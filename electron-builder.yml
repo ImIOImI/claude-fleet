@@ -1,0 +1,16 @@
+appId: com.troyknapp.claudefleet
+productName: claude-fleet
+directories:
+  output: dist
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+linux:
+  target: AppImage
+  category: Development
+mac:
+  target: dmg
+  category: public.app-category.developer-tools
+win:
+  target: nsis
