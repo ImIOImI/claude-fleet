@@ -39,7 +39,7 @@ export function TerminalPane({ containerId }: Props) {
       }
       sessionId = sid;
       unsubData = window.api.pty.onData(sid, (chunk) => {
-        term.write(new Uint8Array(chunk));
+        term.write(chunk);
       });
       unsubEnd = window.api.pty.onEnd(sid, () => {
         term.writeln('\r\n[session ended]');

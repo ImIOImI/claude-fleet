@@ -22,10 +22,9 @@ const api = {
     resize: (sessionId: string, cols: number, rows: number) =>
       ipcRenderer.invoke('pty:resize', sessionId, cols, rows),
     detach: (sessionId: string) => ipcRenderer.invoke('pty:detach', sessionId),
-    onData: (sessionId: string, cb: (chunk: ArrayBuffer) => void) => {
+    onData: (sessionId: string, cb: (chunk: Uint8Array) => void) => {
       const channel = `pty:data:${sessionId}`;
-      const handler = (_e: IpcRendererEvent, chunk: Buffer) =>
-        cb(chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength));
+      const handler = (_e: IpcRendererEvent, chunk: Buffer) => cb(new Uint8Array(chunk));
       ipcRenderer.on(channel, handler);
       return () => ipcRenderer.removeListener(channel, handler);
     },
