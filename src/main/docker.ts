@@ -8,7 +8,7 @@ import {
 } from './paths.js';
 
 export const FLEET_LABEL = 'com.claude-fleet.managed';
-export const RUNNER_IMAGE = 'claude-fleet/runner:latest';
+export const RUNNER_IMAGE = 'ghcr.io/imioimi/claude-fleet/runner:latest';
 
 const docker = new Docker();
 
@@ -62,7 +62,10 @@ export async function createContainer(spec: CreateContainerSpec): Promise<FleetC
   const claudeDir = containerClaudeDir(spec.name);
   await mkdir(claudeDir, { recursive: true });
 
-  const envArr = Object.entries(spec.env).map(([k, v]) => `${k}=${v}`);
+  const uid = process.getuid?.() ?? 1000;
+  const gid = process.getgid?.() ?? 1000;
+
+  const envArr = ['HOME=/home/fleet', ...Object.entries(spec.env).map(([k, v]) => `${k}=${v}`)];
   const hostCfg: Docker.HostConfig = {
     Binds: [
       `${spec.workspaceRoot}:/workspace:rw`,
@@ -76,6 +79,7 @@ export async function createContainer(spec: CreateContainerSpec): Promise<FleetC
   const created = await docker.createContainer({
     name: spec.name,
     Image: RUNNER_IMAGE,
+    User: `${uid}:${gid}`,
     Tty: true,
     OpenStdin: true,
     StdinOnce: false,

@@ -238,7 +238,7 @@ Each container gets its own host-side state dir, bind-mounted into the container
 **Decisions made:**
 - **Host layout**: `<userData>/state/<container-name>/.claude/`, where `<userData>` is Electron's `app.getPath('userData')` (`~/.config/claude-fleet/` on Linux). State dirs are keyed by container name — recreating a container with the same name reuses its prior state. Use a different name to start fresh.
 - **Container layout**: the host state dir is bind-mounted at `/home/fleet/.claude/` read-write. The container's `WorkingDir` is `/workspace`, so Claude Code writes JSONLs to `~/.claude/projects/-workspace/<session-uuid>.jsonl` — the sanitized-cwd is deterministically `-workspace`.
-- **UID/GID**: the runner image is built with the host user's UID/GID via `docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g)`. Files the `fleet` user writes inside the container are owned by the host user on disk, so the bind-mount has no permission issues.
+- **UID/GID**: the container runs as the host user's UID/GID via `User: '<uid>:<gid>'` set at create time. `HOME=/home/fleet` is set in the env so tooling that consults `HOME` finds the bind-mounted `.claude/` even when the runtime UID has no `/etc/passwd` entry. This replaces the earlier idea of baking UIDs at image-build time — the published runner image now has a single fixed UID for the in-image `fleet` user, and the host's UID is supplied at container start.
 - **Create-time behavior**: if `<userData>/state/<name>/.claude/` does not exist, the main process creates it (owned by the host user) before starting the container. If it exists, it's reused as-is.
 - **Removal behavior**: when the user removes a container, a confirmation modal asks "Also delete this container's state dir?" with **Keep** as the default. Picking Delete recursively removes `<userData>/state/<name>/`. Picking Keep leaves the state intact so a future container with that name inherits it.
 
@@ -247,7 +247,7 @@ Each container gets its own host-side state dir, bind-mounted into the container
 - `src/main/docker.ts removeContainer`: take `opts: { deleteState: boolean }`. When true, recursively remove the state dir after the Docker container is removed.
 - `src/main/ipc.ts`: extend `docker:remove` to accept the `deleteState` flag from the renderer.
 - New UI: removal-confirmation modal. Lands wherever the remove action is exposed (TBD; tied to create-container UX #4).
-- Runner image build (#5): the image-build invocation passes the `--build-arg USER_UID`/`USER_GID` flags described above.
+- Runner image (#5): the image is published to GHCR by CI (`ghcr.io/imioimi/claude-fleet/runner:latest`). The app pulls it on first use; UID is handled at container start via `User`, not baked at image-build time.
 
 **Open:**
 - **State-dir name sanitization.** Container names can contain characters that are invalid or hazardous as path components (`/`, `:`, leading dots). Validate/restrict at the create form (`[a-zA-Z0-9_-]+`) so the name maps cleanly to a directory name. Lands with the create-container UX (#4).
@@ -451,7 +451,16 @@ The current flow is three sequential `window.prompt()` dialogs. Functional but c
 Right now the profile name is stamped on the container as a label and the API key is baked into env at create time. If the user rotates the key in the vault, existing containers keep the old one until recreated. We may want a "rotate" action that recreates the container with the new key; we may not. Open.
 
 ### Runner image build
-The README tells the user to `docker build -t claude-fleet/runner:latest docker/` manually. Should the app build the image itself if missing? If so, that's another IPC channel (`docker:ensureImage`) and a UX consideration (build progress in the UI). Open.
+The runner image is published by CI (`.github/workflows/publish-runner.yml`) to `ghcr.io/imioimi/claude-fleet/runner:latest` as a multi-arch (`linux/amd64` + `linux/arm64`) image on every push to `main` that touches `docker/**`. Tags emitted: `latest` (main only) and `sha-<short>`.
+
+On first container-create (or app startup), the app should `docker pull` the image if it isn't already present locally. New IPC channel `docker:ensureImage` returns a pull-progress stream; the UI surfaces this as a one-time toast or as part of the create-container flow.
+
+A local-build fallback (`docker build` from the bundled `docker/` dir) is useful for offline development and when iterating on the Dockerfile. Implementation can be a CLI flag, a settings toggle, or simply a documented dev workflow (`docker build -t ghcr.io/imioimi/claude-fleet/runner:latest docker/` and the pull becomes a no-op).
+
+**Open:**
+- **Package visibility.** GHCR images are private by default for the first push; the package owner has to flip it to public in the GitHub package settings. Decide whether the image is public (anyone can pull, suitable since the code is public) or private (auth required to use the app from CI/another machine).
+- **Tag pinning vs. floating.** The app currently hardcodes `:latest`. Consider pinning to a specific SHA in shipped builds so an unexpected image update can't break a released app version.
+- **Pull progress UI.** Whether the first-run pull is blocking (modal with progress bar) or background (spinner + queued container-create).
 
 ### How `claude` authenticates inside the container
 Today: `ANTHROPIC_API_KEY` env var. Claude Code also supports OAuth via `claude login`. The container is fresh on each create, so there's no persistent `~/.claude/` unless we bind-mount one. If we want OAuth, we need a per-profile bind-mount for `~/.claude/` and a way to do the initial login. Out of scope for v1; revisit if users ask.

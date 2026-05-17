@@ -26,10 +26,16 @@ npm install
 npm run dev
 ```
 
-## Build the runner image
+## Runner image
 
-The app expects a local image tagged `claude-fleet/runner:latest`:
+The app uses `ghcr.io/imioimi/claude-fleet/runner:latest` (published by `.github/workflows/publish-runner.yml`). Once issue #5 lands, the app will `docker pull` it automatically. Until then, pull manually:
 
 ```bash
-docker build -t claude-fleet/runner:latest docker/
+docker pull ghcr.io/imioimi/claude-fleet/runner:latest
+```
+
+Or build from source (useful when iterating on `docker/Dockerfile`):
+
+```bash
+docker build -t ghcr.io/imioimi/claude-fleet/runner:latest docker/
 ```
