@@ -20,7 +20,7 @@ It is a local-only operator console — not a remote orchestrator, not a multi-u
 - Structured observability layered on top of the raw terminal: per-session cost, token counts, tool calls, transcript history — read from the Claude transcript JSONL that the CLI already writes, not by scraping the terminal stream.
 - A global, container-filterable table of past Claude Code sessions with auto-generated short descriptions — selectable to resume any session in any container, regardless of which container originally ran it. Sessions persist across container deletion; the table is the durable record of past work.
 - Drop OS files, pasted images, web content, or text fragments onto the window and have them saved into the selected container's workspace where the agent can read them. The window is the inbox; the path lands on the clipboard for the user to reference in their next prompt.
-- Every terminal session writes a durable, append-only mirror of every event Claude Code emits to `<workspace>/_history/<session-id>.jsonl`. Claude's working transcript can be compacted at will; the mirror preserves the pre-compaction record. The mirror persists across pane switches, container restarts, and app exits — only an explicit "Close terminal" action prompts the user to keep or delete it (default: delete).
+- A durable, append-only mirror of every event Claude Code emits, written to `<workspace>/_history/<session-id>.jsonl` so the agent or user can refer back to pre-compaction turns. Whether the mirror is written, and whether it survives an explicit "Close terminal", are per-profile defaults (factory: write the mirror, delete on close). Both defaults can be overridden — the write decision at open time, the cleanup decision in the modal at close time. The mirror, when written, persists across pane switches, container restarts, and app exits; only the explicit Close action prompts the cleanup question.
 - An always-on, structured log of every prompt Claude makes to the user — permission requests, `AskUserQuestion` calls, and plan-mode approvals — captured to a SQLite table the UI can review. The point is to give the user a substrate for tuning `.claude/settings.json` permissions and CLAUDE.md guidance over time: read what Claude is repeatedly asking about, then decide what to allow, deny, or document.
 - Claude inside each container can query the application's state DB (sessions, cost, prompts, events) through a read-only MCP server exposed by claude-fleet. The agent gets typed tools for common queries plus a raw read-only SQL escape hatch — enough to consult past sessions, summarize cost patterns, or audit what it's been asking the user about.
 - Credentials never touch the renderer process or the host filesystem in plaintext. They live in the OS keychain and are injected into containers as environment variables by the main process.
@@ -311,29 +311,47 @@ Drop OS files, pasted images, web content, or text fragments onto the window; th
 - **Whether to expose drops in the sessions table.** A row showing "5 files dropped" alongside the session might be useful. Out of scope for v1 but worth recording.
 
 ### Durable transcript mirror
-Every terminal session writes a durable, append-only mirror of every event Claude Code emits. The mirror persists indefinitely until the user explicitly closes the terminal — at which point a modal asks whether to delete or preserve it.
+An append-only mirror of every event Claude Code emits for a terminal session. Whether the mirror is written at all, and whether it survives an explicit close, are per-profile defaults that can be overridden per-session.
 
 **Decisions made:**
-- **Mirror behavior**: always written for every terminal session. There is no opt-in at session start; the watcher mirrors unconditionally. Cheap (just tailing the source JSONL), and the keep/delete choice can be made retroactively.
+- **Two profile-level defaults**:
+  - `mirrorDefault: 'on' | 'off'` — when `on`, the watcher mirrors the session unconditionally; when `off`, no mirror is written for sessions opened against this profile by default.
+  - `cleanupDefault: 'delete' | 'preserve'` — the selected option when the close-time modal opens. The user can flip it before confirming.
+  - **Factory values for new profiles**: `mirrorDefault = 'on'`, `cleanupDefault = 'delete'`. Out of the box mirrors are written, and they default to delete-on-close so they don't accumulate by accident.
+- **Open-time override**: at terminal attach, the profile's `mirrorDefault` applies, but the user can override it for that single session. Override is locked in for the duration — flipping to `on` mid-session would silently miss early turns.
 - **Location**: `<workspaceRoot>/_history/<session-id>.jsonl` on the host. Visible inside the container as `/workspace/_history/<session-id>.jsonl`.
 - **Format**: raw JSONL — exact append-only mirror of the events Claude Code emits to its own transcript at `~/.claude/projects/<sanitized-cwd>/<session-id>.jsonl`. Pre-compaction events stay in the mirror even when the source JSONL is rewritten.
 - **Cleanup trigger**: a deliberate "Close terminal" button in the pane header. Switching containers in the sidebar, closing the app, stopping the container, or `claude` exiting inside the PTY do **not** trigger cleanup — they leave the mirror on disk.
-- **Cleanup confirmation**: clicking Close opens a modal asking "Delete the durable transcript mirror for this session?" with **Delete** as the default action. Choosing Delete removes the mirror file; choosing Preserve leaves it on disk.
+- **Cleanup confirmation**: clicking Close opens a modal asking "Delete the durable transcript mirror for this session?" with the profile's `cleanupDefault` pre-selected. The user can flip the selection before confirming. If the session was opened with mirroring disabled (no file exists), the modal is skipped.
 
 **Implementation:**
-The same JSONL watcher that drives observability mirrors every line to `_history/<session-id>.jsonl` as it sees it. The mirror is append-only at the application level — on source-file shrink (compaction), the watcher continues appending new events; it never truncates the mirror. Depends on the per-container `.claude/` host visibility question that blocks observability and the sessions table.
+The same JSONL watcher that drives observability mirrors every line to `_history/<session-id>.jsonl` for sessions whose effective mirror setting is `on`. The mirror is append-only at the application level — on source-file shrink (compaction), the watcher continues appending new events; it never truncates the mirror. Depends on the per-container `.claude/` host visibility question that blocks observability and the sessions table.
+
+Profile shape extends to `Profile = { name, apiKey, mirrorDefault, cleanupDefault }`. The API key stays in keytar (secret); the two settings live in a new SQLite `profile_settings` table — same DB as observability, sessions, and prompts. `vault:get`/`vault:set` in the main process merge the two stores; the renderer continues to see one combined `Profile` object.
+
+**SQLite schema (sketch):**
+```sql
+CREATE TABLE profile_settings (
+  name TEXT PRIMARY KEY,
+  mirror_default TEXT NOT NULL DEFAULT 'on',         -- 'on' | 'off'
+  cleanup_default TEXT NOT NULL DEFAULT 'delete'     -- 'delete' | 'preserve'
+);
+```
 
 **IPC surface (sketch):**
-- `pty:close(sessionId, opts: { deleteMirror: boolean })` — detaches the PTY and, if `deleteMirror` is true, removes the mirror file. Called when the user resolves the modal.
+- `pty:attach(containerId, cols, rows, opts: { mirrorOverride?: 'on' | 'off' })` — when `mirrorOverride` is set, it overrides the profile default for this session only.
+- `pty:close(sessionId, opts: { deleteMirror: boolean })` — detaches the PTY and applies the modal's outcome. Skipped (no `deleteMirror` decision needed) if the session was opened with mirroring `off`.
 - `transcript:list(containerId)` → `string[]` (filenames in `<workspace>/_history/`).
 - `transcript:delete(containerId, sessionId)` → manual cleanup of an orphaned mirror, callable from the sessions-table UI later.
 
 **Open:**
-- **UI placement of the Close button.** Pane header is the natural location (near the container name/status). Decide between a labeled "Close" button and an X icon.
-- **Orphaned mirrors.** App crash, host reboot, container restart, or simply never clicking Close leave the mirror on disk indefinitely. The sessions-table UI should surface these with a "Delete mirror" affordance so they can be cleaned up later.
-- **Resumed sessions.** `claude --resume <id>` reuses a session UUID (unless `--fork-session` is set). On resume the watcher appends new events to the existing `_history/<id>.jsonl`; the Close-time modal at the end of the resumed session decides the file's fate as a whole.
+- **UI placement of the open-time override.** TerminalPane currently auto-attaches on mount; the override needs a moment to be set before the PTY starts. Candidates: a pane-header toggle visible before attach plus a "Start session" button that delays auto-attach, a one-time confirmation dialog at attach, or a quick toggle in the sidebar's container row that takes effect at the next attach.
+- **Profiles dialog UI.** The existing modal needs new controls for the two defaults; decide between labeled toggles, a small "Defaults" section, or an "Advanced" disclosure.
+- **UI placement of the Close button.** Pane header, near the container name/status. Labeled "Close" or an X icon.
+- **Orphaned mirrors.** App crash, host reboot, container restart, or simply never clicking Close leave the mirror on disk indefinitely. The sessions-table UI surfaces these with a "Delete mirror" affordance so they can be cleaned up later. (See issue #3.)
+- **Resumed sessions.** `claude --resume <id>` reuses a session UUID (unless `--fork-session` is set). On resume the watcher appends new events to the existing `_history/<id>.jsonl`; the Close-time modal at the end of the resumed session decides the file's fate as a whole. The open-time override at resume applies to whether new events get appended — flipping from `on` to `off` on resume stops appending but does not delete prior content.
 - **Race on compaction.** Line-based tailing with `fs.watch` rename/change events triggering re-reads of tail, never truncates of the mirror. Test against forced `/compact`.
-- **Indication in the sessions table.** Whether the sessions table should surface a "mirror exists" flag and the file size, so disk usage is visible at a glance.
+- **Migration.** Existing keytar profiles created before this feature have no `profile_settings` row; on first read after upgrade, insert a row with factory defaults.
 
 ### Permission-request log
 Always-on structured log of every prompt Claude makes to the user. Substrate for tuning `.claude/settings.json` permissions and CLAUDE.md guidance over time.
