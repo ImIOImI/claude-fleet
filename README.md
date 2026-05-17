@@ -26,15 +26,20 @@ npm install
 npm run dev
 ```
 
-### Dev shortcut for the API key
+### Authenticating `claude` inside the container
 
-If your OS keychain isn't usable (e.g., WSL without `gnome-keyring`, see issue #8), set `ANTHROPIC_API_KEY` in the env before launching:
+Two modes, picked at container-create time:
+
+- **OAuth (Claude.ai Pro/Max)**: leave the profile-name field blank in the create flow. No API key is injected; the first time `claude` runs in the terminal it prints a login code, you complete the flow in your browser, and the resulting credentials are saved to the bind-mounted `.claude/.credentials.json` so they persist across container restarts.
+- **API key (Console billing)**: type a profile name. The named profile is read from the OS keychain (or, if the keychain isn't usable, from the `ANTHROPIC_API_KEY` env var as a dev fallback — see #8). The key is injected as `ANTHROPIC_API_KEY` into the container.
+
+For the dev fallback to work, launch with the env var set:
 
 ```bash
 ANTHROPIC_API_KEY=sk-... npm run dev
 ```
 
-When the vault can't return a profile, the main process falls back to this env var. Any profile name you enter in the create flow uses the env value as its API key. Production builds should not rely on this — solve #8 before shipping.
+The env fallback is a dev shortcut; production builds should not rely on it — solve #8 before shipping.
 
 ## Runner image
 

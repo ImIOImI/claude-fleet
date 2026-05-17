@@ -463,4 +463,11 @@ A local-build fallback (`docker build` from the bundled `docker/` dir) is useful
 - **Pull progress UI.** Whether the first-run pull is blocking (modal with progress bar) or background (spinner + queued container-create).
 
 ### How `claude` authenticates inside the container
-Today: `ANTHROPIC_API_KEY` env var. Claude Code also supports OAuth via `claude login`. The container is fresh on each create, so there's no persistent `~/.claude/` unless we bind-mount one. If we want OAuth, we need a per-profile bind-mount for `~/.claude/` and a way to do the initial login. Out of scope for v1; revisit if users ask.
+Two modes, picked at create-container time:
+
+- **API key**: profile carries an `apiKey`; container env includes `ANTHROPIC_API_KEY` at create time. Used when the user has a Console API key.
+- **OAuth (Claude.ai Pro/Max)**: profile-name field is left blank in the create flow. No `ANTHROPIC_API_KEY` is injected; the first time `claude` runs in the terminal it prints a login code, the user completes the flow in their browser, and OAuth tokens are written to `<container-state>/.claude/.credentials.json` (host side, via the bind-mount from #1). Future sessions in this container — or in a recreated container with the same name — pick up the credentials automatically.
+
+Claude Code's auth precedence puts `ANTHROPIC_API_KEY` ahead of OAuth tokens, which is why API-key and OAuth modes are mutually exclusive at the env-injection level: OAuth mode skips the env var entirely so the OAuth path is reached.
+
+**Open** (none right now — both modes are wired up).

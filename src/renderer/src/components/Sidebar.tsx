@@ -24,24 +24,38 @@ export function Sidebar({ containers, selectedId, onSelect, onCreated }: Props) 
     const workspaceRoot = prompt('Host workspace root (parent dir):', '/home/troy/repos');
     if (!workspaceRoot) return;
     const workspaceSubdir = prompt('Subdir inside workspace:', '') ?? '';
-    const profileName = prompt('Profile name (must exist in vault):', 'default');
-    if (!profileName) return;
+    const profileName = prompt(
+      'Profile name (leave blank to use Claude.ai login from inside the container):',
+      ''
+    );
+    if (profileName === null) return;
 
     setCreating(true);
     try {
-      const profile = await window.api.vault.get(profileName);
-      if (!profile) {
-        alert(`No vault profile "${profileName}". Add one in Profiles first.`);
-        return;
+      let env: Record<string, string> = {};
+      const labelProfile = profileName || 'oauth';
+
+      if (profileName) {
+        const profile = await window.api.vault.get(profileName);
+        if (!profile) {
+          alert(
+            `No vault profile "${profileName}". Add one in Profiles first, or leave the field blank to use Claude.ai login.`
+          );
+          return;
+        }
+        if (profile.apiKey) {
+          env = { ANTHROPIC_API_KEY: profile.apiKey };
+        }
       }
+
       await window.api.docker.ensureImage(({ message }) => setCreatingMessage(message));
       setCreatingMessage('Creating container…');
       await window.api.docker.create({
         name,
         workspaceRoot,
         workspaceSubdir,
-        profile: profileName,
-        env: { ANTHROPIC_API_KEY: profile.apiKey }
+        profile: labelProfile,
+        env
       });
       onCreated();
     } catch (err) {
