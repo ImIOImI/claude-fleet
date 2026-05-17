@@ -8,3 +8,6 @@ build/
 .env
 .env.local
 *.tsbuildinfo
+
+# Windows NTFS alternate-data-stream metadata surfaced by WSL
+*:Zone.Identifier
