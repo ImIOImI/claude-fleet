@@ -21,6 +21,8 @@ It is a local-only operator console — not a remote orchestrator, not a multi-u
 - A global, container-filterable table of past Claude Code sessions with auto-generated short descriptions — selectable to resume any session in any container, regardless of which container originally ran it. Sessions persist across container deletion; the table is the durable record of past work.
 - Drop OS files, pasted images, web content, or text fragments onto the window and have them saved into the selected container's workspace where the agent can read them. The window is the inbox; the path lands on the clipboard for the user to reference in their next prompt.
 - A per-session opt-in to mirror every event Claude Code emits to a durable, append-only JSONL inside the container's workspace. Claude's own working transcript may be compacted at will; the mirror preserves the pre-compaction record so the user (and the agent on request) can refer back to original turns.
+- An always-on, structured log of every prompt Claude makes to the user — permission requests, `AskUserQuestion` calls, and plan-mode approvals — captured to a SQLite table the UI can review. The point is to give the user a substrate for tuning `.claude/settings.json` permissions and CLAUDE.md guidance over time: read what Claude is repeatedly asking about, then decide what to allow, deny, or document.
+- Claude inside each container can query the application's state DB (sessions, cost, prompts, events) through a read-only MCP server exposed by claude-fleet. The agent gets typed tools for common queries plus a raw read-only SQL escape hatch — enough to consult past sessions, summarize cost patterns, or audit what it's been asking the user about.
 - Credentials never touch the renderer process or the host filesystem in plaintext. They live in the OS keychain and are injected into containers as environment variables by the main process.
 
 ## 3. Non-goals
@@ -329,6 +331,70 @@ The same per-container JSONL watcher used by the observability layer is responsi
 - **Race on compaction.** The mirror writer must catch every line in the source between its last tail position and the truncation event. Implementation reads lines (not bytes) and treats `fs.watch` "rename"/"change" events as triggers to re-read tail, not to truncate the mirror.
 - **Retention.** No rotation or expiry in v1. Revisit if `_history/` grows large enough to matter on real workspaces.
 - **Indication in the sessions table.** Whether the sessions table should surface a flag for sessions whose transcripts are durably mirrored.
+
+### Permission-request log
+Always-on structured log of every prompt Claude makes to the user. Substrate for tuning `.claude/settings.json` permissions and CLAUDE.md guidance over time.
+
+**Decisions made:**
+- **Scope**: structured prompts only — permission requests (Bash/Edit/Write/etc. that hit `ask` rules or unlisted patterns), `AskUserQuestion` tool calls, `ExitPlanMode` approvals. Plain-text questions in assistant messages are out of scope; they don't map cleanly to settings.json entries.
+- **Storage**: SQLite table in the same DB the observability and sessions layers use.
+- **UI affordance**: passive log view only — sortable, filterable, no one-click "add to allow rules" buttons. The user reads, copies patterns, and edits `.claude/settings.json` by hand. Intentional friction so the allowlist doesn't widen faster than the user can notice.
+- **Default**: always on. Per-container disable via a flag on the container's create spec for anyone who wants to turn it off.
+
+**SQLite schema (sketch):**
+```sql
+CREATE TABLE prompts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  container_id TEXT,
+  ts INTEGER NOT NULL,                   -- event timestamp (ms)
+  kind TEXT NOT NULL,                    -- 'permission' | 'ask' | 'plan'
+  tool_name TEXT,                        -- gated tool name when kind='permission'
+  request_payload TEXT NOT NULL,         -- JSON of the prompt details
+  response_payload TEXT,                 -- JSON of how the user resolved it
+  decided_at INTEGER                     -- when the user resolved it (ms)
+);
+```
+
+**Implementation:**
+The same watcher that drives observability emits `prompts` rows when it sees the relevant event kinds in the JSONL stream. Container-level disable is honored at the watcher when it processes events for that container.
+
+**IPC surface (sketch):**
+- `prompts:list({ containerId?, sessionId?, kind?, since?, until? })` → row[]
+- `prompts:get(id)` → row with full payloads
+
+**Open:**
+- **Event detection in the JSONL stream.** Need to confirm the exact event types Claude Code emits for each structured prompt kind (a dedicated permission event vs. a tool-use event for `AskUserQuestion` / `ExitPlanMode`) and the response payload shape.
+- **What gets stored in `request_payload`.** Full prompt object vs. just the actionable fields (tool name, command, paths). Tradeoff is completeness vs. disk vs. accidentally storing sensitive payload content.
+- **UI placement.** Top-level "Prompts" tab, panel inside session detail, or both.
+- **Retention.** None for v1 (rows are small). Revisit if it grows unmanageable.
+- **Cross-session aggregation.** If the same `Bash(...)` pattern triggers a prompt across many sessions, surfacing the aggregate (count, first/last seen) would highlight high-value allowlist candidates. Worth doing in the same UI iteration.
+
+### In-container SQLite access via MCP
+Read-only MCP server exposed by claude-fleet that lets the agent inside each container query the application's state DB (sessions, cost, events, prompts).
+
+**Decisions made:**
+- **Mechanism**: MCP server. Idiomatic for Claude Code, which supports MCP natively. The agent gets typed tools instead of having to learn raw SQL by default.
+- **Access pattern**: strictly read-only. No mutation tools. The DB is owned by the desktop app; the agent has no business modifying its own cost data, session metadata, or prompt log.
+- **Tool surface**: typed tools cover common cases; a raw `query(sql)` tool covers the rest. Read-only at the DB connection layer makes the escape hatch safe.
+- **Connection**: HTTP over a Unix socket bind-mounted into each container. No network exposure; auth is implicit via filesystem permissions; survives Docker network changes.
+
+**Implementation:**
+The main process opens the SQLite file in read-write mode for its own writers (observability watcher, sessions reconciler, prompt-log writer). The MCP server uses a separate connection opened in read-only mode (via the SQLite URI form `file:state.db?mode=ro`). The server listens on `<app-data>/mcp.sock` on the host. Each container's create spec adds a bind-mount of this socket to `/fleet/mcp.sock` inside the container.
+
+**Tool surface (sketch):**
+- `list_sessions({ container?, since?, until?, limit? })` → rows from `sessions`
+- `get_session({ id })` → one row with all metadata
+- `get_cost({ session_id })` → row from `cost`
+- `list_prompts({ container?, session_id?, kind?, since?, limit? })` → rows from `prompts`
+- `list_events({ session_id, type?, since?, limit? })` → rows from `events`
+- `query({ sql })` → arbitrary read-only SQL; rejected at the connection layer if the statement is a write
+
+**Open:**
+- **MCP config delivery to the container.** Options: bake `.mcp.json` into the runner image at `/etc/claude/mcp.json` (or similar), write `.mcp.json` into the bind-mounted workspace at container-create time, or pass `--mcp-config` to `claude` when launching it. Choice affects whether per-container customization is possible.
+- **Schema documentation.** Typed-tool descriptions usually suffice; raw-SQL users may want the schema spelled out. Decide whether to ship a CLAUDE.md fragment with the schema, embed it in the `query` tool's description, or both.
+- **Cross-container visibility.** Today the schema doesn't restrict by container at the DB level — a `sessions` row from container A is visible to the agent in container B. Matches the goal that sessions are global, but explicitly decide whether the MCP server should optionally scope to "this container's data only" by stamping each connection with its container ID at the time the socket is opened.
+- **Runaway-query protection.** Even read-only queries can be expensive. Decide on per-query statement timeout, row-count cap, or both.
 
 ### Create-container UX
 The current flow is three sequential `window.prompt()` dialogs. Functional but crude. Needs a real modal form with: name, workspace root (with a directory picker — `dialog.showOpenDialog` from main), subdir, profile dropdown (populated from `vault:list`), and optional CPU/memory caps.
