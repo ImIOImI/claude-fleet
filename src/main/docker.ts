@@ -1,5 +1,5 @@
 import Docker from 'dockerode';
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, rm, stat } from 'node:fs/promises';
 import type { Duplex } from 'node:stream';
 import {
   assertValidContainerName,
@@ -89,6 +89,12 @@ export async function listContainers(): Promise<FleetContainer[]> {
 
 export async function createContainer(spec: CreateContainerSpec): Promise<FleetContainer> {
   assertValidContainerName(spec.name);
+
+  const wsStat = await stat(spec.workspaceRoot).catch(() => null);
+  if (!wsStat?.isDirectory()) {
+    throw new Error(`Workspace root "${spec.workspaceRoot}" is not an existing directory`);
+  }
+
   const claudeDir = containerClaudeDir(spec.name);
   await mkdir(claudeDir, { recursive: true });
 

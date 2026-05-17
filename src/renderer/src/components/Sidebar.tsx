@@ -17,6 +17,10 @@ export function Sidebar({ containers, selectedId, onSelect, onCreated }: Props) 
   const create = async () => {
     const name = prompt('Container name?', `claude-${Date.now().toString(36).slice(-5)}`);
     if (!name) return;
+    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+      alert('Container name must match [a-zA-Z0-9_-]+ (no spaces, slashes, or dots).');
+      return;
+    }
     const workspaceRoot = prompt('Host workspace root (parent dir):', '/home/troy/repos');
     if (!workspaceRoot) return;
     const workspaceSubdir = prompt('Subdir inside workspace:', '') ?? '';

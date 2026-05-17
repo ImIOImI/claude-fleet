@@ -26,6 +26,16 @@ npm install
 npm run dev
 ```
 
+### Dev shortcut for the API key
+
+If your OS keychain isn't usable (e.g., WSL without `gnome-keyring`, see issue #8), set `ANTHROPIC_API_KEY` in the env before launching:
+
+```bash
+ANTHROPIC_API_KEY=sk-... npm run dev
+```
+
+When the vault can't return a profile, the main process falls back to this env var. Any profile name you enter in the create flow uses the env value as its API key. Production builds should not rely on this — solve #8 before shipping.
+
 ## Runner image
 
 The app uses `ghcr.io/imioimi/claude-fleet/runner:latest` (published by `.github/workflows/publish-runner.yml`). Once issue #5 lands, the app will `docker pull` it automatically. Until then, pull manually:

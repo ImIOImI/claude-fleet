@@ -9,9 +9,9 @@ export interface Profile {
 }
 
 async function readIndex(): Promise<string[]> {
-  const raw = await keytar.getPassword(SERVICE, INDEX_KEY);
-  if (!raw) return [];
   try {
+    const raw = await keytar.getPassword(SERVICE, INDEX_KEY);
+    if (!raw) return [];
     return JSON.parse(raw) as string[];
   } catch {
     return [];
@@ -27,9 +27,15 @@ export async function listProfileNames(): Promise<string[]> {
 }
 
 export async function getProfile(name: string): Promise<Profile | null> {
-  const apiKey = await keytar.getPassword(SERVICE, name);
-  if (!apiKey) return null;
-  return { name, apiKey };
+  try {
+    const apiKey = await keytar.getPassword(SERVICE, name);
+    if (apiKey) return { name, apiKey };
+  } catch {
+    // keyring unavailable (e.g., WSL without gnome-keyring); fall through to env
+  }
+  const envKey = process.env.ANTHROPIC_API_KEY;
+  if (envKey) return { name, apiKey: envKey };
+  return null;
 }
 
 export async function setProfile(profile: Profile): Promise<void> {
