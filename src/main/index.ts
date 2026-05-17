@@ -12,7 +12,7 @@ function createWindow(): BrowserWindow {
     title: 'claude-fleet',
     backgroundColor: '#101216',
     webPreferences: {
-      preload: join(__dirname, '../preload/index.mjs'),
+      preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false
