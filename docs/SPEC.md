@@ -20,7 +20,7 @@ It is a local-only operator console — not a remote orchestrator, not a multi-u
 - Structured observability layered on top of the raw terminal: per-session cost, token counts, tool calls, transcript history — read from the Claude transcript JSONL that the CLI already writes, not by scraping the terminal stream.
 - A global, container-filterable table of past Claude Code sessions with auto-generated short descriptions — selectable to resume any session in any container, regardless of which container originally ran it. Sessions persist across container deletion; the table is the durable record of past work.
 - Drop OS files, pasted images, web content, or text fragments onto the window and have them saved into the selected container's workspace where the agent can read them. The window is the inbox; the path lands on the clipboard for the user to reference in their next prompt.
-- A per-session opt-in to mirror every event Claude Code emits to a durable, append-only JSONL inside the container's workspace. Claude's own working transcript may be compacted at will; the mirror preserves the pre-compaction record so the user (and the agent on request) can refer back to original turns.
+- Every terminal session writes a durable, append-only mirror of every event Claude Code emits to `<workspace>/_history/<session-id>.jsonl`. Claude's working transcript can be compacted at will; the mirror preserves the pre-compaction record. The mirror persists across pane switches, container restarts, and app exits — only an explicit "Close terminal" action prompts the user to keep or delete it (default: delete).
 - An always-on, structured log of every prompt Claude makes to the user — permission requests, `AskUserQuestion` calls, and plan-mode approvals — captured to a SQLite table the UI can review. The point is to give the user a substrate for tuning `.claude/settings.json` permissions and CLAUDE.md guidance over time: read what Claude is repeatedly asking about, then decide what to allow, deny, or document.
 - Claude inside each container can query the application's state DB (sessions, cost, prompts, events) through a read-only MCP server exposed by claude-fleet. The agent gets typed tools for common queries plus a raw read-only SQL escape hatch — enough to consult past sessions, summarize cost patterns, or audit what it's been asking the user about.
 - Credentials never touch the renderer process or the host filesystem in plaintext. They live in the OS keychain and are injected into containers as environment variables by the main process.
@@ -311,26 +311,29 @@ Drop OS files, pasted images, web content, or text fragments onto the window; th
 - **Whether to expose drops in the sessions table.** A row showing "5 files dropped" alongside the session might be useful. Out of scope for v1 but worth recording.
 
 ### Durable transcript mirror
-A per-terminal-session opt-in that mirrors every event Claude Code emits to an append-only file the user (and the agent on request) can refer to even after `claude` has compacted its working transcript.
+Every terminal session writes a durable, append-only mirror of every event Claude Code emits. The mirror persists indefinitely until the user explicitly closes the terminal — at which point a modal asks whether to delete or preserve it.
 
 **Decisions made:**
+- **Mirror behavior**: always written for every terminal session. There is no opt-in at session start; the watcher mirrors unconditionally. Cheap (just tailing the source JSONL), and the keep/delete choice can be made retroactively.
 - **Location**: `<workspaceRoot>/_history/<session-id>.jsonl` on the host. Visible inside the container as `/workspace/_history/<session-id>.jsonl`.
-- **Format**: raw JSONL — exact append-only mirror of the events Claude Code emits to its own transcript at `~/.claude/projects/<sanitized-cwd>/<session-id>.jsonl`. No transformation. Pre-compaction events stay in the mirror even when the source JSONL is rewritten by compaction.
-- **Default**: off. The user opts in per terminal session before the PTY is attached. Choice is locked in for the duration of that session — flipping it on mid-session would silently miss the early turns.
+- **Format**: raw JSONL — exact append-only mirror of the events Claude Code emits to its own transcript at `~/.claude/projects/<sanitized-cwd>/<session-id>.jsonl`. Pre-compaction events stay in the mirror even when the source JSONL is rewritten.
+- **Cleanup trigger**: a deliberate "Close terminal" button in the pane header. Switching containers in the sidebar, closing the app, stopping the container, or `claude` exiting inside the PTY do **not** trigger cleanup — they leave the mirror on disk.
+- **Cleanup confirmation**: clicking Close opens a modal asking "Delete the durable transcript mirror for this session?" with **Delete** as the default action. Choosing Delete removes the mirror file; choosing Preserve leaves it on disk.
 
 **Implementation:**
-The same per-container JSONL watcher used by the observability layer is responsible for the mirror. It tails the source JSONL line-by-line; when the source file shrinks (compaction overwrote it), the watcher does not truncate the mirror — it simply continues appending new lines as they're written. The mirror is append-only at the application level. Depends on the same per-container `.claude/` host visibility question that blocks observability and the sessions table.
+The same JSONL watcher that drives observability mirrors every line to `_history/<session-id>.jsonl` as it sees it. The mirror is append-only at the application level — on source-file shrink (compaction), the watcher continues appending new events; it never truncates the mirror. Depends on the per-container `.claude/` host visibility question that blocks observability and the sessions table.
 
 **IPC surface (sketch):**
-- `pty:attach(containerId, cols, rows, opts: { mirrorTranscript: boolean })` — `opts.mirrorTranscript` is the per-session opt-in.
+- `pty:close(sessionId, opts: { deleteMirror: boolean })` — detaches the PTY and, if `deleteMirror` is true, removes the mirror file. Called when the user resolves the modal.
 - `transcript:list(containerId)` → `string[]` (filenames in `<workspace>/_history/`).
+- `transcript:delete(containerId, sessionId)` → manual cleanup of an orphaned mirror, callable from the sessions-table UI later.
 
 **Open:**
-- **UI exposure of the toggle.** A checkbox in the pane header at attach time, a control in the create-container modal that becomes the default for new sessions, or a per-session dropdown. The toggle must not be flippable mid-session.
-- **Resumed sessions.** `claude --resume <id>` reuses a session UUID (unless `--fork-session` is set). On resume with the mirror opt-in, append to the existing `_history/<id>.jsonl` to keep one mirror per session ID.
-- **Race on compaction.** The mirror writer must catch every line in the source between its last tail position and the truncation event. Implementation reads lines (not bytes) and treats `fs.watch` "rename"/"change" events as triggers to re-read tail, not to truncate the mirror.
-- **Retention.** No rotation or expiry in v1. Revisit if `_history/` grows large enough to matter on real workspaces.
-- **Indication in the sessions table.** Whether the sessions table should surface a flag for sessions whose transcripts are durably mirrored.
+- **UI placement of the Close button.** Pane header is the natural location (near the container name/status). Decide between a labeled "Close" button and an X icon.
+- **Orphaned mirrors.** App crash, host reboot, container restart, or simply never clicking Close leave the mirror on disk indefinitely. The sessions-table UI should surface these with a "Delete mirror" affordance so they can be cleaned up later.
+- **Resumed sessions.** `claude --resume <id>` reuses a session UUID (unless `--fork-session` is set). On resume the watcher appends new events to the existing `_history/<id>.jsonl`; the Close-time modal at the end of the resumed session decides the file's fate as a whole.
+- **Race on compaction.** Line-based tailing with `fs.watch` rename/change events triggering re-reads of tail, never truncates of the mirror. Test against forced `/compact`.
+- **Indication in the sessions table.** Whether the sessions table should surface a "mirror exists" flag and the file size, so disk usage is visible at a glance.
 
 ### Permission-request log
 Always-on structured log of every prompt Claude makes to the user. Substrate for tuning `.claude/settings.json` permissions and CLAUDE.md guidance over time.
