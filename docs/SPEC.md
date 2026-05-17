@@ -20,6 +20,7 @@ It is a local-only operator console — not a remote orchestrator, not a multi-u
 - Structured observability layered on top of the raw terminal: per-session cost, token counts, tool calls, transcript history — read from the Claude transcript JSONL that the CLI already writes, not by scraping the terminal stream.
 - A global, container-filterable table of past Claude Code sessions with auto-generated short descriptions — selectable to resume any session in any container, regardless of which container originally ran it. Sessions persist across container deletion; the table is the durable record of past work.
 - Drop OS files, pasted images, web content, or text fragments onto the window and have them saved into the selected container's workspace where the agent can read them. The window is the inbox; the path lands on the clipboard for the user to reference in their next prompt.
+- A per-session opt-in to mirror every event Claude Code emits to a durable, append-only JSONL inside the container's workspace. Claude's own working transcript may be compacted at will; the mirror preserves the pre-compaction record so the user (and the agent on request) can refer back to original turns.
 - Credentials never touch the renderer process or the host filesystem in plaintext. They live in the OS keychain and are injected into containers as environment variables by the main process.
 
 ## 3. Non-goals
@@ -306,6 +307,28 @@ Drop OS files, pasted images, web content, or text fragments onto the window; th
 - **Web-drag CORS / large downloads.** Need a timeout, a progress indicator if the fetch takes more than a beat, and a sensible error if the URL is unreachable from the main process.
 - **`.gitignore` interaction.** `_dropped/` should be added to the runner image's default `.gitignore` (or the spec should require users to add it). Otherwise drops get committed by accident.
 - **Whether to expose drops in the sessions table.** A row showing "5 files dropped" alongside the session might be useful. Out of scope for v1 but worth recording.
+
+### Durable transcript mirror
+A per-terminal-session opt-in that mirrors every event Claude Code emits to an append-only file the user (and the agent on request) can refer to even after `claude` has compacted its working transcript.
+
+**Decisions made:**
+- **Location**: `<workspaceRoot>/_history/<session-id>.jsonl` on the host. Visible inside the container as `/workspace/_history/<session-id>.jsonl`.
+- **Format**: raw JSONL — exact append-only mirror of the events Claude Code emits to its own transcript at `~/.claude/projects/<sanitized-cwd>/<session-id>.jsonl`. No transformation. Pre-compaction events stay in the mirror even when the source JSONL is rewritten by compaction.
+- **Default**: off. The user opts in per terminal session before the PTY is attached. Choice is locked in for the duration of that session — flipping it on mid-session would silently miss the early turns.
+
+**Implementation:**
+The same per-container JSONL watcher used by the observability layer is responsible for the mirror. It tails the source JSONL line-by-line; when the source file shrinks (compaction overwrote it), the watcher does not truncate the mirror — it simply continues appending new lines as they're written. The mirror is append-only at the application level. Depends on the same per-container `.claude/` host visibility question that blocks observability and the sessions table.
+
+**IPC surface (sketch):**
+- `pty:attach(containerId, cols, rows, opts: { mirrorTranscript: boolean })` — `opts.mirrorTranscript` is the per-session opt-in.
+- `transcript:list(containerId)` → `string[]` (filenames in `<workspace>/_history/`).
+
+**Open:**
+- **UI exposure of the toggle.** A checkbox in the pane header at attach time, a control in the create-container modal that becomes the default for new sessions, or a per-session dropdown. The toggle must not be flippable mid-session.
+- **Resumed sessions.** `claude --resume <id>` reuses a session UUID (unless `--fork-session` is set). On resume with the mirror opt-in, append to the existing `_history/<id>.jsonl` to keep one mirror per session ID.
+- **Race on compaction.** The mirror writer must catch every line in the source between its last tail position and the truncation event. Implementation reads lines (not bytes) and treats `fs.watch` "rename"/"change" events as triggers to re-read tail, not to truncate the mirror.
+- **Retention.** No rotation or expiry in v1. Revisit if `_history/` grows large enough to matter on real workspaces.
+- **Indication in the sessions table.** Whether the sessions table should surface a flag for sessions whose transcripts are durably mirrored.
 
 ### Create-container UX
 The current flow is three sequential `window.prompt()` dialogs. Functional but crude. Needs a real modal form with: name, workspace root (with a directory picker — `dialog.showOpenDialog` from main), subdir, profile dropdown (populated from `vault:list`), and optional CPU/memory caps.
