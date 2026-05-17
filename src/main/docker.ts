@@ -32,6 +32,36 @@ export interface CreateContainerSpec {
   memoryMb?: number;
 }
 
+export interface PullProgress {
+  message: string;
+}
+
+export async function ensureImage(
+  onProgress: (p: PullProgress) => void
+): Promise<void> {
+  try {
+    await docker.getImage(RUNNER_IMAGE).inspect();
+    return;
+  } catch (err: unknown) {
+    if ((err as { statusCode?: number }).statusCode !== 404) throw err;
+  }
+
+  onProgress({ message: `Pulling ${RUNNER_IMAGE}…` });
+  const stream = (await docker.pull(RUNNER_IMAGE)) as NodeJS.ReadableStream;
+
+  await new Promise<void>((resolve, reject) => {
+    docker.modem.followProgress(
+      stream,
+      (err: Error | null) => (err ? reject(err) : resolve()),
+      (event: Record<string, unknown>) => {
+        const status = typeof event.status === 'string' ? event.status : '';
+        const id = typeof event.id === 'string' ? ` ${event.id}` : '';
+        if (status) onProgress({ message: `${status}${id}` });
+      }
+    );
+  });
+}
+
 export async function ping(): Promise<boolean> {
   try {
     await docker.ping();

@@ -11,6 +11,7 @@ interface Props {
 
 export function Sidebar({ containers, selectedId, onSelect, onCreated }: Props) {
   const [creating, setCreating] = useState(false);
+  const [creatingMessage, setCreatingMessage] = useState<string | null>(null);
   const [profilesOpen, setProfilesOpen] = useState(false);
 
   const create = async () => {
@@ -29,6 +30,8 @@ export function Sidebar({ containers, selectedId, onSelect, onCreated }: Props) 
         alert(`No vault profile "${profileName}". Add one in Profiles first.`);
         return;
       }
+      await window.api.docker.ensureImage(({ message }) => setCreatingMessage(message));
+      setCreatingMessage('Creating container…');
       await window.api.docker.create({
         name,
         workspaceRoot,
@@ -41,6 +44,7 @@ export function Sidebar({ containers, selectedId, onSelect, onCreated }: Props) 
       alert(`Failed to create: ${err}`);
     } finally {
       setCreating(false);
+      setCreatingMessage(null);
     }
   };
 
@@ -61,7 +65,7 @@ export function Sidebar({ containers, selectedId, onSelect, onCreated }: Props) 
         </div>
       ))}
       <button onClick={create} disabled={creating}>
-        {creating ? 'Creating…' : '+ New container'}
+        {creating ? (creatingMessage ?? 'Creating…') : '+ New container'}
       </button>
       <button onClick={() => setProfilesOpen(true)}>Profiles…</button>
       <ProfilesDialog open={profilesOpen} onClose={() => setProfilesOpen(false)} />

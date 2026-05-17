@@ -7,7 +7,18 @@ const api = {
     create: (spec: unknown) => ipcRenderer.invoke('docker:create', spec),
     stop: (id: string) => ipcRenderer.invoke('docker:stop', id),
     remove: (id: string, opts?: { deleteState?: boolean }) =>
-      ipcRenderer.invoke('docker:remove', id, opts)
+      ipcRenderer.invoke('docker:remove', id, opts),
+    ensureImage: async (onProgress: (p: { message: string }) => void): Promise<void> => {
+      const channelId = globalThis.crypto.randomUUID();
+      const channel = `docker:ensureImage:progress:${channelId}`;
+      const handler = (_e: IpcRendererEvent, p: { message: string }) => onProgress(p);
+      ipcRenderer.on(channel, handler);
+      try {
+        await ipcRenderer.invoke('docker:ensureImage', channelId);
+      } finally {
+        ipcRenderer.removeListener(channel, handler);
+      }
+    }
   },
   vault: {
     list: (): Promise<string[]> => ipcRenderer.invoke('vault:list'),

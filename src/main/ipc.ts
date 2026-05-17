@@ -8,6 +8,12 @@ const ptySessions = new Map<string, PtyHandle>();
 
 export function registerIpc(): void {
   ipcMain.handle('docker:ping', () => dockerSvc.ping());
+  ipcMain.handle('docker:ensureImage', async (event, channelId: string) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    await dockerSvc.ensureImage((p) => {
+      win?.webContents.send(`docker:ensureImage:progress:${channelId}`, p);
+    });
+  });
   ipcMain.handle('docker:list', () => dockerSvc.listContainers());
   ipcMain.handle('docker:create', (_e, spec) => dockerSvc.createContainer(spec));
   ipcMain.handle('docker:stop', (_e, id: string) => dockerSvc.stopContainer(id));
