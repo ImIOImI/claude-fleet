@@ -233,13 +233,26 @@ claude-fleet/
 These are decided in spirit but not yet implemented. When you implement one, move it out of this section and into the relevant body section above.
 
 ### Per-container Claude Code state visibility on the host
-Both the observability layer and the sessions table need host-side access to each container's Claude Code state — primarily the session JSONLs at `~/.claude/projects/<sanitized-cwd>/<session-uuid>.jsonl`. The sanitized-cwd is just the absolute path with `/` replaced by `-` (e.g., `/workspace` → `-workspace`). Options:
+Each container gets its own host-side state dir, bind-mounted into the container at `/home/fleet/.claude/`. This is the foundation for the observability watcher, sessions table, durable mirror, and permission-request log — all of which read events from `<state-dir>/projects/-workspace/*.jsonl` directly off the host filesystem.
 
-- **Per-container host state dir, bind-mounted to `/home/fleet/.claude/`.** Each container gets its own host-side state dir (e.g., `<app-data>/state/<container-name>/.claude/`). Host has direct `fs.watch` access; settings and any persisted auth tokens survive container recreate as long as the state dir is reused. Currently the leading option.
-- **Bind-mount only the `projects/<sanitized-cwd>/` subdir.** Narrower exposure. Settings would not persist across recreate, which complicates the OAuth question below.
-- **No bind-mount; `docker cp` / `docker exec` on demand.** Cleanest container, but live watching requires polling or `inotifywait` inside the container. Likely too clunky for live observability.
+**Decisions made:**
+- **Host layout**: `<userData>/state/<container-name>/.claude/`, where `<userData>` is Electron's `app.getPath('userData')` (`~/.config/claude-fleet/` on Linux). State dirs are keyed by container name — recreating a container with the same name reuses its prior state. Use a different name to start fresh.
+- **Container layout**: the host state dir is bind-mounted at `/home/fleet/.claude/` read-write. The container's `WorkingDir` is `/workspace`, so Claude Code writes JSONLs to `~/.claude/projects/-workspace/<session-uuid>.jsonl` — the sanitized-cwd is deterministically `-workspace`.
+- **UID/GID**: the runner image is built with the host user's UID/GID via `docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g)`. Files the `fleet` user writes inside the container are owned by the host user on disk, so the bind-mount has no permission issues.
+- **Create-time behavior**: if `<userData>/state/<name>/.claude/` does not exist, the main process creates it (owned by the host user) before starting the container. If it exists, it's reused as-is.
+- **Removal behavior**: when the user removes a container, a confirmation modal asks "Also delete this container's state dir?" with **Keep** as the default. Picking Delete recursively removes `<userData>/state/<name>/`. Picking Keep leaves the state intact so a future container with that name inherits it.
 
-Blocking for the two subsections that follow.
+**Implementation:**
+- `src/main/docker.ts createContainer`: add the state-dir bind to `HostConfig.Binds` alongside the existing workspace bind. Ensure the host dir exists (`mkdir -p`) with host-user ownership before starting the container.
+- `src/main/docker.ts removeContainer`: take `opts: { deleteState: boolean }`. When true, recursively remove the state dir after the Docker container is removed.
+- `src/main/ipc.ts`: extend `docker:remove` to accept the `deleteState` flag from the renderer.
+- New UI: removal-confirmation modal. Lands wherever the remove action is exposed (TBD; tied to create-container UX #4).
+- Runner image build (#5): the image-build invocation passes the `--build-arg USER_UID`/`USER_GID` flags described above.
+
+**Open:**
+- **State-dir name sanitization.** Container names can contain characters that are invalid or hazardous as path components (`/`, `:`, leading dots). Validate/restrict at the create form (`[a-zA-Z0-9_-]+`) so the name maps cleanly to a directory name. Lands with the create-container UX (#4).
+- **Cross-user / multi-host portability.** State is tied to the host user (UID typically 1000). Moving a state dir to another machine requires matching UIDs or a chown. Out of scope; document if it becomes a real workflow.
+- **Settings reset.** `.claude/` will eventually also hold `settings.json`, custom commands, file checkpoints, tasks state. All of it survives container recreate by default. If we later want a "reset settings without losing project history" affordance, decide what's keepable vs. wipeable.
 
 ### Observability layer: cost, tokens, tool calls
 Per-session cost and token counts derived from Claude transcript JSONL events. Outstanding:
