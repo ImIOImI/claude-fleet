@@ -1,5 +1,11 @@
 import Docker from 'dockerode';
+import { mkdir, rm } from 'node:fs/promises';
 import type { Duplex } from 'node:stream';
+import {
+  assertValidContainerName,
+  containerClaudeDir,
+  containerStateDir
+} from './paths.js';
 
 export const FLEET_LABEL = 'com.claude-fleet.managed';
 export const RUNNER_IMAGE = 'claude-fleet/runner:latest';
@@ -52,9 +58,16 @@ export async function listContainers(): Promise<FleetContainer[]> {
 }
 
 export async function createContainer(spec: CreateContainerSpec): Promise<FleetContainer> {
+  assertValidContainerName(spec.name);
+  const claudeDir = containerClaudeDir(spec.name);
+  await mkdir(claudeDir, { recursive: true });
+
   const envArr = Object.entries(spec.env).map(([k, v]) => `${k}=${v}`);
   const hostCfg: Docker.HostConfig = {
-    Binds: [`${spec.workspaceRoot}:/workspace:rw`],
+    Binds: [
+      `${spec.workspaceRoot}:/workspace:rw`,
+      `${claudeDir}:/home/fleet/.claude:rw`
+    ],
     AutoRemove: false
   };
   if (spec.cpus) hostCfg.NanoCpus = Math.round(spec.cpus * 1e9);
@@ -99,12 +112,34 @@ export async function stopContainer(id: string): Promise<void> {
   }
 }
 
-export async function removeContainer(id: string): Promise<void> {
+export interface RemoveContainerOpts {
+  deleteState?: boolean;
+}
+
+export async function removeContainer(
+  id: string,
+  opts: RemoveContainerOpts = {}
+): Promise<void> {
   const c = docker.getContainer(id);
+
+  let name: string | undefined;
+  if (opts.deleteState) {
+    try {
+      const info = await c.inspect();
+      name = info.Name.replace(/^\//, '');
+    } catch (err: unknown) {
+      if ((err as { statusCode?: number }).statusCode !== 404) throw err;
+    }
+  }
+
   try {
     await c.remove({ force: true });
   } catch (err: unknown) {
     if ((err as { statusCode?: number }).statusCode !== 404) throw err;
+  }
+
+  if (opts.deleteState && name) {
+    await rm(containerStateDir(name), { recursive: true, force: true });
   }
 }
 

@@ -6,7 +6,8 @@ const api = {
     list: () => ipcRenderer.invoke('docker:list'),
     create: (spec: unknown) => ipcRenderer.invoke('docker:create', spec),
     stop: (id: string) => ipcRenderer.invoke('docker:stop', id),
-    remove: (id: string) => ipcRenderer.invoke('docker:remove', id)
+    remove: (id: string, opts?: { deleteState?: boolean }) =>
+      ipcRenderer.invoke('docker:remove', id, opts)
   },
   vault: {
     list: (): Promise<string[]> => ipcRenderer.invoke('vault:list'),

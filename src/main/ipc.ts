@@ -11,7 +11,11 @@ export function registerIpc(): void {
   ipcMain.handle('docker:list', () => dockerSvc.listContainers());
   ipcMain.handle('docker:create', (_e, spec) => dockerSvc.createContainer(spec));
   ipcMain.handle('docker:stop', (_e, id: string) => dockerSvc.stopContainer(id));
-  ipcMain.handle('docker:remove', (_e, id: string) => dockerSvc.removeContainer(id));
+  ipcMain.handle(
+    'docker:remove',
+    (_e, id: string, opts?: dockerSvc.RemoveContainerOpts) =>
+      dockerSvc.removeContainer(id, opts)
+  );
 
   ipcMain.handle('vault:list', () => vault.listProfileNames());
   ipcMain.handle('vault:get', (_e, name: string) => vault.getProfile(name));
