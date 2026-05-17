@@ -15,8 +15,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN npm install -g @anthropic-ai/claude-code
 
-RUN groupadd --gid ${USER_GID} fleet 2>/dev/null || true \
- && useradd  --uid ${USER_UID} --gid ${USER_GID} --shell /bin/bash --create-home fleet
+# The node:22 base ships a 'node' user at UID 1000; remove it so we can
+# claim UID 1000 for 'fleet'. Make /home/fleet world-writable so the
+# container can run as any host UID at start time (via docker run --user)
+# and still have a writable $HOME for tooling that consults it.
+RUN userdel -r node 2>/dev/null || rm -rf /home/node \
+ && groupadd --gid ${USER_GID} fleet \
+ && useradd  --uid ${USER_UID} --gid ${USER_GID} --shell /bin/bash --create-home fleet \
+ && chmod 777 /home/fleet
 
 USER fleet
 WORKDIR /workspace
