@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ContainerSummary } from '../App';
 import { ProfilesDialog } from './ProfilesDialog';
+import { CreateContainerModal } from './CreateContainerModal';
 
 interface Props {
   containers: ContainerSummary[];
@@ -10,60 +11,38 @@ interface Props {
 }
 
 export function Sidebar({ containers, selectedId, onSelect, onCreated }: Props) {
-  const [creating, setCreating] = useState(false);
-  const [creatingMessage, setCreatingMessage] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
   const [profilesOpen, setProfilesOpen] = useState(false);
 
-  const create = async () => {
-    const name = prompt('Container name?', `claude-${Date.now().toString(36).slice(-5)}`);
-    if (!name) return;
-    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
-      alert('Container name must match [a-zA-Z0-9_-]+ (no spaces, slashes, or dots).');
-      return;
-    }
-    const workspaceRoot = prompt('Host workspace root (parent dir):', '/home/troy/repos');
-    if (!workspaceRoot) return;
-    const workspaceSubdir = prompt('Subdir inside workspace:', '') ?? '';
-    const profileName = prompt(
-      'Profile name (leave blank to use Claude.ai login from inside the container):',
-      ''
-    );
-    if (profileName === null) return;
+  const handleCreate = async (
+    spec: { name: string; workspaceRoot: string; workspaceSubdir: string; profileName: string },
+    setStatus: (msg: string) => void
+  ) => {
+    let env: Record<string, string> = {};
+    const labelProfile = spec.profileName || 'oauth';
 
-    setCreating(true);
-    try {
-      let env: Record<string, string> = {};
-      const labelProfile = profileName || 'oauth';
-
-      if (profileName) {
-        const profile = await window.api.vault.get(profileName);
-        if (!profile) {
-          alert(
-            `No vault profile "${profileName}". Add one in Profiles first, or leave the field blank to use Claude.ai login.`
-          );
-          return;
-        }
-        if (profile.apiKey) {
-          env = { ANTHROPIC_API_KEY: profile.apiKey };
-        }
+    if (spec.profileName) {
+      const profile = await window.api.vault.get(spec.profileName);
+      if (!profile) {
+        throw new Error(
+          `No vault profile "${spec.profileName}". Add one in Profiles first, or leave the field blank to use Claude.ai login.`
+        );
       }
-
-      await window.api.docker.ensureImage(({ message }) => setCreatingMessage(message));
-      setCreatingMessage('Creating container…');
-      await window.api.docker.create({
-        name,
-        workspaceRoot,
-        workspaceSubdir,
-        profile: labelProfile,
-        env
-      });
-      onCreated();
-    } catch (err) {
-      alert(`Failed to create: ${err}`);
-    } finally {
-      setCreating(false);
-      setCreatingMessage(null);
+      if (profile.apiKey) {
+        env = { ANTHROPIC_API_KEY: profile.apiKey };
+      }
     }
+
+    await window.api.docker.ensureImage(({ message }) => setStatus(message));
+    setStatus('Creating container…');
+    await window.api.docker.create({
+      name: spec.name,
+      workspaceRoot: spec.workspaceRoot,
+      workspaceSubdir: spec.workspaceSubdir,
+      profile: labelProfile,
+      env
+    });
+    onCreated();
   };
 
   return (
@@ -82,10 +61,13 @@ export function Sidebar({ containers, selectedId, onSelect, onCreated }: Props) 
           <span className="name">{c.name}</span>
         </div>
       ))}
-      <button onClick={create} disabled={creating}>
-        {creating ? (creatingMessage ?? 'Creating…') : '+ New container'}
-      </button>
+      <button onClick={() => setCreateOpen(true)}>+ New container</button>
       <button onClick={() => setProfilesOpen(true)}>Profiles…</button>
+      <CreateContainerModal
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        onCreate={handleCreate}
+      />
       <ProfilesDialog open={profilesOpen} onClose={() => setProfilesOpen(false)} />
     </aside>
   );

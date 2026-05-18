@@ -10,11 +10,13 @@ export interface ContainerSummary {
 }
 
 export function App() {
+  const apiReady = typeof window !== 'undefined' && !!window.api;
   const [daemonReachable, setDaemonReachable] = useState<boolean | null>(null);
   const [containers, setContainers] = useState<ContainerSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const refresh = async () => {
+    if (!window.api) return;
     const ok = await window.api.docker.ping();
     setDaemonReachable(ok);
     if (ok) setContainers(await window.api.docker.list());
@@ -22,10 +24,27 @@ export function App() {
   };
 
   useEffect(() => {
+    if (!apiReady) return;
     refresh();
     const t = setInterval(refresh, 5000);
     return () => clearInterval(t);
-  }, []);
+  }, [apiReady]);
+
+  if (!apiReady) {
+    return (
+      <div className="app">
+        <div className="preload-error">
+          <h2>Preload script not loaded</h2>
+          <p>
+            <code>window.api</code> is undefined — the preload script at{' '}
+            <code>out/preload/index.js</code> failed to load. Stop and restart{' '}
+            <code>npm run dev</code> (Ctrl+C, then re-run). If you still see this after a clean
+            restart, check the terminal where dev is running for a preload error.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   const selected = containers.find((c) => c.id === selectedId) ?? null;
 
