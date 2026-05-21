@@ -1,7 +1,8 @@
-import { ipcMain, BrowserWindow } from 'electron';
+import { ipcMain, BrowserWindow, dialog } from 'electron';
 import { randomUUID } from 'node:crypto';
 import * as dockerSvc from './docker.js';
 import * as vault from './vault.js';
+import * as fs from './fs.js';
 import type { PtyHandle } from './docker.js';
 
 const ptySessions = new Map<string, PtyHandle>();
@@ -22,6 +23,20 @@ export function registerIpc(): void {
     (_e, id: string, opts?: dockerSvc.RemoveContainerOpts) =>
       dockerSvc.removeContainer(id, opts)
   );
+
+  ipcMain.handle('fs:isDirectory', (_e, path: string) => fs.isDirectory(path));
+  ipcMain.handle('fs:mkdirp', (_e, path: string) => fs.mkdirp(path));
+
+  ipcMain.handle('dialog:pickDirectory', async (event, defaultPath?: string) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const result = await dialog.showOpenDialog(win!, {
+      properties: ['openDirectory'],
+      defaultPath,
+      title: 'Select workspace root'
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
+  });
 
   ipcMain.handle('vault:list', () => vault.listProfileNames());
   ipcMain.handle('vault:get', (_e, name: string) => vault.getProfile(name));

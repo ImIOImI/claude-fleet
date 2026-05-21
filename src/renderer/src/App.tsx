@@ -31,22 +31,14 @@ export function App() {
   }, [apiReady]);
 
   if (!apiReady) {
-    const preloadRan = typeof window !== 'undefined' && (window as { __preloadOk?: boolean }).__preloadOk === true;
     return (
       <div className="app">
         <div className="preload-error">
           <h2>Preload script not loaded</h2>
           <p>
-            <code>window.api</code> is undefined.
-          </p>
-          <p>
-            Diagnostic: <code>window.__preloadOk</code> ={' '}
-            <strong>{String(preloadRan)}</strong>.
-            {preloadRan ? (
-              <> The preload script ran but failed to expose <code>api</code> — check the terminal where <code>npm run dev</code> is running for an "exposeInMainWorld failed" error.</>
-            ) : (
-              <> The preload script never ran. Check the terminal where <code>npm run dev</code> is running for a load error, or for a missing log line: <code>[claude-fleet preload] script entered</code>.</>
-            )}
+            <code>window.api</code> is undefined — the preload script failed to load. Stop and
+            restart <code>npm run dev</code>; if you still see this after a clean restart, check
+            the terminal where dev is running for a preload error.
           </p>
         </div>
       </div>

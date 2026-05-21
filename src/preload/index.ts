@@ -1,8 +1,5 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
 
-// eslint-disable-next-line no-console
-console.log('[claude-fleet preload] script entered');
-
 const api = {
   docker: {
     ping: (): Promise<boolean> => ipcRenderer.invoke('docker:ping'),
@@ -22,6 +19,14 @@ const api = {
         ipcRenderer.removeListener(channel, handler);
       }
     }
+  },
+  fs: {
+    isDirectory: (path: string): Promise<boolean> => ipcRenderer.invoke('fs:isDirectory', path),
+    mkdirp: (path: string): Promise<void> => ipcRenderer.invoke('fs:mkdirp', path)
+  },
+  dialog: {
+    pickDirectory: (defaultPath?: string): Promise<string | null> =>
+      ipcRenderer.invoke('dialog:pickDirectory', defaultPath)
   },
   vault: {
     list: (): Promise<string[]> => ipcRenderer.invoke('vault:list'),
@@ -52,14 +57,6 @@ const api = {
   }
 };
 
-try {
-  contextBridge.exposeInMainWorld('__preloadOk', true);
-  contextBridge.exposeInMainWorld('api', api);
-  // eslint-disable-next-line no-console
-  console.log('[claude-fleet preload] api exposed successfully');
-} catch (err) {
-  // eslint-disable-next-line no-console
-  console.error('[claude-fleet preload] exposeInMainWorld failed:', err);
-}
+contextBridge.exposeInMainWorld('api', api);
 
 export type FleetApi = typeof api;

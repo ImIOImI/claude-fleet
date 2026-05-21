@@ -188,3 +188,18 @@ body { background: #101216; color: #d8dde6; overflow: hidden; }
 }
 .preload-error h2 { margin: 0 0 8px; color: #ef4444; }
 .preload-error code { background: #101216; padding: 2px 6px; border-radius: 4px; }
+
+.input-with-button { display: flex; gap: 8px; }
+.input-with-button input { flex: 1; }
+.input-with-button button {
+  background: #233040;
+  color: #d8dde6;
+  border: 1px solid #2f3a4a;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.input-with-button button:hover:not(:disabled) { background: #2a3a4f; }
+.input-with-button button:disabled { opacity: 0.6; cursor: default; }

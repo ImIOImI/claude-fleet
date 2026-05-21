@@ -28,16 +28,32 @@ export function CreateContainerModal({ open, onClose, onCreate }: Props) {
   const nameOk = name.length > 0 && /^[a-zA-Z0-9_-]+$/.test(name);
   const canSubmit = nameOk && workspaceRoot.trim().length > 0 && !busy;
 
+  const browse = async () => {
+    const picked = await window.api.dialog.pickDirectory(workspaceRoot.trim() || undefined);
+    if (picked) setWorkspaceRoot(picked);
+  };
+
   const submit = async () => {
     if (!canSubmit) return;
     setBusy(true);
     setStatus(null);
     setError(null);
     try {
+      const ws = workspaceRoot.trim();
+      const exists = await window.api.fs.isDirectory(ws);
+      if (!exists) {
+        const ok = window.confirm(
+          `Workspace folder "${ws}" does not exist. Create it?`
+        );
+        if (!ok) return;
+        setStatus(`Creating ${ws}…`);
+        await window.api.fs.mkdirp(ws);
+      }
+
       await onCreate(
         {
           name,
-          workspaceRoot: workspaceRoot.trim(),
+          workspaceRoot: ws,
           workspaceSubdir: workspaceSubdir.trim(),
           profileName: profileName.trim()
         },
@@ -77,12 +93,17 @@ export function CreateContainerModal({ open, onClose, onCreate }: Props) {
         </div>
         <div className="form-row">
           <label>Workspace root (host path)</label>
-          <input
-            value={workspaceRoot}
-            onChange={(e) => setWorkspaceRoot(e.target.value)}
-            placeholder="/home/troy/repos"
-            disabled={busy}
-          />
+          <div className="input-with-button">
+            <input
+              value={workspaceRoot}
+              onChange={(e) => setWorkspaceRoot(e.target.value)}
+              placeholder="/home/troy/repos"
+              disabled={busy}
+            />
+            <button type="button" onClick={browse} disabled={busy}>
+              Browse…
+            </button>
+          </div>
         </div>
         <div className="form-row">
           <label>Subdir inside workspace</label>
