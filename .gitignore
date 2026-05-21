@@ -9,5 +9,9 @@ build/
 .env.local
 *.tsbuildinfo
 
+# Playwright outputs
+test-results/
+playwright-report/
+
 # Windows NTFS alternate-data-stream metadata surfaced by WSL
 *:Zone.Identifier

@@ -26,6 +26,15 @@ npm install
 npm run dev
 ```
 
+## Test
+
+```bash
+npm test          # build then run the Playwright smoke suite
+npm run test:e2e  # run tests against the existing build (no rebuild)
+```
+
+Three smoke tests (`tests/smoke.spec.ts`) cover the surface area we've broken before: preload load, `+ New container` opening the modal, and the Create button surfacing validation errors. Tests need a display (WSLg, X server, or Xvfb in CI).
+
 ### Authenticating `claude` inside the container
 
 Two modes, picked at container-create time:

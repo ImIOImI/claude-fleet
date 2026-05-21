@@ -25,8 +25,7 @@ export function CreateContainerModal({ open, onClose, onCreate }: Props) {
 
   if (!open) return null;
 
-  const nameOk = name.length > 0 && /^[a-zA-Z0-9_-]+$/.test(name);
-  const canSubmit = nameOk && workspaceRoot.trim().length > 0 && !busy;
+  const nameOk = /^[a-zA-Z0-9_-]+$/.test(name);
 
   const browse = async () => {
     const picked = await window.api.dialog.pickDirectory(workspaceRoot.trim() || undefined);
@@ -34,7 +33,19 @@ export function CreateContainerModal({ open, onClose, onCreate }: Props) {
   };
 
   const submit = async () => {
-    if (!canSubmit) return;
+    if (busy) return;
+    if (!name) {
+      setError('Container name is required.');
+      return;
+    }
+    if (!nameOk) {
+      setError('Container name must match [a-zA-Z0-9_-]+ (no spaces, slashes, or dots).');
+      return;
+    }
+    if (!workspaceRoot.trim()) {
+      setError('Workspace root is required.');
+      return;
+    }
     setBusy(true);
     setStatus(null);
     setError(null);
@@ -129,7 +140,7 @@ export function CreateContainerModal({ open, onClose, onCreate }: Props) {
           <button onClick={onClose} disabled={busy}>
             Cancel
           </button>
-          <button onClick={submit} disabled={!canSubmit}>
+          <button onClick={submit} disabled={busy}>
             {busy ? 'Creating…' : 'Create'}
           </button>
         </div>

@@ -203,3 +203,11 @@ body { background: #101216; color: #d8dde6; overflow: hidden; }
 }
 .input-with-button button:hover:not(:disabled) { background: #2a3a4f; }
 .input-with-button button:disabled { opacity: 0.6; cursor: default; }
+
+.modal button:disabled,
+.input-with-button button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.modal button:hover:not(:disabled),
+.input-with-button button:hover:not(:disabled) { background: #2a3a4f; }
