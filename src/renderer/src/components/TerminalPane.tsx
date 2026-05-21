@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { WebLinksAddon } from '@xterm/addon-web-links';
 
 interface Props {
   containerId: string;
@@ -23,6 +24,10 @@ export function TerminalPane({ containerId }: Props) {
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    // URL detection + click-to-open. The default handler calls window.open,
+    // which the main process's setWindowOpenHandler routes to shell.openExternal,
+    // so URLs land in the host browser instead of trying to open inside the container.
+    term.loadAddon(new WebLinksAddon());
     term.open(host);
     fit.fit();
 
@@ -30,6 +35,28 @@ export function TerminalPane({ containerId }: Props) {
     let unsubData: (() => void) | null = null;
     let unsubEnd: (() => void) | null = null;
     let disposed = false;
+
+    // Ctrl+Shift+C copies the current selection; Ctrl+Shift+V pastes from
+    // the system clipboard. Both consume the keystroke so xterm doesn't
+    // also interpret it (e.g., Ctrl+C as SIGINT).
+    term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+      if (e.type !== 'keydown') return true;
+      if (e.ctrlKey && e.shiftKey && e.code === 'KeyC') {
+        const sel = term.getSelection();
+        if (sel) navigator.clipboard.writeText(sel).catch(() => undefined);
+        return false;
+      }
+      if (e.ctrlKey && e.shiftKey && e.code === 'KeyV') {
+        navigator.clipboard
+          .readText()
+          .then((text) => {
+            if (text && sessionId) window.api.pty.input(sessionId, text);
+          })
+          .catch(() => undefined);
+        return false;
+      }
+      return true;
+    });
 
     (async () => {
       const sid = await window.api.pty.attach(containerId, term.cols, term.rows);
