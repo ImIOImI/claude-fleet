@@ -444,6 +444,14 @@ The main process opens the SQLite file in read-write mode for its own writers (o
 - **CI integration.** GitHub Actions vs. local-only. Headless Electron in CI requires Xvfb (Linux) or equivalent.
 - **Test fixtures.** Shared in-memory DB seed vs. per-test container/profile fixtures.
 
+### App-level Settings surface
+No Settings panel exists yet. The first concrete item that needs one is a toggle for hardware acceleration (issue #13) — Chromium's GPU process fails noisily on WSLg with `viz_main_impl.cc(166) ERROR: Exiting GPU process during initialization`. The fix in code is one line — `app.disableHardwareAcceleration()` before `app.whenReady()` — but it needs a UI control to flip without editing source.
+
+**Open:**
+- **Env-var escape hatch first, or full panel up front.** `CLAUDE_FLEET_DISABLE_HWA=1` would be a five-minute shortcut (and matches the dev-fallback pattern we already use for `ANTHROPIC_API_KEY`); a real Settings modal is more work but is the right end state.
+- **Persistence.** SQLite alongside `profile_settings` is the natural home — same DB the watcher and the rest of the app already share. A JSON config file under `userData` is the alternative if we want the Settings to survive a DB wipe.
+- **Likely future occupants** once the surface exists: log-verbosity, default `mirrorDefault`/`cleanupDefault` for new profiles, dev-shortcut indicators ("ANTHROPIC_API_KEY is sourced from env"), pull-progress UI preference, fast-mode toggle, etc.
+
 ### Create-container UX
 The current flow is three sequential `window.prompt()` dialogs. Functional but crude. Needs a real modal form with: name, workspace root (with a directory picker — `dialog.showOpenDialog` from main), subdir, profile dropdown (populated from `vault:list`), and optional CPU/memory caps.
 
