@@ -2,7 +2,7 @@
   "name": "claude-fleet",
   "version": "0.1.0",
   "description": "Desktop app for managing a fleet of Claude Code container instances",
-  "main": "out/main/index.js",
+  "main": "out/main/index.cjs",
   "author": "Troy Knapp",
   "license": "MIT",
   "private": true,
