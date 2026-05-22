@@ -173,6 +173,8 @@ The index exists because `keytar` has no list operation. It is maintained on eve
 
 Each `pty:attach` runs `claude` fresh inside the container via `docker exec` — it is *not* the container's main process. The container's main process is `sleep infinity`, kept alive by `tini`.
 
+**Clickable links**: `term.registerLinkProvider` walks back to the first non-wrapped row, forward through `isWrapped` continuations, concatenates the rows, and matches URLs against the joined text — so a URL that soft-wraps across multiple rows is registered as a single link spanning all of them. Activation calls `window.open`, which `setWindowOpenHandler` routes through `shell.openExternal`.
+
 ### Manage profiles
 1. User clicks **Profiles…** in the sidebar.
 2. Modal lists names from `vault:list`. Add form takes `name` + `apiKey` (password input). Delete asks for confirmation.

@@ -222,6 +222,27 @@ test('Mock mode: selecting a container mounts the terminal pane', async () => {
   }
 });
 
+test('Mock mode: oauth command runs without crashing the terminal', async () => {
+  // Canvas rendering hides URL text from Playwright; this test only proves
+  // the command path stays alive end-to-end. The clickable-link behavior must
+  // be verified manually by running `CLAUDE_FLEET_MOCK=1 npm run dev`,
+  // typing `oauth`, and clicking the wrapped URL.
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    await window.locator('.container-row', { hasText: 'mock-alpha' }).click();
+    const term = window.locator('.terminal-host');
+    await expect(term).toBeVisible();
+    await term.click();
+    await window.keyboard.type('oauth');
+    await window.keyboard.press('Enter');
+    // Give the FakeShell + xterm time to render the URL + prompt.
+    await window.waitForTimeout(500);
+    await expect(term).toBeVisible();
+  } finally {
+    await app.close();
+  }
+});
+
 test('Mock mode: Close button stops and removes the selected container', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {

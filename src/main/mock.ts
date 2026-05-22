@@ -125,6 +125,7 @@ class FakeShell extends Duplex {
       this.push('  clear         clear the screen\r\n');
       this.push('  echo <text>   print text\r\n');
       this.push('  whoami        print the fake claude identity\r\n');
+      this.push('  oauth         simulate a Claude.ai OAuth login URL print\r\n');
       return;
     }
     if (cmd === 'clear') {
@@ -133,6 +134,20 @@ class FakeShell extends Duplex {
     }
     if (cmd === 'whoami') {
       this.push(`claude (mock, container=${this.containerName})\r\n`);
+      return;
+    }
+    if (cmd === 'oauth') {
+      // Realistic-shaped Claude.ai OAuth URL. Definitely wraps at 80 cols;
+      // exercises the multi-line link provider in TerminalPane.
+      const url =
+        'https://claude.ai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-mock-test' +
+        '&response_type=code&redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2F' +
+        'callback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference&code_challenge=' +
+        '7Z9q4R3xLgPmK2vN8wB6tY1uH5sD0fA-mockChallenge_aBcDeFgHiJ&code_challenge_method=S256' +
+        '&state=mock-state-token-9c8b7a6d5e4f3210fedcba9876543210abcdef1234567890';
+      this.push('Browse to the following URL and paste the code Claude.ai gives you:\r\n\r\n');
+      this.push(`  ${url}\r\n\r\n`);
+      this.push('Paste code: ');
       return;
     }
     if (cmd.startsWith('echo ')) {
