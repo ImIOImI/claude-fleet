@@ -119,6 +119,12 @@ Per-session events from main to renderer:
 
 The renderer's `window.api.pty.onData/onEnd` register listeners and return unsubscribe functions.
 
+### Clipboard + context menu
+The renderer cannot use `navigator.clipboard` reliably (focus/permission gotchas in Electron, and the renderer is contextIsolated). All clipboard access goes through main:
+- `clipboard:write(text)` → `void` — `electron.clipboard.writeText` (no-op on empty).
+- `clipboard:read()` → `string` — `electron.clipboard.readText`.
+- `menu:showTerminalContextMenu({ hasSelection })` → `'copy' | 'paste' | 'selectAll' | null` — builds a native `Menu`, popups it on the focused window, resolves with the chosen action or `null` on dismiss. Copy item is disabled when `hasSelection` is false.
+
 ## 7. Data model
 
 ### Container labels
@@ -172,6 +178,8 @@ The index exists because `keytar` has no list operation. It is maintained on eve
 7. On unmount: unsubscribe listeners, `pty:detach`, dispose the terminal.
 
 Each `pty:attach` runs `claude` fresh inside the container via `docker exec` — it is *not* the container's main process. The container's main process is `sleep infinity`, kept alive by `tini`.
+
+**Copy and paste**: the terminal pane has selection-aware key bindings. Ctrl+C copies when a selection exists and falls through as SIGINT when not; Ctrl+V pastes. Ctrl+Shift+C / Ctrl+Shift+V are unconditional copy / paste (terminal-convention alternates). Right-click opens a native context menu (Copy / Paste / Select All) via `menu:showTerminalContextMenu`. Clipboard reads and writes route through `clipboard:read` / `clipboard:write` in main, not `navigator.clipboard`. The terminal's `wordSeparator` is tuned to whitespace + brackets + quotes only, so double-clicking a URL selects the whole URL (URL-safe characters like `/`, `?`, `&`, `=`, `.`, `:` stay inside the word).
 
 **Clickable links**: `term.registerLinkProvider` walks back to the first non-wrapped row, forward through `isWrapped` continuations, concatenates the rows, and matches URLs against the joined text — so a URL that soft-wraps across multiple rows is registered as a single link spanning all of them. Activation calls `window.open`, which `setWindowOpenHandler` routes through `shell.openExternal`.
 

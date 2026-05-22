@@ -1,4 +1,4 @@
-import { ipcMain, BrowserWindow, dialog } from 'electron';
+import { ipcMain, BrowserWindow, dialog, clipboard, Menu } from 'electron';
 import { randomUUID } from 'node:crypto';
 import * as realDocker from './docker.js';
 import * as mockDocker from './mock.js';
@@ -43,6 +43,34 @@ export function registerIpc(): void {
     if (result.canceled || result.filePaths.length === 0) return null;
     return result.filePaths[0];
   });
+
+  ipcMain.handle('clipboard:write', (_e, text: string) => {
+    if (typeof text === 'string' && text.length > 0) clipboard.writeText(text);
+  });
+  ipcMain.handle('clipboard:read', () => clipboard.readText());
+
+  ipcMain.handle(
+    'menu:showTerminalContextMenu',
+    async (event, opts: { hasSelection: boolean }) => {
+      const win = BrowserWindow.fromWebContents(event.sender);
+      if (!win) return null;
+      return new Promise<'copy' | 'paste' | 'selectAll' | null>((resolve) => {
+        let resolved = false;
+        const settle = (choice: 'copy' | 'paste' | 'selectAll' | null) => {
+          if (resolved) return;
+          resolved = true;
+          resolve(choice);
+        };
+        const menu = Menu.buildFromTemplate([
+          { label: 'Copy', enabled: opts.hasSelection, click: () => settle('copy') },
+          { label: 'Paste', click: () => settle('paste') },
+          { type: 'separator' },
+          { label: 'Select All', click: () => settle('selectAll') }
+        ]);
+        menu.popup({ window: win, callback: () => settle(null) });
+      });
+    }
+  );
 
   ipcMain.handle('vault:available', () => vault.isVaultAvailable());
   ipcMain.handle('vault:list', () => vault.listProfileNames());
