@@ -26,6 +26,25 @@ npm install
 npm run dev
 ```
 
+### Running dev on WSL
+
+`keytar` needs a Secret Service implementation (gnome-keyring, KeePassXC) on Linux. Bare WSL doesn't ship one, so the Profiles dialog will be hidden and the app falls back to reading `ANTHROPIC_API_KEY` from the environment — enough for daily dev work:
+
+```bash
+ANTHROPIC_API_KEY=sk-... npm run dev
+```
+
+A header banner shows when the fallback is active. To exercise the Profiles dialog end-to-end (multiple named profiles, vault writes), install and start a keyring:
+
+```bash
+sudo apt install gnome-keyring libsecret-1-0
+eval "$(gnome-keyring-daemon --start --components=secrets)"
+export DBUS_SESSION_BUS_ADDRESS  # set by the daemon
+npm run dev
+```
+
+This only matters for development on WSL. The packaged Windows build uses Credential Manager (DPAPI) via `keytar` — no setup required.
+
 ## Test
 
 ```bash

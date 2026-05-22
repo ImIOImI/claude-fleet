@@ -29,6 +29,7 @@ const api = {
       ipcRenderer.invoke('dialog:pickDirectory', defaultPath)
   },
   vault: {
+    available: (): Promise<boolean> => ipcRenderer.invoke('vault:available'),
     list: (): Promise<string[]> => ipcRenderer.invoke('vault:list'),
     get: (name: string) => ipcRenderer.invoke('vault:get', name),
     set: (p: { name: string; apiKey: string }) => ipcRenderer.invoke('vault:set', p),

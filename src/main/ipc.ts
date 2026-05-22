@@ -38,6 +38,7 @@ export function registerIpc(): void {
     return result.filePaths[0];
   });
 
+  ipcMain.handle('vault:available', () => vault.isVaultAvailable());
   ipcMain.handle('vault:list', () => vault.listProfileNames());
   ipcMain.handle('vault:get', (_e, name: string) => vault.getProfile(name));
   ipcMain.handle('vault:set', (_e, p: vault.Profile) => vault.setProfile(p));
