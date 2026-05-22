@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { TerminalPane } from './components/TerminalPane';
+import { CloseContainerModal } from './components/CloseContainerModal';
 
 export interface ContainerSummary {
   id: string;
@@ -16,6 +17,7 @@ export function App() {
   const [mockMode, setMockMode] = useState(false);
   const [containers, setContainers] = useState<ContainerSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [closeOpen, setCloseOpen] = useState(false);
 
   const refresh = async () => {
     if (!window.api) return;
@@ -92,6 +94,22 @@ export function App() {
             <>
               <span>{selected.name}</span>
               <span style={{ color: '#6b7280' }}>{selected.status}</span>
+              <button
+                onClick={() => setCloseOpen(true)}
+                style={{
+                  marginLeft: 'auto',
+                  background: '#3a1f1f',
+                  color: '#fca5a5',
+                  border: '1px solid #5a2a2a',
+                  borderRadius: 6,
+                  padding: '4px 10px',
+                  fontSize: 12,
+                  cursor: 'pointer'
+                }}
+                title="Stop and/or remove this container"
+              >
+                Close…
+              </button>
             </>
           )}
           {daemonReachable && !selected && vaultAvailable !== false && <span>Select a container.</span>}
@@ -104,6 +122,16 @@ export function App() {
           )}
         </div>
       </div>
+      {closeOpen && selected && (
+        <CloseContainerModal
+          container={selected}
+          onClose={() => setCloseOpen(false)}
+          onClosed={() => {
+            setSelectedId(null);
+            refresh();
+          }}
+        />
+      )}
     </div>
   );
 }

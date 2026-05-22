@@ -222,6 +222,40 @@ test('Mock mode: selecting a container mounts the terminal pane', async () => {
   }
 });
 
+test('Mock mode: Close button stops and removes the selected container', async () => {
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    await window.locator('.container-row', { hasText: 'mock-alpha' }).click();
+
+    await window.getByRole('button', { name: 'Close…' }).click();
+    await expect(window.getByRole('heading', { name: 'Close container' })).toBeVisible();
+
+    // Running container should expose both "Stop only" and "Stop & remove"
+    await expect(window.getByRole('button', { name: 'Stop only' })).toBeVisible();
+    await window.getByRole('button', { name: 'Stop & remove' }).click();
+
+    // Modal closes, container disappears from sidebar, nothing is selected
+    await expect(window.getByRole('heading', { name: 'Close container' })).toBeHidden();
+    await expect(window.locator('.container-row .name', { hasText: 'mock-alpha' })).toBeHidden();
+    await expect(window.locator('.empty', { hasText: 'No container selected' })).toBeVisible();
+  } finally {
+    await app.close();
+  }
+});
+
+test('Mock mode: Close on an exited container shows only Remove', async () => {
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    await window.locator('.container-row', { hasText: 'mock-beta' }).click();
+    await window.getByRole('button', { name: 'Close…' }).click();
+    await expect(window.getByRole('heading', { name: 'Close container' })).toBeVisible();
+    await expect(window.getByRole('button', { name: 'Stop only' })).toBeHidden();
+    await expect(window.getByRole('button', { name: 'Remove' })).toBeVisible();
+  } finally {
+    await app.close();
+  }
+});
+
 test('Create flow: declining the missing-workspace confirm aborts without mkdirp or create', async () => {
   const { app, window } = await launch();
   try {
