@@ -1,7 +1,60 @@
 import { useEffect, useRef } from 'react';
-import { Terminal } from '@xterm/xterm';
+import { Terminal, type ILink, type ILinkProvider } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { WebLinksAddon } from '@xterm/addon-web-links';
+
+// Default WebLinksAddon matches URLs per visual row, so long URLs that soft-wrap
+// across multiple rows only register the first row as clickable — and "open link"
+// hits a truncated URL. This provider walks back to the first non-wrapped row,
+// forward through isWrapped continuations, concatenates the rows with no padding,
+// matches URLs across the joined text, and emits a link range that spans rows.
+const URL_REGEX = /https?:\/\/[^\s'"`<>()\[\]{}]+/g;
+const TRAILING_PUNCTUATION = /[.,;:!?]+$/;
+
+function multilineLinkProvider(term: Terminal): ILinkProvider {
+  return {
+    provideLinks(bufferLineNumber, callback) {
+      const buf = term.buffer.active;
+      const cols = term.cols;
+
+      let firstRow = bufferLineNumber;
+      while (firstRow > 1 && buf.getLine(firstRow - 1)?.isWrapped) firstRow--;
+
+      let lastRow = firstRow;
+      while (lastRow < buf.length && buf.getLine(lastRow)?.isWrapped) lastRow++;
+
+      let logical = '';
+      for (let r = firstRow; r <= lastRow; r++) {
+        logical += buf.getLine(r - 1)?.translateToString(false) ?? '';
+      }
+
+      const links: ILink[] = [];
+      URL_REGEX.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = URL_REGEX.exec(logical)) !== null) {
+        const url = m[0].replace(TRAILING_PUNCTUATION, '');
+        if (!url) continue;
+
+        const startIdx = m.index;
+        const endIdx = startIdx + url.length - 1;
+        const startRow = firstRow + Math.floor(startIdx / cols);
+        const startCol = (startIdx % cols) + 1;
+        const endRow = firstRow + Math.floor(endIdx / cols);
+        const endCol = (endIdx % cols) + 1;
+
+        if (startRow > bufferLineNumber || endRow < bufferLineNumber) continue;
+
+        links.push({
+          range: { start: { x: startCol, y: startRow }, end: { x: endCol, y: endRow } },
+          text: url,
+          activate: () => {
+            window.open(url, '_blank');
+          }
+        });
+      }
+      callback(links.length ? links : undefined);
+    }
+  };
+}
 
 interface Props {
   containerId: string;
@@ -24,12 +77,12 @@ export function TerminalPane({ containerId }: Props) {
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
-    // URL detection + click-to-open. The default handler calls window.open,
-    // which the main process's setWindowOpenHandler routes to shell.openExternal,
-    // so URLs land in the host browser instead of trying to open inside the container.
-    term.loadAddon(new WebLinksAddon());
     term.open(host);
     fit.fit();
+    // Multi-line URL detection. Activate calls window.open, which the main
+    // process's setWindowOpenHandler routes through shell.openExternal so links
+    // open in the host browser, not inside the container.
+    const linkProviderDisposable = term.registerLinkProvider(multilineLinkProvider(term));
 
     let sessionId: string | null = null;
     let unsubData: (() => void) | null = null;
@@ -85,6 +138,7 @@ export function TerminalPane({ containerId }: Props) {
       ro.disconnect();
       unsubData?.();
       unsubEnd?.();
+      linkProviderDisposable.dispose();
       if (sessionId) window.api.pty.detach(sessionId);
       term.dispose();
     };
