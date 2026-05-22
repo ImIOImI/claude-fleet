@@ -45,6 +45,18 @@ npm run dev
 
 This only matters for development on WSL. The packaged Windows build uses Credential Manager (DPAPI) via `keytar` — no setup required.
 
+### Mock mode (no Docker, no API key)
+
+Iterate on the UI without a Docker daemon, runner image, or API credit:
+
+```bash
+CLAUDE_FLEET_MOCK=1 npm run dev
+```
+
+The sidebar pre-populates with two fake containers; `+ New container` adds more to an in-memory store. Selecting a container attaches a tiny mock shell that echoes input and responds to `help`, `clear`, `whoami`, and `echo`. A `MOCK MODE` chip in the header makes the state obvious. Restart `npm run dev` to reset the fake fleet.
+
+Mock mode is dev-only — the env var is ignored by the packaged build.
+
 ## Test
 
 ```bash

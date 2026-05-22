@@ -1,6 +1,9 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
 
 const api = {
+  app: {
+    mockMode: (): Promise<boolean> => ipcRenderer.invoke('app:mockMode')
+  },
   docker: {
     ping: (): Promise<boolean> => ipcRenderer.invoke('docker:ping'),
     list: () => ipcRenderer.invoke('docker:list'),
