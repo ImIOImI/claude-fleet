@@ -31,6 +31,16 @@ const api = {
     pickDirectory: (defaultPath?: string): Promise<string | null> =>
       ipcRenderer.invoke('dialog:pickDirectory', defaultPath)
   },
+  clipboard: {
+    write: (text: string): Promise<void> => ipcRenderer.invoke('clipboard:write', text),
+    read: (): Promise<string> => ipcRenderer.invoke('clipboard:read')
+  },
+  menu: {
+    showTerminalContextMenu: (
+      opts: { hasSelection: boolean }
+    ): Promise<'copy' | 'paste' | 'selectAll' | null> =>
+      ipcRenderer.invoke('menu:showTerminalContextMenu', opts)
+  },
   vault: {
     available: (): Promise<boolean> => ipcRenderer.invoke('vault:available'),
     list: (): Promise<string[]> => ipcRenderer.invoke('vault:list'),

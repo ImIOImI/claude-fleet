@@ -73,7 +73,11 @@ export function TerminalPane({ containerId }: Props) {
       theme: { background: '#101216' },
       cursorBlink: true,
       convertEol: true,
-      allowProposedApi: true
+      allowProposedApi: true,
+      // Word-select (double-click) treats only whitespace, brackets, quotes,
+      // and angle brackets as separators — keeps URL chars (`/?&=:.`) inside
+      // the word so double-clicking a URL selects it whole.
+      wordSeparator: ' \t()[]{}\'"<>`'
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -89,27 +93,61 @@ export function TerminalPane({ containerId }: Props) {
     let unsubEnd: (() => void) | null = null;
     let disposed = false;
 
-    // Ctrl+Shift+C copies the current selection; Ctrl+Shift+V pastes from
-    // the system clipboard. Both consume the keystroke so xterm doesn't
-    // also interpret it (e.g., Ctrl+C as SIGINT).
+    const doCopy = (): void => {
+      const sel = term.getSelection();
+      if (sel) {
+        void window.api.clipboard.write(sel);
+        term.clearSelection();
+      }
+    };
+
+    const doPaste = (): void => {
+      void window.api.clipboard.read().then((text) => {
+        if (text && sessionId) window.api.pty.input(sessionId, text);
+      });
+    };
+
+    // Key bindings:
+    //   Ctrl+C  -> copy when there's a selection; falls through as SIGINT when not
+    //   Ctrl+V  -> paste
+    //   Ctrl+Shift+C / V -> explicit copy / paste (terminal-convention alternates)
+    // Returning false consumes the keystroke so xterm doesn't also process it.
     term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
       if (e.type !== 'keydown') return true;
-      if (e.ctrlKey && e.shiftKey && e.code === 'KeyC') {
-        const sel = term.getSelection();
-        if (sel) navigator.clipboard.writeText(sel).catch(() => undefined);
+      const plainCtrl = e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey;
+      const ctrlShift = e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
+
+      if (plainCtrl && e.code === 'KeyC') {
+        if (term.hasSelection()) {
+          doCopy();
+          return false;
+        }
+        return true; // no selection — pass through as SIGINT
+      }
+      if (plainCtrl && e.code === 'KeyV') {
+        doPaste();
         return false;
       }
-      if (e.ctrlKey && e.shiftKey && e.code === 'KeyV') {
-        navigator.clipboard
-          .readText()
-          .then((text) => {
-            if (text && sessionId) window.api.pty.input(sessionId, text);
-          })
-          .catch(() => undefined);
+      if (ctrlShift && e.code === 'KeyC') {
+        doCopy();
+        return false;
+      }
+      if (ctrlShift && e.code === 'KeyV') {
+        doPaste();
         return false;
       }
       return true;
     });
+
+    const onContextMenu = async (e: MouseEvent): Promise<void> => {
+      e.preventDefault();
+      const hasSelection = term.hasSelection();
+      const choice = await window.api.menu.showTerminalContextMenu({ hasSelection });
+      if (choice === 'copy') doCopy();
+      else if (choice === 'paste') doPaste();
+      else if (choice === 'selectAll') term.selectAll();
+    };
+    host.addEventListener('contextmenu', onContextMenu);
 
     (async () => {
       const sid = await window.api.pty.attach(containerId, term.cols, term.rows);
@@ -136,6 +174,7 @@ export function TerminalPane({ containerId }: Props) {
     return () => {
       disposed = true;
       ro.disconnect();
+      host.removeEventListener('contextmenu', onContextMenu);
       unsubData?.();
       unsubEnd?.();
       linkProviderDisposable.dispose();
