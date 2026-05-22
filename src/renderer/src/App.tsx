@@ -13,6 +13,7 @@ export function App() {
   const apiReady = typeof window !== 'undefined' && !!window.api;
   const [daemonReachable, setDaemonReachable] = useState<boolean | null>(null);
   const [vaultAvailable, setVaultAvailable] = useState<boolean | null>(null);
+  const [mockMode, setMockMode] = useState(false);
   const [containers, setContainers] = useState<ContainerSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -28,6 +29,7 @@ export function App() {
     if (!apiReady) return;
     refresh();
     window.api.vault.available().then(setVaultAvailable);
+    window.api.app.mockMode().then(setMockMode);
     const t = setInterval(refresh, 5000);
     return () => clearInterval(t);
   }, [apiReady]);
@@ -60,6 +62,22 @@ export function App() {
       />
       <div className="main">
         <div className="main-header">
+          {mockMode && (
+            <span
+              style={{
+                background: '#7c2d12',
+                color: '#fed7aa',
+                padding: '2px 8px',
+                borderRadius: 4,
+                fontSize: 11,
+                fontWeight: 600,
+                letterSpacing: 0.5
+              }}
+              title="CLAUDE_FLEET_MOCK=1 — Docker + PTY are simulated"
+            >
+              MOCK MODE
+            </span>
+          )}
           {daemonReachable === false && (
             <span style={{ color: '#ef4444' }}>
               Docker daemon unreachable — start Docker Desktop (with WSL2 integration).

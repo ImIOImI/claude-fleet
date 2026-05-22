@@ -1,9 +1,13 @@
 import { ipcMain, BrowserWindow, dialog } from 'electron';
 import { randomUUID } from 'node:crypto';
-import * as dockerSvc from './docker.js';
+import * as realDocker from './docker.js';
+import * as mockDocker from './mock.js';
 import * as vault from './vault.js';
 import * as fs from './fs.js';
-import type { PtyHandle } from './docker.js';
+import type { PtyHandle, RemoveContainerOpts } from './docker.js';
+
+export const MOCK_MODE = process.env.CLAUDE_FLEET_MOCK === '1';
+const dockerSvc = MOCK_MODE ? mockDocker : realDocker;
 
 const ptySessions = new Map<string, PtyHandle>();
 
@@ -20,9 +24,11 @@ export function registerIpc(): void {
   ipcMain.handle('docker:stop', (_e, id: string) => dockerSvc.stopContainer(id));
   ipcMain.handle(
     'docker:remove',
-    (_e, id: string, opts?: dockerSvc.RemoveContainerOpts) =>
+    (_e, id: string, opts?: RemoveContainerOpts) =>
       dockerSvc.removeContainer(id, opts)
   );
+
+  ipcMain.handle('app:mockMode', () => MOCK_MODE);
 
   ipcMain.handle('fs:isDirectory', (_e, path: string) => fs.isDirectory(path));
   ipcMain.handle('fs:mkdirp', (_e, path: string) => fs.mkdirp(path));

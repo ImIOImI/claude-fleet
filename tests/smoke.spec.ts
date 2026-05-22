@@ -3,10 +3,13 @@ import path from 'node:path';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..');
 
-async function launch(): Promise<{ app: ElectronApplication; window: Page }> {
+async function launch(
+  envOverrides: Record<string, string> = {}
+): Promise<{ app: ElectronApplication; window: Page }> {
   const app = await electron.launch({
     args: [REPO_ROOT],
-    cwd: REPO_ROOT
+    cwd: REPO_ROOT,
+    env: { ...process.env, ...envOverrides } as Record<string, string>
   });
   const window = await app.firstWindow();
   await window.waitForLoadState('domcontentloaded');
@@ -191,6 +194,29 @@ test('Create flow: missing workspace prompts to create it and mkdirps before con
     expect(calls.mkdirp).toEqual(['/tmp/does-not-exist-yet']);
     expect(calls.create).toHaveLength(1);
     expect(calls.create[0]).toMatchObject({ workspaceRoot: '/tmp/does-not-exist-yet' });
+  } finally {
+    await app.close();
+  }
+});
+
+test('Mock mode: seeded containers appear and MOCK MODE chip is visible', async () => {
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    await expect(window.getByText('MOCK MODE')).toBeVisible();
+    // Seeded containers from src/main/mock.ts
+    await expect(window.locator('.container-row .name', { hasText: 'mock-alpha' })).toBeVisible();
+    await expect(window.locator('.container-row .name', { hasText: 'mock-beta' })).toBeVisible();
+  } finally {
+    await app.close();
+  }
+});
+
+test('Mock mode: selecting a container mounts the terminal pane', async () => {
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    await window.locator('.container-row', { hasText: 'mock-alpha' }).click();
+    await expect(window.locator('.container-row.active', { hasText: 'mock-alpha' })).toBeVisible();
+    await expect(window.locator('.terminal-host')).toBeVisible();
   } finally {
     await app.close();
   }

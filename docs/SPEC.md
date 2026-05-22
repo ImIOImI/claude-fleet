@@ -431,6 +431,16 @@ The main process opens the SQLite file in read-write mode for its own writers (o
 - **Cross-container visibility.** Today the schema doesn't restrict by container at the DB level — a `sessions` row from container A is visible to the agent in container B. Matches the goal that sessions are global, but explicitly decide whether the MCP server should optionally scope to "this container's data only" by stamping each connection with its container ID at the time the socket is opened.
 - **Runaway-query protection.** Even read-only queries can be expensive. Decide on per-query statement timeout, row-count cap, or both.
 
+### Dev-mode mock fleet
+When `CLAUDE_FLEET_MOCK=1` is set in the main process's environment, `ipc.ts` swaps the real `docker.ts` implementation for `src/main/mock.ts`. The mock:
+- maintains an in-memory `Map<id, FleetContainer>` seeded with two fakes (`mock-alpha` running, `mock-beta` exited);
+- implements `ping`/`list`/`create`/`stop`/`remove`/`ensureImage` against that map;
+- returns a custom `Duplex` "fake shell" from `attachPty` that emits a welcome banner, echoes typed characters, handles Enter/backspace/Ctrl-C, and responds to a small command set (`help`, `clear`, `whoami`, `echo`).
+
+The renderer shows a `MOCK MODE` chip in the header (driven by a new `app:mockMode` IPC channel) so the state is obvious. The vault and JSONL-watcher code paths are untouched — mock mode only stubs Docker/PTY. To exercise an API-key profile in mock mode, supply `ANTHROPIC_API_KEY` via env as well; the OAuth path (blank profile) needs nothing.
+
+Intentionally narrow scope: this is for iterating on UI without a daemon, image, or credits. The packaged build never reads the env var.
+
 ### Testing strategy
 **Decided:**
 - **E2E**: Playwright via its Electron integration (`_electron.launch`). Drives the packaged or dev-mode app from outside; can interact with menus, panes, modals, and assert on rendered state.
