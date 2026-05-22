@@ -178,6 +178,14 @@ Each `pty:attach` runs `claude` fresh inside the container via `docker exec` —
 2. Modal lists names from `vault:list`. Add form takes `name` + `apiKey` (password input). Delete asks for confirmation.
 3. All writes go to the OS keychain via the main process.
 
+### Close a container
+1. User selects a container, then clicks **Close…** in the main-pane header.
+2. `<CloseContainerModal>` opens, showing the container name and current status. A single checkbox — "Also delete the state directory" — is unchecked by default (Keep is the spec default; recreating with the same name inherits prior Claude state).
+3. Action buttons depend on current state:
+   - **Running**: `Stop only` (calls `docker:stop`) and `Stop & remove` (calls `docker:stop` then `docker:remove(id, { deleteState })`).
+   - **Exited**: only `Remove` (calls `docker:remove(id, { deleteState })`).
+4. On success, the modal closes, the selection clears, and the sidebar refreshes. Failures surface inline in the modal.
+
 ## 9. Security model
 
 - **API keys never reach the renderer.** `vault:get` returns the key to the main process, which embeds it in the container's env. The renderer only ever holds profile *names*. (Exception: `ProfilesDialog` does receive the key the user just typed, in the brief moment between input and `vault:set` — there is no way around this.)
@@ -247,7 +255,7 @@ Each container gets its own host-side state dir, bind-mounted into the container
 - `src/main/docker.ts createContainer`: add the state-dir bind to `HostConfig.Binds` alongside the existing workspace bind. Ensure the host dir exists (`mkdir -p`) with host-user ownership before starting the container.
 - `src/main/docker.ts removeContainer`: take `opts: { deleteState: boolean }`. When true, recursively remove the state dir after the Docker container is removed.
 - `src/main/ipc.ts`: extend `docker:remove` to accept the `deleteState` flag from the renderer.
-- New UI: removal-confirmation modal. Lands wherever the remove action is exposed (TBD; tied to create-container UX #4).
+- Removal-confirmation modal: implemented as `CloseContainerModal`, opened from the main-pane header's **Close…** button. See §8 "Close a container".
 - Runner image (#5): the image is published to GHCR by CI (`ghcr.io/imioimi/claude-fleet/runner:latest`). The app pulls it on first use; UID is handled at container start via `User`, not baked at image-build time.
 
 **Open:**
