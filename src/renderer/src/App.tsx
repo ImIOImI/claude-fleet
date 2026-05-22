@@ -12,6 +12,7 @@ export interface ContainerSummary {
 export function App() {
   const apiReady = typeof window !== 'undefined' && !!window.api;
   const [daemonReachable, setDaemonReachable] = useState<boolean | null>(null);
+  const [vaultAvailable, setVaultAvailable] = useState<boolean | null>(null);
   const [containers, setContainers] = useState<ContainerSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -26,6 +27,7 @@ export function App() {
   useEffect(() => {
     if (!apiReady) return;
     refresh();
+    window.api.vault.available().then(setVaultAvailable);
     const t = setInterval(refresh, 5000);
     return () => clearInterval(t);
   }, [apiReady]);
@@ -54,6 +56,7 @@ export function App() {
         selectedId={selectedId}
         onSelect={setSelectedId}
         onCreated={refresh}
+        vaultAvailable={vaultAvailable}
       />
       <div className="main">
         <div className="main-header">
@@ -62,13 +65,18 @@ export function App() {
               Docker daemon unreachable — start Docker Desktop (with WSL2 integration).
             </span>
           )}
+          {daemonReachable && vaultAvailable === false && (
+            <span style={{ color: '#f59e0b' }} title="See README → Running dev on WSL">
+              OS keychain unavailable — using ANTHROPIC_API_KEY from env. Profiles disabled.
+            </span>
+          )}
           {daemonReachable && selected && (
             <>
               <span>{selected.name}</span>
               <span style={{ color: '#6b7280' }}>{selected.status}</span>
             </>
           )}
-          {daemonReachable && !selected && <span>Select a container.</span>}
+          {daemonReachable && !selected && vaultAvailable !== false && <span>Select a container.</span>}
         </div>
         <div className="main-body">
           {selected ? (

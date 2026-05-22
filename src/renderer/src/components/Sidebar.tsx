@@ -8,9 +8,10 @@ interface Props {
   selectedId: string | null;
   onSelect: (id: string) => void;
   onCreated: () => void;
+  vaultAvailable: boolean | null;
 }
 
-export function Sidebar({ containers, selectedId, onSelect, onCreated }: Props) {
+export function Sidebar({ containers, selectedId, onSelect, onCreated, vaultAvailable }: Props) {
   const [createOpen, setCreateOpen] = useState(false);
   const [profilesOpen, setProfilesOpen] = useState(false);
 
@@ -62,13 +63,17 @@ export function Sidebar({ containers, selectedId, onSelect, onCreated }: Props) 
         </div>
       ))}
       <button onClick={() => setCreateOpen(true)}>+ New container</button>
-      <button onClick={() => setProfilesOpen(true)}>Profiles…</button>
+      {vaultAvailable !== false && (
+        <button onClick={() => setProfilesOpen(true)}>Profiles…</button>
+      )}
       <CreateContainerModal
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         onCreate={handleCreate}
       />
-      <ProfilesDialog open={profilesOpen} onClose={() => setProfilesOpen(false)} />
+      {vaultAvailable !== false && (
+        <ProfilesDialog open={profilesOpen} onClose={() => setProfilesOpen(false)} />
+      )}
     </aside>
   );
 }

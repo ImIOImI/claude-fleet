@@ -186,6 +186,7 @@ Each `pty:attach` runs `claude` fresh inside the container via `docker exec` —
 - **Renderer cannot escape the IPC surface.** It can: list/create/stop/remove containers carrying the fleet label, list/get/set/delete profiles, attach/detach a PTY. It cannot: shell out, read arbitrary files, touch other Docker containers, hit the network with Node APIs.
 - **Container isolation is Docker's.** No additional sandboxing layered on top. Containers run as non-root user `fleet` (UID 1000) and can write to the bind-mounted workspace as that user.
 - **External link handling**: `setWindowOpenHandler` denies in-app navigation and opens external URLs via `shell.openExternal`.
+- **Vault availability degradation**: the main process probes `keytar` once at startup (`vault:available`). When the OS keychain is unreachable (typically bare WSL with no Secret Service), the renderer hides the **Profiles…** button, the create-container flow accepts only OAuth or env-sourced API keys, and `getProfile` falls back to `ANTHROPIC_API_KEY` from the environment. A header banner surfaces the degraded state. The packaged Windows build hits Credential Manager via DPAPI and never enters this mode; this path exists for Linux dev environments without a keyring.
 
 ## 10. Project layout
 
