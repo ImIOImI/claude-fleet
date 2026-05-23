@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Terminal, type ILink, type ILinkProvider } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 
@@ -62,10 +62,16 @@ interface Props {
 
 export function TerminalPane({ containerId }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  // Bumped when the user clicks "Start new session" after a session ends.
+  // The effect deps on containerId+sessionEpoch, so a new attach happens
+  // with a fresh xterm instance (no stale state from the dead session).
+  const [sessionEpoch, setSessionEpoch] = useState(0);
+  const [sessionEnded, setSessionEnded] = useState(false);
 
   useEffect(() => {
     if (!hostRef.current) return;
     const host = hostRef.current;
+    setSessionEnded(false);
 
     const term = new Terminal({
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
@@ -161,6 +167,7 @@ export function TerminalPane({ containerId }: Props) {
       });
       unsubEnd = window.api.pty.onEnd(sid, () => {
         term.writeln('\r\n[session ended]');
+        if (!disposed) setSessionEnded(true);
       });
       term.onData((data) => window.api.pty.input(sid, data));
     })();
@@ -181,7 +188,27 @@ export function TerminalPane({ containerId }: Props) {
       if (sessionId) window.api.pty.detach(sessionId);
       term.dispose();
     };
-  }, [containerId]);
+  }, [containerId, sessionEpoch]);
 
-  return <div className="terminal-host" ref={hostRef} />;
+  return (
+    <div className="terminal-host" ref={hostRef}>
+      {sessionEnded && (
+        <div className="session-ended-overlay" role="alertdialog" aria-label="Session ended">
+          <div className="session-ended-card">
+            <div className="session-ended-title">claude session ended</div>
+            <div className="session-ended-help">
+              The workspace is still running. Start a new <code>claude</code> session in this
+              workspace to keep going.
+            </div>
+            <button
+              className="btn primary"
+              onClick={() => setSessionEpoch((e) => e + 1)}
+            >
+              Start new session
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }

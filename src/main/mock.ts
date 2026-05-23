@@ -119,6 +119,12 @@ export async function removeWorkspace(id: string, _opts: RemoveWorkspaceOpts = {
 class FakeShell extends Duplex {
   private lineBuf = '';
   private readonly prompt = '\x1b[32m>\x1b[0m ';
+  // `exit`/`quit` end the readable side via push(null). Without gating
+  // subsequent pushes (e.g., the prompt that would otherwise be written
+  // right after runCmd returns), we'd push after end — which Node treats
+  // as an error and which would suppress the 'end' event the renderer
+  // is waiting on.
+  private closed = false;
 
   constructor(private readonly workspaceName: string) {
     super();
@@ -126,6 +132,7 @@ class FakeShell extends Duplex {
   }
 
   private greet(): void {
+    if (this.closed) return;
     this.push('\x1b[1;36mclaude-fleet mock terminal\x1b[0m\r\n');
     this.push(`workspace: ${this.workspaceName}\r\n`);
     this.push("Type 'help' to see available mock commands.\r\n\r\n");
@@ -137,13 +144,18 @@ class FakeShell extends Duplex {
   }
 
   _write(chunk: Buffer | string, _enc: BufferEncoding, cb: (err?: Error | null) => void): void {
+    if (this.closed) {
+      cb();
+      return;
+    }
     const str = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
     for (const ch of str) {
+      if (this.closed) break;
       if (ch === '\r' || ch === '\n') {
         this.push('\r\n');
         this.runCmd(this.lineBuf.trim());
         this.lineBuf = '';
-        this.push(this.prompt);
+        if (!this.closed) this.push(this.prompt);
       } else if (ch === '\x7f' || ch === '\b') {
         if (this.lineBuf.length > 0) {
           this.lineBuf = this.lineBuf.slice(0, -1);
@@ -170,6 +182,7 @@ class FakeShell extends Duplex {
       this.push('  echo <text>   print text\r\n');
       this.push('  whoami        print the fake claude identity\r\n');
       this.push('  oauth         simulate a Claude.ai OAuth login URL print\r\n');
+      this.push('  exit          end the session (shows the restart overlay)\r\n');
       return;
     }
     if (cmd === 'clear') {
@@ -178,6 +191,15 @@ class FakeShell extends Duplex {
     }
     if (cmd === 'whoami') {
       this.push(`claude (mock, workspace=${this.workspaceName})\r\n`);
+      return;
+    }
+    if (cmd === 'exit' || cmd === 'quit') {
+      // Simulate the real claude CLI exiting — closes the duplex so the
+      // pty.onEnd listener in TerminalPane fires the "session ended"
+      // overlay, the same way `/exit` does inside a real container.
+      this.push('exiting…\r\n');
+      this.closed = true;
+      this.push(null);
       return;
     }
     if (cmd === 'oauth') {

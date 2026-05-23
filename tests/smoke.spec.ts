@@ -469,6 +469,32 @@ test('Workspace kind selector: Local shows a "coming soon" error on submit', asy
   }
 });
 
+test('Session ended overlay: "Start new session" reattaches a fresh claude', async () => {
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
+    const term = window.locator('.terminal-host');
+    await expect(term).toBeVisible();
+
+    // Type `exit` in the mock shell — closes the duplex, triggers
+    // the "session ended" overlay in TerminalPane.
+    await term.click();
+    await window.keyboard.type('exit');
+    await window.keyboard.press('Enter');
+
+    const overlay = window.locator('.session-ended-overlay');
+    await expect(overlay).toBeVisible();
+    await expect(overlay.getByRole('button', { name: 'Start new session' })).toBeVisible();
+
+    // Click → overlay disappears (new attach succeeds in mock mode).
+    await overlay.getByRole('button', { name: 'Start new session' }).click();
+    await expect(overlay).toBeHidden();
+    await expect(term).toBeVisible();
+  } finally {
+    await app.close();
+  }
+});
+
 test('Image picker: free-text filter matches across ref and label values', async () => {
   const { app, window } = await launch();
   try {

@@ -668,3 +668,48 @@ body {
 .image-row .image-label-key { color: var(--text-muted, #6b7280); }
 .image-row .image-label-eq { color: var(--border-subtle, #3a4252); margin: 0 2px; }
 .image-row .image-label-value { color: var(--text-secondary, #cbd5e1); }
+
+/* ── Session-ended overlay (terminal pane) ─────────────────────────── */
+.session-ended-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+  z-index: 5;
+}
+.session-ended-card {
+  background: var(--bg-card, #161613);
+  border: 1px solid var(--border-subtle, #27241e);
+  border-radius: 10px;
+  padding: 18px 22px;
+  max-width: 380px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 16px 40px rgb(0 0 0 / 0.5);
+}
+.session-ended-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary, #ece8de);
+  letter-spacing: 0.01em;
+}
+.session-ended-help {
+  font-size: 12px;
+  color: var(--text-muted, #7a7567);
+  line-height: 1.5;
+}
+.session-ended-help code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--text-secondary, #b8b1a3);
+  background: var(--bg-base, #0a0a09);
+  padding: 1px 4px;
+  border-radius: 3px;
+  border: 1px solid var(--border-subtle, #27241e);
+  font-size: 11px;
+}
+.session-ended-card .btn { align-self: center; }
