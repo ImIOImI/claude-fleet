@@ -105,7 +105,7 @@ body {
 }
 .top-strip .app-name .meta { color: var(--text-muted); font-weight: 400; font-size: 11px; }
 
-.ct-chip {
+.ws-chip {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -119,22 +119,22 @@ body {
   white-space: nowrap;
   transition: background 0.1s ease, border-color 0.1s ease;
 }
-.ct-chip:hover { background: var(--bg-card); }
-.ct-chip.active {
+.ws-chip:hover { background: var(--bg-card); }
+.ws-chip.active {
   background: var(--bg-card);
   border-color: var(--hue, var(--accent));
   color: var(--text-primary);
 }
-.ct-chip .dot {
+.ws-chip .dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--state-exited);
   flex-shrink: 0;
 }
-.ct-chip .dot.running { background: var(--state-running); }
-.ct-chip .name { font-weight: 500; }
-.ct-chip .status { color: var(--text-muted); font-size: 11px; }
+.ws-chip .dot.running { background: var(--state-running); }
+.ws-chip .name { font-weight: 500; }
+.ws-chip .status { color: var(--text-muted); font-size: 11px; }
 
 .top-strip-actions {
   margin-left: auto;
@@ -495,3 +495,82 @@ body {
   font-family: var(--font-mono);
   font-size: 12px;
 }
+
+/* ── Past-workspaces list in CreateWorkspaceModal ───────────────────── */
+.past-workspaces { margin: 4px 0 16px; }
+.past-workspaces-label {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0 0 6px 2px;
+}
+.modal-section-label {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 4px 0 6px 2px;
+}
+.past-workspace-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.past-workspace-row {
+  display: grid;
+  grid-template-columns: 14px 1fr auto auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-card, #101216);
+  border: 1px solid var(--rule, #2f3a4a);
+  border-radius: 6px;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.past-workspace-row:hover:not(:disabled) {
+  background: var(--bg-hover, #1a1e26);
+  border-color: var(--rule-strong, #4a5566);
+}
+.past-workspace-row:disabled { opacity: 0.55; cursor: not-allowed; }
+.past-workspace-row .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--text-muted);
+}
+.past-workspace-row .dot.running { background: var(--state-running, #22c55e); }
+.past-workspace-row .dot.stopped { background: var(--state-warn, #eab308); }
+.past-workspace-row .dot.deleted { background: var(--text-muted, #6b7280); }
+.past-workspace-row .ws-name { font-weight: 500; }
+.past-workspace-row .ws-path {
+  color: var(--text-muted);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.past-workspace-row .ws-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.past-workspace-row .ws-state {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+}
+.past-workspace-row .ws-state.running { color: var(--state-running, #22c55e); }
+.past-workspace-row .ws-state.stopped { color: var(--state-warn, #eab308); }
+.past-workspace-row .ws-state.deleted { color: var(--text-muted, #6b7280); }

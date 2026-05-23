@@ -8,22 +8,25 @@ See [`.claude/rules/spec-maintenance.md`](../.claude/rules/spec-maintenance.md) 
 
 ## 1. Overview
 
-**claude-fleet** is a desktop application for driving a small fleet (3–6) of containerized Claude Code instances from a single window. The user picks a credential profile and a host workspace directory; the app spins up a Docker container running `claude` in a PTY, renders the live terminal with xterm.js, and surfaces structured observability (cost, tokens, tool calls, transcript history) sourced from the container's bind-mounted Claude transcript JSONL.
+**claude-fleet** is a desktop application for driving a small fleet (3–6) of Claude Code **workspaces** from a single window. The user picks a credential profile and a host workspace directory; the app spins up a workspace (today: a Docker container backed by `dockerode`) running `claude` in a PTY, renders the live terminal with xterm.js, and surfaces structured observability (cost, tokens, tool calls, transcript history) sourced from the workspace's bind-mounted Claude transcript JSONL.
 
 It is a local-only operator console — not a remote orchestrator, not a multi-user service, not a cloud product. Everything runs on the user's machine, against the user's local Docker daemon.
 
+**Terminology.** "Workspace" is the user-level concept the UI talks about: a named place where a Claude session runs against a directory. It's persisted on disk as a manifest at `<userData>/state/<name>/workspace.json` independent of any backend's lifecycle, so workspaces survive container deletion and can be restarted. "Container" in this doc refers specifically to the Docker container that today is the only implemented workspace backend. A local-host (non-container) backend is anticipated but not yet built.
+
 ## 2. Goals
 
-- Run multiple Claude Code sessions in parallel, each fully isolated in its own Docker container with its own workspace bind-mount.
+- Run multiple Claude Code sessions in parallel, each fully isolated in its own workspace with its own host-directory bind-mount.
 - One window, one keyboard, one set of credentials — no juggling terminals or shells.
+- Workspaces persist across backend lifecycle. A workspace identified by name has a host-side manifest at `<userData>/state/<name>/workspace.json` that survives container deletion. The new-workspace modal surfaces a "past workspaces" list (running / stopped / deleted) one click away from restart — restart starts the existing container if present, or recreates from the saved spec if the container is gone.
 - Live terminal fidelity: cursor, colors, resize, paste, scrollback — all the things xterm.js gives you.
 - Structured observability layered on top of the raw terminal: per-session cost, token counts, tool calls, transcript history — read from the Claude transcript JSONL that the CLI already writes, not by scraping the terminal stream.
-- A global, container-filterable table of past Claude Code sessions with auto-generated short descriptions — selectable to resume any session in any container, regardless of which container originally ran it. Sessions persist across container deletion; the table is the durable record of past work.
-- Drop OS files, pasted images, web content, or text fragments onto the window and have them saved into the selected container's workspace where the agent can read them. The window is the inbox; the path lands on the clipboard for the user to reference in their next prompt.
-- A durable, append-only mirror of every event Claude Code emits, written to `<workspace>/_history/<session-id>.jsonl` so the agent or user can refer back to pre-compaction turns. Whether the mirror is written, and whether it survives an explicit "Close terminal", are per-profile defaults (factory: write the mirror, delete on close). Both defaults can be overridden — the write decision at open time, the cleanup decision in the modal at close time. The mirror, when written, persists across pane switches, container restarts, and app exits; only the explicit Close action prompts the cleanup question.
+- A global, workspace-filterable table of past Claude Code sessions with auto-generated short descriptions — selectable to resume any session in any workspace, regardless of which workspace originally ran it. Sessions persist across workspace deletion; the table is the durable record of past work.
+- Drop OS files, pasted images, web content, or text fragments onto the window and have them saved into the selected workspace's directory where the agent can read them. The window is the inbox; the path lands on the clipboard for the user to reference in their next prompt.
+- A durable, append-only mirror of every event Claude Code emits, written to `<workspace>/_history/<session-id>.jsonl` so the agent or user can refer back to pre-compaction turns. Whether the mirror is written, and whether it survives an explicit "Close terminal", are per-profile defaults (factory: write the mirror, delete on close). Both defaults can be overridden — the write decision at open time, the cleanup decision in the modal at close time. The mirror, when written, persists across pane switches, workspace restarts, and app exits; only the explicit Close action prompts the cleanup question.
 - An always-on, structured log of every prompt Claude makes to the user — permission requests, `AskUserQuestion` calls, and plan-mode approvals — captured to a SQLite table the UI can review. The point is to give the user a substrate for tuning `.claude/settings.json` permissions and CLAUDE.md guidance over time: read what Claude is repeatedly asking about, then decide what to allow, deny, or document.
-- Claude inside each container can query the application's state DB (sessions, cost, prompts, events) through a read-only MCP server exposed by claude-fleet. The agent gets typed tools for common queries plus a raw read-only SQL escape hatch — enough to consult past sessions, summarize cost patterns, or audit what it's been asking the user about.
-- Credentials never touch the renderer process or the host filesystem in plaintext. They live in the OS keychain and are injected into containers as environment variables by the main process.
+- Claude inside each workspace can query the application's state DB (sessions, cost, prompts, events) through a read-only MCP server exposed by claude-fleet. The agent gets typed tools for common queries plus a raw read-only SQL escape hatch — enough to consult past sessions, summarize cost patterns, or audit what it's been asking the user about.
+- Credentials never touch the renderer process or the host filesystem in plaintext. They live in the OS keychain and are injected into workspaces as environment variables by the main process.
 
 ## 3. Non-goals
 
@@ -92,25 +95,28 @@ Three processes, per Electron convention:
 **Renderer** is pure React. It has zero Node access. It can only do what `window.api` lets it do. Everything privileged flows through IPC.
 
 The renderer layout is a 3-row × 3-col shell:
-- **Top row** (`ContainerTabStrip`): app name, container chips (each with a deterministic hue ring + status dot), `+ New container`, daemon status pill, `MOCK MODE` chip when active, `Profiles…`.
+- **Top row** (`WorkspaceTabStrip`): app name, workspace chips (each with a deterministic hue ring + status dot), `+ New workspace`, daemon status pill, `MOCK MODE` chip when active, `Profiles…`. Only live workspaces (running/stopped) appear here; deleted workspaces are surfaced in the new-workspace modal's past list.
 - **Body row** (3 columns):
   - **Sessions pane** (left, ~280px): placeholder until #3 lands the JSONL-backed sessions table.
-  - **Main pane** (center, fluid): header with selected container's name/status and `Close…` button, plus the xterm `TerminalPane` (or empty/first-run/disconnected states).
+  - **Main pane** (center, fluid): header with selected workspace's name/status and `Close…` button, plus the xterm `TerminalPane` (or empty/first-run/disconnected states).
   - **Observability pane** (right, ~320px): placeholder until #2 lands the cost/token/event watcher.
 - **Bottom row** (`BottomBar`): static hint bar with key bindings and degraded-vault notice when applicable.
 
-Modals (`CreateContainerModal`, `CloseContainerModal`, `ProfilesDialog`) are owned by `App` and rendered above the shell.
+Modals (`CreateWorkspaceModal`, `CloseWorkspaceModal`, `ProfilesDialog`) are owned by `App` and rendered above the shell.
 
 ## 6. IPC surface
 
 All channels are `ipcMain.handle`/`ipcRenderer.invoke` (promise-based) except the PTY data stream, which uses one-way `webContents.send` from main to renderer.
 
-### Docker
-- `docker:ping` → `boolean` — is the daemon reachable.
-- `docker:list` → `FleetContainer[]` — list managed containers (filtered by label).
-- `docker:create(spec: CreateContainerSpec)` → `FleetContainer` — create + start a runner container.
-- `docker:stop(id)` → `void` — stop with 5s grace; ignores 304 (already stopped) and 404.
-- `docker:remove(id)` → `void` — force-remove; ignores 404.
+### Workspace
+- `workspace:ping` → `boolean` — is the backend reachable (for the Docker backend, is the daemon up).
+- `workspace:list` → `Workspace[]` — merged list of live (running/stopped) workspaces plus deleted workspaces (those with a manifest on disk but no live container).
+- `workspace:create(input: CreateWorkspaceInput)` → `Workspace` — create + start a runner workspace AND write its manifest to `<userData>/state/<name>/workspace.json`.
+- `workspace:start(name)` → `Workspace | null` — start an existing (live, possibly stopped) workspace by name; returns null if no live container has that name (caller should recreate from manifest via the create flow).
+- `workspace:getManifest(name)` → `WorkspaceSpec | null` — read the persisted manifest.
+- `workspace:stop(id)` → `void` — stop with 5s grace; ignores 304/404.
+- `workspace:remove(id, opts?: { deleteState? })` → `void` — force-remove; if `deleteState`, also `rm -rf <userData>/state/<name>` (which removes the manifest too, so the workspace disappears from the past list).
+- `workspace:ensureImage(channelId)` → progress over `workspace:ensureImage:progress:${channelId}`, resolves when the runner image is locally present (no-op if it already is; otherwise pulls from GHCR).
 
 ### Vault
 - `vault:list` → `string[]` — profile names.
@@ -139,17 +145,46 @@ The renderer cannot use `navigator.clipboard` reliably (focus/permission gotchas
 
 ## 7. Data model
 
-### Container labels
-Every managed container carries:
-- `com.claude-fleet.managed` = `"true"` — discovery filter. `docker:list` filters on this label exclusively, so unmanaged containers never appear in the UI.
-- `com.claude-fleet.subdir` — the subdirectory inside the bind-mounted workspace where `claude` runs.
-- `com.claude-fleet.profile` — the vault profile name whose key was injected into this container.
+### Workspace manifest (on disk)
+For each workspace, `<userData>/state/<name>/workspace.json` records the persistent spec:
 
-### Container shape
+```ts
+interface WorkspaceSpec {
+  name: string;
+  workspaceRoot: string;   // host path bind-mounted into the workspace
+  workspaceSubdir: string; // subdirectory the agent works in
+  profile: string;         // vault profile name, or 'oauth'
+  createdAt: number;
+  lastUsedAt: number;
+}
+```
+
+The manifest is written on `workspace:create` and updated on successful `workspace:start`. The API key is NOT persisted; only the `profile` name is, which is resolved against the keychain at start time. `workspace:remove(_, { deleteState: true })` removes the state dir (and thus the manifest), so the workspace disappears from the past list.
+
+### Workspace shape (returned over IPC)
+The `Workspace` type joins the manifest with live backend state:
+
+```ts
+interface Workspace extends WorkspaceSpec {
+  state: 'running' | 'stopped' | 'deleted';
+  containerId?: string;  // present iff state !== 'deleted'
+  status?: string;       // backend status string when available
+}
+```
+
+### Docker container labels (backend implementation)
+Today the only workspace backend is a Docker container. Each managed container carries:
+- `com.claude-fleet.managed` = `"true"` — discovery filter. `dockerode listContainers` filters on this label exclusively, so unmanaged containers never appear in the UI.
+- `com.claude-fleet.workspace-root` — the host workspace root, stamped so `listLiveWorkspaces` can return it without a manifest read.
+- `com.claude-fleet.subdir` — the subdirectory the agent works in.
+- `com.claude-fleet.profile` — the vault profile name whose key was injected (or `"oauth"`).
+
+### Docker container shape
 - `Tty: true`, `OpenStdin: true`, `StdinOnce: false` — required for interactive `docker exec` later.
 - `WorkingDir: /workspace/${subdir}` (or `/workspace` if subdir is empty).
-- Bind: `${hostWorkspaceRoot}:/workspace:rw`. The runner does *not* own a private workspace; it shares the host's.
-- Env: caller passes a `Record<string,string>`, typically `{ ANTHROPIC_API_KEY: <from vault> }`.
+- Binds: `${workspaceRoot}:/workspace:rw` (the user's host dir) and `<userData>/state/<name>/.claude:/home/fleet/.claude:rw` (per-workspace persistent Claude state).
+- Env: caller passes a `Record<string,string>`, typically `{ ANTHROPIC_API_KEY: <from vault> }` for API-key mode or `{}` for OAuth mode. `HOME=/home/fleet` is also set so tooling finds the bind-mounted `.claude/`.
+- `User: <hostUid>:<hostGid>` so bind-mounted files are owned by the host user.
 - Optional resource limits: `cpus` (→ `NanoCpus`), `memoryMb` (→ `Memory`).
 - `AutoRemove: false` — containers persist across restarts unless explicitly removed.
 
@@ -164,24 +199,28 @@ Plus one index entry:
 
 The index exists because `keytar` has no list operation. It is maintained on every `setProfile`/`deleteProfile`.
 
-`Profile = { name: string; apiKey: string }`. The renderer only ever sees the `name`; the `apiKey` returned from `vault:get` is consumed by the main process when constructing the container env, *not* round-tripped through the UI.
+`Profile = { name: string; apiKey: string }`. The renderer only ever sees the `name`; the `apiKey` returned from `vault:get` is consumed by the main process when constructing the workspace env, *not* round-tripped through the UI.
 
 ## 8. User flows
 
 ### Startup
 1. Main creates the window, registers IPC handlers.
-2. Renderer mounts; on first render it calls `docker:ping`. If false, the header shows "Docker daemon unreachable — start Docker Desktop (with WSL2 integration)."
-3. If reachable, renderer calls `docker:list` and polls every 5s thereafter to pick up state changes from outside the app.
+2. Renderer mounts; on first render it calls `workspace:ping`. If false, the main pane shows "Docker daemon unreachable — start Docker Desktop (with WSL2 integration)."
+3. If reachable, renderer calls `workspace:list` and polls every 5s thereafter to pick up state changes from outside the app. The list includes live workspaces (running/stopped) and deleted workspaces (manifest on disk, no container) — the renderer keys selection by an `id` that's the live containerId or `deleted:<name>` for the deleted ones.
 
-### Create a container
-1. User clicks **+ New container** in the sidebar.
-2. UI collects: container name, host workspace root, subdir, profile name. *(Currently via sequential `window.prompt()` dialogs — see §11, this is a known UX gap.)*
-3. Renderer calls `vault:get(profileName)`. If null, alert and abort.
-4. Renderer calls `docker:create` with `env: { ANTHROPIC_API_KEY: profile.apiKey }`. Main creates and starts the container.
-5. Sidebar refreshes; the new container appears.
+### Create a workspace
+1. User clicks **+ New workspace** in the top strip.
+2. `<CreateWorkspaceModal>` opens. The top section is a "past workspaces" list pulled from `workspace:list` — sorted most-recently-used first, each row showing name, host path, state dot (running/stopped/deleted), and a relative timestamp.
+3. Clicking a past workspace calls `handleRestart(workspace)`:
+   - `workspace:start(name)` is tried first. If the container exists (live or stopped), it's started and selected.
+   - If `workspace:start` returns null (no live container), the renderer falls through to the create flow using the saved manifest values — resolving the API key from the vault when `profile !== 'oauth'`.
+4. Otherwise the user fills the form (name with pet-name placeholder, workspace root with directory picker, subdir, profile name), and clicks **Create & start**.
+5. Renderer calls `vault:get(profileName)` if a profile name was entered. If null, an error appears inline.
+6. Renderer calls `workspace:ensureImage` (pulls from GHCR if needed), then `workspace:create` with `env: { ANTHROPIC_API_KEY: profile.apiKey }` (or `{}` for OAuth mode). Main creates the container, writes the manifest, and returns the `Workspace`.
+7. The top strip refreshes; the new workspace appears.
 
 ### Attach a terminal
-1. User selects a container in the sidebar.
+1. User selects a workspace in the top strip (only live workspaces appear there).
 2. `<TerminalPane>` mounts: creates an `xterm` `Terminal`, fits to its host div.
 3. Calls `pty:attach(containerId, cols, rows)` → gets a `sessionId`.
 4. Registers `onData` (writes chunks into xterm) and `onEnd` (writes `[session ended]`).
@@ -200,23 +239,23 @@ Each `pty:attach` runs `claude` fresh inside the container via `docker exec` —
 2. Modal lists names from `vault:list`. Add form takes `name` + `apiKey` (password input). Delete asks for confirmation.
 3. All writes go to the OS keychain via the main process.
 
-### Close a container
-1. User selects a container, then clicks **Close…** in the main-pane header.
-2. `<CloseContainerModal>` opens, showing the container name and current status. A single checkbox — "Also delete the state directory" — is unchecked by default (Keep is the spec default; recreating with the same name inherits prior Claude state).
+### Close a workspace
+1. User selects a workspace, then clicks **Close…** in the main-pane header.
+2. `<CloseWorkspaceModal>` opens, showing the workspace name and current status. A single checkbox — "Also delete the state directory" — is unchecked by default (Keep is the spec default; recreating with the same name inherits prior Claude state and keeps the workspace in the past list).
 3. Action buttons depend on current state:
-   - **Running**: `Stop only` (calls `docker:stop`) and `Stop & remove` (calls `docker:stop` then `docker:remove(id, { deleteState })`).
-   - **Exited**: only `Remove` (calls `docker:remove(id, { deleteState })`).
-4. On success, the modal closes, the selection clears, and the sidebar refreshes. Failures surface inline in the modal.
+   - **Running**: `Stop only` (calls `workspace:stop`) and `Stop & remove` (calls `workspace:stop` then `workspace:remove(id, { deleteState })`).
+   - **Exited**: only `Remove` (calls `workspace:remove(id, { deleteState })`).
+4. On success, the modal closes, the selection clears, and the top strip refreshes. With `deleteState=false` the workspace transitions to "deleted" state (still in the past list, recoverable via restart). With `deleteState=true` it's fully purged. Failures surface inline in the modal.
 
 ## 9. Security model
 
 - **API keys never reach the renderer.** `vault:get` returns the key to the main process, which embeds it in the container's env. The renderer only ever holds profile *names*. (Exception: `ProfilesDialog` does receive the key the user just typed, in the brief moment between input and `vault:set` — there is no way around this.)
 - **Renderer is isolated.** `contextIsolation: true`, `nodeIntegration: false`. No `require`, no `process`, no `fs` from renderer code.
 - **`sandbox: false`** because preload uses `ipcRenderer`. The renderer itself still has no Node access.
-- **Renderer cannot escape the IPC surface.** It can: list/create/stop/remove containers carrying the fleet label, list/get/set/delete profiles, attach/detach a PTY. It cannot: shell out, read arbitrary files, touch other Docker containers, hit the network with Node APIs.
-- **Container isolation is Docker's.** No additional sandboxing layered on top. Containers run as non-root user `fleet` (UID 1000) and can write to the bind-mounted workspace as that user.
+- **Renderer cannot escape the IPC surface.** It can: list/create/start/stop/remove workspaces carrying the fleet label, list/get/set/delete profiles, attach/detach a PTY. It cannot: shell out, read arbitrary files, touch other Docker containers, hit the network with Node APIs.
+- **Workspace isolation is Docker's.** No additional sandboxing layered on top. Containers run as the host user's UID (via `User: '<uid>:<gid>'`) and can write to the bind-mounted host workspace as that user.
 - **External link handling**: `setWindowOpenHandler` denies in-app navigation and opens external URLs via `shell.openExternal`.
-- **Vault availability degradation**: the main process probes `keytar` once at startup (`vault:available`). When the OS keychain is unreachable (typically bare WSL with no Secret Service), the renderer hides the **Profiles…** button, the create-container flow accepts only OAuth or env-sourced API keys, and `getProfile` falls back to `ANTHROPIC_API_KEY` from the environment. A header banner surfaces the degraded state. The packaged Windows build hits Credential Manager via DPAPI and never enters this mode; this path exists for Linux dev environments without a keyring.
+- **Vault availability degradation**: the main process probes `keytar` once at startup (`vault:available`). When the OS keychain is unreachable (typically bare WSL with no Secret Service), the renderer hides the **Profiles…** button, the create-workspace flow accepts only OAuth or env-sourced API keys, and `getProfile` falls back to `ANTHROPIC_API_KEY` from the environment. A header banner surfaces the degraded state. The packaged Windows build hits Credential Manager via DPAPI and never enters this mode; this path exists for Linux dev environments without a keyring.
 
 ## 10. Project layout
 
@@ -241,8 +280,12 @@ claude-fleet/
 └── src/
     ├── main/
     │   ├── index.ts                   # app lifecycle, BrowserWindow
-    │   ├── ipc.ts                     # registerIpc() — all channels live here
-    │   ├── docker.ts                  # dockerode wrapper + PTY attach
+    │   ├── ipc.ts                     # registerIpc() — workspace:* / pty:* / etc. live here
+    │   ├── docker.ts                  # Docker backend (dockerode wrapper + PTY attach)
+    │   ├── mock.ts                    # mock backend behind CLAUDE_FLEET_MOCK=1
+    │   ├── workspaces.ts              # WorkspaceSpec types + manifest read/write/list
+    │   ├── paths.ts                   # state-dir path conventions
+    │   ├── fs.ts                      # isDirectory / mkdirp helpers
     │   └── vault.ts                   # keytar wrapper + name index
     ├── preload/
     │   └── index.ts                   # contextBridge.exposeInMainWorld('api', …)
@@ -250,17 +293,17 @@ claude-fleet/
         ├── index.html
         └── src/
             ├── main.tsx               # React root
-            ├── App.tsx                # 3-pane shell + modal owner
+            ├── App.tsx                # 3-pane shell + modal owner; refresh() polls workspace:list
             ├── styles.css             # design tokens + component styles
             ├── types.d.ts             # declare global window.api
             └── components/
-                ├── ContainerTabStrip.tsx  # top: app name + container chips + actions
+                ├── WorkspaceTabStrip.tsx  # top: app name + workspace chips + actions
                 ├── SessionsPane.tsx       # left sidebar (placeholder until #3)
                 ├── TerminalPane.tsx       # center: xterm + link provider + key bindings
                 ├── ObservabilityPane.tsx  # right sidebar (placeholder until #2)
                 ├── BottomBar.tsx          # footer hint bar
-                ├── CreateContainerModal.tsx
-                ├── CloseContainerModal.tsx
+                ├── CreateWorkspaceModal.tsx  # form + past-workspaces list
+                ├── CloseWorkspaceModal.tsx
                 └── ProfilesDialog.tsx
 ```
 

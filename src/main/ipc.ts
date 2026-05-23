@@ -4,28 +4,105 @@ import * as realDocker from './docker.js';
 import * as mockDocker from './mock.js';
 import * as vault from './vault.js';
 import * as fs from './fs.js';
-import type { PtyHandle, RemoveContainerOpts } from './docker.js';
+import {
+  listWorkspaceManifests,
+  readWorkspaceManifest,
+  touchWorkspaceUsed,
+  writeWorkspaceManifest,
+  type Workspace,
+  type WorkspaceSpec
+} from './workspaces.js';
+import type { PtyHandle, RemoveWorkspaceOpts, CreateWorkspaceInput } from './docker.js';
 
 export const MOCK_MODE = process.env.CLAUDE_FLEET_MOCK === '1';
-const dockerSvc = MOCK_MODE ? mockDocker : realDocker;
+const backend = MOCK_MODE ? mockDocker : realDocker;
 
 const ptySessions = new Map<string, PtyHandle>();
 
+/**
+ * Merge the live-workspace list (from the backend) with on-disk manifests
+ * (from workspaces.ts) into a single Workspace[]. Live entries take
+ * precedence for state/status; manifests provide workspaceRoot/lastUsedAt
+ * for workspaces whose container has been removed.
+ */
+async function listAllWorkspaces(): Promise<Workspace[]> {
+  const [live, manifests] = await Promise.all([
+    backend.listLiveWorkspaces(),
+    listWorkspaceManifests()
+  ]);
+  const manifestByName = new Map(manifests.map((m) => [m.name, m]));
+  const result: Workspace[] = [];
+
+  for (const w of live) {
+    const m = manifestByName.get(w.name);
+    result.push({
+      ...w,
+      workspaceRoot: w.workspaceRoot || m?.workspaceRoot || '',
+      workspaceSubdir: w.workspaceSubdir || m?.workspaceSubdir || '',
+      profile: w.profile || m?.profile || '',
+      createdAt: m?.createdAt ?? w.createdAt,
+      lastUsedAt: m?.lastUsedAt ?? w.lastUsedAt
+    });
+    manifestByName.delete(w.name);
+  }
+
+  // Manifests with no live container → deleted (recoverable from spec)
+  for (const m of manifestByName.values()) {
+    result.push({ ...m, state: 'deleted' });
+  }
+
+  return result;
+}
+
 export function registerIpc(): void {
-  ipcMain.handle('docker:ping', () => dockerSvc.ping());
-  ipcMain.handle('docker:ensureImage', async (event, channelId: string) => {
+  ipcMain.handle('workspace:ping', () => backend.ping());
+  ipcMain.handle('workspace:ensureImage', async (event, channelId: string) => {
     const win = BrowserWindow.fromWebContents(event.sender);
-    await dockerSvc.ensureImage((p) => {
-      win?.webContents.send(`docker:ensureImage:progress:${channelId}`, p);
+    await backend.ensureImage((p) => {
+      win?.webContents.send(`workspace:ensureImage:progress:${channelId}`, p);
     });
   });
-  ipcMain.handle('docker:list', () => dockerSvc.listContainers());
-  ipcMain.handle('docker:create', (_e, spec) => dockerSvc.createContainer(spec));
-  ipcMain.handle('docker:stop', (_e, id: string) => dockerSvc.stopContainer(id));
+
+  ipcMain.handle('workspace:list', () => listAllWorkspaces());
+
+  ipcMain.handle('workspace:create', async (_e, input: CreateWorkspaceInput) => {
+    const ws = await backend.createWorkspace(input);
+    const spec: WorkspaceSpec = {
+      name: ws.name,
+      workspaceRoot: ws.workspaceRoot,
+      workspaceSubdir: ws.workspaceSubdir,
+      profile: ws.profile,
+      createdAt: ws.createdAt,
+      lastUsedAt: ws.lastUsedAt
+    };
+    await writeWorkspaceManifest(spec);
+    return ws;
+  });
+
+  /**
+   * Start an existing (live, possibly stopped) workspace by name. Returns
+   * the workspace if a container with that name exists; null otherwise,
+   * signalling the renderer to recreate from the saved manifest using the
+   * normal create flow (which resolves vault credentials).
+   */
+  ipcMain.handle('workspace:start', async (_e, name: string): Promise<Workspace | null> => {
+    const id = await backend.startWorkspace(name);
+    if (!id) return null;
+    await touchWorkspaceUsed(name);
+    // Find the freshly-running workspace in the merged list so the
+    // renderer gets the up-to-date state/status fields.
+    const all = await listAllWorkspaces();
+    return all.find((w) => w.name === name) ?? null;
+  });
+
+  ipcMain.handle('workspace:getManifest', async (_e, name: string) => {
+    return readWorkspaceManifest(name);
+  });
+
+  ipcMain.handle('workspace:stop', (_e, id: string) => backend.stopWorkspace(id));
   ipcMain.handle(
-    'docker:remove',
-    (_e, id: string, opts?: RemoveContainerOpts) =>
-      dockerSvc.removeContainer(id, opts)
+    'workspace:remove',
+    (_e, id: string, opts?: RemoveWorkspaceOpts) => backend.removeWorkspace(id, opts)
   );
 
   ipcMain.handle('app:mockMode', () => MOCK_MODE);
@@ -82,7 +159,7 @@ export function registerIpc(): void {
     'pty:attach',
     async (event, containerId: string, cols: number, rows: number) => {
       const sessionId = randomUUID();
-      const handle = await dockerSvc.attachPty(containerId, cols, rows);
+      const handle = await backend.attachPty(containerId, cols, rows);
       ptySessions.set(sessionId, handle);
 
       const win = BrowserWindow.fromWebContents(event.sender);

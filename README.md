@@ -1,10 +1,8 @@
 # claude-fleet
 
-Desktop app for managing a fleet of Claude Code container instances.
+Desktop app for managing a fleet of Claude Code **workspaces**.
 
-Drives 3–6 Docker containers, each running `claude` in its own PTY. Live terminals are
-rendered with xterm.js; structured observability (cost, tokens, tool calls, history) is
-sourced from each container's bind-mounted Claude transcript JSONL.
+A workspace is a named place where a Claude Code session runs against a directory. Today the backend is a Docker container (the only one implemented); a local non-container backend is planned. The app drives 3–6 workspaces, each running `claude` in its own PTY rendered with xterm.js, with structured observability (cost, tokens, tool calls, history) sourced from each workspace's bind-mounted Claude transcript JSONL. Workspaces persist across backend restarts via a manifest in `<userData>/state/<name>/workspace.json`, so removing the container doesn't lose the workspace — it stays one click away in the new-workspace modal's past list.
 
 ## Docs
 
@@ -58,7 +56,7 @@ Iterate on the UI without a Docker daemon, runner image, or API credit:
 CLAUDE_FLEET_MOCK=1 npm run dev
 ```
 
-The sidebar pre-populates with two fake containers; `+ New container` adds more to an in-memory store. Selecting a container attaches a tiny mock shell that echoes input and responds to `help`, `clear`, `whoami`, and `echo`. A `MOCK MODE` chip in the header makes the state obvious. Restart `npm run dev` to reset the fake fleet.
+The top strip pre-populates with two fake workspaces; `+ New workspace` adds more to an in-memory store. Selecting a workspace attaches a tiny mock shell that echoes input and responds to `help`, `clear`, `whoami`, and `echo`. A `MOCK MODE` chip in the header makes the state obvious. Restart `npm run dev` to reset the fake fleet.
 
 Mock mode is dev-only — the env var is ignored by the packaged build.
 
@@ -69,14 +67,14 @@ npm test          # build then run the Playwright smoke suite
 npm run test:e2e  # run tests against the existing build (no rebuild)
 ```
 
-Three smoke tests (`tests/smoke.spec.ts`) cover the surface area we've broken before: preload load, `+ New container` opening the modal, and the Create button surfacing validation errors. Tests need a display (WSLg, X server, or Xvfb in CI).
+The smoke suite (`tests/smoke.spec.ts`) covers regressions we've hit before: preload loading, `+ New workspace` opening the modal, validation surfacing inline, OAuth-mode submission, missing-workspace confirm flow, past-workspaces restart, and the mock-mode UI. Tests need a display (WSLg, X server, or Xvfb in CI).
 
-### Authenticating `claude` inside the container
+### Authenticating `claude` inside a workspace
 
-Two modes, picked at container-create time:
+Two modes, picked at workspace-create time:
 
-- **OAuth (Claude.ai Pro/Max)**: leave the profile-name field blank in the create flow. No API key is injected; the first time `claude` runs in the terminal it prints a login code, you complete the flow in your browser, and the resulting credentials are saved to the bind-mounted `.claude/.credentials.json` so they persist across container restarts.
-- **API key (Console billing)**: type a profile name. The named profile is read from the OS keychain (or, if the keychain isn't usable, from the `ANTHROPIC_API_KEY` env var as a dev fallback — see #8). The key is injected as `ANTHROPIC_API_KEY` into the container.
+- **OAuth (Claude.ai Pro/Max)**: leave the profile-name field blank in the create flow. No API key is injected; the first time `claude` runs in the terminal it prints a login code, you complete the flow in your browser, and the resulting credentials are saved to the bind-mounted `.claude/.credentials.json` so they persist across workspace restarts.
+- **API key (Console billing)**: type a profile name. The named profile is read from the OS keychain (or, if the keychain isn't usable, from the `ANTHROPIC_API_KEY` env var as a dev fallback — see #8). The key is injected as `ANTHROPIC_API_KEY` into the workspace container.
 
 For the dev fallback to work, launch with the env var set:
 

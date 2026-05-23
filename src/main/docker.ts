@@ -1,28 +1,28 @@
+// Docker-backed workspace operations.
+//
+// This module talks to dockerode and exposes operations the IPC layer
+// translates into `workspace:*` channels. The exported types use
+// workspace-level vocabulary because that's what the rest of the app
+// sees; the internal `dockerode` calls still operate on the Docker
+// notion of a container (label `com.claude-fleet.managed`, etc.). When
+// a non-Docker backend lands, it can implement the same surface.
+
 import Docker from 'dockerode';
 import { mkdir, rm, stat } from 'node:fs/promises';
 import type { Duplex } from 'node:stream';
 import {
-  assertValidContainerName,
-  containerClaudeDir,
-  containerStateDir
+  assertValidWorkspaceName,
+  workspaceClaudeDir,
+  workspaceStateDir
 } from './paths.js';
+import type { Workspace } from './workspaces.js';
 
 export const FLEET_LABEL = 'com.claude-fleet.managed';
 export const RUNNER_IMAGE = 'ghcr.io/imioimi/claude-fleet/runner:latest';
 
 const docker = new Docker();
 
-export interface FleetContainer {
-  id: string;
-  name: string;
-  state: string;
-  status: string;
-  workspaceSubdir: string;
-  profile: string;
-  createdAt: number;
-}
-
-export interface CreateContainerSpec {
+export interface CreateWorkspaceInput {
   name: string;
   workspaceRoot: string;
   workspaceSubdir: string;
@@ -71,31 +71,43 @@ export async function ping(): Promise<boolean> {
   }
 }
 
-export async function listContainers(): Promise<FleetContainer[]> {
+/**
+ * Live workspaces — workspaces whose Docker container currently exists
+ * (running or stopped). Does not include "deleted" workspaces (those with
+ * a state dir on disk but no live container); the IPC layer joins these
+ * in via the workspace manifests.
+ */
+export async function listLiveWorkspaces(): Promise<Workspace[]> {
   const raw = await docker.listContainers({
     all: true,
     filters: { label: [FLEET_LABEL] }
   });
-  return raw.map((c) => ({
-    id: c.Id,
-    name: c.Names[0]?.replace(/^\//, '') ?? c.Id.slice(0, 12),
-    state: c.State,
-    status: c.Status,
-    workspaceSubdir: c.Labels['com.claude-fleet.subdir'] ?? '',
-    profile: c.Labels['com.claude-fleet.profile'] ?? '',
-    createdAt: c.Created * 1000
-  }));
+  return raw.map((c) => {
+    const name = c.Names[0]?.replace(/^\//, '') ?? c.Id.slice(0, 12);
+    const state: Workspace['state'] = c.State === 'running' ? 'running' : 'stopped';
+    return {
+      name,
+      workspaceRoot: c.Labels['com.claude-fleet.workspace-root'] ?? '',
+      workspaceSubdir: c.Labels['com.claude-fleet.subdir'] ?? '',
+      profile: c.Labels['com.claude-fleet.profile'] ?? '',
+      createdAt: c.Created * 1000,
+      lastUsedAt: c.Created * 1000,
+      state,
+      containerId: c.Id,
+      status: c.Status
+    };
+  });
 }
 
-export async function createContainer(spec: CreateContainerSpec): Promise<FleetContainer> {
-  assertValidContainerName(spec.name);
+export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Workspace> {
+  assertValidWorkspaceName(spec.name);
 
   const wsStat = await stat(spec.workspaceRoot).catch(() => null);
   if (!wsStat?.isDirectory()) {
     throw new Error(`Workspace root "${spec.workspaceRoot}" is not an existing directory`);
   }
 
-  const claudeDir = containerClaudeDir(spec.name);
+  const claudeDir = workspaceClaudeDir(spec.name);
   await mkdir(claudeDir, { recursive: true });
 
   const uid = process.getuid?.() ?? 1000;
@@ -124,25 +136,57 @@ export async function createContainer(spec: CreateContainerSpec): Promise<FleetC
     Labels: {
       [FLEET_LABEL]: 'true',
       'com.claude-fleet.subdir': spec.workspaceSubdir,
-      'com.claude-fleet.profile': spec.profile
+      'com.claude-fleet.profile': spec.profile,
+      // Stamp the host workspace root on the container so listLiveWorkspaces
+      // can return it without a separate manifest read.
+      'com.claude-fleet.workspace-root': spec.workspaceRoot
     },
     HostConfig: hostCfg
   });
 
   await created.start();
   const info = await created.inspect();
+  const createdAt = Date.parse(info.Created);
   return {
-    id: info.Id,
     name: info.Name.replace(/^\//, ''),
-    state: info.State.Status,
-    status: info.State.Status,
+    workspaceRoot: spec.workspaceRoot,
     workspaceSubdir: spec.workspaceSubdir,
     profile: spec.profile,
-    createdAt: Date.parse(info.Created)
+    createdAt,
+    lastUsedAt: createdAt,
+    state: 'running',
+    containerId: info.Id,
+    status: info.State.Status
   };
 }
 
-export async function stopContainer(id: string): Promise<void> {
+/**
+ * Start the (live) workspace by name. Returns the container id if it exists
+ * (whether it was already running or had to be started), or null if no live
+ * container has that name and the caller should recreate from the spec.
+ */
+export async function startWorkspace(name: string): Promise<string | null> {
+  assertValidWorkspaceName(name);
+  const raw = await docker.listContainers({
+    all: true,
+    filters: { label: [FLEET_LABEL], name: [`^/${name}$`] }
+  });
+  const found = raw[0];
+  if (!found) return null;
+
+  if (found.State !== 'running') {
+    const c = docker.getContainer(found.Id);
+    try {
+      await c.start();
+    } catch (err: unknown) {
+      // 304 = already started — race with another caller
+      if ((err as { statusCode?: number }).statusCode !== 304) throw err;
+    }
+  }
+  return found.Id;
+}
+
+export async function stopWorkspace(id: string): Promise<void> {
   const c = docker.getContainer(id);
   try {
     await c.stop({ t: 5 });
@@ -152,13 +196,13 @@ export async function stopContainer(id: string): Promise<void> {
   }
 }
 
-export interface RemoveContainerOpts {
+export interface RemoveWorkspaceOpts {
   deleteState?: boolean;
 }
 
-export async function removeContainer(
+export async function removeWorkspace(
   id: string,
-  opts: RemoveContainerOpts = {}
+  opts: RemoveWorkspaceOpts = {}
 ): Promise<void> {
   const c = docker.getContainer(id);
 
@@ -179,7 +223,7 @@ export async function removeContainer(
   }
 
   if (opts.deleteState && name) {
-    await rm(containerStateDir(name), { recursive: true, force: true });
+    await rm(workspaceStateDir(name), { recursive: true, force: true });
   }
 }
 

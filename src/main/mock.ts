@@ -1,34 +1,38 @@
 import { Duplex } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import type {
-  FleetContainer,
-  CreateContainerSpec,
+  CreateWorkspaceInput,
   PullProgress,
-  RemoveContainerOpts,
+  RemoveWorkspaceOpts,
   PtyHandle
 } from './docker.js';
+import type { Workspace } from './workspaces.js';
 
-const containers = new Map<string, FleetContainer>();
+const workspaces = new Map<string, Workspace>();
 
 function seed(): void {
   const now = Date.now();
-  containers.set('mock-alpha-id', {
-    id: 'mock-alpha-id',
+  workspaces.set('mock-alpha-id', {
     name: 'mock-alpha',
-    state: 'running',
-    status: 'Up 1 hour',
+    workspaceRoot: '/tmp/mock-alpha',
     workspaceSubdir: '',
     profile: 'oauth',
-    createdAt: now - 3600_000
+    createdAt: now - 3600_000,
+    lastUsedAt: now - 1800_000,
+    state: 'running',
+    containerId: 'mock-alpha-id',
+    status: 'Up 1 hour'
   });
-  containers.set('mock-beta-id', {
-    id: 'mock-beta-id',
+  workspaces.set('mock-beta-id', {
     name: 'mock-beta',
-    state: 'exited',
-    status: 'Exited (0) 2 minutes ago',
+    workspaceRoot: '/tmp/mock-beta',
     workspaceSubdir: 'frontend',
     profile: 'default',
-    createdAt: now - 7200_000
+    createdAt: now - 7200_000,
+    lastUsedAt: now - 7200_000,
+    state: 'stopped',
+    containerId: 'mock-beta-id',
+    status: 'Exited (0) 2 minutes ago'
   });
 }
 seed();
@@ -41,49 +45,63 @@ export async function ensureImage(onProgress: (p: PullProgress) => void): Promis
   onProgress({ message: 'mock: runner image already present' });
 }
 
-export async function listContainers(): Promise<FleetContainer[]> {
-  return Array.from(containers.values());
+export async function listLiveWorkspaces(): Promise<Workspace[]> {
+  return Array.from(workspaces.values());
 }
 
-export async function createContainer(spec: CreateContainerSpec): Promise<FleetContainer> {
+export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Workspace> {
   const id = `mock-${randomUUID().slice(0, 8)}`;
-  const ct: FleetContainer = {
-    id,
+  const ws: Workspace = {
     name: spec.name,
-    state: 'running',
-    status: 'Up just now',
+    workspaceRoot: spec.workspaceRoot,
     workspaceSubdir: spec.workspaceSubdir,
     profile: spec.profile,
-    createdAt: Date.now()
+    createdAt: Date.now(),
+    lastUsedAt: Date.now(),
+    state: 'running',
+    containerId: id,
+    status: 'Up just now'
   };
-  containers.set(id, ct);
-  return ct;
+  workspaces.set(id, ws);
+  return ws;
 }
 
-export async function stopContainer(id: string): Promise<void> {
-  const ct = containers.get(id);
-  if (ct) {
-    ct.state = 'exited';
-    ct.status = 'Exited (0) just now';
+export async function startWorkspace(name: string): Promise<string | null> {
+  for (const [id, ws] of workspaces) {
+    if (ws.name === name) {
+      ws.state = 'running';
+      ws.status = 'Up just now';
+      ws.lastUsedAt = Date.now();
+      return id;
+    }
+  }
+  return null;
+}
+
+export async function stopWorkspace(id: string): Promise<void> {
+  const ws = workspaces.get(id);
+  if (ws) {
+    ws.state = 'stopped';
+    ws.status = 'Exited (0) just now';
   }
 }
 
-export async function removeContainer(id: string, _opts: RemoveContainerOpts = {}): Promise<void> {
-  containers.delete(id);
+export async function removeWorkspace(id: string, _opts: RemoveWorkspaceOpts = {}): Promise<void> {
+  workspaces.delete(id);
 }
 
 class FakeShell extends Duplex {
   private lineBuf = '';
   private readonly prompt = '\x1b[32m>\x1b[0m ';
 
-  constructor(private readonly containerName: string) {
+  constructor(private readonly workspaceName: string) {
     super();
     setTimeout(() => this.greet(), 150);
   }
 
   private greet(): void {
     this.push('\x1b[1;36mclaude-fleet mock terminal\x1b[0m\r\n');
-    this.push(`container: ${this.containerName}\r\n`);
+    this.push(`workspace: ${this.workspaceName}\r\n`);
     this.push("Type 'help' to see available mock commands.\r\n\r\n");
     this.push(this.prompt);
   }
@@ -133,7 +151,7 @@ class FakeShell extends Duplex {
       return;
     }
     if (cmd === 'whoami') {
-      this.push(`claude (mock, container=${this.containerName})\r\n`);
+      this.push(`claude (mock, workspace=${this.workspaceName})\r\n`);
       return;
     }
     if (cmd === 'oauth') {
@@ -163,8 +181,8 @@ export async function attachPty(
   _cols: number,
   _rows: number
 ): Promise<PtyHandle> {
-  const ct = containers.get(containerId);
-  const shell = new FakeShell(ct?.name ?? containerId);
+  const ws = workspaces.get(containerId);
+  const shell = new FakeShell(ws?.name ?? containerId);
   return {
     stream: shell,
     resize: async () => undefined,

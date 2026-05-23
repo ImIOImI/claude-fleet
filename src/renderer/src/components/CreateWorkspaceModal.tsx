@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
+import type { WorkspaceSummary } from '../App';
 
 interface Props {
   open: boolean;
+  workspaces: WorkspaceSummary[];
   onClose: () => void;
   onCreate: (
     spec: {
@@ -10,6 +12,10 @@ interface Props {
       workspaceSubdir: string;
       profileName: string;
     },
+    setStatus: (msg: string) => void
+  ) => Promise<void>;
+  onRestart: (
+    workspace: WorkspaceSummary,
     setStatus: (msg: string) => void
   ) => Promise<void>;
 }
@@ -32,7 +38,7 @@ function petName(): string {
 }
 
 // Persisted across modal opens (and app restarts) so the workspace input
-// pre-fills with whatever was last used — a fresh container is almost
+// pre-fills with whatever was last used — a fresh workspace is almost
 // always against the same repo as the previous one.
 const LAST_WORKSPACE_ROOT_KEY = 'claude-fleet:lastWorkspaceRoot';
 
@@ -53,7 +59,26 @@ function saveLastWorkspaceRoot(path: string): void {
   }
 }
 
-export function CreateContainerModal({ open, onClose, onCreate }: Props) {
+function relativeTime(ms: number): string {
+  const delta = Date.now() - ms;
+  if (delta < 60_000) return 'just now';
+  const m = Math.floor(delta / 60_000);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  if (d < 30) return `${d}d ago`;
+  const mo = Math.floor(d / 30);
+  return `${mo}mo ago`;
+}
+
+export function CreateWorkspaceModal({
+  open,
+  workspaces,
+  onClose,
+  onCreate,
+  onRestart
+}: Props) {
   const [name, setName] = useState('');
   const [workspaceRoot, setWorkspaceRoot] = useState<string>(loadLastWorkspaceRoot);
   const [workspaceSubdir, setWorkspaceSubdir] = useState('');
@@ -63,13 +88,14 @@ export function CreateContainerModal({ open, onClose, onCreate }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [namePlaceholder, setNamePlaceholder] = useState<string>(petName);
 
-  // Refresh the suggested name and re-read the persisted workspace each
-  // time the modal opens so re-opens reflect the latest stored value
+  // Refresh the suggested name and re-read the persisted workspace root
+  // each time the modal opens so re-opens reflect the latest stored value
   // (and don't reuse a previously-shown name suggestion).
   useEffect(() => {
     if (open) {
       setNamePlaceholder(petName());
       setWorkspaceRoot(loadLastWorkspaceRoot());
+      setError(null);
     }
   }, [open]);
 
@@ -80,19 +106,38 @@ export function CreateContainerModal({ open, onClose, onCreate }: Props) {
   const effectiveName = name.trim() || namePlaceholder;
   const nameOk = /^[a-zA-Z0-9_-]+$/.test(effectiveName);
 
+  // Past workspaces shown at the top of the modal — most-recently used first.
+  const pastWorkspaces = [...workspaces].sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+
   const browse = async () => {
     const picked = await window.api.dialog.pickDirectory(workspaceRoot.trim() || undefined);
     if (picked) setWorkspaceRoot(picked);
   };
 
+  const restart = async (workspace: WorkspaceSummary) => {
+    if (busy) return;
+    setBusy(true);
+    setStatus(null);
+    setError(null);
+    try {
+      await onRestart(workspace, setStatus);
+      onClose();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+      setStatus(null);
+    }
+  };
+
   const submit = async () => {
     if (busy) return;
     if (!effectiveName) {
-      setError('Container name is required.');
+      setError('Workspace name is required.');
       return;
     }
     if (!nameOk) {
-      setError('Container name must match [a-zA-Z0-9_-]+ (no spaces, slashes, or dots).');
+      setError('Workspace name must match [a-zA-Z0-9_-]+ (no spaces, slashes, or dots).');
       return;
     }
     if (!workspaceRoot.trim()) {
@@ -142,12 +187,43 @@ export function CreateContainerModal({ open, onClose, onCreate }: Props) {
   return (
     <div className="modal-backdrop" onClick={busy ? undefined : onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>New container</h2>
-        <p className="modal-eyebrow">spin up a runner pointing at a workspace</p>
+        <h2>New workspace</h2>
+        <p className="modal-eyebrow">restart a past workspace, or create a new one</p>
+
+        {pastWorkspaces.length > 0 && (
+          <div className="past-workspaces" aria-label="Past workspaces">
+            <div className="past-workspaces-label">Past workspaces</div>
+            <ul className="past-workspace-list">
+              {pastWorkspaces.map((w) => (
+                <li key={w.id}>
+                  <button
+                    type="button"
+                    className="past-workspace-row"
+                    onClick={() => restart(w)}
+                    disabled={busy}
+                    title={`Restart ${w.name}`}
+                  >
+                    <span className={`dot ${w.state}`} />
+                    <span className="ws-name">{w.name}</span>
+                    <span className="ws-path" title={w.workspaceRoot}>
+                      {w.workspaceRoot || <em>(no path on record)</em>}
+                    </span>
+                    <span className="ws-meta">
+                      <span className={`ws-state ${w.state}`}>{w.state}</span>
+                      <span className="ws-when">{relativeTime(w.lastUsedAt)}</span>
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <div className="modal-section-label">Create a new workspace</div>
         <div className="form-row">
           <label>Name</label>
           <input
-            aria-label="Container name"
+            aria-label="Workspace name"
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder={namePlaceholder}
@@ -199,7 +275,7 @@ export function CreateContainerModal({ open, onClose, onCreate }: Props) {
             Cancel
           </button>
           <button className="btn primary" onClick={submit} disabled={busy}>
-            {busy ? 'Creating…' : 'Create & start'}
+            {busy ? 'Working…' : 'Create & start'}
           </button>
         </div>
       </div>

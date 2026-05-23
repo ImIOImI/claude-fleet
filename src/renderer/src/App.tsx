@@ -1,26 +1,38 @@
 import { useEffect, useState } from 'react';
-import { ContainerTabStrip } from './components/ContainerTabStrip';
+import { WorkspaceTabStrip } from './components/WorkspaceTabStrip';
 import { SessionsPane } from './components/SessionsPane';
 import { ObservabilityPane } from './components/ObservabilityPane';
 import { TerminalPane } from './components/TerminalPane';
 import { BottomBar } from './components/BottomBar';
-import { CreateContainerModal } from './components/CreateContainerModal';
-import { CloseContainerModal } from './components/CloseContainerModal';
+import { CreateWorkspaceModal } from './components/CreateWorkspaceModal';
+import { CloseWorkspaceModal } from './components/CloseWorkspaceModal';
 import { ProfilesDialog } from './components/ProfilesDialog';
 
-export interface ContainerSummary {
-  id: string;
+export type WorkspaceState = 'running' | 'stopped' | 'deleted';
+
+export interface WorkspaceSummary {
   name: string;
-  state: string;
-  status: string;
+  // The renderer keys selection / chips by `id` (= container id for live
+  // workspaces, synthetic "deleted:<name>" for deleted ones). containerId
+  // is what backend operations like attach/stop/remove need; it's only
+  // present when state !== 'deleted'.
+  id: string;
+  containerId?: string;
+  state: WorkspaceState;
+  status?: string;
+  workspaceRoot: string;
+  workspaceSubdir: string;
+  profile: string;
+  createdAt: number;
+  lastUsedAt: number;
 }
 
 export function App() {
   const apiReady = typeof window !== 'undefined' && !!window.api;
-  const [daemonReachable, setDaemonReachable] = useState<boolean | null>(null);
+  const [backendReady, setBackendReady] = useState<boolean | null>(null);
   const [vaultAvailable, setVaultAvailable] = useState<boolean | null>(null);
   const [mockMode, setMockMode] = useState(false);
-  const [containers, setContainers] = useState<ContainerSummary[]>([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [profilesOpen, setProfilesOpen] = useState(false);
@@ -28,10 +40,29 @@ export function App() {
 
   const refresh = async () => {
     if (!window.api) return;
-    const ok = await window.api.docker.ping();
-    setDaemonReachable(ok);
-    if (ok) setContainers(await window.api.docker.list());
-    else setContainers([]);
+    const ok = await window.api.workspace.backendReady();
+    setBackendReady(ok);
+    if (!ok) {
+      setWorkspaces([]);
+      return;
+    }
+    const list = (await window.api.workspace.list()) as Array<{
+      name: string;
+      containerId?: string;
+      state: WorkspaceState;
+      status?: string;
+      workspaceRoot: string;
+      workspaceSubdir: string;
+      profile: string;
+      createdAt: number;
+      lastUsedAt: number;
+    }>;
+    setWorkspaces(
+      list.map((w) => ({
+        ...w,
+        id: w.containerId ?? `deleted:${w.name}`
+      }))
+    );
   };
 
   useEffect(() => {
@@ -60,7 +91,10 @@ export function App() {
     );
   }
 
-  const selected = containers.find((c) => c.id === selectedId) ?? null;
+  // Selection is keyed by .id; the top strip filters out deleted ones so
+  // selectedId never refers to a deleted workspace.
+  const selected = workspaces.find((w) => w.id === selectedId) ?? null;
+  const liveCount = workspaces.filter((w) => w.state !== 'deleted').length;
 
   const handleCreate = async (
     spec: { name: string; workspaceRoot: string; workspaceSubdir: string; profileName: string },
@@ -81,9 +115,9 @@ export function App() {
       }
     }
 
-    await window.api.docker.ensureImage(({ message }) => setStatus(message));
-    setStatus('Creating container…');
-    await window.api.docker.create({
+    await window.api.workspace.ensureImage(({ message }) => setStatus(message));
+    setStatus('Creating workspace…');
+    await window.api.workspace.create({
       name: spec.name,
       workspaceRoot: spec.workspaceRoot,
       workspaceSubdir: spec.workspaceSubdir,
@@ -93,16 +127,46 @@ export function App() {
     refresh();
   };
 
+  /**
+   * Restart a past workspace. If the container still exists (running or
+   * stopped), start it. If it's been deleted, recreate from the saved
+   * manifest via the same flow as a brand-new create.
+   */
+  const handleRestart = async (
+    workspace: WorkspaceSummary,
+    setStatus: (msg: string) => void
+  ) => {
+    setStatus(`Starting ${workspace.name}…`);
+    const started = (await window.api.workspace.start(workspace.name)) as
+      | { containerId?: string }
+      | null;
+    if (started?.containerId) {
+      setSelectedId(started.containerId);
+      refresh();
+      return;
+    }
+    // Container is gone — recreate from saved spec via the standard flow.
+    await handleCreate(
+      {
+        name: workspace.name,
+        workspaceRoot: workspace.workspaceRoot,
+        workspaceSubdir: workspace.workspaceSubdir,
+        profileName: workspace.profile === 'oauth' ? '' : workspace.profile
+      },
+      setStatus
+    );
+  };
+
   return (
     <div className="app">
-      <ContainerTabStrip
-        containers={containers}
+      <WorkspaceTabStrip
+        workspaces={workspaces}
         selectedId={selectedId}
-        daemonReachable={daemonReachable}
+        backendReady={backendReady}
         vaultAvailable={vaultAvailable}
         mockMode={mockMode}
         onSelect={setSelectedId}
-        onNewContainer={() => setCreateOpen(true)}
+        onNewWorkspace={() => setCreateOpen(true)}
         onOpenProfiles={() => setProfilesOpen(true)}
       />
 
@@ -111,7 +175,7 @@ export function App() {
 
         <main className="main-pane">
           <div className="main-header">
-            {daemonReachable === false ? null : selected ? (
+            {backendReady === false ? null : selected ? (
               <>
                 <span style={{ fontWeight: 500, color: 'var(--text-primary)' }}>
                   {selected.name}
@@ -123,27 +187,27 @@ export function App() {
                   <button
                     className="btn danger"
                     onClick={() => setCloseOpen(true)}
-                    title="Stop and/or remove this container"
+                    title="Stop and/or remove this workspace"
                   >
                     Close…
                   </button>
                 </span>
               </>
-            ) : containers.length > 0 ? (
-              <span style={{ color: 'var(--text-muted)' }}>Select a container.</span>
+            ) : liveCount > 0 ? (
+              <span style={{ color: 'var(--text-muted)' }}>Select a workspace.</span>
             ) : null}
           </div>
 
           <div className="main-body">
-            {daemonReachable === false ? (
+            {backendReady === false ? (
               <DockerDisconnected onRetry={refresh} />
-            ) : selected ? (
-              <TerminalPane containerId={selected.id} />
-            ) : containers.length === 0 ? (
-              <FirstRun onNewContainer={() => setCreateOpen(true)} />
+            ) : selected && selected.containerId ? (
+              <TerminalPane containerId={selected.containerId} />
+            ) : liveCount === 0 ? (
+              <FirstRun onNewWorkspace={() => setCreateOpen(true)} />
             ) : (
               <div className="empty">
-                <p style={{ color: 'var(--text-muted)' }}>No container selected.</p>
+                <p style={{ color: 'var(--text-muted)' }}>No workspace selected.</p>
               </div>
             )}
           </div>
@@ -154,17 +218,19 @@ export function App() {
 
       <BottomBar vaultAvailable={vaultAvailable} />
 
-      <CreateContainerModal
+      <CreateWorkspaceModal
         open={createOpen}
+        workspaces={workspaces}
         onClose={() => setCreateOpen(false)}
         onCreate={handleCreate}
+        onRestart={handleRestart}
       />
       {vaultAvailable !== false && (
         <ProfilesDialog open={profilesOpen} onClose={() => setProfilesOpen(false)} />
       )}
-      {closeOpen && selected && (
-        <CloseContainerModal
-          container={selected}
+      {closeOpen && selected && selected.containerId && (
+        <CloseWorkspaceModal
+          workspace={{ ...selected, id: selected.containerId }}
           onClose={() => setCloseOpen(false)}
           onClosed={() => {
             setSelectedId(null);
@@ -196,18 +262,18 @@ function DockerDisconnected({ onRetry }: { onRetry: () => void }) {
   );
 }
 
-function FirstRun({ onNewContainer }: { onNewContainer: () => void }) {
+function FirstRun({ onNewWorkspace }: { onNewWorkspace: () => void }) {
   return (
     <div className="empty">
       <div className="icon-card">▢</div>
       <span className="eyebrow">first run</span>
-      <h2>No containers yet</h2>
+      <h2>No workspaces yet</h2>
       <p>
-        Each container runs <code>claude</code> in an isolated Docker workspace. Spin up your
-        first to get started.
+        Each workspace runs <code>claude</code> in an isolated Docker container against a host
+        directory. Spin up your first to get started.
       </p>
-      <button className="btn primary" onClick={onNewContainer}>
-        + New container
+      <button className="btn primary" onClick={onNewWorkspace}>
+        + New workspace
       </button>
       <span className="hint">You'll need a workspace folder and an API key</span>
     </div>

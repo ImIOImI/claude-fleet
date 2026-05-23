@@ -21,7 +21,7 @@ test('preload exposes window.api with all expected surfaces', async () => {
   try {
     const types = await window.evaluate(() => ({
       api: typeof (window as unknown as { api?: unknown }).api,
-      docker: typeof (window as unknown as { api?: { docker?: unknown } }).api?.docker,
+      workspace: typeof (window as unknown as { api?: { workspace?: unknown } }).api?.workspace,
       vault: typeof (window as unknown as { api?: { vault?: unknown } }).api?.vault,
       pty: typeof (window as unknown as { api?: { pty?: unknown } }).api?.pty,
       fs: typeof (window as unknown as { api?: { fs?: unknown } }).api?.fs,
@@ -29,7 +29,7 @@ test('preload exposes window.api with all expected surfaces', async () => {
     }));
     expect(types).toEqual({
       api: 'object',
-      docker: 'object',
+      workspace: 'object',
       vault: 'object',
       pty: 'object',
       fs: 'object',
@@ -40,15 +40,15 @@ test('preload exposes window.api with all expected surfaces', async () => {
   }
 });
 
-test('+ New container opens the modal', async () => {
+test('+ New workspace opens the modal', async () => {
   const { app, window } = await launch();
   try {
-    // ContainerTabStrip disables the + New container button when
-    // daemonReachable === false; stub the daemon so the test isn't gated
+    // WorkspaceTabStrip disables the + New workspace button when
+    // backendReady === false; stub the backend so the test isn't gated
     // on host Docker state.
     await mockMainIpc(app);
-    await window.locator('.top-strip').getByRole('button', { name: '+ New container' }).click();
-    await expect(window.getByRole('heading', { name: 'New container' })).toBeVisible();
+    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
   } finally {
     await app.close();
   }
@@ -58,13 +58,12 @@ test('Create button surfaces validation errors when required fields are empty', 
   const { app, window } = await launch();
   try {
     await mockMainIpc(app);
-    await window.locator('.top-strip').getByRole('button', { name: '+ New container' }).click();
-    await expect(window.getByRole('heading', { name: 'New container' })).toBeVisible();
+    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
 
-    // Click Create with no input. Name now has a pet-name placeholder
-    // default, so the remaining required field is the workspace root —
-    // we still expect a "required" / "match" error to be surfaced rather
-    // than a silent no-op.
+    // Name now has a pet-name placeholder default, so the remaining required
+    // field is the workspace root — we still expect a "required" / "match"
+    // error to be surfaced rather than a silent no-op.
     await window.getByRole('button', { name: 'Create & start' }).click();
     await expect(window.locator('.error-text')).toContainText(/required|match/);
   } finally {
@@ -72,7 +71,7 @@ test('Create button surfaces validation errors when required fields are empty', 
   }
 });
 
-// The full submit flow with Docker / FS IPC stubbed in the main process.
+// The full submit flow with backend / FS IPC stubbed in the main process.
 // `contextBridge.exposeInMainWorld` makes the api object's properties
 // effectively immutable from the renderer side, so mocking via
 // `window.evaluate` doesn't work. We mock at the IPC-handler level via
@@ -81,12 +80,25 @@ test('Create button surfaces validation errors when required fields are empty', 
 // The actual OAuth handshake (browser → Anthropic → auth code) can't be
 // tested in CI — it needs real credentials and an interactive browser.
 // What we guarantee here is the foundation: a blank-profile submit
-// produces a container with profile label 'oauth' and an empty env, so
+// produces a workspace with profile label 'oauth' and an empty env, so
 // when claude starts in the PTY there's no ANTHROPIC_API_KEY env to win
 // precedence over OAuth.
 
 interface MockOpts {
   isDirectoryReturns?: boolean;
+  // Workspaces returned from workspace:list. Defaults to []. The renderer
+  // synthesizes ids: live → containerId, deleted → "deleted:<name>".
+  workspaceList?: Array<{
+    name: string;
+    containerId?: string;
+    state: 'running' | 'stopped' | 'deleted';
+    status?: string;
+    workspaceRoot: string;
+    workspaceSubdir?: string;
+    profile: string;
+    createdAt?: number;
+    lastUsedAt?: number;
+  }>;
 }
 
 async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {}): Promise<void> {
@@ -96,15 +108,17 @@ async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {}): Promi
       ensureImage: [],
       create: [],
       list: [],
+      start: [],
       isDirectory: [],
       mkdirp: []
     };
 
     const channels = [
-      'docker:ensureImage',
-      'docker:create',
-      'docker:list',
-      'docker:ping',
+      'workspace:ensureImage',
+      'workspace:create',
+      'workspace:list',
+      'workspace:start',
+      'workspace:ping',
       'fs:isDirectory',
       'fs:mkdirp'
     ];
@@ -116,17 +130,41 @@ async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {}): Promi
       }
     }
 
-    ipcMain.handle('docker:ping', () => true);
-    ipcMain.handle('docker:list', () => {
+    const now = Date.now();
+    const list = (opts.workspaceList ?? []).map((w) => ({
+      workspaceSubdir: '',
+      createdAt: now,
+      lastUsedAt: now,
+      ...w
+    }));
+
+    ipcMain.handle('workspace:ping', () => true);
+    ipcMain.handle('workspace:list', () => {
       g.__calls.list.push(true);
-      return [];
+      return list;
     });
-    ipcMain.handle('docker:ensureImage', async () => {
+    ipcMain.handle('workspace:ensureImage', async () => {
       g.__calls.ensureImage.push(true);
     });
-    ipcMain.handle('docker:create', async (_e, spec: Record<string, unknown>) => {
+    ipcMain.handle('workspace:create', async (_e, spec: Record<string, unknown>) => {
       g.__calls.create.push(spec);
-      return { id: 'fake', name: spec.name, state: 'running', status: 'running' };
+      return {
+        name: spec.name,
+        containerId: 'fake-id',
+        state: 'running',
+        status: 'running',
+        workspaceRoot: spec.workspaceRoot,
+        workspaceSubdir: spec.workspaceSubdir ?? '',
+        profile: spec.profile,
+        createdAt: Date.now(),
+        lastUsedAt: Date.now()
+      };
+    });
+    ipcMain.handle('workspace:start', async (_e, name: string) => {
+      g.__calls.start.push(name);
+      const found = list.find((w) => w.name === name);
+      if (!found) return null;
+      return { ...found, state: 'running', containerId: found.containerId ?? `restarted-${name}` };
     });
     ipcMain.handle('fs:isDirectory', async (_e, p: string) => {
       g.__calls.isDirectory.push(p);
@@ -149,19 +187,19 @@ test('Create flow (OAuth mode): empty profile submits with profile=oauth and no 
   try {
     await mockMainIpc(app, { isDirectoryReturns: true });
 
-    await window.locator('.top-strip').getByRole('button', { name: '+ New container' }).click();
-    await window.getByLabel('Container name').fill('test-oauth-container');
+    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await window.getByLabel('Workspace name').fill('test-oauth-workspace');
     await window.getByPlaceholder('/home/troy/repos').fill('/tmp/fleet-test');
     // Subdir and profile left blank → OAuth mode
 
     await window.getByRole('button', { name: 'Create & start' }).click();
-    await expect(window.getByRole('heading', { name: 'New container' })).toBeHidden();
+    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeHidden();
 
     const calls = await getCalls(app);
     expect(calls.ensureImage).toHaveLength(1);
     expect(calls.create).toHaveLength(1);
     expect(calls.create[0]).toMatchObject({
-      name: 'test-oauth-container',
+      name: 'test-oauth-workspace',
       workspaceRoot: '/tmp/fleet-test',
       workspaceSubdir: '',
       profile: 'oauth',
@@ -172,7 +210,7 @@ test('Create flow (OAuth mode): empty profile submits with profile=oauth and no 
   }
 });
 
-test('Create flow: missing workspace prompts to create it and mkdirps before container-create', async () => {
+test('Create flow: missing workspace prompts to create it and mkdirps before workspace-create', async () => {
   const { app, window } = await launch();
   try {
     await mockMainIpc(app, { isDirectoryReturns: false });
@@ -187,12 +225,12 @@ test('Create flow: missing workspace prompts to create it and mkdirps before con
       };
     });
 
-    await window.locator('.top-strip').getByRole('button', { name: '+ New container' }).click();
-    await window.getByLabel('Container name').fill('test-mkdir');
+    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await window.getByLabel('Workspace name').fill('test-mkdir');
     await window.getByPlaceholder('/home/troy/repos').fill('/tmp/does-not-exist-yet');
 
     await window.getByRole('button', { name: 'Create & start' }).click();
-    await expect(window.getByRole('heading', { name: 'New container' })).toBeHidden();
+    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeHidden();
 
     const confirmArgs = await window.evaluate(
       () => (window as unknown as { __confirmArgs: string[] }).__confirmArgs
@@ -207,23 +245,22 @@ test('Create flow: missing workspace prompts to create it and mkdirps before con
   }
 });
 
-test('Mock mode: seeded containers appear and MOCK MODE chip is visible', async () => {
+test('Mock mode: seeded workspaces appear and MOCK MODE chip is visible', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {
     await expect(window.getByText('MOCK MODE')).toBeVisible();
-    // Seeded containers from src/main/mock.ts render as chips in the top strip
-    await expect(window.locator('.ct-chip .name', { hasText: 'mock-alpha' })).toBeVisible();
-    await expect(window.locator('.ct-chip .name', { hasText: 'mock-beta' })).toBeVisible();
+    await expect(window.locator('.ws-chip .name', { hasText: 'mock-alpha' })).toBeVisible();
+    await expect(window.locator('.ws-chip .name', { hasText: 'mock-beta' })).toBeVisible();
   } finally {
     await app.close();
   }
 });
 
-test('Mock mode: selecting a container mounts the terminal pane', async () => {
+test('Mock mode: selecting a workspace mounts the terminal pane', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {
-    await window.locator('.ct-chip', { hasText: 'mock-alpha' }).click();
-    await expect(window.locator('.ct-chip.active', { hasText: 'mock-alpha' })).toBeVisible();
+    await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
+    await expect(window.locator('.ws-chip.active', { hasText: 'mock-alpha' })).toBeVisible();
     await expect(window.locator('.terminal-host')).toBeVisible();
   } finally {
     await app.close();
@@ -237,13 +274,12 @@ test('Mock mode: oauth command runs without crashing the terminal', async () => 
   // typing `oauth`, and clicking the wrapped URL.
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {
-    await window.locator('.ct-chip', { hasText: 'mock-alpha' }).click();
+    await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
     const term = window.locator('.terminal-host');
     await expect(term).toBeVisible();
     await term.click();
     await window.keyboard.type('oauth');
     await window.keyboard.press('Enter');
-    // Give the FakeShell + xterm time to render the URL + prompt.
     await window.waitForTimeout(500);
     await expect(term).toBeVisible();
   } finally {
@@ -251,33 +287,33 @@ test('Mock mode: oauth command runs without crashing the terminal', async () => 
   }
 });
 
-test('Mock mode: Close button stops and removes the selected container', async () => {
+test('Mock mode: Close button stops and removes the selected workspace', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {
-    await window.locator('.ct-chip', { hasText: 'mock-alpha' }).click();
+    await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
 
     await window.getByRole('button', { name: 'Close…' }).click();
-    await expect(window.getByRole('heading', { name: 'Close container' })).toBeVisible();
+    await expect(window.getByRole('heading', { name: 'Close workspace' })).toBeVisible();
 
-    // Running container should expose both "Stop only" and "Stop & remove"
+    // Running workspace should expose both "Stop only" and "Stop & remove"
     await expect(window.getByRole('button', { name: 'Stop only' })).toBeVisible();
     await window.getByRole('button', { name: 'Stop & remove' }).click();
 
-    // Modal closes, container disappears from strip, nothing is selected
-    await expect(window.getByRole('heading', { name: 'Close container' })).toBeHidden();
-    await expect(window.locator('.ct-chip .name', { hasText: 'mock-alpha' })).toBeHidden();
-    await expect(window.locator('.empty', { hasText: 'No container selected' })).toBeVisible();
+    // Modal closes, workspace disappears from strip, nothing is selected
+    await expect(window.getByRole('heading', { name: 'Close workspace' })).toBeHidden();
+    await expect(window.locator('.ws-chip .name', { hasText: 'mock-alpha' })).toBeHidden();
+    await expect(window.locator('.empty', { hasText: 'No workspace selected' })).toBeVisible();
   } finally {
     await app.close();
   }
 });
 
-test('Mock mode: Close on an exited container shows only Remove', async () => {
+test('Mock mode: Close on an exited workspace shows only Remove', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {
-    await window.locator('.ct-chip', { hasText: 'mock-beta' }).click();
+    await window.locator('.ws-chip', { hasText: 'mock-beta' }).click();
     await window.getByRole('button', { name: 'Close…' }).click();
-    await expect(window.getByRole('heading', { name: 'Close container' })).toBeVisible();
+    await expect(window.getByRole('heading', { name: 'Close workspace' })).toBeVisible();
     await expect(window.getByRole('button', { name: 'Stop only' })).toBeHidden();
     await expect(window.getByRole('button', { name: 'Remove' })).toBeVisible();
   } finally {
@@ -293,13 +329,13 @@ test('Create flow: declining the missing-workspace confirm aborts without mkdirp
       window.confirm = () => false;
     });
 
-    await window.locator('.top-strip').getByRole('button', { name: '+ New container' }).click();
-    await window.getByLabel('Container name').fill('test-decline');
+    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await window.getByLabel('Workspace name').fill('test-decline');
     await window.getByPlaceholder('/home/troy/repos').fill('/tmp/declined-path');
     await window.getByRole('button', { name: 'Create & start' }).click();
 
     // Modal stays open after user declines the create-folder confirmation
-    await expect(window.getByRole('heading', { name: 'New container' })).toBeVisible();
+    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
 
     const calls = await getCalls(app);
     expect(calls.mkdirp).toEqual([]);
@@ -317,24 +353,62 @@ test('Create modal: workspace root persists across opens', async () => {
     // value is deterministically empty.
     await window.evaluate(() => localStorage.removeItem('claude-fleet:lastWorkspaceRoot'));
 
-    const newContainer = window
+    const newWorkspace = window
       .locator('.top-strip')
-      .getByRole('button', { name: '+ New container' });
+      .getByRole('button', { name: '+ New workspace' });
     const wsInput = window.getByPlaceholder('/home/troy/repos');
 
     // First open + submit
-    await newContainer.click();
-    await expect(window.getByRole('heading', { name: 'New container' })).toBeVisible();
+    await newWorkspace.click();
+    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
     await expect(wsInput).toHaveValue('');
-    await window.getByLabel('Container name').fill('persistence-test-1');
+    await window.getByLabel('Workspace name').fill('persistence-test-1');
     await wsInput.fill('/tmp/persistence-test-A');
     await window.getByRole('button', { name: 'Create & start' }).click();
-    await expect(window.getByRole('heading', { name: 'New container' })).toBeHidden();
+    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeHidden();
 
     // Second open — the workspace input should remember the previous value.
-    await newContainer.click();
-    await expect(window.getByRole('heading', { name: 'New container' })).toBeVisible();
+    await newWorkspace.click();
+    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
     await expect(wsInput).toHaveValue('/tmp/persistence-test-A');
+  } finally {
+    await app.close();
+  }
+});
+
+test('Past workspaces: deleted workspace appears in modal and restart fires workspace:start', async () => {
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [
+        {
+          name: 'ghost-fox',
+          state: 'deleted',
+          workspaceRoot: '/tmp/ghost-fox',
+          profile: 'oauth'
+        }
+      ]
+    });
+
+    await window
+      .locator('.top-strip')
+      .getByRole('button', { name: '+ New workspace' })
+      .click();
+
+    // The "deleted" workspace isn't in the top strip but should appear in
+    // the modal's past-workspaces list.
+    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
+    const row = window.locator('.past-workspace-row', { hasText: 'ghost-fox' });
+    await expect(row).toBeVisible();
+    await expect(row.locator('.ws-state.deleted')).toBeVisible();
+
+    await row.click();
+
+    // The modal closes after a successful restart, and workspace:start was
+    // invoked with the workspace name.
+    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeHidden();
+    const calls = await getCalls(app);
+    expect(calls.start).toContain('ghost-fox');
   } finally {
     await app.close();
   }

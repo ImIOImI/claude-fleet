@@ -8,7 +8,7 @@ export function ObservabilityPane() {
         <div className="pane-placeholder">
           <strong>Coming with #2</strong>
           Per-session cost, token counts, context usage, and recent tool calls
-          sourced from each container's Claude transcript JSONL. See
+          sourced from each workspace's Claude transcript JSONL. See
           <code> docs/SPEC.md</code> §11 “Observability layer”.
         </div>
       </div>

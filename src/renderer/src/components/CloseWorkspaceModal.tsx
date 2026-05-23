@@ -1,14 +1,14 @@
 import { useState } from 'react';
-import type { ContainerSummary } from '../App';
+import type { WorkspaceSummary } from '../App';
 
 interface Props {
-  container: ContainerSummary;
+  workspace: WorkspaceSummary;
   onClose: () => void;
   onClosed: () => void;
 }
 
-export function CloseContainerModal({ container, onClose, onClosed }: Props) {
-  const running = container.state === 'running';
+export function CloseWorkspaceModal({ workspace, onClose, onClosed }: Props) {
+  const running = workspace.state === 'running';
   const [deleteState, setDeleteState] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -19,7 +19,7 @@ export function CloseContainerModal({ container, onClose, onClosed }: Props) {
     setStatus('Stopping…');
     setError(null);
     try {
-      await window.api.docker.stop(container.id);
+      await window.api.workspace.stop(workspace.id);
       onClosed();
       onClose();
     } catch (err) {
@@ -36,10 +36,10 @@ export function CloseContainerModal({ container, onClose, onClosed }: Props) {
     try {
       if (running) {
         setStatus('Stopping…');
-        await window.api.docker.stop(container.id);
+        await window.api.workspace.stop(workspace.id);
       }
-      setStatus(deleteState ? 'Removing container and state directory…' : 'Removing container…');
-      await window.api.docker.remove(container.id, { deleteState });
+      setStatus(deleteState ? 'Removing workspace and state directory…' : 'Removing workspace…');
+      await window.api.workspace.remove(workspace.id, { deleteState });
       onClosed();
       onClose();
     } catch (err) {
@@ -53,9 +53,9 @@ export function CloseContainerModal({ container, onClose, onClosed }: Props) {
   return (
     <div className="modal-backdrop" onClick={busy ? undefined : onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>Close container</h2>
+        <h2>Close workspace</h2>
         <p className="modal-eyebrow">
-          {container.name} — {container.status}
+          {workspace.name} — {workspace.status}
         </p>
         <label
           style={{
@@ -77,8 +77,9 @@ export function CloseContainerModal({ container, onClose, onClosed }: Props) {
           <span>
             Also delete the state directory
             <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 3, lineHeight: 1.4 }}>
-              Removes <code>~/.config/claude-fleet/state/{container.name}/</code>. A future
-              container with the same name will start fresh.
+              Removes <code>~/.config/claude-fleet/state/{workspace.name}/</code> including the
+              workspace manifest. The workspace will no longer appear in the past list. A future
+              workspace with the same name will start fresh.
             </div>
           </span>
         </label>
