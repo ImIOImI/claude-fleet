@@ -54,16 +54,16 @@ export function CloseContainerModal({ container, onClose, onClosed }: Props) {
     <div className="modal-backdrop" onClick={busy ? undefined : onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <h2>Close container</h2>
-        <p className="muted">
-          <strong style={{ color: '#d8dde6' }}>{container.name}</strong> — {container.status}
+        <p className="modal-eyebrow">
+          {container.name} — {container.status}
         </p>
         <label
           style={{
             display: 'flex',
-            gap: 8,
+            gap: 10,
             alignItems: 'flex-start',
             fontSize: 13,
-            margin: '12px 0',
+            margin: '4px 0 12px',
             cursor: busy ? 'default' : 'pointer'
           }}
         >
@@ -72,11 +72,11 @@ export function CloseContainerModal({ container, onClose, onClosed }: Props) {
             checked={deleteState}
             onChange={(e) => setDeleteState(e.target.checked)}
             disabled={busy}
-            style={{ marginTop: 2 }}
+            style={{ marginTop: 3 }}
           />
           <span>
             Also delete the state directory
-            <div style={{ color: '#6b7280', fontSize: 11, marginTop: 2 }}>
+            <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 3, lineHeight: 1.4 }}>
               Removes <code>~/.config/claude-fleet/state/{container.name}/</code>. A future
               container with the same name will start fresh.
             </div>
@@ -85,15 +85,15 @@ export function CloseContainerModal({ container, onClose, onClosed }: Props) {
         {status && <div className="form-status">{status}</div>}
         {error && <div className="form-hint error-text">{error}</div>}
         <div className="modal-footer">
-          <button onClick={onClose} disabled={busy}>
+          <button className="btn" onClick={onClose} disabled={busy}>
             Cancel
           </button>
           {running && (
-            <button onClick={stopOnly} disabled={busy}>
+            <button className="btn" onClick={stopOnly} disabled={busy}>
               {busy ? '…' : 'Stop only'}
             </button>
           )}
-          <button onClick={stopAndRemove} disabled={busy}>
+          <button className="btn danger" onClick={stopAndRemove} disabled={busy}>
             {busy ? '…' : running ? 'Stop & remove' : 'Remove'}
           </button>
         </div>

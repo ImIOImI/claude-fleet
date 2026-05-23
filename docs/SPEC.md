@@ -55,10 +55,12 @@ Three processes, per Electron convention:
 ```
 ┌────────────────────┐   IPC (contextBridge)   ┌────────────────────┐
 │  Main (Node)       │ ◄─────────────────────► │  Renderer (React)  │
-│  - dockerode       │                         │  - xterm.js        │
-│  - keytar          │   exposes window.api    │  - sidebar, panes  │
-│  - better-sqlite3* │   via preload script    │  - profiles modal  │
-│  - JSONL watcher*  │                         │                    │
+│  - dockerode       │                         │  Layout:           │
+│  - keytar (lazy)   │   exposes window.api    │   ┌─ top strip ─┐  │
+│  - clipboard       │   via preload script    │   ├──┬───────┬──┤  │
+│  - native Menu     │                         │   │S │ term  │ O│  │
+│  - better-sqlite3* │                         │   ├──┴───────┴──┤  │
+│  - JSONL watcher*  │                         │   └─ bottom bar ┘  │
 └─────────┬──────────┘                         └────────────────────┘
           │
           │  Docker socket
@@ -88,6 +90,16 @@ Three processes, per Electron convention:
 **Preload** is a tightly scoped bridge. It uses `contextBridge.exposeInMainWorld('api', …)` to expose a typed `window.api` to the renderer. Window options: `contextIsolation: true`, `nodeIntegration: false`, `sandbox: false` (sandbox is off because the preload needs `ipcRenderer`).
 
 **Renderer** is pure React. It has zero Node access. It can only do what `window.api` lets it do. Everything privileged flows through IPC.
+
+The renderer layout is a 3-row × 3-col shell:
+- **Top row** (`ContainerTabStrip`): app name, container chips (each with a deterministic hue ring + status dot), `+ New container`, daemon status pill, `MOCK MODE` chip when active, `Profiles…`.
+- **Body row** (3 columns):
+  - **Sessions pane** (left, ~280px): placeholder until #3 lands the JSONL-backed sessions table.
+  - **Main pane** (center, fluid): header with selected container's name/status and `Close…` button, plus the xterm `TerminalPane` (or empty/first-run/disconnected states).
+  - **Observability pane** (right, ~320px): placeholder until #2 lands the cost/token/event watcher.
+- **Bottom row** (`BottomBar`): static hint bar with key bindings and degraded-vault notice when applicable.
+
+Modals (`CreateContainerModal`, `CloseContainerModal`, `ProfilesDialog`) are owned by `App` and rendered above the shell.
 
 ## 6. IPC surface
 
@@ -238,12 +250,17 @@ claude-fleet/
         ├── index.html
         └── src/
             ├── main.tsx               # React root
-            ├── App.tsx                # daemon-status header, sidebar + main pane
-            ├── styles.css
+            ├── App.tsx                # 3-pane shell + modal owner
+            ├── styles.css             # design tokens + component styles
             ├── types.d.ts             # declare global window.api
             └── components/
-                ├── Sidebar.tsx
-                ├── TerminalPane.tsx
+                ├── ContainerTabStrip.tsx  # top: app name + container chips + actions
+                ├── SessionsPane.tsx       # left sidebar (placeholder until #3)
+                ├── TerminalPane.tsx       # center: xterm + link provider + key bindings
+                ├── ObservabilityPane.tsx  # right sidebar (placeholder until #2)
+                ├── BottomBar.tsx          # footer hint bar
+                ├── CreateContainerModal.tsx
+                ├── CloseContainerModal.tsx
                 └── ProfilesDialog.tsx
 ```
 
