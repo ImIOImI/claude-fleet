@@ -43,7 +43,7 @@ test('preload exposes window.api with all expected surfaces', async () => {
 test('+ New container opens the modal', async () => {
   const { app, window } = await launch();
   try {
-    await window.getByRole('button', { name: '+ New container' }).click();
+    await window.locator('.top-strip').getByRole('button', { name: '+ New container' }).click();
     await expect(window.getByRole('heading', { name: 'New container' })).toBeVisible();
   } finally {
     await app.close();
@@ -53,11 +53,11 @@ test('+ New container opens the modal', async () => {
 test('Create button surfaces validation errors when fields are empty', async () => {
   const { app, window } = await launch();
   try {
-    await window.getByRole('button', { name: '+ New container' }).click();
+    await window.locator('.top-strip').getByRole('button', { name: '+ New container' }).click();
     await expect(window.getByRole('heading', { name: 'New container' })).toBeVisible();
 
     // Click Create with no input — should surface an error, not silently no-op
-    await window.getByRole('button', { name: 'Create' }).click();
+    await window.getByRole('button', { name: 'Create & start' }).click();
     await expect(window.locator('.error-text')).toContainText(/required|match/);
   } finally {
     await app.close();
@@ -141,12 +141,12 @@ test('Create flow (OAuth mode): empty profile submits with profile=oauth and no 
   try {
     await mockMainIpc(app, { isDirectoryReturns: true });
 
-    await window.getByRole('button', { name: '+ New container' }).click();
+    await window.locator('.top-strip').getByRole('button', { name: '+ New container' }).click();
     await window.getByPlaceholder('my-container').fill('test-oauth-container');
     await window.getByPlaceholder('/home/troy/repos').fill('/tmp/fleet-test');
     // Subdir and profile left blank → OAuth mode
 
-    await window.getByRole('button', { name: 'Create' }).click();
+    await window.getByRole('button', { name: 'Create & start' }).click();
     await expect(window.getByRole('heading', { name: 'New container' })).toBeHidden();
 
     const calls = await getCalls(app);
@@ -179,11 +179,11 @@ test('Create flow: missing workspace prompts to create it and mkdirps before con
       };
     });
 
-    await window.getByRole('button', { name: '+ New container' }).click();
+    await window.locator('.top-strip').getByRole('button', { name: '+ New container' }).click();
     await window.getByPlaceholder('my-container').fill('test-mkdir');
     await window.getByPlaceholder('/home/troy/repos').fill('/tmp/does-not-exist-yet');
 
-    await window.getByRole('button', { name: 'Create' }).click();
+    await window.getByRole('button', { name: 'Create & start' }).click();
     await expect(window.getByRole('heading', { name: 'New container' })).toBeHidden();
 
     const confirmArgs = await window.evaluate(
@@ -203,9 +203,9 @@ test('Mock mode: seeded containers appear and MOCK MODE chip is visible', async 
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {
     await expect(window.getByText('MOCK MODE')).toBeVisible();
-    // Seeded containers from src/main/mock.ts
-    await expect(window.locator('.container-row .name', { hasText: 'mock-alpha' })).toBeVisible();
-    await expect(window.locator('.container-row .name', { hasText: 'mock-beta' })).toBeVisible();
+    // Seeded containers from src/main/mock.ts render as chips in the top strip
+    await expect(window.locator('.ct-chip .name', { hasText: 'mock-alpha' })).toBeVisible();
+    await expect(window.locator('.ct-chip .name', { hasText: 'mock-beta' })).toBeVisible();
   } finally {
     await app.close();
   }
@@ -214,8 +214,8 @@ test('Mock mode: seeded containers appear and MOCK MODE chip is visible', async 
 test('Mock mode: selecting a container mounts the terminal pane', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {
-    await window.locator('.container-row', { hasText: 'mock-alpha' }).click();
-    await expect(window.locator('.container-row.active', { hasText: 'mock-alpha' })).toBeVisible();
+    await window.locator('.ct-chip', { hasText: 'mock-alpha' }).click();
+    await expect(window.locator('.ct-chip.active', { hasText: 'mock-alpha' })).toBeVisible();
     await expect(window.locator('.terminal-host')).toBeVisible();
   } finally {
     await app.close();
@@ -229,7 +229,7 @@ test('Mock mode: oauth command runs without crashing the terminal', async () => 
   // typing `oauth`, and clicking the wrapped URL.
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {
-    await window.locator('.container-row', { hasText: 'mock-alpha' }).click();
+    await window.locator('.ct-chip', { hasText: 'mock-alpha' }).click();
     const term = window.locator('.terminal-host');
     await expect(term).toBeVisible();
     await term.click();
@@ -246,7 +246,7 @@ test('Mock mode: oauth command runs without crashing the terminal', async () => 
 test('Mock mode: Close button stops and removes the selected container', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {
-    await window.locator('.container-row', { hasText: 'mock-alpha' }).click();
+    await window.locator('.ct-chip', { hasText: 'mock-alpha' }).click();
 
     await window.getByRole('button', { name: 'Close…' }).click();
     await expect(window.getByRole('heading', { name: 'Close container' })).toBeVisible();
@@ -255,9 +255,9 @@ test('Mock mode: Close button stops and removes the selected container', async (
     await expect(window.getByRole('button', { name: 'Stop only' })).toBeVisible();
     await window.getByRole('button', { name: 'Stop & remove' }).click();
 
-    // Modal closes, container disappears from sidebar, nothing is selected
+    // Modal closes, container disappears from strip, nothing is selected
     await expect(window.getByRole('heading', { name: 'Close container' })).toBeHidden();
-    await expect(window.locator('.container-row .name', { hasText: 'mock-alpha' })).toBeHidden();
+    await expect(window.locator('.ct-chip .name', { hasText: 'mock-alpha' })).toBeHidden();
     await expect(window.locator('.empty', { hasText: 'No container selected' })).toBeVisible();
   } finally {
     await app.close();
@@ -267,7 +267,7 @@ test('Mock mode: Close button stops and removes the selected container', async (
 test('Mock mode: Close on an exited container shows only Remove', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {
-    await window.locator('.container-row', { hasText: 'mock-beta' }).click();
+    await window.locator('.ct-chip', { hasText: 'mock-beta' }).click();
     await window.getByRole('button', { name: 'Close…' }).click();
     await expect(window.getByRole('heading', { name: 'Close container' })).toBeVisible();
     await expect(window.getByRole('button', { name: 'Stop only' })).toBeHidden();
@@ -285,10 +285,10 @@ test('Create flow: declining the missing-workspace confirm aborts without mkdirp
       window.confirm = () => false;
     });
 
-    await window.getByRole('button', { name: '+ New container' }).click();
+    await window.locator('.top-strip').getByRole('button', { name: '+ New container' }).click();
     await window.getByPlaceholder('my-container').fill('test-decline');
     await window.getByPlaceholder('/home/troy/repos').fill('/tmp/declined-path');
-    await window.getByRole('button', { name: 'Create' }).click();
+    await window.getByRole('button', { name: 'Create & start' }).click();
 
     // Modal stays open after user declines the create-folder confirmation
     await expect(window.getByRole('heading', { name: 'New container' })).toBeVisible();

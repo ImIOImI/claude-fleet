@@ -40,14 +40,14 @@ export function ProfilesDialog({ open, onClose }: Props) {
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>Credential profiles</h2>
-        <p className="muted">API keys are stored in your OS keychain.</p>
+        <h2>Profiles</h2>
+        <p className="modal-eyebrow">API keys stored in the OS keychain</p>
         <ul className="profile-list">
           {profiles.length === 0 && <li className="muted">No profiles yet.</li>}
           {profiles.map((name) => (
             <li key={name}>
               <span>{name}</span>
-              <button onClick={() => del(name)}>Delete</button>
+              <button className="btn danger" onClick={() => del(name)}>Delete</button>
             </li>
           ))}
         </ul>
@@ -63,10 +63,10 @@ export function ProfilesDialog({ open, onClose }: Props) {
             value={newKey}
             onChange={(e) => setNewKey(e.target.value)}
           />
-          <button onClick={add} disabled={busy || !newName || !newKey}>Add</button>
+          <button className="btn primary" onClick={add} disabled={busy || !newName || !newKey}>Add</button>
         </div>
         <div className="modal-footer">
-          <button onClick={onClose}>Close</button>
+          <button className="btn" onClick={onClose}>Done</button>
         </div>
       </div>
     </div>

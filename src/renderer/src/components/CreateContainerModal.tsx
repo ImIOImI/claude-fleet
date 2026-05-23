@@ -87,6 +87,7 @@ export function CreateContainerModal({ open, onClose, onCreate }: Props) {
     <div className="modal-backdrop" onClick={busy ? undefined : onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <h2>New container</h2>
+        <p className="modal-eyebrow">spin up a runner pointing at a workspace</p>
         <div className="form-row">
           <label>Name</label>
           <input
@@ -137,11 +138,11 @@ export function CreateContainerModal({ open, onClose, onCreate }: Props) {
         {status && <div className="form-status">{status}</div>}
         {error && <div className="form-hint error-text">{error}</div>}
         <div className="modal-footer">
-          <button onClick={onClose} disabled={busy}>
+          <button className="btn" onClick={onClose} disabled={busy}>
             Cancel
           </button>
-          <button onClick={submit} disabled={busy}>
-            {busy ? 'Creating…' : 'Create'}
+          <button className="btn primary" onClick={submit} disabled={busy}>
+            {busy ? 'Creating…' : 'Create & start'}
           </button>
         </div>
       </div>
