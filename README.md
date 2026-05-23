@@ -6,6 +6,11 @@ Drives 3–6 Docker containers, each running `claude` in its own PTY. Live termi
 rendered with xterm.js; structured observability (cost, tokens, tool calls, history) is
 sourced from each container's bind-mounted Claude transcript JSONL.
 
+## Docs
+
+- [`docs/SPEC.md`](docs/SPEC.md) — product spec. Single source of truth for what claude-fleet is, how it's built, and which decisions are pending. Start here if you're new.
+- [`design/README.md`](design/README.md) — hi-fi visual reference. Canonical design tokens (`design/tokens.css`) and 11 unpacked artboards (`design/components/*.jsx`); refer to these when implementing UI.
+
 ## Stack
 
 - Electron + Vite + React + TypeScript (via `electron-vite`)
