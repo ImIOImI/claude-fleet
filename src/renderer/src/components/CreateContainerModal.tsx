@@ -31,9 +31,31 @@ function petName(): string {
   return `${a}-${n}`;
 }
 
+// Persisted across modal opens (and app restarts) so the workspace input
+// pre-fills with whatever was last used — a fresh container is almost
+// always against the same repo as the previous one.
+const LAST_WORKSPACE_ROOT_KEY = 'claude-fleet:lastWorkspaceRoot';
+
+function loadLastWorkspaceRoot(): string {
+  try {
+    return localStorage.getItem(LAST_WORKSPACE_ROOT_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+function saveLastWorkspaceRoot(path: string): void {
+  try {
+    localStorage.setItem(LAST_WORKSPACE_ROOT_KEY, path);
+  } catch {
+    // localStorage may be unavailable in odd sandbox modes; persistence
+    // is a nice-to-have so swallow.
+  }
+}
+
 export function CreateContainerModal({ open, onClose, onCreate }: Props) {
   const [name, setName] = useState('');
-  const [workspaceRoot, setWorkspaceRoot] = useState('');
+  const [workspaceRoot, setWorkspaceRoot] = useState<string>(loadLastWorkspaceRoot);
   const [workspaceSubdir, setWorkspaceSubdir] = useState('');
   const [profileName, setProfileName] = useState('');
   const [busy, setBusy] = useState(false);
@@ -41,10 +63,14 @@ export function CreateContainerModal({ open, onClose, onCreate }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [namePlaceholder, setNamePlaceholder] = useState<string>(petName);
 
-  // Refresh the suggested name each time the modal opens so re-opens
-  // don't reuse a previously-shown suggestion.
+  // Refresh the suggested name and re-read the persisted workspace each
+  // time the modal opens so re-opens reflect the latest stored value
+  // (and don't reuse a previously-shown name suggestion).
   useEffect(() => {
-    if (open) setNamePlaceholder(petName());
+    if (open) {
+      setNamePlaceholder(petName());
+      setWorkspaceRoot(loadLastWorkspaceRoot());
+    }
   }, [open]);
 
   if (!open) return null;
@@ -97,10 +123,13 @@ export function CreateContainerModal({ open, onClose, onCreate }: Props) {
         },
         setStatus
       );
+      saveLastWorkspaceRoot(ws);
       setName('');
-      setWorkspaceRoot('');
       setWorkspaceSubdir('');
       setProfileName('');
+      // Keep workspaceRoot — it's the user's persistent choice. The next
+      // modal open will re-read it from localStorage via the useEffect
+      // anyway, so this just keeps state consistent in-memory.
       onClose();
     } catch (err) {
       setError(String(err));

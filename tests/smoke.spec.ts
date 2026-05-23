@@ -308,3 +308,34 @@ test('Create flow: declining the missing-workspace confirm aborts without mkdirp
     await app.close();
   }
 });
+
+test('Create modal: workspace root persists across opens', async () => {
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app);
+    // Start with no remembered workspace so the first open's input
+    // value is deterministically empty.
+    await window.evaluate(() => localStorage.removeItem('claude-fleet:lastWorkspaceRoot'));
+
+    const newContainer = window
+      .locator('.top-strip')
+      .getByRole('button', { name: '+ New container' });
+    const wsInput = window.getByPlaceholder('/home/troy/repos');
+
+    // First open + submit
+    await newContainer.click();
+    await expect(window.getByRole('heading', { name: 'New container' })).toBeVisible();
+    await expect(wsInput).toHaveValue('');
+    await window.getByLabel('Container name').fill('persistence-test-1');
+    await wsInput.fill('/tmp/persistence-test-A');
+    await window.getByRole('button', { name: 'Create & start' }).click();
+    await expect(window.getByRole('heading', { name: 'New container' })).toBeHidden();
+
+    // Second open — the workspace input should remember the previous value.
+    await newContainer.click();
+    await expect(window.getByRole('heading', { name: 'New container' })).toBeVisible();
+    await expect(wsInput).toHaveValue('/tmp/persistence-test-A');
+  } finally {
+    await app.close();
+  }
+});
