@@ -22,6 +22,7 @@ test('preload exposes window.api with all expected surfaces', async () => {
     const types = await window.evaluate(() => ({
       api: typeof (window as unknown as { api?: unknown }).api,
       workspace: typeof (window as unknown as { api?: { workspace?: unknown } }).api?.workspace,
+      images: typeof (window as unknown as { api?: { images?: unknown } }).api?.images,
       vault: typeof (window as unknown as { api?: { vault?: unknown } }).api?.vault,
       pty: typeof (window as unknown as { api?: { pty?: unknown } }).api?.pty,
       fs: typeof (window as unknown as { api?: { fs?: unknown } }).api?.fs,
@@ -30,6 +31,7 @@ test('preload exposes window.api with all expected surfaces', async () => {
     expect(types).toEqual({
       api: 'object',
       workspace: 'object',
+      images: 'object',
       vault: 'object',
       pty: 'object',
       fs: 'object',
@@ -96,8 +98,19 @@ interface MockOpts {
     workspaceRoot: string;
     workspaceSubdir?: string;
     profile: string;
+    kind?: 'container' | 'local';
+    image?: string;
     createdAt?: number;
     lastUsedAt?: number;
+  }>;
+  // Images returned from images:list. Defaults to [].
+  imageLibrary?: Array<{
+    ref: string;
+    digest?: string;
+    labels: Record<string, string>;
+    firstUsedAt?: number;
+    lastUsedAt?: number;
+    useCount?: number;
   }>;
 }
 
@@ -119,6 +132,8 @@ async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {}): Promi
       'workspace:list',
       'workspace:start',
       'workspace:ping',
+      'images:list',
+      'images:remove',
       'fs:isDirectory',
       'fs:mkdirp'
     ];
@@ -172,6 +187,18 @@ async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {}): Promi
     });
     ipcMain.handle('fs:mkdirp', async (_e, p: string) => {
       g.__calls.mkdirp.push(p);
+    });
+
+    const imageLib = (opts.imageLibrary ?? []).map((img) => ({
+      firstUsedAt: now,
+      lastUsedAt: now,
+      useCount: 1,
+      ...img
+    }));
+    ipcMain.handle('images:list', () => imageLib);
+    ipcMain.handle('images:remove', (_e, ref: string) => {
+      const idx = imageLib.findIndex((img) => img.ref === ref);
+      if (idx >= 0) imageLib.splice(idx, 1);
     });
   }, opts);
 }
@@ -409,6 +436,79 @@ test('Past workspaces: deleted workspace appears in modal and restart fires work
     await expect(window.getByRole('heading', { name: 'New workspace' })).toBeHidden();
     const calls = await getCalls(app);
     expect(calls.start).toContain('ghost-fox');
+  } finally {
+    await app.close();
+  }
+});
+
+test('Workspace kind selector: Local shows a "coming soon" error on submit', async () => {
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app);
+    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
+
+    // Both kind radios are visible; Container is the default.
+    const container = window.getByRole('radio', { name: /Container/ });
+    const local = window.getByRole('radio', { name: /Local/ });
+    await expect(container).toBeChecked();
+    await expect(local).not.toBeChecked();
+
+    // Pick Local and submit — should block with a "not implemented" error,
+    // never call workspace:create.
+    await local.check();
+    await window.getByPlaceholder('/home/troy/repos').fill('/tmp/local-ws');
+    await window.getByRole('button', { name: 'Create & start' }).click();
+
+    await expect(window.locator('.error-text')).toContainText(/aren't implemented yet|coming soon/i);
+    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
+    const calls = await getCalls(app);
+    expect(calls.create).toEqual([]);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Image picker: free-text filter matches across ref and label values', async () => {
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      imageLibrary: [
+        {
+          ref: 'ghcr.io/imioimi/claude-fleet/runner:latest',
+          labels: { 'com.claude-fleet.kind': 'runner', language: 'node' }
+        },
+        {
+          ref: 'docker.io/library/python:3.12-slim',
+          labels: { language: 'python', purpose: 'data-science' }
+        },
+        {
+          ref: 'docker.io/library/golang:1.22',
+          labels: { language: 'go', purpose: 'backend' }
+        }
+      ]
+    });
+
+    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
+
+    // All three images visible at first (no filter beyond whatever defaulted
+    // into the input — make sure we clear it for a clean assertion).
+    const imageInput = window.getByLabel('Image reference');
+    await imageInput.fill('');
+    await expect(window.locator('.image-row', { hasText: 'runner:latest' })).toBeVisible();
+    await expect(window.locator('.image-row', { hasText: 'python:3.12-slim' })).toBeVisible();
+    await expect(window.locator('.image-row', { hasText: 'golang:1.22' })).toBeVisible();
+
+    // Filter by a label value — only the python image should remain.
+    await imageInput.fill('data-science');
+    await expect(window.locator('.image-row', { hasText: 'python:3.12-slim' })).toBeVisible();
+    await expect(window.locator('.image-row', { hasText: 'runner:latest' })).toBeHidden();
+    await expect(window.locator('.image-row', { hasText: 'golang:1.22' })).toBeHidden();
+
+    // Click the surviving row — it should fill the image input.
+    await window.locator('.image-row', { hasText: 'python:3.12-slim' }).click();
+    await expect(imageInput).toHaveValue('docker.io/library/python:3.12-slim');
   } finally {
     await app.close();
   }

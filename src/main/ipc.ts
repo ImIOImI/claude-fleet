@@ -4,6 +4,7 @@ import * as realDocker from './docker.js';
 import * as mockDocker from './mock.js';
 import * as vault from './vault.js';
 import * as fs from './fs.js';
+import * as imageLibrary from './imageLibrary.js';
 import {
   listWorkspaceManifests,
   readWorkspaceManifest,
@@ -65,19 +66,47 @@ export function registerIpc(): void {
 
   ipcMain.handle('workspace:list', () => listAllWorkspaces());
 
-  ipcMain.handle('workspace:create', async (_e, input: CreateWorkspaceInput) => {
-    const ws = await backend.createWorkspace(input);
-    const spec: WorkspaceSpec = {
-      name: ws.name,
-      workspaceRoot: ws.workspaceRoot,
-      workspaceSubdir: ws.workspaceSubdir,
-      profile: ws.profile,
-      createdAt: ws.createdAt,
-      lastUsedAt: ws.lastUsedAt
-    };
-    await writeWorkspaceManifest(spec);
-    return ws;
-  });
+  ipcMain.handle(
+    'workspace:create',
+    async (_e, input: CreateWorkspaceInput & { kind?: 'container' | 'local' }) => {
+      if (input.kind === 'local') {
+        throw new Error(
+          "Local workspaces aren't implemented yet. Pick 'Container' for now."
+        );
+      }
+      const ws = await backend.createWorkspace(input);
+      const spec: WorkspaceSpec = {
+        name: ws.name,
+        workspaceRoot: ws.workspaceRoot,
+        workspaceSubdir: ws.workspaceSubdir,
+        profile: ws.profile,
+        kind: 'container',
+        image: ws.image,
+        createdAt: ws.createdAt,
+        lastUsedAt: ws.lastUsedAt
+      };
+      await writeWorkspaceManifest(spec);
+
+      // Auto-record the image into the library so the next create's
+      // picker shows it (and any labels it was built with). Best-effort:
+      // a failed inspect (image just pulled but inspect bombs) shouldn't
+      // fail the workspace create.
+      if (ws.image) {
+        try {
+          const inspected = await backend.inspectImage(ws.image);
+          await imageLibrary.recordImage(inspected);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn('imageLibrary.recordImage failed:', err);
+        }
+      }
+
+      return ws;
+    }
+  );
+
+  ipcMain.handle('images:list', () => imageLibrary.listImages());
+  ipcMain.handle('images:remove', (_e, ref: string) => imageLibrary.removeImage(ref));
 
   /**
    * Start an existing (live, possibly stopped) workspace by name. Returns

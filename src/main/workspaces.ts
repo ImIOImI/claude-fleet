@@ -15,11 +15,20 @@ import { workspaceManifestPath, workspaceStateDir, stateRoot } from './paths.js'
 
 export type WorkspaceState = 'running' | 'stopped' | 'deleted';
 
+/**
+ * Today: 'container' is a Docker container backend; 'local' is a planned
+ * host-process backend (no isolation, just spawn `claude` directly).
+ * The selector exists in the UI; the 'local' implementation is deferred.
+ */
+export type WorkspaceKind = 'container' | 'local';
+
 export interface WorkspaceSpec {
   name: string;
   workspaceRoot: string;
   workspaceSubdir: string;
   profile: string; // vault profile name, or 'oauth'
+  kind: WorkspaceKind;
+  image?: string; // image reference for kind='container'; undefined for 'local'
   createdAt: number;
   lastUsedAt: number;
 }
@@ -47,6 +56,10 @@ export async function readWorkspaceManifest(name: string): Promise<WorkspaceSpec
       workspaceRoot: parsed.workspaceRoot,
       workspaceSubdir: parsed.workspaceSubdir ?? '',
       profile: parsed.profile,
+      // Manifests written before the kind/image fields existed default
+      // to the container backend with no recorded image.
+      kind: parsed.kind ?? 'container',
+      image: parsed.image,
       createdAt: parsed.createdAt ?? Date.now(),
       lastUsedAt: parsed.lastUsedAt ?? parsed.createdAt ?? Date.now()
     };

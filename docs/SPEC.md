@@ -118,6 +118,10 @@ All channels are `ipcMain.handle`/`ipcRenderer.invoke` (promise-based) except th
 - `workspace:remove(id, opts?: { deleteState? })` → `void` — force-remove; if `deleteState`, also `rm -rf <userData>/state/<name>` (which removes the manifest too, so the workspace disappears from the past list).
 - `workspace:ensureImage(channelId)` → progress over `workspace:ensureImage:progress:${channelId}`, resolves when the runner image is locally present (no-op if it already is; otherwise pulls from GHCR).
 
+### Images
+- `images:list` → `ImageEntry[]` — every image known to the library, including labels.
+- `images:remove(ref)` → `void` — remove an image entry. The image itself is not deleted from the Docker daemon; only the library entry goes away.
+
 ### Vault
 - `vault:list` → `string[]` — profile names.
 - `vault:get(name)` → `Profile | null` — `{ name, apiKey }`.
@@ -149,17 +153,39 @@ The renderer cannot use `navigator.clipboard` reliably (focus/permission gotchas
 For each workspace, `<userData>/state/<name>/workspace.json` records the persistent spec:
 
 ```ts
+type WorkspaceKind = 'container' | 'local';
+
 interface WorkspaceSpec {
   name: string;
   workspaceRoot: string;   // host path bind-mounted into the workspace
   workspaceSubdir: string; // subdirectory the agent works in
   profile: string;         // vault profile name, or 'oauth'
+  kind: WorkspaceKind;     // 'container' today; 'local' is selectable in UI, not yet wired
+  image?: string;          // image ref for kind='container'; undefined for 'local'
   createdAt: number;
   lastUsedAt: number;
 }
 ```
 
 The manifest is written on `workspace:create` and updated on successful `workspace:start`. The API key is NOT persisted; only the `profile` name is, which is resolved against the keychain at start time. `workspace:remove(_, { deleteState: true })` removes the state dir (and thus the manifest), so the workspace disappears from the past list.
+
+Manifests written before `kind`/`image` existed default to `kind: 'container'` and an undefined `image` (the runner image was used implicitly). The renderer treats undefined-kind as container, so older manifests Just Work.
+
+### Image library (on disk)
+`<userData>/imageLibrary.json` records every image a container workspace has been created against. Updated automatically on each `workspace:create` (container kind): if the ref is new the entry is inserted with labels pulled via `docker.getImage(ref).inspect()`; if it already exists, `lastUsedAt` and `useCount` are bumped and the labels are refreshed. The new-workspace modal's image picker filters this library by free-text substring across the ref and every label key/value.
+
+```ts
+interface ImageEntry {
+  ref: string;                       // 'ghcr.io/org/img:tag'
+  digest?: string;                   // resolved image digest (sha256:…)
+  labels: Record<string, string>;    // from image inspect; LABEL directives from the Dockerfile
+  firstUsedAt: number;
+  lastUsedAt: number;
+  useCount: number;
+}
+```
+
+Writes are atomic (write-to-temp + rename). Reads tolerate a missing or malformed file by returning an empty library. Manual deletion of entries is exposed via `images:remove`; manual *addition* is not exposed today (the library is purely use-driven).
 
 ### Workspace shape (returned over IPC)
 The `Workspace` type joins the manifest with live backend state:
@@ -213,10 +239,10 @@ The index exists because `keytar` has no list operation. It is maintained on eve
 2. `<CreateWorkspaceModal>` opens. The top section is a "past workspaces" list pulled from `workspace:list` — sorted most-recently-used first, each row showing name, host path, state dot (running/stopped/deleted), and a relative timestamp.
 3. Clicking a past workspace calls `handleRestart(workspace)`:
    - `workspace:start(name)` is tried first. If the container exists (live or stopped), it's started and selected.
-   - If `workspace:start` returns null (no live container), the renderer falls through to the create flow using the saved manifest values — resolving the API key from the vault when `profile !== 'oauth'`.
-4. Otherwise the user fills the form (name with pet-name placeholder, workspace root with directory picker, subdir, profile name), and clicks **Create & start**.
+   - If `workspace:start` returns null (no live container), the renderer falls through to the create flow using the saved manifest values (including the original `kind` and `image`) — resolving the API key from the vault when `profile !== 'oauth'`.
+4. Otherwise the user fills the form. The first decision is **Type**: a radio between **Container** (default — isolated Docker runner) and **Local** (runs on this host, "coming soon" — submitting throws). For Container, an **Image** input appears next, defaulting to the most-recently-used library image (or the bundled runner if the library is empty). Below the input, the image library renders as a scrollable list with free-text filtering across the ref + every label key/value; clicking a row fills the input. The form then collects name (with pet-name placeholder), workspace root (with directory picker + last-used persistence), subdir, and profile name. **Create & start** submits.
 5. Renderer calls `vault:get(profileName)` if a profile name was entered. If null, an error appears inline.
-6. Renderer calls `workspace:ensureImage` (pulls from GHCR if needed), then `workspace:create` with `env: { ANTHROPIC_API_KEY: profile.apiKey }` (or `{}` for OAuth mode). Main creates the container, writes the manifest, and returns the `Workspace`.
+6. Renderer calls `workspace:ensureImage` (pulls the chosen image from its registry if needed), then `workspace:create` with `{ kind, image, env, … }`. Main creates the container, writes the manifest, records the image into the library (via `imageLibrary.recordImage` with labels from `docker inspect`), and returns the `Workspace`.
 7. The top strip refreshes; the new workspace appears.
 
 ### Attach a terminal
@@ -284,6 +310,7 @@ claude-fleet/
     │   ├── docker.ts                  # Docker backend (dockerode wrapper + PTY attach)
     │   ├── mock.ts                    # mock backend behind CLAUDE_FLEET_MOCK=1
     │   ├── workspaces.ts              # WorkspaceSpec types + manifest read/write/list
+    │   ├── imageLibrary.ts            # imageLibrary.json read/write + auto-record
     │   ├── paths.ts                   # state-dir path conventions
     │   ├── fs.ts                      # isDirectory / mkdirp helpers
     │   └── vault.ts                   # keytar wrapper + name index

@@ -17,6 +17,8 @@ function seed(): void {
     workspaceRoot: '/tmp/mock-alpha',
     workspaceSubdir: '',
     profile: 'oauth',
+    kind: 'container',
+    image: 'ghcr.io/imioimi/claude-fleet/runner:latest',
     createdAt: now - 3600_000,
     lastUsedAt: now - 1800_000,
     state: 'running',
@@ -28,6 +30,8 @@ function seed(): void {
     workspaceRoot: '/tmp/mock-beta',
     workspaceSubdir: 'frontend',
     profile: 'default',
+    kind: 'container',
+    image: 'ghcr.io/imioimi/claude-fleet/runner:latest',
     createdAt: now - 7200_000,
     lastUsedAt: now - 7200_000,
     state: 'stopped',
@@ -56,6 +60,8 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
     workspaceRoot: spec.workspaceRoot,
     workspaceSubdir: spec.workspaceSubdir,
     profile: spec.profile,
+    kind: 'container',
+    image: spec.image ?? 'ghcr.io/imioimi/claude-fleet/runner:latest',
     createdAt: Date.now(),
     lastUsedAt: Date.now(),
     state: 'running',
@@ -64,6 +70,26 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
   };
   workspaces.set(id, ws);
   return ws;
+}
+
+/**
+ * Mock inspect — returns a static label set for any ref so the image
+ * library has something to record in mock mode.
+ */
+export async function inspectImage(ref: string): Promise<{
+  ref: string;
+  digest?: string;
+  labels: Record<string, string>;
+}> {
+  return {
+    ref,
+    digest: 'sha256:mock0000mock0000mock0000mock0000mock0000mock0000mock0000mock0000',
+    labels: {
+      'org.opencontainers.image.source': 'https://github.com/ImIOImI/claude-fleet',
+      'com.claude-fleet.kind': 'runner',
+      'com.claude-fleet.language': 'node'
+    }
+  };
 }
 
 export async function startWorkspace(name: string): Promise<string | null> {

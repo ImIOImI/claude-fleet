@@ -28,8 +28,31 @@ export interface CreateWorkspaceInput {
   workspaceSubdir: string;
   profile: string;
   env: Record<string, string>;
+  /** Image reference to launch. Defaults to the bundled runner image. */
+  image?: string;
   cpus?: number;
   memoryMb?: number;
+}
+
+export interface ImageInspectResult {
+  ref: string;
+  digest?: string;
+  labels: Record<string, string>;
+}
+
+/**
+ * Pull (if needed) and inspect an image, returning its digest + labels.
+ * Used by the image library to record metadata about images workspaces
+ * are actually created against.
+ */
+export async function inspectImage(ref: string): Promise<ImageInspectResult> {
+  const info = await docker.getImage(ref).inspect();
+  const labels = (info.Config?.Labels ?? {}) as Record<string, string>;
+  // RepoDigests look like ['ghcr.io/foo/bar@sha256:abc…']; we just want
+  // the trailing digest part for display.
+  const repoDigest = info.RepoDigests?.[0];
+  const digest = repoDigest?.split('@')[1];
+  return { ref, digest, labels };
 }
 
 export interface PullProgress {
@@ -90,6 +113,8 @@ export async function listLiveWorkspaces(): Promise<Workspace[]> {
       workspaceRoot: c.Labels['com.claude-fleet.workspace-root'] ?? '',
       workspaceSubdir: c.Labels['com.claude-fleet.subdir'] ?? '',
       profile: c.Labels['com.claude-fleet.profile'] ?? '',
+      kind: 'container',
+      image: c.Image,
       createdAt: c.Created * 1000,
       lastUsedAt: c.Created * 1000,
       state,
@@ -113,6 +138,7 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
   const uid = process.getuid?.() ?? 1000;
   const gid = process.getgid?.() ?? 1000;
 
+  const image = spec.image ?? RUNNER_IMAGE;
   const envArr = ['HOME=/home/fleet', ...Object.entries(spec.env).map(([k, v]) => `${k}=${v}`)];
   const hostCfg: Docker.HostConfig = {
     Binds: [
@@ -126,7 +152,7 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
 
   const created = await docker.createContainer({
     name: spec.name,
-    Image: RUNNER_IMAGE,
+    Image: image,
     User: `${uid}:${gid}`,
     Tty: true,
     OpenStdin: true,
@@ -152,6 +178,8 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
     workspaceRoot: spec.workspaceRoot,
     workspaceSubdir: spec.workspaceSubdir,
     profile: spec.profile,
+    kind: 'container',
+    image,
     createdAt,
     lastUsedAt: createdAt,
     state: 'running',

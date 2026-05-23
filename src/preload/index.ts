@@ -25,6 +25,10 @@ const api = {
       }
     }
   },
+  images: {
+    list: () => ipcRenderer.invoke('images:list'),
+    remove: (ref: string) => ipcRenderer.invoke('images:remove', ref)
+  },
   fs: {
     isDirectory: (path: string): Promise<boolean> => ipcRenderer.invoke('fs:isDirectory', path),
     mkdirp: (path: string): Promise<void> => ipcRenderer.invoke('fs:mkdirp', path)

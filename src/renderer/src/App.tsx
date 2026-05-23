@@ -9,6 +9,7 @@ import { CloseWorkspaceModal } from './components/CloseWorkspaceModal';
 import { ProfilesDialog } from './components/ProfilesDialog';
 
 export type WorkspaceState = 'running' | 'stopped' | 'deleted';
+export type WorkspaceKind = 'container' | 'local';
 
 export interface WorkspaceSummary {
   name: string;
@@ -23,6 +24,8 @@ export interface WorkspaceSummary {
   workspaceRoot: string;
   workspaceSubdir: string;
   profile: string;
+  kind: WorkspaceKind;
+  image?: string;
   createdAt: number;
   lastUsedAt: number;
 }
@@ -54,12 +57,15 @@ export function App() {
       workspaceRoot: string;
       workspaceSubdir: string;
       profile: string;
+      kind?: WorkspaceKind;
+      image?: string;
       createdAt: number;
       lastUsedAt: number;
     }>;
     setWorkspaces(
       list.map((w) => ({
         ...w,
+        kind: w.kind ?? 'container',
         id: w.containerId ?? `deleted:${w.name}`
       }))
     );
@@ -97,9 +103,17 @@ export function App() {
   const liveCount = workspaces.filter((w) => w.state !== 'deleted').length;
 
   const handleCreate = async (
-    spec: { name: string; workspaceRoot: string; workspaceSubdir: string; profileName: string },
+    spec: {
+      name: string;
+      workspaceRoot: string;
+      workspaceSubdir: string;
+      profileName: string;
+      kind?: 'container' | 'local';
+      image?: string;
+    },
     setStatus: (msg: string) => void
   ) => {
+    const kind = spec.kind ?? 'container';
     let env: Record<string, string> = {};
     const labelProfile = spec.profileName || 'oauth';
 
@@ -115,13 +129,17 @@ export function App() {
       }
     }
 
-    await window.api.workspace.ensureImage(({ message }) => setStatus(message));
+    if (kind === 'container') {
+      await window.api.workspace.ensureImage(({ message }) => setStatus(message));
+    }
     setStatus('Creating workspace…');
     await window.api.workspace.create({
       name: spec.name,
       workspaceRoot: spec.workspaceRoot,
       workspaceSubdir: spec.workspaceSubdir,
       profile: labelProfile,
+      kind,
+      image: spec.image,
       env
     });
     refresh();
@@ -151,7 +169,9 @@ export function App() {
         name: workspace.name,
         workspaceRoot: workspace.workspaceRoot,
         workspaceSubdir: workspace.workspaceSubdir,
-        profileName: workspace.profile === 'oauth' ? '' : workspace.profile
+        profileName: workspace.profile === 'oauth' ? '' : workspace.profile,
+        kind: workspace.kind,
+        image: workspace.image
       },
       setStatus
     );

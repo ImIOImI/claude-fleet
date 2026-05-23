@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import type { WorkspaceSummary } from '../App';
 
+export type WorkspaceKind = 'container' | 'local';
+
 interface Props {
   open: boolean;
   workspaces: WorkspaceSummary[];
@@ -11,6 +13,8 @@ interface Props {
       workspaceRoot: string;
       workspaceSubdir: string;
       profileName: string;
+      kind: WorkspaceKind;
+      image?: string;
     },
     setStatus: (msg: string) => void
   ) => Promise<void>;
@@ -19,6 +23,17 @@ interface Props {
     setStatus: (msg: string) => void
   ) => Promise<void>;
 }
+
+interface ImageEntry {
+  ref: string;
+  digest?: string;
+  labels: Record<string, string>;
+  firstUsedAt: number;
+  lastUsedAt: number;
+  useCount: number;
+}
+
+const DEFAULT_RUNNER_IMAGE = 'ghcr.io/imioimi/claude-fleet/runner:latest';
 
 // 16 × 16 = 256 friendly defaults. Adjective list deliberately upbeat (no
 // "angry-llama"); animals trimmed to short, recognizable picks so the
@@ -83,6 +98,9 @@ export function CreateWorkspaceModal({
   const [workspaceRoot, setWorkspaceRoot] = useState<string>(loadLastWorkspaceRoot);
   const [workspaceSubdir, setWorkspaceSubdir] = useState('');
   const [profileName, setProfileName] = useState('');
+  const [kind, setKind] = useState<WorkspaceKind>('container');
+  const [image, setImage] = useState<string>('');
+  const [libraryImages, setLibraryImages] = useState<ImageEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -96,7 +114,19 @@ export function CreateWorkspaceModal({
       setNamePlaceholder(petName());
       setWorkspaceRoot(loadLastWorkspaceRoot());
       setError(null);
+      // Load the image library on each open so newly-recorded images
+      // surface without an app restart.
+      window.api.images.list().then((entries: ImageEntry[]) => {
+        setLibraryImages(entries);
+        // Default the image input to the most-recently-used library entry,
+        // or to the bundled runner if the library is empty.
+        if (!image) {
+          const recent = [...entries].sort((a, b) => b.lastUsedAt - a.lastUsedAt)[0];
+          setImage(recent?.ref ?? DEFAULT_RUNNER_IMAGE);
+        }
+      });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   if (!open) return null;
@@ -132,6 +162,10 @@ export function CreateWorkspaceModal({
 
   const submit = async () => {
     if (busy) return;
+    if (kind === 'local') {
+      setError("Local workspaces aren't implemented yet. Pick 'Container' for now.");
+      return;
+    }
     if (!effectiveName) {
       setError('Workspace name is required.');
       return;
@@ -142,6 +176,10 @@ export function CreateWorkspaceModal({
     }
     if (!workspaceRoot.trim()) {
       setError('Workspace root is required.');
+      return;
+    }
+    if (kind === 'container' && !image.trim()) {
+      setError('Image reference is required for a container workspace.');
       return;
     }
     setBusy(true);
@@ -164,7 +202,9 @@ export function CreateWorkspaceModal({
           name: effectiveName,
           workspaceRoot: ws,
           workspaceSubdir: workspaceSubdir.trim(),
-          profileName: profileName.trim()
+          profileName: profileName.trim(),
+          kind,
+          image: kind === 'container' ? image.trim() : undefined
         },
         setStatus
       );
@@ -220,6 +260,56 @@ export function CreateWorkspaceModal({
         )}
 
         <div className="modal-section-label">Create a new workspace</div>
+
+        <div className="form-row" aria-label="Workspace kind">
+          <label>Type</label>
+          <div className="kind-radios" role="radiogroup">
+            <label className={`kind-radio ${kind === 'container' ? 'active' : ''}`}>
+              <input
+                type="radio"
+                name="workspace-kind"
+                value="container"
+                checked={kind === 'container'}
+                onChange={() => setKind('container')}
+                disabled={busy}
+              />
+              <span>Container</span>
+              <span className="kind-help">isolated Docker runner</span>
+            </label>
+            <label className={`kind-radio ${kind === 'local' ? 'active' : ''}`}>
+              <input
+                type="radio"
+                name="workspace-kind"
+                value="local"
+                checked={kind === 'local'}
+                onChange={() => setKind('local')}
+                disabled={busy}
+              />
+              <span>Local</span>
+              <span className="kind-help">runs on this host · coming soon</span>
+            </label>
+          </div>
+        </div>
+
+        {kind === 'container' && (
+          <div className="form-row">
+            <label>Image</label>
+            <input
+              aria-label="Image reference"
+              value={image}
+              onChange={(e) => setImage(e.target.value)}
+              placeholder={DEFAULT_RUNNER_IMAGE}
+              disabled={busy}
+            />
+            <ImagePicker
+              library={libraryImages}
+              filter={image}
+              onPick={setImage}
+              busy={busy}
+            />
+          </div>
+        )}
+
         <div className="form-row">
           <label>Name</label>
           <input
@@ -279,6 +369,76 @@ export function CreateWorkspaceModal({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+interface ImagePickerProps {
+  library: ImageEntry[];
+  filter: string;
+  onPick: (ref: string) => void;
+  busy: boolean;
+}
+
+function ImagePicker({ library, filter, onPick, busy }: ImagePickerProps) {
+  if (library.length === 0) return null;
+
+  const needle = filter.trim().toLowerCase();
+  const filtered = needle
+    ? library.filter((img) => {
+        if (img.ref.toLowerCase().includes(needle)) return true;
+        for (const [key, value] of Object.entries(img.labels)) {
+          if (key.toLowerCase().includes(needle)) return true;
+          if (String(value).toLowerCase().includes(needle)) return true;
+        }
+        return false;
+      })
+    : library;
+
+  const sorted = [...filtered].sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+
+  return (
+    <div className="image-library" aria-label="Image library">
+      <div className="image-library-header">
+        {needle
+          ? `${sorted.length} of ${library.length} match "${filter.trim()}"`
+          : `${library.length} known image${library.length === 1 ? '' : 's'}`}
+      </div>
+      {sorted.length === 0 ? (
+        <div className="image-library-empty">
+          No library image matches. The reference will be added when this workspace is created.
+        </div>
+      ) : (
+        <ul className="image-library-list">
+          {sorted.slice(0, 8).map((img) => {
+            const labelEntries = Object.entries(img.labels).slice(0, 3);
+            return (
+              <li key={img.ref}>
+                <button
+                  type="button"
+                  className="image-row"
+                  onClick={() => onPick(img.ref)}
+                  disabled={busy}
+                  title={img.ref}
+                >
+                  <span className="image-ref">{img.ref}</span>
+                  {labelEntries.length > 0 && (
+                    <span className="image-labels">
+                      {labelEntries.map(([k, v]) => (
+                        <span key={k} className="image-label">
+                          <span className="image-label-key">{k}</span>
+                          <span className="image-label-eq">=</span>
+                          <span className="image-label-value">{v}</span>
+                        </span>
+                      ))}
+                    </span>
+                  )}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }
