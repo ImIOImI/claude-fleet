@@ -1,0 +1,174 @@
+/* Hi-fi design tokens for claude-fleet.
+ *
+ * Light is a warm near-white; dark is a deep neutral that goes well with
+ * terminal output. Colors are oklch-based for predictable contrast across
+ * modes. Per-container accents (c1 blue, c2 green, c3 rust) keep their hue
+ * across modes; lightness shifts so they stay legible on either backdrop.
+ *
+ * Switch modes by setting `data-theme="dark"` or `data-theme="light"` on
+ * the .hifi-root element (controlled by React state).
+ */
+
+.hifi-root {
+  /* defaults — overridden by [data-theme] below */
+  color-scheme: light;
+}
+
+/* ── light ──────────────────────────────────────────────────────────── */
+.hifi-root[data-theme="light"] {
+  /* surfaces, ordered shallowest → deepest */
+  --bg-canvas:   oklch(98.5% 0.005 80);
+  --bg:          oklch(99% 0.003 80);
+  --bg-1:        oklch(97% 0.005 80);
+  --bg-2:        oklch(94.5% 0.006 80);
+  --bg-3:        oklch(91% 0.008 80);
+
+  --bg-card:     oklch(100% 0 0);
+  --bg-hover:    oklch(96% 0.005 80);
+
+  /* terminal goes dark even in light mode — convention */
+  --bg-term:     oklch(16% 0.01 90);
+  --term-ink:    oklch(94% 0.01 90);
+  --term-ink-2:  oklch(72% 0.01 90);
+  --term-ink-3:  oklch(52% 0.01 90);
+
+  /* ink */
+  --ink:         oklch(18% 0.005 80);
+  --ink-1:       oklch(38% 0.01 80);
+  --ink-2:       oklch(58% 0.01 80);
+  --ink-3:       oklch(72% 0.01 80);
+
+  /* rules + borders */
+  --rule:        oklch(86% 0.01 80);
+  --rule-soft:   oklch(92% 0.008 80);
+  --rule-strong: oklch(74% 0.01 80);
+
+  /* semantic */
+  --ok:          oklch(58% 0.13 145);
+  --warn:        oklch(72% 0.15 75);
+  --danger:      oklch(56% 0.18 28);
+  --info:        oklch(58% 0.13 240);
+
+  /* per-container */
+  --c1:          oklch(52% 0.16 250);
+  --c1-soft:     oklch(92% 0.05 250);
+  --c1-tint:     oklch(96% 0.025 250);
+  --c2:          oklch(52% 0.14 145);
+  --c2-soft:     oklch(92% 0.05 145);
+  --c2-tint:     oklch(96% 0.025 145);
+  --c3:          oklch(55% 0.16 45);
+  --c3-soft:     oklch(92% 0.05 45);
+  --c3-tint:     oklch(96% 0.025 45);
+
+  /* shadows */
+  --shadow-sm:   0 1px 2px rgb(0 0 0 / 0.04), 0 1px 1px rgb(0 0 0 / 0.04);
+  --shadow:      0 4px 12px rgb(0 0 0 / 0.06), 0 1px 2px rgb(0 0 0 / 0.04);
+  --shadow-lg:   0 16px 40px rgb(0 0 0 / 0.12), 0 4px 12px rgb(0 0 0 / 0.06);
+}
+
+/* ── dark ───────────────────────────────────────────────────────────── */
+.hifi-root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg-canvas:   oklch(8% 0.005 80);
+  --bg:          oklch(11.5% 0.005 80);
+  --bg-1:        oklch(14% 0.006 80);
+  --bg-2:        oklch(17% 0.007 80);
+  --bg-3:        oklch(21% 0.008 80);
+
+  --bg-card:     oklch(14% 0.006 80);
+  --bg-hover:    oklch(18% 0.008 80);
+
+  --bg-term:     oklch(9% 0.005 90);
+  --term-ink:    oklch(94% 0.01 90);
+  --term-ink-2:  oklch(70% 0.01 90);
+  --term-ink-3:  oklch(50% 0.01 90);
+
+  --ink:         oklch(96% 0.005 80);
+  --ink-1:       oklch(78% 0.008 80);
+  --ink-2:       oklch(58% 0.008 80);
+  --ink-3:       oklch(38% 0.008 80);
+
+  --rule:        oklch(25% 0.008 80);
+  --rule-soft:   oklch(18% 0.006 80);
+  --rule-strong: oklch(35% 0.01 80);
+
+  --ok:          oklch(70% 0.16 145);
+  --warn:        oklch(78% 0.16 75);
+  --danger:      oklch(66% 0.18 28);
+  --info:        oklch(70% 0.14 240);
+
+  --c1:          oklch(72% 0.14 250);
+  --c1-soft:     oklch(28% 0.08 250);
+  --c1-tint:     oklch(18% 0.04 250);
+  --c2:          oklch(72% 0.14 145);
+  --c2-soft:     oklch(28% 0.08 145);
+  --c2-tint:     oklch(18% 0.04 145);
+  --c3:          oklch(72% 0.14 45);
+  --c3-soft:     oklch(28% 0.08 45);
+  --c3-tint:     oklch(18% 0.04 45);
+
+  --shadow-sm:   0 1px 2px rgb(0 0 0 / 0.4), 0 1px 1px rgb(0 0 0 / 0.3);
+  --shadow:      0 4px 12px rgb(0 0 0 / 0.4), 0 1px 2px rgb(0 0 0 / 0.3);
+  --shadow-lg:   0 16px 40px rgb(0 0 0 / 0.5), 0 4px 12px rgb(0 0 0 / 0.4);
+}
+
+/* ── base typography ────────────────────────────────────────────────── */
+.hifi-root {
+  font-family: 'Geist', 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  font-feature-settings: 'ss01', 'cv11';
+  color: var(--ink);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.hifi-root .mono {
+  font-family: 'Geist Mono', 'JetBrains Mono', ui-monospace, monospace;
+  font-feature-settings: 'ss01', 'ss03';
+}
+
+.hifi-root .micro {
+  font-family: 'Geist Mono', 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+/* ── primitive states ───────────────────────────────────────────────── */
+.hifi-root button {
+  font-family: inherit;
+  color: inherit;
+}
+.hifi-root *,
+.hifi-root *::before,
+.hifi-root *::after {
+  box-sizing: border-box;
+}
+
+/* ── animations ─────────────────────────────────────────────────────── */
+@keyframes hifiPulse {
+  0%   { transform: scale(0.6); opacity: 0.7; }
+  70%  { transform: scale(1.8); opacity: 0;   }
+  100% { transform: scale(1.8); opacity: 0;   }
+}
+@keyframes hifiBlink {
+  0%, 49%   { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+@keyframes hifiSpin {
+  to { transform: rotate(360deg); }
+}
+@keyframes hifiSlideUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── scrollbar ──────────────────────────────────────────────────────── */
+.hifi-root ::-webkit-scrollbar { width: 8px; height: 8px; }
+.hifi-root ::-webkit-scrollbar-thumb {
+  background: var(--rule); border-radius: 4px;
+}
+.hifi-root ::-webkit-scrollbar-track { background: transparent; }
+
