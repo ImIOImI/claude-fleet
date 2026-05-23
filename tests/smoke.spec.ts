@@ -43,6 +43,10 @@ test('preload exposes window.api with all expected surfaces', async () => {
 test('+ New container opens the modal', async () => {
   const { app, window } = await launch();
   try {
+    // ContainerTabStrip disables the + New container button when
+    // daemonReachable === false; stub the daemon so the test isn't gated
+    // on host Docker state.
+    await mockMainIpc(app);
     await window.locator('.top-strip').getByRole('button', { name: '+ New container' }).click();
     await expect(window.getByRole('heading', { name: 'New container' })).toBeVisible();
   } finally {
@@ -50,13 +54,17 @@ test('+ New container opens the modal', async () => {
   }
 });
 
-test('Create button surfaces validation errors when fields are empty', async () => {
+test('Create button surfaces validation errors when required fields are empty', async () => {
   const { app, window } = await launch();
   try {
+    await mockMainIpc(app);
     await window.locator('.top-strip').getByRole('button', { name: '+ New container' }).click();
     await expect(window.getByRole('heading', { name: 'New container' })).toBeVisible();
 
-    // Click Create with no input — should surface an error, not silently no-op
+    // Click Create with no input. Name now has a pet-name placeholder
+    // default, so the remaining required field is the workspace root —
+    // we still expect a "required" / "match" error to be surfaced rather
+    // than a silent no-op.
     await window.getByRole('button', { name: 'Create & start' }).click();
     await expect(window.locator('.error-text')).toContainText(/required|match/);
   } finally {
@@ -142,7 +150,7 @@ test('Create flow (OAuth mode): empty profile submits with profile=oauth and no 
     await mockMainIpc(app, { isDirectoryReturns: true });
 
     await window.locator('.top-strip').getByRole('button', { name: '+ New container' }).click();
-    await window.getByPlaceholder('my-container').fill('test-oauth-container');
+    await window.getByLabel('Container name').fill('test-oauth-container');
     await window.getByPlaceholder('/home/troy/repos').fill('/tmp/fleet-test');
     // Subdir and profile left blank → OAuth mode
 
@@ -180,7 +188,7 @@ test('Create flow: missing workspace prompts to create it and mkdirps before con
     });
 
     await window.locator('.top-strip').getByRole('button', { name: '+ New container' }).click();
-    await window.getByPlaceholder('my-container').fill('test-mkdir');
+    await window.getByLabel('Container name').fill('test-mkdir');
     await window.getByPlaceholder('/home/troy/repos').fill('/tmp/does-not-exist-yet');
 
     await window.getByRole('button', { name: 'Create & start' }).click();
@@ -286,7 +294,7 @@ test('Create flow: declining the missing-workspace confirm aborts without mkdirp
     });
 
     await window.locator('.top-strip').getByRole('button', { name: '+ New container' }).click();
-    await window.getByPlaceholder('my-container').fill('test-decline');
+    await window.getByLabel('Container name').fill('test-decline');
     await window.getByPlaceholder('/home/troy/repos').fill('/tmp/declined-path');
     await window.getByRole('button', { name: 'Create & start' }).click();
 

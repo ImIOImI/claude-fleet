@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 interface Props {
   open: boolean;
@@ -14,6 +14,23 @@ interface Props {
   ) => Promise<void>;
 }
 
+// 16 × 16 = 256 friendly defaults. Adjective list deliberately upbeat (no
+// "angry-llama"); animals trimmed to short, recognizable picks so the
+// chip rendered in the top strip stays compact.
+const ADJECTIVES = [
+  'happy', 'calm', 'bold', 'quiet', 'swift', 'lucky', 'brave', 'clever',
+  'eager', 'gentle', 'jolly', 'kind', 'merry', 'nimble', 'plucky', 'witty'
+];
+const ANIMALS = [
+  'llama', 'otter', 'fox', 'panda', 'lemur', 'koala', 'bunny', 'finch',
+  'gecko', 'owl', 'wren', 'seal', 'mouse', 'hare', 'frog', 'crane'
+];
+function petName(): string {
+  const a = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
+  const n = ANIMALS[Math.floor(Math.random() * ANIMALS.length)];
+  return `${a}-${n}`;
+}
+
 export function CreateContainerModal({ open, onClose, onCreate }: Props) {
   const [name, setName] = useState('');
   const [workspaceRoot, setWorkspaceRoot] = useState('');
@@ -22,10 +39,20 @@ export function CreateContainerModal({ open, onClose, onCreate }: Props) {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [namePlaceholder, setNamePlaceholder] = useState<string>(petName);
+
+  // Refresh the suggested name each time the modal opens so re-opens
+  // don't reuse a previously-shown suggestion.
+  useEffect(() => {
+    if (open) setNamePlaceholder(petName());
+  }, [open]);
 
   if (!open) return null;
 
-  const nameOk = /^[a-zA-Z0-9_-]+$/.test(name);
+  // Effective name: what the user typed, or the placeholder suggestion
+  // they didn't override. Tab+Enter on a fresh modal uses the suggestion.
+  const effectiveName = name.trim() || namePlaceholder;
+  const nameOk = /^[a-zA-Z0-9_-]+$/.test(effectiveName);
 
   const browse = async () => {
     const picked = await window.api.dialog.pickDirectory(workspaceRoot.trim() || undefined);
@@ -34,7 +61,7 @@ export function CreateContainerModal({ open, onClose, onCreate }: Props) {
 
   const submit = async () => {
     if (busy) return;
-    if (!name) {
+    if (!effectiveName) {
       setError('Container name is required.');
       return;
     }
@@ -63,7 +90,7 @@ export function CreateContainerModal({ open, onClose, onCreate }: Props) {
 
       await onCreate(
         {
-          name,
+          name: effectiveName,
           workspaceRoot: ws,
           workspaceSubdir: workspaceSubdir.trim(),
           profileName: profileName.trim()
@@ -91,9 +118,10 @@ export function CreateContainerModal({ open, onClose, onCreate }: Props) {
         <div className="form-row">
           <label>Name</label>
           <input
+            aria-label="Container name"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="my-container"
+            placeholder={namePlaceholder}
             disabled={busy}
             autoFocus
           />
