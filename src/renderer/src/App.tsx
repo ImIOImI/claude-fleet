@@ -39,7 +39,10 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [profilesOpen, setProfilesOpen] = useState(false);
-  const [closeOpen, setCloseOpen] = useState(false);
+  // The Close modal can be opened on any workspace, not just the selected
+  // one (the hamburger menu on each chip opens it directly). Track the
+  // target workspace by id rather than a boolean.
+  const [closeTargetId, setCloseTargetId] = useState<string | null>(null);
 
   const refresh = async () => {
     if (!window.api) return;
@@ -188,6 +191,8 @@ export function App() {
         onSelect={setSelectedId}
         onNewWorkspace={() => setCreateOpen(true)}
         onOpenProfiles={() => setProfilesOpen(true)}
+        onCloseWorkspace={(w) => setCloseTargetId(w.id)}
+        onRefresh={refresh}
       />
 
       <div className="app-body">
@@ -206,7 +211,7 @@ export function App() {
                 <span style={{ marginLeft: 'auto' }}>
                   <button
                     className="btn danger"
-                    onClick={() => setCloseOpen(true)}
+                    onClick={() => setCloseTargetId(selected.id)}
                     title="Stop and/or remove this workspace"
                   >
                     Close…
@@ -248,16 +253,21 @@ export function App() {
       {vaultAvailable !== false && (
         <ProfilesDialog open={profilesOpen} onClose={() => setProfilesOpen(false)} />
       )}
-      {closeOpen && selected && selected.containerId && (
-        <CloseWorkspaceModal
-          workspace={{ ...selected, id: selected.containerId }}
-          onClose={() => setCloseOpen(false)}
-          onClosed={() => {
-            setSelectedId(null);
-            refresh();
-          }}
-        />
-      )}
+      {(() => {
+        if (!closeTargetId) return null;
+        const target = workspaces.find((w) => w.id === closeTargetId);
+        if (!target || !target.containerId) return null;
+        return (
+          <CloseWorkspaceModal
+            workspace={{ ...target, id: target.containerId }}
+            onClose={() => setCloseTargetId(null)}
+            onClosed={() => {
+              if (selectedId === target.id) setSelectedId(null);
+              refresh();
+            }}
+          />
+        );
+      })()}
     </div>
   );
 }

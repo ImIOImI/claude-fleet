@@ -287,7 +287,7 @@ test('Mock mode: selecting a workspace mounts the terminal pane', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {
     await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
-    await expect(window.locator('.ws-chip.active', { hasText: 'mock-alpha' })).toBeVisible();
+    await expect(window.locator('.ws-chip-group.active', { hasText: 'mock-alpha' })).toBeVisible();
     await expect(window.locator('.terminal-host')).toBeVisible();
   } finally {
     await app.close();
@@ -464,6 +464,83 @@ test('Workspace kind selector: Local shows a "coming soon" error on submit', asy
     await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
     const calls = await getCalls(app);
     expect(calls.create).toEqual([]);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Hamburger menu: running workspace shows Pause/Stop, paused shows Resume', async () => {
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    const chipGroup = window.locator('.ws-chip-group', { hasText: 'mock-alpha' });
+    const trigger = chipGroup.locator('.ws-chip-menu-trigger');
+    await trigger.click();
+
+    // The menu is portaled to document.body; query it at page level.
+    const menu = window.locator('.ws-chip-menu');
+    await expect(menu).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: 'Pause' })).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: 'Stop' })).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: 'Close…' })).toBeVisible();
+    // Stopped/Start should NOT appear for a running workspace.
+    await expect(menu.getByRole('menuitem', { name: 'Resume' })).toBeHidden();
+    await expect(menu.getByRole('menuitem', { name: 'Start' })).toBeHidden();
+
+    await menu.getByRole('menuitem', { name: 'Pause' }).click();
+    await expect(menu).toBeHidden();
+    await expect(chipGroup.locator('.dot.paused')).toBeVisible();
+
+    // Re-open the menu — now we should see Resume instead.
+    await trigger.click();
+    await expect(menu).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: 'Resume' })).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: 'Pause' })).toBeHidden();
+    await expect(menu.getByRole('menuitem', { name: 'Stop' })).toBeHidden();
+
+    await menu.getByRole('menuitem', { name: 'Resume' }).click();
+    await expect(chipGroup.locator('.dot.running')).toBeVisible();
+  } finally {
+    await app.close();
+  }
+});
+
+test('Hamburger menu: stopped workspace shows Start (not Pause/Stop)', async () => {
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    // mock-beta is seeded as state='stopped'
+    const chipGroup = window.locator('.ws-chip-group', { hasText: 'mock-beta' });
+    await chipGroup.locator('.ws-chip-menu-trigger').click();
+
+    const menu = window.locator('.ws-chip-menu');
+    await expect(menu).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: 'Start' })).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: 'Close…' })).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: 'Pause' })).toBeHidden();
+    await expect(menu.getByRole('menuitem', { name: 'Stop' })).toBeHidden();
+    await expect(menu.getByRole('menuitem', { name: 'Resume' })).toBeHidden();
+
+    await menu.getByRole('menuitem', { name: 'Start' }).click();
+    await expect(chipGroup.locator('.dot.running')).toBeVisible();
+  } finally {
+    await app.close();
+  }
+});
+
+test('Hamburger menu: Close… opens the CloseWorkspaceModal even when chip is not selected', async () => {
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    // Don't click mock-beta first — go straight to its hamburger menu.
+    const chipGroup = window.locator('.ws-chip-group', { hasText: 'mock-beta' });
+    await chipGroup.locator('.ws-chip-menu-trigger').click();
+    await window
+      .locator('.ws-chip-menu')
+      .getByRole('menuitem', { name: 'Close…' })
+      .click();
+
+    // The Close modal opens for mock-beta (the chip the user clicked the
+    // menu on), not for whatever was previously selected (nothing here).
+    await expect(window.getByRole('heading', { name: 'Close workspace' })).toBeVisible();
+    await expect(window.locator('.modal-eyebrow', { hasText: 'mock-beta' })).toBeVisible();
   } finally {
     await app.close();
   }
