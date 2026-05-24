@@ -104,6 +104,14 @@ export async function startWorkspace(name: string): Promise<string | null> {
   return null;
 }
 
+export async function pauseWorkspace(id: string): Promise<void> {
+  const ws = workspaces.get(id);
+  if (ws && ws.state === 'running') {
+    ws.state = 'paused';
+    ws.status = 'Paused (was running)';
+  }
+}
+
 export async function stopWorkspace(id: string): Promise<void> {
   const ws = workspaces.get(id);
   if (ws) {
@@ -123,8 +131,9 @@ class FakeShell extends Duplex {
   // subsequent pushes (e.g., the prompt that would otherwise be written
   // right after runCmd returns), we'd push after end — which Node treats
   // as an error and which would suppress the 'end' event the renderer
-  // is waiting on.
-  private closed = false;
+  // is waiting on. Underscored to avoid the type collision with Duplex's
+  // own public `closed` property.
+  private _closed = false;
 
   constructor(private readonly workspaceName: string) {
     super();
@@ -132,7 +141,7 @@ class FakeShell extends Duplex {
   }
 
   private greet(): void {
-    if (this.closed) return;
+    if (this._closed) return;
     this.push('\x1b[1;36mclaude-fleet mock terminal\x1b[0m\r\n');
     this.push(`workspace: ${this.workspaceName}\r\n`);
     this.push("Type 'help' to see available mock commands.\r\n\r\n");
@@ -144,18 +153,18 @@ class FakeShell extends Duplex {
   }
 
   _write(chunk: Buffer | string, _enc: BufferEncoding, cb: (err?: Error | null) => void): void {
-    if (this.closed) {
+    if (this._closed) {
       cb();
       return;
     }
     const str = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
     for (const ch of str) {
-      if (this.closed) break;
+      if (this._closed) break;
       if (ch === '\r' || ch === '\n') {
         this.push('\r\n');
         this.runCmd(this.lineBuf.trim());
         this.lineBuf = '';
-        if (!this.closed) this.push(this.prompt);
+        if (!this._closed) this.push(this.prompt);
       } else if (ch === '\x7f' || ch === '\b') {
         if (this.lineBuf.length > 0) {
           this.lineBuf = this.lineBuf.slice(0, -1);
@@ -198,7 +207,7 @@ class FakeShell extends Duplex {
       // pty.onEnd listener in TerminalPane fires the "session ended"
       // overlay, the same way `/exit` does inside a real container.
       this.push('exiting…\r\n');
-      this.closed = true;
+      this._closed = true;
       this.push(null);
       return;
     }

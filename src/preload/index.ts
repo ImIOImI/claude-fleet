@@ -11,6 +11,7 @@ const api = {
     start: (name: string) => ipcRenderer.invoke('workspace:start', name),
     getManifest: (name: string) => ipcRenderer.invoke('workspace:getManifest', name),
     stop: (id: string) => ipcRenderer.invoke('workspace:stop', id),
+    pause: (id: string) => ipcRenderer.invoke('workspace:pause', id),
     remove: (id: string, opts?: { deleteState?: boolean }) =>
       ipcRenderer.invoke('workspace:remove', id, opts),
     ensureImage: async (onProgress: (p: { message: string }) => void): Promise<void> => {

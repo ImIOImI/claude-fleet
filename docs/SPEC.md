@@ -112,9 +112,10 @@ All channels are `ipcMain.handle`/`ipcRenderer.invoke` (promise-based) except th
 - `workspace:ping` → `boolean` — is the backend reachable (for the Docker backend, is the daemon up).
 - `workspace:list` → `Workspace[]` — merged list of live (running/stopped) workspaces plus deleted workspaces (those with a manifest on disk but no live container).
 - `workspace:create(input: CreateWorkspaceInput)` → `Workspace` — create + start a runner workspace AND write its manifest to `<userData>/state/<name>/workspace.json`.
-- `workspace:start(name)` → `Workspace | null` — start an existing (live, possibly stopped) workspace by name; returns null if no live container has that name (caller should recreate from manifest via the create flow).
+- `workspace:start(name)` → `Workspace | null` — start an existing (live, possibly stopped or paused) workspace by name. Paused containers are `unpause`d; stopped containers are `start`ed. Returns null if no live container has that name (caller should recreate from manifest via the create flow).
 - `workspace:getManifest(name)` → `WorkspaceSpec | null` — read the persisted manifest.
 - `workspace:stop(id)` → `void` — stop with 5s grace; ignores 304/404.
+- `workspace:pause(id)` → `void` — `docker pause` (cgroups freezer). Idempotent: 409 (already paused) and 404 (container gone) are treated as no-ops.
 - `workspace:remove(id, opts?: { deleteState? })` → `void` — force-remove; if `deleteState`, also `rm -rf <userData>/state/<name>` (which removes the manifest too, so the workspace disappears from the past list).
 - `workspace:ensureImage(channelId)` → progress over `workspace:ensureImage:progress:${channelId}`, resolves when the runner image is locally present (no-op if it already is; otherwise pulls from GHCR).
 
@@ -191,12 +192,20 @@ Writes are atomic (write-to-temp + rename). Reads tolerate a missing or malforme
 The `Workspace` type joins the manifest with live backend state:
 
 ```ts
+type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
+
 interface Workspace extends WorkspaceSpec {
-  state: 'running' | 'stopped' | 'deleted';
+  state: WorkspaceState;
   containerId?: string;  // present iff state !== 'deleted'
   status?: string;       // backend status string when available
 }
 ```
+
+**State semantics:**
+- **running** — the backend container is alive and its processes are executing.
+- **paused** — the container is alive but all its processes are frozen via cgroups freezer (`docker pause`). Recoverable with `docker unpause`; preserves in-memory state.
+- **stopped** — the container exists but its main process has exited (or it's in any other non-live state like `created` / `dead`).
+- **deleted** — there is no live container, but a manifest is on disk. Recoverable by recreating via the create flow.
 
 ### Docker container labels (backend implementation)
 Today the only workspace backend is a Docker container. Each managed container carries:
@@ -269,8 +278,9 @@ Each `pty:attach` runs `claude` fresh inside the container via `docker exec` —
 1. User selects a workspace, then clicks **Close…** in the main-pane header.
 2. `<CloseWorkspaceModal>` opens, showing the workspace name and current status. A single checkbox — "Also delete the state directory" — is unchecked by default (Keep is the spec default; recreating with the same name inherits prior Claude state and keeps the workspace in the past list).
 3. Action buttons depend on current state:
-   - **Running**: `Stop only` (calls `workspace:stop`) and `Stop & remove` (calls `workspace:stop` then `workspace:remove(id, { deleteState })`).
-   - **Exited**: only `Remove` (calls `workspace:remove(id, { deleteState })`).
+   - **Running**: `Stop only` (calls `workspace:stop` → state goes to `stopped`), `Pause` (calls `workspace:pause` → state goes to `paused`, processes frozen via cgroups, recoverable), and `Stop & remove` (calls `workspace:stop` then `workspace:remove(id, { deleteState })`).
+   - **Paused**: `Resume` (calls `workspace:start` → unpauses), and `Stop & remove` (forces SIGKILL via `remove --force`, so pause state doesn't block removal).
+   - **Exited / stopped**: only `Remove` (calls `workspace:remove(id, { deleteState })`).
 4. On success, the modal closes, the selection clears, and the top strip refreshes. With `deleteState=false` the workspace transitions to "deleted" state (still in the past list, recoverable via restart). With `deleteState=true` it's fully purged. Failures surface inline in the modal.
 
 ## 9. Security model

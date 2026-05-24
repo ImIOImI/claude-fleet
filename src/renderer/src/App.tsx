@@ -8,7 +8,7 @@ import { CreateWorkspaceModal } from './components/CreateWorkspaceModal';
 import { CloseWorkspaceModal } from './components/CloseWorkspaceModal';
 import { ProfilesDialog } from './components/ProfilesDialog';
 
-export type WorkspaceState = 'running' | 'stopped' | 'deleted';
+export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
 export type WorkspaceKind = 'container' | 'local';
 
 export interface WorkspaceSummary {

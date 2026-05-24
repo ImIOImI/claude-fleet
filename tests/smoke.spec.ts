@@ -469,6 +469,68 @@ test('Workspace kind selector: Local shows a "coming soon" error on submit', asy
   }
 });
 
+test('Mock mode: Pause then Resume via Close modal', async () => {
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    const chip = window.locator('.ws-chip', { hasText: 'mock-alpha' });
+    await chip.click();
+
+    // Running workspace → Close modal exposes Pause.
+    await window.getByRole('button', { name: 'Close…' }).click();
+    await expect(window.getByRole('heading', { name: 'Close workspace' })).toBeVisible();
+    await window.getByRole('button', { name: 'Pause' }).click();
+
+    // Modal closes; the workspace chip now shows the paused dot.
+    await expect(window.getByRole('heading', { name: 'Close workspace' })).toBeHidden();
+    await expect(chip.locator('.dot.paused')).toBeVisible();
+    await expect(chip.locator('.dot.running')).toBeHidden();
+
+    // Re-select + reopen Close modal. Paused workspace → Resume button.
+    await chip.click();
+    await window.getByRole('button', { name: 'Close…' }).click();
+    await expect(window.getByRole('heading', { name: 'Close workspace' })).toBeVisible();
+    await expect(window.getByRole('button', { name: 'Pause' })).toBeHidden();
+    const resume = window.getByRole('button', { name: 'Resume' });
+    await expect(resume).toBeVisible();
+    await resume.click();
+
+    // Modal closes; the workspace chip is back to running.
+    await expect(window.getByRole('heading', { name: 'Close workspace' })).toBeHidden();
+    await expect(chip.locator('.dot.running')).toBeVisible();
+    await expect(chip.locator('.dot.paused')).toBeHidden();
+  } finally {
+    await app.close();
+  }
+});
+
+test('Past workspaces: paused workspace renders the paused state in the past list', async () => {
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [
+        {
+          name: 'frozen-fox',
+          containerId: 'frozen-fox-id',
+          state: 'paused',
+          status: 'Paused',
+          workspaceRoot: '/tmp/frozen-fox',
+          profile: 'oauth'
+        }
+      ]
+    });
+
+    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
+
+    const row = window.locator('.past-workspace-row', { hasText: 'frozen-fox' });
+    await expect(row).toBeVisible();
+    await expect(row.locator('.ws-state.paused')).toBeVisible();
+    await expect(row.locator('.dot.paused')).toBeVisible();
+  } finally {
+    await app.close();
+  }
+});
+
 test('Session ended overlay: "Start new session" reattaches a fresh claude', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {

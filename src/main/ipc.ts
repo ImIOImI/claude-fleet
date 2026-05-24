@@ -129,6 +129,7 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle('workspace:stop', (_e, id: string) => backend.stopWorkspace(id));
+  ipcMain.handle('workspace:pause', (_e, id: string) => backend.pauseWorkspace(id));
   ipcMain.handle(
     'workspace:remove',
     (_e, id: string, opts?: RemoveWorkspaceOpts) => backend.removeWorkspace(id, opts)

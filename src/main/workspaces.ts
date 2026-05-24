@@ -13,7 +13,7 @@
 import { readFile, writeFile, readdir } from 'node:fs/promises';
 import { workspaceManifestPath, workspaceStateDir, stateRoot } from './paths.js';
 
-export type WorkspaceState = 'running' | 'stopped' | 'deleted';
+export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
 
 /**
  * Today: 'container' is a Docker container backend; 'local' is a planned

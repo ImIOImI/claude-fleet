@@ -107,7 +107,13 @@ export async function listLiveWorkspaces(): Promise<Workspace[]> {
   });
   return raw.map((c) => {
     const name = c.Names[0]?.replace(/^\//, '') ?? c.Id.slice(0, 12);
-    const state: Workspace['state'] = c.State === 'running' ? 'running' : 'stopped';
+    // Docker state strings: 'created' | 'running' | 'paused' | 'restarting'
+    // | 'removing' | 'exited' | 'dead'. We collapse everything that isn't
+    // running or paused into 'stopped' for the renderer.
+    let state: Workspace['state'];
+    if (c.State === 'running') state = 'running';
+    else if (c.State === 'paused') state = 'paused';
+    else state = 'stopped';
     return {
       name,
       workspaceRoot: c.Labels['com.claude-fleet.workspace-root'] ?? '',
@@ -190,8 +196,9 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
 
 /**
  * Start the (live) workspace by name. Returns the container id if it exists
- * (whether it was already running or had to be started), or null if no live
+ * (whether it was already running, paused, or stopped), or null if no live
  * container has that name and the caller should recreate from the spec.
+ * Paused containers are unpaused; stopped containers are started.
  */
 export async function startWorkspace(name: string): Promise<string | null> {
   assertValidWorkspaceName(name);
@@ -202,8 +209,15 @@ export async function startWorkspace(name: string): Promise<string | null> {
   const found = raw[0];
   if (!found) return null;
 
-  if (found.State !== 'running') {
-    const c = docker.getContainer(found.Id);
+  const c = docker.getContainer(found.Id);
+  if (found.State === 'paused') {
+    try {
+      await c.unpause();
+    } catch (err: unknown) {
+      // 409 = container is not paused (race with another caller)
+      if ((err as { statusCode?: number }).statusCode !== 409) throw err;
+    }
+  } else if (found.State !== 'running') {
     try {
       await c.start();
     } catch (err: unknown) {
@@ -212,6 +226,23 @@ export async function startWorkspace(name: string): Promise<string | null> {
     }
   }
   return found.Id;
+}
+
+/**
+ * Pause a running container via `docker pause` (cgroups freezer). All
+ * processes in the container are suspended; container state remains
+ * "live" and recoverable via startWorkspace (which will unpause).
+ */
+export async function pauseWorkspace(id: string): Promise<void> {
+  const c = docker.getContainer(id);
+  try {
+    await c.pause();
+  } catch (err: unknown) {
+    const status = (err as { statusCode?: number }).statusCode;
+    // 409 = already paused; 404 = container gone — both are no-ops from
+    // the user's POV. Anything else is a real error.
+    if (status !== 409 && status !== 404) throw err;
+  }
 }
 
 export async function stopWorkspace(id: string): Promise<void> {

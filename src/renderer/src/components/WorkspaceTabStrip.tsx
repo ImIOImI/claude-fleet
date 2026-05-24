@@ -52,7 +52,7 @@ export function WorkspaceTabStrip({
           style={{ ['--hue' as never]: hueFor(w.name) }}
           title={w.status}
         >
-          <span className={`dot ${w.state === 'running' ? 'running' : ''}`} />
+          <span className={`dot ${w.state}`} />
           <span className="name">{w.name}</span>
         </button>
       ))}

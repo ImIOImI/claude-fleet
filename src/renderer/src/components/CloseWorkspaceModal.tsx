@@ -9,6 +9,7 @@ interface Props {
 
 export function CloseWorkspaceModal({ workspace, onClose, onClosed }: Props) {
   const running = workspace.state === 'running';
+  const paused = workspace.state === 'paused';
   const [deleteState, setDeleteState] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -30,11 +31,43 @@ export function CloseWorkspaceModal({ workspace, onClose, onClosed }: Props) {
     }
   };
 
+  const pause = async () => {
+    setBusy(true);
+    setStatus('Pausing…');
+    setError(null);
+    try {
+      await window.api.workspace.pause(workspace.id);
+      onClosed();
+      onClose();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+      setStatus(null);
+    }
+  };
+
+  const resume = async () => {
+    setBusy(true);
+    setStatus('Resuming…');
+    setError(null);
+    try {
+      await window.api.workspace.start(workspace.name);
+      onClosed();
+      onClose();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+      setStatus(null);
+    }
+  };
+
   const stopAndRemove = async () => {
     setBusy(true);
     setError(null);
     try {
-      if (running) {
+      if (running || paused) {
         setStatus('Stopping…');
         await window.api.workspace.stop(workspace.id);
       }
@@ -94,8 +127,23 @@ export function CloseWorkspaceModal({ workspace, onClose, onClosed }: Props) {
               {busy ? '…' : 'Stop only'}
             </button>
           )}
+          {running && (
+            <button
+              className="btn"
+              onClick={pause}
+              disabled={busy}
+              title="Freeze processes via docker pause; resume preserves session state"
+            >
+              {busy ? '…' : 'Pause'}
+            </button>
+          )}
+          {paused && (
+            <button className="btn primary" onClick={resume} disabled={busy}>
+              {busy ? '…' : 'Resume'}
+            </button>
+          )}
           <button className="btn danger" onClick={stopAndRemove} disabled={busy}>
-            {busy ? '…' : running ? 'Stop & remove' : 'Remove'}
+            {busy ? '…' : running || paused ? 'Stop & remove' : 'Remove'}
           </button>
         </div>
       </div>

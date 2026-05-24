@@ -133,6 +133,8 @@ body {
   flex-shrink: 0;
 }
 .ws-chip .dot.running { background: var(--state-running); }
+.ws-chip .dot.paused { background: var(--state-warn); }
+.ws-chip .dot.stopped { background: var(--state-exited); }
 .ws-chip .name { font-weight: 500; }
 .ws-chip .status { color: var(--text-muted); font-size: 11px; }
 
@@ -547,7 +549,8 @@ body {
   background: var(--text-muted);
 }
 .past-workspace-row .dot.running { background: var(--state-running, #22c55e); }
-.past-workspace-row .dot.stopped { background: var(--state-warn, #eab308); }
+.past-workspace-row .dot.paused { background: var(--state-warn, #eab308); }
+.past-workspace-row .dot.stopped { background: var(--state-exited, #d97757); }
 .past-workspace-row .dot.deleted { background: var(--text-muted, #6b7280); }
 .past-workspace-row .ws-name { font-weight: 500; }
 .past-workspace-row .ws-path {
@@ -572,7 +575,8 @@ body {
   font-size: 10px;
 }
 .past-workspace-row .ws-state.running { color: var(--state-running, #22c55e); }
-.past-workspace-row .ws-state.stopped { color: var(--state-warn, #eab308); }
+.past-workspace-row .ws-state.paused { color: var(--state-warn, #eab308); }
+.past-workspace-row .ws-state.stopped { color: var(--state-exited, #d97757); }
 .past-workspace-row .ws-state.deleted { color: var(--text-muted, #6b7280); }
 
 /* ── Workspace-kind radios ─────────────────────────────────────────── */
