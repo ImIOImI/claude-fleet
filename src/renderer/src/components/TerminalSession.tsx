@@ -15,6 +15,28 @@
 import { useEffect, useRef, useState } from 'react';
 import { Terminal, type ILink, type ILinkProvider } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
+
+// Stretch the font fallback chain so canvas renders for glyphs xterm
+// can't find in a monospace font (emoji, symbols, regional indicators)
+// fall through to a system emoji font instead of rendering as tofu. The
+// monospace fonts come first so character-grid alignment is preserved
+// for the common case; emoji-font glyphs are typically wide and pair
+// with the unicode11 width tables below.
+const TERMINAL_FONT_FAMILY = [
+  'ui-monospace',
+  'SFMono-Regular',
+  'Menlo',
+  'Consolas',
+  '"DejaVu Sans Mono"',
+  'monospace',
+  '"Apple Color Emoji"',
+  '"Segoe UI Emoji"',
+  '"Noto Color Emoji"',
+  '"Segoe UI Symbol"',
+  '"Noto Sans Symbols2"',
+  'emoji'
+].join(', ');
 
 const URL_REGEX = /https?:\/\/[^\s'"`<>()\[\]{}]+/g;
 const TRAILING_PUNCTUATION = /[.,;:!?]+$/;
@@ -84,7 +106,7 @@ export function TerminalSession({ containerId, visible }: Props) {
     setSessionEnded(false);
 
     const term = new Terminal({
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+      fontFamily: TERMINAL_FONT_FAMILY,
       fontSize: 13,
       theme: { background: '#101216' },
       cursorBlink: true,
@@ -94,6 +116,15 @@ export function TerminalSession({ containerId, visible }: Props) {
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    // Unicode 11+ width tables — without this xterm uses Unicode 6 widths,
+    // which classify keycap sequences (`1️⃣`), regional
+    // indicators, and most modern emoji as 1-cell narrow. They then render
+    // jammed together because their actual glyph width is 2 cells. With
+    // the addon active, xterm reserves the right number of cells per
+    // grapheme cluster and the surrounding text stays aligned.
+    const unicode11 = new Unicode11Addon();
+    term.loadAddon(unicode11);
+    term.unicode.activeVersion = '11';
     term.open(host);
     fit.fit();
     const linkProviderDisposable = term.registerLinkProvider(multilineLinkProvider(term));

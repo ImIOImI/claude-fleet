@@ -191,7 +191,18 @@ class FakeShell extends Duplex {
       this.push('  echo <text>   print text\r\n');
       this.push('  whoami        print the fake claude identity\r\n');
       this.push('  oauth         simulate a Claude.ai OAuth login URL print\r\n');
+      this.push('  emoji         print a sample line with keycap + flag + ZWJ emoji\r\n');
       this.push('  exit          end the session (shows the restart overlay)\r\n');
+      return;
+    }
+    if (cmd === 'emoji') {
+      // Mix of grapheme-cluster classes that historically tripped xterm:
+      // keycap (digit + VS-16 + combining enclosing keycap), regional
+      // indicators (flag), ZWJ-joined family + skin-tone modifier, and
+      // a single-codepoint wide CJK char as a sanity check.
+      this.push('Sample: 1️⃣ 2️⃣ — flags 🇺🇸 ');
+      this.push('— family 👨‍👩‍👧 ');
+      this.push('— wave 👋🏽 — CJK 漢字\r\n');
       return;
     }
     if (cmd === 'clear') {
