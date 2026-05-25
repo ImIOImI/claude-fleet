@@ -227,7 +227,11 @@ export function App() {
             {backendReady === false ? (
               <DockerDisconnected onRetry={refresh} />
             ) : selected && selected.containerId ? (
-              <TerminalPane containerId={selected.containerId} />
+              // key forces TerminalPane to remount on workspace switch so its
+              // session state (tabs + active id + counter) doesn't leak across
+              // workspaces. PTYs from the old workspace are torn down by
+              // TerminalSession's unmount cleanup.
+              <TerminalPane key={selected.containerId} containerId={selected.containerId} />
             ) : liveCount === 0 ? (
               <FirstRun onNewWorkspace={() => setCreateOpen(true)} />
             ) : (

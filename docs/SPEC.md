@@ -256,14 +256,12 @@ The index exists because `keytar` has no list operation. It is maintained on eve
 
 ### Attach a terminal
 1. User selects a workspace in the top strip (only live workspaces appear there).
-2. `<TerminalPane>` mounts: creates an `xterm` `Terminal`, fits to its host div.
-3. Calls `pty:attach(containerId, cols, rows)` → gets a `sessionId`.
-4. Registers `onData` (writes chunks into xterm) and `onEnd` (writes `[session ended]`).
-5. Forwards `term.onData` to `pty:input(sessionId, data)`.
-6. A `ResizeObserver` re-fits and calls `pty:resize` on host div resize.
-7. On unmount: unsubscribe listeners, `pty:detach`, dispose the terminal.
+2. `<TerminalPane>` mounts. It manages a per-workspace list of terminal sessions (starting with one auto-created "main"), a tab strip above the terminal body, and one `<TerminalSession>` per session stacked in the body — only the active session is `visibility: visible`, the rest stay mounted so their PTYs and scrollback are preserved when tabs are switched.
+3. Each `<TerminalSession>` creates an `xterm` `Terminal`, fits to its host div, calls `pty:attach(containerId, cols, rows)` → gets a `sessionId`. It registers `onData` (writes chunks into xterm) and `onEnd` (shows the session-ended overlay). `term.onData` forwards to `pty:input(sessionId, data)`. A `ResizeObserver` re-fits and calls `pty:resize` on host div resize.
+4. Clicking the **+** in the tab strip creates a new session. The first session is named `main`; subsequent sessions are `session 2`, `session 3`, … via a counter that doesn't decrement on close (so names stay stable). Clicking a tab switches the active session. The **×** on a tab closes it; closing the last session auto-creates a fresh `main` so the strip is never empty.
+5. On unmount (workspace switch or app close): each `<TerminalSession>` unsubscribes listeners, calls `pty:detach`, disposes the terminal. The outer `<TerminalPane>` is keyed by `containerId` in App.tsx, so workspace switches force a clean remount — session state (the tab list, the counter) doesn't leak across workspaces.
 
-Each `pty:attach` runs `claude` fresh inside the container via `docker exec` — it is *not* the container's main process. The container's main process is `sleep infinity`, kept alive by `tini`.
+Each `pty:attach` runs `claude` fresh inside the container via `docker exec` — it is *not* the container's main process. The container's main process is `sleep infinity`, kept alive by `tini`. Multiple sessions in the same workspace are independent `docker exec claude` processes side by side.
 
 **Copy and paste**: the terminal pane has selection-aware key bindings. Ctrl+C copies when a selection exists and falls through as SIGINT when not; Ctrl+V pastes. Ctrl+Shift+C / Ctrl+Shift+V are unconditional copy / paste (terminal-convention alternates). Right-click opens a native context menu (Copy / Paste / Select All) via `menu:showTerminalContextMenu`. Clipboard reads and writes route through `clipboard:read` / `clipboard:write` in main, not `navigator.clipboard`. The terminal's `wordSeparator` is tuned to whitespace + brackets + quotes only, so double-clicking a URL selects the whole URL (URL-safe characters like `/`, `?`, `&`, `=`, `.`, `:` stay inside the word).
 
@@ -336,7 +334,8 @@ claude-fleet/
             └── components/
                 ├── WorkspaceTabStrip.tsx  # top: app name + workspace chips + actions
                 ├── SessionsPane.tsx       # left sidebar (placeholder until #3)
-                ├── TerminalPane.tsx       # center: xterm + link provider + key bindings
+                ├── TerminalPane.tsx       # center: per-workspace session tab strip + stack
+                ├── TerminalSession.tsx    # one session: xterm + PTY + key bindings + session-ended overlay
                 ├── ObservabilityPane.tsx  # right sidebar (placeholder until #2)
                 ├── BottomBar.tsx          # footer hint bar
                 ├── CreateWorkspaceModal.tsx  # form + past-workspaces list
