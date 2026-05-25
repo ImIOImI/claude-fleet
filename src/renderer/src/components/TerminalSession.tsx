@@ -112,7 +112,12 @@ export function TerminalSession({ containerId, visible }: Props) {
       cursorBlink: true,
       convertEol: true,
       allowProposedApi: true,
-      wordSeparator: ' \t()[]{}\'"<>`'
+      wordSeparator: ' \t()[]{}\'"<>`',
+      // Default is 1, which feels glacial on most trackpads/wheels. 3 is
+      // closer to native terminal scroll cadence — a normal wheel notch
+      // moves a few lines instead of a single character row.
+      scrollSensitivity: 3,
+      fastScrollSensitivity: 6
     });
     const fit = new FitAddon();
     term.loadAddon(fit);

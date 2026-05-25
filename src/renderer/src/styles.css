@@ -269,6 +269,18 @@ body {
   padding: 10px;
 }
 
+/* Hide xterm's viewport scrollbar — it floats over the canvas text and
+   adds visual noise. The mouse wheel still scrolls because xterm
+   listens for wheel events on the viewport directly; only the visual
+   track is suppressed. */
+.terminal-host .xterm-viewport {
+  scrollbar-width: none;          /* Firefox */
+  -ms-overflow-style: none;        /* old Edge */
+}
+.terminal-host .xterm-viewport::-webkit-scrollbar {
+  display: none;                   /* WebKit / Chromium / Electron */
+}
+
 /* ----- bottom hint bar ------------------------------------------------- */
 .bottom-bar {
   display: flex;
@@ -821,9 +833,17 @@ body {
   position: absolute;
   inset: 0;
   display: grid;
-  /* strip · accent band · terminal stack */
-  grid-template-rows: auto 2px 1fr;
+  /* strip · accent-band row (its own padding) · terminal stack */
+  grid-template-rows: auto auto 1fr;
   min-height: 0;
+}
+
+/* Wrapper supplies the breathing room above the accent band so it
+   isn't pressed against the session-tab strip. Background matches the
+   terminal body so the gap reads as part of the terminal area. */
+.terminal-accent-band-row {
+  padding-top: 8px;
+  background: var(--bg-base);
 }
 
 /* Workspace accent band riding the top edge of the terminal body — same
