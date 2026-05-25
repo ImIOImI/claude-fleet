@@ -124,6 +124,11 @@ All channels are `ipcMain.handle`/`ipcRenderer.invoke` (promise-based) except th
 - `images:list` → `ImageEntry[]` — every image known to the library, including labels.
 - `images:remove(ref)` → `void` — remove an image entry. The image itself is not deleted from the Docker daemon; only the library entry goes away.
 
+### Sessions
+Per-workspace terminal-session inventory (the tab list shown above the terminal body). Renderer-owned read/write of the whole file; main has no notion of session lifecycle today.
+- `sessions:read(workspaceName)` → `SessionInventory` — read `<userData>/state/<name>/sessions.json`. Returns an empty inventory (`{ version: 1, sessions: [], nextNum: 2 }`) if the file is missing or malformed.
+- `sessions:write(workspaceName, inventory)` → `void` — atomic write of the whole inventory.
+
 ### Vault
 - `vault:list` → `string[]` — profile names.
 - `vault:get(name)` → `Profile | null` — `{ name, apiKey }`.
@@ -188,6 +193,26 @@ interface ImageEntry {
 ```
 
 Writes are atomic (write-to-temp + rename). Reads tolerate a missing or malformed file by returning an empty library. Manual deletion of entries is exposed via `images:remove`; manual *addition* is not exposed today (the library is purely use-driven).
+
+### Session inventory (on disk)
+For each workspace, `<userData>/state/<name>/sessions.json` records the renderer's per-workspace tab list. Loaded by `TerminalPane` on mount, persisted on every change (add tab, close tab, switch active). PTYs themselves are not persisted — only the display ids, names, and which tab was active. On relaunch the renderer recreates the tabs and each `TerminalSession` opens a fresh `docker exec claude` per its tab. In-memory context (anything Claude held in process memory) is not yet preserved across app restarts; the in-container broker that fixes this is a deferred follow-up (see §11 Open decisions).
+
+```ts
+interface SessionEntry {
+  id: string;        // stable display id; NOT the PTY session id (that's per-attach)
+  name: string;      // 'main', 'session 2', 'session 3', …
+  createdAt: number;
+}
+
+interface SessionInventory {
+  version: 1;
+  sessions: SessionEntry[];
+  nextNum: number;   // auto-increment for 'session N' naming; doesn't decrement on close
+  activeId?: string; // tab to focus on attach
+}
+```
+
+Writes are atomic (write-to-temp + rename). Reads tolerate missing/malformed files by returning `{ version: 1, sessions: [], nextNum: 2 }`. The first attach to a fresh workspace inserts a single `main` tab and persists it immediately.
 
 ### Workspace shape (returned over IPC)
 The `Workspace` type joins the manifest with live backend state:
@@ -257,10 +282,12 @@ The index exists because `keytar` has no list operation. It is maintained on eve
 
 ### Attach a terminal
 1. User selects a workspace in the top strip (only live workspaces appear there).
-2. `<TerminalPane>` mounts. It manages a per-workspace list of terminal sessions (starting with one auto-created "main"), a tab strip above the terminal body, and one `<TerminalSession>` per session stacked in the body — only the active session is `visibility: visible`, the rest stay mounted so their PTYs and scrollback are preserved when tabs are switched.
+2. `<TerminalPane>` mounts. It reads the workspace's persisted `sessions.json` via `sessions:read(workspaceName)`. If the inventory is non-empty the saved tabs are restored (including which one was active); otherwise a single auto-created `main` tab is inserted and persisted right away. The pane manages a tab strip above the terminal body and one `<TerminalSession>` per tab stacked in the body — only the active tab is `visibility: visible`, the rest stay mounted so their PTYs and scrollback are preserved across tab switches.
 3. Each `<TerminalSession>` creates an `xterm` `Terminal`, fits to its host div, calls `pty:attach(containerId, cols, rows)` → gets a `sessionId`. It registers `onData` (writes chunks into xterm) and `onEnd` (shows the session-ended overlay). `term.onData` forwards to `pty:input(sessionId, data)`. A `ResizeObserver` re-fits and calls `pty:resize` on host div resize.
-4. Clicking the **+** in the tab strip creates a new session. The first session is named `main`; subsequent sessions are `session 2`, `session 3`, … via a counter that doesn't decrement on close (so names stay stable). Clicking a tab switches the active session. The **×** on a tab closes it; closing the last session auto-creates a fresh `main` so the strip is never empty.
-5. On unmount (workspace switch or app close): each `<TerminalSession>` unsubscribes listeners, calls `pty:detach`, disposes the terminal. The outer `<TerminalPane>` is keyed by `containerId` in App.tsx, so workspace switches force a clean remount — session state (the tab list, the counter) doesn't leak across workspaces.
+4. Clicking the **+** in the tab strip creates a new session. The first session is named `main`; subsequent sessions are `session 2`, `session 3`, … via a counter that doesn't decrement on close (so names stay stable). Clicking a tab switches the active session. The **×** on a tab closes it; closing the last session auto-creates a fresh `main` so the strip is never empty. Every change is persisted to `sessions.json` immediately so a sudden quit doesn't lose tabs.
+5. On unmount (workspace switch or app close): each `<TerminalSession>` unsubscribes listeners, calls `pty:detach`, disposes the terminal. The outer `<TerminalPane>` is keyed by `containerId` in App.tsx, so workspace switches force a clean remount — session state is re-read from `sessions.json`, not carried in renderer memory.
+
+**Paused state.** When the selected workspace's state is `paused`, the terminal pane renders a modal card centered in the session-stack ("workspace paused" + Resume button) while the underlying `TerminalSession`s stay mounted but are dimmed (~40% opacity + greyscale + pointer-events disabled). The session tab strip and accent band stay live so the user can see which tabs exist and which workspace they're looking at. The chip in the workspace ribbon also shows a small ⏸ glyph and an amber status dot. The Resume button calls `workspace:start(name)`, which `docker unpause`s the container; the next `workspace:list` poll picks up the running state and the overlay disappears. Workspace-ribbon chips for other workspaces remain interactive so the user can switch to another workspace without resuming. **Caveat (PR1):** today the PTYs are bound to the docker-exec instances inside the (frozen) container, so they thaw correctly across a pause that happens *while the app is running*. Across an app restart the PTYs are re-spawned and any in-memory state Claude held is lost; the broker layer that preserves it is deferred (see §11).
 
 Each `pty:attach` runs `claude` fresh inside the container via `docker exec` — it is *not* the container's main process. The container's main process is `sleep infinity`, kept alive by `tini`. Multiple sessions in the same workspace are independent `docker exec claude` processes side by side.
 
@@ -319,6 +346,7 @@ claude-fleet/
     │   ├── docker.ts                  # Docker backend (dockerode wrapper + PTY attach)
     │   ├── mock.ts                    # mock backend behind CLAUDE_FLEET_MOCK=1
     │   ├── workspaces.ts              # WorkspaceSpec types + manifest read/write/list
+    │   ├── sessions.ts                # per-workspace sessions.json read/write
     │   ├── imageLibrary.ts            # imageLibrary.json read/write + auto-record
     │   ├── paths.ts                   # state-dir path conventions
     │   ├── fs.ts                      # isDirectory / mkdirp helpers
@@ -415,25 +443,35 @@ CREATE TABLE sessions (
 
 ### Resumable sessions on workspace pause/resume — "expert workspaces"
 
-Today the workspace state machine has a `paused` state implemented via `docker pause` (cgroups freezer): the container is alive but every process inside it is frozen, including any `docker exec claude` sessions. Unpause thaws them. This works *while the app is still running* — the renderer holds the PTY stream open across the freeze. But it doesn't survive app restart: PTY stream handles live in main-process memory only, and once the app exits the renderer has no way to re-attach to the original `docker exec` instances inside the resumed container.
+The end-state goal: **expert workspaces** that load a domain context once (an organization's architecture, a particular application's source, a body of documentation) and then sleep with that context intact. The user pauses the workspace, closes the app, comes back hours or days later, unpauses, and finds every session right where it was — same conversation history, same in-memory analyses, same MCP server state — ready to do a quick task (review a PR, answer a question) and go back to sleep. Re-priming the context on every wake defeats the purpose.
 
-The use case this section is solving for: **expert workspaces** that load a domain context once (an organization's architecture, a particular application's source, a body of documentation) and then sleep with that context intact. The user pauses the workspace, closes the app, comes back hours or days later, unpauses, and finds every session right where it was — same conversation history, same in-memory analyses, same MCP server state — ready to do a quick task (review a PR, answer a question) and go back to sleep. Re-priming the context on every wake defeats the purpose.
+This is a two-phase build. Phase 1 (the persistence + UI foundation) is landed; phase 2 (the in-container broker that actually preserves in-memory context across an app restart) is still ahead.
 
-**Decisions made (intent, not yet implemented):**
-- **Session inventory persists with the workspace.** Each session has a stable id + display name persisted under `<userData>/state/<name>/sessions.json` alongside `workspace.json`. The per-workspace tab list is reconstructed from this file on attach, not held only in renderer memory.
-- **Resume re-attaches, it does not re-spawn.** A resumed paused workspace must reconnect to the *existing* claude processes inside the container. New execs would lose in-memory state, which is the entire point of the feature. (Resume-by-transcript via `claude --resume <id>` is a possible fallback but not the headline behavior.)
-- **Pause is non-destructive at every layer.** The container is frozen, the host-side session inventory is preserved, no PTY streams are forcibly torn down on the app side beyond what the OS does at exit, and clean app exit flushes the inventory to disk so the next launch sees the same tabs.
+**Phase 1 — landed:**
+- **Session inventory persistence.** Each workspace's tab list is stored at `<userData>/state/<name>/sessions.json`. Loaded on `TerminalPane` mount, written on every change. See §6 (Sessions IPC) and §7 (Session inventory).
+- **Paused UI.** The workspace ribbon chip shows a paused dot + ⏸ glyph. The terminal pane overlays a modal card ("workspace paused / Resume") scoped to the session-stack — the underlying terminals stay mounted but dimmed and pointer-events-disabled. The workspace ribbon stays interactive so the user can switch workspaces without resuming. See §8 ("Attach a terminal" → Paused state).
+- **Resume.** The modal's Resume button calls `workspace:start(name)`, which `docker unpause`s the container. The poll picks up the running state and the overlay disappears.
 
-**Open:**
-- **How to re-attach to a session across an app restart.** `docker exec` instances don't naturally survive a client disconnect with reusable IO. Three candidates:
-  1. **tmux / dtach inside the container.** Each session is a persistent multiplexer pane the host PTY proxies through. Re-attach becomes the multiplexer's job. Simplest semantics; adds a process layer and may interact awkwardly with claude's key bindings.
-  2. **A claude-fleet session-broker daemon inside the container.** A long-running supervisor (started by `tini` alongside `sleep infinity`) owns each `claude` PTY and exposes them over a Unix socket bind-mounted to the host. The Electron main re-attaches to the socket on launch. More code we own; cleaner key handling than tmux.
-  3. **Resume by transcript only.** Don't try to preserve the live process. On wake, start fresh execs that immediately `claude --resume <id>` for each session's recorded UUID. Preserves the conversation but loses everything Claude held in memory — runtime analyses, MCP server state, watched-file caches. Lowest implementation cost; weakest match for the expert-with-hot-context goal.
-- **What pause looks like while the app is still running.** Two options: (a) keep the PTY mounted and let the terminal just freeze mid-frame until unpause (technically correct, visually surprising), or (b) overlay a paused-state card and detach the renderer-side stream, then re-attach on resume. The choice affects whether the existing "session ended" overlay needs a sibling "session paused" variant.
-- **Clean-exit flush.** Need an `app:before-quit` hook that writes the session inventory for every paused (and ideally every running) workspace, so an immediate restart reconstructs the tab list. Crash recovery is best-effort: flush opportunistically on session create/close so the gap between flush and crash is bounded.
-- **Interaction with the durable transcript mirror.** Option 3 (resume-by-transcript) reuses the existing mirror semantics. Options 1 and 2 keep the same session UUID across the pause gap, so the mirror just grows — the watcher must tolerate a long quiet period without treating it as a session end.
-- **Resource accounting.** `docker pause` doesn't release RAM; a paused expert workspace pins its memory until the container is removed. Several heavy claude sessions × several expert workspaces can be substantial on a developer machine. Decide whether to surface per-workspace RAM usage in the chip / past-list and whether to warn when the total exceeds a threshold.
-- **Pause depth.** Today pause is one bit per workspace. With expert workspaces the user may want a "deep sleep" (allow the host to swap the frozen memory out aggressively, accept a slower wake) vs. "light sleep" (kept resident, instant wake). Out of scope for v1 but worth recording.
+**Phase 2 — still open:**
+
+The hole today: PTY stream handles live in main-process memory only. App restart loses them, and on next launch the renderer must spawn fresh `docker exec claude` per saved tab — which means the conversation reloads (the JSONL still exists) but everything Claude held in memory (computed analyses, file watches, MCP server state) is gone. Across a same-app-instance pause this is fine (the docker-exec processes themselves are frozen and thaw correctly). Across an app restart it's not.
+
+The chosen fix: an **in-container broker daemon** that owns each `claude` PTY and exposes them over a Unix socket bind-mounted from the host. The Electron main attaches to that socket instead of running `docker exec claude` directly. The broker outlives any individual host connection — quit the app, restart, reconnect to the socket, get the same session bytes back. The runner image's existing `tini` PID 1 supervises both `sleep infinity` (today's container keepalive) and the broker.
+
+Why not tmux/dtach: tmux is cheaper to ship but stacks two TUIs (xterm → tmux → claude) and tmux's prefix key + mouse handling collide with claude's. dtach has no scrollback. A small broker we own gives a clean byte-stream layer with no second TUI in the middle.
+
+Why not resume-by-transcript only: the conversation comes back but cognition doesn't. Defeats the expert-workspace goal.
+
+**Open (phase 2):**
+- **Broker process model.** Single multiplexing daemon serving all sessions on one socket, or per-session daemons each on their own socket. Multiplexing is simpler to install (one binary in the image) but ties session lifecycles together if the broker crashes; per-session is more isolated but more processes.
+- **Broker implementation language.** Node.js (already in the runner image, smaller diff to ship) vs. Go (smaller binary, no runtime, simpler dependency story). Tradeoffs are install-size vs. dev-iteration friction.
+- **Wire protocol.** Length-prefixed binary frames with channel ids (multiplex multiple sessions over one socket); or a simple text command protocol (`ATTACH <id>` then raw bytes). Need to decide on resize semantics, signal forwarding (Ctrl-C, Ctrl-Z), and how to surface broker-internal errors to the host.
+- **Scrollback / ring buffer.** Broker has to remember some bytes per session so reconnecting clients get more than "blank screen until next output." Ring buffer size per session — fixed (1 MB? 10 MB?) or configurable.
+- **Clean-exit flush of sessions.json.** Add an `app:before-quit` hook to write any pending inventory changes (today's opportunistic per-change writes already mean the gap is small, but a final sweep is cheap insurance).
+- **Container restart policy.** Survives app restart today; does not survive host reboot (`RestartPolicy` is unset). For the broker to outlive a host reboot, containers need `unless-stopped` and the broker must come back up on container start. Configurable per workspace, off by default.
+- **Interaction with the durable transcript mirror.** Re-attach via broker keeps the same session UUID across long quiet periods (pause + relaunch). The mirror watcher must not treat a long quiet period as a session end.
+- **Resource accounting.** `docker pause` doesn't release RAM; an expert workspace pins memory until the container is removed. Several heavy sessions × several expert workspaces can be substantial. Decide whether to surface per-workspace RAM usage in the chip / past-list and whether to warn when the total exceeds a threshold.
+- **Pause depth.** "Deep sleep" (allow swap-out, slower wake) vs. "light sleep" (kept resident, instant wake). Out of scope for now; record once the broker work surfaces a need.
 
 ### Drag-and-drop file ingestion
 Drop OS files, pasted images, web content, or text fragments onto the window; the app saves them into the selected container's workspace so the agent can read them.

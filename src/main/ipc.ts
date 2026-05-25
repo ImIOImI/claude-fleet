@@ -5,6 +5,7 @@ import * as mockDocker from './mock.js';
 import * as vault from './vault.js';
 import * as fs from './fs.js';
 import * as imageLibrary from './imageLibrary.js';
+import * as sessions from './sessions.js';
 import {
   listWorkspaceManifests,
   readWorkspaceManifest,
@@ -107,6 +108,15 @@ export function registerIpc(): void {
 
   ipcMain.handle('images:list', () => imageLibrary.listImages());
   ipcMain.handle('images:remove', (_e, ref: string) => imageLibrary.removeImage(ref));
+
+  ipcMain.handle('sessions:read', (_e, workspaceName: string) =>
+    sessions.readInventory(workspaceName)
+  );
+  ipcMain.handle(
+    'sessions:write',
+    (_e, workspaceName: string, inventory: sessions.SessionInventory) =>
+      sessions.writeInventory(workspaceName, inventory)
+  );
 
   /**
    * Start an existing (live, possibly stopped) workspace by name. Returns

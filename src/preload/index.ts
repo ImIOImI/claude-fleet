@@ -1,5 +1,20 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
 
+// Mirrored from src/main/sessions.ts. Kept here as a type-only declaration so
+// the preload doesn't reach into main-process code (and so the renderer can
+// import it via FleetApi without a separate path mapping).
+export interface SessionEntry {
+  id: string;
+  name: string;
+  createdAt: number;
+}
+export interface SessionInventory {
+  version: 1;
+  sessions: SessionEntry[];
+  nextNum: number;
+  activeId?: string;
+}
+
 const api = {
   app: {
     mockMode: (): Promise<boolean> => ipcRenderer.invoke('app:mockMode')
@@ -29,6 +44,12 @@ const api = {
   images: {
     list: () => ipcRenderer.invoke('images:list'),
     remove: (ref: string) => ipcRenderer.invoke('images:remove', ref)
+  },
+  sessions: {
+    read: (workspaceName: string): Promise<SessionInventory> =>
+      ipcRenderer.invoke('sessions:read', workspaceName),
+    write: (workspaceName: string, inventory: SessionInventory): Promise<void> =>
+      ipcRenderer.invoke('sessions:write', workspaceName, inventory)
   },
   fs: {
     isDirectory: (path: string): Promise<boolean> => ipcRenderer.invoke('fs:isDirectory', path),

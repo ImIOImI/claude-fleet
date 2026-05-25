@@ -1,4 +1,6 @@
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from '@playwright/test';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..');
@@ -6,8 +8,13 @@ const REPO_ROOT = path.resolve(import.meta.dirname, '..');
 async function launch(
   envOverrides: Record<string, string> = {}
 ): Promise<{ app: ElectronApplication; window: Page }> {
+  // Isolate userData per launch so persisted state (sessions.json,
+  // workspace manifests, image library) from one test can't leak into
+  // another. The OS keeps temp dirs around — we don't bother cleaning,
+  // they're small and OS-managed.
+  const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-test-'));
   const app = await electron.launch({
-    args: [REPO_ROOT],
+    args: [REPO_ROOT, `--user-data-dir=${userDataDir}`],
     cwd: REPO_ROOT,
     env: { ...process.env, ...envOverrides } as Record<string, string>
   });
@@ -348,6 +355,83 @@ test('Hamburger Close… on an exited workspace shows only Remove', async () => 
     await expect(window.getByRole('heading', { name: 'Close workspace' })).toBeVisible();
     await expect(window.getByRole('button', { name: 'Stop only' })).toBeHidden();
     await expect(window.getByRole('button', { name: 'Remove' })).toBeVisible();
+  } finally {
+    await app.close();
+  }
+});
+
+test('Sessions persistence: write then read returns the same inventory', async () => {
+  // Exercises the sessions.json layer end-to-end through IPC. The
+  // renderer-facing read/write API is what TerminalPane uses on mount
+  // and on every tab-list change.
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    const inv = {
+      version: 1,
+      sessions: [
+        { id: 'aaa', name: 'main', createdAt: 1000 },
+        { id: 'bbb', name: 'session 2', createdAt: 2000 }
+      ],
+      nextNum: 3,
+      activeId: 'bbb'
+    };
+    await window.evaluate(async (inventory) => {
+      await window.api.sessions.write('persistence-roundtrip-test', inventory);
+    }, inv);
+
+    const got = await window.evaluate(async () => {
+      return window.api.sessions.read('persistence-roundtrip-test');
+    });
+
+    expect(got).toEqual(inv);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Pause: chip shows paused glyph and terminal pane shows paused overlay', async () => {
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    // Select the running mock-alpha workspace so its terminal pane mounts.
+    await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
+    await expect(window.locator('.terminal-host')).toBeVisible();
+
+    // Pause via the chip's hamburger menu.
+    const group = window.locator('.ws-chip-group', { hasText: 'mock-alpha' });
+    await group.locator('.ws-chip-menu-trigger').click();
+    await window.locator('.ws-chip-menu').getByRole('menuitem', { name: 'Pause' }).click();
+
+    // The renderer polls workspace:list every 5s but onRefresh fires
+    // immediately after the menu action — paused state should land fast.
+    await expect(
+      window.locator('.ws-chip-group', { hasText: 'mock-alpha' }).locator('.chip-paused-glyph')
+    ).toBeVisible();
+    await expect(window.locator('.paused-overlay')).toBeVisible();
+    await expect(window.getByText('workspace paused')).toBeVisible();
+  } finally {
+    await app.close();
+  }
+});
+
+test('Pause + Resume: clicking Resume in the overlay un-pauses and clears it', async () => {
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
+    const group = window.locator('.ws-chip-group', { hasText: 'mock-alpha' });
+    await group.locator('.ws-chip-menu-trigger').click();
+    await window.locator('.ws-chip-menu').getByRole('menuitem', { name: 'Pause' }).click();
+
+    await expect(window.locator('.paused-overlay')).toBeVisible();
+
+    // Resume button inside the overlay.
+    await window.locator('.paused-overlay').getByRole('button', { name: 'Resume' }).click();
+
+    // After unpause the overlay disappears and the chip's pause glyph
+    // does too. Underlying terminal regains pointer events.
+    await expect(window.locator('.paused-overlay')).toBeHidden();
+    await expect(
+      window.locator('.ws-chip-group', { hasText: 'mock-alpha' }).locator('.chip-paused-glyph')
+    ).toBeHidden();
   } finally {
     await app.close();
   }

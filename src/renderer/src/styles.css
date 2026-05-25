@@ -135,6 +135,7 @@ body {
 .ws-chip .dot.running { background: var(--state-running); }
 .ws-chip .dot.paused { background: var(--state-warn); }
 .ws-chip .dot.stopped { background: var(--state-exited); }
+.ws-chip .chip-paused-glyph { color: var(--state-warn); flex-shrink: 0; }
 .ws-chip .name { font-weight: 500; }
 .ws-chip .status { color: var(--text-muted); font-size: 11px; }
 
@@ -729,6 +730,71 @@ body {
   font-size: 11px;
 }
 .session-ended-card .btn { align-self: center; }
+
+/* ── Paused workspace overlay (terminal pane) ──────────────────────── */
+/* Modal scoped to the session-stack — workspace ribbon stays live so the
+   user can switch to another workspace without resuming. The underlying
+   terminals stay mounted, just visually dimmed, so the user can see the
+   last frame of each session is right where they left it. */
+.session-stack.paused .terminal-session {
+  opacity: 0.4;
+  filter: grayscale(0.5);
+  pointer-events: none;
+  transition: opacity 120ms ease, filter 120ms ease;
+}
+.paused-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(1px);
+  z-index: 6;
+}
+.paused-card {
+  background: var(--bg-card, #161613);
+  border: 1px solid var(--hue, var(--accent));
+  border-radius: 10px;
+  padding: 18px 22px;
+  max-width: 360px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 16px 40px rgb(0 0 0 / 0.55);
+}
+.paused-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: rgba(234, 179, 8, 0.12);
+  color: var(--state-warn);
+  margin-bottom: 2px;
+}
+.paused-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary, #ece8de);
+  letter-spacing: 0.01em;
+}
+.paused-help {
+  font-size: 12px;
+  color: var(--text-muted, #7a7567);
+  line-height: 1.5;
+  max-width: 280px;
+}
+.paused-resume {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.paused-resume svg { flex-shrink: 0; }
 
 /* ── Workspace chip + hamburger menu ───────────────────────────────── */
 .ws-chip-group {

@@ -222,8 +222,19 @@ export function App() {
               // key forces TerminalPane to remount on workspace switch so its
               // session state (tabs + active id + counter) doesn't leak across
               // workspaces. PTYs from the old workspace are torn down by
-              // TerminalSession's unmount cleanup.
-              <TerminalPane key={selected.containerId} containerId={selected.containerId} />
+              // TerminalSession's unmount cleanup. workspaceName is the
+              // persistence key for sessions.json (containerId changes if the
+              // container is recreated; name does not).
+              <TerminalPane
+                key={selected.containerId}
+                workspaceName={selected.name}
+                containerId={selected.containerId}
+                paused={selected.state === 'paused'}
+                onResume={async () => {
+                  await window.api.workspace.start(selected.name);
+                  refresh();
+                }}
+              />
             ) : liveCount === 0 ? (
               <FirstRun onNewWorkspace={() => setCreateOpen(true)} />
             ) : (

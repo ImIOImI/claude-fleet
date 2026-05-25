@@ -158,6 +158,19 @@ export function WorkspaceTabStrip({
             title={w.status}
           >
             <span className={`dot ${w.state}`} />
+            {w.state === 'paused' && (
+              <svg
+                viewBox="0 0 8 8"
+                width="8"
+                height="8"
+                fill="currentColor"
+                aria-hidden="true"
+                className="chip-paused-glyph"
+              >
+                <rect x="1" y="1" width="2" height="6" rx="0.5" />
+                <rect x="5" y="1" width="2" height="6" rx="0.5" />
+              </svg>
+            )}
             <span className="name">{w.name}</span>
           </button>
           <button
