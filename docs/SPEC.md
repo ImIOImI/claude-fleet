@@ -63,27 +63,37 @@ Three processes, per Electron convention:
 │  - keytar (lazy)   │   exposes window.api    │   ┌─ top strip ─┐  │
 │  - clipboard       │   via preload script    │   ├──┬───────┬──┤  │
 │  - native Menu     │                         │   │S │ term  │ O│  │
-│  - better-sqlite3* │                         │   ├──┴───────┴──┤  │
-│  - JSONL watcher*  │                         │   └─ bottom bar ┘  │
-└─────────┬──────────┘                         └────────────────────┘
+│  - broker client   │                         │   ├──┴───────┴──┤  │
+│  - better-sqlite3* │                         │   └─ bottom bar ┘  │
+│  - JSONL watcher*  │                         └────────────────────┘
+└─────────┬──────────┘
           │
-          │  Docker socket
+          │  Docker socket + Unix sockets to each container's broker
           ▼
-┌────────────────────┐
-│  Docker daemon     │
-│  ┌──────────────┐  │
-│  │ runner ct 1  │  │   bind: hostWorkspace → /workspace
-│  │ ┌──────────┐ │  │   exec: `claude` (TTY)
-│  │ │ claude   │ │  │
-│  │ └──────────┘ │  │
-│  └──────────────┘  │
-│  ┌──────────────┐  │
-│  │ runner ct 2  │  │ ...
-│  └──────────────┘  │
-└────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│  Docker daemon                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │ runner ct 1                                                  │   │
+│  │   tini (PID 1)                                               │   │
+│  │     └─ broker  ◄────── unix socket ◄── host BrokerClient     │   │
+│  │         ├─ claude PTY (session A)                            │   │
+│  │         ├─ claude PTY (session B)                            │   │
+│  │         └─ claude PTY (session C)                            │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │ runner ct 2  …                                               │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
+
+binds (per container):
+  hostWorkspace            → /workspace
+  state/<name>/.claude     → /home/fleet/.claude
+  state/<name>/broker      → /run/broker   (broker socket directory)
 ```
 
 \* planned, see §11.
+
+The **broker** is a small Go daemon (//broker) shipped inside the runner image. It owns every claude PTY in the container and exposes them via a Unix-socket protocol. The host's Electron main process attaches via the bind-mounted socket directory rather than running `docker exec claude` directly. This is the foundation of "expert workspaces" (issue #18): PTYs outlive any individual host disconnect (app quit, app crash), so when the user pauses + closes the app + reopens + unpauses, every session reattaches to the same live `claude` process with its in-memory context (analyses, file watches, MCP server state) intact.
 
 **Main process** owns everything privileged:
 - Docker daemon access via `dockerode` (default socket).
@@ -136,10 +146,10 @@ Per-workspace terminal-session inventory (the tab list shown above the terminal 
 - `vault:delete(name)` → `void` — delete + remove from index.
 
 ### PTY
-- `pty:attach(containerId, cols, rows)` → `sessionId: string` — opens a `docker exec` running `claude` with TTY; main retains the stream handle, returns an opaque session id.
-- `pty:input(sessionId, data: string)` → `void` — write user input to the stream.
-- `pty:resize(sessionId, cols, rows)` → `void` — forward window resize to Docker.
-- `pty:detach(sessionId)` → `void` — destroy the stream, drop the session.
+- `pty:attach(containerId, brokerSessionId, cols, rows)` → `ptyHandleId: string` — opens a connection to the workspace's in-container broker (Unix socket at `<state>/<name>/broker/broker.sock`) and either re-attaches to an existing broker session or creates one. `brokerSessionId` is the stable id from `sessions.json` (so re-attach across an app restart finds the same live PTY). Main retains a `BrokerClient` plus the resulting Duplex, returns an opaque `ptyHandleId` the renderer uses for subsequent input/resize/detach calls.
+- `pty:input(ptyHandleId, data: string)` → `void` — write user input to the broker as an INPUT frame on the channel.
+- `pty:resize(ptyHandleId, cols, rows)` → `void` — send a RESIZE frame.
+- `pty:detach(ptyHandleId)` → `void` — send a DETACH frame (session lives on inside the broker) and close the socket.
 
 Per-session events from main to renderer:
 - `pty:data:${sessionId}` — `Buffer` chunks from the container's stdout/stderr.
@@ -243,7 +253,7 @@ Today the only workspace backend is a Docker container. Each managed container c
 ### Docker container shape
 - `Tty: true`, `OpenStdin: true`, `StdinOnce: false` — required for interactive `docker exec` later.
 - `WorkingDir: /workspace/${subdir}` (or `/workspace` if subdir is empty).
-- Binds: `${workspaceRoot}:/workspace:rw` (the user's host dir) and `<userData>/state/<name>/.claude:/home/fleet/.claude:rw` (per-workspace persistent Claude state).
+- Binds: `${workspaceRoot}:/workspace:rw` (the user's host dir), `<userData>/state/<name>/.claude:/home/fleet/.claude:rw` (per-workspace persistent Claude state), and `<userData>/state/<name>/broker:/run/broker:rw` (the directory the in-container broker creates its Unix socket in).
 - Env: caller passes a `Record<string,string>`, typically `{ ANTHROPIC_API_KEY: <from vault> }` for API-key mode or `{}` for OAuth mode. `HOME=/home/fleet` is also set so tooling finds the bind-mounted `.claude/`.
 - `User: <hostUid>:<hostGid>` so bind-mounted files are owned by the host user.
 - Optional resource limits: `cpus` (→ `NanoCpus`), `memoryMb` (→ `Memory`).
@@ -331,8 +341,15 @@ claude-fleet/
 │   └── rules/
 │       └── spec-maintenance.md        # the rule
 ├── docker/
-│   ├── Dockerfile                     # runner image
-│   └── .dockerignore
+│   └── Dockerfile                     # runner image (multi-stage, builds broker)
+├── .dockerignore                      # opt-in: broker/** + docker/Dockerfile only
+├── broker/                            # in-container session multiplexer (Go)
+│   ├── go.mod / go.sum
+│   ├── cmd/broker/main.go             # entrypoint; reads env, listens on socket
+│   └── internal/
+│       ├── proto/                     # wire-protocol frame codec
+│       ├── session/                   # PTY supervision + ring buffer + Manager
+│       └── server/                    # connection loop, frame dispatch
 ├── electron.vite.config.ts            # electron-vite config (main / preload / renderer)
 ├── electron-builder.yml               # packaging config
 ├── package.json
@@ -343,12 +360,13 @@ claude-fleet/
     ├── main/
     │   ├── index.ts                   # app lifecycle, BrowserWindow
     │   ├── ipc.ts                     # registerIpc() — workspace:* / pty:* / etc. live here
-    │   ├── docker.ts                  # Docker backend (dockerode wrapper + PTY attach)
+    │   ├── docker.ts                  # Docker backend (dockerode + broker-aware PTY attach)
+    │   ├── broker.ts                  # host-side BrokerClient + frame codec
     │   ├── mock.ts                    # mock backend behind CLAUDE_FLEET_MOCK=1
     │   ├── workspaces.ts              # WorkspaceSpec types + manifest read/write/list
     │   ├── sessions.ts                # per-workspace sessions.json read/write
     │   ├── imageLibrary.ts            # imageLibrary.json read/write + auto-record
-    │   ├── paths.ts                   # state-dir path conventions
+    │   ├── paths.ts                   # state-dir path conventions (incl. broker dir)
     │   ├── fs.ts                      # isDirectory / mkdirp helpers
     │   └── vault.ts                   # keytar wrapper + name index
     ├── preload/
@@ -443,35 +461,22 @@ CREATE TABLE sessions (
 
 ### Resumable sessions on workspace pause/resume — "expert workspaces"
 
-The end-state goal: **expert workspaces** that load a domain context once (an organization's architecture, a particular application's source, a body of documentation) and then sleep with that context intact. The user pauses the workspace, closes the app, comes back hours or days later, unpauses, and finds every session right where it was — same conversation history, same in-memory analyses, same MCP server state — ready to do a quick task (review a PR, answer a question) and go back to sleep. Re-priming the context on every wake defeats the purpose.
+The goal: **expert workspaces** that load a domain context once (an organization's architecture, a particular application's source, a body of documentation) and then sleep with that context intact. The user pauses the workspace, closes the app, comes back hours or days later, unpauses, and finds every session right where it was — same conversation history, same in-memory analyses, same MCP server state — ready to do a quick task and go back to sleep. Re-priming the context on every wake defeats the purpose.
 
-This is a two-phase build. Phase 1 (the persistence + UI foundation) is landed; phase 2 (the in-container broker that actually preserves in-memory context across an app restart) is still ahead.
+**Status: shipped in two phases.** Phase 1 (sessions persistence + paused UI) and Phase 2 (in-container Go broker + host-side BrokerClient) are both landed. The relevant body sections describe the implementation; what remains here is just the residual open questions.
 
-**Phase 1 — landed:**
-- **Session inventory persistence.** Each workspace's tab list is stored at `<userData>/state/<name>/sessions.json`. Loaded on `TerminalPane` mount, written on every change. See §6 (Sessions IPC) and §7 (Session inventory).
-- **Paused UI.** The workspace ribbon chip shows a paused dot + ⏸ glyph. The terminal pane overlays a modal card ("workspace paused / Resume") scoped to the session-stack — the underlying terminals stay mounted but dimmed and pointer-events-disabled. The workspace ribbon stays interactive so the user can switch workspaces without resuming. See §8 ("Attach a terminal" → Paused state).
-- **Resume.** The modal's Resume button calls `workspace:start(name)`, which `docker unpause`s the container. The poll picks up the running state and the overlay disappears.
+- Phase 1 see: §6 (Sessions IPC), §7 (Session inventory), §8 (Attach a terminal → Paused state).
+- Phase 2 see: §5 (Architecture diagram + broker description), §6 (PTY IPC with `brokerSessionId`), §7 (broker socket bind), §10 (`broker/` Go module).
 
-**Phase 2 — still open:**
+**Open (residual):**
 
-The hole today: PTY stream handles live in main-process memory only. App restart loses them, and on next launch the renderer must spawn fresh `docker exec claude` per saved tab — which means the conversation reloads (the JSONL still exists) but everything Claude held in memory (computed analyses, file watches, MCP server state) is gone. Across a same-app-instance pause this is fine (the docker-exec processes themselves are frozen and thaw correctly). Across an app restart it's not.
-
-The chosen fix: an **in-container broker daemon** that owns each `claude` PTY and exposes them over a Unix socket bind-mounted from the host. The Electron main attaches to that socket instead of running `docker exec claude` directly. The broker outlives any individual host connection — quit the app, restart, reconnect to the socket, get the same session bytes back. The runner image's existing `tini` PID 1 supervises both `sleep infinity` (today's container keepalive) and the broker.
-
-Why not tmux/dtach: tmux is cheaper to ship but stacks two TUIs (xterm → tmux → claude) and tmux's prefix key + mouse handling collide with claude's. dtach has no scrollback. A small broker we own gives a clean byte-stream layer with no second TUI in the middle.
-
-Why not resume-by-transcript only: the conversation comes back but cognition doesn't. Defeats the expert-workspace goal.
-
-**Open (phase 2):**
-- **Broker process model.** Single multiplexing daemon serving all sessions on one socket, or per-session daemons each on their own socket. Multiplexing is simpler to install (one binary in the image) but ties session lifecycles together if the broker crashes; per-session is more isolated but more processes.
-- **Broker implementation language.** Node.js (already in the runner image, smaller diff to ship) vs. Go (smaller binary, no runtime, simpler dependency story). Tradeoffs are install-size vs. dev-iteration friction.
-- **Wire protocol.** Length-prefixed binary frames with channel ids (multiplex multiple sessions over one socket); or a simple text command protocol (`ATTACH <id>` then raw bytes). Need to decide on resize semantics, signal forwarding (Ctrl-C, Ctrl-Z), and how to surface broker-internal errors to the host.
-- **Scrollback / ring buffer.** Broker has to remember some bytes per session so reconnecting clients get more than "blank screen until next output." Ring buffer size per session — fixed (1 MB? 10 MB?) or configurable.
-- **Clean-exit flush of sessions.json.** Add an `app:before-quit` hook to write any pending inventory changes (today's opportunistic per-change writes already mean the gap is small, but a final sweep is cheap insurance).
-- **Container restart policy.** Survives app restart today; does not survive host reboot (`RestartPolicy` is unset). For the broker to outlive a host reboot, containers need `unless-stopped` and the broker must come back up on container start. Configurable per workspace, off by default.
-- **Interaction with the durable transcript mirror.** Re-attach via broker keeps the same session UUID across long quiet periods (pause + relaunch). The mirror watcher must not treat a long quiet period as a session end.
-- **Resource accounting.** `docker pause` doesn't release RAM; an expert workspace pins memory until the container is removed. Several heavy sessions × several expert workspaces can be substantial. Decide whether to surface per-workspace RAM usage in the chip / past-list and whether to warn when the total exceeds a threshold.
-- **Pause depth.** "Deep sleep" (allow swap-out, slower wake) vs. "light sleep" (kept resident, instant wake). Out of scope for now; record once the broker work surfaces a need.
+- **Container restart policy.** Survives app restart today (broker keeps running inside the container). Does not survive host reboot — `RestartPolicy` is unset, so when the docker daemon comes back up the container is in `stopped` state and the broker process is gone. Wiring `unless-stopped` would bring the container back automatically; the broker re-launches on container start, but session state would still be lost (the broker holds session state in memory only, not on disk). For "wake-and-go" expert workspaces across host reboots we'd need session checkpoint/restore inside the broker — out of scope for now.
+- **Clean-exit `app:before-quit` flush of sessions.json.** Today's opportunistic per-change writes mean the gap between last flush and an uncontrolled quit is bounded. A `before-quit` final sweep is cheap insurance for the few-session-modifications-then-instant-quit case.
+- **Ring buffer size.** Default 64 KiB per session (env override: `CLAUDE_FLEET_BROKER_RING`). Big enough to repaint a screenful of context on reconnect; small enough that 6 workspaces × 6 sessions = 2.3 MiB of buffer is negligible. Revisit if users frequently want more replayed history on reconnect.
+- **Interaction with the durable transcript mirror.** Re-attach via broker keeps the same broker session id across long quiet periods (pause + relaunch). The mirror watcher (when it lands) must not treat a long quiet period as a session end.
+- **Resource accounting.** `docker pause` freezes processes but doesn't release RAM; an expert workspace pins memory until the container is removed. Several heavy sessions × several expert workspaces can be substantial on a developer machine. Decide whether to surface per-workspace RAM usage in the chip / past-list and whether to warn when the total exceeds a threshold.
+- **Pause depth.** "Deep sleep" (allow swap-out, slower wake) vs. "light sleep" (kept resident, instant wake). Out of scope until a user actually needs the differentiation.
+- **Broker crash blast radius.** Single multiplexer means a broker bug kills every session in that workspace at once. We accept this tradeoff for the cleaner architecture; mitigate by writing the broker defensively (each session's error handling is local) and by relying on the manager's per-session goroutine isolation. If real crashes appear, revisit the per-session-process model.
 
 ### Drag-and-drop file ingestion
 Drop OS files, pasted images, web content, or text fragments onto the window; the app saves them into the selected container's workspace so the agent can read them.

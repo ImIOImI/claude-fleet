@@ -246,9 +246,16 @@ class FakeShell extends Duplex {
 
 export async function attachPty(
   containerId: string,
+  _sessionId: string,
   _cols: number,
   _rows: number
 ): Promise<PtyHandle> {
+  // Mock mode doesn't run a real broker — sessionId is accepted so the
+  // signature matches the real backend, but each attach gets a fresh
+  // FakeShell instead of looking up a persistent broker session. The
+  // mock's whole point is iterating on UI without the runner image
+  // plumbing, so the in-memory-context-preserved promise is naturally
+  // out of scope here.
   const ws = workspaces.get(containerId);
   const shell = new FakeShell(ws?.name ?? containerId);
   return {

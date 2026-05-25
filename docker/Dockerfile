@@ -1,3 +1,23 @@
+# ─── Stage 1: build the in-container broker binary ───────────────────────
+# The broker is claude-fleet's session multiplexer. It owns every claude
+# PTY inside the container and exposes them over a Unix socket the host
+# attaches to instead of running `docker exec claude` directly. This
+# stage compiles the Go binary against the broker module at //broker.
+#
+# The image is built with the REPO ROOT as build context (see the CI
+# workflow and the host's local-build fallback), so paths below are
+# relative to claude-fleet/.
+FROM golang:1.22-alpine AS broker-build
+
+WORKDIR /src
+COPY broker/go.mod broker/go.sum ./
+RUN go mod download
+COPY broker/ .
+# CGO disabled → fully static binary. ldflags strip debug info to keep
+# the runtime image small (~6 MB instead of ~20 MB).
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/broker ./cmd/broker
+
+# ─── Stage 2: runtime image ──────────────────────────────────────────────
 FROM node:22-bookworm-slim
 
 ARG USER_UID=1000
@@ -24,12 +44,26 @@ RUN userdel -r node 2>/dev/null || rm -rf /home/node \
  && useradd  --uid ${USER_UID} --gid ${USER_GID} --shell /bin/bash --create-home fleet \
  && chmod 777 /home/fleet
 
+# Drop the broker binary in PATH. World-executable so any host UID
+# (set via docker run --user) can run it.
+COPY --from=broker-build /out/broker /usr/local/bin/broker
+RUN chmod 0755 /usr/local/bin/broker
+
+# Pre-create /run/broker so the broker doesn't need to mkdir it at
+# startup as a non-root user. World-rwx so any host UID can own files
+# (the broker socket) inside it.
+RUN mkdir -p /run/broker && chmod 0777 /run/broker
+
 USER fleet
 WORKDIR /workspace
 
 ENV TERM=xterm-256color \
     DISABLE_AUTOUPDATER=1 \
-    DISABLE_TELEMETRY=1
+    DISABLE_TELEMETRY=1 \
+    CLAUDE_FLEET_BROKER_SOCKET=/run/broker/broker.sock
 
+# tini reaps zombies (claude processes spawned and reaped by the
+# broker) and forwards signals. The broker is the long-running
+# foreground process — when it exits, the container exits.
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["sleep", "infinity"]
+CMD ["/usr/local/bin/broker"]

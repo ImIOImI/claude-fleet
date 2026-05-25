@@ -89,10 +89,14 @@ function multilineLinkProvider(term: Terminal): ILinkProvider {
 
 interface Props {
   containerId: string;
+  /** Stable session id from sessions.json — used as the broker's
+   *  session key so re-attach across an app restart finds the same
+   *  live PTY. */
+  sessionId: string;
   visible: boolean;
 }
 
-export function TerminalSession({ containerId, visible }: Props) {
+export function TerminalSession({ containerId, sessionId, visible }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   // Bumped when the user clicks "Start new session" after a session ends.
   // The effect deps on containerId+sessionEpoch, so a new attach happens
@@ -134,7 +138,10 @@ export function TerminalSession({ containerId, visible }: Props) {
     fit.fit();
     const linkProviderDisposable = term.registerLinkProvider(multilineLinkProvider(term));
 
-    let sessionId: string | null = null;
+    // ptyHandleId is the internal handle returned by main's pty:attach —
+    // used to address input/resize/detach. Distinct from the prop
+    // `sessionId`, which is the broker's persistent session key.
+    let ptyHandleId: string | null = null;
     let unsubData: (() => void) | null = null;
     let unsubEnd: (() => void) | null = null;
     let disposed = false;
@@ -149,7 +156,7 @@ export function TerminalSession({ containerId, visible }: Props) {
 
     const doPaste = (): void => {
       void window.api.clipboard.read().then((text) => {
-        if (text && sessionId) window.api.pty.input(sessionId, text);
+        if (text && ptyHandleId) window.api.pty.input(ptyHandleId, text);
       });
     };
 
@@ -191,25 +198,37 @@ export function TerminalSession({ containerId, visible }: Props) {
     host.addEventListener('contextmenu', onContextMenu);
 
     (async () => {
-      const sid = await window.api.pty.attach(containerId, term.cols, term.rows);
-      if (disposed) {
-        window.api.pty.detach(sid);
-        return;
-      }
-      sessionId = sid;
-      unsubData = window.api.pty.onData(sid, (chunk) => {
-        term.write(chunk);
-      });
-      unsubEnd = window.api.pty.onEnd(sid, () => {
-        term.writeln('\r\n[session ended]');
+      try {
+        const sid = await window.api.pty.attach(containerId, sessionId, term.cols, term.rows);
+        if (disposed) {
+          window.api.pty.detach(sid);
+          return;
+        }
+        ptyHandleId = sid;
+        unsubData = window.api.pty.onData(sid, (chunk) => {
+          term.write(chunk);
+        });
+        unsubEnd = window.api.pty.onEnd(sid, () => {
+          term.writeln('\r\n[session ended]');
+          if (!disposed) setSessionEnded(true);
+        });
+        term.onData((data) => window.api.pty.input(sid, data));
+      } catch (err) {
+        // Attach failure most commonly means the in-container broker
+        // isn't reachable — older runner images without it, or the
+        // container still booting. Write the error into the xterm so
+        // the user sees what went wrong, and show the ended overlay so
+        // they can hit "Start new session" once it's ready.
+        const msg = err instanceof Error ? err.message : String(err);
+        term.writeln('\r\n\x1b[31m[failed to attach session]\x1b[0m');
+        term.writeln(`\x1b[31m${msg}\x1b[0m`);
         if (!disposed) setSessionEnded(true);
-      });
-      term.onData((data) => window.api.pty.input(sid, data));
+      }
     })();
 
     const ro = new ResizeObserver(() => {
       fit.fit();
-      if (sessionId) window.api.pty.resize(sessionId, term.cols, term.rows);
+      if (ptyHandleId) window.api.pty.resize(ptyHandleId, term.cols, term.rows);
     });
     ro.observe(host);
 
@@ -220,10 +239,10 @@ export function TerminalSession({ containerId, visible }: Props) {
       unsubData?.();
       unsubEnd?.();
       linkProviderDisposable.dispose();
-      if (sessionId) window.api.pty.detach(sessionId);
+      if (ptyHandleId) window.api.pty.detach(ptyHandleId);
       term.dispose();
     };
-  }, [containerId, sessionEpoch]);
+  }, [containerId, sessionId, sessionEpoch]);
 
   // When this session becomes visible again, force a fit. xterm's
   // ResizeObserver can fire while the host is `visibility: hidden`

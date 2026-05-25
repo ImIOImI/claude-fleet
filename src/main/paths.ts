@@ -27,3 +27,15 @@ export function workspaceClaudeDir(name: string): string {
 export function workspaceManifestPath(name: string): string {
   return join(workspaceStateDir(name), 'workspace.json');
 }
+
+// Bind-mounted into the container at /run/broker (see docker/Dockerfile).
+// The in-container broker creates its Unix socket here as broker.sock.
+// One dir per workspace so brokers from different workspaces never
+// share a socket namespace.
+export function workspaceBrokerDir(name: string): string {
+  return join(workspaceStateDir(name), 'broker');
+}
+
+export function workspaceBrokerSocket(name: string): string {
+  return join(workspaceBrokerDir(name), 'broker.sock');
+}

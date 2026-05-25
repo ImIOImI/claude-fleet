@@ -12,10 +12,13 @@ import { mkdir, rm, stat } from 'node:fs/promises';
 import type { Duplex } from 'node:stream';
 import {
   assertValidWorkspaceName,
+  workspaceBrokerDir,
+  workspaceBrokerSocket,
   workspaceClaudeDir,
   workspaceStateDir
 } from './paths.js';
 import type { Workspace } from './workspaces.js';
+import { BrokerClient, brokerPtyStream } from './broker.js';
 
 export const FLEET_LABEL = 'com.claude-fleet.managed';
 export const RUNNER_IMAGE = 'ghcr.io/imioimi/claude-fleet/runner:latest';
@@ -140,6 +143,8 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
 
   const claudeDir = workspaceClaudeDir(spec.name);
   await mkdir(claudeDir, { recursive: true });
+  const brokerDir = workspaceBrokerDir(spec.name);
+  await mkdir(brokerDir, { recursive: true });
 
   const uid = process.getuid?.() ?? 1000;
   const gid = process.getgid?.() ?? 1000;
@@ -149,7 +154,12 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
   const hostCfg: Docker.HostConfig = {
     Binds: [
       `${spec.workspaceRoot}:/workspace:rw`,
-      `${claudeDir}:/home/fleet/.claude:rw`
+      `${claudeDir}:/home/fleet/.claude:rw`,
+      // The in-container broker creates its socket here. Bind-mounting
+      // the *directory* (not the file) lets the broker create the
+      // socket node on its own — Docker can't bind-mount a file that
+      // doesn't exist yet on the host side.
+      `${brokerDir}:/run/broker:rw`
     ],
     AutoRemove: false
   };
@@ -292,25 +302,82 @@ export interface PtyHandle {
   detach: () => void;
 }
 
+// Channel id used on every host→broker connection. We open one
+// connection per terminal session, so a single channel per connection
+// is enough. (The broker's protocol supports per-connection
+// multiplexing if we ever want to share connections later.)
+const HOST_CHANNEL = 1;
+
+/**
+ * Open a terminal session against the in-container broker.
+ *
+ * `sessionId` is the host-side, stable session id (from sessions.json).
+ * The broker keys its session map by the same string, so a re-attach
+ * after an app restart finds the live claude PTY by id.
+ *
+ * The flow:
+ *   1. Resolve the workspace's broker socket from the container's name.
+ *   2. Open the socket.
+ *   3. ATTACH first. If the broker says "no such session" we CREATE
+ *      then ATTACH — covers both fresh-session and re-attach cases.
+ *   4. Wrap the socket in a Duplex shaped like the old docker-exec PTY
+ *      so the IPC layer doesn't notice the change.
+ */
 export async function attachPty(
   containerId: string,
+  sessionId: string,
   cols: number,
   rows: number
 ): Promise<PtyHandle> {
+  // Find the workspace name so we know which socket to connect to.
+  // Container names always start with "/"; strip that.
   const c = docker.getContainer(containerId);
-  const exec = await c.exec({
-    Cmd: ['claude'],
-    Tty: true,
-    AttachStdin: true,
-    AttachStdout: true,
-    AttachStderr: true,
-    Env: [`COLUMNS=${cols}`, `LINES=${rows}`, 'TERM=xterm-256color']
-  });
-  const stream = (await exec.start({ Tty: true, hijack: true, stdin: true })) as Duplex;
-  await exec.resize({ w: cols, h: rows });
+  const info = await c.inspect();
+  const workspaceName = info.Name.replace(/^\//, '');
+
+  const sockPath = workspaceBrokerSocket(workspaceName);
+  const client = new BrokerClient(sockPath);
+  try {
+    await client.ready();
+  } catch (err) {
+    client.close();
+    throw new Error(
+      `broker socket not reachable at ${sockPath}: ${(err as Error).message}. ` +
+        `Is the runner image new enough to include the broker?`
+    );
+  }
+
+  // Try ATTACH first — if the session is alive (we're re-attaching),
+  // that's all we need. If it's missing, CREATE then ATTACH.
+  let attachResp = await client.attachSession(sessionId, HOST_CHANNEL);
+  if (!attachResp.ok && /no such session/i.test(attachResp.error ?? '')) {
+    const createResp = await client.createSession(sessionId, cols, rows);
+    if (!createResp.ok) {
+      client.close();
+      throw new Error(`broker CREATE failed: ${createResp.error}`);
+    }
+    attachResp = await client.attachSession(sessionId, HOST_CHANNEL);
+  }
+  if (!attachResp.ok) {
+    client.close();
+    throw new Error(`broker ATTACH failed: ${attachResp.error}`);
+  }
+
+  const stream = brokerPtyStream(client, HOST_CHANNEL);
+
   return {
     stream,
-    resize: (c2, r2) => exec.resize({ w: c2, h: r2 }),
-    detach: () => stream.destroy()
+    resize: async (newCols, newRows) => {
+      client.sendResize(HOST_CHANNEL, newCols, newRows);
+    },
+    detach: () => {
+      // Detach the channel cleanly so the session stays alive on the
+      // broker for a future re-attach; then close the socket.
+      // (Fire and forget — if the broker is unreachable there's
+      // nothing to do but tear down.)
+      void client.detachChannel(HOST_CHANNEL).catch(() => undefined);
+      stream.destroy();
+      client.close();
+    }
   };
 }

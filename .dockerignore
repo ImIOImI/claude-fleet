@@ -1,0 +1,12 @@
+# Dockerfile context = repo root. Default everything OUT, then opt in
+# only the paths the multi-stage build actually needs (broker module +
+# the Dockerfile itself). Keeps node_modules, dist outputs, design docs,
+# tests, and IDE state out of every build layer's hash.
+**
+
+!broker/**
+!docker/Dockerfile
+
+# Even within broker/, drop things the binary doesn't need:
+broker/**/*_test.go
+broker/cmd/**/testdata/**

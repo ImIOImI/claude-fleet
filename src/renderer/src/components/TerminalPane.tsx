@@ -173,6 +173,7 @@ export function TerminalPane({ containerId, workspaceName, paused, onResume }: P
           <TerminalSession
             key={s.id}
             containerId={containerId}
+            sessionId={s.id}
             visible={s.id === activeId}
           />
         ))}

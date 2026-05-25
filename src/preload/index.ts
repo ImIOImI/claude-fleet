@@ -77,8 +77,13 @@ const api = {
     delete: (name: string) => ipcRenderer.invoke('vault:delete', name)
   },
   pty: {
-    attach: (containerId: string, cols: number, rows: number): Promise<string> =>
-      ipcRenderer.invoke('pty:attach', containerId, cols, rows),
+    attach: (
+      containerId: string,
+      brokerSessionId: string,
+      cols: number,
+      rows: number
+    ): Promise<string> =>
+      ipcRenderer.invoke('pty:attach', containerId, brokerSessionId, cols, rows),
     input: (sessionId: string, data: string) =>
       ipcRenderer.invoke('pty:input', sessionId, data),
     resize: (sessionId: string, cols: number, rows: number) =>

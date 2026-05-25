@@ -197,23 +197,27 @@ export function registerIpc(): void {
 
   ipcMain.handle(
     'pty:attach',
-    async (event, containerId: string, cols: number, rows: number) => {
-      const sessionId = randomUUID();
-      const handle = await backend.attachPty(containerId, cols, rows);
-      ptySessions.set(sessionId, handle);
+    async (event, containerId: string, brokerSessionId: string, cols: number, rows: number) => {
+      // Internal handle id, used by the renderer to address subsequent
+      // input/resize/detach calls. Distinct from brokerSessionId (which
+      // is the workspace-persistent id the broker keys its session map
+      // by). The renderer doesn't need to learn the broker id.
+      const ptyHandleId = randomUUID();
+      const handle = await backend.attachPty(containerId, brokerSessionId, cols, rows);
+      ptySessions.set(ptyHandleId, handle);
 
       const win = BrowserWindow.fromWebContents(event.sender);
       handle.stream.on('data', (chunk: Buffer) => {
-        win?.webContents.send(`pty:data:${sessionId}`, chunk);
+        win?.webContents.send(`pty:data:${ptyHandleId}`, chunk);
       });
       handle.stream.on('end', () => {
-        win?.webContents.send(`pty:end:${sessionId}`);
-        ptySessions.delete(sessionId);
+        win?.webContents.send(`pty:end:${ptyHandleId}`);
+        ptySessions.delete(ptyHandleId);
       });
       handle.stream.on('error', (err) => {
-        win?.webContents.send(`pty:error:${sessionId}`, String(err));
+        win?.webContents.send(`pty:error:${ptyHandleId}`, String(err));
       });
-      return sessionId;
+      return ptyHandleId;
     }
   );
 
