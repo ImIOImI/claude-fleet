@@ -314,32 +314,37 @@ test('Mock mode: oauth command runs without crashing the terminal', async () => 
   }
 });
 
-test('Mock mode: Close button stops and removes the selected workspace', async () => {
+// Opens the Close workspace modal for a chip via its hamburger menu.
+// The old main-pane "Close…" header button was removed once the chip
+// menu took over the action.
+async function openCloseModalFor(window: Page, chipText: string): Promise<void> {
+  const group = window.locator('.ws-chip-group', { hasText: chipText });
+  await group.locator('.ws-chip-menu-trigger').click();
+  await window.locator('.ws-chip-menu').getByRole('menuitem', { name: 'Close…' }).click();
+}
+
+test('Hamburger Close…: stops and removes a running workspace', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {
-    await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
-
-    await window.getByRole('button', { name: 'Close…' }).click();
+    await openCloseModalFor(window, 'mock-alpha');
     await expect(window.getByRole('heading', { name: 'Close workspace' })).toBeVisible();
 
     // Running workspace should expose both "Stop only" and "Stop & remove"
     await expect(window.getByRole('button', { name: 'Stop only' })).toBeVisible();
     await window.getByRole('button', { name: 'Stop & remove' }).click();
 
-    // Modal closes, workspace disappears from strip, nothing is selected
+    // Modal closes, workspace disappears from strip
     await expect(window.getByRole('heading', { name: 'Close workspace' })).toBeHidden();
     await expect(window.locator('.ws-chip .name', { hasText: 'mock-alpha' })).toBeHidden();
-    await expect(window.locator('.empty', { hasText: 'No workspace selected' })).toBeVisible();
   } finally {
     await app.close();
   }
 });
 
-test('Mock mode: Close on an exited workspace shows only Remove', async () => {
+test('Hamburger Close… on an exited workspace shows only Remove', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {
-    await window.locator('.ws-chip', { hasText: 'mock-beta' }).click();
-    await window.getByRole('button', { name: 'Close…' }).click();
+    await openCloseModalFor(window, 'mock-beta');
     await expect(window.getByRole('heading', { name: 'Close workspace' })).toBeVisible();
     await expect(window.getByRole('button', { name: 'Stop only' })).toBeHidden();
     await expect(window.getByRole('button', { name: 'Remove' })).toBeVisible();
@@ -546,14 +551,13 @@ test('Hamburger menu: Close… opens the CloseWorkspaceModal even when chip is n
   }
 });
 
-test('Mock mode: Pause then Resume via Close modal', async () => {
+test('Pause then Resume via the Close modal (opened from hamburger)', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {
     const chip = window.locator('.ws-chip', { hasText: 'mock-alpha' });
-    await chip.click();
 
     // Running workspace → Close modal exposes Pause.
-    await window.getByRole('button', { name: 'Close…' }).click();
+    await openCloseModalFor(window, 'mock-alpha');
     await expect(window.getByRole('heading', { name: 'Close workspace' })).toBeVisible();
     await window.getByRole('button', { name: 'Pause' }).click();
 
@@ -562,9 +566,8 @@ test('Mock mode: Pause then Resume via Close modal', async () => {
     await expect(chip.locator('.dot.paused')).toBeVisible();
     await expect(chip.locator('.dot.running')).toBeHidden();
 
-    // Re-select + reopen Close modal. Paused workspace → Resume button.
-    await chip.click();
-    await window.getByRole('button', { name: 'Close…' }).click();
+    // Reopen Close modal via the hamburger. Paused workspace → Resume button.
+    await openCloseModalFor(window, 'mock-alpha');
     await expect(window.getByRole('heading', { name: 'Close workspace' })).toBeVisible();
     await expect(window.getByRole('button', { name: 'Pause' })).toBeHidden();
     const resume = window.getByRole('button', { name: 'Resume' });

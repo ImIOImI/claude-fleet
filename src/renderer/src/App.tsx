@@ -11,6 +11,15 @@ import { ProfilesDialog } from './components/ProfilesDialog';
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
 export type WorkspaceKind = 'container' | 'local';
 
+// Same deterministic hash WorkspaceTabStrip uses so a workspace's chip and
+// its terminal area pick up identical colors. Six rotating CSS vars defined
+// in styles.css.
+function hueFor(name: string): string {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  return `var(--hue-${(h % 6) + 1})`;
+}
+
 export interface WorkspaceSummary {
   name: string;
   // The renderer keys selection / chips by `id` (= container id for live
@@ -198,31 +207,14 @@ export function App() {
       <div className="app-body">
         <SessionsPane />
 
-        <main className="main-pane">
-          <div className="main-header">
-            {backendReady === false ? null : selected ? (
-              <>
-                <span style={{ fontWeight: 500, color: 'var(--text-primary)' }}>
-                  {selected.name}
-                </span>
-                <span style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
-                  {selected.status}
-                </span>
-                <span style={{ marginLeft: 'auto' }}>
-                  <button
-                    className="btn danger"
-                    onClick={() => setCloseTargetId(selected.id)}
-                    title="Stop and/or remove this workspace"
-                  >
-                    Close…
-                  </button>
-                </span>
-              </>
-            ) : liveCount > 0 ? (
-              <span style={{ color: 'var(--text-muted)' }}>Select a workspace.</span>
-            ) : null}
-          </div>
-
+        <main
+          className="main-pane"
+          // `--hue` is set when a workspace is selected so the session tab
+          // strip's active underline and the accent band above the terminal
+          // pick up that workspace's color (same hueFor used by the chip in
+          // the workspace ribbon, so the visual identity is consistent).
+          style={selected ? { ['--hue' as never]: hueFor(selected.name) } : undefined}
+        >
           <div className="main-body">
             {backendReady === false ? (
               <DockerDisconnected onRetry={refresh} />

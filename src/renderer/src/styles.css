@@ -821,22 +821,35 @@ body {
   position: absolute;
   inset: 0;
   display: grid;
-  grid-template-rows: auto 1fr;
+  /* strip · accent band · terminal stack */
+  grid-template-rows: auto 2px 1fr;
   min-height: 0;
+}
+
+/* Workspace accent band riding the top edge of the terminal body — same
+   visual idea as the design's ContextBar without the percentage fill
+   (no observability yet). Picks up --hue from the .main-pane wrapper,
+   set by App.tsx so the band matches the workspace's chip color. */
+.terminal-accent-band {
+  background: var(--hue, var(--accent));
+  height: 2px;
 }
 
 /* Session tab strip — sits at the top of the main body. The container
    row above is the workspace ribbon; the session tabs below are scoped
-   to whichever workspace is currently selected. */
+   to whichever workspace is currently selected. Fixed-height with
+   overflow-y: hidden so the strip can't grow / scroll vertically when
+   the active-tab underline pushes 1–2px past the strip's border. */
 .session-tab-strip {
   display: flex;
   align-items: stretch;
   gap: 0;
   background: var(--bg-elevated);
   border-bottom: 1px solid var(--border-subtle);
-  min-height: 32px;
+  height: 32px;
   padding: 0 2px;
   overflow-x: auto;
+  overflow-y: hidden;
 }
 .session-tab {
   display: inline-flex;
@@ -862,7 +875,8 @@ body {
 .session-tab.active {
   color: var(--text-primary);
   background: var(--bg-base);
-  border-bottom-color: var(--accent);
+  /* Active underline picks up the workspace's hue (set on .main-pane). */
+  border-bottom-color: var(--hue, var(--accent));
 }
 .session-tab .session-tab-name { font-weight: 500; }
 .session-tab .session-tab-close {
@@ -901,12 +915,16 @@ body {
 
 /* Stacked session containers — only the active one is visible, but all
    stay mounted so PTYs persist and scrollback is preserved across tab
-   switches. */
+   switches. overflow:hidden + min-height:0 keep the stack at exactly
+   1fr of the grid, so xterm's fit() ends up with an integer row count
+   that fills the space without a residual sub-pixel scrollbar. */
 .session-stack {
   position: relative;
   min-height: 0;
+  overflow: hidden;
 }
 .terminal-session {
   position: absolute;
   inset: 0;
+  overflow: hidden;
 }

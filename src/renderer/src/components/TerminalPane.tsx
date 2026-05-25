@@ -102,6 +102,9 @@ export function TerminalPane({ containerId }: Props) {
           +
         </button>
       </div>
+      {/* Accent band carrying the workspace's hue across the top edge of
+          the terminal — same visual identity as the chip in the ribbon. */}
+      <div className="terminal-accent-band" aria-hidden="true" />
       <div className="session-stack">
         {sessions.map((s) => (
           <TerminalSession
