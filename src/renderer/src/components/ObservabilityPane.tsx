@@ -1,46 +1,13 @@
-import { useEffect, useState } from 'react';
 import type { WorkspaceObservabilitySummary } from '../../../preload';
 
 interface Props {
   /** Active workspace name, or null when nothing is selected. */
   workspaceName: string | null;
+  /** Latest poll result for this workspace from App.tsx. */
+  summary: WorkspaceObservabilitySummary | null;
 }
 
-const POLL_MS = 2000;
-
-export function ObservabilityPane({ workspaceName }: Props) {
-  const [summary, setSummary] = useState<WorkspaceObservabilitySummary | null>(null);
-  // Distinct from `summary == null`: until the first fetch returns, we don't
-  // know whether the workspace has data. Avoids flashing the empty state.
-  const [loaded, setLoaded] = useState(false);
-
-  useEffect(() => {
-    if (!workspaceName) {
-      setSummary(null);
-      setLoaded(true);
-      return;
-    }
-    let cancelled = false;
-    setLoaded(false);
-    const fetchSummary = async () => {
-      try {
-        const next = await window.api.observability.summaryForWorkspace(workspaceName);
-        if (cancelled) return;
-        setSummary(next);
-        setLoaded(true);
-      } catch {
-        // Observability is best-effort; a transient failure shouldn't
-        // disrupt the rest of the app. Keep the previous summary.
-      }
-    };
-    fetchSummary();
-    const id = setInterval(fetchSummary, POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [workspaceName]);
-
+export function ObservabilityPane({ workspaceName, summary }: Props) {
   return (
     <aside className="pane sidebar-right">
       <div className="pane-header">
@@ -50,8 +17,6 @@ export function ObservabilityPane({ workspaceName }: Props) {
       <div className="pane-body">
         {!workspaceName ? (
           <EmptyState message="No workspace selected." />
-        ) : !loaded ? (
-          <EmptyState message="Loading…" />
         ) : !summary || summary.sessionId === null ? (
           <EmptyState message="No transcript events yet." subdued />
         ) : (

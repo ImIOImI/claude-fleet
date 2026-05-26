@@ -355,6 +355,15 @@ export interface WorkspaceSummary {
   outputTokens: number;
   cacheReadInputTokens: number;
   cacheCreationInputTokens: number;
+  /**
+   * Context-window fullness proxy: the latest assistant event's
+   * `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`.
+   * Represents how much of the model's context window the most recent
+   * turn used. Renderer divides by an assumed-model context limit
+   * (default 200_000) to get a 0..1 percentage for the context bar.
+   * Null when no assistant event has been seen yet.
+   */
+  lastTurnContextTokens: number | null;
   /** Top tools called in this session, descending count. */
   topTools: ToolCallCount[];
 }
@@ -405,13 +414,29 @@ export function summaryForWorkspace(workspaceName: string, topToolsLimit = 5): W
     cache_creation_input_tokens: number;
   };
 
-  const latestModel = d
+  const latestAssistant = d
     .prepare(`
-      SELECT model FROM events
+      SELECT model,
+             COALESCE(input_tokens, 0)                  AS input_tokens,
+             COALESCE(cache_read_input_tokens, 0)       AS cache_read_input_tokens,
+             COALESCE(cache_creation_input_tokens, 0)   AS cache_creation_input_tokens
+      FROM events
       WHERE session_id = ? AND type = 'assistant' AND model IS NOT NULL
       ORDER BY id DESC LIMIT 1
     `)
-    .get(session.id) as { model: string } | undefined;
+    .get(session.id) as
+    | {
+        model: string;
+        input_tokens: number;
+        cache_read_input_tokens: number;
+        cache_creation_input_tokens: number;
+      }
+    | undefined;
+  const lastTurnContextTokens = latestAssistant
+    ? latestAssistant.input_tokens +
+      latestAssistant.cache_read_input_tokens +
+      latestAssistant.cache_creation_input_tokens
+    : null;
 
   const topTools = d
     .prepare(`
@@ -429,7 +454,7 @@ export function summaryForWorkspace(workspaceName: string, topToolsLimit = 5): W
     title:
       session.ai_title ??
       (session.first_user_message ? session.first_user_message.slice(0, 80) : null),
-    model: latestModel?.model ?? null,
+    model: latestAssistant?.model ?? null,
     startedAt: session.started_at,
     lastActiveAt: session.last_active_at,
     eventCount: aggregates.event_count,
@@ -437,6 +462,7 @@ export function summaryForWorkspace(workspaceName: string, topToolsLimit = 5): W
     outputTokens: aggregates.output_tokens,
     cacheReadInputTokens: aggregates.cache_read_input_tokens,
     cacheCreationInputTokens: aggregates.cache_creation_input_tokens,
+    lastTurnContextTokens,
     topTools,
   };
 }

@@ -138,6 +138,21 @@ body {
 .ws-chip .chip-paused-glyph { color: var(--state-warn); flex-shrink: 0; }
 .ws-chip .name { font-weight: 500; }
 .ws-chip .status { color: var(--text-muted); font-size: 11px; }
+.ws-chip-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.15;
+  text-align: left;
+}
+.ws-chip-sub {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .top-strip-actions {
   margin-left: auto;
@@ -970,13 +985,23 @@ body {
   background: var(--bg-base);
 }
 
-/* Workspace accent band riding the top edge of the terminal body — same
-   visual idea as the design's ContextBar without the percentage fill
-   (no observability yet). Picks up --hue from the .main-pane wrapper,
-   set by App.tsx so the band matches the workspace's chip color. */
+/* Context bar — workspace identity + most-recent context-window
+   fullness. 3px-tall track + filled bar, width controlled by --pct
+   (computed by TerminalPane from the active session's last-turn
+   context tokens over an assumed 200K limit). When no data is
+   available --pct defaults to 100% so the bar reads as a pure
+   identity band. --hue picked up from .main-pane (App.tsx). */
 .terminal-accent-band {
+  position: relative;
+  height: 3px;
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+.terminal-accent-band-fill {
+  height: 100%;
+  width: var(--pct, 100%);
   background: var(--hue, var(--accent));
-  height: 2px;
+  transition: width 240ms ease;
 }
 
 /* Session tab strip — sits at the top of the main body. The container

@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import type { WorkspaceObservabilitySummary } from '../../preload';
 import { WorkspaceTabStrip } from './components/WorkspaceTabStrip';
 import { SessionsPane } from './components/SessionsPane';
 import { ObservabilityPane } from './components/ObservabilityPane';
@@ -7,6 +8,9 @@ import { BottomBar } from './components/BottomBar';
 import { CreateWorkspaceModal } from './components/CreateWorkspaceModal';
 import { CloseWorkspaceModal } from './components/CloseWorkspaceModal';
 import { ProfilesDialog } from './components/ProfilesDialog';
+
+const SUMMARY_POLL_MS = 2000;
+type SummaryMap = Record<string, WorkspaceObservabilitySummary | null>;
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
 export type WorkspaceKind = 'container' | 'local';
@@ -52,6 +56,12 @@ export function App() {
   // one (the hamburger menu on each chip opens it directly). Track the
   // target workspace by id rather than a boolean.
   const [closeTargetId, setCloseTargetId] = useState<string | null>(null);
+  // Per-workspace observability summary, polled every SUMMARY_POLL_MS for
+  // every running/paused workspace. ObservabilityPane reads the selected
+  // workspace's entry; WorkspaceTabStrip reads each chip's; TerminalPane
+  // reads the selected workspace's to fill the context bar. Centralizing
+  // here avoids three components each polling the same workspaces.
+  const [summaries, setSummaries] = useState<SummaryMap>({});
 
   const refresh = async () => {
     if (!window.api) return;
@@ -91,6 +101,45 @@ export function App() {
     const t = setInterval(refresh, 5000);
     return () => clearInterval(t);
   }, [apiReady]);
+
+  // Workspaces eligible for summary polling: anything live (not deleted).
+  // useMemo with a stable string key so the polling effect's dependency
+  // doesn't re-fire on every workspace[].lastUsedAt nudge.
+  const liveNames = useMemo(
+    () => workspaces.filter((w) => w.state !== 'deleted').map((w) => w.name).sort(),
+    [workspaces]
+  );
+  const liveNamesKey = liveNames.join(',');
+
+  useEffect(() => {
+    if (!apiReady || liveNames.length === 0) {
+      setSummaries({});
+      return;
+    }
+    let cancelled = false;
+    const fetchAll = async () => {
+      const entries = await Promise.all(
+        liveNames.map(async (name) => {
+          try {
+            const s = await window.api.observability.summaryForWorkspace(name);
+            return [name, s] as const;
+          } catch {
+            return [name, null] as const;
+          }
+        })
+      );
+      if (cancelled) return;
+      setSummaries(Object.fromEntries(entries));
+    };
+    fetchAll();
+    const t = setInterval(fetchAll, SUMMARY_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+    // liveNamesKey is the stable signal — the array identity isn't.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiReady, liveNamesKey]);
 
   if (!apiReady) {
     return (
@@ -193,6 +242,7 @@ export function App() {
     <div className="app">
       <WorkspaceTabStrip
         workspaces={workspaces}
+        summaries={summaries}
         selectedId={selectedId}
         backendReady={backendReady}
         vaultAvailable={vaultAvailable}
@@ -230,6 +280,7 @@ export function App() {
                 workspaceName={selected.name}
                 containerId={selected.containerId}
                 paused={selected.state === 'paused'}
+                summary={summaries[selected.name] ?? null}
                 onResume={async () => {
                   await window.api.workspace.start(selected.name);
                   refresh();
@@ -245,7 +296,10 @@ export function App() {
           </div>
         </main>
 
-        <ObservabilityPane workspaceName={selected?.name ?? null} />
+        <ObservabilityPane
+          workspaceName={selected?.name ?? null}
+          summary={selected ? (summaries[selected.name] ?? null) : null}
+        />
       </div>
 
       <BottomBar vaultAvailable={vaultAvailable} />
