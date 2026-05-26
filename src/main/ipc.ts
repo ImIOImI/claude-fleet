@@ -16,7 +16,7 @@ import {
 } from './workspaces.js';
 import type { PtyHandle, RemoveWorkspaceOpts, CreateWorkspaceInput } from './docker.js';
 import type { JsonlWatcher } from './jsonlWatcher.js';
-import { eventsForSession } from './db.js';
+import { eventsForSession, summaryForWorkspace } from './db.js';
 
 export const MOCK_MODE = process.env.CLAUDE_FLEET_MOCK === '1';
 const backend = MOCK_MODE ? mockDocker : realDocker;
@@ -250,5 +250,15 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     'observability:eventsForSession',
     (_e, sessionId: string, sinceEventId = 0, limit = 500) =>
       eventsForSession(sessionId, sinceEventId, limit)
+  );
+
+  /**
+   * Pragmatic v1: picks the most-recently-active Claude session in the
+   * workspace. Precise per-tab mapping (broker session ↔ claude session
+   * UUID) is a deferred follow-up; in practice the latest-active heuristic
+   * matches the focused tab nearly always.
+   */
+  ipcMain.handle('observability:summaryForWorkspace', (_e, workspaceName: string) =>
+    summaryForWorkspace(workspaceName)
   );
 }
