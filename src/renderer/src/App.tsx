@@ -245,7 +245,7 @@ export function App() {
           </div>
         </main>
 
-        <ObservabilityPane />
+        <ObservabilityPane workspaceName={selected?.name ?? null} />
       </div>
 
       <BottomBar vaultAvailable={vaultAvailable} />

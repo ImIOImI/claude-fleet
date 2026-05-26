@@ -332,6 +332,115 @@ export function getSession(id: string): SessionRow | null {
   };
 }
 
+// ── Workspace summary ─────────────────────────────────────────────────────
+
+export interface ToolCallCount {
+  name: string;
+  count: number;
+}
+
+export interface WorkspaceSummary {
+  /** Latest active Claude session UUID in the workspace, or null if none. */
+  sessionId: string | null;
+  /** Display title — from `ai-title.aiTitle` if present, else the session's first user message head. */
+  title: string | null;
+  /** Latest assistant.message.model seen in this session. */
+  model: string | null;
+  startedAt: number | null;
+  lastActiveAt: number | null;
+  /** Row count for this session in `events`. */
+  eventCount: number;
+  /** Per-session token sums (assistant events only). */
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  /** Top tools called in this session, descending count. */
+  topTools: ToolCallCount[];
+}
+
+/**
+ * Single-shot query for the renderer's right-rail pane: pick the
+ * most-recently-active session in this workspace, then assemble its
+ * token totals + top tools + metadata. Returns null when the workspace
+ * has no JSONL events at all yet.
+ */
+export function summaryForWorkspace(workspaceName: string, topToolsLimit = 5): WorkspaceSummary | null {
+  const d = openDbOrThrow();
+  const session = d
+    .prepare(`
+      SELECT id, ai_title, first_user_message, started_at, last_active_at
+      FROM sessions
+      WHERE workspace_name = ?
+      ORDER BY COALESCE(last_active_at, 0) DESC
+      LIMIT 1
+    `)
+    .get(workspaceName) as
+    | {
+        id: string;
+        ai_title: string | null;
+        first_user_message: string | null;
+        started_at: number | null;
+        last_active_at: number | null;
+      }
+    | undefined;
+  if (!session) return null;
+
+  const aggregates = d
+    .prepare(`
+      SELECT
+        COUNT(*)                                                   AS event_count,
+        COALESCE(SUM(input_tokens), 0)                             AS input_tokens,
+        COALESCE(SUM(output_tokens), 0)                            AS output_tokens,
+        COALESCE(SUM(cache_read_input_tokens), 0)                  AS cache_read_input_tokens,
+        COALESCE(SUM(cache_creation_input_tokens), 0)              AS cache_creation_input_tokens
+      FROM events
+      WHERE session_id = ?
+    `)
+    .get(session.id) as {
+    event_count: number;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
+  };
+
+  const latestModel = d
+    .prepare(`
+      SELECT model FROM events
+      WHERE session_id = ? AND type = 'assistant' AND model IS NOT NULL
+      ORDER BY id DESC LIMIT 1
+    `)
+    .get(session.id) as { model: string } | undefined;
+
+  const topTools = d
+    .prepare(`
+      SELECT tool_name AS name, COUNT(*) AS count
+      FROM events
+      WHERE session_id = ? AND tool_name IS NOT NULL
+      GROUP BY tool_name
+      ORDER BY count DESC
+      LIMIT ?
+    `)
+    .all(session.id, topToolsLimit) as ToolCallCount[];
+
+  return {
+    sessionId: session.id,
+    title:
+      session.ai_title ??
+      (session.first_user_message ? session.first_user_message.slice(0, 80) : null),
+    model: latestModel?.model ?? null,
+    startedAt: session.started_at,
+    lastActiveAt: session.last_active_at,
+    eventCount: aggregates.event_count,
+    inputTokens: aggregates.input_tokens,
+    outputTokens: aggregates.output_tokens,
+    cacheReadInputTokens: aggregates.cache_read_input_tokens,
+    cacheCreationInputTokens: aggregates.cache_creation_input_tokens,
+    topTools,
+  };
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 function openDbOrThrow(): Database.Database {
