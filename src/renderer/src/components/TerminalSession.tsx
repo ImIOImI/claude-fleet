@@ -132,6 +132,12 @@ export function TerminalSession({
     setEndedReason(null);
     onLifecycleChange?.(sessionId, 'live');
 
+    // Declared up front so the safeFit helper can read it. The cleanup
+    // function below flips it true; safeFit early-returns to avoid
+    // calling fit on a host whose xterm has already been disposed
+    // (StrictMode double-mount in dev, fast workspace switches in prod).
+    let disposed = false;
+
     const term = new Terminal({
       fontFamily: TERMINAL_FONT_FAMILY,
       fontSize: 13,
@@ -158,7 +164,30 @@ export function TerminalSession({
     term.loadAddon(unicode11);
     term.unicode.activeVersion = '11';
     term.open(host);
-    fit.fit();
+
+    // xterm 5.x's Viewport.syncScrollArea reads from `_renderer.dimensions`,
+    // which is set up inside `term.open` but can be transiently undefined
+    // immediately after open (the renderer is wired in pieces across a
+    // microtask boundary). Calling `fit.fit()` synchronously after open
+    // triggers a resize → syncScrollArea path that crashes with
+    // "Cannot read properties of undefined (reading 'dimensions')". The
+    // crash floods the error log on every workspace switch / new tab and
+    // leaves the terminal looking blank because xterm's render loop is
+    // broken. Defer to the next animation frame and catch defensively;
+    // by then the renderer is settled and the user's first frame of
+    // PTY output arrives correctly.
+    const safeFit = (): void => {
+      if (disposed) return;
+      if (host.clientWidth === 0 || host.clientHeight === 0) return;
+      try {
+        fit.fit();
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[TerminalSession] fit failed (xterm Viewport bug):', err);
+      }
+    };
+    const initialFitRaf = requestAnimationFrame(safeFit);
+
     const linkProviderDisposable = term.registerLinkProvider(multilineLinkProvider(term));
 
     // ptyHandleId is the internal handle returned by main's pty:attach —
@@ -167,7 +196,6 @@ export function TerminalSession({
     let ptyHandleId: string | null = null;
     let unsubData: (() => void) | null = null;
     let unsubEnd: (() => void) | null = null;
-    let disposed = false;
 
     const doCopy = (): void => {
       const sel = term.getSelection();
@@ -255,13 +283,21 @@ export function TerminalSession({
     })();
 
     const ro = new ResizeObserver(() => {
-      fit.fit();
-      if (ptyHandleId) window.api.pty.resize(ptyHandleId, term.cols, term.rows);
+      safeFit();
+      if (ptyHandleId) {
+        try {
+          window.api.pty.resize(ptyHandleId, term.cols, term.rows);
+        } catch {
+          // pty:resize is best-effort — failing to resize doesn't
+          // justify killing the terminal.
+        }
+      }
     });
     ro.observe(host);
 
     return () => {
       disposed = true;
+      cancelAnimationFrame(initialFitRaf);
       ro.disconnect();
       host.removeEventListener('contextmenu', onContextMenu);
       unsubData?.();
