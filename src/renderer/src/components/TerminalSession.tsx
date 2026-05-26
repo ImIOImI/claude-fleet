@@ -110,16 +110,26 @@ export function TerminalSession({
   onLifecycleChange,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
-  // Bumped when the user clicks "Start new session" after a session ends.
-  // The effect deps on containerId+sessionEpoch, so a new attach happens
-  // with a fresh xterm instance (no stale state from the dead session).
+  // Bumped when the user clicks "Start new session" / "Retry" after a
+  // session ends. The effect deps on containerId+sessionEpoch, so a new
+  // attach happens with a fresh xterm instance (no stale state from the
+  // dead session).
   const [sessionEpoch, setSessionEpoch] = useState(0);
-  const [sessionEnded, setSessionEnded] = useState(false);
+  // `null` while the session is live. After it ends, distinguishes
+  // between a clean PTY exit (`{ kind: 'natural' }` — user typed
+  // `/exit`, claude crashed, container stopped) and an attach failure
+  // (`{ kind: 'attach-error', message }` — broker socket unreachable,
+  // permission denied, etc.). The overlay renders different copy +
+  // surfaces the error text for the latter so users can act on it
+  // instead of staring at a generic "session ended" card.
+  const [endedReason, setEndedReason] = useState<
+    { kind: 'natural' } | { kind: 'attach-error'; message: string } | null
+  >(null);
 
   useEffect(() => {
     if (!hostRef.current) return;
     const host = hostRef.current;
-    setSessionEnded(false);
+    setEndedReason(null);
     onLifecycleChange?.(sessionId, 'live');
 
     const term = new Terminal({
@@ -224,7 +234,7 @@ export function TerminalSession({
         unsubEnd = window.api.pty.onEnd(sid, () => {
           term.writeln('\r\n[session ended]');
           if (!disposed) {
-            setSessionEnded(true);
+            setEndedReason({ kind: 'natural' });
             onLifecycleChange?.(sessionId, 'ended');
           }
         });
@@ -232,14 +242,13 @@ export function TerminalSession({
       } catch (err) {
         // Attach failure most commonly means the in-container broker
         // isn't reachable — older runner images without it, or the
-        // container still booting. Write the error into the xterm so
-        // the user sees what went wrong, and show the ended overlay so
-        // they can hit "Start new session" once it's ready.
+        // container still booting. The overlay renders this message
+        // verbatim so the user has something to act on; we don't bother
+        // writing it into xterm because the overlay would cover it
+        // anyway (z-index over .terminal-host).
         const msg = err instanceof Error ? err.message : String(err);
-        term.writeln('\r\n\x1b[31m[failed to attach session]\x1b[0m');
-        term.writeln(`\x1b[31m${msg}\x1b[0m`);
         if (!disposed) {
-          setSessionEnded(true);
+          setEndedReason({ kind: 'attach-error', message: msg });
           onLifecycleChange?.(sessionId, 'ended');
         }
       }
@@ -287,7 +296,32 @@ export function TerminalSession({
       aria-hidden={!visible}
     >
       <div className="terminal-host" ref={hostRef}>
-        {sessionEnded && (
+        {endedReason?.kind === 'attach-error' && (
+          <div
+            className="session-ended-overlay"
+            role="alertdialog"
+            aria-label="Failed to attach to workspace"
+          >
+            <div className="session-ended-card attach-error">
+              <div className="session-ended-title">couldn't attach to the workspace</div>
+              <pre className="session-ended-error" data-testid="attach-error-message">
+                {endedReason.message}
+              </pre>
+              <div className="session-ended-help">
+                Common cause: the local runner image is out of date and doesn't include the
+                broker yet. Try <code>docker pull ghcr.io/imioimi/claude-fleet/runner:latest</code>,
+                then recreate the workspace.
+              </div>
+              <button
+                className="btn primary"
+                onClick={() => setSessionEpoch((e) => e + 1)}
+              >
+                Retry
+              </button>
+            </div>
+          </div>
+        )}
+        {endedReason?.kind === 'natural' && (
           <div className="session-ended-overlay" role="alertdialog" aria-label="Session ended">
             <div className="session-ended-card">
               <div className="session-ended-title">claude session ended</div>

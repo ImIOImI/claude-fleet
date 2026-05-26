@@ -789,6 +789,27 @@ body {
 }
 .session-ended-card .btn { align-self: center; }
 
+/* Attach-error variant: same overlay, wider card so the broker error
+   message fits without aggressive wrapping. The <pre> preserves the
+   exact text (paths, ENOENT codes, etc.) so the user can copy-paste it. */
+.session-ended-card.attach-error {
+  max-width: 520px;
+  text-align: left;
+}
+.session-ended-error {
+  margin: 0;
+  padding: 10px 12px;
+  background: rgba(239, 77, 77, 0.08);
+  border: 1px solid rgba(239, 77, 77, 0.3);
+  border-radius: var(--r-sm, 4px);
+  color: var(--state-error, #ef4d4d);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ── Paused workspace overlay (terminal pane) ──────────────────────── */
 /* Modal scoped to the session-stack — workspace ribbon stays live so the
    user can switch to another workspace without resuming. The underlying
