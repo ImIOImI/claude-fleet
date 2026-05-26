@@ -14,12 +14,20 @@
 // context is lost; PR2's in-container broker is what preserves that.
 
 import { useEffect, useRef, useState } from 'react';
+import type { WorkspaceObservabilitySummary } from '../../../preload';
 import { TerminalSession } from './TerminalSession';
+
+/** Assumed model context window for the bar fill. 200K covers stock 4.x; the
+ *  1M-context variant would under-report (looks fuller than it is) — acceptable
+ *  for v1. Switch to per-model lookup when slot consumers mature. */
+const CONTEXT_LIMIT_TOKENS = 200_000;
 
 interface Props {
   containerId: string;
   workspaceName: string;
   paused: boolean;
+  /** Latest observability summary for this workspace; drives the context-bar fill. */
+  summary: WorkspaceObservabilitySummary | null;
   onResume: () => void;
 }
 
@@ -33,7 +41,7 @@ function uid(): string {
   return globalThis.crypto?.randomUUID?.() ?? `s-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export function TerminalPane({ containerId, workspaceName, paused, onResume }: Props) {
+export function TerminalPane({ containerId, workspaceName, paused, summary, onResume }: Props) {
   const [loaded, setLoaded] = useState(false);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeId, setActiveId] = useState<string>('');
@@ -161,12 +169,22 @@ export function TerminalPane({ containerId, workspaceName, paused, onResume }: P
           +
         </button>
       </div>
-      {/* Accent band carrying the workspace's hue across the top edge of
-          the terminal — same visual identity as the chip in the ribbon.
-          Wrapper supplies the breathing room above the bar (matches the
-          design's ContextBar padding). */}
+      {/* Context bar — workspace's hue band at the top of the terminal,
+          fills from 0..100% with the most recent assistant turn's
+          context-window usage (input + cache_read + cache_create over
+          an assumed 200K limit). Renders as a pure identity band (100%
+          fill) while no data is available. Wrapper supplies the breathing
+          room above the bar (matches the design's ContextBar padding). */}
       <div className="terminal-accent-band-row" aria-hidden="true">
-        <div className="terminal-accent-band" />
+        <div
+          className="terminal-accent-band"
+          style={{
+            ['--pct' as never]: `${contextBarPct(summary)}%`
+          }}
+          title={contextBarTooltip(summary)}
+        >
+          <div className="terminal-accent-band-fill" />
+        </div>
       </div>
       <div className={`session-stack ${paused ? 'paused' : ''}`}>
         {sessions.map((s) => (
@@ -203,4 +221,19 @@ export function TerminalPane({ containerId, workspaceName, paused, onResume }: P
       </div>
     </div>
   );
+}
+
+function contextBarPct(summary: WorkspaceObservabilitySummary | null): number {
+  if (!summary?.lastTurnContextTokens) return 100; // identity-band fallback
+  const raw = (summary.lastTurnContextTokens / CONTEXT_LIMIT_TOKENS) * 100;
+  return Math.max(0, Math.min(100, raw));
+}
+
+function contextBarTooltip(summary: WorkspaceObservabilitySummary | null): string {
+  if (!summary?.lastTurnContextTokens) {
+    return 'Workspace accent — no transcript activity yet';
+  }
+  const tokens = summary.lastTurnContextTokens;
+  const pct = (tokens / CONTEXT_LIMIT_TOKENS) * 100;
+  return `Context: ${tokens.toLocaleString()} / ${CONTEXT_LIMIT_TOKENS.toLocaleString()} tokens (${pct.toFixed(1)}%)`;
 }

@@ -36,6 +36,12 @@ export interface WorkspaceObservabilitySummary {
   outputTokens: number;
   cacheReadInputTokens: number;
   cacheCreationInputTokens: number;
+  /**
+   * Latest assistant event's input + cache_read + cache_create tokens.
+   * Context-window fullness proxy; renderer divides by an assumed
+   * 200K to get a 0..1 percentage for the context bar.
+   */
+  lastTurnContextTokens: number | null;
   topTools: Array<{ name: string; count: number }>;
 }
 
