@@ -162,6 +162,11 @@ The renderer's `window.api.pty.onData/onEnd` register listeners and return unsub
 The watcher's catch-up query for the renderer (live push lands with the observability UI):
 - `observability:eventsForSession(sessionId, sinceEventId?, limit?)` → `EventRow[]` — rows from the `events` table for the given session, ordered by `id` ascending, restricted to `id > sinceEventId`. Caller polls with the highest `id` it has seen to get incremental updates. Returns up to `limit` rows (default 500).
 
+### Error log
+Both main and renderer hook the standard "uncaught" channels and forward each crash through a single sink to `<userData>/error.log`. Main installs `process.on('uncaughtException')` + `process.on('unhandledRejection')` directly. The renderer wires `window.addEventListener('error', …)` + `window.addEventListener('unhandledrejection', …)` in `src/renderer/src/main.tsx` *before* mounting React, so a crash during App's initial render still lands. Each row is one JSON object: `{ ts, source: 'main' | 'renderer', type, message, stack?, extra? }`. No rotation; users can delete the file at will.
+- `app:logError({ type, message, stack?, extra? })` → `void` — renderer → main bridge. The renderer never writes the log directly (sandbox / cross-process consistency).
+- `app:errorLogPath()` → `string` — absolute path of the log, exposed for a future "Open error log" affordance.
+
 ### Clipboard + context menu
 The renderer cannot use `navigator.clipboard` reliably (focus/permission gotchas in Electron, and the renderer is contextIsolated). All clipboard access goes through main:
 - `clipboard:write(text)` → `void` — `electron.clipboard.writeText` (no-op on empty).

@@ -17,6 +17,7 @@ import {
 import type { PtyHandle, RemoveWorkspaceOpts, CreateWorkspaceInput } from './docker.js';
 import type { JsonlWatcher } from './jsonlWatcher.js';
 import { eventsForSession } from './db.js';
+import { logError, getLogPath } from './errorLog.js';
 
 export const MOCK_MODE = process.env.CLAUDE_FLEET_MOCK === '1';
 const backend = MOCK_MODE ? mockDocker : realDocker;
@@ -251,4 +252,19 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     (_e, sessionId: string, sinceEventId = 0, limit = 500) =>
       eventsForSession(sessionId, sinceEventId, limit)
   );
+
+  // Renderer-side error reporting bridge. The renderer's onerror /
+  // onunhandledrejection handlers forward into here so all crashes
+  // (main + renderer) land in a single `<userData>/error.log` users
+  // can cat for diagnostic info.
+  ipcMain.handle(
+    'app:logError',
+    (
+      _e,
+      payload: { type: string; message: string; stack?: string; extra?: Record<string, unknown> }
+    ) => {
+      logError({ source: 'renderer', ...payload });
+    }
+  );
+  ipcMain.handle('app:errorLogPath', () => getLogPath());
 }
