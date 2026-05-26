@@ -20,6 +20,25 @@ export interface SessionInventory {
  * subset the renderer needs. `rawJsonl` holds the original line so the
  * renderer can pull fields the extract columns don't cover yet.
  */
+/**
+ * Per-workspace summary for the right-rail observability pane. Reflects
+ * the most-recently-active Claude session in the workspace; null when
+ * no events have been ingested for that workspace yet.
+ */
+export interface WorkspaceObservabilitySummary {
+  sessionId: string | null;
+  title: string | null;
+  model: string | null;
+  startedAt: number | null;
+  lastActiveAt: number | null;
+  eventCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  topTools: Array<{ name: string; count: number }>;
+}
+
 export interface ObservabilityEventRow {
   id: number;
   sessionId: string;
@@ -152,7 +171,11 @@ const api = {
       sinceEventId = 0,
       limit = 500
     ): Promise<ObservabilityEventRow[]> =>
-      ipcRenderer.invoke('observability:eventsForSession', sessionId, sinceEventId, limit)
+      ipcRenderer.invoke('observability:eventsForSession', sessionId, sinceEventId, limit),
+    summaryForWorkspace: (
+      workspaceName: string
+    ): Promise<WorkspaceObservabilitySummary | null> =>
+      ipcRenderer.invoke('observability:summaryForWorkspace', workspaceName)
   }
 };
 
