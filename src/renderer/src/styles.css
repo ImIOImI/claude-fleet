@@ -964,6 +964,17 @@ body {
   /* Active underline picks up the workspace's hue (set on .main-pane). */
   border-bottom-color: var(--hue, var(--accent));
 }
+.session-tab .session-tab-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--state-running);
+  flex-shrink: 0;
+  transition: background 0.15s ease;
+}
+.session-tab .session-tab-dot.ended {
+  background: var(--state-exited);
+}
 .session-tab .session-tab-name { font-weight: 500; }
 .session-tab .session-tab-close {
   display: inline-flex;

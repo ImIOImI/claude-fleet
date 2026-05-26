@@ -38,6 +38,23 @@ export function TerminalPane({ containerId, workspaceName, paused, onResume }: P
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeId, setActiveId] = useState<string>('');
   const [nextNum, setNextNum] = useState(2);
+  // Tab status: ids in this set have had their PTY exit (user `/exit`,
+  // claude crash, attach failure). The session-ended overlay in
+  // TerminalSession lets the user "Start new session" — when they do,
+  // the session emits 'live' again and the id leaves the set.
+  const [endedIds, setEndedIds] = useState<Set<string>>(new Set());
+
+  const handleLifecycle = (sessionId: string, status: 'live' | 'ended') => {
+    setEndedIds((prev) => {
+      const wanted = status === 'ended';
+      const has = prev.has(sessionId);
+      if (wanted === has) return prev; // no-op
+      const next = new Set(prev);
+      if (wanted) next.add(sessionId);
+      else next.delete(sessionId);
+      return next;
+    });
+  };
 
   // Load inventory on mount, defaulting to a fresh "main" if there's
   // nothing on disk (first attach to this workspace ever, or its
@@ -106,6 +123,15 @@ export function TerminalPane({ containerId, workspaceName, paused, onResume }: P
 
   function closeSession(id: string): void {
     if (!loaded) return;
+    // Drop the closed tab from the ended-set so a future tab that
+    // happens to recycle the id (unlikely with uid(), but cheap insurance)
+    // doesn't inherit the prior ended state.
+    setEndedIds((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
     setSessions((prev) => {
       const idx = prev.findIndex((s) => s.id === id);
       if (idx < 0) return prev;
@@ -129,28 +155,36 @@ export function TerminalPane({ containerId, workspaceName, paused, onResume }: P
   return (
     <div className="terminal-pane">
       <div className="session-tab-strip" role="tablist" aria-label="Terminal sessions">
-        {sessions.map((s) => (
-          <div
-            key={s.id}
-            role="tab"
-            aria-selected={s.id === activeId}
-            className={`session-tab ${s.id === activeId ? 'active' : ''}`}
-            onClick={() => setActiveId(s.id)}
-          >
-            <span className="session-tab-name">{s.name}</span>
-            <button
-              className="session-tab-close"
-              aria-label={`Close ${s.name}`}
-              title="Close session"
-              onClick={(e) => {
-                e.stopPropagation();
-                closeSession(s.id);
-              }}
+        {sessions.map((s) => {
+          const ended = endedIds.has(s.id);
+          return (
+            <div
+              key={s.id}
+              role="tab"
+              aria-selected={s.id === activeId}
+              className={`session-tab ${s.id === activeId ? 'active' : ''}`}
+              onClick={() => setActiveId(s.id)}
             >
-              ×
-            </button>
-          </div>
-        ))}
+              <span
+                className={`session-tab-dot ${ended ? 'ended' : 'live'}`}
+                aria-label={ended ? 'session ended' : 'session live'}
+                title={ended ? 'session ended' : 'session live'}
+              />
+              <span className="session-tab-name">{s.name}</span>
+              <button
+                className="session-tab-close"
+                aria-label={`Close ${s.name}`}
+                title="Close session"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  closeSession(s.id);
+                }}
+              >
+                ×
+              </button>
+            </div>
+          );
+        })}
         <button
           className="session-tab-new"
           onClick={addSession}
@@ -175,6 +209,7 @@ export function TerminalPane({ containerId, workspaceName, paused, onResume }: P
             containerId={containerId}
             sessionId={s.id}
             visible={s.id === activeId}
+            onLifecycleChange={handleLifecycle}
           />
         ))}
         {paused && (
