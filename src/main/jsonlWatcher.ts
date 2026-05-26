@@ -16,7 +16,10 @@
 
 import { promises as fsp, type Stats } from 'node:fs';
 import { join, basename, extname, sep as pathSep } from 'node:path';
-import chokidar, { type FSWatcher } from 'chokidar';
+// chokidar v5 is ESM-only. Our main bundle is CommonJS (per
+// electron.vite.config.ts), so `require('chokidar')` would throw
+// ERR_REQUIRE_ESM. Load it via dynamic import inside `start()`.
+import type { FSWatcher } from 'chokidar';
 import { workspaceClaudeDir } from './paths.js';
 import { ingestLine } from './db.js';
 
@@ -40,6 +43,7 @@ export class JsonlWatcher {
 
   async start(workspaceNames: string[]): Promise<void> {
     if (this.watcher) return;
+    const chokidar = await import('chokidar');
     this.watcher = chokidar.watch([], {
       depth: 0,
       ignoreInitial: false,

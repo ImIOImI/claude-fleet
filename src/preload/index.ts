@@ -41,7 +41,21 @@ export interface ObservabilityEventRow {
 
 const api = {
   app: {
-    mockMode: (): Promise<boolean> => ipcRenderer.invoke('app:mockMode')
+    mockMode: (): Promise<boolean> => ipcRenderer.invoke('app:mockMode'),
+    /**
+     * Forward a renderer-side error into the main process's error.log.
+     * Called automatically by the global onerror/onunhandledrejection
+     * handlers wired in src/renderer/src/main.tsx; callers can also use
+     * it manually around a known-risky operation.
+     */
+    logError: (payload: {
+      type: string;
+      message: string;
+      stack?: string;
+      extra?: Record<string, unknown>;
+    }): Promise<void> => ipcRenderer.invoke('app:logError', payload),
+    /** Absolute path of the error.log file (so we can surface it in the UI later). */
+    errorLogPath: (): Promise<string> => ipcRenderer.invoke('app:errorLogPath')
   },
   workspace: {
     backendReady: (): Promise<boolean> => ipcRenderer.invoke('workspace:ping'),
