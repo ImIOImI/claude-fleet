@@ -76,6 +76,11 @@ function SummaryView({ summary }: { summary: WorkspaceObservabilitySummary }) {
         </div>
       </section>
 
+      <section className="obs-cost-block">
+        <div className="obs-cost-amount mono">{formatUsd(summary.usd)}</div>
+        <div className="obs-cost-label">session cost</div>
+      </section>
+
       <section className="obs-section">
         <div className="obs-section-title">Tokens</div>
         <TokenRow label="input" value={summary.inputTokens} />
@@ -147,6 +152,14 @@ function formatTokens(n: number): string {
   if (n < 1000) return String(n);
   if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 2 : 1)}K`;
   return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 2 : 1)}M`;
+}
+
+function formatUsd(usd: number): string {
+  if (usd === 0) return '$0.00';
+  if (usd < 0.01) return '<$0.01';
+  if (usd < 100) return `$${usd.toFixed(2)}`;
+  if (usd < 1000) return `$${usd.toFixed(1)}`;
+  return `$${Math.round(usd).toLocaleString('en-US')}`;
 }
 
 function relativeTime(ms: number): string {

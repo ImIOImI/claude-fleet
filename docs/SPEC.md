@@ -48,8 +48,9 @@ It is a local-only operator console — not a remote orchestrator, not a multi-u
 | Terminal | `@xterm/xterm` + `@xterm/addon-fit` | The de facto web terminal. Handles ANSI, resize, scrollback, paste, copy-on-select. |
 | Docker client | `dockerode` | Promise-based wrapper over the Docker Engine API with first-class streaming `exec` attach (needed for live PTY). Avoids shelling out to the `docker` CLI. |
 | Credentials | `keytar` | OS keychain integration (Keychain on macOS, Credential Vault on Windows, libsecret on Linux). API keys never hit disk in plaintext. |
-| Local DB | `better-sqlite3` | Synchronous SQLite for the history/cost layer. Single-file, embedded, no daemon. The JSONL→SQLite cache ships in step 1 of #2; cost rollup + UI follow in subsequent steps. |
+| Local DB | `better-sqlite3` | Synchronous SQLite for the history/cost layer. Single-file, embedded, no daemon. JSONL→SQLite cache + cost rollup ship under #2; surrounding observability work (live push, slot consumers) follows. |
 | File watcher | `chokidar` | Tails JSONL transcripts as Claude Code appends to them. Battle-tested cross-platform layer above `fs.watch` (atomic-rename handling, polling fallback on WSL). Imported via dynamic `await import('chokidar')` because v5 is ESM-only and the main bundle is CommonJS. |
+| Unit tests | `vitest` | Fast, Vite-native runner for pure-TS modules (e.g., `pricing.ts`). Picks up `*.test.ts` next to source. E2E lives in `tests/` under Playwright. |
 
 **Native modules.** `better-sqlite3` and `keytar` ship as N-API native bindings — they must match Electron's bundled Node ABI, not the system Node. The repo's `postinstall` script runs `electron-builder install-app-deps` to pull prebuilt binaries (or rebuild) for the current Electron version. Without this hook, `npm install` builds the bindings against the system Node and Electron fails to load them at runtime with a `NODE_MODULE_VERSION` mismatch.
 
@@ -101,7 +102,7 @@ The **broker** is a small Go daemon (//broker) shipped inside the runner image. 
 - Docker daemon access via `dockerode` (default socket).
 - OS keychain access via `keytar`.
 - PTY session lifecycle: holds the duplex stream handle for each active `docker exec`, forwards data to the renderer over per-session IPC channels, forwards renderer input back to the stream, forwards resize events to Docker.
-- JSONL transcript watching (`chokidar`) + SQLite persistence (`better-sqlite3`). The watcher tails every workspace's `<state>/<name>/.claude/projects/-workspace/*.jsonl` non-recursively and ingests new lines into the SQLite cache (see §7 *JSONL→SQLite cache*). Cost rollup, observability UI, and slot consumers (chip/tab/context-bar) land in later steps of #2.
+- JSONL transcript watching (`chokidar`) + SQLite persistence (`better-sqlite3`). The watcher tails every workspace's `<state>/<name>/.claude/projects/-workspace/*.jsonl` non-recursively and ingests new lines into the SQLite cache (see §7 *JSONL→SQLite cache*). Cost rollup (`src/main/pricing.ts`) groups events by `(model, service_tier)` and applies hardcoded Claude 4.x rates to derive USD; the rest of #2 (live push, slot consumers for chip/tab/context-bar) lands later.
 
 **Preload** is a tightly scoped bridge. It uses `contextBridge.exposeInMainWorld('api', …)` to expose a typed `window.api` to the renderer. Window options: `contextIsolation: true`, `nodeIntegration: false`, `sandbox: false` (sandbox is off because the preload needs `ipcRenderer`).
 
@@ -112,7 +113,7 @@ The renderer layout is a 3-row × 3-col shell:
 - **Body row** (3 columns):
   - **Sessions pane** (left, ~280px): placeholder until #3 lands the JSONL-backed sessions table.
   - **Main pane** (center, fluid): header with selected workspace's name/status and `Close…` button, plus the xterm `TerminalPane` (or empty/first-run/disconnected states).
-  - **Observability pane** (right, ~320px): live view of the most-recently-active Claude session in the selected workspace, polled every 2s. Shows session title (from `ai-title` event or first-user-message head), latest model, last-activity relative time, event count, token totals (input / cache-create / cache-read / output) and top tools by call count. Empty state when the workspace has no transcript events yet. Cost rollup (USD) lands with step 2 of #2. Per-terminal-tab precision is deferred (renderer drives off active workspace, not active tab — the latest-active session is the right answer ≥95% of the time).
+  - **Observability pane** (right, ~320px): live view of the most-recently-active Claude session in the selected workspace, polled every 2s. Shows session title (from `ai-title` event or first-user-message head), latest model, last-activity relative time, event count, prominent USD total, token totals (input / cache-create / cache-read / output), and top tools by call count. Empty state when the workspace has no transcript events yet. Per-terminal-tab precision is deferred (renderer drives off active workspace, not active tab — the latest-active session is the right answer ≥95% of the time).
 - **Bottom row** (`BottomBar`): static hint bar with key bindings and degraded-vault notice when applicable.
 
 Modals (`CreateWorkspaceModal`, `CloseWorkspaceModal`, `ProfilesDialog`) are owned by `App` and rendered above the shell.
@@ -162,7 +163,9 @@ The renderer's `window.api.pty.onData/onEnd` register listeners and return unsub
 
 ### Observability
 - `observability:eventsForSession(sessionId, sinceEventId?, limit?)` → `EventRow[]` — rows from the `events` table for the given session, ordered by `id` ascending, restricted to `id > sinceEventId`. Caller polls with the highest `id` it has seen to get incremental updates. Returns up to `limit` rows (default 500).
-- `observability:summaryForWorkspace(workspaceName)` → `WorkspaceSummary | null` — picks the most-recently-active Claude session in the workspace and returns `{ sessionId, title, model, startedAt, lastActiveAt, eventCount, inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, topTools[] }`. Returns null when no events have been ingested for the workspace yet. The right-rail observability pane polls this every 2s. Live push (`observability:event:${sessionId}`) is a planned follow-up that lets the pane subscribe instead of polling.
+- `observability:summaryForWorkspace(workspaceName)` → `WorkspaceSummary | null` — picks the most-recently-active Claude session in the workspace and returns `{ sessionId, title, model, startedAt, lastActiveAt, eventCount, inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, usd, topTools[] }`. Returns null when no events have been ingested for the workspace yet. The right-rail observability pane polls this every 2s. Live push (`observability:event:${sessionId}`) is a planned follow-up that lets the pane subscribe instead of polling.
+- `observability:getCost(sessionId)` → `{ inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, usd }` — token totals + USD for one session. USD is derived from the `events` rows grouped by `(model, service_tier)`; pricing comes from `src/main/pricing.ts` (hardcoded Claude 4.x rates, standard tier full price, batch tier 50%, unknown model/tier degrades to $0 + one-time `console.warn`). The pane reads the equivalent `usd` field from `summaryForWorkspace`; this endpoint exists for the sessions table (#3) and per-session detail views.
+- `observability:getCostForWorkspace(workspaceName)` → same shape, aggregated across every session in the workspace.
 
 ### Error log
 Both main and renderer hook the standard "uncaught" channels and forward each crash through a single sink to `<userData>/error.log`. Main installs `process.on('uncaughtException')` + `process.on('unhandledRejection')` directly. The renderer wires `window.addEventListener('error', …)` + `window.addEventListener('unhandledrejection', …)` in `src/renderer/src/main.tsx` *before* mounting React, so a crash during App's initial render still lands. Each row is one JSON object: `{ ts, source: 'main' | 'renderer', type, message, stack?, extra? }`. No rotation; users can delete the file at will.
@@ -433,6 +436,11 @@ claude-fleet/
     │   ├── workspaces.ts              # WorkspaceSpec types + manifest read/write/list
     │   ├── sessions.ts                # per-workspace sessions.json read/write
     │   ├── imageLibrary.ts            # imageLibrary.json read/write + auto-record
+    │   ├── db.ts                      # SQLite cache: events/sessions tables, ingest, summary, cost queries
+    │   ├── jsonlWatcher.ts            # chokidar-based JSONL tailer feeding db.ingestLine
+    │   ├── pricing.ts                 # Claude 4.x USD rates + costFor(model, tier, tokens)
+    │   ├── pricing.test.ts            # Vitest unit tests for pricing math
+    │   ├── errorLog.ts                # JSON-lines crash log to <userData>/error.log
     │   ├── paths.ts                   # state-dir path conventions (incl. broker dir)
     │   ├── fs.ts                      # isDirectory / mkdirp helpers
     │   └── vault.ts                   # keytar wrapper + name index
@@ -450,7 +458,7 @@ claude-fleet/
                 ├── SessionsPane.tsx       # left sidebar (placeholder until #3)
                 ├── TerminalPane.tsx       # center: per-workspace session tab strip + stack
                 ├── TerminalSession.tsx    # one session: xterm + PTY + key bindings + session-ended overlay
-                ├── ObservabilityPane.tsx  # right sidebar (placeholder until #2)
+                ├── ObservabilityPane.tsx  # right sidebar: live session summary (cost + tokens + tools)
                 ├── BottomBar.tsx          # footer hint bar
                 ├── CreateWorkspaceModal.tsx  # form + past-workspaces list
                 ├── CloseWorkspaceModal.tsx
@@ -484,16 +492,19 @@ Each container gets its own host-side state dir, bind-mounted into the container
 - **Settings reset.** `.claude/` will eventually also hold `settings.json`, custom commands, file checkpoints, tasks state. All of it survives container recreate by default. If we later want a "reset settings without losing project history" affordance, decide what's keepable vs. wipeable.
 
 ### Observability layer: cost, tokens, tool calls
-Per-session cost and token counts derived from Claude transcript JSONL events. **Status: foundation shipped (step 1 of #2); cost rollup, UI, and slot consumers are outstanding.**
+Per-session cost and token counts derived from Claude transcript JSONL events. **Status: foundation + cost rollup + pane v1 shipped; live push, slot consumers, and per-tab precision remain.**
 
-**Shipped (foundation):** the JSONL→SQLite cache + watcher described in §7 *JSONL→SQLite cache*, the `observability:eventsForSession` catch-up IPC in §6, and the `chokidar`+`better-sqlite3` runtime pieces in §4. The watcher tails every workspace's transcripts, ingests new lines idempotently into the `events` table, and updates the `sessions` table with derived metadata (`cwd`, `ai_title`, `first_user_message`, `started_at`, `last_active_at`).
+**Shipped:**
+- The JSONL→SQLite cache + watcher (§7 *JSONL→SQLite cache*), the `observability:eventsForSession` catch-up IPC (§6), and the `chokidar`+`better-sqlite3` runtime pieces (§4). Watcher tails every workspace's transcripts and ingests new lines idempotently into `events`, updating `sessions` with derived metadata.
+- `summaryForWorkspace` (§6) plus the right-rail pane (§5) — title, model, event count, last-activity, prominent USD, token totals, top tools.
+- Cost rollup (`src/main/pricing.ts` + `costForSession` / `costForWorkspace` in `src/main/db.ts`, §6 IPCs). USD is derived per `(model, service_tier)` group with hardcoded Claude 4.x rates — Opus $15/$75/$1.50/$18.75, Sonnet $3/$15/$0.30/$3.75, Haiku $1/$5/$0.10/$1.25 per 1M tokens (input / output / cache-read / cache-creation). Standard tier full price, batch tier 50%, unknown model or tier degrades to $0 + one-time `console.warn`. Unit-tested in `src/main/pricing.test.ts` via Vitest.
 
 **Outstanding:**
-- **Cost rollup.** Derive a `cost` view (or materialized table) from the existing `events` rows: per session, sum input / output / cache-read / cache-creation tokens, multiply by a pricing table (hardcoded constants per `service_tier` × `model`, refreshed manually). New IPCs: `observability:getCost(sessionId)`, `observability:getCostForWorkspace(workspaceName)`. See #32.
 - **Live event push.** Today the ObservabilityPane polls `observability:summaryForWorkspace` every 2s. A live `observability:event:${sessionId}` push (sent from the watcher's ingest path) replaces polling for streaming UIs.
 - **Precise per-tab mapping.** v1 of the ObservabilityPane keys off the workspace's most-recently-active Claude session, not the focused terminal tab. The "right" mapping bridges broker session id ↔ claude session UUID, e.g., by associating each broker session with the next new JSONL that appears after its attach event. Land as a follow-up sub-issue.
 - **Slot consumers.** Chip secondary line (#20), tab status (#24), context-bar fill (#25) — wire to live data once available (#34).
 - **Subagent JSONLs.** Today `depth: 0` skips them. Decide whether to surface them in the events stream as a separate `parent_session_id` field, or treat them as opaque tool runs.
+- **Pricing refresh process.** `pricing.ts` is hand-maintained. When Anthropic publishes new rates, the constants need updating. Consider an annual recheck cadence and/or a comment-pinned source URL.
 
 ### Sessions table
 Global, container-filterable table of past Claude Code sessions, each resumable via `claude --resume <session-id>`.
@@ -695,15 +706,14 @@ Intentionally narrow scope: this is for iterating on UI without a daemon, image,
 
 ### Testing strategy
 **Decided:**
-- **E2E**: Playwright via its Electron integration (`_electron.launch`). Drives the packaged or dev-mode app from outside; can interact with menus, panes, modals, and assert on rendered state.
-- **Unit / integration**: Vitest. Native to the Vite-based stack and what `electron-vite` recommends.
+- **E2E**: Playwright via its Electron integration (`_electron.launch`). Drives the packaged or dev-mode app from outside; can interact with menus, panes, modals, and assert on rendered state. Lives in `tests/`.
+- **Unit / integration**: Vitest. Test files live next to source as `*.test.ts` (Vitest's default pickup pattern). Run via `npm run test:unit`; the `npm test` umbrella runs unit before E2E. Test files **must not** import modules that pull in native bindings (`better-sqlite3`, `keytar`) — those are built for Electron's Node ABI via `electron-builder install-app-deps` and crash under system Node. Keep unit tests against pure modules (e.g., `pricing.ts`); integration tests against `db.ts` would need an Electron-context runner and aren't worth the lift yet.
 - **Scope at v1**: no upfront test plan. Tests get added as features land — each feature lands with at least smoke coverage of the new surface. Avoids the "set up the test infra in advance" anti-pattern when there's nothing to test yet.
 
 **Deferred:**
 - **MCP-based test harness.** A write-capable MCP server that test authors (or claude itself) could drive to exercise the app declaratively. Compelling for agent-authored test generation but premature given that no tests exist yet and standard tooling fits the immediate need. Revisit when there's a concrete pain point that Playwright + Vitest can't solve cleanly — most likely when "have claude write E2E tests for feature X" becomes a recurring workflow.
 
 **Open:**
-- **When to install Playwright/Vitest.** With the first feature that needs verification beyond manual.
 - **CI integration.** GitHub Actions vs. local-only. Headless Electron in CI requires Xvfb (Linux) or equivalent.
 - **Test fixtures.** Shared in-memory DB seed vs. per-test container/profile fixtures.
 
