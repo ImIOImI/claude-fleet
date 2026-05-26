@@ -94,9 +94,21 @@ interface Props {
    *  live PTY. */
   sessionId: string;
   visible: boolean;
+  /**
+   * Called when the PTY signals end-of-life (user `/exit`, claude
+   * crash, docker stop, etc.). The parent TerminalPane uses this to
+   * surface per-tab status in the tab strip — `live` until this fires,
+   * `ended` after.
+   */
+  onLifecycleChange?: (sessionId: string, status: 'live' | 'ended') => void;
 }
 
-export function TerminalSession({ containerId, sessionId, visible }: Props) {
+export function TerminalSession({
+  containerId,
+  sessionId,
+  visible,
+  onLifecycleChange,
+}: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   // Bumped when the user clicks "Start new session" after a session ends.
   // The effect deps on containerId+sessionEpoch, so a new attach happens
@@ -108,6 +120,7 @@ export function TerminalSession({ containerId, sessionId, visible }: Props) {
     if (!hostRef.current) return;
     const host = hostRef.current;
     setSessionEnded(false);
+    onLifecycleChange?.(sessionId, 'live');
 
     const term = new Terminal({
       fontFamily: TERMINAL_FONT_FAMILY,
@@ -210,7 +223,10 @@ export function TerminalSession({ containerId, sessionId, visible }: Props) {
         });
         unsubEnd = window.api.pty.onEnd(sid, () => {
           term.writeln('\r\n[session ended]');
-          if (!disposed) setSessionEnded(true);
+          if (!disposed) {
+            setSessionEnded(true);
+            onLifecycleChange?.(sessionId, 'ended');
+          }
         });
         term.onData((data) => window.api.pty.input(sid, data));
       } catch (err) {
@@ -222,7 +238,10 @@ export function TerminalSession({ containerId, sessionId, visible }: Props) {
         const msg = err instanceof Error ? err.message : String(err);
         term.writeln('\r\n\x1b[31m[failed to attach session]\x1b[0m');
         term.writeln(`\x1b[31m${msg}\x1b[0m`);
-        if (!disposed) setSessionEnded(true);
+        if (!disposed) {
+          setSessionEnded(true);
+          onLifecycleChange?.(sessionId, 'ended');
+        }
       }
     })();
 
