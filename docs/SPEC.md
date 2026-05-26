@@ -112,7 +112,7 @@ The renderer layout is a 3-row × 3-col shell:
 - **Body row** (3 columns):
   - **Sessions pane** (left, ~280px): placeholder until #3 lands the JSONL-backed sessions table.
   - **Main pane** (center, fluid): header with selected workspace's name/status and `Close…` button, plus the xterm `TerminalPane` (or empty/first-run/disconnected states).
-  - **Observability pane** (right, ~320px): placeholder until #2 lands the cost/token/event watcher.
+  - **Observability pane** (right, ~320px): live view of the most-recently-active Claude session in the selected workspace, polled every 2s. Shows session title (from `ai-title` event or first-user-message head), latest model, last-activity relative time, event count, token totals (input / cache-create / cache-read / output) and top tools by call count. Empty state when the workspace has no transcript events yet. Cost rollup (USD) lands with step 2 of #2. Per-terminal-tab precision is deferred (renderer drives off active workspace, not active tab — the latest-active session is the right answer ≥95% of the time).
 - **Bottom row** (`BottomBar`): static hint bar with key bindings and degraded-vault notice when applicable.
 
 Modals (`CreateWorkspaceModal`, `CloseWorkspaceModal`, `ProfilesDialog`) are owned by `App` and rendered above the shell.
@@ -161,8 +161,8 @@ Per-session events from main to renderer:
 The renderer's `window.api.pty.onData/onEnd` register listeners and return unsubscribe functions.
 
 ### Observability
-The watcher's catch-up query for the renderer (live push lands with the observability UI):
 - `observability:eventsForSession(sessionId, sinceEventId?, limit?)` → `EventRow[]` — rows from the `events` table for the given session, ordered by `id` ascending, restricted to `id > sinceEventId`. Caller polls with the highest `id` it has seen to get incremental updates. Returns up to `limit` rows (default 500).
+- `observability:summaryForWorkspace(workspaceName)` → `WorkspaceSummary | null` — picks the most-recently-active Claude session in the workspace and returns `{ sessionId, title, model, startedAt, lastActiveAt, eventCount, inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, topTools[] }`. Returns null when no events have been ingested for the workspace yet. The right-rail observability pane polls this every 2s. Live push (`observability:event:${sessionId}`) is a planned follow-up that lets the pane subscribe instead of polling.
 
 ### Error log
 Both main and renderer hook the standard "uncaught" channels and forward each crash through a single sink to `<userData>/error.log`. Main installs `process.on('uncaughtException')` + `process.on('unhandledRejection')` directly. The renderer wires `window.addEventListener('error', …)` + `window.addEventListener('unhandledrejection', …)` in `src/renderer/src/main.tsx` *before* mounting React, so a crash during App's initial render still lands. Each row is one JSON object: `{ ts, source: 'main' | 'renderer', type, message, stack?, extra? }`. No rotation; users can delete the file at will.
@@ -490,8 +490,9 @@ Per-session cost and token counts derived from Claude transcript JSONL events. *
 
 **Outstanding:**
 - **Cost rollup.** Derive a `cost` view (or materialized table) from the existing `events` rows: per session, sum input / output / cache-read / cache-creation tokens, multiply by a pricing table (hardcoded constants per `service_tier` × `model`, refreshed manually). New IPCs: `observability:getCost(sessionId)`, `observability:getCostForWorkspace(workspaceName)`. See #32.
-- **Live event push.** Today the renderer polls `observability:eventsForSession` for catch-up. A live `observability:event:${sessionId}` push (sent from the watcher's ingest path) replaces polling for streaming UIs. Land alongside the ObservabilityPane in #33.
-- **UI surface.** ObservabilityPane v1: cost + token totals + per-tool counts + session metadata for the active session (#33). Slot consumers — chip secondary line (#20), tab status (#24), context-bar fill (#25) — wire to live data once available (#34).
+- **Live event push.** Today the ObservabilityPane polls `observability:summaryForWorkspace` every 2s. A live `observability:event:${sessionId}` push (sent from the watcher's ingest path) replaces polling for streaming UIs.
+- **Precise per-tab mapping.** v1 of the ObservabilityPane keys off the workspace's most-recently-active Claude session, not the focused terminal tab. The "right" mapping bridges broker session id ↔ claude session UUID, e.g., by associating each broker session with the next new JSONL that appears after its attach event. Land as a follow-up sub-issue.
+- **Slot consumers.** Chip secondary line (#20), tab status (#24), context-bar fill (#25) — wire to live data once available (#34).
 - **Subagent JSONLs.** Today `depth: 0` skips them. Decide whether to surface them in the events stream as a separate `parent_session_id` field, or treat them as opaque tool runs.
 
 ### Sessions table
