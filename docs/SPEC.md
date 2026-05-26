@@ -48,7 +48,8 @@ It is a local-only operator console — not a remote orchestrator, not a multi-u
 | Terminal | `@xterm/xterm` + `@xterm/addon-fit` | The de facto web terminal. Handles ANSI, resize, scrollback, paste, copy-on-select. |
 | Docker client | `dockerode` | Promise-based wrapper over the Docker Engine API with first-class streaming `exec` attach (needed for live PTY). Avoids shelling out to the `docker` CLI. |
 | Credentials | `keytar` | OS keychain integration (Keychain on macOS, Credential Vault on Windows, libsecret on Linux). API keys never hit disk in plaintext. |
-| Local DB | `better-sqlite3` | Synchronous SQLite for the history/cost layer. Single-file, embedded, no daemon. *(Planned — see §11 Open decisions.)* |
+| Local DB | `better-sqlite3` | Synchronous SQLite for the history/cost layer. Single-file, embedded, no daemon. The JSONL→SQLite cache ships in step 1 of #2; cost rollup + UI follow in subsequent steps. |
+| File watcher | `chokidar` | Tails JSONL transcripts as Claude Code appends to them. Battle-tested cross-platform layer above `fs.watch` (atomic-rename handling, polling fallback on WSL). |
 
 The runner image is `claude-fleet/runner:latest`, built from `docker/Dockerfile`. Base: `node:22-bookworm-slim`. Installs `git`, `ca-certificates`, `curl`, `ripgrep`, `jq`, `less`, `tini`, and globally installs `@anthropic-ai/claude-code`. Runs as non-root user `fleet` (UID/GID 1000 by default). Entrypoint is `tini`; default `CMD` is `sleep infinity` so the container stays alive and is `exec`'d into for each terminal session.
 
@@ -64,8 +65,8 @@ Three processes, per Electron convention:
 │  - clipboard       │   via preload script    │   ├──┬───────┬──┤  │
 │  - native Menu     │                         │   │S │ term  │ O│  │
 │  - broker client   │                         │   ├──┴───────┴──┤  │
-│  - better-sqlite3* │                         │   └─ bottom bar ┘  │
-│  - JSONL watcher*  │                         └────────────────────┘
+│  - better-sqlite3  │                         │   └─ bottom bar ┘  │
+│  - JSONL watcher   │                         └────────────────────┘
 └─────────┬──────────┘
           │
           │  Docker socket + Unix sockets to each container's broker
@@ -91,7 +92,6 @@ binds (per container):
   state/<name>/broker      → /run/broker   (broker socket directory)
 ```
 
-\* planned, see §11.
 
 The **broker** is a small Go daemon (//broker) shipped inside the runner image. It owns every claude PTY in the container and exposes them via a Unix-socket protocol. The host's Electron main process attaches via the bind-mounted socket directory rather than running `docker exec claude` directly. This is the foundation of "expert workspaces" (issue #18): PTYs outlive any individual host disconnect (app quit, app crash), so when the user pauses + closes the app + reopens + unpauses, every session reattaches to the same live `claude` process with its in-memory context (analyses, file watches, MCP server state) intact.
 
@@ -99,7 +99,7 @@ The **broker** is a small Go daemon (//broker) shipped inside the runner image. 
 - Docker daemon access via `dockerode` (default socket).
 - OS keychain access via `keytar`.
 - PTY session lifecycle: holds the duplex stream handle for each active `docker exec`, forwards data to the renderer over per-session IPC channels, forwards renderer input back to the stream, forwards resize events to Docker.
-- (Planned) JSONL transcript watching + SQLite persistence.
+- JSONL transcript watching (`chokidar`) + SQLite persistence (`better-sqlite3`). The watcher tails every workspace's `<state>/<name>/.claude/projects/-workspace/*.jsonl` non-recursively and ingests new lines into the SQLite cache (see §7 *JSONL→SQLite cache*). Cost rollup, observability UI, and slot consumers (chip/tab/context-bar) land in later steps of #2.
 
 **Preload** is a tightly scoped bridge. It uses `contextBridge.exposeInMainWorld('api', …)` to expose a typed `window.api` to the renderer. Window options: `contextIsolation: true`, `nodeIntegration: false`, `sandbox: false` (sandbox is off because the preload needs `ipcRenderer`).
 
@@ -157,6 +157,10 @@ Per-session events from main to renderer:
 - `pty:error:${sessionId}` — stream error (stringified).
 
 The renderer's `window.api.pty.onData/onEnd` register listeners and return unsubscribe functions.
+
+### Observability
+The watcher's catch-up query for the renderer (live push lands with the observability UI):
+- `observability:eventsForSession(sessionId, sinceEventId?, limit?)` → `EventRow[]` — rows from the `events` table for the given session, ordered by `id` ascending, restricted to `id > sinceEventId`. Caller polls with the highest `id` it has seen to get incremental updates. Returns up to `limit` rows (default 500).
 
 ### Clipboard + context menu
 The renderer cannot use `navigator.clipboard` reliably (focus/permission gotchas in Electron, and the renderer is contextIsolated). All clipboard access goes through main:
@@ -258,6 +262,62 @@ Today the only workspace backend is a Docker container. Each managed container c
 - `User: <hostUid>:<hostGid>` so bind-mounted files are owned by the host user.
 - Optional resource limits: `cpus` (→ `NanoCpus`), `memoryMb` (→ `Memory`).
 - `AutoRemove: false` — containers persist across restarts unless explicitly removed.
+
+### JSONL→SQLite cache
+Each workspace's Claude transcripts (`<userData>/state/<name>/.claude/projects/-workspace/<session-uuid>.jsonl`) are tailed by a single SQLite cache at `<userData>/state.db` (WAL mode). JSONL stays authoritative — the DB can be dropped at any time and the watcher rebuilds it from the JSONLs on next start.
+
+**Schema (v1):**
+
+```sql
+CREATE TABLE events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  workspace_name TEXT NOT NULL,
+  ts INTEGER,                          -- ms since epoch; null for light events
+  type TEXT NOT NULL,                  -- assistant / user / system / etc.
+  subtype TEXT,                        -- system subtype (turn_duration, compact_boundary, …)
+  uuid TEXT,                           -- event UUID (heavy events only)
+  parent_uuid TEXT,
+  -- fast-access extracts (NULL when n/a):
+  model TEXT,                          -- assistant.message.model
+  input_tokens INTEGER,
+  output_tokens INTEGER,
+  cache_read_input_tokens INTEGER,
+  cache_creation_input_tokens INTEGER,
+  service_tier TEXT,
+  tool_name TEXT,                      -- first tool_use.name in the event's content[]
+  raw_jsonl TEXT NOT NULL,             -- original line, preserves fidelity
+  dedup_key TEXT NOT NULL,             -- uuid when present, else sha256(raw_jsonl)
+  UNIQUE(session_id, dedup_key)
+);
+CREATE INDEX idx_events_session_ts ON events(session_id, ts);
+CREATE INDEX idx_events_workspace ON events(workspace_name);
+CREATE INDEX idx_events_type ON events(type);
+
+CREATE TABLE sessions (
+  id TEXT PRIMARY KEY,                 -- session UUID (= JSONL filename stem)
+  workspace_name TEXT NOT NULL,
+  cwd TEXT,                            -- from first `system` event carrying it
+  started_at INTEGER,                  -- first event ts
+  last_active_at INTEGER,              -- max(event ts)
+  ai_title TEXT,                       -- latest `ai-title.aiTitle`
+  first_user_message TEXT,             -- last-prompt or first user.content
+  user_set_name TEXT                   -- manual override (for the sessions table; see §11)
+);
+CREATE INDEX idx_sessions_workspace ON sessions(workspace_name);
+```
+
+**Why these design choices:**
+- **Unique `(session_id, dedup_key)`** makes ingestion idempotent. Re-tailing a JSONL from byte 0 (after crash, after losing in-memory offsets) produces no duplicates: heavy events use their `uuid` as the key; light events without a `uuid` use a SHA-256 hash of the raw line. Insert uses `INSERT OR IGNORE`.
+- **`raw_jsonl` stored verbatim** so the DB is rebuildable and so new extract columns can be backfilled from existing rows without re-tailing.
+- **Subagent JSONLs** (`<session-id>/subagents/agent-*.jsonl`) are deliberately *not* ingested today — the watcher uses `depth: 0` to skip them. Surface them later if needed.
+
+**Watcher behavior:**
+- One `JsonlWatcher` instance per main process. Started on `app.whenReady` (after `listWorkspaceManifests`), stopped on `before-quit`.
+- Each workspace is registered with `registerWorkspace(name)`, which adds `<state>/<name>/.claude/projects/-workspace` to the watch set (chokidar tolerates missing paths and picks them up when claude creates them).
+- Per-file byte offsets are kept in memory only. On add/change: read from offset to EOF, find the last `\n`, ingest complete lines, advance offset past the newline. Trailing partial line waits for the next event.
+- Compaction (file shrinks below the stored offset) resets the offset to 0; `dedup_key` ensures already-ingested rows aren't duplicated.
+- Mock mode (`CLAUDE_FLEET_MOCK=1`) skips watcher + DB entirely — no real JSONLs to read.
 
 ### Vault layout
 `keytar` stores per-profile credentials under:
@@ -417,11 +477,15 @@ Each container gets its own host-side state dir, bind-mounted into the container
 - **Settings reset.** `.claude/` will eventually also hold `settings.json`, custom commands, file checkpoints, tasks state. All of it survives container recreate by default. If we later want a "reset settings without losing project history" affordance, decide what's keepable vs. wipeable.
 
 ### Observability layer: cost, tokens, tool calls
-Per-session cost and token counts derived from Claude transcript JSONL events. Outstanding:
-- **Watcher.** Main process watches each container's bind-mounted `.claude/projects/` (see above), tails new events into SQLite as they arrive.
-- **Schema.** `events(session_id, ts, type, payload_json)` and `cost(session_id, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, usd)`. Cost is rolled up from per-event token usage; pricing table refreshed periodically.
-- **IPC surface.** `observability:getCost(sessionId)`, `observability:streamEvents(sessionId)` for live tailing.
-- **UI surface.** Probably a status row inside the sessions table plus a per-session detail pane. To be sketched.
+Per-session cost and token counts derived from Claude transcript JSONL events. **Status: foundation shipped (step 1 of #2); cost rollup, UI, and slot consumers are outstanding.**
+
+**Shipped (foundation):** the JSONL→SQLite cache + watcher described in §7 *JSONL→SQLite cache*, the `observability:eventsForSession` catch-up IPC in §6, and the `chokidar`+`better-sqlite3` runtime pieces in §4. The watcher tails every workspace's transcripts, ingests new lines idempotently into the `events` table, and updates the `sessions` table with derived metadata (`cwd`, `ai_title`, `first_user_message`, `started_at`, `last_active_at`).
+
+**Outstanding:**
+- **Cost rollup.** Derive a `cost` view (or materialized table) from the existing `events` rows: per session, sum input / output / cache-read / cache-creation tokens, multiply by a pricing table (hardcoded constants per `service_tier` × `model`, refreshed manually). New IPCs: `observability:getCost(sessionId)`, `observability:getCostForWorkspace(workspaceName)`. See #32.
+- **Live event push.** Today the renderer polls `observability:eventsForSession` for catch-up. A live `observability:event:${sessionId}` push (sent from the watcher's ingest path) replaces polling for streaming UIs. Land alongside the ObservabilityPane in #33.
+- **UI surface.** ObservabilityPane v1: cost + token totals + per-tool counts + session metadata for the active session (#33). Slot consumers — chip secondary line (#20), tab status (#24), context-bar fill (#25) — wire to live data once available (#34).
+- **Subagent JSONLs.** Today `depth: 0` skips them. Decide whether to surface them in the events stream as a separate `parent_session_id` field, or treat them as opaque tool runs.
 
 ### Sessions table
 Global, container-filterable table of past Claude Code sessions, each resumable via `claude --resume <session-id>`.

@@ -15,6 +15,30 @@ export interface SessionInventory {
   activeId?: string;
 }
 
+/**
+ * Row shape from the JSONL → SQLite cache. Mirrors db.EventRow with the
+ * subset the renderer needs. `rawJsonl` holds the original line so the
+ * renderer can pull fields the extract columns don't cover yet.
+ */
+export interface ObservabilityEventRow {
+  id: number;
+  sessionId: string;
+  workspaceName: string;
+  ts: number | null;
+  type: string;
+  subtype: string | null;
+  uuid: string | null;
+  parentUuid: string | null;
+  model: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadInputTokens: number | null;
+  cacheCreationInputTokens: number | null;
+  serviceTier: string | null;
+  toolName: string | null;
+  rawJsonl: string;
+}
+
 const api = {
   app: {
     mockMode: (): Promise<boolean> => ipcRenderer.invoke('app:mockMode')
@@ -101,6 +125,20 @@ const api = {
       ipcRenderer.on(channel, handler);
       return () => ipcRenderer.removeListener(channel, handler);
     }
+  },
+  observability: {
+    /**
+     * Pull rows from the JSONL→SQLite cache for one session, in id order,
+     * after `sinceEventId`. Renderer polls this for catch-up; a live-push
+     * channel arrives with the cost-rollup work in step 2 / observability
+     * UI in step 3.
+     */
+    eventsForSession: (
+      sessionId: string,
+      sinceEventId = 0,
+      limit = 500
+    ): Promise<ObservabilityEventRow[]> =>
+      ipcRenderer.invoke('observability:eventsForSession', sessionId, sinceEventId, limit)
   }
 };
 
