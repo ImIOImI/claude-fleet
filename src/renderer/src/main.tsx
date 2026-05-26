@@ -1,4 +1,3 @@
-import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
 import './styles.css';
@@ -36,4 +35,21 @@ window.addEventListener('unhandledrejection', (e: PromiseRejectionEvent) => {
 });
 
 const root = document.getElementById('root');
-if (root) createRoot(root).render(<React.StrictMode><App /></React.StrictMode>);
+// React StrictMode is deliberately OFF. xterm.js 5.x's `term.dispose()`
+// doesn't fully detach its global scroll/resize listeners — those
+// handlers still hold a reference to the disposed renderer. StrictMode's
+// dev-only synthetic double-mount (mount → cleanup → mount) creates a
+// new xterm on the SAME host while the disposed one's stale listeners
+// are still firing, so every subsequent scroll/resize hits the
+// `Viewport.syncScrollArea` → `_renderer.dimensions` path with an
+// undefined renderer and crashes. The crash makes the terminal look
+// blank (xterm's render loop is broken) and the symptom is "click +
+// for a new session → blank cursor", "switch workspaces and back →
+// terminal blank". StrictMode is a no-op in the packaged build, so
+// keeping it off in dev has zero impact on shipped behavior; it just
+// removes the dev-only crash trigger. If we later want StrictMode's
+// effect-cleanup verification back, the principled fix is to hoist
+// the xterm instance out of the React effect into a ref so it
+// survives the synthetic teardown — non-trivial and not worth it
+// today.
+if (root) createRoot(root).render(<App />);
