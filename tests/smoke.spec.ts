@@ -784,6 +784,38 @@ test('Session ended overlay: "Start new session" reattaches a fresh claude', asy
   }
 });
 
+test('Attach error overlay: broker-unreachable surfaces the actual error message', async () => {
+  // Regression guard for the "blank cursor → generic session-ended modal"
+  // bug. The mock seeds a `fail-broker-missing` workspace whose attachPty
+  // throws synchronously (mirroring the real-world ENOENT on the broker
+  // socket — what happens when the local runner image predates the broker
+  // landing). Before the fix, that error was written into xterm and
+  // immediately covered by the session-ended overlay; users saw nothing
+  // actionable. Now the attach-error overlay surfaces the message verbatim
+  // plus a hint about pulling the runner image.
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    // The seeded `fail-broker-missing` chip is already in the top strip;
+    // clicking it mounts TerminalPane and triggers the attach.
+    await window.locator('.ws-chip', { hasText: 'fail-broker-missing' }).click();
+
+    const overlay = window.locator('.session-ended-overlay');
+    await expect(overlay).toBeVisible({ timeout: 5_000 });
+    await expect(overlay.getByText("couldn't attach to the workspace")).toBeVisible();
+    const errorBlock = window.getByTestId('attach-error-message');
+    await expect(errorBlock).toBeVisible();
+    await expect(errorBlock).toContainText('broker socket not reachable');
+    await expect(errorBlock).toContainText('Is the runner image new enough');
+    // The pull hint is part of the help copy in the attach-error variant.
+    await expect(
+      overlay.getByText(/docker pull ghcr\.io\/imioimi\/claude-fleet\/runner/)
+    ).toBeVisible();
+    await expect(overlay.getByRole('button', { name: 'Retry' })).toBeVisible();
+  } finally {
+    await app.close();
+  }
+});
+
 test('Image picker: free-text filter matches across ref and label values', async () => {
   const { app, window } = await launch();
   try {

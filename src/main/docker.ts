@@ -62,30 +62,63 @@ export interface PullProgress {
   message: string;
 }
 
+/**
+ * Pull the runner image, with offline fallback. Always asks the registry
+ * — `:latest` tags get silent improvements (broker landing, claude
+ * version bumps) and the previous "skip if any copy exists locally"
+ * meant users stayed pinned to whatever they first pulled forever. Now
+ * we let Docker compare layer digests and re-download only changed
+ * layers (no-op when already current).
+ *
+ * When the registry is unreachable but we have a local copy, surface a
+ * one-line warning and proceed with the local image. Anything else
+ * (auth failures, 5xx) bubbles. If no local copy exists either, the
+ * caller can't proceed and the error propagates.
+ */
 export async function ensureImage(
   onProgress: (p: PullProgress) => void
 ): Promise<void> {
-  try {
-    await docker.getImage(RUNNER_IMAGE).inspect();
-    return;
-  } catch (err: unknown) {
-    if ((err as { statusCode?: number }).statusCode !== 404) throw err;
-  }
+  const localExists = await docker
+    .getImage(RUNNER_IMAGE)
+    .inspect()
+    .then(() => true)
+    .catch((err: unknown) => {
+      if ((err as { statusCode?: number }).statusCode === 404) return false;
+      throw err;
+    });
 
-  onProgress({ message: `Pulling ${RUNNER_IMAGE}…` });
-  const stream = (await docker.pull(RUNNER_IMAGE)) as NodeJS.ReadableStream;
-
-  await new Promise<void>((resolve, reject) => {
-    docker.modem.followProgress(
-      stream,
-      (err: Error | null) => (err ? reject(err) : resolve()),
-      (event: Record<string, unknown>) => {
-        const status = typeof event.status === 'string' ? event.status : '';
-        const id = typeof event.id === 'string' ? ` ${event.id}` : '';
-        if (status) onProgress({ message: `${status}${id}` });
-      }
-    );
+  onProgress({
+    message: localExists ? `Checking ${RUNNER_IMAGE} for updates…` : `Pulling ${RUNNER_IMAGE}…`
   });
+
+  try {
+    const stream = (await docker.pull(RUNNER_IMAGE)) as NodeJS.ReadableStream;
+    await new Promise<void>((resolve, reject) => {
+      docker.modem.followProgress(
+        stream,
+        (err: Error | null) => (err ? reject(err) : resolve()),
+        (event: Record<string, unknown>) => {
+          // Per-layer progress events carry `status` ('Pulling fs layer',
+          // 'Downloading', 'Pull complete', etc.). The summary event at the
+          // tail says 'Status: Image is up to date for …' or 'Status:
+          // Downloaded newer image for …'. Forward both — the UI shows the
+          // latest message.
+          const status = typeof event.status === 'string' ? event.status : '';
+          const id = typeof event.id === 'string' ? ` ${event.id}` : '';
+          if (status) onProgress({ message: `${status}${id}` });
+        }
+      );
+    });
+  } catch (err) {
+    if (localExists) {
+      const msg = err instanceof Error ? err.message : String(err);
+      onProgress({
+        message: `Registry check failed (${msg}); using cached ${RUNNER_IMAGE}.`
+      });
+      return;
+    }
+    throw err;
+  }
 }
 
 export async function ping(): Promise<boolean> {
