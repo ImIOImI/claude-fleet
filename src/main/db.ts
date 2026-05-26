@@ -12,6 +12,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
+import { costFor } from './pricing.js';
 
 let db: Database.Database | null = null;
 
@@ -355,6 +356,8 @@ export interface WorkspaceSummary {
   outputTokens: number;
   cacheReadInputTokens: number;
   cacheCreationInputTokens: number;
+  /** Total USD across all events in the session — see `getCost`. */
+  usd: number;
   /** Top tools called in this session, descending count. */
   topTools: ToolCallCount[];
 }
@@ -424,6 +427,8 @@ export function summaryForWorkspace(workspaceName: string, topToolsLimit = 5): W
     `)
     .all(session.id, topToolsLimit) as ToolCallCount[];
 
+  const cost = costForSession(session.id);
+
   return {
     sessionId: session.id,
     title:
@@ -437,8 +442,87 @@ export function summaryForWorkspace(workspaceName: string, topToolsLimit = 5): W
     outputTokens: aggregates.output_tokens,
     cacheReadInputTokens: aggregates.cache_read_input_tokens,
     cacheCreationInputTokens: aggregates.cache_creation_input_tokens,
+    usd: cost.usd,
     topTools,
   };
+}
+
+// ── Cost rollup ───────────────────────────────────────────────────────────
+//
+// Pricing varies by model and service_tier, so we can't just sum tokens once
+// and multiply — different events within a session may use different models.
+// Group by (model, service_tier), let pricing.ts compute USD per group,
+// then sum.
+
+export interface SessionCost {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  usd: number;
+}
+
+interface CostGroupRow {
+  model: string | null;
+  service_tier: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+}
+
+const COST_COLUMNS = `
+  COALESCE(SUM(input_tokens), 0)                AS input_tokens,
+  COALESCE(SUM(output_tokens), 0)               AS output_tokens,
+  COALESCE(SUM(cache_read_input_tokens), 0)     AS cache_read_input_tokens,
+  COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_input_tokens
+`;
+
+function rollupGroups(rows: CostGroupRow[]): SessionCost {
+  let usd = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheReadInputTokens = 0;
+  let cacheCreationInputTokens = 0;
+  for (const r of rows) {
+    inputTokens += r.input_tokens;
+    outputTokens += r.output_tokens;
+    cacheReadInputTokens += r.cache_read_input_tokens;
+    cacheCreationInputTokens += r.cache_creation_input_tokens;
+    usd += costFor(r.model, r.service_tier, {
+      inputTokens: r.input_tokens,
+      outputTokens: r.output_tokens,
+      cacheReadInputTokens: r.cache_read_input_tokens,
+      cacheCreationInputTokens: r.cache_creation_input_tokens,
+    });
+  }
+  return { inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, usd };
+}
+
+export function costForSession(sessionId: string): SessionCost {
+  const d = openDbOrThrow();
+  const rows = d
+    .prepare(`
+      SELECT model, service_tier, ${COST_COLUMNS}
+      FROM events
+      WHERE session_id = ?
+      GROUP BY model, service_tier
+    `)
+    .all(sessionId) as CostGroupRow[];
+  return rollupGroups(rows);
+}
+
+export function costForWorkspace(workspaceName: string): SessionCost {
+  const d = openDbOrThrow();
+  const rows = d
+    .prepare(`
+      SELECT model, service_tier, ${COST_COLUMNS}
+      FROM events
+      WHERE workspace_name = ?
+      GROUP BY model, service_tier
+    `)
+    .all(workspaceName) as CostGroupRow[];
+  return rollupGroups(rows);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

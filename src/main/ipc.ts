@@ -16,7 +16,12 @@ import {
 } from './workspaces.js';
 import type { PtyHandle, RemoveWorkspaceOpts, CreateWorkspaceInput } from './docker.js';
 import type { JsonlWatcher } from './jsonlWatcher.js';
-import { eventsForSession, summaryForWorkspace } from './db.js';
+import {
+  eventsForSession,
+  summaryForWorkspace,
+  costForSession,
+  costForWorkspace,
+} from './db.js';
 import { logError, getLogPath } from './errorLog.js';
 
 export const MOCK_MODE = process.env.CLAUDE_FLEET_MOCK === '1';
@@ -294,6 +299,18 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
    */
   ipcMain.handle('observability:summaryForWorkspace', (_e, workspaceName: string) =>
     summaryForWorkspace(workspaceName)
+  );
+
+  // Cost rollups (#32). USD is derived from `events` via pricing.ts and is
+  // pure SQL + arithmetic on this side — no caching layer yet. The pane
+  // already polls summaryForWorkspace every 2s and now reads the included
+  // `usd`; these per-session / per-workspace endpoints exist for the
+  // sessions table (#3) and future detail views.
+  ipcMain.handle('observability:getCost', (_e, sessionId: string) =>
+    costForSession(sessionId)
+  );
+  ipcMain.handle('observability:getCostForWorkspace', (_e, workspaceName: string) =>
+    costForWorkspace(workspaceName)
   );
 
   // Renderer-side error reporting bridge. The renderer's onerror /

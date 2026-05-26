@@ -36,7 +36,17 @@ export interface WorkspaceObservabilitySummary {
   outputTokens: number;
   cacheReadInputTokens: number;
   cacheCreationInputTokens: number;
+  /** Total USD across all events in the session, derived from the pricing table. */
+  usd: number;
   topTools: Array<{ name: string; count: number }>;
+}
+
+export interface ObservabilityCost {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  usd: number;
 }
 
 export interface ObservabilityEventRow {
@@ -175,7 +185,18 @@ const api = {
     summaryForWorkspace: (
       workspaceName: string
     ): Promise<WorkspaceObservabilitySummary | null> =>
-      ipcRenderer.invoke('observability:summaryForWorkspace', workspaceName)
+      ipcRenderer.invoke('observability:summaryForWorkspace', workspaceName),
+    /**
+     * Per-session USD + token totals. The summary endpoint already carries
+     * `usd` for the active session, so the right-rail pane doesn't need
+     * this call; it's here for the sessions table (#3) and future per-
+     * session detail views.
+     */
+    getCost: (sessionId: string): Promise<ObservabilityCost> =>
+      ipcRenderer.invoke('observability:getCost', sessionId),
+    /** USD + token totals aggregated across all sessions in a workspace. */
+    getCostForWorkspace: (workspaceName: string): Promise<ObservabilityCost> =>
+      ipcRenderer.invoke('observability:getCostForWorkspace', workspaceName)
   }
 };
 
