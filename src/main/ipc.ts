@@ -15,11 +15,17 @@ import {
   type WorkspaceSpec
 } from './workspaces.js';
 import type { PtyHandle, RemoveWorkspaceOpts, CreateWorkspaceInput } from './docker.js';
+import type { JsonlWatcher } from './jsonlWatcher.js';
+import { eventsForSession } from './db.js';
 
 export const MOCK_MODE = process.env.CLAUDE_FLEET_MOCK === '1';
 const backend = MOCK_MODE ? mockDocker : realDocker;
 
 const ptySessions = new Map<string, PtyHandle>();
+
+interface RegisterIpcOpts {
+  jsonlWatcher: JsonlWatcher | null;
+}
 
 /**
  * Merge the live-workspace list (from the backend) with on-disk manifests
@@ -56,7 +62,8 @@ async function listAllWorkspaces(): Promise<Workspace[]> {
   return result;
 }
 
-export function registerIpc(): void {
+export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): void {
+  const { jsonlWatcher } = opts;
   ipcMain.handle('workspace:ping', () => backend.ping());
   ipcMain.handle('workspace:ensureImage', async (event, channelId: string) => {
     const win = BrowserWindow.fromWebContents(event.sender);
@@ -87,6 +94,7 @@ export function registerIpc(): void {
         lastUsedAt: ws.lastUsedAt
       };
       await writeWorkspaceManifest(spec);
+      jsonlWatcher?.registerWorkspace(ws.name);
 
       // Auto-record the image into the library so the next create's
       // picker shows it (and any labels it was built with). Best-effort:
@@ -233,4 +241,14 @@ export function registerIpc(): void {
     ptySessions.get(sessionId)?.detach();
     ptySessions.delete(sessionId);
   });
+
+  // Observability — minimal step-1 surface. Renderer polls
+  // eventsForSession with the latest id it has; the DB returns rows
+  // ingested since. Live push + cost rollup + per-workspace queries
+  // ship with steps 2-3 of #2.
+  ipcMain.handle(
+    'observability:eventsForSession',
+    (_e, sessionId: string, sinceEventId = 0, limit = 500) =>
+      eventsForSession(sessionId, sinceEventId, limit)
+  );
 }

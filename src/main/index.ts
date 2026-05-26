@@ -1,6 +1,14 @@
 import { app, BrowserWindow, shell } from 'electron';
 import { join } from 'node:path';
 import { registerIpc } from './ipc.js';
+import { openDb, closeDb } from './db.js';
+import { JsonlWatcher } from './jsonlWatcher.js';
+import { listWorkspaceManifests } from './workspaces.js';
+
+// Mock mode is for UI iteration without Docker; no real JSONLs exist, so the
+// watcher and DB stay dormant.
+const isMock = process.env.CLAUDE_FLEET_MOCK === '1';
+const jsonlWatcher = isMock ? null : new JsonlWatcher();
 
 const isDev = process.env.NODE_ENV === 'development' || !!process.env.ELECTRON_RENDERER_URL;
 
@@ -34,13 +42,23 @@ function createWindow(): BrowserWindow {
   return win;
 }
 
-app.whenReady().then(() => {
-  registerIpc();
+app.whenReady().then(async () => {
+  if (jsonlWatcher) {
+    openDb(app.getPath('userData'));
+    const manifests = await listWorkspaceManifests();
+    await jsonlWatcher.start(manifests.map((m) => m.name));
+  }
+  registerIpc({ jsonlWatcher });
   createWindow();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+app.on('before-quit', async () => {
+  await jsonlWatcher?.stop();
+  closeDb();
 });
 
 app.on('window-all-closed', () => {
