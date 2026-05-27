@@ -228,7 +228,19 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         source: 'main',
         type: 'pty-attach',
         message: `pty:attach OK (live=${ptySessions.size})`,
-        extra: { brokerSessionId, containerId, ptyHandleId, live: ptySessions.size }
+        // cols/rows are the dimensions the broker spawned the PTY at.
+        // If they're the xterm default (80x24) when the host element is
+        // actually larger, claude will lay out at the wrong size and
+        // subsequent resize will scramble its scrollback. Captured here
+        // so we can regression-test that attach happens after fit.
+        extra: {
+          brokerSessionId,
+          containerId,
+          ptyHandleId,
+          cols,
+          rows,
+          live: ptySessions.size
+        }
       });
 
       const win = BrowserWindow.fromWebContents(event.sender);

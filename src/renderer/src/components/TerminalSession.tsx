@@ -186,7 +186,6 @@ export function TerminalSession({
         console.warn('[TerminalSession] fit failed (xterm Viewport bug):', err);
       }
     };
-    const initialFitRaf = requestAnimationFrame(safeFit);
 
     const linkProviderDisposable = term.registerLinkProvider(multilineLinkProvider(term));
 
@@ -248,7 +247,30 @@ export function TerminalSession({
     };
     host.addEventListener('contextmenu', onContextMenu);
 
-    (async () => {
+    // CRITICAL: fit BEFORE attach. Otherwise xterm sits at its default
+    // 80×24, claude is spawned thinking that's the terminal size, and
+    // a frame later when the real fit lands xterm re-flows its
+    // scrollback to the new dimensions. Claude's setup flow (dark
+    // mode → OAuth → trust folder) issues ESC[2J between prompts, but
+    // those clears only target the visible viewport at the pre-resize
+    // size — rows beyond the original 24 inherit stale scrollback
+    // from earlier setup screens. The user sees claude's main UI at
+    // the top + leftover trust-prompt fragments below.
+    //
+    // Defer the whole attach to one frame after `term.open` so
+    // xterm's renderer is settled, safeFit runs against real host
+    // dimensions, and the cols/rows we pass to the broker on attach
+    // are right from the very first byte claude writes.
+    //
+    // Regression-tested by: "Always-mount: pty:attach receives
+    // fitted xterm cols/rows…" in tests/smoke.spec.ts. That test
+    // asserts the cols recorded by the pty-attach log entry are not
+    // 80 (xterm's default). Without this rAF the test fails because
+    // attach runs synchronously with the default term.cols.
+    const initialFitRaf = requestAnimationFrame(async () => {
+      if (disposed) return;
+      safeFit();
+
       try {
         const sid = await window.api.pty.attach(containerId, sessionId, term.cols, term.rows);
         if (disposed) {
@@ -299,7 +321,7 @@ export function TerminalSession({
           onLifecycleChange?.(sessionId, 'ended');
         }
       }
-    })();
+    });
 
     const ro = new ResizeObserver(() => {
       safeFit();
