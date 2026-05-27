@@ -20,6 +20,14 @@ interface Props {
   containerId: string;
   workspaceName: string;
   paused: boolean;
+  /**
+   * Whether this pane is the currently-selected workspace. Hidden panes
+   * stay fully mounted so their xterm scrollback + broker connections
+   * persist across workspace switches; this just controls painting via
+   * `visibility: hidden` (layout preserved so xterm keeps its measured
+   * cols/rows and doesn't need to refit on show).
+   */
+  visible: boolean;
   onResume: () => void;
 }
 
@@ -33,7 +41,13 @@ function uid(): string {
   return globalThis.crypto?.randomUUID?.() ?? `s-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export function TerminalPane({ containerId, workspaceName, paused, onResume }: Props) {
+export function TerminalPane({
+  containerId,
+  workspaceName,
+  paused,
+  visible,
+  onResume
+}: Props) {
   const [loaded, setLoaded] = useState(false);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeId, setActiveId] = useState<string>('');
@@ -153,7 +167,20 @@ export function TerminalPane({ containerId, workspaceName, paused, onResume }: P
   }
 
   return (
-    <div className="terminal-pane">
+    <div
+      className="terminal-pane"
+      // visibility:hidden preserves layout (xterm keeps real dimensions);
+      // pointer-events:none is belt-and-suspenders so hidden panes never
+      // intercept clicks meant for the visible one stacked at the same
+      // coords. (Modern browsers should already do this for
+      // visibility:hidden, but Playwright's actionability check trips
+      // when multiple absolutely-positioned siblings overlap.)
+      style={{
+        visibility: visible ? 'visible' : 'hidden',
+        pointerEvents: visible ? 'auto' : 'none'
+      }}
+      aria-hidden={!visible}
+    >
       <div className="session-tab-strip" role="tablist" aria-label="Terminal sessions">
         {sessions.map((s) => {
           const ended = endedIds.has(s.id);

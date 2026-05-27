@@ -5,6 +5,18 @@ import path from 'node:path';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..');
 
+/**
+ * Scope locators to the currently-visible TerminalPane. Every live
+ * workspace's pane is always-mounted (see App.tsx's
+ * `workspaces.map(... <TerminalPane visible={...} />)`); only the one
+ * matching `selectedId` has `aria-hidden="false"`. Without this scope
+ * a selector like `.terminal-host` matches every mounted pane and
+ * trips Playwright's strict-mode locator check.
+ */
+function activePane(window: Page) {
+  return window.locator('.terminal-pane:not([aria-hidden="true"])');
+}
+
 async function launch(
   envOverrides: Record<string, string> = {}
 ): Promise<{ app: ElectronApplication; window: Page }> {
@@ -295,7 +307,7 @@ test('Mock mode: selecting a workspace mounts the terminal pane', async () => {
   try {
     await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
     await expect(window.locator('.ws-chip-group.active', { hasText: 'mock-alpha' })).toBeVisible();
-    await expect(window.locator('.terminal-host')).toBeVisible();
+    await expect(activePane(window).locator('.terminal-host')).toBeVisible();
   } finally {
     await app.close();
   }
@@ -309,7 +321,7 @@ test('Mock mode: oauth command runs without crashing the terminal', async () => 
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {
     await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
-    const term = window.locator('.terminal-host');
+    const term = activePane(window).locator('.terminal-host');
     await expect(term).toBeVisible();
     await term.click();
     await window.keyboard.type('oauth');
@@ -394,7 +406,7 @@ test('Pause: chip shows paused glyph and terminal pane shows paused overlay', as
   try {
     // Select the running mock-alpha workspace so its terminal pane mounts.
     await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
-    await expect(window.locator('.terminal-host')).toBeVisible();
+    await expect(activePane(window).locator('.terminal-host')).toBeVisible();
 
     // Pause via the chip's hamburger menu.
     const group = window.locator('.ws-chip-group', { hasText: 'mock-alpha' });
@@ -700,7 +712,7 @@ test('Multi-session: workspace starts with a "main" tab; + adds new tabs; close 
   try {
     await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
 
-    const strip = window.locator('.session-tab-strip');
+    const strip = activePane(window).locator('.session-tab-strip');
     await expect(strip).toBeVisible();
 
     // First session is auto-created and called "main".
@@ -743,7 +755,7 @@ test('Multi-session: closing the only tab respawns a fresh "main"', async () => 
   try {
     await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
 
-    const strip = window.locator('.session-tab-strip');
+    const strip = activePane(window).locator('.session-tab-strip');
     const tabs = strip.locator('.session-tab');
     await expect(tabs).toHaveCount(1);
 
@@ -762,7 +774,7 @@ test('Session ended overlay: "Start new session" reattaches a fresh claude', asy
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {
     await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
-    const term = window.locator('.terminal-host');
+    const term = activePane(window).locator('.terminal-host');
     await expect(term).toBeVisible();
 
     // Type `exit` in the mock shell — closes the duplex, triggers
@@ -771,7 +783,7 @@ test('Session ended overlay: "Start new session" reattaches a fresh claude', asy
     await window.keyboard.type('exit');
     await window.keyboard.press('Enter');
 
-    const overlay = window.locator('.session-ended-overlay');
+    const overlay = activePane(window).locator('.session-ended-overlay');
     await expect(overlay).toBeVisible();
     await expect(overlay.getByRole('button', { name: 'Start new session' })).toBeVisible();
 

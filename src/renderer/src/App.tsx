@@ -218,30 +218,42 @@ export function App() {
           <div className="main-body">
             {backendReady === false ? (
               <DockerDisconnected onRetry={refresh} />
-            ) : selected && selected.containerId ? (
-              // key forces TerminalPane to remount on workspace switch so its
-              // session state (tabs + active id + counter) doesn't leak across
-              // workspaces. PTYs from the old workspace are torn down by
-              // TerminalSession's unmount cleanup. workspaceName is the
-              // persistence key for sessions.json (containerId changes if the
-              // container is recreated; name does not).
-              <TerminalPane
-                key={selected.containerId}
-                workspaceName={selected.name}
-                containerId={selected.containerId}
-                paused={selected.state === 'paused'}
-                onResume={async () => {
-                  await window.api.workspace.start(selected.name);
-                  refresh();
-                }}
-              />
             ) : liveCount === 0 ? (
               <FirstRun onNewWorkspace={() => setCreateOpen(true)} />
-            ) : (
+            ) : !selected || !selected.containerId ? (
               <div className="empty">
                 <p style={{ color: 'var(--text-muted)' }}>No workspace selected.</p>
               </div>
-            )}
+            ) : null}
+            {/*
+              Always-mounted TerminalPanes — one per live workspace, kept
+              alive for as long as the workspace itself exists. Only the
+              one matching `selectedId` is visible; others are hidden via
+              `visibility: hidden` (layout preserved so xterm keeps its
+              real dimensions and doesn't need to refit on show).
+
+              Keying by `name` (not `containerId`) means the pane
+              survives container stop+start with state preserved; it
+              only unmounts when the workspace itself is removed from
+              the list. Each TerminalSession's broker connection stays
+              open across workspace switches — switching is purely a CSS
+              toggle, no detach/attach churn.
+            */}
+            {workspaces
+              .filter((w) => w.state !== 'deleted' && w.containerId)
+              .map((w) => (
+                <TerminalPane
+                  key={w.name}
+                  visible={selectedId === w.id}
+                  workspaceName={w.name}
+                  containerId={w.containerId!}
+                  paused={w.state === 'paused'}
+                  onResume={async () => {
+                    await window.api.workspace.start(w.name);
+                    refresh();
+                  }}
+                />
+              ))}
           </div>
         </main>
 
