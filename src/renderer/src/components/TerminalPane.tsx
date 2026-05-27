@@ -235,7 +235,18 @@ export function TerminalPane({
             key={s.id}
             containerId={containerId}
             sessionId={s.id}
-            visible={s.id === activeId}
+            // Visible only when BOTH this workspace's pane is showing
+            // AND this tab is the active one within it. Without ANDing
+            // the outer `visible` in, the active tab's
+            // `visibility: visible` would override the outer pane's
+            // `visibility: hidden` (CSS visibility cascades downward
+            // unless the child explicitly says 'visible', in which
+            // case it paints regardless of an ancestor's 'hidden').
+            // The user-visible bug was: clicking witty-wren's chip
+            // showed gentle-crane's terminal, because every workspace's
+            // active TerminalSession was actually painting and the one
+            // later in DOM order won the stacking contest.
+            visible={visible && s.id === activeId}
             onLifecycleChange={handleLifecycle}
           />
         ))}

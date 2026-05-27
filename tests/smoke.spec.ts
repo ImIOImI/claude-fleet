@@ -919,6 +919,139 @@ test('Always-mount: pty:attach receives fitted xterm cols/rows, not the 80x24 de
   }
 });
 
+test('Always-mount: workspace terminals stay isolated (no cross-workspace data bleed)', async () => {
+  // Regression guard for the "witty-wren's sessions are mixed up with
+  // gentle-crane's" bug. With always-mount, multiple workspaces have
+  // their TerminalPanes mounted simultaneously, each with its own
+  // BrokerClient and xterm. If anything in the routing/state path
+  // crosses streams — wrong containerId passed to attach, sessions.json
+  // for one workspace getting written under another's name, broker
+  // channels colliding — the symptom is: workspace A's terminal shows
+  // content from workspace B (or some mix of both).
+  //
+  // Mock-mode FakeShell prints `workspace: <name>` in its 150ms-delayed
+  // welcome banner. If routing is correct, mock-alpha's xterm contains
+  // only "workspace: mock-alpha" and never sees "workspace: mock-beta",
+  // and vice-versa. If the bug exists, the cross-name leaks in.
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    // Click mock-alpha and assert its terminal has its own name only.
+    // Each FakeShell's 150ms greet timer starts when its TerminalPane
+    // mounts — i.e., at app startup with always-mount.
+    await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
+    const alphaRows = activePane(window).locator('.xterm-rows');
+    await expect(alphaRows).toContainText('workspace: mock-alpha', { timeout: 3_000 });
+    const alphaContent = (await alphaRows.textContent()) ?? '';
+    expect(alphaContent).not.toContain('workspace: mock-beta');
+
+    // Switch to mock-beta and assert its terminal has its own name only.
+    await window.locator('.ws-chip', { hasText: 'mock-beta' }).click();
+    const betaRows = activePane(window).locator('.xterm-rows');
+    await expect(betaRows).toContainText('workspace: mock-beta', { timeout: 3_000 });
+    const betaContent = (await betaRows.textContent()) ?? '';
+    expect(betaContent).not.toContain('workspace: mock-alpha');
+  } finally {
+    await app.close();
+  }
+});
+
+test('Always-mount: only the selected workspace\'s xterm is actually visible (CSS cascade)', async () => {
+  // Captures the "witty-wren's terminal shows gentle-crane's claude
+  // output" symptom. Root-cause hypothesis: visibility-cascade quirk.
+  // TerminalPane sets `style={{ visibility: visible ? 'visible' : 'hidden' }}`
+  // on its outer div, but the inner TerminalSession ALSO sets
+  // `visibility: visible` on its own div when it's the active tab in
+  // that pane. Per CSS spec, `visibility: visible` on a descendant
+  // overrides `visibility: hidden` on an ancestor — so every workspace's
+  // active TerminalSession actually paints, regardless of whether the
+  // outer pane is meant to be hidden. They all stack at
+  // `position: absolute; inset: 0`; the one later in DOM order is on
+  // top, and that's what the user sees no matter which chip they
+  // click.
+  //
+  // This test asserts: after clicking a chip, EXACTLY ONE `.xterm-rows`
+  // element is actually visible per Playwright's visibility check
+  // (which follows the browser's "is this element rendered" rules,
+  // not just CSS class names). If the bug exists, multiple .xterm-rows
+  // are visible simultaneously.
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    // Wait for both panes to mount and their xterms to render.
+    await expect(window.locator('.xterm-rows')).toHaveCount(3, { timeout: 5_000 });
+
+    // Click mock-alpha. Only mock-alpha's pane should be visibly painted.
+    await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
+
+    const allXtermRows = window.locator('.xterm-rows');
+    const count = await allXtermRows.count();
+    const visibleStates = await Promise.all(
+      Array.from({ length: count }, (_, i) => allXtermRows.nth(i).isVisible())
+    );
+    const visibleCount = visibleStates.filter(Boolean).length;
+    expect(visibleCount).toBe(1);
+
+    // Switch to mock-beta. Now only mock-beta's pane should be visible.
+    await window.locator('.ws-chip', { hasText: 'mock-beta' }).click();
+    const visibleStates2 = await Promise.all(
+      Array.from({ length: count }, (_, i) => allXtermRows.nth(i).isVisible())
+    );
+    expect(visibleStates2.filter(Boolean).length).toBe(1);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Always-mount: adding a tab in one workspace does not leak into the other', async () => {
+  // Companion to the data-bleed test above. The user reported "witty-wren's
+  // sessions seem to be mixed up with gentle-crane's" — possibly meaning
+  // tabs themselves (not terminal content) are leaking across workspaces.
+  // With always-mount, both TerminalPanes' state hooks run continuously;
+  // a misuse of workspaceName in the persist effect could cause workspace
+  // A's tab additions to overwrite workspace B's sessions.json (or
+  // vice-versa).
+  //
+  // This test: add a session to mock-alpha, switch to mock-beta, assert
+  // mock-beta still has exactly one "main" tab and nothing leaked from
+  // alpha's tab-add. Then add a session to mock-beta and confirm
+  // alpha still has its alpha-only tabs.
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    // Click mock-alpha and verify single "main" tab.
+    await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
+    const alphaStrip = activePane(window).locator('.session-tab-strip');
+    await expect(alphaStrip.locator('.session-tab')).toHaveCount(1);
+    await expect(alphaStrip.locator('.session-tab').nth(0)).toContainText('main');
+
+    // Add a new session in alpha → alpha has 2 tabs.
+    await alphaStrip.getByRole('button', { name: 'New session' }).click();
+    await expect(alphaStrip.locator('.session-tab')).toHaveCount(2);
+    await expect(alphaStrip.locator('.session-tab').nth(1)).toContainText('session 2');
+
+    // Switch to mock-beta. Its tab strip must still have exactly one
+    // "main" tab — alpha's add MUST NOT have leaked into beta.
+    await window.locator('.ws-chip', { hasText: 'mock-beta' }).click();
+    const betaStrip = activePane(window).locator('.session-tab-strip');
+    await expect(betaStrip.locator('.session-tab')).toHaveCount(1);
+    await expect(betaStrip.locator('.session-tab').nth(0)).toContainText('main');
+
+    // Add a session to beta.
+    await betaStrip.getByRole('button', { name: 'New session' }).click();
+    await expect(betaStrip.locator('.session-tab')).toHaveCount(2);
+    await expect(betaStrip.locator('.session-tab').nth(1)).toContainText('session 2');
+
+    // Switch back to alpha. Its tab list must be EXACTLY what we left:
+    // 2 tabs, both still bearing alpha's original names. Beta's add
+    // MUST NOT have leaked into alpha.
+    await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
+    const alphaStrip2 = activePane(window).locator('.session-tab-strip');
+    await expect(alphaStrip2.locator('.session-tab')).toHaveCount(2);
+    await expect(alphaStrip2.locator('.session-tab').nth(0)).toContainText('main');
+    await expect(alphaStrip2.locator('.session-tab').nth(1)).toContainText('session 2');
+  } finally {
+    await app.close();
+  }
+});
+
 test('Image picker: free-text filter matches across ref and label values', async () => {
   const { app, window } = await launch();
   try {
