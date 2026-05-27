@@ -138,6 +138,23 @@ body {
 .ws-chip .chip-paused-glyph { color: var(--state-warn); flex-shrink: 0; }
 .ws-chip .name { font-weight: 500; }
 .ws-chip .status { color: var(--text-muted); font-size: 11px; }
+/* Two-line chip content: workspace name on top, live observability
+   activity ("active 2m ago" / "idle 1h ago") beneath. Wraps both in
+   a flex column so the chip still aligns its hue dot + paused glyph
+   to the visual center of the text stack. */
+.ws-chip-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.2;
+  gap: 1px;
+}
+.ws-chip-sub {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 0.01em;
+}
 
 .top-strip-actions {
   margin-left: auto;
@@ -1017,13 +1034,26 @@ body {
   background: var(--bg-base);
 }
 
-/* Workspace accent band riding the top edge of the terminal body — same
-   visual idea as the design's ContextBar without the percentage fill
-   (no observability yet). Picks up --hue from the .main-pane wrapper,
-   set by App.tsx so the band matches the workspace's chip color. */
+/* Workspace context bar — the workspace's hue track at the top of the
+   terminal area, filled from 0..100% with the latest assistant turn's
+   context-window usage. The outer band is the subtle track; the inner
+   .terminal-accent-band-fill widens to --pct (set inline by
+   TerminalPane based on `summary.lastTurnContextTokens / 200_000`).
+   Width transitions smoothly so live polling reads as growth/decay
+   rather than discrete jumps. The 80% compaction tick is a follow-up
+   (needs per-model context-window lookup). */
 .terminal-accent-band {
+  position: relative;
+  background: color-mix(in oklab, var(--hue, var(--accent)) 22%, transparent);
+  height: 3px;
+  overflow: hidden;
+}
+.terminal-accent-band-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--pct, 100%);
   background: var(--hue, var(--accent));
-  height: 2px;
+  transition: width 200ms ease-out;
 }
 
 /* Session tab strip — sits at the top of the main body. The container

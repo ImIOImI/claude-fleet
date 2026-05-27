@@ -178,6 +178,12 @@ interface MockOpts {
     lastUsedAt?: number;
     useCount?: number;
   }>;
+  // Per-workspace observability summaries returned from
+  // observability:summaryForWorkspace, keyed by workspace name. Missing
+  // entries → null (matches the real handler's "no events yet" return).
+  // Use unknown for the value so tests can pass partial shapes without
+  // re-declaring the full WorkspaceObservabilitySummary type here.
+  observabilitySummaries?: Record<string, Record<string, unknown> | null>;
 }
 
 async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {}): Promise<void> {
@@ -201,7 +207,10 @@ async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {}): Promi
       'images:list',
       'images:remove',
       'fs:isDirectory',
-      'fs:mkdirp'
+      'fs:mkdirp',
+      'observability:summaryForWorkspace',
+      'observability:getCost',
+      'observability:getCostForWorkspace'
     ];
     for (const ch of channels) {
       try {
@@ -266,6 +275,23 @@ async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {}): Promi
       const idx = imageLib.findIndex((img) => img.ref === ref);
       if (idx >= 0) imageLib.splice(idx, 1);
     });
+
+    const summaries = opts.observabilitySummaries ?? {};
+    ipcMain.handle(
+      'observability:summaryForWorkspace',
+      (_e, workspaceName: string) => summaries[workspaceName] ?? null
+    );
+    // Cost endpoints used by the sessions table and detail views;
+    // return zeroed data for tests that don't care.
+    const zeroCost = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      usd: 0
+    };
+    ipcMain.handle('observability:getCost', () => zeroCost);
+    ipcMain.handle('observability:getCostForWorkspace', () => zeroCost);
   }, opts);
 }
 
@@ -1047,6 +1073,115 @@ test('Always-mount: adding a tab in one workspace does not leak into the other',
     await expect(alphaStrip2.locator('.session-tab')).toHaveCount(2);
     await expect(alphaStrip2.locator('.session-tab').nth(0)).toContainText('main');
     await expect(alphaStrip2.locator('.session-tab').nth(1)).toContainText('session 2');
+  } finally {
+    await app.close();
+  }
+});
+
+test('Slot consumer: chip secondary line shows live activity from observability summary', async () => {
+  // Issue #34, part 1: each workspace chip in the top strip gets a small
+  // secondary line below the workspace name showing recent activity —
+  // "active 30s ago" / "idle 1h ago" / null when no events have been
+  // ingested for that workspace yet. The summary comes from the
+  // centralized observability:summaryForWorkspace poll in App.tsx (so
+  // multiple consumers — pane, chip, terminal-pane context-bar — all
+  // share one source of truth, polled once per 2s per workspace).
+  const { app, window } = await launch();
+  try {
+    const recent = Date.now() - 30_000;
+    await mockMainIpc(app, {
+      workspaceList: [
+        {
+          name: 'alpha',
+          containerId: 'alpha-id',
+          state: 'running',
+          workspaceRoot: '/tmp/alpha',
+          profile: 'oauth'
+        }
+      ],
+      observabilitySummaries: {
+        alpha: {
+          sessionId: 'sess-1',
+          title: 'demo session',
+          model: 'claude-opus-4-7',
+          startedAt: recent - 5 * 60_000,
+          lastActiveAt: recent,
+          eventCount: 10,
+          inputTokens: 1000,
+          outputTokens: 500,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          usd: 0.05,
+          lastTurnContextTokens: 80_000,
+          topTools: []
+        }
+      }
+    });
+
+    // Force a refresh so workspace:list and the summary IPCs are queried.
+    // The chip should appear with its workspace name on top and an
+    // "active …" line beneath.
+    const chip = window.locator('.ws-chip', { hasText: 'alpha' });
+    await expect(chip).toBeVisible({ timeout: 5_000 });
+    await expect(chip.locator('.ws-chip-sub')).toBeVisible({ timeout: 5_000 });
+    await expect(chip.locator('.ws-chip-sub')).toContainText(/active/);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Slot consumer: terminal context bar fills proportionally to lastTurnContextTokens', async () => {
+  // Issue #34, part 3: the workspace's accent band at the top of the
+  // terminal area becomes a context-window-fullness gauge. Its `--pct`
+  // CSS variable should be `(lastTurnContextTokens / 200_000) * 100`,
+  // clamped to [0, 100]. When summary is missing, falls back to 100%
+  // (pure identity band, the pre-observability behavior).
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [
+        {
+          name: 'alpha',
+          containerId: 'alpha-id',
+          state: 'running',
+          workspaceRoot: '/tmp/alpha',
+          profile: 'oauth'
+        }
+      ],
+      observabilitySummaries: {
+        alpha: {
+          sessionId: 'sess-1',
+          title: null,
+          model: 'claude-opus-4-7',
+          startedAt: Date.now() - 60_000,
+          lastActiveAt: Date.now() - 5_000,
+          eventCount: 3,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          usd: 0,
+          // 80k / 200k = 40%
+          lastTurnContextTokens: 80_000,
+          topTools: []
+        }
+      }
+    });
+
+    // Click the chip so its TerminalPane is the visible one (always-mount
+    // means all panes mount; only the visible one is paintable).
+    await window.locator('.ws-chip', { hasText: 'alpha' }).click();
+    const band = activePane(window).locator('.terminal-accent-band');
+    await expect(band).toBeVisible({ timeout: 5_000 });
+
+    // Wait for the polling effect in App.tsx to feed the summary down
+    // (the value lands on the next poll tick after click). Then assert.
+    await expect
+      .poll(
+        async () => band.evaluate((el) => (el as HTMLElement).style.getPropertyValue('--pct')),
+        { timeout: 5_000 }
+      )
+      .toBe('40%');
   } finally {
     await app.close();
   }

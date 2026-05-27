@@ -7,6 +7,7 @@ import { BottomBar } from './components/BottomBar';
 import { CreateWorkspaceModal } from './components/CreateWorkspaceModal';
 import { CloseWorkspaceModal } from './components/CloseWorkspaceModal';
 import { ProfilesDialog } from './components/ProfilesDialog';
+import type { WorkspaceObservabilitySummary } from '../../preload';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
 export type WorkspaceKind = 'container' | 'local';
@@ -52,6 +53,14 @@ export function App() {
   // one (the hamburger menu on each chip opens it directly). Track the
   // target workspace by id rather than a boolean.
   const [closeTargetId, setCloseTargetId] = useState<string | null>(null);
+  // Centralized observability polling: one IPC call per workspace per
+  // tick, distributed to chip / observability pane / terminal-pane
+  // context-bar via props. Hoisting from the previous per-pane polling
+  // means multiple slot consumers (chip, pane, context-bar) all share
+  // a single source of truth and don't fire duplicate IPCs.
+  const [summaries, setSummaries] = useState<
+    Record<string, WorkspaceObservabilitySummary | null>
+  >({});
 
   const refresh = async () => {
     if (!window.api) return;
@@ -91,6 +100,46 @@ export function App() {
     const t = setInterval(refresh, 5000);
     return () => clearInterval(t);
   }, [apiReady]);
+
+  // Observability summary polling. Hoisted here so that the chip strip,
+  // observability pane, and terminal-pane context bar all read from a
+  // single source rather than each running its own poll. Re-keys on the
+  // sorted-by-name workspace list so a workspace add/remove triggers a
+  // resubscribe but a `lastUsedAt` nudge from the 5s refresh doesn't.
+  const liveNames = workspaces
+    .filter((w) => w.state !== 'deleted')
+    .map((w) => w.name)
+    .sort()
+    .join(',');
+  useEffect(() => {
+    if (!apiReady) return;
+    if (!liveNames) {
+      setSummaries({});
+      return;
+    }
+    const names = liveNames.split(',');
+    let cancelled = false;
+    const poll = async (): Promise<void> => {
+      const entries = await Promise.all(
+        names.map(async (name) => {
+          try {
+            const s = await window.api.observability.summaryForWorkspace(name);
+            return [name, s] as const;
+          } catch {
+            return [name, null] as const;
+          }
+        })
+      );
+      if (cancelled) return;
+      setSummaries(Object.fromEntries(entries));
+    };
+    void poll();
+    const id = setInterval(poll, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [apiReady, liveNames]);
 
   if (!apiReady) {
     return (
@@ -193,6 +242,7 @@ export function App() {
     <div className="app">
       <WorkspaceTabStrip
         workspaces={workspaces}
+        summaries={summaries}
         selectedId={selectedId}
         backendReady={backendReady}
         vaultAvailable={vaultAvailable}
@@ -248,6 +298,7 @@ export function App() {
                   workspaceName={w.name}
                   containerId={w.containerId!}
                   paused={w.state === 'paused'}
+                  summary={summaries[w.name] ?? null}
                   onResume={async () => {
                     await window.api.workspace.start(w.name);
                     refresh();
@@ -257,7 +308,10 @@ export function App() {
           </div>
         </main>
 
-        <ObservabilityPane workspaceName={selected?.name ?? null} />
+        <ObservabilityPane
+          workspaceName={selected?.name ?? null}
+          summary={selected ? summaries[selected.name] ?? null : null}
+        />
       </div>
 
       <BottomBar vaultAvailable={vaultAvailable} />
