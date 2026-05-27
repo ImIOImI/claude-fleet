@@ -788,6 +788,12 @@ body {
   font-size: 11px;
 }
 .session-ended-card .btn { align-self: center; }
+.session-ended-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+.session-ended-actions .btn { align-self: auto; }
 
 /* Attach-error variant: same overlay, wider card so the broker error
    message fits without aggressive wrapping. The <pre> preserves the
