@@ -38,6 +38,24 @@ function seed(): void {
     containerId: 'mock-beta-id',
     status: 'Exited (0) 2 minutes ago'
   });
+  // `fail-*` workspaces simulate the broker-socket-missing failure mode
+  // (stale runner image, pre-broker). attachPty throws synchronously for
+  // these so Playwright can assert the attach-error overlay surfaces the
+  // diagnostic message instead of hiding it behind the generic "session
+  // ended" card.
+  workspaces.set('mock-fail-id', {
+    name: 'fail-broker-missing',
+    workspaceRoot: '/tmp/mock-fail',
+    workspaceSubdir: '',
+    profile: 'oauth',
+    kind: 'container',
+    image: 'ghcr.io/imioimi/claude-fleet/runner:latest',
+    createdAt: now - 60_000,
+    lastUsedAt: now - 60_000,
+    state: 'running',
+    containerId: 'mock-fail-id',
+    status: 'Up 1 minute'
+  });
 }
 seed();
 
@@ -257,6 +275,18 @@ export async function attachPty(
   // plumbing, so the in-memory-context-preserved promise is naturally
   // out of scope here.
   const ws = workspaces.get(containerId);
+  // Workspaces whose name starts with `fail-` simulate the real-world
+  // "stale runner image, broker socket missing" failure mode (the bug
+  // surfaced by the empty docker-logs investigation). Lets Playwright
+  // assert the TerminalSession overlay actually surfaces the error
+  // message instead of masking it behind the generic "session ended"
+  // card.
+  if (ws?.name?.startsWith('fail-')) {
+    throw new Error(
+      `broker socket not reachable at /mock/${ws.name}/broker.sock: ENOENT. ` +
+        `Is the runner image new enough to include the broker?`
+    );
+  }
   const shell = new FakeShell(ws?.name ?? containerId);
   return {
     stream: shell,

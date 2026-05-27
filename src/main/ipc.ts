@@ -219,6 +219,17 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       const ptyHandleId = randomUUID();
       const handle = await backend.attachPty(containerId, brokerSessionId, cols, rows);
       ptySessions.set(ptyHandleId, handle);
+      // Diagnostic: ptySessions.size should oscillate around the count of
+      // currently-mounted TerminalSession components. Unbounded growth =
+      // detach isn't running (renderer cleanup race) or isn't reaching
+      // here (channel mismatch). Surfaced via error.log so we can
+      // correlate against attach failures across long sessions.
+      logError({
+        source: 'main',
+        type: 'pty-attach',
+        message: `pty:attach OK (live=${ptySessions.size})`,
+        extra: { brokerSessionId, containerId, ptyHandleId, live: ptySessions.size }
+      });
 
       const win = BrowserWindow.fromWebContents(event.sender);
       handle.stream.on('data', (chunk: Buffer) => {
@@ -227,9 +238,22 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       handle.stream.on('end', () => {
         win?.webContents.send(`pty:end:${ptyHandleId}`);
         ptySessions.delete(ptyHandleId);
+        logError({
+          source: 'main',
+          type: 'pty-stream-end',
+          message: `pty stream ended (live=${ptySessions.size})`,
+          extra: { brokerSessionId, ptyHandleId, live: ptySessions.size }
+        });
       });
       handle.stream.on('error', (err) => {
         win?.webContents.send(`pty:error:${ptyHandleId}`, String(err));
+        logError({
+          source: 'main',
+          type: 'pty-stream-error',
+          message: String(err),
+          stack: err instanceof Error ? err.stack : undefined,
+          extra: { brokerSessionId, ptyHandleId }
+        });
       });
       return ptyHandleId;
     }
@@ -244,8 +268,17 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   });
 
   ipcMain.handle('pty:detach', (_e, sessionId: string) => {
+    const present = ptySessions.has(sessionId);
     ptySessions.get(sessionId)?.detach();
     ptySessions.delete(sessionId);
+    logError({
+      source: 'main',
+      type: 'pty-detach',
+      message: present
+        ? `pty:detach OK (live=${ptySessions.size})`
+        : `pty:detach for unknown handle (live=${ptySessions.size})`,
+      extra: { ptyHandleId: sessionId, hadHandle: present, live: ptySessions.size }
+    });
   });
 
   // Observability — minimal step-1 surface. Renderer polls

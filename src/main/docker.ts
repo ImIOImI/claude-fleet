@@ -62,30 +62,63 @@ export interface PullProgress {
   message: string;
 }
 
+/**
+ * Pull the runner image, with offline fallback. Always asks the registry
+ * — `:latest` tags get silent improvements (broker landing, claude
+ * version bumps) and the previous "skip if any copy exists locally"
+ * meant users stayed pinned to whatever they first pulled forever. Now
+ * we let Docker compare layer digests and re-download only changed
+ * layers (no-op when already current).
+ *
+ * When the registry is unreachable but we have a local copy, surface a
+ * one-line warning and proceed with the local image. Anything else
+ * (auth failures, 5xx) bubbles. If no local copy exists either, the
+ * caller can't proceed and the error propagates.
+ */
 export async function ensureImage(
   onProgress: (p: PullProgress) => void
 ): Promise<void> {
-  try {
-    await docker.getImage(RUNNER_IMAGE).inspect();
-    return;
-  } catch (err: unknown) {
-    if ((err as { statusCode?: number }).statusCode !== 404) throw err;
-  }
+  const localExists = await docker
+    .getImage(RUNNER_IMAGE)
+    .inspect()
+    .then(() => true)
+    .catch((err: unknown) => {
+      if ((err as { statusCode?: number }).statusCode === 404) return false;
+      throw err;
+    });
 
-  onProgress({ message: `Pulling ${RUNNER_IMAGE}…` });
-  const stream = (await docker.pull(RUNNER_IMAGE)) as NodeJS.ReadableStream;
-
-  await new Promise<void>((resolve, reject) => {
-    docker.modem.followProgress(
-      stream,
-      (err: Error | null) => (err ? reject(err) : resolve()),
-      (event: Record<string, unknown>) => {
-        const status = typeof event.status === 'string' ? event.status : '';
-        const id = typeof event.id === 'string' ? ` ${event.id}` : '';
-        if (status) onProgress({ message: `${status}${id}` });
-      }
-    );
+  onProgress({
+    message: localExists ? `Checking ${RUNNER_IMAGE} for updates…` : `Pulling ${RUNNER_IMAGE}…`
   });
+
+  try {
+    const stream = (await docker.pull(RUNNER_IMAGE)) as NodeJS.ReadableStream;
+    await new Promise<void>((resolve, reject) => {
+      docker.modem.followProgress(
+        stream,
+        (err: Error | null) => (err ? reject(err) : resolve()),
+        (event: Record<string, unknown>) => {
+          // Per-layer progress events carry `status` ('Pulling fs layer',
+          // 'Downloading', 'Pull complete', etc.). The summary event at the
+          // tail says 'Status: Image is up to date for …' or 'Status:
+          // Downloaded newer image for …'. Forward both — the UI shows the
+          // latest message.
+          const status = typeof event.status === 'string' ? event.status : '';
+          const id = typeof event.id === 'string' ? ` ${event.id}` : '';
+          if (status) onProgress({ message: `${status}${id}` });
+        }
+      );
+    });
+  } catch (err) {
+    if (localExists) {
+      const msg = err instanceof Error ? err.message : String(err);
+      onProgress({
+        message: `Registry check failed (${msg}); using cached ${RUNNER_IMAGE}.`
+      });
+      return;
+    }
+    throw err;
+  }
 }
 
 export async function ping(): Promise<boolean> {
@@ -318,10 +351,10 @@ const HOST_CHANNEL = 1;
  * The flow:
  *   1. Resolve the workspace's broker socket from the container's name.
  *   2. Open the socket.
- *   3. ATTACH first. If the broker says "no such session" we CREATE
- *      then ATTACH — covers both fresh-session and re-attach cases.
- *   4. Wrap the socket in a Duplex shaped like the old docker-exec PTY
- *      so the IPC layer doesn't notice the change.
+ *   3. Wrap the channel in a Duplex (brokerPtyStream) so HISTORY/OUTPUT
+ *      listeners are wired BEFORE the broker has a chance to send any.
+ *   4. ATTACH. If the broker says "no such session" we CREATE then ATTACH —
+ *      covers both fresh-session and re-attach cases.
  */
 export async function attachPty(
   containerId: string,
@@ -347,23 +380,45 @@ export async function attachPty(
     );
   }
 
+  // CRITICAL: wire the stream BEFORE sending ATTACH.
+  //
+  // The broker replies to a successful ATTACH with two frames back-to-
+  // back on the same socket chunk: ATTACHED, then HISTORY (the ring
+  // buffer for the session, up to ~64 KiB of prior PTY output). The
+  // frame reader's `for (const frame of consume())` dispatches them in
+  // order — ATTACHED resolves `attachSession`'s waiter, HISTORY fires
+  // `client.emit('history', …)`. If `brokerPtyStream` hasn't wired its
+  // `onHistory` listener yet, that emit hits zero listeners and the
+  // body is silently dropped.
+  //
+  // Symptom: re-attaching to an existing session whose claude is
+  // currently idle at a prompt looks like a "blank terminal" — the
+  // ring buffer content that would have repainted the prompt is gone,
+  // and no live OUTPUT is coming because claude is waiting on input.
+  //
+  // Wiring `brokerPtyStream` here means the Duplex is ready to receive
+  // events for HOST_CHANNEL before any of them are emitted. Pushed
+  // data sits in the Duplex's internal buffer until ipc.ts wires its
+  // `'data'` listener; that's fine, Node streams handle this case.
+  const stream = brokerPtyStream(client, HOST_CHANNEL);
+
   // Try ATTACH first — if the session is alive (we're re-attaching),
   // that's all we need. If it's missing, CREATE then ATTACH.
   let attachResp = await client.attachSession(sessionId, HOST_CHANNEL);
   if (!attachResp.ok && /no such session/i.test(attachResp.error ?? '')) {
     const createResp = await client.createSession(sessionId, cols, rows);
     if (!createResp.ok) {
+      stream.destroy();
       client.close();
       throw new Error(`broker CREATE failed: ${createResp.error}`);
     }
     attachResp = await client.attachSession(sessionId, HOST_CHANNEL);
   }
   if (!attachResp.ok) {
+    stream.destroy();
     client.close();
     throw new Error(`broker ATTACH failed: ${attachResp.error}`);
   }
-
-  const stream = brokerPtyStream(client, HOST_CHANNEL);
 
   return {
     stream,

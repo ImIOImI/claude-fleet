@@ -164,7 +164,24 @@ export class BrokerClient extends EventEmitter {
     super();
     this.socket = net.createConnection(socketPath);
     this.socket.on('data', (chunk: Buffer) => this.onData(chunk));
-    this.socket.on('error', (err) => this.emit('error', err));
+    // Re-emit socket errors on the BrokerClient EventEmitter — but ONLY
+    // when a consumer has actually attached an 'error' listener. Without
+    // the guard, an error firing before any consumer subscribes (e.g.,
+    // ENOENT on a missing broker socket, which happens immediately after
+    // `new BrokerClient()` and before `client.ready()` finishes wiring
+    // its own socket-level listener) hits `EventEmitter.emit('error')`
+    // with zero listeners → Node throws synchronously inside the libuv
+    // I/O callback → uncaughtException kills the awaiting handler's
+    // tick → renderer's invoke fails with "reply was never sent" and
+    // never sees the rejection we tried to throw. The pre-ready path
+    // doesn't need the re-emit anyway: `ready()` attaches its own
+    // `socket.once('error', …)` and rejects the connect promise
+    // directly. The re-emit is only useful for errors after ready()
+    // resolves, when brokerPtyStream has attached its own 'error'
+    // listener on this BrokerClient.
+    this.socket.on('error', (err) => {
+      if (this.listenerCount('error') > 0) this.emit('error', err);
+    });
     this.socket.on('close', () => {
       this.connected = false;
       this.emit('close');
@@ -195,7 +212,11 @@ export class BrokerClient extends EventEmitter {
         this.dispatch(frame.type, frame.payload);
       }
     } catch (err) {
-      this.emit('error', err as Error);
+      // Same guard as the socket-error re-emit: don't throw via the
+      // unhandled-error path if no consumer is listening. `socket.destroy()`
+      // below triggers 'close' which consumers always observe via the
+      // brokerPtyStream wiring, so dropping the error event is recoverable.
+      if (this.listenerCount('error') > 0) this.emit('error', err as Error);
       this.socket.destroy();
     }
   }

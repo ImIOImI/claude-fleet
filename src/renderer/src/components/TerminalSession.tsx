@@ -110,17 +110,33 @@ export function TerminalSession({
   onLifecycleChange,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
-  // Bumped when the user clicks "Start new session" after a session ends.
-  // The effect deps on containerId+sessionEpoch, so a new attach happens
-  // with a fresh xterm instance (no stale state from the dead session).
+  // Bumped when the user clicks "Start new session" / "Retry" after a
+  // session ends. The effect deps on containerId+sessionEpoch, so a new
+  // attach happens with a fresh xterm instance (no stale state from the
+  // dead session).
   const [sessionEpoch, setSessionEpoch] = useState(0);
-  const [sessionEnded, setSessionEnded] = useState(false);
+  // `null` while the session is live. After it ends, distinguishes
+  // between a clean PTY exit (`{ kind: 'natural' }` — user typed
+  // `/exit`, claude crashed, container stopped) and an attach failure
+  // (`{ kind: 'attach-error', message }` — broker socket unreachable,
+  // permission denied, etc.). The overlay renders different copy +
+  // surfaces the error text for the latter so users can act on it
+  // instead of staring at a generic "session ended" card.
+  const [endedReason, setEndedReason] = useState<
+    { kind: 'natural' } | { kind: 'attach-error'; message: string } | null
+  >(null);
 
   useEffect(() => {
     if (!hostRef.current) return;
     const host = hostRef.current;
-    setSessionEnded(false);
+    setEndedReason(null);
     onLifecycleChange?.(sessionId, 'live');
+
+    // Declared up front so the safeFit helper can read it. The cleanup
+    // function below flips it true; safeFit early-returns to avoid
+    // calling fit on a host whose xterm has already been disposed
+    // (StrictMode double-mount in dev, fast workspace switches in prod).
+    let disposed = false;
 
     const term = new Terminal({
       fontFamily: TERMINAL_FONT_FAMILY,
@@ -148,7 +164,30 @@ export function TerminalSession({
     term.loadAddon(unicode11);
     term.unicode.activeVersion = '11';
     term.open(host);
-    fit.fit();
+
+    // xterm 5.x's Viewport.syncScrollArea reads from `_renderer.dimensions`,
+    // which is set up inside `term.open` but can be transiently undefined
+    // immediately after open (the renderer is wired in pieces across a
+    // microtask boundary). Calling `fit.fit()` synchronously after open
+    // triggers a resize → syncScrollArea path that crashes with
+    // "Cannot read properties of undefined (reading 'dimensions')". The
+    // crash floods the error log on every workspace switch / new tab and
+    // leaves the terminal looking blank because xterm's render loop is
+    // broken. Defer to the next animation frame and catch defensively;
+    // by then the renderer is settled and the user's first frame of
+    // PTY output arrives correctly.
+    const safeFit = (): void => {
+      if (disposed) return;
+      if (host.clientWidth === 0 || host.clientHeight === 0) return;
+      try {
+        fit.fit();
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[TerminalSession] fit failed (xterm Viewport bug):', err);
+      }
+    };
+    const initialFitRaf = requestAnimationFrame(safeFit);
+
     const linkProviderDisposable = term.registerLinkProvider(multilineLinkProvider(term));
 
     // ptyHandleId is the internal handle returned by main's pty:attach —
@@ -157,7 +196,6 @@ export function TerminalSession({
     let ptyHandleId: string | null = null;
     let unsubData: (() => void) | null = null;
     let unsubEnd: (() => void) | null = null;
-    let disposed = false;
 
     const doCopy = (): void => {
       const sel = term.getSelection();
@@ -224,35 +262,61 @@ export function TerminalSession({
         unsubEnd = window.api.pty.onEnd(sid, () => {
           term.writeln('\r\n[session ended]');
           if (!disposed) {
-            setSessionEnded(true);
+            setEndedReason({ kind: 'natural' });
             onLifecycleChange?.(sessionId, 'ended');
+            // Diagnostic: distinguish "claude /exit" from "broker
+            // disconnected mid-session" cases. Both currently fire the
+            // same natural-ended overlay; this log captures session id
+            // + handle id so we can correlate against any earlier
+            // attach-error entries.
+            void window.api.app.logError({
+              type: 'session-ended-natural',
+              message: 'pty:end fired (claude exited or broker disconnected)',
+              extra: { sessionId, ptyHandleId: sid, containerId }
+            });
           }
         });
         term.onData((data) => window.api.pty.input(sid, data));
       } catch (err) {
         // Attach failure most commonly means the in-container broker
         // isn't reachable — older runner images without it, or the
-        // container still booting. Write the error into the xterm so
-        // the user sees what went wrong, and show the ended overlay so
-        // they can hit "Start new session" once it's ready.
+        // container still booting. The overlay renders this message
+        // verbatim so the user has something to act on; we don't bother
+        // writing it into xterm because the overlay would cover it
+        // anyway (z-index over .terminal-host).
         const msg = err instanceof Error ? err.message : String(err);
-        term.writeln('\r\n\x1b[31m[failed to attach session]\x1b[0m');
-        term.writeln(`\x1b[31m${msg}\x1b[0m`);
         if (!disposed) {
-          setSessionEnded(true);
+          setEndedReason({ kind: 'attach-error', message: msg });
+          // Mirror to error.log so post-mortem debugging has a record
+          // even though this isn't an uncaught exception (the catch
+          // here is clean — but the user still loses their terminal).
+          void window.api.app.logError({
+            type: 'pty-attach-error',
+            message: msg,
+            stack: err instanceof Error ? err.stack : undefined,
+            extra: { sessionId, containerId }
+          });
           onLifecycleChange?.(sessionId, 'ended');
         }
       }
     })();
 
     const ro = new ResizeObserver(() => {
-      fit.fit();
-      if (ptyHandleId) window.api.pty.resize(ptyHandleId, term.cols, term.rows);
+      safeFit();
+      if (ptyHandleId) {
+        try {
+          window.api.pty.resize(ptyHandleId, term.cols, term.rows);
+        } catch {
+          // pty:resize is best-effort — failing to resize doesn't
+          // justify killing the terminal.
+        }
+      }
     });
     ro.observe(host);
 
     return () => {
       disposed = true;
+      cancelAnimationFrame(initialFitRaf);
       ro.disconnect();
       host.removeEventListener('contextmenu', onContextMenu);
       unsubData?.();
@@ -287,7 +351,43 @@ export function TerminalSession({
       aria-hidden={!visible}
     >
       <div className="terminal-host" ref={hostRef}>
-        {sessionEnded && (
+        {endedReason?.kind === 'attach-error' && (
+          <div
+            className="session-ended-overlay"
+            role="alertdialog"
+            aria-label="Failed to attach to workspace"
+          >
+            <div className="session-ended-card attach-error">
+              <div className="session-ended-title">couldn't attach to the workspace</div>
+              <pre className="session-ended-error" data-testid="attach-error-message">
+                {endedReason.message}
+              </pre>
+              <div className="session-ended-help">
+                Common cause: the local runner image is out of date and doesn't include the
+                broker yet. Try <code>docker pull ghcr.io/imioimi/claude-fleet/runner:latest</code>,
+                then recreate the workspace.
+              </div>
+              <div className="session-ended-actions">
+                <button
+                  className="btn"
+                  onClick={() => {
+                    void window.api.clipboard.write(endedReason.message);
+                  }}
+                  title="Copy the error message to the clipboard"
+                >
+                  Copy error
+                </button>
+                <button
+                  className="btn primary"
+                  onClick={() => setSessionEpoch((e) => e + 1)}
+                >
+                  Retry
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {endedReason?.kind === 'natural' && (
           <div className="session-ended-overlay" role="alertdialog" aria-label="Session ended">
             <div className="session-ended-card">
               <div className="session-ended-title">claude session ended</div>
