@@ -351,10 +351,10 @@ const HOST_CHANNEL = 1;
  * The flow:
  *   1. Resolve the workspace's broker socket from the container's name.
  *   2. Open the socket.
- *   3. ATTACH first. If the broker says "no such session" we CREATE
- *      then ATTACH — covers both fresh-session and re-attach cases.
- *   4. Wrap the socket in a Duplex shaped like the old docker-exec PTY
- *      so the IPC layer doesn't notice the change.
+ *   3. Wrap the channel in a Duplex (brokerPtyStream) so HISTORY/OUTPUT
+ *      listeners are wired BEFORE the broker has a chance to send any.
+ *   4. ATTACH. If the broker says "no such session" we CREATE then ATTACH —
+ *      covers both fresh-session and re-attach cases.
  */
 export async function attachPty(
   containerId: string,
@@ -380,23 +380,45 @@ export async function attachPty(
     );
   }
 
+  // CRITICAL: wire the stream BEFORE sending ATTACH.
+  //
+  // The broker replies to a successful ATTACH with two frames back-to-
+  // back on the same socket chunk: ATTACHED, then HISTORY (the ring
+  // buffer for the session, up to ~64 KiB of prior PTY output). The
+  // frame reader's `for (const frame of consume())` dispatches them in
+  // order — ATTACHED resolves `attachSession`'s waiter, HISTORY fires
+  // `client.emit('history', …)`. If `brokerPtyStream` hasn't wired its
+  // `onHistory` listener yet, that emit hits zero listeners and the
+  // body is silently dropped.
+  //
+  // Symptom: re-attaching to an existing session whose claude is
+  // currently idle at a prompt looks like a "blank terminal" — the
+  // ring buffer content that would have repainted the prompt is gone,
+  // and no live OUTPUT is coming because claude is waiting on input.
+  //
+  // Wiring `brokerPtyStream` here means the Duplex is ready to receive
+  // events for HOST_CHANNEL before any of them are emitted. Pushed
+  // data sits in the Duplex's internal buffer until ipc.ts wires its
+  // `'data'` listener; that's fine, Node streams handle this case.
+  const stream = brokerPtyStream(client, HOST_CHANNEL);
+
   // Try ATTACH first — if the session is alive (we're re-attaching),
   // that's all we need. If it's missing, CREATE then ATTACH.
   let attachResp = await client.attachSession(sessionId, HOST_CHANNEL);
   if (!attachResp.ok && /no such session/i.test(attachResp.error ?? '')) {
     const createResp = await client.createSession(sessionId, cols, rows);
     if (!createResp.ok) {
+      stream.destroy();
       client.close();
       throw new Error(`broker CREATE failed: ${createResp.error}`);
     }
     attachResp = await client.attachSession(sessionId, HOST_CHANNEL);
   }
   if (!attachResp.ok) {
+    stream.destroy();
     client.close();
     throw new Error(`broker ATTACH failed: ${attachResp.error}`);
   }
-
-  const stream = brokerPtyStream(client, HOST_CHANNEL);
 
   return {
     stream,
