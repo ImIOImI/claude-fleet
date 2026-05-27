@@ -264,6 +264,16 @@ export function TerminalSession({
           if (!disposed) {
             setEndedReason({ kind: 'natural' });
             onLifecycleChange?.(sessionId, 'ended');
+            // Diagnostic: distinguish "claude /exit" from "broker
+            // disconnected mid-session" cases. Both currently fire the
+            // same natural-ended overlay; this log captures session id
+            // + handle id so we can correlate against any earlier
+            // attach-error entries.
+            void window.api.app.logError({
+              type: 'session-ended-natural',
+              message: 'pty:end fired (claude exited or broker disconnected)',
+              extra: { sessionId, ptyHandleId: sid, containerId }
+            });
           }
         });
         term.onData((data) => window.api.pty.input(sid, data));
@@ -277,6 +287,15 @@ export function TerminalSession({
         const msg = err instanceof Error ? err.message : String(err);
         if (!disposed) {
           setEndedReason({ kind: 'attach-error', message: msg });
+          // Mirror to error.log so post-mortem debugging has a record
+          // even though this isn't an uncaught exception (the catch
+          // here is clean — but the user still loses their terminal).
+          void window.api.app.logError({
+            type: 'pty-attach-error',
+            message: msg,
+            stack: err instanceof Error ? err.stack : undefined,
+            extra: { sessionId, containerId }
+          });
           onLifecycleChange?.(sessionId, 'ended');
         }
       }
@@ -348,12 +367,23 @@ export function TerminalSession({
                 broker yet. Try <code>docker pull ghcr.io/imioimi/claude-fleet/runner:latest</code>,
                 then recreate the workspace.
               </div>
-              <button
-                className="btn primary"
-                onClick={() => setSessionEpoch((e) => e + 1)}
-              >
-                Retry
-              </button>
+              <div className="session-ended-actions">
+                <button
+                  className="btn"
+                  onClick={() => {
+                    void window.api.clipboard.write(endedReason.message);
+                  }}
+                  title="Copy the error message to the clipboard"
+                >
+                  Copy error
+                </button>
+                <button
+                  className="btn primary"
+                  onClick={() => setSessionEpoch((e) => e + 1)}
+                >
+                  Retry
+                </button>
+              </div>
             </div>
           </div>
         )}
