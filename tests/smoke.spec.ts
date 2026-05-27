@@ -1,5 +1,5 @@
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from '@playwright/test';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -17,9 +17,56 @@ function activePane(window: Page) {
   return window.locator('.terminal-pane:not([aria-hidden="true"])');
 }
 
+interface LogEntry {
+  ts: string;
+  source: 'main' | 'renderer';
+  type: string;
+  message: string;
+  extra?: Record<string, unknown>;
+}
+
+/**
+ * Poll the main-process error.log (read directly from the test
+ * process's filesystem, since `app.evaluate` runs in a context
+ * without `require`) until at least one entry matches the
+ * predicate, or timeout. Used to assert main-process side-effects
+ * (like the cols/rows the broker was asked to spawn claude with)
+ * that aren't reachable via the renderer's DOM.
+ */
+async function waitForLogEntry(
+  userDataDir: string,
+  match: (e: LogEntry) => boolean,
+  timeoutMs = 5_000
+): Promise<LogEntry> {
+  const logPath = path.join(userDataDir, 'error.log');
+  const deadline = Date.now() + timeoutMs;
+  let lastEntries: LogEntry[] = [];
+  for (;;) {
+    let entries: LogEntry[] = [];
+    try {
+      const content = readFileSync(logPath, 'utf8');
+      entries = content
+        .split('\n')
+        .filter((l) => l.length > 0)
+        .map((l) => JSON.parse(l) as LogEntry);
+    } catch {
+      // File may not exist yet — keep polling.
+    }
+    lastEntries = entries;
+    const found = entries.find(match);
+    if (found) return found;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `waitForLogEntry timed out after ${timeoutMs}ms. Last ${lastEntries.length} entries: ${JSON.stringify(lastEntries)}`
+      );
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
 async function launch(
   envOverrides: Record<string, string> = {}
-): Promise<{ app: ElectronApplication; window: Page }> {
+): Promise<{ app: ElectronApplication; window: Page; userDataDir: string }> {
   // Isolate userData per launch so persisted state (sessions.json,
   // workspace manifests, image library) from one test can't leak into
   // another. The OS keeps temp dirs around — we don't bother cleaning,
@@ -32,7 +79,7 @@ async function launch(
   });
   const window = await app.firstWindow();
   await window.waitForLoadState('domcontentloaded');
-  return { app, window };
+  return { app, window, userDataDir };
 }
 
 test('preload exposes window.api with all expected surfaces', async () => {
@@ -823,6 +870,50 @@ test('Attach error overlay: broker-unreachable surfaces the actual error message
       overlay.getByText(/docker pull ghcr\.io\/imioimi\/claude-fleet\/runner/)
     ).toBeVisible();
     await expect(overlay.getByRole('button', { name: 'Retry' })).toBeVisible();
+  } finally {
+    await app.close();
+  }
+});
+
+test('Always-mount: pty:attach receives fitted xterm cols/rows, not the 80x24 default', async () => {
+  // Regression guard for the "claude setup-flow scrollback corruption"
+  // bug. With always-mount, TerminalPane mounts when the workspace
+  // appears in the list, not when the user clicks the chip. Its
+  // TerminalSession initializes xterm at the default 80x24 and calls
+  // `pty.attach(containerId, sessionId, term.cols, term.rows)`
+  // synchronously — BEFORE any fit-addon resize fires. Claude is
+  // spawned at 80x24, writes its multi-screen setup flow at that
+  // size, and only later receives a SIGWINCH from the post-fit
+  // pty.resize. The reflow-after-clear scrambles scrollback: rows
+  // beyond the original 24 inherit leftover content from earlier
+  // setup screens.
+  //
+  // The fix is to defer attach until after the initial safeFit runs
+  // (one rAF). This test asserts the cols/rows recorded in the
+  // pty-attach log entry are the fitted values, not the xterm
+  // default — failing as long as the bug exists, passing once attach
+  // happens after fit.
+  //
+  // Why mock mode: real-backend repro requires Docker + a long
+  // claude setup flow. The bug is in the renderer's mount sequence
+  // (when fit runs vs when attach is called), so the mock backend
+  // exercises it just as well — the cols/rows passed to attachPty
+  // come from xterm regardless of which backend handles them.
+  const { app, userDataDir } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    // Mock seeds 3 workspaces at startup, each gets a TerminalPane
+    // under always-mount. We just need ANY pty-attach to land in the
+    // log to inspect its cols/rows.
+    const attachEntry = await waitForLogEntry(userDataDir, (e) => e.type === 'pty-attach');
+    const extra = (attachEntry.extra ?? {}) as { cols?: number; rows?: number };
+
+    expect(extra.cols).toBeDefined();
+    expect(extra.rows).toBeDefined();
+    // Window is 1400×900 (src/main/index.ts), main pane gets ~800px
+    // wide; fitted xterm should be well over 80 cols. Default xterm
+    // is 80x24 — if attach fires before fit, we see exactly that.
+    expect(extra.cols).not.toBe(80);
+    expect(extra.rows).not.toBe(24);
   } finally {
     await app.close();
   }
