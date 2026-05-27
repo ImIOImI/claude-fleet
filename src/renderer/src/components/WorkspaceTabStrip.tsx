@@ -1,9 +1,17 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
+import type { WorkspaceObservabilitySummary } from '../../../preload';
 import type { WorkspaceSummary } from '../App';
 
 interface Props {
   workspaces: WorkspaceSummary[];
+  /**
+   * Per-workspace observability summary, keyed by workspace name. Values
+   * are `null` while the IPC poll hasn't returned yet or the workspace
+   * has no events ingested. Drives the chip's secondary "active …" /
+   * "idle …" line.
+   */
+  summaries: Record<string, WorkspaceObservabilitySummary | null>;
   selectedId: string | null;
   backendReady: boolean | null;
   vaultAvailable: boolean | null;
@@ -15,6 +23,23 @@ interface Props {
   onCloseWorkspace: (workspace: WorkspaceSummary) => void;
   /** Re-pull workspace:list — called after a chip-menu action mutates state. */
   onRefresh: () => void;
+}
+
+/**
+ * "active 2m ago" / "idle 1h ago" / null when the workspace has no
+ * observability data yet. Threshold for active vs idle is 5 minutes —
+ * short enough that an attentive session reads as active, long enough
+ * that brief pauses (reading a long claude reply, switching windows)
+ * don't flip to idle prematurely.
+ */
+function chipActivityText(s: WorkspaceObservabilitySummary | null | undefined): string | null {
+  if (!s || s.lastActiveAt == null) return null;
+  const delta = Date.now() - s.lastActiveAt;
+  const verb = delta < 5 * 60_000 ? 'active' : 'idle';
+  if (delta < 60_000) return `${verb} just now`;
+  if (delta < 3_600_000) return `${verb} ${Math.round(delta / 60_000)}m ago`;
+  if (delta < 86_400_000) return `${verb} ${Math.round(delta / 3_600_000)}h ago`;
+  return `${verb} ${Math.round(delta / 86_400_000)}d ago`;
 }
 
 // Deterministic hue assignment by workspace name. Six rotating CSS vars
@@ -82,6 +107,7 @@ interface MenuAnchor {
 
 export function WorkspaceTabStrip({
   workspaces,
+  summaries,
   selectedId,
   backendReady,
   vaultAvailable,
@@ -171,7 +197,13 @@ export function WorkspaceTabStrip({
                 <rect x="5" y="1" width="2" height="6" rx="0.5" />
               </svg>
             )}
-            <span className="name">{w.name}</span>
+            <span className="ws-chip-text">
+              <span className="name">{w.name}</span>
+              {(() => {
+                const sub = chipActivityText(summaries[w.name]);
+                return sub ? <span className="ws-chip-sub">{sub}</span> : null;
+              })()}
+            </span>
           </button>
           <button
             className="ws-chip-menu-trigger"

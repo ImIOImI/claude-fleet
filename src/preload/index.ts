@@ -38,6 +38,13 @@ export interface WorkspaceObservabilitySummary {
   cacheCreationInputTokens: number;
   /** Total USD across all events in the session, derived from the pricing table. */
   usd: number;
+  /**
+   * Tokens consumed by the most recent assistant turn (input + cache_read +
+   * cache_creation). Used by the terminal-pane context-bar fill — divided by
+   * the model's context window for the displayed percentage. Null when no
+   * assistant event has been seen yet.
+   */
+  lastTurnContextTokens: number | null;
   topTools: Array<{ name: string; count: number }>;
 }
 
