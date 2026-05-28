@@ -14,7 +14,7 @@
 // only — if we lose it (process restart, watch dropped), re-reading from
 // offset 0 produces the same end state.
 
-import { promises as fsp, type Stats } from 'node:fs';
+import { mkdirSync, promises as fsp, type Stats } from 'node:fs';
 import { join, basename, extname, sep as pathSep } from 'node:path';
 // chokidar v5 is ESM-only. Our main bundle is CommonJS (per
 // electron.vite.config.ts), so `require('chokidar')` would throw
@@ -79,8 +79,24 @@ export class JsonlWatcher {
     const dir = join(workspaceClaudeDir(name), PROJECTS_SUBDIR);
     if (this.watchedDirs.has(dir)) return;
     this.watchedDirs.add(dir);
-    // chokidar tolerates non-existent paths; when the dir is created later
-    // (first time claude runs in the workspace) `add` events fire.
+    // Pre-create the dir before adding it to chokidar's watch list.
+    // Despite chokidar's docs implying that non-existent paths are
+    // saved as "wanted" and watched once they appear, in practice
+    // chokidar v5 silently drops paths that don't exist at `add()`
+    // time — when claude later writes its first JSONL into the
+    // dir-that-was-missing, no 'add' event fires and the watcher
+    // never ingests anything for the workspace. Symptom: the
+    // observability pane stays empty for any workspace whose claude
+    // first-run happens AFTER the workspace was registered.
+    // mkdirSync is recursive so it's a no-op when the dir already
+    // exists, which is the common case at app startup.
+    try {
+      mkdirSync(dir, { recursive: true });
+    } catch {
+      // Ignore — `add()` below will surface any deeper filesystem
+      // problem via the watcher's 'error' event, and the watcher
+      // works fine if the dir gets created elsewhere later.
+    }
     this.watcher.add(dir);
   }
 
