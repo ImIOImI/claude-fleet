@@ -101,11 +101,21 @@ export function App() {
     return () => clearInterval(t);
   }, [apiReady]);
 
-  // Observability summary polling. Hoisted here so that the chip strip,
-  // observability pane, and terminal-pane context bar all read from a
-  // single source rather than each running its own poll. Re-keys on the
-  // sorted-by-name workspace list so a workspace add/remove triggers a
-  // resubscribe but a `lastUsedAt` nudge from the 5s refresh doesn't.
+  // Observability summary distribution. The chip strip, observability pane,
+  // and terminal-pane context bar all read from this shared map.
+  //
+  // Updates arrive two ways:
+  //   1. Live push from main on every JSONL ingest batch (see
+  //      `observability.onSummary` in preload + the `'ingest'` emitter on
+  //      JsonlWatcher). One push per batch keys the affected workspace.
+  //   2. A 30s safety poll that re-fetches every workspace's summary. It
+  //      backs up the push (in case an event is lost) and forces a re-render
+  //      so the chip's relative-time text ("active 2m ago") rolls forward
+  //      even when no new ingests are happening.
+  //
+  // Re-keys on the sorted-by-name workspace list so a workspace add/remove
+  // triggers a resubscribe but a `lastUsedAt` nudge from the 5s refresh
+  // doesn't.
   const liveNames = workspaces
     .filter((w) => w.state !== 'deleted')
     .map((w) => w.name)
@@ -119,7 +129,7 @@ export function App() {
     }
     const names = liveNames.split(',');
     let cancelled = false;
-    const poll = async (): Promise<void> => {
+    const refreshAll = async (): Promise<void> => {
       const entries = await Promise.all(
         names.map(async (name) => {
           try {
@@ -133,10 +143,21 @@ export function App() {
       if (cancelled) return;
       setSummaries(Object.fromEntries(entries));
     };
-    void poll();
-    const id = setInterval(poll, 2000);
+
+    void refreshAll();
+
+    const unsubscribe = window.api.observability.onSummary((workspaceName, summary) => {
+      if (cancelled) return;
+      // Drop pushes for workspaces that aren't in the current live set
+      // (e.g., late-arriving push after a workspace was just removed).
+      if (!names.includes(workspaceName)) return;
+      setSummaries((prev) => ({ ...prev, [workspaceName]: summary }));
+    });
+
+    const id = setInterval(refreshAll, 30_000);
     return () => {
       cancelled = true;
+      unsubscribe();
       clearInterval(id);
     };
   }, [apiReady, liveNames]);

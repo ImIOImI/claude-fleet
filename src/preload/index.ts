@@ -203,7 +203,24 @@ const api = {
       ipcRenderer.invoke('observability:getCost', sessionId),
     /** USD + token totals aggregated across all sessions in a workspace. */
     getCostForWorkspace: (workspaceName: string): Promise<ObservabilityCost> =>
-      ipcRenderer.invoke('observability:getCostForWorkspace', workspaceName)
+      ipcRenderer.invoke('observability:getCostForWorkspace', workspaceName),
+    /**
+     * Subscribe to live summary pushes. Main fires one push per ingest batch
+     * (one JSONL flush ≈ one push) with the freshly computed summary for the
+     * affected workspace. Returns an unsubscribe; callers in App.tsx
+     * distribute the result into the shared summaries map.
+     */
+    onSummary: (
+      cb: (workspaceName: string, summary: WorkspaceObservabilitySummary | null) => void
+    ): (() => void) => {
+      const channel = 'observability:summary';
+      const handler = (
+        _e: IpcRendererEvent,
+        payload: { workspaceName: string; summary: WorkspaceObservabilitySummary | null }
+      ): void => cb(payload.workspaceName, payload.summary);
+      ipcRenderer.on(channel, handler);
+      return () => ipcRenderer.removeListener(channel, handler);
+    }
   }
 };
 
