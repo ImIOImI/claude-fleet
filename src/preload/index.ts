@@ -40,11 +40,18 @@ export interface WorkspaceObservabilitySummary {
   usd: number;
   /**
    * Tokens consumed by the most recent assistant turn (input + cache_read +
-   * cache_creation). Used by the terminal-pane context-bar fill — divided by
-   * the model's context window for the displayed percentage. Null when no
-   * assistant event has been seen yet.
+   * cache_creation). Pair with `contextWindowTokens` for the displayed
+   * percentage. Null when no assistant event has been seen yet.
    */
   lastTurnContextTokens: number | null;
+  /**
+   * Effective context window for this session in tokens — 200K for stock
+   * Claude 4.x, 1M when the model id carries the `[1m]` marker OR when
+   * any observed turn already exceeded 200K (handles the 1M beta header
+   * case where the model string itself doesn't change). The terminal-pane
+   * context bar divides `lastTurnContextTokens` by this for the fill.
+   */
+  contextWindowTokens: number;
   topTools: Array<{ name: string; count: number }>;
 }
 

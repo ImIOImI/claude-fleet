@@ -17,15 +17,6 @@ import { useEffect, useRef, useState } from 'react';
 import type { WorkspaceObservabilitySummary } from '../../../preload';
 import { TerminalSession } from './TerminalSession';
 
-/**
- * Assumed model context window for the bar fill. 200K covers stock
- * Claude 4.x; the 1M-context variant would under-report (the bar
- * looks fuller than it actually is) — acceptable for v1. Switch to a
- * per-model lookup table when the slot consumers mature, alongside
- * the 80% compaction tick.
- */
-const CONTEXT_LIMIT_TOKENS = 200_000;
-
 interface Props {
   containerId: string;
   workspaceName: string;
@@ -51,7 +42,7 @@ interface Props {
 
 function contextBarPct(summary: WorkspaceObservabilitySummary | null): number {
   if (!summary?.lastTurnContextTokens) return 100;
-  const raw = (summary.lastTurnContextTokens / CONTEXT_LIMIT_TOKENS) * 100;
+  const raw = (summary.lastTurnContextTokens / summary.contextWindowTokens) * 100;
   return Math.max(0, Math.min(100, raw));
 }
 
@@ -60,8 +51,9 @@ function contextBarTooltip(summary: WorkspaceObservabilitySummary | null): strin
     return 'Workspace accent — no transcript activity yet';
   }
   const tokens = summary.lastTurnContextTokens;
-  const pct = (tokens / CONTEXT_LIMIT_TOKENS) * 100;
-  return `Context: ${tokens.toLocaleString()} / ${CONTEXT_LIMIT_TOKENS.toLocaleString()} tokens (${pct.toFixed(1)}%)`;
+  const limit = summary.contextWindowTokens;
+  const pct = (tokens / limit) * 100;
+  return `Context: ${tokens.toLocaleString()} / ${limit.toLocaleString()} tokens (${pct.toFixed(1)}%)`;
 }
 
 interface Session {
@@ -258,11 +250,14 @@ export function TerminalPane({
       </div>
       {/* Context bar — workspace's hue track at the top of the terminal,
           filling 0..100% with the latest assistant turn's context-window
-          usage (input + cache_read + cache_creation over an assumed
-          200K limit). Falls back to a pure 100% identity band when no
-          data is available, so a fresh workspace still reads visually
-          correct. Wrapper supplies the breathing room above the bar
-          (matches the design's ContextBar padding). */}
+          usage (input + cache_read + cache_creation over the session's
+          effective window from `summary.contextWindowTokens`: 200K stock,
+          1M for the [1m] variant or when observed usage already crossed
+          200K). A subtle tick at 80% marks the compaction threshold.
+          Falls back to a pure 100% identity band when no data is
+          available, so a fresh workspace still reads visually correct.
+          Wrapper supplies the breathing room above the bar (matches the
+          design's ContextBar padding). */}
       <div className="terminal-accent-band-row" aria-hidden="true">
         <div
           className="terminal-accent-band"
