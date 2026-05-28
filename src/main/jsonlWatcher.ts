@@ -14,6 +14,7 @@
 // only — if we lose it (process restart, watch dropped), re-reading from
 // offset 0 produces the same end state.
 
+import { EventEmitter } from 'node:events';
 import { mkdirSync, promises as fsp, type Stats } from 'node:fs';
 import { join, basename, extname, sep as pathSep } from 'node:path';
 // chokidar v5 is ESM-only. Our main bundle is CommonJS (per
@@ -33,7 +34,28 @@ interface FileState {
   offset: number;
 }
 
-export class JsonlWatcher {
+/**
+ * Emitted once per `process()` batch that ingested ≥1 new line. The IPC layer
+ * subscribes to drive live summary push to the renderer — one emit fans out
+ * to chip/pane/context-bar in one round trip, replacing the previous 2s poll.
+ * Duplicate-only batches (re-read after compaction with no genuinely new
+ * content) suppress the emit so consumers don't re-render for no reason.
+ */
+export interface IngestEvent {
+  workspaceName: string;
+  sessionId: string;
+}
+
+// Typed event surface — TS doesn't get to constrain EventEmitter's own
+// signatures, so we expose a strict facade and assert the underlying calls.
+// Same approach Node's own docs suggest for typed events.
+export interface JsonlWatcher {
+  on(event: 'ingest', listener: (e: IngestEvent) => void): this;
+  off(event: 'ingest', listener: (e: IngestEvent) => void): this;
+  emit(event: 'ingest', e: IngestEvent): boolean;
+}
+
+export class JsonlWatcher extends EventEmitter {
   private watcher: FSWatcher | null = null;
   private readonly files = new Map<string, FileState>();
   private readonly watchedDirs = new Set<string>();
@@ -139,9 +161,19 @@ export class JsonlWatcher {
     if (stats.size < state.offset) state.offset = 0;
     if (stats.size === state.offset) return;
 
-    const newOffset = await readAndIngest(path, state);
+    const { newOffset, insertedCount } = await readAndIngest(path, state);
     state.offset = newOffset;
     this.files.set(path, state);
+
+    // Only emit when ≥1 line genuinely inserted (compaction re-reads return
+    // duplicates whose dedup_key already exists; no consumer state change
+    // happened, so don't wake them up).
+    if (insertedCount > 0) {
+      this.emit('ingest', {
+        workspaceName: state.workspaceName,
+        sessionId: state.sessionId,
+      });
+    }
   }
 
   private initState(path: string): FileState | null {
@@ -154,15 +186,21 @@ export class JsonlWatcher {
   }
 }
 
+interface ReadResult {
+  newOffset: number;
+  insertedCount: number;
+}
+
 /**
- * Read from `state.offset` to EOF, ingest complete lines, return new offset.
+ * Read from `state.offset` to EOF, ingest complete lines, return the new
+ * offset plus the count of lines that produced a non-duplicate insert.
  * Trailing partial line (no terminating `\n`) is left for the next call.
  */
-async function readAndIngest(path: string, state: FileState): Promise<number> {
+async function readAndIngest(path: string, state: FileState): Promise<ReadResult> {
   const fh = await fsp.open(path, 'r');
   try {
     const stats = await fh.stat();
-    if (stats.size <= state.offset) return state.offset;
+    if (stats.size <= state.offset) return { newOffset: state.offset, insertedCount: 0 };
 
     const bytesToRead = stats.size - state.offset;
     const buf = Buffer.alloc(bytesToRead);
@@ -177,16 +215,18 @@ async function readAndIngest(path: string, state: FileState): Promise<number> {
         break;
       }
     }
-    if (lastNl === -1) return state.offset;
+    if (lastNl === -1) return { newOffset: state.offset, insertedCount: 0 };
 
     const text = buf.slice(0, lastNl + 1).toString('utf8');
+    let insertedCount = 0;
     for (const line of text.split('\n')) {
       const trimmed = line.trim();
       if (!trimmed) continue;
-      ingestLine(state.workspaceName, state.sessionId, trimmed);
+      const result = ingestLine(state.workspaceName, state.sessionId, trimmed);
+      if (result.inserted) insertedCount++;
     }
 
-    return state.offset + lastNl + 1;
+    return { newOffset: state.offset + lastNl + 1, insertedCount };
   } finally {
     await fh.close();
   }

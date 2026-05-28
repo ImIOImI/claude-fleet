@@ -70,6 +70,22 @@ async function listAllWorkspaces(): Promise<Workspace[]> {
 
 export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): void {
   const { jsonlWatcher } = opts;
+
+  // Live summary push: when the watcher ingests new lines, compute the
+  // workspace summary once and broadcast to every BrowserWindow. The renderer
+  // subscribes via `observability.onSummary` (see preload) and updates the
+  // shared summaries map without polling. A 30s safety poll in App.tsx
+  // refreshes relative-time displays and covers any missed event.
+  if (jsonlWatcher) {
+    jsonlWatcher.on('ingest', ({ workspaceName }) => {
+      const summary = summaryForWorkspace(workspaceName);
+      const payload = { workspaceName, summary };
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) win.webContents.send('observability:summary', payload);
+      }
+    });
+  }
+
   ipcMain.handle('workspace:ping', () => backend.ping());
   ipcMain.handle('workspace:ensureImage', async (event, channelId: string) => {
     const win = BrowserWindow.fromWebContents(event.sender);

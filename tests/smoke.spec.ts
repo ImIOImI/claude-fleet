@@ -1312,6 +1312,137 @@ test('Watcher: picks up JSONLs written to a workspace whose dir was missing at r
   }
 });
 
+test('Live push: renderer receives observability:summary push when watcher ingests a new JSONL line', async () => {
+  // Step 5 of #2: replaces the renderer's 2s `summaryForWorkspace` poll
+  // with a push from main on every ingest batch. After a JSONL line is
+  // ingested, the JsonlWatcher emits 'ingest', ipc.ts computes the
+  // summary, and broadcasts `observability:summary` to every window.
+  // The renderer's `window.api.observability.onSummary` callback
+  // receives `(workspaceName, summary)` and updates the shared map.
+  //
+  // Test design: launch the app with a manifest but no JSONLs, subscribe
+  // in the renderer (collecting received pushes into a window-scoped
+  // array), then write a JSONL on disk. The push must arrive within
+  // a reasonable window with the correct workspace name + non-null
+  // summary derived from the line we just wrote.
+  const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-push-'));
+  const name = 'push-test-ws';
+  const stateDir = path.join(userDataDir, 'state', name);
+  const projectsDir = path.join(stateDir, '.claude', 'projects', '-workspace');
+  mkdirSync(projectsDir, { recursive: true });
+  writeFileSync(
+    path.join(stateDir, 'workspace.json'),
+    JSON.stringify({
+      name,
+      workspaceRoot: '/tmp/fleet-test-' + name,
+      workspaceSubdir: '',
+      profile: 'oauth',
+      kind: 'container',
+      image: 'mock',
+      createdAt: Date.now(),
+      lastUsedAt: Date.now()
+    })
+  );
+
+  const app = await electron.launch({
+    args: [REPO_ROOT, `--user-data-dir=${userDataDir}`],
+    cwd: REPO_ROOT,
+    env: Object.fromEntries(
+      Object.entries(process.env).filter(([k]) => k !== 'CLAUDE_FLEET_MOCK')
+    ) as Record<string, string>
+  });
+  const window = await app.firstWindow();
+  await window.waitForLoadState('domcontentloaded');
+
+  try {
+    // Subscribe in the renderer BEFORE writing the JSONL — the
+    // subscription stashes every push into window.__pushes so the
+    // test can poll for arrivals. We pull onSummary off window.api
+    // (exposed by preload) and ignore its unsubscribe (page tears
+    // down with the test).
+    await window.evaluate(() => {
+      type Api = {
+        api: {
+          observability: {
+            onSummary: (
+              cb: (workspaceName: string, summary: unknown) => void
+            ) => () => void;
+          };
+        };
+      };
+      const w = window as unknown as Window & {
+        __pushes: Array<{ workspaceName: string; summary: unknown }>;
+      } & Api;
+      w.__pushes = [];
+      w.api.observability.onSummary((workspaceName, summary) => {
+        w.__pushes.push({ workspaceName, summary });
+      });
+    });
+
+    // Give the watcher a moment to fully start before writing —
+    // chokidar can drop early add() calls if start() hasn't resolved.
+    await new Promise((r) => setTimeout(r, 500));
+
+    const sessionId = randomUUID();
+    const event = {
+      type: 'assistant',
+      uuid: randomUUID(),
+      timestamp: new Date().toISOString(),
+      message: {
+        model: 'claude-opus-4-7',
+        content: [],
+        usage: {
+          input_tokens: 123,
+          output_tokens: 45,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+          service_tier: 'standard'
+        }
+      }
+    };
+    writeFileSync(path.join(projectsDir, `${sessionId}.jsonl`), JSON.stringify(event) + '\n');
+
+    // Push must arrive within ~8s — chokidar latency + ingest + IPC.
+    await expect
+      .poll(
+        async () => {
+          return await window.evaluate(() => {
+            const w = window as unknown as {
+              __pushes: Array<{
+                workspaceName: string;
+                summary: { eventCount?: number; sessionId?: string } | null;
+              }>;
+            };
+            return w.__pushes.find(
+              (p) => p.workspaceName === 'push-test-ws' && p.summary !== null
+            );
+          });
+        },
+        { timeout: 8_000, intervals: [200, 500, 1000] }
+      )
+      .toBeTruthy();
+
+    // Verify the pushed summary actually reflects the line we wrote
+    // (not just a null/empty arrival). eventCount must be ≥1, and the
+    // sessionId must match the file we created.
+    const latest = await window.evaluate(() => {
+      const w = window as unknown as {
+        __pushes: Array<{
+          workspaceName: string;
+          summary: { eventCount?: number; sessionId?: string } | null;
+        }>;
+      };
+      return w.__pushes
+        .filter((p) => p.workspaceName === 'push-test-ws' && p.summary !== null)
+        .pop();
+    });
+    expect(latest?.summary?.sessionId).toBe(sessionId);
+    expect(latest?.summary?.eventCount).toBeGreaterThanOrEqual(1);
+  } finally {
+    await app.close();
+  }
+});
+
 test('Slot consumer: chip heights stay equal regardless of whether observability data is present', async () => {
   // Visual regression from the slot-consumers PR. The chip secondary
   // line (".ws-chip-sub" showing "active 2m ago" / "idle 1h ago") is
