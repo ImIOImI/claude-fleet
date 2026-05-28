@@ -325,7 +325,7 @@ CREATE INDEX idx_sessions_workspace ON sessions(workspace_name);
 
 **Watcher behavior:**
 - One `JsonlWatcher` instance per main process. Started on `app.whenReady` (after `listWorkspaceManifests`), stopped on `before-quit`.
-- Each workspace is registered with `registerWorkspace(name)`, which adds `<state>/<name>/.claude/projects/-workspace` to the watch set (chokidar tolerates missing paths and picks them up when claude creates them).
+- Each workspace is registered with `registerWorkspace(name)`, which `mkdir -p`s `<state>/<name>/.claude/projects/-workspace` and adds it to the chokidar watch set. The mkdir is non-obvious but load-bearing: chokidar v5 silently drops paths that don't exist at `add()` time (its docs imply it queues missing paths and watches them when they appear, but in practice the create-detection misses files claude later writes there). Symptom when omitted: any workspace whose claude first-run happens AFTER `registerWorkspace` never gets its JSONLs ingested — the observability pane stays empty for that workspace forever.
 - Per-file byte offsets are kept in memory only. On add/change: read from offset to EOF, find the last `\n`, ingest complete lines, advance offset past the newline. Trailing partial line waits for the next event.
 - Compaction (file shrinks below the stored offset) resets the offset to 0; `dedup_key` ensures already-ingested rows aren't duplicated.
 - Mock mode (`CLAUDE_FLEET_MOCK=1`) skips watcher + DB entirely — no real JSONLs to read.
