@@ -1312,6 +1312,81 @@ test('Watcher: picks up JSONLs written to a workspace whose dir was missing at r
   }
 });
 
+test('Slot consumer: chip heights stay equal regardless of whether observability data is present', async () => {
+  // Visual regression from the slot-consumers PR. The chip secondary
+  // line (".ws-chip-sub" showing "active 2m ago" / "idle 1h ago") is
+  // rendered only when summary.lastActiveAt is non-null. So a workspace
+  // with observability data gets a TALLER chip than a workspace
+  // without — the top strip looks jagged with mixed-height chips.
+  //
+  // The fix is to reserve the subline's space unconditionally
+  // (placeholder element, min-height, or similar) so chip heights
+  // stay consistent regardless of data presence.
+  const { app, window } = await launch();
+  try {
+    const recent = Date.now() - 30_000;
+    await mockMainIpc(app, {
+      workspaceList: [
+        {
+          name: 'with-data',
+          containerId: 'with-id',
+          state: 'running',
+          workspaceRoot: '/tmp/with',
+          profile: 'oauth'
+        },
+        {
+          name: 'no-data',
+          containerId: 'no-id',
+          state: 'running',
+          workspaceRoot: '/tmp/no',
+          profile: 'oauth'
+        }
+      ],
+      observabilitySummaries: {
+        'with-data': {
+          sessionId: 'sess-1',
+          title: 'demo',
+          model: 'claude-opus-4-7',
+          startedAt: recent - 60_000,
+          lastActiveAt: recent,
+          eventCount: 5,
+          inputTokens: 100,
+          outputTokens: 50,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          usd: 0.01,
+          lastTurnContextTokens: 10_000,
+          topTools: []
+        }
+        // no-data: summary is missing (null) → no activity text
+      }
+    });
+
+    const withChip = window.locator('.ws-chip', { hasText: 'with-data' });
+    const noChip = window.locator('.ws-chip', { hasText: 'no-data' });
+    await expect(withChip).toBeVisible({ timeout: 5_000 });
+    await expect(noChip).toBeVisible({ timeout: 5_000 });
+
+    // Give the polling effect a beat to apply the summary so the
+    // sub-line lands in with-data's chip.
+    await expect(withChip.locator('.ws-chip-sub')).toBeVisible({ timeout: 5_000 });
+
+    const withHeight = await withChip.evaluate(
+      (el) => (el as HTMLElement).getBoundingClientRect().height
+    );
+    const noHeight = await noChip.evaluate(
+      (el) => (el as HTMLElement).getBoundingClientRect().height
+    );
+
+    // Heights should be identical. Off-by-1 from sub-pixel rounding
+    // is tolerable; >1px difference means the subline conditionally
+    // pushes the chip taller.
+    expect(Math.abs(withHeight - noHeight)).toBeLessThanOrEqual(1);
+  } finally {
+    await app.close();
+  }
+});
+
 test('Slot consumer: chip secondary line shows live activity from observability summary', async () => {
   // Issue #34, part 1: each workspace chip in the top strip gets a small
   // secondary line below the workspace name showing recent activity —

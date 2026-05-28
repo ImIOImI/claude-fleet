@@ -199,10 +199,18 @@ export function WorkspaceTabStrip({
             )}
             <span className="ws-chip-text">
               <span className="name">{w.name}</span>
-              {(() => {
-                const sub = chipActivityText(summaries[w.name]);
-                return sub ? <span className="ws-chip-sub">{sub}</span> : null;
-              })()}
+              {/*
+                Always render the sub-line element, even when there's no
+                activity text yet. An empty workspace's chip would
+                otherwise be one line tall while a workspace with
+                observability data would be two lines — the top strip
+                ends up with jagged mixed-height chips. The non-breaking
+                space (` `) reserves the line's vertical room
+                without showing any visible character.
+              */}
+              <span className="ws-chip-sub">
+                {chipActivityText(summaries[w.name]) ?? ' '}
+              </span>
             </span>
           </button>
           <button
