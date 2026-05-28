@@ -1487,6 +1487,7 @@ test('Slot consumer: chip heights stay equal regardless of whether observability
           cacheCreationInputTokens: 0,
           usd: 0.01,
           lastTurnContextTokens: 10_000,
+          contextWindowTokens: 200_000,
           topTools: []
         }
         // no-data: summary is missing (null) → no activity text
@@ -1553,6 +1554,7 @@ test('Slot consumer: chip secondary line shows live activity from observability 
           cacheCreationInputTokens: 0,
           usd: 0.05,
           lastTurnContextTokens: 80_000,
+          contextWindowTokens: 200_000,
           topTools: []
         }
       }
@@ -1573,9 +1575,9 @@ test('Slot consumer: chip secondary line shows live activity from observability 
 test('Slot consumer: terminal context bar fills proportionally to lastTurnContextTokens', async () => {
   // Issue #34, part 3: the workspace's accent band at the top of the
   // terminal area becomes a context-window-fullness gauge. Its `--pct`
-  // CSS variable should be `(lastTurnContextTokens / 200_000) * 100`,
-  // clamped to [0, 100]. When summary is missing, falls back to 100%
-  // (pure identity band, the pre-observability behavior).
+  // CSS variable should be `(lastTurnContextTokens / contextWindowTokens)
+  // * 100`, clamped to [0, 100]. When summary is missing, falls back to
+  // 100% (pure identity band, the pre-observability behavior).
   const { app, window } = await launch();
   try {
     await mockMainIpc(app, {
@@ -1603,6 +1605,7 @@ test('Slot consumer: terminal context bar fills proportionally to lastTurnContex
           usd: 0,
           // 80k / 200k = 40%
           lastTurnContextTokens: 80_000,
+          contextWindowTokens: 200_000,
           topTools: []
         }
       }

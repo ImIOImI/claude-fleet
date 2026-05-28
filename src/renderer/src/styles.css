@@ -1037,11 +1037,14 @@ body {
 /* Workspace context bar — the workspace's hue track at the top of the
    terminal area, filled from 0..100% with the latest assistant turn's
    context-window usage. The outer band is the subtle track; the inner
-   .terminal-accent-band-fill widens to --pct (set inline by
-   TerminalPane based on `summary.lastTurnContextTokens / 200_000`).
-   Width transitions smoothly so live polling reads as growth/decay
-   rather than discrete jumps. The 80% compaction tick is a follow-up
-   (needs per-model context-window lookup). */
+   .terminal-accent-band-fill widens to --pct (set inline by TerminalPane
+   based on `summary.lastTurnContextTokens / summary.contextWindowTokens`,
+   where the window is per-model and auto-upgrades to 1M when observed
+   usage warrants). Width transitions smoothly so live polling reads as
+   growth/decay rather than discrete jumps. The ::after element marks
+   the 80% compaction threshold — claude auto-compacts around there, so
+   the tick is the user's heads-up that the next turn might trigger a
+   compaction. */
 .terminal-accent-band {
   position: relative;
   background: color-mix(in oklab, var(--hue, var(--accent)) 22%, transparent);
@@ -1054,6 +1057,19 @@ body {
   width: var(--pct, 100%);
   background: var(--hue, var(--accent));
   transition: width 200ms ease-out;
+}
+.terminal-accent-band::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  /* Center a 1px tick on the 80% mark; the negative left margin keeps
+     the tick visually aligned even at narrow bar widths. */
+  left: 80%;
+  width: 1px;
+  margin-left: -0.5px;
+  background: color-mix(in oklab, var(--text-strong, #fff) 55%, transparent);
+  pointer-events: none;
 }
 
 /* Session tab strip — sits at the top of the main body. The container

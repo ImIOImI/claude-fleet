@@ -13,6 +13,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import { costFor } from './pricing.js';
+import { contextWindowFor } from './contextWindow.js';
 
 let db: Database.Database | null = null;
 
@@ -362,12 +363,19 @@ export interface WorkspaceSummary {
    * Context-window fullness proxy: the latest assistant event's
    * `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`.
    * Represents how much of the model's context window the most recent
-   * turn used. The renderer divides by an assumed model context limit
-   * (200_000 today; per-model lookup is a follow-up) to drive the
-   * terminal-pane context-bar fill. Null when no assistant event has
-   * been seen yet.
+   * turn used. Pair with `contextWindowTokens` for the displayed
+   * percentage. Null when no assistant event has been seen yet.
    */
   lastTurnContextTokens: number | null;
+  /**
+   * Effective context window for this session in tokens — 200K for stock
+   * Claude 4.x, 1M when the model id carries the `[1m]` marker OR when
+   * any observed turn already exceeded 200K (the 1M beta is request-time
+   * and doesn't always show up in the model string). The renderer
+   * divides `lastTurnContextTokens` by this to position the
+   * terminal-pane context-bar fill.
+   */
+  contextWindowTokens: number;
   /** Top tools called in this session, descending count. */
   topTools: ToolCallCount[];
 }
@@ -446,6 +454,26 @@ export function summaryForWorkspace(workspaceName: string, topToolsLimit = 5): W
       latestAssistant.cache_creation_input_tokens
     : null;
 
+  // Observed-max context tokens across all assistant events in the
+  // session. Drives the 1M auto-upgrade in contextWindowFor when the
+  // session's running on the 1M beta header (which doesn't show up in
+  // the model string Claude Code writes to JSONL).
+  const observedMax = d
+    .prepare(`
+      SELECT COALESCE(MAX(
+        COALESCE(input_tokens, 0)
+        + COALESCE(cache_read_input_tokens, 0)
+        + COALESCE(cache_creation_input_tokens, 0)
+      ), 0) AS max_context_tokens
+      FROM events
+      WHERE session_id = ? AND type = 'assistant'
+    `)
+    .get(session.id) as { max_context_tokens: number };
+  const contextWindowTokens = contextWindowFor(
+    latestAssistant?.model ?? null,
+    observedMax.max_context_tokens,
+  );
+
   const topTools = d
     .prepare(`
       SELECT tool_name AS name, COUNT(*) AS count
@@ -474,6 +502,7 @@ export function summaryForWorkspace(workspaceName: string, topToolsLimit = 5): W
     cacheCreationInputTokens: aggregates.cache_creation_input_tokens,
     usd: cost.usd,
     lastTurnContextTokens,
+    contextWindowTokens,
     topTools,
   };
 }
