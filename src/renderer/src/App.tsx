@@ -71,6 +71,17 @@ export function App() {
     Record<string, string>
   >({});
 
+  // Whether the selected workspace's active tab is "fresh" — created
+  // via the + button (or close-last-auto-recreate) in this app run,
+  // rather than loaded from sessions.json. Drives the workspace-summary
+  // fallback below: fresh tabs leave the pane empty even when the
+  // server returns null (user expects a clean slate); loaded tabs fall
+  // back to the workspace summary so pre-PR tabs and concurrent-attach
+  // skip cases still surface what claude is doing in the workspace.
+  const [activeTabFreshByWorkspace, setActiveTabFreshByWorkspace] = useState<
+    Record<string, boolean>
+  >({});
+
   // ObservabilityPane summary scoped to the selected workspace's active
   // tab. Falls back to the workspace summary (`summaries[name]`) below
   // when no per-tab data has arrived yet (initial fetch in flight, or
@@ -383,11 +394,14 @@ export function App() {
                     await window.api.workspace.start(w.name);
                     refresh();
                   }}
-                  onActiveTabChange={(wsName, brokerSessionId) => {
+                  onActiveTabChange={(wsName, brokerSessionId, isFresh) => {
                     setActiveTabByWorkspace((prev) =>
                       prev[wsName] === brokerSessionId
                         ? prev
                         : { ...prev, [wsName]: brokerSessionId }
+                    );
+                    setActiveTabFreshByWorkspace((prev) =>
+                      prev[wsName] === isFresh ? prev : { ...prev, [wsName]: isFresh }
                     );
                   }}
                 />
@@ -398,12 +412,20 @@ export function App() {
         <ObservabilityPane
           workspaceName={selected?.name ?? null}
           summary={
-            // Prefer the per-tab summary for the selected workspace's
-            // active tab; fall back to the workspace summary while the
-            // first per-tab fetch is in flight or when no mapping has
-            // been learned yet (broker→claude mapping is asynchronous —
-            // see §11 SPEC "Per-tab mapping").
-            activeTabSummary ?? (selected ? summaries[selected.name] ?? null : null)
+            // Per-tab summary first. When that's null (no mapping yet
+            // OR mapping points at a stale claude UUID), fall back to
+            // the workspace summary ONLY for tabs loaded from
+            // sessions.json — those probably have real activity the
+            // mapping just hasn't caught up to (pre-PR tabs,
+            // concurrent-attach skip cases). For freshly-added tabs
+            // (the + button, close-last-auto-recreate), leave it null
+            // so the pane shows the empty state — the user just opened
+            // a clean tab and inheriting the previous tab's numbers
+            // would be confusing. See §11 SPEC "Per-tab mapping".
+            activeTabSummary ??
+            (selected && !(activeTabFreshByWorkspace[selected.name] ?? false)
+              ? summaries[selected.name] ?? null
+              : null)
           }
         />
       </div>

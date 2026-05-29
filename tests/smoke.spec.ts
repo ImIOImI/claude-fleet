@@ -1325,6 +1325,119 @@ test('Watcher: picks up JSONLs written to a workspace whose dir was missing at r
   }
 });
 
+test('summaryForBrokerSession: returns null for an unmapped broker session (fresh tab — no workspace fallback)', async () => {
+  // Regression for: "when I open a new session in a workspace it shows
+  // me the information from the last session I used". The fix in
+  // summaryForBrokerSession dropped the fallback to summaryForWorkspace
+  // when the broker→claude mapping doesn't exist — a brand-new tab
+  // legitimately has no data, and inheriting the previous tab's
+  // numbers was confusing. Renderer falls back to workspace summary
+  // separately, but only for tabs loaded from inventory (see
+  // App.tsx's activeTabFreshnessByWorkspace).
+  //
+  // Test design: pre-populate a workspace with one JSONL so the
+  // workspace summary has real data. Launch the app, wait for
+  // ingestion, then call summaryForBrokerSession with a broker
+  // session id that has NO mapping. Must return null (not the
+  // workspace's data).
+  const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-fresh-tab-'));
+  const name = 'fresh-tab-test';
+  const stateDir = path.join(userDataDir, 'state', name);
+  const projectsDir = path.join(stateDir, '.claude', 'projects', '-workspace');
+  mkdirSync(projectsDir, { recursive: true });
+  writeFileSync(
+    path.join(stateDir, 'workspace.json'),
+    JSON.stringify({
+      name,
+      workspaceRoot: '/tmp/fleet-test-' + name,
+      workspaceSubdir: '',
+      profile: 'oauth',
+      kind: 'container',
+      image: 'mock',
+      createdAt: Date.now(),
+      lastUsedAt: Date.now()
+    })
+  );
+  // Existing claude session with real data — the "previous tab" the
+  // user was using before clicking "+" to add a new tab.
+  const previousClaudeUuid = randomUUID();
+  writeFileSync(
+    path.join(projectsDir, `${previousClaudeUuid}.jsonl`),
+    JSON.stringify({
+      type: 'assistant',
+      uuid: randomUUID(),
+      timestamp: new Date().toISOString(),
+      message: {
+        model: 'claude-opus-4-7',
+        content: [],
+        usage: {
+          input_tokens: 4242,
+          output_tokens: 0,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+          service_tier: 'standard'
+        }
+      }
+    }) + '\n'
+  );
+
+  const app = await electron.launch({
+    args: [REPO_ROOT, `--user-data-dir=${userDataDir}`],
+    cwd: REPO_ROOT,
+    env: Object.fromEntries(
+      Object.entries(process.env).filter(([k]) => k !== 'CLAUDE_FLEET_MOCK')
+    ) as Record<string, string>
+  });
+  const window = await app.firstWindow();
+  await window.waitForLoadState('domcontentloaded');
+
+  try {
+    // Wait for the watcher to ingest the existing JSONL so the
+    // workspace summary has real data to fall back to (the bug we're
+    // guarding against would surface this as the "fresh tab" summary).
+    await expect
+      .poll(
+        async () => {
+          return await window.evaluate(async (wsName) => {
+            type Api = {
+              api: { observability: { summaryForWorkspace: (n: string) => Promise<unknown> } };
+            };
+            const s = await (window as unknown as Api).api.observability.summaryForWorkspace(
+              wsName
+            );
+            return s !== null;
+          }, name);
+        },
+        { timeout: 8_000, intervals: [200, 500, 1000] }
+      )
+      .toBe(true);
+
+    // Now ask for a broker session id that has NO mapping. Pre-fix
+    // behavior: returns the workspace summary (4242 input tokens) —
+    // wrong. Post-fix behavior: returns null.
+    const result = await window.evaluate(async (wsName) => {
+      type Api = {
+        api: {
+          observability: {
+            summaryForBrokerSession: (
+              n: string,
+              brokerSessionId: string
+            ) => Promise<unknown>;
+          };
+        };
+      };
+      return await (window as unknown as Api).api.observability.summaryForBrokerSession(
+        wsName,
+        'completely-fresh-broker-id-with-no-mapping'
+      );
+    }, name);
+
+    expect(result).toBeNull();
+  } finally {
+    await app.close();
+  }
+});
+
 test('Live push: renderer receives observability:summary push when watcher ingests a new JSONL line', async () => {
   // Step 5 of #2: replaces the renderer's 2s `summaryForWorkspace` poll
   // with a push from main on every ingest batch. After a JSONL line is

@@ -43,11 +43,22 @@ interface Props {
    * (mount, tab-switch, close-last-and-recreate). App.tsx uses this to
    * drive the per-tab observability summary lookup so the
    * ObservabilityPane reflects whichever tab the user is looking at,
-   * not the workspace's most-recently-active claude session. Fires
-   * with the broker session id (the same uid the broker keys its
-   * session map by); empty string while the inventory is still loading.
+   * not the workspace's most-recently-active claude session.
+   *
+   * `isFresh` distinguishes a tab the user just created via `+` (true)
+   * from one loaded from `sessions.json` (false). App.tsx uses this to
+   * decide whether to fall back to the workspace summary when the
+   * per-tab fetch returns null: fresh tabs legitimately have no data
+   * (showing the previous tab's numbers would be wrong), but
+   * loaded-from-inventory tabs probably have real claude activity that
+   * hasn't been mapped yet (pre-PR tabs, concurrent-attach skip cases)
+   * — there the workspace summary at least surfaces what's happening.
    */
-  onActiveTabChange?: (workspaceName: string, brokerSessionId: string) => void;
+  onActiveTabChange?: (
+    workspaceName: string,
+    brokerSessionId: string,
+    isFresh: boolean
+  ) => void;
 }
 
 function contextBarPct(summary: WorkspaceObservabilitySummary | null): number {
@@ -94,6 +105,15 @@ export function TerminalPane({
   // TerminalSession lets the user "Start new session" — when they do,
   // the session emits 'live' again and the id leaves the set.
   const [endedIds, setEndedIds] = useState<Set<string>>(new Set());
+  // Ids the user created in this component lifetime via `addSession`
+  // (the `+` button), as opposed to ids loaded from sessions.json on
+  // mount. Drives the `isFresh` flag in onActiveTabChange so App.tsx
+  // can decide whether to apply the workspace-summary fallback when
+  // the per-tab observability fetch returns null. Set is intentionally
+  // never pruned within the component's lifetime — once a tab is
+  // marked fresh it stays fresh until the user reloads the app
+  // (where it'd come back via inventory and be treated as loaded).
+  const freshIdsRef = useRef<Set<string>>(new Set());
 
   const handleLifecycle = (sessionId: string, status: 'live' | 'ended') => {
     setEndedIds((prev) => {
@@ -169,13 +189,14 @@ export function TerminalPane({
   // auto-recreate path — every setActiveId call.
   useEffect(() => {
     if (!activeId || !workspaceName) return;
-    onActiveTabChange?.(workspaceName, activeId);
+    onActiveTabChange?.(workspaceName, activeId, freshIdsRef.current.has(activeId));
   }, [activeId, workspaceName, onActiveTabChange]);
 
   function addSession(): void {
     if (!loaded) return;
     const id = uid();
     const name = `session ${nextNum}`;
+    freshIdsRef.current.add(id);
     setSessions((prev) => [...prev, { id, name, createdAt: Date.now() }]);
     setActiveId(id);
     setNextNum((n) => n + 1);
@@ -198,8 +219,13 @@ export function TerminalPane({
       const next = prev.filter((s) => s.id !== id);
       if (next.length === 0) {
         // Never leave the workspace with zero sessions — drop a fresh
-        // main back in so there's always somewhere to type.
+        // main back in so there's always somewhere to type. Mark it
+        // fresh so the observability pane shows an empty state
+        // (closing the last tab and getting a new "main" is morally
+        // the same as clicking "+", and inheriting the closed tab's
+        // numbers would be confusing).
         const fresh: Session = { id: uid(), name: 'main', createdAt: Date.now() };
+        freshIdsRef.current.add(fresh.id);
         setActiveId(fresh.id);
         setNextNum(2);
         return [fresh];
