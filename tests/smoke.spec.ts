@@ -1479,6 +1479,114 @@ test('broker_sessions: a single pending attach is consumed and mapping is learne
   }
 });
 
+test('broker_sessions: mapping is learned even when the user types many minutes after attaching the tab', async () => {
+  // The user's actual bug, reproduced from the real-instance error.log:
+  //   17:16:07 — main (dc8b7689) attached
+  //   17:20:37 — session 2 (c6fdb44e) attached — 4.5 min later
+  //   17:22:03 — session 3 (bb5d5dd8) attached
+  //   ...broker_sessions has c6fdb44e and bb5d5dd8 but NOT dc8b7689.
+  //
+  // Cause: claude doesn't write its first JSONL until the user types
+  // in the session. Pending attaches had a 30s TTL, so by the time
+  // the user got around to typing in "main" (4+ minutes after opening
+  // the workspace), the pending entry had expired. The 'new-session'
+  // event fired with no candidate → no mapping. Sessions 2 and 3
+  // worked because the user typed in them within ~12-23 seconds of
+  // attaching, well inside the old TTL.
+  //
+  // The fix: pending attaches must persist long enough for realistic
+  // user behavior. This test asserts that a pending attach 60 seconds
+  // old still pairs with the next JSONL.
+  const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-late-type-'));
+  const wsName = 'late-type-workspace';
+  const stateDir = path.join(userDataDir, 'state', wsName);
+  const projectsDir = path.join(stateDir, '.claude', 'projects', '-workspace');
+  mkdirSync(projectsDir, { recursive: true });
+  writeFileSync(
+    path.join(stateDir, 'workspace.json'),
+    JSON.stringify({
+      name: wsName,
+      workspaceRoot: '/tmp/fleet-test-' + wsName,
+      workspaceSubdir: '',
+      profile: 'oauth',
+      kind: 'container',
+      image: 'mock',
+      createdAt: Date.now(),
+      lastUsedAt: Date.now()
+    })
+  );
+
+  const app = await electron.launch({
+    args: [REPO_ROOT, `--user-data-dir=${userDataDir}`],
+    cwd: REPO_ROOT,
+    env: {
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(([k]) => k !== 'CLAUDE_FLEET_MOCK')
+      ),
+      CLAUDE_FLEET_E2E: '1'
+    } as Record<string, string>
+  });
+  const window = await app.firstWindow();
+  await window.waitForLoadState('domcontentloaded');
+
+  try {
+    const brokerSessionId = 'broker-late-type-main-id-aaaaaaaa';
+    const callTestIpc = async <T>(channel: string, args: unknown[]): Promise<T> =>
+      app.evaluate(
+        async ({ ipcMain }, [ch, a]) => {
+          const internal = (ipcMain as unknown as {
+            _invokeHandlers: Map<string, (...args: unknown[]) => unknown>;
+          })._invokeHandlers;
+          const handler = internal.get(ch as string);
+          if (!handler) throw new Error(`${ch as string} not registered`);
+          return (await handler({ sender: null }, ...(a as unknown[]))) as T;
+        },
+        [channel, args] as const
+      );
+
+    // Simulate: user attached "main" 60 seconds ago (real-world:
+    // opened a tab, walked away for a minute, came back). Under the
+    // old 30s TTL this entry is expired by now; the fix must keep it
+    // queued so the next JSONL pairs with it.
+    const recordedAt = Date.now() - 60_000;
+    await callTestIpc('__test:recordPendingAttach', [wsName, brokerSessionId, recordedAt]);
+
+    // Now user types. claude finally writes its first JSONL.
+    const claudeSessionUuid = randomUUID();
+    writeFileSync(
+      path.join(projectsDir, `${claudeSessionUuid}.jsonl`),
+      JSON.stringify({
+        type: 'assistant',
+        uuid: randomUUID(),
+        timestamp: new Date().toISOString(),
+        message: {
+          model: 'claude-opus-4-7',
+          content: [],
+          usage: {
+            input_tokens: 1,
+            output_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            service_tier: 'standard'
+          }
+        }
+      }) + '\n'
+    );
+
+    // The mapping must still be learned. Pre-fix: returns null (TTL
+    // pruned the entry). Post-fix: returns the claude session uuid.
+    await expect
+      .poll(
+        async () =>
+          callTestIpc<string | null>('__test:lookupBrokerSession', [wsName, brokerSessionId]),
+        { timeout: 8_000, intervals: [200, 500, 1000] }
+      )
+      .toBe(claudeSessionUuid);
+  } finally {
+    await app.close();
+  }
+});
+
 test('broker_sessions: multi-tab attaches that interleave with JSONL writes all get correct mappings (no concurrent-skip)', async () => {
   // The user's reported bug: opened a new workspace, typed in main →
   // no observability data; later sessions 2/3 → data shows. The

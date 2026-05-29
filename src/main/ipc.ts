@@ -423,8 +423,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   if (process.env.CLAUDE_FLEET_E2E === '1') {
     ipcMain.handle(
       '__test:recordPendingAttach',
-      (_e, workspaceName: string, brokerSessionId: string) => {
-        recordPendingAttach(workspaceName, brokerSessionId);
+      (_e, workspaceName: string, brokerSessionId: string, recordedAt?: number) => {
+        recordPendingAttach(workspaceName, brokerSessionId, recordedAt);
       }
     );
     ipcMain.handle(
