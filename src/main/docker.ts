@@ -19,6 +19,7 @@ import {
 } from './paths.js';
 import type { Workspace } from './workspaces.js';
 import { BrokerClient, brokerPtyStream } from './broker.js';
+import { recordPendingAttach } from './pendingAttaches.js';
 
 export const FLEET_LABEL = 'com.claude-fleet.managed';
 export const RUNNER_IMAGE = 'ghcr.io/imioimi/claude-fleet/runner:latest';
@@ -367,6 +368,15 @@ export async function attachPty(
   const c = docker.getContainer(containerId);
   const info = await c.inspect();
   const workspaceName = info.Name.replace(/^\//, '');
+
+  // Per-tab mapping: record this attach as "pending" so the
+  // JsonlWatcher's new-session hook can pair the broker session id
+  // with the claude UUID when the broker spawns a fresh claude. Cheap
+  // — module-scope map with a 30s TTL. See pendingAttaches.ts for the
+  // single-match disambiguation rule. Recorded BEFORE the actual
+  // attach so the timing window is honest about when the spawn could
+  // start (broker may dispatch immediately on receiving CREATE).
+  recordPendingAttach(workspaceName, sessionId);
 
   const sockPath = workspaceBrokerSocket(workspaceName);
   const client = new BrokerClient(sockPath);

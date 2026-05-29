@@ -210,6 +210,7 @@ async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {}): Promi
       'fs:isDirectory',
       'fs:mkdirp',
       'observability:summaryForWorkspace',
+      'observability:summaryForBrokerSession',
       'observability:getCost',
       'observability:getCostForWorkspace'
     ];
@@ -281,6 +282,18 @@ async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {}): Promi
     ipcMain.handle(
       'observability:summaryForWorkspace',
       (_e, workspaceName: string) => summaries[workspaceName] ?? null
+    );
+    // Per-tab variant. Tests don't model the broker_sessions table
+    // (that'd require driving real attach+JSONL flow), so mirror the
+    // server-side fallback: ignore the broker session id and return
+    // the workspace summary. Mock-mode UI still exercises the per-tab
+    // wiring (App.tsx fetches this endpoint when activeTabId is set);
+    // tests that care about ObservabilityPane data still see consistent
+    // values via observabilitySummaries[workspaceName].
+    ipcMain.handle(
+      'observability:summaryForBrokerSession',
+      (_e, workspaceName: string, _brokerSessionId: string) =>
+        summaries[workspaceName] ?? null
     );
     // Cost endpoints used by the sessions table and detail views;
     // return zeroed data for tests that don't care.

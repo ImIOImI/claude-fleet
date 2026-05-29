@@ -77,6 +77,27 @@ function migrate(d: Database.Database): void {
     `);
     d.pragma('user_version = 1');
   }
+  if (current < 2) {
+    // broker_sessions: maps each renderer-owned broker session id (the
+    // stable per-tab uid in sessions.json) to the claude-generated
+    // session UUID claude writes its JSONL under. Learned passively by
+    // the JsonlWatcher's onNewSession hook + a pending-attach map kept
+    // in docker.ts — see §11 "Per-tab mapping" in docs/SPEC.md.
+    // Persisted because mappings need to survive app restarts: when the
+    // broker still has the claude alive across restart, no new JSONL
+    // appears for us to re-learn from.
+    d.exec(`
+      CREATE TABLE broker_sessions (
+        workspace_name TEXT NOT NULL,
+        broker_session_id TEXT NOT NULL,
+        claude_session_id TEXT NOT NULL,
+        learned_at INTEGER NOT NULL,
+        PRIMARY KEY (workspace_name, broker_session_id)
+      );
+      CREATE INDEX idx_broker_sessions_claude ON broker_sessions(claude_session_id);
+    `);
+    d.pragma('user_version = 2');
+  }
 }
 
 // ── Ingest ────────────────────────────────────────────────────────────────
@@ -388,15 +409,35 @@ export interface WorkspaceSummary {
  */
 export function summaryForWorkspace(workspaceName: string, topToolsLimit = 5): WorkspaceSummary | null {
   const d = openDbOrThrow();
-  const session = d
+  const latest = d
     .prepare(`
-      SELECT id, ai_title, first_user_message, started_at, last_active_at
+      SELECT id
       FROM sessions
       WHERE workspace_name = ?
       ORDER BY COALESCE(last_active_at, 0) DESC
       LIMIT 1
     `)
-    .get(workspaceName) as
+    .get(workspaceName) as { id: string } | undefined;
+  if (!latest) return null;
+  return summaryForSession(latest.id, topToolsLimit);
+}
+
+/**
+ * Same shape as `summaryForWorkspace`, but scoped to one specific claude
+ * session UUID — the per-tab endpoint reaches here via
+ * `summaryForBrokerSession` after resolving the broker→claude mapping.
+ * Returns null when the session id has no rows in `sessions` (mapping
+ * stale, claude exited and the user wiped state, etc.).
+ */
+export function summaryForSession(sessionId: string, topToolsLimit = 5): WorkspaceSummary | null {
+  const d = openDbOrThrow();
+  const session = d
+    .prepare(`
+      SELECT id, ai_title, first_user_message, started_at, last_active_at
+      FROM sessions
+      WHERE id = ?
+    `)
+    .get(sessionId) as
     | {
         id: string;
         ai_title: string | null;
@@ -505,6 +546,66 @@ export function summaryForWorkspace(workspaceName: string, topToolsLimit = 5): W
     contextWindowTokens,
     topTools,
   };
+}
+
+// ── broker_sessions: per-tab mapping ──────────────────────────────────────
+//
+// Each terminal tab carries a renderer-owned `broker_session_id` (the
+// uid from sessions.json the broker uses as its session map key). When
+// the broker spawns claude for that tab, claude writes its JSONL under
+// a different UUID — the `claude_session_id`. We learn the mapping
+// once per tab (see the JsonlWatcher's onNewSession hook in ipc.ts)
+// and persist it so it survives app restart.
+
+/** Persist a (workspace, broker_session) → claude_session mapping. */
+export function learnBrokerSessionMapping(
+  workspaceName: string,
+  brokerSessionId: string,
+  claudeSessionId: string,
+): void {
+  const d = openDbOrThrow();
+  d.prepare(`
+    INSERT INTO broker_sessions (workspace_name, broker_session_id, claude_session_id, learned_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(workspace_name, broker_session_id) DO UPDATE SET
+      claude_session_id = excluded.claude_session_id,
+      learned_at = excluded.learned_at
+  `).run(workspaceName, brokerSessionId, claudeSessionId, Date.now());
+}
+
+/** Look up the claude_session_id for a broker session, or null if unmapped. */
+export function lookupBrokerSession(
+  workspaceName: string,
+  brokerSessionId: string,
+): string | null {
+  const d = openDbOrThrow();
+  const row = d.prepare(`
+    SELECT claude_session_id FROM broker_sessions
+    WHERE workspace_name = ? AND broker_session_id = ?
+  `).get(workspaceName, brokerSessionId) as { claude_session_id: string } | undefined;
+  return row?.claude_session_id ?? null;
+}
+
+/**
+ * Per-tab summary. Resolves broker→claude mapping; falls back to the
+ * workspace summary (the v1 most-recently-active heuristic) when no
+ * mapping is known — keeps the UI usable while the watcher is still
+ * learning, and for sessions that pre-date the mapping table.
+ */
+export function summaryForBrokerSession(
+  workspaceName: string,
+  brokerSessionId: string,
+  topToolsLimit = 5,
+): WorkspaceSummary | null {
+  const claudeId = lookupBrokerSession(workspaceName, brokerSessionId);
+  if (claudeId) {
+    const s = summaryForSession(claudeId, topToolsLimit);
+    if (s) return s;
+    // Mapping points at a session that's gone from `sessions` (state
+    // wiped, claude UUID never materialized). Fall through to workspace
+    // summary so the pane shows something usable.
+  }
+  return summaryForWorkspace(workspaceName, topToolsLimit);
 }
 
 // ── Cost rollup ───────────────────────────────────────────────────────────

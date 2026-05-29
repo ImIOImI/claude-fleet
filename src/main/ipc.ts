@@ -19,11 +19,14 @@ import type { JsonlWatcher } from './jsonlWatcher.js';
 import {
   eventsForSession,
   summaryForWorkspace,
+  summaryForBrokerSession,
   costForSession,
   costForWorkspace,
+  learnBrokerSessionMapping,
 } from './db.js';
 import { logError, getLogPath } from './errorLog.js';
 import { broadcastObservabilitySummary } from './observabilityBroadcast.js';
+import { consumeForWorkspace } from './pendingAttaches.js';
 
 export const MOCK_MODE = process.env.CLAUDE_FLEET_MOCK === '1';
 const backend = MOCK_MODE ? mockDocker : realDocker;
@@ -85,6 +88,18 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         { workspaceName, summary },
         BrowserWindow.getAllWindows()
       );
+    });
+    // Per-tab mapping: when a brand-new claude JSONL appears in a
+    // workspace, ask the pending-attach map if there's exactly one
+    // recent unmapped attach for that workspace. If so, persist the
+    // broker→claude pairing. Conservative single-match rule documented
+    // in pendingAttaches.ts; concurrent attaches fall back to the
+    // workspace summary (v1 behavior) until the user re-mounts a tab
+    // alone and we can disambiguate.
+    jsonlWatcher.on('new-session', ({ workspaceName, sessionId: claudeSessionId }) => {
+      const brokerSessionId = consumeForWorkspace(workspaceName);
+      if (!brokerSessionId) return;
+      learnBrokerSessionMapping(workspaceName, brokerSessionId, claudeSessionId);
     });
   }
 
@@ -356,6 +371,20 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
    */
   ipcMain.handle('observability:summaryForWorkspace', (_e, workspaceName: string) =>
     summaryForWorkspace(workspaceName)
+  );
+
+  /**
+   * Per-tab variant. Resolves broker→claude via the `broker_sessions`
+   * table and returns that session's summary; falls back to the
+   * workspace summary when no mapping is known (concurrent attach
+   * disambiguation skipped, mapping pre-dates this PR, etc.). Same
+   * `WorkspaceSummary` shape so the renderer treats both endpoints
+   * interchangeably.
+   */
+  ipcMain.handle(
+    'observability:summaryForBrokerSession',
+    (_e, workspaceName: string, brokerSessionId: string) =>
+      summaryForBrokerSession(workspaceName, brokerSessionId)
   );
 
   // Cost rollups (#32). USD is derived from `events` via pricing.ts and is
