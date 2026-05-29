@@ -45,6 +45,9 @@ export enum FrameType {
 
 const MAX_FRAME_PAYLOAD = 1 << 20; // mirror proto.MaxFramePayload
 
+/** Timeout for control-RPC responses. See `rpc()` for the rationale. */
+export const RPC_TIMEOUT_MS = 30_000;
+
 /**
  * Splits a stream of socket bytes into discrete frames. Push raw
  * chunks; pull complete frames via the iterator returned by `consume`.
@@ -261,10 +264,22 @@ export class BrokerClient extends EventEmitter {
       return Promise.reject(new Error(`broker: ${FrameType[responseType]} already in flight`));
     }
     return new Promise<Buffer>((resolve, reject) => {
+      // Why 30s and not 10s: the host-side flow does ATTACH → CREATE (if
+      // missing) → ATTACH on the same connection. CREATE inside the
+      // broker spawns the `claude` binary via pty.StartWithSize, and the
+      // first claude spawn after a workspace pause/resume cycle (or
+      // anywhere the broker's session map is empty) routinely takes
+      // 15–25s — auth checks, MCP server warm-up, sometimes a network
+      // call. A 10s timeout fires before that finishes; the broker
+      // eventually sends the response but the waiter is gone, producing
+      // both "ATTACHED timed out" (host) and "unsolicited frame type 4"
+      // (host, when the late response lands). 30s covers the observed
+      // worst case with margin without making honestly-stuck sessions
+      // hang the UI indefinitely.
       const timer = setTimeout(() => {
         this.waiters[responseType] = undefined;
         reject(new Error(`broker: ${FrameType[responseType]} timed out`));
-      }, 10_000);
+      }, RPC_TIMEOUT_MS);
       this.waiters[responseType] = (payload: Buffer): void => {
         clearTimeout(timer);
         resolve(payload);

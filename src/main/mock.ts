@@ -294,3 +294,11 @@ export async function attachPty(
     detach: () => shell.destroy()
   };
 }
+
+/**
+ * Mock has no real broker container, so there are no logs to surface.
+ * Returns empty so `ipc.ts` doesn't have to branch on mode.
+ */
+export async function getBrokerLogs(_containerId: string, _tailLines?: number): Promise<string> {
+  return '';
+}

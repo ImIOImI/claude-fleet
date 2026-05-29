@@ -436,3 +436,38 @@ export async function attachPty(
     }
   };
 }
+
+/**
+ * Read the last `tailLines` of the container's stdout/stderr. Used as
+ * diagnostic context when attachPty fails — the broker logs every
+ * accepted connection, dispatch error, and session lifecycle event, so
+ * when "ATTACHED timed out" fires on the host we want to see what the
+ * broker was actually doing. The runner image runs the broker as PID 1
+ * (per docker/Dockerfile), so its stdout/stderr IS the container's.
+ *
+ * Returns the empty string if anything goes wrong — this is a
+ * best-effort diagnostic; we never want it to mask the underlying
+ * attach error or throw a different one.
+ *
+ * The container's `Tty: true` (per `createContainer` above) means the
+ * logs API returns plain bytes (no docker-multiplex 8-byte headers),
+ * so we can decode and split lines directly.
+ */
+export async function getBrokerLogs(
+  containerId: string,
+  tailLines = 100
+): Promise<string> {
+  try {
+    const c = docker.getContainer(containerId);
+    const buf = await c.logs({
+      stdout: true,
+      stderr: true,
+      tail: tailLines,
+      timestamps: true,
+      follow: false,
+    });
+    return buf.toString('utf8');
+  } catch {
+    return '';
+  }
+}
