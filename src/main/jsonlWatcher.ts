@@ -46,13 +46,29 @@ export interface IngestEvent {
   sessionId: string;
 }
 
+/**
+ * Emitted the first time we see a JSONL file path — i.e. the first
+ * `process()` after `initState` for that path. This is the trigger the
+ * per-tab mapping layer uses to pair a freshly-spawned claude
+ * session UUID with a pending attach (see `pendingAttaches.ts` +
+ * `db.learnBrokerSessionMapping`). Fires before the corresponding
+ * `'ingest'` event for the same batch.
+ */
+export interface NewSessionEvent {
+  workspaceName: string;
+  sessionId: string;
+}
+
 // Typed event surface — TS doesn't get to constrain EventEmitter's own
 // signatures, so we expose a strict facade and assert the underlying calls.
 // Same approach Node's own docs suggest for typed events.
 export interface JsonlWatcher {
   on(event: 'ingest', listener: (e: IngestEvent) => void): this;
+  on(event: 'new-session', listener: (e: NewSessionEvent) => void): this;
   off(event: 'ingest', listener: (e: IngestEvent) => void): this;
+  off(event: 'new-session', listener: (e: NewSessionEvent) => void): this;
   emit(event: 'ingest', e: IngestEvent): boolean;
+  emit(event: 'new-session', e: NewSessionEvent): boolean;
 }
 
 export class JsonlWatcher extends EventEmitter {
@@ -146,8 +162,18 @@ export class JsonlWatcher extends EventEmitter {
   }
 
   private async process(path: string): Promise<void> {
-    const state = this.files.get(path) ?? this.initState(path);
+    const existing = this.files.get(path);
+    const state = existing ?? this.initState(path);
     if (!state) return;
+    // First sighting of this JSONL file path → fire 'new-session' so the
+    // mapping layer can pair this claude UUID with a pending attach.
+    // Fires before the eventual 'ingest' emit for this batch.
+    if (!existing) {
+      this.emit('new-session', {
+        workspaceName: state.workspaceName,
+        sessionId: state.sessionId,
+      });
+    }
 
     let stats: Stats;
     try {

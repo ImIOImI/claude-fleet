@@ -38,6 +38,16 @@ interface Props {
    */
   summary: WorkspaceObservabilitySummary | null;
   onResume: () => void;
+  /**
+   * Reports the active tab's broker session id whenever it changes
+   * (mount, tab-switch, close-last-and-recreate). App.tsx uses this to
+   * drive the per-tab observability summary lookup so the
+   * ObservabilityPane reflects whichever tab the user is looking at,
+   * not the workspace's most-recently-active claude session. Fires
+   * with the broker session id (the same uid the broker keys its
+   * session map by); empty string while the inventory is still loading.
+   */
+  onActiveTabChange?: (workspaceName: string, brokerSessionId: string) => void;
 }
 
 function contextBarPct(summary: WorkspaceObservabilitySummary | null): number {
@@ -72,7 +82,8 @@ export function TerminalPane({
   paused,
   visible,
   summary,
-  onResume
+  onResume,
+  onActiveTabChange
 }: Props) {
   const [loaded, setLoaded] = useState(false);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -151,6 +162,15 @@ export function TerminalPane({
         console.warn('sessions.write failed:', err);
       });
   }, [loaded, workspaceName, sessions, nextNum, activeId]);
+
+  // Bubble activeId up to App so the ObservabilityPane can target the
+  // claude session this tab maps to. Fires on inventory-load
+  // (initial activeId set), tab-click, addSession, and the close-last
+  // auto-recreate path — every setActiveId call.
+  useEffect(() => {
+    if (!activeId || !workspaceName) return;
+    onActiveTabChange?.(workspaceName, activeId);
+  }, [activeId, workspaceName, onActiveTabChange]);
 
   function addSession(): void {
     if (!loaded) return;

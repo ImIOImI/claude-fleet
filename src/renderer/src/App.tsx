@@ -62,6 +62,24 @@ export function App() {
     Record<string, WorkspaceObservabilitySummary | null>
   >({});
 
+  // Active terminal-tab id per workspace, bubbled up from each
+  // TerminalPane via onActiveTabChange. Drives the per-tab observability
+  // summary fetch for the selected workspace below — the ObservabilityPane
+  // shows the focused tab's claude session instead of the workspace's
+  // most-recently-active.
+  const [activeTabByWorkspace, setActiveTabByWorkspace] = useState<
+    Record<string, string>
+  >({});
+
+  // ObservabilityPane summary scoped to the selected workspace's active
+  // tab. Falls back to the workspace summary (`summaries[name]`) below
+  // when no per-tab data has arrived yet (initial fetch in flight, or
+  // mapping hasn't been learned because the broker still has the claude
+  // alive from a previous app run — see broker_sessions table).
+  const [activeTabSummary, setActiveTabSummary] = useState<
+    WorkspaceObservabilitySummary | null
+  >(null);
+
   const refresh = async () => {
     if (!window.api) return;
     const ok = await window.api.workspace.backendReady();
@@ -162,6 +180,45 @@ export function App() {
     };
   }, [apiReady, liveNames]);
 
+  // Per-tab observability fetch for the currently-selected workspace
+  // and active tab. Re-fires when either changes, plus whenever a push
+  // lands for the selected workspace (so the pane stays live without
+  // its own poll). Skipped when no workspace is selected or the tab id
+  // hasn't been bubbled up yet — in both cases the fallback chain in
+  // the JSX below (activeTabSummary ?? workspace summary) keeps the
+  // pane displaying something usable.
+  const selectedWorkspace = workspaces.find((w) => w.id === selectedId) ?? null;
+  const selectedWorkspaceName = selectedWorkspace?.name ?? null;
+  const activeTabId = selectedWorkspaceName
+    ? activeTabByWorkspace[selectedWorkspaceName] ?? null
+    : null;
+  useEffect(() => {
+    if (!apiReady || !selectedWorkspaceName || !activeTabId) {
+      setActiveTabSummary(null);
+      return;
+    }
+    let cancelled = false;
+    const fetchOne = async (): Promise<void> => {
+      try {
+        const s = await window.api.observability.summaryForBrokerSession(
+          selectedWorkspaceName,
+          activeTabId
+        );
+        if (!cancelled) setActiveTabSummary(s);
+      } catch {
+        if (!cancelled) setActiveTabSummary(null);
+      }
+    };
+    void fetchOne();
+    const unsubscribe = window.api.observability.onSummary((pushedWorkspace) => {
+      if (pushedWorkspace === selectedWorkspaceName) void fetchOne();
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [apiReady, selectedWorkspaceName, activeTabId]);
+
   if (!apiReady) {
     return (
       <div className="app">
@@ -180,8 +237,10 @@ export function App() {
   }
 
   // Selection is keyed by .id; the top strip filters out deleted ones so
-  // selectedId never refers to a deleted workspace.
-  const selected = workspaces.find((w) => w.id === selectedId) ?? null;
+  // selectedId never refers to a deleted workspace. `selectedWorkspace`
+  // is the same object — declared earlier so the per-tab observability
+  // effect above can depend on its `.name`.
+  const selected = selectedWorkspace;
   const liveCount = workspaces.filter((w) => w.state !== 'deleted').length;
 
   const handleCreate = async (
@@ -324,6 +383,13 @@ export function App() {
                     await window.api.workspace.start(w.name);
                     refresh();
                   }}
+                  onActiveTabChange={(wsName, brokerSessionId) => {
+                    setActiveTabByWorkspace((prev) =>
+                      prev[wsName] === brokerSessionId
+                        ? prev
+                        : { ...prev, [wsName]: brokerSessionId }
+                    );
+                  }}
                 />
               ))}
           </div>
@@ -331,7 +397,14 @@ export function App() {
 
         <ObservabilityPane
           workspaceName={selected?.name ?? null}
-          summary={selected ? summaries[selected.name] ?? null : null}
+          summary={
+            // Prefer the per-tab summary for the selected workspace's
+            // active tab; fall back to the workspace summary while the
+            // first per-tab fetch is in flight or when no mapping has
+            // been learned yet (broker→claude mapping is asynchronous —
+            // see §11 SPEC "Per-tab mapping").
+            activeTabSummary ?? (selected ? summaries[selected.name] ?? null : null)
+          }
         />
       </div>
 

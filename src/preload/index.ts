@@ -201,6 +201,21 @@ const api = {
     ): Promise<WorkspaceObservabilitySummary | null> =>
       ipcRenderer.invoke('observability:summaryForWorkspace', workspaceName),
     /**
+     * Per-tab variant — looks up the claude session UUID mapped to
+     * `brokerSessionId` and returns that session's summary. Falls back
+     * to the workspace summary when no mapping is known yet, so the
+     * caller always gets something usable.
+     */
+    summaryForBrokerSession: (
+      workspaceName: string,
+      brokerSessionId: string
+    ): Promise<WorkspaceObservabilitySummary | null> =>
+      ipcRenderer.invoke(
+        'observability:summaryForBrokerSession',
+        workspaceName,
+        brokerSessionId
+      ),
+    /**
      * Per-session USD + token totals. The summary endpoint already carries
      * `usd` for the active session, so the right-rail pane doesn't need
      * this call; it's here for the sessions table (#3) and future per-
