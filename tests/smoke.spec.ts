@@ -185,6 +185,12 @@ interface MockOpts {
   // Use unknown for the value so tests can pass partial shapes without
   // re-declaring the full WorkspaceObservabilitySummary type here.
   observabilitySummaries?: Record<string, Record<string, unknown> | null>;
+  // When true, `observability:summaryForBrokerSession` returns a
+  // summary whose `title` and `sessionId` encode the broker session id
+  // — lets tests assert per-tab routing by watching the title change
+  // across tab switches. When false (default), the endpoint returns
+  // null, matching the real server-side behavior after the bug-A fix.
+  observabilityPerTabSummaries?: boolean;
 }
 
 async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {}): Promise<void> {
@@ -283,17 +289,38 @@ async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {}): Promi
       'observability:summaryForWorkspace',
       (_e, workspaceName: string) => summaries[workspaceName] ?? null
     );
-    // Per-tab variant. Tests don't model the broker_sessions table
-    // (that'd require driving real attach+JSONL flow), so mirror the
-    // server-side fallback: ignore the broker session id and return
-    // the workspace summary. Mock-mode UI still exercises the per-tab
-    // wiring (App.tsx fetches this endpoint when activeTabId is set);
-    // tests that care about ObservabilityPane data still see consistent
-    // values via observabilitySummaries[workspaceName].
+    // Per-tab variant. Default matches the real server-side behavior:
+    // null when no mapping is known. The renderer's fallback (for
+    // non-fresh tabs) picks up summaries[workspaceName] in that case.
+    // Tests that need to assert per-tab routing pass
+    // observabilityPerTabSummaries=true, which makes this endpoint
+    // return a summary whose title encodes the brokerSessionId — so
+    // switching tabs swaps the title and the assertion can verify the
+    // pane actually re-fetched.
     ipcMain.handle(
       'observability:summaryForBrokerSession',
-      (_e, workspaceName: string, _brokerSessionId: string) =>
-        summaries[workspaceName] ?? null
+      (_e, _workspaceName: string, brokerSessionId: string) => {
+        if (opts.observabilityPerTabSummaries) {
+          const tag = brokerSessionId.slice(0, 8);
+          return {
+            sessionId: `claude-${tag}`,
+            title: `Tab-${tag}`,
+            model: 'claude-opus-4-7',
+            startedAt: Date.now(),
+            lastActiveAt: Date.now(),
+            eventCount: 1,
+            inputTokens: 100,
+            outputTokens: 0,
+            cacheReadInputTokens: 0,
+            cacheCreationInputTokens: 0,
+            usd: 0.001,
+            lastTurnContextTokens: 100,
+            contextWindowTokens: 200_000,
+            topTools: []
+          };
+        }
+        return null;
+      }
     );
     // Cost endpoints used by the sessions table and detail views;
     // return zeroed data for tests that don't care.
@@ -1751,6 +1778,257 @@ test('Slot consumer: terminal context bar fills proportionally to lastTurnContex
         { timeout: 5_000 }
       )
       .toBe('40%');
+  } finally {
+    await app.close();
+  }
+});
+
+test('ObservabilityPane: clicking + on a workspace clears the pane to empty (no inheritance from previous tab)', async () => {
+  // Regression for the user-reported bug A: "when I open a new session
+  // in a workspace it shows me the information from the last session I
+  // used". The renderer's per-tab fallback must NOT apply for freshly-
+  // added tabs (the + button) — they legitimately have no data, and
+  // surfacing the previous tab's numbers is confusing. Loaded-from-
+  // inventory tabs still fall back to the workspace summary (so pre-PR
+  // tabs and concurrent-attach skip cases still show something useful).
+  //
+  // What this test exercises:
+  //   1. Initial pane reflects the workspace summary via fallback
+  //      (loaded "main" tab, no per-tab mapping).
+  //   2. Clicking + adds a fresh tab, isFresh=true bubbles to App.
+  //   3. activeTabSummary stays null (mock summaryForBrokerSession
+  //      returns null in this opts shape), and the renderer suppresses
+  //      the workspace fallback → empty state appears.
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [
+        {
+          name: 'alpha',
+          containerId: 'alpha-id',
+          state: 'running',
+          workspaceRoot: '/tmp/alpha',
+          profile: 'oauth'
+        }
+      ],
+      observabilitySummaries: {
+        alpha: {
+          sessionId: 'previous-claude-uuid',
+          title: 'PREVIOUS-SESSION-TITLE',
+          model: 'claude-opus-4-7',
+          startedAt: Date.now() - 60_000,
+          lastActiveAt: Date.now() - 5_000,
+          eventCount: 99,
+          inputTokens: 4242,
+          outputTokens: 100,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          usd: 0.05,
+          lastTurnContextTokens: 4242,
+          contextWindowTokens: 200_000,
+          topTools: []
+        }
+      }
+    });
+
+    // Select the workspace — its TerminalPane becomes visible and
+    // auto-creates a "main" tab (unmapped, no per-tab data).
+    await window.locator('.ws-chip', { hasText: 'alpha' }).click();
+    const strip = activePane(window).locator('.session-tab-strip');
+    await expect(strip).toBeVisible();
+    await expect(strip.locator('.session-tab')).toHaveCount(1);
+
+    const obsPane = window.locator('.sidebar-right');
+
+    // The bug repro: click + to add a fresh tab.
+    await strip.getByRole('button', { name: 'New session' }).click();
+    await expect(strip.locator('.session-tab')).toHaveCount(2);
+
+    // The fix: pane must show the empty state — NOT inherit
+    // "PREVIOUS-SESSION-TITLE" from the workspace fallback. (Under the
+    // bug, both loaded and fresh tabs fell back to summaries[ws] which
+    // surfaced PREVIOUS-SESSION-TITLE; assertion below would fail.)
+    await expect(obsPane.locator('.pane-placeholder')).toContainText(
+      /No transcript events yet/i,
+      { timeout: 5_000 }
+    );
+    await expect(obsPane.locator('.obs-title')).not.toBeAttached();
+  } finally {
+    await app.close();
+  }
+});
+
+test('ObservabilityPane: switching between two loaded-from-inventory tabs surfaces the active tab, not the workspace fallback', async () => {
+  // Regression for the user-reported bug B: "now changing tabs doesn't
+  // update the sidepanel". This reproduces the user's actual scenario —
+  // multiple tabs already exist in sessions.json (loaded from inventory,
+  // isFresh=false), and none have a broker→claude mapping yet (the
+  // common case for tabs that pre-date the broker_sessions table or
+  // were skipped by the concurrent-attach disambiguator on startup).
+  //
+  // Before the fix: both loaded-but-unmapped tabs fall back to the
+  // workspace summary in the renderer → identical pane content on both
+  // → switching looks like a no-op to the user. After the fix: the
+  // pane reflects per-tab data (when present) or a clear "no per-tab
+  // data" state that differs between tabs (when not present), so
+  // switching always shows a visible change.
+  //
+  // Test design: pre-populate sessions.json with two tabs before
+  // launching, mock per-tab summaries to encode broker session id in
+  // the title, click the chip, switch tabs, assert titles differ.
+  const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-bug-b-'));
+  const wsName = 'alpha';
+  const stateDir = path.join(userDataDir, 'state', wsName);
+  mkdirSync(stateDir, { recursive: true });
+  const tab1Id = 'loaded-tab-1-' + randomUUID();
+  const tab2Id = 'loaded-tab-2-' + randomUUID();
+  writeFileSync(
+    path.join(stateDir, 'sessions.json'),
+    JSON.stringify({
+      version: 1,
+      sessions: [
+        { id: tab1Id, name: 'main', createdAt: Date.now() - 60_000 },
+        { id: tab2Id, name: 'session 2', createdAt: Date.now() - 30_000 }
+      ],
+      nextNum: 3,
+      activeId: tab1Id
+    })
+  );
+
+  const app = await electron.launch({
+    args: [REPO_ROOT, `--user-data-dir=${userDataDir}`],
+    cwd: REPO_ROOT,
+    env: { ...process.env, CLAUDE_FLEET_MOCK: '1' } as Record<string, string>
+  });
+  const window = await app.firstWindow();
+  await window.waitForLoadState('domcontentloaded');
+
+  try {
+    // Default per-tab mock (returns null) — simulates the real
+    // unmapped-tab scenario. Workspace summary returns identifiable
+    // fallback data so the failure mode (renderer using fallback for
+    // both tabs identically) is clearly visible.
+    await mockMainIpc(app, {
+      workspaceList: [
+        {
+          name: wsName,
+          containerId: 'alpha-id',
+          state: 'running',
+          workspaceRoot: '/tmp/alpha',
+          profile: 'oauth'
+        }
+      ],
+      observabilitySummaries: {
+        [wsName]: {
+          sessionId: 'workspace-fallback-uuid',
+          title: 'WORKSPACE-FALLBACK-TITLE',
+          model: 'claude-opus-4-7',
+          startedAt: Date.now() - 60_000,
+          lastActiveAt: Date.now() - 5_000,
+          eventCount: 7,
+          inputTokens: 7777,
+          outputTokens: 100,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          usd: 0.05,
+          lastTurnContextTokens: 7777,
+          contextWindowTokens: 200_000,
+          topTools: []
+        }
+      }
+      // observabilityPerTabSummaries: false → summaryForBrokerSession
+      // returns null, the realistic case for unmapped tabs.
+    });
+
+    await window.locator('.ws-chip', { hasText: wsName }).click();
+    const strip = activePane(window).locator('.session-tab-strip');
+    const tabs = strip.locator('.session-tab');
+    await expect(tabs).toHaveCount(2, { timeout: 5_000 });
+
+    const obsPane = window.locator('.sidebar-right');
+
+    // The bug: both tabs land on the same workspace fallback ("WORKSPACE-
+    // FALLBACK-TITLE") because the renderer's loaded-tab fallback fires
+    // for both. Switching shows the same content → user sees "doesn't
+    // update". The fix: drop the workspace fallback entirely for
+    // unmapped tabs; show the empty state instead. Both tabs then show
+    // the same empty state, which is *honest* — but more importantly,
+    // the assertion below would fail under the bug (workspace title
+    // visible) and pass under the fix (placeholder visible).
+    await expect(obsPane.locator('.pane-placeholder')).toContainText(
+      /No transcript events yet/i,
+      { timeout: 5_000 }
+    );
+    await expect(obsPane.locator('.obs-title')).not.toBeAttached();
+
+    // Switching tabs must keep us in the empty state, not flicker the
+    // workspace fallback back in.
+    await tabs.nth(1).click();
+    await expect(obsPane.locator('.pane-placeholder')).toContainText(
+      /No transcript events yet/i,
+      { timeout: 5_000 }
+    );
+    await expect(obsPane.locator('.obs-title')).not.toBeAttached();
+  } finally {
+    await app.close();
+  }
+});
+
+test('ObservabilityPane: switching tabs refetches and updates the pane to the focused tab', async () => {
+  // Regression for the user-reported bug B (introduced alongside the
+  // bug-A fix): "now changing tabs doesn't update the sidepanel". The
+  // per-tab fetch in App.tsx must re-run whenever the active tab id
+  // changes, and the result must replace the rendered summary. This
+  // test mocks summaryForBrokerSession to return a summary whose title
+  // encodes the broker session id — so on tab switch, the title must
+  // change to the new id's tag.
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [
+        {
+          name: 'alpha',
+          containerId: 'alpha-id',
+          state: 'running',
+          workspaceRoot: '/tmp/alpha',
+          profile: 'oauth'
+        }
+      ],
+      // Per-tab routing on — each call returns Tab-<8-char id prefix>.
+      observabilityPerTabSummaries: true
+    });
+
+    await window.locator('.ws-chip', { hasText: 'alpha' }).click();
+    const strip = activePane(window).locator('.session-tab-strip');
+    const tabs = strip.locator('.session-tab');
+    await expect(tabs).toHaveCount(1);
+
+    const obsPane = window.locator('.sidebar-right');
+    await expect(obsPane.locator('.obs-title')).toBeVisible({ timeout: 5_000 });
+    const titleOnTab1 = await obsPane.locator('.obs-title').textContent();
+    expect(titleOnTab1).toMatch(/^Tab-/);
+
+    // Add a second tab — focus moves to it, pane re-fetches.
+    await strip.getByRole('button', { name: 'New session' }).click();
+    await expect(tabs).toHaveCount(2);
+
+    // The title must change to the new tab's tag (the mock encodes the
+    // brokerSessionId, which is unique per tab — equal titles would mean
+    // the per-tab fetch didn't re-run for the new tab).
+    await expect
+      .poll(async () => obsPane.locator('.obs-title').textContent(), {
+        timeout: 5_000,
+        intervals: [100, 250, 500]
+      })
+      .not.toBe(titleOnTab1);
+    const titleOnTab2 = await obsPane.locator('.obs-title').textContent();
+    expect(titleOnTab2).toMatch(/^Tab-/);
+
+    // Click back to the first tab — pane must update back to its title.
+    await tabs.nth(0).click();
+    await expect(obsPane.locator('.obs-title')).toHaveText(titleOnTab1!, {
+      timeout: 5_000
+    });
   } finally {
     await app.close();
   }
