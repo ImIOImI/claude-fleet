@@ -1352,6 +1352,265 @@ test('Watcher: picks up JSONLs written to a workspace whose dir was missing at r
   }
 });
 
+test('broker_sessions: a single pending attach is consumed and mapping is learned when claude writes its first JSONL', async () => {
+  // Regression for the user-reported bug: "I opened a new workspace,
+  // typed in 'main', no observability data showed". The mapping-learning
+  // path is: attachPty records a pending attach, claude spawns and
+  // writes its first JSONL, JsonlWatcher emits 'new-session' on first
+  // sighting, ipc.ts consumes the pending attach + persists the
+  // mapping. This test exercises that pipeline end-to-end against the
+  // real watcher + real DB. If it fails, the mapping isn't being
+  // learned even in the simple single-attach case.
+  //
+  // We can't reach attachPty (needs docker + broker), so a test-only
+  // IPC `__test:recordPendingAttach` injects the pending attach
+  // directly. Then we write a JSONL file to the workspace's dir
+  // (simulating what claude would do once spawned). The watcher's
+  // chokidar 'add' event fires, process() emits 'new-session', and
+  // the ipc.ts listener should pair the two.
+  const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-mapping-'));
+  const wsName = 'first-tab-workspace';
+  const stateDir = path.join(userDataDir, 'state', wsName);
+  const projectsDir = path.join(stateDir, '.claude', 'projects', '-workspace');
+  mkdirSync(projectsDir, { recursive: true });
+  writeFileSync(
+    path.join(stateDir, 'workspace.json'),
+    JSON.stringify({
+      name: wsName,
+      workspaceRoot: '/tmp/fleet-test-' + wsName,
+      workspaceSubdir: '',
+      profile: 'oauth',
+      kind: 'container',
+      image: 'mock',
+      createdAt: Date.now(),
+      lastUsedAt: Date.now()
+    })
+  );
+
+  const app = await electron.launch({
+    args: [REPO_ROOT, `--user-data-dir=${userDataDir}`],
+    cwd: REPO_ROOT,
+    env: {
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(([k]) => k !== 'CLAUDE_FLEET_MOCK')
+      ),
+      // Enable the test-only IPC handlers so we can drive recordPendingAttach
+      // without going through the real docker/broker stack.
+      CLAUDE_FLEET_E2E: '1'
+    } as Record<string, string>
+  });
+  const window = await app.firstWindow();
+  await window.waitForLoadState('domcontentloaded');
+
+  try {
+    // Simulate the renderer's attachPty by injecting a pending attach
+    // for "main"'s broker session id. In real usage this is recorded
+    // by docker.ts attachPty when the renderer calls pty:attach.
+    // contextIsolation hides ipcRenderer from the renderer context, so
+    // we invoke the test IPC through the main process — playwright's
+    // app.evaluate runs there and can dispatch into the ipcMain
+    // handlers directly by calling them via require'd helpers.
+    const brokerSessionId = 'broker-main-tab-id-aaaaaaaa';
+    await app.evaluate(
+      ({ ipcMain }, [name, id]) => {
+        // Pull the handler's stored callback off ipcMain's internal map
+        // and invoke it. This is the cleanest way to drive a test-only
+        // IPC from playwright without going through a renderer that
+        // can't see ipcRenderer (contextIsolation: true).
+        const internal = (ipcMain as unknown as {
+          _invokeHandlers: Map<string, (...args: unknown[]) => unknown>;
+        })._invokeHandlers;
+        const handler = internal.get('__test:recordPendingAttach');
+        if (!handler) throw new Error('__test:recordPendingAttach not registered');
+        return handler({ sender: null }, name, id);
+      },
+      [wsName, brokerSessionId] as const
+    );
+
+    // Now write a JSONL file simulating claude's first event. The
+    // watcher's chokidar 'add' should fire, process() emits
+    // 'new-session', and the listener consumes the pending attach +
+    // learns the mapping.
+    const claudeSessionUuid = randomUUID();
+    writeFileSync(
+      path.join(projectsDir, `${claudeSessionUuid}.jsonl`),
+      JSON.stringify({
+        type: 'assistant',
+        uuid: randomUUID(),
+        timestamp: new Date().toISOString(),
+        message: {
+          model: 'claude-opus-4-7',
+          content: [],
+          usage: {
+            input_tokens: 123,
+            output_tokens: 45,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            service_tier: 'standard'
+          }
+        }
+      }) + '\n'
+    );
+
+    // Poll the mapping table — the listener runs synchronously after
+    // 'new-session', so within 5s of the file landing the mapping must
+    // be present. If null persists past timeout, the learning path is
+    // broken for the single-pending-attach case.
+    await expect
+      .poll(
+        async () => {
+          return await app.evaluate(
+            async ({ ipcMain }, [name, id]) => {
+              const internal = (ipcMain as unknown as {
+                _invokeHandlers: Map<string, (...args: unknown[]) => unknown>;
+              })._invokeHandlers;
+              const handler = internal.get('__test:lookupBrokerSession');
+              if (!handler) return null;
+              return (await handler({ sender: null }, name, id)) as string | null;
+            },
+            [wsName, brokerSessionId] as const
+          );
+        },
+        { timeout: 8_000, intervals: [200, 500, 1000] }
+      )
+      .toBe(claudeSessionUuid);
+  } finally {
+    await app.close();
+  }
+});
+
+test('broker_sessions: multi-tab attaches that interleave with JSONL writes all get correct mappings (no concurrent-skip)', async () => {
+  // The user's reported bug: opened a new workspace, typed in main →
+  // no observability data; later sessions 2/3 → data shows. The
+  // single-match disambiguator in pendingAttaches.ts is the most
+  // likely cause: when the user adds tabs rapidly before main's claude
+  // has written its first JSONL, MULTIPLE pending attaches exist
+  // simultaneously and none get mapped (count != 1 → skip).
+  //
+  // The fix needs to map them anyway — by arrival order, since the
+  // broker handles attaches sequentially per-connection and each
+  // claude writes its first JSONL in roughly that same order. The
+  // existing single-match rule documentation called concurrent
+  // ambiguous-to-pair, but in practice the renderer + IPC layer
+  // serialize these enough that FIFO matching is reliable.
+  //
+  // Test design: inject 3 pending attaches in order, then write 3
+  // JSONL files in order, assert all three mappings land on the
+  // right (broker → claude) pair. This currently fails (no mappings
+  // learned because count != 1 each time); the fix is to switch
+  // from single-match to FIFO-by-record-order.
+  const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-multi-attach-'));
+  const wsName = 'multi-tab-workspace';
+  const stateDir = path.join(userDataDir, 'state', wsName);
+  const projectsDir = path.join(stateDir, '.claude', 'projects', '-workspace');
+  mkdirSync(projectsDir, { recursive: true });
+  writeFileSync(
+    path.join(stateDir, 'workspace.json'),
+    JSON.stringify({
+      name: wsName,
+      workspaceRoot: '/tmp/fleet-test-' + wsName,
+      workspaceSubdir: '',
+      profile: 'oauth',
+      kind: 'container',
+      image: 'mock',
+      createdAt: Date.now(),
+      lastUsedAt: Date.now()
+    })
+  );
+
+  const app = await electron.launch({
+    args: [REPO_ROOT, `--user-data-dir=${userDataDir}`],
+    cwd: REPO_ROOT,
+    env: {
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(([k]) => k !== 'CLAUDE_FLEET_MOCK')
+      ),
+      CLAUDE_FLEET_E2E: '1'
+    } as Record<string, string>
+  });
+  const window = await app.firstWindow();
+  await window.waitForLoadState('domcontentloaded');
+
+  try {
+    const brokerMainId = 'broker-main-aaaaaaaaaaaaaaaaaaaaaaaa';
+    const brokerS2Id = 'broker-sess2-bbbbbbbbbbbbbbbbbbbbbbbb';
+    const brokerS3Id = 'broker-sess3-cccccccccccccccccccccccc';
+    const claudeMainUuid = '11111111-1111-1111-1111-111111111111';
+    const claudeS2Uuid = '22222222-2222-2222-2222-222222222222';
+    const claudeS3Uuid = '33333333-3333-3333-3333-333333333333';
+
+    // Helper to call test IPCs through ipcMain's internal map.
+    const callTestIpc = async <T>(channel: string, args: unknown[]): Promise<T> =>
+      app.evaluate(
+        async ({ ipcMain }, [ch, a]) => {
+          const internal = (ipcMain as unknown as {
+            _invokeHandlers: Map<string, (...args: unknown[]) => unknown>;
+          })._invokeHandlers;
+          const handler = internal.get(ch as string);
+          if (!handler) throw new Error(`${ch as string} not registered`);
+          return (await handler({ sender: null }, ...(a as unknown[]))) as T;
+        },
+        [channel, args] as const
+      );
+
+    // Simulate the user creating three tabs quickly — all three
+    // pty:attach calls land before any claude has written its first
+    // JSONL.
+    await callTestIpc('__test:recordPendingAttach', [wsName, brokerMainId]);
+    await callTestIpc('__test:recordPendingAttach', [wsName, brokerS2Id]);
+    await callTestIpc('__test:recordPendingAttach', [wsName, brokerS3Id]);
+
+    // Now write all three JSONLs in the order the claudes spawned —
+    // typically the SAME order as the attaches (broker is sequential
+    // per-connection, but parallel across connections; in practice
+    // first-attached spawns first because it had a head start).
+    const writeJsonl = (uuid: string): void => {
+      writeFileSync(
+        path.join(projectsDir, `${uuid}.jsonl`),
+        JSON.stringify({
+          type: 'assistant',
+          uuid: randomUUID(),
+          timestamp: new Date().toISOString(),
+          message: {
+            model: 'claude-opus-4-7',
+            content: [],
+            usage: {
+              input_tokens: 1,
+              output_tokens: 0,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+              service_tier: 'standard'
+            }
+          }
+        }) + '\n'
+      );
+    };
+    writeJsonl(claudeMainUuid);
+    writeJsonl(claudeS2Uuid);
+    writeJsonl(claudeS3Uuid);
+
+    // All three should land under the expected broker session id
+    // within 5s. The bug: under the current single-match rule, all
+    // three new-session events return null (count=3 at each call) and
+    // no mapping is learned.
+    await expect
+      .poll(
+        async () =>
+          callTestIpc<string | null>('__test:lookupBrokerSession', [wsName, brokerMainId]),
+        { timeout: 8_000, intervals: [200, 500, 1000] }
+      )
+      .toBe(claudeMainUuid);
+    expect(
+      await callTestIpc<string | null>('__test:lookupBrokerSession', [wsName, brokerS2Id])
+    ).toBe(claudeS2Uuid);
+    expect(
+      await callTestIpc<string | null>('__test:lookupBrokerSession', [wsName, brokerS3Id])
+    ).toBe(claudeS3Uuid);
+  } finally {
+    await app.close();
+  }
+});
+
 test('summaryForBrokerSession: returns null for an unmapped broker session (fresh tab — no workspace fallback)', async () => {
   // Regression for: "when I open a new session in a workspace it shows
   // me the information from the last session I used". The fix in

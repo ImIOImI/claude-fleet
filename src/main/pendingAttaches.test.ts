@@ -28,17 +28,33 @@ describe('pendingAttaches', () => {
     expect(consumeForWorkspace('ws-a', 1_500)).toBeNull();
   });
 
-  // The conservative disambiguation rule: multiple concurrent attaches
-  // for the same workspace cannot be reliably paired with arriving
-  // JSONLs in order (broker goroutines race), so we skip mapping
-  // entirely. The caller's fallback (summaryForWorkspace) keeps the UI
-  // working — wrong mapping is strictly worse than no mapping.
-  it('returns null when more than one attach is pending for the same workspace', () => {
+  // FIFO matching: when multiple are pending for the same workspace,
+  // consume the oldest. The previous "skip when count > 1" rule left
+  // the user-reported "open new workspace, type in main → no
+  // observability data" scenario broken; FIFO trades the rare
+  // race-induced swapped mapping for the common case of N attaches +
+  // N JSONLs all mapped correctly in order.
+  it('returns the oldest pending attach when multiple are pending (FIFO)', () => {
     recordPendingAttach('ws-a', 'broker-1', 1_000);
     recordPendingAttach('ws-a', 'broker-2', 1_050);
-    expect(consumeForWorkspace('ws-a', 1_500)).toBeNull();
-    // Both entries remain pending — neither was consumed.
-    expect(consumeForWorkspace('ws-a', 1_600)).toBeNull();
+    expect(consumeForWorkspace('ws-a', 1_500)).toBe('broker-1');
+    // broker-2 still queued; next consume returns it.
+    expect(consumeForWorkspace('ws-a', 1_600)).toBe('broker-2');
+    // Now empty.
+    expect(consumeForWorkspace('ws-a', 1_700)).toBeNull();
+  });
+
+  it('drains N pending attaches over N consume calls in insertion order', () => {
+    // The exact pattern from the user-reported bug: 3 tabs created in
+    // quick succession, 3 JSONLs follow. Each new-session fires
+    // consumeForWorkspace; under FIFO all three pair up correctly.
+    recordPendingAttach('ws-a', 'broker-main', 1_000);
+    recordPendingAttach('ws-a', 'broker-s2', 1_010);
+    recordPendingAttach('ws-a', 'broker-s3', 1_020);
+    expect(consumeForWorkspace('ws-a', 1_100)).toBe('broker-main');
+    expect(consumeForWorkspace('ws-a', 1_110)).toBe('broker-s2');
+    expect(consumeForWorkspace('ws-a', 1_120)).toBe('broker-s3');
+    expect(consumeForWorkspace('ws-a', 1_130)).toBeNull();
   });
 
   it('ignores expired entries (older than the window)', () => {
@@ -75,7 +91,9 @@ describe('pendingAttaches', () => {
   it('does not dedupe distinct broker ids in the same workspace', () => {
     recordPendingAttach('ws-a', 'broker-1', 1_000);
     recordPendingAttach('ws-a', 'broker-2', 1_001);
-    // Two entries → single-match rule fails.
-    expect(consumeForWorkspace('ws-a', 1_500)).toBeNull();
+    // Two entries → FIFO returns the older one; the second consume
+    // returns the second one.
+    expect(consumeForWorkspace('ws-a', 1_500)).toBe('broker-1');
+    expect(consumeForWorkspace('ws-a', 1_600)).toBe('broker-2');
   });
 });

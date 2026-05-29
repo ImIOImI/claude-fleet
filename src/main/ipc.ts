@@ -23,10 +23,11 @@ import {
   costForSession,
   costForWorkspace,
   learnBrokerSessionMapping,
+  lookupBrokerSession,
 } from './db.js';
 import { logError, getLogPath } from './errorLog.js';
 import { broadcastObservabilitySummary } from './observabilityBroadcast.js';
-import { consumeForWorkspace } from './pendingAttaches.js';
+import { consumeForWorkspace, recordPendingAttach } from './pendingAttaches.js';
 
 export const MOCK_MODE = process.env.CLAUDE_FLEET_MOCK === '1';
 const backend = MOCK_MODE ? mockDocker : realDocker;
@@ -413,4 +414,23 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     }
   );
   ipcMain.handle('app:errorLogPath', () => getLogPath());
+
+  // Test-only IPC handlers. Gated by CLAUDE_FLEET_E2E=1 so they don't
+  // ship in production builds. The mapping-learning path normally
+  // depends on the docker/broker stack (attachPty records the pending
+  // attach), which playwright can't reach — these handlers let an
+  // e2e test drive the same logic against the real watcher + DB.
+  if (process.env.CLAUDE_FLEET_E2E === '1') {
+    ipcMain.handle(
+      '__test:recordPendingAttach',
+      (_e, workspaceName: string, brokerSessionId: string) => {
+        recordPendingAttach(workspaceName, brokerSessionId);
+      }
+    );
+    ipcMain.handle(
+      '__test:lookupBrokerSession',
+      (_e, workspaceName: string, brokerSessionId: string) =>
+        lookupBrokerSession(workspaceName, brokerSessionId)
+    );
+  }
 }

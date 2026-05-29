@@ -3,15 +3,26 @@
 // JsonlWatcher first sees a new claude JSONL in a workspace, it asks
 // `consumeForWorkspace` for the matching pending attach.
 //
-// Disambiguation: we only auto-map when exactly ONE pending attach is
-// in flight for the workspace inside the window. Concurrent attaches
-// (e.g., three tabs re-mounted simultaneously on app restart) deliver
-// multiple new-JSONL events in close succession; without an explicit
-// id we'd have to pair them by arrival order, and broker goroutines
-// can race. A wrong mapping shows wrong data for a tab forever, which
-// is strictly worse than no mapping (no mapping falls back to the
-// workspace summary — v1 behavior). So this module is conservative
-// by design: when in doubt, skip and let the fallback handle it.
+// Matching policy: **FIFO**. When `consumeForWorkspace` is called, the
+// oldest pending attach for that workspace is consumed and returned.
+//
+// The previous single-match-only rule (skip when count > 1) was too
+// conservative: in practice a user creating multiple tabs in quick
+// succession leaves N pending attaches and N JSONL writes follow
+// within milliseconds. Under single-match all N were skipped — the
+// ObservabilityPane stayed empty on every tab, the exact bug a user
+// reported when typing in the auto-created "main" tab of a fresh
+// workspace and clicking + a couple of times before claude had
+// written its first event.
+//
+// FIFO maps them all and is correct in the common case where the
+// broker goroutines spawn claudes in roughly attach-order (the host
+// dispatches pty:attach sequentially per renderer mount; each spawn
+// runs in its own goroutine but the first to start usually finishes
+// first). The known failure mode — broker goroutines race and the
+// second-attached claude writes its JSONL first — produces a swapped
+// pairing for that batch; rare enough that "wrong sometimes" beats
+// "always blank" by a wide margin.
 //
 // Pure module — no DB, no fs, no electron. Module-scope state, but the
 // tests can clear it via `_resetForTests`.
@@ -51,11 +62,10 @@ export function recordPendingAttach(
 }
 
 /**
- * Look for a single unambiguous pending attach for the given workspace
- * within the window. Returns the matched `brokerSessionId` and removes
- * it from the pending list; returns null when there are zero or >1
- * candidates (the "ambiguous, skip" case — see the top-of-file
- * disambiguation rule). Always prunes expired entries as a side effect.
+ * Take the oldest non-expired pending attach for the workspace and
+ * return its `brokerSessionId` (removing it from the queue). Returns
+ * null only when no pending attach exists for the workspace inside the
+ * window. Pruning runs as a side effect on every call.
  */
 export function consumeForWorkspace(
   workspaceName: string,
@@ -63,11 +73,10 @@ export function consumeForWorkspace(
   windowMs = DEFAULT_WINDOW_MS,
 ): string | null {
   pruneExpired(now, windowMs);
-  const matches = pending.filter((p) => p.workspaceName === workspaceName);
-  if (matches.length !== 1) return null;
-  const match = matches[0]!;
-  const idx = pending.indexOf(match);
-  if (idx >= 0) pending.splice(idx, 1);
+  const idx = pending.findIndex((p) => p.workspaceName === workspaceName);
+  if (idx === -1) return null;
+  const match = pending[idx]!;
+  pending.splice(idx, 1);
   return match.brokerSessionId;
 }
 
