@@ -23,6 +23,7 @@ import {
   costForWorkspace,
 } from './db.js';
 import { logError, getLogPath } from './errorLog.js';
+import { broadcastObservabilitySummary } from './observabilityBroadcast.js';
 
 export const MOCK_MODE = process.env.CLAUDE_FLEET_MOCK === '1';
 const backend = MOCK_MODE ? mockDocker : realDocker;
@@ -75,14 +76,15 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // workspace summary once and broadcast to every BrowserWindow. The renderer
   // subscribes via `observability.onSummary` (see preload) and updates the
   // shared summaries map without polling. A 30s safety poll in App.tsx
-  // refreshes relative-time displays and covers any missed event.
+  // refreshes relative-time displays and covers any missed event. See
+  // `observabilityBroadcast.ts` for why per-target sends are guarded.
   if (jsonlWatcher) {
     jsonlWatcher.on('ingest', ({ workspaceName }) => {
       const summary = summaryForWorkspace(workspaceName);
-      const payload = { workspaceName, summary };
-      for (const win of BrowserWindow.getAllWindows()) {
-        if (!win.isDestroyed()) win.webContents.send('observability:summary', payload);
-      }
+      broadcastObservabilitySummary(
+        { workspaceName, summary },
+        BrowserWindow.getAllWindows()
+      );
     });
   }
 
