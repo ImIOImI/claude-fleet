@@ -233,7 +233,34 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // is the workspace-persistent id the broker keys its session map
       // by). The renderer doesn't need to learn the broker id.
       const ptyHandleId = randomUUID();
-      const handle = await backend.attachPty(containerId, brokerSessionId, cols, rows);
+      let handle: PtyHandle;
+      try {
+        handle = await backend.attachPty(containerId, brokerSessionId, cols, rows);
+      } catch (err) {
+        // Capture the broker's recent stdout/stderr so the user has
+        // something to diagnose with. The classic symptom we're chasing
+        // is "broker: ATTACHED timed out" after a pause/resume — the
+        // broker is alive but slow to dispatch the response. Without
+        // these logs we have no visibility into what the broker is
+        // doing on the other side of the socket. Best-effort: if the
+        // logs call itself fails (container gone, dockerode flaked),
+        // getBrokerLogs returns '' and we just rethrow the original.
+        const brokerLog = await backend.getBrokerLogs(containerId, 100);
+        logError({
+          source: 'main',
+          type: 'pty-attach-failed',
+          message: `pty:attach failed: ${(err as Error).message}`,
+          stack: err instanceof Error ? err.stack : undefined,
+          extra: {
+            brokerSessionId,
+            containerId,
+            cols,
+            rows,
+            brokerLog: brokerLog || '(no broker logs available)',
+          },
+        });
+        throw err;
+      }
       ptySessions.set(ptyHandleId, handle);
       // Diagnostic: ptySessions.size should oscillate around the count of
       // currently-mounted TerminalSession components. Unbounded growth =
