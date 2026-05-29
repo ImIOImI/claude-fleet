@@ -587,10 +587,17 @@ export function lookupBrokerSession(
 }
 
 /**
- * Per-tab summary. Resolves broker→claude mapping; falls back to the
- * workspace summary (the v1 most-recently-active heuristic) when no
- * mapping is known — keeps the UI usable while the watcher is still
- * learning, and for sessions that pre-date the mapping table.
+ * Per-tab summary. Resolves the broker→claude mapping and returns that
+ * session's summary, or null when no mapping is known.
+ *
+ * **No workspace fallback here.** A brand-new tab the user just opened
+ * carries an unmapped broker session id but legitimately has no data;
+ * returning the workspace's most-recently-active session in that case
+ * surfaces the *previous* tab's numbers — confusing ("why does my new
+ * tab already show 4K tokens?"). Renderer decides when to apply a
+ * workspace fallback: tabs loaded from `sessions.json` get one (best
+ * guess for tabs that pre-date this table or were skipped by the
+ * concurrent-attach disambiguator); freshly-added tabs do not.
  */
 export function summaryForBrokerSession(
   workspaceName: string,
@@ -598,14 +605,8 @@ export function summaryForBrokerSession(
   topToolsLimit = 5,
 ): WorkspaceSummary | null {
   const claudeId = lookupBrokerSession(workspaceName, brokerSessionId);
-  if (claudeId) {
-    const s = summaryForSession(claudeId, topToolsLimit);
-    if (s) return s;
-    // Mapping points at a session that's gone from `sessions` (state
-    // wiped, claude UUID never materialized). Fall through to workspace
-    // summary so the pane shows something usable.
-  }
-  return summaryForWorkspace(workspaceName, topToolsLimit);
+  if (!claudeId) return null;
+  return summaryForSession(claudeId, topToolsLimit);
 }
 
 // ── Cost rollup ───────────────────────────────────────────────────────────
