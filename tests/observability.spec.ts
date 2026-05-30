@@ -1,0 +1,540 @@
+// ObservabilityPane content, slot consumers (chip subline + terminal
+// context bar), and the live-push channel from the JsonlWatcher to
+// the renderer. Mixed: most exercise mock-mode + mockMainIpc, but
+// `Live push` needs the real watcher + DB and bypasses the mock IPC.
+
+import { _electron as electron, test, expect } from '@playwright/test';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { launch, mockMainIpc, activePane, REPO_ROOT } from './_helpers.js';
+
+test('Live push: renderer receives observability:summary push when watcher ingests a new JSONL line', async () => {
+  // The JsonlWatcher emits 'ingest' after every batch that inserts ≥1
+  // new event, ipc.ts computes the summary and broadcasts
+  // `observability:summary` to every window. The renderer's
+  // `window.api.observability.onSummary` callback receives
+  // `(workspaceName, summary)` and updates the shared map.
+  //
+  // Test design: launch the app with a manifest but no JSONLs, subscribe
+  // in the renderer (collecting received pushes into a window-scoped
+  // array), then write a JSONL on disk. The push must arrive within
+  // a reasonable window with the correct workspace name + non-null
+  // summary derived from the line we just wrote.
+  const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-push-'));
+  const name = 'push-test-ws';
+  const stateDir = path.join(userDataDir, 'state', name);
+  const projectsDir = path.join(stateDir, '.claude', 'projects', '-workspace');
+  mkdirSync(projectsDir, { recursive: true });
+  writeFileSync(
+    path.join(stateDir, 'workspace.json'),
+    JSON.stringify({
+      name,
+      workspaceRoot: '/tmp/fleet-test-' + name,
+      workspaceSubdir: '',
+      profile: 'oauth',
+      kind: 'container',
+      image: 'mock',
+      createdAt: Date.now(),
+      lastUsedAt: Date.now()
+    })
+  );
+
+  const app = await electron.launch({
+    args: [REPO_ROOT, `--user-data-dir=${userDataDir}`],
+    cwd: REPO_ROOT,
+    env: Object.fromEntries(
+      Object.entries(process.env).filter(([k]) => k !== 'CLAUDE_FLEET_MOCK')
+    ) as Record<string, string>
+  });
+  const window = await app.firstWindow();
+  await window.waitForLoadState('domcontentloaded');
+
+  try {
+    // Subscribe in the renderer BEFORE writing the JSONL — the
+    // subscription stashes every push into window.__pushes so the
+    // test can poll for arrivals. We pull onSummary off window.api
+    // (exposed by preload) and ignore its unsubscribe (page tears
+    // down with the test).
+    await window.evaluate(() => {
+      type Api = {
+        api: {
+          observability: {
+            onSummary: (
+              cb: (workspaceName: string, summary: unknown) => void
+            ) => () => void;
+          };
+        };
+      };
+      const w = window as unknown as Window & {
+        __pushes: Array<{ workspaceName: string; summary: unknown }>;
+      } & Api;
+      w.__pushes = [];
+      w.api.observability.onSummary((workspaceName, summary) => {
+        w.__pushes.push({ workspaceName, summary });
+      });
+    });
+
+    // Give the watcher a moment to fully start before writing —
+    // chokidar can drop early add() calls if start() hasn't resolved.
+    await new Promise((r) => setTimeout(r, 500));
+
+    const sessionId = randomUUID();
+    const event = {
+      type: 'assistant',
+      uuid: randomUUID(),
+      timestamp: new Date().toISOString(),
+      message: {
+        model: 'claude-opus-4-7',
+        content: [],
+        usage: {
+          input_tokens: 123,
+          output_tokens: 45,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+          service_tier: 'standard'
+        }
+      }
+    };
+    writeFileSync(path.join(projectsDir, `${sessionId}.jsonl`), JSON.stringify(event) + '\n');
+
+    // Push must arrive within ~8s — chokidar latency + ingest + IPC.
+    await expect
+      .poll(
+        async () => {
+          return await window.evaluate(() => {
+            const w = window as unknown as {
+              __pushes: Array<{
+                workspaceName: string;
+                summary: { eventCount?: number; sessionId?: string } | null;
+              }>;
+            };
+            return w.__pushes.find(
+              (p) => p.workspaceName === 'push-test-ws' && p.summary !== null
+            );
+          });
+        },
+        { timeout: 8_000, intervals: [200, 500, 1000] }
+      )
+      .toBeTruthy();
+
+    // Verify the pushed summary actually reflects the line we wrote
+    // (not just a null/empty arrival). eventCount must be ≥1, and the
+    // sessionId must match the file we created.
+    const latest = await window.evaluate(() => {
+      const w = window as unknown as {
+        __pushes: Array<{
+          workspaceName: string;
+          summary: { eventCount?: number; sessionId?: string } | null;
+        }>;
+      };
+      return w.__pushes
+        .filter((p) => p.workspaceName === 'push-test-ws' && p.summary !== null)
+        .pop();
+    });
+    expect(latest?.summary?.sessionId).toBe(sessionId);
+    expect(latest?.summary?.eventCount).toBeGreaterThanOrEqual(1);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Slot consumer: chip heights stay equal regardless of whether observability data is present', async () => {
+  // Visual regression from the slot-consumers PR. The chip secondary
+  // line (".ws-chip-sub" showing "active 2m ago" / "idle 1h ago") is
+  // rendered only when summary.lastActiveAt is non-null. So a workspace
+  // with observability data gets a TALLER chip than a workspace
+  // without — the top strip looks jagged with mixed-height chips.
+  //
+  // The fix is to reserve the subline's space unconditionally
+  // (placeholder element, min-height, or similar) so chip heights
+  // stay consistent regardless of data presence.
+  const { app, window } = await launch();
+  try {
+    const recent = Date.now() - 30_000;
+    await mockMainIpc(app, {
+      workspaceList: [
+        {
+          name: 'with-data',
+          containerId: 'with-id',
+          state: 'running',
+          workspaceRoot: '/tmp/with',
+          profile: 'oauth'
+        },
+        {
+          name: 'no-data',
+          containerId: 'no-id',
+          state: 'running',
+          workspaceRoot: '/tmp/no',
+          profile: 'oauth'
+        }
+      ],
+      observabilitySummaries: {
+        'with-data': {
+          sessionId: 'sess-1',
+          title: 'demo',
+          model: 'claude-opus-4-7',
+          startedAt: recent - 60_000,
+          lastActiveAt: recent,
+          eventCount: 5,
+          inputTokens: 100,
+          outputTokens: 50,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          usd: 0.01,
+          lastTurnContextTokens: 10_000,
+          contextWindowTokens: 200_000,
+          topTools: []
+        }
+        // no-data: summary is missing (null) → no activity text
+      }
+    });
+
+    const withChip = window.locator('.ws-chip', { hasText: 'with-data' });
+    const noChip = window.locator('.ws-chip', { hasText: 'no-data' });
+    await expect(withChip).toBeVisible({ timeout: 5_000 });
+    await expect(noChip).toBeVisible({ timeout: 5_000 });
+
+    // Give the polling effect a beat to apply the summary so the
+    // sub-line lands in with-data's chip.
+    await expect(withChip.locator('.ws-chip-sub')).toBeVisible({ timeout: 5_000 });
+
+    const withHeight = await withChip.evaluate(
+      (el) => (el as HTMLElement).getBoundingClientRect().height
+    );
+    const noHeight = await noChip.evaluate(
+      (el) => (el as HTMLElement).getBoundingClientRect().height
+    );
+
+    // Heights should be identical. Off-by-1 from sub-pixel rounding
+    // is tolerable; >1px difference means the subline conditionally
+    // pushes the chip taller.
+    expect(Math.abs(withHeight - noHeight)).toBeLessThanOrEqual(1);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Slot consumer: chip secondary line shows live activity from observability summary', async () => {
+  // Issue #34, part 1: each workspace chip in the top strip gets a small
+  // secondary line below the workspace name showing recent activity —
+  // "active 30s ago" / "idle 1h ago" / null when no events have been
+  // ingested for that workspace yet. The summary comes from the
+  // centralized observability:summaryForWorkspace poll in App.tsx (so
+  // multiple consumers — pane, chip, terminal-pane context-bar — all
+  // share one source of truth, polled once per 2s per workspace).
+  const { app, window } = await launch();
+  try {
+    const recent = Date.now() - 30_000;
+    await mockMainIpc(app, {
+      workspaceList: [
+        {
+          name: 'alpha',
+          containerId: 'alpha-id',
+          state: 'running',
+          workspaceRoot: '/tmp/alpha',
+          profile: 'oauth'
+        }
+      ],
+      observabilitySummaries: {
+        alpha: {
+          sessionId: 'sess-1',
+          title: 'demo session',
+          model: 'claude-opus-4-7',
+          startedAt: recent - 5 * 60_000,
+          lastActiveAt: recent,
+          eventCount: 10,
+          inputTokens: 1000,
+          outputTokens: 500,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          usd: 0.05,
+          lastTurnContextTokens: 80_000,
+          contextWindowTokens: 200_000,
+          topTools: []
+        }
+      }
+    });
+
+    // Force a refresh so workspace:list and the summary IPCs are queried.
+    // The chip should appear with its workspace name on top and an
+    // "active …" line beneath.
+    const chip = window.locator('.ws-chip', { hasText: 'alpha' });
+    await expect(chip).toBeVisible({ timeout: 5_000 });
+    await expect(chip.locator('.ws-chip-sub')).toBeVisible({ timeout: 5_000 });
+    await expect(chip.locator('.ws-chip-sub')).toContainText(/active/);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Slot consumer: terminal context bar fills proportionally to lastTurnContextTokens', async () => {
+  // Issue #34, part 3: the workspace's accent band at the top of the
+  // terminal area becomes a context-window-fullness gauge. Its `--pct`
+  // CSS variable should be `(lastTurnContextTokens / contextWindowTokens)
+  // * 100`, clamped to [0, 100]. When summary is missing, falls back to
+  // 100% (pure identity band, the pre-observability behavior).
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [
+        {
+          name: 'alpha',
+          containerId: 'alpha-id',
+          state: 'running',
+          workspaceRoot: '/tmp/alpha',
+          profile: 'oauth'
+        }
+      ],
+      observabilitySummaries: {
+        alpha: {
+          sessionId: 'sess-1',
+          title: null,
+          model: 'claude-opus-4-7',
+          startedAt: Date.now() - 60_000,
+          lastActiveAt: Date.now() - 5_000,
+          eventCount: 3,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          usd: 0,
+          // 80k / 200k = 40%
+          lastTurnContextTokens: 80_000,
+          contextWindowTokens: 200_000,
+          topTools: []
+        }
+      }
+    });
+
+    // Click the chip so its TerminalPane is the visible one (always-mount
+    // means all panes mount; only the visible one is paintable).
+    await window.locator('.ws-chip', { hasText: 'alpha' }).click();
+    const band = activePane(window).locator('.terminal-accent-band');
+    await expect(band).toBeVisible({ timeout: 5_000 });
+
+    // Wait for the polling effect in App.tsx to feed the summary down
+    // (the value lands on the next poll tick after click). Then assert.
+    await expect
+      .poll(
+        async () => band.evaluate((el) => (el as HTMLElement).style.getPropertyValue('--pct')),
+        { timeout: 5_000 }
+      )
+      .toBe('40%');
+  } finally {
+    await app.close();
+  }
+});
+
+test('ObservabilityPane: clicking + on a workspace clears the pane to empty (no inheritance from previous tab)', async () => {
+  // Regression for: "when I open a new session in a workspace it shows
+  // me the information from the last session I used". The renderer
+  // must NOT surface the workspace fallback for freshly-added tabs —
+  // they legitimately have no data, and showing the previous tab's
+  // numbers is confusing.
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [
+        {
+          name: 'alpha',
+          containerId: 'alpha-id',
+          state: 'running',
+          workspaceRoot: '/tmp/alpha',
+          profile: 'oauth'
+        }
+      ],
+      observabilitySummaries: {
+        alpha: {
+          sessionId: 'previous-claude-uuid',
+          title: 'PREVIOUS-SESSION-TITLE',
+          model: 'claude-opus-4-7',
+          startedAt: Date.now() - 60_000,
+          lastActiveAt: Date.now() - 5_000,
+          eventCount: 99,
+          inputTokens: 4242,
+          outputTokens: 100,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          usd: 0.05,
+          lastTurnContextTokens: 4242,
+          contextWindowTokens: 200_000,
+          topTools: []
+        }
+      }
+    });
+
+    await window.locator('.ws-chip', { hasText: 'alpha' }).click();
+    const strip = activePane(window).locator('.session-tab-strip');
+    await expect(strip).toBeVisible();
+    await expect(strip.locator('.session-tab')).toHaveCount(1);
+
+    const obsPane = window.locator('.sidebar-right');
+
+    // The bug repro: click + to add a fresh tab.
+    await strip.getByRole('button', { name: 'New session' }).click();
+    await expect(strip.locator('.session-tab')).toHaveCount(2);
+
+    // The fix: pane must show the empty state — NOT inherit
+    // "PREVIOUS-SESSION-TITLE" from the workspace fallback.
+    await expect(obsPane.locator('.pane-placeholder')).toContainText(
+      /No transcript events yet/i,
+      { timeout: 5_000 }
+    );
+    await expect(obsPane.locator('.obs-title')).not.toBeAttached();
+  } finally {
+    await app.close();
+  }
+});
+
+test('ObservabilityPane: switching between two loaded-from-inventory tabs surfaces the active tab, not the workspace fallback', async () => {
+  // Regression: "now changing tabs doesn't update the sidepanel". This
+  // reproduces the user's actual scenario — multiple tabs already exist
+  // in sessions.json (loaded from inventory, isFresh=false), and none
+  // have a broker→claude mapping yet. Before the fix: both unmapped
+  // tabs fall back to the workspace summary → identical pane content.
+  // After the fix: pane shows the empty state on both, switching
+  // remains in the empty state.
+  const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-bug-b-'));
+  const wsName = 'alpha';
+  const stateDir = path.join(userDataDir, 'state', wsName);
+  mkdirSync(stateDir, { recursive: true });
+  const tab1Id = 'loaded-tab-1-' + randomUUID();
+  const tab2Id = 'loaded-tab-2-' + randomUUID();
+  writeFileSync(
+    path.join(stateDir, 'sessions.json'),
+    JSON.stringify({
+      version: 1,
+      sessions: [
+        { id: tab1Id, name: 'main', createdAt: Date.now() - 60_000 },
+        { id: tab2Id, name: 'session 2', createdAt: Date.now() - 30_000 }
+      ],
+      nextNum: 3,
+      activeId: tab1Id
+    })
+  );
+
+  const app = await electron.launch({
+    args: [REPO_ROOT, `--user-data-dir=${userDataDir}`],
+    cwd: REPO_ROOT,
+    env: { ...process.env, CLAUDE_FLEET_MOCK: '1' } as Record<string, string>
+  });
+  const window = await app.firstWindow();
+  await window.waitForLoadState('domcontentloaded');
+
+  try {
+    // Default per-tab mock (returns null) — simulates the real
+    // unmapped-tab scenario. Workspace summary returns identifiable
+    // fallback data so the failure mode would be clearly visible.
+    await mockMainIpc(app, {
+      workspaceList: [
+        {
+          name: wsName,
+          containerId: 'alpha-id',
+          state: 'running',
+          workspaceRoot: '/tmp/alpha',
+          profile: 'oauth'
+        }
+      ],
+      observabilitySummaries: {
+        [wsName]: {
+          sessionId: 'workspace-fallback-uuid',
+          title: 'WORKSPACE-FALLBACK-TITLE',
+          model: 'claude-opus-4-7',
+          startedAt: Date.now() - 60_000,
+          lastActiveAt: Date.now() - 5_000,
+          eventCount: 7,
+          inputTokens: 7777,
+          outputTokens: 100,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          usd: 0.05,
+          lastTurnContextTokens: 7777,
+          contextWindowTokens: 200_000,
+          topTools: []
+        }
+      }
+    });
+
+    await window.locator('.ws-chip', { hasText: wsName }).click();
+    const strip = activePane(window).locator('.session-tab-strip');
+    const tabs = strip.locator('.session-tab');
+    await expect(tabs).toHaveCount(2, { timeout: 5_000 });
+
+    const obsPane = window.locator('.sidebar-right');
+
+    await expect(obsPane.locator('.pane-placeholder')).toContainText(
+      /No transcript events yet/i,
+      { timeout: 5_000 }
+    );
+    await expect(obsPane.locator('.obs-title')).not.toBeAttached();
+
+    // Switching tabs must keep us in the empty state, not flicker the
+    // workspace fallback back in.
+    await tabs.nth(1).click();
+    await expect(obsPane.locator('.pane-placeholder')).toContainText(
+      /No transcript events yet/i,
+      { timeout: 5_000 }
+    );
+    await expect(obsPane.locator('.obs-title')).not.toBeAttached();
+  } finally {
+    await app.close();
+  }
+});
+
+test('ObservabilityPane: switching tabs refetches and updates the pane to the focused tab', async () => {
+  // The per-tab fetch in App.tsx must re-run whenever the active tab id
+  // changes, and the result must replace the rendered summary. Mock
+  // summaryForBrokerSession to return a summary whose title encodes the
+  // broker session id — so on tab switch, the title must change to the
+  // new id's tag.
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [
+        {
+          name: 'alpha',
+          containerId: 'alpha-id',
+          state: 'running',
+          workspaceRoot: '/tmp/alpha',
+          profile: 'oauth'
+        }
+      ],
+      // Per-tab routing on — each call returns Tab-<8-char id prefix>.
+      observabilityPerTabSummaries: true
+    });
+
+    await window.locator('.ws-chip', { hasText: 'alpha' }).click();
+    const strip = activePane(window).locator('.session-tab-strip');
+    const tabs = strip.locator('.session-tab');
+    await expect(tabs).toHaveCount(1);
+
+    const obsPane = window.locator('.sidebar-right');
+    await expect(obsPane.locator('.obs-title')).toBeVisible({ timeout: 5_000 });
+    const titleOnTab1 = await obsPane.locator('.obs-title').textContent();
+    expect(titleOnTab1).toMatch(/^Tab-/);
+
+    // Add a second tab — focus moves to it, pane re-fetches.
+    await strip.getByRole('button', { name: 'New session' }).click();
+    await expect(tabs).toHaveCount(2);
+
+    // The title must change to the new tab's tag.
+    await expect
+      .poll(async () => obsPane.locator('.obs-title').textContent(), {
+        timeout: 5_000,
+        intervals: [100, 250, 500]
+      })
+      .not.toBe(titleOnTab1);
+    const titleOnTab2 = await obsPane.locator('.obs-title').textContent();
+    expect(titleOnTab2).toMatch(/^Tab-/);
+
+    // Click back to the first tab — pane must update back to its title.
+    await tabs.nth(0).click();
+    await expect(obsPane.locator('.obs-title')).toHaveText(titleOnTab1!, {
+      timeout: 5_000
+    });
+  } finally {
+    await app.close();
+  }
+});
