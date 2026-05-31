@@ -6,12 +6,17 @@
 // lifecycle (deletion, recreation) and so future non-container backends
 // can plug in without changing the on-disk shape.
 //
-// On-disk: <userData>/state/<name>/workspace.json
-// Sensitive material (API keys) is NOT persisted here — only the profile
-// *name*, which is resolved against the vault at start time.
+// Identity is a ULID (the immutable `id` field). The user-facing
+// `name` is a mutable label, validated to be unique across the fleet.
+// State dirs are keyed by id (`<userData>/state/<id>/`) so renames are
+// free — the host paths and Docker container labels don't move.
+//
+// On-disk: <userData>/state/<id>/workspace.json
+// Sensitive material (env-var secrets) is NOT persisted here — only the
+// list of secret keys; values live in keytar.
 
 import { readFile, writeFile, readdir } from 'node:fs/promises';
-import { workspaceManifestPath, workspaceStateDir, stateRoot } from './paths.js';
+import { workspaceManifestPath, stateRoot } from './paths.js';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
 
@@ -22,13 +27,46 @@ export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
  */
 export type WorkspaceKind = 'container' | 'local';
 
+/** Authentication mode for the workspace's `claude` invocation. */
+export type AuthMode = 'oauth' | 'apikey';
+
+/**
+ * Per-workspace environment variables. `plain` values live in the
+ * manifest on disk; `secretKeys` lists the keys whose values are
+ * stored in keytar at `<id>:<key>` (resolved at container-start time).
+ */
+export interface WorkspaceEnv {
+  plain: Record<string, string>;
+  secretKeys: string[];
+}
+
+/** Optional Docker resource limits. */
+export interface WorkspaceResources {
+  cpus?: number;
+  memoryMb?: number;
+}
+
+/** Color identity (single hue from the preset palette; falls back to random when unset). */
+export interface WorkspaceColor {
+  hue: number;
+}
+
 export interface WorkspaceSpec {
+  /** ULID; identity, immutable. */
+  id: string;
+  /** Mutable user-facing label; unique across the fleet (validated on save). */
   name: string;
+  description?: string;
+  labels: string[];
+  color?: WorkspaceColor;
   workspaceRoot: string;
   workspaceSubdir: string;
-  profile: string; // vault profile name, or 'oauth'
   kind: WorkspaceKind;
-  image?: string; // image reference for kind='container'; undefined for 'local'
+  /** Image reference for kind='container'; undefined for 'local'. */
+  image?: string;
+  authMode: AuthMode;
+  env: WorkspaceEnv;
+  resources?: WorkspaceResources;
   createdAt: number;
   lastUsedAt: number;
 }
@@ -40,26 +78,44 @@ export interface Workspace extends WorkspaceSpec {
   status?: string;
 }
 
-export async function readWorkspaceManifest(name: string): Promise<WorkspaceSpec | null> {
+/**
+ * Parse a stored manifest into a `WorkspaceSpec`. Returns `null` when
+ * the file is missing/malformed/incompatible (missing required fields).
+ *
+ * Callers should treat null as "no manifest" and fall back to whatever
+ * the live backend reports. The migration code (separate) is responsible
+ * for upgrading legacy on-disk shapes to the current one.
+ */
+export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec | null> {
   try {
-    const raw = await readFile(workspaceManifestPath(name), 'utf8');
+    const raw = await readFile(workspaceManifestPath(id), 'utf8');
     const parsed = JSON.parse(raw) as Partial<WorkspaceSpec>;
     if (
+      typeof parsed.id !== 'string' ||
       typeof parsed.name !== 'string' ||
       typeof parsed.workspaceRoot !== 'string' ||
-      typeof parsed.profile !== 'string'
+      typeof parsed.authMode !== 'string'
     ) {
       return null;
     }
     return {
+      id: parsed.id,
       name: parsed.name,
+      description: parsed.description,
+      labels: Array.isArray(parsed.labels) ? parsed.labels.filter((l): l is string => typeof l === 'string') : [],
+      color: parsed.color && typeof parsed.color.hue === 'number' ? { hue: parsed.color.hue } : undefined,
       workspaceRoot: parsed.workspaceRoot,
       workspaceSubdir: parsed.workspaceSubdir ?? '',
-      profile: parsed.profile,
-      // Manifests written before the kind/image fields existed default
-      // to the container backend with no recorded image.
       kind: parsed.kind ?? 'container',
       image: parsed.image,
+      authMode: parsed.authMode === 'apikey' ? 'apikey' : 'oauth',
+      env: {
+        plain: parsed.env?.plain && typeof parsed.env.plain === 'object' ? parsed.env.plain : {},
+        secretKeys: Array.isArray(parsed.env?.secretKeys)
+          ? parsed.env!.secretKeys.filter((k): k is string => typeof k === 'string')
+          : []
+      },
+      resources: parsed.resources,
       createdAt: parsed.createdAt ?? Date.now(),
       lastUsedAt: parsed.lastUsedAt ?? parsed.createdAt ?? Date.now()
     };
@@ -69,19 +125,19 @@ export async function readWorkspaceManifest(name: string): Promise<WorkspaceSpec
 }
 
 export async function writeWorkspaceManifest(spec: WorkspaceSpec): Promise<void> {
-  await writeFile(workspaceManifestPath(spec.name), JSON.stringify(spec, null, 2) + '\n', 'utf8');
+  await writeFile(workspaceManifestPath(spec.id), JSON.stringify(spec, null, 2) + '\n', 'utf8');
 }
 
-export async function touchWorkspaceUsed(name: string): Promise<void> {
-  const existing = await readWorkspaceManifest(name);
+export async function touchWorkspaceUsed(id: string): Promise<void> {
+  const existing = await readWorkspaceManifest(id);
   if (!existing) return;
   await writeWorkspaceManifest({ ...existing, lastUsedAt: Date.now() });
 }
 
 /**
- * Names of every workspace whose state-dir on disk contains a workspace.json.
- * State dirs without a manifest (e.g., pre-rename Docker containers) are
- * invisible to this list — they only surface via the live-container list.
+ * Every workspace whose state-dir on disk contains a workspace.json.
+ * State dirs without a manifest are invisible to this list — they only
+ * surface via the live-container list (which the IPC layer joins in).
  */
 export async function listWorkspaceManifests(): Promise<WorkspaceSpec[]> {
   let entries: string[];
@@ -91,14 +147,16 @@ export async function listWorkspaceManifests(): Promise<WorkspaceSpec[]> {
     if ((err as { code?: string }).code === 'ENOENT') return [];
     throw err;
   }
-  const specs = await Promise.all(entries.map((name) => readWorkspaceManifest(name)));
+  const specs = await Promise.all(entries.map((id) => readWorkspaceManifest(id)));
   return specs.filter((s): s is WorkspaceSpec => s !== null);
 }
 
 /**
- * Path of the workspace's state dir (exposed so callers don't need to
- * import paths.ts directly).
+ * Find a workspace by its user-facing name. Returns null when no manifest
+ * with that name exists. Useful for legacy code paths (CLI args, IPC by
+ * name) and for the name-uniqueness validator.
  */
-export function stateDirOf(name: string): string {
-  return workspaceStateDir(name);
+export async function findWorkspaceByName(name: string): Promise<WorkspaceSpec | null> {
+  const all = await listWorkspaceManifests();
+  return all.find((s) => s.name === name) ?? null;
 }

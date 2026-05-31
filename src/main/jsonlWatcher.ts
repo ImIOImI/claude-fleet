@@ -29,7 +29,7 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface FileState {
-  workspaceName: string;
+  workspaceId: string;
   sessionId: string;
   offset: number;
 }
@@ -42,7 +42,7 @@ interface FileState {
  * content) suppress the emit so consumers don't re-render for no reason.
  */
 export interface IngestEvent {
-  workspaceName: string;
+  workspaceId: string;
   sessionId: string;
 }
 
@@ -55,7 +55,7 @@ export interface IngestEvent {
  * `'ingest'` event for the same batch.
  */
 export interface NewSessionEvent {
-  workspaceName: string;
+  workspaceId: string;
   sessionId: string;
 }
 
@@ -79,7 +79,7 @@ export class JsonlWatcher extends EventEmitter {
   // add/change events on the same file don't race the byte offset.
   private readonly chains = new Map<string, Promise<void>>();
 
-  async start(workspaceNames: string[]): Promise<void> {
+  async start(workspaceIds: string[]): Promise<void> {
     if (this.watcher) return;
     const chokidar = await import('chokidar');
     this.watcher = chokidar.watch([], {
@@ -98,7 +98,7 @@ export class JsonlWatcher extends EventEmitter {
         this.chains.delete(p);
       })
       .on('error', (err) => console.error('[jsonlWatcher] error:', err));
-    for (const name of workspaceNames) {
+    for (const name of workspaceIds) {
       this.registerWorkspace(name);
     }
   }
@@ -170,7 +170,7 @@ export class JsonlWatcher extends EventEmitter {
     // Fires before the eventual 'ingest' emit for this batch.
     if (!existing) {
       this.emit('new-session', {
-        workspaceName: state.workspaceName,
+        workspaceId: state.workspaceId,
         sessionId: state.sessionId,
       });
     }
@@ -196,17 +196,17 @@ export class JsonlWatcher extends EventEmitter {
     // happened, so don't wake them up).
     if (insertedCount > 0) {
       this.emit('ingest', {
-        workspaceName: state.workspaceName,
+        workspaceId: state.workspaceId,
         sessionId: state.sessionId,
       });
     }
   }
 
   private initState(path: string): FileState | null {
-    const workspaceName = workspaceNameFromPath(path);
+    const workspaceId = workspaceIdFromPath(path);
     const sessionId = basename(path, '.jsonl');
-    if (!workspaceName || !UUID_RE.test(sessionId)) return null;
-    const state: FileState = { workspaceName, sessionId, offset: 0 };
+    if (!workspaceId || !UUID_RE.test(sessionId)) return null;
+    const state: FileState = { workspaceId, sessionId, offset: 0 };
     this.files.set(path, state);
     return state;
   }
@@ -248,7 +248,7 @@ async function readAndIngest(path: string, state: FileState): Promise<ReadResult
     for (const line of text.split('\n')) {
       const trimmed = line.trim();
       if (!trimmed) continue;
-      const result = ingestLine(state.workspaceName, state.sessionId, trimmed);
+      const result = ingestLine(state.workspaceId, state.sessionId, trimmed);
       if (result.inserted) insertedCount++;
     }
 
@@ -262,7 +262,7 @@ async function readAndIngest(path: string, state: FileState): Promise<ReadResult
  * .../state/<workspace>/.claude/projects/-workspace/<session>.jsonl
  *                       ^ marker — the segment before .claude is the workspace.
  */
-function workspaceNameFromPath(filePath: string): string | null {
+function workspaceIdFromPath(filePath: string): string | null {
   const segments = filePath.split(/[\\/]/);
   const idx = segments.lastIndexOf('.claude');
   return idx > 0 ? (segments[idx - 1] ?? null) : null;

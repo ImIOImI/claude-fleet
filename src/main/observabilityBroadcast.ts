@@ -33,7 +33,7 @@ export interface BroadcastTarget {
  * any fresh window up.
  */
 export function broadcastObservabilitySummary(
-  payload: { workspaceName: string; summary: unknown },
+  payload: { workspaceId: string; summary: unknown },
   targets: readonly BroadcastTarget[]
 ): void {
   for (const win of targets) {

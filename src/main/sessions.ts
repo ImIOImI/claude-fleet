@@ -25,7 +25,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { join } from 'node:path';
-import { workspaceStateDir, assertValidWorkspaceName } from './paths.js';
+import { workspaceStateDir, assertValidWorkspaceId } from './paths.js';
 
 export interface SessionEntry {
   id: string; // stable across app restarts; NOT the PTY session id (which is per-attach)
@@ -44,18 +44,18 @@ export interface SessionInventory {
   activeId?: string;
 }
 
-function inventoryPath(workspaceName: string): string {
-  assertValidWorkspaceName(workspaceName);
-  return join(workspaceStateDir(workspaceName), 'sessions.json');
+function inventoryPath(workspaceId: string): string {
+  assertValidWorkspaceId(workspaceId);
+  return join(workspaceStateDir(workspaceId), 'sessions.json');
 }
 
 function emptyInventory(): SessionInventory {
   return { version: 1, sessions: [], nextNum: 2 };
 }
 
-export async function readInventory(workspaceName: string): Promise<SessionInventory> {
+export async function readInventory(workspaceId: string): Promise<SessionInventory> {
   try {
-    const raw = await readFile(inventoryPath(workspaceName), 'utf8');
+    const raw = await readFile(inventoryPath(workspaceId), 'utf8');
     const parsed = JSON.parse(raw) as Partial<SessionInventory>;
     if (!parsed || !Array.isArray(parsed.sessions)) return emptyInventory();
     const sessions = parsed.sessions.filter(
@@ -81,10 +81,10 @@ export async function readInventory(workspaceName: string): Promise<SessionInven
 }
 
 export async function writeInventory(
-  workspaceName: string,
+  workspaceId: string,
   inventory: SessionInventory
 ): Promise<void> {
-  const path = inventoryPath(workspaceName);
+  const path = inventoryPath(workspaceId);
   await mkdir(dirname(path), { recursive: true });
   const tmp = `${path}.tmp`;
   await writeFile(tmp, JSON.stringify(inventory, null, 2) + '\n', 'utf8');
