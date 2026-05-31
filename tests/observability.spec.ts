@@ -23,18 +23,27 @@ test('Live push: renderer receives observability:summary push when watcher inges
   // a reasonable window with the correct workspace name + non-null
   // summary derived from the line we just wrote.
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-push-'));
+  // State dir is keyed by id (ULID shape) so the startup migration treats
+  // the manifest as already-current and doesn't rename the dir out from
+  // under us. The display name is what the test reads from chips/UI; the
+  // id is what observability + watcher key by.
+  const id = '01TESTPUSH00000000000000WS';
   const name = 'push-test-ws';
-  const stateDir = path.join(userDataDir, 'state', name);
+  const stateDir = path.join(userDataDir, 'state', id);
   const projectsDir = path.join(stateDir, '.claude', 'projects', '-workspace');
   mkdirSync(projectsDir, { recursive: true });
   writeFileSync(
     path.join(stateDir, 'workspace.json'),
     JSON.stringify({
+      id,
       name,
+      labels: [],
       workspaceRoot: '/tmp/fleet-test-' + name,
       workspaceSubdir: '',
       kind: 'container',
       image: 'mock',
+      authMode: 'oauth',
+      env: { plain: {}, secretKeys: [] },
       createdAt: Date.now(),
       lastUsedAt: Date.now()
     })
@@ -102,7 +111,7 @@ test('Live push: renderer receives observability:summary push when watcher inges
     await expect
       .poll(
         async () => {
-          return await window.evaluate(() => {
+          return await window.evaluate((targetId) => {
             const w = window as unknown as {
               __pushes: Array<{
                 workspaceId: string;
@@ -110,9 +119,9 @@ test('Live push: renderer receives observability:summary push when watcher inges
               }>;
             };
             return w.__pushes.find(
-              (p) => p.workspaceId === 'push-test-ws' && p.summary !== null
+              (p) => p.workspaceId === targetId && p.summary !== null
             );
-          });
+          }, id);
         },
         { timeout: 8_000, intervals: [200, 500, 1000] }
       )
@@ -121,7 +130,7 @@ test('Live push: renderer receives observability:summary push when watcher inges
     // Verify the pushed summary actually reflects the line we wrote
     // (not just a null/empty arrival). eventCount must be ≥1, and the
     // sessionId must match the file we created.
-    const latest = await window.evaluate(() => {
+    const latest = await window.evaluate((targetId) => {
       const w = window as unknown as {
         __pushes: Array<{
           workspaceId: string;
@@ -129,9 +138,9 @@ test('Live push: renderer receives observability:summary push when watcher inges
         }>;
       };
       return w.__pushes
-        .filter((p) => p.workspaceId === 'push-test-ws' && p.summary !== null)
+        .filter((p) => p.workspaceId === targetId && p.summary !== null)
         .pop();
-    });
+    }, id);
     expect(latest?.summary?.sessionId).toBe(sessionId);
     expect(latest?.summary?.eventCount).toBeGreaterThanOrEqual(1);
   } finally {
