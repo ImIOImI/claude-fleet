@@ -151,6 +151,7 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       create: [],
       list: [],
       start: [],
+      writeManifest: [],
       isDirectory: [],
       mkdirp: []
     };
@@ -161,6 +162,7 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       'workspace:list',
       'workspace:start',
       'workspace:ping',
+      'workspace:writeManifest',
       'images:list',
       'images:remove',
       'fs:isDirectory',
@@ -233,6 +235,11 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       const found = list.find((w) => w.id === id || w.name === id);
       if (!found) return null;
       return { ...found, state: 'running', containerId: found.containerId ?? `restarted-${found.id}` };
+    });
+    // Resume flow (Saved-tab Edit form) calls writeManifest before start.
+    // No persistence — just record the call shape for assertions.
+    ipcMain.handle('workspace:writeManifest', async (_e, spec: Record<string, unknown>) => {
+      g.__calls.writeManifest.push(spec);
     });
     ipcMain.handle('fs:isDirectory', async (_e, p: string) => {
       g.__calls.isDirectory.push(p);

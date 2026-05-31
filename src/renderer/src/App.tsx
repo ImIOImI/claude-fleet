@@ -4,7 +4,8 @@ import { SessionsPane } from './components/SessionsPane';
 import { ObservabilityPane } from './components/ObservabilityPane';
 import { TerminalPane } from './components/TerminalPane';
 import { BottomBar } from './components/BottomBar';
-import { CreateWorkspaceModal, type CreateModalSubmit } from './components/CreateWorkspaceModal';
+import { WorkspaceModal } from './components/WorkspaceModal';
+import type { WorkspaceFormSubmit } from './components/WorkspaceForm';
 import { CloseWorkspaceModal } from './components/CloseWorkspaceModal';
 import type { WorkspaceObservabilitySummary } from '../../preload';
 
@@ -212,35 +213,39 @@ export function App() {
   const liveCount = workspaces.filter((w) => w.state !== 'deleted').length;
 
   /**
+   * Persist any newly-typed secret env values to the keychain. Pre-existing
+   * secrets the form passed through unchanged (no value in `secrets`,
+   * still listed in `secretKeys`) are left alone.
+   */
+  const persistSecrets = async (id: string, submit: WorkspaceFormSubmit): Promise<void> => {
+    for (const [key, value] of Object.entries(submit.secrets)) {
+      if (!value) continue;
+      try {
+        await window.api.vault.setSecret(id, key, value);
+      } catch (err) {
+        console.warn(`vault.setSecret(${id}, ${key}) failed:`, err);
+      }
+    }
+  };
+
+  /**
    * Mint workspace identity + persist any secret env values to the OS
    * keychain, then call `workspace:create`. Secrets are written *before*
    * the container is created so the main process can resolve them at
    * start time (see docker.ts → vault.resolveEnv).
    */
   const handleCreate = async (
-    submit: CreateModalSubmit,
-    setStatus: (msg: string) => void
-  ) => {
-    const id = submit.id;
-    const kind = submit.kind ?? 'container';
+    submit: WorkspaceFormSubmit,
+    setStatus: (msg: string | null) => void
+  ): Promise<void> => {
+    const id = submit.id ?? `ws-${Date.now()}`; // WorkspaceModal mints a real ULID before calling
+    const kind = submit.kind;
 
     if (kind === 'container') {
       await window.api.workspace.ensureImage(({ message }) => setStatus(message));
     }
 
-    // Stash secrets first so resolveEnv can find them. Best-effort — if
-    // the vault isn't available, the create will still proceed with
-    // empty values (claude itself surfaces the auth failure).
-    const secretKeys: string[] = [];
-    for (const [key, value] of Object.entries(submit.secrets)) {
-      if (!value) continue;
-      try {
-        await window.api.vault.setSecret(id, key, value);
-        secretKeys.push(key);
-      } catch (err) {
-        console.warn(`vault.setSecret(${id}, ${key}) failed:`, err);
-      }
-    }
+    await persistSecrets(id, submit);
 
     setStatus('Creating workspace…');
     await window.api.workspace.create({
@@ -254,7 +259,7 @@ export function App() {
       kind,
       image: submit.image,
       authMode: submit.authMode,
-      env: { plain: submit.plainEnv, secretKeys },
+      env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources
     });
     setSelectedId(id);
@@ -262,47 +267,78 @@ export function App() {
   };
 
   /**
-   * Restart a past workspace. If the container still exists (running or
-   * stopped), start it by id (label lookup). If it's been deleted,
-   * recreate from the saved manifest via the same flow as a brand-new
-   * create, reusing the original id so state-dir, vault secrets, and
-   * observability history all stay attached.
+   * Resume a saved workspace, applying any edits the user made in the
+   * Saved-tab expand-edit form. Three cases by the workspace's current
+   * state:
+   *   - **stopped / paused**: write the updated manifest, then
+   *     `workspace:start(id)` resumes the existing container by id-label
+   *     lookup. Container-level edits (env, image, resources, authMode)
+   *     don't take effect until the container is recreated — Phase 2's
+   *     restart-to-apply banner surfaces this.
+   *   - **deleted** (manifest exists, no container): the create flow runs
+   *     with the original id reused so state-dir + vault + observability
+   *     history stay attached.
+   *   - **container disappeared between list + click**: `workspace:start`
+   *     returns null and we fall through to recreate.
    */
-  const handleRestart = async (
-    workspace: WorkspaceSummary,
-    setStatus: (msg: string) => void
-  ) => {
-    setStatus(`Starting ${workspace.name}…`);
-    const started = (await window.api.workspace.start(workspace.id)) as
-      | WorkspaceSummary
-      | null;
+  const handleResume = async (
+    submit: WorkspaceFormSubmit,
+    setStatus: (msg: string | null) => void
+  ): Promise<void> => {
+    const id = submit.id;
+    if (!id) throw new Error('handleResume requires submit.id');
+
+    await persistSecrets(id, submit);
+
+    // Always write the manifest first so renderer-visible edits
+    // (description, labels, color) take effect immediately even if the
+    // container needs a restart for env/image changes.
+    setStatus('Saving changes…');
+    await window.api.workspace.writeManifest({
+      id,
+      name: submit.name,
+      description: submit.description,
+      labels: submit.labels,
+      color: submit.color,
+      workspaceRoot: submit.workspaceRoot,
+      workspaceSubdir: submit.workspaceSubdir,
+      kind: submit.kind,
+      image: submit.image,
+      authMode: submit.authMode,
+      env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
+      resources: submit.resources,
+      createdAt: Date.now(),
+      lastUsedAt: Date.now()
+    });
+
+    setStatus(`Starting ${submit.name}…`);
+    const started = (await window.api.workspace.start(id)) as WorkspaceSummary | null;
     if (started) {
-      setSelectedId(started.id);
+      setSelectedId(id);
       refresh();
       return;
     }
-    // Container is gone — recreate from saved spec, reusing the id.
-    await handleCreate(
-      {
-        id: workspace.id,
-        name: workspace.name,
-        description: workspace.description,
-        labels: workspace.labels,
-        color: workspace.color,
-        workspaceRoot: workspace.workspaceRoot,
-        workspaceSubdir: workspace.workspaceSubdir,
-        kind: workspace.kind,
-        image: workspace.image,
-        authMode: workspace.authMode,
-        plainEnv: workspace.env.plain,
-        // Secrets already live in the vault under this id — no need to
-        // re-write them. The empty `secrets` map means handleCreate
-        // skips the setSecret loop entirely.
-        secrets: {},
-        resources: workspace.resources
-      },
-      setStatus
-    );
+    // No container exists — recreate from spec, reusing the id.
+    if (submit.kind === 'container') {
+      await window.api.workspace.ensureImage(({ message }) => setStatus(message));
+    }
+    setStatus('Recreating workspace…');
+    await window.api.workspace.create({
+      id,
+      name: submit.name,
+      description: submit.description,
+      labels: submit.labels,
+      color: submit.color,
+      workspaceRoot: submit.workspaceRoot,
+      workspaceSubdir: submit.workspaceSubdir,
+      kind: submit.kind,
+      image: submit.image,
+      authMode: submit.authMode,
+      env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
+      resources: submit.resources
+    });
+    setSelectedId(id);
+    refresh();
   };
 
   return (
@@ -370,13 +406,13 @@ export function App() {
 
       <BottomBar vaultAvailable={vaultAvailable} />
 
-      <CreateWorkspaceModal
+      <WorkspaceModal
         open={createOpen}
         workspaces={workspaces}
         vaultAvailable={vaultAvailable}
         onClose={() => setCreateOpen(false)}
         onCreate={handleCreate}
-        onRestart={handleRestart}
+        onResume={handleResume}
       />
       {(() => {
         if (!closeTargetId) return null;

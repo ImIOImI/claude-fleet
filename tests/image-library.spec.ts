@@ -24,7 +24,7 @@ test('Image picker: free-text filter matches across ref and label values', async
     });
 
     await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
-    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
+    await expect(window.getByRole('tab', { name: 'New' })).toBeVisible();
 
     // All three images visible at first (no filter beyond whatever defaulted
     // into the input — make sure we clear it for a clean assertion).

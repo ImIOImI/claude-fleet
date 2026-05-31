@@ -244,6 +244,22 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     return readWorkspaceManifest(id);
   });
 
+  /**
+   * Update a workspace's manifest in place without touching the container.
+   * Used by the Saved-tab Resume flow to apply edited fields (description,
+   * labels, env, etc.) before calling `workspace:start`. Container-level
+   * edits (env values, image) won't take effect until the container is
+   * restarted — see the Phase 2 *restart-to-apply* banner.
+   */
+  ipcMain.handle('workspace:writeManifest', async (_e, spec: WorkspaceSpec) => {
+    // Name-uniqueness across the fleet (own row excluded).
+    const clash = await findWorkspaceByName(spec.name);
+    if (clash && clash.id !== spec.id) {
+      throw new Error(`A workspace named "${spec.name}" already exists.`);
+    }
+    await writeWorkspaceManifest(spec);
+  });
+
   ipcMain.handle('workspace:stop', (_e, containerId: string) => backend.stopWorkspace(containerId));
   ipcMain.handle('workspace:pause', (_e, containerId: string) => backend.pauseWorkspace(containerId));
   ipcMain.handle(

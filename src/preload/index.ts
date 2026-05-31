@@ -107,6 +107,9 @@ const api = {
     /** Start an existing workspace by id. Returns null if no container exists for that id. */
     start: (id: string) => ipcRenderer.invoke('workspace:start', id),
     getManifest: (id: string) => ipcRenderer.invoke('workspace:getManifest', id),
+    /** Update an existing workspace's manifest in place. Container is not touched — caller starts/stops separately. */
+    writeManifest: (spec: unknown): Promise<void> =>
+      ipcRenderer.invoke('workspace:writeManifest', spec),
     stop: (containerId: string) => ipcRenderer.invoke('workspace:stop', containerId),
     pause: (containerId: string) => ipcRenderer.invoke('workspace:pause', containerId),
     remove: (containerId: string, opts?: { deleteState?: boolean }) =>
