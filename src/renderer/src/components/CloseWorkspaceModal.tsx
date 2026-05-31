@@ -15,12 +15,17 @@ export function CloseWorkspaceModal({ workspace, onClose, onClosed }: Props) {
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // workspace.id is the ULID (workspace identity). workspace.containerId
+  // is the Docker container hash and is what stop/pause/remove address.
+  // For start, the main process resolves by id (label lookup).
+  const containerId = workspace.containerId!;
+
   const stopOnly = async () => {
     setBusy(true);
     setStatus('Stopping…');
     setError(null);
     try {
-      await window.api.workspace.stop(workspace.id);
+      await window.api.workspace.stop(containerId);
       onClosed();
       onClose();
     } catch (err) {
@@ -36,7 +41,7 @@ export function CloseWorkspaceModal({ workspace, onClose, onClosed }: Props) {
     setStatus('Pausing…');
     setError(null);
     try {
-      await window.api.workspace.pause(workspace.id);
+      await window.api.workspace.pause(containerId);
       onClosed();
       onClose();
     } catch (err) {
@@ -52,7 +57,7 @@ export function CloseWorkspaceModal({ workspace, onClose, onClosed }: Props) {
     setStatus('Resuming…');
     setError(null);
     try {
-      await window.api.workspace.start(workspace.name);
+      await window.api.workspace.start(workspace.id);
       onClosed();
       onClose();
     } catch (err) {
@@ -69,10 +74,20 @@ export function CloseWorkspaceModal({ workspace, onClose, onClosed }: Props) {
     try {
       if (running || paused) {
         setStatus('Stopping…');
-        await window.api.workspace.stop(workspace.id);
+        await window.api.workspace.stop(containerId);
       }
       setStatus(deleteState ? 'Removing workspace and state directory…' : 'Removing workspace…');
-      await window.api.workspace.remove(workspace.id, { deleteState });
+      await window.api.workspace.remove(containerId, { deleteState });
+      if (deleteState) {
+        // Purge per-workspace vault secrets when the state dir is wiped —
+        // otherwise the keychain accumulates orphan entries keyed by the
+        // (now-discarded) id.
+        try {
+          await window.api.vault.deleteAllForWorkspace(workspace.id);
+        } catch (err) {
+          console.warn('vault.deleteAllForWorkspace failed:', err);
+        }
+      }
       onClosed();
       onClose();
     } catch (err) {
@@ -110,9 +125,10 @@ export function CloseWorkspaceModal({ workspace, onClose, onClosed }: Props) {
           <span>
             Also delete the state directory
             <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 3, lineHeight: 1.4 }}>
-              Removes <code>~/.config/claude-fleet/state/{workspace.name}/</code> including the
-              workspace manifest. The workspace will no longer appear in the past list. A future
-              workspace with the same name will start fresh.
+              Removes <code>~/.config/claude-fleet/state/{workspace.id}/</code> (the workspace
+              manifest, transcripts, broker socket) and purges every secret env value stored for
+              this workspace in the OS keychain. The workspace will no longer appear in the past
+              list and a future workspace with the same name will start fresh.
             </div>
           </span>
         </label>

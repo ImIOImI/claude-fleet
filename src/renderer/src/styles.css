@@ -1176,3 +1176,188 @@ body {
   inset: 0;
   overflow: hidden;
 }
+
+/* ── Workspace modal: new fields (Foundation PR) ─────────────────────────
+   Compact styles for color swatch + popover, label chips, env-vars KV
+   editor, and resource-caps disclosure. PR 2 (Actions) is where these
+   get the full design-doc polish. */
+
+.name-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  position: relative;
+}
+.name-row input { flex: 1; }
+
+.color-swatch {
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--border, #2a2f38);
+  background: oklch(72% 0.14 0);
+  cursor: pointer;
+  padding: 0;
+}
+.color-swatch.unset {
+  background: transparent;
+  border-style: dashed;
+}
+.color-swatch:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.color-picker {
+  position: absolute;
+  top: 36px;
+  left: 0;
+  z-index: 30;
+  background: var(--bg-card, #181c24);
+  border: 1px solid var(--border, #2a2f38);
+  border-radius: 8px;
+  padding: 10px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+  min-width: 220px;
+}
+.color-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 22px);
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.color-chip {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+.color-chip.active { border-color: var(--text-primary, #e6e8ee); }
+.color-chip:hover { transform: scale(1.08); }
+.color-random,
+.color-clear {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border, #2a2f38);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.color-random:hover,
+.color-clear:hover { color: var(--text-primary); }
+
+.label-chip-input {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  padding: 6px 8px;
+  background: var(--bg-input, #11151c);
+  border: 1px solid var(--border, #2a2f38);
+  border-radius: 6px;
+  min-height: 34px;
+}
+.label-chip-input input {
+  flex: 1;
+  min-width: 120px;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  padding: 2px 0;
+}
+.label-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px 2px 8px;
+  font-size: 12px;
+  background: var(--bg-card, #181c24);
+  border: 1px solid var(--border, #2a2f38);
+  border-radius: 999px;
+  color: var(--text-primary);
+}
+.label-chip-remove {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 2px;
+  line-height: 1;
+}
+.label-chip-remove:hover { color: var(--state-error, #ef4d4d); }
+
+.kind-radio.disabled,
+.kind-radio[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; }
+
+.form-disclosure {
+  margin: 8px 0 4px;
+  border-top: 1px solid var(--border, #2a2f38);
+  padding-top: 8px;
+}
+.form-disclosure > summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-primary);
+  list-style: revert;
+}
+.form-disclosure > summary::-webkit-details-marker { color: var(--text-muted); }
+.form-disclosure .form-hint {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-left: 6px;
+}
+
+.env-editor { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.env-row {
+  display: grid;
+  grid-template-columns: 140px 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+}
+.env-row input {
+  padding: 4px 8px;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+}
+.env-secret-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.env-row-remove {
+  background: none;
+  border: 1px solid var(--border, #2a2f38);
+  color: var(--text-muted);
+  border-radius: 4px;
+  width: 24px;
+  height: 24px;
+  cursor: pointer;
+}
+.env-row-remove:hover { color: var(--state-error, #ef4d4d); }
+
+.resources-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+.resources-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.resources-grid input {
+  padding: 4px 8px;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 13px;
+}

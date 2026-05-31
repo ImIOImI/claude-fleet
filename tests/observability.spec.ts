@@ -15,7 +15,7 @@ test('Live push: renderer receives observability:summary push when watcher inges
   // new event, ipc.ts computes the summary and broadcasts
   // `observability:summary` to every window. The renderer's
   // `window.api.observability.onSummary` callback receives
-  // `(workspaceName, summary)` and updates the shared map.
+  // `(workspaceId, summary)` and updates the shared map.
   //
   // Test design: launch the app with a manifest but no JSONLs, subscribe
   // in the renderer (collecting received pushes into a window-scoped
@@ -33,7 +33,6 @@ test('Live push: renderer receives observability:summary push when watcher inges
       name,
       workspaceRoot: '/tmp/fleet-test-' + name,
       workspaceSubdir: '',
-      profile: 'oauth',
       kind: 'container',
       image: 'mock',
       createdAt: Date.now(),
@@ -62,17 +61,17 @@ test('Live push: renderer receives observability:summary push when watcher inges
         api: {
           observability: {
             onSummary: (
-              cb: (workspaceName: string, summary: unknown) => void
+              cb: (workspaceId: string, summary: unknown) => void
             ) => () => void;
           };
         };
       };
       const w = window as unknown as Window & {
-        __pushes: Array<{ workspaceName: string; summary: unknown }>;
+        __pushes: Array<{ workspaceId: string; summary: unknown }>;
       } & Api;
       w.__pushes = [];
-      w.api.observability.onSummary((workspaceName, summary) => {
-        w.__pushes.push({ workspaceName, summary });
+      w.api.observability.onSummary((workspaceId, summary) => {
+        w.__pushes.push({ workspaceId, summary });
       });
     });
 
@@ -106,12 +105,12 @@ test('Live push: renderer receives observability:summary push when watcher inges
           return await window.evaluate(() => {
             const w = window as unknown as {
               __pushes: Array<{
-                workspaceName: string;
+                workspaceId: string;
                 summary: { eventCount?: number; sessionId?: string } | null;
               }>;
             };
             return w.__pushes.find(
-              (p) => p.workspaceName === 'push-test-ws' && p.summary !== null
+              (p) => p.workspaceId === 'push-test-ws' && p.summary !== null
             );
           });
         },
@@ -125,12 +124,12 @@ test('Live push: renderer receives observability:summary push when watcher inges
     const latest = await window.evaluate(() => {
       const w = window as unknown as {
         __pushes: Array<{
-          workspaceName: string;
+          workspaceId: string;
           summary: { eventCount?: number; sessionId?: string } | null;
         }>;
       };
       return w.__pushes
-        .filter((p) => p.workspaceName === 'push-test-ws' && p.summary !== null)
+        .filter((p) => p.workspaceId === 'push-test-ws' && p.summary !== null)
         .pop();
     });
     expect(latest?.summary?.sessionId).toBe(sessionId);
@@ -160,14 +159,12 @@ test('Slot consumer: chip heights stay equal regardless of whether observability
           containerId: 'with-id',
           state: 'running',
           workspaceRoot: '/tmp/with',
-          profile: 'oauth'
         },
         {
           name: 'no-data',
           containerId: 'no-id',
           state: 'running',
           workspaceRoot: '/tmp/no',
-          profile: 'oauth'
         }
       ],
       observabilitySummaries: {
@@ -234,7 +231,6 @@ test('Slot consumer: chip secondary line shows live activity from observability 
           containerId: 'alpha-id',
           state: 'running',
           workspaceRoot: '/tmp/alpha',
-          profile: 'oauth'
         }
       ],
       observabilitySummaries: {
@@ -284,7 +280,6 @@ test('Slot consumer: terminal context bar fills proportionally to lastTurnContex
           containerId: 'alpha-id',
           state: 'running',
           workspaceRoot: '/tmp/alpha',
-          profile: 'oauth'
         }
       ],
       observabilitySummaries: {
@@ -342,7 +337,6 @@ test('ObservabilityPane: clicking + on a workspace clears the pane to empty (no 
           containerId: 'alpha-id',
           state: 'running',
           workspaceRoot: '/tmp/alpha',
-          profile: 'oauth'
         }
       ],
       observabilitySummaries: {
@@ -434,7 +428,6 @@ test('ObservabilityPane: switching between two loaded-from-inventory tabs surfac
           containerId: 'alpha-id',
           state: 'running',
           workspaceRoot: '/tmp/alpha',
-          profile: 'oauth'
         }
       ],
       observabilitySummaries: {
@@ -498,7 +491,6 @@ test('ObservabilityPane: switching tabs refetches and updates the pane to the fo
           containerId: 'alpha-id',
           state: 'running',
           workspaceRoot: '/tmp/alpha',
-          profile: 'oauth'
         }
       ],
       // Per-tab routing on — each call returns Tab-<8-char id prefix>.

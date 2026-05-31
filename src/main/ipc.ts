@@ -11,10 +11,15 @@ import {
   readWorkspaceManifest,
   touchWorkspaceUsed,
   writeWorkspaceManifest,
+  findWorkspaceByName,
   type Workspace,
-  type WorkspaceSpec
+  type WorkspaceSpec,
+  type WorkspaceEnv,
+  type WorkspaceResources,
+  type WorkspaceColor,
+  type AuthMode
 } from './workspaces.js';
-import type { PtyHandle, RemoveWorkspaceOpts, CreateWorkspaceInput } from './docker.js';
+import type { PtyHandle, RemoveWorkspaceOpts } from './docker.js';
 import type { JsonlWatcher } from './jsonlWatcher.js';
 import {
   eventsForSession,
@@ -39,34 +44,63 @@ interface RegisterIpcOpts {
 }
 
 /**
+ * Payload accepted by `workspace:create`. The renderer ships the
+ * pre-allocated ULID along with every field that lands in the manifest;
+ * the main process forwards container-level fields to the backend and
+ * persists the full spec to disk.
+ */
+interface WorkspaceCreatePayload {
+  id: string;
+  name: string;
+  description?: string;
+  labels?: string[];
+  color?: WorkspaceColor;
+  workspaceRoot: string;
+  workspaceSubdir: string;
+  kind?: 'container' | 'local';
+  image?: string;
+  authMode: AuthMode;
+  env: WorkspaceEnv;
+  resources?: WorkspaceResources;
+}
+
+/**
  * Merge the live-workspace list (from the backend) with on-disk manifests
  * (from workspaces.ts) into a single Workspace[]. Live entries take
- * precedence for state/status; manifests provide workspaceRoot/lastUsedAt
- * for workspaces whose container has been removed.
+ * precedence for state/status; manifests provide the user-facing fields
+ * (description/labels/color/env/etc.) that don't live on the container.
  */
 async function listAllWorkspaces(): Promise<Workspace[]> {
   const [live, manifests] = await Promise.all([
     backend.listLiveWorkspaces(),
     listWorkspaceManifests()
   ]);
-  const manifestByName = new Map(manifests.map((m) => [m.name, m]));
+  const manifestById = new Map(manifests.map((m) => [m.id, m]));
   const result: Workspace[] = [];
 
   for (const w of live) {
-    const m = manifestByName.get(w.name);
+    const m = manifestById.get(w.id);
     result.push({
       ...w,
+      // Manifest is authoritative for user-facing fields; container labels
+      // only carry id/name/subdir/workspaceRoot.
+      name: m?.name ?? w.name,
+      description: m?.description,
+      labels: m?.labels ?? w.labels,
+      color: m?.color,
       workspaceRoot: w.workspaceRoot || m?.workspaceRoot || '',
       workspaceSubdir: w.workspaceSubdir || m?.workspaceSubdir || '',
-      profile: w.profile || m?.profile || '',
+      authMode: m?.authMode ?? w.authMode,
+      env: m?.env ?? w.env,
+      resources: m?.resources,
       createdAt: m?.createdAt ?? w.createdAt,
       lastUsedAt: m?.lastUsedAt ?? w.lastUsedAt
     });
-    manifestByName.delete(w.name);
+    manifestById.delete(w.id);
   }
 
   // Manifests with no live container → deleted (recoverable from spec)
-  for (const m of manifestByName.values()) {
+  for (const m of manifestById.values()) {
     result.push({ ...m, state: 'deleted' });
   }
 
@@ -83,10 +117,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // refreshes relative-time displays and covers any missed event. See
   // `observabilityBroadcast.ts` for why per-target sends are guarded.
   if (jsonlWatcher) {
-    jsonlWatcher.on('ingest', ({ workspaceName }) => {
-      const summary = summaryForWorkspace(workspaceName);
+    jsonlWatcher.on('ingest', ({ workspaceId }) => {
+      const summary = summaryForWorkspace(workspaceId);
       broadcastObservabilitySummary(
-        { workspaceName, summary },
+        { workspaceId, summary },
         BrowserWindow.getAllWindows()
       );
     });
@@ -97,10 +131,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     // in pendingAttaches.ts; concurrent attaches fall back to the
     // workspace summary (v1 behavior) until the user re-mounts a tab
     // alone and we can disambiguate.
-    jsonlWatcher.on('new-session', ({ workspaceName, sessionId: claudeSessionId }) => {
-      const brokerSessionId = consumeForWorkspace(workspaceName);
+    jsonlWatcher.on('new-session', ({ workspaceId, sessionId: claudeSessionId }) => {
+      const brokerSessionId = consumeForWorkspace(workspaceId);
       if (!brokerSessionId) return;
-      learnBrokerSessionMapping(workspaceName, brokerSessionId, claudeSessionId);
+      learnBrokerSessionMapping(workspaceId, brokerSessionId, claudeSessionId);
     });
   }
 
@@ -116,25 +150,47 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
 
   ipcMain.handle(
     'workspace:create',
-    async (_e, input: CreateWorkspaceInput & { kind?: 'container' | 'local' }) => {
+    async (_e, input: WorkspaceCreatePayload) => {
       if (input.kind === 'local') {
         throw new Error(
           "Local workspaces aren't implemented yet. Pick 'Container' for now."
         );
       }
-      const ws = await backend.createWorkspace(input);
+      // Name-uniqueness is checked here (and not in the renderer alone) so
+      // a stale list doesn't allow duplicates through.
+      const existing = await findWorkspaceByName(input.name);
+      if (existing && existing.id !== input.id) {
+        throw new Error(`A workspace named "${input.name}" already exists.`);
+      }
+
+      const ws = await backend.createWorkspace({
+        id: input.id,
+        name: input.name,
+        workspaceRoot: input.workspaceRoot,
+        workspaceSubdir: input.workspaceSubdir,
+        env: input.env,
+        image: input.image,
+        resources: input.resources
+      });
+
       const spec: WorkspaceSpec = {
-        name: ws.name,
-        workspaceRoot: ws.workspaceRoot,
-        workspaceSubdir: ws.workspaceSubdir,
-        profile: ws.profile,
+        id: input.id,
+        name: input.name,
+        description: input.description,
+        labels: input.labels ?? [],
+        color: input.color,
+        workspaceRoot: input.workspaceRoot,
+        workspaceSubdir: input.workspaceSubdir,
         kind: 'container',
         image: ws.image,
+        authMode: input.authMode,
+        env: input.env,
+        resources: input.resources,
         createdAt: ws.createdAt,
         lastUsedAt: ws.lastUsedAt
       };
       await writeWorkspaceManifest(spec);
-      jsonlWatcher?.registerWorkspace(ws.name);
+      jsonlWatcher?.registerWorkspace(input.id);
 
       // Auto-record the image into the library so the next create's
       // picker shows it (and any labels it was built with). Best-effort:
@@ -150,47 +206,49 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         }
       }
 
-      return ws;
+      // Merge manifest fields back onto the backend's Workspace so the
+      // renderer sees its color/labels/description immediately.
+      return { ...ws, ...spec, state: ws.state, containerId: ws.containerId, status: ws.status };
     }
   );
 
   ipcMain.handle('images:list', () => imageLibrary.listImages());
   ipcMain.handle('images:remove', (_e, ref: string) => imageLibrary.removeImage(ref));
 
-  ipcMain.handle('sessions:read', (_e, workspaceName: string) =>
-    sessions.readInventory(workspaceName)
+  ipcMain.handle('sessions:read', (_e, workspaceId: string) =>
+    sessions.readInventory(workspaceId)
   );
   ipcMain.handle(
     'sessions:write',
-    (_e, workspaceName: string, inventory: sessions.SessionInventory) =>
-      sessions.writeInventory(workspaceName, inventory)
+    (_e, workspaceId: string, inventory: sessions.SessionInventory) =>
+      sessions.writeInventory(workspaceId, inventory)
   );
 
   /**
-   * Start an existing (live, possibly stopped) workspace by name. Returns
-   * the workspace if a container with that name exists; null otherwise,
+   * Start an existing (live, possibly stopped) workspace by id. Returns
+   * the workspace if a container with that id exists; null otherwise,
    * signalling the renderer to recreate from the saved manifest using the
    * normal create flow (which resolves vault credentials).
    */
-  ipcMain.handle('workspace:start', async (_e, name: string): Promise<Workspace | null> => {
-    const id = await backend.startWorkspace(name);
-    if (!id) return null;
-    await touchWorkspaceUsed(name);
+  ipcMain.handle('workspace:start', async (_e, id: string): Promise<Workspace | null> => {
+    const containerId = await backend.startWorkspace(id);
+    if (!containerId) return null;
+    await touchWorkspaceUsed(id);
     // Find the freshly-running workspace in the merged list so the
     // renderer gets the up-to-date state/status fields.
     const all = await listAllWorkspaces();
-    return all.find((w) => w.name === name) ?? null;
+    return all.find((w) => w.id === id) ?? null;
   });
 
-  ipcMain.handle('workspace:getManifest', async (_e, name: string) => {
-    return readWorkspaceManifest(name);
+  ipcMain.handle('workspace:getManifest', async (_e, id: string) => {
+    return readWorkspaceManifest(id);
   });
 
-  ipcMain.handle('workspace:stop', (_e, id: string) => backend.stopWorkspace(id));
-  ipcMain.handle('workspace:pause', (_e, id: string) => backend.pauseWorkspace(id));
+  ipcMain.handle('workspace:stop', (_e, containerId: string) => backend.stopWorkspace(containerId));
+  ipcMain.handle('workspace:pause', (_e, containerId: string) => backend.pauseWorkspace(containerId));
   ipcMain.handle(
     'workspace:remove',
-    (_e, id: string, opts?: RemoveWorkspaceOpts) => backend.removeWorkspace(id, opts)
+    (_e, containerId: string, opts?: RemoveWorkspaceOpts) => backend.removeWorkspace(containerId, opts)
   );
 
   ipcMain.handle('app:mockMode', () => MOCK_MODE);
@@ -237,11 +295,25 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     }
   );
 
+  // Per-workspace vault. All operations are keyed by the workspace's id
+  // (the ULID). The renderer never sees raw secret values for keys it
+  // didn't just set — only the list of keys + the secret value on
+  // explicit getSecret. setSecret/deleteSecret update the per-workspace
+  // index in keytar; deleteAllForWorkspace runs at workspace delete time.
   ipcMain.handle('vault:available', () => vault.isVaultAvailable());
-  ipcMain.handle('vault:list', () => vault.listProfileNames());
-  ipcMain.handle('vault:get', (_e, name: string) => vault.getProfile(name));
-  ipcMain.handle('vault:set', (_e, p: vault.Profile) => vault.setProfile(p));
-  ipcMain.handle('vault:delete', (_e, name: string) => vault.deleteProfile(name));
+  ipcMain.handle('vault:listKeys', (_e, workspaceId: string) => vault.listKeys(workspaceId));
+  ipcMain.handle('vault:getSecret', (_e, workspaceId: string, key: string) =>
+    vault.getSecret(workspaceId, key)
+  );
+  ipcMain.handle('vault:setSecret', (_e, workspaceId: string, key: string, value: string) =>
+    vault.setSecret(workspaceId, key, value)
+  );
+  ipcMain.handle('vault:deleteSecret', (_e, workspaceId: string, key: string) =>
+    vault.deleteSecret(workspaceId, key)
+  );
+  ipcMain.handle('vault:deleteAllForWorkspace', (_e, workspaceId: string) =>
+    vault.deleteAllForWorkspace(workspaceId)
+  );
 
   ipcMain.handle(
     'pty:attach',
@@ -370,8 +442,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
    * UUID) is a deferred follow-up; in practice the latest-active heuristic
    * matches the focused tab nearly always.
    */
-  ipcMain.handle('observability:summaryForWorkspace', (_e, workspaceName: string) =>
-    summaryForWorkspace(workspaceName)
+  ipcMain.handle('observability:summaryForWorkspace', (_e, workspaceId: string) =>
+    summaryForWorkspace(workspaceId)
   );
 
   /**
@@ -384,8 +456,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
    */
   ipcMain.handle(
     'observability:summaryForBrokerSession',
-    (_e, workspaceName: string, brokerSessionId: string) =>
-      summaryForBrokerSession(workspaceName, brokerSessionId)
+    (_e, workspaceId: string, brokerSessionId: string) =>
+      summaryForBrokerSession(workspaceId, brokerSessionId)
   );
 
   // Cost rollups (#32). USD is derived from `events` via pricing.ts and is
@@ -396,8 +468,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('observability:getCost', (_e, sessionId: string) =>
     costForSession(sessionId)
   );
-  ipcMain.handle('observability:getCostForWorkspace', (_e, workspaceName: string) =>
-    costForWorkspace(workspaceName)
+  ipcMain.handle('observability:getCostForWorkspace', (_e, workspaceId: string) =>
+    costForWorkspace(workspaceId)
   );
 
   // Renderer-side error reporting bridge. The renderer's onerror /
@@ -423,14 +495,14 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   if (process.env.CLAUDE_FLEET_E2E === '1') {
     ipcMain.handle(
       '__test:recordPendingAttach',
-      (_e, workspaceName: string, brokerSessionId: string, recordedAt?: number) => {
-        recordPendingAttach(workspaceName, brokerSessionId, recordedAt);
+      (_e, workspaceId: string, brokerSessionId: string, recordedAt?: number) => {
+        recordPendingAttach(workspaceId, brokerSessionId, recordedAt);
       }
     );
     ipcMain.handle(
       '__test:lookupBrokerSession',
-      (_e, workspaceName: string, brokerSessionId: string) =>
-        lookupBrokerSession(workspaceName, brokerSessionId)
+      (_e, workspaceId: string, brokerSessionId: string) =>
+        lookupBrokerSession(workspaceId, brokerSessionId)
     );
   }
 }

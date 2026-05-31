@@ -98,6 +98,65 @@ function migrate(d: Database.Database): void {
     `);
     d.pragma('user_version = 2');
   }
+  if (current < 3) {
+    // Workspace identity moved from mutable name → immutable ULID id
+    // (workspace-modal redesign, Foundation PR). Pre-existing rows refer
+    // to workspaces by name which no longer matches anything in the new
+    // state-dir layout, so we cut history rather than carry stale
+    // foreign keys. Matches the "clean slate" migration documented in
+    // docs/design/workspace-modal.md.
+    d.exec(`
+      DROP TABLE IF EXISTS events;
+      DROP TABLE IF EXISTS sessions;
+      DROP TABLE IF EXISTS broker_sessions;
+
+      CREATE TABLE events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        ts INTEGER,
+        type TEXT NOT NULL,
+        subtype TEXT,
+        uuid TEXT,
+        parent_uuid TEXT,
+        model TEXT,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        cache_read_input_tokens INTEGER,
+        cache_creation_input_tokens INTEGER,
+        service_tier TEXT,
+        tool_name TEXT,
+        raw_jsonl TEXT NOT NULL,
+        dedup_key TEXT NOT NULL,
+        UNIQUE(session_id, dedup_key)
+      );
+      CREATE INDEX idx_events_session_ts ON events(session_id, ts);
+      CREATE INDEX idx_events_workspace ON events(workspace_id);
+      CREATE INDEX idx_events_type ON events(type);
+
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        cwd TEXT,
+        started_at INTEGER,
+        last_active_at INTEGER,
+        ai_title TEXT,
+        first_user_message TEXT,
+        user_set_name TEXT
+      );
+      CREATE INDEX idx_sessions_workspace ON sessions(workspace_id);
+
+      CREATE TABLE broker_sessions (
+        workspace_id TEXT NOT NULL,
+        broker_session_id TEXT NOT NULL,
+        claude_session_id TEXT NOT NULL,
+        learned_at INTEGER NOT NULL,
+        PRIMARY KEY (workspace_id, broker_session_id)
+      );
+      CREATE INDEX idx_broker_sessions_claude ON broker_sessions(claude_session_id);
+    `);
+    d.pragma('user_version = 3');
+  }
 }
 
 // ── Ingest ────────────────────────────────────────────────────────────────

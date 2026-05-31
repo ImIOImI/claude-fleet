@@ -9,8 +9,8 @@
 //
 // The actual OAuth handshake (browser → Anthropic → auth code) can't
 // be tested in CI — it needs real credentials and an interactive
-// browser. What we guarantee here is the foundation: a blank-profile
-// submit produces a workspace with profile label 'oauth' and an empty
+// browser. What we guarantee here is the foundation: a default-form
+// submit produces a workspace with `authMode='oauth'` and an empty
 // env, so when claude starts in the PTY there's no ANTHROPIC_API_KEY
 // env to win precedence over OAuth.
 
@@ -48,7 +48,7 @@ test('Create button surfaces validation errors when required fields are empty', 
   }
 });
 
-test('Create flow (OAuth mode): empty profile submits with profile=oauth and no API key env', async () => {
+test('Create flow (OAuth mode): default submit produces authMode=oauth and empty env', async () => {
   const { app, window } = await launch();
   try {
     await mockMainIpc(app, { isDirectoryReturns: true });
@@ -56,7 +56,7 @@ test('Create flow (OAuth mode): empty profile submits with profile=oauth and no 
     await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
     await window.getByLabel('Workspace name').fill('test-oauth-workspace');
     await window.getByPlaceholder('/home/troy/repos').fill('/tmp/fleet-test');
-    // Subdir and profile left blank → OAuth mode
+    // Subdir + env left blank → OAuth-only workspace
 
     await window.getByRole('button', { name: 'Create & start' }).click();
     await expect(window.getByRole('heading', { name: 'New workspace' })).toBeHidden();
@@ -68,9 +68,13 @@ test('Create flow (OAuth mode): empty profile submits with profile=oauth and no 
       name: 'test-oauth-workspace',
       workspaceRoot: '/tmp/fleet-test',
       workspaceSubdir: '',
-      profile: 'oauth',
-      env: {}
+      authMode: 'oauth',
+      env: { plain: {}, secretKeys: [] }
     });
+    // Every create is keyed by a freshly minted ULID.
+    const spec = calls.create[0] as { id: string };
+    expect(typeof spec.id).toBe('string');
+    expect(spec.id).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/i);
   } finally {
     await app.close();
   }

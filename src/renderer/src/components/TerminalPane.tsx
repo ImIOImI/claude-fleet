@@ -19,7 +19,8 @@ import { TerminalSession } from './TerminalSession';
 
 interface Props {
   containerId: string;
-  workspaceName: string;
+  /** ULID — used for sessions.json path and observability lookups. */
+  workspaceId: string;
   paused: boolean;
   /**
    * Whether this pane is the currently-selected workspace. Hidden panes
@@ -55,7 +56,7 @@ interface Props {
    * — there the workspace summary at least surfaces what's happening.
    */
   onActiveTabChange?: (
-    workspaceName: string,
+    workspaceId: string,
     brokerSessionId: string,
     isFresh: boolean
   ) => void;
@@ -89,7 +90,7 @@ function uid(): string {
 
 export function TerminalPane({
   containerId,
-  workspaceName,
+  workspaceId,
   paused,
   visible,
   summary,
@@ -134,14 +135,14 @@ export function TerminalPane({
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const inv = await window.api.sessions.read(workspaceName);
+      const inv = await window.api.sessions.read(workspaceId);
       if (cancelled) return;
       if (inv.sessions.length === 0) {
         const main: Session = { id: uid(), name: 'main', createdAt: Date.now() };
         setSessions([main]);
         setActiveId(main.id);
         setNextNum(2);
-        await window.api.sessions.write(workspaceName, {
+        await window.api.sessions.write(workspaceId, {
           version: 1,
           sessions: [main],
           nextNum: 2,
@@ -157,7 +158,7 @@ export function TerminalPane({
     return () => {
       cancelled = true;
     };
-  }, [workspaceName]);
+  }, [workspaceId]);
 
   // Persist on every change after the initial load. Best-effort: write
   // failures are logged but don't fault the UI — the worst case is the
@@ -171,7 +172,7 @@ export function TerminalPane({
       return;
     }
     void window.api.sessions
-      .write(workspaceName, {
+      .write(workspaceId, {
         version: 1,
         sessions,
         nextNum,
@@ -181,16 +182,16 @@ export function TerminalPane({
         // eslint-disable-next-line no-console
         console.warn('sessions.write failed:', err);
       });
-  }, [loaded, workspaceName, sessions, nextNum, activeId]);
+  }, [loaded, workspaceId, sessions, nextNum, activeId]);
 
   // Bubble activeId up to App so the ObservabilityPane can target the
   // claude session this tab maps to. Fires on inventory-load
   // (initial activeId set), tab-click, addSession, and the close-last
   // auto-recreate path — every setActiveId call.
   useEffect(() => {
-    if (!activeId || !workspaceName) return;
-    onActiveTabChange?.(workspaceName, activeId, freshIdsRef.current.has(activeId));
-  }, [activeId, workspaceName, onActiveTabChange]);
+    if (!activeId || !workspaceId) return;
+    onActiveTabChange?.(workspaceId, activeId, freshIdsRef.current.has(activeId));
+  }, [activeId, workspaceId, onActiveTabChange]);
 
   function addSession(): void {
     if (!loaded) return;

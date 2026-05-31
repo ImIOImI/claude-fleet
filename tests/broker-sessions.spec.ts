@@ -25,7 +25,6 @@ function writeManifest(userDataDir: string, name: string): string {
       name,
       workspaceRoot: '/tmp/fleet-test-' + name,
       workspaceSubdir: '',
-      profile: 'oauth',
       kind: 'container',
       image: 'mock',
       createdAt: Date.now(),

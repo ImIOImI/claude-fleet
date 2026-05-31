@@ -32,19 +32,25 @@ test('Watcher: ingests JSONL events for every workspace manifest, not just the f
   // and ingest them. After launch, summaryForWorkspace must return
   // non-null for BOTH workspaces.
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-watcher-'));
-  const writeWorkspace = (name: string): string => {
-    const stateDir = path.join(userDataDir, 'state', name);
+  // State dirs keyed by id (the new ULID-shape identity). The startup
+  // migration leaves these alone since the manifests already carry a
+  // matching `id` + the new `env` field.
+  const writeWorkspace = (id: string, name: string): string => {
+    const stateDir = path.join(userDataDir, 'state', id);
     const jsonlDir = path.join(stateDir, '.claude', 'projects', '-workspace');
     mkdirSync(jsonlDir, { recursive: true });
     writeFileSync(
       path.join(stateDir, 'workspace.json'),
       JSON.stringify({
+        id,
         name,
+        labels: [],
         workspaceRoot: '/tmp/fleet-test-' + name,
         workspaceSubdir: '',
-        profile: 'oauth',
         kind: 'container',
         image: 'mock',
+        authMode: 'oauth',
+        env: { plain: {}, secretKeys: [] },
         createdAt: Date.now(),
         lastUsedAt: Date.now()
       })
@@ -70,8 +76,13 @@ test('Watcher: ingests JSONL events for every workspace manifest, not just the f
     return sessionId;
   };
 
-  writeWorkspace('watcher-alpha');
-  writeWorkspace('watcher-beta');
+  // Use 26-char Crockford-base32 ids so the migration's path-shape check
+  // recognizes them as already-migrated. Pad with leading chars; the
+  // content is opaque to the test.
+  const idAlpha = '01TESTALPHA00000000000000A';
+  const idBeta = '01TESTBETA0000000000000000';
+  writeWorkspace(idAlpha, 'watcher-alpha');
+  writeWorkspace(idBeta, 'watcher-beta');
 
   // Launch with the pre-populated userDataDir. No CLAUDE_FLEET_MOCK —
   // we need the real watcher + DB. Docker being unreachable is fine
@@ -111,7 +122,7 @@ test('Watcher: ingests JSONL events for every workspace manifest, not just the f
               return await (window as unknown as Api).api.observability.summaryForWorkspace(
                 name
               );
-            }, 'watcher-alpha'),
+            }, idAlpha),
             window.evaluate(async (name) => {
               type Api = {
                 api: {
@@ -123,7 +134,7 @@ test('Watcher: ingests JSONL events for every workspace manifest, not just the f
               return await (window as unknown as Api).api.observability.summaryForWorkspace(
                 name
               );
-            }, 'watcher-beta')
+            }, idBeta)
           ]);
           return { alphaNull: a === null, betaNull: b === null };
         },
@@ -150,8 +161,11 @@ test('Watcher: picks up JSONLs written to a workspace whose dir was missing at r
   // creates the dir + JSONL after launch and asserts the watcher
   // catches it.
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-watcher-late-'));
+  // State dir keyed by id (ULID-shape) so the startup migration treats
+  // the pre-seeded manifest as already-current.
+  const id = '01TESTLATECREATE0000000000';
   const name = 'late-create-ws';
-  const stateDir = path.join(userDataDir, 'state', name);
+  const stateDir = path.join(userDataDir, 'state', id);
   // Manifest exists at launch (workspace would have been created in a
   // prior session or earlier in this session) but the projects subdir
   // does NOT exist yet — claude hasn't written anything in this
@@ -160,12 +174,15 @@ test('Watcher: picks up JSONLs written to a workspace whose dir was missing at r
   writeFileSync(
     path.join(stateDir, 'workspace.json'),
     JSON.stringify({
+      id,
       name,
+      labels: [],
       workspaceRoot: '/tmp/fleet-test-' + name,
       workspaceSubdir: '',
-      profile: 'oauth',
       kind: 'container',
       image: 'mock',
+      authMode: 'oauth',
+      env: { plain: {}, secretKeys: [] },
       createdAt: Date.now(),
       lastUsedAt: Date.now()
     })
@@ -227,7 +244,7 @@ test('Watcher: picks up JSONLs written to a workspace whose dir was missing at r
               n
             );
             return s !== null;
-          }, name);
+          }, id);
         },
         { timeout: 8_000, intervals: [200, 500, 1000] }
       )
