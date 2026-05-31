@@ -93,7 +93,6 @@ test('Past workspaces: deleted workspace appears in modal and restart fires work
           name: 'ghost-fox',
           state: 'deleted',
           workspaceRoot: '/tmp/ghost-fox',
-          profile: 'oauth'
         }
       ]
     });
@@ -242,7 +241,6 @@ test('Past workspaces: paused workspace renders the paused state in the past lis
           state: 'paused',
           status: 'Paused',
           workspaceRoot: '/tmp/frozen-fox',
-          profile: 'oauth'
         }
       ]
     });

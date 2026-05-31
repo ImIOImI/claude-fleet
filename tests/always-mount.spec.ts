@@ -170,7 +170,7 @@ test('Always-mount: adding a tab in one workspace does not leak into the other',
   // sessions seem to be mixed up with gentle-crane's" — possibly meaning
   // tabs themselves (not terminal content) are leaking across workspaces.
   // With always-mount, both TerminalPanes' state hooks run continuously;
-  // a misuse of workspaceName in the persist effect could cause workspace
+  // a misuse of workspaceId in the persist effect could cause workspace
   // A's tab additions to overwrite workspace B's sessions.json (or
   // vice-versa).
   //

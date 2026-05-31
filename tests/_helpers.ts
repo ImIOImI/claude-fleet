@@ -98,18 +98,25 @@ export async function launch(
 
 export interface MockOpts {
   isDirectoryReturns?: boolean;
-  // Workspaces returned from workspace:list. Defaults to []. The renderer
-  // synthesizes ids: live → containerId, deleted → "deleted:<name>".
+  // Workspaces returned from workspace:list. Defaults to []. Renderer
+  // identity is the ULID `id`; tests can pass an arbitrary string (the
+  // mock doesn't enforce ULID shape since it never resolves a real
+  // state-dir). `authMode`/`env`/`labels` default to safe values so
+  // legacy tests don't have to spell them out.
   workspaceList?: Array<{
+    id?: string;
     name: string;
+    description?: string;
+    labels?: string[];
     containerId?: string;
     state: 'running' | 'stopped' | 'deleted';
     status?: string;
     workspaceRoot: string;
     workspaceSubdir?: string;
-    profile: string;
     kind?: 'container' | 'local';
     image?: string;
+    authMode?: 'oauth' | 'apikey';
+    env?: { plain: Record<string, string>; secretKeys: string[] };
     createdAt?: number;
     lastUsedAt?: number;
   }>;
@@ -173,6 +180,14 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
 
     const now = Date.now();
     const list = (opts.workspaceList ?? []).map((w) => ({
+      // Pre-fill the new identity + manifest fields so callers don't
+      // have to spell them out. Defaulting `id` to `name` keeps the old
+      // tests' name-based workspace references working without
+      // declaring an explicit ULID.
+      id: w.id ?? w.name,
+      labels: w.labels ?? [],
+      authMode: w.authMode ?? 'oauth',
+      env: w.env ?? { plain: {}, secretKeys: [] },
       workspaceSubdir: '',
       createdAt: now,
       lastUsedAt: now,
@@ -190,22 +205,34 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
     ipcMain.handle('workspace:create', async (_e, spec: Record<string, unknown>) => {
       g.__calls.create.push(spec);
       return {
+        id: spec.id,
         name: spec.name,
+        description: spec.description,
+        labels: spec.labels ?? [],
+        color: spec.color,
         containerId: 'fake-id',
         state: 'running',
         status: 'running',
         workspaceRoot: spec.workspaceRoot,
         workspaceSubdir: spec.workspaceSubdir ?? '',
-        profile: spec.profile,
+        kind: spec.kind ?? 'container',
+        image: spec.image,
+        authMode: spec.authMode ?? 'oauth',
+        env: spec.env ?? { plain: {}, secretKeys: [] },
+        resources: spec.resources,
         createdAt: Date.now(),
         lastUsedAt: Date.now()
       };
     });
-    ipcMain.handle('workspace:start', async (_e, name: string) => {
-      g.__calls.start.push(name);
-      const found = list.find((w) => w.name === name);
+    // Identity moved from name → id. Mock accepts either: tests that
+    // pre-set an id pass it directly; legacy tests that just pass a
+    // name still find the matching workspace via the `id ?? name`
+    // default applied above.
+    ipcMain.handle('workspace:start', async (_e, id: string) => {
+      g.__calls.start.push(id);
+      const found = list.find((w) => w.id === id || w.name === id);
       if (!found) return null;
-      return { ...found, state: 'running', containerId: found.containerId ?? `restarted-${name}` };
+      return { ...found, state: 'running', containerId: found.containerId ?? `restarted-${found.id}` };
     });
     ipcMain.handle('fs:isDirectory', async (_e, p: string) => {
       g.__calls.isDirectory.push(p);
@@ -230,14 +257,14 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
     const summaries = opts.observabilitySummaries ?? {};
     ipcMain.handle(
       'observability:summaryForWorkspace',
-      (_e, workspaceName: string) => summaries[workspaceName] ?? null
+      (_e, workspaceId: string) => summaries[workspaceId] ?? null
     );
     // Per-tab variant. Default matches the real server-side behavior:
     // null when no mapping is known. Tests that need to assert per-tab
     // routing pass observabilityPerTabSummaries=true.
     ipcMain.handle(
       'observability:summaryForBrokerSession',
-      (_e, _workspaceName: string, brokerSessionId: string) => {
+      (_e, _workspaceId: string, brokerSessionId: string) => {
         if (opts.observabilityPerTabSummaries) {
           const tag = brokerSessionId.slice(0, 8);
           return {

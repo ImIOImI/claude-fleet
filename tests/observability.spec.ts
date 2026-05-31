@@ -15,7 +15,7 @@ test('Live push: renderer receives observability:summary push when watcher inges
   // new event, ipc.ts computes the summary and broadcasts
   // `observability:summary` to every window. The renderer's
   // `window.api.observability.onSummary` callback receives
-  // `(workspaceName, summary)` and updates the shared map.
+  // `(workspaceId, summary)` and updates the shared map.
   //
   // Test design: launch the app with a manifest but no JSONLs, subscribe
   // in the renderer (collecting received pushes into a window-scoped
@@ -23,19 +23,27 @@ test('Live push: renderer receives observability:summary push when watcher inges
   // a reasonable window with the correct workspace name + non-null
   // summary derived from the line we just wrote.
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-push-'));
+  // State dir is keyed by id (ULID shape) so the startup migration treats
+  // the manifest as already-current and doesn't rename the dir out from
+  // under us. The display name is what the test reads from chips/UI; the
+  // id is what observability + watcher key by.
+  const id = '01TESTPUSH00000000000000WS';
   const name = 'push-test-ws';
-  const stateDir = path.join(userDataDir, 'state', name);
+  const stateDir = path.join(userDataDir, 'state', id);
   const projectsDir = path.join(stateDir, '.claude', 'projects', '-workspace');
   mkdirSync(projectsDir, { recursive: true });
   writeFileSync(
     path.join(stateDir, 'workspace.json'),
     JSON.stringify({
+      id,
       name,
+      labels: [],
       workspaceRoot: '/tmp/fleet-test-' + name,
       workspaceSubdir: '',
-      profile: 'oauth',
       kind: 'container',
       image: 'mock',
+      authMode: 'oauth',
+      env: { plain: {}, secretKeys: [] },
       createdAt: Date.now(),
       lastUsedAt: Date.now()
     })
@@ -62,17 +70,17 @@ test('Live push: renderer receives observability:summary push when watcher inges
         api: {
           observability: {
             onSummary: (
-              cb: (workspaceName: string, summary: unknown) => void
+              cb: (workspaceId: string, summary: unknown) => void
             ) => () => void;
           };
         };
       };
       const w = window as unknown as Window & {
-        __pushes: Array<{ workspaceName: string; summary: unknown }>;
+        __pushes: Array<{ workspaceId: string; summary: unknown }>;
       } & Api;
       w.__pushes = [];
-      w.api.observability.onSummary((workspaceName, summary) => {
-        w.__pushes.push({ workspaceName, summary });
+      w.api.observability.onSummary((workspaceId, summary) => {
+        w.__pushes.push({ workspaceId, summary });
       });
     });
 
@@ -103,17 +111,17 @@ test('Live push: renderer receives observability:summary push when watcher inges
     await expect
       .poll(
         async () => {
-          return await window.evaluate(() => {
+          return await window.evaluate((targetId) => {
             const w = window as unknown as {
               __pushes: Array<{
-                workspaceName: string;
+                workspaceId: string;
                 summary: { eventCount?: number; sessionId?: string } | null;
               }>;
             };
             return w.__pushes.find(
-              (p) => p.workspaceName === 'push-test-ws' && p.summary !== null
+              (p) => p.workspaceId === targetId && p.summary !== null
             );
-          });
+          }, id);
         },
         { timeout: 8_000, intervals: [200, 500, 1000] }
       )
@@ -122,17 +130,17 @@ test('Live push: renderer receives observability:summary push when watcher inges
     // Verify the pushed summary actually reflects the line we wrote
     // (not just a null/empty arrival). eventCount must be ≥1, and the
     // sessionId must match the file we created.
-    const latest = await window.evaluate(() => {
+    const latest = await window.evaluate((targetId) => {
       const w = window as unknown as {
         __pushes: Array<{
-          workspaceName: string;
+          workspaceId: string;
           summary: { eventCount?: number; sessionId?: string } | null;
         }>;
       };
       return w.__pushes
-        .filter((p) => p.workspaceName === 'push-test-ws' && p.summary !== null)
+        .filter((p) => p.workspaceId === targetId && p.summary !== null)
         .pop();
-    });
+    }, id);
     expect(latest?.summary?.sessionId).toBe(sessionId);
     expect(latest?.summary?.eventCount).toBeGreaterThanOrEqual(1);
   } finally {
@@ -160,14 +168,12 @@ test('Slot consumer: chip heights stay equal regardless of whether observability
           containerId: 'with-id',
           state: 'running',
           workspaceRoot: '/tmp/with',
-          profile: 'oauth'
         },
         {
           name: 'no-data',
           containerId: 'no-id',
           state: 'running',
           workspaceRoot: '/tmp/no',
-          profile: 'oauth'
         }
       ],
       observabilitySummaries: {
@@ -234,7 +240,6 @@ test('Slot consumer: chip secondary line shows live activity from observability 
           containerId: 'alpha-id',
           state: 'running',
           workspaceRoot: '/tmp/alpha',
-          profile: 'oauth'
         }
       ],
       observabilitySummaries: {
@@ -284,7 +289,6 @@ test('Slot consumer: terminal context bar fills proportionally to lastTurnContex
           containerId: 'alpha-id',
           state: 'running',
           workspaceRoot: '/tmp/alpha',
-          profile: 'oauth'
         }
       ],
       observabilitySummaries: {
@@ -342,7 +346,6 @@ test('ObservabilityPane: clicking + on a workspace clears the pane to empty (no 
           containerId: 'alpha-id',
           state: 'running',
           workspaceRoot: '/tmp/alpha',
-          profile: 'oauth'
         }
       ],
       observabilitySummaries: {
@@ -434,7 +437,6 @@ test('ObservabilityPane: switching between two loaded-from-inventory tabs surfac
           containerId: 'alpha-id',
           state: 'running',
           workspaceRoot: '/tmp/alpha',
-          profile: 'oauth'
         }
       ],
       observabilitySummaries: {
@@ -498,7 +500,6 @@ test('ObservabilityPane: switching tabs refetches and updates the pane to the fo
           containerId: 'alpha-id',
           state: 'running',
           workspaceRoot: '/tmp/alpha',
-          profile: 'oauth'
         }
       ],
       // Per-tab routing on — each call returns Tab-<8-char id prefix>.

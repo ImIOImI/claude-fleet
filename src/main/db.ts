@@ -42,7 +42,7 @@ function migrate(d: Database.Database): void {
       CREATE TABLE events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         session_id TEXT NOT NULL,
-        workspace_name TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
         ts INTEGER,
         type TEXT NOT NULL,
         subtype TEXT,
@@ -60,12 +60,12 @@ function migrate(d: Database.Database): void {
         UNIQUE(session_id, dedup_key)
       );
       CREATE INDEX idx_events_session_ts ON events(session_id, ts);
-      CREATE INDEX idx_events_workspace ON events(workspace_name);
+      CREATE INDEX idx_events_workspace ON events(workspace_id);
       CREATE INDEX idx_events_type ON events(type);
 
       CREATE TABLE sessions (
         id TEXT PRIMARY KEY,
-        workspace_name TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
         cwd TEXT,
         started_at INTEGER,
         last_active_at INTEGER,
@@ -73,7 +73,7 @@ function migrate(d: Database.Database): void {
         first_user_message TEXT,
         user_set_name TEXT
       );
-      CREATE INDEX idx_sessions_workspace ON sessions(workspace_name);
+      CREATE INDEX idx_sessions_workspace ON sessions(workspace_id);
     `);
     d.pragma('user_version = 1');
   }
@@ -88,15 +88,74 @@ function migrate(d: Database.Database): void {
     // appears for us to re-learn from.
     d.exec(`
       CREATE TABLE broker_sessions (
-        workspace_name TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
         broker_session_id TEXT NOT NULL,
         claude_session_id TEXT NOT NULL,
         learned_at INTEGER NOT NULL,
-        PRIMARY KEY (workspace_name, broker_session_id)
+        PRIMARY KEY (workspace_id, broker_session_id)
       );
       CREATE INDEX idx_broker_sessions_claude ON broker_sessions(claude_session_id);
     `);
     d.pragma('user_version = 2');
+  }
+  if (current < 3) {
+    // Workspace identity moved from mutable name → immutable ULID id
+    // (workspace-modal redesign, Foundation PR). Pre-existing rows refer
+    // to workspaces by name which no longer matches anything in the new
+    // state-dir layout, so we cut history rather than carry stale
+    // foreign keys. Matches the "clean slate" migration documented in
+    // docs/design/workspace-modal.md.
+    d.exec(`
+      DROP TABLE IF EXISTS events;
+      DROP TABLE IF EXISTS sessions;
+      DROP TABLE IF EXISTS broker_sessions;
+
+      CREATE TABLE events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        ts INTEGER,
+        type TEXT NOT NULL,
+        subtype TEXT,
+        uuid TEXT,
+        parent_uuid TEXT,
+        model TEXT,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        cache_read_input_tokens INTEGER,
+        cache_creation_input_tokens INTEGER,
+        service_tier TEXT,
+        tool_name TEXT,
+        raw_jsonl TEXT NOT NULL,
+        dedup_key TEXT NOT NULL,
+        UNIQUE(session_id, dedup_key)
+      );
+      CREATE INDEX idx_events_session_ts ON events(session_id, ts);
+      CREATE INDEX idx_events_workspace ON events(workspace_id);
+      CREATE INDEX idx_events_type ON events(type);
+
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        cwd TEXT,
+        started_at INTEGER,
+        last_active_at INTEGER,
+        ai_title TEXT,
+        first_user_message TEXT,
+        user_set_name TEXT
+      );
+      CREATE INDEX idx_sessions_workspace ON sessions(workspace_id);
+
+      CREATE TABLE broker_sessions (
+        workspace_id TEXT NOT NULL,
+        broker_session_id TEXT NOT NULL,
+        claude_session_id TEXT NOT NULL,
+        learned_at INTEGER NOT NULL,
+        PRIMARY KEY (workspace_id, broker_session_id)
+      );
+      CREATE INDEX idx_broker_sessions_claude ON broker_sessions(claude_session_id);
+    `);
+    d.pragma('user_version = 3');
   }
 }
 
@@ -111,12 +170,12 @@ export interface IngestResult {
 const insertEvent = (d: Database.Database) =>
   d.prepare(`
     INSERT OR IGNORE INTO events (
-      session_id, workspace_name, ts, type, subtype, uuid, parent_uuid,
+      session_id, workspace_id, ts, type, subtype, uuid, parent_uuid,
       model, input_tokens, output_tokens,
       cache_read_input_tokens, cache_creation_input_tokens,
       service_tier, tool_name, raw_jsonl, dedup_key
     ) VALUES (
-      @session_id, @workspace_name, @ts, @type, @subtype, @uuid, @parent_uuid,
+      @session_id, @workspace_id, @ts, @type, @subtype, @uuid, @parent_uuid,
       @model, @input_tokens, @output_tokens,
       @cache_read_input_tokens, @cache_creation_input_tokens,
       @service_tier, @tool_name, @raw_jsonl, @dedup_key
@@ -125,8 +184,8 @@ const insertEvent = (d: Database.Database) =>
 
 const upsertSession = (d: Database.Database) =>
   d.prepare(`
-    INSERT INTO sessions (id, workspace_name, started_at, last_active_at)
-    VALUES (@id, @workspace_name, @ts, @ts)
+    INSERT INTO sessions (id, workspace_id, started_at, last_active_at)
+    VALUES (@id, @workspace_id, @ts, @ts)
     ON CONFLICT(id) DO UPDATE SET
       last_active_at = MAX(COALESCE(last_active_at, 0), excluded.last_active_at),
       started_at = COALESCE(started_at, excluded.started_at)
@@ -161,7 +220,7 @@ function getStmts(d: Database.Database): Cache {
 }
 
 /**
- * Ingest a single JSONL line. Caller passes `workspaceName` and `sessionId`
+ * Ingest a single JSONL line. Caller passes `workspaceId` and `sessionId`
  * (both derived from the file path on disk — JSONL light events sometimes
  * omit sessionId, so the path is authoritative). The line is parsed,
  * extracts pulled out for fast access, the raw line stored verbatim, and the
@@ -170,7 +229,7 @@ function getStmts(d: Database.Database): Cache {
  * Returns whether the row was inserted (false = duplicate, already present).
  */
 export function ingestLine(
-  workspaceName: string,
+  workspaceId: string,
   sessionId: string,
   rawLine: string,
 ): IngestResult {
@@ -207,7 +266,7 @@ export function ingestLine(
 
   const info = s.insertEvent.run({
     session_id: sessionId,
-    workspace_name: workspaceName,
+    workspace_id: workspaceId,
     ts,
     type,
     subtype,
@@ -227,7 +286,7 @@ export function ingestLine(
   // Touch the sessions row for every event with a known ts so last_active_at
   // tracks reality; events without ts (light events) get the upsert too but
   // contribute NULL.
-  s.upsertSession.run({ id: sessionId, workspace_name: workspaceName, ts });
+  s.upsertSession.run({ id: sessionId, workspace_id: workspaceId, ts });
 
   // Derive per-event metadata into the sessions row.
   if (type === 'system' && typeof parsed.cwd === 'string') {
@@ -248,7 +307,7 @@ export function ingestLine(
 export interface EventRow {
   id: number;
   sessionId: string;
-  workspaceName: string;
+  workspaceId: string;
   ts: number | null;
   type: string;
   subtype: string | null;
@@ -267,7 +326,7 @@ export interface EventRow {
 interface EventRowSql {
   id: number;
   session_id: string;
-  workspace_name: string;
+  workspace_id: string;
   ts: number | null;
   type: string;
   subtype: string | null;
@@ -287,7 +346,7 @@ function rowFromSql(r: EventRowSql): EventRow {
   return {
     id: r.id,
     sessionId: r.session_id,
-    workspaceName: r.workspace_name,
+    workspaceId: r.workspace_id,
     ts: r.ts,
     type: r.type,
     subtype: r.subtype,
@@ -319,7 +378,7 @@ export function eventsForSession(sessionId: string, sinceEventId = 0, limit = 50
 
 export interface SessionRow {
   id: string;
-  workspaceName: string;
+  workspaceId: string;
   cwd: string | null;
   startedAt: number | null;
   lastActiveAt: number | null;
@@ -330,7 +389,7 @@ export interface SessionRow {
 
 interface SessionRowSql {
   id: string;
-  workspace_name: string;
+  workspace_id: string;
   cwd: string | null;
   started_at: number | null;
   last_active_at: number | null;
@@ -345,7 +404,7 @@ export function getSession(id: string): SessionRow | null {
   if (!row) return null;
   return {
     id: row.id,
-    workspaceName: row.workspace_name,
+    workspaceId: row.workspace_id,
     cwd: row.cwd,
     startedAt: row.started_at,
     lastActiveAt: row.last_active_at,
@@ -407,17 +466,17 @@ export interface WorkspaceSummary {
  * token totals + top tools + metadata. Returns null when the workspace
  * has no JSONL events at all yet.
  */
-export function summaryForWorkspace(workspaceName: string, topToolsLimit = 5): WorkspaceSummary | null {
+export function summaryForWorkspace(workspaceId: string, topToolsLimit = 5): WorkspaceSummary | null {
   const d = openDbOrThrow();
   const latest = d
     .prepare(`
       SELECT id
       FROM sessions
-      WHERE workspace_name = ?
+      WHERE workspace_id = ?
       ORDER BY COALESCE(last_active_at, 0) DESC
       LIMIT 1
     `)
-    .get(workspaceName) as { id: string } | undefined;
+    .get(workspaceId) as { id: string } | undefined;
   if (!latest) return null;
   return summaryForSession(latest.id, topToolsLimit);
 }
@@ -559,30 +618,30 @@ export function summaryForSession(sessionId: string, topToolsLimit = 5): Workspa
 
 /** Persist a (workspace, broker_session) → claude_session mapping. */
 export function learnBrokerSessionMapping(
-  workspaceName: string,
+  workspaceId: string,
   brokerSessionId: string,
   claudeSessionId: string,
 ): void {
   const d = openDbOrThrow();
   d.prepare(`
-    INSERT INTO broker_sessions (workspace_name, broker_session_id, claude_session_id, learned_at)
+    INSERT INTO broker_sessions (workspace_id, broker_session_id, claude_session_id, learned_at)
     VALUES (?, ?, ?, ?)
-    ON CONFLICT(workspace_name, broker_session_id) DO UPDATE SET
+    ON CONFLICT(workspace_id, broker_session_id) DO UPDATE SET
       claude_session_id = excluded.claude_session_id,
       learned_at = excluded.learned_at
-  `).run(workspaceName, brokerSessionId, claudeSessionId, Date.now());
+  `).run(workspaceId, brokerSessionId, claudeSessionId, Date.now());
 }
 
 /** Look up the claude_session_id for a broker session, or null if unmapped. */
 export function lookupBrokerSession(
-  workspaceName: string,
+  workspaceId: string,
   brokerSessionId: string,
 ): string | null {
   const d = openDbOrThrow();
   const row = d.prepare(`
     SELECT claude_session_id FROM broker_sessions
-    WHERE workspace_name = ? AND broker_session_id = ?
-  `).get(workspaceName, brokerSessionId) as { claude_session_id: string } | undefined;
+    WHERE workspace_id = ? AND broker_session_id = ?
+  `).get(workspaceId, brokerSessionId) as { claude_session_id: string } | undefined;
   return row?.claude_session_id ?? null;
 }
 
@@ -600,11 +659,11 @@ export function lookupBrokerSession(
  * concurrent-attach disambiguator); freshly-added tabs do not.
  */
 export function summaryForBrokerSession(
-  workspaceName: string,
+  workspaceId: string,
   brokerSessionId: string,
   topToolsLimit = 5,
 ): WorkspaceSummary | null {
-  const claudeId = lookupBrokerSession(workspaceName, brokerSessionId);
+  const claudeId = lookupBrokerSession(workspaceId, brokerSessionId);
   if (!claudeId) return null;
   return summaryForSession(claudeId, topToolsLimit);
 }
@@ -674,16 +733,16 @@ export function costForSession(sessionId: string): SessionCost {
   return rollupGroups(rows);
 }
 
-export function costForWorkspace(workspaceName: string): SessionCost {
+export function costForWorkspace(workspaceId: string): SessionCost {
   const d = openDbOrThrow();
   const rows = d
     .prepare(`
       SELECT model, service_tier, ${COST_COLUMNS}
       FROM events
-      WHERE workspace_name = ?
+      WHERE workspace_id = ?
       GROUP BY model, service_tier
     `)
-    .all(workspaceName) as CostGroupRow[];
+    .all(workspaceId) as CostGroupRow[];
   return rollupGroups(rows);
 }
 

@@ -1,24 +1,22 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { WorkspaceObservabilitySummary } from '../../../preload';
-import type { WorkspaceSummary } from '../App';
+import { colorFor, type WorkspaceSummary } from '../App';
 
 interface Props {
   workspaces: WorkspaceSummary[];
   /**
-   * Per-workspace observability summary, keyed by workspace name. Values
-   * are `null` while the IPC poll hasn't returned yet or the workspace
-   * has no events ingested. Drives the chip's secondary "active …" /
-   * "idle …" line.
+   * Per-workspace observability summary, keyed by workspace id (ULID).
+   * Values are `null` while the IPC poll hasn't returned yet or the
+   * workspace has no events ingested. Drives the chip's secondary
+   * "active …" / "idle …" line.
    */
   summaries: Record<string, WorkspaceObservabilitySummary | null>;
   selectedId: string | null;
   backendReady: boolean | null;
-  vaultAvailable: boolean | null;
   mockMode: boolean;
   onSelect: (id: string) => void;
   onNewWorkspace: () => void;
-  onOpenProfiles: () => void;
   /** Open the CloseWorkspaceModal for the given workspace (full close UX). */
   onCloseWorkspace: (workspace: WorkspaceSummary) => void;
   /** Re-pull workspace:list — called after a chip-menu action mutates state. */
@@ -42,14 +40,6 @@ function chipActivityText(s: WorkspaceObservabilitySummary | null | undefined): 
   return `${verb} ${Math.round(delta / 86_400_000)}d ago`;
 }
 
-// Deterministic hue assignment by workspace name. Six rotating CSS vars
-// defined in styles.css — same name always gets the same color, no random
-// churn between renders.
-function hueFor(name: string): string {
-  let h = 0;
-  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-  return `var(--hue-${(h % 6) + 1})`;
-}
 
 // ── Media-control icons for the menu ─────────────────────────────────
 // All sized to a 12×12 viewBox so they sit on the menu's text baseline.
@@ -110,11 +100,9 @@ export function WorkspaceTabStrip({
   summaries,
   selectedId,
   backendReady,
-  vaultAvailable,
   mockMode,
   onSelect,
   onNewWorkspace,
-  onOpenProfiles,
   onCloseWorkspace,
   onRefresh
 }: Props) {
@@ -153,7 +141,7 @@ export function WorkspaceTabStrip({
     setMenu(null);
     try {
       if (action === 'start') {
-        await window.api.workspace.start(w.name);
+        await window.api.workspace.start(w.id);
       } else if (w.containerId) {
         if (action === 'pause') await window.api.workspace.pause(w.containerId);
         else if (action === 'stop') await window.api.workspace.stop(w.containerId);
@@ -176,7 +164,7 @@ export function WorkspaceTabStrip({
         <div
           key={w.id}
           className={`ws-chip-group ${w.id === selectedId ? 'active' : ''}`}
-          style={{ ['--hue' as never]: hueFor(w.name) }}
+          style={{ ['--hue' as never]: colorFor(w) }}
         >
           <button
             className="ws-chip"
@@ -209,7 +197,7 @@ export function WorkspaceTabStrip({
                 without showing any visible character.
               */}
               <span className="ws-chip-sub">
-                {chipActivityText(summaries[w.name]) ?? ' '}
+                {chipActivityText(summaries[w.id]) ?? ' '}
               </span>
             </span>
           </button>
@@ -255,11 +243,6 @@ export function WorkspaceTabStrip({
           <span className={`dot ${backendReady === false ? 'unreachable' : ''}`} />
           {backendReady === false ? 'disconnected' : 'docker'}
         </span>
-        {vaultAvailable !== false && (
-          <button className="btn" onClick={onOpenProfiles}>
-            Profiles…
-          </button>
-        )}
       </div>
 
       {menu && menuWorkspace &&

@@ -22,7 +22,7 @@ function fakeWindow(opts: {
   };
 }
 
-const PAYLOAD = { workspaceName: 'ws', summary: null };
+const PAYLOAD = { workspaceId: 'ws', summary: null };
 
 describe('broadcastObservabilitySummary', () => {
   it('sends to every live window on the observability:summary channel', () => {

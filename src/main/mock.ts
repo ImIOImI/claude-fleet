@@ -1,5 +1,4 @@
 import { Duplex } from 'node:stream';
-import { randomUUID } from 'node:crypto';
 import type {
   CreateWorkspaceInput,
   PullProgress,
@@ -8,34 +7,43 @@ import type {
 } from './docker.js';
 import type { Workspace } from './workspaces.js';
 
+// In mock mode the workspace id doubles as the containerId. Real backend
+// uses `cf-<id>` for the docker name, but lookups are by label so the
+// renderer never sees the prefix either way.
 const workspaces = new Map<string, Workspace>();
 
 function seed(): void {
   const now = Date.now();
-  workspaces.set('mock-alpha-id', {
+  workspaces.set('01MOCKALPHA000000000000000', {
+    id: '01MOCKALPHA000000000000000',
     name: 'mock-alpha',
+    labels: ['dev'],
     workspaceRoot: '/tmp/mock-alpha',
     workspaceSubdir: '',
-    profile: 'oauth',
     kind: 'container',
     image: 'ghcr.io/imioimi/claude-fleet/runner:latest',
+    authMode: 'oauth',
+    env: { plain: {}, secretKeys: [] },
     createdAt: now - 3600_000,
     lastUsedAt: now - 1800_000,
     state: 'running',
-    containerId: 'mock-alpha-id',
+    containerId: '01MOCKALPHA000000000000000',
     status: 'Up 1 hour'
   });
-  workspaces.set('mock-beta-id', {
+  workspaces.set('01MOCKBETA0000000000000000', {
+    id: '01MOCKBETA0000000000000000',
     name: 'mock-beta',
+    labels: [],
     workspaceRoot: '/tmp/mock-beta',
     workspaceSubdir: 'frontend',
-    profile: 'default',
     kind: 'container',
     image: 'ghcr.io/imioimi/claude-fleet/runner:latest',
+    authMode: 'oauth',
+    env: { plain: {}, secretKeys: [] },
     createdAt: now - 7200_000,
     lastUsedAt: now - 7200_000,
     state: 'stopped',
-    containerId: 'mock-beta-id',
+    containerId: '01MOCKBETA0000000000000000',
     status: 'Exited (0) 2 minutes ago'
   });
   // `fail-*` workspaces simulate the broker-socket-missing failure mode
@@ -43,17 +51,20 @@ function seed(): void {
   // these so Playwright can assert the attach-error overlay surfaces the
   // diagnostic message instead of hiding it behind the generic "session
   // ended" card.
-  workspaces.set('mock-fail-id', {
+  workspaces.set('01MOCKFAIL0000000000000000', {
+    id: '01MOCKFAIL0000000000000000',
     name: 'fail-broker-missing',
+    labels: [],
     workspaceRoot: '/tmp/mock-fail',
     workspaceSubdir: '',
-    profile: 'oauth',
     kind: 'container',
     image: 'ghcr.io/imioimi/claude-fleet/runner:latest',
+    authMode: 'oauth',
+    env: { plain: {}, secretKeys: [] },
     createdAt: now - 60_000,
     lastUsedAt: now - 60_000,
     state: 'running',
-    containerId: 'mock-fail-id',
+    containerId: '01MOCKFAIL0000000000000000',
     status: 'Up 1 minute'
   });
 }
@@ -72,21 +83,24 @@ export async function listLiveWorkspaces(): Promise<Workspace[]> {
 }
 
 export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Workspace> {
-  const id = `mock-${randomUUID().slice(0, 8)}`;
   const ws: Workspace = {
+    id: spec.id,
     name: spec.name,
+    labels: [],
     workspaceRoot: spec.workspaceRoot,
     workspaceSubdir: spec.workspaceSubdir,
-    profile: spec.profile,
     kind: 'container',
     image: spec.image ?? 'ghcr.io/imioimi/claude-fleet/runner:latest',
+    authMode: 'oauth',
+    env: spec.env,
+    resources: spec.resources,
     createdAt: Date.now(),
     lastUsedAt: Date.now(),
     state: 'running',
-    containerId: id,
+    containerId: spec.id,
     status: 'Up just now'
   };
-  workspaces.set(id, ws);
+  workspaces.set(spec.id, ws);
   return ws;
 }
 
@@ -110,36 +124,33 @@ export async function inspectImage(ref: string): Promise<{
   };
 }
 
-export async function startWorkspace(name: string): Promise<string | null> {
-  for (const [id, ws] of workspaces) {
-    if (ws.name === name) {
-      ws.state = 'running';
-      ws.status = 'Up just now';
-      ws.lastUsedAt = Date.now();
-      return id;
-    }
-  }
-  return null;
+export async function startWorkspace(id: string): Promise<string | null> {
+  const ws = workspaces.get(id);
+  if (!ws) return null;
+  ws.state = 'running';
+  ws.status = 'Up just now';
+  ws.lastUsedAt = Date.now();
+  return ws.containerId ?? id;
 }
 
-export async function pauseWorkspace(id: string): Promise<void> {
-  const ws = workspaces.get(id);
+export async function pauseWorkspace(containerId: string): Promise<void> {
+  const ws = workspaces.get(containerId);
   if (ws && ws.state === 'running') {
     ws.state = 'paused';
     ws.status = 'Paused (was running)';
   }
 }
 
-export async function stopWorkspace(id: string): Promise<void> {
-  const ws = workspaces.get(id);
+export async function stopWorkspace(containerId: string): Promise<void> {
+  const ws = workspaces.get(containerId);
   if (ws) {
     ws.state = 'stopped';
     ws.status = 'Exited (0) just now';
   }
 }
 
-export async function removeWorkspace(id: string, _opts: RemoveWorkspaceOpts = {}): Promise<void> {
-  workspaces.delete(id);
+export async function removeWorkspace(containerId: string, _opts: RemoveWorkspaceOpts = {}): Promise<void> {
+  workspaces.delete(containerId);
 }
 
 class FakeShell extends Duplex {

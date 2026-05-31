@@ -104,12 +104,13 @@ const api = {
     backendReady: (): Promise<boolean> => ipcRenderer.invoke('workspace:ping'),
     list: () => ipcRenderer.invoke('workspace:list'),
     create: (input: unknown) => ipcRenderer.invoke('workspace:create', input),
-    start: (name: string) => ipcRenderer.invoke('workspace:start', name),
-    getManifest: (name: string) => ipcRenderer.invoke('workspace:getManifest', name),
-    stop: (id: string) => ipcRenderer.invoke('workspace:stop', id),
-    pause: (id: string) => ipcRenderer.invoke('workspace:pause', id),
-    remove: (id: string, opts?: { deleteState?: boolean }) =>
-      ipcRenderer.invoke('workspace:remove', id, opts),
+    /** Start an existing workspace by id. Returns null if no container exists for that id. */
+    start: (id: string) => ipcRenderer.invoke('workspace:start', id),
+    getManifest: (id: string) => ipcRenderer.invoke('workspace:getManifest', id),
+    stop: (containerId: string) => ipcRenderer.invoke('workspace:stop', containerId),
+    pause: (containerId: string) => ipcRenderer.invoke('workspace:pause', containerId),
+    remove: (containerId: string, opts?: { deleteState?: boolean }) =>
+      ipcRenderer.invoke('workspace:remove', containerId, opts),
     ensureImage: async (onProgress: (p: { message: string }) => void): Promise<void> => {
       const channelId = globalThis.crypto.randomUUID();
       const channel = `workspace:ensureImage:progress:${channelId}`;
@@ -127,10 +128,10 @@ const api = {
     remove: (ref: string) => ipcRenderer.invoke('images:remove', ref)
   },
   sessions: {
-    read: (workspaceName: string): Promise<SessionInventory> =>
-      ipcRenderer.invoke('sessions:read', workspaceName),
-    write: (workspaceName: string, inventory: SessionInventory): Promise<void> =>
-      ipcRenderer.invoke('sessions:write', workspaceName, inventory)
+    read: (workspaceId: string): Promise<SessionInventory> =>
+      ipcRenderer.invoke('sessions:read', workspaceId),
+    write: (workspaceId: string, inventory: SessionInventory): Promise<void> =>
+      ipcRenderer.invoke('sessions:write', workspaceId, inventory)
   },
   fs: {
     isDirectory: (path: string): Promise<boolean> => ipcRenderer.invoke('fs:isDirectory', path),
@@ -151,11 +152,23 @@ const api = {
       ipcRenderer.invoke('menu:showTerminalContextMenu', opts)
   },
   vault: {
+    /** Probe whether the OS keychain is reachable. Cached after first call. */
     available: (): Promise<boolean> => ipcRenderer.invoke('vault:available'),
-    list: (): Promise<string[]> => ipcRenderer.invoke('vault:list'),
-    get: (name: string) => ipcRenderer.invoke('vault:get', name),
-    set: (p: { name: string; apiKey: string }) => ipcRenderer.invoke('vault:set', p),
-    delete: (name: string) => ipcRenderer.invoke('vault:delete', name)
+    /** List the secret keys stored for one workspace. */
+    listKeys: (workspaceId: string): Promise<string[]> =>
+      ipcRenderer.invoke('vault:listKeys', workspaceId),
+    /** Fetch a specific secret value. Returns null when missing or no keychain. */
+    getSecret: (workspaceId: string, key: string): Promise<string | null> =>
+      ipcRenderer.invoke('vault:getSecret', workspaceId, key),
+    /** Store or update a secret. Throws when keychain unavailable. */
+    setSecret: (workspaceId: string, key: string, value: string): Promise<void> =>
+      ipcRenderer.invoke('vault:setSecret', workspaceId, key, value),
+    /** Delete a single secret. No-op when missing. */
+    deleteSecret: (workspaceId: string, key: string): Promise<void> =>
+      ipcRenderer.invoke('vault:deleteSecret', workspaceId, key),
+    /** Purge every secret for a workspace + its index. Called on workspace delete. */
+    deleteAllForWorkspace: (workspaceId: string): Promise<void> =>
+      ipcRenderer.invoke('vault:deleteAllForWorkspace', workspaceId)
   },
   pty: {
     attach: (
@@ -197,9 +210,9 @@ const api = {
     ): Promise<ObservabilityEventRow[]> =>
       ipcRenderer.invoke('observability:eventsForSession', sessionId, sinceEventId, limit),
     summaryForWorkspace: (
-      workspaceName: string
+      workspaceId: string
     ): Promise<WorkspaceObservabilitySummary | null> =>
-      ipcRenderer.invoke('observability:summaryForWorkspace', workspaceName),
+      ipcRenderer.invoke('observability:summaryForWorkspace', workspaceId),
     /**
      * Per-tab variant — looks up the claude session UUID mapped to
      * `brokerSessionId` and returns that session's summary. Falls back
@@ -207,12 +220,12 @@ const api = {
      * caller always gets something usable.
      */
     summaryForBrokerSession: (
-      workspaceName: string,
+      workspaceId: string,
       brokerSessionId: string
     ): Promise<WorkspaceObservabilitySummary | null> =>
       ipcRenderer.invoke(
         'observability:summaryForBrokerSession',
-        workspaceName,
+        workspaceId,
         brokerSessionId
       ),
     /**
@@ -224,8 +237,8 @@ const api = {
     getCost: (sessionId: string): Promise<ObservabilityCost> =>
       ipcRenderer.invoke('observability:getCost', sessionId),
     /** USD + token totals aggregated across all sessions in a workspace. */
-    getCostForWorkspace: (workspaceName: string): Promise<ObservabilityCost> =>
-      ipcRenderer.invoke('observability:getCostForWorkspace', workspaceName),
+    getCostForWorkspace: (workspaceId: string): Promise<ObservabilityCost> =>
+      ipcRenderer.invoke('observability:getCostForWorkspace', workspaceId),
     /**
      * Subscribe to live summary pushes. Main fires one push per ingest batch
      * (one JSONL flush ≈ one push) with the freshly computed summary for the
@@ -233,13 +246,13 @@ const api = {
      * distribute the result into the shared summaries map.
      */
     onSummary: (
-      cb: (workspaceName: string, summary: WorkspaceObservabilitySummary | null) => void
+      cb: (workspaceId: string, summary: WorkspaceObservabilitySummary | null) => void
     ): (() => void) => {
       const channel = 'observability:summary';
       const handler = (
         _e: IpcRendererEvent,
-        payload: { workspaceName: string; summary: WorkspaceObservabilitySummary | null }
-      ): void => cb(payload.workspaceName, payload.summary);
+        payload: { workspaceId: string; summary: WorkspaceObservabilitySummary | null }
+      ): void => cb(payload.workspaceId, payload.summary);
       ipcRenderer.on(channel, handler);
       return () => ipcRenderer.removeListener(channel, handler);
     }

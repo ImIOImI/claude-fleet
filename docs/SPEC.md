@@ -8,17 +8,17 @@ See [`.claude/rules/spec-maintenance.md`](../.claude/rules/spec-maintenance.md) 
 
 ## 1. Overview
 
-**claude-fleet** is a desktop application for driving a small fleet (3–6) of Claude Code **workspaces** from a single window. The user picks a credential profile and a host workspace directory; the app spins up a workspace (today: a Docker container backed by `dockerode`) running `claude` in a PTY, renders the live terminal with xterm.js, and surfaces structured observability (cost, tokens, tool calls, transcript history) sourced from the workspace's bind-mounted Claude transcript JSONL.
+**claude-fleet** is a desktop application for driving a small fleet (3–6) of Claude Code **workspaces** from a single window. The user picks an auth mode (OAuth via Claude.ai, or API key supplied as a per-workspace env-var secret) and a host workspace directory; the app spins up a workspace (today: a Docker container backed by `dockerode`) running `claude` in a PTY, renders the live terminal with xterm.js, and surfaces structured observability (cost, tokens, tool calls, transcript history) sourced from the workspace's bind-mounted Claude transcript JSONL.
 
 It is a local-only operator console — not a remote orchestrator, not a multi-user service, not a cloud product. Everything runs on the user's machine, against the user's local Docker daemon.
 
-**Terminology.** "Workspace" is the user-level concept the UI talks about: a named place where a Claude session runs against a directory. It's persisted on disk as a manifest at `<userData>/state/<name>/workspace.json` independent of any backend's lifecycle, so workspaces survive container deletion and can be restarted. "Container" in this doc refers specifically to the Docker container that today is the only implemented workspace backend. A local-host (non-container) backend is anticipated but not yet built.
+**Terminology.** "Workspace" is the user-level concept the UI talks about: a named place where a Claude session runs against a directory. It's persisted on disk as a manifest at `<userData>/state/<id>/workspace.json` independent of any backend's lifecycle, so workspaces survive container deletion and can be restarted. "Container" in this doc refers specifically to the Docker container that today is the only implemented workspace backend. A local-host (non-container) backend is anticipated but not yet built.
 
 ## 2. Goals
 
 - Run multiple Claude Code sessions in parallel, each fully isolated in its own workspace with its own host-directory bind-mount.
 - One window, one keyboard, one set of credentials — no juggling terminals or shells.
-- Workspaces persist across backend lifecycle. A workspace identified by name has a host-side manifest at `<userData>/state/<name>/workspace.json` that survives container deletion. The new-workspace modal surfaces a "past workspaces" list (running / stopped / deleted) one click away from restart — restart starts the existing container if present, or recreates from the saved spec if the container is gone.
+- Workspaces persist across backend lifecycle. Each workspace has an immutable ULID `id` and a mutable display `name`; the host-side manifest at `<userData>/state/<id>/workspace.json` survives container deletion and rename. The new-workspace modal surfaces a "past workspaces" list (running / stopped / deleted) one click away from restart — restart starts the existing container (looked up by `com.claude-fleet.id` label) if present, or recreates from the saved spec, reusing the same ULID so state-dir + vault history stay attached.
 - Persistent **expert workspaces**: pause an entire workspace plus its session set, then resume later and re-attach to every session right where it was — same conversation, same in-memory context. Lets the user build domain-specific agents that load their architecture / documentation / codebase knowledge once, sleep when idle, and wake up ready to act (analyze a PR, answer a question, run a check) without re-priming the context every time.
 - Live terminal fidelity: cursor, colors, resize, paste, scrollback — all the things xterm.js gives you.
 - Structured observability layered on top of the raw terminal: per-session cost, token counts, tool calls, transcript history — read from the Claude transcript JSONL that the CLI already writes, not by scraping the terminal stream.
@@ -91,8 +91,8 @@ Three processes, per Electron convention:
 
 binds (per container):
   hostWorkspace            → /workspace
-  state/<name>/.claude     → /home/fleet/.claude
-  state/<name>/broker      → /run/broker   (broker socket directory)
+  state/<id>/.claude     → /home/fleet/.claude
+  state/<id>/broker      → /run/broker   (broker socket directory)
 ```
 
 
@@ -102,38 +102,40 @@ The **broker** is a small Go daemon (//broker) shipped inside the runner image. 
 - Docker daemon access via `dockerode` (default socket).
 - OS keychain access via `keytar`.
 - PTY session lifecycle: holds the duplex stream handle for each active `docker exec`, forwards data to the renderer over per-session IPC channels, forwards renderer input back to the stream, forwards resize events to Docker.
-- JSONL transcript watching (`chokidar`) + SQLite persistence (`better-sqlite3`). The watcher tails every workspace's `<state>/<name>/.claude/projects/-workspace/*.jsonl` non-recursively and ingests new lines into the SQLite cache (see §7 *JSONL→SQLite cache*). Cost rollup (`src/main/pricing.ts`) groups events by `(model, service_tier)` and applies hardcoded Claude 4.x rates to derive USD; the rest of #2 (live push, slot consumers for chip/tab/context-bar) lands later.
+- JSONL transcript watching (`chokidar`) + SQLite persistence (`better-sqlite3`). The watcher tails every workspace's `<state>/<id>/.claude/projects/-workspace/*.jsonl` non-recursively and ingests new lines into the SQLite cache (see §7 *JSONL→SQLite cache*). Cost rollup (`src/main/pricing.ts`) groups events by `(model, service_tier)` and applies hardcoded Claude 4.x rates to derive USD; the rest of #2 (live push, slot consumers for chip/tab/context-bar) lands later.
 
 **Preload** is a tightly scoped bridge. It uses `contextBridge.exposeInMainWorld('api', …)` to expose a typed `window.api` to the renderer. Window options: `contextIsolation: true`, `nodeIntegration: false`, `sandbox: false` (sandbox is off because the preload needs `ipcRenderer`).
 
 **Renderer** is pure React. It has zero Node access. It can only do what `window.api` lets it do. Everything privileged flows through IPC.
 
 The renderer layout is a 3-row × 3-col shell:
-- **Top row** (`WorkspaceTabStrip`): app name, workspace chips (each with a deterministic hue ring + status dot), `+ New workspace`, daemon status pill, `MOCK MODE` chip when active, `Profiles…`. Only live workspaces (running/stopped) appear here; deleted workspaces are surfaced in the new-workspace modal's past list. Each chip carries a small secondary line below the workspace name driven by observability — `active 2m ago` when the session is fresh, `idle 1h ago` when it's been quiet > 5 min, or empty when no events have been ingested yet. The activity text reads off `summary.lastActiveAt` from the shared summary map described below.
-- **Centralized observability distribution.** `App.tsx` owns a single `summaries: Record<workspaceName, WorkspaceSummary | null>` map and distributes it to the chip strip, observability pane, and terminal-pane context bar via props. The map is filled two ways:
-  1. **Live push.** The main-process `JsonlWatcher` emits `'ingest'` after every batch that genuinely inserts ≥1 new event (compaction re-reads that hit dedup_key are suppressed). `ipc.ts` subscribes, computes the workspace summary, and sends `observability:summary` to every BrowserWindow with `{ workspaceName, summary }`. The renderer's `window.api.observability.onSummary(cb)` (registered in App.tsx) updates the map immediately — chip relative-time, USD total, and context-bar fill refresh in <100ms of the JSONL flush.
+- **Top row** (`WorkspaceTabStrip`): app name, workspace chips (each with a per-workspace hue + status dot), `+ New workspace`, daemon status pill, `MOCK MODE` chip when active. The chip hue comes from the manifest's `color.hue` field when set, falling back to a name-hash of the same 14-hue preset palette so unset workspaces still get a stable distinct color. Only live workspaces (running/stopped) appear here; deleted workspaces are surfaced in the new-workspace modal's past list. Each chip carries a small secondary line below the workspace name driven by observability — `active 2m ago` when the session is fresh, `idle 1h ago` when it's been quiet > 5 min, or empty when no events have been ingested yet. The activity text reads off `summary.lastActiveAt` from the shared summary map described below.
+- **Centralized observability distribution.** `App.tsx` owns a single `summaries: Record<workspaceId, WorkspaceSummary | null>` map (keyed by ULID) and distributes it to the chip strip, observability pane, and terminal-pane context bar via props. The map is filled two ways:
+  1. **Live push.** The main-process `JsonlWatcher` emits `'ingest'` after every batch that genuinely inserts ≥1 new event (compaction re-reads that hit dedup_key are suppressed). `ipc.ts` subscribes, computes the workspace summary, and sends `observability:summary` to every BrowserWindow with `{ workspaceId, summary }`. The renderer's `window.api.observability.onSummary(cb)` (registered in App.tsx) updates the map immediately — chip relative-time, USD total, and context-bar fill refresh in <100ms of the JSONL flush.
   2. **30s safety poll.** App.tsx also re-fetches every workspace's summary every 30s. This backs up the push for any lost event and forces a re-render so the chip's `Date.now() - lastActiveAt` text rolls forward ("active 2m ago" → "active 12m ago") even when no new ingests are happening. It's 15× less frequent than the previous unconditional 2s poll because push handles the hot path.
 - **Body row** (3 columns):
   - **Sessions pane** (left, ~280px): placeholder until #3 lands the JSONL-backed sessions table.
   - **Main pane** (center, fluid): header with selected workspace's name/status and `Close…` button, plus the xterm `TerminalPane` (or empty/first-run/disconnected states). At the top of the terminal area, a **context bar** carries the workspace's hue track + a width-driven fill — `--pct` set inline by `TerminalPane` from `summary.lastTurnContextTokens / summary.contextWindowTokens × 100`. The effective context window comes from `src/main/contextWindow.ts`: 200K per Claude 4.x family by default, 1M when the model id carries the `[1m]` marker (e.g. `claude-opus-4-7[1m]`), and a heuristic 1M auto-upgrade when any observed turn in the session has already crossed 200K (catches the 1M beta header case, since that flag doesn't show up in the model string Claude Code writes to JSONL). Falls back to a full identity band (100%) when no observability data is available, so a fresh workspace still reads visually correct. Tooltip on the band shows `tokens / limit (pct%)`. A subtle vertical tick at 80% (`.terminal-accent-band::after`) marks the compaction threshold — claude auto-compacts around there, so the tick is the heads-up that the next turn might trigger one.
-  - **Observability pane** (right, ~320px): live view of the **active terminal tab**'s Claude session in the selected workspace. Shows session title (from `ai-title` event or first-user-message head), latest model, last-activity relative time, event count, prominent USD total, token totals (input / cache-create / cache-read / output), and top tools by call count. Empty state when the focused tab has no per-tab data yet. Per-tab resolution comes from the `broker_sessions` mapping table (§11 *Per-tab mapping*). `TerminalPane` bubbles its active tab id up via `onActiveTabChange`; App.tsx fetches `summaryForBrokerSession(workspaceName, activeTabId)` for the selected workspace and re-fetches on every push for that workspace. **No workspace fallback** — when the per-tab fetch returns null the pane shows its empty state directly, regardless of how the tab was added. The fallback was tried (loaded-from-inventory tabs → workspace summary, fresh tabs → empty) but produced two user-visible bugs: clicking `+` showed the previous tab's data via the fallback, and switching between two unmapped tabs showed the same workspace-summary content on both ("doesn't update"). Per-tab semantics are now honest: each tab shows its own data or empty, never inherits from a sibling tab.
+  - **Observability pane** (right, ~320px): live view of the **active terminal tab**'s Claude session in the selected workspace. Shows session title (from `ai-title` event or first-user-message head), latest model, last-activity relative time, event count, prominent USD total, token totals (input / cache-create / cache-read / output), and top tools by call count. Empty state when the focused tab has no per-tab data yet. Per-tab resolution comes from the `broker_sessions` mapping table (§11 *Per-tab mapping*). `TerminalPane` bubbles its active tab id up via `onActiveTabChange`; App.tsx fetches `summaryForBrokerSession(workspaceId, activeTabId)` for the selected workspace and re-fetches on every push for that workspace. **No workspace fallback** — when the per-tab fetch returns null the pane shows its empty state directly, regardless of how the tab was added. The fallback was tried (loaded-from-inventory tabs → workspace summary, fresh tabs → empty) but produced two user-visible bugs: clicking `+` showed the previous tab's data via the fallback, and switching between two unmapped tabs showed the same workspace-summary content on both ("doesn't update"). Per-tab semantics are now honest: each tab shows its own data or empty, never inherits from a sibling tab.
 - **Bottom row** (`BottomBar`): static hint bar with key bindings and degraded-vault notice when applicable.
 
-Modals (`CreateWorkspaceModal`, `CloseWorkspaceModal`, `ProfilesDialog`) are owned by `App` and rendered above the shell.
+Modals (`CreateWorkspaceModal`, `CloseWorkspaceModal`) are owned by `App` and rendered above the shell. The legacy `ProfilesDialog` is gone — per-workspace env-var management lives inside `CreateWorkspaceModal` itself (and, in the upcoming Actions PR, inside the Saved-tab inline edit form).
 
 ## 6. IPC surface
 
 All channels are `ipcMain.handle`/`ipcRenderer.invoke` (promise-based) except the PTY data stream, which uses one-way `webContents.send` from main to renderer.
 
 ### Workspace
+Identity is the **ULID** `id` (immutable, 26 char Crockford base32). The user-facing `name` is a mutable label. Channels that operate on workspace identity (`list`, `create`, `start`, `getManifest`) take `id`; channels that operate on the live container itself (`stop`, `pause`, `remove`) take the Docker `containerId` because their target is the container instance, not the workspace identity.
+
 - `workspace:ping` → `boolean` — is the backend reachable (for the Docker backend, is the daemon up).
 - `workspace:list` → `Workspace[]` — merged list of live (running/stopped) workspaces plus deleted workspaces (those with a manifest on disk but no live container).
-- `workspace:create(input: CreateWorkspaceInput)` → `Workspace` — create + start a runner workspace AND write its manifest to `<userData>/state/<name>/workspace.json`.
-- `workspace:start(name)` → `Workspace | null` — start an existing (live, possibly stopped or paused) workspace by name. Paused containers are `unpause`d; stopped containers are `start`ed. Returns null if no live container has that name (caller should recreate from manifest via the create flow).
-- `workspace:getManifest(name)` → `WorkspaceSpec | null` — read the persisted manifest.
-- `workspace:stop(id)` → `void` — stop with 5s grace; ignores 304/404.
-- `workspace:pause(id)` → `void` — `docker pause` (cgroups freezer). Idempotent: 409 (already paused) and 404 (container gone) are treated as no-ops.
-- `workspace:remove(id, opts?: { deleteState? })` → `void` — force-remove; if `deleteState`, also `rm -rf <userData>/state/<name>` (which removes the manifest too, so the workspace disappears from the past list).
+- `workspace:create(input: WorkspaceCreatePayload)` → `Workspace` — create + start a runner workspace AND write its manifest to `<userData>/state/<id>/workspace.json`. The renderer mints the ULID and ships the full payload (id, name, description, labels, color, workspaceRoot, workspaceSubdir, kind, image, authMode, env: {plain, secretKeys}, resources). Secret env values land in the vault under `<id>:<key>` *before* this call so the main process can resolve them at container-start time.
+- `workspace:start(id)` → `Workspace | null` — start an existing (live, possibly stopped or paused) workspace by ULID (looked up via the `com.claude-fleet.id` label). Paused containers are `unpause`d; stopped containers are `start`ed. Returns null if no container is labelled with that id (caller should recreate from the saved manifest using the same id via the create flow).
+- `workspace:getManifest(id)` → `WorkspaceSpec | null` — read the persisted manifest.
+- `workspace:stop(containerId)` → `void` — stop with 5s grace; ignores 304/404.
+- `workspace:pause(containerId)` → `void` — `docker pause` (cgroups freezer). Idempotent: 409 (already paused) and 404 (container gone) are treated as no-ops.
+- `workspace:remove(containerId, opts?: { deleteState? })` → `void` — force-remove; if `deleteState`, also `rm -rf <userData>/state/<id>` (manifest, transcripts, broker socket). The renderer additionally calls `vault:deleteAllForWorkspace(id)` so secrets don't leak past the state dir.
 - `workspace:ensureImage(channelId)` → progress over `workspace:ensureImage:progress:${channelId}`. Always asks the registry, so improvements to `:latest` (broker landing, claude version bumps) reach existing users on subsequent creates. Docker's pull semantics no-op when local layers match the remote digest. If the registry is unreachable and a local copy exists, falls back to the cached image with a warning; if neither, the error propagates so the caller can surface it.
 
 ### Images
@@ -142,17 +144,20 @@ All channels are `ipcMain.handle`/`ipcRenderer.invoke` (promise-based) except th
 
 ### Sessions
 Per-workspace terminal-session inventory (the tab list shown above the terminal body). Renderer-owned read/write of the whole file; main has no notion of session lifecycle today.
-- `sessions:read(workspaceName)` → `SessionInventory` — read `<userData>/state/<name>/sessions.json`. Returns an empty inventory (`{ version: 1, sessions: [], nextNum: 2 }`) if the file is missing or malformed.
-- `sessions:write(workspaceName, inventory)` → `void` — atomic write of the whole inventory.
+- `sessions:read(workspaceId)` → `SessionInventory` — read `<userData>/state/<id>/sessions.json`. Returns an empty inventory (`{ version: 1, sessions: [], nextNum: 2 }`) if the file is missing or malformed.
+- `sessions:write(workspaceId, inventory)` → `void` — atomic write of the whole inventory.
 
 ### Vault
-- `vault:list` → `string[]` — profile names.
-- `vault:get(name)` → `Profile | null` — `{ name, apiKey }`.
-- `vault:set(profile)` → `void` — upsert; also updates the name index.
-- `vault:delete(name)` → `void` — delete + remove from index.
+Per-workspace secret storage backed by `keytar`. Profiles are gone; each workspace owns its own bag of secret env-var values keyed by `<workspaceId>:<envVarName>`. The renderer never sees a secret value it didn't just write — values come back over `vault:getSecret`, and the main process consumes them directly when constructing the container env via `resolveEnv` (`src/main/vault.ts`).
+- `vault:available` → `boolean` — probe whether the OS keychain is reachable. Cached after first call. Returns false on systems without libsecret-1 / a reachable keyring; the API-key auth mode degrades to disabled in that case.
+- `vault:listKeys(workspaceId)` → `string[]` — every secret-env-var key stored for the workspace. Backed by a per-workspace index entry (`__secrets__:<id>` in keytar) so listing is one keychain read.
+- `vault:getSecret(workspaceId, key)` → `string | null` — fetch a single value. Null when missing or keychain unavailable.
+- `vault:setSecret(workspaceId, key, value)` → `void` — upsert; also adds the key to the workspace's index if not already there. Throws when the keychain isn't reachable.
+- `vault:deleteSecret(workspaceId, key)` → `void` — delete a single value; updates (or drops, if last) the index.
+- `vault:deleteAllForWorkspace(workspaceId)` → `void` — purge every secret + the index for one workspace. Called at workspace-delete time so credentials don't outlive the manifest.
 
 ### PTY
-- `pty:attach(containerId, brokerSessionId, cols, rows)` → `ptyHandleId: string` — opens a connection to the workspace's in-container broker (Unix socket at `<state>/<name>/broker/broker.sock`) and either re-attaches to an existing broker session or creates one. `brokerSessionId` is the stable id from `sessions.json` (so re-attach across an app restart finds the same live PTY). Main retains a `BrokerClient` plus the resulting Duplex, returns an opaque `ptyHandleId` the renderer uses for subsequent input/resize/detach calls. **On failure** the handler captures the last ~100 lines of broker stdout/stderr via `docker logs` and writes them to `error.log` under a `pty-attach-failed` entry alongside the thrown message — the broker is otherwise invisible to the host, and the worst-case "ATTACHED timed out" + "unsolicited frame type 4" pattern after a pause/resume is impossible to diagnose without seeing what the broker was actually doing.
+- `pty:attach(containerId, brokerSessionId, cols, rows)` → `ptyHandleId: string` — opens a connection to the workspace's in-container broker (Unix socket at `<state>/<id>/broker/broker.sock`) and either re-attaches to an existing broker session or creates one. `brokerSessionId` is the stable id from `sessions.json` (so re-attach across an app restart finds the same live PTY). Main retains a `BrokerClient` plus the resulting Duplex, returns an opaque `ptyHandleId` the renderer uses for subsequent input/resize/detach calls. **On failure** the handler captures the last ~100 lines of broker stdout/stderr via `docker logs` and writes them to `error.log` under a `pty-attach-failed` entry alongside the thrown message — the broker is otherwise invisible to the host, and the worst-case "ATTACHED timed out" + "unsolicited frame type 4" pattern after a pause/resume is impossible to diagnose without seeing what the broker was actually doing.
 
 Broker RPC timeout is 30s (`RPC_TIMEOUT_MS` in `src/main/broker.ts`). 10s was the original budget but routinely fired during the first ATTACH after a workspace pause/resume — the broker's `CREATE` path spawns the `claude` binary via `pty.StartWithSize`, and that first spawn (auth checks, MCP server warm-up, occasional network call) regularly takes 15–25s. The host's late-arriving response then lands with no waiter, producing the "unsolicited frame type 4" warning. 30s covers the observed worst case with margin without making honestly-stuck sessions hang the UI indefinitely.
 - `pty:input(ptyHandleId, data: string)` → `void` — write user input to the broker as an INPUT frame on the channel.
@@ -168,11 +173,11 @@ The renderer's `window.api.pty.onData/onEnd` register listeners and return unsub
 
 ### Observability
 - `observability:eventsForSession(sessionId, sinceEventId?, limit?)` → `EventRow[]` — rows from the `events` table for the given session, ordered by `id` ascending, restricted to `id > sinceEventId`. Caller polls with the highest `id` it has seen to get incremental updates. Returns up to `limit` rows (default 500).
-- `observability:summaryForWorkspace(workspaceName)` → `WorkspaceSummary | null` — picks the most-recently-active Claude session in the workspace and returns `{ sessionId, title, model, startedAt, lastActiveAt, eventCount, inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, usd, lastTurnContextTokens, contextWindowTokens, topTools[] }`. Returns null when no events have been ingested for the workspace yet. `lastTurnContextTokens` is `input + cache_read + cache_creation` from the most recent assistant event — a context-window-fullness proxy that drives the terminal-pane context bar; null when no assistant event has been seen yet. `contextWindowTokens` is the session's effective context window (200K / 1M, see §5 *Main pane* for derivation rules). App.tsx fires this once per workspace at mount/resubscribe and then every 30s as a safety net; the hot path is the live `observability:summary` push (see §5 *Centralized observability distribution*).
-- `observability:summaryForBrokerSession(workspaceName, brokerSessionId)` → `WorkspaceSummary | null` — per-tab variant. Resolves the broker→claude mapping in the `broker_sessions` table and returns that claude session's summary, or **null** when no mapping is known. **No workspace fallback at this layer** — a freshly-added tab carries an unmapped broker session id but legitimately has no data, and returning the workspace's most-recently-active session there surfaces the previous tab's numbers (the user-visible "new session shows the last session's info" bug). The renderer applies a workspace-summary fallback only for tabs loaded from `sessions.json` (where the mapping just hasn't caught up — pre-PR tabs, concurrent-attach skip cases); freshly-added tabs (the `+` button, close-last-auto-recreate) leave the pane on its empty state until the watcher learns a mapping and real per-tab data flows in.
-- `observability:summary` (main → renderer) — broadcast every time the watcher ingests new lines for a workspace. Payload: `{ workspaceName, summary: WorkspaceSummary | null }`, where `summary` is the same shape `summaryForWorkspace` returns. Exposed to the renderer as `window.api.observability.onSummary(cb)`, which returns an unsubscribe. One push per ingest batch (one JSONL flush ≈ one push); duplicate-only re-reads after compaction are suppressed at the watcher. The fan-out runs through `broadcastObservabilitySummary` (`src/main/observabilityBroadcast.ts`), which guards each target with `win.isDestroyed()`, `webContents.isDestroyed()`, AND a try/catch around `send` — during BrowserWindow teardown the render frame can be disposed while both destroyed-flags still read false, and `webContents.send` then throws "Render frame was disposed before WebFrameMain could be accessed". The watcher's emit path isn't an awaited handler, so an unswallowed throw unwinds into Node's EventEmitter internals; the per-target catch keeps one stale window from breaking the whole broadcast.
+- `observability:summaryForWorkspace(workspaceId)` → `WorkspaceSummary | null` — picks the most-recently-active Claude session in the workspace and returns `{ sessionId, title, model, startedAt, lastActiveAt, eventCount, inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, usd, lastTurnContextTokens, contextWindowTokens, topTools[] }`. Returns null when no events have been ingested for the workspace yet. `lastTurnContextTokens` is `input + cache_read + cache_creation` from the most recent assistant event — a context-window-fullness proxy that drives the terminal-pane context bar; null when no assistant event has been seen yet. `contextWindowTokens` is the session's effective context window (200K / 1M, see §5 *Main pane* for derivation rules). App.tsx fires this once per workspace at mount/resubscribe and then every 30s as a safety net; the hot path is the live `observability:summary` push (see §5 *Centralized observability distribution*).
+- `observability:summaryForBrokerSession(workspaceId, brokerSessionId)` → `WorkspaceSummary | null` — per-tab variant. Resolves the broker→claude mapping in the `broker_sessions` table and returns that claude session's summary, or **null** when no mapping is known. **No workspace fallback at this layer** — a freshly-added tab carries an unmapped broker session id but legitimately has no data, and returning the workspace's most-recently-active session there surfaces the previous tab's numbers (the user-visible "new session shows the last session's info" bug). The renderer applies a workspace-summary fallback only for tabs loaded from `sessions.json` (where the mapping just hasn't caught up — pre-PR tabs, concurrent-attach skip cases); freshly-added tabs (the `+` button, close-last-auto-recreate) leave the pane on its empty state until the watcher learns a mapping and real per-tab data flows in.
+- `observability:summary` (main → renderer) — broadcast every time the watcher ingests new lines for a workspace. Payload: `{ workspaceId, summary: WorkspaceSummary | null }`, where `summary` is the same shape `summaryForWorkspace` returns. Exposed to the renderer as `window.api.observability.onSummary(cb)`, which returns an unsubscribe. One push per ingest batch (one JSONL flush ≈ one push); duplicate-only re-reads after compaction are suppressed at the watcher. The fan-out runs through `broadcastObservabilitySummary` (`src/main/observabilityBroadcast.ts`), which guards each target with `win.isDestroyed()`, `webContents.isDestroyed()`, AND a try/catch around `send` — during BrowserWindow teardown the render frame can be disposed while both destroyed-flags still read false, and `webContents.send` then throws "Render frame was disposed before WebFrameMain could be accessed". The watcher's emit path isn't an awaited handler, so an unswallowed throw unwinds into Node's EventEmitter internals; the per-target catch keeps one stale window from breaking the whole broadcast.
 - `observability:getCost(sessionId)` → `{ inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, usd }` — token totals + USD for one session. USD is derived from the `events` rows grouped by `(model, service_tier)`; pricing comes from `src/main/pricing.ts` (hardcoded Claude 4.x rates, standard tier full price, batch tier 50%, unknown model/tier degrades to $0 + one-time `console.warn`). The pane reads the equivalent `usd` field from `summaryForWorkspace`; this endpoint exists for the sessions table (#3) and per-session detail views.
-- `observability:getCostForWorkspace(workspaceName)` → same shape, aggregated across every session in the workspace.
+- `observability:getCostForWorkspace(workspaceId)` → same shape, aggregated across every session in the workspace.
 
 ### Error log
 Both main and renderer hook the standard "uncaught" channels and forward each crash through a single sink to `<userData>/error.log`. Main installs `process.on('uncaughtException')` + `process.on('unhandledRejection')` directly. The renderer wires `window.addEventListener('error', …)` + `window.addEventListener('unhandledrejection', …)` in `src/renderer/src/main.tsx` *before* mounting React, so a crash during App's initial render still lands. Each row is one JSON object: `{ ts, source: 'main' | 'renderer', type, message, stack?, extra? }`. No rotation; users can delete the file at will.
@@ -188,24 +193,36 @@ The renderer cannot use `navigator.clipboard` reliably (focus/permission gotchas
 ## 7. Data model
 
 ### Workspace manifest (on disk)
-For each workspace, `<userData>/state/<name>/workspace.json` records the persistent spec:
+For each workspace, `<userData>/state/<id>/workspace.json` records the persistent spec. The directory is keyed by the immutable ULID `id`; the user-facing `name` is a mutable label stored inside the manifest. Renaming a workspace is a manifest edit only — no host paths, container labels, or vault accounts move.
 
 ```ts
 type WorkspaceKind = 'container' | 'local';
+type AuthMode = 'oauth' | 'apikey';
 
 interface WorkspaceSpec {
-  name: string;
+  id: string;              // ULID — identity, never changes
+  name: string;            // mutable label, unique across the fleet (validated on save)
+  description?: string;
+  labels: string[];        // free-form, used for filtering in the Saved tab
+  color?: { hue: number }; // one of 14 preset hues; random/hashed if unset
   workspaceRoot: string;   // host path bind-mounted into the workspace
   workspaceSubdir: string; // subdirectory the agent works in
-  profile: string;         // vault profile name, or 'oauth'
   kind: WorkspaceKind;     // 'container' today; 'local' is selectable in UI, not yet wired
   image?: string;          // image ref for kind='container'; undefined for 'local'
+  authMode: AuthMode;      // 'oauth' (default) or 'apikey' (requires ANTHROPIC_API_KEY in env)
+  env: {
+    plain: Record<string, string>; // values live in the manifest
+    secretKeys: string[];          // values live in keytar under `<id>:<key>`
+  };
+  resources?: { cpus?: number; memoryMb?: number };
   createdAt: number;
   lastUsedAt: number;
 }
 ```
 
-The manifest is written on `workspace:create` and updated on successful `workspace:start`. The API key is NOT persisted; only the `profile` name is, which is resolved against the keychain at start time. `workspace:remove(_, { deleteState: true })` removes the state dir (and thus the manifest), so the workspace disappears from the past list.
+The manifest is written on `workspace:create` and updated on successful `workspace:start`. Secret env values are NOT persisted here — only the *list* of keys (`secretKeys`). Values land in the OS keychain under `<id>:<key>` and are resolved at container-start time via `vault.resolveEnv(id, plain, secretKeys)`.
+
+`workspace:remove(_, { deleteState: true })` removes the state dir (and thus the manifest) and the renderer additionally calls `vault:deleteAllForWorkspace(id)` so the workspace disappears from the past list and leaves no orphan keychain entries.
 
 Manifests written before `kind`/`image` existed default to `kind: 'container'` and an undefined `image` (the runner image was used implicitly). The renderer treats undefined-kind as container, so older manifests Just Work.
 
@@ -226,7 +243,7 @@ interface ImageEntry {
 Writes are atomic (write-to-temp + rename). Reads tolerate a missing or malformed file by returning an empty library. Manual deletion of entries is exposed via `images:remove`; manual *addition* is not exposed today (the library is purely use-driven).
 
 ### Session inventory (on disk)
-For each workspace, `<userData>/state/<name>/sessions.json` records the renderer's per-workspace tab list. Loaded by `TerminalPane` on mount, persisted on every change (add tab, close tab, switch active). PTYs themselves are not persisted — only the display ids, names, and which tab was active. On relaunch the renderer recreates the tabs and each `TerminalSession` opens a fresh `docker exec claude` per its tab. In-memory context (anything Claude held in process memory) is not yet preserved across app restarts; the in-container broker that fixes this is a deferred follow-up (see §11 Open decisions).
+For each workspace, `<userData>/state/<id>/sessions.json` records the renderer's per-workspace tab list. Loaded by `TerminalPane` on mount, persisted on every change (add tab, close tab, switch active). PTYs themselves are not persisted — only the display ids, names, and which tab was active. On relaunch the renderer recreates the tabs and each `TerminalSession` opens a fresh `docker exec claude` per its tab. In-memory context (anything Claude held in process memory) is not yet preserved across app restarts; the in-container broker that fixes this is a deferred follow-up (see §11 Open decisions).
 
 ```ts
 interface SessionEntry {
@@ -265,23 +282,24 @@ interface Workspace extends WorkspaceSpec {
 - **deleted** — there is no live container, but a manifest is on disk. Recoverable by recreating via the create flow.
 
 ### Docker container labels (backend implementation)
-Today the only workspace backend is a Docker container. Each managed container carries:
+Today the only workspace backend is a Docker container. The container name is `cf-<id>` (must be unique on the host); lookup is always by the `com.claude-fleet.id` label, which means renaming a workspace does not require touching the container at all. Each managed container carries:
 - `com.claude-fleet.managed` = `"true"` — discovery filter. `dockerode listContainers` filters on this label exclusively, so unmanaged containers never appear in the UI.
+- `com.claude-fleet.id` — the workspace's ULID. **Stable identity lookup key**; survives renames.
+- `com.claude-fleet.name` — the workspace's user-facing label at create time. Snapshot only; the source of truth for current name is the manifest.
 - `com.claude-fleet.workspace-root` — the host workspace root, stamped so `listLiveWorkspaces` can return it without a manifest read.
 - `com.claude-fleet.subdir` — the subdirectory the agent works in.
-- `com.claude-fleet.profile` — the vault profile name whose key was injected (or `"oauth"`).
 
 ### Docker container shape
 - `Tty: true`, `OpenStdin: true`, `StdinOnce: false` — required for interactive `docker exec` later.
 - `WorkingDir: /workspace/${subdir}` (or `/workspace` if subdir is empty).
-- Binds: `${workspaceRoot}:/workspace:rw` (the user's host dir), `<userData>/state/<name>/.claude:/home/fleet/.claude:rw` (per-workspace persistent Claude state), and `<userData>/state/<name>/broker:/run/broker:rw` (the directory the in-container broker creates its Unix socket in).
-- Env: caller passes a `Record<string,string>`, typically `{ ANTHROPIC_API_KEY: <from vault> }` for API-key mode or `{}` for OAuth mode. `HOME=/home/fleet` is also set so tooling finds the bind-mounted `.claude/`.
+- Binds: `${workspaceRoot}:/workspace:rw` (the user's host dir), `<userData>/state/<id>/.claude:/home/fleet/.claude:rw` (per-workspace persistent Claude state), and `<userData>/state/<id>/broker:/run/broker:rw` (the directory the in-container broker creates its Unix socket in).
+- Env: `manifest.env.plain` merged with secret values resolved at create time via `vault.resolveEnv(id, plain, secretKeys)` (missing secret keys resolve to the empty string so the container still starts; claude itself surfaces the auth failure). `HOME=/home/fleet` is also set so tooling finds the bind-mounted `.claude/`.
 - `User: <hostUid>:<hostGid>` so bind-mounted files are owned by the host user.
 - Optional resource limits: `cpus` (→ `NanoCpus`), `memoryMb` (→ `Memory`).
 - `AutoRemove: false` — containers persist across restarts unless explicitly removed.
 
 ### JSONL→SQLite cache
-Each workspace's Claude transcripts (`<userData>/state/<name>/.claude/projects/-workspace/<session-uuid>.jsonl`) are tailed by a single SQLite cache at `<userData>/state.db` (WAL mode). JSONL stays authoritative — the DB can be dropped at any time and the watcher rebuilds it from the JSONLs on next start.
+Each workspace's Claude transcripts (`<userData>/state/<id>/.claude/projects/-workspace/<session-uuid>.jsonl`) are tailed by a single SQLite cache at `<userData>/state.db` (WAL mode). JSONL stays authoritative — the DB can be dropped at any time and the watcher rebuilds it from the JSONLs on next start.
 
 **Schema (v1):**
 
@@ -289,7 +307,7 @@ Each workspace's Claude transcripts (`<userData>/state/<name>/.claude/projects/-
 CREATE TABLE events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,
-  workspace_name TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
   ts INTEGER,                          -- ms since epoch; null for light events
   type TEXT NOT NULL,                  -- assistant / user / system / etc.
   subtype TEXT,                        -- system subtype (turn_duration, compact_boundary, …)
@@ -308,12 +326,12 @@ CREATE TABLE events (
   UNIQUE(session_id, dedup_key)
 );
 CREATE INDEX idx_events_session_ts ON events(session_id, ts);
-CREATE INDEX idx_events_workspace ON events(workspace_name);
+CREATE INDEX idx_events_workspace ON events(workspace_id);
 CREATE INDEX idx_events_type ON events(type);
 
 CREATE TABLE sessions (
   id TEXT PRIMARY KEY,                 -- session UUID (= JSONL filename stem)
-  workspace_name TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
   cwd TEXT,                            -- from first `system` event carrying it
   started_at INTEGER,                  -- first event ts
   last_active_at INTEGER,              -- max(event ts)
@@ -321,7 +339,7 @@ CREATE TABLE sessions (
   first_user_message TEXT,             -- last-prompt or first user.content
   user_set_name TEXT                   -- manual override (for the sessions table; see §11)
 );
-CREATE INDEX idx_sessions_workspace ON sessions(workspace_name);
+CREATE INDEX idx_sessions_workspace ON sessions(workspace_id);
 ```
 
 **Why these design choices:**
@@ -331,45 +349,62 @@ CREATE INDEX idx_sessions_workspace ON sessions(workspace_name);
 
 **Watcher behavior:**
 - One `JsonlWatcher` instance per main process. Started on `app.whenReady` (after `listWorkspaceManifests`), stopped on `before-quit`.
-- Each workspace is registered with `registerWorkspace(name)`, which `mkdir -p`s `<state>/<name>/.claude/projects/-workspace` and adds it to the chokidar watch set. The mkdir is non-obvious but load-bearing: chokidar v5 silently drops paths that don't exist at `add()` time (its docs imply it queues missing paths and watches them when they appear, but in practice the create-detection misses files claude later writes there). Symptom when omitted: any workspace whose claude first-run happens AFTER `registerWorkspace` never gets its JSONLs ingested — the observability pane stays empty for that workspace forever.
+- Each workspace is registered with `registerWorkspace(id)`, which `mkdir -p`s `<state>/<id>/.claude/projects/-workspace` and adds it to the chokidar watch set. The mkdir is non-obvious but load-bearing: chokidar v5 silently drops paths that don't exist at `add()` time (its docs imply it queues missing paths and watches them when they appear, but in practice the create-detection misses files claude later writes there). Symptom when omitted: any workspace whose claude first-run happens AFTER `registerWorkspace` never gets its JSONLs ingested — the observability pane stays empty for that workspace forever.
 - Per-file byte offsets are kept in memory only. On add/change: read from offset to EOF, find the last `\n`, ingest complete lines, advance offset past the newline. Trailing partial line waits for the next event.
 - Compaction (file shrinks below the stored offset) resets the offset to 0; `dedup_key` ensures already-ingested rows aren't duplicated.
 - Mock mode (`CLAUDE_FLEET_MOCK=1`) skips watcher + DB entirely — no real JSONLs to read.
 
 ### Vault layout
-`keytar` stores per-profile credentials under:
+`keytar` stores per-workspace secret env-var values:
 - `service`: `claude-fleet` (constant)
-- `account`: the profile name
-- `password`: the API key
+- `account`: `<workspaceId>:<envVarName>` (e.g. `01ARZ3NDEKTSV4RRFFQ69G5FAV:ANTHROPIC_API_KEY`)
+- `password`: the secret value (e.g. an API key)
 
-Plus one index entry:
-- `service`: `claude-fleet`, `account`: `__profiles__`, `password`: JSON array of profile names.
+Plus a per-workspace index entry:
+- `service`: `claude-fleet`, `account`: `__secrets__:<workspaceId>`, `password`: JSON array of secret key names for that workspace.
 
-The index exists because `keytar` has no list operation. It is maintained on every `setProfile`/`deleteProfile`.
+The per-workspace index exists because keytar has no list operation; it makes "list this workspace's secret keys" (the common case for the env editor) an O(1) keychain read and makes `vault:deleteAllForWorkspace` cheap because the index already enumerates every account to remove.
 
-`Profile = { name: string; apiKey: string }`. The renderer only ever sees the `name`; the `apiKey` returned from `vault:get` is consumed by the main process when constructing the workspace env, *not* round-tripped through the UI.
+The old `__profiles__:*` shape (global per-profile API keys) is gone. The startup migration in `src/main/migration.ts` purges every keytar entry under `service=claude-fleet` whose account doesn't fit the new `<id>:<key>` or `__secrets__:<id>` form, so `__profiles__:*` entries disappear on first boot of this code on any pre-existing install.
+
+Values are read from the renderer only on explicit `vault:getSecret`; during normal operation, the main process consumes them directly via `resolveEnv` when constructing the container env (not round-tripped through the UI).
 
 ## 8. User flows
 
 ### Startup
 1. Main creates the window, registers IPC handlers.
-2. Renderer mounts; on first render it calls `workspace:ping`. If false, the main pane shows "Docker daemon unreachable — start Docker Desktop (with WSL2 integration)."
-3. If reachable, renderer calls `workspace:list` and polls every 5s thereafter to pick up state changes from outside the app. The list includes live workspaces (running/stopped) and deleted workspaces (manifest on disk, no container) — the renderer keys selection by an `id` that's the live containerId or `deleted:<name>` for the deleted ones.
+2. Before any IPC traffic, main runs `runStartupMigration()` from `src/main/migration.ts`. This is idempotent: legacy name-keyed state dirs get a fresh ULID and the dir is renamed in place (with the manifest rewritten to the new shape — `authMode='oauth'`, empty `env`, etc.), and any keytar entry under `service=claude-fleet` whose account doesn't fit the new `<id>:<key>` / `__secrets__:<id>` shape is deleted (`__profiles__:*` purge). Re-running the migration on an already-migrated install is a no-op.
+3. Renderer mounts; on first render it calls `workspace:ping`. If false, the main pane shows "Docker daemon unreachable — start Docker Desktop (with WSL2 integration)."
+4. If reachable, renderer calls `workspace:list` and polls every 5s thereafter to pick up state changes from outside the app. The list includes live workspaces (running/stopped) and deleted workspaces (manifest on disk, no container). The renderer keys selection by the ULID `id`; `containerId` is present only for live workspaces and is what stop/pause/remove/attach take.
 
 ### Create a workspace
 1. User clicks **+ New workspace** in the top strip.
-2. `<CreateWorkspaceModal>` opens. The top section is a "past workspaces" list pulled from `workspace:list` — sorted most-recently-used first, each row showing name, host path, state dot (running/stopped/deleted), and a relative timestamp.
+2. `<CreateWorkspaceModal>` opens. The top section is a "past workspaces" list pulled from `workspace:list` — sorted most-recently-used first, each row showing name, host path, state dot (running/stopped/deleted), and a relative timestamp. (The Saved + New tab layout from `docs/design/workspace-modal.md` is queued for the next PR; today this section is a flat list with a per-row "restart" action.)
 3. Clicking a past workspace calls `handleRestart(workspace)`:
-   - `workspace:start(name)` is tried first. If the container exists (live or stopped), it's started and selected.
-   - If `workspace:start` returns null (no live container), the renderer falls through to the create flow using the saved manifest values (including the original `kind` and `image`) — resolving the API key from the vault when `profile !== 'oauth'`.
-4. Otherwise the user fills the form. The first decision is **Type**: a radio between **Container** (default — isolated Docker runner) and **Local** (runs on this host, "coming soon" — submitting throws). For Container, an **Image** input appears next, defaulting to the most-recently-used library image (or the bundled runner if the library is empty). Below the input, the image library renders as a scrollable list with free-text filtering across the ref + every label key/value; clicking a row fills the input. The form then collects name (with pet-name placeholder), workspace root (with directory picker + last-used persistence), subdir, and profile name. **Create & start** submits.
-5. Renderer calls `vault:get(profileName)` if a profile name was entered. If null, an error appears inline.
-6. Renderer calls `workspace:ensureImage` (pulls the chosen image from its registry if needed), then `workspace:create` with `{ kind, image, env, … }`. Main creates the container, writes the manifest, records the image into the library (via `imageLibrary.recordImage` with labels from `docker inspect`), and returns the `Workspace`.
-7. The top strip refreshes; the new workspace appears.
+   - `workspace:start(id)` is tried first. If the container exists (live or stopped), it's started and selected.
+   - If `workspace:start` returns null (no live container), the renderer falls through to the create flow using the saved manifest values, **reusing the original ULID** so the state dir, vault secrets, and observability history all stay attached to the workspace.
+4. Otherwise the user fills the form:
+   - **Type** radio: Container (default — isolated Docker runner) or Local ("coming soon" — submit throws).
+   - For Container, an **Image** input appears with the inline image-library picker beneath it (default = most-recently-used library entry, or the bundled runner).
+   - **Name** with pet-name placeholder and a **color swatch** to the left (popover with 14 OKLCH preset hues + Random). The swatch is dashed when no hue has been picked — `WorkspaceTabStrip` falls back to a name-hash of the same palette in that case so the chip still gets a stable distinct color.
+   - **Description** textarea (optional).
+   - **Labels** chip input with `<datalist>` autocomplete drawn from every other workspace's `labels[]`. Used for filtering in the Saved-tab list (PR 2 surface).
+   - **Workspace root** with Browse… directory picker + last-used persistence via `localStorage`.
+   - **Subdir inside workspace** (optional).
+   - **Auth** radio: OAuth (default) / API key. API key is disabled until `ANTHROPIC_API_KEY` is added to the env list below — the radio's tooltip points there.
+   - **Env vars** disclosure: KV editor with a per-row `secret` toggle. Plain rows land in `manifest.env.plain`; secret rows ship to `vault:setSecret(<newId>, key, value)` and only their *key names* are listed in `manifest.env.secretKeys`. The secret toggle is forced off when `vault:available` returns false.
+   - **Resource caps** disclosure (Container only): CPUs + Memory MB. Blank → no Docker limit.
+5. **Create & start** submits. The renderer:
+   1. Validates name (1–80 chars, no control characters, no name clash against the existing fleet) and env-var keys (`[A-Z_][A-Z0-9_]+`, no duplicates).
+   2. Mints a fresh ULID via the `ulid` package.
+   3. For each secret env row, calls `vault:setSecret(id, key, value)`. Failures are warned but don't block the create (the container will start with the secret resolving to `""`).
+   4. Calls `workspace:ensureImage`, then `workspace:create` with the full payload (id, name, description, labels, color, workspaceRoot, workspaceSubdir, kind, image, authMode, env: { plain, secretKeys }, resources).
+6. Main creates the container (`docker create cf-<id>` with the `com.claude-fleet.id` label, env resolved through `vault.resolveEnv`), writes the manifest to `<userData>/state/<id>/workspace.json`, records the image in the library, and returns the `Workspace`.
+7. The top strip refreshes; the new workspace appears and is auto-selected.
 
 ### Attach a terminal
 1. User selects a workspace in the top strip (only live workspaces appear there).
-2. `<TerminalPane>` mounts. It reads the workspace's persisted `sessions.json` via `sessions:read(workspaceName)`. If the inventory is non-empty the saved tabs are restored (including which one was active); otherwise a single auto-created `main` tab is inserted and persisted right away. The pane manages a tab strip above the terminal body and one `<TerminalSession>` per tab stacked in the body — only the active tab is `visibility: visible`, the rest stay mounted so their PTYs and scrollback are preserved across tab switches.
+2. `<TerminalPane>` mounts. It reads the workspace's persisted `sessions.json` via `sessions:read(workspaceId)`. If the inventory is non-empty the saved tabs are restored (including which one was active); otherwise a single auto-created `main` tab is inserted and persisted right away. The pane manages a tab strip above the terminal body and one `<TerminalSession>` per tab stacked in the body — only the active tab is `visibility: visible`, the rest stay mounted so their PTYs and scrollback are preserved across tab switches.
 3. Each `<TerminalSession>` creates an `xterm` `Terminal`, fits to its host div, calls `pty:attach(containerId, cols, rows)` → gets a `sessionId`. It registers `onData` (writes chunks into xterm) and `onEnd` (shows the session-ended overlay). `term.onData` forwards to `pty:input(sessionId, data)`. A `ResizeObserver` re-fits and calls `pty:resize` on host div resize. The end-state overlay has two variants: a **natural** card ("claude session ended — Start new session") when `pty:end` fires after a successful attach, and an **attach-error** card surfacing the error message verbatim plus a `docker pull` hint when `pty:attach` itself throws (most often: stale runner image missing the broker, broker socket unreachable). The attach-error variant exists because the overlay is `position: absolute` over `.terminal-host` — without it, any error text written into xterm would be hidden behind the modal.
 4. Clicking the **+** in the tab strip creates a new session. The first session is named `main`; subsequent sessions are `session 2`, `session 3`, … via a counter that doesn't decrement on close (so names stay stable). Each tab carries a small status dot showing two states today: **live** (PTY attached, normal-color dot) and **ended** (PTY exited, grey dot). Lifecycle is driven by the existing `pty:end` signal each `TerminalSession` already observes; `TerminalSession` reports state changes via an `onLifecycleChange(sessionId, 'live' | 'ended')` callback the parent `TerminalPane` aggregates into a `Set<string>` of ended tab ids. The dot flips back to live on the next "Start new session" click. Clicking a tab switches the active session. The **×** on a tab closes it; closing the last session auto-creates a fresh `main` so the strip is never empty. Every change is persisted to `sessions.json` immediately so a sudden quit doesn't lose tabs. Richer per-tab states (`idle`, `needs-input`) land when the observability watcher + permission-request log expose the relevant signals.
 5. On unmount (workspace removed, or app close): each `<TerminalSession>` unsubscribes listeners, calls `pty:detach`, disposes the terminal.
@@ -384,10 +419,8 @@ Each `pty:attach` runs `claude` fresh inside the container via `docker exec` —
 
 **Clickable links**: `term.registerLinkProvider` walks back to the first non-wrapped row, forward through `isWrapped` continuations, concatenates the rows, and matches URLs against the joined text — so a URL that soft-wraps across multiple rows is registered as a single link spanning all of them. Activation calls `window.open`, which `setWindowOpenHandler` routes through `shell.openExternal`.
 
-### Manage profiles
-1. User clicks **Profiles…** in the sidebar.
-2. Modal lists names from `vault:list`. Add form takes `name` + `apiKey` (password input). Delete asks for confirmation.
-3. All writes go to the OS keychain via the main process.
+### Manage per-workspace env vars
+The global Profiles modal is gone. Per-workspace env vars (both plain and secret) live in the Env-vars disclosure inside `CreateWorkspaceModal` for new workspaces. For existing workspaces the same editor is reused inside the Saved-tab inline edit form (PR 2 *Actions*). Underneath, the renderer calls `vault:setSecret(workspaceId, key, value)` / `vault:deleteSecret(workspaceId, key)` to mutate keychain values, and the manifest's `env.secretKeys` array tracks which keys exist for that workspace so the editor can surface them without ever reading a value.
 
 ### Close a workspace
 1. User selects a workspace, then clicks **Close…** in the main-pane header.
@@ -400,13 +433,13 @@ Each `pty:attach` runs `claude` fresh inside the container via `docker exec` —
 
 ## 9. Security model
 
-- **API keys never reach the renderer.** `vault:get` returns the key to the main process, which embeds it in the container's env. The renderer only ever holds profile *names*. (Exception: `ProfilesDialog` does receive the key the user just typed, in the brief moment between input and `vault:set` — there is no way around this.)
+- **Secret env-var values stay out of the renderer except at write time.** Per-workspace secrets are persisted via `vault:setSecret(workspaceId, key, value)`. After that, the renderer holds only the *list* of secret key names (via `vault:listKeys`); the main process resolves values directly from keytar when constructing the container env. The lone exception is the env-row in `CreateWorkspaceModal` — the renderer briefly holds the value the user just typed before it ships to `vault:setSecret`. There is no way around that.
 - **Renderer is isolated.** `contextIsolation: true`, `nodeIntegration: false`. No `require`, no `process`, no `fs` from renderer code.
 - **`sandbox: false`** because preload uses `ipcRenderer`. The renderer itself still has no Node access.
-- **Renderer cannot escape the IPC surface.** It can: list/create/start/stop/remove workspaces carrying the fleet label, list/get/set/delete profiles, attach/detach a PTY. It cannot: shell out, read arbitrary files, touch other Docker containers, hit the network with Node APIs.
+- **Renderer cannot escape the IPC surface.** It can: list/create/start/stop/remove workspaces carrying the fleet label, list/get/set/delete per-workspace secrets, attach/detach a PTY. It cannot: shell out, read arbitrary files, touch other Docker containers, hit the network with Node APIs.
 - **Workspace isolation is Docker's.** No additional sandboxing layered on top. Containers run as the host user's UID (via `User: '<uid>:<gid>'`) and can write to the bind-mounted host workspace as that user.
 - **External link handling**: `setWindowOpenHandler` denies in-app navigation and opens external URLs via `shell.openExternal`.
-- **Vault availability degradation**: the main process probes `keytar` once at startup (`vault:available`). When the OS keychain is unreachable (typically bare WSL with no Secret Service), the renderer hides the **Profiles…** button, the create-workspace flow accepts only OAuth or env-sourced API keys, and `getProfile` falls back to `ANTHROPIC_API_KEY` from the environment. A header banner surfaces the degraded state. The packaged Windows build hits Credential Manager via DPAPI and never enters this mode; this path exists for Linux dev environments without a keyring.
+- **Vault availability degradation**: the main process probes `keytar` once at startup (`vault:available`). When the OS keychain is unreachable (typically bare WSL with no Secret Service), the env editor disables the per-row "secret" toggle (a row can still be added as a plain env var, but the value lives in the manifest in that case), and the auth-mode picker degrades to OAuth-only unless `ANTHROPIC_API_KEY` is supplied as a plain env. A `BottomBar` notice surfaces the degraded state. The packaged Windows build hits Credential Manager via DPAPI and never enters this mode; this path exists for Linux dev environments without a keyring.
 
 ## 10. Project layout
 
@@ -450,9 +483,10 @@ claude-fleet/
     │   ├── pricing.ts                 # Claude 4.x USD rates + costFor(model, tier, tokens)
     │   ├── pricing.test.ts            # Vitest unit tests for pricing math
     │   ├── errorLog.ts                # JSON-lines crash log to <userData>/error.log
-    │   ├── paths.ts                   # state-dir path conventions (incl. broker dir)
+    │   ├── paths.ts                   # state-dir path conventions (incl. broker dir, shared OAuth credentials)
     │   ├── fs.ts                      # isDirectory / mkdirp helpers
-    │   └── vault.ts                   # keytar wrapper + name index
+    │   ├── migration.ts               # one-shot ULID migration + legacy keytar purge on first boot
+    │   └── vault.ts                   # keytar wrapper, per-workspace secret keying + env resolve
     ├── preload/
     │   └── index.ts                   # contextBridge.exposeInMainWorld('api', …)
     └── renderer/
@@ -469,9 +503,8 @@ claude-fleet/
                 ├── TerminalSession.tsx    # one session: xterm + PTY + key bindings + session-ended overlay
                 ├── ObservabilityPane.tsx  # right sidebar: live session summary (cost + tokens + tools)
                 ├── BottomBar.tsx          # footer hint bar
-                ├── CreateWorkspaceModal.tsx  # form + past-workspaces list
-                ├── CloseWorkspaceModal.tsx
-                └── ProfilesDialog.tsx
+                ├── CreateWorkspaceModal.tsx  # form (color, description, labels, env, resources) + past-workspaces list
+                └── CloseWorkspaceModal.tsx
 ```
 
 ## 11. Open decisions
@@ -485,8 +518,8 @@ Each container gets its own host-side state dir, bind-mounted into the container
 - **Host layout**: `<userData>/state/<container-name>/.claude/`, where `<userData>` is Electron's `app.getPath('userData')` (`~/.config/claude-fleet/` on Linux). State dirs are keyed by container name — recreating a container with the same name reuses its prior state. Use a different name to start fresh.
 - **Container layout**: the host state dir is bind-mounted at `/home/fleet/.claude/` read-write. The container's `WorkingDir` is `/workspace`, so Claude Code writes JSONLs to `~/.claude/projects/-workspace/<session-uuid>.jsonl` — the sanitized-cwd is deterministically `-workspace`.
 - **UID/GID**: the container runs as the host user's UID/GID via `User: '<uid>:<gid>'` set at create time. `HOME=/home/fleet` is set in the env so tooling that consults `HOME` finds the bind-mounted `.claude/` even when the runtime UID has no `/etc/passwd` entry. This replaces the earlier idea of baking UIDs at image-build time — the published runner image now has a single fixed UID for the in-image `fleet` user, and the host's UID is supplied at container start.
-- **Create-time behavior**: if `<userData>/state/<name>/.claude/` does not exist, the main process creates it (owned by the host user) before starting the container. If it exists, it's reused as-is.
-- **Removal behavior**: when the user removes a container, a confirmation modal asks "Also delete this container's state dir?" with **Keep** as the default. Picking Delete recursively removes `<userData>/state/<name>/`. Picking Keep leaves the state intact so a future container with that name inherits it.
+- **Create-time behavior**: if `<userData>/state/<id>/.claude/` does not exist, the main process creates it (owned by the host user) before starting the container. If it exists, it's reused as-is.
+- **Removal behavior**: when the user removes a container, a confirmation modal asks "Also delete this container's state dir?" with **Keep** as the default. Picking Delete recursively removes `<userData>/state/<id>/`. Picking Keep leaves the state intact so a future container with that name inherits it.
 
 **Implementation:**
 - `src/main/docker.ts createContainer`: add the state-dir bind to `HostConfig.Binds` alongside the existing workspace bind. Ensure the host dir exists (`mkdir -p`) with host-user ownership before starting the container.

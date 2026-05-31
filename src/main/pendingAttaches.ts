@@ -31,7 +31,7 @@
 // tests can clear it via `_resetForTests`.
 
 interface PendingAttach {
-  workspaceName: string;
+  workspaceId: string;
   brokerSessionId: string;
   recordedAt: number;
 }
@@ -39,19 +39,19 @@ interface PendingAttach {
 const pending: PendingAttach[] = [];
 
 export function recordPendingAttach(
-  workspaceName: string,
+  workspaceId: string,
   brokerSessionId: string,
   now = Date.now(),
 ): void {
   // Dedupe — if the same (workspace, broker_session) is already pending,
   // refresh its timestamp rather than letting two entries linger.
   for (const p of pending) {
-    if (p.workspaceName === workspaceName && p.brokerSessionId === brokerSessionId) {
+    if (p.workspaceId === workspaceId && p.brokerSessionId === brokerSessionId) {
       p.recordedAt = now;
       return;
     }
   }
-  pending.push({ workspaceName, brokerSessionId, recordedAt: now });
+  pending.push({ workspaceId, brokerSessionId, recordedAt: now });
 }
 
 /**
@@ -59,8 +59,8 @@ export function recordPendingAttach(
  * `brokerSessionId` (removing it from the queue). Returns null only
  * when no pending attach exists for the workspace.
  */
-export function consumeForWorkspace(workspaceName: string): string | null {
-  const idx = pending.findIndex((p) => p.workspaceName === workspaceName);
+export function consumeForWorkspace(workspaceId: string): string | null {
+  const idx = pending.findIndex((p) => p.workspaceId === workspaceId);
   if (idx === -1) return null;
   const match = pending[idx]!;
   pending.splice(idx, 1);
@@ -74,12 +74,12 @@ export function consumeForWorkspace(workspaceName: string): string | null {
  * with a future JSONL.
  */
 export function removePendingAttach(
-  workspaceName: string,
+  workspaceId: string,
   brokerSessionId: string,
 ): void {
   for (let i = pending.length - 1; i >= 0; i--) {
     const p = pending[i]!;
-    if (p.workspaceName === workspaceName && p.brokerSessionId === brokerSessionId) {
+    if (p.workspaceId === workspaceId && p.brokerSessionId === brokerSessionId) {
       pending.splice(i, 1);
       return;
     }

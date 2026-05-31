@@ -4,7 +4,8 @@ import { registerIpc } from './ipc.js';
 import { openDb, closeDb } from './db.js';
 import { JsonlWatcher } from './jsonlWatcher.js';
 import { listWorkspaceManifests } from './workspaces.js';
-import { installMainProcessHandlers, logError, getLogPath } from './errorLog.js';
+import { installMainProcessHandlers, getLogPath } from './errorLog.js';
+import { runStartupMigration } from './migration.js';
 
 // Mock mode is for UI iteration without Docker; no real JSONLs exist, so the
 // watcher and DB stay dormant.
@@ -51,10 +52,14 @@ app.whenReady().then(async () => {
   // Surface the log location so users (and Playwright tests) can find it.
   console.log(`[claude-fleet] error log: ${getLogPath()}`);
 
+  // Clean-slate migration to the ULID-keyed workspace model. Runs every
+  // boot but no-ops once everything's already on the new shape.
+  await runStartupMigration();
+
   if (jsonlWatcher) {
     openDb(app.getPath('userData'));
     const manifests = await listWorkspaceManifests();
-    await jsonlWatcher.start(manifests.map((m) => m.name));
+    await jsonlWatcher.start(manifests.map((m) => m.id));
   }
   registerIpc({ jsonlWatcher });
   createWindow();

@@ -15,19 +15,26 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { REPO_ROOT, callTestIpc } from './_helpers.js';
 
-function writeManifest(userDataDir: string, name: string): string {
-  const stateDir = path.join(userDataDir, 'state', name);
+// State dir is keyed by id (ULID-shape) so the startup migration treats
+// the manifest as already-current and doesn't rename it out from under
+// the watcher. Callers pass the id directly — the broker_sessions table
+// keys by workspace id (no display name involvement at the IPC layer).
+function writeManifest(userDataDir: string, id: string): string {
+  const stateDir = path.join(userDataDir, 'state', id);
   const projectsDir = path.join(stateDir, '.claude', 'projects', '-workspace');
   mkdirSync(projectsDir, { recursive: true });
   writeFileSync(
     path.join(stateDir, 'workspace.json'),
     JSON.stringify({
-      name,
-      workspaceRoot: '/tmp/fleet-test-' + name,
+      id,
+      name: id,
+      labels: [],
+      workspaceRoot: '/tmp/fleet-test-' + id,
       workspaceSubdir: '',
-      profile: 'oauth',
       kind: 'container',
       image: 'mock',
+      authMode: 'oauth',
+      env: { plain: {}, secretKeys: [] },
       createdAt: Date.now(),
       lastUsedAt: Date.now()
     })
@@ -83,7 +90,7 @@ test('broker_sessions: a single pending attach is consumed and mapping is learne
   // the mapping. If this fails, the mapping isn't being learned even
   // in the simple single-attach case.
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-mapping-'));
-  const wsName = 'first-tab-workspace';
+  const wsName = '01TESTFIRSTTAB000000000000';
   const projectsDir = writeManifest(userDataDir, wsName);
 
   const { app } = await launchRealBackend(userDataDir);
@@ -126,7 +133,7 @@ test('broker_sessions: mapping is learned even when the user types many minutes 
   // user behavior. This test asserts that a pending attach 60 seconds
   // old still pairs with the next JSONL.
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-late-type-'));
-  const wsName = 'late-type-workspace';
+  const wsName = '01TESTLATETYPE0000000000WS';
   const projectsDir = writeManifest(userDataDir, wsName);
 
   const { app } = await launchRealBackend(userDataDir);
@@ -164,7 +171,7 @@ test('broker_sessions: multi-tab attaches that interleave with JSONL writes all 
   // the FIFO fix takes the oldest pending entry for each
   // 'new-session', pairing N attaches + N JSONLs correctly in order.
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-multi-attach-'));
-  const wsName = 'multi-tab-workspace';
+  const wsName = '01TESTMULTITAB000000000000';
   const projectsDir = writeManifest(userDataDir, wsName);
 
   const { app } = await launchRealBackend(userDataDir);
@@ -214,7 +221,7 @@ test('summaryForBrokerSession: returns null for an unmapped broker session (fres
   // tab's numbers via fallback was the "new session shows the last
   // session's info" bug.
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-fresh-tab-'));
-  const name = 'fresh-tab-test';
+  const name = '01TESTFRESHTAB000000000000';
   const projectsDir = writeManifest(userDataDir, name);
   // Existing claude session with real data — the "previous tab" the
   // user was using before clicking "+" to add a new tab.

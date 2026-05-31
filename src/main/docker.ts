@@ -4,38 +4,51 @@
 // translates into `workspace:*` channels. The exported types use
 // workspace-level vocabulary because that's what the rest of the app
 // sees; the internal `dockerode` calls still operate on the Docker
-// notion of a container (label `com.claude-fleet.managed`, etc.). When
-// a non-Docker backend lands, it can implement the same surface.
+// notion of a container. When a non-Docker backend lands (the planned
+// 'local' kind), it can implement the same surface.
+//
+// Identity is a ULID stored in the `com.claude-fleet.id` label. Container
+// names are derived as `cf-<id>` so they're unique on the host even when
+// the user renames the workspace's label. Lookup is always by label.
 
 import Docker from 'dockerode';
 import { mkdir, rm, stat } from 'node:fs/promises';
 import type { Duplex } from 'node:stream';
 import {
-  assertValidWorkspaceName,
+  assertValidWorkspaceId,
   workspaceBrokerDir,
   workspaceBrokerSocket,
   workspaceClaudeDir,
   workspaceStateDir
 } from './paths.js';
-import type { Workspace } from './workspaces.js';
+import type { Workspace, WorkspaceEnv, WorkspaceResources } from './workspaces.js';
 import { BrokerClient, brokerPtyStream } from './broker.js';
 import { recordPendingAttach } from './pendingAttaches.js';
+import { resolveEnv } from './vault.js';
 
 export const FLEET_LABEL = 'com.claude-fleet.managed';
+export const ID_LABEL = 'com.claude-fleet.id';
+export const NAME_LABEL = 'com.claude-fleet.name';
+export const SUBDIR_LABEL = 'com.claude-fleet.subdir';
+export const WORKSPACE_ROOT_LABEL = 'com.claude-fleet.workspace-root';
 export const RUNNER_IMAGE = 'ghcr.io/imioimi/claude-fleet/runner:latest';
 
 const docker = new Docker();
 
+function containerNameFor(id: string): string {
+  return `cf-${id}`;
+}
+
 export interface CreateWorkspaceInput {
+  id: string;
   name: string;
   workspaceRoot: string;
   workspaceSubdir: string;
-  profile: string;
-  env: Record<string, string>;
+  /** Plain env vars only — secret values are looked up from the vault. */
+  env: WorkspaceEnv;
   /** Image reference to launch. Defaults to the bundled runner image. */
   image?: string;
-  cpus?: number;
-  memoryMb?: number;
+  resources?: WorkspaceResources;
 }
 
 export interface ImageInspectResult {
@@ -52,8 +65,6 @@ export interface ImageInspectResult {
 export async function inspectImage(ref: string): Promise<ImageInspectResult> {
   const info = await docker.getImage(ref).inspect();
   const labels = (info.Config?.Labels ?? {}) as Record<string, string>;
-  // RepoDigests look like ['ghcr.io/foo/bar@sha256:abc…']; we just want
-  // the trailing digest part for display.
   const repoDigest = info.RepoDigests?.[0];
   const digest = repoDigest?.split('@')[1];
   return { ref, digest, labels };
@@ -66,10 +77,7 @@ export interface PullProgress {
 /**
  * Pull the runner image, with offline fallback. Always asks the registry
  * — `:latest` tags get silent improvements (broker landing, claude
- * version bumps) and the previous "skip if any copy exists locally"
- * meant users stayed pinned to whatever they first pulled forever. Now
- * we let Docker compare layer digests and re-download only changed
- * layers (no-op when already current).
+ * version bumps).
  *
  * When the registry is unreachable but we have a local copy, surface a
  * one-line warning and proceed with the local image. Anything else
@@ -99,11 +107,6 @@ export async function ensureImage(
         stream,
         (err: Error | null) => (err ? reject(err) : resolve()),
         (event: Record<string, unknown>) => {
-          // Per-layer progress events carry `status` ('Pulling fs layer',
-          // 'Downloading', 'Pull complete', etc.). The summary event at the
-          // tail says 'Status: Image is up to date for …' or 'Status:
-          // Downloaded newer image for …'. Forward both — the UI shows the
-          // latest message.
           const status = typeof event.status === 'string' ? event.status : '';
           const id = typeof event.id === 'string' ? ` ${event.id}` : '';
           if (status) onProgress({ message: `${status}${id}` });
@@ -132,59 +135,87 @@ export async function ping(): Promise<boolean> {
 }
 
 /**
- * Live workspaces — workspaces whose Docker container currently exists
- * (running or stopped). Does not include "deleted" workspaces (those with
- * a state dir on disk but no live container); the IPC layer joins these
- * in via the workspace manifests.
+ * Resolve a workspace's container by its ULID. Returns the dockerode
+ * container info object, or undefined if not present.
+ */
+async function findContainerById(
+  id: string
+): Promise<Docker.ContainerInfo | undefined> {
+  const raw = await docker.listContainers({
+    all: true,
+    filters: { label: [`${ID_LABEL}=${id}`] }
+  });
+  return raw[0];
+}
+
+/**
+ * Live workspaces — those whose Docker container currently exists
+ * (running or stopped). Does not include "deleted" workspaces (manifest
+ * but no container); the IPC layer joins those in via workspace
+ * manifests.
+ *
+ * Note: only minimal fields are populated here. The IPC layer overlays
+ * the on-disk manifest (description, labels, color, env, etc.) on top.
  */
 export async function listLiveWorkspaces(): Promise<Workspace[]> {
   const raw = await docker.listContainers({
     all: true,
     filters: { label: [FLEET_LABEL] }
   });
-  return raw.map((c) => {
-    const name = c.Names[0]?.replace(/^\//, '') ?? c.Id.slice(0, 12);
-    // Docker state strings: 'created' | 'running' | 'paused' | 'restarting'
-    // | 'removing' | 'exited' | 'dead'. We collapse everything that isn't
-    // running or paused into 'stopped' for the renderer.
-    let state: Workspace['state'];
-    if (c.State === 'running') state = 'running';
-    else if (c.State === 'paused') state = 'paused';
-    else state = 'stopped';
-    return {
-      name,
-      workspaceRoot: c.Labels['com.claude-fleet.workspace-root'] ?? '',
-      workspaceSubdir: c.Labels['com.claude-fleet.subdir'] ?? '',
-      profile: c.Labels['com.claude-fleet.profile'] ?? '',
-      kind: 'container',
-      image: c.Image,
-      createdAt: c.Created * 1000,
-      lastUsedAt: c.Created * 1000,
-      state,
-      containerId: c.Id,
-      status: c.Status
-    };
-  });
+  return raw
+    .map((c): Workspace | null => {
+      const id = c.Labels[ID_LABEL];
+      const name = c.Labels[NAME_LABEL] ?? c.Names[0]?.replace(/^\//, '') ?? '';
+      // Containers without the id label are pre-migration; the migration
+      // step removes them before this list is ever consulted.
+      if (!id) return null;
+      let state: Workspace['state'];
+      if (c.State === 'running') state = 'running';
+      else if (c.State === 'paused') state = 'paused';
+      else state = 'stopped';
+      return {
+        id,
+        name,
+        labels: [],
+        workspaceRoot: c.Labels[WORKSPACE_ROOT_LABEL] ?? '',
+        workspaceSubdir: c.Labels[SUBDIR_LABEL] ?? '',
+        kind: 'container',
+        image: c.Image,
+        authMode: 'oauth',
+        env: { plain: {}, secretKeys: [] },
+        createdAt: c.Created * 1000,
+        lastUsedAt: c.Created * 1000,
+        state,
+        containerId: c.Id,
+        status: c.Status
+      };
+    })
+    .filter((w): w is Workspace => w !== null);
 }
 
 export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Workspace> {
-  assertValidWorkspaceName(spec.name);
+  assertValidWorkspaceId(spec.id);
 
   const wsStat = await stat(spec.workspaceRoot).catch(() => null);
   if (!wsStat?.isDirectory()) {
     throw new Error(`Workspace root "${spec.workspaceRoot}" is not an existing directory`);
   }
 
-  const claudeDir = workspaceClaudeDir(spec.name);
+  const claudeDir = workspaceClaudeDir(spec.id);
   await mkdir(claudeDir, { recursive: true });
-  const brokerDir = workspaceBrokerDir(spec.name);
+  const brokerDir = workspaceBrokerDir(spec.id);
   await mkdir(brokerDir, { recursive: true });
 
   const uid = process.getuid?.() ?? 1000;
   const gid = process.getgid?.() ?? 1000;
 
   const image = spec.image ?? RUNNER_IMAGE;
-  const envArr = ['HOME=/home/fleet', ...Object.entries(spec.env).map(([k, v]) => `${k}=${v}`)];
+  // Resolve secrets at create-time; the merged env goes straight to the
+  // container's `Env` array. Missing secret keys resolve to empty string
+  // so the container still starts (claude itself surfaces the failure
+  // later via its own error path).
+  const resolvedEnv = await resolveEnv(spec.id, spec.env.plain, spec.env.secretKeys);
+  const envArr = ['HOME=/home/fleet', ...Object.entries(resolvedEnv).map(([k, v]) => `${k}=${v}`)];
   const hostCfg: Docker.HostConfig = {
     Binds: [
       `${spec.workspaceRoot}:/workspace:rw`,
@@ -197,11 +228,11 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
     ],
     AutoRemove: false
   };
-  if (spec.cpus) hostCfg.NanoCpus = Math.round(spec.cpus * 1e9);
-  if (spec.memoryMb) hostCfg.Memory = spec.memoryMb * 1024 * 1024;
+  if (spec.resources?.cpus) hostCfg.NanoCpus = Math.round(spec.resources.cpus * 1e9);
+  if (spec.resources?.memoryMb) hostCfg.Memory = spec.resources.memoryMb * 1024 * 1024;
 
   const created = await docker.createContainer({
-    name: spec.name,
+    name: containerNameFor(spec.id),
     Image: image,
     User: `${uid}:${gid}`,
     Tty: true,
@@ -211,11 +242,10 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
     Env: envArr,
     Labels: {
       [FLEET_LABEL]: 'true',
-      'com.claude-fleet.subdir': spec.workspaceSubdir,
-      'com.claude-fleet.profile': spec.profile,
-      // Stamp the host workspace root on the container so listLiveWorkspaces
-      // can return it without a separate manifest read.
-      'com.claude-fleet.workspace-root': spec.workspaceRoot
+      [ID_LABEL]: spec.id,
+      [NAME_LABEL]: spec.name,
+      [SUBDIR_LABEL]: spec.workspaceSubdir,
+      [WORKSPACE_ROOT_LABEL]: spec.workspaceRoot
     },
     HostConfig: hostCfg
   });
@@ -224,12 +254,16 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
   const info = await created.inspect();
   const createdAt = Date.parse(info.Created);
   return {
-    name: info.Name.replace(/^\//, ''),
+    id: spec.id,
+    name: spec.name,
+    labels: [],
     workspaceRoot: spec.workspaceRoot,
     workspaceSubdir: spec.workspaceSubdir,
-    profile: spec.profile,
     kind: 'container',
     image,
+    authMode: 'oauth',
+    env: spec.env,
+    resources: spec.resources,
     createdAt,
     lastUsedAt: createdAt,
     state: 'running',
@@ -239,18 +273,14 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
 }
 
 /**
- * Start the (live) workspace by name. Returns the container id if it exists
- * (whether it was already running, paused, or stopped), or null if no live
- * container has that name and the caller should recreate from the spec.
- * Paused containers are unpaused; stopped containers are started.
+ * Start the (live) workspace by id. Returns the container id if it exists
+ * (whether it was already running, paused, or stopped), or null if no
+ * container has that ULID label and the caller should recreate from the
+ * spec. Paused containers are unpaused; stopped containers are started.
  */
-export async function startWorkspace(name: string): Promise<string | null> {
-  assertValidWorkspaceName(name);
-  const raw = await docker.listContainers({
-    all: true,
-    filters: { label: [FLEET_LABEL], name: [`^/${name}$`] }
-  });
-  const found = raw[0];
+export async function startWorkspace(id: string): Promise<string | null> {
+  assertValidWorkspaceId(id);
+  const found = await findContainerById(id);
   if (!found) return null;
 
   const c = docker.getContainer(found.Id);
@@ -258,14 +288,12 @@ export async function startWorkspace(name: string): Promise<string | null> {
     try {
       await c.unpause();
     } catch (err: unknown) {
-      // 409 = container is not paused (race with another caller)
       if ((err as { statusCode?: number }).statusCode !== 409) throw err;
     }
   } else if (found.State !== 'running') {
     try {
       await c.start();
     } catch (err: unknown) {
-      // 304 = already started — race with another caller
       if ((err as { statusCode?: number }).statusCode !== 304) throw err;
     }
   }
@@ -273,24 +301,21 @@ export async function startWorkspace(name: string): Promise<string | null> {
 }
 
 /**
- * Pause a running container via `docker pause` (cgroups freezer). All
- * processes in the container are suspended; container state remains
- * "live" and recoverable via startWorkspace (which will unpause).
+ * Pause a running container. All processes are suspended (cgroups freezer);
+ * the container state remains "live" and recoverable via startWorkspace.
  */
-export async function pauseWorkspace(id: string): Promise<void> {
-  const c = docker.getContainer(id);
+export async function pauseWorkspace(containerId: string): Promise<void> {
+  const c = docker.getContainer(containerId);
   try {
     await c.pause();
   } catch (err: unknown) {
     const status = (err as { statusCode?: number }).statusCode;
-    // 409 = already paused; 404 = container gone — both are no-ops from
-    // the user's POV. Anything else is a real error.
     if (status !== 409 && status !== 404) throw err;
   }
 }
 
-export async function stopWorkspace(id: string): Promise<void> {
-  const c = docker.getContainer(id);
+export async function stopWorkspace(containerId: string): Promise<void> {
+  const c = docker.getContainer(containerId);
   try {
     await c.stop({ t: 5 });
   } catch (err: unknown) {
@@ -300,20 +325,21 @@ export async function stopWorkspace(id: string): Promise<void> {
 }
 
 export interface RemoveWorkspaceOpts {
+  /** When true, also wipe the host-side state dir (manifest + .claude + broker). */
   deleteState?: boolean;
 }
 
 export async function removeWorkspace(
-  id: string,
+  containerId: string,
   opts: RemoveWorkspaceOpts = {}
 ): Promise<void> {
-  const c = docker.getContainer(id);
+  const c = docker.getContainer(containerId);
 
-  let name: string | undefined;
+  let id: string | undefined;
   if (opts.deleteState) {
     try {
       const info = await c.inspect();
-      name = info.Name.replace(/^\//, '');
+      id = info.Config.Labels?.[ID_LABEL];
     } catch (err: unknown) {
       if ((err as { statusCode?: number }).statusCode !== 404) throw err;
     }
@@ -325,8 +351,8 @@ export async function removeWorkspace(
     if ((err as { statusCode?: number }).statusCode !== 404) throw err;
   }
 
-  if (opts.deleteState && name) {
-    await rm(workspaceStateDir(name), { recursive: true, force: true });
+  if (opts.deleteState && id) {
+    await rm(workspaceStateDir(id), { recursive: true, force: true });
   }
 }
 
@@ -336,26 +362,13 @@ export interface PtyHandle {
   detach: () => void;
 }
 
-// Channel id used on every host→broker connection. We open one
-// connection per terminal session, so a single channel per connection
-// is enough. (The broker's protocol supports per-connection
-// multiplexing if we ever want to share connections later.)
 const HOST_CHANNEL = 1;
 
 /**
  * Open a terminal session against the in-container broker.
  *
- * `sessionId` is the host-side, stable session id (from sessions.json).
- * The broker keys its session map by the same string, so a re-attach
- * after an app restart finds the live claude PTY by id.
- *
- * The flow:
- *   1. Resolve the workspace's broker socket from the container's name.
- *   2. Open the socket.
- *   3. Wrap the channel in a Duplex (brokerPtyStream) so HISTORY/OUTPUT
- *      listeners are wired BEFORE the broker has a chance to send any.
- *   4. ATTACH. If the broker says "no such session" we CREATE then ATTACH —
- *      covers both fresh-session and re-attach cases.
+ * Broker socket lives in the host state dir keyed by workspace id. We
+ * resolve the id from the container's `com.claude-fleet.id` label.
  */
 export async function attachPty(
   containerId: string,
@@ -363,22 +376,19 @@ export async function attachPty(
   cols: number,
   rows: number
 ): Promise<PtyHandle> {
-  // Find the workspace name so we know which socket to connect to.
-  // Container names always start with "/"; strip that.
   const c = docker.getContainer(containerId);
   const info = await c.inspect();
-  const workspaceName = info.Name.replace(/^\//, '');
+  const workspaceId = info.Config.Labels?.[ID_LABEL];
+  if (!workspaceId) {
+    throw new Error(`container ${containerId} is missing ${ID_LABEL} label`);
+  }
 
-  // Per-tab mapping: record this attach as "pending" so the
-  // JsonlWatcher's new-session hook can pair the broker session id
-  // with the claude UUID when the broker spawns a fresh claude. Cheap
-  // — module-scope map with a 30s TTL. See pendingAttaches.ts for the
-  // single-match disambiguation rule. Recorded BEFORE the actual
-  // attach so the timing window is honest about when the spawn could
-  // start (broker may dispatch immediately on receiving CREATE).
-  recordPendingAttach(workspaceName, sessionId);
+  // Per-tab mapping: record this attach as "pending" so the JsonlWatcher's
+  // new-session hook can pair the broker session id with the claude UUID
+  // when a fresh claude is spawned.
+  recordPendingAttach(workspaceId, sessionId);
 
-  const sockPath = workspaceBrokerSocket(workspaceName);
+  const sockPath = workspaceBrokerSocket(workspaceId);
   const client = new BrokerClient(sockPath);
   try {
     await client.ready();
@@ -390,30 +400,12 @@ export async function attachPty(
     );
   }
 
-  // CRITICAL: wire the stream BEFORE sending ATTACH.
-  //
-  // The broker replies to a successful ATTACH with two frames back-to-
-  // back on the same socket chunk: ATTACHED, then HISTORY (the ring
-  // buffer for the session, up to ~64 KiB of prior PTY output). The
-  // frame reader's `for (const frame of consume())` dispatches them in
-  // order — ATTACHED resolves `attachSession`'s waiter, HISTORY fires
-  // `client.emit('history', …)`. If `brokerPtyStream` hasn't wired its
-  // `onHistory` listener yet, that emit hits zero listeners and the
-  // body is silently dropped.
-  //
-  // Symptom: re-attaching to an existing session whose claude is
-  // currently idle at a prompt looks like a "blank terminal" — the
-  // ring buffer content that would have repainted the prompt is gone,
-  // and no live OUTPUT is coming because claude is waiting on input.
-  //
-  // Wiring `brokerPtyStream` here means the Duplex is ready to receive
-  // events for HOST_CHANNEL before any of them are emitted. Pushed
-  // data sits in the Duplex's internal buffer until ipc.ts wires its
-  // `'data'` listener; that's fine, Node streams handle this case.
+  // CRITICAL: wire the stream BEFORE sending ATTACH so HISTORY frames
+  // aren't dropped. See the long comment block on this function in
+  // earlier iterations — kept terse here since the constraint hasn't
+  // changed but the rest of the function got smaller.
   const stream = brokerPtyStream(client, HOST_CHANNEL);
 
-  // Try ATTACH first — if the session is alive (we're re-attaching),
-  // that's all we need. If it's missing, CREATE then ATTACH.
   let attachResp = await client.attachSession(sessionId, HOST_CHANNEL);
   if (!attachResp.ok && /no such session/i.test(attachResp.error ?? '')) {
     const createResp = await client.createSession(sessionId, cols, rows);
@@ -436,10 +428,6 @@ export async function attachPty(
       client.sendResize(HOST_CHANNEL, newCols, newRows);
     },
     detach: () => {
-      // Detach the channel cleanly so the session stays alive on the
-      // broker for a future re-attach; then close the socket.
-      // (Fire and forget — if the broker is unreachable there's
-      // nothing to do but tear down.)
       void client.detachChannel(HOST_CHANNEL).catch(() => undefined);
       stream.destroy();
       client.close();
@@ -449,19 +437,8 @@ export async function attachPty(
 
 /**
  * Read the last `tailLines` of the container's stdout/stderr. Used as
- * diagnostic context when attachPty fails — the broker logs every
- * accepted connection, dispatch error, and session lifecycle event, so
- * when "ATTACHED timed out" fires on the host we want to see what the
- * broker was actually doing. The runner image runs the broker as PID 1
- * (per docker/Dockerfile), so its stdout/stderr IS the container's.
- *
- * Returns the empty string if anything goes wrong — this is a
- * best-effort diagnostic; we never want it to mask the underlying
- * attach error or throw a different one.
- *
- * The container's `Tty: true` (per `createContainer` above) means the
- * logs API returns plain bytes (no docker-multiplex 8-byte headers),
- * so we can decode and split lines directly.
+ * diagnostic context when attachPty fails. Returns empty string on any
+ * error — never let this mask the underlying failure.
  */
 export async function getBrokerLogs(
   containerId: string,
