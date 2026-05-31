@@ -25,7 +25,7 @@ test('+ New workspace opens the modal', async () => {
     // on host Docker state.
     await mockMainIpc(app);
     await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
-    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
+    await expect(window.getByRole('tab', { name: 'New' })).toBeVisible();
   } finally {
     await app.close();
   }
@@ -36,7 +36,7 @@ test('Create button surfaces validation errors when required fields are empty', 
   try {
     await mockMainIpc(app);
     await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
-    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
+    await expect(window.getByRole('tab', { name: 'New' })).toBeVisible();
 
     // Name now has a pet-name placeholder default, so the remaining required
     // field is the workspace root — we still expect a "required" / "match"
@@ -59,7 +59,7 @@ test('Create flow (OAuth mode): default submit produces authMode=oauth and empty
     // Subdir + env left blank → OAuth-only workspace
 
     await window.getByRole('button', { name: 'Create & start' }).click();
-    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeHidden();
+    await expect(window.getByRole('tab', { name: 'New' })).toBeHidden();
 
     const calls = await getCalls(app);
     expect(calls.ensureImage).toHaveLength(1);
@@ -100,7 +100,7 @@ test('Create flow: missing workspace prompts to create it and mkdirps before wor
     await window.getByPlaceholder('/home/troy/repos').fill('/tmp/does-not-exist-yet');
 
     await window.getByRole('button', { name: 'Create & start' }).click();
-    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeHidden();
+    await expect(window.getByRole('tab', { name: 'New' })).toBeHidden();
 
     const confirmArgs = await window.evaluate(
       () => (window as unknown as { __confirmArgs: string[] }).__confirmArgs
@@ -129,7 +129,7 @@ test('Create flow: declining the missing-workspace confirm aborts without mkdirp
     await window.getByRole('button', { name: 'Create & start' }).click();
 
     // Modal stays open after user declines the create-folder confirmation
-    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
+    await expect(window.getByRole('tab', { name: 'New' })).toBeVisible();
 
     const calls = await getCalls(app);
     expect(calls.mkdirp).toEqual([]);
@@ -154,16 +154,16 @@ test('Create modal: workspace root persists across opens', async () => {
 
     // First open + submit
     await newWorkspace.click();
-    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
+    await expect(window.getByRole('tab', { name: 'New' })).toBeVisible();
     await expect(wsInput).toHaveValue('');
     await window.getByLabel('Workspace name').fill('persistence-test-1');
     await wsInput.fill('/tmp/persistence-test-A');
     await window.getByRole('button', { name: 'Create & start' }).click();
-    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeHidden();
+    await expect(window.getByRole('tab', { name: 'New' })).toBeHidden();
 
     // Second open — the workspace input should remember the previous value.
     await newWorkspace.click();
-    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
+    await expect(window.getByRole('tab', { name: 'New' })).toBeVisible();
     await expect(wsInput).toHaveValue('/tmp/persistence-test-A');
   } finally {
     await app.close();
@@ -175,7 +175,7 @@ test('Workspace kind selector: Local shows a "coming soon" error on submit', asy
   try {
     await mockMainIpc(app);
     await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
-    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
+    await expect(window.getByRole('tab', { name: 'New' })).toBeVisible();
 
     // Both kind radios are visible; Container is the default.
     const container = window.getByRole('radio', { name: /Container/ });
@@ -190,7 +190,7 @@ test('Workspace kind selector: Local shows a "coming soon" error on submit', asy
     await window.getByRole('button', { name: 'Create & start' }).click();
 
     await expect(window.locator('.error-text')).toContainText(/aren't implemented yet|coming soon/i);
-    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
+    await expect(window.getByRole('tab', { name: 'New' })).toBeVisible();
     const calls = await getCalls(app);
     expect(calls.create).toEqual([]);
   } finally {

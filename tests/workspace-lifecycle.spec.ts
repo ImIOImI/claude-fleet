@@ -84,7 +84,7 @@ test('Pause + Resume: clicking Resume in the overlay un-pauses and clears it', a
   }
 });
 
-test('Past workspaces: deleted workspace appears in modal and restart fires workspace:start', async () => {
+test('Saved tab: deleted workspace appears and Resume fires workspace:start', async () => {
   const { app, window } = await launch();
   try {
     await mockMainIpc(app, {
@@ -92,7 +92,7 @@ test('Past workspaces: deleted workspace appears in modal and restart fires work
         {
           name: 'ghost-fox',
           state: 'deleted',
-          workspaceRoot: '/tmp/ghost-fox',
+          workspaceRoot: '/tmp/ghost-fox'
         }
       ]
     });
@@ -102,19 +102,24 @@ test('Past workspaces: deleted workspace appears in modal and restart fires work
       .getByRole('button', { name: '+ New workspace' })
       .click();
 
-    // The "deleted" workspace isn't in the top strip but should appear in
-    // the modal's past-workspaces list.
-    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
-    const row = window.locator('.past-workspace-row', { hasText: 'ghost-fox' });
+    // The "deleted" workspace isn't in the top strip but appears in the
+    // modal's Saved tab (which is the default when saved workspaces exist).
+    await expect(window.getByRole('tab', { name: 'Saved' })).toHaveAttribute('aria-selected', 'true');
+    const row = window.locator('.saved-row', { hasText: 'ghost-fox' });
     await expect(row).toBeVisible();
     await expect(row.locator('.ws-state.deleted')).toBeVisible();
 
-    await row.click();
+    // Expand the row → the inline edit form unfolds with Resume as the
+    // primary action.
+    await row.locator('.saved-row-header').click();
+    const resume = row.getByRole('button', { name: 'Resume' });
+    await expect(resume).toBeVisible();
+    await resume.click();
 
-    // The modal closes after a successful restart, and workspace:start was
-    // invoked with the workspace name.
-    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeHidden();
+    // Modal closes; writeManifest + start both fire (helper defaults workspace id = name).
+    await expect(window.getByRole('tab', { name: 'New' })).toBeHidden();
     const calls = await getCalls(app);
+    expect(calls.writeManifest).toHaveLength(1);
     expect(calls.start).toContain('ghost-fox');
   } finally {
     await app.close();
@@ -230,7 +235,7 @@ test('Pause then Resume via the Close modal (opened from hamburger)', async () =
   }
 });
 
-test('Past workspaces: paused workspace renders the paused state in the past list', async () => {
+test('Saved tab: paused workspace renders the paused state', async () => {
   const { app, window } = await launch();
   try {
     await mockMainIpc(app, {
@@ -240,18 +245,17 @@ test('Past workspaces: paused workspace renders the paused state in the past lis
           containerId: 'frozen-fox-id',
           state: 'paused',
           status: 'Paused',
-          workspaceRoot: '/tmp/frozen-fox',
+          workspaceRoot: '/tmp/frozen-fox'
         }
       ]
     });
 
     await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
-    await expect(window.getByRole('heading', { name: 'New workspace' })).toBeVisible();
+    await expect(window.getByRole('tab', { name: 'Saved' })).toHaveAttribute('aria-selected', 'true');
 
-    const row = window.locator('.past-workspace-row', { hasText: 'frozen-fox' });
+    const row = window.locator('.saved-row', { hasText: 'frozen-fox' });
     await expect(row).toBeVisible();
     await expect(row.locator('.ws-state.paused')).toBeVisible();
-    await expect(row.locator('.dot.paused')).toBeVisible();
   } finally {
     await app.close();
   }

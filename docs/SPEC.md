@@ -18,7 +18,7 @@ It is a local-only operator console — not a remote orchestrator, not a multi-u
 
 - Run multiple Claude Code sessions in parallel, each fully isolated in its own workspace with its own host-directory bind-mount.
 - One window, one keyboard, one set of credentials — no juggling terminals or shells.
-- Workspaces persist across backend lifecycle. Each workspace has an immutable ULID `id` and a mutable display `name`; the host-side manifest at `<userData>/state/<id>/workspace.json` survives container deletion and rename. The new-workspace modal surfaces a "past workspaces" list (running / stopped / deleted) one click away from restart — restart starts the existing container (looked up by `com.claude-fleet.id` label) if present, or recreates from the saved spec, reusing the same ULID so state-dir + vault history stay attached.
+- Workspaces persist across backend lifecycle. Each workspace has an immutable ULID `id` and a mutable display `name`; the host-side manifest at `<userData>/state/<id>/workspace.json` survives container deletion and rename. The workspace modal's Saved tab lists every stopped / paused / deleted workspace; each row expands inline into an edit form so the user can adjust the spec before the Resume button starts the container (looked up by `com.claude-fleet.id` label) — or recreates from the saved spec, reusing the same ULID so state-dir + vault history stay attached.
 - Persistent **expert workspaces**: pause an entire workspace plus its session set, then resume later and re-attach to every session right where it was — same conversation, same in-memory context. Lets the user build domain-specific agents that load their architecture / documentation / codebase knowledge once, sleep when idle, and wake up ready to act (analyze a PR, answer a question, run a check) without re-priming the context every time.
 - Live terminal fidelity: cursor, colors, resize, paste, scrollback — all the things xterm.js gives you.
 - Structured observability layered on top of the raw terminal: per-session cost, token counts, tool calls, transcript history — read from the Claude transcript JSONL that the CLI already writes, not by scraping the terminal stream.
@@ -119,7 +119,7 @@ The renderer layout is a 3-row × 3-col shell:
   - **Observability pane** (right, ~320px): live view of the **active terminal tab**'s Claude session in the selected workspace. Shows session title (from `ai-title` event or first-user-message head), latest model, last-activity relative time, event count, prominent USD total, token totals (input / cache-create / cache-read / output), and top tools by call count. Empty state when the focused tab has no per-tab data yet. Per-tab resolution comes from the `broker_sessions` mapping table (§11 *Per-tab mapping*). `TerminalPane` bubbles its active tab id up via `onActiveTabChange`; App.tsx fetches `summaryForBrokerSession(workspaceId, activeTabId)` for the selected workspace and re-fetches on every push for that workspace. **No workspace fallback** — when the per-tab fetch returns null the pane shows its empty state directly, regardless of how the tab was added. The fallback was tried (loaded-from-inventory tabs → workspace summary, fresh tabs → empty) but produced two user-visible bugs: clicking `+` showed the previous tab's data via the fallback, and switching between two unmapped tabs showed the same workspace-summary content on both ("doesn't update"). Per-tab semantics are now honest: each tab shows its own data or empty, never inherits from a sibling tab.
 - **Bottom row** (`BottomBar`): static hint bar with key bindings and degraded-vault notice when applicable.
 
-Modals (`CreateWorkspaceModal`, `CloseWorkspaceModal`) are owned by `App` and rendered above the shell. The legacy `ProfilesDialog` is gone — per-workspace env-var management lives inside `CreateWorkspaceModal` itself (and, in the upcoming Actions PR, inside the Saved-tab inline edit form).
+Modals (`WorkspaceModal`, `CloseWorkspaceModal`) are owned by `App` and rendered above the shell. `WorkspaceModal` is a tabbed shell with Saved + New tabs (underlined-tab style). The body of each tab uses `WorkspaceForm` — the field-level form component owns its own state, validation, and footer; New tab renders it in `mode='create'`, expanded Saved-tab rows render it in `mode='edit'` with the workspace's persisted spec pre-filled. The legacy `ProfilesDialog` is gone — per-workspace env-var management lives inside `WorkspaceForm`.
 
 ## 6. IPC surface
 
@@ -133,6 +133,7 @@ Identity is the **ULID** `id` (immutable, 26 char Crockford base32). The user-fa
 - `workspace:create(input: WorkspaceCreatePayload)` → `Workspace` — create + start a runner workspace AND write its manifest to `<userData>/state/<id>/workspace.json`. The renderer mints the ULID and ships the full payload (id, name, description, labels, color, workspaceRoot, workspaceSubdir, kind, image, authMode, env: {plain, secretKeys}, resources). Secret env values land in the vault under `<id>:<key>` *before* this call so the main process can resolve them at container-start time.
 - `workspace:start(id)` → `Workspace | null` — start an existing (live, possibly stopped or paused) workspace by ULID (looked up via the `com.claude-fleet.id` label). Paused containers are `unpause`d; stopped containers are `start`ed. Returns null if no container is labelled with that id (caller should recreate from the saved manifest using the same id via the create flow).
 - `workspace:getManifest(id)` → `WorkspaceSpec | null` — read the persisted manifest.
+- `workspace:writeManifest(spec)` → `void` — update a workspace's manifest in place without touching the container. Validates name-uniqueness across the fleet (excluding the row's own id). Used by the Saved-tab Resume flow to apply edited fields before calling `workspace:start`. Container-level fields (env, image, authMode, resources) won't take effect until the container is recreated — Phase 2's restart-to-apply banner surfaces this.
 - `workspace:stop(containerId)` → `void` — stop with 5s grace; ignores 304/404.
 - `workspace:pause(containerId)` → `void` — `docker pause` (cgroups freezer). Idempotent: 409 (already paused) and 404 (container gone) are treated as no-ops.
 - `workspace:remove(containerId, opts?: { deleteState? })` → `void` — force-remove; if `deleteState`, also `rm -rf <userData>/state/<id>` (manifest, transcripts, broker socket). The renderer additionally calls `vault:deleteAllForWorkspace(id)` so secrets don't leak past the state dir.
@@ -379,11 +380,14 @@ Values are read from the renderer only on explicit `vault:getSecret`; during nor
 
 ### Create a workspace
 1. User clicks **+ New workspace** in the top strip.
-2. `<CreateWorkspaceModal>` opens. The top section is a "past workspaces" list pulled from `workspace:list` — sorted most-recently-used first, each row showing name, host path, state dot (running/stopped/deleted), and a relative timestamp. (The Saved + New tab layout from `docs/design/workspace-modal.md` is queued for the next PR; today this section is a flat list with a per-row "restart" action.)
-3. Clicking a past workspace calls `handleRestart(workspace)`:
-   - `workspace:start(id)` is tried first. If the container exists (live or stopped), it's started and selected.
-   - If `workspace:start` returns null (no live container), the renderer falls through to the create flow using the saved manifest values, **reusing the original ULID** so the state dir, vault secrets, and observability history all stay attached to the workspace.
-4. Otherwise the user fills the form:
+2. `<WorkspaceModal>` opens. Two tabs at top: **Saved** (count badge) + **New**, underlined-tab style. Default tab is Saved when at least one non-running workspace exists, else New.
+3. The Saved tab lists every stopped / paused / deleted workspace — sorted with a Variant-B label-filter search at the top: text input matches name + description (substring, case-insensitive), and a **Labels** dropdown opens a checkbox list of fleet-wide labels with usage counts. Selected labels filter the list as OR (any-match); active filters surface as removable pills above the list with an `N of M` count on the right. Each row shows a color identity bar, name, description, state badge, and last-used relative time. Clicking a row's header animates it open (CSS `grid-template-rows: 0fr → 1fr`, 320ms cubic-bezier; chevron rotates 180°; form contents fade-and-slide in over 220ms with 80ms delay) and renders `WorkspaceForm` inline in `mode='edit'` with the persisted spec pre-filled.
+4. **Resume** (primary in the expanded form) — `App.handleResume`:
+   - Writes any newly-typed secret env values via `vault:setSecret(id, key, value)`. Pre-existing secrets the user didn't touch are left alone.
+   - Calls `workspace:writeManifest(spec)` so renderer-visible edits (description, labels, color, name) take effect immediately even if the container needs a restart for env/image changes.
+   - Calls `workspace:start(id)`. If a container exists (state was stopped/paused/running with no label match), it's started. If null (state was deleted, container gone), the renderer falls through to the create flow with the **same id reused** so state-dir + vault history stay attached.
+5. **Cancel** in the expanded form collapses the row without applying changes.
+6. The **New** tab is the Create form. The user fills:
    - **Type** radio: Container (default — isolated Docker runner) or Local ("coming soon" — submit throws).
    - For Container, an **Image** input appears with the inline image-library picker beneath it (default = most-recently-used library entry, or the bundled runner).
    - **Name** with pet-name placeholder and a **color swatch** to the left (popover with 14 OKLCH preset hues + Random). The swatch is dashed when no hue has been picked — `WorkspaceTabStrip` falls back to a name-hash of the same palette in that case so the chip still gets a stable distinct color.
@@ -392,15 +396,15 @@ Values are read from the renderer only on explicit `vault:getSecret`; during nor
    - **Workspace root** with Browse… directory picker + last-used persistence via `localStorage`.
    - **Subdir inside workspace** (optional).
    - **Auth** radio: OAuth (default) / API key. API key is disabled until `ANTHROPIC_API_KEY` is added to the env list below — the radio's tooltip points there.
-   - **Env vars** disclosure: KV editor with a per-row `secret` toggle. Plain rows land in `manifest.env.plain`; secret rows ship to `vault:setSecret(<newId>, key, value)` and only their *key names* are listed in `manifest.env.secretKeys`. The secret toggle is forced off when `vault:available` returns false.
+   - **Env vars** disclosure: KV editor with a per-row `secret` toggle. Plain rows land in `manifest.env.plain`; secret rows ship to `vault:setSecret(<newId>, key, value)` and only their *key names* are listed in `manifest.env.secretKeys`. The secret toggle is forced off when `vault:available` returns false. Edit mode shows pre-existing secret keys with a "•••••" placeholder; the user can replace by typing or leave untouched and the keychain entry stays as-is.
    - **Resource caps** disclosure (Container only): CPUs + Memory MB. Blank → no Docker limit.
-5. **Create & start** submits. The renderer:
+7. **Create & start** submits. The renderer:
    1. Validates name (1–80 chars, no control characters, no name clash against the existing fleet) and env-var keys (`[A-Z_][A-Z0-9_]+`, no duplicates).
-   2. Mints a fresh ULID via the `ulid` package.
+   2. Mints a fresh ULID via the `ulid` package (in `WorkspaceModal.handleCreate`, before the form's payload reaches App).
    3. For each secret env row, calls `vault:setSecret(id, key, value)`. Failures are warned but don't block the create (the container will start with the secret resolving to `""`).
    4. Calls `workspace:ensureImage`, then `workspace:create` with the full payload (id, name, description, labels, color, workspaceRoot, workspaceSubdir, kind, image, authMode, env: { plain, secretKeys }, resources).
-6. Main creates the container (`docker create cf-<id>` with the `com.claude-fleet.id` label, env resolved through `vault.resolveEnv`), writes the manifest to `<userData>/state/<id>/workspace.json`, records the image in the library, and returns the `Workspace`.
-7. The top strip refreshes; the new workspace appears and is auto-selected.
+8. Main creates the container (`docker create cf-<id>` with the `com.claude-fleet.id` label, env resolved through `vault.resolveEnv`), writes the manifest to `<userData>/state/<id>/workspace.json`, records the image in the library, and returns the `Workspace`.
+9. The top strip refreshes; the new workspace appears and is auto-selected.
 
 ### Attach a terminal
 1. User selects a workspace in the top strip (only live workspaces appear there).
@@ -420,7 +424,7 @@ Each `pty:attach` runs `claude` fresh inside the container via `docker exec` —
 **Clickable links**: `term.registerLinkProvider` walks back to the first non-wrapped row, forward through `isWrapped` continuations, concatenates the rows, and matches URLs against the joined text — so a URL that soft-wraps across multiple rows is registered as a single link spanning all of them. Activation calls `window.open`, which `setWindowOpenHandler` routes through `shell.openExternal`.
 
 ### Manage per-workspace env vars
-The global Profiles modal is gone. Per-workspace env vars (both plain and secret) live in the Env-vars disclosure inside `CreateWorkspaceModal` for new workspaces. For existing workspaces the same editor is reused inside the Saved-tab inline edit form (PR 2 *Actions*). Underneath, the renderer calls `vault:setSecret(workspaceId, key, value)` / `vault:deleteSecret(workspaceId, key)` to mutate keychain values, and the manifest's `env.secretKeys` array tracks which keys exist for that workspace so the editor can surface them without ever reading a value.
+The global Profiles modal is gone. Per-workspace env vars (both plain and secret) live in the Env-vars disclosure inside `WorkspaceForm` — the same component renders for new workspaces in the New tab and for existing workspaces in the Saved tab's inline expand-edit form. Underneath, the renderer calls `vault:setSecret(workspaceId, key, value)` / `vault:deleteSecret(workspaceId, key)` to mutate keychain values, and the manifest's `env.secretKeys` array tracks which keys exist for that workspace so the editor can surface them without ever reading a value.
 
 ### Close a workspace
 1. User selects a workspace, then clicks **Close…** in the main-pane header.
@@ -433,7 +437,7 @@ The global Profiles modal is gone. Per-workspace env vars (both plain and secret
 
 ## 9. Security model
 
-- **Secret env-var values stay out of the renderer except at write time.** Per-workspace secrets are persisted via `vault:setSecret(workspaceId, key, value)`. After that, the renderer holds only the *list* of secret key names (via `vault:listKeys`); the main process resolves values directly from keytar when constructing the container env. The lone exception is the env-row in `CreateWorkspaceModal` — the renderer briefly holds the value the user just typed before it ships to `vault:setSecret`. There is no way around that.
+- **Secret env-var values stay out of the renderer except at write time.** Per-workspace secrets are persisted via `vault:setSecret(workspaceId, key, value)`. After that, the renderer holds only the *list* of secret key names (via `vault:listKeys`); the main process resolves values directly from keytar when constructing the container env. The lone exception is the env-row in `WorkspaceForm` — the renderer briefly holds the value the user just typed before it ships to `vault:setSecret`. There is no way around that.
 - **Renderer is isolated.** `contextIsolation: true`, `nodeIntegration: false`. No `require`, no `process`, no `fs` from renderer code.
 - **`sandbox: false`** because preload uses `ipcRenderer`. The renderer itself still has no Node access.
 - **Renderer cannot escape the IPC surface.** It can: list/create/start/stop/remove workspaces carrying the fleet label, list/get/set/delete per-workspace secrets, attach/detach a PTY. It cannot: shell out, read arbitrary files, touch other Docker containers, hit the network with Node APIs.
@@ -503,7 +507,8 @@ claude-fleet/
                 ├── TerminalSession.tsx    # one session: xterm + PTY + key bindings + session-ended overlay
                 ├── ObservabilityPane.tsx  # right sidebar: live session summary (cost + tokens + tools)
                 ├── BottomBar.tsx          # footer hint bar
-                ├── CreateWorkspaceModal.tsx  # form (color, description, labels, env, resources) + past-workspaces list
+                ├── WorkspaceModal.tsx     # tabbed shell: Saved (variant-B search + inline expand-edit) + New
+                ├── WorkspaceForm.tsx      # reusable form (color, description, labels, env, resources); mode-aware
                 └── CloseWorkspaceModal.tsx
 ```
 
