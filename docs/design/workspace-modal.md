@@ -208,8 +208,8 @@ Three PRs.
 | PR | Scope | Closes |
 |----|-------|--------|
 | 1. Foundation | id refactor (ULID + state-dir rename + container lookup by label) + `WorkspaceSpec` schema additions + vault rewrite to per-workspace keying + Create modal with all new fields + clean-slate migration | #27, #22 |
-| 2. Actions    | Edit modal (mode-aware reuse of Create form) + Clone action + Delete action + chip ⋮ menu additions + restart-to-apply banner + Saved-workspaces list rename + per-row search/Edit/Delete + Saved/New tabs | — |
-| 3. Shared OAuth | Bind-mount `<userData>/claude-shared/.credentials.json` into each OAuth workspace; first-login populates, subsequent skip browser flow | — |
+| 2. Actions    | Edit modal (mode-aware reuse of Create form) + Clone action + Delete action + chip ⋮ menu additions + restart-to-apply banner + Saved-workspaces list rename + per-row search/Edit/Delete + Saved/New tabs | #56 |
+| 3. Shared OAuth | Bind-mount `<userData>/claude-shared/.credentials.json` into each OAuth workspace; first-login populates, subsequent skip browser flow | #57 |
 
 PR 2 depends on PR 1. PR 3 is independent of both.
 
