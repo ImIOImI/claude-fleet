@@ -19,6 +19,12 @@ interface Props {
   onNewWorkspace: () => void;
   /** Open the CloseWorkspaceModal for the given workspace (full close UX). */
   onCloseWorkspace: (workspace: WorkspaceSummary) => void;
+  /** Open the EditWorkspaceModal for the given workspace. */
+  onEditWorkspace: (workspace: WorkspaceSummary) => void;
+  /** Open the WorkspaceModal in Clone mode with this workspace as the source. */
+  onCloneWorkspace: (workspace: WorkspaceSummary) => void;
+  /** Open the DeleteWorkspaceModal (purge) — distinct from Close (keep state dir). */
+  onDeleteWorkspace: (workspace: WorkspaceSummary) => void;
   /** Re-pull workspace:list — called after a chip-menu action mutates state. */
   onRefresh: () => void;
 }
@@ -76,6 +82,28 @@ function IconEject(): JSX.Element {
     </svg>
   );
 }
+function IconEdit(): JSX.Element {
+  return (
+    <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.2" aria-hidden="true">
+      <path d="M2 9 L9 2 L11 4 L4 11 L2 11 Z" />
+    </svg>
+  );
+}
+function IconCopy(): JSX.Element {
+  return (
+    <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.2" aria-hidden="true">
+      <rect x="3" y="3" width="7" height="8" rx="0.8" />
+      <path d="M2 8 V2 a1 1 0 0 1 1 -1 H8" />
+    </svg>
+  );
+}
+function IconTrash(): JSX.Element {
+  return (
+    <svg viewBox="0 0 12 12" width="11" height="11" fill="currentColor" aria-hidden="true">
+      <path d="M4 1 H8 V2 H11 V3 H1 V2 H4 Z M2 4 H10 L9 11 H3 Z" />
+    </svg>
+  );
+}
 
 /**
  * Compute the screen-coordinate position of the menu, anchored to the
@@ -104,6 +132,9 @@ export function WorkspaceTabStrip({
   onSelect,
   onNewWorkspace,
   onCloseWorkspace,
+  onEditWorkspace,
+  onCloneWorkspace,
+  onDeleteWorkspace,
   onRefresh
 }: Props) {
   // Single open menu at a time. `for` = workspace id; top/right are
@@ -280,6 +311,27 @@ export function WorkspaceTabStrip({
             <div className="ws-chip-menu-divider" />
             <button
               role="menuitem"
+              onClick={() => {
+                setMenu(null);
+                onEditWorkspace(menuWorkspace);
+              }}
+            >
+              <IconEdit />
+              <span>Edit…</span>
+            </button>
+            <button
+              role="menuitem"
+              onClick={() => {
+                setMenu(null);
+                onCloneWorkspace(menuWorkspace);
+              }}
+            >
+              <IconCopy />
+              <span>Clone…</span>
+            </button>
+            <div className="ws-chip-menu-divider" />
+            <button
+              role="menuitem"
               className="danger"
               onClick={() => {
                 setMenu(null);
@@ -288,6 +340,18 @@ export function WorkspaceTabStrip({
             >
               <IconEject />
               <span>Close…</span>
+            </button>
+            <button
+              role="menuitem"
+              className="danger"
+              onClick={() => {
+                setMenu(null);
+                onDeleteWorkspace(menuWorkspace);
+              }}
+              title="Permanently delete (purges state dir + keychain entries)"
+            >
+              <IconTrash />
+              <span>Delete…</span>
             </button>
           </div>,
           document.body

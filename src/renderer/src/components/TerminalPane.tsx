@@ -38,6 +38,16 @@ interface Props {
    * still reads visually correct.
    */
   summary: WorkspaceObservabilitySummary | null;
+  /**
+   * When true, render the restart-to-apply banner above the session-tab
+   * strip. Set by App.tsx after an EditWorkspaceModal save changes any
+   * container-level field (env, image, authMode, resources) on a running
+   * workspace. Render-only edits (name, description, labels, color)
+   * never trigger the banner.
+   */
+  restartBanner?: boolean;
+  onRestartFromBanner?: () => void;
+  onDismissBanner?: () => void;
   onResume: () => void;
   /**
    * Reports the active tab's broker session id whenever it changes
@@ -94,6 +104,9 @@ export function TerminalPane({
   paused,
   visible,
   summary,
+  restartBanner,
+  onRestartFromBanner,
+  onDismissBanner,
   onResume,
   onActiveTabChange
 }: Props) {
@@ -254,6 +267,29 @@ export function TerminalPane({
       }}
       aria-hidden={!visible}
     >
+      {restartBanner && (
+        <div className="restart-banner" role="status" aria-live="polite">
+          <span className="restart-banner-text">
+            Changes apply on next start.
+          </span>
+          <button
+            type="button"
+            className="btn primary restart-banner-btn"
+            onClick={onRestartFromBanner}
+          >
+            Restart now
+          </button>
+          <button
+            type="button"
+            className="restart-banner-dismiss"
+            onClick={onDismissBanner}
+            aria-label="Dismiss"
+            title="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+      )}
       <div className="session-tab-strip" role="tablist" aria-label="Terminal sessions">
         {sessions.map((s) => {
           const ended = endedIds.has(s.id);

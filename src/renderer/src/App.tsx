@@ -4,9 +4,11 @@ import { SessionsPane } from './components/SessionsPane';
 import { ObservabilityPane } from './components/ObservabilityPane';
 import { TerminalPane } from './components/TerminalPane';
 import { BottomBar } from './components/BottomBar';
-import { WorkspaceModal } from './components/WorkspaceModal';
+import { WorkspaceModal, suggestCloneName } from './components/WorkspaceModal';
 import type { WorkspaceFormSubmit } from './components/WorkspaceForm';
 import { CloseWorkspaceModal } from './components/CloseWorkspaceModal';
+import { DeleteWorkspaceModal } from './components/DeleteWorkspaceModal';
+import { EditWorkspaceModal, containerLevelChanged } from './components/EditWorkspaceModal';
 import type { WorkspaceObservabilitySummary } from '../../preload';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
@@ -77,6 +79,17 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [closeTargetId, setCloseTargetId] = useState<string | null>(null);
+  const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
+  const [editTargetId, setEditTargetId] = useState<string | null>(null);
+  // When the user clicks Clone (Saved-row footer, chip menu, or
+  // EditWorkspaceModal), the source spec lands here and the modal
+  // reopens on the New tab pre-filled. Cleared when modal closes.
+  const [cloneSource, setCloneSource] =
+    useState<Partial<WorkspaceFormSubmit & { id: string }> | null>(null);
+  // Workspaces whose container-level fields were just edited while
+  // running. TerminalPane reads this map to render the
+  // restart-to-apply banner; clearing happens on Restart or Dismiss.
+  const [restartBannerIds, setRestartBannerIds] = useState<Set<string>>(new Set());
   const [summaries, setSummaries] = useState<
     Record<string, WorkspaceObservabilitySummary | null>
   >({});
@@ -341,6 +354,112 @@ export function App() {
     refresh();
   };
 
+  /**
+   * Apply edits to a live workspace's manifest. Returns true when any
+   * container-level field changed (caller flips the restart-to-apply
+   * banner in TerminalPane).
+   */
+  const handleEditSave = async (submit: WorkspaceFormSubmit): Promise<boolean> => {
+    const id = submit.id;
+    if (!id) throw new Error('handleEditSave requires submit.id');
+    const before = workspaces.find((w) => w.id === id);
+    if (!before) throw new Error(`Workspace ${id} not found`);
+
+    await persistSecrets(id, submit);
+    await window.api.workspace.writeManifest({
+      id,
+      name: submit.name,
+      description: submit.description,
+      labels: submit.labels,
+      color: submit.color,
+      workspaceRoot: submit.workspaceRoot,
+      workspaceSubdir: submit.workspaceSubdir,
+      kind: submit.kind,
+      image: submit.image,
+      authMode: submit.authMode,
+      env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
+      resources: submit.resources,
+      createdAt: before.createdAt,
+      lastUsedAt: Date.now()
+    });
+
+    const containerEdit = containerLevelChanged(before, submit);
+    if (containerEdit && (before.state === 'running' || before.state === 'paused')) {
+      setRestartBannerIds((prev) => {
+        if (prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.add(id);
+        return next;
+      });
+    }
+    refresh();
+    return containerEdit;
+  };
+
+  /**
+   * Open the modal in Clone mode pre-filled with the source's spec.
+   * Strips the source's id, suggests `<source>-N` for the name, and
+   * clears the color so a fresh hue is picked.
+   */
+  const openCloneFrom = (source: WorkspaceFormSubmit | WorkspaceSummary): void => {
+    const isSummary = 'state' in source;
+    const baseName = source.name;
+    const plain = isSummary ? source.env.plain : source.plainEnv;
+    const secretKeys = isSummary ? source.env.secretKeys : source.secretKeys;
+    const clone: Partial<WorkspaceFormSubmit & { id: string }> = {
+      // No id — WorkspaceModal.handleCreate mints a fresh ULID on submit.
+      name: suggestCloneName(baseName, workspaces),
+      description: source.description,
+      labels: source.labels,
+      color: undefined, // fresh hue
+      workspaceRoot: source.workspaceRoot,
+      workspaceSubdir: source.workspaceSubdir,
+      kind: source.kind,
+      image: source.image,
+      authMode: source.authMode,
+      plainEnv: { ...plain },
+      // Don't carry secret *values* across — they live in the source's
+      // vault entry, not in the clone's. The user re-enters them in the
+      // env editor before submitting. (Showing pre-existing secret keys
+      // would be misleading: those keys exist for the *source* id.)
+      secretKeys: [...secretKeys],
+      secrets: {},
+      resources: source.resources
+    };
+    setCloneSource(clone);
+    setEditTargetId(null); // close edit modal if open
+    setCreateOpen(true);
+  };
+
+  const restartFromBanner = async (workspaceId: string, containerId: string): Promise<void> => {
+    try {
+      await window.api.workspace.stop(containerId);
+    } catch (err) {
+      console.warn('workspace.stop during restart-banner failed:', err);
+    }
+    try {
+      await window.api.workspace.start(workspaceId);
+    } catch (err) {
+      console.warn('workspace.start during restart-banner failed:', err);
+    }
+    setRestartBannerIds((prev) => {
+      if (!prev.has(workspaceId)) return prev;
+      const next = new Set(prev);
+      next.delete(workspaceId);
+      return next;
+    });
+    refresh();
+  };
+
+  const dismissBanner = (workspaceId: string): void => {
+    setRestartBannerIds((prev) => {
+      if (!prev.has(workspaceId)) return prev;
+      const next = new Set(prev);
+      next.delete(workspaceId);
+      return next;
+    });
+  };
+
   return (
     <div className="app">
       <WorkspaceTabStrip
@@ -352,6 +471,9 @@ export function App() {
         onSelect={setSelectedId}
         onNewWorkspace={() => setCreateOpen(true)}
         onCloseWorkspace={(w) => setCloseTargetId(w.id)}
+        onEditWorkspace={(w) => setEditTargetId(w.id)}
+        onCloneWorkspace={(w) => openCloneFrom(w)}
+        onDeleteWorkspace={(w) => setDeleteTargetId(w.id)}
         onRefresh={refresh}
       />
 
@@ -382,6 +504,9 @@ export function App() {
                   containerId={w.containerId!}
                   paused={w.state === 'paused'}
                   summary={summaries[w.id] ?? null}
+                  restartBanner={restartBannerIds.has(w.id)}
+                  onRestartFromBanner={() => restartFromBanner(w.id, w.containerId!)}
+                  onDismissBanner={() => dismissBanner(w.id)}
                   onResume={async () => {
                     await window.api.workspace.start(w.id);
                     refresh();
@@ -410,10 +535,53 @@ export function App() {
         open={createOpen}
         workspaces={workspaces}
         vaultAvailable={vaultAvailable}
-        onClose={() => setCreateOpen(false)}
-        onCreate={handleCreate}
+        onClose={() => {
+          setCreateOpen(false);
+          setCloneSource(null);
+        }}
+        onCreate={async (submit, setStatus) => {
+          await handleCreate(submit, setStatus);
+          setCloneSource(null);
+        }}
         onResume={handleResume}
+        onClone={async (submit) => openCloneFrom(submit)}
+        onDelete={(w) => setDeleteTargetId(w.id)}
+        initialNewTabValues={cloneSource}
       />
+      {(() => {
+        if (!editTargetId) return null;
+        const target = workspaces.find((w) => w.id === editTargetId);
+        if (!target) return null;
+        return (
+          <EditWorkspaceModal
+            workspace={target}
+            workspaces={workspaces}
+            vaultAvailable={vaultAvailable}
+            onClose={() => setEditTargetId(null)}
+            onSave={handleEditSave}
+            onClone={async (submit) => openCloneFrom(submit)}
+            onDeleted={() => {
+              if (selectedId === target.id) setSelectedId(null);
+              refresh();
+            }}
+          />
+        );
+      })()}
+      {(() => {
+        if (!deleteTargetId) return null;
+        const target = workspaces.find((w) => w.id === deleteTargetId);
+        if (!target) return null;
+        return (
+          <DeleteWorkspaceModal
+            workspace={target}
+            onClose={() => setDeleteTargetId(null)}
+            onDeleted={() => {
+              if (selectedId === target.id) setSelectedId(null);
+              refresh();
+            }}
+          />
+        );
+      })()}
       {(() => {
         if (!closeTargetId) return null;
         const target = workspaces.find((w) => w.id === closeTargetId);

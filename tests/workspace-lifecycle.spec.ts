@@ -92,7 +92,8 @@ test('Saved tab: deleted workspace appears and Resume fires workspace:start', as
         {
           name: 'ghost-fox',
           state: 'deleted',
-          workspaceRoot: '/tmp/ghost-fox'
+          workspaceRoot: '/tmp/ghost-fox',
+          image: 'ghcr.io/imioimi/claude-fleet/runner:latest'
         }
       ]
     });

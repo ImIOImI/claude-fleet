@@ -1629,3 +1629,39 @@ body {
   transform: translateY(0);
   padding: 4px 14px 14px;
 }
+
+/* ── PR-B: Clone/Delete footer, restart-banner ───────────────────────── */
+
+.modal-footer-spacer { flex: 1; }
+
+.btn.danger {
+  color: var(--state-error, #ef4d4d);
+  border-color: color-mix(in oklab, var(--state-error, #ef4d4d) 35%, var(--border, #2a2f38));
+}
+.btn.danger:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--state-error, #ef4d4d) 14%, transparent);
+}
+.btn.danger svg { color: var(--state-error, #ef4d4d); }
+
+.restart-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  background: color-mix(in oklab, var(--accent, #5fa1de) 14%, transparent);
+  border-bottom: 1px solid color-mix(in oklab, var(--accent, #5fa1de) 30%, transparent);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+.restart-banner-text { flex: 1; }
+.restart-banner-btn { padding: 4px 12px; font-size: 12px; }
+.restart-banner-dismiss {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+.restart-banner-dismiss:hover { color: var(--text-primary); }
