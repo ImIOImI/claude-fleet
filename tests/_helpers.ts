@@ -151,9 +151,14 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       create: [],
       list: [],
       start: [],
+      stop: [],
+      pause: [],
+      remove: [],
       writeManifest: [],
       isDirectory: [],
-      mkdirp: []
+      mkdirp: [],
+      vaultSetSecret: [],
+      vaultDeleteAllForWorkspace: []
     };
 
     const channels = [
@@ -161,12 +166,21 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       'workspace:create',
       'workspace:list',
       'workspace:start',
+      'workspace:stop',
+      'workspace:pause',
+      'workspace:remove',
       'workspace:ping',
       'workspace:writeManifest',
       'images:list',
       'images:remove',
       'fs:isDirectory',
       'fs:mkdirp',
+      'vault:available',
+      'vault:listKeys',
+      'vault:getSecret',
+      'vault:setSecret',
+      'vault:deleteSecret',
+      'vault:deleteAllForWorkspace',
       'observability:summaryForWorkspace',
       'observability:summaryForBrokerSession',
       'observability:getCost',
@@ -241,6 +255,33 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
     ipcMain.handle('workspace:writeManifest', async (_e, spec: Record<string, unknown>) => {
       g.__calls.writeManifest.push(spec);
     });
+    ipcMain.handle('workspace:stop', async (_e, containerId: string) => {
+      g.__calls.stop.push(containerId);
+    });
+    ipcMain.handle('workspace:pause', async (_e, containerId: string) => {
+      g.__calls.pause.push(containerId);
+    });
+    ipcMain.handle(
+      'workspace:remove',
+      async (_e, containerId: string, removeOpts: { deleteState?: boolean } | undefined) => {
+        g.__calls.remove.push({ containerId, ...(removeOpts ?? {}) });
+      }
+    );
+    // Vault mocks — record but no persistence. Tests assert against the
+    // call list to verify Delete and secret-write flows.
+    ipcMain.handle('vault:available', () => true);
+    ipcMain.handle('vault:listKeys', (_e, _id: string) => []);
+    ipcMain.handle('vault:getSecret', (_e, _id: string, _key: string) => null);
+    ipcMain.handle('vault:setSecret', async (_e, id: string, key: string, value: string) => {
+      g.__calls.vaultSetSecret.push({ id, key, value });
+    });
+    ipcMain.handle('vault:deleteSecret', async (_e, _id: string, _key: string) => undefined);
+    ipcMain.handle(
+      'vault:deleteAllForWorkspace',
+      async (_e, id: string) => {
+        g.__calls.vaultDeleteAllForWorkspace.push(id);
+      }
+    );
     ipcMain.handle('fs:isDirectory', async (_e, p: string) => {
       g.__calls.isDirectory.push(p);
       return opts.isDirectoryReturns ?? true;

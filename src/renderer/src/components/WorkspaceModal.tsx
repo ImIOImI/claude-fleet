@@ -27,6 +27,37 @@ interface Props {
   onClose: () => void;
   onCreate: (submit: WorkspaceFormSubmit, setStatus: (msg: string | null) => void) => Promise<void>;
   onResume: (submit: WorkspaceFormSubmit, setStatus: (msg: string | null) => void) => Promise<void>;
+  /** Clone action from an expanded Saved row — opens the modal again with the New tab pre-filled. */
+  onClone: (source: WorkspaceFormSubmit) => Promise<void>;
+  /** Delete action from an expanded Saved row — caller shows a confirmation modal. */
+  onDelete: (workspace: WorkspaceSummary) => void;
+  /**
+   * Pre-fill the New tab with these values (used for Clone). Forces the
+   * default tab to 'new' and rebuilds the form's state from the values
+   * each time the modal opens with a non-null source.
+   */
+  initialNewTabValues?: Partial<WorkspaceFormSubmit & { id: string }> | null;
+}
+
+/**
+ * Auto-increment a base name to the first unused `<base>-N` (N ≥ 2)
+ * against the current workspace list. Stops at N = 999 to keep the
+ * loop bounded — in practice no fleet hits that.
+ */
+export function suggestCloneName(base: string, workspaces: WorkspaceSummary[]): string {
+  const taken = new Set(
+    workspaces
+      .filter((w) => w.state !== 'deleted')
+      .map((w) => w.name)
+  );
+  // Strip any existing `-N` suffix so cloning `foo-2` suggests `foo-3`
+  // (rather than `foo-2-2`).
+  const trimmed = base.replace(/-\d+$/, '');
+  for (let n = 2; n < 1000; n++) {
+    const candidate = `${trimmed}-${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  return `${trimmed}-${Date.now()}`;
 }
 
 type TabKey = 'saved' | 'new';
@@ -50,7 +81,10 @@ export function WorkspaceModal({
   vaultAvailable,
   onClose,
   onCreate,
-  onResume
+  onResume,
+  onClone,
+  onDelete,
+  initialNewTabValues
 }: Props) {
   // Saved tab shows non-running workspaces (stopped + paused + deleted).
   // Running workspaces are edited from the chip ⋮ menu in PR-B.
@@ -59,17 +93,21 @@ export function WorkspaceModal({
     [workspaces]
   );
 
-  // Default tab: Saved when there are saved workspaces, else New.
-  // Re-pick the default each time the modal opens so an emptied-out Saved
-  // tab doesn't keep showing as the default after every row was started.
-  const [tab, setTab] = useState<TabKey>(saved.length > 0 ? 'saved' : 'new');
+  // Default tab: New when a clone source is provided, Saved when there
+  // are saved workspaces, else New. Re-pick each time the modal opens so
+  // an emptied-out Saved tab doesn't stick as the default after every
+  // row was started.
+  const defaultTab = (): TabKey =>
+    initialNewTabValues ? 'new' : saved.length > 0 ? 'saved' : 'new';
+  const [tab, setTab] = useState<TabKey>(defaultTab());
   const lastOpen = useRef(open);
   useEffect(() => {
     if (open && !lastOpen.current) {
-      setTab(saved.length > 0 ? 'saved' : 'new');
+      setTab(defaultTab());
     }
     lastOpen.current = open;
-  }, [open, saved.length]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, saved.length, initialNewTabValues]);
 
   // Search state — Saved tab only.
   const [searchText, setSearchText] = useState('');
@@ -308,6 +346,22 @@ export function WorkspaceModal({
                                 vaultAvailable={vaultAvailable}
                                 onSubmit={handleResume}
                                 onCancel={() => setExpandedId(null)}
+                                onClone={async (submit) => {
+                                  // Parent updates `initialNewTabValues`;
+                                  // we collapse the row and switch tabs so
+                                  // the user lands on the pre-filled form.
+                                  // Form re-keys via the `key` prop in the
+                                  // New-tab render below.
+                                  await onClone(submit);
+                                  setExpandedId(null);
+                                  setTab('new');
+                                }}
+                                onDelete={async () => {
+                                  onDelete(w);
+                                  // Close modal so the confirmation modal
+                                  // takes the foreground.
+                                  onClose();
+                                }}
                               />
                             )}
                           </div>
@@ -322,7 +376,11 @@ export function WorkspaceModal({
         ) : (
           <div className="new-tab" role="tabpanel">
             <WorkspaceForm
+              // Re-key the form when a new clone source lands so the
+              // form's internal state resets to the new initial values.
+              key={initialNewTabValues ? `clone-${initialNewTabValues.id ?? initialNewTabValues.name}` : 'fresh'}
               mode="create"
+              initial={initialNewTabValues ?? undefined}
               workspaces={workspaces}
               vaultAvailable={vaultAvailable}
               onSubmit={handleCreate}

@@ -111,7 +111,22 @@ interface Props {
   vaultAvailable: boolean | null;
   onSubmit: (values: WorkspaceFormSubmit, setStatus: (s: string | null) => void) => Promise<void>;
   onCancel: () => void;
-  /** Optional slot for extra footer buttons (Clone / Delete in PR-B edit mode). */
+  /**
+   * Optional Clone action — only meaningful in `mode='edit'`. When set,
+   * a Clone button appears between Cancel and Resume in the footer; on
+   * click the form validates + bubbles the current values via this
+   * callback (the parent re-opens the modal in clone-prefilled state).
+   */
+  onClone?: (values: WorkspaceFormSubmit) => Promise<void>;
+  /**
+   * Optional Delete action — only meaningful in `mode='edit'`. When set,
+   * a Delete button appears on the far left of the footer. The parent
+   * is responsible for confirming + purging state.
+   */
+  onDelete?: (id: string) => Promise<void>;
+  /** Override the primary button label (e.g. "Save" instead of "Resume"). */
+  primaryLabel?: string;
+  /** Optional slot for extra footer buttons. */
   extraFooterLeft?: ReactNode;
 }
 
@@ -122,6 +137,9 @@ export function WorkspaceForm({
   vaultAvailable,
   onSubmit,
   onCancel,
+  onClone,
+  onDelete,
+  primaryLabel: primaryLabelOverride,
   extraFooterLeft
 }: Props) {
   const [name, setName] = useState(initial?.name ?? '');
@@ -167,11 +185,14 @@ export function WorkspaceForm({
   const [error, setError] = useState<string | null>(null);
   const [namePlaceholder] = useState<string>(petName);
 
-  // Fetch image library + default the image input on mount.
+  // Fetch image library on mount. Auto-default the image input only in
+  // create mode — edit mode preserves whatever the manifest had, including
+  // an empty value, so containerLevelChanged doesn't see a spurious
+  // diff when the user opens-and-saves an edit with no image change.
   useEffect(() => {
     window.api.images.list().then((entries: ImageEntry[]) => {
       setLibraryImages(entries);
-      if (!image) {
+      if (mode === 'create' && !image) {
         const recent = [...entries].sort((a, b) => b.lastUsedAt - a.lastUsedAt)[0];
         setImage(recent?.ref ?? DEFAULT_RUNNER_IMAGE);
       }
@@ -225,30 +246,40 @@ export function WorkspaceForm({
   const removeEnvRow = (i: number) =>
     setEnvRows((prev) => prev.filter((_, idx) => idx !== i));
 
-  const submit = async () => {
-    if (busy) return;
+  /**
+   * Validate the form and assemble a `WorkspaceFormSubmit`. Returns null
+   * when validation failed (the error state is set in that case).
+   * Shared by `submit` (primary action) and `clone` (Clone button).
+   * `skipNameClash` lets the Clone path defer the name-uniqueness check
+   * to the parent's auto-increment of `<source>-2`.
+   */
+  const buildPayload = (
+    opts: { skipNameClash?: boolean } = {}
+  ): WorkspaceFormSubmit | null => {
     if (kind === 'local') {
       setError("Local workspaces aren't implemented yet. Pick 'Container' for now.");
-      return;
+      return null;
     }
     if (!nameOk) {
       setError('Workspace name must be 1–80 chars with no control characters.');
-      return;
+      return null;
     }
-    const nameClash = workspaces.some(
-      (w) => w.name === effectiveName && w.state !== 'deleted' && w.id !== initial?.id
-    );
-    if (nameClash) {
-      setError(`A workspace named "${effectiveName}" already exists.`);
-      return;
+    if (!opts.skipNameClash) {
+      const nameClash = workspaces.some(
+        (w) => w.name === effectiveName && w.state !== 'deleted' && w.id !== initial?.id
+      );
+      if (nameClash) {
+        setError(`A workspace named "${effectiveName}" already exists.`);
+        return null;
+      }
     }
     if (!workspaceRoot.trim()) {
       setError('Workspace root is required.');
-      return;
+      return null;
     }
     if (kind === 'container' && !image.trim()) {
       setError('Image reference is required for a container workspace.');
-      return;
+      return null;
     }
 
     const seen = new Set<string>();
@@ -260,11 +291,11 @@ export function WorkspaceForm({
       if (!k) continue;
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) {
         setError(`Invalid env var name "${k}" — must match [A-Z_][A-Z0-9_]+ (POSIX style).`);
-        return;
+        return null;
       }
       if (seen.has(k)) {
         setError(`Duplicate env var "${k}".`);
-        return;
+        return null;
       }
       seen.add(k);
       if (row.secret) {
@@ -273,7 +304,7 @@ export function WorkspaceForm({
             `Secret env "${k}" requires the OS keychain, which isn't reachable. ` +
               `Switch the row to plain or install libsecret.`
           );
-          return;
+          return null;
         }
         secretKeys.push(k);
         // preExisting + empty value = user didn't change it; leave the
@@ -294,12 +325,34 @@ export function WorkspaceForm({
     if (Number.isFinite(cpusNum) && cpusNum > 0) resources = { ...(resources ?? {}), cpus: cpusNum };
     if (Number.isFinite(memNum) && memNum > 0) resources = { ...(resources ?? {}), memoryMb: memNum };
 
+    return {
+      id: initial?.id,
+      name: effectiveName,
+      description: description.trim() || undefined,
+      labels,
+      color: hue !== null ? { hue } : undefined,
+      workspaceRoot: workspaceRoot.trim(),
+      workspaceSubdir: workspaceSubdir.trim(),
+      kind,
+      image: kind === 'container' ? image.trim() : undefined,
+      authMode,
+      plainEnv,
+      secretKeys,
+      secrets,
+      resources
+    };
+  };
+
+  const submit = async () => {
+    if (busy) return;
+    const payload = buildPayload();
+    if (!payload) return;
     setBusy(true);
     setStatus(null);
     setError(null);
     try {
       if (mode === 'create') {
-        const ws = workspaceRoot.trim();
+        const ws = payload.workspaceRoot;
         const exists = await window.api.fs.isDirectory(ws);
         if (!exists) {
           const ok = window.confirm(`Workspace folder "${ws}" does not exist. Create it?`);
@@ -309,26 +362,42 @@ export function WorkspaceForm({
         }
         saveLastWorkspaceRoot(ws);
       }
+      await onSubmit(payload, setStatus);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+      setStatus(null);
+    }
+  };
 
-      await onSubmit(
-        {
-          id: initial?.id,
-          name: effectiveName,
-          description: description.trim() || undefined,
-          labels,
-          color: hue !== null ? { hue } : undefined,
-          workspaceRoot: workspaceRoot.trim(),
-          workspaceSubdir: workspaceSubdir.trim(),
-          kind,
-          image: kind === 'container' ? image.trim() : undefined,
-          authMode,
-          plainEnv,
-          secretKeys,
-          secrets,
-          resources
-        },
-        setStatus
-      );
+  const clone = async () => {
+    if (busy || !onClone) return;
+    // Clone defers the name-clash check to the parent's auto-incrementor
+    // (`<source>-2`, `-3`, …) — the user's current name will collide
+    // with the source workspace until the suffix lands.
+    const payload = buildPayload({ skipNameClash: true });
+    if (!payload) return;
+    setBusy(true);
+    setStatus(null);
+    setError(null);
+    try {
+      await onClone(payload);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+      setStatus(null);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (busy || !onDelete || !initial?.id) return;
+    setBusy(true);
+    setStatus(null);
+    setError(null);
+    try {
+      await onDelete(initial.id);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -338,7 +407,7 @@ export function WorkspaceForm({
   };
 
   const swatchStyle = hue !== null ? { background: `oklch(72% 0.14 ${hue})` } : undefined;
-  const primaryLabel = mode === 'create' ? 'Create & start' : 'Resume';
+  const primaryLabel = primaryLabelOverride ?? (mode === 'create' ? 'Create & start' : 'Resume');
 
   return (
     <div className="workspace-form">
@@ -665,9 +734,32 @@ export function WorkspaceForm({
       {error && <div className="form-hint error-text">{error}</div>}
       <div className="modal-footer">
         {extraFooterLeft}
+        {mode === 'edit' && onDelete && initial?.id && (
+          <button
+            type="button"
+            className="btn danger"
+            onClick={handleDelete}
+            disabled={busy}
+            title="Permanently delete this workspace"
+          >
+            <IconTrash /> Delete
+          </button>
+        )}
+        <span className="modal-footer-spacer" />
         <button className="btn" onClick={onCancel} disabled={busy}>
           Cancel
         </button>
+        {mode === 'edit' && onClone && (
+          <button
+            type="button"
+            className="btn"
+            onClick={clone}
+            disabled={busy}
+            title="Clone this workspace into a new one"
+          >
+            <IconCopy /> Clone
+          </button>
+        )}
         <button className="btn primary" onClick={submit} disabled={busy}>
           {busy ? 'Working…' : primaryLabel}
         </button>
@@ -793,5 +885,22 @@ function ImagePicker({ library, filter, onPick, busy }: ImagePickerProps) {
         </ul>
       )}
     </div>
+  );
+}
+
+function IconTrash(): JSX.Element {
+  return (
+    <svg viewBox="0 0 12 12" width="11" height="11" fill="currentColor" aria-hidden="true">
+      <path d="M4 1 H8 V2 H11 V3 H1 V2 H4 Z M2 4 H10 L9 11 H3 Z" />
+    </svg>
+  );
+}
+
+function IconCopy(): JSX.Element {
+  return (
+    <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.2" aria-hidden="true">
+      <rect x="3" y="3" width="7" height="8" rx="0.8" />
+      <path d="M2 8 V2 a1 1 0 0 1 1 -1 H8" />
+    </svg>
   );
 }

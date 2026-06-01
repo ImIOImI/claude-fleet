@@ -4,6 +4,7 @@
 import { test, expect } from '@playwright/test';
 import { launch, mockMainIpc, getCalls } from './_helpers.js';
 
+const RUNNER = 'ghcr.io/imioimi/claude-fleet/runner:latest';
 const SAVED = [
   {
     id: '01TESTHAPPYLLAMA0000000000',
@@ -11,7 +12,8 @@ const SAVED = [
     description: 'API server work',
     labels: ['dev', 'api'],
     state: 'stopped' as const,
-    workspaceRoot: '/tmp/happy-llama'
+    workspaceRoot: '/tmp/happy-llama',
+    image: RUNNER
   },
   {
     id: '01TESTCALMOTTER000000000000',
@@ -19,7 +21,8 @@ const SAVED = [
     description: 'Data pipeline',
     labels: ['data'],
     state: 'stopped' as const,
-    workspaceRoot: '/tmp/calm-otter'
+    workspaceRoot: '/tmp/calm-otter',
+    image: RUNNER
   },
   {
     id: '01TESTBOLDFOX00000000000000',
@@ -27,7 +30,8 @@ const SAVED = [
     description: 'Frontend work',
     labels: ['dev', 'frontend'],
     state: 'stopped' as const,
-    workspaceRoot: '/tmp/bold-fox'
+    workspaceRoot: '/tmp/bold-fox',
+    image: RUNNER
   }
 ];
 

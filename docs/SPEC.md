@@ -119,7 +119,12 @@ The renderer layout is a 3-row × 3-col shell:
   - **Observability pane** (right, ~320px): live view of the **active terminal tab**'s Claude session in the selected workspace. Shows session title (from `ai-title` event or first-user-message head), latest model, last-activity relative time, event count, prominent USD total, token totals (input / cache-create / cache-read / output), and top tools by call count. Empty state when the focused tab has no per-tab data yet. Per-tab resolution comes from the `broker_sessions` mapping table (§11 *Per-tab mapping*). `TerminalPane` bubbles its active tab id up via `onActiveTabChange`; App.tsx fetches `summaryForBrokerSession(workspaceId, activeTabId)` for the selected workspace and re-fetches on every push for that workspace. **No workspace fallback** — when the per-tab fetch returns null the pane shows its empty state directly, regardless of how the tab was added. The fallback was tried (loaded-from-inventory tabs → workspace summary, fresh tabs → empty) but produced two user-visible bugs: clicking `+` showed the previous tab's data via the fallback, and switching between two unmapped tabs showed the same workspace-summary content on both ("doesn't update"). Per-tab semantics are now honest: each tab shows its own data or empty, never inherits from a sibling tab.
 - **Bottom row** (`BottomBar`): static hint bar with key bindings and degraded-vault notice when applicable.
 
-Modals (`WorkspaceModal`, `CloseWorkspaceModal`) are owned by `App` and rendered above the shell. `WorkspaceModal` is a tabbed shell with Saved + New tabs (underlined-tab style). The body of each tab uses `WorkspaceForm` — the field-level form component owns its own state, validation, and footer; New tab renders it in `mode='create'`, expanded Saved-tab rows render it in `mode='edit'` with the workspace's persisted spec pre-filled. The legacy `ProfilesDialog` is gone — per-workspace env-var management lives inside `WorkspaceForm`.
+Modals owned by `App`:
+- `WorkspaceModal` — tabbed shell with Saved + New tabs (underlined-tab style). Body of each tab uses `WorkspaceForm` — the field-level form component owns state, validation, and footer; New tab renders it in `mode='create'`, expanded Saved-tab rows render it in `mode='edit'`. Saved-row expanded footer is `Delete · Cancel · Clone · Resume`; New-tab footer is `Cancel · Create & start`.
+- `EditWorkspaceModal` — single-purpose modal for editing a *live* workspace. Opened from the chip ⋮ menu Edit entry. Wraps `WorkspaceForm` in `mode='edit'`. On Save, calls `workspace:writeManifest` + diffs pre/post specs; container-level changes flip the restart-to-apply banner in the workspace's TerminalPane.
+- `CloseWorkspaceModal` — Stop / Pause / Stop & remove (keeps state dir).
+- `DeleteWorkspaceModal` — Permanent purge confirmation: stop + `workspace:remove(containerId, { deleteState: true })` + `vault:deleteAllForWorkspace(id)`.
+- The legacy `ProfilesDialog` is gone — per-workspace env-var management lives inside `WorkspaceForm`.
 
 ## 6. IPC surface
 
@@ -381,12 +386,14 @@ Values are read from the renderer only on explicit `vault:getSecret`; during nor
 ### Create a workspace
 1. User clicks **+ New workspace** in the top strip.
 2. `<WorkspaceModal>` opens. Two tabs at top: **Saved** (count badge) + **New**, underlined-tab style. Default tab is Saved when at least one non-running workspace exists, else New.
-3. The Saved tab lists every stopped / paused / deleted workspace — sorted with a Variant-B label-filter search at the top: text input matches name + description (substring, case-insensitive), and a **Labels** dropdown opens a checkbox list of fleet-wide labels with usage counts. Selected labels filter the list as OR (any-match); active filters surface as removable pills above the list with an `N of M` count on the right. Each row shows a color identity bar, name, description, state badge, and last-used relative time. Clicking a row's header animates it open (CSS `grid-template-rows: 0fr → 1fr`, 320ms cubic-bezier; chevron rotates 180°; form contents fade-and-slide in over 220ms with 80ms delay) and renders `WorkspaceForm` inline in `mode='edit'` with the persisted spec pre-filled.
+3. The Saved tab lists every stopped / paused / deleted workspace — sorted with a Variant-B label-filter search at the top: text input matches name + description (substring, case-insensitive), and a **Labels** dropdown opens a checkbox list of fleet-wide labels with usage counts. Selected labels filter the list as OR (any-match); active filters surface as removable pills above the list with an `N of M` count on the right. Each row shows a color identity bar, name, description, state badge, and last-used relative time. Clicking a row's header animates it open (CSS `grid-template-rows: 0fr → 1fr`, 320ms cubic-bezier; chevron rotates 180°; form contents fade-and-slide in over 220ms with 80ms delay) and renders `WorkspaceForm` inline in `mode='edit'` with the persisted spec pre-filled. The expanded row's footer is **Delete (danger)** on the far left, then `Cancel · Clone · Resume` on the right.
 4. **Resume** (primary in the expanded form) — `App.handleResume`:
    - Writes any newly-typed secret env values via `vault:setSecret(id, key, value)`. Pre-existing secrets the user didn't touch are left alone.
    - Calls `workspace:writeManifest(spec)` so renderer-visible edits (description, labels, color, name) take effect immediately even if the container needs a restart for env/image changes.
    - Calls `workspace:start(id)`. If a container exists (state was stopped/paused/running with no label match), it's started. If null (state was deleted, container gone), the renderer falls through to the create flow with the **same id reused** so state-dir + vault history stay attached.
-5. **Cancel** in the expanded form collapses the row without applying changes.
+5. **Clone** in the expanded form opens the modal in Clone mode — `App.openCloneFrom` strips the source's id, auto-suggests `<source>-N` (incrementing N from 2 until unused), clears the color so a fresh hue is picked, and the modal's New tab takes the foreground pre-filled with the source's spec. The user can edit before clicking **Create & start**. Source workspace is unchanged.
+6. **Delete** in the expanded form (or chip ⋮ menu) opens `DeleteWorkspaceModal` — a confirm modal with explicit warning text. On confirm: `workspace:stop` (if live) → `workspace:remove(containerId, { deleteState: true })` (wipes state dir + manifest) → `vault:deleteAllForWorkspace(id)` (purges every secret).
+7. **Cancel** in the expanded form collapses the row without applying changes.
 6. The **New** tab is the Create form. The user fills:
    - **Type** radio: Container (default — isolated Docker runner) or Local ("coming soon" — submit throws).
    - For Container, an **Image** input appears with the inline image-library picker beneath it (default = most-recently-used library entry, or the bundled runner).
@@ -424,7 +431,24 @@ Each `pty:attach` runs `claude` fresh inside the container via `docker exec` —
 **Clickable links**: `term.registerLinkProvider` walks back to the first non-wrapped row, forward through `isWrapped` continuations, concatenates the rows, and matches URLs against the joined text — so a URL that soft-wraps across multiple rows is registered as a single link spanning all of them. Activation calls `window.open`, which `setWindowOpenHandler` routes through `shell.openExternal`.
 
 ### Manage per-workspace env vars
-The global Profiles modal is gone. Per-workspace env vars (both plain and secret) live in the Env-vars disclosure inside `WorkspaceForm` — the same component renders for new workspaces in the New tab and for existing workspaces in the Saved tab's inline expand-edit form. Underneath, the renderer calls `vault:setSecret(workspaceId, key, value)` / `vault:deleteSecret(workspaceId, key)` to mutate keychain values, and the manifest's `env.secretKeys` array tracks which keys exist for that workspace so the editor can surface them without ever reading a value.
+The global Profiles modal is gone. Per-workspace env vars (both plain and secret) live in the Env-vars disclosure inside `WorkspaceForm` — the same component renders for new workspaces in the New tab, for non-running workspaces in the Saved tab's inline expand-edit form, and for **running** workspaces in `EditWorkspaceModal` (opened via the chip ⋮ menu). Underneath, the renderer calls `vault:setSecret(workspaceId, key, value)` / `vault:deleteSecret(workspaceId, key)` to mutate keychain values, and the manifest's `env.secretKeys` array tracks which keys exist for that workspace so the editor can surface them without ever reading a value.
+
+### Chip ⋮ menu (live workspaces)
+Each chip in the workspace strip has a `⋮` trigger that opens a contextual menu. The menu's contents depend on the workspace's state:
+- **Pause / Stop** (running), **Resume** (paused), or **Start** (stopped) — single-action lifecycle controls.
+- **Edit…** — opens `EditWorkspaceModal`, a single-purpose modal wrapping `WorkspaceForm` in edit mode with the workspace's spec pre-filled. On Save, `App.handleEditSave` persists secrets + calls `workspace:writeManifest`, then compares pre-edit vs post-edit specs (`containerLevelChanged` in `EditWorkspaceModal.tsx`). Render-only changes (`name`, `description`, `labels`, `color`) take effect immediately. Container-level changes (`env`, `image`, `authMode`, `resources`) flip the **restart-to-apply banner** in the workspace's `TerminalPane` (see below).
+- **Clone…** — opens the workspace modal in Clone mode pre-filled from this workspace (same `App.openCloneFrom` flow as the Saved-tab Clone footer button).
+- **Close…** — opens `CloseWorkspaceModal` (preserves state dir).
+- **Delete…** — opens `DeleteWorkspaceModal` (purges state dir + every keychain entry under the workspace's id). Distinct from Close — Close keeps the workspace in the Saved list; Delete makes it disappear.
+
+### Restart-to-apply banner
+`TerminalPane` renders a dismissable banner above the session tab strip when `EditWorkspaceModal` saves changes to any container-level field on a running or paused workspace:
+
+> Changes apply on next start. **[Restart now]** ×
+
+- **Restart now**: `workspace:stop(containerId)` → `workspace:start(id)`. Banner clears.
+- **×** (dismiss): banner clears without restart.
+- The banner is keyed by workspace id in App.tsx's `restartBannerIds` Set; the corresponding TerminalPane reads `restartBanner` as a prop and renders accordingly. The Set survives chip switches — selecting another workspace and coming back still shows the banner until dismissed.
 
 ### Close a workspace
 1. User selects a workspace, then clicks **Close…** in the main-pane header.
@@ -509,6 +533,8 @@ claude-fleet/
                 ├── BottomBar.tsx          # footer hint bar
                 ├── WorkspaceModal.tsx     # tabbed shell: Saved (variant-B search + inline expand-edit) + New
                 ├── WorkspaceForm.tsx      # reusable form (color, description, labels, env, resources); mode-aware
+                ├── EditWorkspaceModal.tsx # single-purpose edit modal for live workspaces (chip ⋮ Edit)
+                ├── DeleteWorkspaceModal.tsx # confirm modal: stop + remove + purge keytar
                 └── CloseWorkspaceModal.tsx
 ```
 
