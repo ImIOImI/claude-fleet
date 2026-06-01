@@ -1665,3 +1665,108 @@ body {
   line-height: 1;
 }
 .restart-banner-dismiss:hover { color: var(--text-primary); }
+
+/* ── PR-C: Advanced image search modal ───────────────────────────── */
+
+.image-search-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  background: transparent;
+  border: 1px solid var(--border, #2a2f38);
+  border-left: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 0 6px 6px 0;
+}
+.image-search-trigger:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-card, #181c24);
+}
+.image-search-trigger:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.image-search-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.image-search-row {
+  border: 1px solid var(--border, #2a2f38);
+  border-radius: 8px;
+  background: var(--bg-card, #181c24);
+  overflow: hidden;
+}
+.image-search-row.current { border-color: var(--accent, #5fa1de); }
+.image-search-row-button {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--text-primary);
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.image-search-row-button:hover { background: var(--bg-hover, #1a1e26); }
+
+.image-search-row-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.image-search-ref {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.image-search-tag-chip {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--bg-input, #11151c);
+  border: 1px solid var(--border, #2a2f38);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+
+.image-search-row-meta {
+  display: flex;
+  gap: 14px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.image-search-digest code {
+  font-size: 10px;
+  background: var(--bg-input, #11151c);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.image-search-users {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.image-search-user {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-input, #11151c);
+}
+.image-search-user.ws-state.stopped,
+.image-search-user.ws-state.paused,
+.image-search-user.ws-state.deleted {
+  color: var(--state-warn, #d3b964);
+  border: 1px solid color-mix(in oklab, var(--state-warn, #d3b964) 30%, transparent);
+}
