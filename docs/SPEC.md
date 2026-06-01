@@ -396,7 +396,7 @@ Values are read from the renderer only on explicit `vault:getSecret`; during nor
 7. **Cancel** in the expanded form collapses the row without applying changes.
 6. The **New** tab is the Create form. The user fills:
    - **Type** radio: Container (default — isolated Docker runner) or Local ("coming soon" — submit throws).
-   - For Container, an **Image** input appears with the inline image-library picker beneath it (default = most-recently-used library entry, or the bundled runner).
+   - For Container, an **Image** input appears with the inline image-library picker beneath it (default = most-recently-used library entry, or the bundled runner). A magnifying-glass button right of the input opens **`AdvancedImageSearchModal`** — a focused search surface mirroring the Saved-tab Variant-B shape (text input matches ref + digest, **Tags** dropdown filters by the `:tag` segment with OR semantics + pills). Each row in the list also surfaces which workspaces currently use the image (stopped consumers called out in warning color), so pinning a specific build is informed.
    - **Name** with pet-name placeholder and a **color swatch** to the left (popover with 14 OKLCH preset hues + Random). The swatch is dashed when no hue has been picked — `WorkspaceTabStrip` falls back to a name-hash of the same palette in that case so the chip still gets a stable distinct color.
    - **Description** textarea (optional).
    - **Labels** chip input with `<datalist>` autocomplete drawn from every other workspace's `labels[]`. Used for filtering in the Saved-tab list (PR 2 surface).
@@ -535,6 +535,7 @@ claude-fleet/
                 ├── WorkspaceForm.tsx      # reusable form (color, description, labels, env, resources); mode-aware
                 ├── EditWorkspaceModal.tsx # single-purpose edit modal for live workspaces (chip ⋮ Edit)
                 ├── DeleteWorkspaceModal.tsx # confirm modal: stop + remove + purge keytar
+                ├── AdvancedImageSearchModal.tsx # magnifying-glass next to Image: ref/digest search + Tags filter
                 └── CloseWorkspaceModal.tsx
 ```
 

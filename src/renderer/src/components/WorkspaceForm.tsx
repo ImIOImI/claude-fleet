@@ -15,6 +15,7 @@ import type {
   WorkspaceResources,
   WorkspaceSummary
 } from '../App';
+import { AdvancedImageSearchModal, IconSearch } from './AdvancedImageSearchModal';
 
 export type WorkspaceKind = 'container' | 'local';
 
@@ -180,6 +181,7 @@ export function WorkspaceForm({
   const [kind, setKind] = useState<WorkspaceKind>(initial?.kind ?? 'container');
   const [image, setImage] = useState<string>(initial?.image ?? '');
   const [libraryImages, setLibraryImages] = useState<ImageEntry[]>([]);
+  const [imageSearchOpen, setImageSearchOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -444,18 +446,38 @@ export function WorkspaceForm({
       {kind === 'container' && (
         <div className="form-row">
           <label>Image</label>
-          <input
-            aria-label="Image reference"
-            value={image}
-            onChange={(e) => setImage(e.target.value)}
-            placeholder={DEFAULT_RUNNER_IMAGE}
-            disabled={busy}
-          />
+          <div className="input-with-button">
+            <input
+              aria-label="Image reference"
+              value={image}
+              onChange={(e) => setImage(e.target.value)}
+              placeholder={DEFAULT_RUNNER_IMAGE}
+              disabled={busy}
+            />
+            <button
+              type="button"
+              className="image-search-trigger"
+              aria-label="Open advanced image search"
+              title="Search past images"
+              onClick={() => setImageSearchOpen(true)}
+              disabled={busy}
+            >
+              <IconSearch />
+            </button>
+          </div>
           <ImagePicker
             library={libraryImages}
             filter={image}
             onPick={setImage}
             busy={busy}
+          />
+          <AdvancedImageSearchModal
+            open={imageSearchOpen}
+            library={libraryImages}
+            workspaces={workspaces}
+            currentImage={image}
+            onPick={setImage}
+            onClose={() => setImageSearchOpen(false)}
           />
         </div>
       )}
