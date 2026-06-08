@@ -91,7 +91,7 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
     workspaceSubdir: spec.workspaceSubdir,
     kind: 'container',
     image: spec.image ?? 'ghcr.io/imioimi/claude-fleet/runner:latest',
-    authMode: 'oauth',
+    authMode: spec.authMode,
     env: spec.env,
     resources: spec.resources,
     createdAt: Date.now(),

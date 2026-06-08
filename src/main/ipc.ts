@@ -170,7 +170,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         workspaceSubdir: input.workspaceSubdir,
         env: input.env,
         image: input.image,
-        resources: input.resources
+        resources: input.resources,
+        authMode: input.authMode
       });
 
       const spec: WorkspaceSpec = {
