@@ -18,19 +18,20 @@
 // Idempotent: running this twice is a no-op once the state dir is
 // already keyed by id and the keytar entries already conform.
 
-import { readdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { lstat, mkdir, readdir, readFile, rename, symlink, unlink, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { ulid } from 'ulid';
-import { stateRoot, workspaceManifestPath } from './paths.js';
+import { sharedClaudeCredentialsPath, stateRoot, workspaceClaudeDir, workspaceManifestPath } from './paths.js';
 import type { WorkspaceSpec } from './workspaces.js';
 
 const SERVICE = 'claude-fleet';
 const SECRET_INDEX_PREFIX = '__secrets__:';
 
 /**
- * Run both halves of the clean-slate migration. Best-effort: errors are
- * logged and swallowed so a broken state dir doesn't keep the app from
- * starting. The startup IPC path tolerates a partly-migrated layout.
+ * Run every startup migration step. Best-effort: errors are logged and
+ * swallowed so a broken state dir doesn't keep the app from starting.
+ * Order matters — state-dir renames must finish before credentials
+ * migration walks state dirs by id.
  */
 export async function runStartupMigration(): Promise<void> {
   try {
@@ -42,6 +43,11 @@ export async function runStartupMigration(): Promise<void> {
     await purgeLegacyKeytarEntries();
   } catch (err) {
     console.warn('[migration] keytar purge failed:', err);
+  }
+  try {
+    await migrateOAuthCredentials();
+  } catch (err) {
+    console.warn('[migration] credentials migration failed:', err);
   }
 }
 
@@ -122,6 +128,129 @@ async function migrateStateDirs(): Promise<void> {
       console.log(`[migration] state dir "${dirName}" → "${id}" (name "${name}")`);
     } catch (err) {
       console.warn(`[migration] failed to migrate state dir "${dirName}":`, err);
+    }
+  }
+}
+
+/**
+ * Move every workspace's per-workspace `.claude/.credentials.json` to
+ * a single shared location and replace the per-workspace files with
+ * symlinks to it. Idempotent.
+ *
+ * The shared file backs Phase 3 of the workspace-modal redesign
+ * (issue #57): one Claude.ai login covers every OAuth workspace. The
+ * actual bind-mount lives in `docker.ts createWorkspace`; this
+ * migration just consolidates pre-existing per-workspace files so the
+ * shared file picks up real credentials on first run rather than
+ * staying empty until the user logs in again.
+ *
+ * Rules:
+ *   - "Real file" = exists, is a regular file, is non-empty. Empty
+ *     files (from a stale touch) and symlinks are treated as
+ *     already-migrated.
+ *   - If the shared file isn't real yet and at least one workspace has
+ *     a real credentials file, promote the most-recently-modified one
+ *     to the shared path.
+ *   - For every other workspace that still has a real credentials
+ *     file: back it up as `.credentials.json.old` and replace the
+ *     original with a symlink to the shared path.
+ *   - For the workspace whose file became the shared one: also create
+ *     the symlink so the per-workspace path keeps resolving to real
+ *     credentials.
+ */
+async function migrateOAuthCredentials(): Promise<void> {
+  const root = stateRoot();
+  let entries: string[];
+  try {
+    entries = await readdir(root);
+  } catch (err: unknown) {
+    if ((err as { code?: string }).code === 'ENOENT') return;
+    throw err;
+  }
+
+  // Probe each workspace's credentials.json — collect the ones that
+  // are real, non-empty files (not symlinks, not directories).
+  interface RealCredsFile {
+    id: string;
+    path: string;
+    mtimeMs: number;
+  }
+  const realFiles: RealCredsFile[] = [];
+  for (const id of entries) {
+    let credsPath: string;
+    try {
+      credsPath = join(workspaceClaudeDir(id), '.credentials.json');
+    } catch {
+      // Invalid id (path-safety check) — skip.
+      continue;
+    }
+    try {
+      const lst = await lstat(credsPath);
+      if (lst.isSymbolicLink()) continue;
+      if (!lst.isFile()) continue;
+      if (lst.size === 0) continue;
+      realFiles.push({ id, path: credsPath, mtimeMs: lst.mtimeMs });
+    } catch {
+      // No file — fine, nothing to migrate for this workspace.
+      continue;
+    }
+  }
+
+  const sharedPath = sharedClaudeCredentialsPath();
+  await mkdir(dirname(sharedPath), { recursive: true });
+
+  // "Real" shared file = exists, regular file, non-empty.
+  let sharedIsReal = false;
+  try {
+    const lst = await lstat(sharedPath);
+    sharedIsReal = lst.isFile() && lst.size > 0;
+  } catch {
+    sharedIsReal = false;
+  }
+
+  // Promote: if the shared file isn't real yet but at least one
+  // workspace has credentials, move the most-recently-modified one
+  // into the shared path.
+  if (!sharedIsReal && realFiles.length > 0) {
+    realFiles.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    const winner = realFiles[0];
+    // Drop the existing shared file (likely empty stub from a prior
+    // run that called ensureSharedCredentialsFile but never logged in).
+    try {
+      await unlink(sharedPath);
+    } catch (err: unknown) {
+      if ((err as { code?: string }).code !== 'ENOENT') throw err;
+    }
+    await rename(winner.path, sharedPath);
+    console.log(
+      `[migration] promoted ${winner.id}'s credentials to shared (mtime ${new Date(winner.mtimeMs).toISOString()})`
+    );
+    sharedIsReal = true;
+    // Symlink the winner's path back to shared so the workspace's
+    // .claude/.credentials.json keeps resolving.
+    await symlink(sharedPath, winner.path);
+  }
+
+  // Back up + symlink everyone else.
+  for (const { id, path: credsPath } of realFiles) {
+    // Use lstat so a symlink (from the promotion step above, or a
+    // previous run's migration) is recognized — stat would follow it
+    // and we'd treat the symlink itself as a "real file" worth
+    // backing up.
+    const lst = await lstat(credsPath).catch(() => null);
+    if (!lst || !lst.isFile()) continue;
+    const backupPath = credsPath + '.old';
+    try {
+      await rename(credsPath, backupPath);
+    } catch (err) {
+      console.warn(`[migration] failed to back up ${id}'s credentials:`, err);
+      continue;
+    }
+    try {
+      await symlink(sharedPath, credsPath);
+      console.log(`[migration] backed up ${id}'s credentials → .old + symlinked to shared`);
+    } catch (err) {
+      console.warn(`[migration] failed to symlink ${id}'s credentials:`, err);
     }
   }
 }

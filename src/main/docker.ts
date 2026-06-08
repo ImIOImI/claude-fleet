@@ -12,16 +12,18 @@
 // the user renames the workspace's label. Lookup is always by label.
 
 import Docker from 'dockerode';
-import { mkdir, rm, stat } from 'node:fs/promises';
+import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import type { Duplex } from 'node:stream';
 import {
   assertValidWorkspaceId,
+  sharedClaudeCredentialsPath,
   workspaceBrokerDir,
   workspaceBrokerSocket,
   workspaceClaudeDir,
   workspaceStateDir
 } from './paths.js';
-import type { Workspace, WorkspaceEnv, WorkspaceResources } from './workspaces.js';
+import type { AuthMode, Workspace, WorkspaceEnv, WorkspaceResources } from './workspaces.js';
 import { BrokerClient, brokerPtyStream } from './broker.js';
 import { recordPendingAttach } from './pendingAttaches.js';
 import { resolveEnv } from './vault.js';
@@ -49,6 +51,14 @@ export interface CreateWorkspaceInput {
   /** Image reference to launch. Defaults to the bundled runner image. */
   image?: string;
   resources?: WorkspaceResources;
+  /**
+   * Auth mode. When 'oauth', `createWorkspace` adds a bind-mount of the
+   * shared credentials file (`paths.sharedClaudeCredentialsPath()`) over
+   * `/home/fleet/.claude/.credentials.json` so the first browser login
+   * propagates to every other OAuth workspace. 'apikey' workspaces don't
+   * get the shared bind — their credentials come via the env-var path.
+   */
+  authMode: AuthMode;
 }
 
 export interface ImageInspectResult {
@@ -193,6 +203,26 @@ export async function listLiveWorkspaces(): Promise<Workspace[]> {
     .filter((w): w is Workspace => w !== null);
 }
 
+/**
+ * Ensure `<userData>/claude-shared/.credentials.json` exists as a real
+ * file on disk so Docker can file-bind it into an OAuth-mode container.
+ * Docker refuses to file-bind a missing host path; if we let it auto-
+ * create the missing inode it would become a directory, which would
+ * make `claude`'s `read .credentials.json` fail. Touching an empty
+ * file up front matches what `claude` would write on first OAuth
+ * completion — the file is overwritten with real JSON the first time
+ * a workspace logs in.
+ */
+export async function ensureSharedCredentialsFile(): Promise<string> {
+  const filePath = sharedClaudeCredentialsPath();
+  await mkdir(dirname(filePath), { recursive: true });
+  const existing = await stat(filePath).catch(() => null);
+  if (!existing) {
+    await writeFile(filePath, '', 'utf8');
+  }
+  return filePath;
+}
+
 export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Workspace> {
   assertValidWorkspaceId(spec.id);
 
@@ -216,16 +246,31 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
   // later via its own error path).
   const resolvedEnv = await resolveEnv(spec.id, spec.env.plain, spec.env.secretKeys);
   const envArr = ['HOME=/home/fleet', ...Object.entries(resolvedEnv).map(([k, v]) => `${k}=${v}`)];
+
+  const binds: string[] = [
+    `${spec.workspaceRoot}:/workspace:rw`,
+    `${claudeDir}:/home/fleet/.claude:rw`,
+    // The in-container broker creates its socket here. Bind-mounting
+    // the *directory* (not the file) lets the broker create the
+    // socket node on its own — Docker can't bind-mount a file that
+    // doesn't exist yet on the host side.
+    `${brokerDir}:/run/broker:rw`
+  ];
+
+  // OAuth mode: file-bind the shared credentials file on top of the
+  // per-workspace .claude dir. Docker layers this file bind over the
+  // dir bind, so reads/writes of `/home/fleet/.claude/.credentials.json`
+  // hit the shared host file. First OAuth workspace populates it on
+  // login; every subsequent OAuth workspace sees an already-valid
+  // credentials file and skips the browser dance. Token refresh in any
+  // workspace updates the shared file in place.
+  if (spec.authMode === 'oauth') {
+    const sharedCreds = await ensureSharedCredentialsFile();
+    binds.push(`${sharedCreds}:/home/fleet/.claude/.credentials.json:rw`);
+  }
+
   const hostCfg: Docker.HostConfig = {
-    Binds: [
-      `${spec.workspaceRoot}:/workspace:rw`,
-      `${claudeDir}:/home/fleet/.claude:rw`,
-      // The in-container broker creates its socket here. Bind-mounting
-      // the *directory* (not the file) lets the broker create the
-      // socket node on its own — Docker can't bind-mount a file that
-      // doesn't exist yet on the host side.
-      `${brokerDir}:/run/broker:rw`
-    ],
+    Binds: binds,
     AutoRemove: false
   };
   if (spec.resources?.cpus) hostCfg.NanoCpus = Math.round(spec.resources.cpus * 1e9);
@@ -261,7 +306,7 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
     workspaceSubdir: spec.workspaceSubdir,
     kind: 'container',
     image,
-    authMode: 'oauth',
+    authMode: spec.authMode,
     env: spec.env,
     resources: spec.resources,
     createdAt,

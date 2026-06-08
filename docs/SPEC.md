@@ -298,7 +298,7 @@ Today the only workspace backend is a Docker container. The container name is `c
 ### Docker container shape
 - `Tty: true`, `OpenStdin: true`, `StdinOnce: false` — required for interactive `docker exec` later.
 - `WorkingDir: /workspace/${subdir}` (or `/workspace` if subdir is empty).
-- Binds: `${workspaceRoot}:/workspace:rw` (the user's host dir), `<userData>/state/<id>/.claude:/home/fleet/.claude:rw` (per-workspace persistent Claude state), and `<userData>/state/<id>/broker:/run/broker:rw` (the directory the in-container broker creates its Unix socket in).
+- Binds: `${workspaceRoot}:/workspace:rw` (the user's host dir), `<userData>/state/<id>/.claude:/home/fleet/.claude:rw` (per-workspace persistent Claude state), and `<userData>/state/<id>/broker:/run/broker:rw` (the directory the in-container broker creates its Unix socket in). When `authMode === 'oauth'`, one additional **file-bind** is layered on top of the `.claude` dir bind: `<userData>/claude-shared/.credentials.json:/home/fleet/.claude/.credentials.json:rw` — so the first workspace's Claude.ai login covers every subsequent one and token refresh in any workspace propagates to all of them. The shared host file is created (touched empty) by `docker.ts:ensureSharedCredentialsFile()` before the container starts, because Docker refuses to file-bind a missing host path. `apikey` workspaces don't get the file-bind — auth comes via `ANTHROPIC_API_KEY` in the env.
 - Env: `manifest.env.plain` merged with secret values resolved at create time via `vault.resolveEnv(id, plain, secretKeys)` (missing secret keys resolve to the empty string so the container still starts; claude itself surfaces the auth failure). `HOME=/home/fleet` is also set so tooling finds the bind-mounted `.claude/`.
 - `User: <hostUid>:<hostGid>` so bind-mounted files are owned by the host user.
 - Optional resource limits: `cpus` (→ `NanoCpus`), `memoryMb` (→ `Memory`).
@@ -379,7 +379,10 @@ Values are read from the renderer only on explicit `vault:getSecret`; during nor
 
 ### Startup
 1. Main creates the window, registers IPC handlers.
-2. Before any IPC traffic, main runs `runStartupMigration()` from `src/main/migration.ts`. This is idempotent: legacy name-keyed state dirs get a fresh ULID and the dir is renamed in place (with the manifest rewritten to the new shape — `authMode='oauth'`, empty `env`, etc.), and any keytar entry under `service=claude-fleet` whose account doesn't fit the new `<id>:<key>` / `__secrets__:<id>` shape is deleted (`__profiles__:*` purge). Re-running the migration on an already-migrated install is a no-op.
+2. Before any IPC traffic, main runs `runStartupMigration()` from `src/main/migration.ts`. Three idempotent passes:
+   1. Legacy name-keyed state dirs get a fresh ULID and the dir is renamed in place (with the manifest rewritten to the new shape — `authMode='oauth'`, empty `env`, etc.).
+   2. Any keytar entry under `service=claude-fleet` whose account doesn't fit the new `<id>:<key>` / `__secrets__:<id>` shape is deleted (`__profiles__:*` purge).
+   3. **OAuth credentials consolidation** (Phase 3, #57): every workspace's per-workspace `.claude/.credentials.json` that's a *real non-empty file* (not a symlink, not empty) is folded into the shared file at `<userData>/claude-shared/.credentials.json`. If the shared file doesn't exist (or is empty) and at least one workspace has real credentials, the most-recently-modified one is promoted to the shared path; the others are backed up as `.credentials.json.old`. Every per-workspace path becomes a symlink to the shared file so the host-side filesystem reflects reality.
 3. Renderer mounts; on first render it calls `workspace:ping`. If false, the main pane shows "Docker daemon unreachable — start Docker Desktop (with WSL2 integration)."
 4. If reachable, renderer calls `workspace:list` and polls every 5s thereafter to pick up state changes from outside the app. The list includes live workspaces (running/stopped) and deleted workspaces (manifest on disk, no container). The renderer keys selection by the ULID `id`; `containerId` is present only for live workspaces and is what stop/pause/remove/attach take.
 
@@ -820,11 +823,13 @@ A local-build fallback (`docker build` from the bundled `docker/` dir) is useful
 - **Pull progress UI.** Whether the first-run pull is blocking (modal with progress bar) or background (spinner + queued container-create).
 
 ### How `claude` authenticates inside the container
-Two modes, picked at create-container time:
+Two modes, picked at create-container time via `manifest.authMode`:
 
-- **API key**: profile carries an `apiKey`; container env includes `ANTHROPIC_API_KEY` at create time. Used when the user has a Console API key.
-- **OAuth (Claude.ai Pro/Max)**: profile-name field is left blank in the create flow. No `ANTHROPIC_API_KEY` is injected; the first time `claude` runs in the terminal it prints a login code, the user completes the flow in their browser, and OAuth tokens are written to `<container-state>/.claude/.credentials.json` (host side, via the bind-mount from #1). Future sessions in this container — or in a recreated container with the same name — pick up the credentials automatically.
+- **API key**: env contains `ANTHROPIC_API_KEY` (typically as a secret env var resolved from the per-workspace vault entry at container-start time). Used when the user has a Console API key.
+- **OAuth (Claude.ai Pro/Max)**: no `ANTHROPIC_API_KEY` is injected. A single shared credentials file at `<userData>/claude-shared/.credentials.json` is file-bound into every OAuth workspace as `/home/fleet/.claude/.credentials.json` (layered on top of the per-workspace `.claude` dir bind). The first OAuth workspace's run of `claude` prints a login code; the user completes the flow in their browser; OAuth tokens land in the shared file. Every subsequent OAuth workspace mounts the same file and skips the browser dance. Token refresh in any workspace updates the shared file in place and propagates to all of them.
 
 Claude Code's auth precedence puts `ANTHROPIC_API_KEY` ahead of OAuth tokens, which is why API-key and OAuth modes are mutually exclusive at the env-injection level: OAuth mode skips the env var entirely so the OAuth path is reached.
 
-**Open** (none right now — both modes are wired up).
+**Non-goals (deferred):**
+- Per-workspace OAuth isolation (a different Claude.ai account per workspace). A future `oauthIsolated: boolean` setting could opt a workspace out of the shared bind in favor of a per-workspace file. Not built because nobody's asked for it yet.
+- Multiple Claude.ai accounts simultaneously.
