@@ -196,6 +196,37 @@ export function TerminalSession({
     let unsubData: (() => void) | null = null;
     let unsubEnd: (() => void) | null = null;
 
+    // Scoped one-shot repaint nudge. claude paints some startup screens
+    // (notably the org "Managed settings require approval" gate) on the
+    // primary buffer with incremental erases and no full clear — verified
+    // by capturing its output stream: no ESC[2J, no alternate-screen
+    // switch. If a layout-settling resize lands after claude already
+    // painted at the attach-time size, claude reflows but leaves stale rows
+    // behind and the user sees overlapping text. We can't make claude
+    // full-clear, so on the FIRST real post-attach size change — and only
+    // before the user starts typing — we send Ctrl+L (claude's redraw key)
+    // to force a clean repaint. Setups whose size is already correct at
+    // attach (the common case, including anyone with no org-managed
+    // settings) get no post-attach resize, so this never fires: a no-op.
+    let attachCols = 0;
+    let attachRows = 0;
+    let nudgeArmed = false;
+    let nudgeTimer: ReturnType<typeof setTimeout> | null = null;
+    let armTimer: ReturnType<typeof setTimeout> | null = null;
+    const REPAINT_NUDGE_WINDOW_MS = 6000;
+    const REPAINT_NUDGE_DEBOUNCE_MS = 200;
+    const disarmNudge = (): void => {
+      nudgeArmed = false;
+      if (nudgeTimer) {
+        clearTimeout(nudgeTimer);
+        nudgeTimer = null;
+      }
+      if (armTimer) {
+        clearTimeout(armTimer);
+        armTimer = null;
+      }
+    };
+
     const doCopy = (): void => {
       const sel = term.getSelection();
       if (sel) {
@@ -298,7 +329,20 @@ export function TerminalSession({
             });
           }
         });
-        term.onData((data) => window.api.pty.input(sid, data));
+        term.onData((data) => {
+          // First user keystroke ⇒ they're interacting; cancel any pending
+          // repaint nudge so we never inject Ctrl+L into an active session.
+          disarmNudge();
+          window.api.pty.input(sid, data);
+        });
+
+        // Arm the scoped repaint nudge (consumed by the ResizeObserver
+        // below). attachCols/Rows is the size claude is laying out at right
+        // now; a later resize that changes it is the trigger.
+        attachCols = term.cols;
+        attachRows = term.rows;
+        nudgeArmed = true;
+        armTimer = setTimeout(disarmNudge, REPAINT_NUDGE_WINDOW_MS);
       } catch (err) {
         // Attach failure most commonly means the in-container broker
         // isn't reachable — older runner images without it, or the
@@ -332,6 +376,27 @@ export function TerminalSession({
           // pty:resize is best-effort — failing to resize doesn't
           // justify killing the terminal.
         }
+        // A real post-attach size change while still armed ⇒ debounce a
+        // single Ctrl+L once resizes settle, then disarm. Fires at most
+        // once per session, only when the size actually changed, and never
+        // after the user has typed.
+        if (nudgeArmed && (term.cols !== attachCols || term.rows !== attachRows)) {
+          attachCols = term.cols;
+          attachRows = term.rows;
+          if (nudgeTimer) clearTimeout(nudgeTimer);
+          nudgeTimer = setTimeout(() => {
+            nudgeTimer = null;
+            const handle = ptyHandleId;
+            disarmNudge();
+            if (handle) {
+              try {
+                window.api.pty.input(handle, '\x0c');
+              } catch {
+                // best-effort repaint; never fault the terminal
+              }
+            }
+          }, REPAINT_NUDGE_DEBOUNCE_MS);
+        }
       }
     });
     ro.observe(host);
@@ -339,6 +404,7 @@ export function TerminalSession({
     return () => {
       disposed = true;
       cancelAnimationFrame(initialFitRaf);
+      disarmNudge();
       ro.disconnect();
       host.removeEventListener('contextmenu', onContextMenu);
       unsubData?.();
