@@ -112,7 +112,7 @@ const api = {
       ipcRenderer.invoke('workspace:writeManifest', spec),
     stop: (containerId: string) => ipcRenderer.invoke('workspace:stop', containerId),
     pause: (containerId: string) => ipcRenderer.invoke('workspace:pause', containerId),
-    remove: (containerId: string, opts?: { deleteState?: boolean }) =>
+    remove: (containerId: string, opts?: { deleteState?: boolean; id?: string }) =>
       ipcRenderer.invoke('workspace:remove', containerId, opts),
     ensureImage: async (onProgress: (p: { message: string }) => void): Promise<void> => {
       const channelId = globalThis.crypto.randomUUID();

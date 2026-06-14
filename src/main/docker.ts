@@ -443,28 +443,41 @@ export async function stopWorkspace(containerId: string): Promise<void> {
 export interface RemoveWorkspaceOpts {
   /** When true, also wipe the host-side state dir (manifest + .claude + broker). */
   deleteState?: boolean;
+  /**
+   * Workspace ULID. Required to delete the state dir of a *saved* workspace
+   * (one with no live container) — without a container we can't recover the
+   * id from a label. Live-path callers may omit it; the id is then read from
+   * the container's ID_LABEL.
+   */
+  id?: string;
 }
 
 export async function removeWorkspace(
   containerId: string,
   opts: RemoveWorkspaceOpts = {}
 ): Promise<void> {
-  const c = docker.getContainer(containerId);
-
-  let id: string | undefined;
-  if (opts.deleteState) {
+  // Prefer the caller-supplied ULID (the only way to identify a saved
+  // workspace, whose container no longer exists). Fall back to the
+  // container's label for live-path callers that pass only a containerId.
+  let id = opts.id;
+  if (opts.deleteState && !id && containerId) {
     try {
-      const info = await c.inspect();
+      const info = await docker.getContainer(containerId).inspect();
       id = info.Config.Labels?.[ID_LABEL];
     } catch (err: unknown) {
       if ((err as { statusCode?: number }).statusCode !== 404) throw err;
     }
   }
 
-  try {
-    await c.remove({ force: true });
-  } catch (err: unknown) {
-    if ((err as { statusCode?: number }).statusCode !== 404) throw err;
+  // Remove the container. Prefer the explicit ref; otherwise derive the name
+  // from the id (a saved workspace has none, so this 404s harmlessly).
+  const ref = containerId || (id ? containerNameFor(id) : undefined);
+  if (ref) {
+    try {
+      await docker.getContainer(ref).remove({ force: true });
+    } catch (err: unknown) {
+      if ((err as { statusCode?: number }).statusCode !== 404) throw err;
+    }
   }
 
   if (opts.deleteState && id) {

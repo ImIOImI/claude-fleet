@@ -1,10 +1,12 @@
 import { Duplex } from 'node:stream';
+import { rm } from 'node:fs/promises';
 import type {
   CreateWorkspaceInput,
   PullProgress,
   RemoveWorkspaceOpts,
   PtyHandle
 } from './docker.js';
+import { workspaceStateDir } from './paths.js';
 import type { Workspace } from './workspaces.js';
 
 // In mock mode the workspace id doubles as the containerId. Real backend
@@ -149,8 +151,19 @@ export async function stopWorkspace(containerId: string): Promise<void> {
   }
 }
 
-export async function removeWorkspace(containerId: string, _opts: RemoveWorkspaceOpts = {}): Promise<void> {
-  workspaces.delete(containerId);
+export async function removeWorkspace(
+  containerId: string,
+  opts: RemoveWorkspaceOpts = {}
+): Promise<void> {
+  // In mock the map is keyed by id (== containerId for live mock entries).
+  // A saved workspace isn't in the map at all; its only trace is the on-disk
+  // manifest, so honor deleteState by wiping the state dir keyed off the ULID.
+  const id = opts.id || containerId;
+  if (containerId) workspaces.delete(containerId);
+  if (opts.id) workspaces.delete(opts.id);
+  if (opts.deleteState && id) {
+    await rm(workspaceStateDir(id), { recursive: true, force: true });
+  }
 }
 
 class FakeShell extends Duplex {
