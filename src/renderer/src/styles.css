@@ -52,6 +52,10 @@
   --r-lg: 10px;
   --r-xl: 14px;
 
+  /* elevation (design tokens.css: --shadow-sm/--shadow/--shadow-lg) */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+
   font-family: var(--font-sans);
 }
 
@@ -86,24 +90,52 @@ body {
   padding: 10px 14px;
   background: var(--bg-elevated);
   border-bottom: 1px solid var(--border-subtle);
-  min-height: 56px;
+  /* 72px to fit the 48px chips with breathing room (issue #20). */
+  min-height: 72px;
   overflow-x: auto;
 }
+/* Brand mark: a 28×28 "cf" tile + stacked claude-fleet / N-workspaces
+   label, matching design/components/hi-fi-top-bar.jsx. */
 .top-strip .app-name {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-  letter-spacing: 0.02em;
-  padding: 4px 12px 4px 4px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-right: 12px;
   border-right: 1px solid var(--border-subtle);
   margin-right: 4px;
   white-space: nowrap;
-  display: flex;
-  align-items: center;
-  gap: 8px;
 }
-.top-strip .app-name .meta { color: var(--text-muted); font-weight: 400; font-size: 11px; }
+.top-strip .app-name .brand-tile {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: var(--text-primary);
+  color: var(--bg-base);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: -0.02em;
+  flex-shrink: 0;
+}
+.top-strip .app-name .brand-label {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+.top-strip .app-name .brand-label .title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+.top-strip .app-name .meta {
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  font-weight: 400;
+  font-size: 10px;
+}
 
 .ws-chip {
   display: inline-flex;
@@ -193,13 +225,18 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  padding: 4px 9px;
+  border-radius: var(--r-md);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
   font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-muted);
+  font-size: 10px;
+  color: var(--text-secondary);
 }
+.daemon-status.down { color: var(--state-error); border-color: var(--state-error); }
 .daemon-status .dot {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--state-running);
 }
@@ -923,24 +960,56 @@ body {
   position: relative;
   display: inline-flex;
   align-items: stretch;
-  border-radius: var(--r-md);
-  border: 1.5px solid var(--border-subtle);
+  /* Raised-card chip sized to the design (220–280 × 48). */
+  min-width: 220px;
+  max-width: 280px;
+  height: 48px;
+  flex-shrink: 0;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--border-subtle);
   background: transparent;
   overflow: visible;
-  transition: background 0.1s ease, border-color 0.1s ease;
+  transition: background 0.1s ease, border-color 0.1s ease, box-shadow 0.14s ease;
+}
+/* 3px color-identity bar on the left edge, the workspace hue. Dimmed when
+   inactive, full when selected (design/components/hi-fi-top-bar.jsx). */
+.ws-chip-group::before {
+  content: '';
+  align-self: center;
+  width: 3px;
+  height: 28px;
+  margin-left: 8px;
+  border-radius: 2px;
+  background: var(--hue, var(--accent));
+  opacity: 0.85;
+  flex-shrink: 0;
 }
 .ws-chip-group:hover { background: var(--bg-card); }
 .ws-chip-group.active {
   background: var(--bg-card);
   border-color: var(--hue, var(--accent));
+  box-shadow: var(--shadow-sm);
 }
+.ws-chip-group.active::before { opacity: 1; }
 /* The chip + trigger inside the group share the group's border now;
    suppress the chip's own border styling. */
 .ws-chip-group .ws-chip {
   border: none;
   border-radius: 0;
   background: transparent;
-  padding-right: 8px;
+  /* The color bar supplies the left inset; grow to fill so the ⋮ trigger
+     hugs the right edge and long names ellipsis instead of widening. */
+  flex: 1;
+  min-width: 0;
+  padding: 0 8px 0 10px;
+}
+.ws-chip-group .ws-chip .ws-chip-text { min-width: 0; }
+.ws-chip-group .ws-chip .name,
+.ws-chip-group .ws-chip .ws-chip-sub {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .ws-chip-group .ws-chip:hover { background: transparent; }
 .ws-chip-group.active .ws-chip { color: var(--text-primary); }
@@ -1083,7 +1152,7 @@ body {
   gap: 0;
   background: var(--bg-elevated);
   border-bottom: 1px solid var(--border-subtle);
-  height: 32px;
+  height: 42px;
   padding: 0 2px;
   overflow-x: auto;
   overflow-y: hidden;

@@ -185,9 +185,12 @@ export function WorkspaceTabStrip({
   return (
     <div className="top-strip">
       <div className="app-name">
-        claude-fleet
-        <span className="meta">
-          {live.length} workspace{live.length === 1 ? '' : 's'}
+        <span className="brand-tile" aria-hidden="true">cf</span>
+        <span className="brand-label">
+          <span className="title">claude-fleet</span>
+          <span className="meta">
+            {live.length} workspace{live.length === 1 ? '' : 's'}
+          </span>
         </span>
       </div>
 
@@ -270,9 +273,9 @@ export function WorkspaceTabStrip({
             MOCK MODE
           </span>
         )}
-        <span className="daemon-status">
+        <span className={`daemon-status ${backendReady === false ? 'down' : ''}`}>
           <span className={`dot ${backendReady === false ? 'unreachable' : ''}`} />
-          {backendReady === false ? 'disconnected' : 'docker'}
+          {backendReady === false ? 'No daemon' : 'Docker'}
         </span>
       </div>
 
