@@ -482,7 +482,11 @@ export function App() {
 
         <main
           className="main-pane"
-          style={selected ? { ['--hue' as never]: `${hueFor(selected)}deg` } : undefined}
+          // `--hue` is a full color (same as the chips, via colorFor) — every
+          // CSS consumer (context-accent band, active session-tab underline)
+          // uses it directly as a color. A bare `${hueFor}deg` angle is an
+          // invalid color there, which silently blanked the context bar.
+          style={selected ? { ['--hue' as never]: colorFor(selected) } : undefined}
         >
           <div className="main-body">
             {backendReady === false ? (
