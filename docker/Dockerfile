@@ -39,10 +39,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # OTEL_EXPORTER_OTLP_LOGS_ENDPOINT down to the client) was unnavigable
 # over our broker PTY in 2.1.150 — Enter / arrows / digit-plus-Enter
 # all reached claude (echo confirmed) but the prompt didn't advance.
-# 2.1.169 navigates the same prompt correctly. The pin protects against
-# silent regressions in the same code path — bump deliberately after
-# verifying the prompt still works (see issue #65 for the test recipe).
-RUN npm install -g @anthropic-ai/claude-code@2.1.169
+# 2.1.169 fixed navigation; 2.1.177 (current) keeps it working — verified
+# the gate still navigates over a PTY before bumping. The pin protects
+# against silent regressions in this code path — bump deliberately, after
+# re-verifying the prompt (see issue #65 for the test recipe).
+RUN npm install -g @anthropic-ai/claude-code@2.1.177
 
 # The node:22 base ships a 'node' user at UID 1000; remove it so we can
 # claim UID 1000 for 'fleet'. Make /home/fleet world-writable so the
