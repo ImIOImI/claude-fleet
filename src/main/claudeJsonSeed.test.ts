@@ -23,8 +23,8 @@ vi.mock('electron', () => ({
 }));
 
 // Imported AFTER the mock so paths.ts picks up the stubbed electron.app.
-const { ensureWorkspaceClaudeJson } = await import('./docker.js');
-const { workspaceClaudeJsonPath } = await import('./paths.js');
+const { ensureWorkspaceClaudeJson, ensureSharedRemoteSettingsFile } = await import('./docker.js');
+const { workspaceClaudeJsonPath, sharedRemoteSettingsPath } = await import('./paths.js');
 
 beforeEach(async () => {
   userDataDir = await mkdtemp(join(tmpdir(), 'claude-fleet-claudejson-'));
@@ -62,5 +62,26 @@ describe('ensureWorkspaceClaudeJson', () => {
     const returned = await ensureWorkspaceClaudeJson('01KEEP', '/workspace');
     expect(returned).toBe(path);
     expect(await readFile(path, 'utf8')).toBe(real);
+  });
+});
+
+describe('ensureSharedRemoteSettingsFile', () => {
+  it('touches an empty file when absent so Docker can bind it', async () => {
+    const path = await ensureSharedRemoteSettingsFile();
+    expect(path).toBe(sharedRemoteSettingsPath());
+    expect(await readFile(path, 'utf8')).toBe('');
+  });
+
+  it('leaves an already-populated shared file untouched', async () => {
+    const path = sharedRemoteSettingsPath();
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(join(userDataDir, 'claude-shared'), { recursive: true });
+    // Simulate claude having written the approved org settings in place.
+    const approved = JSON.stringify({ env: { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'x' } });
+    await writeFile(path, approved, 'utf8');
+
+    const returned = await ensureSharedRemoteSettingsFile();
+    expect(returned).toBe(path);
+    expect(await readFile(path, 'utf8')).toBe(approved);
   });
 });

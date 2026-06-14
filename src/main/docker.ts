@@ -18,6 +18,7 @@ import type { Duplex } from 'node:stream';
 import {
   assertValidWorkspaceId,
   sharedClaudeCredentialsPath,
+  sharedRemoteSettingsPath,
   workspaceBrokerDir,
   workspaceBrokerSocket,
   workspaceClaudeDir,
@@ -225,6 +226,24 @@ export async function ensureSharedCredentialsFile(): Promise<string> {
 }
 
 /**
+ * Ensure the shared `remote-settings.json` exists so Docker can file-bind it
+ * (Docker refuses to bind a missing host path). It starts empty: the first
+ * OAuth workspace fetches the org's managed settings, the user approves the
+ * gate once, and claude writes the fetched settings into this file in place —
+ * after which every subsequent OAuth workspace finds them already on disk and
+ * skips the gate. See `sharedRemoteSettingsPath` for the security rationale.
+ */
+export async function ensureSharedRemoteSettingsFile(): Promise<string> {
+  const filePath = sharedRemoteSettingsPath();
+  await mkdir(dirname(filePath), { recursive: true });
+  const existing = await stat(filePath).catch(() => null);
+  if (!existing) {
+    await writeFile(filePath, '', 'utf8');
+  }
+  return filePath;
+}
+
+/**
  * Ensure the per-workspace `~/.claude.json` seed exists, bind-mounted at
  * `/home/fleet/.claude.json`. claude-code stores its onboarding/account
  * state there (NOT in `~/.claude`), so without persisting it every new
@@ -306,9 +325,19 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
   // login; every subsequent OAuth workspace sees an already-valid
   // credentials file and skips the browser dance. Token refresh in any
   // workspace updates the shared file in place.
+  //
+  // The same pattern shares `remote-settings.json` (the org's managed
+  // settings claude fetches): approving the "Managed settings require
+  // approval" gate once writes the fetched settings into the shared file,
+  // so every subsequent OAuth workspace already has them on disk and skips
+  // the gate. claude re-fetches each start and still re-prompts if the org
+  // changes the settings, so this shares the approval without suppressing
+  // genuine changes.
   if (spec.authMode === 'oauth') {
     const sharedCreds = await ensureSharedCredentialsFile();
     binds.push(`${sharedCreds}:/home/fleet/.claude/.credentials.json:rw`);
+    const sharedRemoteSettings = await ensureSharedRemoteSettingsFile();
+    binds.push(`${sharedRemoteSettings}:/home/fleet/.claude/remote-settings.json:rw`);
   }
 
   const hostCfg: Docker.HostConfig = {
