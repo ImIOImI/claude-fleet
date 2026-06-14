@@ -70,7 +70,7 @@ test('Chip ⋮ Delete: opens the confirm modal, then purges container + state + 
     const calls = await getCalls(app);
     expect(calls.stop).toContain(RUNNING_WS.containerId);
     expect(calls.remove).toEqual([
-      { containerId: RUNNING_WS.containerId, deleteState: true }
+      { containerId: RUNNING_WS.containerId, deleteState: true, id: RUNNING_WS.id }
     ]);
     expect(calls.vaultDeleteAllForWorkspace).toContain(RUNNING_WS.id);
   } finally {
@@ -108,6 +108,37 @@ test('Saved-tab Delete: row Delete button opens confirm modal', async () => {
     // The Saved-tab Delete bubbles up, the workspace modal closes, and
     // the confirmation modal opens at the top level.
     await expect(window.getByRole('heading', { name: 'Delete workspace' })).toBeVisible();
+  } finally {
+    await app.close();
+  }
+});
+
+test('Saved-tab Delete: confirming purges a containerless saved workspace (regression)', async () => {
+  // Regression for the bug where deleting a saved workspace did nothing:
+  // DeleteWorkspaceModal gated the remove call on workspace.containerId,
+  // which is absent for saved/deleted entries, so the call was skipped and
+  // the state dir was never wiped — the workspace reappeared. The fix fires
+  // remove regardless and threads the ULID so main can delete by id.
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, { workspaceList: [STOPPED_WS] });
+    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+
+    const row = window.locator('.saved-row', { hasText: 'calm-otter' });
+    await row.locator('.saved-row-header').click();
+    await row.getByRole('button', { name: /Delete/ }).click();
+
+    await expect(window.getByRole('heading', { name: 'Delete workspace' })).toBeVisible();
+    await window.getByRole('button', { name: 'Delete permanently' }).click();
+    await expect(window.getByRole('heading', { name: 'Delete workspace' })).toBeHidden();
+
+    const calls = await getCalls(app);
+    // The remove call must fire even with no containerId, carrying the ULID
+    // so main can wipe the state dir.
+    expect(calls.remove).toEqual([
+      { containerId: '', deleteState: true, id: STOPPED_WS.id }
+    ]);
+    expect(calls.vaultDeleteAllForWorkspace).toContain(STOPPED_WS.id);
   } finally {
     await app.close();
   }

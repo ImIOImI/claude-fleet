@@ -33,10 +33,15 @@ export function DeleteWorkspaceModal({ workspace, onClose, onDeleted }: Props) {
           console.warn('workspace.stop during delete failed:', err);
         }
       }
-      if (workspace.containerId) {
-        setStatus('Removing container + state dir…');
-        await window.api.workspace.remove(workspace.containerId, { deleteState: true });
-      }
+      // Always remove + purge the state dir, even for a saved workspace with
+      // no live container — pass the ULID so the main process can wipe the
+      // state dir without a container to read the id from. (Gating this on
+      // containerId was the bug: saved workspaces were never deleted.)
+      setStatus('Removing container + state dir…');
+      await window.api.workspace.remove(workspace.containerId ?? '', {
+        deleteState: true,
+        id: workspace.id
+      });
       setStatus('Purging vault entries…');
       try {
         await window.api.vault.deleteAllForWorkspace(workspace.id);
