@@ -21,6 +21,7 @@ import {
   workspaceBrokerDir,
   workspaceBrokerSocket,
   workspaceClaudeDir,
+  workspaceClaudeJsonPath,
   workspaceStateDir
 } from './paths.js';
 import type { AuthMode, Workspace, WorkspaceEnv, WorkspaceResources } from './workspaces.js';
@@ -223,6 +224,36 @@ export async function ensureSharedCredentialsFile(): Promise<string> {
   return filePath;
 }
 
+/**
+ * Ensure the per-workspace `~/.claude.json` seed exists, bind-mounted at
+ * `/home/fleet/.claude.json`. claude-code stores its onboarding/account
+ * state there (NOT in `~/.claude`), so without persisting it every new
+ * container re-runs the theme/trust/setup wizard even when the shared
+ * credential is already valid. Seeding `hasCompletedOnboarding` plus trust
+ * for the container's working directory skips that wizard. We only seed
+ * when the file is absent — once claude runs it owns the file, so restarts
+ * and recreations keep the real accumulated state.
+ *
+ * `workingDir` is the in-container cwd (matches the container's WorkingDir);
+ * claude keys trust acceptance by directory, so the seed must name it.
+ */
+export async function ensureWorkspaceClaudeJson(
+  id: string,
+  workingDir: string
+): Promise<string> {
+  const filePath = workspaceClaudeJsonPath(id);
+  await mkdir(dirname(filePath), { recursive: true });
+  const existing = await stat(filePath).catch(() => null);
+  if (!existing) {
+    const seed = {
+      hasCompletedOnboarding: true,
+      projects: { [workingDir]: { hasTrustDialogAccepted: true } }
+    };
+    await writeFile(filePath, JSON.stringify(seed, null, 2), 'utf8');
+  }
+  return filePath;
+}
+
 export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Workspace> {
   assertValidWorkspaceId(spec.id);
 
@@ -247,6 +278,10 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
   const resolvedEnv = await resolveEnv(spec.id, spec.env.plain, spec.env.secretKeys);
   const envArr = ['HOME=/home/fleet', ...Object.entries(resolvedEnv).map(([k, v]) => `${k}=${v}`)];
 
+  // In-container cwd. Reused for the WorkingDir below and for seeding the
+  // trust acceptance in ~/.claude.json (claude keys trust by directory).
+  const workingDir = `/workspace/${spec.workspaceSubdir}`.replace(/\/$/, '') || '/workspace';
+
   const binds: string[] = [
     `${spec.workspaceRoot}:/workspace:rw`,
     `${claudeDir}:/home/fleet/.claude:rw`,
@@ -256,6 +291,13 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
     // doesn't exist yet on the host side.
     `${brokerDir}:/run/broker:rw`
   ];
+
+  // Persist + pre-complete onboarding. ~/.claude.json lives in $HOME,
+  // outside the .claude bind, so without this every new container re-runs
+  // the onboarding wizard. Applies to all auth modes — the trust/setup
+  // wizard isn't OAuth-specific.
+  const claudeJson = await ensureWorkspaceClaudeJson(spec.id, workingDir);
+  binds.push(`${claudeJson}:/home/fleet/.claude.json:rw`);
 
   // OAuth mode: file-bind the shared credentials file on top of the
   // per-workspace .claude dir. Docker layers this file bind over the
@@ -283,7 +325,7 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
     Tty: true,
     OpenStdin: true,
     StdinOnce: false,
-    WorkingDir: `/workspace/${spec.workspaceSubdir}`.replace(/\/$/, '') || '/workspace',
+    WorkingDir: workingDir,
     Env: envArr,
     Labels: {
       [FLEET_LABEL]: 'true',

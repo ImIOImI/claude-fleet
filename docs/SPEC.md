@@ -94,6 +94,7 @@ Three processes, per Electron convention:
 binds (per container):
   hostWorkspace            → /workspace
   state/<id>/.claude     → /home/fleet/.claude
+  state/<id>/claude.json → /home/fleet/.claude.json   (onboarding/trust seed)
   state/<id>/broker      → /run/broker   (broker socket directory)
 ```
 
@@ -301,6 +302,7 @@ Today the only workspace backend is a Docker container. The container name is `c
 - `Tty: true`, `OpenStdin: true`, `StdinOnce: false` — required for interactive `docker exec` later.
 - `WorkingDir: /workspace/${subdir}` (or `/workspace` if subdir is empty).
 - Binds: `${workspaceRoot}:/workspace:rw` (the user's host dir), `<userData>/state/<id>/.claude:/home/fleet/.claude:rw` (per-workspace persistent Claude state), and `<userData>/state/<id>/broker:/run/broker:rw` (the directory the in-container broker creates its Unix socket in). When `authMode === 'oauth'`, one additional **file-bind** is layered on top of the `.claude` dir bind: `<userData>/claude-shared/.credentials.json:/home/fleet/.claude/.credentials.json:rw` — so the first workspace's Claude.ai login covers every subsequent one and token refresh in any workspace propagates to all of them. The shared host file is created (touched empty) by `docker.ts:ensureSharedCredentialsFile()` before the container starts, because Docker refuses to file-bind a missing host path. `apikey` workspaces don't get the file-bind — auth comes via `ANTHROPIC_API_KEY` in the env.
+- A second **file-bind** (all auth modes) maps `<userData>/state/<id>/claude.json:/home/fleet/.claude.json:rw`. This file lives in `$HOME`, *beside* `~/.claude` rather than inside it, so the `.claude` dir bind does not cover it — yet it is where claude stores onboarding/account state (`hasCompletedOnboarding`, per-project `hasTrustDialogAccepted`). Without persisting it, every freshly-created container starts blank and re-runs the onboarding wizard (theme / "trust this folder" / setup) even when the credential is already valid — which reads to the user as "having to log in again." `docker.ts:ensureWorkspaceClaudeJson()` seeds the host file (only if absent) with `{ hasCompletedOnboarding: true, projects: { "<workingDir>": { hasTrustDialogAccepted: true } } }`, where `<workingDir>` is the container's cwd, so the wizard is pre-completed. Seeding only when absent lets claude own the file once it runs (startup counts, MCP/project state accumulate and persist across restarts/recreation). Safe with no credentials yet: the seed skips the wizard but claude still performs the real OAuth login when the token is genuinely missing. Trusting `/workspace` is implied by the act of creating the workspace against that host directory.
 - Env: `manifest.env.plain` merged with secret values resolved at create time via `vault.resolveEnv(id, plain, secretKeys)` (missing secret keys resolve to the empty string so the container still starts; claude itself surfaces the auth failure). `HOME=/home/fleet` is also set so tooling finds the bind-mounted `.claude/`.
 - `User: <hostUid>:<hostGid>` so bind-mounted files are owned by the host user.
 - Optional resource limits: `cpus` (→ `NanoCpus`), `memoryMb` (→ `Memory`).
