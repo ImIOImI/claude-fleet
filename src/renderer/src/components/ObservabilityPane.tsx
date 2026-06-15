@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import type { WorkspaceObservabilitySummary } from '../../../preload';
+import { colorFor, type WorkspaceSummary } from '../App';
 
 interface Props {
   /** Active workspace name, or null when nothing is selected. */
@@ -12,17 +14,38 @@ interface Props {
    * ingested for the selected workspace.
    */
   summary: WorkspaceObservabilitySummary | null;
+  /** All workspaces — drives the Fleet scope (per-workspace cost rows). */
+  workspaces: WorkspaceSummary[];
+  /** Per-workspace summaries keyed by ULID; Fleet view reads `usd` from each. */
+  summaries: Record<string, WorkspaceObservabilitySummary | null>;
 }
 
-export function ObservabilityPane({ workspaceName, summary }: Props) {
+type Scope = 'workspace' | 'fleet';
+
+export function ObservabilityPane({ workspaceName, summary, workspaces, summaries }: Props) {
+  const [scope, setScope] = useState<Scope>('workspace');
+  const live = workspaces.filter((w) => w.state !== 'deleted');
+
   return (
     <aside className="pane sidebar-right">
       <div className="pane-header">
         <span>Observability</span>
-        {summary?.model && <span className="obs-model">{summary.model}</span>}
+        {scope === 'workspace' && summary?.model && (
+          <span className="obs-model">{summary.model}</span>
+        )}
       </div>
+      {live.length > 0 && (
+        <ScopeToggle
+          scope={scope}
+          onScope={setScope}
+          workspaceName={workspaceName}
+          fleetCount={live.length}
+        />
+      )}
       <div className="pane-body">
-        {!workspaceName ? (
+        {scope === 'fleet' ? (
+          <FleetView workspaces={live} summaries={summaries} />
+        ) : !workspaceName ? (
           <EmptyState message="No workspace selected." />
         ) : !summary || summary.sessionId === null ? (
           <EmptyState message="No transcript events yet." subdued />
@@ -31,6 +54,90 @@ export function ObservabilityPane({ workspaceName, summary }: Props) {
         )}
       </div>
     </aside>
+  );
+}
+
+function ScopeToggle({
+  scope,
+  onScope,
+  workspaceName,
+  fleetCount
+}: {
+  scope: Scope;
+  onScope: (s: Scope) => void;
+  workspaceName: string | null;
+  fleetCount: number;
+}) {
+  return (
+    <div className="obs-scope-toggle" role="tablist" aria-label="Observability scope">
+      <button
+        role="tab"
+        aria-selected={scope === 'workspace'}
+        className={`obs-scope-btn ${scope === 'workspace' ? 'active' : ''}`}
+        onClick={() => onScope('workspace')}
+        title={workspaceName ?? 'No workspace selected'}
+      >
+        This workspace
+      </button>
+      <button
+        role="tab"
+        aria-selected={scope === 'fleet'}
+        className={`obs-scope-btn ${scope === 'fleet' ? 'active' : ''}`}
+        onClick={() => onScope('fleet')}
+      >
+        Fleet · {fleetCount}
+      </button>
+    </div>
+  );
+}
+
+function FleetView({
+  workspaces,
+  summaries
+}: {
+  workspaces: WorkspaceSummary[];
+  summaries: Record<string, WorkspaceObservabilitySummary | null>;
+}) {
+  const rows = workspaces.map((w) => ({
+    id: w.id,
+    name: w.name,
+    state: w.state,
+    hue: colorFor(w),
+    usd: summaries[w.id]?.usd ?? 0
+  }));
+  const total = rows.reduce((a, r) => a + r.usd, 0);
+
+  return (
+    <div className="obs-stack">
+      <section className="obs-cost-block">
+        <div className="obs-section-title">
+          Fleet · cost across {rows.length} workspace{rows.length === 1 ? '' : 's'}
+        </div>
+        <div className="obs-cost-amount mono">{formatUsd(total)}</div>
+        <div className="obs-share-bar" aria-hidden="true">
+          {rows.map((r) => (
+            <span
+              key={r.id}
+              className="obs-share-seg"
+              style={{ flex: total > 0 ? r.usd : 1, background: r.hue }}
+              title={`${r.name} · ${formatUsd(r.usd)}`}
+            />
+          ))}
+        </div>
+      </section>
+
+      <section className="obs-section">
+        <div className="obs-section-title">Workspaces</div>
+        {rows.map((r) => (
+          <div key={r.id} className="obs-fleet-row">
+            <span className="obs-fleet-dot" style={{ background: r.hue }} />
+            <span className="obs-fleet-name">{r.name}</span>
+            <span className={`obs-fleet-state ${r.state}`}>{r.state}</span>
+            <span className="obs-fleet-cost mono">{formatUsd(r.usd)}</span>
+          </div>
+        ))}
+      </section>
+    </div>
   );
 }
 

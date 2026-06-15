@@ -282,6 +282,46 @@ test('Cost sparkline: renders one bar per costSeries entry in the pane', async (
   }
 });
 
+test('Fleet scope: toggle shows aggregate cost + per-workspace rows', async () => {
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [
+        { name: 'alpha', containerId: 'alpha-id', state: 'running', workspaceRoot: '/tmp/alpha' },
+        { name: 'beta', containerId: 'beta-id', state: 'running', workspaceRoot: '/tmp/beta' }
+      ],
+      observabilitySummaries: {
+        alpha: {
+          sessionId: 's1', title: 'a', model: 'claude-opus-4-7',
+          startedAt: Date.now(), lastActiveAt: Date.now(),
+          eventCount: 3, inputTokens: 100, outputTokens: 50,
+          cacheReadInputTokens: 0, cacheCreationInputTokens: 0,
+          usd: 0.05, lastTurnContextTokens: 1000, contextWindowTokens: 200_000,
+          topTools: [], recentToolCalls: [], costSeries: []
+        },
+        beta: {
+          sessionId: 's2', title: 'b', model: 'claude-opus-4-7',
+          startedAt: Date.now(), lastActiveAt: Date.now(),
+          eventCount: 3, inputTokens: 100, outputTokens: 50,
+          cacheReadInputTokens: 0, cacheCreationInputTokens: 0,
+          usd: 0.15, lastTurnContextTokens: 1000, contextWindowTokens: 200_000,
+          topTools: [], recentToolCalls: [], costSeries: []
+        }
+      }
+    });
+
+    const obsPane = window.locator('.sidebar-right');
+    await window.getByRole('tab', { name: /Fleet/ }).click();
+
+    // One row per workspace, and the aggregate cost (0.05 + 0.15).
+    await expect(obsPane.locator('.obs-fleet-row')).toHaveCount(2);
+    await expect(obsPane.locator('.obs-cost-amount')).toContainText('$0.20', { timeout: 5_000 });
+    await expect(obsPane.locator('.obs-fleet-row', { hasText: 'beta' })).toContainText('$0.15');
+  } finally {
+    await app.close();
+  }
+});
+
 test('Slot consumer: chip heights stay equal regardless of whether observability data is present', async () => {
   // Visual regression from the slot-consumers PR. The chip secondary
   // line (".ws-chip-sub" showing "active 2m ago" / "idle 1h ago") is
