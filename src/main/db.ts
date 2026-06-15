@@ -441,6 +441,18 @@ export interface ToolCallCount {
   count: number;
 }
 
+export interface UserPrompt {
+  id: number;
+  sessionId: string;
+  ts: number | null;
+  /** 'ask' = AskUserQuestion, 'plan' = ExitPlanMode. */
+  kind: 'ask' | 'plan';
+  /** Summarized tool input (question/plan preview); full detail in raw_jsonl. */
+  input: string | null;
+  /** Whether a tool_result followed (the user answered / approved). */
+  resolved: boolean;
+}
+
 export interface ToolCall {
   name: string;
   /** Short input summary (command / path / pattern / …), or null. */
@@ -720,6 +732,53 @@ export function costSeriesForSession(sessionId: string, limit = 20): number[] {
         cacheCreationInputTokens: r.cache_creation_input_tokens,
       }),
     );
+}
+
+// ── user-prompt log (#11): moments Claude asks the user ───────────────────
+//
+// Sourced straight from the transcript: AskUserQuestion and ExitPlanMode are
+// tool_use events already ingested into `events`. (Generic permission prompts
+// don't appear in the JSONL and don't occur in claude-fleet — tools auto-allow
+// — so they're out of scope.) Each prompt is matched to its tool_result to
+// know whether the user resolved it. No extra table or capture mechanism.
+
+export function userPromptsForWorkspace(workspaceId: string, limit = 200): UserPrompt[] {
+  const d = openDbOrThrow();
+  const rows = d
+    .prepare(`
+      SELECT u.id        AS id,
+             u.session_id AS session_id,
+             u.ts        AS ts,
+             u.tool_name AS tool_name,
+             u.tool_input AS input,
+             (r.id IS NOT NULL) AS resolved
+      FROM events u
+      LEFT JOIN events r
+        ON r.session_id = u.session_id
+       AND r.tool_use_id = u.tool_use_id
+       AND r.tool_result_is_error IS NOT NULL
+      WHERE u.workspace_id = ?
+        AND u.tool_use_id IS NOT NULL
+        AND u.tool_name IN ('AskUserQuestion', 'ExitPlanMode')
+      ORDER BY u.ts DESC, u.id DESC
+      LIMIT ?
+    `)
+    .all(workspaceId, limit) as Array<{
+    id: number;
+    session_id: string;
+    ts: number | null;
+    tool_name: string;
+    input: string | null;
+    resolved: number;
+  }>;
+  return rows.map((r) => ({
+    id: r.id,
+    sessionId: r.session_id,
+    ts: r.ts,
+    kind: r.tool_name === 'ExitPlanMode' ? 'plan' : 'ask',
+    input: r.input,
+    resolved: !!r.resolved
+  }));
 }
 
 // ── broker_sessions: per-tab mapping ──────────────────────────────────────

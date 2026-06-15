@@ -65,6 +65,19 @@ export interface WorkspaceObservabilitySummary {
   costSeries: number[];
 }
 
+/** A moment Claude asked the user something (#11) — from the transcript. */
+export interface UserPromptRow {
+  id: number;
+  sessionId: string;
+  ts: number | null;
+  /** 'ask' = AskUserQuestion, 'plan' = ExitPlanMode. */
+  kind: 'ask' | 'plan';
+  /** Question/plan preview (summarized); full detail in the transcript. */
+  input: string | null;
+  /** Whether the user resolved it (a tool_result followed). */
+  resolved: boolean;
+}
+
 export interface ObservabilityCost {
   inputTokens: number;
   outputTokens: number;
@@ -269,6 +282,11 @@ const api = {
       ipcRenderer.on(channel, handler);
       return () => ipcRenderer.removeListener(channel, handler);
     }
+  },
+  userPrompts: {
+    /** Moments Claude asked the user (AskUserQuestion / ExitPlanMode), newest first (#11). */
+    list: (workspaceId: string): Promise<UserPromptRow[]> =>
+      ipcRenderer.invoke('userPrompts:list', workspaceId)
   }
 };
 
