@@ -282,6 +282,30 @@ test('Cost sparkline: renders one bar per costSeries entry in the pane', async (
   }
 });
 
+test('Context bars: one row per terminal, active tab highlighted', async () => {
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [
+        { name: 'alpha', containerId: 'alpha-id', state: 'running', workspaceRoot: '/tmp/alpha' }
+      ],
+      observabilityPerTabSummaries: true
+    });
+
+    await window.locator('.ws-chip', { hasText: 'alpha' }).click();
+    const obsPane = window.locator('.sidebar-right');
+    await expect(obsPane.locator('.obs-title')).toBeVisible({ timeout: 5_000 });
+
+    // The auto-created "main" terminal yields exactly one context row,
+    // marked active.
+    await expect(obsPane.locator('.obs-ctx-row')).toHaveCount(1, { timeout: 5_000 });
+    await expect(obsPane.getByText(/Context · 1 terminal/)).toBeVisible();
+    await expect(obsPane.locator('.obs-ctx-name.active')).toHaveCount(1);
+  } finally {
+    await app.close();
+  }
+});
+
 test('Fleet scope: toggle shows aggregate cost + per-workspace rows', async () => {
   const { app, window } = await launch();
   try {

@@ -104,6 +104,13 @@ export function App() {
     WorkspaceObservabilitySummary | null
   >(null);
 
+  // Per-terminal context for the selected workspace — one entry per session
+  // tab (from sessions.json), each with its session's context-window usage.
+  // Drives the observability pane's "Context · N terminals" bars.
+  const [terminals, setTerminals] = useState<
+    Array<{ id: string; name: string; contextTokens: number; windowTokens: number }>
+  >([]);
+
   const refresh = async () => {
     if (!window.api) return;
     const ok = await window.api.workspace.backendReady();
@@ -198,6 +205,48 @@ export function App() {
     void fetchOne();
     const unsubscribe = window.api.observability.onSummary((pushedWorkspaceId) => {
       if (pushedWorkspaceId === selectedWorkspaceId) void fetchOne();
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [apiReady, selectedWorkspaceId, activeTabId]);
+
+  // Per-terminal context for the selected workspace: read its session
+  // inventory (sessions.json) and fetch each session's summary for the
+  // context-window usage. Re-keyed on activeTabId so adding/closing a tab
+  // (which moves activeId) re-reads; also refreshed on every push for the
+  // selected workspace so a turn's growth shows live.
+  useEffect(() => {
+    if (!apiReady || !selectedWorkspaceId) {
+      setTerminals([]);
+      return;
+    }
+    let cancelled = false;
+    const fetchTerminals = async (): Promise<void> => {
+      try {
+        const inv = await window.api.sessions.read(selectedWorkspaceId);
+        const rows = await Promise.all(
+          inv.sessions.map(async (s) => {
+            const sum = await window.api.observability
+              .summaryForBrokerSession(selectedWorkspaceId, s.id)
+              .catch(() => null);
+            return {
+              id: s.id,
+              name: s.name,
+              contextTokens: sum?.lastTurnContextTokens ?? 0,
+              windowTokens: sum?.contextWindowTokens ?? 200_000
+            };
+          })
+        );
+        if (!cancelled) setTerminals(rows);
+      } catch {
+        if (!cancelled) setTerminals([]);
+      }
+    };
+    void fetchTerminals();
+    const unsubscribe = window.api.observability.onSummary((pushedWorkspaceId) => {
+      if (pushedWorkspaceId === selectedWorkspaceId) void fetchTerminals();
     });
     return () => {
       cancelled = true;
@@ -532,6 +581,8 @@ export function App() {
           summary={activeTabSummary}
           workspaces={workspaces}
           summaries={summaries}
+          terminals={terminals}
+          activeTerminalId={activeTabId}
         />
       </div>
 
