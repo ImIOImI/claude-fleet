@@ -63,6 +63,8 @@ export interface WorkspaceObservabilitySummary {
   }>;
   /** Per-turn USD cost over recent turns, oldest→newest (sparkline series). */
   costSeries: number[];
+  /** Claude is waiting on the user (unresolved AskUserQuestion/ExitPlanMode). */
+  pendingPrompt: boolean;
 }
 
 /** A moment Claude asked the user something (#11) — from the transcript. */

@@ -141,6 +141,8 @@ export interface MockOpts {
   // across tab switches. When false (default), the endpoint returns
   // null, matching the real server-side behavior after the bug-A fix.
   observabilityPerTabSummaries?: boolean;
+  // userPrompts:list rows, keyed by workspace id. Missing → [].
+  userPrompts?: Record<string, unknown[]>;
 }
 
 export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {}): Promise<void> {
@@ -184,7 +186,8 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       'observability:summaryForWorkspace',
       'observability:summaryForBrokerSession',
       'observability:getCost',
-      'observability:getCostForWorkspace'
+      'observability:getCostForWorkspace',
+      'userPrompts:list'
     ];
     for (const ch of channels) {
       try {
@@ -307,6 +310,8 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       'observability:summaryForWorkspace',
       (_e, workspaceId: string) => summaries[workspaceId] ?? null
     );
+    const promptsByWs = opts.userPrompts ?? {};
+    ipcMain.handle('userPrompts:list', (_e, workspaceId: string) => promptsByWs[workspaceId] ?? []);
     // Per-tab variant. Default matches the real server-side behavior:
     // null when no mapping is known. Tests that need to assert per-tab
     // routing pass observabilityPerTabSummaries=true.
@@ -331,7 +336,8 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
             contextWindowTokens: 200_000,
             topTools: [],
             recentToolCalls: [],
-            costSeries: [0.002, 0.004, 0.006]
+            costSeries: [0.002, 0.004, 0.006],
+            pendingPrompt: false
           };
         }
         return null;

@@ -9,7 +9,7 @@ import type { WorkspaceFormSubmit } from './components/WorkspaceForm';
 import { CloseWorkspaceModal } from './components/CloseWorkspaceModal';
 import { DeleteWorkspaceModal } from './components/DeleteWorkspaceModal';
 import { EditWorkspaceModal, containerLevelChanged } from './components/EditWorkspaceModal';
-import type { WorkspaceObservabilitySummary } from '../../preload';
+import type { WorkspaceObservabilitySummary, UserPromptRow } from '../../preload';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
 export type WorkspaceKind = 'container' | 'local';
@@ -110,6 +110,10 @@ export function App() {
   const [terminals, setTerminals] = useState<
     Array<{ id: string; name: string; contextTokens: number; windowTokens: number }>
   >([]);
+
+  // User-prompt log (#11) for the selected workspace — AskUserQuestion /
+  // ExitPlanMode moments, newest first.
+  const [userPrompts, setUserPrompts] = useState<UserPromptRow[]>([]);
 
   const refresh = async () => {
     if (!window.api) return;
@@ -247,6 +251,32 @@ export function App() {
     void fetchTerminals();
     const unsubscribe = window.api.observability.onSummary((pushedWorkspaceId) => {
       if (pushedWorkspaceId === selectedWorkspaceId) void fetchTerminals();
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [apiReady, selectedWorkspaceId, activeTabId]);
+
+  // User-prompt log for the selected workspace; refreshed on every push so a
+  // new AskUserQuestion / answered prompt shows live.
+  useEffect(() => {
+    if (!apiReady || !selectedWorkspaceId) {
+      setUserPrompts([]);
+      return;
+    }
+    let cancelled = false;
+    const fetchPrompts = async (): Promise<void> => {
+      try {
+        const rows = await window.api.userPrompts.list(selectedWorkspaceId);
+        if (!cancelled) setUserPrompts(rows);
+      } catch {
+        if (!cancelled) setUserPrompts([]);
+      }
+    };
+    void fetchPrompts();
+    const unsubscribe = window.api.observability.onSummary((pushedWorkspaceId) => {
+      if (pushedWorkspaceId === selectedWorkspaceId) void fetchPrompts();
     });
     return () => {
       cancelled = true;
@@ -583,6 +613,7 @@ export function App() {
           summaries={summaries}
           terminals={terminals}
           activeTerminalId={activeTabId}
+          userPrompts={userPrompts}
         />
       </div>
 

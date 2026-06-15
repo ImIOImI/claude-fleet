@@ -424,6 +424,57 @@ test('Fleet scope: toggle shows aggregate cost + per-workspace rows', async () =
   }
 });
 
+test('Chip needs-input: pulsing pip + danger sub-line when a prompt is pending', async () => {
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [
+        { name: 'alpha', containerId: 'alpha-id', state: 'running', workspaceRoot: '/tmp/alpha' }
+      ],
+      observabilitySummaries: {
+        alpha: {
+          sessionId: 's1', title: 'a', model: 'claude-opus-4-7',
+          startedAt: Date.now(), lastActiveAt: Date.now(),
+          eventCount: 2, inputTokens: 0, outputTokens: 0,
+          cacheReadInputTokens: 0, cacheCreationInputTokens: 0,
+          usd: 0, lastTurnContextTokens: 0, contextWindowTokens: 200_000,
+          topTools: [], recentToolCalls: [], costSeries: [], pendingPrompt: true
+        }
+      }
+    });
+    const chip = window.locator('.ws-chip', { hasText: 'alpha' });
+    await expect(chip.locator('.dot.needs-input')).toBeVisible({ timeout: 5_000 });
+    await expect(chip.locator('.ws-chip-sub.attention')).toContainText('needs your input');
+  } finally {
+    await app.close();
+  }
+});
+
+test('Prompt log: pane lists user prompts with resolved/pending status', async () => {
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [
+        { name: 'alpha', containerId: 'alpha-id', state: 'running', workspaceRoot: '/tmp/alpha' }
+      ],
+      observabilityPerTabSummaries: true,
+      userPrompts: {
+        alpha: [
+          { id: 2, sessionId: 's', ts: 2, kind: 'plan', input: 'do X', resolved: false },
+          { id: 1, sessionId: 's', ts: 1, kind: 'ask', input: 'Pick one', resolved: true }
+        ]
+      }
+    });
+    await window.locator('.ws-chip', { hasText: 'alpha' }).click();
+    const obsPane = window.locator('.sidebar-right');
+    await expect(obsPane.locator('.obs-title')).toBeVisible({ timeout: 5_000 });
+    await expect(obsPane.locator('.obs-prompt-row')).toHaveCount(2);
+    await expect(obsPane.locator('.obs-prompt-row.pending')).toHaveCount(1);
+  } finally {
+    await app.close();
+  }
+});
+
 test('Slot consumer: chip heights stay equal regardless of whether observability data is present', async () => {
   // Visual regression from the slot-consumers PR. The chip secondary
   // line (".ws-chip-sub" showing "active 2m ago" / "idle 1h ago") is

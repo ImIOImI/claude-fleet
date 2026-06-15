@@ -167,6 +167,15 @@ body {
 .ws-chip .dot.running { background: var(--state-running); }
 .ws-chip .dot.paused { background: var(--state-warn); }
 .ws-chip .dot.stopped { background: var(--state-exited); }
+/* Needs-input: pulsing red pip while Claude waits on the user (#11/#20). */
+.ws-chip .dot.needs-input {
+  background: var(--state-error);
+  animation: chipPulse 1.2s ease-in-out infinite;
+}
+@keyframes chipPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
 .ws-chip .chip-paused-glyph { color: var(--state-warn); flex-shrink: 0; }
 .ws-chip .name { font-weight: 500; }
 .ws-chip .status { color: var(--text-muted); font-size: 11px; }
@@ -187,6 +196,7 @@ body {
   color: var(--text-muted);
   letter-spacing: 0.01em;
 }
+.ws-chip-sub.attention { color: var(--state-error); }
 
 .top-strip-actions {
   margin-left: auto;
@@ -431,6 +441,35 @@ body {
 }
 .obs-fleet-state.running { color: var(--state-running); }
 .obs-fleet-cost { color: var(--text-secondary); font-size: 11.5px; flex-shrink: 0; }
+
+/* User-prompt log rows: kind badge | preview | status. Pending = warn accent. */
+.obs-prompt-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  padding: 2px 0 2px 6px;
+  border-left: 2px solid var(--border-subtle);
+}
+.obs-prompt-row.pending { border-left-color: var(--state-warn); }
+.obs-prompt-kind {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.obs-prompt-text {
+  color: var(--text-muted);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.obs-prompt-status { font-size: 10px; color: var(--text-muted); flex-shrink: 0; }
+.obs-prompt-row.pending .obs-prompt-status { color: var(--state-warn); }
 
 /* Per-terminal context bars: name | fill bar (+80% tick) | percentage. */
 .obs-ctx-row {

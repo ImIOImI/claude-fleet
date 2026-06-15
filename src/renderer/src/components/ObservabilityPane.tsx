@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { WorkspaceObservabilitySummary } from '../../../preload';
+import type { WorkspaceObservabilitySummary, UserPromptRow } from '../../../preload';
 import { colorFor, type WorkspaceSummary } from '../App';
 
 interface Props {
@@ -22,6 +22,8 @@ interface Props {
   terminals: Array<{ id: string; name: string; contextTokens: number; windowTokens: number }>;
   /** The active tab's session id (highlighted in the context bars). */
   activeTerminalId: string | null;
+  /** User-prompt log for the selected workspace (#11), newest first. */
+  userPrompts: UserPromptRow[];
 }
 
 type Scope = 'workspace' | 'fleet';
@@ -32,7 +34,8 @@ export function ObservabilityPane({
   workspaces,
   summaries,
   terminals,
-  activeTerminalId
+  activeTerminalId,
+  userPrompts
 }: Props) {
   const [scope, setScope] = useState<Scope>('workspace');
   const live = workspaces.filter((w) => w.state !== 'deleted');
@@ -61,7 +64,12 @@ export function ObservabilityPane({
         ) : !summary || summary.sessionId === null ? (
           <EmptyState message="No transcript events yet." subdued />
         ) : (
-          <SummaryView summary={summary} terminals={terminals} activeTerminalId={activeTerminalId} />
+          <SummaryView
+            summary={summary}
+            terminals={terminals}
+            activeTerminalId={activeTerminalId}
+            userPrompts={userPrompts}
+          />
         )}
       </div>
     </aside>
@@ -155,11 +163,13 @@ function FleetView({
 function SummaryView({
   summary,
   terminals,
-  activeTerminalId
+  activeTerminalId,
+  userPrompts
 }: {
   summary: WorkspaceObservabilitySummary;
   terminals: Array<{ id: string; name: string; contextTokens: number; windowTokens: number }>;
   activeTerminalId: string | null;
+  userPrompts: UserPromptRow[];
 }) {
   return (
     <div className="obs-stack">
@@ -189,6 +199,8 @@ function SummaryView({
       </section>
 
       <ContextRows terminals={terminals} activeId={activeTerminalId} />
+
+      <PromptLog prompts={userPrompts} />
 
       {(summary.recentToolCalls ?? []).length > 0 && (
         <section className="obs-section">
@@ -227,6 +239,31 @@ function SummaryView({
         )}
       </section>
     </div>
+  );
+}
+
+/**
+ * Passive user-prompt log (#11): the AskUserQuestion / ExitPlanMode moments
+ * Claude raised for this workspace. Read-only — no one-click allow buttons
+ * (intentional friction). Pending (unanswered) prompts are flagged.
+ */
+function PromptLog({ prompts }: { prompts: UserPromptRow[] }) {
+  if (prompts.length === 0) return null;
+  return (
+    <section className="obs-section">
+      <div className="obs-section-title">Prompts</div>
+      {prompts.slice(0, 8).map((p) => (
+        <div key={p.id} className={`obs-prompt-row ${p.resolved ? 'resolved' : 'pending'}`}>
+          <span className="obs-prompt-kind">{p.kind}</span>
+          {p.input && (
+            <span className="obs-prompt-text" title={p.input}>
+              {p.input}
+            </span>
+          )}
+          <span className="obs-prompt-status mono">{p.resolved ? 'done' : 'waiting'}</span>
+        </div>
+      ))}
+    </section>
   );
 }
 

@@ -505,6 +505,9 @@ export interface WorkspaceSummary {
   recentToolCalls: ToolCall[];
   /** Per-turn USD cost over recent turns, oldest→newest (sparkline series). */
   costSeries: number[];
+  /** True when the session has an unresolved AskUserQuestion/ExitPlanMode —
+   *  i.e. Claude is waiting on the user (drives the chip "needs-input" pip). */
+  pendingPrompt: boolean;
 }
 
 /**
@@ -653,6 +656,7 @@ export function summaryForSession(sessionId: string, topToolsLimit = 5): Workspa
     topTools,
     recentToolCalls: recentToolCallsForSession(session.id, 10),
     costSeries: costSeriesForSession(session.id),
+    pendingPrompt: hasPendingPromptForSession(session.id),
   };
 }
 
@@ -741,6 +745,28 @@ export function costSeriesForSession(sessionId: string, limit = 20): number[] {
 // don't appear in the JSONL and don't occur in claude-fleet — tools auto-allow
 // — so they're out of scope.) Each prompt is matched to its tool_result to
 // know whether the user resolved it. No extra table or capture mechanism.
+
+/** True if the session has an AskUserQuestion/ExitPlanMode tool_use with no
+ *  tool_result yet — Claude is waiting on the user. */
+export function hasPendingPromptForSession(sessionId: string): boolean {
+  const d = openDbOrThrow();
+  const row = d
+    .prepare(`
+      SELECT EXISTS(
+        SELECT 1 FROM events u
+        LEFT JOIN events r
+          ON r.session_id = u.session_id
+         AND r.tool_use_id = u.tool_use_id
+         AND r.tool_result_is_error IS NOT NULL
+        WHERE u.session_id = ?
+          AND u.tool_use_id IS NOT NULL
+          AND u.tool_name IN ('AskUserQuestion', 'ExitPlanMode')
+          AND r.id IS NULL
+      ) AS pending
+    `)
+    .get(sessionId) as { pending: number };
+  return !!row.pending;
+}
 
 export function userPromptsForWorkspace(workspaceId: string, limit = 200): UserPrompt[] {
   const d = openDbOrThrow();

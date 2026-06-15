@@ -194,7 +194,12 @@ export function WorkspaceTabStrip({
         </span>
       </div>
 
-      {live.map((w) => (
+      {live.map((w) => {
+        // "Needs input": Claude is waiting on the user (unresolved
+        // AskUserQuestion/ExitPlanMode) in a running workspace. Drives a
+        // pulsing red pip + danger-toned status line.
+        const needsInput = w.state === 'running' && summaries[w.id]?.pendingPrompt === true;
+        return (
         <div
           key={w.id}
           className={`ws-chip-group ${w.id === selectedId ? 'active' : ''}`}
@@ -203,9 +208,9 @@ export function WorkspaceTabStrip({
           <button
             className="ws-chip"
             onClick={() => onSelect(w.id)}
-            title={w.status}
+            title={needsInput ? 'Claude is waiting for your input' : w.status}
           >
-            <span className={`dot ${w.state}`} />
+            <span className={`dot ${w.state} ${needsInput ? 'needs-input' : ''}`} />
             {w.state === 'paused' && (
               <svg
                 viewBox="0 0 8 8"
@@ -230,8 +235,8 @@ export function WorkspaceTabStrip({
                 space (` `) reserves the line's vertical room
                 without showing any visible character.
               */}
-              <span className="ws-chip-sub">
-                {chipActivityText(summaries[w.id]) ?? ' '}
+              <span className={`ws-chip-sub ${needsInput ? 'attention' : ''}`}>
+                {needsInput ? 'needs your input' : chipActivityText(summaries[w.id]) ?? ' '}
               </span>
             </span>
           </button>
@@ -254,7 +259,8 @@ export function WorkspaceTabStrip({
             ⋮
           </button>
         </div>
-      ))}
+        );
+      })}
 
       <button
         className="btn"
