@@ -12,7 +12,7 @@
 // the user renames the workspace's label. Lookup is always by label.
 
 import Docker from 'dockerode';
-import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { Duplex } from 'node:stream';
 import {
@@ -23,6 +23,8 @@ import {
   workspaceBrokerSocket,
   workspaceClaudeDir,
   workspaceClaudeJsonPath,
+  workspaceInputRequestsPath,
+  workspaceSettingsPath,
   workspaceStateDir
 } from './paths.js';
 import type { AuthMode, Workspace, WorkspaceEnv, WorkspaceResources } from './workspaces.js';
@@ -273,6 +275,48 @@ export async function ensureWorkspaceClaudeJson(
   return filePath;
 }
 
+// The Notification hook command. claude pipes each notification's JSON to the
+// command's stdin; jq stamps a real ms timestamp (the payload has none) and
+// appends one NDJSON line to the sidecar. No matcher → captures every
+// notification kind (permission_prompt, idle_prompt, MCP elicitation); the
+// host watcher ingests them and classification is left to read time (#11).
+const INPUT_REQUESTS_CONTAINER_PATH = '/home/fleet/.claude/input-requests.jsonl';
+const NOTIFICATION_HOOK_COMMAND = `jq -c '. + {ts: (now * 1000 | floor)}' >> ${INPUT_REQUESTS_CONTAINER_PATH}`;
+
+/**
+ * Seed/merge a Notification hook into the workspace's ~/.claude/settings.json
+ * so claude logs every "needs the user" moment to the sidecar the watcher
+ * tails, and touch the sidecar empty so chokidar can watch the file before
+ * the first notification fires. Idempotent: skips if our hook is already
+ * present (recreate), preserving any other settings claude has written.
+ */
+export async function ensureWorkspaceNotificationHook(id: string): Promise<void> {
+  const settingsPath = workspaceSettingsPath(id);
+  await mkdir(dirname(settingsPath), { recursive: true });
+
+  let settings: Record<string, unknown> = {};
+  try {
+    settings = JSON.parse(await readFile(settingsPath, 'utf8')) as Record<string, unknown>;
+  } catch {
+    // Missing or unreadable — start fresh (claude merges its own keys later).
+  }
+  if (typeof settings.hooks !== 'object' || settings.hooks === null) settings.hooks = {};
+  const hooks = settings.hooks as Record<string, unknown>;
+  if (!Array.isArray(hooks.Notification)) hooks.Notification = [];
+  const notification = hooks.Notification as unknown[];
+
+  const present = JSON.stringify(notification).includes('input-requests.jsonl');
+  if (!present) {
+    notification.push({ hooks: [{ type: 'command', command: NOTIFICATION_HOOK_COMMAND }] });
+    await writeFile(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf8');
+  }
+
+  const sidecar = workspaceInputRequestsPath(id);
+  if (!(await stat(sidecar).catch(() => null))) {
+    await writeFile(sidecar, '', 'utf8');
+  }
+}
+
 export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Workspace> {
   assertValidWorkspaceId(spec.id);
 
@@ -317,6 +361,11 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
   // wizard isn't OAuth-specific.
   const claudeJson = await ensureWorkspaceClaudeJson(spec.id, workingDir);
   binds.push(`${claudeJson}:/home/fleet/.claude.json:rw`);
+
+  // Provision the Notification hook + sidecar so claude logs "needs the user"
+  // moments (#11). The sidecar lives in the bound .claude dir, so the host
+  // watcher tails it; no extra bind needed.
+  await ensureWorkspaceNotificationHook(spec.id);
 
   // OAuth mode: file-bind the shared credentials file on top of the
   // per-workspace .claude dir. Docker layers this file bind over the

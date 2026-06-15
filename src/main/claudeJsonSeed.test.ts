@@ -23,8 +23,10 @@ vi.mock('electron', () => ({
 }));
 
 // Imported AFTER the mock so paths.ts picks up the stubbed electron.app.
-const { ensureWorkspaceClaudeJson, ensureSharedRemoteSettingsFile } = await import('./docker.js');
-const { workspaceClaudeJsonPath, sharedRemoteSettingsPath } = await import('./paths.js');
+const { ensureWorkspaceClaudeJson, ensureSharedRemoteSettingsFile, ensureWorkspaceNotificationHook } =
+  await import('./docker.js');
+const { workspaceClaudeJsonPath, sharedRemoteSettingsPath, workspaceSettingsPath, workspaceInputRequestsPath } =
+  await import('./paths.js');
 
 beforeEach(async () => {
   userDataDir = await mkdtemp(join(tmpdir(), 'claude-fleet-claudejson-'));
@@ -62,6 +64,34 @@ describe('ensureWorkspaceClaudeJson', () => {
     const returned = await ensureWorkspaceClaudeJson('01KEEP', '/workspace');
     expect(returned).toBe(path);
     expect(await readFile(path, 'utf8')).toBe(real);
+  });
+});
+
+describe('ensureWorkspaceNotificationHook', () => {
+  it('seeds a Notification hook + touches the sidecar when settings is absent', async () => {
+    const id = '01HOOK000000000000000000A';
+    await ensureWorkspaceNotificationHook(id);
+
+    const settings = JSON.parse(await readFile(workspaceSettingsPath(id), 'utf8'));
+    const cmd = settings.hooks.Notification[0].hooks[0].command;
+    expect(cmd).toContain('input-requests.jsonl');
+    expect(settings.hooks.Notification[0].hooks[0].type).toBe('command');
+    // Sidecar exists (empty) so the watcher can tail it.
+    expect(await readFile(workspaceInputRequestsPath(id), 'utf8')).toBe('');
+  });
+
+  it('merges into existing settings without clobbering and is idempotent', async () => {
+    const id = '01HOOK000000000000000000B';
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(join(userDataDir, 'state', id, '.claude'), { recursive: true });
+    await writeFile(workspaceSettingsPath(id), JSON.stringify({ theme: 'dark' }), 'utf8');
+
+    await ensureWorkspaceNotificationHook(id);
+    await ensureWorkspaceNotificationHook(id); // second call must not duplicate
+
+    const settings = JSON.parse(await readFile(workspaceSettingsPath(id), 'utf8'));
+    expect(settings.theme).toBe('dark'); // preserved
+    expect(settings.hooks.Notification).toHaveLength(1); // not duplicated
   });
 });
 

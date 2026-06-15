@@ -726,24 +726,26 @@ CREATE TABLE profile_settings (
 ### Permission-request log
 Always-on structured log of every prompt Claude makes to the user. Substrate for tuning `.claude/settings.json` permissions and CLAUDE.md guidance over time.
 
+**Implemented (capture v1).** Key finding: **permission prompts are not in the transcript JSONL** — a gated tool just goes `tool_use`→`tool_result`, and the interactive allow/deny prompt leaves no transcript event. So capture is sourced from claude's **`Notification` hook** instead, which fires on exactly the moments we want — `permission_prompt` (tool needs permission), `idle_prompt` (waiting for input), and MCP elicitation. `docker.ts:ensureWorkspaceNotificationHook` seeds/merges a `Notification` hook (no matcher → all kinds) into the workspace's `~/.claude/settings.json` at create time; its command is `jq -c '. + {ts: (now*1000|floor)}' >> ~/.claude/input-requests.jsonl` — stamping a real ms timestamp (the payload has none) and appending one NDJSON line per notification to a sidecar inside the bound `.claude` dir. The `JsonlWatcher` tails that sidecar (alongside the transcripts; routed by file kind) and `db.ingestInputRequest` writes rows to the **`input_requests`** table (raw payload + extracted `session_id`/`notification_type`/`message`; dedup by line hash). Exposed via `inputRequests:list(workspaceId)`. Classification beyond `notification_type` is left to read-time/post-processing. **Remaining:** the passive log UI, per-workspace disable flag, and driving the chip "needs-input" affordance off unresolved rows.
+
 **Decisions made:**
 - **Scope**: structured prompts only — permission requests (Bash/Edit/Write/etc. that hit `ask` rules or unlisted patterns), `AskUserQuestion` tool calls, `ExitPlanMode` approvals. Plain-text questions in assistant messages are out of scope; they don't map cleanly to settings.json entries.
 - **Storage**: SQLite table in the same DB the observability and sessions layers use.
 - **UI affordance**: passive log view only — sortable, filterable, no one-click "add to allow rules" buttons. The user reads, copies patterns, and edits `.claude/settings.json` by hand. Intentional friction so the allowlist doesn't widen faster than the user can notice.
 - **Default**: always on. Per-container disable via a flag on the container's create spec for anyone who wants to turn it off.
 
-**SQLite schema (sketch):**
+**SQLite schema (as built, v5).** The original `prompts` sketch assumed a transcript-sourced event with a known `kind` and a paired response; since the data actually comes from the `Notification` hook (raw, no resolution recorded), the shipped table stores the payload loosely and defers classification:
 ```sql
-CREATE TABLE prompts (
+CREATE TABLE input_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id TEXT NOT NULL,
-  container_id TEXT,
-  ts INTEGER NOT NULL,                   -- event timestamp (ms)
-  kind TEXT NOT NULL,                    -- 'permission' | 'ask' | 'plan'
-  tool_name TEXT,                        -- gated tool name when kind='permission'
-  request_payload TEXT NOT NULL,         -- JSON of the prompt details
-  response_payload TEXT,                 -- JSON of how the user resolved it
-  decided_at INTEGER                     -- when the user resolved it (ms)
+  workspace_id TEXT NOT NULL,
+  session_id TEXT,                       -- from the payload (null if absent)
+  ts INTEGER NOT NULL,                   -- jq-stamped notification time (ms)
+  notification_type TEXT,               -- 'permission_prompt' | 'idle_prompt' | … (raw)
+  message TEXT,                          -- human-readable notification text
+  raw TEXT NOT NULL,                     -- full hook payload, for later classification
+  dedup_key TEXT NOT NULL,               -- sha256(raw line); re-reads are idempotent
+  UNIQUE(workspace_id, dedup_key)
 );
 ```
 

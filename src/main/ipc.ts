@@ -27,6 +27,7 @@ import {
   summaryForBrokerSession,
   costForSession,
   costForWorkspace,
+  inputRequestsForWorkspace,
   learnBrokerSessionMapping,
   lookupBrokerSession,
 } from './db.js';
@@ -487,6 +488,12 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   );
   ipcMain.handle('observability:getCostForWorkspace', (_e, workspaceId: string) =>
     costForWorkspace(workspaceId)
+  );
+
+  // Permission/input-request log (#11): rows from the Notification-hook
+  // sidecar the watcher ingests. Newest first.
+  ipcMain.handle('inputRequests:list', (_e, workspaceId: string) =>
+    inputRequestsForWorkspace(workspaceId)
   );
 
   // Renderer-side error reporting bridge. The renderer's onerror /

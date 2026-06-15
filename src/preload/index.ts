@@ -65,6 +65,19 @@ export interface WorkspaceObservabilitySummary {
   costSeries: number[];
 }
 
+/** A logged "Claude needs the user" moment (#11) — from the Notification hook. */
+export interface InputRequestRow {
+  id: number;
+  workspaceId: string;
+  sessionId: string | null;
+  ts: number;
+  /** e.g. 'permission_prompt' | 'idle_prompt' | … (raw from claude). */
+  notificationType: string | null;
+  message: string | null;
+  /** Full hook payload as a JSON string, for later classification. */
+  raw: string;
+}
+
 export interface ObservabilityCost {
   inputTokens: number;
   outputTokens: number;
@@ -269,6 +282,11 @@ const api = {
       ipcRenderer.on(channel, handler);
       return () => ipcRenderer.removeListener(channel, handler);
     }
+  },
+  inputRequests: {
+    /** Logged "needs the user" rows for a workspace, newest first (#11). */
+    list: (workspaceId: string): Promise<InputRequestRow[]> =>
+      ipcRenderer.invoke('inputRequests:list', workspaceId)
   }
 };
 

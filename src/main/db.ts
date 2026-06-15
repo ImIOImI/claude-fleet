@@ -171,6 +171,30 @@ function migrate(d: Database.Database): void {
     `);
     d.pragma('user_version = 4');
   }
+  if (current < 5) {
+    // input_requests (#11): every "Claude needs the user" moment, captured
+    // raw from claude's Notification hook (permission prompts, idle waits,
+    // MCP elicitation). Stored loosely — `notification_type` + `message` are
+    // pulled out for filtering, `raw` keeps the full payload for later
+    // classification. Separate table from `events`: different source (a
+    // sidecar log, not the transcript) and different lifecycle.
+    d.exec(`
+      CREATE TABLE input_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace_id TEXT NOT NULL,
+        session_id TEXT,
+        ts INTEGER NOT NULL,
+        notification_type TEXT,
+        message TEXT,
+        raw TEXT NOT NULL,
+        dedup_key TEXT NOT NULL,
+        UNIQUE(workspace_id, dedup_key)
+      );
+      CREATE INDEX idx_input_requests_workspace ON input_requests(workspace_id, ts);
+      CREATE INDEX idx_input_requests_session ON input_requests(session_id);
+    `);
+    d.pragma('user_version = 5');
+  }
 }
 
 // ── Ingest ────────────────────────────────────────────────────────────────
@@ -720,6 +744,82 @@ export function costSeriesForSession(sessionId: string, limit = 20): number[] {
         cacheCreationInputTokens: r.cache_creation_input_tokens,
       }),
     );
+}
+
+// ── input_requests (#11): "Claude needs the user" log ─────────────────────
+//
+// Sourced from claude's Notification hook (configured per workspace by
+// docker.ts), which appends one JSON line per notification — permission
+// prompts, idle waits, MCP elicitation — to a sidecar the JsonlWatcher tails.
+// Stored raw + loosely parsed; classification is left to read-time / later.
+
+export interface InputRequestRow {
+  id: number;
+  workspaceId: string;
+  sessionId: string | null;
+  ts: number;
+  notificationType: string | null;
+  message: string | null;
+  raw: string;
+}
+
+/**
+ * Ingest one Notification-hook payload line. The payload has no uuid, so the
+ * dedup key is a hash of the raw line — re-reads (watcher restart) are
+ * idempotent. `ts` is read from the jq-stamped `ts` field (real notification
+ * time), falling back to now.
+ */
+export function ingestInputRequest(workspaceId: string, rawLine: string): { inserted: boolean } {
+  const d = openDbOrThrow();
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(rawLine) as Record<string, unknown>;
+  } catch {
+    return { inserted: false };
+  }
+  const sessionId = typeof parsed.session_id === 'string' ? parsed.session_id : null;
+  const notificationType =
+    typeof parsed.notification_type === 'string' ? parsed.notification_type : null;
+  const message = typeof parsed.message === 'string' ? parsed.message : null;
+  const ts = numOrNull(parsed.ts) ?? Date.now();
+  const info = d
+    .prepare(`
+      INSERT OR IGNORE INTO input_requests
+        (workspace_id, session_id, ts, notification_type, message, raw, dedup_key)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `)
+    .run(workspaceId, sessionId, ts, notificationType, message, rawLine, hashLine(rawLine));
+  return { inserted: info.changes > 0 };
+}
+
+export function inputRequestsForWorkspace(workspaceId: string, limit = 200): InputRequestRow[] {
+  const d = openDbOrThrow();
+  const rows = d
+    .prepare(`
+      SELECT id, workspace_id, session_id, ts, notification_type, message, raw
+      FROM input_requests
+      WHERE workspace_id = ?
+      ORDER BY ts DESC
+      LIMIT ?
+    `)
+    .all(workspaceId, limit) as Array<{
+    id: number;
+    workspace_id: string;
+    session_id: string | null;
+    ts: number;
+    notification_type: string | null;
+    message: string | null;
+    raw: string;
+  }>;
+  return rows.map((r) => ({
+    id: r.id,
+    workspaceId: r.workspace_id,
+    sessionId: r.session_id,
+    ts: r.ts,
+    notificationType: r.notification_type,
+    message: r.message,
+    raw: r.raw
+  }));
 }
 
 // ── broker_sessions: per-tab mapping ──────────────────────────────────────

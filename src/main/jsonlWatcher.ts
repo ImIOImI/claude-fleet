@@ -15,22 +15,30 @@
 // offset 0 produces the same end state.
 
 import { EventEmitter } from 'node:events';
-import { mkdirSync, promises as fsp, type Stats } from 'node:fs';
+import { mkdirSync, writeFileSync, promises as fsp, type Stats } from 'node:fs';
 import { join, basename, extname, sep as pathSep } from 'node:path';
 // chokidar v5 is ESM-only. Our main bundle is CommonJS (per
 // electron.vite.config.ts), so `require('chokidar')` would throw
 // ERR_REQUIRE_ESM. Load it via dynamic import inside `start()`.
 import type { FSWatcher } from 'chokidar';
 import { workspaceClaudeDir } from './paths.js';
-import { ingestLine } from './db.js';
+import { ingestLine, ingestInputRequest } from './db.js';
 
 const PROJECTS_SUBDIR = join('projects', '-workspace');
+// The Notification-hook sidecar (#11), tailed alongside the transcripts.
+// Lives at the root of each workspace's .claude dir.
+const INPUT_REQUESTS_FILE = 'input-requests.jsonl';
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface FileState {
   workspaceId: string;
+  // claude session UUID for transcript files; '' for the input-requests
+  // sidecar (its rows carry their own session_id in the payload).
   sessionId: string;
+  // 'events' → transcript JSONL (events table); 'input' → Notification-hook
+  // sidecar (input_requests table).
+  kind: 'events' | 'input';
   offset: number;
 }
 
@@ -136,6 +144,17 @@ export class JsonlWatcher extends EventEmitter {
       // works fine if the dir gets created elsewhere later.
     }
     this.watcher.add(dir);
+
+    // Also tail the Notification-hook sidecar (#11). Same chokidar v5 caveat
+    // as above — a non-existent file path is dropped at add() time, so touch
+    // it first (append-create, never truncates an existing log).
+    const sidecar = join(workspaceClaudeDir(name), INPUT_REQUESTS_FILE);
+    try {
+      writeFileSync(sidecar, '', { flag: 'a' });
+    } catch {
+      // Best effort — docker.ts also touches it at create time.
+    }
+    this.watcher.add(sidecar);
   }
 
   unregisterWorkspace(name: string): void {
@@ -143,6 +162,10 @@ export class JsonlWatcher extends EventEmitter {
     const dir = join(workspaceClaudeDir(name), PROJECTS_SUBDIR);
     if (!this.watchedDirs.delete(dir)) return;
     this.watcher.unwatch(dir);
+    const sidecar = join(workspaceClaudeDir(name), INPUT_REQUESTS_FILE);
+    this.watcher.unwatch(sidecar);
+    this.files.delete(sidecar);
+    this.chains.delete(sidecar);
     const prefix = dir + pathSep;
     for (const path of [...this.files.keys()]) {
       if (path === dir || path.startsWith(prefix)) {
@@ -168,7 +191,7 @@ export class JsonlWatcher extends EventEmitter {
     // First sighting of this JSONL file path → fire 'new-session' so the
     // mapping layer can pair this claude UUID with a pending attach.
     // Fires before the eventual 'ingest' emit for this batch.
-    if (!existing) {
+    if (!existing && state.kind === 'events') {
       this.emit('new-session', {
         workspaceId: state.workspaceId,
         sessionId: state.sessionId,
@@ -187,14 +210,20 @@ export class JsonlWatcher extends EventEmitter {
     if (stats.size < state.offset) state.offset = 0;
     if (stats.size === state.offset) return;
 
-    const { newOffset, insertedCount } = await readAndIngest(path, state);
+    // Route to the right table: transcript lines → events; sidecar lines →
+    // input_requests (#11). The offset/partial-line machinery is shared.
+    const ingest =
+      state.kind === 'input'
+        ? (line: string): boolean => ingestInputRequest(state.workspaceId, line).inserted
+        : (line: string): boolean => ingestLine(state.workspaceId, state.sessionId, line).inserted;
+
+    const { newOffset, insertedCount } = await readAndIngest(path, state, ingest);
     state.offset = newOffset;
     this.files.set(path, state);
 
-    // Only emit when ≥1 line genuinely inserted (compaction re-reads return
-    // duplicates whose dedup_key already exists; no consumer state change
-    // happened, so don't wake them up).
-    if (insertedCount > 0) {
+    // Only the transcript stream drives the observability summary push; the
+    // sidecar ingests silently (no consumer wired to it live yet).
+    if (insertedCount > 0 && state.kind === 'events') {
       this.emit('ingest', {
         workspaceId: state.workspaceId,
         sessionId: state.sessionId,
@@ -204,9 +233,15 @@ export class JsonlWatcher extends EventEmitter {
 
   private initState(path: string): FileState | null {
     const workspaceId = workspaceIdFromPath(path);
+    if (!workspaceId) return null;
+    if (basename(path) === INPUT_REQUESTS_FILE) {
+      const state: FileState = { workspaceId, sessionId: '', kind: 'input', offset: 0 };
+      this.files.set(path, state);
+      return state;
+    }
     const sessionId = basename(path, '.jsonl');
-    if (!workspaceId || !UUID_RE.test(sessionId)) return null;
-    const state: FileState = { workspaceId, sessionId, offset: 0 };
+    if (!UUID_RE.test(sessionId)) return null;
+    const state: FileState = { workspaceId, sessionId, kind: 'events', offset: 0 };
     this.files.set(path, state);
     return state;
   }
@@ -222,7 +257,11 @@ interface ReadResult {
  * offset plus the count of lines that produced a non-duplicate insert.
  * Trailing partial line (no terminating `\n`) is left for the next call.
  */
-async function readAndIngest(path: string, state: FileState): Promise<ReadResult> {
+async function readAndIngest(
+  path: string,
+  state: FileState,
+  ingest: (line: string) => boolean
+): Promise<ReadResult> {
   const fh = await fsp.open(path, 'r');
   try {
     const stats = await fh.stat();
@@ -248,8 +287,7 @@ async function readAndIngest(path: string, state: FileState): Promise<ReadResult
     for (const line of text.split('\n')) {
       const trimmed = line.trim();
       if (!trimmed) continue;
-      const result = ingestLine(state.workspaceId, state.sessionId, trimmed);
-      if (result.inserted) insertedCount++;
+      if (ingest(trimmed)) insertedCount++;
     }
 
     return { newOffset: state.offset + lastNl + 1, insertedCount };

@@ -148,6 +148,68 @@ test('Live push: renderer receives observability:summary push when watcher inges
   }
 });
 
+test('Input-request log: watcher ingests Notification-hook sidecar lines (#11)', async () => {
+  // Real watcher + DB: a line appended to the per-workspace
+  // input-requests.jsonl sidecar (what claude's Notification hook writes)
+  // is ingested into input_requests and surfaced via inputRequests:list.
+  const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-inputreq-'));
+  const id = '01TESTINPUTREQ000000000WS';
+  const name = 'inputreq-test-ws';
+  const stateDir = path.join(userDataDir, 'state', id);
+  const claudeDir = path.join(stateDir, '.claude');
+  mkdirSync(path.join(claudeDir, 'projects', '-workspace'), { recursive: true });
+  writeFileSync(
+    path.join(stateDir, 'workspace.json'),
+    JSON.stringify({
+      id, name, labels: [],
+      workspaceRoot: '/tmp/fleet-test-' + name, workspaceSubdir: '',
+      kind: 'container', image: 'mock', authMode: 'oauth',
+      env: { plain: {}, secretKeys: [] }, createdAt: Date.now(), lastUsedAt: Date.now()
+    })
+  );
+
+  const app = await electron.launch({
+    args: [REPO_ROOT, `--user-data-dir=${userDataDir}`],
+    cwd: REPO_ROOT,
+    env: Object.fromEntries(
+      Object.entries(process.env).filter(([k]) => k !== 'CLAUDE_FLEET_MOCK')
+    ) as Record<string, string>
+  });
+  const window = await app.firstWindow();
+  await window.waitForLoadState('domcontentloaded');
+
+  try {
+    await new Promise((r) => setTimeout(r, 500));
+
+    const note = {
+      session_id: 'sess-x',
+      hook_event_name: 'Notification',
+      notification_type: 'permission_prompt',
+      message: 'Permission required: Bash command',
+      ts: Date.now()
+    };
+    writeFileSync(path.join(claudeDir, 'input-requests.jsonl'), JSON.stringify(note) + '\n');
+
+    await expect
+      .poll(
+        async () =>
+          window.evaluate(async (wsId) => {
+            const rows = await window.api.inputRequests.list(wsId);
+            return rows.length;
+          }, id),
+        { timeout: 8_000, intervals: [200, 500, 1000] }
+      )
+      .toBeGreaterThanOrEqual(1);
+
+    const rows = await window.evaluate((wsId) => window.api.inputRequests.list(wsId), id);
+    expect(rows[0].notificationType).toBe('permission_prompt');
+    expect(rows[0].message).toContain('Permission required');
+    expect(rows[0].sessionId).toBe('sess-x');
+  } finally {
+    await app.close();
+  }
+});
+
 test('Tool-call detail + cost series: ingest derives duration/status and per-turn cost', async () => {
   // Phase B data layer end-to-end through the real watcher + DB: a tool_use
   // matched to its tool_result yields name/input/duration/status, and an
