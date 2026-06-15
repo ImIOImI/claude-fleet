@@ -530,6 +530,8 @@ export function App() {
         <ObservabilityPane
           workspaceName={selected?.name ?? null}
           summary={activeTabSummary}
+          workspaces={workspaces}
+          summaries={summaries}
         />
       </div>
 
