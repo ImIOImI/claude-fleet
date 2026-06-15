@@ -260,6 +260,28 @@ test('Tool-call detail + cost series: ingest derives duration/status and per-tur
   }
 });
 
+test('Cost sparkline: renders one bar per costSeries entry in the pane', async () => {
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [
+        { name: 'alpha', containerId: 'alpha-id', state: 'running', workspaceRoot: '/tmp/alpha' }
+      ],
+      // Per-tab summaries carry a 3-entry costSeries (see _helpers).
+      observabilityPerTabSummaries: true
+    });
+
+    await window.locator('.ws-chip', { hasText: 'alpha' }).click();
+    const obsPane = window.locator('.sidebar-right');
+    await expect(obsPane.locator('.obs-title')).toBeVisible({ timeout: 5_000 });
+
+    // One bar per costSeries entry.
+    await expect(obsPane.locator('.obs-sparkline-bar')).toHaveCount(3);
+  } finally {
+    await app.close();
+  }
+});
+
 test('Slot consumer: chip heights stay equal regardless of whether observability data is present', async () => {
   // Visual regression from the slot-consumers PR. The chip secondary
   // line (".ws-chip-sub" showing "active 2m ago" / "idle 1h ago") is
