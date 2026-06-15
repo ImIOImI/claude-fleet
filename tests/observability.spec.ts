@@ -260,6 +260,84 @@ test('Tool-call detail + cost series: ingest derives duration/status and per-tur
   }
 });
 
+test('User-prompt log: AskUserQuestion/ExitPlanMode surface with resolved status (#11)', async () => {
+  const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-prompts-'));
+  const id = '01TESTPROMPTS000000000WS';
+  const name = 'prompts-test-ws';
+  const stateDir = path.join(userDataDir, 'state', id);
+  const projectsDir = path.join(stateDir, '.claude', 'projects', '-workspace');
+  mkdirSync(projectsDir, { recursive: true });
+  writeFileSync(
+    path.join(stateDir, 'workspace.json'),
+    JSON.stringify({
+      id, name, labels: [],
+      workspaceRoot: '/tmp/fleet-test-' + name, workspaceSubdir: '',
+      kind: 'container', image: 'mock', authMode: 'oauth',
+      env: { plain: {}, secretKeys: [] }, createdAt: Date.now(), lastUsedAt: Date.now()
+    })
+  );
+
+  const app = await electron.launch({
+    args: [REPO_ROOT, `--user-data-dir=${userDataDir}`],
+    cwd: REPO_ROOT,
+    env: Object.fromEntries(
+      Object.entries(process.env).filter(([k]) => k !== 'CLAUDE_FLEET_MOCK')
+    ) as Record<string, string>
+  });
+  const window = await app.firstWindow();
+  await window.waitForLoadState('domcontentloaded');
+
+  try {
+    await new Promise((r) => setTimeout(r, 500));
+    const sessionId = randomUUID();
+    const lines = [
+      // AskUserQuestion, answered (a tool_result follows).
+      {
+        type: 'assistant', uuid: randomUUID(), timestamp: '2026-01-01T00:00:00.000Z',
+        message: { model: 'claude-opus-4-8', content: [
+          { type: 'tool_use', id: 'toolu_ask', name: 'AskUserQuestion', input: { questions: [{ question: 'Pick one' }] } }
+        ] }
+      },
+      {
+        type: 'user', uuid: randomUUID(), timestamp: '2026-01-01T00:00:05.000Z',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_ask', is_error: false }] }
+      },
+      // ExitPlanMode, still pending (no tool_result).
+      {
+        type: 'assistant', uuid: randomUUID(), timestamp: '2026-01-01T00:00:10.000Z',
+        message: { model: 'claude-opus-4-8', content: [
+          { type: 'tool_use', id: 'toolu_plan', name: 'ExitPlanMode', input: { plan: 'do the thing' } }
+        ] }
+      }
+    ];
+    writeFileSync(
+      path.join(projectsDir, `${sessionId}.jsonl`),
+      lines.map((l) => JSON.stringify(l)).join('\n') + '\n'
+    );
+
+    await expect
+      .poll(
+        async () =>
+          window.evaluate(async (wsId) => {
+            const r = await window.api.userPrompts.list(wsId);
+            return r.length;
+          }, id),
+        { timeout: 8_000, intervals: [200, 500, 1000] }
+      )
+      .toBeGreaterThanOrEqual(2);
+
+    const prompts = await window.evaluate((wsId) => window.api.userPrompts.list(wsId), id);
+    const ask = prompts!.find((p) => p.kind === 'ask');
+    const plan = prompts!.find((p) => p.kind === 'plan');
+    expect(ask).toBeTruthy();
+    expect(ask!.resolved).toBe(true);
+    expect(plan).toBeTruthy();
+    expect(plan!.resolved).toBe(false);
+  } finally {
+    await app.close();
+  }
+});
+
 test('Cost sparkline: renders one bar per costSeries entry in the pane', async () => {
   const { app, window } = await launch();
   try {

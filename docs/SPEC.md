@@ -726,6 +726,10 @@ CREATE TABLE profile_settings (
 ### Permission-request log
 Always-on structured log of every prompt Claude makes to the user. Substrate for tuning `.claude/settings.json` permissions and CLAUDE.md guidance over time.
 
+**Implemented (capture v1) — JSONL-sourced.** Two approaches were investigated; the data sources forced the scope:
+- **Generic permission prompts are not capturable here.** They're not written to the transcript JSONL (a gated tool just goes `tool_use`→`tool_result`), and in claude-fleet they don't even occur — claude auto-allows tools (verified: `Bash` decided in ~5 ms, no prompt). A `Notification`-hook approach (provision a hook in the container that logs permission/idle notifications to a sidecar) was built and **abandoned**: live testing showed claude loads **zero** hooks from a provisioned `~/.claude/settings.json` (`--debug`: "Found 0 total hooks in registry"), apparently gated behind a hook-approval step with no documented way to pre-seed it.
+- **What ships:** `AskUserQuestion` and `ExitPlanMode` — the "Claude is waiting on the user" moments that *do* occur and *are* in the transcript as `tool_use` events already ingested into `events`. `db.userPromptsForWorkspace` is a query over `events` (no new table, no migration): tool_use rows with `tool_name IN ('AskUserQuestion','ExitPlanMode')`, LEFT-JOINed to their `tool_result` (by `tool_use_id`) to derive a `resolved` flag, mapped to `kind` `'ask'`/`'plan'` with the summarized `tool_input` as a preview. Exposed via `userPrompts:list(workspaceId)`. **Remaining:** the passive log UI and driving the chip "needs-input" affordance off unresolved prompts.
+
 **Decisions made:**
 - **Scope**: structured prompts only — permission requests (Bash/Edit/Write/etc. that hit `ask` rules or unlisted patterns), `AskUserQuestion` tool calls, `ExitPlanMode` approvals. Plain-text questions in assistant messages are out of scope; they don't map cleanly to settings.json entries.
 - **Storage**: SQLite table in the same DB the observability and sessions layers use.
