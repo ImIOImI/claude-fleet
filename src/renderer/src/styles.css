@@ -167,6 +167,13 @@ body {
 .ws-chip .dot.running { background: var(--state-running); }
 .ws-chip .dot.paused { background: var(--state-warn); }
 .ws-chip .dot.stopped { background: var(--state-exited); }
+/* Busy: claude actively working — the running dot pulses. */
+.ws-chip .dot.busy { animation: chipBusyPulse 1s ease-in-out infinite; }
+@keyframes chipBusyPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.66); }
+}
+.ws-chip-sub.busy { color: var(--text-secondary); }
 .ws-chip .chip-paused-glyph { color: var(--state-warn); flex-shrink: 0; }
 .ws-chip .name { font-weight: 500; }
 .ws-chip .status { color: var(--text-muted); font-size: 11px; }
