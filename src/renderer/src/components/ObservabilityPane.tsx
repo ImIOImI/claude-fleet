@@ -51,6 +51,7 @@ function SummaryView({ summary }: { summary: WorkspaceObservabilitySummary }) {
       <section className="obs-cost-block">
         <div className="obs-cost-amount mono">{formatUsd(summary.usd)}</div>
         <div className="obs-cost-label">session cost</div>
+        <Sparkline series={summary.costSeries ?? []} />
       </section>
 
       <section className="obs-section">
@@ -97,6 +98,32 @@ function SummaryView({ summary }: { summary: WorkspaceObservabilitySummary }) {
           </div>
         )}
       </section>
+    </div>
+  );
+}
+
+/**
+ * Mini per-turn cost sparkline. Each bar is one assistant turn's USD from
+ * `summary.costSeries` (oldest→newest), height normalized to the max in the
+ * window and opacity ramped so recent turns read brighter. Renders nothing
+ * until there are ≥2 turns with non-zero cost — a single bar isn't a trend.
+ */
+function Sparkline({ series }: { series: number[] }) {
+  const data = series.filter((n) => Number.isFinite(n));
+  const max = Math.max(...data, 0);
+  if (data.length < 2 || max <= 0) return null;
+  return (
+    <div className="obs-sparkline" title="per-turn cost (recent turns)" aria-hidden="true">
+      {data.map((v, i) => (
+        <span
+          key={i}
+          className="obs-sparkline-bar"
+          style={{
+            height: `${Math.max(6, (v / max) * 100)}%`,
+            opacity: 0.4 + (i / data.length) * 0.5
+          }}
+        />
+      ))}
     </div>
   );
 }

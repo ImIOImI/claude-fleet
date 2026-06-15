@@ -361,6 +361,21 @@ body {
   text-transform: uppercase;
   color: var(--text-muted);
 }
+/* Per-turn cost sparkline — accent bars, recent turns brighter. */
+.obs-sparkline {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 32px;
+  width: 100%;
+  margin-top: 10px;
+}
+.obs-sparkline-bar {
+  flex: 1;
+  min-height: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+}
 .obs-row {
   display: flex;
   justify-content: space-between;

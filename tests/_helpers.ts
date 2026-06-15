@@ -331,7 +331,7 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
             contextWindowTokens: 200_000,
             topTools: [],
             recentToolCalls: [],
-            costSeries: []
+            costSeries: [0.002, 0.004, 0.006]
           };
         }
         return null;
