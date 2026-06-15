@@ -18,11 +18,22 @@ interface Props {
   workspaces: WorkspaceSummary[];
   /** Per-workspace summaries keyed by ULID; Fleet view reads `usd` from each. */
   summaries: Record<string, WorkspaceObservabilitySummary | null>;
+  /** One entry per session tab in the selected workspace (context bars). */
+  terminals: Array<{ id: string; name: string; contextTokens: number; windowTokens: number }>;
+  /** The active tab's session id (highlighted in the context bars). */
+  activeTerminalId: string | null;
 }
 
 type Scope = 'workspace' | 'fleet';
 
-export function ObservabilityPane({ workspaceName, summary, workspaces, summaries }: Props) {
+export function ObservabilityPane({
+  workspaceName,
+  summary,
+  workspaces,
+  summaries,
+  terminals,
+  activeTerminalId
+}: Props) {
   const [scope, setScope] = useState<Scope>('workspace');
   const live = workspaces.filter((w) => w.state !== 'deleted');
 
@@ -50,7 +61,7 @@ export function ObservabilityPane({ workspaceName, summary, workspaces, summarie
         ) : !summary || summary.sessionId === null ? (
           <EmptyState message="No transcript events yet." subdued />
         ) : (
-          <SummaryView summary={summary} />
+          <SummaryView summary={summary} terminals={terminals} activeTerminalId={activeTerminalId} />
         )}
       </div>
     </aside>
@@ -141,7 +152,15 @@ function FleetView({
   );
 }
 
-function SummaryView({ summary }: { summary: WorkspaceObservabilitySummary }) {
+function SummaryView({
+  summary,
+  terminals,
+  activeTerminalId
+}: {
+  summary: WorkspaceObservabilitySummary;
+  terminals: Array<{ id: string; name: string; contextTokens: number; windowTokens: number }>;
+  activeTerminalId: string | null;
+}) {
   return (
     <div className="obs-stack">
       <section className="obs-title-block">
@@ -168,6 +187,8 @@ function SummaryView({ summary }: { summary: WorkspaceObservabilitySummary }) {
         <TokenRow label="cache read" value={summary.cacheReadInputTokens} subdued />
         <TokenRow label="output" value={summary.outputTokens} accent />
       </section>
+
+      <ContextRows terminals={terminals} activeId={activeTerminalId} />
 
       {(summary.recentToolCalls ?? []).length > 0 && (
         <section className="obs-section">
@@ -206,6 +227,46 @@ function SummaryView({ summary }: { summary: WorkspaceObservabilitySummary }) {
         )}
       </section>
     </div>
+  );
+}
+
+/**
+ * Per-terminal context bars — one row per session tab in the workspace, each
+ * showing how full that session's context window is (latest turn's tokens /
+ * window). The active tab is dotted + bold; the fill tints warn ≥75% / danger
+ * ≥90%, with an 80% compaction-threshold tick. Renders nothing with no tabs.
+ */
+function ContextRows({
+  terminals,
+  activeId
+}: {
+  terminals: Array<{ id: string; name: string; contextTokens: number; windowTokens: number }>;
+  activeId: string | null;
+}) {
+  if (terminals.length === 0) return null;
+  return (
+    <section className="obs-section">
+      <div className="obs-section-title">
+        Context · {terminals.length} terminal{terminals.length === 1 ? '' : 's'}
+      </div>
+      {terminals.map((t) => {
+        const pct = t.windowTokens > 0 ? Math.min(1, t.contextTokens / t.windowTokens) : 0;
+        const tone = pct >= 0.9 ? 'crit' : pct >= 0.75 ? 'hot' : '';
+        return (
+          <div key={t.id} className="obs-ctx-row">
+            <span className={`obs-ctx-name ${t.id === activeId ? 'active' : ''}`}>
+              {t.id === activeId && <span className="obs-ctx-active-dot" aria-hidden="true" />}
+              <span className="obs-ctx-name-text">{t.name}</span>
+            </span>
+            <span className="obs-ctx-bar" aria-hidden="true">
+              <span className="obs-ctx-fill" style={{ width: `${Math.max(2, pct * 100)}%` }} />
+              <span className="obs-ctx-tick" />
+            </span>
+            <span className={`obs-ctx-pct mono ${tone}`}>{Math.round(pct * 100)}%</span>
+          </div>
+        );
+      })}
+    </section>
   );
 }
 

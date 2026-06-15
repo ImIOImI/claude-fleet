@@ -432,6 +432,64 @@ body {
 .obs-fleet-state.running { color: var(--state-running); }
 .obs-fleet-cost { color: var(--text-secondary); font-size: 11.5px; flex-shrink: 0; }
 
+/* Per-terminal context bars: name | fill bar (+80% tick) | percentage. */
+.obs-ctx-row {
+  display: grid;
+  grid-template-columns: 64px 1fr 34px;
+  gap: 8px;
+  align-items: center;
+  padding: 3px 0;
+}
+.obs-ctx-name {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.obs-ctx-name.active { color: var(--text-primary); font-weight: 600; }
+.obs-ctx-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.obs-ctx-active-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+.obs-ctx-bar {
+  position: relative;
+  height: 5px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--bg-base);
+}
+.obs-ctx-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: var(--accent);
+  transition: width 240ms ease;
+}
+.obs-ctx-tick {
+  position: absolute;
+  left: 80%;
+  top: -1px;
+  bottom: -1px;
+  width: 1px;
+  background: var(--text-muted);
+  opacity: 0.4;
+}
+.obs-ctx-pct {
+  font-size: 11px;
+  text-align: right;
+  color: var(--text-secondary);
+}
+.obs-ctx-pct.hot { color: var(--state-warn); }
+.obs-ctx-pct.crit { color: var(--state-error); }
+
 /* Per-turn cost sparkline — accent bars, recent turns brighter. */
 .obs-sparkline {
   display: flex;
