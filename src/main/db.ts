@@ -157,6 +157,20 @@ function migrate(d: Database.Database): void {
     `);
     d.pragma('user_version = 3');
   }
+  if (current < 4) {
+    // Tool-call detail (Phase B observability): tool_use_id links a
+    // tool_use event to its tool_result so we can compute call duration;
+    // tool_input is a short arg summary; tool_result_is_error is 1/0 on the
+    // result event. Additive ALTER (not a clean-slate) so existing token /
+    // cost history survives — tool detail populates as new calls land.
+    d.exec(`
+      ALTER TABLE events ADD COLUMN tool_use_id TEXT;
+      ALTER TABLE events ADD COLUMN tool_input TEXT;
+      ALTER TABLE events ADD COLUMN tool_result_is_error INTEGER;
+      CREATE INDEX idx_events_tool_use ON events(session_id, tool_use_id);
+    `);
+    d.pragma('user_version = 4');
+  }
 }
 
 // ── Ingest ────────────────────────────────────────────────────────────────
@@ -173,12 +187,14 @@ const insertEvent = (d: Database.Database) =>
       session_id, workspace_id, ts, type, subtype, uuid, parent_uuid,
       model, input_tokens, output_tokens,
       cache_read_input_tokens, cache_creation_input_tokens,
-      service_tier, tool_name, raw_jsonl, dedup_key
+      service_tier, tool_name, tool_use_id, tool_input, tool_result_is_error,
+      raw_jsonl, dedup_key
     ) VALUES (
       @session_id, @workspace_id, @ts, @type, @subtype, @uuid, @parent_uuid,
       @model, @input_tokens, @output_tokens,
       @cache_read_input_tokens, @cache_creation_input_tokens,
-      @service_tier, @tool_name, @raw_jsonl, @dedup_key
+      @service_tier, @tool_name, @tool_use_id, @tool_input, @tool_result_is_error,
+      @raw_jsonl, @dedup_key
     )
   `);
 
@@ -261,8 +277,9 @@ export function ingestLine(
   const cacheCreationInputTokens = numOrNull(usage?.cache_creation_input_tokens);
   const serviceTier = typeof usage?.service_tier === 'string' ? usage.service_tier : null;
 
-  // First tool name in the event's content[] (assistant or user/tool_result events).
-  const toolName = extractFirstToolName(message);
+  // Tool detail from the event's content[]: a tool_use carries name + id +
+  // input; a tool_result carries the matching tool_use_id + error flag.
+  const tool = extractToolDetail(message);
 
   const info = s.insertEvent.run({
     session_id: sessionId,
@@ -278,7 +295,10 @@ export function ingestLine(
     cache_read_input_tokens: cacheReadInputTokens,
     cache_creation_input_tokens: cacheCreationInputTokens,
     service_tier: serviceTier,
-    tool_name: toolName,
+    tool_name: tool.name,
+    tool_use_id: tool.useId,
+    tool_input: tool.input,
+    tool_result_is_error: tool.resultIsError,
     raw_jsonl: rawLine,
     dedup_key: dedupKey,
   });
@@ -421,6 +441,17 @@ export interface ToolCallCount {
   count: number;
 }
 
+export interface ToolCall {
+  name: string;
+  /** Short input summary (command / path / pattern / …), or null. */
+  input: string | null;
+  /** tool_use→tool_result wall time in ms; null while still pending. */
+  durationMs: number | null;
+  /** 'ok' / 'error' once the result lands, 'pending' until then. */
+  status: 'ok' | 'error' | 'pending';
+  ts: number | null;
+}
+
 export interface WorkspaceSummary {
   /** Latest active Claude session UUID in the workspace, or null if none. */
   sessionId: string | null;
@@ -458,6 +489,10 @@ export interface WorkspaceSummary {
   contextWindowTokens: number;
   /** Top tools called in this session, descending count. */
   topTools: ToolCallCount[];
+  /** Recent tool calls with input/duration/status, newest first. */
+  recentToolCalls: ToolCall[];
+  /** Per-turn USD cost over recent turns, oldest→newest (sparkline series). */
+  costSeries: number[];
 }
 
 /**
@@ -604,7 +639,87 @@ export function summaryForSession(sessionId: string, topToolsLimit = 5): Workspa
     lastTurnContextTokens,
     contextWindowTokens,
     topTools,
+    recentToolCalls: recentToolCallsForSession(session.id, 10),
+    costSeries: costSeriesForSession(session.id),
   };
+}
+
+/**
+ * Recent tool calls in a session, newest first. Each tool_use is matched to
+ * its tool_result by tool_use_id (within the session) to derive duration and
+ * ok/error status; calls still awaiting a result come back 'pending'.
+ */
+export function recentToolCallsForSession(sessionId: string, limit = 10): ToolCall[] {
+  const d = openDbOrThrow();
+  const rows = d
+    .prepare(`
+      SELECT u.tool_name AS name,
+             u.tool_input AS input,
+             u.ts         AS start_ts,
+             r.ts         AS end_ts,
+             r.tool_result_is_error AS is_error
+      FROM events u
+      LEFT JOIN events r
+        ON r.session_id = u.session_id
+       AND r.tool_use_id = u.tool_use_id
+       AND r.tool_result_is_error IS NOT NULL
+      WHERE u.session_id = ? AND u.tool_name IS NOT NULL AND u.tool_use_id IS NOT NULL
+      ORDER BY u.id DESC
+      LIMIT ?
+    `)
+    .all(sessionId, limit) as Array<{
+    name: string;
+    input: string | null;
+    start_ts: number | null;
+    end_ts: number | null;
+    is_error: number | null;
+  }>;
+  return rows.map((r) => ({
+    name: r.name,
+    input: r.input,
+    durationMs: r.start_ts != null && r.end_ts != null ? r.end_ts - r.start_ts : null,
+    status: r.is_error == null ? 'pending' : r.is_error ? 'error' : 'ok',
+    ts: r.start_ts,
+  }));
+}
+
+/**
+ * Per-turn USD cost over the last `limit` assistant turns, oldest→newest —
+ * the series a cost sparkline plots. Each assistant event with usage is one
+ * turn; cost is computed per row so mixed models/tiers price correctly.
+ */
+export function costSeriesForSession(sessionId: string, limit = 20): number[] {
+  const d = openDbOrThrow();
+  const rows = d
+    .prepare(`
+      SELECT model, service_tier,
+             COALESCE(input_tokens, 0)                AS input_tokens,
+             COALESCE(output_tokens, 0)               AS output_tokens,
+             COALESCE(cache_read_input_tokens, 0)     AS cache_read_input_tokens,
+             COALESCE(cache_creation_input_tokens, 0) AS cache_creation_input_tokens
+      FROM events
+      WHERE session_id = ? AND type = 'assistant' AND output_tokens IS NOT NULL
+      ORDER BY id DESC
+      LIMIT ?
+    `)
+    .all(sessionId, limit) as Array<{
+    model: string | null;
+    service_tier: string | null;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
+  }>;
+  return rows
+    .reverse()
+    .map((r) =>
+      costFor(r.model, r.service_tier, {
+        inputTokens: r.input_tokens,
+        outputTokens: r.output_tokens,
+        cacheReadInputTokens: r.cache_read_input_tokens,
+        cacheCreationInputTokens: r.cache_creation_input_tokens,
+      }),
+    );
 }
 
 // ── broker_sessions: per-tab mapping ──────────────────────────────────────
@@ -767,14 +882,62 @@ function hashLine(s: string): string {
   return createHash('sha256').update(s).digest('hex');
 }
 
-function extractFirstToolName(message: Record<string, unknown> | null): string | null {
-  if (!message) return null;
+interface ToolDetail {
+  name: string | null;
+  useId: string | null;
+  input: string | null;
+  resultIsError: number | null;
+}
+
+/**
+ * Pull tool-call detail from an event's `message.content[]`. An assistant
+ * event's first `tool_use` block yields the name, its id, and a short input
+ * summary; a user event's `tool_result` block yields the matching
+ * `tool_use_id` and whether it errored. Events with neither return all-null.
+ */
+function extractToolDetail(message: Record<string, unknown> | null): ToolDetail {
+  const empty: ToolDetail = { name: null, useId: null, input: null, resultIsError: null };
+  if (!message) return empty;
   const content = message.content;
-  if (!Array.isArray(content)) return null;
+  if (!Array.isArray(content)) return empty;
   for (const block of content as Array<Record<string, unknown>>) {
-    if (block && block.type === 'tool_use' && typeof block.name === 'string') {
-      return block.name;
+    if (!block) continue;
+    if (block.type === 'tool_use' && typeof block.name === 'string') {
+      return {
+        name: block.name,
+        useId: typeof block.id === 'string' ? block.id : null,
+        input: summarizeToolInput(block.input),
+        resultIsError: null,
+      };
+    }
+    if (block.type === 'tool_result') {
+      return {
+        name: null,
+        useId: typeof block.tool_use_id === 'string' ? block.tool_use_id : null,
+        input: null,
+        resultIsError: block.is_error === true ? 1 : 0,
+      };
     }
   }
-  return null;
+  return empty;
+}
+
+/**
+ * A compact, human-readable one-liner for a tool's input — prefers the most
+ * identifying field (command/path/pattern/url/description), else a truncated
+ * JSON dump. Capped so it stays a chip-sized label.
+ */
+function summarizeToolInput(input: unknown): string | null {
+  if (!input || typeof input !== 'object') return null;
+  const o = input as Record<string, unknown>;
+  const pick =
+    (typeof o.command === 'string' && o.command) ||
+    (typeof o.file_path === 'string' && o.file_path) ||
+    (typeof o.path === 'string' && o.path) ||
+    (typeof o.pattern === 'string' && o.pattern) ||
+    (typeof o.url === 'string' && o.url) ||
+    (typeof o.description === 'string' && o.description) ||
+    '';
+  const s = pick || JSON.stringify(o);
+  return s.length > 160 ? s.slice(0, 159) + '…' : s;
 }
