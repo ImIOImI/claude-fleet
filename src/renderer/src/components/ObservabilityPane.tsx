@@ -61,13 +61,21 @@ function SummaryView({ summary }: { summary: WorkspaceObservabilitySummary }) {
         <TokenRow label="output" value={summary.outputTokens} accent />
       </section>
 
-      {summary.topTools.length > 0 && (
+      {(summary.recentToolCalls ?? []).length > 0 && (
         <section className="obs-section">
-          <div className="obs-section-title">Top tools</div>
-          {summary.topTools.map((t) => (
-            <div key={t.name} className="obs-row">
-              <span className="obs-row-label">{t.name}</span>
-              <span className="obs-row-value">{t.count}</span>
+          <div className="obs-section-title">Recent tools</div>
+          {(summary.recentToolCalls ?? []).map((t, i) => (
+            <div key={i} className={`obs-tool-row ${t.status}`}>
+              <span className="obs-tool-name">{t.name}</span>
+              {t.input && (
+                <span className="obs-tool-input" title={t.input}>
+                  {t.input}
+                </span>
+              )}
+              <span className="obs-tool-meta mono">
+                {t.durationMs != null ? formatDuration(t.durationMs) : '…'}
+                {t.status === 'error' && <span className="obs-tool-err"> err</span>}
+              </span>
             </div>
           ))}
         </section>
@@ -124,6 +132,12 @@ function formatTokens(n: number): string {
   if (n < 1000) return String(n);
   if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 2 : 1)}K`;
   return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 2 : 1)}M`;
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+  return `${(ms / 60_000).toFixed(1)}m`;
 }
 
 function formatUsd(usd: number): string {

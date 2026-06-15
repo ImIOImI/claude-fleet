@@ -374,6 +374,36 @@ body {
 .obs-row.subdued .obs-row-value { color: var(--text-muted); }
 .obs-row.accent .obs-row-value { color: var(--accent); font-weight: 500; }
 
+/* Recent-tools rows: tool name + truncated input + duration/status.
+   A left status accent flags errored calls. */
+.obs-tool-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  padding: 2px 0 2px 6px;
+  border-left: 2px solid var(--state-running);
+}
+.obs-tool-row.error { border-left-color: var(--state-error); }
+.obs-tool-row.pending { border-left-color: var(--state-warn); }
+.obs-tool-name { color: var(--text-primary); font-weight: 500; flex-shrink: 0; }
+.obs-tool-input {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.obs-tool-meta {
+  color: var(--text-secondary);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.obs-tool-err { color: var(--state-error); }
+
 /* ----- terminal pane --------------------------------------------------- */
 .main-pane {
   display: flex;

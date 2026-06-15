@@ -53,6 +53,16 @@ export interface WorkspaceObservabilitySummary {
    */
   contextWindowTokens: number;
   topTools: Array<{ name: string; count: number }>;
+  /** Recent tool calls with input/duration/status, newest first. */
+  recentToolCalls: Array<{
+    name: string;
+    input: string | null;
+    durationMs: number | null;
+    status: 'ok' | 'error' | 'pending';
+    ts: number | null;
+  }>;
+  /** Per-turn USD cost over recent turns, oldest→newest (sparkline series). */
+  costSeries: number[];
 }
 
 export interface ObservabilityCost {

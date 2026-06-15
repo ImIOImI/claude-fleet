@@ -148,6 +148,118 @@ test('Live push: renderer receives observability:summary push when watcher inges
   }
 });
 
+test('Tool-call detail + cost series: ingest derives duration/status and per-turn cost', async () => {
+  // Phase B data layer end-to-end through the real watcher + DB: a tool_use
+  // matched to its tool_result yields name/input/duration/status, and an
+  // assistant turn with usage yields a positive cost-series entry.
+  const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-tools-'));
+  const id = '01TESTTOOLS0000000000000WS';
+  const name = 'tools-test-ws';
+  const stateDir = path.join(userDataDir, 'state', id);
+  const projectsDir = path.join(stateDir, '.claude', 'projects', '-workspace');
+  mkdirSync(projectsDir, { recursive: true });
+  writeFileSync(
+    path.join(stateDir, 'workspace.json'),
+    JSON.stringify({
+      id,
+      name,
+      labels: [],
+      workspaceRoot: '/tmp/fleet-test-' + name,
+      workspaceSubdir: '',
+      kind: 'container',
+      image: 'mock',
+      authMode: 'oauth',
+      env: { plain: {}, secretKeys: [] },
+      createdAt: Date.now(),
+      lastUsedAt: Date.now()
+    })
+  );
+
+  const app = await electron.launch({
+    args: [REPO_ROOT, `--user-data-dir=${userDataDir}`],
+    cwd: REPO_ROOT,
+    env: Object.fromEntries(
+      Object.entries(process.env).filter(([k]) => k !== 'CLAUDE_FLEET_MOCK')
+    ) as Record<string, string>
+  });
+  const window = await app.firstWindow();
+  await window.waitForLoadState('domcontentloaded');
+
+  try {
+    await new Promise((r) => setTimeout(r, 500));
+
+    const sessionId = randomUUID();
+    const lines = [
+      {
+        type: 'assistant',
+        uuid: randomUUID(),
+        timestamp: '2026-01-01T00:00:00.000Z',
+        message: {
+          model: 'claude-opus-4-8',
+          content: [{ type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'ls -la' } }]
+        }
+      },
+      {
+        type: 'user',
+        uuid: randomUUID(),
+        timestamp: '2026-01-01T00:00:02.400Z',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_1', is_error: false }] }
+      },
+      {
+        type: 'assistant',
+        uuid: randomUUID(),
+        timestamp: '2026-01-01T00:00:03.000Z',
+        message: {
+          model: 'claude-opus-4-8',
+          content: [],
+          usage: {
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            service_tier: 'standard'
+          }
+        }
+      }
+    ];
+    writeFileSync(
+      path.join(projectsDir, `${sessionId}.jsonl`),
+      lines.map((l) => JSON.stringify(l)).join('\n') + '\n'
+    );
+
+    // Poll until the watcher has ingested the tool_use (recentToolCalls fills).
+    await expect
+      .poll(
+        async () =>
+          window.evaluate(async (wsId) => {
+            const s = await window.api.observability.summaryForWorkspace(wsId);
+            return s?.recentToolCalls?.length ?? 0;
+          }, id),
+        { timeout: 8_000, intervals: [200, 500, 1000] }
+      )
+      .toBeGreaterThanOrEqual(1);
+
+    const summary = await window.evaluate(
+      (wsId) => window.api.observability.summaryForWorkspace(wsId),
+      id
+    );
+
+    const calls = summary!.recentToolCalls;
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      name: 'Bash',
+      input: 'ls -la',
+      durationMs: 2400,
+      status: 'ok'
+    });
+
+    expect(summary!.costSeries.length).toBeGreaterThanOrEqual(1);
+    expect(summary!.costSeries.some((c) => c > 0)).toBe(true);
+  } finally {
+    await app.close();
+  }
+});
+
 test('Slot consumer: chip heights stay equal regardless of whether observability data is present', async () => {
   // Visual regression from the slot-consumers PR. The chip secondary
   // line (".ws-chip-sub" showing "active 2m ago" / "idle 1h ago") is
