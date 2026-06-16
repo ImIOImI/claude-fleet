@@ -245,7 +245,10 @@ const api = {
   },
   clipboard: {
     write: (text: string): Promise<void> => ipcRenderer.invoke('clipboard:write', text),
-    read: (): Promise<string> => ipcRenderer.invoke('clipboard:read')
+    read: (): Promise<string> => ipcRenderer.invoke('clipboard:read'),
+    /** Image on the clipboard as PNG bytes, or null. For Ctrl+V image drops. */
+    readImage: (): Promise<{ bytes: Uint8Array; mime: string } | null> =>
+      ipcRenderer.invoke('clipboard:readImage')
   },
   menu: {
     showTerminalContextMenu: (

@@ -440,6 +440,15 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     if (typeof text === 'string' && text.length > 0) clipboard.writeText(text);
   });
   ipcMain.handle('clipboard:read', () => clipboard.readText());
+  // Image on the clipboard, as PNG bytes — drives Ctrl+V image ingestion
+  // (the renderer can't read clipboard image bytes directly under
+  // contextIsolation). Null when the clipboard holds no image. Works across
+  // the WSLg boundary since the Windows clipboard is shared into WSLg.
+  ipcMain.handle('clipboard:readImage', () => {
+    const img = clipboard.readImage();
+    if (img.isEmpty()) return null;
+    return { bytes: new Uint8Array(img.toPNG()), mime: 'image/png' };
+  });
 
   // Drag-and-drop ingestion. Routed to the selected workspace by the
   // renderer; each saves into `<fleetRoot>/<id>/_dropped/` and returns the

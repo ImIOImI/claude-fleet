@@ -88,6 +88,20 @@ test('Drag-and-drop: text + bytes land in the dropbox with container paths, coll
     expect(path.basename(b)).toBe('foo-2.bin');
     expect(existsSync(path.join(dropboxDir, 'foo.bin'))).toBe(true);
     expect(existsSync(path.join(dropboxDir, 'foo-2.bin'))).toBe(true);
+
+    // clipboard:readImage — the new IPC the terminal's Ctrl+V handler uses to
+    // decide image-vs-text paste. With a text-only clipboard it must return
+    // null so text paste falls through. (A real image round-trip can't be
+    // exercised in headless Linux Electron — nativeImage/clipboard image
+    // support isn't available here — so we verify the null branch, which is
+    // what gates the fix, and trust the dropBytes path tested above.)
+    await app.evaluate(({ clipboard }) => clipboard.writeText('just text'));
+    const img = await window.evaluate(() =>
+      (window as unknown as {
+        api: { clipboard: { readImage: () => Promise<unknown | null> } };
+      }).api.clipboard.readImage()
+    );
+    expect(img).toBeNull();
   } finally {
     await app.close();
   }

@@ -147,18 +147,35 @@ export function useDropIngestion({ workspaceId, notify }: Options): { dragging: 
         .catch(fail);
     };
 
+    // Image paste routed from the terminal's Ctrl+V handler (xterm
+    // suppresses the native `paste` event while focused — see TerminalSession).
+    const onDropImage = (e: Event): void => {
+      const detail = (e as CustomEvent).detail as { bytes: Uint8Array; mime: string } | undefined;
+      if (!detail) return;
+      const ws = requireWorkspace();
+      if (!ws) return;
+      window.api.files
+        .dropBytes(ws, { mime: detail.mime, bytes: detail.bytes })
+        .then((p) => announce([p]))
+        .catch(fail);
+    };
+
     window.addEventListener('dragover', onDragOver);
     window.addEventListener('dragenter', onDragEnter);
     window.addEventListener('dragleave', onDragLeave);
     window.addEventListener('drop', onDrop);
-    // Capture phase so we see the paste before xterm's textarea consumes it.
+    // Capture phase so we see the paste before xterm's textarea consumes it
+    // (covers the case where focus is OUTSIDE the terminal; the in-terminal
+    // case comes through 'cf:drop-image' above).
     window.addEventListener('paste', onPaste, true);
+    window.addEventListener('cf:drop-image', onDropImage);
     return () => {
       window.removeEventListener('dragover', onDragOver);
       window.removeEventListener('dragenter', onDragEnter);
       window.removeEventListener('dragleave', onDragLeave);
       window.removeEventListener('drop', onDrop);
       window.removeEventListener('paste', onPaste, true);
+      window.removeEventListener('cf:drop-image', onDropImage);
     };
   }, [workspaceId, notify]);
 
