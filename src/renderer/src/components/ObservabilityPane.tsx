@@ -21,6 +21,8 @@ interface Props {
   summary: WorkspaceObservabilitySummary | null;
   /** The selected workspace — drives the Workspace metadata block (path/image/limits). */
   workspace: WorkspaceSummary | null;
+  /** The fleet's shared folder (<fleetRoot>/shared), or null before config loads. */
+  sharedDir: string | null;
   /** All workspaces — drives the Fleet scope (per-workspace cost rows). */
   workspaces: WorkspaceSummary[];
   /** Per-workspace summaries keyed by ULID; Fleet view reads `usd` from each. */
@@ -37,6 +39,7 @@ export function ObservabilityPane({
   workspaceName,
   summary,
   workspace,
+  sharedDir,
   workspaces,
   summaries,
   terminals,
@@ -77,7 +80,7 @@ export function ObservabilityPane({
                 activeTerminalId={activeTerminalId}
               />
             )}
-            {workspace && <WorkspaceBlock workspace={workspace} />}
+            {workspace && <WorkspaceBlock workspace={workspace} sharedDir={sharedDir} />}
           </div>
         )}
       </div>
@@ -252,17 +255,23 @@ function SummaryView({
  * manager), the runner image, and the resource limits. The Path row is the
  * only actionable one; Image/Limits are static.
  */
-function WorkspaceBlock({ workspace }: { workspace: WorkspaceSummary }) {
+function WorkspaceBlock({
+  workspace,
+  sharedDir
+}: {
+  workspace: WorkspaceSummary;
+  sharedDir: string | null;
+}) {
   const fullPath = workspaceHostPath(workspace);
   const limits = formatResourceLimits(workspace.resources);
 
-  const openFolder = async () => {
-    const err = await window.api.fs.openPath(fullPath);
+  const openPath = async (path: string) => {
+    const err = await window.api.fs.openPath(path);
     if (err) {
       void window.api.app.logError({
         type: 'openPath',
-        message: `Could not open workspace folder: ${err}`,
-        extra: { path: fullPath }
+        message: `Could not open folder: ${err}`,
+        extra: { path }
       });
     }
   };
@@ -274,15 +283,29 @@ function WorkspaceBlock({ workspace }: { workspace: WorkspaceSummary }) {
         <button
           type="button"
           className="obs-ws-row obs-ws-action"
-          onClick={openFolder}
-          title={`Open ${fullPath}`}
+          onClick={() => openPath(fullPath)}
+          title={`Open ${fullPath} (private — only this container)`}
         >
-          <span className="obs-ws-key">path</span>
+          <span className="obs-ws-key">private</span>
           <span className="obs-ws-val mono">{workspacePathLabel(workspace)}</span>
           <span className="obs-ws-icon" aria-hidden="true">
             <FolderIcon />
           </span>
         </button>
+        {sharedDir && (
+          <button
+            type="button"
+            className="obs-ws-row obs-ws-action"
+            onClick={() => openPath(sharedDir)}
+            title={`Open ${sharedDir} (shared — every container)`}
+          >
+            <span className="obs-ws-key">shared</span>
+            <span className="obs-ws-val mono">/shared</span>
+            <span className="obs-ws-icon" aria-hidden="true">
+              <FolderIcon />
+            </span>
+          </button>
+        )}
         {workspace.image && (
           <div className="obs-ws-row">
             <span className="obs-ws-key">image</span>

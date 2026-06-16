@@ -9,6 +9,7 @@ import type { WorkspaceFormSubmit } from './components/WorkspaceForm';
 import { CloseWorkspaceModal } from './components/CloseWorkspaceModal';
 import { DeleteWorkspaceModal } from './components/DeleteWorkspaceModal';
 import { EditWorkspaceModal, containerLevelChanged } from './components/EditWorkspaceModal';
+import { SettingsModal } from './components/SettingsModal';
 import type { WorkspaceObservabilitySummary } from '../../preload';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
@@ -78,6 +79,10 @@ export function App() {
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // The shared folder path (<fleetRoot>/shared), fetched once from app config.
+  // Drives the observability rail's "Shared" link.
+  const [sharedDir, setSharedDir] = useState<string | null>(null);
   const [closeTargetId, setCloseTargetId] = useState<string | null>(null);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const [editTargetId, setEditTargetId] = useState<string | null>(null);
@@ -135,6 +140,7 @@ export function App() {
     refresh();
     window.api.vault.available().then(setVaultAvailable);
     window.api.app.mockMode().then(setMockMode);
+    window.api.config.get().then((cfg) => setSharedDir(cfg.sharedDir));
     const t = setInterval(refresh, 5000);
     return () => clearInterval(t);
   }, [apiReady]);
@@ -323,7 +329,6 @@ export function App() {
       description: submit.description,
       labels: submit.labels,
       color: submit.color,
-      workspaceRoot: submit.workspaceRoot,
       workspaceSubdir: submit.workspaceSubdir,
       kind,
       image: submit.image,
@@ -369,7 +374,6 @@ export function App() {
       description: submit.description,
       labels: submit.labels,
       color: submit.color,
-      workspaceRoot: submit.workspaceRoot,
       workspaceSubdir: submit.workspaceSubdir,
       kind: submit.kind,
       image: submit.image,
@@ -398,7 +402,6 @@ export function App() {
       description: submit.description,
       labels: submit.labels,
       color: submit.color,
-      workspaceRoot: submit.workspaceRoot,
       workspaceSubdir: submit.workspaceSubdir,
       kind: submit.kind,
       image: submit.image,
@@ -428,7 +431,6 @@ export function App() {
       description: submit.description,
       labels: submit.labels,
       color: submit.color,
-      workspaceRoot: submit.workspaceRoot,
       workspaceSubdir: submit.workspaceSubdir,
       kind: submit.kind,
       image: submit.image,
@@ -468,7 +470,6 @@ export function App() {
       description: source.description,
       labels: source.labels,
       color: undefined, // fresh hue
-      workspaceRoot: source.workspaceRoot,
       workspaceSubdir: source.workspaceSubdir,
       kind: source.kind,
       image: source.image,
@@ -527,6 +528,7 @@ export function App() {
         mockMode={mockMode}
         onSelect={setSelectedId}
         onNewWorkspace={() => setCreateOpen(true)}
+        onOpenSettings={() => setSettingsOpen(true)}
         onCloseWorkspace={(w) => setCloseTargetId(w.id)}
         onEditWorkspace={(w) => setEditTargetId(w.id)}
         onCloneWorkspace={(w) => openCloneFrom(w)}
@@ -589,6 +591,7 @@ export function App() {
           workspaceName={selected?.name ?? null}
           summary={activeTabSummary}
           workspace={selected ?? null}
+          sharedDir={sharedDir}
           workspaces={workspaces}
           summaries={summaries}
           terminals={terminals}
@@ -615,6 +618,15 @@ export function App() {
         onDelete={(w) => setDeleteTargetId(w.id)}
         initialNewTabValues={cloneSource}
       />
+      {settingsOpen && (
+        <SettingsModal
+          onClose={() => setSettingsOpen(false)}
+          onSaved={(cfg) => {
+            setSharedDir(cfg.sharedDir);
+            refresh();
+          }}
+        />
+      )}
       {(() => {
         if (!editTargetId) return null;
         const target = workspaces.find((w) => w.id === editTargetId);

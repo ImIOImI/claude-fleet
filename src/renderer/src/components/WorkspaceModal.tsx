@@ -407,7 +407,6 @@ function savedToInitial(w: WorkspaceSummary): Record<string, unknown> {
     description: w.description,
     labels: w.labels,
     color: w.color,
-    workspaceRoot: w.workspaceRoot,
     workspaceSubdir: w.workspaceSubdir,
     kind: w.kind,
     image: w.image,

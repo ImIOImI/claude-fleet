@@ -89,7 +89,7 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
     id: spec.id,
     name: spec.name,
     labels: [],
-    workspaceRoot: spec.workspaceRoot,
+    workspaceRoot: `/tmp/mock-fleet/${spec.id}`,
     workspaceSubdir: spec.workspaceSubdir,
     kind: 'container',
     image: spec.image ?? 'ghcr.io/imioimi/claude-fleet/runner:latest',

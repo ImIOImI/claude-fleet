@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { isWslEnvironment } from './wsl.js';
+import { getFleetRoot, setFleetRoot, fleetPrivateDir, fleetSharedDir } from './config.js';
 import * as realDocker from './docker.js';
 import * as mockDocker from './mock.js';
 import * as vault from './vault.js';
@@ -100,7 +101,6 @@ interface WorkspaceCreatePayload {
   description?: string;
   labels?: string[];
   color?: WorkspaceColor;
-  workspaceRoot: string;
   workspaceSubdir: string;
   kind?: 'container' | 'local';
   image?: string;
@@ -133,7 +133,10 @@ async function listAllWorkspaces(): Promise<Workspace[]> {
       description: m?.description,
       labels: m?.labels ?? w.labels,
       color: m?.color,
-      workspaceRoot: w.workspaceRoot || m?.workspaceRoot || '',
+      // workspaceRoot is always the canonical private folder derived from the
+      // fleet root + id — never trust stale labels/manifests (a container
+      // created before the fleet-root migration still carries the old path).
+      workspaceRoot: await fleetPrivateDir(w.id),
       workspaceSubdir: w.workspaceSubdir || m?.workspaceSubdir || '',
       authMode: m?.authMode ?? w.authMode,
       env: m?.env ?? w.env,
@@ -146,7 +149,7 @@ async function listAllWorkspaces(): Promise<Workspace[]> {
 
   // Manifests with no live container → deleted (recoverable from spec)
   for (const m of manifestById.values()) {
-    result.push({ ...m, state: 'deleted' });
+    result.push({ ...m, workspaceRoot: await fleetPrivateDir(m.id), state: 'deleted' });
   }
 
   return result;
@@ -211,7 +214,6 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       const ws = await backend.createWorkspace({
         id: input.id,
         name: input.name,
-        workspaceRoot: input.workspaceRoot,
         workspaceSubdir: input.workspaceSubdir,
         env: input.env,
         image: input.image,
@@ -225,7 +227,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         description: input.description,
         labels: input.labels ?? [],
         color: input.color,
-        workspaceRoot: input.workspaceRoot,
+        // The backend computed the private folder from the fleet root.
+        workspaceRoot: ws.workspaceRoot,
         workspaceSubdir: input.workspaceSubdir,
         kind: 'container',
         image: ws.image,
@@ -297,13 +300,15 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
    * edits (env values, image) won't take effect until the container is
    * restarted — see the Phase 2 *restart-to-apply* banner.
    */
-  ipcMain.handle('workspace:writeManifest', async (_e, spec: WorkspaceSpec) => {
+  ipcMain.handle('workspace:writeManifest', async (_e, spec: Omit<WorkspaceSpec, 'workspaceRoot'>) => {
     // Name-uniqueness across the fleet (own row excluded).
     const clash = await findWorkspaceByName(spec.name);
     if (clash && clash.id !== spec.id) {
       throw new Error(`A workspace named "${spec.name}" already exists.`);
     }
-    await writeWorkspaceManifest(spec);
+    // workspaceRoot is derived, not supplied by the renderer — the canonical
+    // private folder under the fleet root.
+    await writeWorkspaceManifest({ ...spec, workspaceRoot: await fleetPrivateDir(spec.id) });
   });
 
   ipcMain.handle('workspace:stop', (_e, containerId: string) => backend.stopWorkspace(containerId));
@@ -325,6 +330,19 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('fs:openPath', async (_e, path: string) => {
     if (typeof path !== 'string' || path.length === 0) return 'No path provided';
     return RUNNING_IN_WSL ? openPathViaExplorer(path) : shell.openPath(path);
+  });
+
+  // App-level settings. The fleet root is the single host dir holding every
+  // workspace's private folder (<root>/<id>) plus the shared folder
+  // (<root>/shared). `sharedDir` is returned alongside so the renderer can
+  // surface a "Shared" link without recomputing the join.
+  ipcMain.handle('config:get', async () => ({
+    fleetRoot: await getFleetRoot(),
+    sharedDir: await fleetSharedDir()
+  }));
+  ipcMain.handle('config:setFleetRoot', async (_e, path: string) => {
+    await setFleetRoot(path);
+    return { fleetRoot: await getFleetRoot(), sharedDir: await fleetSharedDir() };
   });
 
   ipcMain.handle('dialog:pickDirectory', async (event, defaultPath?: string) => {
