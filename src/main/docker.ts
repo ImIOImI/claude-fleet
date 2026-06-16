@@ -356,7 +356,14 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
 
   const hostCfg: Docker.HostConfig = {
     Binds: binds,
-    AutoRemove: false
+    AutoRemove: false,
+    // Survive a host reboot / docker daemon restart: bring the container
+    // back automatically so its broker re-launches and the user can resume
+    // sessions from disk (transcripts + broker_sessions mapping persist).
+    // `unless-stopped` (not `always`) respects an explicit `workspace:stop`
+    // — a deliberately stopped workspace stays down across reboots; only
+    // ones that were running when the daemon went away come back.
+    RestartPolicy: { Name: 'unless-stopped' }
   };
   if (spec.resources?.cpus) hostCfg.NanoCpus = Math.round(spec.resources.cpus * 1e9);
   if (spec.resources?.memoryMb) hostCfg.Memory = spec.resources.memoryMb * 1024 * 1024;
