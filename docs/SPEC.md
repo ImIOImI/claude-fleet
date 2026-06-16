@@ -153,9 +153,17 @@ Identity is the **ULID** `id` (immutable, 26 char Crockford base32). The user-fa
 - `images:remove(ref)` → `void` — remove an image entry. The image itself is not deleted from the Docker daemon; only the library entry goes away.
 
 ### Sessions
-Per-workspace terminal-session inventory (the tab list shown above the terminal body). Renderer-owned read/write of the whole file; main has no notion of session lifecycle today.
+Two distinct things share this namespace: the per-workspace **terminal-tab inventory** (`read`/`write`) and the global **Sessions table** (`list`/`rename`/`delete`/`resume`).
+
+The tab inventory is the tab list shown above the terminal body. Renderer-owned read/write of the whole file; main has no notion of tab lifecycle.
 - `sessions:read(workspaceId)` → `SessionInventory` — read `<userData>/state/<id>/sessions.json`. Returns an empty inventory (`{ version: 1, sessions: [], nextNum: 2 }`) if the file is missing or malformed.
 - `sessions:write(workspaceId, inventory)` → `void` — atomic write of the whole inventory.
+
+The Sessions table (#3) is a global, workspace-filterable list of every Claude session the watcher has indexed, each resumable via `claude --resume`. Backed by the sqlite `sessions` table (see §7 *JSONL→SQLite cache*).
+- `sessions:list(workspaceId?)` → `SessionListItem[]` — newest-active first. Omit `workspaceId` for the global list; pass it to scope to one workspace. Each item is the `sessions` row (`id`, `workspaceId`, `aiTitle`, `firstUserMessage`, `userSetName`, `startedAt`, `lastActiveAt`) plus derived `eventCount` + `usd` (one grouped pass over `events`, no N+1), overlaid with `workspaceName`, `workspaceColorHue`, `workspaceState`. **Eligibility:** a session appears iff its workspace's manifest still exists — a truly-deleted workspace (manifest removed) drops out of `listAllWorkspaces` and its sessions are filtered; a closed-but-kept workspace (manifest present, no live container → state `'deleted'`) still appears. Enforced in the IPC layer, the only place that knows about on-disk manifests. The renderer's display title is `userSetName ?? aiTitle ?? firstUserMessage ?? '(untitled)'`.
+- `sessions:rename(sessionId, name)` → `void` — set the manual name override (`user_set_name`); an empty/whitespace name clears it back to NULL so the auto title resurfaces.
+- `sessions:delete(workspaceId, sessionId)` → `void` — drop the session's `events`, `broker_sessions`, and `sessions` rows, then unlink the on-disk transcript (`<state>/<id>/.claude/projects/-workspace/<sessionId>.jsonl`). The watcher's `unlink` handler only clears its in-memory offset state, so the DB rows are removed explicitly. Best-effort unlink (a missing file is fine).
+- `sessions:resume(workspaceId)` → `{ containerId } | null` — bring the workspace's container up (`startWorkspace` unpauses a paused one, starts a stopped one, no-ops a running one) and return its `containerId` so the renderer can open a resume tab. **Null** when the container is gone and can't be brought up here (e.g. closed-but-kept workspace with no recreatable container) — the renderer surfaces a non-fatal "couldn't resume" notice. The actual `claude --resume <id>` happens through the normal attach flow (see §6 *PTY*).
 
 ### Vault
 Per-workspace secret storage backed by `keytar`. Profiles are gone; each workspace owns its own bag of secret env-var values keyed by `<workspaceId>:<envVarName>`. The renderer never sees a secret value it didn't just write — values come back over `vault:getSecret`, and the main process consumes them directly when constructing the container env via `resolveEnv` (`src/main/vault.ts`).
@@ -167,7 +175,7 @@ Per-workspace secret storage backed by `keytar`. Profiles are gone; each workspa
 - `vault:deleteAllForWorkspace(workspaceId)` → `void` — purge every secret + the index for one workspace. Called at workspace-delete time so credentials don't outlive the manifest.
 
 ### PTY
-- `pty:attach(containerId, brokerSessionId, cols, rows)` → `ptyHandleId: string` — opens a connection to the workspace's in-container broker (Unix socket at `<state>/<id>/broker/broker.sock`) and either re-attaches to an existing broker session or creates one. `brokerSessionId` is the stable id from `sessions.json` (so re-attach across an app restart finds the same live PTY). Main retains a `BrokerClient` plus the resulting Duplex, returns an opaque `ptyHandleId` the renderer uses for subsequent input/resize/detach calls. **On failure** the handler captures the last ~100 lines of broker stdout/stderr via `docker logs` and writes them to `error.log` under a `pty-attach-failed` entry alongside the thrown message — the broker is otherwise invisible to the host, and the worst-case "ATTACHED timed out" + "unsolicited frame type 4" pattern after a pause/resume is impossible to diagnose without seeing what the broker was actually doing.
+- `pty:attach(containerId, brokerSessionId, cols, rows, resumeOf?)` → `ptyHandleId: string` — opens a connection to the workspace's in-container broker (Unix socket at `<state>/<id>/broker/broker.sock`) and either re-attaches to an existing broker session or creates one. `brokerSessionId` is the stable id from `sessions.json` (so re-attach across an app restart finds the same live PTY). Main retains a `BrokerClient` plus the resulting Duplex, returns an opaque `ptyHandleId` the renderer uses for subsequent input/resize/detach calls. **`resumeOf`** (a Claude session UUID) makes this a *resume* attach: the broker `CREATE` spawns `claude --resume <resumeOf>` instead of a bare `claude`, and the broker→claude mapping is learned **directly** (not via the pending-attach queue) because `claude --resume` appends to the existing `<uuid>.jsonl` rather than writing a new one — so the watcher's `new-session` hook never fires for it. `resumeOf` only takes effect at CREATE time; on a re-attach where the broker session is already alive, ATTACH succeeds first and the resume args are correctly ignored (no second claude spawned). **On failure** the handler captures the last ~100 lines of broker stdout/stderr via `docker logs` and writes them to `error.log` under a `pty-attach-failed` entry alongside the thrown message — the broker is otherwise invisible to the host, and the worst-case "ATTACHED timed out" + "unsolicited frame type 4" pattern after a pause/resume is impossible to diagnose without seeing what the broker was actually doing.
 
 Broker RPC timeout is 30s (`RPC_TIMEOUT_MS` in `src/main/broker.ts`). 10s was the original budget but routinely fired during the first ATTACH after a workspace pause/resume — the broker's `CREATE` path spawns the `claude` binary via `pty.StartWithSize`, and that first spawn (auth checks, MCP server warm-up, occasional network call) regularly takes 15–25s. The host's late-arriving response then lands with no waiter, producing the "unsolicited frame type 4" warning. 30s covers the observed worst case with margin without making honestly-stuck sessions hang the UI indefinitely.
 - `pty:input(ptyHandleId, data: string)` → `void` — write user input to the broker as an INPUT frame on the channel.
@@ -271,9 +279,10 @@ For each workspace, `<userData>/state/<id>/sessions.json` records the renderer's
 
 ```ts
 interface SessionEntry {
-  id: string;        // stable display id; NOT the PTY session id (that's per-attach)
+  id: string;        // stable display id = the broker session key; NOT the PTY handle (per-attach)
   name: string;      // 'main', 'session 2', 'session 3', …
   createdAt: number;
+  resumeOf?: string; // set on a resume tab — first attach runs `claude --resume <resumeOf>`
 }
 
 interface SessionInventory {
@@ -284,7 +293,7 @@ interface SessionInventory {
 }
 ```
 
-Writes are atomic (write-to-temp + rename). Reads tolerate missing/malformed files by returning `{ version: 1, sessions: [], nextNum: 2 }`. The first attach to a fresh workspace inserts a single `main` tab and persists it immediately.
+Writes are atomic (write-to-temp + rename). Reads tolerate missing/malformed files by returning `{ version: 1, sessions: [], nextNum: 2 }`. The first attach to a fresh workspace inserts a single `main` tab and persists it immediately. A **resume tab** (created from the Sessions list) carries `resumeOf` so that even after the broker dies (host reboot) the re-attach re-resumes the same Claude session rather than starting a fresh one.
 
 ### Workspace shape (returned over IPC)
 The `Workspace` type joins the manifest with live backend state:
@@ -370,12 +379,14 @@ CREATE TABLE sessions (
   cwd TEXT,                            -- from first `system` event carrying it
   started_at INTEGER,                  -- first event ts
   last_active_at INTEGER,              -- max(event ts)
-  ai_title TEXT,                       -- latest `ai-title.aiTitle`
+  ai_title TEXT,                       -- latest `ai-title.aiTitle` (dormant — no producer yet)
   first_user_message TEXT,             -- last-prompt or first user.content
-  user_set_name TEXT                   -- manual override (for the sessions table; see §11)
+  user_set_name TEXT                   -- manual override set via sessions:rename
 );
 CREATE INDEX idx_sessions_workspace ON sessions(workspace_id);
 ```
+
+This `sessions` table is the index behind the Sessions table feature (§6 *Sessions*, §8 *Browse & resume a past session*): `listSessions` reads it (joined to a grouped `events` pass for cost + event count), `renameSession` sets `user_set_name`, and `deleteSession` removes the session's rows here + in `events`/`broker_sessions` before the IPC layer unlinks the JSONL.
 
 **Why these design choices:**
 - **Unique `(session_id, dedup_key)`** makes ingestion idempotent. Re-tailing a JSONL from byte 0 (after crash, after losing in-memory offsets) produces no duplicates: heavy events use their `uuid` as the key; light events without a `uuid` use a SHA-256 hash of the raw line. Insert uses `INSERT OR IGNORE`.
@@ -490,6 +501,14 @@ Each chip in the workspace strip has a `⋮` trigger that opens a contextual men
    - **Paused**: `Resume` (calls `workspace:start` → unpauses), and `Stop & remove` (forces SIGKILL via `remove --force`, so pause state doesn't block removal).
    - **Exited / stopped**: only `Remove` (calls `workspace:remove(id, { deleteState })`).
 4. On success, the modal closes, the selection clears, and the top strip refreshes. With `deleteState=false` the workspace transitions to "deleted" state (still in the past list, recoverable via restart). With `deleteState=true` it's fully purged. Failures surface inline in the modal.
+
+### Browse & resume a past session
+The left rail (`SessionsPane`, the 280px column) is the Sessions table. It mirrors the ObservabilityPane's scope control: **This workspace** (the selected one) or **All** (every live workspace). A search box filters by title + workspace name; the list refetches on scope/selection change, on every `observability:summary` push (throttled, so just-active sessions surface live), and after the pane's own rename/delete actions.
+
+Each row shows the display title (resume on click), and — in **All** scope — a workspace color dot + name, plus relative last-active time and USD cost. Hover reveals row actions:
+- **Resume (↻)**: App calls `sessions:resume(workspaceId)` to bring the container up, selects that workspace, and hands the matching `TerminalPane` a resume request. The pane opens a new tab whose `SessionEntry.resumeOf` is the Claude session UUID; that tab's first attach runs `claude --resume <uuid>` in the container (see §6 *PTY*). If the container can't be brought up, App logs a non-fatal warning and does nothing.
+- **Rename (✎)**: inline edit → `sessions:rename`; empty clears the override.
+- **Delete (🗑)**: a two-click inline confirm → `sessions:delete` (drops cache rows + unlinks the transcript). No modal — the action is row-local and the confirm is reversible up to the second click.
 
 ## 9. Security model
 
@@ -618,40 +637,15 @@ Per-session cost and token counts derived from Claude transcript JSONL events. *
 - **Pricing refresh process.** `pricing.ts` is hand-maintained. When Anthropic publishes new rates, the constants need updating. Consider an annual recheck cadence and/or a comment-pinned source URL.
 
 ### Sessions table
-Global, container-filterable table of past Claude Code sessions, each resumable via `claude --resume <session-id>`.
 
-**Decisions made:**
-- **Storage**: SQLite index, JSONL stays the source of truth. SQLite is a cache that can be rebuilt from JSONLs.
-- **Eligibility**: a session appears iff (a) its JSONL exists on disk and (b) the `cwd` recorded in its first event still exists on the host. Filter (b) hides sessions whose workspace was deleted — they can't be resumed cleanly.
-- **Short description**: auto-generated by an LLM call from the transcript. Cached in `auto_description`. Optionally overridden by a user-set name (matching Claude Code's built-in `-n/--name` mechanism).
-- **Scope**: stored globally (sessions are not bound to any particular container's lifetime); UI provides a container filter.
+**Status: shipped.** Global, workspace-filterable list of every Claude session the watcher has indexed, each resumable via `claude --resume <id>`, renamable, and deletable. Implementation lives in the body: §6 *Sessions* (`sessions:list`/`rename`/`delete`/`resume` IPC), §6 *PTY* (`resumeOf` attach), §7 *Session inventory* (`resumeOf` field) + *JSONL→SQLite cache* (the `sessions` table is the index; JSONL stays the source of truth), and §8 *Browse & resume a past session* (the `SessionsPane` UI). It's workspace-keyed (not container-keyed) — sessions outlive any one container, and eligibility is "workspace manifest still exists."
 
-**SQLite schema (sketch):**
-```sql
-CREATE TABLE sessions (
-  id TEXT PRIMARY KEY,                  -- session UUID (= JSONL filename stem)
-  cwd TEXT NOT NULL,                    -- workspace path from first JSONL event
-  container_id TEXT,                    -- container that ran it; NULL once container is deleted
-  container_name TEXT,                  -- last-known name, retained for display when container_id is NULL
-  profile TEXT,                         -- vault profile used at session start
-  started_at INTEGER NOT NULL,          -- first event timestamp (ms)
-  last_active_at INTEGER NOT NULL,      -- last event timestamp (ms)
-  first_user_message TEXT,              -- head of JSONL, fallback display when auto_description is absent
-  auto_description TEXT,                -- LLM-generated
-  user_set_name TEXT                    -- optional manual override
-);
-```
+**Resume mechanism.** The host knows the Claude session UUID up front, so the broker→claude mapping is written **directly** at attach time rather than via the watcher's pending-attach queue — `claude --resume` appends to the existing `<uuid>.jsonl`, so no `new-session` event ever fires. The broker gained an optional `args` field on `CREATE` (`broker/internal/proto`) threaded through `Manager.Create` → `newSession` → `exec.Command(claude, args...)`; the host passes `["--resume", "<uuid>"]`.
 
-**Reconciliation.** On startup and on JSONL change events: new JSONLs → insert row; deleted JSONLs → drop row; modified → bump `last_active_at`.
-
-**Resume flow.** User selects a row → main process locates the target container (or recreates it from the recorded profile/workspace if it's gone) → opens a new PTY and runs `claude --resume <id>` in the recorded `cwd`.
-
-**Deletion.** UI-side "Delete session" prunes the SQLite row and removes the underlying JSONL (or shells out to `claude project purge` for whole-project deletion).
-
-**Open**:
-- Which model generates `auto_description`, and when (on session end? lazily on first display? on a schedule?). Likely cheap/fast model; one-shot generation when the session is first surfaced, regenerated only if `last_active_at` advances significantly.
-- How much of the transcript to feed into the description prompt (full vs. truncated head+tail vs. tool-call summary).
-- In-progress sessions: should the table show currently-active sessions, and if so how (live-updating row vs. only on session end)?
+**Open (residual):**
+- **Auto-title (`ai_title`).** The column + ingest hook (`type: 'ai-title'`) exist but nothing populates them yet — the display title currently falls back to the first user message. An LLM-generated short description is the intended occupant; open questions: which model, when (on first surface? on significant `last_active_at` advance?), and how much transcript to feed it. This is the natural consumer of the future meta-observability LLM-parsing layer (see *Permission-request log*).
+- **In-progress sessions.** The list shows active sessions too (they refresh on every ingest push). No distinct "live row" affordance vs. ended sessions yet — tab-state richness is tracked under *Observability layer*.
+- **Deleting a live session's transcript.** `sessions:delete` unlinks the JSONL even if claude is still appending to it (rare — you'd be deleting the session you're in). On Linux the open fd keeps the inode alive, so claude keeps writing to the now-unlinked file until it reopens; the row reappears on the next new transcript. Acceptable for v1; revisit if it bites.
 
 ### Resumable sessions on workspace pause/resume — "expert workspaces"
 
@@ -750,6 +744,8 @@ Always-on structured log of every prompt Claude makes to the user. Substrate for
 > - **`AskUserQuestion` / `ExitPlanMode`:** claude renders the selection UI in the **TUI but does not write the `tool_use` to the JSONL while the prompt is pending** (verified live: question box on screen, zero tool_use rows in the transcript). They have never appeared as `tool_use` in any real transcript. (A query over these shipped in #77 and was **reverted** once this was confirmed — its e2e only passed against synthesized rows claude doesn't actually produce.)
 >
 > **Net:** the "Claude is waiting on the user" signal lives only in the interactive PTY/TUI, not in the JSONL or a loadable hook. A true needs-input affordance is **blocked** pending either claude-side support (a transcript event or a usable hook) or fragile PTY-body parsing of the prompt box.
+>
+> **Decision (2026-06-16): shelved indefinitely.** We are not pursuing fragile PTY-body parsing. The feature is parked until a **meta-observability** capability exists — a layer that watches the model's responses/terminal stream and hands them to a separate LLM for parsing/classification (e.g. "is this turn waiting on the user, and what is it asking?"). That LLM-parsing substrate is the prerequisite; the permission-request log and the richer `needs-input` tab state both depend on it and should not be revisited before it lands. No further work on #11 until then.
 >
 > **Shipped instead (#79):** a **busy/idle** chip indicator derived from claude's terminal-title glyph in the PTY stream (braille spinner = busy, `✳` = idle) — see §5 *Top row*. That's the one "is claude working vs waiting" signal reliably present; it's busy/idle, not needs-input-specific.
 

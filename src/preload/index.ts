@@ -7,12 +7,42 @@ export interface SessionEntry {
   id: string;
   name: string;
   createdAt: number;
+  /**
+   * When set, this tab resumes a prior claude session: its first attach
+   * spawns `claude --resume <resumeOf>` instead of a fresh claude, and the
+   * broker→claude mapping is learned directly (resume appends to the
+   * existing transcript, so no 'new-session' event fires). `resumeOf` is the
+   * claude session UUID. Persisted so a reattach after the broker died
+   * (host reboot) re-resumes the same session.
+   */
+  resumeOf?: string;
 }
 export interface SessionInventory {
   version: 1;
   sessions: SessionEntry[];
   nextNum: number;
   activeId?: string;
+}
+
+/**
+ * One row of the Sessions table (#3). Mirrors db.SessionListRow plus the
+ * overlaid workspace display fields the main process joins in. The renderer
+ * computes the display title as `userSetName ?? aiTitle ?? firstUserMessage
+ * ?? '(untitled)'`.
+ */
+export interface SessionListItem {
+  id: string;
+  workspaceId: string;
+  aiTitle: string | null;
+  firstUserMessage: string | null;
+  userSetName: string | null;
+  startedAt: number | null;
+  lastActiveAt: number | null;
+  eventCount: number;
+  usd: number;
+  workspaceName: string;
+  workspaceColorHue: number | null;
+  workspaceState: 'running' | 'paused' | 'stopped' | 'deleted';
 }
 
 /**
@@ -144,7 +174,27 @@ const api = {
     read: (workspaceId: string): Promise<SessionInventory> =>
       ipcRenderer.invoke('sessions:read', workspaceId),
     write: (workspaceId: string, inventory: SessionInventory): Promise<void> =>
-      ipcRenderer.invoke('sessions:write', workspaceId, inventory)
+      ipcRenderer.invoke('sessions:write', workspaceId, inventory),
+    /**
+     * Sessions table (#3). Omit `workspaceId` for the global list; pass it to
+     * scope to one workspace. Returns newest-active first, with sessions whose
+     * workspace was deleted already filtered out.
+     */
+    list: (workspaceId?: string): Promise<SessionListItem[]> =>
+      ipcRenderer.invoke('sessions:list', workspaceId),
+    /** Set (empty string clears) the manual name override for a session. */
+    rename: (sessionId: string, name: string): Promise<void> =>
+      ipcRenderer.invoke('sessions:rename', sessionId, name),
+    /** Drop a session from the cache and delete its on-disk transcript. */
+    delete: (workspaceId: string, sessionId: string): Promise<void> =>
+      ipcRenderer.invoke('sessions:delete', workspaceId, sessionId),
+    /**
+     * Bring the session's workspace container up (unpause/start/no-op) and
+     * return its containerId so the renderer can open a resume tab. Null when
+     * the container is gone and can't be brought up here.
+     */
+    resume: (workspaceId: string): Promise<{ containerId: string } | null> =>
+      ipcRenderer.invoke('sessions:resume', workspaceId)
   },
   fs: {
     isDirectory: (path: string): Promise<boolean> => ipcRenderer.invoke('fs:isDirectory', path),
@@ -196,9 +246,12 @@ const api = {
       containerId: string,
       brokerSessionId: string,
       cols: number,
-      rows: number
+      rows: number,
+      // claude session UUID to resume — spawns `claude --resume <uuid>` on
+      // the first CREATE for this tab. Omitted for ordinary new sessions.
+      resumeOf?: string
     ): Promise<string> =>
-      ipcRenderer.invoke('pty:attach', containerId, brokerSessionId, cols, rows),
+      ipcRenderer.invoke('pty:attach', containerId, brokerSessionId, cols, rows, resumeOf),
     input: (sessionId: string, data: string) =>
       ipcRenderer.invoke('pty:input', sessionId, data),
     resize: (sessionId: string, cols: number, rows: number) =>

@@ -32,13 +32,15 @@ func NewManager(cfg ManagerConfig) *Manager {
 
 // Create spawns a new claude PTY under id. ErrIDInUse if the id already
 // has a session. The session lives until Close(id) or natural exit.
-func (m *Manager) Create(id string, cols, rows uint16) (*Session, error) {
+// args, when non-empty, are appended to the claude exec (e.g.
+// ["--resume", "<uuid>"] to resume a prior session).
+func (m *Manager) Create(id string, cols, rows uint16, args []string) (*Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.sessions[id]; ok {
 		return nil, ErrIDInUse
 	}
-	s, err := newSession(id, m.cfg.ClaudeExec, cols, rows, m.cfg.RingBufBytes)
+	s, err := newSession(id, m.cfg.ClaudeExec, args, cols, rows, m.cfg.RingBufBytes)
 	if err != nil {
 		return nil, err
 	}

@@ -31,6 +31,10 @@ export interface SessionEntry {
   id: string; // stable across app restarts; NOT the PTY session id (which is per-attach)
   name: string; // display name: 'main', 'session 2', 'session 3', …
   createdAt: number;
+  // When set, this tab resumes a prior claude session — its first attach
+  // spawns `claude --resume <resumeOf>`. The claude session UUID. Persisted
+  // so a reattach after the broker died (host reboot) re-resumes it.
+  resumeOf?: string;
 }
 
 export interface SessionInventory {
@@ -58,14 +62,17 @@ export async function readInventory(workspaceId: string): Promise<SessionInvento
     const raw = await readFile(inventoryPath(workspaceId), 'utf8');
     const parsed = JSON.parse(raw) as Partial<SessionInventory>;
     if (!parsed || !Array.isArray(parsed.sessions)) return emptyInventory();
-    const sessions = parsed.sessions.filter(
-      (s): s is SessionEntry =>
-        s != null &&
-        typeof s === 'object' &&
-        typeof s.id === 'string' &&
-        typeof s.name === 'string' &&
-        typeof s.createdAt === 'number'
-    );
+    const sessions = parsed.sessions
+      .filter(
+        (s): s is SessionEntry =>
+          s != null &&
+          typeof s === 'object' &&
+          typeof s.id === 'string' &&
+          typeof s.name === 'string' &&
+          typeof s.createdAt === 'number'
+      )
+      // Normalize the optional resumeOf: keep it only when it's a string.
+      .map((s) => (typeof s.resumeOf === 'string' ? s : { ...s, resumeOf: undefined }));
     return {
       version: 1,
       sessions,

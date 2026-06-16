@@ -134,7 +134,7 @@ func (s *Server) dispatch(
 		if req.Cols == 0 || req.Rows == 0 {
 			req.Cols, req.Rows = 80, 24
 		}
-		if _, err := s.mgr.Create(req.ID, req.Cols, req.Rows); err != nil {
+		if _, err := s.mgr.Create(req.ID, req.Cols, req.Rows, req.Args); err != nil {
 			return cw.writeJSON(proto.FrameCreated, proto.CreateResponse{ID: req.ID, OK: false, Error: err.Error()})
 		}
 		return cw.writeJSON(proto.FrameCreated, proto.CreateResponse{ID: req.ID, OK: true})

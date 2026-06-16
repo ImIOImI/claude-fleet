@@ -294,9 +294,22 @@ export class BrokerClient extends EventEmitter {
     });
   }
 
-  async createSession(id: string, cols: number, rows: number): Promise<CreateResponse> {
+  /**
+   * Spawn a new claude PTY in the broker. `args`, when provided, are
+   * appended to the broker's claude exec — the host uses this to resume a
+   * prior session (`['--resume', '<claude-uuid>']`). Omitted for ordinary
+   * new sessions, in which case the field is left off the wire entirely
+   * (matching the broker's `omitempty`).
+   */
+  async createSession(
+    id: string,
+    cols: number,
+    rows: number,
+    args?: string[]
+  ): Promise<CreateResponse> {
+    const body = args && args.length > 0 ? { id, cols, rows, args } : { id, cols, rows };
     const payload = await this.rpc(
-      { type: FrameType.CREATE, payload: Buffer.from(JSON.stringify({ id, cols, rows }), 'utf8') },
+      { type: FrameType.CREATE, payload: Buffer.from(JSON.stringify(body), 'utf8') },
       FrameType.CREATED
     );
     return JSON.parse(payload.toString('utf8')) as CreateResponse;

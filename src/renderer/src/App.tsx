@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { WorkspaceTabStrip } from './components/WorkspaceTabStrip';
 import { SessionsPane } from './components/SessionsPane';
 import { ObservabilityPane } from './components/ObservabilityPane';
@@ -10,7 +10,7 @@ import { CloseWorkspaceModal } from './components/CloseWorkspaceModal';
 import { DeleteWorkspaceModal } from './components/DeleteWorkspaceModal';
 import { EditWorkspaceModal, containerLevelChanged } from './components/EditWorkspaceModal';
 import { SettingsModal } from './components/SettingsModal';
-import type { WorkspaceObservabilitySummary } from '../../preload';
+import type { WorkspaceObservabilitySummary, SessionListItem } from '../../preload';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
 export type WorkspaceKind = 'container' | 'local';
@@ -115,6 +115,44 @@ export function App() {
   const [activeTabSummary, setActiveTabSummary] = useState<
     WorkspaceObservabilitySummary | null
   >(null);
+
+  // Pending resume request from the Sessions list, targeted at one workspace.
+  // App brings the container up, selects the workspace, and hands this to the
+  // matching TerminalPane, which opens a `claude --resume <uuid>` tab and
+  // clears it via onResumeConsumed. `token` lets the same session be resumed
+  // again later (a fresh token re-fires the pane's effect).
+  const [resumeRequest, setResumeRequest] = useState<{
+    workspaceId: string;
+    claudeSessionId: string;
+    title: string;
+    token: number;
+  } | null>(null);
+  const resumeTokenRef = useRef(0);
+  const handleResumeSession = useCallback(
+    async (item: SessionListItem): Promise<void> => {
+      try {
+        const res = await window.api.sessions.resume(item.workspaceId);
+        if (!res) {
+          // Container gone / not recreatable here — non-fatal.
+          // eslint-disable-next-line no-console
+          console.warn('resume: workspace container could not be brought up', item.workspaceId);
+          return;
+        }
+        setSelectedId(item.workspaceId);
+        setResumeRequest({
+          workspaceId: item.workspaceId,
+          claudeSessionId: item.id,
+          title: item.userSetName || item.aiTitle || item.firstUserMessage || 'resumed',
+          token: ++resumeTokenRef.current
+        });
+        refresh();
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('resume failed:', err);
+      }
+    },
+    []
+  );
 
   // Per-terminal context for the selected workspace — one entry per session
   // tab (from sessions.json), each with its session's context-window usage.
@@ -537,7 +575,11 @@ export function App() {
       />
 
       <div className="app-body">
-        <SessionsPane />
+        <SessionsPane
+          workspaces={workspaces}
+          selectedWorkspaceId={selectedId}
+          onResume={handleResumeSession}
+        />
 
         <main
           className="main-pane"
@@ -582,6 +624,8 @@ export function App() {
                     );
                   }}
                   onBusyChange={handleBusyChange}
+                  resumeRequest={resumeRequest?.workspaceId === w.id ? resumeRequest : null}
+                  onResumeConsumed={() => setResumeRequest(null)}
                 />
               ))}
           </div>

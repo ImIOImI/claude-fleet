@@ -290,7 +290,8 @@ export async function attachPty(
   containerId: string,
   _sessionId: string,
   _cols: number,
-  _rows: number
+  _rows: number,
+  _resumeOf?: string
 ): Promise<PtyHandle> {
   // Mock mode doesn't run a real broker — sessionId is accepted so the
   // signature matches the real backend, but each attach gets a fresh
