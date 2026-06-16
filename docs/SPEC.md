@@ -220,6 +220,13 @@ The renderer cannot use `navigator.clipboard` reliably (focus/permission gotchas
 - `clipboard:read()` → `string` — `electron.clipboard.readText`.
 - `menu:showTerminalContextMenu({ hasSelection })` → `'copy' | 'paste' | 'selectAll' | null` — builds a native `Menu`, popups it on the focused window, resolves with the chosen action or `null` on dismiss. Copy item is disabled when `hasSelection` is false.
 
+### Files (drag-and-drop ingestion)
+Save dropped/pasted content into the selected workspace's private folder under `_dropped/` so the agent can read it at `/workspace/_dropped/<name>`. All four handlers take the workspace **ULID** (`workspaceId`, not a containerId — the modern identity) and return the **container-visible** path(s). They touch only the host filesystem (+ a fetch for URL drops), so they're registered unconditionally and work in mock mode. Caps: `MAX_FILE_BYTES` = 100 MB per file, `MAX_DROPBOX_BYTES` = 1 GB per workspace dropbox; overflow throws (rejected, never evicted) and the renderer toasts the message.
+- `files:dropOsFiles(workspaceId, sourcePaths[])` → `string[]` — copy OS-dragged files; caps validated across the whole batch before any copy (a partly-over-limit batch writes nothing). The renderer resolves each `File` to a host path via `webUtils.getPathForFile` in the preload.
+- `files:dropBytes(workspaceId, { suggestedName?, mime?, bytes })` → `string` — clipboard image / inline bytes. Extension comes from `suggestedName`, else a magic-number sniff of `bytes`, else `mime`, else none. Default name `paste-<stamp>`.
+- `files:dropUrl(workspaceId, url)` → `string` — main `fetch`es the URL (http/https only) with a 20s `AbortController` timeout, streaming the body and aborting if it crosses `MAX_FILE_BYTES` even when `content-length` is absent. Name from `Content-Disposition`, else the URL basename, else `web-<stamp>`.
+- `files:dropText(workspaceId, { mime, text })` → `string` — dragged text/HTML saved as `dropped-<stamp>.txt` / `.html`.
+
 ## 7. Data model
 
 ### Workspace manifest (on disk)
@@ -511,6 +518,12 @@ Each row shows the display title (resume on click), and — in **All** scope —
 - **Rename (✎)**: inline edit → `sessions:rename`; empty clears the override.
 - **Delete (🗑)**: a two-click inline confirm → `sessions:delete` (drops cache rows + unlinks the transcript). No modal — the action is row-local and the confirm is reversible up to the second click.
 
+### Drop a file / paste an image / drag in content
+`useDropIngestion` (renderer) wires window-level `dragover`/`drop` + a capture-phase `paste` listener, routing everything to the **selected** workspace (toasts "Select a workspace first" if none). A full-window overlay appears while dragging.
+- **Drop precedence**: real OS files (`getPathForFile` non-empty) → `files:dropOsFiles`; else a dragged http(s) URL (`text/uri-list`/`text/plain`) → `files:dropUrl` (this is the browser-image-drag path — its synthetic File has no host path, so it falls through here); else `text/html` → `files:dropText`; else plain text → `files:dropText`.
+- **Paste**: only acts on an image item on the clipboard (`preventDefault`+`stopPropagation` so it doesn't also reach xterm) → `files:dropBytes`. Text paste falls through to xterm's own Ctrl/Cmd+V handler untouched.
+- **On success**: the returned container path(s) are copied to the clipboard and shown in a toast (`/workspace/_dropped/<name>`) for the user to paste into their prompt. On failure (over-limit, unreachable URL, no workspace), the thrown message is toasted.
+
 ## 9. Security model
 
 - **Secret env-var values stay out of the renderer except at write time.** Per-workspace secrets are persisted via `vault:setSecret(workspaceId, key, value)`. After that, the renderer holds only the *list* of secret key names (via `vault:listKeys`); the main process resolves values directly from keytar when constructing the container env. The lone exception is the env-row in `WorkspaceForm` — the renderer briefly holds the value the user just typed before it ships to `vault:setSecret`. There is no way around that.
@@ -668,30 +681,13 @@ The goal: **expert workspaces** that load a domain context once (an organization
 - **Broker crash blast radius.** Single multiplexer means a broker bug kills every session in that workspace at once. We accept this tradeoff for the cleaner architecture; mitigate by writing the broker defensively (each session's error handling is local) and by relying on the manager's per-session goroutine isolation. If real crashes appear, revisit the per-session-process model.
 
 ### Drag-and-drop file ingestion
-Drop OS files, pasted images, web content, or text fragments onto the window; the app saves them into the selected container's workspace so the agent can read them.
 
-**Decisions made:**
-- **Drop target**: anywhere on the window. The file is routed to whichever container is currently selected in the sidebar. If no container is selected, the drop is rejected with a hint ("select a container first").
-- **Save location**: `<workspaceRoot>/_dropped/` for the selected container. Filename collisions resolved by suffix (`foo.png`, `foo-2.png`, `foo-3.png`). Inside the container the agent reads from `/workspace/_dropped/<name>`.
-- **Post-save behavior**: toast confirmation showing the saved path, plus the path is copied to the system clipboard (via `clipboard.writeText`). User pastes it into their prompt manually — no auto-typing into the PTY.
-- **Sources accepted**:
-  - **OS file drag** — drop from Explorer/Finder/Nautilus. Renderer reads the path via `webUtils.getPathForFile(file)`; main copies from source to destination.
-  - **Clipboard paste** (Cmd/Ctrl+V) anywhere on the window — image bytes from the clipboard saved as `paste-<ISO-timestamp>.<ext>` (extension derived from clipboard format).
-  - **Web drag** — content dragged out of a browser. If a URL, the main process fetches it and writes the body; if inline bytes, written directly. Filename derived from the source URL or Content-Disposition; falls back to `web-<ISO-timestamp>.<ext>`.
-  - **Text / HTML drag** — selected text dragged in. Written as `dropped-<ISO-timestamp>.txt` (plain text) or `.html` (when the drag carries HTML).
+**Status: shipped (all four sources).** Drop OS files / paste images / drag web content / drag text onto the window; saved into the selected workspace's `_dropped/` for the agent to read at `/workspace/_dropped/<name>`. Implementation: §6 *Files* (the `files:*` IPC + caps + sniffing + URL fetch) and §8 *Drop a file / paste an image / drag in content* (the `useDropIngestion` renderer flow, precedence, toasts). `src/main/files.ts` does the work; pure naming/sniff helpers live in `src/main/dropNaming.ts` (electron-free so they're vitest-able). Routed by workspace **ULID** (not containerId). Caps reject (never evict): 100 MB/file, 1 GB/dropbox. The dropbox gets a `.gitignore` of `*` on first use, so drops never get committed regardless of the consumer repo's ignore rules (no dependency on the runner image's `.gitignore`).
 
-**IPC surface (sketch):**
-- `files:dropOsFiles(containerId, sourcePaths: string[])` → `string[]` (saved paths)
-- `files:dropBytes(containerId, payload: { suggestedName, mime, bytes })` → `string`
-- `files:dropUrl(containerId, url: string)` → `string`
-- `files:dropText(containerId, payload: { mime: 'text/plain' | 'text/html', text: string })` → `string`
-
-**Open:**
-- **Max file size / total dropbox size.** A single drop could fill the host disk. Cap per file (e.g., 100 MB) and per container dropbox (e.g., 1 GB) with eviction or rejection on overflow.
-- **MIME / format detection.** For clipboard and web sources where filename isn't given, sniff bytes (magic numbers) before falling back to the clipboard-format extension. Decide whether unknown formats are saved with no extension or rejected.
-- **Web-drag CORS / large downloads.** Need a timeout, a progress indicator if the fetch takes more than a beat, and a sensible error if the URL is unreachable from the main process.
-- **`.gitignore` interaction.** `_dropped/` should be added to the runner image's default `.gitignore` (or the spec should require users to add it). Otherwise drops get committed by accident.
-- **Whether to expose drops in the sessions table.** A row showing "5 files dropped" alongside the session might be useful. Out of scope for v1 but worth recording.
+**Open (residual):**
+- **Unknown formats** save extensionless when neither a magic-number sniff nor the MIME type yields an extension. Acceptable; revisit if it confuses the agent.
+- **No fetch progress UI.** A URL drop that takes a few seconds just shows nothing until it lands or the 20s timeout fires. A progress toast would be nicer for big/slow fetches.
+- **Whether to expose drops in the sessions table.** A row showing "5 files dropped" alongside the session might be useful. Out of scope; worth recording.
 
 ### Durable transcript mirror
 An append-only mirror of every event Claude Code emits for a terminal session. Whether the mirror is written at all, and whether it survives an explicit close, are per-profile defaults that can be overridden per-session.

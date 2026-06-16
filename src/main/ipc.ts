@@ -12,6 +12,7 @@ import * as vault from './vault.js';
 import * as fs from './fs.js';
 import * as imageLibrary from './imageLibrary.js';
 import * as sessions from './sessions.js';
+import * as files from './files.js';
 import {
   listWorkspaceManifests,
   readWorkspaceManifest,
@@ -439,6 +440,25 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     if (typeof text === 'string' && text.length > 0) clipboard.writeText(text);
   });
   ipcMain.handle('clipboard:read', () => clipboard.readText());
+
+  // Drag-and-drop ingestion. Routed to the selected workspace by the
+  // renderer; each saves into `<fleetRoot>/<id>/_dropped/` and returns the
+  // container-visible path (`/workspace/_dropped/<name>`). Not backend-gated
+  // — these touch only the host filesystem (+ a fetch for URL drops), so the
+  // real module works in mock mode too. Errors (over-limit, unreachable URL)
+  // propagate to the renderer, which toasts them.
+  ipcMain.handle('files:dropOsFiles', (_e, workspaceId: string, sourcePaths: string[]) =>
+    files.dropOsFiles(workspaceId, sourcePaths)
+  );
+  ipcMain.handle('files:dropBytes', (_e, workspaceId: string, payload: files.DropBytesPayload) =>
+    files.dropBytes(workspaceId, payload)
+  );
+  ipcMain.handle('files:dropUrl', (_e, workspaceId: string, url: string) =>
+    files.dropUrl(workspaceId, url)
+  );
+  ipcMain.handle('files:dropText', (_e, workspaceId: string, payload: files.DropTextPayload) =>
+    files.dropText(workspaceId, payload)
+  );
 
   ipcMain.handle(
     'menu:showTerminalContextMenu',

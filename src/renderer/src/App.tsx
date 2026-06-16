@@ -11,6 +11,7 @@ import { DeleteWorkspaceModal } from './components/DeleteWorkspaceModal';
 import { EditWorkspaceModal, containerLevelChanged } from './components/EditWorkspaceModal';
 import { SettingsModal } from './components/SettingsModal';
 import type { WorkspaceObservabilitySummary, SessionListItem } from '../../preload';
+import { useDropIngestion } from './dropIngestion';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
 export type WorkspaceKind = 'container' | 'local';
@@ -153,6 +154,23 @@ export function App() {
     },
     []
   );
+
+  // Transient toasts (drag-and-drop results live here today). Auto-dismiss
+  // after a few seconds; errors linger a touch longer.
+  const [toasts, setToasts] = useState<Array<{ id: number; kind: 'ok' | 'error'; message: string }>>(
+    []
+  );
+  const toastSeq = useRef(0);
+  const notify = useCallback((kind: 'ok' | 'error', message: string) => {
+    const id = ++toastSeq.current;
+    setToasts((prev) => [...prev, { id, kind, message }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, kind === 'error' ? 6000 : 4000);
+  }, []);
+
+  // Drag-and-drop / clipboard-image ingestion → selected workspace's _dropped/.
+  const { dragging } = useDropIngestion({ workspaceId: selectedId, notify });
 
   // Per-terminal context for the selected workspace — one entry per session
   // tab (from sessions.json), each with its session's context-window usage.
@@ -556,7 +574,7 @@ export function App() {
   };
 
   return (
-    <div className="app">
+    <div className={`app ${dragging ? 'dragging' : ''}`}>
       <WorkspaceTabStrip
         workspaces={workspaces}
         summaries={summaries}
@@ -642,6 +660,27 @@ export function App() {
           activeTerminalId={activeTabId}
         />
       </div>
+
+      {dragging && (
+        <div className="drop-overlay" aria-hidden="true">
+          <div className="drop-overlay-card">
+            <div className="drop-overlay-title">Drop to add to this workspace</div>
+            <div className="drop-overlay-sub">
+              {selected ? `→ ${selected.name} · /workspace/_dropped/` : 'Select a workspace first'}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {toasts.length > 0 && (
+        <div className="toasts" role="status" aria-live="polite">
+          {toasts.map((t) => (
+            <div key={t.id} className={`toast ${t.kind}`}>
+              {t.message}
+            </div>
+          ))}
+        </div>
+      )}
 
       <BottomBar vaultAvailable={vaultAvailable} />
 
