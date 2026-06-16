@@ -27,7 +27,6 @@ import {
   summaryForBrokerSession,
   costForSession,
   costForWorkspace,
-  userPromptsForWorkspace,
   learnBrokerSessionMapping,
   lookupBrokerSession,
 } from './db.js';
@@ -488,12 +487,6 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   );
   ipcMain.handle('observability:getCostForWorkspace', (_e, workspaceId: string) =>
     costForWorkspace(workspaceId)
-  );
-
-  // User-prompt log (#11): AskUserQuestion / ExitPlanMode moments from the
-  // transcript, newest first, each with a resolved flag.
-  ipcMain.handle('userPrompts:list', (_e, workspaceId: string) =>
-    userPromptsForWorkspace(workspaceId)
   );
 
   // Renderer-side error reporting bridge. The renderer's onerror /
