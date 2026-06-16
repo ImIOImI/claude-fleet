@@ -203,7 +203,7 @@ Host-filesystem helpers used by the workspace-create flow and the observability 
 
 ### Settings (app config)
 App-level settings persist to `<userData>/config.json`. Currently just the **fleet root** — the single host dir holding every workspace's private folder (`<fleetRoot>/<id>`) and the shared folder (`<fleetRoot>/shared`).
-- `config:get()` → `{ fleetRoot, sharedDir }` — current fleet root (defaults to `~/fleet` when unset) and its derived `<fleetRoot>/shared`.
+- `config:get()` → `{ fleetRoot, sharedDir }` — current fleet root and its derived `<fleetRoot>/shared`. Precedence: `CLAUDE_FLEET_ROOT` env override (the e2e suite sets this in `tests/_helpers.ts` so test runs don't pollute the real `~/fleet`) → the persisted config value → the `~/fleet` default.
 - `config:setFleetRoot(path)` → `{ fleetRoot, sharedDir }` — persist a new fleet root (the dir is created). Surfaced via the top-strip gear → `SettingsModal`. Takes effect for new containers and for existing ones on next restart (running containers keep their current mounts until recreated).
 
 ### Clipboard + context menu
