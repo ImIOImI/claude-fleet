@@ -152,6 +152,12 @@ const api = {
     /** Reveal a host path in the OS file manager. Resolves '' on success, else an error string. */
     openPath: (path: string): Promise<string> => ipcRenderer.invoke('fs:openPath', path)
   },
+  config: {
+    /** App-level settings: the fleet root and its derived shared folder. */
+    get: (): Promise<{ fleetRoot: string; sharedDir: string }> => ipcRenderer.invoke('config:get'),
+    setFleetRoot: (path: string): Promise<{ fleetRoot: string; sharedDir: string }> =>
+      ipcRenderer.invoke('config:setFleetRoot', path)
+  },
   dialog: {
     pickDirectory: (defaultPath?: string): Promise<string | null> =>
       ipcRenderer.invoke('dialog:pickDirectory', defaultPath)

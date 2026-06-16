@@ -142,6 +142,9 @@ export interface MockOpts {
   // across tab switches. When false (default), the endpoint returns
   // null, matching the real server-side behavior after the bug-A fix.
   observabilityPerTabSummaries?: boolean;
+  // Fleet root returned from config:get (sharedDir is `${fleetRoot}/shared`).
+  // Defaults to /tmp/fleet.
+  fleetRoot?: string;
 }
 
 export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {}): Promise<void> {
@@ -159,6 +162,7 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       isDirectory: [],
       mkdirp: [],
       openPath: [],
+      setFleetRoot: [],
       vaultSetSecret: [],
       vaultDeleteAllForWorkspace: []
     };
@@ -178,6 +182,8 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       'fs:isDirectory',
       'fs:mkdirp',
       'fs:openPath',
+      'config:get',
+      'config:setFleetRoot',
       'vault:available',
       'vault:listKeys',
       'vault:getSecret',
@@ -295,6 +301,13 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
     ipcMain.handle('fs:openPath', async (_e, p: string) => {
       g.__calls.openPath.push(p);
       return '';
+    });
+
+    const fleetRoot = opts.fleetRoot ?? '/tmp/fleet';
+    ipcMain.handle('config:get', () => ({ fleetRoot, sharedDir: `${fleetRoot}/shared` }));
+    ipcMain.handle('config:setFleetRoot', (_e, p: string) => {
+      g.__calls.setFleetRoot.push(p);
+      return { fleetRoot: p, sharedDir: `${p}/shared` };
     });
 
     const imageLib = (opts.imageLibrary ?? []).map((img) => ({

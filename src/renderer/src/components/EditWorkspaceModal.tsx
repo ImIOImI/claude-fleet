@@ -92,7 +92,6 @@ export function EditWorkspaceModal({
               description: workspace.description,
               labels: workspace.labels,
               color: workspace.color,
-              workspaceRoot: workspace.workspaceRoot,
               workspaceSubdir: workspace.workspaceSubdir,
               kind: workspace.kind,
               image: workspace.image,

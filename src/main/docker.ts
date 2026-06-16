@@ -26,6 +26,7 @@ import {
   workspaceStateDir
 } from './paths.js';
 import type { AuthMode, Workspace, WorkspaceEnv, WorkspaceResources } from './workspaces.js';
+import { fleetPrivateDir, fleetSharedDir } from './config.js';
 import { BrokerClient, brokerPtyStream } from './broker.js';
 import { recordPendingAttach } from './pendingAttaches.js';
 import { resolveEnv } from './vault.js';
@@ -46,7 +47,12 @@ function containerNameFor(id: string): string {
 export interface CreateWorkspaceInput {
   id: string;
   name: string;
-  workspaceRoot: string;
+  /**
+   * Optional subfolder inside the workspace's private /workspace dir to use as
+   * the working directory. Defaults to /workspace itself. The private folder
+   * and the shared folder both come from the app-level fleet root — callers
+   * no longer supply a host path.
+   */
   workspaceSubdir: string;
   /** Plain env vars only — secret values are looked up from the vault. */
   env: WorkspaceEnv;
@@ -276,10 +282,12 @@ export async function ensureWorkspaceClaudeJson(
 export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Workspace> {
   assertValidWorkspaceId(spec.id);
 
-  const wsStat = await stat(spec.workspaceRoot).catch(() => null);
-  if (!wsStat?.isDirectory()) {
-    throw new Error(`Workspace root "${spec.workspaceRoot}" is not an existing directory`);
-  }
+  // Private folder (this container only) + shared folder (all containers).
+  // Both live under the app-level fleet root and are created on demand.
+  const privateDir = await fleetPrivateDir(spec.id);
+  const sharedDir = await fleetSharedDir();
+  await mkdir(privateDir, { recursive: true });
+  await mkdir(sharedDir, { recursive: true });
 
   const claudeDir = workspaceClaudeDir(spec.id);
   await mkdir(claudeDir, { recursive: true });
@@ -302,7 +310,12 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
   const workingDir = `/workspace/${spec.workspaceSubdir}`.replace(/\/$/, '') || '/workspace';
 
   const binds: string[] = [
-    `${spec.workspaceRoot}:/workspace:rw`,
+    // Private per-container working dir. Only this container gets it mounted,
+    // so other containers can't read files dropped here on the host.
+    `${privateDir}:/workspace:rw`,
+    // Shared scratch space, mounted into every container — write here for
+    // other containers to read.
+    `${sharedDir}:/shared:rw`,
     `${claudeDir}:/home/fleet/.claude:rw`,
     // The in-container broker creates its socket here. Bind-mounting
     // the *directory* (not the file) lets the broker create the
@@ -361,7 +374,7 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
       [ID_LABEL]: spec.id,
       [NAME_LABEL]: spec.name,
       [SUBDIR_LABEL]: spec.workspaceSubdir,
-      [WORKSPACE_ROOT_LABEL]: spec.workspaceRoot
+      [WORKSPACE_ROOT_LABEL]: privateDir
     },
     HostConfig: hostCfg
   });
@@ -373,7 +386,7 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
     id: spec.id,
     name: spec.name,
     labels: [],
-    workspaceRoot: spec.workspaceRoot,
+    workspaceRoot: privateDir,
     workspaceSubdir: spec.workspaceSubdir,
     kind: 'container',
     image,

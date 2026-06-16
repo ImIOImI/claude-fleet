@@ -26,7 +26,6 @@ export interface WorkspaceFormSubmit {
   description?: string;
   labels: string[];
   color?: WorkspaceColor;
-  workspaceRoot: string;
   workspaceSubdir: string;
   kind: WorkspaceKind;
   image?: string;
@@ -76,25 +75,6 @@ function petName(): string {
   const a = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
   const n = ANIMALS[Math.floor(Math.random() * ANIMALS.length)];
   return `${a}-${n}`;
-}
-
-const LAST_WORKSPACE_ROOT_KEY = 'claude-fleet:lastWorkspaceRoot';
-
-function loadLastWorkspaceRoot(): string {
-  try {
-    return localStorage.getItem(LAST_WORKSPACE_ROOT_KEY) ?? '';
-  } catch {
-    return '';
-  }
-}
-
-function saveLastWorkspaceRoot(path: string): void {
-  try {
-    localStorage.setItem(LAST_WORKSPACE_ROOT_KEY, path);
-  } catch {
-    // localStorage may be unavailable in odd sandbox modes; persistence
-    // is a nice-to-have so swallow.
-  }
 }
 
 interface EnvRow {
@@ -149,9 +129,6 @@ export function WorkspaceForm({
   const [labels, setLabels] = useState<string[]>(initial?.labels ?? []);
   const [hue, setHue] = useState<number | null>(initial?.color?.hue ?? null);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [workspaceRoot, setWorkspaceRoot] = useState<string>(
-    initial?.workspaceRoot ?? (mode === 'create' ? loadLastWorkspaceRoot() : '')
-  );
   const [workspaceSubdir, setWorkspaceSubdir] = useState(initial?.workspaceSubdir ?? '');
   const [authMode, setAuthMode] = useState<AuthMode>(initial?.authMode ?? 'oauth');
   const [envRows, setEnvRows] = useState<EnvRow[]>(() => {
@@ -219,11 +196,6 @@ export function WorkspaceForm({
   const effectiveName = name.trim() || (mode === 'create' ? namePlaceholder : '');
   const nameOk = effectiveName.length > 0 && effectiveName.length <= 80 && !/[\x00-\x1f\x7f]/.test(effectiveName);
 
-  const browse = async () => {
-    const picked = await window.api.dialog.pickDirectory(workspaceRoot.trim() || undefined);
-    if (picked) setWorkspaceRoot(picked);
-  };
-
   const commitLabel = () => {
     const v = labelInput.trim();
     if (!v) return;
@@ -274,10 +246,6 @@ export function WorkspaceForm({
         setError(`A workspace named "${effectiveName}" already exists.`);
         return null;
       }
-    }
-    if (!workspaceRoot.trim()) {
-      setError('Workspace root is required.');
-      return null;
     }
     if (kind === 'container' && !image.trim()) {
       setError('Image reference is required for a container workspace.');
@@ -333,7 +301,6 @@ export function WorkspaceForm({
       description: description.trim() || undefined,
       labels,
       color: hue !== null ? { hue } : undefined,
-      workspaceRoot: workspaceRoot.trim(),
       workspaceSubdir: workspaceSubdir.trim(),
       kind,
       image: kind === 'container' ? image.trim() : undefined,
@@ -353,17 +320,9 @@ export function WorkspaceForm({
     setStatus(null);
     setError(null);
     try {
-      if (mode === 'create') {
-        const ws = payload.workspaceRoot;
-        const exists = await window.api.fs.isDirectory(ws);
-        if (!exists) {
-          const ok = window.confirm(`Workspace folder "${ws}" does not exist. Create it?`);
-          if (!ok) return;
-          setStatus(`Creating ${ws}…`);
-          await window.api.fs.mkdirp(ws);
-        }
-        saveLastWorkspaceRoot(ws);
-      }
+      // The workspace's private folder (and the shared folder) are created
+      // by the backend under the app-level fleet root — nothing to pick or
+      // pre-create here.
       await onSubmit(payload, setStatus);
     } catch (err) {
       setError(String(err));
@@ -580,25 +539,11 @@ export function WorkspaceForm({
       </div>
 
       <div className="form-row">
-        <label>Workspace root (host path)</label>
-        <div className="input-with-button">
-          <input
-            value={workspaceRoot}
-            onChange={(e) => setWorkspaceRoot(e.target.value)}
-            placeholder="/home/troy/repos"
-            disabled={busy}
-          />
-          <button type="button" onClick={browse} disabled={busy}>
-            Browse…
-          </button>
-        </div>
-      </div>
-      <div className="form-row">
-        <label>Subdir inside workspace</label>
+        <label>Subfolder in /workspace</label>
         <input
           value={workspaceSubdir}
           onChange={(e) => setWorkspaceSubdir(e.target.value)}
-          placeholder="(optional)"
+          placeholder="(optional) working subdir inside this container's private folder"
           disabled={busy}
         />
       </div>

@@ -202,6 +202,27 @@ body {
   gap: 8px;
 }
 
+/* Settings gear in the top strip. */
+.settings-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.settings-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--rule-strong, #4a5566);
+  background: var(--bg-hover, #1a1e26);
+}
+
 .btn {
   background: transparent;
   color: var(--text-secondary);

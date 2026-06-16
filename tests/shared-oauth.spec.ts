@@ -18,7 +18,6 @@ test('Create: default form submit ships authMode=oauth', async () => {
     await expect(window.getByRole('tab', { name: 'New' })).toHaveAttribute('aria-selected', 'true');
 
     await window.getByLabel('Workspace name').fill('test-oauth');
-    await window.getByPlaceholder('/home/troy/repos').fill('/tmp/test-oauth');
     await window.getByRole('button', { name: 'Create & start' }).click();
 
     await expect(window.getByRole('tab', { name: 'New' })).toBeHidden();
@@ -39,7 +38,6 @@ test('Create: switching to API key + supplying ANTHROPIC_API_KEY ships authMode=
     await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
 
     await window.getByLabel('Workspace name').fill('test-apikey');
-    await window.getByPlaceholder('/home/troy/repos').fill('/tmp/test-apikey');
 
     // Open Env vars disclosure → add ANTHROPIC_API_KEY plain (so the
     // API-key radio unlocks without needing the keychain).

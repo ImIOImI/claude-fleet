@@ -22,6 +22,8 @@ import { lstat, mkdir, readdir, readFile, rename, symlink, unlink, writeFile } f
 import { dirname, join } from 'node:path';
 import { ulid } from 'ulid';
 import { sharedClaudeCredentialsPath, stateRoot, workspaceClaudeDir, workspaceManifestPath } from './paths.js';
+import { fleetPrivateDir, fleetSharedDir } from './config.js';
+import { listWorkspaceManifests, writeWorkspaceManifest } from './workspaces.js';
 import type { WorkspaceSpec } from './workspaces.js';
 
 const SERVICE = 'claude-fleet';
@@ -48,6 +50,31 @@ export async function runStartupMigration(): Promise<void> {
     await migrateOAuthCredentials();
   } catch (err) {
     console.warn('[migration] credentials migration failed:', err);
+  }
+  try {
+    await migrateFleetFolders();
+  } catch (err) {
+    console.warn('[migration] fleet-folder migration failed:', err);
+  }
+}
+
+/**
+ * Fleet-folder model: each workspace's private dir is now `<fleetRoot>/<id>`
+ * and a single `<fleetRoot>/shared` is mounted into every container. For each
+ * existing workspace, create its private folder (and the shared folder) so the
+ * "Path"/"Shared" links work before the container is next recreated, and
+ * rewrite the manifest's `workspaceRoot` to the canonical private dir (older
+ * manifests stored a user-picked host path). Idempotent.
+ */
+async function migrateFleetFolders(): Promise<void> {
+  await mkdir(await fleetSharedDir(), { recursive: true });
+  const manifests = await listWorkspaceManifests();
+  for (const m of manifests) {
+    const privateDir = await fleetPrivateDir(m.id);
+    await mkdir(privateDir, { recursive: true });
+    if (m.workspaceRoot !== privateDir) {
+      await writeWorkspaceManifest({ ...m, workspaceRoot: privateDir });
+    }
   }
 }
 

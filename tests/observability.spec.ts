@@ -306,16 +306,17 @@ test('Context bars: one row per terminal, active tab highlighted', async () => {
   }
 });
 
-test('Workspace block: shows path/image/limits and the path row reveals the host folder', async () => {
+test('Workspace block: private + shared rows reveal their host folders', async () => {
   const { app, window } = await launch();
   try {
     await mockMainIpc(app, {
+      fleetRoot: '/tmp/fleet',
       workspaceList: [
         {
           name: 'alpha',
           containerId: 'alpha-id',
           state: 'running',
-          workspaceRoot: '/tmp/alpha',
+          workspaceRoot: '/tmp/fleet/alpha-id',
           workspaceSubdir: 'services/api',
           image: 'claude-fleet/runner:latest',
           resources: { cpus: 2, memoryMb: 4096 }
@@ -330,20 +331,57 @@ test('Workspace block: shows path/image/limits and the path row reveals the host
     const card = obsPane.locator('.obs-ws-card');
     await expect(card).toBeVisible({ timeout: 5_000 });
 
-    // Path row: value is the subdir, the button title is the full host path.
-    const pathBtn = obsPane.locator('button.obs-ws-action');
-    await expect(pathBtn.locator('.obs-ws-val')).toHaveText('/services/api');
-    await expect(pathBtn).toHaveAttribute('title', 'Open /tmp/alpha/services/api');
+    // Private row: value is the subdir, title is the full private host path.
+    const privateBtn = obsPane.locator('button.obs-ws-action').first();
+    await expect(privateBtn.locator('.obs-ws-val')).toHaveText('/services/api');
+    await expect(privateBtn).toHaveAttribute(
+      'title',
+      'Open /tmp/fleet/alpha-id/services/api (private — only this container)'
+    );
+
+    // Shared row reveals the fleet-wide shared folder.
+    const sharedBtn = obsPane.locator('button.obs-ws-action').nth(1);
+    await expect(sharedBtn.locator('.obs-ws-val')).toHaveText('/shared');
+    await expect(sharedBtn).toHaveAttribute(
+      'title',
+      'Open /tmp/fleet/shared (shared — every container)'
+    );
 
     // Image + limits rows.
     await expect(card).toContainText('claude-fleet/runner:latest');
     await expect(card).toContainText('2 cpu · 4096 MB');
 
-    // Clicking the path row reveals the full host folder via fs:openPath.
-    await pathBtn.click();
+    // Clicking each row reveals the right host folder via fs:openPath.
+    await privateBtn.click();
+    await sharedBtn.click();
     await expect
       .poll(async () => (await getCalls(app)).openPath, { timeout: 5_000 })
-      .toContainEqual('/tmp/alpha/services/api');
+      .toEqual(expect.arrayContaining(['/tmp/fleet/alpha-id/services/api', '/tmp/fleet/shared']));
+  } finally {
+    await app.close();
+  }
+});
+
+test('Settings: changing the fleet root persists via config:setFleetRoot', async () => {
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, { fleetRoot: '/tmp/fleet' });
+
+    await window.locator('.settings-btn').click();
+    const modal = window.locator('.modal');
+    await expect(modal).toContainText('Settings');
+    // Pre-filled with the current fleet root from config:get.
+    const input = modal.locator('input').first();
+    await expect(input).toHaveValue('/tmp/fleet');
+
+    await input.fill('/tmp/other-fleet');
+    await modal.getByRole('button', { name: 'Save' }).click();
+
+    await expect
+      .poll(async () => (await getCalls(app)).setFleetRoot, { timeout: 5_000 })
+      .toContainEqual('/tmp/other-fleet');
+    // Modal closes on save.
+    await expect(modal).toHaveCount(0);
   } finally {
     await app.close();
   }
