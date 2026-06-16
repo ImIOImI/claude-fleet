@@ -70,6 +70,12 @@ interface Props {
     brokerSessionId: string,
     isFresh: boolean
   ) => void;
+  /**
+   * Fires when this workspace's busy state flips (busy = any of its sessions
+   * is actively working, per the title-glyph detector). Drives the chip's
+   * "working" indicator in App.
+   */
+  onBusyChange?: (workspaceId: string, busy: boolean) => void;
 }
 
 function contextBarPct(summary: WorkspaceObservabilitySummary | null): number {
@@ -108,7 +114,8 @@ export function TerminalPane({
   onRestartFromBanner,
   onDismissBanner,
   onResume,
-  onActiveTabChange
+  onActiveTabChange,
+  onBusyChange
 }: Props) {
   const [loaded, setLoaded] = useState(false);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -128,6 +135,18 @@ export function TerminalPane({
   // marked fresh it stays fresh until the user reloads the app
   // (where it'd come back via inventory and be treated as loaded).
   const freshIdsRef = useRef<Set<string>>(new Set());
+
+  // Busy session ids. The workspace is "busy" while any session is working;
+  // bubble up only when the aggregate flips so the chip indicator is stable.
+  const busyIdsRef = useRef<Set<string>>(new Set());
+  const handleActivity = (sessionId: string, busy: boolean): void => {
+    const set = busyIdsRef.current;
+    const was = set.size > 0;
+    if (busy) set.add(sessionId);
+    else set.delete(sessionId);
+    const now = set.size > 0;
+    if (now !== was) onBusyChange?.(workspaceId, now);
+  };
 
   const handleLifecycle = (sessionId: string, status: 'live' | 'ended') => {
     setEndedIds((prev) => {
@@ -369,6 +388,7 @@ export function TerminalPane({
             // later in DOM order won the stacking contest.
             visible={visible && s.id === activeId}
             onLifecycleChange={handleLifecycle}
+            onActivityChange={handleActivity}
           />
         ))}
         {paused && (

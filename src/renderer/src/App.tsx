@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { WorkspaceTabStrip } from './components/WorkspaceTabStrip';
 import { SessionsPane } from './components/SessionsPane';
 import { ObservabilityPane } from './components/ObservabilityPane';
@@ -99,6 +99,13 @@ export function App() {
   const [activeTabByWorkspace, setActiveTabByWorkspace] = useState<
     Record<string, string>
   >({});
+
+  // Per-workspace busy state (claude actively working in any of its sessions),
+  // detected from the PTY title glyph in TerminalPane → drives the chip.
+  const [busyByWorkspace, setBusyByWorkspace] = useState<Record<string, boolean>>({});
+  const handleBusyChange = useCallback((workspaceId: string, busy: boolean) => {
+    setBusyByWorkspace((prev) => (prev[workspaceId] === busy ? prev : { ...prev, [workspaceId]: busy }));
+  }, []);
 
   const [activeTabSummary, setActiveTabSummary] = useState<
     WorkspaceObservabilitySummary | null
@@ -514,6 +521,7 @@ export function App() {
       <WorkspaceTabStrip
         workspaces={workspaces}
         summaries={summaries}
+        busyByWorkspace={busyByWorkspace}
         selectedId={selectedId}
         backendReady={backendReady}
         mockMode={mockMode}
@@ -571,6 +579,7 @@ export function App() {
                         : { ...prev, [workspaceId]: brokerSessionId }
                     );
                   }}
+                  onBusyChange={handleBusyChange}
                 />
               ))}
           </div>

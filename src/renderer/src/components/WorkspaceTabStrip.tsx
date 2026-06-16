@@ -12,6 +12,11 @@ interface Props {
    * "active …" / "idle …" line.
    */
   summaries: Record<string, WorkspaceObservabilitySummary | null>;
+  /**
+   * Per-workspace busy flag (claude actively working, from the PTY title
+   * glyph). Drives a "working" indicator on running chips.
+   */
+  busyByWorkspace: Record<string, boolean>;
   selectedId: string | null;
   backendReady: boolean | null;
   mockMode: boolean;
@@ -126,6 +131,7 @@ interface MenuAnchor {
 export function WorkspaceTabStrip({
   workspaces,
   summaries,
+  busyByWorkspace,
   selectedId,
   backendReady,
   mockMode,
@@ -194,7 +200,11 @@ export function WorkspaceTabStrip({
         </span>
       </div>
 
-      {live.map((w) => (
+      {live.map((w) => {
+        // "Busy" = claude actively working in a running workspace (PTY title
+        // glyph is a spinner). Drives a pulsing dot + "working…" sub-line.
+        const busy = w.state === 'running' && busyByWorkspace[w.id] === true;
+        return (
         <div
           key={w.id}
           className={`ws-chip-group ${w.id === selectedId ? 'active' : ''}`}
@@ -203,9 +213,9 @@ export function WorkspaceTabStrip({
           <button
             className="ws-chip"
             onClick={() => onSelect(w.id)}
-            title={w.status}
+            title={busy ? 'Claude is working…' : w.status}
           >
-            <span className={`dot ${w.state}`} />
+            <span className={`dot ${w.state} ${busy ? 'busy' : ''}`} />
             {w.state === 'paused' && (
               <svg
                 viewBox="0 0 8 8"
@@ -230,8 +240,8 @@ export function WorkspaceTabStrip({
                 space (` `) reserves the line's vertical room
                 without showing any visible character.
               */}
-              <span className="ws-chip-sub">
-                {chipActivityText(summaries[w.id]) ?? ' '}
+              <span className={`ws-chip-sub ${busy ? 'busy' : ''}`}>
+                {busy ? 'working…' : chipActivityText(summaries[w.id]) ?? ' '}
               </span>
             </span>
           </button>
@@ -254,7 +264,8 @@ export function WorkspaceTabStrip({
             ⋮
           </button>
         </div>
-      ))}
+        );
+      })}
 
       <button
         className="btn"

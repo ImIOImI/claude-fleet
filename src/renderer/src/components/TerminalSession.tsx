@@ -16,6 +16,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Terminal, type ILink, type ILinkProvider } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
+import { ActivityDetector } from '../activityDetector';
 
 // Stretch the font fallback chain so canvas renders for glyphs xterm
 // can't find in a monospace font (emoji, symbols, regional indicators)
@@ -101,6 +102,12 @@ interface Props {
    * `ended` after.
    */
   onLifecycleChange?: (sessionId: string, status: 'live' | 'ended') => void;
+  /**
+   * Fired when this session's busy/idle state flips, detected from claude's
+   * terminal-title glyph in the PTY stream (see activityDetector). The parent
+   * aggregates per-workspace to drive the chip's "working" indicator.
+   */
+  onActivityChange?: (sessionId: string, busy: boolean) => void;
 }
 
 export function TerminalSession({
@@ -108,6 +115,7 @@ export function TerminalSession({
   sessionId,
   visible,
   onLifecycleChange,
+  onActivityChange,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   // Bumped when the user clicks "Start new session" / "Retry" after a
@@ -309,12 +317,21 @@ export function TerminalSession({
           return;
         }
         ptyHandleId = sid;
+        const activity = new ActivityDetector();
+        // PTY chunks are bytes; decode (streaming-safe so a multibyte glyph
+        // split across chunks still reassembles) for the title detector.
+        const decoder = new TextDecoder();
         unsubData = window.api.pty.onData(sid, (chunk) => {
           term.write(chunk);
+          // Watch the title glyph for busy/idle; report only on a flip.
+          const text = typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true });
+          if (activity.push(text)) onActivityChange?.(sessionId, activity.isBusy);
         });
         unsubEnd = window.api.pty.onEnd(sid, () => {
           term.writeln('\r\n[session ended]');
           if (!disposed) {
+            // A dead session isn't busy.
+            onActivityChange?.(sessionId, false);
             setEndedReason({ kind: 'natural' });
             onLifecycleChange?.(sessionId, 'ended');
             // Diagnostic: distinguish "claude /exit" from "broker
@@ -403,6 +420,7 @@ export function TerminalSession({
 
     return () => {
       disposed = true;
+      onActivityChange?.(sessionId, false);
       cancelAnimationFrame(initialFitRaf);
       disarmNudge();
       ro.disconnect();
