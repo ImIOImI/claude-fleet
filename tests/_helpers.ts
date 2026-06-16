@@ -115,6 +115,7 @@ export interface MockOpts {
     workspaceSubdir?: string;
     kind?: 'container' | 'local';
     image?: string;
+    resources?: { cpus?: number; memoryMb?: number };
     authMode?: 'oauth' | 'apikey';
     env?: { plain: Record<string, string>; secretKeys: string[] };
     createdAt?: number;
@@ -157,6 +158,7 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       writeManifest: [],
       isDirectory: [],
       mkdirp: [],
+      openPath: [],
       vaultSetSecret: [],
       vaultDeleteAllForWorkspace: []
     };
@@ -175,6 +177,7 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       'images:remove',
       'fs:isDirectory',
       'fs:mkdirp',
+      'fs:openPath',
       'vault:available',
       'vault:listKeys',
       'vault:getSecret',
@@ -288,6 +291,10 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
     });
     ipcMain.handle('fs:mkdirp', async (_e, p: string) => {
       g.__calls.mkdirp.push(p);
+    });
+    ipcMain.handle('fs:openPath', async (_e, p: string) => {
+      g.__calls.openPath.push(p);
+      return '';
     });
 
     const imageLib = (opts.imageLibrary ?? []).map((img) => ({

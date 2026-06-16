@@ -1,4 +1,4 @@
-import { ipcMain, BrowserWindow, dialog, clipboard, Menu } from 'electron';
+import { ipcMain, BrowserWindow, dialog, clipboard, Menu, shell } from 'electron';
 import { randomUUID } from 'node:crypto';
 import * as realDocker from './docker.js';
 import * as mockDocker from './mock.js';
@@ -272,6 +272,13 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
 
   ipcMain.handle('fs:isDirectory', (_e, path: string) => fs.isDirectory(path));
   ipcMain.handle('fs:mkdirp', (_e, path: string) => fs.mkdirp(path));
+
+  // Reveal a host path in the OS file manager (Finder/Explorer/etc.). Returns
+  // '' on success, or an error string — shell.openPath never rejects.
+  ipcMain.handle('fs:openPath', async (_e, path: string) => {
+    if (typeof path !== 'string' || path.length === 0) return 'No path provided';
+    return shell.openPath(path);
+  });
 
   ipcMain.handle('dialog:pickDirectory', async (event, defaultPath?: string) => {
     const win = BrowserWindow.fromWebContents(event.sender);
