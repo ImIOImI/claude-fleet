@@ -1,5 +1,8 @@
 import { ipcMain, BrowserWindow, dialog, clipboard, Menu, shell } from 'electron';
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { isWslEnvironment } from './wsl.js';
 import * as realDocker from './docker.js';
 import * as mockDocker from './mock.js';
 import * as vault from './vault.js';
@@ -38,6 +41,48 @@ export const MOCK_MODE = process.env.CLAUDE_FLEET_MOCK === '1';
 const backend = MOCK_MODE ? mockDocker : realDocker;
 
 const ptySessions = new Map<string, PtyHandle>();
+
+// Detected once at load: are we running under WSL? (Drives `fs:openPath`.)
+const RUNNING_IN_WSL = ((): boolean => {
+  let procVersion = '';
+  try {
+    procVersion = readFileSync('/proc/version', 'utf8');
+  } catch {
+    /* not linux / no procfs */
+  }
+  return isWslEnvironment({
+    platform: process.platform,
+    wslDistroName: process.env.WSL_DISTRO_NAME,
+    procVersion
+  });
+})();
+
+/**
+ * Open a host path in Windows Explorer from WSL: translate the Linux path to a
+ * Windows path via `wslpath -w`, then hand it to explorer.exe. explorer.exe
+ * exits 1 even on success, so its exit code is ignored — once we have a
+ * translated path we resolve optimistically. Resolves '' on success or an
+ * error string if the translation itself fails.
+ */
+function openPathViaExplorer(path: string): Promise<string> {
+  return new Promise((resolve) => {
+    execFile('wslpath', ['-w', path], (err, stdout) => {
+      if (err) {
+        resolve(`wslpath failed: ${err.message}`);
+        return;
+      }
+      const winPath = stdout.trim();
+      if (!winPath) {
+        resolve('wslpath returned an empty path');
+        return;
+      }
+      execFile('explorer.exe', [winPath], () => {
+        /* explorer.exe exits 1 even on success — ignore */
+      });
+      resolve('');
+    });
+  });
+}
 
 interface RegisterIpcOpts {
   jsonlWatcher: JsonlWatcher | null;
@@ -274,10 +319,12 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('fs:mkdirp', (_e, path: string) => fs.mkdirp(path));
 
   // Reveal a host path in the OS file manager (Finder/Explorer/etc.). Returns
-  // '' on success, or an error string — shell.openPath never rejects.
+  // '' on success, or an error string. Under WSL `shell.openPath` can't reach a
+  // GUI file manager (no xdg-open / no Linux file manager), so route through
+  // explorer.exe instead. Neither path rejects — callers get a string.
   ipcMain.handle('fs:openPath', async (_e, path: string) => {
     if (typeof path !== 'string' || path.length === 0) return 'No path provided';
-    return shell.openPath(path);
+    return RUNNING_IN_WSL ? openPathViaExplorer(path) : shell.openPath(path);
   });
 
   ipcMain.handle('dialog:pickDirectory', async (event, defaultPath?: string) => {

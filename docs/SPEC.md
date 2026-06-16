@@ -197,7 +197,7 @@ Both main and renderer hook the standard "uncaught" channels and forward each cr
 Host-filesystem helpers used by the workspace-create flow and the observability rail. The renderer is contextIsolated/sandboxed, so all disk access goes through main:
 - `fs:isDirectory(path)` → `boolean` — whether `path` is an existing directory (workspace-root validation).
 - `fs:mkdirp(path)` → `void` — create a directory and parents.
-- `fs:openPath(path)` → `string` — reveal a host path in the OS file manager via `shell.openPath` (cross-platform: Finder/Explorer/file manager). Resolves `''` on success or an error string; never rejects. Empty/non-string input returns `'No path provided'`. Drives the observability rail's Workspace **Path** row.
+- `fs:openPath(path)` → `string` — reveal a host path in the OS file manager. On native macOS/Windows/Linux this is `shell.openPath`. **Under WSL** (detected once at load via `src/main/wsl.ts` — Linux platform + `WSL_DISTRO_NAME` or "microsoft" in `/proc/version`) `shell.openPath` can't reach a GUI file manager (no `xdg-open`/no Linux file manager), so the path is translated with `wslpath -w` and opened with `explorer.exe` (whose exit code is ignored — it returns 1 even on success). Resolves `''` on success or an error string; never rejects. Empty/non-string input returns `'No path provided'`. Drives the observability rail's Workspace **Path** row; the renderer routes any error string to `app:logError`.
 - `dialog:pickDirectory(defaultPath?)` → `string | null` — native open-directory dialog; null on cancel.
 
 ### Clipboard + context menu

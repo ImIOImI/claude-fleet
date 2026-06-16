@@ -258,7 +258,13 @@ function WorkspaceBlock({ workspace }: { workspace: WorkspaceSummary }) {
 
   const openFolder = async () => {
     const err = await window.api.fs.openPath(fullPath);
-    if (err) console.warn(`Could not open ${fullPath}: ${err}`);
+    if (err) {
+      void window.api.app.logError({
+        type: 'openPath',
+        message: `Could not open workspace folder: ${err}`,
+        extra: { path: fullPath }
+      });
+    }
   };
 
   return (
