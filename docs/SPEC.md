@@ -726,7 +726,16 @@ CREATE TABLE profile_settings (
 ### Permission-request log
 Always-on structured log of every prompt Claude makes to the user. Substrate for tuning `.claude/settings.json` permissions and CLAUDE.md guidance over time.
 
-**Decisions made:**
+> **STATUS: BLOCKED — no usable data source (researched 2026-06-15).** The original design below assumes the structured prompts are observable from the JSONL transcript (or a hook). Live testing against the real runner image disproved every capture path:
+> - **Generic permission prompts (Bash/Edit/… `ask`):** not in the JSONL at all — a gated tool just emits `tool_use`→`tool_result`, and the interactive allow/deny prompt leaves no transcript event. And they don't even occur in claude-fleet: claude **auto-allows** tools (debug log: `tool_dispatch … permissionDecisionMs=5`, no prompt shown).
+> - **`Notification`-hook capture** (the cleanest path to permission/idle/elicitation events): a hook provisioned into the container's `~/.claude/settings.json` **never loads** — claude's own `--debug` reports `Found 0 total hooks in registry`, even with the `matcher` field. It appears gated behind a hook-approval/trust step with no documented way to pre-seed non-interactively in a container (same shape as the managed-settings gate).
+> - **`AskUserQuestion` / `ExitPlanMode`:** claude renders the selection UI in the **TUI but does not write the `tool_use` to the JSONL while the prompt is pending** (verified live: question box on screen, zero tool_use rows in the transcript). They have never appeared as `tool_use` in any real transcript. (A query over these shipped in #77 and was **reverted** once this was confirmed — its e2e only passed against synthesized rows claude doesn't actually produce.)
+>
+> **Net:** the "Claude is waiting on the user" signal lives only in the interactive PTY/TUI, not in the JSONL or a loadable hook. A true needs-input affordance is **blocked** pending either claude-side support (a transcript event or a usable hook) or fragile PTY-body parsing of the prompt box.
+>
+> **Shipped instead (#79):** a **busy/idle** chip indicator derived from claude's terminal-title glyph in the PTY stream (braille spinner = busy, `✳` = idle) — see §5 *Top row*. That's the one "is claude working vs waiting" signal reliably present; it's busy/idle, not needs-input-specific.
+
+**Decisions made (original design — superseded by the BLOCKED note above):**
 - **Scope**: structured prompts only — permission requests (Bash/Edit/Write/etc. that hit `ask` rules or unlisted patterns), `AskUserQuestion` tool calls, `ExitPlanMode` approvals. Plain-text questions in assistant messages are out of scope; they don't map cleanly to settings.json entries.
 - **Storage**: SQLite table in the same DB the observability and sessions layers use.
 - **UI affordance**: passive log view only — sortable, filterable, no one-click "add to allow rules" buttons. The user reads, copies patterns, and edits `.claude/settings.json` by hand. Intentional friction so the allowlist doesn't widen faster than the user can notice.
