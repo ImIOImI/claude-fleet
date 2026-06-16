@@ -1,6 +1,11 @@
 import { useState } from 'react';
 import type { WorkspaceObservabilitySummary } from '../../../preload';
 import { colorFor, type WorkspaceSummary } from '../App';
+import {
+  workspaceHostPath,
+  workspacePathLabel,
+  formatResourceLimits
+} from '../observabilityWorkspace';
 
 interface Props {
   /** Active workspace name, or null when nothing is selected. */
@@ -14,6 +19,8 @@ interface Props {
    * ingested for the selected workspace.
    */
   summary: WorkspaceObservabilitySummary | null;
+  /** The selected workspace — drives the Workspace metadata block (path/image/limits). */
+  workspace: WorkspaceSummary | null;
   /** All workspaces — drives the Fleet scope (per-workspace cost rows). */
   workspaces: WorkspaceSummary[];
   /** Per-workspace summaries keyed by ULID; Fleet view reads `usd` from each. */
@@ -29,6 +36,7 @@ type Scope = 'workspace' | 'fleet';
 export function ObservabilityPane({
   workspaceName,
   summary,
+  workspace,
   workspaces,
   summaries,
   terminals,
@@ -58,10 +66,19 @@ export function ObservabilityPane({
           <FleetView workspaces={live} summaries={summaries} />
         ) : !workspaceName ? (
           <EmptyState message="No workspace selected." />
-        ) : !summary || summary.sessionId === null ? (
-          <EmptyState message="No transcript events yet." subdued />
         ) : (
-          <SummaryView summary={summary} terminals={terminals} activeTerminalId={activeTerminalId} />
+          <div className="obs-stack">
+            {!summary || summary.sessionId === null ? (
+              <EmptyState message="No transcript events yet." subdued />
+            ) : (
+              <SummaryView
+                summary={summary}
+                terminals={terminals}
+                activeTerminalId={activeTerminalId}
+              />
+            )}
+            {workspace && <WorkspaceBlock workspace={workspace} />}
+          </div>
         )}
       </div>
     </aside>
@@ -227,6 +244,73 @@ function SummaryView({
         )}
       </section>
     </div>
+  );
+}
+
+/**
+ * Workspace metadata block — the host path (click to reveal in the OS file
+ * manager), the runner image, and the resource limits. The Path row is the
+ * only actionable one; Image/Limits are static.
+ */
+function WorkspaceBlock({ workspace }: { workspace: WorkspaceSummary }) {
+  const fullPath = workspaceHostPath(workspace);
+  const limits = formatResourceLimits(workspace.resources);
+
+  const openFolder = async () => {
+    const err = await window.api.fs.openPath(fullPath);
+    if (err) console.warn(`Could not open ${fullPath}: ${err}`);
+  };
+
+  return (
+    <section className="obs-section">
+      <div className="obs-section-title">Workspace</div>
+      <div className="obs-ws-card">
+        <button
+          type="button"
+          className="obs-ws-row obs-ws-action"
+          onClick={openFolder}
+          title={`Open ${fullPath}`}
+        >
+          <span className="obs-ws-key">path</span>
+          <span className="obs-ws-val mono">{workspacePathLabel(workspace)}</span>
+          <span className="obs-ws-icon" aria-hidden="true">
+            <FolderIcon />
+          </span>
+        </button>
+        {workspace.image && (
+          <div className="obs-ws-row">
+            <span className="obs-ws-key">image</span>
+            <span className="obs-ws-val mono" title={workspace.image}>
+              {workspace.image}
+            </span>
+          </div>
+        )}
+        {limits && (
+          <div className="obs-ws-row">
+            <span className="obs-ws-key">limits</span>
+            <span className="obs-ws-val mono">{limits}</span>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function FolderIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M1.5 4a1 1 0 0 1 1-1H6l1.5 1.5h6a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H2.5a1 1 0 0 1-1-1V4z" />
+    </svg>
   );
 }
 

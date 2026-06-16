@@ -148,7 +148,9 @@ const api = {
   },
   fs: {
     isDirectory: (path: string): Promise<boolean> => ipcRenderer.invoke('fs:isDirectory', path),
-    mkdirp: (path: string): Promise<void> => ipcRenderer.invoke('fs:mkdirp', path)
+    mkdirp: (path: string): Promise<void> => ipcRenderer.invoke('fs:mkdirp', path),
+    /** Reveal a host path in the OS file manager. Resolves '' on success, else an error string. */
+    openPath: (path: string): Promise<string> => ipcRenderer.invoke('fs:openPath', path)
   },
   dialog: {
     pickDirectory: (defaultPath?: string): Promise<string | null> =>

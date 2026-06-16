@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { launch, mockMainIpc, activePane, REPO_ROOT } from './_helpers.js';
+import { launch, mockMainIpc, activePane, getCalls, REPO_ROOT } from './_helpers.js';
 
 test('Live push: renderer receives observability:summary push when watcher ingests a new JSONL line', async () => {
   // The JsonlWatcher emits 'ingest' after every batch that inserts ≥1
@@ -301,6 +301,49 @@ test('Context bars: one row per terminal, active tab highlighted', async () => {
     await expect(obsPane.locator('.obs-ctx-row')).toHaveCount(1, { timeout: 5_000 });
     await expect(obsPane.getByText(/Context · 1 terminal/)).toBeVisible();
     await expect(obsPane.locator('.obs-ctx-name.active')).toHaveCount(1);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Workspace block: shows path/image/limits and the path row reveals the host folder', async () => {
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [
+        {
+          name: 'alpha',
+          containerId: 'alpha-id',
+          state: 'running',
+          workspaceRoot: '/tmp/alpha',
+          workspaceSubdir: 'services/api',
+          image: 'claude-fleet/runner:latest',
+          resources: { cpus: 2, memoryMb: 4096 }
+        }
+      ]
+      // No observability summaries — the Workspace block must render even
+      // before any transcript events have been ingested.
+    });
+
+    await window.locator('.ws-chip', { hasText: 'alpha' }).click();
+    const obsPane = window.locator('.sidebar-right');
+    const card = obsPane.locator('.obs-ws-card');
+    await expect(card).toBeVisible({ timeout: 5_000 });
+
+    // Path row: value is the subdir, the button title is the full host path.
+    const pathBtn = obsPane.locator('button.obs-ws-action');
+    await expect(pathBtn.locator('.obs-ws-val')).toHaveText('/services/api');
+    await expect(pathBtn).toHaveAttribute('title', 'Open /tmp/alpha/services/api');
+
+    // Image + limits rows.
+    await expect(card).toContainText('claude-fleet/runner:latest');
+    await expect(card).toContainText('2 cpu · 4096 MB');
+
+    // Clicking the path row reveals the full host folder via fs:openPath.
+    await pathBtn.click();
+    await expect
+      .poll(async () => (await getCalls(app)).openPath, { timeout: 5_000 })
+      .toContainEqual('/tmp/alpha/services/api');
   } finally {
     await app.close();
   }
