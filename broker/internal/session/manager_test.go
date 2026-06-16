@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -66,7 +67,7 @@ func TestManager_CreateAndList(t *testing.T) {
 	mgr := NewManager(ManagerConfig{ClaudeExec: "/bin/cat", RingBufBytes: 1024})
 	defer mgr.CloseAll()
 
-	sess, err := mgr.Create("sess-1", 80, 24)
+	sess, err := mgr.Create("sess-1", 80, 24, nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -83,14 +84,34 @@ func TestManager_CreateAndList(t *testing.T) {
 	}
 }
 
+func TestManager_CreatePassesArgsToExec(t *testing.T) {
+	// /bin/echo writes its args to stdout (and thus the PTY → ring buffer)
+	// then exits. Proves the Args from CREATE reach exec.Command — the
+	// mechanism behind `claude --resume <uuid>`.
+	mgr := NewManager(ManagerConfig{ClaudeExec: "/bin/echo", RingBufBytes: 1024})
+	defer mgr.CloseAll()
+
+	sess, err := mgr.Create("sess-args", 80, 24, []string{"--resume", "abc-123"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Wait for echo to run and the pump to drain its output into the ring.
+	if !waitUntil(func() bool {
+		return strings.Contains(string(sess.ring.Snapshot()), "--resume abc-123")
+	}) {
+		t.Errorf("ring buffer never saw the args; got %q", sess.ring.Snapshot())
+	}
+}
+
 func TestManager_CreateRejectsDuplicateID(t *testing.T) {
 	mgr := NewManager(ManagerConfig{ClaudeExec: "/bin/cat", RingBufBytes: 1024})
 	defer mgr.CloseAll()
 
-	if _, err := mgr.Create("dup", 80, 24); err != nil {
+	if _, err := mgr.Create("dup", 80, 24, nil); err != nil {
 		t.Fatalf("first Create: %v", err)
 	}
-	if _, err := mgr.Create("dup", 80, 24); err != ErrIDInUse {
+	if _, err := mgr.Create("dup", 80, 24, nil); err != ErrIDInUse {
 		t.Errorf("second Create: got %v, want ErrIDInUse", err)
 	}
 }
@@ -99,7 +120,7 @@ func TestSession_AttachStreamsOutput(t *testing.T) {
 	mgr := NewManager(ManagerConfig{ClaudeExec: "/bin/cat", RingBufBytes: 1024})
 	defer mgr.CloseAll()
 
-	sess, err := mgr.Create("sess-2", 80, 24)
+	sess, err := mgr.Create("sess-2", 80, 24, nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -129,7 +150,7 @@ func TestSession_DetachStopsDelivery(t *testing.T) {
 	mgr := NewManager(ManagerConfig{ClaudeExec: "/bin/cat", RingBufBytes: 1024})
 	defer mgr.CloseAll()
 
-	sess, _ := mgr.Create("sess-3", 80, 24)
+	sess, _ := mgr.Create("sess-3", 80, 24, nil)
 	cw := &captureWriter{}
 	_, _ = sess.Attach(cw, 1)
 	_ = sess.Input([]byte("pre-detach\n"))
@@ -158,7 +179,7 @@ func TestSession_ReattachReplaysHistory(t *testing.T) {
 	mgr := NewManager(ManagerConfig{ClaudeExec: "/bin/cat", RingBufBytes: 1024})
 	defer mgr.CloseAll()
 
-	sess, _ := mgr.Create("sess-4", 80, 24)
+	sess, _ := mgr.Create("sess-4", 80, 24, nil)
 	cw := &captureWriter{}
 	_, _ = sess.Attach(cw, 1)
 	_ = sess.Input([]byte("burst-1\n"))
@@ -183,7 +204,7 @@ func TestSession_DoneClosesOnExit(t *testing.T) {
 	mgr := NewManager(ManagerConfig{ClaudeExec: "/bin/true", RingBufBytes: 1024})
 	defer mgr.CloseAll()
 
-	sess, err := mgr.Create("sess-exit", 80, 24)
+	sess, err := mgr.Create("sess-exit", 80, 24, nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -202,7 +223,7 @@ func TestSession_DoneClosesOnExit(t *testing.T) {
 
 func TestManager_CloseDropsAndKills(t *testing.T) {
 	mgr := NewManager(ManagerConfig{ClaudeExec: "/bin/cat", RingBufBytes: 1024})
-	sess, _ := mgr.Create("sess-close", 80, 24)
+	sess, _ := mgr.Create("sess-close", 80, 24, nil)
 	mgr.Close("sess-close")
 
 	if mgr.Get("sess-close") != nil {

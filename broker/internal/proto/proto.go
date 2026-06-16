@@ -17,7 +17,7 @@
 // Frame type catalog (lowercase verb in flight, uppercase constant in code):
 //
 //	Control (JSON):
-//	  CREATE     C→S  {"id":"<uuid>","cols":N,"rows":M}        spawn a claude PTY
+//	  CREATE     C→S  {"id":"<uuid>","cols":N,"rows":M,"args":[...]}  spawn a claude PTY (args optional, e.g. ["--resume","<uuid>"])
 //	  CREATED    S→C  {"id":"<uuid>","ok":true,"error":"..."}
 //	  ATTACH     C→S  {"id":"<uuid>","channel":N}              claim a channel for a session
 //	  ATTACHED   S→C  {"channel":N,"ok":true,"error":"..."}
@@ -119,6 +119,10 @@ type CreateRequest struct {
 	ID   string `json:"id"`
 	Cols uint16 `json:"cols"`
 	Rows uint16 `json:"rows"`
+	// Args, when non-empty, are appended to the claude exec for this
+	// session — the host uses this to spawn `claude --resume <uuid>`
+	// instead of a fresh session. Empty for ordinary new sessions.
+	Args []string `json:"args,omitempty"`
 }
 
 type CreateResponse struct {

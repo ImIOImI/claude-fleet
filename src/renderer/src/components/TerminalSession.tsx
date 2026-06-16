@@ -94,6 +94,13 @@ interface Props {
    *  session key so re-attach across an app restart finds the same
    *  live PTY. */
   sessionId: string;
+  /**
+   * When set, this tab resumes a prior claude session: the first CREATE
+   * for it spawns `claude --resume <resumeOf>` (resumeOf is the claude
+   * session UUID). Passed straight to pty.attach; ignored on reattach when
+   * the broker session is already alive.
+   */
+  resumeOf?: string;
   visible: boolean;
   /**
    * Called when the PTY signals end-of-life (user `/exit`, claude
@@ -113,6 +120,7 @@ interface Props {
 export function TerminalSession({
   containerId,
   sessionId,
+  resumeOf,
   visible,
   onLifecycleChange,
   onActivityChange,
@@ -311,7 +319,13 @@ export function TerminalSession({
       safeFit();
 
       try {
-        const sid = await window.api.pty.attach(containerId, sessionId, term.cols, term.rows);
+        const sid = await window.api.pty.attach(
+          containerId,
+          sessionId,
+          term.cols,
+          term.rows,
+          resumeOf
+        );
         if (disposed) {
           window.api.pty.detach(sid);
           return;
@@ -431,7 +445,7 @@ export function TerminalSession({
       if (ptyHandleId) window.api.pty.detach(ptyHandleId);
       term.dispose();
     };
-  }, [containerId, sessionId, sessionEpoch]);
+  }, [containerId, sessionId, resumeOf, sessionEpoch]);
 
   // When this session becomes visible again, force a fit. xterm's
   // ResizeObserver can fire while the host is `visibility: hidden`

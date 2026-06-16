@@ -861,6 +861,141 @@ export function costForWorkspace(workspaceId: string): SessionCost {
   return rollupGroups(rows);
 }
 
+// ── Sessions table ──────────────────────────────────────────────────────
+//
+// Backs the left-rail Sessions list (#3): every claude session the watcher
+// has ever ingested, with derived cost + event count. Workspace-eligibility
+// (hiding sessions whose workspace was deleted) is applied in the IPC layer,
+// which is the only place that knows about on-disk manifests.
+
+export interface SessionListRow {
+  id: string;
+  workspaceId: string;
+  /** LLM-generated title; dormant until the title hook lands — usually null. */
+  aiTitle: string | null;
+  /** Head of the first user message — the display title fallback. */
+  firstUserMessage: string | null;
+  /** Manual rename override; wins over the auto title when set. */
+  userSetName: string | null;
+  startedAt: number | null;
+  lastActiveAt: number | null;
+  eventCount: number;
+  usd: number;
+}
+
+interface SessionListSql {
+  id: string;
+  workspace_id: string;
+  ai_title: string | null;
+  first_user_message: string | null;
+  user_set_name: string | null;
+  started_at: number | null;
+  last_active_at: number | null;
+}
+
+/**
+ * All sessions, newest-active first. Optionally scoped to one workspace.
+ * Two queries total regardless of session count: one for session metadata,
+ * one grouped pass over `events` for per-session cost + event count (rolled
+ * up in JS, since USD is per-(model, service_tier)). No N+1.
+ */
+export function listSessions(workspaceId?: string): SessionListRow[] {
+  const d = openDbOrThrow();
+  const sessRows = (
+    workspaceId
+      ? d
+          .prepare(`
+            SELECT id, workspace_id, ai_title, first_user_message, user_set_name,
+                   started_at, last_active_at
+            FROM sessions WHERE workspace_id = ?
+            ORDER BY COALESCE(last_active_at, 0) DESC
+          `)
+          .all(workspaceId)
+      : d
+          .prepare(`
+            SELECT id, workspace_id, ai_title, first_user_message, user_set_name,
+                   started_at, last_active_at
+            FROM sessions
+            ORDER BY COALESCE(last_active_at, 0) DESC
+          `)
+          .all()
+  ) as SessionListSql[];
+
+  const costRows = (
+    workspaceId
+      ? d
+          .prepare(`
+            SELECT session_id, model, service_tier, ${COST_COLUMNS}, COUNT(id) AS event_count
+            FROM events WHERE workspace_id = ?
+            GROUP BY session_id, model, service_tier
+          `)
+          .all(workspaceId)
+      : d
+          .prepare(`
+            SELECT session_id, model, service_tier, ${COST_COLUMNS}, COUNT(id) AS event_count
+            FROM events
+            GROUP BY session_id, model, service_tier
+          `)
+          .all()
+  ) as Array<CostGroupRow & { session_id: string; event_count: number }>;
+
+  const byId = new Map<string, { usd: number; eventCount: number }>();
+  for (const r of costRows) {
+    const agg = byId.get(r.session_id) ?? { usd: 0, eventCount: 0 };
+    agg.eventCount += r.event_count;
+    agg.usd += costFor(r.model, r.service_tier, {
+      inputTokens: r.input_tokens,
+      outputTokens: r.output_tokens,
+      cacheReadInputTokens: r.cache_read_input_tokens,
+      cacheCreationInputTokens: r.cache_creation_input_tokens,
+    });
+    byId.set(r.session_id, agg);
+  }
+
+  return sessRows.map((s) => {
+    const agg = byId.get(s.id) ?? { usd: 0, eventCount: 0 };
+    return {
+      id: s.id,
+      workspaceId: s.workspace_id,
+      aiTitle: s.ai_title,
+      firstUserMessage: s.first_user_message,
+      userSetName: s.user_set_name,
+      startedAt: s.started_at,
+      lastActiveAt: s.last_active_at,
+      eventCount: agg.eventCount,
+      usd: agg.usd,
+    };
+  });
+}
+
+/**
+ * Set (or clear) the manual name override for a session. An empty/whitespace
+ * name clears it back to NULL so the auto title resurfaces.
+ */
+export function renameSession(id: string, name: string): void {
+  const d = openDbOrThrow();
+  const trimmed = name.trim();
+  d.prepare(`UPDATE sessions SET user_set_name = ? WHERE id = ?`).run(
+    trimmed.length ? trimmed : null,
+    id
+  );
+}
+
+/**
+ * Drop a session from the cache entirely: its events, its broker mapping,
+ * and the session row. The on-disk JSONL is removed by the caller (IPC
+ * layer), which knows the host path. Idempotent.
+ */
+export function deleteSession(id: string): void {
+  const d = openDbOrThrow();
+  const tx = d.transaction((sid: string) => {
+    d.prepare(`DELETE FROM events WHERE session_id = ?`).run(sid);
+    d.prepare(`DELETE FROM broker_sessions WHERE claude_session_id = ?`).run(sid);
+    d.prepare(`DELETE FROM sessions WHERE id = ?`).run(sid);
+  });
+  tx(id);
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 function openDbOrThrow(): Database.Database {

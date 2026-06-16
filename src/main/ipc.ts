@@ -2,6 +2,8 @@ import { ipcMain, BrowserWindow, dialog, clipboard, Menu, shell } from 'electron
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { unlink } from 'node:fs/promises';
+import { workspaceTranscriptPath } from './paths.js';
 import { isWslEnvironment } from './wsl.js';
 import { getFleetRoot, setFleetRoot, fleetPrivateDir, fleetSharedDir } from './config.js';
 import * as realDocker from './docker.js';
@@ -33,6 +35,9 @@ import {
   costForWorkspace,
   learnBrokerSessionMapping,
   lookupBrokerSession,
+  listSessions,
+  renameSession,
+  deleteSession,
 } from './db.js';
 import { logError, getLogPath } from './errorLog.js';
 import { broadcastObservabilitySummary } from './observabilityBroadcast.js';
@@ -273,6 +278,80 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       sessions.writeInventory(workspaceId, inventory)
   );
 
+  // ── Sessions table (#3) ──────────────────────────────────────────────
+  // Global, container-filterable list of past claude sessions. Eligibility
+  // (hiding sessions whose workspace was deleted) is enforced here because
+  // the DB layer doesn't know about on-disk manifests. Each row is overlaid
+  // with its workspace's display name / color / state so the renderer can
+  // group and label without a second round-trip.
+  ipcMain.handle('sessions:list', async (_e, workspaceId?: string) => {
+    const all = await listAllWorkspaces();
+    const byId = new Map(all.map((w) => [w.id, w]));
+    const rows = listSessions(workspaceId);
+    return rows.flatMap((r) => {
+      const w = byId.get(r.workspaceId);
+      // Eligibility: show a session iff its workspace still exists (manifest
+      // present). A truly-deleted workspace (manifest removed) drops out of
+      // listAllWorkspaces entirely, so `!w` filters it. A closed-but-kept
+      // workspace keeps its manifest and shows here with state 'deleted'
+      // (no live container) — still browsable/renamable/deletable, and
+      // resume attempts to bring its container up (gracefully no-ops if it
+      // can't be recreated).
+      if (!w) return [];
+      return [
+        {
+          ...r,
+          workspaceName: w.name,
+          workspaceColorHue: w.color?.hue ?? null,
+          workspaceState: w.state,
+        }
+      ];
+    });
+  });
+
+  ipcMain.handle('sessions:rename', (_e, sessionId: string, name: string) => {
+    renameSession(sessionId, name);
+  });
+
+  // Remove a session from the cache AND delete its on-disk transcript.
+  // The watcher's 'unlink' handler clears its in-memory offset state but
+  // does NOT drop DB rows, so deleteSession() does that explicitly. Unlink
+  // is best-effort: a missing file (already gone) is fine.
+  ipcMain.handle('sessions:delete', async (_e, workspaceId: string, sessionId: string) => {
+    deleteSession(sessionId);
+    try {
+      await unlink(workspaceTranscriptPath(workspaceId, sessionId));
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') {
+        logError({
+          source: 'main',
+          type: 'session-delete-unlink-failed',
+          message: `failed to unlink transcript for ${sessionId}: ${(err as Error).message}`,
+          extra: { workspaceId, sessionId }
+        });
+      }
+    }
+  });
+
+  /**
+   * Resume a past session: ensure its workspace's container is up (startWorkspace
+   * unpauses a paused container, starts a stopped one, and is a no-op for a
+   * running one), then hand the renderer the containerId so it can open a tab
+   * that attaches with `--resume <sessionId>`. Returns null when the container
+   * is gone (deleted workspace) and can't be brought up here — the renderer
+   * surfaces that as a non-fatal "couldn't resume" notice.
+   */
+  ipcMain.handle(
+    'sessions:resume',
+    async (_e, workspaceId: string): Promise<{ containerId: string } | null> => {
+      const containerId = await backend.startWorkspace(workspaceId);
+      if (!containerId) return null;
+      await touchWorkspaceUsed(workspaceId);
+      return { containerId };
+    }
+  );
+
   /**
    * Start an existing (live, possibly stopped) workspace by id. Returns
    * the workspace if a container with that id exists; null otherwise,
@@ -406,7 +485,14 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
 
   ipcMain.handle(
     'pty:attach',
-    async (event, containerId: string, brokerSessionId: string, cols: number, rows: number) => {
+    async (
+      event,
+      containerId: string,
+      brokerSessionId: string,
+      cols: number,
+      rows: number,
+      resumeOf?: string
+    ) => {
       // Internal handle id, used by the renderer to address subsequent
       // input/resize/detach calls. Distinct from brokerSessionId (which
       // is the workspace-persistent id the broker keys its session map
@@ -414,7 +500,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       const ptyHandleId = randomUUID();
       let handle: PtyHandle;
       try {
-        handle = await backend.attachPty(containerId, brokerSessionId, cols, rows);
+        handle = await backend.attachPty(containerId, brokerSessionId, cols, rows, resumeOf);
       } catch (err) {
         // Capture the broker's recent stdout/stderr so the user has
         // something to diagnose with. The classic symptom we're chasing

@@ -76,6 +76,16 @@ interface Props {
    * "working" indicator in App.
    */
   onBusyChange?: (workspaceId: string, busy: boolean) => void;
+  /**
+   * A resume request targeted at THIS workspace (App only passes it to the
+   * matching pane). Opens a new tab that attaches with `claude --resume
+   * <claudeSessionId>`. `token` distinguishes repeat resumes of the same
+   * session so the effect re-fires; App clears the request via
+   * `onResumeConsumed` once the tab is added. Null when there's nothing to
+   * resume.
+   */
+  resumeRequest?: { claudeSessionId: string; title: string; token: number } | null;
+  onResumeConsumed?: () => void;
 }
 
 function contextBarPct(summary: WorkspaceObservabilitySummary | null): number {
@@ -98,6 +108,8 @@ interface Session {
   id: string;
   name: string;
   createdAt: number;
+  /** Set on a resume tab — its first attach runs `claude --resume <uuid>`. */
+  resumeOf?: string;
 }
 
 function uid(): string {
@@ -115,7 +127,9 @@ export function TerminalPane({
   onDismissBanner,
   onResume,
   onActiveTabChange,
-  onBusyChange
+  onBusyChange,
+  resumeRequest,
+  onResumeConsumed
 }: Props) {
   const [loaded, setLoaded] = useState(false);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -234,6 +248,28 @@ export function TerminalPane({
     setActiveId(id);
     setNextNum((n) => n + 1);
   }
+
+  // Resume request from the Sessions list: open a new tab bound to the
+  // claude session. The tab carries `resumeOf` so its first attach runs
+  // `claude --resume <uuid>`. Marked fresh so the per-tab observability
+  // fetch doesn't inherit a sibling's numbers before the mapping (learned
+  // directly at attach time for resumes) resolves. Re-fires per `token` so
+  // resuming the same session twice opens two tabs.
+  const lastResumeToken = useRef<number | null>(null);
+  useEffect(() => {
+    if (!loaded || !resumeRequest) return;
+    if (lastResumeToken.current === resumeRequest.token) return;
+    lastResumeToken.current = resumeRequest.token;
+    const id = uid();
+    const name = resumeRequest.title.slice(0, 32) || 'resumed';
+    freshIdsRef.current.add(id);
+    setSessions((prev) => [
+      ...prev,
+      { id, name, createdAt: Date.now(), resumeOf: resumeRequest.claudeSessionId }
+    ]);
+    setActiveId(id);
+    onResumeConsumed?.();
+  }, [loaded, resumeRequest, onResumeConsumed]);
 
   function closeSession(id: string): void {
     if (!loaded) return;
@@ -375,6 +411,7 @@ export function TerminalPane({
             key={s.id}
             containerId={containerId}
             sessionId={s.id}
+            resumeOf={s.resumeOf}
             // Visible only when BOTH this workspace's pane is showing
             // AND this tab is the active one within it. Without ANDing
             // the outer `visible` in, the active tab's

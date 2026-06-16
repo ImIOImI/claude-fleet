@@ -29,6 +29,7 @@ import type { AuthMode, Workspace, WorkspaceEnv, WorkspaceResources } from './wo
 import { fleetPrivateDir, fleetSharedDir } from './config.js';
 import { BrokerClient, brokerPtyStream } from './broker.js';
 import { recordPendingAttach } from './pendingAttaches.js';
+import { learnBrokerSessionMapping } from './db.js';
 import { resolveEnv } from './vault.js';
 
 export const FLEET_LABEL = 'com.claude-fleet.managed';
@@ -516,7 +517,8 @@ export async function attachPty(
   containerId: string,
   sessionId: string,
   cols: number,
-  rows: number
+  rows: number,
+  resumeOf?: string
 ): Promise<PtyHandle> {
   const c = docker.getContainer(containerId);
   const info = await c.inspect();
@@ -525,10 +527,21 @@ export async function attachPty(
     throw new Error(`container ${containerId} is missing ${ID_LABEL} label`);
   }
 
-  // Per-tab mapping: record this attach as "pending" so the JsonlWatcher's
-  // new-session hook can pair the broker session id with the claude UUID
-  // when a fresh claude is spawned.
-  recordPendingAttach(workspaceId, sessionId);
+  // Per-tab mapping. Two paths:
+  //  - Fresh session: record a "pending" attach so the JsonlWatcher's
+  //    new-session hook pairs the broker session id with the claude UUID
+  //    the first time a brand-new JSONL appears.
+  //  - Resume: the claude UUID is already known (it's what we're
+  //    resuming), and `claude --resume` APPENDS to the existing
+  //    `<uuid>.jsonl` rather than creating a new one — so no 'new-session'
+  //    event ever fires for it. Learn the broker→claude mapping directly
+  //    and skip the pending queue, or the per-tab observability lookup
+  //    would never resolve.
+  if (resumeOf) {
+    learnBrokerSessionMapping(workspaceId, sessionId, resumeOf);
+  } else {
+    recordPendingAttach(workspaceId, sessionId);
+  }
 
   const sockPath = workspaceBrokerSocket(workspaceId);
   const client = new BrokerClient(sockPath);
@@ -550,7 +563,16 @@ export async function attachPty(
 
   let attachResp = await client.attachSession(sessionId, HOST_CHANNEL);
   if (!attachResp.ok && /no such session/i.test(attachResp.error ?? '')) {
-    const createResp = await client.createSession(sessionId, cols, rows);
+    // Resume only matters at CREATE time — if the broker already has this
+    // session alive (reattach after an app restart where the broker kept
+    // claude running), ATTACH succeeds above and the resume args are
+    // correctly ignored: we must not spawn a second claude.
+    const createResp = await client.createSession(
+      sessionId,
+      cols,
+      rows,
+      resumeOf ? ['--resume', resumeOf] : undefined
+    );
     if (!createResp.ok) {
       stream.destroy();
       client.close();
