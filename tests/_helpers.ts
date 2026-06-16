@@ -19,6 +19,14 @@ import path from 'node:path';
 
 export const REPO_ROOT = path.resolve(import.meta.dirname, '..');
 
+// Keep the e2e suite's fleet folders out of the real ~/fleet. This module is
+// imported by every spec, so the assignment runs in each Playwright worker
+// before any app launch; config.ts reads CLAUDE_FLEET_ROOT ahead of the
+// ~/fleet default, and the launch envs all spread `process.env`, so the
+// startup migration + workspace creates land in a throwaway temp dir.
+// `??=` lets an explicit shell value still win.
+process.env.CLAUDE_FLEET_ROOT ??= path.join(tmpdir(), 'claude-fleet-test-root');
+
 /**
  * Scope locators to the currently-visible TerminalPane. Every live
  * workspace's pane is always-mounted (see App.tsx's

@@ -43,8 +43,14 @@ async function write(next: AppConfig): Promise<void> {
   await writeFile(configPath(), JSON.stringify(next, null, 2) + '\n', 'utf8');
 }
 
-/** The configured fleet root, or the default when unset. Always absolute. */
+/**
+ * The fleet root. Precedence: `CLAUDE_FLEET_ROOT` env override (used by the
+ * e2e suite to keep test runs out of the real `~/fleet`) → the persisted
+ * config value → the `~/fleet` default. Always absolute.
+ */
 export async function getFleetRoot(): Promise<string> {
+  const override = process.env.CLAUDE_FLEET_ROOT?.trim();
+  if (override) return override;
   const cfg = await read();
   return cfg.fleetRoot ?? defaultFleetRoot();
 }
