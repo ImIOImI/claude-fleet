@@ -56,6 +56,17 @@ test('Drag-and-drop: text + bytes land in the dropbox with container paths, coll
   const dropboxDir = path.join(fleetRoot, WS_ID, '_dropped');
 
   try {
+    // Regression: a `dragover` must be preventDefault'd so the window is a
+    // valid drop target (otherwise the OS shows the "not-allowed" cursor and
+    // the drop never fires). A bare Event has no dataTransfer — the exact
+    // case that previously short-circuited before preventDefault.
+    const prevented = await window.evaluate(() => {
+      const ev = new Event('dragover', { bubbles: true, cancelable: true });
+      window.dispatchEvent(ev);
+      return ev.defaultPrevented;
+    });
+    expect(prevented).toBe(true);
+
     // Text drop → /workspace/_dropped/dropped-<stamp>.txt, content preserved.
     const textPath = await dropText(window, 'text/plain', 'hello from a drag');
     expect(textPath).toMatch(/^\/workspace\/_dropped\/dropped-.*\.txt$/);

@@ -56,10 +56,14 @@ export function useDropIngestion({ workspaceId, notify }: Options): { dragging: 
     };
 
     const onDragOver = (e: DragEvent): void => {
-      // preventDefault on dragover is what lets the drop event fire at all.
-      if (!e.dataTransfer) return;
+      // preventDefault on dragover is what marks the window as a valid drop
+      // target — without it the OS shows the "not-allowed" cursor. Call it
+      // UNCONDITIONALLY and first: during a drag the dataTransfer is in
+      // "protected mode" and can read as null/empty in some Chromium/Electron
+      // builds, and guarding preventDefault behind it silently rejects the
+      // drop. dropEffect is best-effort on top.
       e.preventDefault();
-      e.dataTransfer.dropEffect = 'copy';
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
     };
     const onDragEnter = (e: DragEvent): void => {
       e.preventDefault();
