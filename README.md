@@ -60,6 +60,14 @@ The top strip pre-populates with two fake workspaces; `+ New workspace` adds mor
 
 Mock mode is dev-only — the env var is ignored by the packaged build.
 
+### Quiet the WSLg GPU error
+
+On WSLg, Chromium's GPU process fails to initialize (`viz_main_impl.cc(166) ERROR: Exiting GPU process due to errors during initialization`). It's harmless — rendering falls back to CPU — but it clutters the dev terminal every session and buries real errors. Disable hardware acceleration to silence it:
+
+```bash
+CLAUDE_FLEET_DISABLE_HWA=1 npm run dev
+```
+
 ## Test
 
 ```bash

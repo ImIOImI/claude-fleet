@@ -837,10 +837,10 @@ Intentionally narrow scope: this is for iterating on UI without a daemon, image,
 - **Test fixtures.** Shared in-memory DB seed vs. per-test container/profile fixtures.
 
 ### App-level Settings surface
-No Settings panel exists yet. The first concrete item that needs one is a toggle for hardware acceleration (issue #13) — Chromium's GPU process fails noisily on WSLg with `viz_main_impl.cc(166) ERROR: Exiting GPU process during initialization`. The fix in code is one line — `app.disableHardwareAcceleration()` before `app.whenReady()` — but it needs a UI control to flip without editing source.
+No Settings panel exists yet. The hardware-acceleration toggle (issue #13) ships today as an **env-var escape hatch**: setting `CLAUDE_FLEET_DISABLE_HWA=1` calls `app.disableHardwareAcceleration()` before the `ready` event, suppressing Chromium's noisy GPU-init failure on WSLg (`viz_main_impl.cc(166) ERROR: Exiting GPU process during initialization` — harmless, but it spams the dev terminal every session). This matches the dev-fallback pattern already used for `CLAUDE_FLEET_MOCK` / `ANTHROPIC_API_KEY`. A real Settings modal is still the right end state — it's just not the blocker for silencing the GPU log.
 
 **Open:**
-- **Env-var escape hatch first, or full panel up front.** `CLAUDE_FLEET_DISABLE_HWA=1` would be a five-minute shortcut (and matches the dev-fallback pattern we already use for `ANTHROPIC_API_KEY`); a real Settings modal is more work but is the right end state.
+- **Full Settings panel.** A real UI control would let a non-dev user flip HWA (and future toggles) without setting an env var. The env-var hatch unblocks the WSLg noise in the meantime.
 - **Persistence.** SQLite alongside `profile_settings` is the natural home — same DB the watcher and the rest of the app already share. A JSON config file under `userData` is the alternative if we want the Settings to survive a DB wipe.
 - **Likely future occupants** once the surface exists: log-verbosity, default `mirrorDefault`/`cleanupDefault` for new profiles, dev-shortcut indicators ("ANTHROPIC_API_KEY is sourced from env"), pull-progress UI preference, fast-mode toggle, etc.
 

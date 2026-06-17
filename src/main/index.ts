@@ -14,6 +14,15 @@ const jsonlWatcher = isMock ? null : new JsonlWatcher();
 
 const isDev = process.env.NODE_ENV === 'development' || !!process.env.ELECTRON_RENDERER_URL;
 
+// On WSLg (and some headless/virtualized Linux setups) Chromium's GPU process
+// fails to initialize ("Exiting GPU process due to errors during
+// initialization") — harmless (rendering falls back to CPU) but it spams the
+// dev terminal every session and buries real errors. Set CLAUDE_FLEET_DISABLE_HWA=1
+// to skip GPU acceleration entirely. Must run before the `ready` event.
+if (process.env.CLAUDE_FLEET_DISABLE_HWA === '1') {
+  app.disableHardwareAcceleration();
+}
+
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1400,
