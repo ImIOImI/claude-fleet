@@ -62,7 +62,9 @@ Mock mode is dev-only — the env var is ignored by the packaged build.
 
 ### Quiet the WSLg GPU error
 
-On WSLg, Chromium's GPU process fails to initialize (`viz_main_impl.cc(166) ERROR: Exiting GPU process due to errors during initialization`). It's harmless — rendering falls back to CPU — but it clutters the dev terminal every session and buries real errors. Disable hardware acceleration to silence it:
+On WSLg, Chromium's GPU process fails to initialize (`viz_main_impl.cc(166) ERROR: Exiting GPU process due to errors during initialization`). It's harmless — rendering falls back to CPU — but it clutters the dev terminal every session and buries real errors.
+
+Turn on **Settings (gear icon) → Disable hardware acceleration** and restart the app. For a one-off dev run, the `CLAUDE_FLEET_DISABLE_HWA=1` env var forces it on without touching the setting:
 
 ```bash
 CLAUDE_FLEET_DISABLE_HWA=1 npm run dev

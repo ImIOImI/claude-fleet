@@ -203,10 +203,19 @@ const api = {
     openPath: (path: string): Promise<string> => ipcRenderer.invoke('fs:openPath', path)
   },
   config: {
-    /** App-level settings: the fleet root and its derived shared folder. */
-    get: (): Promise<{ fleetRoot: string; sharedDir: string }> => ipcRenderer.invoke('config:get'),
+    /** App-level settings: the fleet root, its derived shared folder, and the
+     *  hardware-acceleration toggle. */
+    get: (): Promise<{
+      fleetRoot: string;
+      sharedDir: string;
+      disableHardwareAcceleration: boolean;
+    }> => ipcRenderer.invoke('config:get'),
     setFleetRoot: (path: string): Promise<{ fleetRoot: string; sharedDir: string }> =>
-      ipcRenderer.invoke('config:setFleetRoot', path)
+      ipcRenderer.invoke('config:setFleetRoot', path),
+    setHardwareAccelDisabled: (
+      disabled: boolean
+    ): Promise<{ disableHardwareAcceleration: boolean }> =>
+      ipcRenderer.invoke('config:setHardwareAccelDisabled', disabled)
   },
   dialog: {
     pickDirectory: (defaultPath?: string): Promise<string | null> =>

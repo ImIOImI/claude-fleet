@@ -6,6 +6,7 @@ import { JsonlWatcher } from './jsonlWatcher.js';
 import { listWorkspaceManifests } from './workspaces.js';
 import { installMainProcessHandlers, getLogPath } from './errorLog.js';
 import { runStartupMigration } from './migration.js';
+import { hardwareAccelDisabledAtStartup } from './config.js';
 
 // Mock mode is for UI iteration without Docker; no real JSONLs exist, so the
 // watcher and DB stay dormant.
@@ -17,9 +18,10 @@ const isDev = process.env.NODE_ENV === 'development' || !!process.env.ELECTRON_R
 // On WSLg (and some headless/virtualized Linux setups) Chromium's GPU process
 // fails to initialize ("Exiting GPU process due to errors during
 // initialization") — harmless (rendering falls back to CPU) but it spams the
-// dev terminal every session and buries real errors. Set CLAUDE_FLEET_DISABLE_HWA=1
-// to skip GPU acceleration entirely. Must run before the `ready` event.
-if (process.env.CLAUDE_FLEET_DISABLE_HWA === '1') {
+// dev terminal every session and buries real errors. Controlled by the
+// Settings panel toggle (persisted in config.json) or the CLAUDE_FLEET_DISABLE_HWA
+// env override. Must run before the `ready` event, hence the sync read.
+if (hardwareAccelDisabledAtStartup()) {
   app.disableHardwareAcceleration();
 }
 

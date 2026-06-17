@@ -5,7 +5,14 @@ import { readFileSync } from 'node:fs';
 import { unlink } from 'node:fs/promises';
 import { workspaceTranscriptPath } from './paths.js';
 import { isWslEnvironment } from './wsl.js';
-import { getFleetRoot, setFleetRoot, fleetPrivateDir, fleetSharedDir } from './config.js';
+import {
+  getFleetRoot,
+  setFleetRoot,
+  fleetPrivateDir,
+  fleetSharedDir,
+  getHardwareAccelDisabled,
+  setHardwareAccelDisabled
+} from './config.js';
 import * as realDocker from './docker.js';
 import * as mockDocker from './mock.js';
 import * as vault from './vault.js';
@@ -417,11 +424,16 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // surface a "Shared" link without recomputing the join.
   ipcMain.handle('config:get', async () => ({
     fleetRoot: await getFleetRoot(),
-    sharedDir: await fleetSharedDir()
+    sharedDir: await fleetSharedDir(),
+    disableHardwareAcceleration: await getHardwareAccelDisabled()
   }));
   ipcMain.handle('config:setFleetRoot', async (_e, path: string) => {
     await setFleetRoot(path);
     return { fleetRoot: await getFleetRoot(), sharedDir: await fleetSharedDir() };
+  });
+  ipcMain.handle('config:setHardwareAccelDisabled', async (_e, disabled: boolean) => {
+    await setHardwareAccelDisabled(!!disabled);
+    return { disableHardwareAcceleration: await getHardwareAccelDisabled() };
   });
 
   ipcMain.handle('dialog:pickDirectory', async (event, defaultPath?: string) => {
