@@ -142,12 +142,22 @@ func (s *Session) ExitError() error {
 // Attach claims the session for delivery on the given channel via w.
 // Returns the ring buffer's current contents — the caller is expected
 // to ship these as HISTORY frames before live OUTPUT begins.
-// ErrEnded if the session has already exited.
+// ErrEnded if the session has already exited; ErrAlreadyAttached if a
+// live writer already holds the session (the caller must DETACH first).
 func (s *Session) Attach(w ChannelWriter, channel uint32) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.dead {
 		return s.ring.Snapshot(), ErrEnded
+	}
+	if s.attached.writer != nil {
+		// Already claimed by a live connection. Reject rather than stomp
+		// the existing writer — otherwise the original connection silently
+		// goes blind (its OUTPUT flows to the new writer) while still
+		// believing it's attached (#64). The host's normal re-attach
+		// DETACHes first, so it never trips this; only a second connection
+		// (external probe, future second window) reaches here.
+		return nil, ErrAlreadyAttached
 	}
 	s.attached = attachState{writer: w, channel: channel}
 	return s.ring.Snapshot(), nil

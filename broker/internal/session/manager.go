@@ -101,7 +101,8 @@ type SessionInfo struct {
 }
 
 var (
-	ErrIDInUse  = errors.New("session: id already in use")
-	ErrNotFound = errors.New("session: not found")
-	ErrEnded    = errors.New("session: already ended")
+	ErrIDInUse         = errors.New("session: id already in use")
+	ErrNotFound        = errors.New("session: not found")
+	ErrEnded           = errors.New("session: already ended")
+	ErrAlreadyAttached = errors.New("session: already attached")
 )

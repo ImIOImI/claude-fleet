@@ -102,6 +102,8 @@ binds (per container):
 
 The **broker** is a small Go daemon (//broker) shipped inside the runner image. It owns every claude PTY in the container and exposes them via a Unix-socket protocol. The host's Electron main process attaches via the bind-mounted socket directory rather than running `docker exec claude` directly. This is the foundation of "expert workspaces" (issue #18): PTYs outlive any individual host disconnect (app quit, app crash), so when the user pauses + closes the app + reopens + unpauses, every session reattaches to the same live `claude` process with its in-memory context (analyses, file watches, MCP server state) intact.
 
+Each broker session has **at most one live writer**. An `ATTACH` to a session that already holds a writer is rejected (`ATTACHED` with `OK:false`, error `session: already attached`) rather than silently replacing it — otherwise the displaced connection keeps believing it's attached while claude's OUTPUT flows to the newcomer, blinding the original. The host's normal re-attach `DETACH`es first, so it never trips this; the guard exists for a second connection on the socket (an external probe, or a future second window). Reconnect-after-disconnect still works: a dropped connection's deferred cleanup `DETACH`es its sessions, clearing the writer for the next attach.
+
 **Main process** owns everything privileged:
 - Docker daemon access via `dockerode` (default socket).
 - OS keychain access via `keytar`.

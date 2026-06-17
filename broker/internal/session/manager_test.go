@@ -175,6 +175,44 @@ func TestSession_DetachStopsDelivery(t *testing.T) {
 	}
 }
 
+func TestSession_AttachRejectedWhenAlreadyAttached(t *testing.T) {
+	// A second ATTACH for a session that already has a live writer must be
+	// rejected, never silently stomp the first writer (#64). A stomped
+	// writer goes blind — claude's OUTPUT flows to the new writer while the
+	// original connection still thinks it's attached.
+	mgr := NewManager(ManagerConfig{ClaudeExec: "/bin/cat", RingBufBytes: 1024})
+	defer mgr.CloseAll()
+
+	sess, err := mgr.Create("sess-dual", 80, 24, nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cw1 := &captureWriter{}
+	if _, err := sess.Attach(cw1, 1); err != nil {
+		t.Fatalf("first Attach: %v", err)
+	}
+
+	// A second connection probing the same session id (any channel) must be
+	// rejected outright.
+	cw2 := &captureWriter{}
+	if _, err := sess.Attach(cw2, 2); err != ErrAlreadyAttached {
+		t.Fatalf("second Attach: got %v, want ErrAlreadyAttached", err)
+	}
+
+	// The original writer keeps receiving live output; the rejected one
+	// receives nothing.
+	if err := sess.Input([]byte("needle\n")); err != nil {
+		t.Fatalf("Input: %v", err)
+	}
+	if !waitUntil(func() bool { return bytes.Contains(cw1.joined(), []byte("needle")) }) {
+		t.Errorf("original writer went blind after a rejected attach; got %q", cw1.joined())
+	}
+	if len(cw2.all()) != 0 {
+		t.Errorf("rejected writer received %d frames, want 0", len(cw2.all()))
+	}
+}
+
 func TestSession_ReattachReplaysHistory(t *testing.T) {
 	mgr := NewManager(ManagerConfig{ClaudeExec: "/bin/cat", RingBufBytes: 1024})
 	defer mgr.CloseAll()
