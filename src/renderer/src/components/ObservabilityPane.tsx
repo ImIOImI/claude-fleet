@@ -31,6 +31,10 @@ interface Props {
   terminals: Array<{ id: string; name: string; contextTokens: number; windowTokens: number }>;
   /** The active tab's session id (highlighted in the context bars). */
   activeTerminalId: string | null;
+  /** When true, the rail is minimized to a thin reopen strip. */
+  collapsed: boolean;
+  /** Toggle the collapsed state (persisted by App.tsx). */
+  onToggleCollapse: () => void;
 }
 
 type Scope = 'workspace' | 'fleet';
@@ -43,18 +47,47 @@ export function ObservabilityPane({
   workspaces,
   summaries,
   terminals,
-  activeTerminalId
+  activeTerminalId,
+  collapsed,
+  onToggleCollapse
 }: Props) {
   const [scope, setScope] = useState<Scope>('workspace');
   const live = workspaces.filter((w) => w.state !== 'deleted');
+
+  if (collapsed) {
+    return (
+      <aside className="pane sidebar-right obs-rail-collapsed">
+        <button
+          type="button"
+          className="obs-rail-toggle obs-rail-expand"
+          onClick={onToggleCollapse}
+          title="Show observability"
+          aria-label="Show observability"
+        >
+          ‹
+        </button>
+      </aside>
+    );
+  }
 
   return (
     <aside className="pane sidebar-right">
       <div className="pane-header">
         <span>Observability</span>
-        {scope === 'workspace' && summary?.model && (
-          <span className="obs-model">{summary.model}</span>
-        )}
+        <div className="pane-header-right">
+          {scope === 'workspace' && summary?.model && (
+            <span className="obs-model">{summary.model}</span>
+          )}
+          <button
+            type="button"
+            className="obs-rail-toggle"
+            onClick={onToggleCollapse}
+            title="Hide observability"
+            aria-label="Hide observability"
+          >
+            ›
+          </button>
+        </div>
       </div>
       {live.length > 0 && (
         <ScopeToggle

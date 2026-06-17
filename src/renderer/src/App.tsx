@@ -80,6 +80,18 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Observability rail collapse, persisted across restarts (pure UI pref —
+  // localStorage, not the main-side config.json).
+  const [obsCollapsed, setObsCollapsed] = useState(
+    () => localStorage.getItem('obsRailCollapsed') === '1'
+  );
+  const toggleObsCollapsed = useCallback(() => {
+    setObsCollapsed((prev) => {
+      const next = !prev;
+      localStorage.setItem('obsRailCollapsed', next ? '1' : '0');
+      return next;
+    });
+  }, []);
   // The shared folder path (<fleetRoot>/shared), fetched once from app config.
   // Drives the observability rail's "Shared" link.
   const [sharedDir, setSharedDir] = useState<string | null>(null);
@@ -574,7 +586,7 @@ export function App() {
         onRefresh={refresh}
       />
 
-      <div className="app-body">
+      <div className={obsCollapsed ? 'app-body obs-collapsed' : 'app-body'}>
         <SessionsPane
           workspaces={workspaces}
           selectedWorkspaceId={selectedId}
@@ -640,6 +652,8 @@ export function App() {
           summaries={summaries}
           terminals={terminals}
           activeTerminalId={activeTabId}
+          collapsed={obsCollapsed}
+          onToggleCollapse={toggleObsCollapsed}
         />
       </div>
 

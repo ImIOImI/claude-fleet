@@ -81,6 +81,10 @@ body {
   grid-template-columns: 280px 1fr 320px;
   min-height: 0;
 }
+/* Observability rail minimized to a thin reopen strip (#observability-rail). */
+.app-body.obs-collapsed {
+  grid-template-columns: 280px 1fr 28px;
+}
 
 /* ----- top container-tab strip ----------------------------------------- */
 .top-strip {
@@ -311,6 +315,38 @@ body {
   min-height: 0;
   padding: 14px;
   overflow-y: auto;
+}
+
+/* ----- observability rail collapse toggle ----------------------------- */
+.pane-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.obs-rail-toggle {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: var(--r-sm);
+}
+.obs-rail-toggle:hover {
+  color: var(--text-secondary);
+  background: var(--bg-base);
+}
+/* Collapsed: the whole 28px strip is one tall click target. */
+.pane.sidebar-right.obs-rail-collapsed {
+  align-items: stretch;
+  padding: 0;
+}
+.obs-rail-expand {
+  flex: 1;
+  width: 100%;
+  border-radius: 0;
 }
 
 .pane-placeholder {
