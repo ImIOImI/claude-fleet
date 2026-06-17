@@ -20,8 +20,17 @@ import (
 // the server + manager down.
 func startTestServer(t *testing.T) (client *net.UnixConn, cleanup func()) {
 	t.Helper()
+	conn, _, cleanup := startTestServerWithPath(t)
+	return conn, cleanup
+}
+
+// startTestServerWithPath is startTestServer that also returns the socket
+// path, so a test can dial a second connection to the same broker (the #64
+// concurrent-attach repro).
+func startTestServerWithPath(t *testing.T) (client *net.UnixConn, sockPath string, cleanup func()) {
+	t.Helper()
 	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "broker.sock")
+	sockPath = filepath.Join(dir, "broker.sock")
 
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -57,7 +66,7 @@ func startTestServer(t *testing.T) (client *net.UnixConn, cleanup func()) {
 		mgr.CloseAll()
 		<-serveErr
 	}
-	return uc, cleanup
+	return uc, sockPath, cleanup
 }
 
 // expectFrame reads one frame and asserts the type, returning the payload.
@@ -73,6 +82,29 @@ func expectFrame(t *testing.T, conn net.Conn, want proto.FrameType) []byte {
 		t.Fatalf("frame type: got %v, want %v (payload %q)", got, want, payload)
 	}
 	return payload
+}
+
+// readUntilFrame keeps reading frames until one of wantType arrives (or
+// the deadline hits), skipping any frames in between. Needed when a stray
+// channel-data frame — e.g. the PTY line-discipline echo of just-sent
+// input, which arrives as a second OUTPUT alongside the program's own
+// stdout — may still be in flight ahead of a control-frame ack. The real
+// host client demuxes by frame type rather than expecting a rigid order.
+func readUntilFrame(t *testing.T, conn net.Conn, want proto.FrameType) []byte {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		_ = conn.SetReadDeadline(deadline)
+		got, payload, err := proto.ReadFrame(conn)
+		if err != nil {
+			t.Fatalf("read frame: %v", err)
+		}
+		if got == want {
+			return payload
+		}
+	}
+	t.Fatalf("did not see frame %v before deadline", want)
+	return nil
 }
 
 // readUntilFrameContains keeps reading frames until one of the given
@@ -211,9 +243,10 @@ func TestServer_DetachAndReattachReplaysHistory(t *testing.T) {
 		t.Fatal("did not see initial OUTPUT")
 	}
 
-	// DETACH ch=1
+	// DETACH ch=1. A second OUTPUT frame (the PTY echo of "aaa\n") may still
+	// be in flight, so skip past any stray frames to the DETACHED ack.
 	_ = proto.WriteJSONFrame(conn, proto.FrameDetach, proto.ChannelRequest{Channel: 1})
-	expectFrame(t, conn, proto.FrameDetached)
+	readUntilFrame(t, conn, proto.FrameDetached)
 
 	// Re-ATTACH ch=2. Should produce a HISTORY frame containing the
 	// earlier "aaa" bytes.
@@ -222,5 +255,40 @@ func TestServer_DetachAndReattachReplaysHistory(t *testing.T) {
 
 	if !readUntilFrameContains(t, conn, proto.FrameHistory, []byte("aaa")) {
 		t.Fatal("expected HISTORY frame with 'aaa' after re-attach")
+	}
+}
+
+func TestServer_SecondConnAttachToHeldSessionRejected(t *testing.T) {
+	// #64 repro: a second connection ATTACHing a session that another
+	// connection already holds must be rejected (OK:false), not silently
+	// stomp the first connection's writer and blind it.
+	conn, sockPath, cleanup := startTestServerWithPath(t)
+	defer cleanup()
+
+	_ = proto.WriteJSONFrame(conn, proto.FrameCreate, proto.CreateRequest{ID: "held", Cols: 80, Rows: 24})
+	expectFrame(t, conn, proto.FrameCreated)
+	_ = proto.WriteJSONFrame(conn, proto.FrameAttach, proto.AttachRequest{ID: "held", Channel: 1})
+	expectFrame(t, conn, proto.FrameAttached)
+
+	// A separate connection probes the same session id.
+	conn2, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial second conn: %v", err)
+	}
+	defer conn2.Close()
+	_ = proto.WriteJSONFrame(conn2, proto.FrameAttach, proto.AttachRequest{ID: "held", Channel: 1})
+	payload := expectFrame(t, conn2, proto.FrameAttached)
+	var resp proto.AttachResponse
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		t.Fatalf("unmarshal AttachResponse: %v", err)
+	}
+	if resp.OK {
+		t.Fatal("second attach to a held session should be rejected, got OK=true")
+	}
+
+	// The first connection still receives live OUTPUT — it was never stomped.
+	_ = proto.WriteFrame(conn, proto.FrameInput, proto.EncodeChannelData(1, []byte("zzz\n")))
+	if !readUntilFrameContains(t, conn, proto.FrameOutput, []byte("zzz")) {
+		t.Fatal("first connection went blind after the rejected second attach")
 	}
 }
