@@ -6,11 +6,14 @@
 
 import { app } from 'electron';
 import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { assertValidWorkspaceId } from './paths.js';
 
 interface AppConfig {
   fleetRoot?: string;
+  /** When true, the app skips Chromium hardware acceleration at startup. */
+  disableHardwareAcceleration?: boolean;
 }
 
 function configPath(): string {
@@ -30,7 +33,8 @@ async function read(): Promise<AppConfig> {
     const raw = await readFile(configPath(), 'utf8');
     const parsed = JSON.parse(raw) as AppConfig;
     cached = {
-      fleetRoot: typeof parsed.fleetRoot === 'string' && parsed.fleetRoot ? parsed.fleetRoot : undefined
+      fleetRoot: typeof parsed.fleetRoot === 'string' && parsed.fleetRoot ? parsed.fleetRoot : undefined,
+      disableHardwareAcceleration: parsed.disableHardwareAcceleration === true
     };
   } catch {
     cached = {};
@@ -62,6 +66,36 @@ export async function setFleetRoot(path: string): Promise<void> {
   await mkdir(trimmed, { recursive: true });
   const cfg = await read();
   await write({ ...cfg, fleetRoot: trimmed });
+}
+
+/**
+ * Whether to disable Chromium hardware acceleration, decided at startup.
+ * Precedence: `CLAUDE_FLEET_DISABLE_HWA=1` env override (dev shortcut) → the
+ * persisted setting → off. Read **synchronously** because
+ * `app.disableHardwareAcceleration()` must be called before the `ready`
+ * event, before the async config cache is warmed. `app.getPath('userData')`
+ * is available this early.
+ */
+export function hardwareAccelDisabledAtStartup(): boolean {
+  if (process.env.CLAUDE_FLEET_DISABLE_HWA === '1') return true;
+  try {
+    const parsed = JSON.parse(readFileSync(configPath(), 'utf8')) as AppConfig;
+    return parsed.disableHardwareAcceleration === true;
+  } catch {
+    return false;
+  }
+}
+
+/** The persisted hardware-acceleration setting (ignores the env override). */
+export async function getHardwareAccelDisabled(): Promise<boolean> {
+  const cfg = await read();
+  return cfg.disableHardwareAcceleration === true;
+}
+
+/** Persist the hardware-acceleration setting. Takes effect on next launch. */
+export async function setHardwareAccelDisabled(disabled: boolean): Promise<void> {
+  const cfg = await read();
+  await write({ ...cfg, disableHardwareAcceleration: disabled });
 }
 
 /** `<fleetRoot>/<id>` — a workspace's private folder, mounted at /workspace. */

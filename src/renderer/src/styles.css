@@ -1004,6 +1004,19 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--text-primary); }
 }
 .form-row input:disabled { opacity: 0.5; }
 .form-row .form-hint { font-size: 11px; margin-top: 4px; color: var(--text-muted); }
+/* Checkbox setting: a horizontal box + label, not the uppercase field label. */
+.form-row label.checkbox-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 0;
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.form-row label.checkbox-row input { width: auto; margin: 0; cursor: pointer; }
 .error-text { color: var(--state-error); }
 .form-status { font-size: 11px; color: var(--text-secondary); margin: 8px 0; font-family: var(--font-mono); }
 

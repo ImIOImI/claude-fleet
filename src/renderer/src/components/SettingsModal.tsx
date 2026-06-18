@@ -1,8 +1,8 @@
-// App-level settings. Currently just the fleet root — the single host
-// directory that holds every workspace's private folder (<root>/<id>) and
-// the shared folder (<root>/shared) mounted into every container. Changing
-// it takes effect for new containers and on the next restart of existing
-// ones (running containers keep their current mounts until recreated).
+// App-level settings: the fleet root — the single host directory that holds
+// every workspace's private folder (<root>/<id>) and the shared folder
+// (<root>/shared) mounted into every container (changing it takes effect for
+// new containers and on the next restart of existing ones) — plus the
+// hardware-acceleration toggle (applied at the next app launch).
 
 import { useEffect, useState } from 'react';
 
@@ -14,6 +14,10 @@ interface Props {
 
 export function SettingsModal({ onClose, onSaved }: Props) {
   const [fleetRoot, setFleetRoot] = useState('');
+  const [hwaDisabled, setHwaDisabled] = useState(false);
+  // The persisted HWA value at open time — used to know whether the toggle
+  // actually changed, so we only nudge "restart to apply" when it did.
+  const [hwaInitial, setHwaInitial] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -23,6 +27,8 @@ export function SettingsModal({ onClose, onSaved }: Props) {
     void window.api.config.get().then((cfg) => {
       if (live) {
         setFleetRoot(cfg.fleetRoot);
+        setHwaDisabled(cfg.disableHardwareAcceleration);
+        setHwaInitial(cfg.disableHardwareAcceleration);
         setLoaded(true);
       }
     });
@@ -46,6 +52,9 @@ export function SettingsModal({ onClose, onSaved }: Props) {
     setBusy(true);
     setError(null);
     try {
+      if (hwaDisabled !== hwaInitial) {
+        await window.api.config.setHardwareAccelDisabled(hwaDisabled);
+      }
       const cfg = await window.api.config.setFleetRoot(trimmed);
       onSaved(cfg);
       onClose();
@@ -85,6 +94,24 @@ export function SettingsModal({ onClose, onSaved }: Props) {
             <code>&lt;root&gt;/shared</code> folder mounted into every container at{' '}
             <code>/shared</code>. Changing the root applies to new containers and to existing ones
             on their next restart.
+          </p>
+          <div className="form-row">
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={hwaDisabled}
+                onChange={(e) => setHwaDisabled(e.target.checked)}
+                disabled={busy || !loaded}
+              />
+              <span>Disable hardware acceleration</span>
+            </label>
+          </div>
+          <p className="form-hint">
+            Turn this on if Chromium&apos;s GPU process logs errors on startup (common on WSLg) —
+            rendering falls back to CPU. Applies the next time you launch claude-fleet.
+            {hwaDisabled !== hwaInitial && (
+              <strong> Restart required to take effect.</strong>
+            )}
           </p>
           {error && <div className="form-hint error-text">{error}</div>}
           <div className="modal-footer">

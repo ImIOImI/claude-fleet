@@ -212,9 +212,12 @@ Host-filesystem helpers used by the workspace-create flow and the observability 
 - `dialog:pickDirectory(defaultPath?)` → `string | null` — native open-directory dialog; null on cancel.
 
 ### Settings (app config)
-App-level settings persist to `<userData>/config.json`. Currently just the **fleet root** — the single host dir holding every workspace's private folder (`<fleetRoot>/<id>`) and the shared folder (`<fleetRoot>/shared`).
-- `config:get()` → `{ fleetRoot, sharedDir }` — current fleet root and its derived `<fleetRoot>/shared`. Precedence: `CLAUDE_FLEET_ROOT` env override (the e2e suite sets this in `tests/_helpers.ts` so test runs don't pollute the real `~/fleet`) → the persisted config value → the `~/fleet` default.
-- `config:setFleetRoot(path)` → `{ fleetRoot, sharedDir }` — persist a new fleet root (the dir is created). Surfaced via the top-strip gear → `SettingsModal`. Takes effect for new containers and for existing ones on next restart (running containers keep their current mounts until recreated).
+App-level settings persist to `<userData>/config.json`: `{ fleetRoot?: string, disableHardwareAcceleration?: boolean }`. Both are surfaced via the top-strip gear → `SettingsModal`.
+- **Fleet root** — the single host dir holding every workspace's private folder (`<fleetRoot>/<id>`) and the shared folder (`<fleetRoot>/shared`).
+- **disableHardwareAcceleration** — when true, the app calls `app.disableHardwareAcceleration()` at startup. Silences Chromium's noisy GPU-init failure on WSLg (rendering falls back to CPU). Must be read **synchronously** at module load, before the `ready` event — `config.ts:hardwareAccelDisabledAtStartup()` does a `readFileSync` of `config.json` rather than going through the async cache. Changing it requires an app restart to take effect.
+- `config:get()` → `{ fleetRoot, sharedDir, disableHardwareAcceleration }` — current fleet root + its derived `<fleetRoot>/shared` + the persisted HWA flag (the persisted value, not the effective one — the env override below isn't reflected). Fleet-root precedence: `CLAUDE_FLEET_ROOT` env override (the e2e suite sets this in `tests/_helpers.ts` so test runs don't pollute the real `~/fleet`) → the persisted config value → the `~/fleet` default.
+- `config:setFleetRoot(path)` → `{ fleetRoot, sharedDir }` — persist a new fleet root (the dir is created). Takes effect for new containers and for existing ones on next restart (running containers keep their current mounts until recreated).
+- `config:setHardwareAccelDisabled(disabled)` → `{ disableHardwareAcceleration }` — persist the HWA flag. `CLAUDE_FLEET_DISABLE_HWA=1` is an env override (dev shortcut) that forces it on regardless of the persisted value, matching the `CLAUDE_FLEET_MOCK` / `ANTHROPIC_API_KEY` pattern.
 
 ### Clipboard + context menu
 The renderer cannot use `navigator.clipboard` reliably (focus/permission gotchas in Electron, and the renderer is contextIsolated). All clipboard access goes through main:
@@ -837,12 +840,10 @@ Intentionally narrow scope: this is for iterating on UI without a daemon, image,
 - **Test fixtures.** Shared in-memory DB seed vs. per-test container/profile fixtures.
 
 ### App-level Settings surface
-No Settings panel exists yet. The first concrete item that needs one is a toggle for hardware acceleration (issue #13) — Chromium's GPU process fails noisily on WSLg with `viz_main_impl.cc(166) ERROR: Exiting GPU process during initialization`. The fix in code is one line — `app.disableHardwareAcceleration()` before `app.whenReady()` — but it needs a UI control to flip without editing source.
+The `SettingsModal` (top-strip gear) is the app-level Settings panel. It holds the **fleet root** and the **hardware-acceleration toggle** (issue #13 — see §6 *Settings*), both persisted to `config.json`. Settings live in `config.json` (not SQLite) so they survive a DB wipe and, critically, can be read synchronously at startup before the `ready` event (the HWA toggle's hard requirement).
 
 **Open:**
-- **Env-var escape hatch first, or full panel up front.** `CLAUDE_FLEET_DISABLE_HWA=1` would be a five-minute shortcut (and matches the dev-fallback pattern we already use for `ANTHROPIC_API_KEY`); a real Settings modal is more work but is the right end state.
-- **Persistence.** SQLite alongside `profile_settings` is the natural home — same DB the watcher and the rest of the app already share. A JSON config file under `userData` is the alternative if we want the Settings to survive a DB wipe.
-- **Likely future occupants** once the surface exists: log-verbosity, default `mirrorDefault`/`cleanupDefault` for new profiles, dev-shortcut indicators ("ANTHROPIC_API_KEY is sourced from env"), pull-progress UI preference, fast-mode toggle, etc.
+- **Likely future occupants:** log-verbosity, default `mirrorDefault`/`cleanupDefault` for new profiles, dev-shortcut indicators ("ANTHROPIC_API_KEY is sourced from env"), pull-progress UI preference, fast-mode toggle, etc. The modal is currently a single untabbed panel; it gains tabs/sections once enough toggles accumulate.
 
 ### Create-container UX
 The current flow is three sequential `window.prompt()` dialogs. Functional but crude. Needs a real modal form with: name, workspace root (with a directory picker — `dialog.showOpenDialog` from main), subdir, profile dropdown (populated from `vault:list`), and optional CPU/memory caps.
