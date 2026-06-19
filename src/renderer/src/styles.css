@@ -256,26 +256,31 @@ body {
 .btn.danger:hover { background: rgba(239, 77, 77, 0.18); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
+/* Daemon indicator (#23): no pill chrome, constant "Docker" label (it names
+   what's measured) — the dot does all the state signaling. */
 .daemon-status {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 9px;
-  border-radius: var(--r-md);
-  background: var(--bg-card);
-  border: 1px solid var(--rule);
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--ink-1);
 }
-.daemon-status.down { color: var(--danger); border-color: var(--danger); }
 .daemon-status .dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--ok);
 }
-.daemon-status .dot.unreachable { background: var(--danger); }
+/* Unreachable: pulsing red. */
+.daemon-status .dot.unreachable {
+  background: var(--danger);
+  animation: daemonPulse 1.4s ease-in-out infinite;
+}
+@keyframes daemonPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
 
 .mock-chip {
   background: rgba(211, 146, 100, 0.15);

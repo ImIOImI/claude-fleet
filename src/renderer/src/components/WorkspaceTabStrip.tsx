@@ -313,9 +313,16 @@ export function WorkspaceTabStrip({
         >
           <IconGear />
         </button>
-        <span className={`daemon-status ${backendReady === false ? 'down' : ''}`}>
+        <span
+          className="daemon-status"
+          title={
+            backendReady === false
+              ? 'No Docker daemon available — start Docker Desktop'
+              : 'Docker daemon reachable'
+          }
+        >
           <span className={`dot ${backendReady === false ? 'unreachable' : ''}`} />
-          {backendReady === false ? 'No daemon' : 'Docker'}
+          Docker
         </span>
       </div>
 
