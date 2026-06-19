@@ -142,7 +142,14 @@ export async function startWorkspace(id: string): Promise<string | null> {
 
 export async function pauseWorkspace(containerId: string): Promise<void> {
   const ws = workspaces.get(containerId);
-  if (ws && ws.state === 'running') {
+  if (!ws) return;
+  // Match the real backend's idempotent `docker pause` semantics explicitly:
+  //   running → paused   (the only real transition)
+  //   paused  → paused   (no-op; already frozen)
+  //   stopped → paused   (no-op; docker returns 409, treated as no-op)
+  // Making the no-ops explicit stops a renderer bug that assumes a state
+  // change always happens from passing against the mock yet failing in prod.
+  if (ws.state === 'running') {
     ws.state = 'paused';
     ws.status = 'Paused (was running)';
   }
