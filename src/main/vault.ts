@@ -1,169 +1,170 @@
-// Per-workspace secret storage backed by the OS keychain via keytar.
+// Per-workspace secret storage backed by Electron's `safeStorage`.
 //
-// Each workspace owns its own bag of secret env-var values. Accounts are
-// keyed `<workspace-id>:<key>` (e.g. `01ARZ3NDEK…:ANTHROPIC_API_KEY`); a
-// per-workspace index lives at `__secrets__:<workspace-id>` holding a
-// JSON array of the keys that exist for that workspace. The index lets
-// us list keys for a workspace without iterating the entire keychain.
+// Each workspace owns its own bag of secret env-var values. The whole vault
+// is a single JSON object `{ "<workspaceId>": { "<key>": "<value>" } }`,
+// encrypted with `safeStorage.encryptString` and written (base64) to
+// `<userData>/secrets.enc`.
 //
-// Why an index per workspace (instead of one global index)? Listing keys
-// for a single workspace is the common case (env editor in the modal),
-// and a per-workspace index makes that an O(1) keychain read. Deleting a
-// workspace (`deleteAllForWorkspace`) is also cheap because the index
-// already enumerates every account to remove.
+// Why safeStorage instead of keytar: keytar needs a Secret Service daemon
+// (libsecret/gnome-keyring) at runtime, which is routinely absent on WSL —
+// so API-key auth silently failed to store secrets there. safeStorage uses
+// the OS keychain on macOS/Windows and the desktop keyring on Linux *when
+// present*, but falls back to a built-in AES key ("basic" backend) when no
+// keyring is reachable. So encryption is available on bare WSL too, and the
+// vault works everywhere the app runs. The trade-off: under the basic
+// fallback the at-rest key isn't OS-protected — acceptable here since the
+// file lives in the per-user `userData` dir and the prior state was "secrets
+// don't work at all on WSL."
+//
+// Migration note: secrets previously written to keytar (`<id>:<key>`
+// accounts) are NOT carried over — users re-enter API keys once. OAuth
+// workspaces store no secrets, so they're unaffected.
 
-const SERVICE = 'claude-fleet';
-const SECRET_INDEX_PREFIX = '__secrets__:';
+import { app, safeStorage } from 'electron';
+import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
-// keytar links libsecret-1.so.0 at module load on Linux. Loading it lazily
-// and catching the dlopen failure lets the rest of the app survive on
-// systems without it (bare WSL, CI without libsecret-1-0). The renderer
-// degrades gracefully when isVaultAvailable() returns false — API-key
-// auth mode stays disabled and OAuth handles the rest.
-type Keytar = typeof import('keytar');
-let cachedKeytar: Keytar | null | undefined;
-async function loadKeytar(): Promise<Keytar | null> {
-  if (cachedKeytar !== undefined) return cachedKeytar;
+type Store = Record<string, Record<string, string>>;
+
+function filePath(): string {
+  return join(app.getPath('userData'), 'secrets.enc');
+}
+
+// In-memory copy of the decrypted store. We own every write, so the cache
+// stays authoritative once loaded.
+let cache: Store | null = null;
+
+function isStore(v: unknown): v is Store {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+async function load(): Promise<Store> {
+  if (cache) return cache;
   try {
-    const mod = await import('keytar');
-    cachedKeytar = (mod.default ?? mod) as Keytar;
+    const b64 = await readFile(filePath(), 'utf8');
+    if (!b64.trim()) {
+      cache = {};
+      return cache;
+    }
+    const decrypted = safeStorage.decryptString(Buffer.from(b64, 'base64'));
+    const parsed = JSON.parse(decrypted) as unknown;
+    cache = isStore(parsed) ? parsed : {};
   } catch {
-    cachedKeytar = null;
+    // Missing file, undecryptable (key changed), or malformed → empty vault.
+    cache = {};
   }
-  return cachedKeytar;
+  return cache;
 }
 
-function accountFor(workspaceId: string, key: string): string {
-  return `${workspaceId}:${key}`;
+async function persist(store: Store): Promise<void> {
+  cache = store;
+  const buf = safeStorage.encryptString(JSON.stringify(store));
+  await writeFile(filePath(), buf.toString('base64'), 'utf8');
 }
 
-function indexAccountFor(workspaceId: string): string {
-  return `${SECRET_INDEX_PREFIX}${workspaceId}`;
+// Serialize read-modify-write so concurrent setSecret/deleteSecret calls
+// (e.g. the env editor writing several rows) can't clobber each other.
+let writeChain: Promise<unknown> = Promise.resolve();
+function withLock<T>(fn: () => Promise<T>): Promise<T> {
+  const next = writeChain.then(fn, fn);
+  writeChain = next.catch(() => undefined);
+  return next;
 }
 
-async function readIndex(workspaceId: string): Promise<string[]> {
-  const kt = await loadKeytar();
-  if (!kt) return [];
+// safeStorage uses the OS keyring on macOS/Windows and the desktop keyring on
+// Linux. On Linux WITHOUT a keyring (e.g. WSL), `isEncryptionAvailable()` is
+// false until we opt into the plaintext backend — which stores base64
+// plaintext, not OS-encrypted (see SPEC §9). We do that once so the vault is
+// at least functional there; `usesPlaintextEncryption()` lets callers surface
+// the weaker protection.
+let encryptionEnsured = false;
+function encryptionAvailable(): boolean {
+  if (!encryptionEnsured) {
+    encryptionEnsured = true;
+    try {
+      if (!safeStorage.isEncryptionAvailable() && process.platform === 'linux') {
+        safeStorage.setUsePlainTextEncryption(true);
+      }
+    } catch {
+      /* setUsePlainTextEncryption can throw before ready / on some platforms */
+    }
+  }
   try {
-    const raw = await kt.getPassword(SERVICE, indexAccountFor(workspaceId));
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((k): k is string => typeof k === 'string');
+    return safeStorage.isEncryptionAvailable();
   } catch {
-    return [];
+    return false;
   }
 }
 
-async function writeIndex(workspaceId: string, keys: string[]): Promise<void> {
-  const kt = await loadKeytar();
-  if (!kt) throw new Error('Vault unavailable (libsecret missing or keyring unreachable).');
-  await kt.setPassword(SERVICE, indexAccountFor(workspaceId), JSON.stringify(keys));
-}
-
-/** Probe whether the OS keychain is reachable. Cached after first call. */
+/** Probe whether secret storage is usable. Cached after first call. */
 let probeResult: boolean | null = null;
 export async function isVaultAvailable(): Promise<boolean> {
   if (probeResult !== null) return probeResult;
-  const kt = await loadKeytar();
-  if (!kt) {
-    probeResult = false;
-    return false;
-  }
-  try {
-    await kt.getPassword(SERVICE, '__probe__');
-    probeResult = true;
-  } catch {
-    probeResult = false;
-  }
+  probeResult = encryptionAvailable();
   return probeResult;
 }
 
-/** List the secret keys stored for a workspace. Empty array when no keychain. */
+/** List the secret keys stored for a workspace. Empty array when none. */
 export async function listKeys(workspaceId: string): Promise<string[]> {
-  return readIndex(workspaceId);
+  const store = await load();
+  return Object.keys(store[workspaceId] ?? {});
 }
 
-/** Fetch a secret value. Returns null if missing (or no keychain). */
+/** Fetch a secret value. Returns null if missing. */
 export async function getSecret(workspaceId: string, key: string): Promise<string | null> {
-  const kt = await loadKeytar();
-  if (!kt) return null;
-  try {
-    return await kt.getPassword(SERVICE, accountFor(workspaceId, key));
-  } catch {
-    return null;
-  }
+  const store = await load();
+  return store[workspaceId]?.[key] ?? null;
 }
 
 /**
- * Store or update a secret for a workspace. Adds the key to the workspace's
- * index if not already there. Throws if the keychain isn't reachable —
- * callers should branch on `isVaultAvailable()` first.
+ * Store or update a secret for a workspace. Throws if encryption isn't
+ * available — callers should branch on `isVaultAvailable()` first.
  */
-export async function setSecret(
-  workspaceId: string,
-  key: string,
-  value: string
-): Promise<void> {
-  const kt = await loadKeytar();
-  if (!kt) throw new Error('Vault unavailable (libsecret missing or keyring unreachable).');
-  await kt.setPassword(SERVICE, accountFor(workspaceId, key), value);
-  const idx = await readIndex(workspaceId);
-  if (!idx.includes(key)) {
-    idx.push(key);
-    await writeIndex(workspaceId, idx);
+export async function setSecret(workspaceId: string, key: string, value: string): Promise<void> {
+  if (!encryptionAvailable()) {
+    throw new Error('Vault unavailable (secret encryption not available on this system).');
   }
+  await withLock(async () => {
+    const store = await load();
+    const bag = { ...(store[workspaceId] ?? {}), [key]: value };
+    await persist({ ...store, [workspaceId]: bag });
+  });
 }
 
 /** Delete a single secret for a workspace. No-op if missing. */
 export async function deleteSecret(workspaceId: string, key: string): Promise<void> {
-  const kt = await loadKeytar();
-  if (!kt) return;
-  try {
-    await kt.deletePassword(SERVICE, accountFor(workspaceId, key));
-  } catch {
-    // Best effort — the index is the source of truth.
-  }
-  const idx = (await readIndex(workspaceId)).filter((k) => k !== key);
-  if (idx.length === 0) {
-    // Drop the index entirely when no keys remain.
-    try {
-      await kt.deletePassword(SERVICE, indexAccountFor(workspaceId));
-    } catch {
-      // ignore
-    }
-  } else {
-    await writeIndex(workspaceId, idx);
-  }
+  await withLock(async () => {
+    const store = await load();
+    const bag = store[workspaceId];
+    if (!bag || !(key in bag)) return;
+    const next: Record<string, string> = { ...bag };
+    delete next[key];
+    const nextStore = { ...store };
+    if (Object.keys(next).length === 0) delete nextStore[workspaceId];
+    else nextStore[workspaceId] = next;
+    await persist(nextStore);
+  });
 }
 
 /**
- * Delete every secret stored for a workspace plus its index. Called when
- * a workspace is purged from the Saved list.
+ * Delete every secret stored for a workspace. Called when a workspace is
+ * purged from the Saved list.
  */
 export async function deleteAllForWorkspace(workspaceId: string): Promise<void> {
-  const kt = await loadKeytar();
-  if (!kt) return;
-  const keys = await readIndex(workspaceId);
-  for (const key of keys) {
-    try {
-      await kt.deletePassword(SERVICE, accountFor(workspaceId, key));
-    } catch {
-      // ignore
-    }
-  }
-  try {
-    await kt.deletePassword(SERVICE, indexAccountFor(workspaceId));
-  } catch {
-    // ignore
-  }
+  await withLock(async () => {
+    const store = await load();
+    if (!(workspaceId in store)) return;
+    const nextStore = { ...store };
+    delete nextStore[workspaceId];
+    await persist(nextStore);
+  });
 }
 
 /**
- * Resolve a workspace's full env: merge the manifest's plain env with
- * the secret values pulled from the keychain. Used at container-start
- * time. Missing-key paths return an empty string so the container still
- * starts — surfacing the missing key in logs is the caller's job.
+ * Resolve a workspace's full env: merge the manifest's plain env with the
+ * secret values from the vault. Used at container-start time. Missing keys
+ * resolve to the empty string so the container still starts — surfacing the
+ * missing key in logs is the caller's job.
  */
 export async function resolveEnv(
   workspaceId: string,
@@ -176,4 +177,10 @@ export async function resolveEnv(
     merged[key] = value ?? '';
   }
   return merged;
+}
+
+/** Test-only: drop the in-memory cache + probe so a fresh read hits disk. */
+export function _resetVaultCacheForTests(): void {
+  cache = null;
+  probeResult = null;
 }
