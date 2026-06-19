@@ -23,7 +23,7 @@ import { dirname, join } from 'node:path';
 import { ulid } from 'ulid';
 import { sharedClaudeCredentialsPath, stateRoot, workspaceClaudeDir, workspaceManifestPath } from './paths.js';
 import { fleetPrivateDir, fleetSharedDir } from './config.js';
-import { listWorkspaceManifests, writeWorkspaceManifest } from './workspaces.js';
+import { listWorkspaceManifests, writeWorkspaceManifest, FACTORY_MIRROR } from './workspaces.js';
 import type { WorkspaceSpec } from './workspaces.js';
 
 const SERVICE = 'claude-fleet';
@@ -138,6 +138,7 @@ async function migrateStateDirs(): Promise<void> {
       authMode: 'oauth',
       env: { plain: {}, secretKeys: [] },
       resources: undefined,
+      mirror: FACTORY_MIRROR,
       createdAt: typeof parsed.createdAt === 'number' ? parsed.createdAt : Date.now(),
       lastUsedAt: typeof parsed.lastUsedAt === 'number' ? parsed.lastUsedAt : Date.now()
     };

@@ -27,6 +27,12 @@ export interface WorkspaceResources {
   cpus?: number;
   memoryMb?: number;
 }
+export type MirrorSetting = 'on' | 'off';
+export type CleanupSetting = 'delete' | 'preserve';
+export interface WorkspaceMirror {
+  default: MirrorSetting;
+  cleanup: CleanupSetting;
+}
 
 /**
  * Render-side projection of the main-process `Workspace` type. Identity is
@@ -50,6 +56,7 @@ export interface WorkspaceSummary {
   authMode: AuthMode;
   env: WorkspaceEnv;
   resources?: WorkspaceResources;
+  mirror: WorkspaceMirror;
   createdAt: number;
   lastUsedAt: number;
 }
@@ -384,7 +391,8 @@ export function App() {
       image: submit.image,
       authMode: submit.authMode,
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
-      resources: submit.resources
+      resources: submit.resources,
+      mirror: submit.mirror
     });
     setSelectedId(id);
     refresh();
@@ -430,6 +438,7 @@ export function App() {
       authMode: submit.authMode,
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources,
+      mirror: submit.mirror,
       createdAt: Date.now(),
       lastUsedAt: Date.now()
     });
@@ -457,7 +466,8 @@ export function App() {
       image: submit.image,
       authMode: submit.authMode,
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
-      resources: submit.resources
+      resources: submit.resources,
+      mirror: submit.mirror
     });
     setSelectedId(id);
     refresh();
@@ -487,6 +497,7 @@ export function App() {
       authMode: submit.authMode,
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources,
+      mirror: submit.mirror,
       createdAt: before.createdAt,
       lastUsedAt: Date.now()
     });
@@ -531,7 +542,8 @@ export function App() {
       // would be misleading: those keys exist for the *source* id.)
       secretKeys: [...secretKeys],
       secrets: {},
-      resources: source.resources
+      resources: source.resources,
+      mirror: source.mirror
     };
     setCloneSource(clone);
     setEditTargetId(null); // close edit modal if open
@@ -618,6 +630,8 @@ export function App() {
                   key={w.id}
                   visible={selectedId === w.id}
                   workspaceId={w.id}
+                  mirrorDefault={w.mirror.default}
+                  cleanupDefault={w.mirror.cleanup}
                   containerId={w.containerId!}
                   paused={w.state === 'paused'}
                   summary={summaries[w.id] ?? null}

@@ -1668,6 +1668,40 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--text-primary); }
 }
 .session-tab-new:hover { color: var(--text-primary); background: var(--bg-card); }
 
+/* Per-session durable-mirror toggle, pinned to the right of the tab strip. */
+.session-mirror-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  align-self: center;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.session-mirror-toggle:hover { color: var(--text-secondary); background: var(--bg-base); }
+.session-mirror-toggle:disabled { opacity: 0.4; cursor: default; }
+.session-mirror-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+.session-mirror-toggle.on { color: var(--text-secondary); border-color: var(--accent, #5aa9e6); }
+.session-mirror-toggle.on .session-mirror-dot {
+  background: var(--accent, #5aa9e6);
+  box-shadow: 0 0 5px var(--accent, #5aa9e6);
+}
+
 /* Stacked session containers — only the active one is visible, but all
    stay mounted so PTYs persist and scrollback is preserved across tab
    switches. overflow:hidden + min-height:0 keep the stack at exactly
@@ -1863,7 +1897,8 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--text-primary); }
   font-size: 12px;
   color: var(--text-muted);
 }
-.resources-grid input {
+.resources-grid input,
+.resources-grid select {
   padding: 4px 8px;
   font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 13px;

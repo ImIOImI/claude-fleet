@@ -15,12 +15,17 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { WorkspaceObservabilitySummary } from '../../../preload';
+import type { MirrorSetting, CleanupSetting } from '../App';
 import { TerminalSession } from './TerminalSession';
 
 interface Props {
   containerId: string;
   /** ULID — used for sessions.json path and observability lookups. */
   workspaceId: string;
+  /** The workspace's durable-mirror defaults (manifest). New tabs inherit
+   *  `mirrorDefault`; the close-time modal pre-selects `cleanupDefault`. */
+  mirrorDefault: MirrorSetting;
+  cleanupDefault: CleanupSetting;
   paused: boolean;
   /**
    * Whether this pane is the currently-selected workspace. Hidden panes
@@ -110,6 +115,8 @@ interface Session {
   createdAt: number;
   /** Set on a resume tab — its first attach runs `claude --resume <uuid>`. */
   resumeOf?: string;
+  /** Per-session durable-mirror override; absent = use the workspace default. */
+  mirror?: MirrorSetting;
 }
 
 function uid(): string {
@@ -119,6 +126,8 @@ function uid(): string {
 export function TerminalPane({
   containerId,
   workspaceId,
+  mirrorDefault,
+  cleanupDefault,
   paused,
   visible,
   summary,
@@ -140,6 +149,9 @@ export function TerminalPane({
   // TerminalSession lets the user "Start new session" — when they do,
   // the session emits 'live' again and the id leaves the set.
   const [endedIds, setEndedIds] = useState<Set<string>>(new Set());
+  // Set while a close-time "delete the mirror?" confirm is open for a tab that
+  // has a transcript mirror on disk. Null = no confirm pending.
+  const [closeTarget, setCloseTarget] = useState<{ id: string; name: string } | null>(null);
   // Ids the user created in this component lifetime via `addSession`
   // (the `+` button), as opposed to ids loaded from sessions.json on
   // mount. Drives the `isFresh` flag in onActiveTabChange so App.tsx
@@ -307,6 +319,37 @@ export function TerminalPane({
     });
   }
 
+  // The active tab's effective mirror setting (its override, else the
+  // workspace default). Drives the tab-strip toggle.
+  const activeSession = sessions.find((s) => s.id === activeId);
+  const activeMirror: MirrorSetting = activeSession?.mirror ?? mirrorDefault;
+
+  // Flip the active session's override. Persists via the sessions effect and
+  // applies live in the watcher (turning off stops further mirroring; turning
+  // on starts from now — earlier turns aren't backfilled).
+  function toggleMirror(): void {
+    if (!activeSession) return;
+    const next: MirrorSetting = activeMirror === 'on' ? 'off' : 'on';
+    setSessions((prev) => prev.map((s) => (s.id === activeSession.id ? { ...s, mirror: next } : s)));
+    void window.api.mirror.setOverride(workspaceId, activeSession.id, next);
+  }
+
+  // Tab × — if this session has a mirror file, ask before dropping the tab;
+  // otherwise close immediately (nothing to clean up).
+  async function requestClose(s: Session): Promise<void> {
+    const hasMirror = await window.api.mirror.hasForBrokerSession(workspaceId, s.id);
+    if (hasMirror) setCloseTarget({ id: s.id, name: s.name });
+    else closeSession(s.id);
+  }
+
+  async function confirmClose(deleteMirror: boolean): Promise<void> {
+    const target = closeTarget;
+    if (!target) return;
+    setCloseTarget(null);
+    if (deleteMirror) await window.api.mirror.deleteForBrokerSession(workspaceId, target.id);
+    closeSession(target.id);
+  }
+
   return (
     <div
       className="terminal-pane"
@@ -368,7 +411,7 @@ export function TerminalPane({
                 title="Close session"
                 onClick={(e) => {
                   e.stopPropagation();
-                  closeSession(s.id);
+                  void requestClose(s);
                 }}
               >
                 ×
@@ -384,6 +427,21 @@ export function TerminalPane({
           disabled={!loaded || paused}
         >
           +
+        </button>
+        {/* Per-session durable-mirror toggle for the active tab. */}
+        <button
+          className={`session-mirror-toggle ${activeMirror === 'on' ? 'on' : 'off'}`}
+          onClick={toggleMirror}
+          disabled={!loaded || !activeSession}
+          aria-pressed={activeMirror === 'on'}
+          title={
+            activeMirror === 'on'
+              ? 'Transcript mirror on for this session — click to turn off'
+              : 'Transcript mirror off for this session — click to turn on'
+          }
+        >
+          <span className="session-mirror-dot" aria-hidden="true" />
+          mirror {activeMirror}
         </button>
       </div>
       {/* Context bar — workspace's hue track at the top of the terminal,
@@ -410,7 +468,9 @@ export function TerminalPane({
           <TerminalSession
             key={s.id}
             containerId={containerId}
+            workspaceId={workspaceId}
             sessionId={s.id}
+            mirrorSetting={s.mirror ?? mirrorDefault}
             resumeOf={s.resumeOf}
             // Visible only when BOTH this workspace's pane is showing
             // AND this tab is the active one within it. Without ANDing
@@ -452,6 +512,36 @@ export function TerminalPane({
           </div>
         )}
       </div>
+      {closeTarget && (
+        <div className="modal-backdrop" onClick={() => setCloseTarget(null)}>
+          <div className="modal mirror-close-modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Close {closeTarget.name}</h3>
+            <p className="form-hint">
+              This session has a durable transcript mirror saved on the host. Delete it, or keep
+              it on disk for later?
+            </p>
+            <div className="modal-footer">
+              <button type="button" className="btn" onClick={() => setCloseTarget(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className={`btn ${cleanupDefault === 'preserve' ? 'primary' : ''}`}
+                onClick={() => void confirmClose(false)}
+              >
+                Keep &amp; close
+              </button>
+              <button
+                type="button"
+                className={`btn ${cleanupDefault === 'delete' ? 'primary' : ''}`}
+                onClick={() => void confirmClose(true)}
+              >
+                Delete &amp; close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

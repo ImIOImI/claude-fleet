@@ -51,6 +51,24 @@ export interface WorkspaceColor {
   hue: number;
 }
 
+export type MirrorSetting = 'on' | 'off';
+export type CleanupSetting = 'delete' | 'preserve';
+
+/**
+ * Durable-transcript-mirror defaults for a workspace.
+ * - `default`: whether new sessions in this workspace are mirrored unless
+ *   overridden per-session at attach time.
+ * - `cleanup`: the pre-selected option in the close-time delete/preserve modal.
+ * Factory values (applied to legacy manifests with no `mirror` block):
+ * `default: 'on'`, `cleanup: 'delete'`.
+ */
+export interface WorkspaceMirror {
+  default: MirrorSetting;
+  cleanup: CleanupSetting;
+}
+
+export const FACTORY_MIRROR: WorkspaceMirror = { default: 'on', cleanup: 'delete' };
+
 export interface WorkspaceSpec {
   /** ULID; identity, immutable. */
   id: string;
@@ -67,6 +85,8 @@ export interface WorkspaceSpec {
   authMode: AuthMode;
   env: WorkspaceEnv;
   resources?: WorkspaceResources;
+  /** Durable-transcript-mirror defaults. Factory `on`/`delete` when absent. */
+  mirror: WorkspaceMirror;
   createdAt: number;
   lastUsedAt: number;
 }
@@ -116,6 +136,10 @@ export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec |
           : []
       },
       resources: parsed.resources,
+      mirror: {
+        default: parsed.mirror?.default === 'off' ? 'off' : FACTORY_MIRROR.default,
+        cleanup: parsed.mirror?.cleanup === 'preserve' ? 'preserve' : FACTORY_MIRROR.cleanup
+      },
       createdAt: parsed.createdAt ?? Date.now(),
       lastUsedAt: parsed.lastUsedAt ?? parsed.createdAt ?? Date.now()
     };

@@ -1,9 +1,14 @@
 import { ipcMain, BrowserWindow, dialog, clipboard, Menu, shell } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { unlink } from 'node:fs/promises';
-import { workspaceTranscriptPath } from './paths.js';
+import { readFileSync, existsSync } from 'node:fs';
+import { unlink, readdir } from 'node:fs/promises';
+import { workspaceTranscriptPath, workspaceHistoryFile, workspaceHistoryDir } from './paths.js';
+import {
+  setWorkspaceDefault,
+  setSessionOverride,
+  learnMapping as learnMirrorMapping
+} from './mirrorPolicy.js';
 import { isWslEnvironment } from './wsl.js';
 import {
   getFleetRoot,
@@ -30,7 +35,9 @@ import {
   type WorkspaceEnv,
   type WorkspaceResources,
   type WorkspaceColor,
-  type AuthMode
+  type AuthMode,
+  type WorkspaceMirror,
+  FACTORY_MIRROR
 } from './workspaces.js';
 import type { PtyHandle, RemoveWorkspaceOpts } from './docker.js';
 import type { JsonlWatcher } from './jsonlWatcher.js';
@@ -119,6 +126,7 @@ interface WorkspaceCreatePayload {
   authMode: AuthMode;
   env: WorkspaceEnv;
   resources?: WorkspaceResources;
+  mirror?: WorkspaceMirror;
 }
 
 /**
@@ -153,6 +161,7 @@ async function listAllWorkspaces(): Promise<Workspace[]> {
       authMode: m?.authMode ?? w.authMode,
       env: m?.env ?? w.env,
       resources: m?.resources,
+      mirror: m?.mirror ?? FACTORY_MIRROR,
       createdAt: m?.createdAt ?? w.createdAt,
       lastUsedAt: m?.lastUsedAt ?? w.lastUsedAt
     });
@@ -195,6 +204,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       const brokerSessionId = consumeForWorkspace(workspaceId);
       if (!brokerSessionId) return;
       learnBrokerSessionMapping(workspaceId, brokerSessionId, claudeSessionId);
+      // Propagate any pending per-session mirror override onto the claude id.
+      learnMirrorMapping(workspaceId, brokerSessionId, claudeSessionId);
     });
   }
 
@@ -206,7 +217,13 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     });
   });
 
-  ipcMain.handle('workspace:list', () => listAllWorkspaces());
+  ipcMain.handle('workspace:list', async () => {
+    const all = await listAllWorkspaces();
+    // Keep the watcher's per-workspace mirror default fresh (cheap; runs on
+    // the renderer's 5s poll, so manifest edits propagate without a restart).
+    for (const w of all) setWorkspaceDefault(w.id, w.mirror.default);
+    return all;
+  });
 
   ipcMain.handle(
     'workspace:create',
@@ -247,10 +264,12 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         authMode: input.authMode,
         env: input.env,
         resources: input.resources,
+        mirror: input.mirror ?? FACTORY_MIRROR,
         createdAt: ws.createdAt,
         lastUsedAt: ws.lastUsedAt
       };
       await writeWorkspaceManifest(spec);
+      setWorkspaceDefault(spec.id, spec.mirror.default);
       jsonlWatcher?.registerWorkspace(input.id);
 
       // Auto-record the image into the library so the next create's
@@ -395,6 +414,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     // workspaceRoot is derived, not supplied by the renderer — the canonical
     // private folder under the fleet root.
     await writeWorkspaceManifest({ ...spec, workspaceRoot: await fleetPrivateDir(spec.id) });
+    // Reflect a mirror-default edit in the watcher immediately (don't wait for
+    // the next list poll).
+    setWorkspaceDefault(spec.id, spec.mirror?.default ?? FACTORY_MIRROR.default);
   });
 
   ipcMain.handle('workspace:stop', (_e, containerId: string) => backend.stopWorkspace(containerId));
@@ -611,6 +633,59 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         : `pty:detach for unknown handle (live=${ptySessions.size})`,
       extra: { ptyHandleId: sessionId, hadHandle: present, live: ptySessions.size }
     });
+  });
+
+  // Durable transcript mirror (#10). The renderer holds broker session ids;
+  // mirror files are named by claude session id, so the transcript handlers
+  // resolve broker→claude via the `broker_sessions` mapping internally.
+  // Resolve a renderer broker session id to its claude session id. Tolerant
+  // of a dormant DB (mock mode, where the watcher/DB never opened): returns
+  // null instead of throwing, so the mirror handlers degrade to no-ops.
+  const claudeIdFor = (workspaceId: string, brokerSessionId: string): string | null => {
+    try {
+      return lookupBrokerSession(workspaceId, brokerSessionId) ?? null;
+    } catch {
+      return null;
+    }
+  };
+  ipcMain.handle(
+    'mirror:setOverride',
+    (_e, workspaceId: string, brokerSessionId: string, setting: 'on' | 'off') => {
+      setSessionOverride(workspaceId, brokerSessionId, setting === 'off' ? 'off' : 'on');
+      // If the broker→claude mapping is already known (a live flip mid-session),
+      // propagate the new override onto the claude key immediately; otherwise
+      // the watcher's new-session hook will do it once the mapping lands.
+      const claudeId = claudeIdFor(workspaceId, brokerSessionId);
+      if (claudeId) learnMirrorMapping(workspaceId, brokerSessionId, claudeId);
+    }
+  );
+  // Does this tab have a mirror on disk? False when the broker→claude mapping
+  // isn't learned yet (brand-new tab, no activity) — there's nothing to clean
+  // up in that case, so the close-time modal is correctly skipped.
+  ipcMain.handle(
+    'transcript:hasForBrokerSession',
+    (_e, workspaceId: string, brokerSessionId: string) => {
+      const claudeId = claudeIdFor(workspaceId, brokerSessionId);
+      return claudeId ? existsSync(workspaceHistoryFile(workspaceId, claudeId)) : false;
+    }
+  );
+  ipcMain.handle(
+    'transcript:deleteForBrokerSession',
+    async (_e, workspaceId: string, brokerSessionId: string) => {
+      const claudeId = claudeIdFor(workspaceId, brokerSessionId);
+      if (!claudeId) return;
+      await unlink(workspaceHistoryFile(workspaceId, claudeId)).catch(() => {});
+    }
+  );
+  // Claude session ids that have a mirror file — for the sessions table's
+  // orphaned-mirror cleanup affordance (keyed by claude id, as that table is).
+  ipcMain.handle('transcript:list', async (_e, workspaceId: string) => {
+    try {
+      const files = await readdir(workspaceHistoryDir(workspaceId));
+      return files.filter((f) => f.endsWith('.jsonl')).map((f) => f.replace(/\.jsonl$/, ''));
+    } catch {
+      return [];
+    }
   });
 
   // Observability — minimal step-1 surface. Renderer polls

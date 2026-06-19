@@ -90,10 +90,18 @@ function multilineLinkProvider(term: Terminal): ILinkProvider {
 
 interface Props {
   containerId: string;
+  /** ULID — used to pin this session's durable-mirror override before attach. */
+  workspaceId: string;
   /** Stable session id from sessions.json — used as the broker's
    *  session key so re-attach across an app restart finds the same
    *  live PTY. */
   sessionId: string;
+  /**
+   * Effective durable-mirror setting for this session (the per-tab override or
+   * the workspace default). Pinned into the main process right before attach,
+   * so it's locked before any transcript line is ingested.
+   */
+  mirrorSetting: 'on' | 'off';
   /**
    * When set, this tab resumes a prior claude session: the first CREATE
    * for it spawns `claude --resume <resumeOf>` (resumeOf is the claude
@@ -119,7 +127,9 @@ interface Props {
 
 export function TerminalSession({
   containerId,
+  workspaceId,
   sessionId,
+  mirrorSetting,
   resumeOf,
   visible,
   onLifecycleChange,
@@ -319,6 +329,10 @@ export function TerminalSession({
       safeFit();
 
       try {
+        // Pin the durable-mirror decision before the PTY (and thus the
+        // transcript) starts, so no line is ingested under the wrong setting.
+        // Non-fatal: a failure here must never block the attach.
+        await window.api.mirror.setOverride(workspaceId, sessionId, mirrorSetting).catch(() => {});
         const sid = await window.api.pty.attach(
           containerId,
           sessionId,
