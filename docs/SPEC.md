@@ -632,7 +632,7 @@ Each container gets its own host-side state dir, bind-mounted into the container
 - **Settings reset.** `.claude/` will eventually also hold `settings.json`, custom commands, file checkpoints, tasks state. All of it survives container recreate by default. If we later want a "reset settings without losing project history" affordance, decide what's keepable vs. wipeable.
 
 ### Observability layer: cost, tokens, tool calls
-Per-session cost and token counts derived from Claude transcript JSONL events. **Status: foundation + cost rollup + pane v1 + slot consumers + live push + per-model context window + per-tab mapping + tool-call detail (duration/status) + per-turn cost series shipped; the expanded rail (sparkline, scope toggle, fleet view), tab-state richness, and subagent JSONLs remain.**
+Per-session cost and token counts derived from Claude transcript JSONL events. **Status: shipped (#2).** Foundation + cost rollup + pane + slot consumers + live push + per-model context window + per-tab mapping + tool-call detail (duration/status) + per-turn cost series, plus the expanded rail (sparkline, scope toggle, Fleet view) and per-terminal context rows. Residual (out of this issue's scope): richer per-tab state and ingesting subagent JSONLs.
 
 **Shipped:**
 - The JSONL→SQLite cache + watcher (§7 *JSONL→SQLite cache*), the `observability:eventsForSession` catch-up IPC (§6), and the `chokidar`+`better-sqlite3` runtime pieces (§4). Watcher tails every workspace's transcripts and ingests new lines idempotently into `events`, updating `sessions` with derived metadata.
