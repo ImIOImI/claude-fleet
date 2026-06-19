@@ -126,6 +126,7 @@ export interface MockOpts {
     resources?: { cpus?: number; memoryMb?: number };
     authMode?: 'oauth' | 'apikey';
     env?: { plain: Record<string, string>; secretKeys: string[] };
+    mirror?: { default: 'on' | 'off'; cleanup: 'delete' | 'preserve' };
     createdAt?: number;
     lastUsedAt?: number;
   }>;
@@ -222,6 +223,10 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       authMode: w.authMode ?? 'oauth',
       env: w.env ?? { plain: {}, secretKeys: [] },
       workspaceSubdir: '',
+      // Durable-mirror settings (#93). The renderer reads `w.mirror.default`
+      // unconditionally (App.tsx → TerminalPane), so a mock workspace without
+      // this field crashes the render. Default to the factory values.
+      mirror: w.mirror ?? { default: 'on', cleanup: 'delete' },
       createdAt: now,
       lastUsedAt: now,
       ...w
