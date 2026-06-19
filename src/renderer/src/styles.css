@@ -1339,7 +1339,8 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--text-primary); }
   pointer-events: none;
   transition: opacity 120ms ease, filter 120ms ease;
 }
-.paused-overlay {
+.paused-overlay,
+.stopped-overlay {
   position: absolute;
   inset: 0;
   display: flex;

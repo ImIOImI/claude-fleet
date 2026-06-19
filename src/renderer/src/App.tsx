@@ -634,6 +634,7 @@ export function App() {
                   cleanupDefault={w.mirror.cleanup}
                   containerId={w.containerId!}
                   paused={w.state === 'paused'}
+                  stopped={w.state === 'stopped'}
                   summary={summaries[w.id] ?? null}
                   restartBanner={restartBannerIds.has(w.id)}
                   onRestartFromBanner={() => restartFromBanner(w.id, w.containerId!)}

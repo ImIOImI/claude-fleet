@@ -261,3 +261,35 @@ test('Saved tab: paused workspace renders the paused state', async () => {
     await app.close();
   }
 });
+
+test('#17: clicking a stopped workspace shows a Start overlay that resumes it', async () => {
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [
+        {
+          id: '01STOPPEDWS00000000000000WS',
+          name: 'frosty-fox',
+          containerId: 'frosty-id',
+          state: 'stopped',
+          workspaceRoot: '/tmp/frosty'
+        }
+      ]
+    });
+
+    await window.locator('.ws-chip', { hasText: 'frosty-fox' }).click();
+
+    // The pane shows the stopped overlay (not a silently-failing terminal),
+    // with a Start button rather than the paused "Resume".
+    await expect(window.getByText('workspace stopped')).toBeVisible({ timeout: 5_000 });
+    const startBtn = window.getByRole('button', { name: 'Start' });
+    await expect(startBtn).toBeVisible();
+
+    await startBtn.click();
+    await expect
+      .poll(async () => (await getCalls(app)).start, { timeout: 5_000 })
+      .toContainEqual('01STOPPEDWS00000000000000WS');
+  } finally {
+    await app.close();
+  }
+});

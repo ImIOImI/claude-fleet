@@ -47,12 +47,12 @@ It is a local-only operator console — not a remote orchestrator, not a multi-u
 | UI | React 18 + TypeScript | Standard, well-understood. TypeScript is non-negotiable given the IPC surface area. |
 | Terminal | `@xterm/xterm` + `@xterm/addon-fit` | The de facto web terminal. Handles ANSI, resize, scrollback, paste, copy-on-select. |
 | Docker client | `dockerode` | Promise-based wrapper over the Docker Engine API with first-class streaming `exec` attach (needed for live PTY). Avoids shelling out to the `docker` CLI. |
-| Credentials | `keytar` | OS keychain integration (Keychain on macOS, Credential Vault on Windows, libsecret on Linux). API keys never hit disk in plaintext. |
+| Credentials | Electron `safeStorage` | Backs the per-workspace secret vault (`<userData>/secrets.enc`). Real OS encryption on macOS/Windows (and Linux with a desktop keyring). On Linux with no keyring (e.g. WSL) it opts into safeStorage's **plaintext backend** (`setUsePlainTextEncryption(true)` → base64, *not* OS-encrypted) so the vault is at least functional — which `keytar` was not (it failed outright). (`keytar` is retained only for the one-time purge of legacy entries in `migration.ts`.) |
 | Local DB | `better-sqlite3` | Synchronous SQLite for the history/cost layer. Single-file, embedded, no daemon. JSONL→SQLite cache + cost rollup ship under #2; surrounding observability work (live push, slot consumers) follows. |
 | File watcher | `chokidar` | Tails JSONL transcripts as Claude Code appends to them. Battle-tested cross-platform layer above `fs.watch` (atomic-rename handling, polling fallback on WSL). Imported via dynamic `await import('chokidar')` because v5 is ESM-only and the main bundle is CommonJS. |
 | Unit tests | `vitest` | Fast, Vite-native runner for pure-TS modules (e.g., `pricing.ts`). Picks up `*.test.ts` next to source. E2E lives in `tests/` under Playwright. |
 
-**Native modules.** `better-sqlite3` and `keytar` ship as N-API native bindings — they must match Electron's bundled Node ABI, not the system Node. The repo's `postinstall` script runs `electron-builder install-app-deps` to pull prebuilt binaries (or rebuild) for the current Electron version. Without this hook, `npm install` builds the bindings against the system Node and Electron fails to load them at runtime with a `NODE_MODULE_VERSION` mismatch.
+**Native modules.** `better-sqlite3` (and `keytar`, still present for the legacy-purge migration) ship as N-API native bindings — they must match Electron's bundled Node ABI, not the system Node. The repo's `postinstall` script runs `electron-builder install-app-deps` to pull prebuilt binaries (or rebuild) for the current Electron version. Without this hook, `npm install` builds the bindings against the system Node and Electron fails to load them at runtime with a `NODE_MODULE_VERSION` mismatch. (The vault itself no longer needs a native module — `safeStorage` is built into Electron.)
 
 The runner image is `claude-fleet/runner:latest`, built from `docker/Dockerfile`. Base: `node:22-bookworm-slim`. Installs `git`, `ca-certificates`, `curl`, `ripgrep`, `jq`, `less`, `tini`, and globally installs `@anthropic-ai/claude-code` **pinned to a specific version**. Runs as non-root user `fleet` (UID/GID 1000 by default). Entrypoint is `tini`; default `CMD` is `sleep infinity` so the container stays alive and is `exec`'d into for each terminal session.
 
@@ -66,7 +66,7 @@ Three processes, per Electron convention:
 ┌────────────────────┐   IPC (contextBridge)   ┌────────────────────┐
 │  Main (Node)       │ ◄─────────────────────► │  Renderer (React)  │
 │  - dockerode       │                         │  Layout:           │
-│  - keytar (lazy)   │   exposes window.api    │   ┌─ top strip ─┐  │
+│  - safeStorage     │   exposes window.api    │   ┌─ top strip ─┐  │
 │  - clipboard       │   via preload script    │   ├──┬───────┬──┤  │
 │  - native Menu     │                         │   │S │ term  │ O│  │
 │  - broker client   │                         │   ├──┴───────┴──┤  │
@@ -106,7 +106,7 @@ Each broker session has **at most one live writer**. An `ATTACH` to a session th
 
 **Main process** owns everything privileged:
 - Docker daemon access via `dockerode` (default socket).
-- OS keychain access via `keytar`.
+- Secret-vault encryption via Electron `safeStorage`.
 - PTY session lifecycle: holds the duplex stream handle for each active `docker exec`, forwards data to the renderer over per-session IPC channels, forwards renderer input back to the stream, forwards resize events to Docker.
 - JSONL transcript watching (`chokidar`) + SQLite persistence (`better-sqlite3`). The watcher tails every workspace's `<state>/<id>/.claude/projects/-workspace/*.jsonl` non-recursively and ingests new lines into the SQLite cache (see §7 *JSONL→SQLite cache*). Cost rollup (`src/main/pricing.ts`) groups events by `(model, service_tier)` and applies hardcoded Claude 4.x rates to derive USD; the rest of #2 (live push, slot consumers for chip/tab/context-bar) lands later.
 
@@ -168,13 +168,13 @@ The Sessions table (#3) is a global, workspace-filterable list of every Claude s
 - `sessions:resume(workspaceId)` → `{ containerId } | null` — bring the workspace's container up (`startWorkspace` unpauses a paused one, starts a stopped one, no-ops a running one) and return its `containerId` so the renderer can open a resume tab. **Null** when the container is gone and can't be brought up here (e.g. closed-but-kept workspace with no recreatable container) — the renderer surfaces a non-fatal "couldn't resume" notice. The actual `claude --resume <id>` happens through the normal attach flow (see §6 *PTY*).
 
 ### Vault
-Per-workspace secret storage backed by `keytar`. Profiles are gone; each workspace owns its own bag of secret env-var values keyed by `<workspaceId>:<envVarName>`. The renderer never sees a secret value it didn't just write — values come back over `vault:getSecret`, and the main process consumes them directly when constructing the container env via `resolveEnv` (`src/main/vault.ts`).
-- `vault:available` → `boolean` — probe whether the OS keychain is reachable. Cached after first call. Returns false on systems without libsecret-1 / a reachable keyring; the API-key auth mode degrades to disabled in that case.
-- `vault:listKeys(workspaceId)` → `string[]` — every secret-env-var key stored for the workspace. Backed by a per-workspace index entry (`__secrets__:<id>` in keytar) so listing is one keychain read.
-- `vault:getSecret(workspaceId, key)` → `string | null` — fetch a single value. Null when missing or keychain unavailable.
-- `vault:setSecret(workspaceId, key, value)` → `void` — upsert; also adds the key to the workspace's index if not already there. Throws when the keychain isn't reachable.
-- `vault:deleteSecret(workspaceId, key)` → `void` — delete a single value; updates (or drops, if last) the index.
-- `vault:deleteAllForWorkspace(workspaceId)` → `void` — purge every secret + the index for one workspace. Called at workspace-delete time so credentials don't outlive the manifest.
+Per-workspace secret storage backed by Electron `safeStorage` (see §4 *Stack* for the WSL rationale). Profiles are gone; the whole vault is a single JSON object `{ "<workspaceId>": { "<envVarName>": "<value>" } }`, encrypted via `safeStorage.encryptString` and written base64 to `<userData>/secrets.enc`. The decrypted store is cached in memory; mutations are serialized through a write-lock so concurrent `setSecret`/`deleteSecret` calls (the env editor writing several rows) can't clobber each other. The renderer never sees a secret value it didn't just write — values come back over `vault:getSecret`, and the main process consumes them directly when constructing the container env via `resolveEnv` (`src/main/vault.ts`). Migration: secrets previously in keytar are NOT carried over (re-enter once; OAuth workspaces store none).
+- `vault:available` → `boolean` — `safeStorage.isEncryptionAvailable()`, cached. False only when even the AES fallback is unavailable; the API-key auth mode degrades to disabled in that case.
+- `vault:listKeys(workspaceId)` → `string[]` — the secret-env-var keys stored for the workspace (object keys of its bag).
+- `vault:getSecret(workspaceId, key)` → `string | null` — fetch a single value. Null when missing.
+- `vault:setSecret(workspaceId, key, value)` → `void` — upsert into the workspace's bag. Throws when encryption isn't available.
+- `vault:deleteSecret(workspaceId, key)` → `void` — delete a single value; drops the workspace's bag when its last key is removed.
+- `vault:deleteAllForWorkspace(workspaceId)` → `void` — purge the workspace's whole bag. Called at workspace-delete time so credentials don't outlive the manifest.
 
 ### PTY
 - `pty:attach(containerId, brokerSessionId, cols, rows, resumeOf?)` → `ptyHandleId: string` — opens a connection to the workspace's in-container broker (Unix socket at `<state>/<id>/broker/broker.sock`) and either re-attaches to an existing broker session or creates one. `brokerSessionId` is the stable id from `sessions.json` (so re-attach across an app restart finds the same live PTY). Main retains a `BrokerClient` plus the resulting Duplex, returns an opaque `ptyHandleId` the renderer uses for subsequent input/resize/detach calls. **`resumeOf`** (a Claude session UUID) makes this a *resume* attach: the broker `CREATE` spawns `claude --resume <resumeOf>` instead of a bare `claude`, and the broker→claude mapping is learned **directly** (not via the pending-attach queue) because `claude --resume` appends to the existing `<uuid>.jsonl` rather than writing a new one — so the watcher's `new-session` hook never fires for it. `resumeOf` only takes effect at CREATE time; on a re-attach where the broker session is already alive, ATTACH succeeds first and the resume args are correctly ignored (no second claude spawned). **On failure** the handler captures the last ~100 lines of broker stdout/stderr via `docker logs` and writes them to `error.log` under a `pty-attach-failed` entry alongside the thrown message — the broker is otherwise invisible to the host, and the worst-case "ATTACHED timed out" + "unsolicited frame type 4" pattern after a pause/resume is impossible to diagnose without seeing what the broker was actually doing.
@@ -249,7 +249,7 @@ interface WorkspaceSpec {
   authMode: AuthMode;      // 'oauth' (default) or 'apikey' (requires ANTHROPIC_API_KEY in env)
   env: {
     plain: Record<string, string>; // values live in the manifest
-    secretKeys: string[];          // values live in keytar under `<id>:<key>`
+    secretKeys: string[];          // values live in the safeStorage vault (<userData>/secrets.enc)
   };
   resources?: { cpus?: number; memoryMb?: number };
   mirror: {                        // durable transcript mirror (§11), factory on/delete
@@ -261,7 +261,7 @@ interface WorkspaceSpec {
 }
 ```
 
-The manifest is written on `workspace:create` and updated on successful `workspace:start`. Secret env values are NOT persisted here — only the *list* of keys (`secretKeys`). Values land in the OS keychain under `<id>:<key>` and are resolved at container-start time via `vault.resolveEnv(id, plain, secretKeys)`.
+The manifest is written on `workspace:create` and updated on successful `workspace:start`. Secret env values are NOT persisted here — only the *list* of keys (`secretKeys`). Values land in the safeStorage-encrypted vault (`<userData>/secrets.enc`) and are resolved at container-start time via `vault.resolveEnv(id, plain, secretKeys)`.
 
 `workspace:remove(_, { deleteState: true })` removes the state dir (and thus the manifest) and the renderer additionally calls `vault:deleteAllForWorkspace(id)` so the workspace disappears from the past list and leaves no orphan keychain entries.
 
@@ -411,17 +411,11 @@ This `sessions` table is the index behind the Sessions table feature (§6 *Sessi
 - Mock mode (`CLAUDE_FLEET_MOCK=1`) skips watcher + DB entirely — no real JSONLs to read.
 
 ### Vault layout
-`keytar` stores per-workspace secret env-var values:
-- `service`: `claude-fleet` (constant)
-- `account`: `<workspaceId>:<envVarName>` (e.g. `01ARZ3NDEKTSV4RRFFQ69G5FAV:ANTHROPIC_API_KEY`)
-- `password`: the secret value (e.g. an API key)
+Secret env-var values live in `<userData>/secrets.enc`: a single JSON object `{ "<workspaceId>": { "<envVarName>": "<value>" } }`, serialized, encrypted with `safeStorage.encryptString`, and stored base64. One file holds the whole fleet's secrets (no per-account keychain entries, no separate index — listing a workspace's keys is just the object keys of its bag). `vault.ts` keeps the decrypted store cached in memory and serializes writes through a lock.
 
-Plus a per-workspace index entry:
-- `service`: `claude-fleet`, `account`: `__secrets__:<workspaceId>`, `password`: JSON array of secret key names for that workspace.
+Why a file rather than `keytar`: keytar requires a Secret Service daemon on Linux that's absent on bare WSL, so secrets silently failed there. `safeStorage` encrypts with the OS keyring when available; on Linux with no keyring, `vault.ts` calls `setUsePlainTextEncryption(true)` once so encrypt/decrypt still work (base64 plaintext — see §9 for the trade), making the file usable everywhere (see §4 *Stack*). Secrets written under the old keytar scheme are not migrated — users re-enter API keys once.
 
-The per-workspace index exists because keytar has no list operation; it makes "list this workspace's secret keys" (the common case for the env editor) an O(1) keychain read and makes `vault:deleteAllForWorkspace` cheap because the index already enumerates every account to remove.
-
-The old `__profiles__:*` shape (global per-profile API keys) is gone. The startup migration in `src/main/migration.ts` purges every keytar entry under `service=claude-fleet` whose account doesn't fit the new `<id>:<key>` or `__secrets__:<id>` form, so `__profiles__:*` entries disappear on first boot of this code on any pre-existing install.
+The old `__profiles__:*` keytar shape (global per-profile API keys) is gone. The startup migration in `src/main/migration.ts` still runs a best-effort purge of legacy keytar entries (lazy `import('keytar')`, no-op if libsecret is absent), so pre-existing installs don't leave stale credentials in the OS keychain.
 
 Values are read from the renderer only on explicit `vault:getSecret`; during normal operation, the main process consumes them directly via `resolveEnv` when constructing the container env (not round-tripped through the UI).
 
@@ -475,7 +469,9 @@ Values are read from the renderer only on explicit `vault:getSecret`; during nor
 
 **Always-mounted TerminalPanes.** App.tsx renders one `<TerminalPane>` per live workspace (state ≠ `deleted`), all permanently mounted; the one matching `selectedId` has `visible={true}` and the rest are CSS-hidden (`visibility: hidden` to preserve xterm layout dimensions; `pointer-events: none` so hidden panes don't intercept clicks on the visible one stacked at the same coords). Keying is by workspace name (not containerId) so the pane survives container stop+start — sessions.json is per-workspace, not per-container. **Workspace switches are a CSS toggle, not a remount**: xterm scrollback, broker connections, and PTY state persist across selection changes; only an actual workspace removal triggers teardown. This is the architectural fix for a long tail of timing-sensitive bugs (HISTORY frame dropped on re-attach, xterm `Viewport.syncScrollArea` crash on remount, broker `EventEmitter` race on attach) — all of those were second-order effects of the previous tear-down-on-switch model.
 
-**Paused state.** When the selected workspace's state is `paused`, the terminal pane renders a modal card centered in the session-stack ("workspace paused" + Resume button) while the underlying `TerminalSession`s stay mounted but are dimmed (~40% opacity + greyscale + pointer-events disabled). The session tab strip and accent band stay live so the user can see which tabs exist and which workspace they're looking at. The chip in the workspace ribbon also shows a small ⏸ glyph and an amber status dot. The Resume button calls `workspace:start(name)`, which `docker unpause`s the container; the next `workspace:list` poll picks up the running state and the overlay disappears. Workspace-ribbon chips for other workspaces remain interactive so the user can switch to another workspace without resuming. **Caveat (PR1):** today the PTYs are bound to the docker-exec instances inside the (frozen) container, so they thaw correctly across a pause that happens *while the app is running*. Across an app restart the PTYs are re-spawned and any in-memory state Claude held is lost; the broker layer that preserves it is deferred (see §11).
+**Paused state.** When the selected workspace's state is `paused`, the terminal pane renders a modal card centered in the session-stack ("workspace paused" + Resume button) while the underlying `TerminalSession`s stay mounted but are dimmed (~40% opacity + greyscale + pointer-events disabled). The session tab strip and accent band stay live so the user can see which tabs exist and which workspace they're looking at. The chip in the workspace ribbon also shows a small ⏸ glyph and an amber status dot. The Resume button calls `workspace:start(name)`, which `docker unpause`s the container; the next `workspace:list` poll picks up the running state and the overlay disappears. Workspace-ribbon chips for other workspaces remain interactive so the user can switch to another workspace without resuming.
+
+**Stopped state (#17).** When the selected workspace's state is `stopped`, the pane renders the same overlay card with a **Start** button (`.stopped-overlay`, sharing the paused-card styling). Unlike paused, a stopped container has no live broker, so its `TerminalSession`s are **not mounted** — clicking a stopped chip would otherwise mount a terminal that silently fails to attach (the bug this fixes). Start calls the same `workspace:start(id)` (`docker start`); on the next `workspace:list` the state flips to `running`, the overlay clears, and the sessions mount **fresh** against the now-running container (re-reading `sessions.json` for the tab list). The "+ new tab" button is disabled while paused or stopped. **Caveat (PR1):** today the PTYs are bound to the docker-exec instances inside the (frozen) container, so they thaw correctly across a pause that happens *while the app is running*. Across an app restart the PTYs are re-spawned and any in-memory state Claude held is lost; the broker layer that preserves it is deferred (see §11).
 
 Each `pty:attach` runs `claude` fresh inside the container via `docker exec` — it is *not* the container's main process. The container's main process is `sleep infinity`, kept alive by `tini`. Multiple sessions in the same workspace are independent `docker exec claude` processes side by side.
 
@@ -522,7 +518,7 @@ Each row shows the display title (resume on click), and — in **All** scope —
 
 ## 9. Security model
 
-- **Secret env-var values stay out of the renderer except at write time.** Per-workspace secrets are persisted via `vault:setSecret(workspaceId, key, value)`. After that, the renderer holds only the *list* of secret key names (via `vault:listKeys`); the main process resolves values directly from keytar when constructing the container env. The lone exception is the env-row in `WorkspaceForm` — the renderer briefly holds the value the user just typed before it ships to `vault:setSecret`. There is no way around that.
+- **Secret env-var values stay out of the renderer except at write time.** Per-workspace secrets are persisted via `vault:setSecret(workspaceId, key, value)`. After that, the renderer holds only the *list* of secret key names (via `vault:listKeys`); the main process resolves values directly from the safeStorage vault when constructing the container env. The lone exception is the env-row in `WorkspaceForm` — the renderer briefly holds the value the user just typed before it ships to `vault:setSecret`. There is no way around that.
 - **Renderer is isolated.** `contextIsolation: true`, `nodeIntegration: false`. No `require`, no `process`, no `fs` from renderer code.
 - **`sandbox: false`** because preload uses `ipcRenderer`. The renderer itself still has no Node access.
 - **Renderer cannot escape the IPC surface.** It can: list/create/start/stop/remove workspaces carrying the fleet label, list/get/set/delete per-workspace secrets, attach/detach a PTY. It cannot: shell out, read arbitrary files, touch other Docker containers, hit the network with Node APIs.
@@ -531,7 +527,7 @@ Each row shows the display title (resume on click), and — in **All** scope —
 - **The one deliberate cross-container surface is `<fleetRoot>/shared` → `/shared` (rw in every container).** It exists so workspaces can exchange files on purpose; treat it accordingly — **secrets must not be written to `/shared`**, since every workspace can read it.
 - **OAuth credentials are shared across workspaces by design.** In `oauth` mode all workspaces file-bind one `.credentials.json` (one login covers the fleet), so a token present in one container is the same token in every OAuth workspace. `apikey` mode is per-workspace (the key is injected as an env var, visible only inside that container). Either way, a container legitimately holds its *own* auth — the boundary being protected is *other* workspaces' data and the host-private zone, not a workspace's view of its own credentials.
 - **External link handling**: `setWindowOpenHandler` denies in-app navigation and opens external URLs via `shell.openExternal`.
-- **Vault availability degradation**: the main process probes `keytar` once at startup (`vault:available`). When the OS keychain is unreachable (typically bare WSL with no Secret Service), the env editor disables the per-row "secret" toggle (a row can still be added as a plain env var, but the value lives in the manifest in that case), and the auth-mode picker degrades to OAuth-only unless `ANTHROPIC_API_KEY` is supplied as a plain env. A `BottomBar` notice surfaces the degraded state. The packaged Windows build hits Credential Manager via DPAPI and never enters this mode; this path exists for Linux dev environments without a keyring.
+- **Vault availability + the WSL plaintext trade**: the main process probes secret-storage usability once (`vault:available`). On macOS/Windows and Linux-with-a-keyring this is real OS-backed encryption. On Linux with **no** keyring (e.g. WSL), `vault.ts` opts into safeStorage's plaintext backend (`setUsePlainTextEncryption(true)`) so `vault:available` returns true and API-key auth works — but secret values are then stored **base64, not encrypted**, in `<userData>/secrets.enc`. This is a deliberate trade: the prior `keytar` path failed entirely on WSL, and the file already lives in the per-user `userData` dir. If storage is somehow unusable even so, `vault:available` returns false → the env editor disables the per-row "secret" toggle (a row can still be a plain env var, value in the manifest) and the auth-mode picker degrades to OAuth-only unless `ANTHROPIC_API_KEY` is supplied as plain env, with a `BottomBar` notice. (Surfacing the *plaintext* case distinctly in the UI is a future nicety, not yet wired.)
 
 ## 10. Project layout
 
@@ -580,7 +576,7 @@ claude-fleet/
     │   ├── wsl.ts                     # isWslEnvironment() — drives fs:openPath's explorer.exe bridge
     │   ├── fs.ts                      # isDirectory / mkdirp helpers
     │   ├── migration.ts               # one-shot ULID migration + legacy keytar purge + fleet-folder creation on first boot
-    │   └── vault.ts                   # keytar wrapper, per-workspace secret keying + env resolve
+    │   └── vault.ts                   # safeStorage-encrypted secret vault (<userData>/secrets.enc) + env resolve
     ├── preload/
     │   └── index.ts                   # contextBridge.exposeInMainWorld('api', …)
     └── renderer/
@@ -600,7 +596,7 @@ claude-fleet/
                 ├── WorkspaceModal.tsx     # tabbed shell: Saved (variant-B search + inline expand-edit) + New
                 ├── WorkspaceForm.tsx      # reusable form (color, description, labels, env, resources); mode-aware
                 ├── EditWorkspaceModal.tsx # single-purpose edit modal for live workspaces (chip ⋮ Edit)
-                ├── DeleteWorkspaceModal.tsx # confirm modal: stop + remove + purge keytar
+                ├── DeleteWorkspaceModal.tsx # confirm modal: stop + remove + purge vault
                 ├── AdvancedImageSearchModal.tsx # magnifying-glass next to Image: ref/digest search + Tags filter
                 ├── SettingsModal.tsx      # app settings (fleet root); opened from the top-strip gear
                 └── CloseWorkspaceModal.tsx
@@ -822,7 +818,7 @@ Intentionally narrow scope: this is for iterating on UI without a daemon, image,
 ### Testing strategy
 **Decided:**
 - **E2E**: Playwright via its Electron integration (`_electron.launch`). Drives the packaged or dev-mode app from outside; can interact with menus, panes, modals, and assert on rendered state. Lives in `tests/`.
-- **Unit / integration**: Vitest. Test files live next to source as `*.test.ts` (Vitest's default pickup pattern). Run via `npm run test:unit`; the `npm test` umbrella runs unit before E2E. Test files **must not** import modules that pull in native bindings (`better-sqlite3`, `keytar`) — those are built for Electron's Node ABI via `electron-builder install-app-deps` and crash under system Node. Keep unit tests against pure modules (e.g., `pricing.ts`); integration tests against `db.ts` would need an Electron-context runner and aren't worth the lift yet.
+- **Unit / integration**: Vitest. Test files live next to source as `*.test.ts` (Vitest's default pickup pattern). Run via `npm run test:unit`; the `npm test` umbrella runs unit before E2E. Test files **must not** import modules that pull in native bindings (`better-sqlite3`, `keytar`) — those are built for Electron's Node ABI via `electron-builder install-app-deps` and crash under system Node. The same applies to modules that import `electron` (e.g., `vault.ts` uses `safeStorage`, `config.ts` uses `app`) — they only load in an Electron context. Keep unit tests against pure modules (e.g., `pricing.ts`, `wsl.ts`, `observabilityWorkspace.ts`); exercise `db.ts`/`vault.ts` via the Playwright e2e suite instead.
 - **Scope at v1**: no upfront test plan. Tests get added as features land — each feature lands with at least smoke coverage of the new surface. Avoids the "set up the test infra in advance" anti-pattern when there's nothing to test yet.
 
 **Deferred:**

@@ -109,7 +109,10 @@ test('Always-mount: workspace terminals stay isolated (no cross-workspace data b
     expect(alphaContent).not.toContain('workspace: mock-beta');
 
     // Switch to mock-beta and assert its terminal has its own name only.
+    // mock-beta seeds as `stopped`, so clicking it shows the Start overlay
+    // (#17); wake it so its terminal mounts.
     await window.locator('.ws-chip', { hasText: 'mock-beta' }).click();
+    await window.getByRole('button', { name: 'Start' }).click();
     const betaRows = activePane(window).locator('.xterm-rows');
     await expect(betaRows).toContainText('workspace: mock-beta', { timeout: 3_000 });
     const betaContent = (await betaRows.textContent()) ?? '';
@@ -140,7 +143,10 @@ test('Always-mount: only the selected workspace\'s xterm is actually visible (CS
   // are visible simultaneously.
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {
-    // Wait for both panes to mount and their xterms to render.
+    // mock-beta seeds as `stopped` (no terminal until started, #17). Wake it
+    // so all three workspaces have mounted xterms for the visibility check.
+    await window.locator('.ws-chip', { hasText: 'mock-beta' }).click();
+    await window.getByRole('button', { name: 'Start' }).click();
     await expect(window.locator('.xterm-rows')).toHaveCount(3, { timeout: 5_000 });
 
     // Click mock-alpha. Only mock-alpha's pane should be visibly painted.
@@ -191,9 +197,11 @@ test('Always-mount: adding a tab in one workspace does not leak into the other',
     await expect(alphaStrip.locator('.session-tab')).toHaveCount(2);
     await expect(alphaStrip.locator('.session-tab').nth(1)).toContainText('session 2');
 
-    // Switch to mock-beta. Its tab strip must still have exactly one
-    // "main" tab — alpha's add MUST NOT have leaked into beta.
+    // Switch to mock-beta and wake it (seeds stopped, #17). Its tab strip
+    // must still have exactly one "main" tab — alpha's add MUST NOT have
+    // leaked into beta.
     await window.locator('.ws-chip', { hasText: 'mock-beta' }).click();
+    await window.getByRole('button', { name: 'Start' }).click();
     const betaStrip = activePane(window).locator('.session-tab-strip');
     await expect(betaStrip.locator('.session-tab')).toHaveCount(1);
     await expect(betaStrip.locator('.session-tab').nth(0)).toContainText('main');
