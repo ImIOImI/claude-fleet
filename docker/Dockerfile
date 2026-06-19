@@ -30,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ripgrep \
       jq \
       less \
+      socat \
       tini \
     && rm -rf /var/lib/apt/lists/*
 

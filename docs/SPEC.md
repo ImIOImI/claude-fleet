@@ -523,7 +523,7 @@ Each row shows the display title (resume on click), and — in **All** scope —
 - **`sandbox: false`** because preload uses `ipcRenderer`. The renderer itself still has no Node access.
 - **Renderer cannot escape the IPC surface.** It can: list/create/start/stop/remove workspaces carrying the fleet label, list/get/set/delete per-workspace secrets, attach/detach a PTY. It cannot: shell out, read arbitrary files, touch other Docker containers, hit the network with Node APIs.
 - **Workspace isolation is Docker's.** No additional sandboxing layered on top. Containers run as the host user's UID (via `User: '<uid>:<gid>'`) and can write to the bind-mounted host workspace as that user.
-- **Host-private zone — default-deny container exposure.** `<userData>` is the main process's private domain: the SQLite state DB, `config.json`, `error.log`, the keytar vault, and every workspace's durable transcript mirror (`<userData>/state/<id>/_history/`). **Nothing under `<userData>` is bind-mounted into a container** except a workspace's *own* `.claude` dir, its `.claude.json`, and its broker socket dir (and, in OAuth mode, the shared credentials/remote-settings files). The docker socket is held only by the main process — it is never mounted into a workspace container, so there is no docker-in-docker escape path. The invariant: cross-workspace or sensitive data is **mediated by the main process** (and, in future, the read-only MCP server, §11), never exposed by a bind mount. A workspace can therefore never read another workspace's transcripts, secrets, or state off the filesystem. This is why the durable transcript mirror (§11) lives under `<userData>` and not in the container-visible fleet root.
+- **Host-private zone — default-deny container exposure.** `<userData>` is the main process's private domain: the SQLite state DB, `config.json`, `error.log`, the safeStorage vault, and every workspace's durable transcript mirror (`<userData>/state/<id>/_history/`). **Nothing under `<userData>` is bind-mounted into a container** except a workspace's *own* `.claude` dir, its `.claude.json`, its broker socket dir, the **read-only MCP socket** `<userData>/mcp.sock` (§11), and — in OAuth mode — the shared credentials/remote-settings files. The docker socket is held only by the main process — it is never mounted into a workspace container, so there is no docker-in-docker escape path. The invariant: cross-workspace or sensitive data is **mediated by the main process** (the MCP server is exactly that mediator — it exposes the DB read-only, never the file), never exposed by a raw bind mount. So a workspace can read fleet-wide *session/event* data **through the MCP server's read-only tools**, but can never read another workspace's transcripts, secrets, or DB file off the filesystem. This is why the durable transcript mirror (§11) lives under `<userData>` and not in the container-visible fleet root.
 - **The one deliberate cross-container surface is `<fleetRoot>/shared` → `/shared` (rw in every container).** It exists so workspaces can exchange files on purpose; treat it accordingly — **secrets must not be written to `/shared`**, since every workspace can read it.
 - **OAuth credentials are shared across workspaces by design.** In `oauth` mode all workspaces file-bind one `.credentials.json` (one login covers the fleet), so a token present in one container is the same token in every OAuth workspace. `apikey` mode is per-workspace (the key is injected as an env var, visible only inside that container). Either way, a container legitimately holds its *own* auth — the boundary being protected is *other* workspaces' data and the host-private zone, not a workspace's view of its own credentials.
 - **External link handling**: `setWindowOpenHandler` denies in-app navigation and opens external URLs via `shell.openExternal`.
@@ -568,6 +568,7 @@ claude-fleet/
     │   ├── imageLibrary.ts            # imageLibrary.json read/write + auto-record
     │   ├── db.ts                      # SQLite cache: events/sessions tables, ingest, summary, cost queries
     │   ├── mcpServer.ts               # read-only MCP server (#12) on <userData>/mcp.sock; tools over the state DB
+    │   ├── mcpSocket.ts               # pure socket-path helper (shared by mcpServer.ts + docker.ts bind)
     │   ├── mcpReadonlySql.ts          # pure read-only-SQL guard for the MCP `query` escape hatch
     │   ├── jsonlWatcher.ts            # chokidar-based JSONL tailer feeding db.ingestLine
     │   ├── pricing.ts                 # Claude 4.x USD rates + costFor(model, tier, tokens)
@@ -786,7 +787,7 @@ The same watcher that drives observability emits `prompts` rows when it sees the
 ### In-container SQLite access via MCP
 Read-only MCP server exposed by claude-fleet that lets the agent inside each container query the application's state DB (sessions, events, derived cost).
 
-**Status: host-side server SHIPPED (#12, slice 1); container wiring PENDING (slice 2).** The server runs and is e2e-tested over its socket; what remains is plumbing in-container `claude` to it (see *Container wiring* below).
+**Status: SHIPPED (#12).** Host-side server (slice 1) + container wiring (slice 2). Verified end-to-end on a real runner container: `claude mcp list` reports `claude-fleet-state … ✔ Connected` — claude auto-connects with no approval gate.
 
 **Decisions made:**
 - **Mechanism**: MCP server. Idiomatic for Claude Code, which supports MCP natively. The agent gets typed tools instead of having to learn raw SQL by default.
@@ -806,12 +807,12 @@ The main process's writers use the read-write `state.db` connection; the MCP ser
 - `query({ sql })` → arbitrary read-only SQL (guarded), row-capped; the tool description embeds the table schemas
 - (`list_prompts` dropped — the prompt log #11 is blocked, so there is no `prompts` table.)
 
-**Container wiring (slice 2, pending live verification):**
-- Bind `<userData>/mcp.sock` → `/fleet/mcp.sock` (ro) in each container's create spec.
-- Add `socat` to the runner image (no `socat`/`nc` today) for the stdio↔socket bridge.
-- Seed `mcpServers` into the per-workspace `~/.claude.json` (`ensureWorkspaceClaudeJson`): `{ "claude-fleet": { command: "socat", args: ["-", "UNIX-CONNECT:/fleet/mcp.sock"] } }` so `claude` auto-connects on start.
-- **Unknown to verify on a real container**: whether `claude` auto-connects to a user-scope MCP server without an approval gate (echoes of the managed-settings saga, §11) — verify before relying on it.
-- **Schema docs**: embedded in the `query` tool description (decided); a CLAUDE.md fragment can follow if raw-SQL use is common.
+**Container wiring (slice 2, shipped):**
+- `docker.ts createWorkspace` binds `<userData>/mcp.sock` → `/fleet/mcp.sock` **`:rw`** (connecting to a Unix socket needs write access — the read-only guarantee is the DB connection, not the mount). The bind is guarded by an existence check so a missing socket (server down) doesn't make Docker materialize a bogus directory at the path.
+- The runner image installs `socat` (it had no `socat`/`nc`) for the stdio↔socket bridge.
+- `ensureWorkspaceClaudeJson` seeds a **user-scope** `mcpServers` entry into the per-workspace `~/.claude.json`: `{ "claude-fleet-state": { type: "stdio", command: "socat", args: ["-", "UNIX-CONNECT:/fleet/mcp.sock"] } }`. User-scope entries are trusted, so `claude` auto-connects with **no approval gate** (verified: `claude mcp list` → `✔ Connected`). Seeded only when the file is absent (claude owns it after), so existing containers pick it up on recreation.
+- The socket path helper lives in the pure `src/main/mcpSocket.ts` (`mcpSocketPath` + `CONTAINER_MCP_SOCKET`) so `docker.ts` can bind it without importing `better-sqlite3` (which would break docker.ts's vitest-loadable graph).
+- **Schema docs**: embedded in the `query` tool description; a CLAUDE.md fragment can follow if raw-SQL use is common.
 
 ### Dev-mode mock fleet
 When `CLAUDE_FLEET_MOCK=1` is set in the main process's environment, `ipc.ts` swaps the real `docker.ts` implementation for `src/main/mock.ts`. The mock:

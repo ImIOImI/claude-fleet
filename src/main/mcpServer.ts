@@ -20,15 +20,14 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { costFor } from './pricing.js';
 import { isReadOnlySql } from './mcpReadonlySql.js';
+import { mcpSocketPath } from './mcpSocket.js';
 
 const PROTOCOL_VERSION = '2024-11-05';
 const SERVER_INFO = { name: 'claude-fleet-state', version: '1.0.0' };
 const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 1000;
 
-export function mcpSocketPath(userDataDir: string): string {
-  return join(userDataDir, 'mcp.sock');
-}
+export { mcpSocketPath };
 
 let server: Server | null = null;
 let rodb: Database.Database | null = null;

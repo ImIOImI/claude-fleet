@@ -11,6 +11,7 @@
 // names are derived as `cf-<id>` so they're unique on the host even when
 // the user renames the workspace's label. Lookup is always by label.
 
+import { app } from 'electron';
 import Docker from 'dockerode';
 import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -28,6 +29,7 @@ import {
 import type { AuthMode, Workspace, WorkspaceEnv, WorkspaceResources } from './workspaces.js';
 import { FACTORY_MIRROR } from './workspaces.js';
 import { fleetPrivateDir, fleetSharedDir } from './config.js';
+import { mcpSocketPath, CONTAINER_MCP_SOCKET } from './mcpSocket.js';
 import { BrokerClient, brokerPtyStream } from './broker.js';
 import { recordPendingAttach } from './pendingAttaches.js';
 import { learnBrokerSessionMapping } from './db.js';
@@ -277,7 +279,18 @@ export async function ensureWorkspaceClaudeJson(
   if (!existing) {
     const seed = {
       hasCompletedOnboarding: true,
-      projects: { [workingDir]: { hasTrustDialogAccepted: true } }
+      projects: { [workingDir]: { hasTrustDialogAccepted: true } },
+      // Auto-wire the read-only state-DB MCP server (#12). A user-scope
+      // mcpServers entry in ~/.claude.json is trusted (no approval gate, unlike
+      // a project .mcp.json). `socat` bridges claude's stdio MCP client to the
+      // host socket bound at /fleet/mcp.sock.
+      mcpServers: {
+        'claude-fleet-state': {
+          type: 'stdio',
+          command: 'socat',
+          args: ['-', `UNIX-CONNECT:${CONTAINER_MCP_SOCKET}`]
+        }
+      }
     };
     await writeFile(filePath, JSON.stringify(seed, null, 2), 'utf8');
   }
@@ -328,6 +341,17 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
     // doesn't exist yet on the host side.
     `${brokerDir}:/run/broker:rw`
   ];
+
+  // Read-only state-DB MCP server (#12): bind its host socket so in-container
+  // claude can query sessions/events/cost via the `mcpServers` entry seeded in
+  // ~/.claude.json below (a `socat` stdio bridge). `:rw` because connecting to
+  // a Unix socket needs write access — the read-only guarantee is the DB
+  // connection, not the mount. Guarded: if the server isn't up (no socket),
+  // skip the bind so Docker doesn't materialize a bogus directory at the path.
+  const mcpSock = mcpSocketPath(app.getPath('userData'));
+  if (await stat(mcpSock).catch(() => null)) {
+    binds.push(`${mcpSock}:${CONTAINER_MCP_SOCKET}:rw`);
+  }
 
   // Persist + pre-complete onboarding. ~/.claude.json lives in $HOME,
   // outside the .claude bind, so without this every new container re-runs
