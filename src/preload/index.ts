@@ -279,6 +279,23 @@ const api = {
       return () => ipcRenderer.removeListener(channel, handler);
     }
   },
+  // Durable transcript mirror (#10). The renderer addresses sessions by their
+  // broker session id; the main process resolves that to the claude session
+  // id (the mirror filename) internally.
+  mirror: {
+    /** Set the per-session mirror override before attaching this tab. */
+    setOverride: (workspaceId: string, brokerSessionId: string, setting: 'on' | 'off') =>
+      ipcRenderer.invoke('mirror:setOverride', workspaceId, brokerSessionId, setting),
+    /** Whether this tab has a mirror file on disk (false if no mapping yet). */
+    hasForBrokerSession: (workspaceId: string, brokerSessionId: string): Promise<boolean> =>
+      ipcRenderer.invoke('transcript:hasForBrokerSession', workspaceId, brokerSessionId),
+    /** Delete this tab's mirror file (no-op if none). */
+    deleteForBrokerSession: (workspaceId: string, brokerSessionId: string): Promise<void> =>
+      ipcRenderer.invoke('transcript:deleteForBrokerSession', workspaceId, brokerSessionId),
+    /** Claude session ids that have a mirror file (sessions-table cleanup). */
+    list: (workspaceId: string): Promise<string[]> =>
+      ipcRenderer.invoke('transcript:list', workspaceId)
+  },
   observability: {
     /**
      * Pull rows from the JSONL→SQLite cache for one session, in id order,

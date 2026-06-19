@@ -8,6 +8,7 @@ import type {
 } from './docker.js';
 import { workspaceStateDir } from './paths.js';
 import type { Workspace } from './workspaces.js';
+import { FACTORY_MIRROR } from './workspaces.js';
 
 // In mock mode the workspace id doubles as the containerId. Real backend
 // uses `cf-<id>` for the docker name, but lookups are by label so the
@@ -28,6 +29,7 @@ function seed(): void {
     env: { plain: {}, secretKeys: [] },
     createdAt: now - 3600_000,
     lastUsedAt: now - 1800_000,
+    mirror: FACTORY_MIRROR,
     state: 'running',
     containerId: '01MOCKALPHA000000000000000',
     status: 'Up 1 hour'
@@ -44,6 +46,7 @@ function seed(): void {
     env: { plain: {}, secretKeys: [] },
     createdAt: now - 7200_000,
     lastUsedAt: now - 7200_000,
+    mirror: FACTORY_MIRROR,
     state: 'stopped',
     containerId: '01MOCKBETA0000000000000000',
     status: 'Exited (0) 2 minutes ago'
@@ -65,6 +68,7 @@ function seed(): void {
     env: { plain: {}, secretKeys: [] },
     createdAt: now - 60_000,
     lastUsedAt: now - 60_000,
+    mirror: FACTORY_MIRROR,
     state: 'running',
     containerId: '01MOCKFAIL0000000000000000',
     status: 'Up 1 minute'
@@ -98,6 +102,7 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
     resources: spec.resources,
     createdAt: Date.now(),
     lastUsedAt: Date.now(),
+    mirror: FACTORY_MIRROR,
     state: 'running',
     containerId: spec.id,
     status: 'Up just now'

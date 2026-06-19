@@ -252,6 +252,10 @@ interface WorkspaceSpec {
     secretKeys: string[];          // values live in the safeStorage vault (<userData>/secrets.enc)
   };
   resources?: { cpus?: number; memoryMb?: number };
+  mirror: {                        // durable transcript mirror (§11), factory on/delete
+    default: 'on' | 'off';         // new sessions mirror unless overridden per-session
+    cleanup: 'delete' | 'preserve';// pre-selected option in the close-time modal
+  };
   createdAt: number;
   lastUsedAt: number;
 }
@@ -519,6 +523,9 @@ Each row shows the display title (resume on click), and — in **All** scope —
 - **`sandbox: false`** because preload uses `ipcRenderer`. The renderer itself still has no Node access.
 - **Renderer cannot escape the IPC surface.** It can: list/create/start/stop/remove workspaces carrying the fleet label, list/get/set/delete per-workspace secrets, attach/detach a PTY. It cannot: shell out, read arbitrary files, touch other Docker containers, hit the network with Node APIs.
 - **Workspace isolation is Docker's.** No additional sandboxing layered on top. Containers run as the host user's UID (via `User: '<uid>:<gid>'`) and can write to the bind-mounted host workspace as that user.
+- **Host-private zone — default-deny container exposure.** `<userData>` is the main process's private domain: the SQLite state DB, `config.json`, `error.log`, the keytar vault, and every workspace's durable transcript mirror (`<userData>/state/<id>/_history/`). **Nothing under `<userData>` is bind-mounted into a container** except a workspace's *own* `.claude` dir, its `.claude.json`, and its broker socket dir (and, in OAuth mode, the shared credentials/remote-settings files). The docker socket is held only by the main process — it is never mounted into a workspace container, so there is no docker-in-docker escape path. The invariant: cross-workspace or sensitive data is **mediated by the main process** (and, in future, the read-only MCP server, §11), never exposed by a bind mount. A workspace can therefore never read another workspace's transcripts, secrets, or state off the filesystem. This is why the durable transcript mirror (§11) lives under `<userData>` and not in the container-visible fleet root.
+- **The one deliberate cross-container surface is `<fleetRoot>/shared` → `/shared` (rw in every container).** It exists so workspaces can exchange files on purpose; treat it accordingly — **secrets must not be written to `/shared`**, since every workspace can read it.
+- **OAuth credentials are shared across workspaces by design.** In `oauth` mode all workspaces file-bind one `.credentials.json` (one login covers the fleet), so a token present in one container is the same token in every OAuth workspace. `apikey` mode is per-workspace (the key is injected as an env var, visible only inside that container). Either way, a container legitimately holds its *own* auth — the boundary being protected is *other* workspaces' data and the host-private zone, not a workspace's view of its own credentials.
 - **External link handling**: `setWindowOpenHandler` denies in-app navigation and opens external URLs via `shell.openExternal`.
 - **Vault availability + the WSL plaintext trade**: the main process probes secret-storage usability once (`vault:available`). On macOS/Windows and Linux-with-a-keyring this is real OS-backed encryption. On Linux with **no** keyring (e.g. WSL), `vault.ts` opts into safeStorage's plaintext backend (`setUsePlainTextEncryption(true)`) so `vault:available` returns true and API-key auth works — but secret values are then stored **base64, not encrypted**, in `<userData>/secrets.enc`. This is a deliberate trade: the prior `keytar` path failed entirely on WSL, and the file already lives in the per-user `userData` dir. If storage is somehow unusable even so, `vault:available` returns false → the env editor disables the per-row "secret" toggle (a row can still be a plain env var, value in the manifest) and the auth-mode picker degrades to OAuth-only unless `ANTHROPIC_API_KEY` is supplied as plain env, with a `BottomBar` notice. (Surfacing the *plaintext* case distinctly in the UI is a future nicety, not yet wired.)
 
@@ -695,47 +702,33 @@ Drop OS files, pasted images, web content, or text fragments onto the window; th
 - **Whether to expose drops in the sessions table.** A row showing "5 files dropped" alongside the session might be useful. Out of scope for v1 but worth recording.
 
 ### Durable transcript mirror
-An append-only mirror of every event Claude Code emits for a terminal session. Whether the mirror is written at all, and whether it survives an explicit close, are per-profile defaults that can be overridden per-session.
+**Status: shipped (#10).** A host-private, append-only mirror of every event Claude Code emits for a session, kept so the transcript survives compaction. Settings are **per-workspace** (the manifest), with a per-session override.
 
-**Decisions made:**
-- **Two profile-level defaults**:
-  - `mirrorDefault: 'on' | 'off'` — when `on`, the watcher mirrors the session unconditionally; when `off`, no mirror is written for sessions opened against this profile by default.
-  - `cleanupDefault: 'delete' | 'preserve'` — the selected option when the close-time modal opens. The user can flip it before confirming.
-  - **Factory values for new profiles**: `mirrorDefault = 'on'`, `cleanupDefault = 'delete'`. Out of the box mirrors are written, and they default to delete-on-close so they don't accumulate by accident.
-- **Open-time override**: at terminal attach, the profile's `mirrorDefault` applies, but the user can override it for that single session. Override is locked in for the duration — flipping to `on` mid-session would silently miss early turns.
-- **Location**: `<workspaceRoot>/_history/<session-id>.jsonl` on the host. Visible inside the container as `/workspace/_history/<session-id>.jsonl`.
-- **Format**: raw JSONL — exact append-only mirror of the events Claude Code emits to its own transcript at `~/.claude/projects/<sanitized-cwd>/<session-id>.jsonl`. Pre-compaction events stay in the mirror even when the source JSONL is rewritten.
-- **Cleanup trigger**: a deliberate "Close terminal" button in the pane header. Switching containers in the sidebar, closing the app, stopping the container, or `claude` exiting inside the PTY do **not** trigger cleanup — they leave the mirror on disk.
-- **Cleanup confirmation**: clicking Close opens a modal asking "Delete the durable transcript mirror for this session?" with the profile's `cleanupDefault` pre-selected. The user can flip the selection before confirming. If the session was opened with mirroring disabled (no file exists), the modal is skipped.
+**Settings (workspace manifest, not a profiles table).** `WorkspaceSpec.mirror = { default: 'on'|'off', cleanup: 'delete'|'preserve' }`. Factory values (applied to legacy manifests with no `mirror` block, by `readWorkspaceManifest`): `default: 'on'`, `cleanup: 'delete'`. Edited in the create/edit workspace form's "Transcript mirror" disclosure. (The original design pinned these to a "profile" + a `profile_settings` SQLite table; the app is workspace-centric now, so they live on the manifest — no new table.)
 
-**Implementation:**
-The same JSONL watcher that drives observability mirrors every line to `_history/<session-id>.jsonl` for sessions whose effective mirror setting is `on`. The mirror is append-only at the application level — on source-file shrink (compaction), the watcher continues appending new events; it never truncates the mirror. Depends on the per-container `.claude/` host visibility question that blocks observability and the sessions table.
+**Location — host-private (security invariant, §9).** `<userData>/state/<id>/_history/<claude-session-id>.jsonl`. A sibling of the `.claude`/`broker` subdirs but, unlike those, **not bind-mounted into any container** — so no workspace can read another's (or even its own) mirror off the filesystem. This deliberately reverses the original `/workspace/_history` (container-visible) design: cross-workspace transcript access is a real goal, but it must be **mediated** (host UI today; the read-only MCP server, §11, later), never a bind mount. Cleaned up for free when the workspace state dir is removed (`workspace:remove --deleteState`).
 
-Profile shape extends to `Profile = { name, apiKey, mirrorDefault, cleanupDefault }`. The API key stays in the safeStorage vault (secret); the two settings live in a new SQLite `profile_settings` table — same DB as observability, sessions, and prompts. `vault:get`/`vault:set` in the main process merge the two stores; the renderer continues to see one combined `Profile` object.
+**Format.** Raw JSONL — the exact lines Claude Code writes to its own transcript. Compaction-proof: the watcher reuses the SQLite dedup signal — it appends a line to the mirror **only when `ingestLine` reports a genuinely new insert**, so a compaction-triggered re-read from offset 0 never double-appends, and the mirror is never truncated.
 
-**SQLite schema (sketch):**
-```sql
-CREATE TABLE profile_settings (
-  name TEXT PRIMARY KEY,
-  mirror_default TEXT NOT NULL DEFAULT 'on',         -- 'on' | 'off'
-  cleanup_default TEXT NOT NULL DEFAULT 'delete'     -- 'delete' | 'preserve'
-);
-```
+**Effective-setting resolution (`mirrorPolicy.ts`).** A pure in-memory registry resolves, per claude session: per-session override → workspace default → factory `on`. The override is chosen at attach, keyed by the renderer's *broker* session id, then copied onto the *claude* session id when the broker→claude mapping is learned (the same hook that feeds the per-tab observability mapping). Consequence: a few lines emitted before the mapping is learned follow the workspace default rather than an off-override — the only window where the two can disagree.
 
-**IPC surface (sketch):**
-- `pty:attach(containerId, cols, rows, opts: { mirrorOverride?: 'on' | 'off' })` — when `mirrorOverride` is set, it overrides the profile default for this session only.
-- `pty:close(sessionId, opts: { deleteMirror: boolean })` — detaches the PTY and applies the modal's outcome. Skipped (no `deleteMirror` decision needed) if the session was opened with mirroring `off`.
-- `transcript:list(containerId)` → `string[]` (filenames in `<workspace>/_history/`).
-- `transcript:delete(containerId, sessionId)` → manual cleanup of an orphaned mirror, callable from the sessions-table UI later.
+**Per-session override (UI).** A toggle at the right of the session-tab strip shows the active tab's effective setting and flips it. `TerminalSession` pins the effective value via `mirror:setOverride` immediately before `pty:attach`, so it's locked before any line is ingested. Flipping mid-session is **live, not locked**: turning off stops further mirroring; turning on starts from now and does not backfill earlier turns (the watcher consults the policy per batch). The override persists on the tab's `SessionEntry.mirror` in `sessions.json`.
+
+**Close-time cleanup.** The tab's `×` calls `mirror:hasForBrokerSession`; if a mirror file exists it opens a confirm modal (Keep / Delete, with the workspace's `cleanup` default styled primary), then drops the tab. If no mirror exists (e.g. a fresh tab with no activity, or no broker→claude mapping yet) the tab closes immediately. App quit, container stop, workspace switch, and `claude` exiting do **not** delete mirrors.
+
+**IPC surface (as built).** All transcript handlers take the renderer's broker session id and resolve broker→claude internally via the `broker_sessions` table:
+- `mirror:setOverride(workspaceId, brokerSessionId, 'on'|'off')` — set the per-session override (and, if the mapping is already known, propagate it live).
+- `transcript:hasForBrokerSession(workspaceId, brokerSessionId)` → `boolean`.
+- `transcript:deleteForBrokerSession(workspaceId, brokerSessionId)` → `void`.
+- `transcript:list(workspaceId)` → `string[]` (claude session ids with a mirror file; for the sessions-table orphan-cleanup affordance).
+- `setWorkspaceDefault` is refreshed in `mirrorPolicy` on every `workspace:list` poll and on `workspace:create`/`writeManifest`, so manifest edits take effect without a restart.
+
+**Resumed sessions.** `claude --resume <id>` reuses the claude UUID and appends to the existing `<id>.jsonl`; the mirror likewise keeps appending to the same `_history/<id>.jsonl`. The resume attach learns the broker→claude mapping directly (no pending-attach queue), so the override propagates immediately.
 
 **Open:**
-- **UI placement of the open-time override.** TerminalPane currently auto-attaches on mount; the override needs a moment to be set before the PTY starts. Candidates: a pane-header toggle visible before attach plus a "Start session" button that delays auto-attach, a one-time confirmation dialog at attach, or a quick toggle in the sidebar's container row that takes effect at the next attach.
-- **Profiles dialog UI.** The existing modal needs new controls for the two defaults; decide between labeled toggles, a small "Defaults" section, or an "Advanced" disclosure.
-- **UI placement of the Close button.** Pane header, near the container name/status. Labeled "Close" or an X icon.
-- **Orphaned mirrors.** App crash, host reboot, container restart, or simply never clicking Close leave the mirror on disk indefinitely. The sessions-table UI surfaces these with a "Delete mirror" affordance so they can be cleaned up later. (See issue #3.)
-- **Resumed sessions.** `claude --resume <id>` reuses a session UUID (unless `--fork-session` is set). On resume the watcher appends new events to the existing `_history/<id>.jsonl`; the Close-time modal at the end of the resumed session decides the file's fate as a whole. The open-time override at resume applies to whether new events get appended — flipping from `on` to `off` on resume stops appending but does not delete prior content.
-- **Race on compaction.** Line-based tailing with `fs.watch` rename/change events triggering re-reads of tail, never truncates of the mirror. Test against forced `/compact`.
-- **Migration.** Existing keytar profiles created before this feature have no `profile_settings` row; on first read after upgrade, insert a row with factory defaults.
+- **Orphaned mirrors.** A mirror with no live tab (app crash, reboot, never-closed tab) lingers under `_history/`. `transcript:list` exists to surface these in the sessions table with a "Delete mirror" affordance — UI not built yet (depends on #3 surfacing per-session rows).
+- **Per-target sharing ("allow workspace A's transcripts to be read by B").** Today the model is coarse: mirror on = the transcript exists host-side and can be mediated to other workspaces; mirror off = it never leaves. Fine-grained per-workspace ACLs are a future refinement, and the read channel itself (the MCP server, §11) isn't built.
+- **Compaction race test.** Mirror append-on-new-insert is covered by reasoning + the dedup contract; a forced-`/compact` integration test against the real watcher would harden it (the watcher has no unit harness today).
 
 ### Permission-request log
 Always-on structured log of every prompt Claude makes to the user. Substrate for tuning `.claude/settings.json` permissions and CLAUDE.md guidance over time.

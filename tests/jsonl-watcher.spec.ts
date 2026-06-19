@@ -3,11 +3,41 @@
 // (mock backend disables the watcher + DB per src/main/index.ts).
 
 import { _electron as electron, test, expect } from '@playwright/test';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { REPO_ROOT } from './_helpers.js';
+
+// Shared: env with CLAUDE_FLEET_MOCK stripped so the real watcher + DB run.
+const realBackendEnv = (): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(process.env).filter(([k]) => k !== 'CLAUDE_FLEET_MOCK')
+  ) as Record<string, string>;
+
+const assistantEvent = (): string =>
+  JSON.stringify({
+    type: 'assistant',
+    uuid: randomUUID(),
+    timestamp: new Date().toISOString(),
+    message: {
+      model: 'claude-opus-4-7',
+      content: [],
+      usage: {
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        service_tier: 'standard'
+      }
+    }
+  }) + '\n';
+
+const summaryForWorkspace = (window: import('@playwright/test').Page, id: string): Promise<unknown> =>
+  window.evaluate(async (n) => {
+    type Api = { api: { observability: { summaryForWorkspace: (n: string) => Promise<unknown> } } };
+    return (window as unknown as Api).api.observability.summaryForWorkspace(n);
+  }, id);
 
 test('Watcher: ingests JSONL events for every workspace manifest, not just the first', async () => {
   // Regression guard for the "plucky-lemur has JSONLs on disk but
@@ -249,6 +279,83 @@ test('Watcher: picks up JSONLs written to a workspace whose dir was missing at r
         { timeout: 8_000, intervals: [200, 500, 1000] }
       )
       .toBe(true);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Watcher: writes a durable mirror for mirror=on, none for mirror=off', async () => {
+  // End-to-end through the REAL watcher + DB + mirrorPolicy (#10): a workspace
+  // whose manifest says mirror.default='on' gets its transcript mirrored to the
+  // host-private _history/ dir; one with 'off' does not. index.ts seeds the
+  // per-workspace mirror default from the manifest before the watcher starts,
+  // so this holds even with Docker unreachable (no renderer workspace:list).
+  const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-mirror-'));
+
+  const seed = (id: string, name: string, mirror: { default: string; cleanup: string }) => {
+    const stateDir = path.join(userDataDir, 'state', id);
+    const jsonlDir = path.join(stateDir, '.claude', 'projects', '-workspace');
+    mkdirSync(jsonlDir, { recursive: true });
+    writeFileSync(
+      path.join(stateDir, 'workspace.json'),
+      JSON.stringify({
+        id,
+        name,
+        labels: [],
+        workspaceRoot: '/tmp/fleet-test-' + name,
+        workspaceSubdir: '',
+        kind: 'container',
+        image: 'mock',
+        authMode: 'oauth',
+        env: { plain: {}, secretKeys: [] },
+        mirror,
+        createdAt: Date.now(),
+        lastUsedAt: Date.now()
+      })
+    );
+    const session = randomUUID();
+    // Pre-write the JSONL so the watcher ingests it at startup (ignoreInitial:
+    // false), after index.ts has seeded the mirror policy from the manifest.
+    writeFileSync(path.join(jsonlDir, `${session}.jsonl`), assistantEvent());
+    return { stateDir, session };
+  };
+
+  const onId = '01TESTMIRRORON000000000000';
+  const offId = '01TESTMIRROROFF0000000000A';
+  const on = seed(onId, 'mirror-on', { default: 'on', cleanup: 'delete' });
+  const off = seed(offId, 'mirror-off', { default: 'off', cleanup: 'delete' });
+
+  const app = await electron.launch({
+    args: [REPO_ROOT, `--user-data-dir=${userDataDir}`],
+    cwd: REPO_ROOT,
+    env: realBackendEnv()
+  });
+  const window = await app.firstWindow();
+  await window.waitForLoadState('domcontentloaded');
+
+  try {
+    // Both JSONLs ingested → the watcher's readAndIngest (which also does the
+    // mirror append) has run for both sessions.
+    await expect
+      .poll(
+        async () => {
+          const [a, b] = await Promise.all([
+            summaryForWorkspace(window, onId),
+            summaryForWorkspace(window, offId)
+          ]);
+          return a !== null && b !== null;
+        },
+        { timeout: 12_000, intervals: [200, 500, 1000] }
+      )
+      .toBe(true);
+
+    // mirror=on → host-private mirror file exists and carries the event.
+    const onMirror = path.join(on.stateDir, '_history', `${on.session}.jsonl`);
+    await expect.poll(() => existsSync(onMirror), { timeout: 5_000 }).toBe(true);
+    expect(readFileSync(onMirror, 'utf8')).toContain('assistant');
+
+    // mirror=off → no mirror file (ingestion already confirmed above).
+    expect(existsSync(path.join(off.stateDir, '_history', `${off.session}.jsonl`))).toBe(false);
   } finally {
     await app.close();
   }

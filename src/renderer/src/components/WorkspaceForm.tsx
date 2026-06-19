@@ -13,6 +13,9 @@ import type {
   AuthMode,
   WorkspaceColor,
   WorkspaceResources,
+  WorkspaceMirror,
+  MirrorSetting,
+  CleanupSetting,
   WorkspaceSummary
 } from '../App';
 import { AdvancedImageSearchModal, IconSearch } from './AdvancedImageSearchModal';
@@ -46,6 +49,8 @@ export interface WorkspaceFormSubmit {
    */
   secrets: Record<string, string>;
   resources?: WorkspaceResources;
+  /** Durable-transcript-mirror defaults for this workspace. */
+  mirror: WorkspaceMirror;
 }
 
 interface ImageEntry {
@@ -154,6 +159,13 @@ export function WorkspaceForm({
     initial?.resources?.memoryMb != null ? String(initial.resources.memoryMb) : ''
   );
   const [resourcesOpen, setResourcesOpen] = useState(false);
+
+  const [mirrorDefault, setMirrorDefault] = useState<MirrorSetting>(
+    initial?.mirror?.default ?? 'on'
+  );
+  const [cleanupDefault, setCleanupDefault] = useState<CleanupSetting>(
+    initial?.mirror?.cleanup ?? 'delete'
+  );
   const [envOpen, setEnvOpen] = useState(envRows.length > 0);
   const [kind, setKind] = useState<WorkspaceKind>(initial?.kind ?? 'container');
   const [image, setImage] = useState<string>(initial?.image ?? '');
@@ -308,7 +320,8 @@ export function WorkspaceForm({
       plainEnv,
       secretKeys,
       secrets,
-      resources
+      resources,
+      mirror: { default: mirrorDefault, cleanup: cleanupDefault }
     };
   };
 
@@ -696,6 +709,44 @@ export function WorkspaceForm({
           </div>
         </details>
       )}
+
+      <details className="form-disclosure">
+        <summary>
+          Transcript mirror{' '}
+          <span className="form-hint">
+            {mirrorDefault === 'on' ? 'on' : 'off'} · {cleanupDefault} on close
+          </span>
+        </summary>
+        <p className="form-hint">
+          A durable, compaction-proof copy of each session&apos;s transcript, kept host-side
+          (never inside the container). New sessions follow this default; you can override it
+          per session before it starts.
+        </p>
+        <div className="resources-grid">
+          <label>
+            New sessions
+            <select
+              value={mirrorDefault}
+              onChange={(e) => setMirrorDefault(e.target.value as MirrorSetting)}
+              disabled={busy}
+            >
+              <option value="on">Mirror on</option>
+              <option value="off">Mirror off</option>
+            </select>
+          </label>
+          <label>
+            On close, default to
+            <select
+              value={cleanupDefault}
+              onChange={(e) => setCleanupDefault(e.target.value as CleanupSetting)}
+              disabled={busy}
+            >
+              <option value="delete">Delete mirror</option>
+              <option value="preserve">Keep mirror</option>
+            </select>
+          </label>
+        </div>
+      </details>
 
       {status && <div className="form-status">{status}</div>}
       {error && <div className="form-hint error-text">{error}</div>}

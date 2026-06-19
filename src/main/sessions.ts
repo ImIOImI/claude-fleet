@@ -35,6 +35,9 @@ export interface SessionEntry {
   // spawns `claude --resume <resumeOf>`. The claude session UUID. Persisted
   // so a reattach after the broker died (host reboot) re-resumes it.
   resumeOf?: string;
+  // Per-session durable-mirror override. Absent = use the workspace default.
+  // Persisted so the choice survives reattach.
+  mirror?: 'on' | 'off';
 }
 
 export interface SessionInventory {
@@ -71,8 +74,13 @@ export async function readInventory(workspaceId: string): Promise<SessionInvento
           typeof s.name === 'string' &&
           typeof s.createdAt === 'number'
       )
-      // Normalize the optional resumeOf: keep it only when it's a string.
-      .map((s) => (typeof s.resumeOf === 'string' ? s : { ...s, resumeOf: undefined }));
+      // Normalize the optionals: keep resumeOf only when a string, and the
+      // mirror override only when 'on'/'off' (else fall back to undefined).
+      .map((s) => ({
+        ...s,
+        resumeOf: typeof s.resumeOf === 'string' ? s.resumeOf : undefined,
+        mirror: s.mirror === 'on' || s.mirror === 'off' ? s.mirror : undefined
+      }));
     return {
       version: 1,
       sessions,

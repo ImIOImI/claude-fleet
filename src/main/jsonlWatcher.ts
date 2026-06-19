@@ -21,8 +21,9 @@ import { join, basename, extname, sep as pathSep } from 'node:path';
 // electron.vite.config.ts), so `require('chokidar')` would throw
 // ERR_REQUIRE_ESM. Load it via dynamic import inside `start()`.
 import type { FSWatcher } from 'chokidar';
-import { workspaceClaudeDir } from './paths.js';
+import { workspaceClaudeDir, workspaceHistoryDir, workspaceHistoryFile } from './paths.js';
 import { ingestLine } from './db.js';
+import { effectiveForClaudeSession } from './mirrorPolicy.js';
 
 const PROJECTS_SUBDIR = join('projects', '-workspace');
 const UUID_RE =
@@ -244,12 +245,32 @@ async function readAndIngest(path: string, state: FileState): Promise<ReadResult
     if (lastNl === -1) return { newOffset: state.offset, insertedCount: 0 };
 
     const text = buf.slice(0, lastNl + 1).toString('utf8');
+    // The mirror decision is locked per session, so resolve it once per batch.
+    const mirrorOn = effectiveForClaudeSession(state.workspaceId, state.sessionId);
     let insertedCount = 0;
+    let mirrorBuf = '';
     for (const line of text.split('\n')) {
       const trimmed = line.trim();
       if (!trimmed) continue;
       const result = ingestLine(state.workspaceId, state.sessionId, trimmed);
-      if (result.inserted) insertedCount++;
+      // Mirror only genuinely-new inserts: the DB dedup key suppresses
+      // re-reads after a compaction shrink, so we never double-append and the
+      // mirror stays append-only / compaction-proof for free.
+      if (result.inserted) {
+        insertedCount++;
+        if (mirrorOn) mirrorBuf += trimmed + '\n';
+      }
+    }
+
+    if (mirrorBuf) {
+      // Host-private location — never bind-mounted (SPEC §9). mkdir is cheap
+      // and idempotent; do it lazily so off-sessions write nothing.
+      await fsp.mkdir(workspaceHistoryDir(state.workspaceId), { recursive: true });
+      await fsp.appendFile(
+        workspaceHistoryFile(state.workspaceId, state.sessionId),
+        mirrorBuf,
+        'utf8'
+      );
     }
 
     return { newOffset: state.offset + lastNl + 1, insertedCount };

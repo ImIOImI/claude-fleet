@@ -26,10 +26,12 @@ import {
   workspaceStateDir
 } from './paths.js';
 import type { AuthMode, Workspace, WorkspaceEnv, WorkspaceResources } from './workspaces.js';
+import { FACTORY_MIRROR } from './workspaces.js';
 import { fleetPrivateDir, fleetSharedDir } from './config.js';
 import { BrokerClient, brokerPtyStream } from './broker.js';
 import { recordPendingAttach } from './pendingAttaches.js';
 import { learnBrokerSessionMapping } from './db.js';
+import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
 import { resolveEnv } from './vault.js';
 
 export const FLEET_LABEL = 'com.claude-fleet.managed';
@@ -202,6 +204,8 @@ export async function listLiveWorkspaces(): Promise<Workspace[]> {
         image: c.Image,
         authMode: 'oauth',
         env: { plain: {}, secretKeys: [] },
+        // Placeholder; listAllWorkspaces overlays the manifest's mirror value.
+        mirror: FACTORY_MIRROR,
         createdAt: c.Created * 1000,
         lastUsedAt: c.Created * 1000,
         state,
@@ -401,6 +405,8 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
     authMode: spec.authMode,
     env: spec.env,
     resources: spec.resources,
+    // Placeholder; the ipc create handler overlays the full spec's mirror.
+    mirror: FACTORY_MIRROR,
     createdAt,
     lastUsedAt: createdAt,
     state: 'running',
@@ -546,6 +552,7 @@ export async function attachPty(
   //    would never resolve.
   if (resumeOf) {
     learnBrokerSessionMapping(workspaceId, sessionId, resumeOf);
+    learnMirrorMapping(workspaceId, sessionId, resumeOf);
   } else {
     recordPendingAttach(workspaceId, sessionId);
   }
