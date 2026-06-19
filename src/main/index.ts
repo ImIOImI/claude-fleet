@@ -7,6 +7,7 @@ import { listWorkspaceManifests } from './workspaces.js';
 import { installMainProcessHandlers, getLogPath } from './errorLog.js';
 import { runStartupMigration } from './migration.js';
 import { hardwareAccelDisabledAtStartup } from './config.js';
+import { setWorkspaceDefault } from './mirrorPolicy.js';
 
 // Mock mode is for UI iteration without Docker; no real JSONLs exist, so the
 // watcher and DB stay dormant.
@@ -70,6 +71,10 @@ app.whenReady().then(async () => {
   if (jsonlWatcher) {
     openDb(app.getPath('userData'));
     const manifests = await listWorkspaceManifests();
+    // Seed each workspace's durable-mirror default from its manifest before the
+    // watcher starts ingesting, so the very first lines are mirrored per the
+    // saved setting — not dependent on the renderer's later workspace:list poll.
+    for (const m of manifests) setWorkspaceDefault(m.id, m.mirror.default);
     await jsonlWatcher.start(manifests.map((m) => m.id));
   }
   registerIpc({ jsonlWatcher });
