@@ -620,7 +620,7 @@ export function App() {
               <FirstRun onNewWorkspace={() => setCreateOpen(true)} />
             ) : !selected || !selected.containerId ? (
               <div className="empty">
-                <p style={{ color: 'var(--text-muted)' }}>No workspace selected.</p>
+                <p style={{ color: 'var(--ink-2)' }}>No workspace selected.</p>
               </div>
             ) : null}
             {workspaces

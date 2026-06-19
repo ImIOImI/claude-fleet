@@ -124,7 +124,7 @@ export function CloseWorkspaceModal({ workspace, onClose, onClosed }: Props) {
           />
           <span>
             Also delete the state directory
-            <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 3, lineHeight: 1.4 }}>
+            <div style={{ color: 'var(--ink-2)', fontSize: 11, marginTop: 3, lineHeight: 1.4 }}>
               Removes <code>~/.config/claude-fleet/state/{workspace.id}/</code> (the workspace
               manifest, transcripts, broker socket) and purges every secret env value stored for
               this workspace in the OS keychain. The workspace will no longer appear in the past

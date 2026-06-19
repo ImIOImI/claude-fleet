@@ -69,7 +69,7 @@ export function DeleteWorkspaceModal({ workspace, onClose, onDeleted }: Props) {
           Permanently delete <strong>{workspace.name}</strong>? This removes the workspace
           state directory and every secret env value stored for it in the OS keychain.
           <br />
-          <strong style={{ color: 'var(--state-error, #ef4d4d)' }}>This cannot be undone.</strong>
+          <strong style={{ color: 'var(--danger, #ef4d4d)' }}>This cannot be undone.</strong>
         </p>
         {status && <div className="form-status">{status}</div>}
         {error && <div className="form-hint error-text">{error}</div>}
