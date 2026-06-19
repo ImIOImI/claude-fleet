@@ -567,6 +567,8 @@ claude-fleet/
     │   ├── sessions.ts                # per-workspace sessions.json read/write
     │   ├── imageLibrary.ts            # imageLibrary.json read/write + auto-record
     │   ├── db.ts                      # SQLite cache: events/sessions tables, ingest, summary, cost queries
+    │   ├── mcpServer.ts               # read-only MCP server (#12) on <userData>/mcp.sock; tools over the state DB
+    │   ├── mcpReadonlySql.ts          # pure read-only-SQL guard for the MCP `query` escape hatch
     │   ├── jsonlWatcher.ts            # chokidar-based JSONL tailer feeding db.ingestLine
     │   ├── pricing.ts                 # Claude 4.x USD rates + costFor(model, tier, tokens)
     │   ├── pricing.test.ts            # Vitest unit tests for pricing math
@@ -782,30 +784,34 @@ The same watcher that drives observability emits `prompts` rows when it sees the
 - **Cross-session aggregation.** If the same `Bash(...)` pattern triggers a prompt across many sessions, surfacing the aggregate (count, first/last seen) would highlight high-value allowlist candidates. Worth doing in the same UI iteration.
 
 ### In-container SQLite access via MCP
-Read-only MCP server exposed by claude-fleet that lets the agent inside each container query the application's state DB (sessions, cost, events, prompts).
+Read-only MCP server exposed by claude-fleet that lets the agent inside each container query the application's state DB (sessions, events, derived cost).
+
+**Status: host-side server SHIPPED (#12, slice 1); container wiring PENDING (slice 2).** The server runs and is e2e-tested over its socket; what remains is plumbing in-container `claude` to it (see *Container wiring* below).
 
 **Decisions made:**
 - **Mechanism**: MCP server. Idiomatic for Claude Code, which supports MCP natively. The agent gets typed tools instead of having to learn raw SQL by default.
-- **Access pattern**: strictly read-only. No mutation tools. The DB is owned by the desktop app; the agent has no business modifying its own cost data, session metadata, or prompt log.
-- **Tool surface**: typed tools cover common cases; a raw `query(sql)` tool covers the rest. Read-only at the DB connection layer makes the escape hatch safe.
-- **Connection**: HTTP over a Unix socket bind-mounted into each container. No network exposure; auth is implicit via filesystem permissions; survives Docker network changes.
+- **Access pattern**: strictly read-only. No mutation tools.
+- **Transport**: newline-delimited JSON-RPC 2.0 over a Unix socket — **not** HTTP. MCP's HTTP transport wants a URL, which would force a network port; a stdio bridge over the socket keeps it network-free. (Hand-rolled, no MCP SDK dep — matches the broker.)
+- **Visibility = fleet-global**: a `sessions`/`events` row from one workspace is queryable by the agent in another, matching the "sessions are global" goal. Per-workspace scoping (stamp the connection with a workspace id) is a future option.
+- **Runaway protection**: the read-only connection is the hard write-guard; `query` is additionally gated by `isReadOnlySql` (rejects writes + multi-statement injection) and results are row-capped (1000).
 
-**Implementation:**
-The main process opens the SQLite file in read-write mode for its own writers (observability watcher, sessions reconciler, prompt-log writer). The MCP server uses a separate connection opened in read-only mode (via the SQLite URI form `file:state.db?mode=ro`). The server listens on `<app-data>/mcp.sock` on the host. Each container's create spec adds a bind-mount of this socket to `/fleet/mcp.sock` inside the container.
+**Implementation (`src/main/mcpServer.ts`):**
+The main process's writers use the read-write `state.db` connection; the MCP server opens its **own** `better-sqlite3` connection `{ readonly: true, fileMustExist: true }`. It listens on `<userData>/mcp.sock` (started in `index.ts` whenReady after `openDb`, stopped on `before-quit`); each accepted connection is one MCP session (newline-delimited JSON-RPC: `initialize` / `tools/list` / `tools/call` / `ping`, notifications get no reply). The SQL read-only guard lives in the pure, unit-tested `src/main/mcpReadonlySql.ts`.
 
-**Tool surface (sketch):**
-- `list_sessions({ container?, since?, until?, limit? })` → rows from `sessions`
-- `get_session({ id })` → one row with all metadata
-- `get_cost({ session_id })` → row from `cost`
-- `list_prompts({ container?, session_id?, kind?, since?, limit? })` → rows from `prompts`
-- `list_events({ session_id, type?, since?, limit? })` → rows from `events`
-- `query({ sql })` → arbitrary read-only SQL; rejected at the connection layer if the statement is a write
+**Tool surface (shipped):**
+- `list_sessions({ workspace_id?, since?, until?, limit? })` → rows from `sessions`
+- `get_session({ id })` → one row
+- `get_cost({ session_id })` → token totals + USD **derived** from per-(model, service_tier) usage via `pricing.ts` (there is no `cost` table)
+- `list_events({ session_id, type?, since?, limit? })` → curated event columns (omits `raw_jsonl`)
+- `query({ sql })` → arbitrary read-only SQL (guarded), row-capped; the tool description embeds the table schemas
+- (`list_prompts` dropped — the prompt log #11 is blocked, so there is no `prompts` table.)
 
-**Open:**
-- **MCP config delivery to the container.** Options: bake `.mcp.json` into the runner image at `/etc/claude/mcp.json` (or similar), write `.mcp.json` into the bind-mounted workspace at container-create time, or pass `--mcp-config` to `claude` when launching it. Choice affects whether per-container customization is possible.
-- **Schema documentation.** Typed-tool descriptions usually suffice; raw-SQL users may want the schema spelled out. Decide whether to ship a CLAUDE.md fragment with the schema, embed it in the `query` tool's description, or both.
-- **Cross-container visibility.** Today the schema doesn't restrict by container at the DB level — a `sessions` row from container A is visible to the agent in container B. Matches the goal that sessions are global, but explicitly decide whether the MCP server should optionally scope to "this container's data only" by stamping each connection with its container ID at the time the socket is opened.
-- **Runaway-query protection.** Even read-only queries can be expensive. Decide on per-query statement timeout, row-count cap, or both.
+**Container wiring (slice 2, pending live verification):**
+- Bind `<userData>/mcp.sock` → `/fleet/mcp.sock` (ro) in each container's create spec.
+- Add `socat` to the runner image (no `socat`/`nc` today) for the stdio↔socket bridge.
+- Seed `mcpServers` into the per-workspace `~/.claude.json` (`ensureWorkspaceClaudeJson`): `{ "claude-fleet": { command: "socat", args: ["-", "UNIX-CONNECT:/fleet/mcp.sock"] } }` so `claude` auto-connects on start.
+- **Unknown to verify on a real container**: whether `claude` auto-connects to a user-scope MCP server without an approval gate (echoes of the managed-settings saga, §11) — verify before relying on it.
+- **Schema docs**: embedded in the `query` tool description (decided); a CLAUDE.md fragment can follow if raw-SQL use is common.
 
 ### Dev-mode mock fleet
 When `CLAUDE_FLEET_MOCK=1` is set in the main process's environment, `ipc.ts` swaps the real `docker.ts` implementation for `src/main/mock.ts`. The mock:

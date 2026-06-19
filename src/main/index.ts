@@ -2,6 +2,7 @@ import { app, BrowserWindow, shell } from 'electron';
 import { join } from 'node:path';
 import { registerIpc } from './ipc.js';
 import { openDb, closeDb } from './db.js';
+import { startMcpServer, stopMcpServer } from './mcpServer.js';
 import { JsonlWatcher } from './jsonlWatcher.js';
 import { listWorkspaceManifests } from './workspaces.js';
 import { installMainProcessHandlers, getLogPath } from './errorLog.js';
@@ -70,6 +71,9 @@ app.whenReady().then(async () => {
 
   if (jsonlWatcher) {
     openDb(app.getPath('userData'));
+    // Read-only MCP server over <userData>/mcp.sock so in-container claude can
+    // query the state DB (sessions/events/cost). Opens its own readonly conn.
+    startMcpServer(app.getPath('userData'));
     const manifests = await listWorkspaceManifests();
     // Seed each workspace's durable-mirror default from its manifest before the
     // watcher starts ingesting, so the very first lines are mirrored per the
@@ -87,6 +91,7 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', async () => {
   await jsonlWatcher?.stop();
+  stopMcpServer();
   closeDb();
 });
 
