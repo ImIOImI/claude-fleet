@@ -464,7 +464,7 @@ function TokenRow({
 function EmptyState({ message, subdued }: { message: string; subdued?: boolean }) {
   return (
     <div className={`pane-placeholder ${subdued ? 'subdued' : ''}`}>
-      <p style={{ margin: 0, color: 'var(--text-muted)' }}>{message}</p>
+      <p style={{ margin: 0, color: 'var(--ink-2)' }}>{message}</p>
     </div>
   );
 }

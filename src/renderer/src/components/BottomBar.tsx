@@ -10,7 +10,7 @@ export function BottomBar({ vaultAvailable }: Props) {
       <span><span className="key">Ctrl+Shift+C/V</span> explicit copy / paste</span>
       <span className="spacer" />
       {vaultAvailable === false && (
-        <span style={{ color: 'var(--state-warn)' }}>
+        <span style={{ color: 'var(--warn)' }}>
           OS keychain unavailable · env-var fallback active
         </span>
       )}
