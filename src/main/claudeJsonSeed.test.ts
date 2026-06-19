@@ -42,6 +42,13 @@ describe('ensureWorkspaceClaudeJson', () => {
     const parsed = JSON.parse(await readFile(path, 'utf8'));
     expect(parsed.hasCompletedOnboarding).toBe(true);
     expect(parsed.projects['/workspace/app'].hasTrustDialogAccepted).toBe(true);
+    // The read-only state-DB MCP server (#12) is auto-wired via a user-scope
+    // mcpServers entry bridging stdio → the bound /fleet/mcp.sock socket.
+    expect(parsed.mcpServers['claude-fleet-state']).toEqual({
+      type: 'stdio',
+      command: 'socat',
+      args: ['-', 'UNIX-CONNECT:/fleet/mcp.sock']
+    });
   });
 
   it('creates the parent state dir if missing', async () => {
