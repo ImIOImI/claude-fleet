@@ -23,6 +23,13 @@ interface Props {
   workspaceId: string;
   paused: boolean;
   /**
+   * Container is stopped (not running, not paused). Unlike `paused` (frozen
+   * but alive, sessions stay attached), a stopped container has no live broker
+   * — so we don't mount/attach its sessions, and the pane shows a "Start"
+   * overlay instead. Clicking it runs `workspace:start` (#17).
+   */
+  stopped: boolean;
+  /**
    * Whether this pane is the currently-selected workspace. Hidden panes
    * stay fully mounted so their xterm scrollback + broker connections
    * persist across workspace switches; this just controls painting via
@@ -120,6 +127,7 @@ export function TerminalPane({
   containerId,
   workspaceId,
   paused,
+  stopped,
   visible,
   summary,
   restartBanner,
@@ -381,7 +389,7 @@ export function TerminalPane({
           onClick={addSession}
           title="New session in this workspace"
           aria-label="New session"
-          disabled={!loaded || paused}
+          disabled={!loaded || paused || stopped}
         >
           +
         </button>
@@ -405,8 +413,11 @@ export function TerminalPane({
           <div className="terminal-accent-band-fill" />
         </div>
       </div>
-      <div className={`session-stack ${paused ? 'paused' : ''}`}>
-        {sessions.map((s) => (
+      <div className={`session-stack ${paused || stopped ? 'paused' : ''}`}>
+        {/* A stopped container has no live broker, so mounting sessions would
+            only produce doomed attaches — skip them until it's started.
+            Paused keeps them mounted so the in-app stream survives the freeze. */}
+        {!stopped && sessions.map((s) => (
           <TerminalSession
             key={s.id}
             containerId={containerId}
@@ -428,25 +439,36 @@ export function TerminalPane({
             onActivityChange={handleActivity}
           />
         ))}
-        {paused && (
-          <div className="paused-overlay" role="alertdialog" aria-label="Workspace paused">
+        {(paused || stopped) && (
+          <div
+            className={paused ? 'paused-overlay' : 'stopped-overlay'}
+            role="alertdialog"
+            aria-label={paused ? 'Workspace paused' : 'Workspace stopped'}
+          >
             <div className="paused-card">
               <div className="paused-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-                  <rect x="6" y="4" width="4.5" height="16" rx="1" />
-                  <rect x="13.5" y="4" width="4.5" height="16" rx="1" />
-                </svg>
+                {paused ? (
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                    <rect x="6" y="4" width="4.5" height="16" rx="1" />
+                    <rect x="13.5" y="4" width="4.5" height="16" rx="1" />
+                  </svg>
+                ) : (
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                    <rect x="6" y="6" width="12" height="12" rx="1.5" />
+                  </svg>
+                )}
               </div>
-              <div className="paused-title">workspace paused</div>
+              <div className="paused-title">{paused ? 'workspace paused' : 'workspace stopped'}</div>
               <div className="paused-help">
-                The container is frozen. Sessions remain attached and will pick up where they
-                left off on resume.
+                {paused
+                  ? 'The container is frozen. Sessions remain attached and will pick up where they left off on resume.'
+                  : 'The container is stopped. Starting it reconnects your saved session tabs.'}
               </div>
               <button className="btn primary paused-resume" onClick={onResume}>
                 <svg viewBox="0 0 12 12" width="11" height="11" fill="currentColor" aria-hidden="true">
                   <path d="M3 2 L10 6 L3 10 Z" />
                 </svg>
-                <span>Resume</span>
+                <span>{paused ? 'Resume' : 'Start'}</span>
               </button>
             </div>
           </div>
