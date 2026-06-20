@@ -43,11 +43,16 @@ describe('ensureWorkspaceClaudeJson', () => {
     expect(parsed.hasCompletedOnboarding).toBe(true);
     expect(parsed.projects['/workspace/app'].hasTrustDialogAccepted).toBe(true);
     // The read-only state-DB MCP server (#12) is auto-wired via a user-scope
-    // mcpServers entry bridging stdio → the bound /fleet/mcp.sock socket.
+    // mcpServers entry: a reconnecting stdio→socket bridge over the socket in
+    // the bound /fleet/mcp dir. The loop survives the host server's
+    // inode-changing restart while a paused container is alive (#18).
     expect(parsed.mcpServers['claude-fleet-state']).toEqual({
       type: 'stdio',
-      command: 'socat',
-      args: ['-', 'UNIX-CONNECT:/fleet/mcp.sock']
+      command: 'sh',
+      args: [
+        '-c',
+        'while :; do socat - "UNIX-CONNECT:/fleet/mcp/mcp.sock,forever,interval=1"; sleep 1; done'
+      ]
     });
   });
 
@@ -56,19 +61,68 @@ describe('ensureWorkspaceClaudeJson', () => {
     await expect(stat(path)).resolves.toBeTruthy();
   });
 
-  it('does not overwrite an existing file (claude owns it once it runs)', async () => {
+  it("preserves claude's accumulated state but reconciles the managed mcpServers entry", async () => {
     const path = workspaceClaudeJsonPath('01KEEP');
-    // Simulate claude having rewritten the file with real accumulated state.
-    const real = JSON.stringify({ hasCompletedOnboarding: true, numStartups: 7, projects: {} });
+    // Simulate claude having rewritten the file with real accumulated state
+    // PLUS the (now-stale) one-shot socat MCP command from before #18.
+    const real = {
+      hasCompletedOnboarding: true,
+      numStartups: 7,
+      projects: { '/workspace': { hasTrustDialogAccepted: true } },
+      mcpServers: {
+        'claude-fleet-state': { type: 'stdio', command: 'socat', args: ['-', 'UNIX-CONNECT:/fleet/mcp.sock'] }
+      }
+    };
     const { mkdir } = await import('node:fs/promises');
     await mkdir(join(userDataDir, 'state', '01KEEP'), { recursive: true });
-    await writeFile(path, real, 'utf8');
-    const past = Date.now() / 1000 - 100;
-    await utimes(path, past, past);
+    await writeFile(path, JSON.stringify(real), 'utf8');
 
     const returned = await ensureWorkspaceClaudeJson('01KEEP', '/workspace');
     expect(returned).toBe(path);
-    expect(await readFile(path, 'utf8')).toBe(real);
+    const parsed = JSON.parse(await readFile(path, 'utf8'));
+    // Claude's own state is untouched...
+    expect(parsed.numStartups).toBe(7);
+    expect(parsed.hasCompletedOnboarding).toBe(true);
+    expect(parsed.projects['/workspace'].hasTrustDialogAccepted).toBe(true);
+    // ...but the stale one-shot socat command is upgraded to the reconnecting
+    // bridge (#18) so MCP survives pause + app restart on recreation.
+    expect(parsed.mcpServers['claude-fleet-state']).toEqual({
+      type: 'stdio',
+      command: 'sh',
+      args: [
+        '-c',
+        'while :; do socat - "UNIX-CONNECT:/fleet/mcp/mcp.sock,forever,interval=1"; sleep 1; done'
+      ]
+    });
+  });
+
+  it('leaves an existing file byte-identical when the managed entry already matches', async () => {
+    const path = workspaceClaudeJsonPath('01SAME');
+    // File already carries the current reconnecting bridge → no rewrite.
+    const current = {
+      hasCompletedOnboarding: true,
+      numStartups: 3,
+      projects: {},
+      mcpServers: {
+        'claude-fleet-state': {
+          type: 'stdio',
+          command: 'sh',
+          args: [
+            '-c',
+            'while :; do socat - "UNIX-CONNECT:/fleet/mcp/mcp.sock,forever,interval=1"; sleep 1; done'
+          ]
+        }
+      }
+    };
+    const serialized = JSON.stringify(current);
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(join(userDataDir, 'state', '01SAME'), { recursive: true });
+    await writeFile(path, serialized, 'utf8');
+    const past = Date.now() / 1000 - 100;
+    await utimes(path, past, past);
+
+    await ensureWorkspaceClaudeJson('01SAME', '/workspace');
+    expect(await readFile(path, 'utf8')).toBe(serialized);
   });
 });
 

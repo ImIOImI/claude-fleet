@@ -15,12 +15,12 @@
 // a future option (SPEC §11).
 
 import { createServer, type Server, type Socket } from 'node:net';
-import { existsSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { costFor } from './pricing.js';
 import { isReadOnlySql } from './mcpReadonlySql.js';
-import { mcpSocketPath } from './mcpSocket.js';
+import { mcpSocketDir, mcpSocketPath } from './mcpSocket.js';
 
 const PROTOCOL_VERSION = '2024-11-05';
 const SERVER_INFO = { name: 'claude-fleet-state', version: '1.0.0' };
@@ -38,7 +38,12 @@ export function startMcpServer(userDataDir: string): void {
   const dbPath = join(userDataDir, 'state.db');
   rodb = new Database(dbPath, { readonly: true, fileMustExist: true });
   const sockPath = mcpSocketPath(userDataDir);
+  // The socket lives in its own dir (bind-mounted into containers); make sure
+  // it exists before listen().
+  mkdirSync(mcpSocketDir(userDataDir), { recursive: true });
   // A stale socket file from a previous run blocks listen() with EADDRINUSE.
+  // (The unlink also means a fresh inode each run — why containers bind the
+  // *directory*, not this file; see mcpSocket.ts.)
   try {
     if (existsSync(sockPath)) unlinkSync(sockPath);
   } catch {
