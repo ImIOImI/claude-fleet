@@ -484,6 +484,7 @@ export function TerminalPane({
             // active TerminalSession was actually painting and the one
             // later in DOM order won the stacking contest.
             visible={visible && s.id === activeId}
+            paused={paused}
             onLifecycleChange={handleLifecycle}
             onActivityChange={handleActivity}
           />

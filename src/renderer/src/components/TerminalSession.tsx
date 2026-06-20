@@ -111,6 +111,17 @@ interface Props {
   resumeOf?: string;
   visible: boolean;
   /**
+   * Whether the workspace is paused (container frozen via `docker pause`).
+   * A paused container's broker (PID 1) is frozen too: a unix-socket
+   * connect still succeeds at the kernel level (the connection sits in the
+   * listen backlog), so ATTACH is sent but the frozen broker never replies
+   * with ATTACHED — the RPC hangs the full 30s and fails with "ATTACHED
+   * timed out". So we must NOT attach while paused. The attach effect skips
+   * the network attach when this is true and re-runs (clean reattach, broker
+   * replays its ring buffer) when it flips back to false on resume. (#18)
+   */
+  paused?: boolean;
+  /**
    * Called when the PTY signals end-of-life (user `/exit`, claude
    * crash, docker stop, etc.). The parent TerminalPane uses this to
    * surface per-tab status in the tab strip — `live` until this fires,
@@ -132,6 +143,7 @@ export function TerminalSession({
   mirrorSetting,
   resumeOf,
   visible,
+  paused = false,
   onLifecycleChange,
   onActivityChange,
 }: Props) {
@@ -328,6 +340,13 @@ export function TerminalSession({
       if (disposed) return;
       safeFit();
 
+      // Don't attach into a frozen broker. While paused, set up the xterm
+      // (so the under-overlay terminal is sized and ready) but skip the
+      // network attach — it would hang 30s against the frozen PID-1 broker
+      // and fail with "ATTACHED timed out". When `paused` flips to false on
+      // resume, this effect re-runs and attaches cleanly. (#18)
+      if (paused) return;
+
       try {
         // Pin the durable-mirror decision before the PTY (and thus the
         // transcript) starts, so no line is ingested under the wrong setting.
@@ -459,7 +478,7 @@ export function TerminalSession({
       if (ptyHandleId) window.api.pty.detach(ptyHandleId);
       term.dispose();
     };
-  }, [containerId, sessionId, resumeOf, sessionEpoch]);
+  }, [containerId, sessionId, resumeOf, sessionEpoch, paused]);
 
   // When this session becomes visible again, force a fit. xterm's
   // ResizeObserver can fire while the host is `visibility: hidden`

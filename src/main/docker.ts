@@ -543,6 +543,11 @@ export interface PtyHandle {
 }
 
 const HOST_CHANNEL = 1;
+// Reattach race backoff: how many times / how often to retry an ATTACH that
+// fails "already attached" while the broker reaps a dead prior connection.
+// ~3s total covers the unpause-reap window with margin (see attachPty).
+const REATTACH_RETRIES = 12;
+const REATTACH_RETRY_MS = 250;
 
 /**
  * Open a terminal session against the in-container broker.
@@ -600,6 +605,23 @@ export async function attachPty(
   const stream = brokerPtyStream(client, HOST_CHANNEL);
 
   let attachResp = await client.attachSession(sessionId, HOST_CHANNEL);
+
+  // Reattach race (#18): when the previous app instance vanished (pause → quit
+  // → reopen → resume), the broker may still hold the dead connection's
+  // attachment — its read loop only reaps it on unpause, just as we reconnect.
+  // The broker rejects the legitimate reattach as "already attached" (#89's
+  // concurrent-attach guard, correct for a genuinely-live second client). The
+  // reap completes within ms of unpause, so retry briefly to win that race
+  // rather than fail. A truly-live second client keeps failing → gives up.
+  for (
+    let i = 0;
+    i < REATTACH_RETRIES && !attachResp.ok && /already attached/i.test(attachResp.error ?? '');
+    i++
+  ) {
+    await new Promise((r) => setTimeout(r, REATTACH_RETRY_MS));
+    attachResp = await client.attachSession(sessionId, HOST_CHANNEL);
+  }
+
   if (!attachResp.ok && /no such session/i.test(attachResp.error ?? '')) {
     // Resume only matters at CREATE time — if the broker already has this
     // session alive (reattach after an app restart where the broker kept
