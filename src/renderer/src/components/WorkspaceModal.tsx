@@ -86,10 +86,11 @@ export function WorkspaceModal({
   onDelete,
   initialNewTabValues
 }: Props) {
-  // Saved tab shows non-running workspaces (stopped + paused + deleted).
-  // Running workspaces are edited from the chip ⋮ menu in PR-B.
+  // Saved tab = the "cold" fleet: stopped + deleted (needs a restart). The
+  // "warm" fleet (running + paused) lives in the top strip and is edited from
+  // the chip ⋮ menu — so a workspace appears in exactly one place (#21).
   const saved = useMemo(
-    () => workspaces.filter((w) => w.state !== 'running'),
+    () => workspaces.filter((w) => w.state === 'stopped' || w.state === 'deleted'),
     [workspaces]
   );
 

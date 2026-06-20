@@ -189,10 +189,10 @@ export function WorkspaceTabStrip({
     };
   }, [menu]);
 
-  // Top strip only shows workspaces that have a live backend (running,
-  // paused, or stopped). "deleted" workspaces show up in the new-workspace
-  // modal's past-workspaces list instead.
-  const live = workspaces.filter((w) => w.state !== 'deleted');
+  // Top strip = the "warm" fleet: running + paused only (instant switch).
+  // "stopped" and "deleted" are the "cold" fleet — they live in the
+  // workspace modal's Saved list and need a restart (#21).
+  const live = workspaces.filter((w) => w.state === 'running' || w.state === 'paused');
   const menuWorkspace = menu ? live.find((w) => w.id === menu.for) ?? null : null;
 
   async function doAction(action: 'start' | 'pause' | 'stop', w: WorkspaceSummary): Promise<void> {
@@ -289,14 +289,17 @@ export function WorkspaceTabStrip({
       })}
 
       <button
-        className="btn"
+        className="btn add-workspace"
         onClick={onNewWorkspace}
         disabled={backendReady === false}
+        aria-label="Add workspace"
         title={
-          backendReady === false ? 'Docker daemon unreachable' : 'Create a new workspace'
+          backendReady === false
+            ? 'Docker daemon unreachable'
+            : 'Add a workspace — create a new one or resume a saved one'
         }
       >
-        + New workspace
+        +
       </button>
 
       <div className="top-strip-actions">

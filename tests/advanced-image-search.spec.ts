@@ -25,7 +25,7 @@ const IMAGES = [
 ];
 
 async function openSearchModal(window: import('@playwright/test').Page) {
-  await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+  await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
   // Make sure we're on the New tab (default when no saved workspaces).
   await expect(window.getByRole('tab', { name: 'New' })).toHaveAttribute('aria-selected', 'true');
   await window.getByRole('button', { name: 'Open advanced image search' }).click();
@@ -140,7 +140,7 @@ test('Advanced image search: each row surfaces workspaces using the image, stopp
         }
       ]
     });
-    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
     // Workspaces exist → Saved tab is default; switch to New first.
     await window.getByRole('tab', { name: 'New' }).click();
     await window.getByRole('button', { name: 'Open advanced image search' }).click();

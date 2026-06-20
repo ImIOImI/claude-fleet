@@ -21,14 +21,14 @@
 import { test, expect } from '@playwright/test';
 import { launch, mockMainIpc, getCalls } from './_helpers.js';
 
-test('+ New workspace opens the modal', async () => {
+test('"+" add-workspace button opens the modal', async () => {
   const { app, window } = await launch();
   try {
-    // WorkspaceTabStrip disables the + New workspace button when
+    // WorkspaceTabStrip disables the "+" add-workspace button when
     // backendReady === false; stub the backend so the test isn't gated
     // on host Docker state.
     await mockMainIpc(app);
-    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
     await expect(window.getByRole('tab', { name: 'New' })).toBeVisible();
   } finally {
     await app.close();
@@ -40,7 +40,7 @@ test('Create flow (OAuth mode): default submit produces authMode=oauth and empty
   try {
     await mockMainIpc(app);
 
-    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
     await window.getByLabel('Workspace name').fill('test-oauth-workspace');
     // Name only — image auto-fills to the default runner, no host path to pick.
 
@@ -71,7 +71,7 @@ test('Workspace kind selector: Local shows a "coming soon" error on submit', asy
   const { app, window } = await launch();
   try {
     await mockMainIpc(app);
-    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
     await expect(window.getByRole('tab', { name: 'New' })).toBeVisible();
 
     // Both kind radios are visible; Container is the default.

@@ -14,7 +14,7 @@ test('Create: default form submit ships authMode=oauth', async () => {
   try {
     await mockMainIpc(app, { isDirectoryReturns: true });
 
-    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
     await expect(window.getByRole('tab', { name: 'New' })).toHaveAttribute('aria-selected', 'true');
 
     await window.getByLabel('Workspace name').fill('test-oauth');
@@ -35,7 +35,7 @@ test('Create: switching to API key + supplying ANTHROPIC_API_KEY ships authMode=
   try {
     await mockMainIpc(app, { isDirectoryReturns: true });
 
-    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
 
     await window.getByLabel('Workspace name').fill('test-apikey');
 

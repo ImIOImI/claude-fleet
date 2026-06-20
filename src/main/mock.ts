@@ -47,9 +47,9 @@ function seed(): void {
     createdAt: now - 7200_000,
     lastUsedAt: now - 7200_000,
     mirror: FACTORY_MIRROR,
-    state: 'stopped',
+    state: 'running',
     containerId: '01MOCKBETA0000000000000000',
-    status: 'Exited (0) 2 minutes ago'
+    status: 'Up 2 hours'
   });
   // `fail-*` workspaces simulate the broker-socket-missing failure mode
   // (stale runner image, pre-broker). attachPty throws synchronously for
