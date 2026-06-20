@@ -99,7 +99,7 @@ test('Saved-tab Delete: row Delete button opens confirm modal', async () => {
   const { app, window } = await launch();
   try {
     await mockMainIpc(app, { workspaceList: [STOPPED_WS] });
-    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
 
     const row = window.locator('.saved-row', { hasText: 'calm-otter' });
     await row.locator('.saved-row-header').click();
@@ -122,7 +122,7 @@ test('Saved-tab Delete: confirming purges a containerless saved workspace (regre
   const { app, window } = await launch();
   try {
     await mockMainIpc(app, { workspaceList: [STOPPED_WS] });
-    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
 
     const row = window.locator('.saved-row', { hasText: 'calm-otter' });
     await row.locator('.saved-row-header').click();
@@ -148,7 +148,7 @@ test('Saved-tab Clone: row Clone button reopens the modal on New with suggested 
   const { app, window } = await launch();
   try {
     await mockMainIpc(app, { workspaceList: [STOPPED_WS] });
-    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
 
     const row = window.locator('.saved-row', { hasText: 'calm-otter' });
     await row.locator('.saved-row-header').click();

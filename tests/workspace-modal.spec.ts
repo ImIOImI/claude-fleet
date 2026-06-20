@@ -39,7 +39,7 @@ test('Saved tab is the default when saved workspaces exist', async () => {
   const { app, window } = await launch();
   try {
     await mockMainIpc(app, { workspaceList: SAVED });
-    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
 
     const saved = window.getByRole('tab', { name: 'Saved' });
     const fresh = window.getByRole('tab', { name: 'New' });
@@ -59,7 +59,7 @@ test('New tab is the default when no saved workspaces exist', async () => {
   const { app, window } = await launch();
   try {
     await mockMainIpc(app, { workspaceList: [] });
-    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
 
     await expect(window.getByRole('tab', { name: 'New' })).toHaveAttribute('aria-selected', 'true');
     await expect(window.getByLabel('Workspace name')).toBeVisible();
@@ -72,7 +72,7 @@ test('Saved tab: text search filters by name and description', async () => {
   const { app, window } = await launch();
   try {
     await mockMainIpc(app, { workspaceList: SAVED });
-    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
 
     const search = window.getByLabel('Search by name or description');
     await search.fill('pipeline');
@@ -94,7 +94,7 @@ test('Saved tab: labels dropdown filters with OR semantics and surfaces pills', 
   const { app, window } = await launch();
   try {
     await mockMainIpc(app, { workspaceList: SAVED });
-    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
 
     // Open the Labels dropdown.
     await window.getByRole('button', { name: /Labels/ }).click();
@@ -125,7 +125,7 @@ test('Saved tab: clicking a row expands inline with Resume action', async () => 
   const { app, window } = await launch();
   try {
     await mockMainIpc(app, { workspaceList: SAVED });
-    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
 
     const row = window.locator('.saved-row', { hasText: 'happy-llama' });
     // Body starts collapsed.
@@ -153,7 +153,7 @@ test('Saved tab: Resume writes the manifest then starts the container', async ()
       workspaceList: [SAVED[0]],
       isDirectoryReturns: true
     });
-    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
 
     const row = window.locator('.saved-row', { hasText: 'happy-llama' });
     await row.locator('.saved-row-header').click();

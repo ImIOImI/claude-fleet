@@ -202,6 +202,18 @@ export function App() {
     return () => clearInterval(t);
   }, [apiReady]);
 
+  // Keep selection on the "warm" fleet. The top strip only shows running +
+  // paused workspaces (#21); if the selected one leaves that set (stopped via
+  // its ⋮ menu, or removed), drop to the first warm workspace (or nothing) so
+  // the main pane never strands on a chip that's no longer in the strip.
+  useEffect(() => {
+    if (selectedId == null) return;
+    const sel = workspaces.find((w) => w.id === selectedId);
+    if (sel && (sel.state === 'running' || sel.state === 'paused')) return;
+    const firstWarm = workspaces.find((w) => w.state === 'running' || w.state === 'paused');
+    setSelectedId(firstWarm?.id ?? null);
+  }, [workspaces, selectedId]);
+
   // Observability summary distribution. Updates arrive via live push +
   // 30s safety poll. Re-keyed on the sorted workspace-id list so an
   // add/remove triggers resubscribe but a per-workspace lastUsedAt nudge
@@ -624,7 +636,9 @@ export function App() {
               </div>
             ) : null}
             {workspaces
-              .filter((w) => w.state !== 'deleted' && w.containerId)
+              // Only the warm fleet (running + paused) gets an always-mounted
+              // pane — stopped/deleted live in the modal, never the main pane (#21).
+              .filter((w) => (w.state === 'running' || w.state === 'paused') && w.containerId)
               .map((w) => (
                 <TerminalPane
                   key={w.id}
@@ -634,7 +648,6 @@ export function App() {
                   cleanupDefault={w.mirror.cleanup}
                   containerId={w.containerId!}
                   paused={w.state === 'paused'}
-                  stopped={w.state === 'stopped'}
                   summary={summaries[w.id] ?? null}
                   restartBanner={restartBannerIds.has(w.id)}
                   onRestartFromBanner={() => restartFromBanner(w.id, w.containerId!)}

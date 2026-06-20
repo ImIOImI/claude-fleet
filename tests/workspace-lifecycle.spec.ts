@@ -24,18 +24,6 @@ test('Hamburger Close…: stops and removes a running workspace', async () => {
   }
 });
 
-test('Hamburger Close… on an exited workspace shows only Remove', async () => {
-  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
-  try {
-    await openCloseModalFor(window, 'mock-beta');
-    await expect(window.getByRole('heading', { name: 'Close workspace' })).toBeVisible();
-    await expect(window.getByRole('button', { name: 'Stop only' })).toBeHidden();
-    await expect(window.getByRole('button', { name: 'Remove' })).toBeVisible();
-  } finally {
-    await app.close();
-  }
-});
-
 test('Pause: chip shows paused glyph and terminal pane shows paused overlay', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {
@@ -100,7 +88,7 @@ test('Saved tab: deleted workspace appears and Resume fires workspace:start', as
 
     await window
       .locator('.top-strip')
-      .getByRole('button', { name: '+ New workspace' })
+      .getByRole('button', { name: 'Add workspace' })
       .click();
 
     // The "deleted" workspace isn't in the top strip but appears in the
@@ -162,28 +150,6 @@ test('Hamburger menu: running workspace shows Pause/Stop, paused shows Resume', 
   }
 });
 
-test('Hamburger menu: stopped workspace shows Start (not Pause/Stop)', async () => {
-  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
-  try {
-    // mock-beta is seeded as state='stopped'
-    const chipGroup = window.locator('.ws-chip-group', { hasText: 'mock-beta' });
-    await chipGroup.locator('.ws-chip-menu-trigger').click();
-
-    const menu = window.locator('.ws-chip-menu');
-    await expect(menu).toBeVisible();
-    await expect(menu.getByRole('menuitem', { name: 'Start' })).toBeVisible();
-    await expect(menu.getByRole('menuitem', { name: 'Close…' })).toBeVisible();
-    await expect(menu.getByRole('menuitem', { name: 'Pause' })).toBeHidden();
-    await expect(menu.getByRole('menuitem', { name: 'Stop' })).toBeHidden();
-    await expect(menu.getByRole('menuitem', { name: 'Resume' })).toBeHidden();
-
-    await menu.getByRole('menuitem', { name: 'Start' }).click();
-    await expect(chipGroup.locator('.dot.running')).toBeVisible();
-  } finally {
-    await app.close();
-  }
-});
-
 test('Hamburger menu: Close… opens the CloseWorkspaceModal even when chip is not selected', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {
@@ -236,60 +202,34 @@ test('Pause then Resume via the Close modal (opened from hamburger)', async () =
   }
 });
 
-test('Saved tab: paused workspace renders the paused state', async () => {
+test('Strip/modal partition: paused → strip, stopped+deleted → modal Saved (#21)', async () => {
   const { app, window } = await launch();
   try {
     await mockMainIpc(app, {
       workspaceList: [
-        {
-          name: 'frozen-fox',
-          containerId: 'frozen-fox-id',
-          state: 'paused',
-          status: 'Paused',
-          workspaceRoot: '/tmp/frozen-fox'
-        }
+        { id: '01RUN0000000000000000000WS', name: 'api', containerId: 'c-api', state: 'running', workspaceRoot: '/tmp/a' },
+        { id: '01PAU0000000000000000000WS', name: 'web', containerId: 'c-web', state: 'paused', workspaceRoot: '/tmp/b' },
+        { id: '01STO0000000000000000000WS', name: 'db', containerId: 'c-db', state: 'stopped', workspaceRoot: '/tmp/c' },
+        { id: '01DEL0000000000000000000WS', name: 'cron', state: 'deleted', workspaceRoot: '/tmp/d' }
       ]
     });
 
-    await window.locator('.top-strip').getByRole('button', { name: '+ New workspace' }).click();
+    // Top strip = warm fleet: running + paused only.
+    const strip = window.locator('.top-strip');
+    await expect(strip.locator('.ws-chip .name', { hasText: 'api' })).toBeVisible();
+    await expect(strip.locator('.ws-chip .name', { hasText: 'web' })).toBeVisible();
+    await expect(strip.locator('.ws-chip .name', { hasText: 'db' })).toHaveCount(0);
+    await expect(strip.locator('.ws-chip .name', { hasText: 'cron' })).toHaveCount(0);
+
+    // Modal Saved = cold fleet: stopped + deleted only (paused/running excluded).
+    await strip.getByRole('button', { name: 'Add workspace' }).click();
     await expect(window.getByRole('tab', { name: 'Saved' })).toHaveAttribute('aria-selected', 'true');
-
-    const row = window.locator('.saved-row', { hasText: 'frozen-fox' });
-    await expect(row).toBeVisible();
-    await expect(row.locator('.ws-state.paused')).toBeVisible();
+    await expect(window.locator('.saved-row', { hasText: 'db' })).toBeVisible();
+    await expect(window.locator('.saved-row', { hasText: 'cron' })).toBeVisible();
+    await expect(window.locator('.saved-row', { hasText: 'web' })).toHaveCount(0);
+    await expect(window.locator('.saved-row', { hasText: 'api' })).toHaveCount(0);
   } finally {
     await app.close();
   }
 });
 
-test('#17: clicking a stopped workspace shows a Start overlay that resumes it', async () => {
-  const { app, window } = await launch();
-  try {
-    await mockMainIpc(app, {
-      workspaceList: [
-        {
-          id: '01STOPPEDWS00000000000000WS',
-          name: 'frosty-fox',
-          containerId: 'frosty-id',
-          state: 'stopped',
-          workspaceRoot: '/tmp/frosty'
-        }
-      ]
-    });
-
-    await window.locator('.ws-chip', { hasText: 'frosty-fox' }).click();
-
-    // The pane shows the stopped overlay (not a silently-failing terminal),
-    // with a Start button rather than the paused "Resume".
-    await expect(window.getByText('workspace stopped')).toBeVisible({ timeout: 5_000 });
-    const startBtn = window.getByRole('button', { name: 'Start' });
-    await expect(startBtn).toBeVisible();
-
-    await startBtn.click();
-    await expect
-      .poll(async () => (await getCalls(app)).start, { timeout: 5_000 })
-      .toContainEqual('01STOPPEDWS00000000000000WS');
-  } finally {
-    await app.close();
-  }
-});

@@ -242,6 +242,19 @@ body {
   white-space: nowrap;
 }
 .btn:hover { background: var(--bg-card); color: var(--ink); }
+/* "+" button in the top strip: adds a workspace (new or resume), so it's a
+   bare glyph rather than "New workspace" copy (#21). Square, centered. */
+.btn.add-workspace {
+  padding: 0;
+  width: 30px;
+  height: 30px;
+  font-size: 19px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
 .btn.primary {
   background: var(--c2-tint);
   color: var(--ok);
@@ -1347,8 +1360,7 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
   pointer-events: none;
   transition: opacity 120ms ease, filter 120ms ease;
 }
-.paused-overlay,
-.stopped-overlay {
+.paused-overlay {
   position: absolute;
   inset: 0;
   display: flex;
