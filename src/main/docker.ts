@@ -13,7 +13,7 @@
 
 import { app } from 'electron';
 import Docker from 'dockerode';
-import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { Duplex } from 'node:stream';
 import {
@@ -29,7 +29,7 @@ import {
 import type { AuthMode, Workspace, WorkspaceEnv, WorkspaceResources } from './workspaces.js';
 import { FACTORY_MIRROR } from './workspaces.js';
 import { fleetPrivateDir, fleetSharedDir } from './config.js';
-import { mcpSocketPath, CONTAINER_MCP_SOCKET } from './mcpSocket.js';
+import { mcpSocketDir, CONTAINER_MCP_DIR, CONTAINER_MCP_SOCKET } from './mcpSocket.js';
 import { BrokerClient, brokerPtyStream } from './broker.js';
 import { recordPendingAttach } from './pendingAttaches.js';
 import { learnBrokerSessionMapping } from './db.js';
@@ -257,14 +257,51 @@ export async function ensureSharedRemoteSettingsFile(): Promise<string> {
 }
 
 /**
+ * The app-managed `mcpServers` entry seeded into every workspace's
+ * `~/.claude.json` (#12). A user-scope entry is trusted (no approval gate,
+ * unlike a project `.mcp.json`). It bridges claude's stdio MCP client to the
+ * host socket inside the bound `/fleet/mcp` dir.
+ *
+ * It is a *reconnecting* loop, not a bare `socat`: the host owns the socket and
+ * recreates it (new inode) on every app restart, and a paused container
+ * survives that restart — so a one-shot socat would die with the old
+ * connection and claude would mark the MCP server failed. The `forever` keeps
+ * socat retrying the connect while the server is down (e.g. mid-restart); the
+ * `while` restarts socat after an established connection drops. The MCP server
+ * is stateless per-connection, so a reconnected socket serves tool calls
+ * without re-initializing. (#18)
+ */
+function managedMcpServerEntry(): {
+  type: string;
+  command: string;
+  args: string[];
+} {
+  return {
+    type: 'stdio',
+    command: 'sh',
+    args: [
+      '-c',
+      `while :; do socat - "UNIX-CONNECT:${CONTAINER_MCP_SOCKET},forever,interval=1"; sleep 1; done`
+    ]
+  };
+}
+
+/**
  * Ensure the per-workspace `~/.claude.json` seed exists, bind-mounted at
  * `/home/fleet/.claude.json`. claude-code stores its onboarding/account
  * state there (NOT in `~/.claude`), so without persisting it every new
  * container re-runs the theme/trust/setup wizard even when the shared
  * credential is already valid. Seeding `hasCompletedOnboarding` plus trust
- * for the container's working directory skips that wizard. We only seed
- * when the file is absent — once claude runs it owns the file, so restarts
- * and recreations keep the real accumulated state.
+ * for the container's working directory skips that wizard. The onboarding/
+ * account state is only seeded when the file is absent — once claude runs it
+ * owns the file, so restarts and recreations keep the real accumulated state.
+ *
+ * The exception is the app-managed `mcpServers['claude-fleet-state']` entry:
+ * that's our infrastructure, not user state, so we **reconcile it on every
+ * call** (preserving every other key). This is what carries the reconnecting-
+ * bridge fix (#18) onto workspaces created before it landed — when their
+ * container is recreated, the stale one-shot `socat` command is rewritten —
+ * without clobbering claude's accumulated state.
  *
  * `workingDir` is the in-container cwd (matches the container's WorkingDir);
  * claude keys trust acceptance by directory, so the seed must name it.
@@ -275,24 +312,31 @@ export async function ensureWorkspaceClaudeJson(
 ): Promise<string> {
   const filePath = workspaceClaudeJsonPath(id);
   await mkdir(dirname(filePath), { recursive: true });
-  const existing = await stat(filePath).catch(() => null);
-  if (!existing) {
+  const desired = managedMcpServerEntry();
+  const existing = await readFile(filePath, 'utf8').catch(() => null);
+  if (existing === null) {
     const seed = {
       hasCompletedOnboarding: true,
       projects: { [workingDir]: { hasTrustDialogAccepted: true } },
-      // Auto-wire the read-only state-DB MCP server (#12). A user-scope
-      // mcpServers entry in ~/.claude.json is trusted (no approval gate, unlike
-      // a project .mcp.json). `socat` bridges claude's stdio MCP client to the
-      // host socket bound at /fleet/mcp.sock.
-      mcpServers: {
-        'claude-fleet-state': {
-          type: 'stdio',
-          command: 'socat',
-          args: ['-', `UNIX-CONNECT:${CONTAINER_MCP_SOCKET}`]
-        }
-      }
+      mcpServers: { 'claude-fleet-state': desired }
     };
     await writeFile(filePath, JSON.stringify(seed, null, 2), 'utf8');
+    return filePath;
+  }
+  // File exists (claude owns it). Reconcile ONLY our managed mcpServers entry,
+  // leaving everything else byte-for-byte. Tolerate a malformed file — claude
+  // will rewrite it; we never want to fault container creation on a parse error.
+  try {
+    const parsed = JSON.parse(existing) as {
+      mcpServers?: Record<string, unknown>;
+    };
+    const current = parsed.mcpServers?.['claude-fleet-state'];
+    if (JSON.stringify(current) !== JSON.stringify(desired)) {
+      parsed.mcpServers = { ...(parsed.mcpServers ?? {}), 'claude-fleet-state': desired };
+      await writeFile(filePath, JSON.stringify(parsed, null, 2), 'utf8');
+    }
+  } catch {
+    /* malformed claude.json — leave it untouched */
   }
   return filePath;
 }
@@ -342,16 +386,19 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
     `${brokerDir}:/run/broker:rw`
   ];
 
-  // Read-only state-DB MCP server (#12): bind its host socket so in-container
-  // claude can query sessions/events/cost via the `mcpServers` entry seeded in
-  // ~/.claude.json below (a `socat` stdio bridge). `:rw` because connecting to
-  // a Unix socket needs write access — the read-only guarantee is the DB
-  // connection, not the mount. Guarded: if the server isn't up (no socket),
-  // skip the bind so Docker doesn't materialize a bogus directory at the path.
-  const mcpSock = mcpSocketPath(app.getPath('userData'));
-  if (await stat(mcpSock).catch(() => null)) {
-    binds.push(`${mcpSock}:${CONTAINER_MCP_SOCKET}:rw`);
-  }
+  // Read-only state-DB MCP server (#12): bind its host socket DIR (not the
+  // socket file) so in-container claude can query sessions/events/cost via the
+  // `mcpServers` entry seeded in ~/.claude.json below (a reconnecting socat
+  // stdio bridge). Binding the *directory* — like the broker socket above —
+  // means a socket the server recreates with a new inode on app restart is
+  // still visible at the same container path, so a paused container's MCP
+  // survives an app restart (#18). `:rw` because connecting to a Unix socket
+  // needs write access — the read-only guarantee is the DB connection, not the
+  // mount. The dir always exists (startMcpServer mkdirs it; mkdir here too in
+  // case the server hasn't started), so no existence guard is needed.
+  const mcpDir = mcpSocketDir(app.getPath('userData'));
+  await mkdir(mcpDir, { recursive: true });
+  binds.push(`${mcpDir}:${CONTAINER_MCP_DIR}:rw`);
 
   // Persist + pre-complete onboarding. ~/.claude.json lives in $HOME,
   // outside the .claude bind, so without this every new container re-runs

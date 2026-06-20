@@ -1,9 +1,9 @@
 // Read-only MCP server (#12) end-to-end: launch the real app (non-mock so the
 // DB + MCP server start), seed a workspace manifest + a JSONL event for the
-// watcher to ingest, then drive the Unix socket at <userData>/mcp.sock with
-// newline-delimited JSON-RPC — exactly how the in-container `socat` bridge
-// will. Verifies initialize, tools/list, a typed tool, the raw query escape
-// hatch, and that writes are rejected.
+// watcher to ingest, then drive the Unix socket at <userData>/mcp/mcp.sock
+// with newline-delimited JSON-RPC — exactly how the in-container reconnecting
+// socat bridge will. Verifies initialize, tools/list, a typed tool, the raw
+// query escape hatch, and that writes are rejected.
 
 import { _electron as electron, test, expect, type ElectronApplication } from '@playwright/test';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -125,7 +125,7 @@ test('MCP server: initialize, tools, query escape hatch, write rejection', async
     };
     writeFileSync(path.join(projectsDir, `${sessionId}.jsonl`), JSON.stringify(event) + '\n');
 
-    const sock = await connectWithRetry(path.join(userDataDir, 'mcp.sock'));
+    const sock = await connectWithRetry(path.join(userDataDir, 'mcp', 'mcp.sock'));
     client = new RpcClient(sock);
 
     // initialize
