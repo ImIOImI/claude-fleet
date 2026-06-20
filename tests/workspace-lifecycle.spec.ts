@@ -4,7 +4,15 @@
 // backend) or fully-mocked IPC.
 
 import { test, expect } from '@playwright/test';
-import { launch, mockMainIpc, getCalls, openCloseModalFor, activePane } from './_helpers.js';
+import {
+  launch,
+  mockMainIpc,
+  getCalls,
+  openCloseModalFor,
+  activePane,
+  readLogEntries,
+  waitForLogEntry
+} from './_helpers.js';
 
 test('Hamburger Close…: stops and removes a running workspace', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
@@ -197,6 +205,58 @@ test('Pause then Resume via the Close modal (opened from hamburger)', async () =
     await expect(window.getByRole('heading', { name: 'Close workspace' })).toBeHidden();
     await expect(chip.locator('.dot.running')).toBeVisible();
     await expect(chip.locator('.dot.paused')).toBeHidden();
+  } finally {
+    await app.close();
+  }
+});
+
+test('Pause gates the broker attach; Resume re-attaches (#18)', async () => {
+  // Regression guard for "broker: ATTACHED timed out" on reopen-while-paused.
+  // `docker pause` freezes the in-container broker (PID 1). A unix-socket
+  // connect still succeeds (kernel parks it in the listen backlog), so the
+  // host sends ATTACH but the frozen broker never replies ATTACHED — the RPC
+  // hangs the full 30s and fails. The trigger was TerminalSession
+  // auto-attaching one frame after mount regardless of paused state. The fix:
+  // skip the network attach while paused, then re-attach when paused clears.
+  //
+  // Renderer-observable proof (mock backend, since the real frozen-broker
+  // timeout needs Docker): across a pause→resume cycle, exactly ONE new
+  // pty-attach fires for the workspace's container — the resume reattach.
+  // If the gate regressed, a second attach would fire during the paused
+  // window and the count would jump by two.
+  const ALPHA = '01MOCKALPHA000000000000000';
+  const { app, window, userDataDir } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    // Select mock-alpha so its pane is visible and the initial attach lands.
+    await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
+    await waitForLogEntry(
+      userDataDir,
+      (e) => e.type === 'pty-attach' && (e.extra?.containerId as string) === ALPHA
+    );
+    const attachCount = (): number =>
+      readLogEntries(userDataDir).filter(
+        (e) => e.type === 'pty-attach' && (e.extra?.containerId as string) === ALPHA
+      ).length;
+    const baseline = attachCount();
+    expect(baseline).toBeGreaterThanOrEqual(1);
+
+    // Pause via the chip hamburger. The TerminalSession effect re-runs with
+    // paused=true: it sets up xterm but must NOT attach.
+    const group = window.locator('.ws-chip-group', { hasText: 'mock-alpha' });
+    await group.locator('.ws-chip-menu-trigger').click();
+    await window.locator('.ws-chip-menu').getByRole('menuitem', { name: 'Pause' }).click();
+    await expect(window.locator('.paused-overlay')).toBeVisible();
+    // No attach may fire while paused.
+    expect(attachCount()).toBe(baseline);
+
+    // Resume from the overlay → the effect re-runs with paused=false and
+    // re-attaches.
+    await window.locator('.paused-overlay').getByRole('button', { name: 'Resume' }).click();
+    await expect(window.locator('.paused-overlay')).toBeHidden();
+    // Exactly one new attach (the reattach) — generous timeout covers the
+    // unpause refresh + the rAF-deferred attach. Asserting `=== baseline + 1`
+    // (not just `> baseline`) proves no stray attach fired during the pause.
+    await expect.poll(() => attachCount(), { timeout: 8_000 }).toBe(baseline + 1);
   } finally {
     await app.close();
   }

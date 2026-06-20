@@ -86,6 +86,24 @@ export async function waitForLogEntry(
   }
 }
 
+/**
+ * Read every entry currently in the main-process error.log. Returns []
+ * if the file doesn't exist yet. Use for negative/counting assertions
+ * (e.g. "no new pty-attach fired while paused") that waitForLogEntry,
+ * which only waits for presence, can't express.
+ */
+export function readLogEntries(userDataDir: string): LogEntry[] {
+  const logPath = path.join(userDataDir, 'error.log');
+  try {
+    return readFileSync(logPath, 'utf8')
+      .split('\n')
+      .filter((l) => l.length > 0)
+      .map((l) => JSON.parse(l) as LogEntry);
+  } catch {
+    return [];
+  }
+}
+
 export async function launch(
   envOverrides: Record<string, string> = {}
 ): Promise<{ app: ElectronApplication; window: Page; userDataDir: string }> {
