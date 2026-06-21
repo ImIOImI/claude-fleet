@@ -19,8 +19,19 @@ export const DROP_DIRS = ['skills', 'commands', 'agents', 'rules', 'output-style
 
 export interface LoadoutScript {
   label: string;
+  /** Inline shell command. */
   run?: string;
+  /** Path (within the loadout folder) to a script whose contents are run. */
   file?: string;
+  /** Skip-guard: a shell check; if it exits 0, the script is skipped. */
+  unless?: string;
+}
+
+export interface ScriptResult {
+  label: string;
+  status: 'ran' | 'skipped' | 'failed';
+  exitCode?: number;
+  output?: string;
 }
 export interface LoadoutPrompt {
   label: string;
@@ -322,6 +333,47 @@ export async function revertLoadoutMerges(
       else await writeFile(target, JSON.stringify(cur, null, 2) + '\n', 'utf8');
     }
   }
+}
+
+/**
+ * Run a loadout's setup `scripts` via an injected `run` (the docker-exec runner
+ * lives in loadouts.ts, keeping this pure + testable). Each script: resolve the
+ * command (inline `run` or the contents of `file`), honor an `unless` skip-guard
+ * (exit 0 ⇒ skip), then run it. Returns per-script results; never throws (a
+ * thrown runner is the caller's concern — pass one that resolves to a non-zero
+ * exit). Scripts have side effects and are NOT reverted on uninstall.
+ */
+export async function runLoadoutScripts(
+  srcDir: string,
+  scripts: LoadoutScript[] | undefined,
+  run: (command: string) => Promise<{ exitCode: number; output: string }>
+): Promise<ScriptResult[]> {
+  const results: ScriptResult[] = [];
+  for (const s of scripts ?? []) {
+    let command = s.run;
+    if (!command && s.file) {
+      command = (await readFile(join(srcDir, s.file), 'utf8').catch(() => undefined)) || undefined;
+    }
+    if (!command || !command.trim()) {
+      results.push({ label: s.label, status: 'skipped' });
+      continue;
+    }
+    if (s.unless && s.unless.trim()) {
+      const u = await run(s.unless);
+      if (u.exitCode === 0) {
+        results.push({ label: s.label, status: 'skipped' });
+        continue;
+      }
+    }
+    const r = await run(command);
+    results.push({
+      label: s.label,
+      status: r.exitCode === 0 ? 'ran' : 'failed',
+      exitCode: r.exitCode,
+      output: r.output
+    });
+  }
+  return results;
 }
 
 /** Preview what a loadout would merge (for the review modal). */

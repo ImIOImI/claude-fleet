@@ -11,6 +11,7 @@ import {
   revertLoadoutFiles,
   applyLoadoutMerges,
   revertLoadoutMerges,
+  runLoadoutScripts,
   stripBlock
 } from './loadoutCore.js';
 
@@ -176,6 +177,42 @@ describe('applyLoadoutMerges / revertLoadoutMerges', () => {
     expect(rec.mcpServers).toEqual([]);
     expect(JSON.parse(await readFile(join(target, '.claude/settings.json'), 'utf8')).model).toBe('opus');
     expect(JSON.parse(await readFile(join(target, '.mcp.json'), 'utf8')).mcpServers.dup.command).toBe('old');
+  });
+});
+
+describe('runLoadoutScripts', () => {
+  it('honors `unless` (skip), runs commands, and reports failures', async () => {
+    const calls: string[] = [];
+    const run = async (cmd: string) => {
+      calls.push(cmd);
+      if (cmd === 'command -v cargo') return { exitCode: 0, output: '' }; // already present
+      if (cmd === 'fail-me') return { exitCode: 1, output: 'boom' };
+      return { exitCode: 0, output: 'ok' };
+    };
+    const res = await runLoadoutScripts(
+      src,
+      [
+        { label: 'install rust', run: 'curl rustup', unless: 'command -v cargo' },
+        { label: 'setup', run: 'do-setup' },
+        { label: 'broken', run: 'fail-me' }
+      ],
+      run
+    );
+    expect(res[0]).toMatchObject({ label: 'install rust', status: 'skipped' });
+    expect(res[1]).toMatchObject({ label: 'setup', status: 'ran', exitCode: 0 });
+    expect(res[2]).toMatchObject({ label: 'broken', status: 'failed', exitCode: 1 });
+    expect(calls).not.toContain('curl rustup'); // unless passed → never ran
+  });
+
+  it('resolves a `file` script from the loadout folder', async () => {
+    await write(join(src, 'scripts', 'setup.sh'), 'echo hi');
+    const res = await runLoadoutScripts(
+      src,
+      [{ label: 'file script', file: 'scripts/setup.sh' }],
+      async (cmd) => ({ exitCode: 0, output: cmd })
+    );
+    expect(res[0]).toMatchObject({ label: 'file script', status: 'ran' });
+    expect(res[0].output).toContain('echo hi'); // the file's contents became the command
   });
 });
 

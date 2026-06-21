@@ -15,7 +15,7 @@ import { app } from 'electron';
 import Docker from 'dockerode';
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import type { Duplex } from 'node:stream';
+import { Writable, type Duplex } from 'node:stream';
 import {
   assertValidWorkspaceId,
   sharedClaudeCredentialsPath,
@@ -740,4 +740,40 @@ export async function getBrokerLogs(
   } catch {
     return '';
   }
+}
+
+/**
+ * Run a shell command inside a workspace's (running) container and capture its
+ * combined output + exit code. Used by the loadout run layer (#16) for a
+ * loadout's setup `scripts`. Runs `sh -lc <command>` as the container user in
+ * `/workspace`. Throws if the container isn't found/running.
+ */
+export async function runInWorkspace(
+  workspaceId: string,
+  command: string
+): Promise<{ exitCode: number; output: string }> {
+  const found = await findContainerById(workspaceId);
+  if (!found) throw new Error(`no container for workspace ${workspaceId}`);
+  const container = docker.getContainer(found.Id);
+  const exec = await container.exec({
+    Cmd: ['sh', '-lc', command],
+    WorkingDir: '/workspace',
+    AttachStdout: true,
+    AttachStderr: true
+  });
+  const stream = await exec.start({ hijack: true, stdin: false });
+  let output = '';
+  await new Promise<void>((resolve, reject) => {
+    const sink = new Writable({
+      write(chunk, _enc, cb) {
+        output += chunk.toString('utf8');
+        cb();
+      }
+    });
+    container.modem.demuxStream(stream, sink, sink);
+    stream.on('end', resolve);
+    stream.on('error', reject);
+  });
+  const info = await exec.inspect();
+  return { exitCode: info.ExitCode ?? -1, output };
 }
