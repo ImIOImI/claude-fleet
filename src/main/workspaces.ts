@@ -70,6 +70,27 @@ export interface WorkspaceMirror {
 
 export const FACTORY_MIRROR: WorkspaceMirror = { default: 'on', cleanup: 'delete' };
 
+/**
+ * Record of one loadout installed into a workspace (#16-followup). Tracks the
+ * exact things applied so uninstall reverts precisely: dropped files (deleted),
+ * and merges (the CLAUDE.md block, the settings.json keys, the .mcp.json server
+ * names, the hook ids we added). `merges` is reserved for the PR2 merge layer;
+ * PR1 only writes `files` + `merges.claudeMd`.
+ */
+export interface InstalledLoadout {
+  id: string;
+  title: string;
+  /** Workspace-relative paths this loadout dropped (deleted on uninstall). */
+  files: string[];
+  merges?: {
+    claudeMd?: boolean;
+    settingsKeys?: string[];
+    mcpServers?: string[];
+    hooks?: string[];
+  };
+  installedAt: number;
+}
+
 export interface WorkspaceSpec {
   /** ULID; identity, immutable. */
   id: string;
@@ -88,6 +109,8 @@ export interface WorkspaceSpec {
   resources?: WorkspaceResources;
   /** Durable-transcript-mirror defaults. Factory `on`/`delete` when absent. */
   mirror: WorkspaceMirror;
+  /** Loadouts installed into this workspace (#16-followup). Absent ⇒ none. */
+  installedLoadouts?: InstalledLoadout[];
   createdAt: number;
   lastUsedAt: number;
 }
@@ -141,6 +164,7 @@ export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec |
         default: parsed.mirror?.default === 'off' ? 'off' : FACTORY_MIRROR.default,
         cleanup: parsed.mirror?.cleanup === 'preserve' ? 'preserve' : FACTORY_MIRROR.cleanup
       },
+      installedLoadouts: Array.isArray(parsed.installedLoadouts) ? parsed.installedLoadouts : [],
       createdAt: parsed.createdAt ?? Date.now(),
       lastUsedAt: parsed.lastUsedAt ?? parsed.createdAt ?? Date.now()
     };

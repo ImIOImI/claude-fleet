@@ -432,6 +432,15 @@ The old `__profiles__:*` keytar shape (global per-profile API keys) is gone. The
 
 Values are read from the renderer only on explicit `vault:getSecret`; during normal operation, the main process consumes them directly via `resolveEnv` when constructing the container env (not round-tripped through the UI).
 
+### Loadout library (#16-followup)
+A **loadout** is a reusable, machine-parseable bundle of Claude config the user installs into a workspace on demand. Authored loadouts live at `<userData>/loadouts/<id>/`, each a folder with a `loadout.md` (**YAML frontmatter + markdown body** — the Claude-Code idiom, so a Claude instance parses it natively):
+- **Frontmatter** = `title`, `description` (the relevance signal), `tags`, `dependencies {loadouts[], tools[]}`, `scripts[] {label, run|file}`, `prompts[] {label, send|file}`. **Body** = install-instructions prose.
+- **Convention-mapped files**: anything under `skills/ commands/ agents/ rules/ output-styles/` plus a root `CLAUDE.md` is part of the bundle — no need to list files.
+
+**Apply model** (drives install + uninstall): **① drop** — convention files copied into the workspace's project root `.claude/` (for a container that's `<fleetRoot>/<id>/.claude/`, claude's cwd); **② merge** — `CLAUDE.md` appended as a marked `<!-- loadout:<id> start/end -->` block, and (PR2) `settings.json`/`.mcp.json`/hooks deep-merged; **③ run** — (PR2) `scripts` (via `docker exec`), `prompts` (sent to the session), hooks. Install is **collision-safe** (an existing file we didn't write is skipped + reported, never clobbered) and **container-only** in v1 (a local workspace runs in the user's real repo). `WorkspaceSpec.installedLoadouts[]` records the exact dropped files + merges so **uninstall reverts precisely** and keeps anything edited after install.
+
+The pure engine is `src/main/loadoutCore.ts` (parse + apply/revert; fs+yaml only, unit-tested); `src/main/loadouts.ts` is the electron-aware wrapper (resolve `loadoutsRoot`/`fleetPrivateDir`, manifest read/write, `ensureBuiltinLoadouts` seeds 2 starters on first run). Forthcoming: read-only MCP `list_loadouts`/`get_loadout` tools so a workspace's Claude can discover + judge relevance (recommend-only install in v1), the left-rail Library UI + review-before-install modal, and the authoring modal — see §11.
+
 ## 8. User flows
 
 ### Startup
@@ -579,6 +588,8 @@ claude-fleet/
     │   ├── local.ts                   # local host-process backend (#16: node-pty spawn, lifecycle, HOME/auth)
     │   ├── localSessions.ts           # in-process session manager for local PTYs (broker analog, #16)
     │   ├── mcpLocalBridge.ts          # stdio↔socket MCP bridge for local workspaces, run via Electron-as-node (#16)
+    │   ├── loadoutCore.ts             # pure loadout engine: parse loadout.md + apply/revert files (fs+yaml; unit-tested)
+    │   ├── loadouts.ts                # loadout library: list/get/install/uninstall + built-in starters (#16-followup)
     │   ├── broker.ts                  # host-side BrokerClient + frame codec
     │   ├── mock.ts                    # mock backend behind CLAUDE_FLEET_MOCK=1
     │   ├── workspaces.ts              # WorkspaceSpec types + manifest read/write/list

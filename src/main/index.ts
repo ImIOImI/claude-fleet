@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { registerIpc } from './ipc.js';
 import { openDb, closeDb } from './db.js';
 import { startMcpServer, stopMcpServer } from './mcpServer.js';
+import { ensureBuiltinLoadouts } from './loadouts.js';
 import { JsonlWatcher } from './jsonlWatcher.js';
 import { listWorkspaceManifests } from './workspaces.js';
 import { installMainProcessHandlers, getLogPath } from './errorLog.js';
@@ -68,6 +69,10 @@ app.whenReady().then(async () => {
   // Clean-slate migration to the ULID-keyed workspace model. Runs every
   // boot but no-ops once everything's already on the new shape.
   await runStartupMigration();
+
+  // Seed the built-in loadout starters if the library doesn't exist yet
+  // (#16-followup). Idempotent; non-fatal — a seeding hiccup must not block launch.
+  await ensureBuiltinLoadouts().catch((e) => console.warn('[loadouts] seed failed:', e));
 
   if (jsonlWatcher) {
     openDb(app.getPath('userData'));

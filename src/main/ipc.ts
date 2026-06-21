@@ -26,6 +26,8 @@ import { resolveKind } from './backendRouter.js';
 import * as vault from './vault.js';
 import * as fs from './fs.js';
 import * as imageLibrary from './imageLibrary.js';
+import * as loadouts from './loadouts.js';
+import { loadoutDir } from './paths.js';
 import * as sessions from './sessions.js';
 import {
   listWorkspaceManifests,
@@ -498,6 +500,21 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('fs:openPath', async (_e, path: string) => {
     if (typeof path !== 'string' || path.length === 0) return 'No path provided';
     return RUNNING_IN_WSL ? openPathViaExplorer(path) : shell.openPath(path);
+  });
+
+  // ── Loadout library (#16-followup) ───────────────────────────────────────
+  ipcMain.handle('loadouts:list', () => loadouts.listLoadouts());
+  ipcMain.handle('loadouts:get', (_e, id: string) => loadouts.getLoadout(id));
+  ipcMain.handle('loadouts:install', (_e, workspaceId: string, loadoutId: string) =>
+    loadouts.installLoadout(workspaceId, loadoutId)
+  );
+  ipcMain.handle('loadouts:uninstall', (_e, workspaceId: string, loadoutId: string) =>
+    loadouts.uninstallLoadout(workspaceId, loadoutId)
+  );
+  // Reveal a loadout's source folder in the OS file manager (review-modal action).
+  ipcMain.handle('loadouts:openFolder', async (_e, id: string) => {
+    const dir = loadoutDir(id);
+    return RUNNING_IN_WSL ? openPathViaExplorer(dir) : shell.openPath(dir);
   });
 
   // App-level settings. The fleet root is the single host dir holding every
