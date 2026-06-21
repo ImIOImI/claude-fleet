@@ -189,6 +189,158 @@ export async function applyLoadoutFiles(
   return { files, claudeMd, skipped };
 }
 
+// ── Merge layer: settings.json / .mcp.json / hooks (#16-followup) ──────────
+// JSON config a loadout blends into the workspace, tracked so uninstall reverts
+// exactly what was added. settings.json merges at TOP-LEVEL-KEY granularity
+// (add a key only if absent; collisions are skipped + reported — no deep merge
+// into an existing key in v1). `.mcp.json` merges named servers. Hooks append
+// per-event entries (tracked by value). The loadout's hooks come from a
+// dedicated `hooks.json` ({ <event>: [entries] }) and/or settings.json's `hooks`.
+
+export interface MergeRecord {
+  settingsKeys: string[];
+  mcpServers: string[];
+  hooks: { event: string; entry: unknown }[];
+  skipped: string[];
+}
+
+async function readJson(path: string): Promise<Record<string, unknown> | null> {
+  try {
+    return JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function isObj(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+/** Collect `{ <event>: [entries] }` hook objects into one event→entries map. */
+function collectHookEntries(src: unknown, into: Record<string, unknown[]>): void {
+  if (!isObj(src)) return;
+  for (const [event, entries] of Object.entries(src)) {
+    if (Array.isArray(entries)) (into[event] ??= []).push(...entries);
+  }
+}
+
+/** Merge a loadout's settings.json / .mcp.json / hooks.json into `targetDir`. */
+export async function applyLoadoutMerges(srcDir: string, targetDir: string): Promise<MergeRecord> {
+  const settingsKeys: string[] = [];
+  const mcpServers: string[] = [];
+  const hooks: { event: string; entry: unknown }[] = [];
+  const skipped: string[] = [];
+
+  const srcSettings = await readJson(join(srcDir, 'settings.json'));
+  const hookEntries: Record<string, unknown[]> = {};
+  collectHookEntries(await readJson(join(srcDir, 'hooks.json')), hookEntries);
+  if (srcSettings) collectHookEntries(srcSettings.hooks, hookEntries);
+
+  const nonHookKeys = srcSettings ? Object.keys(srcSettings).filter((k) => k !== 'hooks') : [];
+  if (nonHookKeys.length > 0 || Object.keys(hookEntries).length > 0) {
+    const target = join(targetDir, '.claude', 'settings.json');
+    const cur = (await readJson(target)) ?? {};
+    for (const k of nonHookKeys) {
+      if (k in cur) {
+        skipped.push(`settings.json:${k}`);
+        continue;
+      }
+      cur[k] = srcSettings![k];
+      settingsKeys.push(k);
+    }
+    if (Object.keys(hookEntries).length > 0) {
+      const curHooks = isObj(cur.hooks) ? (cur.hooks as Record<string, unknown[]>) : {};
+      for (const [event, entries] of Object.entries(hookEntries)) {
+        if (!Array.isArray(curHooks[event])) curHooks[event] = [];
+        for (const entry of entries) {
+          curHooks[event].push(entry);
+          hooks.push({ event, entry });
+        }
+      }
+      cur.hooks = curHooks;
+    }
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, JSON.stringify(cur, null, 2) + '\n', 'utf8');
+  }
+
+  const srcMcp = await readJson(join(srcDir, '.mcp.json'));
+  const srcServers = srcMcp && isObj(srcMcp.mcpServers) ? srcMcp.mcpServers : null;
+  if (srcServers && Object.keys(srcServers).length > 0) {
+    const target = join(targetDir, '.mcp.json');
+    const cur = (await readJson(target)) ?? {};
+    const curServers = isObj(cur.mcpServers) ? (cur.mcpServers as Record<string, unknown>) : {};
+    for (const [name, def] of Object.entries(srcServers)) {
+      if (name in curServers) {
+        skipped.push(`.mcp.json:${name}`);
+        continue;
+      }
+      curServers[name] = def;
+      mcpServers.push(name);
+    }
+    cur.mcpServers = curServers;
+    await writeFile(target, JSON.stringify(cur, null, 2) + '\n', 'utf8');
+  }
+
+  return { settingsKeys, mcpServers, hooks, skipped };
+}
+
+/** Reverse applyLoadoutMerges: remove exactly the keys/servers/hook entries added. */
+export async function revertLoadoutMerges(
+  targetDir: string,
+  merges: { settingsKeys?: string[]; mcpServers?: string[]; hooks?: { event: string; entry: unknown }[] }
+): Promise<void> {
+  if ((merges.settingsKeys?.length ?? 0) > 0 || (merges.hooks?.length ?? 0) > 0) {
+    const target = join(targetDir, '.claude', 'settings.json');
+    const cur = await readJson(target);
+    if (cur) {
+      for (const k of merges.settingsKeys ?? []) delete cur[k];
+      if ((merges.hooks?.length ?? 0) > 0 && isObj(cur.hooks)) {
+        const curHooks = cur.hooks as Record<string, unknown[]>;
+        for (const { event, entry } of merges.hooks!) {
+          const arr = curHooks[event];
+          if (Array.isArray(arr)) {
+            const idx = arr.findIndex((e) => JSON.stringify(e) === JSON.stringify(entry));
+            if (idx >= 0) arr.splice(idx, 1);
+            if (arr.length === 0) delete curHooks[event];
+          }
+        }
+        if (Object.keys(curHooks).length === 0) delete cur.hooks;
+      }
+      if (Object.keys(cur).length === 0) await rm(target, { force: true });
+      else await writeFile(target, JSON.stringify(cur, null, 2) + '\n', 'utf8');
+    }
+  }
+
+  if ((merges.mcpServers?.length ?? 0) > 0) {
+    const target = join(targetDir, '.mcp.json');
+    const cur = await readJson(target);
+    if (cur && isObj(cur.mcpServers)) {
+      const curServers = cur.mcpServers as Record<string, unknown>;
+      for (const name of merges.mcpServers!) delete curServers[name];
+      if (Object.keys(curServers).length === 0) delete cur.mcpServers;
+      if (Object.keys(cur).length === 0) await rm(target, { force: true });
+      else await writeFile(target, JSON.stringify(cur, null, 2) + '\n', 'utf8');
+    }
+  }
+}
+
+/** Preview what a loadout would merge (for the review modal). */
+export async function loadoutMergePreview(
+  srcDir: string
+): Promise<{ settingsKeys: string[]; mcpServers: string[]; hookEvents: string[] }> {
+  const srcSettings = await readJson(join(srcDir, 'settings.json'));
+  const hookEntries: Record<string, unknown[]> = {};
+  collectHookEntries(await readJson(join(srcDir, 'hooks.json')), hookEntries);
+  if (srcSettings) collectHookEntries(srcSettings.hooks, hookEntries);
+  const srcMcp = await readJson(join(srcDir, '.mcp.json'));
+  const srcServers = srcMcp && isObj(srcMcp.mcpServers) ? srcMcp.mcpServers : {};
+  return {
+    settingsKeys: srcSettings ? Object.keys(srcSettings).filter((k) => k !== 'hooks') : [],
+    mcpServers: Object.keys(srcServers),
+    hookEvents: Object.keys(hookEntries)
+  };
+}
+
 /** Reverse applyLoadoutFiles: delete the dropped files + strip the CLAUDE.md block. */
 export async function revertLoadoutFiles(
   targetDir: string,

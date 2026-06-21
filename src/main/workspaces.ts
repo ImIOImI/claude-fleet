@@ -83,10 +83,15 @@ export interface InstalledLoadout {
   /** Workspace-relative paths this loadout dropped (deleted on uninstall). */
   files: string[];
   merges?: {
+    /** Appended a marked block to the workspace CLAUDE.md. */
     claudeMd?: boolean;
+    /** Top-level keys added to .claude/settings.json. */
     settingsKeys?: string[];
+    /** Server names added to .mcp.json's mcpServers. */
     mcpServers?: string[];
-    hooks?: string[];
+    /** Hook entries appended to settings.hooks, tracked by event + value for
+     *  exact removal on uninstall. */
+    hooks?: { event: string; entry: unknown }[];
   };
   installedAt: number;
 }

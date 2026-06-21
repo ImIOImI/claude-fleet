@@ -9,6 +9,8 @@ import {
   parseLoadout,
   applyLoadoutFiles,
   revertLoadoutFiles,
+  applyLoadoutMerges,
+  revertLoadoutMerges,
   stripBlock
 } from './loadoutCore.js';
 
@@ -122,6 +124,58 @@ describe('applyLoadoutFiles / revertLoadoutFiles', () => {
     await applyLoadoutFiles(src, target, 'rust-pro');
     const cm = await readFile(join(target, 'CLAUDE.md'), 'utf8');
     expect(cm.match(/loadout:rust-pro start/g)).toHaveLength(1);
+  });
+});
+
+describe('applyLoadoutMerges / revertLoadoutMerges', () => {
+  it('merges settings keys, mcp servers, and hooks; revert removes exactly those, keeping user content', async () => {
+    await write(
+      join(src, 'settings.json'),
+      JSON.stringify({
+        statusLine: { type: 'command', command: 'echo hi' },
+        hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo pre' }] }] }
+      })
+    );
+    await write(join(src, '.mcp.json'), JSON.stringify({ mcpServers: { mytool: { command: 'x' } } }));
+    // pre-existing user settings (a model + their own hook)
+    await write(
+      join(target, '.claude', 'settings.json'),
+      JSON.stringify({ model: 'opus', hooks: { PreToolUse: [{ matcher: 'Edit', hooks: [] }] } })
+    );
+
+    const rec = await applyLoadoutMerges(src, target);
+    expect(rec.settingsKeys).toEqual(['statusLine']);
+    expect(rec.mcpServers).toEqual(['mytool']);
+    expect(rec.hooks).toHaveLength(1);
+
+    const s = JSON.parse(await readFile(join(target, '.claude/settings.json'), 'utf8'));
+    expect(s.model).toBe('opus'); // user key preserved
+    expect(s.statusLine).toBeDefined();
+    expect(s.hooks.PreToolUse).toHaveLength(2); // user's + loadout's
+    const mcp = JSON.parse(await readFile(join(target, '.mcp.json'), 'utf8'));
+    expect(mcp.mcpServers.mytool).toBeDefined();
+
+    await revertLoadoutMerges(target, rec);
+    const s2 = JSON.parse(await readFile(join(target, '.claude/settings.json'), 'utf8'));
+    expect(s2.model).toBe('opus'); // user content survives
+    expect(s2.statusLine).toBeUndefined();
+    expect(s2.hooks.PreToolUse).toHaveLength(1); // back to the user's hook only
+    // .mcp.json held only the loadout's server → removed entirely on revert
+    expect(await present(join(target, '.mcp.json'))).toBe(false);
+  });
+
+  it('skips a colliding settings key / mcp server without overwriting', async () => {
+    await write(join(src, 'settings.json'), JSON.stringify({ model: 'sonnet' }));
+    await write(join(src, '.mcp.json'), JSON.stringify({ mcpServers: { dup: { command: 'new' } } }));
+    await write(join(target, '.claude', 'settings.json'), JSON.stringify({ model: 'opus' }));
+    await write(join(target, '.mcp.json'), JSON.stringify({ mcpServers: { dup: { command: 'old' } } }));
+
+    const rec = await applyLoadoutMerges(src, target);
+    expect(rec.skipped).toEqual(expect.arrayContaining(['settings.json:model', '.mcp.json:dup']));
+    expect(rec.settingsKeys).toEqual([]);
+    expect(rec.mcpServers).toEqual([]);
+    expect(JSON.parse(await readFile(join(target, '.claude/settings.json'), 'utf8')).model).toBe('opus');
+    expect(JSON.parse(await readFile(join(target, '.mcp.json'), 'utf8')).mcpServers.dup.command).toBe('old');
   });
 });
 
