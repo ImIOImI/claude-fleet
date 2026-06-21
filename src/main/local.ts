@@ -12,8 +12,7 @@
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, readFile, writeFile, rm, symlink, unlink, stat } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { rm } from 'node:fs/promises';
 import type * as NodePty from 'node-pty';
 import type { Backend } from './backend.js';
 import {
@@ -30,20 +29,12 @@ import type {
   PtyHandle,
   RemoveWorkspaceOpts
 } from './docker.js';
-import { ensureSharedCredentialsFile } from './docker.js';
-import {
-  workspaceStateDir,
-  workspaceClaudeDir,
-  workspaceLocalClaudeJsonPath,
-  sharedClaudeCredentialsPath,
-  assertValidWorkspaceId
-} from './paths.js';
+import { workspaceStateDir, assertValidWorkspaceId } from './paths.js';
 import { resolveEnv } from './vault.js';
 import {
   attachLocalSession,
   killWorkspaceSessions,
   signalWorkspaceSessions,
-  hasLiveSessions,
   type SpawnPty
 } from './localSessions.js';
 
@@ -96,45 +87,20 @@ async function findClaude(): Promise<string | null> {
 }
 
 /**
- * Seed the per-workspace `$HOME/.claude.json` so a local `claude` skips the
- * onboarding/trust wizard for its working dir. Mirrors the container backend's
- * `ensureWorkspaceClaudeJson` minus the MCP entry (wired in PR3). Seeded only
- * when absent — claude owns the file once it runs.
+ * Build the spawn env. A *local* workspace IS the user's host claude, so it
+ * inherits the real host environment — crucially `HOME`, so claude uses the
+ * existing host login, already-approved managed settings (the OTEL gate), and
+ * its real install under `~/.local/bin`. We deliberately do NOT isolate `HOME`:
+ * an isolated home re-triggered the managed-settings approval gate on every
+ * workspace and made claude warn that `$HOME/.local/bin/claude` was missing.
+ * The workspace's resolved env (e.g. a per-workspace `ANTHROPIC_API_KEY`) is
+ * layered on top.
  */
-async function ensureLocalClaudeJson(id: string, workingDir: string): Promise<void> {
-  const filePath = workspaceLocalClaudeJsonPath(id);
-  await mkdir(dirname(filePath), { recursive: true });
-  if (await stat(filePath).catch(() => null)) return;
-  const seed = {
-    hasCompletedOnboarding: true,
-    projects: { [workingDir]: { hasTrustDialogAccepted: true } }
-  };
-  await writeFile(filePath, JSON.stringify(seed, null, 2), 'utf8');
-}
-
-/**
- * For OAuth workspaces, point `$HOME/.claude/.credentials.json` at the shared
- * fleet credentials file (the same one container OAuth workspaces bind), so a
- * single Claude.ai login covers local + container workspaces alike.
- */
-async function linkSharedCredentials(id: string): Promise<void> {
-  const shared = await ensureSharedCredentialsFile();
-  const claudeDir = workspaceClaudeDir(id);
-  await mkdir(claudeDir, { recursive: true });
-  const target = sharedClaudeCredentialsPath();
-  const link = `${claudeDir}/.credentials.json`;
-  // Replace whatever's there with a symlink to the shared file (idempotent).
-  await unlink(link).catch(() => undefined);
-  await symlink(target, link).catch(() => undefined);
-}
-
-/** Build the spawn env: host env (for PATH) + resolved secrets, HOME isolated. */
 async function buildEnv(id: string, ws: { env: Workspace['env'] }): Promise<NodeJS.ProcessEnv> {
   const resolved = await resolveEnv(id, ws.env.plain, ws.env.secretKeys);
   return {
     ...process.env,
     ...resolved,
-    HOME: workspaceStateDir(id),
     TERM: 'xterm-256color'
   };
 }
@@ -180,11 +146,9 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
   if (!workingDir) {
     throw new Error('local workspace requires a working directory');
   }
-  await mkdir(workspaceClaudeDir(spec.id), { recursive: true });
-  await ensureLocalClaudeJson(spec.id, workingDir);
-  if (spec.authMode === 'oauth') {
-    await linkSharedCredentials(spec.id);
-  }
+  // Nothing to provision on disk: local claude uses the host's real ~/.claude
+  // (login, settings, install) and runs in `workingDir`. The manifest is
+  // written by the ipc create handler. Processes spawn lazily on first attach.
   started.add(spec.id);
   paused.delete(spec.id);
   const now = Date.now();
