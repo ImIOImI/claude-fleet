@@ -202,6 +202,16 @@ const api = {
     /** Reveal a host path in the OS file manager. Resolves '' on success, else an error string. */
     openPath: (path: string): Promise<string> => ipcRenderer.invoke('fs:openPath', path)
   },
+  loadouts: {
+    /** Loadout library (#16-followup): browse, inspect, install/uninstall. */
+    list: (): Promise<unknown[]> => ipcRenderer.invoke('loadouts:list'),
+    get: (id: string): Promise<unknown> => ipcRenderer.invoke('loadouts:get', id),
+    openFolder: (id: string): Promise<string> => ipcRenderer.invoke('loadouts:openFolder', id),
+    install: (workspaceId: string, loadoutId: string): Promise<unknown> =>
+      ipcRenderer.invoke('loadouts:install', workspaceId, loadoutId),
+    uninstall: (workspaceId: string, loadoutId: string): Promise<void> =>
+      ipcRenderer.invoke('loadouts:uninstall', workspaceId, loadoutId)
+  },
   config: {
     /** App-level settings: the fleet root, its derived shared folder, and the
      *  hardware-acceleration toggle. */
