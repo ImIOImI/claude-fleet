@@ -93,6 +93,24 @@ describe('attachLocalSession', () => {
     expect(t.calls[0].args).toEqual(['--resume', 'uuid-9']);
   });
 
+  it('prepends --mcp-config before --resume when both are set', () => {
+    const t = tracker();
+    attachLocalSession({
+      ...base,
+      workspaceId: 'ws1',
+      sessionId: 's1',
+      mcpConfigPath: '/state/ws1/mcp-config.json',
+      resumeOf: 'uuid-9',
+      spawn: t.spawn
+    });
+    expect(t.calls[0].args).toEqual([
+      '--mcp-config',
+      '/state/ws1/mcp-config.json',
+      '--resume',
+      'uuid-9'
+    ]);
+  });
+
   it('forwards stream writes to the pty and resize to the proc', async () => {
     const t = tracker();
     const h = attachLocalSession({ ...base, workspaceId: 'ws1', sessionId: 's1', spawn: t.spawn });
