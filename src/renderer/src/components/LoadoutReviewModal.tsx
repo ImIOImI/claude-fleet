@@ -169,8 +169,8 @@ export function LoadoutReviewModal({
 
             {!installed && installable && (
               <p className="lr-hint">
-                Loads on the next Claude session. Resume this workspace's session (Sessions list) to
-                load it without losing the conversation.
+                Claude reads config at session start, so this loads on the next Claude session in
+                this workspace. (One-click “reload current session” is coming.)
               </p>
             )}
             {error && <div className="error-text">{error}</div>}
