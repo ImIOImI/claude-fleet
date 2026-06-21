@@ -19,7 +19,10 @@ import {
   setHardwareAccelDisabled
 } from './config.js';
 import * as realDocker from './docker.js';
+import * as realLocal from './local.js';
 import * as mockDocker from './mock.js';
+import type { Backend } from './backend.js';
+import { resolveKind } from './backendRouter.js';
 import * as vault from './vault.js';
 import * as fs from './fs.js';
 import * as imageLibrary from './imageLibrary.js';
@@ -37,6 +40,7 @@ import {
   type WorkspaceColor,
   type AuthMode,
   type WorkspaceMirror,
+  type WorkspaceKind,
   FACTORY_MIRROR
 } from './workspaces.js';
 import type { PtyHandle, RemoveWorkspaceOpts } from './docker.js';
@@ -58,7 +62,22 @@ import { broadcastObservabilitySummary } from './observabilityBroadcast.js';
 import { consumeForWorkspace, recordPendingAttach } from './pendingAttaches.js';
 
 export const MOCK_MODE = process.env.CLAUDE_FLEET_MOCK === '1';
-const backend = MOCK_MODE ? mockDocker : realDocker;
+
+// Per-workspace backend dispatch (#16). A workspace's `kind` decides whether
+// it's a Docker container or a host process; the two backends share the
+// `Backend` contract. In mock mode everything routes to the mock backend.
+const dockerBackend: Backend = MOCK_MODE ? mockDocker : realDocker;
+const localBackend: Backend = MOCK_MODE ? mockDocker : realLocal;
+
+function backendForKind(kind: WorkspaceKind): Backend {
+  if (MOCK_MODE) return mockDocker;
+  return kind === 'local' ? localBackend : dockerBackend;
+}
+
+async function backendFor(idOrContainerId: string): Promise<Backend> {
+  if (MOCK_MODE) return mockDocker;
+  return backendForKind(await resolveKind(idOrContainerId));
+}
 
 const ptySessions = new Map<string, PtyHandle>();
 
@@ -136,10 +155,12 @@ interface WorkspaceCreatePayload {
  * (description/labels/color/env/etc.) that don't live on the container.
  */
 async function listAllWorkspaces(): Promise<Workspace[]> {
-  const [live, manifests] = await Promise.all([
-    backend.listLiveWorkspaces(),
+  const [dockerLive, localLive, manifests] = await Promise.all([
+    dockerBackend.listLiveWorkspaces(),
+    localBackend.listLiveWorkspaces(),
     listWorkspaceManifests()
   ]);
+  const live = [...dockerLive, ...localLive];
   const manifestById = new Map(manifests.map((m) => [m.id, m]));
   const result: Workspace[] = [];
 
@@ -153,10 +174,15 @@ async function listAllWorkspaces(): Promise<Workspace[]> {
       description: m?.description,
       labels: m?.labels ?? w.labels,
       color: m?.color,
-      // workspaceRoot is always the canonical private folder derived from the
-      // fleet root + id — never trust stale labels/manifests (a container
-      // created before the fleet-root migration still carries the old path).
-      workspaceRoot: await fleetPrivateDir(w.id),
+      // Container: workspaceRoot is always the canonical private folder derived
+      // from the fleet root + id — never trust stale labels/manifests (a
+      // container created before the fleet-root migration still carries the old
+      // path). Local: the user picked an existing host dir, so honor the
+      // manifest's workspaceRoot (#16).
+      workspaceRoot:
+        w.kind === 'local'
+          ? m?.workspaceRoot ?? w.workspaceRoot
+          : await fleetPrivateDir(w.id),
       workspaceSubdir: w.workspaceSubdir || m?.workspaceSubdir || '',
       authMode: m?.authMode ?? w.authMode,
       env: m?.env ?? w.env,
@@ -209,10 +235,12 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     });
   }
 
-  ipcMain.handle('workspace:ping', () => backend.ping());
+  // Docker-daemon reachability (drives the #23 indicator) and image pulls are
+  // Docker-specific; local workspaces need neither.
+  ipcMain.handle('workspace:ping', () => dockerBackend.ping());
   ipcMain.handle('workspace:ensureImage', async (event, channelId: string) => {
     const win = BrowserWindow.fromWebContents(event.sender);
-    await backend.ensureImage((p) => {
+    await dockerBackend.ensureImage((p) => {
       win?.webContents.send(`workspace:ensureImage:progress:${channelId}`, p);
     });
   });
@@ -240,7 +268,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         throw new Error(`A workspace named "${input.name}" already exists.`);
       }
 
-      const ws = await backend.createWorkspace({
+      const ws = await backendForKind(input.kind ?? 'container').createWorkspace({
         id: input.id,
         name: input.name,
         workspaceSubdir: input.workspaceSubdir,
@@ -278,7 +306,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // fail the workspace create.
       if (ws.image) {
         try {
-          const inspected = await backend.inspectImage(ws.image);
+          const inspected = await dockerBackend.inspectImage(ws.image);
           await imageLibrary.recordImage(inspected);
         } catch (err) {
           // eslint-disable-next-line no-console
@@ -371,7 +399,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle(
     'sessions:resume',
     async (_e, workspaceId: string): Promise<{ containerId: string } | null> => {
-      const containerId = await backend.startWorkspace(workspaceId);
+      const containerId = await (await backendFor(workspaceId)).startWorkspace(workspaceId);
       if (!containerId) return null;
       await touchWorkspaceUsed(workspaceId);
       return { containerId };
@@ -385,7 +413,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
    * normal create flow (which resolves vault credentials).
    */
   ipcMain.handle('workspace:start', async (_e, id: string): Promise<Workspace | null> => {
-    const containerId = await backend.startWorkspace(id);
+    const containerId = await (await backendFor(id)).startWorkspace(id);
     if (!containerId) return null;
     await touchWorkspaceUsed(id);
     // Find the freshly-running workspace in the merged list so the
@@ -419,11 +447,16 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     setWorkspaceDefault(spec.id, spec.mirror?.default ?? FACTORY_MIRROR.default);
   });
 
-  ipcMain.handle('workspace:stop', (_e, containerId: string) => backend.stopWorkspace(containerId));
-  ipcMain.handle('workspace:pause', (_e, containerId: string) => backend.pauseWorkspace(containerId));
-  ipcMain.handle(
-    'workspace:remove',
-    (_e, containerId: string, opts?: RemoveWorkspaceOpts) => backend.removeWorkspace(containerId, opts)
+  ipcMain.handle('workspace:stop', async (_e, containerId: string) =>
+    (await backendFor(containerId)).stopWorkspace(containerId)
+  );
+  ipcMain.handle('workspace:pause', async (_e, containerId: string) =>
+    (await backendFor(containerId)).pauseWorkspace(containerId)
+  );
+  ipcMain.handle('workspace:remove', async (_e, containerId: string, opts?: RemoveWorkspaceOpts) =>
+    // A saved (no-live) workspace passes its ULID in opts.id; prefer it so the
+    // kind resolves even when there's no live containerId.
+    (await backendFor(opts?.id ?? containerId)).removeWorkspace(containerId, opts)
   );
 
   ipcMain.handle('app:mockMode', () => MOCK_MODE);
@@ -532,9 +565,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // is the workspace-persistent id the broker keys its session map
       // by). The renderer doesn't need to learn the broker id.
       const ptyHandleId = randomUUID();
+      const b = await backendFor(containerId);
       let handle: PtyHandle;
       try {
-        handle = await backend.attachPty(containerId, brokerSessionId, cols, rows, resumeOf);
+        handle = await b.attachPty(containerId, brokerSessionId, cols, rows, resumeOf);
       } catch (err) {
         // Capture the broker's recent stdout/stderr so the user has
         // something to diagnose with. The classic symptom we're chasing
@@ -544,7 +578,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         // doing on the other side of the socket. Best-effort: if the
         // logs call itself fails (container gone, dockerode flaked),
         // getBrokerLogs returns '' and we just rethrow the original.
-        const brokerLog = await backend.getBrokerLogs(containerId, 100);
+        const brokerLog = await b.getBrokerLogs(containerId, 100);
         logError({
           source: 'main',
           type: 'pty-attach-failed',

@@ -323,8 +323,11 @@ interface Workspace extends WorkspaceSpec {
 - **stopped** — the container exists but its main process has exited (or it's in any other non-live state like `created` / `dead`).
 - **deleted** — there is no live container, but a manifest is on disk. Recoverable by recreating via the create flow.
 
+### Backend dispatch (per-workspace, by `kind`)
+Workspace operations are routed to a backend **per workspace**, not chosen globally. Both backends implement a single `Backend` contract (`src/main/backend.ts`: `ping`, `ensureImage`, `listLiveWorkspaces`, `createWorkspace`, `inspectImage`, `start/pause/stop/removeWorkspace`, `attachPty`, `getBrokerLogs`) — the Docker backend (`docker.ts`), the local host-process backend (`local.ts`, #16), and the mock backend (`mock.ts`, behind `CLAUDE_FLEET_MOCK=1`). `ipc.ts` dispatches each call: `workspace:create` routes on the payload's `kind`; every other channel resolves the workspace's `kind` from its manifest via `backendRouter.ts:resolveKind(idOrContainerId)` (a Docker container id never matches a manifest path → defaults to `'container'`; a local workspace's containerId surrogate equals its id → resolves to `'local'`). `workspace:list` merges live results from both backends. Docker-daemon-specific channels (`ping`, `ensureImage`, `inspectImage`) always target the Docker backend. In mock mode every workspace routes to the mock backend. (As of PR1 the `local.ts` mutations are stubs and `kind:'local'` is still blocked at create; PR2 implements it.)
+
 ### Docker container labels (backend implementation)
-Today the only workspace backend is a Docker container. The container name is `cf-<id>` (must be unique on the host); lookup is always by the `com.claude-fleet.id` label, which means renaming a workspace does not require touching the container at all. Each managed container carries:
+Today the primary workspace backend is a Docker container. The container name is `cf-<id>` (must be unique on the host); lookup is always by the `com.claude-fleet.id` label, which means renaming a workspace does not require touching the container at all. Each managed container carries:
 - `com.claude-fleet.managed` = `"true"` — discovery filter. `dockerode listContainers` filters on this label exclusively, so unmanaged containers never appear in the UI.
 - `com.claude-fleet.id` — the workspace's ULID. **Stable identity lookup key**; survives renames.
 - `com.claude-fleet.name` — the workspace's user-facing label at create time. Snapshot only; the source of truth for current name is the manifest.
@@ -560,7 +563,10 @@ claude-fleet/
     ├── main/
     │   ├── index.ts                   # app lifecycle, BrowserWindow
     │   ├── ipc.ts                     # registerIpc() — workspace:* / pty:* / etc. live here
+    │   ├── backend.ts                 # Backend contract (shared by docker/local/mock)
+    │   ├── backendRouter.ts           # resolveKind() — per-workspace backend routing (#16)
     │   ├── docker.ts                  # Docker backend (dockerode + broker-aware PTY attach)
+    │   ├── local.ts                   # local host-process backend (#16; stub until PR2)
     │   ├── broker.ts                  # host-side BrokerClient + frame codec
     │   ├── mock.ts                    # mock backend behind CLAUDE_FLEET_MOCK=1
     │   ├── workspaces.ts              # WorkspaceSpec types + manifest read/write/list
