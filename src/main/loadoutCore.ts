@@ -128,6 +128,22 @@ export async function parseLoadout(dir: string, id = basename(dir)): Promise<Loa
 }
 
 /**
+ * The workspace-relative destination paths a loadout would write (for the
+ * review's "Files written" list) — derived from the folder by convention,
+ * without touching any workspace.
+ */
+export async function loadoutFileList(srcDir: string): Promise<string[]> {
+  const out: string[] = [];
+  for (const d of DROP_DIRS) {
+    for (const rel of await listFilesRec(join(srcDir, d))) out.push(join('.claude', d, rel));
+  }
+  if ((await readFile(join(srcDir, 'CLAUDE.md'), 'utf8').catch(() => null)) !== null) {
+    out.push('CLAUDE.md');
+  }
+  return out;
+}
+
+/**
  * Apply a loadout's drop files + CLAUDE.md block into `targetDir` (a workspace's
  * project root — i.e. the container's /workspace). Collision-safe: an existing
  * file that we didn't write is skipped and reported, never overwritten. A prior

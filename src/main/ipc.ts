@@ -197,6 +197,9 @@ async function listAllWorkspaces(): Promise<Workspace[]> {
       env: m?.env ?? w.env,
       resources: m?.resources,
       mirror: m?.mirror ?? FACTORY_MIRROR,
+      // Installed loadouts live only on the manifest (#16-followup) — carry
+      // them onto the merged workspace so the Library can show installed state.
+      installedLoadouts: m?.installedLoadouts ?? [],
       createdAt: m?.createdAt ?? w.createdAt,
       lastUsedAt: m?.lastUsedAt ?? w.lastUsedAt
     });
