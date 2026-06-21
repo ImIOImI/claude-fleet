@@ -2432,6 +2432,8 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
 .manifest .mf:last-child { border-bottom: none; }
 .manifest .mf .path { flex: 1; word-break: break-all; }
 .manifest .mf .badge-new { color: var(--ok); font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; }
+.manifest .mf.exec { background: color-mix(in oklch, var(--warn), transparent 92%); }
+.manifest .mf .badge-run { color: var(--warn); font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; }
 .lr-instructions {
   font-size: 11.5px; color: var(--ink-1); line-height: 1.5; white-space: pre-wrap;
   background: var(--bg-2); border: 1px solid var(--rule); border-radius: var(--r-md);

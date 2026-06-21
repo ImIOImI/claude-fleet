@@ -16,14 +16,20 @@ import {
 import {
   parseLoadout,
   applyLoadoutFiles,
+  applyLoadoutMerges,
   revertLoadoutFiles,
+  revertLoadoutMerges,
   loadoutFileList,
+  loadoutMergePreview,
   type LoadoutMeta
 } from './loadoutCore.js';
 
 export type LoadoutSummary = Pick<LoadoutMeta, 'id' | 'title' | 'description' | 'tags'>;
-/** Full loadout for the review modal: metadata + the files it would write. */
-export type LoadoutDetail = LoadoutMeta & { files: string[] };
+/** Full loadout for the review modal: metadata + the files + merges it applies. */
+export type LoadoutDetail = LoadoutMeta & {
+  files: string[];
+  merges: { settingsKeys: string[]; mcpServers: string[]; hookEvents: string[] };
+};
 
 /** All authored loadouts (metadata only). Folders without a loadout.md are skipped. */
 export async function listLoadouts(): Promise<LoadoutSummary[]> {
@@ -46,11 +52,11 @@ export async function listLoadouts(): Promise<LoadoutSummary[]> {
   return out.sort((a, b) => a.title.localeCompare(b.title));
 }
 
-/** Full manifest + file list for one loadout (review modal + MCP get_loadout). */
+/** Full manifest + file/merge preview for one loadout (review modal + MCP get_loadout). */
 export async function getLoadout(id: string): Promise<LoadoutDetail> {
   const dir = loadoutDir(id);
   const meta = await parseLoadout(dir);
-  return { ...meta, files: await loadoutFileList(dir) };
+  return { ...meta, files: await loadoutFileList(dir), merges: await loadoutMergePreview(dir) };
 }
 
 export interface InstallResult {
@@ -68,17 +74,24 @@ export async function installLoadout(workspaceId: string, loadoutId: string): Pr
   }
   const meta = await getLoadout(loadoutId);
   const target = await fleetPrivateDir(workspaceId);
-  const applied = await applyLoadoutFiles(loadoutDir(loadoutId), target, loadoutId);
+  const src = loadoutDir(loadoutId);
+  const applied = await applyLoadoutFiles(src, target, loadoutId);
+  const merged = await applyLoadoutMerges(src, target);
   const record: InstalledLoadout = {
     id: loadoutId,
     title: meta.title,
     files: applied.files,
-    merges: { claudeMd: applied.claudeMd },
+    merges: {
+      claudeMd: applied.claudeMd,
+      settingsKeys: merged.settingsKeys,
+      mcpServers: merged.mcpServers,
+      hooks: merged.hooks
+    },
     installedAt: Date.now()
   };
   const others = (ws.installedLoadouts ?? []).filter((l) => l.id !== loadoutId);
   await writeWorkspaceManifest({ ...ws, installedLoadouts: [...others, record] });
-  return { installed: record, skipped: applied.skipped };
+  return { installed: record, skipped: [...applied.skipped, ...merged.skipped] };
 }
 
 /** Uninstall: remove exactly what was applied, keep anything else. */
@@ -89,6 +102,11 @@ export async function uninstallLoadout(workspaceId: string, loadoutId: string): 
   if (rec) {
     const target = await fleetPrivateDir(workspaceId);
     await revertLoadoutFiles(target, { files: rec.files, claudeMd: rec.merges?.claudeMd }, loadoutId);
+    await revertLoadoutMerges(target, {
+      settingsKeys: rec.merges?.settingsKeys,
+      mcpServers: rec.merges?.mcpServers,
+      hooks: rec.merges?.hooks
+    });
   }
   await writeWorkspaceManifest({
     ...ws,

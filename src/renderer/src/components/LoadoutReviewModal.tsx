@@ -13,6 +13,7 @@ interface LoadoutDetail {
   tags: string[];
   instructions: string;
   files: string[];
+  merges?: { settingsKeys: string[]; mcpServers: string[]; hookEvents: string[] };
   dependencies?: { loadouts?: unknown[]; tools?: unknown[] };
   scripts?: { label: string }[];
   prompts?: { label: string }[];
@@ -154,6 +155,40 @@ export function LoadoutReviewModal({
                     <div className="mf" key={f}>
                       <span className="path">{f}</span>
                       <span className="badge-new">{f === 'CLAUDE.md' ? '+ block' : 'new'}</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {detail.merges && (detail.merges.settingsKeys.length > 0 || detail.merges.mcpServers.length > 0) && (
+              <>
+                <span className="lbl">Merges into config</span>
+                <div className="manifest">
+                  {detail.merges.settingsKeys.map((k) => (
+                    <div className="mf" key={`s-${k}`}>
+                      <span className="path">.claude/settings.json · {k}</span>
+                      <span className="badge-new">merge</span>
+                    </div>
+                  ))}
+                  {detail.merges.mcpServers.map((s) => (
+                    <div className="mf" key={`m-${s}`}>
+                      <span className="path">.mcp.json · {s}</span>
+                      <span className="badge-new">merge</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {detail.merges && detail.merges.hookEvents.length > 0 && (
+              <>
+                <span className="lbl">Hooks · run on events</span>
+                <div className="manifest">
+                  {detail.merges.hookEvents.map((ev) => (
+                    <div className="mf exec" key={`h-${ev}`}>
+                      <span className="path">{ev}</span>
+                      <span className="badge-run">runs</span>
                     </div>
                   ))}
                 </div>
