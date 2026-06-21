@@ -12,9 +12,13 @@
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { rm } from 'node:fs/promises';
+import { rm, stat, writeFile, mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { app } from 'electron';
 import type * as NodePty from 'node-pty';
 import type { Backend } from './backend.js';
+import { mcpSocketDir, mcpSocketPath } from './mcpSocket.js';
+import { ensureLocalBridgeScript, localMcpServerEntry } from './mcpLocalBridge.js';
 import {
   readWorkspaceManifest,
   listWorkspaceManifests,
@@ -220,6 +224,7 @@ export async function attachPty(
     );
   }
   const env = await buildEnv(id, m);
+  const mcpConfigPath = await ensureMcpConfig(id);
   // Attaching implies the workspace is up.
   started.add(id);
   paused.delete(id);
@@ -232,8 +237,31 @@ export async function attachPty(
     env,
     file: claudeBin,
     resumeOf,
+    mcpConfigPath,
     spawn: defaultSpawn
   });
+}
+
+/**
+ * Wire the read-only fleet MCP server (#12) for a local workspace via a
+ * session-scoped `--mcp-config` file (auto-trusted, no approval gate, and never
+ * touches the user's real ~/.claude.json). Points claude at our Electron-as-node
+ * bridge. Skipped (returns undefined) if the MCP server socket isn't present.
+ */
+async function ensureMcpConfig(id: string): Promise<string | undefined> {
+  const userData = app.getPath('userData');
+  const socketPath = mcpSocketPath(userData);
+  if (!(await stat(socketPath).catch(() => null))) return undefined;
+  const bridgePath = await ensureLocalBridgeScript(mcpSocketDir(userData));
+  const config = {
+    mcpServers: {
+      'claude-fleet-state': localMcpServerEntry(process.execPath, bridgePath, socketPath)
+    }
+  };
+  const configPath = join(workspaceStateDir(id), 'mcp-config.json');
+  await mkdir(workspaceStateDir(id), { recursive: true });
+  await writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');
+  return configPath;
 }
 
 export async function getBrokerLogs(_containerId: string, _tailLines?: number): Promise<string> {

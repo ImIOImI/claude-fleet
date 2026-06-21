@@ -74,6 +74,8 @@ export interface AttachOpts {
   file: string;
   /** Claude session UUID to resume; spawns `claude --resume <uuid>`. */
   resumeOf?: string;
+  /** Path to a `--mcp-config` file wiring the fleet MCP server (#16, optional). */
+  mcpConfigPath?: string;
   spawn: SpawnPty;
 }
 
@@ -88,7 +90,10 @@ export function attachLocalSession(opts: AttachOpts): PtyHandle {
   let session = sessions.get(key);
 
   if (!session || session.exited) {
-    const args = opts.resumeOf ? ['--resume', opts.resumeOf] : [];
+    const args = [
+      ...(opts.mcpConfigPath ? ['--mcp-config', opts.mcpConfigPath] : []),
+      ...(opts.resumeOf ? ['--resume', opts.resumeOf] : [])
+    ];
     const proc = opts.spawn({
       file: opts.file,
       args,
