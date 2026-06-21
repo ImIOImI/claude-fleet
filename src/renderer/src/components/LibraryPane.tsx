@@ -18,11 +18,9 @@ interface Props {
   selectedWorkspace: WorkspaceSummary | null;
   /** Refresh the workspace list so installed-state updates. */
   onChanged: () => void;
-  /** Flag a running workspace as needing a claude restart to pick up the loadout. */
-  onNeedsRestart: (workspaceId: string) => void;
 }
 
-export function LibraryPane({ selectedWorkspace, onChanged, onNeedsRestart }: Props) {
+export function LibraryPane({ selectedWorkspace, onChanged }: Props) {
   const [loadouts, setLoadouts] = useState<LoadoutSummary[]>([]);
   const [query, setQuery] = useState('');
   const [activeTags, setActiveTags] = useState<string[]>([]);
@@ -69,7 +67,6 @@ export function LibraryPane({ selectedWorkspace, onChanged, onNeedsRestart }: Pr
   const doInstall = async (id: string): Promise<void> => {
     if (!selectedWorkspace || !installable) return;
     await window.api.loadouts.install(selectedWorkspace.id, id);
-    if (selectedWorkspace.state === 'running') onNeedsRestart(selectedWorkspace.id);
     onChanged();
   };
   const doUninstall = async (id: string): Promise<void> => {
@@ -215,10 +212,7 @@ export function LibraryPane({ selectedWorkspace, onChanged, onNeedsRestart }: Pr
           installable={installable}
           installed={installedIds.has(reviewId)}
           onClose={() => setReviewId(null)}
-          onInstalled={() => {
-            if (selectedWorkspace?.state === 'running') onNeedsRestart(selectedWorkspace.id);
-            onChanged();
-          }}
+          onInstalled={onChanged}
           onUninstalled={onChanged}
         />
       )}

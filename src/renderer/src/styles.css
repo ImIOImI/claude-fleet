@@ -2414,7 +2414,10 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
 
 /* Review modal */
 .modal.loadout-review { width: 480px; max-width: 92vw; max-height: 84vh; overflow-y: auto; }
-.lr-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.lr-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 6px; }
+.lr-open-folder { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; flex-shrink: 0; }
+.lr-open-folder svg { flex-shrink: 0; }
+.lr-hint { font-size: 11px; color: var(--ink-3); line-height: 1.4; margin: 4px 0 0; }
 .lr-title-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 6px; }
 .lr-title-row h2 { font-size: 16px; font-weight: 650; }
 .lr-ver { font-size: 11px; color: var(--ink-3); font-family: var(--font-mono); margin-left: 8px; }

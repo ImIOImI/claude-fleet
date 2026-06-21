@@ -15,7 +15,6 @@ interface Props {
   onResume: (item: SessionListItem) => void;
   /** Refresh workspaces (installed-loadout state). */
   onChanged: () => void;
-  onNeedsRestart: (workspaceId: string) => void;
 }
 
 interface OpenState {
@@ -38,8 +37,7 @@ export function LeftRail({
   selectedWorkspaceId,
   selectedWorkspace,
   onResume,
-  onChanged,
-  onNeedsRestart
+  onChanged
 }: Props) {
   const [open, setOpen] = useState<OpenState>(loadOpen);
   const toggle = (k: keyof OpenState): void =>
@@ -84,11 +82,7 @@ export function LeftRail({
           <span>Library</span>
         </button>
         {open.library && (
-          <LibraryPane
-            selectedWorkspace={selectedWorkspace}
-            onChanged={onChanged}
-            onNeedsRestart={onNeedsRestart}
-          />
+          <LibraryPane selectedWorkspace={selectedWorkspace} onChanged={onChanged} />
         )}
       </section>
     </aside>

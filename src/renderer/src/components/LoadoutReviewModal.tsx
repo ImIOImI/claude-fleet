@@ -98,8 +98,14 @@ export function LoadoutReviewModal({
       <div className="modal loadout-review" onClick={(e) => e.stopPropagation()}>
         <div className="lr-head">
           <span className="eyebrow">Loadout · review</span>
-          <button className="btn btn-sm" onClick={() => window.api.loadouts.openFolder(loadoutId)}>
-            🗀 Open folder
+          <button
+            className="btn btn-sm lr-open-folder"
+            onClick={() => window.api.loadouts.openFolder(loadoutId)}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+            </svg>
+            Open folder
           </button>
         </div>
 
@@ -161,6 +167,12 @@ export function LoadoutReviewModal({
               </>
             )}
 
+            {!installed && installable && (
+              <p className="lr-hint">
+                Loads on the next Claude session. Resume this workspace's session (Sessions list) to
+                load it without losing the conversation.
+              </p>
+            )}
             {error && <div className="error-text">{error}</div>}
 
             <div className="lr-foot">

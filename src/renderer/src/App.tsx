@@ -624,14 +624,6 @@ export function App() {
           selectedWorkspace={selectedWorkspace}
           onResume={handleResumeSession}
           onChanged={refresh}
-          onNeedsRestart={(id) =>
-            setRestartBannerIds((prev) => {
-              if (prev.has(id)) return prev;
-              const next = new Set(prev);
-              next.add(id);
-              return next;
-            })
-          }
         />
 
         <main
