@@ -26,7 +26,7 @@ import {
   workspaceClaudeJsonPath,
   workspaceStateDir
 } from './paths.js';
-import type { AuthMode, Workspace, WorkspaceEnv, WorkspaceResources } from './workspaces.js';
+import type { AuthMode, Workspace, WorkspaceEnv, WorkspaceResources, WorkspaceKind } from './workspaces.js';
 import { FACTORY_MIRROR } from './workspaces.js';
 import { fleetPrivateDir, fleetSharedDir } from './config.js';
 import { mcpSocketDir, CONTAINER_MCP_DIR, CONTAINER_MCP_SOCKET } from './mcpSocket.js';
@@ -72,6 +72,18 @@ export interface CreateWorkspaceInput {
    * get the shared bind — their credentials come via the env-var path.
    */
   authMode: AuthMode;
+  /**
+   * Workspace kind. The Docker backend only ever sees `'container'`; the local
+   * backend (#16) uses `'local'`. Optional + defaulted so existing callers and
+   * the Docker path are unaffected.
+   */
+  kind?: WorkspaceKind;
+  /**
+   * Local backend only (#16): the user-chosen host directory `claude` runs in.
+   * Ignored by the Docker backend, which derives the private folder from the
+   * fleet root.
+   */
+  workspaceRoot?: string;
 }
 
 export interface ImageInspectResult {

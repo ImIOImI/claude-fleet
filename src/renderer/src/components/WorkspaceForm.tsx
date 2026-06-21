@@ -31,6 +31,8 @@ export interface WorkspaceFormSubmit {
   color?: WorkspaceColor;
   workspaceSubdir: string;
   kind: WorkspaceKind;
+  /** Local workspaces only (#16): the host directory `claude` runs in. */
+  workspaceRoot?: string;
   image?: string;
   authMode: AuthMode;
   plainEnv: Record<string, string>;
@@ -168,6 +170,8 @@ export function WorkspaceForm({
   );
   const [envOpen, setEnvOpen] = useState(envRows.length > 0);
   const [kind, setKind] = useState<WorkspaceKind>(initial?.kind ?? 'container');
+  // Local workspaces only: the host directory `claude` runs in (#16).
+  const [workspaceRoot, setWorkspaceRoot] = useState<string>(initial?.workspaceRoot ?? '');
   const [image, setImage] = useState<string>(initial?.image ?? '');
   const [libraryImages, setLibraryImages] = useState<ImageEntry[]>([]);
   const [imageSearchOpen, setImageSearchOpen] = useState(false);
@@ -242,12 +246,12 @@ export function WorkspaceForm({
   const buildPayload = (
     opts: { skipNameClash?: boolean } = {}
   ): WorkspaceFormSubmit | null => {
-    if (kind === 'local') {
-      setError("Local workspaces aren't implemented yet. Pick 'Container' for now.");
-      return null;
-    }
     if (!nameOk) {
       setError('Workspace name must be 1–80 chars with no control characters.');
+      return null;
+    }
+    if (kind === 'local' && !workspaceRoot.trim()) {
+      setError('Pick a working directory for the local workspace.');
       return null;
     }
     if (!opts.skipNameClash) {
@@ -315,6 +319,7 @@ export function WorkspaceForm({
       color: hue !== null ? { hue } : undefined,
       workspaceSubdir: workspaceSubdir.trim(),
       kind,
+      workspaceRoot: kind === 'local' ? workspaceRoot.trim() : undefined,
       image: kind === 'container' ? image.trim() : undefined,
       authMode,
       plainEnv,
@@ -410,10 +415,40 @@ export function WorkspaceForm({
               disabled={busy}
             />
             <span>Local</span>
-            <span className="kind-help">runs on this host · coming soon</span>
+            <span className="kind-help">runs claude on this host</span>
           </label>
         </div>
       </div>
+
+      {kind === 'local' && (
+        <div className="form-row">
+          <label>Working directory</label>
+          <div className="input-with-button">
+            <input
+              aria-label="Working directory"
+              value={workspaceRoot}
+              placeholder="/home/you/repos/your-project"
+              onChange={(e) => setWorkspaceRoot(e.target.value)}
+              disabled={busy}
+            />
+            <button
+              type="button"
+              className="btn"
+              disabled={busy}
+              onClick={async () => {
+                const picked = await window.api.dialog.pickDirectory(workspaceRoot || undefined);
+                if (picked) setWorkspaceRoot(picked);
+              }}
+            >
+              Browse…
+            </button>
+          </div>
+          <p className="field-hint">
+            Runs <code>claude</code> directly on this host (no container) — requires Claude Code
+            installed on your PATH.
+          </p>
+        </div>
+      )}
 
       {kind === 'container' && (
         <div className="form-row">

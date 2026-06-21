@@ -89,14 +89,16 @@ export async function listLiveWorkspaces(): Promise<Workspace[]> {
 }
 
 export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Workspace> {
+  const isLocal = spec.kind === 'local';
   const ws: Workspace = {
     id: spec.id,
     name: spec.name,
     labels: [],
-    workspaceRoot: `/tmp/mock-fleet/${spec.id}`,
+    // Local honors the user-chosen host dir; container gets a mock fleet path.
+    workspaceRoot: isLocal ? spec.workspaceRoot ?? '/tmp/mock-local' : `/tmp/mock-fleet/${spec.id}`,
     workspaceSubdir: spec.workspaceSubdir,
-    kind: 'container',
-    image: spec.image ?? 'ghcr.io/imioimi/claude-fleet/runner:latest',
+    kind: isLocal ? 'local' : 'container',
+    image: isLocal ? undefined : spec.image ?? 'ghcr.io/imioimi/claude-fleet/runner:latest',
     authMode: spec.authMode,
     env: spec.env,
     resources: spec.resources,

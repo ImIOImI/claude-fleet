@@ -141,6 +141,8 @@ interface WorkspaceCreatePayload {
   color?: WorkspaceColor;
   workspaceSubdir: string;
   kind?: 'container' | 'local';
+  /** Local workspaces only (#16): the user-chosen host directory to run in. */
+  workspaceRoot?: string;
   image?: string;
   authMode: AuthMode;
   env: WorkspaceEnv;
@@ -160,7 +162,12 @@ async function listAllWorkspaces(): Promise<Workspace[]> {
     localBackend.listLiveWorkspaces(),
     listWorkspaceManifests()
   ]);
-  const live = [...dockerLive, ...localLive];
+  // Dedup by id: real backends return disjoint sets (a workspace is on exactly
+  // one), so this is a no-op there; in mock mode both `dockerBackend` and
+  // `localBackend` are the same mock module, so this collapses the duplicate.
+  const liveById = new Map<string, Workspace>();
+  for (const w of [...dockerLive, ...localLive]) if (!liveById.has(w.id)) liveById.set(w.id, w);
+  const live = [...liveById.values()];
   const manifestById = new Map(manifests.map((m) => [m.id, m]));
   const result: Workspace[] = [];
 
@@ -256,10 +263,17 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle(
     'workspace:create',
     async (_e, input: WorkspaceCreatePayload) => {
-      if (input.kind === 'local') {
-        throw new Error(
-          "Local workspaces aren't implemented yet. Pick 'Container' for now."
-        );
+      const kind: WorkspaceKind = input.kind ?? 'container';
+      // Local workspaces run `claude` in a user-chosen host directory; validate
+      // it here (the renderer also checks) so a bad path fails fast and clearly.
+      if (kind === 'local') {
+        const root = input.workspaceRoot?.trim();
+        if (!root) {
+          throw new Error('Pick a working directory for the local workspace.');
+        }
+        if (!(await fs.isDirectory(root))) {
+          throw new Error(`Working directory does not exist: ${root}`);
+        }
       }
       // Name-uniqueness is checked here (and not in the renderer alone) so
       // a stale list doesn't allow duplicates through.
@@ -268,14 +282,16 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         throw new Error(`A workspace named "${input.name}" already exists.`);
       }
 
-      const ws = await backendForKind(input.kind ?? 'container').createWorkspace({
+      const ws = await backendForKind(kind).createWorkspace({
         id: input.id,
         name: input.name,
         workspaceSubdir: input.workspaceSubdir,
         env: input.env,
         image: input.image,
         resources: input.resources,
-        authMode: input.authMode
+        authMode: input.authMode,
+        kind,
+        workspaceRoot: input.workspaceRoot
       });
 
       const spec: WorkspaceSpec = {
@@ -284,10 +300,11 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         description: input.description,
         labels: input.labels ?? [],
         color: input.color,
-        // The backend computed the private folder from the fleet root.
+        // Container: the backend derived the private folder from the fleet root.
+        // Local: it's the user-chosen host dir the backend echoed back.
         workspaceRoot: ws.workspaceRoot,
         workspaceSubdir: input.workspaceSubdir,
-        kind: 'container',
+        kind,
         image: ws.image,
         authMode: input.authMode,
         env: input.env,
@@ -433,15 +450,25 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
    * edits (env values, image) won't take effect until the container is
    * restarted — see the Phase 2 *restart-to-apply* banner.
    */
-  ipcMain.handle('workspace:writeManifest', async (_e, spec: Omit<WorkspaceSpec, 'workspaceRoot'>) => {
-    // Name-uniqueness across the fleet (own row excluded).
-    const clash = await findWorkspaceByName(spec.name);
-    if (clash && clash.id !== spec.id) {
-      throw new Error(`A workspace named "${spec.name}" already exists.`);
-    }
-    // workspaceRoot is derived, not supplied by the renderer — the canonical
-    // private folder under the fleet root.
-    await writeWorkspaceManifest({ ...spec, workspaceRoot: await fleetPrivateDir(spec.id) });
+  ipcMain.handle(
+    'workspace:writeManifest',
+    async (_e, spec: Omit<WorkspaceSpec, 'workspaceRoot'> & { workspaceRoot?: string }) => {
+      // Name-uniqueness across the fleet (own row excluded).
+      const clash = await findWorkspaceByName(spec.name);
+      if (clash && clash.id !== spec.id) {
+        throw new Error(`A workspace named "${spec.name}" already exists.`);
+      }
+      // Container: workspaceRoot is derived — the canonical private folder under
+      // the fleet root. Local (#16): it's the user-chosen host dir, supplied by
+      // the renderer; fall back to the existing manifest's value if absent.
+      let workspaceRoot: string;
+      if (spec.kind === 'local') {
+        const existing = await readWorkspaceManifest(spec.id);
+        workspaceRoot = spec.workspaceRoot?.trim() || existing?.workspaceRoot || '';
+      } else {
+        workspaceRoot = await fleetPrivateDir(spec.id);
+      }
+      await writeWorkspaceManifest({ ...spec, workspaceRoot });
     // Reflect a mirror-default edit in the watcher immediately (don't wait for
     // the next list poll).
     setWorkspaceDefault(spec.id, spec.mirror?.default ?? FACTORY_MIRROR.default);
