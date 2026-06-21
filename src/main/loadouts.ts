@@ -21,8 +21,11 @@ import {
   revertLoadoutMerges,
   loadoutFileList,
   loadoutMergePreview,
-  type LoadoutMeta
+  runLoadoutScripts,
+  type LoadoutMeta,
+  type ScriptResult
 } from './loadoutCore.js';
+import { runInWorkspace } from './docker.js';
 
 export type LoadoutSummary = Pick<LoadoutMeta, 'id' | 'title' | 'description' | 'tags'>;
 /** Full loadout for the review modal: metadata + the files + merges it applies. */
@@ -61,8 +64,10 @@ export async function getLoadout(id: string): Promise<LoadoutDetail> {
 
 export interface InstallResult {
   installed: InstalledLoadout;
-  /** Files skipped because they already existed in the workspace (reported, not clobbered). */
+  /** Files/keys skipped because they already existed (reported, not clobbered). */
   skipped: string[];
+  /** Per-script outcome from the loadout's setup `scripts` (run in the container). */
+  scripts: ScriptResult[];
 }
 
 /** Install a loadout into a container workspace's private folder. */
@@ -91,7 +96,18 @@ export async function installLoadout(workspaceId: string, loadoutId: string): Pr
   };
   const others = (ws.installedLoadouts ?? []).filter((l) => l.id !== loadoutId);
   await writeWorkspaceManifest({ ...ws, installedLoadouts: [...others, record] });
-  return { installed: record, skipped: [...applied.skipped, ...merged.skipped] };
+
+  // Run setup scripts in the container (after files/merges land). A non-running
+  // container makes the runner reject → that script is reported as failed, not
+  // thrown. Scripts have side effects and aren't tracked for revert.
+  const scripts = await runLoadoutScripts(src, meta.scripts, (command) =>
+    runInWorkspace(workspaceId, command).catch((e) => ({
+      exitCode: -1,
+      output: e instanceof Error ? e.message : String(e)
+    }))
+  );
+
+  return { installed: record, skipped: [...applied.skipped, ...merged.skipped], scripts };
 }
 
 /** Uninstall: remove exactly what was applied, keep anything else. */

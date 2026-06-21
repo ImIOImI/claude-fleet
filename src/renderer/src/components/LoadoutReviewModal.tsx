@@ -68,9 +68,18 @@ export function LoadoutReviewModal({
     setBusy(true);
     setError(null);
     try {
-      await window.api.loadouts.install(workspaceId, loadoutId);
+      const res = (await window.api.loadouts.install(workspaceId, loadoutId)) as {
+        scripts?: { label: string; status: string }[];
+      };
       onInstalled();
-      onClose();
+      const failed = (res.scripts ?? []).filter((s) => s.status === 'failed');
+      if (failed.length > 0) {
+        // Files/merges landed; surface script failures and keep the modal open.
+        setError(`Installed, but ${failed.length} script(s) failed: ${failed.map((f) => f.label).join(', ')}`);
+        setBusy(false);
+      } else {
+        onClose();
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(false);
@@ -175,6 +184,20 @@ export function LoadoutReviewModal({
                     <div className="mf" key={`m-${s}`}>
                       <span className="path">.mcp.json · {s}</span>
                       <span className="badge-new">merge</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {detail.scripts && detail.scripts.length > 0 && (
+              <>
+                <span className="lbl">Scripts · run on install</span>
+                <div className="manifest">
+                  {detail.scripts.map((s, i) => (
+                    <div className="mf exec" key={`sc-${i}`}>
+                      <span className="path">{s.label}</span>
+                      <span className="badge-run">runs</span>
                     </div>
                   ))}
                 </div>
