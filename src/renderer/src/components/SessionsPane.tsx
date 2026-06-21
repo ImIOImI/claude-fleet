@@ -23,6 +23,9 @@ interface Props {
   selectedWorkspaceId: string | null;
   /** Resume a session — App brings the container up, then opens a resume tab. */
   onResume: (item: SessionListItem) => void;
+  /** When true, render without the outer `.pane` wrapper / title — the
+   *  caller (LeftRail accordion) provides the section header. (#16-followup) */
+  embedded?: boolean;
 }
 
 function displayTitle(s: SessionListItem): string {
@@ -46,7 +49,7 @@ function formatUsd(usd: number): string {
   return `$${Math.round(usd).toLocaleString('en-US')}`;
 }
 
-export function SessionsPane({ workspaces, selectedWorkspaceId, onResume }: Props) {
+export function SessionsPane({ workspaces, selectedWorkspaceId, onResume, embedded = false }: Props) {
   const [scope, setScope] = useState<Scope>('workspace');
   const [query, setQuery] = useState('');
   const [items, setItems] = useState<SessionListItem[]>([]);
@@ -122,10 +125,10 @@ export function SessionsPane({ workspaces, selectedWorkspaceId, onResume }: Prop
       )
     : items;
 
-  return (
-    <aside className="pane sidebar-left">
-      <div className="pane-header sessions-header">
-        <span>Sessions</span>
+  const body = (
+    <>
+      <div className={`pane-header sessions-header${embedded ? ' embedded' : ''}`}>
+        {!embedded && <span>Sessions</span>}
         <div className="obs-scope-toggle" role="tablist" aria-label="Sessions scope">
           <button
             role="tab"
@@ -267,6 +270,7 @@ export function SessionsPane({ workspaces, selectedWorkspaceId, onResume }: Prop
           </ul>
         )}
       </div>
-    </aside>
+    </>
   );
+  return embedded ? body : <aside className="pane sidebar-left">{body}</aside>;
 }

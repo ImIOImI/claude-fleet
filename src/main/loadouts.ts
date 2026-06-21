@@ -17,10 +17,13 @@ import {
   parseLoadout,
   applyLoadoutFiles,
   revertLoadoutFiles,
+  loadoutFileList,
   type LoadoutMeta
 } from './loadoutCore.js';
 
 export type LoadoutSummary = Pick<LoadoutMeta, 'id' | 'title' | 'description' | 'tags'>;
+/** Full loadout for the review modal: metadata + the files it would write. */
+export type LoadoutDetail = LoadoutMeta & { files: string[] };
 
 /** All authored loadouts (metadata only). Folders without a loadout.md are skipped. */
 export async function listLoadouts(): Promise<LoadoutSummary[]> {
@@ -43,9 +46,11 @@ export async function listLoadouts(): Promise<LoadoutSummary[]> {
   return out.sort((a, b) => a.title.localeCompare(b.title));
 }
 
-/** Full manifest for one loadout (used by the review modal + MCP get_loadout). */
-export async function getLoadout(id: string): Promise<LoadoutMeta> {
-  return parseLoadout(loadoutDir(id));
+/** Full manifest + file list for one loadout (review modal + MCP get_loadout). */
+export async function getLoadout(id: string): Promise<LoadoutDetail> {
+  const dir = loadoutDir(id);
+  const meta = await parseLoadout(dir);
+  return { ...meta, files: await loadoutFileList(dir) };
 }
 
 export interface InstallResult {

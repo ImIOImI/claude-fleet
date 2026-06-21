@@ -441,7 +441,7 @@ A **loadout** is a reusable, machine-parseable bundle of Claude config the user 
 
 The pure engine is `src/main/loadoutCore.ts` (parse + apply/revert; fs+yaml only, unit-tested); `src/main/loadouts.ts` is the electron-aware wrapper (resolve `loadoutsRoot`/`fleetPrivateDir`, manifest read/write, `ensureBuiltinLoadouts` seeds 2 starters on first run).
 
-**Shipped so far (PR1):** the format/parse, the **drop** + **CLAUDE.md marked-block** install/uninstall, manifest tracking, collision-safety, container-only, and the IPC surface. The merge/run layers, versioning/dependency resolution, the UI, and the MCP discovery tools are **planned** (described below).
+**Shipped so far:** the format/parse, the **drop** + **CLAUDE.md marked-block** install/uninstall, manifest tracking, collision-safety, container-only, the IPC surface, and the **left-rail Library UI** — an accordion (Sessions + Library) with search + tag-filter, detail cards with per-workspace install/uninstall, and a review-before-install modal (files manifest + 🗀 Open folder). Installing into a running workspace flags the restart-to-apply banner (claude reads config at session start). The merge/run layers, versioning/dependency resolution, the authoring modal, and the MCP discovery tools are **planned** (described below).
 
 **Host-private boundary (invariant, §9).** The library at `<userData>/loadouts/` is in the host-private zone — **never bind-mounted into any container**, like the DB / vault / transcript mirrors. A workspace only ever sees the **installed snapshot** copied into its own `.claude/` + `CLAUDE.md`, never the library folder. A workspace's Claude discovers loadouts (to judge relevance and recommend) **only through the read-only MCP `list_loadouts`/`get_loadout` tools** — *mediated* metadata the main process chooses to expose, exactly the §9 rule (mediated, never a raw bind mount). Discovery ≠ filesystem visibility.
 
@@ -451,7 +451,7 @@ The pure engine is `src/main/loadoutCore.ts` (parse + apply/revert; fs+yaml only
 - **Loadout dependencies** resolve **install-first** (topo-ordered, cycle-guarded). The library holds exactly **one** version of each loadout on disk, so a dependency `version` range is a *satisfies-check* against that single version (no multi-version solver) — an unsatisfiable range blocks with the exact mismatch.
 - **Tool dependencies** are *declared expectations*, **preflight-checked** in the workspace (`command -v` + optional `--version` range) and surfaced in the review's **Requirements** section (✓ present / ✗ missing or wrong version). Since the runner image is **non-root** (no `apt`), runtimes are provided by the loadout's own **user-space bootstrap scripts** (`rustup`, `uv`, `nvm` into `$HOME`), guarded by `scripts[].unless` (e.g. `unless: command -v cargo`) so they run only when missing. System packages needing root are **not** auto-installed — the recommended escape hatch is a custom runner image. A missing **`required: true`** tool hard-blocks; otherwise install warns + proceeds (the review showed the risk).
 
-Forthcoming UI: the left-rail Library (accordion + search/tags), the review-before-install modal (manifest + Requirements + 🗀 Open folder), the authoring modal, and the read-only MCP discovery tools.
+Renderer: `LeftRail.tsx` (the accordion shell — Sessions section reuses `SessionsPane` in `embedded` mode + the new Library section), `LibraryPane.tsx` (search/tag-filter + cards + install/uninstall), `LoadoutReviewModal.tsx` (the review). Still forthcoming: the **Requirements** section in the review (tool preflight, with the merge/run layer), the authoring modal, and the read-only MCP discovery tools.
 
 ## 8. User flows
 
@@ -632,7 +632,10 @@ claude-fleet/
             ├── types.d.ts             # declare global window.api
             └── components/
                 ├── WorkspaceTabStrip.tsx  # top: app name + workspace chips + actions
-                ├── SessionsPane.tsx       # left sidebar (placeholder until #3)
+                ├── LeftRail.tsx           # left sidebar accordion: Sessions + Loadout Library (#16)
+                ├── SessionsPane.tsx       # Sessions list (embedded in LeftRail)
+                ├── LibraryPane.tsx        # loadout Library: search/tag-filter + cards + install (#16)
+                ├── LoadoutReviewModal.tsx # review-before-install: files manifest + Open folder (#16)
                 ├── TerminalPane.tsx       # center: per-workspace session tab strip + stack
                 ├── TerminalSession.tsx    # one session: xterm + PTY + key bindings + session-ended overlay
                 ├── ObservabilityPane.tsx  # right sidebar: live session summary (cost + tokens + tools)

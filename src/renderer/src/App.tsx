@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { WorkspaceTabStrip } from './components/WorkspaceTabStrip';
-import { SessionsPane } from './components/SessionsPane';
+import { LeftRail } from './components/LeftRail';
 import { ObservabilityPane } from './components/ObservabilityPane';
 import { TerminalPane } from './components/TerminalPane';
 import { BottomBar } from './components/BottomBar';
@@ -57,6 +57,8 @@ export interface WorkspaceSummary {
   env: WorkspaceEnv;
   resources?: WorkspaceResources;
   mirror: WorkspaceMirror;
+  /** Loadouts installed into this workspace (#16-followup); absent ⇒ none. */
+  installedLoadouts?: { id: string; title: string; version?: string }[];
   createdAt: number;
   lastUsedAt: number;
 }
@@ -616,10 +618,20 @@ export function App() {
       />
 
       <div className={obsCollapsed ? 'app-body obs-collapsed' : 'app-body'}>
-        <SessionsPane
+        <LeftRail
           workspaces={workspaces}
           selectedWorkspaceId={selectedId}
+          selectedWorkspace={selectedWorkspace}
           onResume={handleResumeSession}
+          onChanged={refresh}
+          onNeedsRestart={(id) =>
+            setRestartBannerIds((prev) => {
+              if (prev.has(id)) return prev;
+              const next = new Set(prev);
+              next.add(id);
+              return next;
+            })
+          }
         />
 
         <main

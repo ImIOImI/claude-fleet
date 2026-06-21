@@ -74,7 +74,9 @@ test('Advanced image search: Tags dropdown filters with OR semantics + pills', a
     await mockMainIpc(app, { imageLibrary: IMAGES });
     await openSearchModal(window);
 
-    await window.getByRole('button', { name: /Tags/ }).click();
+    // Scope to the image-search modal's own Tags button — the loadout Library
+    // (#16) also has a "Tags ▾" button in the left rail.
+    await window.locator('.labels-button').click();
     const dropdown = window.locator('.labels-dropdown');
     await expect(dropdown).toBeVisible();
 
