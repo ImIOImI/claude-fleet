@@ -12,7 +12,7 @@ See [`.claude/rules/spec-maintenance.md`](../.claude/rules/spec-maintenance.md) 
 
 It is a local-only operator console — not a remote orchestrator, not a multi-user service, not a cloud product. Everything runs on the user's machine, against the user's local Docker daemon.
 
-**Terminology.** "Workspace" is the user-level concept the UI talks about: a named place where a Claude session runs against a directory. It's persisted on disk as a manifest at `<userData>/state/<id>/workspace.json` independent of any backend's lifecycle, so workspaces survive container deletion and can be restarted. "Container" in this doc refers specifically to the Docker container that today is the only implemented workspace backend. A local-host (non-container) backend is anticipated but not yet built.
+**Terminology.** "Workspace" is the user-level concept the UI talks about: a named place where a Claude session runs against a directory. It's persisted on disk as a manifest at `<userData>/state/<id>/workspace.json` independent of any backend's lifecycle, so workspaces survive container deletion and can be restarted. "Container" in this doc refers specifically to a Docker-container backend; a **local** (non-container) backend that runs `claude` directly on the host is also implemented (#16, Linux/macOS). A workspace's `kind` selects which.
 
 ## 2. Goals
 
@@ -242,9 +242,9 @@ interface WorkspaceSpec {
   description?: string;
   labels: string[];        // free-form, used for filtering in the Saved tab
   color?: { hue: number }; // one of 14 preset hues; random/hashed if unset
-  workspaceRoot: string;   // derived private folder `<fleetRoot>/<id>` (not user-supplied); bind-mounted at /workspace
+  workspaceRoot: string;   // container: derived `<fleetRoot>/<id>` (bind-mounted at /workspace). local: the user-chosen host dir claude runs in
   workspaceSubdir: string; // optional working subdir inside /workspace
-  kind: WorkspaceKind;     // 'container' today; 'local' is selectable in UI, not yet wired
+  kind: WorkspaceKind;     // 'container' (Docker) or 'local' (host process, #16)
   image?: string;          // image ref for kind='container'; undefined for 'local'
   authMode: AuthMode;      // 'oauth' (default) or 'apikey' (requires ANTHROPIC_API_KEY in env)
   env: {
@@ -324,7 +324,16 @@ interface Workspace extends WorkspaceSpec {
 - **deleted** — there is no live container, but a manifest is on disk. Recoverable by recreating via the create flow.
 
 ### Backend dispatch (per-workspace, by `kind`)
-Workspace operations are routed to a backend **per workspace**, not chosen globally. Both backends implement a single `Backend` contract (`src/main/backend.ts`: `ping`, `ensureImage`, `listLiveWorkspaces`, `createWorkspace`, `inspectImage`, `start/pause/stop/removeWorkspace`, `attachPty`, `getBrokerLogs`) — the Docker backend (`docker.ts`), the local host-process backend (`local.ts`, #16), and the mock backend (`mock.ts`, behind `CLAUDE_FLEET_MOCK=1`). `ipc.ts` dispatches each call: `workspace:create` routes on the payload's `kind`; every other channel resolves the workspace's `kind` from its manifest via `backendRouter.ts:resolveKind(idOrContainerId)` (a Docker container id never matches a manifest path → defaults to `'container'`; a local workspace's containerId surrogate equals its id → resolves to `'local'`). `workspace:list` merges live results from both backends. Docker-daemon-specific channels (`ping`, `ensureImage`, `inspectImage`) always target the Docker backend. In mock mode every workspace routes to the mock backend. (As of PR1 the `local.ts` mutations are stubs and `kind:'local'` is still blocked at create; PR2 implements it.)
+Workspace operations are routed to a backend **per workspace**, not chosen globally. Both backends implement a single `Backend` contract (`src/main/backend.ts`: `ping`, `ensureImage`, `listLiveWorkspaces`, `createWorkspace`, `inspectImage`, `start/pause/stop/removeWorkspace`, `attachPty`, `getBrokerLogs`) — the Docker backend (`docker.ts`), the local host-process backend (`local.ts`, #16), and the mock backend (`mock.ts`, behind `CLAUDE_FLEET_MOCK=1`). `ipc.ts` dispatches each call: `workspace:create` routes on the payload's `kind`; every other channel resolves the workspace's `kind` from its manifest via `backendRouter.ts:resolveKind(idOrContainerId)` (a Docker container id never matches a manifest path → defaults to `'container'`; a local workspace's containerId surrogate equals its id → resolves to `'local'`). `workspace:list` merges live results from both backends (deduped by id, since in mock mode both point at the same module). Docker-daemon-specific channels (`ping`, `ensureImage`, `inspectImage`) always target the Docker backend. In mock mode every workspace routes to the mock backend.
+
+### Local (non-container) backend (#16)
+The local backend (`local.ts`) runs `claude` as a **host child process** via `node-pty`, against a **user-chosen host directory** — no Docker, no broker, no bind mounts. It's for hosts where Docker is unavailable/overkill or `claude` is already installed. Linux/macOS only for now (Windows is a tracked follow-up).
+
+- **Session manager (`localSessions.ts`)** — the in-process analog of the in-container broker. It owns each local PTY in a `Map` keyed by `<workspaceId> <sessionId>`, keeps it alive across renderer **detach/reattach** (workspace switches), and replays a capped ring buffer (256 KiB) on reattach so scrollback is restored — exactly the broker's HISTORY behavior, in the main process. `detach()` leaves the process running; only `stop`/`remove` kill it. Pure module (no node-pty import — the caller injects a `spawn` factory), so it's unit-testable; `local.ts` supplies the node-pty-backed factory (lazy `require` so the native addon loads only when a session actually spawns).
+- **No cross-restart continuity.** Unlike a container (whose broker is a separate process tree that survives an app quit), a local `claude` is a child of the Electron main process and dies with the app. Liveness is in-memory only (`started`/`paused` sets), so after an app restart all local workspaces report `stopped`; the user resumes them and the conversation is restored from the on-disk JSONL via `claude --resume <uuid>` — a fresh process, not the old in-memory state.
+- **Working directory** — the user picks an existing host dir in the form (`dialog:pickDirectory` + a typed-path fallback); `claude` runs there. Safe to allow an arbitrary path because there's no bind mount. Stored as the manifest's `workspaceRoot` (the create + writeManifest handlers preserve it for local instead of deriving `<fleetRoot>/<id>`). Validated (exists + is a directory) in the `workspace:create` handler.
+- **HOME / auth isolation** — spawned with `HOME=<userData>/state/<id>`, so `claude` reads a per-workspace `.claude.json` (dotted) + `.claude/` there, isolated from the user's own host claude config. `ensureLocalClaudeJson` seeds onboarding + per-dir trust (mirrors the container seed, minus MCP which is PR3). OAuth workspaces symlink `$HOME/.claude/.credentials.json` → the shared fleet creds file, so one login covers local + container alike. apikey auth flows via `resolveEnv` into the spawn env. The `claude` binary is resolved via `CLAUDE_FLEET_LOCAL_CLAUDE_BIN` override or `command -v claude`; if absent, attach throws a friendly "install Claude Code" error surfaced by the attach-error overlay.
+- **Lifecycle** — `createWorkspace`/`startWorkspace` mark the workspace running (processes spawn lazily on first attach); `pauseWorkspace`/`startWorkspace` SIGSTOP/SIGCONT the live sessions; `stop`/`remove` kill them (`remove` with `deleteState` also wipes the state dir). `listLiveWorkspaces` returns every `kind:'local'` manifest annotated `running`/`paused`/`stopped` from the in-memory sets, so a stopped local workspace shows in the Saved modal (never the `deleted` bucket unless its manifest is gone).
 
 ### Docker container labels (backend implementation)
 Today the primary workspace backend is a Docker container. The container name is `cf-<id>` (must be unique on the host); lookup is always by the `com.claude-fleet.id` label, which means renaming a workspace does not require touching the container at all. Each managed container carries:
@@ -566,7 +575,8 @@ claude-fleet/
     │   ├── backend.ts                 # Backend contract (shared by docker/local/mock)
     │   ├── backendRouter.ts           # resolveKind() — per-workspace backend routing (#16)
     │   ├── docker.ts                  # Docker backend (dockerode + broker-aware PTY attach)
-    │   ├── local.ts                   # local host-process backend (#16; stub until PR2)
+    │   ├── local.ts                   # local host-process backend (#16: node-pty spawn, lifecycle, HOME/auth)
+    │   ├── localSessions.ts           # in-process session manager for local PTYs (broker analog, #16)
     │   ├── broker.ts                  # host-side BrokerClient + frame codec
     │   ├── mock.ts                    # mock backend behind CLAUDE_FLEET_MOCK=1
     │   ├── workspaces.ts              # WorkspaceSpec types + manifest read/write/list

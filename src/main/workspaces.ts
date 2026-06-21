@@ -15,7 +15,8 @@
 // Sensitive material (env-var secrets) is NOT persisted here — only the
 // list of secret keys; values live in keytar.
 
-import { readFile, writeFile, readdir } from 'node:fs/promises';
+import { readFile, writeFile, readdir, mkdir } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { workspaceManifestPath, stateRoot } from './paths.js';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
@@ -149,7 +150,11 @@ export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec |
 }
 
 export async function writeWorkspaceManifest(spec: WorkspaceSpec): Promise<void> {
-  await writeFile(workspaceManifestPath(spec.id), JSON.stringify(spec, null, 2) + '\n', 'utf8');
+  // Ensure the state dir exists. Real backends mkdir it during create, but the
+  // mock backend doesn't, and edit/migration paths shouldn't assume it's there.
+  const manifestPath = workspaceManifestPath(spec.id);
+  await mkdir(dirname(manifestPath), { recursive: true });
+  await writeFile(manifestPath, JSON.stringify(spec, null, 2) + '\n', 'utf8');
 }
 
 export async function touchWorkspaceUsed(id: string): Promise<void> {
