@@ -49,21 +49,16 @@ export function WifiGlyph({ size = 14, title }: { size?: number; title?: string 
   );
 }
 
-/** Manager "orchestrator" marker — the hub-and-spokes glyph. */
+/** Manager "controls others" marker — the hierarchy / org-chart glyph: one
+ *  node commanding two below it. */
 export function ManagerGlyph({ size = 14, title }: { size?: number; title?: string }): React.JSX.Element {
   return (
     <svg className="committee-glyph mgr" width={size} height={size} viewBox="0 0 16 16" aria-hidden={!title}>
       {title && <title>{title}</title>}
-      <circle cx="8" cy="8" r="2" fill="currentColor" />
-      <circle cx="8" cy="2.4" r="1.4" fill="currentColor" />
-      <circle cx="2.8" cy="12.6" r="1.4" fill="currentColor" />
-      <circle cx="13.2" cy="12.6" r="1.4" fill="currentColor" />
-      <path
-        d="M8 6V3.8M6.6 9.4 3.9 11.3M9.4 9.4l2.7 1.9"
-        stroke="currentColor"
-        strokeWidth="1.1"
-        strokeLinecap="round"
-      />
+      <rect x="5.7" y="1.4" width="4.6" height="3.4" rx="0.9" fill="currentColor" />
+      <rect x="1.2" y="11.2" width="4.6" height="3.4" rx="0.9" fill="currentColor" />
+      <rect x="10.2" y="11.2" width="4.6" height="3.4" rx="0.9" fill="currentColor" />
+      <path d="M8 4.8v2.4M3.5 11.2V8.6h9v2.6" stroke="currentColor" strokeWidth="1.1" fill="none" />
     </svg>
   );
 }
