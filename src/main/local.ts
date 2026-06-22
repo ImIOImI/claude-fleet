@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import { app } from 'electron';
 import type * as NodePty from 'node-pty';
 import type { Backend } from './backend.js';
-import { mcpSocketDir, mcpSocketPath } from './mcpSocket.js';
+import { mcpSocketDir, mcpWorkspaceSocketPath } from './mcpSocket.js';
 import { ensureLocalBridgeScript, localMcpServerEntry } from './mcpLocalBridge.js';
 import {
   readWorkspaceManifest,
@@ -250,8 +250,12 @@ export async function attachPty(
  */
 async function ensureMcpConfig(id: string): Promise<string | undefined> {
   const userData = app.getPath('userData');
-  const socketPath = mcpSocketPath(userData);
+  // Per-workspace socket (#117). The listener is brought up at workspace:create
+  // / startup; if it isn't present yet, skip wiring MCP for this attach.
+  const socketPath = mcpWorkspaceSocketPath(userData, id);
   if (!(await stat(socketPath).catch(() => null))) return undefined;
+  // The bridge script is shared (host-only, never bind-mounted) — it lives in
+  // the parent mcp dir and is referenced by absolute host path.
   const bridgePath = await ensureLocalBridgeScript(mcpSocketDir(userData));
   const config = {
     mcpServers: {

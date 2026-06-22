@@ -2,74 +2,125 @@
 // container (issue #12, SPEC §11). Hand-rolled JSON-RPC over a Unix-domain
 // socket — no SDK dep, matching the broker's "own the protocol" approach.
 //
-// Transport: the server speaks newline-delimited JSON-RPC 2.0 on a Unix socket
-// at `<userData>/mcp.sock`. In-container `claude` reaches it over a stdio
-// bridge (`socat - UNIX-CONNECT:/fleet/mcp.sock`) configured in the workspace's
+// Transport: one listener **per workspace** at `<userData>/mcp/<id>/mcp.sock`
+// (#117), bind-mounted into only that container at `/fleet/mcp/mcp.sock`.
+// In-container `claude` reaches it over a stdio bridge
+// (`socat - UNIX-CONNECT:/fleet/mcp/mcp.sock`) configured in the workspace's
 // ~/.claude.json — wired in the container-side slice (docker.ts / runner image).
+//
+// Caller identity (#117, the security spine): because each workspace has its
+// own listener, the host derives the caller's workspace id from *which listener
+// accepted the connection*, not from anything the client sends. There is no
+// `caller_id` argument, token, or env var to forge or steal — identity is
+// ambient from the mount. Tools receive that id via `ToolCtx`; cross-workspace
+// scoping of reads rides on it in a later phase (#122).
 //
 // Safety: a single connection opened `{ readonly: true }` is the hard guarantee
 // that nothing here can mutate the DB; the typed tools use parameterized SQL,
 // and the raw `query` escape hatch is additionally gated by isReadOnlySql.
-// Visibility is fleet-global (a session row from one workspace is queryable by
-// another) — matching the "sessions are global" goal; per-workspace scoping is
-// a future option (SPEC §11).
+// Visibility is currently fleet-global (a session row from one workspace is
+// queryable by another) — narrowing to the caller + read-granted targets is
+// #122, gated behind a flag.
 
 import { createServer, type Server, type Socket } from 'node:net';
-import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { costFor } from './pricing.js';
 import { isReadOnlySql } from './mcpReadonlySql.js';
-import { mcpSocketDir, mcpSocketPath } from './mcpSocket.js';
+import { mcpWorkspaceSocketDir, mcpWorkspaceSocketPath } from './mcpSocket.js';
 
 const PROTOCOL_VERSION = '2024-11-05';
 const SERVER_INFO = { name: 'claude-fleet-state', version: '1.0.0' };
 const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 1000;
 
-export { mcpSocketPath };
+/** Context handed to every tool call. `callerId` is the workspace id of the
+ *  listener that accepted the connection — host-assigned, never from the wire. */
+interface ToolCtx {
+  callerId: string;
+}
 
-let server: Server | null = null;
+let userDataDir: string | null = null;
 let rodb: Database.Database | null = null;
+// One listening socket per workspace, keyed by workspace id. The id is captured
+// in each listener's accept callback and becomes the connection's caller id.
+const listeners = new Map<string, Server>();
 
-/** Open the read-only DB connection + start listening. No-op if already up. */
-export function startMcpServer(userDataDir: string): void {
-  if (server) return;
-  const dbPath = join(userDataDir, 'state.db');
+/** Open the shared read-only DB connection. Per-workspace listeners are created
+ *  lazily via {@link ensureWorkspaceSocket}. No-op if already started. */
+export function startMcpServer(dir: string): void {
+  if (rodb) return;
+  const dbPath = join(dir, 'state.db');
   rodb = new Database(dbPath, { readonly: true, fileMustExist: true });
-  const sockPath = mcpSocketPath(userDataDir);
-  // The socket lives in its own dir (bind-mounted into containers); make sure
-  // it exists before listen().
-  mkdirSync(mcpSocketDir(userDataDir), { recursive: true });
-  // A stale socket file from a previous run blocks listen() with EADDRINUSE.
-  // (The unlink also means a fresh inode each run — why containers bind the
-  // *directory*, not this file; see mcpSocket.ts.)
+  userDataDir = dir;
+}
+
+/** Ensure a listener exists for `id` at `<userData>/mcp/<id>/mcp.sock`.
+ *  Idempotent; safe to call before the workspace's container starts (the
+ *  in-container socat bridge reconnects until the listener is up). No-op if the
+ *  server hasn't been started (e.g. mock mode / tests without a DB). */
+export function ensureWorkspaceSocket(id: string): void {
+  if (!rodb || !userDataDir) return;
+  if (listeners.has(id)) return;
+  const dir = mcpWorkspaceSocketDir(userDataDir, id);
+  const sockPath = mcpWorkspaceSocketPath(userDataDir, id);
   try {
+    mkdirSync(dir, { recursive: true });
+    // A stale socket file from a previous run blocks listen() with EADDRINUSE.
+    // (The unlink also means a fresh inode each run — why containers bind the
+    // *directory*, not this file; see mcpSocket.ts.)
     if (existsSync(sockPath)) unlinkSync(sockPath);
   } catch {
     /* best effort */
   }
-  server = createServer((sock) => handleConnection(sock));
-  server.on('error', (err) => console.warn('[mcp] server error:', err));
-  server.listen(sockPath, () => console.log(`[mcp] listening on ${sockPath}`));
+  const server = createServer((sock) => handleConnection(sock, id));
+  server.on('error', (err) => console.warn(`[mcp] listener error (${id}):`, err));
+  server.listen(sockPath, () => console.log(`[mcp] listening for ${id} on ${sockPath}`));
+  listeners.set(id, server);
+}
+
+/** Tear down a workspace's listener + remove its socket dir. Best-effort
+ *  cleanup on workspace removal; surviving listeners are harmless and get
+ *  rebuilt from the manifest list on next launch. */
+export function removeWorkspaceSocket(id: string): void {
+  const server = listeners.get(id);
+  if (server) {
+    try {
+      server.close();
+    } catch {
+      /* ignore */
+    }
+    listeners.delete(id);
+  }
+  if (userDataDir) {
+    try {
+      rmSync(mcpWorkspaceSocketDir(userDataDir, id), { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 export function stopMcpServer(): void {
-  try {
-    server?.close();
-  } catch {
-    /* ignore */
+  for (const server of listeners.values()) {
+    try {
+      server.close();
+    } catch {
+      /* ignore */
+    }
   }
+  listeners.clear();
   try {
     rodb?.close();
   } catch {
     /* ignore */
   }
-  server = null;
   rodb = null;
+  userDataDir = null;
 }
 
-function handleConnection(sock: Socket): void {
+function handleConnection(sock: Socket, callerId: string): void {
   let buf = '';
   sock.setEncoding('utf8');
   sock.on('data', (chunk: string) => {
@@ -78,13 +129,13 @@ function handleConnection(sock: Socket): void {
     while ((nl = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, nl).trim();
       buf = buf.slice(nl + 1);
-      if (line) dispatchLine(line, sock);
+      if (line) dispatchLine(line, sock, callerId);
     }
   });
   sock.on('error', () => sock.destroy());
 }
 
-function dispatchLine(line: string, sock: Socket): void {
+function dispatchLine(line: string, sock: Socket, callerId: string): void {
   let msg: { id?: unknown; method?: string; params?: Record<string, unknown> };
   try {
     msg = JSON.parse(line);
@@ -97,7 +148,7 @@ function dispatchLine(line: string, sock: Socket): void {
   const isNotification = id === undefined || id === null;
 
   try {
-    const result = handleMethod(method ?? '', params ?? {});
+    const result = handleMethod(method ?? '', params ?? {}, callerId);
     if (!isNotification && result !== NO_REPLY) {
       send(sock, { jsonrpc: '2.0', id, result });
     }
@@ -121,7 +172,7 @@ class RpcError extends Error {
   }
 }
 
-function handleMethod(method: string, params: Record<string, unknown>): unknown {
+function handleMethod(method: string, params: Record<string, unknown>, callerId: string): unknown {
   switch (method) {
     case 'initialize':
       return {
@@ -134,21 +185,23 @@ function handleMethod(method: string, params: Record<string, unknown>): unknown 
     case 'tools/list':
       return { tools: TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })) };
     case 'tools/call':
-      return callTool(params);
+      return callTool(params, callerId);
     default:
       if (method.startsWith('notifications/')) return NO_REPLY;
       throw new RpcError(-32601, `Method not found: ${method}`);
   }
 }
 
-function callTool(params: Record<string, unknown>): unknown {
+function callTool(params: Record<string, unknown>, callerId: string): unknown {
   const name = params.name as string;
   const args = (params.arguments as Record<string, unknown>) ?? {};
   const tool = TOOLS.find((t) => t.name === name);
   if (!tool) throw new RpcError(-32602, `Unknown tool: ${name}`);
   if (!rodb) throw new RpcError(-32603, 'Database not open');
   try {
-    const result = tool.run(rodb, args);
+    // callerId is host-assigned (the accepting listener's workspace id), so it
+    // is trustworthy here. Tools that scope by caller read it from ctx (#122).
+    const result = tool.run(rodb, args, { callerId });
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   } catch (err) {
     // Tool-level failures surface to the model as an error result (MCP
@@ -175,7 +228,9 @@ interface Tool {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
-  run: (db: Database.Database, args: Record<string, unknown>) => unknown;
+  // ctx carries the host-assigned caller workspace id. Existing tools omit it
+  // (a narrower fn satisfies the wider type); #122's scoped reads consume it.
+  run: (db: Database.Database, args: Record<string, unknown>, ctx: ToolCtx) => unknown;
 }
 
 // Curated event columns (omit raw_jsonl by default — it's large and the

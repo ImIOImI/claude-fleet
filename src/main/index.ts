@@ -2,7 +2,7 @@ import { app, BrowserWindow, shell } from 'electron';
 import { join } from 'node:path';
 import { registerIpc } from './ipc.js';
 import { openDb, closeDb } from './db.js';
-import { startMcpServer, stopMcpServer } from './mcpServer.js';
+import { startMcpServer, stopMcpServer, ensureWorkspaceSocket } from './mcpServer.js';
 import { ensureBuiltinLoadouts } from './loadouts.js';
 import { JsonlWatcher } from './jsonlWatcher.js';
 import { listWorkspaceManifests } from './workspaces.js';
@@ -80,6 +80,10 @@ app.whenReady().then(async () => {
     // query the state DB (sessions/events/cost). Opens its own readonly conn.
     startMcpServer(app.getPath('userData'));
     const manifests = await listWorkspaceManifests();
+    // Re-establish a per-workspace MCP listener for every known workspace (#117)
+    // so a paused container that survived the restart finds its socket again
+    // (its bind points at <userData>/mcp/<id>/, whose listener must be rebuilt).
+    for (const m of manifests) ensureWorkspaceSocket(m.id);
     // Seed each workspace's durable-mirror default from its manifest before the
     // watcher starts ingesting, so the very first lines are mirrored per the
     // saved setting — not dependent on the renderer's later workspace:list poll.

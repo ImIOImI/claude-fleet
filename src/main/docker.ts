@@ -29,7 +29,7 @@ import {
 import type { AuthMode, Workspace, WorkspaceEnv, WorkspaceResources, WorkspaceKind } from './workspaces.js';
 import { FACTORY_MIRROR } from './workspaces.js';
 import { fleetPrivateDir, fleetSharedDir } from './config.js';
-import { mcpSocketDir, CONTAINER_MCP_DIR, CONTAINER_MCP_SOCKET } from './mcpSocket.js';
+import { mcpWorkspaceSocketDir, mcpWorkspaceBind, CONTAINER_MCP_SOCKET } from './mcpSocket.js';
 import { BrokerClient, brokerPtyStream } from './broker.js';
 import { recordPendingAttach } from './pendingAttaches.js';
 import { learnBrokerSessionMapping } from './db.js';
@@ -398,19 +398,25 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
     `${brokerDir}:/run/broker:rw`
   ];
 
-  // Read-only state-DB MCP server (#12): bind its host socket DIR (not the
-  // socket file) so in-container claude can query sessions/events/cost via the
-  // `mcpServers` entry seeded in ~/.claude.json below (a reconnecting socat
-  // stdio bridge). Binding the *directory* — like the broker socket above —
+  // Read-only state-DB MCP server (#12): bind this workspace's **own per-id**
+  // socket DIR (`<userData>/mcp/<id>/`, not the parent and not the socket file)
+  // so in-container claude can query sessions/events/cost via the `mcpServers`
+  // entry seeded in ~/.claude.json below (a reconnecting socat stdio bridge).
+  // Binding the per-id LEAF dir is load-bearing (#117): the container's mount
+  // namespace then contains only its own `mcp.sock`, never a sibling's, and the
+  // host derives an unspoofable caller id from which listener accepted the
+  // connection. Binding the parent `<userData>/mcp/` would break both. Binding
+  // the *directory* (not the socket file) — like the broker socket above —
   // means a socket the server recreates with a new inode on app restart is
   // still visible at the same container path, so a paused container's MCP
   // survives an app restart (#18). `:rw` because connecting to a Unix socket
   // needs write access — the read-only guarantee is the DB connection, not the
-  // mount. The dir always exists (startMcpServer mkdirs it; mkdir here too in
-  // case the server hasn't started), so no existence guard is needed.
-  const mcpDir = mcpSocketDir(app.getPath('userData'));
+  // mount. The listener is created by `ensureWorkspaceSocket` (workspace:create
+  // / startup); we mkdir here too so the bind has a host dir even if the server
+  // hasn't started yet (the bridge reconnects until the socket appears).
+  const mcpDir = mcpWorkspaceSocketDir(app.getPath('userData'), spec.id);
   await mkdir(mcpDir, { recursive: true });
-  binds.push(`${mcpDir}:${CONTAINER_MCP_DIR}:rw`);
+  binds.push(mcpWorkspaceBind(app.getPath('userData'), spec.id));
 
   // Persist + pre-complete onboarding. ~/.claude.json lives in $HOME,
   // outside the .claude bind, so without this every new container re-runs
