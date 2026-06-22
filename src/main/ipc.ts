@@ -258,6 +258,76 @@ async function committeeUnpause(callerId: string, targetId: string): Promise<{ i
   return { id: targetId, running: true };
 }
 
+/** Inject a message into a granted, reachable expert's live session (#120) —
+ *  same fire-and-forget path as a human keystroke (see Backend.committeePost). */
+async function committeePost(
+  callerId: string,
+  targetId: string,
+  msg: string
+): Promise<{ id: string; brokerSessionId: string }> {
+  await assertControl(callerId, targetId, 'post');
+  const kind = await resolveKind(targetId);
+  const { brokerSessionId } = await backendForKind(kind).committeePost(targetId, msg);
+  return { id: targetId, brokerSessionId };
+}
+
+/** One committee `collect` turn — a user/assistant transcript line, decoded. */
+interface CollectTurn {
+  id: number;
+  ts: number | null;
+  role: string;
+  text: string;
+}
+
+/** Pull the human-readable text out of one claude JSONL line. */
+function extractTurnText(rawJsonl: string): string {
+  try {
+    const o = JSON.parse(rawJsonl) as { message?: { content?: unknown } };
+    const content = o.message?.content;
+    if (typeof content === 'string') return content.trim();
+    if (Array.isArray(content)) {
+      return content
+        .map((b) => {
+          if (typeof b === 'string') return b;
+          const block = b as { type?: string; text?: string; name?: string };
+          if (block.type === 'text') return block.text ?? '';
+          if (block.type === 'tool_use') return `[tool_use: ${block.name ?? '?'}]`;
+          if (block.type === 'tool_result') return '[tool_result]';
+          return '';
+        })
+        .join('')
+        .trim();
+    }
+  } catch {
+    /* malformed line — no text */
+  }
+  return '';
+}
+
+/**
+ * Read new transcript turns from a granted expert (#120), cursored by the
+ * autoincrement `events.id` (NOT `ts` — `ts` is nullable and is claude's clock;
+ * skew/null would scramble a time window). Resolves the expert's most-recently-
+ * active session from the DB (v1 single-tab experts ⇒ that's the live one);
+ * never reaches the broker, so it works whether or not anyone is attached.
+ */
+async function committeeCollect(
+  callerId: string,
+  targetId: string,
+  since: number
+): Promise<{ id: string; sessionId: string | null; cursor: number; turns: CollectTurn[] }> {
+  await assertControl(callerId, targetId, 'read');
+  const sessionId = listSessions(targetId)[0]?.id ?? null;
+  if (!sessionId) return { id: targetId, sessionId: null, cursor: since, turns: [] };
+  const events = eventsForSession(sessionId, since, 500);
+  const cursor = events.length ? events[events.length - 1].id : since;
+  const turns = events
+    .filter((e) => e.type === 'assistant' || e.type === 'user')
+    .map((e) => ({ id: e.id, ts: e.ts, role: e.type, text: extractTurnText(e.rawJsonl) }))
+    .filter((t) => t.text.length > 0);
+  return { id: targetId, sessionId, cursor, turns };
+}
+
 export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): void {
   const { jsonlWatcher } = opts;
 
@@ -551,9 +621,20 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('committee:unpause', (_e, callerId: string, targetId: string) =>
     committeeUnpause(callerId, targetId)
   );
+  ipcMain.handle('committee:post', (_e, callerId: string, targetId: string, msg: string) =>
+    committeePost(callerId, targetId, msg)
+  );
+  ipcMain.handle('committee:collect', (_e, callerId: string, targetId: string, since?: number) =>
+    committeeCollect(callerId, targetId, since ?? 0)
+  );
   // Let the MCP committee_* tools reach the same effects (caller id from the
   // per-workspace socket instead of an IPC arg).
-  setCommitteeHandlers({ pause: committeePause, unpause: committeeUnpause });
+  setCommitteeHandlers({
+    pause: committeePause,
+    unpause: committeeUnpause,
+    post: committeePost,
+    collect: committeeCollect
+  });
 
   ipcMain.handle('workspace:remove', async (_e, containerId: string, opts?: RemoveWorkspaceOpts) => {
     // A saved (no-live) workspace passes its ULID in opts.id; prefer it so the

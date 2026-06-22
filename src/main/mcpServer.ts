@@ -51,6 +51,8 @@ interface ToolCtx {
 export interface CommitteeHandlers {
   pause(callerId: string, targetId: string): Promise<unknown>;
   unpause(callerId: string, targetId: string): Promise<unknown>;
+  post(callerId: string, targetId: string, text: string): Promise<unknown>;
+  collect(callerId: string, targetId: string, since: number): Promise<unknown>;
 }
 let committeeHandlers: CommitteeHandlers | null = null;
 export function setCommitteeHandlers(h: CommitteeHandlers): void {
@@ -436,6 +438,42 @@ const TOOLS: Tool[] = [
       if (!committeeHandlers) throw new Error('committee control is unavailable');
       if (typeof a.id !== 'string') throw new Error('id is required');
       return committeeHandlers.unpause(ctx.callerId, a.id);
+    }
+  },
+  {
+    name: 'committee_post',
+    description:
+      'Send a message into a reachable expert workspace you hold a "post" grant for — like typing ' +
+      'it into that session. Args: id (target workspace id), message (text to send).',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string' }, message: { type: 'string' } },
+      required: ['id', 'message']
+    },
+    run: (_db, a, ctx) => {
+      if (!committeeHandlers) throw new Error('committee control is unavailable');
+      if (typeof a.id !== 'string' || typeof a.message !== 'string') {
+        throw new Error('id and message are required');
+      }
+      return committeeHandlers.post(ctx.callerId, a.id, a.message);
+    }
+  },
+  {
+    name: 'committee_collect',
+    description:
+      'Read new transcript turns from an expert workspace you hold a "read" grant for. Cursored by ' +
+      '`since` (an event id): pass the previous reply\'s `cursor`, or omit/0 to start from the beginning. ' +
+      'Returns { sessionId, cursor, turns: [{ id, role, text }] }. Args: id (target), since (optional number).',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string' }, since: { type: 'number' } },
+      required: ['id']
+    },
+    run: (_db, a, ctx) => {
+      if (!committeeHandlers) throw new Error('committee control is unavailable');
+      if (typeof a.id !== 'string') throw new Error('id is required');
+      const since = typeof a.since === 'number' ? a.since : 0;
+      return committeeHandlers.collect(ctx.callerId, a.id, since);
     }
   }
 ];

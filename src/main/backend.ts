@@ -39,4 +39,14 @@ export interface Backend {
     resumeOf?: string
   ): Promise<PtyHandle>;
   getBrokerLogs(containerId: string, tailLines?: number): Promise<string>;
+  /**
+   * Inject a line of input into the workspace's single live session, as if a
+   * human typed it (committee `post`, #120). Resolves the live broker session,
+   * does a transient ATTACH on a dedicated channel, sends `text` + CR, then
+   * DETACHes — so it never holds the one-writer slot beyond the keystroke.
+   * Throws on zero (`not attached yet`) or multiple (`single-tab only`) live
+   * sessions. Container-only; the local backend throws. Returns the resolved
+   * broker session id.
+   */
+  committeePost(workspaceId: string, text: string): Promise<{ brokerSessionId: string }>;
 }

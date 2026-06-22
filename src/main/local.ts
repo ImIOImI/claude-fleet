@@ -273,6 +273,12 @@ export async function getBrokerLogs(_containerId: string, _tailLines?: number): 
   return '';
 }
 
+export async function committeePost(_workspaceId: string, _text: string): Promise<{ brokerSessionId: string }> {
+  // Committee control is container-only (assertControl already refuses local
+  // targets); this exists only to satisfy the Backend contract.
+  throw new Error('committee post is not supported for local workspaces');
+}
+
 // Compile-time assertion that this module satisfies the Backend contract.
 const _assertBackend: Backend = {
   ping,
@@ -285,6 +291,7 @@ const _assertBackend: Backend = {
   stopWorkspace,
   removeWorkspace,
   attachPty,
-  getBrokerLogs
+  getBrokerLogs,
+  committeePost
 };
 void _assertBackend;

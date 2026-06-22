@@ -79,7 +79,7 @@ test('MCP server: initialize, tools, query escape hatch, write rejection', async
   const projectsDir = path.join(stateDir, '.claude', 'projects', '-workspace');
   mkdirSync(projectsDir, { recursive: true });
 
-  const seedManifest = (wsId: string, name: string): void => {
+  const seedManifest = (wsId: string, name: string, extra: Record<string, unknown> = {}): void => {
     mkdirSync(path.join(userDataDir, 'state', wsId), { recursive: true });
     writeFileSync(
       path.join(userDataDir, 'state', wsId, 'workspace.json'),
@@ -94,12 +94,15 @@ test('MCP server: initialize, tools, query escape hatch, write rejection', async
         authMode: 'oauth',
         env: { plain: {}, secretKeys: [] },
         createdAt: Date.now(),
-        lastUsedAt: Date.now()
+        lastUsedAt: Date.now(),
+        ...extra
       })
     );
   };
-  seedManifest(id, 'mcp-test-ws');
-  seedManifest(id2, 'mcp-test-ws-2');
+  // `id` opts in as a reachable expert; `id2` is a manager granted `read` over
+  // it — so a committee_collect from id2's socket is permitted (#120).
+  seedManifest(id, 'mcp-test-ws', { accessibility: { reachable: true } });
+  seedManifest(id2, 'mcp-test-ws-2', { control: { canControl: [{ id, verbs: ['read'] }] } });
 
   const app: ElectronApplication = await electron.launch({
     args: [REPO_ROOT, `--user-data-dir=${userDataDir}`],
@@ -122,7 +125,7 @@ test('MCP server: initialize, tools, query escape hatch, write rejection', async
       timestamp: new Date().toISOString(),
       message: {
         model: 'claude-opus-4-7',
-        content: [],
+        content: [{ type: 'text', text: 'hello from the expert' }],
         usage: {
           input_tokens: 100,
           output_tokens: 20,
@@ -202,6 +205,28 @@ test('MCP server: initialize, tools, query escape hatch, write rejection', async
     try {
       const init2 = await client2.call('initialize', { protocolVersion: '2024-11-05' });
       expect((init2.result as { serverInfo?: { name?: string } }).serverInfo?.name).toBe('claude-fleet-state');
+
+      // committee_collect (#120) cross-workspace: id2 holds a `read` grant over
+      // `id`, which opted in — so collecting from id2's socket returns id's
+      // transcript turn (the seeded assistant text), cursored by events.id.
+      const col = await client2.call('tools/call', { name: 'committee_collect', arguments: { id } });
+      const collected = toolText(col) as {
+        sessionId: string | null;
+        cursor: number;
+        turns: Array<{ role: string; text: string }>;
+      };
+      expect(collected.sessionId).toBe(sessionId);
+      expect(collected.cursor).toBeGreaterThan(0);
+      expect(collected.turns.some((t) => t.role === 'assistant' && t.text.includes('hello from the expert'))).toBe(
+        true
+      );
+
+      // A second collect cursored past that turn returns nothing new.
+      const col2 = await client2.call('tools/call', {
+        name: 'committee_collect',
+        arguments: { id, since: collected.cursor }
+      });
+      expect((toolText(col2) as { turns: unknown[] }).turns).toHaveLength(0);
     } finally {
       client2.close();
     }

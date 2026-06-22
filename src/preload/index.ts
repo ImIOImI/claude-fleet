@@ -180,7 +180,19 @@ const api = {
     pause: (callerId: string, targetId: string): Promise<{ id: string; paused: true }> =>
       ipcRenderer.invoke('committee:pause', callerId, targetId),
     unpause: (callerId: string, targetId: string): Promise<{ id: string; running: true }> =>
-      ipcRenderer.invoke('committee:unpause', callerId, targetId)
+      ipcRenderer.invoke('committee:unpause', callerId, targetId),
+    post: (callerId: string, targetId: string, message: string): Promise<{ id: string; brokerSessionId: string }> =>
+      ipcRenderer.invoke('committee:post', callerId, targetId, message),
+    collect: (
+      callerId: string,
+      targetId: string,
+      since?: number
+    ): Promise<{
+      id: string;
+      sessionId: string | null;
+      cursor: number;
+      turns: Array<{ id: number; ts: number | null; role: string; text: string }>;
+    }> => ipcRenderer.invoke('committee:collect', callerId, targetId, since)
   },
   sessions: {
     read: (workspaceId: string): Promise<SessionInventory> =>

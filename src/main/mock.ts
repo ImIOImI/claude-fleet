@@ -344,3 +344,14 @@ export async function attachPty(
 export async function getBrokerLogs(_containerId: string, _tailLines?: number): Promise<string> {
   return '';
 }
+
+/** Mock committee post (#120): no broker, so just acknowledge for a known
+ *  workspace. Lets the authorization + dispatch path be exercised in mock
+ *  e2e; the real broker round-trip is docker-only. */
+export async function committeePost(
+  workspaceId: string,
+  _text: string
+): Promise<{ brokerSessionId: string }> {
+  if (!workspaces.get(workspaceId)) throw new Error(`no such workspace ${workspaceId}`);
+  return { brokerSessionId: `mock-broker-${workspaceId}` };
+}
