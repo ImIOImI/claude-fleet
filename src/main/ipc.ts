@@ -26,6 +26,8 @@ import * as mockDocker from './mock.js';
 import type { Backend } from './backend.js';
 import { resolveKind } from './backendRouter.js';
 import { assertControl } from './control.js';
+import { ActivityDetector } from './activityDetector.js';
+import { wouldExceed, recordPost, COMMITTEE_CAPS } from './committeeRuns.js';
 import { ensureWorkspaceSocket, removeWorkspaceSocket, setCommitteeHandlers } from './mcpServer.js';
 import * as vault from './vault.js';
 import * as fs from './fs.js';
@@ -91,6 +93,10 @@ const ptySessions = new Map<string, PtyHandle>();
 // one-writer-per-session, so a second attach to an already-viewed expert is
 // rejected `already attached`). Populated/cleared alongside ptySessions.
 const handleWorkspaceId = new Map<string, string>();
+// Host-side busy/idle per workspace (#121), computed in main from the broker
+// output stream (not lifted from the renderer). `since` is the host-clock ms at
+// the last busy↔idle flip — used to detect a stalled (busy-too-long) expert.
+const committeeBusy = new Map<string, { busy: boolean; since: number }>();
 
 // Detected once at load: are we running under WSL? (Drives `fs:openPath`.)
 const RUNNING_IN_WSL = ((): boolean => {
@@ -287,12 +293,62 @@ function liveHandleForWorkspace(workspaceId: string): PtyHandle | null {
  * Only a truly headless expert (no renderer attached) falls back to the
  * backend's transient attach.
  */
+/** Target workspace ids a manager currently holds any grant over. */
+async function managerGrantedTargets(managerId: string): Promise<string[]> {
+  const m = await readWorkspaceManifest(managerId);
+  return (m?.control?.canControl ?? []).map((g) => g.id);
+}
+
+/** Host-initiated force-pause of a set of experts (bypasses assertControl — the
+ *  host is enforcing a budget, not a manager acting). Best-effort per target. */
+async function forcePauseExperts(ids: string[]): Promise<void> {
+  const all = await listAllWorkspaces();
+  await Promise.all(
+    ids.map(async (id) => {
+      const t = all.find((w) => w.id === id);
+      if (t?.containerId) await backendForKind(t.kind).pauseWorkspace(t.containerId).catch(() => undefined);
+    })
+  );
+}
+
+/** Sum derived USD across a manager's controlled experts. Returns 0 when the DB
+ *  isn't open (mock mode) — no real cost to cap there. */
+function spentUsdForManager(targetIds: string[]): number {
+  try {
+    return targetIds.reduce((sum, id) => sum + (costForWorkspace(id)?.usd ?? 0), 0);
+  } catch {
+    return 0;
+  }
+}
+
 async function committeePost(
   callerId: string,
   targetId: string,
   msg: string
 ): Promise<{ id: string; via: 'attached' | 'headless'; brokerSessionId?: string }> {
   await assertControl(callerId, targetId, 'post');
+
+  // Per-expert turn timeout (#121): refuse to pile onto a stuck expert (busy
+  // far longer than a turn should take) instead of letting it hang the loop.
+  const b = committeeBusy.get(targetId);
+  if (b?.busy && Date.now() - b.since > COMMITTEE_CAPS.turnTimeoutMs) {
+    throw new Error(
+      `expert ${targetId} appears stuck (busy ${Math.round((Date.now() - b.since) / 1000)}s); ` +
+        `pause/unpause it before posting`
+    );
+  }
+
+  // Host-enforced runaway budget (#121): if this post would breach the run's
+  // post cap or USD ceiling, force-pause every expert this manager controls and
+  // refuse — a looping manager can't talk past this.
+  const targets = await managerGrantedTargets(callerId);
+  const verdict = wouldExceed(callerId, spentUsdForManager(targets));
+  if (verdict.exceeded) {
+    await forcePauseExperts(targets);
+    throw new Error(`committee run halted: ${verdict.reason}. All experts paused.`);
+  }
+  recordPost(callerId);
+
   const live = liveHandleForWorkspace(targetId);
   if (live) {
     live.stream.write(msg + '\r');
@@ -358,6 +414,30 @@ async function committeeCollect(
     .map((e) => ({ id: e.id, ts: e.ts, role: e.type, text: extractTurnText(e.rawJsonl) }))
     .filter((t) => t.text.length > 0);
   return { id: targetId, sessionId, cursor, turns };
+}
+
+/**
+ * Is this expert paused / busy / stalled, and when was it last active (#121)?
+ * `busy` is host-computed from the broker output stream (renderer-independent);
+ * `stalled` = busy past the turn timeout (the manager's "it's wedged" signal);
+ * `lastActiveAt` is best-effort from the DB (null when the DB isn't open).
+ */
+async function committeeStatus(
+  callerId: string,
+  targetId: string
+): Promise<{ id: string; paused: boolean; busy: boolean; stalled: boolean; lastActiveAt: number | null }> {
+  await assertControl(callerId, targetId, 'read');
+  const ws = (await listAllWorkspaces()).find((w) => w.id === targetId);
+  const b = committeeBusy.get(targetId);
+  const busy = b?.busy ?? false;
+  const stalled = busy && b ? Date.now() - b.since > COMMITTEE_CAPS.turnTimeoutMs : false;
+  let lastActiveAt: number | null = null;
+  try {
+    lastActiveAt = listSessions(targetId)[0]?.lastActiveAt ?? null;
+  } catch {
+    /* DB not open (mock) — leave null */
+  }
+  return { id: targetId, paused: ws?.state === 'paused', busy, stalled, lastActiveAt };
 }
 
 export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): void {
@@ -659,13 +739,17 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('committee:collect', (_e, callerId: string, targetId: string, since?: number) =>
     committeeCollect(callerId, targetId, since ?? 0)
   );
+  ipcMain.handle('committee:status', (_e, callerId: string, targetId: string) =>
+    committeeStatus(callerId, targetId)
+  );
   // Let the MCP committee_* tools reach the same effects (caller id from the
   // per-workspace socket instead of an IPC arg).
   setCommitteeHandlers({
     pause: committeePause,
     unpause: committeeUnpause,
     post: committeePost,
-    collect: committeeCollect
+    collect: committeeCollect,
+    status: committeeStatus
   });
 
   ipcMain.handle('workspace:remove', async (_e, containerId: string, opts?: RemoveWorkspaceOpts) => {
@@ -866,13 +950,21 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       });
 
       const win = BrowserWindow.fromWebContents(event.sender);
+      // Host-side busy detection (#121): scan the SAME broker output stream in
+      // main, so the committee's "is this expert done?" signal never depends on
+      // renderer React state. Reuses the (pure) ActivityDetector.
+      const detector = new ActivityDetector();
       handle.stream.on('data', (chunk: Buffer) => {
         win?.webContents.send(`pty:data:${ptyHandleId}`, chunk);
+        if (owner && detector.push(chunk.toString('utf8'))) {
+          committeeBusy.set(owner.id, { busy: detector.isBusy, since: Date.now() });
+        }
       });
       handle.stream.on('end', () => {
         win?.webContents.send(`pty:end:${ptyHandleId}`);
         ptySessions.delete(ptyHandleId);
         handleWorkspaceId.delete(ptyHandleId);
+        if (owner) committeeBusy.delete(owner.id);
         logError({
           source: 'main',
           type: 'pty-stream-end',
@@ -906,6 +998,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     const present = ptySessions.has(sessionId);
     ptySessions.get(sessionId)?.detach();
     ptySessions.delete(sessionId);
+    const detachedWs = handleWorkspaceId.get(sessionId);
+    if (detachedWs) committeeBusy.delete(detachedWs);
     handleWorkspaceId.delete(sessionId);
     logError({
       source: 'main',

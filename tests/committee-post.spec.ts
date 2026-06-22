@@ -55,6 +55,13 @@ test('Committee: post + collect gated by grant (#120)', async () => {
     );
     expect(posted).toMatchObject({ id: ids['expert-c'] });
 
+    // Granted status resolves (paused/busy computed without the DB; #121).
+    const status = await window.evaluate(
+      ([c, t]) => (window as any).api.committee.status(c, t),
+      [ids['mgr-c'], ids['expert-c']]
+    );
+    expect(status).toMatchObject({ id: ids['expert-c'], paused: false, busy: false });
+
     // (Granted collect's data path needs a real DB — covered in mcp-server.spec.ts;
     // mock mode opens no DB. Here we just prove the grant gate on both verbs.)
 
@@ -85,6 +92,19 @@ test('Committee: post + collect gated by grant (#120)', async () => {
       [ids['expert-c'], ids['mgr-c']]
     );
     expect(deniedCollect).toContain('control denied');
+
+    const deniedStatus = await window.evaluate(
+      async ([c, t]) => {
+        try {
+          await (window as any).api.committee.status(c, t);
+          return 'NOT-REFUSED';
+        } catch (e) {
+          return String(e);
+        }
+      },
+      [ids['expert-c'], ids['mgr-c']]
+    );
+    expect(deniedStatus).toContain('control denied');
   } finally {
     await app.close();
   }
