@@ -921,7 +921,11 @@ accessibility?: { reachable: boolean; acceptFrom?: string[]; roleHint?: string }
 - The effect functions live in `ipc.ts` (`committeePost`/`committeeCollect`), shared by the IPC channels and the MCP tools (injected via `setCommitteeHandlers`). `Backend.committeePost` is the per-backend transient-attach hook used only on the headless fallback (docker real / mock ack / local throw); collect needs no backend (the events DB is shared).
 - **Tested:** `tests/committee-post.real.spec.ts` drives `post` against a **real runner container** (skipped when Docker/the image is absent) and asserts it reuses the renderer attachment (`via: 'attached'`) — the regression that guards the one-writer bug. `mcp-server.spec.ts` covers the `collect` data path against a real DB; `committee-post.spec.ts` covers the grant gate in mock.
 
-**Phased delivery.** #117 socket/identity ✓ → #118 model + UI ✓ → #119 pause/unpause ✓ → #120 post/collect ✓ → #121 busy-idle + status + runaway guards → #122 narrow legacy fleet-global reads (behind a flag) → #123 console UI + manager/expert loadouts.
+**Opening an expert tab is safe.** Because `post` reuses the renderer's existing attachment (above) rather than competing for the broker's one-writer slot, a human clicking into an expert the committee is driving — intentional or not — cannot break it: no second writer, no broker conflict, no stuck session. The only observable effect is the manager's injected text appearing inline in that tab; if the human happens to be typing at the same instant, the two inputs interleave into one line for Claude (cosmetic, recoverable). 
+
+**Required (not optional): inbound-message indicator.** Because injected text currently appears in a watched tab with no label, a **`[committee]` inbound toast/marker** in an expert's tab whenever a committee message is posted into it is a **committed requirement** (owner confirmed), so a watching human always knows why text appeared. Built in #123 with the console; until then injected text is unlabeled (acceptable only because the sole way to `post` pre-#123 is manual testing).
+
+**Phased delivery.** #117 socket/identity ✓ → #118 model + UI ✓ → #119 pause/unpause ✓ → #120 post/collect ✓ → #121 busy-idle + status + runaway guards → #122 narrow legacy fleet-global reads (behind a flag) → #123 console UI + manager/expert loadouts **+ required `[committee]` inbound toast**.
 
 ### Dev-mode mock fleet
 When `CLAUDE_FLEET_MOCK=1` is set in the main process's environment, `ipc.ts` swaps the real `docker.ts` implementation for `src/main/mock.ts`. The mock:
