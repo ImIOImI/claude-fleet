@@ -38,6 +38,10 @@ export interface SessionEntry {
   // Per-session durable-mirror override. Absent = use the workspace default.
   // Persisted so the choice survives reattach.
   mirror?: 'on' | 'off';
+  // When true, the tab's `name` tracks Claude's session summary (the observed
+  // AI title) and is refreshed as the conversation evolves. A manual rename
+  // turns this off. Absent = off (the default "main"/"session N" naming).
+  autoName?: boolean;
 }
 
 export interface SessionInventory {
@@ -79,7 +83,8 @@ export async function readInventory(workspaceId: string): Promise<SessionInvento
       .map((s) => ({
         ...s,
         resumeOf: typeof s.resumeOf === 'string' ? s.resumeOf : undefined,
-        mirror: s.mirror === 'on' || s.mirror === 'off' ? s.mirror : undefined
+        mirror: s.mirror === 'on' || s.mirror === 'off' ? s.mirror : undefined,
+        autoName: s.autoName === true ? true : undefined
       }));
     return {
       version: 1,

@@ -14,6 +14,7 @@
 // context is lost; PR2's in-container broker is what preserves that.
 
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { WorkspaceObservabilitySummary } from '../../../preload';
 import type { MirrorSetting, CleanupSetting } from '../App';
 import { TerminalSession } from './TerminalSession';
@@ -129,10 +130,38 @@ interface Session {
   resumeOf?: string;
   /** Per-session durable-mirror override; absent = use the workspace default. */
   mirror?: MirrorSetting;
+  /** When true, `name` tracks Claude's session summary; a manual rename clears it. */
+  autoName?: boolean;
 }
 
 function uid(): string {
   return globalThis.crypto?.randomUUID?.() ?? `s-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+// Session-tab menu icons — 12×12 viewBox so they sit on the menu text baseline.
+function IconRename(): JSX.Element {
+  return (
+    <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.2" aria-hidden="true">
+      <path d="M2 9 L9 2 L11 4 L4 11 L2 11 Z" />
+    </svg>
+  );
+}
+function IconAuto(): JSX.Element {
+  // A sparkle — "let Claude name it".
+  return (
+    <svg viewBox="0 0 12 12" width="11" height="11" fill="currentColor" aria-hidden="true">
+      <path d="M6 1 L7 4.5 L10.5 6 L7 7.5 L6 11 L5 7.5 L1.5 6 L5 4.5 Z" />
+    </svg>
+  );
+}
+function IconClose(): JSX.Element {
+  // Eject — matches the workspace chip menu's "Close" affordance.
+  return (
+    <svg viewBox="0 0 12 12" width="11" height="11" fill="currentColor" aria-hidden="true">
+      <path d="M6 2 L10 8 L2 8 Z" />
+      <rect x="2" y="9" width="8" height="1.6" rx="0.4" />
+    </svg>
+  );
 }
 
 export function TerminalPane({
@@ -278,6 +307,96 @@ export function TerminalPane({
     setActiveId(id);
     setNextNum((n) => n + 1);
   }
+
+  // ── Session-tab ⋮ menu: rename / auto-rename / close ──────────────────────
+  // Single open menu at a time; viewport coords for the portaled dropdown.
+  const [tabMenu, setTabMenu] = useState<{ id: string; top: number; left: number } | null>(null);
+  // Inline rename: the tab whose name is being edited, plus the draft text.
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [draftName, setDraftName] = useState('');
+
+  // Close the menu on any outside click / Escape / layout shift (the portal is
+  // positioned in viewport coords, so we can't follow the trigger when it moves).
+  useEffect(() => {
+    if (!tabMenu) return;
+    const close = (): void => setTabMenu(null);
+    const esc = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setTabMenu(null);
+    };
+    document.addEventListener('click', close);
+    document.addEventListener('keydown', esc);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      document.removeEventListener('click', close);
+      document.removeEventListener('keydown', esc);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [tabMenu]);
+
+  function openTabMenu(trigger: HTMLElement, id: string): void {
+    const r = trigger.getBoundingClientRect();
+    const left = Math.max(8, Math.min(r.left, window.innerWidth - 188));
+    setTabMenu({ id, top: r.bottom + 4, left });
+  }
+  function startRename(id: string): void {
+    const s = sessions.find((x) => x.id === id);
+    setDraftName(s?.name ?? '');
+    setRenamingId(id);
+  }
+  function commitRename(id: string): void {
+    const name = draftName.trim();
+    setRenamingId(null);
+    if (!name) return;
+    // A manual rename takes ownership: turn auto-rename off so the summary
+    // sync doesn't immediately overwrite it.
+    setSessions((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, name, autoName: false } : s))
+    );
+  }
+  function toggleAutoName(id: string): void {
+    setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, autoName: !s.autoName } : s)));
+  }
+
+  // Auto-rename sync: for every tab with autoName on, mirror Claude's session
+  // summary (the observed AI title) into the tab name, refreshed on each
+  // observability push. Keyed on the *set* of auto-named tabs so flipping the
+  // toggle re-runs immediately; name writes don't re-subscribe (autoKey stable).
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
+  const autoKey = sessions
+    .filter((s) => s.autoName)
+    .map((s) => s.id)
+    .sort()
+    .join(',');
+  useEffect(() => {
+    if (!loaded || !autoKey) return;
+    let cancelled = false;
+    const sync = async (): Promise<void> => {
+      for (const s of sessionsRef.current) {
+        if (!s.autoName) continue;
+        try {
+          const sum = await window.api.observability.summaryForBrokerSession(workspaceId, s.id);
+          const title = sum?.title?.trim().slice(0, 40);
+          if (cancelled || !title) continue;
+          setSessions((prev) =>
+            prev.map((p) => (p.id === s.id && p.autoName && p.name !== title ? { ...p, name: title } : p))
+          );
+        } catch {
+          /* best-effort — a tab with no resolvable title keeps its current name */
+        }
+      }
+    };
+    void sync();
+    const unsub = window.api.observability.onSummary((wid) => {
+      if (wid === workspaceId) void sync();
+    });
+    return () => {
+      cancelled = true;
+      unsub();
+    };
+  }, [loaded, workspaceId, autoKey]);
 
   // Drag-reorder of session tabs (#1). Move the dragged tab before the drop
   // target; the existing sessions.json persist effect saves the new order.
@@ -460,7 +579,8 @@ export function TerminalPane({
                 dragSessionId === s.id ? 'dragging' : ''
               }`}
               onClick={() => setActiveId(s.id)}
-              draggable
+              // Don't drag while editing the name (the input owns the pointer).
+              draggable={renamingId !== s.id}
               onDragStart={(e) => {
                 setDragSessionId(s.id);
                 e.dataTransfer.effectAllowed = 'move';
@@ -480,17 +600,42 @@ export function TerminalPane({
                 aria-label={ended ? 'session ended' : 'session live'}
                 title={ended ? 'session ended' : 'session live'}
               />
-              <span className="session-tab-name">{s.name}</span>
+              {renamingId === s.id ? (
+                <input
+                  className="session-tab-rename"
+                  autoFocus
+                  value={draftName}
+                  onChange={(e) => setDraftName(e.target.value)}
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitRename(s.id);
+                    else if (e.key === 'Escape') setRenamingId(null);
+                  }}
+                  onBlur={() => commitRename(s.id)}
+                  aria-label="Session name"
+                />
+              ) : (
+                <span className="session-tab-name">
+                  {s.autoName && <span className="session-tab-auto" title="Auto-named from Claude's summary" aria-hidden="true">✦</span>}
+                  {s.name}
+                </span>
+              )}
               <button
-                className="session-tab-close"
-                aria-label={`Close ${s.name}`}
-                title="Close session"
+                className="session-tab-menu-trigger"
+                aria-label={`Actions for ${s.name}`}
+                aria-haspopup="menu"
+                aria-expanded={tabMenu?.id === s.id}
+                title="Session actions"
                 onClick={(e) => {
                   e.stopPropagation();
-                  void requestClose(s);
+                  if (tabMenu?.id === s.id) {
+                    setTabMenu(null);
+                    return;
+                  }
+                  openTabMenu(e.currentTarget, s.id);
                 }}
               >
-                ×
+                ⋮
               </button>
             </div>
           );
@@ -520,6 +665,60 @@ export function TerminalPane({
           mirror {activeMirror}
         </button>
       </div>
+      {tabMenu &&
+        (() => {
+          const s = sessions.find((x) => x.id === tabMenu.id);
+          if (!s) return null;
+          return createPortal(
+            <div
+              className="ws-chip-menu"
+              role="menu"
+              style={{ position: 'fixed', top: tabMenu.top, left: tabMenu.left }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                role="menuitem"
+                onClick={() => {
+                  setTabMenu(null);
+                  startRename(s.id);
+                }}
+              >
+                <IconRename />
+                <span>Rename</span>
+              </button>
+              <button
+                role="menuitemcheckbox"
+                aria-checked={!!s.autoName}
+                title="Name this tab from Claude's session summary, kept up to date"
+                onClick={() => {
+                  setTabMenu(null);
+                  toggleAutoName(s.id);
+                }}
+              >
+                <IconAuto />
+                <span>Auto rename</span>
+                {s.autoName && (
+                  <span className="ws-chip-menu-check" aria-hidden="true">
+                    ✓
+                  </span>
+                )}
+              </button>
+              <div className="ws-chip-menu-divider" />
+              <button
+                role="menuitem"
+                className="danger"
+                onClick={() => {
+                  setTabMenu(null);
+                  void requestClose(s);
+                }}
+              >
+                <IconClose />
+                <span>Close</span>
+              </button>
+            </div>,
+            document.body
+          );
+        })()}
       {/* Context bar — workspace's hue track at the top of the terminal,
           filling 0..100% with the latest assistant turn's context-window
           usage (input + cache_read + cache_creation over the session's

@@ -16,6 +16,10 @@ export interface SessionEntry {
    * (host reboot) re-resumes the same session.
    */
   resumeOf?: string;
+  /** Per-session durable-mirror override; absent = use the workspace default. */
+  mirror?: 'on' | 'off';
+  /** When true, the tab name tracks Claude's session summary (auto-rename). */
+  autoName?: boolean;
 }
 export interface SessionInventory {
   version: 1;
