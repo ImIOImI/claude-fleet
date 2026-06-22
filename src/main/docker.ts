@@ -663,6 +663,52 @@ export async function waitForBrokerReady(workspaceId: string): Promise<void> {
 }
 
 /**
+ * Inject `text` into the workspace's single live session as if typed (committee
+ * `post`, #120). A **transient** attach: LIST → guard → ATTACH → INPUT → DETACH,
+ * so we hold the broker's one-writer slot only for the keystroke. We deliberately
+ * do NOT read the session's output stream — the committee reads replies from the
+ * state DB via `collect`, so output capture never depends on this attach. INPUT
+ * is dropped on an unattached channel, hence the ATTACH; frame order on the one
+ * socket guarantees the broker processes INPUT before the following DETACH.
+ *
+ * If a human is viewing the expert (renderer holds the session's writer), the
+ * ATTACH is rejected `already attached`; we retry on the reattach backoff, then
+ * fail — a watched expert can't be posted to in v1 (documented limitation).
+ */
+export async function committeePost(
+  workspaceId: string,
+  text: string
+): Promise<{ brokerSessionId: string }> {
+  const client = new BrokerClient(workspaceBrokerSocket(workspaceId));
+  try {
+    await client.ready();
+    const alive = (await client.listSessions()).filter((s) => s.alive);
+    if (alive.length === 0) {
+      throw new Error(`expert ${workspaceId} has no live session yet — open/attach it before posting`);
+    }
+    if (alive.length > 1) {
+      throw new Error(
+        `expert ${workspaceId} has ${alive.length} live sessions; committee post requires a single-tab expert (v1)`
+      );
+    }
+    const brokerSessionId = alive[0].id;
+    let resp = await client.attachSession(brokerSessionId, HOST_CHANNEL);
+    for (let i = 0; i < REATTACH_RETRIES && !resp.ok && /already attached/i.test(resp.error ?? ''); i++) {
+      await new Promise((r) => setTimeout(r, REATTACH_RETRY_MS));
+      resp = await client.attachSession(brokerSessionId, HOST_CHANNEL);
+    }
+    if (!resp.ok) {
+      throw new Error(`committee post could not attach expert ${workspaceId}: ${resp.error}`);
+    }
+    client.sendInput(HOST_CHANNEL, Buffer.from(text + '\r', 'utf8'));
+    await client.detachChannel(HOST_CHANNEL).catch(() => undefined);
+    return { brokerSessionId };
+  } finally {
+    client.close();
+  }
+}
+
+/**
  * Open a terminal session against the in-container broker.
  *
  * Broker socket lives in the host state dir keyed by workspace id. We

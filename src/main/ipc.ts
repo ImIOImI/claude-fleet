@@ -86,6 +86,11 @@ async function backendFor(idOrContainerId: string): Promise<Backend> {
 }
 
 const ptySessions = new Map<string, PtyHandle>();
+// ptyHandleId → owning workspace id. Lets committee `post` (#120) reuse a live
+// renderer attachment instead of opening a competing one (the broker is
+// one-writer-per-session, so a second attach to an already-viewed expert is
+// rejected `already attached`). Populated/cleared alongside ptySessions.
+const handleWorkspaceId = new Map<string, string>();
 
 // Detected once at load: are we running under WSL? (Drives `fs:openPath`.)
 const RUNNING_IN_WSL = ((): boolean => {
@@ -256,6 +261,103 @@ async function committeeUnpause(callerId: string, targetId: string): Promise<{ i
     await realDocker.waitForBrokerReady(targetId);
   }
   return { id: targetId, running: true };
+}
+
+/** Find a live renderer PtyHandle for a workspace, if one is attached. */
+function liveHandleForWorkspace(workspaceId: string): PtyHandle | null {
+  for (const [handleId, wsId] of handleWorkspaceId) {
+    if (wsId === workspaceId) {
+      const h = ptySessions.get(handleId);
+      if (h) return h;
+    }
+  }
+  return null;
+}
+
+/**
+ * Inject a message into a granted, reachable expert's live session (#120) —
+ * the same fire-and-forget path as a human keystroke.
+ *
+ * The broker is **one-writer-per-session**, and the renderer always-mounts +
+ * auto-attaches every running workspace — so for an expert visible in this app
+ * the renderer already holds the writer, and a competing attach is rejected
+ * `already attached` (verified against a real container). So we **reuse the
+ * live renderer attachment** when present (writing to its stream === sending
+ * INPUT on the host channel; the human watching that tab sees the injection).
+ * Only a truly headless expert (no renderer attached) falls back to the
+ * backend's transient attach.
+ */
+async function committeePost(
+  callerId: string,
+  targetId: string,
+  msg: string
+): Promise<{ id: string; via: 'attached' | 'headless'; brokerSessionId?: string }> {
+  await assertControl(callerId, targetId, 'post');
+  const live = liveHandleForWorkspace(targetId);
+  if (live) {
+    live.stream.write(msg + '\r');
+    return { id: targetId, via: 'attached' };
+  }
+  const kind = await resolveKind(targetId);
+  const { brokerSessionId } = await backendForKind(kind).committeePost(targetId, msg);
+  return { id: targetId, via: 'headless', brokerSessionId };
+}
+
+/** One committee `collect` turn — a user/assistant transcript line, decoded. */
+interface CollectTurn {
+  id: number;
+  ts: number | null;
+  role: string;
+  text: string;
+}
+
+/** Pull the human-readable text out of one claude JSONL line. */
+function extractTurnText(rawJsonl: string): string {
+  try {
+    const o = JSON.parse(rawJsonl) as { message?: { content?: unknown } };
+    const content = o.message?.content;
+    if (typeof content === 'string') return content.trim();
+    if (Array.isArray(content)) {
+      return content
+        .map((b) => {
+          if (typeof b === 'string') return b;
+          const block = b as { type?: string; text?: string; name?: string };
+          if (block.type === 'text') return block.text ?? '';
+          if (block.type === 'tool_use') return `[tool_use: ${block.name ?? '?'}]`;
+          if (block.type === 'tool_result') return '[tool_result]';
+          return '';
+        })
+        .join('')
+        .trim();
+    }
+  } catch {
+    /* malformed line — no text */
+  }
+  return '';
+}
+
+/**
+ * Read new transcript turns from a granted expert (#120), cursored by the
+ * autoincrement `events.id` (NOT `ts` — `ts` is nullable and is claude's clock;
+ * skew/null would scramble a time window). Resolves the expert's most-recently-
+ * active session from the DB (v1 single-tab experts ⇒ that's the live one);
+ * never reaches the broker, so it works whether or not anyone is attached.
+ */
+async function committeeCollect(
+  callerId: string,
+  targetId: string,
+  since: number
+): Promise<{ id: string; sessionId: string | null; cursor: number; turns: CollectTurn[] }> {
+  await assertControl(callerId, targetId, 'read');
+  const sessionId = listSessions(targetId)[0]?.id ?? null;
+  if (!sessionId) return { id: targetId, sessionId: null, cursor: since, turns: [] };
+  const events = eventsForSession(sessionId, since, 500);
+  const cursor = events.length ? events[events.length - 1].id : since;
+  const turns = events
+    .filter((e) => e.type === 'assistant' || e.type === 'user')
+    .map((e) => ({ id: e.id, ts: e.ts, role: e.type, text: extractTurnText(e.rawJsonl) }))
+    .filter((t) => t.text.length > 0);
+  return { id: targetId, sessionId, cursor, turns };
 }
 
 export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): void {
@@ -551,9 +653,20 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('committee:unpause', (_e, callerId: string, targetId: string) =>
     committeeUnpause(callerId, targetId)
   );
+  ipcMain.handle('committee:post', (_e, callerId: string, targetId: string, msg: string) =>
+    committeePost(callerId, targetId, msg)
+  );
+  ipcMain.handle('committee:collect', (_e, callerId: string, targetId: string, since?: number) =>
+    committeeCollect(callerId, targetId, since ?? 0)
+  );
   // Let the MCP committee_* tools reach the same effects (caller id from the
   // per-workspace socket instead of an IPC arg).
-  setCommitteeHandlers({ pause: committeePause, unpause: committeeUnpause });
+  setCommitteeHandlers({
+    pause: committeePause,
+    unpause: committeeUnpause,
+    post: committeePost,
+    collect: committeeCollect
+  });
 
   ipcMain.handle('workspace:remove', async (_e, containerId: string, opts?: RemoveWorkspaceOpts) => {
     // A saved (no-live) workspace passes its ULID in opts.id; prefer it so the
@@ -721,6 +834,13 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         throw err;
       }
       ptySessions.set(ptyHandleId, handle);
+      // Remember which workspace this handle belongs to so committee `post`
+      // (#120) can reuse it. containerId is the Docker id (or, for local, the
+      // ULID); match it back to the workspace's ULID via the merged list.
+      const owner = (await listAllWorkspaces()).find(
+        (w) => w.containerId === containerId || w.id === containerId
+      );
+      if (owner) handleWorkspaceId.set(ptyHandleId, owner.id);
       // Diagnostic: ptySessions.size should oscillate around the count of
       // currently-mounted TerminalSession components. Unbounded growth =
       // detach isn't running (renderer cleanup race) or isn't reaching
@@ -752,6 +872,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       handle.stream.on('end', () => {
         win?.webContents.send(`pty:end:${ptyHandleId}`);
         ptySessions.delete(ptyHandleId);
+        handleWorkspaceId.delete(ptyHandleId);
         logError({
           source: 'main',
           type: 'pty-stream-end',
@@ -785,6 +906,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     const present = ptySessions.has(sessionId);
     ptySessions.get(sessionId)?.detach();
     ptySessions.delete(sessionId);
+    handleWorkspaceId.delete(sessionId);
     logError({
       source: 'main',
       type: 'pty-detach',
@@ -804,6 +926,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     if (!handle) return false;
     await handle.close();
     ptySessions.delete(ptyHandleId);
+    handleWorkspaceId.delete(ptyHandleId);
     logError({
       source: 'main',
       type: 'pty-close',
