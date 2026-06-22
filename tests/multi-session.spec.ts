@@ -67,7 +67,8 @@ test('Multi-session: workspace starts with a "main" tab; + adds new tabs; close 
 
     // Close the active "session 3" — focus moves to the tab on its left
     // (session 2), not all the way back to main.
-    await tabs.nth(2).getByRole('button', { name: 'Close session 3' }).click();
+    await tabs.nth(2).getByRole('button', { name: 'Actions for session 3' }).click();
+    await window.getByRole('menuitem', { name: 'Close' }).click();
     await expect(tabs).toHaveCount(2);
     await expect(tabs.nth(1)).toContainText('session 2');
     await expect(tabs.nth(1)).toHaveClass(/active/);
@@ -86,12 +87,45 @@ test('Multi-session: closing the only tab respawns a fresh "main"', async () => 
     const tabs = strip.locator('.session-tab');
     await expect(tabs).toHaveCount(1);
 
-    await tabs.nth(0).getByRole('button', { name: /Close main/ }).click();
+    await tabs.nth(0).getByRole('button', { name: 'Actions for main' }).click();
+    await window.getByRole('menuitem', { name: 'Close' }).click();
 
     // Strip is never empty: a fresh "main" appears in place.
     await expect(tabs).toHaveCount(1);
     await expect(tabs.nth(0)).toContainText('main');
     await expect(tabs.nth(0)).toHaveClass(/active/);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Session tab menu: rename via inline edit; auto-rename toggle marks the tab', async () => {
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
+    const strip = activePane(window).locator('.session-tab-strip');
+    const tab = strip.locator('.session-tab').nth(0);
+    await expect(tab).toContainText('main');
+
+    // Rename: ⋮ → Rename → inline input → type → Enter.
+    await tab.getByRole('button', { name: 'Actions for main' }).click();
+    await window.getByRole('menuitem', { name: 'Rename' }).click();
+    const input = tab.locator('.session-tab-rename');
+    await expect(input).toBeVisible();
+    await input.fill('backend work');
+    await input.press('Enter');
+    await expect(tab).toContainText('backend work');
+
+    // Auto-rename: ⋮ → Auto rename → the tab gains the ✦ marker, and the
+    // menu item reads back as checked.
+    await tab.getByRole('button', { name: 'Actions for backend work' }).click();
+    await window.getByRole('menuitemcheckbox', { name: 'Auto rename' }).click();
+    await expect(tab.locator('.session-tab-auto')).toBeVisible();
+    await tab.getByRole('button', { name: 'Actions for backend work' }).click();
+    await expect(window.getByRole('menuitemcheckbox', { name: 'Auto rename' })).toHaveAttribute(
+      'aria-checked',
+      'true'
+    );
   } finally {
     await app.close();
   }

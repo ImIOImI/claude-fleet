@@ -292,9 +292,11 @@ For each workspace, `<userData>/state/<id>/sessions.json` records the renderer's
 ```ts
 interface SessionEntry {
   id: string;        // stable display id = the broker session key; NOT the PTY handle (per-attach)
-  name: string;      // 'main', 'session 2', 'session 3', …
+  name: string;      // 'main', 'session 2', 'session 3', … or an auto-derived title
   createdAt: number;
   resumeOf?: string; // set on a resume tab — first attach runs `claude --resume <resumeOf>`
+  mirror?: 'on'|'off'; // per-session durable-mirror override; absent = workspace default
+  autoName?: boolean;  // when true, `name` tracks Claude's session summary (auto-rename)
 }
 
 interface SessionInventory {
@@ -306,6 +308,8 @@ interface SessionInventory {
 ```
 
 Writes are atomic (write-to-temp + rename). Reads tolerate missing/malformed files by returning `{ version: 1, sessions: [], nextNum: 2 }`. The first attach to a fresh workspace inserts a single `main` tab and persists it immediately. A **resume tab** (created from the Sessions list) carries `resumeOf` so that even after the broker dies (host reboot) the re-attach re-resumes the same Claude session rather than starting a fresh one.
+
+**Session-tab actions (⋮ menu).** Each tab has a `⋮` trigger (a portaled dropdown, like the workspace chips; replaces the old bare `×`) with **Rename**, **Auto rename**, and **Close**. *Rename* is an inline edit in the tab; committing sets `name` and clears `autoName` (a manual name takes ownership). *Auto rename* toggles `autoName` — when on, `TerminalPane` subscribes to `observability:summary` and mirrors the tab's resolved Claude session title (`summaryForBrokerSession(...).title`, capped 40 chars) into `name`, refreshed on each push; an auto-named tab shows a `✦` marker. The toggle is **opt-in (default off)** so the conventional `main`/`session N` naming is unchanged unless the user asks for it. *Close* routes through the same `requestClose` path as before (mirror-delete confirm when a transcript mirror exists). Drag-reorder is disabled while a tab's name is being edited.
 
 ### Workspace shape (returned over IPC)
 The `Workspace` type joins the manifest with live backend state:

@@ -1688,6 +1688,44 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
 .session-tab:hover .session-tab-close,
 .session-tab.active .session-tab-close { opacity: 0.7; }
 .session-tab .session-tab-close:hover { background: var(--bg-hover); opacity: 1; color: var(--ink); }
+/* ⋮ actions trigger — replaces the bare close (rename / auto-rename / close). */
+.session-tab .session-tab-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 80ms ease, background 80ms ease;
+}
+.session-tab:hover .session-tab-menu-trigger,
+.session-tab.active .session-tab-menu-trigger { opacity: 0.7; }
+.session-tab .session-tab-menu-trigger:hover { background: var(--bg-hover); opacity: 1; color: var(--ink); }
+/* ✦ marker on an auto-named tab; the inline rename input. */
+.session-tab-auto { color: var(--ok); margin-right: 4px; font-size: 9px; vertical-align: middle; }
+.session-tab-rename {
+  width: 9ch;
+  min-width: 60px;
+  box-sizing: border-box;
+  padding: 1px 4px;
+  background: var(--bg);
+  border: 1px solid var(--ok);
+  border-radius: var(--r-sm);
+  color: var(--ink);
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+/* Trailing checkmark on the active "Auto rename" toggle in the tab menu. */
+.ws-chip-menu-check { margin-left: auto; color: var(--ok); padding-left: 12px; }
 .session-tab-new {
   display: inline-flex;
   align-items: center;
