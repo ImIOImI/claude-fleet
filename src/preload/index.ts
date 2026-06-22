@@ -219,13 +219,16 @@ const api = {
       fleetRoot: string;
       sharedDir: string;
       disableHardwareAcceleration: boolean;
+      autoReloadLoadouts: boolean;
     }> => ipcRenderer.invoke('config:get'),
     setFleetRoot: (path: string): Promise<{ fleetRoot: string; sharedDir: string }> =>
       ipcRenderer.invoke('config:setFleetRoot', path),
     setHardwareAccelDisabled: (
       disabled: boolean
     ): Promise<{ disableHardwareAcceleration: boolean }> =>
-      ipcRenderer.invoke('config:setHardwareAccelDisabled', disabled)
+      ipcRenderer.invoke('config:setHardwareAccelDisabled', disabled),
+    setAutoReloadLoadouts: (enabled: boolean): Promise<{ autoReloadLoadouts: boolean }> =>
+      ipcRenderer.invoke('config:setAutoReloadLoadouts', enabled)
   },
   dialog: {
     pickDirectory: (defaultPath?: string): Promise<string | null> =>
@@ -276,6 +279,9 @@ const api = {
     resize: (sessionId: string, cols: number, rows: number) =>
       ipcRenderer.invoke('pty:resize', sessionId, cols, rows),
     detach: (sessionId: string) => ipcRenderer.invoke('pty:detach', sessionId),
+    /** Terminate the session (kills claude). Returns true if a handle was live. */
+    closeSession: (sessionId: string): Promise<boolean> =>
+      ipcRenderer.invoke('pty:closeSession', sessionId),
     onData: (sessionId: string, cb: (chunk: Uint8Array) => void) => {
       const channel = `pty:data:${sessionId}`;
       const handler = (_e: IpcRendererEvent, chunk: Buffer) => cb(new Uint8Array(chunk));

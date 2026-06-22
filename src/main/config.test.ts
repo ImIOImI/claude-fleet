@@ -23,6 +23,8 @@ const {
   hardwareAccelDisabledAtStartup,
   getHardwareAccelDisabled,
   setHardwareAccelDisabled,
+  getAutoReloadLoadouts,
+  setAutoReloadLoadouts,
   setFleetRoot,
   getFleetRoot,
   _resetConfigCacheForTests
@@ -78,5 +80,31 @@ describe('get/setHardwareAccelDisabled', () => {
     const parsed = JSON.parse(await readFile(configPath(), 'utf8'));
     expect(parsed.fleetRoot).toBe(root);
     expect(parsed.disableHardwareAcceleration).toBe(true);
+  });
+});
+
+describe('get/setAutoReloadLoadouts', () => {
+  it('defaults to on when unset', async () => {
+    expect(await getAutoReloadLoadouts()).toBe(true);
+  });
+
+  it('round-trips, and an explicit false survives a fresh read from disk', async () => {
+    await setAutoReloadLoadouts(false);
+    expect(await getAutoReloadLoadouts()).toBe(false);
+    // Drop the cache so the next read re-parses config.json — the explicit
+    // false must persist (regression: read() used to omit the key, flipping
+    // the setting back on after a restart).
+    _resetConfigCacheForTests();
+    expect(await getAutoReloadLoadouts()).toBe(false);
+  });
+
+  it('does not clobber the other settings', async () => {
+    const root = join(userDataDir, 'fleet');
+    await setFleetRoot(root);
+    await setHardwareAccelDisabled(true);
+    await setAutoReloadLoadouts(false);
+    expect(await getFleetRoot()).toBe(root);
+    expect(await getHardwareAccelDisabled()).toBe(true);
+    expect(await getAutoReloadLoadouts()).toBe(false);
   });
 });

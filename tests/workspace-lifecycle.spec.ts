@@ -197,7 +197,9 @@ test('Pause then Resume via the Close modal (opened from hamburger)', async () =
     await openCloseModalFor(window, 'mock-alpha');
     await expect(window.getByRole('heading', { name: 'Close workspace' })).toBeVisible();
     await expect(window.getByRole('button', { name: 'Pause' })).toBeHidden();
-    const resume = window.getByRole('button', { name: 'Resume' });
+    // Scope to the modal: mock-alpha is auto-selected on launch, so its (now
+    // paused) terminal pane also shows a "Resume" in its paused overlay.
+    const resume = window.locator('.modal').getByRole('button', { name: 'Resume' });
     await expect(resume).toBeVisible();
     await resume.click();
 

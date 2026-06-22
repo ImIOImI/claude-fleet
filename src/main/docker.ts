@@ -598,7 +598,15 @@ export async function removeWorkspace(
 export interface PtyHandle {
   stream: Duplex;
   resize: (cols: number, rows: number) => Promise<void>;
+  /** Unwire this host connection but leave the broker session (claude) alive. */
   detach: () => void;
+  /**
+   * Terminate the broker session entirely — kills the PTY (claude) and drops
+   * the session from the broker's map. Used by the loadout reload, which then
+   * re-attaches the same session id with `--resume` so the same tab picks the
+   * conversation back up with the freshly-installed config. (#16)
+   */
+  close: () => Promise<void>;
 }
 
 const HOST_CHANNEL = 1;
@@ -712,6 +720,14 @@ export async function attachPty(
     },
     detach: () => {
       void client.detachChannel(HOST_CHANNEL).catch(() => undefined);
+      stream.destroy();
+      client.close();
+    },
+    close: async () => {
+      // CLOSE kills the PTY and drops the session (broker server.go: FrameClose
+      // → mgr.Close(id)). Must go through this attached client — the broker only
+      // honors CLOSE on a channel this connection actually holds.
+      await client.closeChannel(HOST_CHANNEL).catch(() => undefined);
       stream.destroy();
       client.close();
     }

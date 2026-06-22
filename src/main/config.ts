@@ -14,6 +14,10 @@ interface AppConfig {
   fleetRoot?: string;
   /** When true, the app skips Chromium hardware acceleration at startup. */
   disableHardwareAcceleration?: boolean;
+  /** When true (default), installing/updating a loadout into a running
+   *  workspace auto-reloads its Claude session (`--resume`) to load the loadout
+   *  — but only while Claude is idle; deferred until it stops working. (#16) */
+  autoReloadLoadouts?: boolean;
 }
 
 function configPath(): string {
@@ -34,7 +38,11 @@ async function read(): Promise<AppConfig> {
     const parsed = JSON.parse(raw) as AppConfig;
     cached = {
       fleetRoot: typeof parsed.fleetRoot === 'string' && parsed.fleetRoot ? parsed.fleetRoot : undefined,
-      disableHardwareAcceleration: parsed.disableHardwareAcceleration === true
+      disableHardwareAcceleration: parsed.disableHardwareAcceleration === true,
+      // Persist as-is so an explicit `false` survives a reload; absent ⇒ default
+      // on (see getAutoReloadLoadouts).
+      autoReloadLoadouts:
+        typeof parsed.autoReloadLoadouts === 'boolean' ? parsed.autoReloadLoadouts : undefined
     };
   } catch {
     cached = {};
@@ -96,6 +104,17 @@ export async function getHardwareAccelDisabled(): Promise<boolean> {
 export async function setHardwareAccelDisabled(disabled: boolean): Promise<void> {
   const cfg = await read();
   await write({ ...cfg, disableHardwareAcceleration: disabled });
+}
+
+/** Auto-reload loadouts into a running workspace when Claude is idle. Default on. */
+export async function getAutoReloadLoadouts(): Promise<boolean> {
+  const cfg = await read();
+  return cfg.autoReloadLoadouts !== false; // default true
+}
+
+export async function setAutoReloadLoadouts(enabled: boolean): Promise<void> {
+  const cfg = await read();
+  await write({ ...cfg, autoReloadLoadouts: enabled });
 }
 
 /** `<fleetRoot>/<id>` — a workspace's private folder, mounted at /workspace. */

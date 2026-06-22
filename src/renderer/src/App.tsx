@@ -80,12 +80,55 @@ export function colorFor(ws: { name: string; color?: WorkspaceColor }): string {
   return `oklch(72% 0.14 ${hueFor(ws)})`;
 }
 
+/** Read a persisted id-order array from localStorage (used for chip order). */
+function loadIdOrder(key: string): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(key) ?? '');
+    if (Array.isArray(v) && v.every((x) => typeof x === 'string')) return v;
+  } catch {
+    /* fall through */
+  }
+  return [];
+}
+
+/**
+ * Stable-sort `list` by a saved id order. Items whose id is in `order` lead, in
+ * that order; anything not yet in `order` (newly created workspaces) keeps its
+ * original relative position at the end. Pure — used to apply the user's
+ * drag-reordered chip order to each fresh `workspace:list`.
+ */
+function applyIdOrder<T extends { id: string }>(list: T[], order: string[]): T[] {
+  const rank = new Map(order.map((id, i) => [id, i]));
+  return list
+    .map((item, i) => ({ item, i }))
+    .sort((a, b) => {
+      const ra = rank.get(a.item.id) ?? Infinity;
+      const rb = rank.get(b.item.id) ?? Infinity;
+      return ra === rb ? a.i - b.i : ra - rb;
+    })
+    .map(({ item }) => item);
+}
+
+/** Move `draggedId` to sit immediately before `targetId` in a list of items. */
+function moveBefore<T extends { id: string }>(list: T[], draggedId: string, targetId: string): T[] {
+  if (draggedId === targetId) return list;
+  const dragged = list.find((x) => x.id === draggedId);
+  if (!dragged) return list;
+  const without = list.filter((x) => x.id !== draggedId);
+  const ti = without.findIndex((x) => x.id === targetId);
+  if (ti < 0) return list;
+  without.splice(ti, 0, dragged);
+  return without;
+}
+
 export function App() {
   const apiReady = typeof window !== 'undefined' && !!window.api;
   const [backendReady, setBackendReady] = useState<boolean | null>(null);
   const [vaultAvailable, setVaultAvailable] = useState<boolean | null>(null);
   const [mockMode, setMockMode] = useState(false);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+  // Latest workspace list, readable from stable callbacks without re-binding.
+  const workspacesRef = useRef<WorkspaceSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -101,9 +144,29 @@ export function App() {
       return next;
     });
   }, []);
+  // Left rail collapse, same pattern/precedent as the observability rail (#4).
+  const [leftCollapsed, setLeftCollapsed] = useState(
+    () => localStorage.getItem('leftRailCollapsed') === '1'
+  );
+  const toggleLeftCollapsed = useCallback(() => {
+    setLeftCollapsed((prev) => {
+      const next = !prev;
+      localStorage.setItem('leftRailCollapsed', next ? '1' : '0');
+      return next;
+    });
+  }, []);
+  // User's drag-reordered chip order (workspace ids). Applied to every fresh
+  // `workspace:list` so `workspaces` is always the display-ordered source (#1).
+  const wsOrderRef = useRef<string[]>(loadIdOrder('workspaceOrder'));
+  // A just-created workspace to focus the moment it comes up warm; suppresses
+  // the auto-select "rescue" until then so creation doesn't bounce away (#2).
+  const pendingSelectRef = useRef<string | null>(null);
   // The shared folder path (<fleetRoot>/shared), fetched once from app config.
   // Drives the observability rail's "Shared" link.
   const [sharedDir, setSharedDir] = useState<string | null>(null);
+  // Auto-reload loadouts into running workspaces when claude is idle (#16).
+  // Mirrors the config setting; default on until the first config.get resolves.
+  const [autoReloadLoadouts, setAutoReloadLoadouts] = useState(true);
   const [closeTargetId, setCloseTargetId] = useState<string | null>(null);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const [editTargetId, setEditTargetId] = useState<string | null>(null);
@@ -175,6 +238,44 @@ export function App() {
     []
   );
 
+  // Loadout reload request, targeted at one workspace (#16). Set when a loadout
+  // is installed and the auto-reload setting is on; handed to the matching
+  // TerminalPane, which reloads its active session in place once idle.
+  const [reloadRequest, setReloadRequest] = useState<{
+    workspaceId: string;
+    token: number;
+  } | null>(null);
+  const reloadRequestTokenRef = useRef(0);
+
+  // Transient toasts (bottom-center, auto-dismissing). Used so far for the
+  // loadout reload, whose close+resume briefly flickers the terminal (#16).
+  const [toasts, setToasts] = useState<{ id: number; eyebrow?: string; message: string }[]>([]);
+  const toastIdRef = useRef(0);
+  const pushToast = useCallback((message: string, eyebrow?: string, ttlMs = 4000): void => {
+    const id = ++toastIdRef.current;
+    setToasts((prev) => [...prev, { id, eyebrow, message }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), ttlMs);
+  }, []);
+  const handleReloadStarted = useCallback(
+    (workspaceId: string): void => {
+      const name = workspacesRef.current.find((w) => w.id === workspaceId)?.name ?? 'workspace';
+      pushToast(`Applying loadout in ${name}…`, 'Reloading');
+    },
+    [pushToast]
+  );
+  // Fired by the Library after a loadout install. Auto-reload only makes sense
+  // for a running container workspace whose claude is live; if the setting is
+  // off the user reloads manually (the loadout loads on their next claude start).
+  const handleLoadoutInstalled = useCallback(
+    (workspaceId: string): void => {
+      if (!autoReloadLoadouts) return;
+      const ws = workspacesRef.current.find((w) => w.id === workspaceId);
+      if (!ws || ws.state !== 'running' || !ws.containerId) return;
+      setReloadRequest({ workspaceId, token: ++reloadRequestTokenRef.current });
+    },
+    [autoReloadLoadouts]
+  );
+
   // Per-terminal context for the selected workspace — one entry per session
   // tab (from sessions.json), each with its session's context-window usage.
   // Drives the observability pane's "Context · N terminals" bars.
@@ -188,31 +289,77 @@ export function App() {
     setBackendReady(ok);
     if (!ok) {
       setWorkspaces([]);
+      workspacesRef.current = [];
       return;
     }
-    const list = (await window.api.workspace.list()) as WorkspaceSummary[];
+    const list = applyIdOrder((await window.api.workspace.list()) as WorkspaceSummary[], wsOrderRef.current);
     setWorkspaces(list);
+    workspacesRef.current = list;
   };
+
+  // Drag-reorder of workspace chips. `workspaces` is the display-ordered source,
+  // so move the dragged workspace before the drop target and persist the new id
+  // order (applied to every subsequent refresh). (#1)
+  const handleReorderWorkspaces = useCallback((draggedId: string, targetId: string): void => {
+    setWorkspaces((prev) => {
+      const next = moveBefore(prev, draggedId, targetId);
+      if (next === prev) return prev;
+      wsOrderRef.current = next.map((w) => w.id);
+      localStorage.setItem('workspaceOrder', JSON.stringify(wsOrderRef.current));
+      workspacesRef.current = next;
+      return next;
+    });
+  }, []);
+
+  // Select a just-created/resumed workspace and keep focus on it as it boots:
+  // pendingSelectRef suppresses the auto-select rescue until it's warm, with a
+  // 10s safety release so a failed bring-up can't strand selection (#2).
+  const focusWorkspaceWhenWarm = useCallback((id: string): void => {
+    pendingSelectRef.current = id;
+    setSelectedId(id);
+    window.setTimeout(() => {
+      if (pendingSelectRef.current === id) pendingSelectRef.current = null;
+    }, 10000);
+  }, []);
 
   useEffect(() => {
     if (!apiReady) return;
     refresh();
     window.api.vault.available().then(setVaultAvailable);
     window.api.app.mockMode().then(setMockMode);
-    window.api.config.get().then((cfg) => setSharedDir(cfg.sharedDir));
+    window.api.config.get().then((cfg) => {
+      setSharedDir(cfg.sharedDir);
+      setAutoReloadLoadouts(cfg.autoReloadLoadouts);
+    });
     const t = setInterval(refresh, 5000);
     return () => clearInterval(t);
   }, [apiReady]);
 
-  // Keep selection on the "warm" fleet. The top strip only shows running +
-  // paused workspaces (#21); if the selected one leaves that set (stopped via
-  // its ⋮ menu, or removed), drop to the first warm workspace (or nothing) so
-  // the main pane never strands on a chip that's no longer in the strip.
+  // Keep a sensible selection on the "warm" fleet (running + paused — the only
+  // states the top strip shows, #21). Three jobs:
+  //   - On startup (nothing selected) focus the leftmost warm workspace (#3).
+  //   - When a just-created workspace is coming up, lock onto it the moment it's
+  //     warm and don't rescue away in the meantime — prevents the create bounce
+  //     (selectedId set before `workspace:list` has caught up). (#2)
+  //   - If the selected workspace leaves the warm set (stopped/removed), fall
+  //     back to the leftmost warm one (or nothing).
   useEffect(() => {
-    if (selectedId == null) return;
-    const sel = workspaces.find((w) => w.id === selectedId);
-    if (sel && (sel.state === 'running' || sel.state === 'paused')) return;
-    const firstWarm = workspaces.find((w) => w.state === 'running' || w.state === 'paused');
+    const warm = (w?: WorkspaceSummary): boolean =>
+      !!w && (w.state === 'running' || w.state === 'paused');
+    const pending = pendingSelectRef.current;
+    if (pending) {
+      const pw = workspaces.find((w) => w.id === pending);
+      if (warm(pw)) {
+        pendingSelectRef.current = null;
+        setSelectedId(pending);
+        return;
+      }
+      // Still booting (present-but-not-warm) or not in the list yet — hold.
+      return;
+    }
+    const sel = selectedId ? workspaces.find((w) => w.id === selectedId) : undefined;
+    if (warm(sel)) return;
+    const firstWarm = workspaces.find(warm);
     setSelectedId(firstWarm?.id ?? null);
   }, [workspaces, selectedId]);
 
@@ -409,7 +556,7 @@ export function App() {
       resources: submit.resources,
       mirror: submit.mirror
     });
-    setSelectedId(id);
+    focusWorkspaceWhenWarm(id);
     refresh();
   };
 
@@ -462,7 +609,7 @@ export function App() {
     setStatus(`Starting ${submit.name}…`);
     const started = (await window.api.workspace.start(id)) as WorkspaceSummary | null;
     if (started) {
-      setSelectedId(id);
+      focusWorkspaceWhenWarm(id);
       refresh();
       return;
     }
@@ -486,7 +633,7 @@ export function App() {
       resources: submit.resources,
       mirror: submit.mirror
     });
-    setSelectedId(id);
+    focusWorkspaceWhenWarm(id);
     refresh();
   };
 
@@ -615,15 +762,23 @@ export function App() {
         onCloneWorkspace={(w) => openCloneFrom(w)}
         onDeleteWorkspace={(w) => setDeleteTargetId(w.id)}
         onRefresh={refresh}
+        onReorderWorkspace={handleReorderWorkspaces}
       />
 
-      <div className={obsCollapsed ? 'app-body obs-collapsed' : 'app-body'}>
+      <div
+        className={`app-body${leftCollapsed ? ' left-collapsed' : ''}${
+          obsCollapsed ? ' obs-collapsed' : ''
+        }`}
+      >
         <LeftRail
           workspaces={workspaces}
           selectedWorkspaceId={selectedId}
           selectedWorkspace={selectedWorkspace}
+          collapsed={leftCollapsed}
+          onToggleCollapse={toggleLeftCollapsed}
           onResume={handleResumeSession}
           onChanged={refresh}
+          onLoadoutInstalled={handleLoadoutInstalled}
         />
 
         <main
@@ -675,6 +830,9 @@ export function App() {
                   onBusyChange={handleBusyChange}
                   resumeRequest={resumeRequest?.workspaceId === w.id ? resumeRequest : null}
                   onResumeConsumed={() => setResumeRequest(null)}
+                  reloadRequest={reloadRequest?.workspaceId === w.id ? reloadRequest : null}
+                  onReloadConsumed={() => setReloadRequest(null)}
+                  onReloadStarted={() => handleReloadStarted(w.id)}
                 />
               ))}
           </div>
@@ -771,6 +929,19 @@ export function App() {
           />
         );
       })()}
+      {toasts.length > 0 && (
+        <div className="toast-stack" role="status" aria-live="polite">
+          {toasts.map((t) => (
+            <div key={t.id} className="toast">
+              <span className="toast-spinner" aria-hidden="true" />
+              <span className="toast-body">
+                {t.eyebrow && <span className="toast-eyebrow">{t.eyebrow}</span>}
+                <span className="toast-text">{t.message}</span>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

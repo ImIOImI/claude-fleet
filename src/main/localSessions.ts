@@ -161,6 +161,20 @@ export function attachLocalSession(opts: AttachOpts): PtyHandle {
       // Leave proc + ring alive (workspace switch / reattach). Just unwire.
       if (s.sub === stream) s.sub = null;
       stream.destroy();
+    },
+    close: async () => {
+      // Terminate the session: kill the claude process and drop it. Loadouts
+      // are container-only so this path isn't exercised by the reload today,
+      // but the handle must satisfy the PtyHandle contract.
+      try {
+        s.proc.kill();
+      } catch {
+        /* already dead */
+      }
+      if (s.sub === stream) s.sub = null;
+      s.exited = true;
+      sessions.delete(key);
+      stream.destroy();
     }
   };
 }

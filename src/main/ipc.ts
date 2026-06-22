@@ -16,7 +16,9 @@ import {
   fleetPrivateDir,
   fleetSharedDir,
   getHardwareAccelDisabled,
-  setHardwareAccelDisabled
+  setHardwareAccelDisabled,
+  getAutoReloadLoadouts,
+  setAutoReloadLoadouts
 } from './config.js';
 import * as realDocker from './docker.js';
 import * as realLocal from './local.js';
@@ -527,8 +529,13 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('config:get', async () => ({
     fleetRoot: await getFleetRoot(),
     sharedDir: await fleetSharedDir(),
-    disableHardwareAcceleration: await getHardwareAccelDisabled()
+    disableHardwareAcceleration: await getHardwareAccelDisabled(),
+    autoReloadLoadouts: await getAutoReloadLoadouts()
   }));
+  ipcMain.handle('config:setAutoReloadLoadouts', async (_e, enabled: boolean) => {
+    await setAutoReloadLoadouts(!!enabled);
+    return { autoReloadLoadouts: await getAutoReloadLoadouts() };
+  });
   ipcMain.handle('config:setFleetRoot', async (_e, path: string) => {
     await setFleetRoot(path);
     return { fleetRoot: await getFleetRoot(), sharedDir: await fleetSharedDir() };
@@ -714,6 +721,24 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         : `pty:detach for unknown handle (live=${ptySessions.size})`,
       extra: { ptyHandleId: sessionId, hadHandle: present, live: ptySessions.size }
     });
+  });
+
+  // Terminate the broker session behind a handle (kills claude, drops the
+  // session). The loadout reload calls this, then re-attaches the same broker
+  // session id with `--resume` so the tab resumes the conversation under the
+  // freshly-installed config. Returns whether a live handle was found. (#16)
+  ipcMain.handle('pty:closeSession', async (_e, ptyHandleId: string) => {
+    const handle = ptySessions.get(ptyHandleId);
+    if (!handle) return false;
+    await handle.close();
+    ptySessions.delete(ptyHandleId);
+    logError({
+      source: 'main',
+      type: 'pty-close',
+      message: `pty:closeSession OK (live=${ptySessions.size})`,
+      extra: { ptyHandleId, live: ptySessions.size }
+    });
+    return true;
   });
 
   // Durable transcript mirror (#10). The renderer holds broker session ids;

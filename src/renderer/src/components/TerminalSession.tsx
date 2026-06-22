@@ -134,6 +134,14 @@ interface Props {
    * aggregates per-workspace to drive the chip's "working" indicator.
    */
   onActivityChange?: (sessionId: string, busy: boolean) => void;
+  /**
+   * Loadout reload trigger (#16). When `reloadTarget.sessionId` matches this
+   * session and `token` advances, the session terminates its broker session
+   * (kills claude) and re-attaches the same id with `claude --resume <uuid>`,
+   * so the tab resumes the conversation under the just-installed loadout. The
+   * parent fires this only while the session is idle.
+   */
+  reloadTarget?: { sessionId: string; token: number } | null;
 }
 
 export function TerminalSession({
@@ -146,6 +154,7 @@ export function TerminalSession({
   paused = false,
   onLifecycleChange,
   onActivityChange,
+  reloadTarget,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   // Bumped when the user clicks "Start new session" / "Retry" after a
@@ -163,6 +172,17 @@ export function TerminalSession({
   const [endedReason, setEndedReason] = useState<
     { kind: 'natural' } | { kind: 'attach-error'; message: string } | null
   >(null);
+
+  // The live pty handle id for the current attach, mirrored out of the effect
+  // closure so the loadout-reload handler can close it. Null between attaches.
+  const ptyHandleRef = useRef<string | null>(null);
+  // When set, the NEXT attach resumes this claude UUID instead of starting
+  // fresh — set by the reload handler right before it bumps the epoch, then
+  // consumed (cleared) by the attach. Overrides the `resumeOf` prop.
+  const resumeOverrideRef = useRef<string | null>(null);
+  // Dedupes reload triggers so a re-render with the same token doesn't reload
+  // twice (StrictMode double-invoke, unrelated prop churn).
+  const lastReloadTokenRef = useRef<number>(0);
 
   useEffect(() => {
     if (!hostRef.current) return;
@@ -352,18 +372,23 @@ export function TerminalSession({
         // transcript) starts, so no line is ingested under the wrong setting.
         // Non-fatal: a failure here must never block the attach.
         await window.api.mirror.setOverride(workspaceId, sessionId, mirrorSetting).catch(() => {});
+        // A reload sets resumeOverrideRef just before bumping the epoch; it wins
+        // over the resumeOf prop for this one attach, then is cleared.
+        const resumeTarget = resumeOverrideRef.current ?? resumeOf;
+        resumeOverrideRef.current = null;
         const sid = await window.api.pty.attach(
           containerId,
           sessionId,
           term.cols,
           term.rows,
-          resumeOf
+          resumeTarget
         );
         if (disposed) {
           window.api.pty.detach(sid);
           return;
         }
         ptyHandleId = sid;
+        ptyHandleRef.current = sid;
         const activity = new ActivityDetector();
         // PTY chunks are bytes; decode (streaming-safe so a multibyte glyph
         // split across chunks still reassembles) for the title detector.
@@ -476,9 +501,49 @@ export function TerminalSession({
       unsubEnd?.();
       linkProviderDisposable.dispose();
       if (ptyHandleId) window.api.pty.detach(ptyHandleId);
+      if (ptyHandleRef.current === ptyHandleId) ptyHandleRef.current = null;
       term.dispose();
     };
   }, [containerId, sessionId, resumeOf, sessionEpoch, paused]);
+
+  // Loadout reload (#16): when the parent targets this session with a fresh
+  // token, terminate the live broker session (kills claude) and re-attach the
+  // same id with `--resume <claude-uuid>`, so the tab picks the conversation
+  // back up with the newly-installed loadout loaded. The parent only fires this
+  // while the session is idle. No-op if we can't resolve a claude session to
+  // resume (e.g. claude never started in this tab) — the files are already in
+  // place and will load on the next `claude` start regardless.
+  useEffect(() => {
+    if (!reloadTarget || reloadTarget.sessionId !== sessionId) return;
+    if (reloadTarget.token === lastReloadTokenRef.current) return;
+    lastReloadTokenRef.current = reloadTarget.token;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const summary = await window.api.observability.summaryForBrokerSession(
+          workspaceId,
+          sessionId
+        );
+        const claudeUuid = summary?.sessionId;
+        if (cancelled || !claudeUuid) return;
+        // Resume the SAME conversation on the next attach.
+        resumeOverrideRef.current = claudeUuid;
+        const handle = ptyHandleRef.current;
+        if (handle) await window.api.pty.closeSession(handle);
+        if (cancelled) return;
+        // Re-run the attach effect: the broker session is gone, so attach
+        // CREATEs it with `--resume <uuid>`.
+        setSessionEpoch((e) => e + 1);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[TerminalSession] loadout reload failed:', err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reloadTarget, sessionId, workspaceId]);
 
   // When this session becomes visible again, force a fit. xterm's
   // ResizeObserver can fire while the host is `visibility: hidden`
