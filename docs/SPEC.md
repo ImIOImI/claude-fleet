@@ -876,7 +876,7 @@ The main process's writers use the read-write `state.db` connection; the MCP ser
 ### Cross-workspace committee control (#116)
 Give one workspace permission to talk to and control others, so a **manager** session can convene a **committee of expert workspaces** — unpause a panel, have them review/argue over a PR, synthesize a verdict. Built in phases (#117–#123); this section is amended each phase.
 
-**Status: in progress.** Phase 1 (#117, per-workspace MCP socket + caller identity — the security spine) shipped. Phase 2 (#118, the permission model + opt-in/grant UI) is described below; the cross-workspace *effects* (pause/post/collect/status, #119–#121) and the console + loadouts (#123) are not built yet.
+**Status: in progress.** Phase 1 (#117, per-workspace MCP socket + caller identity — the security spine) and Phase 2 (#118, permission model + opt-in/grant UI) shipped. Phase 3 (#119, the pause/unpause control plane — first real cross-workspace effect) is described below. The remaining effects (post/collect/status, #120–#121) and the console + loadouts (#123) are not built yet.
 
 **Architecture (recommended, from the design pass).** The existing host MCP server (above) is the cross-workspace control plane — every container already reaches it, it runs in `main` where it can call `pauseWorkspace`/`sendInput`, and it's already in the §9 security model. The **manager is an ordinary Claude session** that gains `committee.*` MCP tools via a loadout — not a privileged broker peer. The **host is the sole authority**.
 
@@ -888,7 +888,7 @@ type CommitteeVerb = 'read' | 'post' | 'pause';
 control?:       { canControl?: Array<{ id: string; verbs: CommitteeVerb[] }> };  // outbound (makes this a "manager")
 accessibility?: { reachable: boolean; acceptFrom?: string[]; roleHint?: string }; // inbound opt-in (makes this a reachable "expert")
 ```
-- **`read`** = query the target's sessions/events/cost; **`post`** = inject input into its live session; **`pause`** = pause/unpause (and cold-start) it. (Only `read`/`post`/`pause` *effects* land in later phases; #118 ships only the data + gate + UI.)
+- **`read`** = query the target's sessions/events/cost; **`post`** = inject input into its live session; **`pause`** = pause/unpause (and cold-start) it. (#118 shipped the data + gate + UI; the `pause` *effect* shipped in #119 below; `read`/`post` effects land in #120/#122.)
 - A workspace holding ≥1 grant is a **manager**; one with `reachable: true` is a reachable **expert**.
 
 **Enforcement — `src/main/control.ts`.** A single `assertControl(callerId, targetId, verb)` is the gate every committee effect must pass. It re-reads **both manifests fresh on every call** (instant revocation — no cached authority) and delegates to a pure `decideControl(caller, target, …)` (unit-tested truth table). Permit **iff** all hold; otherwise default-deny with a reason:
@@ -905,7 +905,14 @@ accessibility?: { reachable: boolean; acceptFrom?: string[]; roleHint?: string }
 - **Grant matrix** (`CommitteePane.tsx`): keyed off the *selected* workspace as manager; rows are the other reachable container peers (managers + opted-out shown excluded with a reason), columns are the three verbs. Toggling a checkbox does an optimistic local update then `getManifest`→`writeManifest` on the manager's manifest. A local selected workspace shows "can't act as a manager — container-only."
 - **Manifest write merge (`workspace:writeManifest`):** the handler now **merges over the existing manifest** (`{ ...existing, ...spec, workspaceRoot }`) so renderer-unmanaged fields survive an edit — the edit form omits `control` (edited in the rail) and `installedLoadouts` (written by the loadouts engine), and a wholesale overwrite would silently wipe them. A key present in the incoming spec (even `undefined`, e.g. clearing `accessibility`) is authoritative. (This also fixes a latent pre-#118 `installedLoadouts`-on-edit drop.) `listAllWorkspaces` carries `control`/`accessibility` through to the renderer so chips + matrix reflect current state.
 
-**Phased delivery.** #117 socket/identity ✓ → #118 model + UI (this) → #119 pause/unpause → #120 post/collect → #121 busy-idle + status + runaway guards → #122 narrow legacy fleet-global reads (behind a flag) → #123 console UI + manager/expert loadouts.
+**Pause/unpause control plane (#119) — first real effect.** A granted manager can pause/unpause a reachable expert.
+- **MCP tools** `committee_pause(id)` / `committee_unpause(id)` (`mcpServer.ts`) — the manager's Claude calls these over its per-workspace socket; `callerId` is the accepting listener's id. They **do not** touch the read-only DB connection; they proxy to host effect functions injected via `setCommitteeHandlers` (so `mcpServer.ts` needn't import the docker/backend graph). Tool dispatch is now async (`callTool` awaits `tool.run`; `dispatchLine` funnels sync + async results through one promise chain).
+- **IPC** `committee:pause` / `committee:unpause` (`ipc.ts`, `committeePause`/`committeeUnpause`) — the same effect functions, with `callerId` supplied by the host UI (the human operator — the ultimate authority, who can edit manifests directly anyway). Exposed to the renderer as `window.api.committee.pause/unpause` for the future console (#123).
+- Both paths call `assertControl(callerId, targetId, 'pause')` first, then: **pause** resolves the target's live `containerId` from `listAllWorkspaces` (pause is keyed by containerId) and calls `backend.pauseWorkspace`; **unpause** calls `backend.startWorkspace(id)` (unpauses a paused container, cold-starts a stopped one) then **waits for the broker** (`docker.ts:waitForBrokerReady`) before returning.
+- **Frozen-broker correctness:** a paused container's broker (PID 1) is frozen — a socket *connect* still succeeds (kernel backlog) but it never answers. So `waitForBrokerReady` polls a fresh `LIST` (not just connect) on the `REATTACH_RETRIES`×`REATTACH_RETRY_MS` backoff, each attempt bounded by a short timeout, until the thawed broker replies. This guarantees a later `post` (#120) never lands in a still-frozen broker. Skipped for mock/local (no broker).
+- `pause` is a **combined verb** (pause + unpause + cold-start) — it grants lifecycle, not just resume. The **manager is never paused**, and experts hold no grants so they can't pause each other.
+
+**Phased delivery.** #117 socket/identity ✓ → #118 model + UI ✓ → #119 pause/unpause ✓ → #120 post/collect → #121 busy-idle + status + runaway guards → #122 narrow legacy fleet-global reads (behind a flag) → #123 console UI + manager/expert loadouts.
 
 ### Dev-mode mock fleet
 When `CLAUDE_FLEET_MOCK=1` is set in the main process's environment, `ipc.ts` swaps the real `docker.ts` implementation for `src/main/mock.ts`. The mock:

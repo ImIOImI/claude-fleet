@@ -25,7 +25,8 @@ import * as realLocal from './local.js';
 import * as mockDocker from './mock.js';
 import type { Backend } from './backend.js';
 import { resolveKind } from './backendRouter.js';
-import { ensureWorkspaceSocket, removeWorkspaceSocket } from './mcpServer.js';
+import { assertControl } from './control.js';
+import { ensureWorkspaceSocket, removeWorkspaceSocket, setCommitteeHandlers } from './mcpServer.js';
 import * as vault from './vault.js';
 import * as fs from './fs.js';
 import * as imageLibrary from './imageLibrary.js';
@@ -220,6 +221,41 @@ async function listAllWorkspaces(): Promise<Workspace[]> {
   }
 
   return result;
+}
+
+// ── Cross-workspace committee control (#119) ───────────────────────────────
+// The single place pause/unpause effects are performed, shared by the MCP
+// tools (caller id from the per-workspace socket) and the committee IPC
+// channels (caller id supplied by the host UI — the human operator, who is the
+// ultimate authority and can already edit manifests directly). Both go through
+// `assertControl` first, so authorization is identical on either path.
+
+/** Pause a reachable, granted expert. Resolves its live containerId from the
+ *  merged list (pauseWorkspace is keyed by containerId, not workspace id). */
+async function committeePause(callerId: string, targetId: string): Promise<{ id: string; paused: true }> {
+  await assertControl(callerId, targetId, 'pause');
+  const target = (await listAllWorkspaces()).find((w) => w.id === targetId);
+  if (!target?.containerId) {
+    throw new Error(`target ${targetId} has no live container to pause`);
+  }
+  await backendForKind(target.kind).pauseWorkspace(target.containerId);
+  return { id: targetId, paused: true };
+}
+
+/** Unpause (or cold-start) a granted expert, returning only once its broker is
+ *  servicing RPCs again so a later `post` (#120) can't land in a frozen broker. */
+async function committeeUnpause(callerId: string, targetId: string): Promise<{ id: string; running: true }> {
+  await assertControl(callerId, targetId, 'pause');
+  const kind = await resolveKind(targetId);
+  const containerId = await backendForKind(kind).startWorkspace(targetId);
+  if (!containerId) {
+    throw new Error(`target ${targetId} has no container to unpause (it may need recreation)`);
+  }
+  // Real docker only — mock/local have no in-container broker to wait on.
+  if (!MOCK_MODE && kind === 'container') {
+    await realDocker.waitForBrokerReady(targetId);
+  }
+  return { id: targetId, running: true };
 }
 
 export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): void {
@@ -506,6 +542,19 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('workspace:pause', async (_e, containerId: string) =>
     (await backendFor(containerId)).pauseWorkspace(containerId)
   );
+  // Committee pause/unpause (#119). `callerId` is the workspace acting as
+  // manager; assertControl gates the effect. Exposed for the committee console
+  // (#123); the manager's Claude reaches the same effects via the MCP tools.
+  ipcMain.handle('committee:pause', (_e, callerId: string, targetId: string) =>
+    committeePause(callerId, targetId)
+  );
+  ipcMain.handle('committee:unpause', (_e, callerId: string, targetId: string) =>
+    committeeUnpause(callerId, targetId)
+  );
+  // Let the MCP committee_* tools reach the same effects (caller id from the
+  // per-workspace socket instead of an IPC arg).
+  setCommitteeHandlers({ pause: committeePause, unpause: committeeUnpause });
+
   ipcMain.handle('workspace:remove', async (_e, containerId: string, opts?: RemoveWorkspaceOpts) => {
     // A saved (no-live) workspace passes its ULID in opts.id; prefer it so the
     // kind resolves even when there's no live containerId.

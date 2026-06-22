@@ -174,6 +174,14 @@ const api = {
     list: () => ipcRenderer.invoke('images:list'),
     remove: (ref: string) => ipcRenderer.invoke('images:remove', ref)
   },
+  /** Cross-workspace committee control (#119). `callerId` is the workspace
+   *  acting as manager; the host gates every call via assertControl. */
+  committee: {
+    pause: (callerId: string, targetId: string): Promise<{ id: string; paused: true }> =>
+      ipcRenderer.invoke('committee:pause', callerId, targetId),
+    unpause: (callerId: string, targetId: string): Promise<{ id: string; running: true }> =>
+      ipcRenderer.invoke('committee:unpause', callerId, targetId)
+  },
   sessions: {
     read: (workspaceId: string): Promise<SessionInventory> =>
       ipcRenderer.invoke('sessions:read', workspaceId),
