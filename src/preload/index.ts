@@ -181,7 +181,11 @@ const api = {
       ipcRenderer.invoke('committee:pause', callerId, targetId),
     unpause: (callerId: string, targetId: string): Promise<{ id: string; running: true }> =>
       ipcRenderer.invoke('committee:unpause', callerId, targetId),
-    post: (callerId: string, targetId: string, message: string): Promise<{ id: string; brokerSessionId: string }> =>
+    post: (
+      callerId: string,
+      targetId: string,
+      message: string
+    ): Promise<{ id: string; via: 'attached' | 'headless'; brokerSessionId?: string }> =>
       ipcRenderer.invoke('committee:post', callerId, targetId, message),
     collect: (
       callerId: string,

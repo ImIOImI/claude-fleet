@@ -86,6 +86,11 @@ async function backendFor(idOrContainerId: string): Promise<Backend> {
 }
 
 const ptySessions = new Map<string, PtyHandle>();
+// ptyHandleId → owning workspace id. Lets committee `post` (#120) reuse a live
+// renderer attachment instead of opening a competing one (the broker is
+// one-writer-per-session, so a second attach to an already-viewed expert is
+// rejected `already attached`). Populated/cleared alongside ptySessions.
+const handleWorkspaceId = new Map<string, string>();
 
 // Detected once at load: are we running under WSL? (Drives `fs:openPath`.)
 const RUNNING_IN_WSL = ((): boolean => {
@@ -258,17 +263,44 @@ async function committeeUnpause(callerId: string, targetId: string): Promise<{ i
   return { id: targetId, running: true };
 }
 
-/** Inject a message into a granted, reachable expert's live session (#120) —
- *  same fire-and-forget path as a human keystroke (see Backend.committeePost). */
+/** Find a live renderer PtyHandle for a workspace, if one is attached. */
+function liveHandleForWorkspace(workspaceId: string): PtyHandle | null {
+  for (const [handleId, wsId] of handleWorkspaceId) {
+    if (wsId === workspaceId) {
+      const h = ptySessions.get(handleId);
+      if (h) return h;
+    }
+  }
+  return null;
+}
+
+/**
+ * Inject a message into a granted, reachable expert's live session (#120) —
+ * the same fire-and-forget path as a human keystroke.
+ *
+ * The broker is **one-writer-per-session**, and the renderer always-mounts +
+ * auto-attaches every running workspace — so for an expert visible in this app
+ * the renderer already holds the writer, and a competing attach is rejected
+ * `already attached` (verified against a real container). So we **reuse the
+ * live renderer attachment** when present (writing to its stream === sending
+ * INPUT on the host channel; the human watching that tab sees the injection).
+ * Only a truly headless expert (no renderer attached) falls back to the
+ * backend's transient attach.
+ */
 async function committeePost(
   callerId: string,
   targetId: string,
   msg: string
-): Promise<{ id: string; brokerSessionId: string }> {
+): Promise<{ id: string; via: 'attached' | 'headless'; brokerSessionId?: string }> {
   await assertControl(callerId, targetId, 'post');
+  const live = liveHandleForWorkspace(targetId);
+  if (live) {
+    live.stream.write(msg + '\r');
+    return { id: targetId, via: 'attached' };
+  }
   const kind = await resolveKind(targetId);
   const { brokerSessionId } = await backendForKind(kind).committeePost(targetId, msg);
-  return { id: targetId, brokerSessionId };
+  return { id: targetId, via: 'headless', brokerSessionId };
 }
 
 /** One committee `collect` turn — a user/assistant transcript line, decoded. */
@@ -802,6 +834,13 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         throw err;
       }
       ptySessions.set(ptyHandleId, handle);
+      // Remember which workspace this handle belongs to so committee `post`
+      // (#120) can reuse it. containerId is the Docker id (or, for local, the
+      // ULID); match it back to the workspace's ULID via the merged list.
+      const owner = (await listAllWorkspaces()).find(
+        (w) => w.containerId === containerId || w.id === containerId
+      );
+      if (owner) handleWorkspaceId.set(ptyHandleId, owner.id);
       // Diagnostic: ptySessions.size should oscillate around the count of
       // currently-mounted TerminalSession components. Unbounded growth =
       // detach isn't running (renderer cleanup race) or isn't reaching
@@ -833,6 +872,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       handle.stream.on('end', () => {
         win?.webContents.send(`pty:end:${ptyHandleId}`);
         ptySessions.delete(ptyHandleId);
+        handleWorkspaceId.delete(ptyHandleId);
         logError({
           source: 'main',
           type: 'pty-stream-end',
@@ -866,6 +906,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     const present = ptySessions.has(sessionId);
     ptySessions.get(sessionId)?.detach();
     ptySessions.delete(sessionId);
+    handleWorkspaceId.delete(sessionId);
     logError({
       source: 'main',
       type: 'pty-detach',
@@ -885,6 +926,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     if (!handle) return false;
     await handle.close();
     ptySessions.delete(ptyHandleId);
+    handleWorkspaceId.delete(ptyHandleId);
     logError({
       source: 'main',
       type: 'pty-close',
