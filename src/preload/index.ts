@@ -196,7 +196,12 @@ const api = {
       sessionId: string | null;
       cursor: number;
       turns: Array<{ id: number; ts: number | null; role: string; text: string }>;
-    }> => ipcRenderer.invoke('committee:collect', callerId, targetId, since)
+    }> => ipcRenderer.invoke('committee:collect', callerId, targetId, since),
+    status: (
+      callerId: string,
+      targetId: string
+    ): Promise<{ id: string; paused: boolean; busy: boolean; stalled: boolean; lastActiveAt: number | null }> =>
+      ipcRenderer.invoke('committee:status', callerId, targetId)
   },
   sessions: {
     read: (workspaceId: string): Promise<SessionInventory> =>

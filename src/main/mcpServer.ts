@@ -53,6 +53,7 @@ export interface CommitteeHandlers {
   unpause(callerId: string, targetId: string): Promise<unknown>;
   post(callerId: string, targetId: string, text: string): Promise<unknown>;
   collect(callerId: string, targetId: string, since: number): Promise<unknown>;
+  status(callerId: string, targetId: string): Promise<unknown>;
 }
 let committeeHandlers: CommitteeHandlers | null = null;
 export function setCommitteeHandlers(h: CommitteeHandlers): void {
@@ -474,6 +475,20 @@ const TOOLS: Tool[] = [
       if (typeof a.id !== 'string') throw new Error('id is required');
       const since = typeof a.since === 'number' ? a.since : 0;
       return committeeHandlers.collect(ctx.callerId, a.id, since);
+    }
+  },
+  {
+    name: 'committee_status',
+    description:
+      'Check an expert workspace you hold a "read" grant for. Returns ' +
+      '{ paused, busy, stalled, lastActiveAt } — `busy` is whether claude is actively working, ' +
+      '`stalled` means it has been busy far longer than a turn should take (likely wedged or ' +
+      'waiting on a prompt). Use this to decide when an expert is done before collecting. Args: id.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+    run: (_db, a, ctx) => {
+      if (!committeeHandlers) throw new Error('committee control is unavailable');
+      if (typeof a.id !== 'string') throw new Error('id is required');
+      return committeeHandlers.status(ctx.callerId, a.id);
     }
   }
 ];

@@ -227,6 +227,15 @@ test('MCP server: initialize, tools, query escape hatch, write rejection', async
         arguments: { id, since: collected.cursor }
       });
       expect((toolText(col2) as { turns: unknown[] }).turns).toHaveLength(0);
+
+      // committee_status (#121): id2 (read-granted) sees id's status. No live
+      // container/attach in this harness ⇒ not paused, not busy; lastActiveAt
+      // comes from the seeded session row.
+      const st = await client2.call('tools/call', { name: 'committee_status', arguments: { id } });
+      const status = toolText(st) as { paused: boolean; busy: boolean; lastActiveAt: number | null };
+      expect(status.paused).toBe(false);
+      expect(status.busy).toBe(false);
+      expect(typeof status.lastActiveAt).toBe('number');
     } finally {
       client2.close();
     }
