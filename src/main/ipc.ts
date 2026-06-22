@@ -25,6 +25,7 @@ import * as realLocal from './local.js';
 import * as mockDocker from './mock.js';
 import type { Backend } from './backend.js';
 import { resolveKind } from './backendRouter.js';
+import { ensureWorkspaceSocket, removeWorkspaceSocket } from './mcpServer.js';
 import * as vault from './vault.js';
 import * as fs from './fs.js';
 import * as imageLibrary from './imageLibrary.js';
@@ -289,6 +290,12 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         throw new Error(`A workspace named "${input.name}" already exists.`);
       }
 
+      // Bring up this workspace's per-id MCP listener (#117) before the backend
+      // creates it: a local workspace's createWorkspace wires its --mcp-config
+      // off the live socket, and a container's reconnecting socat bridge wants
+      // the socket present as soon as it starts.
+      ensureWorkspaceSocket(input.id);
+
       const ws = await backendForKind(kind).createWorkspace({
         id: input.id,
         name: input.name,
@@ -487,11 +494,15 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('workspace:pause', async (_e, containerId: string) =>
     (await backendFor(containerId)).pauseWorkspace(containerId)
   );
-  ipcMain.handle('workspace:remove', async (_e, containerId: string, opts?: RemoveWorkspaceOpts) =>
+  ipcMain.handle('workspace:remove', async (_e, containerId: string, opts?: RemoveWorkspaceOpts) => {
     // A saved (no-live) workspace passes its ULID in opts.id; prefer it so the
     // kind resolves even when there's no live containerId.
-    (await backendFor(opts?.id ?? containerId)).removeWorkspace(containerId, opts)
-  );
+    const result = await (await backendFor(opts?.id ?? containerId)).removeWorkspace(containerId, opts);
+    // Tear down the per-id MCP listener + socket dir (#117). Keyed by workspace
+    // id, which lives in opts.id (containerId is the Docker id). Best-effort.
+    if (opts?.id) removeWorkspaceSocket(opts.id);
+    return result;
+  });
 
   ipcMain.handle('app:mockMode', () => MOCK_MODE);
 

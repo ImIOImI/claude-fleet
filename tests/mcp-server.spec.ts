@@ -72,25 +72,34 @@ function toolText(res: { result?: unknown }): unknown {
 test('MCP server: initialize, tools, query escape hatch, write rejection', async () => {
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-mcp-'));
   const id = '01MCPTESTWS0000000000000WS';
+  // A second workspace proves the per-workspace listener fan-out (#117): each
+  // manifest gets its OWN socket at <userData>/mcp/<id>/mcp.sock at startup.
+  const id2 = '01MCPTESTWS0000000000000W2';
   const stateDir = path.join(userDataDir, 'state', id);
   const projectsDir = path.join(stateDir, '.claude', 'projects', '-workspace');
   mkdirSync(projectsDir, { recursive: true });
-  writeFileSync(
-    path.join(stateDir, 'workspace.json'),
-    JSON.stringify({
-      id,
-      name: 'mcp-test-ws',
-      labels: [],
-      workspaceRoot: '/tmp/fleet-mcp',
-      workspaceSubdir: '',
-      kind: 'container',
-      image: 'mock',
-      authMode: 'oauth',
-      env: { plain: {}, secretKeys: [] },
-      createdAt: Date.now(),
-      lastUsedAt: Date.now()
-    })
-  );
+
+  const seedManifest = (wsId: string, name: string): void => {
+    mkdirSync(path.join(userDataDir, 'state', wsId), { recursive: true });
+    writeFileSync(
+      path.join(userDataDir, 'state', wsId, 'workspace.json'),
+      JSON.stringify({
+        id: wsId,
+        name,
+        labels: [],
+        workspaceRoot: '/tmp/fleet-mcp',
+        workspaceSubdir: '',
+        kind: 'container',
+        image: 'mock',
+        authMode: 'oauth',
+        env: { plain: {}, secretKeys: [] },
+        createdAt: Date.now(),
+        lastUsedAt: Date.now()
+      })
+    );
+  };
+  seedManifest(id, 'mcp-test-ws');
+  seedManifest(id2, 'mcp-test-ws-2');
 
   const app: ElectronApplication = await electron.launch({
     args: [REPO_ROOT, `--user-data-dir=${userDataDir}`],
@@ -125,7 +134,9 @@ test('MCP server: initialize, tools, query escape hatch, write rejection', async
     };
     writeFileSync(path.join(projectsDir, `${sessionId}.jsonl`), JSON.stringify(event) + '\n');
 
-    const sock = await connectWithRetry(path.join(userDataDir, 'mcp', 'mcp.sock'));
+    // Per-workspace socket (#117): the listener for the seeded manifest's id is
+    // brought up at startup, exactly how the in-container bind reaches it.
+    const sock = await connectWithRetry(path.join(userDataDir, 'mcp', id, 'mcp.sock'));
     client = new RpcClient(sock);
 
     // initialize
@@ -165,6 +176,18 @@ test('MCP server: initialize, tools, query escape hatch, write rejection', async
       arguments: { sql: 'DELETE FROM events' }
     });
     expect((del.result as { isError?: boolean }).isError).toBe(true);
+
+    // Per-workspace fan-out (#117): the second workspace has its OWN listener
+    // at its OWN per-id socket path — a separate connection that initializes
+    // independently, exactly how a sibling container's bind would reach it.
+    const sock2 = await connectWithRetry(path.join(userDataDir, 'mcp', id2, 'mcp.sock'));
+    const client2 = new RpcClient(sock2);
+    try {
+      const init2 = await client2.call('initialize', { protocolVersion: '2024-11-05' });
+      expect((init2.result as { serverInfo?: { name?: string } }).serverInfo?.name).toBe('claude-fleet-state');
+    } finally {
+      client2.close();
+    }
   } finally {
     client?.close();
     await app.close();
