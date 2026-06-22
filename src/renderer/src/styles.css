@@ -88,6 +88,13 @@ body {
 .app-body.obs-collapsed {
   grid-template-columns: 280px 1fr 28px;
 }
+/* Left rail minimized to a thin reopen strip (#4). Combines with obs-collapsed. */
+.app-body.left-collapsed {
+  grid-template-columns: 28px 1fr 320px;
+}
+.app-body.left-collapsed.obs-collapsed {
+  grid-template-columns: 28px 1fr 28px;
+}
 
 /* ----- top container-tab strip ----------------------------------------- */
 .top-strip {
@@ -1450,6 +1457,10 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
   box-shadow: var(--shadow-sm);
 }
 .ws-chip-group.active::before { opacity: 1; }
+/* Drag-reorder (#1): the lifted chip fades; targets show a leading insert rule. */
+.ws-chip-group.dragging { opacity: 0.4; }
+.ws-chip-group[draggable='true'] { cursor: grab; }
+.ws-chip-group[draggable='true']:active { cursor: grabbing; }
 /* The chip + trigger inside the group share the group's border now;
    suppress the chip's own border styling. */
 .ws-chip-group .ws-chip {
@@ -1637,6 +1648,8 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
   border-bottom: 2px solid transparent;
 }
 .session-tab:hover { color: var(--ink-1); background: var(--bg-card); }
+.session-tab.dragging { opacity: 0.4; }
+.session-tab[draggable='true']:active { cursor: grabbing; }
 .session-tab.active {
   color: var(--ink);
   background: var(--bg);
@@ -2229,6 +2242,64 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
 }
 .restart-banner-dismiss:hover { color: var(--ink); }
 
+/* ── Toasts (transient, bottom-center; loadout reload notice #16) ────── */
+
+.toast-stack {
+  position: fixed;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 1000;
+  pointer-events: none;
+}
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 10px 15px;
+  border-radius: 8px;
+  background: var(--bg-3, #2a2f38);
+  border: 1px solid var(--rule);
+  color: var(--ink);
+  font-size: 12.5px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+  animation: toast-in 160ms ease-out;
+}
+.toast-body { display: flex; flex-direction: column; gap: 3px; }
+.toast-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  line-height: 1;
+}
+.toast-text { line-height: 1.35; }
+.toast-spinner {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  margin-top: 1px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in oklab, var(--ink-2) 32%, transparent);
+  border-top-color: var(--ink-2);
+  animation: toast-spin 0.7s linear infinite;
+}
+@keyframes toast-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast-spinner { animation: none; }
+  .toast { animation: none; }
+}
+
 /* ── PR-C: Advanced image search modal ───────────────────────────── */
 
 .image-search-trigger {
@@ -2338,6 +2409,18 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
 
 /* Left rail accordion */
 .pane.sidebar-left.left-rail { padding: 0; overflow: hidden; }
+/* Slim header carrying the rail's hide toggle (mirrors the obs rail, #4). */
+.left-rail-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 7px 8px 7px 13px; background: var(--bg-1);
+  border-bottom: 1px solid var(--rule); flex: 0 0 auto;
+}
+.left-rail-title {
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-3);
+}
+/* Collapsed: the whole 28px strip is one tall click target (matches obs rail). */
+.pane.sidebar-left.left-rail.left-rail-collapsed { align-items: stretch; padding: 0; }
 .left-rail .acc { display: flex; flex-direction: column; min-height: 0; border-bottom: 1px solid var(--rule); }
 .left-rail .acc.open { flex: 1 1 0; }
 .left-rail .acc:not(.open) { flex: 0 0 auto; }

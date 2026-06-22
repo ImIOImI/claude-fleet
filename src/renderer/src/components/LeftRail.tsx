@@ -15,6 +15,12 @@ interface Props {
   onResume: (item: SessionListItem) => void;
   /** Refresh workspaces (installed-loadout state). */
   onChanged: () => void;
+  /** A loadout was installed into this workspace — App may auto-reload it (#16). */
+  onLoadoutInstalled?: (workspaceId: string) => void;
+  /** Whether the rail is minimized to a thin reopen strip (#4). */
+  collapsed: boolean;
+  /** Toggle the collapsed state (persisted by App.tsx). */
+  onToggleCollapse: () => void;
 }
 
 interface OpenState {
@@ -37,7 +43,10 @@ export function LeftRail({
   selectedWorkspaceId,
   selectedWorkspace,
   onResume,
-  onChanged
+  onChanged,
+  onLoadoutInstalled,
+  collapsed,
+  onToggleCollapse
 }: Props) {
   const [open, setOpen] = useState<OpenState>(loadOpen);
   const toggle = (k: keyof OpenState): void =>
@@ -47,8 +56,36 @@ export function LeftRail({
       return next;
     });
 
+  if (collapsed) {
+    return (
+      <aside className="pane sidebar-left left-rail left-rail-collapsed">
+        <button
+          type="button"
+          className="obs-rail-toggle obs-rail-expand"
+          onClick={onToggleCollapse}
+          title="Show sessions & library"
+          aria-label="Show sessions & library"
+        >
+          ›
+        </button>
+      </aside>
+    );
+  }
+
   return (
     <aside className="pane sidebar-left left-rail">
+      <div className="left-rail-head">
+        <span className="left-rail-title">Fleet</span>
+        <button
+          type="button"
+          className="obs-rail-toggle"
+          onClick={onToggleCollapse}
+          title="Hide sessions & library"
+          aria-label="Hide sessions & library"
+        >
+          ‹
+        </button>
+      </div>
       <section className={`acc ${open.sessions ? 'open' : ''}`}>
         <button
           className="acc-header"
@@ -82,7 +119,11 @@ export function LeftRail({
           <span>Library</span>
         </button>
         {open.library && (
-          <LibraryPane selectedWorkspace={selectedWorkspace} onChanged={onChanged} />
+          <LibraryPane
+            selectedWorkspace={selectedWorkspace}
+            onChanged={onChanged}
+            onInstalled={onLoadoutInstalled}
+          />
         )}
       </section>
     </aside>

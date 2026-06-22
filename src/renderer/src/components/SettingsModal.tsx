@@ -18,6 +18,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
   // The persisted HWA value at open time — used to know whether the toggle
   // actually changed, so we only nudge "restart to apply" when it did.
   const [hwaInitial, setHwaInitial] = useState(false);
+  const [autoReload, setAutoReload] = useState(true);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -29,6 +30,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
         setFleetRoot(cfg.fleetRoot);
         setHwaDisabled(cfg.disableHardwareAcceleration);
         setHwaInitial(cfg.disableHardwareAcceleration);
+        setAutoReload(cfg.autoReloadLoadouts);
         setLoaded(true);
       }
     });
@@ -55,6 +57,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
       if (hwaDisabled !== hwaInitial) {
         await window.api.config.setHardwareAccelDisabled(hwaDisabled);
       }
+      await window.api.config.setAutoReloadLoadouts(autoReload);
       const cfg = await window.api.config.setFleetRoot(trimmed);
       onSaved(cfg);
       onClose();
@@ -112,6 +115,22 @@ export function SettingsModal({ onClose, onSaved }: Props) {
             {hwaDisabled !== hwaInitial && (
               <strong> Restart required to take effect.</strong>
             )}
+          </p>
+          <div className="form-row">
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={autoReload}
+                onChange={(e) => setAutoReload(e.target.checked)}
+                disabled={busy || !loaded}
+              />
+              <span>Auto-reload loadouts into running workspaces</span>
+            </label>
+          </div>
+          <p className="form-hint">
+            When you install or update a loadout in a running container workspace, reload its
+            Claude session (<code>--resume</code>) so the change takes effect right away. Waits
+            until Claude is idle — if it&apos;s working, the reload is deferred until it stops.
           </p>
           {error && <div className="form-hint error-text">{error}</div>}
           <div className="modal-footer">

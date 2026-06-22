@@ -34,6 +34,8 @@ interface Props {
   onDeleteWorkspace: (workspace: WorkspaceSummary) => void;
   /** Re-pull workspace:list — called after a chip-menu action mutates state. */
   onRefresh: () => void;
+  /** Drag-reorder: move `draggedId` to sit before `targetId` in the strip (#1). */
+  onReorderWorkspace: (draggedId: string, targetId: string) => void;
 }
 
 /**
@@ -162,11 +164,14 @@ export function WorkspaceTabStrip({
   onEditWorkspace,
   onCloneWorkspace,
   onDeleteWorkspace,
-  onRefresh
+  onRefresh,
+  onReorderWorkspace
 }: Props) {
   // Single open menu at a time. `for` = workspace id; top/right are
   // viewport coordinates for the portaled menu.
   const [menu, setMenu] = useState<MenuAnchor | null>(null);
+  // Id of the chip currently being dragged (for reorder), null when idle.
+  const [dragId, setDragId] = useState<string | null>(null);
 
   // Close the menu on any outside click, Escape, or layout disturbance
   // (scroll / resize) — the portal positions the menu in viewport coords,
@@ -228,8 +233,24 @@ export function WorkspaceTabStrip({
         return (
         <div
           key={w.id}
-          className={`ws-chip-group ${w.id === selectedId ? 'active' : ''}`}
+          className={`ws-chip-group ${w.id === selectedId ? 'active' : ''} ${
+            dragId === w.id ? 'dragging' : ''
+          }`}
           style={{ ['--hue' as never]: colorFor(w) }}
+          draggable
+          onDragStart={(e) => {
+            setDragId(w.id);
+            e.dataTransfer.effectAllowed = 'move';
+          }}
+          onDragOver={(e) => {
+            if (dragId && dragId !== w.id) e.preventDefault(); // allow drop
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            if (dragId && dragId !== w.id) onReorderWorkspace(dragId, w.id);
+            setDragId(null);
+          }}
+          onDragEnd={() => setDragId(null)}
         >
           <button
             className="ws-chip"

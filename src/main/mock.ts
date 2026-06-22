@@ -330,7 +330,10 @@ export async function attachPty(
   return {
     stream: shell,
     resize: async () => undefined,
-    detach: () => shell.destroy()
+    detach: () => shell.destroy(),
+    close: async () => {
+      shell.destroy();
+    }
   };
 }
 

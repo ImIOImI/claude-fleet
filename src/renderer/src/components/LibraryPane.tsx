@@ -18,9 +18,11 @@ interface Props {
   selectedWorkspace: WorkspaceSummary | null;
   /** Refresh the workspace list so installed-state updates. */
   onChanged: () => void;
+  /** A loadout finished installing into this workspace (#16 auto-reload). */
+  onInstalled?: (workspaceId: string) => void;
 }
 
-export function LibraryPane({ selectedWorkspace, onChanged }: Props) {
+export function LibraryPane({ selectedWorkspace, onChanged, onInstalled }: Props) {
   const [loadouts, setLoadouts] = useState<LoadoutSummary[]>([]);
   const [query, setQuery] = useState('');
   const [activeTags, setActiveTags] = useState<string[]>([]);
@@ -68,6 +70,7 @@ export function LibraryPane({ selectedWorkspace, onChanged }: Props) {
     if (!selectedWorkspace || !installable) return;
     await window.api.loadouts.install(selectedWorkspace.id, id);
     onChanged();
+    onInstalled?.(selectedWorkspace.id);
   };
   const doUninstall = async (id: string): Promise<void> => {
     if (!selectedWorkspace) return;
@@ -212,7 +215,10 @@ export function LibraryPane({ selectedWorkspace, onChanged }: Props) {
           installable={installable}
           installed={installedIds.has(reviewId)}
           onClose={() => setReviewId(null)}
-          onInstalled={onChanged}
+          onInstalled={() => {
+            onChanged();
+            if (selectedWorkspace) onInstalled?.(selectedWorkspace.id);
+          }}
           onUninstalled={onChanged}
         />
       )}

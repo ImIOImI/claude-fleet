@@ -91,6 +91,18 @@ interface Props {
    */
   resumeRequest?: { claudeSessionId: string; title: string; token: number } | null;
   onResumeConsumed?: () => void;
+  /**
+   * A loadout-reload request targeted at THIS workspace (#16). Set by App when a
+   * loadout is installed and the auto-reload setting is on. The pane reloads its
+   * ACTIVE session in place (`--resume`) once that session is idle — deferring
+   * while claude is working. `token` distinguishes repeat requests. App clears
+   * it via `onReloadConsumed` once the pane has taken ownership.
+   */
+  reloadRequest?: { token: number } | null;
+  onReloadConsumed?: () => void;
+  /** Fired the moment the active session actually starts reloading (after the
+   *  idle gate) — App uses it to show a "reloading…" toast over the flicker. */
+  onReloadStarted?: () => void;
 }
 
 function contextBarPct(summary: WorkspaceObservabilitySummary | null): number {
@@ -138,7 +150,10 @@ export function TerminalPane({
   onActiveTabChange,
   onBusyChange,
   resumeRequest,
-  onResumeConsumed
+  onResumeConsumed,
+  reloadRequest,
+  onReloadConsumed,
+  onReloadStarted
 }: Props) {
   const [loaded, setLoaded] = useState(false);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -164,7 +179,9 @@ export function TerminalPane({
 
   // Busy session ids. The workspace is "busy" while any session is working;
   // bubble up only when the aggregate flips so the chip indicator is stable.
+  // Mirrored into state (`busyIds`) so the idle-gated loadout reload can react.
   const busyIdsRef = useRef<Set<string>>(new Set());
+  const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
   const handleActivity = (sessionId: string, busy: boolean): void => {
     const set = busyIdsRef.current;
     const was = set.size > 0;
@@ -172,6 +189,7 @@ export function TerminalPane({
     else set.delete(sessionId);
     const now = set.size > 0;
     if (now !== was) onBusyChange?.(workspaceId, now);
+    setBusyIds(new Set(set));
   };
 
   const handleLifecycle = (sessionId: string, status: 'live' | 'ended') => {
@@ -261,6 +279,22 @@ export function TerminalPane({
     setNextNum((n) => n + 1);
   }
 
+  // Drag-reorder of session tabs (#1). Move the dragged tab before the drop
+  // target; the existing sessions.json persist effect saves the new order.
+  const [dragSessionId, setDragSessionId] = useState<string | null>(null);
+  function reorderSessions(draggedId: string, targetId: string): void {
+    if (draggedId === targetId) return;
+    setSessions((prev) => {
+      const dragged = prev.find((s) => s.id === draggedId);
+      if (!dragged) return prev;
+      const without = prev.filter((s) => s.id !== draggedId);
+      const ti = without.findIndex((s) => s.id === targetId);
+      if (ti < 0) return prev;
+      without.splice(ti, 0, dragged);
+      return without;
+    });
+  }
+
   // Resume request from the Sessions list: open a new tab bound to the
   // claude session. The tab carries `resumeOf` so its first attach runs
   // `claude --resume <uuid>`. Marked fresh so the per-tab observability
@@ -282,6 +316,32 @@ export function TerminalPane({
     setActiveId(id);
     onResumeConsumed?.();
   }, [loaded, resumeRequest, onResumeConsumed]);
+
+  // Loadout reload (#16): a request from App means "reload the active session in
+  // place so the just-installed loadout takes effect". We hold it pending and
+  // only fire once the active session is idle — interrupting a working claude
+  // would be destructive. `reloadTarget` is handed to the matching
+  // TerminalSession, which closes + re-attaches with `--resume`.
+  const [pendingReload, setPendingReload] = useState(false);
+  const [reloadTarget, setReloadTarget] = useState<{ sessionId: string; token: number } | null>(
+    null
+  );
+  const reloadTokenRef = useRef(0);
+  const lastReloadRequest = useRef<number | null>(null);
+  useEffect(() => {
+    if (!loaded || !reloadRequest) return;
+    if (lastReloadRequest.current === reloadRequest.token) return;
+    lastReloadRequest.current = reloadRequest.token;
+    setPendingReload(true);
+    onReloadConsumed?.();
+  }, [loaded, reloadRequest, onReloadConsumed]);
+  useEffect(() => {
+    if (!pendingReload || !activeId) return;
+    if (busyIds.has(activeId)) return; // claude is working — defer until idle
+    setPendingReload(false);
+    setReloadTarget({ sessionId: activeId, token: ++reloadTokenRef.current });
+    onReloadStarted?.();
+  }, [pendingReload, activeId, busyIds, onReloadStarted]);
 
   function closeSession(id: string): void {
     if (!loaded) return;
@@ -396,8 +456,24 @@ export function TerminalPane({
               key={s.id}
               role="tab"
               aria-selected={s.id === activeId}
-              className={`session-tab ${s.id === activeId ? 'active' : ''}`}
+              className={`session-tab ${s.id === activeId ? 'active' : ''} ${
+                dragSessionId === s.id ? 'dragging' : ''
+              }`}
               onClick={() => setActiveId(s.id)}
+              draggable
+              onDragStart={(e) => {
+                setDragSessionId(s.id);
+                e.dataTransfer.effectAllowed = 'move';
+              }}
+              onDragOver={(e) => {
+                if (dragSessionId && dragSessionId !== s.id) e.preventDefault();
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                if (dragSessionId && dragSessionId !== s.id) reorderSessions(dragSessionId, s.id);
+                setDragSessionId(null);
+              }}
+              onDragEnd={() => setDragSessionId(null)}
             >
               <span
                 className={`session-tab-dot ${ended ? 'ended' : 'live'}`}
@@ -487,6 +563,7 @@ export function TerminalPane({
             paused={paused}
             onLifecycleChange={handleLifecycle}
             onActivityChange={handleActivity}
+            reloadTarget={reloadTarget}
           />
         ))}
         {paused && (
