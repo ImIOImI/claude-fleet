@@ -71,6 +71,45 @@ export interface WorkspaceMirror {
 export const FACTORY_MIRROR: WorkspaceMirror = { default: 'on', cleanup: 'delete' };
 
 /**
+ * Cross-workspace committee control (#116/#117/#118).
+ *
+ * `read`  — query the target's sessions/events/cost.
+ * `post`  — inject input into the target's live session (a manager keystroke).
+ * `pause` — pause/unpause (and cold-start) the target container.
+ *
+ * Authority is **host-private** — these grants live only in the manifest under
+ * `<userData>/state/<id>/`, never bind-mounted into a container, so a workspace
+ * cannot read or edit its own grants. Enforcement is `control.ts:assertControl`,
+ * which re-reads both manifests fresh on every call (instant revocation).
+ */
+export type CommitteeVerb = 'read' | 'post' | 'pause';
+export const COMMITTEE_VERBS: readonly CommitteeVerb[] = ['read', 'post', 'pause'];
+
+/** One outbound grant: the verbs this workspace may exercise on target `id`. */
+export interface ControlGrant {
+  id: string;
+  verbs: CommitteeVerb[];
+}
+
+/** Outbound side: what this workspace (a manager) is allowed to do to others. */
+export interface ControlConfig {
+  canControl?: ControlGrant[];
+}
+
+/**
+ * Inbound side: this workspace's opt-in to being controlled (default-deny — a
+ * workspace is unreachable until it sets `reachable: true`).
+ * - `acceptFrom`: if non-empty, only these caller ids may control it; empty/absent
+ *   means any caller holding a grant (still gated by the outbound grant).
+ * - `roleHint`: free-text lens label surfaced to a manager (e.g. "security").
+ */
+export interface AccessibilityConfig {
+  reachable: boolean;
+  acceptFrom?: string[];
+  roleHint?: string;
+}
+
+/**
  * Record of one loadout installed into a workspace (#16-followup). Tracks the
  * exact things applied so uninstall reverts precisely: dropped files (deleted),
  * and merges (the CLAUDE.md block, the settings.json keys, the .mcp.json server
@@ -116,8 +155,49 @@ export interface WorkspaceSpec {
   mirror: WorkspaceMirror;
   /** Loadouts installed into this workspace (#16-followup). Absent ⇒ none. */
   installedLoadouts?: InstalledLoadout[];
+  /** Outbound committee control grants (#118). Absent ⇒ holds no grants. */
+  control?: ControlConfig;
+  /** Inbound committee opt-in (#118). Absent ⇒ unreachable (default-deny). */
+  accessibility?: AccessibilityConfig;
   createdAt: number;
   lastUsedAt: number;
+}
+
+/** Drop anything that isn't a well-formed control grant — the manifest parser
+ *  is a strict allowlist, so unsanitized fields would silently vanish on the
+ *  next read/write round-trip. Returns undefined when no valid grant survives. */
+function sanitizeControl(c: unknown): ControlConfig | undefined {
+  if (!c || typeof c !== 'object') return undefined;
+  const canControl = (c as ControlConfig).canControl;
+  if (!Array.isArray(canControl)) return undefined;
+  const grants: ControlGrant[] = canControl
+    .filter(
+      (g): g is ControlGrant =>
+        !!g && typeof (g as ControlGrant).id === 'string' && Array.isArray((g as ControlGrant).verbs)
+    )
+    .map((g) => ({
+      id: g.id,
+      verbs: g.verbs.filter((v): v is CommitteeVerb => COMMITTEE_VERBS.includes(v as CommitteeVerb))
+    }))
+    .filter((g) => g.verbs.length > 0);
+  return grants.length ? { canControl: grants } : undefined;
+}
+
+/** Validate the inbound opt-in block. `reachable` must be an explicit boolean;
+ *  anything malformed is dropped (⇒ default-deny). */
+function sanitizeAccessibility(a: unknown): AccessibilityConfig | undefined {
+  if (!a || typeof a !== 'object') return undefined;
+  const obj = a as AccessibilityConfig;
+  if (typeof obj.reachable !== 'boolean') return undefined;
+  const acceptFrom = Array.isArray(obj.acceptFrom)
+    ? obj.acceptFrom.filter((s): s is string => typeof s === 'string')
+    : undefined;
+  const roleHint = typeof obj.roleHint === 'string' ? obj.roleHint : undefined;
+  return {
+    reachable: obj.reachable,
+    ...(acceptFrom && acceptFrom.length ? { acceptFrom } : {}),
+    ...(roleHint ? { roleHint } : {})
+  };
 }
 
 export interface Workspace extends WorkspaceSpec {
@@ -170,6 +250,8 @@ export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec |
         cleanup: parsed.mirror?.cleanup === 'preserve' ? 'preserve' : FACTORY_MIRROR.cleanup
       },
       installedLoadouts: Array.isArray(parsed.installedLoadouts) ? parsed.installedLoadouts : [],
+      control: sanitizeControl(parsed.control),
+      accessibility: sanitizeAccessibility(parsed.accessibility),
       createdAt: parsed.createdAt ?? Date.now(),
       lastUsedAt: parsed.lastUsedAt ?? parsed.createdAt ?? Date.now()
     };

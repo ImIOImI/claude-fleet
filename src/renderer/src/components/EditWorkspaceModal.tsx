@@ -100,7 +100,8 @@ export function EditWorkspaceModal({
               // secretKeys is read by WorkspaceForm via a separate cast
               // (the initial reader looks for it on the partial object).
               secretKeys: workspace.env.secretKeys,
-              resources: workspace.resources
+              resources: workspace.resources,
+              accessibility: workspace.accessibility
             }}
             workspaces={workspaces}
             vaultAvailable={vaultAvailable}

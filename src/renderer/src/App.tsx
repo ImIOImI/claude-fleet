@@ -34,6 +34,23 @@ export interface WorkspaceMirror {
   cleanup: CleanupSetting;
 }
 
+// Cross-workspace committee control (#118) — render-side mirror of the manifest
+// blocks. `control.canControl` = outbound grants (makes this a "manager");
+// `accessibility.reachable` = inbound opt-in (makes this a reachable "expert").
+export type CommitteeVerb = 'read' | 'post' | 'pause';
+export interface ControlGrant {
+  id: string;
+  verbs: CommitteeVerb[];
+}
+export interface ControlConfig {
+  canControl?: ControlGrant[];
+}
+export interface AccessibilityConfig {
+  reachable: boolean;
+  acceptFrom?: string[];
+  roleHint?: string;
+}
+
 /**
  * Render-side projection of the main-process `Workspace` type. Identity is
  * the ULID (`id`) — stable across renames, container churn, etc. The
@@ -59,6 +76,10 @@ export interface WorkspaceSummary {
   mirror: WorkspaceMirror;
   /** Loadouts installed into this workspace (#16-followup); absent ⇒ none. */
   installedLoadouts?: { id: string; title: string; version?: string }[];
+  /** Outbound committee grants (#118); presence of a grant ⇒ this is a manager. */
+  control?: ControlConfig;
+  /** Inbound committee opt-in (#118); absent ⇒ unreachable (default-deny). */
+  accessibility?: AccessibilityConfig;
   createdAt: number;
   lastUsedAt: number;
 }
@@ -602,6 +623,7 @@ export function App() {
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources,
       mirror: submit.mirror,
+      accessibility: submit.accessibility,
       createdAt: Date.now(),
       lastUsedAt: Date.now()
     });
@@ -663,6 +685,7 @@ export function App() {
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources,
       mirror: submit.mirror,
+      accessibility: submit.accessibility,
       createdAt: before.createdAt,
       lastUsedAt: Date.now()
     });
