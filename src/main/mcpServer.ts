@@ -41,6 +41,22 @@ interface ToolCtx {
   callerId: string;
 }
 
+/**
+ * Cross-workspace committee effects (#119+). Injected by `ipc.ts` at startup so
+ * the `committee_*` tools can drive pause/unpause (and later post/collect)
+ * without mcpServer importing the docker/backend module graph. Each takes the
+ * host-assigned `callerId` (never a wire value) and the target workspace id;
+ * the implementation enforces `assertControl` before any effect.
+ */
+export interface CommitteeHandlers {
+  pause(callerId: string, targetId: string): Promise<unknown>;
+  unpause(callerId: string, targetId: string): Promise<unknown>;
+}
+let committeeHandlers: CommitteeHandlers | null = null;
+export function setCommitteeHandlers(h: CommitteeHandlers): void {
+  committeeHandlers = h;
+}
+
 let userDataDir: string | null = null;
 let rodb: Database.Database | null = null;
 // One listening socket per workspace, keyed by workspace id. The id is captured
@@ -147,18 +163,23 @@ function dispatchLine(line: string, sock: Socket, callerId: string): void {
   // Notifications (no id) get no reply — e.g. notifications/initialized.
   const isNotification = id === undefined || id === null;
 
-  try {
-    const result = handleMethod(method ?? '', params ?? {}, callerId);
-    if (!isNotification && result !== NO_REPLY) {
-      send(sock, { jsonrpc: '2.0', id, result });
-    }
-  } catch (err) {
-    if (!isNotification) {
-      const message = err instanceof Error ? err.message : String(err);
-      const code = err instanceof RpcError ? err.code : -32603;
-      send(sock, { jsonrpc: '2.0', id, error: { code, message } });
-    }
-  }
+  // handleMethod may return a Promise (the committee_* tools call async backend
+  // effects); Promise.resolve() funnels both sync throws and async rejections
+  // through the single .catch below.
+  Promise.resolve()
+    .then(() => handleMethod(method ?? '', params ?? {}, callerId))
+    .then((result) => {
+      if (!isNotification && result !== NO_REPLY) {
+        send(sock, { jsonrpc: '2.0', id, result });
+      }
+    })
+    .catch((err) => {
+      if (!isNotification) {
+        const message = err instanceof Error ? err.message : String(err);
+        const code = err instanceof RpcError ? err.code : -32603;
+        send(sock, { jsonrpc: '2.0', id, error: { code, message } });
+      }
+    });
 }
 
 const NO_REPLY = Symbol('no-reply');
@@ -185,14 +206,14 @@ function handleMethod(method: string, params: Record<string, unknown>, callerId:
     case 'tools/list':
       return { tools: TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })) };
     case 'tools/call':
-      return callTool(params, callerId);
+      return callTool(params, callerId); // may be a Promise (committee_* tools)
     default:
       if (method.startsWith('notifications/')) return NO_REPLY;
       throw new RpcError(-32601, `Method not found: ${method}`);
   }
 }
 
-function callTool(params: Record<string, unknown>, callerId: string): unknown {
+async function callTool(params: Record<string, unknown>, callerId: string): Promise<unknown> {
   const name = params.name as string;
   const args = (params.arguments as Record<string, unknown>) ?? {};
   const tool = TOOLS.find((t) => t.name === name);
@@ -200,8 +221,10 @@ function callTool(params: Record<string, unknown>, callerId: string): unknown {
   if (!rodb) throw new RpcError(-32603, 'Database not open');
   try {
     // callerId is host-assigned (the accepting listener's workspace id), so it
-    // is trustworthy here. Tools that scope by caller read it from ctx (#122).
-    const result = tool.run(rodb, args, { callerId });
+    // is trustworthy here. Tools that scope by caller read it from ctx (#122);
+    // the committee_* tools enforce assertControl before any effect. `await`
+    // covers both sync DB tools and async committee effects.
+    const result = await tool.run(rodb, args, { callerId });
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   } catch (err) {
     // Tool-level failures surface to the model as an error result (MCP
@@ -385,6 +408,34 @@ const TOOLS: Tool[] = [
         return { truncated: true, returned: MAX_LIMIT, rows: rows.slice(0, MAX_LIMIT) };
       }
       return { truncated: false, returned: rows.length, rows };
+    }
+  },
+  // Cross-workspace committee control (#119). These do NOT touch the read-only
+  // DB connection — they proxy to the injected host handlers, which enforce
+  // `assertControl(callerId, id, 'pause')` before any effect. `callerId` is the
+  // host-assigned id of the accepting per-workspace socket, never a wire value.
+  {
+    name: 'committee_pause',
+    description:
+      'Pause a reachable expert workspace you hold a "pause" grant for. Freezes its container; ' +
+      'the conversation is preserved. Arg: id (the target workspace id).',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+    run: (_db, a, ctx) => {
+      if (!committeeHandlers) throw new Error('committee control is unavailable');
+      if (typeof a.id !== 'string') throw new Error('id is required');
+      return committeeHandlers.pause(ctx.callerId, a.id);
+    }
+  },
+  {
+    name: 'committee_unpause',
+    description:
+      'Unpause (or cold-start) an expert workspace you hold a "pause" grant for, and wait until ' +
+      'its in-container session manager is responsive before returning. Arg: id (the target workspace id).',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+    run: (_db, a, ctx) => {
+      if (!committeeHandlers) throw new Error('committee control is unavailable');
+      if (typeof a.id !== 'string') throw new Error('id is required');
+      return committeeHandlers.unpause(ctx.callerId, a.id);
     }
   }
 ];

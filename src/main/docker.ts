@@ -623,6 +623,46 @@ const REATTACH_RETRIES = 12;
 const REATTACH_RETRY_MS = 250;
 
 /**
+ * Resolve only once the workspace's broker answers a `LIST` (#119). Committee
+ * unpause uses this so a later `post` (#120) never lands in a *frozen* broker:
+ * `docker unpause` (startWorkspace) has thawed the container by the time we
+ * poll, but the broker (PID 1) may take a moment to resume servicing RPCs.
+ * We retry on the same backoff the reattach race uses.
+ *
+ * A frozen broker still *accepts* a socket connect (the kernel parks it in the
+ * listen backlog) but never answers — so `ready()` succeeding is not enough;
+ * the authoritative signal is a `LIST` reply. Each attempt is bounded by a
+ * short timeout so a genuinely-stuck broker can't burn the full 30s RPC budget
+ * per try (the late reply is swallowed to avoid an unhandled rejection).
+ */
+export async function waitForBrokerReady(workspaceId: string): Promise<void> {
+  const sockPath = workspaceBrokerSocket(workspaceId);
+  const PER_ATTEMPT_MS = 1500;
+  let lastErr: unknown;
+  for (let i = 0; i < REATTACH_RETRIES; i++) {
+    const client = new BrokerClient(sockPath);
+    try {
+      await client.ready();
+      const listed = client.listSessions();
+      listed.catch(() => {}); // swallow a late rejection if we time out first
+      await Promise.race([
+        listed,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('broker LIST timed out')), PER_ATTEMPT_MS))
+      ]);
+      return; // broker is servicing RPCs again
+    } catch (err) {
+      lastErr = err;
+      await new Promise((r) => setTimeout(r, REATTACH_RETRY_MS));
+    } finally {
+      client.close();
+    }
+  }
+  throw new Error(
+    `broker for ${workspaceId} did not become ready after unpause: ${(lastErr as Error)?.message ?? String(lastErr)}`
+  );
+}
+
+/**
  * Open a terminal session against the in-container broker.
  *
  * Broker socket lives in the host state dir keyed by workspace id. We

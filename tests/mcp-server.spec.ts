@@ -147,7 +147,15 @@ test('MCP server: initialize, tools, query escape hatch, write rejection', async
     const tools = await client.call('tools/list');
     const names = ((tools.result as { tools: Array<{ name: string }> }).tools).map((t) => t.name);
     expect(names).toEqual(
-      expect.arrayContaining(['list_sessions', 'get_session', 'get_cost', 'list_events', 'query'])
+      expect.arrayContaining([
+        'list_sessions',
+        'get_session',
+        'get_cost',
+        'list_events',
+        'query',
+        'committee_pause',
+        'committee_unpause'
+      ])
     );
 
     // The watcher ingest is async — poll the raw query until the event lands.
@@ -176,6 +184,15 @@ test('MCP server: initialize, tools, query escape hatch, write rejection', async
       arguments: { sql: 'DELETE FROM events' }
     });
     expect((del.result as { isError?: boolean }).isError).toBe(true);
+
+    // committee_pause (#119) is wired through the async dispatch + injected
+    // handler, and enforces assertControl: this connection's caller id is `id`
+    // (the listener that accepted it), and `id2` never opted in (not reachable),
+    // so the call is refused before any backend effect is reached.
+    const cp = await client.call('tools/call', { name: 'committee_pause', arguments: { id: id2 } });
+    const cpRes = cp.result as { isError?: boolean; content?: Array<{ text?: string }> };
+    expect(cpRes.isError).toBe(true);
+    expect(cpRes.content?.[0]?.text ?? '').toContain('control denied');
 
     // Per-workspace fan-out (#117): the second workspace has its OWN listener
     // at its OWN per-id socket path — a separate connection that initializes
