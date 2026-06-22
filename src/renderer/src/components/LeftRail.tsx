@@ -5,6 +5,7 @@
 import { useState } from 'react';
 import { SessionsPane } from './SessionsPane';
 import { LibraryPane } from './LibraryPane';
+import { CommitteePane } from './CommitteePane';
 import type { WorkspaceSummary } from '../App';
 import type { SessionListItem } from '../../../preload';
 
@@ -26,16 +27,20 @@ interface Props {
 interface OpenState {
   sessions: boolean;
   library: boolean;
+  committee: boolean;
 }
 
 function loadOpen(): OpenState {
   try {
     const v = JSON.parse(localStorage.getItem('leftRailOpen') ?? '');
-    if (v && typeof v.sessions === 'boolean' && typeof v.library === 'boolean') return v;
+    if (v && typeof v.sessions === 'boolean' && typeof v.library === 'boolean') {
+      // `committee` (#118) was added later — default it on for older saved state.
+      return { committee: typeof v.committee === 'boolean' ? v.committee : true, ...v };
+    }
   } catch {
     /* fall through */
   }
-  return { sessions: true, library: true };
+  return { sessions: true, library: true, committee: true };
 }
 
 export function LeftRail({
@@ -123,6 +128,26 @@ export function LeftRail({
             selectedWorkspace={selectedWorkspace}
             onChanged={onChanged}
             onInstalled={onLoadoutInstalled}
+          />
+        )}
+      </section>
+
+      <section className={`acc ${open.committee ? 'open' : ''}`}>
+        <button
+          className="acc-header"
+          aria-expanded={open.committee}
+          onClick={() => toggle('committee')}
+        >
+          <span className={`acc-chev ${open.committee ? 'open' : ''}`} aria-hidden>
+            ▾
+          </span>
+          <span>Committee</span>
+        </button>
+        {open.committee && (
+          <CommitteePane
+            selectedWorkspace={selectedWorkspace}
+            workspaces={workspaces}
+            onChanged={onChanged}
           />
         )}
       </section>

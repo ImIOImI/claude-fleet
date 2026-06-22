@@ -203,6 +203,11 @@ async function listAllWorkspaces(): Promise<Workspace[]> {
       // Installed loadouts live only on the manifest (#16-followup) — carry
       // them onto the merged workspace so the Library can show installed state.
       installedLoadouts: m?.installedLoadouts ?? [],
+      // Committee grants/opt-in live only on the manifest (#118) — carry them
+      // through so chips show the manager/wifi glyphs and the grant matrix
+      // reflects current state.
+      control: m?.control,
+      accessibility: m?.accessibility,
       createdAt: m?.createdAt ?? w.createdAt,
       lastUsedAt: m?.lastUsedAt ?? w.lastUsedAt
     });
@@ -472,17 +477,24 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       if (clash && clash.id !== spec.id) {
         throw new Error(`A workspace named "${spec.name}" already exists.`);
       }
+      const existing = await readWorkspaceManifest(spec.id);
       // Container: workspaceRoot is derived — the canonical private folder under
       // the fleet root. Local (#16): it's the user-chosen host dir, supplied by
       // the renderer; fall back to the existing manifest's value if absent.
       let workspaceRoot: string;
       if (spec.kind === 'local') {
-        const existing = await readWorkspaceManifest(spec.id);
         workspaceRoot = spec.workspaceRoot?.trim() || existing?.workspaceRoot || '';
       } else {
         workspaceRoot = await fleetPrivateDir(spec.id);
       }
-      await writeWorkspaceManifest({ ...spec, workspaceRoot });
+      // Merge OVER the existing manifest so fields the renderer doesn't manage
+      // survive an edit. The edit form sends every form field (those win) but
+      // omits `control` (committee grants, edited in the Committee rail #118)
+      // and `installedLoadouts` (written by the loadouts engine #16); without
+      // this merge a plain edit would silently wipe both. A key present in the
+      // incoming spec — even set to undefined, e.g. clearing `accessibility` by
+      // toggling reachability off — is authoritative and overrides existing.
+      await writeWorkspaceManifest({ ...(existing ?? {}), ...spec, workspaceRoot });
     // Reflect a mirror-default edit in the watcher immediately (don't wait for
     // the next list poll).
     setWorkspaceDefault(spec.id, spec.mirror?.default ?? FACTORY_MIRROR.default);

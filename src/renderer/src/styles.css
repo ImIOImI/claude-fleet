@@ -189,6 +189,39 @@ body {
 }
 .ws-chip-sub.busy { color: var(--ink-1); }
 .ws-chip .chip-paused-glyph { color: var(--warn); flex-shrink: 0; }
+/* Committee role markers (#118): sit at the right edge of the chip, before the
+   ⋮ trigger. Manager (hub) reads as a neutral role marker; reachable (wifi) is
+   info-blue, distinct from the status dot's running/paused colour. */
+.ws-chip-roles { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; }
+.committee-glyph { flex: 0 0 auto; }
+.committee-glyph.mgr { color: var(--ink); }
+.committee-glyph.wifi { color: var(--info); }
+
+/* Committee opt-in (edit form, #118) */
+.committee-reachable-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-1); cursor: pointer; margin: 8px 0; }
+.committee-reachable-row input { margin: 0; accent-color: var(--ok); }
+.committee-warning {
+  display: flex; gap: 9px; align-items: flex-start;
+  padding: 9px 11px; margin: 4px 0 10px; font-size: 11.5px; color: var(--ink-1);
+  background: color-mix(in oklab, var(--warn) 13%, transparent);
+  border: 1px solid color-mix(in oklab, var(--warn) 30%, transparent);
+  border-radius: var(--r-md);
+}
+.committee-warning svg { flex: 0 0 auto; margin-top: 1px; color: var(--warn); }
+
+/* Committee grant matrix (left-rail section, #118) */
+.committee-pane { padding: 8px 10px 12px; font-size: 13px; }
+.committee-empty { color: var(--ink-2); font-size: 12px; padding: 8px 4px; }
+.committee-mgr-note { color: var(--ink-2); font-size: 11.5px; margin: 0 0 10px; }
+.committee-matrix { width: 100%; border-collapse: collapse; font-size: 12px; }
+.committee-matrix th, .committee-matrix td { padding: 6px 6px; border-bottom: 1px solid var(--rule-soft); text-align: center; }
+.committee-matrix th:first-child, .committee-matrix td:first-child { text-align: left; }
+.committee-matrix thead th { font-family: var(--font-mono); font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-2); font-weight: 600; }
+.committee-matrix td input { accent-color: var(--ok); margin: 0; cursor: pointer; }
+.committee-matrix .peer-name { font-weight: 500; color: var(--ink); display: inline-flex; align-items: center; gap: 5px; }
+.committee-matrix .peer-role { font-family: var(--font-mono); font-size: 10px; color: var(--ink-2); }
+.committee-matrix tr.excluded td { color: var(--ink-3); }
+.committee-matrix tr.excluded .peer-name { color: var(--ink-3); font-weight: 400; }
 .ws-chip .name { font-weight: 500; }
 .ws-chip .status { color: var(--ink-2); font-size: 11px; }
 /* Two-line chip content: workspace name on top, live observability

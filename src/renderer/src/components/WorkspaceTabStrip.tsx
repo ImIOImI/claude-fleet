@@ -2,6 +2,17 @@ import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { WorkspaceObservabilitySummary } from '../../../preload';
 import { colorFor, type WorkspaceSummary } from '../App';
+import { isManager, isReachable, ManagerGlyph, WifiGlyph } from './committee';
+
+/** Tooltip describing a reachable workspace's committee opt-in. */
+function reachableTitle(w: WorkspaceSummary): string {
+  const who =
+    w.accessibility?.acceptFrom && w.accessibility.acceptFrom.length > 0
+      ? `accepts: ${w.accessibility.acceptFrom.join(', ')}`
+      : 'accepts any granted manager';
+  const role = w.accessibility?.roleHint ? ` · ${w.accessibility.roleHint}` : '';
+  return `Reachable by managers (${who})${role}`;
+}
 
 interface Props {
   workspaces: WorkspaceSummary[];
@@ -286,6 +297,14 @@ export function WorkspaceTabStrip({
                 {busy ? 'working…' : chipActivityText(summaries[w.id]) ?? ' '}
               </span>
             </span>
+            {(isManager(w) || isReachable(w)) && (
+              <span className="ws-chip-roles">
+                {isManager(w) && (
+                  <ManagerGlyph title={`Manager · controls ${w.control!.canControl!.length} workspace(s)`} />
+                )}
+                {isReachable(w) && <WifiGlyph title={reachableTitle(w)} />}
+              </span>
+            )}
           </button>
           <button
             className="ws-chip-menu-trigger"

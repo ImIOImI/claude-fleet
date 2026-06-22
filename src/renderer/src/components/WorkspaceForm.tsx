@@ -16,6 +16,7 @@ import type {
   WorkspaceMirror,
   MirrorSetting,
   CleanupSetting,
+  AccessibilityConfig,
   WorkspaceSummary
 } from '../App';
 import { AdvancedImageSearchModal, IconSearch } from './AdvancedImageSearchModal';
@@ -53,6 +54,14 @@ export interface WorkspaceFormSubmit {
   resources?: WorkspaceResources;
   /** Durable-transcript-mirror defaults for this workspace. */
   mirror: WorkspaceMirror;
+  /**
+   * Inbound committee opt-in (#118), edit-mode only. `undefined` means "not
+   * reachable" — the parent passes it straight to the manifest, where the
+   * writeManifest handler treats an explicit value as authoritative (so
+   * toggling reachability off clears it). Outbound grants (`control`) are NOT
+   * here — those are edited in the Committee rail, not this form.
+   */
+  accessibility?: AccessibilityConfig;
 }
 
 interface ImageEntry {
@@ -169,6 +178,13 @@ export function WorkspaceForm({
     initial?.mirror?.cleanup ?? 'delete'
   );
   const [envOpen, setEnvOpen] = useState(envRows.length > 0);
+  // Committee opt-in (#118) — inbound "reachable by managers". Edit-mode only.
+  const [reachable, setReachable] = useState<boolean>(initial?.accessibility?.reachable ?? false);
+  const [roleHint, setRoleHint] = useState<string>(initial?.accessibility?.roleHint ?? '');
+  const [acceptFrom, setAcceptFrom] = useState<string>(
+    (initial?.accessibility?.acceptFrom ?? []).join(', ')
+  );
+  const [committeeOpen, setCommitteeOpen] = useState(initial?.accessibility?.reachable ?? false);
   const [kind, setKind] = useState<WorkspaceKind>(initial?.kind ?? 'container');
   // Local workspaces only: the host directory `claude` runs in (#16).
   const [workspaceRoot, setWorkspaceRoot] = useState<string>(initial?.workspaceRoot ?? '');
@@ -311,6 +327,21 @@ export function WorkspaceForm({
     if (Number.isFinite(cpusNum) && cpusNum > 0) resources = { ...(resources ?? {}), cpus: cpusNum };
     if (Number.isFinite(memNum) && memNum > 0) resources = { ...(resources ?? {}), memoryMb: memNum };
 
+    // Inbound committee opt-in. Only meaningful in edit mode; `undefined` when
+    // off so the manifest's accessibility block is cleared on save.
+    const acceptFromList = acceptFrom
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const accessibility: AccessibilityConfig | undefined =
+      mode === 'edit' && reachable
+        ? {
+            reachable: true,
+            ...(acceptFromList.length ? { acceptFrom: acceptFromList } : {}),
+            ...(roleHint.trim() ? { roleHint: roleHint.trim() } : {})
+          }
+        : undefined;
+
     return {
       id: initial?.id,
       name: effectiveName,
@@ -326,7 +357,8 @@ export function WorkspaceForm({
       secretKeys,
       secrets,
       resources,
-      mirror: { default: mirrorDefault, cleanup: cleanupDefault }
+      mirror: { default: mirrorDefault, cleanup: cleanupDefault },
+      accessibility
     };
   };
 
@@ -782,6 +814,61 @@ export function WorkspaceForm({
           </label>
         </div>
       </details>
+
+      {mode === 'edit' && (
+        <details
+          className="form-disclosure"
+          open={committeeOpen}
+          onToggle={(e) => setCommitteeOpen((e.target as HTMLDetailsElement).open)}
+        >
+          <summary>
+            Committee access{' '}
+            <span className="form-hint">{reachable ? 'reachable' : 'private'}</span>
+          </summary>
+          <label className="committee-reachable-row">
+            <input
+              type="checkbox"
+              checked={reachable}
+              onChange={(e) => setReachable(e.target.checked)}
+              disabled={busy}
+            />
+            <span>Reachable by managers</span>
+          </label>
+          {reachable && (
+            <>
+              <div className="committee-warning" role="note">
+                <svg viewBox="0 0 16 16" width="13" height="13" fill="none" aria-hidden="true">
+                  <path d="M8 1.5L1 14h14L8 1.5z" stroke="currentColor" strokeWidth="1.3" />
+                  <path d="M8 6v4M8 11.4v.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                </svg>
+                <span>
+                  Granted managers can <strong>read this session, type into it, and pause it.</strong>
+                </span>
+              </div>
+              <div className="resources-grid">
+                <label>
+                  Role hint
+                  <input
+                    value={roleHint}
+                    onChange={(e) => setRoleHint(e.target.value)}
+                    placeholder="e.g. security"
+                    disabled={busy}
+                  />
+                </label>
+                <label>
+                  Accept from
+                  <input
+                    value={acceptFrom}
+                    onChange={(e) => setAcceptFrom(e.target.value)}
+                    placeholder="manager ids (blank = any granted)"
+                    disabled={busy}
+                  />
+                </label>
+              </div>
+            </>
+          )}
+        </details>
+      )}
 
       {status && <div className="form-status">{status}</div>}
       {error && <div className="form-hint error-text">{error}</div>}
