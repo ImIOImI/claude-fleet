@@ -54,7 +54,9 @@ It is a local-only operator console — not a remote orchestrator, not a multi-u
 
 **Native modules.** `better-sqlite3` (and `keytar`, still present for the legacy-purge migration) ship as N-API native bindings — they must match Electron's bundled Node ABI, not the system Node. The repo's `postinstall` script runs `electron-builder install-app-deps` to pull prebuilt binaries (or rebuild) for the current Electron version. Without this hook, `npm install` builds the bindings against the system Node and Electron fails to load them at runtime with a `NODE_MODULE_VERSION` mismatch. (The vault itself no longer needs a native module — `safeStorage` is built into Electron.)
 
-The runner image is `claude-fleet/runner:latest`, built from `docker/Dockerfile`. Base: `node:22-bookworm-slim`. Installs `git`, `ca-certificates`, `curl`, `ripgrep`, `jq`, `less`, `tini`, and globally installs `@anthropic-ai/claude-code` **pinned to a specific version**. Runs as non-root user `fleet` (UID/GID 1000 by default). Entrypoint is `tini`; default `CMD` is `sleep infinity` so the container stays alive and is `exec`'d into for each terminal session.
+The **base** runner image is `ghcr.io/<owner>/claude-fleet/runner:latest`, built from `docker/Dockerfile`. Base: `node:22-bookworm-slim`. Installs `git`, `ca-certificates`, `curl`, `ripgrep`, `jq`, `less`, `socat`, `tini`, globally installs `@anthropic-ai/claude-code` **pinned to a specific version**, and ships the Go **broker** (built in an earlier stage). Runs as non-root user `fleet` (UID/GID 1000 by default). Entrypoint is `tini`; `CMD` is the broker (the long-running PID 1). The base is deliberately **lean and standalone**.
+
+**DevOps image** (`…/claude-fleet/runner-devops`, `docker/devops/Dockerfile`) is built **`FROM` the base** and layers the SumerSports platform-engineering toolset: GitHub CLI, `yq`, tenv + OpenTofu, Terramate, OPA, tflint + trivy, kubectl + kustomize, helm, `dnsutils` (`dig`), and the AWS CLI; the **Azure CLI is opt-in** (`--build-arg INSTALL_AZURE_CLI=true` — its pip tree ~doubles image size, so it's off by default). The image carries **capability labels** (`com.claude-fleet.capabilities`, `com.claude-fleet.cloud=aws=…/azure=…`, `com.claude-fleet.variant=devops`) that the app surfaces as searchable chips in the workspace image picker, so you can find "the one with kubectl/aws/tofu". **Committee experts/managers run on this image** — their loadouts reach for `gh`/IaC tools. Install logic lives in **shared, standalone, arch-aware scripts under `docker/scripts/`** (one per toolset) that any image composes; pinned versions live in `docker/versions.yaml` (org-canon pins mirror `ci-images`). Both images build with the **repo root as context** (so `docker/scripts/` + the broker module are reachable; `.dockerignore` opts those paths in). The publish workflow builds the base, pushes it, then builds devops with `--build-arg BASE_IMAGE=<base digest>` so they stay in lockstep. Future images stack the same way (e.g. a `platform` image `FROM` devops adding Java/.NET).
 
 **Why claude is pinned, not `:latest`.** claude 2.1.150 added a "Managed settings require approval" startup gate that fires when an org pushes a privileged setting (e.g., `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`) into the user's `remote-settings.json`. In 2.1.150 specifically, the prompt was unnavigable over our broker PTY — input bytes reached claude (verified via `/proc/<pid>/io` rchar growing and tty-echo coming back), but the prompt's parser didn't act on Enter, digits, or arrow-Enter combos, leaving every new OAuth workspace stuck before the main TUI. 2.1.169 fixed navigation and the pin currently sits at 2.1.177 (verified the gate still navigates over a PTY). Pinning the version protects against a silent re-regression in the same code path. Bumping the pin is deliberate — verify navigation works against a built image before raising the floor (see issue #65 for the test recipe and the broker probe script used to verify).
 
@@ -587,8 +589,18 @@ claude-fleet/
 │   └── rules/
 │       └── spec-maintenance.md        # the rule
 ├── docker/
-│   └── Dockerfile                     # runner image (multi-stage, builds broker)
-├── .dockerignore                      # opt-in: broker/** + docker/Dockerfile only
+│   ├── Dockerfile                     # BASE runner (multi-stage, builds broker); lean + standalone
+│   ├── versions.yaml                  # pinned tool versions (source of truth for the scripts)
+│   ├── scripts/                       # shared, standalone, arch-aware installers (one per toolset)
+│   │   ├── _arch.sh                   #   uname → amd64/arm64 + x86_64/aarch64
+│   │   ├── apt-tools.sh               #   make, shellcheck, dnsutils (dig), python3, pre-commit
+│   │   ├── gh.sh  yq.sh  tenv.sh      #   gh; yq; tenv → OpenTofu + Terramate
+│   │   ├── opa.sh  iac-lint.sh        #   OPA; tflint + trivy
+│   │   ├── kubectl.sh  helm.sh        #   kubectl + kustomize; helm
+│   │   └── aws-cli.sh  azure-cli.sh   #   AWS CLI v2; Azure CLI (build-arg gated)
+│   └── devops/
+│       └── Dockerfile                 # FROM base + the platform-engineering toolset (runner-devops)
+├── .dockerignore                      # opt-in: broker/** + docker/Dockerfile + docker/scripts/**
 ├── broker/                            # in-container session multiplexer (Go)
 │   ├── go.mod / go.sum
 │   ├── cmd/broker/main.go             # entrypoint; reads env, listens on socket

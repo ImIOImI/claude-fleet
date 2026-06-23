@@ -1,0 +1,24 @@
+# Pinned tool versions for the claude-fleet runner images.
+#
+# Single source of truth for the install scripts in docker/scripts/. The
+# devops Dockerfile sets ARG defaults to these values; the publish workflow can
+# also read them here to pass --build-arg explicitly. Bump deliberately.
+#
+# Org-canon pins mirror ci-images (SumerSports platform engineering) so an
+# expert reviews against the same toolchain CI uses.
+gh: 2.87.3            # GitHub CLI
+tenv: 4.8.3           # tofu/terraform version manager
+tofu: 1.11.5 1.10.5   # OpenTofu versions installed via tenv (first = default)
+terramate: 0.17.1     # latest stable; ci-images pins a private 0.17.0-betaNN channel
+opa: 1.13.2           # Open Policy Agent
+aws_cli: 2.33.27      # AWS CLI v2
+azure_cli: 2.83.0     # Azure CLI
+
+# These track the tool's own latest-release installer (robust, self-updating).
+# Set a concrete version here + teach the script to honor it if you need to pin.
+yq: latest
+tflint: latest
+trivy: latest
+kubectl: latest       # resolves https://dl.k8s.io/release/stable.txt
+kustomize: latest
+helm: latest

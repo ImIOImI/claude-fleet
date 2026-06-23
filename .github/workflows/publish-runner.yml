@@ -37,7 +37,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
+      # ── Base runner (lean, standalone) ──────────────────────────────────
+      - name: Base metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -46,7 +47,8 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=short
 
-      - name: Build and push
+      - name: Build and push base
+        id: base
         uses: docker/build-push-action@v5
         with:
           # Repo root is the context so the broker module (//broker/)
@@ -57,5 +59,31 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── DevOps runner (FROM the base digest we just pushed) ──────────────
+      - name: DevOps metadata
+        id: meta_devops
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ steps.owner.outputs.value }}/claude-fleet/runner-devops
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+
+      - name: Build and push devops
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/devops/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # Pin to the exact base image just built (by digest) so the two
+          # images are always in lockstep.
+          build-args: |
+            BASE_IMAGE=ghcr.io/${{ steps.owner.outputs.value }}/claude-fleet/runner@${{ steps.base.outputs.digest }}
+          tags: ${{ steps.meta_devops.outputs.tags }}
+          labels: ${{ steps.meta_devops.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
