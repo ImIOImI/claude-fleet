@@ -28,7 +28,12 @@ import { resolveKind } from './backendRouter.js';
 import { assertControl } from './control.js';
 import { ActivityDetector } from './activityDetector.js';
 import { wouldExceed, recordPost, COMMITTEE_CAPS } from './committeeRuns.js';
-import { ensureWorkspaceSocket, removeWorkspaceSocket, setCommitteeHandlers } from './mcpServer.js';
+import {
+  ensureWorkspaceSocket,
+  removeWorkspaceSocket,
+  setCommitteeHandlers,
+  setReadScopeResolver
+} from './mcpServer.js';
 import * as vault from './vault.js';
 import * as fs from './fs.js';
 import * as imageLibrary from './imageLibrary.js';
@@ -297,6 +302,27 @@ function liveHandleForWorkspace(workspaceId: string): PtyHandle | null {
 async function managerGrantedTargets(managerId: string): Promise<string[]> {
   const m = await readWorkspaceManifest(managerId);
   return (m?.control?.canControl ?? []).map((g) => g.id);
+}
+
+/**
+ * Workspaces `callerId` may READ under scoped reads (#122): always its own, plus
+ * any target it holds a `read` grant over that also passes `assertControl`
+ * (i.e. the target opted in + accepts this caller). Injected into the MCP server
+ * so the read tools can filter; kept here because it needs the control graph.
+ */
+async function allowedReadWorkspaces(callerId: string): Promise<string[]> {
+  const ids = new Set<string>([callerId]); // a workspace can always read itself
+  const caller = await readWorkspaceManifest(callerId);
+  for (const g of caller?.control?.canControl ?? []) {
+    if (!g.verbs.includes('read')) continue;
+    try {
+      await assertControl(callerId, g.id, 'read');
+      ids.add(g.id);
+    } catch {
+      /* grant present but target not currently reachable/accepting — exclude */
+    }
+  }
+  return [...ids];
 }
 
 /** Host-initiated force-pause of a set of experts (bypasses assertControl — the
@@ -751,6 +777,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     collect: committeeCollect,
     status: committeeStatus
   });
+  // Scoped reads (#122): teach the MCP read tools the caller's allowed set.
+  setReadScopeResolver(allowedReadWorkspaces);
 
   ipcMain.handle('workspace:remove', async (_e, containerId: string, opts?: RemoveWorkspaceOpts) => {
     // A saved (no-live) workspace passes its ULID in opts.id; prefer it so the

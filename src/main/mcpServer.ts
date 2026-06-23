@@ -36,9 +36,26 @@ const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 1000;
 
 /** Context handed to every tool call. `callerId` is the workspace id of the
- *  listener that accepted the connection — host-assigned, never from the wire. */
+ *  listener that accepted the connection — host-assigned, never from the wire.
+ *  `allowedWorkspaces` is the set of workspace ids this caller may read (self +
+ *  read-granted targets) when scoped reads (#122) are ON; `null` means
+ *  unrestricted (the flag is off — current fleet-global behavior). */
 interface ToolCtx {
   callerId: string;
+  allowedWorkspaces: Set<string> | null;
+}
+
+// Scoped reads (#122): when ON, the read tools return only the caller's own +
+// read-granted workspaces' rows; OFF (default, for one release) preserves the
+// historical fleet-global behavior. Release-long flag — read once at load.
+const SCOPED_READS = process.env.CLAUDE_FLEET_SCOPED_READS === '1';
+
+// Injected by ipc.ts: resolves a caller's allowed read set (self + targets it
+// holds a 'read' grant over that pass assertControl). Kept out of mcpServer so
+// it needn't import the control/manifest graph.
+let readScopeResolver: ((callerId: string) => Promise<string[]>) | null = null;
+export function setReadScopeResolver(fn: (callerId: string) => Promise<string[]>): void {
+  readScopeResolver = fn;
 }
 
 /**
@@ -224,10 +241,12 @@ async function callTool(params: Record<string, unknown>, callerId: string): Prom
   if (!rodb) throw new RpcError(-32603, 'Database not open');
   try {
     // callerId is host-assigned (the accepting listener's workspace id), so it
-    // is trustworthy here. Tools that scope by caller read it from ctx (#122);
-    // the committee_* tools enforce assertControl before any effect. `await`
-    // covers both sync DB tools and async committee effects.
-    const result = await tool.run(rodb, args, { callerId });
+    // is trustworthy here. When scoped reads (#122) are on, resolve the caller's
+    // allowed read set once and hand it to the tool via ctx; off ⇒ null ⇒
+    // unrestricted. `await` covers both sync DB tools and async committee effects.
+    const allowedWorkspaces =
+      SCOPED_READS && readScopeResolver ? new Set(await readScopeResolver(callerId)) : null;
+    const result = await tool.run(rodb, args, { callerId, allowedWorkspaces });
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   } catch (err) {
     // Tool-level failures surface to the model as an error result (MCP
@@ -264,6 +283,21 @@ interface Tool {
 const EVENT_COLS =
   'id, session_id, workspace_id, ts, type, subtype, model, tool_name, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, service_tier';
 
+/** SQL `IN (?,…)` fragment + params for an allowed-workspace set (#122). */
+function inClause(col: string, allowed: Set<string>): { sql: string; params: string[] } {
+  const ids = [...allowed];
+  if (ids.length === 0) return { sql: '0 = 1', params: [] }; // match nothing (self is always present, so unreachable)
+  return { sql: `${col} IN (${ids.map(() => '?').join(',')})`, params: ids };
+}
+
+/** Whether a session's workspace is within the caller's allowed read set (#122). */
+function sessionAllowed(db: Database.Database, sessionId: string, allowed: Set<string>): boolean {
+  const row = db.prepare('SELECT workspace_id FROM sessions WHERE id = ?').get(sessionId) as
+    | { workspace_id?: string }
+    | undefined;
+  return !!row && typeof row.workspace_id === 'string' && allowed.has(row.workspace_id);
+}
+
 const TOOLS: Tool[] = [
   {
     name: 'list_sessions',
@@ -278,7 +312,7 @@ const TOOLS: Tool[] = [
         limit: { type: 'number', description: `default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}` }
       }
     },
-    run: (db, a) => {
+    run: (db, a, ctx) => {
       const where: string[] = [];
       const p: unknown[] = [];
       if (typeof a.workspace_id === 'string') {
@@ -293,6 +327,12 @@ const TOOLS: Tool[] = [
         where.push('last_active_at <= ?');
         p.push(a.until);
       }
+      // Scoped reads (#122): restrict to the caller's allowed workspaces.
+      if (ctx.allowedWorkspaces) {
+        const { sql, params } = inClause('workspace_id', ctx.allowedWorkspaces);
+        where.push(sql);
+        p.push(...params);
+      }
       const sql = `SELECT * FROM sessions ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY last_active_at DESC LIMIT ?`;
       return db.prepare(sql).all(...p, clampLimit(a.limit));
     }
@@ -305,9 +345,17 @@ const TOOLS: Tool[] = [
       properties: { id: { type: 'string' } },
       required: ['id']
     },
-    run: (db, a) => {
+    run: (db, a, ctx) => {
       if (typeof a.id !== 'string') throw new Error('id is required');
-      return db.prepare('SELECT * FROM sessions WHERE id = ?').get(a.id) ?? null;
+      const row = db.prepare('SELECT * FROM sessions WHERE id = ?').get(a.id) as
+        | { workspace_id?: string }
+        | undefined;
+      if (!row) return null;
+      // Scoped reads (#122): hide a session outside the caller's allowed set.
+      if (ctx.allowedWorkspaces && !(typeof row.workspace_id === 'string' && ctx.allowedWorkspaces.has(row.workspace_id))) {
+        return null;
+      }
+      return row;
     }
   },
   {
@@ -319,8 +367,11 @@ const TOOLS: Tool[] = [
       properties: { session_id: { type: 'string' } },
       required: ['session_id']
     },
-    run: (db, a) => {
+    run: (db, a, ctx) => {
       if (typeof a.session_id !== 'string') throw new Error('session_id is required');
+      if (ctx.allowedWorkspaces && !sessionAllowed(db, a.session_id, ctx.allowedWorkspaces)) {
+        throw new Error('not authorized to read this session');
+      }
       const rows = db
         .prepare(
           `SELECT model, service_tier,
@@ -371,8 +422,11 @@ const TOOLS: Tool[] = [
       },
       required: ['session_id']
     },
-    run: (db, a) => {
+    run: (db, a, ctx) => {
       if (typeof a.session_id !== 'string') throw new Error('session_id is required');
+      if (ctx.allowedWorkspaces && !sessionAllowed(db, a.session_id, ctx.allowedWorkspaces)) {
+        throw new Error('not authorized to read this session');
+      }
       const where = ['session_id = ?'];
       const p: unknown[] = [a.session_id];
       if (typeof a.type === 'string') {
@@ -402,7 +456,15 @@ const TOOLS: Tool[] = [
       properties: { sql: { type: 'string' } },
       required: ['sql']
     },
-    run: (db, a) => {
+    run: (db, a, ctx) => {
+      // Scoped reads (#122): the raw hatch can express arbitrary cross-workspace
+      // joins/aggregates that can't be safely row-filtered, so it's disabled
+      // entirely when scoping is on — the typed tools (which ARE scoped) remain.
+      if (ctx.allowedWorkspaces) {
+        throw new Error(
+          'the raw query tool is disabled under scoped reads; use list_sessions / get_session / get_cost / list_events'
+        );
+      }
       const sql = a.sql as string;
       const check = isReadOnlySql(sql);
       if (!check.ok) throw new Error(check.reason ?? 'Rejected.');
