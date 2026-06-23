@@ -48,12 +48,20 @@ test('Committee: post + collect gated by grant (#120)', async () => {
       return Object.fromEntries(list.map((w) => [w.name, w.id])) as Record<string, string>;
     });
 
+    // Select the expert's tab so its (always-mounted) pane is visible, then post.
+    await window.locator('.ws-chip', { hasText: 'expert-c' }).click();
+
     // Granted post resolves (mock acks; real broker round-trip is docker-only).
     const posted = await window.evaluate(
       ([c, t]) => (window as any).api.committee.post(c, t, 'review PR #42 from your lens'),
       [ids['mgr-c'], ids['expert-c']]
     );
     expect(posted).toMatchObject({ id: ids['expert-c'] });
+
+    // The post broadcasts a [committee] inbound toast into the expert's tab (#123).
+    const toast = window.locator('.terminal-pane:not([aria-hidden="true"]) .committee-toast');
+    await expect(toast).toBeVisible({ timeout: 5_000 });
+    await expect(toast).toContainText('review PR #42');
 
     // Granted status resolves (paused/busy computed without the DB; #121).
     const status = await window.evaluate(

@@ -276,8 +276,136 @@ in rules/<name>.md — each a markdown file in the format Claude Code expects.
       CLAUDE.md       (the rules to append)
 
 No skills or scripts — just a CLAUDE.md block the loadout appends.`
-  }
+  },
+  ...committeeStarters()
 };
+
+/** Build the committee expert + manager built-in loadouts (#123). A function
+ *  (hoisted) so `STARTERS` can spread it; all its data is local so there's no
+ *  temporal-dead-zone hazard at module-init time. */
+function committeeStarters(): Record<string, Record<string, string>> {
+  // Per-lens persona for the expert-* loadouts. Each expert reviews ONLY through
+  // its lens and runs **non-interactively** — that no-stall stance is what makes
+  // the host's idle detection trustworthy (SPEC §11).
+  const EXPERT_LENSES: Record<string, { title: string; tag: string; lens: string }> = {
+    security: {
+      title: 'Expert · Security',
+      tag: 'security',
+      lens: 'security: authentication/authorization, input validation, injection, secret handling, unsafe deserialization, supply-chain and dependency risk'
+    },
+    perf: {
+      title: 'Expert · Performance',
+      tag: 'performance',
+      lens: 'performance: hot paths, algorithmic complexity, needless allocations, N+1 queries, blocking I/O on the critical path, and cache behavior'
+    },
+    'api-design': {
+      title: 'Expert · API Design',
+      tag: 'api-design',
+      lens: 'API & interface design: naming, consistency, backwards compatibility, error/return contracts, and ergonomics for callers'
+    }
+  };
+  // Read-only allowlist pre-granted to experts so they NEVER stall on a
+  // permission prompt (hard requirement for trustworthy idle detection).
+  const EXPERT_PERMISSIONS = {
+    permissions: {
+      allow: [
+        'Read(**)',
+        'Grep(**)',
+        'Glob(**)',
+        'Bash(git diff:*)',
+        'Bash(git log:*)',
+        'Bash(git show:*)',
+        'Bash(git status:*)',
+        'Bash(gh pr view:*)',
+        'Bash(gh pr diff:*)'
+      ]
+    }
+  };
+
+  const out: Record<string, Record<string, string>> = {};
+  for (const [key, e] of Object.entries(EXPERT_LENSES)) {
+    out[`expert-${key}`] = {
+      'loadout.md': `---
+title: ${e.title}
+description: A committee expert that reviews strictly through a ${e.tag} lens. Install into a workspace, mark it Reachable, then convene it from a committee-manager. Pre-grants read-only tools so it never stalls on a permission prompt.
+tags: [committee, expert, ${e.tag}]
+---
+Sets a ${e.tag}-reviewer persona and a read-only permission allowlist so the expert can review code without ever pausing for a permission prompt (which would stall the committee's idle detection).`,
+      'CLAUDE.md': `## Committee expert — ${e.tag} lens
+
+You are a **${e.tag} reviewer** on a committee. When the manager posts a task,
+review strictly through this lens — ${e.lens}.
+
+**Operate non-interactively.** You are driven by a committee manager, not a human
+at the keyboard: never ask a question or wait for input. If something is missing,
+state your assumption and proceed. Keep each turn concise and end with a clear,
+decisive verdict (e.g. "BLOCKER: …", "concern: …", or "no ${e.tag} issues found").
+Do not act outside your lens.`,
+      'settings.json': JSON.stringify(EXPERT_PERMISSIONS, null, 2)
+    };
+  }
+
+  out['committee-manager'] = {
+    'loadout.md': `---
+title: Committee Manager
+description: Convene a panel of reachable expert workspaces, drive a multi-round review via the committee.* MCP tools, and synthesize a verdict. Install on the workspace you'll run the committee from, then grant it control over each expert in the Committee rail.
+tags: [committee, manager]
+---
+Adds a run-committee skill teaching the convene → post → poll → collect → synthesize loop over the host committee.* MCP tools. Grant this workspace read/post/pause over each expert in the left-rail Committee matrix first.`,
+    'CLAUDE.md': `## Committee manager
+
+This workspace orchestrates a committee of **expert workspaces** through the
+claude-fleet \`committee_*\` MCP tools (\`committee_unpause\`, \`committee_post\`,
+\`committee_status\`, \`committee_collect\`, \`committee_pause\`). You may only
+control experts you have been granted (set in the app's left-rail Committee
+matrix) that have opted in as Reachable. See the run-committee skill for the loop.`,
+    'skills/run-committee/SKILL.md': `---
+description: Convene and drive a committee of expert workspaces to review something (a PR, a design, a decision) and synthesize a verdict. Use when asked to "convene the committee", "run a committee review", or "get the experts' take".
+---
+
+# Run a committee review
+
+You drive a panel of expert workspaces via the host \`committee_*\` MCP tools.
+Each expert is a separate workspace that opted in (Reachable) and that you hold
+grants over. You can only reach experts you've been granted — if a call is
+refused "control denied", the grant or opt-in is missing (fix it in the app's
+Committee rail).
+
+## Loop
+
+1. **Convene.** For each expert id, call \`committee_unpause(id)\` (it returns once
+   the expert's session manager is responsive).
+2. **Post the task.** \`committee_post(id, "<the task, framed for this expert's
+   lens>")\` — e.g. "Review PR #42 from your security lens; reply with a verdict."
+3. **Poll until done.** \`committee_status(id)\` → when \`busy\` is false the expert
+   finished its turn; if \`stalled\` is true it's wedged — note it and move on.
+4. **Collect.** \`committee_collect(id, since)\` returns \`{ cursor, turns }\`. Pass
+   the previous \`cursor\` back as \`since\` to get only new turns. Read the experts'
+   verdicts.
+5. **Relay / argue (optional).** To have experts react to each other, \`committee_post\`
+   one expert's point to another and collect the response. Keep rounds bounded —
+   the host enforces a hard per-run cap and a USD ceiling and will force-pause
+   everyone on breach.
+6. **Synthesize.** Once you have each expert's verdict, write the unified
+   recommendation yourself. If reviewing a PR, you may post the synthesized review
+   with \`gh pr review\` from your own workspace.
+7. **Pause the panel.** \`committee_pause(id)\` each expert when done — their
+   conversations are preserved for next time.
+
+## Rules
+- Experts run non-interactively; don't expect them to ask clarifying questions.
+- A human may be watching an expert's tab — your posts appear there with a
+  \`[committee]\` toast, so keep them legible.
+- Never exceed what you've been granted; the host enforces every call.`,
+    'settings.json': JSON.stringify(
+      { permissions: { allow: ['mcp__claude-fleet-state'] } },
+      null,
+      2
+    )
+  };
+
+  return out;
+}
 
 /** Seed the built-in starters if the loadouts library doesn't exist yet. */
 export async function ensureBuiltinLoadouts(): Promise<void> {

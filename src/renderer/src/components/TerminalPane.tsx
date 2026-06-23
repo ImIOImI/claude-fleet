@@ -54,6 +54,9 @@ interface Props {
   restartBanner?: boolean;
   onRestartFromBanner?: () => void;
   onDismissBanner?: () => void;
+  /** Latest committee message injected into this workspace (#123); the `nonce`
+   *  re-triggers the transient `[committee]` toast on each new inbound. */
+  inbound?: { message: string; nonce: number } | null;
   onResume: () => void;
   /**
    * Reports the active tab's broker session id whenever it changes
@@ -175,6 +178,7 @@ export function TerminalPane({
   restartBanner,
   onRestartFromBanner,
   onDismissBanner,
+  inbound,
   onResume,
   onActiveTabChange,
   onBusyChange,
@@ -184,6 +188,16 @@ export function TerminalPane({
   onReloadConsumed,
   onReloadStarted
 }: Props) {
+  // Transient `[committee]` toast (#123): show the injected message briefly so a
+  // human watching this expert knows why text just appeared, then auto-dismiss.
+  const [committeeToast, setCommitteeToast] = useState<string | null>(null);
+  useEffect(() => {
+    if (!inbound) return;
+    setCommitteeToast(inbound.message);
+    const t = setTimeout(() => setCommitteeToast(null), 6000);
+    return () => clearTimeout(t);
+  }, [inbound?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const [loaded, setLoaded] = useState(false);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeId, setActiveId] = useState<string>('');
@@ -544,6 +558,19 @@ export function TerminalPane({
       }}
       aria-hidden={!visible}
     >
+      {committeeToast !== null && (
+        <div className="committee-toast" role="status" aria-live="polite">
+          <span className="committee-toast-tag">[committee]</span>
+          <span className="committee-toast-msg">{committeeToast}</span>
+          <button
+            className="committee-toast-dismiss"
+            aria-label="Dismiss"
+            onClick={() => setCommitteeToast(null)}
+          >
+            ×
+          </button>
+        </div>
+      )}
       {restartBanner && (
         <div className="restart-banner" role="status" aria-live="polite">
           <span className="restart-banner-text">
