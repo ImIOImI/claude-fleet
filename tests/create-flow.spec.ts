@@ -68,6 +68,30 @@ test('Create flow (OAuth mode): default submit produces authMode=oauth and empty
   }
 });
 
+test('Create flow: the selected image ref is pulled via ensureImage before create', async () => {
+  // A custom/new image (e.g. the devops runner) must be pulled by ensureImage
+  // with the SELECTED ref — otherwise it 404s at `docker create`. Assert the
+  // ref reaches both ensureImage and the create payload.
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app);
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
+    await window.getByLabel('Workspace name').fill('devops-ws');
+    const ref = 'ghcr.io/imioimi/claude-fleet/runner-devops:latest';
+    await window.getByLabel('Image reference').fill(ref);
+
+    await window.getByRole('button', { name: 'Create & start' }).click();
+    await expect(window.getByRole('tab', { name: 'New' })).toBeHidden();
+
+    const calls = await getCalls(app);
+    // ensureImage was asked to pull the selected ref (mock records the arg).
+    expect(calls.ensureImage).toEqual([ref]);
+    expect(calls.create[0]).toMatchObject({ name: 'devops-ws', image: ref });
+  } finally {
+    await app.close();
+  }
+});
+
 test('Workspace kind selector: Local reveals a working-directory field and creates with kind:local (#16)', async () => {
   const { app, window } = await launch();
   try {

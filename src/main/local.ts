@@ -115,7 +115,10 @@ export async function ping(): Promise<boolean> {
   return (await findClaude()) !== null;
 }
 
-export async function ensureImage(_onProgress: (p: PullProgress) => void): Promise<void> {
+export async function ensureImage(
+  _onProgress: (p: PullProgress) => void,
+  _imageRef?: string
+): Promise<void> {
   // No image for a host process.
 }
 

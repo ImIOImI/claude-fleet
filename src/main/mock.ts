@@ -80,8 +80,12 @@ export async function ping(): Promise<boolean> {
   return true;
 }
 
-export async function ensureImage(onProgress: (p: PullProgress) => void): Promise<void> {
-  onProgress({ message: 'mock: runner image already present' });
+export async function ensureImage(
+  onProgress: (p: PullProgress) => void,
+  imageRef?: string
+): Promise<void> {
+  const ref = imageRef?.trim();
+  onProgress({ message: ref ? `mock: ensured ${ref}` : 'mock: runner image already present' });
 }
 
 export async function listLiveWorkspaces(): Promise<Workspace[]> {

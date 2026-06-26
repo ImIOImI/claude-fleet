@@ -120,10 +120,16 @@ export interface PullProgress {
  * caller can't proceed and the error propagates.
  */
 export async function ensureImage(
-  onProgress: (p: PullProgress) => void
+  onProgress: (p: PullProgress) => void,
+  imageRef?: string
 ): Promise<void> {
+  // Pull whichever image the workspace will use — defaults to the base runner,
+  // but the create/resume flow passes the user-selected ref so a brand-new
+  // image (e.g. the devops runner) is pulled here, with progress, instead of
+  // 404'ing later at `docker create`. Blank/whitespace falls back to default.
+  const ref = imageRef?.trim() || RUNNER_IMAGE;
   const localExists = await docker
-    .getImage(RUNNER_IMAGE)
+    .getImage(ref)
     .inspect()
     .then(() => true)
     .catch((err: unknown) => {
@@ -132,11 +138,11 @@ export async function ensureImage(
     });
 
   onProgress({
-    message: localExists ? `Checking ${RUNNER_IMAGE} for updates…` : `Pulling ${RUNNER_IMAGE}…`
+    message: localExists ? `Checking ${ref} for updates…` : `Pulling ${ref}…`
   });
 
   try {
-    const stream = (await docker.pull(RUNNER_IMAGE)) as NodeJS.ReadableStream;
+    const stream = (await docker.pull(ref)) as NodeJS.ReadableStream;
     await new Promise<void>((resolve, reject) => {
       docker.modem.followProgress(
         stream,
@@ -152,7 +158,7 @@ export async function ensureImage(
     if (localExists) {
       const msg = err instanceof Error ? err.message : String(err);
       onProgress({
-        message: `Registry check failed (${msg}); using cached ${RUNNER_IMAGE}.`
+        message: `Registry check failed (${msg}); using cached ${ref}.`
       });
       return;
     }
@@ -371,7 +377,7 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
   const uid = process.getuid?.() ?? 1000;
   const gid = process.getgid?.() ?? 1000;
 
-  const image = spec.image ?? RUNNER_IMAGE;
+  const image = spec.image?.trim() || RUNNER_IMAGE;
   // Resolve secrets at create-time; the merged env goes straight to the
   // container's `Env` array. Missing secret keys resolve to empty string
   // so the container still starts (claude itself surfaces the failure
