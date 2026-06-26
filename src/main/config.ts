@@ -10,6 +10,46 @@ import { readFileSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { assertValidWorkspaceId } from './paths.js';
 
+/** Which plan the usage bar measures spend against. `custom` uses the
+ *  user-entered token amount; the rest resolve to USAGE_BUDGET_PRESETS. */
+export type UsageBudgetPreset = 'pro' | 'max5' | 'max20' | 'custom';
+
+/**
+ * Estimated total tokens (input + output + cache create + cache read) available
+ * in one rolling window per Claude plan. Anthropic does not publish exact
+ * per-window token limits, so these are order-of-magnitude estimates anchored
+ * to the official Pro→Max multipliers (Max 5× / Max 20× per session). The user
+ * calibrates against their real ceiling via the `custom` preset — the live
+ * rolling-spend readout makes the bar self-correcting. Refresh if Anthropic
+ * publishes concrete numbers.
+ */
+export const USAGE_BUDGET_PRESETS: Record<Exclude<UsageBudgetPreset, 'custom'>, number> = {
+  pro: 19_000_000,
+  max5: 95_000_000,
+  max20: 380_000_000
+};
+
+/** The trailing window the plan-usage bar meters spend over. Anthropic's
+ *  subscription limits reset on a ~5-hour rolling basis. */
+export const USAGE_BUDGET_WINDOW_HOURS = 5;
+
+const DEFAULT_USAGE_PRESET: UsageBudgetPreset = 'pro';
+const DEFAULT_CUSTOM_TOKENS = USAGE_BUDGET_PRESETS.pro;
+
+interface UsageBudgetConfig {
+  preset: UsageBudgetPreset;
+  /** The allowance used when `preset === 'custom'`. */
+  customTokens: number;
+}
+
+/** Stored usage-budget config plus the fields the renderer derives from it. */
+export interface ResolvedUsageBudget extends UsageBudgetConfig {
+  /** Effective allowance after resolving preset → tokens (0 hides the % bar). */
+  allowanceTokens: number;
+  windowHours: number;
+  presets: typeof USAGE_BUDGET_PRESETS;
+}
+
 interface AppConfig {
   fleetRoot?: string;
   /** When true, the app skips Chromium hardware acceleration at startup. */
@@ -18,6 +58,23 @@ interface AppConfig {
    *  workspace auto-reloads its Claude session (`--resume`) to load the loadout
    *  — but only while Claude is idle; deferred until it stops working. (#16) */
   autoReloadLoadouts?: boolean;
+  /** Plan-usage budget for the observability rail's "tokens left" bar. */
+  usageBudget?: UsageBudgetConfig;
+}
+
+/** Defensively parse the persisted usageBudget (untrusted JSON on disk). */
+function parseUsageBudget(v: unknown): UsageBudgetConfig | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const o = v as Record<string, unknown>;
+  const preset = o.preset;
+  if (preset !== 'pro' && preset !== 'max5' && preset !== 'max20' && preset !== 'custom') {
+    return undefined;
+  }
+  const customTokens =
+    typeof o.customTokens === 'number' && Number.isFinite(o.customTokens) && o.customTokens >= 0
+      ? Math.round(o.customTokens)
+      : DEFAULT_CUSTOM_TOKENS;
+  return { preset, customTokens };
 }
 
 function configPath(): string {
@@ -42,7 +99,8 @@ async function read(): Promise<AppConfig> {
       // Persist as-is so an explicit `false` survives a reload; absent ⇒ default
       // on (see getAutoReloadLoadouts).
       autoReloadLoadouts:
-        typeof parsed.autoReloadLoadouts === 'boolean' ? parsed.autoReloadLoadouts : undefined
+        typeof parsed.autoReloadLoadouts === 'boolean' ? parsed.autoReloadLoadouts : undefined,
+      usageBudget: parseUsageBudget(parsed.usageBudget)
     };
   } catch {
     cached = {};
@@ -115,6 +173,41 @@ export async function getAutoReloadLoadouts(): Promise<boolean> {
 export async function setAutoReloadLoadouts(enabled: boolean): Promise<void> {
   const cfg = await read();
   await write({ ...cfg, autoReloadLoadouts: enabled });
+}
+
+/**
+ * The plan-usage budget for the observability rail, resolved for the renderer:
+ * the stored preset/custom amount plus the effective `allowanceTokens`, the
+ * rolling window, and the preset table (so Settings can label each option).
+ * Defaults to the Pro preset.
+ */
+export async function getUsageBudget(): Promise<ResolvedUsageBudget> {
+  const cfg = await read();
+  const stored = cfg.usageBudget ?? {
+    preset: DEFAULT_USAGE_PRESET,
+    customTokens: DEFAULT_CUSTOM_TOKENS
+  };
+  const allowanceTokens =
+    stored.preset === 'custom' ? stored.customTokens : USAGE_BUDGET_PRESETS[stored.preset];
+  return {
+    ...stored,
+    allowanceTokens,
+    windowHours: USAGE_BUDGET_WINDOW_HOURS,
+    presets: USAGE_BUDGET_PRESETS
+  };
+}
+
+/** Persist the usage-budget preset (and the custom token amount it falls back to). */
+export async function setUsageBudget(
+  preset: UsageBudgetPreset,
+  customTokens: number
+): Promise<void> {
+  const cfg = await read();
+  const clean =
+    Number.isFinite(customTokens) && customTokens >= 0
+      ? Math.round(customTokens)
+      : DEFAULT_CUSTOM_TOKENS;
+  await write({ ...cfg, usageBudget: { preset, customTokens: clean } });
 }
 
 /** `<fleetRoot>/<id>` — a workspace's private folder, mounted at /workspace. */

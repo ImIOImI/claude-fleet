@@ -10,7 +10,7 @@ import { CloseWorkspaceModal } from './components/CloseWorkspaceModal';
 import { DeleteWorkspaceModal } from './components/DeleteWorkspaceModal';
 import { EditWorkspaceModal, containerLevelChanged } from './components/EditWorkspaceModal';
 import { SettingsModal } from './components/SettingsModal';
-import type { WorkspaceObservabilitySummary, SessionListItem } from '../../preload';
+import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget } from '../../preload';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
 export type WorkspaceKind = 'container' | 'local';
@@ -188,6 +188,10 @@ export function App() {
   // Auto-reload loadouts into running workspaces when claude is idle (#16).
   // Mirrors the config setting; default on until the first config.get resolves.
   const [autoReloadLoadouts, setAutoReloadLoadouts] = useState(true);
+  // Plan-usage bar (observability rail): the configured allowance + the live
+  // rolling-window spend, polled separately from per-workspace summaries.
+  const [usageBudget, setUsageBudget] = useState<UsageBudget | null>(null);
+  const [budgetSpentTokens, setBudgetSpentTokens] = useState(0);
   const [closeTargetId, setCloseTargetId] = useState<string | null>(null);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const [editTargetId, setEditTargetId] = useState<string | null>(null);
@@ -366,8 +370,21 @@ export function App() {
     window.api.config.get().then((cfg) => {
       setSharedDir(cfg.sharedDir);
       setAutoReloadLoadouts(cfg.autoReloadLoadouts);
+      setUsageBudget(cfg.usageBudget);
     });
     const t = setInterval(refresh, 5000);
+    return () => clearInterval(t);
+  }, [apiReady]);
+
+  // Poll fleet-wide rolling-window token spend for the plan-usage bar. Separate
+  // (slower) cadence from the per-workspace summary refresh — it's a single
+  // cheap aggregate and the rolling window moves on the order of minutes.
+  useEffect(() => {
+    if (!apiReady) return;
+    const poll = () =>
+      window.api.usage.rollingSpend().then((r) => setBudgetSpentTokens(r.spentTokens));
+    poll();
+    const t = setInterval(poll, 15000);
     return () => clearInterval(t);
   }, [apiReady]);
 
@@ -886,6 +903,8 @@ export function App() {
           summaries={summaries}
           terminals={terminals}
           activeTerminalId={activeTabId}
+          budget={usageBudget}
+          budgetSpentTokens={budgetSpentTokens}
           collapsed={obsCollapsed}
           onToggleCollapse={toggleObsCollapsed}
         />
@@ -915,6 +934,8 @@ export function App() {
           onClose={() => setSettingsOpen(false)}
           onSaved={(cfg) => {
             setSharedDir(cfg.sharedDir);
+            // Pick up any usage-budget change made in the modal.
+            window.api.config.get().then((c) => setUsageBudget(c.usageBudget));
             refresh();
           }}
         />

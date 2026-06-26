@@ -32,6 +32,9 @@ export function closeDb(): void {
   if (db) {
     db.close();
     db = null;
+    // The prepared-statement cache is bound to the now-closed handle; drop it
+    // so a subsequent openDb() re-prepares against the fresh connection.
+    stmts = null;
   }
 }
 
@@ -514,6 +517,29 @@ export function summaryForWorkspace(workspaceId: string, topToolsLimit = 5): Wor
     .get(workspaceId) as { id: string } | undefined;
   if (!latest) return null;
   return summaryForSession(latest.id, topToolsLimit);
+}
+
+/**
+ * Total tokens spent across the **whole fleet** within a trailing time window —
+ * the numerator for the observability rail's plan-usage bar. Sums every token
+ * type (input + output + cache create + cache read), since Anthropic's rolling
+ * subscription limit meters against all of them. `sinceMs` is an absolute epoch
+ * floor in ms (the caller passes `Date.now() - windowMs`); as the oldest events
+ * age past it they drop out of the sum, mirroring the real rolling reset.
+ */
+export function tokensSpentSince(sinceMs: number): number {
+  const d = openDbOrThrow();
+  const row = d
+    .prepare(`
+      SELECT COALESCE(SUM(
+        COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) +
+        COALESCE(cache_read_input_tokens, 0) + COALESCE(cache_creation_input_tokens, 0)
+      ), 0) AS total
+      FROM events
+      WHERE ts IS NOT NULL AND ts >= ?
+    `)
+    .get(sinceMs) as { total: number };
+  return row.total;
 }
 
 /**
