@@ -21,20 +21,37 @@ It's a **local-only desktop app**: everything runs on your machine, against your
 ## What makes it special
 
 ### 🚀 Run a whole fleet at once
-Drive 3–6 Claude Code sessions in a single window — one keyboard, one set of credentials. Each workspace gets its own terminal tab strip and observability rail.
-> **Value:** delegate several tasks in parallel and supervise them all at a glance, instead of fanning out across a dozen terminal windows.
+Drive 3–6 Claude Code sessions in a single window — one keyboard, one set of credentials. The top strip is your fleet at a glance: each chip shows its workspace's live state and what it's doing right now.
+
+![the workspace top strip: a selected running workspace, one busy "working…", one paused](assets/design/features/top-strip-chips.png)
+
+> **Value:** delegate several tasks in parallel and supervise them all from one place — `api-migrator` is active, `schema-review` is mid-turn ("working…"), `docs-expert` is paused — instead of fanning out across a dozen terminal windows.
 
 ### 🛡️ Every agent fully sandboxed
 Each workspace runs `claude` in its **own Docker container** against a private host folder (plus a shared fleet folder when you want collaboration). Agents only ever see what you bind-mount in.
 > **Value:** let agents run at full tilt — edit files, run commands, install things — without stepping on each other or on your machine.
 
 ### 🧠 Expert workspaces that never lose the thread
-A small in-container **broker** owns every `claude` PTY, so processes outlive any disconnect. **Pause** a whole workspace and its session set, quit the app, come back tomorrow, **resume** — and re-attach to every session with its in-memory context (analyses, file watches, MCP state) intact.
+A small in-container **broker** owns every `claude` PTY, so processes outlive any disconnect. **Pause** a whole workspace and its session set (the amber **docs-expert** chip in the strip above), quit the app, come back tomorrow, **resume** — and re-attach to every session with its in-memory context (analyses, file watches, MCP state) intact.
 > **Value:** build domain specialists that learn your architecture/docs/codebase once, sleep when idle, and wake up ready to act — no re-priming the context every time.
 
+### 🎯 Watch the context window fill in real time
+A slim **context rail** sits at the top of every terminal — the workspace's hue, filled left-to-right with the latest turn's share of the model's context window, with a tick at the 80% mark where Claude auto-compacts.
+
+![the context rail above a terminal, filled to ~68% with the 80% compaction tick](assets/design/features/context-rail.png)
+
+> **Value:** see at a glance how much room a session has left and get a heads-up *before* a surprise compaction drops detail mid-task — no guessing, no `/context` spam.
+
 ### 📊 See every token and tool call
-A live observability rail reads straight from Claude's own transcript JSONL — never scraped from the screen. Per-session **cost, token counts, context-window fill, recent tool calls, and history**, plus a fleet-wide **plan-usage gauge** ("NN% left" in the current rolling window).
-> **Value:** know what each agent is doing and what it's costing in real time, and catch a runaway before it burns your budget.
+A live observability rail reads straight from Claude's own transcript JSONL — never scraped from the screen. Per-session **cost, a per-turn cost/token sparkline, the full token breakdown, per-terminal context bars, and recent tool calls** (with errors flagged).
+
+![the observability rail: plan-usage gauge, session cost graph, token breakdown, per-terminal context bars, recent tools](assets/design/features/observability-rail.png)
+
+> **Value:** know exactly what each agent is doing and what it's costing in real time — and spot the `npm run test:e2e` that just failed without scrolling the terminal.
+
+### 📈 Stay inside your plan's rolling token budget
+At the top of that rail, a fleet-wide **plan-usage gauge** tracks tokens spent across *all* workspaces in the current rolling window (default 5h) and shows how much you have left — a depleting bar that tints amber, then red, as you approach the ceiling (the "23% left" gauge above).
+> **Value:** one honest number for "how close am I to my plan limit right now," summed across the whole fleet — so a runaway agent can't quietly burn your window out from under the others.
 
 ### 🤝 Orchestrate with the Committee
 Grant a **manager** workspace the ability to read, post to, and pause a panel of reachable **expert** workspaces — cross-workspace, multi-agent collaboration, with you watching the whole conversation.
