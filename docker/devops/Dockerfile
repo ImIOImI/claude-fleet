@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # DevOps runner image — the base claude-fleet runner + the SumerSports
 # platform-engineering toolset (GitHub CLI, OpenTofu/Terramate, OPA, tflint/
 # trivy, kubectl/helm/kustomize, dnsutils, AWS CLI; Azure CLI opt-in). The
@@ -38,7 +39,18 @@ ENV TENV_ROOT=/opt/tenv
 
 USER root
 COPY docker/scripts/ /opt/install-scripts/
-RUN set -eux; cd /opt/install-scripts; \
+# The installers hit api.github.com (tenv resolving tofu/terramate, the
+# kustomize tag lookup, the tflint/trivy installers). Unauthenticated CI builds
+# get 60 req/hr/IP and fail with "rate-limited by GitHub". Mount CI's token as a
+# BuildKit secret (NOT a build-arg — keeps it out of the image history/layers)
+# and export the env vars those tools read; the build still works without it
+# (the secret mount is optional), just risks the anonymous rate limit.
+RUN --mount=type=secret,id=github_token set -eux; \
+    if [ -f /run/secrets/github_token ]; then \
+      GITHUB_TOKEN="$(cat /run/secrets/github_token)"; \
+      export GITHUB_TOKEN TENV_GITHUB_TOKEN="$GITHUB_TOKEN"; \
+    fi; \
+    cd /opt/install-scripts; \
     bash apt-tools.sh; \
     bash gh.sh; \
     bash yq.sh; \

@@ -20,7 +20,11 @@ kubectl version --client | head -1
 # modules' tags (api/, kyaml/, cmd/config/).
 KV="${KUSTOMIZE_VERSION:-latest}"
 if [ "$KV" = "latest" ]; then
-  KV="$(curl -fsSL 'https://api.github.com/repos/kubernetes-sigs/kustomize/releases?per_page=100' \
+  # Authenticate the API call when a token is present (CI exports GITHUB_TOKEN)
+  # — api.github.com allows only 60 req/hr/IP unauthenticated, which CI hits.
+  gh_auth=()
+  [ -n "${GITHUB_TOKEN:-}" ] && gh_auth=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+  KV="$(curl -fsSL "${gh_auth[@]}" 'https://api.github.com/repos/kubernetes-sigs/kustomize/releases?per_page=100' \
         | grep -oE 'kustomize/v[0-9]+\.[0-9]+\.[0-9]+' \
         | sed 's#kustomize/##' \
         | sort -V | tail -n1)"

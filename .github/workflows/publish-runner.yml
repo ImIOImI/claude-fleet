@@ -83,6 +83,12 @@ jobs:
           # images are always in lockstep.
           build-args: |
             BASE_IMAGE=ghcr.io/${{ steps.owner.outputs.value }}/claude-fleet/runner@${{ steps.base.outputs.digest }}
+          # Authenticated GitHub API access for the install scripts (tenv, the
+          # kustomize tag lookup, tflint/trivy) — anonymous builds hit the
+          # 60 req/hr/IP limit. Passed as a BuildKit secret so it never lands
+          # in the image. GITHUB_TOKEN is auto-provided to the workflow.
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
           tags: ${{ steps.meta_devops.outputs.tags }}
           labels: ${{ steps.meta_devops.outputs.labels }}
           cache-from: type=gha
