@@ -6,7 +6,7 @@ V="${KUBECTL_VERSION:-latest}"
 [ "$V" = "latest" ] && V="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
 curl -fsSL "https://dl.k8s.io/release/${V}/bin/linux/${ARCH_DEB}/kubectl" -o /usr/local/bin/kubectl
 chmod 0755 /usr/local/bin/kubectl
-kubectl version --client | head -1
+kubectl version --client | sed -n '1p'  # sed, not head — head SIGPIPEs the producer under QEMU (see apt-tools.sh)
 
 # kustomize — download the release tarball directly (the upstream install
 # script's glob is flaky). Resolve the latest `kustomize/vX.Y.Z` tag unless

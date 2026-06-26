@@ -11,4 +11,4 @@ curl -fsSL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/ins
   | sh -s -- -b /usr/local/bin
 
 tflint --version
-trivy --version | head -1
+trivy --version | sed -n '1p'  # sed, not head — head SIGPIPEs the producer under QEMU (see apt-tools.sh)

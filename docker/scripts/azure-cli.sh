@@ -6,4 +6,4 @@
 set -euo pipefail
 V="${AZURE_CLI_VERSION:-2.83.0}"
 pip3 install --no-cache-dir --break-system-packages "azure-cli==${V}"
-az version --output table | head -3
+az version --output table | sed -n '1,3p'  # sed, not head — head SIGPIPEs the producer under QEMU (see apt-tools.sh)
