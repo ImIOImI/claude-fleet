@@ -496,6 +496,9 @@ export interface WorkspaceSummary {
   recentToolCalls: ToolCall[];
   /** Per-turn USD cost over recent turns, oldest→newest (sparkline series). */
   costSeries: number[];
+  /** Per-turn total tokens over recent turns, oldest→newest — the cost
+   *  sparkline's sibling, shown when the rail's graph is toggled to tokens. */
+  tokenSeries: number[];
 }
 
 /**
@@ -667,6 +670,7 @@ export function summaryForSession(sessionId: string, topToolsLimit = 5): Workspa
     topTools,
     recentToolCalls: recentToolCallsForSession(session.id, 10),
     costSeries: costSeriesForSession(session.id),
+    tokenSeries: tokenSeriesForSession(session.id),
   };
 }
 
@@ -746,6 +750,28 @@ export function costSeriesForSession(sessionId: string, limit = 20): number[] {
         cacheCreationInputTokens: r.cache_creation_input_tokens,
       }),
     );
+}
+
+/**
+ * Per-turn total tokens (input + output + cache create + cache read) over the
+ * last `limit` assistant turns, oldest→newest — the sibling of
+ * `costSeriesForSession` that the observability sparkline plots when toggled
+ * from cost to tokens. Same per-turn definition (one assistant event with
+ * usage = one turn), so the two graphs line up bar-for-bar.
+ */
+export function tokenSeriesForSession(sessionId: string, limit = 20): number[] {
+  const d = openDbOrThrow();
+  const rows = d
+    .prepare(`
+      SELECT COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)
+           + COALESCE(cache_read_input_tokens, 0) + COALESCE(cache_creation_input_tokens, 0) AS total
+      FROM events
+      WHERE session_id = ? AND type = 'assistant' AND output_tokens IS NOT NULL
+      ORDER BY id DESC
+      LIMIT ?
+    `)
+    .all(sessionId, limit) as Array<{ total: number }>;
+  return rows.reverse().map((r) => r.total);
 }
 
 // ── broker_sessions: per-tab mapping ──────────────────────────────────────

@@ -42,6 +42,8 @@ interface Props {
 }
 
 type Scope = 'workspace' | 'fleet';
+/** Which metric the session graph (headline number + sparkline) shows. */
+type GraphMetric = 'cost' | 'tokens';
 
 export function ObservabilityPane({
   workspaceName,
@@ -58,6 +60,19 @@ export function ObservabilityPane({
   onToggleCollapse
 }: Props) {
   const [scope, setScope] = useState<Scope>('workspace');
+  // Session-graph metric (cost vs tokens). A pure UI preference, persisted to
+  // localStorage like the rail-collapse state.
+  const [graphMetric, setGraphMetric] = useState<GraphMetric>(() =>
+    localStorage.getItem('obsGraphMetric') === 'tokens' ? 'tokens' : 'cost'
+  );
+  const onGraphMetric = (m: GraphMetric) => {
+    setGraphMetric(m);
+    try {
+      localStorage.setItem('obsGraphMetric', m);
+    } catch {
+      /* private mode / quota — preference just won't persist */
+    }
+  };
   const live = workspaces.filter((w) => w.state !== 'deleted');
 
   if (collapsed) {
@@ -118,6 +133,8 @@ export function ObservabilityPane({
                 summary={summary}
                 terminals={terminals}
                 activeTerminalId={activeTerminalId}
+                graphMetric={graphMetric}
+                onGraphMetric={onGraphMetric}
               />
             )}
             {workspace && <WorkspaceBlock workspace={workspace} sharedDir={sharedDir} />}
@@ -263,12 +280,22 @@ function FleetView({
 function SummaryView({
   summary,
   terminals,
-  activeTerminalId
+  activeTerminalId,
+  graphMetric,
+  onGraphMetric
 }: {
   summary: WorkspaceObservabilitySummary;
   terminals: Array<{ id: string; name: string; contextTokens: number; windowTokens: number }>;
   activeTerminalId: string | null;
+  graphMetric: GraphMetric;
+  onGraphMetric: (m: GraphMetric) => void;
 }) {
+  const showTokens = graphMetric === 'tokens';
+  const totalTokens =
+    summary.inputTokens +
+    summary.outputTokens +
+    summary.cacheReadInputTokens +
+    summary.cacheCreationInputTokens;
   return (
     <div className="obs-stack">
       <section className="obs-title-block">
@@ -283,9 +310,38 @@ function SummaryView({
       </section>
 
       <section className="obs-cost-block">
-        <div className="obs-cost-amount mono">{formatUsd(summary.usd)}</div>
-        <div className="obs-cost-label">session cost</div>
-        <Sparkline series={summary.costSeries ?? []} />
+        <div className="obs-cost-head">
+          <div className="obs-cost-amount mono">
+            {showTokens ? formatTokens(totalTokens) : formatUsd(summary.usd)}
+          </div>
+          <div className="obs-graph-toggle" role="tablist" aria-label="Session graph metric">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={!showTokens}
+              className={`obs-graph-btn ${!showTokens ? 'active' : ''}`}
+              onClick={() => onGraphMetric('cost')}
+              title="Show session cost"
+            >
+              $
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={showTokens}
+              className={`obs-graph-btn ${showTokens ? 'active' : ''}`}
+              onClick={() => onGraphMetric('tokens')}
+              title="Show session tokens"
+            >
+              tok
+            </button>
+          </div>
+        </div>
+        <div className="obs-cost-label">{showTokens ? 'session tokens' : 'session cost'}</div>
+        <Sparkline
+          series={(showTokens ? summary.tokenSeries : summary.costSeries) ?? []}
+          title={showTokens ? 'per-turn tokens (recent turns)' : 'per-turn cost (recent turns)'}
+        />
       </section>
 
       <section className="obs-section">
@@ -472,17 +528,22 @@ function ContextRows({
 }
 
 /**
- * Mini per-turn cost sparkline. Each bar is one assistant turn's USD from
- * `summary.costSeries` (oldest→newest), height normalized to the max in the
- * window and opacity ramped so recent turns read brighter. Renders nothing
- * until there are ≥2 turns with non-zero cost — a single bar isn't a trend.
+ * Mini per-turn sparkline. Each bar is one assistant turn's value (USD from
+ * `costSeries`, or total tokens from `tokenSeries` — whichever metric the rail
+ * is toggled to), oldest→newest, height normalized to the max in the window and
+ * opacity ramped so recent turns read brighter. Renders nothing until there are
+ * ≥2 non-zero turns — a single bar isn't a trend.
  */
-function Sparkline({ series }: { series: number[] }) {
+function Sparkline({ series, title }: { series: number[]; title?: string }) {
   const data = series.filter((n) => Number.isFinite(n));
   const max = Math.max(...data, 0);
   if (data.length < 2 || max <= 0) return null;
   return (
-    <div className="obs-sparkline" title="per-turn cost (recent turns)" aria-hidden="true">
+    <div
+      className="obs-sparkline"
+      title={title ?? 'per-turn cost (recent turns)'}
+      aria-hidden="true"
+    >
       {data.map((v, i) => (
         <span
           key={i}

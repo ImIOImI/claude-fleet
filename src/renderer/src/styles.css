@@ -658,6 +658,39 @@ body {
   text-transform: uppercase;
   color: var(--ink-2);
 }
+/* Session graph header: headline number + a small cost/tokens metric toggle. */
+.obs-cost-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+}
+.obs-graph-toggle {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-md);
+  flex: 0 0 auto;
+}
+.obs-graph-btn {
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+.obs-graph-btn.active {
+  background: var(--bg-card);
+  border-color: var(--rule);
+  color: var(--ink);
+}
 /* Scope toggle: This workspace ↔ Fleet·N, a segmented control. */
 .obs-scope-toggle {
   display: grid;

@@ -282,6 +282,41 @@ test('Cost sparkline: renders one bar per costSeries entry in the pane', async (
   }
 });
 
+test('Session graph toggle: switches the cost block between cost and tokens', async () => {
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [
+        { name: 'alpha', containerId: 'alpha-id', state: 'running', workspaceRoot: '/tmp/alpha' }
+      ],
+      // Per-tab summary carries usd=0.001, inputTokens=100, and a 3-entry
+      // costSeries + tokenSeries (see _helpers).
+      observabilityPerTabSummaries: true
+    });
+
+    await window.locator('.ws-chip', { hasText: 'alpha' }).click();
+    const obsPane = window.locator('.sidebar-right');
+    await expect(obsPane.locator('.obs-title')).toBeVisible({ timeout: 5_000 });
+
+    // Default metric is cost.
+    await expect(obsPane.locator('.obs-cost-label')).toHaveText('session cost');
+    await expect(obsPane.locator('.obs-cost-amount')).toContainText('$');
+
+    // Toggle to tokens: label + headline number switch (100 input + 0 others),
+    // sparkline still has 3 bars (tokenSeries has 3 entries).
+    await obsPane.locator('.obs-graph-btn', { hasText: 'tok' }).click();
+    await expect(obsPane.locator('.obs-cost-label')).toHaveText('session tokens');
+    await expect(obsPane.locator('.obs-cost-amount')).toHaveText('100');
+    await expect(obsPane.locator('.obs-sparkline-bar')).toHaveCount(3);
+
+    // Toggle back to cost.
+    await obsPane.locator('.obs-graph-btn', { hasText: '$' }).click();
+    await expect(obsPane.locator('.obs-cost-label')).toHaveText('session cost');
+  } finally {
+    await app.close();
+  }
+});
+
 test('Context bars: one row per terminal, active tab highlighted', async () => {
   const { app, window } = await launch();
   try {
