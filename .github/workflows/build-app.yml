@@ -1,0 +1,95 @@
+name: build-app
+
+# Builds the desktop app for macOS, Windows, and Linux on native runners
+# (so native modules compile / fetch prebuilds without cross-compile hacks).
+# - PRs and manual runs: build + upload artifacts for inspection.
+# - Version tags (v*):   build, then publish a DRAFT GitHub Release with the
+#                        installers attached. Binaries are UNSIGNED.
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'electron-builder.yml'
+      - 'electron.vite.config.ts'
+      - '.github/workflows/build-app.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact_glob: 'dist/*.dmg'
+          - os: windows-latest
+            artifact_glob: 'dist/*.exe'
+          - os: ubuntu-latest
+            artifact_glob: 'dist/*.AppImage'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # keytar's prebuilt binary dynamically links libsecret at runtime;
+      # node-pty compiles from source on Linux (no bundled linux prebuild).
+      - name: Install Linux build/runtime deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsecret-1-dev
+
+      # postinstall runs `electron-builder install-app-deps`, which builds the
+      # native modules against Electron's ABI for THIS runner's platform.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build installer
+        # --publish never: the release job (below) owns publishing.
+        # CSC_IDENTITY_AUTO_DISCOVERY=false: don't try to sign on macOS — these
+        # are unsigned builds; a stray keychain identity must not break the run.
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run dist -- --publish never
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-fleet-${{ matrix.os }}
+          path: ${{ matrix.artifact_glob }}
+          if-no-files-found: error
+
+  release:
+    name: draft release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --draft \
+            --generate-notes \
+            --notes "Unsigned builds. macOS: Gatekeeper will warn; Windows: SmartScreen will warn."
