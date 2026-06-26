@@ -31,12 +31,20 @@ const TERMINAL_FONT_FAMILY = [
   'Consolas',
   '"DejaVu Sans Mono"',
   'monospace',
+  // Bundled @font-face subset (styles.css): crisp Miscellaneous-Technical
+  // symbols the host fontconfig set lacks — notably Claude's permission-mode
+  // media-control triangles (⏵, U+23F5). Placed before the emoji fonts so a
+  // sharp glyph wins over an emoji-style one.
+  '"Noto Sans Symbols 2"',
   '"Apple Color Emoji"',
   '"Segoe UI Emoji"',
   '"Noto Color Emoji"',
   '"Segoe UI Symbol"',
-  '"Noto Sans Symbols2"',
-  'emoji'
+  'emoji',
+  // Last-resort catch-all (bundled Unifont subset) for glyphs nothing else
+  // covers — e.g. the tool-result tree connector ⎿ (U+23BF), which even Noto
+  // Sans Symbols 2 lacks. Pixelated, but guarantees no tofu boxes.
+  '"Unifont"'
 ].join(', ');
 
 const URL_REGEX = /https?:\/\/[^\s'"`<>()\[\]{}]+/g;
@@ -222,6 +230,22 @@ export function TerminalSession({
     term.loadAddon(unicode11);
     term.unicode.activeVersion = '11';
     term.open(host);
+
+    // The bundled symbol fonts (styles.css @font-face) load lazily. The DOM
+    // renderer repaints text when a webfont arrives, but force the load + a
+    // refresh so Claude's TUI glyphs (⏵, ⎿) don't flash as tofu on first paint.
+    void Promise.all([
+      document.fonts.load('13px "Noto Sans Symbols 2"'),
+      document.fonts.load('13px "Unifont"')
+    ]).then(() => {
+      if (!disposed) {
+        try {
+          term.refresh(0, term.rows - 1);
+        } catch {
+          /* renderer torn down between open and font load */
+        }
+      }
+    });
 
     // xterm 5.x's Viewport.syncScrollArea reads from `_renderer.dimensions`,
     // which is set up inside `term.open` but can be transiently undefined
