@@ -1062,20 +1062,94 @@ function DockerDisconnected({ onRetry }: { onRetry: () => void }) {
   );
 }
 
+// The empty/first-run view doubles as the product's pitch: a new user opens
+// claude-fleet to nothing, so the main pane sells what the fleet does before
+// asking them to create a workspace. Each card names a distinctive capability
+// and the value it buys; the footer strip name-drops the secondary features.
+const FLEET_FEATURES: { glyph: string; title: string; body: string }[] = [
+  {
+    glyph: '⠿',
+    title: 'Run a whole fleet at once',
+    body: 'Drive 3–6 Claude Code sessions side by side in one window — one keyboard, one set of credentials. Stop juggling terminals and start delegating in parallel.'
+  },
+  {
+    glyph: '▣',
+    title: 'Every agent fully sandboxed',
+    body: 'Each workspace runs claude in its own Docker container against a private folder. Agents work at full tilt without stepping on each other — or on your machine.'
+  },
+  {
+    glyph: '❚❚',
+    title: 'Experts that never lose the thread',
+    body: 'Pause an agent mid-thought and wake it later with its in-memory context intact. Build specialists that learn your codebase once and stay ready to act.'
+  },
+  {
+    glyph: '◑',
+    title: 'See every token and tool call',
+    body: 'Live cost, token burn, context window, and tool activity for each session — read straight from Claude’s transcripts, never scraped from the screen.'
+  },
+  {
+    glyph: '⌘',
+    title: 'Orchestrate with the Committee',
+    body: 'Let a manager agent coordinate a panel of expert workspaces — real multi-agent collaboration, with you watching the whole conversation.'
+  },
+  {
+    glyph: '⇲',
+    title: 'Drop in anything',
+    body: 'Drag files, images, web content, or text onto the window and it lands in the agent’s folder with the path on your clipboard. The window is the inbox.'
+  }
+];
+
 function FirstRun({ onNewWorkspace }: { onNewWorkspace: () => void }) {
   return (
-    <div className="empty">
-      <div className="icon-card">▢</div>
-      <span className="eyebrow">first run</span>
-      <h2>No workspaces yet</h2>
-      <p>
-        Each workspace runs <code>claude</code> in an isolated Docker container against a host
-        directory. Spin up your first to get started.
-      </p>
-      <button className="btn primary" onClick={onNewWorkspace}>
-        + New workspace
-      </button>
-      <span className="hint">You'll need a workspace folder and an API key</span>
+    <div className="landing">
+      <section className="landing-hero">
+        <span className="eyebrow">
+          <span className="dot" />
+          claude fleet
+        </span>
+        <h1>Command a fleet of Claude agents.</h1>
+        <p className="landing-lede">
+          One window to launch, watch, and steer a small fleet of isolated Claude Code
+          workspaces — each in its own sandbox, each with live cost and context telemetry,
+          all under your hand.
+        </p>
+        <div className="landing-cta">
+          <button className="btn primary" onClick={onNewWorkspace}>
+            + Launch your first workspace
+          </button>
+          <span className="hint">Takes a workspace folder and an API key — about a minute.</span>
+        </div>
+      </section>
+
+      <section className="landing-features">
+        {FLEET_FEATURES.map((f) => (
+          <article className="feature-card" key={f.title}>
+            <div className="feature-glyph" aria-hidden="true">
+              {f.glyph}
+            </div>
+            <h3>{f.title}</h3>
+            <p>{f.body}</p>
+          </article>
+        ))}
+      </section>
+
+      <footer className="landing-more">
+        <span className="eyebrow">also inside</span>
+        <ul>
+          <li>
+            <strong>Loadouts</strong> — equip agents with skills &amp; config, auto-applied when idle
+          </li>
+          <li>
+            <strong>Session history</strong> — resume any past session in any workspace
+          </li>
+          <li>
+            <strong>Keychain secrets</strong> — credentials never hit disk in plaintext
+          </li>
+          <li>
+            <strong>Fleet-state MCP</strong> — agents can query their own cost &amp; history
+          </li>
+        </ul>
+      </footer>
     </div>
   );
 }
