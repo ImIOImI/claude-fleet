@@ -2668,8 +2668,32 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
 }
 .loadout-card:hover { border-color: var(--rule-strong); }
 .loadout-card.installed { border-color: color-mix(in oklch, var(--ok), var(--rule) 45%); }
-.lc-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
-.lc-title { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.lc-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.lc-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.lc-title-text {
+  font-size: 12.5px; font-weight: 600; color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* Per-card disclosure chevron (collapse view A). Points down when expanded; the
+   `.collapsed` parent rotates it to point right. */
+.lc-chevron {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; padding: 0; border: none; border-radius: var(--r-sm);
+  background: transparent; color: var(--ink-3); cursor: pointer;
+}
+.lc-chevron:hover { color: var(--ink-1); background: var(--bg-hover); }
+.lc-chevron-svg { transition: transform 0.15s ease; }
+.loadout-card.collapsed .lc-chevron .lc-chevron-svg { transform: rotate(-90deg); }
+.loadout-card.collapsed { gap: 0; }
+/* Header collapse-all / expand-all toggle. */
+.library-bulk { display: flex; justify-content: flex-end; }
+.lib-bulk-btn {
+  display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px;
+  font-size: 11px; color: var(--ink-2); background: transparent;
+  border: 1px solid transparent; border-radius: var(--r-sm); cursor: pointer;
+}
+.lib-bulk-btn:hover { color: var(--ink); background: var(--bg-2); border-color: var(--rule); }
+.lib-bulk-btn .lc-chevron-svg { transition: none; }
 .lc-desc { font-size: 11px; color: var(--ink-2); line-height: 1.4; }
 .lc-actions { display: flex; align-items: center; gap: 6px; position: relative; }
 .lc-menu-trigger { width: 24px; height: 24px; border-radius: var(--r-sm); border: 1px solid var(--rule); background: var(--bg-3); color: var(--ink-2); font-size: 13px; cursor: pointer; }
