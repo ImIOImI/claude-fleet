@@ -50,7 +50,10 @@ A live observability rail reads straight from Claude's own transcript JSONL — 
 > **Value:** know exactly what each agent is doing and what it's costing in real time — and spot the `npm run test:e2e` that just failed without scrolling the terminal.
 
 ### 📈 Stay inside your plan's rolling token budget
-At the top of that rail, a fleet-wide **plan-usage gauge** tracks tokens spent across *all* workspaces in the current rolling window (default 5h) and shows how much you have left — a depleting bar that tints amber, then red, as you approach the ceiling (the "23% left" gauge above).
+At the top of that rail, a fleet-wide **plan-usage gauge** tracks tokens spent across *all* workspaces in the current rolling window (default 5h) — a depleting bar that tints amber, then red, as you approach the ceiling. Just below, the session graph's headline flips between **session cost** and **session tokens** with a per-turn sparkline either way.
+
+![the plan-usage gauge at 23% left, above the session-token headline and per-turn sparkline](assets/design/features/plan-usage-tokens.png)
+
 > **Value:** one honest number for "how close am I to my plan limit right now," summed across the whole fleet — so a runaway agent can't quietly burn your window out from under the others.
 
 ### 🤝 Orchestrate with the Committee
@@ -62,6 +65,9 @@ A per-workspace **permissions matrix** decides who can do what: pick a **manager
 
 ### 📥 Drop in anything
 Drag OS files, pasted images, web content, or text fragments onto the window and they land in the selected workspace's folder — with the path on your clipboard for your next prompt.
+
+![the drag-and-drop overlay: "Drop to add to this workspace → api-migrator · /workspace/_dropped/"](assets/design/features/drag-drop.png)
+
 > **Value:** the window is the agent's inbox; feeding it a screenshot, a log, or a spec is a single drag.
 
 ### And more under the hood
