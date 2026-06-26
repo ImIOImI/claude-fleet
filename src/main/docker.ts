@@ -29,7 +29,13 @@ import {
 import type { AuthMode, Workspace, WorkspaceEnv, WorkspaceResources, WorkspaceKind } from './workspaces.js';
 import { FACTORY_MIRROR } from './workspaces.js';
 import { fleetPrivateDir, fleetSharedDir } from './config.js';
-import { mcpWorkspaceSocketDir, mcpWorkspaceBind, CONTAINER_MCP_SOCKET } from './mcpSocket.js';
+import {
+  mcpWorkspaceSocketDir,
+  mcpWorkspaceBind,
+  CONTAINER_MCP_SOCKET,
+  CONTAINER_MCP_TOKEN,
+  MCP_TCP_PORT
+} from './mcpSocket.js';
 import { BrokerClient, brokerPtyStream } from './broker.js';
 import { recordPendingAttach } from './pendingAttaches.js';
 import { learnBrokerSessionMapping } from './db.js';
@@ -350,13 +356,26 @@ function managedMcpServerEntry(): {
   command: string;
   args: string[];
 } {
+  // Windows: the host MCP server listens on loopback TCP (it can't bind a unix
+  // socket on a Windows path), so the bridge dials host.docker.internal and
+  // authenticates with the per-workspace token bind-mounted at /fleet/mcp/token.
+  // The token is sent as the first line, then claude's stdio is spliced to the
+  // socket: `{ printf token; exec cat; }` feeds the token then claude's input
+  // into socat's stdin (→ TCP), while socat's stdout (← TCP) returns to claude.
+  // The outer `while` re-handshakes on every reconnect (each new TCP connection
+  // needs the token again), so — unlike the unix entry — socat is single-shot,
+  // not `forever`. The token is re-read each iteration so a regenerated one is
+  // picked up. (#117 identity is preserved: the token dir is leaf-bind-mounted
+  // into only this container.)
+  const command = isWindows
+    ? `while :; do TOK=$(cat "${CONTAINER_MCP_TOKEN}" 2>/dev/null); ` +
+      `if [ -n "$TOK" ]; then { printf '%s\\n' "$TOK"; exec cat; } | ` +
+      `socat - "TCP:host.docker.internal:${MCP_TCP_PORT}"; fi; sleep 1; done`
+    : `while :; do socat - "UNIX-CONNECT:${CONTAINER_MCP_SOCKET},forever,interval=1"; sleep 1; done`;
   return {
     type: 'stdio',
     command: 'sh',
-    args: [
-      '-c',
-      `while :; do socat - "UNIX-CONNECT:${CONTAINER_MCP_SOCKET},forever,interval=1"; sleep 1; done`
-    ]
+    args: ['-c', command]
   };
 }
 

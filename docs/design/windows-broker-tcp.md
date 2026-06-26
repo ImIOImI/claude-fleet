@@ -1,6 +1,9 @@
 # Windows support: broker (and MCP) over loopback TCP
 
-**Status:** plan / handoff. Not yet implemented.
+**Status:** **implemented** (Phase 1 broker-over-TCP — PR #141, on `main`;
+Phase 2 MCP-over-TCP — this change). Verified on native Windows: `pty:attach`
+succeeds over loopback TCP, and claude's in-container `claude-fleet-state` MCP
+server connects over loopback TCP with per-workspace token auth.
 **Why this doc:** the work must be done and verified on **native Windows** (Docker
 Desktop, native Electron, Windows-ABI native modules). This captures the full
 plan so a Windows-native Claude Code session can execute it without re-deriving
@@ -142,25 +145,35 @@ constructor(endpoint: string | { host: string; port: number }) {
 Everything downstream (FrameReader, waiters, events) is transport-agnostic and
 needs no change. Update the three call sites to pass the resolved endpoint.
 
-### Phase 2 — MCP over TCP (#12), do after Phase 1 verifies
+### Phase 2 — MCP over TCP (#12) — **implemented**
 
-Same root cause, same fix, lower priority (the terminal works without it). The
-in-container MCP path: host MCP server on a unix socket (`mcpServer.ts`,
-`<userData>/mcp/<id>/mcp.sock`), bind-mounted per-id, reached from the container
-by a reconnecting `socat - UNIX-CONNECT:/fleet/mcp/mcp.sock` stdio bridge seeded
-into `~/.claude.json` (see `claudeJsonSeed.ts` / `ensureWorkspaceClaudeJson`,
-`mcpSocket.ts`, and the bind in `docker.ts` ~407–420). On Windows the bind-mount
-unix socket is unreachable the same way. Options:
-- Have the host MCP server also listen on `127.0.0.1:<port>` (Windows), publish a
-  second container port, and seed the in-container bridge as
-  `socat - TCP:host.docker.internal:<port>` (or `npx -y …` TCP client) instead of
-  the unix `socat`. `host.docker.internal` resolves to the host from inside
-  Docker Desktop containers.
-- Keep the per-id caller-identity model (#117): with TCP you lose the
-  "which unix listener accepted" identity signal, so derive caller id another way
-  (per-workspace token in the seeded bridge command, validated host-side). **Call
-  this out and design it before implementing** — don't regress the #117 security
-  property.
+Same root cause as Phase 1, reversed direction: here the **host** is the server
+and the **container** is the client. The host MCP server (`mcpServer.ts`) can't
+`listen()` on a unix socket at a Windows path (EACCES), so the per-id
+unix-socket transport (`<userData>/mcp/<id>/mcp.sock`, bind-mounted per-id,
+reached by a reconnecting `socat - UNIX-CONNECT:/fleet/mcp/mcp.sock` bridge in
+`~/.claude.json`) can't work on Windows.
+
+**As implemented (win32-gated; Linux/macOS unchanged):**
+- **Transport:** the host runs **one** loopback-TCP listener on
+  `127.0.0.1:7071` (`MCP_TCP_PORT`, override via `CLAUDE_FLEET_MCP_TCP_PORT`) —
+  bound to `127.0.0.1` only (verified reachable from containers via
+  `host.docker.internal`, which Docker Desktop NATs through the host loopback, so
+  it's **not** LAN-exposed). The in-container bridge dials
+  `socat - TCP:host.docker.internal:7071`.
+- **Caller identity (#117 preserved):** the TCP source address is always
+  `127.0.0.1` (NAT'd) and carries no identity, so "which listener accepted" is
+  replaced by a **per-workspace token**. Each workspace gets a random 256-bit
+  token written to `<userData>/mcp/<id>/token` — the **same per-id leaf dir** the
+  socket used, bind-mounted into only that container, so a container only ever
+  sees its own token and can't read a sibling's or guess one. The bridge sends
+  the token as the **first line**; the host maps token→workspace id = `callerId`
+  and drops any connection presenting an unknown token. The reconnecting bridge
+  re-sends the token on every reconnect (so socat is single-shot per connection,
+  not `forever`).
+- Bridge command (seeded by `managedMcpServerEntry` in `docker.ts`):
+  `TOK=$(cat /fleet/mcp/token); { printf '%s\n' "$TOK"; exec cat; } | socat - TCP:host.docker.internal:7071`
+  inside the existing reconnect `while` loop.
 
 ## Building / verifying (native Windows)
 
