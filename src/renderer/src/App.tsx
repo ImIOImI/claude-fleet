@@ -588,7 +588,9 @@ export function App() {
     const kind = submit.kind;
 
     if (kind === 'container') {
-      await window.api.workspace.ensureImage(({ message }) => setStatus(message));
+      // Pull the selected image (not just the default runner) so a brand-new
+      // ref is fetched here with progress, rather than 404'ing at create.
+      await window.api.workspace.ensureImage(({ message }) => setStatus(message), submit.image);
     }
 
     await persistSecrets(id, submit);
@@ -669,7 +671,7 @@ export function App() {
     }
     // No container exists — recreate from spec, reusing the id.
     if (submit.kind === 'container') {
-      await window.api.workspace.ensureImage(({ message }) => setStatus(message));
+      await window.api.workspace.ensureImage(({ message }) => setStatus(message), submit.image);
     }
     setStatus('Recreating workspace…');
     await window.api.workspace.create({

@@ -171,13 +171,16 @@ const api = {
     pause: (containerId: string) => ipcRenderer.invoke('workspace:pause', containerId),
     remove: (containerId: string, opts?: { deleteState?: boolean; id?: string }) =>
       ipcRenderer.invoke('workspace:remove', containerId, opts),
-    ensureImage: async (onProgress: (p: { message: string }) => void): Promise<void> => {
+    ensureImage: async (
+      onProgress: (p: { message: string }) => void,
+      image?: string
+    ): Promise<void> => {
       const channelId = globalThis.crypto.randomUUID();
       const channel = `workspace:ensureImage:progress:${channelId}`;
       const handler = (_e: IpcRendererEvent, p: { message: string }) => onProgress(p);
       ipcRenderer.on(channel, handler);
       try {
-        await ipcRenderer.invoke('workspace:ensureImage', channelId);
+        await ipcRenderer.invoke('workspace:ensureImage', channelId, image);
       } finally {
         ipcRenderer.removeListener(channel, handler);
       }

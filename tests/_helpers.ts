@@ -256,8 +256,8 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       g.__calls.list.push(true);
       return list;
     });
-    ipcMain.handle('workspace:ensureImage', async () => {
-      g.__calls.ensureImage.push(true);
+    ipcMain.handle('workspace:ensureImage', async (_e, _channelId: string, image?: string) => {
+      g.__calls.ensureImage.push(image ?? null);
     });
     ipcMain.handle('workspace:create', async (_e, spec: Record<string, unknown>) => {
       g.__calls.create.push(spec);

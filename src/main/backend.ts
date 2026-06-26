@@ -20,8 +20,9 @@ import type {
 export interface Backend {
   /** Backend reachable? (Docker daemon up / `claude` on PATH.) */
   ping(): Promise<boolean>;
-  /** Ensure the runtime is present (pull the image / no-op for local). */
-  ensureImage(onProgress: (p: PullProgress) => void): Promise<void>;
+  /** Ensure the runtime is present — pull `imageRef` (default: the base
+   *  runner), streaming progress; no-op for local. */
+  ensureImage(onProgress: (p: PullProgress) => void, imageRef?: string): Promise<void>;
   /** Live workspaces this backend owns, with their current state. */
   listLiveWorkspaces(): Promise<Workspace[]>;
   createWorkspace(spec: CreateWorkspaceInput): Promise<Workspace>;

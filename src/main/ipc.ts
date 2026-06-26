@@ -523,11 +523,11 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // Docker-daemon reachability (drives the #23 indicator) and image pulls are
   // Docker-specific; local workspaces need neither.
   ipcMain.handle('workspace:ping', () => dockerBackend.ping());
-  ipcMain.handle('workspace:ensureImage', async (event, channelId: string) => {
+  ipcMain.handle('workspace:ensureImage', async (event, channelId: string, image?: string) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     await dockerBackend.ensureImage((p) => {
       win?.webContents.send(`workspace:ensureImage:progress:${channelId}`, p);
-    });
+    }, image);
   });
 
   ipcMain.handle('workspace:list', async () => {
