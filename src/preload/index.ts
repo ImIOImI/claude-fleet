@@ -97,6 +97,9 @@ export interface WorkspaceObservabilitySummary {
   }>;
   /** Per-turn USD cost over recent turns, oldest→newest (sparkline series). */
   costSeries: number[];
+  /** Per-turn total tokens over recent turns, oldest→newest — the cost
+   *  sparkline's sibling, shown when the rail's graph is toggled to tokens. */
+  tokenSeries: number[];
 }
 
 export interface ObservabilityCost {
