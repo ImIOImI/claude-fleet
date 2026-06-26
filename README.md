@@ -28,11 +28,17 @@ Drive 3–6 Claude Code sessions in a single window — one keyboard, one set of
 > **Value:** delegate several tasks in parallel and supervise them all from one place — `api-migrator` is active, `schema-review` is mid-turn ("working…"), `docs-expert` is paused — instead of fanning out across a dozen terminal windows.
 
 ### 🛡️ Every agent fully sandboxed
-Each workspace runs `claude` in its **own Docker container** against a private host folder (plus a shared fleet folder when you want collaboration). Agents only ever see what you bind-mount in.
+Each workspace runs `claude` in its **own Docker container** against a private host folder (plus a shared fleet folder when you want collaboration), on the image you choose, under CPU/memory caps you set. Agents only ever see what you bind-mount in.
+
+![the Workspace card: private bind-mount, shared folder, runner image, and CPU/memory limits](assets/design/features/workspace-card.png)
+
 > **Value:** let agents run at full tilt — edit files, run commands, install things — without stepping on each other or on your machine.
 
 ### 🧠 Expert workspaces that never lose the thread
-A small in-container **broker** owns every `claude` PTY, so processes outlive any disconnect. **Pause** a whole workspace and its session set (the amber **docs-expert** chip in the strip above), quit the app, come back tomorrow, **resume** — and re-attach to every session with its in-memory context (analyses, file watches, MCP state) intact.
+A small in-container **broker** owns every `claude` PTY, so processes outlive any disconnect. **Pause** a whole workspace and its session set, quit the app, come back tomorrow, **Resume** — and re-attach to every session with its in-memory context (analyses, file watches, MCP state) intact.
+
+![a paused workspace's chip menu open, showing Resume](assets/design/features/chip-lifecycle-menu.png)
+
 > **Value:** build domain specialists that learn your architecture/docs/codebase once, sleep when idle, and wake up ready to act — no re-priming the context every time.
 
 ### 🎯 Watch the context window fill in real time
