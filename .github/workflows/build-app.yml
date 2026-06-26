@@ -49,10 +49,26 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libsecret-1-dev
 
-      # postinstall runs `electron-builder install-app-deps`, which builds the
-      # native modules against Electron's ABI for THIS runner's platform.
-      - name: Install dependencies
+      # macOS/Linux have working toolchains, so the default postinstall
+      # (`electron-builder install-app-deps`) builds native modules fine.
+      - name: Install dependencies (macOS/Linux)
+        if: matrix.os != 'windows-latest'
         run: npm ci
+
+      # Windows: never compile native modules from source. node-gyp can't
+      # detect the runner's newest Visual Studio, and we don't need node-ABI
+      # builds — only Electron-ABI ones. Mirror the Makefile's win path:
+      #   --ignore-scripts (skip the node-ABI build during install)
+      #   drop cpu-features (optional ssh2 dep, no win prebuild → needs MSVC)
+      #   install-app-deps fetches better-sqlite3/keytar Electron prebuilts;
+      #   node-pty uses its bundled win32 prebuild.
+      - name: Install dependencies (Windows — prebuilt natives, no MSVC)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          npm ci --ignore-scripts
+          rm -rf node_modules/cpu-features
+          npx --no-install electron-builder install-app-deps --platform win32 --arch x64
 
       - name: Build installer
         # --publish never: the release job (below) owns publishing.
