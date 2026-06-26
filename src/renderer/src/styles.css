@@ -1,5 +1,27 @@
 @import '@xterm/xterm/css/xterm.css';
 
+/* Bundled symbol-font fallbacks for the terminal pane. The Linux/WSLg
+   fontconfig set has no glyph for several characters Claude Code's TUI emits —
+   the media-control triangles in its permission-mode line (`⏵⏵ accept edits
+   on`, U+23F5) and the tool-result tree connector (`⎿`, U+23BF) — so they
+   render as tofu. Each file is the Miscellaneous Technical block subsetted to
+   a few KB. Noto (crisp) is preferred in TERMINAL_FONT_FAMILY; Unifont is the
+   last-resort catch-all for glyphs even Noto lacks (e.g. ⎿). */
+@font-face {
+  font-family: 'Noto Sans Symbols 2';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./assets/fonts/NotoSansSymbols2-misc-technical.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Unifont';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./assets/fonts/Unifont-misc-technical.woff2') format('woff2');
+}
+
 /* ----- design tokens ---------------------------------------------------- */
 /* Canonical oklch token system, lifted from design/tokens.css (dark theme).
    styles.css references these design names exclusively — the legacy hex tokens
