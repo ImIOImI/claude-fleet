@@ -18,6 +18,10 @@ apt-get install -y --no-install-recommends \
 pip3 install --no-cache-dir --break-system-packages pre-commit
 rm -rf /var/lib/apt/lists/*
 
-make --version | head -1
-dig -v 2>&1 | head -1 || true
+# Smoke the tools. Use `sed -n '1p'` (NOT `| head -1`) to print the first line:
+# head closes the pipe after line 1, and under QEMU emulation (the arm64 leg of
+# the multi-arch build) the slow emulated producer is still writing → SIGPIPE →
+# exit 141, which `set -o pipefail` turns into a build failure. sed drains to EOF.
+make --version | sed -n '1p'
+dig -v 2>&1 | sed -n '1p' || true
 pre-commit --version

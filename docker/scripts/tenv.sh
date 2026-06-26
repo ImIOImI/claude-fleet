@@ -32,7 +32,7 @@ tenv tm install "$TERRAMATE_VERSION"
 tenv tm use "$TERRAMATE_VERSION"
 
 # Smoke the shims (this also creates the per-version last-use.txt files as root)…
-tofu version | head -1
+tofu version | sed -n '1p'  # sed, not head — head SIGPIPEs the producer under QEMU (see apt-tools.sh)
 terramate --version
 
 # …THEN make everything world-RWX, so any container UID (docker run --user) can

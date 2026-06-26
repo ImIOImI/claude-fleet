@@ -8,4 +8,4 @@ curl -fsSL "https://github.com/cli/cli/releases/download/v${V}/gh_${V}_linux_${A
   | tar -xz -C "$tmp"
 install -m 0755 "$tmp/gh_${V}_linux_${ARCH_DEB}/bin/gh" /usr/local/bin/gh
 rm -rf "$tmp"
-gh --version | head -1
+gh --version | sed -n '1p'  # sed, not head — head SIGPIPEs the producer under QEMU (see apt-tools.sh)
