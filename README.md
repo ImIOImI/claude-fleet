@@ -54,8 +54,11 @@ At the top of that rail, a fleet-wide **plan-usage gauge** tracks tokens spent a
 > **Value:** one honest number for "how close am I to my plan limit right now," summed across the whole fleet — so a runaway agent can't quietly burn your window out from under the others.
 
 ### 🤝 Orchestrate with the Committee
-Grant a **manager** workspace the ability to read, post to, and pause a panel of reachable **expert** workspaces — cross-workspace, multi-agent collaboration, with you watching the whole conversation.
-> **Value:** compose specialists into a team (architect + reviewer + implementer) instead of cramming everything into one overloaded context.
+A per-workspace **permissions matrix** decides who can do what: pick a **manager** workspace and tick `read` / `post` / `pause` for each reachable **expert**. The grant is the whole security model — a manager can only ever act on a workspace that opted in (and never on another manager).
+
+![the Committee grant matrix: a manager's read/post/pause grants over reachable expert workspaces](assets/design/features/committee-matrix.png)
+
+> **Value:** compose specialists into a team (architect + reviewer + implementer) with explicit, least-privilege grants — multi-agent collaboration you can see and control, not a black box.
 
 ### 📥 Drop in anything
 Drag OS files, pasted images, web content, or text fragments onto the window and they land in the selected workspace's folder — with the path on your clipboard for your next prompt.
