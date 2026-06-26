@@ -10,6 +10,7 @@ import { CloseWorkspaceModal } from './components/CloseWorkspaceModal';
 import { DeleteWorkspaceModal } from './components/DeleteWorkspaceModal';
 import { EditWorkspaceModal, containerLevelChanged } from './components/EditWorkspaceModal';
 import { SettingsModal } from './components/SettingsModal';
+import { useDropIngestion } from './dropIngestion';
 import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget } from '../../preload';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
@@ -287,15 +288,32 @@ export function App() {
   } | null>(null);
   const reloadRequestTokenRef = useRef(0);
 
-  // Transient toasts (bottom-center, auto-dismissing). Used so far for the
-  // loadout reload, whose close+resume briefly flickers the terminal (#16).
-  const [toasts, setToasts] = useState<{ id: number; eyebrow?: string; message: string }[]>([]);
+  // Transient toasts (bottom-center, auto-dismissing). Used for the loadout
+  // reload (#16) and drag-and-drop results (#87). `kind` styles the toast:
+  // 'progress' shows the spinner (the default), 'ok'/'error' show a static
+  // status glyph and (for error) danger coloring.
+  type ToastKind = 'progress' | 'ok' | 'error';
+  const [toasts, setToasts] = useState<
+    { id: number; eyebrow?: string; message: string; kind: ToastKind }[]
+  >([]);
   const toastIdRef = useRef(0);
-  const pushToast = useCallback((message: string, eyebrow?: string, ttlMs = 4000): void => {
-    const id = ++toastIdRef.current;
-    setToasts((prev) => [...prev, { id, eyebrow, message }]);
-    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), ttlMs);
-  }, []);
+  const pushToast = useCallback(
+    (message: string, eyebrow?: string, ttlMs = 4000, kind: ToastKind = 'progress'): void => {
+      const id = ++toastIdRef.current;
+      setToasts((prev) => [...prev, { id, eyebrow, message, kind }]);
+      setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), ttlMs);
+    },
+    []
+  );
+  // Drag-and-drop / clipboard-image ingestion → selected workspace's _dropped/.
+  // Results surface through the existing toast stack; errors linger longer.
+  const notify = useCallback(
+    (kind: 'ok' | 'error', message: string): void => {
+      pushToast(message, kind === 'error' ? 'Drop failed' : 'Saved', kind === 'error' ? 6000 : 4000, kind);
+    },
+    [pushToast]
+  );
+  const { dragging } = useDropIngestion({ workspaceId: selectedId, notify });
   const handleReloadStarted = useCallback(
     (workspaceId: string): void => {
       const name = workspacesRef.current.find((w) => w.id === workspaceId)?.name ?? 'workspace';
@@ -803,7 +821,7 @@ export function App() {
   };
 
   return (
-    <div className="app">
+    <div className={`app${dragging ? ' dragging' : ''}`}>
       <WorkspaceTabStrip
         workspaces={workspaces}
         summaries={summaries}
@@ -991,11 +1009,27 @@ export function App() {
           />
         );
       })()}
+      {dragging && (
+        <div className="drop-overlay" aria-hidden="true">
+          <div className="drop-overlay-card">
+            <div className="drop-overlay-title">Drop to add to this workspace</div>
+            <div className="drop-overlay-sub">
+              {selected ? `→ ${selected.name} · /workspace/_dropped/` : 'Select a workspace first'}
+            </div>
+          </div>
+        </div>
+      )}
       {toasts.length > 0 && (
         <div className="toast-stack" role="status" aria-live="polite">
           {toasts.map((t) => (
-            <div key={t.id} className="toast">
-              <span className="toast-spinner" aria-hidden="true" />
+            <div key={t.id} className={`toast${t.kind !== 'progress' ? ` ${t.kind}` : ''}`}>
+              {t.kind === 'progress' ? (
+                <span className="toast-spinner" aria-hidden="true" />
+              ) : (
+                <span className="toast-glyph" aria-hidden="true">
+                  {t.kind === 'ok' ? '✓' : '✕'}
+                </span>
+              )}
               <span className="toast-body">
                 {t.eyebrow && <span className="toast-eyebrow">{t.eyebrow}</span>}
                 <span className="toast-text">{t.message}</span>

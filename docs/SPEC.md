@@ -757,29 +757,28 @@ The goal: **expert workspaces** that load a domain context once (an organization
 ### Drag-and-drop file ingestion
 Drop OS files, pasted images, web content, or text fragments onto the window; the app saves them into the selected container's workspace so the agent can read them.
 
-**Status: BUILT then SHELVED — blocked (PR #87, closed unmerged 2026-06-17).** The full feature was implemented (`src/main/files.ts` + `dropNaming.ts`: all four sources, 100 MB/file + 1 GB/dropbox caps with reject-on-overflow, magic-byte MIME sniffing, collision suffixing, a URL fetch with a 20s abort + streaming size guard, a `*` `.gitignore` in the dropbox; a `useDropIngestion` renderer hook + full-window overlay + toasts; unit + e2e). It was **not merged** because drag-and-drop can't function on the current **WSLg dev** setup: OS drag events aren't forwarded Windows→Linux into the Electron window and clipboard image bytes don't reliably cross (a real OS drag event also can't be synthesized in Electron for e2e). The right-rail **Private / Shared folder-reveal** links cover getting files into a workspace meanwhile. **Unblock when claude-fleet ships as a native binary install.** Code preserved on branch `feat/drag-drop-ingestion`; it predates the fleet-root model, so the dropbox path below moves from `<workspaceRoot>/_dropped/` to the per-workspace private folder `<fleetRoot>/<id>/_dropped/`. The design below is the target for that revival.
+**Status: SHIPPED (#87, revived on native Windows).** Originally built then shelved (PR #87, closed unmerged 2026-06-17) because drag-and-drop can't be exercised on the **WSLg dev** setup — OS drag events aren't forwarded Windows→Linux into the Electron window and clipboard image bytes don't reliably cross (a real OS drag event also can't be synthesized in Electron for e2e). It is now revived against a **native Windows build**, where the OS integrations work. Implementation: `src/main/files.ts` + `dropNaming.ts` (all four sources, 100 MB/file + 1 GB/dropbox caps with reject-on-overflow, magic-byte MIME sniffing, collision suffixing, a URL fetch with a 20s abort + streaming size guard, a `*` `.gitignore` in the dropbox); a `useDropIngestion` renderer hook + full-window overlay; results surface through the existing bottom-center toast stack (`pushToast`, with `ok`/`error` variants added alongside the loadout-reload `progress` toast). Unit (`dropNaming.test.ts`) + e2e (`drag-drop.spec.ts`, which drives the `files:*` IPC directly since a real OS drag can't be synthesized). **WSLg caveat retained:** under WSLg dev the overlay still won't receive OS drops; the right-rail Private/Shared folder-reveal links remain the fallback there.
 
 **Decisions made:**
-- **Drop target**: anywhere on the window. The file is routed to whichever container is currently selected in the sidebar. If no container is selected, the drop is rejected with a hint ("select a container first").
-- **Save location**: `<workspaceRoot>/_dropped/` for the selected container. Filename collisions resolved by suffix (`foo.png`, `foo-2.png`, `foo-3.png`). Inside the container the agent reads from `/workspace/_dropped/<name>`.
-- **Post-save behavior**: toast confirmation showing the saved path, plus the path is copied to the system clipboard (via `clipboard.writeText`). User pastes it into their prompt manually — no auto-typing into the PTY.
+- **Drop target**: anywhere on the window. The file is routed to whichever workspace is currently selected. If none is selected, the drop is rejected with a hint ("Select a workspace first, then drop.").
+- **Save location**: `<fleetRoot>/<id>/_dropped/` — the selected workspace's private folder (via `config.ts:fleetPrivateDir`, the same dir mounted at `/workspace`). Filename collisions resolved by suffix (`foo.png`, `foo-2.png`, `foo-3.png`). Inside the container the agent reads from `/workspace/_dropped/<name>`.
+- **Post-save behavior**: toast confirmation showing the saved container path, plus the path is copied to the system clipboard (via `clipboard.writeText`). User pastes it into their prompt manually — no auto-typing into the PTY.
 - **Sources accepted**:
   - **OS file drag** — drop from Explorer/Finder/Nautilus. Renderer reads the path via `webUtils.getPathForFile(file)`; main copies from source to destination.
   - **Clipboard paste** (Cmd/Ctrl+V) anywhere on the window — image bytes from the clipboard saved as `paste-<ISO-timestamp>.<ext>` (extension derived from clipboard format).
   - **Web drag** — content dragged out of a browser. If a URL, the main process fetches it and writes the body; if inline bytes, written directly. Filename derived from the source URL or Content-Disposition; falls back to `web-<ISO-timestamp>.<ext>`.
   - **Text / HTML drag** — selected text dragged in. Written as `dropped-<ISO-timestamp>.txt` (plain text) or `.html` (when the drag carries HTML).
 
-**IPC surface (sketch):**
-- `files:dropOsFiles(containerId, sourcePaths: string[])` → `string[]` (saved paths)
-- `files:dropBytes(containerId, payload: { suggestedName, mime, bytes })` → `string`
-- `files:dropUrl(containerId, url: string)` → `string`
-- `files:dropText(containerId, payload: { mime: 'text/plain' | 'text/html', text: string })` → `string`
+**IPC surface (as built).** Each takes the selected `workspaceId` and returns the container-visible saved path(s):
+- `files:dropOsFiles(workspaceId, sourcePaths: string[])` → `string[]` (saved paths) — caps validated across the whole batch before any copy, so a partial over-limit drop writes nothing.
+- `files:dropBytes(workspaceId, payload: { suggestedName?, mime?, bytes })` → `string`
+- `files:dropUrl(workspaceId, url: string)` → `string`
+- `files:dropText(workspaceId, payload: { mime: 'text/plain' | 'text/html', text: string })` → `string`
+- `clipboard:readImage()` → `{ bytes, mime } | null` — supports Ctrl+V image ingestion. The renderer can't read clipboard image bytes under contextIsolation, and xterm swallows the native `paste` event while the terminal is focused, so `TerminalSession`'s Ctrl+V handler calls this and, when an image is present, dispatches a `cf:drop-image` window event that `useDropIngestion` routes to `files:dropBytes`.
+
+**Resolved (were open):** per-file (100 MB) + per-dropbox (1 GB) caps with reject-on-overflow (no eviction); magic-byte MIME sniffing with clipboard/MIME-type fallback (unknown ⇒ saved extensionless); URL fetch with a 20s abort + streaming size guard; the dropbox carries its own `*` `.gitignore` so drops are never committed regardless of the consumer repo's rules.
 
 **Open:**
-- **Max file size / total dropbox size.** A single drop could fill the host disk. Cap per file (e.g., 100 MB) and per container dropbox (e.g., 1 GB) with eviction or rejection on overflow.
-- **MIME / format detection.** For clipboard and web sources where filename isn't given, sniff bytes (magic numbers) before falling back to the clipboard-format extension. Decide whether unknown formats are saved with no extension or rejected.
-- **Web-drag CORS / large downloads.** Need a timeout, a progress indicator if the fetch takes more than a beat, and a sensible error if the URL is unreachable from the main process.
-- **`.gitignore` interaction.** `_dropped/` should be added to the runner image's default `.gitignore` (or the spec should require users to add it). Otherwise drops get committed by accident.
 - **Whether to expose drops in the sessions table.** A row showing "5 files dropped" alongside the session might be useful. Out of scope for v1 but worth recording.
 
 ### Durable transcript mirror

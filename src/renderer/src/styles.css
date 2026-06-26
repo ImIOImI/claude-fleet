@@ -2494,6 +2494,48 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
   .toast-spinner { animation: none; }
   .toast { animation: none; }
 }
+/* Drag-and-drop result toasts (#87): static glyph instead of the spinner. */
+.toast-glyph {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  margin-top: 1px;
+  font-size: 12px;
+  line-height: 13px;
+  text-align: center;
+}
+.toast.ok { border-color: color-mix(in oklab, var(--ok) 45%, var(--rule)); }
+.toast.ok .toast-glyph { color: var(--ok); }
+.toast.error { border-color: color-mix(in oklab, var(--danger) 45%, var(--rule)); }
+.toast.error .toast-glyph,
+.toast.error .toast-text { color: var(--danger); }
+
+/* ----- drag-and-drop overlay (#87) ----------------------------------- */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in oklab, var(--info) 12%, rgba(0, 0, 0, 0.45));
+  pointer-events: none;
+}
+.drop-overlay-card {
+  padding: 28px 40px;
+  border: 2px dashed var(--info);
+  border-radius: var(--r-lg);
+  background: var(--bg-card);
+  text-align: center;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+}
+.drop-overlay-title { font-size: 16px; font-weight: 600; color: var(--ink); }
+.drop-overlay-sub {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+}
 
 /* ── PR-C: Advanced image search modal ───────────────────────────── */
 

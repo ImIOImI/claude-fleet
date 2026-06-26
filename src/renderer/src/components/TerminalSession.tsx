@@ -318,8 +318,19 @@ export function TerminalSession({
     };
 
     const doPaste = (): void => {
-      void window.api.clipboard.read().then((text) => {
-        if (text && ptyHandleId) window.api.pty.input(ptyHandleId, text);
+      // Image on the clipboard → ingest as a drop instead of pasting text.
+      // xterm intercepts Ctrl+V on keydown (preventDefault), so the
+      // window-level `paste` listener never fires while the terminal is
+      // focused — we route through the terminal's own paste path and hand
+      // off via a window CustomEvent that useDropIngestion handles.
+      void window.api.clipboard.readImage().then((img) => {
+        if (img) {
+          window.dispatchEvent(new CustomEvent('cf:drop-image', { detail: img }));
+          return;
+        }
+        return window.api.clipboard.read().then((text) => {
+          if (text && ptyHandleId) window.api.pty.input(ptyHandleId, text);
+        });
       });
     };
 
