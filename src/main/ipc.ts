@@ -378,11 +378,27 @@ async function committeePost(
   const live = liveHandleForWorkspace(targetId);
   if (live) {
     live.stream.write(msg + '\r');
+    broadcastCommitteeInbound(targetId, msg);
     return { id: targetId, via: 'attached' };
   }
   const kind = await resolveKind(targetId);
   const { brokerSessionId } = await backendForKind(kind).committeePost(targetId, msg);
+  broadcastCommitteeInbound(targetId, msg);
   return { id: targetId, via: 'headless', brokerSessionId };
+}
+
+/** Tell the renderer a committee message was injected into `workspaceId` so the
+ *  expert's tab can show a `[committee]` toast (#123) — the awareness cue, since
+ *  the injected text otherwise appears in a watched tab unlabeled. */
+function broadcastCommitteeInbound(workspaceId: string, message: string): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue;
+    try {
+      win.webContents.send('committee:inbound', { workspaceId, message });
+    } catch {
+      /* frame disposed mid-send */
+    }
+  }
 }
 
 /** One committee `collect` turn — a user/assistant transcript line, decoded. */

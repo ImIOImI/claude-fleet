@@ -217,6 +217,21 @@ export function App() {
     setBusyByWorkspace((prev) => (prev[workspaceId] === busy ? prev : { ...prev, [workspaceId]: busy }));
   }, []);
 
+  // Latest committee message injected into each workspace (#123). The `nonce`
+  // bumps on every inbound so TerminalPane re-shows its `[committee]` toast even
+  // when the same text is posted twice.
+  const [inboundByWorkspace, setInboundByWorkspace] = useState<
+    Record<string, { message: string; nonce: number }>
+  >({});
+  useEffect(() => {
+    return window.api.committee.onInbound((workspaceId, message) => {
+      setInboundByWorkspace((prev) => ({
+        ...prev,
+        [workspaceId]: { message, nonce: (prev[workspaceId]?.nonce ?? 0) + 1 }
+      }));
+    });
+  }, []);
+
   const [activeTabSummary, setActiveTabSummary] = useState<
     WorkspaceObservabilitySummary | null
   >(null);
@@ -836,6 +851,7 @@ export function App() {
                   containerId={w.containerId!}
                   paused={w.state === 'paused'}
                   summary={summaries[w.id] ?? null}
+                  inbound={inboundByWorkspace[w.id] ?? null}
                   restartBanner={restartBannerIds.has(w.id)}
                   onRestartFromBanner={() => restartFromBanner(w.id, w.containerId!)}
                   onDismissBanner={() => dismissBanner(w.id)}

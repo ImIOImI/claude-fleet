@@ -49,6 +49,27 @@ describe('ensureBuiltinLoadouts', () => {
     expect(la.files).toContain('.claude/skills/writing-loadouts/SKILL.md');
   });
 
+  it('seeds the committee loadouts (#123): expert-* personas + the manager skill', async () => {
+    await ensureBuiltinLoadouts();
+    const ids = (await listLoadouts()).map((l) => l.id);
+    expect(ids).toEqual(
+      expect.arrayContaining(['expert-security', 'expert-perf', 'expert-api-design', 'committee-manager'])
+    );
+
+    // Experts ship a settings.json that pre-grants read-only tools (no stall).
+    const sec = await getLoadout('expert-security');
+    expect(sec.tags).toEqual(expect.arrayContaining(['committee', 'expert', 'security']));
+    const secSettings = JSON.parse(
+      await readFile(join(loadoutDir('expert-security'), 'settings.json'), 'utf8')
+    );
+    expect(secSettings.permissions.allow).toContain('Read(**)');
+
+    // The manager ships the run-committee skill that teaches the loop.
+    const mgr = await getLoadout('committee-manager');
+    expect(mgr.tags).toContain('manager');
+    expect(mgr.files).toContain('.claude/skills/run-committee/SKILL.md');
+  });
+
   it('seeds a missing starter without clobbering one the user edited', async () => {
     // User already has an edited spec-driven loadout on disk.
     await mkdir(loadoutDir('spec-driven'), { recursive: true });

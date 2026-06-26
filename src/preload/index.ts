@@ -201,7 +201,16 @@ const api = {
       callerId: string,
       targetId: string
     ): Promise<{ id: string; paused: boolean; busy: boolean; stalled: boolean; lastActiveAt: number | null }> =>
-      ipcRenderer.invoke('committee:status', callerId, targetId)
+      ipcRenderer.invoke('committee:status', callerId, targetId),
+    /** Subscribe to committee messages injected into a workspace (#123) so its
+     *  tab can show a `[committee]` toast. Returns an unsubscribe. */
+    onInbound: (cb: (workspaceId: string, message: string) => void): (() => void) => {
+      const channel = 'committee:inbound';
+      const handler = (_e: IpcRendererEvent, payload: { workspaceId: string; message: string }): void =>
+        cb(payload.workspaceId, payload.message);
+      ipcRenderer.on(channel, handler);
+      return () => ipcRenderer.removeListener(channel, handler);
+    }
   },
   sessions: {
     read: (workspaceId: string): Promise<SessionInventory> =>

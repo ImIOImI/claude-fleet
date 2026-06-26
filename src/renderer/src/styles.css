@@ -197,6 +197,21 @@ body {
 .committee-glyph.mgr { color: var(--ink); }
 .committee-glyph.wifi { color: var(--info); }
 
+/* Committee inbound toast (#123): appears in an expert's tab when a manager
+   injects a message, so a watching human knows why text appeared. */
+.committee-toast {
+  position: absolute; top: 10px; right: 12px; z-index: 40;
+  display: flex; align-items: center; gap: 8px; max-width: 60%;
+  padding: 7px 10px; font-size: 12px; color: var(--ink);
+  background: color-mix(in oklab, var(--info) 16%, var(--bg-card));
+  border: 1px solid color-mix(in oklab, var(--info) 40%, transparent);
+  border-radius: var(--r-md); box-shadow: var(--shadow);
+}
+.committee-toast-tag { font-family: var(--font-mono); font-size: 10px; font-weight: 600; color: var(--info); flex: 0 0 auto; }
+.committee-toast-msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.committee-toast-dismiss { flex: 0 0 auto; background: none; border: none; color: var(--ink-2); font-size: 15px; line-height: 1; cursor: pointer; padding: 0 2px; }
+.committee-toast-dismiss:hover { color: var(--ink); }
+
 /* Committee opt-in (edit form, #118) */
 .committee-reachable-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-1); cursor: pointer; margin: 8px 0; }
 .committee-reachable-row input { margin: 0; accent-color: var(--ok); }
