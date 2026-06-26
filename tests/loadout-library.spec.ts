@@ -76,3 +76,39 @@ test('Library: clicking a card opens the review with files + Install (#16)', asy
     await app.close();
   }
 });
+
+test('Library: per-card chevron + Collapse all / Expand all (view A)', async () => {
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
+    await window.getByLabel('Workspace name').fill('lib-collapse');
+    await window.getByRole('button', { name: 'Create & start' }).click();
+    await expect(window.getByRole('tab', { name: 'New' })).toBeHidden();
+    await window.locator('.ws-chip', { hasText: 'lib-collapse' }).click();
+
+    const specCard = window.locator('.loadout-card', { hasText: 'Spec-Driven Dev' });
+    await expect(specCard).toBeVisible({ timeout: 5_000 });
+
+    // Cards start expanded — descriptions are present.
+    await expect(window.locator('.loadout-card .lc-desc').first()).toBeVisible();
+    const descCount = await window.locator('.loadout-card .lc-desc').count();
+    expect(descCount).toBeGreaterThan(1);
+
+    // Per-card chevron collapses just that card (its description goes away;
+    // others remain). The chevron stops propagation, so no review modal opens.
+    await specCard.locator('.lc-chevron').click();
+    await expect(specCard.locator('.lc-desc')).toHaveCount(0);
+    await expect(window.locator('.modal.loadout-review')).toHaveCount(0);
+    expect(await window.locator('.loadout-card .lc-desc').count()).toBe(descCount - 1);
+
+    // Collapse all → every description hidden; the toggle flips to Expand all.
+    await window.getByRole('button', { name: /Collapse all/ }).click();
+    await expect(window.locator('.loadout-card .lc-desc')).toHaveCount(0);
+
+    // Expand all → descriptions return.
+    await window.getByRole('button', { name: /Expand all/ }).click();
+    expect(await window.locator('.loadout-card .lc-desc').count()).toBe(descCount);
+  } finally {
+    await app.close();
+  }
+});

@@ -14,6 +14,9 @@ interface LoadoutSummary {
   tags: string[];
 }
 
+/** localStorage key for the set of collapsed loadout ids (default: expanded). */
+const COLLAPSE_KEY = 'loadoutLibraryCollapsed';
+
 interface Props {
   selectedWorkspace: WorkspaceSummary | null;
   /** Refresh the workspace list so installed-state updates. */
@@ -29,6 +32,33 @@ export function LibraryPane({ selectedWorkspace, onChanged, onInstalled }: Props
   const [tagMenu, setTagMenu] = useState(false);
   const [reviewId, setReviewId] = useState<string | null>(null);
   const [menuId, setMenuId] = useState<string | null>(null);
+  // Per-card collapse — cards default expanded; the set holds collapsed ids,
+  // persisted to localStorage (a pure UI preference, like the rail-collapse
+  // state) so it survives restarts. The chevron toggles one card; the header
+  // toggle collapses/expands all currently-visible (filtered) cards.
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem(COLLAPSE_KEY);
+      return new Set(raw ? (JSON.parse(raw) as string[]) : []);
+    } catch {
+      return new Set();
+    }
+  });
+  const persistCollapsed = (s: Set<string>): void => {
+    try {
+      localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...s]));
+    } catch {
+      /* private mode / quota — preference just won't persist */
+    }
+  };
+  const toggleCollapse = (id: string): void =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      persistCollapsed(next);
+      return next;
+    });
 
   useEffect(() => {
     window.api.loadouts
@@ -65,6 +95,20 @@ export function LibraryPane({ selectedWorkspace, onChanged, onInstalled }: Props
       return matchesQ && matchesTags;
     });
   }, [loadouts, query, activeTags]);
+
+  // Header toggle, scoped to the visible (filtered) cards: collapse them all
+  // when most are open, otherwise expand them all.
+  const visibleIds = filtered.map((l) => l.id);
+  const mostlyExpanded =
+    visibleIds.filter((id) => collapsed.has(id)).length <= visibleIds.length / 2;
+  const bulkToggle = (): void =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (mostlyExpanded) visibleIds.forEach((id) => next.add(id));
+      else visibleIds.forEach((id) => next.delete(id));
+      persistCollapsed(next);
+      return next;
+    });
 
   const doInstall = async (id: string): Promise<void> => {
     if (!selectedWorkspace || !installable) return;
@@ -134,18 +178,47 @@ export function LibraryPane({ selectedWorkspace, onChanged, onInstalled }: Props
 
       {note && <div className="library-note">{note}</div>}
 
+      {filtered.length > 1 && (
+        <div className="library-bulk">
+          <button
+            type="button"
+            className="lib-bulk-btn"
+            onClick={bulkToggle}
+            aria-label={mostlyExpanded ? 'Collapse all loadouts' : 'Expand all loadouts'}
+          >
+            <ChevronIcon />
+            {mostlyExpanded ? 'Collapse all' : 'Expand all'}
+          </button>
+        </div>
+      )}
+
       <div className="library-cards">
         {filtered.length === 0 && <div className="pane-placeholder subdued">No loadouts match.</div>}
         {filtered.map((l) => {
           const inst = installedIds.has(l.id);
+          const isCollapsed = collapsed.has(l.id);
           return (
             <div
               key={l.id}
-              className={`loadout-card ${inst ? 'installed' : ''}`}
+              className={`loadout-card ${inst ? 'installed' : ''} ${isCollapsed ? 'collapsed' : ''}`}
               onClick={() => setReviewId(l.id)}
             >
               <div className="lc-top">
-                <div className="lc-title">{l.title}</div>
+                <div className="lc-title">
+                  <button
+                    type="button"
+                    className="lc-chevron"
+                    aria-label={isCollapsed ? `Expand ${l.title}` : `Collapse ${l.title}`}
+                    aria-expanded={!isCollapsed}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleCollapse(l.id);
+                    }}
+                  >
+                    <ChevronIcon />
+                  </button>
+                  <span className="lc-title-text">{l.title}</span>
+                </div>
                 <div className="lc-actions" onClick={(e) => e.stopPropagation()}>
                   {inst ? (
                     <>
@@ -192,8 +265,8 @@ export function LibraryPane({ selectedWorkspace, onChanged, onInstalled }: Props
                   )}
                 </div>
               </div>
-              {l.description && <div className="lc-desc">{l.description}</div>}
-              {l.tags.length > 0 && (
+              {!isCollapsed && l.description && <div className="lc-desc">{l.description}</div>}
+              {!isCollapsed && l.tags.length > 0 && (
                 <div className="tags">
                   {l.tags.map((t) => (
                     <span className="tag" key={t}>
@@ -223,5 +296,26 @@ export function LibraryPane({ selectedWorkspace, onChanged, onInstalled }: Props
         />
       )}
     </div>
+  );
+}
+
+/** Disclosure chevron — points down when expanded, rotated to point right when
+ *  collapsed (via the `.collapsed` parent / `.lib-bulk-btn` CSS). */
+function ChevronIcon() {
+  return (
+    <svg
+      className="lc-chevron-svg"
+      width="11"
+      height="11"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M4 6l4 4 4-4" />
+    </svg>
   );
 }
