@@ -6,6 +6,13 @@ directories:
 files:
   - out/**/*
   - package.json
+# Native modules must live on the real filesystem — they cannot be dlopen'd
+# from inside app.asar. Force them (and any *.node binaries) to be unpacked.
+asarUnpack:
+  - "**/*.node"
+  - "**/node_modules/better-sqlite3/**"
+  - "**/node_modules/keytar/**"
+  - "**/node_modules/node-pty/**"
 linux:
   target: AppImage
   category: Development
