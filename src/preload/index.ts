@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
+import { contextBridge, ipcRenderer, IpcRendererEvent, webUtils } from 'electron';
 
 // Mirrored from src/main/sessions.ts. Kept here as a type-only declaration so
 // the preload doesn't reach into main-process code (and so the renderer can
@@ -263,6 +263,37 @@ const api = {
     /** Reveal a host path in the OS file manager. Resolves '' on success, else an error string. */
     openPath: (path: string): Promise<string> => ipcRenderer.invoke('fs:openPath', path)
   },
+  files: {
+    /**
+     * Resolve the host path of a dragged OS File. `webUtils.getPathForFile`
+     * replaces the removed `File.path` property and must be called in the
+     * preload (the renderer has no access to webUtils). Returns '' for
+     * non-OS-file drops (synthetic File objects from web/text drags).
+     */
+    getPathForFile: (file: File): string => {
+      try {
+        return webUtils.getPathForFile(file);
+      } catch {
+        return '';
+      }
+    },
+    /** OS file drag → saved container paths (`/workspace/_dropped/<name>`). */
+    dropOsFiles: (workspaceId: string, sourcePaths: string[]): Promise<string[]> =>
+      ipcRenderer.invoke('files:dropOsFiles', workspaceId, sourcePaths),
+    /** Clipboard image / inline bytes → saved container path. */
+    dropBytes: (
+      workspaceId: string,
+      payload: { suggestedName?: string; mime?: string; bytes: Uint8Array }
+    ): Promise<string> => ipcRenderer.invoke('files:dropBytes', workspaceId, payload),
+    /** Dragged web URL (fetched in main) → saved container path. */
+    dropUrl: (workspaceId: string, url: string): Promise<string> =>
+      ipcRenderer.invoke('files:dropUrl', workspaceId, url),
+    /** Dragged text/HTML → saved container path. */
+    dropText: (
+      workspaceId: string,
+      payload: { mime: 'text/plain' | 'text/html'; text: string }
+    ): Promise<string> => ipcRenderer.invoke('files:dropText', workspaceId, payload)
+  },
   loadouts: {
     /** Loadout library (#16-followup): browse, inspect, install/uninstall. */
     list: (): Promise<unknown[]> => ipcRenderer.invoke('loadouts:list'),
@@ -309,7 +340,10 @@ const api = {
   },
   clipboard: {
     write: (text: string): Promise<void> => ipcRenderer.invoke('clipboard:write', text),
-    read: (): Promise<string> => ipcRenderer.invoke('clipboard:read')
+    read: (): Promise<string> => ipcRenderer.invoke('clipboard:read'),
+    /** Image on the clipboard as PNG bytes, or null. For Ctrl+V image drops. */
+    readImage: (): Promise<{ bytes: Uint8Array; mime: string } | null> =>
+      ipcRenderer.invoke('clipboard:readImage')
   },
   menu: {
     showTerminalContextMenu: (
