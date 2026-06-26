@@ -163,9 +163,15 @@ export class BrokerClient extends EventEmitter {
   // can take it.
   private waiters: Partial<Record<FrameType, (payload: Buffer) => void>> = {};
 
-  constructor(socketPath: string) {
+  constructor(endpoint: string | { host: string; port: number }) {
     super();
-    this.socket = net.createConnection(socketPath);
+    // A string is a unix-socket path (Linux/macOS). An {host,port} object
+    // is a loopback TCP endpoint (Windows), where the broker can't be
+    // reached over an AF_UNIX socket living inside Docker's Linux VM.
+    this.socket =
+      typeof endpoint === 'string'
+        ? net.createConnection(endpoint)
+        : net.createConnection(endpoint.port, endpoint.host);
     this.socket.on('data', (chunk: Buffer) => this.onData(chunk));
     // Re-emit socket errors on the BrokerClient EventEmitter — but ONLY
     // when a consumer has actually attached an 'error' listener. Without

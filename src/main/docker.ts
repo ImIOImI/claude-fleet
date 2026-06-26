@@ -45,8 +45,64 @@ export const RUNNER_IMAGE = 'ghcr.io/imioimi/claude-fleet/runner:latest';
 
 const docker = new Docker();
 
+const isWindows = process.platform === 'win32';
+
+// Windows broker transport. A native Windows process cannot connect() to
+// the broker's AF_UNIX socket, which only exists inside Docker Desktop's
+// Linux VM (surfaced as a shared file → EACCES). On Windows the broker
+// listens on loopback TCP inside the container (fixed port) and Docker
+// publishes it to an ephemeral 127.0.0.1:<hostPort> on the host. Linux and
+// macOS keep using the bind-mounted unix socket. See
+// docs/design/windows-broker-tcp.md.
+const BROKER_TCP_PORT = 7070;
+const BROKER_TCP_KEY = `${BROKER_TCP_PORT}/tcp`;
+
+/**
+ * How the host reaches a workspace's broker: a unix-socket path string
+ * (Linux/macOS) or a loopback TCP endpoint (Windows). Both forms are
+ * accepted by `new BrokerClient()`.
+ */
+type BrokerEndpoint = string | { host: string; port: number };
+
 function containerNameFor(id: string): string {
   return `cf-${id}`;
+}
+
+/**
+ * Derive the broker endpoint from a container's inspect info. On Windows we
+ * read the host port Docker published for the container's 7070/tcp; on other
+ * platforms the transport is the bind-mounted unix socket and the inspect
+ * info is unused.
+ */
+function brokerEndpointFromInfo(
+  workspaceId: string,
+  info: Docker.ContainerInspectInfo
+): BrokerEndpoint {
+  if (!isWindows) return workspaceBrokerSocket(workspaceId);
+  const binding = info.NetworkSettings?.Ports?.[BROKER_TCP_KEY]?.[0];
+  if (!binding?.HostPort) {
+    throw new Error(
+      `broker TCP port ${BROKER_TCP_KEY} is not published for workspace ${workspaceId} yet ` +
+        `(was the container created by a build new enough to publish it?)`
+    );
+  }
+  return { host: '127.0.0.1', port: Number(binding.HostPort) };
+}
+
+/**
+ * Resolve the broker endpoint for a workspace by id. On Windows this
+ * re-inspects the container on every call, so a host-port reassignment
+ * across a container restart is picked up without any persisted state.
+ */
+async function brokerEndpoint(workspaceId: string): Promise<BrokerEndpoint> {
+  if (!isWindows) return workspaceBrokerSocket(workspaceId);
+  const info = await docker.getContainer(containerNameFor(workspaceId)).inspect();
+  return brokerEndpointFromInfo(workspaceId, info);
+}
+
+/** Human-readable form of a broker endpoint, for error messages. */
+function describeEndpoint(ep: BrokerEndpoint): string {
+  return typeof ep === 'string' ? ep : `tcp ${ep.host}:${ep.port}`;
 }
 
 export interface CreateWorkspaceInput {
@@ -384,6 +440,9 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
   // later via its own error path).
   const resolvedEnv = await resolveEnv(spec.id, spec.env.plain, spec.env.secretKeys);
   const envArr = ['HOME=/home/fleet', ...Object.entries(resolvedEnv).map(([k, v]) => `${k}=${v}`)];
+  // Windows: tell the broker to listen on loopback TCP instead of a unix
+  // socket. The host connects via the published 127.0.0.1:<hostPort>.
+  if (isWindows) envArr.push(`CLAUDE_FLEET_BROKER_TCP_PORT=${BROKER_TCP_PORT}`);
 
   // In-container cwd. Reused for the WorkingDir below and for seeding the
   // trust acceptance in ~/.claude.json (claude keys trust by directory).
@@ -466,6 +525,13 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
   };
   if (spec.resources?.cpus) hostCfg.NanoCpus = Math.round(spec.resources.cpus * 1e9);
   if (spec.resources?.memoryMb) hostCfg.Memory = spec.resources.memoryMb * 1024 * 1024;
+  // Windows: publish the broker's TCP port to the host loopback only — the
+  // broker has no auth, so it must never be reachable off-host. Empty
+  // HostPort lets Docker pick an ephemeral host port, avoiding collisions
+  // across workspaces.
+  if (isWindows) {
+    hostCfg.PortBindings = { [BROKER_TCP_KEY]: [{ HostIp: '127.0.0.1', HostPort: '' }] };
+  }
 
   const created = await docker.createContainer({
     name: containerNameFor(spec.id),
@@ -476,6 +542,7 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
     StdinOnce: false,
     WorkingDir: workingDir,
     Env: envArr,
+    ExposedPorts: isWindows ? { [BROKER_TCP_KEY]: {} } : undefined,
     Labels: {
       [FLEET_LABEL]: 'true',
       [ID_LABEL]: spec.id,
@@ -642,11 +709,11 @@ const REATTACH_RETRY_MS = 250;
  * per try (the late reply is swallowed to avoid an unhandled rejection).
  */
 export async function waitForBrokerReady(workspaceId: string): Promise<void> {
-  const sockPath = workspaceBrokerSocket(workspaceId);
+  const endpoint = await brokerEndpoint(workspaceId);
   const PER_ATTEMPT_MS = 1500;
   let lastErr: unknown;
   for (let i = 0; i < REATTACH_RETRIES; i++) {
-    const client = new BrokerClient(sockPath);
+    const client = new BrokerClient(endpoint);
     try {
       await client.ready();
       const listed = client.listSessions();
@@ -685,7 +752,7 @@ export async function committeePost(
   workspaceId: string,
   text: string
 ): Promise<{ brokerSessionId: string }> {
-  const client = new BrokerClient(workspaceBrokerSocket(workspaceId));
+  const client = new BrokerClient(await brokerEndpoint(workspaceId));
   try {
     await client.ready();
     const alive = (await client.listSessions()).filter((s) => s.alive);
@@ -751,14 +818,14 @@ export async function attachPty(
     recordPendingAttach(workspaceId, sessionId);
   }
 
-  const sockPath = workspaceBrokerSocket(workspaceId);
-  const client = new BrokerClient(sockPath);
+  const endpoint = brokerEndpointFromInfo(workspaceId, info);
+  const client = new BrokerClient(endpoint);
   try {
     await client.ready();
   } catch (err) {
     client.close();
     throw new Error(
-      `broker socket not reachable at ${sockPath}: ${(err as Error).message}. ` +
+      `broker not reachable at ${describeEndpoint(endpoint)}: ${(err as Error).message}. ` +
         `Is the runner image new enough to include the broker?`
     );
   }
