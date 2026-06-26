@@ -11,10 +11,20 @@ kubectl version --client | head -1
 # kustomize — download the release tarball directly (the upstream install
 # script's glob is flaky). Resolve the latest `kustomize/vX.Y.Z` tag unless
 # pinned, then fetch the matching asset (tag slash is %2F-encoded in the URL).
+#
+# The selector must DRAIN the whole curl body: a `| head -1` mid-stream closes
+# the pipe early and SIGPIPEs curl (exit 141), which `set -o pipefail` turns
+# into a build failure (this is what broke the devops image publish). `sort -V
+# | tail -n1` reads to EOF (no early close) and picks the highest version —
+# more robust than API order, since the kustomize repo interleaves other
+# modules' tags (api/, kyaml/, cmd/config/).
 KV="${KUSTOMIZE_VERSION:-latest}"
 if [ "$KV" = "latest" ]; then
-  KV="$(curl -fsSL 'https://api.github.com/repos/kubernetes-sigs/kustomize/releases?per_page=30' \
-        | grep '"tag_name"' | grep 'kustomize/' | head -1 | sed -E 's#.*"kustomize/(v[0-9.]+)".*#\1#')"
+  KV="$(curl -fsSL 'https://api.github.com/repos/kubernetes-sigs/kustomize/releases?per_page=100' \
+        | grep -oE 'kustomize/v[0-9]+\.[0-9]+\.[0-9]+' \
+        | sed 's#kustomize/##' \
+        | sort -V | tail -n1)"
+  [ -n "$KV" ] || { echo "kustomize: could not resolve latest release tag" >&2; exit 1; }
 fi
 tmp="$(mktemp -d)"
 curl -fsSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KV}/kustomize_${KV}_linux_${ARCH_DEB}.tar.gz" \
