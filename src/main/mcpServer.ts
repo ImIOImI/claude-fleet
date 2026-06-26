@@ -23,12 +23,26 @@
 // #122, gated behind a flag.
 
 import { createServer, type Server, type Socket } from 'node:net';
-import { existsSync, mkdirSync, rmSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { costFor } from './pricing.js';
 import { isReadOnlySql } from './mcpReadonlySql.js';
-import { mcpWorkspaceSocketDir, mcpWorkspaceSocketPath } from './mcpSocket.js';
+import {
+  mcpWorkspaceSocketDir,
+  mcpWorkspaceSocketPath,
+  mcpWorkspaceTokenPath,
+  MCP_TCP_PORT
+} from './mcpSocket.js';
+
+// A Windows host can't listen() on a unix-domain socket at a Windows path
+// (EACCES), so the per-workspace-socket transport (#117) can't work there. On
+// win32 the server instead runs ONE loopback-TCP listener for all workspaces
+// and authenticates each connection by a per-workspace token (see mcpSocket.ts
+// mcpWorkspaceTokenPath). Linux/macOS keep the per-workspace unix sockets
+// unchanged. See docs/design/windows-broker-tcp.md (Phase 2).
+const isWindows = process.platform === 'win32';
 
 const PROTOCOL_VERSION = '2024-11-05';
 const SERVER_INFO = { name: 'claude-fleet-state', version: '1.0.0' };
@@ -81,23 +95,56 @@ let userDataDir: string | null = null;
 let rodb: Database.Database | null = null;
 // One listening socket per workspace, keyed by workspace id. The id is captured
 // in each listener's accept callback and becomes the connection's caller id.
+// (Unix transport — Linux/macOS.)
 const listeners = new Map<string, Server>();
 
+// Windows TCP transport: a single shared loopback listener plus a token→id map.
+// A connection's caller id is resolved from the token it presents on its first
+// line, since the TCP source address (always 127.0.0.1 via host.docker.internal)
+// carries no identity. tokenToId is the authority; idToToken makes token
+// issuance idempotent and lets removeWorkspaceSocket revoke.
+let tcpListener: Server | null = null;
+const tokenToId = new Map<string, string>();
+const idToToken = new Map<string, string>();
+
 /** Open the shared read-only DB connection. Per-workspace listeners are created
- *  lazily via {@link ensureWorkspaceSocket}. No-op if already started. */
+ *  lazily via {@link ensureWorkspaceSocket}. No-op if already started. On
+ *  Windows this also binds the single loopback-TCP listener that fronts every
+ *  workspace (identity comes from the per-connection token, not the socket). */
 export function startMcpServer(dir: string): void {
   if (rodb) return;
   const dbPath = join(dir, 'state.db');
   rodb = new Database(dbPath, { readonly: true, fileMustExist: true });
   userDataDir = dir;
+
+  if (isWindows && !tcpListener) {
+    // 127.0.0.1 only — never 0.0.0.0. Docker Desktop NATs host.docker.internal
+    // through the host loopback, so containers still reach it while the LAN
+    // cannot. callerId is resolved from the first-line token in handleTcp.
+    const srv = createServer((sock) => handleTcpConnection(sock));
+    srv.on('error', (err) => console.warn('[mcp] tcp listener error:', err));
+    srv.listen(MCP_TCP_PORT, '127.0.0.1', () =>
+      console.log(`[mcp] tcp listening on 127.0.0.1:${MCP_TCP_PORT}`)
+    );
+    tcpListener = srv;
+  }
 }
 
-/** Ensure a listener exists for `id` at `<userData>/mcp/<id>/mcp.sock`.
- *  Idempotent; safe to call before the workspace's container starts (the
- *  in-container socat bridge reconnects until the listener is up). No-op if the
- *  server hasn't been started (e.g. mock mode / tests without a DB). */
+/** Ensure `id` is reachable from its container. Idempotent; safe to call before
+ *  the workspace's container starts (the in-container bridge reconnects until
+ *  the server is up). No-op if the server hasn't been started (e.g. mock mode /
+ *  tests without a DB).
+ *
+ *  Unix (Linux/macOS): a per-workspace listener at `<userData>/mcp/<id>/mcp.sock`.
+ *  Windows: ensure a per-workspace token exists on disk (in the same per-id
+ *  leaf dir, bind-mounted into only that container) and is registered, so the
+ *  shared TCP listener can map an incoming token to this id. */
 export function ensureWorkspaceSocket(id: string): void {
   if (!rodb || !userDataDir) return;
+  if (isWindows) {
+    ensureWorkspaceToken(id);
+    return;
+  }
   if (listeners.has(id)) return;
   const dir = mcpWorkspaceSocketDir(userDataDir, id);
   const sockPath = mcpWorkspaceSocketPath(userDataDir, id);
@@ -116,6 +163,35 @@ export function ensureWorkspaceSocket(id: string): void {
   listeners.set(id, server);
 }
 
+/** Windows: ensure a stable per-workspace token exists and is registered.
+ *  Reuses the token already on disk (so it survives app restarts and matches a
+ *  paused container's baked-in bridge) — otherwise mints a fresh 256-bit one.
+ *  Writing it into the per-id leaf dir is what bounds its visibility to the one
+ *  container that dir is bind-mounted into. */
+function ensureWorkspaceToken(id: string): void {
+  if (!userDataDir) return;
+  if (idToToken.has(id)) return;
+  const dir = mcpWorkspaceSocketDir(userDataDir, id);
+  const tokenPath = mcpWorkspaceTokenPath(userDataDir, id);
+  let token: string | null = null;
+  try {
+    mkdirSync(dir, { recursive: true });
+    if (existsSync(tokenPath)) {
+      const existing = readFileSync(tokenPath, 'utf8').trim();
+      if (existing) token = existing;
+    }
+    if (!token) {
+      token = randomBytes(32).toString('hex');
+      writeFileSync(tokenPath, token, { encoding: 'utf8', mode: 0o600 });
+    }
+  } catch (err) {
+    console.warn(`[mcp] token setup failed (${id}):`, err);
+    return;
+  }
+  tokenToId.set(token, id);
+  idToToken.set(id, token);
+}
+
 /** Tear down a workspace's listener + remove its socket dir. Best-effort
  *  cleanup on workspace removal; surviving listeners are harmless and get
  *  rebuilt from the manifest list on next launch. */
@@ -128,6 +204,12 @@ export function removeWorkspaceSocket(id: string): void {
       /* ignore */
     }
     listeners.delete(id);
+  }
+  // Windows: revoke the token so the shared listener stops honoring it.
+  const token = idToToken.get(id);
+  if (token) {
+    tokenToId.delete(token);
+    idToToken.delete(id);
   }
   if (userDataDir) {
     try {
@@ -147,6 +229,16 @@ export function stopMcpServer(): void {
     }
   }
   listeners.clear();
+  if (tcpListener) {
+    try {
+      tcpListener.close();
+    } catch {
+      /* ignore */
+    }
+    tcpListener = null;
+  }
+  tokenToId.clear();
+  idToToken.clear();
   try {
     rodb?.close();
   } catch {
@@ -169,6 +261,39 @@ function handleConnection(sock: Socket, callerId: string): void {
     }
   });
   sock.on('error', () => sock.destroy());
+}
+
+/** Windows TCP connection handler. The first non-empty line authenticates the
+ *  connection: it must be a registered per-workspace token, which resolves the
+ *  caller id. The source address is always 127.0.0.1 (NAT'd through the host
+ *  loopback) so it proves nothing — the token is the sole identity. Subsequent
+ *  lines are the normal newline-delimited JSON-RPC stream. An unknown token
+ *  drops the connection before any tool can run. */
+function handleTcpConnection(sock: Socket): void {
+  let buf = '';
+  let callerId: string | null = null;
+  sock.setEncoding('utf8');
+  sock.on('error', () => sock.destroy());
+  sock.on('data', (chunk: string) => {
+    buf += chunk;
+    let nl: number;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (callerId === null) {
+        if (!line) continue; // tolerate leading blank lines before the token
+        const id = tokenToId.get(line);
+        if (!id) {
+          console.warn('[mcp] tcp connection presented an unknown token; closing');
+          sock.destroy();
+          return;
+        }
+        callerId = id;
+        continue;
+      }
+      if (line) dispatchLine(line, sock, callerId);
+    }
+  });
 }
 
 function dispatchLine(line: string, sock: Socket, callerId: string): void {
