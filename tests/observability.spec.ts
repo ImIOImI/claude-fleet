@@ -387,6 +387,20 @@ test('Settings: changing the fleet root persists via config:setFleetRoot', async
   }
 });
 
+test('Plan-usage bar: renders fleet-wide "tokens left" from config + rollingSpend', async () => {
+  const { app, window } = await launch();
+  try {
+    // Default stub: Pro allowance 19M, rollingSpend 0 ⇒ full window remaining.
+    await mockMainIpc(app);
+    const bar = window.locator('.obs-budget');
+    await expect(bar).toBeVisible();
+    await expect(bar.locator('.obs-budget-pct')).toHaveText('100% left');
+    await expect(bar.locator('.obs-budget-sub')).toContainText('0 / 19.0M');
+  } finally {
+    await app.close();
+  }
+});
+
 test('Fleet scope: toggle shows aggregate cost + per-workspace rows', async () => {
   const { app, window } = await launch();
   try {

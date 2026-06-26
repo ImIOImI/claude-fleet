@@ -18,7 +18,11 @@ import {
   getHardwareAccelDisabled,
   setHardwareAccelDisabled,
   getAutoReloadLoadouts,
-  setAutoReloadLoadouts
+  setAutoReloadLoadouts,
+  getUsageBudget,
+  setUsageBudget,
+  USAGE_BUDGET_WINDOW_HOURS,
+  type UsageBudgetPreset
 } from './config.js';
 import * as realDocker from './docker.js';
 import * as realLocal from './local.js';
@@ -69,6 +73,7 @@ import {
   listSessions,
   renameSession,
   deleteSession,
+  tokensSpentSince,
 } from './db.js';
 import { logError, getLogPath } from './errorLog.js';
 import { broadcastObservabilitySummary } from './observabilityBroadcast.js';
@@ -843,11 +848,28 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     fleetRoot: await getFleetRoot(),
     sharedDir: await fleetSharedDir(),
     disableHardwareAcceleration: await getHardwareAccelDisabled(),
-    autoReloadLoadouts: await getAutoReloadLoadouts()
+    autoReloadLoadouts: await getAutoReloadLoadouts(),
+    usageBudget: await getUsageBudget()
   }));
   ipcMain.handle('config:setAutoReloadLoadouts', async (_e, enabled: boolean) => {
     await setAutoReloadLoadouts(!!enabled);
     return { autoReloadLoadouts: await getAutoReloadLoadouts() };
+  });
+  ipcMain.handle(
+    'config:setUsageBudget',
+    async (_e, preset: UsageBudgetPreset, customTokens: number) => {
+      await setUsageBudget(preset, Number(customTokens));
+      return { usageBudget: await getUsageBudget() };
+    }
+  );
+  // Plan-usage bar numerator: total tokens spent across the fleet in the
+  // trailing rolling window. The allowance (denominator) lives in config.
+  ipcMain.handle('usage:rollingSpend', () => {
+    const windowMs = USAGE_BUDGET_WINDOW_HOURS * 60 * 60 * 1000;
+    return {
+      spentTokens: tokensSpentSince(Date.now() - windowMs),
+      windowHours: USAGE_BUDGET_WINDOW_HOURS
+    };
   });
   ipcMain.handle('config:setFleetRoot', async (_e, path: string) => {
     await setFleetRoot(path);

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { WorkspaceObservabilitySummary } from '../../../preload';
+import type { WorkspaceObservabilitySummary, UsageBudget } from '../../../preload';
 import { colorFor, type WorkspaceSummary } from '../App';
 import {
   workspaceHostPath,
@@ -31,6 +31,10 @@ interface Props {
   terminals: Array<{ id: string; name: string; contextTokens: number; windowTokens: number }>;
   /** The active tab's session id (highlighted in the context bars). */
   activeTerminalId: string | null;
+  /** Plan-usage budget (allowance + window), or null before config loads. */
+  budget: UsageBudget | null;
+  /** Tokens spent fleet-wide in the budget's rolling window (poll from App). */
+  budgetSpentTokens: number;
   /** When true, the rail is minimized to a thin reopen strip. */
   collapsed: boolean;
   /** Toggle the collapsed state (persisted by App.tsx). */
@@ -48,6 +52,8 @@ export function ObservabilityPane({
   summaries,
   terminals,
   activeTerminalId,
+  budget,
+  budgetSpentTokens,
   collapsed,
   onToggleCollapse
 }: Props) {
@@ -89,6 +95,7 @@ export function ObservabilityPane({
           </button>
         </div>
       </div>
+      {budget && <UsageBudgetBar budget={budget} spentTokens={budgetSpentTokens} />}
       {live.length > 0 && (
         <ScopeToggle
           scope={scope}
@@ -118,6 +125,54 @@ export function ObservabilityPane({
         )}
       </div>
     </aside>
+  );
+}
+
+/**
+ * Plan-usage bar — fleet-wide "tokens left" for the current rolling window
+ * (default 5h), framed as percent remaining since that's what the user asked
+ * for ("how many tokens you have left"). The fill depletes as you spend and
+ * tints warn ≤25% / danger ≤10% left. With no configured allowance it degrades
+ * to a spend-only readout. Always shown (account-wide, not per-workspace), so a
+ * watching human can read their true ceiling here when Claude reports a limit
+ * and calibrate the Custom preset in Settings.
+ */
+function UsageBudgetBar({
+  budget,
+  spentTokens
+}: {
+  budget: UsageBudget;
+  spentTokens: number;
+}) {
+  const { allowanceTokens, windowHours } = budget;
+  if (allowanceTokens <= 0) {
+    return (
+      <div className="obs-budget obs-budget-spendonly">
+        <span className="obs-budget-label">plan usage · {windowHours}h</span>
+        <span className="obs-budget-figure mono">{formatTokens(spentTokens)}</span>
+      </div>
+    );
+  }
+  const usedFrac = Math.min(1, spentTokens / allowanceTokens);
+  const leftFrac = Math.max(0, 1 - usedFrac);
+  const leftPct = Math.round(leftFrac * 100);
+  const tone = leftFrac <= 0.1 ? 'crit' : leftFrac <= 0.25 ? 'hot' : '';
+  return (
+    <div className="obs-budget" title={`${formatTokens(spentTokens)} of ${formatTokens(allowanceTokens)} tokens used in the last ${windowHours}h`}>
+      <div className="obs-budget-head">
+        <span className="obs-budget-label">plan usage · {windowHours}h</span>
+        <span className={`obs-budget-pct mono ${tone}`}>{leftPct}% left</span>
+      </div>
+      <span className="obs-budget-bar" aria-hidden="true">
+        <span
+          className={`obs-budget-fill ${tone}`}
+          style={{ width: `${Math.max(0, leftFrac * 100)}%` }}
+        />
+      </span>
+      <div className="obs-budget-sub mono">
+        {formatTokens(spentTokens)} / {formatTokens(allowanceTokens)}
+      </div>
+    </div>
   );
 }
 

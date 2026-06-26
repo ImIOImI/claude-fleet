@@ -5,6 +5,14 @@
 // hardware-acceleration toggle (applied at the next app launch).
 
 import { useEffect, useState } from 'react';
+import type { UsageBudgetPreset } from '../../../preload';
+
+/** Compact token formatter for preset labels (e.g. 19_000_000 → "19M"). */
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`;
+  if (n >= 1000) return `${Math.round(n / 1000)}K`;
+  return String(n);
+}
 
 interface Props {
   onClose: () => void;
@@ -19,6 +27,11 @@ export function SettingsModal({ onClose, onSaved }: Props) {
   // actually changed, so we only nudge "restart to apply" when it did.
   const [hwaInitial, setHwaInitial] = useState(false);
   const [autoReload, setAutoReload] = useState(true);
+  // Plan-usage budget for the observability rail's "tokens left" bar.
+  const [budgetPreset, setBudgetPreset] = useState<UsageBudgetPreset>('pro');
+  const [budgetCustom, setBudgetCustom] = useState('');
+  const [budgetPresets, setBudgetPresets] = useState({ pro: 0, max5: 0, max20: 0 });
+  const [budgetWindowHours, setBudgetWindowHours] = useState(5);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -31,6 +44,14 @@ export function SettingsModal({ onClose, onSaved }: Props) {
         setHwaDisabled(cfg.disableHardwareAcceleration);
         setHwaInitial(cfg.disableHardwareAcceleration);
         setAutoReload(cfg.autoReloadLoadouts);
+        // Guard: a partial config (e.g. an old build, or a test stub) shouldn't
+        // break the modal — the budget control just falls back to its defaults.
+        if (cfg.usageBudget) {
+          setBudgetPreset(cfg.usageBudget.preset);
+          setBudgetCustom(String(cfg.usageBudget.customTokens));
+          setBudgetPresets(cfg.usageBudget.presets);
+          setBudgetWindowHours(cfg.usageBudget.windowHours);
+        }
         setLoaded(true);
       }
     });
@@ -58,6 +79,8 @@ export function SettingsModal({ onClose, onSaved }: Props) {
         await window.api.config.setHardwareAccelDisabled(hwaDisabled);
       }
       await window.api.config.setAutoReloadLoadouts(autoReload);
+      const customTokens = Math.max(0, Math.round(Number(budgetCustom) || 0));
+      await window.api.config.setUsageBudget(budgetPreset, customTokens);
       const cfg = await window.api.config.setFleetRoot(trimmed);
       onSaved(cfg);
       onClose();
@@ -131,6 +154,44 @@ export function SettingsModal({ onClose, onSaved }: Props) {
             When you install or update a loadout in a running container workspace, reload its
             Claude session (<code>--resume</code>) so the change takes effect right away. Waits
             until Claude is idle — if it&apos;s working, the reload is deferred until it stops.
+          </p>
+          <div className="form-row">
+            <label>Plan usage budget</label>
+            <select
+              value={budgetPreset}
+              onChange={(e) => setBudgetPreset(e.target.value as UsageBudgetPreset)}
+              disabled={busy || !loaded}
+            >
+              <option value="pro">Pro — {fmtTokens(budgetPresets.pro)} / {budgetWindowHours}h</option>
+              <option value="max5">
+                Max 5× — {fmtTokens(budgetPresets.max5)} / {budgetWindowHours}h
+              </option>
+              <option value="max20">
+                Max 20× — {fmtTokens(budgetPresets.max20)} / {budgetWindowHours}h
+              </option>
+              <option value="custom">Custom…</option>
+            </select>
+          </div>
+          {budgetPreset === 'custom' && (
+            <div className="form-row">
+              <label>Custom budget (tokens per {budgetWindowHours}h)</label>
+              <input
+                type="number"
+                min="0"
+                step="1000000"
+                value={budgetCustom}
+                onChange={(e) => setBudgetCustom(e.target.value)}
+                placeholder="e.g. 19000000"
+                disabled={busy || !loaded}
+              />
+            </div>
+          )}
+          <p className="form-hint">
+            The observability rail shows tokens left in a rolling {budgetWindowHours}-hour window
+            (input + output + cache), fleet-wide. Anthropic doesn&apos;t publish exact limits, so the
+            plan presets are <strong>estimates</strong> anchored to the Max 5×/20× multipliers —
+            calibrate with <strong>Custom</strong> using your real ceiling from Settings → Usage, or
+            the spend shown when Claude Code reports a limit.
           </p>
           {error && <div className="form-hint error-text">{error}</div>}
           <div className="modal-footer">

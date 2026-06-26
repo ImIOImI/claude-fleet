@@ -211,6 +211,7 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       'fs:openPath',
       'config:get',
       'config:setFleetRoot',
+      'usage:rollingSpend',
       'vault:available',
       'vault:listKeys',
       'vault:getSecret',
@@ -335,11 +336,25 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
     });
 
     const fleetRoot = opts.fleetRoot ?? '/tmp/fleet';
-    ipcMain.handle('config:get', () => ({ fleetRoot, sharedDir: `${fleetRoot}/shared` }));
+    const usagePresets = { pro: 19_000_000, max5: 95_000_000, max20: 380_000_000 };
+    ipcMain.handle('config:get', () => ({
+      fleetRoot,
+      sharedDir: `${fleetRoot}/shared`,
+      disableHardwareAcceleration: false,
+      autoReloadLoadouts: true,
+      usageBudget: {
+        preset: 'pro',
+        customTokens: usagePresets.pro,
+        allowanceTokens: usagePresets.pro,
+        windowHours: 5,
+        presets: usagePresets
+      }
+    }));
     ipcMain.handle('config:setFleetRoot', (_e, p: string) => {
       g.__calls.setFleetRoot.push(p);
       return { fleetRoot: p, sharedDir: `${p}/shared` };
     });
+    ipcMain.handle('usage:rollingSpend', () => ({ spentTokens: 0, windowHours: 5 }));
 
     const imageLib = (opts.imageLibrary ?? []).map((img) => ({
       firstUsedAt: now,

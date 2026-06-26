@@ -126,6 +126,19 @@ export interface ObservabilityEventRow {
   rawJsonl: string;
 }
 
+/** Which Claude plan the observability rail's usage bar measures spend against. */
+export type UsageBudgetPreset = 'pro' | 'max5' | 'max20' | 'custom';
+
+/** Resolved plan-usage budget (mirrors `ResolvedUsageBudget` in main/config). */
+export interface UsageBudget {
+  preset: UsageBudgetPreset;
+  customTokens: number;
+  /** Effective allowance after resolving preset → tokens (0 hides the % bar). */
+  allowanceTokens: number;
+  windowHours: number;
+  presets: Record<Exclude<UsageBudgetPreset, 'custom'>, number>;
+}
+
 const api = {
   app: {
     mockMode: (): Promise<boolean> => ipcRenderer.invoke('app:mockMode'),
@@ -262,6 +275,7 @@ const api = {
       sharedDir: string;
       disableHardwareAcceleration: boolean;
       autoReloadLoadouts: boolean;
+      usageBudget: UsageBudget;
     }> => ipcRenderer.invoke('config:get'),
     setFleetRoot: (path: string): Promise<{ fleetRoot: string; sharedDir: string }> =>
       ipcRenderer.invoke('config:setFleetRoot', path),
@@ -270,7 +284,18 @@ const api = {
     ): Promise<{ disableHardwareAcceleration: boolean }> =>
       ipcRenderer.invoke('config:setHardwareAccelDisabled', disabled),
     setAutoReloadLoadouts: (enabled: boolean): Promise<{ autoReloadLoadouts: boolean }> =>
-      ipcRenderer.invoke('config:setAutoReloadLoadouts', enabled)
+      ipcRenderer.invoke('config:setAutoReloadLoadouts', enabled),
+    setUsageBudget: (
+      preset: UsageBudgetPreset,
+      customTokens: number
+    ): Promise<{ usageBudget: UsageBudget }> =>
+      ipcRenderer.invoke('config:setUsageBudget', preset, customTokens)
+  },
+  usage: {
+    /** Total tokens spent across the fleet in the trailing rolling window —
+     *  the plan-usage bar's numerator. Poll it; the allowance is in config. */
+    rollingSpend: (): Promise<{ spentTokens: number; windowHours: number }> =>
+      ipcRenderer.invoke('usage:rollingSpend')
   },
   dialog: {
     pickDirectory: (defaultPath?: string): Promise<string | null> =>
