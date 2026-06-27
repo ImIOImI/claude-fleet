@@ -170,6 +170,25 @@ test('broker_sessions: multi-tab attaches that interleave with JSONL writes all 
   // single-match rule these all got skipped (count != 1 → null);
   // the FIFO fix takes the oldest pending entry for each
   // 'new-session', pairing N attaches + N JSONLs correctly in order.
+  //
+  // The pairing the test asserts (oldest pending ↔ first new-session)
+  // only holds if 'new-session' events arrive in the same order the
+  // JSONLs were written. But that order comes from chokidar's 'add'
+  // events, which are driven by a directory readdir/inotify scan —
+  // when several files are created in the same instant, the OS reports
+  // them in filesystem-dependent order, NOT creation order. Writing all
+  // three JSONLs in one burst therefore raced: chokidar could surface
+  // s2 before main, FIFO would pair brokerMain↔claudeS2, and the
+  // assertion flaked. (pendingAttaches.ts documents this as an accepted
+  // worst-case for production; the test must not depend on the undefined
+  // ordering.)
+  //
+  // Fix: queue all three pending attaches up front (this is what
+  // exercises the no-concurrent-skip regression), but reveal the JSONLs
+  // one at a time, waiting for each mapping to land before writing the
+  // next. With exactly one 'new-session' in flight per consume, FIFO
+  // pairs each broker id with the correct UUID regardless of readdir
+  // order — deterministic, and still proves the concurrent-pending path.
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-multi-attach-'));
   const wsName = '01TESTMULTITAB000000000000';
   const projectsDir = writeManifest(userDataDir, wsName);
@@ -185,30 +204,33 @@ test('broker_sessions: multi-tab attaches that interleave with JSONL writes all 
     const claudeS3Uuid = '33333333-3333-3333-3333-333333333333';
 
     // Three tabs created in quick succession — all pending attaches
-    // land before any claude has written its first JSONL.
+    // land before any claude has written its first JSONL. This is the
+    // concurrent-pending condition the FIFO fix must survive.
     await callTestIpc(app, '__test:recordPendingAttach', [wsName, brokerMainId]);
     await callTestIpc(app, '__test:recordPendingAttach', [wsName, brokerS2Id]);
     await callTestIpc(app, '__test:recordPendingAttach', [wsName, brokerS3Id]);
 
-    // Write three JSONLs in the order the claudes spawned (broker
-    // spawns in attach-order in the common case).
-    writeAssistantJsonl(projectsDir, claudeMainUuid);
-    writeAssistantJsonl(projectsDir, claudeS2Uuid);
-    writeAssistantJsonl(projectsDir, claudeS3Uuid);
+    // Reveal the JSONLs one at a time, in spawn order, waiting for each
+    // mapping before the next appears. Only one 'new-session' is ever in
+    // flight, so FIFO consumption pairs deterministically — no dependence
+    // on the order chokidar happens to report a burst of new files.
+    const expectMapping = async (
+      brokerId: string,
+      claudeUuid: string
+    ): Promise<void> => {
+      writeAssistantJsonl(projectsDir, claudeUuid);
+      await expect
+        .poll(
+          async () =>
+            callTestIpc<string | null>(app, '__test:lookupBrokerSession', [wsName, brokerId]),
+          { timeout: 8_000, intervals: [200, 500, 1000] }
+        )
+        .toBe(claudeUuid);
+    };
 
-    await expect
-      .poll(
-        async () =>
-          callTestIpc<string | null>(app, '__test:lookupBrokerSession', [wsName, brokerMainId]),
-        { timeout: 8_000, intervals: [200, 500, 1000] }
-      )
-      .toBe(claudeMainUuid);
-    expect(
-      await callTestIpc<string | null>(app, '__test:lookupBrokerSession', [wsName, brokerS2Id])
-    ).toBe(claudeS2Uuid);
-    expect(
-      await callTestIpc<string | null>(app, '__test:lookupBrokerSession', [wsName, brokerS3Id])
-    ).toBe(claudeS3Uuid);
+    await expectMapping(brokerMainId, claudeMainUuid);
+    await expectMapping(brokerS2Id, claudeS2Uuid);
+    await expectMapping(brokerS3Id, claudeS3Uuid);
   } finally {
     await app.close();
   }
