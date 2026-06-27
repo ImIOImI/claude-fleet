@@ -26,6 +26,20 @@ function looksLikeHttpUrl(s: string): boolean {
   return /^https?:\/\/\S+$/i.test(t);
 }
 
+// The dataTransfer.types a real ingestible drag carries: OS files, a dragged
+// URL, dragged HTML, or plain text. An internal workspace-chip reorder drag
+// (#147) sets effectAllowed='move' but NO data items, so its types list is
+// empty — that's how we tell the two apart and avoid hijacking the reorder.
+const EXTERNAL_DRAG_TYPES = ['Files', 'text/uri-list', 'text/plain', 'text/html'];
+
+/** Whether a drag carries an external payload we should ingest (vs. an internal
+ *  app drag like chip reorder, which has no data items). `types` is
+ *  DataTransfer.types; readable during dragenter/dragover and at drop. */
+export function isExternalDrag(types: readonly string[] | undefined): boolean {
+  if (!types) return false;
+  return EXTERNAL_DRAG_TYPES.some((t) => types.includes(t));
+}
+
 export function useDropIngestion({ workspaceId, notify }: Options): { dragging: boolean } {
   const [dragging, setDragging] = useState(false);
 
@@ -66,6 +80,9 @@ export function useDropIngestion({ workspaceId, notify }: Options): { dragging: 
       if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
     };
     const onDragEnter = (e: DragEvent): void => {
+      // Ignore internal app drags (chip reorder) — no external payload means no
+      // overlay (#147). Genuine file/URL/text drags raise it as before.
+      if (!isExternalDrag(e.dataTransfer?.types)) return;
       e.preventDefault();
       depth++;
       setDragging(true);
@@ -76,11 +93,14 @@ export function useDropIngestion({ workspaceId, notify }: Options): { dragging: 
     };
 
     const onDrop = (e: DragEvent): void => {
+      const dt = e.dataTransfer;
+      // Internal app drag (e.g. chip reorder): let the originating handler own
+      // the drop — don't preventDefault or run ingestion, which would swallow
+      // the reorder (#147). At drop time dataTransfer.types is fully readable.
+      if (!dt || !isExternalDrag(dt.types)) return;
       e.preventDefault();
       depth = 0;
       setDragging(false);
-      const dt = e.dataTransfer;
-      if (!dt) return;
       const ws = requireWorkspace();
       if (!ws) return;
 

@@ -13,13 +13,13 @@
 // live), and after our own rename/delete actions.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { colorFor, type WorkspaceSummary } from '../App';
+import { colorFor } from '../App';
 import type { SessionListItem } from '../../../preload';
+import { sessionsForScope } from '../sessionsView';
 
 type Scope = 'workspace' | 'all';
 
 interface Props {
-  workspaces: WorkspaceSummary[];
   selectedWorkspaceId: string | null;
   /** Resume a session — App brings the container up, then opens a resume tab. */
   onResume: (item: SessionListItem) => void;
@@ -49,7 +49,7 @@ function formatUsd(usd: number): string {
   return `$${Math.round(usd).toLocaleString('en-US')}`;
 }
 
-export function SessionsPane({ workspaces, selectedWorkspaceId, onResume, embedded = false }: Props) {
+export function SessionsPane({ selectedWorkspaceId, onResume, embedded = false }: Props) {
   const [scope, setScope] = useState<Scope>('workspace');
   const [query, setQuery] = useState('');
   const [items, setItems] = useState<SessionListItem[]>([]);
@@ -59,29 +59,24 @@ export function SessionsPane({ workspaces, selectedWorkspaceId, onResume, embedd
   const [draftName, setDraftName] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
-  const liveWorkspaceCount = workspaces.filter(
-    (w) => w.state !== 'deleted' && w.containerId
-  ).length;
-
+  // Load the full session list once and scope it client-side. The unfiltered
+  // `sessions.list()` and the per-workspace `sessions.list(id)` query the same
+  // table with identical ordering (db.ts listSessions), so filtering here is
+  // equivalent to a scoped fetch — and it lets the "All · N" badge be a true
+  // session count instead of a workspace count (#149).
   const load = useCallback(async () => {
-    const wsId = scope === 'workspace' ? selectedWorkspaceId ?? undefined : undefined;
-    // In workspace scope with nothing selected there's nothing to show.
-    if (scope === 'workspace' && !wsId) {
-      setItems([]);
-      setLoaded(true);
-      return;
-    }
     try {
-      const rows = await window.api.sessions.list(wsId);
+      const rows = await window.api.sessions.list();
       setItems(rows);
     } catch {
       setItems([]);
     } finally {
       setLoaded(true);
     }
-  }, [scope, selectedWorkspaceId]);
+  }, []);
 
-  // Refetch on scope/selection change.
+  // Refetch when the underlying data may have changed (scope/selection only
+  // re-slice the already-loaded list, so they don't need a refetch).
   useEffect(() => {
     void load();
   }, [load]);
@@ -116,14 +111,17 @@ export function SessionsPane({ workspaces, selectedWorkspaceId, onResume, embedd
     await load();
   };
 
+  // Sessions shown for the active scope; the "All" badge counts the full list.
+  const scoped = sessionsForScope(items, scope, selectedWorkspaceId);
+  const allSessionsCount = items.length;
   const q = query.trim().toLowerCase();
   const filtered = q
-    ? items.filter(
+    ? scoped.filter(
         (s) =>
           displayTitle(s).toLowerCase().includes(q) ||
           s.workspaceName.toLowerCase().includes(q)
       )
-    : items;
+    : scoped;
 
   const body = (
     <>
@@ -145,7 +143,7 @@ export function SessionsPane({ workspaces, selectedWorkspaceId, onResume, embedd
             className={`obs-scope-btn ${scope === 'all' ? 'active' : ''}`}
             onClick={() => setScope('all')}
           >
-            All · {liveWorkspaceCount}
+            All · {allSessionsCount}
           </button>
         </div>
         <input

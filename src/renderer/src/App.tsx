@@ -11,6 +11,7 @@ import { DeleteWorkspaceModal } from './components/DeleteWorkspaceModal';
 import { EditWorkspaceModal, containerLevelChanged } from './components/EditWorkspaceModal';
 import { SettingsModal } from './components/SettingsModal';
 import { useDropIngestion } from './dropIngestion';
+import { contextBarSummary } from './contextBarSource';
 import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget } from '../../preload';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
@@ -887,7 +888,7 @@ export function App() {
                   cleanupDefault={w.mirror.cleanup}
                   containerId={w.containerId!}
                   paused={w.state === 'paused'}
-                  summary={summaries[w.id] ?? null}
+                  summary={contextBarSummary(selectedId === w.id, activeTabSummary, summaries[w.id] ?? null)}
                   inbound={inboundByWorkspace[w.id] ?? null}
                   restartBanner={restartBannerIds.has(w.id)}
                   onRestartFromBanner={() => restartFromBanner(w.id, w.containerId!)}

@@ -17,6 +17,7 @@ import { Terminal, type ILink, type ILinkProvider } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { ActivityDetector } from '../activityDetector';
+import { decideTerminalKeyAction } from '../terminalKeymap';
 
 // Stretch the font fallback chain so canvas renders for glyphs xterm
 // can't find in a monospace font (emoji, symbols, regional indicators)
@@ -319,10 +320,10 @@ export function TerminalSession({
 
     const doPaste = (): void => {
       // Image on the clipboard → ingest as a drop instead of pasting text.
-      // xterm intercepts Ctrl+V on keydown (preventDefault), so the
-      // window-level `paste` listener never fires while the terminal is
-      // focused — we route through the terminal's own paste path and hand
-      // off via a window CustomEvent that useDropIngestion handles.
+      // The custom key handler calls preventDefault() on Ctrl+V (see below), so
+      // the browser's native paste never reaches xterm's textarea and this stays
+      // the single paste path (#150). Clipboard images are handed off via a
+      // window CustomEvent that useDropIngestion handles.
       void window.api.clipboard.readImage().then((img) => {
         if (img) {
           window.dispatchEvent(new CustomEvent('cf:drop-image', { detail: img }));
@@ -335,30 +336,13 @@ export function TerminalSession({
     };
 
     term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
-      if (e.type !== 'keydown') return true;
-      const plainCtrl = e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey;
-      const ctrlShift = e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
-
-      if (plainCtrl && e.code === 'KeyC') {
-        if (term.hasSelection()) {
-          doCopy();
-          return false;
-        }
-        return true; // no selection — pass through as SIGINT
-      }
-      if (plainCtrl && e.code === 'KeyV') {
-        doPaste();
-        return false;
-      }
-      if (ctrlShift && e.code === 'KeyC') {
-        doCopy();
-        return false;
-      }
-      if (ctrlShift && e.code === 'KeyV') {
-        doPaste();
-        return false;
-      }
-      return true;
+      const action = decideTerminalKeyAction(e, term.hasSelection());
+      // preventDefault is what stops the native browser paste from firing a
+      // second time alongside our doPaste() (#150); the decision owns when.
+      if (action.preventDefault) e.preventDefault();
+      if (action.effect === 'copy') doCopy();
+      else if (action.effect === 'paste') doPaste();
+      return action.pass;
     });
 
     const onContextMenu = async (e: MouseEvent): Promise<void> => {
