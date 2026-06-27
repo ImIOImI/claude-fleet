@@ -327,6 +327,15 @@ export function App() {
     },
     [pushToast]
   );
+  const handleRefreshRequested = useCallback(
+    (name: string, busyNow: boolean): void => {
+      pushToast(
+        busyNow ? `Refreshing ${name} when idle…` : `Refreshing ${name}…`,
+        'Refreshing'
+      );
+    },
+    [pushToast]
+  );
   // Fired by the Library after a loadout install. Auto-reload only makes sense
   // for a running container workspace whose claude is live; if the setting is
   // off the user reloads manually (the loadout loads on their next claude start).
@@ -925,6 +934,7 @@ export function App() {
                   reloadRequest={reloadRequest?.workspaceId === w.id ? reloadRequest : null}
                   onReloadConsumed={() => setReloadRequest(null)}
                   onReloadStarted={() => handleReloadStarted(w.id)}
+                  onRefreshRequested={handleRefreshRequested}
                 />
               ))}
           </div>

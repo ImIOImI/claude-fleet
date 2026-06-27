@@ -18,6 +18,7 @@ import { createPortal } from 'react-dom';
 import type { WorkspaceObservabilitySummary } from '../../../preload';
 import type { MirrorSetting, CleanupSetting } from '../App';
 import { TerminalSession } from './TerminalSession';
+import { readyToRefresh } from './refreshQueue';
 
 interface Props {
   containerId: string;
@@ -107,6 +108,11 @@ interface Props {
   /** Fired the moment the active session actually starts reloading (after the
    *  idle gate) — App uses it to show a "reloading…" toast over the flicker. */
   onReloadStarted?: () => void;
+  /**
+   * Fired when the user picks Refresh on a session chip. The parent shows the
+   * shared toast; `busyNow` selects the copy ("…when idle" while claude works).
+   */
+  onRefreshRequested?: (sessionName: string, busyNow: boolean) => void;
 }
 
 function contextBarPct(summary: WorkspaceObservabilitySummary | null): number {
@@ -166,6 +172,15 @@ function IconClose(): JSX.Element {
     </svg>
   );
 }
+function IconRefresh(): JSX.Element {
+  // Circular arrow — exit & resume this session in place.
+  return (
+    <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M10 6 A4 4 0 1 1 8.6 3" />
+      <path d="M10.4 1.6 L10.4 4 L8 4" />
+    </svg>
+  );
+}
 
 export function TerminalPane({
   containerId,
@@ -186,7 +201,8 @@ export function TerminalPane({
   onResumeConsumed,
   reloadRequest,
   onReloadConsumed,
-  onReloadStarted
+  onReloadStarted,
+  onRefreshRequested
 }: Props) {
   // Transient `[committee]` toast (#123): show the injected message briefly so a
   // human watching this expert knows why text just appeared, then auto-dismiss.
@@ -453,12 +469,12 @@ export function TerminalPane({
   // Loadout reload (#16): a request from App means "reload the active session in
   // place so the just-installed loadout takes effect". We hold it pending and
   // only fire once the active session is idle — interrupting a working claude
-  // would be destructive. `reloadTarget` is handed to the matching
-  // TerminalSession, which closes + re-attaches with `--resume`.
+  // would be destructive. The token in `reloadTargets[activeId]` is handed to
+  // the matching TerminalSession, which closes + re-attaches with `--resume`.
+  // The map (rather than a single target) lets the loadout reload and the
+  // manual chip-menu Refresh address different sessions independently.
   const [pendingReload, setPendingReload] = useState(false);
-  const [reloadTarget, setReloadTarget] = useState<{ sessionId: string; token: number } | null>(
-    null
-  );
+  const [reloadTargets, setReloadTargets] = useState<Record<string, number>>({});
   const reloadTokenRef = useRef(0);
   const lastReloadRequest = useRef<number | null>(null);
   useEffect(() => {
@@ -472,9 +488,46 @@ export function TerminalPane({
     if (!pendingReload || !activeId) return;
     if (busyIds.has(activeId)) return; // claude is working — defer until idle
     setPendingReload(false);
-    setReloadTarget({ sessionId: activeId, token: ++reloadTokenRef.current });
+    setReloadTargets((prev) => ({ ...prev, [activeId]: ++reloadTokenRef.current }));
     onReloadStarted?.();
   }, [pendingReload, activeId, busyIds, onReloadStarted]);
+
+  // Manual chip-menu Refresh: a per-session queue. requestRefresh enqueues a
+  // session id and shows the toast at click time; this effect drains the queue
+  // into reloadTargets once each session is idle (readyToRefresh enforces the
+  // not-busy / not-ended / still-exists rule). Shares reloadTargets with the
+  // loadout reload, so a loadout reload of one tab and a manual refresh of
+  // another fire independently when each goes idle.
+  const [pendingRefresh, setPendingRefresh] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    if (pendingRefresh.size === 0) return;
+    const existing = new Set(sessions.map((s) => s.id));
+    const ready = readyToRefresh(pendingRefresh, busyIds, endedIds, existing);
+    if (ready.length === 0) return;
+    setPendingRefresh((prev) => {
+      const next = new Set(prev);
+      ready.forEach((id) => next.delete(id));
+      return next;
+    });
+    setReloadTargets((prev) => {
+      const next = { ...prev };
+      ready.forEach((id) => {
+        next[id] = ++reloadTokenRef.current;
+      });
+      return next;
+    });
+  }, [pendingRefresh, busyIds, endedIds, sessions]);
+
+  function requestRefresh(s: Session): void {
+    if (!loaded || endedIds.has(s.id)) return;
+    setPendingRefresh((prev) => {
+      if (prev.has(s.id)) return prev;
+      const next = new Set(prev);
+      next.add(s.id);
+      return next;
+    });
+    onRefreshRequested?.(s.name, busyIds.has(s.id));
+  }
 
   function closeSession(id: string): void {
     if (!loaded) return;
@@ -714,6 +767,19 @@ export function TerminalPane({
                 <span>Rename</span>
               </button>
               <button
+                role="menuitem"
+                disabled={endedIds.has(s.id)}
+                aria-disabled={endedIds.has(s.id)}
+                title="Exit and resume this session (waits until it's idle)"
+                onClick={() => {
+                  setTabMenu(null);
+                  requestRefresh(s);
+                }}
+              >
+                <IconRefresh />
+                <span>Refresh</span>
+              </button>
+              <button
                 role="menuitemcheckbox"
                 aria-checked={!!s.autoName}
                 title="Name this tab from Claude's session summary, kept up to date"
@@ -789,7 +855,7 @@ export function TerminalPane({
             paused={paused}
             onLifecycleChange={handleLifecycle}
             onActivityChange={handleActivity}
-            reloadTarget={reloadTarget}
+            reloadToken={reloadTargets[s.id] ?? null}
           />
         ))}
         {paused && (

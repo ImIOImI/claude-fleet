@@ -156,3 +156,54 @@ test('Session ended overlay: "Start new session" reattaches a fresh claude', asy
     await app.close();
   }
 });
+
+test('Session tab menu: Refresh shows the toast and keeps the session live', async () => {
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
+    const pane = activePane(window);
+    const tab = pane.locator('.session-tab-strip .session-tab').nth(0);
+    await expect(tab).toContainText('main');
+    const term = pane.locator('.terminal-host');
+    await expect(term).toBeVisible();
+
+    // ⋮ → Refresh
+    await tab.getByRole('button', { name: 'Actions for main' }).click();
+    const refresh = window.getByRole('menuitem', { name: 'Refresh' });
+    await expect(refresh).toBeVisible();
+    await refresh.click();
+
+    // Idle session → toast without the "when idle" suffix.
+    await expect(window.locator('.toast', { hasText: 'Refreshing main' })).toBeVisible();
+
+    // Session stays usable — no stuck "ended" overlay or ended dot.
+    await expect(term).toBeVisible();
+    await expect(pane.locator('.session-ended-overlay')).toHaveCount(0);
+    await expect(tab.locator('.session-tab-dot.ended')).toHaveCount(0);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Session tab menu: Refresh is disabled for an ended session', async () => {
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
+    const pane = activePane(window);
+    const tab = pane.locator('.session-tab-strip .session-tab').nth(0);
+    const term = pane.locator('.terminal-host');
+    await expect(term).toBeVisible();
+
+    // End the session via the mock shell.
+    await term.click();
+    await window.keyboard.type('exit');
+    await window.keyboard.press('Enter');
+    await expect(pane.locator('.session-ended-overlay')).toBeVisible();
+
+    // Refresh is present but disabled — nothing to resume in place.
+    await tab.getByRole('button', { name: 'Actions for main' }).click();
+    await expect(window.getByRole('menuitem', { name: 'Refresh' })).toBeDisabled();
+  } finally {
+    await app.close();
+  }
+});
