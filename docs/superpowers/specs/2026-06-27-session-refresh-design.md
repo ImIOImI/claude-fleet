@@ -106,12 +106,14 @@ re-CREATEs the broker session with `--resume <uuid>`. No-ops safely when no uuid
 
 ## Testing
 
-Add coverage to `tests/smoke.spec.ts`:
-- Clicking Refresh on an **idle** session triggers `pty.closeSession` followed by a
-  re-attach carrying `--resume`.
-- Clicking Refresh on a **busy** session **defers** — no close until the activity detector
-  flips the session to idle, then it fires.
-- The toast appears immediately on click (queued copy when busy).
+- **Busy-defer rule** is unit-tested as a pure helper, `src/renderer/src/components/refreshQueue.test.ts`
+  (`readyToRefresh` excludes busy / ended / closed sessions) — runs in vitest, no Electron.
+- **End-to-end** coverage in `tests/multi-session.spec.ts` (Playwright, runs in CI):
+  - Clicking Refresh on an **idle** session shows the `Refreshing main…` toast and keeps the
+    session live (no stuck ended overlay).
+  - Refresh is **disabled** on an ended session.
+  - (In mock mode there's no resolvable claude UUID, so the underlying close+resume no-ops
+    gracefully; the deep close+resume is covered by the loadout reload's live container test.)
 
 ## Docs
 
