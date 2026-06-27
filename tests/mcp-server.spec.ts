@@ -2,8 +2,8 @@
 // DB + MCP server start), seed a workspace manifest + a JSONL event for the
 // watcher to ingest, then drive the Unix socket at <userData>/mcp/mcp.sock
 // with newline-delimited JSON-RPC — exactly how the in-container reconnecting
-// socat bridge will. Verifies initialize, tools/list, a typed tool, the raw
-// query escape hatch, and that writes are rejected.
+// socat bridge will. Verifies initialize, tools/list, the typed read tools, and
+// committee control. There is no raw `query` tool (removed for isolation, #146).
 
 import { _electron as electron, test, expect, type ElectronApplication } from '@playwright/test';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -69,7 +69,7 @@ function toolText(res: { result?: unknown }): unknown {
   return content?.[0]?.text ? JSON.parse(content[0].text) : undefined;
 }
 
-test('MCP server: initialize, tools, query escape hatch, write rejection', async () => {
+test('MCP server: initialize, tools, typed reads, committee control', async () => {
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-mcp-'));
   const id = '01MCPTESTWS0000000000000WS';
   // A second workspace proves the per-workspace listener fan-out (#117): each
@@ -146,7 +146,8 @@ test('MCP server: initialize, tools, query escape hatch, write rejection', async
     const init = await client.call('initialize', { protocolVersion: '2024-11-05' });
     expect((init.result as { serverInfo?: { name?: string } }).serverInfo?.name).toBe('claude-fleet-state');
 
-    // tools/list exposes the typed tools + the raw query escape hatch
+    // tools/list exposes the typed tools — and crucially NO raw `query` tool
+    // (removed for workspace isolation, #146).
     const tools = await client.call('tools/list');
     const names = ((tools.result as { tools: Array<{ name: string }> }).tools).map((t) => t.name);
     expect(names).toEqual(
@@ -155,38 +156,25 @@ test('MCP server: initialize, tools, query escape hatch, write rejection', async
         'get_session',
         'get_cost',
         'list_events',
-        'query',
         'committee_pause',
         'committee_unpause'
       ])
     );
+    expect(names).not.toContain('query');
 
-    // The watcher ingest is async — poll the raw query until the event lands.
+    // The watcher ingest is async — poll the typed list_sessions until the
+    // seeded session lands. (This connection's caller id is `id`, which owns the
+    // session, so scoped reads surface it.)
     await expect
       .poll(
         async () => {
-          const res = await client!.call('tools/call', {
-            name: 'query',
-            arguments: { sql: 'SELECT COUNT(*) AS c FROM events' }
-          });
-          const out = toolText(res) as { rows?: Array<{ c: number }> };
-          return out?.rows?.[0]?.c ?? 0;
+          const res = await client!.call('tools/call', { name: 'list_sessions', arguments: {} });
+          const rows = (toolText(res) as Array<{ id: string }>) ?? [];
+          return rows.some((s) => s.id === sessionId);
         },
         { timeout: 8_000, intervals: [200, 500, 1000] }
       )
-      .toBeGreaterThanOrEqual(1);
-
-    // Typed tool: the seeded session shows up.
-    const sessions = await client.call('tools/call', { name: 'list_sessions', arguments: {} });
-    const rows = toolText(sessions) as Array<{ id: string }>;
-    expect(rows.some((s) => s.id === sessionId)).toBe(true);
-
-    // Write rejection through the escape hatch (guard fires before the engine).
-    const del = await client.call('tools/call', {
-      name: 'query',
-      arguments: { sql: 'DELETE FROM events' }
-    });
-    expect((del.result as { isError?: boolean }).isError).toBe(true);
+      .toBe(true);
 
     // committee_pause (#119) is wired through the async dispatch + injected
     // handler, and enforces assertControl: this connection's caller id is `id`

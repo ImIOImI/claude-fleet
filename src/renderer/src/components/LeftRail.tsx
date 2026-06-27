@@ -105,7 +105,6 @@ export function LeftRail({
         {open.sessions && (
           <SessionsPane
             embedded
-            workspaces={workspaces}
             selectedWorkspaceId={selectedWorkspaceId}
             onResume={onResume}
           />

@@ -1,8 +1,8 @@
-// Scoped MCP reads (#122). Launches the real app with CLAUDE_FLEET_SCOPED_READS=1
-// and two workspaces — A (a reachable expert) and B (a manager granted `read`
-// over A). With scoping ON, A (no grants) sees only its own sessions, B sees its
-// own + A's, and the raw `query` hatch is disabled. (Flag OFF — the default,
-// current fleet-global behavior — stays covered by mcp-server.spec.ts.)
+// Cross-workspace read scoping (#122/#146). Launches the real app with two
+// workspaces — A (a reachable expert) and B (a manager granted `read` over A).
+// Reads are workspace-scoped by default (no flag): A (no grants) sees only its
+// own sessions, never B's; B sees its own + A's; and there is no raw `query`
+// tool to escape the scope. This is the isolation guarantee from #146.
 
 import { _electron as electron, test, expect, type ElectronApplication } from '@playwright/test';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -63,7 +63,7 @@ function toolText(res: { result?: unknown }): unknown {
   return content?.[0]?.text ? JSON.parse(content[0].text) : undefined;
 }
 
-test('scoped reads: caller sees own + read-granted sessions only; query disabled (#122)', async () => {
+test('scoped reads: caller sees own + read-granted sessions only; no query tool (#146)', async () => {
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-scoped-'));
   const A = '01SCOPEDAAAAAAAAAAAAAAAAAA';
   const B = '01SCOPEDBBBBBBBBBBBBBBBBBB';
@@ -97,10 +97,9 @@ test('scoped reads: caller sees own + read-granted sessions only; query disabled
   const app: ElectronApplication = await electron.launch({
     args: [REPO_ROOT, `--user-data-dir=${userDataDir}`],
     cwd: REPO_ROOT,
-    env: {
-      ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'CLAUDE_FLEET_MOCK')),
-      CLAUDE_FLEET_SCOPED_READS: '1'
-    } as Record<string, string>
+    env: Object.fromEntries(
+      Object.entries(process.env).filter(([k]) => k !== 'CLAUDE_FLEET_MOCK')
+    ) as Record<string, string>
   });
   const window = await app.firstWindow();
   await window.waitForLoadState('domcontentloaded');
@@ -134,15 +133,14 @@ test('scoped reads: caller sees own + read-granted sessions only; query disabled
     expect(bSees).toContain(sessionB);
     expect(bSees).toContain(sessionA);
 
-    // The raw query hatch is disabled under scoping.
+    // There is no raw `query` tool to escape the scope (#146).
     const qSock = await connectWithRetry(path.join(userDataDir, 'mcp', A, 'mcp.sock'));
     const qc = new RpcClient(qSock);
     clients.push(qc);
     await qc.call('initialize', { protocolVersion: '2024-11-05' });
-    const q = await qc.call('tools/call', { name: 'query', arguments: { sql: 'SELECT 1' } });
-    const qr = q.result as { isError?: boolean; content?: Array<{ text?: string }> };
-    expect(qr.isError).toBe(true);
-    expect(qr.content?.[0]?.text ?? '').toMatch(/disabled under scoped reads/);
+    const tools = await qc.call('tools/list');
+    const names = (tools.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name);
+    expect(names).not.toContain('query');
   } finally {
     clients.forEach((c) => c.close());
     await app.close();
