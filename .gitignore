@@ -15,3 +15,6 @@ playwright-report/
 
 # Windows NTFS alternate-data-stream metadata surfaced by WSL
 *:Zone.Identifier
+
+# Superpowers brainstorm/designsync scratch
+.superpowers/
