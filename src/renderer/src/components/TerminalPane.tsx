@@ -453,12 +453,12 @@ export function TerminalPane({
   // Loadout reload (#16): a request from App means "reload the active session in
   // place so the just-installed loadout takes effect". We hold it pending and
   // only fire once the active session is idle — interrupting a working claude
-  // would be destructive. `reloadTarget` is handed to the matching
-  // TerminalSession, which closes + re-attaches with `--resume`.
+  // would be destructive. The token in `reloadTargets[activeId]` is handed to
+  // the matching TerminalSession, which closes + re-attaches with `--resume`.
+  // The map (rather than a single target) lets the loadout reload and the
+  // manual chip-menu Refresh address different sessions independently.
   const [pendingReload, setPendingReload] = useState(false);
-  const [reloadTarget, setReloadTarget] = useState<{ sessionId: string; token: number } | null>(
-    null
-  );
+  const [reloadTargets, setReloadTargets] = useState<Record<string, number>>({});
   const reloadTokenRef = useRef(0);
   const lastReloadRequest = useRef<number | null>(null);
   useEffect(() => {
@@ -472,7 +472,7 @@ export function TerminalPane({
     if (!pendingReload || !activeId) return;
     if (busyIds.has(activeId)) return; // claude is working — defer until idle
     setPendingReload(false);
-    setReloadTarget({ sessionId: activeId, token: ++reloadTokenRef.current });
+    setReloadTargets((prev) => ({ ...prev, [activeId]: ++reloadTokenRef.current }));
     onReloadStarted?.();
   }, [pendingReload, activeId, busyIds, onReloadStarted]);
 
@@ -789,7 +789,7 @@ export function TerminalPane({
             paused={paused}
             onLifecycleChange={handleLifecycle}
             onActivityChange={handleActivity}
-            reloadTarget={reloadTarget}
+            reloadToken={reloadTargets[s.id] ?? null}
           />
         ))}
         {paused && (
