@@ -13,6 +13,8 @@ interface Props {
   workspaces: WorkspaceSummary[];
   selectedWorkspaceId: string | null;
   selectedWorkspace: WorkspaceSummary | null;
+  /** Claude session UUIDs whose session is actively working — pulses its row. */
+  busySessionIds: Set<string>;
   onResume: (item: SessionListItem) => void;
   /** Refresh workspaces (installed-loadout state). */
   onChanged: () => void;
@@ -47,6 +49,7 @@ export function LeftRail({
   workspaces,
   selectedWorkspaceId,
   selectedWorkspace,
+  busySessionIds,
   onResume,
   onChanged,
   onLoadoutInstalled,
@@ -106,6 +109,7 @@ export function LeftRail({
           <SessionsPane
             embedded
             selectedWorkspaceId={selectedWorkspaceId}
+            busySessionIds={busySessionIds}
             onResume={onResume}
           />
         )}
