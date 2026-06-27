@@ -13,10 +13,17 @@
 export function contextBarSummary<T>(
   isSelected: boolean,
   activeTabSummary: T | null,
-  workspaceSummary: T | null
+  workspaceSummary: T | null,
+  activeTabIsFresh: boolean
 ): T | null {
-  // Match the rail exactly: the selected pane reflects the active tab (which may
-  // be null for a fresh/unmapped tab — the bar then renders its empty/identity
-  // state, same as the rail), never the workspace-level number.
-  return isSelected ? activeTabSummary : workspaceSummary;
+  // Off-screen panes have no active-tab summary computed — keep the workspace one.
+  if (!isSelected) return workspaceSummary;
+  // The selected pane reflects its active tab when that summary has resolved.
+  if (activeTabSummary) return activeTabSummary;
+  // No per-tab summary yet. Mirror the rail's fallback (SPEC §6): a fresh
+  // (+-created) tab legitimately has no data → show the empty/identity state
+  // rather than another session's numbers; an inventory/loaded tab whose
+  // broker_sessions mapping hasn't been learned yet falls back to the workspace
+  // summary so the bar still surfaces activity until the mapping catches up.
+  return activeTabIsFresh ? null : workspaceSummary;
 }
