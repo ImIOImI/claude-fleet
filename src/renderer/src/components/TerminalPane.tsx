@@ -172,6 +172,15 @@ function IconClose(): JSX.Element {
     </svg>
   );
 }
+function IconRefresh(): JSX.Element {
+  // Circular arrow — exit & resume this session in place.
+  return (
+    <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M10 6 A4 4 0 1 1 8.6 3" />
+      <path d="M10.4 1.6 L10.4 4 L8 4" />
+    </svg>
+  );
+}
 
 export function TerminalPane({
   containerId,
@@ -756,6 +765,19 @@ export function TerminalPane({
               >
                 <IconRename />
                 <span>Rename</span>
+              </button>
+              <button
+                role="menuitem"
+                disabled={endedIds.has(s.id)}
+                aria-disabled={endedIds.has(s.id)}
+                title="Exit and resume this session (waits until it's idle)"
+                onClick={() => {
+                  setTabMenu(null);
+                  requestRefresh(s);
+                }}
+              >
+                <IconRefresh />
+                <span>Refresh</span>
               </button>
               <button
                 role="menuitemcheckbox"

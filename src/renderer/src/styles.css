@@ -1863,6 +1863,9 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
 }
 .ws-chip-menu button:hover { background: var(--bg-hover); color: var(--ink); }
 .ws-chip-menu button:hover svg { color: var(--ink); }
+.ws-chip-menu button:disabled { opacity: 0.4; cursor: default; }
+.ws-chip-menu button:disabled:hover { background: transparent; color: var(--ink-1); }
+.ws-chip-menu button:disabled:hover svg { color: var(--ink-2); }
 .ws-chip-menu button.danger { color: var(--danger); }
 .ws-chip-menu button.danger svg { color: var(--danger); }
 .ws-chip-menu button.danger:hover { background: rgba(239, 77, 77, 0.12); }
