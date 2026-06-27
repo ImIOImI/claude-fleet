@@ -215,6 +215,11 @@ export function App() {
   const [activeTabByWorkspace, setActiveTabByWorkspace] = useState<
     Record<string, string>
   >({});
+  // Whether each workspace's active tab is a fresh (+-created) one vs. loaded
+  // from inventory — drives the terminal context-bar fallback (#148).
+  const [activeTabFreshByWorkspace, setActiveTabFreshByWorkspace] = useState<
+    Record<string, boolean>
+  >({});
 
   // Per-workspace busy state (claude actively working in any of its sessions),
   // detected from the PTY title glyph in TerminalPane → drives the chip.
@@ -888,7 +893,12 @@ export function App() {
                   cleanupDefault={w.mirror.cleanup}
                   containerId={w.containerId!}
                   paused={w.state === 'paused'}
-                  summary={contextBarSummary(selectedId === w.id, activeTabSummary, summaries[w.id] ?? null)}
+                  summary={contextBarSummary(
+                    selectedId === w.id,
+                    activeTabSummary,
+                    summaries[w.id] ?? null,
+                    activeTabFreshByWorkspace[w.id] ?? false
+                  )}
                   inbound={inboundByWorkspace[w.id] ?? null}
                   restartBanner={restartBannerIds.has(w.id)}
                   onRestartFromBanner={() => restartFromBanner(w.id, w.containerId!)}
@@ -897,11 +907,16 @@ export function App() {
                     await window.api.workspace.start(w.id);
                     refresh();
                   }}
-                  onActiveTabChange={(workspaceId, brokerSessionId) => {
+                  onActiveTabChange={(workspaceId, brokerSessionId, isFresh) => {
                     setActiveTabByWorkspace((prev) =>
                       prev[workspaceId] === brokerSessionId
                         ? prev
                         : { ...prev, [workspaceId]: brokerSessionId }
+                    );
+                    setActiveTabFreshByWorkspace((prev) =>
+                      prev[workspaceId] === isFresh
+                        ? prev
+                        : { ...prev, [workspaceId]: isFresh }
                     );
                   }}
                   onBusyChange={handleBusyChange}

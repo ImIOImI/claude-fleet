@@ -42,8 +42,10 @@ test('Committee: expert opt-in → wifi chip; manager grant → manager chip (#1
 
     // 2) Select mgr-one and grant it `post` over expert-sec in the matrix.
     await window.locator('.ws-chip', { hasText: 'mgr-one' }).click();
-    // The Committee accordion section is present and open by default.
-    await expect(window.getByRole('button', { name: /Committee/ })).toBeVisible();
+    // The Committee accordion section is present and open by default. Match the
+    // accordion header exactly — `/Committee/` also matches the left-rail
+    // "Collapse Committee Manager" chevron (strict-mode ambiguity).
+    await expect(window.getByRole('button', { name: 'Committee', exact: true })).toBeVisible();
     const postBox = window.getByLabel('post expert-sec');
     await expect(postBox).toBeVisible({ timeout: 5_000 });
     await postBox.check();
