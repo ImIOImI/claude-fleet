@@ -18,6 +18,7 @@ import { createPortal } from 'react-dom';
 import type { WorkspaceObservabilitySummary } from '../../../preload';
 import type { MirrorSetting, CleanupSetting } from '../App';
 import { TerminalSession } from './TerminalSession';
+import { readyToRefresh } from './refreshQueue';
 
 interface Props {
   containerId: string;
@@ -107,6 +108,11 @@ interface Props {
   /** Fired the moment the active session actually starts reloading (after the
    *  idle gate) — App uses it to show a "reloading…" toast over the flicker. */
   onReloadStarted?: () => void;
+  /**
+   * Fired when the user picks Refresh on a session chip. The parent shows the
+   * shared toast; `busyNow` selects the copy ("…when idle" while claude works).
+   */
+  onRefreshRequested?: (sessionName: string, busyNow: boolean) => void;
 }
 
 function contextBarPct(summary: WorkspaceObservabilitySummary | null): number {
@@ -186,7 +192,8 @@ export function TerminalPane({
   onResumeConsumed,
   reloadRequest,
   onReloadConsumed,
-  onReloadStarted
+  onReloadStarted,
+  onRefreshRequested
 }: Props) {
   // Transient `[committee]` toast (#123): show the injected message briefly so a
   // human watching this expert knows why text just appeared, then auto-dismiss.
@@ -475,6 +482,43 @@ export function TerminalPane({
     setReloadTargets((prev) => ({ ...prev, [activeId]: ++reloadTokenRef.current }));
     onReloadStarted?.();
   }, [pendingReload, activeId, busyIds, onReloadStarted]);
+
+  // Manual chip-menu Refresh: a per-session queue. requestRefresh enqueues a
+  // session id and shows the toast at click time; this effect drains the queue
+  // into reloadTargets once each session is idle (readyToRefresh enforces the
+  // not-busy / not-ended / still-exists rule). Shares reloadTargets with the
+  // loadout reload, so a loadout reload of one tab and a manual refresh of
+  // another fire independently when each goes idle.
+  const [pendingRefresh, setPendingRefresh] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    if (pendingRefresh.size === 0) return;
+    const existing = new Set(sessions.map((s) => s.id));
+    const ready = readyToRefresh(pendingRefresh, busyIds, endedIds, existing);
+    if (ready.length === 0) return;
+    setPendingRefresh((prev) => {
+      const next = new Set(prev);
+      ready.forEach((id) => next.delete(id));
+      return next;
+    });
+    setReloadTargets((prev) => {
+      const next = { ...prev };
+      ready.forEach((id) => {
+        next[id] = ++reloadTokenRef.current;
+      });
+      return next;
+    });
+  }, [pendingRefresh, busyIds, endedIds, sessions]);
+
+  function requestRefresh(s: Session): void {
+    if (!loaded || endedIds.has(s.id)) return;
+    setPendingRefresh((prev) => {
+      if (prev.has(s.id)) return prev;
+      const next = new Set(prev);
+      next.add(s.id);
+      return next;
+    });
+    onRefreshRequested?.(s.name, busyIds.has(s.id));
+  }
 
   function closeSession(id: string): void {
     if (!loaded) return;
