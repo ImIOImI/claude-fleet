@@ -16,11 +16,32 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { colorFor } from '../App';
 import type { SessionListItem } from '../../../preload';
 import { sessionsForScope } from '../sessionsView';
+import { useBlinkSync } from '../blinkSync';
 
 type Scope = 'workspace' | 'all';
 
+/**
+ * Leading "busy" pulse on a Sessions row whose claude session is actively
+ * working. Wall-clock-synchronized via `useBlinkSync` so it blinks in lockstep
+ * with the workspace chip + session-tab indicators. A component (not an inline
+ * span) so the hook runs unconditionally — the dot is only mounted when busy.
+ */
+function SessionBusyDot(): JSX.Element {
+  const blink = useBlinkSync(true);
+  return (
+    <span
+      className="session-busy-dot"
+      style={blink}
+      aria-label="Claude is working"
+      title="Claude is working…"
+    />
+  );
+}
+
 interface Props {
   selectedWorkspaceId: string | null;
+  /** Claude session UUIDs whose session is actively working — pulses its row. */
+  busySessionIds?: Set<string>;
   /** Resume a session — App brings the container up, then opens a resume tab. */
   onResume: (item: SessionListItem) => void;
   /** When true, render without the outer `.pane` wrapper / title — the
@@ -49,7 +70,12 @@ function formatUsd(usd: number): string {
   return `$${Math.round(usd).toLocaleString('en-US')}`;
 }
 
-export function SessionsPane({ selectedWorkspaceId, onResume, embedded = false }: Props) {
+export function SessionsPane({
+  selectedWorkspaceId,
+  busySessionIds,
+  onResume,
+  embedded = false
+}: Props) {
   const [scope, setScope] = useState<Scope>('workspace');
   const [query, setQuery] = useState('');
   const [items, setItems] = useState<SessionListItem[]>([]);
@@ -177,8 +203,10 @@ export function SessionsPane({ selectedWorkspaceId, onResume, embedded = false }
                 name: s.workspaceName,
                 color: s.workspaceColorHue != null ? { hue: s.workspaceColorHue } : undefined
               });
+              const busy = busySessionIds?.has(s.id) ?? false;
               return (
-                <li key={s.id} className="session-row">
+                <li key={s.id} className={`session-row${busy ? ' busy' : ''}`}>
+                  {busy && <SessionBusyDot />}
                   <div className="session-row-main">
                     {editing ? (
                       <input

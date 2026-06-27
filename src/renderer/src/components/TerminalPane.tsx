@@ -19,6 +19,26 @@ import type { WorkspaceObservabilitySummary } from '../../../preload';
 import type { MirrorSetting, CleanupSetting } from '../App';
 import { TerminalSession } from './TerminalSession';
 import { readyToRefresh } from './refreshQueue';
+import { useBlinkSync } from '../blinkSync';
+
+/**
+ * A session tab's status dot. `live`/`ended` colors it; `busy` makes it pulse
+ * (claude is working in this session), wall-clock-synchronized via `useBlinkSync`
+ * so it blinks in lockstep with the workspace chip + Sessions-row indicators.
+ * A separate component because the hook can't run inside the `.map()` over tabs.
+ */
+function SessionTabDot({ ended, busy }: { ended: boolean; busy: boolean }): JSX.Element {
+  const pulsing = busy && !ended;
+  const blink = useBlinkSync(pulsing);
+  return (
+    <span
+      className={`session-tab-dot ${ended ? 'ended' : 'live'} ${pulsing ? 'busy' : ''}`}
+      style={blink}
+      aria-label={ended ? 'session ended' : pulsing ? 'Claude is working' : 'session live'}
+      title={ended ? 'session ended' : pulsing ? 'Claude is working…' : 'session live'}
+    />
+  );
+}
 
 interface Props {
   containerId: string;
@@ -86,6 +106,14 @@ interface Props {
    * "working" indicator in App.
    */
   onBusyChange?: (workspaceId: string, busy: boolean) => void;
+  /**
+   * Reports the full set of this workspace's currently-busy *broker* session
+   * ids whenever it changes. App resolves these to claude session UUIDs to
+   * pulse the matching rows in the left-rail Sessions list. Distinct from
+   * `onBusyChange` (a per-workspace aggregate that drives the chip): this
+   * carries per-session granularity and fires on every flip.
+   */
+  onBusyIdsChange?: (workspaceId: string, brokerSessionIds: string[]) => void;
   /**
    * A resume request targeted at THIS workspace (App only passes it to the
    * matching pane). Opens a new tab that attaches with `claude --resume
@@ -197,6 +225,7 @@ export function TerminalPane({
   onResume,
   onActiveTabChange,
   onBusyChange,
+  onBusyIdsChange,
   resumeRequest,
   onResumeConsumed,
   reloadRequest,
@@ -248,6 +277,9 @@ export function TerminalPane({
     else set.delete(sessionId);
     const now = set.size > 0;
     if (now !== was) onBusyChange?.(workspaceId, now);
+    // Always emit the per-session set (not just on aggregate flips) so App can
+    // pulse exactly the running sessions' rows in the Sessions list.
+    onBusyIdsChange?.(workspaceId, [...set]);
     setBusyIds(new Set(set));
   };
 
@@ -675,11 +707,7 @@ export function TerminalPane({
               }}
               onDragEnd={() => setDragSessionId(null)}
             >
-              <span
-                className={`session-tab-dot ${ended ? 'ended' : 'live'}`}
-                aria-label={ended ? 'session ended' : 'session live'}
-                title={ended ? 'session ended' : 'session live'}
-              />
+              <SessionTabDot ended={ended} busy={busyIds.has(s.id)} />
               {renamingId === s.id ? (
                 <input
                   className="session-tab-rename"

@@ -1,8 +1,20 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { WorkspaceObservabilitySummary } from '../../../preload';
-import { colorFor, type WorkspaceSummary } from '../App';
+import { colorFor, type WorkspaceState, type WorkspaceSummary } from '../App';
 import { isManager, isReachable, ManagerGlyph, WifiGlyph } from './committee';
+import { useBlinkSync } from '../blinkSync';
+
+/**
+ * The chip's status dot. A separate component so the busy pulse can be
+ * wall-clock-synchronized via `useBlinkSync` (a hook, so it can't live in the
+ * `.map()` over workspaces) — keeping the chip dot in lockstep with the session
+ * tab + Sessions-row busy pulses.
+ */
+function ChipDot({ state, busy }: { state: WorkspaceState; busy: boolean }): JSX.Element {
+  const blink = useBlinkSync(busy);
+  return <span className={`dot ${state} ${busy ? 'busy' : ''}`} style={blink} />;
+}
 
 /** Tooltip describing a reachable workspace's committee opt-in. */
 function reachableTitle(w: WorkspaceSummary): string {
@@ -268,7 +280,7 @@ export function WorkspaceTabStrip({
             onClick={() => onSelect(w.id)}
             title={busy ? 'Claude is working…' : w.status}
           >
-            <span className={`dot ${w.state} ${busy ? 'busy' : ''}`} />
+            <ChipDot state={w.state} busy={busy} />
             {w.state === 'paused' && (
               <svg
                 viewBox="0 0 8 8"

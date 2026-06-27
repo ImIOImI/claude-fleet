@@ -556,6 +556,17 @@ body {
   flex: none;
 }
 .session-row-cost { margin-left: auto; font-family: var(--font-mono); }
+/* Busy: claude actively working in this session — a leading dot pulses, in
+   lockstep with the workspace chip + session-tab indicators (wall-clock
+   synced via blinkSync). Reuses the chip's `chipBusyPulse` keyframes. */
+.session-busy-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--ok);
+  animation: chipBusyPulse 1s ease-in-out infinite;
+}
 
 .session-row-actions {
   display: flex;
@@ -1986,6 +1997,12 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
 }
 .session-tab .session-tab-dot.ended {
   background: var(--c3);
+}
+/* Busy: claude actively working in this session's tab — the live dot pulses,
+   in lockstep with the workspace chip + Sessions-row indicators (wall-clock
+   synced via blinkSync). Reuses the chip's `chipBusyPulse` keyframes. */
+.session-tab .session-tab-dot.busy {
+  animation: chipBusyPulse 1s ease-in-out infinite;
 }
 .session-tab .session-tab-name { font-weight: 500; }
 .session-tab .session-tab-close {

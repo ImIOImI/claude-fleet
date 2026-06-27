@@ -12,6 +12,7 @@ import { EditWorkspaceModal, containerLevelChanged } from './components/EditWork
 import { SettingsModal } from './components/SettingsModal';
 import { useDropIngestion } from './dropIngestion';
 import { contextBarSummary } from './contextBarSource';
+import { busyClaudeIdSet } from './busySessions';
 import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget } from '../../preload';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
@@ -227,6 +228,21 @@ export function App() {
   const handleBusyChange = useCallback((workspaceId: string, busy: boolean) => {
     setBusyByWorkspace((prev) => (prev[workspaceId] === busy ? prev : { ...prev, [workspaceId]: busy }));
   }, []);
+
+  // Per-workspace busy *broker* session ids (the granular form of the busy
+  // flag above), bubbled up from each TerminalPane. Resolved below to the set
+  // of busy *claude* session UUIDs so the left-rail Sessions list can pulse
+  // exactly the running sessions' rows.
+  const [busyBrokerByWorkspace, setBusyBrokerByWorkspace] = useState<Record<string, string[]>>({});
+  const handleBusyIds = useCallback((workspaceId: string, ids: string[]) => {
+    setBusyBrokerByWorkspace((prev) => {
+      const prevIds = prev[workspaceId] ?? [];
+      // Order-insensitive equality — skip the state churn when nothing changed.
+      if (prevIds.length === ids.length && prevIds.every((id) => ids.includes(id))) return prev;
+      return { ...prev, [workspaceId]: ids };
+    });
+  }, []);
+  const [busySessionIds, setBusySessionIds] = useState<Set<string>>(new Set());
 
   // Latest committee message injected into each workspace (#123). The `nonce`
   // bumps on every inbound so TerminalPane re-shows its `[committee]` toast even
@@ -571,6 +587,57 @@ export function App() {
     };
   }, [apiReady, selectedWorkspaceId, activeTabId]);
 
+  // Resolve busy *broker* session ids → busy *claude* session UUIDs for the
+  // left-rail Sessions list. `summaryForBrokerSession` carries the mapped
+  // claude session id (`sessionId`). Re-runs when the busy set changes and on
+  // every observability push — the broker→claude mapping is learned as
+  // transcripts ingest, so a freshly-busy session may not resolve on the first
+  // try. Keyed on a stable, order-insensitive serialization of the busy set.
+  const busyBrokerKey = JSON.stringify(
+    Object.entries(busyBrokerByWorkspace)
+      .filter(([, ids]) => ids.length > 0)
+      .map(([ws, ids]) => [ws, [...ids].sort()] as const)
+      .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+  );
+  useEffect(() => {
+    if (!apiReady) {
+      setBusySessionIds(new Set());
+      return;
+    }
+    let cancelled = false;
+    const resolve = async (): Promise<void> => {
+      const mappings = new Map<string, Map<string, string>>();
+      await Promise.all(
+        Object.entries(busyBrokerByWorkspace).map(async ([wsId, ids]) => {
+          if (ids.length === 0) return;
+          const m = new Map<string, string>();
+          await Promise.all(
+            ids.map(async (brokerId) => {
+              try {
+                const sum = await window.api.observability.summaryForBrokerSession(wsId, brokerId);
+                if (sum?.sessionId) m.set(brokerId, sum.sessionId);
+              } catch {
+                /* mapping not learned yet — this session simply won't pulse */
+              }
+            })
+          );
+          mappings.set(wsId, m);
+        })
+      );
+      if (cancelled) return;
+      const next = busyClaudeIdSet(busyBrokerByWorkspace, mappings);
+      setBusySessionIds((prev) =>
+        prev.size === next.size && [...prev].every((id) => next.has(id)) ? prev : next
+      );
+    };
+    void resolve();
+    const unsubscribe = window.api.observability.onSummary(() => void resolve());
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [apiReady, busyBrokerKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
   if (!apiReady) {
     return (
       <div className="app">
@@ -864,6 +931,7 @@ export function App() {
           workspaces={workspaces}
           selectedWorkspaceId={selectedId}
           selectedWorkspace={selectedWorkspace}
+          busySessionIds={busySessionIds}
           collapsed={leftCollapsed}
           onToggleCollapse={toggleLeftCollapsed}
           onResume={handleResumeSession}
@@ -929,6 +997,7 @@ export function App() {
                     );
                   }}
                   onBusyChange={handleBusyChange}
+                  onBusyIdsChange={handleBusyIds}
                   resumeRequest={resumeRequest?.workspaceId === w.id ? resumeRequest : null}
                   onResumeConsumed={() => setResumeRequest(null)}
                   reloadRequest={reloadRequest?.workspaceId === w.id ? reloadRequest : null}
