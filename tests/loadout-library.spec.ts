@@ -7,7 +7,7 @@ import { test, expect } from '@playwright/test';
 import { launch, mockMainIpc, getCalls } from './_helpers.js';
 
 test('Library: accordion lists starters, search filters, install + uninstall round-trip (#16)', async () => {
-  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  const { app, window } = await launch();
   try {
     // Create a container workspace — install needs a manifest on disk to track.
     await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
@@ -48,7 +48,7 @@ test('Library: accordion lists starters, search filters, install + uninstall rou
 });
 
 test('Library: clicking a card opens the review with files + Install (#16)', async () => {
-  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  const { app, window } = await launch();
   try {
     await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
     await window.getByLabel('Workspace name').fill('lib-test2');
@@ -78,7 +78,7 @@ test('Library: clicking a card opens the review with files + Install (#16)', asy
 });
 
 test('Library: per-card chevron + Collapse all / Expand all (view A)', async () => {
-  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  const { app, window } = await launch();
   try {
     await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
     await window.getByLabel('Workspace name').fill('lib-collapse');

@@ -485,9 +485,9 @@ Renderer: `LeftRail.tsx` (the accordion shell — Sessions section reuses `Sessi
 
 **IPC (Phase 1, all privileged main process):**
 - `loadouts:catalog(workspaceId?)` → `CatalogEntry[]` — assembles the local library with per-workspace install state (`installed`, `installedVersion`, `updateAvailable`), `present` (folder exists on disk), and `favorited` (from `config.json`). Returns all entries when `workspaceId` is omitted (used by the browser modal, which shows the full catalog regardless of workspace selection).
-- `loadouts:setFavorite(id, on)` → `string[]` — toggles one loadout's membership in `config.json`'s `favoritedLoadouts` set and returns the updated set. Favorites are global (user-level, not workspace-scoped).
+- `loadouts:setFavorite(id, on)` → `string[]` — toggles one loadout's membership in `config.json`'s `favorites` set and returns the updated set. Favorites are global (user-level, not workspace-scoped).
 
-**Favorites (global).** `config.json` gains a `favoritedLoadouts: string[]` field. The field is absent-tolerant (defaults to `[]`) and is written by `loadouts:setFavorite`. The catalog builder reads it and sets `favorited: boolean` per entry. There is one favorites set for the whole app; per-entry `installed`/`updateAvailable` state is relative to the selected workspace.
+**Favorites (global).** `config.json` gains a `favorites: string[]` field. The field is absent-tolerant (defaults to `[]`) and is written by `loadouts:setFavorite`. The catalog builder reads it and sets `favorited: boolean` per entry. There is one favorites set for the whole app; per-entry `installed`/`updateAvailable` state is relative to the selected workspace.
 
 **Left-rail additions (Phase 1).** The library pane gains two affordances beside the existing Tags dropdown: a **`.fav-filter`** toggle button (☆/★) that, when active (`.on`), filters the card list to `favorited === true` only; and a **`.lib-browse`** "Browse all" button that opens the browser modal. Each expanded card gains a **`.lc-fav`** button (☆ Favorite / ★ Favorited) that calls `loadouts:setFavorite` and triggers a catalog reload.
 
