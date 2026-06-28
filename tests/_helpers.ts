@@ -174,6 +174,19 @@ export interface MockOpts {
   // Fleet root returned from config:get (sharedDir is `${fleetRoot}/shared`).
   // Defaults to /tmp/fleet.
   fleetRoot?: string;
+  // Loadout catalog entries returned from loadouts:catalog. Defaults to [].
+  loadoutCatalog?: Array<{
+    id: string;
+    title: string;
+    description: string;
+    tags: string[];
+    version: string;
+    present: boolean;
+    installed: boolean;
+    updateAvailable: boolean;
+    favorited: boolean;
+    sources: string[];
+  }>;
 }
 
 export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {}): Promise<void> {
@@ -193,7 +206,8 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       openPath: [],
       setFleetRoot: [],
       vaultSetSecret: [],
-      vaultDeleteAllForWorkspace: []
+      vaultDeleteAllForWorkspace: [],
+      setFavorite: []
     };
 
     const channels = [
@@ -223,7 +237,9 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       'observability:summaryForWorkspace',
       'observability:summaryForBrokerSession',
       'observability:getCost',
-      'observability:getCostForWorkspace'
+      'observability:getCostForWorkspace',
+      'loadouts:catalog',
+      'loadouts:setFavorite'
     ];
     for (const ch of channels) {
       try {
@@ -406,6 +422,15 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
         return null;
       }
     );
+    // Loadout catalog + favorites mocks. Return the caller's catalog (defaults
+    // to []) and record setFavorite calls for assertion.
+    const catalog = opts.loadoutCatalog ?? [];
+    ipcMain.handle('loadouts:catalog', () => catalog);
+    ipcMain.handle('loadouts:setFavorite', (_e, id: string, on: boolean) => {
+      g.__calls.setFavorite.push({ id, on });
+      return undefined;
+    });
+
     // Cost endpoints used by the sessions table and detail views;
     // return zeroed data for tests that don't care.
     const zeroCost = {

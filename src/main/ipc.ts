@@ -22,8 +22,10 @@ import {
   getUsageBudget,
   setUsageBudget,
   USAGE_BUDGET_WINDOW_HOURS,
-  type UsageBudgetPreset
+  type UsageBudgetPreset,
+  setFavorite
 } from './config.js';
+import { buildLoadoutCatalog } from './loadoutCatalog.js';
 import * as realDocker from './docker.js';
 import * as realLocal from './local.js';
 import * as mockDocker from './mock.js';
@@ -887,6 +889,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     const dir = loadoutDir(id);
     return RUNNING_IN_WSL ? openPathViaExplorer(dir) : shell.openPath(dir);
   });
+  ipcMain.handle('loadouts:catalog', (_e, workspaceId?: string) => buildLoadoutCatalog(workspaceId));
+  ipcMain.handle('loadouts:setFavorite', (_e, id: string, on: boolean) => setFavorite(id, on));
 
   // App-level settings. The fleet root is the single host dir holding every
   // workspace's private folder (<root>/<id>) plus the shared folder

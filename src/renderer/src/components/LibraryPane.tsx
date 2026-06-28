@@ -3,16 +3,11 @@
 // into the selected workspace. Clicking a card opens the review modal; an
 // installed card offers a ⋮ → Uninstall shortcut.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { WorkspaceSummary } from '../App';
 import { LoadoutReviewModal } from './LoadoutReviewModal';
 
-interface LoadoutSummary {
-  id: string;
-  title: string;
-  description: string;
-  tags: string[];
-}
+type Entry = Awaited<ReturnType<typeof window.api.loadouts.catalog>>[number];
 
 /** localStorage key for the set of collapsed loadout ids (default: expanded). */
 const COLLAPSE_KEY = 'loadoutLibraryCollapsed';
@@ -23,13 +18,16 @@ interface Props {
   onChanged: () => void;
   /** A loadout finished installing into this workspace (#16 auto-reload). */
   onInstalled?: (workspaceId: string) => void;
+  /** Open the browse-all / OCI registry browser (wired in Task 6). */
+  onBrowse?: () => void;
 }
 
-export function LibraryPane({ selectedWorkspace, onChanged, onInstalled }: Props) {
-  const [loadouts, setLoadouts] = useState<LoadoutSummary[]>([]);
+export function LibraryPane({ selectedWorkspace, onChanged, onInstalled, onBrowse }: Props) {
+  const [entries, setEntries] = useState<Entry[]>([]);
   const [query, setQuery] = useState('');
   const [activeTags, setActiveTags] = useState<string[]>([]);
   const [tagMenu, setTagMenu] = useState(false);
+  const [favOnly, setFavOnly] = useState(false);
   const [reviewId, setReviewId] = useState<string | null>(null);
   const [menuId, setMenuId] = useState<string | null>(null);
   // Per-card collapse — cards default expanded; the set holds collapsed ids,
@@ -60,16 +58,21 @@ export function LibraryPane({ selectedWorkspace, onChanged, onInstalled }: Props
       return next;
     });
 
+  const reload = useCallback(async () => {
+    try {
+      setEntries(await window.api.loadouts.catalog(selectedWorkspace?.id));
+    } catch {
+      setEntries([]);
+    }
+  }, [selectedWorkspace?.id]);
+
   useEffect(() => {
-    window.api.loadouts
-      .list()
-      .then((l) => setLoadouts(l as LoadoutSummary[]))
-      .catch(() => setLoadouts([]));
-  }, []);
+    void reload();
+  }, [reload]);
 
   const installedIds = useMemo(
-    () => new Set((selectedWorkspace?.installedLoadouts ?? []).map((l) => l.id)),
-    [selectedWorkspace]
+    () => new Set(entries.filter((e) => e.installed).map((e) => e.id)),
+    [entries]
   );
   const installable =
     !!selectedWorkspace &&
@@ -79,26 +82,27 @@ export function LibraryPane({ selectedWorkspace, onChanged, onInstalled }: Props
 
   const allTags = useMemo(() => {
     const c = new Map<string, number>();
-    for (const l of loadouts) for (const t of l.tags) c.set(t, (c.get(t) ?? 0) + 1);
+    for (const e of entries) for (const t of e.tags) c.set(t, (c.get(t) ?? 0) + 1);
     return [...c.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  }, [loadouts]);
+  }, [entries]);
 
   const toggleTag = (t: string): void =>
     setActiveTags((p) => (p.includes(t) ? p.filter((x) => x !== t) : [...p, t]));
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return loadouts.filter((l) => {
+    return entries.filter((e) => {
+      if (favOnly && !e.favorited) return false;
       const matchesQ =
-        !q || l.title.toLowerCase().includes(q) || l.description.toLowerCase().includes(q);
-      const matchesTags = activeTags.length === 0 || activeTags.some((t) => l.tags.includes(t));
+        !q || e.title.toLowerCase().includes(q) || e.description.toLowerCase().includes(q);
+      const matchesTags = activeTags.length === 0 || activeTags.some((t) => e.tags.includes(t));
       return matchesQ && matchesTags;
     });
-  }, [loadouts, query, activeTags]);
+  }, [entries, query, activeTags, favOnly]);
 
   // Header toggle, scoped to the visible (filtered) cards: collapse them all
   // when most are open, otherwise expand them all.
-  const visibleIds = filtered.map((l) => l.id);
+  const visibleIds = filtered.map((e) => e.id);
   const mostlyExpanded =
     visibleIds.filter((id) => collapsed.has(id)).length <= visibleIds.length / 2;
   const bulkToggle = (): void =>
@@ -115,11 +119,13 @@ export function LibraryPane({ selectedWorkspace, onChanged, onInstalled }: Props
     await window.api.loadouts.install(selectedWorkspace.id, id);
     onChanged();
     onInstalled?.(selectedWorkspace.id);
+    void reload();
   };
   const doUninstall = async (id: string): Promise<void> => {
     if (!selectedWorkspace) return;
     await window.api.loadouts.uninstall(selectedWorkspace.id, id);
     onChanged();
+    void reload();
   };
 
   const note = !installable
@@ -141,6 +147,9 @@ export function LibraryPane({ selectedWorkspace, onChanged, onInstalled }: Props
           onChange={(e) => setQuery(e.target.value)}
           aria-label="Search loadouts"
         />
+        <button type="button" className="btn btn-sm lib-browse" onClick={() => onBrowse?.()}>
+          Browse all
+        </button>
       </div>
 
       <div className="library-filter">
@@ -151,13 +160,22 @@ export function LibraryPane({ selectedWorkspace, onChanged, onInstalled }: Props
         >
           Tags ▾
         </button>
+        <button
+          type="button"
+          className={`fav-filter ${favOnly ? 'on' : ''}`}
+          aria-pressed={favOnly}
+          title="Show favorites only"
+          onClick={() => setFavOnly((v) => !v)}
+        >
+          {favOnly ? '★' : '☆'}
+        </button>
         {activeTags.map((t) => (
           <button key={t} className="pill" onClick={() => toggleTag(t)} title="Remove filter">
             {t} ✕
           </button>
         ))}
         <span className="nofm">
-          {filtered.length} of {loadouts.length}
+          {filtered.length} of {entries.length}
         </span>
         {tagMenu && (
           <div className="tag-menu" onMouseLeave={() => setTagMenu(false)}>
@@ -194,50 +212,50 @@ export function LibraryPane({ selectedWorkspace, onChanged, onInstalled }: Props
 
       <div className="library-cards">
         {filtered.length === 0 && <div className="pane-placeholder subdued">No loadouts match.</div>}
-        {filtered.map((l) => {
-          const inst = installedIds.has(l.id);
-          const isCollapsed = collapsed.has(l.id);
+        {filtered.map((e) => {
+          const inst = installedIds.has(e.id);
+          const isCollapsed = collapsed.has(e.id);
           return (
             <div
-              key={l.id}
+              key={e.id}
               className={`loadout-card ${inst ? 'installed' : ''} ${isCollapsed ? 'collapsed' : ''}`}
-              onClick={() => setReviewId(l.id)}
+              onClick={() => setReviewId(e.id)}
             >
               <div className="lc-top">
                 <div className="lc-title">
                   <button
                     type="button"
                     className="lc-chevron"
-                    aria-label={isCollapsed ? `Expand ${l.title}` : `Collapse ${l.title}`}
+                    aria-label={isCollapsed ? `Expand ${e.title}` : `Collapse ${e.title}`}
                     aria-expanded={!isCollapsed}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toggleCollapse(l.id);
+                    onClick={(ev) => {
+                      ev.stopPropagation();
+                      toggleCollapse(e.id);
                     }}
                   >
                     <ChevronIcon />
                   </button>
-                  <span className="lc-title-text">{l.title}</span>
+                  <span className="lc-title-text">{e.title}</span>
                 </div>
-                <div className="lc-actions" onClick={(e) => e.stopPropagation()}>
+                <div className="lc-actions" onClick={(ev) => ev.stopPropagation()}>
                   {inst ? (
                     <>
-                      <button className="btn installed btn-sm" onClick={() => setReviewId(l.id)}>
+                      <button className="btn installed btn-sm" onClick={() => setReviewId(e.id)}>
                         ✓ Installed
                       </button>
                       <button
                         className="lc-menu-trigger"
                         aria-label="Loadout actions"
-                        onClick={() => setMenuId((m) => (m === l.id ? null : l.id))}
+                        onClick={() => setMenuId((m) => (m === e.id ? null : e.id))}
                       >
                         ⋮
                       </button>
-                      {menuId === l.id && (
+                      {menuId === e.id && (
                         <div className="lc-menu" onMouseLeave={() => setMenuId(null)}>
                           <button
                             onClick={() => {
                               setMenuId(null);
-                              setReviewId(l.id);
+                              setReviewId(e.id);
                             }}
                           >
                             Review
@@ -246,7 +264,7 @@ export function LibraryPane({ selectedWorkspace, onChanged, onInstalled }: Props
                             className="danger"
                             onClick={() => {
                               setMenuId(null);
-                              void doUninstall(l.id);
+                              void doUninstall(e.id);
                             }}
                           >
                             Uninstall
@@ -258,22 +276,35 @@ export function LibraryPane({ selectedWorkspace, onChanged, onInstalled }: Props
                     <button
                       className="btn primary btn-sm"
                       disabled={!installable}
-                      onClick={() => void doInstall(l.id)}
+                      onClick={() => void doInstall(e.id)}
                     >
                       + Install
                     </button>
                   )}
                 </div>
               </div>
-              {!isCollapsed && l.description && <div className="lc-desc">{l.description}</div>}
-              {!isCollapsed && l.tags.length > 0 && (
+              {!isCollapsed && e.description && <div className="lc-desc">{e.description}</div>}
+              {!isCollapsed && e.tags.length > 0 && (
                 <div className="tags">
-                  {l.tags.map((t) => (
+                  {e.tags.map((t) => (
                     <span className="tag" key={t}>
                       {t}
                     </span>
                   ))}
                 </div>
+              )}
+              {!isCollapsed && (
+                <button
+                  type="button"
+                  className={`lc-fav ${e.favorited ? 'on' : ''}`}
+                  onClick={async (ev) => {
+                    ev.stopPropagation();
+                    await window.api.loadouts.setFavorite(e.id, !e.favorited);
+                    void reload();
+                  }}
+                >
+                  {e.favorited ? '★ Favorited' : '☆ Favorite'}
+                </button>
               )}
             </div>
           );
@@ -291,8 +322,12 @@ export function LibraryPane({ selectedWorkspace, onChanged, onInstalled }: Props
           onInstalled={() => {
             onChanged();
             if (selectedWorkspace) onInstalled?.(selectedWorkspace.id);
+            void reload();
           }}
-          onUninstalled={onChanged}
+          onUninstalled={() => {
+            onChanged();
+            void reload();
+          }}
         />
       )}
     </div>

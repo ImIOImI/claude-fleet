@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { assertValidWorkspaceId } from './paths.js';
+import { toggleFavorite } from './ociCore.js';
 
 /** Which plan the usage bar measures spend against. `custom` uses the
  *  user-entered token amount; the rest resolve to USAGE_BUDGET_PRESETS. */
@@ -60,6 +61,8 @@ interface AppConfig {
   autoReloadLoadouts?: boolean;
   /** Plan-usage budget for the observability rail's "tokens left" bar. */
   usageBudget?: UsageBudgetConfig;
+  /** Global loadout favorites (loadout ids), shown in every workspace's rail. */
+  favorites?: string[];
 }
 
 /** Defensively parse the persisted usageBudget (untrusted JSON on disk). */
@@ -219,6 +222,20 @@ export async function fleetPrivateDir(id: string): Promise<string> {
 /** `<fleetRoot>/shared` — mounted into every container at /shared (rw). */
 export async function fleetSharedDir(): Promise<string> {
   return join(await getFleetRoot(), 'shared');
+}
+
+/** Return the current global loadout favorites list. */
+export async function getFavorites(): Promise<string[]> {
+  const cfg = await read();
+  return cfg.favorites ?? [];
+}
+
+/** Toggle a global loadout favorite and persist it. Returns the new list. */
+export async function setFavorite(id: string, on: boolean): Promise<string[]> {
+  const cfg = await read();
+  const favorites = toggleFavorite(cfg.favorites ?? [], id, on);
+  await write({ ...cfg, favorites });
+  return favorites;
 }
 
 /** Test-only: drop the in-memory cache so a fresh read hits disk. */

@@ -10,6 +10,7 @@ import { CloseWorkspaceModal } from './components/CloseWorkspaceModal';
 import { DeleteWorkspaceModal } from './components/DeleteWorkspaceModal';
 import { EditWorkspaceModal, containerLevelChanged } from './components/EditWorkspaceModal';
 import { SettingsModal } from './components/SettingsModal';
+import LoadoutBrowserModal from './components/LoadoutBrowserModal';
 import { useDropIngestion } from './dropIngestion';
 import { contextBarSummary } from './contextBarSource';
 import { busyClaudeIdSet } from './busySessions';
@@ -156,6 +157,7 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [browseOpen, setBrowseOpen] = useState(false);
   // Observability rail collapse, persisted across restarts (pure UI pref —
   // localStorage, not the main-side config.json).
   const [obsCollapsed, setObsCollapsed] = useState(
@@ -937,6 +939,7 @@ export function App() {
           onResume={handleResumeSession}
           onChanged={refresh}
           onLoadoutInstalled={handleLoadoutInstalled}
+          onBrowse={() => setBrowseOpen(true)}
         />
 
         <main
@@ -1104,6 +1107,13 @@ export function App() {
           />
         );
       })()}
+      {browseOpen && (
+        <LoadoutBrowserModal
+          workspace={selectedWorkspace}
+          onClose={() => setBrowseOpen(false)}
+          onChanged={() => void refresh()}
+        />
+      )}
       {dragging && (
         <div className="drop-overlay" aria-hidden="true">
           <div className="drop-overlay-card">

@@ -479,72 +479,23 @@ If no resumable UUID exists (claude never started in that tab), it's a no-op —
 
 Renderer: `LeftRail.tsx` (the accordion shell — Sessions section reuses `SessionsPane` in `embedded` mode + the new Library section), `LibraryPane.tsx` (search/tag-filter + cards + install/uninstall), `LoadoutReviewModal.tsx` (the review). **Card collapse (long-list ergonomics):** each loadout card is independently collapsible via a disclosure **chevron** in its title row (collapsed = title + action only; the body — description + tags — hides). The chevron toggles that one card (stops propagation, so the card-body click still opens the review modal); a header **Collapse all / Expand all** toggle (shown when >1 card is visible) acts on the currently-filtered set, its label following whether most visible cards are open. Cards default **expanded**; the set of collapsed ids persists to `localStorage` under `loadoutLibraryCollapsed` (a pure UI preference, like the rail-collapse state) — a loadout not in the set is expanded, so new loadouts appear open. Still forthcoming: the **Requirements** section in the review (tool preflight, with the merge/run layer), the authoring modal, and the read-only MCP discovery tools.
 
-### Loadout library v2 — remote OCI sources, browser modal, favorites (designed; not yet shipped)
+### Loadout library v2 — Phase 1: local catalog, favorites, browser modal
 
-A designed-but-unbuilt evolution of the library. The pure logic core ships ahead
-of the wiring: `src/main/ociCore.ts` (ref parsing, the security-critical
-artifact-layer path sanitizer, index parsing, version compare, catalog
-assembly) is implemented and unit-tested (`ociCore.test.ts`); the networked and
-electron layers below are enumerated as `it.todo` specs in that test. Design
-doc + hi-fi mocks: [`docs/superpowers/specs/2026-06-28-loadout-library-v2-design.md`](superpowers/specs/2026-06-28-loadout-library-v2-design.md).
+**Phase 1 is implemented.** Design doc + hi-fi mocks: [`docs/superpowers/specs/2026-06-28-loadout-library-v2-design.md`](superpowers/specs/2026-06-28-loadout-library-v2-design.md). The pure OCI logic core (`src/main/ociCore.ts` — ref parsing, artifact-layer path sanitizer, index parsing, version compare) was implemented and unit-tested in an earlier step; Phase 1 wires the user-facing layer on top of the local-only catalog.
 
-- **Remote OCI sources.** The user adds **public GHCR** sources (e.g.
-  `ghcr.io/imioimi/claude-fleet-loadouts`) and downloads loadouts from them.
-  Transport is a **native, zero-dependency OCI client** in the main process
-  (`fetch` against `ghcr.io/v2/` with the anonymous-token flow: 401 → parse
-  `Www-Authenticate` → `GET ghcr.io/token?scope=repository:<repo>:pull` →
-  retry) — no `oras` binary, no host dependency. **Public/anonymous only in v1**
-  (no credentials stored); private/org GHCR (a PAT in the safeStorage vault) is
-  a clean follow-up.
-- **Discovery via an index artifact (cross-repo contract).** OCI exposes no
-  namespace listing on GHCR, so a source publishes a well-known **index
-  artifact** `<source>/index:latest`, artifactType
-  `application/vnd.claude-fleet.loadout-index.v1`, a single `index.json` layer of
-  `[{id,title,description,tags,version}]`. The app derives each loadout's pull
-  ref as `<source>/<id>:<version>`. **Pairs with claude-fleet-loadouts**: its
-  `publish-loadouts.yml` must emit the index, and its docs/skills must document
-  the format — that paired change lands with implementation (see Open
-  decisions), so nothing drifts while only the design is recorded here.
-- **Install pulls transparently — no "download" state.** There is no
-  download-without-install step. **Install** pulls the artifact into the
-  host-private library `<userData>/loadouts/<id>/` if absent or stale (caching
-  the folder byte-identical to the artifact via the layer-title tree), then runs
-  the existing `installLoadout`. Re-pull on a collision with a *locally-authored*
-  id is **confirm-before-overwrite** (never silent). **Update** = re-pull the
-  newer version, then the existing §7 Update/Sync pushes it into installed
-  workspaces.
-- **Sources + provenance** persist in `<userData>/loadouts/sources.json`
-  (`{ sources: string[], provenance: { [id]: {source, version, downloadedAt} } }`);
-  `listLoadouts` ignores it (it filters to directories). Update detection
-  compares the index version against the provenance/installed version.
-- **Favorites (global).** A single user-level favorites set (in `config.json`),
-  shown in **every** workspace's rail; per-entry install/update state is relative
-  to the selected workspace.
-- **IPC (new, all privileged main process):** `loadouts:catalog(workspaceId?)`
-  (assembled local+remote with per-workspace state), `loadouts:listSources` /
-  `addSource(ref)` / `removeSource(ref)` / `refreshSources`,
-  `loadouts:download(ref,id,version)`, `loadouts:setFavorite(id, on)`.
-  `loadouts:install` is revised to pull-if-needed. The MCP server stays
-  read-only — all of this is host-side IPC, consistent with §7's "writes never
-  go through MCP".
-- **Security (§9 preserved).** Downloads land only in the host-private
-  `<userData>/loadouts/` — **never bind-mounted into a container**, like today's
-  library. The only new exposure is outbound main→`ghcr.io`. The
-  `ociCore.safeLayerPath` guard confines every reconstructed layer to the
-  loadout folder (rejects `..`/absolute titles), and `parseIndex` rejects a
-  malformed/hostile index.
-- **UI.** A **browser modal** (the "facet sidebar" layout: source checkboxes +
-  tag cloud + search; results with Install / Installed / Update) is the full
-  catalog browser over local + remote. The **left rail is unchanged** from today
-  (search, tag filter, per-card expand/collapse, install/uninstall, ⋮ menu) plus
-  three minimal additions: an `Update ↑` affordance on a card with a newer
-  remote version, a **favorite toggle that appears only in the expanded card**
-  (no per-row stars), and a **non-intrusive favorites filter** (a small ★ icon
-  toggle beside the Tags dropdown). New primitives this introduces — a `--warn`
-  `.btn.update`, the facet checkbox-list/inset panel, the favorite ★ + favorites
-  filter — are catalogued in the design doc's style guide; the only reconcile is
-  the primary-button drift (design artboard's ink-inverted vs shipped green
-  `.btn.primary`), resolved to **shipped** as canonical.
+**IPC (Phase 1, all privileged main process):**
+- `loadouts:catalog(workspaceId?)` → `CatalogEntry[]` — assembles the local library with per-workspace install state (`installed`, `installedVersion`, `updateAvailable`), `present` (folder exists on disk), and `favorited` (from `config.json`). Returns all entries when `workspaceId` is omitted (used by the browser modal, which shows the full catalog regardless of workspace selection).
+- `loadouts:setFavorite(id, on)` → `string[]` — toggles one loadout's membership in `config.json`'s `favorites` set and returns the updated set. Favorites are global (user-level, not workspace-scoped).
+
+**Favorites (global).** `config.json` gains a `favorites: string[]` field. The field is absent-tolerant (defaults to `[]`) and is written by `loadouts:setFavorite`. The catalog builder reads it and sets `favorited: boolean` per entry. There is one favorites set for the whole app; per-entry `installed`/`updateAvailable` state is relative to the selected workspace.
+
+**Left-rail additions (Phase 1).** The library pane gains two affordances beside the existing Tags dropdown: a **`.fav-filter`** toggle button (☆/★) that, when active (`.on`), filters the card list to `favorited === true` only; and a **`.lib-browse`** "Browse all" button that opens the browser modal. Each expanded card gains a **`.lc-fav`** button (☆ Favorite / ★ Favorited) that calls `loadouts:setFavorite` and triggers a catalog reload.
+
+**Browser modal (`LoadoutBrowserModal`).** Renders as `.modal.loadout-browser` (720 px wide, flex column). Layout: `.lb-head` (title + close); `.lb-body` grid (200 px `.lb-facets` sidebar + `.lb-results` list). The facets sidebar has a `.lb-search` input and a `.lb-tagcloud` of `.lb-tag` pills (each togglable, `.on` when active — tag filter requires *all* active tags). Each result row is `.lb-row` with `.lb-row-main` (title, tags, description) and `.lb-row-actions` (`.lc-fav` toggle + Install / Installed button). Phase 2 will add source checkboxes and the Update ↑ affordance.
+
+**Styles (new classes, `styles.css`).** `.fav-filter`, `.fav-filter.on`, `.lc-fav`, `.lc-fav.on`, `.lib-browse`, `.modal.loadout-browser`, `.lb-head`, `.lb-body`, `.lb-facets`, `.lb-search`, `.lb-tagcloud`, `.lb-tag`, `.lb-tag.on`, `.lb-results`, `.lb-row`, `.lb-row-main`, `.lb-row-title`, `.lb-row-desc`, `.lb-row-actions`, `.lb-empty`. All use the existing token set (`--ok`, `--rule`, `--bg-3`, `--ink`, `--ink-2`, `--r-sm`, `--r-md`).
+
+**Phase 2 (not yet built).** Remote OCI sources: the user adds public GHCR sources (e.g. `ghcr.io/imioimi/claude-fleet-loadouts`); the app fetches them via a native, zero-dependency OCI client (`fetch` + anonymous-token flow). Discovery via a well-known **index artifact** `<source>/index:latest` (artifactType `application/vnd.claude-fleet.loadout-index.v1`, a single `index.json` layer of `[{id,title,description,tags,version}]`). Install pulls the artifact into `<userData>/loadouts/<id>/` if absent or stale, then runs the existing `installLoadout`. Sources + provenance persist in `<userData>/loadouts/sources.json`. Update detection compares index version against provenance/installed version. New IPC: `loadouts:listSources` / `addSource` / `removeSource` / `refreshSources` / `download`. An `Update ↑` affordance on cards with a newer remote version. **Cross-repo dependency (governance):** the paired `claude-fleet-loadouts` change (emitting `<source>/index:latest` from `publish-loadouts.yml` and documenting the format) must land in the same change per the workspace CLAUDE.md cross-repo contract rule.
 
 ## 8. User flows
 
@@ -756,8 +707,8 @@ claude-fleet/
 
 These are decided in spirit but not yet implemented. When you implement one, move it out of this section and into the relevant body section above.
 
-### Loadout library v2 — remote OCI sources, browser modal, favorites
-Designed in §7 ("Loadout library v2"). Pure core (`ociCore.ts`) is implemented + unit-tested; the networked (`ociClient.ts`) and electron-wired (`loadoutSources.ts`) layers, the new IPC, the browser modal, and the rail additions (Update affordance, expanded favorite toggle, favorites filter) are not yet built — enumerated as `it.todo` in `ociCore.test.ts`. **Cross-repo dependency (governance):** discovery relies on an **index artifact** published by `claude-fleet-loadouts`; that repo's `publish-loadouts.yml` must emit `<source>/index:latest` (artifactType `application/vnd.claude-fleet.loadout-index.v1`) and its README/skills must document the format. Per the workspace's CLAUDE.md cross-repo contract rule, that paired change lands **in the same change as the consumer implementation** — recorded here so it isn't re-litigated and so no drift ships before then.
+### Loadout library v2 — remote OCI sources + update detection (Phase 2)
+**Phase 1 (local catalog + favorites + browser modal) is implemented** — see §7 "Loadout library v2 — Phase 1". Phase 2 (remote OCI sources, index artifact, update detection, paired `claude-fleet-loadouts` publish) is not yet built. The pure OCI logic core (`ociCore.ts`) is implemented + unit-tested; the networked (`ociClient.ts`) and electron-wired (`loadoutSources.ts`) layers and the new source-management IPC are enumerated as `it.todo` in `ociCore.test.ts`. **Cross-repo dependency (governance):** discovery relies on an **index artifact** published by `claude-fleet-loadouts`; that repo's `publish-loadouts.yml` must emit `<source>/index:latest` (artifactType `application/vnd.claude-fleet.loadout-index.v1`) and its README/skills must document the format. Per the workspace's CLAUDE.md cross-repo contract rule, that paired change lands **in the same change as the Phase 2 consumer implementation** — recorded here so it isn't re-litigated and so no drift ships before then.
 
 ### Per-container Claude Code state visibility on the host
 Each container gets its own host-side state dir, bind-mounted into the container at `/home/fleet/.claude/`. This is the foundation for the observability watcher, sessions table, durable mirror, and permission-request log — all of which read events from `<state-dir>/projects/-workspace/*.jsonl` directly off the host filesystem.

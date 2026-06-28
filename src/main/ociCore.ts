@@ -230,3 +230,12 @@ export function assembleCatalog(args: {
 
   return [...map.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
+
+/** Add or remove `id` from a favorites list, returning a new de-duplicated array.
+ *  Adding is idempotent; removing an absent id is a no-op. Existing order is
+ *  preserved and a newly-added id is appended. */
+export function toggleFavorite(favorites: string[], id: string, on: boolean): string[] {
+  const set = favorites.filter((f) => f !== id);
+  if (on) set.push(id);
+  return set;
+}

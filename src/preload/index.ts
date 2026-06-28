@@ -328,7 +328,27 @@ const api = {
     install: (workspaceId: string, loadoutId: string): Promise<unknown> =>
       ipcRenderer.invoke('loadouts:install', workspaceId, loadoutId),
     uninstall: (workspaceId: string, loadoutId: string): Promise<void> =>
-      ipcRenderer.invoke('loadouts:uninstall', workspaceId, loadoutId)
+      ipcRenderer.invoke('loadouts:uninstall', workspaceId, loadoutId),
+    catalog: (
+      workspaceId?: string
+    ): Promise<
+      Array<{
+        id: string;
+        title: string;
+        description: string;
+        tags: string[];
+        version: string;
+        remoteVersion?: string;
+        present: boolean;
+        installed: boolean;
+        installedVersion?: string;
+        updateAvailable: boolean;
+        favorited: boolean;
+        sources: string[];
+      }>
+    > => ipcRenderer.invoke('loadouts:catalog', workspaceId),
+    setFavorite: (id: string, on: boolean): Promise<string[]> =>
+      ipcRenderer.invoke('loadouts:setFavorite', id, on)
   },
   config: {
     /** App-level settings: the fleet root, its derived shared folder, and the
