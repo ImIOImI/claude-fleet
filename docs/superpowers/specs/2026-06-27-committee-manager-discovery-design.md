@@ -34,33 +34,28 @@ entry; `verbs` lists which. An entry with `controllable: false` is visible for
 discovery but not yet actionable — the manager asks the operator to grant
 control in the Committee rail.
 
-### 2. Discoverability gate — `acceptFrom` only
+### 2. Discoverability gate — honors the same `acceptFrom` contract as control
 
 An expert is listed in a caller's roster iff a pure `decideRoster` decision
-passes, mirroring `decideControl` minus the outbound-grant check:
+passes, mirroring `decideControl`'s container-only + no-manager-target + reachable
+rules and interpreting `acceptFrom` **the same way control does** (so the two
+never disagree about who "blank" admits):
 
-- both caller and target are containers (identity is only unspoofable for
-  containers — same constraint as control);
-- target is not itself a manager (no manager-of-managers visibility);
-- not a self-entry;
-- target `accessibility.reachable === true`;
-- **`accessibility.acceptFrom` is non-empty AND names the caller.**
+- both caller and target are containers; target is not itself a manager; not a
+  self-entry; target `accessibility.reachable === true`; and:
+- `acceptFrom` **names the caller** → discoverable **without a grant** (pre-grant
+  discovery — the operator explicitly advertised to this manager);
+- `acceptFrom` **blank/empty** → *"any granted"*: discoverable **iff the caller
+  already holds a grant** over the target;
+- `acceptFrom` **non-empty but omits the caller** → never discoverable (explicit
+  whitelist; a grant cannot override it).
 
-The last rule is the deliberate choice: an expert with an **open/empty
-`acceptFrom`** is *controllable-if-granted* but **NOT roster-visible**.
-Discovery requires the operator to explicitly name the manager in the expert's
-`acceptFrom`. This keeps `reachable` from silently becoming a fleet-wide
-advertisement and reuses an existing field rather than adding a new
-`discoverable` flag.
-
-Note the resulting asymmetry (documented in SPEC): empty `acceptFrom` permits
-control (when a grant exists) but not discovery. `acceptFrom` ≠ grant, so the
-"discover → ask operator for a grant" flow still works — the expert lists the
-manager in `acceptFrom` before any grant exists, appearing with
-`grant.controllable: false`.
-
-No grant is required to appear in the roster — that is the intended discovery
-widening.
+The blank case is gated by an existing grant so the roster never reveals more
+than control already allows, and a `reachable` expert with open `acceptFrom` is
+never advertised to *ungranted* managers — while staying consistent with
+`decideControl` and the UI's *"blank = any granted"* copy (the original
+"acceptFrom must be non-empty AND name the caller" rule contradicted that copy and
+was reconciled).
 
 ### 3. Enriched `committee_status`
 

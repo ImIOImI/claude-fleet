@@ -106,16 +106,18 @@ export function decideControl(
 
 /**
  * Pure decision for whether `target` should appear in `caller`'s committee
- * roster (#discovery). Mirrors `decideControl` minus the outbound-grant check —
- * discovery does NOT require a grant — but the inbound opt-in is STRICTER:
+ * roster (#discovery). Mirrors `decideControl`'s container-only / no-manager /
+ * reachable rules, and honors the SAME meaning of `acceptFrom` as control so the
+ * two never disagree about who "blank" admits:
  *
- *   acceptFrom must be NON-EMPTY and name the caller.
- *
- * An expert with an open/empty `acceptFrom` is controllable-if-granted but NOT
- * roster-visible: discovery requires the operator to explicitly name the manager
- * in the expert's `acceptFrom`, so `reachable` never becomes a silent fleet-wide
- * advertisement. `acceptFrom` ≠ grant, so the "discover → ask for a grant" flow
- * still works (the expert lists the manager before any grant exists).
+ *   • `acceptFrom` NAMES the caller  → discoverable, no grant needed
+ *     (pre-grant discovery: the operator explicitly advertised to this manager).
+ *   • `acceptFrom` blank/empty       → "any granted" — discoverable only if the
+ *     caller already holds a grant over the target (so the roster never reveals
+ *     more than control already allows, and `reachable` alone never advertises
+ *     fleet-wide to ungranted managers).
+ *   • `acceptFrom` non-empty, omits caller → never discoverable (explicit
+ *     whitelist; a grant cannot override it — control denies it too).
  */
 export function decideRoster(
   caller: WorkspaceSpec | null,
@@ -134,12 +136,22 @@ export function decideRoster(
   // No manager-of-managers visibility.
   if (isManager(target)) return { ok: false, reason: `target ${targetId} is a manager` };
 
-  // Inbound opt-in, acceptFrom-gated: reachable AND acceptFrom explicitly names caller.
   const acc = target.accessibility;
   if (!acc?.reachable) return { ok: false, reason: `target ${targetId} is not reachable` };
-  if (!acc.acceptFrom || !acc.acceptFrom.includes(callerId))
-    return { ok: false, reason: `target ${targetId} does not advertise to caller ${callerId}` };
 
+  if (acc.acceptFrom && acc.acceptFrom.length > 0) {
+    // Explicit whitelist: discoverable iff it names the caller (no grant needed).
+    if (!acc.acceptFrom.includes(callerId))
+      return { ok: false, reason: `target ${targetId} does not advertise to caller ${callerId}` };
+    return { ok: true };
+  }
+
+  // Blank/empty acceptFrom = "any granted": discoverable only if the caller holds
+  // a grant — matching decideControl's blank semantics and the UI's "blank = any
+  // granted" contract, so the roster exposes nothing control wouldn't.
+  const granted = (caller.control?.canControl ?? []).some((g) => g.id === targetId && g.verbs.length > 0);
+  if (!granted)
+    return { ok: false, reason: `target ${targetId} has open acceptFrom but caller ${callerId} holds no grant` };
   return { ok: true };
 }
 
