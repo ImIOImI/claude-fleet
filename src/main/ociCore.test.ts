@@ -12,6 +12,7 @@ import {
   compareVersions,
   isUpdateAvailable,
   assembleCatalog,
+  toggleFavorite,
   SUPPORTED_REGISTRY
 } from './ociCore.js';
 
@@ -169,6 +170,19 @@ describe('ociClient (GHCR pull)', () => {
   it.todo('pulls every layer blob by digest and reconstructs the tree from layer titles');
   it.todo('routes every layer write through safeLayerPath and aborts the pull on a traversal title');
   it.todo('enforces a per-blob size cap');
+});
+
+describe('toggleFavorite', () => {
+  it('adds an id (idempotent) and removes it, de-duplicating', () => {
+    expect(toggleFavorite([], 'a', true)).toEqual(['a']);
+    expect(toggleFavorite(['a'], 'a', true)).toEqual(['a']); // idempotent add
+    expect(toggleFavorite(['a', 'b'], 'a', false)).toEqual(['b']);
+    expect(toggleFavorite(['a'], 'z', false)).toEqual(['a']); // remove absent = no-op
+  });
+
+  it('preserves existing order and appends new ids', () => {
+    expect(toggleFavorite(['b', 'a'], 'c', true)).toEqual(['b', 'a', 'c']);
+  });
 });
 
 // ── Source + provenance + favorites layer (loadoutSources.ts) — to implement ──
