@@ -27,6 +27,14 @@ export function isReachable(ws: { accessibility?: AccessibilityConfig }): boolea
   return ws.accessibility?.reachable === true;
 }
 
+/** Workspaces eligible to appear in `selfId`'s "Accept from" list: every OTHER
+ *  container workspace that is currently a manager (holds ≥1 outbound grant).
+ *  Container-only mirrors the control gate; self is excluded (a workspace can't
+ *  accept control from itself). Pure — unit-tested in committee.test.ts. */
+export function eligibleAcceptFromManagers<T extends CommitteeFields>(workspaces: T[], selfId: string): T[] {
+  return workspaces.filter((w) => w.id !== selfId && w.kind === 'container' && isManager(w));
+}
+
 /** Verbs `manager` currently grants over `targetId` (empty if none). */
 export function grantedVerbs(manager: { control?: ControlConfig }, targetId: string): CommitteeVerb[] {
   return manager.control?.canControl?.find((g) => g.id === targetId)?.verbs ?? [];

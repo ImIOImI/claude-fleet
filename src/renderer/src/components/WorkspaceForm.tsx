@@ -20,6 +20,7 @@ import type {
   WorkspaceSummary
 } from '../App';
 import { AdvancedImageSearchModal, IconSearch } from './AdvancedImageSearchModal';
+import { eligibleAcceptFromManagers, ManagerGlyph } from './committee';
 
 export type WorkspaceKind = 'container' | 'local';
 
@@ -181,10 +182,17 @@ export function WorkspaceForm({
   // Committee opt-in (#118) — inbound "reachable by managers". Edit-mode only.
   const [reachable, setReachable] = useState<boolean>(initial?.accessibility?.reachable ?? false);
   const [roleHint, setRoleHint] = useState<string>(initial?.accessibility?.roleHint ?? '');
-  const [acceptFrom, setAcceptFrom] = useState<string>(
-    (initial?.accessibility?.acceptFrom ?? []).join(', ')
-  );
+  // Inbound acceptFrom whitelist as a set of manager workspace ids (#164).
+  // Empty ⇒ "any granted manager". Edited via a manager checkbox list below.
+  const [acceptFrom, setAcceptFrom] = useState<string[]>(initial?.accessibility?.acceptFrom ?? []);
   const [committeeOpen, setCommitteeOpen] = useState(initial?.accessibility?.reachable ?? false);
+  // Manager workspaces eligible for the acceptFrom list (other container managers).
+  const managerOptions = useMemo(
+    () => eligibleAcceptFromManagers(workspaces, initial?.id ?? ''),
+    [workspaces, initial?.id]
+  );
+  const toggleAcceptFrom = (id: string): void =>
+    setAcceptFrom((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   const [kind, setKind] = useState<WorkspaceKind>(initial?.kind ?? 'container');
   // Local workspaces only: the host directory `claude` runs in (#16).
   const [workspaceRoot, setWorkspaceRoot] = useState<string>(initial?.workspaceRoot ?? '');
@@ -328,11 +336,11 @@ export function WorkspaceForm({
     if (Number.isFinite(memNum) && memNum > 0) resources = { ...(resources ?? {}), memoryMb: memNum };
 
     // Inbound committee opt-in. Only meaningful in edit mode; `undefined` when
-    // off so the manifest's accessibility block is cleared on save.
-    const acceptFromList = acceptFrom
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
+    // off so the manifest's accessibility block is cleared on save. The list is
+    // pruned to workspaces that are CURRENTLY managers — a previously-saved id
+    // that is no longer a manager has no checkbox and drops on save (#164).
+    const managerIds = new Set(managerOptions.map((m) => m.id));
+    const acceptFromList = acceptFrom.filter((id) => managerIds.has(id));
     const accessibility: AccessibilityConfig | undefined =
       mode === 'edit' && reachable
         ? {
@@ -845,25 +853,41 @@ export function WorkspaceForm({
                   Granted managers can <strong>read this session, type into it, and pause it.</strong>
                 </span>
               </div>
-              <div className="resources-grid">
-                <label>
-                  Role hint
-                  <input
-                    value={roleHint}
-                    onChange={(e) => setRoleHint(e.target.value)}
-                    placeholder="e.g. security"
-                    disabled={busy}
-                  />
-                </label>
-                <label>
-                  Accept from
-                  <input
-                    value={acceptFrom}
-                    onChange={(e) => setAcceptFrom(e.target.value)}
-                    placeholder="manager ids (blank = any granted)"
-                    disabled={busy}
-                  />
-                </label>
+              <label>
+                Role hint
+                <input
+                  value={roleHint}
+                  onChange={(e) => setRoleHint(e.target.value)}
+                  placeholder="e.g. security"
+                  disabled={busy}
+                />
+              </label>
+              <div className="committee-acceptfrom">
+                <span className="committee-acceptfrom-label">Accept from</span>
+                {managerOptions.length === 0 ? (
+                  <p className="form-hint">
+                    No manager workspaces yet — grant a workspace control over an expert in the Committee
+                    rail first.
+                  </p>
+                ) : (
+                  <div className="committee-acceptfrom-list" role="group" aria-label="Accept from managers">
+                    {managerOptions.map((m) => (
+                      <label key={m.id} className="committee-acceptfrom-row" title={m.id}>
+                        <input
+                          type="checkbox"
+                          checked={acceptFrom.includes(m.id)}
+                          onChange={() => toggleAcceptFrom(m.id)}
+                          disabled={busy}
+                        />
+                        <ManagerGlyph size={12} />
+                        <span className="committee-acceptfrom-name">{m.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+                <p className="form-hint">
+                  None selected = any granted manager may control this workspace.
+                </p>
               </div>
             </>
           )}
