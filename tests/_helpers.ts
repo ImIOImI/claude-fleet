@@ -145,6 +145,8 @@ export interface MockOpts {
     authMode?: 'oauth' | 'apikey';
     env?: { plain: Record<string, string>; secretKeys: string[] };
     mirror?: { default: 'on' | 'off'; cleanup: 'delete' | 'preserve' };
+    control?: { canControl?: Array<{ id: string; verbs: Array<'read' | 'post' | 'pause'> }> };
+    accessibility?: { reachable: boolean; acceptFrom?: string[]; roleHint?: string };
     createdAt?: number;
     lastUsedAt?: number;
   }>;

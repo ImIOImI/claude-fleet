@@ -246,6 +246,25 @@ body {
 }
 .committee-warning svg { flex: 0 0 auto; margin-top: 1px; color: var(--warn); }
 
+/* Accept-from manager multiselect (#164) */
+.committee-acceptfrom { margin: 8px 0 2px; }
+.committee-acceptfrom-label { display: block; font-size: 13px; color: var(--ink-1); margin-bottom: 5px; }
+.committee-acceptfrom-list {
+  display: flex; flex-direction: column; gap: 2px;
+  max-height: 168px; overflow-y: auto;
+  padding: 5px; border: 1px solid var(--rule); border-radius: var(--r-md);
+  background: var(--bg-1);
+}
+.committee-acceptfrom-row {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 13px; color: var(--ink-1); cursor: pointer;
+  padding: 3px 5px; border-radius: var(--r-sm);
+}
+.committee-acceptfrom-row:hover { background: var(--bg-2); }
+.committee-acceptfrom-row input { margin: 0; accent-color: var(--ok); }
+.committee-acceptfrom-row svg { flex: 0 0 auto; color: var(--ink-2); }
+.committee-acceptfrom-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* Committee grant matrix (left-rail section, #118) */
 .committee-pane { padding: 8px 10px 12px; font-size: 13px; }
 .committee-empty { color: var(--ink-2); font-size: 12px; padding: 8px 4px; }
