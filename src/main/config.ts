@@ -224,6 +224,12 @@ export async function fleetSharedDir(): Promise<string> {
   return join(await getFleetRoot(), 'shared');
 }
 
+/** Return the current global loadout favorites list. */
+export async function getFavorites(): Promise<string[]> {
+  const cfg = await read();
+  return cfg.favorites ?? [];
+}
+
 /** Toggle a global loadout favorite and persist it. Returns the new list. */
 export async function setFavorite(id: string, on: boolean): Promise<string[]> {
   const cfg = await read();
