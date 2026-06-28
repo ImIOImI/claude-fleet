@@ -17,7 +17,11 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
   const [entries, setEntries] = useState<Entry[]>([]);
   const [query, setQuery] = useState('');
   const [activeTags, setActiveTags] = useState<string[]>([]);
-  const installable = !!workspace && workspace.kind === 'container' && !!workspace.containerId;
+  const installable =
+    !!workspace &&
+    workspace.kind === 'container' &&
+    (workspace.state === 'running' || workspace.state === 'paused') &&
+    !!workspace.containerId;
 
   const reload = useCallback(async () => {
     setEntries(await window.api.loadouts.catalog(workspace?.id));
@@ -40,7 +44,8 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
     setActiveTags((prev) => (prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]));
 
   const onInstall = async (id: string): Promise<void> => {
-    if (workspace) await window.api.loadouts.install(workspace.id, id);
+    if (!workspace) return;
+    await window.api.loadouts.install(workspace.id, id);
     onChanged();
     void reload();
   };
