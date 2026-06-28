@@ -24,6 +24,8 @@ interface Props {
   collapsed: boolean;
   /** Toggle the collapsed state (persisted by App.tsx). */
   onToggleCollapse: () => void;
+  /** Open the full loadout browser modal. */
+  onBrowse?: () => void;
 }
 
 interface OpenState {
@@ -54,7 +56,8 @@ export function LeftRail({
   onChanged,
   onLoadoutInstalled,
   collapsed,
-  onToggleCollapse
+  onToggleCollapse,
+  onBrowse
 }: Props) {
   const [open, setOpen] = useState<OpenState>(loadOpen);
   const toggle = (k: keyof OpenState): void =>
@@ -131,6 +134,7 @@ export function LeftRail({
             selectedWorkspace={selectedWorkspace}
             onChanged={onChanged}
             onInstalled={onLoadoutInstalled}
+            onBrowse={onBrowse}
           />
         )}
       </section>
