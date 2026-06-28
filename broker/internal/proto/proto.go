@@ -35,6 +35,12 @@
 //	  HISTORY    S→C  [u32 ch][bytes...]                       ring-buffer dump after ATTACH
 //	  RESIZE     C→S  [u32 ch][u16 cols][u16 rows]             window resize
 //
+//	Port forward (JSON):
+//	  DIAL       C→S  {"channel":N,"port":P}                   open TCP conn to 127.0.0.1:P, bind to channel
+//	  DIALED     S→C  {"channel":N,"ok":true,"error":"..."}    dial succeeded or failed
+//	  LISTPORTS  C→S  {}                                       enumerate listening TCP ports
+//	  PORTS      S→C  {"ports":[{"port":P},...]}               list of detected ports
+//
 // Why split INPUT/OUTPUT instead of one DATA: makes direction explicit in
 // logs and lets either side reject mis-directed frames as a bug rather
 // than silently consume them.
@@ -52,21 +58,25 @@ import (
 type FrameType uint8
 
 const (
-	FrameCreate   FrameType = 0x01
-	FrameCreated  FrameType = 0x02
-	FrameAttach   FrameType = 0x03
-	FrameAttached FrameType = 0x04
-	FrameDetach   FrameType = 0x05
-	FrameDetached FrameType = 0x06
-	FrameClose    FrameType = 0x07
-	FrameClosed   FrameType = 0x08
-	FrameEnded    FrameType = 0x09
-	FrameList     FrameType = 0x0a
-	FrameSessions FrameType = 0x0b
-	FrameInput    FrameType = 0x10
-	FrameOutput   FrameType = 0x11
-	FrameHistory  FrameType = 0x12
-	FrameResize   FrameType = 0x13
+	FrameCreate    FrameType = 0x01
+	FrameCreated   FrameType = 0x02
+	FrameAttach    FrameType = 0x03
+	FrameAttached  FrameType = 0x04
+	FrameDetach    FrameType = 0x05
+	FrameDetached  FrameType = 0x06
+	FrameClose     FrameType = 0x07
+	FrameClosed    FrameType = 0x08
+	FrameEnded     FrameType = 0x09
+	FrameList      FrameType = 0x0a
+	FrameSessions  FrameType = 0x0b
+	FrameInput     FrameType = 0x10
+	FrameOutput    FrameType = 0x11
+	FrameHistory   FrameType = 0x12
+	FrameResize    FrameType = 0x13
+	FrameDial      FrameType = 0x14
+	FrameDialed    FrameType = 0x15
+	FrameListPorts FrameType = 0x16
+	FramePorts     FrameType = 0x17
 )
 
 // MaxFramePayload caps individual frame payloads so a malformed length
@@ -109,6 +119,14 @@ func (t FrameType) String() string {
 		return "HISTORY"
 	case FrameResize:
 		return "RESIZE"
+	case FrameDial:
+		return "DIAL"
+	case FrameDialed:
+		return "DIALED"
+	case FrameListPorts:
+		return "LISTPORTS"
+	case FramePorts:
+		return "PORTS"
 	}
 	return fmt.Sprintf("UNKNOWN(0x%02x)", uint8(t))
 }
@@ -164,6 +182,32 @@ type SessionInfo struct {
 
 type SessionsResponse struct {
 	Sessions []SessionInfo `json:"sessions"`
+}
+
+// ── Port-forward control shapes ──────────────────────────────────────────
+
+// DialRequest asks the broker to open a TCP connection to 127.0.0.1:Port
+// inside the container and bind it to Channel. The byte relay then reuses
+// INPUT (host→conn) and OUTPUT (conn→host) on that channel; CLOSE/ENDED
+// tear it down — exactly like a PTY channel.
+type DialRequest struct {
+	Channel uint32 `json:"channel"`
+	Port    uint16 `json:"port"`
+}
+
+type DialResponse struct {
+	Channel uint32 `json:"channel"`
+	OK      bool   `json:"ok"`
+	Error   string `json:"error,omitempty"`
+}
+
+// PortInfo is one listening TCP port detected inside the container.
+type PortInfo struct {
+	Port uint16 `json:"port"`
+}
+
+type PortsResponse struct {
+	Ports []PortInfo `json:"ports"`
 }
 
 // ── Codec ────────────────────────────────────────────────────────────────

@@ -144,3 +144,38 @@ func TestFrameTypeStringCoversAllNames(t *testing.T) {
 		}
 	}
 }
+
+func TestFrameType_String_PortForwardFrames(t *testing.T) {
+	cases := map[FrameType]string{
+		FrameDial:      "DIAL",
+		FrameDialed:    "DIALED",
+		FrameListPorts: "LISTPORTS",
+		FramePorts:     "PORTS",
+	}
+	for ft, want := range cases {
+		if got := ft.String(); got != want {
+			t.Errorf("%#x: got %q want %q", uint8(ft), got, want)
+		}
+	}
+}
+
+func TestDialRequest_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteJSONFrame(&buf, FrameDial, DialRequest{Channel: 7, Port: 3000}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	ft, payload, err := ReadFrame(&buf)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if ft != FrameDial {
+		t.Fatalf("type: got %v want DIAL", ft)
+	}
+	var req DialRequest
+	if err := json.Unmarshal(payload, &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if req.Channel != 7 || req.Port != 3000 {
+		t.Fatalf("got %+v", req)
+	}
+}
