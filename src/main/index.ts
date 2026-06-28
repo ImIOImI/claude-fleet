@@ -18,6 +18,23 @@ const jsonlWatcher = isMock ? null : new JsonlWatcher();
 
 const isDev = process.env.NODE_ENV === 'development' || !!process.env.ELECTRON_RENDERER_URL;
 
+// The most recently created window, so a second-instance launch can focus it
+// instead of starting a rival process (see the single-instance lock below).
+let mainWindow: BrowserWindow | null = null;
+
+// Single-instance lock (#159). Two claude-fleet processes can't coexist: the
+// second one loses the race to bind the host MCP listener (127.0.0.1:7071) with
+// EADDRINUSE, and every container's claude-fleet-state MCP then silently shows
+// "Failed to connect" against whichever instance didn't get the port. So a
+// second launch must not start the app at all — it hands off to the running
+// instance (which focuses its window via 'second-instance' below) and exits.
+// requestSingleInstanceLock() must be called before app is ready; if we didn't
+// get the lock, quit now and skip all startup.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+}
+
 // On WSLg (and some headless/virtualized Linux setups) Chromium's GPU process
 // fails to initialize ("Exiting GPU process due to errors during
 // initialization") — harmless (rendering falls back to CPU) but it spams the
@@ -58,7 +75,19 @@ function createWindow(): BrowserWindow {
   return win;
 }
 
-app.whenReady().then(async () => {
+// A second launch lands here in the already-running primary instead of starting
+// a rival process: restore + focus the existing window (#159).
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+});
+
+// Only the primary instance boots the app; a duplicate already called app.quit()
+// above and must not register the startup path (which would bind the listeners
+// it can't acquire).
+if (gotSingleInstanceLock) app.whenReady().then(async () => {
   // First thing after whenReady: register error logging. From here on,
   // any thrown error or rejected promise on main lands in error.log
   // before potentially propagating into a crash.
@@ -91,10 +120,10 @@ app.whenReady().then(async () => {
     await jsonlWatcher.start(manifests.map((m) => m.id));
   }
   registerIpc({ jsonlWatcher });
-  createWindow();
+  mainWindow = createWindow();
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow();
   });
 });
 
