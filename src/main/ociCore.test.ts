@@ -163,14 +163,7 @@ describe('assembleCatalog', () => {
   });
 });
 
-// ── Networked layer (ociClient.ts) — to implement ────────────────────────────
-describe('ociClient (GHCR pull)', () => {
-  it.todo('obtains an anonymous bearer via the 401 → /token flow for a public repo');
-  it.todo('fetches a manifest and returns its com.claude-fleet.loadout.* annotations without pulling blobs');
-  it.todo('pulls every layer blob by digest and reconstructs the tree from layer titles');
-  it.todo('routes every layer write through safeLayerPath and aborts the pull on a traversal title');
-  it.todo('enforces a per-blob size cap');
-});
+// ── Networked layer (ociClient.ts) — covered by src/main/ociClient.test.ts ───
 
 describe('toggleFavorite', () => {
   it('adds an id (idempotent) and removes it, de-duplicating', () => {
