@@ -4,7 +4,7 @@
 // loadout via the left-rail Library accordion.
 
 import { test, expect } from '@playwright/test';
-import { launch } from './_helpers.js';
+import { launch, mockMainIpc, getCalls } from './_helpers.js';
 
 test('Library: accordion lists starters, search filters, install + uninstall round-trip (#16)', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
@@ -108,6 +108,157 @@ test('Library: per-card chevron + Collapse all / Expand all (view A)', async () 
     // Expand all → descriptions return.
     await window.getByRole('button', { name: /Expand all/ }).click();
     expect(await window.locator('.loadout-card .lc-desc').count()).toBe(descCount);
+  } finally {
+    await app.close();
+  }
+});
+
+// ── Library v2 Phase 1: favorites + browse modal ─────────────────────────────
+// These tests use mockMainIpc so they don't rely on seeded built-in starters or
+// Docker. They exercise: the .lc-fav favorite toggle wires loadouts:setFavorite
+// IPC, the .fav-filter hides non-favorited entries, and .lib-browse opens the
+// LoadoutBrowserModal (.modal.loadout-browser) with the catalog entry visible.
+
+const PHASE1_ENTRY = {
+  id: 'spec-driven',
+  title: 'Spec-Driven',
+  description: 'Spec-driven dev workflow',
+  tags: ['workflow'],
+  version: '1.0.0',
+  present: true,
+  installed: false,
+  updateAvailable: false,
+  favorited: false,
+  sources: [],
+};
+
+test('Library v2: favorite toggle calls setFavorite IPC', async () => {
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [
+        {
+          id: 'ws-1',
+          name: 'test-workspace',
+          state: 'running',
+          workspaceRoot: '/workspace/test',
+          containerId: 'container-abc',
+          kind: 'container',
+        },
+      ],
+      loadoutCatalog: [PHASE1_ENTRY],
+    });
+
+    await window.waitForTimeout(400);
+
+    // Ensure Library accordion is open.
+    const libraryAccHeader = window.locator('.acc-header', { hasText: 'Library' });
+    await libraryAccHeader.waitFor({ state: 'visible', timeout: 8_000 });
+    const isExpanded = await libraryAccHeader.getAttribute('aria-expanded');
+    if (isExpanded !== 'true') {
+      await libraryAccHeader.click();
+      await window.waitForTimeout(200);
+    }
+
+    // The catalog entry should appear as a loadout card.
+    const card = window.locator('.loadout-card', { hasText: 'Spec-Driven' });
+    await card.waitFor({ state: 'visible', timeout: 8_000 });
+
+    // Click the .lc-fav button (visible on expanded cards).
+    const favBtn = card.locator('.lc-fav');
+    await favBtn.waitFor({ state: 'visible', timeout: 4_000 });
+    await favBtn.click();
+    await window.waitForTimeout(300);
+
+    // Assert loadouts:setFavorite was called with id='spec-driven', on=true.
+    const calls = await getCalls(app);
+    const favCalls = calls.setFavorite as Array<{ id: string; on: boolean }>;
+    expect(favCalls.length).toBeGreaterThanOrEqual(1);
+    expect(favCalls[favCalls.length - 1]).toMatchObject({ id: 'spec-driven', on: true });
+  } finally {
+    await app.close();
+  }
+});
+
+test('Library v2: favorites filter hides non-favorited entries', async () => {
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [],
+      loadoutCatalog: [PHASE1_ENTRY],
+    });
+
+    await window.waitForTimeout(400);
+
+    const libraryAccHeader = window.locator('.acc-header', { hasText: 'Library' });
+    await libraryAccHeader.waitFor({ state: 'visible', timeout: 8_000 });
+    const isExpanded = await libraryAccHeader.getAttribute('aria-expanded');
+    if (isExpanded !== 'true') {
+      await libraryAccHeader.click();
+      await window.waitForTimeout(200);
+    }
+
+    const card = window.locator('.loadout-card', { hasText: 'Spec-Driven' });
+    await card.waitFor({ state: 'visible', timeout: 8_000 });
+
+    const favFilter = window.locator('.fav-filter');
+    await favFilter.waitFor({ state: 'visible', timeout: 4_000 });
+
+    // Card is visible before filter is active.
+    await expect(card).toBeVisible();
+
+    // Activate the favorites filter — our entry is not favorited, so it should
+    // disappear and the "No loadouts match." placeholder should appear.
+    await favFilter.click();
+    await window.waitForTimeout(200);
+    await expect(favFilter).toHaveClass(/\bon\b/);
+    await expect(window.locator('.pane-placeholder', { hasText: 'No loadouts match.' })).toBeVisible();
+
+    // Deactivate the filter — card returns.
+    await favFilter.click();
+    await window.waitForTimeout(200);
+    await expect(favFilter).not.toHaveClass(/\bon\b/);
+    await expect(card).toBeVisible();
+  } finally {
+    await app.close();
+  }
+});
+
+test('Library v2: Browse-all button opens loadout browser modal', async () => {
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [],
+      loadoutCatalog: [PHASE1_ENTRY],
+    });
+
+    await window.waitForTimeout(400);
+
+    const libraryAccHeader = window.locator('.acc-header', { hasText: 'Library' });
+    await libraryAccHeader.waitFor({ state: 'visible', timeout: 8_000 });
+    const isExpanded = await libraryAccHeader.getAttribute('aria-expanded');
+    if (isExpanded !== 'true') {
+      await libraryAccHeader.click();
+      await window.waitForTimeout(200);
+    }
+
+    // The "Browse all" button has class .lib-browse and opens the modal.
+    const browseBtn = window.locator('.lib-browse');
+    await browseBtn.waitFor({ state: 'visible', timeout: 4_000 });
+    await browseBtn.click();
+
+    // LoadoutBrowserModal renders as .modal.loadout-browser.
+    const browserModal = window.locator('.modal.loadout-browser');
+    await browserModal.waitFor({ state: 'visible', timeout: 6_000 });
+
+    // The catalog entry should appear in the results list.
+    const browserRow = browserModal.locator('.lb-row', { hasText: 'Spec-Driven' });
+    await browserRow.waitFor({ state: 'visible', timeout: 4_000 });
+    await expect(browserRow.locator('.lb-row-title')).toContainText('Spec-Driven');
+
+    // Close the modal via the Close button.
+    await browserModal.locator('button', { hasText: 'Close' }).click();
+    await expect(browserModal).not.toBeVisible();
   } finally {
     await app.close();
   }
