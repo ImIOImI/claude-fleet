@@ -54,3 +54,24 @@ implementation lives under `src/renderer/`; the artboards are the
 If a token from `tokens.css` isn't yet in `src/renderer/src/styles.css`,
 lift it in when you reach for it — keep names consistent so a future
 search across both folders matches.
+
+## Toasts
+
+![toast style guide: existing → consolidated → new MCP-unreachable toast](toasts.png)
+
+One unified toast component (`src/renderer/src/components/Toast.tsx` over the
+pure model in `toasts.ts`) covers every transient notice, in two placements:
+
+- **`ToastStack`** — the global, bottom-center, stacked toasts (loadout reload,
+  drag-and-drop results, MCP health).
+- **`ToastView`** in `placement: 'tab'` — a single in-tab toast anchored
+  top-right inside a session pane (the committee inbound message; replaces the
+  old bespoke `.committee-toast`).
+
+Variants: `kind ∈ {progress, ok, error, info}` (spinner / ✓ / ✕ / eyebrow-only);
+auto-dismiss via a ttl **or** `sticky` + a manual ✕; an optional inline
+**action** button. The **MCP-unreachable** toast is the canonical sticky error:
+`error` kind, an `Open log` action (`app:openErrorLog`), dismissible for a
+prolonged outage, fed by the `mcp:status` broadcast and auto-cleared on
+reconnect. CSS lives in the `.toast*` block of `styles.css`; new primitives
+(`.toast.info`, `.toast--tab`, `.toast-action`, `.toast-dismiss`).

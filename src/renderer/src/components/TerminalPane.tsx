@@ -18,6 +18,8 @@ import { createPortal } from 'react-dom';
 import type { WorkspaceObservabilitySummary } from '../../../preload';
 import type { MirrorSetting, CleanupSetting } from '../App';
 import { TerminalSession } from './TerminalSession';
+import { ToastView } from './Toast';
+import { makeToast } from '../toasts';
 import { readyToRefresh } from './refreshQueue';
 import { useBlinkSync } from '../blinkSync';
 
@@ -644,17 +646,17 @@ export function TerminalPane({
       aria-hidden={!visible}
     >
       {committeeToast !== null && (
-        <div className="committee-toast" role="status" aria-live="polite">
-          <span className="committee-toast-tag">[committee]</span>
-          <span className="committee-toast-msg">{committeeToast}</span>
-          <button
-            className="committee-toast-dismiss"
-            aria-label="Dismiss"
-            onClick={() => setCommitteeToast(null)}
-          >
-            ×
-          </button>
-        </div>
+        <ToastView
+          toast={makeToast(0, {
+            kind: 'info',
+            eyebrow: 'committee',
+            message: committeeToast,
+            placement: 'tab',
+            sticky: false,
+            dismissible: true
+          })}
+          onDismiss={() => setCommitteeToast(null)}
+        />
       )}
       {restartBanner && (
         <div className="restart-banner" role="status" aria-live="polite">

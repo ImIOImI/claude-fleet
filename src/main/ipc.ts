@@ -38,7 +38,8 @@ import {
   ensureWorkspaceSocket,
   removeWorkspaceSocket,
   setCommitteeHandlers,
-  setReadScopeResolver
+  setReadScopeResolver,
+  currentMcpStatus
 } from './mcpServer.js';
 import * as vault from './vault.js';
 import * as fs from './fs.js';
@@ -1288,6 +1289,17 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     }
   );
   ipcMain.handle('app:errorLogPath', () => getLogPath());
+  // Open error.log in the OS default app — the MCP-unreachable toast's "Open
+  // log" action (#159 follow-up). WSL can't reach a Windows shell.openPath, so
+  // route through the same explorer.exe fallback the folder-open handlers use.
+  ipcMain.handle('app:openErrorLog', () => {
+    const p = getLogPath();
+    return RUNNING_IN_WSL ? openPathViaExplorer(p) : shell.openPath(p);
+  });
+  // Current host MCP listener health — a window mounting mid-outage reads this
+  // to render the sticky "MCP unreachable" toast (live changes arrive on the
+  // mcp:status broadcast). See mcpStatusBroadcast.ts.
+  ipcMain.handle('mcp:status:get', () => currentMcpStatus());
 
   // Test-only IPC handlers. Gated by CLAUDE_FLEET_E2E=1 so they don't
   // ship in production builds. The mapping-learning path normally

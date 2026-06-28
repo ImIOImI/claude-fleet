@@ -2,7 +2,8 @@ import { app, BrowserWindow, shell } from 'electron';
 import { join } from 'node:path';
 import { registerIpc } from './ipc.js';
 import { openDb, closeDb } from './db.js';
-import { startMcpServer, stopMcpServer, ensureWorkspaceSocket } from './mcpServer.js';
+import { startMcpServer, stopMcpServer, ensureWorkspaceSocket, setMcpStatusListener } from './mcpServer.js';
+import { broadcastMcpStatus } from './mcpStatusBroadcast.js';
 import { ensureBuiltinLoadouts } from './loadouts.js';
 import { JsonlWatcher } from './jsonlWatcher.js';
 import { listWorkspaceManifests } from './workspaces.js';
@@ -108,6 +109,10 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     // Read-only MCP server over <userData>/mcp.sock so in-container claude can
     // query the state DB (sessions/events/cost). Opens its own readonly conn.
     startMcpServer(app.getPath('userData'));
+    // Surface host MCP listener health to renderers as the "MCP unreachable"
+    // sticky toast (#159 follow-up): fan the change-only status out to every
+    // window. Wired before the listener can fail so the first event is caught.
+    setMcpStatusListener((s) => broadcastMcpStatus(s, BrowserWindow.getAllWindows()));
     const manifests = await listWorkspaceManifests();
     // Re-establish a per-workspace MCP listener for every known workspace (#117)
     // so a paused container that survived the restart finds its socket again
