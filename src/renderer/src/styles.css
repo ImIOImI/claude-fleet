@@ -219,20 +219,8 @@ body {
 .committee-glyph.mgr { color: var(--ink); }
 .committee-glyph.wifi { color: var(--info); }
 
-/* Committee inbound toast (#123): appears in an expert's tab when a manager
-   injects a message, so a watching human knows why text appeared. */
-.committee-toast {
-  position: absolute; top: 10px; right: 12px; z-index: 40;
-  display: flex; align-items: center; gap: 8px; max-width: 60%;
-  padding: 7px 10px; font-size: 12px; color: var(--ink);
-  background: color-mix(in oklab, var(--info) 16%, var(--bg-card));
-  border: 1px solid color-mix(in oklab, var(--info) 40%, transparent);
-  border-radius: var(--r-md); box-shadow: var(--shadow);
-}
-.committee-toast-tag { font-family: var(--font-mono); font-size: 10px; font-weight: 600; color: var(--info); flex: 0 0 auto; }
-.committee-toast-msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.committee-toast-dismiss { flex: 0 0 auto; background: none; border: none; color: var(--ink-2); font-size: 15px; line-height: 1; cursor: pointer; padding: 0 2px; }
-.committee-toast-dismiss:hover { color: var(--ink); }
+/* The committee inbound toast (#123) now uses the unified .toast component
+   (info kind, in-tab placement) — see the .toast block further down. */
 
 /* Committee opt-in (edit form, #118) */
 .committee-reachable-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-1); cursor: pointer; margin: 8px 0; }
@@ -2708,6 +2696,36 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
 .toast.error { border-color: color-mix(in oklab, var(--danger) 45%, var(--rule)); }
 .toast.error .toast-glyph,
 .toast.error .toast-text { color: var(--danger); }
+.toast.error .toast-eyebrow { color: var(--danger); }
+/* The stack is click-through (pointer-events:none) so it never blocks the UI,
+   but each toast re-enables pointer events for its action / ✕ buttons. */
+.toast { pointer-events: auto; }
+/* info kind (e.g. the committee message): info-tinted surface, no glyph — the
+   eyebrow carries it. Replaces the old bespoke .committee-toast. */
+.toast.info {
+  background: color-mix(in oklab, var(--info) 14%, var(--bg-card));
+  border-color: color-mix(in oklab, var(--info) 40%, var(--rule));
+}
+.toast.info .toast-eyebrow { color: var(--info); }
+/* in-tab placement (committee): anchored top-right inside the session pane
+   rather than the global bottom-center stack. */
+.toast--tab {
+  position: absolute; top: 10px; right: 12px; z-index: 40;
+  max-width: 60%; align-items: center; box-shadow: var(--shadow);
+}
+/* inline action button (e.g. "Open log") + dismiss ✕ */
+.toast-action {
+  flex: 0 0 auto; align-self: center; font-family: inherit; font-size: 11px;
+  padding: 3px 9px; border-radius: var(--r-sm);
+  background: var(--bg-2); color: var(--ink-1); border: 1px solid var(--rule);
+  cursor: pointer; white-space: nowrap;
+}
+.toast-action:hover { color: var(--ink); border-color: var(--rule-strong); }
+.toast-dismiss {
+  flex: 0 0 auto; align-self: flex-start; background: none; border: none;
+  color: var(--ink-2); font-size: 15px; line-height: 1; cursor: pointer; padding: 0 2px;
+}
+.toast-dismiss:hover { color: var(--ink); }
 
 /* ----- drag-and-drop overlay (#87) ----------------------------------- */
 .drop-overlay {

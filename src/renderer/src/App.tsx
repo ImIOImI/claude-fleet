@@ -1,5 +1,7 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, useReducer } from 'react';
 import { WorkspaceTabStrip } from './components/WorkspaceTabStrip';
+import { ToastStack } from './components/Toast';
+import { toastReducer, makeToast, type Toast, type ToastKind } from './toasts';
 import { LeftRail } from './components/LeftRail';
 import { ObservabilityPane } from './components/ObservabilityPane';
 import { TerminalPane } from './components/TerminalPane';
@@ -310,23 +312,62 @@ export function App() {
   } | null>(null);
   const reloadRequestTokenRef = useRef(0);
 
-  // Transient toasts (bottom-center, auto-dismissing). Used for the loadout
-  // reload (#16) and drag-and-drop results (#87). `kind` styles the toast:
-  // 'progress' shows the spinner (the default), 'ok'/'error' show a static
-  // status glyph and (for error) danger coloring.
-  type ToastKind = 'progress' | 'ok' | 'error';
-  const [toasts, setToasts] = useState<
-    { id: number; eyebrow?: string; message: string; kind: ToastKind }[]
-  >([]);
+  // Toasts — one unified component (src/renderer/src/toasts.ts + components/
+  // Toast.tsx) drives both the global bottom-center stack here and the in-tab
+  // committee toast in TerminalPane. Most are transient (auto-dismiss after
+  // ttl); the MCP-unreachable toast is sticky (see the mcp:status effect
+  // below). Used by the loadout reload (#16), drag-and-drop results (#87), and
+  // MCP health (#159 follow-up). `kind`: 'progress' (spinner, default), 'ok'/
+  // 'error' (status glyph + coloring), 'info' (eyebrow-only, e.g. committee).
+  const [toasts, dispatchToast] = useReducer(toastReducer, [] as Toast[]);
   const toastIdRef = useRef(0);
+  const dismissToast = useCallback((id: number): void => dispatchToast({ type: 'dismiss', id }), []);
   const pushToast = useCallback(
     (message: string, eyebrow?: string, ttlMs = 4000, kind: ToastKind = 'progress'): void => {
       const id = ++toastIdRef.current;
-      setToasts((prev) => [...prev, { id, eyebrow, message, kind }]);
-      setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), ttlMs);
+      dispatchToast({
+        type: 'push',
+        toast: makeToast(id, {
+          kind,
+          message,
+          eyebrow,
+          placement: 'global',
+          sticky: false,
+          dismissible: false
+        })
+      });
+      setTimeout(() => dispatchToast({ type: 'dismiss', id }), ttlMs);
     },
     []
   );
+  // MCP health → a single sticky "unreachable" toast (#159 follow-up). Main
+  // broadcasts mcp:status on listener bind success/failure (change-only). While
+  // down we show one keyed sticky error toast (Open log + ✕); the ✕ snoozes it
+  // for the duration of this outage, and a reconnect clears it. A window opened
+  // mid-outage learns the current status via getMcpStatus().
+  useEffect(() => {
+    const apply = (s: { ok: boolean; detail?: string }): void => {
+      if (s.ok) {
+        dispatchToast({ type: 'dismissKey', key: 'mcp-down' });
+        return;
+      }
+      dispatchToast({
+        type: 'push',
+        toast: makeToast(++toastIdRef.current, {
+          kind: 'error',
+          eyebrow: 'MCP unreachable',
+          message: "claude-fleet-state can't reach the host (:7071).",
+          placement: 'global',
+          sticky: true,
+          dismissible: true,
+          key: 'mcp-down',
+          action: { label: 'Open log', onClick: () => void window.api.app.openErrorLog() }
+        })
+      });
+    };
+    void window.api.app.getMcpStatus().then(apply).catch(() => {});
+    return window.api.app.onMcpStatus(apply);
+  }, []);
   // Drag-and-drop / clipboard-image ingestion → selected workspace's _dropped/.
   // Results surface through the existing toast stack; errors linger longer.
   const notify = useCallback(
@@ -1114,25 +1155,7 @@ export function App() {
           </div>
         </div>
       )}
-      {toasts.length > 0 && (
-        <div className="toast-stack" role="status" aria-live="polite">
-          {toasts.map((t) => (
-            <div key={t.id} className={`toast${t.kind !== 'progress' ? ` ${t.kind}` : ''}`}>
-              {t.kind === 'progress' ? (
-                <span className="toast-spinner" aria-hidden="true" />
-              ) : (
-                <span className="toast-glyph" aria-hidden="true">
-                  {t.kind === 'ok' ? '✓' : '✕'}
-                </span>
-              )}
-              <span className="toast-body">
-                {t.eyebrow && <span className="toast-eyebrow">{t.eyebrow}</span>}
-                <span className="toast-text">{t.message}</span>
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }

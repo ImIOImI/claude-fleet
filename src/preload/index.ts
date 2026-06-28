@@ -158,7 +158,19 @@ const api = {
       extra?: Record<string, unknown>;
     }): Promise<void> => ipcRenderer.invoke('app:logError', payload),
     /** Absolute path of the error.log file (so we can surface it in the UI later). */
-    errorLogPath: (): Promise<string> => ipcRenderer.invoke('app:errorLogPath')
+    errorLogPath: (): Promise<string> => ipcRenderer.invoke('app:errorLogPath'),
+    /** Open error.log in the OS default app — the MCP-unreachable toast's action. */
+    openErrorLog: (): Promise<string> => ipcRenderer.invoke('app:openErrorLog'),
+    /** Current host MCP listener health, for a window mounting mid-outage. */
+    getMcpStatus: (): Promise<{ ok: boolean; detail?: string }> =>
+      ipcRenderer.invoke('mcp:status:get'),
+    /** Subscribe to host MCP listener health changes (drives the sticky "MCP
+     *  unreachable" toast). Returns an unsubscribe function. */
+    onMcpStatus: (cb: (s: { ok: boolean; detail?: string }) => void): (() => void) => {
+      const handler = (_e: IpcRendererEvent, s: { ok: boolean; detail?: string }): void => cb(s);
+      ipcRenderer.on('mcp:status', handler);
+      return () => ipcRenderer.removeListener('mcp:status', handler);
+    }
   },
   workspace: {
     backendReady: (): Promise<boolean> => ipcRenderer.invoke('workspace:ping'),

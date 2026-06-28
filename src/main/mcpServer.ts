@@ -34,6 +34,7 @@ import Database from 'better-sqlite3';
 import { costFor } from './pricing.js';
 import { logError } from './errorLog.js';
 import { describeListenerError, type ListenerScope } from './mcpListenerError.js';
+import { type McpStatus } from './mcpStatusBroadcast.js';
 import {
   mcpWorkspaceSocketDir,
   mcpWorkspaceSocketPath,
@@ -129,6 +130,30 @@ let tcpListener: Server | null = null;
 const tokenToId = new Map<string, string>();
 const idToToken = new Map<string, string>();
 
+// Host MCP listener health, surfaced to renderers as the "MCP unreachable"
+// sticky toast (#159 follow-up). Defaults healthy; the win32 TCP listener flips
+// it on bind success/failure. On non-win32 there is no single listener, so it
+// stays healthy (per-workspace unix-socket failures still log durably via
+// reportListenerError, but aren't a global "MCP down"). A failed TCP bind has
+// no in-process recovery (no auto-retry — the single-instance lock is the real
+// fix); it clears when the app restarts and binds cleanly.
+let mcpStatus: McpStatus = { ok: true };
+let statusListener: ((s: McpStatus) => void) | null = null;
+/** Wire a callback fired whenever host MCP listener health changes; index.ts
+ *  broadcasts it to renderers on the `mcp:status` channel. */
+export function setMcpStatusListener(fn: (s: McpStatus) => void): void {
+  statusListener = fn;
+}
+/** Current host MCP listener health — for a window mounting mid-outage. */
+export function currentMcpStatus(): McpStatus {
+  return mcpStatus;
+}
+function setMcpHealth(ok: boolean, detail?: string): void {
+  if (mcpStatus.ok === ok && mcpStatus.detail === detail) return; // change-only
+  mcpStatus = { ok, detail };
+  statusListener?.(mcpStatus);
+}
+
 /** Open the shared read-only DB connection. Per-workspace listeners are created
  *  lazily via {@link ensureWorkspaceSocket}. No-op if already started. On
  *  Windows this also binds the single loopback-TCP listener that fronts every
@@ -144,10 +169,14 @@ export function startMcpServer(dir: string): void {
     // through the host loopback, so containers still reach it while the LAN
     // cannot. callerId is resolved from the first-line token in handleTcp.
     const srv = createServer((sock) => handleTcpConnection(sock));
-    srv.on('error', (err) => reportListenerError({ scope: 'tcp', port: MCP_TCP_PORT }, err));
-    srv.listen(MCP_TCP_PORT, '127.0.0.1', () =>
-      console.log(`[mcp] tcp listening on 127.0.0.1:${MCP_TCP_PORT}`)
-    );
+    srv.on('error', (err) => {
+      reportListenerError({ scope: 'tcp', port: MCP_TCP_PORT }, err);
+      setMcpHealth(false, (err as NodeJS.ErrnoException).code ?? 'error');
+    });
+    srv.listen(MCP_TCP_PORT, '127.0.0.1', () => {
+      console.log(`[mcp] tcp listening on 127.0.0.1:${MCP_TCP_PORT}`);
+      setMcpHealth(true);
+    });
     tcpListener = srv;
   }
 }
