@@ -18,3 +18,6 @@ playwright-report/
 
 # Superpowers brainstorm/designsync scratch
 .superpowers/
+
+# Claude Code worktrees (EnterWorktree nests linked worktrees here)
+.claude/worktrees/
