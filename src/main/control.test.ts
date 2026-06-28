@@ -121,16 +121,35 @@ describe('decideRoster (acceptFrom-gated discoverability)', () => {
     expect(decideRoster(ws(MGR), expert, MGR, EXP)).toEqual({ ok: true });
   });
 
-  it('excludes a reachable expert with open/empty acceptFrom (not advertised)', () => {
+  it('excludes a reachable expert with open/empty acceptFrom when the caller holds NO grant', () => {
+    // "blank = any granted": with no grant the caller is not "granted", so it
+    // must not discover an open expert (matches decideControl's blank semantics).
     const open = ws(EXP, { accessibility: { reachable: true } });
     const empty = ws(EXP, { accessibility: { reachable: true, acceptFrom: [] } });
     expect(decideRoster(ws(MGR), open, MGR, EXP).ok).toBe(false);
     expect(decideRoster(ws(MGR), empty, MGR, EXP).ok).toBe(false);
   });
 
-  it('excludes an expert whose acceptFrom names someone else', () => {
+  it('lists an open/empty-acceptFrom expert WHEN the caller holds a grant (blank = any granted)', () => {
+    const granted = ws(MGR, { control: { canControl: [{ id: EXP, verbs: ['read'] }] } });
+    const open = ws(EXP, { accessibility: { reachable: true } });
+    const empty = ws(EXP, { accessibility: { reachable: true, acceptFrom: [] } });
+    expect(decideRoster(granted, open, MGR, EXP)).toEqual({ ok: true });
+    expect(decideRoster(granted, empty, MGR, EXP)).toEqual({ ok: true });
+  });
+
+  it('still hides an expert whose acceptFrom names someone else, even if the caller holds a grant', () => {
+    // A non-empty list is an explicit whitelist; a caller it omits is never
+    // discoverable (and decideControl would deny it too). A grant cannot override.
+    const granted = ws(MGR, { control: { canControl: [{ id: EXP, verbs: ['read'] }] } });
     const other = ws(EXP, { accessibility: { reachable: true, acceptFrom: ['01SOMEONE'] } });
     expect(decideRoster(ws(MGR), other, MGR, EXP).ok).toBe(false);
+    expect(decideRoster(granted, other, MGR, EXP).ok).toBe(false);
+  });
+
+  it('lists a named expert even with no grant (pre-grant discovery via acceptFrom)', () => {
+    const named = ws(EXP, { accessibility: { reachable: true, acceptFrom: [MGR] } });
+    expect(decideRoster(ws(MGR), named, MGR, EXP)).toEqual({ ok: true });
   });
 
   it('excludes a target that is not reachable', () => {
@@ -197,6 +216,15 @@ describe('buildRoster (shaping)', () => {
     const expert = ws(EXP, { accessibility: { reachable: true, acceptFrom: [MGR] } });
     const roster = buildRoster(caller, MGR, [expert], status);
     expect(roster[0].grant).toEqual({ controllable: false, verbs: [] });
+  });
+
+  it('lists an open-acceptFrom expert the caller is granted over (blank = any granted)', () => {
+    const caller = ws(MGR, { control: { canControl: [{ id: EXP, verbs: ['read', 'pause'] }] } });
+    const open = ws(EXP, { name: 'open-expert', accessibility: { reachable: true } });
+    const roster = buildRoster(caller, MGR, [open], status);
+    expect(roster).toHaveLength(1);
+    expect(roster[0].id).toBe(EXP);
+    expect(roster[0].grant).toEqual({ controllable: true, verbs: ['read', 'pause'] });
   });
 
   it('caps loadout titles to ROSTER_TITLE_MAX (untrusted OCI text)', () => {

@@ -663,8 +663,9 @@ export const TOOLS: Tool[] = [
   {
     name: 'committee_roster',
     description:
-      'Discover the expert workspaces available to you — those that are reachable AND name you in ' +
-      'their acceptFrom. Returns one entry per expert: ' +
+      'Discover the expert workspaces available to you — reachable experts that either name you in ' +
+      'their acceptFrom (visible even before you hold a grant) or have an open acceptFrom and you ' +
+      'already hold a grant over them. Returns one entry per expert: ' +
       '{ id, name, description, labels, roleHint, installedLoadouts: [{ id, title }], ' +
       'status: { paused, busy, stalled, lastActiveAt }, grant: { controllable, verbs } }. ' +
       'Use it before convening to learn who your experts are and what they specialize in. An entry ' +
