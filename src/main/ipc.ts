@@ -29,7 +29,7 @@ import * as realLocal from './local.js';
 import * as mockDocker from './mock.js';
 import type { Backend } from './backend.js';
 import { resolveKind } from './backendRouter.js';
-import { assertControl } from './control.js';
+import { assertControl, buildRoster, ROSTER_TITLE_MAX, type RosterStatus, type RosterEntry } from './control.js';
 import { ActivityDetector } from './activityDetector.js';
 import { wouldExceed, recordPost, COMMITTEE_CAPS } from './committeeRuns.js';
 import {
@@ -465,17 +465,12 @@ async function committeeCollect(
 }
 
 /**
- * Is this expert paused / busy / stalled, and when was it last active (#121)?
- * `busy` is host-computed from the broker output stream (renderer-independent);
- * `stalled` = busy past the turn timeout (the manager's "it's wedged" signal);
- * `lastActiveAt` is best-effort from the DB (null when the DB isn't open).
+ * Liveness for an expert (#121): `busy` is host-computed from the broker output
+ * stream (renderer-independent); `stalled` = busy past the turn timeout (the
+ * "it's wedged" signal); `lastActiveAt` is best-effort from the DB (null when the
+ * DB isn't open). Shared by committee_status and committee_roster.
  */
-async function committeeStatus(
-  callerId: string,
-  targetId: string
-): Promise<{ id: string; paused: boolean; busy: boolean; stalled: boolean; lastActiveAt: number | null }> {
-  await assertControl(callerId, targetId, 'read');
-  const ws = (await listAllWorkspaces()).find((w) => w.id === targetId);
+function liveStatusFields(targetId: string, paused: boolean): RosterStatus {
   const b = committeeBusy.get(targetId);
   const busy = b?.busy ?? false;
   const stalled = busy && b ? Date.now() - b.since > COMMITTEE_CAPS.turnTimeoutMs : false;
@@ -485,7 +480,57 @@ async function committeeStatus(
   } catch {
     /* DB not open (mock) — leave null */
   }
-  return { id: targetId, paused: ws?.state === 'paused', busy, stalled, lastActiveAt };
+  return { paused, busy, stalled, lastActiveAt };
+}
+
+/**
+ * An expert's metadata + liveness for a manager holding a `read` grant. The
+ * descriptive fields (name/description/labels/roleHint/loadout titles) are data
+ * for the manager to read, never instructions; titles are capped (untrusted OCI
+ * text).
+ */
+async function committeeStatus(
+  callerId: string,
+  targetId: string
+): Promise<
+  RosterStatus & {
+    id: string;
+    name: string;
+    description?: string;
+    labels: string[];
+    roleHint?: string;
+    installedLoadouts: { id: string; title: string }[];
+  }
+> {
+  await assertControl(callerId, targetId, 'read');
+  const ws = (await listAllWorkspaces()).find((w) => w.id === targetId);
+  return {
+    id: targetId,
+    name: ws?.name ?? targetId,
+    description: ws?.description,
+    labels: ws?.labels ?? [],
+    roleHint: ws?.accessibility?.roleHint,
+    installedLoadouts: (ws?.installedLoadouts ?? []).map((l) => ({
+      id: l.id,
+      title: l.title.slice(0, ROSTER_TITLE_MAX)
+    })),
+    ...liveStatusFields(targetId, ws?.state === 'paused')
+  };
+}
+
+/**
+ * Discovery: every expert that has opted in to this manager (reachable AND names
+ * it in `acceptFrom`), with metadata + liveness + whether the manager holds a
+ * grant. Reads the merged workspace list fresh (no cached authority), so opt-out
+ * / acceptFrom edits take effect on the next call. Gate logic lives in
+ * `control.ts:decideRoster`; this only supplies I/O (the candidate list + live
+ * status). Requires no grant — that's the deliberate discovery widening.
+ */
+async function committeeRoster(callerId: string): Promise<RosterEntry[]> {
+  const all = await listAllWorkspaces();
+  const caller = all.find((w) => w.id === callerId) ?? null;
+  const stateById = new Map(all.map((w) => [w.id, w.state]));
+  return buildRoster(caller, callerId, all, (id) => liveStatusFields(id, stateById.get(id) === 'paused'));
 }
 
 export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): void {
@@ -790,6 +835,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('committee:status', (_e, callerId: string, targetId: string) =>
     committeeStatus(callerId, targetId)
   );
+  ipcMain.handle('committee:roster', (_e, callerId: string) => committeeRoster(callerId));
   // Let the MCP committee_* tools reach the same effects (caller id from the
   // per-workspace socket instead of an IPC arg).
   setCommitteeHandlers({
@@ -797,7 +843,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     unpause: committeeUnpause,
     post: committeePost,
     collect: committeeCollect,
-    status: committeeStatus
+    status: committeeStatus,
+    roster: committeeRoster
   });
   // Scoped reads (#122): teach the MCP read tools the caller's allowed set.
   setReadScopeResolver(allowedReadWorkspaces);

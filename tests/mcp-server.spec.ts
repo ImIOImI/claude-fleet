@@ -99,9 +99,15 @@ test('MCP server: initialize, tools, typed reads, committee control', async () =
       })
     );
   };
-  // `id` opts in as a reachable expert; `id2` is a manager granted `read` over
+  // `id` opts in as a reachable expert and names `id2` in acceptFrom (so it is
+  // also discoverable in id2's roster); `id2` is a manager granted `read` over
   // it — so a committee_collect from id2's socket is permitted (#120).
-  seedManifest(id, 'mcp-test-ws', { accessibility: { reachable: true } });
+  seedManifest(id, 'mcp-test-ws', {
+    description: 'reviews auth',
+    labels: ['security'],
+    accessibility: { reachable: true, acceptFrom: [id2], roleHint: 'security' },
+    installedLoadouts: [{ id: 'expert-security', title: 'Expert · Security', files: [], installedAt: 0 }]
+  });
   seedManifest(id2, 'mcp-test-ws-2', { control: { canControl: [{ id, verbs: ['read'] }] } });
 
   const app: ElectronApplication = await electron.launch({
@@ -157,7 +163,8 @@ test('MCP server: initialize, tools, typed reads, committee control', async () =
         'get_cost',
         'list_events',
         'committee_pause',
-        'committee_unpause'
+        'committee_unpause',
+        'committee_roster'
       ])
     );
     expect(names).not.toContain('query');
@@ -220,10 +227,41 @@ test('MCP server: initialize, tools, typed reads, committee control', async () =
       // container/attach in this harness ⇒ not paused, not busy; lastActiveAt
       // comes from the seeded session row.
       const st = await client2.call('tools/call', { name: 'committee_status', arguments: { id } });
-      const status = toolText(st) as { paused: boolean; busy: boolean; lastActiveAt: number | null };
+      const status = toolText(st) as {
+        paused: boolean;
+        busy: boolean;
+        lastActiveAt: number | null;
+        name: string;
+        roleHint?: string;
+      };
       expect(status.paused).toBe(false);
       expect(status.busy).toBe(false);
       expect(typeof status.lastActiveAt).toBe('number');
+      // Enriched status also carries the expert's metadata.
+      expect(status.name).toBe('mcp-test-ws');
+      expect(status.roleHint).toBe('security');
+
+      // committee_roster (discovery): id2 sees `id` because it is reachable AND
+      // names id2 in acceptFrom, with its metadata + a controllable grant.
+      const ros = await client2.call('tools/call', { name: 'committee_roster', arguments: {} });
+      const roster = toolText(ros) as Array<{
+        id: string;
+        roleHint?: string;
+        description?: string;
+        installedLoadouts: Array<{ id: string; title: string }>;
+        grant: { controllable: boolean; verbs: string[] };
+      }>;
+      expect(roster).toHaveLength(1);
+      expect(roster[0].id).toBe(id);
+      expect(roster[0].roleHint).toBe('security');
+      expect(roster[0].description).toBe('reviews auth');
+      expect(roster[0].installedLoadouts).toEqual([{ id: 'expert-security', title: 'Expert · Security' }]);
+      expect(roster[0].grant).toEqual({ controllable: true, verbs: ['read'] });
+
+      // Conversely, the expert (caller `id`) holds no grants and no peer names
+      // it, so its own roster is empty — discovery is acceptFrom-gated, per-caller.
+      const rosExpert = await client.call('tools/call', { name: 'committee_roster', arguments: {} });
+      expect(toolText(rosExpert) as unknown[]).toHaveLength(0);
     } finally {
       client2.close();
     }

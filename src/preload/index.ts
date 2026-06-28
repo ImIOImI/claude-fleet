@@ -219,8 +219,34 @@ const api = {
     status: (
       callerId: string,
       targetId: string
-    ): Promise<{ id: string; paused: boolean; busy: boolean; stalled: boolean; lastActiveAt: number | null }> =>
-      ipcRenderer.invoke('committee:status', callerId, targetId),
+    ): Promise<{
+      id: string;
+      name: string;
+      description?: string;
+      labels: string[];
+      roleHint?: string;
+      installedLoadouts: Array<{ id: string; title: string }>;
+      paused: boolean;
+      busy: boolean;
+      stalled: boolean;
+      lastActiveAt: number | null;
+    }> => ipcRenderer.invoke('committee:status', callerId, targetId),
+    /** Discover experts that have opted in to `callerId` (reachable + acceptFrom
+     *  names it), with metadata, liveness, and whether a grant is held. */
+    roster: (
+      callerId: string
+    ): Promise<
+      Array<{
+        id: string;
+        name: string;
+        description?: string;
+        labels: string[];
+        roleHint?: string;
+        installedLoadouts: Array<{ id: string; title: string }>;
+        status: { paused: boolean; busy: boolean; stalled: boolean; lastActiveAt: number | null };
+        grant: { controllable: boolean; verbs: Array<'read' | 'post' | 'pause'> };
+      }>
+    > => ipcRenderer.invoke('committee:roster', callerId),
     /** Subscribe to committee messages injected into a workspace (#123) so its
      *  tab can show a `[committee]` toast. Returns an unsubscribe. */
     onInbound: (cb: (workspaceId: string, message: string) => void): (() => void) => {
