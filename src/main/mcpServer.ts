@@ -32,6 +32,8 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { costFor } from './pricing.js';
+import { logError } from './errorLog.js';
+import { describeListenerError, type ListenerScope } from './mcpListenerError.js';
 import {
   mcpWorkspaceSocketDir,
   mcpWorkspaceSocketPath,
@@ -100,6 +102,17 @@ export function setCommitteeHandlers(h: CommitteeHandlers): void {
   committeeHandlers = h;
 }
 
+/** Route a host MCP listener `error` event to BOTH the console (live dev
+ *  visibility) and `error.log` (durable trace — #159). Without the durable sink
+ *  a swallowed bind failure — chiefly EADDRINUSE from a stale/duplicate
+ *  claude-fleet still holding 127.0.0.1:7071 — left no record of why a
+ *  container's claude-fleet-state MCP shows "Failed to connect". */
+function reportListenerError(where: ListenerScope, err: unknown): void {
+  const report = describeListenerError(where, err);
+  console.warn(`[mcp] ${report.message}`);
+  logError({ source: 'main', ...report });
+}
+
 let userDataDir: string | null = null;
 let rodb: Database.Database | null = null;
 // One listening socket per workspace, keyed by workspace id. The id is captured
@@ -131,7 +144,7 @@ export function startMcpServer(dir: string): void {
     // through the host loopback, so containers still reach it while the LAN
     // cannot. callerId is resolved from the first-line token in handleTcp.
     const srv = createServer((sock) => handleTcpConnection(sock));
-    srv.on('error', (err) => console.warn('[mcp] tcp listener error:', err));
+    srv.on('error', (err) => reportListenerError({ scope: 'tcp', port: MCP_TCP_PORT }, err));
     srv.listen(MCP_TCP_PORT, '127.0.0.1', () =>
       console.log(`[mcp] tcp listening on 127.0.0.1:${MCP_TCP_PORT}`)
     );
@@ -167,7 +180,7 @@ export function ensureWorkspaceSocket(id: string): void {
     /* best effort */
   }
   const server = createServer((sock) => handleConnection(sock, id));
-  server.on('error', (err) => console.warn(`[mcp] listener error (${id}):`, err));
+  server.on('error', (err) => reportListenerError({ scope: 'unix', workspaceId: id }, err));
   server.listen(sockPath, () => console.log(`[mcp] listening for ${id} on ${sockPath}`));
   listeners.set(id, server);
 }
