@@ -18,6 +18,27 @@ import { createPortal } from 'react-dom';
 import type { WorkspaceObservabilitySummary } from '../../../preload';
 import type { MirrorSetting, CleanupSetting } from '../App';
 import { TerminalSession } from './TerminalSession';
+import { readyToRefresh } from './refreshQueue';
+import { useBlinkSync } from '../blinkSync';
+
+/**
+ * A session tab's status dot. `live`/`ended` colors it; `busy` makes it pulse
+ * (claude is working in this session), wall-clock-synchronized via `useBlinkSync`
+ * so it blinks in lockstep with the workspace chip + Sessions-row indicators.
+ * A separate component because the hook can't run inside the `.map()` over tabs.
+ */
+function SessionTabDot({ ended, busy }: { ended: boolean; busy: boolean }): JSX.Element {
+  const pulsing = busy && !ended;
+  const blink = useBlinkSync(pulsing);
+  return (
+    <span
+      className={`session-tab-dot ${ended ? 'ended' : 'live'} ${pulsing ? 'busy' : ''}`}
+      style={blink}
+      aria-label={ended ? 'session ended' : pulsing ? 'Claude is working' : 'session live'}
+      title={ended ? 'session ended' : pulsing ? 'Claude is working…' : 'session live'}
+    />
+  );
+}
 
 interface Props {
   containerId: string;
@@ -86,6 +107,14 @@ interface Props {
    */
   onBusyChange?: (workspaceId: string, busy: boolean) => void;
   /**
+   * Reports the full set of this workspace's currently-busy *broker* session
+   * ids whenever it changes. App resolves these to claude session UUIDs to
+   * pulse the matching rows in the left-rail Sessions list. Distinct from
+   * `onBusyChange` (a per-workspace aggregate that drives the chip): this
+   * carries per-session granularity and fires on every flip.
+   */
+  onBusyIdsChange?: (workspaceId: string, brokerSessionIds: string[]) => void;
+  /**
    * A resume request targeted at THIS workspace (App only passes it to the
    * matching pane). Opens a new tab that attaches with `claude --resume
    * <claudeSessionId>`. `token` distinguishes repeat resumes of the same
@@ -107,6 +136,11 @@ interface Props {
   /** Fired the moment the active session actually starts reloading (after the
    *  idle gate) — App uses it to show a "reloading…" toast over the flicker. */
   onReloadStarted?: () => void;
+  /**
+   * Fired when the user picks Refresh on a session chip. The parent shows the
+   * shared toast; `busyNow` selects the copy ("…when idle" while claude works).
+   */
+  onRefreshRequested?: (sessionName: string, busyNow: boolean) => void;
 }
 
 function contextBarPct(summary: WorkspaceObservabilitySummary | null): number {
@@ -166,6 +200,15 @@ function IconClose(): JSX.Element {
     </svg>
   );
 }
+function IconRefresh(): JSX.Element {
+  // Circular arrow — exit & resume this session in place.
+  return (
+    <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M10 6 A4 4 0 1 1 8.6 3" />
+      <path d="M10.4 1.6 L10.4 4 L8 4" />
+    </svg>
+  );
+}
 
 export function TerminalPane({
   containerId,
@@ -182,11 +225,13 @@ export function TerminalPane({
   onResume,
   onActiveTabChange,
   onBusyChange,
+  onBusyIdsChange,
   resumeRequest,
   onResumeConsumed,
   reloadRequest,
   onReloadConsumed,
-  onReloadStarted
+  onReloadStarted,
+  onRefreshRequested
 }: Props) {
   // Transient `[committee]` toast (#123): show the injected message briefly so a
   // human watching this expert knows why text just appeared, then auto-dismiss.
@@ -232,6 +277,9 @@ export function TerminalPane({
     else set.delete(sessionId);
     const now = set.size > 0;
     if (now !== was) onBusyChange?.(workspaceId, now);
+    // Always emit the per-session set (not just on aggregate flips) so App can
+    // pulse exactly the running sessions' rows in the Sessions list.
+    onBusyIdsChange?.(workspaceId, [...set]);
     setBusyIds(new Set(set));
   };
 
@@ -453,12 +501,12 @@ export function TerminalPane({
   // Loadout reload (#16): a request from App means "reload the active session in
   // place so the just-installed loadout takes effect". We hold it pending and
   // only fire once the active session is idle — interrupting a working claude
-  // would be destructive. `reloadTarget` is handed to the matching
-  // TerminalSession, which closes + re-attaches with `--resume`.
+  // would be destructive. The token in `reloadTargets[activeId]` is handed to
+  // the matching TerminalSession, which closes + re-attaches with `--resume`.
+  // The map (rather than a single target) lets the loadout reload and the
+  // manual chip-menu Refresh address different sessions independently.
   const [pendingReload, setPendingReload] = useState(false);
-  const [reloadTarget, setReloadTarget] = useState<{ sessionId: string; token: number } | null>(
-    null
-  );
+  const [reloadTargets, setReloadTargets] = useState<Record<string, number>>({});
   const reloadTokenRef = useRef(0);
   const lastReloadRequest = useRef<number | null>(null);
   useEffect(() => {
@@ -472,9 +520,46 @@ export function TerminalPane({
     if (!pendingReload || !activeId) return;
     if (busyIds.has(activeId)) return; // claude is working — defer until idle
     setPendingReload(false);
-    setReloadTarget({ sessionId: activeId, token: ++reloadTokenRef.current });
+    setReloadTargets((prev) => ({ ...prev, [activeId]: ++reloadTokenRef.current }));
     onReloadStarted?.();
   }, [pendingReload, activeId, busyIds, onReloadStarted]);
+
+  // Manual chip-menu Refresh: a per-session queue. requestRefresh enqueues a
+  // session id and shows the toast at click time; this effect drains the queue
+  // into reloadTargets once each session is idle (readyToRefresh enforces the
+  // not-busy / not-ended / still-exists rule). Shares reloadTargets with the
+  // loadout reload, so a loadout reload of one tab and a manual refresh of
+  // another fire independently when each goes idle.
+  const [pendingRefresh, setPendingRefresh] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    if (pendingRefresh.size === 0) return;
+    const existing = new Set(sessions.map((s) => s.id));
+    const ready = readyToRefresh(pendingRefresh, busyIds, endedIds, existing);
+    if (ready.length === 0) return;
+    setPendingRefresh((prev) => {
+      const next = new Set(prev);
+      ready.forEach((id) => next.delete(id));
+      return next;
+    });
+    setReloadTargets((prev) => {
+      const next = { ...prev };
+      ready.forEach((id) => {
+        next[id] = ++reloadTokenRef.current;
+      });
+      return next;
+    });
+  }, [pendingRefresh, busyIds, endedIds, sessions]);
+
+  function requestRefresh(s: Session): void {
+    if (!loaded || endedIds.has(s.id)) return;
+    setPendingRefresh((prev) => {
+      if (prev.has(s.id)) return prev;
+      const next = new Set(prev);
+      next.add(s.id);
+      return next;
+    });
+    onRefreshRequested?.(s.name, busyIds.has(s.id));
+  }
 
   function closeSession(id: string): void {
     if (!loaded) return;
@@ -622,11 +707,7 @@ export function TerminalPane({
               }}
               onDragEnd={() => setDragSessionId(null)}
             >
-              <span
-                className={`session-tab-dot ${ended ? 'ended' : 'live'}`}
-                aria-label={ended ? 'session ended' : 'session live'}
-                title={ended ? 'session ended' : 'session live'}
-              />
+              <SessionTabDot ended={ended} busy={busyIds.has(s.id)} />
               {renamingId === s.id ? (
                 <input
                   className="session-tab-rename"
@@ -714,6 +795,19 @@ export function TerminalPane({
                 <span>Rename</span>
               </button>
               <button
+                role="menuitem"
+                disabled={endedIds.has(s.id)}
+                aria-disabled={endedIds.has(s.id)}
+                title="Exit and resume this session (waits until it's idle)"
+                onClick={() => {
+                  setTabMenu(null);
+                  requestRefresh(s);
+                }}
+              >
+                <IconRefresh />
+                <span>Refresh</span>
+              </button>
+              <button
                 role="menuitemcheckbox"
                 aria-checked={!!s.autoName}
                 title="Name this tab from Claude's session summary, kept up to date"
@@ -789,7 +883,7 @@ export function TerminalPane({
             paused={paused}
             onLifecycleChange={handleLifecycle}
             onActivityChange={handleActivity}
-            reloadTarget={reloadTarget}
+            reloadToken={reloadTargets[s.id] ?? null}
           />
         ))}
         {paused && (

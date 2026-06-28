@@ -12,6 +12,8 @@ on:
   pull_request:
     paths:
       - 'src/**'
+      - 'tests/**'
+      - 'playwright.config.ts'
       - 'package.json'
       - 'package-lock.json'
       - 'electron-builder.yml'
@@ -84,6 +86,59 @@ jobs:
           name: claude-fleet-${{ matrix.os }}
           path: ${{ matrix.artifact_glob }}
           if-no-files-found: error
+
+  # Playwright end-to-end suite (tests/*.spec.ts). These drive the REAL Electron
+  # app via @playwright/test's _electron.launch, so the job needs a virtual
+  # display (Xvfb) and Chromium/Electron's shared libraries — neither of which
+  # the lean runner image has, which is why e2e runs here on a GH runner rather
+  # than in a container. No spec spawns a Docker container (mock fleet or
+  # on-disk seed data), so no Docker daemon is required. Linux-only for now:
+  # Xvfb is Linux-only, and one GH-hosted Linux runner covers the suite.
+  e2e:
+    name: e2e (playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # libsecret for keytar (links it at runtime); build-essential/python3 are
+      # preinstalled on the runner and let node-pty compile its Electron-ABI build.
+      - name: Install Linux runtime deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsecret-1-dev
+
+      # postinstall (electron-builder install-app-deps) rebuilds the native
+      # modules against Electron's ABI — exactly what we launch below.
+      - name: Install dependencies
+        run: npm ci
+
+      # apt-installs the Chromium/Electron shared libs (libgtk-3, libnss3,
+      # libgbm, libasound, …) — the set Electron needs to start.
+      - name: Install Electron/Chromium system libraries
+        run: npx playwright install-deps chromium
+
+      - name: Build app
+        run: npm run build
+
+      # Xvfb gives Electron a headless display; ELECTRON_DISABLE_SANDBOX avoids
+      # Chromium's setuid-sandbox requirement (unavailable in CI).
+      - name: Run Playwright e2e
+        run: xvfb-run -a npm run test:e2e
+        env:
+          ELECTRON_DISABLE_SANDBOX: '1'
+
+      - name: Upload Playwright artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results
+          path: test-results/
+          if-no-files-found: ignore
 
   release:
     name: draft release

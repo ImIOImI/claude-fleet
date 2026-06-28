@@ -246,6 +246,25 @@ body {
 }
 .committee-warning svg { flex: 0 0 auto; margin-top: 1px; color: var(--warn); }
 
+/* Accept-from manager multiselect (#164) */
+.committee-acceptfrom { margin: 8px 0 2px; }
+.committee-acceptfrom-label { display: block; font-size: 13px; color: var(--ink-1); margin-bottom: 5px; }
+.committee-acceptfrom-list {
+  display: flex; flex-direction: column; gap: 2px;
+  max-height: 168px; overflow-y: auto;
+  padding: 5px; border: 1px solid var(--rule); border-radius: var(--r-md);
+  background: var(--bg-1);
+}
+.committee-acceptfrom-row {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 13px; color: var(--ink-1); cursor: pointer;
+  padding: 3px 5px; border-radius: var(--r-sm);
+}
+.committee-acceptfrom-row:hover { background: var(--bg-2); }
+.committee-acceptfrom-row input { margin: 0; accent-color: var(--ok); }
+.committee-acceptfrom-row svg { flex: 0 0 auto; color: var(--ink-2); }
+.committee-acceptfrom-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* Committee grant matrix (left-rail section, #118) */
 .committee-pane { padding: 8px 10px 12px; font-size: 13px; }
 .committee-empty { color: var(--ink-2); font-size: 12px; padding: 8px 4px; }
@@ -556,6 +575,17 @@ body {
   flex: none;
 }
 .session-row-cost { margin-left: auto; font-family: var(--font-mono); }
+/* Busy: claude actively working in this session — a leading dot pulses, in
+   lockstep with the workspace chip + session-tab indicators (wall-clock
+   synced via blinkSync). Reuses the chip's `chipBusyPulse` keyframes. */
+.session-busy-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--ok);
+  animation: chipBusyPulse 1s ease-in-out infinite;
+}
 
 .session-row-actions {
   display: flex;
@@ -1103,6 +1133,166 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
   line-height: 1.5;
 }
 .empty .hint { font-size: 11px; color: var(--ink-2); font-family: var(--font-mono); }
+
+/* ----- landing / first-run pitch -------------------------------------- */
+/* The first-run view sells the fleet before the user has created anything.
+   Lives inside .main-body (position:relative), so pin + scroll within it. */
+.landing {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  padding: 56px clamp(24px, 6vw, 72px) 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 40px;
+  /* a soft green wash from the top echoes the fleet's accent (--ok) */
+  background:
+    radial-gradient(120% 70% at 50% -10%, oklch(70% 0.16 145 / 0.08), transparent 60%),
+    var(--bg);
+}
+
+.landing-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 16px;
+  max-width: 720px;
+}
+.landing-hero h1 {
+  margin: 0;
+  font-size: clamp(30px, 4.5vw, 46px);
+  font-weight: 600;
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  background: linear-gradient(180deg, var(--ink), var(--ink-1));
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+.landing-hero .eyebrow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ok);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.landing-hero .eyebrow .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+}
+.landing-lede {
+  margin: 0;
+  max-width: 600px;
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--ink-1);
+}
+.landing-cta {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+.landing-cta .btn.primary {
+  font-size: 14px;
+  padding: 10px 20px;
+}
+
+.landing-features {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+  width: 100%;
+  max-width: 920px;
+}
+.feature-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 20px;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-lg);
+  background: var(--bg-card);
+  text-align: left;
+  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+.feature-card:hover {
+  border-color: var(--rule-strong);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow);
+}
+.feature-glyph {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--r-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  color: var(--ok);
+  background: oklch(70% 0.16 145 / 0.1);
+  border: 1px solid oklch(70% 0.16 145 / 0.22);
+  margin-bottom: 4px;
+}
+.feature-card h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.feature-card p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-1);
+}
+
+.landing-more {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  max-width: 920px;
+  padding-top: 28px;
+  border-top: 1px solid var(--rule-soft);
+}
+.landing-more .eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+.landing-more ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px 24px;
+  width: 100%;
+}
+.landing-more li {
+  font-size: 12.5px;
+  color: var(--ink-2);
+  line-height: 1.5;
+}
+.landing-more li strong {
+  color: var(--ink-1);
+  font-weight: 600;
+}
 
 /* ----- modals --------------------------------------------------------- */
 .modal-backdrop {
@@ -1703,6 +1893,9 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
 }
 .ws-chip-menu button:hover { background: var(--bg-hover); color: var(--ink); }
 .ws-chip-menu button:hover svg { color: var(--ink); }
+.ws-chip-menu button:disabled { opacity: 0.4; cursor: default; }
+.ws-chip-menu button:disabled:hover { background: transparent; color: var(--ink-1); }
+.ws-chip-menu button:disabled:hover svg { color: var(--ink-2); }
 .ws-chip-menu button.danger { color: var(--danger); }
 .ws-chip-menu button.danger svg { color: var(--danger); }
 .ws-chip-menu button.danger:hover { background: rgba(239, 77, 77, 0.12); }
@@ -1823,6 +2016,12 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
 }
 .session-tab .session-tab-dot.ended {
   background: var(--c3);
+}
+/* Busy: claude actively working in this session's tab — the live dot pulses,
+   in lockstep with the workspace chip + Sessions-row indicators (wall-clock
+   synced via blinkSync). Reuses the chip's `chipBusyPulse` keyframes. */
+.session-tab .session-tab-dot.busy {
+  animation: chipBusyPulse 1s ease-in-out infinite;
 }
 .session-tab .session-tab-name { font-weight: 500; }
 .session-tab .session-tab-close {
@@ -2493,6 +2692,48 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
 @media (prefers-reduced-motion: reduce) {
   .toast-spinner { animation: none; }
   .toast { animation: none; }
+}
+/* Drag-and-drop result toasts (#87): static glyph instead of the spinner. */
+.toast-glyph {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  margin-top: 1px;
+  font-size: 12px;
+  line-height: 13px;
+  text-align: center;
+}
+.toast.ok { border-color: color-mix(in oklab, var(--ok) 45%, var(--rule)); }
+.toast.ok .toast-glyph { color: var(--ok); }
+.toast.error { border-color: color-mix(in oklab, var(--danger) 45%, var(--rule)); }
+.toast.error .toast-glyph,
+.toast.error .toast-text { color: var(--danger); }
+
+/* ----- drag-and-drop overlay (#87) ----------------------------------- */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in oklab, var(--info) 12%, rgba(0, 0, 0, 0.45));
+  pointer-events: none;
+}
+.drop-overlay-card {
+  padding: 28px 40px;
+  border: 2px dashed var(--info);
+  border-radius: var(--r-lg);
+  background: var(--bg-card);
+  text-align: center;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+}
+.drop-overlay-title { font-size: 16px; font-weight: 600; color: var(--ink); }
+.drop-overlay-sub {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--ink-2);
+  font-family: var(--font-mono);
 }
 
 /* ── PR-C: Advanced image search modal ───────────────────────────── */

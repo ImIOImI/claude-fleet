@@ -146,6 +146,61 @@ test('Saved tab: clicking a row expands inline with Resume action', async () => 
   }
 });
 
+test('Committee access: accept-from lists managers as checkboxes and saves the selection', async () => {
+  const EXPERT = {
+    id: '01TESTEXPERT0000000000000E',
+    name: 'sec-expert',
+    state: 'stopped' as const,
+    workspaceRoot: '/tmp/sec-expert',
+    image: RUNNER,
+    kind: 'container' as const,
+    labels: []
+  };
+  // A manager: another container workspace that holds an outbound grant.
+  const MANAGER = {
+    id: '01TESTMANAGER000000000000M',
+    name: 'lead-manager',
+    state: 'stopped' as const,
+    workspaceRoot: '/tmp/lead-manager',
+    image: RUNNER,
+    kind: 'container' as const,
+    labels: [],
+    control: { canControl: [{ id: EXPERT.id, verbs: ['read' as const] }] }
+  };
+
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, { workspaceList: [EXPERT, MANAGER], isDirectoryReturns: true });
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
+
+    const row = window.locator('.saved-row', { hasText: 'sec-expert' });
+    await row.locator('.saved-row-header').click();
+
+    // Open "Committee access" and opt in as reachable.
+    await row.getByText('Committee access').click();
+    await row.getByText('Reachable by managers').click();
+
+    // The manager appears as a checkbox row (not the expert itself).
+    const mgrRow = row.locator('.committee-acceptfrom-row', { hasText: 'lead-manager' });
+    await expect(mgrRow).toBeVisible();
+    await expect(row.locator('.committee-acceptfrom-row', { hasText: 'sec-expert' })).toHaveCount(0);
+
+    await mgrRow.locator('input[type="checkbox"]').check();
+
+    // Resume serializes the form → writeManifest carries the selected id.
+    await row.getByRole('button', { name: 'Resume' }).click();
+
+    const calls = await getCalls(app);
+    const spec = calls.writeManifest.at(-1) as {
+      accessibility?: { reachable?: boolean; acceptFrom?: string[] };
+    };
+    expect(spec.accessibility?.reachable).toBe(true);
+    expect(spec.accessibility?.acceptFrom).toEqual([MANAGER.id]);
+  } finally {
+    await app.close();
+  }
+});
+
 test('Saved tab: Resume writes the manifest then starts the container', async () => {
   const { app, window } = await launch({});
   try {

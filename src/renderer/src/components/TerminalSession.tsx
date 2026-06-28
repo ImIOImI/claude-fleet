@@ -17,6 +17,7 @@ import { Terminal, type ILink, type ILinkProvider } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { ActivityDetector } from '../activityDetector';
+import { decideTerminalKeyAction } from '../terminalKeymap';
 
 // Stretch the font fallback chain so canvas renders for glyphs xterm
 // can't find in a monospace font (emoji, symbols, regional indicators)
@@ -143,13 +144,14 @@ interface Props {
    */
   onActivityChange?: (sessionId: string, busy: boolean) => void;
   /**
-   * Loadout reload trigger (#16). When `reloadTarget.sessionId` matches this
-   * session and `token` advances, the session terminates its broker session
-   * (kills claude) and re-attaches the same id with `claude --resume <uuid>`,
-   * so the tab resumes the conversation under the just-installed loadout. The
-   * parent fires this only while the session is idle.
+   * Reload/refresh trigger. Each time this number changes to a new non-null
+   * value, the session terminates its broker session (kills claude) and
+   * re-attaches the same id with `claude --resume <uuid>`, resuming the
+   * conversation in place. Fed per-session by TerminalPane's reloadTargets
+   * map; the parent only advances it while the session is idle. Used by both
+   * the loadout reload (#16) and the manual chip-menu Refresh.
    */
-  reloadTarget?: { sessionId: string; token: number } | null;
+  reloadToken?: number | null;
 }
 
 export function TerminalSession({
@@ -162,7 +164,7 @@ export function TerminalSession({
   paused = false,
   onLifecycleChange,
   onActivityChange,
-  reloadTarget,
+  reloadToken,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   // Bumped when the user clicks "Start new session" / "Retry" after a
@@ -318,36 +320,30 @@ export function TerminalSession({
     };
 
     const doPaste = (): void => {
-      void window.api.clipboard.read().then((text) => {
-        if (text && ptyHandleId) window.api.pty.input(ptyHandleId, text);
+      // Image on the clipboard → ingest as a drop instead of pasting text.
+      // The custom key handler calls preventDefault() on Ctrl+V (see below), so
+      // the browser's native paste never reaches xterm's textarea and this stays
+      // the single paste path (#150). Clipboard images are handed off via a
+      // window CustomEvent that useDropIngestion handles.
+      void window.api.clipboard.readImage().then((img) => {
+        if (img) {
+          window.dispatchEvent(new CustomEvent('cf:drop-image', { detail: img }));
+          return;
+        }
+        return window.api.clipboard.read().then((text) => {
+          if (text && ptyHandleId) window.api.pty.input(ptyHandleId, text);
+        });
       });
     };
 
     term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
-      if (e.type !== 'keydown') return true;
-      const plainCtrl = e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey;
-      const ctrlShift = e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
-
-      if (plainCtrl && e.code === 'KeyC') {
-        if (term.hasSelection()) {
-          doCopy();
-          return false;
-        }
-        return true; // no selection — pass through as SIGINT
-      }
-      if (plainCtrl && e.code === 'KeyV') {
-        doPaste();
-        return false;
-      }
-      if (ctrlShift && e.code === 'KeyC') {
-        doCopy();
-        return false;
-      }
-      if (ctrlShift && e.code === 'KeyV') {
-        doPaste();
-        return false;
-      }
-      return true;
+      const action = decideTerminalKeyAction(e, term.hasSelection());
+      // preventDefault is what stops the native browser paste from firing a
+      // second time alongside our doPaste() (#150); the decision owns when.
+      if (action.preventDefault) e.preventDefault();
+      if (action.effect === 'copy') doCopy();
+      else if (action.effect === 'paste') doPaste();
+      return action.pass;
     });
 
     const onContextMenu = async (e: MouseEvent): Promise<void> => {
@@ -538,9 +534,9 @@ export function TerminalSession({
   // resume (e.g. claude never started in this tab) — the files are already in
   // place and will load on the next `claude` start regardless.
   useEffect(() => {
-    if (!reloadTarget || reloadTarget.sessionId !== sessionId) return;
-    if (reloadTarget.token === lastReloadTokenRef.current) return;
-    lastReloadTokenRef.current = reloadTarget.token;
+    if (reloadToken == null) return;
+    if (reloadToken === lastReloadTokenRef.current) return;
+    lastReloadTokenRef.current = reloadToken;
     let cancelled = false;
     void (async () => {
       try {
@@ -567,7 +563,7 @@ export function TerminalSession({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reloadTarget, sessionId, workspaceId]);
+  }, [reloadToken, sessionId, workspaceId]);
 
   // When this session becomes visible again, force a fit. xterm's
   // ResizeObserver can fire while the host is `visibility: hidden`

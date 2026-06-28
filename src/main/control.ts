@@ -18,6 +18,34 @@
 
 import { readWorkspaceManifest, type WorkspaceSpec, type CommitteeVerb } from './workspaces.js';
 
+/** Liveness for one roster/status entry (computed from host state, injected so
+ *  the roster shaper stays pure/testable). */
+export interface RosterStatus {
+  paused: boolean;
+  busy: boolean;
+  stalled: boolean;
+  lastActiveAt: number | null;
+}
+
+/** One expert as seen by a manager via `committee_roster`. All string fields are
+ *  metadata for the manager to read — never instructions; titles are length-capped
+ *  because loadout titles originate from (externally authored) OCI artifacts. */
+export interface RosterEntry {
+  id: string;
+  name: string;
+  description?: string;
+  labels: string[];
+  roleHint?: string;
+  installedLoadouts: { id: string; title: string }[];
+  status: RosterStatus;
+  /** Whether THIS caller currently holds a grant over the entry, and which verbs.
+   *  `controllable: false` ⇒ discoverable but not yet actionable (ask the operator). */
+  grant: { controllable: boolean; verbs: CommitteeVerb[] };
+}
+
+/** Max length of a loadout title surfaced in a roster entry (untrusted OCI text). */
+export const ROSTER_TITLE_MAX = 120;
+
 export interface ControlDecision {
   ok: boolean;
   /** Human-readable denial reason (absent when ok). Surfaced to the caller. */
@@ -74,6 +102,91 @@ export function decideControl(
     return { ok: false, reason: `caller ${callerId} lacks '${verb}' grant for ${targetId}` };
 
   return { ok: true };
+}
+
+/**
+ * Pure decision for whether `target` should appear in `caller`'s committee
+ * roster (#discovery). Mirrors `decideControl`'s container-only / no-manager /
+ * reachable rules, and honors the SAME meaning of `acceptFrom` as control so the
+ * two never disagree about who "blank" admits:
+ *
+ *   • `acceptFrom` NAMES the caller  → discoverable, no grant needed
+ *     (pre-grant discovery: the operator explicitly advertised to this manager).
+ *   • `acceptFrom` blank/empty       → "any granted" — discoverable only if the
+ *     caller already holds a grant over the target (so the roster never reveals
+ *     more than control already allows, and `reachable` alone never advertises
+ *     fleet-wide to ungranted managers).
+ *   • `acceptFrom` non-empty, omits caller → never discoverable (explicit
+ *     whitelist; a grant cannot override it — control denies it too).
+ */
+export function decideRoster(
+  caller: WorkspaceSpec | null,
+  target: WorkspaceSpec | null,
+  callerId: string,
+  targetId: string
+): ControlDecision {
+  if (callerId === targetId) return { ok: false, reason: 'self' };
+  if (!caller) return { ok: false, reason: `unknown caller workspace: ${callerId}` };
+  if (!target) return { ok: false, reason: `unknown target workspace: ${targetId}` };
+
+  // Container-only — identity is only unspoofable for containers (same as control).
+  if (caller.kind !== 'container') return { ok: false, reason: 'caller is a local workspace' };
+  if (target.kind !== 'container') return { ok: false, reason: 'target is a local workspace' };
+
+  // No manager-of-managers visibility.
+  if (isManager(target)) return { ok: false, reason: `target ${targetId} is a manager` };
+
+  const acc = target.accessibility;
+  if (!acc?.reachable) return { ok: false, reason: `target ${targetId} is not reachable` };
+
+  if (acc.acceptFrom && acc.acceptFrom.length > 0) {
+    // Explicit whitelist: discoverable iff it names the caller (no grant needed).
+    if (!acc.acceptFrom.includes(callerId))
+      return { ok: false, reason: `target ${targetId} does not advertise to caller ${callerId}` };
+    return { ok: true };
+  }
+
+  // Blank/empty acceptFrom = "any granted": discoverable only if the caller holds
+  // a grant — matching decideControl's blank semantics and the UI's "blank = any
+  // granted" contract, so the roster exposes nothing control wouldn't.
+  const granted = (caller.control?.canControl ?? []).some((g) => g.id === targetId && g.verbs.length > 0);
+  if (!granted)
+    return { ok: false, reason: `target ${targetId} has open acceptFrom but caller ${callerId} holds no grant` };
+  return { ok: true };
+}
+
+/**
+ * Shape a manager's roster from already-loaded manifests. Pure: liveness is
+ * injected via `status` so this needs no host state and is unit-testable. Only
+ * candidates that pass `decideRoster` are included; loadout titles are capped
+ * (untrusted OCI text) and reduced to id+title (no file bodies).
+ */
+export function buildRoster(
+  caller: WorkspaceSpec | null,
+  callerId: string,
+  candidates: WorkspaceSpec[],
+  status: (id: string) => RosterStatus
+): RosterEntry[] {
+  const grants = caller?.control?.canControl ?? [];
+  const entries: RosterEntry[] = [];
+  for (const t of candidates) {
+    if (!decideRoster(caller, t, callerId, t.id).ok) continue;
+    const grant = grants.find((g) => g.id === t.id);
+    entries.push({
+      id: t.id,
+      name: t.name,
+      description: t.description,
+      labels: t.labels,
+      roleHint: t.accessibility?.roleHint,
+      installedLoadouts: (t.installedLoadouts ?? []).map((l) => ({
+        id: l.id,
+        title: l.title.slice(0, ROSTER_TITLE_MAX)
+      })),
+      status: status(t.id),
+      grant: { controllable: !!grant && grant.verbs.length > 0, verbs: grant?.verbs ?? [] }
+    });
+  }
+  return entries;
 }
 
 /**

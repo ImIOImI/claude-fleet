@@ -11,7 +11,8 @@ vi.mock('./workspaces.js', async (orig) => ({
   readWorkspaceManifest: vi.fn()
 }));
 
-const { decideControl, assertControl } = await import('./control.js');
+const { decideControl, assertControl, decideRoster, buildRoster, ROSTER_TITLE_MAX } =
+  await import('./control.js');
 const { readWorkspaceManifest } = await import('./workspaces.js');
 const mockRead = vi.mocked(readWorkspaceManifest);
 
@@ -110,6 +111,131 @@ describe('decideControl (#118 truth table)', () => {
     const localExp = ws(EXP, { ...expert, kind: 'local' });
     expect(decideControl(localMgr, expert, MGR, EXP, 'post').ok).toBe(false);
     expect(decideControl(manager, localExp, MGR, EXP, 'post').ok).toBe(false);
+  });
+});
+
+describe('decideRoster (acceptFrom-gated discoverability)', () => {
+  it('lists a reachable expert whose acceptFrom names the caller, no grant needed', () => {
+    // Caller holds NO outbound grant — discovery must not require one.
+    const expert = ws(EXP, { accessibility: { reachable: true, acceptFrom: [MGR] } });
+    expect(decideRoster(ws(MGR), expert, MGR, EXP)).toEqual({ ok: true });
+  });
+
+  it('excludes a reachable expert with open/empty acceptFrom when the caller holds NO grant', () => {
+    // "blank = any granted": with no grant the caller is not "granted", so it
+    // must not discover an open expert (matches decideControl's blank semantics).
+    const open = ws(EXP, { accessibility: { reachable: true } });
+    const empty = ws(EXP, { accessibility: { reachable: true, acceptFrom: [] } });
+    expect(decideRoster(ws(MGR), open, MGR, EXP).ok).toBe(false);
+    expect(decideRoster(ws(MGR), empty, MGR, EXP).ok).toBe(false);
+  });
+
+  it('lists an open/empty-acceptFrom expert WHEN the caller holds a grant (blank = any granted)', () => {
+    const granted = ws(MGR, { control: { canControl: [{ id: EXP, verbs: ['read'] }] } });
+    const open = ws(EXP, { accessibility: { reachable: true } });
+    const empty = ws(EXP, { accessibility: { reachable: true, acceptFrom: [] } });
+    expect(decideRoster(granted, open, MGR, EXP)).toEqual({ ok: true });
+    expect(decideRoster(granted, empty, MGR, EXP)).toEqual({ ok: true });
+  });
+
+  it('still hides an expert whose acceptFrom names someone else, even if the caller holds a grant', () => {
+    // A non-empty list is an explicit whitelist; a caller it omits is never
+    // discoverable (and decideControl would deny it too). A grant cannot override.
+    const granted = ws(MGR, { control: { canControl: [{ id: EXP, verbs: ['read'] }] } });
+    const other = ws(EXP, { accessibility: { reachable: true, acceptFrom: ['01SOMEONE'] } });
+    expect(decideRoster(ws(MGR), other, MGR, EXP).ok).toBe(false);
+    expect(decideRoster(granted, other, MGR, EXP).ok).toBe(false);
+  });
+
+  it('lists a named expert even with no grant (pre-grant discovery via acceptFrom)', () => {
+    const named = ws(EXP, { accessibility: { reachable: true, acceptFrom: [MGR] } });
+    expect(decideRoster(ws(MGR), named, MGR, EXP)).toEqual({ ok: true });
+  });
+
+  it('excludes a target that is not reachable', () => {
+    const notReachable = ws(EXP, { accessibility: { reachable: false, acceptFrom: [MGR] } });
+    expect(decideRoster(ws(MGR), notReachable, MGR, EXP).ok).toBe(false);
+    expect(decideRoster(ws(MGR), ws(EXP), MGR, EXP).ok).toBe(false);
+  });
+
+  it('excludes a self-entry and a missing manifest', () => {
+    const self = ws(MGR, { accessibility: { reachable: true, acceptFrom: [MGR] } });
+    expect(decideRoster(self, self, MGR, MGR).ok).toBe(false);
+    expect(decideRoster(ws(MGR), null, MGR, EXP).ok).toBe(false);
+    expect(decideRoster(null, ws(EXP, { accessibility: { reachable: true, acceptFrom: [MGR] } }), MGR, EXP).ok).toBe(false);
+  });
+
+  it('excludes a target that is itself a manager (no manager-of-managers visibility)', () => {
+    const targetMgr = ws(EXP, {
+      accessibility: { reachable: true, acceptFrom: [MGR] },
+      control: { canControl: [{ id: '01SUB', verbs: ['post'] }] }
+    });
+    expect(decideRoster(ws(MGR), targetMgr, MGR, EXP).ok).toBe(false);
+  });
+
+  it('excludes when either side is a LOCAL workspace (container-only)', () => {
+    const expert = ws(EXP, { accessibility: { reachable: true, acceptFrom: [MGR] } });
+    expect(decideRoster(ws(MGR, { kind: 'local' }), expert, MGR, EXP).ok).toBe(false);
+    expect(decideRoster(ws(MGR), ws(EXP, { ...expert, kind: 'local' }), MGR, EXP).ok).toBe(false);
+  });
+});
+
+describe('buildRoster (shaping)', () => {
+  const status = () => ({ paused: false, busy: true, stalled: false, lastActiveAt: 42 });
+
+  it('includes only discoverable experts and maps their metadata + status', () => {
+    const caller = ws(MGR, { control: { canControl: [{ id: EXP, verbs: ['read', 'post'] }] } });
+    const visible = ws(EXP, {
+      name: 'sec-expert',
+      description: 'reviews auth',
+      labels: ['security'],
+      accessibility: { reachable: true, acceptFrom: [MGR], roleHint: 'security' },
+      installedLoadouts: [
+        { id: 'committee-expert-security', title: 'Security reviewer', files: [], installedAt: 0 }
+      ]
+    });
+    const hidden = ws('01OPEN', { accessibility: { reachable: true } }); // open acceptFrom
+
+    const roster = buildRoster(caller, MGR, [caller, visible, hidden], status);
+
+    expect(roster).toHaveLength(1);
+    expect(roster[0]).toEqual({
+      id: EXP,
+      name: 'sec-expert',
+      description: 'reviews auth',
+      labels: ['security'],
+      roleHint: 'security',
+      installedLoadouts: [{ id: 'committee-expert-security', title: 'Security reviewer' }],
+      status: { paused: false, busy: true, stalled: false, lastActiveAt: 42 },
+      grant: { controllable: true, verbs: ['read', 'post'] }
+    });
+  });
+
+  it('marks a discoverable-but-ungranted expert controllable:false', () => {
+    const caller = ws(MGR); // no grants
+    const expert = ws(EXP, { accessibility: { reachable: true, acceptFrom: [MGR] } });
+    const roster = buildRoster(caller, MGR, [expert], status);
+    expect(roster[0].grant).toEqual({ controllable: false, verbs: [] });
+  });
+
+  it('lists an open-acceptFrom expert the caller is granted over (blank = any granted)', () => {
+    const caller = ws(MGR, { control: { canControl: [{ id: EXP, verbs: ['read', 'pause'] }] } });
+    const open = ws(EXP, { name: 'open-expert', accessibility: { reachable: true } });
+    const roster = buildRoster(caller, MGR, [open], status);
+    expect(roster).toHaveLength(1);
+    expect(roster[0].id).toBe(EXP);
+    expect(roster[0].grant).toEqual({ controllable: true, verbs: ['read', 'pause'] });
+  });
+
+  it('caps loadout titles to ROSTER_TITLE_MAX (untrusted OCI text)', () => {
+    const caller = ws(MGR);
+    const longTitle = 'x'.repeat(ROSTER_TITLE_MAX + 50);
+    const expert = ws(EXP, {
+      accessibility: { reachable: true, acceptFrom: [MGR] },
+      installedLoadouts: [{ id: 'l', title: longTitle, files: [], installedAt: 0 }]
+    });
+    const roster = buildRoster(caller, MGR, [expert], status);
+    expect(roster[0].installedLoadouts[0].title.length).toBe(ROSTER_TITLE_MAX);
   });
 });
 

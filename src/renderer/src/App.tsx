@@ -10,6 +10,9 @@ import { CloseWorkspaceModal } from './components/CloseWorkspaceModal';
 import { DeleteWorkspaceModal } from './components/DeleteWorkspaceModal';
 import { EditWorkspaceModal, containerLevelChanged } from './components/EditWorkspaceModal';
 import { SettingsModal } from './components/SettingsModal';
+import { useDropIngestion } from './dropIngestion';
+import { contextBarSummary } from './contextBarSource';
+import { busyClaudeIdSet } from './busySessions';
 import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget } from '../../preload';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
@@ -213,6 +216,11 @@ export function App() {
   const [activeTabByWorkspace, setActiveTabByWorkspace] = useState<
     Record<string, string>
   >({});
+  // Whether each workspace's active tab is a fresh (+-created) one vs. loaded
+  // from inventory — drives the terminal context-bar fallback (#148).
+  const [activeTabFreshByWorkspace, setActiveTabFreshByWorkspace] = useState<
+    Record<string, boolean>
+  >({});
 
   // Per-workspace busy state (claude actively working in any of its sessions),
   // detected from the PTY title glyph in TerminalPane → drives the chip.
@@ -220,6 +228,21 @@ export function App() {
   const handleBusyChange = useCallback((workspaceId: string, busy: boolean) => {
     setBusyByWorkspace((prev) => (prev[workspaceId] === busy ? prev : { ...prev, [workspaceId]: busy }));
   }, []);
+
+  // Per-workspace busy *broker* session ids (the granular form of the busy
+  // flag above), bubbled up from each TerminalPane. Resolved below to the set
+  // of busy *claude* session UUIDs so the left-rail Sessions list can pulse
+  // exactly the running sessions' rows.
+  const [busyBrokerByWorkspace, setBusyBrokerByWorkspace] = useState<Record<string, string[]>>({});
+  const handleBusyIds = useCallback((workspaceId: string, ids: string[]) => {
+    setBusyBrokerByWorkspace((prev) => {
+      const prevIds = prev[workspaceId] ?? [];
+      // Order-insensitive equality — skip the state churn when nothing changed.
+      if (prevIds.length === ids.length && prevIds.every((id) => ids.includes(id))) return prev;
+      return { ...prev, [workspaceId]: ids };
+    });
+  }, []);
+  const [busySessionIds, setBusySessionIds] = useState<Set<string>>(new Set());
 
   // Latest committee message injected into each workspace (#123). The `nonce`
   // bumps on every inbound so TerminalPane re-shows its `[committee]` toast even
@@ -287,19 +310,45 @@ export function App() {
   } | null>(null);
   const reloadRequestTokenRef = useRef(0);
 
-  // Transient toasts (bottom-center, auto-dismissing). Used so far for the
-  // loadout reload, whose close+resume briefly flickers the terminal (#16).
-  const [toasts, setToasts] = useState<{ id: number; eyebrow?: string; message: string }[]>([]);
+  // Transient toasts (bottom-center, auto-dismissing). Used for the loadout
+  // reload (#16) and drag-and-drop results (#87). `kind` styles the toast:
+  // 'progress' shows the spinner (the default), 'ok'/'error' show a static
+  // status glyph and (for error) danger coloring.
+  type ToastKind = 'progress' | 'ok' | 'error';
+  const [toasts, setToasts] = useState<
+    { id: number; eyebrow?: string; message: string; kind: ToastKind }[]
+  >([]);
   const toastIdRef = useRef(0);
-  const pushToast = useCallback((message: string, eyebrow?: string, ttlMs = 4000): void => {
-    const id = ++toastIdRef.current;
-    setToasts((prev) => [...prev, { id, eyebrow, message }]);
-    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), ttlMs);
-  }, []);
+  const pushToast = useCallback(
+    (message: string, eyebrow?: string, ttlMs = 4000, kind: ToastKind = 'progress'): void => {
+      const id = ++toastIdRef.current;
+      setToasts((prev) => [...prev, { id, eyebrow, message, kind }]);
+      setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), ttlMs);
+    },
+    []
+  );
+  // Drag-and-drop / clipboard-image ingestion → selected workspace's _dropped/.
+  // Results surface through the existing toast stack; errors linger longer.
+  const notify = useCallback(
+    (kind: 'ok' | 'error', message: string): void => {
+      pushToast(message, kind === 'error' ? 'Drop failed' : 'Saved', kind === 'error' ? 6000 : 4000, kind);
+    },
+    [pushToast]
+  );
+  const { dragging } = useDropIngestion({ workspaceId: selectedId, notify });
   const handleReloadStarted = useCallback(
     (workspaceId: string): void => {
       const name = workspacesRef.current.find((w) => w.id === workspaceId)?.name ?? 'workspace';
       pushToast(`Applying loadout in ${name}…`, 'Reloading');
+    },
+    [pushToast]
+  );
+  const handleRefreshRequested = useCallback(
+    (name: string, busyNow: boolean): void => {
+      pushToast(
+        busyNow ? `Refreshing ${name} when idle…` : `Refreshing ${name}…`,
+        'Refreshing'
+      );
     },
     [pushToast]
   );
@@ -537,6 +586,57 @@ export function App() {
       unsubscribe();
     };
   }, [apiReady, selectedWorkspaceId, activeTabId]);
+
+  // Resolve busy *broker* session ids → busy *claude* session UUIDs for the
+  // left-rail Sessions list. `summaryForBrokerSession` carries the mapped
+  // claude session id (`sessionId`). Re-runs when the busy set changes and on
+  // every observability push — the broker→claude mapping is learned as
+  // transcripts ingest, so a freshly-busy session may not resolve on the first
+  // try. Keyed on a stable, order-insensitive serialization of the busy set.
+  const busyBrokerKey = JSON.stringify(
+    Object.entries(busyBrokerByWorkspace)
+      .filter(([, ids]) => ids.length > 0)
+      .map(([ws, ids]) => [ws, [...ids].sort()] as const)
+      .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+  );
+  useEffect(() => {
+    if (!apiReady) {
+      setBusySessionIds(new Set());
+      return;
+    }
+    let cancelled = false;
+    const resolve = async (): Promise<void> => {
+      const mappings = new Map<string, Map<string, string>>();
+      await Promise.all(
+        Object.entries(busyBrokerByWorkspace).map(async ([wsId, ids]) => {
+          if (ids.length === 0) return;
+          const m = new Map<string, string>();
+          await Promise.all(
+            ids.map(async (brokerId) => {
+              try {
+                const sum = await window.api.observability.summaryForBrokerSession(wsId, brokerId);
+                if (sum?.sessionId) m.set(brokerId, sum.sessionId);
+              } catch {
+                /* mapping not learned yet — this session simply won't pulse */
+              }
+            })
+          );
+          mappings.set(wsId, m);
+        })
+      );
+      if (cancelled) return;
+      const next = busyClaudeIdSet(busyBrokerByWorkspace, mappings);
+      setBusySessionIds((prev) =>
+        prev.size === next.size && [...prev].every((id) => next.has(id)) ? prev : next
+      );
+    };
+    void resolve();
+    const unsubscribe = window.api.observability.onSummary(() => void resolve());
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [apiReady, busyBrokerKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!apiReady) {
     return (
@@ -803,7 +903,7 @@ export function App() {
   };
 
   return (
-    <div className="app">
+    <div className={`app${dragging ? ' dragging' : ''}`}>
       <WorkspaceTabStrip
         workspaces={workspaces}
         summaries={summaries}
@@ -831,6 +931,7 @@ export function App() {
           workspaces={workspaces}
           selectedWorkspaceId={selectedId}
           selectedWorkspace={selectedWorkspace}
+          busySessionIds={busySessionIds}
           collapsed={leftCollapsed}
           onToggleCollapse={toggleLeftCollapsed}
           onResume={handleResumeSession}
@@ -869,7 +970,12 @@ export function App() {
                   cleanupDefault={w.mirror.cleanup}
                   containerId={w.containerId!}
                   paused={w.state === 'paused'}
-                  summary={summaries[w.id] ?? null}
+                  summary={contextBarSummary(
+                    selectedId === w.id,
+                    activeTabSummary,
+                    summaries[w.id] ?? null,
+                    activeTabFreshByWorkspace[w.id] ?? false
+                  )}
                   inbound={inboundByWorkspace[w.id] ?? null}
                   restartBanner={restartBannerIds.has(w.id)}
                   onRestartFromBanner={() => restartFromBanner(w.id, w.containerId!)}
@@ -878,19 +984,26 @@ export function App() {
                     await window.api.workspace.start(w.id);
                     refresh();
                   }}
-                  onActiveTabChange={(workspaceId, brokerSessionId) => {
+                  onActiveTabChange={(workspaceId, brokerSessionId, isFresh) => {
                     setActiveTabByWorkspace((prev) =>
                       prev[workspaceId] === brokerSessionId
                         ? prev
                         : { ...prev, [workspaceId]: brokerSessionId }
                     );
+                    setActiveTabFreshByWorkspace((prev) =>
+                      prev[workspaceId] === isFresh
+                        ? prev
+                        : { ...prev, [workspaceId]: isFresh }
+                    );
                   }}
                   onBusyChange={handleBusyChange}
+                  onBusyIdsChange={handleBusyIds}
                   resumeRequest={resumeRequest?.workspaceId === w.id ? resumeRequest : null}
                   onResumeConsumed={() => setResumeRequest(null)}
                   reloadRequest={reloadRequest?.workspaceId === w.id ? reloadRequest : null}
                   onReloadConsumed={() => setReloadRequest(null)}
                   onReloadStarted={() => handleReloadStarted(w.id)}
+                  onRefreshRequested={handleRefreshRequested}
                 />
               ))}
           </div>
@@ -991,11 +1104,27 @@ export function App() {
           />
         );
       })()}
+      {dragging && (
+        <div className="drop-overlay" aria-hidden="true">
+          <div className="drop-overlay-card">
+            <div className="drop-overlay-title">Drop to add to this workspace</div>
+            <div className="drop-overlay-sub">
+              {selected ? `→ ${selected.name} · /workspace/_dropped/` : 'Select a workspace first'}
+            </div>
+          </div>
+        </div>
+      )}
       {toasts.length > 0 && (
         <div className="toast-stack" role="status" aria-live="polite">
           {toasts.map((t) => (
-            <div key={t.id} className="toast">
-              <span className="toast-spinner" aria-hidden="true" />
+            <div key={t.id} className={`toast${t.kind !== 'progress' ? ` ${t.kind}` : ''}`}>
+              {t.kind === 'progress' ? (
+                <span className="toast-spinner" aria-hidden="true" />
+              ) : (
+                <span className="toast-glyph" aria-hidden="true">
+                  {t.kind === 'ok' ? '✓' : '✕'}
+                </span>
+              )}
               <span className="toast-body">
                 {t.eyebrow && <span className="toast-eyebrow">{t.eyebrow}</span>}
                 <span className="toast-text">{t.message}</span>
@@ -1028,20 +1157,94 @@ function DockerDisconnected({ onRetry }: { onRetry: () => void }) {
   );
 }
 
+// The empty/first-run view doubles as the product's pitch: a new user opens
+// claude-fleet to nothing, so the main pane sells what the fleet does before
+// asking them to create a workspace. Each card names a distinctive capability
+// and the value it buys; the footer strip name-drops the secondary features.
+const FLEET_FEATURES: { glyph: string; title: string; body: string }[] = [
+  {
+    glyph: '⠿',
+    title: 'Run a whole fleet at once',
+    body: 'Drive 3–6 Claude Code sessions side by side in one window — one keyboard, one set of credentials. Stop juggling terminals and start delegating in parallel.'
+  },
+  {
+    glyph: '▣',
+    title: 'Every agent fully sandboxed',
+    body: 'Each workspace runs claude in its own Docker container against a private folder. Agents work at full tilt without stepping on each other — or on your machine.'
+  },
+  {
+    glyph: '❚❚',
+    title: 'Experts that never lose the thread',
+    body: 'Pause an agent mid-thought and wake it later with its in-memory context intact. Build specialists that learn your codebase once and stay ready to act.'
+  },
+  {
+    glyph: '◑',
+    title: 'See every token and tool call',
+    body: 'Live cost, token burn, context window, and tool activity for each session — read straight from Claude’s transcripts, never scraped from the screen.'
+  },
+  {
+    glyph: '⌘',
+    title: 'Orchestrate with the Committee',
+    body: 'Let a manager agent coordinate a panel of expert workspaces — real multi-agent collaboration, with you watching the whole conversation.'
+  },
+  {
+    glyph: '⇲',
+    title: 'Drop in anything',
+    body: 'Drag files, images, web content, or text onto the window and it lands in the agent’s folder with the path on your clipboard. The window is the inbox.'
+  }
+];
+
 function FirstRun({ onNewWorkspace }: { onNewWorkspace: () => void }) {
   return (
-    <div className="empty">
-      <div className="icon-card">▢</div>
-      <span className="eyebrow">first run</span>
-      <h2>No workspaces yet</h2>
-      <p>
-        Each workspace runs <code>claude</code> in an isolated Docker container against a host
-        directory. Spin up your first to get started.
-      </p>
-      <button className="btn primary" onClick={onNewWorkspace}>
-        + New workspace
-      </button>
-      <span className="hint">You'll need a workspace folder and an API key</span>
+    <div className="landing">
+      <section className="landing-hero">
+        <span className="eyebrow">
+          <span className="dot" />
+          claude fleet
+        </span>
+        <h1>Command a fleet of Claude agents.</h1>
+        <p className="landing-lede">
+          One window to launch, watch, and steer a small fleet of isolated Claude Code
+          workspaces — each in its own sandbox, each with live cost and context telemetry,
+          all under your hand.
+        </p>
+        <div className="landing-cta">
+          <button className="btn primary" onClick={onNewWorkspace}>
+            + Launch your first workspace
+          </button>
+          <span className="hint">Takes a workspace folder and an API key — about a minute.</span>
+        </div>
+      </section>
+
+      <section className="landing-features">
+        {FLEET_FEATURES.map((f) => (
+          <article className="feature-card" key={f.title}>
+            <div className="feature-glyph" aria-hidden="true">
+              {f.glyph}
+            </div>
+            <h3>{f.title}</h3>
+            <p>{f.body}</p>
+          </article>
+        ))}
+      </section>
+
+      <footer className="landing-more">
+        <span className="eyebrow">also inside</span>
+        <ul>
+          <li>
+            <strong>Loadouts</strong> — equip agents with skills &amp; config, auto-applied when idle
+          </li>
+          <li>
+            <strong>Session history</strong> — resume any past session in any workspace
+          </li>
+          <li>
+            <strong>Keychain secrets</strong> — credentials never hit disk in plaintext
+          </li>
+          <li>
+            <strong>Fleet-state MCP</strong> — agents can query their own cost &amp; history
+          </li>
+        </ul>
+      </footer>
     </div>
   );
 }
