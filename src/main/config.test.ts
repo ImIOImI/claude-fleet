@@ -31,6 +31,7 @@ const {
   USAGE_BUDGET_WINDOW_HOURS,
   setFleetRoot,
   getFleetRoot,
+  setFavorite,
   _resetConfigCacheForTests
 } = await import('./config.js');
 
@@ -173,5 +174,31 @@ describe('get/setUsageBudget', () => {
     expect(await getFleetRoot()).toBe(root);
     expect(await getAutoReloadLoadouts()).toBe(false);
     expect((await getUsageBudget()).preset).toBe('max5');
+  });
+});
+
+describe('setFavorite', () => {
+  it('adds a favorite and returns the new list', async () => {
+    expect(await setFavorite('spec-driven', true)).toEqual(['spec-driven']);
+  });
+
+  it('persists the favorite so a fresh cache read sees it', async () => {
+    await setFavorite('spec-driven', true);
+    _resetConfigCacheForTests();
+    // After cache reset the on-disk value is authoritative — toggling off
+    // should start from ['spec-driven'] and return [].
+    expect(await setFavorite('spec-driven', false)).toEqual([]);
+  });
+
+  it('removes a favorite and returns the new list', async () => {
+    await setFavorite('spec-driven', true);
+    expect(await setFavorite('spec-driven', false)).toEqual([]);
+  });
+
+  it('does not clobber other settings', async () => {
+    const root = join(userDataDir, 'fleet');
+    await setFleetRoot(root);
+    await setFavorite('spec-driven', true);
+    expect(await getFleetRoot()).toBe(root);
   });
 });
