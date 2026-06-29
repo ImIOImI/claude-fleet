@@ -445,6 +445,20 @@ function clampLimit(v: unknown): number {
   return Math.max(1, Math.min(MAX_LIMIT, n));
 }
 
+/** Return a shallow copy of `row` with an ISO sibling (`<field>_iso`) for each
+ *  named epoch-ms field that holds a finite number. Null/0/missing → no sibling.
+ *  Lets clients bucket by UTC day without shelling out to `date` (#174). */
+function withIso<T extends Record<string, unknown>>(row: T, fields: string[]): T {
+  const out: Record<string, unknown> = { ...row };
+  for (const f of fields) {
+    const v = row[f];
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+      out[`${f}_iso`] = new Date(v).toISOString();
+    }
+  }
+  return out as T;
+}
+
 interface Tool {
   name: string;
   description: string;
@@ -517,7 +531,8 @@ export const TOOLS: Tool[] = [
       where.push(scopeSql);
       p.push(...params);
       const sql = `SELECT * FROM sessions ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY last_active_at DESC LIMIT ?`;
-      return db.prepare(sql).all(...p, clampLimit(a.limit));
+      const rows = db.prepare(sql).all(...p, clampLimit(a.limit)) as Array<Record<string, unknown>>;
+      return rows.map((r) => withIso(r, ['started_at', 'last_active_at']));
     }
   },
   {
@@ -538,7 +553,7 @@ export const TOOLS: Tool[] = [
       if (!(typeof row.workspace_id === 'string' && ctx.allowedWorkspaces.has(row.workspace_id))) {
         return null;
       }
-      return row;
+      return withIso(row as Record<string, unknown>, ['started_at', 'last_active_at']);
     }
   },
   {
@@ -637,7 +652,8 @@ export const TOOLS: Tool[] = [
         p.push(a.since);
       }
       const sql = `SELECT ${cols} FROM events WHERE ${where.join(' AND ')} ORDER BY id ASC LIMIT ?`;
-      return db.prepare(sql).all(...p, clampLimit(a.limit));
+      const rows = db.prepare(sql).all(...p, clampLimit(a.limit)) as Array<Record<string, unknown>>;
+      return rows.map((r) => withIso(r, ['ts']));
     }
   },
   // NOTE: there is intentionally no raw `query` (arbitrary SQL) tool. Such a

@@ -141,3 +141,15 @@ describe('list_events richer projection (#174)', () => {
     ).toThrow(/unknown column/i);
   });
 });
+
+describe('ISO timestamps (#174)', () => {
+  it('list_sessions adds ISO siblings for epoch fields', () => {
+    const rows = tool('list_sessions').run(db, {}, ctxA) as Array<Record<string, unknown>>;
+    expect(rows[0].last_active_at_iso).toBe(new Date(1000).toISOString());
+  });
+
+  it('list_events adds ts_iso', () => {
+    const rows = tool('list_events').run(db, { session_id: 'sa', tool_name: 'Bash' }, ctxA) as Array<Record<string, unknown>>;
+    expect(rows[0].ts_iso).toBe(new Date(1100).toISOString());
+  });
+});
