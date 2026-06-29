@@ -130,15 +130,20 @@ export class PortForwardManager {
           const duplex = brokerPtyStream(client, 1);
           socket.pipe(duplex);
           duplex.pipe(socket);
-          const cleanup = (): void => {
+          let closed = false;
+          const cleanup = (endSocket = false): void => {
+            if (closed) return;
+            closed = true;
             void client.closeChannel(1).catch(() => undefined);
             duplex.destroy();
             client.close();
+            if (endSocket) socket.end();
+            else socket.destroy();
           };
-          socket.on('close', cleanup);
-          socket.on('error', cleanup);
-          duplex.on('end', () => socket.end());
-          duplex.on('error', () => socket.destroy());
+          socket.on('close', () => cleanup());
+          socket.on('error', () => cleanup());
+          duplex.on('end', () => cleanup(true));
+          duplex.on('error', () => cleanup());
         })
         .catch(() => {
           socket.destroy();
