@@ -263,6 +263,34 @@ export function App() {
     });
   }, []);
 
+  // Dev-server detection (#port-forward): the broker spotted a new listening
+  // port inside a workspace container. Offer a one-click preview that opens
+  // the system browser via a loopback forward over the broker socket.
+  useEffect(() => {
+    return window.api.ports.onDetected((workspaceId, port) => {
+      const name = workspacesRef.current.find((w) => w.id === workspaceId)?.name ?? 'workspace';
+      dispatchToast({
+        type: 'push',
+        toast: makeToast(++toastIdRef.current, {
+          kind: 'info',
+          eyebrow: 'Preview',
+          message: `Dev server detected on port ${port} in ${name}`,
+          placement: 'global',
+          sticky: false,
+          dismissible: true,
+          action: {
+            label: 'Open preview',
+            onClick: () => void window.api.ports.open(workspaceId, port)
+          }
+        })
+      });
+      // Auto-dismiss after a longer window than the default — give the user
+      // time to click. Keyless so multiple ports can stack.
+      const id = toastIdRef.current;
+      setTimeout(() => dispatchToast({ type: 'dismiss', id }), 12000);
+    });
+  }, []);
+
   const [activeTabSummary, setActiveTabSummary] = useState<
     WorkspaceObservabilitySummary | null
   >(null);
