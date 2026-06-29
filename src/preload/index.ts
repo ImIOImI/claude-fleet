@@ -460,6 +460,21 @@ const api = {
       return () => ipcRenderer.removeListener(channel, handler);
     }
   },
+  ports: {
+    /** Subscribe to "dev server detected on port N" events (toast cue).
+     *  Returns an unsubscribe function. */
+    onDetected: (cb: (workspaceId: string, port: number) => void): (() => void) => {
+      const channel = 'ports:detected';
+      const handler = (_e: IpcRendererEvent, payload: { workspaceId: string; port: number }): void =>
+        cb(payload.workspaceId, payload.port);
+      ipcRenderer.on(channel, handler);
+      return () => ipcRenderer.removeListener(channel, handler);
+    },
+    /** Open a loopback forward to a container port and the system browser;
+     *  returns the bound host port. */
+    open: (workspaceId: string, containerPort: number): Promise<{ hostPort: number }> =>
+      ipcRenderer.invoke('ports:open', workspaceId, containerPort)
+  },
   // Durable transcript mirror (#10). The renderer addresses sessions by their
   // broker session id; the main process resolves that to the claude session
   // id (the mirror filename) internally.
