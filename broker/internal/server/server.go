@@ -20,18 +20,24 @@ import (
 	"io"
 	"log"
 	"net"
+	"strconv"
 	"sync"
+	"time"
 
+	"github.com/ImIOImI/claude-fleet/broker/internal/portscan"
 	"github.com/ImIOImI/claude-fleet/broker/internal/proto"
 	"github.com/ImIOImI/claude-fleet/broker/internal/session"
 )
 
 type Server struct {
 	mgr *session.Manager
+	// ListPorts enumerates listening TCP ports for LISTPORTS. Field so
+	// tests can inject a deterministic scanner; defaults to portscan.Listening.
+	ListPorts func() ([]uint16, error)
 }
 
 func New(mgr *session.Manager) *Server {
-	return &Server{mgr: mgr}
+	return &Server{mgr: mgr, ListPorts: portscan.Listening}
 }
 
 // Serve accepts connections on ln until ctx is canceled or the listener
@@ -96,6 +102,15 @@ func (s *Server) handleConn(ctx context.Context, c net.Conn) {
 		}
 	}()
 
+	// Channel id → dialed TCP conn (port-forward relay), scoped to this
+	// connection. Disjoint from `attached` (PTY channels).
+	dialed := map[uint32]net.Conn{}
+	defer func() {
+		for _, conn := range dialed {
+			_ = conn.Close()
+		}
+	}()
+
 	for {
 		if ctx.Err() != nil {
 			return
@@ -107,7 +122,7 @@ func (s *Server) handleConn(ctx context.Context, c net.Conn) {
 			}
 			return
 		}
-		if err := s.dispatch(ft, payload, cw, attached); err != nil {
+		if err := s.dispatch(ft, payload, cw, attached, dialed); err != nil {
 			log.Printf("dispatch %v: %v", ft, err)
 			// Protocol-level errors are non-fatal — keep the conn
 			// open so the host can recover. Truly fatal errors would
@@ -121,6 +136,7 @@ func (s *Server) dispatch(
 	payload []byte,
 	cw *connWriter,
 	attached map[uint32]string,
+	dialed map[uint32]net.Conn,
 ) error {
 	switch ft {
 	case proto.FrameCreate:
@@ -205,6 +221,11 @@ func (s *Server) dispatch(
 		if err := json.Unmarshal(payload, &req); err != nil {
 			return cw.writeJSON(proto.FrameClosed, proto.ChannelResponse{Channel: req.Channel, OK: false, Error: "bad json"})
 		}
+		if conn, ok := dialed[req.Channel]; ok {
+			_ = conn.Close()
+			delete(dialed, req.Channel)
+			return cw.writeJSON(proto.FrameClosed, proto.ChannelResponse{Channel: req.Channel, OK: true})
+		}
 		id, ok := attached[req.Channel]
 		if !ok {
 			return cw.writeJSON(proto.FrameClosed, proto.ChannelResponse{Channel: req.Channel, OK: false, Error: "channel not attached"})
@@ -217,6 +238,10 @@ func (s *Server) dispatch(
 		channel, body, err := proto.DecodeChannelData(payload)
 		if err != nil {
 			return err
+		}
+		if conn, ok := dialed[channel]; ok {
+			_, _ = conn.Write(body) // ignore: closed conn just drops bytes
+			return nil
 		}
 		id, ok := attached[channel]
 		if !ok {
@@ -250,6 +275,57 @@ func (s *Server) dispatch(
 			resp.Sessions[i] = proto.SessionInfo{ID: info.ID, Alive: info.Alive}
 		}
 		return cw.writeJSON(proto.FrameSessions, resp)
+
+	case proto.FrameDial:
+		var req proto.DialRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return cw.writeJSON(proto.FrameDialed, proto.DialResponse{Channel: req.Channel, OK: false, Error: "bad json"})
+		}
+		if _, exists := dialed[req.Channel]; exists {
+			return cw.writeJSON(proto.FrameDialed, proto.DialResponse{Channel: req.Channel, OK: false, Error: "channel in use"})
+		}
+		// Security: only ever 127.0.0.1 — never an arbitrary host/IP.
+		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(req.Port)))
+		conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+		if err != nil {
+			return cw.writeJSON(proto.FrameDialed, proto.DialResponse{Channel: req.Channel, OK: false, Error: err.Error()})
+		}
+		dialed[req.Channel] = conn
+		if err := cw.writeJSON(proto.FrameDialed, proto.DialResponse{Channel: req.Channel, OK: true}); err != nil {
+			_ = conn.Close()
+			delete(dialed, req.Channel)
+			return err
+		}
+		// Pump conn → OUTPUT frames on this channel until the conn closes,
+		// then signal ENDED (mirrors a PTY session ending). The conn stays
+		// in `dialed` until CLOSE or disconnect cleanup — the read loop owns
+		// the map, so this goroutine never touches it.
+		go func(ch uint32, c net.Conn) {
+			buf := make([]byte, 32*1024)
+			for {
+				n, rerr := c.Read(buf)
+				if n > 0 {
+					_ = cw.WriteChannelData(ch, buf[:n])
+				}
+				if rerr != nil {
+					break
+				}
+			}
+			_ = cw.writeJSON(proto.FrameEnded, proto.EndedNotice{Channel: ch, Reason: "exit"})
+		}(req.Channel, conn)
+		return nil
+
+	case proto.FrameListPorts:
+		ports, err := s.ListPorts()
+		if err != nil {
+			log.Printf("listports: %v", err)
+			ports = nil
+		}
+		resp := proto.PortsResponse{Ports: make([]proto.PortInfo, len(ports))}
+		for i, p := range ports {
+			resp.Ports[i] = proto.PortInfo{Port: p}
+		}
+		return cw.writeJSON(proto.FramePorts, resp)
 
 	default:
 		// Unknown frame types: log and drop. The host can roll forward.
