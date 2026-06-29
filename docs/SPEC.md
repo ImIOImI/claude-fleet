@@ -37,6 +37,7 @@ It is a local-only operator console — not a remote orchestrator, not a multi-u
 - **Not a session recorder.** Terminal output is rendered but not persisted; durable history comes from Claude's own transcript JSONL, not from the PTY stream.
 - **Not a Claude Code replacement.** The CLI inside the container is the source of truth for what runs. This app is a viewport and lifecycle manager around it.
 - **No auto-updater, no telemetry.** The runner image sets `DISABLE_AUTOUPDATER=1` and `DISABLE_TELEMETRY=1`.
+- **Not a general port manager (v1).** Port-forward preview auto-detects dev servers and opens them in the system browser — no manual port pinning, no persistent port list, no arbitrary `host:port` dialing, no LAN exposure, no in-app preview tab.
 
 ## 4. Stack
 
@@ -107,6 +108,17 @@ binds (per container):
 
 
 The **broker** is a small Go daemon (//broker) shipped inside the runner image. It owns every claude PTY in the container and exposes them via a Unix-socket protocol. The host's Electron main process attaches via the bind-mounted socket directory rather than running `docker exec claude` directly. This is the foundation of "expert workspaces" (issue #18): PTYs outlive any individual host disconnect (app quit, app crash), so when the user pauses + closes the app + reopens + unpauses, every session reattaches to the same live `claude` process with its in-memory context (analyses, file watches, MCP server state) intact.
+
+**Broker frame protocol.** The frame envelope is `[u32 totalLen BE][u8 type][payload]`, defined in `broker/internal/proto/proto.go` and mirrored as `FrameType` in `src/main/broker.ts`. PTY-session frames (host↔broker): `CREATE`/`CREATED`, `ATTACH`/`ATTACHED`, `DETACH`/`DETACHED`, `INPUT`, `OUTPUT`, `CLOSE`/`CLOSED`, `ENDED`, `RESIZE`, `LIST`/`SESSIONS`, `HISTORY`. Port-forward frames (added for dev-server preview):
+
+| Frame | Hex | Dir | Payload | Meaning |
+|---|---|---|---|---|
+| `DIAL` | 0x14 | host→broker | JSON `{channel, port}` | dial `127.0.0.1:<port>` inside the container; bind to `channel` |
+| `DIALED` | 0x15 | broker→host | JSON `{channel, ok, error?}` | dial result |
+| `LISTPORTS` | 0x16 | host→broker | empty | request current LISTEN ports |
+| `PORTS` | 0x17 | broker→host | JSON `{ports:[{port}]}` | listening-port snapshot |
+
+A broker channel is either a PTY session or a dialed TCP connection — disjoint kinds, host-allocated from the same monotonic counter so they never collide. Once `DIALED{ok:true}`, the channel reuses the existing `INPUT`/`OUTPUT`/`CLOSE`/`ENDED` frames as a raw byte relay — HTTP keep-alive and WebSocket/HMR pass through untouched. Port detection: `LISTPORTS` parses `/proc/net/tcp` and `/proc/net/tcp6`, keeps rows in state `0A` (LISTEN), extracts the local port, dedupes across both files, and excludes the broker's own TCP port (Windows) and the MCP port.
 
 Each broker session has **at most one live writer**. An `ATTACH` to a session that already holds a writer is rejected (`ATTACHED` with `OK:false`, error `session: already attached`) rather than silently replacing it — otherwise the displaced connection keeps believing it's attached while claude's OUTPUT flows to the newcomer, blinding the original. The host's normal re-attach `DETACH`es first, so it never trips this; the guard exists for a second connection on the socket (an external probe, or a future second window). Reconnect-after-disconnect still works: a dropped connection's deferred cleanup `DETACH`es its sessions, clearing the writer for the next attach. **One race remains** on the pause→quit→reopen→resume path: the pre-quit connection died while the container was paused, so the broker (frozen) hasn't run that connection's deferred cleanup yet. On `unpause` it reaps the dead connection and accepts the new ATTACH — but the host may reconnect in the millisecond before the reap completes and get rejected `already attached`. So the host **retries** an `already attached` ATTACH (`REATTACH_RETRIES`=12 × `REATTACH_RETRY_MS`=250ms ≈ 3s) in `attachPty`; a genuinely-live second writer keeps failing and the retry gives up.
 
@@ -197,6 +209,14 @@ Per-session events from main to renderer:
 - `pty:error:${sessionId}` — stream error (stringified).
 
 The renderer's `window.api.pty.onData/onEnd` register listeners and return unsubscribe functions.
+
+### Ports
+Dev-server preview: auto-detects listening ports inside a running container and relays browser traffic over the broker socket (see §5 *Broker frame protocol* for `DIAL`/`DIALED`/`LISTPORTS`/`PORTS` frames; see §8 *Dev-server preview* for the user flow; implementation in `src/main/portforward.ts`).
+
+- `ports:detected` (main → renderer event) — `{ workspaceId, port }`. Fired when a new port appears in the `LISTPORTS` scan for a running workspace. The renderer shows a transient toast ("Dev server detected on port N") with an **Open preview** button. Main dedupes: a port toasts once per appearance; if it disappears and reappears it toasts again.
+- `ports:open(workspaceId, containerPort)` → `{ hostPort }` — creates (or reuses) a `PortForward` for `containerPort`: a loopback `net.Server` bound to `127.0.0.1:0` (ephemeral host port). Each inbound browser connection gets a fresh broker channel via `DIAL`, then traffic flows through the existing `INPUT`/`OUTPUT` relay. Calls `shell.openExternal('http://127.0.0.1:<hostPort>')` and returns `hostPort`. In `MOCK_MODE` (no broker) the handler returns a stub host port without dialing.
+
+**`PortMonitor`** — one per running workspace. Opens a dedicated lightweight `BrokerClient` (one-per-monitor — deliberate: concurrent `DIAL`s on a shared client would collide on the `DIALED` waiter), calls `listPorts()` every 3s, diffs against the last-seen set, and emits `ports:detected` on newly-appeared ports. Started when the workspace reaches `running`; stopped on pause/stop/remove. **`PortForward`** — one per forwarded container port. The `net.Server` is torn down automatically when the workspace pauses/stops/is removed. In `MOCK_MODE` the `ports:detected` event is driven by a test-only handler and `ports:open` returns a stub, matching the existing mock-for-UI / real-for-pipeline split.
 
 ### Observability
 - `observability:eventsForSession(sessionId, sinceEventId?, limit?)` → `EventRow[]` — rows from the `events` table for the given session, ordered by `id` ascending, restricted to `id > sinceEventId`. Caller polls with the highest `id` it has seen to get incremental updates. Returns up to `limit` rows (default 500).
@@ -596,6 +616,15 @@ Each row shows the display title (resume on click), and — in **All** scope —
 - **Rename (✎)**: inline edit → `sessions:rename`; empty clears the override.
 - **Delete (🗑)**: a two-click inline confirm → `sessions:delete` (drops cache rows + unlinks the transcript). No modal — the action is row-local and the confirm is reversible up to the second click.
 
+### Dev-server preview
+A dev server (Vite, Next, a Python server, …) started inside a workspace container is auto-detected and openable in the host browser, with traffic relayed over the existing broker socket — no new published ports, no Docker bridge routing required. See §6 *Ports* for the IPC surface; §5 *Broker frame protocol* for the wire frames.
+
+1. When a workspace reaches `running`, main starts a `PortMonitor` for it: a dedicated `BrokerClient` issues `LISTPORTS` every ~3s, diffs the result against the last-seen port set, and calls `ports:detected {workspaceId, port}` for each newly-appeared port.
+2. The renderer receives `ports:detected`, shows a transient toast: *"Dev server detected on port N"* + an **Open preview** button.
+3. User clicks **Open preview** → `ports:open(workspaceId, N)`. Main creates (or reuses) a `PortForward`: a `net.Server` bound to `127.0.0.1:0` (ephemeral host port). For every inbound browser connection, main sends `DIAL {channel, port=N}` to the broker over a fresh `BrokerClient`, awaits `DIALED{ok:true}`, then pipes the browser socket ↔ the broker channel using the existing `INPUT`/`OUTPUT` relay. Returns `{ hostPort }`.
+4. Main calls `shell.openExternal('http://127.0.0.1:<hostPort>')` — the system browser opens the forwarded URL. WebSocket/HMR traffic (Vite, Next hot-reload) passes through the raw byte relay untouched.
+5. The `PortForward` and `PortMonitor` are torn down automatically when the workspace pauses, stops, or is removed.
+
 ## 9. Security model
 
 - **Secret env-var values stay out of the renderer except at write time.** Per-workspace secrets are persisted via `vault:setSecret(workspaceId, key, value)`. After that, the renderer holds only the *list* of secret key names (via `vault:listKeys`); the main process resolves values directly from the safeStorage vault when constructing the container env. The lone exception is the env-row in `WorkspaceForm` — the renderer briefly holds the value the user just typed before it ships to `vault:setSecret`. There is no way around that.
@@ -607,6 +636,7 @@ Each row shows the display title (resume on click), and — in **All** scope —
 - **The one deliberate cross-container surface is `<fleetRoot>/shared` → `/shared` (rw in every container).** It exists so workspaces can exchange files on purpose; treat it accordingly — **secrets must not be written to `/shared`**, since every workspace can read it.
 - **OAuth credentials are shared across workspaces by design.** In `oauth` mode all workspaces file-bind one `.credentials.json` (one login covers the fleet), so a token present in one container is the same token in every OAuth workspace. `apikey` mode is per-workspace (the key is injected as an env var, visible only inside that container). Either way, a container legitimately holds its *own* auth — the boundary being protected is *other* workspaces' data and the host-private zone, not a workspace's view of its own credentials.
 - **External link handling**: `setWindowOpenHandler` denies in-app navigation and opens external URLs via `shell.openExternal`.
+- **Port-forward preview — loopback-only, no new published ports.** The host `PortForward` listener binds `127.0.0.1` only — not `0.0.0.0`, no LAN exposure. The broker dials `127.0.0.1:<port>` inside its own container only — never an arbitrary host or IP; `port` is a constrained uint16. No new Docker published ports are created on any platform: Linux/macOS ride the existing bind-mounted Unix socket; Windows rides the existing loopback-TCP broker port. The new `DIAL`/`LISTPORTS` frames do not widen who can reach the broker (still only the host-owned Unix socket or loopback-TCP on Windows), preserving the broker's existing no-auth posture.
 - **Vault availability + the WSL plaintext trade**: the main process probes secret-storage usability once (`vault:available`). On macOS/Windows and Linux-with-a-keyring this is real OS-backed encryption. On Linux with **no** keyring (e.g. WSL), `vault.ts` opts into safeStorage's plaintext backend (`setUsePlainTextEncryption(true)`) so `vault:available` returns true and API-key auth works — but secret values are then stored **base64, not encrypted**, in `<userData>/secrets.enc`. This is a deliberate trade: the prior `keytar` path failed entirely on WSL, and the file already lives in the per-user `userData` dir. If storage is somehow unusable even so, `vault:available` returns false → the env editor disables the per-row "secret" toggle (a row can still be a plain env var, value in the manifest) and the auth-mode picker degrades to OAuth-only unless `ANTHROPIC_API_KEY` is supplied as plain env, with a `BottomBar` notice. (Surfacing the *plaintext* case distinctly in the UI is a future nicety, not yet wired.)
 
 ## 10. Project layout
@@ -677,6 +707,7 @@ claude-fleet/
     │   ├── wsl.ts                     # isWslEnvironment() — drives fs:openPath's explorer.exe bridge
     │   ├── fs.ts                      # isDirectory / mkdirp helpers
     │   ├── migration.ts               # one-shot ULID migration + legacy keytar purge + fleet-folder creation on first boot
+    │   ├── portforward.ts             # PortMonitor (3s LISTPORTS poll, ports:detected) + PortForward (loopback net.Server, DIAL relay)
     │   └── vault.ts                   # safeStorage-encrypted secret vault (<userData>/secrets.enc) + env resolve
     ├── preload/
     │   └── index.ts                   # contextBridge.exposeInMainWorld('api', …)
