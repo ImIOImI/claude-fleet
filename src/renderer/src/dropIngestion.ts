@@ -40,6 +40,33 @@ export function isExternalDrag(types: readonly string[] | undefined): boolean {
   return EXTERNAL_DRAG_TYPES.some((t) => types.includes(t));
 }
 
+// True for the lifetime of an internal app drag (a workspace-chip reorder),
+// set on the chip's dragstart and cleared on dragend. The window-level
+// dragover handler consults this instead of sniffing dataTransfer.types,
+// which can read empty mid-drag in some Chromium/Electron builds (the reason
+// onDragOver is otherwise unconditional). It's a module-scoped flag because
+// the chip handlers (WorkspaceTabStrip) and the window handlers (here) live in
+// different components but share the same native drag.
+let internalDragActive = false;
+
+/** Mark/clear an in-flight internal app drag (chip reorder). Called from the
+ *  chip's dragstart (true) and dragend (false). */
+export function setInternalDragActive(active: boolean): void {
+  internalDragActive = active;
+}
+
+/** Whether the window-level ingestion should claim a `dragover` —
+ *  `preventDefault()` + `dropEffect='copy'`. It must NOT claim an internal
+ *  chip drag (#177): that drag carries `effectAllowed='move'`, and forcing
+ *  `dropEffect='copy'` is incompatible with `'move'`, so Chromium resolves the
+ *  drag operation to `none` and never fires the chip's `drop` event — the
+ *  reorder silently no-ops (no overlay, but no reorder either). Leaving it
+ *  unclaimed lets the chip's `'move'` stand. External drags (flag false) are
+ *  claimed exactly as before, preserving the protected-mode fix above. */
+export function shouldClaimDragOver(internalActive: boolean): boolean {
+  return !internalActive;
+}
+
 export function useDropIngestion({ workspaceId, notify }: Options): { dragging: boolean } {
   const [dragging, setDragging] = useState(false);
 
@@ -70,6 +97,11 @@ export function useDropIngestion({ workspaceId, notify }: Options): { dragging: 
     };
 
     const onDragOver = (e: DragEvent): void => {
+      // Don't touch an internal chip-reorder drag (#177): forcing
+      // dropEffect='copy' over its effectAllowed='move' makes Chromium cancel
+      // the drop, so the reorder never fires. The chip's own dragover handles
+      // its drop target; we stay out of the way.
+      if (!shouldClaimDragOver(internalDragActive)) return;
       // preventDefault on dragover is what marks the window as a valid drop
       // target — without it the OS shows the "not-allowed" cursor. Call it
       // UNCONDITIONALLY and first: during a drag the dataTransfer is in
