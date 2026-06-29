@@ -459,6 +459,54 @@ function withIso<T extends Record<string, unknown>>(row: T, fields: string[]): T
   return out as T;
 }
 
+/** Sum a session's assistant-event token usage per (model, service_tier) and
+ *  derive USD via the pricing table. Shared by get_cost and session_summary. */
+function aggregateSessionCost(
+  db: Database.Database,
+  sessionId: string
+): {
+  usd: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+} {
+  const rows = db
+    .prepare(
+      `SELECT model, service_tier,
+              SUM(COALESCE(input_tokens,0)) AS input,
+              SUM(COALESCE(output_tokens,0)) AS output,
+              SUM(COALESCE(cache_read_input_tokens,0)) AS cacheRead,
+              SUM(COALESCE(cache_creation_input_tokens,0)) AS cacheCreate
+       FROM events WHERE session_id = ? AND type = 'assistant'
+       GROUP BY model, service_tier`
+    )
+    .all(sessionId) as Array<{
+    model: string | null;
+    service_tier: string | null;
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheCreate: number;
+  }>;
+  let usd = 0;
+  const totals = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
+  for (const r of rows) {
+    const tokens = {
+      inputTokens: r.input,
+      outputTokens: r.output,
+      cacheReadInputTokens: r.cacheRead,
+      cacheCreationInputTokens: r.cacheCreate
+    };
+    usd += costFor(r.model, r.service_tier, tokens);
+    totals.inputTokens += r.input;
+    totals.outputTokens += r.output;
+    totals.cacheReadInputTokens += r.cacheRead;
+    totals.cacheCreationInputTokens += r.cacheCreate;
+  }
+  return { usd, ...totals };
+}
+
 interface Tool {
   name: string;
   description: string;
@@ -570,40 +618,7 @@ export const TOOLS: Tool[] = [
       if (!sessionAllowed(db, a.session_id, ctx.allowedWorkspaces)) {
         throw new Error('not authorized to read this session');
       }
-      const rows = db
-        .prepare(
-          `SELECT model, service_tier,
-                  SUM(COALESCE(input_tokens,0)) AS input,
-                  SUM(COALESCE(output_tokens,0)) AS output,
-                  SUM(COALESCE(cache_read_input_tokens,0)) AS cacheRead,
-                  SUM(COALESCE(cache_creation_input_tokens,0)) AS cacheCreate
-           FROM events WHERE session_id = ? AND type = 'assistant'
-           GROUP BY model, service_tier`
-        )
-        .all(a.session_id) as Array<{
-        model: string | null;
-        service_tier: string | null;
-        input: number;
-        output: number;
-        cacheRead: number;
-        cacheCreate: number;
-      }>;
-      let usd = 0;
-      const totals = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
-      for (const r of rows) {
-        const tokens = {
-          inputTokens: r.input,
-          outputTokens: r.output,
-          cacheReadInputTokens: r.cacheRead,
-          cacheCreationInputTokens: r.cacheCreate
-        };
-        usd += costFor(r.model, r.service_tier, tokens);
-        totals.inputTokens += r.input;
-        totals.outputTokens += r.output;
-        totals.cacheReadInputTokens += r.cacheRead;
-        totals.cacheCreationInputTokens += r.cacheCreate;
-      }
-      return { session_id: a.session_id, usd, ...totals };
+      return { session_id: a.session_id, ...aggregateSessionCost(db, a.session_id) };
     }
   },
   {
@@ -654,6 +669,53 @@ export const TOOLS: Tool[] = [
       const sql = `SELECT ${cols} FROM events WHERE ${where.join(' AND ')} ORDER BY id ASC LIMIT ?`;
       const rows = db.prepare(sql).all(...p, clampLimit(a.limit)) as Array<Record<string, unknown>>;
       return rows.map((r) => withIso(r, ['ts']));
+    }
+  },
+  {
+    name: 'session_summary',
+    description:
+      'One-call summary of a session: distinct files edited (Write/Edit/NotebookEdit), commands run ' +
+      '(Bash), token totals + derived USD, and the UTC time span (epoch ms + ISO). Lists are capped; ' +
+      '*Count fields give the true totals. Collapses list_events + get_cost into one request (#174).',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+    run: (db, a, ctx) => {
+      if (typeof a.id !== 'string') throw new Error('id is required');
+      if (!sessionAllowed(db, a.id, ctx.allowedWorkspaces)) {
+        throw new Error('not authorized to read this session');
+      }
+      const MAX_SUMMARY_ITEMS = 100;
+      const distinctInputs = (names: string[]): { items: string[]; count: number } => {
+        const placeholders = names.map(() => '?').join(',');
+        const rows = db
+          .prepare(
+            `SELECT DISTINCT tool_input FROM events
+             WHERE session_id = ? AND tool_name IN (${placeholders}) AND tool_input IS NOT NULL
+             ORDER BY tool_input`
+          )
+          .all(a.id, ...names) as Array<{ tool_input: string }>;
+        const items = rows.map((r) => r.tool_input);
+        return { items: items.slice(0, MAX_SUMMARY_ITEMS), count: items.length };
+      };
+      const files = distinctInputs(['Write', 'Edit', 'NotebookEdit']);
+      const cmds = distinctInputs(['Bash']);
+
+      const span = db
+        .prepare(`SELECT MIN(ts) AS started_at, MAX(ts) AS last_active_at FROM events WHERE session_id = ?`)
+        .get(a.id) as { started_at: number | null; last_active_at: number | null };
+
+      return withIso(
+        {
+          session_id: a.id,
+          filesEdited: files.items,
+          filesEditedCount: files.count,
+          commands: cmds.items,
+          commandsCount: cmds.count,
+          ...aggregateSessionCost(db, a.id),
+          started_at: span.started_at,
+          last_active_at: span.last_active_at
+        },
+        ['started_at', 'last_active_at']
+      );
     }
   },
   // NOTE: there is intentionally no raw `query` (arbitrary SQL) tool. Such a

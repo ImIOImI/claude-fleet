@@ -153,3 +153,20 @@ describe('ISO timestamps (#174)', () => {
     expect(rows[0].ts_iso).toBe(new Date(1100).toISOString());
   });
 });
+
+describe('session_summary (#174)', () => {
+  it('summarizes files, commands, cost and time span for an allowed session', () => {
+    const s = tool('session_summary').run(db, { id: 'sa' }, ctxA) as Record<string, unknown>;
+    expect(s.session_id).toBe('sa');
+    expect(s.filesEdited).toEqual(['/workspace/foo.ts']);
+    expect(s.commands).toEqual(['npm test']);
+    expect(s.last_active_at).toBe(1200);
+    expect(s.last_active_at_iso).toBe(new Date(1200).toISOString());
+    expect(typeof s.usd).toBe('number');
+    expect(s.inputTokens).toBe(10);
+  });
+
+  it('refuses a session outside the allowed set', () => {
+    expect(() => tool('session_summary').run(db, { id: 'sb' }, ctxA)).toThrow(/not authorized/i);
+  });
+});
