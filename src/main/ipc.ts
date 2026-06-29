@@ -90,8 +90,14 @@ import { MCP_TCP_PORT } from './mcpSocket.js';
 export const MOCK_MODE = process.env.CLAUDE_FLEET_MOCK === '1';
 
 const isWindows = process.platform === 'win32';
-// Broker's own loopback-TCP port on Windows (see docker.ts BROKER_TCP_PORT)
-// and the MCP port — infra ports we must never offer as dev-server previews.
+// Infra ports we must never offer as dev-server previews.
+// 7070: the broker's own loopback-TCP listener on Windows (see docker.ts
+//   BROKER_TCP_PORT) — this is the load-bearing exclusion; it appears in
+//   the container's LISTEN table only on Windows.
+// MCP_TCP_PORT (7071): defensive belt-and-suspenders. The container reaches
+//   the host MCP server via an OUTBOUND connection → ESTABLISHED, which the
+//   /proc/net/tcp scanner already filters out, so 7071 never appears in the
+//   LISTEN scan. Kept here in case that assumption ever changes.
 const INFRA_PORTS = isWindows ? [7070, MCP_TCP_PORT] : [];
 
 /** Tell every window a forwardable dev-server port appeared (toast cue). */

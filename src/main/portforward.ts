@@ -48,7 +48,7 @@ interface Monitor {
 }
 
 interface Forward {
-  server: net.Server;
+  close(): void;
   hostPort: number;
 }
 
@@ -116,7 +116,9 @@ export class PortForwardManager {
     if (existing) return { hostPort: existing.hostPort };
 
     const endpoint = await this.deps.resolveEndpoint(workspaceId);
+    const sockets = new Set<net.Socket>();
     const server = net.createServer((socket) => {
+      sockets.add(socket);
       const client = this.deps.makeClient(endpoint);
       client
         .ready()
@@ -134,6 +136,7 @@ export class PortForwardManager {
           const cleanup = (endSocket = false): void => {
             if (closed) return;
             closed = true;
+            sockets.delete(socket);
             void client.closeChannel(1).catch(() => undefined);
             duplex.destroy();
             client.close();
@@ -146,6 +149,7 @@ export class PortForwardManager {
           duplex.on('error', () => cleanup());
         })
         .catch(() => {
+          sockets.delete(socket);
           socket.destroy();
           client.close();
         });
@@ -160,19 +164,25 @@ export class PortForwardManager {
       });
     });
 
+    const close = (): void => {
+      server.close();
+      for (const s of sockets) s.destroy();
+      sockets.clear();
+    };
+
     let byPort = this.forwards.get(workspaceId);
     if (!byPort) {
       byPort = new Map();
       this.forwards.set(workspaceId, byPort);
     }
-    byPort.set(containerPort, { server, hostPort });
+    byPort.set(containerPort, { close, hostPort });
     return { hostPort };
   }
 
   closeForWorkspace(workspaceId: string): void {
     const byPort = this.forwards.get(workspaceId);
     if (!byPort) return;
-    for (const { server } of byPort.values()) server.close();
+    for (const fwd of byPort.values()) fwd.close();
     this.forwards.delete(workspaceId);
   }
 
