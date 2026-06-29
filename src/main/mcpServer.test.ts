@@ -7,9 +7,13 @@
 //   1. The default allowed-read set is the caller's OWN workspace - never
 //      "unrestricted" (no flag required).
 //   2. The typed read tools, given a caller-scoped context, never surface
-//      another workspace's rows; and the unscopable raw `query` hatch is gone.
+//      another workspace's rows; and the scoped `query` tool (#174) uses a
+//      per-call in-memory snapshot so isolation is structural, not row-filtered.
 
 import Database from 'better-sqlite3';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { TOOLS, resolveAllowedWorkspaces, type ToolCtx } from './mcpServer.js';
 
@@ -54,6 +58,43 @@ function makeDb(): Database.Database {
   ev.run('sa', WS_A, 1200, 'assistant', 'claude-x', 0, 0, 'standard', 'Edit', 'u2', '/workspace/foo.ts', null, '{}', 'da3');
   ev.run('sb', WS_B, 2000, 'assistant', 'claude-x', 99, 99, 'standard', null, null, null, null, '{"secret":true}', 'db');
   return db;
+}
+
+// query ATTACHes db.name, so it needs a real file (not :memory:). Mirror makeDb's
+// rows into a temp-file DB. Returns the db + a cleanup fn.
+function makeFileDb(): { db: Database.Database; cleanup: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), 'mcp-q-'));
+  const path = join(dir, 'state.db');
+  const fileDb = new Database(path);
+  fileDb.exec(`
+    CREATE TABLE events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL, workspace_id TEXT NOT NULL, ts INTEGER,
+      type TEXT NOT NULL, subtype TEXT, uuid TEXT, parent_uuid TEXT, model TEXT,
+      input_tokens INTEGER, output_tokens INTEGER, cache_read_input_tokens INTEGER,
+      cache_creation_input_tokens INTEGER, service_tier TEXT, tool_name TEXT,
+      tool_use_id TEXT, tool_input TEXT, tool_result_is_error INTEGER,
+      raw_jsonl TEXT NOT NULL, dedup_key TEXT NOT NULL, UNIQUE(session_id, dedup_key)
+    );
+    CREATE TABLE sessions (
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, cwd TEXT, started_at INTEGER,
+      last_active_at INTEGER, ai_title TEXT, first_user_message TEXT, user_set_name TEXT
+    );
+    CREATE TABLE broker_sessions (
+      workspace_id TEXT NOT NULL, broker_session_id TEXT NOT NULL,
+      claude_session_id TEXT NOT NULL, learned_at INTEGER NOT NULL,
+      PRIMARY KEY (workspace_id, broker_session_id)
+    );
+  `);
+  const sess = fileDb.prepare('INSERT INTO sessions (id, workspace_id, last_active_at, ai_title) VALUES (?,?,?,?)');
+  sess.run('sa', WS_A, 1000, 'A session');
+  sess.run('sb', WS_B, 2000, 'B session (secret)');
+  const ev = fileDb.prepare(
+    `INSERT INTO events (session_id, workspace_id, ts, type, raw_jsonl, dedup_key) VALUES (?,?,?,?,?,?)`
+  );
+  ev.run('sa', WS_A, 1000, 'assistant', '{"a":1}', 'da');
+  ev.run('sb', WS_B, 2000, 'assistant', '{"secret":true}', 'db');
+  return { db: fileDb, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 function tool(name: string) {
@@ -107,9 +148,56 @@ describe('typed read tools are workspace-scoped (#146)', () => {
   });
 });
 
-describe('raw SQL escape hatch is removed (#146)', () => {
-  it('exposes no query tool that could read other workspaces raw transcripts', () => {
-    expect(TOOLS.find((t) => t.name === 'query')).toBeUndefined();
+describe('scoped query tool (#174)', () => {
+  let fdb: Database.Database;
+  let cleanup: () => void;
+  beforeEach(() => {
+    ({ db: fdb, cleanup } = makeFileDb());
+  });
+  afterEach(() => {
+    fdb.close();
+    cleanup();
+  });
+  const run = (args: Record<string, unknown>) => tool('query').run(fdb, args, ctxA);
+
+  it('returns only the caller\'s rows for a plain select', () => {
+    const rows = run({ sql: 'SELECT workspace_id FROM sessions' }) as Array<{ workspace_id: string }>;
+    expect(rows.every((r) => r.workspace_id === WS_A)).toBe(true);
+    expect(rows.length).toBe(1);
+  });
+
+  it('cannot reach another workspace via UNION / subquery / where', () => {
+    const r1 = run({ sql: "SELECT * FROM sessions WHERE workspace_id = '" + WS_B + "'" }) as unknown[];
+    expect(r1).toEqual([]);
+    const r2 = run({ sql: 'SELECT count(*) AS n FROM events' }) as Array<{ n: number }>;
+    expect(r2[0].n).toBe(1); // only A's event is in the snapshot
+  });
+
+  it('cannot introspect/escape via sqlite_master', () => {
+    const names = run({ sql: 'SELECT name FROM sqlite_master ORDER BY name' }) as Array<{ name: string }>;
+    expect(names.map((r) => r.name).sort()).toEqual(['broker_sessions', 'events', 'sessions']);
+  });
+
+  it('omits raw_jsonl by default and includes it only with include_raw', () => {
+    expect(() => run({ sql: 'SELECT raw_jsonl FROM events' })).toThrow(); // column not in snapshot
+    const rows = run({ sql: 'SELECT raw_jsonl FROM events', include_raw: true }) as Array<{ raw_jsonl: string }>;
+    expect(rows[0].raw_jsonl).toBe('{"a":1}'); // A\'s own row only
+  });
+
+  it('rejects writes / DDL / multi-statement', () => {
+    expect(() => run({ sql: "INSERT INTO events (session_id) VALUES ('x')" })).toThrow(/read-only/i);
+    expect(() => run({ sql: 'DROP TABLE events' })).toThrow(/read-only/i);
+    expect(() => run({ sql: 'UPDATE sessions SET ai_title = 1' })).toThrow(/read-only/i);
+  });
+
+  it('caps result rows via max_rows', () => {
+    const rows = run({ sql: 'SELECT 1 AS x FROM sessions, events', max_rows: 1 }) as unknown[];
+    expect(rows.length).toBe(1);
+  });
+
+  it('supports bound params', () => {
+    const rows = run({ sql: 'SELECT id FROM sessions WHERE id = ?', params: ['sa'] }) as Array<{ id: string }>;
+    expect(rows).toEqual([{ id: 'sa' }]);
   });
 });
 

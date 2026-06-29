@@ -535,6 +535,44 @@ function inClause(col: string, allowed: Set<string>): { sql: string; params: str
   return { sql: `${col} IN (${ids.map(() => '?').join(',')})`, params: ids };
 }
 
+const MAX_QUERY_BYTES = 50_000;
+
+// Columns copied into a query snapshot's events table (raw_jsonl appended only
+// when include_raw). Mirrors the real events schema minus dedup_key.
+const SNAPSHOT_EVENT_COLS =
+  'id, session_id, workspace_id, ts, type, subtype, uuid, parent_uuid, model, ' +
+  'input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, ' +
+  'service_tier, tool_name, tool_use_id, tool_input, tool_result_is_error';
+
+/** Build a throwaway in-memory DB containing ONLY the caller's allowed-workspace
+ *  rows, copied from the source DB at `srcPath` (the live state.db). The source
+ *  is DETACHed before the caller's SQL ever runs, so isolation is structural:
+ *  no subquery/UNION/sqlite_master trick can reach unfiltered rows (#146). The
+ *  caller owns the returned DB and must close it. */
+function buildSnapshot(srcPath: string, allowed: Set<string>, includeRaw: boolean): Database.Database {
+  const mem = new Database(':memory:');
+  const alias = 'src_' + randomBytes(6).toString('hex');
+  const { sql: scope, params } = inClause('workspace_id', allowed);
+  // ATTACH the real DB. Path is escaped into the statement (ATTACH filename is
+  // not reliably bindable); paths never contain single quotes in practice, but
+  // double any just in case.
+  const attached = srcPath.replace(/'/g, "''");
+  mem.exec(`ATTACH DATABASE '${attached}' AS ${alias}`);
+  try {
+    const eventCols = includeRaw ? `${SNAPSHOT_EVENT_COLS}, raw_jsonl` : SNAPSHOT_EVENT_COLS;
+    mem.prepare(
+      `CREATE TABLE events AS SELECT ${eventCols} FROM ${alias}.events WHERE ${scope}`
+    ).run(...params);
+    mem.prepare(`CREATE TABLE sessions AS SELECT * FROM ${alias}.sessions WHERE ${scope}`).run(...params);
+    mem.prepare(
+      `CREATE TABLE broker_sessions AS SELECT * FROM ${alias}.broker_sessions WHERE ${scope}`
+    ).run(...params);
+  } finally {
+    mem.exec(`DETACH ${alias}`);
+  }
+  return mem;
+}
+
 /** Whether a session's workspace is within the caller's allowed read set (#122). */
 function sessionAllowed(db: Database.Database, sessionId: string, allowed: Set<string>): boolean {
   const row = db.prepare('SELECT workspace_id FROM sessions WHERE id = ?').get(sessionId) as
@@ -718,11 +756,54 @@ export const TOOLS: Tool[] = [
       );
     }
   },
-  // NOTE: there is intentionally no raw `query` (arbitrary SQL) tool. Such a
-  // hatch can express cross-workspace joins/aggregates and expose `raw_jsonl`
-  // transcript bodies that can't be safely confined to the caller's workspace
-  // (#146). The typed, workspace-scoped tools above are the only read surface.
-  //
+  // `query` runs arbitrary READ-ONLY SQL against a per-call in-memory SNAPSHOT
+  // seeded only with the caller's allowed-workspace rows (buildSnapshot). The
+  // real DB is DETACHed before the caller's SQL runs, so isolation is structural
+  // — no join/UNION/subquery/sqlite_master trick can reach another workspace's
+  // rows (#146/§9). raw_jsonl is excluded unless include_raw, and even then only
+  // the caller's own rows are present. The reader-only guard rejects writes/DDL.
+  {
+    name: 'query',
+    description:
+      'Run a single read-only SQL statement against your workspace data. Tables: events, sessions, ' +
+      'broker_sessions — pre-filtered to the rows you may read, so SELECT freely (joins, aggregates, ' +
+      'GROUP BY, datetime(ts/1000,"unixepoch") for UTC). raw_jsonl is excluded unless include_raw=true. ' +
+      'Args: sql (required), params (array of bound ? values), include_raw (bool), max_rows (default ' +
+      `${DEFAULT_LIMIT}, max ${MAX_LIMIT}). Writes/DDL/multi-statement are rejected.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sql: { type: 'string' },
+        params: { type: 'array' },
+        include_raw: { type: 'boolean' },
+        max_rows: { type: 'number', description: `default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}` }
+      },
+      required: ['sql']
+    },
+    run: (db, a, ctx) => {
+      if (typeof a.sql !== 'string') throw new Error('sql is required');
+      const params = Array.isArray(a.params) ? a.params : [];
+      const includeRaw = a.include_raw === true;
+      const maxRows = clampLimit(a.max_rows);
+      const srcPath = db.name; // live state.db path; ':memory:' in some tests
+      const snap = buildSnapshot(srcPath, ctx.allowedWorkspaces, includeRaw);
+      try {
+        const stmt = snap.prepare(a.sql);
+        if (!stmt.reader) throw new Error('read-only SELECT statements only');
+        const rows = stmt.all(...params) as unknown[];
+        const capped = rows.slice(0, maxRows);
+        const json = JSON.stringify(capped);
+        if (json.length > MAX_QUERY_BYTES) {
+          throw new Error(
+            `result too large (${json.length} bytes > ${MAX_QUERY_BYTES}); add LIMIT or aggregate server-side`
+          );
+        }
+        return capped;
+      } finally {
+        snap.close();
+      }
+    }
+  },
   // Cross-workspace committee control (#119). These do NOT touch the read-only
   // DB connection — they proxy to the injected host handlers, which enforce
   // `assertControl(callerId, id, 'pause')` before any effect. `callerId` is the
