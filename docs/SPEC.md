@@ -420,14 +420,16 @@ CREATE TABLE sessions (
   cwd TEXT,                            -- from first `system` event carrying it
   started_at INTEGER,                  -- first event ts
   last_active_at INTEGER,              -- max(event ts)
-  ai_title TEXT,                       -- latest `ai-title.aiTitle` (dormant — no producer yet)
-  first_user_message TEXT,             -- last-prompt or first user.content
+  ai_title TEXT,                       -- latest `ai-title.aiTitle`; Claude Code emits these lines natively (see below)
+  first_user_message TEXT,             -- last-prompt or first user.content; synthetic command-wrapper messages skipped
   user_set_name TEXT                   -- manual override set via sessions:rename
 );
 CREATE INDEX idx_sessions_workspace ON sessions(workspace_id);
 ```
 
 This `sessions` table is the index behind the Sessions table feature (§6 *Sessions*, §8 *Browse & resume a past session*): `listSessions` reads it (joined to a grouped `events` pass for cost + event count), `renameSession` sets `user_set_name`, and `deleteSession` removes the session's rows here + in `events`/`broker_sessions` before the IPC layer unlinks the JSONL.
+
+**Title derivation.** The display title is `user_set_name ?? ai_title ?? first_user_message`. `ai_title` is **populated, not dormant** — Claude Code (≥2.1.x) writes `{"type":"ai-title","aiTitle":…,"sessionId":…}` lines into its own transcript natively (no hook, no statusline), and `ingestLine` folds the latest into `sessions.ai_title`. This rides on an **undocumented native transcript line type**, so it is the kind of thing a `claude` pin bump can silently break (§4 — bumping the pin is deliberate; re-verify the `ai-title` line still appears). `first_user_message` is the COALESCE'd first value, but **synthetic command-wrapper messages are skipped** when deriving it (`src/main/userPromptText.ts`): a session started with a slash command (e.g. `/clear`) emits a wrapper-only first `user` message (`<local-command-caveat>`/`<command-name>`/…) that would otherwise lock in as a junk fallback title; the first *real* prompt wins instead. `tests/ai-title.spec.ts` pins both behaviors against the real watcher + DB.
 
 **Why these design choices:**
 - **Unique `(session_id, dedup_key)`** makes ingestion idempotent. Re-tailing a JSONL from byte 0 (after crash, after losing in-memory offsets) produces no duplicates: heavy events use their `uuid` as the key; light events without a `uuid` use a SHA-256 hash of the raw line. Insert uses `INSERT OR IGNORE`.
@@ -761,7 +763,7 @@ Per-session cost and token counts derived from Claude transcript JSONL events. *
 **Resume mechanism.** The host knows the Claude session UUID up front, so the broker→claude mapping is written **directly** at attach time rather than via the watcher's pending-attach queue — `claude --resume` appends to the existing `<uuid>.jsonl`, so no `new-session` event ever fires. The broker gained an optional `args` field on `CREATE` (`broker/internal/proto`) threaded through `Manager.Create` → `newSession` → `exec.Command(claude, args...)`; the host passes `["--resume", "<uuid>"]`.
 
 **Open (residual):**
-- **Auto-title (`ai_title`).** The column + ingest hook (`type: 'ai-title'`) exist but nothing populates them yet — the display title currently falls back to the first user message. An LLM-generated short description is the intended occupant; open questions: which model, when (on first surface? on significant `last_active_at` advance?), and how much transcript to feed it. This is the natural consumer of the future meta-observability LLM-parsing layer (see *Permission-request log*).
+- **Auto-title (`ai_title`) — shipped, not an LLM build.** This was once an open question ("which model / when / how much transcript"); it's moot. Claude Code emits `ai-title` transcript lines natively and the watcher already ingests them (§7 *JSONL→SQLite cache → Title derivation*), so titles are accurate with zero app-side LLM cost. The only residual is **fragility**: the title depends on an undocumented native transcript line type, so a `claude` pin bump should re-verify the `ai-title` line still appears (`tests/ai-title.spec.ts` is the guard). A future app-generated titler is unnecessary unless Claude Code stops emitting the line.
 - **In-progress sessions.** The list shows active sessions too (they refresh on every ingest push). No distinct "live row" affordance vs. ended sessions yet — tab-state richness is tracked under *Observability layer*.
 - **Deleting a live session's transcript.** `sessions:delete` unlinks the JSONL even if claude is still appending to it (rare — you'd be deleting the session you're in). On Linux the open fd keeps the inode alive, so claude keeps writing to the now-unlinked file until it reopens; the row reappears on the next new transcript. Acceptable for v1; revisit if it bites.
 

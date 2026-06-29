@@ -1,0 +1,38 @@
+import { describe, it, expect } from 'vitest';
+import { isSyntheticPromptText } from './userPromptText.js';
+
+describe('isSyntheticPromptText', () => {
+  it('flags messages that are entirely a command/harness wrapper', () => {
+    expect(
+      isSyntheticPromptText(
+        '<local-command-caveat>Caveat: messages below were generated while running local commands.</local-command-caveat>'
+      )
+    ).toBe(true);
+    expect(isSyntheticPromptText('<command-name>/clear</command-name>')).toBe(true);
+    expect(isSyntheticPromptText('<command-message>clear</command-message>')).toBe(true);
+    expect(isSyntheticPromptText('<command-args></command-args>')).toBe(true);
+    expect(isSyntheticPromptText('<local-command-stdout></local-command-stdout>')).toBe(true);
+    expect(isSyntheticPromptText('<system-reminder>As you answer…</system-reminder>')).toBe(true);
+  });
+
+  it('flags a wrapper even with leading whitespace', () => {
+    expect(isSyntheticPromptText('\n  \t<local-command-caveat>x</local-command-caveat>')).toBe(true);
+  });
+
+  it('flags empty / whitespace-only content (never a real title)', () => {
+    expect(isSyntheticPromptText('')).toBe(true);
+    expect(isSyntheticPromptText('   \n\t ')).toBe(true);
+  });
+
+  it('keeps an ordinary prompt', () => {
+    expect(
+      isSyntheticPromptText('I want you to look at claude fleet again and refresh your understanding.')
+    ).toBe(false);
+  });
+
+  it('keeps a real prompt that merely mentions a tag mid-text', () => {
+    expect(
+      isSyntheticPromptText('Why does the parser choke on a <system-reminder> tag in the input?')
+    ).toBe(false);
+  });
+});
