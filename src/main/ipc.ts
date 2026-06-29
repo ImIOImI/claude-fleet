@@ -82,8 +82,40 @@ import {
 import { logError, getLogPath } from './errorLog.js';
 import { broadcastObservabilitySummary } from './observabilityBroadcast.js';
 import { consumeForWorkspace, recordPendingAttach } from './pendingAttaches.js';
+import { PortForwardManager } from './portforward.js';
+import { brokerEndpoint } from './docker.js';
+import { BrokerClient } from './broker.js';
+import { MCP_TCP_PORT } from './mcpSocket.js';
 
 export const MOCK_MODE = process.env.CLAUDE_FLEET_MOCK === '1';
+
+const isWindows = process.platform === 'win32';
+// Broker's own loopback-TCP port on Windows (see docker.ts BROKER_TCP_PORT)
+// and the MCP port — infra ports we must never offer as dev-server previews.
+const INFRA_PORTS = isWindows ? [7070, MCP_TCP_PORT] : [];
+
+/** Tell every window a forwardable dev-server port appeared (toast cue). */
+function broadcastPortDetected(workspaceId: string, port: number): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue;
+    try {
+      win.webContents.send('ports:detected', { workspaceId, port });
+    } catch {
+      /* frame disposed mid-send */
+    }
+  }
+}
+
+// Real-backend only: in mock mode there is no broker to poll, so detection is
+// driven by the e2e test-only handler below and `ports:open` returns a stub.
+const portForward: PortForwardManager | null = MOCK_MODE
+  ? null
+  : new PortForwardManager({
+      resolveEndpoint: brokerEndpoint,
+      makeClient: (ep) => new BrokerClient(ep),
+      onDetected: broadcastPortDetected,
+      excludePorts: () => INFRA_PORTS
+    });
 
 // Per-workspace backend dispatch (#16). A workspace's `kind` decides whether
 // it's a Docker container or a host process; the two backends share the
@@ -584,6 +616,12 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     // Keep the watcher's per-workspace mirror default fresh (cheap; runs on
     // the renderer's 5s poll, so manifest edits propagate without a restart).
     for (const w of all) setWorkspaceDefault(w.id, w.mirror.default);
+    // Keep a port-detection monitor running for each live container workspace.
+    // Reconciling here (the renderer polls workspace:list) covers start, pause,
+    // stop, remove, and app launch without per-action hooks.
+    portForward?.reconcile(
+      all.filter((w) => w.state === 'running' && w.kind !== 'local').map((w) => w.id)
+    );
     return all;
   });
 
@@ -863,6 +901,20 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   });
 
   ipcMain.handle('app:mockMode', () => MOCK_MODE);
+
+  ipcMain.handle(
+    'ports:open',
+    async (_e, workspaceId: string, containerPort: number): Promise<{ hostPort: number }> => {
+      if (!portForward) {
+        // Mock mode: no real broker; hand back a deterministic stub host port
+        // so the e2e can assert the round-trip without a container.
+        return { hostPort: 65000 };
+      }
+      const { hostPort } = await portForward.openPort(workspaceId, containerPort);
+      void shell.openExternal(`http://127.0.0.1:${hostPort}`);
+      return { hostPort };
+    }
+  );
 
   ipcMain.handle('fs:isDirectory', (_e, path: string) => fs.isDirectory(path));
   ipcMain.handle('fs:mkdirp', (_e, path: string) => fs.mkdirp(path));
@@ -1318,5 +1370,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       (_e, workspaceId: string, brokerSessionId: string) =>
         lookupBrokerSession(workspaceId, brokerSessionId)
     );
+    ipcMain.handle('__test:emitDetectedPort', (_e, workspaceId: string, port: number) => {
+      broadcastPortDetected(workspaceId, port);
+    });
   }
 }
