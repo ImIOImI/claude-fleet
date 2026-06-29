@@ -454,10 +454,17 @@ interface Tool {
   run: (db: Database.Database, args: Record<string, unknown>, ctx: ToolCtx) => unknown;
 }
 
-// Curated event columns (omit raw_jsonl by default — it's large and the
-// extract columns cover the common needs).
+// Curated event columns (omit raw_jsonl by default — it's large/sensitive and
+// the extract columns below cover the common needs). tool_input/tool_use_id/
+// tool_result_is_error carry the parsed which-file/which-command detail (#174).
 const EVENT_COLS =
-  'id, session_id, workspace_id, ts, type, subtype, model, tool_name, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, service_tier';
+  'id, session_id, workspace_id, ts, type, subtype, model, tool_name, tool_use_id, tool_input, tool_result_is_error, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, service_tier';
+
+// Columns a caller may request via list_events `columns` projection. Excludes
+// raw_jsonl by design (#146) — use the `query` tool with include_raw for that.
+const EVENT_COL_ALLOWLIST = new Set(
+  EVENT_COLS.split(',').map((c) => c.trim()).concat(['uuid', 'parent_uuid'])
+);
 
 /** SQL `IN (?,…)` fragment + params for an allowed-workspace set (#122). */
 function inClause(col: string, allowed: Set<string>): { sql: string; params: string[] } {
@@ -587,14 +594,18 @@ export const TOOLS: Tool[] = [
   {
     name: 'list_events',
     description:
-      'List events for a session in id order (omits the raw JSONL body). Optional filters: type, since (epoch ms on ts), limit.',
+      'List events for a session in id order (omits the raw JSONL body). tool_input carries the ' +
+      'parsed which-file/which-command detail. Optional: type, tool_name, since (epoch ms on ts), ' +
+      'limit, and columns (array projecting a subset of the curated columns).',
     inputSchema: {
       type: 'object',
       properties: {
         session_id: { type: 'string' },
         type: { type: 'string' },
+        tool_name: { type: 'string' },
         since: { type: 'number' },
-        limit: { type: 'number', description: `default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}` }
+        limit: { type: 'number', description: `default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}` },
+        columns: { type: 'array', items: { type: 'string' }, description: 'subset of the curated columns' }
       },
       required: ['session_id']
     },
@@ -603,17 +614,29 @@ export const TOOLS: Tool[] = [
       if (!sessionAllowed(db, a.session_id, ctx.allowedWorkspaces)) {
         throw new Error('not authorized to read this session');
       }
+      let cols = EVENT_COLS;
+      if (Array.isArray(a.columns)) {
+        const names = a.columns.map((c) => String(c));
+        for (const n of names) {
+          if (!EVENT_COL_ALLOWLIST.has(n)) throw new Error(`unknown column: ${n}`);
+        }
+        if (names.length > 0) cols = names.join(', ');
+      }
       const where = ['session_id = ?'];
       const p: unknown[] = [a.session_id];
       if (typeof a.type === 'string') {
         where.push('type = ?');
         p.push(a.type);
       }
+      if (typeof a.tool_name === 'string') {
+        where.push('tool_name = ?');
+        p.push(a.tool_name);
+      }
       if (typeof a.since === 'number') {
         where.push('ts >= ?');
         p.push(a.since);
       }
-      const sql = `SELECT ${EVENT_COLS} FROM events WHERE ${where.join(' AND ')} ORDER BY id ASC LIMIT ?`;
+      const sql = `SELECT ${cols} FROM events WHERE ${where.join(' AND ')} ORDER BY id ASC LIMIT ?`;
       return db.prepare(sql).all(...p, clampLimit(a.limit));
     }
   },
