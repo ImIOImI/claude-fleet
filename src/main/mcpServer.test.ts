@@ -188,6 +188,7 @@ describe('scoped query tool (#174)', () => {
     expect(() => run({ sql: "INSERT INTO events (session_id) VALUES ('x')" })).toThrow(/read-only/i);
     expect(() => run({ sql: 'DROP TABLE events' })).toThrow(/read-only/i);
     expect(() => run({ sql: 'UPDATE sessions SET ai_title = 1' })).toThrow(/read-only/i);
+    expect(() => run({ sql: 'SELECT 1; SELECT 2' })).toThrow();
   });
 
   it('caps result rows via max_rows', () => {
@@ -227,6 +228,10 @@ describe('list_events richer projection (#174)', () => {
     expect(() =>
       tool('list_events').run(db, { session_id: 'sa', columns: ['raw_jsonl; DROP TABLE events'] }, ctxA)
     ).toThrow(/unknown column/i);
+  });
+
+  it('rejects raw_jsonl in the columns projection', () => {
+    expect(() => tool('list_events').run(db, { session_id: 'sa', columns: ['raw_jsonl'] }, ctxA)).toThrow(/unknown column/i);
   });
 });
 

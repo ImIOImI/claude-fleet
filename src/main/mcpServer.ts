@@ -19,9 +19,12 @@
 // to the caller's OWN workspace plus any workspace it holds a `read` grant over
 // (#122). This is NOT optional — there is no fleet-global mode to enable, so one
 // workspace's agent can never enumerate or read another's sessions, costs, or
-// transcripts. Because arbitrary SQL can express cross-workspace joins and
-// aggregates that can't be safely row-filtered, there is deliberately NO raw
-// `query` escape hatch: the typed, scoped tools are the only read surface.
+// transcripts. The typed tools enforce this server-side by filtering all queries
+// through the caller's `allowedWorkspaces` set. The `query` tool (#174) runs
+// arbitrary READ-ONLY SQL against a per-call in-memory SNAPSHOT seeded only with
+// the caller's allowed-workspace rows (buildSnapshot); the real DB is DETACHed
+// before the caller's SQL runs, so isolation is structural — no join/UNION/
+// subquery/sqlite_master trick can reach another workspace's rows.
 //
 // Safety: a single connection opened `{ readonly: true }` is the hard guarantee
 // that nothing here can mutate the DB; the typed tools use parameterized SQL.
@@ -551,26 +554,31 @@ const SNAPSHOT_EVENT_COLS =
  *  caller owns the returned DB and must close it. */
 function buildSnapshot(srcPath: string, allowed: Set<string>, includeRaw: boolean): Database.Database {
   const mem = new Database(':memory:');
-  const alias = 'src_' + randomBytes(6).toString('hex');
-  const { sql: scope, params } = inClause('workspace_id', allowed);
-  // ATTACH the real DB. Path is escaped into the statement (ATTACH filename is
-  // not reliably bindable); paths never contain single quotes in practice, but
-  // double any just in case.
-  const attached = srcPath.replace(/'/g, "''");
-  mem.exec(`ATTACH DATABASE '${attached}' AS ${alias}`);
   try {
-    const eventCols = includeRaw ? `${SNAPSHOT_EVENT_COLS}, raw_jsonl` : SNAPSHOT_EVENT_COLS;
-    mem.prepare(
-      `CREATE TABLE events AS SELECT ${eventCols} FROM ${alias}.events WHERE ${scope}`
-    ).run(...params);
-    mem.prepare(`CREATE TABLE sessions AS SELECT * FROM ${alias}.sessions WHERE ${scope}`).run(...params);
-    mem.prepare(
-      `CREATE TABLE broker_sessions AS SELECT * FROM ${alias}.broker_sessions WHERE ${scope}`
-    ).run(...params);
-  } finally {
-    mem.exec(`DETACH ${alias}`);
+    const alias = 'src_' + randomBytes(6).toString('hex');
+    const { sql: scope, params } = inClause('workspace_id', allowed);
+    // ATTACH the real DB. Path is escaped into the statement (ATTACH filename is
+    // not reliably bindable); paths never contain single quotes in practice, but
+    // double any just in case.
+    const attached = srcPath.replace(/'/g, "''");
+    mem.exec(`ATTACH DATABASE '${attached}' AS ${alias}`);
+    try {
+      const eventCols = includeRaw ? `${SNAPSHOT_EVENT_COLS}, raw_jsonl` : SNAPSHOT_EVENT_COLS;
+      mem.prepare(
+        `CREATE TABLE events AS SELECT ${eventCols} FROM ${alias}.events WHERE ${scope}`
+      ).run(...params);
+      mem.prepare(`CREATE TABLE sessions AS SELECT * FROM ${alias}.sessions WHERE ${scope}`).run(...params);
+      mem.prepare(
+        `CREATE TABLE broker_sessions AS SELECT * FROM ${alias}.broker_sessions WHERE ${scope}`
+      ).run(...params);
+    } finally {
+      mem.exec(`DETACH ${alias}`);
+    }
+    return mem;
+  } catch (e) {
+    mem.close();
+    throw e;
   }
-  return mem;
 }
 
 /** Whether a session's workspace is within the caller's allowed read set (#122). */
