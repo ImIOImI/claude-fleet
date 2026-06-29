@@ -3024,3 +3024,14 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
 .lb-row-desc { font-size: 11px; color: var(--ink-2); }
 .lb-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .lb-empty { color: var(--ink-2); font-size: 12px; padding: 8px; }
+
+/* Loadout sources + update (library v2 Phase 2) */
+.lb-sources { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+.lb-sources-head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-2); }
+.lb-source-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-1); }
+.lb-source-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lb-source-remove { border: none; background: none; color: var(--ink-2); cursor: pointer; font-size: 14px; }
+.lb-add-source { display: flex; gap: 4px; margin-top: 4px; }
+.lb-add-source input { flex: 1; min-width: 0; }
+.lb-source-error { font-size: 11px; color: var(--danger); }
+.btn.update { background: color-mix(in oklch, var(--warn) 22%, transparent); color: var(--warn); border-color: var(--warn); }

@@ -74,6 +74,7 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
     const r = await window.api.loadouts.install(workspace.id, e.id, source ? { source, version: e.remoteVersion } : undefined);
     if (r && (r as { status?: string }).status === 'needs-confirm') {
       if (!window.confirm(`"${e.id}" already exists locally. Overwrite with the downloaded copy?`)) return;
+      if (!source) return;
       await window.api.loadouts.install(workspace.id, e.id, { source, version: e.remoteVersion, force: true });
     }
     onChanged();
@@ -128,7 +129,9 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
                     type="button"
                     className="lb-source-remove"
                     aria-label={`Remove ${s}`}
-                    onClick={async () => {
+                    onClick={async (ev) => {
+                      ev.stopPropagation();
+                      ev.preventDefault();
                       await window.api.loadouts.removeSource(s);
                       await reloadSources();
                       await reload();

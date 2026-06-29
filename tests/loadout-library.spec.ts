@@ -224,6 +224,87 @@ test('Library v2: favorites filter hides non-favorited entries', async () => {
   }
 });
 
+// ── Library v2 Phase 2: remote sources + Update ↑ ────────────────────────────
+
+const SOURCE = 'ghcr.io/imioimi/claude-fleet-loadouts';
+
+const PHASE2_ENTRY = {
+  id: 'spec-driven',
+  title: 'Spec-Driven',
+  description: 'Spec-driven dev workflow',
+  tags: ['workflow'],
+  version: '1.0.0',
+  remoteVersion: '1.1.0',
+  present: true,
+  installed: true,
+  updateAvailable: true,
+  favorited: false,
+  sources: [SOURCE],
+};
+
+test('Library v2 Phase 2: source checkbox in browser modal + Update ↑ in rail', async () => {
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [
+        {
+          id: 'ws-p2',
+          name: 'ws-p2',
+          state: 'running',
+          workspaceRoot: '/workspace/p2',
+          containerId: 'container-p2',
+          kind: 'container',
+        },
+      ],
+      loadoutCatalog: [PHASE2_ENTRY],
+      loadoutSources: [SOURCE],
+    });
+
+    await window.waitForTimeout(400);
+
+    // Ensure Library accordion is open.
+    const libraryAccHeader = window.locator('.acc-header', { hasText: 'Library' });
+    await libraryAccHeader.waitFor({ state: 'visible', timeout: 8_000 });
+    const isExpanded = await libraryAccHeader.getAttribute('aria-expanded');
+    if (isExpanded !== 'true') {
+      await libraryAccHeader.click();
+      await window.waitForTimeout(200);
+    }
+
+    // Select the workspace so the Update ↑ button is enabled.
+    const chip = window.locator('.ws-chip', { hasText: 'ws-p2' });
+    await chip.waitFor({ state: 'visible', timeout: 6_000 });
+    await chip.click();
+    await window.waitForTimeout(200);
+
+    // The installed card should show Update ↑ since updateAvailable=true.
+    const card = window.locator('.loadout-card', { hasText: 'Spec-Driven' });
+    await card.waitFor({ state: 'visible', timeout: 8_000 });
+    const updateBtn = card.locator('.btn.update');
+    await updateBtn.waitFor({ state: 'visible', timeout: 4_000 });
+    await expect(updateBtn).toContainText('Update');
+
+    // Open the browser modal and verify the source checkbox is present.
+    const browseBtn = window.locator('.lib-browse');
+    await browseBtn.waitFor({ state: 'visible', timeout: 4_000 });
+    await browseBtn.click();
+
+    const browserModal = window.locator('.modal.loadout-browser');
+    await browserModal.waitFor({ state: 'visible', timeout: 6_000 });
+
+    // The source row should be visible in the .lb-sources section.
+    const sourceRow = browserModal.locator('.lb-source-row');
+    await sourceRow.waitFor({ state: 'visible', timeout: 4_000 });
+    await expect(sourceRow.locator('.lb-source-name')).toContainText('imioimi/claude-fleet-loadouts');
+
+    // Close modal.
+    await browserModal.locator('button', { hasText: 'Close' }).click();
+    await expect(browserModal).not.toBeVisible();
+  } finally {
+    await app.close();
+  }
+});
+
 test('Library v2: Browse-all button opens loadout browser modal', async () => {
   const { app, window } = await launch();
   try {
