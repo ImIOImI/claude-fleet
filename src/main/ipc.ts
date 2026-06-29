@@ -46,6 +46,8 @@ import * as fs from './fs.js';
 import * as imageLibrary from './imageLibrary.js';
 import * as files from './files.js';
 import * as loadouts from './loadouts.js';
+import * as loadoutSources from './loadoutSources.js';
+import { ensureAndInstall } from './loadoutInstall.js';
 import { loadoutDir } from './paths.js';
 import * as sessions from './sessions.js';
 import {
@@ -879,8 +881,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // ── Loadout library (#16-followup) ───────────────────────────────────────
   ipcMain.handle('loadouts:list', () => loadouts.listLoadouts());
   ipcMain.handle('loadouts:get', (_e, id: string) => loadouts.getLoadout(id));
-  ipcMain.handle('loadouts:install', (_e, workspaceId: string, loadoutId: string) =>
-    loadouts.installLoadout(workspaceId, loadoutId)
+  ipcMain.handle('loadouts:install', (_e, workspaceId: string, loadoutId: string, opts?: { source?: string; version?: string; force?: boolean }) =>
+    ensureAndInstall(workspaceId, loadoutId, opts ?? {})
   );
   ipcMain.handle('loadouts:uninstall', (_e, workspaceId: string, loadoutId: string) =>
     loadouts.uninstallLoadout(workspaceId, loadoutId)
@@ -892,6 +894,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   });
   ipcMain.handle('loadouts:catalog', (_e, workspaceId?: string) => buildLoadoutCatalog(workspaceId));
   ipcMain.handle('loadouts:setFavorite', (_e, id: string, on: boolean) => setFavorite(id, on));
+  ipcMain.handle('loadouts:listSources', () => loadoutSources.listSources());
+  ipcMain.handle('loadouts:addSource', (_e, base: string) => loadoutSources.addSource(base));
+  ipcMain.handle('loadouts:removeSource', (_e, base: string) => loadoutSources.removeSource(base));
+  ipcMain.handle('loadouts:refreshSource', (_e, base: string) => loadoutSources.browseSource(base, { refresh: true }));
 
   // App-level settings. The fleet root is the single host dir holding every
   // workspace's private folder (<root>/<id>) plus the shared folder

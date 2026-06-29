@@ -337,8 +337,12 @@ const api = {
     list: (): Promise<unknown[]> => ipcRenderer.invoke('loadouts:list'),
     get: (id: string): Promise<unknown> => ipcRenderer.invoke('loadouts:get', id),
     openFolder: (id: string): Promise<string> => ipcRenderer.invoke('loadouts:openFolder', id),
-    install: (workspaceId: string, loadoutId: string): Promise<unknown> =>
-      ipcRenderer.invoke('loadouts:install', workspaceId, loadoutId),
+    install: (
+      workspaceId: string,
+      loadoutId: string,
+      opts?: { source?: string; version?: string; force?: boolean }
+    ): Promise<{ status: 'installed' } | { status: 'needs-confirm'; reason: string }> =>
+      ipcRenderer.invoke('loadouts:install', workspaceId, loadoutId, opts),
     uninstall: (workspaceId: string, loadoutId: string): Promise<void> =>
       ipcRenderer.invoke('loadouts:uninstall', workspaceId, loadoutId),
     catalog: (
@@ -360,7 +364,17 @@ const api = {
       }>
     > => ipcRenderer.invoke('loadouts:catalog', workspaceId),
     setFavorite: (id: string, on: boolean): Promise<string[]> =>
-      ipcRenderer.invoke('loadouts:setFavorite', id, on)
+      ipcRenderer.invoke('loadouts:setFavorite', id, on),
+    listSources: (): Promise<string[]> => ipcRenderer.invoke('loadouts:listSources'),
+    addSource: (
+      base: string
+    ): Promise<Array<{ id: string; title: string; description: string; tags: string[]; version: string }>> =>
+      ipcRenderer.invoke('loadouts:addSource', base),
+    removeSource: (base: string): Promise<void> => ipcRenderer.invoke('loadouts:removeSource', base),
+    refreshSource: (
+      base: string
+    ): Promise<Array<{ id: string; title: string; description: string; tags: string[]; version: string }>> =>
+      ipcRenderer.invoke('loadouts:refreshSource', base)
   },
   config: {
     /** App-level settings: the fleet root, its derived shared folder, and the
