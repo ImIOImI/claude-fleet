@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isExternalDrag } from './dropIngestion';
+import { isExternalDrag, shouldClaimDragOver } from './dropIngestion';
 
 describe('isExternalDrag', () => {
   // #147: an internal workspace-chip reorder drag carries effectAllowed='move'
@@ -27,5 +27,22 @@ describe('isExternalDrag', () => {
 
   it('ignores unrelated-only type lists', () => {
     expect(isExternalDrag(['application/x-internal-thing'])).toBe(false);
+  });
+});
+
+describe('shouldClaimDragOver', () => {
+  // #177: #147 stopped the overlay/drop from hijacking a chip reorder, but the
+  // window-level onDragOver still preventDefault'd and set dropEffect='copy'
+  // UNCONDITIONALLY — even for an internal chip drag. The chip drag carries
+  // effectAllowed='move', and 'copy' is incompatible with 'move', so Chromium
+  // computes the drag operation as none and never fires the chip's drop event:
+  // no overlay (good) but also no reorder. The window must NOT claim dragover
+  // while an internal drag is in flight, leaving the chip's 'move' to stand.
+  it('does NOT claim dragover while an internal chip drag is active', () => {
+    expect(shouldClaimDragOver(true)).toBe(false);
+  });
+
+  it('claims dragover for ordinary (external) drags so the copy cursor shows', () => {
+    expect(shouldClaimDragOver(false)).toBe(true);
   });
 });
