@@ -1,7 +1,7 @@
 // Unit tests for the pure loadout-library-v2 OCI core: ref parsing, layer-path
 // safety, index parsing, version compare, and catalog assembly. No electron,
-// no network, no fs. The `it.todo` blocks enumerate the networked / electron-
-// wired behaviors that land with ociClient.ts and loadoutSources.ts.
+// no network, no fs. Networked/electron-wired behaviors are tested in their
+// own files: ociClient.test.ts, loadoutSources.test.ts, loadoutInstall.test.ts.
 
 import { describe, expect, it } from 'vitest';
 import {
@@ -178,15 +178,3 @@ describe('toggleFavorite', () => {
   });
 });
 
-// ── Source + provenance + favorites layer (loadoutSources.ts) — to implement ──
-describe('loadoutSources (electron-wired)', () => {
-  it.todo('addSource validates a base ref by pulling + parsing its index, then persists it to <userData>/loadouts/sources.json');
-  it.todo('removeSource drops a source and its cached index');
-  it.todo('browseSource returns the cached index, refreshing on demand');
-  it.todo('download pulls into <userData>/loadouts/<id>/ and records provenance {source, version}');
-  it.todo('install pulls-if-absent-or-stale then runs the existing installLoadout (no standalone Download state)');
-  it.todo('confirm-before-overwrite when a download collides with a locally-authored loadout of the same id');
-  it.todo('favorites persist globally in config.json and toggle via the expanded card / modal');
-  it.todo('the rail favorites filter narrows the list to favorited loadouts only');
-  it.todo('downloads land only under host-private <userData>/loadouts and are never bind-mounted into a container (§9)');
-});

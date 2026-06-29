@@ -736,7 +736,7 @@ claude-fleet/
 These are decided in spirit but not yet implemented. When you implement one, move it out of this section and into the relevant body section above.
 
 ### Loadout library v2 — remote OCI sources + update detection (Phase 2)
-**Phase 2 (remote OCI sources, index artifact, update detection) is implemented** — see §7 "Loadout library v2 — Phase 2". The paired index publisher shipped in `claude-fleet-loadouts` (the `publish-loadouts.yml` workflow now emits `<source>/index:latest`). Both sides landed in the same change per the CLAUDE.md cross-repo contract rule. All `it.todo` stubs in `ociCore.test.ts` are implemented and passing.
+**Phase 2 (remote OCI sources, index artifact, update detection) is implemented and tested** — ociClient (`src/main/ociClient.test.ts`), loadoutSources (`src/main/loadoutSources.test.ts`), and loadoutInstall (`src/main/loadoutInstall.test.ts`) have their own dedicated unit test suites. The paired index publisher shipped in `claude-fleet-loadouts` (the `publish-loadouts.yml` workflow now emits `<source>/index:latest`). Both sides landed in the same change per the CLAUDE.md cross-repo contract rule. `ociCore.test.ts` focuses on the pure OCI core logic (ref parsing, layer-path safety, index parsing, version compare, catalog assembly) with no network or electron-wired behaviors.
 
 ### Per-container Claude Code state visibility on the host
 Each container gets its own host-side state dir, bind-mounted into the container at `/home/fleet/.claude/`. This is the foundation for the observability watcher, sessions table, durable mirror, and permission-request log — all of which read events from `<state-dir>/projects/-workspace/*.jsonl` directly off the host filesystem.
