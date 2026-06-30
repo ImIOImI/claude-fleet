@@ -661,23 +661,32 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 6: fold mapping-diag into the errors table; remove the `/shared` hack
+### Task 6: record mapping-diagnostic signals into the errors table
+
+**Note:** These signals are NET-NEW on this baseline — the temporary `/shared`
+`mappingDiag.ts` from the earlier investigation was never committed here. There
+is nothing to remove; we add two `logError` signals that now flow into the
+errors table and are reachable via `list_errors`.
 
 **Files:**
-- Delete: `src/main/mappingDiag.ts`
-- Modify: `src/main/docker.ts` (remove the `mappingDiag` import + the attach-mode `void mappingDiag({...})` call — attach-mode is noise)
-- Modify: `src/main/ipc.ts` (remove the `mappingDiag` import; replace the two remaining diagnostics with permanent `logError` calls; keep the `mappingDiagSeen` dedupe set for the lookup signal)
+- Modify: `src/main/ipc.ts` (add a module-scoped dedupe set; emit `new-session-dropped` (info) in the `new-session` handler; emit `mapping-unresolved`/`mapping-stale-session` (warn) in the `observability:summaryForBrokerSession` handler)
 
 **Interfaces:**
-- Consumes: `logError` (already imported in `ipc.ts`).
+- Consumes: `logError`, `lookupBrokerSession`, `summaryForBrokerSession` (all already imported in `ipc.ts`).
 
-- [ ] **Step 1: Remove the temporary module + docker.ts call**
+- [ ] **Step 1: Add a module-scoped dedupe set**
 
-Delete `src/main/mappingDiag.ts`. In `src/main/docker.ts`, remove `import { mappingDiag } from './mappingDiag.js';` and delete the entire `void mappingDiag({ at: 'attach', ... });` block in `attachPty`.
+In `src/main/ipc.ts`, after the `committeeBusy` map declaration, add:
 
-- [ ] **Step 2: Replace the `new-session` diagnostic with a permanent signal**
+```ts
+// Dedupe set so the per-tab summary lookup (polled on every observability push)
+// records each unresolved (workspace:tab:outcome) only once per run.
+const mappingUnresolvedSeen = new Set<string>();
+```
 
-In `src/main/ipc.ts`, remove `import { mappingDiag } from './mappingDiag.js';`. In the `jsonlWatcher.on('new-session', ...)` handler, replace the `void mappingDiag({...})` call with (only logging the interesting drop case):
+- [ ] **Step 2: Emit `new-session-dropped` (info)**
+
+In the `jsonlWatcher.on('new-session', ...)` handler, replace `if (!brokerSessionId) return;` with:
 
 ```ts
       if (!brokerSessionId) {
@@ -693,15 +702,23 @@ In `src/main/ipc.ts`, remove `import { mappingDiag } from './mappingDiag.js';`. 
       }
 ```
 
-(Delete the old `if (!brokerSessionId) return;` line it replaces.)
+- [ ] **Step 3: Emit `mapping-unresolved` (warn) from the summary handler**
 
-- [ ] **Step 3: Replace the lookup diagnostic with a permanent signal**
-
-In `src/main/ipc.ts`, in the `observability:summaryForBrokerSession` handler, replace the `void mappingDiag({ at: 'lookup', ... })` call (keep the `mappingDiagSeen` dedupe + the `outcome` computation) with:
+Replace the `observability:summaryForBrokerSession` handler body (currently a single `summaryForBrokerSession(...)` return) with:
 
 ```ts
-      if (outcome !== 'resolved' && !mappingDiagSeen.has(key)) {
-        mappingDiagSeen.add(key);
+  ipcMain.handle(
+    'observability:summaryForBrokerSession',
+    (_e, workspaceId: string, brokerSessionId: string) => {
+      const summary = summaryForBrokerSession(workspaceId, brokerSessionId);
+      // A blank rail's root signal: a no-mapping outcome here is why the per-tab
+      // summary is null. mapped-no-session = stale mapping. Deduped per
+      // (workspace:tab:outcome) so the frequent rail polls log each state once.
+      const claudeId = lookupBrokerSession(workspaceId, brokerSessionId);
+      const outcome = claudeId ? (summary ? 'resolved' : 'mapped-no-session') : 'no-mapping';
+      const key = `${workspaceId}:${brokerSessionId}:${outcome}`;
+      if (outcome !== 'resolved' && !mappingUnresolvedSeen.has(key)) {
+        mappingUnresolvedSeen.add(key);
         logError({
           source: 'main',
           type: outcome === 'no-mapping' ? 'mapping-unresolved' : 'mapping-stale-session',
@@ -711,29 +728,25 @@ In `src/main/ipc.ts`, in the `observability:summaryForBrokerSession` handler, re
           extra: { brokerSessionId, claudeSessionId: claudeId, outcome }
         });
       }
+      return summary;
+    }
+  );
 ```
-
-(Update the surrounding comment to drop the "remove after confirming / `/shared`" wording — these are now permanent.)
 
 - [ ] **Step 4: Typecheck**
 
 Run: `npm run typecheck`
-Expected: clean — no remaining references to `mappingDiag`.
+Expected: clean.
 
-- [ ] **Step 5: Confirm the temporary module is gone**
-
-Run: `rg -n "mappingDiag|/shared/_logs" src/main || echo "clean"`
-Expected: `clean`.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add -A
-git commit -m "refactor: fold mapping diagnostics into the errors table
+git add src/main/ipc.ts
+git commit -m "feat(obs): record mapping-unresolved/new-session-dropped diagnostics
 
-Removes the temporary /shared mapping-diag side-channel; the mapping-unresolved
-(warn) and new-session-dropped (info) signals now go through logError into the
-errors table, reachable via list_errors.
+The mapping-unresolved (warn) and new-session-dropped (info) signals now go
+through logError into the errors table, reachable via list_errors — the
+sanctioned replacement for the temporary /shared diagnostics.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```

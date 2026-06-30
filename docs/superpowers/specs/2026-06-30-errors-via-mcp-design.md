@@ -11,13 +11,11 @@ mapping was suspected absent), there was no sanctioned way for an in-workspace a
 read host-side errors or "why is this panel degraded" signals. `error.log` lives in the
 host Electron `userData` dir, which a workspace container cannot reach (security
 invariant, SPEC §9), and the MCP read surface exposes only `list_sessions` / `get_session`
-/ `get_cost` / `list_events` — no errors, no diagnostics. As a stopgap, diagnostics were
-written to the bind-mounted `/shared` folder. This design replaces that hack with a
-first-class, scoped, queryable error surface, plus a human affordance to reach the data
-folder from the app's Help menu.
-
-(Note: CLAUDE.md advertises `query` / `session_summary` / `broker_sessions` MCP access
-that is **not implemented** — see Out-of-scope follow-ups.)
+/ `get_cost` / `list_events` (plus `session_summary` / `query` as of #174) — but **no
+errors, no diagnostics**. As a stopgap during the investigation, diagnostics were written
+to the bind-mounted `/shared` folder. This design replaces that hack with a first-class,
+scoped, queryable error surface, plus a human affordance to reach the data folder from the
+app's Help menu.
 
 ## Goals
 
@@ -156,8 +154,6 @@ submenu" API, so:
 
 ## Out-of-scope follow-ups
 
-- **CLAUDE.md drift:** it documents `query` / `session_summary` / `broker_sessions` MCP
-  access that isn't implemented. Either implement or correct the doc (separate change).
 - **Mapping-learning durability:** the broker→claude mapping is learn-once with no repair
   path on reconnect (persist learned claude UUID into `sessions.json` + replay on attach).
   The `mapping-unresolved` signal added here makes this diagnosable; the fix is separate.
