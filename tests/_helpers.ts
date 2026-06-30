@@ -186,7 +186,10 @@ export interface MockOpts {
     updateAvailable: boolean;
     favorited: boolean;
     sources: string[];
+    remoteVersion?: string;
   }>;
+  // Source list returned from loadouts:listSources. Defaults to [].
+  loadoutSources?: string[];
 }
 
 export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {}): Promise<void> {
@@ -207,7 +210,10 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       setFleetRoot: [],
       vaultSetSecret: [],
       vaultDeleteAllForWorkspace: [],
-      setFavorite: []
+      setFavorite: [],
+      addSource: [],
+      removeSource: [],
+      refreshSource: []
     };
 
     const channels = [
@@ -239,7 +245,11 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       'observability:getCost',
       'observability:getCostForWorkspace',
       'loadouts:catalog',
-      'loadouts:setFavorite'
+      'loadouts:setFavorite',
+      'loadouts:listSources',
+      'loadouts:addSource',
+      'loadouts:removeSource',
+      'loadouts:refreshSource'
     ];
     for (const ch of channels) {
       try {
@@ -428,6 +438,26 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
     ipcMain.handle('loadouts:catalog', () => catalog);
     ipcMain.handle('loadouts:setFavorite', (_e, id: string, on: boolean) => {
       g.__calls.setFavorite.push({ id, on });
+      return undefined;
+    });
+
+    // Loadout sources mocks (Phase 2). Return the caller's sources list and record
+    // add/remove/refresh calls so tests can assert source management flows.
+    const sourcesState: string[] = [...(opts.loadoutSources ?? [])];
+    ipcMain.handle('loadouts:listSources', () => [...sourcesState]);
+    ipcMain.handle('loadouts:addSource', (_e, base: string) => {
+      g.__calls.addSource.push(base);
+      if (!sourcesState.includes(base)) sourcesState.push(base);
+      return undefined;
+    });
+    ipcMain.handle('loadouts:removeSource', (_e, base: string) => {
+      g.__calls.removeSource.push(base);
+      const idx = sourcesState.indexOf(base);
+      if (idx >= 0) sourcesState.splice(idx, 1);
+      return undefined;
+    });
+    ipcMain.handle('loadouts:refreshSource', (_e, base: string) => {
+      g.__calls.refreshSource.push(base);
       return undefined;
     });
 

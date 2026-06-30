@@ -1,12 +1,14 @@
 // Assemble the loadout catalog for the renderer (browser modal + rail). Phase 1
 // is local-only: the local library + the target workspace's installed set +
 // global favorites, with no remote sources (assembleCatalog `remote` is []).
+// Phase 2 extends this with real remote sources via allRemote().
 // Pure assembly lives in ociCore.ts:assembleCatalog; this is the I/O glue.
 
 import { listLoadouts } from './loadouts.js';
 import { getFavorites } from './config.js';
 import { readWorkspaceManifest } from './workspaces.js';
 import { assembleCatalog, type CatalogEntry, type LocalLoadout, type InstalledRef } from './ociCore.js';
+import { allRemote } from './loadoutSources.js';
 
 export async function buildLoadoutCatalog(workspaceId?: string): Promise<CatalogEntry[]> {
   const [summaries, favorites] = await Promise.all([listLoadouts(), getFavorites()]);
@@ -25,5 +27,6 @@ export async function buildLoadoutCatalog(workspaceId?: string): Promise<Catalog
       version: (l as { version?: string }).version
     }));
   }
-  return assembleCatalog({ local, installed, favorites });
+  const remote = await allRemote();
+  return assembleCatalog({ local, installed, favorites, remote });
 }

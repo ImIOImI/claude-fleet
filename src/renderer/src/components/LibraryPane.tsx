@@ -243,6 +243,26 @@ export function LibraryPane({ selectedWorkspace, onChanged, onInstalled, onBrows
                       <button className="btn installed btn-sm" onClick={() => setReviewId(e.id)}>
                         ✓ Installed
                       </button>
+                      {e.updateAvailable && (
+                        <button
+                          className="btn update btn-sm"
+                          title={`Update to ${e.remoteVersion}`}
+                          disabled={!installable}
+                          onClick={async () => {
+                            const source = e.sources[0];
+                            if (!source) return;
+                            await window.api.loadouts.install(selectedWorkspace!.id, e.id, {
+                              source,
+                              version: e.remoteVersion,
+                              force: true,
+                            });
+                            onChanged();
+                            void reload();
+                          }}
+                        >
+                          Update ↑
+                        </button>
+                      )}
                       <button
                         className="lc-menu-trigger"
                         aria-label="Loadout actions"

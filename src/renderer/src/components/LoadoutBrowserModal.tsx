@@ -1,6 +1,6 @@
 // Full-catalog browse modal (#16 Phase 1). Facet sidebar (tag cloud + search)
-// + results list with install / favorite actions. Phase 2 will add source
-// checkboxes and the Update ↑ affordance — those are deliberately omitted here.
+// + results list with install / favorite actions. Phase 2 adds source
+// checkboxes (Task 5) and the Update ↑ affordance (Task 6).
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { WorkspaceSummary } from '../App';
@@ -17,6 +17,11 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
   const [entries, setEntries] = useState<Entry[]>([]);
   const [query, setQuery] = useState('');
   const [activeTags, setActiveTags] = useState<string[]>([]);
+  const [sources, setSources] = useState<string[]>([]);
+  const [selectedSources, setSelectedSources] = useState<string[]>([]);
+  const [addingSource, setAddingSource] = useState('');
+  const [sourceError, setSourceError] = useState<string | null>(null);
+
   const installable =
     !!workspace &&
     workspace.kind === 'container' &&
@@ -28,6 +33,11 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
   }, [workspace?.id]);
   useEffect(() => { void reload(); }, [reload]);
 
+  const reloadSources = useCallback(async () => {
+    setSources(await window.api.loadouts.listSources());
+  }, []);
+  useEffect(() => { void reloadSources(); }, [reloadSources]);
+
   const allTags = useMemo(() => {
     const set = new Set<string>();
     for (const e of entries) for (const t of e.tags) set.add(t);
@@ -35,6 +45,7 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
   }, [entries]);
 
   const filtered = entries.filter((e) => {
+    if (selectedSources.length && !e.present && !e.sources.some((s) => selectedSources.includes(s))) return false;
     if (activeTags.length && !activeTags.every((t) => e.tags.includes(t))) return false;
     if (query && !`${e.title} ${e.description}`.toLowerCase().includes(query.toLowerCase())) return false;
     return true;
@@ -43,12 +54,33 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
   const toggleTag = (t: string): void =>
     setActiveTags((prev) => (prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]));
 
-  const onInstall = async (id: string): Promise<void> => {
+  const addSource = async (): Promise<void> => {
+    const base = addingSource.trim();
+    if (!base) return;
+    setSourceError(null);
+    try {
+      await window.api.loadouts.addSource(base);
+      setAddingSource('');
+      await reloadSources();
+      await reload();
+    } catch (err) {
+      setSourceError((err as Error).message);
+    }
+  };
+
+  const onInstall = async (e: Entry): Promise<void> => {
     if (!workspace) return;
-    await window.api.loadouts.install(workspace.id, id);
+    const source = e.sources[0];
+    const r = await window.api.loadouts.install(workspace.id, e.id, source ? { source, version: e.remoteVersion } : undefined);
+    if (r && (r as { status?: string }).status === 'needs-confirm') {
+      if (!window.confirm(`"${e.id}" already exists locally. Overwrite with the downloaded copy?`)) return;
+      if (!source) return;
+      await window.api.loadouts.install(workspace.id, e.id, { source, version: e.remoteVersion, force: true });
+    }
     onChanged();
     void reload();
   };
+
   const onFav = async (e: Entry): Promise<void> => {
     await window.api.loadouts.setFavorite(e.id, !e.favorited);
     void reload();
@@ -81,6 +113,44 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
                 </button>
               ))}
             </div>
+            <div className="lb-sources">
+              <div className="lb-sources-head">Sources</div>
+              {sources.map((s) => (
+                <label key={s} className="lb-source-row" title={s}>
+                  <input
+                    type="checkbox"
+                    checked={selectedSources.includes(s)}
+                    onChange={() =>
+                      setSelectedSources((p) => (p.includes(s) ? p.filter((x) => x !== s) : [...p, s]))
+                    }
+                  />
+                  <span className="lb-source-name">{s.replace(/^ghcr\.io\//, '')}</span>
+                  <button
+                    type="button"
+                    className="lb-source-remove"
+                    aria-label={`Remove ${s}`}
+                    onClick={async (ev) => {
+                      ev.stopPropagation();
+                      ev.preventDefault();
+                      await window.api.loadouts.removeSource(s);
+                      await reloadSources();
+                      await reload();
+                    }}
+                  >
+                    ×
+                  </button>
+                </label>
+              ))}
+              <div className="lb-add-source">
+                <input
+                  placeholder="ghcr.io/owner/repo"
+                  value={addingSource}
+                  onChange={(e) => setAddingSource(e.target.value)}
+                />
+                <button type="button" onClick={() => void addSource()}>+ Add</button>
+              </div>
+              {sourceError && <div className="lb-source-error">{sourceError}</div>}
+            </div>
           </aside>
           <ul className="lb-results">
             {filtered.map((e) => (
@@ -109,9 +179,9 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
                     <button
                       className="btn primary btn-sm"
                       disabled={!installable}
-                      onClick={() => void onInstall(e.id)}
+                      onClick={() => void onInstall(e)}
                     >
-                      + Install
+                      {e.present ? '+ Install' : '↓ Install'}
                     </button>
                   )}
                 </div>
