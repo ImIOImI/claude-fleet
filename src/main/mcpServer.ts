@@ -764,6 +764,38 @@ export const TOOLS: Tool[] = [
       );
     }
   },
+  {
+    name: 'list_errors',
+    description:
+      'List recorded errors/diagnostics (newest first). Scoped to your workspace plus global app-level crashes. Optional filters: workspace_id, session_id, level, type, since (epoch ms on ts), limit.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspace_id: { type: 'string' },
+        session_id: { type: 'string' },
+        level: { type: 'string', description: "'error' | 'warn' | 'info'" },
+        type: { type: 'string' },
+        since: { type: 'number', description: 'epoch ms, ts >= since' },
+        limit: { type: 'number', description: `default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}` }
+      }
+    },
+    run: (db, a, ctx) => {
+      const where: string[] = [];
+      const p: unknown[] = [];
+      // Always: own workspace(s) OR a global (NULL-workspace) crash row.
+      const { sql: scopeSql, params } = inClause('workspace_id', ctx.allowedWorkspaces);
+      where.push(`(${scopeSql} OR workspace_id IS NULL)`);
+      p.push(...params);
+      if (typeof a.workspace_id === 'string') { where.push('workspace_id = ?'); p.push(a.workspace_id); }
+      if (typeof a.session_id === 'string') { where.push('session_id = ?'); p.push(a.session_id); }
+      if (typeof a.level === 'string') { where.push('level = ?'); p.push(a.level); }
+      if (typeof a.type === 'string') { where.push('type = ?'); p.push(a.type); }
+      if (typeof a.since === 'number') { where.push('ts >= ?'); p.push(a.since); }
+      const sql = `SELECT * FROM errors WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ?`;
+      const rows = db.prepare(sql).all(...p, clampLimit(a.limit)) as Array<Record<string, unknown>>;
+      return rows.map((r) => ({ ...r, ts_iso: new Date(r.ts as number).toISOString() }));
+    }
+  },
   // `query` runs arbitrary READ-ONLY SQL against a per-call in-memory SNAPSHOT
   // seeded only with the caller's allowed-workspace rows (buildSnapshot). The
   // real DB is DETACHed before the caller's SQL runs, so isolation is structural
