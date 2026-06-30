@@ -28,7 +28,8 @@ type Scope = 'workspace' | 'all';
  */
 function SessionBusyDot({ waiting }: { waiting: boolean }): JSX.Element {
   const blink = useBlinkSync(true);
-  return <span className={`session-busy-dot ${waiting ? 'waiting' : ''}`} style={blink} />;
+  const label = waiting ? 'Waiting on your input' : 'Claude is working…';
+  return <span className={`session-busy-dot ${waiting ? 'waiting' : ''}`} style={blink} aria-label={label} title={label} />;
 }
 
 interface Props {

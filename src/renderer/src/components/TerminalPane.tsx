@@ -32,14 +32,14 @@ import { useBlinkSync } from '../blinkSync';
 function SessionTabDot({ ended, busy, waiting }: { ended: boolean; busy: boolean; waiting: boolean }): JSX.Element {
   const active = !ended && (busy || waiting);
   const cls = waiting && !ended ? 'waiting' : busy && !ended ? 'busy' : '';
-  const label = ended ? 'session ended' : waiting ? 'waiting on your input' : busy ? 'Claude is working' : 'session live';
+  const label = ended ? 'session ended' : waiting ? 'waiting on your input' : busy ? 'Claude is working…' : 'session live';
   const blink = useBlinkSync(active);
   return (
     <span
       className={`session-tab-dot ${ended ? 'ended' : 'live'} ${cls}`}
       style={blink}
       aria-label={label}
-      title={label === 'Claude is working' ? 'Claude is working…' : label}
+      title={label}
     />
   );
 }
