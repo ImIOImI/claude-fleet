@@ -878,9 +878,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     await clearInputWaitForContainer(containerId);
     return (await backendFor(containerId)).stopWorkspace(containerId);
   });
-  ipcMain.handle('workspace:pause', async (_e, containerId: string) =>
-    (await backendFor(containerId)).pauseWorkspace(containerId)
-  );
+  ipcMain.handle('workspace:pause', async (_e, containerId: string) => {
+    await clearInputWaitForContainer(containerId);
+    return (await backendFor(containerId)).pauseWorkspace(containerId);
+  });
   // Committee pause/unpause (#119). `callerId` is the workspace acting as
   // manager; assertControl gates the effect. Exposed for the committee console
   // (#123); the manager's Claude reaches the same effects via the MCP tools.
