@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "AskUserQuestion", "hooks": [ { "type": "command", "command": "/usr/local/lib/claude-fleet/input-wait-report.sh" } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "AskUserQuestion", "hooks": [ { "type": "command", "command": "/usr/local/lib/claude-fleet/input-wait-report.sh" } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "/usr/local/lib/claude-fleet/input-wait-report.sh" } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "/usr/local/lib/claude-fleet/input-wait-report.sh" } ] }
+    ]
+  }
+}

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef, useReducer } from 'react';
+import { useEffect, useState, useCallback, useRef, useReducer, useMemo } from 'react';
 import { WorkspaceTabStrip } from './components/WorkspaceTabStrip';
 import { ToastStack } from './components/Toast';
 import { toastReducer, makeToast, type Toast, type ToastKind } from './toasts';
@@ -16,6 +16,7 @@ import LoadoutBrowserModal from './components/LoadoutBrowserModal';
 import { useDropIngestion } from './dropIngestion';
 import { contextBarSummary } from './contextBarSource';
 import { busyClaudeIdSet } from './busySessions';
+import { mergeWaitingSessionIds, waitingFlags } from './waitingSessions';
 import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget } from '../../preload';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
@@ -247,6 +248,8 @@ export function App() {
     });
   }, []);
   const [busySessionIds, setBusySessionIds] = useState<Set<string>>(new Set());
+  // workspaceId -> set of claude session UUIDs blocked on AskUserQuestion.
+  const [waitingByWorkspace, setWaitingByWorkspace] = useState<Map<string, Set<string>>>(new Map());
 
   // Latest committee message injected into each workspace (#123). The `nonce`
   // bumps on every inbound so TerminalPane re-shows its `[committee]` toast even
@@ -709,6 +712,19 @@ export function App() {
     };
   }, [apiReady, busyBrokerKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Subscribe to input-wait pushes (sessions blocked on AskUserQuestion).
+  useEffect(() => {
+    const unsubscribe = window.api.observability.onInputWait((workspaceId, waitingSessionIds) => {
+      setWaitingByWorkspace((prev) => {
+        const next = new Map(prev);
+        if (waitingSessionIds.length === 0) next.delete(workspaceId);
+        else next.set(workspaceId, new Set(waitingSessionIds));
+        return next;
+      });
+    });
+    return unsubscribe;
+  }, []);
+
   if (!apiReady) {
     return (
       <div className="app">
@@ -973,6 +989,11 @@ export function App() {
     });
   };
 
+  // Union of waiting claude UUIDs across all workspaces — for the Sessions list.
+  const waitingSessionIds = useMemo(() => mergeWaitingSessionIds(waitingByWorkspace), [waitingByWorkspace]);
+  // Per-workspace boolean — for the workspace chip.
+  const waitingByWorkspaceFlag = useMemo(() => waitingFlags(waitingByWorkspace), [waitingByWorkspace]);
+
   return (
     <div className={`app${dragging ? ' dragging' : ''}`}>
       <WorkspaceTabStrip
@@ -991,6 +1012,7 @@ export function App() {
         onDeleteWorkspace={(w) => setDeleteTargetId(w.id)}
         onRefresh={refresh}
         onReorderWorkspace={handleReorderWorkspaces}
+        waitingByWorkspace={waitingByWorkspaceFlag}
       />
 
       <div
@@ -1003,6 +1025,7 @@ export function App() {
           selectedWorkspaceId={selectedId}
           selectedWorkspace={selectedWorkspace}
           busySessionIds={busySessionIds}
+          waitingSessionIds={waitingSessionIds}
           collapsed={leftCollapsed}
           onToggleCollapse={toggleLeftCollapsed}
           onResume={handleResumeSession}
@@ -1076,6 +1099,7 @@ export function App() {
                   onReloadConsumed={() => setReloadRequest(null)}
                   onReloadStarted={() => handleReloadStarted(w.id)}
                   onRefreshRequested={handleRefreshRequested}
+                  waitingSessionIds={waitingSessionIds}
                 />
               ))}
           </div>
