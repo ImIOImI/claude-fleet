@@ -151,6 +151,9 @@ const handleWorkspaceId = new Map<string, string>();
 // the last busy↔idle flip — used to detect a stalled (busy-too-long) expert.
 const committeeBusy = new Map<string, { busy: boolean; since: number }>();
 
+// Dedupe set so the per-tab summary lookup (polled on every observability push)
+// records each unresolved (workspace:tab:outcome) only once per run.
+const mappingUnresolvedSeen = new Set<string>();
 
 interface RegisterIpcOpts {
   jsonlWatcher: JsonlWatcher | null;
@@ -550,7 +553,17 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     // alone and we can disambiguate.
     jsonlWatcher.on('new-session', ({ workspaceId, sessionId: claudeSessionId }) => {
       const brokerSessionId = consumeForWorkspace(workspaceId);
-      if (!brokerSessionId) return;
+      if (!brokerSessionId) {
+        logError({
+          source: 'main',
+          type: 'new-session-dropped',
+          level: 'info',
+          message: `new-session for ${claudeSessionId} had no pending attach to pair with`,
+          workspaceId,
+          extra: { claudeSessionId }
+        });
+        return;
+      }
       learnBrokerSessionMapping(workspaceId, brokerSessionId, claudeSessionId);
       // Propagate any pending per-session mirror override onto the claude id.
       learnMirrorMapping(workspaceId, brokerSessionId, claudeSessionId);
@@ -1271,8 +1284,27 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
    */
   ipcMain.handle(
     'observability:summaryForBrokerSession',
-    (_e, workspaceId: string, brokerSessionId: string) =>
-      summaryForBrokerSession(workspaceId, brokerSessionId)
+    (_e, workspaceId: string, brokerSessionId: string) => {
+      const summary = summaryForBrokerSession(workspaceId, brokerSessionId);
+      // A blank rail's root signal: a no-mapping outcome here is why the per-tab
+      // summary is null. mapped-no-session = stale mapping. Deduped per
+      // (workspace:tab:outcome) so the frequent rail polls log each state once.
+      const claudeId = lookupBrokerSession(workspaceId, brokerSessionId);
+      const outcome = claudeId ? (summary ? 'resolved' : 'mapped-no-session') : 'no-mapping';
+      const key = `${workspaceId}:${brokerSessionId}:${outcome}`;
+      if (outcome !== 'resolved' && !mappingUnresolvedSeen.has(key)) {
+        mappingUnresolvedSeen.add(key);
+        logError({
+          source: 'main',
+          type: outcome === 'no-mapping' ? 'mapping-unresolved' : 'mapping-stale-session',
+          level: 'warn',
+          message: `per-tab summary ${outcome} for broker ${brokerSessionId}`,
+          workspaceId,
+          extra: { brokerSessionId, claudeSessionId: claudeId, outcome }
+        });
+      }
+      return summary;
+    }
   );
 
   // Cost rollups (#32). USD is derived from `events` via pricing.ts and is
