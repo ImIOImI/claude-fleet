@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { TOOLS, resolveAllowedWorkspaces, type ToolCtx } from './mcpServer.js';
+import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, type ToolCtx } from './mcpServer.js';
 
 const WS_A = '01WORKSPACEAAAAAAAAAAAAAAA';
 const WS_B = '01WORKSPACEBBBBBBBBBBBBBBB';
@@ -261,5 +261,22 @@ describe('session_summary (#174)', () => {
 
   it('refuses a session outside the allowed set', () => {
     expect(() => tool('session_summary').run(db, { id: 'sb' }, ctxA)).toThrow(/not authorized/i);
+  });
+});
+
+describe('signal_input_wait', () => {
+  const ctx: ToolCtx = { callerId: 'ws-A', allowedWorkspaces: new Set(['ws-A']) };
+  const tool = () => TOOLS.find((t) => t.name === 'signal_input_wait')!;
+
+  it('forwards (callerId, sessionId, waiting) to the injected handler', () => {
+    const calls: Array<[string, string, boolean]> = [];
+    setInputWaitHandler((c, s, w) => calls.push([c, s, w]));
+    tool().run({} as never, { sessionId: 'sess-1', waiting: true }, ctx);
+    expect(calls).toEqual([['ws-A', 'sess-1', true]]);
+  });
+
+  it('rejects bad args', () => {
+    setInputWaitHandler(() => {});
+    expect(() => tool().run({} as never, { sessionId: 'x' }, ctx)).toThrow(/required/);
   });
 });

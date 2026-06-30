@@ -106,6 +106,16 @@ export function setCommitteeHandlers(h: CommitteeHandlers): void {
   committeeHandlers = h;
 }
 
+/** Injected by ipc.ts: report that a session in the caller's workspace has
+ *  started (waiting=true) or finished (waiting=false) blocking on an
+ *  AskUserQuestion prompt. callerId is host-assigned (the accepting listener's
+ *  workspace id); sessionId is the claude session UUID from the hook payload. */
+export type InputWaitHandler = (callerId: string, sessionId: string, waiting: boolean) => void;
+let inputWaitHandler: InputWaitHandler | null = null;
+export function setInputWaitHandler(fn: InputWaitHandler): void {
+  inputWaitHandler = fn;
+}
+
 /** Route a host MCP listener `error` event to BOTH the console (live dev
  *  visibility) and `error.log` (durable trace — #159). Without the durable sink
  *  a swallowed bind failure — chiefly EADDRINUSE from a stale/duplicate
@@ -908,6 +918,26 @@ export const TOOLS: Tool[] = [
     run: (_db, _a, ctx) => {
       if (!committeeHandlers) throw new Error('committee control is unavailable');
       return committeeHandlers.roster(ctx.callerId);
+    }
+  },
+  {
+    name: 'signal_input_wait',
+    description:
+      'Internal (called by the runner AskUserQuestion hook, not by the model): report whether a ' +
+      'session in THIS workspace is blocked waiting on an AskUserQuestion prompt. ' +
+      'Args: sessionId (the claude session UUID), waiting (boolean).',
+    inputSchema: {
+      type: 'object',
+      properties: { sessionId: { type: 'string' }, waiting: { type: 'boolean' } },
+      required: ['sessionId', 'waiting']
+    },
+    run: (_db, a, ctx) => {
+      if (!inputWaitHandler) throw new Error('input-wait signaling is unavailable');
+      if (typeof a.sessionId !== 'string' || typeof a.waiting !== 'boolean') {
+        throw new Error('sessionId (string) and waiting (boolean) are required');
+      }
+      inputWaitHandler(ctx.callerId, a.sessionId, a.waiting);
+      return { ok: true };
     }
   }
 ];
