@@ -12,6 +12,7 @@
 import { app } from 'electron';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import type { ErrorRow } from './db.js';
 
 type Source = 'main' | 'renderer';
 
@@ -21,9 +22,18 @@ interface LogPayload {
   message: string;
   stack?: string;
   extra?: Record<string, unknown>;
+  workspaceId?: string;
+  sessionId?: string;
+  level?: 'error' | 'warn' | 'info';
 }
 
 let logPath: string | null = null;
+let sink: ((row: ErrorRow) => void) | null = null;
+
+/** Register a best-effort DB sink for structured error rows. */
+export function setErrorSink(fn: ((row: ErrorRow) => void) | null): void {
+  sink = fn;
+}
 
 function ensureLogPath(): string {
   if (logPath) return logPath;
@@ -35,16 +45,19 @@ function ensureLogPath(): string {
 
 /** Append one JSON line to the log. Best-effort — never throws. */
 export function logError(payload: LogPayload): void {
+  const tsMs = Date.now();
   try {
-    const row = {
-      ts: new Date().toISOString(),
-      ...payload,
-    };
+    const row = { ts: new Date(tsMs).toISOString(), ...payload };
     appendFileSync(ensureLogPath(), JSON.stringify(row) + '\n', 'utf8');
   } catch {
     // If writing the log itself errors, there's nothing useful we can do —
     // any throw here would cascade into the very error-handling path the
     // user invoked. Drop it.
+  }
+  try {
+    sink?.({ ts: tsMs, ...payload });
+  } catch {
+    // DB sink is best-effort — a wedged DB must never break crash logging.
   }
 }
 

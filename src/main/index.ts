@@ -1,13 +1,13 @@
 import { app, BrowserWindow, shell } from 'electron';
 import { join } from 'node:path';
 import { registerIpc } from './ipc.js';
-import { openDb, closeDb } from './db.js';
+import { openDb, closeDb, recordError } from './db.js';
 import { startMcpServer, stopMcpServer, ensureWorkspaceSocket, setMcpStatusListener } from './mcpServer.js';
 import { broadcastMcpStatus } from './mcpStatusBroadcast.js';
 import { ensureBuiltinLoadouts } from './loadouts.js';
 import { JsonlWatcher } from './jsonlWatcher.js';
 import { listWorkspaceManifests } from './workspaces.js';
-import { installMainProcessHandlers, getLogPath } from './errorLog.js';
+import { installMainProcessHandlers, getLogPath, setErrorSink } from './errorLog.js';
 import { runStartupMigration } from './migration.js';
 import { hardwareAccelDisabledAtStartup } from './config.js';
 import { setWorkspaceDefault } from './mirrorPolicy.js';
@@ -106,6 +106,9 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
 
   if (jsonlWatcher) {
     openDb(app.getPath('userData'));
+    // Wire the crash-safe DB sink so every logError call is also persisted to
+    // the errors table (best-effort; a wedged DB must never break crash logging).
+    setErrorSink((row) => recordError(row));
     // Read-only MCP server over <userData>/mcp.sock so in-container claude can
     // query the state DB (sessions/events/cost). Opens its own readonly conn.
     startMcpServer(app.getPath('userData'));
