@@ -42,6 +42,8 @@ interface Props {
   selectedWorkspaceId: string | null;
   /** Claude session UUIDs whose session is actively working — pulses its row. */
   busySessionIds?: Set<string>;
+  /** Claude session UUIDs blocked on AskUserQuestion — will drive a waiting indicator (Task 7). */
+  waitingSessionIds?: Set<string>;
   /** Resume a session — App brings the container up, then opens a resume tab. */
   onResume: (item: SessionListItem) => void;
   /** When true, render without the outer `.pane` wrapper / title — the

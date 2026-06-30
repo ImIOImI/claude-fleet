@@ -143,6 +143,8 @@ interface Props {
    * shared toast; `busyNow` selects the copy ("…when idle" while claude works).
    */
   onRefreshRequested?: (sessionName: string, busyNow: boolean) => void;
+  /** Claude session UUIDs blocked on AskUserQuestion — drives waiting indicators (Task 7). */
+  waitingSessionIds?: Set<string>;
 }
 
 function contextBarPct(summary: WorkspaceObservabilitySummary | null): number {

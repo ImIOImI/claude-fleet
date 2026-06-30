@@ -60,6 +60,8 @@ interface Props {
   onRefresh: () => void;
   /** Drag-reorder: move `draggedId` to sit before `targetId` in the strip (#1). */
   onReorderWorkspace: (draggedId: string, targetId: string) => void;
+  /** Per-workspace waiting flag: true when the workspace has a session blocked on AskUserQuestion. */
+  waitingByWorkspace?: Record<string, boolean>;
 }
 
 /**
