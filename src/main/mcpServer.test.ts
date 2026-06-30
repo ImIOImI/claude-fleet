@@ -268,6 +268,8 @@ describe('signal_input_wait', () => {
   const ctx: ToolCtx = { callerId: 'ws-A', allowedWorkspaces: new Set(['ws-A']) };
   const tool = () => TOOLS.find((t) => t.name === 'signal_input_wait')!;
 
+  afterEach(() => setInputWaitHandler(() => {}));
+
   it('forwards (callerId, sessionId, waiting) to the injected handler', () => {
     const calls: Array<[string, string, boolean]> = [];
     setInputWaitHandler((c, s, w) => calls.push([c, s, w]));
