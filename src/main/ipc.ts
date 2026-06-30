@@ -1286,22 +1286,23 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     'observability:summaryForBrokerSession',
     (_e, workspaceId: string, brokerSessionId: string) => {
       const summary = summaryForBrokerSession(workspaceId, brokerSessionId);
-      // A blank rail's root signal: a no-mapping outcome here is why the per-tab
-      // summary is null. mapped-no-session = stale mapping. Deduped per
-      // (workspace:tab:outcome) so the frequent rail polls log each state once.
-      const claudeId = lookupBrokerSession(workspaceId, brokerSessionId);
-      const outcome = claudeId ? (summary ? 'resolved' : 'mapped-no-session') : 'no-mapping';
-      const key = `${workspaceId}:${brokerSessionId}:${outcome}`;
-      if (outcome !== 'resolved' && !mappingUnresolvedSeen.has(key)) {
-        mappingUnresolvedSeen.add(key);
-        logError({
-          source: 'main',
-          type: outcome === 'no-mapping' ? 'mapping-unresolved' : 'mapping-stale-session',
-          level: 'warn',
-          message: `per-tab summary ${outcome} for broker ${brokerSessionId}`,
-          workspaceId,
-          extra: { brokerSessionId, claudeSessionId: claudeId, outcome }
-        });
+      if (!summary) {
+        // Blank-rail root signal: no-mapping = why the per-tab summary is null;
+        // mapped-no-session = stale mapping. Deduped per (workspace:tab:outcome).
+        const claudeId = lookupBrokerSession(workspaceId, brokerSessionId);
+        const outcome = claudeId ? 'mapped-no-session' : 'no-mapping';
+        const key = `${workspaceId}:${brokerSessionId}:${outcome}`;
+        if (!mappingUnresolvedSeen.has(key)) {
+          mappingUnresolvedSeen.add(key);
+          logError({
+            source: 'main',
+            type: outcome === 'no-mapping' ? 'mapping-unresolved' : 'mapping-stale-session',
+            level: 'warn',
+            message: `per-tab summary ${outcome} for broker ${brokerSessionId}`,
+            workspaceId,
+            extra: { brokerSessionId, claudeSessionId: claudeId, outcome }
+          });
+        }
       }
       return summary;
     }

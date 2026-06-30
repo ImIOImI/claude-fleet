@@ -301,4 +301,13 @@ describe('list_errors', () => {
     const rows = t.run(db, { level: 'warn' }, ctx([WS_A])) as Array<Record<string, unknown>>;
     expect(rows.every((r) => r.level === 'warn')).toBe(true);
   });
+
+  it('workspace_id filter preserves global (NULL) crash rows', () => {
+    // An agent narrowing to its own workspace must still see global app crashes.
+    const rows = t.run(db, { workspace_id: WS_A }, ctx([WS_A])) as Array<Record<string, unknown>>;
+    const types = rows.map((r) => r.type);
+    expect(types).toContain('mapping-unresolved'); // WS_A own row
+    expect(types).toContain('uncaughtException');  // global NULL row
+    expect(types).not.toContain('pty-attach-failed'); // WS_B — must stay hidden
+  });
 });

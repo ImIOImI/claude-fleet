@@ -786,7 +786,7 @@ export const TOOLS: Tool[] = [
       const { sql: scopeSql, params } = inClause('workspace_id', ctx.allowedWorkspaces);
       where.push(`(${scopeSql} OR workspace_id IS NULL)`);
       p.push(...params);
-      if (typeof a.workspace_id === 'string') { where.push('workspace_id = ?'); p.push(a.workspace_id); }
+      if (typeof a.workspace_id === 'string') { where.push('(workspace_id = ? OR workspace_id IS NULL)'); p.push(a.workspace_id); }
       if (typeof a.session_id === 'string') { where.push('session_id = ?'); p.push(a.session_id); }
       if (typeof a.level === 'string') { where.push('level = ?'); p.push(a.level); }
       if (typeof a.type === 'string') { where.push('type = ?'); p.push(a.type); }
