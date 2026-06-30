@@ -1,8 +1,9 @@
 // Cross-workspace read scoping (#122/#146). Launches the real app with two
 // workspaces — A (a reachable expert) and B (a manager granted `read` over A).
 // Reads are workspace-scoped by default (no flag): A (no grants) sees only its
-// own sessions, never B's; B sees its own + A's; and there is no raw `query`
-// tool to escape the scope. This is the isolation guarantee from #146.
+// own sessions, never B's; B sees its own + A's; and the `query` tool runs only
+// against a per-call snapshot of the caller's allowed rows, so even arbitrary
+// read-only SQL can't escape the scope (#174). This is the #146 isolation guarantee.
 
 import { _electron as electron, test, expect, type ElectronApplication } from '@playwright/test';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -133,14 +134,25 @@ test('scoped reads: caller sees own + read-granted sessions only; no query tool 
     expect(bSees).toContain(sessionB);
     expect(bSees).toContain(sessionA);
 
-    // There is no raw `query` tool to escape the scope (#146).
+    // The `query` tool exists but is snapshot-scoped (#174): from A's socket
+    // (no grants) it can only ever see A's own rows — never B's — because A's
+    // per-call snapshot is seeded with A's workspace rows only. So even raw
+    // read-only SQL cannot escape the scope (#146).
     const qSock = await connectWithRetry(path.join(userDataDir, 'mcp', A, 'mcp.sock'));
     const qc = new RpcClient(qSock);
     clients.push(qc);
     await qc.call('initialize', { protocolVersion: '2024-11-05' });
     const tools = await qc.call('tools/list');
     const names = (tools.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name);
-    expect(names).not.toContain('query');
+    expect(names).toContain('query');
+
+    const qres = await qc.call('tools/call', {
+      name: 'query',
+      arguments: { sql: 'SELECT id FROM sessions' }
+    });
+    const qIds = ((toolText(qres) as Array<{ id: string }>) ?? []).map((r) => r.id);
+    expect(qIds).toContain(sessionA);
+    expect(qIds).not.toContain(sessionB);
   } finally {
     clients.forEach((c) => c.close());
     await app.close();
