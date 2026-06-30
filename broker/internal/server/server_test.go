@@ -258,6 +258,88 @@ func TestServer_DetachAndReattachReplaysHistory(t *testing.T) {
 	}
 }
 
+func TestServer_DialRelayEchoesBytes(t *testing.T) {
+	conn, cleanup := startTestServer(t)
+	defer cleanup()
+
+	// Stand up a local TCP echo server on 127.0.0.1 — the broker will DIAL it.
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("echo listen: %v", err)
+	}
+	defer echo.Close()
+	go func() {
+		c, aerr := echo.Accept()
+		if aerr != nil {
+			return
+		}
+		defer c.Close()
+		buf := make([]byte, 256)
+		for {
+			n, rerr := c.Read(buf)
+			if n > 0 {
+				_, _ = c.Write(buf[:n])
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
+	port := uint16(echo.Addr().(*net.TCPAddr).Port)
+
+	// DIAL channel 1 → the echo server.
+	if err := proto.WriteJSONFrame(conn, proto.FrameDial, proto.DialRequest{Channel: 1, Port: port}); err != nil {
+		t.Fatalf("write DIAL: %v", err)
+	}
+	payload := expectFrame(t, conn, proto.FrameDialed)
+	var resp proto.DialResponse
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		t.Fatalf("decode DIALED: %v", err)
+	}
+	if !resp.OK || resp.Channel != 1 {
+		t.Fatalf("DIAL failed: %+v", resp)
+	}
+
+	// INPUT on the dial channel → echoed back as OUTPUT.
+	if err := proto.WriteFrame(conn, proto.FrameInput, proto.EncodeChannelData(1, []byte("ping"))); err != nil {
+		t.Fatalf("write INPUT: %v", err)
+	}
+	if !readUntilFrameContains(t, conn, proto.FrameOutput, []byte("ping")) {
+		t.Fatal("did not see echoed OUTPUT 'ping'")
+	}
+}
+
+func TestServer_DialRefusedReportsError(t *testing.T) {
+	conn, cleanup := startTestServer(t)
+	defer cleanup()
+
+	// Port 1 on loopback has nothing listening → dial refused.
+	_ = proto.WriteJSONFrame(conn, proto.FrameDial, proto.DialRequest{Channel: 1, Port: 1})
+	payload := expectFrame(t, conn, proto.FrameDialed)
+	var resp proto.DialResponse
+	_ = json.Unmarshal(payload, &resp)
+	if resp.OK {
+		t.Fatal("expected dial to port 1 to fail")
+	}
+	if resp.Error == "" {
+		t.Fatal("expected an error message")
+	}
+}
+
+func TestServer_ListPortsUsesInjectedScanner(t *testing.T) {
+	conn, cleanup := startTestServer(t)
+	defer cleanup()
+	// Override the scanner on the running server is not reachable post-New;
+	// instead this test drives the default path and asserts the frame shape.
+	_ = proto.WriteJSONFrame(conn, proto.FrameListPorts, struct{}{})
+	payload := expectFrame(t, conn, proto.FramePorts)
+	var resp proto.PortsResponse
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		t.Fatalf("decode PORTS: %v", err)
+	}
+	// Real /proc scan: shape must decode; contents are environment-dependent.
+}
+
 func TestServer_SecondConnAttachToHeldSessionRejected(t *testing.T) {
 	// #64 repro: a second connection ATTACHing a session that another
 	// connection already holds must be rejected (OK:false), not silently

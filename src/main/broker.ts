@@ -40,7 +40,11 @@ export enum FrameType {
   INPUT = 0x10,
   OUTPUT = 0x11,
   HISTORY = 0x12,
-  RESIZE = 0x13
+  RESIZE = 0x13,
+  DIAL = 0x14,
+  DIALED = 0x15,
+  LISTPORTS = 0x16,
+  PORTS = 0x17
 }
 
 const MAX_FRAME_PAYLOAD = 1 << 20; // mirror proto.MaxFramePayload
@@ -130,6 +134,12 @@ interface CreateResponse {
 }
 
 interface AttachResponse {
+  channel: number;
+  ok: boolean;
+  error?: string;
+}
+
+interface DialResponse {
   channel: number;
   ok: boolean;
   error?: string;
@@ -350,6 +360,30 @@ export class BrokerClient extends EventEmitter {
     );
     const obj = JSON.parse(payload.toString('utf8')) as { sessions: SessionInfo[] };
     return obj.sessions;
+  }
+
+  /**
+   * Open a TCP connection to 127.0.0.1:<port> inside the container, bound
+   * to `channel`. After a successful dial the byte relay reuses INPUT
+   * (host→conn) and OUTPUT (conn→host) on the same channel — so wrap the
+   * channel in `brokerPtyStream` exactly as a PTY session is wrapped.
+   */
+  async dial(channel: number, port: number): Promise<DialResponse> {
+    const payload = await this.rpc(
+      { type: FrameType.DIAL, payload: Buffer.from(JSON.stringify({ channel, port }), 'utf8') },
+      FrameType.DIALED
+    );
+    return JSON.parse(payload.toString('utf8')) as DialResponse;
+  }
+
+  /** Listening TCP ports detected inside the container (LISTEN sockets). */
+  async listPorts(): Promise<number[]> {
+    const payload = await this.rpc(
+      { type: FrameType.LISTPORTS, payload: Buffer.alloc(0) },
+      FrameType.PORTS
+    );
+    const obj = JSON.parse(payload.toString('utf8')) as { ports: { port: number }[] };
+    return obj.ports.map((p) => p.port);
   }
 
   sendInput(channel: number, data: Buffer): void {

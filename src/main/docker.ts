@@ -68,7 +68,7 @@ const BROKER_TCP_KEY = `${BROKER_TCP_PORT}/tcp`;
  * (Linux/macOS) or a loopback TCP endpoint (Windows). Both forms are
  * accepted by `new BrokerClient()`.
  */
-type BrokerEndpoint = string | { host: string; port: number };
+export type BrokerEndpoint = string | { host: string; port: number };
 
 function containerNameFor(id: string): string {
   return `cf-${id}`;
@@ -100,7 +100,7 @@ function brokerEndpointFromInfo(
  * re-inspects the container on every call, so a host-port reassignment
  * across a container restart is picked up without any persisted state.
  */
-async function brokerEndpoint(workspaceId: string): Promise<BrokerEndpoint> {
+export async function brokerEndpoint(workspaceId: string): Promise<BrokerEndpoint> {
   if (!isWindows) return workspaceBrokerSocket(workspaceId);
   const info = await docker.getContainer(containerNameFor(workspaceId)).inspect();
   return brokerEndpointFromInfo(workspaceId, info);
