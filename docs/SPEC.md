@@ -916,7 +916,7 @@ Always-on structured log of every prompt Claude makes to the user. Substrate for
 >
 > **Shipped:** the **busy/idle** chip indicator (#79, `activityDetector.ts`, PTY title glyph) **and** the **waiting indicator** (violet `--wait` dot, `?` glyph, `needs input` subline — see §5 *Top row*). The waiting indicator covers `AskUserQuestion` only.
 
-**Decisions made (original design — superseded by the BLOCKED note above):**
+**Decisions made (original design — partially superseded by the status note above):**
 - **Scope**: structured prompts only — permission requests (Bash/Edit/Write/etc. that hit `ask` rules or unlisted patterns), `AskUserQuestion` tool calls, `ExitPlanMode` approvals. Plain-text questions in assistant messages are out of scope; they don't map cleanly to settings.json entries.
 - **Storage**: SQLite table in the same DB the observability and sessions layers use.
 - **UI affordance**: passive log view only — sortable, filterable, no one-click "add to allow rules" buttons. The user reads, copies patterns, and edits `.claude/settings.json` by hand. Intentional friction so the allowlist doesn't widen faster than the user can notice.
