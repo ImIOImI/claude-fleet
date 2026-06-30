@@ -8,6 +8,7 @@ import { ensureBuiltinLoadouts } from './loadouts.js';
 import { JsonlWatcher } from './jsonlWatcher.js';
 import { listWorkspaceManifests } from './workspaces.js';
 import { installMainProcessHandlers, getLogPath, setErrorSink } from './errorLog.js';
+import { installAppMenu } from './appMenu.js';
 import { runStartupMigration } from './migration.js';
 import { hardwareAccelDisabledAtStartup } from './config.js';
 import { setWorkspaceDefault } from './mirrorPolicy.js';
@@ -93,6 +94,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   // any thrown error or rejected promise on main lands in error.log
   // before potentially propagating into a crash.
   installMainProcessHandlers();
+  installAppMenu();
   // Surface the log location so users (and Playwright tests) can find it.
   console.log(`[claude-fleet] error log: ${getLogPath()}`);
 
