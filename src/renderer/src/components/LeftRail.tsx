@@ -15,6 +15,8 @@ interface Props {
   selectedWorkspace: WorkspaceSummary | null;
   /** Claude session UUIDs whose session is actively working — pulses its row. */
   busySessionIds: Set<string>;
+  /** Claude session UUIDs blocked on AskUserQuestion — for waiting indicators (Task 7). */
+  waitingSessionIds?: Set<string>;
   onResume: (item: SessionListItem) => void;
   /** Refresh workspaces (installed-loadout state). */
   onChanged: () => void;
@@ -52,6 +54,7 @@ export function LeftRail({
   selectedWorkspaceId,
   selectedWorkspace,
   busySessionIds,
+  waitingSessionIds,
   onResume,
   onChanged,
   onLoadoutInstalled,
@@ -113,6 +116,7 @@ export function LeftRail({
             embedded
             selectedWorkspaceId={selectedWorkspaceId}
             busySessionIds={busySessionIds}
+            waitingSessionIds={waitingSessionIds}
             onResume={onResume}
           />
         )}

@@ -65,6 +65,15 @@ RUN chmod 0755 /usr/local/bin/broker
 # (the broker socket) inside it.
 RUN mkdir -p /run/broker && chmod 0777 /run/broker
 
+# claude-fleet "needs input" hook: reports AskUserQuestion pose/clear edges to
+# the host MCP server so the chip can show a waiting state. Loaded via --settings
+# on each claude launch (trusted; no /hooks approval gate).
+RUN mkdir -p /usr/local/lib/claude-fleet
+COPY docker/runner/input-wait-report.sh /usr/local/lib/claude-fleet/input-wait-report.sh
+COPY docker/runner/hooks.settings.json /usr/local/lib/claude-fleet/hooks.settings.json
+RUN chmod 0755 /usr/local/lib/claude-fleet/input-wait-report.sh \
+ && chmod 0644 /usr/local/lib/claude-fleet/hooks.settings.json
+
 USER fleet
 WORKDIR /workspace
 

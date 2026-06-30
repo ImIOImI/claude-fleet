@@ -55,6 +55,7 @@
   --warn:        oklch(78% 0.16 75);
   --danger:      oklch(66% 0.18 28);
   --info:        oklch(70% 0.14 240);
+  --wait:        oklch(68% 0.17 300);    /* violet — "needs your input" */
 
   /* per-container palette (fallback — the chip hue is computed in JS via
      colorFor(); these are the design's c-tokens for static fallbacks/tints) */
@@ -211,6 +212,9 @@ body {
 }
 .ws-chip-sub.busy { color: var(--ink-1); }
 .ws-chip .chip-paused-glyph { color: var(--warn); flex-shrink: 0; }
+/* Waiting on AskUserQuestion: same pulse as busy, violet, wins over busy. */
+.ws-chip .dot.waiting { background: var(--wait); animation: chipBusyPulse 1s ease-in-out infinite; }
+.ws-chip .chip-wait-glyph { color: var(--wait); flex-shrink: 0; font-weight: 700; }
 /* Committee role markers (#118): sit at the right edge of the chip, before the
    ⋮ trigger. Manager (hub) reads as a neutral role marker; reachable (wifi) is
    info-blue, distinct from the status dot's running/paused colour. */
@@ -574,6 +578,7 @@ body {
   background: var(--ok);
   animation: chipBusyPulse 1s ease-in-out infinite;
 }
+.session-busy-dot.waiting { background: var(--wait); }
 
 .session-row-actions {
   display: flex;
@@ -2011,6 +2016,7 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
 .session-tab .session-tab-dot.busy {
   animation: chipBusyPulse 1s ease-in-out infinite;
 }
+.session-tab .session-tab-dot.waiting { background: var(--wait); animation: chipBusyPulse 1s ease-in-out infinite; }
 .session-tab .session-tab-name { font-weight: 500; }
 .session-tab .session-tab-close {
   display: inline-flex;

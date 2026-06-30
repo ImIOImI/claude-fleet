@@ -5,6 +5,7 @@ import { colorFor, type WorkspaceState, type WorkspaceSummary } from '../App';
 import { isManager, isReachable, ManagerGlyph, WifiGlyph } from './committee';
 import { useBlinkSync } from '../blinkSync';
 import { setInternalDragActive } from '../dropIngestion';
+import { dotClass } from './chipState';
 
 /**
  * The chip's status dot. A separate component so the busy pulse can be
@@ -12,9 +13,9 @@ import { setInternalDragActive } from '../dropIngestion';
  * `.map()` over workspaces) — keeping the chip dot in lockstep with the session
  * tab + Sessions-row busy pulses.
  */
-function ChipDot({ state, busy }: { state: WorkspaceState; busy: boolean }): JSX.Element {
-  const blink = useBlinkSync(busy);
-  return <span className={`dot ${state} ${busy ? 'busy' : ''}`} style={blink} />;
+function ChipDot({ state, busy, waiting }: { state: WorkspaceState; busy: boolean; waiting: boolean }): JSX.Element {
+  const blink = useBlinkSync(busy || waiting);
+  return <span className={`${dotClass({ base: `dot ${state}`, busy, waiting })}`} style={blink} />;
 }
 
 /** Tooltip describing a reachable workspace's committee opt-in. */
@@ -60,6 +61,8 @@ interface Props {
   onRefresh: () => void;
   /** Drag-reorder: move `draggedId` to sit before `targetId` in the strip (#1). */
   onReorderWorkspace: (draggedId: string, targetId: string) => void;
+  /** Per-workspace waiting flag: true when the workspace has a session blocked on AskUserQuestion. */
+  waitingByWorkspace?: Record<string, boolean>;
 }
 
 /**
@@ -178,6 +181,7 @@ export function WorkspaceTabStrip({
   workspaces,
   summaries,
   busyByWorkspace,
+  waitingByWorkspace = {},
   selectedId,
   backendReady,
   mockMode,
@@ -254,6 +258,7 @@ export function WorkspaceTabStrip({
         // "Busy" = claude actively working in a running workspace (PTY title
         // glyph is a spinner). Drives a pulsing dot + "working…" sub-line.
         const busy = w.state === 'running' && busyByWorkspace[w.id] === true;
+        const waiting = w.state === 'running' && waitingByWorkspace[w.id] === true;
         return (
         <div
           key={w.id}
@@ -289,9 +294,9 @@ export function WorkspaceTabStrip({
           <button
             className="ws-chip"
             onClick={() => onSelect(w.id)}
-            title={busy ? 'Claude is working…' : w.status}
+            title={waiting ? 'Waiting on your input' : busy ? 'Claude is working…' : w.status}
           >
-            <ChipDot state={w.state} busy={busy} />
+            <ChipDot state={w.state} busy={busy} waiting={waiting} />
             {w.state === 'paused' && (
               <svg
                 viewBox="0 0 8 8"
@@ -305,6 +310,7 @@ export function WorkspaceTabStrip({
                 <rect x="5" y="1" width="2" height="6" rx="0.5" />
               </svg>
             )}
+            {waiting && <span className="chip-wait-glyph" title="Waiting on your input">?</span>}
             <span className="ws-chip-text">
               <span className="name">{w.name}</span>
               {/*
@@ -316,8 +322,8 @@ export function WorkspaceTabStrip({
                 space (` `) reserves the line's vertical room
                 without showing any visible character.
               */}
-              <span className={`ws-chip-sub ${busy ? 'busy' : ''}`}>
-                {busy ? 'working…' : chipActivityText(summaries[w.id]) ?? ' '}
+              <span className={`ws-chip-sub ${busy || waiting ? 'busy' : ''}`}>
+                {waiting ? 'needs input' : busy ? 'working…' : chipActivityText(summaries[w.id]) ?? ' '}
               </span>
             </span>
             {(isManager(w) || isReachable(w)) && (

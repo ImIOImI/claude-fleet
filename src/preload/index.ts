@@ -565,6 +565,22 @@ const api = {
       ): void => cb(payload.workspaceId, payload.summary);
       ipcRenderer.on(channel, handler);
       return () => ipcRenderer.removeListener(channel, handler);
+    },
+    /**
+     * Subscribe to live "needs input" pushes. Main fires one per change with the
+     * full set of claude session UUIDs in that workspace currently blocked on an
+     * AskUserQuestion prompt. Returns an unsubscribe.
+     */
+    onInputWait: (
+      cb: (workspaceId: string, waitingSessionIds: string[]) => void
+    ): (() => void) => {
+      const channel = 'inputwait:update';
+      const handler = (
+        _e: IpcRendererEvent,
+        payload: { workspaceId: string; waitingSessionIds: string[] }
+      ): void => cb(payload.workspaceId, payload.waitingSessionIds);
+      ipcRenderer.on(channel, handler);
+      return () => ipcRenderer.removeListener(channel, handler);
     }
   }
 };
