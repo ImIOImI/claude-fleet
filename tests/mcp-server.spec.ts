@@ -162,6 +162,7 @@ test('MCP server: initialize, tools, typed reads, committee control', async () =
         'get_session',
         'get_cost',
         'list_events',
+        'list_errors',
         'session_summary',
         'query',
         'committee_pause',
