@@ -7,10 +7,12 @@ set -u
 payload="$(cat)"
 sid="$(printf '%s' "$payload" | jq -r '.session_id // empty' 2>/dev/null)"
 evt="$(printf '%s' "$payload" | jq -r '.hook_event_name // empty' 2>/dev/null)"
-[ -n "$sid" ] || exit 0
+[ -n "$sid" ] || { echo "input-wait-report: no session_id in hook payload" >&2; exit 0; }
 if [ "$evt" = "PreToolUse" ]; then waiting=true; else waiting=false; fi
 
-req=$(printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"signal_input_wait","arguments":{"sessionId":"%s","waiting":%s}}}' "$sid" "$waiting")
+req=$(jq -nc --arg sid "$sid" --argjson waiting "$waiting" \
+  '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"signal_input_wait",arguments:{sessionId:$sid,waiting:$waiting}}}')
+
 
 # Test seam: capture the request instead of sending it.
 if [ -n "${CF_INPUT_WAIT_SINK:-}" ]; then

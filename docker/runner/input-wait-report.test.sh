@@ -2,6 +2,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/input-wait-report.sh"
 sink="$(mktemp)"
+trap 'rm -f "$sink"' EXIT
 
 # PreToolUse[AskUserQuestion] → waiting:true
 printf '%s' '{"session_id":"sid-1","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion"}' \
@@ -21,5 +22,11 @@ grep -q '"waiting":false' "$sink" || { echo "FAIL: post should be false"; exit 1
 printf '%s' '{"session_id":"sid-1","hook_event_name":"Stop"}' \
   | CF_INPUT_WAIT_SINK="$sink" bash "$SCRIPT"
 grep -q '"waiting":false' "$sink" || { echo "FAIL: stop should be false"; exit 1; }
+
+# UserPromptSubmit → waiting:false
+: > "$sink"
+printf '%s' '{"session_id":"sid-1","hook_event_name":"UserPromptSubmit"}' \
+  | CF_INPUT_WAIT_SINK="$sink" bash "$SCRIPT"
+grep -q '"waiting":false' "$sink" || { echo "FAIL: userpromptsubmit should be false"; exit 1; }
 
 echo "PASS"
