@@ -3,7 +3,7 @@
 // watcher to ingest, then drive the Unix socket at <userData>/mcp/mcp.sock
 // with newline-delimited JSON-RPC — exactly how the in-container reconnecting
 // socat bridge will. Verifies initialize, tools/list, the typed read tools, and
-// committee control. There is no raw `query` tool (removed for isolation, #146).
+// committee control, and the snapshot-scoped `query` tool (#174).
 
 import { _electron as electron, test, expect, type ElectronApplication } from '@playwright/test';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -152,8 +152,8 @@ test('MCP server: initialize, tools, typed reads, committee control', async () =
     const init = await client.call('initialize', { protocolVersion: '2024-11-05' });
     expect((init.result as { serverInfo?: { name?: string } }).serverInfo?.name).toBe('claude-fleet-state');
 
-    // tools/list exposes the typed tools — and crucially NO raw `query` tool
-    // (removed for workspace isolation, #146).
+    // tools/list exposes the typed tools, the session_summary aggregator, and
+    // the snapshot-scoped `query` tool (#174).
     const tools = await client.call('tools/list');
     const names = ((tools.result as { tools: Array<{ name: string }> }).tools).map((t) => t.name);
     expect(names).toEqual(
@@ -162,12 +162,13 @@ test('MCP server: initialize, tools, typed reads, committee control', async () =
         'get_session',
         'get_cost',
         'list_events',
+        'session_summary',
+        'query',
         'committee_pause',
         'committee_unpause',
         'committee_roster'
       ])
     );
-    expect(names).not.toContain('query');
 
     // The watcher ingest is async — poll the typed list_sessions until the
     // seeded session lands. (This connection's caller id is `id`, which owns the
