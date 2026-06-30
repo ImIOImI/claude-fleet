@@ -59,8 +59,12 @@ test('Committee: post + collect gated by grant (#120)', async () => {
     expect(posted).toMatchObject({ id: ids['expert-c'] });
 
     // The post broadcasts a [committee] inbound toast into the expert's tab (#123).
-    const toast = window.locator('.terminal-pane:not([aria-hidden="true"]) .committee-toast');
+    // After the toast consolidation (#167) this renders via the shared ToastView
+    // as the in-tab `.toast--tab` (eyebrow "committee"); the bespoke
+    // `.committee-toast` class is gone (see Toast.tsx / styles.css).
+    const toast = window.locator('.terminal-pane:not([aria-hidden="true"]) .toast--tab');
     await expect(toast).toBeVisible({ timeout: 5_000 });
+    await expect(toast).toContainText('committee');
     await expect(toast).toContainText('review PR #42');
 
     // Granted status resolves (paused/busy computed without the DB; #121).

@@ -4,6 +4,7 @@ import type { WorkspaceObservabilitySummary } from '../../../preload';
 import { colorFor, type WorkspaceState, type WorkspaceSummary } from '../App';
 import { isManager, isReachable, ManagerGlyph, WifiGlyph } from './committee';
 import { useBlinkSync } from '../blinkSync';
+import { setInternalDragActive } from '../dropIngestion';
 
 /**
  * The chip's status dot. A separate component so the busy pulse can be
@@ -264,6 +265,10 @@ export function WorkspaceTabStrip({
           onDragStart={(e) => {
             setDragId(w.id);
             e.dataTransfer.effectAllowed = 'move';
+            // Tell the window-level file-ingestion handlers to stay out of this
+            // internal drag — otherwise its dragover forces dropEffect='copy'
+            // over our 'move' and cancels the reorder drop (#177).
+            setInternalDragActive(true);
           }}
           onDragOver={(e) => {
             if (dragId && dragId !== w.id) e.preventDefault(); // allow drop
@@ -272,8 +277,14 @@ export function WorkspaceTabStrip({
             e.preventDefault();
             if (dragId && dragId !== w.id) onReorderWorkspace(dragId, w.id);
             setDragId(null);
+            setInternalDragActive(false);
           }}
-          onDragEnd={() => setDragId(null)}
+          onDragEnd={() => {
+            setDragId(null);
+            // dragend always fires (drop or cancel), so this is the guaranteed
+            // clear; the onDrop clear above just frees it a beat earlier.
+            setInternalDragActive(false);
+          }}
         >
           <button
             className="ws-chip"

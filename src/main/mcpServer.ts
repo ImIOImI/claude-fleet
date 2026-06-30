@@ -19,9 +19,12 @@
 // to the caller's OWN workspace plus any workspace it holds a `read` grant over
 // (#122). This is NOT optional — there is no fleet-global mode to enable, so one
 // workspace's agent can never enumerate or read another's sessions, costs, or
-// transcripts. Because arbitrary SQL can express cross-workspace joins and
-// aggregates that can't be safely row-filtered, there is deliberately NO raw
-// `query` escape hatch: the typed, scoped tools are the only read surface.
+// transcripts. The typed tools enforce this server-side by filtering all queries
+// through the caller's `allowedWorkspaces` set. The `query` tool (#174) runs
+// arbitrary READ-ONLY SQL against a per-call in-memory SNAPSHOT seeded only with
+// the caller's allowed-workspace rows (buildSnapshot); the real DB is DETACHed
+// before the caller's SQL runs, so isolation is structural — no join/UNION/
+// subquery/sqlite_master trick can reach another workspace's rows.
 //
 // Safety: a single connection opened `{ readonly: true }` is the hard guarantee
 // that nothing here can mutate the DB; the typed tools use parameterized SQL.
@@ -445,6 +448,68 @@ function clampLimit(v: unknown): number {
   return Math.max(1, Math.min(MAX_LIMIT, n));
 }
 
+/** Return a shallow copy of `row` with an ISO sibling (`<field>_iso`) for each
+ *  named epoch-ms field that holds a finite number. Null/0/missing → no sibling.
+ *  Lets clients bucket by UTC day without shelling out to `date` (#174). */
+function withIso<T extends Record<string, unknown>>(row: T, fields: string[]): T {
+  const out: Record<string, unknown> = { ...row };
+  for (const f of fields) {
+    const v = row[f];
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+      out[`${f}_iso`] = new Date(v).toISOString();
+    }
+  }
+  return out as T;
+}
+
+/** Sum a session's assistant-event token usage per (model, service_tier) and
+ *  derive USD via the pricing table. Shared by get_cost and session_summary. */
+function aggregateSessionCost(
+  db: Database.Database,
+  sessionId: string
+): {
+  usd: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+} {
+  const rows = db
+    .prepare(
+      `SELECT model, service_tier,
+              SUM(COALESCE(input_tokens,0)) AS input,
+              SUM(COALESCE(output_tokens,0)) AS output,
+              SUM(COALESCE(cache_read_input_tokens,0)) AS cacheRead,
+              SUM(COALESCE(cache_creation_input_tokens,0)) AS cacheCreate
+       FROM events WHERE session_id = ? AND type = 'assistant'
+       GROUP BY model, service_tier`
+    )
+    .all(sessionId) as Array<{
+    model: string | null;
+    service_tier: string | null;
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheCreate: number;
+  }>;
+  let usd = 0;
+  const totals = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
+  for (const r of rows) {
+    const tokens = {
+      inputTokens: r.input,
+      outputTokens: r.output,
+      cacheReadInputTokens: r.cacheRead,
+      cacheCreationInputTokens: r.cacheCreate
+    };
+    usd += costFor(r.model, r.service_tier, tokens);
+    totals.inputTokens += r.input;
+    totals.outputTokens += r.output;
+    totals.cacheReadInputTokens += r.cacheRead;
+    totals.cacheCreationInputTokens += r.cacheCreate;
+  }
+  return { usd, ...totals };
+}
+
 interface Tool {
   name: string;
   description: string;
@@ -454,16 +519,66 @@ interface Tool {
   run: (db: Database.Database, args: Record<string, unknown>, ctx: ToolCtx) => unknown;
 }
 
-// Curated event columns (omit raw_jsonl by default — it's large and the
-// extract columns cover the common needs).
+// Curated event columns (omit raw_jsonl by default — it's large/sensitive and
+// the extract columns below cover the common needs). tool_input/tool_use_id/
+// tool_result_is_error carry the parsed which-file/which-command detail (#174).
 const EVENT_COLS =
-  'id, session_id, workspace_id, ts, type, subtype, model, tool_name, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, service_tier';
+  'id, session_id, workspace_id, ts, type, subtype, model, tool_name, tool_use_id, tool_input, tool_result_is_error, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, service_tier';
+
+// Columns a caller may request via list_events `columns` projection. Excludes
+// raw_jsonl by design (#146) — use the `query` tool with include_raw for that.
+const EVENT_COL_ALLOWLIST = new Set(
+  EVENT_COLS.split(',').map((c) => c.trim()).concat(['uuid', 'parent_uuid'])
+);
 
 /** SQL `IN (?,…)` fragment + params for an allowed-workspace set (#122). */
 function inClause(col: string, allowed: Set<string>): { sql: string; params: string[] } {
   const ids = [...allowed];
   if (ids.length === 0) return { sql: '0 = 1', params: [] }; // match nothing (self is always present, so unreachable)
   return { sql: `${col} IN (${ids.map(() => '?').join(',')})`, params: ids };
+}
+
+const MAX_QUERY_BYTES = 50_000;
+
+// Columns copied into a query snapshot's events table (raw_jsonl appended only
+// when include_raw). Mirrors the real events schema minus dedup_key.
+const SNAPSHOT_EVENT_COLS =
+  'id, session_id, workspace_id, ts, type, subtype, uuid, parent_uuid, model, ' +
+  'input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, ' +
+  'service_tier, tool_name, tool_use_id, tool_input, tool_result_is_error';
+
+/** Build a throwaway in-memory DB containing ONLY the caller's allowed-workspace
+ *  rows, copied from the source DB at `srcPath` (the live state.db). The source
+ *  is DETACHed before the caller's SQL ever runs, so isolation is structural:
+ *  no subquery/UNION/sqlite_master trick can reach unfiltered rows (#146). The
+ *  caller owns the returned DB and must close it. */
+function buildSnapshot(srcPath: string, allowed: Set<string>, includeRaw: boolean): Database.Database {
+  const mem = new Database(':memory:');
+  try {
+    const alias = 'src_' + randomBytes(6).toString('hex');
+    const { sql: scope, params } = inClause('workspace_id', allowed);
+    // ATTACH the real DB. Path is escaped into the statement (ATTACH filename is
+    // not reliably bindable); paths never contain single quotes in practice, but
+    // double any just in case.
+    const attached = srcPath.replace(/'/g, "''");
+    mem.exec(`ATTACH DATABASE '${attached}' AS ${alias}`);
+    try {
+      const eventCols = includeRaw ? `${SNAPSHOT_EVENT_COLS}, raw_jsonl` : SNAPSHOT_EVENT_COLS;
+      mem.prepare(
+        `CREATE TABLE events AS SELECT ${eventCols} FROM ${alias}.events WHERE ${scope}`
+      ).run(...params);
+      mem.prepare(`CREATE TABLE sessions AS SELECT * FROM ${alias}.sessions WHERE ${scope}`).run(...params);
+      mem.prepare(
+        `CREATE TABLE broker_sessions AS SELECT * FROM ${alias}.broker_sessions WHERE ${scope}`
+      ).run(...params);
+    } finally {
+      mem.exec(`DETACH ${alias}`);
+    }
+    return mem;
+  } catch (e) {
+    mem.close();
+    throw e;
+  }
 }
 
 /** Whether a session's workspace is within the caller's allowed read set (#122). */
@@ -510,7 +625,8 @@ export const TOOLS: Tool[] = [
       where.push(scopeSql);
       p.push(...params);
       const sql = `SELECT * FROM sessions ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY last_active_at DESC LIMIT ?`;
-      return db.prepare(sql).all(...p, clampLimit(a.limit));
+      const rows = db.prepare(sql).all(...p, clampLimit(a.limit)) as Array<Record<string, unknown>>;
+      return rows.map((r) => withIso(r, ['started_at', 'last_active_at']));
     }
   },
   {
@@ -531,7 +647,7 @@ export const TOOLS: Tool[] = [
       if (!(typeof row.workspace_id === 'string' && ctx.allowedWorkspaces.has(row.workspace_id))) {
         return null;
       }
-      return row;
+      return withIso(row as Record<string, unknown>, ['started_at', 'last_active_at']);
     }
   },
   {
@@ -548,53 +664,24 @@ export const TOOLS: Tool[] = [
       if (!sessionAllowed(db, a.session_id, ctx.allowedWorkspaces)) {
         throw new Error('not authorized to read this session');
       }
-      const rows = db
-        .prepare(
-          `SELECT model, service_tier,
-                  SUM(COALESCE(input_tokens,0)) AS input,
-                  SUM(COALESCE(output_tokens,0)) AS output,
-                  SUM(COALESCE(cache_read_input_tokens,0)) AS cacheRead,
-                  SUM(COALESCE(cache_creation_input_tokens,0)) AS cacheCreate
-           FROM events WHERE session_id = ? AND type = 'assistant'
-           GROUP BY model, service_tier`
-        )
-        .all(a.session_id) as Array<{
-        model: string | null;
-        service_tier: string | null;
-        input: number;
-        output: number;
-        cacheRead: number;
-        cacheCreate: number;
-      }>;
-      let usd = 0;
-      const totals = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
-      for (const r of rows) {
-        const tokens = {
-          inputTokens: r.input,
-          outputTokens: r.output,
-          cacheReadInputTokens: r.cacheRead,
-          cacheCreationInputTokens: r.cacheCreate
-        };
-        usd += costFor(r.model, r.service_tier, tokens);
-        totals.inputTokens += r.input;
-        totals.outputTokens += r.output;
-        totals.cacheReadInputTokens += r.cacheRead;
-        totals.cacheCreationInputTokens += r.cacheCreate;
-      }
-      return { session_id: a.session_id, usd, ...totals };
+      return { session_id: a.session_id, ...aggregateSessionCost(db, a.session_id) };
     }
   },
   {
     name: 'list_events',
     description:
-      'List events for a session in id order (omits the raw JSONL body). Optional filters: type, since (epoch ms on ts), limit.',
+      'List events for a session in id order (omits the raw JSONL body). tool_input carries the ' +
+      'parsed which-file/which-command detail. Optional: type, tool_name, since (epoch ms on ts), ' +
+      'limit, and columns (array projecting a subset of the curated columns).',
     inputSchema: {
       type: 'object',
       properties: {
         session_id: { type: 'string' },
         type: { type: 'string' },
+        tool_name: { type: 'string' },
         since: { type: 'number' },
-        limit: { type: 'number', description: `default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}` }
+        limit: { type: 'number', description: `default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}` },
+        columns: { type: 'array', items: { type: 'string' }, description: 'subset of the curated columns' }
       },
       required: ['session_id']
     },
@@ -603,25 +690,128 @@ export const TOOLS: Tool[] = [
       if (!sessionAllowed(db, a.session_id, ctx.allowedWorkspaces)) {
         throw new Error('not authorized to read this session');
       }
+      let cols = EVENT_COLS;
+      if (Array.isArray(a.columns)) {
+        const names = a.columns.map((c) => String(c));
+        for (const n of names) {
+          if (!EVENT_COL_ALLOWLIST.has(n)) throw new Error(`unknown column: ${n}`);
+        }
+        if (names.length > 0) cols = names.join(', ');
+      }
       const where = ['session_id = ?'];
       const p: unknown[] = [a.session_id];
       if (typeof a.type === 'string') {
         where.push('type = ?');
         p.push(a.type);
       }
+      if (typeof a.tool_name === 'string') {
+        where.push('tool_name = ?');
+        p.push(a.tool_name);
+      }
       if (typeof a.since === 'number') {
         where.push('ts >= ?');
         p.push(a.since);
       }
-      const sql = `SELECT ${EVENT_COLS} FROM events WHERE ${where.join(' AND ')} ORDER BY id ASC LIMIT ?`;
-      return db.prepare(sql).all(...p, clampLimit(a.limit));
+      const sql = `SELECT ${cols} FROM events WHERE ${where.join(' AND ')} ORDER BY id ASC LIMIT ?`;
+      const rows = db.prepare(sql).all(...p, clampLimit(a.limit)) as Array<Record<string, unknown>>;
+      return rows.map((r) => withIso(r, ['ts']));
     }
   },
-  // NOTE: there is intentionally no raw `query` (arbitrary SQL) tool. Such a
-  // hatch can express cross-workspace joins/aggregates and expose `raw_jsonl`
-  // transcript bodies that can't be safely confined to the caller's workspace
-  // (#146). The typed, workspace-scoped tools above are the only read surface.
-  //
+  {
+    name: 'session_summary',
+    description:
+      'One-call summary of a session: distinct files edited (Write/Edit/NotebookEdit), commands run ' +
+      '(Bash), token totals + derived USD, and the UTC time span (epoch ms + ISO). Lists are capped; ' +
+      '*Count fields give the true totals. Collapses list_events + get_cost into one request (#174).',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+    run: (db, a, ctx) => {
+      if (typeof a.id !== 'string') throw new Error('id is required');
+      if (!sessionAllowed(db, a.id, ctx.allowedWorkspaces)) {
+        throw new Error('not authorized to read this session');
+      }
+      const MAX_SUMMARY_ITEMS = 100;
+      const distinctInputs = (names: string[]): { items: string[]; count: number } => {
+        const placeholders = names.map(() => '?').join(',');
+        const rows = db
+          .prepare(
+            `SELECT DISTINCT tool_input FROM events
+             WHERE session_id = ? AND tool_name IN (${placeholders}) AND tool_input IS NOT NULL
+             ORDER BY tool_input`
+          )
+          .all(a.id, ...names) as Array<{ tool_input: string }>;
+        const items = rows.map((r) => r.tool_input);
+        return { items: items.slice(0, MAX_SUMMARY_ITEMS), count: items.length };
+      };
+      const files = distinctInputs(['Write', 'Edit', 'NotebookEdit']);
+      const cmds = distinctInputs(['Bash']);
+
+      const span = db
+        .prepare(`SELECT MIN(ts) AS started_at, MAX(ts) AS last_active_at FROM events WHERE session_id = ?`)
+        .get(a.id) as { started_at: number | null; last_active_at: number | null };
+
+      return withIso(
+        {
+          session_id: a.id,
+          filesEdited: files.items,
+          filesEditedCount: files.count,
+          commands: cmds.items,
+          commandsCount: cmds.count,
+          ...aggregateSessionCost(db, a.id),
+          started_at: span.started_at,
+          last_active_at: span.last_active_at
+        },
+        ['started_at', 'last_active_at']
+      );
+    }
+  },
+  // `query` runs arbitrary READ-ONLY SQL against a per-call in-memory SNAPSHOT
+  // seeded only with the caller's allowed-workspace rows (buildSnapshot). The
+  // real DB is DETACHed before the caller's SQL runs, so isolation is structural
+  // — no join/UNION/subquery/sqlite_master trick can reach another workspace's
+  // rows (#146/§9). raw_jsonl is excluded unless include_raw, and even then only
+  // the caller's own rows are present. The reader-only guard rejects writes/DDL.
+  {
+    name: 'query',
+    description:
+      'Run a single read-only SQL statement against your workspace data. Tables: events, sessions, ' +
+      'broker_sessions — pre-filtered to the rows you may read, so SELECT freely (joins, aggregates, ' +
+      'GROUP BY, datetime(ts/1000,"unixepoch") for UTC). raw_jsonl is excluded unless include_raw=true. ' +
+      'Args: sql (required), params (array of bound ? values), include_raw (bool), max_rows (default ' +
+      `${DEFAULT_LIMIT}, max ${MAX_LIMIT}). Writes/DDL/multi-statement are rejected.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sql: { type: 'string' },
+        params: { type: 'array' },
+        include_raw: { type: 'boolean' },
+        max_rows: { type: 'number', description: `default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}` }
+      },
+      required: ['sql']
+    },
+    run: (db, a, ctx) => {
+      if (typeof a.sql !== 'string') throw new Error('sql is required');
+      const params = Array.isArray(a.params) ? a.params : [];
+      const includeRaw = a.include_raw === true;
+      const maxRows = clampLimit(a.max_rows);
+      const srcPath = db.name; // live state.db path; ':memory:' in some tests
+      const snap = buildSnapshot(srcPath, ctx.allowedWorkspaces, includeRaw);
+      try {
+        const stmt = snap.prepare(a.sql);
+        if (!stmt.reader) throw new Error('read-only SELECT statements only');
+        const rows = stmt.all(...params) as unknown[];
+        const capped = rows.slice(0, maxRows);
+        const json = JSON.stringify(capped);
+        if (json.length > MAX_QUERY_BYTES) {
+          throw new Error(
+            `result too large (${json.length} bytes > ${MAX_QUERY_BYTES}); add LIMIT or aggregate server-side`
+          );
+        }
+        return capped;
+      } finally {
+        snap.close();
+      }
+    }
+  },
   // Cross-workspace committee control (#119). These do NOT touch the read-only
   // DB connection — they proxy to the injected host handlers, which enforce
   // `assertControl(callerId, id, 'pause')` before any effect. `callerId` is the

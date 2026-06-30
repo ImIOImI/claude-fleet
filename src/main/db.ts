@@ -14,6 +14,7 @@ import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import { costFor } from './pricing.js';
 import { contextWindowFor } from './contextWindow.js';
+import { isSyntheticPromptText } from './userPromptText.js';
 
 let db: Database.Database | null = null;
 
@@ -316,9 +317,17 @@ export function ingestLine(
     s.updateSessionCwd.run(parsed.cwd, sessionId);
   } else if (type === 'ai-title' && typeof parsed.aiTitle === 'string') {
     s.updateSessionAiTitle.run(parsed.aiTitle, sessionId);
-  } else if (type === 'last-prompt' && typeof parsed.lastPrompt === 'string') {
+  } else if (
+    type === 'last-prompt' &&
+    typeof parsed.lastPrompt === 'string' &&
+    !isSyntheticPromptText(parsed.lastPrompt)
+  ) {
     s.updateSessionLastPrompt.run(parsed.lastPrompt, sessionId);
-  } else if (type === 'user' && typeof message?.content === 'string') {
+  } else if (
+    type === 'user' &&
+    typeof message?.content === 'string' &&
+    !isSyntheticPromptText(message.content)
+  ) {
     s.updateSessionLastPrompt.run(message.content, sessionId);
   }
 
