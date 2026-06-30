@@ -9,7 +9,13 @@
 # Shared install scripts the devops (and future) images COPY — they build from
 # this same repo-root context (see docker/devops/Dockerfile).
 !docker/scripts/**
+# Runner hook assets the base image COPYs in (input-wait-report.sh +
+# hooks.settings.json) — loaded via `claude --settings` for the waiting-chip.
+# Without this opt-in those COPYs fail with "not found" and the publish breaks.
+!docker/runner/**
 
 # Even within broker/, drop things the binary doesn't need:
 broker/**/*_test.go
 broker/cmd/**/testdata/**
+# …and the runner hook test harness — not COPYd into any image.
+docker/runner/*.test.sh

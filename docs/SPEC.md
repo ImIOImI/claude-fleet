@@ -713,7 +713,7 @@ claude-fleet/
 │   │   └── aws-cli.sh  azure-cli.sh   #   AWS CLI v2; Azure CLI (build-arg gated)
 │   └── devops/
 │       └── Dockerfile                 # FROM base + the platform-engineering toolset (runner-devops)
-├── .dockerignore                      # opt-in: broker/** + docker/Dockerfile + docker/scripts/**
+├── .dockerignore                      # opt-in: broker/** + docker/Dockerfile + docker/scripts/** + docker/runner/**
 ├── broker/                            # in-container session multiplexer (Go)
 │   ├── go.mod / go.sum
 │   ├── cmd/broker/main.go             # entrypoint; reads env, listens on socket
@@ -1124,6 +1124,8 @@ Right now the profile name is stamped on the container as a label and the API ke
 
 ### Runner image build
 The runner image is published by CI (`.github/workflows/publish-runner.yml`) to `ghcr.io/imioimi/claude-fleet/runner:latest` as a multi-arch (`linux/amd64` + `linux/arm64`) image on every push to `main` that touches `docker/**`. Tags emitted: `latest` (main only) and `sha-<short>`.
+
+**Build-context contract (load-bearing).** The Docker build context is the repo root with a deny-all `.dockerignore` that opts paths back in (`!broker/**`, `!docker/Dockerfile`, `!docker/scripts/**`, `!docker/runner/**`). **Anything the Dockerfile `COPY`s must be opted in here** — a `COPY` of an unlisted path fails the build with `"…": not found` and **nothing publishes**, leaving the previous (stale) `:latest` in place. This is exactly how the runner hook assets (`docker/runner/hooks.settings.json` + `input-wait-report.sh`) were once added with the `--settings` launch flag but *without* the `.dockerignore` opt-in: the app shipped a flag pointing at a file no published image contained, so every new in-container `claude` died with "Settings file not found". The publish workflow **should also smoke-test the built base image** (`test -f …/hooks.settings.json`) so a silently-absent asset can't ship green. Coupling note: the app's `claude --settings …` launch (§4 hooks) hard-depends on the image carrying that file; keep the flag and the image asset in lockstep, or make the launch degrade gracefully when the file is absent.
 
 On first container-create (or app startup), the app should `docker pull` the image if it isn't already present locally. New IPC channel `docker:ensureImage` returns a pull-progress stream; the UI surfaces this as a one-time toast or as part of the create-container flow.
 
