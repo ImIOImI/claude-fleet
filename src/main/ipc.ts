@@ -1,7 +1,6 @@
 import { ipcMain, BrowserWindow, dialog, clipboard, Menu, shell } from 'electron';
 import { randomUUID } from 'node:crypto';
-import { execFile } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { unlink, readdir } from 'node:fs/promises';
 import { workspaceTranscriptPath, workspaceHistoryFile, workspaceHistoryDir } from './paths.js';
 import {
@@ -9,7 +8,7 @@ import {
   setSessionOverride,
   learnMapping as learnMirrorMapping
 } from './mirrorPolicy.js';
-import { isWslEnvironment } from './wsl.js';
+import { openHostPath } from './openHostPath.js';
 import {
   getFleetRoot,
   setFleetRoot,
@@ -152,47 +151,6 @@ const handleWorkspaceId = new Map<string, string>();
 // the last busy↔idle flip — used to detect a stalled (busy-too-long) expert.
 const committeeBusy = new Map<string, { busy: boolean; since: number }>();
 
-// Detected once at load: are we running under WSL? (Drives `fs:openPath`.)
-const RUNNING_IN_WSL = ((): boolean => {
-  let procVersion = '';
-  try {
-    procVersion = readFileSync('/proc/version', 'utf8');
-  } catch {
-    /* not linux / no procfs */
-  }
-  return isWslEnvironment({
-    platform: process.platform,
-    wslDistroName: process.env.WSL_DISTRO_NAME,
-    procVersion
-  });
-})();
-
-/**
- * Open a host path in Windows Explorer from WSL: translate the Linux path to a
- * Windows path via `wslpath -w`, then hand it to explorer.exe. explorer.exe
- * exits 1 even on success, so its exit code is ignored — once we have a
- * translated path we resolve optimistically. Resolves '' on success or an
- * error string if the translation itself fails.
- */
-function openPathViaExplorer(path: string): Promise<string> {
-  return new Promise((resolve) => {
-    execFile('wslpath', ['-w', path], (err, stdout) => {
-      if (err) {
-        resolve(`wslpath failed: ${err.message}`);
-        return;
-      }
-      const winPath = stdout.trim();
-      if (!winPath) {
-        resolve('wslpath returned an empty path');
-        return;
-      }
-      execFile('explorer.exe', [winPath], () => {
-        /* explorer.exe exits 1 even on success — ignore */
-      });
-      resolve('');
-    });
-  });
-}
 
 interface RegisterIpcOpts {
   jsonlWatcher: JsonlWatcher | null;
@@ -923,7 +881,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // explorer.exe instead. Neither path rejects — callers get a string.
   ipcMain.handle('fs:openPath', async (_e, path: string) => {
     if (typeof path !== 'string' || path.length === 0) return 'No path provided';
-    return RUNNING_IN_WSL ? openPathViaExplorer(path) : shell.openPath(path);
+    return openHostPath(path);
   });
 
   // ── Loadout library (#16-followup) ───────────────────────────────────────
@@ -938,7 +896,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // Reveal a loadout's source folder in the OS file manager (review-modal action).
   ipcMain.handle('loadouts:openFolder', async (_e, id: string) => {
     const dir = loadoutDir(id);
-    return RUNNING_IN_WSL ? openPathViaExplorer(dir) : shell.openPath(dir);
+    return openHostPath(dir);
   });
   ipcMain.handle('loadouts:catalog', (_e, workspaceId?: string) => buildLoadoutCatalog(workspaceId));
   ipcMain.handle('loadouts:setFavorite', (_e, id: string, on: boolean) => setFavorite(id, on));
@@ -1348,7 +1306,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // route through the same explorer.exe fallback the folder-open handlers use.
   ipcMain.handle('app:openErrorLog', () => {
     const p = getLogPath();
-    return RUNNING_IN_WSL ? openPathViaExplorer(p) : shell.openPath(p);
+    return openHostPath(p);
   });
   // Current host MCP listener health — a window mounting mid-outage reads this
   // to render the sticky "MCP unreachable" toast (live changes arrive on the
