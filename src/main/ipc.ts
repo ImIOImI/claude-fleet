@@ -346,16 +346,6 @@ async function forcePauseExperts(ids: string[]): Promise<void> {
   );
 }
 
-/** Sum derived USD across a manager's controlled experts. Returns 0 when the DB
- *  isn't open (mock mode) — no real cost to cap there. */
-function spentUsdForManager(targetIds: string[]): number {
-  try {
-    return targetIds.reduce((sum, id) => sum + (costForWorkspace(id)?.usd ?? 0), 0);
-  } catch {
-    return 0;
-  }
-}
-
 async function committeePost(
   callerId: string,
   targetId: string,
@@ -373,13 +363,13 @@ async function committeePost(
     );
   }
 
-  // Host-enforced runaway budget (#121): if this post would breach the run's
-  // post cap or USD ceiling, force-pause every expert this manager controls and
-  // refuse — a looping manager can't talk past this.
-  const targets = await managerGrantedTargets(callerId);
-  const verdict = wouldExceed(callerId, spentUsdForManager(targets));
+  // Host-enforced runaway guard (#121): if this post would breach the run's
+  // post cap, force-pause every expert this manager controls and refuse — a
+  // looping manager can't talk past this. There is no dollar cost cap; committee
+  // experts run without a spend ceiling.
+  const verdict = wouldExceed(callerId);
   if (verdict.exceeded) {
-    await forcePauseExperts(targets);
+    await forcePauseExperts(await managerGrantedTargets(callerId));
     throw new Error(`committee run halted: ${verdict.reason}. All experts paused.`);
   }
   recordPost(callerId);

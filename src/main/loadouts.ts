@@ -394,8 +394,8 @@ Committee rail).
    verdicts.
 5. **Relay / argue (optional).** To have experts react to each other, \`committee_post\`
    one expert's point to another and collect the response. Keep rounds bounded —
-   the host enforces a hard per-run cap and a USD ceiling and will force-pause
-   everyone on breach.
+   the host enforces a hard per-run post cap (no dollar cost cap) and will
+   force-pause everyone on breach.
 6. **Synthesize.** Once you have each expert's verdict, write the unified
    recommendation yourself. If reviewing a PR, you may post the synthesized review
    with \`gh pr review\` from your own workspace.
