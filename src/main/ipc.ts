@@ -39,6 +39,7 @@ import {
   removeWorkspaceSocket,
   setCommitteeHandlers,
   setReadScopeResolver,
+  setInputWaitHandler,
   currentMcpStatus
 } from './mcpServer.js';
 import * as vault from './vault.js';
@@ -83,6 +84,7 @@ import {
 } from './db.js';
 import { logError, getLogPath } from './errorLog.js';
 import { broadcastObservabilitySummary } from './observabilityBroadcast.js';
+import { broadcastInputWait } from './inputWaitBroadcast.js';
 import { consumeForWorkspace, recordPendingAttach } from './pendingAttaches.js';
 import { PortForwardManager } from './portforward.js';
 import { brokerEndpoint } from './docker.js';
@@ -850,9 +852,32 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     setWorkspaceDefault(spec.id, spec.mirror?.default ?? FACTORY_MIRROR.default);
   });
 
-  ipcMain.handle('workspace:stop', async (_e, containerId: string) =>
-    (await backendFor(containerId)).stopWorkspace(containerId)
-  );
+  // Per-workspace set of claude session UUIDs currently blocked on an
+  // AskUserQuestion prompt (driven by the runner hook via the signal_input_wait
+  // MCP tool). Pushed to renderers on every change; chips render it as "needs input".
+  const inputWaitByWorkspace = new Map<string, Set<string>>();
+  function pushInputWait(workspaceId: string): void {
+    const set = inputWaitByWorkspace.get(workspaceId) ?? new Set<string>();
+    broadcastInputWait(
+      { workspaceId, waitingSessionIds: [...set] },
+      BrowserWindow.getAllWindows()
+    );
+  }
+
+  // Clear any "waiting on input" marks for the workspace backing this container
+  // and push the cleared state, so a stopped/removed workspace's chip doesn't
+  // stay violet. Best-effort: a container with no resolvable workspace is a no-op.
+  async function clearInputWaitForContainer(containerId: string): Promise<void> {
+    const all = await listAllWorkspaces().catch(() => []);
+    const ws = all.find((w) => w.containerId === containerId);
+    if (!ws) return;
+    if (inputWaitByWorkspace.delete(ws.id)) pushInputWait(ws.id);
+  }
+
+  ipcMain.handle('workspace:stop', async (_e, containerId: string) => {
+    await clearInputWaitForContainer(containerId);
+    return (await backendFor(containerId)).stopWorkspace(containerId);
+  });
   ipcMain.handle('workspace:pause', async (_e, containerId: string) =>
     (await backendFor(containerId)).pauseWorkspace(containerId)
   );
@@ -887,8 +912,17 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   });
   // Scoped reads (#122): teach the MCP read tools the caller's allowed set.
   setReadScopeResolver(allowedReadWorkspaces);
+  setInputWaitHandler((callerId, sessionId, waiting) => {
+    let set = inputWaitByWorkspace.get(callerId);
+    if (!set) { set = new Set(); inputWaitByWorkspace.set(callerId, set); }
+    if (waiting) set.add(sessionId); else set.delete(sessionId);
+    pushInputWait(callerId);
+  });
 
   ipcMain.handle('workspace:remove', async (_e, containerId: string, opts?: RemoveWorkspaceOpts) => {
+    // Clear input-wait state before removal — after removal the workspace is
+    // gone from listAllWorkspaces() and clearInputWaitForContainer can't resolve it.
+    await clearInputWaitForContainer(containerId);
     // A saved (no-live) workspace passes its ULID in opts.id; prefer it so the
     // kind resolves even when there's no live containerId.
     const result = await (await backendFor(opts?.id ?? containerId)).removeWorkspace(containerId, opts);
