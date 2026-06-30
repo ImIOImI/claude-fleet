@@ -1,7 +1,6 @@
 import { ipcMain, BrowserWindow, dialog, clipboard, Menu, shell } from 'electron';
 import { randomUUID } from 'node:crypto';
-import { execFile } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { unlink, readdir } from 'node:fs/promises';
 import { workspaceTranscriptPath, workspaceHistoryFile, workspaceHistoryDir } from './paths.js';
 import {
@@ -9,7 +8,7 @@ import {
   setSessionOverride,
   learnMapping as learnMirrorMapping
 } from './mirrorPolicy.js';
-import { isWslEnvironment } from './wsl.js';
+import { openHostPath } from './openHostPath.js';
 import {
   getFleetRoot,
   setFleetRoot,
@@ -154,47 +153,9 @@ const handleWorkspaceId = new Map<string, string>();
 // the last busy↔idle flip — used to detect a stalled (busy-too-long) expert.
 const committeeBusy = new Map<string, { busy: boolean; since: number }>();
 
-// Detected once at load: are we running under WSL? (Drives `fs:openPath`.)
-const RUNNING_IN_WSL = ((): boolean => {
-  let procVersion = '';
-  try {
-    procVersion = readFileSync('/proc/version', 'utf8');
-  } catch {
-    /* not linux / no procfs */
-  }
-  return isWslEnvironment({
-    platform: process.platform,
-    wslDistroName: process.env.WSL_DISTRO_NAME,
-    procVersion
-  });
-})();
-
-/**
- * Open a host path in Windows Explorer from WSL: translate the Linux path to a
- * Windows path via `wslpath -w`, then hand it to explorer.exe. explorer.exe
- * exits 1 even on success, so its exit code is ignored — once we have a
- * translated path we resolve optimistically. Resolves '' on success or an
- * error string if the translation itself fails.
- */
-function openPathViaExplorer(path: string): Promise<string> {
-  return new Promise((resolve) => {
-    execFile('wslpath', ['-w', path], (err, stdout) => {
-      if (err) {
-        resolve(`wslpath failed: ${err.message}`);
-        return;
-      }
-      const winPath = stdout.trim();
-      if (!winPath) {
-        resolve('wslpath returned an empty path');
-        return;
-      }
-      execFile('explorer.exe', [winPath], () => {
-        /* explorer.exe exits 1 even on success — ignore */
-      });
-      resolve('');
-    });
-  });
-}
+// Dedupe set so the per-tab summary lookup (polled on every observability push)
+// records each unresolved (workspace:tab:outcome) only once per run.
+const mappingUnresolvedSeen = new Set<string>();
 
 interface RegisterIpcOpts {
   jsonlWatcher: JsonlWatcher | null;
@@ -594,7 +555,17 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     // alone and we can disambiguate.
     jsonlWatcher.on('new-session', ({ workspaceId, sessionId: claudeSessionId }) => {
       const brokerSessionId = consumeForWorkspace(workspaceId);
-      if (!brokerSessionId) return;
+      if (!brokerSessionId) {
+        logError({
+          source: 'main',
+          type: 'new-session-dropped',
+          level: 'info',
+          message: `new-session for ${claudeSessionId} had no pending attach to pair with`,
+          workspaceId,
+          extra: { claudeSessionId }
+        });
+        return;
+      }
       learnBrokerSessionMapping(workspaceId, brokerSessionId, claudeSessionId);
       // Propagate any pending per-session mirror override onto the claude id.
       learnMirrorMapping(workspaceId, brokerSessionId, claudeSessionId);
@@ -958,7 +929,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // explorer.exe instead. Neither path rejects — callers get a string.
   ipcMain.handle('fs:openPath', async (_e, path: string) => {
     if (typeof path !== 'string' || path.length === 0) return 'No path provided';
-    return RUNNING_IN_WSL ? openPathViaExplorer(path) : shell.openPath(path);
+    return openHostPath(path);
   });
 
   // ── Loadout library (#16-followup) ───────────────────────────────────────
@@ -973,7 +944,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // Reveal a loadout's source folder in the OS file manager (review-modal action).
   ipcMain.handle('loadouts:openFolder', async (_e, id: string) => {
     const dir = loadoutDir(id);
-    return RUNNING_IN_WSL ? openPathViaExplorer(dir) : shell.openPath(dir);
+    return openHostPath(dir);
   });
   ipcMain.handle('loadouts:catalog', (_e, workspaceId?: string) => buildLoadoutCatalog(workspaceId));
   ipcMain.handle('loadouts:setFavorite', (_e, id: string, on: boolean) => setFavorite(id, on));
@@ -1348,8 +1319,28 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
    */
   ipcMain.handle(
     'observability:summaryForBrokerSession',
-    (_e, workspaceId: string, brokerSessionId: string) =>
-      summaryForBrokerSession(workspaceId, brokerSessionId)
+    (_e, workspaceId: string, brokerSessionId: string) => {
+      const summary = summaryForBrokerSession(workspaceId, brokerSessionId);
+      if (!summary) {
+        // Blank-rail root signal: no-mapping = why the per-tab summary is null;
+        // mapped-no-session = stale mapping. Deduped per (workspace:tab:outcome).
+        const claudeId = lookupBrokerSession(workspaceId, brokerSessionId);
+        const outcome = claudeId ? 'mapped-no-session' : 'no-mapping';
+        const key = `${workspaceId}:${brokerSessionId}:${outcome}`;
+        if (!mappingUnresolvedSeen.has(key)) {
+          mappingUnresolvedSeen.add(key);
+          logError({
+            source: 'main',
+            type: outcome === 'no-mapping' ? 'mapping-unresolved' : 'mapping-stale-session',
+            level: 'warn',
+            message: `per-tab summary ${outcome} for broker ${brokerSessionId}`,
+            workspaceId,
+            extra: { brokerSessionId, claudeSessionId: claudeId, outcome }
+          });
+        }
+      }
+      return summary;
+    }
   );
 
   // Cost rollups (#32). USD is derived from `events` via pricing.ts and is
@@ -1383,7 +1374,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // route through the same explorer.exe fallback the folder-open handlers use.
   ipcMain.handle('app:openErrorLog', () => {
     const p = getLogPath();
-    return RUNNING_IN_WSL ? openPathViaExplorer(p) : shell.openPath(p);
+    return openHostPath(p);
   });
   // Current host MCP listener health — a window mounting mid-outage reads this
   // to render the sticky "MCP unreachable" toast (live changes arrive on the

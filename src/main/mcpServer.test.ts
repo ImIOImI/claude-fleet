@@ -57,6 +57,19 @@ function makeDb(): Database.Database {
   ev.run('sa', WS_A, 1100, 'assistant', 'claude-x', 0, 0, 'standard', 'Bash', 'u1', 'npm test', null, '{}', 'da2');
   ev.run('sa', WS_A, 1200, 'assistant', 'claude-x', 0, 0, 'standard', 'Edit', 'u2', '/workspace/foo.ts', null, '{}', 'da3');
   ev.run('sb', WS_B, 2000, 'assistant', 'claude-x', 99, 99, 'standard', null, null, null, null, '{"secret":true}', 'db');
+  db.exec(`
+    CREATE TABLE errors (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, workspace_id TEXT,
+      session_id TEXT, source TEXT NOT NULL, level TEXT NOT NULL, type TEXT NOT NULL,
+      message TEXT NOT NULL, stack TEXT, extra TEXT
+    );
+  `);
+  const err = db.prepare(
+    'INSERT INTO errors (ts, workspace_id, session_id, source, level, type, message) VALUES (?,?,?,?,?,?,?)'
+  );
+  err.run(1000, WS_A, 'sa', 'main', 'warn', 'mapping-unresolved', 'A degraded');
+  err.run(2000, WS_B, 'sb', 'main', 'error', 'pty-attach-failed', 'B secret error');
+  err.run(3000, null, null, 'main', 'error', 'uncaughtException', 'global crash');
   return db;
 }
 
@@ -261,6 +274,41 @@ describe('session_summary (#174)', () => {
 
   it('refuses a session outside the allowed set', () => {
     expect(() => tool('session_summary').run(db, { id: 'sb' }, ctxA)).toThrow(/not authorized/i);
+  });
+});
+
+describe('list_errors', () => {
+  const t = TOOLS.find((t) => t.name === 'list_errors')!;
+  const ctx = (allowed: string[]): ToolCtx => ({
+    callerId: allowed[0], allowedWorkspaces: new Set(allowed)
+  });
+
+  it('returns own-workspace errors + global (NULL) rows, never another workspace', () => {
+    const rows = t.run(db, {}, ctx([WS_A])) as Array<Record<string, unknown>>;
+    const types = rows.map((r) => r.type);
+    expect(types).toContain('mapping-unresolved'); // WS_A
+    expect(types).toContain('uncaughtException');  // global
+    expect(types).not.toContain('pty-attach-failed'); // WS_B — must be hidden
+  });
+
+  it('includes a ts_iso sibling and orders newest-first', () => {
+    const rows = t.run(db, {}, ctx([WS_A])) as Array<Record<string, unknown>>;
+    expect(typeof rows[0].ts_iso).toBe('string');
+    expect(rows[0].ts as number).toBeGreaterThanOrEqual(rows[rows.length - 1].ts as number);
+  });
+
+  it('filters by level', () => {
+    const rows = t.run(db, { level: 'warn' }, ctx([WS_A])) as Array<Record<string, unknown>>;
+    expect(rows.every((r) => r.level === 'warn')).toBe(true);
+  });
+
+  it('workspace_id filter preserves global (NULL) crash rows', () => {
+    // An agent narrowing to its own workspace must still see global app crashes.
+    const rows = t.run(db, { workspace_id: WS_A }, ctx([WS_A])) as Array<Record<string, unknown>>;
+    const types = rows.map((r) => r.type);
+    expect(types).toContain('mapping-unresolved'); // WS_A own row
+    expect(types).toContain('uncaughtException');  // global NULL row
+    expect(types).not.toContain('pty-attach-failed'); // WS_B — must stay hidden
   });
 });
 

@@ -175,6 +175,25 @@ function migrate(d: Database.Database): void {
     `);
     d.pragma('user_version = 4');
   }
+  if ((d.pragma('user_version', { simple: true }) as number) < 5) {
+    d.exec(`
+      CREATE TABLE errors (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts           INTEGER NOT NULL,
+        workspace_id TEXT,
+        session_id   TEXT,
+        source       TEXT NOT NULL,
+        level        TEXT NOT NULL,
+        type         TEXT NOT NULL,
+        message      TEXT NOT NULL,
+        stack        TEXT,
+        extra        TEXT
+      );
+      CREATE INDEX idx_errors_workspace_ts ON errors(workspace_id, ts);
+      CREATE INDEX idx_errors_session ON errors(session_id);
+    `);
+    d.pragma('user_version = 5');
+  }
 }
 
 // ── Ingest ────────────────────────────────────────────────────────────────
@@ -1055,6 +1074,52 @@ export function deleteSession(id: string): void {
     d.prepare(`DELETE FROM sessions WHERE id = ?`).run(sid);
   });
   tx(id);
+}
+
+// ── Error recording ───────────────────────────────────────────────────────
+
+export const ERRORS_RETENTION = 2000;
+
+export interface ErrorRow {
+  ts: number;
+  source: string;
+  type: string;
+  message: string;
+  stack?: string;
+  extra?: Record<string, unknown>;
+  workspaceId?: string;
+  sessionId?: string;
+  level?: string;
+}
+
+export function recordError(row: ErrorRow): void {
+  const d = openDbOrThrow();
+  // Resolve the claude session UUID: prefer an explicit sessionId; else, if the
+  // caller only knew the broker id, best-effort resolve it via the mapping
+  // (NULL when unmapped — itself an honest signal).
+  let sessionId = row.sessionId ?? null;
+  if (!sessionId && row.workspaceId && typeof row.extra?.brokerSessionId === 'string') {
+    sessionId = lookupBrokerSession(row.workspaceId, row.extra.brokerSessionId as string);
+  }
+  d.prepare(`
+    INSERT INTO errors (ts, workspace_id, session_id, source, level, type, message, stack, extra)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    row.ts,
+    row.workspaceId ?? null,
+    sessionId,
+    row.source,
+    row.level ?? 'error',
+    row.type,
+    row.message,
+    row.stack ?? null,
+    row.extra ? JSON.stringify(row.extra) : null
+  );
+  d.prepare(`
+    DELETE FROM errors WHERE id NOT IN (
+      SELECT id FROM errors ORDER BY id DESC LIMIT ?
+    )
+  `).run(ERRORS_RETENTION);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
