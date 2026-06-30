@@ -41,6 +41,7 @@ import { recordPendingAttach } from './pendingAttaches.js';
 import { learnBrokerSessionMapping } from './db.js';
 import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
 import { resolveEnv } from './vault.js';
+import { claudeCreateArgs } from './claudeArgs.js';
 
 export const FLEET_LABEL = 'com.claude-fleet.managed';
 export const ID_LABEL = 'com.claude-fleet.id';
@@ -882,7 +883,7 @@ export async function attachPty(
       sessionId,
       cols,
       rows,
-      resumeOf ? ['--resume', resumeOf] : undefined
+      claudeCreateArgs(resumeOf)
     );
     if (!createResp.ok) {
       stream.destroy();
