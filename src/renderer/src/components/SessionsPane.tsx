@@ -26,16 +26,9 @@ type Scope = 'workspace' | 'all';
  * with the workspace chip + session-tab indicators. A component (not an inline
  * span) so the hook runs unconditionally — the dot is only mounted when busy.
  */
-function SessionBusyDot(): JSX.Element {
+function SessionBusyDot({ waiting }: { waiting: boolean }): JSX.Element {
   const blink = useBlinkSync(true);
-  return (
-    <span
-      className="session-busy-dot"
-      style={blink}
-      aria-label="Claude is working"
-      title="Claude is working…"
-    />
-  );
+  return <span className={`session-busy-dot ${waiting ? 'waiting' : ''}`} style={blink} />;
 }
 
 interface Props {
@@ -75,6 +68,7 @@ function formatUsd(usd: number): string {
 export function SessionsPane({
   selectedWorkspaceId,
   busySessionIds,
+  waitingSessionIds,
   onResume,
   embedded = false
 }: Props) {
@@ -206,9 +200,10 @@ export function SessionsPane({
                 color: s.workspaceColorHue != null ? { hue: s.workspaceColorHue } : undefined
               });
               const busy = busySessionIds?.has(s.id) ?? false;
+              const waiting = waitingSessionIds?.has(s.id) ?? false;
               return (
-                <li key={s.id} className={`session-row${busy ? ' busy' : ''}`}>
-                  {busy && <SessionBusyDot />}
+                <li key={s.id} className={`session-row${waiting ? ' waiting' : busy ? ' busy' : ''}`}>
+                  {(busy || waiting) && <SessionBusyDot waiting={waiting} />}
                   <div className="session-row-main">
                     {editing ? (
                       <input

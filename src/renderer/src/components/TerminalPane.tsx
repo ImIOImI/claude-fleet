@@ -29,15 +29,17 @@ import { useBlinkSync } from '../blinkSync';
  * so it blinks in lockstep with the workspace chip + Sessions-row indicators.
  * A separate component because the hook can't run inside the `.map()` over tabs.
  */
-function SessionTabDot({ ended, busy }: { ended: boolean; busy: boolean }): JSX.Element {
-  const pulsing = busy && !ended;
-  const blink = useBlinkSync(pulsing);
+function SessionTabDot({ ended, busy, waiting }: { ended: boolean; busy: boolean; waiting: boolean }): JSX.Element {
+  const active = !ended && (busy || waiting);
+  const cls = waiting && !ended ? 'waiting' : busy && !ended ? 'busy' : '';
+  const label = ended ? 'session ended' : waiting ? 'waiting on your input' : busy ? 'Claude is working' : 'session live';
+  const blink = useBlinkSync(active);
   return (
     <span
-      className={`session-tab-dot ${ended ? 'ended' : 'live'} ${pulsing ? 'busy' : ''}`}
+      className={`session-tab-dot ${ended ? 'ended' : 'live'} ${cls}`}
       style={blink}
-      aria-label={ended ? 'session ended' : pulsing ? 'Claude is working' : 'session live'}
-      title={ended ? 'session ended' : pulsing ? 'Claude is working…' : 'session live'}
+      aria-label={label}
+      title={label === 'Claude is working' ? 'Claude is working…' : label}
     />
   );
 }
@@ -235,7 +237,8 @@ export function TerminalPane({
   reloadRequest,
   onReloadConsumed,
   onReloadStarted,
-  onRefreshRequested
+  onRefreshRequested,
+  waitingSessionIds
 }: Props) {
   // Transient `[committee]` toast (#123): show the injected message briefly so a
   // human watching this expert knows why text just appeared, then auto-dismiss.
@@ -464,6 +467,34 @@ export function TerminalPane({
     };
   }, [loaded, workspaceId, autoKey]);
 
+  // Resolve each tab's claude session UUID so the tab dot can reflect the
+  // per-claude "needs input" set (keyed by claude UUID). Refreshes on
+  // observability pushes (the broker→claude mapping is learned as transcripts
+  // ingest) and when the tab set changes.
+  const [claudeIdByBroker, setClaudeIdByBroker] = useState<Map<string, string>>(new Map());
+  const tabIdsKey = sessions.map((s) => s.id).sort().join(',');
+  useEffect(() => {
+    if (!loaded || sessions.length === 0) return;
+    let cancelled = false;
+    const resolve = async (): Promise<void> => {
+      const next = new Map<string, string>();
+      for (const s of sessionsRef.current) {
+        try {
+          const sum = await window.api.observability.summaryForBrokerSession(workspaceId, s.id);
+          if (sum?.sessionId) next.set(s.id, sum.sessionId);
+        } catch { /* mapping not learned yet */ }
+      }
+      if (cancelled) return;
+      setClaudeIdByBroker((prev) => {
+        if (prev.size === next.size && [...next].every(([k, v]) => prev.get(k) === v)) return prev;
+        return next;
+      });
+    };
+    void resolve();
+    const unsub = window.api.observability.onSummary((wid) => { if (wid === workspaceId) void resolve(); });
+    return () => { cancelled = true; unsub(); };
+  }, [loaded, workspaceId, tabIdsKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Drag-reorder of session tabs (#1). Move the dragged tab before the drop
   // target; the existing sessions.json persist effect saves the new order.
   const [dragSessionId, setDragSessionId] = useState<string | null>(null);
@@ -686,6 +717,8 @@ export function TerminalPane({
       <div className="session-tab-strip" role="tablist" aria-label="Terminal sessions">
         {sessions.map((s) => {
           const ended = endedIds.has(s.id);
+          const claudeId = claudeIdByBroker.get(s.id);
+          const tabWaiting = !!claudeId && (waitingSessionIds?.has(claudeId) ?? false);
           return (
             <div
               key={s.id}
@@ -711,7 +744,7 @@ export function TerminalPane({
               }}
               onDragEnd={() => setDragSessionId(null)}
             >
-              <SessionTabDot ended={ended} busy={busyIds.has(s.id)} />
+              <SessionTabDot ended={ended} busy={busyIds.has(s.id)} waiting={tabWaiting} />
               {renamingId === s.id ? (
                 <input
                   className="session-tab-rename"
