@@ -6,6 +6,9 @@ directories:
 files:
   - out/**/*
   - package.json
+  # sharp is an image-only transitive dep of @huggingface/transformers, unused by
+  # text feature-extraction — keep its native binaries out of the package.
+  - "!**/node_modules/sharp/**"
 # Native modules must live on the real filesystem — they cannot be dlopen'd
 # from inside app.asar. Force them (and any *.node binaries) to be unpacked.
 asarUnpack:
@@ -14,7 +17,7 @@ asarUnpack:
   - "**/node_modules/better-sqlite3/**"
   - "**/node_modules/keytar/**"
   - "**/node_modules/node-pty/**"
-  - "**/node_modules/onnxruntime-web/**"
+  - "**/node_modules/onnxruntime-node/**"
 linux:
   target: AppImage
   category: Development

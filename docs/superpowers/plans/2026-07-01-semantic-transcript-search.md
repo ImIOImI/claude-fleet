@@ -6,11 +6,11 @@
 
 **Architecture:** The `JsonlWatcher` already ingests every JSONL line into SQLite (`events`). We hang an async embedding pipeline off its `'ingest'` event: turn text is embedded by a local WASM model and stored as Float32 BLOBs in a new `embeddings` table in `state.db`. A new scoped MCP tool embeds the query and brute-force cosine-ranks candidate rows filtered by `allowedWorkspaces`.
 
-**Tech Stack:** Electron main (Node), `better-sqlite3`, `@huggingface/transformers` (WASM backend, no native module), `bge-small-en-v1.5` (384-dim), vitest.
+**Tech Stack:** Electron main (Node), `better-sqlite3`, `@huggingface/transformers` (native `onnxruntime-node` backend), `bge-small-en-v1.5` (384-dim), vitest.
 
 ## Global Constraints
 
-- **No new native module.** Embeddings use `@huggingface/transformers` on its WASM/ONNX backend. Do NOT install `onnxruntime-node`.
+- **Native embedding backend (revised decision).** `@huggingface/transformers` in Node hard-requires the native `onnxruntime-node` — there is no WASM-only path in the main process. This is accepted: `onnxruntime-node` (prebuilt per platform) joins the cross-build native modules (better-sqlite3, keytar, node-pty). Its `.node` binaries must be `asarUnpack`ed. The transitive `sharp` dep is image-only and unused → **exclude it from packaging** (electron-builder `files: "!**/node_modules/sharp/**"`).
 - **Embedding model id:** `Xenova/bge-small-en-v1.5`. **Dim:** `384`. Vectors are **L2-normalized at embed time**, so cosine similarity = dot product.
 - **Vector storage:** Float32 little-endian BLOB in SQLite; brute-force cosine in JS. No `sqlite-vec`.
 - **Schema migration is `user_version = 6`** (v5 = `errors` table already exists). Additive only — do NOT drop `events`/`sessions`.
@@ -63,15 +63,20 @@ Run: `node scratch-embed-check.mjs`
 Expected (first run downloads the model, then): `dim= 384 rows= 2 norm≈ 1.0000`
 If it errors trying to load `onnxruntime-node`, the WASM fallback isn't engaging — ensure `onnxruntime-node` is not installed; transformers.js uses `onnxruntime-web` (WASM) when the node binding is absent.
 
-- [ ] **Step 4: Add asarUnpack so packaged builds can read the wasm/model files**
+- [ ] **Step 4: Add asarUnpack (native onnx binaries) + exclude sharp**
 
-In `electron-builder.yml`, under the existing config, add (merge into any existing `asarUnpack:` list):
+In `electron-builder.yml`, merge into any existing `asarUnpack:` list:
 ```yaml
 asarUnpack:
   - "**/node_modules/@huggingface/transformers/**"
-  - "**/node_modules/onnxruntime-web/**"
+  - "**/node_modules/onnxruntime-node/**"
 ```
-Rationale: ONNX wasm binaries and cached model files can't be memory-mapped from inside the asar archive.
+And exclude the unused image lib from the package (add to / create the `files:` list):
+```yaml
+files:
+  - "!**/node_modules/sharp/**"
+```
+Rationale: `onnxruntime-node`'s `.node` binaries can't be loaded from inside the asar archive; `sharp` is image-only and unused by text feature-extraction.
 
 - [ ] **Step 5: Remove the scratch file and commit**
 
@@ -447,7 +452,7 @@ Expected: FAIL — `Cannot find module './embeddings.js'`.
 - [ ] **Step 3: Implement `embeddings.ts`**
 
 ```ts
-// Local, on-host embedding model (WASM backend — no native module). Transcript
+// Local, on-host embedding model (native onnxruntime-node backend). Transcript
 // text never leaves the machine. Lazy-loads the model once per process.
 import { EMBED_MODEL_ID, EMBED_DIM } from './vectors.js';
 
@@ -1082,7 +1087,7 @@ import { join } from 'node:path'; // if not already imported
 - [ ] **Step 2: Initialize the embedder and wire the indexer (inside the `if (jsonlWatcher)` block, after `startMcpServer(...)`)**
 
 ```ts
-    // Local embedder for semantic transcript search (WASM, on-host).
+    // Local embedder for semantic transcript search (native onnxruntime-node, on-host).
     const embed = makeEmbedder(join(app.getPath('userData'), 'models'));
     setQueryEmbedder(embed);
 
@@ -1194,7 +1199,7 @@ git commit -m "feat(search): runner Stop hook emits session-summary events (Phas
 
 - [ ] **Step 1: Update `docs/SPEC.md`**
 
-- Observability/data-model section: add the `embeddings` and `session_summaries` tables and the `session-summary` JSONL event type + note vectors are local (WASM `bge-small-en-v1.5`, 384-d, normalized) and rebuildable.
+- Observability/data-model section: add the `embeddings` and `session_summaries` tables and the `session-summary` JSONL event type + note vectors are local (native `onnxruntime-node`, `bge-small-en-v1.5`, 384-d, normalized) and rebuildable; record that `onnxruntime-node` is a cross-build native module and `sharp` is excluded from packaging.
 - §11 Fleet-state MCP: add `search_transcripts` to the tool list with its args + the scoping guarantee (results confined to `allowedWorkspaces`).
 - Runner contract: document the `session-summary` event (Phase 2) written by the runner Stop hook.
 
@@ -1221,7 +1226,7 @@ git commit -m "docs: SPEC + design status for semantic transcript search"
 ## Self-Review
 
 **Spec coverage:**
-- Local WASM embeddings, no native module → Tasks 1, 4 + Global Constraints. ✅
+- Local embeddings (native onnxruntime-node backend; sharp excluded) → Tasks 1, 4 + Global Constraints. ✅
 - `bge-small-en-v1.5`, 384-d, normalized → Task 2 constants, Task 4. ✅
 - BLOB vectors + brute-force cosine, no sqlite-vec → Tasks 2, 7. ✅
 - Migration additive, v6 → Task 3. ✅

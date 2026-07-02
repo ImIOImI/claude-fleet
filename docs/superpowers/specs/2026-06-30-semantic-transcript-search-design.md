@@ -32,8 +32,14 @@ weakening the cross-workspace confinement model.
   grant-scoped cross-workspace search (the committee manager over experts it
   holds a `read` grant on). One shared index, one tool, filtered by
   `allowedWorkspaces`.
-- **Embeddings:** local, on-host, **WASM backend** (no new native module). No
-  transcript text leaves the host. No new vault secret.
+- **Embeddings:** local, on-host via `@huggingface/transformers`. No transcript
+  text leaves the host; no new vault secret. **Revised during implementation:**
+  the WASM-only goal is not achievable — transformers.js in Node hard-requires
+  the native `onnxruntime-node` (no WASM path via the package `exports` map). So
+  `onnxruntime-node` is accepted as a cross-build native module (prebuilt per
+  platform, `asarUnpack`ed), and the transitive image-only `sharp` dep is
+  excluded from packaging. The "local, on-host, no data leaves the machine"
+  property — the actual point — is preserved.
 - **What to index:** conversation text (user prompts + assistant text replies),
   **plus** a per-session summary. Tool inputs/results are *not* embedded.
 - **Approach:** incremental index on ingest + brute-force cosine search (vs lazy
@@ -51,7 +57,7 @@ weakening the cross-workspace confinement model.
 All main-process, slotting into the existing **watcher → SQLite → scoped-MCP-tool**
 spine.
 
-- **`src/main/embeddings.ts`** *(new)* — wraps a local WASM embedding model
+- **`src/main/embeddings.ts`** *(new)* — wraps a local embedding model (native `onnxruntime-node`)
   (`transformers.js`, `bge-small-en-v1.5`, 384-dim, L2-normalized so cosine =
   dot product). Lazy-loads the model on first use; model files cached under
   `<userData>`. Exposes `embed(texts: string[]): Promise<Float32Array[]>` and a
