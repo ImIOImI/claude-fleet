@@ -1,17 +1,19 @@
 import { app, BrowserWindow, shell } from 'electron';
 import { join } from 'node:path';
 import { registerIpc } from './ipc.js';
-import { openDb, closeDb, recordError } from './db.js';
-import { startMcpServer, stopMcpServer, ensureWorkspaceSocket, setMcpStatusListener } from './mcpServer.js';
+import { openDb, closeDb, recordError, listSessions } from './db.js';
+import { startMcpServer, stopMcpServer, ensureWorkspaceSocket, setMcpStatusListener, setQueryEmbedder } from './mcpServer.js';
 import { broadcastMcpStatus } from './mcpStatusBroadcast.js';
 import { ensureBuiltinLoadouts } from './loadouts.js';
 import { JsonlWatcher } from './jsonlWatcher.js';
 import { listWorkspaceManifests } from './workspaces.js';
-import { installMainProcessHandlers, getLogPath, setErrorSink } from './errorLog.js';
+import { installMainProcessHandlers, getLogPath, setErrorSink, logError } from './errorLog.js';
 import { installAppMenu } from './appMenu.js';
 import { runStartupMigration } from './migration.js';
 import { hardwareAccelDisabledAtStartup } from './config.js';
 import { setWorkspaceDefault } from './mirrorPolicy.js';
+import { makeEmbedder } from './embeddings.js';
+import { indexSessionTurns, indexSessionSummaries } from './transcriptIndex.js';
 
 // Mock mode is for UI iteration without Docker; no real JSONLs exist, so the
 // watcher and DB stay dormant.
@@ -114,6 +116,20 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     // Read-only MCP server over <userData>/mcp.sock so in-container claude can
     // query the state DB (sessions/events/cost). Opens its own readonly conn.
     startMcpServer(app.getPath('userData'));
+    // Local embedder for semantic transcript search (native onnxruntime-node, on-host).
+    const embed = makeEmbedder(join(app.getPath('userData'), 'models'));
+    setQueryEmbedder(embed);
+
+    // Index new turns/summaries as they land. Fire-and-forget: indexing must
+    // never block ingest, and a failure degrades search silently (logged).
+    jsonlWatcher.on('ingest', ({ sessionId }) => {
+      indexSessionTurns(sessionId, embed).catch((e) =>
+        logError({ source: 'main', level: 'warn', type: 'transcript-index', message: String(e) }));
+    });
+    jsonlWatcher.on('ingest', () => {
+      indexSessionSummaries(embed).catch((e) =>
+        logError({ source: 'main', level: 'warn', type: 'summary-index', message: String(e) }));
+    });
     // Surface host MCP listener health to renderers as the "MCP unreachable"
     // sticky toast (#159 follow-up): fan the change-only status out to every
     // window. Wired before the listener can fail so the first event is caught.
@@ -128,6 +144,16 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     // saved setting — not dependent on the renderer's later workspace:list poll.
     for (const m of manifests) setWorkspaceDefault(m.id, m.mirror.default);
     await jsonlWatcher.start(manifests.map((m) => m.id));
+    // Backfill embeddings for sessions ingested before this feature / after a
+    // model change. Non-blocking; walks every known session once.
+    void (async () => {
+      try {
+        for (const s of listSessions()) await indexSessionTurns(s.id, embed);
+        await indexSessionSummaries(embed);
+      } catch (e) {
+        logError({ source: 'main', level: 'warn', type: 'index-backfill', message: String(e) });
+      }
+    })();
   }
   registerIpc({ jsonlWatcher });
   mainWindow = createWindow();

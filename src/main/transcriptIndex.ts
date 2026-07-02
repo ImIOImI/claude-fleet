@@ -45,7 +45,7 @@ export async function indexSessionTurns(sessionId: string, embed: EmbedFn, batch
       // Nothing embeddable in this batch (all tool-only/empty). Insert a
       // zero-vector placeholder so these rows leave the pending set and the
       // loop terminates. They score ~0 and never surface in search.
-      for (const { ev } of pending) {
+      for (const ev of pending) {
         insertEmbedding({
           workspaceId: ev.workspaceId, sessionId, kind: 'turn', refEventId: ev.id, ts: ev.ts,
           text: '', modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
