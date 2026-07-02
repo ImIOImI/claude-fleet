@@ -269,12 +269,24 @@ const updateSessionAiTitle = (d: Database.Database) =>
 const updateSessionLastPrompt = (d: Database.Database) =>
   d.prepare(`UPDATE sessions SET first_user_message = COALESCE(first_user_message, ?) WHERE id = ?`);
 
+const upsertSessionSummary = (d: Database.Database) =>
+  d.prepare(`
+    INSERT INTO session_summaries (session_id, workspace_id, summary, source_max_event_id, model, generated_at)
+    VALUES (@session_id, @workspace_id, @summary, @source_max_event_id, @model, @generated_at)
+    ON CONFLICT(session_id) DO UPDATE SET
+      summary = excluded.summary,
+      source_max_event_id = excluded.source_max_event_id,
+      model = excluded.model,
+      generated_at = excluded.generated_at
+  `);
+
 interface Cache {
   insertEvent: ReturnType<typeof insertEvent>;
   upsertSession: ReturnType<typeof upsertSession>;
   updateSessionCwd: ReturnType<typeof updateSessionCwd>;
   updateSessionAiTitle: ReturnType<typeof updateSessionAiTitle>;
   updateSessionLastPrompt: ReturnType<typeof updateSessionLastPrompt>;
+  upsertSessionSummary: ReturnType<typeof upsertSessionSummary>;
 }
 let stmts: Cache | null = null;
 function getStmts(d: Database.Database): Cache {
@@ -285,6 +297,7 @@ function getStmts(d: Database.Database): Cache {
       updateSessionCwd: updateSessionCwd(d),
       updateSessionAiTitle: updateSessionAiTitle(d),
       updateSessionLastPrompt: updateSessionLastPrompt(d),
+      upsertSessionSummary: upsertSessionSummary(d),
     };
   }
   return stmts;
@@ -380,6 +393,15 @@ export function ingestLine(
     !isSyntheticPromptText(message.content)
   ) {
     s.updateSessionLastPrompt.run(message.content, sessionId);
+  } else if (type === 'session-summary' && typeof parsed.summary === 'string') {
+    s.upsertSessionSummary.run({
+      session_id: sessionId,
+      workspace_id: workspaceId,
+      summary: parsed.summary,
+      source_max_event_id: maxEventId(sessionId),
+      model: typeof parsed.model === 'string' ? parsed.model : null,
+      generated_at: ts ?? Date.now(),
+    });
   }
 
   return { inserted: info.changes > 0, sessionId, type };
@@ -1163,6 +1185,32 @@ export function maxEventId(sessionId: string): number {
   const d = openDbOrThrow();
   const row = d.prepare(`SELECT COALESCE(MAX(id), 0) AS m FROM events WHERE session_id = ?`).get(sessionId) as { m: number };
   return row.m;
+}
+
+export interface PendingSummary {
+  sessionId: string;
+  workspaceId: string;
+  summary: string;
+  sourceMaxEventId: number;
+  ts: number | null;
+}
+
+/** Summaries whose current (session, source_max_event_id) has no embedding. */
+export function unembeddedSummaries(modelId: string, limit = 100): PendingSummary[] {
+  const d = openDbOrThrow();
+  return d
+    .prepare(`
+      SELECT s.session_id AS sessionId, s.workspace_id AS workspaceId, s.summary AS summary,
+             s.source_max_event_id AS sourceMaxEventId, s.generated_at AS ts
+      FROM session_summaries s
+      LEFT JOIN embeddings em
+        ON em.session_id = s.session_id AND em.kind = 'summary'
+       AND em.model_id = ? AND em.dedup_key = CAST(s.source_max_event_id AS TEXT)
+      WHERE em.id IS NULL
+      ORDER BY s.generated_at DESC
+      LIMIT ?
+    `)
+    .all(modelId, limit) as PendingSummary[];
 }
 
 // ── Error recording ───────────────────────────────────────────────────────

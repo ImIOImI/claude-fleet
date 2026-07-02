@@ -2,7 +2,7 @@
 // Pure text extraction + a write path that embeds pending turns. The embed
 // function is injected so this module has no dependency on the model runtime
 // (and tests can stub it).
-import { insertEmbedding, unembeddedTurnEvents } from './db.js';
+import { insertEmbedding, unembeddedTurnEvents, unembeddedSummaries } from './db.js';
 import { encodeVector, EMBED_MODEL_ID, EMBED_DIM } from './vectors.js';
 
 export type EmbedFn = (texts: string[]) => Promise<Float32Array[]>;
@@ -74,6 +74,25 @@ export async function indexSessionTurns(sessionId: string, embed: EmbedFn, batch
         });
       }
     }
+  }
+  return total;
+}
+
+export async function indexSessionSummaries(embed: EmbedFn, batch = 64): Promise<number> {
+  let total = 0;
+  for (;;) {
+    const pending = unembeddedSummaries(EMBED_MODEL_ID, batch);
+    if (pending.length === 0) break;
+    const vecs = await embed(pending.map((p) => p.summary.slice(0, MAX_CHARS)));
+    pending.forEach((p, i) => {
+      const ok = insertEmbedding({
+        workspaceId: p.workspaceId, sessionId: p.sessionId, kind: 'summary', refEventId: null, ts: p.ts,
+        text: p.summary.slice(0, MAX_CHARS), modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
+        vec: encodeVector(vecs[i]), dedupKey: String(p.sourceMaxEventId),
+      });
+      if (ok) total++;
+    });
+    if (pending.length < batch) break;
   }
   return total;
 }

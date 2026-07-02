@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb, closeDb, ingestLine, unembeddedTurnEvents } from './db.js';
-import { extractText, indexSessionTurns } from './transcriptIndex.js';
+import { extractText, indexSessionTurns, indexSessionSummaries } from './transcriptIndex.js';
 import { EMBED_MODEL_ID, EMBED_DIM } from './vectors.js';
 
 // Deterministic stub embedder: unit vector whose first slot is text length mod 1.
@@ -45,5 +45,14 @@ describe('indexSessionTurns', () => {
     ingestLine(WS, SES, line({ type: 'user', uuid: 'u1', timestamp: '2026-07-01T00:00:00Z', message: { content: 'hi' } }));
     await indexSessionTurns(SES, stubEmbed);
     expect(await indexSessionTurns(SES, stubEmbed)).toBe(0);
+  });
+});
+
+describe('indexSessionSummaries', () => {
+  it('embeds a pending session summary once', async () => {
+    ingestLine(WS, SES, line({ type: 'user', uuid: 'u1', timestamp: '2026-07-01T00:00:00Z', message: { content: 'hi' } }));
+    ingestLine(WS, SES, line({ type: 'session-summary', summary: 'Fixed the reconnect bug.', timestamp: '2026-07-01T00:01:00Z' }));
+    expect(await indexSessionSummaries(stubEmbed)).toBe(1);
+    expect(await indexSessionSummaries(stubEmbed)).toBe(0);
   });
 });
