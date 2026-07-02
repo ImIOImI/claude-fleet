@@ -15,7 +15,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, type ToolCtx } from './mcpServer.js';
+import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setQueryEmbedder, type ToolCtx } from './mcpServer.js';
+import { EMBED_DIM } from './vectors.js';
 
 const WS_A = '01WORKSPACEAAAAAAAAAAAAAAA';
 const WS_B = '01WORKSPACEBBBBBBBBBBBBBBB';
@@ -328,5 +329,22 @@ describe('signal_input_wait', () => {
   it('rejects bad args', () => {
     setInputWaitHandler(() => {});
     expect(() => tool().run({} as never, { sessionId: 'x' }, ctx)).toThrow(/required/);
+  });
+});
+
+describe('search_transcripts is workspace-scoped (#146)', () => {
+  it('never returns a hit outside the caller allowed set', async () => {
+    // Insert one embedding row per workspace directly into the test db.
+    const enc = (v: Float32Array) => Buffer.from(v.buffer, v.byteOffset, v.byteLength);
+    const unit = () => { const v = new Float32Array(EMBED_DIM); v[0] = 1; return v; };
+    db.prepare(`CREATE TABLE IF NOT EXISTS embeddings (id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT, session_id TEXT, kind TEXT, ref_event_id INTEGER, ts INTEGER, text TEXT, model_id TEXT, dim INTEGER, vec BLOB, dedup_key TEXT, UNIQUE(session_id,kind,dedup_key))`).run();
+    const ins = db.prepare(`INSERT INTO embeddings (workspace_id,session_id,kind,ref_event_id,ts,text,model_id,dim,vec,dedup_key) VALUES (?,?,?,?,?,?,?,?,?,?)`);
+    ins.run(WS_A, 'sa', 'turn', 1, 1000, 'A content', 'Xenova/bge-small-en-v1.5', EMBED_DIM, enc(unit()), 't1');
+    ins.run(WS_B, 'sb', 'turn', 2, 2000, 'B secret content', 'Xenova/bge-small-en-v1.5', EMBED_DIM, enc(unit()), 't2');
+
+    setQueryEmbedder(async (texts) => texts.map(() => unit()));
+    const hits = (await tool('search_transcripts').run(db, { query: 'anything' }, ctxA)) as Array<{ workspace_id?: string; workspaceId?: string }>;
+    const wss = hits.map((h) => h.workspaceId ?? h.workspace_id);
+    expect(wss).not.toContain(WS_B);
   });
 });

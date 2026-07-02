@@ -36,6 +36,7 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { costFor } from './pricing.js';
 import { logError } from './errorLog.js';
+import { searchTranscripts, type EmbedFn } from './transcriptIndex.js';
 import { describeListenerError, type ListenerScope } from './mcpListenerError.js';
 import { type McpStatus } from './mcpStatusBroadcast.js';
 import {
@@ -114,6 +115,15 @@ export type InputWaitHandler = (callerId: string, sessionId: string, waiting: bo
 let inputWaitHandler: InputWaitHandler | null = null;
 export function setInputWaitHandler(fn: InputWaitHandler): void {
   inputWaitHandler = fn;
+}
+
+/** Injected at startup (when the embedding model is loaded): a function that
+ *  embeds an array of text strings into Float32Array vectors. Until injected,
+ *  the `search_transcripts` tool returns an "index is unavailable" error rather
+ *  than a silent empty result, so callers know to retry later. */
+let queryEmbedder: EmbedFn | null = null;
+export function setQueryEmbedder(fn: EmbedFn): void {
+  queryEmbedder = fn;
 }
 
 /** Route a host MCP listener `error` event to BOTH the console (live dev
@@ -726,6 +736,33 @@ export const TOOLS: Tool[] = [
       const rows = db.prepare(sql).all(...p, clampLimit(a.limit)) as Array<Record<string, unknown>>;
       return rows.map((r) => withIso(r, ['ts']));
     }
+  },
+  {
+    name: 'search_transcripts',
+    description:
+      'Semantic search over past transcript content in your allowed workspaces. Embeds the query and returns the most similar turns (and session summaries) by meaning. Args: query (required), limit (default 10, max 50), workspace_id (narrows), kind ("turn"|"summary").',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string' },
+        limit: { type: 'number', description: 'default 10, max 50' },
+        workspace_id: { type: 'string' },
+        kind: { type: 'string', enum: ['turn', 'summary'] },
+      },
+      required: ['query'],
+    },
+    run: async (_db, a, ctx) => {
+      if (typeof a.query !== 'string' || a.query.trim().length === 0) throw new Error('query is required');
+      if (!queryEmbedder) throw new Error('transcript search index is unavailable');
+      // A caller-supplied workspace_id can only NARROW within the allowed set.
+      let allowed = ctx.allowedWorkspaces;
+      if (typeof a.workspace_id === 'string') {
+        allowed = allowed.has(a.workspace_id) ? new Set([a.workspace_id]) : new Set<string>();
+      }
+      const limit = typeof a.limit === 'number' ? Math.max(1, Math.min(50, Math.floor(a.limit))) : 10;
+      const kind = a.kind === 'turn' || a.kind === 'summary' ? a.kind : undefined;
+      return searchTranscripts(a.query, allowed, queryEmbedder, { limit, kind }, _db);
+    },
   },
   {
     name: 'session_summary',
