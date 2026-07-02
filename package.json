@@ -22,6 +22,7 @@
     "dist": "electron-vite build && electron-builder"
   },
   "dependencies": {
+    "@huggingface/transformers": "^3",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-unicode11": "^0.8.0",
     "@xterm/addon-web-links": "^0.11.0",

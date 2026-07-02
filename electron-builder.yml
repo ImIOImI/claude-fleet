@@ -10,9 +10,11 @@ files:
 # from inside app.asar. Force them (and any *.node binaries) to be unpacked.
 asarUnpack:
   - "**/*.node"
+  - "**/node_modules/@huggingface/transformers/**"
   - "**/node_modules/better-sqlite3/**"
   - "**/node_modules/keytar/**"
   - "**/node_modules/node-pty/**"
+  - "**/node_modules/onnxruntime-web/**"
 linux:
   target: AppImage
   category: Development
