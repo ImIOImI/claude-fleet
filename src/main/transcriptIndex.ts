@@ -2,8 +2,9 @@
 // Pure text extraction + a write path that embeds pending turns. The embed
 // function is injected so this module has no dependency on the model runtime
 // (and tests can stub it).
-import { insertEmbedding, unembeddedTurnEvents, unembeddedSummaries } from './db.js';
-import { encodeVector, EMBED_MODEL_ID, EMBED_DIM } from './vectors.js';
+import type Database from 'better-sqlite3';
+import { insertEmbedding, unembeddedTurnEvents, unembeddedSummaries, getDb } from './db.js';
+import { encodeVector, decodeVector, topK, EMBED_MODEL_ID, EMBED_DIM } from './vectors.js';
 
 export type EmbedFn = (texts: string[]) => Promise<Float32Array[]>;
 
@@ -76,6 +77,43 @@ export async function indexSessionTurns(sessionId: string, embed: EmbedFn, batch
     }
   }
   return total;
+}
+
+export interface SearchHit {
+  sessionId: string;
+  workspaceId: string;
+  kind: 'turn' | 'summary';
+  ts: number | null;
+  text: string;
+  score: number;
+}
+
+export async function searchTranscripts(
+  query: string,
+  allowedWorkspaces: Set<string>,
+  embed: EmbedFn,
+  opts: { limit?: number; kind?: 'turn' | 'summary' } = {},
+  db: Database.Database = getDb(),
+): Promise<SearchHit[]> {
+  const ids = [...allowedWorkspaces];
+  if (ids.length === 0 || query.trim().length === 0) return [];
+  const limit = Math.max(1, Math.min(50, opts.limit ?? 10));
+
+  const [qvec] = await embed([query.trim()]);
+  const where = [`workspace_id IN (${ids.map(() => '?').join(',')})`, `model_id = ?`, `text <> ''`];
+  const params: unknown[] = [...ids, EMBED_MODEL_ID];
+  if (opts.kind) { where.push('kind = ?'); params.push(opts.kind); }
+
+  const rows = db
+    .prepare(`SELECT session_id AS sessionId, workspace_id AS workspaceId, kind, ts, text, vec
+              FROM embeddings WHERE ${where.join(' AND ')}`)
+    .all(...params) as Array<{ sessionId: string; workspaceId: string; kind: 'turn' | 'summary'; ts: number | null; text: string; vec: Buffer }>;
+
+  const cands = rows.map((r) => ({ vec: decodeVector(r.vec) }));
+  return topK(qvec, cands, limit).map(({ index, score }) => {
+    const r = rows[index];
+    return { sessionId: r.sessionId, workspaceId: r.workspaceId, kind: r.kind, ts: r.ts, text: r.text, score };
+  });
 }
 
 export async function indexSessionSummaries(embed: EmbedFn, batch = 64): Promise<number> {

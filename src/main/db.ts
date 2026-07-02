@@ -1266,6 +1266,8 @@ function openDbOrThrow(): Database.Database {
   return db;
 }
 
+export function getDb(): Database.Database { return openDbOrThrow(); }
+
 function parseTimestamp(v: unknown): number | null {
   if (typeof v !== 'string') return null;
   const ms = Date.parse(v);
