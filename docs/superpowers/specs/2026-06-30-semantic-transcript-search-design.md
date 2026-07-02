@@ -11,10 +11,14 @@ committee manager) cannot retrieve relevant *past* transcript content by meaning
 The observability pipeline stores every JSONL line in `events`, but the only
 extract columns are metadata (tokens, model, tool name, timestamps). The actual
 conversation content lives inside the `raw_jsonl` blob, nested in Anthropic's
-`message.content[]` format, and the MCP read surface deliberately exposes **no**
-transcript bodies (`list_events` omits `raw_jsonl`; there is intentionally no
-raw-SQL `query` tool — mcpServer.ts:620 — because raw bodies "can't be safely
-confined to the caller's workspace", #146).
+`message.content[]` format. The typed read tools surface no bodies
+(`list_events` omits `raw_jsonl`); the only body access is the scoped `query`
+tool (#174), which runs the caller's SQL against a per-call in-memory snapshot
+containing **only their allowed-workspace rows** and exposes `raw_jsonl` only
+when `include_raw=true` — the real DB is DETACHed before the SQL runs, so
+confinement is structural (#146/§9). There is no *semantic* retrieval: an agent
+cannot find content by meaning, only by exact SQL/text filters over its own
+scoped rows.
 
 We want agents to ask "have I/we worked on something like this before?" and get
 back the most semantically relevant past turns and sessions — **without**
@@ -60,7 +64,11 @@ spine.
   for vector upsert/scan and summary read/write.
 - **`src/main/mcpServer.ts`** — one new scoped tool, `search_transcripts`.
 
-## Data model (migration v5 — embeddings are rebuildable from JSONL, clean-slate OK)
+## Data model (migration v6 — embeddings are rebuildable from JSONL, additive)
+
+> `user_version` is already at **5** (the `errors` table) on `origin/main`, so this
+> is the **v6** migration. It is purely additive (two new tables) — no clean-slate
+> drop, since it doesn't touch `events`/`sessions`.
 
 ```sql
 CREATE TABLE embeddings (
@@ -134,10 +142,11 @@ New tool **`search_transcripts`**:
   cosine (dot product on normalized vecs) in JS → top-k →
   return `[{ session_id, workspace_id, kind, ts, text, score }]`.
 - **Security:** scoping is identical to the other typed tools —
-  `ctx.allowedWorkspaces` filters every candidate row, so self-recall and
-  grant-scoped cross-workspace search fall out of the same filter. Consistent
-  with #146: a *typed, scoped* tool may return confined snippets, unlike the
-  rejected raw-SQL / `raw_jsonl` hatch.
+  `ctx.allowedWorkspaces` filters every candidate row (the same `inClause`
+  pattern `list_sessions` uses), so self-recall and grant-scoped cross-workspace
+  search fall out of one filter. This matches the existing confinement model
+  (#146/§9): the tool only ever returns rows from the caller's allowed
+  workspaces, exactly as the scoped `query` snapshot does.
 - Brute-force scan is acceptable at desktop scale (tens of thousands of vectors →
   single-digit-to-tens of ms).
 
