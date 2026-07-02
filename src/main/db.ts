@@ -194,6 +194,38 @@ function migrate(d: Database.Database): void {
     `);
     d.pragma('user_version = 5');
   }
+  if ((d.pragma('user_version', { simple: true }) as number) < 6) {
+    // Semantic transcript search (rebuildable from JSONL — additive).
+    d.exec(`
+      CREATE TABLE embeddings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace_id TEXT NOT NULL,
+        session_id   TEXT NOT NULL,
+        kind         TEXT NOT NULL,          -- 'turn' | 'summary'
+        ref_event_id INTEGER,
+        ts           INTEGER,
+        text         TEXT NOT NULL,
+        model_id     TEXT NOT NULL,
+        dim          INTEGER NOT NULL,
+        vec          BLOB NOT NULL,
+        dedup_key    TEXT NOT NULL,
+        UNIQUE(session_id, kind, dedup_key)
+      );
+      CREATE INDEX idx_emb_workspace ON embeddings(workspace_id);
+      CREATE INDEX idx_emb_session   ON embeddings(session_id);
+      CREATE INDEX idx_emb_ref_event ON embeddings(ref_event_id);
+
+      CREATE TABLE session_summaries (
+        session_id          TEXT PRIMARY KEY,
+        workspace_id        TEXT NOT NULL,
+        summary             TEXT NOT NULL,
+        source_max_event_id INTEGER NOT NULL,
+        model               TEXT,
+        generated_at        INTEGER NOT NULL
+      );
+    `);
+    d.pragma('user_version = 6');
+  }
 }
 
 // ── Ingest ────────────────────────────────────────────────────────────────
@@ -1074,6 +1106,63 @@ export function deleteSession(id: string): void {
     d.prepare(`DELETE FROM sessions WHERE id = ?`).run(sid);
   });
   tx(id);
+}
+
+// ── Embeddings ────────────────────────────────────────────────────────────
+
+export interface EmbeddingInsert {
+  workspaceId: string;
+  sessionId: string;
+  kind: 'turn' | 'summary';
+  refEventId: number | null;
+  ts: number | null;
+  text: string;
+  modelId: string;
+  dim: number;
+  vec: Buffer;
+  dedupKey: string;
+}
+
+export function insertEmbedding(row: EmbeddingInsert): boolean {
+  const d = openDbOrThrow();
+  const info = d
+    .prepare(`
+      INSERT OR IGNORE INTO embeddings
+        (workspace_id, session_id, kind, ref_event_id, ts, text, model_id, dim, vec, dedup_key)
+      VALUES (@workspaceId, @sessionId, @kind, @refEventId, @ts, @text, @modelId, @dim, @vec, @dedupKey)
+    `)
+    .run(row);
+  return info.changes > 0;
+}
+
+export interface UnembeddedTurn {
+  id: number;
+  workspaceId: string;
+  ts: number | null;
+  rawJsonl: string;
+}
+
+/** user/assistant events in a session with no 'turn' embedding for `modelId`. */
+export function unembeddedTurnEvents(sessionId: string, modelId: string, limit = 200): UnembeddedTurn[] {
+  const d = openDbOrThrow();
+  const rows = d
+    .prepare(`
+      SELECT e.id AS id, e.workspace_id AS workspaceId, e.ts AS ts, e.raw_jsonl AS rawJsonl
+      FROM events e
+      LEFT JOIN embeddings em
+        ON em.ref_event_id = e.id AND em.kind = 'turn' AND em.model_id = ?
+      WHERE e.session_id = ? AND e.type IN ('user', 'assistant') AND em.id IS NULL
+      ORDER BY e.id ASC
+      LIMIT ?
+    `)
+    .all(modelId, sessionId, limit) as UnembeddedTurn[];
+  return rows;
+}
+
+export function maxEventId(sessionId: string): number {
+  const d = openDbOrThrow();
+  const row = d.prepare(`SELECT COALESCE(MAX(id), 0) AS m FROM events WHERE session_id = ?`).get(sessionId) as { m: number };
+  return row.m;
 }
 
 // ── Error recording ───────────────────────────────────────────────────────
