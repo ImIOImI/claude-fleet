@@ -1,7 +1,7 @@
 # Design: Semantic transcript search for agents
 
 **Date:** 2026-06-30
-**Status:** Approved (brainstorming) — pending implementation plan
+**Status:** Phase 1 implemented; Phase 2 (runner session-summary hook) deferred to follow-up PR
 **Repo:** `claude-fleet`
 
 ## Problem
