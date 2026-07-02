@@ -42,6 +42,7 @@ import { learnBrokerSessionMapping } from './db.js';
 import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
 import { resolveEnv } from './vault.js';
 import { claudeCreateArgs } from './claudeArgs.js';
+import { injectAndSubmit } from './ptyInput.js';
 
 export const FLEET_LABEL = 'com.claude-fleet.managed';
 export const ID_LABEL = 'com.claude-fleet.id';
@@ -793,7 +794,7 @@ export async function committeePost(
     if (!resp.ok) {
       throw new Error(`committee post could not attach expert ${workspaceId}: ${resp.error}`);
     }
-    client.sendInput(HOST_CHANNEL, Buffer.from(text + '\r', 'utf8'));
+    await injectAndSubmit((chunk) => client.sendInput(HOST_CHANNEL, Buffer.from(chunk, 'utf8')), text);
     await client.detachChannel(HOST_CHANNEL).catch(() => undefined);
     return { brokerSessionId };
   } finally {

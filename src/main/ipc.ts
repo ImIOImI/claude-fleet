@@ -89,6 +89,7 @@ import { PortForwardManager } from './portforward.js';
 import { brokerEndpoint } from './docker.js';
 import { BrokerClient } from './broker.js';
 import { MCP_TCP_PORT } from './mcpSocket.js';
+import { injectAndSubmit } from './ptyInput.js';
 
 export const MOCK_MODE = process.env.CLAUDE_FLEET_MOCK === '1';
 
@@ -379,7 +380,7 @@ async function committeePost(
 
   const live = liveHandleForWorkspace(targetId);
   if (live) {
-    live.stream.write(msg + '\r');
+    await injectAndSubmit((chunk) => live.stream.write(chunk), msg);
     broadcastCommitteeInbound(targetId, msg);
     return { id: targetId, via: 'attached' };
   }
