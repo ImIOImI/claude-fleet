@@ -346,5 +346,6 @@ describe('search_transcripts is workspace-scoped (#146)', () => {
     const hits = (await tool('search_transcripts').run(db, { query: 'anything' }, ctxA)) as Array<{ workspace_id?: string; workspaceId?: string }>;
     const wss = hits.map((h) => h.workspaceId ?? h.workspace_id);
     expect(wss).not.toContain(WS_B);
+    expect(wss).toContain(WS_A);
   });
 });
