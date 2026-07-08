@@ -2,18 +2,26 @@
 // a GUI-launched Electron app (or a bare `sh -c`) inherits a minimal PATH that
 // omits the user's shell-profile additions — so a native-installer claude under
 // ~/.local/bin is invisible to `command -v claude`, even though it's installed.
+//
+// The win32 suite guards the sibling bug: the original resolver was POSIX-only
+// (`sh`, `/bin/bash -lic`, no `.exe` suffix), so on Windows every step failed
+// even with claude.exe installed and on PATH.
 
 import { describe, expect, it } from 'vitest';
+import { join } from 'node:path';
 import { resolveClaudeBin, type ResolveDeps } from './claudeResolve.js';
 
 const HOME = '/home/troy';
 const LOCAL_BIN = `${HOME}/.local/bin/claude`;
+const WIN_HOME = 'C:\\Users\\troy';
+const WIN_EXE = 'C:\\Users\\troy\\.local\\bin\\claude.exe';
 
 /** Build deps with sane no-op defaults; each test overrides what it exercises. */
 function deps(overrides: Partial<ResolveDeps> = {}): ResolveDeps {
   return {
     env: {},
     homedir: HOME,
+    platform: 'linux',
     // Nothing on the inherited PATH, no shell, nothing on disk — the pessimistic
     // baseline. Tests opt into each source of truth.
     execFile: async () => {
@@ -78,5 +86,69 @@ describe('resolveClaudeBin', () => {
 
   it('returns null only when claude is genuinely absent everywhere', async () => {
     expect(await resolveClaudeBin(deps())).toBeNull();
+  });
+});
+
+describe('resolveClaudeBin on win32', () => {
+  /** Windows baseline: no sh, no SHELL, native-installer claude.exe on disk. */
+  function winDeps(overrides: Partial<ResolveDeps> = {}): ResolveDeps {
+    return deps({ homedir: WIN_HOME, platform: 'win32', ...overrides });
+  }
+
+  it('resolves claude.exe via where.exe on the inherited PATH (CRLF output)', async () => {
+    const got = await resolveClaudeBin(
+      winDeps({
+        execFile: async (file, args) => {
+          expect(file).toBe('where.exe');
+          expect(args).toEqual(['claude']);
+          return { stdout: `${WIN_EXE}\r\n` };
+        }
+      })
+    );
+    expect(got).toBe(WIN_EXE);
+  });
+
+  it('prefers a spawnable .exe when where.exe also lists an extension-less shim', async () => {
+    const got = await resolveClaudeBin(
+      winDeps({
+        // Git Bash shim first in PATH order; the real .exe second.
+        execFile: async () => ({
+          stdout: 'C:\\Users\\troy\\.local\\bin\\claude\r\n' + `${WIN_EXE}\r\n`
+        })
+      })
+    );
+    expect(got).toBe(WIN_EXE);
+  });
+
+  // The regression this suite exists for: claude.exe installed at
+  // %USERPROFILE%\.local\bin but where.exe misses it (not on the app's PATH).
+  // The POSIX-only resolver probed `...\.local\bin\claude` — no .exe — and
+  // attach threw "claude isn't installed" at a user with claude on their PATH.
+  it('probes %USERPROFILE%\\.local\\bin\\claude.exe when where.exe finds nothing', async () => {
+    const expected = join(WIN_HOME, '.local', 'bin', 'claude.exe');
+    const got = await resolveClaudeBin(
+      winDeps({
+        execFile: async () => {
+          throw new Error('INFO: Could not find files for the given pattern(s).');
+        },
+        isExecutableFile: async (p) => p === expected
+      })
+    );
+    expect(got).toBe(expected);
+  });
+
+  it('never consults a POSIX shell on win32', async () => {
+    const execs: string[] = [];
+    const got = await resolveClaudeBin(
+      winDeps({
+        env: { SHELL: '/bin/zsh' }, // even if some stray SHELL is set
+        execFile: async (file) => {
+          execs.push(file);
+          throw new Error('not found');
+        }
+      })
+    );
+    expect(got).toBeNull();
+    expect(execs).toEqual(['where.exe']); // no sh, no login shell
   });
 });

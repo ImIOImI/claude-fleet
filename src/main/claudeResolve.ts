@@ -12,6 +12,12 @@
 // claude` alone reports "not installed" for a claude that's plainly there.
 // We therefore try, in order: inherited PATH → well-known install dirs →
 // the user's login shell (which sources their profile).
+//
+// On Windows there are no POSIX shells to consult: the PATH lookup is
+// `where.exe claude` (preferring a directly spawnable `.exe` over an
+// extension-less shim), the well-known candidate is the native installer's
+// `%USERPROFILE%\.local\bin\claude.exe`, and the login-shell step is skipped
+// (GUI processes get the registry-backed user PATH anyway).
 
 import { access, constants as fsConstants } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -19,10 +25,33 @@ import { join } from 'node:path';
 export interface ResolveDeps {
   env: NodeJS.ProcessEnv;
   homedir: string;
+  /** process.platform — 'win32' switches to where.exe + .exe candidates. */
+  platform: NodeJS.Platform;
   /** Run a command and capture stdout; rejects on non-zero exit. */
   execFile: (file: string, args: string[]) => Promise<{ stdout: string }>;
   /** True if `path` exists and is executable. */
   isExecutableFile: (path: string) => Promise<boolean>;
+}
+
+const isPosixPath = (line: string): boolean => line.startsWith('/');
+const isWindowsPath = (line: string): boolean => /^[A-Za-z]:[\\/]/.test(line);
+
+/** Run a lookup command and return its stdout as trimmed, non-empty lines
+ *  (tolerates CRLF and banner/rc chatter); [] on any failure. */
+async function lookupLines(
+  execFile: ResolveDeps['execFile'],
+  file: string,
+  args: string[]
+): Promise<string[]> {
+  try {
+    const { stdout } = await execFile(file, args);
+    return stdout
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 /** Extract the resolved binary path from a `command -v` invocation, tolerating
@@ -32,25 +61,30 @@ async function commandV(
   file: string,
   args: string[]
 ): Promise<string | null> {
-  try {
-    const { stdout } = await execFile(file, args);
-    const lines = stdout
-      .split('\n')
-      .map((l) => l.trim())
-      .filter(Boolean);
-    // `command -v` prints the absolute path last; a login shell may prepend
-    // noise, so take the final line that looks like an absolute path.
-    for (let i = lines.length - 1; i >= 0; i--) {
-      if (lines[i].startsWith('/')) return lines[i];
-    }
-    return null;
-  } catch {
-    return null;
+  const lines = await lookupLines(execFile, file, args);
+  // `command -v` prints the absolute path last; a login shell may prepend
+  // noise, so take the final line that looks like an absolute path.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (isPosixPath(lines[i])) return lines[i];
   }
+  return null;
+}
+
+/** `where.exe claude` — every PATH match, one per line, PATH order first. */
+async function whereClaude(execFile: ResolveDeps['execFile']): Promise<string | null> {
+  const lines = (await lookupLines(execFile, 'where.exe', ['claude'])).filter(isWindowsPath);
+  // Prefer a directly spawnable .exe: `where` may list an extension-less
+  // shell shim (for Git Bash) ahead of the real claude.exe.
+  return lines.find((l) => l.toLowerCase().endsWith('.exe')) ?? lines[0] ?? null;
 }
 
 /** Well-known absolute locations a host claude may live at, in priority order. */
-function wellKnownCandidates(homedir: string): string[] {
+function wellKnownCandidates(homedir: string, platform: NodeJS.Platform): string[] {
+  if (platform === 'win32') {
+    // Native installer default. npm-global shims live on the registry-backed
+    // user PATH, which where.exe already covers.
+    return homedir ? [join(homedir, '.local', 'bin', 'claude.exe')] : [];
+  }
   const candidates: string[] = [];
   if (homedir) candidates.push(join(homedir, '.local/bin/claude')); // native installer (default)
   candidates.push('/usr/local/bin/claude'); // npm global on many setups
@@ -63,17 +97,27 @@ function wellKnownCandidates(homedir: string): string[] {
  * Resolve the `claude` binary, or null if it can't be found. Order:
  *   1. `CLAUDE_FLEET_LOCAL_CLAUDE_BIN` override (non-PATH install / test stand-in).
  *   2. The PATH we inherited (fast; correct when launched from a terminal).
+ *      POSIX: `sh -c 'command -v claude'`; Windows: `where.exe claude`.
  *   3. Well-known install dirs (fast fs probe; catches ~/.local/bin GUI launches).
- *   4. The user's login shell (slow; last resort for exotic custom PATHs).
+ *   4. POSIX only: the user's login shell (slow; last resort for exotic custom PATHs).
  */
 export async function resolveClaudeBin(deps: ResolveDeps): Promise<string | null> {
   const override = deps.env.CLAUDE_FLEET_LOCAL_CLAUDE_BIN?.trim();
   if (override) return override;
 
+  if (deps.platform === 'win32') {
+    const onPath = await whereClaude(deps.execFile);
+    if (onPath) return onPath;
+    for (const candidate of wellKnownCandidates(deps.homedir, deps.platform)) {
+      if (await deps.isExecutableFile(candidate)) return candidate;
+    }
+    return null; // no POSIX shells to consult on Windows
+  }
+
   const onPath = await commandV(deps.execFile, 'sh', ['-c', 'command -v claude']);
   if (onPath) return onPath;
 
-  for (const candidate of wellKnownCandidates(deps.homedir)) {
+  for (const candidate of wellKnownCandidates(deps.homedir, deps.platform)) {
     if (await deps.isExecutableFile(candidate)) return candidate;
   }
 
@@ -98,7 +142,13 @@ export async function findClaude(
   execFile: ResolveDeps['execFile'],
   homedir: string
 ): Promise<string | null> {
-  return resolveClaudeBin({ env: process.env, homedir, execFile, isExecutableFile });
+  return resolveClaudeBin({
+    env: process.env,
+    homedir,
+    platform: process.platform,
+    execFile,
+    isExecutableFile
+  });
 }
 
 /** User-facing message when no claude can be found on the host. */
