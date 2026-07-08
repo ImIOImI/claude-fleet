@@ -12,11 +12,13 @@
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { homedir } from 'node:os';
 import { rm, stat, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { app } from 'electron';
 import type * as NodePty from 'node-pty';
 import type { Backend } from './backend.js';
+import { findClaude, CLAUDE_NOT_FOUND_MESSAGE } from './claudeResolve.js';
 import { mcpSocketDir, mcpWorkspaceSocketPath } from './mcpSocket.js';
 import { ensureLocalBridgeScript, localMcpServerEntry } from './mcpLocalBridge.js';
 import {
@@ -73,21 +75,9 @@ const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
   };
 };
 
-/**
- * Resolve the `claude` binary. An explicit `CLAUDE_FLEET_LOCAL_CLAUDE_BIN`
- * override wins (for a non-PATH install, or to point tests at a stand-in);
- * otherwise look it up on the host PATH (POSIX `command -v`).
- */
-async function findClaude(): Promise<string | null> {
-  const override = process.env.CLAUDE_FLEET_LOCAL_CLAUDE_BIN?.trim();
-  if (override) return override;
-  try {
-    const { stdout } = await execFileAsync('sh', ['-c', 'command -v claude']);
-    const path = stdout.trim();
-    return path.length > 0 ? path : null;
-  } catch {
-    return null;
-  }
+/** Resolve the host `claude` binary (see claudeResolve.ts for the strategy). */
+function resolveClaude(): Promise<string | null> {
+  return findClaude((file, args) => execFileAsync(file, args), homedir());
 }
 
 /**
@@ -112,7 +102,7 @@ async function buildEnv(id: string, ws: { env: Workspace['env'] }): Promise<Node
 // ── Backend surface ────────────────────────────────────────────────────────
 
 export async function ping(): Promise<boolean> {
-  return (await findClaude()) !== null;
+  return (await resolveClaude()) !== null;
 }
 
 export async function ensureImage(
@@ -219,12 +209,9 @@ export async function attachPty(
   const id = containerId;
   const m = await readWorkspaceManifest(id);
   if (!m) throw new Error(`no manifest for local workspace ${id}`);
-  const claudeBin = await findClaude();
+  const claudeBin = await resolveClaude();
   if (!claudeBin) {
-    throw new Error(
-      "`claude` isn't installed on this host (not found on PATH). Install Claude Code " +
-        '(npm i -g @anthropic-ai/claude-code) to use a local workspace, or use a Container workspace.'
-    );
+    throw new Error(CLAUDE_NOT_FOUND_MESSAGE);
   }
   const env = await buildEnv(id, m);
   const mcpConfigPath = await ensureMcpConfig(id);
