@@ -36,6 +36,7 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { costFor } from './pricing.js';
 import { logError } from './errorLog.js';
+import { ensureContainerBridgeScript } from './mcpContainerBridge.js';
 import { searchTranscripts, type EmbedFn } from './transcriptIndex.js';
 import { describeListenerError, type ListenerScope } from './mcpListenerError.js';
 import { type McpStatus } from './mcpStatusBroadcast.js';
@@ -215,6 +216,15 @@ export function startMcpServer(dir: string): void {
  *  shared TCP listener can map an incoming token to this id. */
 export function ensureWorkspaceSocket(id: string): void {
   if (!rodb || !userDataDir) return;
+  // Refresh the container-side bridge script in the per-id dir (bind-mounted
+  // into exactly that container) so an app upgrade updates every workspace's
+  // bridge without a runner-image rebuild. Best-effort: a failed write leaves
+  // the previous bridge in place.
+  try {
+    ensureContainerBridgeScript(mcpWorkspaceSocketDir(userDataDir, id));
+  } catch (err) {
+    console.warn(`[mcp] bridge script write failed (${id}):`, err);
+  }
   if (isWindows) {
     ensureWorkspaceToken(id);
     return;
@@ -323,6 +333,7 @@ export function stopMcpServer(): void {
 }
 
 function handleConnection(sock: Socket, callerId: string): void {
+  const conn = trackConnection('unix', callerId, sock);
   let buf = '';
   sock.setEncoding('utf8');
   sock.on('data', (chunk: string) => {
@@ -331,10 +342,46 @@ function handleConnection(sock: Socket, callerId: string): void {
     while ((nl = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, nl).trim();
       buf = buf.slice(nl + 1);
-      if (line) dispatchLine(line, sock, callerId);
+      if (line) {
+        conn.rpcCount++;
+        dispatchLine(line, sock, callerId);
+      }
     }
   });
   sock.on('error', () => sock.destroy());
+}
+
+/** Durable connection-lifecycle breadcrumbs (errors DB via list_errors). The
+ *  first-call-hang investigation burned days on "did the request ever reach
+ *  the host?" — these rows answer that question for every future incident:
+ *  a connection accept, its close (with lifetime + how many RPC lines it
+ *  carried), and TCP auth failures, which previously went to console only. */
+function trackConnection(
+  transport: 'unix' | 'tcp',
+  callerId: string,
+  sock: Socket
+): { rpcCount: number } {
+  const openedAt = Date.now();
+  const conn = { rpcCount: 0 };
+  logError({
+    source: 'main',
+    type: 'mcp-conn',
+    level: 'info',
+    message: `mcp ${transport} connection accepted for ${callerId}`,
+    workspaceId: callerId,
+    extra: { transport }
+  });
+  sock.on('close', () => {
+    logError({
+      source: 'main',
+      type: 'mcp-conn-closed',
+      level: 'info',
+      message: `mcp ${transport} connection for ${callerId} closed after ${Date.now() - openedAt}ms (${conn.rpcCount} rpc lines)`,
+      workspaceId: callerId,
+      extra: { transport, durationMs: Date.now() - openedAt, rpcCount: conn.rpcCount }
+    });
+  });
+  return conn;
 }
 
 /** Windows TCP connection handler. The first non-empty line authenticates the
@@ -346,6 +393,7 @@ function handleConnection(sock: Socket, callerId: string): void {
 function handleTcpConnection(sock: Socket): void {
   let buf = '';
   let callerId: string | null = null;
+  let conn: { rpcCount: number } | null = null;
   sock.setEncoding('utf8');
   sock.on('error', () => sock.destroy());
   sock.on('data', (chunk: string) => {
@@ -359,13 +407,23 @@ function handleTcpConnection(sock: Socket): void {
         const id = tokenToId.get(line);
         if (!id) {
           console.warn('[mcp] tcp connection presented an unknown token; closing');
+          logError({
+            source: 'main',
+            type: 'mcp-auth-failed',
+            level: 'warn',
+            message: 'mcp tcp connection presented an unknown token; closed'
+          });
           sock.destroy();
           return;
         }
         callerId = id;
+        conn = trackConnection('tcp', callerId, sock);
         continue;
       }
-      if (line) dispatchLine(line, sock, callerId);
+      if (line) {
+        if (conn) conn.rpcCount++;
+        dispatchLine(line, sock, callerId);
+      }
     }
   });
 }

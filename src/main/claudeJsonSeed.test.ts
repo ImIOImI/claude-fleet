@@ -43,16 +43,15 @@ describe('ensureWorkspaceClaudeJson', () => {
     expect(parsed.hasCompletedOnboarding).toBe(true);
     expect(parsed.projects['/workspace/app'].hasTrustDialogAccepted).toBe(true);
     // The read-only state-DB MCP server (#12) is auto-wired via a user-scope
-    // mcpServers entry: a reconnecting stdio→socket bridge over the socket in
-    // the bound /fleet/mcp dir. The loop survives the host server's
-    // inode-changing restart while a paused container is alive (#18).
+    // mcpServers entry: the reconnect+resend node bridge over the socket in
+    // the bound /fleet/mcp dir. It survives the host server's inode-changing
+    // restart while a paused container is alive (#18) and re-sends unanswered
+    // requests after an app restart (the first-call hang).
     expect(parsed.mcpServers['claude-fleet-state']).toEqual({
       type: 'stdio',
-      command: 'sh',
-      args: [
-        '-c',
-        'while :; do socat - "UNIX-CONNECT:/fleet/mcp/mcp.sock,forever,interval=1"; sleep 1; done'
-      ]
+      command: 'node',
+      args: ['/fleet/mcp/bridge.cjs'],
+      env: { CLAUDE_FLEET_MCP_UNIX: '/fleet/mcp/mcp.sock' }
     });
   });
 
@@ -84,21 +83,19 @@ describe('ensureWorkspaceClaudeJson', () => {
     expect(parsed.numStartups).toBe(7);
     expect(parsed.hasCompletedOnboarding).toBe(true);
     expect(parsed.projects['/workspace'].hasTrustDialogAccepted).toBe(true);
-    // ...but the stale one-shot socat command is upgraded to the reconnecting
-    // bridge (#18) so MCP survives pause + app restart on recreation.
+    // ...but the stale socat command is upgraded to the reconnect+resend node
+    // bridge so MCP survives pause + app restart on recreation.
     expect(parsed.mcpServers['claude-fleet-state']).toEqual({
       type: 'stdio',
-      command: 'sh',
-      args: [
-        '-c',
-        'while :; do socat - "UNIX-CONNECT:/fleet/mcp/mcp.sock,forever,interval=1"; sleep 1; done'
-      ]
+      command: 'node',
+      args: ['/fleet/mcp/bridge.cjs'],
+      env: { CLAUDE_FLEET_MCP_UNIX: '/fleet/mcp/mcp.sock' }
     });
   });
 
   it('leaves an existing file byte-identical when the managed entry already matches', async () => {
     const path = workspaceClaudeJsonPath('01SAME');
-    // File already carries the current reconnecting bridge → no rewrite.
+    // File already carries the current reconnect+resend bridge → no rewrite.
     const current = {
       hasCompletedOnboarding: true,
       numStartups: 3,
@@ -106,11 +103,9 @@ describe('ensureWorkspaceClaudeJson', () => {
       mcpServers: {
         'claude-fleet-state': {
           type: 'stdio',
-          command: 'sh',
-          args: [
-            '-c',
-            'while :; do socat - "UNIX-CONNECT:/fleet/mcp/mcp.sock,forever,interval=1"; sleep 1; done'
-          ]
+          command: 'node',
+          args: ['/fleet/mcp/bridge.cjs'],
+          env: { CLAUDE_FLEET_MCP_UNIX: '/fleet/mcp/mcp.sock' }
         }
       }
     };

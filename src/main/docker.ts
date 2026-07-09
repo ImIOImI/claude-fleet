@@ -32,10 +32,12 @@ import { fleetPrivateDir, fleetSharedDir } from './config.js';
 import {
   mcpWorkspaceSocketDir,
   mcpWorkspaceBind,
+  CONTAINER_MCP_DIR,
   CONTAINER_MCP_SOCKET,
   CONTAINER_MCP_TOKEN,
   MCP_TCP_PORT
 } from './mcpSocket.js';
+import { CONTAINER_BRIDGE_FILENAME } from './mcpContainerBridge.js';
 import { BrokerClient, brokerPtyStream } from './broker.js';
 import { randomUUID } from 'node:crypto';
 import { learnBrokerSessionMapping } from './db.js';
@@ -358,27 +360,29 @@ function managedMcpServerEntry(): {
   type: string;
   command: string;
   args: string[];
+  env: Record<string, string>;
 } {
-  // Windows: the host MCP server listens on loopback TCP (it can't bind a unix
-  // socket on a Windows path), so the bridge dials host.docker.internal and
-  // authenticates with the per-workspace token bind-mounted at /fleet/mcp/token.
-  // The token is sent as the first line, then claude's stdio is spliced to the
-  // socket: `{ printf token; exec cat; }` feeds the token then claude's input
-  // into socat's stdin (→ TCP), while socat's stdout (← TCP) returns to claude.
-  // The outer `while` re-handshakes on every reconnect (each new TCP connection
-  // needs the token again), so — unlike the unix entry — socat is single-shot,
-  // not `forever`. The token is re-read each iteration so a regenerated one is
-  // picked up. (#117 identity is preserved: the token dir is leaf-bind-mounted
-  // into only this container.)
-  const command = isWindows
-    ? `while :; do TOK=$(cat "${CONTAINER_MCP_TOKEN}" 2>/dev/null); ` +
-      `if [ -n "$TOK" ]; then { printf '%s\\n' "$TOK"; exec cat; } | ` +
-      `socat - "TCP:host.docker.internal:${MCP_TCP_PORT}"; fi; sleep 1; done`
-    : `while :; do socat - "UNIX-CONNECT:${CONTAINER_MCP_SOCKET},forever,interval=1"; sleep 1; done`;
+  // The bridge is a node script the host writes into the per-workspace MCP dir
+  // (the one dir bind-mounted into exactly this container, #117), refreshed on
+  // every app start — no runner-image rebuild to update it. It reconnects
+  // forever and RE-SENDS unanswered requests after a reconnect: the previous
+  // `{ printf token; exec cat; } | socat` pipeline silently ate the first
+  // request written after a host-app restart (cat died on the SIGPIPE carrying
+  // it), which presented as the "first MCP call of the session hangs forever".
+  // Windows hosts listen on loopback TCP (a unix socket can't live on a
+  // Windows path) with the first-line token as identity; unix hosts use the
+  // per-workspace socket, where the path itself is the identity.
+  const env: Record<string, string> = isWindows
+    ? {
+        CLAUDE_FLEET_MCP_TCP: `host.docker.internal:${MCP_TCP_PORT}`,
+        CLAUDE_FLEET_MCP_TOKEN_FILE: CONTAINER_MCP_TOKEN
+      }
+    : { CLAUDE_FLEET_MCP_UNIX: CONTAINER_MCP_SOCKET };
   return {
     type: 'stdio',
-    command: 'sh',
-    args: ['-c', command]
+    command: 'node',
+    args: [`${CONTAINER_MCP_DIR}/${CONTAINER_BRIDGE_FILENAME}`],
+    env
   };
 }
 
