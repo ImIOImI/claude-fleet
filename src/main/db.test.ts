@@ -64,3 +64,17 @@ describe('recordError', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
+
+describe('learnBrokerSessionMapping remap reporting (#195)', () => {
+  it('returns null on first learn, the previous claude id thereafter', () => {
+    const dir = freshDb();
+    try {
+      expect(learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-1')).toBeNull();
+      // Idempotent relearn still reports what was there before.
+      expect(learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-1')).toBe('claude-1');
+      // A remap to a DIFFERENT claude session (the #195 cross-wiring event)
+      // must surface the overwritten id so callers can log it.
+      expect(learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-2')).toBe('claude-1');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});

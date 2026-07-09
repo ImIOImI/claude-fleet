@@ -39,6 +39,7 @@ import {
 import { BrokerClient, brokerPtyStream } from './broker.js';
 import { recordPendingAttach } from './pendingAttaches.js';
 import { learnBrokerSessionMapping } from './db.js';
+import { logError } from './errorLog.js';
 import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
 import { resolveEnv } from './vault.js';
 import { claudeCreateArgs } from './claudeArgs.js';
@@ -833,7 +834,17 @@ export async function attachPty(
   //    and skip the pending queue, or the per-tab observability lookup
   //    would never resolve.
   if (resumeOf) {
-    learnBrokerSessionMapping(workspaceId, sessionId, resumeOf);
+    const previous = learnBrokerSessionMapping(workspaceId, sessionId, resumeOf);
+    if (previous && previous !== resumeOf) {
+      logError({
+        source: 'main',
+        type: 'mapping-remapped',
+        level: 'warn',
+        message: `broker ${sessionId} remapped ${previous} → ${resumeOf} via resume attach`,
+        workspaceId,
+        extra: { brokerSessionId: sessionId, from: previous, to: resumeOf }
+      });
+    }
     learnMirrorMapping(workspaceId, sessionId, resumeOf);
   } else {
     recordPendingAttach(workspaceId, sessionId);

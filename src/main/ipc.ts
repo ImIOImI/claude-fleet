@@ -84,7 +84,7 @@ import {
 import { logError, getLogPath } from './errorLog.js';
 import { broadcastObservabilitySummary } from './observabilityBroadcast.js';
 import { broadcastInputWait } from './inputWaitBroadcast.js';
-import { consumeForWorkspace, recordPendingAttach } from './pendingAttaches.js';
+import { consumeForWorkspace, pendingSnapshotForWorkspace, recordPendingAttach } from './pendingAttaches.js';
 import { PortForwardManager } from './portforward.js';
 import { brokerEndpoint } from './docker.js';
 import { BrokerClient } from './broker.js';
@@ -328,11 +328,26 @@ async function allowedReadWorkspaces(callerId: string): Promise<string[]> {
   const caller = await readWorkspaceManifest(callerId);
   for (const g of caller?.control?.canControl ?? []) {
     if (!g.verbs.includes('read')) continue;
+    const checkStart = Date.now();
     try {
       await assertControl(callerId, g.id, 'read');
       ids.add(g.id);
     } catch {
       /* grant present but target not currently reachable/accepting — exclude */
+    } finally {
+      // Per-grant timing: the MCP first-call hang presents as callTool stuck
+      // in resolve-allowed; this pins the stall to a specific grant target.
+      const checkMs = Date.now() - checkStart;
+      if (checkMs >= 1_000) {
+        logError({
+          source: 'main',
+          type: 'grant-check-slow',
+          level: 'warn',
+          message: `assertControl(${callerId} → ${g.id}, read) took ${checkMs}ms during MCP scope resolution`,
+          workspaceId: callerId,
+          extra: { targetId: g.id, checkMs }
+        });
+      }
     }
   }
   return [...ids];
@@ -555,6 +570,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     // workspace summary (v1 behavior) until the user re-mounts a tab
     // alone and we can disambiguate.
     jsonlWatcher.on('new-session', ({ workspaceId, sessionId: claudeSessionId }) => {
+      const queued = pendingSnapshotForWorkspace(workspaceId);
       const brokerSessionId = consumeForWorkspace(workspaceId);
       if (!brokerSessionId) {
         logError({
@@ -567,7 +583,39 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         });
         return;
       }
-      learnBrokerSessionMapping(workspaceId, brokerSessionId, claudeSessionId);
+      const previous = learnBrokerSessionMapping(workspaceId, brokerSessionId, claudeSessionId);
+      // Every learn leaves a trace; the two warn cases are the #195 evidence
+      // trail — a FIFO consume that had to guess between tabs, and a mapping
+      // silently flipping to a different claude session.
+      if (queued.length > 1) {
+        logError({
+          source: 'main',
+          type: 'mapping-ambiguous-consume',
+          level: 'warn',
+          message: `paired ${claudeSessionId} with broker ${brokerSessionId} by FIFO with ${queued.length} tabs pending — pairing is a guess`,
+          workspaceId,
+          extra: { claudeSessionId, consumed: brokerSessionId, queued }
+        });
+      } else {
+        logError({
+          source: 'main',
+          type: 'mapping-learned',
+          level: 'info',
+          message: `paired ${claudeSessionId} with broker ${brokerSessionId}`,
+          workspaceId,
+          extra: { claudeSessionId, consumed: brokerSessionId }
+        });
+      }
+      if (previous && previous !== claudeSessionId) {
+        logError({
+          source: 'main',
+          type: 'mapping-remapped',
+          level: 'warn',
+          message: `broker ${brokerSessionId} remapped ${previous} → ${claudeSessionId}; a tab Refresh will now resume a different conversation`,
+          workspaceId,
+          extra: { brokerSessionId, from: previous, to: claudeSessionId }
+        });
+      }
       // Propagate any pending per-session mirror override onto the claude id.
       learnMirrorMapping(workspaceId, brokerSessionId, claudeSessionId);
     });

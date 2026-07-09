@@ -432,12 +432,38 @@ function handleMethod(method: string, params: Record<string, unknown>, callerId:
   }
 }
 
-async function callTool(params: Record<string, unknown>, callerId: string): Promise<unknown> {
+// Diagnostics thresholds. A call past STALL_MS leaves a breadcrumb saying
+// which stage it is stuck in (the first-call-per-session hang presents as an
+// await that never settles — without this, the hang leaves no trace at all).
+// SLOW_* log completed-but-slow calls so creeping latency is visible in
+// `list_errors` before it becomes a hang report.
+const STALL_MS = 10_000;
+const SLOW_RESOLVE_MS = 2_000;
+const SLOW_TOTAL_MS = 10_000;
+
+/** Test-only: swap the read-only DB handle without a real listener. */
+export function _setDbForTests(db: Database.Database | null): void {
+  rodb = db;
+}
+
+export async function callTool(params: Record<string, unknown>, callerId: string): Promise<unknown> {
   const name = params.name as string;
   const args = (params.arguments as Record<string, unknown>) ?? {};
   const tool = TOOLS.find((t) => t.name === name);
   if (!tool) throw new RpcError(-32602, `Unknown tool: ${name}`);
   if (!rodb) throw new RpcError(-32603, 'Database not open');
+  const startedAt = Date.now();
+  let stage: 'resolve-allowed' | 'run-tool' = 'resolve-allowed';
+  const watchdog = setTimeout(() => {
+    logError({
+      source: 'main',
+      type: 'mcp-call-stalled',
+      level: 'warn',
+      message: `tools/call ${name} still running after ${STALL_MS}ms (stuck in ${stage})`,
+      workspaceId: callerId,
+      extra: { tool: name, stage }
+    });
+  }, STALL_MS);
   try {
     // callerId is host-assigned (the accepting listener's workspace id), so it
     // is trustworthy here. Resolve the caller's allowed read set (self +
@@ -445,13 +471,40 @@ async function callTool(params: Record<string, unknown>, callerId: string): Prom
     // scoped to it (#146). `await` covers both sync DB tools and async committee
     // effects.
     const allowedWorkspaces = await resolveAllowedWorkspaces(callerId);
+    const resolveMs = Date.now() - startedAt;
+    stage = 'run-tool';
     const result = await tool.run(rodb, args, { callerId, allowedWorkspaces });
+    const totalMs = Date.now() - startedAt;
+    if (resolveMs >= SLOW_RESOLVE_MS || totalMs >= SLOW_TOTAL_MS) {
+      logError({
+        source: 'main',
+        type: 'mcp-slow-call',
+        level: 'warn',
+        message: `tools/call ${name} took ${totalMs}ms (scope resolution ${resolveMs}ms)`,
+        workspaceId: callerId,
+        extra: { tool: name, resolveMs, totalMs }
+      });
+    }
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   } catch (err) {
     // Tool-level failures surface to the model as an error result (MCP
     // convention), not a protocol error, so it can read the message and adapt.
+    // The full stack goes to the error log — the caller-facing message alone
+    // proved undebuggable when the packaged app's embedder failed to load
+    // (#194: a bare ERR_MODULE_NOT_FOUND one-liner with no trace anywhere).
     const message = err instanceof Error ? err.message : String(err);
+    logError({
+      source: 'main',
+      type: 'mcp-tool-error',
+      level: 'error',
+      message: `${name}: ${message}`,
+      stack: err instanceof Error ? err.stack : undefined,
+      workspaceId: callerId,
+      extra: { tool: name, stage, args: JSON.stringify(args).slice(0, 300) }
+    });
     return { content: [{ type: 'text', text: `Error: ${message}` }], isError: true };
+  } finally {
+    clearTimeout(watchdog);
   }
 }
 

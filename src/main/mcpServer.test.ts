@@ -349,3 +349,78 @@ describe('search_transcripts is workspace-scoped (#146)', () => {
     expect(wss).toContain(WS_A);
   });
 });
+
+// ---------------------------------------------------------------------------
+// callTool diagnostics: every tool-call failure must land in the error log
+// with a stack (the #194 packaged-app crash surfaced as a bare one-line
+// message with no server-side trace), and calls that stall must leave a
+// breadcrumb saying WHICH stage hung (the first-call-hang investigation).
+// ---------------------------------------------------------------------------
+import { vi } from 'vitest';
+import { setErrorSink } from './errorLog.js';
+import { callTool, _setDbForTests, setReadScopeResolver } from './mcpServer.js';
+import type { ErrorRow } from './db.js';
+
+describe('callTool diagnostics', () => {
+  let rows: ErrorRow[] = [];
+  let harness: { db: Database.Database; cleanup: () => void } | null = null;
+
+  beforeEach(() => {
+    rows = [];
+    setErrorSink((r) => rows.push(r));
+  });
+  afterEach(() => {
+    setErrorSink(null);
+    _setDbForTests(null);
+    setReadScopeResolver(async (id) => [id]);
+    vi.useRealTimers();
+    harness?.cleanup();
+    harness = null;
+  });
+
+  it('logs mcp-tool-error with a stack when a tool throws, still returning an MCP error result', async () => {
+    harness = makeFileDb();
+    _setDbForTests(harness.db);
+    const res = (await callTool(
+      { name: 'query', arguments: { sql: 'DEFINITELY NOT SQL' } },
+      WS_A
+    )) as { isError?: boolean };
+    expect(res.isError).toBe(true); // caller-facing behavior unchanged
+    const row = rows.find((r) => r.type === 'mcp-tool-error');
+    expect(row).toBeDefined();
+    expect(row!.level).toBe('error');
+    expect(row!.workspaceId).toBe(WS_A);
+    expect(row!.extra?.tool).toBe('query');
+    expect(row!.stack).toBeTruthy();
+  });
+
+  it('watchdog logs mcp-call-stalled with the stuck stage when a call hangs', async () => {
+    vi.useFakeTimers();
+    harness = makeFileDb();
+    _setDbForTests(harness.db);
+    setReadScopeResolver(() => new Promise(() => {})); // never resolves
+    void callTool({ name: 'list_sessions', arguments: {} }, WS_A);
+    await vi.advanceTimersByTimeAsync(10_000);
+    const row = rows.find((r) => r.type === 'mcp-call-stalled');
+    expect(row).toBeDefined();
+    expect(row!.level).toBe('warn');
+    expect(row!.extra?.stage).toBe('resolve-allowed');
+    expect(row!.extra?.tool).toBe('list_sessions');
+  });
+
+  it('logs mcp-slow-call when scope resolution is slow but completes', async () => {
+    vi.useFakeTimers();
+    harness = makeFileDb();
+    _setDbForTests(harness.db);
+    setReadScopeResolver(
+      (id) => new Promise((resolve) => setTimeout(() => resolve([id]), 3_000))
+    );
+    const p = callTool({ name: 'list_sessions', arguments: {} }, WS_A);
+    await vi.advanceTimersByTimeAsync(3_000);
+    await p;
+    const row = rows.find((r) => r.type === 'mcp-slow-call');
+    expect(row).toBeDefined();
+    expect(row!.extra?.tool).toBe('list_sessions');
+    expect(row!.extra?.resolveMs).toBeGreaterThanOrEqual(2_000);
+  });
+});
