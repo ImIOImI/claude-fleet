@@ -426,6 +426,19 @@ export function App() {
     },
     [pushToast]
   );
+  // A refresh that can't identify its tab's conversation is skipped, never
+  // guessed — resuming the wrong session silently cross-wires the tab (#195).
+  const handleRefreshUnresolved = useCallback(
+    (name: string): void => {
+      pushToast(
+        `Couldn't identify which conversation "${name}" holds — refresh skipped instead of switching sessions.`,
+        'Refresh skipped',
+        8000,
+        'error'
+      );
+    },
+    [pushToast]
+  );
   // Fired by the Library after a loadout install. Auto-reload only makes sense
   // for a running container workspace whose claude is live; if the setting is
   // off the user reloads manually (the loadout loads on their next claude start).
@@ -1099,6 +1112,7 @@ export function App() {
                   onReloadConsumed={() => setReloadRequest(null)}
                   onReloadStarted={() => handleReloadStarted(w.id)}
                   onRefreshRequested={handleRefreshRequested}
+                  onRefreshUnresolved={handleRefreshUnresolved}
                   waitingSessionIds={waitingSessionIds}
                 />
               ))}

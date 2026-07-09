@@ -152,6 +152,13 @@ interface Props {
    * the loadout reload (#16) and the manual chip-menu Refresh.
    */
   reloadToken?: number | null;
+  /**
+   * Fired when a reload/refresh was requested but this tab's claude session
+   * could not be identified (no broker→claude mapping). The reload is skipped
+   * — resuming a guessed session silently attaches the tab to a different
+   * conversation (#195) — and the parent surfaces the skip to the user.
+   */
+  onRefreshUnresolved?: (sessionId: string) => void;
 }
 
 export function TerminalSession({
@@ -165,6 +172,7 @@ export function TerminalSession({
   onLifecycleChange,
   onActivityChange,
   reloadToken,
+  onRefreshUnresolved,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   // Bumped when the user clicks "Start new session" / "Retry" after a
@@ -545,7 +553,13 @@ export function TerminalSession({
           sessionId
         );
         const claudeUuid = summary?.sessionId;
-        if (cancelled || !claudeUuid) return;
+        if (cancelled) return;
+        if (!claudeUuid) {
+          // No mapping — we don't know which conversation this tab holds.
+          // Never guess (#195): tell the user the refresh was skipped.
+          onRefreshUnresolved?.(sessionId);
+          return;
+        }
         // Resume the SAME conversation on the next attach.
         resumeOverrideRef.current = claudeUuid;
         const handle = ptyHandleRef.current;
@@ -563,7 +577,7 @@ export function TerminalSession({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reloadToken, sessionId, workspaceId]);
+  }, [reloadToken, sessionId, workspaceId, onRefreshUnresolved]);
 
   // When this session becomes visible again, force a fit. xterm's
   // ResizeObserver can fire while the host is `visibility: hidden`

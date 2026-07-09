@@ -188,3 +188,53 @@ describe('workspace-level controls', () => {
     expect(t.procs[0].kills).toEqual(['SIGSTOP', 'SIGCONT']);
   });
 });
+
+describe('host-assigned claude session ids (#195)', () => {
+  it('passes --session-id on a fresh spawn and reports it via onFreshSpawn', () => {
+    const t = tracker();
+    const learned: string[] = [];
+    attachLocalSession({
+      ...base,
+      workspaceId: 'ws1',
+      sessionId: 's1',
+      claudeSessionId: 'uuid-fresh',
+      onFreshSpawn: (id) => learned.push(id),
+      spawn: t.spawn
+    });
+    expect(t.calls[0].args).toEqual(['--session-id', 'uuid-fresh']);
+    expect(learned).toEqual(['uuid-fresh']);
+  });
+
+  it('resume wins: spawns with --resume, reports the resumed id', () => {
+    const t = tracker();
+    const learned: string[] = [];
+    attachLocalSession({
+      ...base,
+      workspaceId: 'ws1',
+      sessionId: 's1',
+      resumeOf: 'uuid-old',
+      claudeSessionId: 'uuid-fresh',
+      onFreshSpawn: (id) => learned.push(id),
+      spawn: t.spawn
+    });
+    expect(t.calls[0].args).toEqual(['--resume', 'uuid-old']);
+    expect(learned).toEqual(['uuid-old']);
+  });
+
+  it('does NOT fire onFreshSpawn when re-attaching a live session (no spawn, id unknown)', () => {
+    const t = tracker();
+    const learned: string[] = [];
+    attachLocalSession({ ...base, workspaceId: 'ws1', sessionId: 's1', spawn: t.spawn });
+    // Same key, claude still running: attach must not respawn nor relearn.
+    attachLocalSession({
+      ...base,
+      workspaceId: 'ws1',
+      sessionId: 's1',
+      claudeSessionId: 'uuid-second',
+      onFreshSpawn: (id) => learned.push(id),
+      spawn: t.spawn
+    });
+    expect(t.procs).toHaveLength(1);
+    expect(learned).toEqual([]);
+  });
+});

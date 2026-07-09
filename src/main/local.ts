@@ -35,6 +35,10 @@ import type {
   PtyHandle,
   RemoveWorkspaceOpts
 } from './docker.js';
+import { randomUUID } from 'node:crypto';
+import { learnBrokerSessionMapping } from './db.js';
+import { logError } from './errorLog.js';
+import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
 import { workspaceStateDir, assertValidWorkspaceId } from './paths.js';
 import { resolveEnv } from './vault.js';
 import {
@@ -227,6 +231,35 @@ export async function attachPty(
     env,
     file: claudeBin,
     resumeOf,
+    // Host-assigned claude session id (#195): only consumed on a fresh spawn;
+    // onFreshSpawn then records the tab→claude mapping deterministically.
+    // Local workspaces previously never learned mappings at all (no broker,
+    // no pending-attach path), so per-tab observability and Refresh-resume
+    // silently degraded to workspace-level guesses.
+    claudeSessionId: randomUUID(),
+    onFreshSpawn: (claudeSessionId) => {
+      const previous = learnBrokerSessionMapping(id, sessionId, claudeSessionId);
+      if (previous && previous !== claudeSessionId) {
+        logError({
+          source: 'main',
+          type: 'mapping-remapped',
+          level: 'warn',
+          message: `broker ${sessionId} remapped ${previous} → ${claudeSessionId} at local spawn`,
+          workspaceId: id,
+          extra: { brokerSessionId: sessionId, from: previous, to: claudeSessionId }
+        });
+      } else if (!previous) {
+        logError({
+          source: 'main',
+          type: 'mapping-learned',
+          level: 'info',
+          message: `paired ${claudeSessionId} with broker ${sessionId} at local spawn (${resumeOf ? 'resume' : 'session-id'})`,
+          workspaceId: id,
+          extra: { claudeSessionId, brokerSessionId: sessionId, how: resumeOf ? 'resume' : 'session-id' }
+        });
+      }
+      learnMirrorMapping(id, sessionId, claudeSessionId);
+    },
     mcpConfigPath,
     spawn: defaultSpawn
   });

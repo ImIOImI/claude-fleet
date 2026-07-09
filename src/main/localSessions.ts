@@ -74,6 +74,15 @@ export interface AttachOpts {
   file: string;
   /** Claude session UUID to resume; spawns `claude --resume <uuid>`. */
   resumeOf?: string;
+  /** Host-assigned claude session UUID for a FRESH spawn (#195): passed as
+   *  `--session-id` so the broker→claude mapping is known up front instead of
+   *  guessed from JSONL appearance order. Ignored when resumeOf is set. */
+  claudeSessionId?: string;
+  /** Fired only when this attach actually spawned claude, with the session
+   *  UUID the process will use (resumeOf, else claudeSessionId). The caller
+   *  learns the tab→claude mapping here — never on a re-attach, where the
+   *  live process's id is whatever it already was. */
+  onFreshSpawn?: (claudeSessionId: string) => void;
   /** Path to a `--mcp-config` file wiring the fleet MCP server (#16, optional). */
   mcpConfigPath?: string;
   spawn: SpawnPty;
@@ -92,7 +101,11 @@ export function attachLocalSession(opts: AttachOpts): PtyHandle {
   if (!session || session.exited) {
     const args = [
       ...(opts.mcpConfigPath ? ['--mcp-config', opts.mcpConfigPath] : []),
-      ...(opts.resumeOf ? ['--resume', opts.resumeOf] : [])
+      ...(opts.resumeOf
+        ? ['--resume', opts.resumeOf]
+        : opts.claudeSessionId
+          ? ['--session-id', opts.claudeSessionId]
+          : [])
     ];
     const proc = opts.spawn({
       file: opts.file,
@@ -115,6 +128,8 @@ export function attachLocalSession(opts: AttachOpts): PtyHandle {
       sessions.delete(key);
     });
     session = s;
+    const spawnedId = opts.resumeOf ?? opts.claudeSessionId;
+    if (spawnedId) opts.onFreshSpawn?.(spawnedId);
   }
 
   const s = session;
