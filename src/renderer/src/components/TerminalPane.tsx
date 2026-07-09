@@ -145,6 +145,9 @@ interface Props {
    * shared toast; `busyNow` selects the copy ("…when idle" while claude works).
    */
   onRefreshRequested?: (sessionName: string, busyNow: boolean) => void;
+  /** Fired when a requested refresh was skipped because the tab's conversation
+   *  could not be identified (#195) — the parent toasts the skip. */
+  onRefreshUnresolved?: (sessionName: string) => void;
   /** Claude session UUIDs blocked on AskUserQuestion — drives waiting indicators (Task 7). */
   waitingSessionIds?: Set<string>;
 }
@@ -238,6 +241,7 @@ export function TerminalPane({
   onReloadConsumed,
   onReloadStarted,
   onRefreshRequested,
+  onRefreshUnresolved,
   waitingSessionIds
 }: Props) {
   // Transient `[committee]` toast (#123): show the injected message briefly so a
@@ -585,6 +589,11 @@ export function TerminalPane({
     });
   }, [pendingRefresh, busyIds, endedIds, sessions]);
 
+  function handleRefreshUnresolved(sessionId: string): void {
+    const name = sessions.find((s) => s.id === sessionId)?.name ?? 'session';
+    onRefreshUnresolved?.(name);
+  }
+
   function requestRefresh(s: Session): void {
     if (!loaded || endedIds.has(s.id)) return;
     setPendingRefresh((prev) => {
@@ -921,6 +930,7 @@ export function TerminalPane({
             onLifecycleChange={handleLifecycle}
             onActivityChange={handleActivity}
             reloadToken={reloadTargets[s.id] ?? null}
+            onRefreshUnresolved={handleRefreshUnresolved}
           />
         ))}
         {paused && (

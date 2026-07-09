@@ -9,3 +9,18 @@ describe('claudeCreateArgs', () => {
     expect(claudeCreateArgs('uuid-9')).toEqual(['--settings', '/usr/local/lib/claude-fleet/hooks.settings.json', '--resume', 'uuid-9']);
   });
 });
+
+describe('claudeCreateArgs session identity (#195)', () => {
+  it('pins a host-assigned --session-id on fresh starts', () => {
+    expect(claudeCreateArgs(undefined, 'uuid-5')).toEqual([
+      '--settings', '/usr/local/lib/claude-fleet/hooks.settings.json',
+      '--session-id', 'uuid-5'
+    ]);
+  });
+  it('never mixes --session-id with --resume — a resume keeps the resumed id', () => {
+    expect(claudeCreateArgs('uuid-9', 'uuid-5')).toEqual([
+      '--settings', '/usr/local/lib/claude-fleet/hooks.settings.json',
+      '--resume', 'uuid-9'
+    ]);
+  });
+});

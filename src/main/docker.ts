@@ -37,7 +37,7 @@ import {
   MCP_TCP_PORT
 } from './mcpSocket.js';
 import { BrokerClient, brokerPtyStream } from './broker.js';
-import { recordPendingAttach } from './pendingAttaches.js';
+import { randomUUID } from 'node:crypto';
 import { learnBrokerSessionMapping } from './db.js';
 import { logError } from './errorLog.js';
 import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
@@ -823,33 +823,6 @@ export async function attachPty(
     throw new Error(`container ${containerId} is missing ${ID_LABEL} label`);
   }
 
-  // Per-tab mapping. Two paths:
-  //  - Fresh session: record a "pending" attach so the JsonlWatcher's
-  //    new-session hook pairs the broker session id with the claude UUID
-  //    the first time a brand-new JSONL appears.
-  //  - Resume: the claude UUID is already known (it's what we're
-  //    resuming), and `claude --resume` APPENDS to the existing
-  //    `<uuid>.jsonl` rather than creating a new one — so no 'new-session'
-  //    event ever fires for it. Learn the broker→claude mapping directly
-  //    and skip the pending queue, or the per-tab observability lookup
-  //    would never resolve.
-  if (resumeOf) {
-    const previous = learnBrokerSessionMapping(workspaceId, sessionId, resumeOf);
-    if (previous && previous !== resumeOf) {
-      logError({
-        source: 'main',
-        type: 'mapping-remapped',
-        level: 'warn',
-        message: `broker ${sessionId} remapped ${previous} → ${resumeOf} via resume attach`,
-        workspaceId,
-        extra: { brokerSessionId: sessionId, from: previous, to: resumeOf }
-      });
-    }
-    learnMirrorMapping(workspaceId, sessionId, resumeOf);
-  } else {
-    recordPendingAttach(workspaceId, sessionId);
-  }
-
   const endpoint = brokerEndpointFromInfo(workspaceId, info);
   const client = new BrokerClient(endpoint);
   try {
@@ -891,11 +864,42 @@ export async function attachPty(
     // session alive (reattach after an app restart where the broker kept
     // claude running), ATTACH succeeds above and the resume args are
     // correctly ignored: we must not spawn a second claude.
+    //
+    // Session identity (#195): the claude UUID this CREATE will run under is
+    // decided HERE — resumeOf when resuming, else a host-generated UUID passed
+    // as `--session-id`. The broker→claude mapping is learned before the
+    // spawn instead of guessed later from JSONL appearance order (the old
+    // pending-attach FIFO could pair a new JSONL with the wrong tab, and a
+    // wrong row makes a later tab Refresh silently resume a different
+    // conversation). Learning is deliberately NOT done on the plain-ATTACH
+    // path above: an already-live claude keeps whatever id it already has.
+    const claudeSessionId = resumeOf ?? randomUUID();
+    const previous = learnBrokerSessionMapping(workspaceId, sessionId, claudeSessionId);
+    if (previous && previous !== claudeSessionId) {
+      logError({
+        source: 'main',
+        type: 'mapping-remapped',
+        level: 'warn',
+        message: `broker ${sessionId} remapped ${previous} → ${claudeSessionId} at CREATE`,
+        workspaceId,
+        extra: { brokerSessionId: sessionId, from: previous, to: claudeSessionId }
+      });
+    } else if (!previous) {
+      logError({
+        source: 'main',
+        type: 'mapping-learned',
+        level: 'info',
+        message: `paired ${claudeSessionId} with broker ${sessionId} at CREATE (${resumeOf ? 'resume' : 'session-id'})`,
+        workspaceId,
+        extra: { claudeSessionId, brokerSessionId: sessionId, how: resumeOf ? 'resume' : 'session-id' }
+      });
+    }
+    learnMirrorMapping(workspaceId, sessionId, claudeSessionId);
     const createResp = await client.createSession(
       sessionId,
       cols,
       rows,
-      claudeCreateArgs(resumeOf)
+      claudeCreateArgs(resumeOf, claudeSessionId)
     );
     if (!createResp.ok) {
       stream.destroy();

@@ -1,7 +1,12 @@
-// Queue of broker_session_id → claude_session_id pairings waiting to
-// be learned. `attachPty` records a pending entry per attach; when the
-// JsonlWatcher first sees a new claude JSONL in a workspace, it asks
-// `consumeForWorkspace` for the next pending attach.
+// LEGACY FALLBACK (#195). Queue of broker_session_id → claude_session_id
+// pairings waiting to be learned from JSONL appearance order. Since the
+// host started assigning claude session ids at CREATE time (`--session-id`,
+// see docker.ts/local.ts), production code no longer records pending
+// attaches — the mapping is learned deterministically before claude spawns.
+// The queue and its consume path remain as the pairing mechanism for
+// sessions the host did NOT name (and for the e2e __test seeding hook);
+// when consumed with >1 entry pending the pairing is a guess and is logged
+// as `mapping-ambiguous-consume`.
 //
 // Lifetime: an entry sits in the queue from the moment its tab is
 // attached until claude writes its first JSONL for that tab. There is
