@@ -27,5 +27,20 @@
       "Bash(git filter-branch *)",
       "Bash(git filter-repo *)"
     ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/spec-to-issue.sh\"",
+            "timeout": 30,
+            "statusMessage": "Checking spec → GitHub issue"
+          }
+        ]
+      }
+    ]
   }
 }

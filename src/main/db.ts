@@ -194,6 +194,38 @@ function migrate(d: Database.Database): void {
     `);
     d.pragma('user_version = 5');
   }
+  if ((d.pragma('user_version', { simple: true }) as number) < 6) {
+    // Semantic transcript search (rebuildable from JSONL — additive).
+    d.exec(`
+      CREATE TABLE embeddings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace_id TEXT NOT NULL,
+        session_id   TEXT NOT NULL,
+        kind         TEXT NOT NULL,          -- 'turn' | 'summary'
+        ref_event_id INTEGER,
+        ts           INTEGER,
+        text         TEXT NOT NULL,
+        model_id     TEXT NOT NULL,
+        dim          INTEGER NOT NULL,
+        vec          BLOB NOT NULL,
+        dedup_key    TEXT NOT NULL,
+        UNIQUE(session_id, kind, dedup_key)
+      );
+      CREATE INDEX idx_emb_workspace ON embeddings(workspace_id);
+      CREATE INDEX idx_emb_session   ON embeddings(session_id);
+      CREATE INDEX idx_emb_ref_event ON embeddings(ref_event_id);
+
+      CREATE TABLE session_summaries (
+        session_id          TEXT PRIMARY KEY,
+        workspace_id        TEXT NOT NULL,
+        summary             TEXT NOT NULL,
+        source_max_event_id INTEGER NOT NULL,
+        model               TEXT,
+        generated_at        INTEGER NOT NULL
+      );
+    `);
+    d.pragma('user_version = 6');
+  }
 }
 
 // ── Ingest ────────────────────────────────────────────────────────────────
@@ -237,12 +269,24 @@ const updateSessionAiTitle = (d: Database.Database) =>
 const updateSessionLastPrompt = (d: Database.Database) =>
   d.prepare(`UPDATE sessions SET first_user_message = COALESCE(first_user_message, ?) WHERE id = ?`);
 
+const upsertSessionSummary = (d: Database.Database) =>
+  d.prepare(`
+    INSERT INTO session_summaries (session_id, workspace_id, summary, source_max_event_id, model, generated_at)
+    VALUES (@session_id, @workspace_id, @summary, @source_max_event_id, @model, @generated_at)
+    ON CONFLICT(session_id) DO UPDATE SET
+      summary = excluded.summary,
+      source_max_event_id = excluded.source_max_event_id,
+      model = excluded.model,
+      generated_at = excluded.generated_at
+  `);
+
 interface Cache {
   insertEvent: ReturnType<typeof insertEvent>;
   upsertSession: ReturnType<typeof upsertSession>;
   updateSessionCwd: ReturnType<typeof updateSessionCwd>;
   updateSessionAiTitle: ReturnType<typeof updateSessionAiTitle>;
   updateSessionLastPrompt: ReturnType<typeof updateSessionLastPrompt>;
+  upsertSessionSummary: ReturnType<typeof upsertSessionSummary>;
 }
 let stmts: Cache | null = null;
 function getStmts(d: Database.Database): Cache {
@@ -253,6 +297,7 @@ function getStmts(d: Database.Database): Cache {
       updateSessionCwd: updateSessionCwd(d),
       updateSessionAiTitle: updateSessionAiTitle(d),
       updateSessionLastPrompt: updateSessionLastPrompt(d),
+      upsertSessionSummary: upsertSessionSummary(d),
     };
   }
   return stmts;
@@ -348,6 +393,15 @@ export function ingestLine(
     !isSyntheticPromptText(message.content)
   ) {
     s.updateSessionLastPrompt.run(message.content, sessionId);
+  } else if (type === 'session-summary' && typeof parsed.summary === 'string') {
+    s.upsertSessionSummary.run({
+      session_id: sessionId,
+      workspace_id: workspaceId,
+      summary: parsed.summary,
+      source_max_event_id: maxEventId(sessionId),
+      model: typeof parsed.model === 'string' ? parsed.model : null,
+      generated_at: ts ?? Date.now(),
+    });
   }
 
   return { inserted: info.changes > 0, sessionId, type };
@@ -1076,6 +1130,89 @@ export function deleteSession(id: string): void {
   tx(id);
 }
 
+// ── Embeddings ────────────────────────────────────────────────────────────
+
+export interface EmbeddingInsert {
+  workspaceId: string;
+  sessionId: string;
+  kind: 'turn' | 'summary';
+  refEventId: number | null;
+  ts: number | null;
+  text: string;
+  modelId: string;
+  dim: number;
+  vec: Buffer;
+  dedupKey: string;
+}
+
+export function insertEmbedding(row: EmbeddingInsert): boolean {
+  const d = openDbOrThrow();
+  const info = d
+    .prepare(`
+      INSERT OR IGNORE INTO embeddings
+        (workspace_id, session_id, kind, ref_event_id, ts, text, model_id, dim, vec, dedup_key)
+      VALUES (@workspaceId, @sessionId, @kind, @refEventId, @ts, @text, @modelId, @dim, @vec, @dedupKey)
+    `)
+    .run(row);
+  return info.changes > 0;
+}
+
+export interface UnembeddedTurn {
+  id: number;
+  workspaceId: string;
+  ts: number | null;
+  rawJsonl: string;
+}
+
+/** user/assistant events in a session with no 'turn' embedding for `modelId`. */
+export function unembeddedTurnEvents(sessionId: string, modelId: string, limit = 200): UnembeddedTurn[] {
+  const d = openDbOrThrow();
+  const rows = d
+    .prepare(`
+      SELECT e.id AS id, e.workspace_id AS workspaceId, e.ts AS ts, e.raw_jsonl AS rawJsonl
+      FROM events e
+      LEFT JOIN embeddings em
+        ON em.ref_event_id = e.id AND em.kind = 'turn' AND em.model_id = ?
+      WHERE e.session_id = ? AND e.type IN ('user', 'assistant') AND em.id IS NULL
+      ORDER BY e.id ASC
+      LIMIT ?
+    `)
+    .all(modelId, sessionId, limit) as UnembeddedTurn[];
+  return rows;
+}
+
+export function maxEventId(sessionId: string): number {
+  const d = openDbOrThrow();
+  const row = d.prepare(`SELECT COALESCE(MAX(id), 0) AS m FROM events WHERE session_id = ?`).get(sessionId) as { m: number };
+  return row.m;
+}
+
+export interface PendingSummary {
+  sessionId: string;
+  workspaceId: string;
+  summary: string;
+  sourceMaxEventId: number;
+  ts: number | null;
+}
+
+/** Summaries whose current (session, source_max_event_id) has no embedding. */
+export function unembeddedSummaries(modelId: string, limit = 100): PendingSummary[] {
+  const d = openDbOrThrow();
+  return d
+    .prepare(`
+      SELECT s.session_id AS sessionId, s.workspace_id AS workspaceId, s.summary AS summary,
+             s.source_max_event_id AS sourceMaxEventId, s.generated_at AS ts
+      FROM session_summaries s
+      LEFT JOIN embeddings em
+        ON em.session_id = s.session_id AND em.kind = 'summary'
+       AND em.model_id = ? AND em.dedup_key = CAST(s.source_max_event_id AS TEXT)
+      WHERE em.id IS NULL
+      ORDER BY s.generated_at DESC
+      LIMIT ?
+    `)
+    .all(modelId, limit) as PendingSummary[];
+}
+
 // ── Error recording ───────────────────────────────────────────────────────
 
 export const ERRORS_RETENTION = 2000;
@@ -1128,6 +1265,8 @@ function openDbOrThrow(): Database.Database {
   if (!db) throw new Error('db not opened — call openDb(userDataDir) first');
   return db;
 }
+
+export function getDb(): Database.Database { return openDbOrThrow(); }
 
 function parseTimestamp(v: unknown): number | null {
   if (typeof v !== 'string') return null;
