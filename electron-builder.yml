@@ -6,18 +6,24 @@ directories:
 files:
   - out/**/*
   - package.json
-  # sharp is an image-only transitive dep of @huggingface/transformers, unused by
-  # text feature-extraction — keep its native binaries out of the package.
-  - "!**/node_modules/sharp/**"
+  # sharp MUST ship: transformers' CJS node build imports it at module load
+  # (pipelines.js -> utils/image.js -> sharp), so excluding it breaks every
+  # search_transcripts call in the packaged app with "Cannot find module
+  # 'sharp'" (#194 fallout). npm installs only the build platform's @img/*
+  # optional packages, so foreign-platform binaries never enter the tree.
 # Native modules must live on the real filesystem — they cannot be dlopen'd
 # from inside app.asar. Force them (and any *.node binaries) to be unpacked.
+# sharp/@img are unpacked as full trees: sharp.node dlopens the libvips
+# shared libraries (.dll/.so, not *.node) relative to its own real path.
 asarUnpack:
   - "**/*.node"
   - "**/node_modules/@huggingface/transformers/**"
+  - "**/node_modules/@img/**"
   - "**/node_modules/better-sqlite3/**"
   - "**/node_modules/keytar/**"
   - "**/node_modules/node-pty/**"
   - "**/node_modules/onnxruntime-node/**"
+  - "**/node_modules/sharp/**"
 linux:
   target: AppImage
   category: Development
