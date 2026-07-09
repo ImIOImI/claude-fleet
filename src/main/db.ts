@@ -865,13 +865,22 @@ export function tokenSeriesForSession(sessionId: string, limit = 20): number[] {
 // once per tab (see the JsonlWatcher's onNewSession hook in ipc.ts)
 // and persist it so it survives app restart.
 
-/** Persist a (workspace, broker_session) → claude_session mapping. */
+/** Persist a (workspace, broker_session) → claude_session mapping.
+ *  Returns the claude_session_id that was previously stored for this broker
+ *  session (null on first learn) so callers can log a remap — an overwrite
+ *  with a DIFFERENT claude id is the #195 cross-wiring event and must never
+ *  happen silently. */
 export function learnBrokerSessionMapping(
   workspaceId: string,
   brokerSessionId: string,
   claudeSessionId: string,
-): void {
+): string | null {
   const d = openDbOrThrow();
+  const previous = (d.prepare(`
+    SELECT claude_session_id FROM broker_sessions
+    WHERE workspace_id = ? AND broker_session_id = ?
+  `).get(workspaceId, brokerSessionId) as { claude_session_id: string } | undefined)
+    ?.claude_session_id ?? null;
   d.prepare(`
     INSERT INTO broker_sessions (workspace_id, broker_session_id, claude_session_id, learned_at)
     VALUES (?, ?, ?, ?)
@@ -879,6 +888,7 @@ export function learnBrokerSessionMapping(
       claude_session_id = excluded.claude_session_id,
       learned_at = excluded.learned_at
   `).run(workspaceId, brokerSessionId, claudeSessionId, Date.now());
+  return previous;
 }
 
 /** Look up the claude_session_id for a broker session, or null if unmapped. */

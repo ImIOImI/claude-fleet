@@ -3,6 +3,7 @@ import {
   consumeForWorkspace,
   recordPendingAttach,
   removePendingAttach,
+  pendingSnapshotForWorkspace,
   _resetForTests,
 } from './pendingAttaches.js';
 
@@ -101,5 +102,23 @@ describe('pendingAttaches', () => {
       // Original entry untouched.
       expect(consumeForWorkspace('ws-a')).toBe('broker-1');
     });
+  });
+});
+
+describe('pendingSnapshotForWorkspace', () => {
+  it('returns pending entries for the workspace only, oldest first, without consuming', () => {
+    recordPendingAttach('ws-a', 'broker-1', 1_000);
+    recordPendingAttach('ws-b', 'broker-x', 1_025);
+    recordPendingAttach('ws-a', 'broker-2', 1_050);
+    expect(pendingSnapshotForWorkspace('ws-a')).toEqual([
+      { brokerSessionId: 'broker-1', recordedAt: 1_000 },
+      { brokerSessionId: 'broker-2', recordedAt: 1_050 },
+    ]);
+    // Snapshot is a read — the queue is untouched.
+    expect(consumeForWorkspace('ws-a')).toBe('broker-1');
+  });
+
+  it('returns [] when nothing is pending', () => {
+    expect(pendingSnapshotForWorkspace('ws-a')).toEqual([]);
   });
 });

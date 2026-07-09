@@ -68,6 +68,20 @@ export function consumeForWorkspace(workspaceId: string): string | null {
 }
 
 /**
+ * Read-only view of the queue for one workspace, oldest first. Used by the
+ * new-session handler to log how ambiguous a FIFO consume was (#195): with
+ * more than one entry pending, the pairing is a guess and the snapshot is
+ * the evidence trail.
+ */
+export function pendingSnapshotForWorkspace(
+  workspaceId: string,
+): Array<{ brokerSessionId: string; recordedAt: number }> {
+  return pending
+    .filter((p) => p.workspaceId === workspaceId)
+    .map((p) => ({ brokerSessionId: p.brokerSessionId, recordedAt: p.recordedAt }));
+}
+
+/**
  * Drop a specific pending entry without learning a mapping. Called
  * when the user closes a tab before claude ever wrote anything — the
  * entry would otherwise sit in the queue forever and incorrectly pair
