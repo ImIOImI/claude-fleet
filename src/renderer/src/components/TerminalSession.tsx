@@ -548,11 +548,13 @@ export function TerminalSession({
     let cancelled = false;
     void (async () => {
       try {
-        const summary = await window.api.observability.summaryForBrokerSession(
+        // Resume-grade lookup only: never resume from a legacy guessed
+        // mapping — resuming a guess silently swaps the tab onto a
+        // different conversation (#195).
+        const claudeUuid = await window.api.observability.resolveResumeTarget(
           workspaceId,
           sessionId
         );
-        const claudeUuid = summary?.sessionId;
         if (cancelled) return;
         if (!claudeUuid) {
           // No mapping — we don't know which conversation this tab holds.

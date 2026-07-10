@@ -226,6 +226,16 @@ function migrate(d: Database.Database): void {
     `);
     d.pragma('user_version = 6');
   }
+  if ((d.pragma('user_version', { simple: true }) as number) < 7) {
+    // Verified resume mappings (#195 follow-up). Rows minted by the pre-#198
+    // FIFO guess are indistinguishable from facts, and a tab Refresh that
+    // trusts one resumes the WRONG conversation. New learns are deterministic
+    // (host-assigned --session-id / explicit --resume) and marked verified=1;
+    // every pre-existing row stays verified=0 — still fine for observability
+    // attribution, but never again a resume target.
+    d.exec(`ALTER TABLE broker_sessions ADD COLUMN verified INTEGER NOT NULL DEFAULT 0`);
+    d.pragma('user_version = 7');
+  }
 }
 
 // ── Ingest ────────────────────────────────────────────────────────────────
@@ -882,13 +892,31 @@ export function learnBrokerSessionMapping(
   `).get(workspaceId, brokerSessionId) as { claude_session_id: string } | undefined)
     ?.claude_session_id ?? null;
   d.prepare(`
-    INSERT INTO broker_sessions (workspace_id, broker_session_id, claude_session_id, learned_at)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO broker_sessions (workspace_id, broker_session_id, claude_session_id, learned_at, verified)
+    VALUES (?, ?, ?, ?, 1)
     ON CONFLICT(workspace_id, broker_session_id) DO UPDATE SET
       claude_session_id = excluded.claude_session_id,
-      learned_at = excluded.learned_at
+      learned_at = excluded.learned_at,
+      verified = 1
   `).run(workspaceId, brokerSessionId, claudeSessionId, Date.now());
   return previous;
+}
+
+/** Resume-grade lookup: returns the claude session id only when the mapping
+ *  was learned deterministically (verified=1). Pre-#198 rows were FIFO
+ *  guesses — good enough to attribute cost/summaries, never good enough to
+ *  `claude --resume` from: resuming a guess silently swaps the tab onto a
+ *  different conversation (#195). */
+export function lookupVerifiedBrokerSession(
+  workspaceId: string,
+  brokerSessionId: string,
+): string | null {
+  const d = openDbOrThrow();
+  const row = d.prepare(`
+    SELECT claude_session_id FROM broker_sessions
+    WHERE workspace_id = ? AND broker_session_id = ? AND verified = 1
+  `).get(workspaceId, brokerSessionId) as { claude_session_id: string } | undefined;
+  return row?.claude_session_id ?? null;
 }
 
 /** Look up the claude_session_id for a broker session, or null if unmapped. */

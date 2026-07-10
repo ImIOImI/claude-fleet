@@ -76,6 +76,7 @@ import {
   costForWorkspace,
   learnBrokerSessionMapping,
   lookupBrokerSession,
+  lookupVerifiedBrokerSession,
   listSessions,
   renameSession,
   deleteSession,
@@ -1366,6 +1367,16 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
    * `WorkspaceSummary` shape so the renderer treats both endpoints
    * interchangeably.
    */
+  // Resume-grade tab→conversation resolution (#195 follow-up). Returns the
+  // claude session UUID for a tab only when the mapping is verified (learned
+  // deterministically at spawn). Legacy FIFO-guessed rows return null — the
+  // renderer then surfaces "refresh skipped" instead of resuming a guess.
+  ipcMain.handle(
+    'sessions:resolveResumeTarget',
+    (_e, workspaceId: string, brokerSessionId: string) =>
+      lookupVerifiedBrokerSession(workspaceId, brokerSessionId)
+  );
+
   ipcMain.handle(
     'observability:summaryForBrokerSession',
     (_e, workspaceId: string, brokerSessionId: string) => {
