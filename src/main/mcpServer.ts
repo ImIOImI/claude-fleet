@@ -136,6 +136,30 @@ export function setQueryEmbedder(fn: EmbedFn): void {
   queryEmbedder = fn;
 }
 
+/** Injected by ipc.ts: persist a value signal (marked-useful, clickthrough,
+ *  etc.) to the usage_events table. callerId and sessionId come from the tool
+ *  args + ctx — never from the wire unvalidated. */
+export type UsageRecorder = (e: {
+  workspaceId: string;
+  sessionId?: string | null;
+  kind: 'search-impression' | 'clickthrough' | 'marked-useful' | 'resumed';
+  detail?: Record<string, unknown>;
+}) => void;
+let usageRecorder: UsageRecorder | null = null;
+export function setUsageRecorder(fn: UsageRecorder): void {
+  usageRecorder = fn;
+}
+
+/** Injected by ipc.ts: resolve the effective fleet tunables for a workspace
+ *  (app defaults ⊕ workspace env overrides). callerId is host-assigned.
+ *  Returns a Promise so ipc.ts can use async readWorkspaceManifest without
+ *  a sync cache; callTool already awaits tool.run so async resolvers just work. */
+export type ConfigResolver = (callerId: string) => Record<string, unknown> | Promise<Record<string, unknown>>;
+let configResolver: ConfigResolver | null = null;
+export function setConfigResolver(fn: ConfigResolver): void {
+  configResolver = fn;
+}
+
 /** Route a host MCP listener `error` event to BOTH the console (live dev
  *  visibility) and `error.log` (durable trace — #159). Without the durable sink
  *  a swallowed bind failure — chiefly EADDRINUSE from a stale/duplicate
@@ -1147,6 +1171,45 @@ export const TOOLS: Tool[] = [
       }
       sessionMappingHandler(ctx.callerId, a.brokerSessionId, a.sessionId);
       return { ok: true };
+    }
+  },
+  {
+    name: 'mark_useful',
+    description:
+      'Mark a session as useful after its content answered your question — e.g. when a ' +
+      'search_transcripts result led you to the information you needed. This feeds the value ' +
+      'signals that decide what history stays richly indexed. Args: sessionId (required), note (optional, why it helped).',
+    inputSchema: {
+      type: 'object',
+      properties: { sessionId: { type: 'string' }, note: { type: 'string' } },
+      required: ['sessionId']
+    },
+    run: (db, a, ctx) => {
+      if (!usageRecorder) throw new Error('usage recording is unavailable');
+      if (typeof a.sessionId !== 'string') throw new Error('sessionId (string) is required');
+      // Scope: the session must belong to an allowed workspace (same check
+      // shape as get_session — reuse its row lookup against `db`).
+      const row = db.prepare('SELECT workspace_id FROM sessions WHERE id = ?').get(a.sessionId) as { workspace_id: string } | undefined;
+      if (!row || !ctx.allowedWorkspaces.has(row.workspace_id)) throw new Error(`session not found: ${a.sessionId}`);
+      usageRecorder({
+        workspaceId: ctx.callerId,
+        sessionId: a.sessionId,
+        kind: 'marked-useful',
+        detail: typeof a.note === 'string' && a.note ? { note: a.note.slice(0, 500) } : undefined
+      });
+      return { ok: true };
+    }
+  },
+  {
+    name: 'get_config',
+    description:
+      'Effective fleet tunables for this workspace (summarizer model/debounce/window, app defaults ' +
+      '⊕ workspace env overrides). Note: reflects what the host set at container create; manual ' +
+      'in-container env changes are not visible until recreate. No args.',
+    inputSchema: { type: 'object', properties: {} },
+    run: (_db, _a, ctx) => {
+      if (!configResolver) throw new Error('config resolution is unavailable');
+      return configResolver(ctx.callerId);
     }
   }
 ];

@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setSessionMappingHandler, setQueryEmbedder, type ToolCtx } from './mcpServer.js';
+import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setSessionMappingHandler, setQueryEmbedder, setUsageRecorder, setConfigResolver, type ToolCtx } from './mcpServer.js';
 import { EMBED_DIM, EMBED_MODEL_ID } from './vectors.js';
 
 const WS_A = '01WORKSPACEAAAAAAAAAAAAAAA';
@@ -361,6 +361,28 @@ describe('search_transcripts is workspace-scoped (#146)', () => {
     const wss = hits.map((h) => h.workspaceId ?? h.workspace_id);
     expect(wss).not.toContain(WS_B);
     expect(wss).toContain(WS_A);
+  });
+});
+
+describe('mark_useful + get_config (#207)', () => {
+  afterEach(() => { setUsageRecorder(() => {}); setConfigResolver(() => ({})); });
+
+  it('mark_useful records a marked-useful usage event for an allowed session', () => {
+    const events: unknown[] = [];
+    setUsageRecorder((e) => events.push(e));
+    tool('mark_useful').run(db, { sessionId: 'sa', note: 'led me to the fix' }, ctxA);
+    expect(events).toEqual([{ workspaceId: WS_A, sessionId: 'sa', kind: 'marked-useful', detail: { note: 'led me to the fix' } }]);
+  });
+
+  it("mark_useful refuses a session outside the caller's allowed set", () => {
+    setUsageRecorder(() => { throw new Error('must not be called'); });
+    expect(() => tool('mark_useful').run(db, { sessionId: 'sb' }, ctxA)).toThrow(/not found/);
+  });
+
+  it('get_config returns the resolver output for the caller', async () => {
+    setConfigResolver((callerId) => ({ summarizer: { model: 'haiku', minNewTurns: 20 }, workspaceId: callerId }));
+    const out = await tool('get_config').run(db, {}, ctxA) as Record<string, unknown>;
+    expect(out.workspaceId).toBe(WS_A);
   });
 });
 
