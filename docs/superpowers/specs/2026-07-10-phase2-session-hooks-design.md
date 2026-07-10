@@ -31,15 +31,15 @@ Transport, timeout (2s), fire-and-forget semantics, and the `CF_*_SINK` test sea
 New `docker/runner/summarize.sh`, registered under **`Stop`**:
 
 1. **Debounce — human prompts, not lines.** Transcript lines are a bad novelty proxy: one tool-heavy turn emits dozens of lines (tool_use + results), so a line threshold would fire on every turn exactly when sessions are busiest. Instead count **typed user prompts** (in claude JSONL, human messages carry *string* content; tool results carry content *arrays* — a one-line jq discriminator) against `<uuid>.fleet.state`. Re-summarize only when **≥ `CF_SUMMARY_MIN_NEW_PROMPTS` (default 3)** new human prompts have landed since the last summary **and ≥ `CF_SUMMARY_MIN_INTERVAL_S` (default 120)** seconds have passed since the last summarizer run. Worst-case cost: one haiku call per three human messages, capped at one per two minutes — bounded by typing speed, invariant to tool storms. Most Stop firings cost one jq pass.
-2. **Generate:** extract recent turn text from the transcript (jq, cap ~8k chars), pipe to `claude -p --model haiku` (env-overridable: `CF_SUMMARY_MODEL`) **in the background** with a prompt demanding strict JSON `{ "summary": "...", "tags": ["..."] }` — 3-sentence summary, 3–6 lowercase concept tags. Runs on the workspace's own credentials (in-container auth). Validate output with jq; discard on parse failure (log to stderr, never block).
-3. **Deliver:** append `{"type":"session-summary","summary","tags","sessionId","model"}` to the sidecar `<uuid>.fleet.jsonl` — **never** to claude's live transcript (appending to it corrupts `--resume`).
+2. **Generate — chapter summaries, not a rolling whole-session summary.** A long "wandering" session (days, many subjects) compressed into one 3-sentence blurb generalizes into uselessness. Instead each firing summarizes only the **window since the last summary** (the ~3+ new prompts — time-local, therefore topic-coherent), producing an append-only sequence of focused *chapters*. Extract the window's turn text (jq, cap ~8k chars), prepend the previous chapter's summary as one line of continuity context ("Previously: …"), pipe to `claude -p --model haiku` (env-overridable: `CF_SUMMARY_MODEL`) **in the background** with a prompt demanding strict JSON `{ "summary": "...", "tags": ["..."] }` — ≤3 sentences about this window, 3–6 lowercase concept tags. Runs on the workspace's own credentials (in-container auth). Validate with jq; discard on parse failure (log to stderr, never block). Window-only input also keeps the prompt small regardless of session length.
+3. **Deliver:** append `{"type":"session-summary","summary","tags","sessionId","model","fromEventTs","toEventTs"}` to the sidecar `<uuid>.fleet.jsonl` — **never** to claude's live transcript (appending to it corrupts `--resume`).
 
 **Known risk (resolve during implementation):** the `claude -p` run writes its own throwaway transcript. Run it from `/tmp` and verify the watcher doesn't index it; fallback: filter at ingest by cwd. Cost profile: ≤ one haiku call per 3 human prompts and ≥120s apart, on the workspace's own auth.
 
 ### D. Watcher + ingest
 
 - `JsonlWatcher` learns the sidecar convention: `*.fleet.jsonl` ingests under the session id from the filename stem and **never** fires `new-session` (cannot touch the pending-attach fallback path).
-- `ingestLine`'s existing `session-summary` handling gains: parse `tags[]` → replace the session's rows in `session_tags`; and delete the session's stale `kind='summary'` embedding row when a newer summary supersedes it (closes the existing stale-summary-embeddings backlog item).
+- `ingestLine`'s `session-summary` handling changes from upsert-one-per-session to **append-one-chapter-per-event** (dedup key unchanged: `source_max_event_id`); `tags[]` accumulate into `session_tags` via `INSERT OR IGNORE` (union across chapters — a wandering session correctly carries many tags). Chapters are append-only, so each embeds exactly once and the old "stale summary embedding on re-summarization" backlog item **evaporates** — no cleanup path needed.
 
 ### E. Value-signal collection (collection now; scoring/compaction is Phase 3)
 
@@ -59,7 +59,24 @@ Signals recorded:
 ### F. Data model (migration v8)
 
 ```sql
-ALTER TABLE session_summaries ADD COLUMN tags TEXT;          -- JSON array, convenience copy
+-- session_summaries becomes CHAPTERED: rebuild from (session_id PRIMARY KEY)
+-- to append-only rows, one per summarized window. Existing rows (if any)
+-- migrate as chapter rows unchanged.
+CREATE TABLE session_summaries_v8 (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id          TEXT NOT NULL,
+  workspace_id        TEXT NOT NULL,
+  summary             TEXT NOT NULL,
+  tags                TEXT,                 -- JSON array for this chapter
+  source_max_event_id INTEGER NOT NULL,     -- dedup key (unchanged semantics)
+  from_ts             INTEGER,
+  to_ts               INTEGER,
+  model               TEXT,
+  generated_at        INTEGER NOT NULL,
+  UNIQUE(session_id, source_max_event_id)
+);
+-- (copy old rows, drop old table, rename)
+CREATE INDEX idx_session_summaries_session ON session_summaries_v8(session_id, generated_at);
 
 CREATE TABLE session_tags (
   workspace_id TEXT NOT NULL,
@@ -85,7 +102,7 @@ CREATE INDEX idx_usage_events_workspace_ts ON usage_events(workspace_id, ts);
 
 - New tools: `report_session_mapping`, `mark_useful` (write-via-injected-handler, caller-scoped).
 - `query` snapshot gains `session_summaries`, `session_tags`, `usage_events` (all carry `workspace_id` → structural scoping unchanged); tool description updated. Tag cloud = `SELECT tag, COUNT(*) FROM session_tags GROUP BY tag` for any agent.
-- `search_transcripts` description gains the mark-useful instruction; starts returning `kind='summary'` hits for real.
+- `search_transcripts` description gains the mark-useful instruction; starts returning `kind='summary'` hits for real — one per *chapter*, so a hit lands on the relevant stretch of a long session (its `from_ts`/`to_ts` locate it in time).
 
 ### H. Version-skew safety
 
