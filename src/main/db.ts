@@ -236,6 +236,54 @@ function migrate(d: Database.Database): void {
     d.exec(`ALTER TABLE broker_sessions ADD COLUMN verified INTEGER NOT NULL DEFAULT 0`);
     d.pragma('user_version = 7');
   }
+  if ((d.pragma('user_version', { simple: true }) as number) < 8) {
+    // Phase 2 (#207): chaptered summaries + tags + value-signal collection.
+    // session_summaries becomes append-only chapters (one per summarized
+    // window); a wandering multi-day session gets topical chapters instead
+    // of one over-generalized replaced blurb. Old rows migrate as chapters.
+    d.exec(`
+      CREATE TABLE session_summaries_v8 (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id          TEXT NOT NULL,
+        workspace_id        TEXT NOT NULL,
+        summary             TEXT NOT NULL,
+        tags                TEXT,
+        source_max_event_id INTEGER NOT NULL,
+        from_ts             INTEGER,
+        to_ts               INTEGER,
+        model               TEXT,
+        generated_at        INTEGER NOT NULL,
+        UNIQUE(session_id, source_max_event_id)
+      );
+      INSERT INTO session_summaries_v8
+        (session_id, workspace_id, summary, source_max_event_id, model, generated_at)
+        SELECT session_id, workspace_id, summary, source_max_event_id, model, generated_at
+        FROM session_summaries;
+      DROP TABLE session_summaries;
+      ALTER TABLE session_summaries_v8 RENAME TO session_summaries;
+      CREATE INDEX idx_session_summaries_session ON session_summaries(session_id, generated_at);
+
+      CREATE TABLE session_tags (
+        workspace_id TEXT NOT NULL,
+        session_id   TEXT NOT NULL,
+        tag          TEXT NOT NULL,
+        PRIMARY KEY (session_id, tag)
+      );
+      CREATE INDEX idx_session_tags_workspace ON session_tags(workspace_id, tag);
+
+      CREATE TABLE usage_events (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts           INTEGER NOT NULL,
+        workspace_id TEXT NOT NULL,
+        session_id   TEXT,
+        kind         TEXT NOT NULL,
+        detail       TEXT
+      );
+      CREATE INDEX idx_usage_events_session ON usage_events(session_id, kind);
+      CREATE INDEX idx_usage_events_workspace_ts ON usage_events(workspace_id, ts);
+    `);
+    d.pragma('user_version = 8');
+  }
 }
 
 // ── Ingest ────────────────────────────────────────────────────────────────
@@ -279,16 +327,14 @@ const updateSessionAiTitle = (d: Database.Database) =>
 const updateSessionLastPrompt = (d: Database.Database) =>
   d.prepare(`UPDATE sessions SET first_user_message = COALESCE(first_user_message, ?) WHERE id = ?`);
 
-const upsertSessionSummary = (d: Database.Database) =>
+const insertSessionChapter = (d: Database.Database) =>
   d.prepare(`
-    INSERT INTO session_summaries (session_id, workspace_id, summary, source_max_event_id, model, generated_at)
-    VALUES (@session_id, @workspace_id, @summary, @source_max_event_id, @model, @generated_at)
-    ON CONFLICT(session_id) DO UPDATE SET
-      summary = excluded.summary,
-      source_max_event_id = excluded.source_max_event_id,
-      model = excluded.model,
-      generated_at = excluded.generated_at
+    INSERT OR IGNORE INTO session_summaries
+      (session_id, workspace_id, summary, tags, source_max_event_id, from_ts, to_ts, model, generated_at)
+    VALUES (@session_id, @workspace_id, @summary, @tags, @source_max_event_id, @from_ts, @to_ts, @model, @generated_at)
   `);
+const insertSessionTag = (d: Database.Database) =>
+  d.prepare(`INSERT OR IGNORE INTO session_tags (workspace_id, session_id, tag) VALUES (?, ?, ?)`);
 
 interface Cache {
   insertEvent: ReturnType<typeof insertEvent>;
@@ -296,7 +342,8 @@ interface Cache {
   updateSessionCwd: ReturnType<typeof updateSessionCwd>;
   updateSessionAiTitle: ReturnType<typeof updateSessionAiTitle>;
   updateSessionLastPrompt: ReturnType<typeof updateSessionLastPrompt>;
-  upsertSessionSummary: ReturnType<typeof upsertSessionSummary>;
+  insertSessionChapter: ReturnType<typeof insertSessionChapter>;
+  insertSessionTag: ReturnType<typeof insertSessionTag>;
 }
 let stmts: Cache | null = null;
 function getStmts(d: Database.Database): Cache {
@@ -307,7 +354,8 @@ function getStmts(d: Database.Database): Cache {
       updateSessionCwd: updateSessionCwd(d),
       updateSessionAiTitle: updateSessionAiTitle(d),
       updateSessionLastPrompt: updateSessionLastPrompt(d),
-      upsertSessionSummary: upsertSessionSummary(d),
+      insertSessionChapter: insertSessionChapter(d),
+      insertSessionTag: insertSessionTag(d),
     };
   }
   return stmts;
@@ -404,14 +452,26 @@ export function ingestLine(
   ) {
     s.updateSessionLastPrompt.run(message.content, sessionId);
   } else if (type === 'session-summary' && typeof parsed.summary === 'string') {
-    s.upsertSessionSummary.run({
+    const toEpoch = (v: unknown): number | null => {
+      const t = typeof v === 'string' ? Date.parse(v) : NaN;
+      return Number.isFinite(t) ? t : null;
+    };
+    s.insertSessionChapter.run({
       session_id: sessionId,
       workspace_id: workspaceId,
       summary: parsed.summary,
+      tags: Array.isArray(parsed.tags) ? JSON.stringify(parsed.tags) : null,
       source_max_event_id: maxEventId(sessionId),
+      from_ts: toEpoch(parsed.fromEventTs),
+      to_ts: toEpoch(parsed.toEventTs),
       model: typeof parsed.model === 'string' ? parsed.model : null,
       generated_at: ts ?? Date.now(),
     });
+    if (Array.isArray(parsed.tags)) {
+      for (const tag of parsed.tags) {
+        if (typeof tag === 'string' && tag.trim()) s.insertSessionTag.run(workspaceId, sessionId, tag.trim().toLowerCase());
+      }
+    }
   }
 
   return { inserted: info.changes > 0, sessionId, type };
@@ -874,6 +934,25 @@ export function tokenSeriesForSession(sessionId: string, limit = 20): number[] {
 // a different UUID — the `claude_session_id`. We learn the mapping
 // once per tab (see the JsonlWatcher's onNewSession hook in ipc.ts)
 // and persist it so it survives app restart.
+
+/** Union-accumulate concept tags for a session (chapter tags, #207). */
+export function addSessionTags(workspaceId: string, sessionId: string, tags: string[]): void {
+  const d = openDbOrThrow();
+  const ins = d.prepare(`INSERT OR IGNORE INTO session_tags (workspace_id, session_id, tag) VALUES (?, ?, ?)`);
+  for (const t of tags) if (t.trim()) ins.run(workspaceId, sessionId, t.trim().toLowerCase());
+}
+
+/** Append-only value signal (#207). Scores are derived at read time (Phase 3). */
+export function recordUsageEvent(e: {
+  workspaceId: string;
+  sessionId?: string | null;
+  kind: 'search-impression' | 'clickthrough' | 'marked-useful' | 'resumed';
+  detail?: Record<string, unknown>;
+}): void {
+  const d = openDbOrThrow();
+  d.prepare(`INSERT INTO usage_events (ts, workspace_id, session_id, kind, detail) VALUES (?, ?, ?, ?, ?)`)
+    .run(Date.now(), e.workspaceId, e.sessionId ?? null, e.kind, e.detail ? JSON.stringify(e.detail) : null);
+}
 
 /** Persist a (workspace, broker_session) → claude_session mapping.
  *  Returns the claude_session_id that was previously stored for this broker
