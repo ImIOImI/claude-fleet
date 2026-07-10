@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setSessionMappingHandler, setQueryEmbedder, setUsageRecorder, setConfigResolver, type ToolCtx } from './mcpServer.js';
+import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setSessionMappingHandler, setQueryEmbedder, setUsageRecorder, setConfigResolver, _resetTelemetryForTests, type ToolCtx } from './mcpServer.js';
 import { EMBED_DIM, EMBED_MODEL_ID } from './vectors.js';
 
 const WS_A = '01WORKSPACEAAAAAAAAAAAAAAA';
@@ -458,5 +458,53 @@ describe('callTool diagnostics', () => {
     expect(row).toBeDefined();
     expect(row!.extra?.tool).toBe('list_sessions');
     expect(row!.extra?.resolveMs).toBeGreaterThanOrEqual(2_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Implicit usage telemetry (#207): search impressions, click-throughs
+// ---------------------------------------------------------------------------
+
+/** Insert one embedding row for (ws, ses) — reuses the INSERT pattern from
+ *  the search-scoping describe above. */
+function seedEmbedding(testDb: Database.Database, ws: string, ses: string): void {
+  const enc = (v: Float32Array) => Buffer.from(v.buffer, v.byteOffset, v.byteLength);
+  const unit = () => { const v = new Float32Array(EMBED_DIM); v[0] = 1; return v; };
+  testDb.prepare(`CREATE TABLE IF NOT EXISTS embeddings (id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT, session_id TEXT, kind TEXT, ref_event_id INTEGER, ts INTEGER, text TEXT, model_id TEXT, dim INTEGER, vec BLOB, dedup_key TEXT, UNIQUE(session_id,kind,dedup_key))`).run();
+  testDb.prepare(`INSERT OR IGNORE INTO embeddings (workspace_id,session_id,kind,ref_event_id,ts,text,model_id,dim,vec,dedup_key) VALUES (?,?,?,?,?,?,?,?,?,?)`).run(ws, ses, 'turn', 1, 1000, 'A content', EMBED_MODEL_ID, EMBED_DIM, enc(unit()), 't1-' + ses);
+}
+
+describe('implicit usage telemetry (#207)', () => {
+  beforeEach(() => _resetTelemetryForTests());
+  afterEach(() => setUsageRecorder(() => {}));
+
+  it('search_transcripts records one impression per distinct result session, carrying the query', async () => {
+    const events: Array<Record<string, unknown>> = [];
+    setUsageRecorder((e) => events.push(e as Record<string, unknown>));
+    setQueryEmbedder(async (texts) => texts.map(() => { const v = new Float32Array(EMBED_DIM); v[0] = 1; return v; }));
+    // seed one embedding row for WS_A (reuse the insert helper pattern from the scoping describe)
+    seedEmbedding(db, WS_A, 'sa');
+    await tool('search_transcripts').run(db, { query: 'the broker hang' }, ctxA);
+    const imp = events.filter((e) => e.kind === 'search-impression');
+    expect(imp).toHaveLength(1);
+    expect(imp[0].sessionId).toBe('sa');
+    expect((imp[0].detail as Record<string, unknown>).query).toBe('the broker hang');
+  });
+
+  it('a read of a recently-searched session records a clickthrough', async () => {
+    const events: Array<Record<string, unknown>> = [];
+    setUsageRecorder((e) => events.push(e as Record<string, unknown>));
+    setQueryEmbedder(async (texts) => texts.map(() => { const v = new Float32Array(EMBED_DIM); v[0] = 1; return v; }));
+    seedEmbedding(db, WS_A, 'sa');
+    await tool('search_transcripts').run(db, { query: 'x' }, ctxA);
+    tool('get_session').run(db, { id: 'sa' }, ctxA);
+    expect(events.some((e) => e.kind === 'clickthrough' && e.sessionId === 'sa')).toBe(true);
+  });
+
+  it('a read WITHOUT a recent search records no clickthrough', () => {
+    const events: Array<Record<string, unknown>> = [];
+    setUsageRecorder((e) => events.push(e as Record<string, unknown>));
+    tool('get_session').run(db, { id: 'sa' }, ctxA);
+    expect(events.filter((e) => e.kind === 'clickthrough')).toHaveLength(0);
   });
 });

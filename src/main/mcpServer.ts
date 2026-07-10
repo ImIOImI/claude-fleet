@@ -136,6 +136,33 @@ export function setQueryEmbedder(fn: EmbedFn): void {
   queryEmbedder = fn;
 }
 
+// ── Implicit value telemetry (#207) ─────────────────────────────────────────
+// Per-caller ring of recently-returned search result session ids. A read of
+// one of those sessions within CLICKTHROUGH_WINDOW_MS is engagement — the
+// implicit signal Phase 3's value scoring is built on. In-memory only.
+const CLICKTHROUGH_WINDOW_MS = 5 * 60_000;
+const recentSearchHits = new Map<string, Map<string, number>>(); // callerId → sessionId → ts
+export function _resetTelemetryForTests(): void { recentSearchHits.clear(); }
+
+function noteSearchResults(callerId: string, query: string, sessionIds: string[]): void {
+  const ring = recentSearchHits.get(callerId) ?? new Map<string, number>();
+  const now = Date.now();
+  for (const sid of new Set(sessionIds)) {
+    ring.set(sid, now);
+    usageRecorder?.({ workspaceId: callerId, sessionId: sid, kind: 'search-impression', detail: { query: query.slice(0, 300) } });
+  }
+  recentSearchHits.set(callerId, ring);
+}
+
+function noteRead(callerId: string, sessionId: string): void {
+  const ring = recentSearchHits.get(callerId);
+  const ts = ring?.get(sessionId);
+  if (ts === undefined) return;
+  if (Date.now() - ts > CLICKTHROUGH_WINDOW_MS) { ring!.delete(sessionId); return; }
+  ring!.delete(sessionId); // one clickthrough per impression
+  usageRecorder?.({ workspaceId: callerId, sessionId, kind: 'clickthrough' });
+}
+
 /** Injected by ipc.ts: persist a value signal (marked-useful, clickthrough,
  *  etc.) to the usage_events table. callerId and sessionId come from the tool
  *  args + ctx — never from the wire unvalidated. */
@@ -811,6 +838,8 @@ export const TOOLS: Tool[] = [
       if (!(typeof row.workspace_id === 'string' && ctx.allowedWorkspaces.has(row.workspace_id))) {
         return null;
       }
+      // Record clickthrough if this session was recently returned by a search (#207).
+      noteRead(ctx.callerId, a.id);
       return withIso(row as Record<string, unknown>, ['started_at', 'last_active_at']);
     }
   },
@@ -828,6 +857,8 @@ export const TOOLS: Tool[] = [
       if (!sessionAllowed(db, a.session_id, ctx.allowedWorkspaces)) {
         throw new Error('not authorized to read this session');
       }
+      // Record clickthrough if this session was recently returned by a search (#207).
+      noteRead(ctx.callerId, a.session_id);
       return { session_id: a.session_id, ...aggregateSessionCost(db, a.session_id) };
     }
   },
@@ -854,6 +885,8 @@ export const TOOLS: Tool[] = [
       if (!sessionAllowed(db, a.session_id, ctx.allowedWorkspaces)) {
         throw new Error('not authorized to read this session');
       }
+      // Record clickthrough if this session was recently returned by a search (#207).
+      noteRead(ctx.callerId, a.session_id);
       let cols = EVENT_COLS;
       if (Array.isArray(a.columns)) {
         const names = a.columns.map((c) => String(c));
@@ -905,7 +938,10 @@ export const TOOLS: Tool[] = [
       }
       const limit = typeof a.limit === 'number' ? Math.max(1, Math.min(50, Math.floor(a.limit))) : 10;
       const kind = a.kind === 'turn' || a.kind === 'summary' ? a.kind : undefined;
-      return searchTranscripts(a.query, allowed, queryEmbedder, { limit, kind }, _db);
+      const hits = await searchTranscripts(a.query, allowed, queryEmbedder, { limit, kind }, _db);
+      // Record one search-impression per distinct result session (#207).
+      noteSearchResults(ctx.callerId, a.query, (hits as Array<{ sessionId?: string }>).map((h) => h.sessionId ?? '').filter(Boolean));
+      return hits;
     },
   },
   {
@@ -920,6 +956,8 @@ export const TOOLS: Tool[] = [
       if (!sessionAllowed(db, a.id, ctx.allowedWorkspaces)) {
         throw new Error('not authorized to read this session');
       }
+      // Record clickthrough if this session was recently returned by a search (#207).
+      noteRead(ctx.callerId, a.id);
       const MAX_SUMMARY_ITEMS = 100;
       const distinctInputs = (names: string[]): { items: string[]; count: number } => {
         const placeholders = names.map(() => '?').join(',');

@@ -40,7 +40,7 @@ import {
 import { CONTAINER_BRIDGE_FILENAME } from './mcpContainerBridge.js';
 import { BrokerClient, brokerPtyStream } from './broker.js';
 import { randomUUID } from 'node:crypto';
-import { learnBrokerSessionMapping } from './db.js';
+import { learnBrokerSessionMapping, recordUsageEvent } from './db.js';
 import { logError } from './errorLog.js';
 import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
 import { resolveEnv } from './vault.js';
@@ -899,6 +899,7 @@ export async function attachPty(
       });
     }
     learnMirrorMapping(workspaceId, sessionId, claudeSessionId);
+    if (resumeOf) recordUsageEvent({ workspaceId, sessionId: resumeOf, kind: 'resumed' });
     const createResp = await client.createSession(
       sessionId,
       cols,
