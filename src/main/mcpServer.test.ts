@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setQueryEmbedder, type ToolCtx } from './mcpServer.js';
+import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setSessionMappingHandler, setQueryEmbedder, type ToolCtx } from './mcpServer.js';
 import { EMBED_DIM, EMBED_MODEL_ID } from './vectors.js';
 
 const WS_A = '01WORKSPACEAAAAAAAAAAAAAAA';
@@ -329,6 +329,20 @@ describe('signal_input_wait', () => {
   it('rejects bad args', () => {
     setInputWaitHandler(() => {});
     expect(() => tool().run({} as never, { sessionId: 'x' }, ctx)).toThrow(/required/);
+  });
+});
+
+describe('report_session_mapping (#207)', () => {
+  afterEach(() => setSessionMappingHandler(() => {}));
+  it('forwards (callerId, brokerSessionId, sessionId) to the injected handler', () => {
+    const calls: Array<[string, string, string]> = [];
+    setSessionMappingHandler((c, b, s) => calls.push([c, b, s]));
+    tool('report_session_mapping').run({} as never, { brokerSessionId: 'tab-1', sessionId: 'uuid-9' }, ctxA);
+    expect(calls).toEqual([[WS_A, 'tab-1', 'uuid-9']]);
+  });
+  it('rejects bad args', () => {
+    setSessionMappingHandler(() => {});
+    expect(() => tool('report_session_mapping').run({} as never, { brokerSessionId: 'x' }, ctxA)).toThrow(/required/);
   });
 });
 

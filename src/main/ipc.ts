@@ -39,6 +39,7 @@ import {
   setCommitteeHandlers,
   setReadScopeResolver,
   setInputWaitHandler,
+  setSessionMappingHandler,
   currentMcpStatus
 } from './mcpServer.js';
 import * as vault from './vault.js';
@@ -939,6 +940,17 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     if (!set) { set = new Set(); inputWaitByWorkspace.set(callerId, set); }
     if (waiting) set.add(sessionId); else set.delete(sessionId);
     pushInputWait(callerId);
+  });
+  setSessionMappingHandler((callerId, brokerSessionId, claudeSessionId) => {
+    const previous = learnBrokerSessionMapping(callerId, brokerSessionId, claudeSessionId);
+    if (previous && previous !== claudeSessionId) {
+      logError({
+        source: 'main', type: 'mapping-remapped', level: 'warn',
+        message: `broker ${brokerSessionId} remapped ${previous} → ${claudeSessionId} via SessionStart hook (drift corrected)`,
+        workspaceId: callerId,
+        extra: { brokerSessionId, from: previous, to: claudeSessionId, how: 'session-start-hook' }
+      });
+    }
   });
 
   ipcMain.handle('workspace:remove', async (_e, containerId: string, opts?: RemoveWorkspaceOpts) => {

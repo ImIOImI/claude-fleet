@@ -118,6 +118,15 @@ export function setInputWaitHandler(fn: InputWaitHandler): void {
   inputWaitHandler = fn;
 }
 
+/** Injected by ipc.ts: persist claude's self-reported tab↔session mapping
+ *  (SessionStart hook, #207). callerId is host-assigned; the handler may only
+ *  ever write the caller's own workspace rows. */
+export type SessionMappingHandler = (callerId: string, brokerSessionId: string, sessionId: string) => void;
+let sessionMappingHandler: SessionMappingHandler | null = null;
+export function setSessionMappingHandler(fn: SessionMappingHandler): void {
+  sessionMappingHandler = fn;
+}
+
 /** Injected at startup (when the embedding model is loaded): a function that
  *  embeds an array of text strings into Float32Array vectors. Until injected,
  *  the `search_transcripts` tool returns an "index is unavailable" error rather
@@ -1117,6 +1126,26 @@ export const TOOLS: Tool[] = [
         throw new Error('sessionId (string) and waiting (boolean) are required');
       }
       inputWaitHandler(ctx.callerId, a.sessionId, a.waiting);
+      return { ok: true };
+    }
+  },
+  {
+    name: 'report_session_mapping',
+    description:
+      'Internal (called by the runner SessionStart hook, not by the model): record which claude ' +
+      'session UUID is running in which tab of THIS workspace. ' +
+      'Args: brokerSessionId (the tab id), sessionId (the claude session UUID).',
+    inputSchema: {
+      type: 'object',
+      properties: { brokerSessionId: { type: 'string' }, sessionId: { type: 'string' } },
+      required: ['brokerSessionId', 'sessionId']
+    },
+    run: (_db, a, ctx) => {
+      if (!sessionMappingHandler) throw new Error('session-mapping reporting is unavailable');
+      if (typeof a.brokerSessionId !== 'string' || typeof a.sessionId !== 'string') {
+        throw new Error('brokerSessionId (string) and sessionId (string) are required');
+      }
+      sessionMappingHandler(ctx.callerId, a.brokerSessionId, a.sessionId);
       return { ok: true };
     }
   }

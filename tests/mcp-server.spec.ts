@@ -168,7 +168,9 @@ test('MCP server: initialize, tools, typed reads, committee control', async () =
         'query',
         'committee_pause',
         'committee_unpause',
-        'committee_roster'
+        'committee_roster',
+        'signal_input_wait',
+        'report_session_mapping'
       ])
     );
 
