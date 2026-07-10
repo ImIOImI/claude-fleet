@@ -46,11 +46,11 @@ class FakePty implements PtyProc {
 }
 
 /** Spawn factory that records every spawn and the args/cwd/env used. */
-function tracker(): { spawn: SpawnPty; procs: FakePty[]; calls: Array<{ file: string; args: string[]; cwd: string }> } {
+function tracker(): { spawn: SpawnPty; procs: FakePty[]; calls: Array<{ file: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv }> } {
   const procs: FakePty[] = [];
-  const calls: Array<{ file: string; args: string[]; cwd: string }> = [];
-  const spawn: SpawnPty = ({ file, args, cwd }) => {
-    calls.push({ file, args, cwd });
+  const calls: Array<{ file: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv }> = [];
+  const spawn: SpawnPty = ({ file, args, cwd, env }) => {
+    calls.push({ file, args, cwd, env });
     const p = new FakePty();
     procs.push(p);
     return p;
@@ -236,5 +236,11 @@ describe('host-assigned claude session ids (#195)', () => {
     });
     expect(t.procs).toHaveLength(1);
     expect(learned).toEqual([]);
+  });
+
+  it('exports CLAUDE_FLEET_BROKER_SESSION_ID to the spawned claude (#207)', () => {
+    const t = tracker();
+    attachLocalSession({ ...base, workspaceId: 'ws1', sessionId: 's1', spawn: t.spawn });
+    expect(t.calls[0].env.CLAUDE_FLEET_BROKER_SESSION_ID).toBe('s1');
   });
 });
