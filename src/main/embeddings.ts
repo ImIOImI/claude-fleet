@@ -1,7 +1,7 @@
 // Local, on-host embedding model (native onnxruntime-node backend). Transcript
 // text never leaves the machine. Lazy-loads the model once per process.
 import { createRequire } from 'node:module';
-import { EMBED_MODEL_ID, EMBED_DIM } from './vectors.js';
+import { EMBED_HF_ID, EMBED_DTYPE, EMBED_DIM } from './vectors.js';
 
 // transformers must load through the CJS loader: a dynamic import() resolves
 // via Electron's ESM loader, which cannot load packages from inside app.asar
@@ -19,7 +19,7 @@ export function makeEmbedder(cacheDir: string): (texts: string[]) => Promise<Flo
     const { pipeline, env } = requireCjs('@huggingface/transformers') as typeof import('@huggingface/transformers');
     env.cacheDir = cacheDir;          // cache weights under <userData>
     env.allowRemoteModels = true;     // fetch once on first use
-    return (await pipeline('feature-extraction', EMBED_MODEL_ID)) as unknown as Extractor;
+    return (await pipeline('feature-extraction', EMBED_HF_ID, { dtype: EMBED_DTYPE })) as unknown as Extractor;
   }
 
   return async function embed(texts: string[]): Promise<Float32Array[]> {

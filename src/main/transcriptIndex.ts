@@ -8,7 +8,14 @@ import { encodeVector, decodeVector, topK, EMBED_MODEL_ID, EMBED_DIM } from './v
 
 export type EmbedFn = (texts: string[]) => Promise<Float32Array[]>;
 
-const MAX_CHARS = 2000;
+// Truncation + batch size are MEMORY controls, not just throughput knobs:
+// activation memory scales with batch × sequence length, and onnxruntime's
+// arena holds its peak allocation for the life of the process. Measured on
+// bge-small q8: 1000 chars × batch 8 holds ~300 MB steady; 2000 chars ×
+// batch 64 on fp32 grew past 3 GB. Retrieval quality is insensitive to the
+// tail truncation (the head of a turn carries its topic).
+const MAX_CHARS = 1000;
+const EMBED_BATCH = 8;
 
 /** Human-readable text of a JSONL event's `message`, or '' if it carries none. */
 export function extractText(message: unknown): string {
@@ -24,7 +31,7 @@ export function extractText(message: unknown): string {
 }
 
 /** Embed every pending turn for a session. Returns rows inserted. */
-export async function indexSessionTurns(sessionId: string, embed: EmbedFn, batch = 64): Promise<number> {
+export async function indexSessionTurns(sessionId: string, embed: EmbedFn, batch = EMBED_BATCH): Promise<number> {
   let total = 0;
   // Loop so a session with a large backlog drains across batches.
   // unembeddedTurnEvents only returns rows still lacking an embedding, so the
@@ -116,7 +123,7 @@ export async function searchTranscripts(
   });
 }
 
-export async function indexSessionSummaries(embed: EmbedFn, batch = 64): Promise<number> {
+export async function indexSessionSummaries(embed: EmbedFn, batch = EMBED_BATCH): Promise<number> {
   let total = 0;
   for (;;) {
     const pending = unembeddedSummaries(EMBED_MODEL_ID, batch);
