@@ -762,6 +762,15 @@ function buildSnapshot(srcPath: string, allowed: Set<string>, includeRaw: boolea
       mem.prepare(
         `CREATE TABLE broker_sessions AS SELECT * FROM ${alias}.broker_sessions WHERE ${scope}`
       ).run(...params);
+      mem.prepare(
+        `CREATE TABLE session_summaries AS SELECT * FROM ${alias}.session_summaries WHERE ${scope}`
+      ).run(...params);
+      mem.prepare(
+        `CREATE TABLE session_tags AS SELECT * FROM ${alias}.session_tags WHERE ${scope}`
+      ).run(...params);
+      mem.prepare(
+        `CREATE TABLE usage_events AS SELECT * FROM ${alias}.usage_events WHERE ${scope}`
+      ).run(...params);
     } finally {
       mem.exec(`DETACH ${alias}`);
     }
@@ -917,7 +926,7 @@ export const TOOLS: Tool[] = [
   {
     name: 'search_transcripts',
     description:
-      'Semantic search over past transcript content in your allowed workspaces. Embeds the query and returns the most similar turns (and session summaries) by meaning. Args: query (required), limit (default 10, max 50), workspace_id (narrows), kind ("turn"|"summary").',
+      'Semantic search over past transcript content in your allowed workspaces. Embeds the query and returns the most similar turns (and session summaries) by meaning. Args: query (required), limit (default 10, max 50), workspace_id (narrows), kind ("turn"|"summary"). If a result leads you to the information you needed, call mark_useful with its sessionId.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1035,8 +1044,9 @@ export const TOOLS: Tool[] = [
     name: 'query',
     description:
       'Run a single read-only SQL statement against your workspace data. Tables: events, sessions, ' +
-      'broker_sessions — pre-filtered to the rows you may read, so SELECT freely (joins, aggregates, ' +
-      'GROUP BY, datetime(ts/1000,"unixepoch") for UTC). raw_jsonl is excluded unless include_raw=true. ' +
+      'broker_sessions, session_summaries, session_tags, usage_events — pre-filtered to the rows you may ' +
+      'read, so SELECT freely (joins, aggregates, GROUP BY, datetime(ts/1000,"unixepoch") for UTC). ' +
+      'raw_jsonl is excluded unless include_raw=true. ' +
       'Args: sql (required), params (array of bound ? values), include_raw (bool), max_rows (default ' +
       `${DEFAULT_LIMIT}, max ${MAX_LIMIT}). Writes/DDL/multi-statement are rejected.`,
     inputSchema: {

@@ -64,6 +64,33 @@ function makeDb(): Database.Database {
       session_id TEXT, source TEXT NOT NULL, level TEXT NOT NULL, type TEXT NOT NULL,
       message TEXT NOT NULL, stack TEXT, extra TEXT
     );
+    CREATE TABLE session_summaries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      workspace_id TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      tags TEXT,
+      source_max_event_id INTEGER NOT NULL,
+      from_ts INTEGER,
+      to_ts INTEGER,
+      model TEXT,
+      generated_at INTEGER NOT NULL,
+      UNIQUE(session_id, source_max_event_id)
+    );
+    CREATE TABLE session_tags (
+      workspace_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      tag TEXT NOT NULL,
+      PRIMARY KEY (session_id, tag)
+    );
+    CREATE TABLE usage_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts INTEGER NOT NULL,
+      workspace_id TEXT NOT NULL,
+      session_id TEXT,
+      kind TEXT NOT NULL,
+      detail TEXT
+    );
   `);
   const err = db.prepare(
     'INSERT INTO errors (ts, workspace_id, session_id, source, level, type, message) VALUES (?,?,?,?,?,?,?)'
@@ -98,6 +125,33 @@ function makeFileDb(): { db: Database.Database; cleanup: () => void } {
       workspace_id TEXT NOT NULL, broker_session_id TEXT NOT NULL,
       claude_session_id TEXT NOT NULL, learned_at INTEGER NOT NULL,
       PRIMARY KEY (workspace_id, broker_session_id)
+    );
+    CREATE TABLE session_summaries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      workspace_id TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      tags TEXT,
+      source_max_event_id INTEGER NOT NULL,
+      from_ts INTEGER,
+      to_ts INTEGER,
+      model TEXT,
+      generated_at INTEGER NOT NULL,
+      UNIQUE(session_id, source_max_event_id)
+    );
+    CREATE TABLE session_tags (
+      workspace_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      tag TEXT NOT NULL,
+      PRIMARY KEY (session_id, tag)
+    );
+    CREATE TABLE usage_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts INTEGER NOT NULL,
+      workspace_id TEXT NOT NULL,
+      session_id TEXT,
+      kind TEXT NOT NULL,
+      detail TEXT
     );
   `);
   const sess = fileDb.prepare('INSERT INTO sessions (id, workspace_id, last_active_at, ai_title) VALUES (?,?,?,?)');
@@ -189,7 +243,9 @@ describe('scoped query tool (#174)', () => {
 
   it('cannot introspect/escape via sqlite_master', () => {
     const names = run({ sql: 'SELECT name FROM sqlite_master ORDER BY name' }) as Array<{ name: string }>;
-    expect(names.map((r) => r.name).sort()).toEqual(['broker_sessions', 'events', 'sessions']);
+    expect(names.map((r) => r.name).sort()).toEqual(
+      ['broker_sessions', 'events', 'session_summaries', 'session_tags', 'sessions', 'usage_events']
+    );
   });
 
   it('omits raw_jsonl by default and includes it only with include_raw', () => {
@@ -213,6 +269,40 @@ describe('scoped query tool (#174)', () => {
   it('supports bound params', () => {
     const rows = run({ sql: 'SELECT id FROM sessions WHERE id = ?', params: ['sa'] }) as Array<{ id: string }>;
     expect(rows).toEqual([{ id: 'sa' }]);
+  });
+});
+
+describe('query snapshot exposes phase-2 tables, workspace-scoped (#207)', () => {
+  let fdb: Database.Database;
+  let cleanup: () => void;
+  beforeEach(() => {
+    ({ db: fdb, cleanup } = makeFileDb());
+  });
+  afterEach(() => {
+    fdb.close();
+    cleanup();
+  });
+  const run = (args: Record<string, unknown>) => tool('query').run(fdb, args, ctxA);
+
+  it('session_tags are readable and scoped', () => {
+    fdb.prepare(`INSERT INTO session_tags VALUES (?, 'sa', 'broker')`).run(WS_A);
+    fdb.prepare(`INSERT INTO session_tags VALUES (?, 'sb', 'secret-tag')`).run(WS_B);
+    const rows = run({ sql: 'SELECT tag FROM session_tags ORDER BY tag' }) as Array<{ tag: string }>;
+    expect(rows.map((r) => r.tag)).toEqual(['broker']);
+  });
+
+  it('session_summaries are readable and scoped', () => {
+    fdb.prepare(`INSERT INTO session_summaries (session_id, workspace_id, summary, source_max_event_id, generated_at) VALUES (?, ?, ?, ?, ?)`).run('sa', WS_A, 'A summary', 1, 1000);
+    fdb.prepare(`INSERT INTO session_summaries (session_id, workspace_id, summary, source_max_event_id, generated_at) VALUES (?, ?, ?, ?, ?)`).run('sb', WS_B, 'B secret summary', 2, 2000);
+    const rows = run({ sql: 'SELECT session_id FROM session_summaries ORDER BY session_id' }) as Array<{ session_id: string }>;
+    expect(rows.map((r) => r.session_id)).toEqual(['sa']);
+  });
+
+  it('usage_events are readable and scoped', () => {
+    fdb.prepare(`INSERT INTO usage_events (ts, workspace_id, session_id, kind) VALUES (?, ?, ?, ?)`).run(1000, WS_A, 'sa', 'marked-useful');
+    fdb.prepare(`INSERT INTO usage_events (ts, workspace_id, session_id, kind) VALUES (?, ?, ?, ?)`).run(2000, WS_B, 'sb', 'secret-event');
+    const rows = run({ sql: 'SELECT kind FROM usage_events ORDER BY kind' }) as Array<{ kind: string }>;
+    expect(rows.map((r) => r.kind)).toEqual(['marked-useful']);
   });
 });
 
