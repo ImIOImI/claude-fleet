@@ -728,7 +728,9 @@ Wire in `ipc.ts` (next to the `setInputWaitHandler(...)` call at ~line 937; impo
 - [ ] **Step 4: Run** `npx vitest run src/main/mcpServer.test.ts` → PASS. Check the tool-count/contract assertions in that file and `tests/mcp-server.spec.ts` — update the pinned tool list to include `report_session_mapping` (Task 11 pins the rest; do this tool now so the suite stays green).
 - [ ] **Step 5: Commit** — `git commit -am "feat(mcp): report_session_mapping — claude self-reports tab mapping, fixes /clear drift (#207)"`
 
----### Task 9: MCP tools `mark_useful` + `get_config`
+---
+
+### Task 9: MCP tools `mark_useful` + `get_config`
 
 **Files:**
 - Modify: `src/main/mcpServer.ts`, `src/main/ipc.ts`
