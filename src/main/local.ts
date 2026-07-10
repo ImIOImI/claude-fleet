@@ -36,7 +36,7 @@ import type {
   RemoveWorkspaceOpts
 } from './docker.js';
 import { randomUUID } from 'node:crypto';
-import { learnBrokerSessionMapping } from './db.js';
+import { learnBrokerSessionMapping, recordUsageEvent } from './db.js';
 import { logError } from './errorLog.js';
 import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
 import { workspaceStateDir, assertValidWorkspaceId } from './paths.js';
@@ -259,6 +259,7 @@ export async function attachPty(
         });
       }
       learnMirrorMapping(id, sessionId, claudeSessionId);
+      if (resumeOf) recordUsageEvent({ workspaceId: id, sessionId: resumeOf, kind: 'resumed' });
     },
     mcpConfigPath,
     spawn: defaultSpawn

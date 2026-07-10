@@ -113,7 +113,7 @@ export function attachLocalSession(opts: AttachOpts): PtyHandle {
       cwd: opts.cwd,
       cols: opts.cols,
       rows: opts.rows,
-      env: opts.env
+      env: { ...opts.env, CLAUDE_FLEET_BROKER_SESSION_ID: opts.sessionId }
     });
     const s: Session = { proc, ring: [], ringBytes: 0, sub: null, exited: false };
     sessions.set(key, s);

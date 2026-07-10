@@ -29,9 +29,29 @@ const PROJECTS_SUBDIR = join('projects', '-workspace');
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** Session id + sidecar flag from a watched file path, or null if neither a
+ *  primary transcript (<uuid>.jsonl) nor a fleet sidecar (<uuid>.fleet.jsonl).
+ *  Sidecars carry host-bound events (session-summary chapters, #207) and are
+ *  ingested under their session id but NEVER fire 'new-session' — they must
+ *  not touch the pending-attach fallback or look like fresh conversations. */
+export function parseTranscriptFilename(
+  path: string
+): { sessionId: string; sidecar: boolean } | null {
+  if (extname(path) !== '.jsonl') return null;
+  let stem = basename(path, '.jsonl');
+  let sidecar = false;
+  if (stem.endsWith('.fleet')) {
+    stem = stem.slice(0, -'.fleet'.length);
+    sidecar = true;
+  }
+  if (!UUID_RE.test(stem)) return null;
+  return { sessionId: stem, sidecar };
+}
+
 interface FileState {
   workspaceId: string;
   sessionId: string;
+  sidecar: boolean;
   offset: number;
 }
 
@@ -166,10 +186,13 @@ export class JsonlWatcher extends EventEmitter {
     const existing = this.files.get(path);
     const state = existing ?? this.initState(path);
     if (!state) return;
-    // First sighting of this JSONL file path → fire 'new-session' so the
+    // First sighting of a primary transcript → fire 'new-session' so the
     // mapping layer can pair this claude UUID with a pending attach.
+    // Sidecars (<uuid>.fleet.jsonl) are host-written summary data and must
+    // NOT fire 'new-session': they arrive after the session is already known
+    // and firing would corrupt the pending-attach fallback (#207).
     // Fires before the eventual 'ingest' emit for this batch.
-    if (!existing) {
+    if (!existing && !state.sidecar) {
       this.emit('new-session', {
         workspaceId: state.workspaceId,
         sessionId: state.sessionId,
@@ -205,9 +228,9 @@ export class JsonlWatcher extends EventEmitter {
 
   private initState(path: string): FileState | null {
     const workspaceId = workspaceIdFromPath(path);
-    const sessionId = basename(path, '.jsonl');
-    if (!workspaceId || !UUID_RE.test(sessionId)) return null;
-    const state: FileState = { workspaceId, sessionId, offset: 0 };
+    const parsed = parseTranscriptFilename(path);
+    if (!workspaceId || !parsed) return null;
+    const state: FileState = { workspaceId, sessionId: parsed.sessionId, sidecar: parsed.sidecar, offset: 0 };
     this.files.set(path, state);
     return state;
   }
@@ -246,7 +269,11 @@ async function readAndIngest(path: string, state: FileState): Promise<ReadResult
 
     const text = buf.slice(0, lastNl + 1).toString('utf8');
     // The mirror decision is locked per session, so resolve it once per batch.
-    const mirrorOn = effectiveForClaudeSession(state.workspaceId, state.sessionId);
+    // Sidecars (<uuid>.fleet.jsonl) are DB data (Stop-hook chapter summaries,
+    // #207) — they ingest into SQLite normally but are never mirrored: the
+    // mirror is a conversation-history backup, not a DB replica.
+    const mirrorOn =
+      !state.sidecar && effectiveForClaudeSession(state.workspaceId, state.sessionId);
     let insertedCount = 0;
     let mirrorBuf = '';
     for (const line of text.split('\n')) {

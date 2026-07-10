@@ -39,6 +39,9 @@ import {
   setCommitteeHandlers,
   setReadScopeResolver,
   setInputWaitHandler,
+  setSessionMappingHandler,
+  setUsageRecorder,
+  setConfigResolver,
   currentMcpStatus
 } from './mcpServer.js';
 import * as vault from './vault.js';
@@ -81,6 +84,7 @@ import {
   renameSession,
   deleteSession,
   tokensSpentSince,
+  recordUsageEvent,
 } from './db.js';
 import { logError, getLogPath } from './errorLog.js';
 import { broadcastObservabilitySummary } from './observabilityBroadcast.js';
@@ -939,6 +943,32 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     if (!set) { set = new Set(); inputWaitByWorkspace.set(callerId, set); }
     if (waiting) set.add(sessionId); else set.delete(sessionId);
     pushInputWait(callerId);
+  });
+  setSessionMappingHandler((callerId, brokerSessionId, claudeSessionId) => {
+    const previous = learnBrokerSessionMapping(callerId, brokerSessionId, claudeSessionId);
+    if (previous && previous !== claudeSessionId) {
+      logError({
+        source: 'main', type: 'mapping-remapped', level: 'warn',
+        message: `broker ${brokerSessionId} remapped ${previous} → ${claudeSessionId} via SessionStart hook (drift corrected)`,
+        workspaceId: callerId,
+        extra: { brokerSessionId, from: previous, to: claudeSessionId, how: 'session-start-hook' }
+      });
+    }
+  });
+  setUsageRecorder((e) => recordUsageEvent(e));
+  setConfigResolver(async (callerId) => {
+    const m = await readWorkspaceManifest(callerId);
+    const env: Record<string, string> = m?.env?.plain ?? {};
+    const num = (v: unknown, d: number) => (Number.isFinite(Number(v)) ? Number(v) : d);
+    return {
+      workspaceId: callerId,
+      summarizer: {
+        model: typeof env.CF_SUMMARY_MODEL === 'string' ? env.CF_SUMMARY_MODEL : 'haiku',
+        minNewTurns: num(env.CF_SUMMARY_MIN_NEW_TURNS, 20),
+        minIntervalS: num(env.CF_SUMMARY_MIN_INTERVAL_S, 120),
+        windowChars: num(env.CF_SUMMARY_WINDOW_CHARS, 8000)
+      }
+    };
   });
 
   ipcMain.handle('workspace:remove', async (_e, containerId: string, opts?: RemoveWorkspaceOpts) => {

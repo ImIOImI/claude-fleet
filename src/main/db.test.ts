@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDb, closeDb, recordError, learnBrokerSessionMapping, lookupBrokerSession, lookupVerifiedBrokerSession, ERRORS_RETENTION } from './db.js';
+import { openDb, closeDb, recordError, learnBrokerSessionMapping, lookupBrokerSession, lookupVerifiedBrokerSession, ERRORS_RETENTION, recordUsageEvent } from './db.js';
 
 function freshDb() {
   const dir = mkdtempSync(join(tmpdir(), 'cf-db-'));
@@ -101,6 +101,20 @@ describe('verified resume mappings (poisoned legacy rows)', () => {
       // A deterministic relearn upgrades the row to verified.
       learnBrokerSessionMapping('ws-a', 'broker-legacy', 'claude-real');
       expect(lookupVerifiedBrokerSession('ws-a', 'broker-legacy')).toBe('claude-real');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('usage_events (#207)', () => {
+  it('recordUsageEvent appends rows with JSON detail', () => {
+    const dir = freshDb();
+    try {
+      recordUsageEvent({ workspaceId: 'ws-a', sessionId: 's1', kind: 'search-impression', detail: { query: 'broker hang' } });
+      recordUsageEvent({ workspaceId: 'ws-a', kind: 'resumed', sessionId: 's1' });
+      const db = openDb(dir);
+      const rows = db.prepare('SELECT kind, session_id, detail FROM usage_events ORDER BY id').all() as Array<Record<string, unknown>>;
+      expect(rows.map((r) => r.kind)).toEqual(['search-impression', 'resumed']);
+      expect(JSON.parse(rows[0].detail as string)).toEqual({ query: 'broker hang' });
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

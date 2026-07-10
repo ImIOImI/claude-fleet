@@ -118,6 +118,15 @@ export function setInputWaitHandler(fn: InputWaitHandler): void {
   inputWaitHandler = fn;
 }
 
+/** Injected by ipc.ts: persist claude's self-reported tab↔session mapping
+ *  (SessionStart hook, #207). callerId is host-assigned; the handler may only
+ *  ever write the caller's own workspace rows. */
+export type SessionMappingHandler = (callerId: string, brokerSessionId: string, sessionId: string) => void;
+let sessionMappingHandler: SessionMappingHandler | null = null;
+export function setSessionMappingHandler(fn: SessionMappingHandler): void {
+  sessionMappingHandler = fn;
+}
+
 /** Injected at startup (when the embedding model is loaded): a function that
  *  embeds an array of text strings into Float32Array vectors. Until injected,
  *  the `search_transcripts` tool returns an "index is unavailable" error rather
@@ -125,6 +134,57 @@ export function setInputWaitHandler(fn: InputWaitHandler): void {
 let queryEmbedder: EmbedFn | null = null;
 export function setQueryEmbedder(fn: EmbedFn): void {
   queryEmbedder = fn;
+}
+
+// ── Implicit value telemetry (#207) ─────────────────────────────────────────
+// Per-caller ring of recently-returned search result session ids. A read of
+// one of those sessions within CLICKTHROUGH_WINDOW_MS is engagement — the
+// implicit signal Phase 3's value scoring is built on. In-memory only.
+const CLICKTHROUGH_WINDOW_MS = 5 * 60_000;
+const recentSearchHits = new Map<string, Map<string, number>>(); // callerId → sessionId → ts
+export function _resetTelemetryForTests(): void { recentSearchHits.clear(); }
+
+function noteSearchResults(callerId: string, query: string, sessionIds: string[]): void {
+  const ring = recentSearchHits.get(callerId) ?? new Map<string, number>();
+  const now = Date.now();
+  for (const sid of new Set(sessionIds)) {
+    ring.set(sid, now);
+    usageRecorder?.({ workspaceId: callerId, sessionId: sid, kind: 'search-impression', detail: { query: query.slice(0, 300) } });
+  }
+  recentSearchHits.set(callerId, ring);
+}
+
+function noteRead(callerId: string, sessionId: string): void {
+  const ring = recentSearchHits.get(callerId);
+  const ts = ring?.get(sessionId);
+  if (ts === undefined) return;
+  if (Date.now() - ts > CLICKTHROUGH_WINDOW_MS) { ring!.delete(sessionId); return; }
+  ring!.delete(sessionId); // one clickthrough per impression
+  usageRecorder?.({ workspaceId: callerId, sessionId, kind: 'clickthrough' });
+}
+
+/** Injected by ipc.ts: persist a value signal (marked-useful, clickthrough,
+ *  etc.) to the usage_events table. callerId and sessionId come from the tool
+ *  args + ctx — never from the wire unvalidated. */
+export type UsageRecorder = (e: {
+  workspaceId: string;
+  sessionId?: string | null;
+  kind: 'search-impression' | 'clickthrough' | 'marked-useful' | 'resumed';
+  detail?: Record<string, unknown>;
+}) => void;
+let usageRecorder: UsageRecorder | null = null;
+export function setUsageRecorder(fn: UsageRecorder): void {
+  usageRecorder = fn;
+}
+
+/** Injected by ipc.ts: resolve the effective fleet tunables for a workspace
+ *  (app defaults ⊕ workspace env overrides). callerId is host-assigned.
+ *  Returns a Promise so ipc.ts can use async readWorkspaceManifest without
+ *  a sync cache; callTool already awaits tool.run so async resolvers just work. */
+export type ConfigResolver = (callerId: string) => Record<string, unknown> | Promise<Record<string, unknown>>;
+let configResolver: ConfigResolver | null = null;
+export function setConfigResolver(fn: ConfigResolver): void {
+  configResolver = fn;
 }
 
 /** Route a host MCP listener `error` event to BOTH the console (live dev
@@ -702,6 +762,15 @@ function buildSnapshot(srcPath: string, allowed: Set<string>, includeRaw: boolea
       mem.prepare(
         `CREATE TABLE broker_sessions AS SELECT * FROM ${alias}.broker_sessions WHERE ${scope}`
       ).run(...params);
+      mem.prepare(
+        `CREATE TABLE session_summaries AS SELECT * FROM ${alias}.session_summaries WHERE ${scope}`
+      ).run(...params);
+      mem.prepare(
+        `CREATE TABLE session_tags AS SELECT * FROM ${alias}.session_tags WHERE ${scope}`
+      ).run(...params);
+      mem.prepare(
+        `CREATE TABLE usage_events AS SELECT * FROM ${alias}.usage_events WHERE ${scope}`
+      ).run(...params);
     } finally {
       mem.exec(`DETACH ${alias}`);
     }
@@ -778,6 +847,8 @@ export const TOOLS: Tool[] = [
       if (!(typeof row.workspace_id === 'string' && ctx.allowedWorkspaces.has(row.workspace_id))) {
         return null;
       }
+      // Record clickthrough if this session was recently returned by a search (#207).
+      noteRead(ctx.callerId, a.id);
       return withIso(row as Record<string, unknown>, ['started_at', 'last_active_at']);
     }
   },
@@ -795,6 +866,8 @@ export const TOOLS: Tool[] = [
       if (!sessionAllowed(db, a.session_id, ctx.allowedWorkspaces)) {
         throw new Error('not authorized to read this session');
       }
+      // Record clickthrough if this session was recently returned by a search (#207).
+      noteRead(ctx.callerId, a.session_id);
       return { session_id: a.session_id, ...aggregateSessionCost(db, a.session_id) };
     }
   },
@@ -821,6 +894,8 @@ export const TOOLS: Tool[] = [
       if (!sessionAllowed(db, a.session_id, ctx.allowedWorkspaces)) {
         throw new Error('not authorized to read this session');
       }
+      // Record clickthrough if this session was recently returned by a search (#207).
+      noteRead(ctx.callerId, a.session_id);
       let cols = EVENT_COLS;
       if (Array.isArray(a.columns)) {
         const names = a.columns.map((c) => String(c));
@@ -851,7 +926,7 @@ export const TOOLS: Tool[] = [
   {
     name: 'search_transcripts',
     description:
-      'Semantic search over past transcript content in your allowed workspaces. Embeds the query and returns the most similar turns (and session summaries) by meaning. Args: query (required), limit (default 10, max 50), workspace_id (narrows), kind ("turn"|"summary").',
+      'Semantic search over past transcript content in your allowed workspaces. Embeds the query and returns the most similar turns (and session summaries) by meaning. Args: query (required), limit (default 10, max 50), workspace_id (narrows), kind ("turn"|"summary"). If a result leads you to the information you needed, call mark_useful with its sessionId.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -872,7 +947,10 @@ export const TOOLS: Tool[] = [
       }
       const limit = typeof a.limit === 'number' ? Math.max(1, Math.min(50, Math.floor(a.limit))) : 10;
       const kind = a.kind === 'turn' || a.kind === 'summary' ? a.kind : undefined;
-      return searchTranscripts(a.query, allowed, queryEmbedder, { limit, kind }, _db);
+      const hits = await searchTranscripts(a.query, allowed, queryEmbedder, { limit, kind }, _db);
+      // Record one search-impression per distinct result session (#207).
+      noteSearchResults(ctx.callerId, a.query, (hits as Array<{ sessionId?: string }>).map((h) => h.sessionId ?? '').filter(Boolean));
+      return hits;
     },
   },
   {
@@ -887,6 +965,8 @@ export const TOOLS: Tool[] = [
       if (!sessionAllowed(db, a.id, ctx.allowedWorkspaces)) {
         throw new Error('not authorized to read this session');
       }
+      // Record clickthrough if this session was recently returned by a search (#207).
+      noteRead(ctx.callerId, a.id);
       const MAX_SUMMARY_ITEMS = 100;
       const distinctInputs = (names: string[]): { items: string[]; count: number } => {
         const placeholders = names.map(() => '?').join(',');
@@ -964,8 +1044,9 @@ export const TOOLS: Tool[] = [
     name: 'query',
     description:
       'Run a single read-only SQL statement against your workspace data. Tables: events, sessions, ' +
-      'broker_sessions — pre-filtered to the rows you may read, so SELECT freely (joins, aggregates, ' +
-      'GROUP BY, datetime(ts/1000,"unixepoch") for UTC). raw_jsonl is excluded unless include_raw=true. ' +
+      'broker_sessions, session_summaries, session_tags, usage_events — pre-filtered to the rows you may ' +
+      'read, so SELECT freely (joins, aggregates, GROUP BY, datetime(ts/1000,"unixepoch") for UTC). ' +
+      'raw_jsonl is excluded unless include_raw=true. ' +
       'Args: sql (required), params (array of bound ? values), include_raw (bool), max_rows (default ' +
       `${DEFAULT_LIMIT}, max ${MAX_LIMIT}). Writes/DDL/multi-statement are rejected.`,
     inputSchema: {
@@ -1118,6 +1199,65 @@ export const TOOLS: Tool[] = [
       }
       inputWaitHandler(ctx.callerId, a.sessionId, a.waiting);
       return { ok: true };
+    }
+  },
+  {
+    name: 'report_session_mapping',
+    description:
+      'Internal (called by the runner SessionStart hook, not by the model): record which claude ' +
+      'session UUID is running in which tab of THIS workspace. ' +
+      'Args: brokerSessionId (the tab id), sessionId (the claude session UUID).',
+    inputSchema: {
+      type: 'object',
+      properties: { brokerSessionId: { type: 'string' }, sessionId: { type: 'string' } },
+      required: ['brokerSessionId', 'sessionId']
+    },
+    run: (_db, a, ctx) => {
+      if (!sessionMappingHandler) throw new Error('session-mapping reporting is unavailable');
+      if (typeof a.brokerSessionId !== 'string' || typeof a.sessionId !== 'string') {
+        throw new Error('brokerSessionId (string) and sessionId (string) are required');
+      }
+      sessionMappingHandler(ctx.callerId, a.brokerSessionId, a.sessionId);
+      return { ok: true };
+    }
+  },
+  {
+    name: 'mark_useful',
+    description:
+      'Mark a session as useful after its content answered your question — e.g. when a ' +
+      'search_transcripts result led you to the information you needed. This feeds the value ' +
+      'signals that decide what history stays richly indexed. Args: sessionId (required), note (optional, why it helped).',
+    inputSchema: {
+      type: 'object',
+      properties: { sessionId: { type: 'string' }, note: { type: 'string' } },
+      required: ['sessionId']
+    },
+    run: (db, a, ctx) => {
+      if (!usageRecorder) throw new Error('usage recording is unavailable');
+      if (typeof a.sessionId !== 'string') throw new Error('sessionId (string) is required');
+      // Scope: the session must belong to an allowed workspace (same check
+      // shape as get_session — reuse its row lookup against `db`).
+      const row = db.prepare('SELECT workspace_id FROM sessions WHERE id = ?').get(a.sessionId) as { workspace_id: string } | undefined;
+      if (!row || !ctx.allowedWorkspaces.has(row.workspace_id)) throw new Error(`session not found: ${a.sessionId}`);
+      usageRecorder({
+        workspaceId: ctx.callerId,
+        sessionId: a.sessionId,
+        kind: 'marked-useful',
+        detail: typeof a.note === 'string' && a.note ? { note: a.note.slice(0, 500) } : undefined
+      });
+      return { ok: true };
+    }
+  },
+  {
+    name: 'get_config',
+    description:
+      'Effective fleet tunables for this workspace (summarizer model/debounce/window, app defaults ' +
+      '⊕ workspace env overrides). Note: reflects what the host set at container create; manual ' +
+      'in-container env changes are not visible until recreate. No args.',
+    inputSchema: { type: 'object', properties: {} },
+    run: (_db, _a, ctx) => {
+      if (!configResolver) throw new Error('config resolution is unavailable');
+      return configResolver(ctx.callerId);
     }
   }
 ];
