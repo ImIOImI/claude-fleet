@@ -935,13 +935,6 @@ export function tokenSeriesForSession(sessionId: string, limit = 20): number[] {
 // once per tab (see the JsonlWatcher's onNewSession hook in ipc.ts)
 // and persist it so it survives app restart.
 
-/** Union-accumulate concept tags for a session (chapter tags, #207). */
-export function addSessionTags(workspaceId: string, sessionId: string, tags: string[]): void {
-  const d = openDbOrThrow();
-  const ins = d.prepare(`INSERT OR IGNORE INTO session_tags (workspace_id, session_id, tag) VALUES (?, ?, ?)`);
-  for (const t of tags) if (t.trim()) ins.run(workspaceId, sessionId, t.trim().toLowerCase());
-}
-
 /** Append-only value signal (#207). Scores are derived at read time (Phase 3). */
 export function recordUsageEvent(e: {
   workspaceId: string;
