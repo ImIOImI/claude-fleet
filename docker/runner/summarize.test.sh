@@ -19,9 +19,11 @@ mkturns() { # $1 = number of user turns to write
   printf '{"type":"user","message":{"content":[{"type":"tool_result","content":"x"}]}}\n' >> "$t"
 }
 fake_llm="$work/fake-llm.sh"
-cat > "$fake_llm" <<'FAKE'
+llm_input="$work/llm-input"
+# Note: heredoc uses double-quote delimiter so $llm_input expands at write time.
+cat > "$fake_llm" <<FAKE
 #!/usr/bin/env bash
-cat >/dev/null
+cat > "$llm_input"
 printf '{"summary":"Fixed the widget and refactored the frobnicator.","tags":["widget","frobnicator","refactor"]}'
 FAKE
 chmod +x "$fake_llm"
@@ -44,6 +46,11 @@ assert "$(wc -l < "$work/$sid.fleet.jsonl" | tr -d ' ')" "1" "no re-summary with
 # 4. 20 MORE turns: second chapter appended.
 mkturns 40; run
 assert "$(wc -l < "$work/$sid.fleet.jsonl" | tr -d ' ')" "2" "second chapter appended"
+
+# 4b. Second chapter window contains turns from new window only (turn 25 is in
+#     window; turn 5 was in the first chapter and must NOT appear).
+assert "$(grep -c 'prompt number 25' "$work/llm-input" 2>/dev/null || echo 0)" "1" "second chapter contains turn 25"
+assert "$(grep 'prompt number 5 ' "$work/llm-input" >/dev/null 2>&1 && echo found || echo absent)" "absent" "second chapter excludes turn 5"
 
 # 5. Malformed model output: rejected, nothing appended.
 cat > "$fake_llm" <<'FAKE'

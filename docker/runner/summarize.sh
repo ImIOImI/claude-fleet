@@ -38,18 +38,28 @@ new_turns=$((turns - last_turns))
 printf '%s %s\n' "$turns" "$now" > "$state"
 
 generate() {
-  # Window: text of turns AFTER the last summarized turn. Take user strings +
-  # assistant text blocks in file order, keep the tail for the new window,
-  # cap total chars.
+  # Window: text of entries whose user-turn number > last_turns.
+  # Rule: a user prompt increments the counter then carries that new value;
+  # an assistant reply carries the same value as the user prompt it follows
+  # (i.e. it belongs to that turn). Entries with turn number > $skip are in
+  # the new window. This ensures the slice boundary is expressed in user-turn
+  # positions, not mixed-entry positions, so no content from previous chapters
+  # leaks into the current window.
   window="$(jq -rs --argjson skip "$last_turns" '
-    [ .[]
-      | select((.type=="user" and (.message.content|type)=="string")
-               or (.type=="assistant"))
-      | if .type=="user" then "USER: " + .message.content
-        else "ASSISTANT: " + ([.message.content[]? | select(.type=="text") | .text] | join("\n"))
-        end
-      | select(length > 10)
-    ] | .[$skip:] | join("\n---\n")' "$tpath" 2>/dev/null | tail -c "$window_chars")"
+    reduce .[] as $e ([[], 0];
+      if ($e.type=="user" and ($e.message.content|type)=="string")
+      then [ .[0] + [{n: (.[1]+1), e: $e}], .[1]+1 ]
+      elif $e.type=="assistant"
+      then [ .[0] + [{n: .[1], e: $e}], .[1] ]
+      else . end)
+    | .[0]
+    | map(select(.n > $skip))
+    | map(.e
+        | if .type=="user" then "USER: " + .message.content
+          else "ASSISTANT: " + ([.message.content[]? | select(.type=="text") | .text] | join("\n"))
+          end)
+    | map(select(length > 10))
+    | join("\n---\n")' "$tpath" 2>/dev/null | tail -c "$window_chars")"
   [ -n "$window" ] || return 0
 
   prev="$(tail -n 1 "$sidecar" 2>/dev/null | jq -r '.summary // empty' 2>/dev/null)"
