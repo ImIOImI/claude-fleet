@@ -6,8 +6,14 @@
     "PostToolUse": [
       { "matcher": "AskUserQuestion", "hooks": [ { "type": "command", "command": "/usr/local/lib/claude-fleet/input-wait-report.sh" } ] }
     ],
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "/usr/local/lib/claude-fleet/session-report.sh" } ] }
+    ],
     "Stop": [
-      { "hooks": [ { "type": "command", "command": "/usr/local/lib/claude-fleet/input-wait-report.sh" } ] }
+      { "hooks": [
+        { "type": "command", "command": "/usr/local/lib/claude-fleet/input-wait-report.sh" },
+        { "type": "command", "command": "/usr/local/lib/claude-fleet/summarize.sh" }
+      ] }
     ],
     "UserPromptSubmit": [
       { "hooks": [ { "type": "command", "command": "/usr/local/lib/claude-fleet/input-wait-report.sh" } ] }
