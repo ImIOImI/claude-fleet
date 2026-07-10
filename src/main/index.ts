@@ -11,6 +11,7 @@ import { listWorkspaceManifests } from './workspaces.js';
 import { installMainProcessHandlers, getLogPath, setErrorSink, logError } from './errorLog.js';
 import { installAppMenu } from './appMenu.js';
 import { runStartupMigration } from './migration.js';
+import { ensureWorkspaceClaudeJson } from './docker.js';
 import { hardwareAccelDisabledAtStartup } from './config.js';
 import { setWorkspaceDefault } from './mirrorPolicy.js';
 import { makeEmbedder } from './embeddings.js';
@@ -140,6 +141,26 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     // so a paused container that survived the restart finds its socket again
     // (its bind points at <userData>/mcp/<id>/, whose listener must be rebuilt).
     for (const m of manifests) ensureWorkspaceSocket(m.id);
+    // Reconcile the app-managed mcpServers entry in every container workspace's
+    // bind-mounted ~/.claude.json at startup — not just at container create.
+    // Without this, a bridge fix never reaches an existing workspace until its
+    // container is recreated: the old socat entry kept eating the first MCP
+    // request after every app restart (the first-call hang) indefinitely.
+    // Live claude sessions still pick it up only when they (re)spawn the MCP
+    // server process — a tab Refresh or a new session, not a container rebuild.
+    for (const m of manifests) {
+      if (m.kind !== 'container') continue;
+      const workingDir = `/workspace/${m.workspaceSubdir}`.replace(/\/$/, '') || '/workspace';
+      ensureWorkspaceClaudeJson(m.id, workingDir).catch((e) =>
+        logError({
+          source: 'main',
+          type: 'claude-json-reconcile',
+          level: 'warn',
+          message: `startup reconcile of ~/.claude.json failed: ${String(e)}`,
+          workspaceId: m.id
+        })
+      );
+    }
     // Seed each workspace's durable-mirror default from its manifest before the
     // watcher starts ingesting, so the very first lines are mirrored per the
     // saved setting — not dependent on the renderer's later workspace:list poll.
