@@ -274,3 +274,19 @@ func TestManager_CloseDropsAndKills(t *testing.T) {
 		t.Fatal("killed session never reached Done()")
 	}
 }
+
+// TestBrokerSessionIDExported proves the spawned child sees its own broker
+// session id in env — the hooks' only way to know which tab they belong to.
+func TestBrokerSessionIDExported(t *testing.T) {
+	m := NewManager(ManagerConfig{ClaudeExec: "/bin/sh", RingBufBytes: 4096})
+	sess, err := m.Create("tab-42", 80, 24, []string{"-c", "printf '%s' \"$CLAUDE_FLEET_BROKER_SESSION_ID\""})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	defer m.Close("tab-42")
+	if !waitUntil(func() bool {
+		return strings.Contains(string(sess.ring.Snapshot()), "tab-42")
+	}) {
+		t.Fatalf("child env missing broker session id; output=%q", sess.ring.Snapshot())
+	}
+}

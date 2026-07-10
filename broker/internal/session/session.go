@@ -60,7 +60,12 @@ type ChannelWriter interface {
 
 func newSession(id, command string, args []string, cols, rows uint16, ringBytes int) (*Session, error) {
 	cmd := exec.Command(command, args...)
-	cmd.Env = append(cmd.Environ(), "TERM=xterm-256color")
+	// TERM for the TUI; CLAUDE_FLEET_BROKER_SESSION_ID so in-container hooks
+	// can pair their claude session with the tab that owns this PTY (#207).
+	cmd.Env = append(cmd.Environ(),
+		"TERM=xterm-256color",
+		"CLAUDE_FLEET_BROKER_SESSION_ID="+id,
+	)
 	// Detach the child from the broker's controlling tty so signals
 	// the broker receives don't propagate automatically.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
