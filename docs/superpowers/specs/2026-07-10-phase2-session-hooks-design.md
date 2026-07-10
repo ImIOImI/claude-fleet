@@ -34,7 +34,7 @@ New `docker/runner/summarize.sh`, registered under **`Stop`**:
 2. **Generate:** extract recent turn text from the transcript (jq, cap ~8k chars), pipe to `claude -p --model haiku` (env-overridable: `CF_SUMMARY_MODEL`) **in the background** with a prompt demanding strict JSON `{ "summary": "...", "tags": ["..."] }` — 3-sentence summary, 3–6 lowercase concept tags. Runs on the workspace's own credentials (in-container auth). Validate output with jq; discard on parse failure (log to stderr, never block).
 3. **Deliver:** append `{"type":"session-summary","summary","tags","sessionId","model"}` to the sidecar `<uuid>.fleet.jsonl` — **never** to claude's live transcript (appending to it corrupts `--resume`).
 
-**Known risk (resolve during implementation):** the `claude -p` run writes its own throwaway transcript. Run it from `/tmp` and verify the watcher doesn't index it; fallback: filter at ingest by cwd. Cost profile: ~one haiku call per 20 transcript lines, on the workspace's own auth.
+**Known risk (resolve during implementation):** the `claude -p` run writes its own throwaway transcript. Run it from `/tmp` and verify the watcher doesn't index it; fallback: filter at ingest by cwd. Cost profile: ≤ one haiku call per 3 human prompts and ≥120s apart, on the workspace's own auth.
 
 ### D. Watcher + ingest
 
