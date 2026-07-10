@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDb, closeDb, recordError, learnBrokerSessionMapping, ERRORS_RETENTION } from './db.js';
+import { openDb, closeDb, recordError, learnBrokerSessionMapping, lookupBrokerSession, lookupVerifiedBrokerSession, ERRORS_RETENTION } from './db.js';
 
 function freshDb() {
   const dir = mkdtempSync(join(tmpdir(), 'cf-db-'));
@@ -75,6 +75,32 @@ describe('learnBrokerSessionMapping remap reporting (#195)', () => {
       // A remap to a DIFFERENT claude session (the #195 cross-wiring event)
       // must surface the overwritten id so callers can log it.
       expect(learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-2')).toBe('claude-1');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('verified resume mappings (poisoned legacy rows)', () => {
+  it('new learns are verified; lookupVerifiedBrokerSession returns them', () => {
+    const dir = freshDb();
+    try {
+      learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-1');
+      expect(lookupVerifiedBrokerSession('ws-a', 'broker-1')).toBe('claude-1');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('legacy (unverified) rows resolve for observability but never for resume', () => {
+    const dir = freshDb();
+    try {
+      // Simulate a pre-#198 FIFO-guessed row: present, but verified=0.
+      openDb(dir).prepare(`
+        INSERT INTO broker_sessions (workspace_id, broker_session_id, claude_session_id, learned_at, verified)
+        VALUES ('ws-a', 'broker-legacy', 'claude-guessed', 1, 0)
+      `).run();
+      expect(lookupBrokerSession('ws-a', 'broker-legacy')).toBe('claude-guessed'); // observability OK
+      expect(lookupVerifiedBrokerSession('ws-a', 'broker-legacy')).toBeNull();     // resume refused
+      // A deterministic relearn upgrades the row to verified.
+      learnBrokerSessionMapping('ws-a', 'broker-legacy', 'claude-real');
+      expect(lookupVerifiedBrokerSession('ws-a', 'broker-legacy')).toBe('claude-real');
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

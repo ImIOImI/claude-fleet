@@ -539,6 +539,17 @@ const api = {
         brokerSessionId
       ),
     /**
+     * Resume-grade tab→conversation resolution: the claude session UUID this
+     * tab may `--resume`, or null when the mapping isn't verified (learned
+     * deterministically at spawn, #195). Distinct from the summary lookup
+     * above, which may serve legacy guessed mappings for display purposes.
+     */
+    resolveResumeTarget: (
+      workspaceId: string,
+      brokerSessionId: string
+    ): Promise<string | null> =>
+      ipcRenderer.invoke('sessions:resolveResumeTarget', workspaceId, brokerSessionId),
+    /**
      * Per-session USD + token totals. The summary endpoint already carries
      * `usd` for the active session, so the right-rail pane doesn't need
      * this call; it's here for the sessions table (#3) and future per-
