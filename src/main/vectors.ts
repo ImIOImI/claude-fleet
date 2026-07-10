@@ -2,7 +2,17 @@
 // tool (read side). No transformers/db imports here so mcpServer can use it
 // without pulling in the model runtime.
 
-export const EMBED_MODEL_ID = 'Xenova/bge-small-en-v1.5';
+/** HuggingFace repo the embedder loads. */
+export const EMBED_HF_ID = 'Xenova/bge-small-en-v1.5';
+/** Quantization the embedder runs at. q8 cuts steady-state RSS from
+ *  1.9–3.4 GB (fp32, growing per batch — the ORT arena never shrinks) to
+ *  ~300 MB at the indexer's batch/truncation settings, with negligible
+ *  retrieval-quality loss for bge-small. */
+export const EMBED_DTYPE = 'q8';
+/** DB key for embedding rows. Includes the dtype: q8 vectors are not
+ *  comparable to fp32 ones, so a dtype change re-keys (and re-embeds)
+ *  everything rather than mixing incompatible vectors in one search. */
+export const EMBED_MODEL_ID = `${EMBED_HF_ID}@${EMBED_DTYPE}`;
 export const EMBED_DIM = 384;
 
 /** Float32Array → little-endian BLOB. */

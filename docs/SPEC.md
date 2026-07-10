@@ -472,7 +472,14 @@ CREATE INDEX idx_errors_session ON errors(session_id);
 
 -- v6: semantic transcript search (rebuildable from JSONL — additive).
 -- vec is a Float32 BLOB (384 floats, L2-normalized) produced by bge-small-en-v1.5
--- via the local onnxruntime-node backend. Brute-force cosine search; no sqlite-vec.
+-- via the local onnxruntime-node backend (bge-small-en-v1.5 at dtype q8; the DB
+-- model key carries the dtype -- 'Xenova/bge-small-en-v1.5@q8' -- because q8 and
+-- fp32 vectors are not comparable: a dtype change re-keys and re-embeds, and the
+-- backfill purges rows under retired keys via deleteEmbeddingsForOtherModels).
+-- Indexing batch (8) and per-text truncation (1000 chars) are MEMORY controls:
+-- onnxruntime's arena holds its peak allocation for the process lifetime, and
+-- fp32 at batch 64 x 2000 chars grew the main process past 3 GB; q8 at 8 x 1000
+-- holds ~300 MB steady. Brute-force cosine search; no sqlite-vec.
 -- dedup_key = 't<ref_event_id>' for turns, String(source_max_event_id) for summaries.
 CREATE TABLE embeddings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

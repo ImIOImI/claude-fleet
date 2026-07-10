@@ -1,7 +1,8 @@
 import { app, BrowserWindow, shell } from 'electron';
 import { join } from 'node:path';
 import { registerIpc } from './ipc.js';
-import { openDb, closeDb, recordError, listSessions } from './db.js';
+import { openDb, closeDb, deleteEmbeddingsForOtherModels, recordError, listSessions } from './db.js';
+import { EMBED_MODEL_ID } from './vectors.js';
 import { startMcpServer, stopMcpServer, ensureWorkspaceSocket, setMcpStatusListener, setQueryEmbedder } from './mcpServer.js';
 import { broadcastMcpStatus } from './mcpStatusBroadcast.js';
 import { ensureBuiltinLoadouts } from './loadouts.js';
@@ -148,6 +149,9 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     // model change. Non-blocking; walks every known session once.
     void (async () => {
       try {
+        // A model/dtype change re-keys EMBED_MODEL_ID; drop vectors under
+        // retired keys so they don't accumulate as dead weight.
+        deleteEmbeddingsForOtherModels(EMBED_MODEL_ID);
         for (const s of listSessions()) await indexSessionTurns(s.id, embed);
         await indexSessionSummaries(embed);
       } catch (e) {

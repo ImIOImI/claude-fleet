@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDb, closeDb, ingestLine, insertEmbedding, unembeddedTurnEvents, maxEventId } from './db.js';
-import { encodeVector, EMBED_MODEL_ID } from './vectors.js';
+import { openDb, closeDb, deleteEmbeddingsForOtherModels, ingestLine, insertEmbedding, unembeddedTurnEvents, maxEventId } from './db.js';
+import { encodeVector, EMBED_MODEL_ID, EMBED_DIM } from './vectors.js';
 
 let dir: string;
 const WS = '01WS';
@@ -48,5 +48,26 @@ describe('embeddings schema + helpers', () => {
     ingestLine(WS, SES, userLine('u1', 'a'));
     ingestLine(WS, SES, userLine('u2', 'b'));
     expect(maxEventId(SES)).toBeGreaterThan(0);
+  });
+});
+
+describe('deleteEmbeddingsForOtherModels', () => {
+  it('drops rows keyed to a different model, keeps the current ones', () => {
+    ingestLine(WS, SES, userLine('u1', 'hello there'));
+    const [ev] = unembeddedTurnEvents(SES, EMBED_MODEL_ID);
+    insertEmbedding({
+      workspaceId: WS, sessionId: SES, kind: 'turn', refEventId: ev.id,
+      ts: ev.ts, text: 'old fp32 row', modelId: 'Xenova/bge-small-en-v1.5', dim: EMBED_DIM,
+      vec: encodeVector(new Float32Array(EMBED_DIM)), dedupKey: `t${ev.id}-old`,
+    });
+    insertEmbedding({
+      workspaceId: WS, sessionId: SES, kind: 'turn', refEventId: ev.id,
+      ts: ev.ts, text: 'current row', modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
+      vec: encodeVector(new Float32Array(EMBED_DIM)), dedupKey: `t${ev.id}`,
+    });
+    expect(deleteEmbeddingsForOtherModels(EMBED_MODEL_ID)).toBe(1);
+    // The current-model row still satisfies the pending query (row is embedded).
+    expect(unembeddedTurnEvents(SES, EMBED_MODEL_ID).length).toBe(0);
+    expect(deleteEmbeddingsForOtherModels(EMBED_MODEL_ID)).toBe(0);
   });
 });

@@ -1155,6 +1155,14 @@ export interface EmbeddingInsert {
   dedupKey: string;
 }
 
+/** Drop embedding rows keyed to any OTHER model id. Run before backfill so a
+ *  model/dtype change (which re-keys EMBED_MODEL_ID) doesn't leave dead
+ *  vectors accumulating under retired keys. Returns rows deleted. */
+export function deleteEmbeddingsForOtherModels(modelId: string): number {
+  const d = openDbOrThrow();
+  return d.prepare('DELETE FROM embeddings WHERE model_id != ?').run(modelId).changes;
+}
+
 export function insertEmbedding(row: EmbeddingInsert): boolean {
   const d = openDbOrThrow();
   const info = d
