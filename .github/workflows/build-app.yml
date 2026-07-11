@@ -158,12 +158,14 @@ jobs:
           cache: npm
 
       # Same Windows install dance as the build job: skip node-ABI native builds,
+      # then re-run only the electron binary download (skipped by --ignore-scripts),
       # then fetch Electron-ABI prebuilts (better-sqlite3, keytar, node-pty).
       - name: Install dependencies (prebuilt natives, no MSVC)
         shell: bash
         run: |
           npm ci --ignore-scripts
           rm -rf node_modules/cpu-features
+          node node_modules/electron/install.js
           npx --no-install electron-builder install-app-deps --platform win32 --arch x64
 
       - name: Install Electron/Chromium system libraries
