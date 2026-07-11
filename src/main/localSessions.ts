@@ -85,6 +85,10 @@ export interface AttachOpts {
   onFreshSpawn?: (claudeSessionId: string) => void;
   /** Path to a `--mcp-config` file wiring the fleet MCP server (#16, optional). */
   mcpConfigPath?: string;
+  /** Extra args prepended before claude's own flags. Used by e2e tests to
+   *  inject a stub script path when CLAUDE_FLEET_LOCAL_CLAUDE_BIN is an
+   *  interpreter (e.g. `node`) rather than a self-contained binary. */
+  extraArgs?: string[];
   spawn: SpawnPty;
 }
 
@@ -100,6 +104,7 @@ export function attachLocalSession(opts: AttachOpts): PtyHandle {
 
   if (!session || session.exited) {
     const args = [
+      ...(opts.extraArgs ?? []),
       ...(opts.mcpConfigPath ? ['--mcp-config', opts.mcpConfigPath] : []),
       ...(opts.resumeOf
         ? ['--resume', opts.resumeOf]
@@ -206,20 +211,6 @@ export function killWorkspaceSessions(workspaceId: string): void {
     }
     s.sub?.push(null);
     sessions.delete(key);
-  }
-}
-
-/** Send a signal (SIGSTOP/SIGCONT for pause/resume) to a workspace's sessions. */
-export function signalWorkspaceSessions(workspaceId: string, signal: 'SIGSTOP' | 'SIGCONT'): void {
-  const prefix = `${workspaceId}${SEP}`;
-  for (const [key, s] of sessions) {
-    if (key.startsWith(prefix) && !s.exited) {
-      try {
-        s.proc.kill(signal);
-      } catch {
-        /* */
-      }
-    }
   }
 }
 

@@ -109,6 +109,7 @@ async function buildEnv(id: string, ws: { env: Workspace['env'] }): Promise<Node
 // ── Backend surface ────────────────────────────────────────────────────────
 
 export async function ping(): Promise<boolean> {
+  if (process.env.CLAUDE_FLEET_LOCAL_CLAUDE_BIN) return true;
   return (await resolveClaude()) !== null;
 }
 
@@ -207,10 +208,11 @@ export async function attachPty(
   const id = containerId;
   const m = await readWorkspaceManifest(id);
   if (!m) throw new Error(`no manifest for local workspace ${id}`);
-  const claudeBin = await resolveClaude();
-  if (!claudeBin) {
-    throw new Error(CLAUDE_NOT_FOUND_MESSAGE);
-  }
+  const overrideBin = process.env.CLAUDE_FLEET_LOCAL_CLAUDE_BIN;
+  const claudeBin = overrideBin ?? (await resolveClaude());
+  if (!claudeBin) throw new Error(CLAUDE_NOT_FOUND_MESSAGE);
+  const rawExtra = process.env.CLAUDE_FLEET_LOCAL_CLAUDE_EXTRA_ARGS;
+  const extraArgs = rawExtra ? rawExtra.split('\0').filter(Boolean) : undefined;
   const env = await buildEnv(id, m);
   const mcpConfigPath = await ensureMcpConfig(id);
   // Attaching implies the workspace is up.
@@ -254,6 +256,7 @@ export async function attachPty(
       learnMirrorMapping(id, sessionId, claudeSessionId);
       if (resumeOf) recordUsageEvent({ workspaceId: id, sessionId: resumeOf, kind: 'resumed' });
     },
+    extraArgs,
     mcpConfigPath,
     spawn: defaultSpawn
   });
