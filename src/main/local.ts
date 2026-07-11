@@ -3,11 +3,16 @@
 //
 // Unlike the container backend, there's no broker process tree to outlive the
 // app: a local `claude` is a child of the Electron main process and dies when
-// the app quits. So liveness is in-memory only (the `started`/`paused` sets
-// below). Across a workspace switch the process survives via the in-process
-// session manager (`localSessions.ts`); across an app restart it does not, and
-// is restored on the next attach via `claude --resume <uuid>` off the on-disk
+// the app quits. So liveness is in-memory only (the `started` set below).
+// Across a workspace switch the process survives via the in-process session
+// manager (`localSessions.ts`); across an app restart it does not, and is
+// restored on the next attach via `claude --resume <uuid>` off the on-disk
 // JSONL. See SPEC §6/§10.
+//
+// Pause is not supported for local workspaces — there is no container to
+// freeze and SIGSTOP/SIGCONT semantics don't map cleanly onto a host process
+// with in-flight network connections. The Pause button is hidden in the UI for
+// local workspaces.
 
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
@@ -44,7 +49,6 @@ import { resolveEnv } from './vault.js';
 import {
   attachLocalSession,
   killWorkspaceSessions,
-  signalWorkspaceSessions,
   type SpawnPty
 } from './localSessions.js';
 
@@ -57,7 +61,6 @@ const execFileAsync = promisify(execFile);
 // 'stopped' until the user starts/attaches one (their processes died with the
 // previous app run).
 const started = new Set<string>();
-const paused = new Set<string>();
 
 /** node-pty-backed spawn factory passed to the session manager. */
 const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
@@ -125,17 +128,13 @@ export async function listLiveWorkspaces(): Promise<Workspace[]> {
   const result: Workspace[] = [];
   for (const m of manifests) {
     if (m.kind !== 'local') continue;
-    const state: WorkspaceState = paused.has(m.id)
-      ? 'paused'
-      : started.has(m.id)
-        ? 'running'
-        : 'stopped';
+    const state: WorkspaceState = started.has(m.id) ? 'running' : 'stopped';
     result.push({
       ...m,
       state,
-      // Only warm (running/paused) workspaces get a containerId surrogate so
-      // the renderer mounts their pane; stopped ones live in the Saved modal.
-      containerId: state === 'stopped' ? undefined : m.id
+      // Only running workspaces get a containerId surrogate so the renderer
+      // mounts their pane; stopped ones live in the Saved modal.
+      containerId: state === 'running' ? m.id : undefined
     });
   }
   return result;
@@ -151,7 +150,6 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
   // (login, settings, install) and runs in `workingDir`. The manifest is
   // written by the ipc create handler. Processes spawn lazily on first attach.
   started.add(spec.id);
-  paused.delete(spec.id);
   const now = Date.now();
   return {
     id: spec.id,
@@ -175,19 +173,16 @@ export async function startWorkspace(id: string): Promise<string | null> {
   const m = await readWorkspaceManifest(id);
   if (!m || m.kind !== 'local') return null;
   started.add(id);
-  if (paused.delete(id)) signalWorkspaceSessions(id, 'SIGCONT');
   return id; // the containerId surrogate the renderer attaches against
 }
 
-export async function pauseWorkspace(containerId: string): Promise<void> {
-  signalWorkspaceSessions(containerId, 'SIGSTOP');
-  if (started.has(containerId)) paused.add(containerId);
+export async function pauseWorkspace(_containerId: string): Promise<void> {
+  throw new Error('pause is not supported for local workspaces');
 }
 
 export async function stopWorkspace(containerId: string): Promise<void> {
   killWorkspaceSessions(containerId);
   started.delete(containerId);
-  paused.delete(containerId);
 }
 
 export async function removeWorkspace(
@@ -197,7 +192,6 @@ export async function removeWorkspace(
   const id = opts.id ?? containerId;
   killWorkspaceSessions(id);
   started.delete(id);
-  paused.delete(id);
   if (opts.deleteState && id) {
     await rm(workspaceStateDir(id), { recursive: true, force: true });
   }
@@ -221,7 +215,6 @@ export async function attachPty(
   const mcpConfigPath = await ensureMcpConfig(id);
   // Attaching implies the workspace is up.
   started.add(id);
-  paused.delete(id);
   return attachLocalSession({
     workspaceId: id,
     sessionId,

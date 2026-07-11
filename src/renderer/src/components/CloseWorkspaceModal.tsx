@@ -143,7 +143,7 @@ export function CloseWorkspaceModal({ workspace, onClose, onClosed }: Props) {
               {busy ? '…' : 'Stop only'}
             </button>
           )}
-          {running && (
+          {running && workspace.kind !== 'local' && (
             <button
               className="btn"
               onClick={pause}
@@ -153,7 +153,7 @@ export function CloseWorkspaceModal({ workspace, onClose, onClosed }: Props) {
               {busy ? '…' : 'Pause'}
             </button>
           )}
-          {paused && (
+          {paused && workspace.kind !== 'local' && (
             <button className="btn primary" onClick={resume} disabled={busy}>
               {busy ? '…' : 'Resume'}
             </button>
