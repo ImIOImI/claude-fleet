@@ -6,7 +6,7 @@
 // uses ConPTY; this test proves it works end-to-end.
 //
 // The stub is wired via:
-//   CLAUDE_FLEET_LOCAL_CLAUDE_BIN=node
+//   CLAUDE_FLEET_LOCAL_CLAUDE_BIN=<absolute node path>  (resolveClaude override)
 //   CLAUDE_FLEET_LOCAL_CLAUDE_EXTRA_ARGS=<path-to-stub> (NUL-separated)
 // local.ts reads these and passes extraArgs to attachLocalSession so the spawn
 // becomes: node <stub-path> [--mcp-config ...] [--session-id ...]

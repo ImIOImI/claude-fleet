@@ -198,7 +198,6 @@ describe('workspace-level controls', () => {
     expect(hasLiveSessions('ws1')).toBe(false);
     expect(hasLiveSessions('ws2')).toBe(true);
   });
-
 });
 
 describe('host-assigned claude session ids (#195)', () => {

@@ -109,7 +109,6 @@ async function buildEnv(id: string, ws: { env: Workspace['env'] }): Promise<Node
 // ── Backend surface ────────────────────────────────────────────────────────
 
 export async function ping(): Promise<boolean> {
-  if (process.env.CLAUDE_FLEET_LOCAL_CLAUDE_BIN) return true;
   return (await resolveClaude()) !== null;
 }
 
@@ -208,9 +207,14 @@ export async function attachPty(
   const id = containerId;
   const m = await readWorkspaceManifest(id);
   if (!m) throw new Error(`no manifest for local workspace ${id}`);
-  const overrideBin = process.env.CLAUDE_FLEET_LOCAL_CLAUDE_BIN;
-  const claudeBin = overrideBin ?? (await resolveClaude());
+  // resolveClaude honors CLAUDE_FLEET_LOCAL_CLAUDE_BIN as its first resolution
+  // step (see claudeResolve.ts), so an e2e test's stub interpreter is picked up
+  // here without a separate override branch.
+  const claudeBin = await resolveClaude();
   if (!claudeBin) throw new Error(CLAUDE_NOT_FOUND_MESSAGE);
+  // e2e tests point CLAUDE_FLEET_LOCAL_CLAUDE_BIN at an interpreter (node) and
+  // pass the stub script path here (NUL-separated), prepended before claude's
+  // own flags so the spawn becomes `node <stub> [--mcp-config …] [--session-id …]`.
   const rawExtra = process.env.CLAUDE_FLEET_LOCAL_CLAUDE_EXTRA_ARGS;
   const extraArgs = rawExtra ? rawExtra.split('\0').filter(Boolean) : undefined;
   const env = await buildEnv(id, m);
