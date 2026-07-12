@@ -43,12 +43,19 @@ test('Local backend: PTY spawns and reports session mapping (ConPTY on win32) (#
   // claude-stub.js path; passed NUL-separated so it survives spaces in the path.
   const stubPath = path.resolve(import.meta.dirname, 'fixtures', 'claude-stub.js');
 
+  // Use the full absolute path to the node binary running these tests.
+  // On Windows, ConPTY's path_util::get_shell_path only does exact-filename
+  // matching (no PATHEXT extension resolution), so bare 'node' isn't found —
+  // process.execPath gives C:\…\node.exe which is an absolute path that bypasses
+  // the PATH search entirely. On POSIX the full path also works fine.
+  const nodeBin = process.execPath;
+
   const app = await electron.launch({
     args: [REPO_ROOT, `--user-data-dir=${userDataDir}`],
     cwd: REPO_ROOT,
     env: {
       ...process.env,
-      CLAUDE_FLEET_LOCAL_CLAUDE_BIN: 'node',
+      CLAUDE_FLEET_LOCAL_CLAUDE_BIN: nodeBin,
       CLAUDE_FLEET_LOCAL_CLAUDE_EXTRA_ARGS: stubPath
     } as Record<string, string>
   });
