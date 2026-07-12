@@ -1218,6 +1218,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // correlate against attach failures across long sessions.
       logError({
         source: 'main',
+        // Success, not a failure: recordError persists `level ?? 'error'`, so an
+        // unspecified level would store this as `error` and the create modal, which
+        // styles entries by level, would flash it red (#210). Pin it to `info`.
+        level: 'info',
         type: 'pty-attach',
         message: `pty:attach OK (live=${ptySessions.size})`,
         // cols/rows are the dimensions the broker spawned the PTY at.
