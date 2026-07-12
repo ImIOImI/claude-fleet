@@ -8,56 +8,9 @@
 import { _electron as electron, test, expect, type ElectronApplication } from '@playwright/test';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { connect, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { REPO_ROOT } from './_helpers.js';
-
-class RpcClient {
-  private buf = '';
-  private nextId = 1;
-  private pending = new Map<number, (m: { result?: unknown; error?: unknown }) => void>();
-  constructor(private sock: Socket) {
-    sock.setEncoding('utf8');
-    sock.on('data', (chunk: string) => {
-      this.buf += chunk;
-      let nl: number;
-      while ((nl = this.buf.indexOf('\n')) >= 0) {
-        const line = this.buf.slice(0, nl).trim();
-        this.buf = this.buf.slice(nl + 1);
-        if (!line) continue;
-        const msg = JSON.parse(line) as { id?: number; result?: unknown; error?: unknown };
-        if (typeof msg.id === 'number') this.pending.get(msg.id)?.(msg);
-      }
-    });
-  }
-  call(method: string, params?: unknown): Promise<{ result?: unknown; error?: unknown }> {
-    const id = this.nextId++;
-    return new Promise((resolve) => {
-      this.pending.set(id, resolve);
-      this.sock.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
-    });
-  }
-  close(): void {
-    this.sock.destroy();
-  }
-}
-
-async function connectWithRetry(sockPath: string, deadlineMs = 8000): Promise<Socket> {
-  const start = Date.now();
-  for (;;) {
-    try {
-      return await new Promise<Socket>((resolve, reject) => {
-        const s = connect(sockPath);
-        s.once('connect', () => resolve(s));
-        s.once('error', reject);
-      });
-    } catch (err) {
-      if (Date.now() - start > deadlineMs) throw err;
-      await new Promise((r) => setTimeout(r, 150));
-    }
-  }
-}
+import { REPO_ROOT, RpcClient, connectMcp } from './_helpers.js';
 
 function toolText(res: { result?: unknown }): unknown {
   const content = (res.result as { content?: Array<{ text?: string }> })?.content;
@@ -110,8 +63,7 @@ test('scoped reads: caller sees own + read-granted sessions only; no query tool 
     await new Promise((r) => setTimeout(r, 800)); // let the watcher ingest both sessions
 
     const listSessionIds = async (sockId: string): Promise<string[]> => {
-      const sock = await connectWithRetry(path.join(userDataDir, 'mcp', sockId, 'mcp.sock'));
-      const c = new RpcClient(sock);
+      const c = await connectMcp(sockId, userDataDir);
       clients.push(c);
       await c.call('initialize', { protocolVersion: '2024-11-05' });
       // poll until ingest has landed
@@ -138,8 +90,7 @@ test('scoped reads: caller sees own + read-granted sessions only; no query tool 
     // (no grants) it can only ever see A's own rows — never B's — because A's
     // per-call snapshot is seeded with A's workspace rows only. So even raw
     // read-only SQL cannot escape the scope (#146).
-    const qSock = await connectWithRetry(path.join(userDataDir, 'mcp', A, 'mcp.sock'));
-    const qc = new RpcClient(qSock);
+    const qc = await connectMcp(A, userDataDir);
     clients.push(qc);
     await qc.call('initialize', { protocolVersion: '2024-11-05' });
     const tools = await qc.call('tools/list');

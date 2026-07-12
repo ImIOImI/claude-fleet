@@ -140,6 +140,57 @@ jobs:
           path: test-results/
           if-no-files-found: ignore
 
+  # Windows Playwright e2e suite. Runs the same specs as the Linux e2e job but
+  # on windows-latest, so the Windows-only runtime paths get real coverage:
+  # node-pty spawns via ConPTY (local-backend.spec.ts) and the MCP transport is
+  # loopback TCP + per-workspace token instead of a Unix socket (connectMcp in
+  # _helpers.ts picks the transport by platform). Electron needs no Xvfb on
+  # Windows — it opens a native window. As on Linux, no spec spawns a real
+  # Docker container (mock fleet + on-disk seed data), so no Docker daemon is
+  # required.
+  e2e-windows:
+    name: e2e (playwright, windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # Same Windows install dance as the build job: skip node-ABI native builds,
+      # then re-run only the electron binary download (skipped by --ignore-scripts),
+      # then fetch Electron-ABI prebuilts (better-sqlite3, keytar, node-pty).
+      - name: Install dependencies (prebuilt natives, no MSVC)
+        shell: bash
+        run: |
+          npm ci --ignore-scripts
+          rm -rf node_modules/cpu-features
+          node node_modules/electron/install.js
+          npx --no-install electron-builder install-app-deps --platform win32 --arch x64
+
+      - name: Install Electron/Chromium system libraries
+        run: npx playwright install-deps chromium
+
+      - name: Build app
+        run: npm run build
+
+      # No Xvfb on Windows — Electron opens a native window. ELECTRON_DISABLE_SANDBOX
+      # avoids the Chromium setuid-sandbox requirement (same as Linux e2e).
+      - name: Run Playwright e2e
+        run: npm run test:e2e
+        env:
+          ELECTRON_DISABLE_SANDBOX: '1'
+
+      - name: Upload Playwright artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results-windows
+          path: test-results/
+          if-no-files-found: ignore
+
   release:
     name: draft release
     needs: build

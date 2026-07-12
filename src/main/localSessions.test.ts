@@ -7,7 +7,6 @@ import type { Duplex } from 'node:stream';
 import {
   attachLocalSession,
   killWorkspaceSessions,
-  signalWorkspaceSessions,
   hasLiveSessions,
   _resetForTest,
   type PtyProc,
@@ -91,6 +90,26 @@ describe('attachLocalSession', () => {
     const t = tracker();
     attachLocalSession({ ...base, workspaceId: 'ws1', sessionId: 's1', resumeOf: 'uuid-9', spawn: t.spawn });
     expect(t.calls[0].args).toEqual(['--resume', 'uuid-9']);
+  });
+
+  it('prepends extraArgs before all other flags', () => {
+    const t = tracker();
+    attachLocalSession({
+      ...base,
+      workspaceId: 'ws1',
+      sessionId: 's1',
+      extraArgs: ['/path/to/stub.js'],
+      mcpConfigPath: '/state/ws1/mcp-config.json',
+      resumeOf: 'uuid-9',
+      spawn: t.spawn
+    });
+    expect(t.calls[0].args).toEqual([
+      '/path/to/stub.js',
+      '--mcp-config',
+      '/state/ws1/mcp-config.json',
+      '--resume',
+      'uuid-9'
+    ]);
   });
 
   it('prepends --mcp-config before --resume when both are set', () => {
@@ -178,14 +197,6 @@ describe('workspace-level controls', () => {
     expect(t.procs[2].kills).toHaveLength(0); // ws2:s1 untouched
     expect(hasLiveSessions('ws1')).toBe(false);
     expect(hasLiveSessions('ws2')).toBe(true);
-  });
-
-  it('signalWorkspaceSessions sends SIGSTOP/SIGCONT to the workspace sessions', () => {
-    const t = tracker();
-    attachLocalSession({ ...base, workspaceId: 'ws1', sessionId: 's1', spawn: t.spawn });
-    signalWorkspaceSessions('ws1', 'SIGSTOP');
-    signalWorkspaceSessions('ws1', 'SIGCONT');
-    expect(t.procs[0].kills).toEqual(['SIGSTOP', 'SIGCONT']);
   });
 });
 

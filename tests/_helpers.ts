@@ -14,6 +14,7 @@ import {
   type Page,
 } from '@playwright/test';
 import { mkdtempSync, readFileSync } from 'node:fs';
+import { connect, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -490,6 +491,86 @@ export async function openCloseModalFor(window: Page, chipText: string): Promise
   const group = window.locator('.ws-chip-group', { hasText: chipText });
   await group.locator('.ws-chip-menu-trigger').click();
   await window.locator('.ws-chip-menu').getByRole('menuitem', { name: 'Close…' }).click();
+}
+
+/**
+ * Minimal newline-delimited JSON-RPC client over a socket.
+ * Used by MCP e2e tests. Shared here to avoid per-spec copies and so
+ * connectMcp can return a pre-wired instance.
+ */
+export class RpcClient {
+  private buf = '';
+  private nextId = 1;
+  private pending = new Map<number, (msg: { result?: unknown; error?: unknown }) => void>();
+  constructor(private sock: Socket) {
+    sock.setEncoding('utf8');
+    sock.on('data', (chunk: string) => {
+      this.buf += chunk;
+      let nl: number;
+      while ((nl = this.buf.indexOf('\n')) >= 0) {
+        const line = this.buf.slice(0, nl).trim();
+        this.buf = this.buf.slice(nl + 1);
+        if (!line) continue;
+        const msg = JSON.parse(line) as { id?: number; result?: unknown; error?: unknown };
+        if (typeof msg.id === 'number' && this.pending.has(msg.id)) {
+          this.pending.get(msg.id)!(msg);
+          this.pending.delete(msg.id);
+        }
+      }
+    });
+  }
+  call(method: string, params?: unknown): Promise<{ result?: unknown; error?: unknown }> {
+    const id = this.nextId++;
+    return new Promise((resolve) => {
+      this.pending.set(id, resolve);
+      this.sock.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+    });
+  }
+  close(): void {
+    this.sock.destroy();
+  }
+}
+
+/**
+ * Connect to a workspace's MCP server with retry until the deadline.
+ * POSIX: Unix socket at <userDataDir>/mcp/<id>/mcp.sock.
+ * Windows: loopback TCP at 127.0.0.1:CLAUDE_FLEET_MCP_TCP_PORT (default 7071);
+ *   reads the per-workspace token from <userDataDir>/mcp/<id>/token and sends
+ *   it as the first line, matching the in-container bridge protocol.
+ */
+export async function connectMcp(
+  workspaceId: string,
+  userDataDir: string,
+  deadlineMs = 8_000
+): Promise<RpcClient> {
+  const start = Date.now();
+  for (;;) {
+    try {
+      let sock: Socket;
+      if (process.platform === 'win32') {
+        const tokenPath = path.join(userDataDir, 'mcp', workspaceId, 'token');
+        const token = readFileSync(tokenPath, 'utf8').trim();
+        const port = Number(process.env.CLAUDE_FLEET_MCP_TCP_PORT) || 7071;
+        sock = await new Promise<Socket>((resolve, reject) => {
+          const s = connect(port, '127.0.0.1');
+          s.once('connect', () => resolve(s));
+          s.once('error', reject);
+        });
+        sock.write(token + '\n');
+      } else {
+        const sockPath = path.join(userDataDir, 'mcp', workspaceId, 'mcp.sock');
+        sock = await new Promise<Socket>((resolve, reject) => {
+          const s = connect(sockPath);
+          s.once('connect', () => resolve(s));
+          s.once('error', reject);
+        });
+      }
+      return new RpcClient(sock);
+    } catch (err) {
+      if (Date.now() - start > deadlineMs) throw err;
+      await new Promise((r) => setTimeout(r, 150));
+    }
+  }
 }
 
 /**
