@@ -70,8 +70,13 @@ Window:
 $window"
 
   raw="$(printf '%s' "$prompt" | ${CF_SUMMARIZE_CMD:-claude -p --model "$model"} 2>/dev/null)"
+  # Models (esp. haiku) wrap the object in a ```json code fence and may add
+  # prose around it. Pull out the object between the first '{' and last '}'
+  # before validating — the summary JSON has no nested objects, so this is
+  # unambiguous. No braces at all → empty → rejected below.
+  json="${raw#"${raw%%\{*}"}"; json="${json%"${json##*\}}"}"
   # Strict validation: must parse, must have non-empty summary + tags array.
-  out="$(printf '%s' "$raw" | jq -c 'select((.summary|type)=="string" and (.summary|length)>0 and (.tags|type)=="array") | {summary, tags}' 2>/dev/null)"
+  out="$(printf '%s' "$json" | jq -c 'select((.summary|type)=="string" and (.summary|length)>0 and (.tags|type)=="array") | {summary, tags}' 2>/dev/null)"
   [ -n "$out" ] || { echo "summarize: model output rejected" >&2; return 0; }
 
   from_ts="$(jq -rs '[.[] | .timestamp // empty] | first // empty' "$tpath" 2>/dev/null)"

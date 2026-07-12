@@ -69,4 +69,24 @@ mkturns 80
 mkpayload | CF_SUMMARIZE_FG=1 CF_SUMMARIZE_CMD="$fake_llm" bash "$here/summarize.sh"   # honors 120s default vs state just written
 assert "$(wc -l < "$work/$sid.fleet.jsonl" | tr -d ' ')" "2" "interval floor blocks immediate re-run"
 
+# 7. Fenced JSON output: models (esp. haiku) wrap the object in a ```json code
+#    fence and may add prose. It must still be accepted. Isolated sid/transcript
+#    so it doesn't inherit the accumulated state above.
+t2="$work/ffffffff-1111-2222-3333-444444444444.jsonl"
+sid2="ffffffff-1111-2222-3333-444444444444"
+: > "$t2"
+for i in $(seq 1 20); do
+  printf '{"type":"user","timestamp":"2026-07-10T00:00:00Z","message":{"content":"typed human prompt number %s with enough length"}}\n' "$i" >> "$t2"
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":"assistant reply number %s here"}]}}\n' "$i" >> "$t2"
+done
+cat > "$fake_llm" <<'FAKE'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'Here is the summary:\n```json\n{"summary":"Wrapped in a code fence.","tags":["fence","json","markdown"]}\n```\n'
+FAKE
+printf '{"session_id":"%s","transcript_path":"%s"}' "$sid2" "$t2" \
+  | CF_SUMMARIZE_FG=1 CF_SUMMARIZE_CMD="$fake_llm" CF_SUMMARY_MIN_INTERVAL_S=0 bash "$here/summarize.sh"
+assert "$(jq -r '.type' "$work/$sid2.fleet.jsonl" 2>/dev/null)" "session-summary" "fenced JSON output accepted"
+assert "$(jq -r '.tags | length' "$work/$sid2.fleet.jsonl" 2>/dev/null)" "3" "fenced JSON tags parsed"
+
 [ "$fails" -eq 0 ] && echo "ALL PASS" || exit 1
