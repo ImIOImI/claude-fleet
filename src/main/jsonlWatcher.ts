@@ -21,7 +21,7 @@ import { join, basename, extname, sep as pathSep } from 'node:path';
 // electron.vite.config.ts), so `require('chokidar')` would throw
 // ERR_REQUIRE_ESM. Load it via dynamic import inside `start()`.
 import type { FSWatcher } from 'chokidar';
-import { workspaceClaudeDir, workspaceHistoryDir, workspaceHistoryFile } from './paths.js';
+import { workspaceClaudeDir, workspaceHistoryDir, workspaceHistoryFile, hostLocalProjectsDir } from './paths.js';
 import { ingestLine } from './db.js';
 import { effectiveForClaudeSession } from './mirrorPolicy.js';
 
@@ -99,6 +99,45 @@ export class JsonlWatcher extends EventEmitter {
   // Per-file mutex (sequenced via a chained promise) so concurrent
   // add/change events on the same file don't race the byte offset.
   private readonly chains = new Map<string, Promise<void>>();
+
+  // Registered host transcript dirs for local-backend workspaces:
+  //   ~/.claude/projects/<encoded-root>/  →  real workspace id.
+  // Consulted before the '.claude'-parent path rule (which is wrong for
+  // host paths). Watched at the specific subdir only, so unrelated personal
+  // projects in the same ~/.claude/projects tree are never ingested.
+  private readonly hostDirs = new Map<string, string>(); // dir → workspaceId
+
+  registerLocalWorkspace(id: string, workspaceRoot: string): void {
+    this.addHostDir(id, hostLocalProjectsDir(workspaceRoot));
+  }
+
+  /** @internal test seam — register a host dir directly. */
+  registerLocalDirForTest(id: string, dir: string): void {
+    this.addHostDir(id, dir);
+  }
+
+  private addHostDir(id: string, dir: string): void {
+    if (!this.watcher) return;
+    if (this.hostDirs.has(dir)) return;
+    this.hostDirs.set(dir, id);
+    this.watchedDirs.add(dir);
+    try { mkdirSync(dir, { recursive: true }); } catch { /* see registerWorkspace */ }
+    this.watcher.add(dir);
+  }
+
+  unregisterLocalWorkspace(id: string): void {
+    if (!this.watcher) return;
+    for (const [dir, wsId] of [...this.hostDirs]) {
+      if (wsId !== id) continue;
+      this.hostDirs.delete(dir);
+      this.watchedDirs.delete(dir);
+      this.watcher.unwatch(dir);
+      const prefix = dir + pathSep;
+      for (const path of [...this.files.keys()]) {
+        if (path === dir || path.startsWith(prefix)) { this.files.delete(path); this.chains.delete(path); }
+      }
+    }
+  }
 
   async start(workspaceIds: string[]): Promise<void> {
     if (this.watcher) return;
@@ -227,12 +266,20 @@ export class JsonlWatcher extends EventEmitter {
   }
 
   private initState(path: string): FileState | null {
-    const workspaceId = workspaceIdFromPath(path);
+    const workspaceId = this.workspaceIdForPath(path);
     const parsed = parseTranscriptFilename(path);
     if (!workspaceId || !parsed) return null;
     const state: FileState = { workspaceId, sessionId: parsed.sessionId, sidecar: parsed.sidecar, offset: 0 };
     this.files.set(path, state);
     return state;
+  }
+
+  /** Host-dir map first (local workspaces), then the '.claude'-parent rule. */
+  private workspaceIdForPath(path: string): string | null {
+    for (const [dir, wsId] of this.hostDirs) {
+      if (path === dir || path.startsWith(dir + pathSep)) return wsId;
+    }
+    return workspaceIdFromPath(path);
   }
 }
 
