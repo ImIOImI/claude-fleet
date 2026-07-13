@@ -2,12 +2,15 @@
 //
 // Each workspace's claude binary writes its transcript to:
 //   <userData>/state/<name>/.claude/projects/-workspace/<session-uuid>.jsonl
+// Local-backend workspaces instead write under the host's real
+//   ~/.claude/projects/<encoded-root>/  (registered via registerLocalWorkspace).
 //
-// We watch that directory non-recursively (so subagent JSONLs nested under
-// <session-uuid>/subagents/* are deliberately skipped — out of scope for
-// step 1). For every change we read from the file's last-known byte offset
-// to the current EOF, split on newlines, ingest complete lines, and stash
-// the offset of any trailing partial line for the next change event.
+// We watch at depth 2 so subagent JSONLs nested under
+// <session-uuid>/subagents/agent-*.jsonl are also ingested — their token spend
+// rolls up to the parent session (see parseSubagentPath). For every change we
+// read from the file's last-known byte offset to the current EOF, split on
+// newlines, ingest complete lines, and stash the offset of any trailing
+// partial line for the next change event.
 //
 // Re-ingestion is idempotent: db.ingestLine uses uuid (or a content hash for
 // light events) as a dedup key. The byte offset is an in-memory optimization
