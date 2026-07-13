@@ -765,6 +765,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       await writeWorkspaceManifest(spec);
       setWorkspaceDefault(spec.id, spec.mirror.default);
       jsonlWatcher?.registerWorkspace(input.id);
+      if (spec.kind === 'local' && spec.workspaceRoot) {
+        jsonlWatcher?.registerLocalWorkspace(input.id, spec.workspaceRoot);
+      }
 
       // Auto-record the image into the library so the next create's
       // picker shows it (and any labels it was built with). Best-effort:
@@ -1024,6 +1027,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     // Tear down the per-id MCP listener + socket dir (#117). Keyed by workspace
     // id, which lives in opts.id (containerId is the Docker id). Best-effort.
     if (opts?.id) removeWorkspaceSocket(opts.id);
+    if (opts?.id) jsonlWatcher?.unregisterLocalWorkspace(opts.id);
     return result;
   });
 
