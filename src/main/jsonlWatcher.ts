@@ -29,6 +29,19 @@ const PROJECTS_SUBDIR = join('projects', '-workspace');
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+const AGENT_FILE_RE = /^agent-.*\.jsonl$/i;
+
+/** Parent session id from a subagent transcript path
+ *  `.../<parent-session-uuid>/subagents/agent-*.jsonl`, or null. */
+export function parseSubagentPath(path: string): { parentSessionId: string } | null {
+  const segs = path.split(/[\\/]/);
+  const file = segs[segs.length - 1] ?? '';
+  if (!AGENT_FILE_RE.test(file)) return null;
+  if (segs[segs.length - 2] !== 'subagents') return null;
+  const parent = segs[segs.length - 3] ?? '';
+  return UUID_RE.test(parent) ? { parentSessionId: parent } : null;
+}
+
 /** Session id + sidecar flag from a watched file path, or null if neither a
  *  primary transcript (<uuid>.jsonl) nor a fleet sidecar (<uuid>.fleet.jsonl).
  *  Sidecars carry host-bound events (session-summary chapters, #207) and are
@@ -149,7 +162,7 @@ export class JsonlWatcher extends EventEmitter {
     if (this.watcher) return;
     const chokidar = await import('chokidar');
     this.watcher = chokidar.watch([], {
-      depth: 0,
+      depth: 2, // reach <projectdir>/<session>/subagents/agent-*.jsonl (#plan-usage)
       ignoreInitial: false,
       persistent: true,
       // No awaitWriteFinish: we tolerate partial-line reads by tracking the
@@ -273,8 +286,19 @@ export class JsonlWatcher extends EventEmitter {
 
   private initState(path: string): FileState | null {
     const workspaceId = this.workspaceIdForPath(path);
+    if (!workspaceId) return null;
+
+    const sub = parseSubagentPath(path);
+    if (sub) {
+      // Subagent transcript — attribute to the parent session; never a
+      // 'new-session' (the parent already exists) and never mirrored.
+      const state: FileState = { workspaceId, sessionId: sub.parentSessionId, sidecar: true, offset: 0 };
+      this.files.set(path, state);
+      return state;
+    }
+
     const parsed = parseTranscriptFilename(path);
-    if (!workspaceId || !parsed) return null;
+    if (!parsed) return null;
     const state: FileState = { workspaceId, sessionId: parsed.sessionId, sidecar: parsed.sidecar, offset: 0 };
     this.files.set(path, state);
     return state;
