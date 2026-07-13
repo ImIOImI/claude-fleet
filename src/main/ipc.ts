@@ -592,6 +592,9 @@ async function computePlanUsage(opts?: { windowS?: number; at?: number }): Promi
   return {
     ...fold,
     window,
+    // Deliberately the latest *limit-hit* anchor (the one seeding capUsd), not
+    // the covering anchor: throttle anchors and unparsed weekly limits are not
+    // surfaced here.
     latestAnchor: hit
       ? { kind: hit.kind, scope: hit.scope, resetAtIso: hit.resetAt ? new Date(hit.resetAt).toISOString() : null, message: hit.message }
       : null,
