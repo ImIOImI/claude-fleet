@@ -15,6 +15,7 @@ import Database from 'better-sqlite3';
 import { costFor } from './pricing.js';
 import { contextWindowFor } from './contextWindow.js';
 import { isSyntheticPromptText } from './userPromptText.js';
+import { extractAnchor } from './usageAnchors.js';
 
 let db: Database.Database | null = null;
 
@@ -506,6 +507,13 @@ export function ingestLine(
         if (typeof tag === 'string' && tag.trim()) s.insertSessionTag.run(workspaceId, sessionId, tag.trim().toLowerCase());
       }
     }
+  }
+
+  // Rate-limit anchors (#plan-usage): the account-wide-true checkpoints.
+  // Only on a genuinely-new insert so re-reads after compaction don't re-fire.
+  if (info.changes > 0) {
+    const anchor = extractAnchor(parsed, ts ?? Date.now(), dedupKey);
+    if (anchor) insertUsageAnchor(workspaceId, sessionId, ts ?? Date.now(), anchor);
   }
 
   return { inserted: info.changes > 0, sessionId, type };
