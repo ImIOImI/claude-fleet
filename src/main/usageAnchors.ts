@@ -56,7 +56,7 @@ export function extractAnchor(
   tsMs: number,
   dedupKey: string
 ): AnchorInput | null {
-  if (parsed.error === 'rate_limit' || parsed.apiErrorStatus === 429) {
+  if (parsed.error === 'rate_limit') {
     const message = firstText(parsed);
     const reset = message ? parseResetText(message, tsMs) : null;
     return {
