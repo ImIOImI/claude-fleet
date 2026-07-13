@@ -107,6 +107,12 @@ export class JsonlWatcher extends EventEmitter {
   // projects in the same ~/.claude/projects tree are never ingested.
   private readonly hostDirs = new Map<string, string>(); // dir → workspaceId
 
+  /**
+   * Register a local-backend workspace's host transcript dir
+   * (~/.claude/projects/<encoded-root>/) so its files ingest under `id`.
+   * Must be called AFTER start() — like registerWorkspace, this silently
+   * no-ops if the watcher isn't running yet.
+   */
   registerLocalWorkspace(id: string, workspaceRoot: string): void {
     this.addHostDir(id, hostLocalProjectsDir(workspaceRoot));
   }
