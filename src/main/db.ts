@@ -1147,6 +1147,40 @@ export function costForWorkspace(workspaceId: string): SessionCost {
   return rollupGroups(rows);
 }
 
+export interface PlanUsageRow {
+  workspaceId: string;
+  model: string | null;
+  serviceTier: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+}
+
+/**
+ * Windowed app-wide usage: sums assistant-event tokens across ALL workspaces
+ * in the half-open time window `[fromMs, toMs)`, grouped by
+ * `(workspace_id, model, service_tier)`.
+ */
+export function planUsageRows(fromMs: number, toMs: number): PlanUsageRow[] {
+  const d = openDbOrThrow();
+  const rows = d.prepare(`
+    SELECT workspace_id, model, service_tier, ${COST_COLUMNS}
+    FROM events
+    WHERE type = 'assistant' AND ts IS NOT NULL AND ts >= ? AND ts < ?
+    GROUP BY workspace_id, model, service_tier
+  `).all(fromMs, toMs) as Array<CostGroupRow & { workspace_id: string }>;
+  return rows.map((r) => ({
+    workspaceId: r.workspace_id,
+    model: r.model,
+    serviceTier: r.service_tier,
+    inputTokens: r.input_tokens,
+    outputTokens: r.output_tokens,
+    cacheReadInputTokens: r.cache_read_input_tokens,
+    cacheCreationInputTokens: r.cache_creation_input_tokens,
+  }));
+}
+
 // ── Usage anchors ─────────────────────────────────────────────────────────
 
 export interface UsageAnchorRow {
