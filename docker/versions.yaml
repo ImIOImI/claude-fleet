@@ -13,6 +13,7 @@ terramate: 0.17.1     # latest stable; ci-images pins a private 0.17.0-betaNN ch
 opa: 1.13.2           # Open Policy Agent
 aws_cli: 2.33.27      # AWS CLI v2
 azure_cli: 2.83.0     # Azure CLI
+doppler: 3.76.0       # Doppler CLI (secrets manager)
 
 # These track the tool's own latest-release installer (robust, self-updating).
 # Set a concrete version here + teach the script to honor it if you need to pin.
