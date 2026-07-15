@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 # DevOps runner image — the base claude-fleet runner + the SumerSports
 # platform-engineering toolset (GitHub CLI, OpenTofu/Terramate, OPA, tflint/
-# trivy, kubectl/helm/kustomize, dnsutils, Doppler, AWS CLI; Azure CLI opt-in).
+# trivy, kubectl/helm/kustomize, Argo CD/Workflows/Rollouts, dnsutils, Doppler,
+# AWS CLI; Azure CLI opt-in).
 # The committee experts/manager run on this image (loadouts reach for gh,
 # IaC tools).
 #
@@ -21,6 +22,9 @@ ARG OPA_VERSION=1.13.2
 ARG AWS_CLI_VERSION=2.33.27
 ARG AZURE_CLI_VERSION=2.83.0
 ARG DOPPLER_VERSION=3.76.0
+ARG ARGOCD_VERSION=3.4.5
+ARG ARGO_WORKFLOWS_VERSION=4.0.7
+ARG ARGO_ROLLOUTS_VERSION=1.9.0
 # Heavy / creds-dependent CLIs. AWS is on by default; Azure is OFF by default
 # (its pip tree roughly doubles the image to ~3.4 GB) — opt in per build.
 ARG INSTALL_AWS_CLI=true
@@ -30,9 +34,9 @@ ARG INSTALL_AZURE_CLI=false
 # in the workspace image picker, so these let you find "the one with kubectl /
 # aws / tofu". The cloud CLIs reflect the build args (accurate per build).
 LABEL org.opencontainers.image.title="claude-fleet runner · devops" \
-      org.opencontainers.image.description="Base claude-fleet runner + platform-engineering toolset: gh, OpenTofu/Terramate (tenv), OPA, tflint/trivy, kubectl/kustomize/helm, dnsutils, Doppler, AWS CLI." \
+      org.opencontainers.image.description="Base claude-fleet runner + platform-engineering toolset: gh, OpenTofu/Terramate (tenv), OPA, tflint/trivy, kubectl/kustomize/helm, Argo CD/Workflows/Rollouts, dnsutils, Doppler, AWS CLI." \
       com.claude-fleet.variant="devops" \
-      com.claude-fleet.capabilities="gh yq tofu opentofu terramate opa tflint trivy kubectl kustomize helm dig dnsutils pre-commit shellcheck doppler" \
+      com.claude-fleet.capabilities="gh yq tofu opentofu terramate opa tflint trivy kubectl kustomize helm dig dnsutils pre-commit shellcheck doppler argocd argo argo-workflows argo-rollouts" \
       com.claude-fleet.cloud="aws=${INSTALL_AWS_CLI} azure=${INSTALL_AZURE_CLI}"
 
 # tenv's `tofu` shim reads TENV_ROOT at runtime; point every container UID
@@ -61,6 +65,7 @@ RUN --mount=type=secret,id=github_token set -eux; \
     bash iac-lint.sh; \
     bash kubectl.sh; \
     bash helm.sh; \
+    bash argo.sh; \
     bash doppler.sh; \
     if [ "$INSTALL_AWS_CLI" = "true" ]; then bash aws-cli.sh; fi; \
     if [ "$INSTALL_AZURE_CLI" = "true" ]; then bash azure-cli.sh; fi; \

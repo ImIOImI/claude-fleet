@@ -14,6 +14,9 @@ opa: 1.13.2           # Open Policy Agent
 aws_cli: 2.33.27      # AWS CLI v2
 azure_cli: 2.83.0     # Azure CLI
 doppler: 3.76.0       # Doppler CLI (secrets manager)
+argocd: 3.4.5         # Argo CD CLI
+argo_workflows: 4.0.7 # Argo Workflows CLI (`argo`)
+argo_rollouts: 1.9.0  # Argo Rollouts kubectl plugin
 
 # These track the tool's own latest-release installer (robust, self-updating).
 # Set a concrete version here + teach the script to honor it if you need to pin.
