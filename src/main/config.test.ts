@@ -210,8 +210,14 @@ describe('resolveWorkspaceConfig (#219)', () => {
     expect(out).toEqual({
       workspaceId: 'ws-1',
       app: { version: '9.9.9' },
+      runnerImage: null,
       summarizer: { model: 'haiku', minNewTurns: 20, minIntervalS: 120, windowChars: 8000 }
     });
+  });
+
+  it("reports the workspace's configured runner image when the manifest has one", () => {
+    const out = resolveWorkspaceConfig('ws-1', {}, '1.0.0', 'ghcr.io/imioimi/claude-fleet-runner:main');
+    expect(out.runnerImage).toEqual({ name: 'ghcr.io/imioimi/claude-fleet-runner:main' });
   });
 
   it('applies CF_SUMMARY_* env overrides, falling back on non-numeric values', () => {

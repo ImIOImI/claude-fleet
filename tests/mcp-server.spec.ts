@@ -131,9 +131,11 @@ test('MCP server: initialize, tools, typed reads, committee control', async () =
     ).version;
     const cfg = toolText(
       await client.call('tools/call', { name: 'get_config', arguments: {} })
-    ) as { workspaceId?: string; app?: { version?: string } };
+    ) as { workspaceId?: string; app?: { version?: string }; runnerImage?: { name?: string } | null };
     expect(cfg.workspaceId).toBe(id);
     expect(cfg.app?.version).toBe(pkgVersion);
+    // The configured runner image comes straight from the seeded manifest.
+    expect(cfg.runnerImage).toEqual({ name: 'mock' });
 
     // The watcher ingest is async — poll the typed list_sessions until the
     // seeded session lands. (This connection's caller id is `id`, which owns the

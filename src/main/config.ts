@@ -240,21 +240,28 @@ export async function setFavorite(id: string, on: boolean): Promise<string[]> {
 
 /** The `get_config` MCP payload: effective fleet tunables for one workspace
  *  (app defaults ⊕ the workspace's plain-env overrides), plus the live host
- *  app version (#219). Pure — callers supply the manifest env and
- *  `app.getVersion()` — so the shape is unit-testable without Electron. */
+ *  app version and the manifest's configured runner image (#219). Pure —
+ *  callers supply the manifest fields and `app.getVersion()` — so the shape
+ *  is unit-testable without Electron. `runnerImage` is the image *reference*
+ *  the workspace was created with (null for local workspaces); it does not
+ *  say which build of that tag the live container runs — that needs a docker
+ *  inspect and stays a #219 follow-up. */
 export function resolveWorkspaceConfig(
   workspaceId: string,
   env: Record<string, string>,
-  appVersion: string
+  appVersion: string,
+  image?: string
 ): {
   workspaceId: string;
   app: { version: string };
+  runnerImage: { name: string } | null;
   summarizer: { model: string; minNewTurns: number; minIntervalS: number; windowChars: number };
 } {
   const num = (v: unknown, d: number) => (Number.isFinite(Number(v)) ? Number(v) : d);
   return {
     workspaceId,
     app: { version: appVersion },
+    runnerImage: image ? { name: image } : null,
     summarizer: {
       model: typeof env.CF_SUMMARY_MODEL === 'string' ? env.CF_SUMMARY_MODEL : 'haiku',
       minNewTurns: num(env.CF_SUMMARY_MIN_NEW_TURNS, 20),

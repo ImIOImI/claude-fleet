@@ -959,7 +959,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   setUsageRecorder((e) => recordUsageEvent(e));
   setConfigResolver(async (callerId) => {
     const m = await readWorkspaceManifest(callerId);
-    return resolveWorkspaceConfig(callerId, m?.env?.plain ?? {}, app.getVersion());
+    return resolveWorkspaceConfig(callerId, m?.env?.plain ?? {}, app.getVersion(), m?.image);
   });
 
   ipcMain.handle('workspace:remove', async (_e, containerId: string, opts?: RemoveWorkspaceOpts) => {
