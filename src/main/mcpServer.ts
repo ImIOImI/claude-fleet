@@ -1252,8 +1252,9 @@ export const TOOLS: Tool[] = [
     name: 'get_config',
     description:
       'Effective fleet tunables for this workspace (summarizer model/debounce/window, app defaults ' +
-      '⊕ workspace env overrides). Note: reflects what the host set at container create; manual ' +
-      'in-container env changes are not visible until recreate. No args.',
+      '⊕ workspace env overrides), plus app.version — the claude-fleet version of the LIVE host ' +
+      'process (current across app restarts). Tunables reflect what the host set at container ' +
+      'create; manual in-container env changes are not visible until recreate. No args.',
     inputSchema: { type: 'object', properties: {} },
     run: (_db, _a, ctx) => {
       if (!configResolver) throw new Error('config resolution is unavailable');

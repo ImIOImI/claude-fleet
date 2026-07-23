@@ -32,6 +32,7 @@ const {
   setFleetRoot,
   getFleetRoot,
   setFavorite,
+  resolveWorkspaceConfig,
   _resetConfigCacheForTests
 } = await import('./config.js');
 
@@ -200,5 +201,25 @@ describe('setFavorite', () => {
     await setFleetRoot(root);
     await setFavorite('spec-driven', true);
     expect(await getFleetRoot()).toBe(root);
+  });
+});
+
+describe('resolveWorkspaceConfig (#219)', () => {
+  it('reports the live app version alongside the summarizer defaults', () => {
+    const out = resolveWorkspaceConfig('ws-1', {}, '9.9.9');
+    expect(out).toEqual({
+      workspaceId: 'ws-1',
+      app: { version: '9.9.9' },
+      summarizer: { model: 'haiku', minNewTurns: 20, minIntervalS: 120, windowChars: 8000 }
+    });
+  });
+
+  it('applies CF_SUMMARY_* env overrides, falling back on non-numeric values', () => {
+    const out = resolveWorkspaceConfig(
+      'ws-1',
+      { CF_SUMMARY_MODEL: 'sonnet', CF_SUMMARY_MIN_NEW_TURNS: '5', CF_SUMMARY_WINDOW_CHARS: 'garbage' },
+      '1.0.0'
+    );
+    expect(out.summarizer).toEqual({ model: 'sonnet', minNewTurns: 5, minIntervalS: 120, windowChars: 8000 });
   });
 });

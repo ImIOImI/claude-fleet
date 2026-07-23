@@ -238,6 +238,32 @@ export async function setFavorite(id: string, on: boolean): Promise<string[]> {
   return favorites;
 }
 
+/** The `get_config` MCP payload: effective fleet tunables for one workspace
+ *  (app defaults ⊕ the workspace's plain-env overrides), plus the live host
+ *  app version (#219). Pure — callers supply the manifest env and
+ *  `app.getVersion()` — so the shape is unit-testable without Electron. */
+export function resolveWorkspaceConfig(
+  workspaceId: string,
+  env: Record<string, string>,
+  appVersion: string
+): {
+  workspaceId: string;
+  app: { version: string };
+  summarizer: { model: string; minNewTurns: number; minIntervalS: number; windowChars: number };
+} {
+  const num = (v: unknown, d: number) => (Number.isFinite(Number(v)) ? Number(v) : d);
+  return {
+    workspaceId,
+    app: { version: appVersion },
+    summarizer: {
+      model: typeof env.CF_SUMMARY_MODEL === 'string' ? env.CF_SUMMARY_MODEL : 'haiku',
+      minNewTurns: num(env.CF_SUMMARY_MIN_NEW_TURNS, 20),
+      minIntervalS: num(env.CF_SUMMARY_MIN_INTERVAL_S, 120),
+      windowChars: num(env.CF_SUMMARY_WINDOW_CHARS, 8000)
+    }
+  };
+}
+
 /** Test-only: drop the in-memory cache so a fresh read hits disk. */
 export function _resetConfigCacheForTests(): void {
   cached = null;

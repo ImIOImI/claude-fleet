@@ -5,7 +5,7 @@ describe('buildAppMenuTemplate', () => {
   it('adds Open Data Folder and Open Log under a Help submenu, wired to the actions', () => {
     const openDataFolder = vi.fn();
     const openLog = vi.fn();
-    const template = buildAppMenuTemplate({ openDataFolder, openLog });
+    const template = buildAppMenuTemplate({ openDataFolder, openLog }, '1.0.0');
 
     const help = template.find((m) => m.role === 'help' || m.label === 'Help');
     expect(help).toBeDefined();
@@ -21,10 +21,19 @@ describe('buildAppMenuTemplate', () => {
   });
 
   it('preserves the standard role-based submenus', () => {
-    const template = buildAppMenuTemplate({ openDataFolder: () => {}, openLog: () => {} });
+    const template = buildAppMenuTemplate({ openDataFolder: () => {}, openLog: () => {} }, '1.0.0');
     const roles = template.map((m) => m.role);
     expect(roles).toContain('editMenu');
     expect(roles).toContain('viewMenu');
     expect(roles).toContain('windowMenu');
+  });
+
+  it('shows the running app version as a disabled Help item (#219)', () => {
+    const template = buildAppMenuTemplate({ openDataFolder: () => {}, openLog: () => {} }, '9.9.9');
+    const help = template.find((m) => m.role === 'help' || m.label === 'Help');
+    const items = (help!.submenu as Array<{ label?: string; enabled?: boolean }>) ?? [];
+    const version = items.find((i) => i.label === 'claude-fleet v9.9.9');
+    expect(version).toBeDefined();
+    expect(version!.enabled).toBe(false);
   });
 });

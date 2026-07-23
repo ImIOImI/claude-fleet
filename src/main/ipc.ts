@@ -1,4 +1,4 @@
-import { ipcMain, BrowserWindow, dialog, clipboard, Menu, shell } from 'electron';
+import { app, ipcMain, BrowserWindow, dialog, clipboard, Menu, shell } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { unlink, readdir } from 'node:fs/promises';
@@ -22,7 +22,8 @@ import {
   setUsageBudget,
   USAGE_BUDGET_WINDOW_HOURS,
   type UsageBudgetPreset,
-  setFavorite
+  setFavorite,
+  resolveWorkspaceConfig
 } from './config.js';
 import { buildLoadoutCatalog } from './loadoutCatalog.js';
 import * as realDocker from './docker.js';
@@ -958,17 +959,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   setUsageRecorder((e) => recordUsageEvent(e));
   setConfigResolver(async (callerId) => {
     const m = await readWorkspaceManifest(callerId);
-    const env: Record<string, string> = m?.env?.plain ?? {};
-    const num = (v: unknown, d: number) => (Number.isFinite(Number(v)) ? Number(v) : d);
-    return {
-      workspaceId: callerId,
-      summarizer: {
-        model: typeof env.CF_SUMMARY_MODEL === 'string' ? env.CF_SUMMARY_MODEL : 'haiku',
-        minNewTurns: num(env.CF_SUMMARY_MIN_NEW_TURNS, 20),
-        minIntervalS: num(env.CF_SUMMARY_MIN_INTERVAL_S, 120),
-        windowChars: num(env.CF_SUMMARY_WINDOW_CHARS, 8000)
-      }
-    };
+    return resolveWorkspaceConfig(callerId, m?.env?.plain ?? {}, app.getVersion());
   });
 
   ipcMain.handle('workspace:remove', async (_e, containerId: string, opts?: RemoveWorkspaceOpts) => {
