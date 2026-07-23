@@ -1,4 +1,5 @@
 import { app, Menu, type MenuItemConstructorOptions } from 'electron';
+import { appVersionString } from './appVersion.js';
 import { getLogPath } from './errorLog.js';
 import { openHostPath } from './openHostPath.js';
 
@@ -42,7 +43,7 @@ export function installAppMenu(): void {
       openDataFolder: () => void openHostPath(app.getPath('userData')),
       openLog: () => void openHostPath(getLogPath())
     },
-    app.getVersion()
+    appVersionString()
   );
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }

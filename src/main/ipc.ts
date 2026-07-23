@@ -1,4 +1,5 @@
-import { app, ipcMain, BrowserWindow, dialog, clipboard, Menu, shell } from 'electron';
+import { ipcMain, BrowserWindow, dialog, clipboard, Menu, shell } from 'electron';
+import { appVersionString } from './appVersion.js';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { unlink, readdir } from 'node:fs/promises';
@@ -959,7 +960,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   setUsageRecorder((e) => recordUsageEvent(e));
   setConfigResolver(async (callerId) => {
     const m = await readWorkspaceManifest(callerId);
-    return resolveWorkspaceConfig(callerId, m?.env?.plain ?? {}, app.getVersion(), m?.image);
+    return resolveWorkspaceConfig(callerId, m?.env?.plain ?? {}, appVersionString(), m?.image);
   });
 
   ipcMain.handle('workspace:remove', async (_e, containerId: string, opts?: RemoveWorkspaceOpts) => {
