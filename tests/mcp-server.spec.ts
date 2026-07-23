@@ -6,7 +6,8 @@
 // committee control, and the snapshot-scoped `query` tool (#174).
 
 import { _electron as electron, test, expect, type ElectronApplication } from '@playwright/test';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -123,6 +124,24 @@ test('MCP server: initialize, tools, typed reads, committee control', async () =
         'get_config'
       ])
     );
+
+    // get_config surfaces the live host app version (#219) so a workspace can
+    // tell what claude-fleet it's talking to. The e2e app is unpackaged, so it
+    // reports the dev-decorated form: <package.json version>-dev.<HEAD sha>.
+    const pkgVersion = (
+      JSON.parse(readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')) as { version: string }
+    ).version;
+    const headSha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8'
+    }).trim();
+    const cfg = toolText(
+      await client.call('tools/call', { name: 'get_config', arguments: {} })
+    ) as { workspaceId?: string; app?: { version?: string }; runnerImage?: { name?: string } | null };
+    expect(cfg.workspaceId).toBe(id);
+    expect(cfg.app?.version).toBe(`${pkgVersion}-dev.${headSha}`);
+    // The configured runner image comes straight from the seeded manifest.
+    expect(cfg.runnerImage).toEqual({ name: 'mock' });
 
     // The watcher ingest is async — poll the typed list_sessions until the
     // seeded session lands. (This connection's caller id is `id`, which owns the

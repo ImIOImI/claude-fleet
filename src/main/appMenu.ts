@@ -1,4 +1,5 @@
 import { app, Menu, type MenuItemConstructorOptions } from 'electron';
+import { appVersionString } from './appVersion.js';
 import { getLogPath } from './errorLog.js';
 import { openHostPath } from './openHostPath.js';
 
@@ -14,7 +15,7 @@ interface MenuActions {
  * under Help. The macOS app-name submenu is included only on darwin. Pure +
  * exported so the Help items can be unit-tested without an Electron runtime.
  */
-export function buildAppMenuTemplate(actions: MenuActions): MenuItemConstructorOptions[] {
+export function buildAppMenuTemplate(actions: MenuActions, version: string): MenuItemConstructorOptions[] {
   const isMac = process.platform === 'darwin';
   const template: MenuItemConstructorOptions[] = [
     ...(isMac ? [{ role: 'appMenu' as const }] : []),
@@ -25,6 +26,8 @@ export function buildAppMenuTemplate(actions: MenuActions): MenuItemConstructorO
     {
       role: 'help',
       submenu: [
+        { label: `claude-fleet v${version}`, enabled: false },
+        { type: 'separator' },
         { label: 'Open Data Folder', click: () => actions.openDataFolder() },
         { label: 'Open Log', click: () => actions.openLog() }
       ]
@@ -35,9 +38,12 @@ export function buildAppMenuTemplate(actions: MenuActions): MenuItemConstructorO
 
 /** Build the menu with real actions and install it as the application menu. */
 export function installAppMenu(): void {
-  const template = buildAppMenuTemplate({
-    openDataFolder: () => void openHostPath(app.getPath('userData')),
-    openLog: () => void openHostPath(getLogPath())
-  });
+  const template = buildAppMenuTemplate(
+    {
+      openDataFolder: () => void openHostPath(app.getPath('userData')),
+      openLog: () => void openHostPath(getLogPath())
+    },
+    appVersionString()
+  );
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
