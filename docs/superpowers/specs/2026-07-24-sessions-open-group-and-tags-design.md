@@ -108,8 +108,10 @@ Reuses the Library kit verbatim — no new visual vocabulary:
 - Deleting an open session keeps existing semantics (deletes transcript + DB rows); the
   live tab is untouched and the row disappears from the list.
 - Renaming/busy/pulse behavior is orthogonal and unchanged.
-- Mock mode (`CLAUDE_FLEET_MOCK=1`): mock fleet should stamp a couple of sessions
-  open + tagged so the UI is exercisable without Docker.
+- Mock mode (`CLAUDE_FLEET_MOCK=1`) disables the DB + watcher by design, so the
+  Sessions list is empty there — no mock seeding. E2e coverage uses the real-DB
+  transcript-seeding pattern (`tests/sessions-list.spec.ts`), where a seeded
+  `session-summary` JSONL line carries tags through the whole pipeline.
 
 ## Non-goals
 
@@ -126,9 +128,12 @@ Reuses the Library kit verbatim — no new visual vocabulary:
   composition (scope/text/tags incl. tag-text search), tag-count derivation, and the
   open-map broker→claude resolution helper.
 - **Unit:** `db.listSessions` tags join (latest summary wins, absent summary → empty).
-- **e2e (Playwright, mock mode):** Open group renders with the mock's open sessions;
-  clicking an open row activates the existing tab (no new tab created); tag chip click
-  filters the list; `Tags ▾` menu toggles.
+- **e2e (Playwright, real-DB seeding):** extend `tests/sessions-list.spec.ts` — a seeded
+  `session-summary` JSONL line's tags appear on `sessions:list` rows; with no live tab
+  mapped, no `Open` group header renders.
+- **Manual (real app):** live tab → `Open · N` → close tab → row slides to Recent; click
+  an open row from another workspace → jumps to the right workspace + tab. Requires a
+  running container with a learned broker mapping, so it stays manual.
 
 ## SPEC.md updates (same commit as implementation)
 
