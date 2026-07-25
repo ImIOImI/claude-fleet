@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sessionsForScope } from './sessionsView';
+import { sessionsForScope, filterSessions, partitionByOpen, tagCounts } from './sessionsView';
 
 // Minimal session shape — only what the scope logic touches.
 const S = (id: string, workspaceId: string): { id: string; workspaceId: string } => ({
@@ -32,5 +32,77 @@ describe('sessionsForScope', () => {
   it('does not mutate or alias the input list in All scope', () => {
     const all = sessionsForScope(ALL, 'all', null);
     expect(all).not.toBe(ALL);
+  });
+});
+
+const sess = (over: Partial<{
+  id: string; workspaceId: string; workspaceName: string; tags: string[];
+  userSetName: string | null; aiTitle: string | null; firstUserMessage: string | null;
+}> = {}) => ({
+  id: 'id-1', workspaceId: 'ws-1', workspaceName: 'alpha', tags: [],
+  userSetName: null, aiTitle: null, firstUserMessage: 'hello world',
+  ...over
+});
+
+describe('filterSessions', () => {
+  it('empty query + no tags returns everything', () => {
+    const items = [sess({ id: 'a' }), sess({ id: 'b' })];
+    expect(filterSessions(items, '', [])).toEqual(items);
+  });
+  it('matches title precedence field (userSetName > aiTitle > firstUserMessage)', () => {
+    const items = [
+      sess({ id: 'a', userSetName: 'Broker fix' }),
+      sess({ id: 'b', aiTitle: 'MCP hang' }),
+      sess({ id: 'c', firstUserMessage: 'loadout publish' })
+    ];
+    expect(filterSessions(items, 'broker', []).map((s) => s.id)).toEqual(['a']);
+    expect(filterSessions(items, 'mcp', []).map((s) => s.id)).toEqual(['b']);
+    expect(filterSessions(items, 'publish', []).map((s) => s.id)).toEqual(['c']);
+  });
+  it('matches workspace name and tag text via plain substring', () => {
+    const items = [
+      sess({ id: 'a', workspaceName: 'devops' }),
+      sess({ id: 'b', tags: ['reconnect', 'broker'] })
+    ];
+    expect(filterSessions(items, 'devop', []).map((s) => s.id)).toEqual(['a']);
+    expect(filterSessions(items, 'reconn', []).map((s) => s.id)).toEqual(['b']);
+  });
+  it('activeTags require an exact tag, OR across tags, AND with the query', () => {
+    const items = [
+      sess({ id: 'a', tags: ['mcp'], firstUserMessage: 'one' }),
+      sess({ id: 'b', tags: ['ci'], firstUserMessage: 'two' }),
+      sess({ id: 'c', tags: ['mcp', 'ci'], firstUserMessage: 'three' })
+    ];
+    expect(filterSessions(items, '', ['mcp']).map((s) => s.id)).toEqual(['a', 'c']);
+    expect(filterSessions(items, '', ['mcp', 'ci']).map((s) => s.id)).toEqual(['a', 'b', 'c']);
+    expect(filterSessions(items, 'three', ['mcp']).map((s) => s.id)).toEqual(['c']);
+  });
+});
+
+describe('partitionByOpen', () => {
+  it('splits preserving input order in both groups', () => {
+    const items = [sess({ id: 'a' }), sess({ id: 'b' }), sess({ id: 'c' })];
+    const { open, recent } = partitionByOpen(items, new Set(['c', 'a']));
+    expect(open.map((s) => s.id)).toEqual(['a', 'c']);
+    expect(recent.map((s) => s.id)).toEqual(['b']);
+  });
+  it('empty open set puts everything in recent', () => {
+    const { open, recent } = partitionByOpen([sess({ id: 'a' })], new Set());
+    expect(open).toEqual([]);
+    expect(recent.map((s) => s.id)).toEqual(['a']);
+  });
+});
+
+describe('tagCounts', () => {
+  it('counts across sessions, sorted by count desc then alphabetically', () => {
+    const items = [
+      { tags: ['mcp', 'ci'] },
+      { tags: ['mcp'] },
+      { tags: ['broker'] }
+    ];
+    expect(tagCounts(items)).toEqual([['mcp', 2], ['broker', 1], ['ci', 1]]);
+  });
+  it('empty input gives empty output', () => {
+    expect(tagCounts([])).toEqual([]);
   });
 });

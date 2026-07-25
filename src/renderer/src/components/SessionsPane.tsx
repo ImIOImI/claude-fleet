@@ -12,11 +12,12 @@
 // every observability summary push (so new + just-active sessions surface
 // live), and after our own rename/delete actions.
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { colorFor } from '../App';
 import type { SessionListItem } from '../../../preload';
-import { sessionsForScope } from '../sessionsView';
+import { sessionsForScope, filterSessions, partitionByOpen, tagCounts } from '../sessionsView';
 import { useBlinkSync } from '../blinkSync';
+import type { OpenTabRef } from '../busySessions';
 
 type Scope = 'workspace' | 'all';
 
@@ -38,6 +39,8 @@ interface Props {
   busySessionIds?: Set<string>;
   /** Claude session UUIDs blocked on AskUserQuestion — will drive a waiting indicator (Task 7). */
   waitingSessionIds?: Set<string>;
+  /** Claude session UUID → open tab address; drives the Open group (Task 6). */
+  openSessions?: Map<string, OpenTabRef>;
   /** Resume a session — App brings the container up, then opens a resume tab. */
   onResume: (item: SessionListItem) => void;
   /** When true, render without the outer `.pane` wrapper / title — the
@@ -70,6 +73,7 @@ export function SessionsPane({
   selectedWorkspaceId,
   busySessionIds,
   waitingSessionIds,
+  openSessions,
   onResume,
   embedded = false
 }: Props) {
@@ -81,6 +85,10 @@ export function SessionsPane({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [activeTags, setActiveTags] = useState<string[]>([]);
+  const [tagMenu, setTagMenu] = useState(false);
+  const toggleTag = (t: string): void =>
+    setActiveTags((prev) => (prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]));
 
   // Load the full session list once and scope it client-side. The unfiltered
   // `sessions.list()` and the per-workspace `sessions.list(id)` query the same
@@ -138,13 +146,154 @@ export function SessionsPane({
   const scoped = sessionsForScope(items, scope, selectedWorkspaceId);
   const allSessionsCount = items.length;
   const q = query.trim().toLowerCase();
-  const filtered = q
-    ? scoped.filter(
-        (s) =>
-          displayTitle(s).toLowerCase().includes(q) ||
-          s.workspaceName.toLowerCase().includes(q)
-      )
-    : scoped;
+  const filtered = filterSessions(scoped, query, activeTags);
+  const { open: openRows, recent: recentRows } = partitionByOpen(
+    filtered,
+    new Set(openSessions?.keys() ?? [])
+  );
+  const allTags = tagCounts(scoped);
+
+  // FLIP: rows animate to their new slot when they move between the Open and
+  // Recent groups (or reorder). Positions are captured after every render;
+  // deltas against the previous render animate via the Web Animations API.
+  const rowEls = useRef(new Map<string, HTMLLIElement>());
+  const rowRef = (id: string) => (el: HTMLLIElement | null): void => {
+    if (el) rowEls.current.set(id, el);
+    else rowEls.current.delete(id);
+  };
+  const prevRects = useRef(new Map<string, DOMRect>());
+  useLayoutEffect(() => {
+    const next = new Map<string, DOMRect>();
+    for (const [id, el] of rowEls.current) {
+      const rect = el.getBoundingClientRect();
+      const prev = prevRects.current.get(id);
+      if (prev) {
+        const dy = prev.top - rect.top;
+        if (dy !== 0) {
+          el.animate(
+            [{ transform: `translateY(${dy}px)` }, { transform: 'translateY(0)' }],
+            { duration: 350, easing: 'cubic-bezier(.2,.8,.2,1)' }
+          );
+        }
+      }
+      next.set(id, rect);
+    }
+    prevRects.current = next;
+  });
+
+  const renderRow = (s: SessionListItem): JSX.Element => {
+    const editing = editingId === s.id;
+    const confirming = confirmDeleteId === s.id;
+    const color = colorFor({
+      name: s.workspaceName,
+      color: s.workspaceColorHue != null ? { hue: s.workspaceColorHue } : undefined
+    });
+    const busy = busySessionIds?.has(s.id) ?? false;
+    const waiting = waitingSessionIds?.has(s.id) ?? false;
+    const isOpen = openSessions?.has(s.id) ?? false;
+    return (
+      <li key={s.id} ref={rowRef(s.id)} data-sid={s.id} className={`session-row${waiting ? ' waiting' : busy ? ' busy' : ''}${isOpen ? ' open' : ''}`}>
+        {(busy || waiting) && <SessionBusyDot waiting={waiting} />}
+        <div className="session-row-main">
+          {editing ? (
+            <input
+              className="session-row-rename"
+              autoFocus
+              value={draftName}
+              onChange={(e) => setDraftName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void commitRename(s.id);
+                else if (e.key === 'Escape') setEditingId(null);
+              }}
+              onBlur={() => void commitRename(s.id)}
+              aria-label="Session name"
+            />
+          ) : (
+            <button
+              className="session-row-title"
+              title={isOpen ? `Go to open tab — "${displayTitle(s)}"` : `Resume "${displayTitle(s)}"`}
+              onClick={() => onResume(s)}
+            >
+              {displayTitle(s)}
+            </button>
+          )}
+          <div className="session-row-meta">
+            {scope === 'all' && (
+              <span className="session-row-ws" title={s.workspaceName}>
+                <span
+                  className="session-row-dot"
+                  style={{ background: color }}
+                  aria-hidden="true"
+                />
+                {s.workspaceName}
+              </span>
+            )}
+            {s.lastActiveAt != null && (
+              <span className="session-row-time">{relativeTime(s.lastActiveAt)}</span>
+            )}
+            {s.tags.length > 0 && (
+              <span className="session-row-tags">
+                {s.tags.slice(0, 2).map((t) => (
+                  <button
+                    key={t}
+                    className={`tag session-row-tag${activeTags.includes(t) ? ' on' : ''}`}
+                    title={`Filter by "${t}"`}
+                    onClick={() => toggleTag(t)}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </span>
+            )}
+            <span className="session-row-cost">{formatUsd(s.usd)}</span>
+          </div>
+        </div>
+        {confirming ? (
+          <div className="session-row-confirm">
+            <span>Delete?</span>
+            <button className="btn-mini" onClick={() => setConfirmDeleteId(null)}>
+              Cancel
+            </button>
+            <button className="btn-mini danger" onClick={() => void doDelete(s)}>
+              Delete
+            </button>
+          </div>
+        ) : (
+          !editing && (
+            <div className="session-row-actions">
+              <button
+                className="session-row-action"
+                title="Resume this session"
+                aria-label="Resume session"
+                onClick={() => onResume(s)}
+              >
+                ↻
+              </button>
+              <button
+                className="session-row-action"
+                title="Rename"
+                aria-label="Rename session"
+                onClick={() => {
+                  setDraftName(s.userSetName ?? displayTitle(s));
+                  setEditingId(s.id);
+                }}
+              >
+                ✎
+              </button>
+              <button
+                className="session-row-action"
+                title="Delete session + transcript"
+                aria-label="Delete session"
+                onClick={() => setConfirmDeleteId(s.id)}
+              >
+                🗑
+              </button>
+            </div>
+          )
+        )}
+      </li>
+    );
+  };
 
   const body = (
     <>
@@ -177,6 +326,40 @@ export function SessionsPane({
           onChange={(e) => setQuery(e.target.value)}
           aria-label="Search sessions"
         />
+        {allTags.length > 0 && (
+          <div className="library-filter sessions-tagfilter">
+            <button
+              className="tag-dd"
+              onClick={() => setTagMenu((o) => !o)}
+              aria-expanded={tagMenu}
+            >
+              Tags ▾
+            </button>
+            {activeTags.map((t) => (
+              <button key={t} className="pill" onClick={() => toggleTag(t)} title="Remove filter">
+                {t} ✕
+              </button>
+            ))}
+            <span className="nofm">
+              {filtered.length} of {scoped.length}
+            </span>
+            {tagMenu && (
+              <div className="tag-menu" onMouseLeave={() => setTagMenu(false)}>
+                {allTags.map(([t, n]) => (
+                  <label key={t} className="tag-menu-item">
+                    <input
+                      type="checkbox"
+                      checked={activeTags.includes(t)}
+                      onChange={() => toggleTag(t)}
+                    />
+                    <span>{t}</span>
+                    <span className="tm-count">{n}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
       <div className="pane-body sessions-body">
         {!loaded ? null : scope === 'workspace' && !selectedWorkspaceId ? (
@@ -186,111 +369,26 @@ export function SessionsPane({
           </div>
         ) : filtered.length === 0 ? (
           <div className="pane-placeholder subdued">
-            <strong>{q ? 'No matches' : 'No sessions yet'}</strong>
-            {q
+            <strong>{q || activeTags.length > 0 ? 'No matches' : 'No sessions yet'}</strong>
+            {q || activeTags.length > 0
               ? 'Try a different search.'
               : 'Claude sessions appear here once a transcript exists.'}
           </div>
         ) : (
           <ul className="sessions-list">
-            {filtered.map((s) => {
-              const editing = editingId === s.id;
-              const confirming = confirmDeleteId === s.id;
-              const color = colorFor({
-                name: s.workspaceName,
-                color: s.workspaceColorHue != null ? { hue: s.workspaceColorHue } : undefined
-              });
-              const busy = busySessionIds?.has(s.id) ?? false;
-              const waiting = waitingSessionIds?.has(s.id) ?? false;
-              return (
-                <li key={s.id} className={`session-row${waiting ? ' waiting' : busy ? ' busy' : ''}`}>
-                  {(busy || waiting) && <SessionBusyDot waiting={waiting} />}
-                  <div className="session-row-main">
-                    {editing ? (
-                      <input
-                        className="session-row-rename"
-                        autoFocus
-                        value={draftName}
-                        onChange={(e) => setDraftName(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') void commitRename(s.id);
-                          else if (e.key === 'Escape') setEditingId(null);
-                        }}
-                        onBlur={() => void commitRename(s.id)}
-                        aria-label="Session name"
-                      />
-                    ) : (
-                      <button
-                        className="session-row-title"
-                        title={`Resume "${displayTitle(s)}"`}
-                        onClick={() => onResume(s)}
-                      >
-                        {displayTitle(s)}
-                      </button>
-                    )}
-                    <div className="session-row-meta">
-                      {scope === 'all' && (
-                        <span className="session-row-ws" title={s.workspaceName}>
-                          <span
-                            className="session-row-dot"
-                            style={{ background: color }}
-                            aria-hidden="true"
-                          />
-                          {s.workspaceName}
-                        </span>
-                      )}
-                      {s.lastActiveAt != null && (
-                        <span className="session-row-time">{relativeTime(s.lastActiveAt)}</span>
-                      )}
-                      <span className="session-row-cost">{formatUsd(s.usd)}</span>
-                    </div>
-                  </div>
-                  {confirming ? (
-                    <div className="session-row-confirm">
-                      <span>Delete?</span>
-                      <button className="btn-mini" onClick={() => setConfirmDeleteId(null)}>
-                        Cancel
-                      </button>
-                      <button className="btn-mini danger" onClick={() => void doDelete(s)}>
-                        Delete
-                      </button>
-                    </div>
-                  ) : (
-                    !editing && (
-                      <div className="session-row-actions">
-                        <button
-                          className="session-row-action"
-                          title="Resume this session"
-                          aria-label="Resume session"
-                          onClick={() => onResume(s)}
-                        >
-                          ↻
-                        </button>
-                        <button
-                          className="session-row-action"
-                          title="Rename"
-                          aria-label="Rename session"
-                          onClick={() => {
-                            setDraftName(s.userSetName ?? displayTitle(s));
-                            setEditingId(s.id);
-                          }}
-                        >
-                          ✎
-                        </button>
-                        <button
-                          className="session-row-action"
-                          title="Delete session + transcript"
-                          aria-label="Delete session"
-                          onClick={() => setConfirmDeleteId(s.id)}
-                        >
-                          🗑
-                        </button>
-                      </div>
-                    )
-                  )}
-                </li>
-              );
-            })}
+            {openRows.length > 0 && (
+              <li className="session-group-label" aria-hidden="true">
+                <span className="session-group-dot" /> Open · {openRows.length}
+                <span className="session-group-line" />
+              </li>
+            )}
+            {openRows.map(renderRow)}
+            {openRows.length > 0 && recentRows.length > 0 && (
+              <li className="session-group-label recent" aria-hidden="true">
+                Recent<span className="session-group-line" />
+              </li>
+            )}
+            {recentRows.map(renderRow)}
           </ul>
         )}
       </div>

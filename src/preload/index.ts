@@ -47,6 +47,8 @@ export interface SessionListItem {
   workspaceName: string;
   workspaceColorHue: number | null;
   workspaceState: 'running' | 'paused' | 'stopped' | 'deleted';
+  /** Latest summary-chapter tags, relevance-ordered; [] when unsummarized. */
+  tags: string[];
 }
 
 /**

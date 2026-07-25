@@ -118,6 +118,10 @@ interface Props {
    * carries per-session granularity and fires on every flip.
    */
   onBusyIdsChange?: (workspaceId: string, brokerSessionIds: string[]) => void;
+  /** Live tab report for the Sessions list's Open group: the broker session
+   *  ids of tabs whose PTY has not ended. Emitted on every tab-list or
+   *  lifecycle change, and [] when this pane unmounts. */
+  onLiveIdsChange?: (workspaceId: string, brokerSessionIds: string[]) => void;
   /**
    * A resume request targeted at THIS workspace (App only passes it to the
    * matching pane). Opens a new tab that attaches with `claude --resume
@@ -128,6 +132,10 @@ interface Props {
    */
   resumeRequest?: { claudeSessionId: string; title: string; token: number } | null;
   onResumeConsumed?: () => void;
+  /** Activate an existing tab (Sessions-list jump-to-tab). Token-guarded
+   *  like resumeRequest so the same tab can be jumped to repeatedly. */
+  activateRequest?: { brokerSessionId: string; token: number } | null;
+  onActivateConsumed?: () => void;
   /**
    * A loadout-reload request targeted at THIS workspace (#16). Set by App when a
    * loadout is installed and the auto-reload setting is on. The pane reloads its
@@ -235,8 +243,11 @@ export function TerminalPane({
   onActiveTabChange,
   onBusyChange,
   onBusyIdsChange,
+  onLiveIdsChange,
   resumeRequest,
   onResumeConsumed,
+  activateRequest,
+  onActivateConsumed,
   reloadRequest,
   onReloadConsumed,
   onReloadStarted,
@@ -305,6 +316,20 @@ export function TerminalPane({
       return next;
     });
   };
+
+  // Report live tabs (Sessions-list Open group). A tab is live unless its
+  // PTY has ended; endedIds is exactly that set. Cleared on unmount so a
+  // stopped workspace's tabs leave the Open group immediately.
+  useEffect(() => {
+    if (!loaded) return;
+    onLiveIdsChange?.(
+      workspaceId,
+      sessions.filter((s) => !endedIds.has(s.id)).map((s) => s.id)
+    );
+  }, [loaded, workspaceId, sessions, endedIds, onLiveIdsChange]);
+  useEffect(() => {
+    return () => onLiveIdsChange?.(workspaceId, []);
+  }, [workspaceId, onLiveIdsChange]);
 
   // Load inventory on mount, defaulting to a fresh "main" if there's
   // nothing on disk (first attach to this workspace ever, or its
@@ -536,6 +561,19 @@ export function TerminalPane({
     setActiveId(id);
     onResumeConsumed?.();
   }, [loaded, resumeRequest, onResumeConsumed]);
+
+  // Jump-to-tab from the Sessions list: activate an existing tab instead of
+  // opening a duplicate resume tab. Same token dance as resumeRequest.
+  const lastActivateToken = useRef(0);
+  useEffect(() => {
+    if (!loaded || !activateRequest) return;
+    if (lastActivateToken.current === activateRequest.token) return;
+    lastActivateToken.current = activateRequest.token;
+    if (sessions.some((s) => s.id === activateRequest.brokerSessionId)) {
+      setActiveId(activateRequest.brokerSessionId);
+    }
+    onActivateConsumed?.();
+  }, [loaded, activateRequest, sessions, onActivateConsumed]);
 
   // Loadout reload (#16): a request from App means "reload the active session in
   // place so the just-installed loadout takes effect". We hold it pending and

@@ -19,6 +19,7 @@ interface SessionListItem {
   eventCount: number;
   usd: number;
   workspaceName: string;
+  tags: string[];
 }
 
 // Thin window.api.sessions wrappers, run in the renderer page context.
@@ -98,7 +99,8 @@ test('Sessions table: list reflects the seeded transcript; rename + delete round
           service_tier: 'standard'
         }
       }
-    }
+    },
+    { type: 'session-summary', summary: 'Seeded for the tags e2e.', tags: ['e2e-tag', 'seeded'] }
   ];
   writeFileSync(
     path.join(jsonlDir, `${sessionId}.jsonl`),
@@ -129,9 +131,29 @@ test('Sessions table: list reflects the seeded transcript; rename + delete round
     expect(rows[0].id).toBe(sessionId);
     expect(rows[0].firstUserMessage).toBe('Investigate the flaky test');
     expect(rows[0].workspaceName).toBe('sessions-ws');
-    expect(rows[0].eventCount).toBe(2);
+    // 3 = two turns + the seeded session-summary line (every ingested JSONL
+    // line is one row in `events`, summaries included).
+    expect(rows[0].eventCount).toBe(3);
     expect(rows[0].usd).toBeGreaterThan(0);
     expect(rows[0].userSetName).toBeNull();
+
+    // Tags from the summary chapter ride the sessions:list payload (#spec:
+    // sessions-open-group-and-tags). Order preserved from the summarizer.
+    expect(rows[0].tags).toEqual(['e2e-tag', 'seeded']);
+
+    // The embedded SessionsPane defaults to "This workspace" scope, but no
+    // workspace is selected in this harness, so switch it to fleet-wide ("All")
+    // to surface the seeded session in the DOM.
+    await window.getByRole('tab', { name: /^All ·/ }).click();
+
+    // With no live terminal tab mapped to this session, the pane shows no
+    // Open group — every row is plain "Recent" (no group headers at all
+    // when the Open group is empty).
+    // Positive control: the pane is rendered with the seeded row — the
+    // zero-counts below assert an empty Open group, not an empty DOM.
+    await expect(window.locator('.session-row')).toHaveCount(1);
+    await expect(window.locator('.session-group-label')).toHaveCount(0);
+    await expect(window.locator('.session-row.open')).toHaveCount(0);
 
     // The global list (no workspace filter) also surfaces it.
     expect((await listSessions(window)).some((r) => r.id === sessionId)).toBe(true);

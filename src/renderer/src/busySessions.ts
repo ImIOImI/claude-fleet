@@ -31,3 +31,32 @@ export function busyClaudeIdSet(
   }
   return out;
 }
+
+/** A live terminal tab, addressed for jump-to-tab. */
+export interface OpenTabRef {
+  workspaceId: string;
+  brokerSessionId: string;
+}
+
+/**
+ * Resolve live tab *broker* ids to a claude-UUID-keyed open map, the same
+ * translation busyClaudeIdSet does but keeping the (workspace, tab) address
+ * so the Sessions list can jump to the tab. Unmapped broker ids are skipped
+ * (they resolve once observability learns the mapping and the caller
+ * re-resolves).
+ */
+export function openSessionMap(
+  liveBrokerByWorkspace: Record<string, string[]>,
+  mappings: Map<string, Map<string, string>>
+): Map<string, OpenTabRef> {
+  const out = new Map<string, OpenTabRef>();
+  for (const [workspaceId, brokerIds] of Object.entries(liveBrokerByWorkspace)) {
+    const map = mappings.get(workspaceId);
+    if (!map) continue;
+    for (const brokerSessionId of brokerIds) {
+      const claudeId = map.get(brokerSessionId);
+      if (claudeId) out.set(claudeId, { workspaceId, brokerSessionId });
+    }
+  }
+  return out;
+}

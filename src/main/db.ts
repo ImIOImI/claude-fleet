@@ -1125,6 +1125,9 @@ export interface SessionListRow {
   lastActiveAt: number | null;
   eventCount: number;
   usd: number;
+  /** Tags from the latest tagged summary chapter, in emitted (relevance)
+   *  order; [] until the Phase-2 summarizer has produced one. */
+  tags: string[];
 }
 
 interface SessionListSql {
@@ -1196,6 +1199,38 @@ export function listSessions(workspaceId?: string): SessionListRow[] {
     byId.set(r.session_id, agg);
   }
 
+  const tagRows = (
+    workspaceId
+      ? d
+          .prepare(`
+            SELECT session_id, tags, MAX(id) AS latest
+            FROM session_summaries
+            WHERE tags IS NOT NULL AND workspace_id = ?
+            GROUP BY session_id
+          `)
+          .all(workspaceId)
+      : d
+          .prepare(`
+            SELECT session_id, tags, MAX(id) AS latest
+            FROM session_summaries
+            WHERE tags IS NOT NULL
+            GROUP BY session_id
+          `)
+          .all()
+  ) as Array<{ session_id: string; tags: string }>;
+
+  const tagsById = new Map<string, string[]>();
+  for (const r of tagRows) {
+    try {
+      const parsed: unknown = JSON.parse(r.tags);
+      if (Array.isArray(parsed)) {
+        tagsById.set(r.session_id, parsed.filter((t): t is string => typeof t === 'string'));
+      }
+    } catch {
+      /* malformed tags JSON — treat as untagged */
+    }
+  }
+
   return sessRows.map((s) => {
     const agg = byId.get(s.id) ?? { usd: 0, eventCount: 0 };
     return {
@@ -1208,6 +1243,7 @@ export function listSessions(workspaceId?: string): SessionListRow[] {
       lastActiveAt: s.last_active_at,
       eventCount: agg.eventCount,
       usd: agg.usd,
+      tags: tagsById.get(s.id) ?? [],
     };
   });
 }
