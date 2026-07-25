@@ -17,6 +17,7 @@ import { colorFor } from '../App';
 import type { SessionListItem } from '../../../preload';
 import { sessionsForScope } from '../sessionsView';
 import { useBlinkSync } from '../blinkSync';
+import type { OpenTabRef } from '../busySessions';
 
 type Scope = 'workspace' | 'all';
 
@@ -38,6 +39,8 @@ interface Props {
   busySessionIds?: Set<string>;
   /** Claude session UUIDs blocked on AskUserQuestion — will drive a waiting indicator (Task 7). */
   waitingSessionIds?: Set<string>;
+  /** Claude session UUID → open tab address; drives the Open group (Task 6). */
+  openSessions?: Map<string, OpenTabRef>;
   /** Resume a session — App brings the container up, then opens a resume tab. */
   onResume: (item: SessionListItem) => void;
   /** When true, render without the outer `.pane` wrapper / title — the

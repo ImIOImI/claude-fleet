@@ -7,6 +7,7 @@ import { SessionsPane } from './SessionsPane';
 import { LibraryPane } from './LibraryPane';
 import { CommitteePane } from './CommitteePane';
 import type { WorkspaceSummary } from '../App';
+import type { OpenTabRef } from '../busySessions';
 import type { SessionListItem } from '../../../preload';
 
 interface Props {
@@ -17,6 +18,8 @@ interface Props {
   busySessionIds: Set<string>;
   /** Claude session UUIDs blocked on AskUserQuestion — for waiting indicators (Task 7). */
   waitingSessionIds?: Set<string>;
+  /** Claude session UUID → open tab address; used by SessionsPane to group/jump. */
+  openSessions?: Map<string, OpenTabRef>;
   onResume: (item: SessionListItem) => void;
   /** Refresh workspaces (installed-loadout state). */
   onChanged: () => void;
@@ -55,6 +58,7 @@ export function LeftRail({
   selectedWorkspace,
   busySessionIds,
   waitingSessionIds,
+  openSessions,
   onResume,
   onChanged,
   onLoadoutInstalled,
@@ -117,6 +121,7 @@ export function LeftRail({
             selectedWorkspaceId={selectedWorkspaceId}
             busySessionIds={busySessionIds}
             waitingSessionIds={waitingSessionIds}
+            openSessions={openSessions}
             onResume={onResume}
           />
         )}

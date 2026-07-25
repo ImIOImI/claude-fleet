@@ -15,7 +15,7 @@ import { SettingsModal } from './components/SettingsModal';
 import LoadoutBrowserModal from './components/LoadoutBrowserModal';
 import { useDropIngestion } from './dropIngestion';
 import { contextBarSummary } from './contextBarSource';
-import { busyClaudeIdSet } from './busySessions';
+import { busyClaudeIdSet, openSessionMap, type OpenTabRef } from './busySessions';
 import { mergeWaitingSessionIds, waitingFlags } from './waitingSessions';
 import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget } from '../../preload';
 
@@ -247,6 +247,20 @@ export function App() {
       return { ...prev, [workspaceId]: ids };
     });
   }, []);
+  // Per-workspace LIVE broker session ids (tabs whose PTY hasn't ended),
+  // bubbled up from each TerminalPane. Resolved with the busy set below into
+  // the claude-UUID-keyed open map for the Sessions list's Open group.
+  const [liveBrokerByWorkspace, setLiveBrokerByWorkspace] = useState<Record<string, string[]>>({});
+  const handleLiveIds = useCallback((workspaceId: string, ids: string[]) => {
+    setLiveBrokerByWorkspace((prev) => {
+      const prevIds = prev[workspaceId] ?? [];
+      if (prevIds.length === ids.length && prevIds.every((id) => ids.includes(id))) return prev;
+      return { ...prev, [workspaceId]: ids };
+    });
+  }, []);
+  const [openSessions, setOpenSessions] = useState<Map<string, OpenTabRef>>(new Map());
+  const openSessionsRef = useRef(openSessions);
+  useEffect(() => { openSessionsRef.current = openSessions; }, [openSessions]);
   const [busySessionIds, setBusySessionIds] = useState<Set<string>>(new Set());
   // workspaceId -> set of claude session UUIDs blocked on AskUserQuestion.
   const [waitingByWorkspace, setWaitingByWorkspace] = useState<Map<string, Set<string>>>(new Map());
@@ -310,9 +324,23 @@ export function App() {
     token: number;
   } | null>(null);
   const resumeTokenRef = useRef(0);
+  const [activateRequest, setActivateRequest] = useState<{
+    workspaceId: string;
+    brokerSessionId: string;
+    token: number;
+  } | null>(null);
+  const activateTokenRef = useRef(0);
   const handleResumeSession = useCallback(
     async (item: SessionListItem): Promise<void> => {
       try {
+        // Already open as a live tab somewhere? Jump to it instead of
+        // spawning a duplicate `claude --resume` tab.
+        const openTab = openSessionsRef.current.get(item.id);
+        if (openTab) {
+          setSelectedId(openTab.workspaceId);
+          setActivateRequest({ ...openTab, token: ++activateTokenRef.current });
+          return;
+        }
         const res = await window.api.sessions.resume(item.workspaceId);
         if (!res) {
           // Container gone / not recreatable here — non-fatal.
@@ -674,37 +702,50 @@ export function App() {
     };
   }, [apiReady, selectedWorkspaceId, activeTabId]);
 
-  // Resolve busy *broker* session ids → busy *claude* session UUIDs for the
-  // left-rail Sessions list. `summaryForBrokerSession` carries the mapped
-  // claude session id (`sessionId`). Re-runs when the busy set changes and on
+  // Resolve busy + live *broker* session ids → busy *claude* session UUIDs for
+  // the left-rail Sessions list and → the claude-UUID-keyed open map for the
+  // Sessions list's Open group. `summaryForBrokerSession` carries the mapped
+  // claude session id (`sessionId`). Re-runs when either set changes and on
   // every observability push — the broker→claude mapping is learned as
   // transcripts ingest, so a freshly-busy session may not resolve on the first
-  // try. Keyed on a stable, order-insensitive serialization of the busy set.
-  const busyBrokerKey = JSON.stringify(
-    Object.entries(busyBrokerByWorkspace)
-      .filter(([, ids]) => ids.length > 0)
-      .map(([ws, ids]) => [ws, [...ids].sort()] as const)
-      .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+  // try. Keyed on a stable, order-insensitive serialization of both sets.
+  const brokerResolveKey = JSON.stringify(
+    [busyBrokerByWorkspace, liveBrokerByWorkspace].map((rec) =>
+      Object.entries(rec)
+        .filter(([, ids]) => ids.length > 0)
+        .map(([ws, ids]) => [ws, [...ids].sort()] as const)
+        .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    )
   );
   useEffect(() => {
     if (!apiReady) {
       setBusySessionIds(new Set());
+      setOpenSessions(new Map());
       return;
     }
     let cancelled = false;
     const resolve = async (): Promise<void> => {
+      // One mapping fetch pass over the union of busy + live broker ids.
+      const wanted = new Map<string, Set<string>>();
+      for (const rec of [busyBrokerByWorkspace, liveBrokerByWorkspace]) {
+        for (const [wsId, ids] of Object.entries(rec)) {
+          if (ids.length === 0) continue;
+          const set = wanted.get(wsId) ?? new Set<string>();
+          for (const id of ids) set.add(id);
+          wanted.set(wsId, set);
+        }
+      }
       const mappings = new Map<string, Map<string, string>>();
       await Promise.all(
-        Object.entries(busyBrokerByWorkspace).map(async ([wsId, ids]) => {
-          if (ids.length === 0) return;
+        [...wanted.entries()].map(async ([wsId, ids]) => {
           const m = new Map<string, string>();
           await Promise.all(
-            ids.map(async (brokerId) => {
+            [...ids].map(async (brokerId) => {
               try {
                 const sum = await window.api.observability.summaryForBrokerSession(wsId, brokerId);
                 if (sum?.sessionId) m.set(brokerId, sum.sessionId);
               } catch {
-                /* mapping not learned yet — this session simply won't pulse */
+                /* mapping not learned yet — resolves on a later pass */
               }
             })
           );
@@ -712,10 +753,25 @@ export function App() {
         })
       );
       if (cancelled) return;
-      const next = busyClaudeIdSet(busyBrokerByWorkspace, mappings);
+      const nextBusy = busyClaudeIdSet(busyBrokerByWorkspace, mappings);
       setBusySessionIds((prev) =>
-        prev.size === next.size && [...prev].every((id) => next.has(id)) ? prev : next
+        prev.size === nextBusy.size && [...prev].every((id) => nextBusy.has(id)) ? prev : nextBusy
       );
+      const nextOpen = openSessionMap(liveBrokerByWorkspace, mappings);
+      setOpenSessions((prev) => {
+        if (prev.size === nextOpen.size) {
+          let same = true;
+          for (const [k, v] of nextOpen) {
+            const p = prev.get(k);
+            if (!p || p.workspaceId !== v.workspaceId || p.brokerSessionId !== v.brokerSessionId) {
+              same = false;
+              break;
+            }
+          }
+          if (same) return prev;
+        }
+        return nextOpen;
+      });
     };
     void resolve();
     const unsubscribe = window.api.observability.onSummary(() => void resolve());
@@ -723,7 +779,7 @@ export function App() {
       cancelled = true;
       unsubscribe();
     };
-  }, [apiReady, busyBrokerKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [apiReady, brokerResolveKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Subscribe to input-wait pushes (sessions blocked on AskUserQuestion).
   useEffect(() => {
@@ -1039,6 +1095,7 @@ export function App() {
           selectedWorkspace={selectedWorkspace}
           busySessionIds={busySessionIds}
           waitingSessionIds={waitingSessionIds}
+          openSessions={openSessions}
           collapsed={leftCollapsed}
           onToggleCollapse={toggleLeftCollapsed}
           onResume={handleResumeSession}
@@ -1106,6 +1163,11 @@ export function App() {
                   }}
                   onBusyChange={handleBusyChange}
                   onBusyIdsChange={handleBusyIds}
+                  onLiveIdsChange={handleLiveIds}
+                  activateRequest={
+                    activateRequest?.workspaceId === w.id ? activateRequest : null
+                  }
+                  onActivateConsumed={() => setActivateRequest(null)}
                   resumeRequest={resumeRequest?.workspaceId === w.id ? resumeRequest : null}
                   onResumeConsumed={() => setResumeRequest(null)}
                   reloadRequest={reloadRequest?.workspaceId === w.id ? reloadRequest : null}
