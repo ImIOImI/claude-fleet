@@ -136,6 +136,15 @@ export function setQueryEmbedder(fn: EmbedFn): void {
   queryEmbedder = fn;
 }
 
+/** Injected by ipc.ts: compute app-wide token/USD spend for a trailing window.
+ *  The tool is aggregate-only (no per-workspace/transcript detail) so no grant
+ *  is required — mirrors the global-error-row carve-out in list_errors. */
+export type PlanUsageHandler = (opts?: { windowS?: number; at?: number }) => Promise<unknown>;
+let planUsageHandler: PlanUsageHandler | null = null;
+export function setPlanUsageHandler(fn: PlanUsageHandler): void {
+  planUsageHandler = fn;
+}
+
 // ── Implicit value telemetry (#207) ─────────────────────────────────────────
 // Per-caller ring of recently-returned search result session ids. A read of
 // one of those sessions within CLICKTHROUGH_WINDOW_MS is engagement — the
@@ -1034,6 +1043,28 @@ export const TOOLS: Tool[] = [
       return rows.map((r) => ({ ...r, ts_iso: new Date(r.ts as number).toISOString() }));
     }
   },
+  {
+    name: 'plan_usage',
+    description:
+      'App-wide claude-fleet token spend for the current 5-hour usage window: ' +
+      'USD + token totals, byModel/byBackend splits, the latest account limit anchor, ' +
+      'and a provisional plan-usage %. Aggregates ONLY — no per-workspace or transcript ' +
+      'detail (use get_cost for your own session). No grant required. usedPct measures ' +
+      "claude-fleet's own consumption, not the whole Anthropic account.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        window_s: { type: 'number', description: 'trailing window seconds when no anchor covers `at` (default 18000)' },
+        at: { type: 'number', description: 'epoch ms to evaluate (default now)' },
+      },
+    },
+    run: async (_db, a) => {
+      if (!planUsageHandler) throw new Error('plan_usage is unavailable (no handler wired)');
+      const windowS = typeof a.window_s === 'number' ? a.window_s : undefined;
+      const at = typeof a.at === 'number' ? a.at : undefined;
+      return planUsageHandler({ windowS, at });
+    },
+  },
   // `query` runs arbitrary READ-ONLY SQL against a per-call in-memory SNAPSHOT
   // seeded only with the caller's allowed-workspace rows (buildSnapshot). The
   // real DB is DETACHed before the caller's SQL runs, so isolation is structural
@@ -1264,3 +1295,8 @@ export const TOOLS: Tool[] = [
     }
   }
 ];
+
+/** Test-only: fetch a single Tool entry by name for unit-testing run() directly. */
+export function __getToolForTest(name: string): Tool | undefined {
+  return TOOLS.find((t) => t.name === name);
+}

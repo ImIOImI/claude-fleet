@@ -15,6 +15,7 @@ import Database from 'better-sqlite3';
 import { costFor } from './pricing.js';
 import { contextWindowFor } from './contextWindow.js';
 import { isSyntheticPromptText } from './userPromptText.js';
+import { extractAnchor } from './usageAnchors.js';
 
 let db: Database.Database | null = null;
 
@@ -284,6 +285,30 @@ function migrate(d: Database.Database): void {
     `);
     d.pragma('user_version = 8');
   }
+
+  if ((d.pragma('user_version', { simple: true }) as number) < 9) {
+    // Account-level rate-limit anchors — the only account-wide-true checkpoints
+    // (429 reset messages + populated rateLimits payloads). Rebuildable from JSONL.
+    d.exec(`
+      CREATE TABLE usage_anchors (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts           INTEGER NOT NULL,
+        workspace_id TEXT,
+        session_id   TEXT,
+        kind         TEXT NOT NULL,      -- 'limit-hit' | 'throttle'
+        http_status  INTEGER,
+        scope        TEXT,               -- 'session' | 'weekly' | 'opus-weekly'
+        reset_at     INTEGER,
+        window_start INTEGER,
+        message      TEXT,
+        rate_limits  TEXT,
+        dedup_key    TEXT NOT NULL,
+        UNIQUE(dedup_key)
+      );
+      CREATE INDEX idx_usage_anchors_ts ON usage_anchors(ts);
+    `);
+    d.pragma('user_version = 9');
+  }
 }
 
 // ── Ingest ────────────────────────────────────────────────────────────────
@@ -336,6 +361,14 @@ const insertSessionChapter = (d: Database.Database) =>
 const insertSessionTag = (d: Database.Database) =>
   d.prepare(`INSERT OR IGNORE INTO session_tags (workspace_id, session_id, tag) VALUES (?, ?, ?)`);
 
+const insertUsageAnchorStmt = (d: Database.Database) =>
+  d.prepare(`
+    INSERT OR IGNORE INTO usage_anchors
+      (ts, workspace_id, session_id, kind, http_status, scope, reset_at, window_start, message, rate_limits, dedup_key)
+    VALUES
+      (@ts, @workspace_id, @session_id, @kind, @http_status, @scope, @reset_at, @window_start, @message, @rate_limits, @dedup_key)
+  `);
+
 interface Cache {
   insertEvent: ReturnType<typeof insertEvent>;
   upsertSession: ReturnType<typeof upsertSession>;
@@ -344,6 +377,7 @@ interface Cache {
   updateSessionLastPrompt: ReturnType<typeof updateSessionLastPrompt>;
   insertSessionChapter: ReturnType<typeof insertSessionChapter>;
   insertSessionTag: ReturnType<typeof insertSessionTag>;
+  insertUsageAnchor: ReturnType<typeof insertUsageAnchorStmt>;
 }
 let stmts: Cache | null = null;
 function getStmts(d: Database.Database): Cache {
@@ -356,6 +390,7 @@ function getStmts(d: Database.Database): Cache {
       updateSessionLastPrompt: updateSessionLastPrompt(d),
       insertSessionChapter: insertSessionChapter(d),
       insertSessionTag: insertSessionTag(d),
+      insertUsageAnchor: insertUsageAnchorStmt(d),
     };
   }
   return stmts;
@@ -472,6 +507,13 @@ export function ingestLine(
         if (typeof tag === 'string' && tag.trim()) s.insertSessionTag.run(workspaceId, sessionId, tag.trim().toLowerCase());
       }
     }
+  }
+
+  // Rate-limit anchors (#plan-usage): the account-wide-true checkpoints.
+  // Only on a genuinely-new insert so re-reads after compaction don't re-fire.
+  if (info.changes > 0) {
+    const anchor = extractAnchor(parsed, ts ?? Date.now(), dedupKey);
+    if (anchor) insertUsageAnchor(workspaceId, sessionId, ts ?? Date.now(), anchor);
   }
 
   return { inserted: info.changes > 0, sessionId, type };
@@ -1103,6 +1145,114 @@ export function costForWorkspace(workspaceId: string): SessionCost {
     `)
     .all(workspaceId) as CostGroupRow[];
   return rollupGroups(rows);
+}
+
+export interface PlanUsageRow {
+  workspaceId: string;
+  model: string | null;
+  serviceTier: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+}
+
+/**
+ * Windowed app-wide usage: sums assistant-event tokens across ALL workspaces
+ * in the half-open time window `[fromMs, toMs)`, grouped by
+ * `(workspace_id, model, service_tier)`.
+ */
+export function planUsageRows(fromMs: number, toMs: number): PlanUsageRow[] {
+  const d = openDbOrThrow();
+  const rows = d.prepare(`
+    SELECT workspace_id, model, service_tier, ${COST_COLUMNS}
+    FROM events
+    WHERE type = 'assistant' AND ts IS NOT NULL AND ts >= ? AND ts < ?
+    GROUP BY workspace_id, model, service_tier
+  `).all(fromMs, toMs) as Array<CostGroupRow & { workspace_id: string }>;
+  return rows.map((r) => ({
+    workspaceId: r.workspace_id,
+    model: r.model,
+    serviceTier: r.service_tier,
+    inputTokens: r.input_tokens,
+    outputTokens: r.output_tokens,
+    cacheReadInputTokens: r.cache_read_input_tokens,
+    cacheCreationInputTokens: r.cache_creation_input_tokens,
+  }));
+}
+
+// ── Usage anchors ─────────────────────────────────────────────────────────
+
+export interface UsageAnchorRow {
+  id: number;
+  ts: number;
+  workspaceId: string | null;
+  sessionId: string | null;
+  kind: string;
+  httpStatus: number | null;
+  scope: string | null;
+  resetAt: number | null;
+  windowStart: number | null;
+  message: string | null;
+}
+
+interface UsageAnchorSql {
+  id: number; ts: number; workspace_id: string | null; session_id: string | null;
+  kind: string; http_status: number | null; scope: string | null;
+  reset_at: number | null; window_start: number | null; message: string | null;
+}
+
+function toAnchorRow(r: UsageAnchorSql): UsageAnchorRow {
+  return {
+    id: r.id, ts: r.ts, workspaceId: r.workspace_id, sessionId: r.session_id,
+    kind: r.kind, httpStatus: r.http_status, scope: r.scope,
+    resetAt: r.reset_at, windowStart: r.window_start, message: r.message,
+  };
+}
+
+export function insertUsageAnchor(
+  workspaceId: string,
+  sessionId: string,
+  tsMs: number,
+  a: import('./usageAnchors.js').AnchorInput
+): void {
+  const d = openDbOrThrow();
+  getStmts(d).insertUsageAnchor.run({
+    ts: tsMs,
+    workspace_id: workspaceId,
+    session_id: sessionId,
+    kind: a.kind,
+    http_status: a.httpStatus,
+    scope: a.scope,
+    reset_at: a.resetAt,
+    window_start: a.windowStart,
+    message: a.message,
+    rate_limits: a.rateLimits,
+    dedup_key: a.dedupKey,
+  });
+}
+
+export function latestAnchorCovering(atMs: number): UsageAnchorRow | null {
+  const d = openDbOrThrow();
+  const r = d.prepare(`
+    SELECT id, ts, workspace_id, session_id, kind, http_status, scope, reset_at, window_start, message
+    FROM usage_anchors
+    WHERE scope = 'session' AND window_start IS NOT NULL AND reset_at IS NOT NULL
+      AND window_start <= ? AND ? <= reset_at
+    ORDER BY ts DESC LIMIT 1
+  `).get(atMs, atMs) as UsageAnchorSql | undefined;
+  return r ? toAnchorRow(r) : null;
+}
+
+export function latestLimitHitAnchor(): UsageAnchorRow | null {
+  const d = openDbOrThrow();
+  const r = d.prepare(`
+    SELECT id, ts, workspace_id, session_id, kind, http_status, scope, reset_at, window_start, message
+    FROM usage_anchors
+    WHERE kind = 'limit-hit' AND window_start IS NOT NULL
+    ORDER BY ts DESC LIMIT 1
+  `).get() as UsageAnchorSql | undefined;
+  return r ? toAnchorRow(r) : null;
 }
 
 // ── Sessions table ──────────────────────────────────────────────────────

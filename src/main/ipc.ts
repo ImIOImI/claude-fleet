@@ -44,7 +44,8 @@ import {
   setSessionMappingHandler,
   setUsageRecorder,
   setConfigResolver,
-  currentMcpStatus
+  currentMcpStatus,
+  setPlanUsageHandler,
 } from './mcpServer.js';
 import * as vault from './vault.js';
 import * as fs from './fs.js';
@@ -87,7 +88,11 @@ import {
   deleteSession,
   tokensSpentSince,
   recordUsageEvent,
+  planUsageRows,
+  latestAnchorCovering,
+  latestLimitHitAnchor,
 } from './db.js';
+import { foldPlanUsage, type PlanUsageFold } from './planUsage.js';
 import { logError, getLogPath } from './errorLog.js';
 import { broadcastObservabilitySummary } from './observabilityBroadcast.js';
 import { broadcastInputWait } from './inputWaitBroadcast.js';
@@ -552,6 +557,55 @@ async function committeeRoster(callerId: string): Promise<RosterEntry[]> {
   return buildRoster(caller, callerId, all, (id) => liveStatusFields(id, stateById.get(id) === 'paused'));
 }
 
+// ── Plan-wide usage (#plan-usage-ledger) ─────────────────────────────────
+
+export interface PlanUsage extends PlanUsageFold {
+  window: { startMs: number; endMs: number; source: 'anchor' | 'rolling' };
+  latestAnchor: { kind: string; scope: string | null; resetAtIso: string | null; message: string | null } | null;
+  estimate: { capUsd: number | null; usedPct: number | null; basis: 'seed' | 'calibrated' };
+}
+
+/** App-wide plan usage for the window covering `at` (default: now). Reads every
+ *  workspace; returns aggregates only. `localIds` distinguishes backends. */
+async function computePlanUsage(opts?: { windowS?: number; at?: number }): Promise<PlanUsage> {
+  const at = opts?.at ?? Date.now();
+  const windowMs = (opts?.windowS ?? 5 * 60 * 60) * 1000;
+
+  const covering = latestAnchorCovering(at);
+  const window = covering && covering.windowStart != null && covering.resetAt != null
+    ? { startMs: covering.windowStart, endMs: covering.resetAt, source: 'anchor' as const }
+    : { startMs: at - windowMs, endMs: at, source: 'rolling' as const };
+
+  const all = await listAllWorkspaces();
+  const localIds = new Set(all.filter((w) => w.kind === 'local').map((w) => w.id));
+
+  const fold = foldPlanUsage(planUsageRows(window.startMs, window.endMs), localIds);
+
+  // Cap seed: the window cost recomputed at the most recent limit-hit anchor
+  // (now including local + subagent spend). null until a limit-hit exists.
+  const hit = latestLimitHitAnchor();
+  let capUsd: number | null = null;
+  if (hit && hit.windowStart != null && hit.resetAt != null) {
+    capUsd = foldPlanUsage(planUsageRows(hit.windowStart, hit.resetAt), localIds).spend.usd;
+  }
+
+  return {
+    ...fold,
+    window,
+    // Deliberately the latest *limit-hit* anchor (the one seeding capUsd), not
+    // the covering anchor: throttle anchors and unparsed weekly limits are not
+    // surfaced here.
+    latestAnchor: hit
+      ? { kind: hit.kind, scope: hit.scope, resetAtIso: hit.resetAt ? new Date(hit.resetAt).toISOString() : null, message: hit.message }
+      : null,
+    estimate: {
+      capUsd,
+      usedPct: capUsd && capUsd > 0 ? fold.spend.usd / capUsd : null,
+      basis: 'seed',
+    },
+  };
+}
+
 export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): void {
   const { jsonlWatcher } = opts;
 
@@ -714,6 +768,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       await writeWorkspaceManifest(spec);
       setWorkspaceDefault(spec.id, spec.mirror.default);
       jsonlWatcher?.registerWorkspace(input.id);
+      if (spec.kind === 'local' && spec.workspaceRoot) {
+        jsonlWatcher?.registerLocalWorkspace(input.id, spec.workspaceRoot);
+      }
 
       // Auto-record the image into the library so the next create's
       // picker shows it (and any labels it was built with). Best-effort:
@@ -973,6 +1030,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     // Tear down the per-id MCP listener + socket dir (#117). Keyed by workspace
     // id, which lives in opts.id (containerId is the Docker id). Best-effort.
     if (opts?.id) removeWorkspaceSocket(opts.id);
+    if (opts?.id) jsonlWatcher?.unregisterLocalWorkspace(opts.id);
     return result;
   });
 
@@ -1364,6 +1422,12 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       return [];
     }
   });
+
+  // Plan-wide usage aggregates (#plan-usage-ledger). `computePlanUsage` folds
+  // windowed DB rows into spend totals + byModel + byBackend. No per-workspace
+  // fields escape the fold (privacy contract lives in planUsage.ts).
+  ipcMain.handle('observability:planUsage', (_e, opts?: { windowS?: number; at?: number }) => computePlanUsage(opts));
+  setPlanUsageHandler((opts) => computePlanUsage(opts));
 
   // Observability — minimal step-1 surface. Renderer polls
   // eventsForSession with the latest id it has; the DB returns rows

@@ -166,6 +166,14 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     // saved setting — not dependent on the renderer's later workspace:list poll.
     for (const m of manifests) setWorkspaceDefault(m.id, m.mirror.default);
     await jsonlWatcher.start(manifests.map((m) => m.id));
+    // Local-backend workspaces write to the host's real ~/.claude, not the
+    // per-workspace state dir — register those host project dirs so their
+    // (and their subagents') token spend is ingested (#plan-usage).
+    for (const m of manifests) {
+      if (m.kind === 'local' && m.workspaceRoot) {
+        jsonlWatcher.registerLocalWorkspace(m.id, m.workspaceRoot);
+      }
+    }
     // Backfill embeddings for sessions ingested before this feature / after a
     // model change. Non-blocking; walks every known session once.
     void (async () => {

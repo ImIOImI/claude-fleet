@@ -2,12 +2,15 @@
 //
 // Each workspace's claude binary writes its transcript to:
 //   <userData>/state/<name>/.claude/projects/-workspace/<session-uuid>.jsonl
+// Local-backend workspaces instead write under the host's real
+//   ~/.claude/projects/<encoded-root>/  (registered via registerLocalWorkspace).
 //
-// We watch that directory non-recursively (so subagent JSONLs nested under
-// <session-uuid>/subagents/* are deliberately skipped — out of scope for
-// step 1). For every change we read from the file's last-known byte offset
-// to the current EOF, split on newlines, ingest complete lines, and stash
-// the offset of any trailing partial line for the next change event.
+// We watch at depth 2 so subagent JSONLs nested under
+// <session-uuid>/subagents/agent-*.jsonl are also ingested — their token spend
+// rolls up to the parent session (see parseSubagentPath). For every change we
+// read from the file's last-known byte offset to the current EOF, split on
+// newlines, ingest complete lines, and stash the offset of any trailing
+// partial line for the next change event.
 //
 // Re-ingestion is idempotent: db.ingestLine uses uuid (or a content hash for
 // light events) as a dedup key. The byte offset is an in-memory optimization
@@ -21,13 +24,26 @@ import { join, basename, extname, sep as pathSep } from 'node:path';
 // electron.vite.config.ts), so `require('chokidar')` would throw
 // ERR_REQUIRE_ESM. Load it via dynamic import inside `start()`.
 import type { FSWatcher } from 'chokidar';
-import { workspaceClaudeDir, workspaceHistoryDir, workspaceHistoryFile } from './paths.js';
+import { workspaceClaudeDir, workspaceHistoryDir, workspaceHistoryFile, hostLocalProjectsDir } from './paths.js';
 import { ingestLine } from './db.js';
 import { effectiveForClaudeSession } from './mirrorPolicy.js';
 
 const PROJECTS_SUBDIR = join('projects', '-workspace');
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const AGENT_FILE_RE = /^agent-.*\.jsonl$/i;
+
+/** Parent session id from a subagent transcript path
+ *  `.../<parent-session-uuid>/subagents/agent-*.jsonl`, or null. */
+export function parseSubagentPath(path: string): { parentSessionId: string } | null {
+  const segs = path.split(/[\\/]/);
+  const file = segs[segs.length - 1] ?? '';
+  if (!AGENT_FILE_RE.test(file)) return null;
+  if (segs[segs.length - 2] !== 'subagents') return null;
+  const parent = segs[segs.length - 3] ?? '';
+  return UUID_RE.test(parent) ? { parentSessionId: parent } : null;
+}
 
 /** Session id + sidecar flag from a watched file path, or null if neither a
  *  primary transcript (<uuid>.jsonl) nor a fleet sidecar (<uuid>.fleet.jsonl).
@@ -100,11 +116,56 @@ export class JsonlWatcher extends EventEmitter {
   // add/change events on the same file don't race the byte offset.
   private readonly chains = new Map<string, Promise<void>>();
 
+  // Registered host transcript dirs for local-backend workspaces:
+  //   ~/.claude/projects/<encoded-root>/  →  real workspace id.
+  // Consulted before the '.claude'-parent path rule (which is wrong for
+  // host paths). Watched at the specific subdir only, so unrelated personal
+  // projects in the same ~/.claude/projects tree are never ingested.
+  private readonly hostDirs = new Map<string, string>(); // dir → workspaceId
+
+  /**
+   * Register a local-backend workspace's host transcript dir
+   * (~/.claude/projects/<encoded-root>/) so its files ingest under `id`.
+   * Must be called AFTER start() — like registerWorkspace, this silently
+   * no-ops if the watcher isn't running yet.
+   */
+  registerLocalWorkspace(id: string, workspaceRoot: string): void {
+    this.addHostDir(id, hostLocalProjectsDir(workspaceRoot));
+  }
+
+  /** @internal test seam — register a host dir directly. */
+  registerLocalDirForTest(id: string, dir: string): void {
+    this.addHostDir(id, dir);
+  }
+
+  private addHostDir(id: string, dir: string): void {
+    if (!this.watcher) return;
+    if (this.hostDirs.has(dir)) return;
+    this.hostDirs.set(dir, id);
+    this.watchedDirs.add(dir);
+    try { mkdirSync(dir, { recursive: true }); } catch { /* see registerWorkspace */ }
+    this.watcher.add(dir);
+  }
+
+  unregisterLocalWorkspace(id: string): void {
+    if (!this.watcher) return;
+    for (const [dir, wsId] of [...this.hostDirs]) {
+      if (wsId !== id) continue;
+      this.hostDirs.delete(dir);
+      this.watchedDirs.delete(dir);
+      this.watcher.unwatch(dir);
+      const prefix = dir + pathSep;
+      for (const path of [...this.files.keys()]) {
+        if (path === dir || path.startsWith(prefix)) { this.files.delete(path); this.chains.delete(path); }
+      }
+    }
+  }
+
   async start(workspaceIds: string[]): Promise<void> {
     if (this.watcher) return;
     const chokidar = await import('chokidar');
     this.watcher = chokidar.watch([], {
-      depth: 0,
+      depth: 2, // reach <projectdir>/<session>/subagents/agent-*.jsonl (#plan-usage)
       ignoreInitial: false,
       persistent: true,
       // No awaitWriteFinish: we tolerate partial-line reads by tracking the
@@ -227,12 +288,31 @@ export class JsonlWatcher extends EventEmitter {
   }
 
   private initState(path: string): FileState | null {
-    const workspaceId = workspaceIdFromPath(path);
+    const workspaceId = this.workspaceIdForPath(path);
+    if (!workspaceId) return null;
+
+    const sub = parseSubagentPath(path);
+    if (sub) {
+      // Subagent transcript — attribute to the parent session; never a
+      // 'new-session' (the parent already exists) and never mirrored.
+      const state: FileState = { workspaceId, sessionId: sub.parentSessionId, sidecar: true, offset: 0 };
+      this.files.set(path, state);
+      return state;
+    }
+
     const parsed = parseTranscriptFilename(path);
-    if (!workspaceId || !parsed) return null;
+    if (!parsed) return null;
     const state: FileState = { workspaceId, sessionId: parsed.sessionId, sidecar: parsed.sidecar, offset: 0 };
     this.files.set(path, state);
     return state;
+  }
+
+  /** Host-dir map first (local workspaces), then the '.claude'-parent rule. */
+  private workspaceIdForPath(path: string): string | null {
+    for (const [dir, wsId] of this.hostDirs) {
+      if (path === dir || path.startsWith(dir + pathSep)) return wsId;
+    }
+    return workspaceIdFromPath(path);
   }
 }
 
