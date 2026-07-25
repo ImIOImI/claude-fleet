@@ -514,6 +514,40 @@ body {
   border-radius: var(--r-md);
 }
 .session-row:hover { background: var(--bg-card); border-color: var(--rule); }
+
+/* Open group (live terminal tab somewhere in the fleet): green edge + tint,
+   group headers split the list. Green = live, matching the busy dot. */
+.session-row.open {
+  border-left: 2px solid var(--ok);
+  border-radius: 3px var(--r-md) var(--r-md) 3px;
+  background: color-mix(in oklch, var(--ok), transparent 93%);
+}
+.session-row.open:hover { border-color: var(--rule); border-left-color: var(--ok); }
+.session-group-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+.session-group-label.recent { margin-top: 6px; }
+.session-group-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+.session-group-line { flex: 1; height: 1px; background: var(--rule-soft); }
+
+/* Meta-line tags: house .tag chips (Library vocabulary) in the slack space
+   between time and cost; they shrink/clip first when the line is tight. */
+.session-row-tags { display: inline-flex; gap: 4px; min-width: 0; overflow: hidden; }
+.session-row-tag { cursor: pointer; }
+.session-row-tag:hover { color: var(--ink); border-color: var(--ink-3); }
+.session-row-tag.on { color: var(--ok); border-color: var(--ok); }
+
+/* Tag filter row reuses .library-filter spacing inside the stacked header. */
+.sessions-header .sessions-tagfilter { margin: 0; }
+
 .session-row-main { flex: 1; min-width: 0; }
 .session-row-title {
   display: block;
