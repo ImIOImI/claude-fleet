@@ -142,7 +142,9 @@ test('Sessions table: list reflects the seeded transcript; rename + delete round
     // With no live terminal tab mapped to this session, the pane shows no
     // Open group — every row is plain "Recent" (no group headers at all
     // when the Open group is empty).
-    await window.locator('text=Sessions').first().click();
+    // Positive control: the pane is rendered with the seeded row — the
+    // zero-counts below assert an empty Open group, not an empty DOM.
+    await expect(window.locator('.session-row')).toHaveCount(1);
     await expect(window.locator('.session-group-label')).toHaveCount(0);
     await expect(window.locator('.session-row.open')).toHaveCount(0);
 
