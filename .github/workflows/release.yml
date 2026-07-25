@@ -1,0 +1,113 @@
+name: release
+
+# Manually-dispatched release. Builds the unsigned desktop installers for
+# macOS, Windows, and Linux, then publishes a DRAFT GitHub Release with the
+# installers attached — letting a maintainer cut a draft on demand without
+# pushing a v* tag (the tag-triggered path lives in build-app.yml).
+#
+# The draft's tag does not become a real git ref until the release is
+# published; on publish GitHub creates it at the built commit (`--target`).
+#
+# The build matrix below intentionally MIRRORS the `build` job in
+# build-app.yml (same native-module install dance per platform). If you change
+# the install/build steps there, mirror the change here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create, e.g. v0.7.1'
+        required: true
+        type: string
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact_glob: 'dist/*.dmg'
+          - os: windows-latest
+            artifact_glob: 'dist/*.exe'
+          - os: ubuntu-latest
+            artifact_glob: 'dist/*.AppImage'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # keytar's prebuilt binary dynamically links libsecret at runtime;
+      # node-pty compiles from source on Linux (no bundled linux prebuild).
+      - name: Install Linux build/runtime deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsecret-1-dev
+
+      # macOS/Linux have working toolchains, so the default postinstall
+      # (`electron-builder install-app-deps`) builds native modules fine.
+      - name: Install dependencies (macOS/Linux)
+        if: matrix.os != 'windows-latest'
+        run: npm ci
+
+      # Windows: never compile native modules from source. node-gyp can't
+      # detect the runner's newest Visual Studio, and we don't need node-ABI
+      # builds — only Electron-ABI ones. Mirror the Makefile's win path:
+      #   --ignore-scripts (skip the node-ABI build during install)
+      #   drop cpu-features (optional ssh2 dep, no win prebuild → needs MSVC)
+      #   install-app-deps fetches better-sqlite3/keytar Electron prebuilts;
+      #   node-pty uses its bundled win32 prebuild.
+      - name: Install dependencies (Windows — prebuilt natives, no MSVC)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          npm ci --ignore-scripts
+          rm -rf node_modules/cpu-features
+          npx --no-install electron-builder install-app-deps --platform win32 --arch x64
+
+      - name: Build installer
+        # --publish never: the release job (below) owns publishing.
+        # CSC_IDENTITY_AUTO_DISCOVERY=false: don't try to sign on macOS — these
+        # are unsigned builds; a stray keychain identity must not break the run.
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run dist -- --publish never
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-fleet-${{ matrix.os }}
+          path: ${{ matrix.artifact_glob }}
+          if-no-files-found: error
+
+  release:
+    name: draft release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release create "$TAG" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --draft \
+            --generate-notes \
+            --notes "Unsigned builds. macOS: Gatekeeper will warn; Windows: SmartScreen will warn."
