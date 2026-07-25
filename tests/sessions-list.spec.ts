@@ -131,7 +131,9 @@ test('Sessions table: list reflects the seeded transcript; rename + delete round
     expect(rows[0].id).toBe(sessionId);
     expect(rows[0].firstUserMessage).toBe('Investigate the flaky test');
     expect(rows[0].workspaceName).toBe('sessions-ws');
-    expect(rows[0].eventCount).toBe(2);
+    // 3 = two turns + the seeded session-summary line (every ingested JSONL
+    // line is one row in `events`, summaries included).
+    expect(rows[0].eventCount).toBe(3);
     expect(rows[0].usd).toBeGreaterThan(0);
     expect(rows[0].userSetName).toBeNull();
 
