@@ -141,6 +141,11 @@ test('Sessions table: list reflects the seeded transcript; rename + delete round
     // sessions-open-group-and-tags). Order preserved from the summarizer.
     expect(rows[0].tags).toEqual(['e2e-tag', 'seeded']);
 
+    // The embedded SessionsPane defaults to "This workspace" scope, but no
+    // workspace is selected in this harness, so switch it to fleet-wide ("All")
+    // to surface the seeded session in the DOM.
+    await window.getByRole('tab', { name: /^All ·/ }).click();
+
     // With no live terminal tab mapped to this session, the pane shows no
     // Open group — every row is plain "Recent" (no group headers at all
     // when the Open group is empty).
