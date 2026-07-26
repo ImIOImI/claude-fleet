@@ -6,7 +6,7 @@ V="${RUST_VERSION:-1.84.0}"
 export CARGO_HOME=/opt/cargo RUSTUP_HOME=/opt/rustup
 curl -fsSL https://sh.rustup.rs \
   | sh -s -- -y --no-modify-path --profile minimal --default-toolchain "$V" \
-      --component clippy rustfmt
+      --component clippy --component rustfmt
 # World-readable/executable so a non-root `fleet` (or any --user UID) can use it.
 chmod -R a+rX /opt/cargo /opt/rustup
 /opt/cargo/bin/rustc --version | sed -n '1p'

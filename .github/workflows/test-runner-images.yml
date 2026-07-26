@@ -1,0 +1,88 @@
+name: Test runner images
+
+on:
+  pull_request:
+    paths:
+      - 'docker/**'
+      - 'broker/**'
+      - '.github/workflows/test-runner-images.yml'
+
+permissions:
+  contents: read
+
+# Pre-merge gate. publish-runner.yml only runs post-merge on `main`, so without
+# this a PR that breaks a Dockerfile or install script passes all checks, merges,
+# and only then blows up on `main` (with blobs already pushed) — exactly how the
+# rust.sh break slipped through. Here we build EVERY runner image on a native
+# amd64 runner and smoke the ones that ship a test, WITHOUT pushing to GHCR: the
+# freshly-built base goes to an ephemeral local registry (service container) so
+# the variants can build `FROM` it. amd64 only — it's native/fast and catches
+# essentially all breakage (script/Dockerfile errors are arch-independent);
+# full multi-arch is validated post-merge by publish-runner.yml.
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+    env:
+      # Ephemeral, job-local registry — nothing reaches GHCR.
+      BASE_REF: localhost:5000/claude-fleet/runner:pr
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          # network=host lets the docker-container builder reach the local
+          # registry on localhost:5000 (BuildKit treats localhost as insecure).
+          driver-opts: network=host
+
+      - name: Build base (amd64) → local registry
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.BASE_REF }}
+          # Read the cache the publish workflow populates on main; don't write
+          # it back (PRs shouldn't evict publish's shared GHA cache entries).
+          cache-from: type=gha,scope=base-amd64
+
+      - name: Build devops (amd64) FROM local base
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/devops/Dockerfile
+          platforms: linux/amd64
+          load: true
+          build-args: |
+            BASE_IMAGE=${{ env.BASE_REF }}
+          # Same token the install scripts use on publish; on same-repo PRs it's
+          # the auto-provided GITHUB_TOKEN. Missing on fork PRs → scripts fall
+          # back to anonymous GitHub API (rate-limited but functional).
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
+          tags: claude-fleet/runner-devops:test
+          cache-from: type=gha,scope=devops-amd64
+
+      - name: Build dev (amd64) FROM local base
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/dev/Dockerfile
+          platforms: linux/amd64
+          load: true
+          build-args: |
+            BASE_IMAGE=${{ env.BASE_REF }}
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
+          tags: claude-fleet/runner-dev:test
+          cache-from: type=gha,scope=dev-amd64
+
+      - name: Smoke dev image
+        run: bash docker/dev/smoke.test.sh claude-fleet/runner-dev:test

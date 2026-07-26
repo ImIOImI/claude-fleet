@@ -205,6 +205,7 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       pause: [],
       remove: [],
       writeManifest: [],
+      getManifest: [],
       isDirectory: [],
       mkdirp: [],
       openPath: [],
@@ -227,6 +228,7 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       'workspace:remove',
       'workspace:ping',
       'workspace:writeManifest',
+      'workspace:getManifest',
       'images:list',
       'images:remove',
       'fs:isDirectory',
@@ -324,6 +326,17 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
     // No persistence — just record the call shape for assertions.
     ipcMain.handle('workspace:writeManifest', async (_e, spec: Record<string, unknown>) => {
       g.__calls.writeManifest.push(spec);
+    });
+    // Recreate flow (restart-to-apply banner) reads the saved manifest before
+    // rebuilding the container. Return the most recent writeManifest'd spec for
+    // the id (so edits like a new image are reflected), else the list entry.
+    ipcMain.handle('workspace:getManifest', async (_e, id: string) => {
+      g.__calls.getManifest.push(id);
+      const written = [...g.__calls.writeManifest]
+        .reverse()
+        .find((s) => (s as { id?: string }).id === id);
+      if (written) return written;
+      return list.find((w) => w.id === id || w.name === id) ?? null;
     });
     ipcMain.handle('workspace:stop', async (_e, containerId: string) => {
       g.__calls.stop.push(containerId);

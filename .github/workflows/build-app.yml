@@ -51,11 +51,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libsecret-1-dev
 
-      # macOS/Linux have working toolchains, so the default postinstall
-      # (`electron-builder install-app-deps`) builds native modules fine.
+      # macOS/Linux: install without scripts, drop the optional cpu-features
+      # dep, then rebuild the required natives for the Electron ABI. We must
+      # exclude cpu-features (an unused optional ssh2/dockerode transitive):
+      # it builds via the old `nan`, whose `v8::External::Value()` was removed
+      # in Electron 43's V8, so its node-gyp build fails on every platform.
       - name: Install dependencies (macOS/Linux)
         if: matrix.os != 'windows-latest'
-        run: npm ci
+        run: |
+          npm ci --ignore-scripts
+          rm -rf node_modules/cpu-features
+          npx --no-install electron-builder install-app-deps
 
       # Windows: never compile native modules from source. node-gyp can't
       # detect the runner's newest Visual Studio, and we don't need node-ABI
@@ -112,10 +118,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libsecret-1-dev
 
-      # postinstall (electron-builder install-app-deps) rebuilds the native
-      # modules against Electron's ABI — exactly what we launch below.
+      # Install without scripts, drop the optional cpu-features dep (its old
+      # `nan` build fails against Electron 43's V8), then rebuild the required
+      # natives against Electron's ABI — exactly what we launch below.
       - name: Install dependencies
-        run: npm ci
+        run: |
+          npm ci --ignore-scripts
+          rm -rf node_modules/cpu-features
+          npx --no-install electron-builder install-app-deps
 
       # apt-installs the Chromium/Electron shared libs (libgtk-3, libnss3,
       # libgbm, libasound, …) — the set Electron needs to start.

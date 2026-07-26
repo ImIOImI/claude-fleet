@@ -1,8 +1,9 @@
 # Pinned tool versions for the claude-fleet runner images.
 #
 # Single source of truth for the install scripts in docker/scripts/. The
-# devops Dockerfile sets ARG defaults to these values; the publish workflow can
-# also read them here to pass --build-arg explicitly. Bump deliberately.
+# devops/dev Dockerfiles set ARG defaults to these values (e.g. gh is shared by
+# both); the publish workflow can also read them here to pass --build-arg
+# explicitly. Bump deliberately.
 #
 # Org-canon pins mirror ci-images (SumerSports platform engineering) so an
 # expert reviews against the same toolchain CI uses.
