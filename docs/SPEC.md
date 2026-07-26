@@ -773,8 +773,8 @@ Each chip in the workspace strip has a `⋮` trigger that opens a contextual men
 
 > Changes apply on next start. **[Restart now]** ×
 
-- **Restart now**: `workspace:stop(containerId)` → `workspace:start(id)`. Banner clears.
-- **×** (dismiss): banner clears without restart.
+- **Restart now**: **recreates** the container from the saved manifest — `workspace:getManifest(id)` → `workspace:ensureImage` (pull the possibly-new image) → `workspace:stop(containerId)` → `workspace:remove(containerId, {deleteState:false, id})` → `workspace:create(spec)`, reusing the same ULID so the private state dir + vault history stay attached. A plain `stop`→`start` would reuse the existing container and silently *not* apply the image/env/resource change (the container's spec is fixed at create time), so it must be recreated. The orchestration lives in `applyContainerEdit` (`src/renderer/src/workspaceLifecycle.ts`, unit-tested with an injected api); on success the banner clears and the workspace is re-focused, on failure the banner stays up for a retry. Recreating ends the current PTYs/Claude sessions (they start fresh in the new container); the host-side `/workspace` files persist and remount.
+- **×** (dismiss): banner clears without recreating.
 - The banner is keyed by workspace id in App.tsx's `restartBannerIds` Set; the corresponding TerminalPane reads `restartBanner` as a prop and renders accordingly. The Set survives chip switches — selecting another workspace and coming back still shows the banner until dismissed.
 
 ### Close a workspace
