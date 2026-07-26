@@ -127,6 +127,21 @@ export function setSessionMappingHandler(fn: SessionMappingHandler): void {
   sessionMappingHandler = fn;
 }
 
+/** Injected by ipc.ts: record a diagnostic from the runner's chapter-summary
+ *  Stop hook (`summarize.sh`, #230). The hook fails into `/dev/null` otherwise,
+ *  so a dead #207 pipeline is invisible; this lands each decision point in the
+ *  `errors` table (reachable via `list_errors`). callerId is host-assigned. */
+export type SummaryStatusHandler = (
+  callerId: string,
+  sessionId: string,
+  phase: string,
+  detail: Record<string, unknown>,
+) => void;
+let summaryStatusHandler: SummaryStatusHandler | null = null;
+export function setSummaryStatusHandler(fn: SummaryStatusHandler): void {
+  summaryStatusHandler = fn;
+}
+
 /** Injected at startup (when the embedding model is loaded): a function that
  *  embeds an array of text strings into Float32Array vectors. Until injected,
  *  the `search_transcripts` tool returns an "index is unavailable" error rather
@@ -1249,6 +1264,35 @@ export const TOOLS: Tool[] = [
         throw new Error('brokerSessionId (string) and sessionId (string) are required');
       }
       sessionMappingHandler(ctx.callerId, a.brokerSessionId, a.sessionId);
+      return { ok: true };
+    }
+  },
+  {
+    name: 'report_summary_status',
+    description:
+      'Internal (called by the runner chapter-summary Stop hook, not by the model): record a ' +
+      'diagnostic for the #207 summarizer in THIS workspace so its failures are not silent. ' +
+      'Args: sessionId (the claude session UUID), phase (e.g. "attempt" | "generated" | "rejected" | ' +
+      '"empty-window" | "gate"), detail (optional object of counters/context).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string' },
+        phase: { type: 'string' },
+        detail: { type: 'object' }
+      },
+      required: ['sessionId', 'phase']
+    },
+    run: (_db, a, ctx) => {
+      if (!summaryStatusHandler) throw new Error('summary-status reporting is unavailable');
+      if (typeof a.sessionId !== 'string' || typeof a.phase !== 'string') {
+        throw new Error('sessionId (string) and phase (string) are required');
+      }
+      const detail =
+        a.detail && typeof a.detail === 'object' && !Array.isArray(a.detail)
+          ? (a.detail as Record<string, unknown>)
+          : {};
+      summaryStatusHandler(ctx.callerId, a.sessionId, a.phase, detail);
       return { ok: true };
     }
   },
