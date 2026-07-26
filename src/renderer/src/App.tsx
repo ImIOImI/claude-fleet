@@ -14,6 +14,11 @@ import { EditWorkspaceModal, containerLevelChanged } from './components/EditWork
 import { SettingsModal } from './components/SettingsModal';
 import LoadoutBrowserModal from './components/LoadoutBrowserModal';
 import { useDropIngestion } from './dropIngestion';
+import {
+  applyContainerEdit,
+  type WorkspaceLifecycleApi,
+  type WorkspaceManifest
+} from './workspaceLifecycle';
 import { contextBarSummary } from './contextBarSource';
 import { busyClaudeIdSet, openSessionMap, type OpenTabRef } from './busySessions';
 import { mergeWaitingSessionIds, waitingFlags } from './waitingSessions';
@@ -1030,23 +1035,39 @@ export function App() {
   };
 
   const restartFromBanner = async (workspaceId: string, containerId: string): Promise<void> => {
+    // Container-level edits (image/env/resources/authMode) are fixed at
+    // create time, so applying them means RECREATING the container from the
+    // saved manifest — not a stop→start, which would reuse the old spec.
+    const api: WorkspaceLifecycleApi = {
+      getManifest: (id) =>
+        window.api.workspace.getManifest(id) as Promise<WorkspaceManifest | null>,
+      ensureImage: (onProgress, image) => window.api.workspace.ensureImage(onProgress, image),
+      stop: (cid) => window.api.workspace.stop(cid),
+      start: (id) => window.api.workspace.start(id),
+      remove: (cid, opts) => window.api.workspace.remove(cid, opts),
+      create: (input) => window.api.workspace.create(input)
+    };
     try {
-      await window.api.workspace.stop(containerId);
+      await applyContainerEdit(
+        api,
+        { id: workspaceId, containerId },
+        (message) => pushToast(message, 'Recreating', 4000, 'progress')
+      );
+      setRestartBannerIds((prev) => {
+        if (!prev.has(workspaceId)) return prev;
+        const next = new Set(prev);
+        next.delete(workspaceId);
+        return next;
+      });
+      focusWorkspaceWhenWarm(workspaceId);
+      pushToast('Workspace recreated with the updated settings.', 'Recreated', 4000, 'ok');
     } catch (err) {
-      console.warn('workspace.stop during restart-banner failed:', err);
+      // Keep the banner up so the user can retry.
+      console.error('recreate from restart-banner failed:', err);
+      pushToast(`Recreate failed: ${(err as Error).message}`, 'Recreate failed', 8000, 'error');
+    } finally {
+      refresh();
     }
-    try {
-      await window.api.workspace.start(workspaceId);
-    } catch (err) {
-      console.warn('workspace.start during restart-banner failed:', err);
-    }
-    setRestartBannerIds((prev) => {
-      if (!prev.has(workspaceId)) return prev;
-      const next = new Set(prev);
-      next.delete(workspaceId);
-      return next;
-    });
-    refresh();
   };
 
   const dismissBanner = (workspaceId: string): void => {

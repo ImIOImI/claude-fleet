@@ -221,7 +221,7 @@ test('Chip ⋮ Edit: Save with container-level changes (image) shows the restart
   }
 });
 
-test('Restart banner: Dismiss removes it; Restart now calls stop + start', async () => {
+test('Restart banner: Restart now recreates the container on the edited image', async () => {
   const { app, window } = await launch();
   try {
     await mockMainIpc(app, { workspaceList: [RUNNING_WS] });
@@ -236,13 +236,52 @@ test('Restart banner: Dismiss removes it; Restart now calls stop + start', async
     const banner = window.locator('.terminal-pane:not([aria-hidden="true"]) .restart-banner');
     await expect(banner).toBeVisible();
 
-    // Restart now → stop + start fire; banner disappears.
+    // Restart now → the container is RECREATED (not stop→start, which would
+    // reuse it and drop the image change): ensureImage → stop → remove
+    // (keeping state) → create on the new image. Banner clears.
     await banner.getByRole('button', { name: 'Restart now' }).click();
     await expect(banner).toBeHidden();
 
     const calls = await getCalls(app);
+    expect(calls.getManifest).toContain(RUNNING_WS.id);
+    expect(calls.ensureImage).toContain('ghcr.io/imioimi/claude-fleet/runner:different');
     expect(calls.stop).toContain(RUNNING_WS.containerId);
-    expect(calls.start).toContain(RUNNING_WS.id);
+    // Removed with state preserved, keyed by the workspace id.
+    expect(calls.remove).toContainEqual(
+      expect.objectContaining({ containerId: RUNNING_WS.containerId, deleteState: false, id: RUNNING_WS.id })
+    );
+    // Recreated with the same id on the new image.
+    expect(calls.create).toContainEqual(
+      expect.objectContaining({ id: RUNNING_WS.id, image: 'ghcr.io/imioimi/claude-fleet/runner:different' })
+    );
+    // NOT a plain restart — start must not be called for the recreate.
+    expect(calls.start).not.toContain(RUNNING_WS.id);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Restart banner: Dismiss removes it without recreating', async () => {
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, { workspaceList: [RUNNING_WS] });
+    await window.locator('.ws-chip-group', { hasText: 'happy-llama' }).getByRole('button').first().click();
+
+    const menu = await openChipMenu(window, 'happy-llama');
+    await menu.getByRole('menuitem', { name: 'Edit…' }).click();
+    await window.getByLabel('Image reference').fill('ghcr.io/imioimi/claude-fleet/runner:different');
+    await window.getByRole('button', { name: 'Save' }).click();
+
+    const banner = window.locator('.terminal-pane:not([aria-hidden="true"]) .restart-banner');
+    await expect(banner).toBeVisible();
+
+    // × dismiss → banner clears, nothing is recreated.
+    await banner.getByRole('button', { name: 'Dismiss' }).click();
+    await expect(banner).toBeHidden();
+
+    const calls = await getCalls(app);
+    expect(calls.create).toHaveLength(0);
+    expect(calls.remove).toHaveLength(0);
   } finally {
     await app.close();
   }
