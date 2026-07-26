@@ -98,7 +98,7 @@ generate() {
   prev="$(tail -n 1 "$sidecar" 2>/dev/null | jq -r '.summary // empty' 2>/dev/null)"
   prompt="You summarize a window of an ongoing coding session.
 Previously: ${prev:-"(session start)"}
-Reply with ONLY strict JSON: {\"summary\":\"<=3 sentences about THIS window\",\"tags\":[\"3-6 lowercase concept tags\"]}
+Reply with ONLY strict JSON: {\"summary\":\"<=3 sentences about THIS window\",\"tags\":[\"3-6 lowercase concept tags\"],\"title\":\"<=6 word label for the whole session so far\"}
 Window:
 $window"
 
@@ -122,9 +122,21 @@ $window"
   printf '%s' "$out" | jq -c --arg sid "$sid" --arg model "$model" --arg f "$from_ts" --arg t "$to_ts" \
     '{type:"session-summary", summary:.summary, tags:.tags, sessionId:$sid, model:$model, fromEventTs:$f, toEventTs:$t}' \
     >> "$sidecar"
+
+  # #170: the model also returns a short rolling "title". Emit it as an ai-title
+  # sidecar line so ingestLine's last-write-wins overwrites Claude Code's stale
+  # one-shot ai_title — re-titling the session tab (via summaryForBrokerSession)
+  # and the left-rail (which reads the same DB column). Optional: absent/blank
+  # title just skips this line, so older summarizer prompts stay compatible.
+  title="$(printf '%s' "$json" | jq -r 'if (.title|type)=="string" and ((.title|gsub("^\\s+|\\s+$";""))|length)>0 then (.title|gsub("^\\s+|\\s+$";"")) else empty end' 2>/dev/null)"
+  if [ -n "$title" ]; then
+    jq -nc --arg sid "$sid" --arg title "$title" '{type:"ai-title", aiTitle:$title, sessionId:$sid}' >> "$sidecar"
+  fi
+
   # Chapter written to the sidecar. If this appears but no chapter lands in the
-  # DB, the failure is in sidecar ingestion, not generation (#230).
-  report_status generated "$(printf '%s' "$out" | jq -c '{tags:(.tags|length),summaryLen:(.summary|length)}' 2>/dev/null || printf '{}')"
+  # DB, the failure is in sidecar ingestion, not generation (#230). `retitled`
+  # records whether this run also refreshed the ai-title (#170).
+  report_status generated "$(printf '%s' "$out" | jq -c --argjson retitled "$([ -n "$title" ] && echo true || echo false)" '{tags:(.tags|length),summaryLen:(.summary|length),retitled:$retitled}' 2>/dev/null || printf '{}')"
 }
 
 if [ -n "${CF_SUMMARIZE_FG:-}" ]; then generate; else
