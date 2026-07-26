@@ -50,11 +50,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libsecret-1-dev
 
-      # macOS/Linux have working toolchains, so the default postinstall
-      # (`electron-builder install-app-deps`) builds native modules fine.
+      # macOS/Linux: install without scripts, drop the optional cpu-features
+      # dep (its old `nan` build fails against Electron 43's V8 on every
+      # platform), then rebuild the required natives for the Electron ABI.
       - name: Install dependencies (macOS/Linux)
         if: matrix.os != 'windows-latest'
-        run: npm ci
+        run: |
+          npm ci --ignore-scripts
+          rm -rf node_modules/cpu-features
+          npx --no-install electron-builder install-app-deps
 
       # Windows: never compile native modules from source. node-gyp can't
       # detect the runner's newest Visual Studio, and we don't need node-ABI
