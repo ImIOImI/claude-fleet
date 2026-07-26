@@ -132,4 +132,31 @@ printf '{"session_id":"%s","transcript_path":"%s"}' "$sidB" "$tB" \
   | CF_SUMMARIZE_FG=1 CF_SUMMARY_STATUS_SINK="$sinkB" bash "$here/summarize.sh"
 assert "$([ -s "$sinkB" ] && echo nonempty || echo empty)" "empty" "below-threshold without diag emits nothing"
 
+# ── #170 ai-title refresh: the same haiku call also returns a short "title";
+#    summarize.sh appends an ai-title sidecar line so ingestLine's last-write-wins
+#    overwrites Claude Code's stale one-shot title → tab + left-rail re-title. ──
+
+# 12. Model returns a title → ai-title line appended alongside session-summary.
+title_llm="$work/title-llm.sh"
+printf '#!/usr/bin/env bash\ncat >/dev/null; printf %s '\''{"summary":"Refactored the widget.","tags":["widget","refactor","cleanup"],"title":"Refactor widget module"}'\''\n' > "$title_llm"; chmod +x "$title_llm"
+sidC="cccccccc-0000-0000-0000-00000000000c"; tC="$work/$sidC.jsonl"; sinkC="$work/sinkC"
+mkturns_iso "$sidC" "$tC" 20
+printf '{"session_id":"%s","transcript_path":"%s"}' "$sidC" "$tC" \
+  | CF_SUMMARIZE_FG=1 CF_SUMMARIZE_CMD="$title_llm" CF_SUMMARY_MIN_INTERVAL_S=0 CF_SUMMARY_STATUS_SINK="$sinkC" bash "$here/summarize.sh"
+assert "$(jq -rs 'map(select(.type=="session-summary")) | length' "$work/$sidC.fleet.jsonl" 2>/dev/null)" "1" "session-summary still emitted with title"
+assert "$(jq -rs 'map(select(.type=="ai-title")) | length' "$work/$sidC.fleet.jsonl" 2>/dev/null)" "1" "ai-title line emitted when title present"
+assert "$(jq -rs 'map(select(.type=="ai-title")) | .[0].aiTitle' "$work/$sidC.fleet.jsonl" 2>/dev/null)" "Refactor widget module" "ai-title carries the model title"
+assert "$(jq -rs 'map(select(.type=="ai-title")) | .[0].sessionId' "$work/$sidC.fleet.jsonl" 2>/dev/null)" "$sidC" "ai-title stamps session id"
+# The generated breadcrumb notes the retitle so #230 observers see it happen.
+assert "$(jq -r 'select(.params.arguments.phase=="generated") | .params.arguments.detail.retitled' "$sinkC" 2>/dev/null)" "true" "generated breadcrumb notes retitled:true"
+
+# 13. Model omits title → no ai-title line (backward compatible); chapter unaffected.
+sidD="dddddddd-0000-0000-0000-00000000000d"; tD="$work/$sidD.jsonl"; sinkD="$work/sinkD"
+mkturns_iso "$sidD" "$tD" 20
+printf '{"session_id":"%s","transcript_path":"%s"}' "$sidD" "$tD" \
+  | CF_SUMMARIZE_FG=1 CF_SUMMARIZE_CMD="$ok_llm" CF_SUMMARY_MIN_INTERVAL_S=0 CF_SUMMARY_STATUS_SINK="$sinkD" bash "$here/summarize.sh"
+assert "$(jq -rs 'map(select(.type=="ai-title")) | length' "$work/$sidD.fleet.jsonl" 2>/dev/null)" "0" "no ai-title line when model omits title"
+assert "$(jq -rs 'map(select(.type=="session-summary")) | length' "$work/$sidD.fleet.jsonl" 2>/dev/null)" "1" "session-summary still emitted without title"
+assert "$(jq -r 'select(.params.arguments.phase=="generated") | .params.arguments.detail.retitled' "$sinkD" 2>/dev/null)" "false" "generated breadcrumb notes retitled:false when omitted"
+
 [ "$fails" -eq 0 ] && echo "ALL PASS" || exit 1
