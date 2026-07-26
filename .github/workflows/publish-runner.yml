@@ -14,8 +14,14 @@ permissions:
   packages: write
 
 jobs:
-  publish:
+  # ── Base runner (lean, standalone) ────────────────────────────────────────
+  # Built first and once: every variant is FROM this exact digest, so it must
+  # exist in the registry before the variants fan out.
+  base:
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.base.outputs.digest }}
+      owner: ${{ steps.owner.outputs.value }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,7 +43,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── Base runner (lean, standalone) ──────────────────────────────────
       - name: Base metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -62,79 +67,94 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # ── DevOps runner (FROM the base digest we just pushed) ──────────────
-      - name: DevOps metadata
-        id: meta_devops
+  # ── Variant runners (FROM the base digest) ────────────────────────────────
+  # Each variant only depends on the base, never on a sibling — so they build
+  # in parallel via the matrix. Pinned to the exact base digest for lockstep.
+  # fail-fast: false so one variant's failure doesn't cancel the others.
+  variants:
+    needs: base
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # SumerSports platform-engineering toolset (gh, IaC, kubectl, Argo,
+          # AWS). The install scripts hit api.github.com → need the token.
+          - variant: devops
+            image: runner-devops
+            file: docker/devops/Dockerfile
+            smoke: ''
+          # Polyglot dev toolchain (build-essential, Python+uv, Go, Rust,
+          # Playwright libs). Has a non-root smoke test.
+          - variant: dev
+            image: runner-dev
+            file: docker/dev/Dockerfile
+            smoke: docker/dev/smoke.test.sh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Variant metadata
+        id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ steps.owner.outputs.value }}/claude-fleet/runner-devops
+          images: ghcr.io/${{ needs.base.outputs.owner }}/claude-fleet/${{ matrix.image }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=short
 
-      - name: Build and push devops
+      - name: Build and push ${{ matrix.variant }}
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: docker/devops/Dockerfile
+          file: ${{ matrix.file }}
           platforms: linux/amd64,linux/arm64
           push: true
-          # Pin to the exact base image just built (by digest) so the two
-          # images are always in lockstep.
+          # Pin to the exact base image just built (by digest) so every variant
+          # stays in lockstep with the base.
           build-args: |
-            BASE_IMAGE=ghcr.io/${{ steps.owner.outputs.value }}/claude-fleet/runner@${{ steps.base.outputs.digest }}
-          # Authenticated GitHub API access for the install scripts (tenv, the
-          # kustomize tag lookup, tflint/trivy) — anonymous builds hit the
-          # 60 req/hr/IP limit. Passed as a BuildKit secret so it never lands
-          # in the image. GITHUB_TOKEN is auto-provided to the workflow.
+            BASE_IMAGE=ghcr.io/${{ needs.base.outputs.owner }}/claude-fleet/runner@${{ needs.base.outputs.digest }}
+          # Authenticated GitHub API access for the install scripts (tenv,
+          # kustomize tag lookup, tflint/trivy, rust/go/uv releases) — anonymous
+          # builds hit the 60 req/hr/IP limit. Passed as a BuildKit secret so it
+          # never lands in the image. GITHUB_TOKEN is auto-provided.
           secrets: |
             github_token=${{ secrets.GITHUB_TOKEN }}
-          tags: ${{ steps.meta_devops.outputs.tags }}
-          labels: ${{ steps.meta_devops.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # ── Dev runner (FROM the base digest; polyglot toolchain, no cloud/k8s) ─
-      - name: Dev metadata
-        id: meta_dev
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ steps.owner.outputs.value }}/claude-fleet/runner-dev
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,format=short
-
-      - name: Build and push dev
+      # Variants that ship a smoke test: load the native (amd64) image locally
+      # so `docker run` can execute it, then run the test as the non-root user.
+      - name: Build ${{ matrix.variant }} (amd64, load) for smoke
+        if: matrix.smoke != ''
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: docker/dev/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          build-args: |
-            BASE_IMAGE=ghcr.io/${{ steps.owner.outputs.value }}/claude-fleet/runner@${{ steps.base.outputs.digest }}
-          secrets: |
-            github_token=${{ secrets.GITHUB_TOKEN }}
-          tags: ${{ steps.meta_dev.outputs.tags }}
-          labels: ${{ steps.meta_dev.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # Smoke the native-arch image as the non-root fleet user (load one-arch
-      # locally so `docker run` can execute it on the runner).
-      - name: Build dev (amd64, load) for smoke
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: docker/dev/Dockerfile
+          file: ${{ matrix.file }}
           platforms: linux/amd64
           load: true
           build-args: |
-            BASE_IMAGE=ghcr.io/${{ steps.owner.outputs.value }}/claude-fleet/runner@${{ steps.base.outputs.digest }}
+            BASE_IMAGE=ghcr.io/${{ needs.base.outputs.owner }}/claude-fleet/runner@${{ needs.base.outputs.digest }}
           secrets: |
             github_token=${{ secrets.GITHUB_TOKEN }}
-          tags: claude-fleet/runner-dev:test
+          tags: claude-fleet/${{ matrix.image }}:test
           cache-from: type=gha
 
-      - name: Smoke dev image
-        run: bash docker/dev/smoke.test.sh claude-fleet/runner-dev:test
+      - name: Smoke ${{ matrix.variant }} image
+        if: matrix.smoke != ''
+        run: bash ${{ matrix.smoke }} claude-fleet/${{ matrix.image }}:test
