@@ -13,9 +13,30 @@ permissions:
   contents: read
   packages: write
 
+# Native multi-arch: every arch builds on its own native runner (amd64 on
+# ubuntu-24.04, arm64 on ubuntu-24.04-arm) — no QEMU emulation — then a merge
+# job stitches the per-arch pushes into one multi-arch manifest via
+# `docker buildx imagetools create`. Images fan out in parallel; a variant only
+# waits on the base manifest it is FROM.
+#
+#   base-build (amd64 ‖ arm64) ─▶ base-merge ─▶ variant-build ({devops,dev}×{amd64,arm64})
+#                                                          └─▶ variant-merge ({devops,dev})
+
+env:
+  REGISTRY: ghcr.io
+
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  # ── Base runner, per-arch (push each arch by digest, no tag) ───────────────
+  base-build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,8 +45,64 @@ jobs:
         id: owner
         run: echo "value=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push base (${{ matrix.arch }}) by digest
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          # Repo root is the context so the broker module (//broker/) is
+          # reachable from the Dockerfile's multi-stage build.
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          # push-by-digest: no tag here; the merge job assembles the tagged
+          # manifest list from the per-arch digests.
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/claude-fleet/runner,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=base-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=base-${{ matrix.arch }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-base-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── Base manifest list (combine per-arch digests → tagged multi-arch) ──────
+  base-merge:
+    needs: base-build
+    runs-on: ubuntu-latest
+    outputs:
+      owner: ${{ steps.owner.outputs.value }}
+      digest: ${{ steps.digest.outputs.value }}
+    steps:
+      - name: Lowercase repository owner
+        id: owner
+        run: echo "value=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-base-*
+          merge-multiple: true
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -33,108 +110,169 @@ jobs:
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── Base runner (lean, standalone) ──────────────────────────────────
-      - name: Base metadata
+      - name: Metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ steps.owner.outputs.value }}/claude-fleet/runner
+          images: ${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/claude-fleet/runner
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=short
 
-      - name: Build and push base
-        id: base
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/claude-fleet/runner@sha256:%s ' *)
+
+      - name: Output merged manifest digest
+        id: digest
+        run: |
+          tag="$(jq -r '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")"
+          d="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          echo "value=$d" >> "$GITHUB_OUTPUT"
+
+  # ── Variant runners, per-arch (FROM the base manifest digest) ──────────────
+  # variant × arch fan-out. `include` fills runner (by arch) and image/file/
+  # smoke (by variant) onto each combination.
+  variant-build:
+    needs: base-merge
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [devops, dev]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - variant: devops
+            image: runner-devops
+            file: docker/devops/Dockerfile
+            smoke: ''
+          - variant: dev
+            image: runner-dev
+            file: docker/dev/Dockerfile
+            smoke: docker/dev/smoke.test.sh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.variant }} (${{ matrix.arch }}) by digest
+        id: build
         uses: docker/build-push-action@v5
         with:
-          # Repo root is the context so the broker module (//broker/)
-          # is reachable from the Dockerfile's multi-stage build.
           context: .
-          file: docker/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # ── DevOps runner (FROM the base digest we just pushed) ──────────────
-      - name: DevOps metadata
-        id: meta_devops
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ steps.owner.outputs.value }}/claude-fleet/runner-devops
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,format=short
-
-      - name: Build and push devops
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: docker/devops/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          # Pin to the exact base image just built (by digest) so the two
-          # images are always in lockstep.
+          file: ${{ matrix.file }}
+          platforms: linux/${{ matrix.arch }}
+          # Pin to the exact base manifest just built so every variant stays in
+          # lockstep with the base.
           build-args: |
-            BASE_IMAGE=ghcr.io/${{ steps.owner.outputs.value }}/claude-fleet/runner@${{ steps.base.outputs.digest }}
-          # Authenticated GitHub API access for the install scripts (tenv, the
-          # kustomize tag lookup, tflint/trivy) — anonymous builds hit the
-          # 60 req/hr/IP limit. Passed as a BuildKit secret so it never lands
-          # in the image. GITHUB_TOKEN is auto-provided to the workflow.
+            BASE_IMAGE=${{ env.REGISTRY }}/${{ needs.base-merge.outputs.owner }}/claude-fleet/runner@${{ needs.base-merge.outputs.digest }}
+          # Authenticated GitHub API access for the install scripts (tenv,
+          # kustomize tag lookup, tflint/trivy, rust/go/uv releases) — anonymous
+          # builds hit the 60 req/hr/IP limit. BuildKit secret, so it never
+          # lands in the image. GITHUB_TOKEN is auto-provided.
           secrets: |
             github_token=${{ secrets.GITHUB_TOKEN }}
-          tags: ${{ steps.meta_devops.outputs.tags }}
-          labels: ${{ steps.meta_devops.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ needs.base-merge.outputs.owner }}/claude-fleet/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.variant }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}-${{ matrix.arch }}
 
-      # ── Dev runner (FROM the base digest; polyglot toolchain, no cloud/k8s) ─
-      - name: Dev metadata
-        id: meta_dev
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ steps.owner.outputs.value }}/claude-fleet/runner-dev
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,format=short
-
-      - name: Build and push dev
+      # Variants that ship a smoke test run it on their NATIVE amd64 image:
+      # rebuild with load (cache-hit from the push-by-digest build above) so
+      # `docker run` can execute it, then run the test as the non-root user.
+      - name: Load ${{ matrix.variant }} (amd64) for smoke
+        if: matrix.smoke != '' && matrix.arch == 'amd64'
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: docker/dev/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          build-args: |
-            BASE_IMAGE=ghcr.io/${{ steps.owner.outputs.value }}/claude-fleet/runner@${{ steps.base.outputs.digest }}
-          secrets: |
-            github_token=${{ secrets.GITHUB_TOKEN }}
-          tags: ${{ steps.meta_dev.outputs.tags }}
-          labels: ${{ steps.meta_dev.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # Smoke the native-arch image as the non-root fleet user (load one-arch
-      # locally so `docker run` can execute it on the runner).
-      - name: Build dev (amd64, load) for smoke
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: docker/dev/Dockerfile
+          file: ${{ matrix.file }}
           platforms: linux/amd64
           load: true
           build-args: |
-            BASE_IMAGE=ghcr.io/${{ steps.owner.outputs.value }}/claude-fleet/runner@${{ steps.base.outputs.digest }}
+            BASE_IMAGE=${{ env.REGISTRY }}/${{ needs.base-merge.outputs.owner }}/claude-fleet/runner@${{ needs.base-merge.outputs.digest }}
           secrets: |
             github_token=${{ secrets.GITHUB_TOKEN }}
-          tags: claude-fleet/runner-dev:test
-          cache-from: type=gha
+          tags: claude-fleet/${{ matrix.image }}:test
+          cache-from: type=gha,scope=${{ matrix.variant }}-amd64
 
-      - name: Smoke dev image
-        run: bash docker/dev/smoke.test.sh claude-fleet/runner-dev:test
+      - name: Smoke ${{ matrix.variant }} image
+        if: matrix.smoke != '' && matrix.arch == 'amd64'
+        run: bash ${{ matrix.smoke }} claude-fleet/${{ matrix.image }}:test
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.image }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── Variant manifest lists (one per variant, in parallel) ──────────────────
+  variant-merge:
+    needs: [base-merge, variant-build]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: runner-devops
+          - image: runner-dev
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-${{ matrix.image }}-*
+          merge-multiple: true
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ needs.base-merge.outputs.owner }}/claude-fleet/${{ matrix.image }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ needs.base-merge.outputs.owner }}/claude-fleet/${{ matrix.image }}@sha256:%s ' *)
