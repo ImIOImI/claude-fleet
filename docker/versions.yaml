@@ -26,3 +26,8 @@ trivy: latest
 kubectl: latest       # resolves https://dl.k8s.io/release/stable.txt
 kustomize: latest
 helm: latest
+
+# Dev image toolchains (docker/dev/Dockerfile).
+go: 1.23.5            # Go — official tarball into /usr/local/go
+rust: 1.84.0          # Rust — rustup toolchain (cargo/rustc/clippy)
+uv: 0.5.14            # uv — fast Python package/venv manager
