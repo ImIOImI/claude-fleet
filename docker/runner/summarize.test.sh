@@ -89,4 +89,47 @@ printf '{"session_id":"%s","transcript_path":"%s"}' "$sid2" "$t2" \
 assert "$(jq -r '.type' "$work/$sid2.fleet.jsonl" 2>/dev/null)" "session-summary" "fenced JSON output accepted"
 assert "$(jq -r '.tags | length' "$work/$sid2.fleet.jsonl" 2>/dev/null)" "3" "fenced JSON tags parsed"
 
+# ── #230 diagnostics: report_status emits to the MCP sink at each decision point ──
+phases() { jq -r '.params.arguments.phase' "$1" 2>/dev/null | tr '\n' ',' ; }
+mkturns_iso() { # $1 sid, $2 transcript, $3 count — isolated fixture
+  : > "$2"
+  for i in $(seq 1 "$3"); do
+    printf '{"type":"user","timestamp":"2026-07-10T00:00:00Z","message":{"content":"typed human prompt number %s with enough length"}}\n' "$i" >> "$2"
+    printf '{"type":"assistant","message":{"content":[{"type":"text","text":"assistant reply %s"}]}}\n' "$i" >> "$2"
+  done
+}
+
+# 8. Success path emits attempt → generated (and NOT rejected).
+ok_llm="$work/ok-llm.sh"
+printf '#!/usr/bin/env bash\ncat >/dev/null; printf %s '\''{"summary":"did stuff.","tags":["a","b","c"]}'\''\n' > "$ok_llm"; chmod +x "$ok_llm"
+sid8="88888888-0000-0000-0000-000000000008"; t8="$work/$sid8.jsonl"; sink8="$work/sink8"
+mkturns_iso "$sid8" "$t8" 20
+printf '{"session_id":"%s","transcript_path":"%s"}' "$sid8" "$t8" \
+  | CF_SUMMARIZE_FG=1 CF_SUMMARIZE_CMD="$ok_llm" CF_SUMMARY_MIN_INTERVAL_S=0 CF_SUMMARY_STATUS_SINK="$sink8" bash "$here/summarize.sh"
+assert "$(phases "$sink8")" "attempt,generated," "success path reports attempt then generated"
+
+# 9. Rejected model output emits attempt → rejected (the top #230 suspect signal).
+bad_llm="$work/bad-llm.sh"
+printf '#!/usr/bin/env bash\ncat >/dev/null; printf %s '\''sorry, no json here'\''\n' > "$bad_llm"; chmod +x "$bad_llm"
+sid9="99999999-0000-0000-0000-000000000009"; t9="$work/$sid9.jsonl"; sink9="$work/sink9"
+mkturns_iso "$sid9" "$t9" 20
+printf '{"session_id":"%s","transcript_path":"%s"}' "$sid9" "$t9" \
+  | CF_SUMMARIZE_FG=1 CF_SUMMARIZE_CMD="$bad_llm" CF_SUMMARY_MIN_INTERVAL_S=0 CF_SUMMARY_STATUS_SINK="$sink9" bash "$here/summarize.sh"
+assert "$(phases "$sink9")" "attempt,rejected," "rejected path reports attempt then rejected"
+
+# 10. Below threshold with CF_SUMMARY_DIAG=1 emits a gate tick carrying the count.
+sidA="aaaaaaaa-0000-0000-0000-00000000000a"; tA="$work/$sidA.jsonl"; sinkA="$work/sinkA"
+mkturns_iso "$sidA" "$tA" 5
+printf '{"session_id":"%s","transcript_path":"%s"}' "$sidA" "$tA" \
+  | CF_SUMMARIZE_FG=1 CF_SUMMARY_DIAG=1 CF_SUMMARY_STATUS_SINK="$sinkA" bash "$here/summarize.sh"
+assert "$(phases "$sinkA")" "gate," "below-threshold + diag reports a gate tick"
+assert "$(jq -r '.params.arguments.detail.turns' "$sinkA" 2>/dev/null)" "5" "gate tick carries the turn count"
+
+# 11. Below threshold WITHOUT diag stays silent (no spam on the common path).
+sidB="bbbbbbbb-0000-0000-0000-00000000000b"; tB="$work/$sidB.jsonl"; sinkB="$work/sinkB"
+mkturns_iso "$sidB" "$tB" 5
+printf '{"session_id":"%s","transcript_path":"%s"}' "$sidB" "$tB" \
+  | CF_SUMMARIZE_FG=1 CF_SUMMARY_STATUS_SINK="$sinkB" bash "$here/summarize.sh"
+assert "$([ -s "$sinkB" ] && echo nonempty || echo empty)" "empty" "below-threshold without diag emits nothing"
+
 [ "$fails" -eq 0 ] && echo "ALL PASS" || exit 1

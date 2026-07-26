@@ -42,6 +42,7 @@ import {
   setReadScopeResolver,
   setInputWaitHandler,
   setSessionMappingHandler,
+  setSummaryStatusHandler,
   setUsageRecorder,
   setConfigResolver,
   currentMcpStatus,
@@ -1025,6 +1026,20 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         extra: { brokerSessionId, from: previous, to: claudeSessionId, how: 'session-start-hook' }
       });
     }
+  });
+  setSummaryStatusHandler((callerId, sessionId, phase, detail) => {
+    // #230: the chapter-summary Stop hook is fire-and-forget into /dev/null, so
+    // a dead #207 pipeline is otherwise invisible. Land each decision point in
+    // the errors table. `rejected` is the one that means "the summarizer tried
+    // and the model output was unusable" → warn; the rest are informational.
+    logError({
+      source: 'main',
+      type: `summary-${phase}`,
+      level: phase === 'rejected' ? 'warn' : 'info',
+      message: `summarizer ${phase} for session ${sessionId}`,
+      workspaceId: callerId,
+      extra: { sessionId, phase, ...detail }
+    });
   });
   setUsageRecorder((e) => recordUsageEvent(e));
   setConfigResolver(async (callerId) => {
