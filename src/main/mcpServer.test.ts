@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setSessionMappingHandler, setQueryEmbedder, setUsageRecorder, setConfigResolver, _resetTelemetryForTests, type ToolCtx } from './mcpServer.js';
+import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setSessionMappingHandler, setSummaryStatusHandler, setQueryEmbedder, setUsageRecorder, setConfigResolver, _resetTelemetryForTests, type ToolCtx } from './mcpServer.js';
 import { EMBED_DIM, EMBED_MODEL_ID } from './vectors.js';
 
 const WS_A = '01WORKSPACEAAAAAAAAAAAAAAA';
@@ -433,6 +433,27 @@ describe('report_session_mapping (#207)', () => {
   it('rejects bad args', () => {
     setSessionMappingHandler(() => {});
     expect(() => tool('report_session_mapping').run({} as never, { brokerSessionId: 'x' }, ctxA)).toThrow(/required/);
+  });
+});
+
+describe('report_summary_status (#230)', () => {
+  afterEach(() => setSummaryStatusHandler(() => {}));
+  it('forwards (callerId, sessionId, phase, detail) to the injected handler', () => {
+    const calls: Array<[string, string, string, Record<string, unknown>]> = [];
+    setSummaryStatusHandler((c, s, p, d) => calls.push([c, s, p, d]));
+    tool('report_summary_status').run({} as never, { sessionId: 'uuid-9', phase: 'rejected', detail: { rawLen: 12 } }, ctxA);
+    expect(calls).toEqual([[WS_A, 'uuid-9', 'rejected', { rawLen: 12 }]]);
+  });
+  it('defaults detail to {} and tolerates a non-object detail', () => {
+    const calls: Array<Record<string, unknown>> = [];
+    setSummaryStatusHandler((_c, _s, _p, d) => calls.push(d));
+    tool('report_summary_status').run({} as never, { sessionId: 'uuid-9', phase: 'attempt' }, ctxA);
+    tool('report_summary_status').run({} as never, { sessionId: 'uuid-9', phase: 'attempt', detail: 'nope' }, ctxA);
+    expect(calls).toEqual([{}, {}]);
+  });
+  it('rejects bad args', () => {
+    setSummaryStatusHandler(() => {});
+    expect(() => tool('report_summary_status').run({} as never, { sessionId: 'x' }, ctxA)).toThrow(/required/);
   });
 });
 

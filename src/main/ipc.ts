@@ -42,6 +42,7 @@ import {
   setReadScopeResolver,
   setInputWaitHandler,
   setSessionMappingHandler,
+  setSummaryStatusHandler,
   setUsageRecorder,
   setConfigResolver,
   currentMcpStatus,
@@ -81,6 +82,7 @@ import {
   costForSession,
   costForWorkspace,
   learnBrokerSessionMapping,
+  recordBrokerSessionMapping,
   lookupBrokerSession,
   lookupVerifiedBrokerSession,
   listSessions,
@@ -1004,8 +1006,19 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     pushInputWait(callerId);
   });
   setSessionMappingHandler((callerId, brokerSessionId, claudeSessionId) => {
-    const previous = learnBrokerSessionMapping(callerId, brokerSessionId, claudeSessionId);
-    if (previous && previous !== claudeSessionId) {
+    const { mode, previous } = recordBrokerSessionMapping(callerId, brokerSessionId, claudeSessionId);
+    if (mode === 'deferred') {
+      // The hook named a session that hasn't written a transcript yet (a fresh
+      // `/clear`). Parked rather than committed so an abandoned cleared session
+      // can't strand the tab on a rowless phantom (#170) — promoted on its first
+      // ingested line, or discarded if it never produces one.
+      logError({
+        source: 'main', type: 'mapping-deferred', level: 'info',
+        message: `broker ${brokerSessionId} parked → ${claudeSessionId} via SessionStart hook (awaiting transcript; keeping ${previous})`,
+        workspaceId: callerId,
+        extra: { brokerSessionId, pending: claudeSessionId, keeping: previous, how: 'session-start-hook' }
+      });
+    } else if (previous && previous !== claudeSessionId) {
       logError({
         source: 'main', type: 'mapping-remapped', level: 'warn',
         message: `broker ${brokerSessionId} remapped ${previous} → ${claudeSessionId} via SessionStart hook (drift corrected)`,
@@ -1013,6 +1026,20 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         extra: { brokerSessionId, from: previous, to: claudeSessionId, how: 'session-start-hook' }
       });
     }
+  });
+  setSummaryStatusHandler((callerId, sessionId, phase, detail) => {
+    // #230: the chapter-summary Stop hook is fire-and-forget into /dev/null, so
+    // a dead #207 pipeline is otherwise invisible. Land each decision point in
+    // the errors table. `rejected` is the one that means "the summarizer tried
+    // and the model output was unusable" → warn; the rest are informational.
+    logError({
+      source: 'main',
+      type: `summary-${phase}`,
+      level: phase === 'rejected' ? 'warn' : 'info',
+      message: `summarizer ${phase} for session ${sessionId}`,
+      workspaceId: callerId,
+      extra: { sessionId, phase, ...detail }
+    });
   });
   setUsageRecorder((e) => recordUsageEvent(e));
   setConfigResolver(async (callerId) => {
