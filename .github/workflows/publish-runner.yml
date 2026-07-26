@@ -93,3 +93,48 @@ jobs:
           labels: ${{ steps.meta_devops.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # ── Dev runner (FROM the base digest; polyglot toolchain, no cloud/k8s) ─
+      - name: Dev metadata
+        id: meta_dev
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ steps.owner.outputs.value }}/claude-fleet/runner-dev
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+
+      - name: Build and push dev
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/dev/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            BASE_IMAGE=ghcr.io/${{ steps.owner.outputs.value }}/claude-fleet/runner@${{ steps.base.outputs.digest }}
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
+          tags: ${{ steps.meta_dev.outputs.tags }}
+          labels: ${{ steps.meta_dev.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Smoke the native-arch image as the non-root fleet user (load one-arch
+      # locally so `docker run` can execute it on the runner).
+      - name: Build dev (amd64, load) for smoke
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/dev/Dockerfile
+          platforms: linux/amd64
+          load: true
+          build-args: |
+            BASE_IMAGE=ghcr.io/${{ steps.owner.outputs.value }}/claude-fleet/runner@${{ steps.base.outputs.digest }}
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
+          tags: claude-fleet/runner-dev:test
+          cache-from: type=gha
+
+      - name: Smoke dev image
+        run: bash docker/dev/smoke.test.sh claude-fleet/runner-dev:test
