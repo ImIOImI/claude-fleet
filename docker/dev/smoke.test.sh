@@ -19,4 +19,5 @@ run 'uv --version         | sed -n "1p"'
 run 'go version           | sed -n "1p"'
 run 'cargo --version      | sed -n "1p"'
 run 'rustc --version      | sed -n "1p"'
+run 'gh --version         | sed -n "1p"'
 echo "== all toolchains reachable as fleet =="
