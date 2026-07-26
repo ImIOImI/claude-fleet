@@ -41,7 +41,7 @@ import type {
   RemoveWorkspaceOpts
 } from './docker.js';
 import { randomUUID } from 'node:crypto';
-import { learnBrokerSessionMapping, recordUsageEvent } from './db.js';
+import { recordBrokerSessionMapping, recordUsageEvent } from './db.js';
 import { logError } from './errorLog.js';
 import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
 import { workspaceStateDir, assertValidWorkspaceId } from './paths.js';
@@ -237,8 +237,20 @@ export async function attachPty(
     // silently degraded to workspace-level guesses.
     claudeSessionId: randomUUID(),
     onFreshSpawn: (claudeSessionId) => {
-      const previous = learnBrokerSessionMapping(id, sessionId, claudeSessionId);
-      if (previous && previous !== claudeSessionId) {
+      const { mode, previous } = recordBrokerSessionMapping(id, sessionId, claudeSessionId);
+      if (mode === 'deferred') {
+        // Re-spawn of a tab that still holds a real conversation onto a fresh
+        // (not-yet-written) id — parked until it produces a transcript so an
+        // unused session can't black-hole the tab (#170).
+        logError({
+          source: 'main',
+          type: 'mapping-deferred',
+          level: 'info',
+          message: `broker ${sessionId} parked → ${claudeSessionId} at local spawn (awaiting transcript; keeping ${previous})`,
+          workspaceId: id,
+          extra: { brokerSessionId: sessionId, pending: claudeSessionId, keeping: previous }
+        });
+      } else if (previous && previous !== claudeSessionId) {
         logError({
           source: 'main',
           type: 'mapping-remapped',

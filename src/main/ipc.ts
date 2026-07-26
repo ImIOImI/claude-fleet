@@ -81,6 +81,7 @@ import {
   costForSession,
   costForWorkspace,
   learnBrokerSessionMapping,
+  recordBrokerSessionMapping,
   lookupBrokerSession,
   lookupVerifiedBrokerSession,
   listSessions,
@@ -1004,8 +1005,19 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     pushInputWait(callerId);
   });
   setSessionMappingHandler((callerId, brokerSessionId, claudeSessionId) => {
-    const previous = learnBrokerSessionMapping(callerId, brokerSessionId, claudeSessionId);
-    if (previous && previous !== claudeSessionId) {
+    const { mode, previous } = recordBrokerSessionMapping(callerId, brokerSessionId, claudeSessionId);
+    if (mode === 'deferred') {
+      // The hook named a session that hasn't written a transcript yet (a fresh
+      // `/clear`). Parked rather than committed so an abandoned cleared session
+      // can't strand the tab on a rowless phantom (#170) — promoted on its first
+      // ingested line, or discarded if it never produces one.
+      logError({
+        source: 'main', type: 'mapping-deferred', level: 'info',
+        message: `broker ${brokerSessionId} parked → ${claudeSessionId} via SessionStart hook (awaiting transcript; keeping ${previous})`,
+        workspaceId: callerId,
+        extra: { brokerSessionId, pending: claudeSessionId, keeping: previous, how: 'session-start-hook' }
+      });
+    } else if (previous && previous !== claudeSessionId) {
       logError({
         source: 'main', type: 'mapping-remapped', level: 'warn',
         message: `broker ${brokerSessionId} remapped ${previous} → ${claudeSessionId} via SessionStart hook (drift corrected)`,

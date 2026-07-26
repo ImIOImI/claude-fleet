@@ -40,7 +40,7 @@ import {
 import { CONTAINER_BRIDGE_FILENAME } from './mcpContainerBridge.js';
 import { BrokerClient, brokerPtyStream } from './broker.js';
 import { randomUUID } from 'node:crypto';
-import { learnBrokerSessionMapping, recordUsageEvent } from './db.js';
+import { recordBrokerSessionMapping, recordUsageEvent } from './db.js';
 import { logError } from './errorLog.js';
 import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
 import { resolveEnv } from './vault.js';
@@ -878,8 +878,20 @@ export async function attachPty(
     // conversation). Learning is deliberately NOT done on the plain-ATTACH
     // path above: an already-live claude keeps whatever id it already has.
     const claudeSessionId = resumeOf ?? randomUUID();
-    const previous = learnBrokerSessionMapping(workspaceId, sessionId, claudeSessionId);
-    if (previous && previous !== claudeSessionId) {
+    const { mode, previous } = recordBrokerSessionMapping(workspaceId, sessionId, claudeSessionId);
+    if (mode === 'deferred') {
+      // Re-CREATE of a tab that still holds a real conversation, onto a fresh
+      // (not-yet-written) session id. Parked until it produces a transcript so
+      // a session that never gets used can't black-hole the tab (#170).
+      logError({
+        source: 'main',
+        type: 'mapping-deferred',
+        level: 'info',
+        message: `broker ${sessionId} parked → ${claudeSessionId} at CREATE (awaiting transcript; keeping ${previous})`,
+        workspaceId,
+        extra: { brokerSessionId: sessionId, pending: claudeSessionId, keeping: previous }
+      });
+    } else if (previous && previous !== claudeSessionId) {
       logError({
         source: 'main',
         type: 'mapping-remapped',
