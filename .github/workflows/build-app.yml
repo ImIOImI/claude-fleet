@@ -155,9 +155,12 @@ jobs:
   # node-pty spawns via ConPTY (local-backend.spec.ts) and the MCP transport is
   # loopback TCP + per-workspace token instead of a Unix socket (connectMcp in
   # _helpers.ts picks the transport by platform). Electron needs no Xvfb on
-  # Windows — it opens a native window. As on Linux, no spec spawns a real
-  # Docker container (mock fleet + on-disk seed data), so no Docker daemon is
-  # required.
+  # Windows — it opens a native window. No spec spawns a real Docker container
+  # (mock fleet + on-disk seed data), but the app still pokes the Docker engine
+  # on startup (sessions:list → dockerode), and the windows-latest daemon is not
+  # reliably running when the job begins — so a "Wait for the Docker engine"
+  # step gates the run to avoid an intermittent `ENOENT //./pipe/docker_engine`
+  # flake (#243).
   e2e-windows:
     name: e2e (playwright, windows)
     runs-on: windows-latest
@@ -185,6 +188,29 @@ jobs:
 
       - name: Build app
         run: npm run build
+
+      # windows-latest ships Docker, but the daemon service isn't guaranteed to
+      # be running (or done starting) when the job begins — an intermittent
+      # `connect ENOENT //./pipe/docker_engine` then fails the e2e specs, which
+      # poke dockerode on startup via sessions:list even though none of them
+      # spawn a container (#243). Start the service if it's stopped and poll the
+      # engine until it answers (or fail loudly after 3 min) BEFORE the specs run,
+      # so a slow-starting daemon no longer surfaces as a cryptic mid-test flake.
+      - name: Wait for the Docker engine
+        shell: pwsh
+        run: |
+          Get-Service -Name 'docker*' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Status -ne 'Running' } |
+            ForEach-Object { Write-Host "Starting service $($_.Name)"; Start-Service $_.Name }
+          $deadline = (Get-Date).AddMinutes(3)
+          while ((Get-Date) -lt $deadline) {
+            docker info *> $null
+            if ($LASTEXITCODE -eq 0) { Write-Host 'Docker engine is ready.'; exit 0 }
+            Write-Host 'Waiting for the Docker engine...'
+            Start-Sleep -Seconds 3
+          }
+          Write-Error 'Docker engine did not become ready within 3 minutes.'
+          exit 1
 
       # No Xvfb on Windows — Electron opens a native window. ELECTRON_DISABLE_SANDBOX
       # avoids the Chromium setuid-sandbox requirement (same as Linux e2e).
