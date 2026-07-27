@@ -84,12 +84,13 @@ export interface IngestEvent {
 }
 
 /**
- * Emitted the first time we see a JSONL file path — i.e. the first
- * `process()` after `initState` for that path. This is the trigger the
- * per-tab mapping layer uses to pair a freshly-spawned claude
- * session UUID with a pending attach (see `pendingAttaches.ts` +
- * `db.learnBrokerSessionMapping`). Fires before the corresponding
- * `'ingest'` event for the same batch.
+ * Emitted the first time we see a given session's primary transcript — at
+ * most ONCE per session id per watcher lifetime (see `announcedSessions`).
+ * This is the trigger the per-tab mapping layer uses to pair a freshly-spawned
+ * claude session UUID with a pending attach (see `pendingAttaches.ts` +
+ * `db.learnBrokerSessionMapping`). Fires before the corresponding `'ingest'`
+ * event for the same batch. Re-sighting the transcript (chokidar unlink→add,
+ * unregister/re-register) does NOT re-fire it.
  */
 export interface NewSessionEvent {
   workspaceId: string;
@@ -115,6 +116,15 @@ export class JsonlWatcher extends EventEmitter {
   // Per-file mutex (sequenced via a chained promise) so concurrent
   // add/change events on the same file don't race the byte offset.
   private readonly chains = new Map<string, Promise<void>>();
+  // Sessions already announced via 'new-session'. Keyed by session id (the
+  // session's stable identity), and deliberately OUTLIVES the `files` map:
+  // `files` entries are dropped on chokidar unlink, unregister, and stat
+  // failures, and a re-sighted transcript would then look like `!existing`
+  // and re-fire 'new-session'. Under a chokidar unlink→add re-add storm that
+  // re-fire becomes a runaway that floods the pending-attach layer with
+  // dropped events (#243). This set caps 'new-session' to once per session
+  // per watcher lifetime. Cleared only on stop().
+  private readonly announcedSessions = new Set<string>();
 
   // Registered host transcript dirs for local-backend workspaces:
   //   ~/.claude/projects/<encoded-root>/  →  real workspace id.
@@ -192,6 +202,7 @@ export class JsonlWatcher extends EventEmitter {
     this.files.clear();
     this.chains.clear();
     this.watchedDirs.clear();
+    this.announcedSessions.clear();
   }
 
   registerWorkspace(name: string): void {
@@ -252,8 +263,12 @@ export class JsonlWatcher extends EventEmitter {
     // Sidecars (<uuid>.fleet.jsonl) are host-written summary data and must
     // NOT fire 'new-session': they arrive after the session is already known
     // and firing would corrupt the pending-attach fallback (#207).
+    // Guarded by `announcedSessions` so a transcript re-sighted after its
+    // `files` entry was dropped (unlink→add, unregister, stat failure) does
+    // NOT re-fire — the source of the #243 new-session-dropped flood.
     // Fires before the eventual 'ingest' emit for this batch.
-    if (!existing && !state.sidecar) {
+    if (!existing && !state.sidecar && !this.announcedSessions.has(state.sessionId)) {
+      this.announcedSessions.add(state.sessionId);
       this.emit('new-session', {
         workspaceId: state.workspaceId,
         sessionId: state.sessionId,
