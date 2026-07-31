@@ -291,25 +291,29 @@ export function App() {
   useEffect(() => {
     return window.api.ports.onDetected((workspaceId, port) => {
       const name = workspacesRef.current.find((w) => w.id === workspaceId)?.name ?? 'workspace';
+      // Sticky: this toast is the only way to reach the preview (bridge IPs
+      // aren't routable from the host on Windows), so it must never expire —
+      // missing it means restarting the dev server to re-trigger detection.
+      // It clears on click or ✕. Keyless so multiple ports can stack.
+      const id = ++toastIdRef.current;
       dispatchToast({
         type: 'push',
-        toast: makeToast(++toastIdRef.current, {
+        toast: makeToast(id, {
           kind: 'info',
           eyebrow: 'Preview',
           message: `Dev server detected on port ${port} in ${name}`,
           placement: 'global',
-          sticky: false,
+          sticky: true,
           dismissible: true,
           action: {
             label: 'Open preview',
-            onClick: () => void window.api.ports.open(workspaceId, port)
+            onClick: () => {
+              void window.api.ports.open(workspaceId, port);
+              dispatchToast({ type: 'dismiss', id });
+            }
           }
         })
       });
-      // Auto-dismiss after a longer window than the default — give the user
-      // time to click. Keyless so multiple ports can stack.
-      const id = toastIdRef.current;
-      setTimeout(() => dispatchToast({ type: 'dismiss', id }), 12000);
     });
   }, []);
 
