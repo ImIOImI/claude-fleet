@@ -28,13 +28,23 @@ if [ "$new_turns" -lt "$min_turns" ]; then
 fi
 [ $((now - last_run)) -ge "$min_interval" ] || exit 0
 
-# Claim the window immediately (before the slow LLM call) so a Stop firing
-# mid-generation doesn't double-summarize the same turns.
-printf '%s %s\n' "$turns" "$now" > "$state"
+max_chapters="${CF_SUMMARY_MAX_CHAPTERS_PER_RUN:-5}"
 
-if [ -n "${CF_SUMMARIZE_FG:-}" ]; then generate_window "$last_turns" "$new_turns"; else
+# Catch up in real ≤min_turns chapters instead of one tail-capped mega-window
+# (#246): a resumed session with an 80-turn backlog gets 4 chapters, not 1.
+# Stops on: backlog drained (rc 1), cap reached, or a chunk that attempted but
+# didn't generate (rc 2 — likely a broken model; don't burn the rest of the cap).
+run_chunks() {
+  n=0
+  while [ "$n" -lt "$max_chapters" ]; do
+    summarize_next_chunk || return 0
+    n=$((n+1))
+  done
+}
+
+if [ -n "${CF_SUMMARIZE_FG:-}" ]; then run_chunks; else
   # cd /tmp: the claude -p run must not write its throwaway transcript into
   # the watched workspace project dir (spec §C known risk).
-  ( cd /tmp && generate_window "$last_turns" "$new_turns" ) >/dev/null 2>&1 &
+  ( cd /tmp && run_chunks ) >/dev/null 2>&1 &
 fi
 exit 0

@@ -44,38 +44,51 @@ read_watermark() {
   [ -f "$state" ] && read -r last_turns last_run < "$state"
 }
 
-# Task-1 shape: today's unbounded window generation, parameterized by $1=skip.
-# Task 2 replaces this with the chunk-bounded summarize_next_chunk.
-generate_window() {
-  skip="$1"
-  # Window: text of entries whose user-turn number > last_turns.
-  # Rule: a user prompt increments the counter then carries that new value;
-  # an assistant reply carries the same value as the user prompt it follows
-  # (i.e. it belongs to that turn). Entries with turn number > $skip are in
-  # the new window. This ensures the slice boundary is expressed in user-turn
-  # positions, not mixed-entry positions, so no content from previous chapters
-  # leaks into the current window.
-  window="$(jq -rs --argjson skip "$skip" '
+# One chapter for the next chunk: turns (last_turns, last_turns+min_turns].
+# Only fires when a FULL chunk exists (sub-threshold tails stay unsummarized —
+# parity with organic behavior). Claims the watermark BEFORE the model call.
+# Returns: 0 chapter generated; 1 no full chunk (nothing claimed);
+#          2 chunk claimed but not generated (empty window / model rejected).
+summarize_next_chunk() {
+  turns="$(count_turns)"
+  read_watermark
+  new_turns=$((turns - last_turns))
+  [ "$new_turns" -ge "$min_turns" ] || return 1
+  skip="$last_turns"
+  chunk_end=$((skip + min_turns))
+  printf '%s %s\n' "$chunk_end" "$(date +%s)" > "$state"
+
+  # Window: entries whose user-turn number n satisfies skip < n <= chunk_end.
+  # A user prompt increments the counter then carries the new value; an
+  # assistant reply carries the same value as the prompt it follows — so the
+  # slice boundary is expressed in user-turn positions and no content from
+  # other chapters leaks in. Emits {text, from, to} so the chapter can carry
+  # the WINDOW's timestamps (#246 — whole-transcript stamps poisoned Phase 3).
+  slice="$(jq -cs --argjson skip "$skip" --argjson upto "$chunk_end" '
     reduce .[] as $e ([[], 0];
       if ($e.type=="user" and ($e.message.content|type)=="string")
       then [ .[0] + [{n: (.[1]+1), e: $e}], .[1]+1 ]
       elif $e.type=="assistant"
       then [ .[0] + [{n: .[1], e: $e}], .[1] ]
       else . end)
-    | .[0]
-    | map(select(.n > $skip))
-    | map(.e
-        | if .type=="user" then "USER: " + .message.content
-          else "ASSISTANT: " + ([.message.content[]? | select(.type=="text") | .text] | join("\n"))
-          end)
-    | map(select(length > 10))
-    | join("\n---\n")' "$tpath" 2>/dev/null | tail -c "$window_chars")"
-  [ -n "$window" ] || { report_status empty-window "$(jq -nc --argjson nt "${2:-0}" '{newTurns:$nt}' 2>/dev/null || printf '{}')"; return 0; }
+    | .[0] | map(select(.n > $skip and .n <= $upto)) | . as $win
+    | { text: ($win
+        | map(.e
+            | if .type=="user" then "USER: " + .message.content
+              else "ASSISTANT: " + ([.message.content[]? | select(.type=="text") | .text] | join("\n"))
+              end)
+        | map(select(length > 10)) | join("\n---\n")),
+        from: ([$win[].e.timestamp // empty] | first // ""),
+        to:   ([$win[].e.timestamp // empty] | last // "") }' "$tpath" 2>/dev/null)"
+  window="$(printf '%s' "$slice" | jq -r '.text // empty' 2>/dev/null | tail -c "$window_chars")"
+  from_ts="$(printf '%s' "$slice" | jq -r '.from // empty' 2>/dev/null)"
+  to_ts="$(printf '%s' "$slice" | jq -r '.to // empty' 2>/dev/null)"
+  [ -n "$window" ] || { report_status empty-window "$(jq -nc --argjson nt "$new_turns" '{newTurns:$nt}' 2>/dev/null || printf '{}')"; return 2; }
 
   # Gate passed and we have a window — about to call the summarizer model. If
-  # this signal appears but neither `generated` nor `rejected` follows, the
-  # model call itself hung/crashed (the top #230 suspect).
-  report_status attempt "$(jq -nc --argjson nt "${2:-0}" --arg model "$model" '{newTurns:$nt,model:$model}' 2>/dev/null || printf '{}')"
+  # this appears with no `generated`/`rejected` after it, the model call itself
+  # hung/crashed (the top #230 suspect).
+  report_status attempt "$(jq -nc --argjson nt "$min_turns" --arg model "$model" '{newTurns:$nt,model:$model}' 2>/dev/null || printf '{}')"
 
   prev="$(tail -n 1 "$sidecar" 2>/dev/null | jq -r '.summary // empty' 2>/dev/null)"
   prompt="You summarize a window of an ongoing coding session.
@@ -86,37 +99,26 @@ $window"
 
   raw="$(printf '%s' "$prompt" | ${CF_SUMMARIZE_CMD:-claude -p --model "$model"} 2>/dev/null)"
   # Models (esp. haiku) wrap the object in a ```json code fence and may add
-  # prose around it. Pull out the object between the first '{' and last '}'
-  # before validating — the summary JSON has no nested objects, so this is
-  # unambiguous. No braces at all → empty → rejected below.
+  # prose around it. Pull out the object between the first '{' and last '}'.
   json="${raw#"${raw%%\{*}"}"; json="${json%"${json##*\}}"}"
-  # Strict validation: must parse, must have non-empty summary + tags array.
   out="$(printf '%s' "$json" | jq -c 'select((.summary|type)=="string" and (.summary|length)>0 and (.tags|type)=="array") | {summary, tags}' 2>/dev/null)"
   [ -n "$out" ] || {
     echo "summarize: model output rejected" >&2
-    # Distinguish "model returned nothing" from "returned unparseable text".
     report_status rejected "$(jq -nc --argjson len "${#raw}" '{rawLen:$len}' 2>/dev/null || printf '{}')"
-    return 0
+    return 2
   }
 
-  from_ts="$(jq -rs '[.[] | .timestamp // empty] | first // empty' "$tpath" 2>/dev/null)"
-  to_ts="$(jq -rs '[.[] | .timestamp // empty] | last // empty' "$tpath" 2>/dev/null)"
   printf '%s' "$out" | jq -c --arg sid "$sid" --arg model "$model" --arg f "$from_ts" --arg t "$to_ts" \
     '{type:"session-summary", summary:.summary, tags:.tags, sessionId:$sid, model:$model, fromEventTs:$f, toEventTs:$t}' \
     >> "$sidecar"
 
-  # #170: the model also returns a short rolling "title". Emit it as an ai-title
-  # sidecar line so ingestLine's last-write-wins overwrites Claude Code's stale
-  # one-shot ai_title — re-titling the session tab (via summaryForBrokerSession)
-  # and the left-rail (which reads the same DB column). Optional: absent/blank
-  # title just skips this line, so older summarizer prompts stay compatible.
+  # #170: emit the rolling ai-title so ingestLine's last-write-wins re-titles
+  # the tab/left-rail. Optional — absent/blank title just skips the line.
   title="$(printf '%s' "$json" | jq -r 'if (.title|type)=="string" and ((.title|gsub("^\\s+|\\s+$";""))|length)>0 then (.title|gsub("^\\s+|\\s+$";"")) else empty end' 2>/dev/null)"
   if [ -n "$title" ]; then
     jq -nc --arg sid "$sid" --arg title "$title" '{type:"ai-title", aiTitle:$title, sessionId:$sid}' >> "$sidecar"
   fi
 
-  # Chapter written to the sidecar. If this appears but no chapter lands in the
-  # DB, the failure is in sidecar ingestion, not generation (#230). `retitled`
-  # records whether this run also refreshed the ai-title (#170).
   report_status generated "$(printf '%s' "$out" | jq -c --argjson retitled "$([ -n "$title" ] && echo true || echo false)" '{tags:(.tags|length),summaryLen:(.summary|length),retitled:$retitled}' 2>/dev/null || printf '{}')"
+  return 0
 }
