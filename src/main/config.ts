@@ -255,7 +255,8 @@ export function resolveWorkspaceConfig(
   workspaceId: string;
   app: { version: string };
   runnerImage: { name: string } | null;
-  summarizer: { model: string; minNewTurns: number; minIntervalS: number; windowChars: number };
+  summarizer: { model: string; minNewTurns: number; minIntervalS: number; windowChars: number; maxChaptersPerRun: number };
+  backfill: { enabled: boolean; maxPerSweep: number; delayS: number };
 } {
   const num = (v: unknown, d: number) => (Number.isFinite(Number(v)) ? Number(v) : d);
   return {
@@ -266,7 +267,13 @@ export function resolveWorkspaceConfig(
       model: typeof env.CF_SUMMARY_MODEL === 'string' ? env.CF_SUMMARY_MODEL : 'haiku',
       minNewTurns: num(env.CF_SUMMARY_MIN_NEW_TURNS, 20),
       minIntervalS: num(env.CF_SUMMARY_MIN_INTERVAL_S, 120),
-      windowChars: num(env.CF_SUMMARY_WINDOW_CHARS, 8000)
+      windowChars: num(env.CF_SUMMARY_WINDOW_CHARS, 8000),
+      maxChaptersPerRun: num(env.CF_SUMMARY_MAX_CHAPTERS_PER_RUN, 5)
+    },
+    backfill: {
+      enabled: env.CF_BACKFILL !== '0',
+      maxPerSweep: num(env.CF_BACKFILL_MAX_PER_SWEEP, 10),
+      delayS: num(env.CF_BACKFILL_DELAY_S, 3)
     }
   };
 }

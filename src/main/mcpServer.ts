@@ -1326,7 +1326,7 @@ export const TOOLS: Tool[] = [
   {
     name: 'get_config',
     description:
-      'Effective fleet tunables for this workspace (summarizer model/debounce/window, app defaults ' +
+      'Effective fleet tunables for this workspace (summarizer model/debounce/window/chapter-cap and backfill sweep budget, app defaults ' +
       '⊕ workspace env overrides), plus app.version — the claude-fleet version of the LIVE host ' +
       'process (current across app restarts) — and runnerImage.name, the image reference the ' +
       'workspace was created with (null for local workspaces; the tag, not the build — a newer ' +
