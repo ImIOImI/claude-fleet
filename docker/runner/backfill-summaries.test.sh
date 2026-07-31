@@ -37,7 +37,7 @@ mkturns_seq "$proj/-workspace/$tiny.jsonl" 5
 run_sweep() { # $* = extra env assignments
   printf '{"session_id":"%s","transcript_path":"%s"}' "$cur" "$proj/-workspace/$cur.jsonl" \
     | env CF_BACKFILL_FG=1 CF_BACKFILL_PROJECTS_DIR="$proj" CF_BACKFILL_DELAY_S=0 \
-          CF_SUMMARIZE_CMD="$fake_llm" "$@" bash "$here/backfill-summaries.sh"
+          CF_SUMMARIZE_CMD="$fake_llm" CF_BACKFILL_LOCK_DIR="$work/lock" "$@" bash "$here/backfill-summaries.sh"
 }
 
 # 1. Full drain: old1 gets 2 chapters, old2 gets 1; current + tiny untouched.
@@ -80,7 +80,7 @@ printf '#!/usr/bin/env bash\ncat >/dev/null; printf %s '\''no json'\''\n' > "$ba
 : > "$calls"
 printf '{"session_id":"%s","transcript_path":"%s"}' "$cur" "$proj/-workspace/$cur.jsonl" \
   | env CF_BACKFILL_FG=1 CF_BACKFILL_PROJECTS_DIR="$proj" CF_BACKFILL_DELAY_S=0 \
-        CF_SUMMARIZE_CMD="$bad_llm" bash "$here/backfill-summaries.sh"
+        CF_SUMMARIZE_CMD="$bad_llm" CF_BACKFILL_LOCK_DIR="$work/lock" bash "$here/backfill-summaries.sh"
 assert "$([ -f "$proj/-workspace/$old1.fleet.jsonl" ] || [ -f "$proj/-workspace/$old2.fleet.jsonl" ] && echo yes || echo no)" "no" "broken model produces no chapters"
 
 # 6. Lock: a held lock makes the sweep a no-op.
