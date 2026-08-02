@@ -211,7 +211,8 @@ describe('resolveWorkspaceConfig (#219)', () => {
       workspaceId: 'ws-1',
       app: { version: '9.9.9' },
       runnerImage: null,
-      summarizer: { model: 'haiku', minNewTurns: 20, minIntervalS: 120, windowChars: 8000 }
+      summarizer: { model: 'haiku', minNewTurns: 20, minIntervalS: 120, windowChars: 8000, maxChaptersPerRun: 5 },
+      backfill: { enabled: true, maxPerSweep: 10, delayS: 3 }
     });
   });
 
@@ -223,9 +224,10 @@ describe('resolveWorkspaceConfig (#219)', () => {
   it('applies CF_SUMMARY_* env overrides, falling back on non-numeric values', () => {
     const out = resolveWorkspaceConfig(
       'ws-1',
-      { CF_SUMMARY_MODEL: 'sonnet', CF_SUMMARY_MIN_NEW_TURNS: '5', CF_SUMMARY_WINDOW_CHARS: 'garbage' },
+      { CF_SUMMARY_MODEL: 'sonnet', CF_SUMMARY_MIN_NEW_TURNS: '5', CF_SUMMARY_WINDOW_CHARS: 'garbage', CF_BACKFILL: '0', CF_BACKFILL_MAX_PER_SWEEP: '4', CF_SUMMARY_MAX_CHAPTERS_PER_RUN: 'garbage' },
       '1.0.0'
     );
-    expect(out.summarizer).toEqual({ model: 'sonnet', minNewTurns: 5, minIntervalS: 120, windowChars: 8000 });
+    expect(out.summarizer).toEqual({ model: 'sonnet', minNewTurns: 5, minIntervalS: 120, windowChars: 8000, maxChaptersPerRun: 5 });
+    expect(out.backfill).toEqual({ enabled: false, maxPerSweep: 4, delayS: 3 });
   });
 });

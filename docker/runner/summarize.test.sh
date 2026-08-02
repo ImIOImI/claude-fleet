@@ -159,4 +159,52 @@ assert "$(jq -rs 'map(select(.type=="ai-title")) | length' "$work/$sidD.fleet.js
 assert "$(jq -rs 'map(select(.type=="session-summary")) | length' "$work/$sidD.fleet.jsonl" 2>/dev/null)" "1" "session-summary still emitted without title"
 assert "$(jq -r 'select(.params.arguments.phase=="generated") | .params.arguments.detail.retitled' "$sinkD" 2>/dev/null)" "false" "generated breadcrumb notes retitled:false when omitted"
 
+# ── #246 chunked backfill core: bounded windows, windowed timestamps, loop cap ──
+mkturns_seq() { # $1 sid, $2 transcript, $3 count — ordered unique timestamps
+  : > "$2"
+  for i in $(seq 1 "$3"); do
+    printf '{"type":"user","timestamp":"2026-07-10T%02d:%02d:00Z","message":{"content":"typed human prompt number %s with enough length"}}\n' \
+      "$((i / 60))" "$((i % 60))" "$i" >> "$2"
+    printf '{"type":"assistant","message":{"content":[{"type":"text","text":"assistant reply number %s here"}]}}\n' "$i" >> "$2"
+  done
+}
+count_llm="$work/count-llm.sh"   # counts invocations, returns valid JSON
+calls="$work/llm-calls"
+cat > "$count_llm" <<COUNT
+#!/usr/bin/env bash
+cat > "$work/last-llm-input"
+echo x >> "$calls"
+printf '{"summary":"chunk summary.","tags":["a","b","c"]}'
+COUNT
+chmod +x "$count_llm"
+
+# 14. 80-turn dead transcript, one Stop-hook run → 4 chapters (organic cadence
+#     replayed), watermark 80, model called exactly 4 times.
+sidE="eeeeeeee-0000-0000-0000-00000000000e"; tE="$work/$sidE.jsonl"
+mkturns_seq "$sidE" "$tE" 80; : > "$calls"
+printf '{"session_id":"%s","transcript_path":"%s"}' "$sidE" "$tE" \
+  | CF_SUMMARIZE_FG=1 CF_SUMMARIZE_CMD="$count_llm" CF_SUMMARY_MIN_INTERVAL_S=0 bash "$here/summarize.sh"
+assert "$(jq -rs 'map(select(.type=="session-summary")) | length' "$work/$sidE.fleet.jsonl" 2>/dev/null)" "4" "80 turns → 4 chapters in one run"
+assert "$(wc -l < "$calls" | tr -d ' ')" "4" "model called once per chunk"
+assert "$(cut -d' ' -f1 "$work/$sidE.fleet.state")" "80" "watermark advanced to 80"
+# Last chunk's window is turns 61-80 only.
+assert "$(grep -c 'prompt number 61 ' "$work/last-llm-input" 2>/dev/null || echo 0)" "1" "final chunk contains turn 61"
+assert "$(grep 'prompt number 41 ' "$work/last-llm-input" >/dev/null 2>&1 && echo found || echo absent)" "absent" "final chunk excludes turn 41"
+
+# 15. Windowed timestamps: chapter 2 carries the 2nd chunk's first/last ts,
+#     not the whole transcript's.
+assert "$(jq -rs 'map(select(.type=="session-summary")) | .[1].fromEventTs' "$work/$sidE.fleet.jsonl")" "2026-07-10T00:21:00Z" "chapter 2 fromEventTs = turn 21"
+assert "$(jq -rs 'map(select(.type=="session-summary")) | .[1].toEventTs' "$work/$sidE.fleet.jsonl")" "2026-07-10T00:40:00Z" "chapter 2 toEventTs = turn 40"
+
+# 16. CF_SUMMARY_MAX_CHAPTERS_PER_RUN caps the loop; a second run resumes.
+sidF="ffffffff-0000-0000-0000-00000000000f"; tF="$work/$sidF.jsonl"
+mkturns_seq "$sidF" "$tF" 80; : > "$calls"
+printf '{"session_id":"%s","transcript_path":"%s"}' "$sidF" "$tF" \
+  | CF_SUMMARIZE_FG=1 CF_SUMMARIZE_CMD="$count_llm" CF_SUMMARY_MIN_INTERVAL_S=0 CF_SUMMARY_MAX_CHAPTERS_PER_RUN=2 bash "$here/summarize.sh"
+assert "$(jq -rs 'map(select(.type=="session-summary")) | length' "$work/$sidF.fleet.jsonl" 2>/dev/null)" "2" "cap stops after 2 chapters"
+assert "$(cut -d' ' -f1 "$work/$sidF.fleet.state")" "40" "capped run watermarks at 40"
+printf '{"session_id":"%s","transcript_path":"%s"}' "$sidF" "$tF" \
+  | CF_SUMMARIZE_FG=1 CF_SUMMARIZE_CMD="$count_llm" CF_SUMMARY_MIN_INTERVAL_S=0 CF_SUMMARY_MAX_CHAPTERS_PER_RUN=2 bash "$here/summarize.sh"
+assert "$(jq -rs 'map(select(.type=="session-summary")) | length' "$work/$sidF.fleet.jsonl" 2>/dev/null)" "4" "second run resumes to 4 chapters"
+
 [ "$fails" -eq 0 ] && echo "ALL PASS" || exit 1
