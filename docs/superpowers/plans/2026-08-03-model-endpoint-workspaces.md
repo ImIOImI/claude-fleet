@@ -784,7 +784,9 @@ git add src/main/config.ts src/main/config.test.ts src/main/ipc.ts src/main/mcpS
 git commit -m "feat(#250): get_config reports the workspace backend (mode + endpoint, no token)"
 ```
 
----### Task 7: Settings → Model Endpoints panel
+---
+
+### Task 7: Settings → Model Endpoints panel
 
 **Files:**
 - Modify: `src/renderer/src/components/SettingsModal.tsx`
