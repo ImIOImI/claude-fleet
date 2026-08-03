@@ -29,7 +29,7 @@ export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
 export type WorkspaceKind = 'container' | 'local';
 
 /** Authentication mode for the workspace's `claude` invocation. */
-export type AuthMode = 'oauth' | 'apikey';
+export type AuthMode = 'oauth' | 'apikey' | 'endpoint';
 
 /**
  * Per-workspace environment variables. `plain` values live in the
@@ -149,6 +149,10 @@ export interface WorkspaceSpec {
   /** Image reference for kind='container'; undefined for 'local'. */
   image?: string;
   authMode: AuthMode;
+  /** authMode 'endpoint' only: id into the app-level model-endpoint registry
+   *  (<userData>/endpoints.json). A REFERENCE — resolved live at container
+   *  create / local spawn, so registry edits apply on next start (#250). */
+  endpointId?: string;
   env: WorkspaceEnv;
   resources?: WorkspaceResources;
   /** Durable-transcript-mirror defaults. Factory `on`/`delete` when absent. */
@@ -237,7 +241,11 @@ export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec |
       workspaceSubdir: parsed.workspaceSubdir ?? '',
       kind: parsed.kind ?? 'container',
       image: parsed.image,
-      authMode: parsed.authMode === 'apikey' ? 'apikey' : 'oauth',
+      authMode:
+        parsed.authMode === 'apikey' ? 'apikey'
+        : parsed.authMode === 'endpoint' ? 'endpoint'
+        : 'oauth',
+      endpointId: typeof parsed.endpointId === 'string' && parsed.endpointId ? parsed.endpointId : undefined,
       env: {
         plain: parsed.env?.plain && typeof parsed.env.plain === 'object' ? parsed.env.plain : {},
         secretKeys: Array.isArray(parsed.env?.secretKeys)

@@ -137,8 +137,14 @@ export interface CreateWorkspaceInput {
    * `/home/fleet/.claude/.credentials.json` so the first browser login
    * propagates to every other OAuth workspace. 'apikey' workspaces don't
    * get the shared bind — their credentials come via the env-var path.
+   * 'endpoint' workspaces also don't get the shared bind; their model
+   * config comes from the endpoint registry at container-start time (#250).
    */
   authMode: AuthMode;
+  /** authMode 'endpoint' only: id into the app-level model-endpoint registry
+   *  (<userData>/endpoints.json). A REFERENCE — resolved live at container
+   *  create / local spawn, so registry edits apply on next start (#250). */
+  endpointId?: string;
   /**
    * Workspace kind. The Docker backend only ever sees `'container'`; the local
    * backend (#16) uses `'local'`. Optional + defaulted so existing callers and

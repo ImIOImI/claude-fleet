@@ -298,7 +298,7 @@ For each workspace, `<userData>/state/<id>/workspace.json` records the persisten
 
 ```ts
 type WorkspaceKind = 'container' | 'local';
-type AuthMode = 'oauth' | 'apikey';
+type AuthMode = 'oauth' | 'apikey' | 'endpoint';
 
 interface WorkspaceSpec {
   id: string;              // ULID — identity, never changes
@@ -310,7 +310,8 @@ interface WorkspaceSpec {
   workspaceSubdir: string; // optional working subdir inside /workspace
   kind: WorkspaceKind;     // 'container' (Docker) or 'local' (host process, #16)
   image?: string;          // image ref for kind='container'; undefined for 'local'
-  authMode: AuthMode;      // 'oauth' (default) or 'apikey' (requires ANTHROPIC_API_KEY in env)
+  authMode: AuthMode;      // 'oauth' (default) or 'apikey' (requires ANTHROPIC_API_KEY in env) or 'endpoint' (model-endpoint registry, no shared-OAuth bind, #250)
+  endpointId?: string;     // authMode 'endpoint' only: id into the app-level endpoint registry (<userData>/endpoints.json); resolved live at container-create/spawn time (#250)
   env: {
     plain: Record<string, string>; // values live in the manifest
     secretKeys: string[];          // values live in the safeStorage vault (<userData>/secrets.enc)

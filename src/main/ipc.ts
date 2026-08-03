@@ -194,6 +194,8 @@ interface WorkspaceCreatePayload {
   workspaceRoot?: string;
   image?: string;
   authMode: AuthMode;
+  /** authMode 'endpoint' only: id into the app-level model-endpoint registry (#250). */
+  endpointId?: string;
   env: WorkspaceEnv;
   resources?: WorkspaceResources;
   mirror?: WorkspaceMirror;
@@ -723,6 +725,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
           throw new Error(`Working directory does not exist: ${root}`);
         }
       }
+      if (input.authMode === 'endpoint' && !input.endpointId) {
+        throw new Error('Pick a model endpoint for this workspace.');
+      }
+
       // Name-uniqueness is checked here (and not in the renderer alone) so
       // a stale list doesn't allow duplicates through.
       const existing = await findWorkspaceByName(input.name);
@@ -744,6 +750,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         image: input.image,
         resources: input.resources,
         authMode: input.authMode,
+        endpointId: input.endpointId,
         kind,
         workspaceRoot: input.workspaceRoot
       });
@@ -761,6 +768,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         kind,
         image: ws.image,
         authMode: input.authMode,
+        endpointId: input.endpointId,
         env: input.env,
         resources: input.resources,
         mirror: input.mirror ?? FACTORY_MIRROR,
