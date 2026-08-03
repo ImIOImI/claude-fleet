@@ -37,6 +37,8 @@ export interface WorkspaceFormSubmit {
   workspaceRoot?: string;
   image?: string;
   authMode: AuthMode;
+  /** authMode 'endpoint' only — registry reference (#250). */
+  endpointId?: string;
   plainEnv: Record<string, string>;
   /**
    * Full list of every secret-env-var key the workspace will have after
@@ -148,6 +150,8 @@ export function WorkspaceForm({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [workspaceSubdir, setWorkspaceSubdir] = useState(initial?.workspaceSubdir ?? '');
   const [authMode, setAuthMode] = useState<AuthMode>(initial?.authMode ?? 'oauth');
+  const [endpointId, setEndpointId] = useState<string | undefined>(initial?.endpointId);
+  const [endpoints, setEndpoints] = useState<Array<{ id: string; name: string; modelId: string; baseUrl: string }>>([]);
   const [envRows, setEnvRows] = useState<EnvRow[]>(() => {
     const rows: EnvRow[] = [];
     if (initial?.plainEnv) {
@@ -204,10 +208,11 @@ export function WorkspaceForm({
   const [error, setError] = useState<string | null>(null);
   const [namePlaceholder] = useState<string>(petName);
 
-  // Fetch image library on mount. Auto-default the image input only in
-  // create mode — edit mode preserves whatever the manifest had, including
-  // an empty value, so containerLevelChanged doesn't see a spurious
-  // diff when the user opens-and-saves an edit with no image change.
+  // Fetch image library and endpoint registry on mount. Auto-default the
+  // image input only in create mode — edit mode preserves whatever the
+  // manifest had, including an empty value, so containerLevelChanged
+  // doesn't see a spurious diff when the user opens-and-saves an edit
+  // with no image change.
   useEffect(() => {
     window.api.images.list().then((entries: ImageEntry[]) => {
       setLibraryImages(entries);
@@ -216,6 +221,7 @@ export function WorkspaceForm({
         setImage(recent?.ref ?? DEFAULT_RUNNER_IMAGE);
       }
     });
+    (window.api.endpoints.list() as Promise<Array<{ id: string; name: string; modelId: string; baseUrl: string }>>).then(setEndpoints);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -291,6 +297,10 @@ export function WorkspaceForm({
       setError('Image reference is required for a container workspace.');
       return null;
     }
+    if (authMode === 'endpoint' && !endpointId) {
+      setError('Pick a model endpoint.');
+      return null;
+    }
 
     const seen = new Set<string>();
     const plainEnv: Record<string, string> = {};
@@ -361,6 +371,7 @@ export function WorkspaceForm({
       workspaceRoot: kind === 'local' ? workspaceRoot.trim() : undefined,
       image: kind === 'container' ? image.trim() : undefined,
       authMode,
+      endpointId: authMode === 'endpoint' ? endpointId : undefined,
       plainEnv,
       secretKeys,
       secrets,
@@ -668,8 +679,43 @@ export function WorkspaceForm({
               {apiKeyAvailable ? 'ANTHROPIC_API_KEY in env' : 'set ANTHROPIC_API_KEY below'}
             </span>
           </label>
+          <label
+            className={`kind-radio ${authMode === 'endpoint' ? 'active' : ''} ${endpoints.length ? '' : 'disabled'}`}
+            title={endpoints.length ? '' : 'Add a model endpoint in Settings to enable'}
+          >
+            <input
+              type="radio"
+              name="auth-mode"
+              value="endpoint"
+              checked={authMode === 'endpoint'}
+              onChange={() => setAuthMode('endpoint')}
+              disabled={busy || endpoints.length === 0}
+            />
+            <span>Endpoint {endpoints.length === 0 && '🔒'}</span>
+            <span className="kind-help">
+              {endpoints.length ? 'non-Claude model via registry' : 'register one in Settings'}
+            </span>
+          </label>
         </div>
       </div>
+
+      {authMode === 'endpoint' && (
+        <div className="form-row">
+          <label>Model endpoint</label>
+          <select
+            value={endpointId ?? ''}
+            onChange={(e) => setEndpointId(e.target.value || undefined)}
+            disabled={busy}
+          >
+            <option value="">— pick an endpoint —</option>
+            {endpoints.map((ep) => (
+              <option key={ep.id} value={ep.id}>
+                {ep.name} — {ep.modelId} ({ep.baseUrl})
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
       <details
         className="form-disclosure"

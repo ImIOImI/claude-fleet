@@ -26,7 +26,7 @@ import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget } from
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
 export type WorkspaceKind = 'container' | 'local';
-export type AuthMode = 'oauth' | 'apikey';
+export type AuthMode = 'oauth' | 'apikey' | 'endpoint';
 
 export interface WorkspaceColor {
   hue: number;
@@ -83,6 +83,8 @@ export interface WorkspaceSummary {
   kind: WorkspaceKind;
   image?: string;
   authMode: AuthMode;
+  /** authMode 'endpoint' only — id into the app-level model-endpoint registry (#250). */
+  endpointId?: string;
   env: WorkspaceEnv;
   resources?: WorkspaceResources;
   mirror: WorkspaceMirror;
@@ -872,6 +874,7 @@ export function App() {
       workspaceRoot: submit.workspaceRoot,
       image: submit.image,
       authMode: submit.authMode,
+      endpointId: submit.endpointId,
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources,
       mirror: submit.mirror
@@ -919,6 +922,7 @@ export function App() {
       workspaceRoot: submit.workspaceRoot,
       image: submit.image,
       authMode: submit.authMode,
+      endpointId: submit.endpointId,
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources,
       mirror: submit.mirror,
@@ -950,6 +954,7 @@ export function App() {
       workspaceRoot: submit.workspaceRoot,
       image: submit.image,
       authMode: submit.authMode,
+      endpointId: submit.endpointId,
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources,
       mirror: submit.mirror
@@ -981,6 +986,7 @@ export function App() {
       workspaceRoot: submit.workspaceRoot,
       image: submit.image,
       authMode: submit.authMode,
+      endpointId: submit.endpointId,
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources,
       mirror: submit.mirror,
@@ -1023,6 +1029,7 @@ export function App() {
       workspaceRoot: source.workspaceRoot,
       image: source.image,
       authMode: source.authMode,
+      endpointId: isSummary ? source.endpointId : source.endpointId,
       plainEnv: { ...plain },
       // Don't carry secret *values* across — they live in the source's
       // vault entry, not in the clone's. The user re-enters them in the

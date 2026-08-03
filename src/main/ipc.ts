@@ -244,6 +244,7 @@ async function listAllWorkspaces(): Promise<Workspace[]> {
           : await fleetPrivateDir(w.id),
       workspaceSubdir: w.workspaceSubdir || m?.workspaceSubdir || '',
       authMode: m?.authMode ?? w.authMode,
+      endpointId: m?.endpointId,
       env: m?.env ?? w.env,
       resources: m?.resources,
       mirror: m?.mirror ?? FACTORY_MIRROR,
