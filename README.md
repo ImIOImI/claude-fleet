@@ -4,10 +4,10 @@
 
 ### Command a fleet of Claude agents — from one window.
 
-[![Latest release](https://img.shields.io/github/v/release/ImIOImI/claude-fleet?style=for-the-badge&label=latest&color=5865F2)](https://github.com/ImIOImI/claude-fleet/releases/latest)
-[![Download for macOS](https://img.shields.io/badge/macOS-.dmg_(Apple_Silicon)-black?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/ImIOImI/claude-fleet/releases/latest)
-[![Download for Linux](https://img.shields.io/badge/Linux-.AppImage-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/ImIOImI/claude-fleet/releases/latest)
-[![Download for Windows](https://img.shields.io/badge/Windows-Setup.exe-0078D4?style=for-the-badge)](https://github.com/ImIOImI/claude-fleet/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/ImIOImI/claude-fleet?label=latest)](https://github.com/ImIOImI/claude-fleet/releases/latest)
+[![Download for macOS](https://img.shields.io/badge/macOS-.dmg_(Apple_Silicon)-black?logo=apple&logoColor=white)](https://github.com/ImIOImI/claude-fleet/releases/latest)
+[![Download for Linux](https://img.shields.io/badge/Linux-.AppImage-FCC624?logo=linux&logoColor=black)](https://github.com/ImIOImI/claude-fleet/releases/latest)
+[![Download for Windows](https://img.shields.io/badge/Windows-Setup.exe-0078D4)](https://github.com/ImIOImI/claude-fleet/releases/latest)
 
 <sub>Builds are unsigned — macOS Gatekeeper and Windows SmartScreen will warn on first launch.</sub>
 
