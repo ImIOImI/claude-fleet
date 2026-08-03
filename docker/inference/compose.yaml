@@ -1,0 +1,41 @@
+# Dev/test inference fixture (#250) — NOT a product feature. Fleet consumes
+# endpoints; it never manages inference. This runs a local Ollama that fleet
+# workspaces reach at http://host.docker.internal:11434 (register that URL in
+# Settings → Model Endpoints).
+#
+#   docker compose -f docker/inference/compose.yaml up -d
+#   docker compose -f docker/inference/compose.yaml exec ollama ollama pull qwen3:4b
+#
+# GPU (NVIDIA): docker compose -f docker/inference/compose.yaml --profile gpu up -d
+services:
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - '11434:11434'
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      # claude-code's FIRST request is ~35K tokens. Ollama's 4096 default
+      # SILENTLY TRUNCATES it into garbage; 32K is also not enough.
+      # Empirically validated 2026-07-22 — do not lower this.
+      OLLAMA_CONTEXT_LENGTH: '40960'
+
+  ollama-gpu:
+    profiles: ['gpu']
+    image: ollama/ollama:latest
+    ports:
+      - '11434:11434'
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      OLLAMA_CONTEXT_LENGTH: '40960'
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  ollama-models:

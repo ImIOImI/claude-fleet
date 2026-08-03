@@ -38,6 +38,7 @@ It is a local-only operator console — not a remote orchestrator, not a multi-u
 - **Not a Claude Code replacement.** The CLI inside the container is the source of truth for what runs. This app is a viewport and lifecycle manager around it.
 - **No auto-updater, no telemetry.** The runner image sets `DISABLE_AUTOUPDATER=1` and `DISABLE_TELEMETRY=1`.
 - **Not a general port manager (v1).** Port-forward preview auto-detects dev servers and opens them in the system browser — no manual port pinning, no persistent port list, no arbitrary `host:port` dialing, no LAN exposure, no in-app preview tab.
+- **Not an inference manager.** Fleet workspaces consume model endpoints (local Ollama, org LLMs, or cloud services) but do not manage them. `docker/inference/compose.yaml` is a dev/test fixture only — no model downloads, no GPU scheduling, no container lifecycle as a product feature.
 
 ## 4. Stack
 
