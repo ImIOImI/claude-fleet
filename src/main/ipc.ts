@@ -1054,7 +1054,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   setConfigResolver(async (callerId) => {
     const m = await readWorkspaceManifest(callerId);
     const ep = m?.authMode === 'endpoint' && m.endpointId ? await getEndpoint(m.endpointId) : null;
-    return resolveWorkspaceConfig(callerId, m?.env?.plain ?? {}, appVersionString(), m?.image, {
+    const effectiveEnv = { ...(ep ? { CF_SUMMARY_MODEL: ep.modelId } : {}), ...(m?.env?.plain ?? {}) };
+    return resolveWorkspaceConfig(callerId, effectiveEnv, appVersionString(), m?.image, {
       mode: m?.authMode ?? 'oauth',
       endpoint: ep ? { name: ep.name, baseUrl: ep.baseUrl, modelId: ep.modelId } : null
     });

@@ -248,4 +248,14 @@ describe('resolveWorkspaceConfig (#219)', () => {
     const cfg = resolveWorkspaceConfig('ws1', {}, '0.9.0');
     expect(cfg.backend).toEqual({ mode: 'oauth', endpoint: null });
   });
+
+  it('mode: apikey passes through', () => {
+    const cfg = resolveWorkspaceConfig('ws1', {}, '0.9.0', undefined, { mode: 'apikey', endpoint: null });
+    expect(cfg.backend.mode).toBe('apikey');
+  });
+
+  it('CF_SUMMARY_MODEL env override wins over defaults', () => {
+    const cfg = resolveWorkspaceConfig('ws1', { CF_SUMMARY_MODEL: 'user-override' }, '0.9.0');
+    expect(cfg.summarizer.model).toBe('user-override');
+  });
 });
