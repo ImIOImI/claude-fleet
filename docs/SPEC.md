@@ -1285,12 +1285,13 @@ A local-build fallback (`docker build` from the bundled `docker/` dir) is useful
 - **Pull progress UI.** Whether the first-run pull is blocking (modal with progress bar) or background (spinner + queued container-create).
 
 ### How `claude` authenticates inside the container
-Two modes, picked at create-container time via `manifest.authMode`:
+Three modes, picked at create-container time via `manifest.authMode`:
 
 - **API key**: env contains `ANTHROPIC_API_KEY` (typically as a secret env var resolved from the per-workspace vault entry at container-start time). Used when the user has a Console API key.
 - **OAuth (Claude.ai Pro/Max)**: no `ANTHROPIC_API_KEY` is injected. A single shared credentials file at `<userData>/claude-shared/.credentials.json` is file-bound into every OAuth workspace as `/home/fleet/.claude/.credentials.json` (layered on top of the per-workspace `.claude` dir bind). The first OAuth workspace's run of `claude` prints a login code; the user completes the flow in their browser; OAuth tokens land in the shared file. Every subsequent OAuth workspace mounts the same file and skips the browser dance. Token refresh in any workspace updates the shared file in place and propagates to all of them.
+- **Endpoint** (`authMode === 'endpoint'`, #250): the workspace targets a custom model endpoint from the app-level registry (`<userData>/endpoints.json`). At container-create/spawn time, `endpointEnv(endpointId)` resolves the registry entry live and compiles five env vars into the container env: `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CF_SUMMARY_MODEL`. These are spread **first** so that any explicit workspace env vars (resolved via `resolveEnv`) override them. No OAuth credentials file is bound — auth comes entirely from env. If the registry entry is missing or the id is unknown, `endpointEnv` returns `{}` (and warns), so the workspace still starts (claude surfaces the auth failure itself). Registry edits and key rotation take effect on the next create/recreate, not in a running container.
 
-Claude Code's auth precedence puts `ANTHROPIC_API_KEY` ahead of OAuth tokens, which is why API-key and OAuth modes are mutually exclusive at the env-injection level: OAuth mode skips the env var entirely so the OAuth path is reached.
+Claude Code's auth precedence puts `ANTHROPIC_BASE_URL`+`ANTHROPIC_AUTH_TOKEN` (or `ANTHROPIC_API_KEY`) ahead of OAuth tokens, which is why API-key, OAuth, and endpoint modes are mutually exclusive at the env-injection level: OAuth mode skips the env vars entirely so the OAuth path is reached; endpoint mode never binds the credentials file.
 
 **Non-goals (deferred):**
 - Per-workspace OAuth isolation (a different Claude.ai account per workspace). A future `oauthIsolated: boolean` setting could opt a workspace out of the shared bind in favor of a per-workspace file. Not built because nobody's asked for it yet.

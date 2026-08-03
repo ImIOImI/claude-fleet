@@ -103,3 +103,14 @@ describe('probeEndpoint', () => {
     expect(r.message.toLowerCase()).toContain('unreachable');
   });
 });
+
+describe('backend env precedence', () => {
+  it('workspace env overrides compiled endpoint env when spread second', () => {
+    const endpointVars = compileEndpointEnv(ep, null);
+    const workspaceEnv: Record<string, string> = { CF_SUMMARY_MODEL: 'haiku', MY_VAR: '1' }; // user override
+    const merged = { ...endpointVars, ...workspaceEnv };
+    expect(merged.CF_SUMMARY_MODEL).toBe('haiku');          // user wins
+    expect(merged.ANTHROPIC_BASE_URL).toBe(ep.baseUrl);     // endpoint fills the rest
+    expect(merged.MY_VAR).toBe('1');
+  });
+});

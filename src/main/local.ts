@@ -46,6 +46,7 @@ import { logError } from './errorLog.js';
 import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
 import { workspaceStateDir, assertValidWorkspaceId } from './paths.js';
 import { resolveEnv } from './vault.js';
+import { endpointEnv } from './endpoints.js';
 import {
   attachLocalSession,
   killWorkspaceSessions,
@@ -97,10 +98,15 @@ function resolveClaude(): Promise<string | null> {
  * The workspace's resolved env (e.g. a per-workspace `ANTHROPIC_API_KEY`) is
  * layered on top.
  */
-async function buildEnv(id: string, ws: { env: Workspace['env'] }): Promise<NodeJS.ProcessEnv> {
+async function buildEnv(
+  id: string,
+  ws: { env: Workspace['env']; authMode?: Workspace['authMode']; endpointId?: string }
+): Promise<NodeJS.ProcessEnv> {
+  const backendVars = ws.authMode === 'endpoint' ? await endpointEnv(ws.endpointId) : {};
   const resolved = await resolveEnv(id, ws.env.plain, ws.env.secretKeys);
   return {
     ...process.env,
+    ...backendVars,
     ...resolved,
     TERM: 'xterm-256color'
   };
