@@ -1,7 +1,7 @@
 # Model-endpoint workspaces — run non-Claude models (local or org-hosted) behind claude-code
 
 **Date:** 2026-07-23
-**Status:** approved (design review with Troy, this session)
+**Status:** implemented (feat/model-endpoint-workspaces)
 **Builds on:** workspace env + vault (`resolveEnv`), local-backend workspaces (#106), Phase 2 session hooks (#208)
 
 ## Problem

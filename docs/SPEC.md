@@ -287,7 +287,7 @@ App-level settings persist to `<userData>/config.json`: `{ fleetRoot?: string, d
 ### Model endpoints (#250)
 App-level registry of custom model endpoints (`<userData>/endpoints.json`). API keys stored in vault under scope `endpoint:<id>`, key `ANTHROPIC_AUTH_TOKEN`.
 - `endpoints:list()` → `ModelEndpoint[]` — all registered endpoints.
-- `endpoints:save(input)` → `ModelEndpoint` — create or update an endpoint. Input: `Omit<ModelEndpoint, 'id' | 'hasApiKey'> & { id?: string }` (id generated as ULID if absent).
+- `endpoints:save(input)` → `ModelEndpoint` — create or update an endpoint. Input: `Omit<ModelEndpoint, 'id' | 'hasApiKey'> & { id?: string }` (id generated as UUID via `crypto.randomUUID()` if absent).
 - `endpoints:delete(id)` → `void` — remove an endpoint and its stored API key.
 - `endpoints:setApiKey(id, value)` → `void` — store or clear the API key for an endpoint (value `null` clears it).
 - `endpoints:probe(baseUrl, modelId, apiKey?)` → `{ ok: boolean; status?: number; message: string }` — test whether an endpoint speaks the Anthropic Messages API (one test POST with max_tokens:1).
@@ -639,6 +639,26 @@ The old `__profiles__:*` keytar shape (global per-profile API keys) is gone. The
 
 Values are read from the renderer only on explicit `vault:getSecret`; during normal operation, the main process consumes them directly via `resolveEnv` when constructing the container env (not round-tripped through the UI).
 
+The vault also holds **endpoint API keys**: scope `endpoint:<id>`, key `ANTHROPIC_AUTH_TOKEN` — the same file, the same safeStorage envelope, a different namespace. `deleteEndpoint(id)` purges the whole `endpoint:<id>` scope from the vault. The endpoint id is a UUID (not a ULID — `endpoints.ts` uses `crypto.randomUUID()`). See *Model endpoint registry* below for the non-secret part.
+
+### Model endpoint registry (on disk)
+`<userData>/endpoints.json` is a JSON array of `ModelEndpoint` objects — the app-level list of Anthropic-format endpoints workspaces with `authMode 'endpoint'` point claude-code at. Only non-secret fields live here; the API key (if any) lives in the vault as described above. The file is read-through-cache in memory (`endpoints.ts`) and written atomically on every `endpoints:save` / `endpoints:delete` / `endpoints:setApiKey` call.
+
+```ts
+interface ModelEndpoint {
+  id: string;            // UUID (crypto.randomUUID)
+  name: string;          // user label, free-form
+  baseUrl: string;       // Anthropic-format base URL; no trailing slash; claude-code appends /v1/messages itself
+  modelId: string;       // model id passed as ANTHROPIC_MODEL
+  smallFastModelId?: string; // haiku-class model; defaults to modelId when absent
+  contextLength?: number; // display metadata only — the server owns the real limit
+  hasApiKey: boolean;    // true iff a key is stored in the vault (the key itself is never serialised here)
+  notes?: string;
+}
+```
+
+Writes are validated before persisting (`name`, `baseUrl` with http/https prefix, `modelId` all required). The registry tolerates a missing or malformed file by returning `[]`. There is no migration path for the old per-profile keytar shape — `endpoints.json` is new in #250.
+
 ### Loadout library (#16-followup)
 A **loadout** is a reusable, machine-parseable bundle of Claude config the user installs into a workspace on demand. Authored loadouts live at `<userData>/loadouts/<id>/`, each a folder with a `loadout.md` (**YAML frontmatter + markdown body** — the Claude-Code idiom, so a Claude instance parses it natively):
 - **Frontmatter** = `title`, `version` (semver), `description` (the relevance signal), `tags`, `dependencies { loadouts: [{id, version?}], tools: [{cmd, version?}] }`, `scripts[] {label, run|file, unless?}`, `prompts[] {label, send|file}`. **Body** = install-instructions prose.
@@ -820,6 +840,12 @@ A dev server (Vite, Next, a Python server, …) started inside a workspace conta
 3. User clicks **Open preview** → `ports:open(workspaceId, N)`. Main creates (or reuses) a `PortForward`: a `net.Server` bound to `127.0.0.1:0` (ephemeral host port). For every inbound browser connection, main sends `DIAL {channel, port=N}` to the broker over a fresh `BrokerClient`, awaits `DIALED{ok:true}`, then pipes the browser socket ↔ the broker channel using the existing `INPUT`/`OUTPUT` relay. Returns `{ hostPort }`.
 4. Main calls `shell.openExternal('http://127.0.0.1:<hostPort>')` — the system browser opens the forwarded URL. WebSocket/HMR traffic (Vite, Next hot-reload) passes through the raw byte relay untouched.
 5. The `PortForward` and `PortMonitor` are torn down automatically when the workspace pauses, stops, or is removed.
+
+### Model endpoint workspace (#250)
+1. **Register an endpoint.** User opens Settings → **Model Endpoints** tab. Clicks **Add endpoint**, fills Name, Base URL (must start with `http://` or `https://`), Model ID, optional Small/Fast Model ID, optional Context Length (display only), optional Notes, optional API key. The **Test** button fires `endpoints:probe(baseUrl, modelId, apiKey?)` — a one-shot `POST /v1/messages` with `max_tokens:1`; the response badge shows OK or the error message. Clicking **Save** (or **Add**) calls `endpoints:save(...)` (persists to `<userData>/endpoints.json`) and, if an API key was provided, calls `endpoints:setApiKey(id, value)` (stores under vault scope `endpoint:<id>`, key `ANTHROPIC_AUTH_TOKEN`). The list refreshes. Deleting an endpoint via **Remove** calls `endpoints:delete(id)` — removes the registry entry and purges the vault scope.
+2. **Create an endpoint workspace.** In the **New workspace** modal the **Auth** radio gains an **Endpoint** option, disabled and annotated *(no endpoints registered)* until `endpoints:list()` returns at least one entry. Selecting **Endpoint** reveals a dropdown populated from `endpoints:list()`; the user picks one. Other auth fields (OAuth / API key) are deselected and irrelevant — the endpoint supplies its own token. The remaining form fields (image, name, env vars, resources) work identically to OAuth workspaces.
+3. **Container create / local spawn.** `workspace:create` (or `local spawn`) calls `endpointEnv(endpointId)`, which resolves the registry entry live and retrieves the API key from the vault. It compiles five env vars — `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CF_SUMMARY_MODEL` — and spreads them **first** in the container env, so explicit workspace env vars (from `resolveEnv`) override them. No OAuth credentials file is bind-mounted. If the endpoint id is unknown (deleted after the workspace was created), `endpointEnv` returns `{}` and warns; the workspace starts and claude surfaces the auth failure itself. Registry edits and key rotation take effect on next create/recreate (not in a running container).
+4. **Observability.** Identical to other workspaces — JSONL → SQLite pipeline, cost read from `events` rows grouped by `(model, service_tier)`. For models not in `src/main/pricing.ts` the USD field renders **`—`** (zero in the DB, not surfaced as `$0.00`) — the pricing table covers only Anthropic's own models; custom/org endpoints are unpriced by design.
 
 ## 9. Security model
 
