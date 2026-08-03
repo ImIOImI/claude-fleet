@@ -49,7 +49,7 @@ import {
   setPlanUsageHandler,
 } from './mcpServer.js';
 import * as vault from './vault.js';
-import { listEndpoints, saveEndpoint, deleteEndpoint, setEndpointApiKey, probeEndpoint, type ModelEndpoint } from './endpoints.js';
+import { listEndpoints, saveEndpoint, deleteEndpoint, setEndpointApiKey, probeEndpoint, getEndpoint, type ModelEndpoint } from './endpoints.js';
 import * as fs from './fs.js';
 import * as imageLibrary from './imageLibrary.js';
 import * as files from './files.js';
@@ -1053,7 +1053,11 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   setUsageRecorder((e) => recordUsageEvent(e));
   setConfigResolver(async (callerId) => {
     const m = await readWorkspaceManifest(callerId);
-    return resolveWorkspaceConfig(callerId, m?.env?.plain ?? {}, appVersionString(), m?.image);
+    const ep = m?.authMode === 'endpoint' && m.endpointId ? await getEndpoint(m.endpointId) : null;
+    return resolveWorkspaceConfig(callerId, m?.env?.plain ?? {}, appVersionString(), m?.image, {
+      mode: m?.authMode ?? 'oauth',
+      endpoint: ep ? { name: ep.name, baseUrl: ep.baseUrl, modelId: ep.modelId } : null
+    });
   });
 
   ipcMain.handle('workspace:remove', async (_e, containerId: string, opts?: RemoveWorkspaceOpts) => {
