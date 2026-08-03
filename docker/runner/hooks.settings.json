@@ -7,7 +7,10 @@
       { "matcher": "AskUserQuestion", "hooks": [ { "type": "command", "command": "/usr/local/lib/claude-fleet/input-wait-report.sh" } ] }
     ],
     "SessionStart": [
-      { "hooks": [ { "type": "command", "command": "/usr/local/lib/claude-fleet/session-report.sh" } ] }
+      { "hooks": [
+        { "type": "command", "command": "/usr/local/lib/claude-fleet/session-report.sh" },
+        { "type": "command", "command": "/usr/local/lib/claude-fleet/backfill-summaries.sh" }
+      ] }
     ],
     "Stop": [
       { "hooks": [

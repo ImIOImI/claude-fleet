@@ -1270,10 +1270,11 @@ export const TOOLS: Tool[] = [
   {
     name: 'report_summary_status',
     description:
-      'Internal (called by the runner chapter-summary Stop hook, not by the model): record a ' +
-      'diagnostic for the #207 summarizer in THIS workspace so its failures are not silent. ' +
-      'Args: sessionId (the claude session UUID), phase (e.g. "attempt" | "generated" | "rejected" | ' +
-      '"empty-window" | "gate"), detail (optional object of counters/context).',
+      'Internal (called by the runner summarizer hooks — the Stop chapter hook and the SessionStart ' +
+      'backfill sweep — not by the model): record a diagnostic for the #207 summarizer in THIS ' +
+      'workspace so its failures are not silent. Args: sessionId (the claude session UUID), phase ' +
+      '(e.g. "attempt" | "generated" | "rejected" | "empty-window" | "gate" | "backfill-start" | ' +
+      '"backfill-done"), detail (optional object of counters/context).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1326,7 +1327,7 @@ export const TOOLS: Tool[] = [
   {
     name: 'get_config',
     description:
-      'Effective fleet tunables for this workspace (summarizer model/debounce/window, app defaults ' +
+      'Effective fleet tunables for this workspace (summarizer model/debounce/window/chapter-cap and backfill sweep budget, app defaults ' +
       '⊕ workspace env overrides), plus app.version — the claude-fleet version of the LIVE host ' +
       'process (current across app restarts) — and runnerImage.name, the image reference the ' +
       'workspace was created with (null for local workspaces; the tag, not the build — a newer ' +

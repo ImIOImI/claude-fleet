@@ -12,11 +12,17 @@
 //
 // This bridge instead tracks every request line by its JSON-RPC id and only
 // forgets it once a response with that id comes back. On ANY disconnect it
-// reconnects (forever, with backoff), re-authenticates, and re-sends every
-// still-unanswered request in order. Notifications (no id) are sent at most
-// once. Re-sending reads is safe (the server is read-only); the committee_*
-// effects are at-least-once across an app restart — acceptable vs. an
-// indefinite hang, and noted in SPEC §11.
+// reconnects forever with EXPONENTIAL BACKOFF (base CLAUDE_FLEET_MCP_RETRY_MS,
+// doubling, capped at CLAUDE_FLEET_MCP_RETRY_MAX_MS), re-authenticates, and
+// re-sends every still-unanswered request in order. The backoff resets to the
+// base once a connection proves healthy (a server byte arrives, or it survives
+// CLAUDE_FLEET_MCP_STABLE_MS) so a genuine drop (host app restart) still
+// recovers in ~1s, while a hard-down server or a connection that dies on every
+// attempt (server not up, token file absent) is probed ever more slowly
+// instead of hammered once a second forever (#243 runaway). Notifications
+// (no id) are sent at most once. Re-sending reads is safe (the server is
+// read-only); the committee_* effects are at-least-once across an app restart
+// — acceptable vs. an indefinite hang, and noted in SPEC §11.
 //
 // Delivery: the host writes this script into the per-workspace MCP dir
 // (`<userData>/mcp/<id>/`), which is the one dir bind-mounted into that
@@ -27,7 +33,9 @@
 //   CLAUDE_FLEET_MCP_TCP        host:port  (Windows hosts — loopback TCP)
 //   CLAUDE_FLEET_MCP_UNIX       socket path (Linux/macOS hosts)
 //   CLAUDE_FLEET_MCP_TOKEN_FILE first-line auth token path (TCP only)
-//   CLAUDE_FLEET_MCP_RETRY_MS   reconnect backoff (test hook; default 1000)
+//   CLAUDE_FLEET_MCP_RETRY_MS   base reconnect backoff (test hook; default 1000)
+//   CLAUDE_FLEET_MCP_RETRY_MAX_MS reconnect backoff cap (default 30000)
+//   CLAUDE_FLEET_MCP_STABLE_MS  connection uptime that resets backoff (default 5000)
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -43,6 +51,8 @@ const tcp = process.env.CLAUDE_FLEET_MCP_TCP || '';
 const unix = process.env.CLAUDE_FLEET_MCP_UNIX || '';
 const tokenFile = process.env.CLAUDE_FLEET_MCP_TOKEN_FILE || '';
 const retryMs = Number(process.env.CLAUDE_FLEET_MCP_RETRY_MS) || 1000;
+const retryMaxMs = Number(process.env.CLAUDE_FLEET_MCP_RETRY_MAX_MS) || 30000;
+const stableMs = Number(process.env.CLAUDE_FLEET_MCP_STABLE_MS) || 5000;
 
 // Ordered outbox. Requests (numeric/string id) stay until a response with the
 // same id arrives; notifications (no id) leave as soon as they hit a live
@@ -50,6 +60,9 @@ const retryMs = Number(process.env.CLAUDE_FLEET_MCP_RETRY_MS) || 1000;
 let outbox = []; // { id: string|null, line: string, sent: boolean }
 let sock = null;
 let connected = false;
+// Current reconnect delay; grows on every close, resets when a connection
+// proves healthy. See connect()/onServerData().
+let backoffMs = retryMs;
 
 function idKey(v) {
   return v === undefined || v === null ? null : String(v);
@@ -86,6 +99,9 @@ function flush() {
 
 let outCarry = '';
 function onServerData(chunk) {
+  // A byte from the server proves this connection works — collapse the
+  // reconnect backoff so a genuine later drop (host app restart) recovers fast.
+  backoffMs = retryMs;
   process.stdout.write(chunk);
   outCarry += chunk;
   let nl;
@@ -104,6 +120,7 @@ function connect() {
     ? net.connect(Number(tcp.split(':')[1]), tcp.split(':')[0])
     : net.connect(unix);
   sock = c;
+  let stableTimer = null;
   c.setKeepAlive(true, 5000);
   c.setEncoding('utf8');
   c.on('connect', () => {
@@ -118,13 +135,23 @@ function connect() {
     for (const entry of outbox) entry.sent = false;
     outCarry = '';
     flush();
+    // A connection that stays up past stableMs is healthy — reset the backoff
+    // so the NEXT reconnect is fast. A connection that dies before this fires
+    // (server down, token missing → immediate destroy) leaves the backoff
+    // growing, which is what stops the fixed-1s reconnect storm (#243).
+    stableTimer = setTimeout(() => { backoffMs = retryMs; }, stableMs);
   });
   c.on('data', onServerData);
   c.on('error', () => { /* 'close' always follows and owns the retry */ });
   c.on('close', () => {
     connected = false;
     sock = null;
-    setTimeout(connect, retryMs);
+    if (stableTimer) { clearTimeout(stableTimer); stableTimer = null; }
+    // Reconnect after the current backoff, then grow it (capped). Healthy
+    // connections reset backoffMs back to the base (see above / onServerData).
+    const wait = backoffMs;
+    backoffMs = Math.min(backoffMs * 2, retryMaxMs);
+    setTimeout(connect, wait);
   });
 }
 connect();

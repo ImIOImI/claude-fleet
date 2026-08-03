@@ -87,7 +87,9 @@ describe('container MCP bridge', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  async function startBridge(): Promise<{ out: string[]; write(line: string): void }> {
+  async function startBridge(
+    extraEnv: Record<string, string> = {}
+  ): Promise<{ out: string[]; write(line: string): void }> {
     dir = mkdtempSync(join(tmpdir(), 'bridge-'));
     writeFileSync(join(dir, 'token'), 'tok-abc\n', 'utf8');
     const script = ensureContainerBridgeScript(dir);
@@ -96,7 +98,8 @@ describe('container MCP bridge', () => {
         ...process.env,
         CLAUDE_FLEET_MCP_TCP: `127.0.0.1:${PORT}`,
         CLAUDE_FLEET_MCP_TOKEN_FILE: join(dir, 'token'),
-        CLAUDE_FLEET_MCP_RETRY_MS: '100'
+        CLAUDE_FLEET_MCP_RETRY_MS: '100',
+        ...extraEnv
       },
       stdio: ['pipe', 'pipe', 'inherit']
     });
@@ -179,5 +182,40 @@ describe('container MCP bridge', () => {
     await until(() => f2.lines.length >= 2);
     expect(f2.lines[0]).toBe('tok-abc');
     expect(JSON.parse(f2.lines[1]).id).toBe(7); // replayed, not lost
+  });
+
+  it('backs off exponentially when the server keeps dropping the connection (#243)', async () => {
+    // The pathological churn case: a server that accepts then immediately
+    // drops every connection without ever sending data (so the connection
+    // never proves healthy and the backoff never resets). The bridge must
+    // slow its reconnects instead of hammering at a fixed 1s interval.
+    const accepts: number[] = [];
+    const server = createServer((sock) => {
+      accepts.push(Date.now());
+      sock.on('error', () => undefined);
+      sock.destroy();
+    });
+    await new Promise<void>((r) => server.listen(PORT, '127.0.0.1', () => r()));
+    fakes.push({
+      server,
+      lines: [],
+      sockets: new Set(),
+      close: () => new Promise<void>((r) => server.close(() => r()))
+    });
+
+    await startBridge({
+      CLAUDE_FLEET_MCP_RETRY_MS: '80',
+      CLAUDE_FLEET_MCP_RETRY_MAX_MS: '640',
+      CLAUDE_FLEET_MCP_STABLE_MS: '60000' // never resets during the test
+    });
+
+    await until(() => accepts.length >= 5, 8000);
+    // Gaps between successive accepts follow the reconnect delay: ~80, 160,
+    // 320, 640 (then capped). Assert each of the first few grows, and that
+    // none blows past the cap (with generous scheduler slack).
+    const gaps = accepts.slice(1).map((t, i) => t - accepts[i]!);
+    expect(gaps[1]!).toBeGreaterThan(gaps[0]! * 1.4);
+    expect(gaps[2]!).toBeGreaterThan(gaps[1]! * 1.4);
+    for (const g of gaps) expect(g).toBeLessThan(640 + 400);
   });
 });

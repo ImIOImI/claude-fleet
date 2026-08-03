@@ -67,16 +67,22 @@ RUN mkdir -p /run/broker && chmod 0777 /run/broker
 
 # claude-fleet hooks: input-wait-report.sh reports AskUserQuestion pose/clear
 # edges; session-report.sh emits session metadata on SessionStart; summarize.sh
-# emits a final transcript digest on Stop. Loaded via --settings on each claude
-# launch (trusted; no /hooks approval gate).
+# emits a final transcript digest on Stop; summary-core.sh is the sourced
+# generation core shared by summarize.sh and backfill-summaries.sh;
+# backfill-summaries.sh is the SessionStart backfill sweep. Loaded via
+# --settings on each claude launch (trusted; no /hooks approval gate).
 RUN mkdir -p /usr/local/lib/claude-fleet
 COPY docker/runner/input-wait-report.sh /usr/local/lib/claude-fleet/input-wait-report.sh
 COPY docker/runner/session-report.sh /usr/local/lib/claude-fleet/session-report.sh
 COPY docker/runner/summarize.sh /usr/local/lib/claude-fleet/summarize.sh
+COPY docker/runner/summary-core.sh /usr/local/lib/claude-fleet/summary-core.sh
+COPY docker/runner/backfill-summaries.sh /usr/local/lib/claude-fleet/backfill-summaries.sh
 COPY docker/runner/hooks.settings.json /usr/local/lib/claude-fleet/hooks.settings.json
 RUN chmod 0755 /usr/local/lib/claude-fleet/input-wait-report.sh \
  && chmod 0755 /usr/local/lib/claude-fleet/session-report.sh \
  && chmod 0755 /usr/local/lib/claude-fleet/summarize.sh \
+ && chmod 0755 /usr/local/lib/claude-fleet/summary-core.sh \
+ && chmod 0755 /usr/local/lib/claude-fleet/backfill-summaries.sh \
  && chmod 0644 /usr/local/lib/claude-fleet/hooks.settings.json
 
 USER fleet
