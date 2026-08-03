@@ -158,3 +158,43 @@ export async function endpointEnv(endpointId: string | undefined): Promise<Recor
 export function _resetEndpointsCacheForTests(): void {
   cached = null;
 }
+
+/**
+ * One cheap POST {baseUrl}/v1/messages with max_tokens:1 (spec §A). Success
+ * ⇒ the endpoint speaks the Anthropic Messages API. Deliberately does NOT
+ * touch /v1/messages/count_tokens — Ollama 404s it and claude-code copes.
+ * 10s timeout: LAN endpoints answer fast; a cold local model may need to
+ * load, but the probe is a format check, not a health check.
+ */
+export async function probeEndpoint(
+  baseUrl: string,
+  modelId: string,
+  apiKey: string | null
+): Promise<{ ok: boolean; status?: number; message: string }> {
+  const url = `${baseUrl.replace(/\/+$/, '')}/v1/messages`;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': apiKey ?? 'claude-fleet',
+        authorization: `Bearer ${apiKey ?? 'claude-fleet'}`,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({ model: modelId, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] }),
+      signal: AbortSignal.timeout(10_000)
+    });
+    if (res.ok) return { ok: true, status: res.status, message: 'Endpoint speaks the Anthropic Messages API.' };
+    const body = (await res.text()).slice(0, 300);
+    return {
+      ok: false,
+      status: res.status,
+      message:
+        `HTTP ${res.status} from ${url} — this endpoint does not appear to speak the Anthropic Messages API. ` +
+        `If it is OpenAI-format only, front it with a gateway (e.g. LiteLLM) and register the gateway URL. ` +
+        `See docs/local-models.md. Response: ${body}`
+    };
+  } catch (err) {
+    return { ok: false, message: `Endpoint unreachable: ${(err as Error).message}` };
+  }
+}

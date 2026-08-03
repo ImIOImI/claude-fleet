@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { parseEndpoints, compileEndpointEnv, type ModelEndpoint } from './endpoints.js';
+import { createServer, type Server } from 'node:http';
+import { parseEndpoints, compileEndpointEnv, probeEndpoint, type ModelEndpoint } from './endpoints.js';
 
 const ep: ModelEndpoint = {
   id: 'abc',
@@ -55,5 +56,50 @@ describe('parseEndpoints', () => {
     expect(e.hasApiKey).toBe(false);       // strict boolean
     expect(e.contextLength).toBeUndefined(); // strict number
     expect(e.notes).toBeUndefined();         // strict string
+  });
+});
+
+function listen(server: Server): Promise<number> {
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => {
+    resolve((server.address() as { port: number }).port);
+  }));
+}
+
+describe('probeEndpoint', () => {
+  it('reports ok for an Anthropic-format /v1/messages endpoint', async () => {
+    const server = createServer((req, res) => {
+      if (req.method === 'POST' && req.url === '/v1/messages') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ id: 'msg_1', type: 'message', role: 'assistant', content: [], usage: {} }));
+      } else {
+        res.writeHead(404).end();
+      }
+    });
+    const port = await listen(server);
+    try {
+      const r = await probeEndpoint(`http://127.0.0.1:${port}`, 'test-model', null);
+      expect(r.ok).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reports a helpful failure for a non-Anthropic endpoint (404)', async () => {
+    const server = createServer((_req, res) => res.writeHead(404).end('not found'));
+    const port = await listen(server);
+    try {
+      const r = await probeEndpoint(`http://127.0.0.1:${port}`, 'test-model', null);
+      expect(r.ok).toBe(false);
+      expect(r.status).toBe(404);
+      expect(r.message).toContain('Anthropic');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reports unreachable endpoints without throwing', async () => {
+    const r = await probeEndpoint('http://127.0.0.1:1', 'test-model', null);
+    expect(r.ok).toBe(false);
+    expect(r.message.toLowerCase()).toContain('unreachable');
   });
 });
