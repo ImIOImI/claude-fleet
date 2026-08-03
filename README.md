@@ -4,6 +4,13 @@
 
 ### Command a fleet of Claude agents — from one window.
 
+[![Latest release](https://img.shields.io/github/v/release/ImIOImI/claude-fleet?style=for-the-badge&label=latest&color=5865F2)](https://github.com/ImIOImI/claude-fleet/releases/latest)
+[![Download for macOS](https://img.shields.io/badge/macOS-.dmg_(Apple_Silicon)-black?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/ImIOImI/claude-fleet/releases/latest)
+[![Download for Linux](https://img.shields.io/badge/Linux-.AppImage-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/ImIOImI/claude-fleet/releases/latest)
+[![Download for Windows](https://img.shields.io/badge/Windows-Setup.exe-0078D4?style=for-the-badge)](https://github.com/ImIOImI/claude-fleet/releases/latest)
+
+<sub>Builds are unsigned — macOS Gatekeeper and Windows SmartScreen will warn on first launch.</sub>
+
 Launch, watch, and steer a small fleet of **isolated Claude Code workspaces** side by side. Each runs in its own sandbox, each with live cost and context telemetry, all under your hand — so you can stop juggling terminals and start delegating in parallel.
 
 ![claude-fleet welcome screen](assets/design/first-run/01-landing-desktop.png)
@@ -199,36 +206,3 @@ Or build from source (useful when iterating on `docker/Dockerfile`):
 ```bash
 docker build -t ghcr.io/imioimi/claude-fleet/runner:latest docker/
 ```
-
-## Release
-
-Releases are cut from `main` via a version-bump PR followed by a tag push. The tag build (`.github/workflows/build-app.yml`) compiles unsigned installers for macOS (`.dmg`), Windows (`.exe`), and Linux (`.AppImage`) on native runners and attaches them to a **draft** GitHub Release.
-
-1. **Make sure everything shipping is merged** and CI on `main` is green. Pick the version per semver: minor for features, patch for fixes.
-
-2. **Open a release PR** that bumps only the version:
-
-   ```bash
-   git checkout -b release-vX.Y.Z
-   npm version X.Y.Z --no-git-tag-version   # updates package.json + package-lock.json
-   git commit -am "chore: release vX.Y.Z"
-   git push -u origin release-vX.Y.Z
-   gh pr create --title "chore: release vX.Y.Z" --body "<one-line headline of what ships>"
-   ```
-
-   The bump touches `package.json`/`package-lock.json`, so the full build matrix runs on the PR.
-
-3. **Squash-merge once green**, then tag the squash commit on `main`:
-
-   ```bash
-   git checkout main && git pull
-   git tag vX.Y.Z && git push origin vX.Y.Z
-   ```
-
-4. **Wait for the tag build** to draft the GitHub Release with installers attached (`gh run watch`), then review the draft — sanity-check the artifacts, write the release notes — and publish it:
-
-   ```bash
-   gh release edit vX.Y.Z --draft=false
-   ```
-
-The binaries are unsigned (see the Windows-installer notes in `docs/SPEC.md` §4), so expect OS trust prompts on first launch.
