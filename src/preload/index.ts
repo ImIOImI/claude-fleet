@@ -444,6 +444,15 @@ const api = {
     deleteAllForWorkspace: (workspaceId: string): Promise<void> =>
       ipcRenderer.invoke('vault:deleteAllForWorkspace', workspaceId)
   },
+  endpoints: {
+    list: (): Promise<unknown[]> => ipcRenderer.invoke('endpoints:list'),
+    save: (input: unknown): Promise<unknown> => ipcRenderer.invoke('endpoints:save', input),
+    delete: (id: string): Promise<void> => ipcRenderer.invoke('endpoints:delete', id),
+    setApiKey: (id: string, value: string | null): Promise<void> =>
+      ipcRenderer.invoke('endpoints:setApiKey', id, value),
+    probe: (baseUrl: string, modelId: string, apiKey?: string | null): Promise<unknown> =>
+      ipcRenderer.invoke('endpoints:probe', baseUrl, modelId, apiKey ?? null)
+  },
   pty: {
     attach: (
       containerId: string,

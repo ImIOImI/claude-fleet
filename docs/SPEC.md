@@ -283,6 +283,14 @@ App-level settings persist to `<userData>/config.json`: `{ fleetRoot?: string, d
 - `config:setUsageBudget(preset, customTokens)` → `{ usageBudget }` — persist the plan-usage preset and the custom token amount it falls back to (`customTokens` is rounded, clamped ≥0).
 - `usage:rollingSpend()` → `{ spentTokens, windowHours }` — the plan-usage bar's **numerator**: total tokens (all four types) spent across the **whole fleet** in the trailing `windowHours` window, via `db.ts:tokensSpentSince(Date.now() - windowMs)`. App.tsx polls this every 15s (separate, slower cadence than the per-workspace summary push — it's one cheap aggregate and the rolling window moves on the order of minutes).
 
+### Model endpoints (#250)
+App-level registry of custom model endpoints (`<userData>/endpoints.json`). API keys stored in vault under scope `endpoint:<id>`, key `ANTHROPIC_AUTH_TOKEN`.
+- `endpoints:list()` → `ModelEndpoint[]` — all registered endpoints.
+- `endpoints:save(input)` → `ModelEndpoint` — create or update an endpoint. Input: `Omit<ModelEndpoint, 'id' | 'hasApiKey'> & { id?: string }` (id generated as ULID if absent).
+- `endpoints:delete(id)` → `void` — remove an endpoint and its stored API key.
+- `endpoints:setApiKey(id, value)` → `void` — store or clear the API key for an endpoint (value `null` clears it).
+- `endpoints:probe(baseUrl, modelId, apiKey?)` → `{ ok: boolean; status?: number; message: string }` — test whether an endpoint speaks the Anthropic Messages API (one test POST with max_tokens:1).
+
 ### Clipboard + context menu
 The renderer cannot use `navigator.clipboard` reliably (focus/permission gotchas in Electron, and the renderer is contextIsolated). All clipboard access goes through main:
 - `clipboard:write(text)` → `void` — `electron.clipboard.writeText` (no-op on empty).

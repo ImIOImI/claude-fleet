@@ -49,6 +49,7 @@ import {
   setPlanUsageHandler,
 } from './mcpServer.js';
 import * as vault from './vault.js';
+import { listEndpoints, saveEndpoint, deleteEndpoint, setEndpointApiKey, probeEndpoint, type ModelEndpoint } from './endpoints.js';
 import * as fs from './fs.js';
 import * as imageLibrary from './imageLibrary.js';
 import * as files from './files.js';
@@ -1157,6 +1158,17 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     await setHardwareAccelDisabled(!!disabled);
     return { disableHardwareAcceleration: await getHardwareAccelDisabled() };
   });
+
+  // ── Model-endpoint registry (#250) ─────────────────────────────────────
+  ipcMain.handle('endpoints:list', () => listEndpoints());
+  ipcMain.handle('endpoints:save', (_e, input: Omit<ModelEndpoint, 'id' | 'hasApiKey'> & { id?: string }) =>
+    saveEndpoint(input)
+  );
+  ipcMain.handle('endpoints:delete', (_e, id: string) => deleteEndpoint(id));
+  ipcMain.handle('endpoints:setApiKey', (_e, id: string, value: string | null) => setEndpointApiKey(id, value));
+  ipcMain.handle('endpoints:probe', (_e, baseUrl: string, modelId: string, apiKey?: string | null) =>
+    probeEndpoint(baseUrl, modelId, apiKey ?? null)
+  );
 
   ipcMain.handle('dialog:pickDirectory', async (event, defaultPath?: string) => {
     const win = BrowserWindow.fromWebContents(event.sender);
