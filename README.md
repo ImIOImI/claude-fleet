@@ -4,6 +4,13 @@
 
 ### Command a fleet of Claude agents — from one window.
 
+[![Latest release](https://img.shields.io/github/v/release/ImIOImI/claude-fleet?label=latest)](https://github.com/ImIOImI/claude-fleet/releases/latest)
+[![Download for macOS](https://img.shields.io/badge/macOS-.dmg_(Apple_Silicon)-black?logo=apple&logoColor=white)](https://github.com/ImIOImI/claude-fleet/releases/latest)
+[![Download for Linux](https://img.shields.io/badge/Linux-.AppImage-FCC624?logo=linux&logoColor=black)](https://github.com/ImIOImI/claude-fleet/releases/latest)
+[![Download for Windows](https://img.shields.io/badge/Windows-Setup.exe-0078D4)](https://github.com/ImIOImI/claude-fleet/releases/latest)
+
+<sub>Builds are unsigned — macOS Gatekeeper and Windows SmartScreen will warn on first launch.</sub>
+
 Launch, watch, and steer a small fleet of **isolated Claude Code workspaces** side by side. Each runs in its own sandbox, each with live cost and context telemetry, all under your hand — so you can stop juggling terminals and start delegating in parallel.
 
 ![claude-fleet welcome screen](assets/design/first-run/01-landing-desktop.png)
