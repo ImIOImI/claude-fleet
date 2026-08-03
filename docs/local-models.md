@@ -42,13 +42,13 @@ docker compose -f docker/inference/compose.yaml exec ollama ollama pull qwen3:4b
 
 Register `http://host.docker.internal:11434` in Settings → Model Endpoints.
 
-**GPU support:** add the `--profile gpu` flag to the compose command to use NVIDIA GPUs (requires the Docker NVIDIA runtime):
+**GPU support:** use the compose override file to add NVIDIA GPU support (requires the Docker NVIDIA runtime):
 
 ```bash
-docker compose -f docker/inference/compose.yaml --profile gpu up -d
+docker compose -f docker/inference/compose.yaml -f docker/inference/compose.gpu.yaml up -d
 ```
 
-The GPU profile also sets `OLLAMA_CONTEXT_LENGTH=40960`.
+The GPU override layers a device reservation onto the same `ollama` service without port conflicts.
 
 ### Performance expectations
 

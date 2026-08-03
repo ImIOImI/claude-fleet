@@ -3,10 +3,12 @@
 # workspaces reach at http://host.docker.internal:11434 (register that URL in
 # Settings → Model Endpoints).
 #
+# CPU usage:
 #   docker compose -f docker/inference/compose.yaml up -d
 #   docker compose -f docker/inference/compose.yaml exec ollama ollama pull qwen3:4b
 #
-# GPU (NVIDIA): docker compose -f docker/inference/compose.yaml --profile gpu up -d
+# GPU usage (requires compose.gpu.yaml override):
+#   docker compose -f docker/inference/compose.yaml -f docker/inference/compose.gpu.yaml up -d
 services:
   ollama:
     image: ollama/ollama:latest
@@ -19,23 +21,6 @@ services:
       # SILENTLY TRUNCATES it into garbage; 32K is also not enough.
       # Empirically validated 2026-07-22 — do not lower this.
       OLLAMA_CONTEXT_LENGTH: '40960'
-
-  ollama-gpu:
-    profiles: ['gpu']
-    image: ollama/ollama:latest
-    ports:
-      - '11434:11434'
-    volumes:
-      - ollama-models:/root/.ollama
-    environment:
-      OLLAMA_CONTEXT_LENGTH: '40960'
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
 
 volumes:
   ollama-models:
