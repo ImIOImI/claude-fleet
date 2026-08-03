@@ -97,19 +97,20 @@ function resolveClaude(): Promise<string | null> {
  * workspace and made claude warn that `$HOME/.local/bin/claude` was missing.
  * The workspace's resolved env (e.g. a per-workspace `ANTHROPIC_API_KEY`) is
  * layered on top.
+ *
+ * exported for tests
  */
-async function buildEnv(
+export async function buildEnv(
   id: string,
   ws: { env: Workspace['env']; authMode?: Workspace['authMode']; endpointId?: string }
 ): Promise<NodeJS.ProcessEnv> {
   const backendVars = ws.authMode === 'endpoint' ? await endpointEnv(ws.endpointId) : {};
   const resolved = await resolveEnv(id, ws.env.plain, ws.env.secretKeys);
-  return {
-    ...process.env,
-    ...backendVars,
-    ...resolved,
-    TERM: 'xterm-256color'
-  };
+  const base: NodeJS.ProcessEnv = { ...process.env };
+  // Endpoint workspaces must not inherit the host's real Anthropic key (dev
+  // fallback mode) into a process whose base URL is a third-party endpoint.
+  if (ws.authMode === 'endpoint') delete base.ANTHROPIC_API_KEY;
+  return { ...base, ...backendVars, ...resolved, TERM: 'xterm-256color' };
 }
 
 // ── Backend surface ────────────────────────────────────────────────────────

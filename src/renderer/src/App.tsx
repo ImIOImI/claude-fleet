@@ -1029,7 +1029,7 @@ export function App() {
       workspaceRoot: source.workspaceRoot,
       image: source.image,
       authMode: source.authMode,
-      endpointId: isSummary ? source.endpointId : source.endpointId,
+      endpointId: source.endpointId,
       plainEnv: { ...plain },
       // Don't carry secret *values* across — they live in the source's
       // vault entry, not in the clone's. The user re-enters them in the
