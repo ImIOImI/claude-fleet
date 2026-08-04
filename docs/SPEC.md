@@ -38,6 +38,7 @@ It is a local-only operator console — not a remote orchestrator, not a multi-u
 - **Not a Claude Code replacement.** The CLI inside the container is the source of truth for what runs. This app is a viewport and lifecycle manager around it.
 - **No auto-updater, no telemetry.** The runner image sets `DISABLE_AUTOUPDATER=1` and `DISABLE_TELEMETRY=1`.
 - **Not a general port manager (v1).** Port-forward preview auto-detects dev servers and opens them in the system browser — no manual port pinning, no persistent port list, no arbitrary `host:port` dialing, no LAN exposure, no in-app preview tab.
+- **Not an inference manager.** Fleet workspaces consume model endpoints (local Ollama, org LLMs, or cloud services) but do not manage them. `docker/inference/compose.yaml` is a dev/test fixture only — no model downloads, no GPU scheduling, no container lifecycle as a product feature.
 
 ## 4. Stack
 
@@ -283,6 +284,14 @@ App-level settings persist to `<userData>/config.json`: `{ fleetRoot?: string, d
 - `config:setUsageBudget(preset, customTokens)` → `{ usageBudget }` — persist the plan-usage preset and the custom token amount it falls back to (`customTokens` is rounded, clamped ≥0).
 - `usage:rollingSpend()` → `{ spentTokens, windowHours }` — the plan-usage bar's **numerator**: total tokens (all four types) spent across the **whole fleet** in the trailing `windowHours` window, via `db.ts:tokensSpentSince(Date.now() - windowMs)`. App.tsx polls this every 15s (separate, slower cadence than the per-workspace summary push — it's one cheap aggregate and the rolling window moves on the order of minutes).
 
+### Model endpoints (#250)
+App-level registry of custom model endpoints (`<userData>/endpoints.json`). API keys stored in vault under scope `endpoint:<id>`, key `ANTHROPIC_AUTH_TOKEN`.
+- `endpoints:list()` → `ModelEndpoint[]` — all registered endpoints.
+- `endpoints:save(input)` → `ModelEndpoint` — create or update an endpoint. Input: `Omit<ModelEndpoint, 'id' | 'hasApiKey'> & { id?: string }` (id generated as UUID via `crypto.randomUUID()` if absent).
+- `endpoints:delete(id)` → `void` — remove an endpoint and its stored API key.
+- `endpoints:setApiKey(id, value)` → `void` — store or clear the API key for an endpoint (value `null` clears it).
+- `endpoints:probe(baseUrl, modelId, apiKey?)` → `{ ok: boolean; status?: number; message: string }` — test whether an endpoint speaks the Anthropic Messages API (one test POST with max_tokens:1).
+
 ### Clipboard + context menu
 The renderer cannot use `navigator.clipboard` reliably (focus/permission gotchas in Electron, and the renderer is contextIsolated). All clipboard access goes through main:
 - `clipboard:write(text)` → `void` — `electron.clipboard.writeText` (no-op on empty).
@@ -298,7 +307,7 @@ For each workspace, `<userData>/state/<id>/workspace.json` records the persisten
 
 ```ts
 type WorkspaceKind = 'container' | 'local';
-type AuthMode = 'oauth' | 'apikey';
+type AuthMode = 'oauth' | 'apikey' | 'endpoint';
 
 interface WorkspaceSpec {
   id: string;              // ULID — identity, never changes
@@ -310,7 +319,8 @@ interface WorkspaceSpec {
   workspaceSubdir: string; // optional working subdir inside /workspace
   kind: WorkspaceKind;     // 'container' (Docker) or 'local' (host process, #16)
   image?: string;          // image ref for kind='container'; undefined for 'local'
-  authMode: AuthMode;      // 'oauth' (default) or 'apikey' (requires ANTHROPIC_API_KEY in env)
+  authMode: AuthMode;      // 'oauth' (default) or 'apikey' (requires ANTHROPIC_API_KEY in env) or 'endpoint' (model-endpoint registry, no shared-OAuth bind, #250)
+  endpointId?: string;     // authMode 'endpoint' only: id into the app-level endpoint registry (<userData>/endpoints.json); resolved live at container-create/spawn time (#250)
   env: {
     plain: Record<string, string>; // values live in the manifest
     secretKeys: string[];          // values live in the safeStorage vault (<userData>/secrets.enc)
@@ -629,6 +639,26 @@ The old `__profiles__:*` keytar shape (global per-profile API keys) is gone. The
 
 Values are read from the renderer only on explicit `vault:getSecret`; during normal operation, the main process consumes them directly via `resolveEnv` when constructing the container env (not round-tripped through the UI).
 
+The vault also holds **endpoint API keys**: scope `endpoint:<id>`, key `ANTHROPIC_AUTH_TOKEN` — the same file, the same safeStorage envelope, a different namespace. `deleteEndpoint(id)` purges the whole `endpoint:<id>` scope from the vault. The endpoint id is a UUID (not a ULID — `endpoints.ts` uses `crypto.randomUUID()`). See *Model endpoint registry* below for the non-secret part.
+
+### Model endpoint registry (on disk)
+`<userData>/endpoints.json` is a JSON array of `ModelEndpoint` objects — the app-level list of Anthropic-format endpoints workspaces with `authMode 'endpoint'` point claude-code at. Only non-secret fields live here; the API key (if any) lives in the vault as described above. The file is read-through-cache in memory (`endpoints.ts`) and written atomically on every `endpoints:save` / `endpoints:delete` / `endpoints:setApiKey` call.
+
+```ts
+interface ModelEndpoint {
+  id: string;            // UUID (crypto.randomUUID)
+  name: string;          // user label, free-form
+  baseUrl: string;       // Anthropic-format base URL; no trailing slash; claude-code appends /v1/messages itself
+  modelId: string;       // model id passed as ANTHROPIC_MODEL
+  smallFastModelId?: string; // haiku-class model; defaults to modelId when absent
+  contextLength?: number; // display metadata only — the server owns the real limit
+  hasApiKey: boolean;    // true iff a key is stored in the vault (the key itself is never serialised here)
+  notes?: string;
+}
+```
+
+Writes are validated before persisting (`name`, `baseUrl` with http/https prefix, `modelId` all required). The registry tolerates a missing or malformed file by returning `[]`. There is no migration path for the old per-profile keytar shape — `endpoints.json` is new in #250.
+
 ### Loadout library (#16-followup)
 A **loadout** is a reusable, machine-parseable bundle of Claude config the user installs into a workspace on demand. Authored loadouts live at `<userData>/loadouts/<id>/`, each a folder with a `loadout.md` (**YAML frontmatter + markdown body** — the Claude-Code idiom, so a Claude instance parses it natively):
 - **Frontmatter** = `title`, `version` (semver), `description` (the relevance signal), `tags`, `dependencies { loadouts: [{id, version?}], tools: [{cmd, version?}] }`, `scripts[] {label, run|file, unless?}`, `prompts[] {label, send|file}`. **Body** = install-instructions prose.
@@ -810,6 +840,12 @@ A dev server (Vite, Next, a Python server, …) started inside a workspace conta
 3. User clicks **Open preview** → `ports:open(workspaceId, N)`. Main creates (or reuses) a `PortForward`: a `net.Server` bound to `127.0.0.1:0` (ephemeral host port). For every inbound browser connection, main sends `DIAL {channel, port=N}` to the broker over a fresh `BrokerClient`, awaits `DIALED{ok:true}`, then pipes the browser socket ↔ the broker channel using the existing `INPUT`/`OUTPUT` relay. Returns `{ hostPort }`.
 4. Main calls `shell.openExternal('http://127.0.0.1:<hostPort>')` — the system browser opens the forwarded URL. WebSocket/HMR traffic (Vite, Next hot-reload) passes through the raw byte relay untouched.
 5. The `PortForward` and `PortMonitor` are torn down automatically when the workspace pauses, stops, or is removed.
+
+### Model endpoint workspace (#250)
+1. **Register an endpoint.** User opens Settings → **Model Endpoints** tab. Clicks **Add endpoint**, fills Name, Base URL (must start with `http://` or `https://`), Model ID, optional Small/Fast Model ID, optional Context Length (display only), optional Notes, optional API key. The **Test** button fires `endpoints:probe(baseUrl, modelId, apiKey?)` — a one-shot `POST /v1/messages` with `max_tokens:1`; the response badge shows OK or the error message. Clicking **Save** (or **Add**) calls `endpoints:save(...)` (persists to `<userData>/endpoints.json`) and, if an API key was provided, calls `endpoints:setApiKey(id, value)` (stores under vault scope `endpoint:<id>`, key `ANTHROPIC_AUTH_TOKEN`). The list refreshes. Deleting an endpoint via **Remove** calls `endpoints:delete(id)` — removes the registry entry and purges the vault scope.
+2. **Create an endpoint workspace.** In the **New workspace** modal the **Auth** radio gains an **Endpoint** option, disabled and annotated *(no endpoints registered)* until `endpoints:list()` returns at least one entry. Selecting **Endpoint** reveals a dropdown populated from `endpoints:list()`; the user picks one. Other auth fields (OAuth / API key) are deselected and irrelevant — the endpoint supplies its own token. The remaining form fields (image, name, env vars, resources) work identically to OAuth workspaces.
+3. **Container create / local spawn.** `workspace:create` (or `local spawn`) calls `endpointEnv(endpointId)`, which resolves the registry entry live and retrieves the API key from the vault. It compiles five env vars — `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CF_SUMMARY_MODEL` — and spreads them **first** in the container env, so explicit workspace env vars (from `resolveEnv`) override them. No OAuth credentials file is bind-mounted. If the endpoint id is unknown (deleted after the workspace was created), `endpointEnv` returns `{}` and warns; the workspace starts and claude surfaces the auth failure itself. Registry edits and key rotation take effect on next create/recreate (not in a running container). For **local** endpoint workspaces specifically, `buildEnv` strips the inherited host `ANTHROPIC_API_KEY` (present in dev when using the `ANTHROPIC_API_KEY=sk-…` fallback) before assembling the env, so the real Anthropic key is never forwarded to a third-party endpoint's process; an explicit `ANTHROPIC_API_KEY` set in the workspace's own env restores it.
+4. **Observability.** Identical to other workspaces — JSONL → SQLite pipeline, cost read from `events` rows grouped by `(model, service_tier)`. For models not in `src/main/pricing.ts` the USD field renders **`—`** (zero in the DB, not surfaced as `$0.00`) — the pricing table covers only Anthropic's own models; custom/org endpoints are unpriced by design.
 
 ## 9. Security model
 
@@ -1145,7 +1181,7 @@ The main process's writers use the read-write `state.db` connection; the MCP ser
 - `report_session_mapping({ brokerSessionId, sessionId })` — called by the `SessionStart` hook inside the container (not by the model). Records the tab↔session mapping through the phantom-safe `recordBrokerSessionMapping` path: commits (`verified=1`, logs `mapping-remapped`) when safe, or parks it in `pending_claude_session_id` (logs `mapping-deferred`) when the tab still holds a real conversation and the reported id has no transcript yet — so an abandoned `/clear` session can't strand the tab (#170). Caller identity is ambient; affects only the caller's own workspace.
 - `report_summary_status({ sessionId, phase, detail? })` — called by the chapter-summary hooks (`summarize.sh`, `backfill-summaries.sh`), not by the model. Records a `summary-<phase>` diagnostic into the `errors` table so the #207 pipeline's failures aren't silent (#230). `phase` ∈ `attempt` | `generated` | `rejected` | `empty-window` | `gate` | `backfill-start` | `backfill-done`; `rejected` logs at `warn`, the rest `info`; `detail` is a free-form counter/context object. `backfill-start` and `backfill-done` are always-on sweep bookends (both `info`), attributed to the triggering session. Caller identity is ambient; affects only the caller's own workspace. Container backend only.
 - `mark_useful({ sessionId, note? })` — explicit agent feedback after a `search_transcripts` result helped. The `search_transcripts` tool description instructs agents to call this when a result led to their answer. Scoped: the session must belong to an allowed workspace. Records a `marked-useful` usage event; note truncated to 500 chars.
-- `get_config()` — returns effective fleet tunables for this workspace: `{ app: { version }, runnerImage: { name } | null, summarizer: { model, minNewTurns, minIntervalS, windowChars, maxChaptersPerRun }, backfill: { enabled, maxPerSweep, delayS } }` (shape built by the pure `resolveWorkspaceConfig` in `src/main/config.ts`). Summarizer values resolve as app defaults overridden by the workspace's `env.plain` (`CF_SUMMARY_MODEL`, `CF_SUMMARY_MIN_NEW_TURNS`, `CF_SUMMARY_MIN_INTERVAL_S`, `CF_SUMMARY_WINDOW_CHARS`, `CF_SUMMARY_MAX_CHAPTERS_PER_RUN`) and backfill values from (`CF_BACKFILL`, `CF_BACKFILL_MAX_PER_SWEEP`, `CF_BACKFILL_DELAY_S`); all reflect what the host set at container create — manual in-container env changes are not visible until recreate. `app.version` describes the **live host process** — current across app restarts without a recreate — so a workspace can always tell what claude-fleet it's talking to. `runnerImage.name` is the manifest's configured image reference (`null` for local workspaces); it identifies the tag, not the build — surfacing the live container's image id/created date would need a docker inspect and remains an open follow-up on #219.
+- `get_config()` — returns effective fleet tunables for this workspace: `{ app: { version }, runnerImage: { name } | null, summarizer: { model, minNewTurns, minIntervalS, windowChars, maxChaptersPerRun }, backfill: { enabled, maxPerSweep, delayS }, backend: { mode: 'oauth' | 'apikey' | 'endpoint', endpoint: { name, baseUrl, modelId } | null } }` (shape built by the pure `resolveWorkspaceConfig` in `src/main/config.ts`). Summarizer values resolve as app defaults (for endpoint workspaces, `CF_SUMMARY_MODEL` defaults to the endpoint's `modelId`) overridden by the workspace's `env.plain` (`CF_SUMMARY_MODEL`, `CF_SUMMARY_MIN_NEW_TURNS`, `CF_SUMMARY_MIN_INTERVAL_S`, `CF_SUMMARY_WINDOW_CHARS`, `CF_SUMMARY_MAX_CHAPTERS_PER_RUN`); workspace env overrides always win. Backfill values resolve from (`CF_BACKFILL`, `CF_BACKFILL_MAX_PER_SWEEP`, `CF_BACKFILL_DELAY_S`); all reflect what the host set at container create — manual in-container env changes are not visible until recreate. `app.version` describes the **live host process** — current across app restarts without a recreate — so a workspace can always tell what claude-fleet it's talking to. `runnerImage.name` is the manifest's configured image reference (`null` for local workspaces); it identifies the tag, not the build — surfacing the live container's image id/created date would need a docker inspect and remains an open follow-up on #219. `backend` reports the model backend the workspace was created with: `mode` is `oauth` (Anthropic OAuth default), `apikey` (user-supplied Anthropic key), or `endpoint` (custom model endpoint); `endpoint` is the registered endpoint's `{ name, baseUrl, modelId }` when mode is `endpoint` and the endpoint still exists, or `null` otherwise (deleted endpoint or non-endpoint mode). The API token is **never** included — it stays in the vault.
 - `plan_usage({ window_s?, at? })` → app-wide aggregate for the 5-hour usage window covering `at` (default now). Returns `{ window: { startMs, endMs, source: 'anchor' | 'rolling' }, spend: { usd, inputTokens, outputTokens, cacheReadTokens, cacheCreateTokens }, byModel: [{ model, usd }], byBackend: [{ backend: 'container' | 'local', usd }], latestAnchor: { kind, scope, resetAtIso, message } | null, estimate: { capUsd, usedPct, basis: 'seed' | 'calibrated' } }`. The window comes from the latest covering `usage_anchors` row (`source:'anchor'`, real block bounds) or a trailing `window_s` fallback (default 18000s, `source:'rolling'`). `capUsd` seeds from the window cost recomputed at the most recent `limit-hit` anchor (`basis:'seed'` until multi-anchor calibration lands); `usedPct = spend.usd / capUsd`, or null when uncalibrated. **No grant required; aggregates only** — the same non-private carve-out as global-error rows; never emits per-workspace rows or transcript detail (`foldPlanUsage` has no per-workspace field). Computed in `ipc.ts:computePlanUsage` and injected via `setPlanUsageHandler` (which alone knows backend kinds), so `mcpServer.ts` needn't import the backend graph. `usage_anchors` is intentionally **not** in the `query` tool's snapshot — anchors surface only through this aggregate.
 - (`list_prompts` dropped — the prompt log #11 is blocked, so there is no `prompts` table.)
 
@@ -1284,12 +1320,13 @@ A local-build fallback (`docker build` from the bundled `docker/` dir) is useful
 - **Pull progress UI.** Whether the first-run pull is blocking (modal with progress bar) or background (spinner + queued container-create).
 
 ### How `claude` authenticates inside the container
-Two modes, picked at create-container time via `manifest.authMode`:
+Three modes, picked at create-container time via `manifest.authMode`:
 
 - **API key**: env contains `ANTHROPIC_API_KEY` (typically as a secret env var resolved from the per-workspace vault entry at container-start time). Used when the user has a Console API key.
 - **OAuth (Claude.ai Pro/Max)**: no `ANTHROPIC_API_KEY` is injected. A single shared credentials file at `<userData>/claude-shared/.credentials.json` is file-bound into every OAuth workspace as `/home/fleet/.claude/.credentials.json` (layered on top of the per-workspace `.claude` dir bind). The first OAuth workspace's run of `claude` prints a login code; the user completes the flow in their browser; OAuth tokens land in the shared file. Every subsequent OAuth workspace mounts the same file and skips the browser dance. Token refresh in any workspace updates the shared file in place and propagates to all of them.
+- **Endpoint** (`authMode === 'endpoint'`, #250): the workspace targets a custom model endpoint from the app-level registry (`<userData>/endpoints.json`). At container-create/spawn time, `endpointEnv(endpointId)` resolves the registry entry live and compiles five env vars into the container env: `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CF_SUMMARY_MODEL`. These are spread **first** so that any explicit workspace env vars (resolved via `resolveEnv`) override them. No OAuth credentials file is bound — auth comes entirely from env. If the registry entry is missing or the id is unknown, `endpointEnv` returns `{}` (and warns), so the workspace still starts (claude surfaces the auth failure itself). Registry edits and key rotation take effect on the next create/recreate, not in a running container.
 
-Claude Code's auth precedence puts `ANTHROPIC_API_KEY` ahead of OAuth tokens, which is why API-key and OAuth modes are mutually exclusive at the env-injection level: OAuth mode skips the env var entirely so the OAuth path is reached.
+Claude Code's auth precedence puts `ANTHROPIC_BASE_URL`+`ANTHROPIC_AUTH_TOKEN` (or `ANTHROPIC_API_KEY`) ahead of OAuth tokens, which is why API-key, OAuth, and endpoint modes are mutually exclusive at the env-injection level: OAuth mode skips the env vars entirely so the OAuth path is reached; endpoint mode never binds the credentials file.
 
 **Non-goals (deferred):**
 - Per-workspace OAuth isolation (a different Claude.ai account per workspace). A future `oauthIsolated: boolean` setting could opt a workspace out of the shared bind in favor of a per-workspace file. Not built because nobody's asked for it yet.

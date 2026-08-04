@@ -44,6 +44,7 @@ import { recordBrokerSessionMapping, recordUsageEvent } from './db.js';
 import { logError } from './errorLog.js';
 import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
 import { resolveEnv } from './vault.js';
+import { endpointEnv } from './endpoints.js';
 import { claudeCreateArgs } from './claudeArgs.js';
 import { injectAndSubmit } from './ptyInput.js';
 
@@ -137,8 +138,14 @@ export interface CreateWorkspaceInput {
    * `/home/fleet/.claude/.credentials.json` so the first browser login
    * propagates to every other OAuth workspace. 'apikey' workspaces don't
    * get the shared bind — their credentials come via the env-var path.
+   * 'endpoint' workspaces also don't get the shared bind; their model
+   * config comes from the endpoint registry at container-start time (#250).
    */
   authMode: AuthMode;
+  /** authMode 'endpoint' only: id into the app-level model-endpoint registry
+   *  (<userData>/endpoints.json). A REFERENCE — resolved live at container
+   *  create / local spawn, so registry edits apply on next start (#250). */
+  endpointId?: string;
   /**
    * Workspace kind. The Docker backend only ever sees `'container'`; the local
    * backend (#16) uses `'local'`. Optional + defaulted so existing callers and
@@ -464,7 +471,12 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
   // container's `Env` array. Missing secret keys resolve to empty string
   // so the container still starts (claude itself surfaces the failure
   // later via its own error path).
-  const resolvedEnv = await resolveEnv(spec.id, spec.env.plain, spec.env.secretKeys);
+  // authMode 'endpoint': compile the registry entry to claude-code's env
+  // contract (ANTHROPIC_BASE_URL/AUTH_TOKEN/MODEL/…, #250). Spread FIRST so
+  // explicit workspace env still overrides it. Resolved live — registry
+  // edits/key rotation apply on next create.
+  const backendVars = spec.authMode === 'endpoint' ? await endpointEnv(spec.endpointId) : {};
+  const resolvedEnv = { ...backendVars, ...(await resolveEnv(spec.id, spec.env.plain, spec.env.secretKeys)) };
   const envArr = ['HOME=/home/fleet', ...Object.entries(resolvedEnv).map(([k, v]) => `${k}=${v}`)];
   // Windows: tell the broker to listen on loopback TCP instead of a unix
   // socket. The host connects via the published 127.0.0.1:<hostPort>.
@@ -531,6 +543,7 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
   // the gate. claude re-fetches each start and still re-prompts if the org
   // changes the settings, so this shares the approval without suppressing
   // genuine changes.
+  // 'apikey' and 'endpoint' modes get no Anthropic credential file — env only (#250).
   if (spec.authMode === 'oauth') {
     const sharedCreds = await ensureSharedCredentialsFile();
     binds.push(`${sharedCreds}:/home/fleet/.claude/.credentials.json:rw`);

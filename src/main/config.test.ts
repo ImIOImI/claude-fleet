@@ -212,7 +212,8 @@ describe('resolveWorkspaceConfig (#219)', () => {
       app: { version: '9.9.9' },
       runnerImage: null,
       summarizer: { model: 'haiku', minNewTurns: 20, minIntervalS: 120, windowChars: 8000, maxChaptersPerRun: 5 },
-      backfill: { enabled: true, maxPerSweep: 10, delayS: 3 }
+      backfill: { enabled: true, maxPerSweep: 10, delayS: 3 },
+      backend: { mode: 'oauth', endpoint: null }
     });
   });
 
@@ -229,5 +230,32 @@ describe('resolveWorkspaceConfig (#219)', () => {
     );
     expect(out.summarizer).toEqual({ model: 'sonnet', minNewTurns: 5, minIntervalS: 120, windowChars: 8000, maxChaptersPerRun: 5 });
     expect(out.backfill).toEqual({ enabled: false, maxPerSweep: 4, delayS: 3 });
+  });
+
+  it('reports the backend, never a token', () => {
+    const cfg = resolveWorkspaceConfig('ws1', {}, '0.9.0', undefined, {
+      mode: 'endpoint',
+      endpoint: { name: 'org-vllm', baseUrl: 'http://10.0.0.5:8000', modelId: 'qwen3-32b' }
+    });
+    expect(cfg.backend).toEqual({
+      mode: 'endpoint',
+      endpoint: { name: 'org-vllm', baseUrl: 'http://10.0.0.5:8000', modelId: 'qwen3-32b' }
+    });
+    expect(JSON.stringify(cfg)).not.toContain('AUTH_TOKEN');
+  });
+
+  it('defaults backend to oauth with no endpoint', () => {
+    const cfg = resolveWorkspaceConfig('ws1', {}, '0.9.0');
+    expect(cfg.backend).toEqual({ mode: 'oauth', endpoint: null });
+  });
+
+  it('mode: apikey passes through', () => {
+    const cfg = resolveWorkspaceConfig('ws1', {}, '0.9.0', undefined, { mode: 'apikey', endpoint: null });
+    expect(cfg.backend.mode).toBe('apikey');
+  });
+
+  it('CF_SUMMARY_MODEL env override wins over defaults', () => {
+    const cfg = resolveWorkspaceConfig('ws1', { CF_SUMMARY_MODEL: 'user-override' }, '0.9.0');
+    expect(cfg.summarizer.model).toBe('user-override');
   });
 });

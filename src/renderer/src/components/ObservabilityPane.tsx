@@ -234,13 +234,20 @@ function FleetView({
   workspaces: WorkspaceSummary[];
   summaries: Record<string, WorkspaceObservabilitySummary | null>;
 }) {
-  const rows = workspaces.map((w) => ({
-    id: w.id,
-    name: w.name,
-    state: w.state,
-    hue: colorFor(w),
-    usd: summaries[w.id]?.usd ?? 0
-  }));
+  const rows = workspaces.map((w) => {
+    const s = summaries[w.id];
+    const totalTokens = s
+      ? s.inputTokens + s.outputTokens + s.cacheReadInputTokens + s.cacheCreationInputTokens
+      : 0;
+    return {
+      id: w.id,
+      name: w.name,
+      state: w.state,
+      hue: colorFor(w),
+      usd: s?.usd ?? 0,
+      totalTokens
+    };
+  });
   const total = rows.reduce((a, r) => a + r.usd, 0);
 
   return (
@@ -256,7 +263,7 @@ function FleetView({
               key={r.id}
               className="obs-share-seg"
               style={{ flex: total > 0 ? r.usd : 1, background: r.hue }}
-              title={`${r.name} · ${formatUsd(r.usd)}`}
+              title={`${r.name} · ${formatUsd(r.usd, r.totalTokens)}`}
             />
           ))}
         </div>
@@ -269,7 +276,12 @@ function FleetView({
             <span className="obs-fleet-dot" style={{ background: r.hue }} />
             <span className="obs-fleet-name">{r.name}</span>
             <span className={`obs-fleet-state ${r.state}`}>{r.state}</span>
-            <span className="obs-fleet-cost mono">{formatUsd(r.usd)}</span>
+            <span
+              className="obs-fleet-cost mono"
+              title={r.usd === 0 && r.totalTokens > 0 ? 'no price table for this model (local/endpoint backend)' : undefined}
+            >
+              {formatUsd(r.usd, r.totalTokens)}
+            </span>
           </div>
         ))}
       </section>
@@ -311,8 +323,11 @@ function SummaryView({
 
       <section className="obs-cost-block">
         <div className="obs-cost-head">
-          <div className="obs-cost-amount mono">
-            {showTokens ? formatTokens(totalTokens) : formatUsd(summary.usd)}
+          <div
+            className="obs-cost-amount mono"
+            title={!showTokens && summary.usd === 0 && totalTokens > 0 ? 'no price table for this model (local/endpoint backend)' : undefined}
+          >
+            {showTokens ? formatTokens(totalTokens) : formatUsd(summary.usd, totalTokens)}
           </div>
           <div className="obs-graph-toggle" role="tablist" aria-label="Session graph metric">
             <button
@@ -597,7 +612,8 @@ function formatDuration(ms: number): string {
   return `${(ms / 60_000).toFixed(1)}m`;
 }
 
-function formatUsd(usd: number): string {
+function formatUsd(usd: number, totalTokens?: number): string {
+  if (usd === 0 && totalTokens !== undefined && totalTokens > 0) return '—';
   if (usd === 0) return '$0.00';
   if (usd < 0.01) return '<$0.01';
   if (usd < 100) return `$${usd.toFixed(2)}`;

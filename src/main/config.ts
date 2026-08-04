@@ -245,18 +245,22 @@ export async function setFavorite(id: string, on: boolean): Promise<string[]> {
  *  is unit-testable without Electron. `runnerImage` is the image *reference*
  *  the workspace was created with (null for local workspaces); it does not
  *  say which build of that tag the live container runs — that needs a docker
- *  inspect and stays a #219 follow-up. */
+ *  inspect and stays a #219 follow-up. `backend` describes the model backend
+ *  the workspace was created with (mode + endpoint metadata); never includes
+ *  the API token — that stays in the vault. */
 export function resolveWorkspaceConfig(
   workspaceId: string,
   env: Record<string, string>,
   appVersion: string,
-  image?: string
+  image?: string,
+  backend?: { mode: 'oauth' | 'apikey' | 'endpoint'; endpoint: { name: string; baseUrl: string; modelId: string } | null }
 ): {
   workspaceId: string;
   app: { version: string };
   runnerImage: { name: string } | null;
   summarizer: { model: string; minNewTurns: number; minIntervalS: number; windowChars: number; maxChaptersPerRun: number };
   backfill: { enabled: boolean; maxPerSweep: number; delayS: number };
+  backend: { mode: 'oauth' | 'apikey' | 'endpoint'; endpoint: { name: string; baseUrl: string; modelId: string } | null };
 } {
   const num = (v: unknown, d: number) => (Number.isFinite(Number(v)) ? Number(v) : d);
   return {
@@ -274,7 +278,8 @@ export function resolveWorkspaceConfig(
       enabled: env.CF_BACKFILL !== '0',
       maxPerSweep: num(env.CF_BACKFILL_MAX_PER_SWEEP, 10),
       delayS: num(env.CF_BACKFILL_DELAY_S, 3)
-    }
+    },
+    backend: backend ?? { mode: 'oauth', endpoint: null }
   };
 }
 

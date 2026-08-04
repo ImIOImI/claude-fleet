@@ -1,0 +1,12 @@
+# GPU override — layers an NVIDIA device reservation onto the base service.
+# Usage:
+#   docker compose -f docker/inference/compose.yaml -f docker/inference/compose.gpu.yaml up -d
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

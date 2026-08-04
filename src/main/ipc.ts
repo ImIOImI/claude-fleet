@@ -49,6 +49,7 @@ import {
   setPlanUsageHandler,
 } from './mcpServer.js';
 import * as vault from './vault.js';
+import { listEndpoints, saveEndpoint, deleteEndpoint, setEndpointApiKey, probeEndpoint, getEndpoint, type ModelEndpoint } from './endpoints.js';
 import * as fs from './fs.js';
 import * as imageLibrary from './imageLibrary.js';
 import * as files from './files.js';
@@ -194,6 +195,8 @@ interface WorkspaceCreatePayload {
   workspaceRoot?: string;
   image?: string;
   authMode: AuthMode;
+  /** authMode 'endpoint' only: id into the app-level model-endpoint registry (#250). */
+  endpointId?: string;
   env: WorkspaceEnv;
   resources?: WorkspaceResources;
   mirror?: WorkspaceMirror;
@@ -241,6 +244,7 @@ async function listAllWorkspaces(): Promise<Workspace[]> {
           : await fleetPrivateDir(w.id),
       workspaceSubdir: w.workspaceSubdir || m?.workspaceSubdir || '',
       authMode: m?.authMode ?? w.authMode,
+      endpointId: m?.endpointId,
       env: m?.env ?? w.env,
       resources: m?.resources,
       mirror: m?.mirror ?? FACTORY_MIRROR,
@@ -723,6 +727,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
           throw new Error(`Working directory does not exist: ${root}`);
         }
       }
+      if (input.authMode === 'endpoint' && !input.endpointId) {
+        throw new Error('Pick a model endpoint for this workspace.');
+      }
+
       // Name-uniqueness is checked here (and not in the renderer alone) so
       // a stale list doesn't allow duplicates through.
       const existing = await findWorkspaceByName(input.name);
@@ -744,6 +752,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         image: input.image,
         resources: input.resources,
         authMode: input.authMode,
+        endpointId: input.endpointId,
         kind,
         workspaceRoot: input.workspaceRoot
       });
@@ -761,6 +770,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         kind,
         image: ws.image,
         authMode: input.authMode,
+        endpointId: input.endpointId,
         env: input.env,
         resources: input.resources,
         mirror: input.mirror ?? FACTORY_MIRROR,
@@ -1044,7 +1054,12 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   setUsageRecorder((e) => recordUsageEvent(e));
   setConfigResolver(async (callerId) => {
     const m = await readWorkspaceManifest(callerId);
-    return resolveWorkspaceConfig(callerId, m?.env?.plain ?? {}, appVersionString(), m?.image);
+    const ep = m?.authMode === 'endpoint' && m.endpointId ? await getEndpoint(m.endpointId) : null;
+    const effectiveEnv = { ...(ep ? { CF_SUMMARY_MODEL: ep.modelId } : {}), ...(m?.env?.plain ?? {}) };
+    return resolveWorkspaceConfig(callerId, effectiveEnv, appVersionString(), m?.image, {
+      mode: m?.authMode ?? 'oauth',
+      endpoint: ep ? { name: ep.name, baseUrl: ep.baseUrl, modelId: ep.modelId } : null
+    });
   });
 
   ipcMain.handle('workspace:remove', async (_e, containerId: string, opts?: RemoveWorkspaceOpts) => {
@@ -1149,6 +1164,17 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     await setHardwareAccelDisabled(!!disabled);
     return { disableHardwareAcceleration: await getHardwareAccelDisabled() };
   });
+
+  // ── Model-endpoint registry (#250) ─────────────────────────────────────
+  ipcMain.handle('endpoints:list', () => listEndpoints());
+  ipcMain.handle('endpoints:save', (_e, input: Omit<ModelEndpoint, 'id' | 'hasApiKey'> & { id?: string }) =>
+    saveEndpoint(input)
+  );
+  ipcMain.handle('endpoints:delete', (_e, id: string) => deleteEndpoint(id));
+  ipcMain.handle('endpoints:setApiKey', (_e, id: string, value: string | null) => setEndpointApiKey(id, value));
+  ipcMain.handle('endpoints:probe', (_e, baseUrl: string, modelId: string, apiKey?: string | null) =>
+    probeEndpoint(baseUrl, modelId, apiKey ?? null)
+  );
 
   ipcMain.handle('dialog:pickDirectory', async (event, defaultPath?: string) => {
     const win = BrowserWindow.fromWebContents(event.sender);

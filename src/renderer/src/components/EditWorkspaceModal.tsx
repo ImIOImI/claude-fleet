@@ -96,6 +96,7 @@ export function EditWorkspaceModal({
               kind: workspace.kind,
               image: workspace.image,
               authMode: workspace.authMode,
+              endpointId: workspace.endpointId,
               plainEnv: workspace.env.plain,
               // secretKeys is read by WorkspaceForm via a separate cast
               // (the initial reader looks for it on the partial object).
@@ -132,6 +133,7 @@ export function containerLevelChanged(
   after: WorkspaceFormSubmit
 ): boolean {
   if (before.authMode !== after.authMode) return true;
+  if ((before.endpointId ?? '') !== (after.endpointId ?? '')) return true;
   if ((before.image ?? '') !== (after.image ?? '')) return true;
   // env.plain values
   const beforePlain = before.env.plain;
