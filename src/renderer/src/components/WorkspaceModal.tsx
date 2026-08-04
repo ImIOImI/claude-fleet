@@ -413,6 +413,7 @@ function savedToInitial(w: WorkspaceSummary): Record<string, unknown> {
     workspaceRoot: w.workspaceRoot,
     image: w.image,
     authMode: w.authMode,
+    endpointId: w.endpointId,
     plainEnv: w.env.plain,
     secretKeys: w.env.secretKeys,
     resources: w.resources
