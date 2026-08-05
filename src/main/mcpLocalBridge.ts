@@ -17,6 +17,7 @@
 
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { windowsPathToWslPath } from './localLauncher.js';
 
 const BRIDGE_FILENAME = 'local-bridge.cjs';
 
@@ -64,6 +65,33 @@ export function localMcpServerEntry(
   return {
     type: 'stdio',
     command: electronBin,
+    args: [bridgePath],
+    env: { ELECTRON_RUN_AS_NODE: '1', CLAUDE_FLEET_MCP_SOCKET: socketPath }
+  };
+}
+
+/**
+ * The `mcpServers` entry for a WSL-launcher workspace (#253). claude runs
+ * INSIDE the distro, but WSL Windows-interop lets it exec the app's own exe
+ * directly (binfmt_misc), with stdio piped across the boundary — so the same
+ * Electron-as-node bridge works with only the *command* path translated to
+ * its /mnt/c form. `args`/env stay Windows paths: the bridge runs as a
+ * Windows process and dials the same per-workspace listener as native local
+ * (caller identity — which listener accepted — is untouched). Plain env vars
+ * flow into interop-launched Windows processes, so ELECTRON_RUN_AS_NODE and
+ * the socket path ride through unchanged. Null when the exe isn't on a
+ * drive letter (no automount form) — caller then skips MCP wiring.
+ */
+export function wslMcpServerEntry(
+  electronBin: string,
+  bridgePath: string,
+  socketPath: string
+): { type: string; command: string; args: string[]; env: Record<string, string> } | null {
+  const command = windowsPathToWslPath(electronBin);
+  if (!command) return null;
+  return {
+    type: 'stdio',
+    command,
     args: [bridgePath],
     env: { ELECTRON_RUN_AS_NODE: '1', CLAUDE_FLEET_MCP_SOCKET: socketPath }
   };
