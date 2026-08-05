@@ -247,7 +247,12 @@ export class JsonlWatcher extends EventEmitter {
     if (!this.watcher) return;
     await this.watcher.close();
     this.watcher = null;
-    await this.pollWatcher?.close();
+    // Await the creation PROMISE, not the field: a stop() racing the lazy
+    // chokidar import would otherwise miss (and leak) the poller the import
+    // is about to create. this.watcher is already null here, so a still-
+    // in-flight ensurePollWatcher resolves to null and creates nothing.
+    const poller = await this.pollWatcherPromise;
+    await poller?.close();
     this.pollWatcher = null;
     this.pollWatcherPromise = null;
     this.polledDirs.clear();
