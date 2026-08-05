@@ -1,0 +1,152 @@
+//
+// Launcher translation for local (non-container) workspaces (#253): turns the
+// per-workspace `launcher` manifest choice into the actual node-pty spawn.
+// Implemented as a SpawnPty *wrapper* so localSessions.ts (which composes
+// claude's own args and owns the ring buffer) stays byte-identical: the
+// session manager thinks it's spawning `claude file+args`; this module
+// rewrites that into `wsl.exe -d <distro> -- <shell> -lic '…'` (wsl mode) or
+// a platform-shell template invocation (custom mode).
+//
+// Pure module: no electron / node-pty imports (types from localSessions are
+// type-only), so it loads under vitest. Same discipline as claudeResolve.ts.
+
+import type { SpawnPty } from './localSessions.js';
+
+/** Per-workspace launch strategy (manifest `launcher`; absent ⇒ native). */
+export type WorkspaceLauncher =
+  | { mode: 'native' }
+  | {
+      mode: 'wsl';
+      /** wsl.exe distro name, e.g. 'Ubuntu'. */
+      distro: string;
+      /** Absolute shell path inside the distro, e.g. '/usr/bin/zsh'. */
+      shell: string;
+      /** $HOME inside the distro — probed at save time; the transcript
+       *  watcher derives the \\wsl.localhost root from it. */
+      home: string;
+      /** claude path inside the distro — probed at save time. */
+      claudePath: string;
+    }
+  | {
+      mode: 'custom';
+      /** Command template; `{claude}` → resolved host binary, `{args}` →
+       *  fleet's pre-quoted flags (appended if the placeholder is absent). */
+      command: string;
+    };
+
+/** POSIX single-quote: safe against every metacharacter except NUL. */
+export function posixQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/** \\wsl.localhost\<distro>\a\b (or legacy \\wsl$\…) → { distro, '/a/b' }. */
+export function uncToLinuxPath(p: string): { distro: string; path: string } | null {
+  const m = /^\\\\wsl(?:\.localhost|\$)\\([^\\]+)(\\.*)?$/i.exec(p);
+  if (!m) return null;
+  const path = (m[2] ?? '').replace(/\\/g, '/');
+  return { distro: m[1], path: path || '/' };
+}
+
+export function linuxPathToUnc(distro: string, linuxPath: string): string {
+  return `\\\\wsl.localhost\\${distro}${linuxPath.replace(/\//g, '\\')}`;
+}
+
+/** C:\a\b → /mnt/c/a/b (default WSL automount); null for non-drive paths. */
+export function windowsPathToWslPath(p: string): string | null {
+  const m = /^([A-Za-z]):[\\/](.*)$/.exec(p);
+  if (!m) return null;
+  return `/mnt/${m[1].toLowerCase()}/${m[2].replace(/\\/g, '/')}`;
+}
+
+/** In-distro pidfile written by the -lic bootstrap (`echo $$ > …; exec claude`).
+ *  Lives in the distro's /tmp so it vanishes with the WSL VM — stale-file
+ *  signals are harmless no-ops. Ids are path-safe (assertValidWorkspaceId). */
+export function wslPidFile(workspaceId: string, sessionId: string): string {
+  return `/tmp/claude-fleet-${workspaceId}-${sessionId}.pid`;
+}
+
+/** Forward `passKeys` across the wsl.exe boundary: WSLENV names the vars
+ *  (`/u` = Win→WSL only); the values ride the normal Windows env. */
+export function buildWslSpawnEnv(
+  base: NodeJS.ProcessEnv,
+  passKeys: string[]
+): NodeJS.ProcessEnv {
+  if (passKeys.length === 0) return { ...base };
+  const wslenv = [base.WSLENV, ...passKeys.map((k) => `${k}/u`)].filter(Boolean).join(':');
+  return { ...base, WSLENV: wslenv };
+}
+
+/** Env vars fleet sets that claude must see inside the distro. Workspace env
+ *  keys are appended at wrap time. TERM rides along so the TUI renders. */
+const BASE_WSL_PASS_KEYS = ['CLAUDE_FLEET_BROKER_SESSION_ID', 'TERM'];
+
+/**
+ * Wrap a SpawnPty so the launcher decides what actually gets spawned.
+ * - native: passthrough.
+ * - wsl (win32 only): `wsl.exe -d <distro> --cd <cwd> -- <shell> -lic
+ *   'echo $$ > <pidfile>; exec <claudePath> <args…>'`. The pty's own cwd must
+ *   be a valid WINDOWS dir (`opts.windowsCwd`) — the Linux cwd goes via --cd.
+ *   The inner spawn's `file` (host claude) is ignored; the manifest-cached
+ *   in-distro claudePath is used instead.
+ * - custom: `{claude}`/`{args}` substitution, run via the platform shell from
+ *   the original (host) cwd.
+ */
+export function wrapSpawnForLauncher(
+  launcher: WorkspaceLauncher,
+  inner: SpawnPty,
+  opts: { workspaceId: string; platform: NodeJS.Platform; windowsCwd?: string }
+): SpawnPty {
+  if (launcher.mode === 'native') return inner;
+
+  if (launcher.mode === 'wsl') {
+    if (opts.platform !== 'win32') {
+      throw new Error(`launcher mode 'wsl' is only valid on win32 (got ${opts.platform})`);
+    }
+    return (spawnOpts) => {
+      const sessionId = spawnOpts.env.CLAUDE_FLEET_BROKER_SESSION_ID ?? 'unknown';
+      const pidFile = wslPidFile(opts.workspaceId, sessionId);
+      const cmd =
+        `echo $$ > ${posixQuote(pidFile)}; ` +
+        `exec ${[launcher.claudePath, ...spawnOpts.args].map(posixQuote).join(' ')}`;
+      // Forward workspace env keys + fleet's own vars across the boundary.
+      const passKeys = [
+        ...BASE_WSL_PASS_KEYS,
+        ...Object.keys(spawnOpts.env).filter(
+          (k) => k.startsWith('ANTHROPIC_') || k.startsWith('CLAUDE_')
+        )
+      ];
+      return inner({
+        ...spawnOpts,
+        file: 'wsl.exe',
+        args: ['-d', launcher.distro, '--cd', spawnOpts.cwd, '--', launcher.shell, '-lic', cmd],
+        cwd: opts.windowsCwd ?? spawnOpts.cwd,
+        env: buildWslSpawnEnv(spawnOpts.env, [...new Set(passKeys)])
+      });
+    };
+  }
+
+  // custom
+  return (spawnOpts) => {
+    const quotedArgs = spawnOpts.args.map(posixQuote).join(' ');
+    let cmd = launcher.command;
+    cmd = cmd.replace(/\{claude\}/g, posixQuote(spawnOpts.file));
+    cmd = cmd.includes('{args}') ? cmd.replace(/\{args\}/g, quotedArgs) : `${cmd} ${quotedArgs}`;
+    const shell: { file: string; args: string[] } =
+      opts.platform === 'win32'
+        ? { file: 'cmd.exe', args: ['/d', '/s', '/c', cmd] }
+        : { file: 'sh', args: ['-c', cmd] };
+    return inner({ ...spawnOpts, file: shell.file, args: shell.args });
+  };
+}
+
+/** \\wsl.localhost transcript dir for a wsl-launcher workspace: the in-distro
+ *  ~/.claude/projects/<encoded-cwd>, viewed over the 9P share. `encode` is
+ *  paths.ts's encodeClaudeProjectDir, injected to keep this module pure. */
+export function wslLocalProjectsDir(
+  distro: string,
+  home: string,
+  workspaceRoot: string,
+  encode: (p: string) => string
+): string {
+  return linuxPathToUnc(distro, `${home}/.claude/projects/${encode(workspaceRoot)}`);
+}
