@@ -9,6 +9,7 @@
 // Linux side and is plain UTF-8. Pure module — vitest-loadable.
 
 import { resolveClaudeBin } from './claudeResolve.js';
+import { posixQuote } from './localLauncher.js';
 
 export interface ProbeDeps {
   /** execFile with { encoding: 'buffer' } — for wsl.exe's UTF-16 output. */
@@ -80,6 +81,11 @@ export async function probeWslDistro(distro: string, deps: ProbeDeps): Promise<W
     // wsl.conf [interop] is enabled. Prints 'yes' iff present.
     inDistro(deps, distro, 'test -f /proc/sys/fs/binfmt_misc/WSLInterop && echo yes')
   ]);
+
+  if (!home) {
+    throw new Error(`could not determine $HOME in ${distro} — is the distro runnable?`);
+  }
+
   const loginShell = loginShellRaw || '/bin/bash';
   const shells = shellsRaw.split('\n').map((s) => s.trim()).filter((s) => s.startsWith('/'));
 
@@ -93,7 +99,7 @@ export async function probeWslDistro(distro: string, deps: ProbeDeps): Promise<W
     execFile: (file, args) =>
       deps.exec('wsl.exe', ['-d', distro, '--', file, ...args]),
     isExecutableFile: async (p) =>
-      (await inDistro(deps, distro, `test -x ${JSON.stringify(p)} && echo yes`)) === 'yes'
+      (await inDistro(deps, distro, `test -x ${posixQuote(p)} && echo yes`)) === 'yes'
   });
 
   return { shells, loginShell, home, claudePath, interopEnabled: interopRaw === 'yes' };

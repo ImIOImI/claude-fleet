@@ -82,4 +82,16 @@ describe('probeWslDistro', () => {
     expect(p.claudePath).toBeNull();
     expect(p.interopEnabled).toBe(false);
   });
+
+  it('throws when $HOME cannot be determined', async () => {
+    await expect(
+      probeWslDistro('Ubuntu', deps({
+        'getent passwd': '/bin/bash\n',
+        'echo "$HOME"': '',
+        '/etc/shells': '/bin/bash\n',
+        WSLInterop: '',
+        'command -v claude': ''
+      }))
+    ).rejects.toThrow(/HOME/);
+  });
 });
