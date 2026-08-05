@@ -16,6 +16,9 @@ describe('decodeWsl', () => {
   it('decodes UTF-16LE and strips CR', () => {
     expect(decodeWsl(u16('Ubuntu\r\nDebian\r\n'))).toBe('Ubuntu\nDebian\n');
   });
+  it('keeps spaces (column parsing depends on them) and strips NULs', () => {
+    expect(decodeWsl(u16('* Ubuntu  2'))).toBe('* Ubuntu  2');
+  });
 });
 
 describe('parseDistroList', () => {
