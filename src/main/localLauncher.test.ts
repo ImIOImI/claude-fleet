@@ -104,6 +104,12 @@ describe('wrapSpawnForLauncher — wsl', () => {
       wrapSpawnForLauncher(launcher, spawn, { workspaceId: 'w', platform: 'linux' })
     ).toThrow(/win32/);
   });
+  it('throws when windowsCwd is missing', () => {
+    const { spawn } = captureSpawn();
+    expect(() =>
+      wrapSpawnForLauncher(launcher, spawn, { workspaceId: 'w', platform: 'win32' })
+    ).toThrow(/windowsCwd/);
+  });
 });
 
 describe('wrapSpawnForLauncher — custom', () => {

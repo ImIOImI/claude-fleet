@@ -102,6 +102,10 @@ export function wrapSpawnForLauncher(
     if (opts.platform !== 'win32') {
       throw new Error(`launcher mode 'wsl' is only valid on win32 (got ${opts.platform})`);
     }
+    if (!opts.windowsCwd) {
+      throw new Error("launcher mode 'wsl' requires opts.windowsCwd (a valid Windows dir for wsl.exe itself)");
+    }
+    const windowsCwd = opts.windowsCwd;
     return (spawnOpts) => {
       const sessionId = spawnOpts.env.CLAUDE_FLEET_BROKER_SESSION_ID ?? 'unknown';
       const pidFile = wslPidFile(opts.workspaceId, sessionId);
@@ -119,7 +123,7 @@ export function wrapSpawnForLauncher(
         ...spawnOpts,
         file: 'wsl.exe',
         args: ['-d', launcher.distro, '--cd', spawnOpts.cwd, '--', launcher.shell, '-lic', cmd],
-        cwd: opts.windowsCwd ?? spawnOpts.cwd,
+        cwd: windowsCwd,
         env: buildWslSpawnEnv(spawnOpts.env, [...new Set(passKeys)])
       });
     };
