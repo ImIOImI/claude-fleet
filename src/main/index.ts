@@ -8,6 +8,8 @@ import { broadcastMcpStatus } from './mcpStatusBroadcast.js';
 import { ensureBuiltinLoadouts } from './loadouts.js';
 import { JsonlWatcher } from './jsonlWatcher.js';
 import { listWorkspaceManifests } from './workspaces.js';
+import { wslLocalProjectsDir } from './localLauncher.js';
+import { encodeClaudeProjectDir } from './paths.js';
 import { installMainProcessHandlers, getLogPath, setErrorSink, logError } from './errorLog.js';
 import { installAppMenu } from './appMenu.js';
 import { runStartupMigration } from './migration.js';
@@ -171,7 +173,16 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     // (and their subagents') token spend is ingested (#plan-usage).
     for (const m of manifests) {
       if (m.kind === 'local' && m.workspaceRoot) {
-        jsonlWatcher.registerLocalWorkspace(m.id, m.workspaceRoot);
+        if (m.launcher?.mode === 'wsl') {
+          jsonlWatcher.registerPolledLocalDir(
+            m.id,
+            wslLocalProjectsDir(
+              m.launcher.distro, m.launcher.home, m.workspaceRoot, encodeClaudeProjectDir
+            )
+          );
+        } else {
+          jsonlWatcher.registerLocalWorkspace(m.id, m.workspaceRoot);
+        }
       }
     }
     // Backfill embeddings for sessions ingested before this feature / after a

@@ -147,6 +147,7 @@ export interface UsageBudget {
 const api = {
   app: {
     mockMode: (): Promise<boolean> => ipcRenderer.invoke('app:mockMode'),
+    platform: (): Promise<NodeJS.Platform> => Promise.resolve(process.platform),
     /**
      * Forward a renderer-side error into the main process's error.log.
      * Called automatically by the global onerror/onunhandledrejection
@@ -202,6 +203,21 @@ const api = {
         ipcRenderer.removeListener(channel, handler);
       }
     }
+  },
+  local: {
+    /** Installed WSL distros (win32; empty elsewhere) — populates the launcher picker (#253). */
+    listWslDistros: (): Promise<{ distros: string[]; defaultDistro: string | null }> =>
+      ipcRenderer.invoke('local:listWslDistros'),
+    /** Probe one distro for shells/login shell/$HOME/claude/interop (#253). */
+    probeWslDistro: (
+      distro: string
+    ): Promise<{
+      shells: string[];
+      loginShell: string;
+      home: string;
+      claudePath: string | null;
+      interopEnabled: boolean;
+    }> => ipcRenderer.invoke('local:probeWslDistro', distro)
   },
   images: {
     list: () => ipcRenderer.invoke('images:list'),
