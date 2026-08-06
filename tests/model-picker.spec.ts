@@ -93,7 +93,7 @@ test('dangling endpoint: edit form shows (deleted endpoint) and blocks submit', 
     // Expand by clicking the saved-row-header button (the li itself is not clickable).
     await row.locator('.saved-row-header').click();
     await expect(row.getByRole('button', { name: 'Model' })).toContainText('(deleted endpoint)');
-    await row.getByRole('button', { name: 'Resume' }).click();
+    await row.locator('.modal-footer').getByRole('button', { name: 'Resume' }).click();
     await expect(row.getByText(/model endpoint was deleted/)).toBeVisible();
     const calls = await getCalls(app);
     expect(calls.writeManifest).toHaveLength(0);
@@ -116,7 +116,7 @@ test('saved-tab resume keeps endpointId (#252 regression class)', async () => {
     // Expand by clicking the saved-row-header button (the li itself is not clickable).
     await row.locator('.saved-row-header').click();
     await expect(row.getByRole('button', { name: 'Model' })).toContainText('ollama-local');
-    await row.getByRole('button', { name: 'Resume' }).click();
+    await row.locator('.modal-footer').getByRole('button', { name: 'Resume' }).click();
     await expect(window.locator('.ws-chip', { hasText: 'ep-resume-ws' })).toBeVisible();
     const calls = await getCalls(app);
     expect(calls.writeManifest[0]).toMatchObject({ authMode: 'endpoint', endpointId: 'ep1' });
