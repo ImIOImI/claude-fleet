@@ -3,7 +3,7 @@
 // authMode/endpointId on the wire; Auth morphs; dangling endpoints block
 // submit; saved-tab resume keeps endpointId (the #252 savedToInitial bug).
 import { expect, test } from '@playwright/test';
-import { getCalls, launch, mockMainIpc } from './_helpers';
+import { getCalls, launch, mockMainIpc } from './_helpers.js';
 
 const EP = { id: 'ep1', name: 'ollama-local', modelId: 'qwen3:4b', baseUrl: 'http://host.docker.internal:11434' };
 
@@ -24,6 +24,7 @@ test('picking an endpoint morphs Auth and submits authMode=endpoint', async () =
     await expect(window.locator('.auth-note')).toContainText('key from endpoint registry');
 
     await window.getByRole('button', { name: 'Create & start' }).click();
+    await expect(window.getByRole('tab', { name: 'New' })).toBeHidden();
     const calls = await getCalls(app);
     expect(calls.create[0]).toMatchObject({ name: 'ep-ws', authMode: 'endpoint', endpointId: 'ep1' });
   } finally {
@@ -37,7 +38,8 @@ test('empty registry: combobox lists Claude + Add endpoint only; default submit 
     await mockMainIpc(app, { endpoints: [] });
     await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
     await window.getByRole('button', { name: 'Model' }).click();
-    const options = window.getByRole('option');
+    const listbox = window.locator('[role="listbox"][aria-label="Model options"]');
+    const options = listbox.getByRole('option');
     await expect(options).toHaveCount(2);
     await expect(options.first()).toContainText('Claude');
     await expect(options.last()).toContainText('Add endpoint');
@@ -45,6 +47,7 @@ test('empty registry: combobox lists Claude + Add endpoint only; default submit 
 
     await window.getByLabel('Workspace name').fill('plain-ws');
     await window.getByRole('button', { name: 'Create & start' }).click();
+    await expect(window.getByRole('tab', { name: 'New' })).toBeHidden();
     const calls = await getCalls(app);
     expect(calls.create[0]).toMatchObject({ authMode: 'oauth' });
     expect((calls.create[0] as { endpointId?: string }).endpointId).toBeUndefined();
@@ -114,6 +117,7 @@ test('saved-tab resume keeps endpointId (#252 regression class)', async () => {
     await row.locator('.saved-row-header').click();
     await expect(row.getByRole('button', { name: 'Model' })).toContainText('ollama-local');
     await row.getByRole('button', { name: 'Resume' }).click();
+    await expect(window.locator('.ws-chip', { hasText: 'ep-resume-ws' })).toBeVisible();
     const calls = await getCalls(app);
     expect(calls.writeManifest[0]).toMatchObject({ authMode: 'endpoint', endpointId: 'ep1' });
   } finally {
@@ -128,6 +132,8 @@ test('＋ Add endpoint… opens Settings on the Model Endpoints tab', async () =
     await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
     await window.getByRole('button', { name: 'Model' }).click();
     await window.getByRole('option', { name: /Add endpoint/ }).click();
+    // SettingsModal root is <div class="modal modal-tabbed"> inside a backdrop.
+    await expect(window.locator('.modal.modal-tabbed')).toBeVisible();
     // SettingsModal tabs are <div class="modal-tab"> not <button> — locate by class + text.
     await expect(window.locator('.modal-tab', { hasText: 'Model Endpoints' })).toHaveAttribute('aria-current', 'page');
   } finally {
