@@ -8,7 +8,7 @@
 // the e2e-windows CI job which installs Alpine via Vampire/setup-wsl.
 
 import { test, expect } from '@playwright/test';
-import { execFileSync, execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { REPO_ROOT, launch, waitForLogEntry } from './_helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -145,6 +145,15 @@ test.describe('wsl local workspaces', () => {
 
         // The "Run claude in" section must be visible.
         await expect(window.getByLabel('Run claude in')).toBeVisible();
+
+        // If the app-side distro listing comes back empty the WSL radio never
+        // renders and the visibility wait times out cryptically — fail loudly
+        // with the real cause instead.
+        const listed = await window.evaluate(() =>
+          (window as unknown as { api: { local: { listWslDistros(): Promise<{ distros: string[] }> } } })
+            .api.local.listWslDistros()
+        );
+        expect(listed.distros, 'app listWslDistros returned no distros — setup-wsl distro not visible to the app').not.toHaveLength(0);
 
         // The WSL radio must be visible (we are on win32 with distros).
         // Use /WSL/ regex because the accessible name includes the kind-help span text.
