@@ -117,7 +117,7 @@ test('saved-tab resume keeps endpointId (#252 regression class)', async () => {
     await row.locator('.saved-row-header').click();
     await expect(row.getByRole('button', { name: 'Model' })).toContainText('ollama-local');
     await row.locator('.modal-footer').getByRole('button', { name: 'Resume' }).click();
-    await expect(window.locator('.ws-chip', { hasText: 'ep-resume-ws' })).toBeVisible();
+    await expect(window.getByRole('tab', { name: 'Saved' })).toBeHidden();
     const calls = await getCalls(app);
     expect(calls.writeManifest[0]).toMatchObject({ authMode: 'endpoint', endpointId: 'ep1' });
   } finally {
