@@ -1036,7 +1036,7 @@ export function App() {
       workspaceSubdir: source.workspaceSubdir,
       kind: source.kind,
       workspaceRoot: source.workspaceRoot,
-      launcher: isSummary ? source.launcher : source.launcher,
+      launcher: source.launcher,
       image: source.image,
       authMode: source.authMode,
       endpointId: source.endpointId,
