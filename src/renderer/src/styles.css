@@ -1587,6 +1587,48 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
   color: var(--ink-2, #6b7280);
 }
 
+/* ── Model combobox (workspace form, #256) ─────────────────────────── */
+.model-combo { position: relative; }
+.model-combo-btn {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  background: var(--bg-canvas); border: 1px solid var(--rule);
+  border-radius: var(--r-md); padding: 6px 10px; cursor: pointer;
+  color: var(--ink); font-size: 13px; text-align: left; font-family: var(--font-sans);
+}
+.model-combo-btn:focus-visible { outline: none; border-color: var(--ok); }
+.model-combo-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.model-combo-caret { margin-left: auto; color: var(--ink-3); font-size: 11px; }
+.model-combo-list {
+  position: absolute; z-index: 30; top: calc(100% + 4px); left: 0; right: 0;
+  background: var(--bg-2); border: 1px solid var(--rule); border-radius: var(--r-md);
+  box-shadow: var(--shadow-lg); overflow: hidden;
+}
+.model-combo-item { display: flex; gap: 10px; padding: 8px 10px; cursor: pointer; align-items: center; }
+.model-combo-item.hover { background: var(--bg-hover); }
+.model-combo-item.sel { box-shadow: inset 2px 0 0 var(--ok); background: var(--bg-hover); }
+.model-combo-item.add { border-top: 1px solid var(--rule-soft); color: var(--ink-1); }
+.model-combo-meta { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.model-combo-meta b { font-weight: 500; font-size: 13px; }
+.model-combo-meta small {
+  font-family: var(--font-mono); font-size: 11px; color: var(--ink-2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.model-badge {
+  flex: none; width: 26px; height: 26px; border-radius: 6px; display: flex;
+  align-items: center; justify-content: center; font-size: 13px; background: var(--bg-3);
+}
+.model-badge.claude { background: oklch(30% 0.06 45); }
+.model-badge.endpoint { background: oklch(28% 0.06 240); }
+.auth-note {
+  display: flex; align-items: center; gap: 8px;
+  border: 1px dashed var(--rule); border-radius: var(--r-md);
+  padding: 8px 10px; font-size: 12px; color: var(--ink-2); background: var(--bg);
+}
+.auth-note b { color: var(--ink-1); font-weight: 500; }
+.auth-note .auth-note-edit {
+  color: var(--ink-1); text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+}
+
 /* ── Image library picker ──────────────────────────────────────────── */
 .image-library {
   margin-top: 8px;
