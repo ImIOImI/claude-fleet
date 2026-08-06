@@ -143,6 +143,7 @@ export function ModelCombobox({
         className="model-combo-btn"
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-activedescendant={open ? `model-opt-${active}` : undefined}
         aria-label="Model"
         disabled={disabled}
         onClick={() => (open ? setOpen(false) : openList())}
@@ -157,7 +158,7 @@ export function ModelCombobox({
         <span className="model-combo-caret">▾</span>
       </button>
       {open && (
-        <div className="model-combo-list" role="listbox" aria-label="Model options" aria-activedescendant={`model-opt-${active}`}>
+        <div className="model-combo-list" role="listbox" aria-label="Model options">
           {options.map((o, i) => (
             <div
               key={o.key}
