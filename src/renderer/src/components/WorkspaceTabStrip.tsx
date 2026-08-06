@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { WorkspaceObservabilitySummary } from '../../../preload';
 import { colorFor, type WorkspaceState, type WorkspaceSummary } from '../App';
@@ -6,6 +6,8 @@ import { isManager, isReachable, ManagerGlyph, WifiGlyph } from './committee';
 import { useBlinkSync } from '../blinkSync';
 import { setInternalDragActive } from '../dropIngestion';
 import { dotClass } from './chipState';
+import { usePortalMenu } from './portalMenu';
+import { IconCopy, IconEject, IconPause, IconPencil, IconPlay, IconStop, IconTrash } from './menuIcons';
 
 /**
  * The chip's status dot. A separate component so the busy pulse can be
@@ -83,24 +85,6 @@ function chipActivityText(s: WorkspaceObservabilitySummary | null | undefined): 
 }
 
 
-// ── Media-control icons for the menu ─────────────────────────────────
-// All sized to a 12×12 viewBox so they sit on the menu's text baseline.
-// `currentColor` lets each menu item pick up its hover/danger styling.
-function IconPlay(): JSX.Element {
-  return (
-    <svg viewBox="0 0 12 12" width="11" height="11" fill="currentColor" aria-hidden="true">
-      <path d="M3 2 L10 6 L3 10 Z" />
-    </svg>
-  );
-}
-function IconPause(): JSX.Element {
-  return (
-    <svg viewBox="0 0 12 12" width="11" height="11" fill="currentColor" aria-hidden="true">
-      <rect x="3" y="2" width="2.4" height="8" rx="0.6" />
-      <rect x="6.6" y="2" width="2.4" height="8" rx="0.6" />
-    </svg>
-  );
-}
 function IconGear(): JSX.Element {
   return (
     <svg
@@ -119,64 +103,6 @@ function IconGear(): JSX.Element {
     </svg>
   );
 }
-function IconStop(): JSX.Element {
-  return (
-    <svg viewBox="0 0 12 12" width="11" height="11" fill="currentColor" aria-hidden="true">
-      <rect x="2.5" y="2.5" width="7" height="7" rx="0.8" />
-    </svg>
-  );
-}
-function IconEject(): JSX.Element {
-  // Used for Close — eject is the natural "remove the media" sibling of
-  // play/pause/stop, and reads as "take this out" instead of "delete."
-  return (
-    <svg viewBox="0 0 12 12" width="11" height="11" fill="currentColor" aria-hidden="true">
-      <path d="M6 2 L10 8 L2 8 Z" />
-      <rect x="2" y="9" width="8" height="1.6" rx="0.4" />
-    </svg>
-  );
-}
-function IconEdit(): JSX.Element {
-  return (
-    <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.2" aria-hidden="true">
-      <path d="M2 9 L9 2 L11 4 L4 11 L2 11 Z" />
-    </svg>
-  );
-}
-function IconCopy(): JSX.Element {
-  return (
-    <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.2" aria-hidden="true">
-      <rect x="3" y="3" width="7" height="8" rx="0.8" />
-      <path d="M2 8 V2 a1 1 0 0 1 1 -1 H8" />
-    </svg>
-  );
-}
-function IconTrash(): JSX.Element {
-  return (
-    <svg viewBox="0 0 12 12" width="11" height="11" fill="currentColor" aria-hidden="true">
-      <path d="M4 1 H8 V2 H11 V3 H1 V2 H4 Z M2 4 H10 L9 11 H3 Z" />
-    </svg>
-  );
-}
-
-/**
- * Compute the screen-coordinate position of the menu, anchored to the
- * trigger button's bottom-right corner. Clamps so the menu can't overflow
- * the viewport on the right edge.
- */
-function menuPositionFor(triggerEl: HTMLElement): { top: number; right: number } {
-  const rect = triggerEl.getBoundingClientRect();
-  const right = Math.max(8, window.innerWidth - rect.right);
-  const top = rect.bottom + 4;
-  return { top, right };
-}
-
-interface MenuAnchor {
-  for: string;
-  top: number;
-  right: number;
-}
-
 export function WorkspaceTabStrip({
   workspaces,
   summaries,
@@ -195,41 +121,19 @@ export function WorkspaceTabStrip({
   onRefresh,
   onReorderWorkspace
 }: Props) {
-  // Single open menu at a time. `for` = workspace id; top/right are
-  // viewport coordinates for the portaled menu.
-  const [menu, setMenu] = useState<MenuAnchor | null>(null);
+  // Chip ⋮ menu — shared portaled-menu mechanics (right-anchored).
+  const { menu, toggle: toggleMenu, close: closeMenu } = usePortalMenu();
   // Id of the chip currently being dragged (for reorder), null when idle.
   const [dragId, setDragId] = useState<string | null>(null);
-
-  // Close the menu on any outside click, Escape, or layout disturbance
-  // (scroll / resize) — the portal positions the menu in viewport coords,
-  // so we can't easily follow the trigger when the page moves.
-  useEffect(() => {
-    if (menu === null) return;
-    const close = (): void => setMenu(null);
-    const escClose = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') setMenu(null);
-    };
-    document.addEventListener('click', close);
-    document.addEventListener('keydown', escClose);
-    window.addEventListener('scroll', close, true);
-    window.addEventListener('resize', close);
-    return () => {
-      document.removeEventListener('click', close);
-      document.removeEventListener('keydown', escClose);
-      window.removeEventListener('scroll', close, true);
-      window.removeEventListener('resize', close);
-    };
-  }, [menu]);
 
   // Top strip = the "warm" fleet: running + paused only (instant switch).
   // "stopped" and "deleted" are the "cold" fleet — they live in the
   // workspace modal's Saved list and need a restart (#21).
   const live = workspaces.filter((w) => w.state === 'running' || w.state === 'paused');
-  const menuWorkspace = menu ? live.find((w) => w.id === menu.for) ?? null : null;
+  const menuWorkspace = menu ? live.find((w) => w.id === menu.id) ?? null : null;
 
   async function doAction(action: 'start' | 'pause' | 'stop', w: WorkspaceSummary): Promise<void> {
-    setMenu(null);
+    closeMenu();
     try {
       if (action === 'start') {
         await window.api.workspace.start(w.id);
@@ -339,15 +243,10 @@ export function WorkspaceTabStrip({
             className="ws-chip-menu-trigger"
             aria-label={`Actions for ${w.name}`}
             aria-haspopup="menu"
-            aria-expanded={menu?.for === w.id}
+            aria-expanded={menu?.id === w.id}
             onClick={(e) => {
               e.stopPropagation();
-              if (menu?.for === w.id) {
-                setMenu(null);
-                return;
-              }
-              const pos = menuPositionFor(e.currentTarget);
-              setMenu({ for: w.id, ...pos });
+              toggleMenu(e.currentTarget, w.id, 'right');
             }}
             title="Workspace actions"
           >
@@ -436,17 +335,17 @@ export function WorkspaceTabStrip({
             <button
               role="menuitem"
               onClick={() => {
-                setMenu(null);
+                closeMenu();
                 onEditWorkspace(menuWorkspace);
               }}
             >
-              <IconEdit />
+              <IconPencil />
               <span>Edit…</span>
             </button>
             <button
               role="menuitem"
               onClick={() => {
-                setMenu(null);
+                closeMenu();
                 onCloneWorkspace(menuWorkspace);
               }}
             >
@@ -458,7 +357,7 @@ export function WorkspaceTabStrip({
               role="menuitem"
               className="danger"
               onClick={() => {
-                setMenu(null);
+                closeMenu();
                 onCloseWorkspace(menuWorkspace);
               }}
             >
@@ -469,7 +368,7 @@ export function WorkspaceTabStrip({
               role="menuitem"
               className="danger"
               onClick={() => {
-                setMenu(null);
+                closeMenu();
                 onDeleteWorkspace(menuWorkspace);
               }}
               title="Permanently delete (purges state dir + keychain entries)"
