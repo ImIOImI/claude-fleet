@@ -22,6 +22,8 @@ import { ToastView } from './Toast';
 import { makeToast } from '../toasts';
 import { readyToRefresh } from './refreshQueue';
 import { useBlinkSync } from '../blinkSync';
+import { usePortalMenu } from './portalMenu';
+import { IconAuto, IconEject, IconPencil, IconRefresh } from './menuIcons';
 
 /**
  * A session tab's status dot. `live`/`ended` colors it; `busy` makes it pulse
@@ -190,41 +192,6 @@ interface Session {
 
 function uid(): string {
   return globalThis.crypto?.randomUUID?.() ?? `s-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-// Session-tab menu icons — 12×12 viewBox so they sit on the menu text baseline.
-function IconRename(): JSX.Element {
-  return (
-    <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.2" aria-hidden="true">
-      <path d="M2 9 L9 2 L11 4 L4 11 L2 11 Z" />
-    </svg>
-  );
-}
-function IconAuto(): JSX.Element {
-  // A sparkle — "let Claude name it".
-  return (
-    <svg viewBox="0 0 12 12" width="11" height="11" fill="currentColor" aria-hidden="true">
-      <path d="M6 1 L7 4.5 L10.5 6 L7 7.5 L6 11 L5 7.5 L1.5 6 L5 4.5 Z" />
-    </svg>
-  );
-}
-function IconClose(): JSX.Element {
-  // Eject — matches the workspace chip menu's "Close" affordance.
-  return (
-    <svg viewBox="0 0 12 12" width="11" height="11" fill="currentColor" aria-hidden="true">
-      <path d="M6 2 L10 8 L2 8 Z" />
-      <rect x="2" y="9" width="8" height="1.6" rx="0.4" />
-    </svg>
-  );
-}
-function IconRefresh(): JSX.Element {
-  // Circular arrow — exit & resume this session in place.
-  return (
-    <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M10 6 A4 4 0 1 1 8.6 3" />
-      <path d="M10.4 1.6 L10.4 4 L8 4" />
-    </svg>
-  );
 }
 
 export function TerminalPane({
@@ -406,38 +373,13 @@ export function TerminalPane({
     setNextNum((n) => n + 1);
   }
 
-  // ── Session-tab ⋮ menu: rename / auto-rename / close ──────────────────────
-  // Single open menu at a time; viewport coords for the portaled dropdown.
-  const [tabMenu, setTabMenu] = useState<{ id: string; top: number; left: number } | null>(null);
+  // Session-tab ⋮ menu: rename / auto-rename / close — shared portaled-menu
+  // mechanics (state + close listeners + anchor math) live in usePortalMenu.
+  const { menu: tabMenu, toggle: toggleTabMenu, close: closeTabMenu } = usePortalMenu();
   // Inline rename: the tab whose name is being edited, plus the draft text.
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState('');
 
-  // Close the menu on any outside click / Escape / layout shift (the portal is
-  // positioned in viewport coords, so we can't follow the trigger when it moves).
-  useEffect(() => {
-    if (!tabMenu) return;
-    const close = (): void => setTabMenu(null);
-    const esc = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') setTabMenu(null);
-    };
-    document.addEventListener('click', close);
-    document.addEventListener('keydown', esc);
-    window.addEventListener('scroll', close, true);
-    window.addEventListener('resize', close);
-    return () => {
-      document.removeEventListener('click', close);
-      document.removeEventListener('keydown', esc);
-      window.removeEventListener('scroll', close, true);
-      window.removeEventListener('resize', close);
-    };
-  }, [tabMenu]);
-
-  function openTabMenu(trigger: HTMLElement, id: string): void {
-    const r = trigger.getBoundingClientRect();
-    const left = Math.max(8, Math.min(r.left, window.innerWidth - 188));
-    setTabMenu({ id, top: r.bottom + 4, left });
-  }
   function startRename(id: string): void {
     const s = sessions.find((x) => x.id === id);
     setDraftName(s?.name ?? '');
@@ -820,11 +762,7 @@ export function TerminalPane({
                 title="Session actions"
                 onClick={(e) => {
                   e.stopPropagation();
-                  if (tabMenu?.id === s.id) {
-                    setTabMenu(null);
-                    return;
-                  }
-                  openTabMenu(e.currentTarget, s.id);
+                  toggleTabMenu(e.currentTarget, s.id);
                 }}
               >
                 ⋮
@@ -871,11 +809,11 @@ export function TerminalPane({
               <button
                 role="menuitem"
                 onClick={() => {
-                  setTabMenu(null);
+                  closeTabMenu();
                   startRename(s.id);
                 }}
               >
-                <IconRename />
+                <IconPencil />
                 <span>Rename</span>
               </button>
               <button
@@ -884,7 +822,7 @@ export function TerminalPane({
                 aria-disabled={endedIds.has(s.id)}
                 title="Exit and resume this session (waits until it's idle)"
                 onClick={() => {
-                  setTabMenu(null);
+                  closeTabMenu();
                   requestRefresh(s);
                 }}
               >
@@ -896,7 +834,7 @@ export function TerminalPane({
                 aria-checked={!!s.autoName}
                 title="Name this tab from Claude's session summary, kept up to date"
                 onClick={() => {
-                  setTabMenu(null);
+                  closeTabMenu();
                   toggleAutoName(s.id);
                 }}
               >
@@ -913,11 +851,11 @@ export function TerminalPane({
                 role="menuitem"
                 className="danger"
                 onClick={() => {
-                  setTabMenu(null);
+                  closeTabMenu();
                   void requestClose(s);
                 }}
               >
-                <IconClose />
+                <IconEject />
                 <span>Close</span>
               </button>
             </div>,
