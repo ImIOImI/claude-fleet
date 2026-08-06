@@ -629,6 +629,33 @@ async function computePlanUsage(opts?: { windowS?: number; at?: number }): Promi
   };
 }
 
+/**
+ * Normalize a WSL working-directory value and validate it exists inside the
+ * distro. Shared by `workspace:create` and `workspace:writeManifest` so both
+ * handlers apply identical UNC→Linux normalization and existence checks.
+ *
+ * - Accepts either a `\\wsl.localhost\<distro>\…` UNC path (from the Browse
+ *   picker on Windows) or a bare Linux absolute path.
+ * - Returns the normalized Linux-absolute path.
+ * - Throws a user-friendly error when the path doesn't start with `/` or
+ *   does not exist in the distro.
+ */
+async function normalizeAndValidateWslRoot(
+  launcher: Extract<import('./localLauncher.js').WorkspaceLauncher, { mode: 'wsl' }>,
+  root: string
+): Promise<string> {
+  const unc = uncToLinuxPath(root);
+  const linuxRoot = unc ? unc.path : root;
+  if (!linuxRoot.startsWith('/')) {
+    throw new Error(`WSL working directory must be a Linux path: ${root}`);
+  }
+  const ok = await execFileAsync('wsl.exe', [
+    '-d', launcher.distro, '--', 'test', '-d', linuxRoot
+  ]).then(() => true, () => false);
+  if (!ok) throw new Error(`Directory does not exist in ${launcher.distro}: ${linuxRoot}`);
+  return linuxRoot;
+}
+
 export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): void {
   const { jsonlWatcher } = opts;
 
@@ -742,17 +769,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
           throw new Error('Pick a working directory for the local workspace.');
         }
         if (launcher?.mode === 'wsl') {
-          // Accept a \\wsl.localhost UNC paste and normalize it to Linux form.
-          const unc = uncToLinuxPath(root);
-          const linuxRoot = unc ? unc.path : root;
-          if (!linuxRoot.startsWith('/')) {
-            throw new Error(`WSL working directory must be a Linux path: ${root}`);
-          }
-          const ok = await execFileAsync('wsl.exe', [
-            '-d', launcher.distro, '--', 'test', '-d', linuxRoot
-          ]).then(() => true, () => false);
-          if (!ok) throw new Error(`Directory does not exist in ${launcher.distro}: ${linuxRoot}`);
-          input.workspaceRoot = linuxRoot;
+          // Accept a \\wsl.localhost UNC paste and normalize it to Linux form;
+          // validate existence inside the distro via the shared helper.
+          input.workspaceRoot = await normalizeAndValidateWslRoot(launcher, root);
         } else if (!(await fs.isDirectory(root))) {
           throw new Error(`Working directory does not exist: ${root}`);
         }
@@ -975,6 +994,13 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       } else {
         workspaceRoot = await fleetPrivateDir(spec.id);
       }
+      // WSL mode: normalize and validate the working directory the same way
+      // workspace:create does, so an edit with a changed or pasted UNC root
+      // is accepted/rejected consistently.
+      const incomingLauncher = sanitizeLauncher((spec as { launcher?: unknown }).launcher);
+      if (spec.kind === 'local' && incomingLauncher?.mode === 'wsl' && workspaceRoot) {
+        workspaceRoot = await normalizeAndValidateWslRoot(incomingLauncher, workspaceRoot);
+      }
       // Merge OVER the existing manifest so fields the renderer doesn't manage
       // survive an edit. The edit form sends every form field (those win) but
       // omits `control` (committee grants, edited in the Committee rail #118)
@@ -986,7 +1012,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         ...(existing ?? {}),
         ...spec,
         workspaceRoot,
-        launcher: sanitizeLauncher((spec as { launcher?: unknown }).launcher)
+        launcher: incomingLauncher
       });
     // Reflect a mirror-default edit in the watcher immediately (don't wait for
     // the next list poll).

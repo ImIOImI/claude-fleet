@@ -682,8 +682,11 @@ export function WorkspaceForm({
               </button>
             </div>
             <p className="form-hint">
-              Runs <code>claude</code> directly on this host (no container) — requires Claude Code
-              installed on your PATH.
+              {launcherMode === 'wsl'
+                ? <>Runs <code>claude</code> inside <strong>{wslDistro || 'the selected distro'}</strong>; the directory is a path in the distro&apos;s filesystem.</>
+                : launcherMode === 'custom'
+                  ? 'The directory your launch command runs in.'
+                  : <>Runs <code>claude</code> directly on this host (no container) — requires Claude Code installed on your PATH.</>}
             </p>
           </div>
         </>
