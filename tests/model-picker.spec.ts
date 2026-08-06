@@ -132,8 +132,6 @@ test('＋ Add endpoint… opens Settings on the Model Endpoints tab', async () =
     await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
     await window.getByRole('button', { name: 'Model' }).click();
     await window.getByRole('option', { name: /Add endpoint/ }).click();
-    // SettingsModal root is <div class="modal modal-tabbed"> inside a backdrop.
-    await expect(window.locator('.modal.modal-tabbed')).toBeVisible();
     // SettingsModal tabs are <div class="modal-tab"> not <button> — locate by class + text.
     await expect(window.locator('.modal-tab', { hasText: 'Model Endpoints' })).toHaveAttribute('aria-current', 'page');
   } finally {

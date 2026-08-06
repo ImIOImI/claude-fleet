@@ -84,7 +84,7 @@ The chevron in the row header rotates 180° when expanded; clicking it collapses
 - Chevron rotation shares the easing curve.
 
 ### 10. Model combobox open
-![model combobox open](../../assets/design/workspace-modal/06-model-combobox-open.png)
+![model combobox open](../../assets/design/workspace-modal/10-model-combobox-open.png)
 
 The **Model** row sits directly above Auth. Claude is first and default; each
 registry endpoint renders two lines (name, `modelId · baseUrl`) with a badge;
@@ -93,7 +93,7 @@ With an empty registry the list is just Claude + Add endpoint — there is no
 locked dead-end state.
 
 ### 11. Endpoint selected — Auth morphs
-![endpoint selected](../../assets/design/workspace-modal/07-endpoint-selected-auth-note.png)
+![endpoint selected](../../assets/design/workspace-modal/11-endpoint-selected-auth-note.png)
 
 With an endpoint selected there is nothing to choose under Auth: the radios
 are replaced by a passive note naming the endpoint's stored key ("key from

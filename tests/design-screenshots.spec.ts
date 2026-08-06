@@ -22,14 +22,14 @@ test('capture workspace-modal states', async () => {
     // 02 — empty create form, Model=Claude, OAuth selected, API key locked
     await modal.screenshot({ path: `${OUT}/02-empty-oauth-api-key-option-disabled.png` });
 
-    // 06 — Model combobox open
+    // 10 — Model combobox open
     await window.getByRole('button', { name: 'Model' }).click();
     await window.locator('[role="listbox"][aria-label="Model options"]').waitFor();
-    await modal.screenshot({ path: `${OUT}/06-model-combobox-open.png` });
+    await modal.screenshot({ path: `${OUT}/10-model-combobox-open.png` });
 
-    // 07 — endpoint selected, Auth morphed to the registry-key note
+    // 11 — endpoint selected, Auth morphed to the registry-key note
     await window.getByRole('option', { name: /ollama-local/ }).click();
-    await modal.screenshot({ path: `${OUT}/07-endpoint-selected-auth-note.png` });
+    await modal.screenshot({ path: `${OUT}/11-endpoint-selected-auth-note.png` });
   } finally {
     await app.close();
   }
