@@ -94,6 +94,8 @@ export function EditWorkspaceModal({
               color: workspace.color,
               workspaceSubdir: workspace.workspaceSubdir,
               kind: workspace.kind,
+              workspaceRoot: workspace.workspaceRoot,
+              launcher: workspace.launcher,
               image: workspace.image,
               authMode: workspace.authMode,
               endpointId: workspace.endpointId,

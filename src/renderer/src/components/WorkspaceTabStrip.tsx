@@ -408,10 +408,12 @@ export function WorkspaceTabStrip({
           >
             {menuWorkspace.state === 'running' && (
               <>
-                <button role="menuitem" onClick={() => doAction('pause', menuWorkspace)}>
-                  <IconPause />
-                  <span>Pause</span>
-                </button>
+                {(menuWorkspace.kind !== 'local' || menuWorkspace.launcher?.mode === 'wsl') && (
+                  <button role="menuitem" onClick={() => doAction('pause', menuWorkspace)}>
+                    <IconPause />
+                    <span>Pause</span>
+                  </button>
+                )}
                 <button role="menuitem" onClick={() => doAction('stop', menuWorkspace)}>
                   <IconStop />
                   <span>Stop</span>
