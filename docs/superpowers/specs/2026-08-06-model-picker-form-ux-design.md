@@ -96,6 +96,13 @@ vault contract are untouched; no migration.**
 - **SPEC.md:** this changes a user-facing flow, so `docs/SPEC.md` (workspace
   create/edit flow; the §11/#250 endpoint-UX wording) is updated in the same
   implementation PR, per `.claude/rules/spec-maintenance.md`.
+- **Design doc + screenshots:** `docs/design/workspace-modal.md` state §2
+  ("Empty · OAuth (API-key option disabled)") and its captures in
+  `assets/design/workspace-modal/` show the old Auth radio row. Same PR:
+  refresh the affected prose/screenshots and add two new states — Model
+  combobox open, and endpoint-selected (morphed Auth note). Captures are
+  driven via the mock fleet (`CLAUDE_FLEET_MOCK=1`) + Playwright so they're
+  reproducible; there is no existing screenshot pipeline.
 
 ## Testing
 
