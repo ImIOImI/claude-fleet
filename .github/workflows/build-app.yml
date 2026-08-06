@@ -213,15 +213,30 @@ jobs:
           exit 1
 
       # WSL distro for the wsl-local e2e specs (#253). setup-wsl handles the
-      # no-reboot install; Alpine is the fastest distro. WSL2 needs the nested
-      # virtualization now present on windows-2022+ hosted runners; the action
-      # falls back cleanly and the specs skip if no distro ends up installed.
+      # no-reboot install. Debian, not Alpine: Alpine's download URL is resolved
+      # via an unauthenticated GitHub API lookup that 403s on shared runner IPs
+      # (observed on PR #257's first run); Debian comes from Microsoft's static
+      # aka.ms link. WSL2 needs the nested virtualization present on
+      # windows-2022+ hosted runners; the specs self-skip if no distro lands.
       - name: Set up WSL
         uses: Vampire/setup-wsl@v5
         continue-on-error: true   # WSL flakiness must not fail unrelated e2e
         with:
-          distribution: Alpine
+          distribution: Debian
           wsl-version: 2
+
+      # continue-on-error above can hide a failed install behind a green check
+      # while wsl-local.spec.ts silently self-skips — surface that as a loud
+      # annotation so "passed CI" can't be mistaken for "WSL flow tested".
+      - name: Check WSL availability (wsl-local specs skip without it)
+        shell: pwsh
+        run: |
+          $distros = (wsl.exe --list --quiet) -join ''
+          if (-not $distros.Trim()) {
+            Write-Host "::warning title=WSL e2e skipped::No WSL distro installed - tests/wsl-local.spec.ts will self-skip; the WSL launcher flow is NOT covered by this run."
+          } else {
+            Write-Host "WSL distros present:"; wsl.exe --list --verbose
+          }
 
       # No Xvfb on Windows — Electron opens a native window. ELECTRON_DISABLE_SANDBOX
       # avoids the Chromium setuid-sandbox requirement (same as Linux e2e).
