@@ -37,6 +37,8 @@ interface Props {
    * each time the modal opens with a non-null source.
    */
   initialNewTabValues?: Partial<WorkspaceFormSubmit & { id: string }> | null;
+  /** Open Settings modal on a specific tab (e.g. deep-link to Model Endpoints). */
+  onOpenSettings?: (tab: 'endpoints') => void;
 }
 
 /**
@@ -84,7 +86,8 @@ export function WorkspaceModal({
   onResume,
   onClone,
   onDelete,
-  initialNewTabValues
+  initialNewTabValues,
+  onOpenSettings
 }: Props) {
   // Saved tab = the "cold" fleet: stopped + deleted (needs a restart). The
   // "warm" fleet (running + paused) lives in the top strip and is edited from
@@ -363,6 +366,7 @@ export function WorkspaceModal({
                                   // takes the foreground.
                                   onClose();
                                 }}
+                                onOpenSettings={onOpenSettings}
                               />
                             )}
                           </div>
@@ -386,6 +390,7 @@ export function WorkspaceModal({
               vaultAvailable={vaultAvailable}
               onSubmit={handleCreate}
               onCancel={onClose}
+              onOpenSettings={onOpenSettings}
             />
           </div>
         )}

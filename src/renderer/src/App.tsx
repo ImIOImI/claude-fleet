@@ -166,7 +166,7 @@ export function App() {
   const workspacesRef = useRef<WorkspaceSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<null | 'settings' | 'endpoints'>(null);
   const [browseOpen, setBrowseOpen] = useState(false);
   // Observability rail collapse, persisted across restarts (pure UI pref —
   // localStorage, not the main-side config.json).
@@ -1106,7 +1106,7 @@ export function App() {
         mockMode={mockMode}
         onSelect={setSelectedId}
         onNewWorkspace={() => setCreateOpen(true)}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={() => setSettingsTab('settings')}
         onCloseWorkspace={(w) => setCloseTargetId(w.id)}
         onEditWorkspace={(w) => setEditTargetId(w.id)}
         onCloneWorkspace={(w) => openCloneFrom(w)}
@@ -1247,18 +1247,8 @@ export function App() {
         onClone={async (submit) => openCloneFrom(submit)}
         onDelete={(w) => setDeleteTargetId(w.id)}
         initialNewTabValues={cloneSource}
+        onOpenSettings={(tab) => setSettingsTab(tab)}
       />
-      {settingsOpen && (
-        <SettingsModal
-          onClose={() => setSettingsOpen(false)}
-          onSaved={(cfg) => {
-            setSharedDir(cfg.sharedDir);
-            // Pick up any usage-budget change made in the modal.
-            window.api.config.get().then((c) => setUsageBudget(c.usageBudget));
-            refresh();
-          }}
-        />
-      )}
       {(() => {
         if (!editTargetId) return null;
         const target = workspaces.find((w) => w.id === editTargetId);
@@ -1275,6 +1265,7 @@ export function App() {
               if (selectedId === target.id) setSelectedId(null);
               refresh();
             }}
+            onOpenSettings={(tab) => setSettingsTab(tab)}
           />
         );
       })()}
@@ -1313,6 +1304,18 @@ export function App() {
           workspace={selectedWorkspace}
           onClose={() => setBrowseOpen(false)}
           onChanged={() => void refresh()}
+        />
+      )}
+      {settingsTab && (
+        <SettingsModal
+          initialTab={settingsTab}
+          onClose={() => setSettingsTab(null)}
+          onSaved={(cfg) => {
+            setSharedDir(cfg.sharedDir);
+            // Pick up any usage-budget change made in the modal.
+            window.api.config.get().then((c) => setUsageBudget(c.usageBudget));
+            refresh();
+          }}
         />
       )}
       {dragging && (
