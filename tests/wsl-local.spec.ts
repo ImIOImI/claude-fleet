@@ -9,7 +9,7 @@
 
 import { test, expect } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { REPO_ROOT, launch, waitForLogEntry } from './_helpers.js';
+import { launch } from './_helpers.js';
 
 // ---------------------------------------------------------------------------
 // Platform guard
@@ -91,6 +91,7 @@ test.describe('wsl local workspaces', () => {
   test(
     'create → probe → attach → transcript ingested → pause/resume',
     async () => {
+      test.setTimeout(120_000);
       const distro = firstDistro();
       if (!distro) {
         test.skip(true, 'no WSL distro found (wslAvailable returned true but list is empty)');
@@ -197,13 +198,48 @@ test.describe('wsl local workspaces', () => {
         ).toBeVisible({ timeout: 20_000 });
 
         // 8. Poll until the fake transcript session appears in the observability
-        //    pipeline. The polled watcher ticks every 1500ms; allow ~15s total for
-        //    WSL file-system propagation + chokidar polling + ingest.
-        await waitForLogEntry(
-          userDataDir,
-          (e) => e.type === 'ingest-ok' || e.type === 'mapping-learned',
-          15_000
-        );
+        //    pipeline. Subscribe to onSummary pushes (fired by the polled watcher
+        //    after each ingest tick) and wait for a non-null summary keyed to the
+        //    'wsl-e2e' workspace. Allow ~20s: WSL FS propagation + 1500ms watcher
+        //    poll + ingest + IPC push.
+        await window.evaluate(() => {
+          type Api = {
+            api: {
+              observability: {
+                onSummary: (cb: (workspaceId: string, summary: unknown) => void) => () => void;
+              };
+            };
+          };
+          const w = window as unknown as Window & {
+            __wslPushes: Array<{ workspaceId: string; summary: unknown }>;
+          } & Api;
+          w.__wslPushes = [];
+          w.api.observability.onSummary((workspaceId, summary) => {
+            w.__wslPushes.push({ workspaceId, summary });
+          });
+        });
+
+        // Find the workspace id for 'wsl-e2e' from the live list so we can key the push.
+        const wslWorkspaceId = await window.evaluate(async () => {
+          type Api = { api: { workspace: { list: () => Promise<Array<{ id: string; name: string }>> } } };
+          const list = await (window as unknown as Api).api.workspace.list();
+          return list.find((w) => w.name === 'wsl-e2e')?.id ?? null;
+        });
+
+        await expect
+          .poll(
+            async () =>
+              window.evaluate((targetId) => {
+                const w = window as unknown as {
+                  __wslPushes: Array<{ workspaceId: string; summary: unknown }>;
+                };
+                return w.__wslPushes.some(
+                  (p) => p.workspaceId === targetId && p.summary !== null
+                );
+              }, wslWorkspaceId),
+            { timeout: 20_000, intervals: [500, 1_000, 2_000] }
+          )
+          .toBe(true);
 
         // 9. Pause → assert SIGSTOP (proc state = T) → resume → state back to S/R.
         const group = window.locator('.ws-chip-group', { hasText: 'wsl-e2e' });
@@ -263,8 +299,6 @@ test.describe('wsl local workspaces', () => {
       } finally {
         await app.close();
       }
-    },
-    // Generous timeout: distro probe + watcher poll + SIGSTOP checks across WSL.
-    120_000
+    }
   );
 });
