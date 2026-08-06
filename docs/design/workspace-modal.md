@@ -1,6 +1,6 @@
 # Workspace modal — design
 
-> **Status**: target-state design. Not yet implemented in `src/`. This document captures the decisions reached during the design pass; implementation will land in three PRs (Foundation → Actions → Shared OAuth). When code ships, the relevant sections of [`docs/SPEC.md`](../SPEC.md) get updated to describe the new current state and this doc is preserved as the visual reference.
+> **Status**: implemented in `src/` (the modal shipped across #58-era foundation PRs; the Model picker landed with #256). This doc is the visual reference for the modal's states; keep it in sync when the form changes.
 
 This document describes the workspace modal — the single UI surface for creating new workspaces, restarting saved ones, editing config, cloning, and deletion. It replaces `CreateWorkspaceModal.tsx` + `ProfilesDialog.tsx` with a unified flow.
 
@@ -83,7 +83,7 @@ The chevron in the row header rotates 180° when expanded; clicking it collapses
 - Form contents fade-and-slide in (`opacity 0 → 1`, `transform: translateY(-3px) → 0`) over 220ms with 80ms delay.
 - Chevron rotation shares the easing curve.
 
-### 6. Model combobox open
+### 10. Model combobox open
 ![model combobox open](../../assets/design/workspace-modal/06-model-combobox-open.png)
 
 The **Model** row sits directly above Auth. Claude is first and default; each
@@ -92,7 +92,7 @@ the final "＋ Add endpoint…" entry deep-links to Settings → Model Endpoints
 With an empty registry the list is just Claude + Add endpoint — there is no
 locked dead-end state.
 
-### 7. Endpoint selected — Auth morphs
+### 11. Endpoint selected — Auth morphs
 ![endpoint selected](../../assets/design/workspace-modal/07-endpoint-selected-auth-note.png)
 
 With an endpoint selected there is nothing to choose under Auth: the radios

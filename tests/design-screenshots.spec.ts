@@ -24,6 +24,7 @@ test('capture workspace-modal states', async () => {
 
     // 06 — Model combobox open
     await window.getByRole('button', { name: 'Model' }).click();
+    await window.locator('[role="listbox"][aria-label="Model options"]').waitFor();
     await modal.screenshot({ path: `${OUT}/06-model-combobox-open.png` });
 
     // 07 — endpoint selected, Auth morphed to the registry-key note
