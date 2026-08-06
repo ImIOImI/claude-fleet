@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   posixQuote,
+  win32Quote,
   uncToLinuxPath,
   linuxPathToUnc,
   windowsPathToWslPath,
@@ -26,6 +27,12 @@ describe('posixQuote', () => {
   it('wraps in single quotes', () => expect(posixQuote('abc')).toBe(`'abc'`));
   it('escapes embedded single quotes', () =>
     expect(posixQuote(`a'b`)).toBe(`'a'\\''b'`));
+});
+
+describe('win32Quote', () => {
+  it('wraps in double quotes', () => expect(win32Quote('hello')).toBe(`"hello"`));
+  it('doubles embedded double quotes', () =>
+    expect(win32Quote(`say "hi"`)).toBe(`"say ""hi"""`));
 });
 
 describe('path translation', () => {
@@ -98,6 +105,22 @@ describe('wrapSpawnForLauncher — wsl', () => {
     expect(c.env.WSLENV).toContain('ANTHROPIC_API_KEY/u');
     expect(c.env.WSLENV).toContain('CLAUDE_FLEET_BROKER_SESSION_ID/u');
   });
+  it('forwards passEnvKeys non-prefixed keys across the WSL boundary via WSLENV', () => {
+    const { spawn, calls } = captureSpawn();
+    const wrapped = wrapSpawnForLauncher(launcher, spawn, {
+      workspaceId: 'ws2', platform: 'win32', windowsCwd: 'C:\\Users\\troy',
+      passEnvKeys: ['MY_CUSTOM_TOKEN', 'ANOTHER_KEY']
+    });
+    wrapped({
+      file: 'ignored', args: ['--session-id', 'u2'],
+      cwd: '/home/troy/proj', cols: 80, rows: 24,
+      env: { CLAUDE_FLEET_BROKER_SESSION_ID: 'sess2', MY_CUSTOM_TOKEN: 'secret' }
+    });
+    const c = calls[0];
+    expect(c.env.WSLENV).toContain('MY_CUSTOM_TOKEN/u');
+    expect(c.env.WSLENV).toContain('ANOTHER_KEY/u');
+    expect(c.env.WSLENV).toContain('CLAUDE_FLEET_BROKER_SESSION_ID/u');
+  });
   it('throws off-win32', () => {
     const { spawn } = captureSpawn();
     expect(() =>
@@ -133,17 +156,21 @@ describe('wrapSpawnForLauncher — custom', () => {
     wrapped({ file: '/usr/bin/claude', args: ['--resume', 'u'], cwd: '/repo', cols: 80, rows: 24, env: {} });
     expect(calls[0].args).toEqual(['-c', `claude-via-proxy '--resume' 'u'`]);
   });
-  it('uses cmd.exe /d /s /c on win32', () => {
+  it('uses cmd.exe /d /s /c on win32 and double-quotes args', () => {
     const { spawn, calls } = captureSpawn();
     const wrapped = wrapSpawnForLauncher(
-      { mode: 'custom', command: 'wrap.cmd {args}' }, spawn,
+      { mode: 'custom', command: 'wrap.cmd {claude} {args}' }, spawn,
       { workspaceId: 'w', platform: 'win32' }
     );
-    wrapped({ file: 'C:\\bin\\claude.exe', args: ['--resume', 'u'], cwd: 'C:\\repo', cols: 80, rows: 24, env: {} });
+    wrapped({ file: 'C:\\bin\\claude.exe', args: ['--resume', 'u1'], cwd: 'C:\\repo', cols: 80, rows: 24, env: {} });
     expect(calls[0].file).toBe('cmd.exe');
     expect(calls[0].args[0]).toBe('/d');
     expect(calls[0].args[1]).toBe('/s');
     expect(calls[0].args[2]).toBe('/c');
+    // win32Quote uses double-quote style, not POSIX single-quote
+    const cmd = calls[0].args[3];
+    expect(cmd).toContain('"C:\\bin\\claude.exe"');
+    expect(cmd).toContain('"--resume" "u1"');
   });
 });
 

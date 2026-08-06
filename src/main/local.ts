@@ -107,7 +107,22 @@ async function signalWslSessions(
   signal: 'STOP' | 'CONT' | 'TERM'
 ): Promise<void> {
   const glob = wslPidFile(workspaceId, '*');
-  const script = `for f in ${glob}; do [ -f "$f" ] && kill -${signal} "$(cat "$f")" 2>/dev/null; done; true`;
+  // Guard against pid reuse: before signaling, confirm the process running
+  // at the saved pid is actually claude (cmdline contains 'claude'). If not,
+  // the pidfile is stale — remove it rather than signaling an unrelated
+  // process. This is the paranoid-safe path; a missing /proc/<pid>/cmdline
+  // (process already gone) is treated as stale too.
+  const script = [
+    `for f in ${glob}; do`,
+    `  [ -f "$f" ] || continue`,
+    `  p=$(cat "$f")`,
+    `  if grep -q claude "/proc/$p/cmdline" 2>/dev/null; then`,
+    `    kill -${signal} "$p" 2>/dev/null`,
+    `  else`,
+    `    rm -f "$f"`,
+    `  fi`,
+    `done; true`
+  ].join('\n');
   await execFileAsync('wsl.exe', ['-d', launcher.distro, '--', 'sh', '-c', script]).catch(() => {});
 }
 
@@ -229,6 +244,12 @@ export async function stopWorkspace(containerId: string): Promise<void> {
   // conpty teardown isn't guaranteed to reap the Linux-side process (#253).
   if (m?.launcher?.mode === 'wsl') {
     await signalWslSessions(m.launcher, containerId, 'TERM');
+    // Clean up stale pidfiles after TERM: a pid recycled by the OS before the
+    // next launch could be signaled incorrectly (pid-reuse hazard). Best-effort;
+    // the /tmp location is ephemeral and vanishes with the WSL VM anyway.
+    const glob = wslPidFile(containerId, '*');
+    const cleanScript = `rm -f ${glob}; true`;
+    await execFileAsync('wsl.exe', ['-d', m.launcher.distro, '--', 'sh', '-c', cleanScript]).catch(() => {});
   }
   started.delete(containerId);
   paused.delete(containerId);
@@ -280,7 +301,12 @@ export async function attachPty(
       : mcpConfigPath;
   // Attaching implies the workspace is up.
   started.add(id);
-  paused.delete(id);
+  // If the workspace was paused, resume it now. For wsl-launcher workspaces
+  // the in-distro claude is SIGSTOP'd and must receive SIGCONT — otherwise
+  // the pty attaches but the process never makes progress.
+  if (paused.delete(id) && launcher.mode === 'wsl') {
+    await signalWslSessions(launcher, id, 'CONT');
+  }
   return attachLocalSession({
     workspaceId: id,
     sessionId,
@@ -338,7 +364,11 @@ export async function attachPty(
       workspaceId: id,
       platform: process.platform,
       // wsl.exe needs a valid WINDOWS cwd; the Linux cwd goes via --cd.
-      windowsCwd: homedir()
+      windowsCwd: homedir(),
+      // All per-workspace env keys (plain + secret) must cross the WSL boundary
+      // so that keys not matching ANTHROPIC_*/CLAUDE_* prefixes (e.g. a
+      // per-workspace MYAPP_TOKEN) still reach the in-distro claude.
+      passEnvKeys: [...Object.keys(m.env.plain), ...m.env.secretKeys]
     })
   });
 }

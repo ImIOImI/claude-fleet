@@ -39,6 +39,12 @@ export function posixQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+/** Windows double-quote: encloses the value in double quotes and escapes
+ *  any embedded double quotes by doubling them (cmd.exe convention). */
+export function win32Quote(s: string): string {
+  return `"${s.replace(/"/g, '""')}"`;
+}
+
 /** \\wsl.localhost\<distro>\a\b (or legacy \\wsl$\…) → { distro, '/a/b' }. */
 export function uncToLinuxPath(p: string): { distro: string; path: string } | null {
   const m = /^\\\\wsl(?:\.localhost|\$)\\([^\\]+)(\\.*)?$/i.exec(p);
@@ -94,7 +100,7 @@ const BASE_WSL_PASS_KEYS = ['CLAUDE_FLEET_BROKER_SESSION_ID', 'TERM'];
 export function wrapSpawnForLauncher(
   launcher: WorkspaceLauncher,
   inner: SpawnPty,
-  opts: { workspaceId: string; platform: NodeJS.Platform; windowsCwd?: string }
+  opts: { workspaceId: string; platform: NodeJS.Platform; windowsCwd?: string; passEnvKeys?: string[] }
 ): SpawnPty {
   if (launcher.mode === 'native') return inner;
 
@@ -113,11 +119,15 @@ export function wrapSpawnForLauncher(
         `echo $$ > ${posixQuote(pidFile)}; ` +
         `exec ${[launcher.claudePath, ...spawnOpts.args].map(posixQuote).join(' ')}`;
       // Forward workspace env keys + fleet's own vars across the boundary.
+      // opts.passEnvKeys carries any non-prefixed per-workspace keys (e.g. a
+      // custom MYAPP_TOKEN in the workspace env) that the caller knows should
+      // cross the WSL boundary; they're unioned with the auto-detected ones.
       const passKeys = [
         ...BASE_WSL_PASS_KEYS,
         ...Object.keys(spawnOpts.env).filter(
           (k) => k.startsWith('ANTHROPIC_') || k.startsWith('CLAUDE_')
-        )
+        ),
+        ...(opts.passEnvKeys ?? [])
       ];
       return inner({
         ...spawnOpts,
@@ -131,9 +141,14 @@ export function wrapSpawnForLauncher(
 
   // custom
   return (spawnOpts) => {
-    const quotedArgs = spawnOpts.args.map(posixQuote).join(' ');
+    // Use platform-appropriate quoting: POSIX single-quote on POSIX, cmd.exe
+    // double-quote (with embedded-quote doubling) on win32. POSIX quoting
+    // inside cmd.exe /c is unsafe — cmd.exe treats ' as a literal character
+    // and uses " for grouping.
+    const quote = opts.platform === 'win32' ? win32Quote : posixQuote;
+    const quotedArgs = spawnOpts.args.map(quote).join(' ');
     let cmd = launcher.command;
-    cmd = cmd.replace(/\{claude\}/g, posixQuote(spawnOpts.file));
+    cmd = cmd.replace(/\{claude\}/g, quote(spawnOpts.file));
     cmd = cmd.includes('{args}') ? cmd.replace(/\{args\}/g, quotedArgs) : `${cmd} ${quotedArgs}`;
     const shell: { file: string; args: string[] } =
       opts.platform === 'win32'
