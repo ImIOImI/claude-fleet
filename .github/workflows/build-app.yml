@@ -164,6 +164,9 @@ jobs:
   e2e-windows:
     name: e2e (playwright, windows)
     runs-on: windows-latest
+    # WSL seeding + Electron e2e normally fit in ~15 min; bound runaway hangs
+    # (a wedged wsl.exe blocks synchronously, outside Playwright's timeouts).
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -216,14 +219,18 @@ jobs:
       # no-reboot install. Debian, not Alpine: Alpine's download URL is resolved
       # via an unauthenticated GitHub API lookup that 403s on shared runner IPs
       # (observed on PR #257's first run); Debian comes from Microsoft's static
-      # aka.ms link. WSL2 needs the nested virtualization present on
-      # windows-2022+ hosted runners; the specs self-skip if no distro lands.
+      # aka.ms link. WSL *1*, deliberately: WSL2's VM + nested-virt boot took
+      # ~21 min on a hosted runner and destabilized it (PR #257 second run).
+      # WSL1 installs in ~2 min with no VM and covers everything the spec
+      # exercises (list/probe/login-shell spawn/interop/\\wsl.localhost/
+      # signals; the transcript watcher polls either way). Real WSL2 coverage
+      # is manual on dev machines. Specs self-skip if no distro lands.
       - name: Set up WSL
         uses: Vampire/setup-wsl@v5
         continue-on-error: true   # WSL flakiness must not fail unrelated e2e
         with:
           distribution: Debian
-          wsl-version: 2
+          wsl-version: 1
 
       # continue-on-error above can hide a failed install behind a green check
       # while wsl-local.spec.ts silently self-skips — surface that as a loud
