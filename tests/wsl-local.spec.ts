@@ -55,7 +55,8 @@ function firstDistro(): string {
 // 1. Prints FAKE-CLAUDE-READY to stdout (proves spawn ran inside the distro).
 // 2. Writes one valid JSONL transcript line to ~/.claude/projects/<cwd-slug>/<SID>.jsonl
 //    (triggers the polled-watcher ingest path).
-// 3. Stays alive with `exec cat` (echoes stdin, keeps the PTY open).
+// 3. Stays alive with `cat` (echoes stdin, keeps the PTY open; NOT exec cat —
+//    see NOTE below for why exec cat breaks the signal guard).
 //
 // The JSONL line shape matches what db.ingestLine accepts: type + uuid are
 // sufficient for a non-assistant event; message.role and message.content make
@@ -65,6 +66,14 @@ function firstDistro(): string {
 //
 // The sessionId in the JSON payload is not used by the watcher (it derives the
 // session from the file path), but including it for debugging clarity.
+//
+// NOTE: The script ends with plain `cat` (not `exec cat`) so that the pidfile's
+// $$ remains the `sh` interpreter process, whose /proc/<pid>/cmdline contains
+// "claude" (matching the signal-guard grep in src/main/local.ts).  With `exec
+// cat` the process image is replaced and cmdline becomes "cat", causing the
+// guard to treat the live session as stale (no signal sent, pause fails).
+// SIGSTOP on the sh pid is observable as state T in /proc/<pid>/stat; `cat`
+// runs as a child but the sh parent is what the pidfile records.
 
 const FAKE_CLAUDE = `#!/bin/sh
 echo FAKE-CLAUDE-READY
@@ -78,7 +87,7 @@ done
 DIR="$HOME/.claude/projects/$(pwd | sed 's/[^a-zA-Z0-9]/-/g')"
 mkdir -p "$DIR"
 printf '{"type":"user","uuid":"%s-u1","message":{"role":"user","content":"hi"}}\\n' "$SID" > "$DIR/$SID.jsonl"
-exec cat
+cat
 `;
 
 // ---------------------------------------------------------------------------
@@ -198,44 +207,35 @@ test.describe('wsl local workspaces', () => {
         ).toBeVisible({ timeout: 20_000 });
 
         // 8. Poll until the fake transcript session appears in the observability
-        //    pipeline. Subscribe to onSummary pushes (fired by the polled watcher
-        //    after each ingest tick) and wait for a non-null summary keyed to the
-        //    'wsl-e2e' workspace. Allow ~20s: WSL FS propagation + 1500ms watcher
-        //    poll + ingest + IPC push.
-        await window.evaluate(() => {
-          type Api = {
-            api: {
-              observability: {
-                onSummary: (cb: (workspaceId: string, summary: unknown) => void) => () => void;
-              };
-            };
-          };
-          const w = window as unknown as Window & {
-            __wslPushes: Array<{ workspaceId: string; summary: unknown }>;
-          } & Api;
-          w.__wslPushes = [];
-          w.api.observability.onSummary((workspaceId, summary) => {
-            w.__wslPushes.push({ workspaceId, summary });
-          });
-        });
+        //    pipeline. Resolve the workspace id first, then repeatedly invoke
+        //    summaryForWorkspace until it returns non-null (the polled UNC watcher
+        //    fires after each ingest tick). Allow ~20s: WSL FS propagation +
+        //    1500ms watcher poll + ingest + IPC round-trip.
 
-        // Find the workspace id for 'wsl-e2e' from the live list so we can key the push.
+        // Find the workspace id for 'wsl-e2e' from the live list.
         const wslWorkspaceId = await window.evaluate(async () => {
           type Api = { api: { workspace: { list: () => Promise<Array<{ id: string; name: string }>> } } };
           const list = await (window as unknown as Api).api.workspace.list();
           return list.find((w) => w.name === 'wsl-e2e')?.id ?? null;
         });
 
+        // Loud non-null guard — fail early with a clear message rather than a
+        // cryptic null-dereference inside the poll below.
+        expect(wslWorkspaceId, 'created WSL workspace not found in workspace:list').not.toBeNull();
+
         await expect
           .poll(
             async () =>
-              window.evaluate((targetId) => {
-                const w = window as unknown as {
-                  __wslPushes: Array<{ workspaceId: string; summary: unknown }>;
+              window.evaluate(async (targetId) => {
+                type Api = {
+                  api: {
+                    observability: {
+                      summaryForWorkspace: (id: string) => Promise<unknown | null>;
+                    };
+                  };
                 };
-                return w.__wslPushes.some(
-                  (p) => p.workspaceId === targetId && p.summary !== null
-                );
+                const summary = await (window as unknown as Api).api.observability.summaryForWorkspace(targetId!);
+                return summary !== null;
               }, wslWorkspaceId),
             { timeout: 20_000, intervals: [500, 1_000, 2_000] }
           )
