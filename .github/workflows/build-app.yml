@@ -212,6 +212,17 @@ jobs:
           Write-Error 'Docker engine did not become ready within 3 minutes.'
           exit 1
 
+      # WSL distro for the wsl-local e2e specs (#253). setup-wsl handles the
+      # no-reboot install; Alpine is the fastest distro. WSL2 needs the nested
+      # virtualization now present on windows-2022+ hosted runners; the action
+      # falls back cleanly and the specs skip if no distro ends up installed.
+      - name: Set up WSL
+        uses: Vampire/setup-wsl@v5
+        continue-on-error: true   # WSL flakiness must not fail unrelated e2e
+        with:
+          distribution: Alpine
+          wsl-version: 2
+
       # No Xvfb on Windows — Electron opens a native window. ELECTRON_DISABLE_SANDBOX
       # avoids the Chromium setuid-sandbox requirement (same as Linux e2e).
       - name: Run Playwright e2e
