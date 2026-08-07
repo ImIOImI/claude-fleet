@@ -43,6 +43,11 @@ export interface WorkspaceFormSubmit {
   kind: WorkspaceKind;
   /** Local workspaces only (#16): the host directory `claude` runs in. */
   workspaceRoot?: string;
+  /** Local workspaces only (#253): how claude is invoked. undefined ⇒ native. */
+  launcher?:
+    | { mode: 'native' }
+    | { mode: 'wsl'; distro: string; shell: string; home: string; claudePath: string }
+    | { mode: 'custom'; command: string };
   image?: string;
   authMode: AuthMode;
   /** authMode 'endpoint' only — registry reference (#250). */
@@ -217,6 +222,27 @@ export function WorkspaceForm({
   const [kind, setKind] = useState<WorkspaceKind>(initial?.kind ?? 'container');
   // Local workspaces only: the host directory `claude` runs in (#16).
   const [workspaceRoot, setWorkspaceRoot] = useState<string>(initial?.workspaceRoot ?? '');
+  const initialLauncher = initial?.launcher;
+  const [launcherMode, setLauncherMode] = useState<'native' | 'wsl' | 'custom'>(
+    initialLauncher?.mode ?? 'native'
+  );
+  const [platform, setPlatform] = useState<string>('');
+  const [wslDistros, setWslDistros] = useState<{ distros: string[]; defaultDistro: string | null }>({ distros: [], defaultDistro: null });
+  const [wslDistro, setWslDistro] = useState<string>(
+    initialLauncher?.mode === 'wsl' ? initialLauncher.distro : ''
+  );
+  const [wslProbe, setWslProbe] = useState<
+    | { state: 'idle' }
+    | { state: 'probing' }
+    | { state: 'done'; shells: string[]; loginShell: string; home: string; claudePath: string | null; interopEnabled: boolean }
+    | { state: 'error'; message: string }
+  >({ state: 'idle' });
+  const [wslShell, setWslShell] = useState<string>(
+    initialLauncher?.mode === 'wsl' ? initialLauncher.shell : ''
+  );
+  const [customCommand, setCustomCommand] = useState<string>(
+    initialLauncher?.mode === 'custom' ? initialLauncher.command : ''
+  );
   const [image, setImage] = useState<string>(initial?.image ?? '');
   const [libraryImages, setLibraryImages] = useState<ImageEntry[]>([]);
   const [imageSearchOpen, setImageSearchOpen] = useState(false);
@@ -248,6 +274,26 @@ export function WorkspaceForm({
     refreshEndpoints();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  useEffect(() => {
+    void window.api.app.platform().then(setPlatform);
+  }, []);
+  // Load distros once when local kind is active on Windows.
+  useEffect(() => {
+    if (kind !== 'local' || platform !== 'win32') return;
+    void window.api.local.listWslDistros().then(setWslDistros);
+  }, [kind, platform]);
+  // Probe on distro change.
+  useEffect(() => {
+    if (launcherMode !== 'wsl' || !wslDistro) return;
+    setWslProbe({ state: 'probing' });
+    window.api.local.probeWslDistro(wslDistro).then(
+      (p) => {
+        setWslProbe({ state: 'done', ...p });
+        setWslShell((s) => (s && p.shells.includes(s) ? s : p.loginShell));
+      },
+      (err: Error) => setWslProbe({ state: 'error', message: err.message })
+    );
+  }, [launcherMode, wslDistro]);
 
   const apiKeyAvailable = useMemo(
     () =>
@@ -306,6 +352,17 @@ export function WorkspaceForm({
     }
     if (kind === 'local' && !workspaceRoot.trim()) {
       setError('Pick a working directory for the local workspace.');
+      return null;
+    }
+    if (kind === 'local' && launcherMode === 'wsl') {
+      if (!wslDistro) { setError('Pick a WSL distro.'); return null; }
+      if (wslProbe.state !== 'done' || !wslProbe.claudePath) {
+        setError('WSL probe must succeed (claude found in the distro) before saving.');
+        return null;
+      }
+    }
+    if (kind === 'local' && launcherMode === 'custom' && !customCommand.trim()) {
+      setError('Enter a launch command.');
       return null;
     }
     if (!opts.skipNameClash) {
@@ -398,6 +455,18 @@ export function WorkspaceForm({
       workspaceSubdir: workspaceSubdir.trim(),
       kind,
       workspaceRoot: kind === 'local' ? workspaceRoot.trim() : undefined,
+      launcher:
+        kind !== 'local' || launcherMode === 'native'
+          ? undefined
+          : launcherMode === 'custom'
+            ? { mode: 'custom' as const, command: customCommand.trim() }
+            : {
+                mode: 'wsl' as const,
+                distro: wslDistro,
+                shell: wslShell,
+                home: wslProbe.state === 'done' ? wslProbe.home : '',
+                claudePath: wslProbe.state === 'done' ? (wslProbe.claudePath ?? '') : ''
+              },
       image: kind === 'container' ? image.trim() : undefined,
       authMode,
       endpointId,
@@ -501,33 +570,155 @@ export function WorkspaceForm({
       </div>
 
       {kind === 'local' && (
-        <div className="form-row">
-          <label>Working directory</label>
-          <div className="input-with-button">
-            <input
-              aria-label="Working directory"
-              value={workspaceRoot}
-              placeholder="/home/you/repos/your-project"
-              onChange={(e) => setWorkspaceRoot(e.target.value)}
-              disabled={busy}
-            />
-            <button
-              type="button"
-              className="btn"
-              disabled={busy}
-              onClick={async () => {
-                const picked = await window.api.dialog.pickDirectory(workspaceRoot || undefined);
-                if (picked) setWorkspaceRoot(picked);
-              }}
-            >
-              Browse…
-            </button>
+        <>
+          <div className="form-row" aria-label="Run claude in">
+            <label>Run claude in</label>
+            <div className="kind-radios" role="radiogroup">
+              <label className={`kind-radio ${launcherMode === 'native' ? 'active' : ''}`}>
+                <input
+                  type="radio"
+                  name="launcher-mode"
+                  value="native"
+                  checked={launcherMode === 'native'}
+                  onChange={() => setLauncherMode('native')}
+                  disabled={busy}
+                />
+                This computer
+                <span className="kind-help">spawn claude directly</span>
+              </label>
+              {platform === 'win32' && wslDistros.distros.length > 0 && (
+                <label className={`kind-radio ${launcherMode === 'wsl' ? 'active' : ''}`}>
+                  <input
+                    type="radio"
+                    name="launcher-mode"
+                    value="wsl"
+                    checked={launcherMode === 'wsl'}
+                    onChange={() => {
+                      setLauncherMode('wsl');
+                      if (!wslDistro) setWslDistro(wslDistros.defaultDistro ?? wslDistros.distros[0]);
+                    }}
+                    disabled={busy}
+                  />
+                  WSL
+                  <span className="kind-help">inside a WSL distro, via your login shell</span>
+                </label>
+              )}
+              <label className={`kind-radio ${launcherMode === 'custom' ? 'active' : ''}`}>
+                <input
+                  type="radio"
+                  name="launcher-mode"
+                  value="custom"
+                  checked={launcherMode === 'custom'}
+                  onChange={() => setLauncherMode('custom')}
+                  disabled={busy}
+                />
+                Custom command
+                <span className="kind-help">advanced: your own wrapper</span>
+              </label>
+            </div>
           </div>
-          <p className="field-hint">
-            Runs <code>claude</code> directly on this host (no container) — requires Claude Code
-            installed on your PATH.
-          </p>
-        </div>
+
+          {launcherMode === 'wsl' && (
+            <div className="form-row">
+              <label>WSL distro</label>
+              <select
+                aria-label="WSL distro"
+                value={wslDistro}
+                onChange={(e) => setWslDistro(e.target.value)}
+                disabled={busy}
+              >
+                {wslDistros.distros.map((d) => (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+              </select>
+              <label>Shell</label>
+              <select
+                aria-label="WSL shell"
+                value={wslShell}
+                onChange={(e) => setWslShell(e.target.value)}
+                disabled={busy || wslProbe.state !== 'done'}
+              >
+                {(wslProbe.state === 'done' ? wslProbe.shells : wslShell ? [wslShell] : []).map((s) => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+              {wslProbe.state === 'probing' && <p className="form-hint">Probing {wslDistro}…</p>}
+              {wslProbe.state === 'error' && <p className="form-hint error-text">Probe failed: {wslProbe.message}</p>}
+              {wslProbe.state === 'done' && wslProbe.claudePath && (
+                <p className="form-hint">&#10003; claude found at <code>{wslProbe.claudePath}</code></p>
+              )}
+              {wslProbe.state === 'done' && !wslProbe.claudePath && (
+                <p className="form-hint error-text">
+                  claude not found in {wslDistro} — install it there or pick another distro.
+                </p>
+              )}
+              {wslProbe.state === 'done' && !wslProbe.interopEnabled && (
+                <p className="form-hint">
+                  Windows interop is disabled in this distro — fleet tools (claude-fleet-state MCP)
+                  will be unavailable in its sessions.
+                </p>
+              )}
+            </div>
+          )}
+
+          {launcherMode === 'custom' && (
+            <div className="form-row">
+              <label>Launch command</label>
+              <input
+                aria-label="Custom launch command"
+                value={customCommand}
+                placeholder="my-wrapper {claude} {args}"
+                onChange={(e) => setCustomCommand(e.target.value)}
+                disabled={busy}
+              />
+              <p className="form-hint">
+                Runs via your platform shell. <code>{'{claude}'}</code> = resolved claude binary,{' '}
+                <code>{'{args}'}</code> = fleet flags (appended if omitted — resume and fleet tools
+                depend on them). If your command moves claude off this host, session history/cost
+                tracking may not see its transcripts. You own quoting.
+              </p>
+            </div>
+          )}
+
+          <div className="form-row">
+            <label>Working directory</label>
+            <div className="input-with-button">
+              <input
+                aria-label="Working directory"
+                value={workspaceRoot}
+                placeholder={launcherMode === 'wsl' ? '/home/you/projects/your-repo' : '/home/you/repos/your-project'}
+                onChange={(e) => setWorkspaceRoot(e.target.value)}
+                disabled={busy}
+              />
+              <button
+                type="button"
+                className="btn"
+                disabled={busy}
+                onClick={async () => {
+                  let picked: string | null;
+                  if (launcherMode === 'wsl' && wslDistro) {
+                    picked = await window.api.dialog.pickDirectory(`\\\\wsl.localhost\\${wslDistro}\\`);
+                    if (picked && /^\\\\wsl/i.test(picked)) {
+                      picked = picked.replace(/^\\\\wsl(?:\.localhost|\$)\\[^\\]+/i, '').replace(/\\/g, '/') || '/';
+                    }
+                  } else {
+                    picked = await window.api.dialog.pickDirectory(workspaceRoot || undefined);
+                  }
+                  if (picked) setWorkspaceRoot(picked);
+                }}
+              >
+                Browse…
+              </button>
+            </div>
+            <p className="form-hint">
+              {launcherMode === 'wsl'
+                ? <>Runs <code>claude</code> inside <strong>{wslDistro || 'the selected distro'}</strong>; the directory is a path in the distro&apos;s filesystem.</>
+                : launcherMode === 'custom'
+                  ? 'The directory your launch command runs in.'
+                  : <>Runs <code>claude</code> directly on this host (no container) — requires Claude Code installed on your PATH.</>}
+            </p>
+          </div>
+        </>
       )}
 
       {kind === 'container' && (

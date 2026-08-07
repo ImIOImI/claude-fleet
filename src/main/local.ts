@@ -9,10 +9,11 @@
 // restored on the next attach via `claude --resume <uuid>` off the on-disk
 // JSONL. See SPEC §6/§10.
 //
-// Pause is not supported for local workspaces — there is no container to
-// freeze and SIGSTOP/SIGCONT semantics don't map cleanly onto a host process
-// with in-flight network connections. The Pause button is hidden in the UI for
-// local workspaces.
+// Pause is not supported for *native/custom* local workspaces — there is no
+// container to freeze and SIGSTOP/SIGCONT semantics don't map cleanly onto a
+// host process with in-flight network connections. The Pause button is hidden
+// in the UI for those. wsl-launcher workspaces pause via `kill -STOP` on the
+// in-distro pid (see pauseWorkspace).
 
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
@@ -25,7 +26,13 @@ import type * as NodePty from 'node-pty';
 import type { Backend } from './backend.js';
 import { findClaude, CLAUDE_NOT_FOUND_MESSAGE } from './claudeResolve.js';
 import { mcpSocketDir, mcpWorkspaceSocketPath } from './mcpSocket.js';
-import { ensureLocalBridgeScript, localMcpServerEntry } from './mcpLocalBridge.js';
+import { ensureLocalBridgeScript, localMcpServerEntry, wslMcpServerEntry } from './mcpLocalBridge.js';
+import {
+  wrapSpawnForLauncher,
+  wslPidFile,
+  windowsPathToWslPath,
+  type WorkspaceLauncher
+} from './localLauncher.js';
 import {
   readWorkspaceManifest,
   listWorkspaceManifests,
@@ -63,6 +70,10 @@ const execFileAsync = promisify(execFile);
 // previous app run).
 const started = new Set<string>();
 
+// wsl-launcher workspaces CAN pause (kill -STOP inside the distro, #253);
+// native/custom local ones still can't. In-memory like `started`.
+const paused = new Set<string>();
+
 /** node-pty-backed spawn factory passed to the session manager. */
 const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
   const pty = require('node-pty') as typeof NodePty;
@@ -86,6 +97,33 @@ const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
 /** Resolve the host `claude` binary (see claudeResolve.ts for the strategy). */
 function resolveClaude(): Promise<string | null> {
   return findClaude((file, args) => execFileAsync(file, args), homedir());
+}
+
+/** Best-effort signal to every live in-distro claude of a wsl workspace via
+ *  its session pidfiles (written by the -lic bootstrap; see localLauncher). */
+async function signalWslSessions(
+  launcher: Extract<WorkspaceLauncher, { mode: 'wsl' }>,
+  workspaceId: string,
+  signal: 'STOP' | 'CONT' | 'TERM'
+): Promise<void> {
+  const glob = wslPidFile(workspaceId, '*');
+  // Guard against pid reuse: before signaling, confirm the process running
+  // at the saved pid is actually claude (cmdline contains 'claude'). If not,
+  // the pidfile is stale — remove it rather than signaling an unrelated
+  // process. This is the paranoid-safe path; a missing /proc/<pid>/cmdline
+  // (process already gone) is treated as stale too.
+  const script = [
+    `for f in ${glob}; do`,
+    `  [ -f "$f" ] || continue`,
+    `  p=$(cat "$f")`,
+    `  if grep -q claude "/proc/$p/cmdline" 2>/dev/null; then`,
+    `    kill -${signal} "$p" 2>/dev/null`,
+    `  else`,
+    `    rm -f "$f"`,
+    `  fi`,
+    `done; true`
+  ].join('\n');
+  await execFileAsync('wsl.exe', ['-d', launcher.distro, '--exec', 'sh', '-c', script]).catch(() => {});
 }
 
 /**
@@ -135,13 +173,17 @@ export async function listLiveWorkspaces(): Promise<Workspace[]> {
   const result: Workspace[] = [];
   for (const m of manifests) {
     if (m.kind !== 'local') continue;
-    const state: WorkspaceState = started.has(m.id) ? 'running' : 'stopped';
+    const state: WorkspaceState = paused.has(m.id)
+      ? 'paused'
+      : started.has(m.id)
+        ? 'running'
+        : 'stopped';
     result.push({
       ...m,
       state,
       // Only running workspaces get a containerId surrogate so the renderer
       // mounts their pane; stopped ones live in the Saved modal.
-      containerId: state === 'running' ? m.id : undefined
+      containerId: state === 'stopped' ? undefined : m.id
     });
   }
   return result;
@@ -180,16 +222,37 @@ export async function startWorkspace(id: string): Promise<string | null> {
   const m = await readWorkspaceManifest(id);
   if (!m || m.kind !== 'local') return null;
   started.add(id);
+  if (paused.delete(id) && m.launcher?.mode === 'wsl') {
+    await signalWslSessions(m.launcher, id, 'CONT');
+  }
   return id; // the containerId surrogate the renderer attaches against
 }
 
-export async function pauseWorkspace(_containerId: string): Promise<void> {
+export async function pauseWorkspace(containerId: string): Promise<void> {
+  const m = await readWorkspaceManifest(containerId);
+  if (m?.launcher?.mode === 'wsl') {
+    await signalWslSessions(m.launcher, containerId, 'STOP');
+    if (started.has(containerId)) paused.add(containerId);
+    return;
+  }
   throw new Error('pause is not supported for local workspaces');
 }
 
 export async function stopWorkspace(containerId: string): Promise<void> {
+  const m = await readWorkspaceManifest(containerId);
   killWorkspaceSessions(containerId);
+  // conpty teardown isn't guaranteed to reap the Linux-side process (#253).
+  if (m?.launcher?.mode === 'wsl') {
+    await signalWslSessions(m.launcher, containerId, 'TERM');
+    // Clean up stale pidfiles after TERM: a pid recycled by the OS before the
+    // next launch could be signaled incorrectly (pid-reuse hazard). Best-effort;
+    // the /tmp location is ephemeral and vanishes with the WSL VM anyway.
+    const glob = wslPidFile(containerId, '*');
+    const cleanScript = `rm -f ${glob}; true`;
+    await execFileAsync('wsl.exe', ['-d', m.launcher.distro, '--exec', 'sh', '-c', cleanScript]).catch(() => {});
+  }
   started.delete(containerId);
+  paused.delete(containerId);
 }
 
 export async function removeWorkspace(
@@ -199,6 +262,7 @@ export async function removeWorkspace(
   const id = opts.id ?? containerId;
   killWorkspaceSessions(id);
   started.delete(id);
+  paused.delete(id);
   if (opts.deleteState && id) {
     await rm(workspaceStateDir(id), { recursive: true, force: true });
   }
@@ -214,10 +278,14 @@ export async function attachPty(
   const id = containerId;
   const m = await readWorkspaceManifest(id);
   if (!m) throw new Error(`no manifest for local workspace ${id}`);
-  // resolveClaude honors CLAUDE_FLEET_LOCAL_CLAUDE_BIN as its first resolution
-  // step (see claudeResolve.ts), so an e2e test's stub interpreter is picked up
-  // here without a separate override branch.
-  const claudeBin = await resolveClaude();
+  const launcher: WorkspaceLauncher = m.launcher ?? { mode: 'native' };
+  // wsl mode uses the save-time-probed in-distro path (manifest cache) — the
+  // host resolver is wrong there. wrapSpawnForLauncher substitutes it; the
+  // host `file` below is ignored for wsl. If the cache went stale (distro
+  // reinstalled), the shell prints exec's error into the pty; re-saving the
+  // workspace re-probes.
+  const claudeBin =
+    launcher.mode === 'wsl' ? launcher.claudePath : await resolveClaude();
   if (!claudeBin) throw new Error(CLAUDE_NOT_FOUND_MESSAGE);
   // e2e tests point CLAUDE_FLEET_LOCAL_CLAUDE_BIN at an interpreter (node) and
   // pass the stub script path here (NUL-separated), prepended before claude's
@@ -225,9 +293,20 @@ export async function attachPty(
   const rawExtra = process.env.CLAUDE_FLEET_LOCAL_CLAUDE_EXTRA_ARGS;
   const extraArgs = rawExtra ? rawExtra.split('\0').filter(Boolean) : undefined;
   const env = await buildEnv(id, m);
-  const mcpConfigPath = await ensureMcpConfig(id);
+  const mcpConfigPath = await ensureMcpConfig(id, launcher);
+  // claude reads --mcp-config INSIDE the distro for wsl mode.
+  const mcpConfigArg =
+    mcpConfigPath && launcher.mode === 'wsl'
+      ? (windowsPathToWslPath(mcpConfigPath) ?? undefined)
+      : mcpConfigPath;
   // Attaching implies the workspace is up.
   started.add(id);
+  // If the workspace was paused, resume it now. For wsl-launcher workspaces
+  // the in-distro claude is SIGSTOP'd and must receive SIGCONT — otherwise
+  // the pty attaches but the process never makes progress.
+  if (paused.delete(id) && launcher.mode === 'wsl') {
+    await signalWslSessions(launcher, id, 'CONT');
+  }
   return attachLocalSession({
     workspaceId: id,
     sessionId,
@@ -280,8 +359,17 @@ export async function attachPty(
       if (resumeOf) recordUsageEvent({ workspaceId: id, sessionId: resumeOf, kind: 'resumed' });
     },
     extraArgs,
-    mcpConfigPath,
-    spawn: defaultSpawn
+    mcpConfigPath: mcpConfigArg,
+    spawn: wrapSpawnForLauncher(launcher, defaultSpawn, {
+      workspaceId: id,
+      platform: process.platform,
+      // wsl.exe needs a valid WINDOWS cwd; the Linux cwd goes via --cd.
+      windowsCwd: homedir(),
+      // All per-workspace env keys (plain + secret) must cross the WSL boundary
+      // so that keys not matching ANTHROPIC_*/CLAUDE_* prefixes (e.g. a
+      // per-workspace MYAPP_TOKEN) still reach the in-distro claude.
+      passEnvKeys: [...Object.keys(m.env.plain), ...m.env.secretKeys]
+    })
   });
 }
 
@@ -291,7 +379,10 @@ export async function attachPty(
  * touches the user's real ~/.claude.json). Points claude at our Electron-as-node
  * bridge. Skipped (returns undefined) if the MCP server socket isn't present.
  */
-async function ensureMcpConfig(id: string): Promise<string | undefined> {
+async function ensureMcpConfig(
+  id: string,
+  launcher: WorkspaceLauncher
+): Promise<string | undefined> {
   const userData = app.getPath('userData');
   // Per-workspace socket (#117). The listener is brought up at workspace:create
   // / startup; if it isn't present yet, skip wiring MCP for this attach.
@@ -300,11 +391,14 @@ async function ensureMcpConfig(id: string): Promise<string | undefined> {
   // The bridge script is shared (host-only, never bind-mounted) — it lives in
   // the parent mcp dir and is referenced by absolute host path.
   const bridgePath = await ensureLocalBridgeScript(mcpSocketDir(userData));
-  const config = {
-    mcpServers: {
-      'claude-fleet-state': localMcpServerEntry(process.execPath, bridgePath, socketPath)
-    }
-  };
+  const entry =
+    launcher.mode === 'wsl'
+      ? wslMcpServerEntry(process.execPath, bridgePath, socketPath)
+      : localMcpServerEntry(process.execPath, bridgePath, socketPath);
+  // wsl + untranslatable exe path (or interop off, which surfaces as the
+  // bridge failing) ⇒ skip wiring; the session works without fleet tools.
+  if (!entry) return undefined;
+  const config = { mcpServers: { 'claude-fleet-state': entry } };
   const configPath = join(workspaceStateDir(id), 'mcp-config.json');
   await mkdir(workspaceStateDir(id), { recursive: true });
   await writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');

@@ -3,7 +3,9 @@ import { appVersionString } from './appVersion.js';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { unlink, readdir } from 'node:fs/promises';
-import { workspaceTranscriptPath, workspaceHistoryFile, workspaceHistoryDir } from './paths.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { workspaceTranscriptPath, workspaceHistoryFile, workspaceHistoryDir, encodeClaudeProjectDir } from './paths.js';
 import {
   setWorkspaceDefault,
   setSessionOverride,
@@ -64,6 +66,7 @@ import {
   touchWorkspaceUsed,
   writeWorkspaceManifest,
   findWorkspaceByName,
+  sanitizeLauncher,
   type Workspace,
   type WorkspaceSpec,
   type WorkspaceEnv,
@@ -74,6 +77,8 @@ import {
   type WorkspaceKind,
   FACTORY_MIRROR
 } from './workspaces.js';
+import { listWslDistros, probeWslDistro, type ProbeDeps } from './wslProbe.js';
+import { wslLocalProjectsDir, uncToLinuxPath } from './localLauncher.js';
 import type { PtyHandle, RemoveWorkspaceOpts } from './docker.js';
 import type { JsonlWatcher } from './jsonlWatcher.js';
 import {
@@ -107,6 +112,16 @@ import { MCP_TCP_PORT } from './mcpSocket.js';
 import { injectAndSubmit } from './ptyInput.js';
 
 export const MOCK_MODE = process.env.CLAUDE_FLEET_MOCK === '1';
+
+const execFileAsync = promisify(execFile);
+
+const wslProbeDeps: ProbeDeps = {
+  execBuf: async (file, args) => {
+    const { stdout } = await execFileAsync(file, args, { encoding: 'buffer' as const });
+    return { stdout: stdout as unknown as Buffer };
+  },
+  exec: (file, args) => execFileAsync(file, args)
+};
 
 const isWindows = process.platform === 'win32';
 // Infra ports we must never offer as dev-server previews.
@@ -197,6 +212,8 @@ interface WorkspaceCreatePayload {
   authMode: AuthMode;
   /** authMode 'endpoint' only: id into the app-level model-endpoint registry (#250). */
   endpointId?: string;
+  /** Local workspaces only (#253): how `claude` is invoked (sanitized server-side). */
+  launcher?: unknown;
   env: WorkspaceEnv;
   resources?: WorkspaceResources;
   mirror?: WorkspaceMirror;
@@ -612,6 +629,33 @@ async function computePlanUsage(opts?: { windowS?: number; at?: number }): Promi
   };
 }
 
+/**
+ * Normalize a WSL working-directory value and validate it exists inside the
+ * distro. Shared by `workspace:create` and `workspace:writeManifest` so both
+ * handlers apply identical UNC→Linux normalization and existence checks.
+ *
+ * - Accepts either a `\\wsl.localhost\<distro>\…` UNC path (from the Browse
+ *   picker on Windows) or a bare Linux absolute path.
+ * - Returns the normalized Linux-absolute path.
+ * - Throws a user-friendly error when the path doesn't start with `/` or
+ *   does not exist in the distro.
+ */
+async function normalizeAndValidateWslRoot(
+  launcher: Extract<import('./localLauncher.js').WorkspaceLauncher, { mode: 'wsl' }>,
+  root: string
+): Promise<string> {
+  const unc = uncToLinuxPath(root);
+  const linuxRoot = unc ? unc.path : root;
+  if (!linuxRoot.startsWith('/')) {
+    throw new Error(`WSL working directory must be a Linux path: ${root}`);
+  }
+  const ok = await execFileAsync('wsl.exe', [
+    '-d', launcher.distro, '--exec', 'test', '-d', linuxRoot
+  ]).then(() => true, () => false);
+  if (!ok) throw new Error(`Directory does not exist in ${launcher.distro}: ${linuxRoot}`);
+  return linuxRoot;
+}
+
 export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): void {
   const { jsonlWatcher } = opts;
 
@@ -716,6 +760,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     'workspace:create',
     async (_e, input: WorkspaceCreatePayload) => {
       const kind: WorkspaceKind = input.kind ?? 'container';
+      const launcher = kind === 'local' ? sanitizeLauncher(input.launcher) : undefined;
       // Local workspaces run `claude` in a user-chosen host directory; validate
       // it here (the renderer also checks) so a bad path fails fast and clearly.
       if (kind === 'local') {
@@ -723,7 +768,11 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         if (!root) {
           throw new Error('Pick a working directory for the local workspace.');
         }
-        if (!(await fs.isDirectory(root))) {
+        if (launcher?.mode === 'wsl') {
+          // Accept a \\wsl.localhost UNC paste and normalize it to Linux form;
+          // validate existence inside the distro via the shared helper.
+          input.workspaceRoot = await normalizeAndValidateWslRoot(launcher, root);
+        } else if (!(await fs.isDirectory(root))) {
           throw new Error(`Working directory does not exist: ${root}`);
         }
       }
@@ -771,6 +820,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         image: ws.image,
         authMode: input.authMode,
         endpointId: input.endpointId,
+        launcher,
         env: input.env,
         resources: input.resources,
         mirror: input.mirror ?? FACTORY_MIRROR,
@@ -781,7 +831,16 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       setWorkspaceDefault(spec.id, spec.mirror.default);
       jsonlWatcher?.registerWorkspace(input.id);
       if (spec.kind === 'local' && spec.workspaceRoot) {
-        jsonlWatcher?.registerLocalWorkspace(input.id, spec.workspaceRoot);
+        if (spec.launcher?.mode === 'wsl') {
+          jsonlWatcher?.registerPolledLocalDir(
+            input.id,
+            wslLocalProjectsDir(
+              spec.launcher.distro, spec.launcher.home, spec.workspaceRoot, encodeClaudeProjectDir
+            )
+          );
+        } else {
+          jsonlWatcher?.registerLocalWorkspace(input.id, spec.workspaceRoot);
+        }
       }
 
       // Auto-record the image into the library so the next create's
@@ -935,6 +994,13 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       } else {
         workspaceRoot = await fleetPrivateDir(spec.id);
       }
+      // WSL mode: normalize and validate the working directory the same way
+      // workspace:create does, so an edit with a changed or pasted UNC root
+      // is accepted/rejected consistently.
+      const incomingLauncher = sanitizeLauncher((spec as { launcher?: unknown }).launcher);
+      if (spec.kind === 'local' && incomingLauncher?.mode === 'wsl' && workspaceRoot) {
+        workspaceRoot = await normalizeAndValidateWslRoot(incomingLauncher, workspaceRoot);
+      }
       // Merge OVER the existing manifest so fields the renderer doesn't manage
       // survive an edit. The edit form sends every form field (those win) but
       // omits `control` (committee grants, edited in the Committee rail #118)
@@ -942,7 +1008,12 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // this merge a plain edit would silently wipe both. A key present in the
       // incoming spec — even set to undefined, e.g. clearing `accessibility` by
       // toggling reachability off — is authoritative and overrides existing.
-      await writeWorkspaceManifest({ ...(existing ?? {}), ...spec, workspaceRoot });
+      await writeWorkspaceManifest({
+        ...(existing ?? {}),
+        ...spec,
+        workspaceRoot,
+        launcher: incomingLauncher
+      });
     // Reflect a mirror-default edit in the watcher immediately (don't wait for
     // the next list poll).
     setWorkspaceDefault(spec.id, spec.mirror?.default ?? FACTORY_MIRROR.default);
@@ -1094,6 +1165,19 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
 
   ipcMain.handle('fs:isDirectory', (_e, path: string) => fs.isDirectory(path));
   ipcMain.handle('fs:mkdirp', (_e, path: string) => fs.mkdirp(path));
+
+  // ── WSL probe (#253) ─────────────────────────────────────────────────────
+  ipcMain.handle('local:listWslDistros', () => {
+    if (process.platform !== 'win32') return { distros: [], defaultDistro: null };
+    return listWslDistros(wslProbeDeps);
+  });
+  ipcMain.handle('local:probeWslDistro', (_e, distro: string) => {
+    if (process.platform !== 'win32') throw new Error('WSL probing is Windows-only');
+    if (typeof distro !== 'string' || !/^[\w.-]+$/.test(distro)) {
+      throw new Error('invalid distro name');
+    }
+    return probeWslDistro(distro, wslProbeDeps);
+  });
 
   // Reveal a host path in the OS file manager (Finder/Explorer/etc.). Returns
   // '' on success, or an error string. Under WSL `shell.openPath` can't reach a

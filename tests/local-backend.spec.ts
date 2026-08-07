@@ -1,4 +1,4 @@
-// Local backend (#16) / ConPTY verification (#106).
+// Local backend (#16) / ConPTY verification (#106) / launcher UI Linux-side assertions (#253).
 //
 // Exercises the REAL local backend (no CLAUDE_FLEET_MOCK) with a stub claude
 // binary (tests/fixtures/claude-stub.js) so a full PTY spawn round-trip runs
@@ -15,7 +15,7 @@ import { _electron as electron, test, expect } from '@playwright/test';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { REPO_ROOT, waitForLogEntry } from './_helpers.js';
+import { REPO_ROOT, launch, mockMainIpc, waitForLogEntry } from './_helpers.js';
 
 test('Local backend: PTY spawns and reports session mapping (ConPTY on win32) (#106)', async () => {
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'fleet-local-'));
@@ -93,6 +93,48 @@ test('Local backend: PTY spawns and reports session mapping (ConPTY on win32) (#
       (e) => e.type === 'mapping-learned' && e.workspaceId === id,
       15_000
     );
+  } finally {
+    await app.close();
+  }
+});
+
+// Linux-side launcher UI assertions (#253).
+//
+// On Linux (non-win32), the "Run claude in" section must be present when
+// kind=Local, but the WSL radio must NOT appear (win32-only). The Custom
+// command radio and its input field must be reachable. Runs with the mock
+// IPC layer so no Docker daemon or real claude binary is needed.
+test('Launcher UI (Linux): WSL radio absent, custom-command radio present (#253)', async () => {
+  const { app, window } = await launch();
+  await mockMainIpc(app);
+
+  try {
+    // Open the New workspace modal.
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
+
+    // Make sure we're on the New tab.
+    const newTab = window.getByRole('tab', { name: 'New' });
+    if (await newTab.isVisible()) {
+      await newTab.click();
+    }
+
+    // Switch to Local kind to reveal the launcher section.
+    await window.getByRole('radio', { name: /Local/ }).check();
+
+    // The "Run claude in" section row must be visible.
+    await expect(window.getByLabel('Run claude in')).toBeVisible();
+
+    // WSL radio is Windows-only — must be absent on Linux.
+    // Use /WSL/ regex because the accessible name includes the kind-help span text.
+    await expect(window.getByRole('radio', { name: /WSL/ })).toHaveCount(0);
+
+    // Custom command radio must be present and checkable.
+    const customRadio = window.getByRole('radio', { name: /Custom command/ });
+    await expect(customRadio).toBeVisible();
+    await customRadio.check();
+
+    // The custom launch command input must appear after selecting custom.
+    await expect(window.getByLabel('Custom launch command')).toBeVisible();
   } finally {
     await app.close();
   }

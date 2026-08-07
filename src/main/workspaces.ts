@@ -18,6 +18,7 @@
 import { readFile, writeFile, readdir, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { workspaceManifestPath, stateRoot } from './paths.js';
+import type { WorkspaceLauncher } from './localLauncher.js';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
 
@@ -153,6 +154,9 @@ export interface WorkspaceSpec {
    *  (<userData>/endpoints.json). A REFERENCE — resolved live at container
    *  create / local spawn, so registry edits apply on next start (#250). */
   endpointId?: string;
+  /** Local workspaces only (#253): how `claude` is invoked. Absent ⇒ native
+   *  direct spawn. 'wsl' is win32-only (validated by sanitizeLauncher). */
+  launcher?: WorkspaceLauncher;
   env: WorkspaceEnv;
   resources?: WorkspaceResources;
   /** Durable-transcript-mirror defaults. Factory `on`/`delete` when absent. */
@@ -204,6 +208,36 @@ function sanitizeAccessibility(a: unknown): AccessibilityConfig | undefined {
   };
 }
 
+/** Strict-allowlist launcher validation (#253). 'wsl' additionally requires
+ *  win32 — a hand-edited manifest can't activate WSL mode elsewhere. */
+export function sanitizeLauncher(
+  l: unknown,
+  platform: NodeJS.Platform = process.platform
+): WorkspaceLauncher | undefined {
+  if (!l || typeof l !== 'object') return undefined;
+  const o = l as Record<string, unknown>;
+  if (o.mode === 'native') return { mode: 'native' };
+  if (o.mode === 'custom') {
+    return typeof o.command === 'string' && o.command.trim()
+      ? { mode: 'custom', command: o.command }
+      : undefined;
+  }
+  if (o.mode === 'wsl') {
+    if (platform !== 'win32') return undefined;
+    const { distro, shell, home, claudePath } = o as Record<string, unknown>;
+    if ([distro, shell, home, claudePath].every((v) => typeof v === 'string' && v)) {
+      return {
+        mode: 'wsl',
+        distro: distro as string,
+        shell: shell as string,
+        home: home as string,
+        claudePath: claudePath as string
+      };
+    }
+  }
+  return undefined;
+}
+
 export interface Workspace extends WorkspaceSpec {
   state: WorkspaceState;
   // Present iff there's a live backend (container) for this workspace.
@@ -246,6 +280,7 @@ export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec |
         : parsed.authMode === 'endpoint' ? 'endpoint'
         : 'oauth',
       endpointId: typeof parsed.endpointId === 'string' && parsed.endpointId ? parsed.endpointId : undefined,
+      launcher: sanitizeLauncher(parsed.launcher),
       env: {
         plain: parsed.env?.plain && typeof parsed.env.plain === 'object' ? parsed.env.plain : {},
         secretKeys: Array.isArray(parsed.env?.secretKeys)

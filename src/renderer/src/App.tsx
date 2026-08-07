@@ -81,6 +81,11 @@ export interface WorkspaceSummary {
   workspaceRoot: string;
   workspaceSubdir: string;
   kind: WorkspaceKind;
+  /** Local workspaces only (#253): how claude is invoked. undefined ⇒ native. */
+  launcher?:
+    | { mode: 'native' }
+    | { mode: 'wsl'; distro: string; shell: string; home: string; claudePath: string }
+    | { mode: 'custom'; command: string };
   image?: string;
   authMode: AuthMode;
   /** authMode 'endpoint' only — id into the app-level model-endpoint registry (#250). */
@@ -872,6 +877,7 @@ export function App() {
       workspaceSubdir: submit.workspaceSubdir,
       kind,
       workspaceRoot: submit.workspaceRoot,
+      launcher: submit.launcher,
       image: submit.image,
       authMode: submit.authMode,
       endpointId: submit.endpointId,
@@ -920,6 +926,7 @@ export function App() {
       workspaceSubdir: submit.workspaceSubdir,
       kind: submit.kind,
       workspaceRoot: submit.workspaceRoot,
+      launcher: submit.launcher,
       image: submit.image,
       authMode: submit.authMode,
       endpointId: submit.endpointId,
@@ -952,6 +959,7 @@ export function App() {
       workspaceSubdir: submit.workspaceSubdir,
       kind: submit.kind,
       workspaceRoot: submit.workspaceRoot,
+      launcher: submit.launcher,
       image: submit.image,
       authMode: submit.authMode,
       endpointId: submit.endpointId,
@@ -984,6 +992,7 @@ export function App() {
       workspaceSubdir: submit.workspaceSubdir,
       kind: submit.kind,
       workspaceRoot: submit.workspaceRoot,
+      launcher: submit.launcher,
       image: submit.image,
       authMode: submit.authMode,
       endpointId: submit.endpointId,
@@ -1027,6 +1036,7 @@ export function App() {
       workspaceSubdir: source.workspaceSubdir,
       kind: source.kind,
       workspaceRoot: source.workspaceRoot,
+      launcher: source.launcher,
       image: source.image,
       authMode: source.authMode,
       endpointId: source.endpointId,

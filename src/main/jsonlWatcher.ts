@@ -111,6 +111,12 @@ export interface JsonlWatcher {
 
 export class JsonlWatcher extends EventEmitter {
   private watcher: FSWatcher | null = null;
+  // Second chokidar instance for dirs where inotify can't reach — the
+  // \\wsl.localhost 9P share delivers no change events (#253). Created
+  // lazily on the first polled registration; same handlers as `watcher`.
+  private pollWatcher: FSWatcher | null = null;
+  private pollWatcherPromise: Promise<FSWatcher | null> | null = null;
+  private readonly polledDirs = new Set<string>();
   private readonly files = new Map<string, FileState>();
   private readonly watchedDirs = new Set<string>();
   // Per-file mutex (sequenced via a chained promise) so concurrent
@@ -163,12 +169,61 @@ export class JsonlWatcher extends EventEmitter {
       if (wsId !== id) continue;
       this.hostDirs.delete(dir);
       this.watchedDirs.delete(dir);
-      this.watcher.unwatch(dir);
+      if (this.polledDirs.delete(dir)) {
+        void this.pollWatcherPromise?.then((w) => w?.unwatch(dir));
+      } else {
+        this.watcher.unwatch(dir);
+      }
       const prefix = dir + pathSep;
       for (const path of [...this.files.keys()]) {
         if (path === dir || path.startsWith(prefix)) { this.files.delete(path); this.chains.delete(path); }
       }
     }
+  }
+
+  /** Register a transcript dir that needs POLLING (no inotify — e.g. a
+   *  \\wsl.localhost share for a wsl-launcher workspace, #253). */
+  registerPolledLocalDir(id: string, dir: string): void {
+    if (!this.watcher) return; // same started-gate as registerLocalWorkspace
+    if (this.hostDirs.has(dir)) return;
+    this.hostDirs.set(dir, id);
+    this.watchedDirs.add(dir);
+    this.polledDirs.add(dir);
+    try { mkdirSync(dir, { recursive: true }); } catch { /* see registerWorkspace */ }
+    void this.ensurePollWatcher().then((w) => {
+      // Skip if stopped or unregistered while chokidar was loading.
+      if (w && this.polledDirs.has(dir)) w.add(dir);
+    });
+  }
+
+  private ensurePollWatcher(): Promise<FSWatcher | null> {
+    if (!this.pollWatcherPromise) {
+      // Lazy import mirrors start(); chokidar is ESM-only under our CJS bundle.
+      this.pollWatcherPromise = import('chokidar').then((chokidar) => {
+        if (!this.watcher) return null; // stopped while loading
+        this.pollWatcher = chokidar.watch([], {
+          depth: 2,
+          ignoreInitial: false,
+          persistent: true,
+          usePolling: true,
+          interval: 1500,
+          binaryInterval: 3000,
+        });
+        this.wireHandlers(this.pollWatcher);
+        return this.pollWatcher;
+      });
+    }
+    return this.pollWatcherPromise;
+  }
+
+  private wireHandlers(w: FSWatcher): void {
+    w.on('add', (p) => this.enqueue(p))
+      .on('change', (p) => this.enqueue(p))
+      .on('unlink', (p) => {
+        this.files.delete(p);
+        this.chains.delete(p);
+      })
+      .on('error', (err) => console.error('[jsonlWatcher] error:', err));
   }
 
   async start(workspaceIds: string[]): Promise<void> {
@@ -182,14 +237,7 @@ export class JsonlWatcher extends EventEmitter {
       // last newline byte and rolling the offset forward only past complete
       // lines. Lower latency this way.
     });
-    this.watcher
-      .on('add', (p) => this.enqueue(p))
-      .on('change', (p) => this.enqueue(p))
-      .on('unlink', (p) => {
-        this.files.delete(p);
-        this.chains.delete(p);
-      })
-      .on('error', (err) => console.error('[jsonlWatcher] error:', err));
+    this.wireHandlers(this.watcher);
     for (const name of workspaceIds) {
       this.registerWorkspace(name);
     }
@@ -199,6 +247,15 @@ export class JsonlWatcher extends EventEmitter {
     if (!this.watcher) return;
     await this.watcher.close();
     this.watcher = null;
+    // Await the creation PROMISE, not the field: a stop() racing the lazy
+    // chokidar import would otherwise miss (and leak) the poller the import
+    // is about to create. this.watcher is already null here, so a still-
+    // in-flight ensurePollWatcher resolves to null and creates nothing.
+    const poller = await this.pollWatcherPromise;
+    await poller?.close();
+    this.pollWatcher = null;
+    this.pollWatcherPromise = null;
+    this.polledDirs.clear();
     this.files.clear();
     this.chains.clear();
     this.watchedDirs.clear();
