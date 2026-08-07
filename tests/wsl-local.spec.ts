@@ -132,10 +132,13 @@ test.describe('wsl local workspaces', () => {
         { encoding: 'utf8', timeout: 10_000 }
       );
 
-      // 2. Pre-create the working directory inside the distro.
+      // 2. Pre-create the working directory inside the distro, and clear any
+      //    pidfiles left by earlier attempts of this test in the same job —
+      //    the distro's /tmp persists across Playwright retries, and a stale
+      //    pidfile would poison both the pause signal glob and our own checks.
       execFileSync(
         'wsl.exe',
-        ['-d', distro, '--exec', 'sh', '-c', 'mkdir -p /tmp/cf-e2e'],
+        ['-d', distro, '--exec', 'sh', '-c', 'mkdir -p /tmp/cf-e2e && rm -f /tmp/claude-fleet-*.pid'],
         { encoding: 'utf8', timeout: 10_000 }
       );
 
@@ -245,37 +248,65 @@ test.describe('wsl local workspaces', () => {
           .toBe(true);
 
         // 9. Pause → assert SIGSTOP (proc state = T) → resume → state back to S/R.
+        //
+        // Diagnose-first design: BEFORE pausing, capture the pidfile, its pid,
+        // that pid's cmdline and state. This directly validates the premise of
+        // the production signal guard (cmdline must contain 'claude') and lets
+        // a failure name the lying side — producer (no/broken pidfile), guard
+        // (cmdline mismatch → it deletes the pidfile), or signal delivery.
+        const inspect = (): { pidfile: string; pid: string; cmdline: string; state: string } => {
+          const out = execFileSync(
+            'wsl.exe',
+            ['-d', distro, '--exec', 'sh', '-c', [
+              'PIDF=$(ls /tmp/claude-fleet-*.pid 2>/dev/null | head -1)',
+              'printf "pidfile=%s\\n" "$PIDF"',
+              '[ -n "$PIDF" ] || exit 0',
+              'PID=$(cat "$PIDF")',
+              'printf "pid=%s\\n" "$PID"',
+              'printf "cmdline=%s\\n" "$(tr \'\\0\' \' \' < /proc/$PID/cmdline 2>/dev/null)"',
+              'printf "state=%s\\n" "$(awk \'{print $3}\' /proc/$PID/stat 2>/dev/null)"',
+            ].join('; ')],
+            { encoding: 'utf8', timeout: 5_000 }
+          );
+          const get = (k: string): string => (out.match(new RegExp(`^${k}=(.*)$`, 'm'))?.[1] ?? '').trim();
+          return { pidfile: get('pidfile'), pid: get('pid'), cmdline: get('cmdline'), state: get('state') };
+        };
+
+        const before = inspect();
+        expect(before.pidfile, `pidfile missing before Pause — bootstrap never wrote it (inspect: ${JSON.stringify(before)})`).not.toBe('');
+        expect(before.cmdline, `pid ${before.pid} cmdline lacks 'claude' — the production signal guard would treat it as stale (inspect: ${JSON.stringify(before)})`).toContain('claude');
+
         const group = window.locator('.ws-chip-group', { hasText: 'wsl-e2e' });
         await group.locator('.ws-chip-menu-trigger').click();
         await window.locator('.ws-chip-menu').getByRole('menuitem', { name: 'Pause' }).click();
 
-        // After pause, the pidfile should exist and the process should be in state T.
-        // Allow up to 8s for the SIGSTOP to land (WSL process scheduling latency).
-        // /proc/<pid>/stat field 3 is the process state character (T = stopped).
-        const procStateScript = [
-          'PIDF=$(ls /tmp/claude-fleet-*.pid 2>/dev/null | head -1)',
-          '[ -n "$PIDF" ] || exit 1',
-          'PID=$(cat "$PIDF")',
-          'cut -d\\ -f3 /proc/$PID/stat',
-        ].join('; ');
+        // After pause, THAT SPECIFIC pid should be in state T. Allow up to 8s
+        // for the SIGSTOP to land (WSL process scheduling latency).
+        const stateOf = (pid: string): string => {
+          try {
+            return execFileSync(
+              'wsl.exe',
+              ['-d', distro, '--exec', 'sh', '-c', `awk '{print $3}' /proc/${pid}/stat 2>/dev/null`],
+              { encoding: 'utf8', timeout: 5_000 }
+            ).trim();
+          } catch {
+            return '';
+          }
+        };
 
         const paused = await (async () => {
           const deadline = Date.now() + 8_000;
           while (Date.now() < deadline) {
-            try {
-              const state = execFileSync(
-                'wsl.exe',
-                ['-d', distro, '--exec', 'sh', '-c', procStateScript],
-                { encoding: 'utf8', timeout: 5_000 }
-              ).trim();
-              if (state === 'T') return true;
-            } catch { /* keep polling */ }
+            if (stateOf(before.pid) === 'T') return true;
             await new Promise((r) => setTimeout(r, 500));
           }
           return false;
         })();
 
-        expect(paused, 'process should be in state T (SIGSTOP) after Pause').toBe(true);
+        expect(
+          paused,
+          `pid ${before.pid} should be in state T after Pause — post-pause inspect: ${JSON.stringify(inspect())}, pre-pause: ${JSON.stringify(before)}`
+        ).toBe(true);
 
         // Resume — chip menu again.
         await group.locator('.ws-chip-menu-trigger').click();
@@ -285,20 +316,17 @@ test.describe('wsl local workspaces', () => {
         const resumed = await (async () => {
           const deadline = Date.now() + 5_000;
           while (Date.now() < deadline) {
-            try {
-              const state = execFileSync(
-                'wsl.exe',
-                ['-d', distro, '--exec', 'sh', '-c', procStateScript],
-                { encoding: 'utf8', timeout: 5_000 }
-              ).trim();
-              if (state === 'S' || state === 'R' || state === 'I') return true;
-            } catch { /* keep polling */ }
+            const state = stateOf(before.pid);
+            if (state === 'S' || state === 'R' || state === 'I') return true;
             await new Promise((r) => setTimeout(r, 500));
           }
           return false;
         })();
 
-        expect(resumed, 'process should be back to S/R/I (SIGCONT) after Resume').toBe(true);
+        expect(
+          resumed,
+          `pid ${before.pid} should be back to S/R/I after Resume — post-resume inspect: ${JSON.stringify(inspect())}`
+        ).toBe(true);
       } finally {
         await app.close();
       }
