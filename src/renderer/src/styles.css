@@ -992,6 +992,73 @@ body {
 }
 .obs-tool-err { color: var(--danger); }
 
+/* Serving rows: port + owning cmdline + uptime, with hover-revealed
+   open-preview / kill buttons. Blue left accent distinguishes serving
+   ports from the green tool rows above. Kill is a two-step inline
+   confirm (the ✕ swaps to a red "kill?" chip that reverts after 3s). */
+.obs-port-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 2px 4px 2px 6px;
+  border-left: 2px solid var(--info);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  transition: background 120ms ease;
+}
+.obs-port-row:hover { background: var(--bg-hover); }
+.obs-port-num { font-weight: 600; color: var(--ink); flex-shrink: 0; }
+.obs-port-cmd {
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.obs-port-up { color: var(--ink-1); font-size: 11px; flex-shrink: 0; }
+.obs-port-ws {
+  color: var(--ink);
+  flex-shrink: 0;
+  max-width: 92px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.obs-port-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--ink-2);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+  opacity: 0.55;
+  transition: opacity 120ms ease, color 120ms ease, background 120ms ease;
+}
+.obs-port-row:hover .obs-port-btn { opacity: 1; }
+.obs-port-btn:hover { background: var(--bg-2); color: var(--ink); }
+.obs-port-btn.kill:hover { color: var(--danger); }
+.obs-port-kill-confirm {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--danger);
+  border-radius: var(--r-sm);
+  color: var(--danger);
+  padding: 2px 6px;
+  cursor: pointer;
+}
+
 /* Workspace metadata block: path (clickable → reveal in file manager),
    image, limits. Rows live in a bordered card with hairline dividers; the
    Path row brightens its folder icon + underlines its value on hover. */
