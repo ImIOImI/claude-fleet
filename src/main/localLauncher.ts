@@ -89,7 +89,7 @@ const BASE_WSL_PASS_KEYS = ['CLAUDE_FLEET_BROKER_SESSION_ID', 'TERM'];
 /**
  * Wrap a SpawnPty so the launcher decides what actually gets spawned.
  * - native: passthrough.
- * - wsl (win32 only): `wsl.exe -d <distro> --cd <cwd> -- <shell> -lic
+ * - wsl (win32 only): `wsl.exe -d <distro> --cd <cwd> --exec <shell> -lic
  *   'echo $$ > <pidfile>; exec <claudePath> <args…>'`. The pty's own cwd must
  *   be a valid WINDOWS dir (`opts.windowsCwd`) — the Linux cwd goes via --cd.
  *   The inner spawn's `file` (host claude) is ignored; the manifest-cached
@@ -132,7 +132,7 @@ export function wrapSpawnForLauncher(
       return inner({
         ...spawnOpts,
         file: 'wsl.exe',
-        args: ['-d', launcher.distro, '--cd', spawnOpts.cwd, '--', launcher.shell, '-lic', cmd],
+        args: ['-d', launcher.distro, '--cd', spawnOpts.cwd, '--exec', launcher.shell, '-lic', cmd],
         cwd: windowsCwd,
         env: buildWslSpawnEnv(spawnOpts.env, [...new Set(passKeys)])
       });

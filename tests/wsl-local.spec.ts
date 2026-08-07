@@ -114,7 +114,7 @@ test.describe('wsl local workspaces', () => {
       execFileSync(
         'wsl.exe',
         [
-          '-d', distro, '--',
+          '-d', distro, '--exec',
           'sh', '-c',
           `mkdir -p ~/.local/bin && printf '%s' '${b64}' | base64 -d > ~/.local/bin/claude && chmod +x ~/.local/bin/claude`,
         ],
@@ -125,7 +125,7 @@ test.describe('wsl local workspaces', () => {
       execFileSync(
         'wsl.exe',
         [
-          '-d', distro, '--',
+          '-d', distro, '--exec',
           'sh', '-c',
           'grep -qF "/.local/bin" /etc/profile 2>/dev/null || printf "\\nexport PATH=\\$HOME/.local/bin:\\$PATH\\n" >> /etc/profile',
         ],
@@ -135,7 +135,7 @@ test.describe('wsl local workspaces', () => {
       // 2. Pre-create the working directory inside the distro.
       execFileSync(
         'wsl.exe',
-        ['-d', distro, '--', 'sh', '-c', 'mkdir -p /tmp/cf-e2e'],
+        ['-d', distro, '--exec', 'sh', '-c', 'mkdir -p /tmp/cf-e2e'],
         { encoding: 'utf8', timeout: 10_000 }
       );
 
@@ -265,7 +265,7 @@ test.describe('wsl local workspaces', () => {
             try {
               const state = execFileSync(
                 'wsl.exe',
-                ['-d', distro, '--', 'sh', '-c', procStateScript],
+                ['-d', distro, '--exec', 'sh', '-c', procStateScript],
                 { encoding: 'utf8', timeout: 5_000 }
               ).trim();
               if (state === 'T') return true;
@@ -288,7 +288,7 @@ test.describe('wsl local workspaces', () => {
             try {
               const state = execFileSync(
                 'wsl.exe',
-                ['-d', distro, '--', 'sh', '-c', procStateScript],
+                ['-d', distro, '--exec', 'sh', '-c', procStateScript],
                 { encoding: 'utf8', timeout: 5_000 }
               ).trim();
               if (state === 'S' || state === 'R' || state === 'I') return true;

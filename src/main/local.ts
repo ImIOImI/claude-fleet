@@ -123,7 +123,7 @@ async function signalWslSessions(
     `  fi`,
     `done; true`
   ].join('\n');
-  await execFileAsync('wsl.exe', ['-d', launcher.distro, '--', 'sh', '-c', script]).catch(() => {});
+  await execFileAsync('wsl.exe', ['-d', launcher.distro, '--exec', 'sh', '-c', script]).catch(() => {});
 }
 
 /**
@@ -249,7 +249,7 @@ export async function stopWorkspace(containerId: string): Promise<void> {
     // the /tmp location is ephemeral and vanishes with the WSL VM anyway.
     const glob = wslPidFile(containerId, '*');
     const cleanScript = `rm -f ${glob}; true`;
-    await execFileAsync('wsl.exe', ['-d', m.launcher.distro, '--', 'sh', '-c', cleanScript]).catch(() => {});
+    await execFileAsync('wsl.exe', ['-d', m.launcher.distro, '--exec', 'sh', '-c', cleanScript]).catch(() => {});
   }
   started.delete(containerId);
   paused.delete(containerId);

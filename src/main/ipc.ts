@@ -650,7 +650,7 @@ async function normalizeAndValidateWslRoot(
     throw new Error(`WSL working directory must be a Linux path: ${root}`);
   }
   const ok = await execFileAsync('wsl.exe', [
-    '-d', launcher.distro, '--', 'test', '-d', linuxRoot
+    '-d', launcher.distro, '--exec', 'test', '-d', linuxRoot
   ]).then(() => true, () => false);
   if (!ok) throw new Error(`Directory does not exist in ${launcher.distro}: ${linuxRoot}`);
   return linuxRoot;

@@ -5,8 +5,8 @@
 //
 // Two exec flavors are injected: `execBuf` for wsl.exe's OWN output
 // (`--list --verbose`), which is UTF-16LE, and `exec` (utf8) for commands run
-// INSIDE a distro (`wsl.exe -d <d> -- sh -c …`), whose output comes from the
-// Linux side and is plain UTF-8. Pure module — vitest-loadable.
+// INSIDE a distro (`wsl.exe -d <d> --exec sh -c …`), whose output comes from
+// the Linux side and is plain UTF-8. Pure module — vitest-loadable.
 
 import { resolveClaudeBin } from './claudeResolve.js';
 import { posixQuote } from './localLauncher.js';
@@ -65,7 +65,7 @@ export async function listWslDistros(deps: ProbeDeps): Promise<WslDistroList> {
 /** Run a POSIX one-liner inside the distro; '' on any failure. */
 async function inDistro(deps: ProbeDeps, distro: string, script: string): Promise<string> {
   try {
-    const { stdout } = await deps.exec('wsl.exe', ['-d', distro, '--', 'sh', '-c', script]);
+    const { stdout } = await deps.exec('wsl.exe', ['-d', distro, '--exec', 'sh', '-c', script]);
     return stdout.trim();
   } catch {
     return '';
@@ -97,7 +97,7 @@ export async function probeWslDistro(distro: string, deps: ProbeDeps): Promise<W
     homedir: home,
     platform: 'linux',
     execFile: (file, args) =>
-      deps.exec('wsl.exe', ['-d', distro, '--', file, ...args]),
+      deps.exec('wsl.exe', ['-d', distro, '--exec', file, ...args]),
     isExecutableFile: async (p) =>
       (await inDistro(deps, distro, `test -x ${posixQuote(p)} && echo yes`)) === 'yes'
   });

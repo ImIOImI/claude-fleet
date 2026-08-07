@@ -93,7 +93,7 @@ describe('wrapSpawnForLauncher — wsl', () => {
     });
     const c = calls[0];
     expect(c.file).toBe('wsl.exe');
-    expect(c.args.slice(0, 5)).toEqual(['-d', 'Ubuntu', '--cd', '/home/troy/proj', '--']);
+    expect(c.args.slice(0, 5)).toEqual(['-d', 'Ubuntu', '--cd', '/home/troy/proj', '--exec']);
     expect(c.args[5]).toBe('/usr/bin/zsh');
     expect(c.args[6]).toBe('-lic');
     const cmd = c.args[7];
