@@ -26,8 +26,14 @@ import {
   USAGE_BUDGET_WINDOW_HOURS,
   type UsageBudgetPreset,
   setFavorite,
-  resolveWorkspaceConfig
+  resolveWorkspaceConfig,
+  getPerfTelemetry,
+  setPerfTelemetry,
+  getPerfOtlp,
+  setPerfOtlp
 } from './config.js';
+import { getPerfStatus, reconfigurePerf, recordPtyChunk } from './perf.js';
+import { resolvePerfConfig } from './perfConfig.js';
 import { buildLoadoutCatalog } from './loadoutCatalog.js';
 import * as realDocker from './docker.js';
 import * as realLocal from './local.js';
@@ -133,6 +139,16 @@ const isWindows = process.platform === 'win32';
 //   /proc/net/tcp scanner already filters out, so 7071 never appears in the
 //   LISTEN scan. Kept here in case that assumption ever changes.
 const INFRA_PORTS = isWindows ? [7070, MCP_TCP_PORT] : [];
+
+/** Re-read config + env and reconfigure the perf pipeline (used after settings changes). */
+async function reapplyPerfConfig(): Promise<void> {
+  await reconfigurePerf(
+    resolvePerfConfig(
+      { perfTelemetry: await getPerfTelemetry(), perfOtlp: await getPerfOtlp() },
+      process.env
+    )
+  );
+}
 
 /** Tell every window a forwardable dev-server port appeared (toast cue). */
 function broadcastPortDetected(workspaceId: string, port: number): void {
@@ -1224,7 +1240,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     sharedDir: await fleetSharedDir(),
     disableHardwareAcceleration: await getHardwareAccelDisabled(),
     autoReloadLoadouts: await getAutoReloadLoadouts(),
-    usageBudget: await getUsageBudget()
+    usageBudget: await getUsageBudget(),
+    perfTelemetry: await getPerfTelemetry(),
+    perfOtlp: await getPerfOtlp()
   }));
   ipcMain.handle('config:setAutoReloadLoadouts', async (_e, enabled: boolean) => {
     await setAutoReloadLoadouts(!!enabled);
@@ -1254,6 +1272,20 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     await setHardwareAccelDisabled(!!disabled);
     return { disableHardwareAcceleration: await getHardwareAccelDisabled() };
   });
+
+  ipcMain.handle('config:setPerfTelemetry', async (_e, enabled: boolean) => {
+    await setPerfTelemetry(enabled === true);
+    await reapplyPerfConfig();
+    return getPerfStatus();
+  });
+
+  ipcMain.handle('config:setPerfOtlp', async (_e, enabled: boolean, endpoint: string) => {
+    await setPerfOtlp(enabled === true, String(endpoint ?? ''));
+    await reapplyPerfConfig();
+    return getPerfStatus();
+  });
+
+  ipcMain.handle('perf:status', async () => getPerfStatus());
 
   // ── Model-endpoint registry (#250) ─────────────────────────────────────
   ipcMain.handle('endpoints:list', () => listEndpoints());
@@ -1439,6 +1471,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       const detector = new ActivityDetector();
       handle.stream.on('data', (chunk: Buffer) => {
         win?.webContents.send(`pty:data:${ptyHandleId}`, chunk);
+        recordPtyChunk(owner?.id ?? handleWorkspaceId.get(ptyHandleId) ?? null, brokerSessionId, chunk.length);
         if (owner && detector.push(chunk.toString('utf8'))) {
           committeeBusy.set(owner.id, { busy: detector.isBusy, since: Date.now() });
         }
