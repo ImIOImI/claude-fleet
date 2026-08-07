@@ -1151,11 +1151,17 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
 
   ipcMain.handle(
     'ports:open',
-    async (_e, workspaceId: string, containerPort: number): Promise<{ hostPort: number }> => {
+    async (_e, workspaceId: string, containerPort: number): Promise<{ hostPort: number | null }> => {
       if (!portForward) {
         // Mock mode: no real broker; hand back a deterministic stub host port
         // so the e2e can assert the round-trip without a container.
         return { hostPort: 65000 };
+      }
+      // The toast is sticky, so the server may be long gone by click time.
+      // hostPort: null tells the renderer to toast an error instead of the
+      // browser opening a dead localhost tab.
+      if (!(await portForward.verifyPort(workspaceId, containerPort))) {
+        return { hostPort: null };
       }
       const { hostPort } = await portForward.openPort(workspaceId, containerPort);
       void shell.openExternal(`http://127.0.0.1:${hostPort}`);

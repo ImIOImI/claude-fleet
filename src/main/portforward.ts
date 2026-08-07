@@ -6,7 +6,12 @@
 //  - PortMonitor: per running workspace, poll the broker's LISTPORTS every
 //    `pollMs` and emit `onDetected(workspaceId, port)` the first time a port
 //    appears (a port that stays open is reported once; one that disappears
-//    and returns is reported again).
+//    and returns is reported again). LISTPORTS reports EVERY listen socket in
+//    the container — Chromium DevTools ports, node inspectors, short-lived
+//    tool servers — so each new port is HTTP-probed through the broker first
+//    and only ports that answer with an HTTP response line are reported.
+//    Non-answering ports are re-probed for a few ticks (a dev server can
+//    accept connections before it serves), then silently ignored.
 //  - PortForward: a loopback `net.Server`; each inbound browser TCP
 //    connection gets its OWN BrokerClient (channel 1) and is relayed to
 //    127.0.0.1:<containerPort> inside the container via DIAL + the reused
@@ -20,6 +25,46 @@ import net from 'node:net';
 import { BrokerClient, brokerPtyStream } from './broker.js';
 
 type BrokerEndpoint = string | { host: string; port: number };
+
+/** Consecutive failed probes before a listening port is written off as
+ *  non-HTTP. At the 3s poll interval this gives a slow-starting dev server
+ *  ~9s to begin serving. */
+export const MAX_PROBE_ATTEMPTS = 3;
+const PROBE_TIMEOUT_MS = 1500;
+
+/** True when the container port answers a minimal GET with an HTTP response
+ *  line. Rides the same DIAL + channel-stream path the forward itself uses,
+ *  so a probe that passes implies the preview will connect. */
+async function httpProbe(
+  makeClient: (endpoint: BrokerEndpoint) => BrokerClient,
+  endpoint: BrokerEndpoint,
+  port: number
+): Promise<boolean> {
+  const client = makeClient(endpoint);
+  try {
+    await client.ready();
+    const resp = await client.dial(1, port);
+    if (!resp.ok) return false;
+    const duplex = brokerPtyStream(client, 1);
+    const first = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('probe timeout')), PROBE_TIMEOUT_MS);
+      const settle = (fn: () => void): void => {
+        clearTimeout(timer);
+        fn();
+      };
+      duplex.once('data', (chunk) => settle(() => resolve(String(chunk))));
+      duplex.once('error', (err) => settle(() => reject(err)));
+      duplex.once('end', () => settle(() => reject(new Error('closed before responding'))));
+      duplex.write('GET / HTTP/1.0\r\n\r\n');
+    });
+    duplex.destroy();
+    return first.startsWith('HTTP/');
+  } catch {
+    return false;
+  } finally {
+    client.close();
+  }
+}
 
 /** Pure detection diff: which scanned ports are new vs `prev`, after
  *  removing infra ports (broker/MCP). Returns the next baseline set. */
@@ -40,11 +85,21 @@ export interface PortForwardDeps {
   onDetected(workspaceId: string, port: number): void;
   excludePorts(workspaceId: string): number[];
   pollMs?: number;
+  /** Whether the container port answers like an HTTP server. Injectable for
+   *  tests; defaults to a GET probe over a broker DIAL. */
+  probePort?(endpoint: BrokerEndpoint, port: number): Promise<boolean>;
 }
 
 interface Monitor {
   timer: NodeJS.Timeout;
   seen: Set<number>;
+  /** Consecutive failed probes per port — retried while < MAX_PROBE_ATTEMPTS,
+   *  then given up on (kept in `seen`, never toasted). Cleared when the port
+   *  stops listening, so a port that disappears and returns is probed afresh. */
+  probeFails: Map<number, number>;
+  /** Re-entrancy guard: probes make a poll tick slow enough to overlap the
+   *  next interval fire; overlapping ticks would double-report. */
+  polling: boolean;
 }
 
 interface Forward {
@@ -59,7 +114,11 @@ export class PortForwardManager {
   private readonly forwards = new Map<string, Map<number, Forward>>();
 
   constructor(deps: PortForwardDeps) {
-    this.deps = { pollMs: 3000, ...deps };
+    this.deps = {
+      pollMs: 3000,
+      probePort: (endpoint, port) => httpProbe(deps.makeClient, endpoint, port),
+      ...deps
+    };
   }
 
   reconcile(runningWorkspaceIds: string[]): void {
@@ -76,9 +135,10 @@ export class PortForwardManager {
   }
 
   private startMonitor(workspaceId: string): void {
-    const seen = new Set<number>();
     const monitor: Monitor = {
-      seen,
+      seen: new Set<number>(),
+      probeFails: new Map(),
+      polling: false,
       timer: setInterval(() => void this.poll(workspaceId), this.deps.pollMs)
     };
     this.monitors.set(workspaceId, monitor);
@@ -94,7 +154,8 @@ export class PortForwardManager {
 
   private async poll(workspaceId: string): Promise<void> {
     const monitor = this.monitors.get(workspaceId);
-    if (!monitor) return;
+    if (!monitor || monitor.polling) return;
+    monitor.polling = true;
     let client: BrokerClient | undefined;
     try {
       const endpoint = await this.deps.resolveEndpoint(workspaceId);
@@ -102,12 +163,41 @@ export class PortForwardManager {
       await client.ready();
       const ports = await client.listPorts();
       const { newly, next } = diffPorts(monitor.seen, ports, this.deps.excludePorts(workspaceId));
+      // Ports that stopped listening get a fresh probe budget if they return.
+      for (const p of [...monitor.probeFails.keys()]) {
+        if (!next.has(p)) monitor.probeFails.delete(p);
+      }
+      for (const port of newly) {
+        if (await this.deps.probePort(endpoint, port)) {
+          monitor.probeFails.delete(port);
+          this.deps.onDetected(workspaceId, port);
+          continue;
+        }
+        const fails = (monitor.probeFails.get(port) ?? 0) + 1;
+        monitor.probeFails.set(port, fails);
+        // Keep an unconfirmed port out of `seen` so the next tick re-probes it
+        // (a dev server can listen before it serves). Past the attempt budget
+        // it stays in `seen`: a non-HTTP listener, never reported.
+        if (fails < MAX_PROBE_ATTEMPTS) next.delete(port);
+      }
       monitor.seen = next;
-      for (const port of newly) this.deps.onDetected(workspaceId, port);
     } catch {
       // Broker not ready / workspace paused — skip this tick silently.
     } finally {
       client?.close();
+      monitor.polling = false;
+    }
+  }
+
+  /** Whether anything still answers on the container port — `ports:open` gates
+   *  the browser launch on this so "Open preview" on a stale toast surfaces an
+   *  error instead of a dead localhost tab. */
+  async verifyPort(workspaceId: string, containerPort: number): Promise<boolean> {
+    try {
+      const endpoint = await this.deps.resolveEndpoint(workspaceId);
+      return await this.deps.probePort(endpoint, containerPort);
+    } catch {
+      return false;
     }
   }
 
