@@ -55,28 +55,60 @@ Audit findings (2026-08-07, against v0.10.0):
   *conclusions* this data should drive, not part of this work).
 - Go broker instrumentation (phase 3, only if implicated).
 - Renderer paint profiling (Chrome DevTools when the data points there).
-- Telemetry ever leaving the machine. Local SQLite only.
+- Telemetry leaving the machine **by default**. Local SQLite is the primary
+  store; OTLP export happens only when the user explicitly configures an
+  endpoint (see §3).
 
 ## Design
 
-### 1. Main-process health monitor — new module `src/main/perf.ts` (Phase 1)
+### 0. Recording pipeline: OpenTelemetry-native
+
+All instrumentation goes through the **OpenTelemetry API**
+(`@opentelemetry/api`), with the OTel Node SDK (tracer + meter providers)
+running in the main process, owned by `src/main/perf.ts`:
+
+- Timed operations are real OTel **spans**; measurements are OTel **metrics**
+  (histograms/counters). Names follow OTel semantic conventions where they
+  exist (e.g. the `nodejs.eventloop.delay.*` metric names); everything custom
+  lives under a `claude_fleet.*` namespace.
+- Two exporters, both fed by the SDK's batch processors (~5 s interval):
+  1. **SQLite exporter (always on):** custom `SpanExporter` + metric exporter
+     that map finished spans/metric points into the local `perf_events` table
+     (§3). This keeps the fleet-state MCP analysis loop fully local.
+  2. **OTLP/HTTP exporter (opt-in):** registered only when the standard
+     `OTEL_EXPORTER_OTLP_ENDPOINT` env var is set, streaming the same data to
+     any OTel backend (Jaeger, Grafana, Datadog, …). No custom config surface
+     — standard OTel env vars only. Absent the env var, nothing leaves the
+     machine.
+- The kill switch (§4) works by starting/shutting down the SDK: with no
+  provider registered, the OTel API no-ops, so instrumentation sites cost
+  effectively nothing while disabled.
+- The **renderer stays thin**: it does not run an OTel web SDK. Phase 2
+  renderer samples arrive over `perf:samples` and main records them through
+  the OTel API on the renderer's behalf.
+
+### 1. Main-process health monitor — `src/main/perf.ts` (Phase 1)
 
 - **Event-loop stall detector:** `perf_hooks.monitorEventLoopDelay`
-  (`resolution: 10`), sampled every 5 s. A window whose max delay exceeds
-  50 ms records a `stall` event carrying p50/p99/max for the window. Native
-  histogram; effectively free.
-- **Slow-op tracer:** `perfSpan(name, fn)` (sync and async variants) records
-  any wrapped operation slower than 25 ms as a `slow_op` event (name, dur_ms,
-  ts). Wrapped around the known synchronous suspects:
+  (`resolution: 10`), sampled every 5 s into OTel gauges/histograms
+  (`nodejs.eventloop.delay.p50/p99/max`). A window whose max delay exceeds
+  50 ms additionally records a `claude_fleet.stall` event carrying p50/p99/max
+  for the window. Native histogram; effectively free.
+- **Slow-op tracer:** `perfSpan(name, fn)` (sync and async variants) wraps an
+  operation in an OTel span. Spans slower than 25 ms are persisted by the
+  SQLite exporter as `slow_op` rows (the OTLP exporter, when enabled, receives
+  all spans and applies its own sampling). Wrapped around the known
+  synchronous suspects:
   - the JSONL ingest batch in `jsonlWatcher.ts` (the `ingestLine` chain),
   - dockerode calls in `docker.ts`,
   - vault operations,
   - every `ipcMain.handle` callback, generically, at registration in `ipc.ts`
-    (span name = channel name).
+    (span name = `claude_fleet.ipc.<channel>`).
   A `stall` that coincides with a `slow_op` is self-attributing at query time.
-- **PTY throughput counters:** per-session bytes/chunks forwarded per 5 s
-  window, recorded as `pty_window` events only when nonzero, so stalls can be
-  correlated with output load.
+- **PTY throughput counters:** OTel counters for bytes/chunks forwarded, with
+  a `session_id` attribute, aggregated per 5 s window and persisted as
+  `pty_window` rows only when nonzero, so stalls can be correlated with
+  output load.
 
 ### 2. User-perceived latency hops (Phase 2)
 
@@ -89,12 +121,13 @@ Audit findings (2026-08-07, against v0.10.0):
   keystroke; the next `pty:data` arrival within 2 s closes the sample. Noisy
   per-sample, meaningful as a histogram over a day of use.
 - Renderer batches its samples to main every ~5 s over a new one-way
-  `perf:samples` channel (`ipcRenderer.send`, not invoke).
+  `perf:samples` channel (`ipcRenderer.send`, not invoke); main records them
+  as `claude_fleet.terminal.*` histograms via the OTel API (§0).
 
 Both processes share the machine wall clock, so epoch-ms stamps
 (`performance.timeOrigin + performance.now()`) are directly comparable.
 
-### 3. Storage
+### 3. Storage (the SQLite exporter's target)
 
 New table in the existing history DB, added via the `user_version` migration
 chain in `db.ts`:
@@ -105,18 +138,24 @@ CREATE TABLE perf_events (
   ts         INTEGER NOT NULL,          -- epoch ms
   kind       TEXT NOT NULL,             -- stall | slow_op | pty_window | input_hop | output_hop | echo_rtt
   session_id TEXT,                      -- nullable; broker session where applicable
-  name       TEXT,                      -- span/channel name for slow_op, else NULL
+  name       TEXT,                      -- span/metric name for slow_op etc., else NULL
   dur_ms     REAL,                      -- primary measurement
-  meta       TEXT                       -- JSON: p50/p99/max, bytes, chunks, …
+  trace_id   TEXT,                      -- OTel trace id (spans only)
+  span_id    TEXT,                      -- OTel span id (spans only)
+  meta       TEXT                       -- JSON: span attributes, p50/p99/max, bytes, chunks, …
 );
 CREATE INDEX idx_perf_events_ts ON perf_events(ts);
 CREATE INDEX idx_perf_events_kind_ts ON perf_events(kind, ts);
 ```
 
-- Inserts are **batched every 5 s in a single transaction**, never on the hot
-  path. The batch insert is itself wrapped in `perfSpan('perf.flush')`, so the
-  telemetry self-reports if it ever becomes the problem.
-- Retention: rows older than 7 days deleted at startup.
+- The exporter batch-inserts **in a single transaction per flush (~5 s)**,
+  never on the hot path. The flush is itself wrapped in
+  `perfSpan('claude_fleet.perf.flush')`, so the telemetry self-reports if it
+  ever becomes the problem.
+- `trace_id`/`span_id` let local rows be correlated with an external OTLP
+  backend when one is configured.
+- Retention: rows older than 7 days deleted at startup (local table only;
+  external backends own their own retention).
 
 ### 4. Controls (settings toggle + MCP lever)
 
@@ -130,6 +169,7 @@ CREATE INDEX idx_perf_events_kind_ts ON perf_events(kind, ts);
   forces it *on*.
 - **MCP lever** on the fleet-state server:
   - `perf_status` (read) → `{ enabled, source: 'settings' | 'env-override',
+    otlpExport: boolean /* OTEL_EXPORTER_OTLP_ENDPOINT set */,
     eventCounts: { kind → count, last 24 h } }`.
   - `perf_set` (write, mediated) → `{ enabled: boolean }`; flips the
     `perfTelemetry` app setting through the same main-process code path as the
@@ -141,8 +181,9 @@ CREATE INDEX idx_perf_events_kind_ts ON perf_events(kind, ts);
     outside the committee family. It stays within the SPEC §9 invariant
     (writes mediated by the main process, no filesystem/DB path exposed), but
     SPEC §11 must document it explicitly as a global, ungated switch.
-- Live toggling: turning telemetry off stops sampling and flushes; turning it
-  on restarts monitors. No app restart required.
+- Live toggling: turning telemetry off flushes and shuts down the OTel SDK
+  (the API then no-ops at every instrumentation site); turning it on
+  re-registers the providers. No app restart required.
 
 ### 5. MCP query surface
 
@@ -154,8 +195,11 @@ describe the shared host process, not another workspace's content.
 
 ### 6. Testing
 
-- Vitest units: span threshold behavior, batching/flush, retention pruning,
-  live enable/disable, migration bump, env-override precedence.
+- Vitest units: the SQLite exporter (span/metric point → `perf_events` row
+  mapping, threshold filtering, single-transaction flush), retention pruning,
+  live enable/disable (SDK shutdown → API no-ops), migration bump,
+  env-override precedence, OTLP exporter registration gated on
+  `OTEL_EXPORTER_OTLP_ENDPOINT`.
 - MCP contract tests: `mcpServer.test.ts` for `perf_status`/`perf_set` and the
   snapshot allowlist; matching `tests/mcp-*.spec.ts` e2e additions (CI-only)
   per the MCP contract-test convention.
@@ -164,7 +208,10 @@ describe the shared host process, not another workspace's content.
 
 ### 7. SPEC.md updates (same-commit rule)
 
-- §6 Observability: `perf_events` table, collection pipeline, retention.
+- §4 Stack: new runtime deps (`@opentelemetry/api`, SDK trace/metrics
+  packages, OTLP/HTTP exporter) and the rationale for OTel-native recording.
+- §6 Observability: `perf_events` table, OTel pipeline (SQLite exporter +
+  opt-in OTLP via `OTEL_EXPORTER_OTLP_ENDPOINT`), retention.
 - §11 Fleet-state MCP: `perf_status`, `perf_set`, snapshot addition, the
   ungated-write security note.
 - IPC surface: `config:setPerfTelemetry`, `perf:samples`, and the Phase 2
@@ -173,9 +220,10 @@ describe the shared host process, not another workspace's content.
 
 ## Phasing
 
-- **PR 1 (Phase 1):** `perf.ts` (stall detector, slow-op tracer, PTY
-  counters), `perf_events` storage, settings toggle + Settings UI, env
-  override, MCP `perf_status`/`perf_set`, snapshot allowlist, tests, SPEC.
+- **PR 1 (Phase 1):** `perf.ts` (OTel SDK wiring, SQLite + opt-in OTLP
+  exporters, stall detector, slow-op tracer, PTY counters), `perf_events`
+  storage, settings toggle + Settings UI, env override, MCP
+  `perf_status`/`perf_set`, snapshot allowlist, tests, SPEC.
 - **PR 2 (Phase 2):** latency hops (`pty:input` ts, `{ts, chunk}` output
   envelope, echo-RTT sampling, `perf:samples` batching), tests, SPEC.
 
