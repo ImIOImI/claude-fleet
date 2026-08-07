@@ -807,8 +807,11 @@ function buildSnapshot(srcPath: string, allowed: Set<string>, includeRaw: boolea
         mem.prepare(
           `CREATE TABLE perf_events AS SELECT * FROM ${alias}.perf_events WHERE workspace_id IS NULL OR ${scope}`
         ).run(...params);
-      } catch {
-        // perf_events not yet in this DB (older schema) — create empty shell
+      } catch (e) {
+        // Pre-v11 DB (no perf_events yet): give callers an empty, correctly-shaped
+        // table. Anything else is a real failure and must surface, not read as
+        // "no perf data".
+        if (!(e instanceof Error && /no such table/i.test(e.message))) throw e;
         mem.exec(`CREATE TABLE perf_events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, kind TEXT NOT NULL, workspace_id TEXT, session_id TEXT, name TEXT, dur_ms REAL, trace_id TEXT, span_id TEXT, meta TEXT)`);
       }
     } finally {

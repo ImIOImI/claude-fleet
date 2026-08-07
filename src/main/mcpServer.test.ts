@@ -672,8 +672,12 @@ describe('perf tools', () => {
     process.env.CLAUDE_FLEET_PERF = '0';
     try {
       const set = TOOLS.find((t) => t.name === 'perf_set')!;
+      // Both enabled: false and enabled: true should be rejected
       await expect(
         set.run(db, { enabled: false }, ctxA)
+      ).rejects.toThrow(/CLAUDE_FLEET_PERF/i);
+      await expect(
+        set.run(db, { enabled: true }, ctxA)
       ).rejects.toThrow(/CLAUDE_FLEET_PERF/i);
     } finally {
       if (saved === undefined) delete process.env.CLAUDE_FLEET_PERF;
