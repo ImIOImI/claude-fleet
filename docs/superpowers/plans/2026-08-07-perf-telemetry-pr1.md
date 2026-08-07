@@ -475,7 +475,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 **Interfaces:**
 - Consumes: `PerfStore`, `PerfRow` (Task 1); `EffectivePerfConfig` (Task 2).
 - Produces (Tasks 4–8 consume):
-  - `initPerf(store: PerfStore, effective: EffectivePerfConfig): void` — idempotent-safe via internal shutdown-first.
+  - `initPerf(store: PerfStore, effective: EffectivePerfConfig): void` — single-init; throws on double init (re-init goes through `reconfigurePerf`).
   - `shutdownPerf(): Promise<void>` — flushes processors + store, disables global providers.
   - `reconfigurePerf(effective: EffectivePerfConfig): Promise<void>` — shutdown + re-init with the same store.
   - `perfSpan<T>(name: string, fn: () => T, attrs?: Record<string, string | number>): T`
