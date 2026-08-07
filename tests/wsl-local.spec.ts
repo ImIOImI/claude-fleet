@@ -172,7 +172,10 @@ test.describe('wsl local workspaces', () => {
         await wslRadio.check();
 
         // Wait for the distro dropdown to appear and contain our distro.
-        const distroSelect = window.getByLabel('WSL distro');
+        // exact: the WSL *radio*'s accessible name ("WSL inside a WSL distro,
+        // via your login shell") contains this substring and would otherwise
+        // trip Playwright's strict mode (2 matches).
+        const distroSelect = window.getByLabel('WSL distro', { exact: true });
         await expect(distroSelect).toBeVisible({ timeout: 8_000 });
         await expect(distroSelect.locator('option', { hasText: distro })).toHaveCount(1);
         await distroSelect.selectOption(distro);
