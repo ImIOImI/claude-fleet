@@ -172,8 +172,11 @@ const portForward: PortForwardManager | null = MOCK_MODE
     });
 
 // Mock mode gets a scheduled fake feed instead (see mockPorts.ts) so the
-// rail's Serving section works with CLAUDE_FLEET_MOCK=1.
-const mockPorts: MockServingPorts | null = MOCK_MODE
+// rail's Serving section works interactively under CLAUDE_FLEET_MOCK=1.
+// e2e runs (CLAUDE_FLEET_E2E=1) disable this auto-feed: tests drive Serving
+// state deterministically through the __test:setServingPorts IPC handle, so
+// the timed fakes must stay silent or they race the injected snapshots.
+const mockPorts: MockServingPorts | null = MOCK_MODE && process.env.CLAUDE_FLEET_E2E !== '1'
   ? new MockServingPorts(broadcastPortsChanged)
   : null;
 
