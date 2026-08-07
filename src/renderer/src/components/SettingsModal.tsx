@@ -290,99 +290,121 @@ export function SettingsModal({ onClose, onSaved }: Props) {
         {/* ── Settings tab ─────────────────────────────────────────────── */}
         {activeTab === 'settings' && (
           <div className="new-tab" role="tabpanel">
-            <div className="form-row">
-              <label>Fleet root (host path)</label>
+            <div className="settings-section">
+              <div className="settings-section-header">Storage</div>
               <div className="input-with-button">
                 <input
                   value={fleetRoot}
                   onChange={(e) => setFleetRoot(e.target.value)}
                   placeholder="/home/you/fleet"
                   disabled={busy || !loaded}
+                  aria-label="Fleet root (host path)"
                 />
                 <button type="button" onClick={browse} disabled={busy || !loaded}>
                   Browse…
                 </button>
               </div>
+              <p className="setting-desc">
+                Private folder per workspace at <code>&lt;root&gt;/&lt;id&gt;</code> →{' '}
+                <code>/workspace</code>, plus a shared <code>&lt;root&gt;/shared</code> →{' '}
+                <code>/shared</code> in every container. Applies to new containers and on next
+                restart.
+              </p>
             </div>
-            <p className="form-hint">
-              Each workspace gets a private folder at <code>&lt;root&gt;/&lt;id&gt;</code> (mounted at{' '}
-              <code>/workspace</code>, visible only to that container) plus a shared{' '}
-              <code>&lt;root&gt;/shared</code> folder mounted into every container at{' '}
-              <code>/shared</code>. Changing the root applies to new containers and to existing ones
-              on their next restart.
-            </p>
-            <div className="form-row">
-              <label className="checkbox-row">
+
+            <div className="settings-section">
+              <div className="settings-section-header">Behavior</div>
+              <div className="setting-row">
+                <div className="setting-row-text">
+                  <label className="setting-title" htmlFor="setting-hwa">
+                    Disable hardware acceleration
+                  </label>
+                  <p className="setting-desc">
+                    For GPU-process errors on startup (common on WSLg). Applies at next launch.
+                    {hwaDisabled !== hwaInitial && (
+                      <strong> Restart required to take effect.</strong>
+                    )}
+                  </p>
+                </div>
                 <input
+                  id="setting-hwa"
                   type="checkbox"
                   checked={hwaDisabled}
                   onChange={(e) => setHwaDisabled(e.target.checked)}
                   disabled={busy || !loaded}
                 />
-                <span>Disable hardware acceleration</span>
-              </label>
-            </div>
-            <p className="form-hint">
-              Turn this on if Chromium&apos;s GPU process logs errors on startup (common on WSLg) —
-              rendering falls back to CPU. Applies the next time you launch claude-fleet.
-              {hwaDisabled !== hwaInitial && (
-                <strong> Restart required to take effect.</strong>
-              )}
-            </p>
-            <div className="form-row">
-              <label className="checkbox-row">
+              </div>
+              <div className="setting-row">
+                <div className="setting-row-text">
+                  <label className="setting-title" htmlFor="setting-autoreload">
+                    Auto-reload loadouts into running workspaces
+                  </label>
+                  <p className="setting-desc">
+                    Reload the Claude session (<code>--resume</code>) after a loadout
+                    install/update — waits until Claude is idle before reloading.
+                  </p>
+                </div>
                 <input
+                  id="setting-autoreload"
                   type="checkbox"
                   checked={autoReload}
                   onChange={(e) => setAutoReload(e.target.checked)}
                   disabled={busy || !loaded}
                 />
-                <span>Auto-reload loadouts into running workspaces</span>
-              </label>
-            </div>
-            <p className="form-hint">
-              When you install or update a loadout in a running container workspace, reload its
-              Claude session (<code>--resume</code>) so the change takes effect right away. Waits
-              until Claude is idle — if it&apos;s working, the reload is deferred until it stops.
-            </p>
-            <div className="form-row">
-              <label>Plan usage budget</label>
-              <select
-                value={budgetPreset}
-                onChange={(e) => setBudgetPreset(e.target.value as UsageBudgetPreset)}
-                disabled={busy || !loaded}
-              >
-                <option value="pro">Pro — {fmtTokens(budgetPresets.pro)} / {budgetWindowHours}h</option>
-                <option value="max5">
-                  Max 5× — {fmtTokens(budgetPresets.max5)} / {budgetWindowHours}h
-                </option>
-                <option value="max20">
-                  Max 20× — {fmtTokens(budgetPresets.max20)} / {budgetWindowHours}h
-                </option>
-                <option value="custom">Custom…</option>
-              </select>
-            </div>
-            {budgetPreset === 'custom' && (
-              <div className="form-row">
-                <label>Custom budget (tokens per {budgetWindowHours}h)</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="1000000"
-                  value={budgetCustom}
-                  onChange={(e) => setBudgetCustom(e.target.value)}
-                  placeholder="e.g. 19000000"
-                  disabled={busy || !loaded}
-                />
               </div>
-            )}
-            <p className="form-hint">
-              The observability rail shows tokens left in a rolling {budgetWindowHours}-hour window
-              (input + output + cache), fleet-wide. Anthropic doesn&apos;t publish exact limits, so the
-              plan presets are <strong>estimates</strong> anchored to the Max 5×/20× multipliers —
-              calibrate with <strong>Custom</strong> using your real ceiling from Settings → Usage, or
-              the spend shown when Claude Code reports a limit.
-            </p>
+            </div>
+
+            <div className="settings-section">
+              <div className="settings-section-header">Plan usage</div>
+              <div className="setting-row">
+                <div className="setting-row-text">
+                  <label className="setting-title" htmlFor="setting-budget">
+                    Budget for the &ldquo;tokens left&rdquo; bar
+                  </label>
+                  <p className="setting-desc">
+                    Rolling {budgetWindowHours}-hour window (input + output + cache), fleet-wide.
+                    Presets are estimates — calibrate with Custom.
+                  </p>
+                </div>
+                <select
+                  id="setting-budget"
+                  value={budgetPreset}
+                  onChange={(e) => setBudgetPreset(e.target.value as UsageBudgetPreset)}
+                  disabled={busy || !loaded}
+                >
+                  <option value="pro">
+                    Pro — {fmtTokens(budgetPresets.pro)} / {budgetWindowHours}h
+                  </option>
+                  <option value="max5">
+                    Max 5× — {fmtTokens(budgetPresets.max5)} / {budgetWindowHours}h
+                  </option>
+                  <option value="max20">
+                    Max 20× — {fmtTokens(budgetPresets.max20)} / {budgetWindowHours}h
+                  </option>
+                  <option value="custom">Custom…</option>
+                </select>
+              </div>
+              {budgetPreset === 'custom' && (
+                <div className="setting-custom-budget">
+                  <input
+                    type="number"
+                    min="0"
+                    step="1000000"
+                    value={budgetCustom}
+                    onChange={(e) => setBudgetCustom(e.target.value)}
+                    placeholder="e.g. 19000000"
+                    disabled={busy || !loaded}
+                    aria-label={`Custom budget (tokens per ${budgetWindowHours}h)`}
+                  />
+                  <p className="setting-desc">
+                    Anthropic doesn&apos;t publish exact limits — presets are anchored to the Max
+                    5×/20× multipliers. Calibrate with your real ceiling from Settings → Usage, or
+                    the spend shown when Claude Code reports a limit.
+                  </p>
+                </div>
+              )}
+            </div>
+
             {error && <div className="form-hint error-text">{error}</div>}
             <div className="modal-footer">
               <span className="modal-footer-spacer" />
