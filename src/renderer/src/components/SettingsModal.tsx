@@ -432,56 +432,19 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                     <code>docs/local-models.md</code> for Ollama/vLLM/LiteLLM recipes.
                   </p>
                 ) : (
-                  <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 12px' }}>
+                  <ul className="endpoint-list">
                     {endpoints.map((ep) => (
-                      <li
-                        key={ep.id}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 10,
-                          padding: '8px 0',
-                          borderBottom: '1px solid var(--rule)'
-                        }}
-                      >
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontWeight: 500, fontSize: 13, color: 'var(--ink)' }}>
-                            {ep.name}
-                          </div>
-                          <div
-                            style={{
-                              fontSize: 11,
-                              color: 'var(--ink-2)',
-                              fontFamily: 'var(--font-mono)',
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap'
-                            }}
-                          >
+                      <li key={ep.id} className="endpoint-row">
+                        <div className="endpoint-row-text">
+                          <div className="endpoint-name">{ep.name}</div>
+                          <div className="endpoint-detail">
                             {ep.baseUrl} · {ep.modelId}
                           </div>
                         </div>
-                        <span
-                          style={{
-                            fontSize: 10,
-                            padding: '2px 6px',
-                            borderRadius: 999,
-                            background: ep.hasApiKey
-                              ? 'color-mix(in oklab, var(--ok) 18%, transparent)'
-                              : 'var(--bg-canvas)',
-                            border: `1px solid ${ep.hasApiKey ? 'color-mix(in oklab, var(--ok) 35%, transparent)' : 'var(--rule)'}`,
-                            color: ep.hasApiKey ? 'var(--ok)' : 'var(--ink-2)',
-                            whiteSpace: 'nowrap',
-                            flexShrink: 0
-                          }}
-                        >
+                        <span className={`endpoint-key-badge${ep.hasApiKey ? ' on' : ''}`}>
                           {ep.hasApiKey ? 'key set' : 'no key'}
                         </span>
-                        <button
-                          type="button"
-                          className="btn-mini"
-                          onClick={() => openEditForm(ep)}
-                        >
+                        <button type="button" className="btn-mini" onClick={() => openEditForm(ep)}>
                           Edit
                         </button>
                         <button
@@ -511,76 +474,82 @@ export function SettingsModal({ onClose, onSaved }: Props) {
             {/* Add / Edit inline form */}
             {showForm && (
               <>
-                <div className="form-row">
-                  <label>Name *</label>
-                  <input
-                    value={form.name}
-                    onChange={(e) => updateField('name', e.target.value)}
-                    placeholder="My Ollama"
-                    disabled={epBusy}
-                  />
+                <div className="settings-section">
+                  <div className="settings-section-header">Endpoint</div>
+                  <div className="form-row">
+                    <label>Name *</label>
+                    <input
+                      value={form.name}
+                      onChange={(e) => updateField('name', e.target.value)}
+                      placeholder="My Ollama"
+                      disabled={epBusy}
+                    />
+                  </div>
+                  <div className="form-row">
+                    <label>Base URL *</label>
+                    <input
+                      value={form.baseUrl}
+                      onChange={(e) => updateField('baseUrl', e.target.value)}
+                      placeholder="http://host.docker.internal:11434"
+                      disabled={epBusy}
+                    />
+                  </div>
+                  <div className="form-row">
+                    <label>Model ID *</label>
+                    <input
+                      value={form.modelId}
+                      onChange={(e) => updateField('modelId', e.target.value)}
+                      placeholder="qwen3:4b"
+                      disabled={epBusy}
+                    />
+                  </div>
                 </div>
-                <div className="form-row">
-                  <label>Base URL *</label>
-                  <input
-                    value={form.baseUrl}
-                    onChange={(e) => updateField('baseUrl', e.target.value)}
-                    placeholder="http://host.docker.internal:11434"
-                    disabled={epBusy}
-                  />
-                </div>
-                <div className="form-row">
-                  <label>Model ID *</label>
-                  <input
-                    value={form.modelId}
-                    onChange={(e) => updateField('modelId', e.target.value)}
-                    placeholder="qwen3:4b"
-                    disabled={epBusy}
-                  />
-                </div>
-                <div className="form-row">
-                  <label>Small / fast model ID (optional)</label>
-                  <input
-                    value={form.smallFastModelId}
-                    onChange={(e) => updateField('smallFastModelId', e.target.value)}
-                    placeholder="defaults to Model ID"
-                    disabled={epBusy}
-                  />
-                </div>
-                <div className="form-row">
-                  <label>Context length (optional)</label>
-                  <input
-                    type="number"
-                    min="1"
-                    step="1"
-                    value={form.contextLength}
-                    onChange={(e) => updateField('contextLength', e.target.value)}
-                    placeholder="e.g. 32768"
-                    disabled={epBusy}
-                  />
-                </div>
-                <div className="form-row">
-                  <label>Notes (optional)</label>
-                  <input
-                    value={form.notes}
-                    onChange={(e) => updateField('notes', e.target.value)}
-                    placeholder="e.g. local Ollama on workstation"
-                    disabled={epBusy}
-                  />
-                </div>
-                <div className="form-row">
-                  <label>API key (optional)</label>
-                  <input
-                    type="password"
-                    value={form.apiKey}
-                    onChange={(e) => updateField('apiKey', e.target.value)}
-                    placeholder={
-                      form.id
-                        ? '••••• (unchanged — leave blank to keep current key)'
-                        : '(none — local endpoints usually need no key)'
-                    }
-                    disabled={epBusy}
-                  />
+                <div className="settings-section">
+                  <div className="settings-section-header">Options</div>
+                  <div className="form-row">
+                    <label>Small / fast model ID (optional)</label>
+                    <input
+                      value={form.smallFastModelId}
+                      onChange={(e) => updateField('smallFastModelId', e.target.value)}
+                      placeholder="defaults to Model ID"
+                      disabled={epBusy}
+                    />
+                  </div>
+                  <div className="form-row">
+                    <label>Context length (optional)</label>
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={form.contextLength}
+                      onChange={(e) => updateField('contextLength', e.target.value)}
+                      placeholder="e.g. 32768"
+                      disabled={epBusy}
+                    />
+                  </div>
+                  <div className="form-row">
+                    <label>Notes (optional)</label>
+                    <input
+                      value={form.notes}
+                      onChange={(e) => updateField('notes', e.target.value)}
+                      placeholder="e.g. local Ollama on workstation"
+                      disabled={epBusy}
+                    />
+                  </div>
+                  <div className="form-row">
+                    <label>API key (optional)</label>
+                    <input
+                      type="password"
+                      value={form.apiKey}
+                      onChange={(e) => updateField('apiKey', e.target.value)}
+                      placeholder={
+                        form.id
+                          ? '••••• (unchanged — leave blank to keep current key)'
+                          : '(none — local endpoints usually need no key)'
+                      }
+                      disabled={epBusy}
+                    />
+                  </div>
                 </div>
 
                 {/* Probe result */}

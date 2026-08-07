@@ -1509,6 +1509,41 @@ label.setting-title { display: block; cursor: pointer; }
 .setting-custom-budget input { width: 100%; }
 .setting-custom-budget .setting-desc { margin-top: 6px; }
 
+/* ── SettingsModal: model-endpoint list rows ────────────────────────── */
+.endpoint-list { list-style: none; padding: 0; margin: 0 0 12px; }
+.endpoint-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.endpoint-row-text { flex: 1; min-width: 0; }
+.endpoint-name { font-weight: 500; font-size: 13px; color: var(--ink); }
+.endpoint-detail {
+  font-size: 11px;
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.endpoint-key-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--rule);
+  color: var(--ink-2);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.endpoint-key-badge.on {
+  background: color-mix(in oklab, var(--ok) 18%, transparent);
+  border-color: color-mix(in oklab, var(--ok) 35%, transparent);
+  color: var(--ok);
+}
+
 /* preload error */
 .preload-error {
   margin: auto;
