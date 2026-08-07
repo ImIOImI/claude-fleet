@@ -56,8 +56,11 @@ Audit findings (2026-08-07, against v0.10.0):
 - Go broker instrumentation (phase 3, only if implicated).
 - Renderer paint profiling (Chrome DevTools when the data points there).
 - Telemetry leaving the machine **by default**. Local SQLite is the primary
-  store; OTLP export happens only when the user explicitly configures an
-  endpoint (see §3).
+  store; OTLP export happens only when the user explicitly enables it (§0,
+  §4).
+- The OTel **logs** signal. This design exports traces + metrics only;
+  streaming `error.log` (or other app logs) to a collector is a conscious
+  cut, revisit later if wanted.
 
 ## Design
 
@@ -75,11 +78,14 @@ running in the main process, owned by `src/main/perf.ts`:
   1. **SQLite exporter (always on):** custom `SpanExporter` + metric exporter
      that map finished spans/metric points into the local `perf_events` table
      (§3). This keeps the fleet-state MCP analysis loop fully local.
-  2. **OTLP/HTTP exporter (opt-in):** registered only when the standard
-     `OTEL_EXPORTER_OTLP_ENDPOINT` env var is set, streaming the same data to
-     any OTel backend (Jaeger, Grafana, Datadog, …). No custom config surface
-     — standard OTel env vars only. Absent the env var, nothing leaves the
-     machine.
+  2. **OTLP/HTTP exporter (opt-in):** streams the same traces + metrics to
+     any OTel backend (Jaeger, Grafana, Datadog, …). Enabled either by the
+     Settings-UI export toggle + endpoint field (§4 — the primary interface;
+     env vars are hostile UX for a desktop app) or by the standard
+     `OTEL_EXPORTER_OTLP_ENDPOINT` env var, which **overrides** the setting
+     when present (OTel-standard compat + dev/e2e escape hatch; auth headers
+     via `OTEL_EXPORTER_OTLP_HEADERS`). With export off and no env var,
+     nothing leaves the machine.
 - The kill switch (§4) works by starting/shutting down the SDK: with no
   provider registered, the OTel API no-ops, so instrumentation sites cost
   effectively nothing while disabled.
@@ -159,22 +165,43 @@ CREATE INDEX idx_perf_events_kind_ts ON perf_events(kind, ts);
 
 ### 4. Controls (settings toggle + MCP lever)
 
-- **App setting:** `perfTelemetry?: boolean` on `AppConfig`
-  (`<userData>/config.json`), **default `true`**. New
-  `config:setPerfTelemetry` IPC handler following the existing `config:set*`
-  pattern, and a toggle in the Settings screen (with the other app-level
-  switches, e.g. hardware acceleration).
-- **Env override:** `CLAUDE_FLEET_PERF=0` forces telemetry off regardless of
-  the setting (dev/e2e escape hatch, mirroring existing dev flags). It never
-  forces it *on*.
+- **App settings** on `AppConfig` (`<userData>/config.json`):
+  - `perfTelemetry?: boolean` — record locally, **default `true`**.
+  - `perfOtlp?: { enabled: boolean; endpoint: string }` — export, **default
+    off/empty**.
+  New `config:setPerfTelemetry` + `config:setPerfOtlp` IPC handlers following
+  the existing per-field `config:set*` pattern.
+- **Settings UI (decision 2026-08-07, chosen from rendered mockups —
+  "Option B with C's state handling"):** a new **Diagnostics** section in the
+  Settings modal, after Plan usage, using the established section-header +
+  toggle-row idioms:
+  - *Performance telemetry* row with a live mono status line beneath the
+    description, fed by the same data `perf_status` returns. Render states:
+    `● recording · <n> events / 24 h [· exporting → <endpoint>]` (green dot),
+    `○ off` (grey), and `● forced off by CLAUDE_FLEET_PERF=0 — setting
+    ignored` (amber, checkbox disabled). The status line — not the checkbox —
+    is the source of truth, since the MCP lever can flip recording remotely.
+  - *Export via OTLP* row (checkbox), greyed out while recording is off; when
+    checked, the endpoint input reveals full-width below it (the
+    Plan-usage-Custom idiom) with a hint noting the
+    `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_HEADERS` env
+    overrides. Archived rendering:
+    `assets/2026-08-07-perf-telemetry/settings-mockups.html` (self-contained;
+    open in a browser).
+- **Env overrides:** `CLAUDE_FLEET_PERF=0` forces recording off regardless of
+  the setting (dev/e2e escape hatch; it never forces it *on*).
+  `OTEL_EXPORTER_OTLP_ENDPOINT` forces export on to that endpoint (§0).
 - **MCP lever** on the fleet-state server:
   - `perf_status` (read) → `{ enabled, source: 'settings' | 'env-override',
-    otlpExport: boolean /* OTEL_EXPORTER_OTLP_ENDPOINT set */,
-    eventCounts: { kind → count, last 24 h } }`.
+    otlp: { enabled: boolean, endpoint: string | null,
+    source: 'settings' | 'env' }, eventCounts: { kind → count, last 24 h } }`.
   - `perf_set` (write, mediated) → `{ enabled: boolean }`; flips the
     `perfTelemetry` app setting through the same main-process code path as the
     Settings UI, and returns the resulting `perf_status`. Rejected with a
-    clear error while the env override is active.
+    clear error while the `CLAUDE_FLEET_PERF` override is active.
+    **`perf_set` deliberately cannot enable export or set the endpoint** — a
+    workspace must never be able to redirect host telemetry to an arbitrary
+    URL. Export config is Settings-UI or env only.
   - Both tools are available to every workspace (no grant required): they
     control diagnostics collection only and expose no cross-workspace data.
     **Security note:** `perf_set` is the first mutating fleet-state tool
@@ -198,8 +225,9 @@ describe the shared host process, not another workspace's content.
 - Vitest units: the SQLite exporter (span/metric point → `perf_events` row
   mapping, threshold filtering, single-transaction flush), retention pruning,
   live enable/disable (SDK shutdown → API no-ops), migration bump,
-  env-override precedence, OTLP exporter registration gated on
-  `OTEL_EXPORTER_OTLP_ENDPOINT`.
+  env-override precedence (`CLAUDE_FLEET_PERF` beats setting; OTLP env beats
+  the `perfOtlp` setting), OTLP exporter registration off by default / on via
+  setting / on via env, and `perf_set` rejecting export-config changes.
 - MCP contract tests: `mcpServer.test.ts` for `perf_status`/`perf_set` and the
   snapshot allowlist; matching `tests/mcp-*.spec.ts` e2e additions (CI-only)
   per the MCP contract-test convention.
@@ -214,9 +242,11 @@ describe the shared host process, not another workspace's content.
   opt-in OTLP via `OTEL_EXPORTER_OTLP_ENDPOINT`), retention.
 - §11 Fleet-state MCP: `perf_status`, `perf_set`, snapshot addition, the
   ungated-write security note.
-- IPC surface: `config:setPerfTelemetry`, `perf:samples`, and the Phase 2
-  payload shape changes to `pty:input` / `pty:data:*`.
-- Dev env flags: `CLAUDE_FLEET_PERF`.
+- IPC surface: `config:setPerfTelemetry`, `config:setPerfOtlp`,
+  `perf:samples`, and the Phase 2 payload shape changes to `pty:input` /
+  `pty:data:*`.
+- Data model: the `perfTelemetry` / `perfOtlp` fields on `AppConfig`.
+- Dev env flags: `CLAUDE_FLEET_PERF`, `OTEL_EXPORTER_OTLP_*` behavior.
 
 ## Phasing
 
