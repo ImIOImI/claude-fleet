@@ -305,7 +305,7 @@ CREATE INDEX idx_perf_events_kind_ts ON perf_events(kind, ts);
 **Controls and precedence:**
 - Recording: `CLAUDE_FLEET_PERF=0` forces off (takes priority over any setting, never forces on). Otherwise the `perfTelemetry` config value (default `true`).
 - Export: `OTEL_EXPORTER_OTLP_ENDPOINT` env var forces OTLP export on to that endpoint (source `'env'`). Otherwise the `perfOtlp` config value. Export endpoint is Settings-UI or env only — `perf_set` cannot set it.
-- Mock mode (`CLAUDE_FLEET_MOCK=1`): the perf pipeline never initializes; `perf:status` returns a static `{ enabled: false }`.
+- Mock mode (`CLAUDE_FLEET_MOCK=1`): `initPerf` is never called (no DB); `perf:status` and the `config:setPerf*` handlers degrade to a truthful all-off `PerfStatus` (`enabled: false`, settings source, empty counts) instead of throwing.
 
 **Settings UI:** a new **Diagnostics** section in the Settings modal (after Plan usage) with a *Performance telemetry* toggle row and live status line (`● recording · N events / 24h [· exporting → <endpoint>]` / `○ off` / `● forced off by CLAUDE_FLEET_PERF=0`), and an *Export via OTLP* checkbox with an always-visible (but disabled when unchecked) endpoint input field. The status line is the source of truth since `perf_set` can flip recording remotely.
 
