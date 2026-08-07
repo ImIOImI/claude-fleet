@@ -33,7 +33,7 @@ type Server struct {
 	mgr *session.Manager
 	// ListPorts enumerates listening TCP ports for LISTPORTS. Field so
 	// tests can inject a deterministic scanner; defaults to portscan.Listening.
-	ListPorts func() ([]uint16, error)
+	ListPorts func() ([]portscan.Detail, error)
 }
 
 func New(mgr *session.Manager) *Server {
@@ -323,7 +323,7 @@ func (s *Server) dispatch(
 		}
 		resp := proto.PortsResponse{Ports: make([]proto.PortInfo, len(ports))}
 		for i, p := range ports {
-			resp.Ports[i] = proto.PortInfo{Port: p}
+			resp.Ports[i] = proto.PortInfo{Port: p.Port}
 		}
 		return cw.writeJSON(proto.FramePorts, resp)
 
