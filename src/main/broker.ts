@@ -44,7 +44,9 @@ export enum FrameType {
   DIAL = 0x14,
   DIALED = 0x15,
   LISTPORTS = 0x16,
-  PORTS = 0x17
+  PORTS = 0x17,
+  KILLPORT = 0x18,
+  KILLED = 0x19
 }
 
 const MAX_FRAME_PAYLOAD = 1 << 20; // mirror proto.MaxFramePayload
@@ -148,6 +150,14 @@ interface DialResponse {
 export interface SessionInfo {
   id: string;
   alive: boolean;
+}
+
+/** One listening container port; pid/cmdline are absent when the broker
+ *  (or an old runner image's broker) couldn't attribute the socket. */
+export interface BrokerPortInfo {
+  port: number;
+  pid?: number;
+  cmdline?: string;
 }
 
 /**
@@ -376,14 +386,27 @@ export class BrokerClient extends EventEmitter {
     return JSON.parse(payload.toString('utf8')) as DialResponse;
   }
 
-  /** Listening TCP ports detected inside the container (LISTEN sockets). */
-  async listPorts(): Promise<number[]> {
+  /** Listening TCP ports detected inside the container (LISTEN sockets),
+   *  with best-effort owning pid/cmdline. */
+  async listPorts(): Promise<BrokerPortInfo[]> {
     const payload = await this.rpc(
       { type: FrameType.LISTPORTS, payload: Buffer.alloc(0) },
       FrameType.PORTS
     );
-    const obj = JSON.parse(payload.toString('utf8')) as { ports: { port: number }[] };
-    return obj.ports.map((p) => p.port);
+    const obj = JSON.parse(payload.toString('utf8')) as { ports: BrokerPortInfo[] };
+    return obj.ports;
+  }
+
+  /** Terminate the process listening on a container port. The broker
+   *  resolves port→pid itself at kill time (TERM, 2s grace, then KILL).
+   *  On an old broker without KILLPORT the rpc times out and this rejects —
+   *  callers surface that as { ok:false }. */
+  async killPort(port: number): Promise<{ ok: boolean; error?: string }> {
+    const payload = await this.rpc(
+      { type: FrameType.KILLPORT, payload: Buffer.from(JSON.stringify({ port }), 'utf8') },
+      FrameType.KILLED
+    );
+    return JSON.parse(payload.toString('utf8')) as { ok: boolean; error?: string };
   }
 
   sendInput(channel: number, data: Buffer): void {

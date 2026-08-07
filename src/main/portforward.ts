@@ -161,8 +161,12 @@ export class PortForwardManager {
       const endpoint = await this.deps.resolveEndpoint(workspaceId);
       client = this.deps.makeClient(endpoint);
       await client.ready();
-      const ports = await client.listPorts();
-      const { newly, next } = diffPorts(monitor.seen, ports, this.deps.excludePorts(workspaceId));
+      const details = await client.listPorts();
+      const { newly, next } = diffPorts(
+        monitor.seen,
+        details.map((d) => d.port),
+        this.deps.excludePorts(workspaceId)
+      );
       // Ports that stopped listening get a fresh probe budget if they return.
       for (const p of [...monitor.probeFails.keys()]) {
         if (!next.has(p)) monitor.probeFails.delete(p);

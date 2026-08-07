@@ -6,7 +6,7 @@ function stubClient(ports: () => number[]): unknown {
   return {
     ready: () => Promise.resolve(),
     close: () => {},
-    listPorts: () => Promise.resolve(ports()),
+    listPorts: () => Promise.resolve(ports().map((port) => ({ port }))),
     dial: () => Promise.reject(new Error('stub')),
     closeChannel: () => Promise.resolve()
   };
