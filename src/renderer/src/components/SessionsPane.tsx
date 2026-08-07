@@ -16,7 +16,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { createPortal } from 'react-dom';
 import { colorFor } from '../App';
 import type { SessionListItem } from '../../../preload';
-import { sessionsForScope, filterSessions, partitionByOpen, tagCounts } from '../sessionsView';
+import { sessionsForScope, filterSessions, partitionByOpen, tagCounts, limitSessions } from '../sessionsView';
 import { useBlinkSync } from '../blinkSync';
 import type { OpenTabRef } from '../busySessions';
 import { usePortalMenu } from './portalMenu';
@@ -46,6 +46,12 @@ interface Props {
   openSessions?: Map<string, OpenTabRef>;
   /** Resume a session — App brings the container up, then opens a resume tab. */
   onResume: (item: SessionListItem) => void;
+  /** Display prefs (uiPrefs): hide the per-session USD badge. Default show. */
+  showSessionCost?: boolean;
+  /** Display prefs: trim the Recent list to the newest N (0 = unlimited). */
+  maxSessions?: number;
+  /** Display prefs: hide Recent sessions idle > N days (0 = unlimited). */
+  maxSessionAgeDays?: number;
   /** When true, render without the outer `.pane` wrapper / title — the
    *  caller (LeftRail accordion) provides the section header. (#16-followup) */
   embedded?: boolean;
@@ -78,6 +84,9 @@ export function SessionsPane({
   waitingSessionIds,
   openSessions,
   onResume,
+  showSessionCost = true,
+  maxSessions = 0,
+  maxSessionAgeDays = 0,
   embedded = false
 }: Props) {
   const [scope, setScope] = useState<Scope>('workspace');
@@ -149,15 +158,25 @@ export function SessionsPane({
     await load();
   };
 
-  // Sessions shown for the active scope; the "All" badge counts the full list.
+  // Sessions shown for the active scope. Display-prefs limits (uiPrefs) trim
+  // the Recent group only — open-tab rows always render — and are bypassed
+  // while a search/tag filter is active so old sessions stay findable.
   const scoped = sessionsForScope(items, scope, selectedWorkspaceId);
-  const allSessionsCount = items.length;
   const q = query.trim().toLowerCase();
   const filtered = filterSessions(scoped, query, activeTags);
-  const { open: openRows, recent: recentRows } = partitionByOpen(
-    filtered,
-    new Set(openSessions?.keys() ?? [])
-  );
+  const openIds = new Set(openSessions?.keys() ?? []);
+  const { open: openRows, recent: recentRows } = partitionByOpen(filtered, openIds);
+  const limitOpts = { maxCount: maxSessions, maxAgeDays: maxSessionAgeDays };
+  const bypassLimits = q !== '' || activeTags.length > 0;
+  const recentShown = bypassLimits
+    ? recentRows
+    : limitSessions(recentRows, limitOpts, Date.now());
+  // "All · N" badge: what the All view lists under the current limits (#149) —
+  // open rows + the limited recent rows over the FULL list, search ignored
+  // (searching never changed the badge before either).
+  const allParts = partitionByOpen(items, openIds);
+  const allSessionsCount =
+    allParts.open.length + limitSessions(allParts.recent, limitOpts, Date.now()).length;
   const allTags = tagCounts(scoped);
 
   // FLIP: rows animate to their new slot when they move between the Open and
@@ -252,7 +271,7 @@ export function SessionsPane({
                 ))}
               </span>
             )}
-            <span className="session-row-cost">{formatUsd(s.usd)}</span>
+            {showSessionCost && <span className="session-row-cost">{formatUsd(s.usd)}</span>}
           </div>
         </div>
         {confirming ? (
@@ -360,12 +379,20 @@ export function SessionsPane({
             <strong>No workspace selected</strong>
             Pick a workspace above, or switch to <em>All</em> to see every session.
           </div>
-        ) : filtered.length === 0 ? (
+        ) : openRows.length + recentShown.length === 0 ? (
           <div className="pane-placeholder subdued">
-            <strong>{q || activeTags.length > 0 ? 'No matches' : 'No sessions yet'}</strong>
+            <strong>
+              {q || activeTags.length > 0
+                ? 'No matches'
+                : filtered.length > 0
+                  ? 'All sessions hidden by display filters'
+                  : 'No sessions yet'}
+            </strong>
             {q || activeTags.length > 0
               ? 'Try a different search.'
-              : 'Claude sessions appear here once a transcript exists.'}
+              : filtered.length > 0
+                ? 'Raise Max sessions / Max session age in Settings → Display, or search.'
+                : 'Claude sessions appear here once a transcript exists.'}
           </div>
         ) : (
           <ul className="sessions-list">
@@ -376,12 +403,12 @@ export function SessionsPane({
               </li>
             )}
             {openRows.map(renderRow)}
-            {openRows.length > 0 && recentRows.length > 0 && (
+            {openRows.length > 0 && recentShown.length > 0 && (
               <li className="session-group-label recent" aria-hidden="true">
                 Recent<span className="session-group-line" />
               </li>
             )}
-            {recentRows.map(renderRow)}
+            {recentShown.map(renderRow)}
           </ul>
         )}
       </div>

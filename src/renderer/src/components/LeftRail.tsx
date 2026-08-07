@@ -20,6 +20,12 @@ interface Props {
   waitingSessionIds?: Set<string>;
   /** Claude session UUID → open tab address; used by SessionsPane to group/jump. */
   openSessions?: Map<string, OpenTabRef>;
+  /** Display prefs (uiPrefs): hide the per-session USD badge. Default show. */
+  showSessionCost?: boolean;
+  /** Display prefs: trim the Recent list to the newest N (0 = unlimited). */
+  maxSessions?: number;
+  /** Display prefs: hide Recent sessions idle > N days (0 = unlimited). */
+  maxSessionAgeDays?: number;
   onResume: (item: SessionListItem) => void;
   /** Refresh workspaces (installed-loadout state). */
   onChanged: () => void;
@@ -59,6 +65,9 @@ export function LeftRail({
   busySessionIds,
   waitingSessionIds,
   openSessions,
+  showSessionCost,
+  maxSessions,
+  maxSessionAgeDays,
   onResume,
   onChanged,
   onLoadoutInstalled,
@@ -122,6 +131,9 @@ export function LeftRail({
             busySessionIds={busySessionIds}
             waitingSessionIds={waitingSessionIds}
             openSessions={openSessions}
+            showSessionCost={showSessionCost}
+            maxSessions={maxSessions}
+            maxSessionAgeDays={maxSessionAgeDays}
             onResume={onResume}
           />
         )}

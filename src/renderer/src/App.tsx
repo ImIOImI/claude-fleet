@@ -1167,6 +1167,9 @@ export function App() {
           onChanged={refresh}
           onLoadoutInstalled={handleLoadoutInstalled}
           onBrowse={() => setBrowseOpen(true)}
+          showSessionCost={uiPrefs?.showSessionCost !== false}
+          maxSessions={uiPrefs?.maxSessions ?? 0}
+          maxSessionAgeDays={uiPrefs?.maxSessionAgeDays ?? 0}
         />
 
         <main
