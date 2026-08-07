@@ -65,4 +65,17 @@ describe('PerfStore', () => {
     for (let i = 0; i < 11_000; i++) store.enqueue({ ts: i, kind: 'stall', durMs: 60 });
     expect(store.pending()).toBe(10_000);
   });
+
+  it('flush restores the buffer when the transaction throws', () => {
+    store.enqueue({ ts: 1, kind: 'stall', durMs: 60 });
+    db.exec(`DROP TABLE perf_events`); // force the transaction to throw
+    let threwError = false;
+    try {
+      store.flush();
+    } catch (e) {
+      threwError = true;
+    }
+    expect(threwError).toBe(true);
+    expect(store.pending()).toBe(1);
+  });
 });

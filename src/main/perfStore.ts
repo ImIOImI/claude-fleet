@@ -43,20 +43,27 @@ export class PerfStore {
     if (this.buf.length === 0) return 0;
     const rows = this.buf;
     this.buf = [];
-    const ins = this.db.prepare(`
-      INSERT INTO perf_events (ts, kind, workspace_id, session_id, name, dur_ms, trace_id, span_id, meta)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    this.db.transaction((rs: PerfRow[]) => {
-      for (const r of rs) {
-        ins.run(
-          r.ts, r.kind, r.workspaceId ?? null, r.sessionId ?? null, r.name ?? null,
-          r.durMs ?? null, r.traceId ?? null, r.spanId ?? null,
-          r.meta ? JSON.stringify(r.meta) : null
-        );
-      }
-    })(rows);
-    return rows.length;
+    try {
+      const ins = this.db.prepare(`
+        INSERT INTO perf_events (ts, kind, workspace_id, session_id, name, dur_ms, trace_id, span_id, meta)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      this.db.transaction((rs: PerfRow[]) => {
+        for (const r of rs) {
+          ins.run(
+            r.ts, r.kind, r.workspaceId ?? null, r.sessionId ?? null, r.name ?? null,
+            r.durMs ?? null, r.traceId ?? null, r.spanId ?? null,
+            r.meta ? JSON.stringify(r.meta) : null
+          );
+        }
+      })(rows);
+      return rows.length;
+    } catch (err) {
+      // Telemetry rows must not vanish silently on a transient DB error —
+      // put them back (ahead of anything enqueued mid-flush) and rethrow.
+      this.buf = rows.concat(this.buf);
+      throw err;
+    }
   }
 
   /** Delete rows older than the retention window. Returns rows deleted. */
