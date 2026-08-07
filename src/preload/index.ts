@@ -512,8 +512,9 @@ const api = {
       return () => ipcRenderer.removeListener(channel, handler);
     },
     /** Open a loopback forward to a container port and the system browser;
-     *  returns the bound host port. */
-    open: (workspaceId: string, containerPort: number): Promise<{ hostPort: number }> =>
+     *  returns the bound host port, or null when nothing answers on the
+     *  container port anymore (stale toast). */
+    open: (workspaceId: string, containerPort: number): Promise<{ hostPort: number | null }> =>
       ipcRenderer.invoke('ports:open', workspaceId, containerPort)
   },
   // Durable transcript mirror (#10). The renderer addresses sessions by their

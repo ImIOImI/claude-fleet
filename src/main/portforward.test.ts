@@ -1,5 +1,16 @@
 import { describe, it, expect, vi } from 'vitest';
-import { diffPorts, PortForwardManager } from './portforward.js';
+import { diffPorts, PortForwardManager, MAX_PROBE_ATTEMPTS } from './portforward.js';
+
+/** Broker client stub whose listPorts yields `ports()` — enough for poll(). */
+function stubClient(ports: () => number[]): unknown {
+  return {
+    ready: () => Promise.resolve(),
+    close: () => {},
+    listPorts: () => Promise.resolve(ports()),
+    dial: () => Promise.reject(new Error('stub')),
+    closeChannel: () => Promise.resolve()
+  };
+}
 
 describe('diffPorts', () => {
   it('reports ports not seen before, excluding infra ports', () => {
@@ -50,5 +61,107 @@ describe('PortForwardManager.reconcile', () => {
     expect(makeClientCalls).toBeGreaterThan(0);
     mgr.dispose();
     vi.useRealTimers();
+  });
+});
+
+describe('PortForwardManager probe gating', () => {
+  const pollMs = 1000;
+
+  function makeMgr(opts: {
+    ports: () => number[];
+    probe: (endpoint: unknown, port: number) => Promise<boolean>;
+    onDetected: (workspaceId: string, port: number) => void;
+  }): PortForwardManager {
+    return new PortForwardManager({
+      resolveEndpoint: async () => 'sock',
+      makeClient: () => stubClient(opts.ports) as never,
+      onDetected: opts.onDetected,
+      excludePorts: () => [],
+      probePort: opts.probe,
+      pollMs
+    });
+  }
+
+  it('reports a port only when the probe confirms an HTTP answer', async () => {
+    vi.useFakeTimers();
+    const detected: number[] = [];
+    const probe = vi.fn().mockResolvedValue(true);
+    const mgr = makeMgr({ ports: () => [3000], probe, onDetected: (_ws, p) => detected.push(p) });
+    mgr.reconcile(['a']);
+    await vi.advanceTimersByTimeAsync(pollMs);
+    expect(detected).toEqual([3000]);
+    // Stays reported once: no re-probe / re-report while it keeps listening.
+    await vi.advanceTimersByTimeAsync(pollMs * 2);
+    expect(detected).toEqual([3000]);
+    expect(probe).toHaveBeenCalledTimes(1);
+    mgr.dispose();
+    vi.useRealTimers();
+  });
+
+  it('retries a failing probe then gives up silently after the attempt budget', async () => {
+    vi.useFakeTimers();
+    const detected: number[] = [];
+    const probe = vi.fn().mockResolvedValue(false);
+    const mgr = makeMgr({ ports: () => [9229], probe, onDetected: (_ws, p) => detected.push(p) });
+    mgr.reconcile(['a']);
+    await vi.advanceTimersByTimeAsync(pollMs * (MAX_PROBE_ATTEMPTS + 3));
+    expect(detected).toEqual([]);
+    // Probed exactly MAX_PROBE_ATTEMPTS times, then written off while it listens.
+    expect(probe).toHaveBeenCalledTimes(MAX_PROBE_ATTEMPTS);
+    mgr.dispose();
+    vi.useRealTimers();
+  });
+
+  it('reports a port whose probe fails first (listening before serving) then passes', async () => {
+    vi.useFakeTimers();
+    const detected: number[] = [];
+    const probe = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
+    const mgr = makeMgr({ ports: () => [5173], probe, onDetected: (_ws, p) => detected.push(p) });
+    mgr.reconcile(['a']);
+    await vi.advanceTimersByTimeAsync(pollMs * 3);
+    expect(detected).toEqual([5173]);
+    mgr.dispose();
+    vi.useRealTimers();
+  });
+
+  it('re-probes a written-off port after it disappears and returns', async () => {
+    vi.useFakeTimers();
+    const detected: number[] = [];
+    let current = [4000];
+    const probe = vi.fn().mockResolvedValue(false);
+    const mgr = makeMgr({ ports: () => current, probe, onDetected: (_ws, p) => detected.push(p) });
+    mgr.reconcile(['a']);
+    await vi.advanceTimersByTimeAsync(pollMs * (MAX_PROBE_ATTEMPTS + 1));
+    expect(probe).toHaveBeenCalledTimes(MAX_PROBE_ATTEMPTS);
+    current = []; // port stops listening…
+    await vi.advanceTimersByTimeAsync(pollMs);
+    current = [4000]; // …and returns, now answering HTTP
+    probe.mockResolvedValue(true);
+    await vi.advanceTimersByTimeAsync(pollMs);
+    expect(detected).toEqual([4000]);
+    mgr.dispose();
+    vi.useRealTimers();
+  });
+
+  it('verifyPort reflects the probe result and endpoint failures', async () => {
+    const mgr = makeMgr({
+      ports: () => [],
+      probe: async (_ep, port) => port === 3000,
+      onDetected: () => {}
+    });
+    await expect(mgr.verifyPort('a', 3000)).resolves.toBe(true);
+    await expect(mgr.verifyPort('a', 4000)).resolves.toBe(false);
+    const failing = new PortForwardManager({
+      resolveEndpoint: async () => {
+        throw new Error('no endpoint');
+      },
+      makeClient: () => stubClient(() => []) as never,
+      onDetected: () => {},
+      excludePorts: () => [],
+      probePort: async () => true
+    });
+    await expect(failing.verifyPort('a', 3000)).resolves.toBe(false);
+    mgr.dispose();
+    failing.dispose();
   });
 });

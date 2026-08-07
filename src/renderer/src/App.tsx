@@ -301,13 +301,16 @@ export function App() {
       // Sticky: this toast is the only way to reach the preview (bridge IPs
       // aren't routable from the host on Windows), so it must never expire —
       // missing it means restarting the dev server to re-trigger detection.
-      // It clears on click or ✕. Keyless so multiple ports can stack.
+      // It clears on click or ✕. Keyed per workspace+port so a server that
+      // restarts (port disappears and returns) replaces its toast instead of
+      // stacking a duplicate; distinct ports still stack.
       const id = ++toastIdRef.current;
       dispatchToast({
         type: 'push',
         toast: makeToast(id, {
           kind: 'info',
           eyebrow: 'Preview',
+          key: `port:${workspaceId}:${port}`,
           message: `Dev server detected on port ${port} in ${name}`,
           placement: 'global',
           sticky: true,
@@ -315,13 +318,30 @@ export function App() {
           action: {
             label: 'Open preview',
             onClick: () => {
-              void window.api.ports.open(workspaceId, port);
               dispatchToast({ type: 'dismiss', id });
+              void window.api.ports
+                .open(workspaceId, port)
+                .then(({ hostPort }) => {
+                  if (hostPort === null) {
+                    pushToast(
+                      `Nothing is answering on port ${port} in ${name} anymore — the server may have stopped.`,
+                      'Preview',
+                      6000,
+                      'error'
+                    );
+                  }
+                })
+                .catch(() => {
+                  pushToast(`Couldn't open the preview for port ${port} in ${name}.`, 'Preview', 6000, 'error');
+                });
             }
           }
         })
       });
     });
+    // pushToast/dispatchToast are declared below but stable (useCallback []/
+    // useReducer) and only touched inside the subscription callback, which
+    // fires long after the first render initializes them.
   }, []);
 
   const [activeTabSummary, setActiveTabSummary] = useState<
