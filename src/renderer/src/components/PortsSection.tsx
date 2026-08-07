@@ -91,6 +91,7 @@ function PortRow({
         <button
           type="button"
           className="obs-port-kill-confirm"
+          aria-label={`Confirm kill server on port ${row.port}`}
           onClick={() => {
             setConfirming(false);
             onKill(row.workspaceId, row.port);

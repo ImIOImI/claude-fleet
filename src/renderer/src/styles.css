@@ -1007,7 +1007,7 @@ body {
   transition: background 120ms ease;
 }
 .obs-port-row:hover { background: var(--bg-hover); }
-.obs-port-num { font-weight: 600; color: var(--ink); flex-shrink: 0; }
+.obs-port-num { font-weight: 600; color: var(--ink); flex-shrink: 0; font-family: var(--font-mono); font-size: 12px; }
 .obs-port-cmd {
   color: var(--ink-2);
   font-family: var(--font-mono);
