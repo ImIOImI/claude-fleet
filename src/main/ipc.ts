@@ -105,7 +105,8 @@ import { logError, getLogPath } from './errorLog.js';
 import { broadcastObservabilitySummary } from './observabilityBroadcast.js';
 import { broadcastInputWait } from './inputWaitBroadcast.js';
 import { consumeForWorkspace, pendingSnapshotForWorkspace, recordPendingAttach } from './pendingAttaches.js';
-import { PortForwardManager } from './portforward.js';
+import { PortForwardManager, type ServingPort } from './portforward.js';
+import { MockServingPorts } from './mockPorts.js';
 import { brokerEndpoint } from './docker.js';
 import { BrokerClient } from './broker.js';
 import { MCP_TCP_PORT } from './mcpSocket.js';
@@ -146,6 +147,18 @@ function broadcastPortDetected(workspaceId: string, port: number): void {
   }
 }
 
+/** Tell every window a workspace's Serving snapshot changed (rail state). */
+function broadcastPortsChanged(workspaceId: string, ports: ServingPort[]): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue;
+    try {
+      win.webContents.send('ports:changed', { workspaceId, ports });
+    } catch {
+      /* frame disposed mid-send */
+    }
+  }
+}
+
 // Real-backend only: in mock mode there is no broker to poll, so detection is
 // driven by the e2e test-only handler below and `ports:open` returns a stub.
 const portForward: PortForwardManager | null = MOCK_MODE
@@ -154,9 +167,15 @@ const portForward: PortForwardManager | null = MOCK_MODE
       resolveEndpoint: brokerEndpoint,
       makeClient: (ep) => new BrokerClient(ep),
       onDetected: broadcastPortDetected,
-      onChanged: () => {},
+      onChanged: broadcastPortsChanged,
       excludePorts: () => INFRA_PORTS
     });
+
+// Mock mode gets a scheduled fake feed instead (see mockPorts.ts) so the
+// rail's Serving section works with CLAUDE_FLEET_MOCK=1.
+const mockPorts: MockServingPorts | null = MOCK_MODE
+  ? new MockServingPorts(broadcastPortsChanged)
+  : null;
 
 // Per-workspace backend dispatch (#16). A workspace's `kind` decides whether
 // it's a Docker container or a host process; the two backends share the
@@ -754,6 +773,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     portForward?.reconcile(
       all.filter((w) => w.state === 'running' && w.kind !== 'local').map((w) => w.id)
     );
+    mockPorts?.reconcile(all.filter((w) => w.state === 'running').map((w) => w.id));
     return all;
   });
 
@@ -1167,6 +1187,18 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       const { hostPort } = await portForward.openPort(workspaceId, containerPort);
       void shell.openExternal(`http://127.0.0.1:${hostPort}`);
       return { hostPort };
+    }
+  );
+
+  // Serving rail state: seed on renderer mount/reload. Mock mode serves the
+  // fake feed; real mode the PortForwardManager snapshot.
+  ipcMain.handle('ports:list', () => (portForward ?? mockPorts)?.snapshot() ?? []);
+
+  ipcMain.handle(
+    'ports:kill',
+    async (_e, workspaceId: string, port: number): Promise<{ ok: boolean; error?: string }> => {
+      if (!portForward) return mockPorts?.kill(workspaceId, port) ?? { ok: false, error: 'unavailable' };
+      return portForward.killPort(workspaceId, port);
     }
   );
 
@@ -1694,6 +1726,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     );
     ipcMain.handle('__test:emitDetectedPort', (_e, workspaceId: string, port: number) => {
       broadcastPortDetected(workspaceId, port);
+    });
+    ipcMain.handle('__test:setServingPorts', (_e, workspaceId: string, ports: ServingPort[]) => {
+      broadcastPortsChanged(workspaceId, ports);
     });
   }
 }
