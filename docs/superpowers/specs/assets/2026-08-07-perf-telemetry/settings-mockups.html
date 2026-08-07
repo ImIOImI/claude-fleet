@@ -191,7 +191,7 @@
   <div class="option">
     <div class="option-label">Option B &nbsp;(recommended)</div>
     <h2>New “Diagnostics” section with a live status line</h2>
-    <p class="rationale">Telemetry gets its own section after Plan usage: the recording toggle with a live mono status line (recording state, 24-hour event count, export destination), plus an independent “Export via OTLP” toggle whose endpoint input reveals below it when checked (the Plan-usage-Custom idiom). Export greys out when recording is off. Because the MCP lever can flip recording remotely, the status line — not the checkboxes — is the glanceable source of truth.</p>
+    <p class="rationale">Telemetry gets its own section after Plan usage: the recording toggle with a live mono status line (recording state, 24-hour event count, export destination), plus an independent “Export via OTLP” toggle with its endpoint input always visible below it — <strong>greyed out (disabled) whenever export is unchecked</strong>, matching the app's <code style="font-family:var(--font-mono)">input:disabled</code> treatment. The whole export block greys out when recording is off. Because the MCP lever can flip recording remotely, the status line — not the checkboxes — is the glanceable source of truth.</p>
     <div class="mock-row"><div class="mock-col">
       <div class="modal">
         <div class="modal-tabs">
@@ -310,6 +310,33 @@
           </div>
         </div>
         <p class="mock-caption">State 3 — switched off (via checkbox or a workspace's <code style="font-family:var(--font-mono)">perf_set</code>): grey dot, no counts.</p>
+      </div>
+      <div class="mock-col">
+        <div class="modal" style="width:440px">
+          <div class="settings-section" style="margin-bottom:0">
+            <div class="settings-section-header">Diagnostics</div>
+            <div class="setting-row">
+              <div class="setting-row-text">
+                <label class="setting-title">Performance telemetry</label>
+                <p class="setting-desc">Record event-loop stalls, slow operations, and terminal latency to the local history DB (OpenTelemetry).</p>
+                <p class="setting-status"><span class="dot recording"></span> recording · 1,204 events / 24 h · OTLP export off</p>
+              </div>
+              <input type="checkbox" checked>
+            </div>
+            <div class="setting-row">
+              <div class="setting-row-text">
+                <label class="setting-title">Export via OTLP</label>
+                <p class="setting-desc">Also stream traces and metrics to an OpenTelemetry collector. Local recording continues either way.</p>
+              </div>
+              <input type="checkbox">
+            </div>
+            <div class="setting-custom-budget annotate" style="margin:2px 0 4px">
+              <input disabled style="width:100%;box-sizing:border-box;background:var(--bg);color:var(--ink-1);border:1px solid var(--rule);border-radius:6px;padding:6px 9px;font-size:12px;font-family:var(--font-mono);opacity:0.5" value="http://localhost:4318">
+              <p class="setting-desc" style="margin-top:6px;opacity:0.55">OTLP/HTTP endpoint. <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> overrides this when set.</p>
+            </div>
+          </div>
+        </div>
+        <p class="mock-caption">State 4 — export unchecked: the endpoint field stays visible but greyed out (<code style="font-family:var(--font-mono)">input:disabled</code>, opacity .5), keeping the configured destination in view without implying it's active.</p>
       </div>
     </div>
   </div>

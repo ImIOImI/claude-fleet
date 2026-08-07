@@ -181,9 +181,11 @@ CREATE INDEX idx_perf_events_kind_ts ON perf_events(kind, ts);
     `○ off` (grey), and `● forced off by CLAUDE_FLEET_PERF=0 — setting
     ignored` (amber, checkbox disabled). The status line — not the checkbox —
     is the source of truth, since the MCP lever can flip recording remotely.
-  - *Export via OTLP* row (checkbox), greyed out while recording is off; when
-    checked, the endpoint input reveals full-width below it (the
-    Plan-usage-Custom idiom) with a hint noting the
+  - *Export via OTLP* row (checkbox), greyed out while recording is off. The
+    endpoint input sits full-width below the row and is **always visible but
+    disabled + greyed out (the existing `input:disabled` opacity-0.5
+    treatment) whenever export is unchecked** — the configured destination
+    stays in view without implying it's active. Hint text notes the
     `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_HEADERS` env
     overrides. Archived rendering:
     `assets/2026-08-07-perf-telemetry/settings-mockups.html` (self-contained;
