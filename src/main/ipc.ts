@@ -154,6 +154,7 @@ const portForward: PortForwardManager | null = MOCK_MODE
       resolveEndpoint: brokerEndpoint,
       makeClient: (ep) => new BrokerClient(ep),
       onDetected: broadcastPortDetected,
+      onChanged: () => {},
       excludePorts: () => INFRA_PORTS
     });
 

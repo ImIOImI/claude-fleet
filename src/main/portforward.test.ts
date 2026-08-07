@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { diffPorts, PortForwardManager, MAX_PROBE_ATTEMPTS } from './portforward.js';
+import { diffPorts, PortForwardManager, MAX_PROBE_ATTEMPTS, ServingPort } from './portforward.js';
 
 /** Broker client stub whose listPorts yields `ports()` — enough for poll(). */
 function stubClient(ports: () => number[]): unknown {
@@ -47,6 +47,7 @@ describe('PortForwardManager.reconcile', () => {
         } as never;
       },
       onDetected: () => {},
+      onChanged: () => {},
       excludePorts: () => [],
       pollMs
     });
@@ -76,6 +77,7 @@ describe('PortForwardManager probe gating', () => {
       resolveEndpoint: async () => 'sock',
       makeClient: () => stubClient(opts.ports) as never,
       onDetected: opts.onDetected,
+      onChanged: () => {},
       excludePorts: () => [],
       probePort: opts.probe,
       pollMs
@@ -157,11 +159,158 @@ describe('PortForwardManager probe gating', () => {
       },
       makeClient: () => stubClient(() => []) as never,
       onDetected: () => {},
+      onChanged: () => {},
       excludePorts: () => [],
       probePort: async () => true
     });
     await expect(failing.verifyPort('a', 3000)).resolves.toBe(false);
     mgr.dispose();
     failing.dispose();
+  });
+});
+
+describe('PortForwardManager serving snapshot', () => {
+  /** Manager wired for snapshot tests: detailed ports come from `feed()`,
+   *  every probe passes, time is `clock.t`. */
+  function servingHarness(feed: () => Array<{ port: number; pid?: number; cmdline?: string }>) {
+    const changes: Array<{ workspaceId: string; ports: ServingPort[] }> = [];
+    const clock = { t: 1000 };
+    const mgr = new PortForwardManager({
+      resolveEndpoint: async () => 'sock',
+      makeClient: () =>
+        ({
+          ready: () => Promise.resolve(),
+          close: () => {},
+          listPorts: () => Promise.resolve(feed()),
+          dial: () => Promise.reject(new Error('stub')),
+          closeChannel: () => Promise.resolve(),
+          killPort: () => Promise.resolve({ ok: true })
+        }) as never,
+      onDetected: () => {},
+      onChanged: (workspaceId, ports) => changes.push({ workspaceId, ports }),
+      excludePorts: () => [],
+      probePort: () => Promise.resolve(true),
+      now: () => clock.t,
+      pollMs: 1000
+    });
+    return { mgr, changes, clock };
+  }
+
+  it('adds a probe-passed port to the snapshot and emits onChanged', async () => {
+    vi.useFakeTimers();
+    let ports: Array<{ port: number; pid?: number; cmdline?: string }> = [];
+    const { mgr, changes } = servingHarness(() => ports);
+    mgr.reconcile(['ws1']);
+    ports = [{ port: 3000, pid: 42, cmdline: 'vite dev' }];
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(changes).toEqual([
+      {
+        workspaceId: 'ws1',
+        ports: [{ port: 3000, pid: 42, cmdline: 'vite dev', firstSeenAt: 1000 }]
+      }
+    ]);
+    expect(mgr.snapshot()).toEqual([
+      { workspaceId: 'ws1', ports: [{ port: 3000, pid: 42, cmdline: 'vite dev', firstSeenAt: 1000 }] }
+    ]);
+    mgr.dispose();
+    vi.useRealTimers();
+  });
+
+  it('does not re-emit while nothing changes, removes a vanished port', async () => {
+    vi.useFakeTimers();
+    let ports: Array<{ port: number; pid?: number }> = [{ port: 3000, pid: 42 }];
+    const { mgr, changes } = servingHarness(() => ports);
+    mgr.reconcile(['ws1']);
+    await vi.advanceTimersByTimeAsync(1000); // add → emit 1
+    await vi.advanceTimersByTimeAsync(1000); // steady → no emit
+    expect(changes).toHaveLength(1);
+    ports = [];
+    await vi.advanceTimersByTimeAsync(1000); // removal → emit 2
+    expect(changes).toHaveLength(2);
+    expect(changes[1].ports).toEqual([]);
+    mgr.dispose();
+    vi.useRealTimers();
+  });
+
+  it('resets firstSeenAt when the pid behind a port changes', async () => {
+    vi.useFakeTimers();
+    let ports = [{ port: 3000, pid: 42, cmdline: 'vite dev' }];
+    const { mgr, changes, clock } = servingHarness(() => ports);
+    mgr.reconcile(['ws1']);
+    await vi.advanceTimersByTimeAsync(1000);
+    clock.t = 5000;
+    ports = [{ port: 3000, pid: 99, cmdline: 'vite dev (restarted)' }];
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(changes).toHaveLength(2);
+    expect(changes[1].ports).toEqual([
+      { port: 3000, pid: 99, cmdline: 'vite dev (restarted)', firstSeenAt: 5000 }
+    ]);
+    mgr.dispose();
+    vi.useRealTimers();
+  });
+
+  it('missing pid/cmdline (old broker) become nulls', async () => {
+    vi.useFakeTimers();
+    const { mgr, changes } = servingHarness(() => [{ port: 3000 }]);
+    mgr.reconcile(['ws1']);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(changes[0].ports).toEqual([{ port: 3000, pid: null, cmdline: null, firstSeenAt: 1000 }]);
+    mgr.dispose();
+    vi.useRealTimers();
+  });
+
+  it('emits an empty snapshot when a workspace with serving ports departs', async () => {
+    vi.useFakeTimers();
+    const { mgr, changes } = servingHarness(() => [{ port: 3000, pid: 42 }]);
+    mgr.reconcile(['ws1']);
+    await vi.advanceTimersByTimeAsync(1000);
+    mgr.reconcile([]); // ws1 stops
+    expect(changes).toHaveLength(2);
+    expect(changes[1]).toEqual({ workspaceId: 'ws1', ports: [] });
+    expect(mgr.snapshot()).toEqual([]);
+    mgr.dispose();
+    vi.useRealTimers();
+  });
+
+  it('killPort forwards to the broker client', async () => {
+    const calls: number[] = [];
+    const mgr = new PortForwardManager({
+      resolveEndpoint: async () => 'sock',
+      makeClient: () =>
+        ({
+          ready: () => Promise.resolve(),
+          close: () => {},
+          listPorts: () => Promise.resolve([]),
+          dial: () => Promise.reject(new Error('stub')),
+          closeChannel: () => Promise.resolve(),
+          killPort: (port: number) => {
+            calls.push(port);
+            return Promise.resolve({ ok: true });
+          }
+        }) as never,
+      onDetected: () => {},
+      onChanged: () => {},
+      excludePorts: () => []
+    });
+    const res = await mgr.killPort('ws1', 8765);
+    expect(res).toEqual({ ok: true });
+    expect(calls).toEqual([8765]);
+    mgr.dispose();
+  });
+
+  it('killPort surfaces broker failure as ok:false', async () => {
+    const mgr = new PortForwardManager({
+      resolveEndpoint: async () => {
+        throw new Error('workspace not running');
+      },
+      makeClient: () => ({}) as never,
+      onDetected: () => {},
+      onChanged: () => {},
+      excludePorts: () => []
+    });
+    const res = await mgr.killPort('ws1', 8765);
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain('workspace not running');
+    mgr.dispose();
   });
 });
