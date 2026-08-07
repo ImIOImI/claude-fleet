@@ -56,13 +56,51 @@ describe('BrokerClient port-forward RPCs', () => {
     client.close();
   });
 
-  it('listPorts returns the port numbers', async () => {
+  it('listPorts returns the port infos', async () => {
     const sock = path.join(mkdtempSync(path.join(tmpdir(), 'broker-test-')), 'b.sock');
     server = startStub(sock);
     const client = new BrokerClient(sock);
     await client.ready();
     const ports = await client.listPorts();
-    expect(ports).toEqual([3000, 8080]);
+    expect(ports).toEqual([{ port: 3000 }, { port: 8080 }]);
+    client.close();
+  });
+
+  it('listPorts includes pid and cmdline when present', async () => {
+    const sock = path.join(mkdtempSync(path.join(tmpdir(), 'broker-test-')), 'b.sock');
+    // Custom stub that responds with port info that includes pid and cmdline
+    const server2 = net.createServer((sock) => {
+      let buf = Buffer.alloc(0);
+      sock.on('data', (chunk) => {
+        buf = Buffer.concat([buf, chunk]);
+        while (buf.length >= 4) {
+          const total = buf.readUInt32BE(0);
+          if (buf.length < 4 + total) break;
+          const type = buf[4];
+          const payload = buf.subarray(5, 4 + total);
+          buf = buf.subarray(4 + total);
+          if (type === FrameType.LISTPORTS) {
+            sock.write(
+              encodeJSON(FrameType.PORTS, {
+                ports: [
+                  { port: 3000, pid: 42, cmdline: 'vite dev' },
+                  { port: 8080, pid: 123 }
+                ]
+              })
+            );
+          }
+        }
+      });
+    });
+    server2.listen(sock);
+    server = server2;
+    const client = new BrokerClient(sock);
+    await client.ready();
+    const ports = await client.listPorts();
+    expect(ports).toEqual([
+      { port: 3000, pid: 42, cmdline: 'vite dev' },
+      { port: 8080, pid: 123 }
+    ]);
     client.close();
   });
 });
