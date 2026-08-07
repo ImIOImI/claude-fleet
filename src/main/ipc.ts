@@ -32,7 +32,7 @@ import {
   getPerfOtlp,
   setPerfOtlp
 } from './config.js';
-import { getPerfStatus, reconfigurePerf, recordPtyChunk } from './perf.js';
+import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk } from './perf.js';
 import { resolvePerfConfig } from './perfConfig.js';
 import { buildLoadoutCatalog } from './loadoutCatalog.js';
 import * as realDocker from './docker.js';
@@ -140,8 +140,18 @@ const isWindows = process.platform === 'win32';
 //   LISTEN scan. Kept here in case that assumption ever changes.
 const INFRA_PORTS = isWindows ? [7070, MCP_TCP_PORT] : [];
 
+/** Mock mode never initializes perf (no DB) — the Settings modal still polls
+ *  perf:status, so report a truthful "off" instead of throwing (#mock). */
+const PERF_STATUS_UNINITIALIZED = {
+  enabled: false,
+  source: 'settings' as const,
+  otlp: { enabled: false, endpoint: null, source: 'settings' as const },
+  eventCounts: {}
+};
+
 /** Re-read config + env and reconfigure the perf pipeline (used after settings changes). */
 async function reapplyPerfConfig(): Promise<void> {
+  if (!getEffectivePerf()) return;
   await reconfigurePerf(
     resolvePerfConfig(
       { perfTelemetry: await getPerfTelemetry(), perfOtlp: await getPerfOtlp() },
@@ -1276,16 +1286,16 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('config:setPerfTelemetry', async (_e, enabled: boolean) => {
     await setPerfTelemetry(enabled === true);
     await reapplyPerfConfig();
-    return getPerfStatus();
+    return getEffectivePerf() ? getPerfStatus() : PERF_STATUS_UNINITIALIZED;
   });
 
   ipcMain.handle('config:setPerfOtlp', async (_e, enabled: boolean, endpoint: string) => {
     await setPerfOtlp(enabled === true, String(endpoint ?? ''));
     await reapplyPerfConfig();
-    return getPerfStatus();
+    return getEffectivePerf() ? getPerfStatus() : PERF_STATUS_UNINITIALIZED;
   });
 
-  ipcMain.handle('perf:status', async () => getPerfStatus());
+  ipcMain.handle('perf:status', async () => getEffectivePerf() ? getPerfStatus() : PERF_STATUS_UNINITIALIZED);
 
   // ── Model-endpoint registry (#250) ─────────────────────────────────────
   ipcMain.handle('endpoints:list', () => listEndpoints());
