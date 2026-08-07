@@ -144,6 +144,14 @@ export interface UsageBudget {
   presets: Record<Exclude<UsageBudgetPreset, 'custom'>, number>;
 }
 
+/** Display preferences (mirrors `UiPrefs` in main/config). 0 = unlimited. */
+export interface UiPrefs {
+  showBudgetBar: boolean;
+  showSessionCost: boolean;
+  maxSessions: number;
+  maxSessionAgeDays: number;
+}
+
 const api = {
   app: {
     mockMode: (): Promise<boolean> => ipcRenderer.invoke('app:mockMode'),
@@ -403,6 +411,7 @@ const api = {
       disableHardwareAcceleration: boolean;
       autoReloadLoadouts: boolean;
       usageBudget: UsageBudget;
+      uiPrefs: UiPrefs;
     }> => ipcRenderer.invoke('config:get'),
     setFleetRoot: (path: string): Promise<{ fleetRoot: string; sharedDir: string }> =>
       ipcRenderer.invoke('config:setFleetRoot', path),
@@ -416,7 +425,9 @@ const api = {
       preset: UsageBudgetPreset,
       customTokens: number
     ): Promise<{ usageBudget: UsageBudget }> =>
-      ipcRenderer.invoke('config:setUsageBudget', preset, customTokens)
+      ipcRenderer.invoke('config:setUsageBudget', preset, customTokens),
+    setUiPrefs: (prefs: Partial<UiPrefs>): Promise<{ uiPrefs: UiPrefs }> =>
+      ipcRenderer.invoke('config:setUiPrefs', prefs)
   },
   usage: {
     /** Total tokens spent across the fleet in the trailing rolling window —

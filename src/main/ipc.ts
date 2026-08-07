@@ -23,6 +23,8 @@ import {
   setAutoReloadLoadouts,
   getUsageBudget,
   setUsageBudget,
+  getUiPrefs,
+  setUiPrefs,
   USAGE_BUDGET_WINDOW_HOURS,
   type UsageBudgetPreset,
   setFavorite,
@@ -1224,7 +1226,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     sharedDir: await fleetSharedDir(),
     disableHardwareAcceleration: await getHardwareAccelDisabled(),
     autoReloadLoadouts: await getAutoReloadLoadouts(),
-    usageBudget: await getUsageBudget()
+    usageBudget: await getUsageBudget(),
+    uiPrefs: await getUiPrefs()
   }));
   ipcMain.handle('config:setAutoReloadLoadouts', async (_e, enabled: boolean) => {
     await setAutoReloadLoadouts(!!enabled);
@@ -1237,6 +1240,12 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       return { usageBudget: await getUsageBudget() };
     }
   );
+  // Display preferences (budget-bar/session-cost visibility, session-list
+  // filters). Partial merge — the renderer sends only what changed.
+  ipcMain.handle('config:setUiPrefs', async (_e, prefs: unknown) => {
+    await setUiPrefs((prefs ?? {}) as Partial<import('./config.js').UiPrefs>);
+    return { uiPrefs: await getUiPrefs() };
+  });
   // Plan-usage bar numerator: total tokens spent across the fleet in the
   // trailing rolling window. The allowance (denominator) lives in config.
   ipcMain.handle('usage:rollingSpend', () => {
