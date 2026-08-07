@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { closeDb, openDb } from './db.js';
 import { PerfStore } from './perfStore.js';
 import {
-  initPerf, shutdownPerf, reconfigurePerf, perfSpan, perfSpanAsync, getEffectivePerf
+  initPerf, shutdownPerf, reconfigurePerf, perfSpan, perfSpanAsync, getEffectivePerf,
+  recordPtyChunk
 } from './perf.js';
 import type { EffectivePerfConfig } from './perfConfig.js';
 import type Database from 'better-sqlite3';
@@ -21,22 +22,23 @@ const OFF: EffectivePerfConfig = {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Shared fixtures — used by both describe blocks below.
+let dir: string;
+let db: Database.Database;
+let store: PerfStore;
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'perf-'));
+  db = openDb(dir);
+  store = new PerfStore(db);
+});
+afterEach(async () => {
+  await shutdownPerf();
+  closeDb();
+  rmSync(dir, { recursive: true, force: true });
+});
+
 describe('perf tracer pipeline', () => {
-  let dir: string;
-  let db: Database.Database;
-  let store: PerfStore;
-
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'perf-'));
-    db = openDb(dir);
-    store = new PerfStore(db);
-  });
-  afterEach(async () => {
-    await shutdownPerf();
-    closeDb();
-    rmSync(dir, { recursive: true, force: true });
-  });
-
   it('records spans >= 25ms as slow_op rows and drops fast spans', async () => {
     initPerf(store, ON);
     perfSpan('claude_fleet.test.slow', () => { const end = Date.now() + 40; while (Date.now() < end) { /* busy */ } });
@@ -80,5 +82,49 @@ describe('perf tracer pipeline', () => {
     initPerf(store, ON);
     await shutdownPerf();
     await expect(shutdownPerf()).resolves.toBeUndefined();
+  });
+});
+
+describe('stall sampler + pty counters', () => {
+  // dir/db/store/afterEach identical to the tracer describe — reuse via the same outer scope.
+
+  it('records a stall row when the sampled window max exceeds 50ms', async () => {
+    let max = 10;
+    initPerf(store, ON, { delaySource: () => ({ p50: 2, p99: 8, max }), sampleIntervalMs: 20 });
+    await sleep(50); // ≥1 quiet window — below threshold, no row
+    max = 120;
+    await sleep(50); // ≥1 stalled window
+    await shutdownPerf();
+    const rows = db.prepare(`SELECT dur_ms, meta FROM perf_events WHERE kind = 'stall'`).all() as Array<{ dur_ms: number; meta: string }>;
+    expect(rows.length).toBeGreaterThanOrEqual(1);
+    expect(rows[0].dur_ms).toBe(120);
+    expect(JSON.parse(rows[0].meta)).toEqual({ p50: 2, p99: 8, max: 120 });
+  });
+
+  it('aggregates pty chunks into per-session pty_window rows', async () => {
+    initPerf(store, ON, { delaySource: () => ({ p50: 0, p99: 0, max: 0 }), sampleIntervalMs: 20 });
+    recordPtyChunk('ws-1', 'sess-a', 1000);
+    recordPtyChunk('ws-1', 'sess-a', 500);
+    recordPtyChunk('ws-2', 'sess-b', 42);
+    await sleep(50);
+    await shutdownPerf();
+    const rows = db.prepare(
+      `SELECT session_id, workspace_id, meta FROM perf_events WHERE kind = 'pty_window' AND name = 'claude_fleet.pty.bytes' ORDER BY session_id`
+    ).all() as Array<{ session_id: string; workspace_id: string; meta: string }>;
+    expect(rows.map((r) => [r.workspace_id, r.session_id, JSON.parse(r.meta).value])).toEqual([
+      ['ws-1', 'sess-a', 1500],
+      ['ws-2', 'sess-b', 42]
+    ]);
+    const chunks = db.prepare(
+      `SELECT meta FROM perf_events WHERE kind = 'pty_window' AND name = 'claude_fleet.pty.chunks' AND session_id = 'sess-a'`
+    ).get() as { meta: string };
+    expect(JSON.parse(chunks.meta).value).toBe(2);
+  });
+
+  it('recordPtyChunk while disabled is a no-op', async () => {
+    initPerf(store, OFF);
+    recordPtyChunk('ws-1', 'sess-a', 1000);
+    await shutdownPerf();
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM perf_events WHERE kind = 'pty_window'`).get()).toEqual({ n: 0 });
   });
 });
