@@ -138,12 +138,14 @@ export interface MockOpts {
     containerId?: string;
     state: 'running' | 'stopped' | 'deleted';
     status?: string;
-    workspaceRoot: string;
+    workspaceRoot?: string;
     workspaceSubdir?: string;
     kind?: 'container' | 'local';
     image?: string;
     resources?: { cpus?: number; memoryMb?: number };
-    authMode?: 'oauth' | 'apikey';
+    authMode?: 'oauth' | 'apikey' | 'endpoint';
+    /** authMode 'endpoint' only — references a registry entry by id. */
+    endpointId?: string;
     env?: { plain: Record<string, string>; secretKeys: string[] };
     mirror?: { default: 'on' | 'off'; cleanup: 'delete' | 'preserve' };
     control?: { canControl?: Array<{ id: string; verbs: Array<'read' | 'post' | 'pause'> }> };
@@ -151,6 +153,8 @@ export interface MockOpts {
     createdAt?: number;
     lastUsedAt?: number;
   }>;
+  /** Endpoint registry entries returned from endpoints:list. Defaults to []. */
+  endpoints?: Array<{ id: string; name: string; modelId: string; baseUrl: string }>;
   // Images returned from images:list. Defaults to [].
   imageLibrary?: Array<{
     ref: string;
@@ -252,7 +256,8 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       'loadouts:listSources',
       'loadouts:addSource',
       'loadouts:removeSource',
-      'loadouts:refreshSource'
+      'loadouts:refreshSource',
+      'endpoints:list'
     ];
     for (const ch of channels) {
       try {
@@ -474,6 +479,10 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       g.__calls.refreshSource.push(base);
       return undefined;
     });
+
+    // Endpoint registry mock (#256). Returns the caller's endpoints list
+    // (defaults to []) so workspace-form tests can exercise endpoint selection.
+    ipcMain.handle('endpoints:list', () => opts.endpoints ?? []);
 
     // Cost endpoints used by the sessions table and detail views;
     // return zeroed data for tests that don't care.

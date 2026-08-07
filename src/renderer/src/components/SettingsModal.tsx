@@ -54,16 +54,18 @@ function formFromEndpoint(ep: ModelEndpoint): EndpointFormState {
   };
 }
 
+export type ActiveTab = 'settings' | 'endpoints';
+
 interface Props {
   onClose: () => void;
   /** Called after a successful save with the new config so the app can refresh. */
   onSaved: (config: { fleetRoot: string; sharedDir: string }) => void;
+  /** Open the modal directly on this tab (default: 'settings'). */
+  initialTab?: ActiveTab;
 }
 
-type ActiveTab = 'settings' | 'endpoints';
-
-export function SettingsModal({ onClose, onSaved }: Props) {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('settings');
+export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
+  const [activeTab, setActiveTab] = useState<ActiveTab>(initialTab ?? 'settings');
 
   // ── Settings tab state ──────────────────────────────────────────────────
   const [fleetRoot, setFleetRoot] = useState('');

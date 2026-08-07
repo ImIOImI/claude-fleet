@@ -21,6 +21,14 @@ import type {
 } from '../App';
 import { AdvancedImageSearchModal, IconSearch } from './AdvancedImageSearchModal';
 import { eligibleAcceptFromManagers, ManagerGlyph } from './committee';
+import { ModelCombobox, type EndpointEntry } from './ModelCombobox';
+import {
+  claudeAuthFromInitial,
+  deriveAuthFields,
+  modelFromInitial,
+  type ClaudeAuth,
+  type ModelSelection
+} from './modelPicker';
 
 export type WorkspaceKind = 'container' | 'local';
 
@@ -128,6 +136,9 @@ interface Props {
   primaryLabel?: string;
   /** Optional slot for extra footer buttons. */
   extraFooterLeft?: ReactNode;
+  /** Opens the app Settings modal on a tab — used by "＋ Add endpoint…" and
+   *  the endpoint auth note's "edit" link. Threaded from App.tsx. */
+  onOpenSettings?: (tab: 'endpoints') => void;
 }
 
 export function WorkspaceForm({
@@ -140,7 +151,8 @@ export function WorkspaceForm({
   onClone,
   onDelete,
   primaryLabel: primaryLabelOverride,
-  extraFooterLeft
+  extraFooterLeft,
+  onOpenSettings
 }: Props) {
   const [name, setName] = useState(initial?.name ?? '');
   const [description, setDescription] = useState(initial?.description ?? '');
@@ -149,9 +161,14 @@ export function WorkspaceForm({
   const [hue, setHue] = useState<number | null>(initial?.color?.hue ?? null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [workspaceSubdir, setWorkspaceSubdir] = useState(initial?.workspaceSubdir ?? '');
-  const [authMode, setAuthMode] = useState<AuthMode>(initial?.authMode ?? 'oauth');
-  const [endpointId, setEndpointId] = useState<string | undefined>(initial?.endpointId);
-  const [endpoints, setEndpoints] = useState<Array<{ id: string; name: string; modelId: string; baseUrl: string }>>([]);
+  const [model, setModel] = useState<ModelSelection>(() =>
+    modelFromInitial(initial?.authMode, initial?.endpointId)
+  );
+  const [claudeAuth, setClaudeAuth] = useState<ClaudeAuth>(() =>
+    claudeAuthFromInitial(initial?.authMode)
+  );
+  const [endpoints, setEndpoints] = useState<EndpointEntry[]>([]);
+  const [endpointsLoaded, setEndpointsLoaded] = useState(false);
   const [envRows, setEnvRows] = useState<EnvRow[]>(() => {
     const rows: EnvRow[] = [];
     if (initial?.plainEnv) {
@@ -213,6 +230,13 @@ export function WorkspaceForm({
   // manifest had, including an empty value, so containerLevelChanged
   // doesn't see a spurious diff when the user opens-and-saves an edit
   // with no image change.
+  const refreshEndpoints = (): void => {
+    (window.api.endpoints.list() as Promise<EndpointEntry[]>).then((list) => {
+      setEndpoints(list);
+      setEndpointsLoaded(true);
+    });
+  };
+
   useEffect(() => {
     window.api.images.list().then((entries: ImageEntry[]) => {
       setLibraryImages(entries);
@@ -221,7 +245,7 @@ export function WorkspaceForm({
         setImage(recent?.ref ?? DEFAULT_RUNNER_IMAGE);
       }
     });
-    (window.api.endpoints.list() as Promise<Array<{ id: string; name: string; modelId: string; baseUrl: string }>>).then(setEndpoints);
+    refreshEndpoints();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -297,8 +321,13 @@ export function WorkspaceForm({
       setError('Image reference is required for a container workspace.');
       return null;
     }
-    if (authMode === 'endpoint' && !endpointId) {
-      setError('Pick a model endpoint.');
+    const { authMode, endpointId } = deriveAuthFields(model, claudeAuth);
+    if (
+      model.kind === 'endpoint' &&
+      endpointsLoaded &&
+      !endpoints.some((e) => e.id === model.endpointId)
+    ) {
+      setError("This workspace's model endpoint was deleted — pick another model.");
       return null;
     }
 
@@ -371,7 +400,7 @@ export function WorkspaceForm({
       workspaceRoot: kind === 'local' ? workspaceRoot.trim() : undefined,
       image: kind === 'container' ? image.trim() : undefined,
       authMode,
-      endpointId: authMode === 'endpoint' ? endpointId : undefined,
+      endpointId,
       plainEnv,
       secretKeys,
       secrets,
@@ -647,73 +676,72 @@ export function WorkspaceForm({
         />
       </div>
 
-      <div className="form-row" aria-label="Auth mode">
-        <label>Auth</label>
-        <div className="kind-radios" role="radiogroup">
-          <label className={`kind-radio ${authMode === 'oauth' ? 'active' : ''}`}>
-            <input
-              type="radio"
-              name="auth-mode"
-              value="oauth"
-              checked={authMode === 'oauth'}
-              onChange={() => setAuthMode('oauth')}
-              disabled={busy}
-            />
-            <span>OAuth</span>
-            <span className="kind-help">log in via Claude.ai</span>
-          </label>
-          <label
-            className={`kind-radio ${authMode === 'apikey' ? 'active' : ''} ${apiKeyAvailable ? '' : 'disabled'}`}
-            title={apiKeyAvailable ? '' : 'Add ANTHROPIC_API_KEY in Env vars to enable'}
-          >
-            <input
-              type="radio"
-              name="auth-mode"
-              value="apikey"
-              checked={authMode === 'apikey'}
-              onChange={() => setAuthMode('apikey')}
-              disabled={busy || !apiKeyAvailable}
-            />
-            <span>API key {!apiKeyAvailable && '🔒'}</span>
-            <span className="kind-help">
-              {apiKeyAvailable ? 'ANTHROPIC_API_KEY in env' : 'set ANTHROPIC_API_KEY below'}
-            </span>
-          </label>
-          <label
-            className={`kind-radio ${authMode === 'endpoint' ? 'active' : ''} ${endpoints.length ? '' : 'disabled'}`}
-            title={endpoints.length ? '' : 'Add a model endpoint in Settings to enable'}
-          >
-            <input
-              type="radio"
-              name="auth-mode"
-              value="endpoint"
-              checked={authMode === 'endpoint'}
-              onChange={() => setAuthMode('endpoint')}
-              disabled={busy || endpoints.length === 0}
-            />
-            <span>Endpoint {endpoints.length === 0 && '🔒'}</span>
-            <span className="kind-help">
-              {endpoints.length ? 'non-Claude model via registry' : 'register one in Settings'}
-            </span>
-          </label>
-        </div>
+      <div className="form-row" aria-label="Model">
+        <label>Model</label>
+        <ModelCombobox
+          value={model}
+          endpoints={endpoints}
+          endpointsLoaded={endpointsLoaded}
+          disabled={busy}
+          onChange={setModel}
+          onOpen={refreshEndpoints}
+          onAddEndpoint={onOpenSettings ? () => onOpenSettings('endpoints') : undefined}
+        />
       </div>
 
-      {authMode === 'endpoint' && (
-        <div className="form-row">
-          <label>Model endpoint</label>
-          <select
-            value={endpointId ?? ''}
-            onChange={(e) => setEndpointId(e.target.value || undefined)}
-            disabled={busy}
-          >
-            <option value="">— pick an endpoint —</option>
-            {endpoints.map((ep) => (
-              <option key={ep.id} value={ep.id}>
-                {ep.name} — {ep.modelId} ({ep.baseUrl})
-              </option>
-            ))}
-          </select>
+      {model.kind === 'claude' ? (
+        <div className="form-row" aria-label="Auth mode">
+          <label>Auth</label>
+          <div className="kind-radios" role="radiogroup">
+            <label className={`kind-radio ${claudeAuth === 'oauth' ? 'active' : ''}`}>
+              <input
+                type="radio"
+                name="auth-mode"
+                value="oauth"
+                checked={claudeAuth === 'oauth'}
+                onChange={() => setClaudeAuth('oauth')}
+                disabled={busy}
+              />
+              <span>OAuth</span>
+              <span className="kind-help">log in via Claude.ai</span>
+            </label>
+            <label
+              className={`kind-radio ${claudeAuth === 'apikey' ? 'active' : ''} ${apiKeyAvailable ? '' : 'disabled'}`}
+              title={apiKeyAvailable ? '' : 'Add ANTHROPIC_API_KEY in Env vars to enable'}
+            >
+              <input
+                type="radio"
+                name="auth-mode"
+                value="apikey"
+                checked={claudeAuth === 'apikey'}
+                onChange={() => setClaudeAuth('apikey')}
+                disabled={busy || !apiKeyAvailable}
+              />
+              <span>API key {!apiKeyAvailable && '🔒'}</span>
+              <span className="kind-help">
+                {apiKeyAvailable ? 'ANTHROPIC_API_KEY in env' : 'set ANTHROPIC_API_KEY below'}
+              </span>
+            </label>
+          </div>
+        </div>
+      ) : (
+        <div className="form-row" aria-label="Auth mode">
+          <label>Auth</label>
+          <div className="auth-note">
+            🔑{' '}
+            <span>
+              <b>{endpoints.find((e) => e.id === model.endpointId)?.name ?? '(deleted endpoint)'}</b>{' '}
+              — key from endpoint registry (none stored → placeholder token)
+              {onOpenSettings && (
+                <>
+                  {' · '}
+                  <a className="auth-note-edit" onClick={() => onOpenSettings('endpoints')}>
+                    edit
+                  </a>
+                </>
+              )}
+            </span>
+          </div>
         </div>
       )}
 

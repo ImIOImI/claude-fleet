@@ -31,6 +31,8 @@ interface Props {
   onClone: (submit: WorkspaceFormSubmit) => Promise<void>;
   /** Workspace was deleted — caller refreshes + closes. */
   onDeleted: () => void;
+  /** Open Settings modal on a specific tab (e.g. deep-link to Model Endpoints). */
+  onOpenSettings?: (tab: 'endpoints') => void;
 }
 
 export function EditWorkspaceModal({
@@ -40,7 +42,8 @@ export function EditWorkspaceModal({
   onClose,
   onSave,
   onClone,
-  onDeleted
+  onDeleted,
+  onOpenSettings
 }: Props) {
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
 
@@ -111,6 +114,7 @@ export function EditWorkspaceModal({
             onCancel={onClose}
             onClone={handleClone}
             onDelete={handleDeleteRequest}
+            onOpenSettings={onOpenSettings}
           />
         </div>
       </div>
