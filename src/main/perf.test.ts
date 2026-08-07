@@ -6,7 +6,7 @@ import { closeDb, openDb } from './db.js';
 import { PerfStore } from './perfStore.js';
 import {
   initPerf, shutdownPerf, reconfigurePerf, perfSpan, perfSpanAsync, getEffectivePerf,
-  recordPtyChunk
+  recordPtyChunk, getPerfStatus
 } from './perf.js';
 import type { EffectivePerfConfig } from './perfConfig.js';
 import type Database from 'better-sqlite3';
@@ -126,5 +126,22 @@ describe('stall sampler + pty counters', () => {
     recordPtyChunk('ws-1', 'sess-a', 1000);
     await shutdownPerf();
     expect(db.prepare(`SELECT COUNT(*) AS n FROM perf_events WHERE kind = 'pty_window'`).get()).toEqual({ n: 0 });
+  });
+});
+
+describe('getPerfStatus', () => {
+  it('reflects effective config + 24h counts (flushing pending rows first)', () => {
+    initPerf(store, ON);
+    store.enqueue({ ts: Date.now(), kind: 'stall', durMs: 60 });
+    const s = getPerfStatus();
+    expect(s.enabled).toBe(true);
+    expect(s.source).toBe('settings');
+    expect(s.otlp).toEqual({ enabled: false, endpoint: null, source: 'settings' });
+    expect(s.eventCounts.stall).toBe(1);
+  });
+
+  it('throws before init', async () => {
+    await shutdownPerf();
+    expect(() => getPerfStatus()).toThrow(/init/i);
   });
 });

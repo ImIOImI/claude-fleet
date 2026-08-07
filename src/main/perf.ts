@@ -126,8 +126,27 @@ interface Runtime {
 }
 let rt: Runtime | null = null;
 
+export interface PerfStatus {
+  enabled: boolean;
+  source: 'settings' | 'env-override';
+  otlp: { enabled: boolean; endpoint: string | null; source: 'settings' | 'env' };
+  eventCounts: Record<string, number>;
+}
+
 export function getEffectivePerf(): EffectivePerfConfig | null {
   return rt?.effective ?? null;
+}
+
+/** One-call status for perf_status (MCP) and perf:status (Settings UI). */
+export function getPerfStatus(): PerfStatus {
+  if (!rt) throw new Error('perf not initialized');
+  rt.store.flush(); // counts include anything still buffered
+  return {
+    enabled: rt.effective.recording,
+    source: rt.effective.recordingSource,
+    otlp: rt.effective.otlp,
+    eventCounts: rt.store.counts24h()
+  };
 }
 
 export function initPerf(store: PerfStore, effective: EffectivePerfConfig, hooks?: PerfInitHooks): void {
