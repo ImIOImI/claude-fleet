@@ -13,6 +13,7 @@
 // live), and after our own rename/delete actions.
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { colorFor } from '../App';
 import type { SessionListItem } from '../../../preload';
 import { sessionsForScope, filterSessions, partitionByOpen, tagCounts } from '../sessionsView';
@@ -69,6 +70,33 @@ function formatUsd(usd: number): string {
   return `$${Math.round(usd).toLocaleString('en-US')}`;
 }
 
+// Row-menu icons — 12×12 viewBox, same visual set as the session-tab ⋮ menu
+// (TerminalPane). Resume reuses the circular-arrow, rename the pencil.
+function IconResume(): JSX.Element {
+  return (
+    <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M10 6 A4 4 0 1 1 8.6 3" />
+      <path d="M10.4 1.6 L10.4 4 L8 4" />
+    </svg>
+  );
+}
+function IconRename(): JSX.Element {
+  return (
+    <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.2" aria-hidden="true">
+      <path d="M2 9 L9 2 L11 4 L4 11 L2 11 Z" />
+    </svg>
+  );
+}
+function IconDelete(): JSX.Element {
+  return (
+    <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" aria-hidden="true">
+      <path d="M2 3.5 H10" />
+      <path d="M4.5 3.5 V2.5 H7.5 V3.5" />
+      <path d="M3 3.5 L3.7 10.5 H8.3 L9 3.5" />
+    </svg>
+  );
+}
+
 export function SessionsPane({
   selectedWorkspaceId,
   busySessionIds,
@@ -87,6 +115,38 @@ export function SessionsPane({
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [activeTags, setActiveTags] = useState<string[]>([]);
   const [tagMenu, setTagMenu] = useState(false);
+
+  // ── Row ⋮ menu: resume / rename / delete ──────────────────────────────────
+  // Single open menu at a time; viewport coords for the portaled dropdown.
+  // Same pattern as the session-tab menu (TerminalPane) and workspace chips.
+  const [rowMenu, setRowMenu] = useState<{ id: string; top: number; left: number } | null>(null);
+
+  // Close the menu on any outside click / Escape / layout shift (the portal is
+  // positioned in viewport coords, so we can't follow the trigger when it moves).
+  useEffect(() => {
+    if (!rowMenu) return;
+    const close = (): void => setRowMenu(null);
+    const esc = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setRowMenu(null);
+    };
+    document.addEventListener('click', close);
+    document.addEventListener('keydown', esc);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      document.removeEventListener('click', close);
+      document.removeEventListener('keydown', esc);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [rowMenu]);
+
+  function openRowMenu(trigger: HTMLElement, id: string): void {
+    const r = trigger.getBoundingClientRect();
+    const left = Math.max(8, Math.min(r.left, window.innerWidth - 188));
+    setRowMenu({ id, top: r.bottom + 4, left });
+  }
+
   const toggleTag = (t: string): void =>
     setActiveTags((prev) => (prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]));
 
@@ -263,30 +323,17 @@ export function SessionsPane({
             <div className="session-row-actions">
               <button
                 className="session-row-action"
-                title="Resume this session"
-                aria-label="Resume session"
-                onClick={() => onResume(s)}
-              >
-                ↻
-              </button>
-              <button
-                className="session-row-action"
-                title="Rename"
-                aria-label="Rename session"
-                onClick={() => {
-                  setDraftName(s.userSetName ?? displayTitle(s));
-                  setEditingId(s.id);
+                title="Session actions"
+                aria-label="Session actions"
+                aria-haspopup="menu"
+                aria-expanded={rowMenu?.id === s.id}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (rowMenu?.id === s.id) setRowMenu(null);
+                  else openRowMenu(e.currentTarget, s.id);
                 }}
               >
-                ✎
-              </button>
-              <button
-                className="session-row-action"
-                title="Delete session + transcript"
-                aria-label="Delete session"
-                onClick={() => setConfirmDeleteId(s.id)}
-              >
-                🗑
+                ⋮
               </button>
             </div>
           )
@@ -392,6 +439,57 @@ export function SessionsPane({
           </ul>
         )}
       </div>
+      {rowMenu &&
+        (() => {
+          const s = items.find((x) => x.id === rowMenu.id);
+          if (!s) return null;
+          const isOpen = openSessions?.has(s.id) ?? false;
+          return createPortal(
+            <div
+              className="ws-chip-menu"
+              role="menu"
+              style={{ position: 'fixed', top: rowMenu.top, left: rowMenu.left }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                role="menuitem"
+                title={isOpen ? 'Jump to the open terminal tab' : 'Resume this session'}
+                onClick={() => {
+                  setRowMenu(null);
+                  onResume(s);
+                }}
+              >
+                <IconResume />
+                <span>{isOpen ? 'Go to tab' : 'Resume'}</span>
+              </button>
+              <button
+                role="menuitem"
+                onClick={() => {
+                  setRowMenu(null);
+                  setDraftName(s.userSetName ?? displayTitle(s));
+                  setEditingId(s.id);
+                }}
+              >
+                <IconRename />
+                <span>Rename</span>
+              </button>
+              <div className="ws-chip-menu-divider" />
+              <button
+                role="menuitem"
+                className="danger"
+                title="Delete session + transcript"
+                onClick={() => {
+                  setRowMenu(null);
+                  setConfirmDeleteId(s.id);
+                }}
+              >
+                <IconDelete />
+                <span>Delete</span>
+              </button>
+            </div>,
+            document.body
+          );
+        })()}
     </>
   );
   return embedded ? body : <aside className="pane sidebar-left">{body}</aside>;

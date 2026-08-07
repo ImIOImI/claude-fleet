@@ -632,6 +632,9 @@ body {
   border-radius: var(--r-sm);
 }
 .session-row-action:hover { background: var(--bg); color: var(--ink); }
+/* The menu is portaled, so hovering it un-hovers the row — keep the open
+   trigger visible instead of fading it under its own menu. */
+.session-row-actions:has(> [aria-expanded='true']) { opacity: 1; }
 
 .session-row-confirm {
   display: flex;
