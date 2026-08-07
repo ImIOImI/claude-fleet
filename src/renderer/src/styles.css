@@ -1393,7 +1393,9 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
   margin-bottom: 5px;
 }
 .form-row input,
-.form-row select {
+.form-row select,
+.settings-section input:not([type='checkbox']),
+.settings-section select {
   background: var(--bg-canvas);
   border: 1px solid var(--rule);
   border-radius: var(--r-md);
@@ -1403,25 +1405,15 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
   font-family: var(--font-mono);
 }
 .form-row input:focus,
-.form-row select:focus {
+.form-row select:focus,
+.settings-section input:not([type='checkbox']):focus,
+.settings-section select:focus {
   outline: none;
   border-color: var(--ok);
 }
-.form-row input:disabled { opacity: 0.5; }
+.form-row input:disabled,
+.settings-section input:disabled { opacity: 0.5; }
 .form-row .form-hint { font-size: 11px; margin-top: 4px; color: var(--ink-2); }
-/* Checkbox setting: a horizontal box + label, not the uppercase field label. */
-.form-row label.checkbox-row {
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 0;
-  text-transform: none;
-  letter-spacing: normal;
-  font-size: 13px;
-  color: var(--ink-1);
-  cursor: pointer;
-}
-.form-row label.checkbox-row input { width: auto; margin: 0; cursor: pointer; }
 .error-text { color: var(--danger); }
 .form-status { font-size: 11px; color: var(--ink-1); margin: 8px 0; font-family: var(--font-mono); }
 
@@ -1466,6 +1458,81 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
   color: var(--ink);
 }
 .input-with-button button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── SettingsModal: grouped sections + setting rows ─────────────────── */
+.settings-section { margin-bottom: 18px; }
+.settings-section-header {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  padding-bottom: 6px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.setting-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+}
+.setting-row-text { flex: 1; min-width: 0; }
+.setting-title { font-size: 13px; color: var(--ink); }
+label.setting-title { display: block; cursor: pointer; }
+.setting-desc {
+  font-size: 11px;
+  color: var(--ink-2);
+  line-height: 1.4;
+  margin: 2px 0 0;
+}
+.setting-row input[type='checkbox'] {
+  margin: 3px 0 0;
+  cursor: pointer;
+  accent-color: var(--ok);
+  flex-shrink: 0;
+}
+.setting-row select { flex-shrink: 0; align-self: center; }
+.setting-custom-budget { margin-top: 8px; }
+.setting-custom-budget input { width: 100%; }
+.setting-custom-budget .setting-desc { margin-top: 6px; }
+
+/* ── SettingsModal: model-endpoint list rows ────────────────────────── */
+.endpoint-list { list-style: none; padding: 0; margin: 0 0 12px; }
+.endpoint-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.endpoint-row-text { flex: 1; min-width: 0; }
+.endpoint-name { font-weight: 500; font-size: 13px; color: var(--ink); }
+.endpoint-detail {
+  font-size: 11px;
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.endpoint-key-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--rule);
+  color: var(--ink-2);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.endpoint-key-badge.on {
+  background: color-mix(in oklab, var(--ok) 18%, transparent);
+  border-color: color-mix(in oklab, var(--ok) 35%, transparent);
+  color: var(--ok);
+}
 
 /* preload error */
 .preload-error {
