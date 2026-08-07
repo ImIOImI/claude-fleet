@@ -106,10 +106,12 @@ running in the main process, owned by `src/main/perf.ts`:
   all spans and applies its own sampling). Wrapped around the known
   synchronous suspects:
   - the JSONL ingest batch in `jsonlWatcher.ts` (the `ingestLine` chain),
-  - dockerode calls in `docker.ts`,
-  - vault operations,
   - every `ipcMain.handle` callback, generically, at registration in `ipc.ts`
     (span name = `claude_fleet.ipc.<channel>`).
+  Dockerode calls and vault operations are **attributed via their enclosing
+  `claude_fleet.ipc.<channel>` spans** in PR 1 — they run on the hot IPC
+  dispatch path, so the wrapping channel span captures their cost. Dedicated
+  child spans are a follow-up if stall data demands finer attribution grain.
   A `stall` that coincides with a `slow_op` is self-attributing at query time.
 - **PTY throughput counters:** OTel counters for bytes/chunks forwarded, with
   a `session_id` attribute, aggregated per 5 s window and persisted as
@@ -140,15 +142,18 @@ chain in `db.ts`:
 
 ```sql
 CREATE TABLE perf_events (
-  id         INTEGER PRIMARY KEY,
-  ts         INTEGER NOT NULL,          -- epoch ms
-  kind       TEXT NOT NULL,             -- stall | slow_op | pty_window | input_hop | output_hop | echo_rtt
-  session_id TEXT,                      -- nullable; broker session where applicable
-  name       TEXT,                      -- span/metric name for slow_op etc., else NULL
-  dur_ms     REAL,                      -- primary measurement
-  trace_id   TEXT,                      -- OTel trace id (spans only)
-  span_id    TEXT,                      -- OTel span id (spans only)
-  meta       TEXT                       -- JSON: span attributes, p50/p99/max, bytes, chunks, …
+  id           INTEGER PRIMARY KEY,
+  ts           INTEGER NOT NULL,          -- epoch ms
+  kind         TEXT NOT NULL,             -- stall | slow_op | pty_window | input_hop | output_hop | echo_rtt
+  workspace_id TEXT,                      -- NULL = app-global row (stalls, slow_ops without a specific workspace);
+                                          -- non-NULL = workspace-scoped (used for MCP snapshot scoping so
+                                          -- per-workspace PTY rows are confined to the caller's allowed set)
+  session_id   TEXT,                      -- nullable; claude session id where applicable
+  name         TEXT,                      -- span/metric name for slow_op etc., else NULL
+  dur_ms       REAL,                      -- primary measurement
+  trace_id     TEXT,                      -- OTel trace id (spans only)
+  span_id      TEXT,                      -- OTel span id (spans only)
+  meta         TEXT                       -- JSON: span attributes, p50/p99/max, bytes, chunks, …
 );
 CREATE INDEX idx_perf_events_ts ON perf_events(ts);
 CREATE INDEX idx_perf_events_kind_ts ON perf_events(kind, ts);
