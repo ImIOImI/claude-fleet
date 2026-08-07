@@ -78,12 +78,52 @@ const paused = new Set<string>();
 const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
   const pty = require('node-pty') as typeof NodePty;
   const p = pty.spawn(file, args, { name: 'xterm-256color', cwd, cols, rows, env });
+
+  // Track liveness so the ConPTY nudge below (and any late resize) never calls
+  // into an exited pty — node-pty on Node 22 throws "Cannot resize a pty that
+  // has already exited" as an *uncaught* error, which would crash the main
+  // process (see localSessions.resize, which guards the same way).
+  let exited = false;
+  p.onExit(() => {
+    exited = true;
+  });
+  const safeResize = (c: number, r: number): void => {
+    if (exited) return;
+    try {
+      p.resize(c, r);
+    } catch {
+      /* raced with exit */
+    }
+  };
+
+  // ConPTY overlap fix (#268): on Windows, `claude` runs under ConPTY, which
+  // keeps its own pseudoconsole buffer and reprints/reflows it to the frontend
+  // on updates. claude's TUI redraws incrementally (cursor-up + erase, no full
+  // clear), so if ConPTY's buffer state hasn't settled at the fitted width its
+  // reprints land on rows xterm already drew → overlapping/ghosted text on
+  // every response. ConPTY only reliably applies its size once the child has
+  // attached to the pseudoconsole, so the spawn-time cols/rows can be stale.
+  // A real winsize change after attach forces ConPTY to settle and re-emit a
+  // clean frame — the programmatic equivalent of the manual window-resize that
+  // heals it. POSIX PTYs (macOS/Linux, and the container backend's Linux PTY)
+  // don't need this, so it's Windows-only.
+  if (process.platform === 'win32') {
+    setTimeout(() => {
+      if (exited) return;
+      // Jitter one column and back so the value actually changes (a same-size
+      // resize can be a no-op and skip ConPTY's re-emit), landing back at the
+      // fitted size. The renderer's ResizeObserver keeps it in sync afterward.
+      safeResize(Math.max(1, cols - 1), rows);
+      safeResize(cols, rows);
+    }, 250);
+  }
+
   return {
     get pid() {
       return p.pid;
     },
     write: (d) => p.write(d),
-    resize: (c, r) => p.resize(c, r),
+    resize: safeResize,
     kill: (sig) => p.kill(sig),
     onData: (cb) => {
       p.onData(cb);
