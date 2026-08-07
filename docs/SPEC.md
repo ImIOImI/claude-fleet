@@ -329,9 +329,9 @@ App-level settings persist to `<userData>/config.json`: `{ fleetRoot?: string, d
 - `config:setHardwareAccelDisabled(disabled)` → `{ disableHardwareAcceleration }` — persist the HWA flag. `CLAUDE_FLEET_DISABLE_HWA=1` is an env override (dev shortcut) that forces it on regardless of the persisted value, matching the `CLAUDE_FLEET_MOCK` / `ANTHROPIC_API_KEY` pattern.
 - `config:setAutoReloadLoadouts(enabled)` → `{ autoReloadLoadouts }` — persist the auto-reload flag.
 - `config:setUsageBudget(preset, customTokens)` → `{ usageBudget }` — persist the plan-usage preset and the custom token amount it falls back to (`customTokens` is rounded, clamped ≥0).
-- `config:setPerfTelemetry(enabled: boolean)` → `void` — persist the `perfTelemetry` flag and reconfigure the OTel SDK (shutdown + re-init, no restart needed). Rejected silently under `CLAUDE_FLEET_PERF=0`.
+- `config:setPerfTelemetry(enabled: boolean)` → `void` — persist the `perfTelemetry` flag and reconfigure the OTel SDK (shutdown + re-init, no restart needed). Under `CLAUDE_FLEET_PERF=0`, the setting persists to config.json but the env override keeps recording off; reconfigure re-resolves and env wins.
 - `config:setPerfOtlp(enabled: boolean, endpoint: string)` → `void` — persist the OTLP export config and reconfigure the SDK.
-- `perf:status` → `PerfStatus` — read-only snapshot: `{ enabled: boolean, source: 'settings'|'env-override', otlp: { enabled, endpoint, source: 'settings'|'env' }, eventCounts: Record<kind, count> }` (24-hour kind counts). Returns a static `{ enabled: false }` in mock mode.
+- `perf:status` → `PerfStatus` — read-only snapshot: `{ enabled: boolean, source: 'settings'|'env-override', otlp: { enabled, endpoint, source: 'settings'|'env' }, eventCounts: Record<kind, count> }` (24-hour kind counts). In mock mode, returns a truthful all-off PerfStatus (`{ enabled: false, source: 'settings', otlp: { enabled: false, endpoint: null, source: 'settings' }, eventCounts: {} }`)
 - `usage:rollingSpend()` → `{ spentTokens, windowHours }` — the plan-usage bar's **numerator**: total tokens (all four types) spent across the **whole fleet** in the trailing `windowHours` window, via `db.ts:tokensSpentSince(Date.now() - windowMs)`. App.tsx polls this every 15s (separate, slower cadence than the per-workspace summary push — it's one cheap aggregate and the rolling window moves on the order of minutes).
 
 ### Model endpoints (#250)
@@ -1349,7 +1349,7 @@ Intentionally narrow scope: this is for iterating on UI without a daemon, image,
 **Other dev-env flags (main process, dev-only unless noted):**
 - `CLAUDE_FLEET_ROOT` — override the fleet root (the e2e suite uses this so test runs don't pollute `~/fleet`).
 - `CLAUDE_FLEET_DISABLE_HWA=1` — force-disable hardware acceleration (silences WSLg GPU errors).
-- `CLAUDE_FLEET_PERF=0` — force-disable performance telemetry recording; the OTel pipeline never initializes, `perf:status` returns `{ enabled: false, source: 'env-override' }`. Honored in packaged builds (so e2e tests can suppress the pipeline without touching config). Never forces recording *on*.
+- `CLAUDE_FLEET_PERF=0` — force recording off; `initPerf` runs (prune executes, perf:status works, source reads 'env-override'), but the OTel SDK providers (tracer/meter, sampler, flush timer) never start. Honored in packaged builds (so e2e tests can suppress the pipeline without touching config). Never forces recording *on*.
 - `OTEL_EXPORTER_OTLP_ENDPOINT` — force OTLP export to the given endpoint URL (overrides `perfOtlp.enabled`/`.endpoint`); standard OTel env var, useful for dev/e2e with a local collector. `OTEL_EXPORTER_OTLP_HEADERS` carries auth headers in the standard `Key=Value,Key2=Value2` format.
 
 ### Testing strategy

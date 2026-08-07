@@ -142,7 +142,7 @@ chain in `db.ts`:
 
 ```sql
 CREATE TABLE perf_events (
-  id           INTEGER PRIMARY KEY,
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
   ts           INTEGER NOT NULL,          -- epoch ms
   kind         TEXT NOT NULL,             -- stall | slow_op | pty_window | input_hop | output_hop | echo_rtt
   workspace_id TEXT,                      -- NULL = app-global row (stalls, slow_ops without a specific workspace);
