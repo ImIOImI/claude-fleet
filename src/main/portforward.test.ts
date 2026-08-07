@@ -334,7 +334,35 @@ describe('PortForwardManager serving snapshot', () => {
     vi.useRealTimers();
   });
 
-  it('killPort forwards to the broker client', async () => {
+  it('killPort rejects ports not in the serving snapshot without constructing a broker client', async () => {
+    let makeClientCalls = 0;
+    const mgr = new PortForwardManager({
+      resolveEndpoint: async () => 'sock',
+      makeClient: () => {
+        makeClientCalls++;
+        return ({
+          ready: () => Promise.resolve(),
+          close: () => {},
+          listPorts: () => Promise.resolve([]),
+          dial: () => Promise.reject(new Error('stub')),
+          closeChannel: () => Promise.resolve(),
+          killPort: () => Promise.resolve({ ok: true })
+        }) as never;
+      },
+      onDetected: () => {},
+      onChanged: () => {},
+      excludePorts: () => []
+    });
+    // ws1 has no monitor (never reconciled), so 8765 is not in the serving list.
+    const res = await mgr.killPort('ws1', 8765);
+    expect(res).toEqual({ ok: false, error: 'port 8765 is not in the serving list' });
+    // The gate must fire before makeClient is called.
+    expect(makeClientCalls).toBe(0);
+    mgr.dispose();
+  });
+
+  it('killPort forwards to the broker client for a port in the serving snapshot', async () => {
+    vi.useFakeTimers();
     const calls: number[] = [];
     const mgr = new PortForwardManager({
       resolveEndpoint: async () => 'sock',
@@ -342,7 +370,7 @@ describe('PortForwardManager serving snapshot', () => {
         ({
           ready: () => Promise.resolve(),
           close: () => {},
-          listPorts: () => Promise.resolve([]),
+          listPorts: () => Promise.resolve([{ port: 8765, pid: 1 }]),
           dial: () => Promise.reject(new Error('stub')),
           closeChannel: () => Promise.resolve(),
           killPort: (port: number) => {
@@ -352,24 +380,50 @@ describe('PortForwardManager serving snapshot', () => {
         }) as never,
       onDetected: () => {},
       onChanged: () => {},
-      excludePorts: () => []
+      excludePorts: () => [],
+      probePort: () => Promise.resolve(true),
+      pollMs: 1000
     });
+    // Drive port 8765 into the serving snapshot via a poll tick.
+    mgr.reconcile(['ws1']);
+    await vi.advanceTimersByTimeAsync(1000);
+    vi.useRealTimers();
+    // Now killPort should pass the gate and reach the broker client.
     const res = await mgr.killPort('ws1', 8765);
     expect(res).toEqual({ ok: true });
     expect(calls).toEqual([8765]);
     mgr.dispose();
   });
 
-  it('killPort surfaces broker failure as ok:false', async () => {
+  it('killPort surfaces broker failure as ok:false for a serving port whose resolveEndpoint throws', async () => {
+    vi.useFakeTimers();
+    // We need port 8765 in the serving snapshot first, then simulate a broker
+    // failure at kill time by having resolveEndpoint throw after the poll phase.
+    let resolveShouldThrow = false;
     const mgr = new PortForwardManager({
       resolveEndpoint: async () => {
-        throw new Error('workspace not running');
+        if (resolveShouldThrow) throw new Error('workspace not running');
+        return 'sock';
       },
-      makeClient: () => ({}) as never,
+      makeClient: () =>
+        ({
+          ready: () => Promise.resolve(),
+          close: () => {},
+          listPorts: () => Promise.resolve([{ port: 8765, pid: 1 }]),
+          dial: () => Promise.reject(new Error('stub')),
+          closeChannel: () => Promise.resolve(),
+          killPort: () => Promise.resolve({ ok: true })
+        }) as never,
       onDetected: () => {},
       onChanged: () => {},
-      excludePorts: () => []
+      excludePorts: () => [],
+      probePort: () => Promise.resolve(true),
+      pollMs: 1000
     });
+    mgr.reconcile(['ws1']);
+    await vi.advanceTimersByTimeAsync(1000); // drive 8765 into snapshot
+    vi.useRealTimers();
+    resolveShouldThrow = true; // simulate failure at kill time
     const res = await mgr.killPort('ws1', 8765);
     expect(res.ok).toBe(false);
     expect(res.error).toContain('workspace not running');

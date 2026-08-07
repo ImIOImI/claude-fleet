@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { WorkspaceObservabilitySummary, UsageBudget, ServingPort } from '../../../preload';
 import { colorFor, type WorkspaceSummary } from '../App';
-import { PortsSection, type PortRowData } from './PortsSection';
+import { PortsSection } from './PortsSection';
 import {
   workspaceHostPath,
   workspacePathLabel,

@@ -272,6 +272,15 @@ export class PortForwardManager {
    *  port→pid at kill time; the snapshot row disappears via the normal
    *  poll once the socket closes. */
   async killPort(workspaceId: string, port: number): Promise<{ ok: boolean; error?: string }> {
+    // Defense-in-depth: the kill affordance only exists for serving rows, but
+    // we enforce the same boundary here so a buggy or compromised renderer
+    // cannot kill infra listeners (broker socket 7070, MCP relay 7071) or any
+    // never-probed non-HTTP port. The display-side INFRA_PORTS exclusions do
+    // not bind the broker, so this check is the authoritative gate.
+    const monitor = this.monitors.get(workspaceId);
+    if (!monitor?.serving.has(port)) {
+      return { ok: false, error: `port ${port} is not in the serving list` };
+    }
     let client: BrokerClient | undefined;
     try {
       const endpoint = await this.deps.resolveEndpoint(workspaceId);

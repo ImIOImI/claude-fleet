@@ -22,10 +22,13 @@ export function usePorts(): Record<string, ServingPort[]> {
     const unsub = window.api.ports.onChanged((workspaceId, ports) => {
       setByWorkspace((prev) => {
         if (ports.length === 0) {
-          if (!(workspaceId in prev)) return prev;
-          const next = { ...prev };
-          delete next[workspaceId];
-          return next;
+          // Store an empty array rather than deleting the key. Deleting would
+          // let a late-arriving ports:list seed overlay resurrect the row
+          // permanently if the seed lands after this clear. PortsSection
+          // renders nothing for empty arrays, so the visual result is
+          // identical. Broadcasts always win over the seed overlay below.
+          if (workspaceId in prev && prev[workspaceId].length === 0) return prev;
+          return { ...prev, [workspaceId]: [] };
         }
         return { ...prev, [workspaceId]: ports };
       });
