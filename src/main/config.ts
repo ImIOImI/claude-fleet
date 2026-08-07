@@ -133,7 +133,10 @@ async function read(): Promise<AppConfig> {
       autoReloadLoadouts:
         typeof parsed.autoReloadLoadouts === 'boolean' ? parsed.autoReloadLoadouts : undefined,
       usageBudget: parseUsageBudget(parsed.usageBudget),
-      uiPrefs: parseUiPrefs(parsed.uiPrefs)
+      uiPrefs: parseUiPrefs(parsed.uiPrefs),
+      favorites: Array.isArray(parsed.favorites)
+        ? parsed.favorites.filter((x): x is string => typeof x === 'string')
+        : undefined
     };
   } catch {
     cached = {};

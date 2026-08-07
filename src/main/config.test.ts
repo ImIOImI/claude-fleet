@@ -204,6 +204,16 @@ describe('setFavorite', () => {
     await setFavorite('spec-driven', true);
     expect(await getFleetRoot()).toBe(root);
   });
+
+  it('survives a settings write after a cold read from disk (regression: read() dropped favorites)', async () => {
+    await setFavorite('spec-driven', true);
+    // Cold read: the next setter rebuilds the cache from disk before writing.
+    _resetConfigCacheForTests();
+    await setUiPrefs({ showBudgetBar: false });
+    _resetConfigCacheForTests();
+    const parsed = JSON.parse(await readFile(configPath(), 'utf8'));
+    expect(parsed.favorites).toEqual(['spec-driven']);
+  });
 });
 
 describe('resolveWorkspaceConfig (#219)', () => {

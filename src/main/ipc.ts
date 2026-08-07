@@ -1241,7 +1241,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     }
   );
   // Display preferences (budget-bar/session-cost visibility, session-list
-  // filters). Partial merge — the renderer sends only what changed.
+  // filters). Accepts a partial; the settings modal sends all four keys.
   ipcMain.handle('config:setUiPrefs', async (_e, prefs: unknown) => {
     await setUiPrefs((prefs ?? {}) as Partial<import('./config.js').UiPrefs>);
     return { uiPrefs: await getUiPrefs() };
