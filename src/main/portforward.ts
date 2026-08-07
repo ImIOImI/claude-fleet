@@ -243,6 +243,10 @@ export class PortForwardManager {
         // it stays in `seen`: a non-HTTP listener, never reported.
         if (fails < MAX_PROBE_ATTEMPTS) next.delete(port);
       }
+      // A reconcile() may have stopped this workspace while a probe was in
+      // flight; the stop already broadcast the clearing snapshot, so a stale
+      // poll must not resurrect ghost rows it can never clear again.
+      if (this.monitors.get(workspaceId) !== monitor) return;
       monitor.seen = next;
       if (changed) this.deps.onChanged(workspaceId, servingSorted(monitor));
     } catch {

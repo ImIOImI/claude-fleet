@@ -272,6 +272,68 @@ describe('PortForwardManager serving snapshot', () => {
     vi.useRealTimers();
   });
 
+  it('a poll in flight when the workspace departs cannot resurrect ghost rows', async () => {
+    vi.useFakeTimers();
+    let releaseProbe: (v: boolean) => void = () => {};
+    const changes: Array<{ workspaceId: string; ports: ServingPort[] }> = [];
+    const mgr = new PortForwardManager({
+      resolveEndpoint: async () => 'sock',
+      makeClient: () =>
+        ({
+          ready: () => Promise.resolve(),
+          close: () => {},
+          listPorts: () => Promise.resolve([{ port: 3000, pid: 42 }]),
+          dial: () => Promise.reject(new Error('stub')),
+          closeChannel: () => Promise.resolve(),
+          killPort: () => Promise.resolve({ ok: true })
+        }) as never,
+      onDetected: () => {},
+      onChanged: (workspaceId, ports) => changes.push({ workspaceId, ports }),
+      excludePorts: () => [],
+      probePort: () => new Promise<boolean>((resolve) => (releaseProbe = resolve)),
+      pollMs: 1000
+    });
+    mgr.reconcile(['ws1']);
+    await vi.advanceTimersByTimeAsync(1000); // poll starts, probe now pending
+    mgr.reconcile([]);                        // ws1 departs mid-probe
+    releaseProbe(true);                       // probe finally passes
+    await vi.advanceTimersByTimeAsync(0);     // let the poll tail run
+    // The departed workspace must not have re-emitted ports after its stop.
+    // (stopMonitor with an empty serving map emits nothing, so `changes`
+    // must contain no entry with ports.length > 0.)
+    expect(changes.filter((c) => c.ports.length > 0)).toEqual([]);
+    mgr.dispose();
+    vi.useRealTimers();
+  });
+
+  it('emitted arrays are sorted by port ascending', async () => {
+    vi.useFakeTimers();
+    const changes: Array<{ workspaceId: string; ports: ServingPort[] }> = [];
+    const mgr = new PortForwardManager({
+      resolveEndpoint: async () => 'sock',
+      makeClient: () =>
+        ({
+          ready: () => Promise.resolve(),
+          close: () => {},
+          listPorts: () => Promise.resolve([{ port: 8765, pid: 1 }, { port: 3000, pid: 2 }]),
+          dial: () => Promise.reject(new Error('stub')),
+          closeChannel: () => Promise.resolve(),
+          killPort: () => Promise.resolve({ ok: true })
+        }) as never,
+      onDetected: () => {},
+      onChanged: (workspaceId, ports) => changes.push({ workspaceId, ports }),
+      excludePorts: () => [],
+      probePort: () => Promise.resolve(true),
+      pollMs: 1000
+    });
+    mgr.reconcile(['ws1']);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(changes).toHaveLength(1);
+    expect(changes[0].ports.map((p) => p.port)).toEqual([3000, 8765]);
+    mgr.dispose();
+    vi.useRealTimers();
+  });
+
   it('killPort forwards to the broker client', async () => {
     const calls: number[] = [];
     const mgr = new PortForwardManager({
