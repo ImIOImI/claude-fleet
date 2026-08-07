@@ -6,10 +6,13 @@
 import { perfSpanAsync } from './perf.js';
 
 export function instrumentIpcHandle(ipc: {
-  handle: (channel: string, listener: (...args: never[]) => unknown) => void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  handle: (channel: string, listener: (...args: any[]) => unknown) => void;
 }): void {
   const raw = ipc.handle.bind(ipc);
-  ipc.handle = (channel: string, listener: (...args: never[]) => unknown) =>
-    raw(channel, ((...args: never[]) =>
-      perfSpanAsync(`claude_fleet.ipc.${channel}`, () => listener(...args))) as never);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ipc.handle = (channel: string, listener: (...args: any[]) => unknown) =>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    raw(channel, ((...args: any[]) =>
+      perfSpanAsync(`claude_fleet.ipc.${channel}`, () => listener(...args))));
 }
