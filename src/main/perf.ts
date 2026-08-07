@@ -277,8 +277,9 @@ export async function perfSpanAsync<T>(
 /** PTY throughput instrumentation point (ipc.ts pty:attach data handler).
  *  No-op while recording is off. */
 export function recordPtyChunk(workspaceId: string | null, sessionId: string, byteLength: number): void {
-  if (!rt?.effective.recording) return;
+  const r = rt;
+  if (!r?.effective.recording) return;
   const attrs = { workspace_id: workspaceId ?? '', session_id: sessionId };
-  rt.ptyBytes?.add(byteLength, attrs);
-  rt.ptyChunks?.add(1, attrs);
+  r.ptyBytes?.add(byteLength, attrs);
+  r.ptyChunks?.add(1, attrs);
 }

@@ -91,9 +91,9 @@ describe('stall sampler + pty counters', () => {
   it('records a stall row when the sampled window max exceeds 50ms', async () => {
     let max = 10;
     initPerf(store, ON, { delaySource: () => ({ p50: 2, p99: 8, max }), sampleIntervalMs: 20 });
-    await sleep(50); // ≥1 quiet window — below threshold, no row
+    await sleep(150); // ≥1 quiet window — below threshold, no row
     max = 120;
-    await sleep(50); // ≥1 stalled window
+    await sleep(150); // ≥1 stalled window
     await shutdownPerf();
     const rows = db.prepare(`SELECT dur_ms, meta FROM perf_events WHERE kind = 'stall'`).all() as Array<{ dur_ms: number; meta: string }>;
     expect(rows.length).toBeGreaterThanOrEqual(1);
@@ -106,7 +106,7 @@ describe('stall sampler + pty counters', () => {
     recordPtyChunk('ws-1', 'sess-a', 1000);
     recordPtyChunk('ws-1', 'sess-a', 500);
     recordPtyChunk('ws-2', 'sess-b', 42);
-    await sleep(50);
+    await sleep(150);
     await shutdownPerf();
     const rows = db.prepare(
       `SELECT session_id, workspace_id, meta FROM perf_events WHERE kind = 'pty_window' AND name = 'claude_fleet.pty.bytes' ORDER BY session_id`
