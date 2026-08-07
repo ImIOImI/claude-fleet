@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Two LISTEN rows (ports 3000/0x0BB8 inode 12345, 8765/0x223D inode 67890)
@@ -78,4 +80,64 @@ func TestListening_ResolvesOwnPidAndCmdline(t *testing.T) {
 		t.Fatalf("cmdline %q does not look like this test binary", mine.Cmdline)
 	}
 	_ = fmt.Sprintf // keep fmt imported if assertions change
+}
+
+// Spawn a child that listens on a port and ignores nothing (default TERM
+// disposition = die), then KillOwner it and assert the port closes.
+func TestKillOwner_TerminatesListener(t *testing.T) {
+	if _, err := os.Stat("/proc/net/tcp"); err != nil {
+		t.Skip("no /proc on this host")
+	}
+	// A python one-liner is the most portable always-present listener in the
+	// runner image and dev containers alike; skip if python3 is missing.
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not on PATH")
+	}
+	cmd := exec.Command(py, "-c",
+		`import socket,sys,time
+s=socket.socket(); s.bind(("127.0.0.1",0)); s.listen()
+print(s.getsockname()[1], flush=True)
+time.sleep(300)`)
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start listener: %v", err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() }()
+
+	var port uint16
+	if _, err := fmt.Fscan(out, &port); err != nil {
+		t.Fatalf("read child port: %v", err)
+	}
+
+	if err := KillOwner(port, 2*time.Second); err != nil {
+		t.Fatalf("KillOwner: %v", err)
+	}
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("child exited 0 — expected signal death")
+	}
+
+	// And the port must be gone from the scan.
+	details, err := Listening()
+	if err != nil {
+		t.Fatalf("Listening after kill: %v", err)
+	}
+	for _, d := range details {
+		if d.Port == port {
+			t.Fatalf("port %d still listening after KillOwner", port)
+		}
+	}
+}
+
+func TestKillOwner_NoOwnerIsError(t *testing.T) {
+	if _, err := os.Stat("/proc/net/tcp"); err != nil {
+		t.Skip("no /proc on this host")
+	}
+	// Port 1 requires root to bind; nothing in a test env listens there.
+	if err := KillOwner(1, time.Millisecond); err == nil {
+		t.Fatal("expected error for unowned port")
+	}
 }

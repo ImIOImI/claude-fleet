@@ -13,6 +13,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // tcpStateListen is the value of the "st" column for a LISTEN socket
@@ -170,4 +172,42 @@ func readCmdline(pid int) string {
 		s = string(r[:maxCmdline]) + "…"
 	}
 	return s
+}
+
+// KillOwner terminates the process listening on port. The PID is resolved
+// from the live socket AT CALL TIME — never accepted from the host — which
+// removes any PID-reuse hazard. SIGTERM first; if the process survives
+// `grace`, SIGKILL. Returns an error when the port has no resolvable owner
+// or the first signal fails.
+func KillOwner(port uint16, grace time.Duration) error {
+	details, err := Listening()
+	if err != nil {
+		return err
+	}
+	pid := 0
+	for _, d := range details {
+		if d.Port == port {
+			pid = d.Pid
+			break
+		}
+	}
+	if pid == 0 {
+		return fmt.Errorf("no resolvable owner for port %d", port)
+	}
+	proc, err := os.FindProcess(pid) // never fails on unix
+	if err != nil {
+		return err
+	}
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) {
+		if err := proc.Signal(syscall.Signal(0)); err != nil {
+			return nil // gone
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_ = proc.Signal(syscall.SIGKILL)
+	return nil
 }
