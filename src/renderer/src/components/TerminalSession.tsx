@@ -52,6 +52,7 @@ const TERMINAL_FONT_FAMILY = [
 
 const URL_REGEX = /https?:\/\/[^\s'"`<>()\[\]{}]+/g;
 const TRAILING_PUNCTUATION = /[.,;:!?]+$/;
+const MAX_SAMPLE_BATCH = 1000; // matches sanitizePerfSamples MAX_BATCH in main
 
 function multilineLinkProvider(term: Terminal): ILinkProvider {
   return {
@@ -438,12 +439,12 @@ export function TerminalSession({
           if (perfRecording()) {
             const arrival = performance.timeOrigin + performance.now();
             for (const rtt of echoTracker.output(arrival)) {
-              sampleBatch.push({ kind: 'echo_rtt', durMs: rtt });
+              if (sampleBatch.length < MAX_SAMPLE_BATCH) sampleBatch.push({ kind: 'echo_rtt', durMs: rtt });
             }
             if (typeof ts === 'number') {
               // Completion callback fires after xterm has processed the chunk.
               term.write(chunk, () => {
-                if (!samplingClosed) {
+                if (!samplingClosed && sampleBatch.length < MAX_SAMPLE_BATCH) {
                   sampleBatch.push({
                     kind: 'output_hop',
                     durMs: performance.timeOrigin + performance.now() - ts

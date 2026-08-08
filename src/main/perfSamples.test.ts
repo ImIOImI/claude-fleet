@@ -13,6 +13,7 @@ describe('sanitizePerfSamples', () => {
     expect(sanitizePerfSamples('x')).toBeNull();
     expect(sanitizePerfSamples({ sessionId: 7, samples: [] })).toBeNull();
     expect(sanitizePerfSamples({ sessionId: 's', samples: 'nope' })).toBeNull();
+    expect(sanitizePerfSamples({ sessionId: 'x'.repeat(129), samples: [] })).toBeNull();
   });
 
   it('drops invalid entries but keeps valid ones', () => {

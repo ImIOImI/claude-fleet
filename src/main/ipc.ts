@@ -1354,13 +1354,14 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     if (!batch) return;
     const ws = handleWorkspaceId.get(batch.sessionId) ?? null;
     const sess = handleBrokerSessionId.get(batch.sessionId) ?? null;
+    if (sess === null) return; // handle already torn down — don't record unattributable rows
     for (const s of batch.samples) recordLatencySample(s.kind, ws, sess, s.durMs);
   });
 
   // One-way main→renderer recording-state push (perf Phase 2): fires on
-  // every initPerf/reconfigurePerf — Settings toggle, MCP perf_set, and
-  // startup all funnel through there. Windows created later pull the
-  // initial state via perf:status.
+  // every perf reconfigure — Settings toggle, MCP perf_set. The startup
+  // initPerf predates this listener, so initial state reaches windows via
+  // the perf:status pull rather than a push.
   setPerfStateListener((recording) => {
     for (const win of BrowserWindow.getAllWindows()) {
       if (!win.isDestroyed()) win.webContents.send('perf:state', recording);
@@ -1591,8 +1592,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     perfSetSpanContext({ workspaceId: handleWorkspaceId.get(sessionId) });
     ptySessions.get(sessionId)?.stream.write(data);
     // Renderer stamps only while recording (perf:state gate); skip missing
-    // or future-skewed stamps rather than recording zeros.
-    if (typeof ts === 'number') {
+    // or future-skewed stamps rather than recording zeros. Also skip once
+    // the handle's maps are cleared (typing into an ended session would
+    // produce unattributable NULL-workspace rows visible fleet-wide).
+    if (typeof ts === 'number' && handleBrokerSessionId.has(sessionId)) {
       const dur = Date.now() - ts;
       if (dur >= 0) {
         recordLatencySample(

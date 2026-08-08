@@ -17,7 +17,7 @@ export interface PerfSampleBatch {
 export function sanitizePerfSamples(payload: unknown): PerfSampleBatch | null {
   if (typeof payload !== 'object' || payload === null) return null;
   const p = payload as { sessionId?: unknown; samples?: unknown };
-  if (typeof p.sessionId !== 'string' || !Array.isArray(p.samples)) return null;
+  if (typeof p.sessionId !== 'string' || p.sessionId.length > 128 || !Array.isArray(p.samples)) return null;
   const samples: PerfSampleBatch['samples'] = [];
   for (const s of p.samples.slice(0, MAX_BATCH * 2)) {
     if (samples.length >= MAX_BATCH) break;
