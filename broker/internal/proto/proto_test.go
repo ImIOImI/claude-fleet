@@ -151,6 +151,8 @@ func TestFrameType_String_PortForwardFrames(t *testing.T) {
 		FrameDialed:    "DIALED",
 		FrameListPorts: "LISTPORTS",
 		FramePorts:     "PORTS",
+		FrameKillPort:  "KILLPORT",
+		FrameKilled:    "KILLED",
 	}
 	for ft, want := range cases {
 		if got := ft.String(); got != want {

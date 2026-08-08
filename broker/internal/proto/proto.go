@@ -39,7 +39,9 @@
 //	  DIAL       C→S  {"channel":N,"port":P}                   open TCP conn to 127.0.0.1:P, bind to channel
 //	  DIALED     S→C  {"channel":N,"ok":true,"error":"..."}    dial succeeded or failed
 //	  LISTPORTS  C→S  {}                                       enumerate listening TCP ports
-//	  PORTS      S→C  {"ports":[{"port":P},...]}               list of detected ports
+//	  PORTS      S→C  {"ports":[{"port":P,"pid":N,"cmdline":"..."},...]}  listening ports + best-effort owners
+//	  KILLPORT   C→S  {"port":P}                               TERM (then KILL) the process listening on P
+//	  KILLED     S→C  {"ok":true,"error":"..."}                kill outcome
 //
 // Why split INPUT/OUTPUT instead of one DATA: makes direction explicit in
 // logs and lets either side reject mis-directed frames as a bug rather
@@ -77,6 +79,8 @@ const (
 	FrameDialed    FrameType = 0x15
 	FrameListPorts FrameType = 0x16
 	FramePorts     FrameType = 0x17
+	FrameKillPort  FrameType = 0x18
+	FrameKilled    FrameType = 0x19
 )
 
 // MaxFramePayload caps individual frame payloads so a malformed length
@@ -127,6 +131,10 @@ func (t FrameType) String() string {
 		return "LISTPORTS"
 	case FramePorts:
 		return "PORTS"
+	case FrameKillPort:
+		return "KILLPORT"
+	case FrameKilled:
+		return "KILLED"
 	}
 	return fmt.Sprintf("UNKNOWN(0x%02x)", uint8(t))
 }
@@ -201,13 +209,29 @@ type DialResponse struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// PortInfo is one listening TCP port detected inside the container.
+// PortInfo is one listening TCP port detected inside the container,
+// attributed (best-effort) to its owning process. Pid/Cmdline are omitted
+// when unresolved; the host treats their absence as "no kill capability".
 type PortInfo struct {
-	Port uint16 `json:"port"`
+	Port    uint16 `json:"port"`
+	Pid     int    `json:"pid,omitempty"`
+	Cmdline string `json:"cmdline,omitempty"`
 }
 
 type PortsResponse struct {
 	Ports []PortInfo `json:"ports"`
+}
+
+// KillPortRequest asks the broker to terminate the process listening on
+// Port. The broker resolves port→PID itself at kill time (SIGTERM, 2s
+// grace, then SIGKILL) — it never trusts a host-supplied PID.
+type KillPortRequest struct {
+	Port uint16 `json:"port"`
+}
+
+type KilledResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
 }
 
 // ── Codec ────────────────────────────────────────────────────────────────

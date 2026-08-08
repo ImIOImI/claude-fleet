@@ -31,13 +31,21 @@ import (
 
 type Server struct {
 	mgr *session.Manager
-	// ListPorts enumerates listening TCP ports for LISTPORTS. Field so
-	// tests can inject a deterministic scanner; defaults to portscan.Listening.
-	ListPorts func() ([]uint16, error)
+	// ListPorts enumerates listening TCP ports (with best-effort owner
+	// attribution) for LISTPORTS. Field so tests can inject a deterministic
+	// scanner; defaults to portscan.Listening.
+	ListPorts func() ([]portscan.Detail, error)
+	// KillPort terminates the process behind a listening port for KILLPORT.
+	// Injectable for tests; defaults to portscan.KillOwner with a 2s grace.
+	KillPort func(port uint16) error
 }
 
 func New(mgr *session.Manager) *Server {
-	return &Server{mgr: mgr, ListPorts: portscan.Listening}
+	return &Server{
+		mgr:       mgr,
+		ListPorts: portscan.Listening,
+		KillPort:  func(port uint16) error { return portscan.KillOwner(port, 2*time.Second) },
+	}
 }
 
 // Serve accepts connections on ln until ctx is canceled or the listener
@@ -323,9 +331,19 @@ func (s *Server) dispatch(
 		}
 		resp := proto.PortsResponse{Ports: make([]proto.PortInfo, len(ports))}
 		for i, p := range ports {
-			resp.Ports[i] = proto.PortInfo{Port: p}
+			resp.Ports[i] = proto.PortInfo{Port: p.Port, Pid: p.Pid, Cmdline: p.Cmdline}
 		}
 		return cw.writeJSON(proto.FramePorts, resp)
+
+	case proto.FrameKillPort:
+		var req proto.KillPortRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return cw.writeJSON(proto.FrameKilled, proto.KilledResponse{OK: false, Error: "bad json"})
+		}
+		if err := s.KillPort(req.Port); err != nil {
+			return cw.writeJSON(proto.FrameKilled, proto.KilledResponse{OK: false, Error: err.Error()})
+		}
+		return cw.writeJSON(proto.FrameKilled, proto.KilledResponse{OK: true})
 
 	default:
 		// Unknown frame types: log and drop. The host can roll forward.

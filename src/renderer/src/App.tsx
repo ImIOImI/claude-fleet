@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef, useReducer, useMemo } from 'react';
+import { usePorts } from './usePorts';
 import { WorkspaceTabStrip } from './components/WorkspaceTabStrip';
 import { ToastStack } from './components/Toast';
 import { toastReducer, makeToast, type Toast, type ToastKind } from './toasts';
@@ -292,58 +293,6 @@ export function App() {
     });
   }, []);
 
-  // Dev-server detection (#port-forward): the broker spotted a new listening
-  // port inside a workspace container. Offer a one-click preview that opens
-  // the system browser via a loopback forward over the broker socket.
-  useEffect(() => {
-    return window.api.ports.onDetected((workspaceId, port) => {
-      const name = workspacesRef.current.find((w) => w.id === workspaceId)?.name ?? 'workspace';
-      // Sticky: this toast is the only way to reach the preview (bridge IPs
-      // aren't routable from the host on Windows), so it must never expire —
-      // missing it means restarting the dev server to re-trigger detection.
-      // It clears on click or ✕. Keyed per workspace+port so a server that
-      // restarts (port disappears and returns) replaces its toast instead of
-      // stacking a duplicate; distinct ports still stack.
-      const id = ++toastIdRef.current;
-      dispatchToast({
-        type: 'push',
-        toast: makeToast(id, {
-          kind: 'info',
-          eyebrow: 'Preview',
-          key: `port:${workspaceId}:${port}`,
-          message: `Dev server detected on port ${port} in ${name}`,
-          placement: 'global',
-          sticky: true,
-          dismissible: true,
-          action: {
-            label: 'Open preview',
-            onClick: () => {
-              dispatchToast({ type: 'dismiss', id });
-              void window.api.ports
-                .open(workspaceId, port)
-                .then(({ hostPort }) => {
-                  if (hostPort === null) {
-                    pushToast(
-                      `Nothing is answering on port ${port} in ${name} anymore — the server may have stopped.`,
-                      'Preview',
-                      6000,
-                      'error'
-                    );
-                  }
-                })
-                .catch(() => {
-                  pushToast(`Couldn't open the preview for port ${port} in ${name}.`, 'Preview', 6000, 'error');
-                });
-            }
-          }
-        })
-      });
-    });
-    // pushToast/dispatchToast are declared below but stable (useCallback []/
-    // useReducer) and only touched inside the subscription callback, which
-    // fires long after the first render initializes them.
-  }, []);
-
   const [activeTabSummary, setActiveTabSummary] = useState<
     WorkspaceObservabilitySummary | null
   >(null);
@@ -465,6 +414,81 @@ export function App() {
     void window.api.app.getMcpStatus().then(apply).catch(() => {});
     return window.api.app.onMcpStatus(apply);
   }, []);
+  // Open the loopback preview for a serving port — shared by the detection
+  // toast and the rail's Serving section. Errors surface as toasts.
+  const openPreview = useCallback((workspaceId: string, port: number) => {
+    const name = workspacesRef.current.find((w) => w.id === workspaceId)?.name ?? 'workspace';
+    void window.api.ports
+      .open(workspaceId, port)
+      .then(({ hostPort }) => {
+        if (hostPort === null) {
+          pushToast(
+            `Nothing is answering on port ${port} in ${name} anymore — the server may have stopped.`,
+            'Preview',
+            6000,
+            'error'
+          );
+        }
+      })
+      .catch(() => {
+        pushToast(`Couldn't open the preview for port ${port} in ${name}.`, 'Preview', 6000, 'error');
+      });
+  }, []);
+
+  const killServingPort = useCallback((workspaceId: string, port: number) => {
+    const name = workspacesRef.current.find((w) => w.id === workspaceId)?.name ?? 'workspace';
+    void window.api.ports.kill(workspaceId, port).then(({ ok, error }) => {
+      if (!ok) {
+        pushToast(
+          `Couldn't kill the server on port ${port} in ${name}${error ? ` — ${error}` : ''}.`,
+          'Serving',
+          6000,
+          'error'
+        );
+      }
+    });
+  }, []);
+
+  const servingPorts = usePorts();
+
+  // Dev-server detection (#port-forward): the broker spotted a new listening
+  // port inside a workspace container. Offer a one-click preview that opens
+  // the system browser via a loopback forward over the broker socket.
+  useEffect(() => {
+    return window.api.ports.onDetected((workspaceId, port) => {
+      const name = workspacesRef.current.find((w) => w.id === workspaceId)?.name ?? 'workspace';
+      // Sticky: this toast is the only way to reach the preview (bridge IPs
+      // aren't routable from the host on Windows), so it must never expire —
+      // missing it means restarting the dev server to re-trigger detection.
+      // It clears on click or ✕. Keyed per workspace+port so a server that
+      // restarts (port disappears and returns) replaces its toast instead of
+      // stacking a duplicate; distinct ports still stack.
+      const id = ++toastIdRef.current;
+      dispatchToast({
+        type: 'push',
+        toast: makeToast(id, {
+          kind: 'info',
+          eyebrow: 'Preview',
+          key: `port:${workspaceId}:${port}`,
+          message: `Dev server detected on port ${port} in ${name}`,
+          placement: 'global',
+          sticky: true,
+          dismissible: true,
+          action: {
+            label: 'Open preview',
+            onClick: () => {
+              dispatchToast({ type: 'dismiss', id });
+              openPreview(workspaceId, port);
+            }
+          }
+        })
+      });
+    });
+    // pushToast/dispatchToast are stable (useCallback []/useReducer).
+    // openPreview is a stable useCallback([]) — adding it to the dep array
+    // keeps the linter happy while the effect still runs once.
+  }, [openPreview]);
+
   // Drag-and-drop / clipboard-image ingestion → selected workspace's _dropped/.
   // Results surface through the existing toast stack; errors linger longer.
   const notify = useCallback(
@@ -1256,6 +1280,9 @@ export function App() {
           budgetSpentTokens={budgetSpentTokens}
           collapsed={obsCollapsed}
           onToggleCollapse={toggleObsCollapsed}
+          servingPorts={servingPorts}
+          onOpenPort={openPreview}
+          onKillPort={killServingPort}
         />
       </div>
 

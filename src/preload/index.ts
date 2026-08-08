@@ -104,6 +104,16 @@ export interface WorkspaceObservabilitySummary {
   tokenSeries: number[];
 }
 
+/** One HTTP-serving container port in the rail's Serving section. pid /
+ *  cmdline are null when the runner image's broker predates attribution
+ *  (the kill affordance is hidden in that case). */
+export interface ServingPort {
+  port: number;
+  pid: number | null;
+  cmdline: string | null;
+  firstSeenAt: number;
+}
+
 export interface ObservabilityCost {
   inputTokens: number;
   outputTokens: number;
@@ -529,7 +539,25 @@ const api = {
      *  returns the bound host port, or null when nothing answers on the
      *  container port anymore (stale toast). */
     open: (workspaceId: string, containerPort: number): Promise<{ hostPort: number | null }> =>
-      ipcRenderer.invoke('ports:open', workspaceId, containerPort)
+      ipcRenderer.invoke('ports:open', workspaceId, containerPort),
+    /** Subscribe to per-workspace Serving snapshots (full replace per event;
+     *  an empty array clears the workspace). Returns an unsubscribe fn. */
+    onChanged: (cb: (workspaceId: string, ports: ServingPort[]) => void): (() => void) => {
+      const channel = 'ports:changed';
+      const handler = (
+        _e: IpcRendererEvent,
+        payload: { workspaceId: string; ports: ServingPort[] }
+      ): void => cb(payload.workspaceId, payload.ports);
+      ipcRenderer.on(channel, handler);
+      return () => ipcRenderer.removeListener(channel, handler);
+    },
+    /** Current Serving snapshots for all running workspaces (mount seed). */
+    list: (): Promise<Array<{ workspaceId: string; ports: ServingPort[] }>> =>
+      ipcRenderer.invoke('ports:list'),
+    /** Kill the process behind a serving port (broker resolves the pid at
+     *  kill time). The row clears via the next poll's ports:changed. */
+    kill: (workspaceId: string, port: number): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('ports:kill', workspaceId, port)
   },
   // Durable transcript mirror (#10). The renderer addresses sessions by their
   // broker session id; the main process resolves that to the claude session
