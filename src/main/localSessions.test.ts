@@ -7,6 +7,7 @@ import type { Duplex } from 'node:stream';
 import {
   attachLocalSession,
   killWorkspaceSessions,
+  hasLiveSession,
   hasLiveSessions,
   _resetForTest,
   type PtyProc,
@@ -181,6 +182,18 @@ describe('attachLocalSession', () => {
     // Next attach to the same key spawns a fresh process.
     attachLocalSession({ ...base, workspaceId: 'ws1', sessionId: 's1', spawn: t.spawn });
     expect(t.procs).toHaveLength(2);
+  });
+});
+
+describe('hasLiveSession (per-tab liveness)', () => {
+  it('tracks one tab: false before spawn, true while alive, false after exit', () => {
+    const t = tracker();
+    expect(hasLiveSession('ws1', 's1')).toBe(false);
+    attachLocalSession({ ...base, workspaceId: 'ws1', sessionId: 's1', spawn: t.spawn });
+    expect(hasLiveSession('ws1', 's1')).toBe(true);
+    expect(hasLiveSession('ws1', 's2')).toBe(false); // sibling tab unaffected
+    t.procs[0].fireExit();
+    expect(hasLiveSession('ws1', 's1')).toBe(false);
   });
 });
 

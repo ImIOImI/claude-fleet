@@ -3,11 +3,14 @@
 //
 // Unlike the container backend, there's no broker process tree to outlive the
 // app: a local `claude` is a child of the Electron main process and dies when
-// the app quits. So liveness is in-memory only (the `started` set below).
+// the app quits. Process liveness is in-memory (the `started` set below), but
+// the workspace's *warm state* is persisted to `<stateDir>/<id>/local-live.json`
+// and rehydrated at startup, so a running local workspace keeps its chip in
+// the warm strip across an app restart instead of demoting to 'stopped'.
 // Across a workspace switch the process survives via the in-process session
-// manager (`localSessions.ts`); across an app restart it does not, and is
-// restored on the next attach via `claude --resume <uuid>` off the on-disk
-// JSONL. See SPEC §6/§10.
+// manager (`localSessions.ts`); across an app restart it does not — each tab's
+// conversation is restored on its first attach via `claude --resume <uuid>`
+// off the verified broker→claude mapping (see attachPty). See SPEC §6/§10.
 //
 // Pause is not supported for *native/custom* local workspaces — there is no
 // container to freeze and SIGSTOP/SIGCONT semantics don't map cleanly onto a
@@ -19,7 +22,7 @@ import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
-import { rm, stat, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { app } from 'electron';
 import type * as NodePty from 'node-pty';
@@ -38,6 +41,7 @@ import {
   listWorkspaceManifests,
   FACTORY_MIRROR,
   type Workspace,
+  type WorkspaceSpec,
   type WorkspaceState
 } from './workspaces.js';
 import type {
@@ -48,7 +52,11 @@ import type {
   RemoveWorkspaceOpts
 } from './docker.js';
 import { randomUUID } from 'node:crypto';
-import { recordBrokerSessionMapping, recordUsageEvent } from './db.js';
+import {
+  lookupResumableBrokerSession,
+  recordBrokerSessionMapping,
+  recordUsageEvent
+} from './db.js';
 import { logError } from './errorLog.js';
 import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
 import { workspaceStateDir, assertValidWorkspaceId } from './paths.js';
@@ -56,6 +64,7 @@ import { resolveEnv } from './vault.js';
 import { endpointEnv } from './endpoints.js';
 import {
   attachLocalSession,
+  hasLiveSession,
   killWorkspaceSessions,
   type SpawnPty
 } from './localSessions.js';
@@ -65,14 +74,76 @@ import {
 const require = createRequire(import.meta.url);
 const execFileAsync = promisify(execFile);
 
-// In-memory liveness. Empty at app start ⇒ all local workspaces report
-// 'stopped' until the user starts/attaches one (their processes died with the
-// previous app run).
+// In-memory liveness, seeded from the persisted warm state on the first
+// listLiveWorkspaces() of a run (see rehydrateLiveState) so an app restart
+// doesn't demote running local workspaces to 'stopped'.
 const started = new Set<string>();
 
 // wsl-launcher workspaces CAN pause (kill -STOP inside the distro, #253);
 // native/custom local ones still can't. In-memory like `started`.
 const paused = new Set<string>();
+
+// ── Warm-state persistence ─────────────────────────────────────────────────
+//
+// `<stateDir>/<id>/local-live.json` = `{ "state": "running" | "paused" }`;
+// absent ⇒ stopped. Written on every state transition, removed on stop, and
+// read back once per app run. Runtime state deliberately lives NEXT TO the
+// manifest rather than in it — workspace.json is the user's spec, and its
+// strict-allowlist parser would silently drop unknown fields on round-trip.
+
+function liveStatePath(id: string): string {
+  return join(workspaceStateDir(id), 'local-live.json');
+}
+
+/** Best-effort: chip warmth is a nicety, never worth failing a transition. */
+async function persistLiveState(id: string): Promise<void> {
+  try {
+    if (!started.has(id)) {
+      await rm(liveStatePath(id), { force: true });
+      return;
+    }
+    const state = paused.has(id) ? 'paused' : 'running';
+    await mkdir(workspaceStateDir(id), { recursive: true });
+    await writeFile(liveStatePath(id), JSON.stringify({ state }) + '\n', 'utf8');
+  } catch {
+    /* best-effort */
+  }
+}
+
+let rehydrated = false;
+
+/** Seed `started`/`paused` from the persisted warm state, once per app run.
+ *  Only ever ADDS ids at process start (both sets are empty before the first
+ *  list), so it can't clobber transitions that raced ahead of the first call. */
+async function rehydrateLiveState(manifests: WorkspaceSpec[]): Promise<void> {
+  if (rehydrated) return;
+  rehydrated = true;
+  await Promise.all(
+    manifests
+      .filter((m) => m.kind === 'local')
+      .map(async (m) => {
+        try {
+          const raw = await readFile(liveStatePath(m.id), 'utf8');
+          const state = (JSON.parse(raw) as { state?: unknown }).state;
+          if (state === 'running') {
+            started.add(m.id);
+          } else if (state === 'paused') {
+            started.add(m.id);
+            paused.add(m.id);
+          }
+        } catch {
+          /* absent or malformed ⇒ stopped */
+        }
+      })
+  );
+}
+
+/** Test-only: simulate an app restart (in-memory warm state dies, disk survives). */
+export function _resetForTest(): void {
+  started.clear();
+  paused.clear();
+  rehydrated = false;
+}
 
 /** node-pty-backed spawn factory passed to the session manager. */
 const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
@@ -210,6 +281,7 @@ export async function inspectImage(_ref: string): Promise<ImageInspectResult> {
 
 export async function listLiveWorkspaces(): Promise<Workspace[]> {
   const manifests = await listWorkspaceManifests();
+  await rehydrateLiveState(manifests);
   const result: Workspace[] = [];
   for (const m of manifests) {
     if (m.kind !== 'local') continue;
@@ -239,6 +311,7 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
   // (login, settings, install) and runs in `workingDir`. The manifest is
   // written by the ipc create handler. Processes spawn lazily on first attach.
   started.add(spec.id);
+  await persistLiveState(spec.id);
   const now = Date.now();
   return {
     id: spec.id,
@@ -265,6 +338,7 @@ export async function startWorkspace(id: string): Promise<string | null> {
   if (paused.delete(id) && m.launcher?.mode === 'wsl') {
     await signalWslSessions(m.launcher, id, 'CONT');
   }
+  await persistLiveState(id);
   return id; // the containerId surrogate the renderer attaches against
 }
 
@@ -273,6 +347,7 @@ export async function pauseWorkspace(containerId: string): Promise<void> {
   if (m?.launcher?.mode === 'wsl') {
     await signalWslSessions(m.launcher, containerId, 'STOP');
     if (started.has(containerId)) paused.add(containerId);
+    await persistLiveState(containerId);
     return;
   }
   throw new Error('pause is not supported for local workspaces');
@@ -293,6 +368,7 @@ export async function stopWorkspace(containerId: string): Promise<void> {
   }
   started.delete(containerId);
   paused.delete(containerId);
+  await persistLiveState(containerId);
 }
 
 export async function removeWorkspace(
@@ -303,8 +379,35 @@ export async function removeWorkspace(
   killWorkspaceSessions(id);
   started.delete(id);
   paused.delete(id);
+  await persistLiveState(id);
   if (opts.deleteState && id) {
     await rm(workspaceStateDir(id), { recursive: true, force: true });
+  }
+}
+
+/**
+ * Which claude session (if any) a local attach should `--resume`.
+ * - An explicit target (Sessions-pane resume, tab Refresh) always wins.
+ * - A tab with a live pty re-attaches; resume args would be ignored anyway.
+ * - Otherwise the tab's process is gone — most commonly because the app
+ *   restarted (a local claude dies with the Electron main process). Resume
+ *   the tab's verified broker→claude mapping so the restored chip's tabs
+ *   pick their conversations back up instead of spawning fresh ones.
+ * - A throwing lookup (dormant DB in mock mode) degrades to a fresh spawn.
+ *
+ * Exported for tests.
+ */
+export function effectiveResumeOf(
+  explicit: string | undefined,
+  hasLivePty: boolean,
+  lookupResumable: () => string | null
+): string | undefined {
+  if (explicit) return explicit;
+  if (hasLivePty) return undefined;
+  try {
+    return lookupResumable() ?? undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -347,6 +450,13 @@ export async function attachPty(
   if (paused.delete(id) && launcher.mode === 'wsl') {
     await signalWslSessions(launcher, id, 'CONT');
   }
+  await persistLiveState(id);
+  // Cross-restart continuity: a restored tab whose process died with the
+  // previous app run resumes its mapped conversation instead of spawning a
+  // fresh one.
+  const resume = effectiveResumeOf(resumeOf, hasLiveSession(id, sessionId), () =>
+    lookupResumableBrokerSession(id, sessionId)
+  );
   return attachLocalSession({
     workspaceId: id,
     sessionId,
@@ -355,7 +465,7 @@ export async function attachPty(
     cwd: m.workspaceRoot,
     env,
     file: claudeBin,
-    resumeOf,
+    resumeOf: resume,
     // Host-assigned claude session id (#195): only consumed on a fresh spawn;
     // onFreshSpawn then records the tab→claude mapping deterministically.
     // Local workspaces previously never learned mappings at all (no broker,
@@ -390,13 +500,13 @@ export async function attachPty(
           source: 'main',
           type: 'mapping-learned',
           level: 'info',
-          message: `paired ${claudeSessionId} with broker ${sessionId} at local spawn (${resumeOf ? 'resume' : 'session-id'})`,
+          message: `paired ${claudeSessionId} with broker ${sessionId} at local spawn (${resume ? 'resume' : 'session-id'})`,
           workspaceId: id,
-          extra: { claudeSessionId, brokerSessionId: sessionId, how: resumeOf ? 'resume' : 'session-id' }
+          extra: { claudeSessionId, brokerSessionId: sessionId, how: resume ? 'resume' : 'session-id' }
         });
       }
       learnMirrorMapping(id, sessionId, claudeSessionId);
-      if (resumeOf) recordUsageEvent({ workspaceId: id, sessionId: resumeOf, kind: 'resumed' });
+      if (resume) recordUsageEvent({ workspaceId: id, sessionId: resume, kind: 'resumed' });
     },
     extraArgs,
     mcpConfigPath: mcpConfigArg,
