@@ -43,6 +43,7 @@ import * as realLocal from './local.js';
 import * as mockDocker from './mock.js';
 import type { Backend } from './backend.js';
 import { resolveKind } from './backendRouter.js';
+import { findLiveHandleId } from './ptyHandleLookup.js';
 import { assertControl, buildRoster, ROSTER_TITLE_MAX, type RosterStatus, type RosterEntry } from './control.js';
 import { ActivityDetector } from './activityDetector.js';
 import { wouldExceed, recordPost, COMMITTEE_CAPS } from './committeeRuns.js';
@@ -1631,10 +1632,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   });
 
   // Terminate the broker session behind a handle (kills claude, drops the
-  // session). The loadout reload calls this, then re-attaches the same broker
-  // session id with `--resume` so the tab resumes the conversation under the
-  // freshly-installed config. Returns whether a live handle was found. (#16)
-  ipcMain.handle('pty:closeSession', async (_e, ptyHandleId: string) => {
+  // session) and forget its maps. Shared by the two close paths below.
+  const reapHandle = async (ptyHandleId: string, via: string): Promise<boolean> => {
     const handle = ptySessions.get(ptyHandleId);
     if (!handle) return false;
     await handle.close();
@@ -1644,11 +1643,41 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     logError({
       source: 'main',
       type: 'pty-close',
-      message: `pty:closeSession OK (live=${ptySessions.size})`,
+      message: `${via} OK (live=${ptySessions.size})`,
       extra: { ptyHandleId, live: ptySessions.size }
     });
     return true;
-  });
+  };
+
+  // Terminate the broker session behind a handle (kills claude, drops the
+  // session). The loadout reload calls this, then re-attaches the same broker
+  // session id with `--resume` so the tab resumes the conversation under the
+  // freshly-installed config. Returns whether a live handle was found. (#16)
+  ipcMain.handle('pty:closeSession', (_e, ptyHandleId: string) =>
+    reapHandle(ptyHandleId, 'pty:closeSession')
+  );
+
+  // Reap a session by (workspace, broker session id) rather than a live
+  // ptyHandle. Closing a tab (#287) runs from the parent pane, which only knows
+  // the stable broker session id — not the child's per-attach handle — so it
+  // routes the kill through the same broker CLOSE / local-process teardown that
+  // the refresh path uses instead of merely dropping the tab from sessions.json
+  // and orphaning the claude process. Note: this is the EXPLICIT tab-close path
+  // only; app quit does not reap (before-quit leaves broker sessions alive so a
+  // relaunch re-attaches). Returns whether a live handle was found.
+  ipcMain.handle(
+    'pty:closeSessionByBroker',
+    (_e, workspaceId: string, brokerSessionId: string) => {
+      const ptyHandleId = findLiveHandleId(
+        handleWorkspaceId,
+        handleBrokerSessionId,
+        workspaceId,
+        brokerSessionId
+      );
+      if (!ptyHandleId) return Promise.resolve(false);
+      return reapHandle(ptyHandleId, 'pty:closeSessionByBroker');
+    }
+  );
 
   // Durable transcript mirror (#10). The renderer holds broker session ids;
   // mirror files are named by claude session id, so the transcript handlers
