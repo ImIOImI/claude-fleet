@@ -188,11 +188,16 @@ describe('stall sampler + pty counters', () => {
     expect(hop.session_id).toBe('sess-a');
   });
 
-  it('recordLatencySample while disabled or uninitialized is a no-op', async () => {
+  it('recordLatencySample while disabled, uninitialized, or given junk is a no-op', async () => {
+    recordLatencySample('echo_rtt', 'ws-1', 'sess-a', 50); // before any initPerf: no runtime
     initPerf(store, OFF);
-    recordLatencySample('echo_rtt', 'ws-1', 'sess-a', 50);
+    recordLatencySample('echo_rtt', 'ws-1', 'sess-a', 50); // recording off
     await shutdownPerf();
     recordLatencySample('echo_rtt', 'ws-1', 'sess-a', 50); // after shutdown: no runtime
+    initPerf(store, ON);
+    recordLatencySample('echo_rtt', 'ws-1', 'sess-a', NaN); // non-finite
+    recordLatencySample('echo_rtt', 'ws-1', 'sess-a', -1); // negative
+    await shutdownPerf();
     expect(db.prepare(`SELECT COUNT(*) AS n FROM perf_events WHERE kind = 'echo_rtt'`).get()).toEqual({ n: 0 });
   });
 });
