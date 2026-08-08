@@ -678,6 +678,22 @@ const api = {
       ): void => cb(payload.workspaceId, payload.waitingSessionIds);
       ipcRenderer.on(channel, handler);
       return () => ipcRenderer.removeListener(channel, handler);
+    },
+    /**
+     * Subscribe to authoritative peer-status pushes (#286): a flat list of
+     * `{ claudeSessionId, status }` from claude's `~/.claude/sessions/<pid>.json`
+     * files. The renderer merges this over the title glyph. Returns an unsubscribe.
+     */
+    onSessionStatus: (
+      cb: (statuses: Array<{ claudeSessionId: string; status: 'busy' | 'idle' | 'waiting'; waitingFor?: string }>) => void
+    ): (() => void) => {
+      const channel = 'sessionstatus:update';
+      const handler = (
+        _e: IpcRendererEvent,
+        payload: { statuses: Array<{ claudeSessionId: string; status: 'busy' | 'idle' | 'waiting'; waitingFor?: string }> }
+      ): void => cb(payload.statuses);
+      ipcRenderer.on(channel, handler);
+      return () => ipcRenderer.removeListener(channel, handler);
     }
   },
   perf: {

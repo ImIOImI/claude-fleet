@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import { unlink, readdir } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { workspaceTranscriptPath, workspaceHistoryFile, workspaceHistoryDir, encodeClaudeProjectDir } from './paths.js';
+import { workspaceTranscriptPath, workspaceHistoryFile, workspaceHistoryDir, encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir } from './paths.js';
 import {
   setWorkspaceDefault,
   setSessionOverride,
@@ -88,9 +88,10 @@ import {
   FACTORY_MIRROR
 } from './workspaces.js';
 import { listWslDistros, probeWslDistro, type ProbeDeps } from './wslProbe.js';
-import { wslLocalProjectsDir, uncToLinuxPath } from './localLauncher.js';
+import { wslLocalProjectsDir, wslLocalSessionsDir, uncToLinuxPath } from './localLauncher.js';
 import type { PtyHandle, RemoveWorkspaceOpts } from './docker.js';
 import type { JsonlWatcher } from './jsonlWatcher.js';
+import type { PeerStatusWatcher } from './peerStatusWatcher.js';
 import {
   eventsForSession,
   summaryForWorkspace,
@@ -246,6 +247,7 @@ const mappingUnresolvedSeen = new Set<string>();
 
 interface RegisterIpcOpts {
   jsonlWatcher: JsonlWatcher | null;
+  peerStatusWatcher?: PeerStatusWatcher | null;
 }
 
 /**
@@ -713,7 +715,7 @@ async function normalizeAndValidateWslRoot(
 }
 
 export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): void {
-  const { jsonlWatcher } = opts;
+  const { jsonlWatcher, peerStatusWatcher } = opts;
 
   // Live summary push: when the watcher ingests new lines, compute the
   // workspace summary once and broadcast to every BrowserWindow. The renderer
@@ -897,6 +899,21 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
           );
         } else {
           jsonlWatcher?.registerLocalWorkspace(input.id, spec.workspaceRoot);
+        }
+      }
+      // Peer-status dir for the new workspace (#286): container → bind path;
+      // local WSL → polled 9P dir; local native/custom → the shared host dir.
+      if (peerStatusWatcher) {
+        if (spec.kind === 'local') {
+          if (spec.launcher?.mode === 'wsl') {
+            peerStatusWatcher.registerPolledDir(
+              wslLocalSessionsDir(spec.launcher.distro, spec.launcher.home)
+            );
+          } else {
+            peerStatusWatcher.registerDir(hostLocalSessionsDir());
+          }
+        } else {
+          peerStatusWatcher.registerDir(workspaceClaudeSessionsDir(input.id));
         }
       }
 
@@ -1201,6 +1218,11 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     // id, which lives in opts.id (containerId is the Docker id). Best-effort.
     if (opts?.id) removeWorkspaceSocket(opts.id);
     if (opts?.id) jsonlWatcher?.unregisterLocalWorkspace(opts.id);
+    // Drop a container workspace's peer-status watch (its state dir, incl.
+    // .claude/sessions, is removed). The shared host ~/.claude/sessions dir used
+    // by local native workspaces is left registered — other local workspaces and
+    // the user's own claude sessions share it (#286).
+    if (opts?.id) peerStatusWatcher?.unregisterDir(workspaceClaudeSessionsDir(opts.id));
     return result;
   });
 

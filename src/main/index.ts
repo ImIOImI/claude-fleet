@@ -12,9 +12,11 @@ import { startMcpServer, stopMcpServer, ensureWorkspaceSocket, setMcpStatusListe
 import { broadcastMcpStatus } from './mcpStatusBroadcast.js';
 import { ensureBuiltinLoadouts } from './loadouts.js';
 import { JsonlWatcher } from './jsonlWatcher.js';
+import { PeerStatusWatcher } from './peerStatusWatcher.js';
+import { broadcastSessionStatus } from './sessionStatusBroadcast.js';
 import { listWorkspaceManifests } from './workspaces.js';
-import { wslLocalProjectsDir } from './localLauncher.js';
-import { encodeClaudeProjectDir } from './paths.js';
+import { wslLocalProjectsDir, wslLocalSessionsDir } from './localLauncher.js';
+import { encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir } from './paths.js';
 import { installMainProcessHandlers, getLogPath, setErrorSink, logError } from './errorLog.js';
 import { installAppMenu } from './appMenu.js';
 import { runStartupMigration } from './migration.js';
@@ -28,6 +30,30 @@ import { indexSessionTurns, indexSessionSummaries } from './transcriptIndex.js';
 // watcher and DB stay dormant.
 const isMock = process.env.CLAUDE_FLEET_MOCK === '1';
 const jsonlWatcher = isMock ? null : new JsonlWatcher();
+// Authoritative busy/idle/waiting from claude's peer-status files (#286).
+const peerStatusWatcher = isMock ? null : new PeerStatusWatcher();
+
+/** Register each workspace's peer-status `sessions/` dir with the watcher.
+ *  Container: the bind-mounted host dir. Local native/custom: the shared host
+ *  ~/.claude/sessions (registered once). Local WSL: the polled 9P-share dir. */
+function registerPeerStatusDirs(
+  watcher: PeerStatusWatcher,
+  manifests: Awaited<ReturnType<typeof listWorkspaceManifests>>
+): void {
+  let hostNativeRegistered = false;
+  for (const m of manifests) {
+    if (m.kind === 'local') {
+      if (m.launcher?.mode === 'wsl') {
+        watcher.registerPolledDir(wslLocalSessionsDir(m.launcher.distro, m.launcher.home));
+      } else if (!hostNativeRegistered) {
+        watcher.registerDir(hostLocalSessionsDir());
+        hostNativeRegistered = true;
+      }
+    } else {
+      watcher.registerDir(workspaceClaudeSessionsDir(m.id));
+    }
+  }
+}
 
 const isDev = process.env.NODE_ENV === 'development' || !!process.env.ELECTRON_RENDERER_URL;
 
@@ -198,6 +224,19 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         }
       }
     }
+    // Peer-status reconciler (#286): watch each workspace's claude
+    // `sessions/<pid>.json` files and push an authoritative busy/idle/waiting
+    // snapshot to every renderer, which merges it over the title glyph.
+    if (peerStatusWatcher) {
+      await peerStatusWatcher.start();
+      registerPeerStatusDirs(peerStatusWatcher, manifests);
+      peerStatusWatcher.on('change', (snapshot) => {
+        broadcastSessionStatus(
+          snapshot.map((s) => ({ claudeSessionId: s.sessionId, status: s.status, waitingFor: s.waitingFor })),
+          BrowserWindow.getAllWindows()
+        );
+      });
+    }
     // Backfill embeddings for sessions ingested before this feature / after a
     // model change. Non-blocking; walks every known session once.
     void (async () => {
@@ -216,7 +255,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   // registered handler runs inside a claude_fleet.ipc.<channel> span.
   // With recording off the tracer is a no-op — cost is one async frame/invoke.
   instrumentIpcHandle(ipcMain);
-  registerIpc({ jsonlWatcher });
+  registerIpc({ jsonlWatcher, peerStatusWatcher });
   mainWindow = createWindow();
 
   app.on('activate', () => {
@@ -226,6 +265,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
 
 app.on('before-quit', async () => {
   await jsonlWatcher?.stop();
+  await peerStatusWatcher?.stop();
   stopMcpServer();
   await shutdownPerf();
   closeDb();

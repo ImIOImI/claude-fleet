@@ -169,3 +169,9 @@ export function wslLocalProjectsDir(
 ): string {
   return linuxPathToUnc(distro, `${home}/.claude/projects/${encode(workspaceRoot)}`);
 }
+
+/** \\wsl.localhost peer-status dir for a wsl-launcher workspace: the in-distro
+ *  ~/.claude/sessions, viewed over the 9P share (polled, like projects). #286 */
+export function wslLocalSessionsDir(distro: string, home: string): string {
+  return linuxPathToUnc(distro, `${home}/.claude/sessions`);
+}
