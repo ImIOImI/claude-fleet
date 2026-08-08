@@ -290,6 +290,7 @@ export function TerminalSession({
     let unsubData: (() => void) | null = null;
     let unsubEnd: (() => void) | null = null;
     let sampleTimer: ReturnType<typeof setInterval> | null = null;
+    let samplingClosed = false;
 
     // Scoped one-shot repaint nudge. claude paints some startup screens
     // (notably the org "Managed settings require approval" gate) on the
@@ -442,10 +443,12 @@ export function TerminalSession({
             if (typeof ts === 'number') {
               // Completion callback fires after xterm has processed the chunk.
               term.write(chunk, () => {
-                sampleBatch.push({
-                  kind: 'output_hop',
-                  durMs: performance.timeOrigin + performance.now() - ts
-                });
+                if (!samplingClosed) {
+                  sampleBatch.push({
+                    kind: 'output_hop',
+                    durMs: performance.timeOrigin + performance.now() - ts
+                  });
+                }
               });
             } else {
               term.write(chunk);
@@ -559,6 +562,7 @@ export function TerminalSession({
       onActivityChange?.(sessionId, false);
       cancelAnimationFrame(initialFitRaf);
       disarmNudge();
+      samplingClosed = true;
       if (sampleTimer) clearInterval(sampleTimer);
       ro.disconnect();
       host.removeEventListener('contextmenu', onContextMenu);
