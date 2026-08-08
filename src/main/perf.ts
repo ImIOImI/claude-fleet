@@ -162,6 +162,15 @@ interface Runtime {
 }
 let rt: Runtime | null = null;
 
+/** Injected broadcaster for the one-way perf:state push (ipc.ts wires it to
+ *  BrowserWindow — perf.ts stays Electron-free for testability). Fired with
+ *  the effective recording state at the end of every initPerf, which covers
+ *  reconfigurePerf too (it delegates to shutdown+init). */
+let stateListener: ((recording: boolean) => void) | null = null;
+export function setPerfStateListener(cb: ((recording: boolean) => void) | null): void {
+  stateListener = cb;
+}
+
 export interface PerfStatus {
   enabled: boolean;
   source: 'settings' | 'env-override';
@@ -200,7 +209,10 @@ export function initPerf(store: PerfStore, effective: EffectivePerfConfig, hooks
     latencyHists: null
   };
   store.prune(RETENTION_MS);
-  if (!effective.recording) return; // globals stay no-op
+  if (!effective.recording) {
+    stateListener?.(effective.recording);
+    return; // globals stay no-op
+  }
 
   // Context propagation: lets perfSpan* parent nested spans and lets
   // perfSetSpanContext reach the active span. Without a registered manager
@@ -290,6 +302,8 @@ export function initPerf(store: PerfStore, effective: EffectivePerfConfig, hooks
     }
   }, hooks?.sampleIntervalMs ?? SAMPLE_INTERVAL_MS);
   rt.sampleTimer.unref();
+
+  stateListener?.(effective.recording);
 }
 
 export async function shutdownPerf(): Promise<void> {

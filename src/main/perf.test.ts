@@ -6,7 +6,7 @@ import { closeDb, openDb } from './db.js';
 import { PerfStore } from './perfStore.js';
 import {
   initPerf, shutdownPerf, reconfigurePerf, perfSpan, perfSpanAsync, perfSetSpanContext, getEffectivePerf,
-  recordPtyChunk, getPerfStatus, recordLatencySample
+  recordPtyChunk, getPerfStatus, recordLatencySample, setPerfStateListener
 } from './perf.js';
 import type { EffectivePerfConfig } from './perfConfig.js';
 import type Database from 'better-sqlite3';
@@ -216,5 +216,18 @@ describe('getPerfStatus', () => {
   it('throws before init', async () => {
     await shutdownPerf();
     expect(() => getPerfStatus()).toThrow(/init/i);
+  });
+});
+
+describe('setPerfStateListener', () => {
+  afterEach(() => setPerfStateListener(null));
+
+  it('fires with the effective recording state on init and reconfigure', async () => {
+    const seen: boolean[] = [];
+    setPerfStateListener((r) => seen.push(r));
+    initPerf(store, ON);
+    await reconfigurePerf(OFF);
+    await reconfigurePerf(ON);
+    expect(seen).toEqual([true, false, true]);
   });
 });
