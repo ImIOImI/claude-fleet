@@ -28,8 +28,14 @@ import {
   USAGE_BUDGET_WINDOW_HOURS,
   type UsageBudgetPreset,
   setFavorite,
-  resolveWorkspaceConfig
+  resolveWorkspaceConfig,
+  getPerfTelemetry,
+  setPerfTelemetry,
+  getPerfOtlp,
+  setPerfOtlp
 } from './config.js';
+import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk } from './perf.js';
+import { resolvePerfConfig } from './perfConfig.js';
 import { buildLoadoutCatalog } from './loadoutCatalog.js';
 import * as realDocker from './docker.js';
 import * as realLocal from './local.js';
@@ -107,7 +113,8 @@ import { logError, getLogPath } from './errorLog.js';
 import { broadcastObservabilitySummary } from './observabilityBroadcast.js';
 import { broadcastInputWait } from './inputWaitBroadcast.js';
 import { consumeForWorkspace, pendingSnapshotForWorkspace, recordPendingAttach } from './pendingAttaches.js';
-import { PortForwardManager } from './portforward.js';
+import { PortForwardManager, type ServingPort } from './portforward.js';
+import { MockServingPorts } from './mockPorts.js';
 import { brokerEndpoint } from './docker.js';
 import { BrokerClient } from './broker.js';
 import { MCP_TCP_PORT } from './mcpSocket.js';
@@ -136,12 +143,44 @@ const isWindows = process.platform === 'win32';
 //   LISTEN scan. Kept here in case that assumption ever changes.
 const INFRA_PORTS = isWindows ? [7070, MCP_TCP_PORT] : [];
 
+/** Mock mode never initializes perf (no DB) — the Settings modal still polls
+ *  perf:status, so report a truthful "off" instead of throwing (#mock). */
+const PERF_STATUS_UNINITIALIZED = {
+  enabled: false,
+  source: 'settings' as const,
+  otlp: { enabled: false, endpoint: null, source: 'settings' as const },
+  eventCounts: {}
+};
+
+/** Re-read config + env and reconfigure the perf pipeline (used after settings changes). */
+async function reapplyPerfConfig(): Promise<void> {
+  if (!getEffectivePerf()) return;
+  await reconfigurePerf(
+    resolvePerfConfig(
+      { perfTelemetry: await getPerfTelemetry(), perfOtlp: await getPerfOtlp() },
+      process.env
+    )
+  );
+}
+
 /** Tell every window a forwardable dev-server port appeared (toast cue). */
 function broadcastPortDetected(workspaceId: string, port: number): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed()) continue;
     try {
       win.webContents.send('ports:detected', { workspaceId, port });
+    } catch {
+      /* frame disposed mid-send */
+    }
+  }
+}
+
+/** Tell every window a workspace's Serving snapshot changed (rail state). */
+function broadcastPortsChanged(workspaceId: string, ports: ServingPort[]): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue;
+    try {
+      win.webContents.send('ports:changed', { workspaceId, ports });
     } catch {
       /* frame disposed mid-send */
     }
@@ -156,8 +195,18 @@ const portForward: PortForwardManager | null = MOCK_MODE
       resolveEndpoint: brokerEndpoint,
       makeClient: (ep) => new BrokerClient(ep),
       onDetected: broadcastPortDetected,
+      onChanged: broadcastPortsChanged,
       excludePorts: () => INFRA_PORTS
     });
+
+// Mock mode gets a scheduled fake feed instead (see mockPorts.ts) so the
+// rail's Serving section works interactively under CLAUDE_FLEET_MOCK=1.
+// e2e runs (CLAUDE_FLEET_E2E=1) disable this auto-feed: tests drive Serving
+// state deterministically through the __test:setServingPorts IPC handle, so
+// the timed fakes must stay silent or they race the injected snapshots.
+const mockPorts: MockServingPorts | null = MOCK_MODE && process.env.CLAUDE_FLEET_E2E !== '1'
+  ? new MockServingPorts(broadcastPortsChanged)
+  : null;
 
 // Per-workspace backend dispatch (#16). A workspace's `kind` decides whether
 // it's a Docker container or a host process; the two backends share the
@@ -755,6 +804,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     portForward?.reconcile(
       all.filter((w) => w.state === 'running' && w.kind !== 'local').map((w) => w.id)
     );
+    mockPorts?.reconcile(all.filter((w) => w.state === 'running').map((w) => w.id));
     return all;
   });
 
@@ -1171,6 +1221,18 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     }
   );
 
+  // Serving rail state: seed on renderer mount/reload. Mock mode serves the
+  // fake feed; real mode the PortForwardManager snapshot.
+  ipcMain.handle('ports:list', () => (portForward ?? mockPorts)?.snapshot() ?? []);
+
+  ipcMain.handle(
+    'ports:kill',
+    async (_e, workspaceId: string, port: number): Promise<{ ok: boolean; error?: string }> => {
+      if (!portForward) return mockPorts?.kill(workspaceId, port) ?? { ok: false, error: 'unavailable' };
+      return portForward.killPort(workspaceId, port);
+    }
+  );
+
   ipcMain.handle('fs:isDirectory', (_e, path: string) => fs.isDirectory(path));
   ipcMain.handle('fs:mkdirp', (_e, path: string) => fs.mkdirp(path));
 
@@ -1227,7 +1289,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     disableHardwareAcceleration: await getHardwareAccelDisabled(),
     autoReloadLoadouts: await getAutoReloadLoadouts(),
     usageBudget: await getUsageBudget(),
-    uiPrefs: await getUiPrefs()
+    uiPrefs: await getUiPrefs(),
+    perfTelemetry: await getPerfTelemetry(),
+    perfOtlp: await getPerfOtlp()
   }));
   ipcMain.handle('config:setAutoReloadLoadouts', async (_e, enabled: boolean) => {
     await setAutoReloadLoadouts(!!enabled);
@@ -1263,6 +1327,20 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     await setHardwareAccelDisabled(!!disabled);
     return { disableHardwareAcceleration: await getHardwareAccelDisabled() };
   });
+
+  ipcMain.handle('config:setPerfTelemetry', async (_e, enabled: boolean) => {
+    await setPerfTelemetry(enabled === true);
+    await reapplyPerfConfig();
+    return getEffectivePerf() ? getPerfStatus() : PERF_STATUS_UNINITIALIZED;
+  });
+
+  ipcMain.handle('config:setPerfOtlp', async (_e, enabled: boolean, endpoint: string) => {
+    await setPerfOtlp(enabled === true, String(endpoint ?? ''));
+    await reapplyPerfConfig();
+    return getEffectivePerf() ? getPerfStatus() : PERF_STATUS_UNINITIALIZED;
+  });
+
+  ipcMain.handle('perf:status', async () => getEffectivePerf() ? getPerfStatus() : PERF_STATUS_UNINITIALIZED);
 
   // ── Model-endpoint registry (#250) ─────────────────────────────────────
   ipcMain.handle('endpoints:list', () => listEndpoints());
@@ -1448,6 +1526,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       const detector = new ActivityDetector();
       handle.stream.on('data', (chunk: Buffer) => {
         win?.webContents.send(`pty:data:${ptyHandleId}`, chunk);
+        recordPtyChunk(owner?.id ?? handleWorkspaceId.get(ptyHandleId) ?? null, brokerSessionId, chunk.length);
         if (owner && detector.push(chunk.toString('utf8'))) {
           committeeBusy.set(owner.id, { busy: detector.isBusy, since: Date.now() });
         }
@@ -1702,6 +1781,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     );
     ipcMain.handle('__test:emitDetectedPort', (_e, workspaceId: string, port: number) => {
       broadcastPortDetected(workspaceId, port);
+    });
+    ipcMain.handle('__test:setServingPorts', (_e, workspaceId: string, ports: ServingPort[]) => {
+      broadcastPortsChanged(workspaceId, ports);
     });
   }
 }

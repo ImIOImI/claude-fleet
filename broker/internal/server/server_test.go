@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/ImIOImI/claude-fleet/broker/internal/portscan"
 	"github.com/ImIOImI/claude-fleet/broker/internal/proto"
 	"github.com/ImIOImI/claude-fleet/broker/internal/session"
 )
@@ -338,6 +340,110 @@ func TestServer_ListPortsUsesInjectedScanner(t *testing.T) {
 		t.Fatalf("decode PORTS: %v", err)
 	}
 	// Real /proc scan: shape must decode; contents are environment-dependent.
+}
+
+// startTestServerReturningServer is startTestServer but also returns the
+// *Server so tests can inject fields (ListPorts, KillPort) after construction.
+func startTestServerReturningServer(t *testing.T) (client *net.UnixConn, srv *Server, cleanup func()) {
+	t.Helper()
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "broker.sock")
+
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	if err := os.Chmod(sockPath, 0o666); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	mgr := session.NewManager(session.ManagerConfig{
+		ClaudeExec:   "/bin/cat",
+		RingBufBytes: 1024,
+	})
+	srv = New(mgr)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ctx, ln) }()
+
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		cancel()
+		_ = ln.Close()
+		mgr.CloseAll()
+		t.Fatalf("dial: %v", err)
+	}
+	uc := conn.(*net.UnixConn)
+
+	cleanup = func() {
+		_ = uc.Close()
+		cancel()
+		_ = ln.Close()
+		mgr.CloseAll()
+		<-serveErr
+	}
+	return uc, srv, cleanup
+}
+
+func TestServer_ListPortsCarriesOwnerInfo(t *testing.T) {
+	// A server with an injected scanner must relay pid/cmdline verbatim.
+	conn, srv, cleanup := startTestServerReturningServer(t)
+	defer cleanup()
+	srv.ListPorts = func() ([]portscan.Detail, error) {
+		return []portscan.Detail{{Port: 3000, Pid: 42, Cmdline: "vite dev"}, {Port: 9999}}, nil
+	}
+	_ = proto.WriteJSONFrame(conn, proto.FrameListPorts, struct{}{})
+	payload := expectFrame(t, conn, proto.FramePorts)
+	var resp proto.PortsResponse
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		t.Fatalf("decode PORTS: %v", err)
+	}
+	if len(resp.Ports) != 2 {
+		t.Fatalf("want 2 ports, got %+v", resp.Ports)
+	}
+	byPort := map[uint16]proto.PortInfo{}
+	for _, p := range resp.Ports {
+		byPort[p.Port] = p
+	}
+	if got := byPort[3000]; got.Pid != 42 || got.Cmdline != "vite dev" {
+		t.Fatalf("owner info lost: %+v", got)
+	}
+	if got := byPort[9999]; got.Pid != 0 || got.Cmdline != "" {
+		t.Fatalf("unresolved port must have zero owner fields: %+v", got)
+	}
+}
+
+func TestServer_KillPortDispatch(t *testing.T) {
+	conn, srv, cleanup := startTestServerReturningServer(t)
+	defer cleanup()
+	var killed []uint16
+	srv.KillPort = func(port uint16) error {
+		killed = append(killed, port)
+		return nil
+	}
+	_ = proto.WriteJSONFrame(conn, proto.FrameKillPort, proto.KillPortRequest{Port: 8765})
+	payload := expectFrame(t, conn, proto.FrameKilled)
+	var resp proto.KilledResponse
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		t.Fatalf("decode KILLED: %v", err)
+	}
+	if !resp.OK || len(killed) != 1 || killed[0] != 8765 {
+		t.Fatalf("kill not dispatched: resp=%+v killed=%v", resp, killed)
+	}
+}
+
+func TestServer_KillPortErrorSurfaces(t *testing.T) {
+	conn, srv, cleanup := startTestServerReturningServer(t)
+	defer cleanup()
+	srv.KillPort = func(uint16) error { return errors.New("no resolvable owner") }
+	_ = proto.WriteJSONFrame(conn, proto.FrameKillPort, proto.KillPortRequest{Port: 1})
+	payload := expectFrame(t, conn, proto.FrameKilled)
+	var resp proto.KilledResponse
+	_ = json.Unmarshal(payload, &resp)
+	if resp.OK || resp.Error == "" {
+		t.Fatalf("want ok=false with error, got %+v", resp)
+	}
 }
 
 func TestServer_SecondConnAttachToHeldSessionRejected(t *testing.T) {

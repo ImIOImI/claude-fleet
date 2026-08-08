@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import type { WorkspaceObservabilitySummary, UsageBudget } from '../../../preload';
+import type { WorkspaceObservabilitySummary, UsageBudget, ServingPort } from '../../../preload';
 import { colorFor, type WorkspaceSummary } from '../App';
+import { PortsSection } from './PortsSection';
 import {
   workspaceHostPath,
   workspacePathLabel,
@@ -39,6 +40,12 @@ interface Props {
   collapsed: boolean;
   /** Toggle the collapsed state (persisted by App.tsx). */
   onToggleCollapse: () => void;
+  /** Live Serving snapshots keyed by workspace id (App's usePorts). */
+  servingPorts: Record<string, ServingPort[]>;
+  /** Open the loopback preview for a serving port (same path as the toast). */
+  onOpenPort: (workspaceId: string, port: number) => void;
+  /** Kill the server behind a serving port. */
+  onKillPort: (workspaceId: string, port: number) => void;
 }
 
 type Scope = 'workspace' | 'fleet';
@@ -57,7 +64,10 @@ export function ObservabilityPane({
   budget,
   budgetSpentTokens,
   collapsed,
-  onToggleCollapse
+  onToggleCollapse,
+  servingPorts,
+  onOpenPort,
+  onKillPort
 }: Props) {
   const [scope, setScope] = useState<Scope>('workspace');
   // Session-graph metric (cost vs tokens). A pure UI preference, persisted to
@@ -121,7 +131,7 @@ export function ObservabilityPane({
       )}
       <div className="pane-body">
         {scope === 'fleet' ? (
-          <FleetView workspaces={live} summaries={summaries} />
+          <FleetView workspaces={live} summaries={summaries} servingPorts={servingPorts} onOpenPort={onOpenPort} onKillPort={onKillPort} />
         ) : !workspaceName ? (
           <EmptyState message="No workspace selected." />
         ) : (
@@ -135,6 +145,17 @@ export function ObservabilityPane({
                 activeTerminalId={activeTerminalId}
                 graphMetric={graphMetric}
                 onGraphMetric={onGraphMetric}
+              />
+            )}
+            {workspace && (
+              <PortsSection
+                rows={(servingPorts[workspace.id] ?? []).map((p) => ({
+                  ...p,
+                  workspaceId: workspace.id
+                }))}
+                showWorkspace={false}
+                onOpen={onOpenPort}
+                onKill={onKillPort}
               />
             )}
             {workspace && <WorkspaceBlock workspace={workspace} sharedDir={sharedDir} />}
@@ -229,10 +250,16 @@ function ScopeToggle({
 
 function FleetView({
   workspaces,
-  summaries
+  summaries,
+  servingPorts,
+  onOpenPort,
+  onKillPort
 }: {
   workspaces: WorkspaceSummary[];
   summaries: Record<string, WorkspaceObservabilitySummary | null>;
+  servingPorts: Record<string, ServingPort[]>;
+  onOpenPort: (workspaceId: string, port: number) => void;
+  onKillPort: (workspaceId: string, port: number) => void;
 }) {
   const rows = workspaces.map((w) => {
     const s = summaries[w.id];
@@ -285,6 +312,20 @@ function FleetView({
           </div>
         ))}
       </section>
+
+      <PortsSection
+        rows={rows.flatMap((r) =>
+          (servingPorts[r.id] ?? []).map((p) => ({
+            ...p,
+            workspaceId: r.id,
+            workspaceName: r.name,
+            hue: r.hue
+          }))
+        )}
+        showWorkspace
+        onOpen={onOpenPort}
+        onKill={onKillPort}
+      />
     </div>
   );
 }
