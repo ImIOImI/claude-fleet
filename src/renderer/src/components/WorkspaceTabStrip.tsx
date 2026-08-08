@@ -4,7 +4,7 @@ import type { WorkspaceObservabilitySummary } from '../../../preload';
 import { colorFor, type WorkspaceState, type WorkspaceSummary } from '../App';
 import { isManager, isReachable, ManagerGlyph, WifiGlyph } from './committee';
 import { useBlinkSync } from '../blinkSync';
-import { setInternalDragActive } from '../dropIngestion';
+import { reorderDragHandlers } from '../dropIngestion';
 import { dotClass } from './chipState';
 import { usePortalMenu } from './portalMenu';
 import { IconCopy, IconEject, IconPause, IconPencil, IconPlay, IconStop, IconTrash } from './menuIcons';
@@ -171,29 +171,12 @@ export function WorkspaceTabStrip({
           }`}
           style={{ ['--hue' as never]: colorFor(w) }}
           draggable
-          onDragStart={(e) => {
-            setDragId(w.id);
-            e.dataTransfer.effectAllowed = 'move';
-            // Tell the window-level file-ingestion handlers to stay out of this
-            // internal drag — otherwise its dragover forces dropEffect='copy'
-            // over our 'move' and cancels the reorder drop (#177).
-            setInternalDragActive(true);
-          }}
-          onDragOver={(e) => {
-            if (dragId && dragId !== w.id) e.preventDefault(); // allow drop
-          }}
-          onDrop={(e) => {
-            e.preventDefault();
-            if (dragId && dragId !== w.id) onReorderWorkspace(dragId, w.id);
-            setDragId(null);
-            setInternalDragActive(false);
-          }}
-          onDragEnd={() => {
-            setDragId(null);
-            // dragend always fires (drop or cancel), so this is the guaranteed
-            // clear; the onDrop clear above just frees it a beat earlier.
-            setInternalDragActive(false);
-          }}
+          {...reorderDragHandlers({
+            id: w.id,
+            dragId,
+            setDragId,
+            onReorder: onReorderWorkspace
+          })}
         >
           <button
             className="ws-chip"
