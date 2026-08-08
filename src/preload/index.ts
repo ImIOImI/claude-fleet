@@ -523,6 +523,11 @@ const api = {
     /** Terminate the session (kills claude). Returns true if a handle was live. */
     closeSession: (sessionId: string): Promise<boolean> =>
       ipcRenderer.invoke('pty:closeSession', sessionId),
+    /** Terminate a session by (workspace, broker session id) — used by tab-close,
+     *  which knows the stable broker session id but not the per-attach handle.
+     *  Kills claude via the same broker CLOSE the refresh path uses. */
+    closeSessionByBroker: (workspaceId: string, brokerSessionId: string): Promise<boolean> =>
+      ipcRenderer.invoke('pty:closeSessionByBroker', workspaceId, brokerSessionId),
     onData: (sessionId: string, cb: (chunk: Uint8Array, ts?: number) => void) => {
       const channel = `pty:data:${sessionId}`;
       const handler = (_e: IpcRendererEvent, chunk: Buffer, ts?: number) => cb(new Uint8Array(chunk), ts);
