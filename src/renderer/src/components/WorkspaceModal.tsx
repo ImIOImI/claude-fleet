@@ -15,6 +15,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ulid } from 'ulid';
 import { colorFor, type WorkspaceSummary } from '../App';
+import { ModalBackdrop } from './ModalBackdrop';
 import {
   WorkspaceForm,
   type WorkspaceFormSubmit
@@ -191,7 +192,7 @@ export function WorkspaceModal({
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <ModalBackdrop onClose={onClose}>
       <div className="modal modal-tabbed" onClick={(e) => e.stopPropagation()}>
         <div className="modal-tabs" role="tablist">
           <button
@@ -396,7 +397,7 @@ export function WorkspaceModal({
           </div>
         )}
       </div>
-    </div>
+    </ModalBackdrop>
   );
 }
 

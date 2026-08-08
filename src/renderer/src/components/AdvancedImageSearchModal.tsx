@@ -10,6 +10,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import type { WorkspaceSummary } from '../App';
+import { ModalBackdrop } from './ModalBackdrop';
 
 export interface ImageEntry {
   ref: string;
@@ -148,7 +149,7 @@ export function AdvancedImageSearchModal({
     );
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <ModalBackdrop onClose={onClose}>
       <div className="modal modal-tabbed" onClick={(e) => e.stopPropagation()}>
         <div className="modal-tabs" role="tablist">
           <div className="modal-tab active" aria-current="page">
@@ -306,7 +307,7 @@ export function AdvancedImageSearchModal({
           )}
         </div>
       </div>
-    </div>
+    </ModalBackdrop>
   );
 }
 

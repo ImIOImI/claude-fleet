@@ -4,6 +4,7 @@
 // loadout's source folder via the WSL-aware fs:openPath.
 
 import { useEffect, useState } from 'react';
+import { ModalBackdrop } from './ModalBackdrop';
 
 interface LoadoutDetail {
   id: string;
@@ -104,7 +105,7 @@ export function LoadoutReviewModal({
   const toolDeps = detail ? depList(detail.dependencies?.tools) : [];
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <ModalBackdrop onClose={onClose}>
       <div className="modal loadout-review" onClick={(e) => e.stopPropagation()}>
         <div className="lr-head">
           <span className="eyebrow">Loadout · review</span>
@@ -255,6 +256,6 @@ export function LoadoutReviewModal({
           </>
         )}
       </div>
-    </div>
+    </ModalBackdrop>
   );
 }

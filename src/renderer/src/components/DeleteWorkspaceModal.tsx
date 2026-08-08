@@ -5,6 +5,7 @@
 
 import { useState } from 'react';
 import type { WorkspaceSummary } from '../App';
+import { ModalBackdrop } from './ModalBackdrop';
 
 interface Props {
   workspace: WorkspaceSummary;
@@ -61,7 +62,7 @@ export function DeleteWorkspaceModal({ workspace, onClose, onDeleted }: Props) {
   };
 
   return (
-    <div className="modal-backdrop" onClick={busy ? undefined : onClose}>
+    <ModalBackdrop onClose={busy ? undefined : onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <h2>Delete workspace</h2>
         <p className="modal-eyebrow">{workspace.name}</p>
@@ -83,6 +84,6 @@ export function DeleteWorkspaceModal({ workspace, onClose, onDeleted }: Props) {
           </button>
         </div>
       </div>
-    </div>
+    </ModalBackdrop>
   );
 }

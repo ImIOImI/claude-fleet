@@ -176,6 +176,7 @@ A running chip also surfaces a **waiting indicator** — a violet (`--wait`) sta
 - **Bottom row** (`BottomBar`): static hint bar with key bindings and degraded-vault notice when applicable.
 
 Modals owned by `App`:
+- All modals render inside the shared `ModalBackdrop` component, which dismisses only when a left-button press **starts and ends on the backdrop element itself** (tracked via mousedown/mouseup targets, pure logic in `backdropDismiss.ts`) — a plain `onClick={onClose}` backdrop would also close on a text-selection drag that releases over the backdrop, because the browser fires `click` on the common ancestor of the down/up targets. Passing `onClose={undefined}` disables backdrop dismissal (used while a modal is `busy`).
 - `WorkspaceModal` — tabbed shell with Saved + New tabs (underlined-tab style). Body of each tab uses `WorkspaceForm` — the field-level form component owns state, validation, and footer; New tab renders it in `mode='create'`, expanded Saved-tab rows render it in `mode='edit'`. Saved-row expanded footer is `Delete · Cancel · Clone · Resume`; New-tab footer is `Cancel · Create & start`.
 - `EditWorkspaceModal` — single-purpose modal for editing a *live* workspace. Opened from the chip ⋮ menu Edit entry. Wraps `WorkspaceForm` in `mode='edit'`. On Save, calls `workspace:writeManifest` + diffs pre/post specs; container-level changes flip the restart-to-apply banner in the workspace's TerminalPane.
 - `CloseWorkspaceModal` — Stop / Pause / Stop & remove (keeps state dir).

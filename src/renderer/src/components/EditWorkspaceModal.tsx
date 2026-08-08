@@ -19,6 +19,7 @@ import { useState } from 'react';
 import { WorkspaceForm, type WorkspaceFormSubmit } from './WorkspaceForm';
 import { DeleteWorkspaceModal } from './DeleteWorkspaceModal';
 import { workspaceToFormInitial } from './formInitial';
+import { ModalBackdrop } from './ModalBackdrop';
 import type { WorkspaceSummary } from '../App';
 
 interface Props {
@@ -80,7 +81,7 @@ export function EditWorkspaceModal({
   }
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <ModalBackdrop onClose={onClose}>
       <div className="modal modal-tabbed" onClick={(e) => e.stopPropagation()}>
         <div className="modal-tabs" role="tablist">
           <div className="modal-tab active" aria-current="page">
@@ -102,7 +103,7 @@ export function EditWorkspaceModal({
           />
         </div>
       </div>
-    </div>
+    </ModalBackdrop>
   );
 }
 

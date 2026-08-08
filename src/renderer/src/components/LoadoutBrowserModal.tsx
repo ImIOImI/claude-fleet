@@ -4,6 +4,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { WorkspaceSummary } from '../App';
+import { ModalBackdrop } from './ModalBackdrop';
 
 type Entry = Awaited<ReturnType<typeof window.api.loadouts.catalog>>[number];
 
@@ -87,7 +88,7 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <ModalBackdrop onClose={onClose}>
       <div className="modal loadout-browser" onClick={(ev) => ev.stopPropagation()}>
         <div className="lb-head">
           <span className="eyebrow">Loadouts · browse</span>
@@ -191,6 +192,6 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
           </ul>
         </div>
       </div>
-    </div>
+    </ModalBackdrop>
   );
 }

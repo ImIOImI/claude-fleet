@@ -6,6 +6,7 @@
 
 import { useEffect, useState } from 'react';
 import type { PerfStatusPayload, UsageBudgetPreset, UiPrefs } from '../../../preload';
+import { ModalBackdrop } from './ModalBackdrop';
 
 /** Compact token formatter for preset labels (e.g. 19_000_000 → "19M"). */
 function fmtTokens(n: number): string {
@@ -308,7 +309,7 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <ModalBackdrop onClose={onClose}>
       <div className="modal modal-tabbed" onClick={(e) => e.stopPropagation()}>
         <div className="modal-tabs" role="tablist">
           <div
@@ -779,7 +780,7 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
           </div>
         )}
       </div>
-    </div>
+    </ModalBackdrop>
   );
 }
 
