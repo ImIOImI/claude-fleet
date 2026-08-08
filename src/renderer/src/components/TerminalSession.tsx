@@ -18,6 +18,8 @@ import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { ActivityDetector } from '../activityDetector';
 import { decideTerminalKeyAction } from '../terminalKeymap';
+import { EchoRttTracker } from '../echoRtt';
+import { initPerfState, perfRecording } from '../perfState';
 
 // Stretch the font fallback chain so canvas renders for glyphs xterm
 // can't find in a monospace font (emoji, symbols, regional indicators)
@@ -287,6 +289,7 @@ export function TerminalSession({
     let ptyHandleId: string | null = null;
     let unsubData: (() => void) | null = null;
     let unsubEnd: (() => void) | null = null;
+    let sampleTimer: ReturnType<typeof setInterval> | null = null;
 
     // Scoped one-shot repaint nudge. claude paints some startup screens
     // (notably the org "Managed settings require approval" gate) on the
@@ -417,12 +420,39 @@ export function TerminalSession({
         }
         ptyHandleId = sid;
         ptyHandleRef.current = sid;
+        // Latency sampling (perf Phase 2): keystroke→echo pairing + output
+        // hop, batched to main every 5s. Gated on perfRecording() per event.
+        initPerfState();
+        const echoTracker = new EchoRttTracker();
+        const sampleBatch: Array<{ kind: 'output_hop' | 'echo_rtt'; durMs: number }> = [];
+        sampleTimer = setInterval(() => {
+          if (sampleBatch.length === 0) return;
+          window.api.perf.samples({ sessionId: sid, samples: sampleBatch.splice(0) });
+        }, 5000);
         const activity = new ActivityDetector();
         // PTY chunks are bytes; decode (streaming-safe so a multibyte glyph
         // split across chunks still reassembles) for the title detector.
         const decoder = new TextDecoder();
-        unsubData = window.api.pty.onData(sid, (chunk) => {
-          term.write(chunk);
+        unsubData = window.api.pty.onData(sid, (chunk, ts) => {
+          if (perfRecording()) {
+            const arrival = performance.timeOrigin + performance.now();
+            for (const rtt of echoTracker.output(arrival)) {
+              sampleBatch.push({ kind: 'echo_rtt', durMs: rtt });
+            }
+            if (typeof ts === 'number') {
+              // Completion callback fires after xterm has processed the chunk.
+              term.write(chunk, () => {
+                sampleBatch.push({
+                  kind: 'output_hop',
+                  durMs: performance.timeOrigin + performance.now() - ts
+                });
+              });
+            } else {
+              term.write(chunk);
+            }
+          } else {
+            term.write(chunk);
+          }
           // Watch the title glyph for busy/idle; report only on a flip.
           const text = typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true });
           if (activity.push(text)) onActivityChange?.(sessionId, activity.isBusy);
@@ -450,7 +480,13 @@ export function TerminalSession({
           // First user keystroke ⇒ they're interacting; cancel any pending
           // repaint nudge so we never inject Ctrl+L into an active session.
           disarmNudge();
-          window.api.pty.input(sid, data);
+          if (perfRecording()) {
+            const ts = performance.timeOrigin + performance.now();
+            echoTracker.keystroke(ts);
+            window.api.pty.input(sid, data, ts);
+          } else {
+            window.api.pty.input(sid, data);
+          }
         });
 
         // Arm the scoped repaint nudge (consumed by the ResizeObserver
@@ -523,6 +559,7 @@ export function TerminalSession({
       onActivityChange?.(sessionId, false);
       cancelAnimationFrame(initialFitRaf);
       disarmNudge();
+      if (sampleTimer) clearInterval(sampleTimer);
       ro.disconnect();
       host.removeEventListener('contextmenu', onContextMenu);
       unsubData?.();
