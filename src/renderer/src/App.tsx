@@ -23,7 +23,7 @@ import {
 import { contextBarSummary } from './contextBarSource';
 import { busyClaudeIdSet, openSessionMap, type OpenTabRef } from './busySessions';
 import { mergeWaitingSessionIds, waitingFlags } from './waitingSessions';
-import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget } from '../../preload';
+import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget, UiPrefs } from '../../preload';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
 export type WorkspaceKind = 'container' | 'local';
@@ -213,6 +213,8 @@ export function App() {
   // rolling-window spend, polled separately from per-workspace summaries.
   const [usageBudget, setUsageBudget] = useState<UsageBudget | null>(null);
   const [budgetSpentTokens, setBudgetSpentTokens] = useState(0);
+  // Display prefs; null until the first config.get resolves (defaults = shown).
+  const [uiPrefs, setUiPrefs] = useState<UiPrefs | null>(null);
   const [closeTargetId, setCloseTargetId] = useState<string | null>(null);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const [editTargetId, setEditTargetId] = useState<string | null>(null);
@@ -595,6 +597,7 @@ export function App() {
       setSharedDir(cfg.sharedDir);
       setAutoReloadLoadouts(cfg.autoReloadLoadouts);
       setUsageBudget(cfg.usageBudget);
+      setUiPrefs(cfg.uiPrefs);
     });
     const t = setInterval(refresh, 5000);
     return () => clearInterval(t);
@@ -604,13 +607,13 @@ export function App() {
   // (slower) cadence from the per-workspace summary refresh — it's a single
   // cheap aggregate and the rolling window moves on the order of minutes.
   useEffect(() => {
-    if (!apiReady) return;
+    if (!apiReady || uiPrefs?.showBudgetBar === false) return;
     const poll = () =>
       window.api.usage.rollingSpend().then((r) => setBudgetSpentTokens(r.spentTokens));
     poll();
     const t = setInterval(poll, 15000);
     return () => clearInterval(t);
-  }, [apiReady]);
+  }, [apiReady, uiPrefs?.showBudgetBar]);
 
   // Keep a sensible selection on the "warm" fleet (running + paused — the only
   // states the top strip shows, #21). Three jobs:
@@ -1188,6 +1191,9 @@ export function App() {
           onChanged={refresh}
           onLoadoutInstalled={handleLoadoutInstalled}
           onBrowse={() => setBrowseOpen(true)}
+          showSessionCost={uiPrefs?.showSessionCost !== false}
+          maxSessions={uiPrefs?.maxSessions ?? 0}
+          maxSessionAgeDays={uiPrefs?.maxSessionAgeDays ?? 0}
         />
 
         <main
@@ -1276,7 +1282,7 @@ export function App() {
           summaries={summaries}
           terminals={terminals}
           activeTerminalId={activeTabId}
-          budget={usageBudget}
+          budget={uiPrefs?.showBudgetBar === false ? null : usageBudget}
           budgetSpentTokens={budgetSpentTokens}
           collapsed={obsCollapsed}
           onToggleCollapse={toggleObsCollapsed}
@@ -1369,8 +1375,11 @@ export function App() {
           onClose={() => setSettingsTab(null)}
           onSaved={(cfg) => {
             setSharedDir(cfg.sharedDir);
-            // Pick up any usage-budget change made in the modal.
-            window.api.config.get().then((c) => setUsageBudget(c.usageBudget));
+            // Pick up any usage-budget / display-prefs change made in the modal.
+            window.api.config.get().then((c) => {
+              setUsageBudget(c.usageBudget);
+              setUiPrefs(c.uiPrefs);
+            });
             refresh();
           }}
         />

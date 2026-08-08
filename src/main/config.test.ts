@@ -33,6 +33,8 @@ const {
   getFleetRoot,
   setFavorite,
   resolveWorkspaceConfig,
+  getUiPrefs,
+  setUiPrefs,
   getPerfTelemetry,
   setPerfTelemetry,
   getPerfOtlp,
@@ -206,6 +208,16 @@ describe('setFavorite', () => {
     await setFavorite('spec-driven', true);
     expect(await getFleetRoot()).toBe(root);
   });
+
+  it('survives a settings write after a cold read from disk (regression: read() dropped favorites)', async () => {
+    await setFavorite('spec-driven', true);
+    // Cold read: the next setter rebuilds the cache from disk before writing.
+    _resetConfigCacheForTests();
+    await setUiPrefs({ showBudgetBar: false });
+    _resetConfigCacheForTests();
+    const parsed = JSON.parse(await readFile(configPath(), 'utf8'));
+    expect(parsed.favorites).toEqual(['spec-driven']);
+  });
 });
 
 describe('resolveWorkspaceConfig (#219)', () => {
@@ -261,6 +273,74 @@ describe('resolveWorkspaceConfig (#219)', () => {
   it('CF_SUMMARY_MODEL env override wins over defaults', () => {
     const cfg = resolveWorkspaceConfig('ws1', { CF_SUMMARY_MODEL: 'user-override' }, '0.9.0');
     expect(cfg.summarizer.model).toBe('user-override');
+  });
+});
+
+describe('get/setUiPrefs', () => {
+  it('defaults everything to visible/unlimited when unset', async () => {
+    expect(await getUiPrefs()).toEqual({
+      showBudgetBar: true,
+      showSessionCost: true,
+      maxSessions: 0,
+      maxSessionAgeDays: 0
+    });
+  });
+
+  it('merges partial writes — setting one key preserves the others', async () => {
+    await setUiPrefs({ showBudgetBar: false });
+    await setUiPrefs({ maxSessions: 25 });
+    expect(await getUiPrefs()).toEqual({
+      showBudgetBar: false,
+      showSessionCost: true,
+      maxSessions: 25,
+      maxSessionAgeDays: 0
+    });
+  });
+
+  it('an explicit false survives a fresh read from disk', async () => {
+    await setUiPrefs({ showSessionCost: false, maxSessionAgeDays: 7 });
+    _resetConfigCacheForTests();
+    const p = await getUiPrefs();
+    expect(p.showSessionCost).toBe(false);
+    expect(p.maxSessionAgeDays).toBe(7);
+  });
+
+  it('rounds fractional filter values and rejects negatives (keeps prior value)', async () => {
+    await setUiPrefs({ maxSessions: 25.7 });
+    expect((await getUiPrefs()).maxSessions).toBe(26);
+    await setUiPrefs({ maxSessions: -5 });
+    expect((await getUiPrefs()).maxSessions).toBe(26); // negative rejected, prior kept
+  });
+
+  it('preserves a non-preset value verbatim (hand-edited config.json)', async () => {
+    await setUiPrefs({ maxSessions: 42 });
+    _resetConfigCacheForTests();
+    expect((await getUiPrefs()).maxSessions).toBe(42);
+  });
+
+  it('ignores a malformed persisted uiPrefs, falling back to defaults', async () => {
+    await writeFile(
+      configPath(),
+      JSON.stringify({ uiPrefs: { showBudgetBar: 'nope', maxSessions: 'many' } }),
+      'utf8'
+    );
+    _resetConfigCacheForTests();
+    expect(await getUiPrefs()).toEqual({
+      showBudgetBar: true,
+      showSessionCost: true,
+      maxSessions: 0,
+      maxSessionAgeDays: 0
+    });
+  });
+
+  it('does not clobber the other settings', async () => {
+    const root = join(userDataDir, 'fleet');
+    await setFleetRoot(root);
+    await setUsageBudget('max5', 9_000_000);
+    await setUiPrefs({ showBudgetBar: false });
+    expect(await getFleetRoot()).toBe(root);
+    expect((await getUsageBudget()).preset).toBe('max5');
+    expect((await getUiPrefs()).showBudgetBar).toBe(false);
   });
 });
 

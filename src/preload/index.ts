@@ -154,6 +154,14 @@ export interface UsageBudget {
   presets: Record<Exclude<UsageBudgetPreset, 'custom'>, number>;
 }
 
+/** Display preferences (mirrors `UiPrefs` in main/config). 0 = unlimited. */
+export interface UiPrefs {
+  showBudgetBar: boolean;
+  showSessionCost: boolean;
+  maxSessions: number;
+  maxSessionAgeDays: number;
+}
+
 /** Perf-telemetry status snapshot (mirrors `PerfStatus` in main/perf). */
 export interface PerfStatusPayload {
   enabled: boolean;
@@ -421,6 +429,7 @@ const api = {
       disableHardwareAcceleration: boolean;
       autoReloadLoadouts: boolean;
       usageBudget: UsageBudget;
+      uiPrefs: UiPrefs;
       perfTelemetry: boolean;
       perfOtlp: { enabled: boolean; endpoint: string };
     }> => ipcRenderer.invoke('config:get'),
@@ -437,6 +446,8 @@ const api = {
       customTokens: number
     ): Promise<{ usageBudget: UsageBudget }> =>
       ipcRenderer.invoke('config:setUsageBudget', preset, customTokens),
+    setUiPrefs: (prefs: Partial<UiPrefs>): Promise<{ uiPrefs: UiPrefs }> =>
+      ipcRenderer.invoke('config:setUiPrefs', prefs),
     setPerfTelemetry: (enabled: boolean): Promise<PerfStatusPayload> =>
       ipcRenderer.invoke('config:setPerfTelemetry', enabled),
     setPerfOtlp: (enabled: boolean, endpoint: string): Promise<PerfStatusPayload> =>

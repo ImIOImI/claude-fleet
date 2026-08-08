@@ -68,3 +68,22 @@ export function tagCounts(items: ReadonlyArray<{ tags: string[] }>): Array<[stri
   for (const s of items) for (const t of s.tags) c.set(t, (c.get(t) ?? 0) + 1);
   return [...c.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
 }
+
+/** Display-prefs trim for the Recent group (uiPrefs.maxSessions /
+ *  maxSessionAgeDays; 0 = unlimited). Age filter first (rows exactly at the
+ *  cutoff stay; null lastActiveAt passes — age unknown ⇒ keep), then the
+ *  newest-N cap — items arrive last-active-descending (db.ts listSessions),
+ *  so a plain slice IS "newest N". `now` is injected for testability. */
+export function limitSessions<T extends { lastActiveAt: number | null }>(
+  items: readonly T[],
+  opts: { maxCount: number; maxAgeDays: number },
+  now: number
+): T[] {
+  let out = [...items];
+  if (opts.maxAgeDays > 0) {
+    const cutoff = now - opts.maxAgeDays * 86_400_000;
+    out = out.filter((s) => s.lastActiveAt == null || s.lastActiveAt >= cutoff);
+  }
+  if (opts.maxCount > 0) out = out.slice(0, opts.maxCount);
+  return out;
+}

@@ -51,6 +51,16 @@ export interface ResolvedUsageBudget extends UsageBudgetConfig {
   presets: typeof USAGE_BUDGET_PRESETS;
 }
 
+/** Visual/display preferences: pure UI toggles + left-rail
+ *  session filters. All display-only — tracking and the DB are unaffected.
+ *  0 means "unlimited" for both numeric filters. */
+export interface UiPrefs {
+  showBudgetBar: boolean;
+  showSessionCost: boolean;
+  maxSessions: number;
+  maxSessionAgeDays: number;
+}
+
 interface AppConfig {
   fleetRoot?: string;
   /** When true, the app skips Chromium hardware acceleration at startup. */
@@ -63,6 +73,8 @@ interface AppConfig {
   usageBudget?: UsageBudgetConfig;
   /** Global loadout favorites (loadout ids), shown in every workspace's rail. */
   favorites?: string[];
+  /** Display preferences; partial on disk — getUiPrefs() resolves defaults. */
+  uiPrefs?: Partial<UiPrefs>;
   /** Perf telemetry recording (docs/superpowers/specs/2026-08-07-perf-telemetry-design.md).
    *  Absent ⇒ default ON. CLAUDE_FLEET_PERF=0 overrides at resolve time (perfConfig.ts). */
   perfTelemetry?: boolean;
@@ -83,6 +95,23 @@ function parseUsageBudget(v: unknown): UsageBudgetConfig | undefined {
       ? Math.round(o.customTokens)
       : DEFAULT_CUSTOM_TOKENS;
   return { preset, customTokens };
+}
+
+/** Defensively parse persisted/incoming uiPrefs (untrusted JSON). Keeps only
+ *  well-typed keys: booleans as-is; numbers rounded, negatives rejected. */
+function parseUiPrefs(v: unknown): Partial<UiPrefs> | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const o = v as Record<string, unknown>;
+  const out: Partial<UiPrefs> = {};
+  if (typeof o.showBudgetBar === 'boolean') out.showBudgetBar = o.showBudgetBar;
+  if (typeof o.showSessionCost === 'boolean') out.showSessionCost = o.showSessionCost;
+  const num = (x: unknown): number | undefined =>
+    typeof x === 'number' && Number.isFinite(x) && x >= 0 ? Math.round(x) : undefined;
+  const maxSessions = num(o.maxSessions);
+  if (maxSessions !== undefined) out.maxSessions = maxSessions;
+  const maxSessionAgeDays = num(o.maxSessionAgeDays);
+  if (maxSessionAgeDays !== undefined) out.maxSessionAgeDays = maxSessionAgeDays;
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /** Defensively parse the persisted perfOtlp block (untrusted JSON on disk). */
@@ -119,6 +148,10 @@ async function read(): Promise<AppConfig> {
       autoReloadLoadouts:
         typeof parsed.autoReloadLoadouts === 'boolean' ? parsed.autoReloadLoadouts : undefined,
       usageBudget: parseUsageBudget(parsed.usageBudget),
+      uiPrefs: parseUiPrefs(parsed.uiPrefs),
+      favorites: Array.isArray(parsed.favorites)
+        ? parsed.favorites.filter((x): x is string => typeof x === 'string')
+        : undefined,
       perfTelemetry: typeof parsed.perfTelemetry === 'boolean' ? parsed.perfTelemetry : undefined,
       perfOtlp: parsePerfOtlp(parsed.perfOtlp)
     };
@@ -256,6 +289,25 @@ export async function setUsageBudget(
       ? Math.round(customTokens)
       : DEFAULT_CUSTOM_TOKENS;
   await write({ ...cfg, usageBudget: { preset, customTokens: clean } });
+}
+
+/** Display preferences, resolved for the renderer: absent toggles default to
+ *  shown, absent filters to 0 (unlimited) — so existing installs see no change. */
+export async function getUiPrefs(): Promise<UiPrefs> {
+  const cfg = await read();
+  return {
+    showBudgetBar: cfg.uiPrefs?.showBudgetBar !== false,
+    showSessionCost: cfg.uiPrefs?.showSessionCost !== false,
+    maxSessions: cfg.uiPrefs?.maxSessions ?? 0,
+    maxSessionAgeDays: cfg.uiPrefs?.maxSessionAgeDays ?? 0
+  };
+}
+
+/** Shallow-merge a partial update into the stored uiPrefs. Invalid values are
+ *  dropped by parseUiPrefs (prior/default value wins), never written. */
+export async function setUiPrefs(partial: Partial<UiPrefs>): Promise<void> {
+  const cfg = await read();
+  await write({ ...cfg, uiPrefs: { ...cfg.uiPrefs, ...parseUiPrefs(partial) } });
 }
 
 /** `<fleetRoot>/<id>` — a workspace's private folder, mounted at /workspace. */

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sessionsForScope, filterSessions, partitionByOpen, tagCounts } from './sessionsView';
+import { sessionsForScope, filterSessions, partitionByOpen, tagCounts, limitSessions } from './sessionsView';
 
 // Minimal session shape — only what the scope logic touches.
 const S = (id: string, workspaceId: string): { id: string; workspaceId: string } => ({
@@ -104,5 +104,43 @@ describe('tagCounts', () => {
   });
   it('empty input gives empty output', () => {
     expect(tagCounts([])).toEqual([]);
+  });
+});
+
+describe('limitSessions', () => {
+  const DAY = 86_400_000;
+  const NOW = 1_754_000_000_000;
+  const row = (id: string, ageDays: number | null): { id: string; lastActiveAt: number | null } => ({
+    id,
+    lastActiveAt: ageDays === null ? null : NOW - ageDays * DAY
+  });
+  // last-active-descending, matching db.ts listSessions ordering.
+  const ROWS = [row('a', 0), row('b', 2), row('c', 10), row('d', 40), row('e', null)];
+
+  it('0/0 is a passthrough (unlimited), without aliasing the input', () => {
+    const out = limitSessions(ROWS, { maxCount: 0, maxAgeDays: 0 }, NOW);
+    expect(out).toEqual(ROWS);
+    expect(out).not.toBe(ROWS);
+  });
+
+  it('age filter drops older rows; exactly at the boundary stays', () => {
+    const boundary = [row('x', 7), row('y', 7.00001)];
+    const out = limitSessions(boundary, { maxCount: 0, maxAgeDays: 7 }, NOW);
+    expect(out.map((s) => s.id)).toEqual(['x']);
+  });
+
+  it('null lastActiveAt passes the age filter (age unknown ⇒ keep)', () => {
+    const out = limitSessions(ROWS, { maxCount: 0, maxAgeDays: 7 }, NOW);
+    expect(out.map((s) => s.id)).toEqual(['a', 'b', 'e']);
+  });
+
+  it('count cap keeps the newest N (input order is last-active-descending)', () => {
+    const out = limitSessions(ROWS, { maxCount: 2, maxAgeDays: 0 }, NOW);
+    expect(out.map((s) => s.id)).toEqual(['a', 'b']);
+  });
+
+  it('applies age first, then the cap', () => {
+    const out = limitSessions(ROWS, { maxCount: 2, maxAgeDays: 30 }, NOW);
+    expect(out.map((s) => s.id)).toEqual(['a', 'b']); // d(40d) already gone before capping
   });
 });

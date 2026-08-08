@@ -5,13 +5,23 @@
 // hardware-acceleration toggle (applied at the next app launch).
 
 import { useEffect, useState } from 'react';
-import type { PerfStatusPayload, UsageBudgetPreset } from '../../../preload';
+import type { PerfStatusPayload, UsageBudgetPreset, UiPrefs } from '../../../preload';
 
 /** Compact token formatter for preset labels (e.g. 19_000_000 → "19M"). */
 function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`;
   if (n >= 1000) return `${Math.round(n / 1000)}K`;
   return String(n);
+}
+
+/** Dropdown presets for the Display filters; 0 = All/unlimited. */
+const SESSION_COUNT_PRESETS = [0, 10, 25, 50, 100];
+const SESSION_AGE_PRESETS = [0, 1, 7, 30, 90];
+
+/** "1 day" / "7 days" / "All" labels for the age dropdown. */
+function ageLabel(days: number): string {
+  if (days === 0) return 'All';
+  return days === 1 ? '1 day' : `${days} days`;
 }
 
 /** Mirrors the ModelEndpoint shape from src/main/endpoints.ts. */
@@ -79,6 +89,13 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
   const [budgetCustom, setBudgetCustom] = useState('');
   const [budgetPresets, setBudgetPresets] = useState({ pro: 0, max5: 0, max20: 0 });
   const [budgetWindowHours, setBudgetWindowHours] = useState(5);
+  // Display prefs: budget-bar/session-cost visibility + list filters.
+  const [uiPrefs, setUiPrefsState] = useState<UiPrefs>({
+    showBudgetBar: true,
+    showSessionCost: true,
+    maxSessions: 0,
+    maxSessionAgeDays: 0
+  });
   // Perf-telemetry settings state.
   const [perfTelemetry, setPerfTelemetryState] = useState(true);
   const [perfOtlpEnabled, setPerfOtlpEnabled] = useState(false);
@@ -115,6 +132,7 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
           setBudgetPresets(cfg.usageBudget.presets);
           setBudgetWindowHours(cfg.usageBudget.windowHours);
         }
+        if (cfg.uiPrefs) setUiPrefsState(cfg.uiPrefs);
         if (cfg.perfTelemetry !== undefined) {
           setPerfTelemetryState(cfg.perfTelemetry);
         }
@@ -182,6 +200,7 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
       await window.api.config.setAutoReloadLoadouts(autoReload);
       const customTokens = Math.max(0, Math.round(Number(budgetCustom) || 0));
       await window.api.config.setUsageBudget(budgetPreset, customTokens);
+      await window.api.config.setUiPrefs(uiPrefs);
       await window.api.config.setPerfTelemetry(perfTelemetry);
       await window.api.config.setPerfOtlp(perfOtlpEnabled, perfOtlpEndpoint);
       const cfg = await window.api.config.setFleetRoot(trimmed);
@@ -429,6 +448,104 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
                   </p>
                 </div>
               )}
+            </div>
+
+            <div className="settings-section">
+              <div className="settings-section-header">Display</div>
+              <div className="setting-row">
+                <div className="setting-row-text">
+                  <label className="setting-title" htmlFor="setting-show-budget">
+                    Show plan-usage budget in the observability rail
+                  </label>
+                  <p className="setting-desc">
+                    Hiding only affects display — spend tracking continues.
+                  </p>
+                </div>
+                <input
+                  id="setting-show-budget"
+                  type="checkbox"
+                  checked={uiPrefs.showBudgetBar}
+                  onChange={(e) =>
+                    setUiPrefsState((p) => ({ ...p, showBudgetBar: e.target.checked }))
+                  }
+                  disabled={busy || !loaded}
+                />
+              </div>
+              <div className="setting-row">
+                <div className="setting-row-text">
+                  <label className="setting-title" htmlFor="setting-show-cost">
+                    Show session cost in the sessions list
+                  </label>
+                  <p className="setting-desc">
+                    Costs are still recorded and visible in the observability rail.
+                  </p>
+                </div>
+                <input
+                  id="setting-show-cost"
+                  type="checkbox"
+                  checked={uiPrefs.showSessionCost}
+                  onChange={(e) =>
+                    setUiPrefsState((p) => ({ ...p, showSessionCost: e.target.checked }))
+                  }
+                  disabled={busy || !loaded}
+                />
+              </div>
+              <div className="setting-row">
+                <div className="setting-row-text">
+                  <label className="setting-title" htmlFor="setting-max-sessions">
+                    Max sessions shown
+                  </label>
+                  <p className="setting-desc">
+                    Trims the sessions list only — searching bypasses it; nothing is deleted.
+                  </p>
+                </div>
+                <select
+                  id="setting-max-sessions"
+                  value={uiPrefs.maxSessions}
+                  onChange={(e) =>
+                    setUiPrefsState((p) => ({ ...p, maxSessions: Number(e.target.value) }))
+                  }
+                  disabled={busy || !loaded}
+                >
+                  {!SESSION_COUNT_PRESETS.includes(uiPrefs.maxSessions) && (
+                    <option value={uiPrefs.maxSessions}>{uiPrefs.maxSessions} (custom)</option>
+                  )}
+                  {SESSION_COUNT_PRESETS.map((n) => (
+                    <option key={n} value={n}>
+                      {n === 0 ? 'All' : n}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="setting-row">
+                <div className="setting-row-text">
+                  <label className="setting-title" htmlFor="setting-max-age">
+                    Max session age
+                  </label>
+                  <p className="setting-desc">
+                    Hides sessions idle longer than this. Open tabs always show.
+                  </p>
+                </div>
+                <select
+                  id="setting-max-age"
+                  value={uiPrefs.maxSessionAgeDays}
+                  onChange={(e) =>
+                    setUiPrefsState((p) => ({ ...p, maxSessionAgeDays: Number(e.target.value) }))
+                  }
+                  disabled={busy || !loaded}
+                >
+                  {!SESSION_AGE_PRESETS.includes(uiPrefs.maxSessionAgeDays) && (
+                    <option value={uiPrefs.maxSessionAgeDays}>
+                      {ageLabel(uiPrefs.maxSessionAgeDays)} (custom)
+                    </option>
+                  )}
+                  {SESSION_AGE_PRESETS.map((n) => (
+                    <option key={n} value={n}>
+                      {ageLabel(n)}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             <div className="settings-section">
