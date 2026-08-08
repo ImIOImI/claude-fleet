@@ -144,6 +144,14 @@ export interface UsageBudget {
   presets: Record<Exclude<UsageBudgetPreset, 'custom'>, number>;
 }
 
+/** Perf-telemetry status snapshot (mirrors `PerfStatus` in main/perf). */
+export interface PerfStatusPayload {
+  enabled: boolean;
+  source: 'settings' | 'env-override';
+  otlp: { enabled: boolean; endpoint: string | null; source: 'settings' | 'env' };
+  eventCounts: Record<string, number>;
+}
+
 const api = {
   app: {
     mockMode: (): Promise<boolean> => ipcRenderer.invoke('app:mockMode'),
@@ -403,6 +411,8 @@ const api = {
       disableHardwareAcceleration: boolean;
       autoReloadLoadouts: boolean;
       usageBudget: UsageBudget;
+      perfTelemetry: boolean;
+      perfOtlp: { enabled: boolean; endpoint: string };
     }> => ipcRenderer.invoke('config:get'),
     setFleetRoot: (path: string): Promise<{ fleetRoot: string; sharedDir: string }> =>
       ipcRenderer.invoke('config:setFleetRoot', path),
@@ -416,7 +426,11 @@ const api = {
       preset: UsageBudgetPreset,
       customTokens: number
     ): Promise<{ usageBudget: UsageBudget }> =>
-      ipcRenderer.invoke('config:setUsageBudget', preset, customTokens)
+      ipcRenderer.invoke('config:setUsageBudget', preset, customTokens),
+    setPerfTelemetry: (enabled: boolean): Promise<PerfStatusPayload> =>
+      ipcRenderer.invoke('config:setPerfTelemetry', enabled),
+    setPerfOtlp: (enabled: boolean, endpoint: string): Promise<PerfStatusPayload> =>
+      ipcRenderer.invoke('config:setPerfOtlp', enabled, endpoint)
   },
   usage: {
     /** Total tokens spent across the fleet in the trailing rolling window —
@@ -621,6 +635,9 @@ const api = {
       ipcRenderer.on(channel, handler);
       return () => ipcRenderer.removeListener(channel, handler);
     }
+  },
+  perf: {
+    status: (): Promise<PerfStatusPayload> => ipcRenderer.invoke('perf:status')
   }
 };
 

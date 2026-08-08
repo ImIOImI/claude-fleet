@@ -33,6 +33,10 @@ const {
   getFleetRoot,
   setFavorite,
   resolveWorkspaceConfig,
+  getPerfTelemetry,
+  setPerfTelemetry,
+  getPerfOtlp,
+  setPerfOtlp,
   _resetConfigCacheForTests
 } = await import('./config.js');
 
@@ -257,5 +261,27 @@ describe('resolveWorkspaceConfig (#219)', () => {
   it('CF_SUMMARY_MODEL env override wins over defaults', () => {
     const cfg = resolveWorkspaceConfig('ws1', { CF_SUMMARY_MODEL: 'user-override' }, '0.9.0');
     expect(cfg.summarizer.model).toBe('user-override');
+  });
+});
+
+describe('perf telemetry config', () => {
+  it('getPerfTelemetry defaults true; explicit false persists', async () => {
+    expect(await getPerfTelemetry()).toBe(true);
+    await setPerfTelemetry(false);
+    _resetConfigCacheForTests();
+    expect(await getPerfTelemetry()).toBe(false);
+  });
+
+  it('getPerfOtlp defaults off/empty; setPerfOtlp round-trips', async () => {
+    expect(await getPerfOtlp()).toEqual({ enabled: false, endpoint: '' });
+    await setPerfOtlp(true, 'http://localhost:4318');
+    _resetConfigCacheForTests();
+    expect(await getPerfOtlp()).toEqual({ enabled: true, endpoint: 'http://localhost:4318' });
+  });
+
+  it('setPerfOtlp rejects enabling with a non-http endpoint', async () => {
+    await expect(setPerfOtlp(true, 'ftp://nope')).rejects.toThrow(/http/i);
+    await expect(setPerfOtlp(true, '')).rejects.toThrow(/endpoint/i);
+    await expect(setPerfOtlp(false, '')).resolves.toBeUndefined(); // disabling never validates
   });
 });

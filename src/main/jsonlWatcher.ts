@@ -27,6 +27,7 @@ import type { FSWatcher } from 'chokidar';
 import { workspaceClaudeDir, workspaceHistoryDir, workspaceHistoryFile, hostLocalProjectsDir } from './paths.js';
 import { ingestLine } from './db.js';
 import { effectiveForClaudeSession } from './mirrorPolicy.js';
+import { perfSpan } from './perf.js';
 
 const PROJECTS_SUBDIR = join('projects', '-workspace');
 const UUID_RE =
@@ -428,18 +429,25 @@ async function readAndIngest(path: string, state: FileState): Promise<ReadResult
       !state.sidecar && effectiveForClaudeSession(state.workspaceId, state.sessionId);
     let insertedCount = 0;
     let mirrorBuf = '';
-    for (const line of text.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      const result = ingestLine(state.workspaceId, state.sessionId, trimmed);
-      // Mirror only genuinely-new inserts: the DB dedup key suppresses
-      // re-reads after a compaction shrink, so we never double-append and the
-      // mirror stays append-only / compaction-proof for free.
-      if (result.inserted) {
-        insertedCount++;
-        if (mirrorOn) mirrorBuf += trimmed + '\n';
-      }
-    }
+    const lines = text.split('\n');
+    perfSpan(
+      'claude_fleet.ingest',
+      () => {
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          const result = ingestLine(state.workspaceId, state.sessionId, trimmed);
+          // Mirror only genuinely-new inserts: the DB dedup key suppresses
+          // re-reads after a compaction shrink, so we never double-append and the
+          // mirror stays append-only / compaction-proof for free.
+          if (result.inserted) {
+            insertedCount++;
+            if (mirrorOn) mirrorBuf += trimmed + '\n';
+          }
+        }
+      },
+      { workspace_id: state.workspaceId, session_id: state.sessionId, lines: lines.length }
+    );
 
     if (mirrorBuf) {
       // Host-private location — never bind-mounted (SPEC §9). mkdir is cheap

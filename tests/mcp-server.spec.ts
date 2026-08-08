@@ -121,7 +121,9 @@ test('MCP server: initialize, tools, typed reads, committee control', async () =
         'signal_input_wait',
         'report_session_mapping',
         'mark_useful',
-        'get_config'
+        'get_config',
+        'perf_status',
+        'perf_set'
       ])
     );
 

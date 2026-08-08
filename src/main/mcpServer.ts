@@ -46,6 +46,9 @@ import {
   mcpWorkspaceTokenPath,
   MCP_TCP_PORT
 } from './mcpSocket.js';
+import { getPerfStatus, reconfigurePerf } from './perf.js';
+import { getPerfTelemetry, setPerfTelemetry, getPerfOtlp } from './config.js';
+import { resolvePerfConfig } from './perfConfig.js';
 
 // A Windows host can't listen() on a unix-domain socket at a Windows path
 // (EACCES), so the per-workspace-socket transport (#117) can't work there. On
@@ -795,6 +798,22 @@ function buildSnapshot(srcPath: string, allowed: Set<string>, includeRaw: boolea
       mem.prepare(
         `CREATE TABLE usage_events AS SELECT * FROM ${alias}.usage_events WHERE ${scope}`
       ).run(...params);
+      // perf_events: app-global rows (workspace_id NULL — stalls, slow ops)
+      // are host-process facts visible to every caller; workspace-tagged rows
+      // (pty windows, terminal latency) are scoped like everything else.
+      // Wrapped in try/catch so an older DB without the table doesn't break
+      // snapshot creation for callers that don't query perf_events.
+      try {
+        mem.prepare(
+          `CREATE TABLE perf_events AS SELECT * FROM ${alias}.perf_events WHERE workspace_id IS NULL OR ${scope}`
+        ).run(...params);
+      } catch (e) {
+        // Pre-v11 DB (no perf_events yet): give callers an empty, correctly-shaped
+        // table. Anything else is a real failure and must surface, not read as
+        // "no perf data".
+        if (!(e instanceof Error && /no such table/i.test(e.message))) throw e;
+        mem.exec(`CREATE TABLE perf_events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, kind TEXT NOT NULL, workspace_id TEXT, session_id TEXT, name TEXT, dur_ms REAL, trace_id TEXT, span_id TEXT, meta TEXT)`);
+      }
     } finally {
       mem.exec(`DETACH ${alias}`);
     }
@@ -1090,7 +1109,7 @@ export const TOOLS: Tool[] = [
     name: 'query',
     description:
       'Run a single read-only SQL statement against your workspace data. Tables: events, sessions, ' +
-      'broker_sessions, session_summaries, session_tags, usage_events — pre-filtered to the rows you may ' +
+      'broker_sessions, session_summaries, session_tags, usage_events, perf_events — pre-filtered to the rows you may ' +
       'read, so SELECT freely (joins, aggregates, GROUP BY, datetime(ts/1000,"unixepoch") for UTC). ' +
       'raw_jsonl is excluded unless include_raw=true. ' +
       'Args: sql (required), params (array of bound ? values), include_raw (bool), max_rows (default ' +
@@ -1127,6 +1146,49 @@ export const TOOLS: Tool[] = [
       } finally {
         snap.close();
       }
+    }
+  },
+  // Perf-telemetry tools. perf_status is a read-only snapshot; perf_set
+  // changes the recording toggle (app-global, settings-tier only — OTLP
+  // export config is Settings-UI/env, never MCP-settable). Neither touches
+  // the read-only `db` connection — they route through the in-process perf
+  // runtime (getPerfStatus / reconfigurePerf) and the settings vault
+  // (setPerfTelemetry) directly.
+  {
+    name: 'perf_status',
+    description:
+      'Perf-telemetry state: recording on/off + which source controls it (settings vs CLAUDE_FLEET_PERF), ' +
+      'OTLP export state, and perf_events counts per kind over the trailing 24h.',
+    inputSchema: { type: 'object', properties: {} },
+    run: async () => getPerfStatus()
+  },
+  {
+    name: 'perf_set',
+    description:
+      'Enable or disable perf-telemetry recording (app-global; mediated by the host). ' +
+      'Cannot change OTLP export config — export is Settings-UI/env only. ' +
+      'Fails while CLAUDE_FLEET_PERF=0 pins recording off.',
+    inputSchema: {
+      type: 'object',
+      properties: { enabled: { type: 'boolean' } },
+      required: ['enabled']
+    },
+    run: async (_db: Database.Database, args: Record<string, unknown>) => {
+      const extras = Object.keys(args).filter((k) => k !== 'enabled');
+      if (extras.length > 0) {
+        throw new Error(`perf_set cannot change export config (unexpected: ${extras.join(', ')})`);
+      }
+      if (process.env.CLAUDE_FLEET_PERF === '0') {
+        throw new Error('recording is forced off by CLAUDE_FLEET_PERF=0 — the setting is ignored until the override is removed');
+      }
+      await setPerfTelemetry(args.enabled === true);
+      await reconfigurePerf(
+        resolvePerfConfig(
+          { perfTelemetry: await getPerfTelemetry(), perfOtlp: await getPerfOtlp() },
+          process.env
+        )
+      );
+      return getPerfStatus();
     }
   },
   // Cross-workspace committee control (#119). These do NOT touch the read-only
