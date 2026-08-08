@@ -32,6 +32,8 @@ describe('channelAttrs', () => {
       .toEqual({ workspace_id: 'ws-1', session_id: 'bs-2' });
     expect(channelAttrs('observability:eventsForSession', ['sess-uuid', 0, 500]))
       .toEqual({ session_id: 'sess-uuid' });
+    expect(channelAttrs('committee:post', ['ws-caller', 'ws-target', 'hello']))
+      .toEqual({ workspace_id: 'ws-caller' });
   });
 
   it('returns undefined for unmapped channels and non-string args', () => {

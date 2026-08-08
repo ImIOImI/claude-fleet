@@ -36,6 +36,9 @@ const CHANNEL_CONTEXT: Record<string, { workspaceArg?: number; sessionArg?: numb
   'sessions:rename': S0,
   'workspace:start': W0,
   'workspace:getManifest': W0,
+  // committee:* args are (callerId, targetId, …) — both workspace ULIDs. We
+  // stamp the CALLER: it owns the span for MCP scoping (the manager sees its
+  // own rows), and the target id stays available in meta if ever needed.
   'committee:pause': W0,
   'committee:unpause': W0,
   'committee:post': W0,
