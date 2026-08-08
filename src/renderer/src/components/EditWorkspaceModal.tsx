@@ -18,6 +18,7 @@
 import { useState } from 'react';
 import { WorkspaceForm, type WorkspaceFormSubmit } from './WorkspaceForm';
 import { DeleteWorkspaceModal } from './DeleteWorkspaceModal';
+import { workspaceToFormInitial } from './formInitial';
 import type { WorkspaceSummary } from '../App';
 
 interface Props {
@@ -89,26 +90,7 @@ export function EditWorkspaceModal({
         <div className="new-tab" role="tabpanel">
           <WorkspaceForm
             mode="edit"
-            initial={{
-              id: workspace.id,
-              name: workspace.name,
-              description: workspace.description,
-              labels: workspace.labels,
-              color: workspace.color,
-              workspaceSubdir: workspace.workspaceSubdir,
-              kind: workspace.kind,
-              workspaceRoot: workspace.workspaceRoot,
-              launcher: workspace.launcher,
-              image: workspace.image,
-              authMode: workspace.authMode,
-              endpointId: workspace.endpointId,
-              plainEnv: workspace.env.plain,
-              // secretKeys is read by WorkspaceForm via a separate cast
-              // (the initial reader looks for it on the partial object).
-              secretKeys: workspace.env.secretKeys,
-              resources: workspace.resources,
-              accessibility: workspace.accessibility
-            }}
+            initial={workspaceToFormInitial(workspace)}
             workspaces={workspaces}
             vaultAvailable={vaultAvailable}
             primaryLabel="Save"
