@@ -21,6 +21,7 @@ import { TerminalSession } from './TerminalSession';
 import { ToastView } from './Toast';
 import { makeToast } from '../toasts';
 import { readyToRefresh } from './refreshQueue';
+import { reorderDragHandlers } from '../dropIngestion';
 import { useBlinkSync } from '../blinkSync';
 import { usePortalMenu } from './portalMenu';
 import { IconAuto, IconEject, IconPencil, IconRefresh } from './menuIcons';
@@ -719,19 +720,12 @@ export function TerminalPane({
               onClick={() => setActiveId(s.id)}
               // Don't drag while editing the name (the input owns the pointer).
               draggable={renamingId !== s.id}
-              onDragStart={(e) => {
-                setDragSessionId(s.id);
-                e.dataTransfer.effectAllowed = 'move';
-              }}
-              onDragOver={(e) => {
-                if (dragSessionId && dragSessionId !== s.id) e.preventDefault();
-              }}
-              onDrop={(e) => {
-                e.preventDefault();
-                if (dragSessionId && dragSessionId !== s.id) reorderSessions(dragSessionId, s.id);
-                setDragSessionId(null);
-              }}
-              onDragEnd={() => setDragSessionId(null)}
+              {...reorderDragHandlers({
+                id: s.id,
+                dragId: dragSessionId,
+                setDragId: setDragSessionId,
+                onReorder: reorderSessions
+              })}
             >
               <SessionTabDot ended={ended} busy={busyIds.has(s.id)} waiting={tabWaiting} />
               {renamingId === s.id ? (

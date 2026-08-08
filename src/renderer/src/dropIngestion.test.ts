@@ -1,5 +1,11 @@
-import { describe, it, expect } from 'vitest';
-import { isExternalDrag, shouldClaimDragOver } from './dropIngestion';
+import { describe, it, expect, beforeEach } from 'vitest';
+import {
+  isExternalDrag,
+  isInternalDragActive,
+  reorderDragHandlers,
+  setInternalDragActive,
+  shouldClaimDragOver
+} from './dropIngestion';
 
 describe('isExternalDrag', () => {
   // #147: an internal workspace-chip reorder drag carries effectAllowed='move'
@@ -44,5 +50,94 @@ describe('shouldClaimDragOver', () => {
 
   it('claims dragover for ordinary (external) drags so the copy cursor shows', () => {
     expect(shouldClaimDragOver(false)).toBe(true);
+  });
+});
+
+describe('reorderDragHandlers', () => {
+  // Session-tab reorder regression: TerminalPane wired its own drag handlers
+  // without setInternalDragActive, so the window-level dragover still forced
+  // dropEffect='copy' over the tab's 'move' and the drop never fired (the same
+  // mechanism as #177, which was only fixed for workspace chips). The shared
+  // factory exists so every internal reorder drag gets the flag wiring; these
+  // tests pin that contract.
+  interface FakeEvent {
+    preventDefault(): void;
+    dataTransfer: { effectAllowed: string };
+    defaultPrevented: boolean;
+  }
+  function fakeEvent(): FakeEvent {
+    const e = {
+      defaultPrevented: false,
+      preventDefault(): void {
+        e.defaultPrevented = true;
+      },
+      dataTransfer: { effectAllowed: 'uninitialized' }
+    };
+    return e;
+  }
+
+  let dragId: string | null = null;
+  let reorders: Array<[string, string]> = [];
+  const opts = (id: string): Parameters<typeof reorderDragHandlers>[0] => ({
+    id,
+    dragId,
+    setDragId: (v) => {
+      dragId = v;
+    },
+    onReorder: (draggedId, targetId) => {
+      reorders.push([draggedId, targetId]);
+    }
+  });
+
+  beforeEach(() => {
+    dragId = null;
+    reorders = [];
+    setInternalDragActive(false);
+  });
+
+  it('dragstart marks the drag internal so window dragover stays out (#177)', () => {
+    const e = fakeEvent();
+    reorderDragHandlers(opts('a')).onDragStart(e);
+    expect(isInternalDragActive()).toBe(true);
+    expect(shouldClaimDragOver(isInternalDragActive())).toBe(false);
+    expect(e.dataTransfer.effectAllowed).toBe('move');
+    expect(dragId).toBe('a');
+  });
+
+  it('dragover accepts the drop only over a different chip', () => {
+    dragId = 'a';
+    const over = fakeEvent();
+    reorderDragHandlers(opts('b')).onDragOver(over);
+    expect(over.defaultPrevented).toBe(true);
+
+    const self = fakeEvent();
+    reorderDragHandlers(opts('a')).onDragOver(self);
+    expect(self.defaultPrevented).toBe(false);
+  });
+
+  it('drop reorders dragged-before-target and clears the drag state', () => {
+    dragId = 'a';
+    setInternalDragActive(true);
+    reorderDragHandlers(opts('b')).onDrop(fakeEvent());
+    expect(reorders).toEqual([['a', 'b']]);
+    expect(dragId).toBeNull();
+    expect(isInternalDragActive()).toBe(false);
+  });
+
+  it('drop on the dragged chip itself is a no-op reorder but still clears state', () => {
+    dragId = 'a';
+    setInternalDragActive(true);
+    reorderDragHandlers(opts('a')).onDrop(fakeEvent());
+    expect(reorders).toEqual([]);
+    expect(dragId).toBeNull();
+    expect(isInternalDragActive()).toBe(false);
+  });
+
+  it('dragend clears the flag even for a cancelled drag (no drop)', () => {
+    dragId = 'a';
+    setInternalDragActive(true);
+    reorderDragHandlers(opts('a')).onDragEnd();
+    expect(dragId).toBeNull();
+    expect(isInternalDragActive()).toBe(false);
   });
 });

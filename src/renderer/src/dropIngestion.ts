@@ -55,6 +55,64 @@ export function setInternalDragActive(active: boolean): void {
   internalDragActive = active;
 }
 
+/** Read the internal-drag flag (for tests). */
+export function isInternalDragActive(): boolean {
+  return internalDragActive;
+}
+
+// The event surface the reorder handlers need — React.DragEvent satisfies it,
+// and tests can pass a plain object.
+interface ReorderDragEvent {
+  preventDefault(): void;
+  dataTransfer: { effectAllowed: string };
+}
+
+interface ReorderDragOpts {
+  /** This chip's id. */
+  id: string;
+  /** The id currently being dragged (the strip's drag state), or null. */
+  dragId: string | null;
+  setDragId: (id: string | null) => void;
+  /** Move `draggedId` before `targetId` in the strip's order. */
+  onReorder: (draggedId: string, targetId: string) => void;
+}
+
+/** Drag-reorder handlers for a chip/tab in a strip (workspace chips, session
+ *  tabs). Centralized so every internal reorder drag sets the internal-drag
+ *  flag — a strip that wires dragstart by hand and forgets the flag gets its
+ *  drop silently cancelled by the window-level ingestion dragover (#177:
+ *  forced dropEffect='copy' is incompatible with the drag's
+ *  effectAllowed='move', so Chromium resolves the operation to none). */
+export function reorderDragHandlers({ id, dragId, setDragId, onReorder }: ReorderDragOpts): {
+  onDragStart: (e: ReorderDragEvent) => void;
+  onDragOver: (e: ReorderDragEvent) => void;
+  onDrop: (e: ReorderDragEvent) => void;
+  onDragEnd: () => void;
+} {
+  return {
+    onDragStart(e) {
+      setDragId(id);
+      e.dataTransfer.effectAllowed = 'move';
+      setInternalDragActive(true);
+    },
+    onDragOver(e) {
+      if (dragId && dragId !== id) e.preventDefault(); // allow drop
+    },
+    onDrop(e) {
+      e.preventDefault();
+      if (dragId && dragId !== id) onReorder(dragId, id);
+      setDragId(null);
+      setInternalDragActive(false);
+    },
+    onDragEnd() {
+      setDragId(null);
+      // dragend always fires (drop or cancel), so this is the guaranteed
+      // clear; the onDrop clear above just frees it a beat earlier.
+      setInternalDragActive(false);
+    }
+  };
+}
+
 /** Whether the window-level ingestion should claim a `dragover` —
  *  `preventDefault()` + `dropEffect='copy'`. It must NOT claim an internal
  *  chip drag (#177): that drag carries `effectAllowed='move'`, and forcing
