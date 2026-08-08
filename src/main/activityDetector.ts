@@ -12,6 +12,10 @@
 // prompt" — the glyph can't tell them apart.
 
 const OSC_TITLE = /\x1b\]0;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
+// Cap on the CARRY-OVER between pushes, applied strictly AFTER scanning (#283):
+// trimming before the scan discarded any title with ≥ ~500 bytes behind it in
+// the same chunk, and a swallowed idle edge (written once, unlike the spinner)
+// left committee busy stuck on permanently.
 const BUF_CAP = 512;
 
 /** True when the title's leading glyph is a braille spinner frame. */
@@ -33,11 +37,19 @@ export class ActivityDetector {
 
   push(chunk: string): boolean {
     this.buf += chunk;
-    if (this.buf.length > BUF_CAP) this.buf = this.buf.slice(-BUF_CAP);
     let m: RegExpExecArray | null;
     let lastTitle: string | null = null;
+    let tailStart = 0;
     OSC_TITLE.lastIndex = 0;
-    while ((m = OSC_TITLE.exec(this.buf)) !== null) lastTitle = m[1];
+    while ((m = OSC_TITLE.exec(this.buf)) !== null) {
+      lastTitle = m[1];
+      tailStart = m.index + m[0].length;
+    }
+    // Trim only AFTER the scan: everything up to the last complete title has
+    // been seen and is safe to drop; the capped tail carries a possibly-split
+    // trailing sequence into the next push.
+    const tail = this.buf.slice(tailStart);
+    this.buf = tail.length > BUF_CAP ? tail.slice(-BUF_CAP) : tail;
     if (lastTitle === null) return false;
     const next = isBusyTitle(lastTitle);
     if (next === this.busy) return false;

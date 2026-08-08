@@ -16,7 +16,8 @@ import { useEffect, useRef, useState } from 'react';
 import { Terminal, type ILink, type ILinkProvider } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
-import { ActivityDetector } from '../activityDetector';
+import { isBusyTitle } from '../activityDetector';
+import { busyFlagIsStale } from '../staleBusy';
 import { decideTerminalKeyAction } from '../terminalKeymap';
 
 // Stretch the font fallback chain so canvas renders for glyphs xterm
@@ -50,6 +51,10 @@ const TERMINAL_FONT_FAMILY = [
 
 const URL_REGEX = /https?:\/\/[^\s'"`<>()\[\]{}]+/g;
 const TRAILING_PUNCTUATION = /[.,;:!?]+$/;
+
+// Poll period for the stale-busy watchdog (see staleBusy.ts). Worst case a
+// stale flag survives BUSY_SILENCE_TIMEOUT_MS + this before it clears.
+const STALE_BUSY_CHECK_MS = 2000;
 
 function multilineLinkProvider(term: Terminal): ILinkProvider {
   return {
@@ -287,6 +292,7 @@ export function TerminalSession({
     let ptyHandleId: string | null = null;
     let unsubData: (() => void) | null = null;
     let unsubEnd: (() => void) | null = null;
+    let staleBusyTimer: ReturnType<typeof setInterval> | null = null;
 
     // Scoped one-shot repaint nudge. claude paints some startup screens
     // (notably the org "Managed settings require approval" gate) on the
@@ -417,21 +423,36 @@ export function TerminalSession({
         }
         ptyHandleId = sid;
         ptyHandleRef.current = sid;
-        const activity = new ActivityDetector();
-        // PTY chunks are bytes; decode (streaming-safe so a multibyte glyph
-        // split across chunks still reassembles) for the title detector.
-        const decoder = new TextDecoder();
+        // Busy/idle (#283): read the title from xterm's own OSC parser —
+        // onTitleChange fires once per complete title no matter how the PTY
+        // stream was chunked, which is the framing dependence that used to
+        // swallow idle edges. isBusyTitle still classifies the glyph.
+        let busy = false;
+        let lastOutputAt = Date.now();
+        const setBusy = (next: boolean): void => {
+          if (next === busy) return;
+          busy = next;
+          onActivityChange?.(sessionId, next);
+        };
+        term.onTitleChange((title) => setBusy(isBusyTitle(title)));
+        // A title write can still be lost before it ever reaches us (ConPTY
+        // drops/coalesces writes, #283) and claude writes the idle title
+        // exactly once — so also re-derive from a level signal: flagged busy
+        // while the PTY has been silent past the timeout ⇒ the flag is stale,
+        // clear it. A real busy state re-asserts itself within ~1s via the
+        // next spinner-title frame.
+        staleBusyTimer = setInterval(() => {
+          if (busyFlagIsStale(busy, lastOutputAt, Date.now())) setBusy(false);
+        }, STALE_BUSY_CHECK_MS);
         unsubData = window.api.pty.onData(sid, (chunk) => {
+          lastOutputAt = Date.now();
           term.write(chunk);
-          // Watch the title glyph for busy/idle; report only on a flip.
-          const text = typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true });
-          if (activity.push(text)) onActivityChange?.(sessionId, activity.isBusy);
         });
         unsubEnd = window.api.pty.onEnd(sid, () => {
           term.writeln('\r\n[session ended]');
           if (!disposed) {
             // A dead session isn't busy.
-            onActivityChange?.(sessionId, false);
+            setBusy(false);
             setEndedReason({ kind: 'natural' });
             onLifecycleChange?.(sessionId, 'ended');
             // Diagnostic: distinguish "claude /exit" from "broker
@@ -522,6 +543,7 @@ export function TerminalSession({
       disposed = true;
       onActivityChange?.(sessionId, false);
       cancelAnimationFrame(initialFitRaf);
+      if (staleBusyTimer) clearInterval(staleBusyTimer);
       disarmNudge();
       ro.disconnect();
       host.removeEventListener('contextmenu', onContextMenu);

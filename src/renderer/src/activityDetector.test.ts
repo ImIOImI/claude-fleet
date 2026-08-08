@@ -51,4 +51,33 @@ describe('ActivityDetector', () => {
     expect(d.push('just some terminal text\r\n$ ')).toBe(false);
     expect(d.isBusy).toBe(false);
   });
+
+  // Regression for #283: push() used to trim the buffer to its last 512 bytes
+  // BEFORE scanning, so a title with enough bytes behind it in the SAME chunk
+  // (a full-screen repaint at 206×79 is several KB) was discarded unseen.
+  // Claude re-asserts the spinner title every frame but writes the idle title
+  // exactly once, so every swallowed edge biased toward a permanently stuck
+  // "working…". The boundary cases here straddle the old BUF_CAP.
+  it('sees the idle title no matter how many bytes follow it in the same chunk', () => {
+    for (const trailing of [0, 490, 511, 512, 600, 4096, 40000]) {
+      const d = new ActivityDetector();
+      expect(d.push(BUSY)).toBe(true); // arm: busy
+      expect(d.push(IDLE + 'x'.repeat(trailing)), `trailing=${trailing}`).toBe(true);
+      expect(d.isBusy, `trailing=${trailing}`).toBe(false);
+    }
+  });
+
+  it('sees a busy title buried in a large chunk (never goes blind)', () => {
+    const d = new ActivityDetector();
+    expect(d.push(BUSY + 'x'.repeat(40000))).toBe(true);
+    expect(d.isBusy).toBe(true);
+  });
+
+  it('still tracks a split title after large-chunk trims', () => {
+    const d = new ActivityDetector();
+    d.push(BUSY + 'x'.repeat(40000)); // busy, buffer trimmed
+    expect(d.push('\x1b]0;✳ Cal')).toBe(false); // incomplete OSC carries over
+    expect(d.push('culating\x07')).toBe(true); // completes → idle
+    expect(d.isBusy).toBe(false);
+  });
 });
