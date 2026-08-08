@@ -1616,6 +1616,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     const detachedWs = handleWorkspaceId.get(sessionId);
     if (detachedWs) committeeBusy.delete(detachedWs);
     handleWorkspaceId.delete(sessionId);
+    handleBrokerSessionId.delete(sessionId);
     logError({
       source: 'main',
       type: 'pty-detach',
@@ -1636,6 +1637,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     await handle.close();
     ptySessions.delete(ptyHandleId);
     handleWorkspaceId.delete(ptyHandleId);
+    handleBrokerSessionId.delete(ptyHandleId);
     logError({
       source: 'main',
       type: 'pty-close',
