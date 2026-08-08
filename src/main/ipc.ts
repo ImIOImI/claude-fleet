@@ -34,7 +34,7 @@ import {
   getPerfOtlp,
   setPerfOtlp
 } from './config.js';
-import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk } from './perf.js';
+import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk, perfSetSpanContext } from './perf.js';
 import { resolvePerfConfig } from './perfConfig.js';
 import { buildLoadoutCatalog } from './loadoutCatalog.js';
 import * as realDocker from './docker.js';
@@ -1491,6 +1491,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         (w) => w.containerId === containerId || w.id === containerId
       );
       if (owner) handleWorkspaceId.set(ptyHandleId, owner.id);
+      perfSetSpanContext({ workspaceId: owner?.id, sessionId: brokerSessionId });
       // Diagnostic: ptySessions.size should oscillate around the count of
       // currently-mounted TerminalSession components. Unbounded growth =
       // detach isn't running (renderer cleanup race) or isn't reaching
@@ -1558,6 +1559,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   );
 
   ipcMain.handle('pty:input', (_e, sessionId: string, data: string) => {
+    perfSetSpanContext({ workspaceId: handleWorkspaceId.get(sessionId) });
     ptySessions.get(sessionId)?.stream.write(data);
   });
 
