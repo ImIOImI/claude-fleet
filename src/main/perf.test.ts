@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { closeDb, openDb } from './db.js';
 import { PerfStore } from './perfStore.js';
 import {
-  initPerf, shutdownPerf, reconfigurePerf, perfSpan, perfSpanAsync, getEffectivePerf,
+  initPerf, shutdownPerf, reconfigurePerf, perfSpan, perfSpanAsync, perfSetSpanContext, getEffectivePerf,
   recordPtyChunk, getPerfStatus
 } from './perf.js';
 import type { EffectivePerfConfig } from './perfConfig.js';
@@ -97,6 +97,26 @@ describe('perf tracer pipeline', () => {
     ).all() as Array<{ name: string; trace_id: string }>;
     expect(rows.map((r) => r.name)).toEqual(['claude_fleet.test.child', 'claude_fleet.test.parent']);
     expect(rows[0].trace_id).toBe(rows[1].trace_id);
+  });
+
+  it('perfSetSpanContext stamps workspace/session onto the active span', async () => {
+    initPerf(store, ON);
+    await perfSpanAsync('claude_fleet.test.ctx', async () => {
+      perfSetSpanContext({ workspaceId: 'ws-9', sessionId: 'sess-9' });
+      const end = Date.now() + 30; while (Date.now() < end) { /* busy */ }
+    });
+    await shutdownPerf();
+    const row = db.prepare(
+      `SELECT workspace_id, session_id FROM perf_events WHERE name = 'claude_fleet.test.ctx'`
+    ).get() as { workspace_id: string; session_id: string };
+    expect(row).toEqual({ workspace_id: 'ws-9', session_id: 'sess-9' });
+  });
+
+  it('perfSetSpanContext is a no-op outside a span and while disabled', async () => {
+    initPerf(store, OFF);
+    expect(() => perfSetSpanContext({ workspaceId: 'ws-9' })).not.toThrow();
+    await shutdownPerf();
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM perf_events`).get()).toEqual({ n: 0 });
   });
 });
 

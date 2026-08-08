@@ -258,6 +258,7 @@ export async function shutdownPerf(): Promise<void> {
   await r.tracerProvider?.shutdown().catch(() => undefined); // flushes batch processors
   trace.disable();
   metrics.disable();
+  // context.disable() resets the global manager, so a later initPerf can re-register one.
   context.disable();
   r.store.flush();
 }
@@ -300,6 +301,16 @@ export async function perfSpanAsync<T>(
   } finally {
     span.end();
   }
+}
+
+/** Stamp workspace/session attribution onto the active span, for handlers
+ *  that only learn the ids after work starts (pty:attach owner lookup,
+ *  pty:input handle map). No-op outside a span or while recording is off. */
+export function perfSetSpanContext(ctx: { workspaceId?: string; sessionId?: string }): void {
+  const span = trace.getActiveSpan();
+  if (!span) return;
+  if (typeof ctx.workspaceId === 'string') span.setAttribute('workspace_id', ctx.workspaceId);
+  if (typeof ctx.sessionId === 'string') span.setAttribute('session_id', ctx.sessionId);
 }
 
 /** PTY throughput instrumentation point (ipc.ts pty:attach data handler).
