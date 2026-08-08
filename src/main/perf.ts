@@ -12,7 +12,7 @@ import type { ExportResult } from '@opentelemetry/core';
 import { ExportResultCode } from '@opentelemetry/core';
 import { context, metrics, trace, type Attributes } from '@opentelemetry/api';
 import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
-import type { Counter } from '@opentelemetry/api';
+import type { Counter, Histogram } from '@opentelemetry/api';
 import {
   BasicTracerProvider, BatchSpanProcessor,
   type ReadableSpan, type SpanExporter
@@ -33,6 +33,9 @@ export const STALL_THRESHOLD_MS = 50;
 export const SAMPLE_INTERVAL_MS = 5000;
 const TRACER_NAME = 'claude-fleet';
 const METER_NAME = 'claude-fleet';
+export type LatencyKind = 'input_hop' | 'output_hop' | 'echo_rtt';
+const TERMINAL_METRIC_PREFIX = 'claude_fleet.terminal.';
+const LATENCY_KINDS: readonly LatencyKind[] = ['input_hop', 'output_hop', 'echo_rtt'];
 
 /** Maps finished spans → slow_op rows. Spans faster than SLOW_OP_MS are
  *  dropped here (the OTLP exporter, when registered, still gets them all). */
@@ -64,7 +67,7 @@ export class SqliteSpanExporter implements SpanExporter {
   }
 }
 
-/** Maps DELTA counter data points → pty_window rows. Gauge metrics (the
+/** Maps DELTA counter data points → pty_window rows and terminal-latency histogram points → input_hop/output_hop/echo_rtt rows. Gauge metrics (the
  *  event-loop delay percentiles, exported for OTLP dashboards) are skipped:
  *  their local representation is the thresholded stall row the sampler
  *  writes directly. */
@@ -78,21 +81,52 @@ export class SqliteMetricExporter implements PushMetricExporter {
   export(resourceMetrics: ResourceMetrics, done: (result: ExportResult) => void): void {
     for (const scope of resourceMetrics.scopeMetrics) {
       for (const metric of scope.metrics) {
-        if (!metric.descriptor.name.startsWith('claude_fleet.pty.')) continue;
-        for (const dp of metric.dataPoints) {
-          const value = typeof dp.value === 'number' ? dp.value : 0;
-          if (value === 0) continue;
-          const attrs = dp.attributes as Record<string, unknown>;
-          const workspaceIdRaw = typeof attrs.workspace_id === 'string' ? attrs.workspace_id : null;
-          this.store.enqueue({
-            ts: Date.now(),
-            kind: 'pty_window',
-            name: metric.descriptor.name,
-            // Normalize '' workspace_id to null
-            workspaceId: workspaceIdRaw === '' ? null : workspaceIdRaw,
-            sessionId: typeof attrs.session_id === 'string' ? attrs.session_id : null,
-            meta: { value }
-          });
+        const name = metric.descriptor.name;
+        if (name.startsWith('claude_fleet.pty.')) {
+          for (const dp of metric.dataPoints) {
+            const value = typeof dp.value === 'number' ? dp.value : 0;
+            if (value === 0) continue;
+            const attrs = dp.attributes as Record<string, unknown>;
+            const workspaceIdRaw = typeof attrs.workspace_id === 'string' ? attrs.workspace_id : null;
+            this.store.enqueue({
+              ts: Date.now(),
+              kind: 'pty_window',
+              name,
+              // Normalize '' workspace_id to null
+              workspaceId: workspaceIdRaw === '' ? null : workspaceIdRaw,
+              sessionId: typeof attrs.session_id === 'string' ? attrs.session_id : null,
+              meta: { value }
+            });
+          }
+        } else if (name.startsWith(TERMINAL_METRIC_PREFIX)) {
+          const kind = name.slice(TERMINAL_METRIC_PREFIX.length) as LatencyKind;
+          if (!LATENCY_KINDS.includes(kind)) continue;
+          for (const dp of metric.dataPoints) {
+            // Histogram data point: { count, sum, min?, max?, buckets: { boundaries, counts } }
+            const v = dp.value as {
+              count: number; sum?: number; min?: number; max?: number;
+              buckets?: { boundaries: number[]; counts: number[] };
+            };
+            if (!v || typeof v.count !== 'number' || v.count === 0) continue;
+            const attrs = dp.attributes as Record<string, unknown>;
+            const ws = typeof attrs.workspace_id === 'string' && attrs.workspace_id !== '' ? attrs.workspace_id : null;
+            const sess = typeof attrs.session_id === 'string' && attrs.session_id !== '' ? attrs.session_id : null;
+            this.store.enqueue({
+              ts: Date.now(),
+              kind,
+              name,
+              workspaceId: ws,
+              sessionId: sess,
+              durMs: v.max ?? null,
+              meta: {
+                count: v.count,
+                sum: v.sum ?? null,
+                min: v.min ?? null,
+                max: v.max ?? null,
+                buckets: v.buckets ?? null
+              }
+            });
+          }
         }
       }
     }
@@ -124,6 +158,7 @@ interface Runtime {
   loopHistogram: ReturnType<typeof monitorEventLoopDelay> | null;
   ptyBytes: Counter | null;
   ptyChunks: Counter | null;
+  latencyHists: Record<LatencyKind, Histogram> | null;
 }
 let rt: Runtime | null = null;
 
@@ -161,7 +196,8 @@ export function initPerf(store: PerfStore, effective: EffectivePerfConfig, hooks
     sampleTimer: null,
     loopHistogram: null,
     ptyBytes: null,
-    ptyChunks: null
+    ptyChunks: null,
+    latencyHists: null
   };
   store.prune(RETENTION_MS);
   if (!effective.recording) return; // globals stay no-op
@@ -213,6 +249,15 @@ export function initPerf(store: PerfStore, effective: EffectivePerfConfig, hooks
   const meter = metrics.getMeter(METER_NAME);
   rt.ptyBytes = meter.createCounter('claude_fleet.pty.bytes', { description: 'PTY output bytes forwarded to the renderer' });
   rt.ptyChunks = meter.createCounter('claude_fleet.pty.chunks', { description: 'PTY output chunks forwarded to the renderer' });
+  rt.latencyHists = Object.fromEntries(
+    LATENCY_KINDS.map((k) => [
+      k,
+      meter.createHistogram(`${TERMINAL_METRIC_PREFIX}${k}`, {
+        unit: 'ms',
+        description: 'User-perceived terminal latency hop (perf telemetry Phase 2)'
+      })
+    ])
+  ) as Record<LatencyKind, Histogram>;
 
   // Event-loop delay: gauges follow OTel semconv naming for OTLP dashboards;
   // the local record is the thresholded stall row.
@@ -321,4 +366,22 @@ export function recordPtyChunk(workspaceId: string | null, sessionId: string, by
   const attrs = { workspace_id: workspaceId ?? '', session_id: sessionId };
   r.ptyBytes?.add(byteLength, attrs);
   r.ptyChunks?.add(1, attrs);
+}
+
+/** Terminal latency sample (perf telemetry Phase 2). Sources: main's
+ *  pty:input receipt (input_hop) and the renderer's perf:samples batches
+ *  (output_hop, echo_rtt). No-op while recording is off. */
+export function recordLatencySample(
+  kind: LatencyKind,
+  workspaceId: string | null,
+  sessionId: string | null,
+  durMs: number
+): void {
+  const r = rt;
+  if (!r?.effective.recording || !r.latencyHists) return;
+  if (!Number.isFinite(durMs) || durMs < 0) return;
+  r.latencyHists[kind].record(durMs, {
+    workspace_id: workspaceId ?? '',
+    session_id: sessionId ?? ''
+  });
 }

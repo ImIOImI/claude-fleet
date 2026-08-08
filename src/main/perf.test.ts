@@ -6,7 +6,7 @@ import { closeDb, openDb } from './db.js';
 import { PerfStore } from './perfStore.js';
 import {
   initPerf, shutdownPerf, reconfigurePerf, perfSpan, perfSpanAsync, perfSetSpanContext, getEffectivePerf,
-  recordPtyChunk, getPerfStatus
+  recordPtyChunk, getPerfStatus, recordLatencySample
 } from './perf.js';
 import type { EffectivePerfConfig } from './perfConfig.js';
 import type Database from 'better-sqlite3';
@@ -161,6 +161,39 @@ describe('stall sampler + pty counters', () => {
     recordPtyChunk('ws-1', 'sess-a', 1000);
     await shutdownPerf();
     expect(db.prepare(`SELECT COUNT(*) AS n FROM perf_events WHERE kind = 'pty_window'`).get()).toEqual({ n: 0 });
+  });
+
+  it('aggregates latency samples into per-session rows with histogram meta', async () => {
+    initPerf(store, ON, { delaySource: () => ({ p50: 0, p99: 0, max: 0 }), sampleIntervalMs: 20 });
+    recordLatencySample('echo_rtt', 'ws-1', 'sess-a', 120);
+    recordLatencySample('echo_rtt', 'ws-1', 'sess-a', 80);
+    recordLatencySample('input_hop', null, 'sess-a', 3);
+    await sleep(150);
+    await shutdownPerf();
+    const rtt = db.prepare(
+      `SELECT workspace_id, session_id, dur_ms, meta FROM perf_events WHERE kind = 'echo_rtt'`
+    ).get() as { workspace_id: string; session_id: string; dur_ms: number; meta: string };
+    expect(rtt.workspace_id).toBe('ws-1');
+    expect(rtt.session_id).toBe('sess-a');
+    expect(rtt.dur_ms).toBe(120); // max of the window
+    const meta = JSON.parse(rtt.meta);
+    expect(meta.count).toBe(2);
+    expect(meta.sum).toBe(200);
+    expect(meta.min).toBe(80);
+    expect(meta.max).toBe(120);
+    const hop = db.prepare(
+      `SELECT workspace_id, session_id FROM perf_events WHERE kind = 'input_hop'`
+    ).get() as { workspace_id: string | null; session_id: string };
+    expect(hop.workspace_id).toBeNull(); // '' normalizes to NULL
+    expect(hop.session_id).toBe('sess-a');
+  });
+
+  it('recordLatencySample while disabled or uninitialized is a no-op', async () => {
+    initPerf(store, OFF);
+    recordLatencySample('echo_rtt', 'ws-1', 'sess-a', 50);
+    await shutdownPerf();
+    recordLatencySample('echo_rtt', 'ws-1', 'sess-a', 50); // after shutdown: no runtime
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM perf_events WHERE kind = 'echo_rtt'`).get()).toEqual({ n: 0 });
   });
 });
 
