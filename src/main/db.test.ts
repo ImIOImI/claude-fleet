@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDb, closeDb, recordError, learnBrokerSessionMapping, recordBrokerSessionMapping, lookupBrokerSession, lookupVerifiedBrokerSession, summaryForBrokerSession, ingestLine, ERRORS_RETENTION, recordUsageEvent } from './db.js';
+import { openDb, closeDb, recordError, learnBrokerSessionMapping, recordBrokerSessionMapping, lookupBrokerSession, lookupVerifiedBrokerSession, lookupResumableBrokerSession, summaryForBrokerSession, ingestLine, ERRORS_RETENTION, recordUsageEvent } from './db.js';
 
 // A minimal well-formed transcript line that makes `sessionId` a *real*
 // session (any ingested line upserts the sessions row). The `user` string
@@ -117,6 +117,39 @@ describe('verified resume mappings (poisoned legacy rows)', () => {
       // A deterministic relearn upgrades the row to verified.
       learnBrokerSessionMapping('ws-a', 'broker-legacy', 'claude-real');
       expect(lookupVerifiedBrokerSession('ws-a', 'broker-legacy')).toBe('claude-real');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('lookupResumableBrokerSession — cross-restart auto-resume gate', () => {
+  it('returns the mapping only once the session has ingested a transcript line', () => {
+    const dir = freshDb();
+    try {
+      learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-1');
+      // Verified but never produced a transcript: `claude --resume` of it
+      // would error visibly in the tab, so refuse and let the attach spawn fresh.
+      expect(lookupResumableBrokerSession('ws-a', 'broker-1')).toBeNull();
+      realSession('ws-a', 'claude-1');
+      expect(lookupResumableBrokerSession('ws-a', 'broker-1')).toBe('claude-1');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('never resumes an unverified (FIFO-guessed) mapping, even with a real session', () => {
+    const dir = freshDb();
+    try {
+      openDb(dir).prepare(`
+        INSERT INTO broker_sessions (workspace_id, broker_session_id, claude_session_id, learned_at, verified)
+        VALUES ('ws-a', 'broker-legacy', 'claude-guessed', 1, 0)
+      `).run();
+      realSession('ws-a', 'claude-guessed');
+      expect(lookupResumableBrokerSession('ws-a', 'broker-legacy')).toBeNull();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('returns null for an unmapped broker session', () => {
+    const dir = freshDb();
+    try {
+      expect(lookupResumableBrokerSession('ws-a', 'broker-unknown')).toBeNull();
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

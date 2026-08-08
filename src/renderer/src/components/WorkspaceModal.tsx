@@ -19,6 +19,7 @@ import {
   WorkspaceForm,
   type WorkspaceFormSubmit
 } from './WorkspaceForm';
+import { workspaceToFormInitial } from './formInitial';
 
 interface Props {
   open: boolean;
@@ -345,7 +346,7 @@ export function WorkspaceModal({
                             {expanded && (
                               <WorkspaceForm
                                 mode="edit"
-                                initial={savedToInitial(w)}
+                                initial={workspaceToFormInitial(w)}
                                 workspaces={workspaces}
                                 vaultAvailable={vaultAvailable}
                                 onSubmit={handleResume}
@@ -399,28 +400,3 @@ export function WorkspaceModal({
   );
 }
 
-/**
- * Map a WorkspaceSummary to the form's initial-value shape. The form's
- * `WorkspaceFormSubmit` type doesn't have a `secretKeys` field (secrets
- * are an output-only concept on submit), but the initial-value reader
- * looks for it via the `as unknown` cast in WorkspaceForm so the edit
- * surface can show pre-existing secret keys with a "•••••" placeholder.
- */
-function savedToInitial(w: WorkspaceSummary): Record<string, unknown> {
-  return {
-    id: w.id,
-    name: w.name,
-    description: w.description,
-    labels: w.labels,
-    color: w.color,
-    workspaceSubdir: w.workspaceSubdir,
-    kind: w.kind,
-    workspaceRoot: w.workspaceRoot,
-    image: w.image,
-    authMode: w.authMode,
-    endpointId: w.endpointId,
-    plainEnv: w.env.plain,
-    secretKeys: w.env.secretKeys,
-    resources: w.resources
-  };
-}

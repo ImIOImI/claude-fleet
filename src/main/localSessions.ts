@@ -214,6 +214,15 @@ export function killWorkspaceSessions(workspaceId: string): void {
   }
 }
 
+/** Is this exact tab's process alive right now? False for a tab that exited
+ *  or was never spawned in this app run — the signal the local backend's
+ *  cross-restart auto-resume keys off (a dead/unknown tab with a verified
+ *  broker→claude mapping re-spawns as `claude --resume <uuid>`). */
+export function hasLiveSession(workspaceId: string, sessionId: string): boolean {
+  const s = sessions.get(sessionKey(workspaceId, sessionId));
+  return !!s && !s.exited;
+}
+
 export function hasLiveSessions(workspaceId: string): boolean {
   const prefix = `${workspaceId}${SEP}`;
   for (const [key, s] of sessions) {
