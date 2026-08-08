@@ -267,6 +267,11 @@ async function signalWslSessions(
   await execFileAsync('wsl.exe', ['-d', launcher.distro, '--exec', 'sh', '-c', script]).catch(() => {});
 }
 
+// Env markers claude sets on the subprocesses it spawns to flag a nested/child
+// context. A fleet-launched claude is a genuine top-level session, so these are
+// scrubbed from the inherited host env before spawn (see buildEnv, #285).
+const CLAUDE_CHILD_SESSION_MARKERS = ['CLAUDE_CODE_CHILD_SESSION', 'CLAUDECODE'] as const;
+
 /**
  * Build the spawn env. A *local* workspace IS the user's host claude, so it
  * inherits the real host environment — crucially `HOME`, so claude uses the
@@ -289,6 +294,15 @@ export async function buildEnv(
   // Endpoint workspaces must not inherit the host's real Anthropic key (dev
   // fallback mode) into a process whose base URL is a third-party endpoint.
   if (ws.authMode === 'endpoint') delete base.ANTHROPIC_API_KEY;
+  // A fleet-spawned local claude is a fresh TOP-LEVEL session, not a child of
+  // whatever launched fleet. If fleet was itself started from inside a claude
+  // session (e.g. a `claude` Bash tool ran `npm run dev`), its env carries
+  // claude's child-session markers; inherited unscrubbed, the spawned claude
+  // sees CLAUDE_CODE_CHILD_SESSION and turns transcript saving OFF — no .jsonl
+  // is written, the watcher ingests nothing, and the session shows $0.00 with
+  // no busy attribution (#285). Scrub the markers so it saves its transcript.
+  // (An explicit workspace env override re-appears below via `resolved`.)
+  for (const marker of CLAUDE_CHILD_SESSION_MARKERS) delete base[marker];
   return { ...base, ...backendVars, ...resolved, TERM: 'xterm-256color' };
 }
 
