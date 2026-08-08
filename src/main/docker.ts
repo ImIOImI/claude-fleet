@@ -47,6 +47,7 @@ import { resolveEnv } from './vault.js';
 import { endpointEnv } from './endpoints.js';
 import { claudeCreateArgs } from './claudeArgs.js';
 import { injectAndSubmit } from './ptyInput.js';
+import { perfSpanAsync, perfSetSpanContext } from './perf.js';
 
 export const FLEET_LABEL = 'com.claude-fleet.managed';
 export const ID_LABEL = 'com.claude-fleet.id';
@@ -448,7 +449,11 @@ export async function ensureWorkspaceClaudeJson(
   return filePath;
 }
 
-export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Workspace> {
+export function createWorkspace(spec: CreateWorkspaceInput): Promise<Workspace> {
+  return perfSpanAsync('claude_fleet.docker.create', () => createWorkspaceInner(spec), { workspace_id: spec.id });
+}
+
+async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspace> {
   assertValidWorkspaceId(spec.id);
 
   // Private folder (this container only) + shared folder (all containers).
@@ -622,7 +627,11 @@ export async function createWorkspace(spec: CreateWorkspaceInput): Promise<Works
  * container has that ULID label and the caller should recreate from the
  * spec. Paused containers are unpaused; stopped containers are started.
  */
-export async function startWorkspace(id: string): Promise<string | null> {
+export function startWorkspace(id: string): Promise<string | null> {
+  return perfSpanAsync('claude_fleet.docker.start', () => startWorkspaceInner(id), { workspace_id: id });
+}
+
+async function startWorkspaceInner(id: string): Promise<string | null> {
   assertValidWorkspaceId(id);
   const found = await findContainerById(id);
   if (!found) return null;
@@ -648,7 +657,11 @@ export async function startWorkspace(id: string): Promise<string | null> {
  * Pause a running container. All processes are suspended (cgroups freezer);
  * the container state remains "live" and recoverable via startWorkspace.
  */
-export async function pauseWorkspace(containerId: string): Promise<void> {
+export function pauseWorkspace(containerId: string): Promise<void> {
+  return perfSpanAsync('claude_fleet.docker.pause', () => pauseWorkspaceInner(containerId));
+}
+
+async function pauseWorkspaceInner(containerId: string): Promise<void> {
   const c = docker.getContainer(containerId);
   try {
     await c.pause();
@@ -658,7 +671,11 @@ export async function pauseWorkspace(containerId: string): Promise<void> {
   }
 }
 
-export async function stopWorkspace(containerId: string): Promise<void> {
+export function stopWorkspace(containerId: string): Promise<void> {
+  return perfSpanAsync('claude_fleet.docker.stop', () => stopWorkspaceInner(containerId));
+}
+
+async function stopWorkspaceInner(containerId: string): Promise<void> {
   const c = docker.getContainer(containerId);
   try {
     await c.stop({ t: 5 });
@@ -826,7 +843,17 @@ export async function committeePost(
  * Broker socket lives in the host state dir keyed by workspace id. We
  * resolve the id from the container's `com.claude-fleet.id` label.
  */
-export async function attachPty(
+export function attachPty(
+  containerId: string,
+  sessionId: string,
+  cols: number,
+  rows: number,
+  resumeOf?: string
+): Promise<PtyHandle> {
+  return perfSpanAsync('claude_fleet.docker.attach_pty', () => attachPtyInner(containerId, sessionId, cols, rows, resumeOf), { session_id: sessionId });
+}
+
+async function attachPtyInner(
   containerId: string,
   sessionId: string,
   cols: number,
@@ -839,6 +866,7 @@ export async function attachPty(
   if (!workspaceId) {
     throw new Error(`container ${containerId} is missing ${ID_LABEL} label`);
   }
+  perfSetSpanContext({ workspaceId });
 
   const endpoint = brokerEndpointFromInfo(workspaceId, info);
   const client = new BrokerClient(endpoint);

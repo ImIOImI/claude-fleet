@@ -21,6 +21,7 @@
 // workspaces store no secrets, so they're unaffected.
 
 import { app, safeStorage } from 'electron';
+import { perfSpanAsync } from './perf.js';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -166,7 +167,15 @@ export async function deleteAllForWorkspace(workspaceId: string): Promise<void> 
  * resolve to the empty string so the container still starts — surfacing the
  * missing key in logs is the caller's job.
  */
-export async function resolveEnv(
+export function resolveEnv(
+  workspaceId: string,
+  plain: Record<string, string>,
+  secretKeys: string[]
+): Promise<Record<string, string>> {
+  return perfSpanAsync('claude_fleet.vault.resolve_env', () => resolveEnvInner(workspaceId, plain, secretKeys), { workspace_id: workspaceId });
+}
+
+async function resolveEnvInner(
   workspaceId: string,
   plain: Record<string, string>,
   secretKeys: string[]
