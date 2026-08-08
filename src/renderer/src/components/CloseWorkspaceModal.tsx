@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { WorkspaceSummary } from '../App';
+import { ModalBackdrop } from './ModalBackdrop';
 
 interface Props {
   workspace: WorkspaceSummary;
@@ -99,7 +100,7 @@ export function CloseWorkspaceModal({ workspace, onClose, onClosed }: Props) {
   };
 
   return (
-    <div className="modal-backdrop" onClick={busy ? undefined : onClose}>
+    <ModalBackdrop onClose={busy ? undefined : onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <h2>Close workspace</h2>
         <p className="modal-eyebrow">
@@ -163,6 +164,6 @@ export function CloseWorkspaceModal({ workspace, onClose, onClosed }: Props) {
           </button>
         </div>
       </div>
-    </div>
+    </ModalBackdrop>
   );
 }

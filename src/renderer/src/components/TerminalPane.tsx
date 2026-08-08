@@ -19,6 +19,7 @@ import type { WorkspaceObservabilitySummary } from '../../../preload';
 import type { MirrorSetting, CleanupSetting } from '../App';
 import { TerminalSession } from './TerminalSession';
 import { ToastView } from './Toast';
+import { ModalBackdrop } from './ModalBackdrop';
 import { makeToast } from '../toasts';
 import { readyToRefresh } from './refreshQueue';
 import { useBlinkSync } from '../blinkSync';
@@ -934,7 +935,7 @@ export function TerminalPane({
         )}
       </div>
       {closeTarget && (
-        <div className="modal-backdrop" onClick={() => setCloseTarget(null)}>
+        <ModalBackdrop onClose={() => setCloseTarget(null)}>
           <div className="modal mirror-close-modal" onClick={(e) => e.stopPropagation()}>
             <h3>Close {closeTarget.name}</h3>
             <p className="form-hint">
@@ -961,7 +962,7 @@ export function TerminalPane({
               </button>
             </div>
           </div>
-        </div>
+        </ModalBackdrop>
       )}
     </div>
   );
