@@ -68,6 +68,7 @@ import {
   killWorkspaceSessions,
   type SpawnPty
 } from './localSessions.js';
+import { createConptySettler } from './conptySettle.js';
 
 // Lazy require so the native node-pty addon only loads when a local session is
 // actually spawned (and never under vitest, which can't load the Electron ABI).
@@ -148,16 +149,28 @@ export function _resetForTest(): void {
 /** node-pty-backed spawn factory passed to the session manager. */
 const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
   const pty = require('node-pty') as typeof NodePty;
-  const p = pty.spawn(file, args, { name: 'xterm-256color', cwd, cols, rows, env });
-
-  // Track liveness so the ConPTY nudge below (and any late resize) never calls
-  // into an exited pty — node-pty on Node 22 throws "Cannot resize a pty that
-  // has already exited" as an *uncaught* error, which would crash the main
-  // process (see localSessions.resize, which guards the same way).
-  let exited = false;
-  p.onExit(() => {
-    exited = true;
+  const p = pty.spawn(file, args, {
+    name: 'xterm-256color',
+    cwd,
+    cols,
+    rows,
+    env,
+    // Opt-in escape hatch (#268 fallback #2): node-pty 1.1.0 bundles a newer
+    // conpty.dll + OpenConsole.exe (already asarUnpacked with the rest of
+    // node-pty) that fixes many ConPTY reflow/reprint bugs. Off by default —
+    // it swaps the OS console host for every Windows local session and has
+    // had no Windows soak time here; flip it via a user env var without a
+    // rebuild if the re-settle below doesn't hold.
+    ...(process.platform === 'win32' && process.env.CLAUDE_FLEET_CONPTY_DLL === '1'
+      ? { useConptyDll: true }
+      : {})
   });
+
+  // Track liveness so the ConPTY settle below (and any late resize) never
+  // calls into an exited pty — node-pty on Node 22 throws "Cannot resize a
+  // pty that has already exited" as an *uncaught* error, which would crash
+  // the main process (see localSessions.resize, which guards the same way).
+  let exited = false;
   const safeResize = (c: number, r: number): void => {
     if (exited) return;
     try {
@@ -167,34 +180,51 @@ const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
     }
   };
 
-  // ConPTY overlap fix (#268): on Windows, `claude` runs under ConPTY, which
-  // keeps its own pseudoconsole buffer and reprints/reflows it to the frontend
-  // on updates. claude's TUI redraws incrementally (cursor-up + erase, no full
-  // clear), so if ConPTY's buffer state hasn't settled at the fitted width its
-  // reprints land on rows xterm already drew → overlapping/ghosted text on
-  // every response. ConPTY only reliably applies its size once the child has
-  // attached to the pseudoconsole, so the spawn-time cols/rows can be stale.
-  // A real winsize change after attach forces ConPTY to settle and re-emit a
-  // clean frame — the programmatic equivalent of the manual window-resize that
-  // heals it. POSIX PTYs (macOS/Linux, and the container backend's Linux PTY)
-  // don't need this, so it's Windows-only.
-  if (process.platform === 'win32') {
-    setTimeout(() => {
-      if (exited) return;
-      // Jitter one column and back so the value actually changes (a same-size
-      // resize can be a no-op and skip ConPTY's re-emit), landing back at the
-      // fitted size. The renderer's ResizeObserver keeps it in sync afterward.
-      safeResize(Math.max(1, cols - 1), rows);
-      safeResize(cols, rows);
-    }, 250);
-  }
+  // ConPTY overlap fix (#268, reworked): ConPTY keeps its own pseudoconsole
+  // buffer and reprints/reflows it to the frontend on updates — an ongoing
+  // condition, so the original one-shot post-spawn jitter (#269) did not hold
+  // in the field, and its closure-captured spawn cols could clobber a
+  // renderer fit landing inside the 250 ms window, pinning ConPTY at a stale
+  // width. Now every resize (and the spawn itself) schedules a debounced
+  // settle that jitters the winsize at the pty's CURRENT size, forcing
+  // ConPTY to re-emit a clean frame — the programmatic equivalent of the
+  // manual window resize that heals the corruption. POSIX PTYs (macOS/Linux,
+  // and the container backend's Linux PTY) don't need this, so Windows-only.
+  const settler =
+    process.platform === 'win32'
+      ? createConptySettler({
+          resize: safeResize,
+          getSize: () => ({ cols: p.cols, rows: p.rows }),
+          onSettle: ({ cols: c, rows: r }) => {
+            // One line per settle: the field-visible record of what size
+            // ConPTY was reconciled to. A settle size that differs from the
+            // spawn size means a post-spawn resize landed — the case the
+            // one-shot fix silently reverted.
+            logError({
+              source: 'main',
+              type: 'conpty-settle',
+              level: 'info',
+              message: `conpty settled at ${c}x${r} (pid ${p.pid}, spawned ${cols}x${rows})`,
+              extra: { pid: p.pid, cols: c, rows: r, spawnCols: cols, spawnRows: rows }
+            });
+          }
+        })
+      : null;
+  p.onExit(() => {
+    exited = true;
+    settler?.dispose();
+  });
+  settler?.schedule();
 
   return {
     get pid() {
       return p.pid;
     },
     write: (d) => p.write(d),
-    resize: safeResize,
+    resize: (c, r) => {
+      safeResize(c, r);
+      settler?.schedule();
+    },
     kill: (sig) => p.kill(sig),
     onData: (cb) => {
       p.onData(cb);
