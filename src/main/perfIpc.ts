@@ -19,13 +19,10 @@ import { perfSpanAsync } from './perf.js';
 
 const W0 = { workspaceArg: 0 } as const;
 const W0S1 = { workspaceArg: 0, sessionArg: 1 } as const;
-const S0 = { sessionArg: 0 } as const;
 
 /** Channel → 0-based positions (after the Electron event) of id-bearing args.
- *  session ids here are whatever the channel traffics in — broker session ids
- *  for `*ForBrokerSession`/`mirror:*`, claude session UUIDs for
- *  `observability:eventsForSession`/`getCost` — matching what the rest of
- *  perf_events already stores. */
+ *  session ids here are broker session ids for `*ForBrokerSession`/`mirror:*`
+ *  — matching what the rest of perf_events already stores. */
 const CHANNEL_CONTEXT: Record<string, { workspaceArg?: number; sessionArg?: number }> = {
   'sessions:read': W0,
   'sessions:list': W0,
@@ -33,12 +30,11 @@ const CHANNEL_CONTEXT: Record<string, { workspaceArg?: number; sessionArg?: numb
   'sessions:resume': W0,
   'sessions:delete': W0S1,
   'sessions:resolveResumeTarget': W0S1,
-  'sessions:rename': S0,
   'workspace:start': W0,
   'workspace:getManifest': W0,
   // committee:* args are (callerId, targetId, …) — both workspace ULIDs. We
   // stamp the CALLER: it owns the span for MCP scoping (the manager sees its
-  // own rows), and the target id stays available in meta if ever needed.
+  // own rows), and the target id could be added as an attribute if ever needed.
   'committee:pause': W0,
   'committee:unpause': W0,
   'committee:post': W0,
@@ -65,9 +61,7 @@ const CHANNEL_CONTEXT: Record<string, { workspaceArg?: number; sessionArg?: numb
   'ports:kill': W0,
   'observability:summaryForWorkspace': W0,
   'observability:getCostForWorkspace': W0,
-  'observability:summaryForBrokerSession': W0S1,
-  'observability:eventsForSession': S0,
-  'observability:getCost': S0
+  'observability:summaryForBrokerSession': W0S1
 };
 
 /** Attribution attrs for a channel invoke. `handlerArgs` excludes the leading
