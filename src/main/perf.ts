@@ -10,7 +10,8 @@ import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { hrTimeToMilliseconds } from '@opentelemetry/core';
 import type { ExportResult } from '@opentelemetry/core';
 import { ExportResultCode } from '@opentelemetry/core';
-import { metrics, trace, type Attributes } from '@opentelemetry/api';
+import { context, metrics, trace, type Attributes } from '@opentelemetry/api';
+import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import type { Counter } from '@opentelemetry/api';
 import {
   BasicTracerProvider, BatchSpanProcessor,
@@ -165,6 +166,13 @@ export function initPerf(store: PerfStore, effective: EffectivePerfConfig, hooks
   store.prune(RETENTION_MS);
   if (!effective.recording) return; // globals stay no-op
 
+  // Context propagation: lets perfSpan* parent nested spans and lets
+  // perfSetSpanContext reach the active span. Without a registered manager
+  // the API's context.with is a passthrough and getActiveSpan is undefined.
+  const ctxManager = new AsyncLocalStorageContextManager();
+  ctxManager.enable();
+  context.setGlobalContextManager(ctxManager);
+
   const processors = [
     new BatchSpanProcessor(new SqliteSpanExporter(store), { scheduledDelayMillis: FLUSH_INTERVAL_MS })
   ];
@@ -250,6 +258,7 @@ export async function shutdownPerf(): Promise<void> {
   await r.tracerProvider?.shutdown().catch(() => undefined); // flushes batch processors
   trace.disable();
   metrics.disable();
+  context.disable();
   r.store.flush();
 }
 
@@ -268,7 +277,7 @@ export function otlpSignalUrl(endpoint: string, signal: 'traces' | 'metrics'): s
 export function perfSpan<T>(name: string, fn: () => T, attrs?: Attributes): T {
   const span = trace.getTracer(TRACER_NAME).startSpan(name, { attributes: attrs });
   try {
-    return fn();
+    return context.with(trace.setSpan(context.active(), span), fn);
   } catch (err) {
     if (err instanceof Error) span.recordException(err);
     throw err;
@@ -284,7 +293,7 @@ export async function perfSpanAsync<T>(
 ): Promise<T> {
   const span = trace.getTracer(TRACER_NAME).startSpan(name, { attributes: attrs });
   try {
-    return await fn();
+    return await context.with(trace.setSpan(context.active(), span), fn);
   } catch (err) {
     if (err instanceof Error) span.recordException(err);
     throw err;

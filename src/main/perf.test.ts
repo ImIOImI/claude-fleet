@@ -83,6 +83,21 @@ describe('perf tracer pipeline', () => {
     await shutdownPerf();
     await expect(shutdownPerf()).resolves.toBeUndefined();
   });
+
+  it('nested perfSpanAsync spans share a trace_id (child parents under the active span)', async () => {
+    initPerf(store, ON);
+    const spin = (ms: number) => { const end = Date.now() + ms; while (Date.now() < end) { /* busy */ } };
+    await perfSpanAsync('claude_fleet.test.parent', async () => {
+      spin(30);
+      await perfSpanAsync('claude_fleet.test.child', async () => { spin(30); });
+    });
+    await shutdownPerf();
+    const rows = db.prepare(
+      `SELECT name, trace_id FROM perf_events WHERE kind = 'slow_op' AND name LIKE 'claude_fleet.test.%' ORDER BY name`
+    ).all() as Array<{ name: string; trace_id: string }>;
+    expect(rows.map((r) => r.name)).toEqual(['claude_fleet.test.child', 'claude_fleet.test.parent']);
+    expect(rows[0].trace_id).toBe(rows[1].trace_id);
+  });
 });
 
 describe('stall sampler + pty counters', () => {
