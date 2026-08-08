@@ -34,8 +34,9 @@ import {
   getPerfOtlp,
   setPerfOtlp
 } from './config.js';
-import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk, perfSetSpanContext } from './perf.js';
+import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk, perfSetSpanContext, recordLatencySample, setPerfStateListener } from './perf.js';
 import { resolvePerfConfig } from './perfConfig.js';
+import { sanitizePerfSamples } from './perfSamples.js';
 import { buildLoadoutCatalog } from './loadoutCatalog.js';
 import * as realDocker from './docker.js';
 import * as realLocal from './local.js';
@@ -230,6 +231,9 @@ const ptySessions = new Map<string, PtyHandle>();
 // one-writer-per-session, so a second attach to an already-viewed expert is
 // rejected `already attached`). Populated/cleared alongside ptySessions.
 const handleWorkspaceId = new Map<string, string>();
+// ptyHandleId → brokerSessionId, for latency-sample session attribution
+// (mirrors handleWorkspaceId's lifecycle: set on attach, deleted on end).
+const handleBrokerSessionId = new Map<string, string>();
 // Host-side busy/idle per workspace (#121), computed in main from the broker
 // output stream (not lifted from the renderer). `since` is the host-clock ms at
 // the last busy↔idle flip — used to detect a stalled (busy-too-long) expert.
@@ -1342,6 +1346,27 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
 
   ipcMain.handle('perf:status', async () => getEffectivePerf() ? getPerfStatus() : PERF_STATUS_UNINITIALIZED);
 
+  // One-way renderer→main latency sample batches (perf Phase 2). Not an
+  // invoke: no response, no span (instrumentIpcHandle wraps handle() only).
+  ipcMain.on('perf:samples', (_e, payload: unknown) => {
+    if (!getEffectivePerf()?.recording) return; // belt and braces — renderer also gates
+    const batch = sanitizePerfSamples(payload);
+    if (!batch) return;
+    const ws = handleWorkspaceId.get(batch.sessionId) ?? null;
+    const sess = handleBrokerSessionId.get(batch.sessionId) ?? null;
+    for (const s of batch.samples) recordLatencySample(s.kind, ws, sess, s.durMs);
+  });
+
+  // One-way main→renderer recording-state push (perf Phase 2): fires on
+  // every initPerf/reconfigurePerf — Settings toggle, MCP perf_set, and
+  // startup all funnel through there. Windows created later pull the
+  // initial state via perf:status.
+  setPerfStateListener((recording) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('perf:state', recording);
+    }
+  });
+
   // ── Model-endpoint registry (#250) ─────────────────────────────────────
   ipcMain.handle('endpoints:list', () => listEndpoints());
   ipcMain.handle('endpoints:save', (_e, input: Omit<ModelEndpoint, 'id' | 'hasApiKey'> & { id?: string }) =>
@@ -1491,6 +1516,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         (w) => w.containerId === containerId || w.id === containerId
       );
       if (owner) handleWorkspaceId.set(ptyHandleId, owner.id);
+      handleBrokerSessionId.set(ptyHandleId, brokerSessionId);
       perfSetSpanContext({ workspaceId: owner?.id, sessionId: brokerSessionId });
       // Diagnostic: ptySessions.size should oscillate around the count of
       // currently-mounted TerminalSession components. Unbounded growth =
@@ -1526,7 +1552,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // renderer React state. Reuses the (pure) ActivityDetector.
       const detector = new ActivityDetector();
       handle.stream.on('data', (chunk: Buffer) => {
-        win?.webContents.send(`pty:data:${ptyHandleId}`, chunk);
+        // Second arg = epoch-ms send stamp for the renderer's output-hop
+        // measurement (perf Phase 2). The chunk stays a raw Buffer.
+        win?.webContents.send(`pty:data:${ptyHandleId}`, chunk, Date.now());
         recordPtyChunk(owner?.id ?? handleWorkspaceId.get(ptyHandleId) ?? null, brokerSessionId, chunk.length);
         if (owner && detector.push(chunk.toString('utf8'))) {
           committeeBusy.set(owner.id, { busy: detector.isBusy, since: Date.now() });
@@ -1536,6 +1564,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         win?.webContents.send(`pty:end:${ptyHandleId}`);
         ptySessions.delete(ptyHandleId);
         handleWorkspaceId.delete(ptyHandleId);
+        handleBrokerSessionId.delete(ptyHandleId);
         if (owner) committeeBusy.delete(owner.id);
         logError({
           source: 'main',
@@ -1558,9 +1587,22 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     }
   );
 
-  ipcMain.handle('pty:input', (_e, sessionId: string, data: string) => {
+  ipcMain.handle('pty:input', (_e, sessionId: string, data: string, ts?: number) => {
     perfSetSpanContext({ workspaceId: handleWorkspaceId.get(sessionId) });
     ptySessions.get(sessionId)?.stream.write(data);
+    // Renderer stamps only while recording (perf:state gate); skip missing
+    // or future-skewed stamps rather than recording zeros.
+    if (typeof ts === 'number') {
+      const dur = Date.now() - ts;
+      if (dur >= 0) {
+        recordLatencySample(
+          'input_hop',
+          handleWorkspaceId.get(sessionId) ?? null,
+          handleBrokerSessionId.get(sessionId) ?? null,
+          dur
+        );
+      }
+    }
   });
 
   ipcMain.handle('pty:resize', async (_e, sessionId: string, cols: number, rows: number) => {
