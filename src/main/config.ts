@@ -63,6 +63,11 @@ interface AppConfig {
   usageBudget?: UsageBudgetConfig;
   /** Global loadout favorites (loadout ids), shown in every workspace's rail. */
   favorites?: string[];
+  /** Perf telemetry recording (docs/superpowers/specs/2026-08-07-perf-telemetry-design.md).
+   *  Absent ⇒ default ON. CLAUDE_FLEET_PERF=0 overrides at resolve time (perfConfig.ts). */
+  perfTelemetry?: boolean;
+  /** OTLP export of perf traces/metrics. Default off; OTEL_EXPORTER_OTLP_ENDPOINT overrides. */
+  perfOtlp?: { enabled: boolean; endpoint: string };
 }
 
 /** Defensively parse the persisted usageBudget (untrusted JSON on disk). */
@@ -78,6 +83,16 @@ function parseUsageBudget(v: unknown): UsageBudgetConfig | undefined {
       ? Math.round(o.customTokens)
       : DEFAULT_CUSTOM_TOKENS;
   return { preset, customTokens };
+}
+
+/** Defensively parse the persisted perfOtlp block (untrusted JSON on disk). */
+function parsePerfOtlp(v: unknown): { enabled: boolean; endpoint: string } | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const o = v as Record<string, unknown>;
+  return {
+    enabled: o.enabled === true,
+    endpoint: typeof o.endpoint === 'string' ? o.endpoint : ''
+  };
 }
 
 function configPath(): string {
@@ -103,7 +118,9 @@ async function read(): Promise<AppConfig> {
       // on (see getAutoReloadLoadouts).
       autoReloadLoadouts:
         typeof parsed.autoReloadLoadouts === 'boolean' ? parsed.autoReloadLoadouts : undefined,
-      usageBudget: parseUsageBudget(parsed.usageBudget)
+      usageBudget: parseUsageBudget(parsed.usageBudget),
+      perfTelemetry: typeof parsed.perfTelemetry === 'boolean' ? parsed.perfTelemetry : undefined,
+      perfOtlp: parsePerfOtlp(parsed.perfOtlp)
     };
   } catch {
     cached = {};
@@ -176,6 +193,34 @@ export async function getAutoReloadLoadouts(): Promise<boolean> {
 export async function setAutoReloadLoadouts(enabled: boolean): Promise<void> {
   const cfg = await read();
   await write({ ...cfg, autoReloadLoadouts: enabled });
+}
+
+/** Perf-telemetry recording setting. Default on. (Env override lives in perfConfig.ts.) */
+export async function getPerfTelemetry(): Promise<boolean> {
+  const cfg = await read();
+  return cfg.perfTelemetry !== false; // default true
+}
+
+export async function setPerfTelemetry(enabled: boolean): Promise<void> {
+  const cfg = await read();
+  await write({ ...cfg, perfTelemetry: enabled });
+}
+
+/** OTLP export setting (endpoint kept even while disabled — the Settings UI
+ *  shows it greyed out rather than losing it). */
+export async function getPerfOtlp(): Promise<{ enabled: boolean; endpoint: string }> {
+  const cfg = await read();
+  return cfg.perfOtlp ?? { enabled: false, endpoint: '' };
+}
+
+export async function setPerfOtlp(enabled: boolean, endpoint: string): Promise<void> {
+  const trimmed = endpoint.trim();
+  if (enabled) {
+    if (!trimmed) throw new Error('OTLP export needs an endpoint URL');
+    if (!/^https?:\/\//.test(trimmed)) throw new Error('OTLP endpoint must be an http(s) URL');
+  }
+  const cfg = await read();
+  await write({ ...cfg, perfOtlp: { enabled, endpoint: trimmed } });
 }
 
 /**

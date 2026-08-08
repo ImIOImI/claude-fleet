@@ -17,6 +17,10 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setSessionMappingHandler, setSummaryStatusHandler, setQueryEmbedder, setUsageRecorder, setConfigResolver, _resetTelemetryForTests, type ToolCtx } from './mcpServer.js';
 import { EMBED_DIM, EMBED_MODEL_ID } from './vectors.js';
+import { closeDb, openDb } from './db.js';
+import { PerfStore } from './perfStore.js';
+import { initPerf, shutdownPerf } from './perf.js';
+import type { EffectivePerfConfig } from './perfConfig.js';
 
 const WS_A = '01WORKSPACEAAAAAAAAAAAAAAA';
 const WS_B = '01WORKSPACEBBBBBBBBBBBBBBB';
@@ -153,6 +157,18 @@ function makeFileDb(): { db: Database.Database; cleanup: () => void } {
       kind TEXT NOT NULL,
       detail TEXT
     );
+    CREATE TABLE perf_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      workspace_id TEXT,
+      session_id TEXT,
+      name TEXT,
+      dur_ms REAL,
+      trace_id TEXT,
+      span_id TEXT,
+      meta TEXT
+    );
   `);
   const sess = fileDb.prepare('INSERT INTO sessions (id, workspace_id, last_active_at, ai_title) VALUES (?,?,?,?)');
   sess.run('sa', WS_A, 1000, 'A session');
@@ -244,7 +260,7 @@ describe('scoped query tool (#174)', () => {
   it('cannot introspect/escape via sqlite_master', () => {
     const names = run({ sql: 'SELECT name FROM sqlite_master ORDER BY name' }) as Array<{ name: string }>;
     expect(names.map((r) => r.name).sort()).toEqual(
-      ['broker_sessions', 'events', 'session_summaries', 'session_tags', 'sessions', 'usage_events']
+      ['broker_sessions', 'events', 'perf_events', 'session_summaries', 'session_tags', 'sessions', 'usage_events']
     );
   });
 
@@ -617,5 +633,102 @@ describe('implicit usage telemetry (#207)', () => {
     setUsageRecorder((e) => events.push(e as Record<string, unknown>));
     tool('get_session').run(db, { id: 'sa' }, ctxA);
     expect(events.filter((e) => e.kind === 'clickthrough')).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// perf tools — perf_status, perf_set, perf_events in query snapshot
+// ---------------------------------------------------------------------------
+const PERF_ON: EffectivePerfConfig = {
+  recording: true, recordingSource: 'settings',
+  otlp: { enabled: false, endpoint: null, source: 'settings' }
+};
+
+describe('perf tools', () => {
+  it('perf_status and perf_set are registered with the pinned schemas', () => {
+    const status = TOOLS.find((t) => t.name === 'perf_status');
+    const set = TOOLS.find((t) => t.name === 'perf_set');
+    expect(status).toBeDefined();
+    expect(set).toBeDefined();
+    expect(set!.inputSchema).toEqual({
+      type: 'object',
+      properties: { enabled: { type: 'boolean' } },
+      required: ['enabled']
+    });
+  });
+
+  it('perf_set rejects export-config arguments', async () => {
+    const set = TOOLS.find((t) => t.name === 'perf_set')!;
+    await expect(
+      set.run(db, { enabled: true, endpoint: 'http://evil:4318' }, ctxA)
+    ).rejects.toThrow(/export/i);
+    await expect(
+      set.run(db, { enabled: true, otlp: { enabled: true } }, ctxA)
+    ).rejects.toThrow(/export/i);
+  });
+
+  it('perf_set rejects when CLAUDE_FLEET_PERF=0', async () => {
+    const saved = process.env.CLAUDE_FLEET_PERF;
+    process.env.CLAUDE_FLEET_PERF = '0';
+    try {
+      const set = TOOLS.find((t) => t.name === 'perf_set')!;
+      // Both enabled: false and enabled: true should be rejected
+      await expect(
+        set.run(db, { enabled: false }, ctxA)
+      ).rejects.toThrow(/CLAUDE_FLEET_PERF/i);
+      await expect(
+        set.run(db, { enabled: true }, ctxA)
+      ).rejects.toThrow(/CLAUDE_FLEET_PERF/i);
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_FLEET_PERF;
+      else process.env.CLAUDE_FLEET_PERF = saved;
+    }
+  });
+
+  describe('perf_status with live runtime', () => {
+    let perfDir: string;
+    beforeEach(() => {
+      perfDir = mkdtempSync(join(tmpdir(), 'mcp-perf-'));
+      const perfDb = openDb(perfDir);
+      const store = new PerfStore(perfDb);
+      initPerf(store, PERF_ON);
+    });
+    afterEach(async () => {
+      await shutdownPerf();
+      closeDb();
+      rmSync(perfDir, { recursive: true, force: true });
+    });
+
+    it('perf_status returns status without throwing', async () => {
+      const statusTool = TOOLS.find((t) => t.name === 'perf_status')!;
+      const result = await statusTool.run(db, {}, ctxA);
+      expect(result).toHaveProperty('enabled');
+      expect(result).toHaveProperty('source');
+      expect(result).toHaveProperty('otlp');
+      expect(result).toHaveProperty('eventCounts');
+    });
+  });
+
+  describe('perf_events in query snapshot', () => {
+    let fdb: Database.Database;
+    let cleanup: () => void;
+    beforeEach(() => {
+      ({ db: fdb, cleanup } = makeFileDb());
+    });
+    afterEach(() => {
+      fdb.close();
+      cleanup();
+    });
+
+    it('scopes perf_events to allowed workspaces + app-global rows', () => {
+      fdb.prepare(`INSERT INTO perf_events (ts, kind, workspace_id, name, dur_ms) VALUES (1, 'pty_window', ?, 'claude_fleet.pty.bytes', NULL)`).run(WS_A);
+      fdb.prepare(`INSERT INTO perf_events (ts, kind, workspace_id, name, dur_ms) VALUES (2, 'pty_window', ?, 'claude_fleet.pty.bytes', NULL)`).run(WS_B);
+      fdb.prepare(`INSERT INTO perf_events (ts, kind, dur_ms) VALUES (3, 'stall', 80)`).run();
+      const rows = tool('query').run(fdb, { sql: 'SELECT kind, workspace_id FROM perf_events ORDER BY ts' }, ctxA) as Array<{ kind: string; workspace_id: string | null }>;
+      expect(rows).toEqual([
+        { kind: 'pty_window', workspace_id: WS_A },
+        { kind: 'stall', workspace_id: null }
+      ]);
+    });
   });
 });

@@ -5,7 +5,7 @@
 // hardware-acceleration toggle (applied at the next app launch).
 
 import { useEffect, useState } from 'react';
-import type { UsageBudgetPreset } from '../../../preload';
+import type { PerfStatusPayload, UsageBudgetPreset } from '../../../preload';
 
 /** Compact token formatter for preset labels (e.g. 19_000_000 → "19M"). */
 function fmtTokens(n: number): string {
@@ -79,6 +79,11 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
   const [budgetCustom, setBudgetCustom] = useState('');
   const [budgetPresets, setBudgetPresets] = useState({ pro: 0, max5: 0, max20: 0 });
   const [budgetWindowHours, setBudgetWindowHours] = useState(5);
+  // Perf-telemetry settings state.
+  const [perfTelemetry, setPerfTelemetryState] = useState(true);
+  const [perfOtlpEnabled, setPerfOtlpEnabled] = useState(false);
+  const [perfOtlpEndpoint, setPerfOtlpEndpoint] = useState('');
+  const [perfStatus, setPerfStatus] = useState<PerfStatusPayload | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -110,12 +115,29 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
           setBudgetPresets(cfg.usageBudget.presets);
           setBudgetWindowHours(cfg.usageBudget.windowHours);
         }
+        if (cfg.perfTelemetry !== undefined) {
+          setPerfTelemetryState(cfg.perfTelemetry);
+        }
+        if (cfg.perfOtlp) {
+          setPerfOtlpEnabled(cfg.perfOtlp.enabled);
+          setPerfOtlpEndpoint(cfg.perfOtlp.endpoint ?? '');
+        }
         setLoaded(true);
       }
     });
     return () => {
       live = false;
     };
+  }, []);
+
+  // ── Live perf-telemetry status (5 s poll) ──────────────────────────────
+  useEffect(() => {
+    let alive = true;
+    const tick = () =>
+      window.api.perf.status().then((s) => { if (alive) setPerfStatus(s); }).catch(() => undefined);
+    tick();
+    const t = setInterval(tick, 5000);
+    return () => { alive = false; clearInterval(t); };
   }, []);
 
   // ── Load endpoints when tab is first activated ──────────────────────────
@@ -160,6 +182,8 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
       await window.api.config.setAutoReloadLoadouts(autoReload);
       const customTokens = Math.max(0, Math.round(Number(budgetCustom) || 0));
       await window.api.config.setUsageBudget(budgetPreset, customTokens);
+      await window.api.config.setPerfTelemetry(perfTelemetry);
+      await window.api.config.setPerfOtlp(perfOtlpEnabled, perfOtlpEndpoint);
       const cfg = await window.api.config.setFleetRoot(trimmed);
       onSaved(cfg);
       onClose();
@@ -407,6 +431,51 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
               )}
             </div>
 
+            <div className="settings-section">
+              <div className="settings-section-header">Diagnostics</div>
+              <div className={`setting-row${perfStatus?.source === 'env-override' ? ' disabled' : ''}`}>
+                <div className="setting-row-text">
+                  <label className="setting-title" htmlFor="perf-telemetry">Performance telemetry</label>
+                  <p className="setting-desc">
+                    Record event-loop stalls, slow operations, and terminal latency to the local
+                    history DB (OpenTelemetry). Queryable from any workspace via the fleet-state
+                    MCP; 7-day retention.
+                  </p>
+                  {perfStatus && <PerfStatusLine s={perfStatus} />}
+                </div>
+                <input
+                  id="perf-telemetry" type="checkbox" checked={perfTelemetry}
+                  disabled={busy || !loaded || perfStatus?.source === 'env-override'}
+                  onChange={(e) => setPerfTelemetryState(e.target.checked)}
+                />
+              </div>
+              <div className={`setting-row${perfTelemetry ? '' : ' disabled'}`}>
+                <div className="setting-row-text">
+                  <label className="setting-title" htmlFor="perf-otlp">Export via OTLP</label>
+                  <p className="setting-desc">
+                    Also stream traces and metrics to an OpenTelemetry collector. Local recording
+                    continues either way. Not changeable from workspaces.
+                  </p>
+                </div>
+                <input
+                  id="perf-otlp" type="checkbox" checked={perfOtlpEnabled}
+                  disabled={busy || !loaded || !perfTelemetry}
+                  onChange={(e) => setPerfOtlpEnabled(e.target.checked)}
+                />
+              </div>
+              <div className="setting-custom-budget">
+                <input
+                  type="text" value={perfOtlpEndpoint} placeholder="http://localhost:4318"
+                  disabled={busy || !loaded || !perfTelemetry || !perfOtlpEnabled}
+                  onChange={(e) => setPerfOtlpEndpoint(e.target.value)}
+                />
+                <p className={`setting-desc${!perfTelemetry || !perfOtlpEnabled ? ' setting-desc-dim' : ''}`}>
+                  OTLP/HTTP endpoint. <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> overrides this when
+                  set; auth headers via <code>OTEL_EXPORTER_OTLP_HEADERS</code>.
+                </p>
+              </div>
+            </div>
+
             {error && <div className="form-hint error-text">{error}</div>}
             <div className="modal-footer">
               <span className="modal-footer-spacer" />
@@ -594,5 +663,27 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
         )}
       </div>
     </div>
+  );
+}
+
+function PerfStatusLine({ s }: { s: PerfStatusPayload }): JSX.Element {
+  if (s.source === 'env-override') {
+    return (
+      <p className="setting-status">
+        <span className="perf-dot override" /> forced off by <code>CLAUDE_FLEET_PERF=0</code> — setting ignored
+      </p>
+    );
+  }
+  if (!s.enabled) {
+    return <p className="setting-status"><span className="perf-dot off" /> off</p>;
+  }
+  const total = Object.values(s.eventCounts).reduce((a, b) => a + b, 0);
+  const exporting = s.otlp.enabled && s.otlp.endpoint
+    ? <> · exporting → <code>{s.otlp.endpoint.replace(/^https?:\/\//, '')}</code></>
+    : <> · OTLP export off</>;
+  return (
+    <p className="setting-status">
+      <span className="perf-dot recording" /> recording · {total.toLocaleString()} events / 24 h{exporting}
+    </p>
   );
 }

@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mockups: perf telemetry in Settings</title>
+<style>
+  /* ── claude-fleet design tokens (copied from src/renderer/src/styles.css) ── */
+  :root {
+    --bg-canvas:   oklch(8% 0.005 80);
+    --bg:          oklch(11.5% 0.005 80);
+    --bg-1:        oklch(14% 0.006 80);
+    --bg-2:        oklch(17% 0.007 80);
+    --bg-3:        oklch(21% 0.008 80);
+    --bg-card:     oklch(14% 0.006 80);
+    --ink:         oklch(96% 0.005 80);
+    --ink-1:       oklch(78% 0.008 80);
+    --ink-2:       oklch(58% 0.008 80);
+    --ink-3:       oklch(38% 0.008 80);
+    --rule:        oklch(25% 0.008 80);
+    --rule-soft:   oklch(18% 0.006 80);
+    --ok:          oklch(70% 0.16 145);
+    --warn:        oklch(78% 0.16 75);
+    --r-lg: 10px;
+    --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'SF Pro Display', sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, 'Cascadia Code', Consolas, monospace;
+  }
+  body {
+    margin: 0; padding: 2.5rem 1.25rem 6rem;
+    background: var(--bg-canvas); color: var(--ink);
+    font-family: var(--font-sans); font-size: 14px; line-height: 1.55;
+  }
+  .page { max-width: 1100px; margin: 0 auto; }
+  .page > h1 { font-size: 1.5em; margin: 0 0 4px; }
+  .page > p.sub { color: var(--ink-2); margin: 0 0 2.5rem; }
+  .page a { color: var(--ok); }
+
+  .option { margin-bottom: 4rem; }
+  .option-label {
+    font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--ok);
+    margin-bottom: 2px;
+  }
+  .option > h2 { margin: 0 0 6px; font-size: 1.15em; }
+  .option > p.rationale { color: var(--ink-1); max-width: 62ch; margin: 0 0 1.5rem; font-size: 13px; }
+  .mock-row { display: flex; gap: 28px; flex-wrap: wrap; align-items: flex-start; }
+  .mock-col { flex: 0 0 auto; }
+  .mock-caption {
+    font-size: 11.5px; color: var(--ink-2); max-width: 480px; margin-top: 10px;
+    font-style: italic;
+  }
+
+  /* ── faithful modal reproduction ── */
+  .modal {
+    background: var(--bg-card); border: 1px solid var(--rule);
+    border-radius: var(--r-lg); padding: 22px 22px 18px;
+    width: 480px; max-width: 90vw;
+    box-shadow: 0 18px 60px rgba(0,0,0,0.5);
+  }
+  .modal-tabs { display: flex; border-bottom: 1px solid var(--rule); margin: -8px 0 16px; }
+  .modal-tab {
+    background: transparent; border: none; border-bottom: 2px solid transparent;
+    color: var(--ink-2); font-size: 14px; font-weight: 500;
+    padding: 12px 18px; margin-bottom: -1px; font-family: var(--font-sans);
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .modal-tab.active { color: var(--ink); border-bottom-color: var(--ok); }
+  .modal-tab-count {
+    font-size: 11px; background: var(--bg-3); border-radius: 8px; padding: 1px 7px;
+    color: var(--ink-2); font-family: var(--font-mono);
+  }
+  .settings-section { margin-bottom: 18px; }
+  .settings-section-header {
+    font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2);
+    padding-bottom: 6px; margin-bottom: 10px; border-bottom: 1px solid var(--rule-soft);
+  }
+  .setting-row {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 12px; padding: 6px 0;
+  }
+  .setting-row-text { flex: 1; min-width: 0; }
+  .setting-title { font-size: 13px; color: var(--ink); display: block; }
+  .setting-desc { font-size: 11px; color: var(--ink-2); line-height: 1.4; margin: 2px 0 0; }
+  .setting-desc code, .setting-status code {
+    font-family: var(--font-mono); font-size: 0.95em;
+    background: var(--bg-2); padding: 0 4px; border-radius: 4px;
+  }
+  .setting-row input[type='checkbox'] { margin: 3px 0 0; accent-color: var(--ok); flex-shrink: 0; }
+  .setting-row select {
+    flex-shrink: 0; align-self: center; background: var(--bg); color: var(--ink);
+    border: 1px solid var(--rule); border-radius: 6px; padding: 4px 8px; font-size: 12px;
+  }
+  .input-with-button { display: flex; gap: 8px; }
+  .input-with-button input {
+    flex: 1; background: var(--bg); color: var(--ink-1); border: 1px solid var(--rule);
+    border-radius: 6px; padding: 6px 9px; font-size: 12px; font-family: var(--font-mono);
+  }
+  .input-with-button button {
+    background: var(--bg-2); color: var(--ink-1); border: 1px solid var(--rule);
+    border-radius: 6px; padding: 6px 12px; font-size: 12px; font-family: var(--font-sans);
+  }
+  .hint { font-size: 11px; color: var(--ink-2); line-height: 1.4; margin-top: 6px; }
+  .modal-footer {
+    display: flex; justify-content: flex-end; gap: 8px;
+    margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--rule);
+  }
+  .modal-footer button {
+    border-radius: 6px; padding: 6px 16px; font-size: 13px; font-family: var(--font-sans);
+  }
+  .btn-ghost { background: transparent; color: var(--ink-1); border: 1px solid var(--rule); }
+  .btn-primary { background: var(--ok); color: oklch(15% 0.02 145); border: 1px solid transparent; font-weight: 600; }
+
+  /* ── mockup-only additions under review ── */
+  .setting-status {
+    font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-2);
+    margin: 6px 0 0; display: flex; align-items: center; gap: 6px;
+  }
+  .setting-status .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .dot.recording { background: var(--ok); box-shadow: 0 0 6px oklch(70% 0.16 145 / 0.5); }
+  .dot.off { background: var(--ink-3); }
+  .dot.override { background: var(--warn); }
+  .setting-row.disabled .setting-title, .setting-row.disabled .setting-desc { opacity: 0.55; }
+
+  /* annotation: not part of the UI */
+  .annotate { outline: 1.5px dashed oklch(70% 0.16 145 / 0.55); outline-offset: 6px; border-radius: 2px; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Perf telemetry in Settings — three renderings</h1>
+  <p class="sub">Faithful to the post-restyle Settings modal (2026-08-06 design language: mono section headers, toggle rows). The dashed green outline marks the new UI in each option — it is an annotation, not part of the design. &nbsp;·&nbsp; <a href="/">back to the spec</a></p>
+
+  <!-- ═══════════════ OPTION A ═══════════════ -->
+  <div class="option">
+    <div class="option-label">Option A</div>
+    <h2>One row in the existing “Behavior” section</h2>
+    <p class="rationale">Minimal footprint: telemetry is just the third toggle row under Behavior, styled identically to its neighbors. No live status shown — the MCP <code style="font-family:var(--font-mono)">perf_status</code> tool is the status surface.</p>
+    <div class="mock-row"><div class="mock-col">
+      <div class="modal">
+        <div class="modal-tabs">
+          <button class="modal-tab active">Settings</button>
+          <button class="modal-tab">Model Endpoints <span class="modal-tab-count">2</span></button>
+        </div>
+        <div class="settings-section">
+          <div class="settings-section-header">Storage</div>
+          <div class="input-with-button"><input value="/home/troy/fleet" readonly><button>Browse…</button></div>
+          <div class="hint">Private folder per workspace at <code>&lt;root&gt;/&lt;id&gt;</code> → <code>/workspace</code>, plus shared. Applies to new containers.</div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-section-header">Behavior</div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <label class="setting-title">Disable hardware acceleration</label>
+              <p class="setting-desc">For GPU-process errors on startup (common on WSLg). Applies at next launch.</p>
+            </div>
+            <input type="checkbox">
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <label class="setting-title">Auto-reload loadouts into running workspaces</label>
+              <p class="setting-desc">Reload the Claude session (<code>--resume</code>) after a loadout install/update; waits until idle.</p>
+            </div>
+            <input type="checkbox" checked>
+          </div>
+          <div class="setting-row annotate">
+            <div class="setting-row-text">
+              <label class="setting-title">Performance telemetry</label>
+              <p class="setting-desc">Record event-loop stalls, slow operations, and terminal latency to the local history DB (OpenTelemetry). Queryable from any workspace via the fleet-state MCP.</p>
+            </div>
+            <input type="checkbox" checked>
+          </div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-section-header">Plan usage</div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <label class="setting-title">Budget for the “tokens left” bar</label>
+              <p class="setting-desc">Rolling 5-hour window, fleet-wide. Presets are estimates — calibrate with Custom.</p>
+            </div>
+            <select><option>Max 20×</option></select>
+          </div>
+        </div>
+        <div class="modal-footer"><button class="btn-ghost">Cancel</button><button class="btn-primary">Save</button></div>
+      </div>
+      <p class="mock-caption">Smallest change; telemetry reads as just another app behavior. Downside: when <code style="font-family:var(--font-mono)">perf_set</code> flips it from a workspace, nothing here shows the live state or why.</p>
+    </div></div>
+  </div>
+
+  <!-- ═══════════════ OPTION B ═══════════════ -->
+  <div class="option">
+    <div class="option-label">Option B &nbsp;(recommended)</div>
+    <h2>New “Diagnostics” section with a live status line</h2>
+    <p class="rationale">Telemetry gets its own section after Plan usage: the recording toggle with a live mono status line (recording state, 24-hour event count, export destination), plus an independent “Export via OTLP” toggle with its endpoint input always visible below it — <strong>greyed out (disabled) whenever export is unchecked</strong>, matching the app's <code style="font-family:var(--font-mono)">input:disabled</code> treatment. The whole export block greys out when recording is off. Because the MCP lever can flip recording remotely, the status line — not the checkboxes — is the glanceable source of truth.</p>
+    <div class="mock-row"><div class="mock-col">
+      <div class="modal">
+        <div class="modal-tabs">
+          <button class="modal-tab active">Settings</button>
+          <button class="modal-tab">Model Endpoints <span class="modal-tab-count">2</span></button>
+        </div>
+        <div class="settings-section">
+          <div class="settings-section-header">Storage</div>
+          <div class="input-with-button"><input value="/home/troy/fleet" readonly><button>Browse…</button></div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-section-header">Behavior</div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <label class="setting-title">Disable hardware acceleration</label>
+              <p class="setting-desc">For GPU-process errors on startup (common on WSLg). Applies at next launch.</p>
+            </div>
+            <input type="checkbox">
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <label class="setting-title">Auto-reload loadouts into running workspaces</label>
+              <p class="setting-desc">Reload the Claude session (<code>--resume</code>) after a loadout install/update; waits until idle.</p>
+            </div>
+            <input type="checkbox" checked>
+          </div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-section-header">Plan usage</div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <label class="setting-title">Budget for the “tokens left” bar</label>
+              <p class="setting-desc">Rolling 5-hour window, fleet-wide. Presets are estimates — calibrate with Custom.</p>
+            </div>
+            <select><option>Max 20×</option></select>
+          </div>
+        </div>
+        <div class="settings-section annotate">
+          <div class="settings-section-header">Diagnostics</div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <label class="setting-title">Performance telemetry</label>
+              <p class="setting-desc">Record event-loop stalls, slow operations, and terminal latency to the local history DB (OpenTelemetry). Queryable from any workspace via the fleet-state MCP; 7-day retention.</p>
+              <p class="setting-status"><span class="dot recording"></span> recording · 1,204 events / 24 h · exporting → <code>localhost:4318</code></p>
+            </div>
+            <input type="checkbox" checked>
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <label class="setting-title">Export via OTLP</label>
+              <p class="setting-desc">Also stream traces and metrics to an OpenTelemetry collector (Jaeger, Grafana, Datadog…). Local recording continues either way. Not changeable from workspaces.</p>
+            </div>
+            <input type="checkbox" checked>
+          </div>
+          <div class="setting-custom-budget" style="margin:2px 0 4px">
+            <input style="width:100%;box-sizing:border-box;background:var(--bg);color:var(--ink-1);border:1px solid var(--rule);border-radius:6px;padding:6px 9px;font-size:12px;font-family:var(--font-mono)" value="http://localhost:4318">
+            <p class="setting-desc" style="margin-top:6px">OTLP/HTTP endpoint. <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> overrides this when set; auth headers via <code>OTEL_EXPORTER_OTLP_HEADERS</code>.</p>
+          </div>
+        </div>
+        <div class="modal-footer"><button class="btn-ghost">Cancel</button><button class="btn-primary">Save</button></div>
+      </div>
+      <p class="mock-caption">The status line is live (fed by the same counts <code style="font-family:var(--font-mono)">perf_status</code> returns), so a remote <code style="font-family:var(--font-mono)">perf_set</code> flip is immediately visible here. Room to grow: future diagnostics (broker log capture, etc.) land in this section.</p>
+    </div></div>
+  </div>
+
+  <!-- ═══════════════ OPTION C ═══════════════ -->
+  <div class="option">
+    <div class="option-label">Option C</div>
+    <h2>Diagnostics section, all states surfaced</h2>
+    <p class="rationale">Same as B, but the status line also renders the two special states: OTLP export configured, and the <code style="font-family:var(--font-mono)">CLAUDE_FLEET_PERF=0</code> env override pinning telemetry off (checkbox disabled, amber dot). Shown as the section only, in each state:</p>
+    <div class="mock-row">
+      <div class="mock-col">
+        <div class="modal" style="width:440px">
+          <div class="settings-section" style="margin-bottom:0">
+            <div class="settings-section-header">Diagnostics</div>
+            <div class="setting-row">
+              <div class="setting-row-text">
+                <label class="setting-title">Performance telemetry</label>
+                <p class="setting-desc">Record event-loop stalls, slow operations, and terminal latency to the local history DB (OpenTelemetry).</p>
+                <p class="setting-status annotate"><span class="dot recording"></span> recording · 1,204 events / 24 h · exporting → <code>localhost:4318</code></p>
+              </div>
+              <input type="checkbox" checked>
+            </div>
+          </div>
+        </div>
+        <p class="mock-caption">State 1 — recording with <code style="font-family:var(--font-mono)">OTEL_EXPORTER_OTLP_ENDPOINT</code> set: the export destination is shown so it's never a surprise that data is leaving the machine.</p>
+      </div>
+      <div class="mock-col">
+        <div class="modal" style="width:440px">
+          <div class="settings-section" style="margin-bottom:0">
+            <div class="settings-section-header">Diagnostics</div>
+            <div class="setting-row disabled">
+              <div class="setting-row-text">
+                <label class="setting-title">Performance telemetry</label>
+                <p class="setting-desc">Record event-loop stalls, slow operations, and terminal latency to the local history DB (OpenTelemetry).</p>
+                <p class="setting-status annotate"><span class="dot override"></span> forced off by <code>CLAUDE_FLEET_PERF=0</code> — setting ignored</p>
+              </div>
+              <input type="checkbox" checked disabled>
+            </div>
+          </div>
+        </div>
+        <p class="mock-caption">State 2 — env override active: the checkbox keeps its saved value but is disabled, and the amber status explains who wins and why (matching the “rejected while override active” behavior of <code style="font-family:var(--font-mono)">perf_set</code>).</p>
+      </div>
+      <div class="mock-col">
+        <div class="modal" style="width:440px">
+          <div class="settings-section" style="margin-bottom:0">
+            <div class="settings-section-header">Diagnostics</div>
+            <div class="setting-row">
+              <div class="setting-row-text">
+                <label class="setting-title">Performance telemetry</label>
+                <p class="setting-desc">Record event-loop stalls, slow operations, and terminal latency to the local history DB (OpenTelemetry).</p>
+                <p class="setting-status annotate"><span class="dot off"></span> off</p>
+              </div>
+              <input type="checkbox">
+            </div>
+          </div>
+        </div>
+        <p class="mock-caption">State 3 — switched off (via checkbox or a workspace's <code style="font-family:var(--font-mono)">perf_set</code>): grey dot, no counts.</p>
+      </div>
+      <div class="mock-col">
+        <div class="modal" style="width:440px">
+          <div class="settings-section" style="margin-bottom:0">
+            <div class="settings-section-header">Diagnostics</div>
+            <div class="setting-row">
+              <div class="setting-row-text">
+                <label class="setting-title">Performance telemetry</label>
+                <p class="setting-desc">Record event-loop stalls, slow operations, and terminal latency to the local history DB (OpenTelemetry).</p>
+                <p class="setting-status"><span class="dot recording"></span> recording · 1,204 events / 24 h · OTLP export off</p>
+              </div>
+              <input type="checkbox" checked>
+            </div>
+            <div class="setting-row">
+              <div class="setting-row-text">
+                <label class="setting-title">Export via OTLP</label>
+                <p class="setting-desc">Also stream traces and metrics to an OpenTelemetry collector. Local recording continues either way.</p>
+              </div>
+              <input type="checkbox">
+            </div>
+            <div class="setting-custom-budget annotate" style="margin:2px 0 4px">
+              <input disabled style="width:100%;box-sizing:border-box;background:var(--bg);color:var(--ink-1);border:1px solid var(--rule);border-radius:6px;padding:6px 9px;font-size:12px;font-family:var(--font-mono);opacity:0.5" value="http://localhost:4318">
+              <p class="setting-desc" style="margin-top:6px;opacity:0.55">OTLP/HTTP endpoint. <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> overrides this when set.</p>
+            </div>
+          </div>
+        </div>
+        <p class="mock-caption">State 4 — export unchecked: the endpoint field stays visible but greyed out (<code style="font-family:var(--font-mono)">input:disabled</code>, opacity .5), keeping the configured destination in view without implying it's active.</p>
+      </div>
+    </div>
+  </div>
+
+  <p style="color:var(--ink-2); font-size:12.5px; max-width:70ch">My recommendation is <strong style="color:var(--ink)">B with C's state handling</strong> — the section + status line from B, rendering all three states from C. The extra states are cheap (same status component) and the override state prevents a genuinely confusing situation: a checkbox that appears on while nothing records.</p>
+</div>
+</body>
+</html>

@@ -1,7 +1,12 @@
-import { app, BrowserWindow, shell } from 'electron';
+import { app, BrowserWindow, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
 import { registerIpc } from './ipc.js';
 import { openDb, closeDb, deleteEmbeddingsForOtherModels, recordError, listSessions } from './db.js';
+import { initPerf, shutdownPerf } from './perf.js';
+import { PerfStore } from './perfStore.js';
+import { resolvePerfConfig } from './perfConfig.js';
+import { getPerfTelemetry, getPerfOtlp } from './config.js';
+import { instrumentIpcHandle } from './perfIpc.js';
 import { EMBED_MODEL_ID } from './vectors.js';
 import { startMcpServer, stopMcpServer, ensureWorkspaceSocket, setMcpStatusListener, setQueryEmbedder } from './mcpServer.js';
 import { broadcastMcpStatus } from './mcpStatusBroadcast.js';
@@ -113,10 +118,18 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   await ensureBuiltinLoadouts().catch((e) => console.warn('[loadouts] seed failed:', e));
 
   if (jsonlWatcher) {
-    openDb(app.getPath('userData'));
+    const db = openDb(app.getPath('userData'));
     // Wire the crash-safe DB sink so every logError call is also persisted to
     // the errors table (best-effort; a wedged DB must never break crash logging).
     setErrorSink((row) => recordError(row));
+    const perfStore = new PerfStore(db);
+    initPerf(
+      perfStore,
+      resolvePerfConfig(
+        { perfTelemetry: await getPerfTelemetry(), perfOtlp: await getPerfOtlp() },
+        process.env
+      )
+    );
     // Read-only MCP server over <userData>/mcp.sock so in-container claude can
     // query the state DB (sessions/events/cost). Opens its own readonly conn.
     startMcpServer(app.getPath('userData'));
@@ -199,6 +212,10 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       }
     })();
   }
+  // Patch ipcMain.handle before ipc.ts registers anything, so every later-
+  // registered handler runs inside a claude_fleet.ipc.<channel> span.
+  // With recording off the tracer is a no-op — cost is one async frame/invoke.
+  instrumentIpcHandle(ipcMain);
   registerIpc({ jsonlWatcher });
   mainWindow = createWindow();
 
@@ -210,6 +227,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
 app.on('before-quit', async () => {
   await jsonlWatcher?.stop();
   stopMcpServer();
+  await shutdownPerf();
   closeDb();
 });
 
