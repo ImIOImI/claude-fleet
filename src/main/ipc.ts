@@ -1645,6 +1645,11 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     handleBrokerSessionId.delete(sessionId);
     logError({
       source: 'main',
+      // Lifecycle diagnostics, not failures — logged at info to match pty-attach
+      // (a missing level defaults to 'error' in the DB sink). The unknown-handle
+      // branch is a normal no-op after tab-close reaps the handle first (#287),
+      // so error-level here buried real errors under routine tab churn.
+      level: 'info',
       type: 'pty-detach',
       message: present
         ? `pty:detach OK (live=${ptySessions.size})`
@@ -1664,6 +1669,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     handleBrokerSessionId.delete(ptyHandleId);
     logError({
       source: 'main',
+      // Successful reap is a lifecycle event, not a failure — info, like pty-attach.
+      level: 'info',
       type: 'pty-close',
       message: `${via} OK (live=${ptySessions.size})`,
       extra: { ptyHandleId, live: ptySessions.size }
