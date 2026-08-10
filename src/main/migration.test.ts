@@ -21,8 +21,25 @@ vi.mock('electron', () => ({
 }));
 
 // Imported AFTER the mock so paths.ts picks up the stubbed electron.app.
-const { runStartupMigration } = await import('./migration.js');
+const { runStartupMigration, migrateFleetFolders } = await import('./migration.js');
 const { sharedClaudeCredentialsPath, workspaceClaudeDir } = await import('./paths.js');
+const { writeWorkspaceManifest, listWorkspaceManifests, FACTORY_MIRROR } = await import('./workspaces.js');
+const { fleetPrivateDir } = await import('./config.js');
+type WorkspaceSpec = Parameters<typeof writeWorkspaceManifest>[0];
+
+function seedSpec(over: Partial<WorkspaceSpec> & Pick<WorkspaceSpec, 'id' | 'kind' | 'workspaceRoot'>): WorkspaceSpec {
+  return {
+    name: 'w',
+    labels: [],
+    workspaceSubdir: '',
+    authMode: 'oauth',
+    env: { plain: {}, secretKeys: [] },
+    mirror: FACTORY_MIRROR,
+    createdAt: 1,
+    lastUsedAt: 1,
+    ...over
+  } as WorkspaceSpec;
+}
 
 async function seedCreds(id: string, body: string, mtimeMs?: number): Promise<string> {
   const dir = workspaceClaudeDir(id);
@@ -168,5 +185,49 @@ describe('migrateOAuthCredentials', () => {
     // And the per-workspace path is now a symlink to shared.
     const credsA = join(workspaceClaudeDir(idA), '.credentials.json');
     expect((await lstat(credsA)).isSymbolicLink()).toBe(true);
+  });
+});
+
+describe('migrateFleetFolders — workspaceRoot canonicalization', () => {
+  beforeEach(() => {
+    // Deterministic <fleetRoot>/<id> without touching the real ~/fleet.
+    process.env.CLAUDE_FLEET_ROOT = join(userDataDir, 'fleet');
+  });
+  afterEach(() => {
+    delete process.env.CLAUDE_FLEET_ROOT;
+  });
+
+  const rootOf = async (id: string): Promise<string | undefined> =>
+    (await listWorkspaceManifests()).find((m) => m.id === id)?.workspaceRoot;
+
+  it('leaves a WSL local workspaceRoot untouched (the in-distro Linux path)', async () => {
+    const id = '01TESTWSL0000000000000000A';
+    await writeWorkspaceManifest(
+      seedSpec({
+        id,
+        kind: 'local',
+        workspaceRoot: '/home/troy/fleet/local-wsl',
+        launcher: { mode: 'wsl', distro: 'Debian', shell: '/bin/bash', home: '/home/troy', claudePath: '/usr/bin/claude' }
+      })
+    );
+    await migrateFleetFolders();
+    // Must NOT be rewritten to <fleetRoot>/<id> (which wsl --cd would land in /mnt/c).
+    expect(await rootOf(id)).toBe('/home/troy/fleet/local-wsl');
+  });
+
+  it('leaves a native local workspaceRoot untouched (the user-picked host dir)', async () => {
+    const id = '01TESTNATIVE00000000000000';
+    await writeWorkspaceManifest(seedSpec({ id, kind: 'local', workspaceRoot: 'C:\\Users\\troy\\proj' }));
+    await migrateFleetFolders();
+    expect(await rootOf(id)).toBe('C:\\Users\\troy\\proj');
+  });
+
+  it('canonicalizes a container workspaceRoot to <fleetRoot>/<id>', async () => {
+    const id = '01TESTCONTAINER0000000000A';
+    await writeWorkspaceManifest(
+      seedSpec({ id, kind: 'container', image: 'img:latest', workspaceRoot: '/some/stale/pre-migration/path' })
+    );
+    await migrateFleetFolders();
+    expect(await rootOf(id)).toBe(await fleetPrivateDir(id));
   });
 });

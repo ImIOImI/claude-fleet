@@ -59,17 +59,26 @@ export async function runStartupMigration(): Promise<void> {
 }
 
 /**
- * Fleet-folder model: each workspace's private dir is now `<fleetRoot>/<id>`
- * and a single `<fleetRoot>/shared` is mounted into every container. For each
- * existing workspace, create its private folder (and the shared folder) so the
- * "Path"/"Shared" links work before the container is next recreated, and
- * rewrite the manifest's `workspaceRoot` to the canonical private dir (older
- * manifests stored a user-picked host path). Idempotent.
+ * Fleet-folder model: each **container** workspace's private dir is now
+ * `<fleetRoot>/<id>` and a single `<fleetRoot>/shared` is mounted into every
+ * container. For each existing container workspace, create its private folder
+ * (and the shared folder) so the "Path"/"Shared" links work before the container
+ * is next recreated, and rewrite the manifest's `workspaceRoot` to the canonical
+ * private dir (older manifests stored a user-picked host path). Idempotent.
+ *
+ * **Local workspaces are skipped entirely.** A local workspace's `workspaceRoot`
+ * is a user-picked path — a host dir for native, or an in-distro Linux path for
+ * WSL — and is authoritative. Canonicalizing it to `<fleetRoot>/<id>` (a Windows
+ * path) corrupted the manifest on every boot: on relaunch a WSL session then
+ * auto-resumed with `wsl --cd C:\…\fleet\<id>`, which WSL translates to an empty
+ * `/mnt/c/…` dir (wrong-cwd bug), and the transcript watcher re-registered the
+ * wrong projects dir (re-breaking local ingestion, #285).
  */
-async function migrateFleetFolders(): Promise<void> {
+export async function migrateFleetFolders(): Promise<void> {
   await mkdir(await fleetSharedDir(), { recursive: true });
   const manifests = await listWorkspaceManifests();
   for (const m of manifests) {
+    if (m.kind === 'local') continue; // user-picked root is authoritative — never rewrite
     const privateDir = await fleetPrivateDir(m.id);
     await mkdir(privateDir, { recursive: true });
     if (m.workspaceRoot !== privateDir) {

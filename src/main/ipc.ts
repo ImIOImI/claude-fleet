@@ -337,9 +337,15 @@ async function listAllWorkspaces(): Promise<Workspace[]> {
     manifestById.delete(w.id);
   }
 
-  // Manifests with no live container → deleted (recoverable from spec)
+  // Manifests with no live container → deleted (recoverable from spec).
+  // Local workspaces keep their user-picked workspaceRoot; only containers get
+  // the canonical `<fleetRoot>/<id>` (see the live-merge branch above).
   for (const m of manifestById.values()) {
-    result.push({ ...m, workspaceRoot: await fleetPrivateDir(m.id), state: 'deleted' });
+    result.push({
+      ...m,
+      workspaceRoot: m.kind === 'local' ? m.workspaceRoot : await fleetPrivateDir(m.id),
+      state: 'deleted'
+    });
   }
 
   return result;
