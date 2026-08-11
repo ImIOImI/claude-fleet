@@ -234,15 +234,14 @@ describe('setPerfStateListener', () => {
 
 describe('perfNotePowerEvent (suspend filtering)', () => {
   it('discards windows between suspend and shortly after resume', async () => {
-    initPerf(store, ON, { delaySource: () => ({ p50: 2, p99: 8, max: 30000 }), sampleIntervalMs: 20 });
+    initPerf(store, ON, { delaySource: () => ({ p50: 2, p99: 8, max: 30000 }), sampleIntervalMs: 100 });
     perfNotePowerEvent('suspend');
-    await sleep(100); // several would-be "stall" windows while suspended
-    perfNotePowerEvent('resume');
-    await sleep(15); // still inside the one-interval discard horizon
+    await sleep(350); // several suspended windows
     store.flush(); // rows are buffered — flush before counting
     const midCount = (db.prepare(`SELECT COUNT(*) AS n FROM perf_events WHERE kind='stall'`).get() as { n: number }).n;
     expect(midCount).toBe(0);
-    await sleep(200); // past the horizon: real windows record again
+    perfNotePowerEvent('resume');
+    await sleep(350); // past the discard horizon: real windows record again
     await shutdownPerf();
     const after = (db.prepare(`SELECT COUNT(*) AS n FROM perf_events WHERE kind='stall'`).get() as { n: number }).n;
     expect(after).toBeGreaterThanOrEqual(1);

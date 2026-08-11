@@ -244,10 +244,12 @@ const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
 };
 
 /** Resolve the host `claude` binary (see claudeResolve.ts for the strategy).
- *  Cached: the uncached lookup spawned where.exe/login-shell probes on every
- *  workspace:ping (once a minute) and blocked the main loop ~1.5 s per call
- *  on Windows (perf_events finding, 2026-08-11). Null re-probes after 5 min;
- *  a spawn failure invalidates so a moved binary is re-resolved. */
+ *  Cached: the lookup spawns where.exe/login-shell probes, so it should run
+ *  once per install state, not once per session spawn. NOTE (2026-08-11
+ *  review): workspace:ping routes to dockerode, and local ping() currently
+ *  has no callers — this cache does NOT explain the per-minute idle stall,
+ *  which remains under investigation. Null re-probes after 5 min; a spawn
+ *  failure invalidates so a moved binary is re-resolved. */
 const claudeResolver = cachedNullableResolver(
   () => findClaude((file, args) => execFileAsync(file, args), homedir()),
   { nullTtlMs: 5 * 60_000 }

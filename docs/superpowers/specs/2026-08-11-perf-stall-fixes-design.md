@@ -14,6 +14,9 @@
    call**, spawning `where.exe`/login-shell lookups; on Windows the process
    creation blocks the loop for essentially the whole span. This is the prime
    suspect for the felt "intermittent hangs with no pattern".
+
+   **Post-review correction (2026-08-11, whole-branch review):** the causal chain above is wrong — `workspace:ping` routes to dockerode's ping, and the local backend's `ping()` (the only resolveClaude caller on a poll path) is currently dead code. The ping-span⋈stall alignment is equally consistent with ping being a *victim*: a stall stretches every concurrent async span. Leading remaining hypotheses: (a) dockerode's Windows named-pipe connect blocking the loop inside libuv, (b) Chromium background-throttling coalescing the renderer's 5 s polls into per-minute bursts that hit the synchronous better-sqlite3 read handlers. F1's cache is kept (it is correct and removes per-spawn lookups) but the per-minute stall finding STAYS OPEN pending post-merge re-measurement.
+
 2. **Cross-process latency hops are corrupted by renderer clock drift.**
    `output_hop` mean 4.19 s vs `echo_rtt` mean 478 ms is physically
    inconsistent: `performance.timeOrigin + performance.now()` in a long-lived

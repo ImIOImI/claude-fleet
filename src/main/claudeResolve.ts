@@ -158,12 +158,12 @@ export const CLAUDE_NOT_FOUND_MESSAGE =
   'set CLAUDE_FLEET_LOCAL_CLAUDE_BIN to its path, or use a Container workspace.';
 
 /** Memoize a nullable async resolution (perf stall fix F1, spec
- *  2026-08-11-perf-stall-fixes-design.md). The local backend re-resolved the
- *  claude binary on every workspace:ping (once a minute), and the process
- *  spawn behind findClaude blocks the main loop ~1.5 s on Windows. Policy:
- *  a non-null result is cached until invalidate(); null (claude not found)
- *  is cached for nullTtlMs so a later install is picked up; concurrent gets
- *  share one in-flight probe; a rejected probe is not cached. */
+ *  2026-08-11-perf-stall-fixes-design.md). The lookup behind findClaude
+ *  spawns where.exe/login-shell probes, so callers should not re-run it
+ *  per invocation. Policy: a non-null result is cached until invalidate();
+ *  null (claude not found) is cached for nullTtlMs so a later install is
+ *  picked up; concurrent gets share one in-flight probe; a rejected probe
+ *  is not cached. */
 export function cachedNullableResolver<T>(
   resolve: () => Promise<T | null>,
   opts: { nullTtlMs: number; now?: () => number }
