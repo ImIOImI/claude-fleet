@@ -171,20 +171,24 @@ export function cachedNullableResolver<T>(
   const now = opts.now ?? Date.now;
   let cached: { value: T | null; at: number } | null = null;
   let inFlight: Promise<T | null> | null = null;
+  let generation = 0; // bumped by invalidate(); probes from older generations must not write back
   return {
     get(): Promise<T | null> {
       if (cached && (cached.value !== null || now() - cached.at < opts.nullTtlMs)) {
         return Promise.resolve(cached.value);
       }
       if (!inFlight) {
+        const gen = generation;
         inFlight = resolve().then(
           (value) => {
-            cached = { value, at: now() };
-            inFlight = null;
+            if (gen === generation) {
+              cached = { value, at: now() };
+              inFlight = null;
+            }
             return value;
           },
           (err) => {
-            inFlight = null;
+            if (gen === generation) inFlight = null;
             throw err;
           }
         );
@@ -193,6 +197,8 @@ export function cachedNullableResolver<T>(
     },
     invalidate(): void {
       cached = null;
+      inFlight = null;
+      generation += 1;
     }
   };
 }

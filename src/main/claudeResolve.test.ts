@@ -209,4 +209,22 @@ describe('cachedNullableResolver', () => {
     r.invalidate();
     expect(await r.get()).toBe('/bin/claude2');
   });
+
+  it('a probe in flight when invalidate() is called cannot poison the cache', async () => {
+    let calls = 0;
+    const releases: Array<(v: string | null) => void> = [];
+    const r = cachedNullableResolver(
+      () => { calls += 1; return new Promise<string | null>((res) => { releases.push(res); }); },
+      { nullTtlMs: 1000 }
+    );
+    const stale = r.get(); // probe 1 in flight
+    r.invalidate(); // claude moved/uninstalled while probing
+    const fresh = r.get(); // must start probe 2, not reuse probe 1
+    expect(calls).toBe(2);
+    releases[0]('/stale/claude'); // probe 1 settles AFTER the invalidate
+    expect(await stale).toBe('/stale/claude'); // original caller still gets its answer
+    releases[1]('/fresh/claude');
+    expect(await fresh).toBe('/fresh/claude');
+    expect(await r.get()).toBe('/fresh/claude'); // cache holds the fresh value, not the stale write-back
+  });
 });
