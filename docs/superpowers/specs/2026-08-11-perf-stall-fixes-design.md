@@ -46,8 +46,9 @@ non-factor — 41 slow instances, max 203 ms, over 3 days.
   `nullTtlMs = 5 * 60_000`. `ping()` and the spawn path both go through the
   cache. The spawn path **invalidates on spawn failure** (stale path — e.g.
   claude was moved/uninstalled) so the next call re-probes.
-- Effect: the per-minute ping stops spawning processes entirely after the
-  first successful resolution — the once-a-minute freeze disappears.
+- Effect (revised per the post-review correction above): session spawns stop
+  re-running the lookup. This does NOT fix the once-a-minute freeze — that
+  finding stays open.
 
 ### F2. Renderer stamps switch to Date.now()
 
