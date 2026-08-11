@@ -156,3 +156,43 @@ export const CLAUDE_NOT_FOUND_MESSAGE =
   "`claude` isn't installed on this host — it wasn't found on PATH, in ~/.local/bin, " +
   'or via your login shell. Install Claude Code (see claude.com/product/claude-code), ' +
   'set CLAUDE_FLEET_LOCAL_CLAUDE_BIN to its path, or use a Container workspace.';
+
+/** Memoize a nullable async resolution (perf stall fix F1, spec
+ *  2026-08-11-perf-stall-fixes-design.md). The local backend re-resolved the
+ *  claude binary on every workspace:ping (once a minute), and the process
+ *  spawn behind findClaude blocks the main loop ~1.5 s on Windows. Policy:
+ *  a non-null result is cached until invalidate(); null (claude not found)
+ *  is cached for nullTtlMs so a later install is picked up; concurrent gets
+ *  share one in-flight probe; a rejected probe is not cached. */
+export function cachedNullableResolver<T>(
+  resolve: () => Promise<T | null>,
+  opts: { nullTtlMs: number; now?: () => number }
+): { get(): Promise<T | null>; invalidate(): void } {
+  const now = opts.now ?? Date.now;
+  let cached: { value: T | null; at: number } | null = null;
+  let inFlight: Promise<T | null> | null = null;
+  return {
+    get(): Promise<T | null> {
+      if (cached && (cached.value !== null || now() - cached.at < opts.nullTtlMs)) {
+        return Promise.resolve(cached.value);
+      }
+      if (!inFlight) {
+        inFlight = resolve().then(
+          (value) => {
+            cached = { value, at: now() };
+            inFlight = null;
+            return value;
+          },
+          (err) => {
+            inFlight = null;
+            throw err;
+          }
+        );
+      }
+      return inFlight;
+    },
+    invalidate(): void {
+      cached = null;
+    }
+  };
+}
