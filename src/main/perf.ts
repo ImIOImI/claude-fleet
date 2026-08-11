@@ -339,6 +339,8 @@ export async function shutdownPerf(): Promise<void> {
   metrics.disable();
   // context.disable() resets the global manager, so a later initPerf can re-register one.
   context.disable();
+  suspendedAtWall = null;
+  discardUntilWall = 0;
   r.store.flush();
 }
 
