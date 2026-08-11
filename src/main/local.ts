@@ -27,7 +27,7 @@ import { join } from 'node:path';
 import { app } from 'electron';
 import type * as NodePty from 'node-pty';
 import type { Backend } from './backend.js';
-import { findClaude, CLAUDE_NOT_FOUND_MESSAGE } from './claudeResolve.js';
+import { findClaude, CLAUDE_NOT_FOUND_MESSAGE, cachedNullableResolver } from './claudeResolve.js';
 import { mcpSocketDir, mcpWorkspaceSocketPath } from './mcpSocket.js';
 import { ensureLocalBridgeScript, localMcpServerEntry, wslMcpServerEntry } from './mcpLocalBridge.js';
 import {
@@ -149,22 +149,30 @@ export function _resetForTest(): void {
 /** node-pty-backed spawn factory passed to the session manager. */
 const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
   const pty = require('node-pty') as typeof NodePty;
-  const p = pty.spawn(file, args, {
-    name: 'xterm-256color',
-    cwd,
-    cols,
-    rows,
-    env,
-    // Opt-in escape hatch (#268 fallback #2): node-pty 1.1.0 bundles a newer
-    // conpty.dll + OpenConsole.exe (already asarUnpacked with the rest of
-    // node-pty) that fixes many ConPTY reflow/reprint bugs. Off by default —
-    // it swaps the OS console host for every Windows local session and has
-    // had no Windows soak time here; flip it via a user env var without a
-    // rebuild if the re-settle below doesn't hold.
-    ...(process.platform === 'win32' && process.env.CLAUDE_FLEET_CONPTY_DLL === '1'
-      ? { useConptyDll: true }
-      : {})
-  });
+  let p: NodePty.IPty;
+  try {
+    p = pty.spawn(file, args, {
+      name: 'xterm-256color',
+      cwd,
+      cols,
+      rows,
+      env,
+      // Opt-in escape hatch (#268 fallback #2): node-pty 1.1.0 bundles a newer
+      // conpty.dll + OpenConsole.exe (already asarUnpacked with the rest of
+      // node-pty) that fixes many ConPTY reflow/reprint bugs. Off by default —
+      // it swaps the OS console host for every Windows local session and has
+      // had no Windows soak time here; flip it via a user env var without a
+      // rebuild if the re-settle below doesn't hold.
+      ...(process.platform === 'win32' && process.env.CLAUDE_FLEET_CONPTY_DLL === '1'
+        ? { useConptyDll: true }
+        : {})
+    });
+  } catch (err) {
+    // Stale resolution (binary moved/uninstalled since we cached it): force
+    // the next resolveClaude() to re-probe instead of failing forever.
+    claudeResolver.invalidate();
+    throw err;
+  }
 
   // Track liveness so the ConPTY settle below (and any late resize) never
   // calls into an exited pty — node-pty on Node 22 throws "Cannot resize a
@@ -235,9 +243,17 @@ const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
   };
 };
 
-/** Resolve the host `claude` binary (see claudeResolve.ts for the strategy). */
+/** Resolve the host `claude` binary (see claudeResolve.ts for the strategy).
+ *  Cached: the uncached lookup spawned where.exe/login-shell probes on every
+ *  workspace:ping (once a minute) and blocked the main loop ~1.5 s per call
+ *  on Windows (perf_events finding, 2026-08-11). Null re-probes after 5 min;
+ *  a spawn failure invalidates so a moved binary is re-resolved. */
+const claudeResolver = cachedNullableResolver(
+  () => findClaude((file, args) => execFileAsync(file, args), homedir()),
+  { nullTtlMs: 5 * 60_000 }
+);
 function resolveClaude(): Promise<string | null> {
-  return findClaude((file, args) => execFileAsync(file, args), homedir());
+  return claudeResolver.get();
 }
 
 /** Best-effort signal to every live in-distro claude of a wsl workspace via
