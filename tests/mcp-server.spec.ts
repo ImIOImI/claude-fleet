@@ -127,9 +127,10 @@ test('MCP server: initialize, tools, typed reads, committee control', async () =
       ])
     );
 
-    // get_config surfaces the live host app version (#219) so a workspace can
-    // tell what claude-fleet it's talking to. The e2e app is unpackaged, so it
-    // reports the dev-decorated form: <package.json version>-dev.<HEAD sha>.
+    // get_config surfaces the live host app version (#219) and build sha
+    // (#298) so a workspace can tell exactly what claude-fleet it's talking
+    // to. The e2e app is unpackaged, so it reports the dev-decorated form
+    // (<package.json version>-dev.<HEAD sha>) with the live HEAD as app.sha.
     const pkgVersion = (
       JSON.parse(readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')) as { version: string }
     ).version;
@@ -139,9 +140,10 @@ test('MCP server: initialize, tools, typed reads, committee control', async () =
     }).trim();
     const cfg = toolText(
       await client.call('tools/call', { name: 'get_config', arguments: {} })
-    ) as { workspaceId?: string; app?: { version?: string }; runnerImage?: { name?: string } | null };
+    ) as { workspaceId?: string; app?: { version?: string; sha?: string | null }; runnerImage?: { name?: string } | null };
     expect(cfg.workspaceId).toBe(id);
     expect(cfg.app?.version).toBe(`${pkgVersion}-dev.${headSha}`);
+    expect(cfg.app?.sha).toBe(headSha);
     // The configured runner image comes straight from the seeded manifest.
     expect(cfg.runnerImage).toEqual({ name: 'mock' });
 

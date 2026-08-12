@@ -220,12 +220,12 @@ describe('setFavorite', () => {
   });
 });
 
-describe('resolveWorkspaceConfig (#219)', () => {
-  it('reports the live app version alongside the summarizer defaults', () => {
-    const out = resolveWorkspaceConfig('ws-1', {}, '9.9.9');
+describe('resolveWorkspaceConfig (#219, #298)', () => {
+  it('reports the live app version and build sha alongside the summarizer defaults', () => {
+    const out = resolveWorkspaceConfig('ws-1', {}, { version: '9.9.9', sha: 'abc1234' });
     expect(out).toEqual({
       workspaceId: 'ws-1',
-      app: { version: '9.9.9' },
+      app: { version: '9.9.9', sha: 'abc1234' },
       runnerImage: null,
       summarizer: { model: 'haiku', minNewTurns: 20, minIntervalS: 120, windowChars: 8000, maxChaptersPerRun: 5 },
       backfill: { enabled: true, maxPerSweep: 10, delayS: 3 },
@@ -233,8 +233,13 @@ describe('resolveWorkspaceConfig (#219)', () => {
     });
   });
 
+  it('reports app.sha as null when no build sha is known (dev outside git)', () => {
+    const out = resolveWorkspaceConfig('ws-1', {}, { version: '9.9.9', sha: null });
+    expect(out.app).toEqual({ version: '9.9.9', sha: null });
+  });
+
   it("reports the workspace's configured runner image when the manifest has one", () => {
-    const out = resolveWorkspaceConfig('ws-1', {}, '1.0.0', 'ghcr.io/imioimi/claude-fleet-runner:main');
+    const out = resolveWorkspaceConfig('ws-1', {}, { version: '1.0.0', sha: null }, 'ghcr.io/imioimi/claude-fleet-runner:main');
     expect(out.runnerImage).toEqual({ name: 'ghcr.io/imioimi/claude-fleet-runner:main' });
   });
 
@@ -242,14 +247,14 @@ describe('resolveWorkspaceConfig (#219)', () => {
     const out = resolveWorkspaceConfig(
       'ws-1',
       { CF_SUMMARY_MODEL: 'sonnet', CF_SUMMARY_MIN_NEW_TURNS: '5', CF_SUMMARY_WINDOW_CHARS: 'garbage', CF_BACKFILL: '0', CF_BACKFILL_MAX_PER_SWEEP: '4', CF_SUMMARY_MAX_CHAPTERS_PER_RUN: 'garbage' },
-      '1.0.0'
+      { version: '1.0.0', sha: null }
     );
     expect(out.summarizer).toEqual({ model: 'sonnet', minNewTurns: 5, minIntervalS: 120, windowChars: 8000, maxChaptersPerRun: 5 });
     expect(out.backfill).toEqual({ enabled: false, maxPerSweep: 4, delayS: 3 });
   });
 
   it('reports the backend, never a token', () => {
-    const cfg = resolveWorkspaceConfig('ws1', {}, '0.9.0', undefined, {
+    const cfg = resolveWorkspaceConfig('ws1', {}, { version: '0.9.0', sha: null }, undefined, {
       mode: 'endpoint',
       endpoint: { name: 'org-vllm', baseUrl: 'http://10.0.0.5:8000', modelId: 'qwen3-32b' }
     });
@@ -261,17 +266,17 @@ describe('resolveWorkspaceConfig (#219)', () => {
   });
 
   it('defaults backend to oauth with no endpoint', () => {
-    const cfg = resolveWorkspaceConfig('ws1', {}, '0.9.0');
+    const cfg = resolveWorkspaceConfig('ws1', {}, { version: '0.9.0', sha: null });
     expect(cfg.backend).toEqual({ mode: 'oauth', endpoint: null });
   });
 
   it('mode: apikey passes through', () => {
-    const cfg = resolveWorkspaceConfig('ws1', {}, '0.9.0', undefined, { mode: 'apikey', endpoint: null });
+    const cfg = resolveWorkspaceConfig('ws1', {}, { version: '0.9.0', sha: null }, undefined, { mode: 'apikey', endpoint: null });
     expect(cfg.backend.mode).toBe('apikey');
   });
 
   it('CF_SUMMARY_MODEL env override wins over defaults', () => {
-    const cfg = resolveWorkspaceConfig('ws1', { CF_SUMMARY_MODEL: 'user-override' }, '0.9.0');
+    const cfg = resolveWorkspaceConfig('ws1', { CF_SUMMARY_MODEL: 'user-override' }, { version: '0.9.0', sha: null });
     expect(cfg.summarizer.model).toBe('user-override');
   });
 });
