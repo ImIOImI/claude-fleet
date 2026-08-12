@@ -159,6 +159,7 @@ interface Runtime {
   ptyBytes: Counter | null;
   ptyChunks: Counter | null;
   latencyHists: Record<LatencyKind, Histogram> | null;
+  sampleIntervalMs: number;
 }
 let rt: Runtime | null = null;
 
@@ -169,6 +170,23 @@ let rt: Runtime | null = null;
 let stateListener: ((recording: boolean) => void) | null = null;
 export function setPerfStateListener(cb: ((recording: boolean) => void) | null): void {
   stateListener = cb;
+}
+
+// OS-suspend awareness (spec 2026-08-11-perf-stall-fixes-design.md F3).
+// While the machine sleeps no code runs, but the sampler's next read sees
+// the whole gap as one giant "delay" — six ~66 s phantom stalls per night
+// in the first dogfood. ipc.ts wires Electron powerMonitor to this (perf.ts
+// stays Electron-free); windows overlapping suspend→resume, plus the first
+// window after resume, are read-and-discarded instead of recorded.
+let suspendedAtWall: number | null = null;
+let discardUntilWall = 0;
+export function perfNotePowerEvent(event: 'suspend' | 'resume'): void {
+  if (event === 'suspend') {
+    suspendedAtWall = Date.now();
+  } else {
+    suspendedAtWall = null;
+    discardUntilWall = Date.now() + (rt?.sampleIntervalMs ?? SAMPLE_INTERVAL_MS);
+  }
 }
 
 export interface PerfStatus {
@@ -206,7 +224,8 @@ export function initPerf(store: PerfStore, effective: EffectivePerfConfig, hooks
     loopHistogram: null,
     ptyBytes: null,
     ptyChunks: null,
-    latencyHists: null
+    latencyHists: null,
+    sampleIntervalMs: hooks?.sampleIntervalMs ?? SAMPLE_INTERVAL_MS
   };
   store.prune(RETENTION_MS);
   if (!effective.recording) {
@@ -296,6 +315,7 @@ export function initPerf(store: PerfStore, effective: EffectivePerfConfig, hooks
   }
   rt.sampleTimer = setInterval(() => {
     const w = readDelay();
+    if (suspendedAtWall !== null || Date.now() < discardUntilWall) return; // sleep gap, not a block
     Object.assign(lastWindow, w);
     if (w.max > STALL_THRESHOLD_MS) {
       rt?.store.enqueue({ ts: Date.now(), kind: 'stall', durMs: w.max, meta: { ...w } });
@@ -307,6 +327,8 @@ export function initPerf(store: PerfStore, effective: EffectivePerfConfig, hooks
 }
 
 export async function shutdownPerf(): Promise<void> {
+  suspendedAtWall = null;
+  discardUntilWall = 0;
   if (!rt) return;
   const r = rt;
   rt = null;

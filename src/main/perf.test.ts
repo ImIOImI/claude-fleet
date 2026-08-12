@@ -6,7 +6,7 @@ import { closeDb, openDb } from './db.js';
 import { PerfStore } from './perfStore.js';
 import {
   initPerf, shutdownPerf, reconfigurePerf, perfSpan, perfSpanAsync, perfSetSpanContext, getEffectivePerf,
-  recordPtyChunk, getPerfStatus, recordLatencySample, setPerfStateListener
+  recordPtyChunk, getPerfStatus, recordLatencySample, setPerfStateListener, perfNotePowerEvent
 } from './perf.js';
 import type { EffectivePerfConfig } from './perfConfig.js';
 import type Database from 'better-sqlite3';
@@ -229,5 +229,25 @@ describe('setPerfStateListener', () => {
     await reconfigurePerf(OFF);
     await reconfigurePerf(ON);
     expect(seen).toEqual([true, false, true]);
+  });
+});
+
+describe('perfNotePowerEvent (suspend filtering)', () => {
+  it('discards windows between suspend and shortly after resume', async () => {
+    initPerf(store, ON, { delaySource: () => ({ p50: 2, p99: 8, max: 30000 }), sampleIntervalMs: 100 });
+    perfNotePowerEvent('suspend');
+    await sleep(350); // several suspended windows
+    store.flush(); // rows are buffered — flush before counting
+    const midCount = (db.prepare(`SELECT COUNT(*) AS n FROM perf_events WHERE kind='stall'`).get() as { n: number }).n;
+    expect(midCount).toBe(0);
+    perfNotePowerEvent('resume');
+    await sleep(350); // past the discard horizon: real windows record again
+    await shutdownPerf();
+    const after = (db.prepare(`SELECT COUNT(*) AS n FROM perf_events WHERE kind='stall'`).get() as { n: number }).n;
+    expect(after).toBeGreaterThanOrEqual(1);
+  });
+
+  it('is a no-op before initPerf', () => {
+    expect(() => perfNotePowerEvent('resume')).not.toThrow();
   });
 });

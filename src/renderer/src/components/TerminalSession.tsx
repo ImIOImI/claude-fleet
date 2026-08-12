@@ -437,7 +437,7 @@ export function TerminalSession({
         const decoder = new TextDecoder();
         unsubData = window.api.pty.onData(sid, (chunk, ts) => {
           if (perfRecording()) {
-            const arrival = performance.timeOrigin + performance.now();
+            const arrival = Date.now();
             for (const rtt of echoTracker.output(arrival)) {
               if (sampleBatch.length < MAX_SAMPLE_BATCH) sampleBatch.push({ kind: 'echo_rtt', durMs: rtt });
             }
@@ -447,7 +447,7 @@ export function TerminalSession({
                 if (!samplingClosed && sampleBatch.length < MAX_SAMPLE_BATCH) {
                   sampleBatch.push({
                     kind: 'output_hop',
-                    durMs: performance.timeOrigin + performance.now() - ts
+                    durMs: Date.now() - ts
                   });
                 }
               });
@@ -485,7 +485,13 @@ export function TerminalSession({
           // repaint nudge so we never inject Ctrl+L into an active session.
           disarmNudge();
           if (perfRecording()) {
-            const ts = performance.timeOrigin + performance.now();
+            // Date.now(), NOT performance.timeOrigin + performance.now():
+            // timeOrigin drifts from the wall clock on long-lived renderers
+            // (sleep/NTP) — observed ~4 s of skew, which inflated output_hop
+            // and made main's `dur >= 0` guard silently drop every input_hop.
+            // Main stamps with Date.now(); the renderer must use the same
+            // clock. (2026-08-11 perf_events finding.)
+            const ts = Date.now();
             echoTracker.keystroke(ts);
             window.api.pty.input(sid, data, ts);
           } else {

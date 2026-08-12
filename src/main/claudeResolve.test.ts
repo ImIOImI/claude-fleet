@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { join } from 'node:path';
-import { resolveClaudeBin, type ResolveDeps } from './claudeResolve.js';
+import { resolveClaudeBin, cachedNullableResolver, type ResolveDeps } from './claudeResolve.js';
 
 const HOME = '/home/troy';
 const LOCAL_BIN = `${HOME}/.local/bin/claude`;
@@ -150,5 +150,81 @@ describe('resolveClaudeBin on win32', () => {
     );
     expect(got).toBeNull();
     expect(execs).toEqual(['where.exe']); // no sh, no login shell
+  });
+});
+
+describe('cachedNullableResolver', () => {
+  it('caches a non-null resolution indefinitely', async () => {
+    let calls = 0;
+    const r = cachedNullableResolver(async () => { calls += 1; return '/bin/claude'; }, { nullTtlMs: 1000 });
+    expect(await r.get()).toBe('/bin/claude');
+    expect(await r.get()).toBe('/bin/claude');
+    expect(calls).toBe(1);
+  });
+
+  it('caches null only for nullTtlMs, then re-probes', async () => {
+    let calls = 0;
+    let clock = 0;
+    const r = cachedNullableResolver(async () => { calls += 1; return null; }, { nullTtlMs: 1000, now: () => clock });
+    expect(await r.get()).toBeNull();
+    clock = 999;
+    expect(await r.get()).toBeNull();
+    expect(calls).toBe(1);
+    clock = 1001;
+    expect(await r.get()).toBeNull();
+    expect(calls).toBe(2);
+  });
+
+  it('shares one in-flight probe between concurrent gets', async () => {
+    let calls = 0;
+    let release: (v: string | null) => void = () => {};
+    const r = cachedNullableResolver(
+      () => { calls += 1; return new Promise<string | null>((res) => { release = res; }); },
+      { nullTtlMs: 1000 }
+    );
+    const a = r.get();
+    const b = r.get();
+    release('/bin/claude');
+    expect(await a).toBe('/bin/claude');
+    expect(await b).toBe('/bin/claude');
+    expect(calls).toBe(1);
+  });
+
+  it('does not cache a rejected probe', async () => {
+    let calls = 0;
+    const r = cachedNullableResolver(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('flaky');
+      return '/bin/claude';
+    }, { nullTtlMs: 1000 });
+    await expect(r.get()).rejects.toThrow('flaky');
+    expect(await r.get()).toBe('/bin/claude');
+    expect(calls).toBe(2);
+  });
+
+  it('invalidate() forces a re-probe even after a non-null hit', async () => {
+    let calls = 0;
+    const r = cachedNullableResolver(async () => { calls += 1; return `/bin/claude${calls}`; }, { nullTtlMs: 1000 });
+    expect(await r.get()).toBe('/bin/claude1');
+    r.invalidate();
+    expect(await r.get()).toBe('/bin/claude2');
+  });
+
+  it('a probe in flight when invalidate() is called cannot poison the cache', async () => {
+    let calls = 0;
+    const releases: Array<(v: string | null) => void> = [];
+    const r = cachedNullableResolver(
+      () => { calls += 1; return new Promise<string | null>((res) => { releases.push(res); }); },
+      { nullTtlMs: 1000 }
+    );
+    const stale = r.get(); // probe 1 in flight
+    r.invalidate(); // claude moved/uninstalled while probing
+    const fresh = r.get(); // must start probe 2, not reuse probe 1
+    expect(calls).toBe(2);
+    releases[0]('/stale/claude'); // probe 1 settles AFTER the invalidate
+    expect(await stale).toBe('/stale/claude'); // original caller still gets its answer
+    releases[1]('/fresh/claude');
+    expect(await fresh).toBe('/fresh/claude');
+    expect(await r.get()).toBe('/fresh/claude'); // cache holds the fresh value, not the stale write-back
   });
 });

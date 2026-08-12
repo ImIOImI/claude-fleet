@@ -1,4 +1,4 @@
-import { ipcMain, BrowserWindow, dialog, clipboard, Menu, shell } from 'electron';
+import { ipcMain, BrowserWindow, dialog, clipboard, Menu, shell, powerMonitor } from 'electron';
 import { appVersionString } from './appVersion.js';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -34,7 +34,7 @@ import {
   getPerfOtlp,
   setPerfOtlp
 } from './config.js';
-import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk, perfSetSpanContext, recordLatencySample, setPerfStateListener } from './perf.js';
+import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk, perfSetSpanContext, recordLatencySample, setPerfStateListener, perfNotePowerEvent } from './perf.js';
 import { resolvePerfConfig } from './perfConfig.js';
 import { sanitizePerfSamples } from './perfSamples.js';
 import { buildLoadoutCatalog } from './loadoutCatalog.js';
@@ -1396,6 +1396,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       if (!win.isDestroyed()) win.webContents.send('perf:state', recording);
     }
   });
+
+  // OS suspend/resume → stall-sampler discard (perf.ts stays Electron-free).
+  powerMonitor.on('suspend', () => perfNotePowerEvent('suspend'));
+  powerMonitor.on('resume', () => perfNotePowerEvent('resume'));
 
   // ── Model-endpoint registry (#250) ─────────────────────────────────────
   ipcMain.handle('endpoints:list', () => listEndpoints());
