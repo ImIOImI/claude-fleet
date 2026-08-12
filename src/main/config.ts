@@ -337,9 +337,12 @@ export async function setFavorite(id: string, on: boolean): Promise<string[]> {
 
 /** The `get_config` MCP payload: effective fleet tunables for one workspace
  *  (app defaults ⊕ the workspace's plain-env overrides), plus the live host
- *  app version and the manifest's configured runner image (#219). Pure —
- *  callers supply the manifest fields and `app.getVersion()` — so the shape
- *  is unit-testable without Electron. `runnerImage` is the image *reference*
+ *  app version + build sha and the manifest's configured runner image
+ *  (#219, #298). `app.sha` is the git short sha of the running build (null
+ *  when unknown) — the semver alone can't distinguish two builds of the same
+ *  release, which is exactly what telemetry comparisons need. Pure — callers
+ *  supply the manifest fields and the version/sha — so the shape is
+ *  unit-testable without Electron. `runnerImage` is the image *reference*
  *  the workspace was created with (null for local workspaces); it does not
  *  say which build of that tag the live container runs — that needs a docker
  *  inspect and stays a #219 follow-up. `backend` describes the model backend
@@ -348,12 +351,12 @@ export async function setFavorite(id: string, on: boolean): Promise<string[]> {
 export function resolveWorkspaceConfig(
   workspaceId: string,
   env: Record<string, string>,
-  appVersion: string,
+  appVer: { version: string; sha: string | null },
   image?: string,
   backend?: { mode: 'oauth' | 'apikey' | 'endpoint'; endpoint: { name: string; baseUrl: string; modelId: string } | null }
 ): {
   workspaceId: string;
-  app: { version: string };
+  app: { version: string; sha: string | null };
   runnerImage: { name: string } | null;
   summarizer: { model: string; minNewTurns: number; minIntervalS: number; windowChars: number; maxChaptersPerRun: number };
   backfill: { enabled: boolean; maxPerSweep: number; delayS: number };
@@ -362,7 +365,7 @@ export function resolveWorkspaceConfig(
   const num = (v: unknown, d: number) => (Number.isFinite(Number(v)) ? Number(v) : d);
   return {
     workspaceId,
-    app: { version: appVersion },
+    app: { version: appVer.version, sha: appVer.sha },
     runnerImage: image ? { name: image } : null,
     summarizer: {
       model: typeof env.CF_SUMMARY_MODEL === 'string' ? env.CF_SUMMARY_MODEL : 'haiku',

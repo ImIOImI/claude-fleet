@@ -1,5 +1,5 @@
 import { ipcMain, BrowserWindow, dialog, clipboard, Menu, shell, powerMonitor } from 'electron';
-import { appVersionString } from './appVersion.js';
+import { appBuildSha, appVersionString } from './appVersion.js';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { unlink, readdir } from 'node:fs/promises';
@@ -1207,7 +1207,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     const m = await readWorkspaceManifest(callerId);
     const ep = m?.authMode === 'endpoint' && m.endpointId ? await getEndpoint(m.endpointId) : null;
     const effectiveEnv = { ...(ep ? { CF_SUMMARY_MODEL: ep.modelId } : {}), ...(m?.env?.plain ?? {}) };
-    return resolveWorkspaceConfig(callerId, effectiveEnv, appVersionString(), m?.image, {
+    return resolveWorkspaceConfig(callerId, effectiveEnv, { version: appVersionString(), sha: appBuildSha() ?? null }, m?.image, {
       mode: m?.authMode ?? 'oauth',
       endpoint: ep ? { name: ep.name, baseUrl: ep.baseUrl, modelId: ep.modelId } : null
     });

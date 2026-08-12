@@ -19,6 +19,7 @@ import { wslLocalProjectsDir, wslLocalSessionsDir } from './localLauncher.js';
 import { encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir } from './paths.js';
 import { installMainProcessHandlers, getLogPath, setErrorSink, logError } from './errorLog.js';
 import { installAppMenu } from './appMenu.js';
+import { appBuildSha, appVersionString } from './appVersion.js';
 import { runStartupMigration } from './migration.js';
 import { ensureWorkspaceClaudeJson } from './docker.js';
 import { hardwareAccelDisabledAtStartup } from './config.js';
@@ -148,6 +149,16 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     // Wire the crash-safe DB sink so every logError call is also persisted to
     // the errors table (best-effort; a wedged DB must never break crash logging).
     setErrorSink((row) => recordError(row));
+    // One line per app run identifying the build (#298): the error.log header
+    // and an errors-table row that lets historical telemetry be partitioned by
+    // build sha when two builds share a semver.
+    logError({
+      source: 'main',
+      type: 'app-start',
+      level: 'info',
+      message: `claude-fleet ${appVersionString()} starting`,
+      extra: { sha: appBuildSha() ?? null }
+    });
     const perfStore = new PerfStore(db);
     initPerf(
       perfStore,
