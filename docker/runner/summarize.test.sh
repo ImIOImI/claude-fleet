@@ -207,4 +207,67 @@ printf '{"session_id":"%s","transcript_path":"%s"}' "$sidF" "$tF" \
   | CF_SUMMARIZE_FG=1 CF_SUMMARIZE_CMD="$count_llm" CF_SUMMARY_MIN_INTERVAL_S=0 CF_SUMMARY_MAX_CHAPTERS_PER_RUN=2 bash "$here/summarize.sh"
 assert "$(jq -rs 'map(select(.type=="session-summary")) | length' "$work/$sidF.fleet.jsonl" 2>/dev/null)" "4" "second run resumes to 4 chapters"
 
+# ── #230 prompt hijack: haiku continues conversational transcript content
+#    instead of summarizing. The window must be quoted as delimited DATA and the
+#    operative instruction + JSON format must come AFTER it (recency wins with
+#    weak models), and an invalid reply gets exactly one retry. ──
+
+# 17. Prompt structure: window delimited, instruction after the window content.
+sidG="12121212-0000-0000-0000-000000000012"; tG="$work/$sidG.jsonl"
+mkturns_iso "$sidG" "$tG" 20
+cap_llm="$work/cap-llm.sh"; cap_in="$work/cap-in"
+cat > "$cap_llm" <<CAP
+#!/usr/bin/env bash
+cat > "$cap_in"
+printf '{"summary":"structural capture.","tags":["a","b","c"]}'
+CAP
+chmod +x "$cap_llm"
+printf '{"session_id":"%s","transcript_path":"%s"}' "$sidG" "$tG" \
+  | CF_SUMMARIZE_FG=1 CF_SUMMARIZE_CMD="$cap_llm" CF_SUMMARY_MIN_INTERVAL_S=0 bash "$here/summarize.sh"
+assert "$(grep -c '^<<<TRANSCRIPT-WINDOW$' "$cap_in" 2>/dev/null)" "1" "window opened by begin marker"
+assert "$(grep -c '^TRANSCRIPT-WINDOW>>>$' "$cap_in" 2>/dev/null)" "1" "window closed by end marker"
+last_window_line="$(grep -n 'prompt number 20' "$cap_in" | tail -1 | cut -d: -f1)"
+instruction_line="$(grep -n 'Reply with ONLY strict JSON' "$cap_in" | tail -1 | cut -d: -f1)"
+assert "$([ -n "$instruction_line" ] && [ -n "$last_window_line" ] && [ "$instruction_line" -gt "$last_window_line" ] && echo after || echo before)" \
+  "after" "JSON instruction comes after the window content"
+
+# 18. Retry: first reply is a hijacked continuation (no JSON), second is valid →
+#     chapter lands, model called exactly twice, no rejected breadcrumb.
+retry_llm="$work/retry-llm.sh"; retry_calls="$work/retry-calls"
+cat > "$retry_llm" <<RETRY
+#!/usr/bin/env bash
+cat >/dev/null
+echo x >> "$retry_calls"
+if [ "\$(wc -l < "$retry_calls")" -ge 2 ]; then
+  printf '{"summary":"second try worked.","tags":["a","b","c"]}'
+else
+  printf 'PR #191 is in CI now. I will monitor it and report back.'
+fi
+RETRY
+chmod +x "$retry_llm"
+sidH="13131313-0000-0000-0000-000000000013"; tH="$work/$sidH.jsonl"; sinkH="$work/sinkH"
+mkturns_iso "$sidH" "$tH" 20; : > "$retry_calls"
+printf '{"session_id":"%s","transcript_path":"%s"}' "$sidH" "$tH" \
+  | CF_SUMMARIZE_FG=1 CF_SUMMARIZE_CMD="$retry_llm" CF_SUMMARY_MIN_INTERVAL_S=0 CF_SUMMARY_STATUS_SINK="$sinkH" bash "$here/summarize.sh"
+assert "$(jq -rs 'map(select(.type=="session-summary")) | length' "$work/$sidH.fleet.jsonl" 2>/dev/null)" "1" "retry recovers the chapter"
+assert "$(wc -l < "$retry_calls" | tr -d ' ')" "2" "model called exactly twice on retry"
+assert "$(phases "$sinkH")" "attempt,generated," "recovered retry reports attempt then generated"
+
+# 19. Both attempts invalid → rejected once, model called exactly twice.
+sidI="14141414-0000-0000-0000-000000000014"; tI="$work/$sidI.jsonl"; sinkI="$work/sinkI"
+fail_llm="$work/fail-llm.sh"; fail_calls="$work/fail-calls"
+cat > "$fail_llm" <<FAILLLM
+#!/usr/bin/env bash
+cat >/dev/null
+echo x >> "$fail_calls"
+printf 'Sounds good, I will keep going with the release.'
+FAILLLM
+chmod +x "$fail_llm"
+mkturns_iso "$sidI" "$tI" 20; : > "$fail_calls"
+printf '{"session_id":"%s","transcript_path":"%s"}' "$sidI" "$tI" \
+  | CF_SUMMARIZE_FG=1 CF_SUMMARIZE_CMD="$fail_llm" CF_SUMMARY_MIN_INTERVAL_S=0 CF_SUMMARY_STATUS_SINK="$sinkI" bash "$here/summarize.sh"
+assert "$(phases "$sinkI")" "attempt,rejected," "double failure reports attempt then rejected"
+assert "$(wc -l < "$fail_calls" | tr -d ' ')" "2" "double failure stops after the single retry"
+assert "$([ -f "$work/$sidI.fleet.jsonl" ] && echo yes || echo no)" "no" "no chapter on double failure"
+
 [ "$fails" -eq 0 ] && echo "ALL PASS" || exit 1
