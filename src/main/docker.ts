@@ -47,7 +47,7 @@ import { resolveEnv } from './vault.js';
 import { endpointEnv } from './endpoints.js';
 import { claudeCreateArgs } from './claudeArgs.js';
 import { injectAndSubmit } from './ptyInput.js';
-import { perfSpanAsync, perfSetSpanContext } from './perf.js';
+import { perfSpan, perfSpanAsync, perfSetSpanContext } from './perf.js';
 
 export const FLEET_LABEL = 'com.claude-fleet.managed';
 export const ID_LABEL = 'com.claude-fleet.id';
@@ -241,7 +241,21 @@ export async function ensureImage(
   }
 }
 
-export async function ping(): Promise<boolean> {
+export function ping(): Promise<boolean> {
+  // Two spans discriminate the open stall hypothesis (perf dogfood
+  // 2026-08-14): the SYNC dispatch span measures only up to dockerode's
+  // first await — the sole portion that can block the main loop (e.g. a
+  // Windows named-pipe connect stalling inside libuv). The async span
+  // measures the full daemon round trip. dispatch big → ping blocks the
+  // loop; dispatch ~0 while the async span stretches → ping is a stall
+  // victim. Caveat: a connect deferred to a later tick escapes the
+  // dispatch span, so a small dispatch doesn't fully acquit npipe.
+  return perfSpanAsync('claude_fleet.docker.ping', () =>
+    perfSpan('claude_fleet.docker.ping_dispatch', () => pingInner())
+  );
+}
+
+async function pingInner(): Promise<boolean> {
   try {
     await docker.ping();
     return true;
