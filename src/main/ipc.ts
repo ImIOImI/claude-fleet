@@ -1,11 +1,11 @@
-import { ipcMain, BrowserWindow, dialog, clipboard, Menu, shell } from 'electron';
-import { appVersionString } from './appVersion.js';
+import { ipcMain, BrowserWindow, dialog, clipboard, Menu, shell, powerMonitor } from 'electron';
+import { appBuildSha, appVersionString } from './appVersion.js';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { unlink, readdir } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { workspaceTranscriptPath, workspaceHistoryFile, workspaceHistoryDir, encodeClaudeProjectDir } from './paths.js';
+import { workspaceTranscriptPath, workspaceHistoryFile, workspaceHistoryDir, encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir } from './paths.js';
 import {
   setWorkspaceDefault,
   setSessionOverride,
@@ -34,14 +34,16 @@ import {
   getPerfOtlp,
   setPerfOtlp
 } from './config.js';
-import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk, perfSetSpanContext } from './perf.js';
+import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk, perfSetSpanContext, recordLatencySample, setPerfStateListener, perfNotePowerEvent } from './perf.js';
 import { resolvePerfConfig } from './perfConfig.js';
+import { sanitizePerfSamples } from './perfSamples.js';
 import { buildLoadoutCatalog } from './loadoutCatalog.js';
 import * as realDocker from './docker.js';
 import * as realLocal from './local.js';
 import * as mockDocker from './mock.js';
 import type { Backend } from './backend.js';
 import { resolveKind } from './backendRouter.js';
+import { findLiveHandleId } from './ptyHandleLookup.js';
 import { assertControl, buildRoster, ROSTER_TITLE_MAX, type RosterStatus, type RosterEntry } from './control.js';
 import { ActivityDetector } from './activityDetector.js';
 import { wouldExceed, recordPost, COMMITTEE_CAPS } from './committeeRuns.js';
@@ -86,9 +88,10 @@ import {
   FACTORY_MIRROR
 } from './workspaces.js';
 import { listWslDistros, probeWslDistro, type ProbeDeps } from './wslProbe.js';
-import { wslLocalProjectsDir, uncToLinuxPath } from './localLauncher.js';
+import { wslLocalProjectsDir, wslLocalSessionsDir, uncToLinuxPath } from './localLauncher.js';
 import type { PtyHandle, RemoveWorkspaceOpts } from './docker.js';
 import type { JsonlWatcher } from './jsonlWatcher.js';
+import type { PeerStatusWatcher } from './peerStatusWatcher.js';
 import {
   eventsForSession,
   summaryForWorkspace,
@@ -230,6 +233,9 @@ const ptySessions = new Map<string, PtyHandle>();
 // one-writer-per-session, so a second attach to an already-viewed expert is
 // rejected `already attached`). Populated/cleared alongside ptySessions.
 const handleWorkspaceId = new Map<string, string>();
+// ptyHandleId → brokerSessionId, for latency-sample session attribution
+// (mirrors handleWorkspaceId's lifecycle: set on attach, deleted on end).
+const handleBrokerSessionId = new Map<string, string>();
 // Host-side busy/idle per workspace (#121), computed in main from the broker
 // output stream (not lifted from the renderer). `since` is the host-clock ms at
 // the last busy↔idle flip — used to detect a stalled (busy-too-long) expert.
@@ -241,6 +247,7 @@ const mappingUnresolvedSeen = new Set<string>();
 
 interface RegisterIpcOpts {
   jsonlWatcher: JsonlWatcher | null;
+  peerStatusWatcher?: PeerStatusWatcher | null;
 }
 
 /**
@@ -330,9 +337,15 @@ async function listAllWorkspaces(): Promise<Workspace[]> {
     manifestById.delete(w.id);
   }
 
-  // Manifests with no live container → deleted (recoverable from spec)
+  // Manifests with no live container → deleted (recoverable from spec).
+  // Local workspaces keep their user-picked workspaceRoot; only containers get
+  // the canonical `<fleetRoot>/<id>` (see the live-merge branch above).
   for (const m of manifestById.values()) {
-    result.push({ ...m, workspaceRoot: await fleetPrivateDir(m.id), state: 'deleted' });
+    result.push({
+      ...m,
+      workspaceRoot: m.kind === 'local' ? m.workspaceRoot : await fleetPrivateDir(m.id),
+      state: 'deleted'
+    });
   }
 
   return result;
@@ -708,7 +721,7 @@ async function normalizeAndValidateWslRoot(
 }
 
 export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): void {
-  const { jsonlWatcher } = opts;
+  const { jsonlWatcher, peerStatusWatcher } = opts;
 
   // Live summary push: when the watcher ingests new lines, compute the
   // workspace summary once and broadcast to every BrowserWindow. The renderer
@@ -892,6 +905,21 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
           );
         } else {
           jsonlWatcher?.registerLocalWorkspace(input.id, spec.workspaceRoot);
+        }
+      }
+      // Peer-status dir for the new workspace (#286): container → bind path;
+      // local WSL → polled 9P dir; local native/custom → the shared host dir.
+      if (peerStatusWatcher) {
+        if (spec.kind === 'local') {
+          if (spec.launcher?.mode === 'wsl') {
+            peerStatusWatcher.registerPolledDir(
+              wslLocalSessionsDir(spec.launcher.distro, spec.launcher.home)
+            );
+          } else {
+            peerStatusWatcher.registerDir(hostLocalSessionsDir());
+          }
+        } else {
+          peerStatusWatcher.registerDir(workspaceClaudeSessionsDir(input.id));
         }
       }
 
@@ -1179,7 +1207,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     const m = await readWorkspaceManifest(callerId);
     const ep = m?.authMode === 'endpoint' && m.endpointId ? await getEndpoint(m.endpointId) : null;
     const effectiveEnv = { ...(ep ? { CF_SUMMARY_MODEL: ep.modelId } : {}), ...(m?.env?.plain ?? {}) };
-    return resolveWorkspaceConfig(callerId, effectiveEnv, appVersionString(), m?.image, {
+    return resolveWorkspaceConfig(callerId, effectiveEnv, { version: appVersionString(), sha: appBuildSha() ?? null }, m?.image, {
       mode: m?.authMode ?? 'oauth',
       endpoint: ep ? { name: ep.name, baseUrl: ep.baseUrl, modelId: ep.modelId } : null
     });
@@ -1196,6 +1224,11 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     // id, which lives in opts.id (containerId is the Docker id). Best-effort.
     if (opts?.id) removeWorkspaceSocket(opts.id);
     if (opts?.id) jsonlWatcher?.unregisterLocalWorkspace(opts.id);
+    // Drop a container workspace's peer-status watch (its state dir, incl.
+    // .claude/sessions, is removed). The shared host ~/.claude/sessions dir used
+    // by local native workspaces is left registered — other local workspaces and
+    // the user's own claude sessions share it (#286).
+    if (opts?.id) peerStatusWatcher?.unregisterDir(workspaceClaudeSessionsDir(opts.id));
     return result;
   });
 
@@ -1341,6 +1374,32 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   });
 
   ipcMain.handle('perf:status', async () => getEffectivePerf() ? getPerfStatus() : PERF_STATUS_UNINITIALIZED);
+
+  // One-way renderer→main latency sample batches (perf Phase 2). Not an
+  // invoke: no response, no span (instrumentIpcHandle wraps handle() only).
+  ipcMain.on('perf:samples', (_e, payload: unknown) => {
+    if (!getEffectivePerf()?.recording) return; // belt and braces — renderer also gates
+    const batch = sanitizePerfSamples(payload);
+    if (!batch) return;
+    const ws = handleWorkspaceId.get(batch.sessionId) ?? null;
+    const sess = handleBrokerSessionId.get(batch.sessionId) ?? null;
+    if (sess === null) return; // handle already torn down — don't record unattributable rows
+    for (const s of batch.samples) recordLatencySample(s.kind, ws, sess, s.durMs);
+  });
+
+  // One-way main→renderer recording-state push (perf Phase 2): fires on
+  // every perf reconfigure — Settings toggle, MCP perf_set. The startup
+  // initPerf predates this listener, so initial state reaches windows via
+  // the perf:status pull rather than a push.
+  setPerfStateListener((recording) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('perf:state', recording);
+    }
+  });
+
+  // OS suspend/resume → stall-sampler discard (perf.ts stays Electron-free).
+  powerMonitor.on('suspend', () => perfNotePowerEvent('suspend'));
+  powerMonitor.on('resume', () => perfNotePowerEvent('resume'));
 
   // ── Model-endpoint registry (#250) ─────────────────────────────────────
   ipcMain.handle('endpoints:list', () => listEndpoints());
@@ -1491,6 +1550,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         (w) => w.containerId === containerId || w.id === containerId
       );
       if (owner) handleWorkspaceId.set(ptyHandleId, owner.id);
+      handleBrokerSessionId.set(ptyHandleId, brokerSessionId);
       perfSetSpanContext({ workspaceId: owner?.id, sessionId: brokerSessionId });
       // Diagnostic: ptySessions.size should oscillate around the count of
       // currently-mounted TerminalSession components. Unbounded growth =
@@ -1526,7 +1586,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // renderer React state. Reuses the (pure) ActivityDetector.
       const detector = new ActivityDetector();
       handle.stream.on('data', (chunk: Buffer) => {
-        win?.webContents.send(`pty:data:${ptyHandleId}`, chunk);
+        // Second arg = epoch-ms send stamp for the renderer's output-hop
+        // measurement (perf Phase 2). The chunk stays a raw Buffer.
+        win?.webContents.send(`pty:data:${ptyHandleId}`, chunk, Date.now());
         recordPtyChunk(owner?.id ?? handleWorkspaceId.get(ptyHandleId) ?? null, brokerSessionId, chunk.length);
         if (owner && detector.push(chunk.toString('utf8'))) {
           committeeBusy.set(owner.id, { busy: detector.isBusy, since: Date.now() });
@@ -1536,6 +1598,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         win?.webContents.send(`pty:end:${ptyHandleId}`);
         ptySessions.delete(ptyHandleId);
         handleWorkspaceId.delete(ptyHandleId);
+        handleBrokerSessionId.delete(ptyHandleId);
         if (owner) committeeBusy.delete(owner.id);
         logError({
           source: 'main',
@@ -1558,9 +1621,24 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     }
   );
 
-  ipcMain.handle('pty:input', (_e, sessionId: string, data: string) => {
+  ipcMain.handle('pty:input', (_e, sessionId: string, data: string, ts?: number) => {
     perfSetSpanContext({ workspaceId: handleWorkspaceId.get(sessionId) });
     ptySessions.get(sessionId)?.stream.write(data);
+    // Renderer stamps only while recording (perf:state gate); skip missing
+    // or future-skewed stamps rather than recording zeros. Also skip once
+    // the handle's maps are cleared (typing into an ended session would
+    // produce unattributable NULL-workspace rows visible fleet-wide).
+    if (typeof ts === 'number' && handleBrokerSessionId.has(sessionId)) {
+      const dur = Date.now() - ts;
+      if (dur >= 0) {
+        recordLatencySample(
+          'input_hop',
+          handleWorkspaceId.get(sessionId) ?? null,
+          handleBrokerSessionId.get(sessionId) ?? null,
+          dur
+        );
+      }
+    }
   });
 
   ipcMain.handle('pty:resize', async (_e, sessionId: string, cols: number, rows: number) => {
@@ -1574,8 +1652,14 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     const detachedWs = handleWorkspaceId.get(sessionId);
     if (detachedWs) committeeBusy.delete(detachedWs);
     handleWorkspaceId.delete(sessionId);
+    handleBrokerSessionId.delete(sessionId);
     logError({
       source: 'main',
+      // Lifecycle diagnostics, not failures — logged at info to match pty-attach
+      // (a missing level defaults to 'error' in the DB sink). The unknown-handle
+      // branch is a normal no-op after tab-close reaps the handle first (#287),
+      // so error-level here buried real errors under routine tab churn.
+      level: 'info',
       type: 'pty-detach',
       message: present
         ? `pty:detach OK (live=${ptySessions.size})`
@@ -1585,23 +1669,54 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   });
 
   // Terminate the broker session behind a handle (kills claude, drops the
-  // session). The loadout reload calls this, then re-attaches the same broker
-  // session id with `--resume` so the tab resumes the conversation under the
-  // freshly-installed config. Returns whether a live handle was found. (#16)
-  ipcMain.handle('pty:closeSession', async (_e, ptyHandleId: string) => {
+  // session) and forget its maps. Shared by the two close paths below.
+  const reapHandle = async (ptyHandleId: string, via: string): Promise<boolean> => {
     const handle = ptySessions.get(ptyHandleId);
     if (!handle) return false;
     await handle.close();
     ptySessions.delete(ptyHandleId);
     handleWorkspaceId.delete(ptyHandleId);
+    handleBrokerSessionId.delete(ptyHandleId);
     logError({
       source: 'main',
+      // Successful reap is a lifecycle event, not a failure — info, like pty-attach.
+      level: 'info',
       type: 'pty-close',
-      message: `pty:closeSession OK (live=${ptySessions.size})`,
+      message: `${via} OK (live=${ptySessions.size})`,
       extra: { ptyHandleId, live: ptySessions.size }
     });
     return true;
-  });
+  };
+
+  // Terminate the broker session behind a handle (kills claude, drops the
+  // session). The loadout reload calls this, then re-attaches the same broker
+  // session id with `--resume` so the tab resumes the conversation under the
+  // freshly-installed config. Returns whether a live handle was found. (#16)
+  ipcMain.handle('pty:closeSession', (_e, ptyHandleId: string) =>
+    reapHandle(ptyHandleId, 'pty:closeSession')
+  );
+
+  // Reap a session by (workspace, broker session id) rather than a live
+  // ptyHandle. Closing a tab (#287) runs from the parent pane, which only knows
+  // the stable broker session id — not the child's per-attach handle — so it
+  // routes the kill through the same broker CLOSE / local-process teardown that
+  // the refresh path uses instead of merely dropping the tab from sessions.json
+  // and orphaning the claude process. Note: this is the EXPLICIT tab-close path
+  // only; app quit does not reap (before-quit leaves broker sessions alive so a
+  // relaunch re-attaches). Returns whether a live handle was found.
+  ipcMain.handle(
+    'pty:closeSessionByBroker',
+    (_e, workspaceId: string, brokerSessionId: string) => {
+      const ptyHandleId = findLiveHandleId(
+        handleWorkspaceId,
+        handleBrokerSessionId,
+        workspaceId,
+        brokerSessionId
+      );
+      if (!ptyHandleId) return Promise.resolve(false);
+      return reapHandle(ptyHandleId, 'pty:closeSessionByBroker');
+    }
+  );
 
   // Durable transcript mirror (#10). The renderer holds broker session ids;
   // mirror files are named by claude session id, so the transcript handlers

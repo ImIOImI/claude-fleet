@@ -19,6 +19,8 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { isBusyTitle } from '../activityDetector';
 import { busyFlagIsStale } from '../staleBusy';
 import { decideTerminalKeyAction } from '../terminalKeymap';
+import { EchoRttTracker } from '../echoRtt';
+import { initPerfState, perfRecording } from '../perfState';
 
 // Stretch the font fallback chain so canvas renders for glyphs xterm
 // can't find in a monospace font (emoji, symbols, regional indicators)
@@ -51,6 +53,7 @@ const TERMINAL_FONT_FAMILY = [
 
 const URL_REGEX = /https?:\/\/[^\s'"`<>()\[\]{}]+/g;
 const TRAILING_PUNCTUATION = /[.,;:!?]+$/;
+const MAX_SAMPLE_BATCH = 1000; // matches sanitizePerfSamples MAX_BATCH in main
 
 // Poll period for the stale-busy watchdog (see staleBusy.ts). Worst case a
 // stale flag survives BUSY_SILENCE_TIMEOUT_MS + this before it clears.
@@ -293,6 +296,8 @@ export function TerminalSession({
     let unsubData: (() => void) | null = null;
     let unsubEnd: (() => void) | null = null;
     let staleBusyTimer: ReturnType<typeof setInterval> | null = null;
+    let sampleTimer: ReturnType<typeof setInterval> | null = null;
+    let samplingClosed = false;
 
     // Scoped one-shot repaint nudge. claude paints some startup screens
     // (notably the org "Managed settings require approval" gate) on the
@@ -444,9 +449,38 @@ export function TerminalSession({
         staleBusyTimer = setInterval(() => {
           if (busyFlagIsStale(busy, lastOutputAt, Date.now())) setBusy(false);
         }, STALE_BUSY_CHECK_MS);
-        unsubData = window.api.pty.onData(sid, (chunk) => {
+        // Latency sampling (perf Phase 2): keystroke→echo pairing + output
+        // hop, batched to main every 5s. Gated on perfRecording() per event.
+        initPerfState();
+        const echoTracker = new EchoRttTracker();
+        const sampleBatch: Array<{ kind: 'output_hop' | 'echo_rtt'; durMs: number }> = [];
+        sampleTimer = setInterval(() => {
+          if (sampleBatch.length === 0) return;
+          window.api.perf.samples({ sessionId: sid, samples: sampleBatch.splice(0) });
+        }, 5000);
+        unsubData = window.api.pty.onData(sid, (chunk, ts) => {
           lastOutputAt = Date.now();
-          term.write(chunk);
+          if (perfRecording()) {
+            const arrival = Date.now();
+            for (const rtt of echoTracker.output(arrival)) {
+              if (sampleBatch.length < MAX_SAMPLE_BATCH) sampleBatch.push({ kind: 'echo_rtt', durMs: rtt });
+            }
+            if (typeof ts === 'number') {
+              // Completion callback fires after xterm has processed the chunk.
+              term.write(chunk, () => {
+                if (!samplingClosed && sampleBatch.length < MAX_SAMPLE_BATCH) {
+                  sampleBatch.push({
+                    kind: 'output_hop',
+                    durMs: Date.now() - ts
+                  });
+                }
+              });
+            } else {
+              term.write(chunk);
+            }
+          } else {
+            term.write(chunk);
+          }
         });
         unsubEnd = window.api.pty.onEnd(sid, () => {
           term.writeln('\r\n[session ended]');
@@ -471,7 +505,19 @@ export function TerminalSession({
           // First user keystroke ⇒ they're interacting; cancel any pending
           // repaint nudge so we never inject Ctrl+L into an active session.
           disarmNudge();
-          window.api.pty.input(sid, data);
+          if (perfRecording()) {
+            // Date.now(), NOT performance.timeOrigin + performance.now():
+            // timeOrigin drifts from the wall clock on long-lived renderers
+            // (sleep/NTP) — observed ~4 s of skew, which inflated output_hop
+            // and made main's `dur >= 0` guard silently drop every input_hop.
+            // Main stamps with Date.now(); the renderer must use the same
+            // clock. (2026-08-11 perf_events finding.)
+            const ts = Date.now();
+            echoTracker.keystroke(ts);
+            window.api.pty.input(sid, data, ts);
+          } else {
+            window.api.pty.input(sid, data);
+          }
         });
 
         // Arm the scoped repaint nudge (consumed by the ResizeObserver
@@ -545,6 +591,8 @@ export function TerminalSession({
       cancelAnimationFrame(initialFitRaf);
       if (staleBusyTimer) clearInterval(staleBusyTimer);
       disarmNudge();
+      samplingClosed = true;
+      if (sampleTimer) clearInterval(sampleTimer);
       ro.disconnect();
       host.removeEventListener('contextmenu', onContextMenu);
       unsubData?.();

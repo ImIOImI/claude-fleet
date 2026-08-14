@@ -156,3 +156,49 @@ export const CLAUDE_NOT_FOUND_MESSAGE =
   "`claude` isn't installed on this host — it wasn't found on PATH, in ~/.local/bin, " +
   'or via your login shell. Install Claude Code (see claude.com/product/claude-code), ' +
   'set CLAUDE_FLEET_LOCAL_CLAUDE_BIN to its path, or use a Container workspace.';
+
+/** Memoize a nullable async resolution (perf stall fix F1, spec
+ *  2026-08-11-perf-stall-fixes-design.md). The lookup behind findClaude
+ *  spawns where.exe/login-shell probes, so callers should not re-run it
+ *  per invocation. Policy: a non-null result is cached until invalidate();
+ *  null (claude not found) is cached for nullTtlMs so a later install is
+ *  picked up; concurrent gets share one in-flight probe; a rejected probe
+ *  is not cached. */
+export function cachedNullableResolver<T>(
+  resolve: () => Promise<T | null>,
+  opts: { nullTtlMs: number; now?: () => number }
+): { get(): Promise<T | null>; invalidate(): void } {
+  const now = opts.now ?? Date.now;
+  let cached: { value: T | null; at: number } | null = null;
+  let inFlight: Promise<T | null> | null = null;
+  let generation = 0; // bumped by invalidate(); probes from older generations must not write back
+  return {
+    get(): Promise<T | null> {
+      if (cached && (cached.value !== null || now() - cached.at < opts.nullTtlMs)) {
+        return Promise.resolve(cached.value);
+      }
+      if (!inFlight) {
+        const gen = generation;
+        inFlight = resolve().then(
+          (value) => {
+            if (gen === generation) {
+              cached = { value, at: now() };
+              inFlight = null;
+            }
+            return value;
+          },
+          (err) => {
+            if (gen === generation) inFlight = null;
+            throw err;
+          }
+        );
+      }
+      return inFlight;
+    },
+    invalidate(): void {
+      cached = null;
+      inFlight = null;
+      generation += 1;
+    }
+  };
+}

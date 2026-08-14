@@ -515,17 +515,22 @@ const api = {
       resumeOf?: string
     ): Promise<string> =>
       ipcRenderer.invoke('pty:attach', containerId, brokerSessionId, cols, rows, resumeOf),
-    input: (sessionId: string, data: string) =>
-      ipcRenderer.invoke('pty:input', sessionId, data),
+    input: (sessionId: string, data: string, ts?: number) =>
+      ipcRenderer.invoke('pty:input', sessionId, data, ts),
     resize: (sessionId: string, cols: number, rows: number) =>
       ipcRenderer.invoke('pty:resize', sessionId, cols, rows),
     detach: (sessionId: string) => ipcRenderer.invoke('pty:detach', sessionId),
     /** Terminate the session (kills claude). Returns true if a handle was live. */
     closeSession: (sessionId: string): Promise<boolean> =>
       ipcRenderer.invoke('pty:closeSession', sessionId),
-    onData: (sessionId: string, cb: (chunk: Uint8Array) => void) => {
+    /** Terminate a session by (workspace, broker session id) — used by tab-close,
+     *  which knows the stable broker session id but not the per-attach handle.
+     *  Kills claude via the same broker CLOSE the refresh path uses. */
+    closeSessionByBroker: (workspaceId: string, brokerSessionId: string): Promise<boolean> =>
+      ipcRenderer.invoke('pty:closeSessionByBroker', workspaceId, brokerSessionId),
+    onData: (sessionId: string, cb: (chunk: Uint8Array, ts?: number) => void) => {
       const channel = `pty:data:${sessionId}`;
-      const handler = (_e: IpcRendererEvent, chunk: Buffer) => cb(new Uint8Array(chunk));
+      const handler = (_e: IpcRendererEvent, chunk: Buffer, ts?: number) => cb(new Uint8Array(chunk), ts);
       ipcRenderer.on(channel, handler);
       return () => ipcRenderer.removeListener(channel, handler);
     },
@@ -673,10 +678,37 @@ const api = {
       ): void => cb(payload.workspaceId, payload.waitingSessionIds);
       ipcRenderer.on(channel, handler);
       return () => ipcRenderer.removeListener(channel, handler);
+    },
+    /**
+     * Subscribe to authoritative peer-status pushes (#286): a flat list of
+     * `{ claudeSessionId, status }` from claude's `~/.claude/sessions/<pid>.json`
+     * files. The renderer merges this over the title glyph. Returns an unsubscribe.
+     */
+    onSessionStatus: (
+      cb: (statuses: Array<{ claudeSessionId: string; status: 'busy' | 'idle' | 'waiting'; waitingFor?: string }>) => void
+    ): (() => void) => {
+      const channel = 'sessionstatus:update';
+      const handler = (
+        _e: IpcRendererEvent,
+        payload: { statuses: Array<{ claudeSessionId: string; status: 'busy' | 'idle' | 'waiting'; waitingFor?: string }> }
+      ): void => cb(payload.statuses);
+      ipcRenderer.on(channel, handler);
+      return () => ipcRenderer.removeListener(channel, handler);
     }
   },
   perf: {
-    status: (): Promise<PerfStatusPayload> => ipcRenderer.invoke('perf:status')
+    status: (): Promise<PerfStatusPayload> => ipcRenderer.invoke('perf:status'),
+    /** Fire-and-forget latency sample batch (perf Phase 2). */
+    samples: (payload: {
+      sessionId: string;
+      samples: Array<{ kind: 'output_hop' | 'echo_rtt'; durMs: number }>;
+    }): void => ipcRenderer.send('perf:samples', payload),
+    /** Subscribe to recording-state pushes. Returns an unsubscribe fn. */
+    onState: (cb: (recording: boolean) => void): (() => void) => {
+      const handler = (_e: IpcRendererEvent, recording: boolean): void => cb(recording);
+      ipcRenderer.on('perf:state', handler);
+      return () => ipcRenderer.removeListener('perf:state', handler);
+    }
   }
 };
 

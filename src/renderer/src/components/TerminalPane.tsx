@@ -587,8 +587,18 @@ export function TerminalPane({
     onRefreshRequested?.(s.name, busyIds.has(s.id));
   }
 
-  function closeSession(id: string): void {
+  async function closeSession(id: string): Promise<void> {
     if (!loaded) return;
+    // Reap the underlying claude BEFORE dropping the tab (#287). Closing a tab
+    // used to only remove it from renderer state (→ sessions.json), leaving the
+    // broker session / local claude process orphaned — its PTY unreachable once
+    // it was no longer in the list. Route the kill through the same broker CLOSE
+    // the refresh path uses. Awaited first so the child TerminalSession's
+    // unmount `detach` (which, for local, leaves claude alive) can't win the
+    // race: by the time we remove the tab the handle is already closed+gone, so
+    // the detach is a no-op on an unknown handle. Only explicit tab-close reaps;
+    // app quit leaves sessions alive for relaunch to re-attach.
+    await window.api.pty.closeSessionByBroker(workspaceId, id).catch(() => {});
     // Drop the closed tab from the ended-set so a future tab that
     // happens to recycle the id (unlikely with uid(), but cheap insurance)
     // doesn't inherit the prior ended state.
@@ -643,7 +653,7 @@ export function TerminalPane({
   async function requestClose(s: Session): Promise<void> {
     const hasMirror = await window.api.mirror.hasForBrokerSession(workspaceId, s.id);
     if (hasMirror) setCloseTarget({ id: s.id, name: s.name });
-    else closeSession(s.id);
+    else await closeSession(s.id);
   }
 
   async function confirmClose(deleteMirror: boolean): Promise<void> {
@@ -651,7 +661,7 @@ export function TerminalPane({
     if (!target) return;
     setCloseTarget(null);
     if (deleteMirror) await window.api.mirror.deleteForBrokerSession(workspaceId, target.id);
-    closeSession(target.id);
+    await closeSession(target.id);
   }
 
   return (

@@ -86,3 +86,36 @@ describe('buildEnv — ANTHROPIC_API_KEY inheritance', () => {
     expect(env.ANTHROPIC_API_KEY).toBe(explicit);
   });
 });
+
+describe('buildEnv — claude child-session markers (#285)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  // When the fleet app is itself launched from inside a claude session (e.g. a
+  // `claude` Bash tool ran `npm run dev`), its environment carries claude's
+  // child-session markers. A local workspace inherits `{ ...process.env }`, so
+  // without scrubbing, the spawned claude sees CLAUDE_CODE_CHILD_SESSION and
+  // turns transcript saving OFF — no .jsonl is written, the watcher ingests
+  // nothing, and the session shows $0.00 with no busy attribution.
+  it('strips CLAUDE_CODE_CHILD_SESSION so the spawned claude saves its transcript', async () => {
+    vi.stubEnv('CLAUDE_CODE_CHILD_SESSION', '1');
+    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+    expect(env.CLAUDE_CODE_CHILD_SESSION).toBeUndefined();
+  });
+
+  it('strips the CLAUDECODE nested marker', async () => {
+    vi.stubEnv('CLAUDECODE', '1');
+    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+    expect(env.CLAUDECODE).toBeUndefined();
+  });
+
+  it('an explicit workspace override of a marker is still honoured', async () => {
+    vi.stubEnv('CLAUDE_CODE_CHILD_SESSION', '1');
+    const env = await buildEnv('ws1', {
+      ...fakeEnv({ CLAUDE_CODE_CHILD_SESSION: 'keep-me' }),
+      authMode: 'oauth'
+    });
+    expect(env.CLAUDE_CODE_CHILD_SESSION).toBe('keep-me');
+  });
+});

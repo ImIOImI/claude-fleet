@@ -27,7 +27,7 @@ import { join } from 'node:path';
 import { app } from 'electron';
 import type * as NodePty from 'node-pty';
 import type { Backend } from './backend.js';
-import { findClaude, CLAUDE_NOT_FOUND_MESSAGE } from './claudeResolve.js';
+import { findClaude, CLAUDE_NOT_FOUND_MESSAGE, cachedNullableResolver } from './claudeResolve.js';
 import { mcpSocketDir, mcpWorkspaceSocketPath } from './mcpSocket.js';
 import { ensureLocalBridgeScript, localMcpServerEntry, wslMcpServerEntry } from './mcpLocalBridge.js';
 import {
@@ -68,6 +68,7 @@ import {
   killWorkspaceSessions,
   type SpawnPty
 } from './localSessions.js';
+import { createConptySettler } from './conptySettle.js';
 
 // Lazy require so the native node-pty addon only loads when a local session is
 // actually spawned (and never under vitest, which can't load the Electron ABI).
@@ -148,16 +149,36 @@ export function _resetForTest(): void {
 /** node-pty-backed spawn factory passed to the session manager. */
 const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
   const pty = require('node-pty') as typeof NodePty;
-  const p = pty.spawn(file, args, { name: 'xterm-256color', cwd, cols, rows, env });
+  let p: NodePty.IPty;
+  try {
+    p = pty.spawn(file, args, {
+      name: 'xterm-256color',
+      cwd,
+      cols,
+      rows,
+      env,
+      // Opt-in escape hatch (#268 fallback #2): node-pty 1.1.0 bundles a newer
+      // conpty.dll + OpenConsole.exe (already asarUnpacked with the rest of
+      // node-pty) that fixes many ConPTY reflow/reprint bugs. Off by default —
+      // it swaps the OS console host for every Windows local session and has
+      // had no Windows soak time here; flip it via a user env var without a
+      // rebuild if the re-settle below doesn't hold.
+      ...(process.platform === 'win32' && process.env.CLAUDE_FLEET_CONPTY_DLL === '1'
+        ? { useConptyDll: true }
+        : {})
+    });
+  } catch (err) {
+    // Stale resolution (binary moved/uninstalled since we cached it): force
+    // the next resolveClaude() to re-probe instead of failing forever.
+    claudeResolver.invalidate();
+    throw err;
+  }
 
-  // Track liveness so the ConPTY nudge below (and any late resize) never calls
-  // into an exited pty — node-pty on Node 22 throws "Cannot resize a pty that
-  // has already exited" as an *uncaught* error, which would crash the main
-  // process (see localSessions.resize, which guards the same way).
+  // Track liveness so the ConPTY settle below (and any late resize) never
+  // calls into an exited pty — node-pty on Node 22 throws "Cannot resize a
+  // pty that has already exited" as an *uncaught* error, which would crash
+  // the main process (see localSessions.resize, which guards the same way).
   let exited = false;
-  p.onExit(() => {
-    exited = true;
-  });
   const safeResize = (c: number, r: number): void => {
     if (exited) return;
     try {
@@ -167,34 +188,51 @@ const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
     }
   };
 
-  // ConPTY overlap fix (#268): on Windows, `claude` runs under ConPTY, which
-  // keeps its own pseudoconsole buffer and reprints/reflows it to the frontend
-  // on updates. claude's TUI redraws incrementally (cursor-up + erase, no full
-  // clear), so if ConPTY's buffer state hasn't settled at the fitted width its
-  // reprints land on rows xterm already drew → overlapping/ghosted text on
-  // every response. ConPTY only reliably applies its size once the child has
-  // attached to the pseudoconsole, so the spawn-time cols/rows can be stale.
-  // A real winsize change after attach forces ConPTY to settle and re-emit a
-  // clean frame — the programmatic equivalent of the manual window-resize that
-  // heals it. POSIX PTYs (macOS/Linux, and the container backend's Linux PTY)
-  // don't need this, so it's Windows-only.
-  if (process.platform === 'win32') {
-    setTimeout(() => {
-      if (exited) return;
-      // Jitter one column and back so the value actually changes (a same-size
-      // resize can be a no-op and skip ConPTY's re-emit), landing back at the
-      // fitted size. The renderer's ResizeObserver keeps it in sync afterward.
-      safeResize(Math.max(1, cols - 1), rows);
-      safeResize(cols, rows);
-    }, 250);
-  }
+  // ConPTY overlap fix (#268, reworked): ConPTY keeps its own pseudoconsole
+  // buffer and reprints/reflows it to the frontend on updates — an ongoing
+  // condition, so the original one-shot post-spawn jitter (#269) did not hold
+  // in the field, and its closure-captured spawn cols could clobber a
+  // renderer fit landing inside the 250 ms window, pinning ConPTY at a stale
+  // width. Now every resize (and the spawn itself) schedules a debounced
+  // settle that jitters the winsize at the pty's CURRENT size, forcing
+  // ConPTY to re-emit a clean frame — the programmatic equivalent of the
+  // manual window resize that heals the corruption. POSIX PTYs (macOS/Linux,
+  // and the container backend's Linux PTY) don't need this, so Windows-only.
+  const settler =
+    process.platform === 'win32'
+      ? createConptySettler({
+          resize: safeResize,
+          getSize: () => ({ cols: p.cols, rows: p.rows }),
+          onSettle: ({ cols: c, rows: r }) => {
+            // One line per settle: the field-visible record of what size
+            // ConPTY was reconciled to. A settle size that differs from the
+            // spawn size means a post-spawn resize landed — the case the
+            // one-shot fix silently reverted.
+            logError({
+              source: 'main',
+              type: 'conpty-settle',
+              level: 'info',
+              message: `conpty settled at ${c}x${r} (pid ${p.pid}, spawned ${cols}x${rows})`,
+              extra: { pid: p.pid, cols: c, rows: r, spawnCols: cols, spawnRows: rows }
+            });
+          }
+        })
+      : null;
+  p.onExit(() => {
+    exited = true;
+    settler?.dispose();
+  });
+  settler?.schedule();
 
   return {
     get pid() {
       return p.pid;
     },
     write: (d) => p.write(d),
-    resize: safeResize,
+    resize: (c, r) => {
+      safeResize(c, r);
+      settler?.schedule();
+    },
     kill: (sig) => p.kill(sig),
     onData: (cb) => {
       p.onData(cb);
@@ -205,9 +243,19 @@ const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
   };
 };
 
-/** Resolve the host `claude` binary (see claudeResolve.ts for the strategy). */
+/** Resolve the host `claude` binary (see claudeResolve.ts for the strategy).
+ *  Cached: the lookup spawns where.exe/login-shell probes, so it should run
+ *  once per install state, not once per session spawn. NOTE (2026-08-11
+ *  review): workspace:ping routes to dockerode, and local ping() currently
+ *  has no callers — this cache does NOT explain the per-minute idle stall,
+ *  which remains under investigation. Null re-probes after 5 min; a spawn
+ *  failure invalidates so a moved binary is re-resolved. */
+const claudeResolver = cachedNullableResolver(
+  () => findClaude((file, args) => execFileAsync(file, args), homedir()),
+  { nullTtlMs: 5 * 60_000 }
+);
 function resolveClaude(): Promise<string | null> {
-  return findClaude((file, args) => execFileAsync(file, args), homedir());
+  return claudeResolver.get();
 }
 
 /** Best-effort signal to every live in-distro claude of a wsl workspace via
@@ -237,6 +285,11 @@ async function signalWslSessions(
   await execFileAsync('wsl.exe', ['-d', launcher.distro, '--exec', 'sh', '-c', script]).catch(() => {});
 }
 
+// Env markers claude sets on the subprocesses it spawns to flag a nested/child
+// context. A fleet-launched claude is a genuine top-level session, so these are
+// scrubbed from the inherited host env before spawn (see buildEnv, #285).
+const CLAUDE_CHILD_SESSION_MARKERS = ['CLAUDE_CODE_CHILD_SESSION', 'CLAUDECODE'] as const;
+
 /**
  * Build the spawn env. A *local* workspace IS the user's host claude, so it
  * inherits the real host environment — crucially `HOME`, so claude uses the
@@ -259,6 +312,15 @@ export async function buildEnv(
   // Endpoint workspaces must not inherit the host's real Anthropic key (dev
   // fallback mode) into a process whose base URL is a third-party endpoint.
   if (ws.authMode === 'endpoint') delete base.ANTHROPIC_API_KEY;
+  // A fleet-spawned local claude is a fresh TOP-LEVEL session, not a child of
+  // whatever launched fleet. If fleet was itself started from inside a claude
+  // session (e.g. a `claude` Bash tool ran `npm run dev`), its env carries
+  // claude's child-session markers; inherited unscrubbed, the spawned claude
+  // sees CLAUDE_CODE_CHILD_SESSION and turns transcript saving OFF — no .jsonl
+  // is written, the watcher ingests nothing, and the session shows $0.00 with
+  // no busy attribution (#285). Scrub the markers so it saves its transcript.
+  // (An explicit workspace env override re-appears below via `resolved`.)
+  for (const marker of CLAUDE_CHILD_SESSION_MARKERS) delete base[marker];
   return { ...base, ...backendVars, ...resolved, TERM: 'xterm-256color' };
 }
 

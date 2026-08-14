@@ -22,7 +22,14 @@ import {
 } from './workspaceLifecycle';
 import { contextBarSummary } from './contextBarSource';
 import { busyClaudeIdSet, openSessionMap, type OpenTabRef } from './busySessions';
-import { mergeWaitingSessionIds, waitingFlags } from './waitingSessions';
+import { mergeWaitingSessionIds } from './waitingSessions';
+import {
+  resolveBusyClaudeIds,
+  resolveWaitingClaudeIds,
+  resolveBusyByWorkspace,
+  resolveWaitingByWorkspace,
+  type PeerKind
+} from './sessionStatusMerge';
 import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget, UiPrefs } from '../../preload';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
@@ -242,17 +249,13 @@ export function App() {
     Record<string, boolean>
   >({});
 
-  // Per-workspace busy state (claude actively working in any of its sessions),
-  // detected from the PTY title glyph in TerminalPane → drives the chip.
-  const [busyByWorkspace, setBusyByWorkspace] = useState<Record<string, boolean>>({});
-  const handleBusyChange = useCallback((workspaceId: string, busy: boolean) => {
-    setBusyByWorkspace((prev) => (prev[workspaceId] === busy ? prev : { ...prev, [workspaceId]: busy }));
-  }, []);
-
-  // Per-workspace busy *broker* session ids (the granular form of the busy
-  // flag above), bubbled up from each TerminalPane. Resolved below to the set
-  // of busy *claude* session UUIDs so the left-rail Sessions list can pulse
-  // exactly the running sessions' rows.
+  // Per-workspace busy *broker* session ids, detected from the PTY title glyph
+  // and bubbled up from each TerminalPane. Resolved below to the set of busy
+  // *claude* session UUIDs so the left-rail Sessions list can pulse exactly the
+  // running sessions' rows, and OR'd (via resolveBusyByWorkspace) into the
+  // per-workspace chip. The old per-workspace boolean signal (onBusyChange) is
+  // gone — the chip now derives from these granular ids so peer-status (#286)
+  // can override a stuck glyph per session (#283).
   const [busyBrokerByWorkspace, setBusyBrokerByWorkspace] = useState<Record<string, string[]>>({});
   const handleBusyIds = useCallback((workspaceId: string, ids: string[]) => {
     setBusyBrokerByWorkspace((prev) => {
@@ -279,6 +282,13 @@ export function App() {
   const [busySessionIds, setBusySessionIds] = useState<Set<string>>(new Set());
   // workspaceId -> set of claude session UUIDs blocked on AskUserQuestion.
   const [waitingByWorkspace, setWaitingByWorkspace] = useState<Map<string, Set<string>>>(new Map());
+  // Authoritative claude-session status from peer-status files (#286): claude
+  // session UUID -> busy|idle|waiting. Merged over the title glyph below.
+  const [peerStatus, setPeerStatus] = useState<Map<string, PeerKind>>(new Map());
+  // ws -> (broker session id -> claude session id), resolved in the busy effect
+  // and lifted to state so the peer-status merge can attribute claude ids to
+  // workspaces for the chip.
+  const [claudeMappings, setClaudeMappings] = useState<Map<string, Map<string, string>>>(new Map());
 
   // Latest committee message injected into each workspace (#123). The `nonce`
   // bumps on every inbound so TerminalPane re-shows its `[committee]` toast even
@@ -816,6 +826,7 @@ export function App() {
         })
       );
       if (cancelled) return;
+      setClaudeMappings(mappings);
       const nextBusy = busyClaudeIdSet(busyBrokerByWorkspace, mappings);
       setBusySessionIds((prev) =>
         prev.size === nextBusy.size && [...prev].every((id) => nextBusy.has(id)) ? prev : nextBusy
@@ -855,6 +866,18 @@ export function App() {
       });
     });
     return unsubscribe;
+  }, []);
+
+  // Subscribe to authoritative peer-status pushes (#286). Each push is the full
+  // current snapshot, so replace the map wholesale.
+  useEffect(() => {
+    return window.api.observability.onSessionStatus((statuses) => {
+      setPeerStatus(() => {
+        const next = new Map<string, PeerKind>();
+        for (const s of statuses) next.set(s.claudeSessionId, s.status);
+        return next;
+      });
+    });
   }, []);
 
   if (!apiReady) {
@@ -1148,16 +1171,36 @@ export function App() {
   };
 
   // Union of waiting claude UUIDs across all workspaces — for the Sessions list.
-  const waitingSessionIds = useMemo(() => mergeWaitingSessionIds(waitingByWorkspace), [waitingByWorkspace]);
+  // Peer-status (#286) is authoritative: it extends waiting to all prompt kinds
+  // and backends (the hook set was container/AskUserQuestion-only) and clears a
+  // stale hook entry a session's peer-status says is no longer waiting.
+  const waitingSessionIds = useMemo(
+    () => resolveWaitingClaudeIds(mergeWaitingSessionIds(waitingByWorkspace), peerStatus),
+    [waitingByWorkspace, peerStatus]
+  );
   // Per-workspace boolean — for the workspace chip.
-  const waitingByWorkspaceFlag = useMemo(() => waitingFlags(waitingByWorkspace), [waitingByWorkspace]);
+  const waitingByWorkspaceFlag = useMemo(
+    () => resolveWaitingByWorkspace(waitingByWorkspace, claudeMappings, peerStatus),
+    [waitingByWorkspace, claudeMappings, peerStatus]
+  );
+  // Busy, with peer-status as the authoritative override of the title glyph
+  // (self-heals the stale-busy gap, #283): the glyph governs only sessions the
+  // peer hasn't reported yet.
+  const effectiveBusySessionIds = useMemo(
+    () => resolveBusyClaudeIds(busySessionIds, peerStatus),
+    [busySessionIds, peerStatus]
+  );
+  const effectiveBusyByWorkspace = useMemo(
+    () => resolveBusyByWorkspace(busyBrokerByWorkspace, claudeMappings, peerStatus),
+    [busyBrokerByWorkspace, claudeMappings, peerStatus]
+  );
 
   return (
     <div className={`app${dragging ? ' dragging' : ''}`}>
       <WorkspaceTabStrip
         workspaces={workspaces}
         summaries={summaries}
-        busyByWorkspace={busyByWorkspace}
+        busyByWorkspace={effectiveBusyByWorkspace}
         selectedId={selectedId}
         backendReady={backendReady}
         mockMode={mockMode}
@@ -1182,7 +1225,7 @@ export function App() {
           workspaces={workspaces}
           selectedWorkspaceId={selectedId}
           selectedWorkspace={selectedWorkspace}
-          busySessionIds={busySessionIds}
+          busySessionIds={effectiveBusySessionIds}
           waitingSessionIds={waitingSessionIds}
           openSessions={openSessions}
           collapsed={leftCollapsed}
@@ -1253,7 +1296,6 @@ export function App() {
                         : { ...prev, [workspaceId]: isFresh }
                     );
                   }}
-                  onBusyChange={handleBusyChange}
                   onBusyIdsChange={handleBusyIds}
                   onLiveIdsChange={handleLiveIds}
                   activateRequest={
