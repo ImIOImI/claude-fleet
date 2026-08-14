@@ -69,6 +69,7 @@ import * as loadouts from './loadouts.js';
 import * as loadoutSources from './loadoutSources.js';
 import { ensureAndInstall } from './loadoutInstall.js';
 import { loadoutDir } from './paths.js';
+import { ttlCache } from './ttlCache.js';
 import * as sessions from './sessions.js';
 import {
   listWorkspaceManifests,
@@ -283,7 +284,7 @@ interface WorkspaceCreatePayload {
  * precedence for state/status; manifests provide the user-facing fields
  * (description/labels/color/env/etc.) that don't live on the container.
  */
-async function listAllWorkspaces(): Promise<Workspace[]> {
+async function fetchAllWorkspaces(): Promise<Workspace[]> {
   const [dockerLive, localLive, manifests] = await Promise.all([
     dockerBackend.listLiveWorkspaces(),
     localBackend.listLiveWorkspaces(),
@@ -351,6 +352,24 @@ async function listAllWorkspaces(): Promise<Workspace[]> {
   return result;
 }
 
+// The merged list is the hot path behind workspace:list (the renderer's 5s
+// poll) plus ~7 internal callers, and every uncached call re-lists docker +
+// local backends and re-reads every manifest from disk. A 1s TTL with
+// in-flight dedup collapses those bursts into one backend round-trip.
+// Mutating handlers call invalidateWorkspaceList() so a read issued right
+// after a mutation is fresh; state changed outside the app (docker CLI, a
+// container dying) was only ever observed at poll granularity anyway, so the
+// added ≤1s staleness is immaterial. No caller mutates the shared result.
+const workspaceListCache = ttlCache(fetchAllWorkspaces, 1_000);
+
+async function listAllWorkspaces(): Promise<Workspace[]> {
+  return workspaceListCache.get();
+}
+
+function invalidateWorkspaceList(): void {
+  workspaceListCache.invalidate();
+}
+
 // ── Cross-workspace committee control (#119) ───────────────────────────────
 // The single place pause/unpause effects are performed, shared by the MCP
 // tools (caller id from the per-workspace socket) and the committee IPC
@@ -367,6 +386,7 @@ async function committeePause(callerId: string, targetId: string): Promise<{ id:
     throw new Error(`target ${targetId} has no live container to pause`);
   }
   await backendForKind(target.kind).pauseWorkspace(target.containerId);
+  invalidateWorkspaceList();
   return { id: targetId, paused: true };
 }
 
@@ -379,6 +399,7 @@ async function committeeUnpause(callerId: string, targetId: string): Promise<{ i
   if (!containerId) {
     throw new Error(`target ${targetId} has no container to unpause (it may need recreation)`);
   }
+  invalidateWorkspaceList();
   // Real docker only — mock/local have no in-container broker to wait on.
   if (!MOCK_MODE && kind === 'container') {
     await realDocker.waitForBrokerReady(targetId);
@@ -462,6 +483,7 @@ async function forcePauseExperts(ids: string[]): Promise<void> {
       if (t?.containerId) await backendForKind(t.kind).pauseWorkspace(t.containerId).catch(() => undefined);
     })
   );
+  invalidateWorkspaceList();
 }
 
 async function committeePost(
@@ -893,6 +915,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         lastUsedAt: ws.lastUsedAt
       };
       await writeWorkspaceManifest(spec);
+      invalidateWorkspaceList();
       setWorkspaceDefault(spec.id, spec.mirror.default);
       jsonlWatcher?.registerWorkspace(input.id);
       if (spec.kind === 'local' && spec.workspaceRoot) {
@@ -1040,7 +1063,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     if (!containerId) return null;
     await touchWorkspaceUsed(id);
     // Find the freshly-running workspace in the merged list so the
-    // renderer gets the up-to-date state/status fields.
+    // renderer gets the up-to-date state/status fields (invalidate first —
+    // a cached pre-start list would hand back a stale 'deleted'/'stopped' row).
+    invalidateWorkspaceList();
     const all = await listAllWorkspaces();
     return all.find((w) => w.id === id) ?? null;
   });
@@ -1094,6 +1119,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         workspaceRoot,
         launcher: incomingLauncher
       });
+    invalidateWorkspaceList();
     // Reflect a mirror-default edit in the watcher immediately (don't wait for
     // the next list poll).
     setWorkspaceDefault(spec.id, spec.mirror?.default ?? FACTORY_MIRROR.default);
@@ -1123,11 +1149,15 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
 
   ipcMain.handle('workspace:stop', async (_e, containerId: string) => {
     await clearInputWaitForContainer(containerId);
-    return (await backendFor(containerId)).stopWorkspace(containerId);
+    const result = await (await backendFor(containerId)).stopWorkspace(containerId);
+    invalidateWorkspaceList();
+    return result;
   });
   ipcMain.handle('workspace:pause', async (_e, containerId: string) => {
     await clearInputWaitForContainer(containerId);
-    return (await backendFor(containerId)).pauseWorkspace(containerId);
+    const result = await (await backendFor(containerId)).pauseWorkspace(containerId);
+    invalidateWorkspaceList();
+    return result;
   });
   // Committee pause/unpause (#119). `callerId` is the workspace acting as
   // manager; assertControl gates the effect. Exposed for the committee console
@@ -1220,6 +1250,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     // A saved (no-live) workspace passes its ULID in opts.id; prefer it so the
     // kind resolves even when there's no live containerId.
     const result = await (await backendFor(opts?.id ?? containerId)).removeWorkspace(containerId, opts);
+    invalidateWorkspaceList();
     // Tear down the per-id MCP listener + socket dir (#117). Keyed by workspace
     // id, which lives in opts.id (containerId is the Docker id). Best-effort.
     if (opts?.id) removeWorkspaceSocket(opts.id);
@@ -1294,12 +1325,18 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // ── Loadout library (#16-followup) ───────────────────────────────────────
   ipcMain.handle('loadouts:list', () => loadouts.listLoadouts());
   ipcMain.handle('loadouts:get', (_e, id: string) => loadouts.getLoadout(id));
-  ipcMain.handle('loadouts:install', (_e, workspaceId: string, loadoutId: string, opts?: { source?: string; version?: string; force?: boolean }) =>
-    ensureAndInstall(workspaceId, loadoutId, opts ?? {})
-  );
-  ipcMain.handle('loadouts:uninstall', (_e, workspaceId: string, loadoutId: string) =>
-    loadouts.uninstallLoadout(workspaceId, loadoutId)
-  );
+  // Install/uninstall write `installedLoadouts` onto the manifest, which the
+  // merged workspace list carries — invalidate so the Library reflects it.
+  ipcMain.handle('loadouts:install', async (_e, workspaceId: string, loadoutId: string, opts?: { source?: string; version?: string; force?: boolean }) => {
+    const result = await ensureAndInstall(workspaceId, loadoutId, opts ?? {});
+    invalidateWorkspaceList();
+    return result;
+  });
+  ipcMain.handle('loadouts:uninstall', async (_e, workspaceId: string, loadoutId: string) => {
+    const result = await loadouts.uninstallLoadout(workspaceId, loadoutId);
+    invalidateWorkspaceList();
+    return result;
+  });
   // Reveal a loadout's source folder in the OS file manager (review-modal action).
   ipcMain.handle('loadouts:openFolder', async (_e, id: string) => {
     const dir = loadoutDir(id);
