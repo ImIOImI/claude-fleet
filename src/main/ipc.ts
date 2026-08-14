@@ -1048,6 +1048,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       const containerId = await (await backendFor(workspaceId)).startWorkspace(workspaceId);
       if (!containerId) return null;
       await touchWorkspaceUsed(workspaceId);
+      invalidateWorkspaceList(); // startWorkspace may have brought a stopped container up
       return { containerId };
     }
   );
