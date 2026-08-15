@@ -41,7 +41,7 @@ export class MockServingPorts {
       ports = new Map();
       this.serving.set(id, ports);
     }
-    ports.set(f.port, { port: f.port, pid: f.pid, cmdline: f.cmdline, firstSeenAt: this.now() });
+    ports.set(f.port, { port: f.port, pid: f.pid, cmdline: f.cmdline, sessionId: null, firstSeenAt: this.now() });
     this.emit(id);
   }
 

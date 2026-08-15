@@ -111,6 +111,9 @@ export interface ServingPort {
   port: number;
   pid: number | null;
   cmdline: string | null;
+  /** Broker session id of the tab whose process tree owns the server;
+   *  null when the broker couldn't attribute one (orphan, old image). */
+  sessionId: string | null;
   firstSeenAt: number;
 }
 

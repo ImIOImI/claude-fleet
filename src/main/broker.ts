@@ -158,6 +158,9 @@ export interface BrokerPortInfo {
   port: number;
   pid?: number;
   cmdline?: string;
+  /** Owning broker session id (ppid-ancestry attribution); absent when
+   *  unresolved or on a pre-session-attribution broker. */
+  session?: string;
 }
 
 /**
