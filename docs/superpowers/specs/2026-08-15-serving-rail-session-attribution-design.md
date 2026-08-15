@@ -55,7 +55,12 @@ that session id.
   a session chip (tab title) renders on the row; clicking it selects the
   workspace and focuses that tab. Not found / null → no chip; the row looks
   exactly as today.
-- Fleet scope keeps the workspace dot + name; the chip renders after them.
+- Chip visual (mockup-approved 2026-08-15): bordered pill — `--info`-tinted
+  border and background wash, ▸ glyph, tab title ellipsized at ~110px,
+  radius 99px. Row order in workspace scope:
+  `:port · cmdline · [chip] · uptime · ↗ · ✕`.
+- Fleet scope keeps the workspace dot + name; the chip renders after the
+  cmdline, before the buttons (uptime stays tooltip-only there, as today).
 - **Kill is always visible.** The `pid !== null` gate is removed. The
   two-step confirm ("kill?") is unchanged.
 
