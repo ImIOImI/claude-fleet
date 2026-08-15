@@ -29,7 +29,10 @@ export function useServingSessionNames(
     .sort()
     .join(',');
   useEffect(() => {
-    if (key === '') return;
+    if (key === '') {
+      setNames({});
+      return;
+    }
     let alive = true;
     void Promise.all(
       workspacesNeedingNames(servingPorts).map(async (id) => {

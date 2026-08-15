@@ -57,7 +57,7 @@ test('session chip names the owning tab and click focuses it', async () => {
 
     // Wait for the first session tab to appear (auto-created "main").
     const strip = activePane(window).locator('.session-tab-strip');
-    await strip.locator('.session-tab').first().waitFor();
+    await activePane(window).locator('.session-tab').first().waitFor();
 
     // Read the real tab id from sessions.json (the sessions:read IPC handler
     // in mock mode uses the same file-backed readInventory as production).
@@ -83,7 +83,7 @@ test('session chip names the owning tab and click focuses it', async () => {
 
     // Click focuses the owning tab (activateRequest path).
     await rows.first().locator('.obs-port-chip').click();
-    await expect(window.locator('.session-tab.active')).toContainText(tabName);
+    await expect(activePane(window).locator('.session-tab.active')).toContainText(tabName);
   } finally {
     await app.close();
   }
