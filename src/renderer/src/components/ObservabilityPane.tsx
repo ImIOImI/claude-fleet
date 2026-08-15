@@ -46,6 +46,9 @@ interface Props {
   onOpenPort: (workspaceId: string, port: number) => void;
   /** Kill the server behind a serving port. */
   onKillPort: (workspaceId: string, port: number) => void;
+  /** wsId → brokerSessionId → tab name, for Serving-row session chips. */
+  sessionNames: Record<string, Record<string, string>>;
+  onFocusSession: (workspaceId: string, brokerSessionId: string) => void;
 }
 
 type Scope = 'workspace' | 'fleet';
@@ -67,7 +70,9 @@ export function ObservabilityPane({
   onToggleCollapse,
   servingPorts,
   onOpenPort,
-  onKillPort
+  onKillPort,
+  sessionNames,
+  onFocusSession
 }: Props) {
   const [scope, setScope] = useState<Scope>('workspace');
   // Session-graph metric (cost vs tokens). A pure UI preference, persisted to
@@ -131,7 +136,7 @@ export function ObservabilityPane({
       )}
       <div className="pane-body">
         {scope === 'fleet' ? (
-          <FleetView workspaces={live} summaries={summaries} servingPorts={servingPorts} onOpenPort={onOpenPort} onKillPort={onKillPort} />
+          <FleetView workspaces={live} summaries={summaries} servingPorts={servingPorts} onOpenPort={onOpenPort} onKillPort={onKillPort} sessionNames={sessionNames} onFocusSession={onFocusSession} />
         ) : !workspaceName ? (
           <EmptyState message="No workspace selected." />
         ) : (
@@ -151,11 +156,13 @@ export function ObservabilityPane({
               <PortsSection
                 rows={(servingPorts[workspace.id] ?? []).map((p) => ({
                   ...p,
-                  workspaceId: workspace.id
+                  workspaceId: workspace.id,
+                  sessionName: p.sessionId ? sessionNames[workspace.id]?.[p.sessionId] : undefined
                 }))}
                 showWorkspace={false}
                 onOpen={onOpenPort}
                 onKill={onKillPort}
+                onFocusSession={onFocusSession}
               />
             )}
             {workspace && <WorkspaceBlock workspace={workspace} sharedDir={sharedDir} />}
@@ -253,13 +260,18 @@ function FleetView({
   summaries,
   servingPorts,
   onOpenPort,
-  onKillPort
+  onKillPort,
+  sessionNames,
+  onFocusSession
 }: {
   workspaces: WorkspaceSummary[];
   summaries: Record<string, WorkspaceObservabilitySummary | null>;
   servingPorts: Record<string, ServingPort[]>;
   onOpenPort: (workspaceId: string, port: number) => void;
   onKillPort: (workspaceId: string, port: number) => void;
+  /** wsId → brokerSessionId → tab name, for Serving-row session chips. */
+  sessionNames: Record<string, Record<string, string>>;
+  onFocusSession: (workspaceId: string, brokerSessionId: string) => void;
 }) {
   const rows = workspaces.map((w) => {
     const s = summaries[w.id];
@@ -319,12 +331,14 @@ function FleetView({
             ...p,
             workspaceId: r.id,
             workspaceName: r.name,
-            hue: r.hue
+            hue: r.hue,
+            sessionName: p.sessionId ? sessionNames[r.id]?.[p.sessionId] : undefined
           }))
         )}
         showWorkspace
         onOpen={onOpenPort}
         onKill={onKillPort}
+        onFocusSession={onFocusSession}
       />
     </div>
   );

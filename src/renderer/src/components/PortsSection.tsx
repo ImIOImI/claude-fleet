@@ -7,6 +7,9 @@ export interface PortRowData extends ServingPort {
   /** Fleet scope only: dot hue + name shown before the port. */
   workspaceName?: string;
   hue?: string;
+  /** Tab name of the session whose process tree owns the server; absent when
+   *  the broker couldn't attribute one or the tab has been closed. */
+  sessionName?: string;
 }
 
 /**
@@ -15,18 +18,23 @@ export interface PortRowData extends ServingPort {
  * path as the detection toast), ✕ kills the server via the broker behind a
  * two-step inline confirm. Renders nothing when no port is serving. The
  * kill button always renders; if the broker is too old to support KILLPORT,
- * the failure is surfaced at kill time via toast.
+ * the failure is surfaced at kill time via toast. Each row optionally shows
+ * a session chip naming the owning tab — click focuses that tab (switching
+ * workspace first in fleet scope); absent when the broker couldn't attribute
+ * the port or the tab is gone.
  */
 export function PortsSection({
   rows,
   showWorkspace,
   onOpen,
-  onKill
+  onKill,
+  onFocusSession
 }: {
   rows: PortRowData[];
   showWorkspace: boolean;
   onOpen: (workspaceId: string, port: number) => void;
   onKill: (workspaceId: string, port: number) => void;
+  onFocusSession: (workspaceId: string, brokerSessionId: string) => void;
 }) {
   if (rows.length === 0) return null;
   return (
@@ -39,6 +47,7 @@ export function PortsSection({
           showWorkspace={showWorkspace}
           onOpen={onOpen}
           onKill={onKill}
+          onFocusSession={onFocusSession}
         />
       ))}
     </section>
@@ -49,12 +58,14 @@ function PortRow({
   row,
   showWorkspace,
   onOpen,
-  onKill
+  onKill,
+  onFocusSession
 }: {
   row: PortRowData;
   showWorkspace: boolean;
   onOpen: (workspaceId: string, port: number) => void;
   onKill: (workspaceId: string, port: number) => void;
+  onFocusSession: (workspaceId: string, brokerSessionId: string) => void;
 }) {
   // Two-step kill confirm: first ✕ swaps the actions for a "kill?" chip
   // that reverts after 3s untouched; the second click sends the kill.
@@ -81,6 +92,18 @@ function PortRow({
         <span className="obs-port-cmd" title={row.cmdline}>
           {row.cmdline}
         </span>
+      )}
+      {row.sessionId && row.sessionName && (
+        <button
+          type="button"
+          className="obs-port-chip"
+          title={`Session "${row.sessionName}" started this server — click to focus its tab`}
+          aria-label={`Focus session ${row.sessionName}`}
+          onClick={() => onFocusSession(row.workspaceId, row.sessionId!)}
+        >
+          <span className="obs-port-chip-glyph">▸</span>
+          <span className="obs-port-chip-name">{row.sessionName}</span>
+        </button>
       )}
       {!showWorkspace && (
         <span className="obs-port-up" title={`since ${startedAt}`}>
