@@ -62,6 +62,13 @@ describe('summaryForSession cache', () => {
     expect(summaryForSession(SES)).toBeNull();
   });
 
+  it('the cached summary is frozen — decoration throws instead of corrupting the cache', () => {
+    ingestLine(WS, SES, userLine('u1', 'first'));
+    const s = summaryForSession(SES);
+    expect(Object.isFrozen(s)).toBe(true);
+    expect(() => { (s as unknown as Record<string, unknown>).decorated = true; }).toThrow();
+  });
+
   it('reopening a different DB never serves the previous DB values', () => {
     ingestLine(WS, SES, userLine('u1', 'first'));
     expect(summaryForSession(SES)).not.toBeNull();

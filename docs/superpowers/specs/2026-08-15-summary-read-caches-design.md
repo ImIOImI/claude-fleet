@@ -108,7 +108,7 @@ export function syncKeyedCache<V>(opts: {
   real query per ingest batch, cache hits otherwise.
 - `usage:rollingSpend`: one real sum per 15 s bucket per window size
   (vs every 60 s poll × windows today) and after each ingest batch.
-- MCP `session_summary` (same `db.ts` reads) benefits transparently.
+- NOT the MCP `session_summary` tool — corrected at final review: it runs its own SQL on a private read-only connection (`rodb` in mcpServer.ts) and never touches these `db.ts` reads. No stale-cache risk there either, for the same reason.
 
 ## Non-goals
 
