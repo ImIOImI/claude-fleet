@@ -56,7 +56,6 @@ test('session chip names the owning tab and click focuses it', async () => {
     await window.locator('.ws-chip', { hasText: 'mock-alpha' }).click();
 
     // Wait for the first session tab to appear (auto-created "main").
-    const strip = activePane(window).locator('.session-tab-strip');
     await activePane(window).locator('.session-tab').first().waitFor();
 
     // Read the real tab id from sessions.json (the sessions:read IPC handler
@@ -66,6 +65,16 @@ test('session chip names the owning tab and click focuses it', async () => {
       return { id: inv.sessions[0].id, name: inv.sessions[0].name };
     }, WS);
 
+    // Add a second tab so the first tab becomes inactive — without this the
+    // "click focuses" assertion is vacuous (the tab is already active).
+    const paneStrip = activePane(window).locator('.session-tab-strip');
+    await paneStrip.getByRole('button', { name: 'New session' }).click();
+    // Second tab should now be active; first tab should be inactive.
+    const tabs = paneStrip.locator('.session-tab');
+    await expect(tabs.nth(1)).toHaveClass(/active/);
+    await expect(tabs.nth(0)).not.toHaveClass(/active/);
+
+    // Inject ports: first port attributed to the first (now-inactive) tab.
     await callTestIpc(app, '__test:setServingPorts', [
       WS,
       [
@@ -81,7 +90,8 @@ test('session chip names the owning tab and click focuses it', async () => {
     // Unattributed row: no chip.
     await expect(rows.nth(1).locator('.obs-port-chip')).toHaveCount(0);
 
-    // Click focuses the owning tab (activateRequest path).
+    // Click the chip — this must switch focus from the second tab back to the
+    // first tab, proving the activateRequest path is wired end-to-end.
     await rows.first().locator('.obs-port-chip').click();
     await expect(activePane(window).locator('.session-tab.active')).toContainText(tabName);
   } finally {

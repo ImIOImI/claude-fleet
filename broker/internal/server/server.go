@@ -33,7 +33,8 @@ type Server struct {
 	mgr *session.Manager
 	// ListPorts enumerates listening TCP ports (with best-effort owner
 	// attribution) for LISTPORTS. Field so tests can inject a deterministic
-	// scanner; defaults to portscan.Listening.
+	// scanner; defaults to a closure that calls portscan.Listening then
+	// portscan.AttributeSessions with the manager's current root PIDs.
 	ListPorts func() ([]portscan.Detail, error)
 	// KillPort terminates the process behind a listening port for KILLPORT.
 	// Injectable for tests; defaults to portscan.KillOwner with a 2s grace.

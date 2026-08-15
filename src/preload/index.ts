@@ -105,8 +105,10 @@ export interface WorkspaceObservabilitySummary {
 }
 
 /** One HTTP-serving container port in the rail's Serving section. pid /
- *  cmdline are null when the runner image's broker predates attribution
- *  (the kill affordance is hidden in that case). */
+ *  cmdline are null when the runner image's broker predates attribution;
+ *  sessionId is likewise null on old brokers or orphaned servers. The kill
+ *  affordance is always visible — on a pre-KILLPORT broker the kill fails
+ *  with an error toast ("runner image too old — recreate the workspace"). */
 export interface ServingPort {
   port: number;
   pid: number | null;
