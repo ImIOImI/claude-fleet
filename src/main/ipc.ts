@@ -209,7 +209,10 @@ const portForward: PortForwardManager | null = MOCK_MODE
 // state deterministically through the __test:setServingPorts IPC handle, so
 // the timed fakes must stay silent or they race the injected snapshots.
 const mockPorts: MockServingPorts | null = MOCK_MODE && process.env.CLAUDE_FLEET_E2E !== '1'
-  ? new MockServingPorts(broadcastPortsChanged)
+  ? new MockServingPorts(broadcastPortsChanged, undefined, async (workspaceId) => {
+      const inv = await sessions.readInventory(workspaceId);
+      return inv.sessions[0]?.id ?? null;
+    })
   : null;
 
 // Per-workspace backend dispatch (#16). A workspace's `kind` decides whether
