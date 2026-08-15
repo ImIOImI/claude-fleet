@@ -10,8 +10,8 @@ test('serving ports render in the rail; kill uses a two-step confirm', async () 
     await callTestIpc(app, '__test:setServingPorts', [
       WS,
       [
-        { port: 3000, pid: 42, cmdline: 'node vite dev', firstSeenAt: Date.now() - 60_000 },
-        { port: 8765, pid: null, cmdline: null, firstSeenAt: Date.now() }
+        { port: 3000, pid: 42, cmdline: 'node vite dev', sessionId: null, firstSeenAt: Date.now() - 60_000 },
+        { port: 8765, pid: null, cmdline: null, sessionId: null, firstSeenAt: Date.now() }
       ]
     ]);
 
@@ -30,8 +30,9 @@ test('serving ports render in the rail; kill uses a two-step confirm', async () 
     await expect(rows.first()).toContainText('vite dev');
     await expect(rows.first()).toContainText('up 1m');
 
-    // pid:null row (old broker) has no kill button.
-    await expect(rows.nth(1).locator('.obs-port-btn.kill')).toHaveCount(0);
+    // pid:null row (old broker) still gets a kill button — the failure is
+    // surfaced at kill time via toast, not by hiding the affordance.
+    await expect(rows.nth(1).locator('.obs-port-btn.kill')).toHaveCount(1);
 
     // Kill is two-step: clicking ✕ shows the confirm chip, no kill yet.
     // Playwright's click() auto-hovers, so no explicit hover needed.

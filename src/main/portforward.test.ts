@@ -515,3 +515,35 @@ describe('ServingPort session attribution', () => {
     vi.useRealTimers();
   });
 });
+
+describe('killPort old-broker fallback', () => {
+  it('maps a KILLED rpc timeout to actionable copy', async () => {
+    const mgr = new PortForwardManager({
+      resolveEndpoint: async () => 'sock',
+      makeClient: () =>
+        ({
+          ready: () => Promise.resolve(),
+          close: () => {},
+          listPorts: () => Promise.resolve([{ port: 3000, pid: 42 }]),
+          killPort: () => Promise.reject(new Error('broker: KILLED timed out')),
+          dial: () => Promise.reject(new Error('stub')),
+          closeChannel: () => Promise.resolve()
+        }) as never,
+      onDetected: () => {},
+      onChanged: () => {},
+      excludePorts: () => [],
+      probePort: () => Promise.resolve(true),
+      pollMs: 1000
+    });
+    vi.useFakeTimers();
+    mgr.reconcile(['ws']);
+    await vi.advanceTimersByTimeAsync(1000); // port 3000 enters the snapshot
+    vi.useRealTimers();
+    const res = await mgr.killPort('ws', 3000);
+    expect(res).toEqual({
+      ok: false,
+      error: 'runner image too old — recreate the workspace to enable kill'
+    });
+    mgr.dispose();
+  });
+});

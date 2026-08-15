@@ -14,8 +14,8 @@ export interface PortRowData extends ServingPort {
  * row per HTTP-serving container port; ↗ opens the loopback preview (same
  * path as the detection toast), ✕ kills the server via the broker behind a
  * two-step inline confirm. Renders nothing when no port is serving. The
- * kill button is hidden for rows without a pid (old runner image's broker
- * can't attribute or kill).
+ * kill button always renders; if the broker is too old to support KILLPORT,
+ * the failure is surfaced at kill time via toast.
  */
 export function PortsSection({
   rows,
@@ -110,17 +110,15 @@ function PortRow({
           >
             ↗
           </button>
-          {row.pid !== null && (
-            <button
-              type="button"
-              className="obs-port-btn kill"
-              title="Kill server"
-              aria-label={`Kill server on port ${row.port}`}
-              onClick={() => setConfirming(true)}
-            >
-              ✕
-            </button>
-          )}
+          <button
+            type="button"
+            className="obs-port-btn kill"
+            title="Kill server"
+            aria-label={`Kill server on port ${row.port}`}
+            onClick={() => setConfirming(true)}
+          >
+            ✕
+          </button>
         </>
       )}
     </div>

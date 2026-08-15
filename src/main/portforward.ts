@@ -299,7 +299,13 @@ export class PortForwardManager {
       await client.ready();
       return await client.killPort(port);
     } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      const msg = err instanceof Error ? err.message : String(err);
+      // A pre-KILLPORT broker logs-and-drops the unknown frame, so the RPC
+      // times out. Translate into copy the toast can show as-is.
+      if (/timed out/.test(msg)) {
+        return { ok: false, error: 'runner image too old — recreate the workspace to enable kill' };
+      }
+      return { ok: false, error: msg };
     } finally {
       client?.close();
     }
