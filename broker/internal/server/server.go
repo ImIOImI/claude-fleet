@@ -42,9 +42,15 @@ type Server struct {
 
 func New(mgr *session.Manager) *Server {
 	return &Server{
-		mgr:       mgr,
-		ListPorts: portscan.Listening,
-		KillPort:  func(port uint16) error { return portscan.KillOwner(port, 2*time.Second) },
+		mgr: mgr,
+		ListPorts: func() ([]portscan.Detail, error) {
+			details, err := portscan.Listening()
+			if err == nil {
+				portscan.AttributeSessions(details, mgr.RootPids())
+			}
+			return details, err
+		},
+		KillPort: func(port uint16) error { return portscan.KillOwner(port, 2*time.Second) },
 	}
 }
 
@@ -331,7 +337,7 @@ func (s *Server) dispatch(
 		}
 		resp := proto.PortsResponse{Ports: make([]proto.PortInfo, len(ports))}
 		for i, p := range ports {
-			resp.Ports[i] = proto.PortInfo{Port: p.Port, Pid: p.Pid, Cmdline: p.Cmdline}
+			resp.Ports[i] = proto.PortInfo{Port: p.Port, Pid: p.Pid, Cmdline: p.Cmdline, Session: p.Session}
 		}
 		return cw.writeJSON(proto.FramePorts, resp)
 
