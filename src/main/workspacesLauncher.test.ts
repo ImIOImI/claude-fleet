@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sanitizeLauncher } from './workspaces.js';
+import { sanitizeLauncher, manifestInvariant } from './workspaces.js';
 
 describe('sanitizeLauncher', () => {
   it('passes a well-formed wsl launcher on win32', () => {
@@ -64,5 +64,77 @@ describe('sanitizeLauncher', () => {
     expect(sanitizeLauncher({ mode: 'native' }, 'linux')).toEqual({ mode: 'native' });
     expect(sanitizeLauncher('zsh', 'linux')).toBeUndefined();
     expect(sanitizeLauncher(undefined, 'linux')).toBeUndefined();
+  });
+});
+
+// #323: a wsl launcher with a Windows workspaceRoot is a state both manifest
+// writers claim to reject — and a live install had one anyway, costing ~6 days
+// of silent, total observability loss (#313) with nothing logged. Until the
+// writer hole is found, this is the detector that makes it loud.
+describe('manifestInvariant — #323', () => {
+  const base = {
+    id: '01TEST000000000000000000WS',
+    name: 'ws',
+    labels: [],
+    workspaceSubdir: '',
+    authMode: 'oauth',
+    env: { plain: {}, secretKeys: [] },
+    mirror: { default: 'on', cleanup: 'preserve' },
+    createdAt: 0,
+    lastUsedAt: 0
+  } as unknown as Parameters<typeof manifestInvariant>[0];
+
+  const wsl = {
+    mode: 'wsl' as const,
+    distro: 'Ubuntu-24.04',
+    shell: '/bin/zsh',
+    home: '/home/troy',
+    claudePath: '/home/troy/.local/bin/claude'
+  };
+
+  it('flags the exact live case that produced #313', () => {
+    const v = manifestInvariant({
+      ...base,
+      kind: 'local',
+      launcher: wsl,
+      workspaceRoot: 'C:\\Users\\troyk\\fleet\\01KZKC42R3NZ00F8DRFYZV3XPP'
+    });
+    expect(v).toContain('non-Linux workspaceRoot');
+    expect(v).toContain('C:\\Users\\troyk\\fleet');
+  });
+
+  it('accepts a wsl workspace with a Linux root (the correct shape)', () => {
+    expect(
+      manifestInvariant({ ...base, kind: 'local', launcher: wsl, workspaceRoot: '/home/troy/proj' })
+    ).toBeNull();
+  });
+
+  // A Windows root is normal and correct for these — the invariant is
+  // specifically about wsl, where wsl.exe rewrites the cwd underneath us.
+  it('does not flag a native local workspace with a Windows root', () => {
+    expect(
+      manifestInvariant({
+        ...base,
+        kind: 'local',
+        launcher: { mode: 'native' },
+        workspaceRoot: 'C:\\Users\\troyk\\fleet\\ws'
+      })
+    ).toBeNull();
+  });
+
+  it('does not flag a local workspace with no launcher at all', () => {
+    expect(
+      manifestInvariant({ ...base, kind: 'local', workspaceRoot: 'C:\\Users\\troyk\\fleet\\ws' })
+    ).toBeNull();
+  });
+
+  it('does not flag a container workspace (its root is always derived)', () => {
+    expect(
+      manifestInvariant({
+        ...base,
+        kind: 'container',
+        workspaceRoot: 'C:\\Users\\troyk\\fleet\\ws'
+      })
+    ).toBeNull();
   });
 });

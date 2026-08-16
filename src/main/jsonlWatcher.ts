@@ -29,6 +29,27 @@ import { ingestLine } from './db.js';
 import { effectiveForClaudeSession } from './mirrorPolicy.js';
 import { perfSpan } from './perf.js';
 
+/**
+ * Fire-and-forget structured log for watcher lifecycle events (#323).
+ *
+ * `errorLog` imports electron, and this module is loaded directly by unit tests
+ * that don't mock it — so the import is lazy and every failure is swallowed.
+ * Logging about the watcher must never be able to break the watcher.
+ */
+function logWatcherEvent(payload: {
+  type: string;
+  message: string;
+  level?: 'error' | 'warn' | 'info';
+  workspaceId?: string;
+  extra?: Record<string, unknown>;
+}): void {
+  void import('./errorLog.js')
+    .then(({ logError }) => logError({ source: 'main', ...payload }))
+    .catch(() => {
+      /* no logger available (unit tests) — nothing useful to do */
+    });
+}
+
 const PROJECTS_SUBDIR = join('projects', '-workspace');
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -183,14 +204,42 @@ export class JsonlWatcher extends EventEmitter {
   }
 
   /** Register a transcript dir that needs POLLING (no inotify — e.g. a
-   *  \\wsl.localhost share for a wsl-launcher workspace, #253). */
+   *  \\wsl.localhost share for a wsl-launcher workspace, #253).
+   *
+   *  Logs the dir it settles on, and no longer swallows a failed mkdir (#323). */
   registerPolledLocalDir(id: string, dir: string): void {
     if (!this.watcher) return; // same started-gate as registerLocalWorkspace
     if (this.hostDirs.has(dir)) return;
     this.hostDirs.set(dir, id);
     this.watchedDirs.add(dir);
     this.polledDirs.add(dir);
-    try { mkdirSync(dir, { recursive: true }); } catch { /* see registerWorkspace */ }
+    // Record WHICH directory this workspace is polled at (#323). A "shows
+    // nothing in either rail" report is otherwise undiagnosable from logs
+    // alone; with this line you compare it against where claude actually
+    // writes, and the answer is immediate — that is how #313 was found.
+    logWatcherEvent({
+      type: 'watcher-polled-dir',
+      level: 'info',
+      message: `polling ${dir}`,
+      workspaceId: id,
+      extra: { dir }
+    });
+    try {
+      mkdirSync(dir, { recursive: true });
+    } catch (err) {
+      // Previously swallowed, and that silence is what let #313 run for ~6
+      // days: this mkdir FAILED over the \\wsl.localhost 9P share, so the app
+      // polled a path that never existed and never said so. It also means a
+      // "does the watch dir exist?" health check proves nothing — we create it
+      // ourselves — which makes the failure to create it the signal worth having.
+      logWatcherEvent({
+        type: 'watcher-dir-mkdir-failed',
+        level: 'warn',
+        message: `could not create the directory to poll: ${dir}`,
+        workspaceId: id,
+        extra: { dir, err: String(err) }
+      });
+    }
     void this.ensurePollWatcher().then((w) => {
       // Skip if stopped or unregistered while chokidar was loading.
       if (w && this.polledDirs.has(dir)) w.add(dir);
