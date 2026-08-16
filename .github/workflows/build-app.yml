@@ -6,24 +6,65 @@ name: build-app
 # - Version tags (v*):   build, then publish a DRAFT GitHub Release with the
 #                        installers attached. Binaries are UNSIGNED.
 
+# Path filtering deliberately does NOT live in `on.pull_request.paths` (#303).
+# A workflow skipped by a path filter never creates its check runs at all, so
+# the `e2e (playwright)` / `e2e (playwright, windows)` contexts the `pass ci`
+# ruleset requires stayed Pending forever and docker/docs-only PRs could never
+# merge. This workflow therefore runs on EVERY pull request, and the filtering
+# happens in the `changes` job below — see the aggregator jobs at the bottom
+# for how the required contexts always report.
+
 on:
   push:
     tags: ['v*']
   pull_request:
-    paths:
-      - 'src/**'
-      - 'tests/**'
-      - 'playwright.config.ts'
-      - 'package.json'
-      - 'package-lock.json'
-      - 'electron-builder.yml'
-      - 'electron.vite.config.ts'
-      - '.github/workflows/build-app.yml'
   workflow_dispatch:
 
 jobs:
+  # Which parts of the tree changed. Everything expensive keys off this instead
+  # of a workflow-level path filter. Fails SAFE: anything we can't determine
+  # (non-PR event, missing merge base) runs the full pipeline.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need both PR endpoints to diff against the merge base
+
+      - name: Detect code changes
+        id: filter
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "non-PR event (${{ github.event_name }}) — building everything"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          head='${{ github.event.pull_request.head.sha }}'
+          base=$(git merge-base '${{ github.event.pull_request.base.sha }}' "$head" 2>/dev/null || true)
+          if [ -z "$base" ]; then
+            echo "no merge base found — building everything"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only "$base" "$head")
+          echo "changed files:"; echo "$changed" | sed 's/^/  /'
+          # Mirrors the old on.pull_request.paths list.
+          if echo "$changed" | grep -qE '^(src/|tests/|playwright\.config\.ts$|package\.json$|package-lock\.json$|electron-builder\.yml$|electron\.vite\.config\.ts$|\.github/workflows/build-app\.yml$)'; then
+            echo "→ code paths touched; running the full pipeline"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "→ no code paths touched; skipping build/e2e"
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
   build:
     name: build (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -100,8 +141,10 @@ jobs:
   # than in a container. No spec spawns a Docker container (mock fleet or
   # on-disk seed data), so no Docker daemon is required. Linux-only for now:
   # Xvfb is Linux-only, and one GH-hosted Linux runner covers the suite.
-  e2e:
-    name: e2e (playwright)
+  e2e-linux:
+    name: e2e run (playwright)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -161,8 +204,10 @@ jobs:
   # reliably running when the job begins — so a "Wait for the Docker engine"
   # step gates the run to avoid an intermittent `ENOENT //./pipe/docker_engine`
   # flake (#243).
-  e2e-windows:
-    name: e2e (playwright, windows)
+  e2e-windows-run:
+    name: e2e run (playwright, windows)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
     # WSL seeding + Electron e2e normally fit in ~15 min; bound runaway hangs
     # (a wedged wsl.exe blocks synchronously, outside Playwright's timeouts).
@@ -259,6 +304,64 @@ jobs:
           name: playwright-results-windows
           path: test-results/
           if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Required-context aggregators (#303).
+  #
+  # These two carry the EXACT names the `pass ci` ruleset requires, run on every
+  # PR (`if: always()`), and simply mirror the real run's outcome. That gives a
+  # docker/docs-only PR a green required check in ~10 s instead of a permanent
+  # Pending, without weakening the gate: a genuine e2e failure still fails here.
+  #
+  # Why not the no-op twin workflow with `paths-ignore`: `paths` and
+  # `paths-ignore` are not complements, so a PR touching BOTH code and docs
+  # matches both filters and produces two check runs with the same name — the
+  # no-op passing in seconds while the real suite is still running. Keeping one
+  # job per required name avoids that ambiguity entirely.
+  #
+  # `changes` is checked explicitly: if IT fails, the run job is skipped, and
+  # treating that skip as success would silently green a broken pipeline.
+  e2e:
+    name: e2e (playwright)
+    needs: [changes, e2e-linux]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mirror the e2e run outcome
+        shell: bash
+        run: |
+          gate='${{ needs.changes.result }}'
+          run='${{ needs.e2e-linux.result }}'
+          echo "changes=$gate  e2e run=$run"
+          if [ "$gate" != "success" ]; then
+            echo "::error::the changes gate concluded '$gate'"; exit 1
+          fi
+          case "$run" in
+            success) echo "e2e passed"; exit 0 ;;
+            skipped) echo "no code paths changed — e2e not required for this PR"; exit 0 ;;
+            *) echo "::error::e2e run concluded '$run'"; exit 1 ;;
+          esac
+
+  e2e-windows:
+    name: e2e (playwright, windows)
+    needs: [changes, e2e-windows-run]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mirror the e2e run outcome
+        shell: bash
+        run: |
+          gate='${{ needs.changes.result }}'
+          run='${{ needs.e2e-windows-run.result }}'
+          echo "changes=$gate  e2e run=$run"
+          if [ "$gate" != "success" ]; then
+            echo "::error::the changes gate concluded '$gate'"; exit 1
+          fi
+          case "$run" in
+            success) echo "e2e passed"; exit 0 ;;
+            skipped) echo "no code paths changed — e2e not required for this PR"; exit 0 ;;
+            *) echo "::error::e2e run concluded '$run'"; exit 1 ;;
+          esac
 
   release:
     name: draft release
