@@ -62,14 +62,12 @@ jobs:
             echo "code=false" >> "$GITHUB_OUTPUT"
           fi
   # Unit suite (vitest). Until #311, `vitest` appeared nowhere in this workflow:
-  # ~790 tests ran on developer machines only and protected nothing on main. It
-  # sits alongside the e2e jobs on the same `changes` gate.
-  #
-  # NOTE: this job is NOT in the `pass ci` ruleset. If you make it required, give
-  # it the aggregator treatment the e2e contexts get below — a gated job that is
-  # required but skipped by the gate reproduces the #303 deadlock exactly.
-  unit:
-    name: unit (vitest)
+  # ~790 tests ran on developer machines only and protected nothing on main.
+  # Required via the `unit (vitest)` aggregator at the bottom (#318) — this job
+  # is gated, so it can't carry the required name itself without reproducing the
+  # #303 deadlock on docs-only PRs.
+  unit-run:
+    name: unit run (vitest)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
@@ -379,6 +377,27 @@ jobs:
   #
   # `changes` is checked explicitly: if IT fails, the run job is skipped, and
   # treating that skip as success would silently green a broken pipeline.
+  unit:
+    name: unit (vitest)
+    needs: [changes, unit-run]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mirror the unit run outcome
+        shell: bash
+        run: |
+          gate='${{ needs.changes.result }}'
+          run='${{ needs.unit-run.result }}'
+          echo "changes=$gate  unit run=$run"
+          if [ "$gate" != "success" ]; then
+            echo "::error::the changes gate concluded '$gate'"; exit 1
+          fi
+          case "$run" in
+            success) echo "unit suite passed"; exit 0 ;;
+            skipped) echo "no code paths changed — unit suite not required for this PR"; exit 0 ;;
+            *) echo "::error::unit run concluded '$run'"; exit 1 ;;
+          esac
+
   e2e:
     name: e2e (playwright)
     needs: [changes, e2e-linux]
