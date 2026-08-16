@@ -168,16 +168,46 @@ export function wrapSpawnForLauncher(
   };
 }
 
+/**
+ * The cwd claude will ACTUALLY have inside the distro, given a stored
+ * `workspaceRoot` (#313).
+ *
+ * This is not always the stored string. `wrapSpawnForLauncher` hands the root
+ * to `wsl.exe --cd` (above), and wsl.exe rewrites a Windows path into its
+ * `/mnt/<drive>` automount form before claude ever sees it — so a root of
+ * `C:\Users\t\fleet\ws` lands claude in `/mnt/c/Users/t/fleet/ws`. Anything
+ * deriving a path from claude's cwd (its `~/.claude/projects/<encoded-cwd>`
+ * dir, most of all) has to apply the same rewrite or it describes a directory
+ * that will never exist.
+ *
+ * A path already in Linux form — the normal case, since both manifest writers
+ * run `normalizeAndValidateWslRoot` — passes through untouched.
+ */
+export function wslInDistroPath(workspaceRoot: string): string {
+  // A \\wsl.localhost\<distro>\… root is the same story one layer out: claude
+  // sees the plain Linux path, not the UNC the host uses to reach it.
+  const unc = uncToLinuxPath(workspaceRoot);
+  if (unc) return unc.path;
+  return windowsPathToWslPath(workspaceRoot) ?? workspaceRoot;
+}
+
 /** \\wsl.localhost transcript dir for a wsl-launcher workspace: the in-distro
  *  ~/.claude/projects/<encoded-cwd>, viewed over the 9P share. `encode` is
- *  paths.ts's encodeClaudeProjectDir, injected to keep this module pure. */
+ *  paths.ts's encodeClaudeProjectDir, injected to keep this module pure.
+ *  The cwd is normalized to its in-distro form first (#313) — encoding the
+ *  stored Windows path made the watcher poll a directory claude never writes
+ *  to, so such a workspace ingested nothing and showed up in neither the
+ *  observability rail nor the session rail. */
 export function wslLocalProjectsDir(
   distro: string,
   home: string,
   workspaceRoot: string,
   encode: (p: string) => string
 ): string {
-  return linuxPathToUnc(distro, `${home}/.claude/projects/${encode(workspaceRoot)}`);
+  return linuxPathToUnc(
+    distro,
+    `${home}/.claude/projects/${encode(wslInDistroPath(workspaceRoot))}`
+  );
 }
 
 /** \\wsl.localhost peer-status dir for a wsl-launcher workspace: the in-distro
