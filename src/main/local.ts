@@ -28,8 +28,18 @@ import { app } from 'electron';
 import type * as NodePty from 'node-pty';
 import type { Backend } from './backend.js';
 import { findClaude, CLAUDE_NOT_FOUND_MESSAGE, cachedNullableResolver } from './claudeResolve.js';
-import { mcpSocketDir, mcpWorkspaceSocketPath } from './mcpSocket.js';
-import { ensureLocalBridgeScript, localMcpServerEntry, wslMcpServerEntry } from './mcpLocalBridge.js';
+import {
+  mcpSocketDir,
+  mcpWorkspaceSocketPath,
+  mcpWorkspaceTokenPath,
+  MCP_TCP_PORT
+} from './mcpSocket.js';
+import {
+  ensureLocalBridgeScript,
+  localMcpServerEntry,
+  wslMcpServerEntry,
+  type McpTransport
+} from './mcpLocalBridge.js';
 import {
   wrapSpawnForLauncher,
   wslPidFile,
@@ -586,27 +596,58 @@ export async function attachPty(
 }
 
 /**
+ * The transport a local workspace's bridge should use, plus the file whose
+ * existence proves the server side is ready for it (#295).
+ *
+ * Unix hosts: a per-workspace listener at `<userData>/mcp/<id>/mcp.sock` — the
+ * socket both addresses the server and *is* the caller identity (#117).
+ * Windows hosts: `listen()` on a unix socket is impossible, so the server runs
+ * one loopback-TCP listener for every workspace and identity rides on the
+ * per-workspace token at `<userData>/mcp/<id>/token`. Gating on `mcp.sock`
+ * there — which is never created — is what left Windows local workspaces with
+ * no fleet MCP at all.
+ *
+ * Exported for tests.
+ */
+export function localMcpTransport(
+  userData: string,
+  id: string,
+  platform: NodeJS.Platform = process.platform
+): { transport: McpTransport; readyPath: string } {
+  if (platform === 'win32') {
+    const tokenPath = mcpWorkspaceTokenPath(userData, id);
+    return {
+      transport: { kind: 'tcp', host: '127.0.0.1', port: MCP_TCP_PORT, tokenPath },
+      readyPath: tokenPath
+    };
+  }
+  const socketPath = mcpWorkspaceSocketPath(userData, id);
+  return { transport: { kind: 'unix', socketPath }, readyPath: socketPath };
+}
+
+/**
  * Wire the read-only fleet MCP server (#12) for a local workspace via a
  * session-scoped `--mcp-config` file (auto-trusted, no approval gate, and never
  * touches the user's real ~/.claude.json). Points claude at our Electron-as-node
- * bridge. Skipped (returns undefined) if the MCP server socket isn't present.
+ * bridge. Skipped (returns undefined) if the server side isn't up yet.
  */
 async function ensureMcpConfig(
   id: string,
   launcher: WorkspaceLauncher
 ): Promise<string | undefined> {
   const userData = app.getPath('userData');
-  // Per-workspace socket (#117). The listener is brought up at workspace:create
-  // / startup; if it isn't present yet, skip wiring MCP for this attach.
-  const socketPath = mcpWorkspaceSocketPath(userData, id);
-  if (!(await stat(socketPath).catch(() => null))) return undefined;
+  // Per-workspace socket or token (#117/#295). Both are brought up by
+  // `ensureWorkspaceSocket` at workspace:create / startup; if this workspace's
+  // one isn't on disk yet, skip wiring MCP for this attach.
+  const { transport, readyPath } = localMcpTransport(userData, id);
+  if (!(await stat(readyPath).catch(() => null))) return undefined;
   // The bridge script is shared (host-only, never bind-mounted) — it lives in
   // the parent mcp dir and is referenced by absolute host path.
   const bridgePath = await ensureLocalBridgeScript(mcpSocketDir(userData));
   const entry =
     launcher.mode === 'wsl'
-      ? wslMcpServerEntry(process.execPath, bridgePath, socketPath)
-      : localMcpServerEntry(process.execPath, bridgePath, socketPath);
+      ? wslMcpServerEntry(process.execPath, bridgePath, transport)
+      : localMcpServerEntry(process.execPath, bridgePath, transport);
   // wsl + untranslatable exe path (or interop off, which surfaces as the
   // bridge failing) ⇒ skip wiring; the session works without fleet tools.
   if (!entry) return undefined;

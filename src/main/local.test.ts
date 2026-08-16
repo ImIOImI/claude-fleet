@@ -3,6 +3,7 @@
 // while oauth/apikey workspaces do, and that an explicit workspace env entry
 // for ANTHROPIC_API_KEY is still honoured on endpoint workspaces.
 
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock electron so the module loads outside Electron.
@@ -42,7 +43,7 @@ vi.mock('./endpoints.js', () => ({
 vi.mock('node-pty', () => ({}));
 
 // Dynamic import AFTER mocks are registered.
-const { buildEnv } = await import('./local.js');
+const { buildEnv, localMcpTransport } = await import('./local.js');
 
 const fakeEnv = (plain: Record<string, string> = {}) => ({
   env: { plain, secretKeys: [] as string[] }
@@ -117,5 +118,39 @@ describe('buildEnv — claude child-session markers (#285)', () => {
       authMode: 'oauth'
     });
     expect(env.CLAUDE_CODE_CHILD_SESSION).toBe('keep-me');
+  });
+});
+
+// #295: on Windows the MCP server never creates a per-workspace `mcp.sock`
+// (it can't listen() on one) — it mints a token and fronts every workspace
+// with one loopback-TCP listener. ensureMcpConfig gated on the socket file,
+// so on Windows the gate could never pass and local workspaces (native AND
+// wsl) silently got no fleet MCP at all.
+describe('localMcpTransport — #295', () => {
+  const UD = '/ud';
+
+  it('windows: TCP + token, gated on the token file (not the never-created socket)', () => {
+    const { transport, readyPath } = localMcpTransport(UD, 'ws1', 'win32');
+    expect(transport).toEqual({
+      kind: 'tcp',
+      host: '127.0.0.1',
+      port: 7071,
+      tokenPath: join(UD, 'mcp', 'ws1', 'token')
+    });
+    expect(readyPath).toBe(join(UD, 'mcp', 'ws1', 'token'));
+    expect(readyPath).not.toContain('mcp.sock');
+  });
+
+  it('posix: per-workspace unix socket, gated on the socket', () => {
+    const { transport, readyPath } = localMcpTransport(UD, 'ws1', 'linux');
+    expect(transport).toEqual({ kind: 'unix', socketPath: join(UD, 'mcp', 'ws1', 'mcp.sock') });
+    expect(readyPath).toBe(join(UD, 'mcp', 'ws1', 'mcp.sock'));
+  });
+
+  it('keeps the per-workspace leaf dir on both platforms (caller identity, #117)', () => {
+    for (const p of ['win32', 'linux'] as const) {
+      expect(localMcpTransport(UD, 'ws-a', p).readyPath).toContain(join('mcp', 'ws-a'));
+      expect(localMcpTransport(UD, 'ws-b', p).readyPath).toContain(join('mcp', 'ws-b'));
+    }
   });
 });
