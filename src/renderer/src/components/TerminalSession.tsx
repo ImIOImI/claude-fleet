@@ -183,6 +183,9 @@ export function TerminalSession({
   onRefreshUnresolved,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  // The live xterm, so effects outside the attach effect can force a repaint
+  // without reaching into its closure (#268).
+  const termRef = useRef<Terminal | null>(null);
   // Bumped when the user clicks "Start new session" / "Retry" after a
   // session ends. The effect deps on containerId+sessionEpoch, so a new
   // attach happens with a fresh xterm instance (no stale state from the
@@ -236,6 +239,7 @@ export function TerminalSession({
       scrollSensitivity: 3,
       fastScrollSensitivity: 6
     });
+    termRef.current = term;
     const fit = new FitAddon();
     term.loadAddon(fit);
     // Unicode 11+ width tables — without this xterm uses Unicode 6 widths,
@@ -316,6 +320,17 @@ export function TerminalSession({
         const cur = `${term.cols}x${term.rows}`;
         if (cur === prev) return; // two frames agree — the pane has settled
         prev = cur;
+      }
+    };
+
+    /** Redraw every visible row from the buffer (#268). Best-effort: a torn-down
+     *  renderer must never fault the terminal. */
+    const forceRepaint = (): void => {
+      if (disposed) return;
+      try {
+        term.refresh(0, term.rows - 1);
+      } catch {
+        /* renderer disposed mid-frame */
       }
     };
 
@@ -612,6 +627,18 @@ export function TerminalSession({
             // pty:resize is best-effort — failing to resize doesn't
             // justify killing the terminal.
           }
+          // Repaint every visible row from the buffer after a real size
+          // change (#268). The reported symptom is stray glyphs that overlap
+          // the text and — the detail that identifies the cause — do NOT go
+          // away as you scroll. Buffer content scrolls with the content, so
+          // anything that stays put is a cell xterm never repainted: the
+          // buffer is right and the paint is stale. With the DOM renderer
+          // (no canvas/webgl addon here) `refresh` is what forces rows to be
+          // redrawn, and it was previously only ever called once, after the
+          // symbol webfonts load. Resizes — including resizes that land while
+          // a pane sits `visibility: hidden`, which is when xterm's dirty-row
+          // tracking has the least chance of being right — got none.
+          forceRepaint();
         }
         // A real post-attach size change while still armed ⇒ debounce a
         // single Ctrl+L once resizes settle, then disarm. Fires at most
@@ -653,6 +680,7 @@ export function TerminalSession({
       linkProviderDisposable.dispose();
       if (ptyHandleId) window.api.pty.detach(ptyHandleId);
       if (ptyHandleRef.current === ptyHandleId) ptyHandleRef.current = null;
+      if (termRef.current === term) termRef.current = null;
       term.dispose();
     };
   }, [containerId, sessionId, resumeOf, sessionEpoch, paused]);
@@ -717,6 +745,17 @@ export function TerminalSession({
     const id = requestAnimationFrame(() => {
       const evt = new Event('resize');
       host.dispatchEvent(evt);
+      // Panes are always-mounted and get resized while hidden, so a pane can
+      // come back carrying rows xterm last painted at a different size (#268).
+      // The fit above only redraws what xterm thinks is dirty; force the rest.
+      const t = termRef.current;
+      if (t) {
+        try {
+          t.refresh(0, t.rows - 1);
+        } catch {
+          /* disposed between frames */
+        }
+      }
     });
     return () => cancelAnimationFrame(id);
   }, [visible]);
