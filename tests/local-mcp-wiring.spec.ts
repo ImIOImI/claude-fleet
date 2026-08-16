@@ -91,6 +91,12 @@ test('Local MCP wiring: the app-written mcp-config drives a working bridge (#295
       workspaceRoot: tmpdir(),
       workspaceSubdir: '',
       kind: 'local',
+      // Explicit rather than relying on attachPty's `?? { mode: 'native' }`
+      // fallback: on windows-latest this is what makes the run exercise the
+      // NATIVE (ConPTY) launcher and `localMcpServerEntry` — the other half of
+      // what #295 broke. The wsl launcher takes a different entry builder and
+      // is called out at the top of this file.
+      launcher: { mode: 'native' },
       authMode: 'oauth',
       env: { plain: {}, secretKeys: [] },
       createdAt: Date.now(),
@@ -152,6 +158,16 @@ test('Local MCP wiring: the app-written mcp-config drives a working bridge (#295
       }
     ).mcpServers['claude-fleet-state'];
     expect(entry).toBeTruthy();
+
+    // Native launcher, so the command is the app's own exe verbatim — a path
+    // spawnable on THIS side of the boundary, not the `/mnt/c/…` automount
+    // translation `wslMcpServerEntry` produces for in-distro claude. Pins that
+    // this run really is the native path and hasn't drifted onto the wsl one.
+    // (Not compared against the runner's own `process.execPath`: that's node
+    // here but the Electron binary in the app's main process.)
+    expect(entry.command.startsWith('/mnt/')).toBe(false);
+    expect(existsSync(entry.command), `bridge command not spawnable: ${entry.command}`).toBe(true);
+    expect(entry.env.ELECTRON_RUN_AS_NODE).toBe('1');
 
     // 2. The transport matches what THIS host's MCP server actually offers,
     //    and the readiness file it names is really on disk.
