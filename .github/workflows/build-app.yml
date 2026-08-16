@@ -74,19 +74,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Node 22, NOT the 20 the other jobs use. vitest loads better-sqlite3 in
-      # process, and better-sqlite3@13 declares `engines: { node: '>=22' }` —
-      # under node 20 its native binding fails to load and takes the whole
-      # vitest worker with it ("Worker exited unexpectedly", which is how this
-      # first showed up: exactly the 17 db/watcher/perf/transcript specs that
-      # open the DB died, the other 90 files passed).
-      #
-      # 22 also lines up with the Node that Electron 43 bundles, i.e. the one
-      # these modules actually run under in the app. The build/e2e jobs stay on
-      # 20 because there node is only the toolchain — the natives are loaded by
-      # Electron's own runtime, not by the runner's node. (npm does warn
-      # EBADENGINE for @electron/rebuild, @electron/get and extract-zip on 20;
-      # worth revisiting the whole workflow's node version separately.)
+      # Node 22 everywhere now (#318 follow-up). This job is why: vitest loads
+      # better-sqlite3 in process, and better-sqlite3@13 declares
+      # `engines: { node: '>=22' }` — under node 20 its native binding failed to
+      # load and took the whole vitest worker with it ("Worker exited
+      # unexpectedly": exactly the 17 db/watcher/perf/transcript specs that open
+      # the DB, while the other 90 files passed).
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -137,7 +130,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       # keytar's prebuilt binary dynamically links libsecret at runtime;
@@ -207,7 +200,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       # libsecret for keytar (links it at runtime); build-essential/python3 are
@@ -273,7 +266,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       # Same Windows install dance as the build job: skip node-ABI native builds,

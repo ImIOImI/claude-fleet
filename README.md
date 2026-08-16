@@ -93,7 +93,7 @@ Drag OS files, pasted images, web content, or text fragments onto the window and
 
 ## Getting started
 
-**Prerequisites:** Node 20+ and a reachable Docker daemon (Docker Desktop with WSL2 integration, or native `dockerd`).
+**Prerequisites:** Node 22+ and a reachable Docker daemon (Docker Desktop with WSL2 integration, or native `dockerd`).
 
 ```bash
 npm install

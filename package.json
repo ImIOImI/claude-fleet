@@ -1,6 +1,9 @@
 {
   "name": "claude-fleet",
   "version": "0.12.1",
+  "engines": {
+    "node": ">=22"
+  },
   "description": "Desktop app for managing a fleet of Claude Code container instances",
   "main": "out/main/index.cjs",
   "author": "Troy Knapp",
