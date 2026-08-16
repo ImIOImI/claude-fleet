@@ -630,11 +630,20 @@ export function localMcpTransport(
  * session-scoped `--mcp-config` file (auto-trusted, no approval gate, and never
  * touches the user's real ~/.claude.json). Points claude at our Electron-as-node
  * bridge. Skipped (returns undefined) if the server side isn't up yet.
+ *
+ * Exported for tests.
  */
-async function ensureMcpConfig(
+export async function ensureMcpConfig(
   id: string,
   launcher: WorkspaceLauncher
 ): Promise<string | undefined> {
+  // Interop off ⇒ don't wire at all (#259). The wsl bridge reaches the host by
+  // exec'ing the app's own .exe from inside the distro, which is precisely what
+  // `wsl.conf [interop] enabled=false` forbids — so wiring it would only put a
+  // permanently-failed `claude-fleet-state` in the user's `/mcp` list. The
+  // design (local-launcher-wsl §C) always called for skipping here; the flag
+  // just wasn't persisted to act on. Undefined (never probed) still wires.
+  if (launcher.mode === 'wsl' && launcher.interopEnabled === false) return undefined;
   const userData = app.getPath('userData');
   // Per-workspace socket or token (#117/#295). Both are brought up by
   // `ensureWorkspaceSocket` at workspace:create / startup; if this workspace's
@@ -648,8 +657,9 @@ async function ensureMcpConfig(
     launcher.mode === 'wsl'
       ? wslMcpServerEntry(process.execPath, bridgePath, transport)
       : localMcpServerEntry(process.execPath, bridgePath, transport);
-  // wsl + untranslatable exe path (or interop off, which surfaces as the
-  // bridge failing) ⇒ skip wiring; the session works without fleet tools.
+  // wsl + untranslatable exe path (e.g. the app installed on a UNC share, which
+  // has no /mnt/<drive> form) ⇒ skip wiring; the session works without fleet
+  // tools. Interop-off is handled up front, above.
   if (!entry) return undefined;
   const config = { mcpServers: { 'claude-fleet-state': entry } };
   const configPath = join(workspaceStateDir(id), 'mcp-config.json');

@@ -1,3 +1,7 @@
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import { decodeWsl, parseDistroList, listWslDistros, probeWslDistro, type ProbeDeps } from './wslProbe.js';
 
@@ -69,6 +73,77 @@ describe('probeWslDistro', () => {
     expect(p.shells).toEqual(['/bin/bash', '/usr/bin/zsh']);
     expect(p.interopEnabled).toBe(true);
     expect(p.claudePath).toBe('/home/troy/.local/bin/claude');
+  });
+
+  // #259: the old check was `test -f …/WSLInterop`, which false-negatived on
+  // two real configurations — a distro that registers the handler under the
+  // newer `WSLInterop-late` name, and one where the entry exists but is
+  // switched off.
+  //
+  // These run the probe's ACTUAL shell one-liner through a real `sh`, with the
+  // absolute `/proc/sys/fs/binfmt_misc` prefix rewritten to a temp dir holding
+  // fake binfmt entries. A fake that just returns 'yes' would only be testing
+  // itself — reverting the probe to the legacy single-name check has to make
+  // these fail, and with a real interpreter it does.
+
+  describe('interop detection (#259)', () => {
+    const BINFMT = '/proc/sys/fs/binfmt_misc';
+
+    /** Distro whose binfmt dir holds `entries` (name → first line of the file). */
+    const interopDeps = (entries: Record<string, string>): ProbeDeps => {
+      const dir = mkdtempSync(join(tmpdir(), 'binfmt-'));
+      for (const [name, body] of Object.entries(entries)) {
+        writeFileSync(join(dir, name), `${body}\ninterpreter /init\n`);
+      }
+      return {
+        execBuf: async () => ({ stdout: Buffer.alloc(0) }),
+        exec: async (_file, args) => {
+          const script = args[args.length - 1];
+          if (script.includes('getent passwd')) return { stdout: '/bin/bash\n' };
+          if (script.includes('echo "$HOME"')) return { stdout: '/home/x\n' };
+          if (script.includes('/etc/shells')) return { stdout: '/bin/bash\n' };
+          if (script.includes('binfmt_misc')) {
+            // Real execution of the real script, rooted at the fake dir.
+            const rooted = script.split(BINFMT).join(dir);
+            return { stdout: execFileSync('sh', ['-c', rooted], { encoding: 'utf8' }) };
+          }
+          return { stdout: '' }; // claude lookups → not found
+        }
+      };
+    };
+
+    it('detects interop registered under the legacy WSLInterop name', async () => {
+      const p = await probeWslDistro('Ubuntu', interopDeps({ WSLInterop: 'enabled' }));
+      expect(p.interopEnabled).toBe(true);
+    });
+
+    it('detects interop registered as WSLInterop-late (newer WSL)', async () => {
+      const p = await probeWslDistro('Ubuntu', interopDeps({ 'WSLInterop-late': 'enabled' }));
+      expect(p.interopEnabled).toBe(true);
+    });
+
+    it('reports false when a registration exists but is disabled', async () => {
+      const p = await probeWslDistro('Ubuntu', interopDeps({ WSLInterop: 'disabled' }));
+      expect(p.interopEnabled).toBe(false);
+    });
+
+    it('reports false when the late entry exists but is disabled', async () => {
+      const p = await probeWslDistro('Ubuntu', interopDeps({ 'WSLInterop-late': 'disabled' }));
+      expect(p.interopEnabled).toBe(false);
+    });
+
+    it('reports true when one name is disabled and the other is enabled', async () => {
+      const p = await probeWslDistro(
+        'Ubuntu',
+        interopDeps({ WSLInterop: 'disabled', 'WSLInterop-late': 'enabled' })
+      );
+      expect(p.interopEnabled).toBe(true);
+    });
+
+    it('reports false when no registration exists at all', async () => {
+      const p = await probeWslDistro('Ubuntu', interopDeps({}));
+      expect(p.interopEnabled).toBe(false);
+    });
   });
 
   it('claudePath null when not found; interop false on probe failure', async () => {

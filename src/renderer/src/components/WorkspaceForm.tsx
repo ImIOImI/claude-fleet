@@ -46,7 +46,14 @@ export interface WorkspaceFormSubmit {
   /** Local workspaces only (#253): how claude is invoked. undefined ⇒ native. */
   launcher?:
     | { mode: 'native' }
-    | { mode: 'wsl'; distro: string; shell: string; home: string; claudePath: string }
+    | {
+        mode: 'wsl';
+        distro: string;
+        shell: string;
+        home: string;
+        claudePath: string;
+        interopEnabled?: boolean;
+      }
     | { mode: 'custom'; command: string };
   image?: string;
   authMode: AuthMode;
@@ -465,7 +472,13 @@ export function WorkspaceForm({
                 distro: wslDistro,
                 shell: wslShell,
                 home: wslProbe.state === 'done' ? wslProbe.home : '',
-                claudePath: wslProbe.state === 'done' ? (wslProbe.claudePath ?? '') : ''
+                claudePath: wslProbe.state === 'done' ? (wslProbe.claudePath ?? '') : '',
+                // Persisted so attach can skip MCP wiring when interop is off
+                // (#259) — previously this drove only the note below and was
+                // thrown away on save. Omitted when the probe didn't finish, so
+                // it stays undefined ("not probed") rather than a false read as
+                // "interop is off".
+                ...(wslProbe.state === 'done' ? { interopEnabled: wslProbe.interopEnabled } : {})
               },
       image: kind === 'container' ? image.trim() : undefined,
       authMode,

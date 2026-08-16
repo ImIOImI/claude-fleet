@@ -26,6 +26,16 @@ export type WorkspaceLauncher =
       home: string;
       /** claude path inside the distro — probed at save time. */
       claudePath: string;
+      /** Whether Windows interop is usable in this distro — probed at save
+       *  time (#259). Interop is how the fleet-state MCP bridge crosses the
+       *  boundary (it execs the app's own .exe from inside the distro), so
+       *  `false` means MCP wiring is skipped for this workspace rather than
+       *  wired up to fail inside claude.
+       *
+       *  `undefined` means "not probed" — every manifest written before this
+       *  field existed — and is treated as "wire it", preserving the previous
+       *  behaviour for those workspaces. Only an explicit `false` skips. */
+      interopEnabled?: boolean;
     }
   | {
       mode: 'custom';
