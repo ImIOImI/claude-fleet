@@ -61,6 +61,64 @@ jobs:
             echo "→ no code paths touched; skipping build/e2e"
             echo "code=false" >> "$GITHUB_OUTPUT"
           fi
+  # Unit suite (vitest). Until #311, `vitest` appeared nowhere in this workflow:
+  # ~790 tests ran on developer machines only and protected nothing on main. It
+  # sits alongside the e2e jobs on the same `changes` gate.
+  #
+  # NOTE: this job is NOT in the `pass ci` ruleset. If you make it required, give
+  # it the aggregator treatment the e2e contexts get below — a gated job that is
+  # required but skipped by the gate reproduces the #303 deadlock exactly.
+  unit:
+    name: unit (vitest)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 22, NOT the 20 the other jobs use. vitest loads better-sqlite3 in
+      # process, and better-sqlite3@13 declares `engines: { node: '>=22' }` —
+      # under node 20 its native binding fails to load and takes the whole
+      # vitest worker with it ("Worker exited unexpectedly", which is how this
+      # first showed up: exactly the 17 db/watcher/perf/transcript specs that
+      # open the DB died, the other 90 files passed).
+      #
+      # 22 also lines up with the Node that Electron 43 bundles, i.e. the one
+      # these modules actually run under in the app. The build/e2e jobs stay on
+      # 20 because there node is only the toolchain — the natives are loaded by
+      # Electron's own runtime, not by the runner's node. (npm does warn
+      # EBADENGINE for @electron/rebuild, @electron/get and extract-zip on 20;
+      # worth revisiting the whole workflow's node version separately.)
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # vitest runs in plain NODE, so anything it loads for real must be
+      # node-ABI. Deliberately NOT the e2e job's install dance: that ends in
+      # `electron-builder install-app-deps`, which compiles better-sqlite3 for
+      # ELECTRON's ABI into build/Release — and that takes precedence over the
+      # N-API prebuilds better-sqlite3 ships, so `require`ing it from node
+      # aborts the process. The symptom is not a test failure but
+      # "Worker exited unexpectedly" from the vitest pool.
+      #
+      # --ignore-scripts builds nothing and leaves the prebuilds in place, which
+      # is exactly what db.test.ts loads. No apt deps either: keytar has no
+      # binary under --ignore-scripts, and the suite never loads it.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      # Not strictly part of #311, but this workflow never typechecked either —
+      # `npm run dist` builds without running tsc. One line, same job.
+      - name: Typecheck
+        run: npm run typecheck
+
+      # CI=true makes the real-model embeddings test self-skip rather than pull
+      # ~90 MB of weights onto an ephemeral runner every run (see the comment in
+      # embeddings.test.ts).
+      - name: Unit tests
+        run: npm run test:unit
+
   build:
     name: build (${{ matrix.os }})
     needs: changes
