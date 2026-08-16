@@ -81,21 +81,19 @@ jobs:
           node-version: 20
           cache: npm
 
-      # libsecret for keytar (linked at runtime by the modules the suite loads).
-      - name: Install Linux runtime deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libsecret-1-dev
-
-      # Same install dance as the e2e job, and for the same reason: several
-      # specs load real natives (db.test.ts opens better-sqlite3 for real), so
-      # the prebuilts have to be present. cpu-features is dropped because its
-      # old `nan` build fails against Electron 43's V8.
+      # vitest runs in plain NODE, so anything it loads for real must be
+      # node-ABI. Deliberately NOT the e2e job's install dance: that ends in
+      # `electron-builder install-app-deps`, which compiles better-sqlite3 for
+      # ELECTRON's ABI into build/Release — and that takes precedence over the
+      # N-API prebuilds better-sqlite3 ships, so `require`ing it from node
+      # aborts the process. The symptom is not a test failure but
+      # "Worker exited unexpectedly" from the vitest pool.
+      #
+      # --ignore-scripts builds nothing and leaves the prebuilds in place, which
+      # is exactly what db.test.ts loads. No apt deps either: keytar has no
+      # binary under --ignore-scripts, and the suite never loads it.
       - name: Install dependencies
-        run: |
-          npm ci --ignore-scripts
-          rm -rf node_modules/cpu-features
-          npx --no-install electron-builder install-app-deps
+        run: npm ci --ignore-scripts
 
       # Not strictly part of #311, but this workflow never typechecked either —
       # `npm run dist` builds without running tsc. One line, same job.
