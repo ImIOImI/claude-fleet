@@ -92,7 +92,14 @@ export interface WorkspaceSummary {
   /** Local workspaces only (#253): how claude is invoked. undefined ⇒ native. */
   launcher?:
     | { mode: 'native' }
-    | { mode: 'wsl'; distro: string; shell: string; home: string; claudePath: string }
+    | {
+        mode: 'wsl';
+        distro: string;
+        shell: string;
+        home: string;
+        claudePath: string;
+        interopEnabled?: boolean;
+      }
     | { mode: 'custom'; command: string };
   image?: string;
   authMode: AuthMode;
