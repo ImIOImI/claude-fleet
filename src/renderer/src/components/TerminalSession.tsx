@@ -287,12 +287,48 @@ export function TerminalSession({
       }
     };
 
+    // Fit repeatedly until the size stops changing, so the PTY is spawned at
+    // the size the pane will actually BE (#268).
+    //
+    // One pre-attach fit isn't enough. At app startup every warm workspace's
+    // pane mounts and attaches at once, before layout has settled, and they all
+    // fit to the same too-small size — measured on a live install, 69% of
+    // sessions spawned at 107x45 while the panes they belonged to settled at
+    // 128x52 / 132x52 / 194x51 / 228x72. A `--resume` session then replays its
+    // entire prior conversation into ConPTY's buffer at that wrong width, and
+    // every later resize makes ConPTY re-emit that stale-width content. That is
+    // the ghosting, and it is why it's worst at startup on resumed sessions.
+    //
+    // Two consecutive frames agreeing is the signal. Capped, so a pane whose
+    // size never settles (an animation, a drag in progress) still attaches
+    // promptly — attaching late is worse than attaching slightly wrong.
+    const SETTLED_FIT_MAX_MS = 500;
+    const nextFrame = (): Promise<void> =>
+      new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    const fitUntilStable = async (): Promise<void> => {
+      safeFit();
+      const deadline = Date.now() + SETTLED_FIT_MAX_MS;
+      let prev = `${term.cols}x${term.rows}`;
+      while (!disposed && Date.now() < deadline) {
+        await nextFrame();
+        if (disposed) return;
+        safeFit();
+        const cur = `${term.cols}x${term.rows}`;
+        if (cur === prev) return; // two frames agree — the pane has settled
+        prev = cur;
+      }
+    };
+
     const linkProviderDisposable = term.registerLinkProvider(multilineLinkProvider(term));
 
     // ptyHandleId is the internal handle returned by main's pty:attach —
     // used to address input/resize/detach. Distinct from the prop
     // `sessionId`, which is the broker's persistent session key.
     let ptyHandleId: string | null = null;
+    // Size last pushed to the pty; seeded from the attach so a redundant
+    // first resize is suppressed too (#268).
+    let lastSentCols = -1;
+    let lastSentRows = -1;
     let unsubData: (() => void) | null = null;
     let unsubEnd: (() => void) | null = null;
     let staleBusyTimer: ReturnType<typeof setInterval> | null = null;
@@ -397,7 +433,9 @@ export function TerminalSession({
     // attach runs synchronously with the default term.cols.
     const initialFitRaf = requestAnimationFrame(async () => {
       if (disposed) return;
-      safeFit();
+      // Settled size, not just "one frame after open" (#268).
+      await fitUntilStable();
+      if (disposed) return;
 
       // Don't attach into a frozen broker. While paused, set up the xterm
       // (so the under-overlay terminal is sized and ready) but skip the
@@ -428,6 +466,8 @@ export function TerminalSession({
         }
         ptyHandleId = sid;
         ptyHandleRef.current = sid;
+        lastSentCols = term.cols;
+        lastSentRows = term.rows;
         // Busy/idle (#283): read the title from xterm's own OSC parser —
         // onTitleChange fires once per complete title no matter how the PTY
         // stream was chunked, which is the framing dependence that used to
@@ -554,11 +594,24 @@ export function TerminalSession({
     const ro = new ResizeObserver(() => {
       safeFit();
       if (ptyHandleId) {
-        try {
-          window.api.pty.resize(ptyHandleId, term.cols, term.rows);
-        } catch {
-          // pty:resize is best-effort — failing to resize doesn't
-          // justify killing the terminal.
+        // Only push a size the pty doesn't already have (#268). The observer
+        // fires on any host layout change — a scrollbar appearing as claude's
+        // output grows, rails mounting, the context bar updating — and most of
+        // those leave cols/rows untouched. Forwarding them anyway was not free:
+        // on Windows every resize also arms the ConPTY settler, whose whole job
+        // is to jitter the winsize and force ConPTY to re-emit a frame. So a
+        // no-op resize cost three ConPTY resizes and a full redraw of whatever
+        // was in its buffer. 11% of settles on a live install were triggered
+        // this way, with nothing having changed.
+        if (term.cols !== lastSentCols || term.rows !== lastSentRows) {
+          lastSentCols = term.cols;
+          lastSentRows = term.rows;
+          try {
+            window.api.pty.resize(ptyHandleId, term.cols, term.rows);
+          } catch {
+            // pty:resize is best-effort — failing to resize doesn't
+            // justify killing the terminal.
+          }
         }
         // A real post-attach size change while still armed ⇒ debounce a
         // single Ctrl+L once resizes settle, then disarm. Fires at most

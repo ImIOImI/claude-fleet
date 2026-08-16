@@ -208,6 +208,9 @@ const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
   // ConPTY to re-emit a clean frame — the programmatic equivalent of the
   // manual window resize that heals the corruption. POSIX PTYs (macOS/Linux,
   // and the container backend's Linux PTY) don't need this, so Windows-only.
+  // Last size pushed to the pty, seeded from the spawn size (#268).
+  let lastCols = cols;
+  let lastRows = rows;
   const settler =
     process.platform === 'win32'
       ? createConptySettler({
@@ -239,7 +242,20 @@ const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
       return p.pid;
     },
     write: (d) => p.write(d),
+    // Change-aware (#268). A resize to the size the pty already has is not
+    // free on Windows: it arms the ConPTY settler, whose job is to jitter the
+    // winsize so ConPTY re-emits a full frame — so a no-op resize cost three
+    // ConPTY resizes and a redraw of whatever stale content sat in its buffer.
+    // Measured on a live install, 11% of settles were triggered with nothing
+    // having changed. The renderer guards this too; this is the authoritative
+    // one, covering every caller.
+    //
+    // Note the settler's own jitter calls `safeResize` DIRECTLY, not through
+    // here, so a genuine size change still gets its intended re-emit.
     resize: (c, r) => {
+      if (c === lastCols && r === lastRows) return;
+      lastCols = c;
+      lastRows = r;
       safeResize(c, r);
       settler?.schedule();
     },
