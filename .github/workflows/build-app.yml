@@ -61,6 +61,53 @@ jobs:
             echo "→ no code paths touched; skipping build/e2e"
             echo "code=false" >> "$GITHUB_OUTPUT"
           fi
+  # Unit suite (vitest). Until #311, `vitest` appeared nowhere in this workflow:
+  # ~790 tests ran on developer machines only and protected nothing on main. It
+  # sits alongside the e2e jobs on the same `changes` gate.
+  #
+  # NOTE: this job is NOT in the `pass ci` ruleset. If you make it required, give
+  # it the aggregator treatment the e2e contexts get below — a gated job that is
+  # required but skipped by the gate reproduces the #303 deadlock exactly.
+  unit:
+    name: unit (vitest)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # libsecret for keytar (linked at runtime by the modules the suite loads).
+      - name: Install Linux runtime deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsecret-1-dev
+
+      # Same install dance as the e2e job, and for the same reason: several
+      # specs load real natives (db.test.ts opens better-sqlite3 for real), so
+      # the prebuilts have to be present. cpu-features is dropped because its
+      # old `nan` build fails against Electron 43's V8.
+      - name: Install dependencies
+        run: |
+          npm ci --ignore-scripts
+          rm -rf node_modules/cpu-features
+          npx --no-install electron-builder install-app-deps
+
+      # Not strictly part of #311, but this workflow never typechecked either —
+      # `npm run dist` builds without running tsc. One line, same job.
+      - name: Typecheck
+        run: npm run typecheck
+
+      # CI=true makes the real-model embeddings test self-skip rather than pull
+      # ~90 MB of weights onto an ephemeral runner every run (see the comment in
+      # embeddings.test.ts).
+      - name: Unit tests
+        run: npm run test:unit
+
   build:
     name: build (${{ matrix.os }})
     needs: changes
