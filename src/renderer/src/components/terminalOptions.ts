@@ -47,6 +47,21 @@ export function buildTerminalOptions(): ITerminalOptions {
     // closer to native terminal scroll cadence — a normal wheel notch
     // moves a few lines instead of a single character row.
     scrollSensitivity: 3,
-    fastScrollSensitivity: 6
+    fastScrollSensitivity: 6,
+    // Disable scrollback reflow on resize (#330). Claude's TUI (Ink) paints
+    // absolutely-positioned full-width rows, not genuinely wrapped text, so
+    // xterm re-wrapping scrollback on a width change splits those rows —
+    // orphaned tails ("Re", "Th", "So.") land at column 0 over the transcript
+    // and nothing ever repairs them. Trade-off: old scrollback keeps its
+    // original wrap points when the terminal is resized (tmux behavior).
+    //
+    // xterm 5.5 gate specifics (Buffer._isReflowEnabled): `backend` is only
+    // consulted when `buildNumber` is TRUTHY — `{ backend: 'winpty' }` alone
+    // silently leaves reflow ON. And the "assume wrapped if the last char is
+    // non-whitespace" selection heuristic this option is documented to imply
+    // is in fact only enabled for conpty < 21376, so this exact value turns
+    // reflow off without touching selection/copy of wrapped lines. Pinned by
+    // terminalOptions.test.ts.
+    windowsPty: { backend: 'winpty', buildNumber: 1 }
   };
 }
