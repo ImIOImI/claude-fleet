@@ -5,7 +5,7 @@
 
 import type Database from 'better-sqlite3';
 
-export type PerfKind = 'stall' | 'slow_op' | 'pty_window' | 'input_hop' | 'output_hop' | 'echo_rtt';
+export type PerfKind = 'stall' | 'slow_op' | 'pty_window' | 'input_hop' | 'output_hop' | 'echo_rtt' | 'gc';
 
 export interface PerfRow {
   ts: number;
