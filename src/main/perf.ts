@@ -6,7 +6,7 @@
 // (always on while recording) feed the local perf_events table; OTLP HTTP
 // exporters are added only when effective.otlp.enabled.
 
-import { monitorEventLoopDelay } from 'node:perf_hooks';
+import { monitorEventLoopDelay, PerformanceObserver, performance } from 'node:perf_hooks';
 import { hrTimeToMilliseconds } from '@opentelemetry/core';
 import type { ExportResult } from '@opentelemetry/core';
 import { ExportResultCode } from '@opentelemetry/core';
@@ -160,6 +160,7 @@ interface Runtime {
   ptyChunks: Counter | null;
   latencyHists: Record<LatencyKind, Histogram> | null;
   sampleIntervalMs: number;
+  gcObserver: PerformanceObserver | null;
 }
 let rt: Runtime | null = null;
 
@@ -225,7 +226,8 @@ export function initPerf(store: PerfStore, effective: EffectivePerfConfig, hooks
     ptyBytes: null,
     ptyChunks: null,
     latencyHists: null,
-    sampleIntervalMs: hooks?.sampleIntervalMs ?? SAMPLE_INTERVAL_MS
+    sampleIntervalMs: hooks?.sampleIntervalMs ?? SAMPLE_INTERVAL_MS,
+    gcObserver: null
   };
   store.prune(RETENTION_MS);
   if (!effective.recording) {
@@ -290,6 +292,11 @@ export function initPerf(store: PerfStore, effective: EffectivePerfConfig, hooks
     ])
   ) as Record<LatencyKind, Histogram>;
 
+  rt.gcObserver = new PerformanceObserver((list) => {
+    recordGcEntries(list.getEntries() as unknown as Array<{ startTime: number; duration: number; detail?: unknown }>);
+  });
+  rt.gcObserver.observe({ entryTypes: ['gc'] });
+
   // Event-loop delay: gauges follow OTel semconv naming for OTLP dashboards;
   // the local record is the thresholded stall row.
   const lastWindow = { p50: 0, p99: 0, max: 0 };
@@ -335,6 +342,7 @@ export async function shutdownPerf(): Promise<void> {
   if (r.flushTimer) clearInterval(r.flushTimer);
   if (r.sampleTimer) clearInterval(r.sampleTimer);
   r.loopHistogram?.disable();
+  r.gcObserver?.disconnect();
   await r.meterProvider?.shutdown().catch(() => undefined); // final metric collection → exporter
   await r.tracerProvider?.shutdown().catch(() => undefined); // flushes batch processors
   trace.disable();
@@ -392,6 +400,31 @@ export function perfSetSpanContext(ctx: { workspaceId?: string; sessionId?: stri
   if (!span) return;
   if (typeof ctx.workspaceId === 'string') span.setAttribute('workspace_id', ctx.workspaceId);
   if (typeof ctx.sessionId === 'string') span.setAttribute('session_id', ctx.sessionId);
+}
+
+const GC_KIND_NAMES: Record<number, string> = { 1: 'minor', 2: 'major', 4: 'incremental', 8: 'weakcb' };
+
+/** GC pauses are synchronous stops no span can capture — the 2026-08-17
+ *  analysis found 84% of surviving big stalls overlap no instrumented op.
+ *  Entries >= SLOW_OP_MS become app-global gc rows (workspace NULL, like
+ *  stalls). Exported for tests; the observer callback delegates here. */
+export function recordGcEntries(
+  entries: ReadonlyArray<{ startTime: number; duration: number; detail?: unknown }>
+): void {
+  const r = rt;
+  if (!r?.effective.recording) return;
+  for (const e of entries) {
+    if (e.duration < SLOW_OP_MS) continue;
+    const detail = (e.detail ?? {}) as { kind?: number; flags?: number };
+    const kindName = GC_KIND_NAMES[detail.kind ?? -1] ?? 'unknown';
+    r.store.enqueue({
+      ts: Math.round(performance.timeOrigin + e.startTime),
+      kind: 'gc',
+      name: `claude_fleet.gc.${kindName}`,
+      durMs: e.duration,
+      meta: { gcKind: kindName, flags: detail.flags ?? 0 }
+    });
+  }
 }
 
 /** PTY throughput instrumentation point (ipc.ts pty:attach data handler).
