@@ -14,7 +14,7 @@ import { ensureBuiltinLoadouts } from './loadouts.js';
 import { JsonlWatcher } from './jsonlWatcher.js';
 import { PeerStatusWatcher } from './peerStatusWatcher.js';
 import { broadcastSessionStatus } from './sessionStatusBroadcast.js';
-import { listWorkspaceManifests } from './workspaces.js';
+import { listWorkspaceManifests, manifestInvariant } from './workspaces.js';
 import { wslLocalProjectsDir, wslLocalSessionsDir } from './localLauncher.js';
 import { encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir } from './paths.js';
 import { installMainProcessHandlers, getLogPath, setErrorSink, logError } from './errorLog.js';
@@ -222,6 +222,21 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     // per-workspace state dir — register those host project dirs so their
     // (and their subagents') token spend is ingested (#plan-usage).
     for (const m of manifests) {
+      // Sweep for states that should be impossible (#323). writeWorkspaceManifest
+      // catches these as they're written, but a manifest already on disk in a bad
+      // state is never re-written, so it would otherwise stay silent forever —
+      // which is exactly what happened for ~6 days in #313.
+      const violation = manifestInvariant(m);
+      if (violation) {
+        logError({
+          source: 'main',
+          type: 'manifest-invariant',
+          level: 'error',
+          message: `${violation} (found at startup)`,
+          workspaceId: m.id,
+          extra: { workspaceRoot: m.workspaceRoot, launcher: m.launcher, kind: m.kind }
+        });
+      }
       if (m.kind === 'local' && m.workspaceRoot) {
         if (m.launcher?.mode === 'wsl') {
           jsonlWatcher.registerPolledLocalDir(

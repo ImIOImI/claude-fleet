@@ -28,8 +28,18 @@ import { app } from 'electron';
 import type * as NodePty from 'node-pty';
 import type { Backend } from './backend.js';
 import { findClaude, CLAUDE_NOT_FOUND_MESSAGE, cachedNullableResolver } from './claudeResolve.js';
-import { mcpSocketDir, mcpWorkspaceSocketPath } from './mcpSocket.js';
-import { ensureLocalBridgeScript, localMcpServerEntry, wslMcpServerEntry } from './mcpLocalBridge.js';
+import {
+  mcpSocketDir,
+  mcpWorkspaceSocketPath,
+  mcpWorkspaceTokenPath,
+  MCP_TCP_PORT
+} from './mcpSocket.js';
+import {
+  ensureLocalBridgeScript,
+  localMcpServerEntry,
+  wslMcpServerEntry,
+  type McpTransport
+} from './mcpLocalBridge.js';
 import {
   wrapSpawnForLauncher,
   wslPidFile,
@@ -198,6 +208,9 @@ const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
   // ConPTY to re-emit a clean frame — the programmatic equivalent of the
   // manual window resize that heals the corruption. POSIX PTYs (macOS/Linux,
   // and the container backend's Linux PTY) don't need this, so Windows-only.
+  // Last size pushed to the pty, seeded from the spawn size (#268).
+  let lastCols = cols;
+  let lastRows = rows;
   const settler =
     process.platform === 'win32'
       ? createConptySettler({
@@ -229,7 +242,20 @@ const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
       return p.pid;
     },
     write: (d) => p.write(d),
+    // Change-aware (#268). A resize to the size the pty already has is not
+    // free on Windows: it arms the ConPTY settler, whose job is to jitter the
+    // winsize so ConPTY re-emits a full frame — so a no-op resize cost three
+    // ConPTY resizes and a redraw of whatever stale content sat in its buffer.
+    // Measured on a live install, 11% of settles were triggered with nothing
+    // having changed. The renderer guards this too; this is the authoritative
+    // one, covering every caller.
+    //
+    // Note the settler's own jitter calls `safeResize` DIRECTLY, not through
+    // here, so a genuine size change still gets its intended re-emit.
     resize: (c, r) => {
+      if (c === lastCols && r === lastRows) return;
+      lastCols = c;
+      lastRows = r;
       safeResize(c, r);
       settler?.schedule();
     },
@@ -586,29 +612,70 @@ export async function attachPty(
 }
 
 /**
+ * The transport a local workspace's bridge should use, plus the file whose
+ * existence proves the server side is ready for it (#295).
+ *
+ * Unix hosts: a per-workspace listener at `<userData>/mcp/<id>/mcp.sock` — the
+ * socket both addresses the server and *is* the caller identity (#117).
+ * Windows hosts: `listen()` on a unix socket is impossible, so the server runs
+ * one loopback-TCP listener for every workspace and identity rides on the
+ * per-workspace token at `<userData>/mcp/<id>/token`. Gating on `mcp.sock`
+ * there — which is never created — is what left Windows local workspaces with
+ * no fleet MCP at all.
+ *
+ * Exported for tests.
+ */
+export function localMcpTransport(
+  userData: string,
+  id: string,
+  platform: NodeJS.Platform = process.platform
+): { transport: McpTransport; readyPath: string } {
+  if (platform === 'win32') {
+    const tokenPath = mcpWorkspaceTokenPath(userData, id);
+    return {
+      transport: { kind: 'tcp', host: '127.0.0.1', port: MCP_TCP_PORT, tokenPath },
+      readyPath: tokenPath
+    };
+  }
+  const socketPath = mcpWorkspaceSocketPath(userData, id);
+  return { transport: { kind: 'unix', socketPath }, readyPath: socketPath };
+}
+
+/**
  * Wire the read-only fleet MCP server (#12) for a local workspace via a
  * session-scoped `--mcp-config` file (auto-trusted, no approval gate, and never
  * touches the user's real ~/.claude.json). Points claude at our Electron-as-node
- * bridge. Skipped (returns undefined) if the MCP server socket isn't present.
+ * bridge. Skipped (returns undefined) if the server side isn't up yet.
+ *
+ * Exported for tests.
  */
-async function ensureMcpConfig(
+export async function ensureMcpConfig(
   id: string,
   launcher: WorkspaceLauncher
 ): Promise<string | undefined> {
+  // Interop off ⇒ don't wire at all (#259). The wsl bridge reaches the host by
+  // exec'ing the app's own .exe from inside the distro, which is precisely what
+  // `wsl.conf [interop] enabled=false` forbids — so wiring it would only put a
+  // permanently-failed `claude-fleet-state` in the user's `/mcp` list. The
+  // design (local-launcher-wsl §C) always called for skipping here; the flag
+  // just wasn't persisted to act on. Undefined (never probed) still wires.
+  if (launcher.mode === 'wsl' && launcher.interopEnabled === false) return undefined;
   const userData = app.getPath('userData');
-  // Per-workspace socket (#117). The listener is brought up at workspace:create
-  // / startup; if it isn't present yet, skip wiring MCP for this attach.
-  const socketPath = mcpWorkspaceSocketPath(userData, id);
-  if (!(await stat(socketPath).catch(() => null))) return undefined;
+  // Per-workspace socket or token (#117/#295). Both are brought up by
+  // `ensureWorkspaceSocket` at workspace:create / startup; if this workspace's
+  // one isn't on disk yet, skip wiring MCP for this attach.
+  const { transport, readyPath } = localMcpTransport(userData, id);
+  if (!(await stat(readyPath).catch(() => null))) return undefined;
   // The bridge script is shared (host-only, never bind-mounted) — it lives in
   // the parent mcp dir and is referenced by absolute host path.
   const bridgePath = await ensureLocalBridgeScript(mcpSocketDir(userData));
   const entry =
     launcher.mode === 'wsl'
-      ? wslMcpServerEntry(process.execPath, bridgePath, socketPath)
-      : localMcpServerEntry(process.execPath, bridgePath, socketPath);
-  // wsl + untranslatable exe path (or interop off, which surfaces as the
-  // bridge failing) ⇒ skip wiring; the session works without fleet tools.
+      ? wslMcpServerEntry(process.execPath, bridgePath, transport)
+      : localMcpServerEntry(process.execPath, bridgePath, transport);
+  // wsl + untranslatable exe path (e.g. the app installed on a UNC share, which
+  // has no /mnt/<drive> form) ⇒ skip wiring; the session works without fleet
+  // tools. Interop-off is handled up front, above.
   if (!entry) return undefined;
   const config = { mcpServers: { 'claude-fleet-state': entry } };
   const configPath = join(workspaceStateDir(id), 'mcp-config.json');

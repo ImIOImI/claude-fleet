@@ -195,9 +195,18 @@ class FakeShell extends Duplex {
   // own public `closed` property.
   private _closed = false;
 
-  constructor(private readonly workspaceName: string) {
+  constructor(
+    private readonly workspaceName: string,
+    private cols = 80
+  ) {
     super();
     setTimeout(() => this.greet(), 150);
+  }
+
+  /** Mirrors pty resize so width-sensitive commands (`wide`) emit rows at
+   *  the terminal's true current width, like a real TUI would. */
+  setCols(cols: number): void {
+    if (cols > 0) this.cols = cols;
   }
 
   private greet(): void {
@@ -252,6 +261,7 @@ class FakeShell extends Duplex {
       this.push('  whoami        print the fake claude identity\r\n');
       this.push('  oauth         simulate a Claude.ai OAuth login URL print\r\n');
       this.push('  emoji         print a sample line with keycap + flag + ZWJ emoji\r\n');
+      this.push('  wide <n>      print n rows exactly terminal-width wide (reflow repro)\r\n');
       this.push('  exit          end the session (shows the restart overlay)\r\n');
       return;
     }
@@ -296,6 +306,19 @@ class FakeShell extends Duplex {
       this.push('Paste code: ');
       return;
     }
+    if (cmd.startsWith('wide')) {
+      // Full-width rows that are NOT genuinely wrapped — the shape Claude's
+      // Ink TUI leaves in scrollback, and the input xterm's resize reflow
+      // corrupts (#330). Row starts are marked `row-`, the fill is `x`, the
+      // tail is `####`; the reflow e2e asserts no rendered line ever starts
+      // with a fill/tail fragment.
+      const n = Math.min(parseInt(cmd.slice(4).trim(), 10) || 20, 500);
+      for (let i = 0; i < n; i++) {
+        const head = `row-${String(i).padStart(3, '0')} `.padEnd(Math.max(this.cols - 4, 10), 'x');
+        this.push(`${head}####\r\n`);
+      }
+      return;
+    }
     if (cmd.startsWith('echo ')) {
       this.push(cmd.slice(5) + '\r\n');
       return;
@@ -307,7 +330,7 @@ class FakeShell extends Duplex {
 export async function attachPty(
   containerId: string,
   _sessionId: string,
-  _cols: number,
+  cols: number,
   _rows: number,
   _resumeOf?: string
 ): Promise<PtyHandle> {
@@ -330,10 +353,10 @@ export async function attachPty(
         `Is the runner image new enough to include the broker?`
     );
   }
-  const shell = new FakeShell(ws?.name ?? containerId);
+  const shell = new FakeShell(ws?.name ?? containerId, cols);
   return {
     stream: shell,
-    resize: async () => undefined,
+    resize: async (c: number) => shell.setCols(c),
     detach: () => shell.destroy(),
     close: async () => {
       shell.destroy();

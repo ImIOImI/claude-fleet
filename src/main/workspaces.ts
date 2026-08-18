@@ -224,14 +224,18 @@ export function sanitizeLauncher(
   }
   if (o.mode === 'wsl') {
     if (platform !== 'win32') return undefined;
-    const { distro, shell, home, claudePath } = o as Record<string, unknown>;
+    const { distro, shell, home, claudePath, interopEnabled } = o as Record<string, unknown>;
     if ([distro, shell, home, claudePath].every((v) => typeof v === 'string' && v)) {
       return {
         mode: 'wsl',
         distro: distro as string,
         shell: shell as string,
         home: home as string,
-        claudePath: claudePath as string
+        claudePath: claudePath as string,
+        // Only a real boolean round-trips (#259). Missing or garbage stays
+        // undefined = "not probed" = still wire MCP, which is what every
+        // manifest written before this field existed must keep doing.
+        ...(typeof interopEnabled === 'boolean' ? { interopEnabled } : {})
       };
     }
   }
@@ -303,7 +307,60 @@ export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec |
   }
 }
 
+/**
+ * Manifest states that are supposed to be impossible. Returns a description of
+ * the violation, or null when the spec is coherent. Pure — exported for tests
+ * and for the startup sweep in index.ts.
+ *
+ * Today there is exactly one (#323): a `wsl` launcher with a non-Linux
+ * `workspaceRoot`. Both writers run `normalizeAndValidateWslRoot`, which
+ * rejects exactly that — and yet a live install had one. It cost ~6 days of
+ * silent, total observability loss (#313): claude's in-distro cwd is the
+ * `/mnt/<drive>` translation of that root, while the watcher derived its path
+ * from the stored Windows string, and nothing anywhere said a word.
+ */
+export function manifestInvariant(spec: WorkspaceSpec): string | null {
+  if (
+    spec.kind === 'local' &&
+    spec.launcher?.mode === 'wsl' &&
+    spec.workspaceRoot &&
+    !spec.workspaceRoot.startsWith('/')
+  ) {
+    return `wsl launcher with a non-Linux workspaceRoot: ${spec.workspaceRoot}`;
+  }
+  return null;
+}
+
 export async function writeWorkspaceManifest(spec: WorkspaceSpec): Promise<void> {
+  // Every manifest write funnels through here — create, edit,
+  // touchWorkspaceUsed, migration — which makes it the one place a violation
+  // can't slip past, whichever caller produced it. The stack is the point:
+  // #323 is open precisely because the bad state is visible on disk and we
+  // cannot tell which code path wrote it.
+  const violation = manifestInvariant(spec);
+  if (violation) {
+    try {
+      // Lazily imported: errorLog pulls in electron, and this module is loaded
+      // by unit tests that don't mock it. The happy path never reaches here.
+      const { logError } = await import('./errorLog.js');
+      logError({
+        source: 'main',
+        type: 'manifest-invariant',
+        level: 'error',
+        message: violation,
+        workspaceId: spec.id,
+        extra: {
+          workspaceRoot: spec.workspaceRoot,
+          launcher: spec.launcher,
+          kind: spec.kind,
+          // Who wrote it — the evidence #323 is missing.
+          stack: new Error('manifest-invariant').stack
+        }
+      });
+    } catch {
+      /* logging must never break a manifest write */
+    }
+  }
   // Ensure the state dir exists. Real backends mkdir it during create, but the
   // mock backend doesn't, and edit/migration paths shouldn't assume it's there.
   const manifestPath = workspaceManifestPath(spec.id);

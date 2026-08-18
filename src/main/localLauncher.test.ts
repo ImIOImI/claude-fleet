@@ -9,6 +9,7 @@ import {
   buildWslSpawnEnv,
   wrapSpawnForLauncher,
   wslLocalProjectsDir,
+  wslInDistroPath,
   type WorkspaceLauncher
 } from './localLauncher.js';
 import type { SpawnPty, PtyProc } from './localSessions.js';
@@ -180,5 +181,50 @@ describe('wslLocalProjectsDir', () => {
     expect(wslLocalProjectsDir('Ubuntu', '/home/troy', '/home/troy/proj', encode)).toBe(
       '\\\\wsl.localhost\\Ubuntu\\home\\troy\\.claude\\projects\\-home-troy-proj'
     );
+  });
+
+  // #313: wsl.exe --cd rewrites a Windows root into /mnt/<drive> before claude
+  // sees it, so claude encodes the TRANSLATED cwd. Encoding the stored Windows
+  // path pointed the watcher at a directory that never exists — the workspace
+  // ingested nothing and vanished from both rails.
+  describe('wslInDistroPath (#313)', () => {
+    it('translates a drive-letter root the way wsl.exe --cd does', () => {
+      expect(wslInDistroPath('C:\\Users\\troyk\\fleet\\ws1')).toBe(
+        '/mnt/c/Users/troyk/fleet/ws1'
+      );
+    });
+    it('unwraps a \\\\wsl.localhost UNC root to the plain Linux path', () => {
+      expect(wslInDistroPath('\\\\wsl.localhost\\Ubuntu\\home\\troy\\proj')).toBe(
+        '/home/troy/proj'
+      );
+    });
+    it('leaves an already-Linux root untouched (the normal case)', () => {
+      expect(wslInDistroPath('/home/troy/proj')).toBe('/home/troy/proj');
+    });
+  });
+
+  it('encodes the TRANSLATED cwd for a Windows workspaceRoot (#313)', () => {
+    const encode = (p: string) => p.replace(/[^a-zA-Z0-9]/g, '-');
+    // Verbatim from the live workspace this was found on: claude writes to
+    // ~/.claude/projects/-mnt-c-Users-troyk-fleet-<id>, so that is what the
+    // watcher must poll — NOT the C--Users-… form the stored root encodes to.
+    const dir = wslLocalProjectsDir(
+      'Ubuntu-24.04',
+      '/home/troy',
+      'C:\\Users\\troyk\\fleet\\01KZKC42R3NZ00F8DRFYZV3XPP',
+      encode
+    );
+    expect(dir).toBe(
+      '\\\\wsl.localhost\\Ubuntu-24.04\\home\\troy\\.claude\\projects\\' +
+        '-mnt-c-Users-troyk-fleet-01KZKC42R3NZ00F8DRFYZV3XPP'
+    );
+    expect(dir).not.toContain('C--Users');
+  });
+
+  it('encodes a UNC workspaceRoot to the same dir as its Linux form (#313)', () => {
+    const encode = (p: string) => p.replace(/[^a-zA-Z0-9]/g, '-');
+    expect(
+      wslLocalProjectsDir('Ubuntu', '/home/troy', '\\\\wsl.localhost\\Ubuntu\\home\\troy\\proj', encode)
+    ).toBe(wslLocalProjectsDir('Ubuntu', '/home/troy', '/home/troy/proj', encode));
   });
 });

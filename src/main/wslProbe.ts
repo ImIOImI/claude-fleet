@@ -78,8 +78,25 @@ export async function probeWslDistro(distro: string, deps: ProbeDeps): Promise<W
     inDistro(deps, distro, 'echo "$HOME"'),
     inDistro(deps, distro, 'while read -r s; do [ -x "$s" ] && echo "$s"; done < /etc/shells'),
     // Canonical interop check: the binfmt registration only exists when
-    // wsl.conf [interop] is enabled. Prints 'yes' iff present.
-    inDistro(deps, distro, 'test -f /proc/sys/fs/binfmt_misc/WSLInterop && echo yes')
+    // wsl.conf [interop] is enabled. Prints 'yes' iff present AND enabled.
+    //
+    // Two things the original `test -f …/WSLInterop` missed (#259):
+    //  - **The name.** Newer WSL registers the handler as `WSLInterop-late`
+    //    (systemd-enabled distros register late, after user units); on those
+    //    the old check false-negatived and we told the user fleet tools were
+    //    unavailable on a perfectly interop-capable distro.
+    //  - **enabled vs merely registered.** A binfmt_misc entry's first line is
+    //    literally `enabled` or `disabled`, and it can be toggled without the
+    //    file going away — so presence alone doesn't mean usable. `-qx` matches
+    //    that whole line exactly, holding us to the documented contract rather
+    //    than to "the word appears somewhere in the file" (later lines carry
+    //    the interpreter path and flags).
+    inDistro(
+      deps,
+      distro,
+      'for f in /proc/sys/fs/binfmt_misc/WSLInterop /proc/sys/fs/binfmt_misc/WSLInterop-late; ' +
+        'do [ -f "$f" ] && head -n1 "$f" | grep -qx enabled && { echo yes; break; }; done'
+    )
   ]);
 
   if (!home) {

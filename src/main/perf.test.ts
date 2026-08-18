@@ -6,7 +6,7 @@ import { closeDb, openDb } from './db.js';
 import { PerfStore } from './perfStore.js';
 import {
   initPerf, shutdownPerf, reconfigurePerf, perfSpan, perfSpanAsync, perfSetSpanContext, getEffectivePerf,
-  recordPtyChunk, getPerfStatus, recordLatencySample, setPerfStateListener, perfNotePowerEvent
+  recordPtyChunk, getPerfStatus, recordLatencySample, setPerfStateListener, perfNotePowerEvent, recordGcEntries
 } from './perf.js';
 import type { EffectivePerfConfig } from './perfConfig.js';
 import type Database from 'better-sqlite3';
@@ -249,5 +249,52 @@ describe('perfNotePowerEvent (suspend filtering)', () => {
 
   it('is a no-op before initPerf', () => {
     expect(() => perfNotePowerEvent('resume')).not.toThrow();
+  });
+});
+
+describe('recordGcEntries (GC pause rows)', () => {
+  const entry = (duration: number, kind: number, startTime = 1000) =>
+    ({ startTime, duration, detail: { kind, flags: 0 } });
+
+  it('records >=25ms GC pauses as gc rows with decoded kind names', async () => {
+    initPerf(store, ON);
+    recordGcEntries([entry(180, 2), entry(30, 1), entry(40, 4), entry(26, 8), entry(50, 99)]);
+    await shutdownPerf();
+    const rows = db.prepare(
+      `SELECT name, dur_ms, meta FROM perf_events WHERE kind = 'gc' ORDER BY dur_ms DESC`
+    ).all() as Array<{ name: string; dur_ms: number; meta: string }>;
+    expect(rows.map((r) => r.name)).toEqual([
+      'claude_fleet.gc.major',
+      'claude_fleet.gc.unknown',
+      'claude_fleet.gc.incremental',
+      'claude_fleet.gc.minor',
+      'claude_fleet.gc.weakcb'
+    ]);
+    expect(rows[0].dur_ms).toBe(180);
+    expect(JSON.parse(rows[0].meta)).toEqual({ gcKind: 'major', flags: 0 });
+  });
+
+  it('drops sub-threshold pauses and tolerates missing detail', async () => {
+    initPerf(store, ON);
+    recordGcEntries([entry(24, 2), { startTime: 1000, duration: 60 }]);
+    await shutdownPerf();
+    const rows = db.prepare(`SELECT name FROM perf_events WHERE kind = 'gc'`).all() as Array<{ name: string }>;
+    expect(rows).toEqual([{ name: 'claude_fleet.gc.unknown' }]);
+  });
+
+  it('converts startTime to epoch ms via timeOrigin', async () => {
+    initPerf(store, ON);
+    recordGcEntries([entry(100, 2, 5000)]);
+    await shutdownPerf();
+    const row = db.prepare(`SELECT ts FROM perf_events WHERE kind = 'gc'`).get() as { ts: number };
+    expect(row.ts).toBe(Math.round(performance.timeOrigin + 5000));
+  });
+
+  it('is a no-op while disabled or uninitialized', async () => {
+    recordGcEntries([entry(500, 2)]); // before init
+    initPerf(store, OFF);
+    recordGcEntries([entry(500, 2)]);
+    await shutdownPerf();
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM perf_events WHERE kind='gc'`).get()).toEqual({ n: 0 });
   });
 });

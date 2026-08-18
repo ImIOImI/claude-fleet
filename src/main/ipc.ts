@@ -34,7 +34,7 @@ import {
   getPerfOtlp,
   setPerfOtlp
 } from './config.js';
-import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk, perfSetSpanContext, recordLatencySample, setPerfStateListener, perfNotePowerEvent } from './perf.js';
+import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk, perfSetSpanContext, recordLatencySample, setPerfStateListener, perfNotePowerEvent, perfSpan } from './perf.js';
 import { resolvePerfConfig } from './perfConfig.js';
 import { sanitizePerfSamples } from './perfSamples.js';
 import { buildLoadoutCatalog } from './loadoutCatalog.js';
@@ -756,10 +756,20 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // `observabilityBroadcast.ts` for why per-target sends are guarded.
   if (jsonlWatcher) {
     jsonlWatcher.on('ingest', ({ workspaceId }) => {
-      const summary = summaryForWorkspace(workspaceId);
-      broadcastObservabilitySummary(
-        { workspaceId, summary },
-        BrowserWindow.getAllWindows()
+      // Runs from a watcher emit, not an IPC handler — the generic IPC span
+      // wrapper never covered it, so the summary recompute + the per-window
+      // structured clone inside webContents.send were invisible to stall
+      // attribution until this span (2026-08-17 analysis).
+      perfSpan(
+        'claude_fleet.observability.ingest_broadcast',
+        () => {
+          const summary = summaryForWorkspace(workspaceId);
+          broadcastObservabilitySummary(
+            { workspaceId, summary },
+            BrowserWindow.getAllWindows()
+          );
+        },
+        { workspace_id: workspaceId }
       );
     });
     // Per-tab mapping: when a brand-new claude JSONL appears in a

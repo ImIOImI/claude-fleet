@@ -21,35 +21,7 @@ import { busyFlagIsStale } from '../staleBusy';
 import { decideTerminalKeyAction } from '../terminalKeymap';
 import { EchoRttTracker } from '../echoRtt';
 import { initPerfState, perfRecording } from '../perfState';
-
-// Stretch the font fallback chain so canvas renders for glyphs xterm
-// can't find in a monospace font (emoji, symbols, regional indicators)
-// fall through to a system emoji font instead of rendering as tofu. The
-// monospace fonts come first so character-grid alignment is preserved
-// for the common case; emoji-font glyphs are typically wide and pair
-// with the unicode11 width tables below.
-const TERMINAL_FONT_FAMILY = [
-  'ui-monospace',
-  'SFMono-Regular',
-  'Menlo',
-  'Consolas',
-  '"DejaVu Sans Mono"',
-  'monospace',
-  // Bundled @font-face subset (styles.css): crisp Miscellaneous-Technical
-  // symbols the host fontconfig set lacks — notably Claude's permission-mode
-  // media-control triangles (⏵, U+23F5). Placed before the emoji fonts so a
-  // sharp glyph wins over an emoji-style one.
-  '"Noto Sans Symbols 2"',
-  '"Apple Color Emoji"',
-  '"Segoe UI Emoji"',
-  '"Noto Color Emoji"',
-  '"Segoe UI Symbol"',
-  'emoji',
-  // Last-resort catch-all (bundled Unifont subset) for glyphs nothing else
-  // covers — e.g. the tool-result tree connector ⎿ (U+23BF), which even Noto
-  // Sans Symbols 2 lacks. Pixelated, but guarantees no tofu boxes.
-  '"Unifont"'
-].join(', ');
+import { buildTerminalOptions } from './terminalOptions';
 
 const URL_REGEX = /https?:\/\/[^\s'"`<>()\[\]{}]+/g;
 const TRAILING_PUNCTUATION = /[.,;:!?]+$/;
@@ -183,6 +155,9 @@ export function TerminalSession({
   onRefreshUnresolved,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  // The live xterm, so effects outside the attach effect can force a repaint
+  // without reaching into its closure (#268).
+  const termRef = useRef<Terminal | null>(null);
   // Bumped when the user clicks "Start new session" / "Retry" after a
   // session ends. The effect deps on containerId+sessionEpoch, so a new
   // attach happens with a fresh xterm instance (no stale state from the
@@ -222,20 +197,8 @@ export function TerminalSession({
     // (StrictMode double-mount in dev, fast workspace switches in prod).
     let disposed = false;
 
-    const term = new Terminal({
-      fontFamily: TERMINAL_FONT_FAMILY,
-      fontSize: 13,
-      theme: { background: '#101216' },
-      cursorBlink: true,
-      convertEol: true,
-      allowProposedApi: true,
-      wordSeparator: ' \t()[]{}\'"<>`',
-      // Default is 1, which feels glacial on most trackpads/wheels. 3 is
-      // closer to native terminal scroll cadence — a normal wheel notch
-      // moves a few lines instead of a single character row.
-      scrollSensitivity: 3,
-      fastScrollSensitivity: 6
-    });
+    const term = new Terminal(buildTerminalOptions());
+    termRef.current = term;
     const fit = new FitAddon();
     term.loadAddon(fit);
     // Unicode 11+ width tables — without this xterm uses Unicode 6 widths,
@@ -287,12 +250,59 @@ export function TerminalSession({
       }
     };
 
+    // Fit repeatedly until the size stops changing, so the PTY is spawned at
+    // the size the pane will actually BE (#268).
+    //
+    // One pre-attach fit isn't enough. At app startup every warm workspace's
+    // pane mounts and attaches at once, before layout has settled, and they all
+    // fit to the same too-small size — measured on a live install, 69% of
+    // sessions spawned at 107x45 while the panes they belonged to settled at
+    // 128x52 / 132x52 / 194x51 / 228x72. A `--resume` session then replays its
+    // entire prior conversation into ConPTY's buffer at that wrong width, and
+    // every later resize makes ConPTY re-emit that stale-width content. That is
+    // the ghosting, and it is why it's worst at startup on resumed sessions.
+    //
+    // Two consecutive frames agreeing is the signal. Capped, so a pane whose
+    // size never settles (an animation, a drag in progress) still attaches
+    // promptly — attaching late is worse than attaching slightly wrong.
+    const SETTLED_FIT_MAX_MS = 500;
+    const nextFrame = (): Promise<void> =>
+      new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    const fitUntilStable = async (): Promise<void> => {
+      safeFit();
+      const deadline = Date.now() + SETTLED_FIT_MAX_MS;
+      let prev = `${term.cols}x${term.rows}`;
+      while (!disposed && Date.now() < deadline) {
+        await nextFrame();
+        if (disposed) return;
+        safeFit();
+        const cur = `${term.cols}x${term.rows}`;
+        if (cur === prev) return; // two frames agree — the pane has settled
+        prev = cur;
+      }
+    };
+
+    /** Redraw every visible row from the buffer (#268). Best-effort: a torn-down
+     *  renderer must never fault the terminal. */
+    const forceRepaint = (): void => {
+      if (disposed) return;
+      try {
+        term.refresh(0, term.rows - 1);
+      } catch {
+        /* renderer disposed mid-frame */
+      }
+    };
+
     const linkProviderDisposable = term.registerLinkProvider(multilineLinkProvider(term));
 
     // ptyHandleId is the internal handle returned by main's pty:attach —
     // used to address input/resize/detach. Distinct from the prop
     // `sessionId`, which is the broker's persistent session key.
     let ptyHandleId: string | null = null;
+    // Size last pushed to the pty; seeded from the attach so a redundant
+    // first resize is suppressed too (#268).
+    let lastSentCols = -1;
+    let lastSentRows = -1;
     let unsubData: (() => void) | null = null;
     let unsubEnd: (() => void) | null = null;
     let staleBusyTimer: ReturnType<typeof setInterval> | null = null;
@@ -397,7 +407,9 @@ export function TerminalSession({
     // attach runs synchronously with the default term.cols.
     const initialFitRaf = requestAnimationFrame(async () => {
       if (disposed) return;
-      safeFit();
+      // Settled size, not just "one frame after open" (#268).
+      await fitUntilStable();
+      if (disposed) return;
 
       // Don't attach into a frozen broker. While paused, set up the xterm
       // (so the under-overlay terminal is sized and ready) but skip the
@@ -428,6 +440,8 @@ export function TerminalSession({
         }
         ptyHandleId = sid;
         ptyHandleRef.current = sid;
+        lastSentCols = term.cols;
+        lastSentRows = term.rows;
         // Busy/idle (#283): read the title from xterm's own OSC parser —
         // onTitleChange fires once per complete title no matter how the PTY
         // stream was chunked, which is the framing dependence that used to
@@ -554,11 +568,36 @@ export function TerminalSession({
     const ro = new ResizeObserver(() => {
       safeFit();
       if (ptyHandleId) {
-        try {
-          window.api.pty.resize(ptyHandleId, term.cols, term.rows);
-        } catch {
-          // pty:resize is best-effort — failing to resize doesn't
-          // justify killing the terminal.
+        // Only push a size the pty doesn't already have (#268). The observer
+        // fires on any host layout change — a scrollbar appearing as claude's
+        // output grows, rails mounting, the context bar updating — and most of
+        // those leave cols/rows untouched. Forwarding them anyway was not free:
+        // on Windows every resize also arms the ConPTY settler, whose whole job
+        // is to jitter the winsize and force ConPTY to re-emit a frame. So a
+        // no-op resize cost three ConPTY resizes and a full redraw of whatever
+        // was in its buffer. 11% of settles on a live install were triggered
+        // this way, with nothing having changed.
+        if (term.cols !== lastSentCols || term.rows !== lastSentRows) {
+          lastSentCols = term.cols;
+          lastSentRows = term.rows;
+          try {
+            window.api.pty.resize(ptyHandleId, term.cols, term.rows);
+          } catch {
+            // pty:resize is best-effort — failing to resize doesn't
+            // justify killing the terminal.
+          }
+          // Repaint every visible row from the buffer after a real size
+          // change (#268). The reported symptom is stray glyphs that overlap
+          // the text and — the detail that identifies the cause — do NOT go
+          // away as you scroll. Buffer content scrolls with the content, so
+          // anything that stays put is a cell xterm never repainted: the
+          // buffer is right and the paint is stale. With the DOM renderer
+          // (no canvas/webgl addon here) `refresh` is what forces rows to be
+          // redrawn, and it was previously only ever called once, after the
+          // symbol webfonts load. Resizes — including resizes that land while
+          // a pane sits `visibility: hidden`, which is when xterm's dirty-row
+          // tracking has the least chance of being right — got none.
+          forceRepaint();
         }
         // A real post-attach size change while still armed ⇒ debounce a
         // single Ctrl+L once resizes settle, then disarm. Fires at most
@@ -600,6 +639,7 @@ export function TerminalSession({
       linkProviderDisposable.dispose();
       if (ptyHandleId) window.api.pty.detach(ptyHandleId);
       if (ptyHandleRef.current === ptyHandleId) ptyHandleRef.current = null;
+      if (termRef.current === term) termRef.current = null;
       term.dispose();
     };
   }, [containerId, sessionId, resumeOf, sessionEpoch, paused]);
@@ -664,6 +704,17 @@ export function TerminalSession({
     const id = requestAnimationFrame(() => {
       const evt = new Event('resize');
       host.dispatchEvent(evt);
+      // Panes are always-mounted and get resized while hidden, so a pane can
+      // come back carrying rows xterm last painted at a different size (#268).
+      // The fit above only redraws what xterm thinks is dirty; force the rest.
+      const t = termRef.current;
+      if (t) {
+        try {
+          t.refresh(0, t.rows - 1);
+        } catch {
+          /* disposed between frames */
+        }
+      }
     });
     return () => cancelAnimationFrame(id);
   }, [visible]);
