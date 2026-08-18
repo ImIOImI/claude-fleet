@@ -39,7 +39,7 @@
 //	  DIAL       C→S  {"channel":N,"port":P}                   open TCP conn to 127.0.0.1:P, bind to channel
 //	  DIALED     S→C  {"channel":N,"ok":true,"error":"..."}    dial succeeded or failed
 //	  LISTPORTS  C→S  {}                                       enumerate listening TCP ports
-//	  PORTS      S→C  {"ports":[{"port":P,"pid":N,"cmdline":"..."},...]}  listening ports + best-effort owners
+//	  PORTS      S→C  {"ports":[{port,pid?,cmdline?,session?},...]}  listening ports + best-effort owners + owning session
 //	  KILLPORT   C→S  {"port":P}                               TERM (then KILL) the process listening on P
 //	  KILLED     S→C  {"ok":true,"error":"..."}                kill outcome
 //
@@ -210,12 +210,14 @@ type DialResponse struct {
 }
 
 // PortInfo is one listening TCP port detected inside the container,
-// attributed (best-effort) to its owning process. Pid/Cmdline are omitted
-// when unresolved; the host treats their absence as "no kill capability".
+// attributed (best-effort) to its owning process and broker session.
+// Pid/Cmdline/Session are omitted when unresolved; the host treats a
+// missing session as "no owning tab" (orphaned or pre-session server).
 type PortInfo struct {
 	Port    uint16 `json:"port"`
 	Pid     int    `json:"pid,omitempty"`
 	Cmdline string `json:"cmdline,omitempty"`
+	Session string `json:"session,omitempty"`
 }
 
 type PortsResponse struct {

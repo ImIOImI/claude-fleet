@@ -1059,6 +1059,28 @@ body {
   cursor: pointer;
 }
 
+/* Serving-row session chip: the tab whose process tree owns the server.
+   Click focuses that tab (switching workspace first in fleet scope). Info-
+   tinted pill so it reads as clickable next to the quiet uptime text. */
+.obs-port-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  max-width: 110px;
+  font-size: 10.5px;
+  padding: 1px 7px 2px;
+  background: color-mix(in oklab, var(--info) 8%, transparent);
+  border: 1px solid color-mix(in oklab, var(--info) 40%, var(--rule));
+  border-radius: 99px;
+  color: var(--ink-1);
+  cursor: pointer;
+  overflow: hidden;
+}
+.obs-port-chip:hover { color: var(--ink); border-color: var(--info); }
+.obs-port-chip-glyph { font-size: 9px; color: var(--info); flex-shrink: 0; }
+.obs-port-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* Workspace metadata block: path (clickable → reveal in file manager),
    image, limits. Rows live in a bordered card with hairline dividers; the
    Path row brightens its folder icon + underlines its value on hover. */

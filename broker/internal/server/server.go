@@ -33,7 +33,8 @@ type Server struct {
 	mgr *session.Manager
 	// ListPorts enumerates listening TCP ports (with best-effort owner
 	// attribution) for LISTPORTS. Field so tests can inject a deterministic
-	// scanner; defaults to portscan.Listening.
+	// scanner; defaults to a closure that calls portscan.Listening then
+	// portscan.AttributeSessions with the manager's current root PIDs.
 	ListPorts func() ([]portscan.Detail, error)
 	// KillPort terminates the process behind a listening port for KILLPORT.
 	// Injectable for tests; defaults to portscan.KillOwner with a 2s grace.
@@ -42,9 +43,15 @@ type Server struct {
 
 func New(mgr *session.Manager) *Server {
 	return &Server{
-		mgr:       mgr,
-		ListPorts: portscan.Listening,
-		KillPort:  func(port uint16) error { return portscan.KillOwner(port, 2*time.Second) },
+		mgr: mgr,
+		ListPorts: func() ([]portscan.Detail, error) {
+			details, err := portscan.Listening()
+			if err == nil {
+				portscan.AttributeSessions(details, mgr.RootPids())
+			}
+			return details, err
+		},
+		KillPort: func(port uint16) error { return portscan.KillOwner(port, 2*time.Second) },
 	}
 }
 
@@ -331,7 +338,7 @@ func (s *Server) dispatch(
 		}
 		resp := proto.PortsResponse{Ports: make([]proto.PortInfo, len(ports))}
 		for i, p := range ports {
-			resp.Ports[i] = proto.PortInfo{Port: p.Port, Pid: p.Pid, Cmdline: p.Cmdline}
+			resp.Ports[i] = proto.PortInfo{Port: p.Port, Pid: p.Pid, Cmdline: p.Cmdline, Session: p.Session}
 		}
 		return cw.writeJSON(proto.FramePorts, resp)
 

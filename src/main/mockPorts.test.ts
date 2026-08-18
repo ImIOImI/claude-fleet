@@ -54,4 +54,22 @@ describe('MockServingPorts', () => {
     mock.dispose();
     vi.useRealTimers();
   });
+
+  it('stamps the first fake port with the resolved session id, second stays null', async () => {
+    vi.useFakeTimers();
+    const snapshots: ServingPort[][] = [];
+    const mock = new MockServingPorts(
+      (_id, ports) => snapshots.push(ports),
+      () => 111,
+      async () => 'tab-1'
+    );
+    mock.reconcile(['ws']);
+    await vi.advanceTimersByTimeAsync(25_000);
+    await vi.advanceTimersByTimeAsync(0); // let the async resolve settle
+    const last = snapshots.at(-1)!;
+    expect(last.find((p) => p.port === 3000)?.sessionId).toBe('tab-1');
+    expect(last.find((p) => p.port === 8765)?.sessionId).toBeNull();
+    mock.dispose();
+    vi.useRealTimers();
+  });
 });

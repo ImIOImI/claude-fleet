@@ -30,6 +30,7 @@ type Detail struct {
 	Port    uint16
 	Pid     int    // 0 when unresolved
 	Cmdline string // "" when unresolved
+	Session string // owning broker session id; "" when unresolved
 }
 
 // Listening returns the deduped set of TCP ports in LISTEN state across

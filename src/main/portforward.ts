@@ -40,6 +40,9 @@ export interface ServingPort {
   port: number;
   pid: number | null;
   cmdline: string | null;
+  /** Broker session id of the tab whose process tree owns the server;
+   *  null when the broker couldn't attribute one (orphan, old image). */
+  sessionId: string | null;
   firstSeenAt: number; // epoch ms (host clock)
 }
 
@@ -203,18 +206,25 @@ export class PortForwardManager {
         }
       }
       // A pid change behind a still-listening port is a server restart:
-      // replace the row and restart its uptime clock.
+      // replace the row and restart its uptime clock. A sessionId change
+      // alone is late attribution (fd race on an earlier scan) — update in
+      // place, keeping firstSeenAt.
       for (const [port, sp] of monitor.serving) {
         const d = byPort.get(port);
         if (!d) continue;
         const pid = d.pid ?? null;
+        const sessionId = d.session ?? null;
         if (pid !== sp.pid) {
           monitor.serving.set(port, {
             port,
             pid,
             cmdline: d.cmdline ?? null,
+            sessionId,
             firstSeenAt: this.deps.now()
           });
+          changed = true;
+        } else if (sessionId !== sp.sessionId) {
+          monitor.serving.set(port, { ...sp, sessionId });
           changed = true;
         }
       }
@@ -230,6 +240,7 @@ export class PortForwardManager {
             port,
             pid: d?.pid ?? null,
             cmdline: d?.cmdline ?? null,
+            sessionId: d?.session ?? null,
             firstSeenAt: this.deps.now()
           });
           changed = true;
@@ -288,7 +299,13 @@ export class PortForwardManager {
       await client.ready();
       return await client.killPort(port);
     } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      const msg = err instanceof Error ? err.message : String(err);
+      // A pre-KILLPORT broker logs-and-drops the unknown frame, so the RPC
+      // times out. Translate into copy the toast can show as-is.
+      if (/timed out/.test(msg)) {
+        return { ok: false, error: 'runner image too old — recreate the workspace to enable kill' };
+      }
+      return { ok: false, error: msg };
     } finally {
       client?.close();
     }

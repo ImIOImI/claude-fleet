@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef, useReducer, useMemo } from 'react';
 import { usePorts } from './usePorts';
+import { useServingSessionNames } from './useServingSessionNames';
 import { WorkspaceTabStrip } from './components/WorkspaceTabStrip';
 import { ToastStack } from './components/Toast';
 import { toastReducer, makeToast, type Toast, type ToastKind } from './toasts';
@@ -469,6 +470,14 @@ export function App() {
   }, []);
 
   const servingPorts = usePorts();
+  const servingSessionNames = useServingSessionNames(servingPorts);
+
+  // Serving-row session chip → jump to the owning tab (same activateRequest
+  // path the Sessions-list jump uses).
+  const focusServingSession = useCallback((workspaceId: string, brokerSessionId: string) => {
+    setSelectedId(workspaceId);
+    setActivateRequest({ workspaceId, brokerSessionId, token: ++activateTokenRef.current });
+  }, []);
 
   // Dev-server detection (#port-forward): the broker spotted a new listening
   // port inside a workspace container. Offer a one-click preview that opens
@@ -1338,6 +1347,8 @@ export function App() {
           servingPorts={servingPorts}
           onOpenPort={openPreview}
           onKillPort={killServingPort}
+          sessionNames={servingSessionNames}
+          onFocusSession={focusServingSession}
         />
       </div>
 

@@ -7,9 +7,9 @@
 
 import type { ServingPort } from './portforward.js';
 
-const FAKES: ReadonlyArray<{ afterMs: number; port: number; pid: number; cmdline: string }> = [
-  { afterMs: 10_000, port: 3000, pid: 4242, cmdline: 'node /workspace/node_modules/.bin/vite dev' },
-  { afterMs: 25_000, port: 8765, pid: 4343, cmdline: 'python3 -m http.server 8765' }
+const FAKES: ReadonlyArray<{ afterMs: number; port: number; pid: number; cmdline: string; attributed: boolean }> = [
+  { afterMs: 10_000, port: 3000, pid: 4242, cmdline: 'node /workspace/node_modules/.bin/vite dev', attributed: true },
+  { afterMs: 25_000, port: 8765, pid: 4343, cmdline: 'python3 -m http.server 8765', attributed: false }
 ];
 
 export class MockServingPorts {
@@ -18,7 +18,11 @@ export class MockServingPorts {
 
   constructor(
     private readonly onChanged: (workspaceId: string, ports: ServingPort[]) => void,
-    private readonly now: () => number = Date.now
+    private readonly now: () => number = Date.now,
+    /** Maps a workspace to the broker session id its first fake port is
+     *  attributed to (mock stand-in for the broker's ancestry walk).
+     *  Undefined/null → the port renders without a session chip. */
+    private readonly resolveSessionId?: (workspaceId: string) => Promise<string | null>
   ) {}
 
   reconcile(runningIds: string[]): void {
@@ -36,13 +40,33 @@ export class MockServingPorts {
   }
 
   private add(id: string, f: (typeof FAKES)[number]): void {
-    let ports = this.serving.get(id);
-    if (!ports) {
-      ports = new Map();
-      this.serving.set(id, ports);
+    const sessionIdPromise = f.attributed && this.resolveSessionId
+      ? this.resolveSessionId(id).catch(() => null)
+      : null;
+
+    if (!sessionIdPromise) {
+      // Synchronous path for backward compatibility (no resolveSessionId)
+      let ports = this.serving.get(id);
+      if (!ports) {
+        ports = new Map();
+        this.serving.set(id, ports);
+      }
+      ports.set(f.port, { port: f.port, pid: f.pid, cmdline: f.cmdline, sessionId: null, firstSeenAt: this.now() });
+      this.emit(id);
+      return;
     }
-    ports.set(f.port, { port: f.port, pid: f.pid, cmdline: f.cmdline, firstSeenAt: this.now() });
-    this.emit(id);
+
+    // Async path: resolve the session id first, then add the port
+    void sessionIdPromise.then((sessionId) => {
+      if (!this.timers.has(id)) return; // stopped while resolving
+      let ports = this.serving.get(id);
+      if (!ports) {
+        ports = new Map();
+        this.serving.set(id, ports);
+      }
+      ports.set(f.port, { port: f.port, pid: f.pid, cmdline: f.cmdline, sessionId, firstSeenAt: this.now() });
+      this.emit(id);
+    });
   }
 
   private stop(id: string): void {

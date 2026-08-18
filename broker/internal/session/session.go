@@ -198,3 +198,12 @@ func (s *Session) kill() {
 		_ = s.cmd.Process.Kill()
 	}
 }
+
+// Pid returns the root pid of the session's claude process, or 0 when the
+// process is gone or never started. Used for port→session attribution.
+func (s *Session) Pid() int {
+	if s.cmd != nil && s.cmd.Process != nil {
+		return s.cmd.Process.Pid
+	}
+	return 0
+}

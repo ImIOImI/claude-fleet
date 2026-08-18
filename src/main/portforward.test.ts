@@ -206,11 +206,11 @@ describe('PortForwardManager serving snapshot', () => {
     expect(changes).toEqual([
       {
         workspaceId: 'ws1',
-        ports: [{ port: 3000, pid: 42, cmdline: 'vite dev', firstSeenAt: 1000 }]
+        ports: [{ port: 3000, pid: 42, cmdline: 'vite dev', sessionId: null, firstSeenAt: 1000 }]
       }
     ]);
     expect(mgr.snapshot()).toEqual([
-      { workspaceId: 'ws1', ports: [{ port: 3000, pid: 42, cmdline: 'vite dev', firstSeenAt: 1000 }] }
+      { workspaceId: 'ws1', ports: [{ port: 3000, pid: 42, cmdline: 'vite dev', sessionId: null, firstSeenAt: 1000 }] }
     ]);
     mgr.dispose();
     vi.useRealTimers();
@@ -243,7 +243,7 @@ describe('PortForwardManager serving snapshot', () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(changes).toHaveLength(2);
     expect(changes[1].ports).toEqual([
-      { port: 3000, pid: 99, cmdline: 'vite dev (restarted)', firstSeenAt: 5000 }
+      { port: 3000, pid: 99, cmdline: 'vite dev (restarted)', sessionId: null, firstSeenAt: 5000 }
     ]);
     mgr.dispose();
     vi.useRealTimers();
@@ -254,7 +254,7 @@ describe('PortForwardManager serving snapshot', () => {
     const { mgr, changes } = servingHarness(() => [{ port: 3000 }]);
     mgr.reconcile(['ws1']);
     await vi.advanceTimersByTimeAsync(1000);
-    expect(changes[0].ports).toEqual([{ port: 3000, pid: null, cmdline: null, firstSeenAt: 1000 }]);
+    expect(changes[0].ports).toEqual([{ port: 3000, pid: null, cmdline: null, sessionId: null, firstSeenAt: 1000 }]);
     mgr.dispose();
     vi.useRealTimers();
   });
@@ -427,6 +427,123 @@ describe('PortForwardManager serving snapshot', () => {
     const res = await mgr.killPort('ws1', 8765);
     expect(res.ok).toBe(false);
     expect(res.error).toContain('workspace not running');
+    mgr.dispose();
+  });
+});
+
+describe('ServingPort session attribution', () => {
+  function mgrWith(listPorts: () => Array<{ port: number; pid?: number; cmdline?: string; session?: string }>, onChanged: (id: string, ports: ServingPort[]) => void): PortForwardManager {
+    return new PortForwardManager({
+      resolveEndpoint: async () => 'sock',
+      makeClient: () =>
+        ({
+          ready: () => Promise.resolve(),
+          close: () => {},
+          listPorts: () => Promise.resolve(listPorts()),
+          dial: () => Promise.reject(new Error('stub')),
+          closeChannel: () => Promise.resolve()
+        }) as never,
+      onDetected: () => {},
+      onChanged,
+      excludePorts: () => [],
+      probePort: () => Promise.resolve(true),
+      pollMs: 1000,
+      now: () => 111
+    });
+  }
+
+  it('carries the broker session id into the snapshot', async () => {
+    let last: ServingPort[] = [];
+    const mgr = mgrWith(() => [{ port: 3000, pid: 42, cmdline: 'vite', session: 'tab-1' }], (_id, p) => (last = p));
+    vi.useFakeTimers();
+    mgr.reconcile(['ws']);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(last).toEqual([{ port: 3000, pid: 42, cmdline: 'vite', sessionId: 'tab-1', firstSeenAt: 111 }]);
+    mgr.dispose();
+    vi.useRealTimers();
+  });
+
+  it('late attribution updates sessionId in place without resetting firstSeenAt', async () => {
+    let last: ServingPort[] = [];
+    let calls = 0;
+    const details = [{ port: 3000, pid: 42, cmdline: 'vite' } as { port: number; pid?: number; cmdline?: string; session?: string }];
+    const mgr = mgrWith(() => details, (_id, p) => ((last = p), calls++));
+    vi.useFakeTimers();
+    mgr.reconcile(['ws']);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(last[0].sessionId).toBeNull();
+    const seenAt = last[0].firstSeenAt;
+    details[0].session = 'tab-1'; // fd-race resolved on a later scan
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(last[0].sessionId).toBe('tab-1');
+    expect(last[0].firstSeenAt).toBe(seenAt); // NOT a restart
+    expect(calls).toBe(2);
+    mgr.dispose();
+    vi.useRealTimers();
+  });
+
+  it('a pid change still resets the row (restart) and takes the new sessionId', async () => {
+    let last: ServingPort[] = [];
+    const details = [{ port: 3000, pid: 42, cmdline: 'vite', session: 'tab-1' } as { port: number; pid?: number; cmdline?: string; session?: string }];
+    let t = 100;
+    const mgr = new PortForwardManager({
+      resolveEndpoint: async () => 'sock',
+      makeClient: () =>
+        ({
+          ready: () => Promise.resolve(),
+          close: () => {},
+          listPorts: () => Promise.resolve(details),
+          dial: () => Promise.reject(new Error('stub')),
+          closeChannel: () => Promise.resolve()
+        }) as never,
+      onDetected: () => {},
+      onChanged: (_id, p) => (last = p),
+      excludePorts: () => [],
+      probePort: () => Promise.resolve(true),
+      pollMs: 1000,
+      now: () => t
+    });
+    vi.useFakeTimers();
+    mgr.reconcile(['ws']);
+    await vi.advanceTimersByTimeAsync(1000);
+    t = 200;
+    details[0].pid = 43;
+    details[0].session = 'tab-2';
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(last[0]).toEqual({ port: 3000, pid: 43, cmdline: 'vite', sessionId: 'tab-2', firstSeenAt: 200 });
+    mgr.dispose();
+    vi.useRealTimers();
+  });
+});
+
+describe('killPort old-broker fallback', () => {
+  it('maps a KILLED rpc timeout to actionable copy', async () => {
+    const mgr = new PortForwardManager({
+      resolveEndpoint: async () => 'sock',
+      makeClient: () =>
+        ({
+          ready: () => Promise.resolve(),
+          close: () => {},
+          listPorts: () => Promise.resolve([{ port: 3000, pid: 42 }]),
+          killPort: () => Promise.reject(new Error('broker: KILLED timed out')),
+          dial: () => Promise.reject(new Error('stub')),
+          closeChannel: () => Promise.resolve()
+        }) as never,
+      onDetected: () => {},
+      onChanged: () => {},
+      excludePorts: () => [],
+      probePort: () => Promise.resolve(true),
+      pollMs: 1000
+    });
+    vi.useFakeTimers();
+    mgr.reconcile(['ws']);
+    await vi.advanceTimersByTimeAsync(1000); // port 3000 enters the snapshot
+    vi.useRealTimers();
+    const res = await mgr.killPort('ws', 3000);
+    expect(res).toEqual({
+      ok: false,
+      error: 'runner image too old — recreate the workspace to enable kill'
+    });
     mgr.dispose();
   });
 });

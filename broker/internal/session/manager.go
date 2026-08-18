@@ -84,6 +84,25 @@ func (m *Manager) List() []SessionInfo {
 	return out
 }
 
+// RootPids maps each live session's PTY root pid → session id. LISTPORTS
+// uses it to attribute a listening port to the session whose process tree
+// spawned the server. Dead-but-listed sessions are excluded: their pid may
+// already be reused by an unrelated process.
+func (m *Manager) RootPids() map[int]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[int]string, len(m.sessions))
+	for id, s := range m.sessions {
+		if !s.Alive() {
+			continue
+		}
+		if pid := s.Pid(); pid > 0 {
+			out[pid] = id
+		}
+	}
+	return out
+}
+
 // CloseAll kills every session. Used at broker shutdown.
 func (m *Manager) CloseAll() {
 	m.mu.Lock()
