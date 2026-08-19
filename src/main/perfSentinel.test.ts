@@ -5,16 +5,20 @@ import {
 } from './perfSentinel.js';
 
 type MsgCb = (win: { p50: number; p99: number; max: number }) => void;
-function fakeWorker(): { worker: SentinelWorkerLike; emit: MsgCb; terminated: () => boolean } {
+type OnceCb = () => void;
+function fakeWorker(): { worker: SentinelWorkerLike; emit: MsgCb; die: () => void; terminated: () => boolean } {
   let cb: MsgCb = () => {};
+  let onceCbs: OnceCb[] = [];
   let terminated = false;
   return {
     worker: {
       on: (_e, c) => { cb = c; },
+      once: (_e, c) => { onceCbs.push(c); },
       unref: () => {},
       terminate: () => { terminated = true; }
     },
     emit: (w) => cb(w),
+    die: () => { for (const c of onceCbs) c(); },
     terminated: () => terminated
   };
 }
@@ -23,7 +27,7 @@ afterEach(() => disarmSentinel());
 
 describe('stall sentinel', () => {
   it('disarmed by default; sentinelWindowFor is null; status is empty', () => {
-    expect(sentinelStatus()).toEqual({ enabled: false, startedAt: null, expiresAt: null, lastWorkerWindow: null });
+    expect(sentinelStatus()).toEqual({ enabled: false, startedAt: null, expiresAt: null, lastWorkerWindow: null, workerDead: false });
     expect(sentinelWindowFor(1000)).toBeNull();
   });
 
@@ -76,5 +80,27 @@ describe('stall sentinel', () => {
     expect(s.enabled).toBe(true);
     expect(s.lastWorkerWindow).not.toBeNull();
     expect(s.lastWorkerWindow!.max).toBeGreaterThanOrEqual(0);
+  });
+
+  it('dead worker: sentinelWindowFor returns { dead: true } and sentinelStatus reports workerDead', () => {
+    const f = fakeWorker();
+    let clock = 10_000;
+    armSentinel(undefined, { workerFactory: () => f.worker, sampleIntervalMs: 5000, now: () => clock });
+    expect(sentinelStatus().workerDead).toBe(false);
+    f.die();
+    expect(sentinelWindowFor(clock)).toEqual({ dead: true });
+    expect(sentinelStatus().workerDead).toBe(true);
+  });
+
+  it('dead worker: once callbacks do not fire for a replaced (re-armed) state', () => {
+    const f = fakeWorker();
+    let clock = 10_000;
+    armSentinel(undefined, { workerFactory: () => f.worker, sampleIntervalMs: 5000, now: () => clock });
+    const f2 = fakeWorker();
+    armSentinel(undefined, { workerFactory: () => f2.worker, sampleIntervalMs: 5000, now: () => clock });
+    // fire old worker's once — must NOT mark current state as dead
+    f.die();
+    expect(sentinelStatus().workerDead).toBe(false);
+    expect(sentinelWindowFor(clock)).not.toEqual({ dead: true });
   });
 });

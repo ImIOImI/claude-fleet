@@ -347,6 +347,6 @@ describe('stall rows: cpu + sentinel enrichment', () => {
   it('getPerfStatus includes the sentinel block', () => {
     initPerf(store, ON);
     const s = getPerfStatus();
-    expect(s.sentinel).toEqual({ enabled: false, startedAt: null, expiresAt: null, lastWorkerWindow: null });
+    expect(s.sentinel).toEqual({ enabled: false, startedAt: null, expiresAt: null, lastWorkerWindow: null, workerDead: false });
   });
 });

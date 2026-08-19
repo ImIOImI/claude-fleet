@@ -28,14 +28,17 @@ export interface SentinelStatus {
   startedAt: number | null;
   expiresAt: number | null;
   lastWorkerWindow: { p50: number; p99: number; max: number; ageMs: number } | null;
+  workerDead: boolean;
 }
 
 export type SentinelWindowVerdict =
   | { workerMaxMs: number; aligned: boolean; ageMs: number }
-  | { stale: true; ageMs: number };
+  | { stale: true; ageMs: number }
+  | { dead: true };
 
 export interface SentinelWorkerLike {
   on(event: 'message', cb: (win: { p50: number; p99: number; max: number }) => void): void;
+  once?(event: 'error' | 'exit', cb: () => void): void;
   unref(): void;
   terminate(): Promise<unknown> | void;
 }
@@ -54,6 +57,7 @@ interface State {
   sampleIntervalMs: number;
   now: () => number;
   lastWindow: { p50: number; p99: number; max: number; at: number } | null;
+  dead: boolean;
 }
 let state: State | null = null;
 
@@ -75,11 +79,14 @@ export function armSentinel(opts?: { ttlHours?: number }, hooks?: SentinelHooks)
     ttlTimer: null,
     sampleIntervalMs,
     now,
-    lastWindow: null
+    lastWindow: null,
+    dead: false
   };
   worker.on('message', (win) => {
     s.lastWindow = { ...win, at: s.now() };
   });
+  worker.once?.('error', () => { if (state === s) s.dead = true; });
+  worker.once?.('exit', () => { if (state === s) s.dead = true; });
   worker.unref();
   if (ttl !== undefined) {
     s.ttlTimer = setTimeout(() => disarmSentinel(), ttl * 3_600_000);
@@ -93,11 +100,14 @@ export function disarmSentinel(): void {
   state = null;
   if (!s) return;
   if (s.ttlTimer) clearTimeout(s.ttlTimer);
-  void s.worker.terminate();
+  const t = s.worker.terminate();
+  if (t && typeof (t as Promise<unknown>).then === 'function') {
+    (t as Promise<unknown>).then(undefined, () => {});
+  }
 }
 
 export function sentinelStatus(): SentinelStatus {
-  if (!state) return { enabled: false, startedAt: null, expiresAt: null, lastWorkerWindow: null };
+  if (!state) return { enabled: false, startedAt: null, expiresAt: null, lastWorkerWindow: null, workerDead: false };
   const { lastWindow, now } = state;
   return {
     enabled: true,
@@ -105,16 +115,20 @@ export function sentinelStatus(): SentinelStatus {
     expiresAt: state.expiresAt,
     lastWorkerWindow: lastWindow
       ? { p50: lastWindow.p50, p99: lastWindow.p99, max: lastWindow.max, ageMs: now() - lastWindow.at }
-      : null
+      : null,
+    workerDead: state.dead
   };
 }
 
 /** Verdict for a stall observed at nowMs; null when not armed. A window
  *  older than 2 sample intervals (or never received) reports stale — an
- *  armed-but-silent worker is itself starvation evidence. */
+ *  armed-but-silent worker is itself starvation evidence. A dead worker
+ *  (error/exit) reports { dead: true } so callers can distinguish starvation
+ *  evidence from a crashed worker. */
 export function sentinelWindowFor(nowMs: number): SentinelWindowVerdict | null {
   const s = state;
   if (!s) return null;
+  if (s.dead) return { dead: true };
   const w = s.lastWindow;
   if (!w) return { stale: true, ageMs: nowMs - s.startedAt };
   const ageMs = nowMs - w.at;

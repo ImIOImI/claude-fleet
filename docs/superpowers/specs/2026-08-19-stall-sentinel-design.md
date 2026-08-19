@@ -48,7 +48,7 @@ every app start comes up disarmed.
   armSentinel(opts?: { ttlHours?: number }): void   // idempotent re-arm resets TTL
   disarmSentinel(): void                             // idempotent; terminates the worker
   sentinelStatus(): SentinelStatus
-  sentinelWindowFor(nowMs: number): { workerMaxMs: number; aligned: boolean; ageMs: number } | null
+  sentinelWindowFor(nowMs: number): { workerMaxMs: number; aligned: boolean; ageMs: number } | { stale: true; ageMs: number } | { dead: true } | null
   ```
 - `aligned` = the worker's latest window max also exceeded
   `STALL_THRESHOLD_MS` (50) — the starvation signature.
@@ -95,6 +95,8 @@ confirmed, and the fix conversation moves to resource governance (WSL2
 memory/CPU caps, container cpu limits), not app code. Majority `aligned=0`
 ⇒ a real main-loop blocker remains; next step is `--inspect` sampling
 profiler on the host, aimed by the stall timestamps.
+
+**Interpretation caveats (final review):** scheduling is per-thread, so `aligned: false` means only 'the worker's last window got CPU' — treat `stale` (and `dead`) as aligned-equivalent, judge in aggregate, and remember `aligned: false` can still be a non-JS main-thread block (sync syscall, message-pump stall). `meta.cpu.utilization` spans stall-to-stall, so interpret it only when stalls cluster (a lone stall after a quiet hour averages the whole gap).
 
 ## Non-goals
 
