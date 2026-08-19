@@ -25,6 +25,9 @@ export interface Toast {
   dismissible: boolean;
   /** Optional inline action button, e.g. "Open log". */
   action?: ToastAction;
+  /** Optional second inline action, e.g. the "Keep" next to "Use newer" on
+   *  the newer-claude toast (#336). Rendered after `action`. */
+  secondaryAction?: ToastAction;
   /** Dedupe key: pushing another toast with the same key REPLACES the existing
    *  one rather than stacking — e.g. the single "MCP unreachable" toast. */
   key?: string;

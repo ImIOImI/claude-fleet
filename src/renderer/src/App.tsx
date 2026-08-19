@@ -517,6 +517,54 @@ export function App() {
     // keeps the linter happy while the effect still runs once.
   }, [openPreview]);
 
+  // Newer-claude cue (#336): a wsl-launcher workspace started and its distro
+  // has a claude newer than the manifest-pinned one. Sticky + keyed per
+  // workspace (a re-start replaces the toast instead of stacking). "Use newer"
+  // repins the manifest — new sessions only; "Keep" suppresses re-offers up
+  // to that version. Plain ✕ just snoozes until the next start.
+  useEffect(() => {
+    return window.api.claudeUpdate.onAvailable(({ workspaceId, distro, pinned, best }) => {
+      const name = workspacesRef.current.find((w) => w.id === workspaceId)?.name ?? 'workspace';
+      const pinnedLabel = pinned.version
+        ? `pinned to ${pinned.version}`
+        : 'pinned to a binary that no longer runs';
+      const id = ++toastIdRef.current;
+      dispatchToast({
+        type: 'push',
+        toast: makeToast(id, {
+          kind: 'info',
+          eyebrow: 'Claude update',
+          key: `claude-update:${workspaceId}`,
+          message: `Claude Code ${best.version} found in ${distro} — ${name} is ${pinnedLabel}. Applies to new sessions.`,
+          placement: 'global',
+          sticky: true,
+          dismissible: true,
+          action: {
+            label: 'Use newer',
+            onClick: () => {
+              dispatchToast({ type: 'dismiss', id });
+              void window.api.claudeUpdate
+                .decide(workspaceId, { action: 'adopt', path: best.path })
+                .catch(() => {
+                  pushToast(`Couldn't update ${name}'s claude path.`, 'Claude update', 6000, 'error');
+                });
+            }
+          },
+          secondaryAction: {
+            label: 'Keep',
+            onClick: () => {
+              dispatchToast({ type: 'dismiss', id });
+              void window.api.claudeUpdate
+                .decide(workspaceId, { action: 'ignore', version: best.version })
+                .catch(() => {});
+            }
+          }
+        })
+      });
+    });
+    // dispatchToast/pushToast are stable (useReducer/useCallback []).
+  }, []);
+
   // Drag-and-drop / clipboard-image ingestion → selected workspace's _dropped/.
   // Results surface through the existing toast stack; errors linger longer.
   const notify = useCallback(
