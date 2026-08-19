@@ -46,9 +46,10 @@ import {
   mcpWorkspaceTokenPath,
   MCP_TCP_PORT
 } from './mcpSocket.js';
-import { getPerfStatus, reconfigurePerf } from './perf.js';
+import { getPerfStatus, reconfigurePerf, getEffectivePerf } from './perf.js';
 import { getPerfTelemetry, setPerfTelemetry, getPerfOtlp } from './config.js';
 import { resolvePerfConfig } from './perfConfig.js';
+import { armSentinel, disarmSentinel } from './perfSentinel.js';
 
 // A Windows host can't listen() on a unix-domain socket at a Windows path
 // (EACCES), so the per-workspace-socket transport (#117) can't work there. On
@@ -1158,7 +1159,8 @@ export const TOOLS: Tool[] = [
     name: 'perf_status',
     description:
       'Perf-telemetry state: recording on/off + which source controls it (settings vs CLAUDE_FLEET_PERF), ' +
-      'OTLP export state, and perf_events counts per kind over the trailing 24h.',
+      'OTLP export state, and perf_events counts per kind over the trailing 24h. ' +
+      'Includes the stall-sentinel status (see perf_sentinel_set).',
     inputSchema: { type: 'object', properties: {} },
     run: async () => getPerfStatus()
   },
@@ -1188,6 +1190,38 @@ export const TOOLS: Tool[] = [
           process.env
         )
       );
+      return getPerfStatus();
+    }
+  },
+  {
+    name: 'perf_sentinel_set',
+    description:
+      'Arm or disarm the stall sentinel: a worker-thread co-stall detector that annotates stall rows ' +
+      'with meta.sentinel, discriminating OS-level starvation (worker stalled too) from main-loop blocks. ' +
+      'Armed until app restart, manual disarm, or optional ttlHours (max 168); never persisted. ' +
+      'Requires perf recording to be enabled. Returns the resulting perf_status.',
+    inputSchema: {
+      type: 'object',
+      properties: { enabled: { type: 'boolean' }, ttlHours: { type: 'number' } },
+      required: ['enabled']
+    },
+    run: async (_db: Database.Database, args: Record<string, unknown>) => {
+      const extras = Object.keys(args).filter((k) => k !== 'enabled' && k !== 'ttlHours');
+      if (extras.length > 0) {
+        throw new Error(`perf_sentinel_set: unexpected arguments: ${extras.join(', ')}`);
+      }
+      if (args.enabled === true) {
+        const ttl = args.ttlHours;
+        if (ttl !== undefined && (typeof ttl !== 'number' || !Number.isFinite(ttl) || ttl <= 0 || ttl > 168)) {
+          throw new Error('ttlHours must be a number in (0, 168]');
+        }
+        if (!getEffectivePerf()?.recording) {
+          throw new Error('perf recording is disabled — enable it (perf_set) before arming the sentinel');
+        }
+        armSentinel(ttl !== undefined ? { ttlHours: ttl as number } : undefined);
+      } else {
+        disarmSentinel();
+      }
       return getPerfStatus();
     }
   },

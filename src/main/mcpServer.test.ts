@@ -20,6 +20,7 @@ import { EMBED_DIM, EMBED_MODEL_ID } from './vectors.js';
 import { closeDb, openDb } from './db.js';
 import { PerfStore } from './perfStore.js';
 import { initPerf, shutdownPerf } from './perf.js';
+import { disarmSentinel } from './perfSentinel.js';
 import type { EffectivePerfConfig } from './perfConfig.js';
 
 const WS_A = '01WORKSPACEAAAAAAAAAAAAAAA';
@@ -729,6 +730,68 @@ describe('perf tools', () => {
         { kind: 'pty_window', workspace_id: WS_A },
         { kind: 'stall', workspace_id: null }
       ]);
+    });
+  });
+
+  describe('perf_sentinel_set', () => {
+    let perfDir: string;
+    beforeEach(() => {
+      perfDir = mkdtempSync(join(tmpdir(), 'mcp-sentinel-'));
+      const perfDb = openDb(perfDir);
+      const store = new PerfStore(perfDb);
+      initPerf(store, PERF_ON);
+    });
+    afterEach(async () => {
+      disarmSentinel();
+      await shutdownPerf();
+      closeDb();
+      rmSync(perfDir, { recursive: true, force: true });
+    });
+
+    it('perf_sentinel_set is registered with the pinned schema', () => {
+      const t = TOOLS.find((x) => x.name === 'perf_sentinel_set')!;
+      expect(t).toBeDefined();
+      expect(t.inputSchema).toEqual({
+        type: 'object',
+        properties: { enabled: { type: 'boolean' }, ttlHours: { type: 'number' } },
+        required: ['enabled']
+      });
+    });
+
+    it('perf_sentinel_set arms (with ttl), reports via perf_status, and disarms', async () => {
+      const t = TOOLS.find((x) => x.name === 'perf_sentinel_set')!;
+      const armed = await t.run(db, { enabled: true, ttlHours: 1 }, ctxA);
+      expect((armed as { sentinel: { enabled: boolean; expiresAt: number | null } }).sentinel.enabled).toBe(true);
+      expect((armed as { sentinel: { expiresAt: number | null } }).sentinel.expiresAt).not.toBeNull();
+      const disarmed = await t.run(db, { enabled: false }, ctxA);
+      expect((disarmed as { sentinel: { enabled: boolean } }).sentinel.enabled).toBe(false);
+    });
+
+    it('perf_sentinel_set validates ttlHours and rejects extra args', async () => {
+      const t = TOOLS.find((x) => x.name === 'perf_sentinel_set')!;
+      await expect(t.run(db, { enabled: true, ttlHours: 0 }, ctxA)).rejects.toThrow(/ttlHours/);
+      await expect(t.run(db, { enabled: true, ttlHours: 169 }, ctxA)).rejects.toThrow(/ttlHours/);
+      await expect(t.run(db, { enabled: true, endpoint: 'http://evil' }, ctxA)).rejects.toThrow(/unexpected/);
+    });
+
+    it('perf_sentinel_set refuses to arm while recording is disabled', async () => {
+      const PERF_OFF: EffectivePerfConfig = {
+        recording: false, recordingSource: 'settings',
+        otlp: { enabled: false, endpoint: null, source: 'settings' }
+      };
+      // Shut down the perf-on runtime and restart with recording disabled
+      await shutdownPerf();
+      closeDb();
+      rmSync(perfDir, { recursive: true, force: true });
+      perfDir = mkdtempSync(join(tmpdir(), 'mcp-sentinel-off-'));
+      const perfDb = openDb(perfDir);
+      const store = new PerfStore(perfDb);
+      initPerf(store, PERF_OFF);
+
+      const t = TOOLS.find((x) => x.name === 'perf_sentinel_set')!;
+      await expect(t.run(db, { enabled: true }, ctxA)).rejects.toThrow(/recording/);
+      // disarm must still work while recording is off:
+      await expect(t.run(db, { enabled: false }, ctxA)).resolves.toBeTruthy();
     });
   });
 });
