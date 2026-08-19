@@ -100,6 +100,7 @@ export interface WorkspaceSummary {
         home: string;
         claudePath: string;
         interopEnabled?: boolean;
+        ignoreClaudeVersion?: string;
       }
     | { mode: 'custom'; command: string };
   image?: string;
