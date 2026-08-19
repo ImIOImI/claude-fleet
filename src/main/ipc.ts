@@ -89,7 +89,7 @@ import {
   FACTORY_MIRROR
 } from './workspaces.js';
 import { listWslDistros, probeWslDistro, type ProbeDeps } from './wslProbe.js';
-import { wslLocalProjectsDir, wslLocalSessionsDir, uncToLinuxPath } from './localLauncher.js';
+import { wslLocalProjectsDir, wslLocalSessionsDir, uncToLinuxPath, applyClaudeUpdateDecision, type ClaudeUpdateDecision } from './localLauncher.js';
 import type { PtyHandle, RemoveWorkspaceOpts } from './docker.js';
 import type { JsonlWatcher } from './jsonlWatcher.js';
 import type { PeerStatusWatcher } from './peerStatusWatcher.js';
@@ -177,6 +177,26 @@ function broadcastPortDetected(workspaceId: string, port: number): void {
       /* frame disposed mid-send */
     }
   }
+}
+
+/** Fire-and-forget newer-claude check on wsl-workspace start (#336). Runs in
+ *  the background (~1-2s of wsl.exe probing) and never delays the start path;
+ *  a hit fans out to every window as a toast cue. */
+function scheduleClaudeFreshnessCheck(workspaceId: string): void {
+  void realLocal
+    .checkClaudeFreshness(workspaceId)
+    .then((update) => {
+      if (!update) return;
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (win.isDestroyed()) continue;
+        try {
+          win.webContents.send('local:claude-update-available', { workspaceId, ...update });
+        } catch {
+          /* frame disposed mid-send */
+        }
+      }
+    })
+    .catch(() => {});
 }
 
 /** Tell every window a workspace's Serving snapshot changed (rail state). */
@@ -1062,6 +1082,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       if (!containerId) return null;
       await touchWorkspaceUsed(workspaceId);
       invalidateWorkspaceList(); // startWorkspace may have brought a stopped container up
+      scheduleClaudeFreshnessCheck(workspaceId);
       return { containerId };
     }
   );
@@ -1076,6 +1097,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     const containerId = await (await backendFor(id)).startWorkspace(id);
     if (!containerId) return null;
     await touchWorkspaceUsed(id);
+    scheduleClaudeFreshnessCheck(id);
     // Find the freshly-running workspace in the merged list so the
     // renderer gets the up-to-date state/status fields (invalidate first —
     // a cached pre-start list would hand back a stale 'deleted'/'stopped' row).
@@ -1087,6 +1109,24 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('workspace:getManifest', async (_e, id: string) => {
     return readWorkspaceManifest(id);
   });
+
+  /** Fold a newer-claude toast decision into the workspace manifest (#336).
+   *  adopt: repin launcher.claudePath (new sessions only — live PTYs keep
+   *  their running binary). ignore: persist ignoreClaudeVersion so the toast
+   *  only returns for something strictly newer. */
+  ipcMain.handle(
+    'local:claude-update-decision',
+    async (_e, workspaceId: string, decision: ClaudeUpdateDecision): Promise<void> => {
+      const m = await readWorkspaceManifest(workspaceId);
+      if (!m || m.launcher?.mode !== 'wsl') {
+        throw new Error(`${workspaceId} is not a wsl-launcher workspace`);
+      }
+      await writeWorkspaceManifest({
+        ...m,
+        launcher: applyClaudeUpdateDecision(m.launcher, decision)
+      });
+    }
+  );
 
   /**
    * Update a workspace's manifest in place without touching the container.
