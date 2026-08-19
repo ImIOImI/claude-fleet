@@ -8,6 +8,7 @@ import {
   initPerf, shutdownPerf, reconfigurePerf, perfSpan, perfSpanAsync, perfSetSpanContext, getEffectivePerf,
   recordPtyChunk, getPerfStatus, recordLatencySample, setPerfStateListener, perfNotePowerEvent, recordGcEntries
 } from './perf.js';
+import { armSentinel, disarmSentinel, sentinelStatus } from './perfSentinel.js';
 import type { EffectivePerfConfig } from './perfConfig.js';
 import type Database from 'better-sqlite3';
 
@@ -133,7 +134,7 @@ describe('stall sampler + pty counters', () => {
     const rows = db.prepare(`SELECT dur_ms, meta FROM perf_events WHERE kind = 'stall'`).all() as Array<{ dur_ms: number; meta: string }>;
     expect(rows.length).toBeGreaterThanOrEqual(1);
     expect(rows[0].dur_ms).toBe(120);
-    expect(JSON.parse(rows[0].meta)).toEqual({ p50: 2, p99: 8, max: 120 });
+    expect(JSON.parse(rows[0].meta)).toMatchObject({ p50: 2, p99: 8, max: 120 });
   });
 
   it('aggregates pty chunks into per-session pty_window rows', async () => {
@@ -296,5 +297,56 @@ describe('recordGcEntries (GC pause rows)', () => {
     recordGcEntries([entry(500, 2)]);
     await shutdownPerf();
     expect(db.prepare(`SELECT COUNT(*) AS n FROM perf_events WHERE kind='gc'`).get()).toEqual({ n: 0 });
+  });
+});
+
+describe('stall rows: cpu + sentinel enrichment', () => {
+  afterEach(() => disarmSentinel());
+
+  it('every stall row carries meta.cpu.utilization in [0,1]', async () => {
+    initPerf(store, ON, { delaySource: () => ({ p50: 2, p99: 8, max: 120 }), sampleIntervalMs: 20 });
+    await sleep(100);
+    await shutdownPerf();
+    const rows = db.prepare(`SELECT meta FROM perf_events WHERE kind='stall'`).all() as Array<{ meta: string }>;
+    expect(rows.length).toBeGreaterThanOrEqual(1);
+    for (const r of rows) {
+      const u = JSON.parse(r.meta).cpu?.utilization;
+      expect(typeof u).toBe('number');
+      expect(u).toBeGreaterThanOrEqual(0);
+      expect(u).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('armed sentinel annotates stall rows; disarmed leaves meta.sentinel absent', async () => {
+    let cb: (w: { p50: number; p99: number; max: number }) => void = () => {};
+    armSentinel(undefined, {
+      workerFactory: () => ({ on: (_e, c) => { cb = c; }, unref: () => {}, terminate: () => {} }),
+      sampleIntervalMs: 20
+    });
+    cb({ p50: 1, p99: 2, max: 200 }); // worker co-stalled
+    initPerf(store, ON, { delaySource: () => ({ p50: 2, p99: 8, max: 120 }), sampleIntervalMs: 20 });
+    await sleep(60);
+    disarmSentinel();
+    await sleep(60);
+    await shutdownPerf();
+    const rows = db.prepare(`SELECT meta FROM perf_events WHERE kind='stall' ORDER BY id`).all() as Array<{ meta: string }>;
+    const metas = rows.map((r) => JSON.parse(r.meta));
+    expect(metas.some((m) => m.sentinel?.aligned === true)).toBe(true); // while armed
+    expect(metas.some((m) => m.sentinel === undefined)).toBe(true);     // after disarm
+  });
+
+  it('shutdownPerf disarms the sentinel (covers recording-off via reconfigure)', async () => {
+    armSentinel(undefined, {
+      workerFactory: () => ({ on: () => {}, unref: () => {}, terminate: () => {} })
+    });
+    initPerf(store, ON);
+    await shutdownPerf();
+    expect(sentinelStatus().enabled).toBe(false);
+  });
+
+  it('getPerfStatus includes the sentinel block', () => {
+    initPerf(store, ON);
+    const s = getPerfStatus();
+    expect(s.sentinel).toEqual({ enabled: false, startedAt: null, expiresAt: null, lastWorkerWindow: null });
   });
 });
