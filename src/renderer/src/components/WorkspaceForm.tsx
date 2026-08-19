@@ -20,6 +20,7 @@ import type {
   WorkspaceSummary
 } from '../App';
 import { AdvancedImageSearchModal, IconSearch } from './AdvancedImageSearchModal';
+import { buildWslLauncherPayload } from './wslLauncherPayload';
 import { eligibleAcceptFromManagers, ManagerGlyph } from './committee';
 import { ModelCombobox, type EndpointEntry } from './ModelCombobox';
 import {
@@ -53,6 +54,9 @@ export interface WorkspaceFormSubmit {
         home: string;
         claudePath: string;
         interopEnabled?: boolean;
+        /** "Keep" suppression from the claude-update toast (#336) — owned by
+         *  the manifest; the form only round-trips it (#339). */
+        ignoreClaudeVersion?: string;
       }
     | { mode: 'custom'; command: string };
   image?: string;
@@ -467,19 +471,15 @@ export function WorkspaceForm({
           ? undefined
           : launcherMode === 'custom'
             ? { mode: 'custom' as const, command: customCommand.trim() }
-            : {
-                mode: 'wsl' as const,
-                distro: wslDistro,
-                shell: wslShell,
-                home: wslProbe.state === 'done' ? wslProbe.home : '',
-                claudePath: wslProbe.state === 'done' ? (wslProbe.claudePath ?? '') : '',
-                // Persisted so attach can skip MCP wiring when interop is off
-                // (#259) — previously this drove only the note below and was
-                // thrown away on save. Omitted when the probe didn't finish, so
-                // it stays undefined ("not probed") rather than a false read as
-                // "interop is off".
-                ...(wslProbe.state === 'done' ? { interopEnabled: wslProbe.interopEnabled } : {})
-              },
+            : // Same distro ⇒ the manifest owns claudePath/ignoreClaudeVersion
+              // (the claude-update toast changes them, #339); the probe only
+              // refreshes home/interopEnabled (#259 tri-state preserved).
+              buildWslLauncherPayload(
+                initialLauncher,
+                wslDistro,
+                wslShell,
+                wslProbe.state === 'done' ? wslProbe : null
+              ),
       image: kind === 'container' ? image.trim() : undefined,
       authMode,
       endpointId,
