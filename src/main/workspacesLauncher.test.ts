@@ -60,6 +60,39 @@ describe('sanitizeLauncher', () => {
     });
   });
 
+  describe('wsl ignoreClaudeVersion round-trip (#336)', () => {
+    it('round-trips ignoreClaudeVersion on a wsl launcher', () => {
+      const l = sanitizeLauncher(
+        {
+          mode: 'wsl',
+          distro: 'Ubuntu',
+          shell: '/bin/bash',
+          home: '/home/u',
+          claudePath: '/home/u/.local/bin/claude',
+          ignoreClaudeVersion: '2.1.235'
+        },
+        'win32'
+      );
+      expect(l).toMatchObject({ mode: 'wsl', ignoreClaudeVersion: '2.1.235' });
+    });
+
+    it('drops a non-string/empty ignoreClaudeVersion', () => {
+      const base = {
+        mode: 'wsl',
+        distro: 'Ubuntu',
+        shell: '/bin/bash',
+        home: '/home/u',
+        claudePath: '/home/u/.local/bin/claude'
+      };
+      expect(sanitizeLauncher({ ...base, ignoreClaudeVersion: 7 }, 'win32')).not.toHaveProperty(
+        'ignoreClaudeVersion'
+      );
+      expect(sanitizeLauncher({ ...base, ignoreClaudeVersion: '' }, 'win32')).not.toHaveProperty(
+        'ignoreClaudeVersion'
+      );
+    });
+  });
+
   it('normalizes native / drops junk', () => {
     expect(sanitizeLauncher({ mode: 'native' }, 'linux')).toEqual({ mode: 'native' });
     expect(sanitizeLauncher('zsh', 'linux')).toBeUndefined();

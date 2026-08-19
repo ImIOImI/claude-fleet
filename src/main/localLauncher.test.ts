@@ -10,6 +10,7 @@ import {
   wrapSpawnForLauncher,
   wslLocalProjectsDir,
   wslInDistroPath,
+  applyClaudeUpdateDecision,
   type WorkspaceLauncher
 } from './localLauncher.js';
 import type { SpawnPty, PtyProc } from './localSessions.js';
@@ -226,5 +227,38 @@ describe('wslLocalProjectsDir', () => {
     expect(
       wslLocalProjectsDir('Ubuntu', '/home/troy', '\\\\wsl.localhost\\Ubuntu\\home\\troy\\proj', encode)
     ).toBe(wslLocalProjectsDir('Ubuntu', '/home/troy', '/home/troy/proj', encode));
+  });
+});
+
+describe('applyClaudeUpdateDecision', () => {
+  const wsl = {
+    mode: 'wsl' as const,
+    distro: 'Ubuntu',
+    shell: '/bin/bash',
+    home: '/home/u',
+    claudePath: '/home/u/.local/bin/claude',
+    ignoreClaudeVersion: '2.1.0'
+  };
+
+  it('adopt rewrites claudePath and clears ignoreClaudeVersion', () => {
+    const out = applyClaudeUpdateDecision(wsl, { action: 'adopt', path: '/opt/claude' });
+    expect(out).toEqual({
+      mode: 'wsl',
+      distro: 'Ubuntu',
+      shell: '/bin/bash',
+      home: '/home/u',
+      claudePath: '/opt/claude'
+    });
+  });
+
+  it('ignore persists the version and keeps claudePath', () => {
+    const out = applyClaudeUpdateDecision(wsl, { action: 'ignore', version: '2.2.0' });
+    expect(out).toEqual({ ...wsl, ignoreClaudeVersion: '2.2.0' });
+  });
+
+  it('throws for non-wsl launchers', () => {
+    expect(() =>
+      applyClaudeUpdateDecision({ mode: 'native' }, { action: 'ignore', version: '1.0.0' })
+    ).toThrow(/wsl/);
   });
 });

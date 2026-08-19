@@ -224,7 +224,7 @@ export function sanitizeLauncher(
   }
   if (o.mode === 'wsl') {
     if (platform !== 'win32') return undefined;
-    const { distro, shell, home, claudePath, interopEnabled } = o as Record<string, unknown>;
+    const { distro, shell, home, claudePath, interopEnabled, ignoreClaudeVersion } = o as Record<string, unknown>;
     if ([distro, shell, home, claudePath].every((v) => typeof v === 'string' && v)) {
       return {
         mode: 'wsl',
@@ -235,7 +235,11 @@ export function sanitizeLauncher(
         // Only a real boolean round-trips (#259). Missing or garbage stays
         // undefined = "not probed" = still wire MCP, which is what every
         // manifest written before this field existed must keep doing.
-        ...(typeof interopEnabled === 'boolean' ? { interopEnabled } : {})
+        ...(typeof interopEnabled === 'boolean' ? { interopEnabled } : {}),
+        // "Keep" persistence for the newer-claude toast (#336).
+        ...(typeof ignoreClaudeVersion === 'string' && ignoreClaudeVersion
+          ? { ignoreClaudeVersion }
+          : {})
       };
     }
   }

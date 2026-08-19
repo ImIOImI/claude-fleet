@@ -50,3 +50,17 @@ describe('toastReducer', () => {
     expect(toastReducer(s, { type: 'dismissKey', key: 'mcp-down' }).map((x) => x.id)).toEqual([1, 3]);
   });
 });
+
+it('makeToast carries secondaryAction through', () => {
+  const noop = (): void => {};
+  const t = makeToast(1, {
+    kind: 'info',
+    message: 'm',
+    placement: 'global',
+    sticky: true,
+    dismissible: true,
+    action: { label: 'A', onClick: noop },
+    secondaryAction: { label: 'B', onClick: noop }
+  });
+  expect(t.secondaryAction?.label).toBe('B');
+});

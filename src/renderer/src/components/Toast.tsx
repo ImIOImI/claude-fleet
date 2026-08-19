@@ -39,6 +39,11 @@ export function ToastView({
           {toast.action.label}
         </button>
       )}
+      {toast.secondaryAction && (
+        <button className="toast-action" onClick={toast.secondaryAction.onClick}>
+          {toast.secondaryAction.label}
+        </button>
+      )}
       {toast.dismissible && (
         <button className="toast-dismiss" aria-label="Dismiss" onClick={() => onDismiss(toast.id)}>
           ×

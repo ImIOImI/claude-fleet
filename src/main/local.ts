@@ -46,6 +46,7 @@ import {
   windowsPathToWslPath,
   type WorkspaceLauncher
 } from './localLauncher.js';
+import { checkWslClaudeFreshness, type ClaudeUpdate } from './wslClaudeFreshness.js';
 import {
   readWorkspaceManifest,
   listWorkspaceManifests,
@@ -428,6 +429,25 @@ export async function startWorkspace(id: string): Promise<string | null> {
   }
   await persistLiveState(id);
   return id; // the containerId surrogate the renderer attaches against
+}
+
+/**
+ * Start-time staleness check for a wsl-launcher workspace (#336): did the
+ * distro grow a claude newer than the manifest-pinned one? Null for non-wsl
+ * workspaces and on any probe failure — callers treat null as "no cue".
+ */
+export async function checkClaudeFreshness(
+  id: string
+): Promise<(ClaudeUpdate & { distro: string }) | null> {
+  const m = await readWorkspaceManifest(id);
+  if (!m || m.kind !== 'local' || m.launcher?.mode !== 'wsl') return null;
+  const update = await checkWslClaudeFreshness(m.launcher, {
+    exec: async (file, args) => {
+      const { stdout } = await execFileAsync(file, args);
+      return { stdout: String(stdout) };
+    }
+  });
+  return update ? { ...update, distro: m.launcher.distro } : null;
 }
 
 export async function pauseWorkspace(containerId: string): Promise<void> {

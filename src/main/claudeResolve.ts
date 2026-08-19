@@ -79,7 +79,7 @@ async function whereClaude(execFile: ResolveDeps['execFile']): Promise<string | 
 }
 
 /** Well-known absolute locations a host claude may live at, in priority order. */
-function wellKnownCandidates(homedir: string, platform: NodeJS.Platform): string[] {
+export function wellKnownCandidates(homedir: string, platform: NodeJS.Platform): string[] {
   if (platform === 'win32') {
     // Native installer default. npm-global shims live on the registry-backed
     // user PATH, which where.exe already covers.
