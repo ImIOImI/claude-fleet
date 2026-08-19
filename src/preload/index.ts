@@ -580,6 +580,38 @@ const api = {
     kill: (workspaceId: string, port: number): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('ports:kill', workspaceId, port)
   },
+  // Newer-claude cue for wsl-launcher workspaces (#336).
+  claudeUpdate: {
+    /** Subscribe to "a newer in-distro claude exists" cues (start-time check).
+     *  Returns an unsubscribe function. */
+    onAvailable: (
+      cb: (update: {
+        workspaceId: string;
+        distro: string;
+        pinned: { path: string; version: string | null };
+        best: { path: string; version: string };
+      }) => void
+    ): (() => void) => {
+      const channel = 'local:claude-update-available';
+      const handler = (
+        _e: IpcRendererEvent,
+        payload: {
+          workspaceId: string;
+          distro: string;
+          pinned: { path: string; version: string | null };
+          best: { path: string; version: string };
+        }
+      ): void => cb(payload);
+      ipcRenderer.on(channel, handler);
+      return () => ipcRenderer.removeListener(channel, handler);
+    },
+    /** Persist a toast decision: adopt repins launcher.claudePath (new
+     *  sessions only), ignore suppresses re-offers up to that version. */
+    decide: (
+      workspaceId: string,
+      decision: { action: 'adopt'; path: string } | { action: 'ignore'; version: string }
+    ): Promise<void> => ipcRenderer.invoke('local:claude-update-decision', workspaceId, decision)
+  },
   // Durable transcript mirror (#10). The renderer addresses sessions by their
   // broker session id; the main process resolves that to the claude session
   // id (the mirror filename) internally.
