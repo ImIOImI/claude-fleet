@@ -54,15 +54,14 @@ to 2.0.76. [Use newer] [Keep]”. Copy notes that only *new* sessions pick up th
 change. Toast uses the shared toast/`ModalBackdrop`-era conventions (no raw
 backdrop handlers).
 
-### Adopt — `ipcMain.handle('local:adopt-claude', (workspaceId, path))`
+### Decisions — `ipcMain.handle('local:claude-update-decision', (workspaceId, decision))`
 
-Rewrites `launcher.claudePath` via `writeWorkspaceManifest` and clears
-`ignoreClaudeVersion`. Existing PTYs keep their running process.
-
-### Keep
-
-Persists `launcher.ignoreClaudeVersion = best.version`. The toast reappears
-only when something strictly newer than the ignored version shows up.
+One channel for both toast buttons:
+- `{ action: 'adopt', path }` rewrites `launcher.claudePath` via
+  `writeWorkspaceManifest` and clears `ignoreClaudeVersion`. Existing PTYs
+  keep their running process.
+- `{ action: 'ignore', version }` persists `launcher.ignoreClaudeVersion`;
+  the toast reappears only for something strictly newer.
 
 ## Testing
 
