@@ -36,6 +36,9 @@ export type WorkspaceLauncher =
        *  field existed — and is treated as "wire it", preserving the previous
        *  behaviour for those workspaces. Only an explicit `false` skips. */
       interopEnabled?: boolean;
+      /** "Keep" from the newer-claude toast (#336): suppress update offers at
+       *  or below this version. Cleared when the user adopts a new path. */
+      ignoreClaudeVersion?: string;
     }
   | {
       mode: 'custom';
@@ -79,6 +82,27 @@ export function windowsPathToWslPath(p: string): string | null {
  *  signals are harmless no-ops. Ids are path-safe (assertValidWorkspaceId). */
 export function wslPidFile(workspaceId: string, sessionId: string): string {
   return `/tmp/claude-fleet-${workspaceId}-${sessionId}.pid`;
+}
+
+/** The two buttons on the newer-claude toast (#336). */
+export type ClaudeUpdateDecision =
+  | { action: 'adopt'; path: string }
+  | { action: 'ignore'; version: string };
+
+/** Fold a toast decision into the launcher. Pure — the caller persists the
+ *  returned launcher via writeWorkspaceManifest. */
+export function applyClaudeUpdateDecision(
+  launcher: WorkspaceLauncher,
+  decision: ClaudeUpdateDecision
+): WorkspaceLauncher {
+  if (launcher.mode !== 'wsl') {
+    throw new Error(`claude-update decisions only apply to wsl launchers (got ${launcher.mode})`);
+  }
+  if (decision.action === 'adopt') {
+    const { ignoreClaudeVersion: _cleared, ...rest } = launcher;
+    return { ...rest, claudePath: decision.path };
+  }
+  return { ...launcher, ignoreClaudeVersion: decision.version };
 }
 
 /** Forward `passKeys` across the wsl.exe boundary: WSLENV names the vars
