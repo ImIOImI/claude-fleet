@@ -1674,8 +1674,20 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       const win = BrowserWindow.fromWebContents(event.sender);
       // Host-side busy detection (#121): scan the SAME broker output stream in
       // main, so the committee's "is this expert done?" signal never depends on
-      // renderer React state. Reuses the (pure) ActivityDetector.
-      const detector = new ActivityDetector();
+      // renderer React state. Reuses the (pure) ActivityDetector. The
+      // unknown-glyph callback fires at most once per session — it means
+      // claude changed its title spinner again (#343) and busy detection is
+      // likely dead until the glyph set is updated.
+      const detector = new ActivityDetector((title) => {
+        logError({
+          source: 'main',
+          level: 'warn',
+          type: 'activity-unknown-title-glyph',
+          message: `unrecognized terminal-title glyph — busy detection may be broken (#343): ${title}`,
+          workspaceId: owner?.id,
+          extra: { brokerSessionId, ptyHandleId, title }
+        });
+      });
       handle.stream.on('data', (chunk: Buffer) => {
         // Second arg = epoch-ms send stamp for the renderer's output-hop
         // measurement (perf Phase 2). The chunk stays a raw Buffer.
