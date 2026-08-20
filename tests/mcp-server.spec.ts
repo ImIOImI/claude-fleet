@@ -123,7 +123,8 @@ test('MCP server: initialize, tools, typed reads, committee control', async () =
         'mark_useful',
         'get_config',
         'perf_status',
-        'perf_set'
+        'perf_set',
+        'perf_sentinel_set'
       ])
     );
 

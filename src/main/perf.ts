@@ -7,6 +7,8 @@
 // exporters are added only when effective.otlp.enabled.
 
 import { monitorEventLoopDelay, PerformanceObserver, performance } from 'node:perf_hooks';
+import { cpus } from 'node:os';
+import { disarmSentinel, sentinelStatus, sentinelWindowFor, type SentinelStatus } from './perfSentinel.js';
 import { hrTimeToMilliseconds } from '@opentelemetry/core';
 import type { ExportResult } from '@opentelemetry/core';
 import { ExportResultCode } from '@opentelemetry/core';
@@ -195,6 +197,7 @@ export interface PerfStatus {
   source: 'settings' | 'env-override';
   otlp: { enabled: boolean; endpoint: string | null; source: 'settings' | 'env' };
   eventCounts: Record<string, number>;
+  sentinel: SentinelStatus;
 }
 
 export function getEffectivePerf(): EffectivePerfConfig | null {
@@ -209,7 +212,29 @@ export function getPerfStatus(): PerfStatus {
     enabled: rt.effective.recording,
     source: rt.effective.recordingSource,
     otlp: rt.effective.otlp,
-    eventCounts: rt.store.counts24h()
+    eventCounts: rt.store.counts24h(),
+    sentinel: sentinelStatus()
+  };
+}
+
+/** System-wide busy fraction since the previous call (0..1, 3 decimals).
+ *  Starving hosts show sustained ~1.0 — stamped on every stall row so
+ *  starvation is diagnosable even without the sentinel armed. */
+function makeCpuSampler(): () => number {
+  let prev = cpus();
+  return () => {
+    const cur = cpus();
+    let idle = 0;
+    let total = 0;
+    for (let i = 0; i < cur.length; i += 1) {
+      const c = cur[i].times;
+      const p = prev[i]?.times ?? { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 };
+      idle += c.idle - p.idle;
+      total += c.user - p.user + c.nice - p.nice + c.sys - p.sys + c.idle - p.idle + c.irq - p.irq;
+    }
+    prev = cur;
+    if (total <= 0) return 0;
+    return Math.round((1 - idle / total) * 1000) / 1000;
   };
 }
 
@@ -320,12 +345,20 @@ export function initPerf(store: PerfStore, effective: EffectivePerfConfig, hooks
       return w;
     };
   }
+  const cpuSample = makeCpuSampler();
   rt.sampleTimer = setInterval(() => {
     const w = readDelay();
     if (suspendedAtWall !== null || Date.now() < discardUntilWall) return; // sleep gap, not a block
     Object.assign(lastWindow, w);
     if (w.max > STALL_THRESHOLD_MS) {
-      rt?.store.enqueue({ ts: Date.now(), kind: 'stall', durMs: w.max, meta: { ...w } });
+      const nowMs = Date.now();
+      const sv = sentinelWindowFor(nowMs);
+      rt?.store.enqueue({
+        ts: nowMs,
+        kind: 'stall',
+        durMs: w.max,
+        meta: { ...w, cpu: { utilization: cpuSample() }, ...(sv ? { sentinel: sv } : {}) }
+      });
     }
   }, hooks?.sampleIntervalMs ?? SAMPLE_INTERVAL_MS);
   rt.sampleTimer.unref();
@@ -336,6 +369,7 @@ export function initPerf(store: PerfStore, effective: EffectivePerfConfig, hooks
 export async function shutdownPerf(): Promise<void> {
   suspendedAtWall = null;
   discardUntilWall = 0;
+  disarmSentinel();
   if (!rt) return;
   const r = rt;
   rt = null;
