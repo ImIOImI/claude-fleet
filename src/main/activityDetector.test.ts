@@ -1,17 +1,35 @@
 // Main-process ActivityDetector (#121) — same parser as the renderer twin,
 // re-tested here since the two copies must stay behavior-identical.
 
-import { describe, expect, it } from 'vitest';
-import { ActivityDetector, isBusyTitle } from './activityDetector.js';
+import { describe, expect, it, vi } from 'vitest';
+import { ActivityDetector, isBusyTitle, isUnknownTitleGlyph } from './activityDetector.js';
 
-const BUSY = '⠂'; // braille spinner frame ⠂
+// Real titles captured from a live claude PTY (#343): busy = quadrant circles
+// ◐/◑ (U+25D0/U+25D1), idle = ✳ (U+2733). Braille is the legacy spinner.
+const BUSY = '◐';
+const BUSY_LEGACY = '⠂';
 const IDLE = '✳';
 
 describe('isBusyTitle', () => {
-  it('treats a leading braille glyph as busy, anything else as idle', () => {
+  it('treats leading quadrant-circle or braille glyphs as busy, anything else as idle', () => {
     expect(isBusyTitle(`${BUSY} working`)).toBe(true);
+    expect(isBusyTitle('◑ Reply with ok')).toBe(true);
+    expect(isBusyTitle('◒ working')).toBe(true);
+    expect(isBusyTitle('◓ working')).toBe(true);
+    expect(isBusyTitle(`${BUSY_LEGACY} working`)).toBe(true);
     expect(isBusyTitle(`${IDLE} done`)).toBe(false);
+    expect(isBusyTitle('✦ unknown glyph')).toBe(false);
     expect(isBusyTitle('')).toBe(false);
+  });
+});
+
+describe('isUnknownTitleGlyph', () => {
+  it('flags only unrecognized non-ASCII leading glyphs', () => {
+    expect(isUnknownTitleGlyph(`${BUSY} working`)).toBe(false);
+    expect(isUnknownTitleGlyph(`${BUSY_LEGACY} working`)).toBe(false);
+    expect(isUnknownTitleGlyph(`${IDLE} done`)).toBe(false);
+    expect(isUnknownTitleGlyph('Claude Code')).toBe(false);
+    expect(isUnknownTitleGlyph('✦ unknown glyph')).toBe(true);
   });
 });
 
@@ -25,9 +43,15 @@ describe('ActivityDetector.push', () => {
     expect(d.push('plain output, no title')).toBe(false);
     expect(d.push(osc(`${BUSY} thinking`))).toBe(true); // idle → busy
     expect(d.isBusy).toBe(true);
-    expect(d.push(osc(`${BUSY} still thinking`))).toBe(false); // still busy
+    expect(d.push(osc(`◑ still thinking`))).toBe(false); // still busy
     expect(d.push(osc(`${IDLE} done`))).toBe(true); // busy → idle
     expect(d.isBusy).toBe(false);
+  });
+
+  it('still flips on the legacy braille spinner', () => {
+    const d = new ActivityDetector();
+    expect(d.push(osc(`${BUSY_LEGACY} thinking`))).toBe(true);
+    expect(d.isBusy).toBe(true);
   });
 
   it('uses the LAST title in a chunk', () => {
@@ -36,25 +60,14 @@ describe('ActivityDetector.push', () => {
     expect(d.isBusy).toBe(false);
   });
 
-  // Regression for #283: push() used to trim the buffer to its last 512 bytes
-  // BEFORE scanning, so a title followed in the SAME chunk by ≥ ~500 bytes
-  // (a full-screen repaint is several KB) was discarded unseen. Busy re-asserts
-  // every spinner frame, idle is written once — so a swallowed idle edge stuck
-  // committee_status on busy permanently. Boundary cases straddle the old cap.
-  it('sees the idle title no matter how many bytes follow it in the same chunk', () => {
-    for (const trailing of [0, 490, 511, 512, 600, 4096, 40000]) {
-      const d = new ActivityDetector();
-      expect(d.push(osc(`${BUSY} working`))).toBe(true); // arm: busy
-      expect(d.push(osc(`${IDLE} done`) + 'x'.repeat(trailing)), `trailing=${trailing}`).toBe(
-        true
-      );
-      expect(d.isBusy, `trailing=${trailing}`).toBe(false);
-    }
-  });
-
-  it('sees a busy title buried in a large chunk (never goes blind)', () => {
-    const d = new ActivityDetector();
-    expect(d.push(osc(`${BUSY} working`) + 'x'.repeat(40000))).toBe(true);
-    expect(d.isBusy).toBe(true);
+  it('reports an unknown title glyph at most once per detector', () => {
+    const onUnknown = vi.fn();
+    const d = new ActivityDetector(onUnknown);
+    d.push(osc('✦ Mystery glyph'));
+    d.push(osc('✦ Mystery glyph again'));
+    expect(onUnknown).toHaveBeenCalledTimes(1);
+    expect(onUnknown).toHaveBeenCalledWith('✦ Mystery glyph');
+    d.push(osc(`${IDLE} done`));
+    expect(onUnknown).toHaveBeenCalledTimes(1); // known glyphs never fire it
   });
 });

@@ -6,7 +6,8 @@
 ## Problem
 
 claude-fleet chips show **busy** (claude working) vs not, via the PTY title glyph
-(`activityDetector.ts`: braille spinner = busy, `✳` = idle). They cannot show the
+(`activityDetector.ts`: quadrant-circle spinner `◐◑◒◓` = busy — legacy braille
+accepted, #343 — `✳` = idle). They cannot show the
 state that most wants a human: a session **blocked on an `AskUserQuestion` prompt,
 waiting for the user to answer**. Add a distinct chip state for it, on the workspace
 chip and both session indicators (terminal session-tab dot + left-rail Sessions row).

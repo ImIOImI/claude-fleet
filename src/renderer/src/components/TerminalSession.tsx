@@ -16,7 +16,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Terminal, type ILink, type ILinkProvider } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
-import { isBusyTitle } from '../activityDetector';
+import { isBusyTitle, isUnknownTitleGlyph } from '../activityDetector';
 import { busyFlagIsStale } from '../staleBusy';
 import { decideTerminalKeyAction } from '../terminalKeymap';
 import { EchoRttTracker } from '../echoRtt';
@@ -453,7 +453,21 @@ export function TerminalSession({
           busy = next;
           onActivityChange?.(sessionId, next);
         };
-        term.onTitleChange((title) => setBusy(isBusyTitle(title)));
+        // Unknown glyph = claude changed its title spinner again (#343);
+        // busy stays fail-safe idle but log once per attach so the next
+        // upstream change surfaces as a diagnostic, not a dead indicator.
+        let reportedUnknownGlyph = false;
+        term.onTitleChange((title) => {
+          if (!reportedUnknownGlyph && isUnknownTitleGlyph(title)) {
+            reportedUnknownGlyph = true;
+            void window.api.app.logError({
+              type: 'activity-unknown-title-glyph',
+              message: `unrecognized terminal-title glyph — busy detection may be broken (#343): ${title.trim()}`,
+              extra: { sessionId, containerId, title: title.trim() }
+            });
+          }
+          setBusy(isBusyTitle(title));
+        });
         // A title write can still be lost before it ever reaches us (ConPTY
         // drops/coalesces writes, #283) and claude writes the idle title
         // exactly once — so also re-derive from a level signal: flagged busy
