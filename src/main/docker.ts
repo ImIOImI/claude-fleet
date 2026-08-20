@@ -746,7 +746,16 @@ export async function removeWorkspace(
 
 export interface PtyHandle {
   stream: Duplex;
-  resize: (cols: number, rows: number) => Promise<void>;
+  /** Resolves `true` when the resize reached the PTY. Backends that cannot
+   *  tell (the broker speaks a fire-and-forget RPC) resolve `void`, which the
+   *  IPC layer treats as "assume delivered" — only an explicit `false` is a
+   *  reported drop. See ipc.ts's `pty:resize` and #268. */
+  resize: (cols: number, rows: number) => Promise<void | boolean>;
+  /** Size the PTY actually holds, when the backend can report it. Used by the
+   *  width-agreement sweep to catch a divergence that no failed call
+   *  announced — e.g. a resize lost in the ConPTY → wsl.exe → in-distro pty
+   *  relay. Undefined on backends with no way to read it back. */
+  getSize?: () => { cols: number; rows: number } | undefined;
   /** Unwire this host connection but leave the broker session (claude) alive. */
   detach: () => void;
   /**

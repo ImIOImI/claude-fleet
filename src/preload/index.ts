@@ -1,5 +1,18 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent, webUtils } from 'electron';
 
+/** Outcome of a `pty:resize`. Lives here because preload is the IPC contract
+ *  surface: main imports it type-only, and the renderer picks it up through
+ *  `FleetApi = typeof api`. `ok` means the size reached the PTY; `actual` is
+ *  the size the PTY reports holding afterwards, when the backend can read it
+ *  back (node-pty only). See ipc.ts's handler and #268. */
+export interface PtyResizeResult {
+  ok: boolean;
+  cols: number;
+  rows: number;
+  actual?: { cols: number; rows: number };
+  reason?: 'unknown-handle' | 'not-delivered' | 'error';
+}
+
 // Mirrored from src/main/sessions.ts. Kept here as a type-only declaration so
 // the preload doesn't reach into main-process code (and so the renderer can
 // import it via FleetApi without a separate path mapping).
@@ -522,7 +535,11 @@ const api = {
       ipcRenderer.invoke('pty:attach', containerId, brokerSessionId, cols, rows, resumeOf),
     input: (sessionId: string, data: string, ts?: number) =>
       ipcRenderer.invoke('pty:input', sessionId, data, ts),
-    resize: (sessionId: string, cols: number, rows: number) =>
+    /** Push a new terminal size to the PTY. Resolves the *outcome* — a resize
+     *  can be dropped silently (unknown handle during the attach window, pty
+     *  already exited), and the caller must not record a dropped size as
+     *  delivered or claude stays pinned at a stale width (#268). */
+    resize: (sessionId: string, cols: number, rows: number): Promise<PtyResizeResult> =>
       ipcRenderer.invoke('pty:resize', sessionId, cols, rows),
     detach: (sessionId: string) => ipcRenderer.invoke('pty:detach', sessionId),
     /** Terminate the session (kills claude). Returns true if a handle was live. */

@@ -91,6 +91,9 @@ import {
 import { listWslDistros, probeWslDistro, type ProbeDeps } from './wslProbe.js';
 import { wslLocalProjectsDir, wslLocalSessionsDir, uncToLinuxPath, applyClaudeUpdateDecision, type ClaudeUpdateDecision } from './localLauncher.js';
 import type { PtyHandle, RemoveWorkspaceOpts } from './docker.js';
+import { createWidthAgreementMonitor, type Divergence } from './widthAgreement.js';
+// Type-only: preload owns the IPC payload shapes (see PtyResizeResult there).
+import type { PtyResizeResult } from '../preload/index.js';
 import type { JsonlWatcher } from './jsonlWatcher.js';
 import type { PeerStatusWatcher } from './peerStatusWatcher.js';
 import {
@@ -252,6 +255,43 @@ async function backendFor(idOrContainerId: string): Promise<Backend> {
 }
 
 const ptySessions = new Map<string, PtyHandle>();
+// ptyHandleId → the size we last successfully pushed to that PTY. The sweep
+// below compares it against what the PTY reports actually holding (#268): the
+// two can drift apart with no failed call anywhere, because a resize can be
+// lost below our API surface — the suspected path being the ConPTY →
+// wsl.exe → in-distro pty relay on WSL workspaces. A divergence is invisible
+// today and permanently corrupts scrollback, so it is worth a log line.
+const handleWantedSize = new Map<string, { cols: number; rows: number }>();
+// Cheap enough to run unconditionally: a Map walk plus one getSize() per live
+// handle, and only handles whose backend can report a size are checked.
+const WIDTH_SWEEP_MS = 15_000;
+const widthMonitor = createWidthAgreementMonitor();
+
+function logDivergence(d: Divergence, at: 'resize' | 'sweep'): void {
+  logError({
+    source: 'main',
+    type: 'width-divergence',
+    level: 'warn',
+    message: `pty holds ${d.got.cols}x${d.got.rows} but ${d.want.cols}x${d.want.rows} was pushed (Δcols=${d.deltaCols})`,
+    extra: {
+      ptyHandleId: d.handleId,
+      wantCols: d.want.cols,
+      wantRows: d.want.rows,
+      gotCols: d.got.cols,
+      gotRows: d.got.rows,
+      deltaCols: d.deltaCols,
+      deltaRows: d.deltaRows,
+      at
+    }
+  });
+}
+
+function sweepWidthAgreement(): void {
+  for (const [handleId, handle] of ptySessions) {
+    const d = widthMonitor.check(handleId, handleWantedSize.get(handleId), handle.getSize?.());
+    if (d) logDivergence(d, 'sweep');
+  }
+}
 // ptyHandleId → owning workspace id. Lets committee `post` (#120) reuse a live
 // renderer attachment instead of opening a competing one (the broker is
 // one-writer-per-session, so a second attach to an already-viewed expert is
@@ -766,6 +806,10 @@ async function normalizeAndValidateWslRoot(
 }
 
 export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): void {
+  // Width-agreement sweep (#268). unref'd so it never holds the process open.
+  const widthSweep = setInterval(sweepWidthAgreement, WIDTH_SWEEP_MS);
+  widthSweep.unref?.();
+
   const { jsonlWatcher, peerStatusWatcher } = opts;
 
   // Live summary push: when the watcher ingests new lines, compute the
@@ -1634,6 +1678,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         throw err;
       }
       ptySessions.set(ptyHandleId, handle);
+      // Seed the width-agreement baseline with the size claude was spawned at.
+      handleWantedSize.set(ptyHandleId, { cols, rows });
       // Remember which workspace this handle belongs to so committee `post`
       // (#120) can reuse it. containerId is the Docker id (or, for local, the
       // ULID); match it back to the workspace's ULID via the merged list.
@@ -1700,6 +1746,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       handle.stream.on('end', () => {
         win?.webContents.send(`pty:end:${ptyHandleId}`);
         ptySessions.delete(ptyHandleId);
+        handleWantedSize.delete(ptyHandleId);
+        widthMonitor.forget(ptyHandleId);
         handleWorkspaceId.delete(ptyHandleId);
         handleBrokerSessionId.delete(ptyHandleId);
         if (owner) committeeBusy.delete(owner.id);
@@ -1744,14 +1792,71 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     }
   });
 
-  ipcMain.handle('pty:resize', async (_e, sessionId: string, cols: number, rows: number) => {
-    await ptySessions.get(sessionId)?.resize(cols, rows);
-  });
+  ipcMain.handle(
+    'pty:resize',
+    async (_e, sessionId: string, cols: number, rows: number): Promise<PtyResizeResult> => {
+      // Report the outcome instead of swallowing it (#268). This used to be
+      // `ptySessions.get(sessionId)?.resize(...)`: an unknown handle — the
+      // normal state during the attach/re-attach window, after a recreate, or
+      // once a tab-close has reaped the handle — was an unobservable no-op.
+      // The renderer latched the size as sent regardless, and the #326 dedupe
+      // then skipped every later resize at that same size, so a single
+      // dropped resize pinned claude at a stale width for the life of the
+      // session. Claude keeps emitting full-width rows at the width it
+      // believes in; each one overflows xterm's narrower grid and wraps onto
+      // the next line's first columns, corrupting scrollback permanently.
+      const handle = ptySessions.get(sessionId);
+      if (!handle) {
+        logError({
+          source: 'main',
+          type: 'pty-resize-dropped',
+          level: 'warn',
+          message: `pty:resize ${cols}x${rows} for unknown handle (live=${ptySessions.size})`,
+          extra: { ptyHandleId: sessionId, cols, rows, reason: 'unknown-handle', live: ptySessions.size }
+        });
+        return { ok: false, cols, rows, reason: 'unknown-handle' };
+      }
+      try {
+        // Backends that can't report delivery resolve undefined; only an
+        // explicit false is a drop.
+        const delivered = await handle.resize(cols, rows);
+        if (delivered === false) {
+          logError({
+            source: 'main',
+            type: 'pty-resize-dropped',
+            level: 'warn',
+            message: `pty:resize ${cols}x${rows} not delivered (pty exited or threw)`,
+            extra: { ptyHandleId: sessionId, cols, rows, reason: 'not-delivered' }
+          });
+          return { ok: false, cols, rows, reason: 'not-delivered' };
+        }
+        handleWantedSize.set(sessionId, { cols, rows });
+        const actual = handle.getSize?.();
+        // The call succeeded and the pty still disagrees — a loss below our
+        // API surface (the ConPTY → wsl.exe → in-distro pty relay is the
+        // suspected path). Nothing else in the stack would ever say so.
+        const d = widthMonitor.check(sessionId, { cols, rows }, actual);
+        if (d) logDivergence(d, 'resize');
+        return { ok: true, cols, rows, actual };
+      } catch (err) {
+        logError({
+          source: 'main',
+          type: 'pty-resize-dropped',
+          level: 'warn',
+          message: `pty:resize ${cols}x${rows} threw: ${String(err)}`,
+          extra: { ptyHandleId: sessionId, cols, rows, reason: 'error' }
+        });
+        return { ok: false, cols, rows, reason: 'error' };
+      }
+    }
+  );
 
   ipcMain.handle('pty:detach', (_e, sessionId: string) => {
     const present = ptySessions.has(sessionId);
     ptySessions.get(sessionId)?.detach();
     ptySessions.delete(sessionId);
+    handleWantedSize.delete(sessionId);
+    widthMonitor.forget(sessionId);
     const detachedWs = handleWorkspaceId.get(sessionId);
     if (detachedWs) committeeBusy.delete(detachedWs);
     handleWorkspaceId.delete(sessionId);
@@ -1778,6 +1883,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     if (!handle) return false;
     await handle.close();
     ptySessions.delete(ptyHandleId);
+    handleWantedSize.delete(ptyHandleId);
+    widthMonitor.forget(ptyHandleId);
     handleWorkspaceId.delete(ptyHandleId);
     handleBrokerSessionId.delete(ptyHandleId);
     logError({
