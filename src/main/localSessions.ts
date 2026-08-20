@@ -21,6 +21,13 @@ export interface PtyProc {
   kill(signal?: string): void;
   onData(cb: (data: string) => void): void;
   onExit(cb: () => void): void;
+  /** The size the PTY actually holds right now, as opposed to the size we
+   *  last asked it for. Ground truth for the width-agreement check in ipc.ts
+   *  (#268): every layer between the renderer and the pty swallows resize
+   *  failures, so "we sent 107" is not evidence that claude is at 107.
+   *  Optional — only the node-pty backend can answer it; test fakes and the
+   *  container/broker handles leave it undefined and are simply not checked. */
+  getSize?(): { cols: number; rows: number };
 }
 
 export type SpawnPty = (opts: {
@@ -168,15 +175,23 @@ export function attachLocalSession(opts: AttachOpts): PtyHandle {
 
   return {
     stream,
+    // Report failure instead of swallowing it (#268). A resize that never
+    // reaches the pty leaves claude laying out at a stale width while xterm
+    // renders at the new one; every full-width row then overflows by the
+    // difference and wraps onto the next line's first columns, permanently
+    // corrupting scrollback. The renderer only advances its "last sent size"
+    // latch when this resolves true, so a dropped resize is retried rather
+    // than being remembered as delivered.
     resize: async (cols: number, rows: number) => {
-      if (!s.exited) {
-        try {
-          s.proc.resize(cols, rows);
-        } catch {
-          /* exited */
-        }
+      if (s.exited) return false;
+      try {
+        s.proc.resize(cols, rows);
+        return true;
+      } catch {
+        return false;
       }
     },
+    getSize: () => s.proc.getSize?.(),
     detach: () => {
       // Leave proc + ring alive (workspace switch / reattach). Just unwire.
       if (s.sub === stream) s.sub = null;

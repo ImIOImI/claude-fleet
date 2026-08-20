@@ -260,6 +260,12 @@ const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
       safeResize(c, r);
       settler?.schedule();
     },
+    // Ground truth for the width-agreement sweep (#268): what the pty holds,
+    // not what we last asked for. node-pty updates these from the resize it
+    // actually applied, so a resize swallowed by `safeResize` (raced with
+    // exit) or lost further down leaves these at the stale value — which is
+    // exactly the divergence that corrupts scrollback.
+    getSize: () => ({ cols: p.cols, rows: p.rows }),
     kill: (sig) => p.kill(sig),
     onData: (cb) => {
       p.onData(cb);

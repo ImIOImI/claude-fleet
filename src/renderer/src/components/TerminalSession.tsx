@@ -22,6 +22,7 @@ import { decideTerminalKeyAction } from '../terminalKeymap';
 import { EchoRttTracker } from '../echoRtt';
 import { initPerfState, perfRecording } from '../perfState';
 import { buildTerminalOptions } from './terminalOptions';
+import { createResizePusher, type ResizePusher } from './resizePusher';
 
 const URL_REGEX = /https?:\/\/[^\s'"`<>()\[\]{}]+/g;
 const TRAILING_PUNCTUATION = /[.,;:!?]+$/;
@@ -299,10 +300,18 @@ export function TerminalSession({
     // used to address input/resize/detach. Distinct from the prop
     // `sessionId`, which is the broker's persistent session key.
     let ptyHandleId: string | null = null;
-    // Size last pushed to the pty; seeded from the attach so a redundant
-    // first resize is suppressed too (#268).
-    let lastSentCols = -1;
-    let lastSentRows = -1;
+    // Size last *delivered* to the pty, owned by the pusher below. It only
+    // advances when main confirms the resize landed, so a dropped resize is
+    // retried instead of being remembered as sent (#268). Seeded from the
+    // attach so a redundant first resize is suppressed too.
+    let resizePusher: ResizePusher | null = null;
+    // Renderer-side record of the last size we *reacted* to. Deliberately
+    // separate from the pusher's delivery latch: the repaint and the Ctrl+L
+    // nudge are local effects that should fire once per real size change,
+    // whether or not that push landed. The pusher retries drops on its own
+    // schedule and must not drag extra full repaints along with it.
+    let lastObservedCols = -1;
+    let lastObservedRows = -1;
     let unsubData: (() => void) | null = null;
     let unsubEnd: (() => void) | null = null;
     let staleBusyTimer: ReturnType<typeof setInterval> | null = null;
@@ -440,8 +449,23 @@ export function TerminalSession({
         }
         ptyHandleId = sid;
         ptyHandleRef.current = sid;
-        lastSentCols = term.cols;
-        lastSentRows = term.rows;
+        resizePusher = createResizePusher({
+          getSize: () => ({ cols: term.cols, rows: term.rows }),
+          push: (cols, rows) => window.api.pty.resize(sid, cols, rows),
+          onGiveUp: (cols, rows, attempts) => {
+            // Worth a line: from here on xterm and the pty disagree, and the
+            // transcript will accumulate overflow fragments in its first
+            // columns. main's width-agreement sweep logs the other side.
+            void window.api.app.logError({
+              type: 'pty-resize-abandoned',
+              message: `gave up pushing ${cols}x${rows} to the pty after ${attempts} attempts — xterm and the pty now disagree (#268)`,
+              extra: { sessionId, containerId, cols, rows, attempts }
+            });
+          }
+        });
+        resizePusher.seed(term.cols, term.rows);
+        lastObservedCols = term.cols;
+        lastObservedRows = term.rows;
         // Busy/idle (#283): read the title from xterm's own OSC parser —
         // onTitleChange fires once per complete title no matter how the PTY
         // stream was chunked, which is the framing dependence that used to
@@ -591,15 +615,13 @@ export function TerminalSession({
         // no-op resize cost three ConPTY resizes and a full redraw of whatever
         // was in its buffer. 11% of settles on a live install were triggered
         // this way, with nothing having changed.
-        if (term.cols !== lastSentCols || term.rows !== lastSentRows) {
-          lastSentCols = term.cols;
-          lastSentRows = term.rows;
-          try {
-            window.api.pty.resize(ptyHandleId, term.cols, term.rows);
-          } catch {
-            // pty:resize is best-effort — failing to resize doesn't
-            // justify killing the terminal.
-          }
+        if (term.cols !== lastObservedCols || term.rows !== lastObservedRows) {
+          lastObservedCols = term.cols;
+          lastObservedRows = term.rows;
+          // The pusher owns delivery, retries, and the latch; it no-ops when
+          // the pty already has this size, so the #326 dedupe intent is
+          // preserved without the "assume it landed" bug that came with it.
+          resizePusher?.request();
           // Repaint every visible row from the buffer after a real size
           // change (#268). The reported symptom is stray glyphs that overlap
           // the text and — the detail that identifies the cause — do NOT go
@@ -640,6 +662,7 @@ export function TerminalSession({
 
     return () => {
       disposed = true;
+      resizePusher?.dispose();
       onActivityChange?.(sessionId, false);
       cancelAnimationFrame(initialFitRaf);
       if (staleBusyTimer) clearInterval(staleBusyTimer);
