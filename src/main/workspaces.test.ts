@@ -82,3 +82,40 @@ it('still coerces garbage authMode to oauth', async () => {
   const back = await readWorkspaceManifest(ID);
   expect(back?.authMode).toBe('oauth');
 });
+
+// #268: per-workspace terminal renderer. The manifest parser is a strict
+// allowlist, so an unlisted field silently vanishes on the next read/write —
+// which is exactly how this would regress.
+const rendererSpec = (terminalRenderer: unknown) =>
+  ({
+    id: ID,
+    name: 'renderer-test',
+    labels: [],
+    workspaceRoot: tmpdir(),
+    workspaceSubdir: '',
+    kind: 'local',
+    authMode: 'oauth',
+    terminalRenderer,
+    env: { plain: {}, secretKeys: [] },
+    mirror: { default: 'on', cleanup: 'delete' },
+    createdAt: 1,
+    lastUsedAt: 1
+  }) as unknown as Parameters<typeof writeWorkspaceManifest>[0];
+
+it('round-trips a per-workspace terminalRenderer through the manifest (#268)', async () => {
+  for (const r of ['canvas', 'webgl', 'dom'] as const) {
+    await writeWorkspaceManifest(rendererSpec(r));
+    expect((await readWorkspaceManifest(ID))?.terminalRenderer).toBe(r);
+  }
+});
+
+it('treats an absent terminalRenderer as inherit (undefined), not a value', async () => {
+  await writeWorkspaceManifest(rendererSpec(undefined));
+  expect((await readWorkspaceManifest(ID))?.terminalRenderer).toBeUndefined();
+});
+
+it('drops an unrecognised terminalRenderer rather than persisting it', async () => {
+  // A hand-edited manifest must not be able to leave a pane unable to paint.
+  await writeWorkspaceManifest(rendererSpec('vulkan'));
+  expect((await readWorkspaceManifest(ID))?.terminalRenderer).toBeUndefined();
+});

@@ -445,6 +445,7 @@ const api = {
       fleetRoot: string;
       sharedDir: string;
       disableHardwareAcceleration: boolean;
+      terminalRenderer: 'dom' | 'canvas' | 'webgl';
       autoReloadLoadouts: boolean;
       usageBudget: UsageBudget;
       uiPrefs: UiPrefs;
@@ -457,6 +458,15 @@ const api = {
       disabled: boolean
     ): Promise<{ disableHardwareAcceleration: boolean }> =>
       ipcRenderer.invoke('config:setHardwareAccelDisabled', disabled),
+    /** App-level default terminal renderer: 'dom' (default), 'canvas', or
+     *  'webgl'. Applies to panes mounted after the change, not live ones. A
+     *  workspace can override it; see terminalRendererFor (#268). */
+    setTerminalRenderer: (renderer: 'dom' | 'canvas' | 'webgl') =>
+      ipcRenderer.invoke('config:setTerminalRenderer', renderer),
+    /** Effective renderer for one workspace's panes — the workspace's own
+     *  setting if it has one, otherwise the app-level default. */
+    terminalRendererFor: (workspaceId: string): Promise<'dom' | 'canvas' | 'webgl'> =>
+      ipcRenderer.invoke('config:terminalRendererFor', workspaceId),
     setAutoReloadLoadouts: (enabled: boolean): Promise<{ autoReloadLoadouts: boolean }> =>
       ipcRenderer.invoke('config:setAutoReloadLoadouts', enabled),
     setUsageBudget: (

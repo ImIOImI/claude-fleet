@@ -19,6 +19,7 @@ import { readFile, writeFile, readdir, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { workspaceManifestPath, stateRoot } from './paths.js';
 import type { WorkspaceLauncher } from './localLauncher.js';
+import type { TerminalRenderer } from './config.js';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
 
@@ -157,6 +158,12 @@ export interface WorkspaceSpec {
   /** Local workspaces only (#253): how `claude` is invoked. Absent ⇒ native
    *  direct spawn. 'wsl' is win32-only (validated by sanitizeLauncher). */
   launcher?: WorkspaceLauncher;
+  /** Per-workspace xterm renderer override (#268). Absent ⇒ inherit the
+   *  app-level `terminalRenderer` setting. Scoped per workspace because the
+   *  scroll/paint artifact it works around is reported on local (WSL)
+   *  workspaces specifically, and the DOM renderer is otherwise preferable
+   *  for its per-glyph font fallback — so this is not a fleet-wide switch. */
+  terminalRenderer?: TerminalRenderer;
   env: WorkspaceEnv;
   resources?: WorkspaceResources;
   /** Durable-transcript-mirror defaults. Factory `on`/`delete` when absent. */
@@ -206,6 +213,14 @@ function sanitizeAccessibility(a: unknown): AccessibilityConfig | undefined {
     ...(acceptFrom && acceptFrom.length ? { acceptFrom } : {}),
     ...(roleHint ? { roleHint } : {})
   };
+}
+
+/** Strict-allowlist renderer validation (#268). Anything unrecognised becomes
+ *  `undefined` (inherit the global setting) rather than a broken renderer —
+ *  the manifest parser is an allowlist, so an unsanitized value would survive
+ *  a read/write round-trip and could leave a pane unable to paint. */
+function sanitizeTerminalRenderer(v: unknown): TerminalRenderer | undefined {
+  return v === 'dom' || v === 'canvas' || v === 'webgl' ? v : undefined;
 }
 
 /** Strict-allowlist launcher validation (#253). 'wsl' additionally requires
@@ -289,6 +304,7 @@ export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec |
         : 'oauth',
       endpointId: typeof parsed.endpointId === 'string' && parsed.endpointId ? parsed.endpointId : undefined,
       launcher: sanitizeLauncher(parsed.launcher),
+      terminalRenderer: sanitizeTerminalRenderer(parsed.terminalRenderer),
       env: {
         plain: parsed.env?.plain && typeof parsed.env.plain === 'object' ? parsed.env.plain : {},
         secretKeys: Array.isArray(parsed.env?.secretKeys)

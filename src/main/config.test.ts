@@ -22,6 +22,9 @@ vi.mock('electron', () => ({
 const {
   hardwareAccelDisabledAtStartup,
   getHardwareAccelDisabled,
+  getTerminalRenderer,
+  setTerminalRenderer,
+  resolveTerminalRenderer,
   setHardwareAccelDisabled,
   getAutoReloadLoadouts,
   setAutoReloadLoadouts,
@@ -48,6 +51,7 @@ beforeEach(async () => {
   userDataDir = await mkdtemp(join(tmpdir(), 'cf-config-'));
   _resetConfigCacheForTests();
   delete process.env.CLAUDE_FLEET_DISABLE_HWA;
+  delete process.env.CLAUDE_FLEET_TERMINAL_RENDERER;
 });
 
 afterEach(async () => {
@@ -368,5 +372,74 @@ describe('perf telemetry config', () => {
     await expect(setPerfOtlp(true, 'ftp://nope')).rejects.toThrow(/http/i);
     await expect(setPerfOtlp(true, '')).rejects.toThrow(/endpoint/i);
     await expect(setPerfOtlp(false, '')).resolves.toBeUndefined(); // disabling never validates
+  });
+});
+
+// #268: the terminal renderer choice. `dom` is the safe default — it is the
+// only renderer with native per-glyph CSS font fallback — so anything
+// unrecognised must resolve to it rather than leaving a pane unable to paint.
+describe('get/setTerminalRenderer', () => {
+  it('defaults to dom when unset', async () => {
+    expect(await getTerminalRenderer()).toBe('dom');
+  });
+
+  it('round-trips canvas and webgl through config.json', async () => {
+    await setTerminalRenderer('webgl');
+    expect(await getTerminalRenderer()).toBe('webgl');
+    await setTerminalRenderer('canvas');
+    expect(await getTerminalRenderer()).toBe('canvas');
+    await setTerminalRenderer('dom');
+    expect(await getTerminalRenderer()).toBe('dom');
+  });
+
+  it('coerces an unknown persisted value to dom', async () => {
+    await writeFile(configPath(), JSON.stringify({ terminalRenderer: 'opengl2' }), 'utf8');
+    _resetConfigCacheForTests();
+    expect(await getTerminalRenderer()).toBe('dom');
+  });
+
+  it('coerces an unknown value on write rather than persisting it', async () => {
+    await setTerminalRenderer('nonsense' as unknown as 'dom');
+    expect(await getTerminalRenderer()).toBe('dom');
+  });
+
+  it('env override wins over the persisted value', async () => {
+    await setTerminalRenderer('dom');
+    process.env.CLAUDE_FLEET_TERMINAL_RENDERER = 'canvas';
+    expect(await getTerminalRenderer()).toBe('canvas');
+  });
+
+  it('ignores an unknown env override', async () => {
+    await setTerminalRenderer('webgl');
+    process.env.CLAUDE_FLEET_TERMINAL_RENDERER = 'vulkan';
+    expect(await getTerminalRenderer()).toBe('webgl');
+  });
+});
+
+// #268: precedence for one pane — env (tests) > workspace override > global.
+describe('resolveTerminalRenderer', () => {
+  it('falls back to the global setting when the workspace has no override', async () => {
+    await setTerminalRenderer('canvas');
+    expect(await resolveTerminalRenderer(undefined)).toBe('canvas');
+  });
+
+  it('prefers the workspace override over the global setting', async () => {
+    await setTerminalRenderer('dom');
+    expect(await resolveTerminalRenderer('webgl')).toBe('webgl');
+  });
+
+  it('ignores an unrecognised workspace override and uses the global', async () => {
+    await setTerminalRenderer('canvas');
+    expect(await resolveTerminalRenderer('vulkan' as unknown as 'dom')).toBe('canvas');
+  });
+
+  it('env override beats both', async () => {
+    await setTerminalRenderer('dom');
+    process.env.CLAUDE_FLEET_TERMINAL_RENDERER = 'canvas';
+    expect(await resolveTerminalRenderer('webgl')).toBe('canvas');
+  });
+
+  it('defaults to dom with nothing set anywhere', async () => {
+    expect(await resolveTerminalRenderer(undefined)).toBe('dom');
   });
 });

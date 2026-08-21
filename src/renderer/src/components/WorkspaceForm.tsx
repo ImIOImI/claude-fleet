@@ -59,6 +59,9 @@ export interface WorkspaceFormSubmit {
         ignoreClaudeVersion?: string;
       }
     | { mode: 'custom'; command: string };
+  /** Per-workspace xterm renderer (#268). undefined ⇒ inherit the app-level
+   *  default from Settings. */
+  terminalRenderer?: 'dom' | 'canvas' | 'webgl';
   image?: string;
   authMode: AuthMode;
   /** authMode 'endpoint' only — registry reference (#250). */
@@ -234,6 +237,10 @@ export function WorkspaceForm({
   // Local workspaces only: the host directory `claude` runs in (#16).
   const [workspaceRoot, setWorkspaceRoot] = useState<string>(initial?.workspaceRoot ?? '');
   const initialLauncher = initial?.launcher;
+  // '' means "inherit the app-level default" (#268).
+  const [terminalRenderer, setTerminalRenderer] = useState<'' | 'dom' | 'canvas' | 'webgl'>(
+    initial?.terminalRenderer ?? ''
+  );
   const [launcherMode, setLauncherMode] = useState<'native' | 'wsl' | 'custom'>(
     initialLauncher?.mode ?? 'native'
   );
@@ -480,6 +487,7 @@ export function WorkspaceForm({
                 wslShell,
                 wslProbe.state === 'done' ? wslProbe : null
               ),
+      terminalRenderer: terminalRenderer === '' ? undefined : terminalRenderer,
       image: kind === 'container' ? image.trim() : undefined,
       authMode,
       endpointId,
@@ -692,6 +700,32 @@ export function WorkspaceForm({
               </p>
             </div>
           )}
+
+          <div className="form-row">
+            <label htmlFor="ws-terminal-renderer">Terminal renderer</label>
+            <select
+              id="ws-terminal-renderer"
+              aria-label="Terminal renderer"
+              value={terminalRenderer}
+              onChange={(e) =>
+                setTerminalRenderer(e.target.value as '' | 'dom' | 'canvas' | 'webgl')
+              }
+              disabled={busy}
+            >
+              <option value="">Default (from Settings)</option>
+              <option value="dom">dom</option>
+              <option value="canvas">canvas</option>
+              <option value="webgl">webgl</option>
+            </select>
+            <p className="form-hint">
+              <code>dom</code> is the default and the only renderer with per-glyph font fallback
+              for Claude&apos;s symbol glyphs. <code>canvas</code> / <code>webgl</code> paint the
+              grid as one element, which avoids stray characters left behind at the left edge when
+              scrolling (#268) — reported on local workspaces. Applies to terminals opened after
+              saving; <code>webgl</code> falls back to <code>dom</code> if the GPU refuses a
+              context.
+            </p>
+          </div>
 
           <div className="form-row">
             <label>Working directory</label>

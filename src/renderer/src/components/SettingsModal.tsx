@@ -81,6 +81,8 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
   // ── Settings tab state ──────────────────────────────────────────────────
   const [fleetRoot, setFleetRoot] = useState('');
   const [hwaDisabled, setHwaDisabled] = useState(false);
+  const [termRenderer, setTermRenderer] = useState<'dom' | 'canvas' | 'webgl'>('dom');
+  const [termRendererInitial, setTermRendererInitial] = useState<'dom' | 'canvas' | 'webgl'>('dom');
   // The persisted HWA value at open time — used to know whether the toggle
   // actually changed, so we only nudge "restart to apply" when it did.
   const [hwaInitial, setHwaInitial] = useState(false);
@@ -124,6 +126,8 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
         setFleetRoot(cfg.fleetRoot);
         setHwaDisabled(cfg.disableHardwareAcceleration);
         setHwaInitial(cfg.disableHardwareAcceleration);
+        setTermRenderer(cfg.terminalRenderer);
+        setTermRendererInitial(cfg.terminalRenderer);
         setAutoReload(cfg.autoReloadLoadouts);
         // Guard: a partial config (e.g. an old build, or a test stub) shouldn't
         // break the modal — the budget control just falls back to its defaults.
@@ -195,6 +199,9 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
     setBusy(true);
     setError(null);
     try {
+      if (termRenderer !== termRendererInitial) {
+        await window.api.config.setTerminalRenderer(termRenderer);
+      }
       if (hwaDisabled !== hwaInitial) {
         await window.api.config.setHardwareAccelDisabled(hwaDisabled);
       }
@@ -379,6 +386,34 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
                   onChange={(e) => setHwaDisabled(e.target.checked)}
                   disabled={busy || !loaded}
                 />
+              </div>
+              <div className="setting-row">
+                <div className="setting-row-text">
+                  <label className="setting-title" htmlFor="setting-term-renderer">
+                    Terminal renderer
+                  </label>
+                  <p className="setting-desc">
+                    <code>dom</code> is the default and the only one with per-glyph font
+                    fallback for Claude&apos;s symbol glyphs. <code>webgl</code> /{' '}
+                    <code>canvas</code> paint the grid as one element, which avoids stray
+                    characters left behind at the left edge when scrolling (#268).
+                    {termRenderer !== termRendererInitial && (
+                      <strong> Applies to terminals opened after saving.</strong>
+                    )}
+                  </p>
+                </div>
+                <select
+                  id="setting-term-renderer"
+                  value={termRenderer}
+                  onChange={(e) =>
+                    setTermRenderer(e.target.value as 'dom' | 'canvas' | 'webgl')
+                  }
+                  disabled={busy || !loaded}
+                >
+                  <option value="dom">dom (default)</option>
+                  <option value="canvas">canvas</option>
+                  <option value="webgl">webgl</option>
+                </select>
               </div>
               <div className="setting-row">
                 <div className="setting-row-text">
