@@ -92,6 +92,7 @@ import { listWslDistros, probeWslDistro, type ProbeDeps } from './wslProbe.js';
 import { wslLocalProjectsDir, wslLocalSessionsDir, uncToLinuxPath, applyClaudeUpdateDecision, type ClaudeUpdateDecision } from './localLauncher.js';
 import type { PtyHandle, RemoveWorkspaceOpts } from './docker.js';
 import { createWidthAgreementMonitor, type Divergence } from './widthAgreement.js';
+import { createPtyCapture, type PtyCapture } from './ptyCapture.js';
 // Type-only: preload owns the IPC payload shapes (see PtyResizeResult there).
 import type { PtyResizeResult } from '../preload/index.js';
 import type { JsonlWatcher } from './jsonlWatcher.js';
@@ -262,6 +263,9 @@ const ptySessions = new Map<string, PtyHandle>();
 // wsl.exe → in-distro pty relay on WSL workspaces. A divergence is invisible
 // today and permanently corrupts scrollback, so it is worth a log line.
 const handleWantedSize = new Map<string, { cols: number; rows: number }>();
+// ptyHandleId -> raw-stream capture, when CLAUDE_FLEET_CAPTURE_PTY is set.
+// Empty in normal operation; see ptyCapture.ts for why this exists (#268).
+const ptyCaptures = new Map<string, PtyCapture>();
 // Cheap enough to run unconditionally: a Map walk plus one getSize() per live
 // handle, and only handles whose backend can report a size are checked.
 const WIDTH_SWEEP_MS = 15_000;
@@ -1688,6 +1692,15 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       );
       if (owner) handleWorkspaceId.set(ptyHandleId, owner.id);
       handleBrokerSessionId.set(ptyHandleId, brokerSessionId);
+      // No-op unless CLAUDE_FLEET_CAPTURE_PTY is set (ptyCapture.ts, #268).
+      const capture = createPtyCapture({
+        handleId: ptyHandleId,
+        workspaceId: owner?.id ?? null,
+        brokerSessionId,
+        cols,
+        rows
+      });
+      if (capture) ptyCaptures.set(ptyHandleId, capture);
       perfSetSpanContext({ workspaceId: owner?.id, sessionId: brokerSessionId });
       // Diagnostic: ptySessions.size should oscillate around the count of
       // currently-mounted TerminalSession components. Unbounded growth =
@@ -1738,6 +1751,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         // Second arg = epoch-ms send stamp for the renderer's output-hop
         // measurement (perf Phase 2). The chunk stays a raw Buffer.
         win?.webContents.send(`pty:data:${ptyHandleId}`, chunk, Date.now());
+        // Capture exactly what the renderer got, not what we think we sent.
+        ptyCaptures.get(ptyHandleId)?.data(chunk);
         recordPtyChunk(owner?.id ?? handleWorkspaceId.get(ptyHandleId) ?? null, brokerSessionId, chunk.length);
         if (owner && detector.push(chunk.toString('utf8'))) {
           committeeBusy.set(owner.id, { busy: detector.isBusy, since: Date.now() });
@@ -1748,6 +1763,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         ptySessions.delete(ptyHandleId);
         handleWantedSize.delete(ptyHandleId);
         widthMonitor.forget(ptyHandleId);
+        ptyCaptures.get(ptyHandleId)?.close();
+        ptyCaptures.delete(ptyHandleId);
         handleWorkspaceId.delete(ptyHandleId);
         handleBrokerSessionId.delete(ptyHandleId);
         if (owner) committeeBusy.delete(owner.id);
@@ -1831,6 +1848,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
           return { ok: false, cols, rows, reason: 'not-delivered' };
         }
         handleWantedSize.set(sessionId, { cols, rows });
+        ptyCaptures.get(sessionId)?.resize(cols, rows);
         const actual = handle.getSize?.();
         // The call succeeded and the pty still disagrees — a loss below our
         // API surface (the ConPTY → wsl.exe → in-distro pty relay is the
@@ -1857,6 +1875,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     ptySessions.delete(sessionId);
     handleWantedSize.delete(sessionId);
     widthMonitor.forget(sessionId);
+    ptyCaptures.get(sessionId)?.close();
+    ptyCaptures.delete(sessionId);
     const detachedWs = handleWorkspaceId.get(sessionId);
     if (detachedWs) committeeBusy.delete(detachedWs);
     handleWorkspaceId.delete(sessionId);
@@ -1885,6 +1905,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     ptySessions.delete(ptyHandleId);
     handleWantedSize.delete(ptyHandleId);
     widthMonitor.forget(ptyHandleId);
+    ptyCaptures.get(ptyHandleId)?.close();
+    ptyCaptures.delete(ptyHandleId);
     handleWorkspaceId.delete(ptyHandleId);
     handleBrokerSessionId.delete(ptyHandleId);
     logError({
