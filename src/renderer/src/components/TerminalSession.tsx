@@ -213,6 +213,57 @@ export function TerminalSession({
     term.unicode.activeVersion = '11';
     term.open(host);
 
+    // Optional GPU/canvas renderer (#268). The DOM renderer paints the grid as
+    // thousands of absolutely-positioned spans inside a scrolling container,
+    // which is the case Chromium's scroll/paint invalidation handles worst —
+    // narrow stale strips survive a scroll and show a previous frame's text,
+    // pinned to screen rows while the content moves past them. canvas/webgl
+    // paint the whole grid as one element, so there is nothing to leave
+    // behind. Off by default: the DOM renderer is the only one that does
+    // native per-glyph CSS font fallback, which is what the bundled symbol
+    // fonts rely on (see the webfont preload below and terminal-fonts.spec).
+    //
+    // Loaded after open() — addons need the renderer wired — and guarded so a
+    // GPU that refuses the context leaves a working DOM-rendered terminal
+    // rather than a blank pane.
+    void window.api.config
+      .get()
+      .then(async ({ terminalRenderer }) => {
+        if (disposed || terminalRenderer === 'dom') return;
+        try {
+          if (terminalRenderer === 'webgl') {
+            const { WebglAddon } = await import('@xterm/addon-webgl');
+            if (disposed) return;
+            const webgl = new WebglAddon();
+            // A lost context (driver reset, GPU process crash) leaves the
+            // canvas dead. Dispose so xterm falls back to the DOM renderer
+            // instead of the pane going blank.
+            webgl.onContextLoss(() => {
+              try {
+                webgl.dispose();
+              } catch {
+                /* already gone */
+              }
+            });
+            term.loadAddon(webgl);
+          } else {
+            const { CanvasAddon } = await import('@xterm/addon-canvas');
+            if (disposed) return;
+            term.loadAddon(new CanvasAddon());
+          }
+        } catch (err) {
+          // Never fault the terminal over a renderer upgrade.
+          void window.api.app.logError({
+            type: 'terminal-renderer-failed',
+            message: `could not load the ${terminalRenderer} renderer; staying on DOM: ${String(err)}`,
+            extra: { sessionId, containerId, renderer: terminalRenderer }
+          });
+        }
+      })
+      .catch(() => {
+        /* config read failed — DOM renderer stands */
+      });
+
     // The bundled symbol fonts (styles.css @font-face) load lazily. The DOM
     // renderer repaints text when a webfont arrives, but force the load + a
     // refresh so Claude's TUI glyphs (⏵, ⎿) don't flash as tofu on first paint.

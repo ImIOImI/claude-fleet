@@ -18,6 +18,9 @@ import {
   fleetPrivateDir,
   fleetSharedDir,
   getHardwareAccelDisabled,
+  getTerminalRenderer,
+  setTerminalRenderer,
+  type TerminalRenderer,
   setHardwareAccelDisabled,
   getAutoReloadLoadouts,
   setAutoReloadLoadouts,
@@ -1459,6 +1462,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     fleetRoot: await getFleetRoot(),
     sharedDir: await fleetSharedDir(),
     disableHardwareAcceleration: await getHardwareAccelDisabled(),
+    terminalRenderer: await getTerminalRenderer(),
     autoReloadLoadouts: await getAutoReloadLoadouts(),
     usageBudget: await getUsageBudget(),
     uiPrefs: await getUiPrefs(),
@@ -1498,6 +1502,11 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('config:setHardwareAccelDisabled', async (_e, disabled: boolean) => {
     await setHardwareAccelDisabled(!!disabled);
     return { disableHardwareAcceleration: await getHardwareAccelDisabled() };
+  });
+
+  ipcMain.handle('config:setTerminalRenderer', async (_e, renderer: unknown) => {
+    await setTerminalRenderer(renderer as TerminalRenderer);
+    return { terminalRenderer: await getTerminalRenderer() };
   });
 
   ipcMain.handle('config:setPerfTelemetry', async (_e, enabled: boolean) => {

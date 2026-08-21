@@ -61,10 +61,25 @@ export interface UiPrefs {
   maxSessionAgeDays: number;
 }
 
+/** Which xterm renderer each terminal pane uses.
+ *
+ *  `dom` (default) is what the app has always used, and it is the only one
+ *  that does native per-glyph CSS font fallback — the bundled Noto Sans
+ *  Symbols 2 / Unifont subsets that keep claude's ⏵ (U+23F5) and ⎿ (U+23BF)
+ *  from rendering as tofu depend on it. It is also, being thousands of
+ *  absolutely-positioned spans in a scrolling container, the renderer most
+ *  exposed to Chromium's scroll/paint invalidation leaving narrow stale
+ *  strips behind (#268). `canvas` and `webgl` paint the whole grid into one
+ *  element, which cannot exhibit that, at the cost of xterm doing its own
+ *  glyph fallback. Opt-in until the font trade-off is measured. */
+export type TerminalRenderer = 'dom' | 'canvas' | 'webgl';
+
 interface AppConfig {
   fleetRoot?: string;
   /** When true, the app skips Chromium hardware acceleration at startup. */
   disableHardwareAcceleration?: boolean;
+  /** xterm renderer for terminal panes. Absent ⇒ 'dom'. See TerminalRenderer. */
+  terminalRenderer?: TerminalRenderer;
   /** When true (default), installing/updating a loadout into a running
    *  workspace auto-reloads its Claude session (`--resume`) to load the loadout
    *  — but only while Claude is idle; deferred until it stops working. (#16) */
@@ -215,6 +230,27 @@ export async function getHardwareAccelDisabled(): Promise<boolean> {
 export async function setHardwareAccelDisabled(disabled: boolean): Promise<void> {
   const cfg = await read();
   await write({ ...cfg, disableHardwareAcceleration: disabled });
+}
+
+/** The terminal renderer setting. Unknown/absent values resolve to 'dom' so a
+ *  hand-edited config can't leave the app with no working renderer. */
+export async function getTerminalRenderer(): Promise<TerminalRenderer> {
+  // Env override first, mirroring CLAUDE_FLEET_DISABLE_HWA — lets the e2e
+  // suite exercise every renderer without hand-writing a config file.
+  const env = process.env.CLAUDE_FLEET_TERMINAL_RENDERER;
+  if (env === 'canvas' || env === 'webgl' || env === 'dom') return env;
+  const cfg = await read();
+  const v = cfg.terminalRenderer;
+  return v === 'canvas' || v === 'webgl' ? v : 'dom';
+}
+
+/** Persist the terminal renderer. Takes effect on the next pane mount
+ *  (workspace switch or restart), not retroactively on live panes. */
+export async function setTerminalRenderer(renderer: TerminalRenderer): Promise<void> {
+  const cfg = await read();
+  const v: TerminalRenderer =
+    renderer === 'canvas' || renderer === 'webgl' ? renderer : 'dom';
+  await write({ ...cfg, terminalRenderer: v });
 }
 
 /** Auto-reload loadouts into a running workspace when Claude is idle. Default on. */

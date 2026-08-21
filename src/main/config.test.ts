@@ -22,6 +22,8 @@ vi.mock('electron', () => ({
 const {
   hardwareAccelDisabledAtStartup,
   getHardwareAccelDisabled,
+  getTerminalRenderer,
+  setTerminalRenderer,
   setHardwareAccelDisabled,
   getAutoReloadLoadouts,
   setAutoReloadLoadouts,
@@ -48,6 +50,7 @@ beforeEach(async () => {
   userDataDir = await mkdtemp(join(tmpdir(), 'cf-config-'));
   _resetConfigCacheForTests();
   delete process.env.CLAUDE_FLEET_DISABLE_HWA;
+  delete process.env.CLAUDE_FLEET_TERMINAL_RENDERER;
 });
 
 afterEach(async () => {
@@ -368,5 +371,46 @@ describe('perf telemetry config', () => {
     await expect(setPerfOtlp(true, 'ftp://nope')).rejects.toThrow(/http/i);
     await expect(setPerfOtlp(true, '')).rejects.toThrow(/endpoint/i);
     await expect(setPerfOtlp(false, '')).resolves.toBeUndefined(); // disabling never validates
+  });
+});
+
+// #268: the terminal renderer choice. `dom` is the safe default — it is the
+// only renderer with native per-glyph CSS font fallback — so anything
+// unrecognised must resolve to it rather than leaving a pane unable to paint.
+describe('get/setTerminalRenderer', () => {
+  it('defaults to dom when unset', async () => {
+    expect(await getTerminalRenderer()).toBe('dom');
+  });
+
+  it('round-trips canvas and webgl through config.json', async () => {
+    await setTerminalRenderer('webgl');
+    expect(await getTerminalRenderer()).toBe('webgl');
+    await setTerminalRenderer('canvas');
+    expect(await getTerminalRenderer()).toBe('canvas');
+    await setTerminalRenderer('dom');
+    expect(await getTerminalRenderer()).toBe('dom');
+  });
+
+  it('coerces an unknown persisted value to dom', async () => {
+    await writeFile(configPath(), JSON.stringify({ terminalRenderer: 'opengl2' }), 'utf8');
+    _resetConfigCacheForTests();
+    expect(await getTerminalRenderer()).toBe('dom');
+  });
+
+  it('coerces an unknown value on write rather than persisting it', async () => {
+    await setTerminalRenderer('nonsense' as unknown as 'dom');
+    expect(await getTerminalRenderer()).toBe('dom');
+  });
+
+  it('env override wins over the persisted value', async () => {
+    await setTerminalRenderer('dom');
+    process.env.CLAUDE_FLEET_TERMINAL_RENDERER = 'canvas';
+    expect(await getTerminalRenderer()).toBe('canvas');
+  });
+
+  it('ignores an unknown env override', async () => {
+    await setTerminalRenderer('webgl');
+    process.env.CLAUDE_FLEET_TERMINAL_RENDERER = 'vulkan';
+    expect(await getTerminalRenderer()).toBe('webgl');
   });
 });

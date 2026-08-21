@@ -445,6 +445,7 @@ const api = {
       fleetRoot: string;
       sharedDir: string;
       disableHardwareAcceleration: boolean;
+      terminalRenderer: 'dom' | 'canvas' | 'webgl';
       autoReloadLoadouts: boolean;
       usageBudget: UsageBudget;
       uiPrefs: UiPrefs;
@@ -457,6 +458,10 @@ const api = {
       disabled: boolean
     ): Promise<{ disableHardwareAcceleration: boolean }> =>
       ipcRenderer.invoke('config:setHardwareAccelDisabled', disabled),
+    /** Terminal renderer for panes: 'dom' (default), 'canvas', or 'webgl'.
+     *  Applies to panes mounted after the change, not live ones (#268). */
+    setTerminalRenderer: (renderer: 'dom' | 'canvas' | 'webgl') =>
+      ipcRenderer.invoke('config:setTerminalRenderer', renderer),
     setAutoReloadLoadouts: (enabled: boolean): Promise<{ autoReloadLoadouts: boolean }> =>
       ipcRenderer.invoke('config:setAutoReloadLoadouts', enabled),
     setUsageBudget: (
