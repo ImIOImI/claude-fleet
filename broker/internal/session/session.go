@@ -153,7 +153,7 @@ func (s *Session) Attach(w ChannelWriter, channel uint32) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.dead {
-		return s.ring.Snapshot(), ErrEnded
+		return s.ring.ReplaySnapshot(), ErrEnded
 	}
 	if s.attached.writer != nil {
 		// Already claimed by a live connection. Reject rather than stomp
@@ -165,7 +165,7 @@ func (s *Session) Attach(w ChannelWriter, channel uint32) ([]byte, error) {
 		return nil, ErrAlreadyAttached
 	}
 	s.attached = attachState{writer: w, channel: channel}
-	return s.ring.Snapshot(), nil
+	return s.ring.ReplaySnapshot(), nil
 }
 
 // Detach drops the current writer if it's the one passed in. The

@@ -51,6 +51,10 @@ interface Session {
   proc: PtyProc;
   ring: Buffer[];
   ringBytes: number;
+  /** True once the ring has dropped a chunk. Until then byte 0 is the real
+   *  start of this session's output and must be replayed verbatim; only a
+   *  trimmed ring can begin mid-escape-sequence (#268). */
+  ringTrimmed: boolean;
   sub: Duplex | null;
   exited: boolean;
 }
@@ -61,12 +65,54 @@ function sessionKey(workspaceId: string, sessionId: string): string {
   return `${workspaceId}${SEP}${sessionId}`;
 }
 
+/**
+ * Index of the first byte of `history` that is safe to feed a terminal as the
+ * start of a stream (#268).
+ *
+ * The ring drops whole chunks off the front, and PTY chunk boundaries are
+ * whatever the OS handed over — they do not align with escape sequences. So
+ * the retained head routinely begins *inside* one. Replay that verbatim and
+ * the terminal sees the sequence's tail as ordinary text and prints it: drop
+ * the ESC from `ESC[6n` (the cursor-position query) and a literal `[6n`
+ * lands in the transcript. Same for a cut mid-word, which is where the
+ * reported `Re` / `Th` / `So.` fragments came from. Nothing ever repairs it,
+ * because scrollback is never rewritten.
+ *
+ * Two byte positions are guaranteed not to be mid-sequence: an ESC (0x1B),
+ * which always *starts* a sequence, and the byte after a newline, which a CSI
+ * sequence cannot span. Take whichever comes first so we discard as little
+ * restored scrollback as possible. Both are ASCII, so this also lands on a
+ * UTF-8 codepoint boundary for free.
+ *
+ * Cost: up to one partial line of history. When the cut happens to land on a
+ * clean line start we drop one real line — cheap next to printing control
+ * residue over the user's transcript.
+ */
+export function safeReplayStart(history: Buffer): number {
+  if (history.length === 0) return 0;
+
+  const esc = history.indexOf(0x1b);
+  const nl = history.indexOf(0x0a);
+
+  if (esc < 0 && nl < 0) {
+    // One unterminated line with no escapes: nothing can be cut safely, but
+    // don't hand the decoder a dangling UTF-8 continuation byte.
+    let i = 0;
+    while (i < history.length && (history[i] & 0xc0) === 0x80) i++;
+    return i;
+  }
+  if (esc < 0) return nl + 1;
+  if (nl < 0) return esc;
+  return Math.min(esc, nl + 1);
+}
+
 function appendRing(s: Session, buf: Buffer): void {
   s.ring.push(buf);
   s.ringBytes += buf.length;
   // Trim oldest chunks once over cap (keep at least the latest chunk).
   while (s.ringBytes > RING_CAP_BYTES && s.ring.length > 1) {
     s.ringBytes -= s.ring.shift()!.length;
+    s.ringTrimmed = true;
   }
 }
 
@@ -127,7 +173,7 @@ export function attachLocalSession(opts: AttachOpts): PtyHandle {
       rows: opts.rows,
       env: { ...opts.env, CLAUDE_FLEET_BROKER_SESSION_ID: opts.sessionId }
     });
-    const s: Session = { proc, ring: [], ringBytes: 0, sub: null, exited: false };
+    const s: Session = { proc, ring: [], ringBytes: 0, ringTrimmed: false, sub: null, exited: false };
     sessions.set(key, s);
     proc.onData((data) => {
       const buf = Buffer.from(data, 'utf8');
@@ -169,8 +215,14 @@ export function attachLocalSession(opts: AttachOpts): PtyHandle {
   });
   s.sub = stream;
 
-  // Replay the ring (broker HISTORY analog) so reattach restores scrollback.
-  for (const b of s.ring) stream.push(b);
+  // Replay the ring (broker HISTORY analog) so reattach restores scrollback,
+  // starting at a boundary that isn't inside an escape sequence (#268 — see
+  // safeReplayStart). Concatenated first because the safe boundary may lie
+  // past the end of the (arbitrarily sized) first retained chunk.
+  const history = Buffer.concat(s.ring);
+  // An untrimmed ring still holds byte 0 of the session — replay it as-is.
+  const from = s.ringTrimmed ? safeReplayStart(history) : 0;
+  if (from < history.length) stream.push(history.subarray(from));
   if (s.exited) stream.push(null);
 
   return {

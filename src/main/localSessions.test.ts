@@ -10,6 +10,7 @@ import {
   hasLiveSession,
   hasLiveSessions,
   _resetForTest,
+  safeReplayStart,
   type PtyProc,
   type SpawnPty
 } from './localSessions.js';
@@ -266,5 +267,74 @@ describe('host-assigned claude session ids (#195)', () => {
     const t = tracker();
     attachLocalSession({ ...base, workspaceId: 'ws1', sessionId: 's1', spawn: t.spawn });
     expect(t.calls[0].env.CLAUDE_FLEET_BROKER_SESSION_ID).toBe('s1');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #268: reattach replay must not begin inside an escape sequence.
+//
+// The ring drops whole chunks, and PTY chunk boundaries don't align with
+// escape sequences — so the retained head can start mid-sequence. Replayed
+// verbatim, the terminal prints the tail as text: strip the ESC from `ESC[6n`
+// (cursor-position query) and a literal `[6n` lands in the transcript. That is
+// the reported far-left `6`; a cut mid-word is where `Re`/`Th`/`So.` came from.
+
+describe('reattach replay starts at a safe boundary (#268)', () => {
+  it('safeReplayStart skips an orphaned escape-sequence tail', () => {
+    // ESC was trimmed away with the previous chunk; `[6n` would be printed.
+    const head = Buffer.from('[6n\x1b[38;5;33mhello\r\n');
+    expect(safeReplayStart(head)).toBe(3);
+    expect(head.subarray(safeReplayStart(head)).toString()).toBe('\x1b[38;5;33mhello\r\n');
+  });
+
+  it('safeReplayStart drops a partial line when that comes first', () => {
+    const head = Buffer.from('own fox jumps.\nrow-1 \x1b[0mfull line\n');
+    expect(head.subarray(safeReplayStart(head)).toString()).toBe('row-1 \x1b[0mfull line\n');
+  });
+
+  it('safeReplayStart keeps a stream that already starts cleanly', () => {
+    expect(safeReplayStart(Buffer.from('\x1b[2Jclean'))).toBe(0);
+  });
+
+  it('safeReplayStart never starts on a UTF-8 continuation byte', () => {
+    // Cut in the middle of ⏵ (U+23F5, 3 bytes) with nothing else to anchor to.
+    const glyph = Buffer.from('⏵');
+    const head = Buffer.concat([glyph.subarray(1), Buffer.from('abc')]);
+    const out = head.subarray(safeReplayStart(head));
+    expect(out.toString('utf8')).toBe('abc');
+  });
+
+  it('safeReplayStart handles an empty ring', () => {
+    expect(safeReplayStart(Buffer.alloc(0))).toBe(0);
+  });
+
+  it('a reattach after ring overflow replays no escape residue', async () => {
+    const t = tracker();
+    const h1 = attachLocalSession({ ...base, workspaceId: 'wR', sessionId: 'sR', spawn: t.spawn });
+    collect(h1.stream);
+
+    // Realistic TUI output, chunked on a stride that is coprime with the unit
+    // so sequences straddle chunk boundaries — exactly as a real PTY delivers
+    // them. Uniform, sequence-aligned chunks hide this bug entirely.
+    const UNIT = '\x1b[6n\x1b[38;5;33mThe quick brown fox jumps over the lazy dog.\x1b[0m\r\n';
+    let out = '';
+    while (out.length < 300 * 1024) out += UNIT;
+    for (let i = 0; i < out.length; i += 7) t.procs[0].emit(out.slice(i, i + 7));
+    await tick();
+
+    // Workspace switch: detach, reattach, read what gets replayed.
+    h1.detach();
+    const h2 = attachLocalSession({ ...base, workspaceId: 'wR', sessionId: 'sR', spawn: t.spawn });
+    const replay = collect(h2.stream);
+    await tick();
+
+    const r = replay();
+    expect(r.length).toBeGreaterThan(0);
+    // The regression: replay must not open mid-sequence. Before the fix this
+    // starts with the literal "[6n".
+    expect(r.startsWith('\x1b')).toBe(true);
+    expect(r.slice(0, 4)).not.toBe('[6n\x1b');
+    // And no orphaned DSR tail anywhere in the replayed history.
+    expect(r.match(/(?<!\x1b\[)6n/g)).toBeNull();
   });
 });
