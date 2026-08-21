@@ -24,6 +24,7 @@ const {
   getHardwareAccelDisabled,
   getTerminalRenderer,
   setTerminalRenderer,
+  resolveTerminalRenderer,
   setHardwareAccelDisabled,
   getAutoReloadLoadouts,
   setAutoReloadLoadouts,
@@ -412,5 +413,33 @@ describe('get/setTerminalRenderer', () => {
     await setTerminalRenderer('webgl');
     process.env.CLAUDE_FLEET_TERMINAL_RENDERER = 'vulkan';
     expect(await getTerminalRenderer()).toBe('webgl');
+  });
+});
+
+// #268: precedence for one pane — env (tests) > workspace override > global.
+describe('resolveTerminalRenderer', () => {
+  it('falls back to the global setting when the workspace has no override', async () => {
+    await setTerminalRenderer('canvas');
+    expect(await resolveTerminalRenderer(undefined)).toBe('canvas');
+  });
+
+  it('prefers the workspace override over the global setting', async () => {
+    await setTerminalRenderer('dom');
+    expect(await resolveTerminalRenderer('webgl')).toBe('webgl');
+  });
+
+  it('ignores an unrecognised workspace override and uses the global', async () => {
+    await setTerminalRenderer('canvas');
+    expect(await resolveTerminalRenderer('vulkan' as unknown as 'dom')).toBe('canvas');
+  });
+
+  it('env override beats both', async () => {
+    await setTerminalRenderer('dom');
+    process.env.CLAUDE_FLEET_TERMINAL_RENDERER = 'canvas';
+    expect(await resolveTerminalRenderer('webgl')).toBe('canvas');
+  });
+
+  it('defaults to dom with nothing set anywhere', async () => {
+    expect(await resolveTerminalRenderer(undefined)).toBe('dom');
   });
 });

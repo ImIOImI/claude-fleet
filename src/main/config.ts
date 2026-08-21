@@ -244,6 +244,25 @@ export async function getTerminalRenderer(): Promise<TerminalRenderer> {
   return v === 'canvas' || v === 'webgl' ? v : 'dom';
 }
 
+/** Effective renderer for one workspace (#268): env override (tests) → the
+ *  workspace's own setting → the app-level default → 'dom'. Per-workspace,
+ *  because the artifact this works around is reported on local workspaces and
+ *  the DOM renderer is otherwise preferable for its font fallback. */
+export async function resolveTerminalRenderer(
+  workspaceOverride?: TerminalRenderer
+): Promise<TerminalRenderer> {
+  const env = process.env.CLAUDE_FLEET_TERMINAL_RENDERER;
+  if (env === 'canvas' || env === 'webgl' || env === 'dom') return env;
+  if (
+    workspaceOverride === 'canvas' ||
+    workspaceOverride === 'webgl' ||
+    workspaceOverride === 'dom'
+  ) {
+    return workspaceOverride;
+  }
+  return getTerminalRenderer();
+}
+
 /** Persist the terminal renderer. Takes effect on the next pane mount
  *  (workspace switch or restart), not retroactively on live panes. */
 export async function setTerminalRenderer(renderer: TerminalRenderer): Promise<void> {

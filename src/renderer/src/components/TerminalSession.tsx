@@ -227,8 +227,8 @@ export function TerminalSession({
     // GPU that refuses the context leaves a working DOM-rendered terminal
     // rather than a blank pane.
     void window.api.config
-      .get()
-      .then(async ({ terminalRenderer }) => {
+      .terminalRendererFor(workspaceId)
+      .then(async (terminalRenderer) => {
         if (disposed || terminalRenderer === 'dom') return;
         try {
           if (terminalRenderer === 'webgl') {

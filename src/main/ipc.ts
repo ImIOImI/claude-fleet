@@ -20,6 +20,7 @@ import {
   getHardwareAccelDisabled,
   getTerminalRenderer,
   setTerminalRenderer,
+  resolveTerminalRenderer,
   type TerminalRenderer,
   setHardwareAccelDisabled,
   getAutoReloadLoadouts,
@@ -343,6 +344,8 @@ interface WorkspaceCreatePayload {
   endpointId?: string;
   /** Local workspaces only (#253): how `claude` is invoked (sanitized server-side). */
   launcher?: unknown;
+  /** Per-workspace xterm renderer override (#268); sanitized server-side. */
+  terminalRenderer?: unknown;
   env: WorkspaceEnv;
   resources?: WorkspaceResources;
   mirror?: WorkspaceMirror;
@@ -992,6 +995,14 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         authMode: input.authMode,
         endpointId: input.endpointId,
         launcher,
+        // Sanitized here too: the create path builds the spec field by field,
+        // so an unlisted field is silently dropped rather than persisted.
+        terminalRenderer:
+          input.terminalRenderer === 'dom' ||
+          input.terminalRenderer === 'canvas' ||
+          input.terminalRenderer === 'webgl'
+            ? input.terminalRenderer
+            : undefined,
         env: input.env,
         resources: input.resources,
         mirror: input.mirror ?? FACTORY_MIRROR,
@@ -1502,6 +1513,18 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('config:setHardwareAccelDisabled', async (_e, disabled: boolean) => {
     await setHardwareAccelDisabled(!!disabled);
     return { disableHardwareAcceleration: await getHardwareAccelDisabled() };
+  });
+
+  // Effective renderer for one pane: workspace override → global → 'dom'.
+  // Resolved in main so the renderer never has to know the precedence rules.
+  ipcMain.handle('config:terminalRendererFor', async (_e, workspaceId: string) => {
+    let override: TerminalRenderer | undefined;
+    try {
+      override = (await readWorkspaceManifest(workspaceId))?.terminalRenderer;
+    } catch {
+      /* unknown/unreadable workspace — fall through to the global setting */
+    }
+    return resolveTerminalRenderer(override);
   });
 
   ipcMain.handle('config:setTerminalRenderer', async (_e, renderer: unknown) => {
