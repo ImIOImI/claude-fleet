@@ -88,6 +88,7 @@ import {
   type WorkspaceResources,
   type WorkspaceColor,
   type AuthMode,
+  type Harness,
   type WorkspaceMirror,
   type WorkspaceKind,
   FACTORY_MIRROR
@@ -342,6 +343,8 @@ interface WorkspaceCreatePayload {
   authMode: AuthMode;
   /** authMode 'endpoint' only: id into the app-level model-endpoint registry (#250). */
   endpointId?: string;
+  /** authMode 'endpoint' only: which harness drives this workspace. */
+  harness?: Harness;
   /** Local workspaces only (#253): how `claude` is invoked (sanitized server-side). */
   launcher?: unknown;
   /** Per-workspace xterm renderer override (#268); sanitized server-side. */
@@ -394,6 +397,7 @@ async function fetchAllWorkspaces(): Promise<Workspace[]> {
       workspaceSubdir: w.workspaceSubdir || m?.workspaceSubdir || '',
       authMode: m?.authMode ?? w.authMode,
       endpointId: m?.endpointId,
+      harness: m?.harness,
       env: m?.env ?? w.env,
       resources: m?.resources,
       mirror: m?.mirror ?? FACTORY_MIRROR,
@@ -976,6 +980,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         resources: input.resources,
         authMode: input.authMode,
         endpointId: input.endpointId,
+        harness: input.harness,
         kind,
         workspaceRoot: input.workspaceRoot
       });
@@ -994,6 +999,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         image: ws.image,
         authMode: input.authMode,
         endpointId: input.endpointId,
+        harness: input.harness,
         launcher,
         // Sanitized here too: the create path builds the spec field by field,
         // so an unlisted field is silently dropped rather than persisted.

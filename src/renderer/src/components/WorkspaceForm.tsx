@@ -11,6 +11,7 @@ import type { ReactNode } from 'react';
 import { useEffect, useMemo, useState } from 'react';
 import type {
   AuthMode,
+  Harness,
   WorkspaceColor,
   WorkspaceResources,
   WorkspaceMirror,
@@ -30,6 +31,7 @@ import {
   type ClaudeAuth,
   type ModelSelection
 } from './modelPicker';
+import { validateHarnessSelection } from './harness.js';
 
 export type WorkspaceKind = 'container' | 'local';
 
@@ -66,6 +68,8 @@ export interface WorkspaceFormSubmit {
   authMode: AuthMode;
   /** authMode 'endpoint' only — registry reference (#250). */
   endpointId?: string;
+  /** authMode 'endpoint' only: which harness drives this workspace. */
+  harness?: Harness;
   plainEnv: Record<string, string>;
   /**
    * Full list of every secret-env-var key the workspace will have after
@@ -186,6 +190,7 @@ export function WorkspaceForm({
   const [claudeAuth, setClaudeAuth] = useState<ClaudeAuth>(() =>
     claudeAuthFromInitial(initial?.authMode)
   );
+  const [harness, setHarness] = useState<Harness | undefined>(() => initial?.harness);
   const [endpoints, setEndpoints] = useState<EndpointEntry[]>([]);
   const [endpointsLoaded, setEndpointsLoaded] = useState(false);
   const [envRows, setEnvRows] = useState<EnvRow[]>(() => {
@@ -405,6 +410,8 @@ export function WorkspaceForm({
       setError("This workspace's model endpoint was deleted — pick another model.");
       return null;
     }
+    const harnessErr = validateHarnessSelection(authMode, model.kind === 'endpoint' ? harness : undefined);
+    if (harnessErr) { setError(harnessErr); return null; }
 
     const seen = new Set<string>();
     const plainEnv: Record<string, string> = {};
@@ -491,6 +498,7 @@ export function WorkspaceForm({
       image: kind === 'container' ? image.trim() : undefined,
       authMode,
       endpointId,
+      harness: model.kind === 'endpoint' ? harness : undefined,
       plainEnv,
       secretKeys,
       secrets,
@@ -963,24 +971,39 @@ export function WorkspaceForm({
           </div>
         </div>
       ) : (
-        <div className="form-row" aria-label="Auth mode">
-          <label>Auth</label>
-          <div className="auth-note">
-            🔑{' '}
-            <span>
-              <b>{endpoints.find((e) => e.id === model.endpointId)?.name ?? '(deleted endpoint)'}</b>{' '}
-              — key from endpoint registry (none stored → placeholder token)
-              {onOpenSettings && (
-                <>
-                  {' · '}
-                  <a className="auth-note-edit" onClick={() => onOpenSettings('endpoints')}>
-                    edit
-                  </a>
-                </>
-              )}
-            </span>
+        <>
+          <div className="form-row" aria-label="Auth mode">
+            <label>Auth</label>
+            <div className="auth-note">
+              🔑{' '}
+              <span>
+                <b>{endpoints.find((e) => e.id === model.endpointId)?.name ?? '(deleted endpoint)'}</b>{' '}
+                — key from endpoint registry (none stored → placeholder token)
+                {onOpenSettings && (
+                  <>
+                    {' · '}
+                    <a className="auth-note-edit" onClick={() => onOpenSettings('endpoints')}>
+                      edit
+                    </a>
+                  </>
+                )}
+              </span>
+            </div>
           </div>
-        </div>
+          <div className="form-row" aria-label="Harness">
+            <label>Harness</label>
+            <div className="kind-radios" role="radiogroup">
+              {(['claude-code', 'qwen-code'] as const).map((h) => (
+                <label key={h} className={`kind-radio ${harness === h ? 'active' : ''}`}>
+                  <input type="radio" name="harness" value={h} checked={harness === h}
+                         onChange={() => setHarness(h)} disabled={busy} />
+                  <span>{h === 'claude-code' ? 'Claude Code' : 'Qwen Code'}</span>
+                  <span className="kind-help">{h === 'claude-code' ? "Anthropic's harness" : 'Qwen-tuned harness'}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        </>
       )}
 
       <details

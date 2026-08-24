@@ -36,6 +36,7 @@ import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget, UiPre
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
 export type WorkspaceKind = 'container' | 'local';
 export type AuthMode = 'oauth' | 'apikey' | 'endpoint';
+export type Harness = 'claude-code' | 'qwen-code';
 
 export interface WorkspaceColor {
   hue: number;
@@ -107,6 +108,8 @@ export interface WorkspaceSummary {
   authMode: AuthMode;
   /** authMode 'endpoint' only — id into the app-level model-endpoint registry (#250). */
   endpointId?: string;
+  /** authMode 'endpoint' only: which harness drives this workspace. */
+  harness?: Harness;
   env: WorkspaceEnv;
   resources?: WorkspaceResources;
   mirror: WorkspaceMirror;
@@ -1016,6 +1019,7 @@ export function App() {
       image: submit.image,
       authMode: submit.authMode,
       endpointId: submit.endpointId,
+      harness: submit.harness,
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources,
       mirror: submit.mirror
@@ -1065,6 +1069,7 @@ export function App() {
       image: submit.image,
       authMode: submit.authMode,
       endpointId: submit.endpointId,
+      harness: submit.harness,
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources,
       mirror: submit.mirror,
@@ -1098,6 +1103,7 @@ export function App() {
       image: submit.image,
       authMode: submit.authMode,
       endpointId: submit.endpointId,
+      harness: submit.harness,
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources,
       mirror: submit.mirror
@@ -1131,6 +1137,7 @@ export function App() {
       image: submit.image,
       authMode: submit.authMode,
       endpointId: submit.endpointId,
+      harness: submit.harness,
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources,
       mirror: submit.mirror,
@@ -1175,6 +1182,7 @@ export function App() {
       image: source.image,
       authMode: source.authMode,
       endpointId: source.endpointId,
+      harness: source.harness,
       plainEnv: { ...plain },
       // Don't carry secret *values* across — they live in the source's
       // vault entry, not in the clone's. The user re-enters them in the
