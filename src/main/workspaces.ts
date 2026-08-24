@@ -358,8 +358,8 @@ export function manifestInvariant(spec: WorkspaceSpec): string | null {
   ) {
     return `wsl launcher with a non-Linux workspaceRoot: ${spec.workspaceRoot}`;
   }
-  if (spec.authMode === 'endpoint' && !spec.harness) {
-    return `endpoint workspace ${spec.id} missing harness (claude-code | qwen-code)`;
+  if (spec.harness === 'qwen-code' && spec.authMode !== 'endpoint') {
+    return `qwen-code harness requires authMode 'endpoint' (workspace ${spec.id})`;
   }
   return null;
 }

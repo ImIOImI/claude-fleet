@@ -144,12 +144,16 @@ describe('harness field', () => {
     expect(got?.harness).toBeUndefined();
   });
 
-  it('invariant rejects an endpoint workspace with no harness', () => {
-    // harness is required for endpoint workspaces once the feature ships.
-    expect(manifestInvariant({ ...base(), harness: undefined } as never)).toMatch(/harness/);
+  it('invariant accepts an endpoint workspace with no harness (defaults to claude-code)', () => {
+    // An endpoint workspace without an explicit harness is valid — absent means claude-code.
+    expect(manifestInvariant({ ...base(), harness: undefined } as never)).toBeNull();
   });
 
-  it('invariant accepts an endpoint workspace with a harness', () => {
-    expect(manifestInvariant({ ...base(), harness: 'claude-code' } as never)).toBeNull();
+  it('invariant rejects qwen-code harness with a non-endpoint authMode', () => {
+    expect(manifestInvariant({ ...base(), authMode: 'oauth', harness: 'qwen-code' } as never)).toMatch(/qwen-code|endpoint/);
+  });
+
+  it('invariant accepts qwen-code harness with authMode endpoint', () => {
+    expect(manifestInvariant({ ...base(), harness: 'qwen-code' } as never)).toBeNull();
   });
 });
