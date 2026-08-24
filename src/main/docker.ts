@@ -556,7 +556,24 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
   // edits/key rotation apply on next create.
   const backendVars = spec.authMode === 'endpoint' ? await endpointEnv(spec.endpointId, spec.harness) : {};
   const resolvedEnv = { ...backendVars, ...(await resolveEnv(spec.id, spec.env.plain, spec.env.secretKeys)) };
-  if (spec.harness === 'qwen-code') resolvedEnv.CLAUDE_FLEET_BROKER_CLAUDE = 'qwen';
+  if (spec.harness === 'qwen-code') {
+    resolvedEnv.CLAUDE_FLEET_BROKER_CLAUDE = 'qwen';
+    // Sidecar env vars — tell the transcript sidecar where qwen writes its chat
+    // logs and where to emit the mapped claude-dialect JSONL for the host watcher.
+    //
+    // CF_QWEN_CHATS_DIR: qwen sanitizes cwd to a project dir using the same
+    // character replacement as claude (`encodeClaudeProjectDir`: /[^a-zA-Z0-9]/ → '-'),
+    // so '/workspace' → '-workspace'. The chats subdir is the immediate parent of
+    // the <sid>.jsonl files, which is what pump() reads from.
+    //
+    // CF_FLEET_PROJECTS_DIR: the claudeDir bind mounts <userData>/state/<id>/.claude
+    // at /home/fleet/.claude (see `binds` below: `${claudeDir}:/home/fleet/.claude:rw`).
+    // The host chokidar watcher watches <userData>/state/<id>/.claude/projects/-workspace/
+    // (PROJECTS_SUBDIR in jsonlWatcher.ts), which is the in-container path
+    // /home/fleet/.claude/projects/-workspace/. The sidecar appends to <sid>.jsonl there.
+    resolvedEnv.CF_QWEN_CHATS_DIR = '/home/fleet/.qwen/projects/-workspace/chats';
+    resolvedEnv.CF_FLEET_PROJECTS_DIR = '/home/fleet/.claude/projects/-workspace';
+  }
   const envArr = ['HOME=/home/fleet', ...Object.entries(resolvedEnv).map(([k, v]) => `${k}=${v}`)];
   // Windows: tell the broker to listen on loopback TCP instead of a unix
   // socket. The host connects via the published 127.0.0.1:<hostPort>.

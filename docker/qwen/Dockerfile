@@ -32,7 +32,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends socat \
  # mount has a parent (Docker refuses a file mount into a missing directory).
  && mkdir -p /home/fleet/.qwen && chown fleet:fleet /home/fleet/.qwen
 
-# Back to the unprivileged fleet user. ENTRYPOINT (tini) + CMD (broker) are
-# inherited from the base — this is still a fleet runner, just with qwen added.
+# Ship the qwen transcript sidecar — bundled MJS files + start script.
+# start.sh backgrounds the sidecar then execs the broker so tini (ENTRYPOINT)
+# correctly reaps the broker. The sidecar requires CF_QWEN_CHATS_DIR and
+# CF_FLEET_PROJECTS_DIR to be set in the container env (injected by docker.ts).
+COPY docker/qwen/lines.mjs docker/qwen/qwenAdapter.mjs docker/qwen/sidecar.mjs docker/qwen/title.mjs \
+     /usr/local/lib/claude-fleet/qwen/
+COPY docker/qwen/start.sh /usr/local/lib/claude-fleet/qwen/start.sh
+RUN chmod +x /usr/local/lib/claude-fleet/qwen/start.sh
+
+# Back to the unprivileged fleet user. CMD overrides the base image's CMD
+# (broker) with our start script that backgrounds the sidecar then execs broker.
 USER fleet
 WORKDIR /workspace
+CMD ["/usr/local/lib/claude-fleet/qwen/start.sh"]
