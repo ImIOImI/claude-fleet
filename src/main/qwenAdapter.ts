@@ -28,7 +28,7 @@ function usage(rec: Rec): Rec | undefined {
   };
 }
 
-function content(rec: Rec): unknown[] {
+function content(rec: Rec): string | unknown[] {
   const msg = asObj(rec.message);
   // Real @google/genai Content type uses `parts[]` (not `content[]` as the
   // brief draft assumed). Verified against qwen-code chatRecordingService.ts.
@@ -51,6 +51,7 @@ function content(rec: Rec): unknown[] {
     } else if (part.functionResponse) {
       const tcr = asObj(rec.toolCallResult);
       // toolCallResult.callId is the tool_use_id for pairing; status 'error' maps to is_error.
+      // part.functionResponse.response is the conventional Gemini FunctionResponse envelope.
       out.push({
         type: 'tool_result',
         tool_use_id: String(tcr.callId ?? ''),
@@ -59,9 +60,12 @@ function content(rec: Rec): unknown[] {
       });
     }
   }
-  // user records: db.ts fills first_user_message from message.content as a string
-  // (line 618 of db.ts: `typeof message?.content === 'string'`).
-  if (rec.type === 'user' && !out.length) return [textChunks.join('')];
+  // user records with only plain text: db.ts fills first_user_message ONLY when
+  // message.content is a bare string (db.ts ingestLine: `typeof message?.content === 'string'`).
+  // Return the joined text as a string so the title is populated correctly.
+  // tool_result records (folded into a user-type line) or records with tool blocks
+  // keep content as an array.
+  if (rec.type === 'user' && !out.length) return textChunks.join('');
   if (textChunks.length) out.unshift({ type: 'text', text: textChunks.join('') });
   return out;
 }

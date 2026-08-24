@@ -49,7 +49,41 @@ describe('mapQwenRecord', () => {
       message: { role: 'user', parts: [{ text: 'do the thing' }] }
     }));
     expect(out.type).toBe('user');
-    expect(out.message.content).toContain('do the thing');
+    expect(typeof out.message.content).toBe('string');
+    expect(out.message.content).toBe('do the thing');
+  });
+
+  it('uses functionCall.id fast-path when present (no synthesized id)', () => {
+    const out = parse(mapQwenRecord({
+      type: 'assistant', uuid: 'u5', timestamp: '2026-08-24T00:00:04.000Z', model: 'qwen3-coder:30b',
+      message: { role: 'model', parts: [{ functionCall: { id: 'fc_id_123', name: 'read_file', args: { path: 'b.ts' } } }] }
+    }));
+    const tu = out.message.content.find((b: { type: string }) => b.type === 'tool_use');
+    expect(tu.id).toBe('fc_id_123');
+    expect(tu.name).toBe('read_file');
+  });
+
+  it('maps a mixed text+functionCall assistant record — text block precedes tool_use', () => {
+    const out = parse(mapQwenRecord({
+      type: 'assistant', uuid: 'u6', timestamp: '2026-08-24T00:00:05.000Z', model: 'qwen3-coder:30b',
+      message: { role: 'model', parts: [
+        { text: 'I will read the file.' },
+        { functionCall: { name: 'read_file', args: { path: 'c.ts' } } }
+      ] }
+    }));
+    const blocks: { type: string }[] = out.message.content;
+    expect(blocks.some((b) => b.type === 'text')).toBe(true);
+    expect(blocks.some((b) => b.type === 'tool_use')).toBe(true);
+    expect(blocks[0].type).toBe('text');
+    expect(blocks[blocks.length - 1].type).toBe('tool_use');
+  });
+
+  it('omits message.usage when usageMetadata is absent', () => {
+    const out = parse(mapQwenRecord({
+      type: 'assistant', uuid: 'u7', timestamp: '2026-08-24T00:00:06.000Z', model: 'qwen3-coder:30b',
+      message: { role: 'model', parts: [{ text: 'done' }] }
+    }));
+    expect(out.message.usage).toBeUndefined();
   });
 
   it('returns null for a system/unmappable record', () => {
