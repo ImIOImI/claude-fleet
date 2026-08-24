@@ -2,7 +2,7 @@
 // electron is mocked so app.getPath('userData') resolves to a per-test temp dir;
 // the rest is plain fs against workspace.json.
 
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,7 +19,7 @@ vi.mock('electron', () => ({
   }
 }));
 
-const { readWorkspaceManifest, writeWorkspaceManifest, FACTORY_MIRROR } = await import(
+const { readWorkspaceManifest, writeWorkspaceManifest, FACTORY_MIRROR, manifestInvariant } = await import(
   './workspaces.js'
 );
 
@@ -118,4 +118,38 @@ it('drops an unrecognised terminalRenderer rather than persisting it', async () 
   // A hand-edited manifest must not be able to leave a pane unable to paint.
   await writeWorkspaceManifest(rendererSpec('vulkan'));
   expect((await readWorkspaceManifest(ID))?.terminalRenderer).toBeUndefined();
+});
+
+const base = () => ({
+  id: '01TESTWS0000000000000000AA', name: 'ws', labels: [] as string[],
+  workspaceRoot: '/workspace', workspaceSubdir: '', kind: 'container' as const,
+  authMode: 'endpoint' as const, endpointId: 'ep-1',
+  env: { plain: {}, secretKeys: [] }, mirror: { default: 'on' as const, cleanup: 'off' as const },
+  createdAt: 1, lastUsedAt: 1
+});
+
+describe('harness field', () => {
+  it('round-trips harness through write→read', async () => {
+    await writeWorkspaceManifest({ ...base(), harness: 'qwen-code' } as never);
+    const got = await readWorkspaceManifest(base().id);
+    expect(got?.harness).toBe('qwen-code');
+  });
+
+  it('drops harness when authMode is not endpoint', async () => {
+    const dir = join(userDataDir, 'state', base().id);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'workspace.json'),
+      JSON.stringify({ ...base(), authMode: 'oauth', endpointId: undefined, harness: 'qwen-code' }));
+    const got = await readWorkspaceManifest(base().id);
+    expect(got?.harness).toBeUndefined();
+  });
+
+  it('invariant rejects an endpoint workspace with no harness', () => {
+    // harness is required for endpoint workspaces once the feature ships.
+    expect(manifestInvariant({ ...base(), harness: undefined } as never)).toMatch(/harness/);
+  });
+
+  it('invariant accepts an endpoint workspace with a harness', () => {
+    expect(manifestInvariant({ ...base(), harness: 'claude-code' } as never)).toBeNull();
+  });
 });

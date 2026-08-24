@@ -33,6 +33,9 @@ export type WorkspaceKind = 'container' | 'local';
 /** Authentication mode for the workspace's `claude` invocation. */
 export type AuthMode = 'oauth' | 'apikey' | 'endpoint';
 
+/** Which harness drives an endpoint workspace. */
+export type Harness = 'claude-code' | 'qwen-code';
+
 /**
  * Per-workspace environment variables. `plain` values live in the
  * manifest on disk; `secretKeys` lists the keys whose values are
@@ -155,6 +158,8 @@ export interface WorkspaceSpec {
    *  (<userData>/endpoints.json). A REFERENCE — resolved live at container
    *  create / local spawn, so registry edits apply on next start (#250). */
   endpointId?: string;
+  /** authMode 'endpoint' only: which harness drives this workspace. Absent = 'claude-code'. */
+  harness?: Harness;
   /** Local workspaces only (#253): how `claude` is invoked. Absent ⇒ native
    *  direct spawn. 'wsl' is win32-only (validated by sanitizeLauncher). */
   launcher?: WorkspaceLauncher;
@@ -303,6 +308,11 @@ export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec |
         : parsed.authMode === 'endpoint' ? 'endpoint'
         : 'oauth',
       endpointId: typeof parsed.endpointId === 'string' && parsed.endpointId ? parsed.endpointId : undefined,
+      harness:
+        parsed.authMode === 'endpoint' &&
+        (parsed.harness === 'qwen-code' || parsed.harness === 'claude-code')
+          ? parsed.harness
+          : undefined,
       launcher: sanitizeLauncher(parsed.launcher),
       terminalRenderer: sanitizeTerminalRenderer(parsed.terminalRenderer),
       env: {
@@ -347,6 +357,9 @@ export function manifestInvariant(spec: WorkspaceSpec): string | null {
     !spec.workspaceRoot.startsWith('/')
   ) {
     return `wsl launcher with a non-Linux workspaceRoot: ${spec.workspaceRoot}`;
+  }
+  if (spec.authMode === 'endpoint' && !spec.harness) {
+    return `endpoint workspace ${spec.id} missing harness (claude-code | qwen-code)`;
   }
   return null;
 }
