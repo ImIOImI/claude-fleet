@@ -51,6 +51,7 @@ import {
   readWorkspaceManifest,
   listWorkspaceManifests,
   FACTORY_MIRROR,
+  type Harness,
   type Workspace,
   type WorkspaceSpec,
   type WorkspaceState
@@ -337,14 +338,16 @@ const CLAUDE_CHILD_SESSION_MARKERS = ['CLAUDE_CODE_CHILD_SESSION', 'CLAUDECODE']
  */
 export async function buildEnv(
   id: string,
-  ws: { env: Workspace['env']; authMode?: Workspace['authMode']; endpointId?: string }
+  ws: { env: Workspace['env']; authMode?: Workspace['authMode']; endpointId?: string; harness?: Harness }
 ): Promise<NodeJS.ProcessEnv> {
-  const backendVars = ws.authMode === 'endpoint' ? await endpointEnv(ws.endpointId) : {};
+  const backendVars = ws.authMode === 'endpoint' ? await endpointEnv(ws.endpointId, ws.harness) : {};
   const resolved = await resolveEnv(id, ws.env.plain, ws.env.secretKeys);
   const base: NodeJS.ProcessEnv = { ...process.env };
   // Endpoint workspaces must not inherit the host's real Anthropic key (dev
   // fallback mode) into a process whose base URL is a third-party endpoint.
-  if (ws.authMode === 'endpoint') delete base.ANTHROPIC_API_KEY;
+  // Also strip OPENAI_API_KEY so a qwen-code endpoint workspace gets only the
+  // compiled key from the registry, not the host's ambient OpenAI key.
+  if (ws.authMode === 'endpoint') { delete base.ANTHROPIC_API_KEY; delete base.OPENAI_API_KEY; }
   // A fleet-spawned local claude is a fresh TOP-LEVEL session, not a child of
   // whatever launched fleet. If fleet was itself started from inside a claude
   // session (e.g. a `claude` Bash tool ran `npm run dev`), its env carries

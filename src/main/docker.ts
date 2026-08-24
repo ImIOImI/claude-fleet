@@ -26,7 +26,7 @@ import {
   workspaceClaudeJsonPath,
   workspaceStateDir
 } from './paths.js';
-import type { AuthMode, Workspace, WorkspaceEnv, WorkspaceResources, WorkspaceKind } from './workspaces.js';
+import type { AuthMode, Harness, Workspace, WorkspaceEnv, WorkspaceResources, WorkspaceKind } from './workspaces.js';
 import { FACTORY_MIRROR } from './workspaces.js';
 import { fleetPrivateDir, fleetSharedDir } from './config.js';
 import {
@@ -147,6 +147,8 @@ export interface CreateWorkspaceInput {
    *  (<userData>/endpoints.json). A REFERENCE — resolved live at container
    *  create / local spawn, so registry edits apply on next start (#250). */
   endpointId?: string;
+  /** authMode 'endpoint' only: which harness drives this workspace. Absent = 'claude-code'. */
+  harness?: Harness;
   /**
    * Workspace kind. The Docker backend only ever sees `'container'`; the local
    * backend (#16) uses `'local'`. Optional + defaulted so existing callers and
@@ -494,7 +496,7 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
   // contract (ANTHROPIC_BASE_URL/AUTH_TOKEN/MODEL/…, #250). Spread FIRST so
   // explicit workspace env still overrides it. Resolved live — registry
   // edits/key rotation apply on next create.
-  const backendVars = spec.authMode === 'endpoint' ? await endpointEnv(spec.endpointId) : {};
+  const backendVars = spec.authMode === 'endpoint' ? await endpointEnv(spec.endpointId, spec.harness) : {};
   const resolvedEnv = { ...backendVars, ...(await resolveEnv(spec.id, spec.env.plain, spec.env.secretKeys)) };
   const envArr = ['HOME=/home/fleet', ...Object.entries(resolvedEnv).map(([k, v]) => `${k}=${v}`)];
   // Windows: tell the broker to listen on loopback TCP instead of a unix
