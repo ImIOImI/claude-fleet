@@ -561,16 +561,23 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
     // Sidecar env vars — tell the transcript sidecar where qwen writes its chat
     // logs and where to emit the mapped claude-dialect JSONL for the host watcher.
     //
-    // CF_QWEN_CHATS_DIR: qwen sanitizes cwd to a project dir using the same
-    // character replacement as claude (`encodeClaudeProjectDir`: /[^a-zA-Z0-9]/ → '-'),
-    // so '/workspace' → '-workspace'. The chats subdir is the immediate parent of
-    // the <sid>.jsonl files, which is what pump() reads from.
+    // CF_QWEN_PROJECTS_DIR: the qwen projects root. The sidecar scans all immediate
+    // subdirectories of this root for a `chats/` child and watches every *.jsonl it
+    // finds there. This avoids assuming the sanitized CWD name (previously hardcoded
+    // as '-workspace') — if qwen's encodeProjectDir rule differs from claude's, or the
+    // workspace has a non-empty subdir, discovery still finds the files.
+    //
+    // CF_QWEN_CHATS_DIR: kept as an optional exact-chats-dir hint for back-compat.
+    // The sidecar treats it as one additional chats dir on top of the discovered ones.
+    // We still set it to the expected path so a sidecar from an older image (pre-discovery)
+    // continues to work without an image rebuild.
     //
     // CF_FLEET_PROJECTS_DIR: the claudeDir bind mounts <userData>/state/<id>/.claude
     // at /home/fleet/.claude (see `binds` below: `${claudeDir}:/home/fleet/.claude:rw`).
     // The host chokidar watcher watches <userData>/state/<id>/.claude/projects/-workspace/
     // (PROJECTS_SUBDIR in jsonlWatcher.ts), which is the in-container path
     // /home/fleet/.claude/projects/-workspace/. The sidecar appends to <sid>.jsonl there.
+    resolvedEnv.CF_QWEN_PROJECTS_DIR = '/home/fleet/.qwen/projects';
     resolvedEnv.CF_QWEN_CHATS_DIR = '/home/fleet/.qwen/projects/-workspace/chats';
     resolvedEnv.CF_FLEET_PROJECTS_DIR = '/home/fleet/.claude/projects/-workspace';
   }
