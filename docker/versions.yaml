@@ -1,5 +1,9 @@
 # Pinned tool versions for the claude-fleet runner images.
 #
+# qwen: @qwen-code/qwen-code npm package. 0.22.0 is the version pinned at
+# implementation time — verify at release (https://www.npmjs.com/package/@qwen-code/qwen-code).
+qwen: 0.22.0
+#
 # Single source of truth for the install scripts in docker/scripts/. The
 # devops/dev Dockerfiles set ARG defaults to these values (e.g. gh is shared by
 # both); the publish workflow can also read them here to pass --build-arg

@@ -14,7 +14,7 @@
 import { app } from 'electron';
 import Docker from 'dockerode';
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Writable, type Duplex } from 'node:stream';
 import {
   assertValidWorkspaceId,
@@ -55,6 +55,8 @@ export const NAME_LABEL = 'com.claude-fleet.name';
 export const SUBDIR_LABEL = 'com.claude-fleet.subdir';
 export const WORKSPACE_ROOT_LABEL = 'com.claude-fleet.workspace-root';
 export const RUNNER_IMAGE = 'ghcr.io/imioimi/claude-fleet/runner:latest';
+/** Variant runner image for qwen-code harness workspaces. Carries `qwen` CLI + `socat`. */
+export const QWEN_RUNNER_IMAGE = 'ghcr.io/imioimi/claude-fleet/runner-qwen:latest';
 
 const docker = new Docker();
 
@@ -465,6 +467,62 @@ export async function ensureWorkspaceClaudeJson(
   return filePath;
 }
 
+/**
+ * Pure helper: the MCP server object to seed into a qwen-code workspace's
+ * `~/.qwen/settings.json`. Unlike claude-code (which uses a reconnecting node
+ * bridge because its PTY persists across app restarts), qwen-code is short-lived
+ * per invocation — a direct `socat` stdio bridge is sufficient. Identity is
+ * ambient from the bind-mounted per-workspace socket path (#117).
+ */
+export function qwenSettingsContent(): object {
+  return {
+    mcpServers: {
+      'claude-fleet-state': {
+        command: 'socat',
+        args: ['-', `UNIX-CONNECT:${CONTAINER_MCP_SOCKET}`]
+      }
+    }
+  };
+}
+
+/**
+ * Ensure the per-workspace `~/.qwen/settings.json` seed exists, bind-mounted
+ * at `/home/fleet/.qwen/settings.json`. Mirrors the `ensureWorkspaceClaudeJson`
+ * pattern: seeds on first create, reconciles the managed `mcpServers` entry on
+ * every subsequent call, leaves everything else byte-for-byte.
+ *
+ * Only called for `harness === 'qwen-code'` workspaces; the bind mount is
+ * wired in `createWorkspaceInner`.
+ */
+export async function seedQwenSettings(id: string): Promise<string> {
+  const filePath = join(workspaceStateDir(id), 'qwen-settings.json');
+  await mkdir(dirname(filePath), { recursive: true });
+  const desired = qwenSettingsContent();
+  const existing = await readFile(filePath, 'utf8').catch(() => null);
+  if (existing === null) {
+    await writeFile(filePath, JSON.stringify(desired, null, 2), 'utf8');
+    return filePath;
+  }
+  // File exists. Reconcile ONLY our managed mcpServers entry; leave every other
+  // key byte-for-byte. Tolerate a malformed file — qwen will rewrite it.
+  try {
+    const parsed = JSON.parse(existing) as {
+      mcpServers?: Record<string, unknown>;
+    };
+    const current = parsed.mcpServers?.['claude-fleet-state'];
+    if (JSON.stringify(current) !== JSON.stringify((desired as { mcpServers: Record<string, unknown> }).mcpServers['claude-fleet-state'])) {
+      parsed.mcpServers = {
+        ...(parsed.mcpServers ?? {}),
+        'claude-fleet-state': (desired as { mcpServers: Record<string, unknown> }).mcpServers['claude-fleet-state']
+      };
+      await writeFile(filePath, JSON.stringify(parsed, null, 2), 'utf8');
+    }
+  } catch {
+    /* malformed qwen settings — leave it untouched */
+  }
+  return filePath;
+}
+
 export function createWorkspace(spec: CreateWorkspaceInput): Promise<Workspace> {
   return perfSpanAsync('claude_fleet.docker.create', () => createWorkspaceInner(spec), { workspace_id: spec.id });
 }
@@ -487,7 +545,7 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
   const uid = process.getuid?.() ?? 1000;
   const gid = process.getgid?.() ?? 1000;
 
-  const image = spec.image?.trim() || RUNNER_IMAGE;
+  const image = spec.image?.trim() || (spec.harness === 'qwen-code' ? QWEN_RUNNER_IMAGE : RUNNER_IMAGE);
   // Resolve secrets at create-time; the merged env goes straight to the
   // container's `Env` array. Missing secret keys resolve to empty string
   // so the container still starts (claude itself surfaces the failure
@@ -571,6 +629,14 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
     binds.push(`${sharedCreds}:/home/fleet/.claude/.credentials.json:rw`);
     const sharedRemoteSettings = await ensureSharedRemoteSettingsFile();
     binds.push(`${sharedRemoteSettings}:/home/fleet/.claude/remote-settings.json:rw`);
+  }
+
+  // qwen-code workspaces: seed ~/.qwen/settings.json with the fleet-state MCP
+  // entry (socat direct bridge — no reconnect loop needed; qwen is short-lived
+  // per invocation). Bind-mounted as a file, like ~/.claude.json above.
+  if (spec.harness === 'qwen-code') {
+    const qwenSettings = await seedQwenSettings(spec.id);
+    binds.push(`${qwenSettings}:/home/fleet/.qwen/settings.json:rw`);
   }
 
   const hostCfg: Docker.HostConfig = {
