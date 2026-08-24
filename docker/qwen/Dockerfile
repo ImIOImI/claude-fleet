@@ -27,7 +27,10 @@ COPY docker/scripts/_arch.sh docker/scripts/qwen.sh /opt/install-scripts/
 RUN apt-get update && apt-get install -y --no-install-recommends socat \
  && rm -rf /var/lib/apt/lists/* \
  && cd /opt/install-scripts && QWEN_VERSION="${QWEN_VERSION}" bash qwen.sh \
- && rm -rf /opt/install-scripts
+ && rm -rf /opt/install-scripts \
+ # Pre-create qwen's config dir so seedQwenSettings' ~/.qwen/settings.json bind
+ # mount has a parent (Docker refuses a file mount into a missing directory).
+ && mkdir -p /home/fleet/.qwen && chown fleet:fleet /home/fleet/.qwen
 
 # Back to the unprivileged fleet user. ENTRYPOINT (tini) + CMD (broker) are
 # inherited from the base — this is still a fleet runner, just with qwen added.
