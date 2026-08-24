@@ -27,7 +27,7 @@ import {
   workspaceStateDir
 } from './paths.js';
 import type { AuthMode, Harness, Workspace, WorkspaceEnv, WorkspaceResources, WorkspaceKind } from './workspaces.js';
-import { FACTORY_MIRROR } from './workspaces.js';
+import { FACTORY_MIRROR, readWorkspaceManifest } from './workspaces.js';
 import { fleetPrivateDir, fleetSharedDir } from './config.js';
 import {
   mcpWorkspaceSocketDir,
@@ -45,7 +45,7 @@ import { logError } from './errorLog.js';
 import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
 import { resolveEnv } from './vault.js';
 import { endpointEnv } from './endpoints.js';
-import { claudeCreateArgs } from './claudeArgs.js';
+import { harnessCreateArgs } from './harnessArgs.js';
 import { injectAndSubmit } from './ptyInput.js';
 import { perfSpan, perfSpanAsync, perfSetSpanContext } from './perf.js';
 
@@ -498,6 +498,7 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
   // edits/key rotation apply on next create.
   const backendVars = spec.authMode === 'endpoint' ? await endpointEnv(spec.endpointId, spec.harness) : {};
   const resolvedEnv = { ...backendVars, ...(await resolveEnv(spec.id, spec.env.plain, spec.env.secretKeys)) };
+  if (spec.harness === 'qwen-code') resolvedEnv.CLAUDE_FLEET_BROKER_CLAUDE = 'qwen';
   const envArr = ['HOME=/home/fleet', ...Object.entries(resolvedEnv).map(([k, v]) => `${k}=${v}`)];
   // Windows: tell the broker to listen on loopback TCP instead of a unix
   // socket. The host connects via the published 127.0.0.1:<hostPort>.
@@ -893,6 +894,9 @@ async function attachPtyInner(
   }
   perfSetSpanContext({ workspaceId });
 
+  const manifest = await readWorkspaceManifest(workspaceId);
+  const harness = manifest?.harness;
+
   const endpoint = brokerEndpointFromInfo(workspaceId, info);
   const client = new BrokerClient(endpoint);
   try {
@@ -982,7 +986,7 @@ async function attachPtyInner(
       sessionId,
       cols,
       rows,
-      claudeCreateArgs(resumeOf, claudeSessionId)
+      harnessCreateArgs(harness, resumeOf, claudeSessionId)
     );
     if (!createResp.ok) {
       stream.destroy();
