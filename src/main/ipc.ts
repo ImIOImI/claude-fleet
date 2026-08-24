@@ -405,6 +405,11 @@ async function fetchAllWorkspaces(): Promise<Workspace[]> {
       // reflects current state.
       control: m?.control,
       accessibility: m?.accessibility,
+      // Manifest-only (#268). This projection is field-by-field, so an omitted
+      // field is dropped for every LIVE workspace while the deleted branch
+      // (`...m`) keeps it — the form would then show "Default" for a workspace
+      // that has an override, and saving would silently clear it.
+      terminalRenderer: m?.terminalRenderer,
       createdAt: m?.createdAt ?? w.createdAt,
       lastUsedAt: m?.lastUsedAt ?? w.lastUsedAt
     });

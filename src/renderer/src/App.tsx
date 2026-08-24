@@ -103,6 +103,9 @@ export interface WorkspaceSummary {
         ignoreClaudeVersion?: string;
       }
     | { mode: 'custom'; command: string };
+  /** Per-workspace xterm renderer override (#268). undefined ⇒ inherit the
+   *  app-level default. */
+  terminalRenderer?: 'dom' | 'canvas' | 'webgl';
   image?: string;
   authMode: AuthMode;
   /** authMode 'endpoint' only — id into the app-level model-endpoint registry (#250). */
