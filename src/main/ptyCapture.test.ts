@@ -47,6 +47,17 @@ describe('ptyCapture (#268 diagnostics)', () => {
     expect(createPtyCapture({ ...base })).toBeNull();
   });
 
+  it('ignores a path that is not absolute on this platform', () => {
+    // A Windows path on POSIX is a legal relative filename with backslashes,
+    // so this would otherwise create `./C:\\Users\\…` wherever the app was
+    // started — which is exactly how capture files ended up inside a git
+    // checkout during the #268 investigation.
+    process.env.CLAUDE_FLEET_CAPTURE_PTY =
+      process.platform === 'win32' ? 'relative\\path' : 'C:\\Users\\Someone\\ptycap';
+    expect(captureDir()).toBeNull();
+    expect(createPtyCapture({ ...base })).toBeNull();
+  });
+
   it('records the spawn geometry in an open event', async () => {
     const cap = createPtyCapture({ ...base, dir })!;
     expect(cap).not.toBeNull();
