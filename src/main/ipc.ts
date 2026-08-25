@@ -405,6 +405,11 @@ async function fetchAllWorkspaces(): Promise<Workspace[]> {
       // reflects current state.
       control: m?.control,
       accessibility: m?.accessibility,
+      // Manifest-only (#268). This projection is field-by-field, so an omitted
+      // field is dropped for every LIVE workspace while the deleted branch
+      // (`...m`) keeps it — the form would then show "Default" for a workspace
+      // that has an override, and saving would silently clear it.
+      terminalRenderer: m?.terminalRenderer,
       createdAt: m?.createdAt ?? w.createdAt,
       lastUsedAt: m?.lastUsedAt ?? w.lastUsedAt
     });
@@ -2125,9 +2130,20 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     'app:logError',
     (
       _e,
-      payload: { type: string; message: string; stack?: string; extra?: Record<string, unknown> }
+      payload: {
+        type: string;
+        message: string;
+        level?: 'error' | 'warn' | 'info';
+        stack?: string;
+        extra?: Record<string, unknown>;
+      }
     ) => {
-      logError({ source: 'renderer', ...payload });
+      // Allowlist the level rather than trusting the renderer verbatim.
+      const level =
+        payload.level === 'info' || payload.level === 'warn' || payload.level === 'error'
+          ? payload.level
+          : undefined;
+      logError({ source: 'renderer', ...payload, level });
     }
   );
   ipcMain.handle('app:errorLogPath', () => getLogPath());

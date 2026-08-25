@@ -31,6 +31,7 @@ export function workspaceToFormInitial(
     kind: w.kind,
     workspaceRoot: w.workspaceRoot,
     launcher: w.launcher,
+    terminalRenderer: w.terminalRenderer,
     image: w.image,
     authMode: w.authMode,
     endpointId: w.endpointId,
