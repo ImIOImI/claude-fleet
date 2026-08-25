@@ -23,7 +23,7 @@
 // line-oriented and binary-safe.
 
 import { createWriteStream, mkdirSync, type WriteStream } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { logError } from './errorLog.js';
 
 /** Per-session cap so a long-running capture can't fill the disk. Override
@@ -52,7 +52,24 @@ export interface PtyCaptureOpts {
 
 export function captureDir(): string | null {
   const d = process.env.CLAUDE_FLEET_CAPTURE_PTY;
-  return d && d.trim() ? d.trim() : null;
+  if (!d || !d.trim()) return null;
+  const dir = d.trim();
+  // Must be absolute FOR THIS PLATFORM. A Windows-style path on POSIX is a
+  // perfectly legal *relative filename* containing backslashes, so mkdir
+  // happily creates `./C:\Users\…` next to the cwd instead of failing —
+  // which is how a stray env var scattered capture files through a git
+  // checkout (and produced a path Windows then refused to check out).
+  if (!isAbsolute(dir)) {
+    logError({
+      source: 'main',
+      type: 'pty-capture-bad-dir',
+      level: 'warn',
+      message: `CLAUDE_FLEET_CAPTURE_PTY must be an absolute path on this platform; ignoring ${JSON.stringify(dir)}`,
+      extra: { dir, platform: process.platform }
+    });
+    return null;
+  }
+  return dir;
 }
 
 function maxBytesFromEnv(): number {

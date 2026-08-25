@@ -443,3 +443,36 @@ describe('resolveTerminalRenderer', () => {
     expect(await resolveTerminalRenderer(undefined)).toBe('dom');
   });
 });
+
+// #268: the renderer must survive a RESTART, not just an in-process round trip.
+// The original tests set-then-got in one process, where the in-memory cache
+// masked the fact that read() dropped the field on every load from disk.
+describe('terminalRenderer survives a reload from disk', () => {
+  it('is read back from an existing config.json', async () => {
+    await writeFile(configPath(), JSON.stringify({ terminalRenderer: 'canvas' }), 'utf8');
+    _resetConfigCacheForTests();
+    expect(await getTerminalRenderer()).toBe('canvas');
+  });
+
+  it('survives setTerminalRenderer + cache drop (the restart path)', async () => {
+    await setTerminalRenderer('webgl');
+    _resetConfigCacheForTests();
+    expect(await getTerminalRenderer()).toBe('webgl');
+  });
+
+  it('is not erased by writing an unrelated setting', async () => {
+    // write() spreads the parsed config, so a dropped field is destroyed on
+    // the next save of anything else — silent data loss, not just a bad read.
+    await setTerminalRenderer('canvas');
+    _resetConfigCacheForTests();
+    await setHardwareAccelDisabled(true);
+    _resetConfigCacheForTests();
+    expect(await getTerminalRenderer()).toBe('canvas');
+  });
+
+  it('coerces garbage on disk to dom', async () => {
+    await writeFile(configPath(), JSON.stringify({ terminalRenderer: 'opengl' }), 'utf8');
+    _resetConfigCacheForTests();
+    expect(await getTerminalRenderer()).toBe('dom');
+  });
+});

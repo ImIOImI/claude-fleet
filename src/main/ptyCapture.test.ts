@@ -7,10 +7,16 @@ import { createPtyCapture, captureDir } from './ptyCapture';
 let dir: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'ptycap-'));
+  // Clear on the way IN as well as out: "off by default" must assert the
+  // code's default, not the developer's shell. A machine that happens to have
+  // this exported (e.g. mid-investigation) failed this test spuriously.
+  delete process.env.CLAUDE_FLEET_CAPTURE_PTY;
+  delete process.env.CLAUDE_FLEET_CAPTURE_PTY_MAX_MB;
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
   delete process.env.CLAUDE_FLEET_CAPTURE_PTY;
+  delete process.env.CLAUDE_FLEET_CAPTURE_PTY_MAX_MB;
 });
 
 const base = { handleId: 'h1', workspaceId: 'ws1', brokerSessionId: 'bs1', cols: 107, rows: 45 };
@@ -37,6 +43,17 @@ describe('ptyCapture (#268 diagnostics)', () => {
 
   it('is off when the env var is empty or whitespace', () => {
     process.env.CLAUDE_FLEET_CAPTURE_PTY = '   ';
+    expect(captureDir()).toBeNull();
+    expect(createPtyCapture({ ...base })).toBeNull();
+  });
+
+  it('ignores a path that is not absolute on this platform', () => {
+    // A Windows path on POSIX is a legal relative filename with backslashes,
+    // so this would otherwise create `./C:\\Users\\…` wherever the app was
+    // started — which is exactly how capture files ended up inside a git
+    // checkout during the #268 investigation.
+    process.env.CLAUDE_FLEET_CAPTURE_PTY =
+      process.platform === 'win32' ? 'relative\\path' : 'C:\\Users\\Someone\\ptycap';
     expect(captureDir()).toBeNull();
     expect(createPtyCapture({ ...base })).toBeNull();
   });
