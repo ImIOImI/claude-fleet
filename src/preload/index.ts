@@ -201,6 +201,10 @@ const api = {
     logError: (payload: {
       type: string;
       message: string;
+      /** Omitted ⇒ 'error' in the sink. Set 'info'/'warn' for diagnostics that
+       *  are lifecycle records rather than failures, so they don't bury real
+       *  errors in the log. */
+      level?: 'error' | 'warn' | 'info';
       stack?: string;
       extra?: Record<string, unknown>;
     }): Promise<void> => ipcRenderer.invoke('app:logError', payload),

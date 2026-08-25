@@ -2130,9 +2130,20 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     'app:logError',
     (
       _e,
-      payload: { type: string; message: string; stack?: string; extra?: Record<string, unknown> }
+      payload: {
+        type: string;
+        message: string;
+        level?: 'error' | 'warn' | 'info';
+        stack?: string;
+        extra?: Record<string, unknown>;
+      }
     ) => {
-      logError({ source: 'renderer', ...payload });
+      // Allowlist the level rather than trusting the renderer verbatim.
+      const level =
+        payload.level === 'info' || payload.level === 'warn' || payload.level === 'error'
+          ? payload.level
+          : undefined;
+      logError({ source: 'renderer', ...payload, level });
     }
   );
   ipcMain.handle('app:errorLogPath', () => getLogPath());
