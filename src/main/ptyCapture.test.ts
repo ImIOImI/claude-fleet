@@ -7,10 +7,16 @@ import { createPtyCapture, captureDir } from './ptyCapture';
 let dir: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'ptycap-'));
+  // Clear on the way IN as well as out: "off by default" must assert the
+  // code's default, not the developer's shell. A machine that happens to have
+  // this exported (e.g. mid-investigation) failed this test spuriously.
+  delete process.env.CLAUDE_FLEET_CAPTURE_PTY;
+  delete process.env.CLAUDE_FLEET_CAPTURE_PTY_MAX_MB;
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
   delete process.env.CLAUDE_FLEET_CAPTURE_PTY;
+  delete process.env.CLAUDE_FLEET_CAPTURE_PTY_MAX_MB;
 });
 
 const base = { handleId: 'h1', workspaceId: 'ws1', brokerSessionId: 'bs1', cols: 107, rows: 45 };

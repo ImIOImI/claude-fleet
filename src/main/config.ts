@@ -158,6 +158,18 @@ async function read(): Promise<AppConfig> {
     cached = {
       fleetRoot: typeof parsed.fleetRoot === 'string' && parsed.fleetRoot ? parsed.fleetRoot : undefined,
       disableHardwareAcceleration: parsed.disableHardwareAcceleration === true,
+      // Read back explicitly: this normalizer is a field-by-field allowlist,
+      // so an omitted key is silently dropped on every load — the value round
+      // -tripped through setTerminalRenderer only because the in-memory cache
+      // held it, and reappeared as 'dom' after a restart. Worse, `write()`
+      // spreads this object, so saving any UNRELATED setting erased it from
+      // disk (#268).
+      terminalRenderer:
+        parsed.terminalRenderer === 'canvas' ||
+        parsed.terminalRenderer === 'webgl' ||
+        parsed.terminalRenderer === 'dom'
+          ? parsed.terminalRenderer
+          : undefined,
       // Persist as-is so an explicit `false` survives a reload; absent ⇒ default
       // on (see getAutoReloadLoadouts).
       autoReloadLoadouts:
