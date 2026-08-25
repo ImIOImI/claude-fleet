@@ -52,6 +52,11 @@ if (!PROJECTS_DIR || !OUT) {
   process.exit(1);
 }
 
+// Ensure the output dir exists before any appendFile calls so the sidecar is
+// self-sufficient even when the host jsonlWatcher hasn't mkdir'd it yet.
+import { mkdirSync } from 'node:fs';
+mkdirSync(OUT, { recursive: true });
+
 // Per-file byte offset — keyed by absolute source path so two project dirs
 // that happen to contain a same-named sid don't collide. Advances only after
 // a successful append so a crash before fsp.appendFile leaves the source
