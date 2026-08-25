@@ -255,16 +255,16 @@ reachable), as today.
 
 ## Open decisions
 
-- **Env vars vs `~/.qwen/settings.json`** for the qwen endpoint config. Start
-  with env (sufficient, rides #250); switch to a compiled settings.json only if
-  per-provider sampling/`extra_body`/`contextWindowSize` tuning is needed.
-- **Sidecar process host:** a dedicated tiny Node process vs folding the tail-and-
-  map loop into the broker. Leaning dedicated (single responsibility, testable in
-  isolation), decided at implementation.
-- **qwen model pricing:** whether to price qwen endpoints at all or render `—`
-  (unpriced, as #250 does for unknown models). Default `—` unless a rate is
-  configured on the endpoint entry.
-- **Serving contingency:** if real coding tasks expose tool-reliability or
-  latency limits Ollama can't meet, document a vLLM + `--tool-call-parser
-  qwen3_xml` migration (correct sampling: temp 0.7 / top_p 0.8 /
-  repetition_penalty 1.05; ≥Q5/FP8; INT8 KV). Not a v1 workstream.
+All Phase 2 decisions are resolved:
+
+- **Env vars vs `~/.qwen/settings.json`** — **Resolved: env vars.** `CF_QWEN_PROJECTS_DIR`, `CF_QWEN_CHATS_DIR`, and `CF_FLEET_PROJECTS_DIR` are set by `docker.ts` at container-create time (see `createWorkspaceInner`). The qwen endpoint config (`OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`) also rides env, unchanged from the Phase 1 decision. No compiled `settings.json` is needed for the endpoint config.
+
+- **Sidecar process host** — **Resolved: dedicated sidecar process.** `docker/qwen/start.sh` backgrounds `sidecar.mjs` then execs the broker. The sidecar owns transcript translation in isolation; if it crashes, the broker PTY continues running. Folding the tail-and-map loop into the broker was rejected (Go broker + Node sidecar logic = wrong layer; single responsibility).
+
+- **qwen model pricing** — **Resolved: unpriced (`—`) by default.** No qwen model ids are in `pricing.ts`. The USD field renders `—` via the existing unknown-model path (zero in DB, not surfaced as `$0.00`). A characterization test pins this behavior. Adding a rate is a one-line `pricing.ts` edit when a stable rate is known.
+
+- **Transcript discovery (resolved during Phase 2 implementation):** the sidecar uses **glob-discovery** of the qwen projects root (`CF_QWEN_PROJECTS_DIR`) rather than a hardcoded project-dir name. Every immediate subdirectory of the root is scanned for a `chats/` child; all `*.jsonl` files there are tailed. This is robust to qwen's `encodeProjectDir` sanitization producing a different path than assumed. `CF_QWEN_CHATS_DIR` is retained as a back-compat exact-chats-dir hint for older images.
+
+**Still open (not Phase 2 scope):**
+- **Serving contingency:** if real coding tasks expose tool-reliability or latency limits Ollama can't meet, document a vLLM + `--tool-call-parser qwen3_xml` migration (correct sampling: temp 0.7 / top_p 0.8 / repetition_penalty 1.05; ≥Q5/FP8; INT8 KV). Not a v1 workstream.
+- **Local qwen harness** — deferred until concrete demand; see §11 of SPEC.md.
