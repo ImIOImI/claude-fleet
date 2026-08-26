@@ -1573,6 +1573,15 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
    the right (e.g. the PTY capture directory) — the input lives inside
    .setting-row-text, under the description. */
 .setting-row-stacked .input-with-button { margin-top: 8px; }
+/* On/off control for a stacked setting, sitting above its path input. */
+.capture-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--ink-dim, #9aa4b2);
+}
 .setting-title { font-size: 13px; color: var(--ink); }
 label.setting-title { display: block; cursor: pointer; }
 .setting-desc {

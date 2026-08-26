@@ -26,6 +26,9 @@ const {
   setTerminalRenderer,
   getCapturePty,
   setCapturePty,
+  getCaptureEnabled,
+  setCaptureEnabled,
+  getEffectiveCaptureDir,
   resolveTerminalRenderer,
   setHardwareAccelDisabled,
   getAutoReloadLoadouts,
@@ -506,5 +509,58 @@ describe('get/setCapturePty', () => {
     await setHardwareAccelDisabled(true);
     _resetConfigCacheForTests();
     expect(await getCapturePty()).toBe('/var/tmp/ptycap');
+  });
+});
+
+// #268: capture is a toggle plus a remembered directory, so switching it off
+// doesn't make you re-pick the folder next time.
+describe('capture toggle', () => {
+  it('keeps the directory when capture is switched off', async () => {
+    await setCapturePty('/var/tmp/ptycap');
+    await setCaptureEnabled(false);
+    _resetConfigCacheForTests();
+    expect(await getCapturePty()).toBe('/var/tmp/ptycap'); // remembered
+    expect(await getCaptureEnabled()).toBe(false);
+    expect(await getEffectiveCaptureDir()).toBeNull(); // but not capturing
+  });
+
+  it('captures once switched back on, without re-picking the folder', async () => {
+    await setCapturePty('/var/tmp/ptycap');
+    await setCaptureEnabled(false);
+    await setCaptureEnabled(true);
+    _resetConfigCacheForTests();
+    expect(await getEffectiveCaptureDir()).toBe('/var/tmp/ptycap');
+  });
+
+  it('stays off when enabled with no directory', async () => {
+    await setCaptureEnabled(true);
+    _resetConfigCacheForTests();
+    expect(await getCaptureEnabled()).toBe(true);
+    expect(await getEffectiveCaptureDir()).toBeNull();
+  });
+
+  it('infers ON for a pre-toggle config that has a directory', async () => {
+    // Installs from before the toggle existed were capturing iff a path was
+    // set; they must not silently stop after upgrading.
+    await writeFile(configPath(), JSON.stringify({ capturePty: '/var/tmp/old' }), 'utf8');
+    _resetConfigCacheForTests();
+    expect(await getCaptureEnabled()).toBe(true);
+    expect(await getEffectiveCaptureDir()).toBe('/var/tmp/old');
+  });
+
+  it('infers OFF for a pre-toggle config with no directory', async () => {
+    await writeFile(configPath(), JSON.stringify({}), 'utf8');
+    _resetConfigCacheForTests();
+    expect(await getCaptureEnabled()).toBe(false);
+  });
+
+  it('survives a reload and an unrelated write', async () => {
+    await setCapturePty('/var/tmp/ptycap');
+    await setCaptureEnabled(false);
+    _resetConfigCacheForTests();
+    await setHardwareAccelDisabled(true);
+    _resetConfigCacheForTests();
+    expect(await getCapturePty()).toBe('/var/tmp/ptycap');
+    expect(await getCaptureEnabled()).toBe(false);
   });
 });
