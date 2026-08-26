@@ -78,3 +78,39 @@ describe('terminal scrollback survives resize without reflow corruption (#330)',
     expect(term.buffer.active.getLine(1)?.isWrapped).toBe(true);
   });
 });
+
+// #268: a bare LF must not gain a carriage return.
+//
+// claude's TUI (Ink) positions absolutely and then emits LF expecting "down
+// one row, same column". `convertEol: true` injects a CR, so the write lands
+// at column 0 and the previous frame's leading characters are left stranded
+// in the first columns — the reported stray `Th` / `Co` / `Tw` fragments.
+// Recorded sessions replayed through these options went from 10 orphan
+// fragments to 0 with this off.
+describe('convertEol (#268)', () => {
+  it('is disabled — a TUI depends on LF preserving the cursor column', () => {
+    expect(buildTerminalOptions().convertEol).toBe(false);
+  });
+
+  it('LF moves down without returning to column 0', async () => {
+    const term = new Terminal({ ...buildTerminalOptions(), cols: 40, rows: 10 });
+    await new Promise<void>((r) => term.write('\x1b[5;4H', r));
+    const before = term.buffer.active.cursorX;
+    const rowBefore = term.buffer.active.cursorY;
+    await new Promise<void>((r) => term.write('\n', r));
+    expect(before).toBe(3);
+    expect(term.buffer.active.cursorX).toBe(3); // preserved, not reset
+    expect(term.buffer.active.cursorY).toBe(rowBefore + 1);
+  });
+
+  it('an Ink-style repaint keeps its indentation', async () => {
+    // position → erase to EOL → bare LF → text is the exact shape claude emits.
+    const term = new Terminal({ ...buildTerminalOptions(), cols: 60, rows: 10 });
+    await new Promise<void>((r) =>
+      term.write('\x1b[?1049h\x1b[2J\x1b[3;3H\x1b[K\nWorth noting', r)
+    );
+    const line = term.buffer.active.getLine(3)?.translateToString(true) ?? '';
+    // Indented at the column the frame positioned to — not slammed to 0.
+    expect(line.startsWith('  Worth noting')).toBe(true);
+  });
+});
