@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -139,5 +140,95 @@ func TestKillOwner_NoOwnerIsError(t *testing.T) {
 	// Port 1 requires root to bind; nothing in a test env listens there.
 	if err := KillOwner(1, time.Millisecond); err == nil {
 		t.Fatal("expected error for unowned port")
+	}
+}
+
+// A supervisor that respawns its listener child is the case KillOwner cannot
+// handle: signalling only the socket-owning leaf lets the parent reopen the
+// port. KillTree must walk from the owner up to the command launched under
+// the session (the child of the session's PTY root) and take out the whole
+// subtree, so the port stays gone.
+func TestKillTree_TakesOutRespawningSupervisor(t *testing.T) {
+	if _, err := os.Stat("/proc/net/tcp"); err != nil {
+		t.Skip("no /proc on this host")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not on PATH")
+	}
+	// A listener that rebinds a fixed port (SO_REUSEADDR so a respawn can
+	// grab it immediately) and holds it open.
+	pyPath := writeTempScript(t, `import socket,sys,time
+p=int(sys.argv[1])
+s=socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1",p)); s.listen()
+time.sleep(300)`)
+
+	// Grab a free port number, then hand it to a shell supervisor that
+	// respawns the listener whenever it dies.
+	probe, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("probe listen: %v", err)
+	}
+	port := uint16(probe.Addr().(*net.TCPAddr).Port)
+	_ = probe.Close()
+
+	sup := exec.Command("sh", "-c",
+		fmt.Sprintf("while true; do python3 %s %d; sleep 0.1; done", pyPath, port))
+	sup.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // isolate for cleanup
+	if err := sup.Start(); err != nil {
+		t.Fatalf("start supervisor: %v", err)
+	}
+	defer func() { _ = syscall.Kill(-sup.Process.Pid, syscall.SIGKILL); _, _ = sup.Process.Wait() }()
+
+	if !waitPortListening(port, 5*time.Second) {
+		t.Fatalf("port %d never came up", port)
+	}
+
+	// This test process stands in for the session's PTY root; the supervisor
+	// is the command launched under it.
+	roots := map[int]string{os.Getpid(): "sess-test"}
+	if err := KillTree(port, roots, 2*time.Second); err != nil {
+		t.Fatalf("KillTree: %v", err)
+	}
+
+	// The supervisor is dead, so nothing respawns the listener: the port must
+	// stay gone across a respawn window.
+	if waitPortListening(port, 1500*time.Millisecond) {
+		t.Fatalf("port %d still (or again) listening — supervisor was not killed", port)
+	}
+}
+
+// writeTempScript writes body to a temp file and returns its path.
+func writeTempScript(t *testing.T, body string) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "listener-*.py")
+	if err != nil {
+		t.Fatalf("temp script: %v", err)
+	}
+	if _, err := f.WriteString(body); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	_ = f.Close()
+	return f.Name()
+}
+
+// waitPortListening polls Listening() until port appears or the deadline
+// passes. Returns whether it is listening.
+func waitPortListening(port uint16, within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for {
+		details, err := Listening()
+		if err == nil {
+			for _, d := range details {
+				if d.Port == port {
+					return true
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

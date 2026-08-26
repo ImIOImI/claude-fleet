@@ -37,7 +37,9 @@ type Server struct {
 	// portscan.AttributeSessions with the manager's current root PIDs.
 	ListPorts func() ([]portscan.Detail, error)
 	// KillPort terminates the process behind a listening port for KILLPORT.
-	// Injectable for tests; defaults to portscan.KillOwner with a 2s grace.
+	// Injectable for tests; defaults to portscan.KillTree (the whole command
+	// subtree, so a supervisor like nodemon/`next dev` can't respawn the
+	// listener and reopen the port) with a 2s grace.
 	KillPort func(port uint16) error
 }
 
@@ -51,7 +53,8 @@ func New(mgr *session.Manager) *Server {
 			}
 			return details, err
 		},
-		KillPort: func(port uint16) error { return portscan.KillOwner(port, 2*time.Second) },
+		// RootPids is read fresh per kill so attribution reflects live sessions.
+		KillPort: func(port uint16) error { return portscan.KillTree(port, mgr.RootPids(), 2*time.Second) },
 	}
 }
 
