@@ -450,6 +450,8 @@ const api = {
       sharedDir: string;
       disableHardwareAcceleration: boolean;
       terminalRenderer: 'dom' | 'canvas' | 'webgl';
+      /** Raw PTY capture directory; '' when off (#268 diagnostics). */
+      capturePty: string;
       autoReloadLoadouts: boolean;
       usageBudget: UsageBudget;
       uiPrefs: UiPrefs;
@@ -467,6 +469,10 @@ const api = {
      *  workspace can override it; see terminalRendererFor (#268). */
     setTerminalRenderer: (renderer: 'dom' | 'canvas' | 'webgl') =>
       ipcRenderer.invoke('config:setTerminalRenderer', renderer),
+    /** Set the raw PTY capture directory; '' turns it off. Applies to
+     *  terminals attached after the change — no restart needed. */
+    setCapturePty: (dir: string): Promise<{ capturePty: string }> =>
+      ipcRenderer.invoke('config:setCapturePty', dir),
     /** Effective renderer for one workspace's panes — the workspace's own
      *  setting if it has one, otherwise the app-level default. */
     terminalRendererFor: (workspaceId: string): Promise<'dom' | 'canvas' | 'webgl'> =>

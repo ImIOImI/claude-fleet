@@ -1569,6 +1569,10 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
   padding: 6px 0;
 }
 .setting-row-text { flex: 1; min-width: 0; }
+/* A row whose control is a full-width input rather than a checkbox/select on
+   the right (e.g. the PTY capture directory) — the input lives inside
+   .setting-row-text, under the description. */
+.setting-row-stacked .input-with-button { margin-top: 8px; }
 .setting-title { font-size: 13px; color: var(--ink); }
 label.setting-title { display: block; cursor: pointer; }
 .setting-desc {
