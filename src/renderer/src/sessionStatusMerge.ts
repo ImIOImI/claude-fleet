@@ -28,6 +28,28 @@ export function resolveBusyClaudeIds(
 }
 
 /**
+ * Busy verdict for a single session tab dot (#371). Same precedence as
+ * `resolveBusyByWorkspace`: once the broker→claude mapping is known, the
+ * peer-reconciled set is authoritative (so a peer-idle session clears a stuck
+ * glyph, and a peer-busy one the glyph missed still lights); while the mapping
+ * is unresolved, the raw title glyph (keyed by broker id) governs.
+ *
+ * @param claudeId            broker→claude mapping for this tab, or undefined
+ * @param brokerId            this tab's broker session id
+ * @param reconciledBusy      busy *claude* ids (from `resolveBusyClaudeIds`)
+ * @param glyphBusyBroker     raw title-glyph busy set, keyed by broker id
+ */
+export function resolveTabBusy(
+  claudeId: string | undefined,
+  brokerId: string,
+  reconciledBusy: Set<string>,
+  glyphBusyBroker: Set<string>
+): boolean {
+  if (claudeId) return reconciledBusy.has(claudeId);
+  return glyphBusyBroker.has(brokerId);
+}
+
+/**
  * Waiting *claude* session ids: same override. The glyph can never produce a
  * waiting signal, so `hookWaiting` is the legacy AskUserQuestion-hook set
  * (container-only); peer-status extends waiting to all prompt kinds and all
