@@ -128,10 +128,13 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
         setFleetRoot(cfg.fleetRoot);
         setHwaDisabled(cfg.disableHardwareAcceleration);
         setHwaInitial(cfg.disableHardwareAcceleration);
-        setTermRenderer(cfg.terminalRenderer);
-        setTermRendererInitial(cfg.terminalRenderer);
-        setCapturePty(cfg.capturePty);
-        setCapturePtyInitial(cfg.capturePty);
+        setTermRenderer(cfg.terminalRenderer ?? 'dom');
+        setTermRendererInitial(cfg.terminalRenderer ?? 'dom');
+        // `?? ''` deliberately: these are optional on the IPC payload, and a
+        // missing one previously made Save throw on .trim() — taking every
+        // other setting down with it.
+        setCapturePty(cfg.capturePty ?? '');
+        setCapturePtyInitial(cfg.capturePty ?? '');
         setAutoReload(cfg.autoReloadLoadouts);
         // Guard: a partial config (e.g. an old build, or a test stub) shouldn't
         // break the modal — the budget control just falls back to its defaults.
