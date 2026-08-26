@@ -24,6 +24,8 @@ const {
   getHardwareAccelDisabled,
   getTerminalRenderer,
   setTerminalRenderer,
+  getCapturePty,
+  setCapturePty,
   resolveTerminalRenderer,
   setHardwareAccelDisabled,
   getAutoReloadLoadouts,
@@ -474,5 +476,35 @@ describe('terminalRenderer survives a reload from disk', () => {
     await writeFile(configPath(), JSON.stringify({ terminalRenderer: 'opengl' }), 'utf8');
     _resetConfigCacheForTests();
     expect(await getTerminalRenderer()).toBe('dom');
+  });
+});
+
+// #268: the capture directory is a persisted setting, so it must survive a
+// reload from disk — the same field-by-field read() that dropped
+// terminalRenderer would drop this too.
+describe('get/setCapturePty', () => {
+  it('is null when unset', async () => {
+    expect(await getCapturePty()).toBeNull();
+  });
+
+  it('round-trips through disk, not just the cache', async () => {
+    await setCapturePty('/var/tmp/ptycap');
+    _resetConfigCacheForTests();
+    expect(await getCapturePty()).toBe('/var/tmp/ptycap');
+  });
+
+  it('an empty value turns capture off', async () => {
+    await setCapturePty('/var/tmp/ptycap');
+    await setCapturePty('   ');
+    _resetConfigCacheForTests();
+    expect(await getCapturePty()).toBeNull();
+  });
+
+  it('is not erased by writing an unrelated setting', async () => {
+    await setCapturePty('/var/tmp/ptycap');
+    _resetConfigCacheForTests();
+    await setHardwareAccelDisabled(true);
+    _resetConfigCacheForTests();
+    expect(await getCapturePty()).toBe('/var/tmp/ptycap');
   });
 });

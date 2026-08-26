@@ -20,6 +20,8 @@ import {
   getHardwareAccelDisabled,
   getTerminalRenderer,
   setTerminalRenderer,
+  getCapturePty,
+  setCapturePty,
   resolveTerminalRenderer,
   type TerminalRenderer,
   setHardwareAccelDisabled,
@@ -1479,6 +1481,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     sharedDir: await fleetSharedDir(),
     disableHardwareAcceleration: await getHardwareAccelDisabled(),
     terminalRenderer: await getTerminalRenderer(),
+    capturePty: (await getCapturePty()) ?? '',
     autoReloadLoadouts: await getAutoReloadLoadouts(),
     usageBudget: await getUsageBudget(),
     uiPrefs: await getUiPrefs(),
@@ -1530,6 +1533,11 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       /* unknown/unreadable workspace — fall through to the global setting */
     }
     return resolveTerminalRenderer(override);
+  });
+
+  ipcMain.handle('config:setCapturePty', async (_e, dir: unknown) => {
+    await setCapturePty(typeof dir === 'string' ? dir : '');
+    return { capturePty: (await getCapturePty()) ?? '' };
   });
 
   ipcMain.handle('config:setTerminalRenderer', async (_e, renderer: unknown) => {
@@ -1731,6 +1739,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       handleBrokerSessionId.set(ptyHandleId, brokerSessionId);
       // No-op unless CLAUDE_FLEET_CAPTURE_PTY is set (ptyCapture.ts, #268).
       const capture = createPtyCapture({
+        configuredDir: await getCapturePty(),
         handleId: ptyHandleId,
         workspaceId: owner?.id ?? null,
         brokerSessionId,

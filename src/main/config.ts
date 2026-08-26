@@ -80,6 +80,9 @@ interface AppConfig {
   disableHardwareAcceleration?: boolean;
   /** xterm renderer for terminal panes. Absent ⇒ 'dom'. See TerminalRenderer. */
   terminalRenderer?: TerminalRenderer;
+  /** Directory for raw PTY capture (#268 diagnostics). Absent/empty ⇒ off.
+   *  Must be absolute; validated where it is consumed (ptyCapture.ts). */
+  capturePty?: string;
   /** When true (default), installing/updating a loadout into a running
    *  workspace auto-reloads its Claude session (`--resume`) to load the loadout
    *  — but only while Claude is idle; deferred until it stops working. (#16) */
@@ -164,6 +167,10 @@ async function read(): Promise<AppConfig> {
       // held it, and reappeared as 'dom' after a restart. Worse, `write()`
       // spreads this object, so saving any UNRELATED setting erased it from
       // disk (#268).
+      capturePty:
+        typeof parsed.capturePty === 'string' && parsed.capturePty.trim()
+          ? parsed.capturePty.trim()
+          : undefined,
       terminalRenderer:
         parsed.terminalRenderer === 'canvas' ||
         parsed.terminalRenderer === 'webgl' ||
@@ -254,6 +261,20 @@ export async function getTerminalRenderer(): Promise<TerminalRenderer> {
   const cfg = await read();
   const v = cfg.terminalRenderer;
   return v === 'canvas' || v === 'webgl' ? v : 'dom';
+}
+
+/** Directory for raw PTY capture, or null when off. Diagnostics only. */
+export async function getCapturePty(): Promise<string | null> {
+  const cfg = await read();
+  return cfg.capturePty && cfg.capturePty.trim() ? cfg.capturePty.trim() : null;
+}
+
+/** Persist the capture directory. Empty/whitespace turns capture off.
+ *  Takes effect for terminals attached after the change — no restart. */
+export async function setCapturePty(dir: string): Promise<void> {
+  const cfg = await read();
+  const v = typeof dir === 'string' && dir.trim() ? dir.trim() : undefined;
+  await write({ ...cfg, capturePty: v });
 }
 
 /** Effective renderer for one workspace (#268): env override (tests) → the

@@ -153,3 +153,35 @@ describe('ptyCapture (#268 diagnostics)', () => {
     expect(files[0]).not.toContain('..');
   });
 });
+
+// #268: capture is configurable from Settings, not only by env var. The env
+// var must still win so the e2e suite can drive it without touching config.
+describe('captureDir precedence (Settings vs env)', () => {
+  it('uses the configured directory when no env var is set', () => {
+    expect(captureDir(dir)).toBe(dir);
+  });
+
+  it('is off when neither is set', () => {
+    expect(captureDir(null)).toBeNull();
+    expect(captureDir('')).toBeNull();
+    expect(captureDir('   ')).toBeNull();
+  });
+
+  it('env var wins over the configured directory', () => {
+    process.env.CLAUDE_FLEET_CAPTURE_PTY = dir;
+    expect(captureDir('/some/other/place')).toBe(dir);
+  });
+
+  it('rejects a configured path that is not absolute', () => {
+    const rel = process.platform === 'win32' ? 'relative\\path' : 'C:\\Users\\X\\cap';
+    expect(captureDir(rel)).toBeNull();
+  });
+
+  it('createPtyCapture arms from configuredDir alone', async () => {
+    const cap = createPtyCapture({ ...base, dir: undefined, configuredDir: dir })!;
+    expect(cap).not.toBeNull();
+    cap.close();
+    const ev = await readCapture(dir);
+    expect(ev[0]).toMatchObject({ k: 'open' });
+  });
+});
