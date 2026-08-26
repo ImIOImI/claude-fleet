@@ -83,6 +83,8 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
   const [hwaDisabled, setHwaDisabled] = useState(false);
   const [capturePty, setCapturePty] = useState('');
   const [capturePtyInitial, setCapturePtyInitial] = useState('');
+  const [captureOn, setCaptureOn] = useState(false);
+  const [captureOnInitial, setCaptureOnInitial] = useState(false);
   const [termRenderer, setTermRenderer] = useState<'dom' | 'canvas' | 'webgl'>('dom');
   const [termRendererInitial, setTermRendererInitial] = useState<'dom' | 'canvas' | 'webgl'>('dom');
   // The persisted HWA value at open time — used to know whether the toggle
@@ -135,6 +137,8 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
         // other setting down with it.
         setCapturePty(cfg.capturePty ?? '');
         setCapturePtyInitial(cfg.capturePty ?? '');
+        setCaptureOn(cfg.captureEnabled ?? false);
+        setCaptureOnInitial(cfg.captureEnabled ?? false);
         setAutoReload(cfg.autoReloadLoadouts);
         // Guard: a partial config (e.g. an old build, or a test stub) shouldn't
         // break the modal — the budget control just falls back to its defaults.
@@ -206,8 +210,12 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
     setBusy(true);
     setError(null);
     try {
+      // Directory first, so enabling in the same save has a path to use.
       if (capturePty.trim() !== capturePtyInitial.trim()) {
         await window.api.config.setCapturePty(capturePty.trim());
+      }
+      if (captureOn !== captureOnInitial) {
+        await window.api.config.setCaptureEnabled(captureOn);
       }
       if (termRenderer !== termRendererInitial) {
         await window.api.config.setTerminalRenderer(termRenderer);
@@ -427,16 +435,30 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
               </div>
               <div className="setting-row setting-row-stacked">
                 <div className="setting-row-text">
-                  <label className="setting-title" htmlFor="setting-capture-pty">
+                  <label className="setting-title" htmlFor="setting-capture-on">
                     Capture terminal output (diagnostics)
                   </label>
                   <p className="setting-desc">
-                    Records each session&apos;s raw PTY stream and resize timeline to this
-                    folder, for diagnosing terminal-rendering bugs. Leave empty to turn off.
-                    Must be an absolute path. Applies to terminals opened after saving — no
-                    restart. <strong>A capture contains full terminal output</strong>, so treat
-                    the files as sensitive.
+                    Records each session&apos;s raw PTY stream and resize timeline, for
+                    diagnosing terminal-rendering bugs. Applies to terminals opened after
+                    saving — no restart. The folder is remembered while capture is off.
+                    Must be an absolute path.{' '}
+                    <strong>A capture contains full terminal output</strong>, so treat the
+                    files as sensitive.
+                    {captureOn && !capturePty.trim() && (
+                      <strong> Pick a folder — capture stays off without one.</strong>
+                    )}
                   </p>
+                  <label className="capture-toggle">
+                    <input
+                      id="setting-capture-on"
+                      type="checkbox"
+                      checked={captureOn}
+                      onChange={(e) => setCaptureOn(e.target.checked)}
+                      disabled={busy || !loaded}
+                    />
+                    <span>{captureOn ? 'Capturing' : 'Off'}</span>
+                  </label>
                   <div className="input-with-button">
                     <input
                       id="setting-capture-pty"

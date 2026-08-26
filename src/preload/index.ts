@@ -450,8 +450,10 @@ const api = {
       sharedDir: string;
       disableHardwareAcceleration: boolean;
       terminalRenderer: 'dom' | 'canvas' | 'webgl';
-      /** Raw PTY capture directory; '' when off (#268 diagnostics). */
+      /** Remembered raw-PTY-capture directory, kept even while off (#268). */
       capturePty: string;
+      /** Whether capture is currently switched on. */
+      captureEnabled: boolean;
       autoReloadLoadouts: boolean;
       usageBudget: UsageBudget;
       uiPrefs: UiPrefs;
@@ -469,10 +471,14 @@ const api = {
      *  workspace can override it; see terminalRendererFor (#268). */
     setTerminalRenderer: (renderer: 'dom' | 'canvas' | 'webgl') =>
       ipcRenderer.invoke('config:setTerminalRenderer', renderer),
-    /** Set the raw PTY capture directory; '' turns it off. Applies to
-     *  terminals attached after the change — no restart needed. */
+    /** Set the raw-PTY-capture directory. Remembered while capture is off, so
+     *  the toggle doesn't discard it. Applies to terminals attached after the
+     *  change — no restart needed. */
     setCapturePty: (dir: string): Promise<{ capturePty: string }> =>
       ipcRenderer.invoke('config:setCapturePty', dir),
+    /** Switch raw PTY capture on/off, keeping the configured directory. */
+    setCaptureEnabled: (enabled: boolean): Promise<{ captureEnabled: boolean }> =>
+      ipcRenderer.invoke('config:setCaptureEnabled', enabled),
     /** Effective renderer for one workspace's panes — the workspace's own
      *  setting if it has one, otherwise the app-level default. */
     terminalRendererFor: (workspaceId: string): Promise<'dom' | 'canvas' | 'webgl'> =>
