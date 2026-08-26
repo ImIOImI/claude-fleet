@@ -33,6 +33,20 @@ import {
 } from './sessionStatusMerge';
 import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget, UiPrefs } from '../../preload';
 
+/** The lifecycle IPC surface `applyContainerEdit` needs, bound to `window.api`.
+ *  Shared by the restart-to-apply banner and the resume-time image refresh. */
+function makeLifecycleApi(): WorkspaceLifecycleApi {
+  return {
+    getManifest: (id) =>
+      window.api.workspace.getManifest(id) as Promise<WorkspaceManifest | null>,
+    ensureImage: (onProgress, image) => window.api.workspace.ensureImage(onProgress, image),
+    stop: (cid) => window.api.workspace.stop(cid),
+    start: (id) => window.api.workspace.start(id),
+    remove: (cid, opts) => window.api.workspace.remove(cid, opts),
+    create: (input) => window.api.workspace.create(input)
+  };
+}
+
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
 export type WorkspaceKind = 'container' | 'local';
 export type AuthMode = 'oauth' | 'apikey' | 'endpoint';
@@ -1076,6 +1090,29 @@ export function App() {
       lastUsedAt: Date.now()
     });
 
+    // Resume-time image refresh: if a newer image landed for this stopped
+    // container, recreate it so the resume runs the new image (rather than
+    // silently reusing the old one, which stop/start can't change). The main
+    // verdict pulls the image and only returns true for a stopped container —
+    // running/paused ones refresh via the explicit restart-to-apply banner.
+    if (submit.kind === 'container') {
+      const current = workspaces.find((w) => w.id === id);
+      setStatus(`Checking ${submit.name} image…`);
+      const stale = await window.api.workspace.resumeImageStale(id, ({ message }) =>
+        setStatus(message)
+      );
+      if (stale && current?.containerId) {
+        setStatus('Newer image available — recreating…');
+        await applyContainerEdit(makeLifecycleApi(), { id, containerId: current.containerId }, (m) =>
+          setStatus(m)
+        );
+        pushToast('Workspace recreated with the latest image.', 'Updated', 4000, 'ok');
+        focusWorkspaceWhenWarm(id);
+        refresh();
+        return;
+      }
+    }
+
     setStatus(`Starting ${submit.name}…`);
     const started = (await window.api.workspace.start(id)) as WorkspaceSummary | null;
     if (started) {
@@ -1197,18 +1234,9 @@ export function App() {
     // Container-level edits (image/env/resources/authMode) are fixed at
     // create time, so applying them means RECREATING the container from the
     // saved manifest — not a stop→start, which would reuse the old spec.
-    const api: WorkspaceLifecycleApi = {
-      getManifest: (id) =>
-        window.api.workspace.getManifest(id) as Promise<WorkspaceManifest | null>,
-      ensureImage: (onProgress, image) => window.api.workspace.ensureImage(onProgress, image),
-      stop: (cid) => window.api.workspace.stop(cid),
-      start: (id) => window.api.workspace.start(id),
-      remove: (cid, opts) => window.api.workspace.remove(cid, opts),
-      create: (input) => window.api.workspace.create(input)
-    };
     try {
       await applyContainerEdit(
-        api,
+        makeLifecycleApi(),
         { id: workspaceId, containerId },
         (message) => pushToast(message, 'Recreating', 4000, 'progress')
       );

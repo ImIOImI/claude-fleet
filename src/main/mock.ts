@@ -146,6 +146,11 @@ export async function startWorkspace(id: string): Promise<string | null> {
   return ws.containerId ?? id;
 }
 
+export async function isResumeImageStale(): Promise<boolean> {
+  // No registry in mock mode — resume never forces a recreate.
+  return false;
+}
+
 export async function pauseWorkspace(containerId: string): Promise<void> {
   const ws = workspaces.get(containerId);
   if (!ws) return;
