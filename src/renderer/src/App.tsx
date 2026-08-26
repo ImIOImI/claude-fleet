@@ -1378,6 +1378,7 @@ export function App() {
                   onRefreshRequested={handleRefreshRequested}
                   onRefreshUnresolved={handleRefreshUnresolved}
                   waitingSessionIds={waitingSessionIds}
+                  busySessionIds={effectiveBusySessionIds}
                 />
               ))}
           </div>
