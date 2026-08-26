@@ -40,7 +40,24 @@ export function buildTerminalOptions(): ITerminalOptions {
     fontSize: 13,
     theme: { background: '#101216' },
     cursorBlink: true,
-    convertEol: true,
+    // MUST stay false (#268). `convertEol` makes xterm treat a bare LF as
+    // CRLF. That is right for line-oriented output piped into a terminal, and
+    // wrong for a full-screen TUI: claude's Ink renderer positions absolutely
+    // and then relies on LF meaning "down one row, same column". Injecting a
+    // carriage return moves the cursor to column 0, so a frame that positions
+    // to column 3, erases to end of line and emits LF no longer writes where
+    // it intended — leaving the previous frame's leading characters stranded
+    // in the first columns. That is the stray `Th` / `Co` / `Tw` fragments
+    // reported in #268, and it is why they survived every renderer change:
+    // the damage happens in the parser, before anything is painted.
+    //
+    // A real PTY already applies ONLCR on the slave side, so a bare LF that
+    // needs a CR has one by the time it reaches us; this option only ever
+    // added a second, unwanted one. Verified against two recorded sessions
+    // (src/main/ptyCapture.ts): orphan fragments 10 -> 0, with indentation
+    // unchanged (no stair-stepping, the failure mode if bare LFs were acting
+    // as line separators).
+    convertEol: false,
     allowProposedApi: true,
     wordSeparator: ' \t()[]{}\'"<>`',
     // Default is 1, which feels glacial on most trackpads/wheels. 3 is
