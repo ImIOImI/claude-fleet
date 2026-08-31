@@ -14,13 +14,8 @@
 // workspace has a manifest; flipping docker down causes mergeWorkspaces to
 // produce state:'unreachable' with lastKnownState:'running'.
 
-import path from 'path';
 import { test, expect } from '@playwright/test';
-import { launch, callTestIpc } from './_helpers.js';
-
-// Repo root — a directory that exists on the host, used as the local
-// workspace's working directory (real create handler validates it exists).
-const REPO_ROOT = path.resolve(new URL(import.meta.url).pathname, '../../..');
+import { launch, callTestIpc, REPO_ROOT } from './_helpers.js';
 
 test('daemon down: banner, inert chip, gated create, recovery', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1', CLAUDE_FLEET_E2E: '1' });

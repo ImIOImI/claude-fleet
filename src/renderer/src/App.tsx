@@ -342,6 +342,36 @@ export function App() {
     token: number;
   } | null>(null);
   const activateTokenRef = useRef(0);
+
+  // Toasts — one unified component (src/renderer/src/toasts.ts + components/
+  // Toast.tsx) drives both the global bottom-center stack here and the in-tab
+  // committee toast in TerminalPane. Most are transient (auto-dismiss after
+  // ttl); the MCP-unreachable toast is sticky (see the mcp:status effect
+  // below). Used by the loadout reload (#16), drag-and-drop results (#87), and
+  // MCP health (#159 follow-up). `kind`: 'progress' (spinner, default), 'ok'/
+  // 'error' (status glyph + coloring), 'info' (eyebrow-only, e.g. committee).
+  const [toasts, dispatchToast] = useReducer(toastReducer, [] as Toast[]);
+  const toastIdRef = useRef(0);
+  const dismissToast = useCallback((id: number): void => dispatchToast({ type: 'dismiss', id }), []);
+  const pushToast = useCallback(
+    (message: string, eyebrow?: string, ttlMs = 4000, kind: ToastKind = 'progress'): void => {
+      const id = ++toastIdRef.current;
+      dispatchToast({
+        type: 'push',
+        toast: makeToast(id, {
+          kind,
+          message,
+          eyebrow,
+          placement: 'global',
+          sticky: false,
+          dismissible: false
+        })
+      });
+      setTimeout(() => dispatchToast({ type: 'dismiss', id }), ttlMs);
+    },
+    []
+  );
+
   const handleResumeSession = useCallback(
     async (item: SessionListItem): Promise<void> => {
       try {
@@ -396,35 +426,6 @@ export function App() {
     token: number;
   } | null>(null);
   const reloadRequestTokenRef = useRef(0);
-
-  // Toasts — one unified component (src/renderer/src/toasts.ts + components/
-  // Toast.tsx) drives both the global bottom-center stack here and the in-tab
-  // committee toast in TerminalPane. Most are transient (auto-dismiss after
-  // ttl); the MCP-unreachable toast is sticky (see the mcp:status effect
-  // below). Used by the loadout reload (#16), drag-and-drop results (#87), and
-  // MCP health (#159 follow-up). `kind`: 'progress' (spinner, default), 'ok'/
-  // 'error' (status glyph + coloring), 'info' (eyebrow-only, e.g. committee).
-  const [toasts, dispatchToast] = useReducer(toastReducer, [] as Toast[]);
-  const toastIdRef = useRef(0);
-  const dismissToast = useCallback((id: number): void => dispatchToast({ type: 'dismiss', id }), []);
-  const pushToast = useCallback(
-    (message: string, eyebrow?: string, ttlMs = 4000, kind: ToastKind = 'progress'): void => {
-      const id = ++toastIdRef.current;
-      dispatchToast({
-        type: 'push',
-        toast: makeToast(id, {
-          kind,
-          message,
-          eyebrow,
-          placement: 'global',
-          sticky: false,
-          dismissible: false
-        })
-      });
-      setTimeout(() => dispatchToast({ type: 'dismiss', id }), ttlMs);
-    },
-    []
-  );
   // MCP health → a single sticky "unreachable" toast (#159 follow-up). Main
   // broadcasts mcp:status on listener bind success/failure (change-only). While
   // down we show one keyed sticky error toast (Open log + ✕); the ✕ snoozes it

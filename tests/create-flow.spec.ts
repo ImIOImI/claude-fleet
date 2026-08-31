@@ -24,9 +24,7 @@ import { launch, mockMainIpc, getCalls, activePane, REPO_ROOT } from './_helpers
 test('"+" add-workspace button opens the modal', async () => {
   const { app, window } = await launch();
   try {
-    // WorkspaceTabStrip disables the "+" add-workspace button when
-    // backendReady === false; stub the backend so the test isn't gated
-    // on host Docker state.
+    // Stub the backend for isolation.
     await mockMainIpc(app);
     await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
     await expect(window.getByRole('tab', { name: 'New' })).toBeVisible();
