@@ -18,6 +18,11 @@ import { test, expect } from '@playwright/test';
 import { launch, callTestIpc, REPO_ROOT } from './_helpers.js';
 
 test('daemon down: banner, inert chip, gated create, recovery', async () => {
+  // One continuous scenario (down → degraded UI → local create → recovery), so
+  // the worst-case sum of poll waits (5s renderer poll + 1s list TTL per
+  // transition, two workspace creations, app launch) legitimately exceeds the
+  // 30s suite default — same pattern as committee-post.real.spec.ts.
+  test.setTimeout(120_000);
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1', CLAUDE_FLEET_E2E: '1' });
   try {
     // ── Baseline: no banner ───────────────────────────────────────────────────
