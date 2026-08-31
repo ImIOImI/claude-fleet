@@ -215,7 +215,7 @@ export function WorkspaceTabStrip({
               */}
               <span className={`ws-chip-sub ${busy || waiting ? 'busy' : ''}`}>
                 {unreachable
-                  ? `unreachable${w.lastKnownState ? \` · was ${w.lastKnownState}\` : ''}`
+                  ? `unreachable${w.lastKnownState ? ` · was ${w.lastKnownState}` : ''}`
                   : waiting ? 'needs input' : busy ? 'working…' : chipActivityText(summaries[w.id]) ?? ' '}
               </span>
             </span>
