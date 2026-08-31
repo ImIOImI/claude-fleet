@@ -383,6 +383,26 @@ body {
   50% { opacity: 0.25; }
 }
 
+/* Daemon-down banner (#380): non-blocking replacement for the old
+   full-screen gate — local workspaces stay fully usable underneath. */
+.daemon-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  font-size: 12px;
+  color: #f0b8b3;
+  background: #2b1d1c;
+  border-bottom: 1px solid #4a2a27;
+}
+.daemon-banner .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+  animation: daemonPulse 1.4s ease-in-out infinite;
+}
+
 .mock-chip {
   background: rgba(211, 146, 100, 0.15);
   color: var(--warn);
@@ -1754,6 +1774,7 @@ label.setting-title { display: block; cursor: pointer; }
 .past-workspace-row .ws-state.paused { color: var(--warn, #eab308); }
 .past-workspace-row .ws-state.stopped { color: var(--c3, #d97757); }
 .past-workspace-row .ws-state.deleted { color: var(--ink-2, #6b7280); }
+.past-workspace-row .ws-state.unreachable { color: var(--danger); }
 
 /* ── Workspace-kind radios ─────────────────────────────────────────── */
 .kind-radios { display: flex; gap: 8px; }

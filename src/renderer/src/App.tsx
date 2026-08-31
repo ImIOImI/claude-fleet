@@ -32,8 +32,9 @@ import {
   type PeerKind
 } from './sessionStatusMerge';
 import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget, UiPrefs } from '../../preload';
+import { isWarm } from './fleetTemperature';
 
-export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
+export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted' | 'unreachable';
 export type WorkspaceKind = 'container' | 'local';
 export type AuthMode = 'oauth' | 'apikey' | 'endpoint';
 
@@ -86,6 +87,8 @@ export interface WorkspaceSummary {
   color?: WorkspaceColor;
   containerId?: string;
   state: WorkspaceState;
+  /** Present on state:'unreachable' rows — the state before the daemon died. */
+  lastKnownState?: 'running' | 'paused' | 'stopped' | 'deleted';
   status?: string;
   workspaceRoot: string;
   workspaceSubdir: string;
@@ -631,11 +634,6 @@ export function App() {
     if (!window.api) return;
     const ok = await window.api.workspace.backendReady();
     setBackendReady(ok);
-    if (!ok) {
-      setWorkspaces([]);
-      workspacesRef.current = [];
-      return;
-    }
     const list = applyIdOrder((await window.api.workspace.list()) as WorkspaceSummary[], wsOrderRef.current);
     setWorkspaces(list);
     workspacesRef.current = list;
@@ -702,12 +700,10 @@ export function App() {
   //   - If the selected workspace leaves the warm set (stopped/removed), fall
   //     back to the leftmost warm one (or nothing).
   useEffect(() => {
-    const warm = (w?: WorkspaceSummary): boolean =>
-      !!w && (w.state === 'running' || w.state === 'paused');
     const pending = pendingSelectRef.current;
     if (pending) {
       const pw = workspaces.find((w) => w.id === pending);
-      if (warm(pw)) {
+      if (isWarm(pw)) {
         pendingSelectRef.current = null;
         setSelectedId(pending);
         return;
@@ -716,8 +712,8 @@ export function App() {
       return;
     }
     const sel = selectedId ? workspaces.find((w) => w.id === selectedId) : undefined;
-    if (warm(sel)) return;
-    const firstWarm = workspaces.find(warm);
+    if (isWarm(sel)) return;
+    const firstWarm = workspaces.find(isWarm);
     setSelectedId(firstWarm?.id ?? null);
   }, [workspaces, selectedId]);
 
@@ -1284,6 +1280,14 @@ export function App() {
         waitingByWorkspace={waitingByWorkspaceFlag}
       />
 
+      {backendReady === false && (
+        <div className="daemon-banner" role="status">
+          <span className="dot" aria-hidden="true" />
+          Docker daemon unreachable — container workspaces are shown from last-known state and
+          can&apos;t be started or attached until it&apos;s back.
+        </div>
+      )}
+
       <div
         className={`app-body${leftCollapsed ? ' left-collapsed' : ''}${
           obsCollapsed ? ' obs-collapsed' : ''
@@ -1316,10 +1320,16 @@ export function App() {
           style={selected ? { ['--hue' as never]: colorFor(selected) } : undefined}
         >
           <div className="main-body">
-            {backendReady === false ? (
-              <DockerDisconnected onRetry={refresh} />
-            ) : liveCount === 0 ? (
+            {liveCount === 0 ? (
               <FirstRun onNewWorkspace={() => setCreateOpen(true)} />
+            ) : selected?.state === 'unreachable' ? (
+              <div className="empty">
+                <div className="icon-card error">!</div>
+                <h2>Docker daemon unreachable</h2>
+                <p>
+                  {selected.name} will reattach automatically when Docker is back.
+                </p>
+              </div>
             ) : !selected || !selected.containerId ? (
               <div className="empty">
                 <p style={{ color: 'var(--ink-2)' }}>No workspace selected.</p>
@@ -1508,26 +1518,6 @@ export function App() {
         </div>
       )}
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
-    </div>
-  );
-}
-
-function DockerDisconnected({ onRetry }: { onRetry: () => void }) {
-  return (
-    <div className="empty">
-      <div className="icon-card error">!</div>
-      <span className="eyebrow error">
-        <span className="dot" />
-        disconnected
-      </span>
-      <h2>Docker daemon unreachable</h2>
-      <p>
-        Start Docker Desktop (with WSL2 integration on Windows). claude-fleet will reconnect
-        automatically once it's back.
-      </p>
-      <button className="btn" onClick={onRetry}>
-        Retry connection
-      </button>
     </div>
   );
 }
