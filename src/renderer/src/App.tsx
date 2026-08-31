@@ -1421,6 +1421,7 @@ export function App() {
         open={createOpen}
         workspaces={workspaces}
         vaultAvailable={vaultAvailable}
+        dockerUp={backendReady !== false}
         onClose={() => {
           setCreateOpen(false);
           setCloneSource(null);
