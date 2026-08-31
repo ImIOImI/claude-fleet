@@ -8,7 +8,7 @@ function spec(id: string, kind: 'container' | 'local'): WorkspaceSpec {
   return {
     id, name: `ws-${id}`, labels: [], workspaceRoot: `/root/${id}`, workspaceSubdir: '',
     kind, authMode: 'oauth', env: { plain: {}, secretKeys: [] }
-  } as WorkspaceSpec;
+  } as unknown as WorkspaceSpec;
 }
 function live(id: string, kind: 'container' | 'local', state: WorkspaceState): Workspace {
   return { ...spec(id, kind), state, containerId: `c-${id}`, status: 'Up' } as Workspace;
@@ -109,7 +109,7 @@ describe('mergeWorkspaces', () => {
   });
 
   it('manifest-only terminalRenderer overlay: live workspace inherits manifest override (#268)', async () => {
-    const spec_a = { ...spec('a', 'container'), terminalRenderer: 'webgl' };
+    const spec_a = { ...spec('a', 'container'), terminalRenderer: 'webgl' as const };
     const live_a = { ...live('a', 'container', 'running') }; // no terminalRenderer
     const out = await mergeWorkspaces({
       dockerResult: up([live_a]),

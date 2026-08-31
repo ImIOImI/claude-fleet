@@ -136,6 +136,7 @@ import { brokerEndpoint } from './docker.js';
 import { BrokerClient } from './broker.js';
 import { MCP_TCP_PORT } from './mcpSocket.js';
 import { injectAndSubmit } from './ptyInput.js';
+import { mergeWorkspaces } from './workspaceMerge.js';
 
 export const MOCK_MODE = process.env.CLAUDE_FLEET_MOCK === '1';
 
@@ -356,83 +357,42 @@ interface WorkspaceCreatePayload {
   mirror?: WorkspaceMirror;
 }
 
+// Last-known container states for daemon-down synthesis (#380). In-memory
+// only, by design: after an app restart while the daemon is down we cannot
+// distinguish running from stopped, so everything unreachable lands cold.
+const lastKnownStates = new Map<string, Workspace['state']>();
+
+// e2e-only (mock mode): forces the docker half down without touching the
+// mock backend, which serves BOTH backends in mock mode.
+let e2eDockerDown = false;
+
 /**
  * Merge the live-workspace list (from the backend) with on-disk manifests
- * (from workspaces.ts) into a single Workspace[]. Live entries take
- * precedence for state/status; manifests provide the user-facing fields
- * (description/labels/color/env/etc.) that don't live on the container.
+ * (from workspaces.ts) into a single Workspace[]. Delegates to mergeWorkspaces
+ * in workspaceMerge.ts, which handles the full overlay including degraded
+ * synthesis when the docker daemon is unreachable (#380).
  */
 async function fetchAllWorkspaces(): Promise<Workspace[]> {
-  const [dockerLive, localLive, manifests] = await Promise.all([
-    dockerBackend.listLiveWorkspaces(),
-    localBackend.listLiveWorkspaces(),
+  const dockerPromise: Promise<Workspace[]> = e2eDockerDown
+    ? Promise.reject(Object.assign(new Error('docker daemon down (e2e)'), { code: 'ECONNREFUSED' }))
+    : dockerBackend.listLiveWorkspaces();
+  const [dockerResult, localLive, manifests] = await Promise.all([
+    dockerPromise.then(
+      (value): PromiseSettledResult<Workspace[]> => ({ status: 'fulfilled', value }),
+      (reason): PromiseSettledResult<Workspace[]> => ({ status: 'rejected', reason })
+    ),
+    // In mock mode both backends are the same module; when e2e forces the
+    // docker half down, container-kind mocks must not sneak back in as live
+    // through the local half.
+    localBackend.listLiveWorkspaces().then((ws) => (e2eDockerDown ? ws.filter((w) => w.kind === 'local') : ws)),
     listWorkspaceManifests()
   ]);
-  // Dedup by id: real backends return disjoint sets (a workspace is on exactly
-  // one), so this is a no-op there; in mock mode both `dockerBackend` and
-  // `localBackend` are the same mock module, so this collapses the duplicate.
-  const liveById = new Map<string, Workspace>();
-  for (const w of [...dockerLive, ...localLive]) if (!liveById.has(w.id)) liveById.set(w.id, w);
-  const live = [...liveById.values()];
-  const manifestById = new Map(manifests.map((m) => [m.id, m]));
-  const result: Workspace[] = [];
-
-  for (const w of live) {
-    const m = manifestById.get(w.id);
-    result.push({
-      ...w,
-      // Manifest is authoritative for user-facing fields; container labels
-      // only carry id/name/subdir/workspaceRoot.
-      name: m?.name ?? w.name,
-      description: m?.description,
-      labels: m?.labels ?? w.labels,
-      color: m?.color,
-      // Container: workspaceRoot is always the canonical private folder derived
-      // from the fleet root + id — never trust stale labels/manifests (a
-      // container created before the fleet-root migration still carries the old
-      // path). Local: the user picked an existing host dir, so honor the
-      // manifest's workspaceRoot (#16).
-      workspaceRoot:
-        w.kind === 'local'
-          ? m?.workspaceRoot ?? w.workspaceRoot
-          : await fleetPrivateDir(w.id),
-      workspaceSubdir: w.workspaceSubdir || m?.workspaceSubdir || '',
-      authMode: m?.authMode ?? w.authMode,
-      endpointId: m?.endpointId,
-      env: m?.env ?? w.env,
-      resources: m?.resources,
-      mirror: m?.mirror ?? FACTORY_MIRROR,
-      // Installed loadouts live only on the manifest (#16-followup) — carry
-      // them onto the merged workspace so the Library can show installed state.
-      installedLoadouts: m?.installedLoadouts ?? [],
-      // Committee grants/opt-in live only on the manifest (#118) — carry them
-      // through so chips show the manager/wifi glyphs and the grant matrix
-      // reflects current state.
-      control: m?.control,
-      accessibility: m?.accessibility,
-      // Manifest-only (#268). This projection is field-by-field, so an omitted
-      // field is dropped for every LIVE workspace while the deleted branch
-      // (`...m`) keeps it — the form would then show "Default" for a workspace
-      // that has an override, and saving would silently clear it.
-      terminalRenderer: m?.terminalRenderer,
-      createdAt: m?.createdAt ?? w.createdAt,
-      lastUsedAt: m?.lastUsedAt ?? w.lastUsedAt
-    });
-    manifestById.delete(w.id);
-  }
-
-  // Manifests with no live container → deleted (recoverable from spec).
-  // Local workspaces keep their user-picked workspaceRoot; only containers get
-  // the canonical `<fleetRoot>/<id>` (see the live-merge branch above).
-  for (const m of manifestById.values()) {
-    result.push({
-      ...m,
-      workspaceRoot: m.kind === 'local' ? m.workspaceRoot : await fleetPrivateDir(m.id),
-      state: 'deleted'
-    });
-  }
-
-  return result;
+  return mergeWorkspaces({
+    dockerResult, localLive, manifests,
+    lastKnown: lastKnownStates,
+    privateDir: fleetPrivateDir,
+    factoryMirror: FACTORY_MIRROR
+  });
 }
 
 // The merged list is the hot path behind workspace:list (the renderer's 5s
@@ -465,6 +425,9 @@ function invalidateWorkspaceList(): void {
 async function committeePause(callerId: string, targetId: string): Promise<{ id: string; paused: true }> {
   await assertControl(callerId, targetId, 'pause');
   const target = (await listAllWorkspaces()).find((w) => w.id === targetId);
+  if (target?.state === 'unreachable') {
+    throw new Error(`Docker daemon unreachable — target ${targetId} cannot be paused until it's back`);
+  }
   if (!target?.containerId) {
     throw new Error(`target ${targetId} has no live container to pause`);
   }
@@ -478,6 +441,12 @@ async function committeePause(callerId: string, targetId: string): Promise<{ id:
 async function committeeUnpause(callerId: string, targetId: string): Promise<{ id: string; running: true }> {
   await assertControl(callerId, targetId, 'pause');
   const kind = await resolveKind(targetId);
+  if (kind !== 'local') {
+    const t = (await listAllWorkspaces()).find((w) => w.id === targetId);
+    if (t?.state === 'unreachable') {
+      throw new Error(`Docker daemon unreachable — target ${targetId} cannot be unpaused until it's back`);
+    }
+  }
   const containerId = await backendForKind(kind).startWorkspace(targetId);
   if (!containerId) {
     throw new Error(`target ${targetId} has no container to unpause (it may need recreation)`);
@@ -917,7 +886,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
 
   // Docker-daemon reachability (drives the #23 indicator) and image pulls are
   // Docker-specific; local workspaces need neither.
-  ipcMain.handle('workspace:ping', () => dockerBackend.ping());
+  ipcMain.handle('workspace:ping', () => (e2eDockerDown ? false : dockerBackend.ping()));
   ipcMain.handle('workspace:ensureImage', async (event, channelId: string, image?: string) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     await dockerBackend.ensureImage((p) => {
@@ -2199,6 +2168,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     });
     ipcMain.handle('__test:setServingPorts', (_e, workspaceId: string, ports: ServingPort[]) => {
       broadcastPortsChanged(workspaceId, ports);
+    });
+    ipcMain.handle('__test:setDockerDown', (_e, downFlag: boolean) => {
+      e2eDockerDown = downFlag === true;
+      invalidateWorkspaceList();
     });
   }
 }
