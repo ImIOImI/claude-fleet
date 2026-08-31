@@ -157,6 +157,12 @@ interface Props {
    * is responsible for confirming + purging state.
    */
   onDelete?: (id: string) => Promise<void>;
+  /**
+   * When set, the Delete button is rendered but disabled with this string
+   * as its tooltip. Used when Docker is down and the workspace is a
+   * container-kind row — deleting would hit ECONNREFUSED.
+   */
+  deleteDisabledReason?: string;
   /** Override the primary button label (e.g. "Save" instead of "Resume"). */
   primaryLabel?: string;
   /** Optional slot for extra footer buttons. */
@@ -176,6 +182,7 @@ export function WorkspaceForm({
   onCancel,
   onClone,
   onDelete,
+  deleteDisabledReason,
   primaryLabel: primaryLabelOverride,
   extraFooterLeft,
   onOpenSettings
@@ -1223,8 +1230,8 @@ export function WorkspaceForm({
             type="button"
             className="btn danger"
             onClick={handleDelete}
-            disabled={busy}
-            title="Permanently delete this workspace"
+            disabled={busy || !!deleteDisabledReason}
+            title={deleteDisabledReason ?? 'Permanently delete this workspace'}
           >
             <IconTrash /> Delete
           </button>

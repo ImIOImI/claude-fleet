@@ -841,6 +841,7 @@ body {
   color: var(--ink-2);
 }
 .obs-fleet-state.running { color: var(--ok); }
+.obs-fleet-state.unreachable { color: var(--danger); }
 .obs-fleet-cost { color: var(--ink-1); font-size: 11.5px; flex-shrink: 0; }
 
 /* Per-terminal context bars: name | fill bar (+80% tick) | percentage. */
@@ -1775,7 +1776,7 @@ label.setting-title { display: block; cursor: pointer; }
 .past-workspace-row .ws-state.paused { color: var(--warn, #eab308); }
 .past-workspace-row .ws-state.stopped { color: var(--c3, #d97757); }
 .past-workspace-row .ws-state.deleted { color: var(--ink-2, #6b7280); }
-.past-workspace-row .ws-state.unreachable { color: var(--danger); }
+.past-workspace-row .ws-state.unreachable { color: var(--danger, #ef4d4d); }
 
 /* ── Workspace-kind radios ─────────────────────────────────────────── */
 .kind-radios { display: flex; gap: 8px; }

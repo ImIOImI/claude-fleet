@@ -250,13 +250,8 @@ export function WorkspaceTabStrip({
       <button
         className="btn add-workspace"
         onClick={onNewWorkspace}
-        disabled={backendReady === false}
         aria-label="Add workspace"
-        title={
-          backendReady === false
-            ? 'Docker daemon unreachable'
-            : 'Add a workspace — create a new one or resume a saved one'
-        }
+        title="Add a workspace — create a new one or resume a saved one"
       >
         +
       </button>

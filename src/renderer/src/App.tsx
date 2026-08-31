@@ -353,6 +353,18 @@ export function App() {
           setActivateRequest({ ...openTab, token: ++activateTokenRef.current });
           return;
         }
+        // Guard: if the target workspace is unreachable (daemon down), calling
+        // sessions.resume would hit ECONNREFUSED. Surface a toast and bail.
+        const ws = workspacesRef.current.find((w) => w.id === item.workspaceId);
+        if (ws?.state === 'unreachable') {
+          pushToast(
+            'Docker daemon unreachable — resume this session when it\'s back.',
+            'Resume blocked',
+            6000,
+            'error'
+          );
+          return;
+        }
         const res = await window.api.sessions.resume(item.workspaceId);
         if (!res) {
           // Container gone / not recreatable here — non-fatal.
@@ -373,7 +385,7 @@ export function App() {
         console.warn('resume failed:', err);
       }
     },
-    []
+    [pushToast]
   );
 
   // Loadout reload request, targeted at one workspace (#16). Set when a loadout

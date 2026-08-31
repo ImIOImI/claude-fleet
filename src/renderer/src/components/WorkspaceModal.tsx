@@ -374,6 +374,11 @@ export function WorkspaceModal({
                                   // takes the foreground.
                                   onClose();
                                 }}
+                                deleteDisabledReason={
+                                  w.state === 'unreachable' && w.kind !== 'local'
+                                    ? 'Docker daemon unreachable'
+                                    : undefined
+                                }
                                 onOpenSettings={onOpenSettings}
                               />
                             )}

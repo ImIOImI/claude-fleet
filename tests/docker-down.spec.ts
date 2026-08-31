@@ -14,8 +14,13 @@
 // workspace has a manifest; flipping docker down causes mergeWorkspaces to
 // produce state:'unreachable' with lastKnownState:'running'.
 
+import path from 'path';
 import { test, expect } from '@playwright/test';
 import { launch, callTestIpc } from './_helpers.js';
+
+// Repo root — a directory that exists on the host, used as the local
+// workspace's working directory (real create handler validates it exists).
+const REPO_ROOT = path.resolve(new URL(import.meta.url).pathname, '../../..');
 
 test('daemon down: banner, inert chip, gated create, recovery', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1', CLAUDE_FLEET_E2E: '1' });
@@ -27,7 +32,7 @@ test('daemon down: banner, inert chip, gated create, recovery', async () => {
     // Seeded mock workspaces have no manifests; a workspace created via the UI
     // goes through workspace:create → writeWorkspaceManifest and survives a
     // docker-down event as an "unreachable" chip.
-    // The "Add workspace" button is enabled while docker is up.
+    // The "Add workspace" button is always enabled (daemon state does not gate it).
     await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
     await window.getByLabel('Workspace name').fill('test-container-ws');
     // Default kind is Container; submit immediately.
@@ -70,11 +75,12 @@ test('daemon down: banner, inert chip, gated create, recovery', async () => {
     // Close the modal.
     await window.keyboard.press('Escape');
 
-    // ── "Add workspace" button is disabled while docker is down ───────────────
-    // WorkspaceTabStrip gates the button on backendReady===false.
+    // ── "Add workspace" button is ENABLED while docker is down ───────────────
+    // The button always allows opening the modal; gating happens inside the
+    // modal (Container radio disabled, Local still enabled).
     await expect(
       window.locator('.top-strip').getByRole('button', { name: 'Add workspace' })
-    ).toBeDisabled();
+    ).toBeEnabled();
 
     // ── Unreachable chip: dimmed (opacity + dashed border class), labeled ─────
     // The created workspace had state:'running' at last-known, so it surfaces as
@@ -89,14 +95,31 @@ test('daemon down: banner, inert chip, gated create, recovery', async () => {
     // ── Selected unreachable workspace: main pane shows reattach card ─────────
     await expect(window.locator('.main-body')).toContainText('will reattach automatically');
 
-    // ── Local workspace creation still works while docker is down ─────────────
-    // The "Add workspace" button is disabled, so we can't open the modal to test
-    // local creation end-to-end. The button-disabled state is itself the
-    // correct UX gate: container creation is blocked at the button level, which
-    // subsumes the radio-level check. Local creation end-to-end in this degraded
-    // state would require bypassing the disabled button — out of scope here.
-    // The local radio being enabled (verified above while the modal was open)
-    // demonstrates the per-radio gating is correct.
+    // ── Local workspace creation works while docker is down ───────────────────
+    // The "Add workspace" button is enabled; open the modal and switch to Local.
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
+    // Modal opens — default tab: Saved (has workspaces) or New. Switch to New.
+    const newTab = window.getByRole('tab', { name: 'New' });
+    await newTab.click();
+    // Container radio is disabled, Local is enabled and we select it.
+    const containerRadio2 = window.getByRole('radio', { name: /Container/ });
+    const localRadio2 = window.getByRole('radio', { name: /Local/ });
+    await expect(containerRadio2).toBeDisabled();
+    await expect(localRadio2).toBeEnabled();
+    // WorkspaceForm defaults kind to 'local' when dockerUp===false, so Local
+    // should already be selected; if not, select it explicitly.
+    if (!(await localRadio2.isChecked())) {
+      await localRadio2.check();
+    }
+    await expect(localRadio2).toBeChecked();
+    // Fill in the local workspace form.
+    await window.getByLabel('Workspace name').fill('local-while-down');
+    await window.getByLabel('Working directory').fill(REPO_ROOT);
+    await window.getByRole('button', { name: 'Create & start' }).click();
+
+    // The new local workspace chip appears in the warm strip while daemon is still down.
+    const localChip = window.locator('.ws-chip', { hasText: 'local-while-down' });
+    await expect(localChip).toBeVisible({ timeout: 8_000 });
 
     // ── Recovery: flip docker back up ────────────────────────────────────────
     await callTestIpc(app, '__test:setDockerDown', [false]);
@@ -107,15 +130,15 @@ test('daemon down: banner, inert chip, gated create, recovery', async () => {
     // Unreachable chip class is gone; workspace re-merges as running.
     await expect(window.locator('.ws-chip-group.unreachable')).toHaveCount(0, { timeout: 10_000 });
 
-    // The workspace chip is still present and no longer dimmed.
+    // The container workspace chip is still present and no longer dimmed.
     await expect(
       window.locator('.ws-chip-group', { hasText: 'test-container-ws' })
     ).toBeVisible();
 
-    // "Add workspace" button is enabled again.
+    // "Add workspace" button is still enabled (it's always enabled).
     await expect(
       window.locator('.top-strip').getByRole('button', { name: 'Add workspace' })
-    ).toBeEnabled({ timeout: 10_000 });
+    ).toBeEnabled();
   } finally {
     await app.close();
   }
