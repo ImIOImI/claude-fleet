@@ -42,7 +42,7 @@ non-goal.
 - `fetchAllWorkspaces` switches to `Promise.allSettled`. When the docker
   half rejects with a **daemon-connect error** (ECONNREFUSED / ENOENT /
   ENOTFOUND / EPIPE / ECONNRESET on the socket — a `isDaemonConnectError`
-  predicate in `docker.ts`), every container-kind manifest is synthesized as
+  predicate in `workspaceMerge.ts`), every container-kind manifest is synthesized as
   `state: 'unreachable'`, `lastKnownState` from the map (absent if unknown),
   `containerId: undefined`. Local workspaces and manifests merge exactly as
   today. **Any other docker error still rejects the whole fetch** — a real
