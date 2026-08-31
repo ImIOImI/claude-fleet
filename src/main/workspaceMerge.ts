@@ -36,7 +36,7 @@ export async function mergeWorkspaces(opts: MergeOptions): Promise<Workspace[]> 
   if (dockerDown && !isDaemonConnectError(dockerResult.reason)) throw dockerResult.reason;
   const dockerLive = dockerResult.status === 'fulfilled' ? dockerResult.value : [];
 
-  // ── identical to the previous ipc.ts merge ──────────────────────────────
+  // ── manifest overlay: identical merge logic to ipc.ts ──────────────────────
   const liveById = new Map<string, Workspace>();
   for (const w of [...dockerLive, ...localLive]) if (!liveById.has(w.id)) liveById.set(w.id, w);
   const manifestById = new Map(manifests.map((m) => [m.id, m]));
@@ -67,6 +67,11 @@ export async function mergeWorkspaces(opts: MergeOptions): Promise<Workspace[]> 
       installedLoadouts: m?.installedLoadouts ?? [],
       control: m?.control,
       accessibility: m?.accessibility,
+      // Manifest-only (#268). This projection is field-by-field, so an omitted
+      // field is dropped for every LIVE workspace while the deleted branch
+      // (`...m`) keeps it — the form would then show "Default" for a workspace
+      // that has an override, and saving would silently clear it.
+      terminalRenderer: m?.terminalRenderer,
       createdAt: m?.createdAt ?? w.createdAt,
       lastUsedAt: m?.lastUsedAt ?? w.lastUsedAt
     });

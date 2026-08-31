@@ -107,4 +107,17 @@ describe('mergeWorkspaces', () => {
     expect(after[0].lastKnownState).toBeUndefined();
     expect(lastKnown.get('a')).toBe('paused');
   });
+
+  it('manifest-only terminalRenderer overlay: live workspace inherits manifest override (#268)', async () => {
+    const spec_a = { ...spec('a', 'container'), terminalRenderer: 'webgl' };
+    const live_a = { ...live('a', 'container', 'running') }; // no terminalRenderer
+    const out = await mergeWorkspaces({
+      dockerResult: up([live_a]),
+      localLive: [],
+      manifests: [spec_a],
+      lastKnown: new Map(),
+      privateDir, factoryMirror: MIRROR
+    });
+    expect(out[0]).toMatchObject({ id: 'a', terminalRenderer: 'webgl' });
+  });
 });
