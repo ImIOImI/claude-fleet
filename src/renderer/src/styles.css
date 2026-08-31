@@ -204,6 +204,7 @@ body {
 .ws-chip .dot.running { background: var(--ok); }
 .ws-chip .dot.paused { background: var(--warn); }
 .ws-chip .dot.stopped { background: var(--c3); }
+.ws-chip .dot.unreachable { background: var(--danger); animation: daemonPulse 1.4s ease-in-out infinite; }
 /* Busy: claude actively working — the running dot pulses. */
 .ws-chip .dot.busy { animation: chipBusyPulse 1s ease-in-out infinite; }
 @keyframes chipBusyPulse {
@@ -2089,6 +2090,9 @@ label.setting-title { display: block; cursor: pointer; }
 .ws-chip-group.dragging { opacity: 0.4; }
 .ws-chip-group[draggable='true'] { cursor: grab; }
 .ws-chip-group[draggable='true']:active { cursor: grabbing; }
+/* Unreachable chips (#380): visibly inert, still present + selectable.
+   The border lives on the group element itself (see .ws-chip-group above). */
+.ws-chip-group.unreachable { opacity: 0.55; border-style: dashed; }
 /* The chip + trigger inside the group share the group's border now;
    suppress the chip's own border styling. */
 .ws-chip-group .ws-chip {

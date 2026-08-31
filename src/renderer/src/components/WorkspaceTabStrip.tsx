@@ -8,6 +8,7 @@ import { reorderDragHandlers } from '../dropIngestion';
 import { dotClass } from './chipState';
 import { usePortalMenu } from './portalMenu';
 import { IconCopy, IconEject, IconPause, IconPencil, IconPlay, IconStop, IconTrash } from './menuIcons';
+import { isWarm } from '../fleetTemperature';
 
 /**
  * The chip's status dot. A separate component so the busy pulse can be
@@ -126,13 +127,15 @@ export function WorkspaceTabStrip({
   // Id of the chip currently being dragged (for reorder), null when idle.
   const [dragId, setDragId] = useState<string | null>(null);
 
-  // Top strip = the "warm" fleet: running + paused only (instant switch).
+  // Top strip = the "warm" fleet: running + paused, and unreachable-was-warm
+  // (#380). A daemon flap must not make chips vanish mid-session.
   // "stopped" and "deleted" are the "cold" fleet — they live in the
   // workspace modal's Saved list and need a restart (#21).
-  const live = workspaces.filter((w) => w.state === 'running' || w.state === 'paused');
+  const live = workspaces.filter(isWarm);
   const menuWorkspace = menu ? live.find((w) => w.id === menu.id) ?? null : null;
 
   async function doAction(action: 'start' | 'pause' | 'stop', w: WorkspaceSummary): Promise<void> {
+    if (w.state === 'unreachable') return; // defense in depth — no daemon, no action
     closeMenu();
     try {
       if (action === 'start') {
@@ -161,6 +164,7 @@ export function WorkspaceTabStrip({
       {live.map((w) => {
         // "Busy" = claude actively working in a running workspace (PTY title
         // glyph is a spinner). Drives a pulsing dot + "working…" sub-line.
+        const unreachable = w.state === 'unreachable';
         const busy = w.state === 'running' && busyByWorkspace[w.id] === true;
         const waiting = w.state === 'running' && waitingByWorkspace[w.id] === true;
         return (
@@ -168,7 +172,7 @@ export function WorkspaceTabStrip({
           key={w.id}
           className={`ws-chip-group ${w.id === selectedId ? 'active' : ''} ${
             dragId === w.id ? 'dragging' : ''
-          }`}
+          } ${unreachable ? 'unreachable' : ''}`}
           style={{ ['--hue' as never]: colorFor(w) }}
           draggable
           {...reorderDragHandlers({
@@ -210,7 +214,9 @@ export function WorkspaceTabStrip({
                 without showing any visible character.
               */}
               <span className={`ws-chip-sub ${busy || waiting ? 'busy' : ''}`}>
-                {waiting ? 'needs input' : busy ? 'working…' : chipActivityText(summaries[w.id]) ?? ' '}
+                {unreachable
+                  ? `unreachable${w.lastKnownState ? \` · was ${w.lastKnownState}\` : ''}`
+                  : waiting ? 'needs input' : busy ? 'working…' : chipActivityText(summaries[w.id]) ?? ' '}
               </span>
             </span>
             {(isManager(w) || isReachable(w)) && (
@@ -222,19 +228,21 @@ export function WorkspaceTabStrip({
               </span>
             )}
           </button>
-          <button
-            className="ws-chip-menu-trigger"
-            aria-label={`Actions for ${w.name}`}
-            aria-haspopup="menu"
-            aria-expanded={menu?.id === w.id}
-            onClick={(e) => {
-              e.stopPropagation();
-              toggleMenu(e.currentTarget, w.id, 'right');
-            }}
-            title="Workspace actions"
-          >
-            ⋮
-          </button>
+          {!unreachable && (
+            <button
+              className="ws-chip-menu-trigger"
+              aria-label={`Actions for ${w.name}`}
+              aria-haspopup="menu"
+              aria-expanded={menu?.id === w.id}
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleMenu(e.currentTarget, w.id, 'right');
+              }}
+              title="Workspace actions"
+            >
+              ⋮
+            </button>
+          )}
         </div>
         );
       })}
