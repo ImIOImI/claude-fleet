@@ -72,8 +72,11 @@ test('daemon down: banner, inert chip, gated create, recovery', async () => {
     // The hint text appears next to the disabled radio.
     await expect(window.locator('.kind-hint')).toContainText('needs Docker — daemon unreachable');
 
-    // Close the modal.
-    await window.keyboard.press('Escape');
+    // Close the modal via the form's Cancel button — Escape only dismisses the
+    // labels dropdown, not the modal, and a lingering backdrop would swallow
+    // every later click in this test.
+    await window.getByRole('button', { name: 'Cancel' }).click();
+    await expect(window.getByLabel('Workspace name')).toHaveCount(0);
 
     // ── "Add workspace" button is ENABLED while docker is down ───────────────
     // The button always allows opening the modal; gating happens inside the
