@@ -1273,7 +1273,11 @@ export function App() {
   );
 
   return (
-    <div className={`app${dragging ? ' dragging' : ''}`}>
+    <div
+      className={`app${dragging ? ' dragging' : ''}${
+        backendReady === false ? ' daemon-down' : ''
+      }`}
+    >
       <WorkspaceTabStrip
         workspaces={workspaces}
         summaries={summaries}

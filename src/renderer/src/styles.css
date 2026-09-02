@@ -101,6 +101,14 @@ body {
   grid-template-columns: 1fr;
   height: 100vh;
 }
+/* Daemon-down banner (#380) sits between the top strip and the body as an
+   extra in-flow row. Without a track for it, grid auto-placement would push
+   the body out of the 1fr row into `auto`, so the banner would swallow all the
+   spare height (worse the larger the window). Add a second `auto` row for the
+   banner while the body keeps 1fr. */
+.app.daemon-down {
+  grid-template-rows: auto auto 1fr auto;
+}
 
 .app-body {
   display: grid;
