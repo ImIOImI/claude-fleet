@@ -124,11 +124,13 @@ import {
   planUsageRows,
   latestAnchorCovering,
   latestLimitHitAnchor,
+  SUMMARY_STALE_GRACE_MS,
 } from './db.js';
 import { foldPlanUsage, type PlanUsageFold } from './planUsage.js';
 import { logError, getLogPath } from './errorLog.js';
 import { broadcastObservabilitySummary } from './observabilityBroadcast.js';
 import { broadcastInputWait } from './inputWaitBroadcast.js';
+import { makeTrailingRebroadcast } from './trailingBroadcast.js';
 import { consumeForWorkspace, pendingSnapshotForWorkspace, recordPendingAttach } from './pendingAttaches.js';
 import { PortForwardManager, type ServingPort } from './portforward.js';
 import { MockServingPorts } from './mockPorts.js';
@@ -838,6 +840,34 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // shared summaries map without polling. A 30s safety poll in App.tsx
   // refreshes relative-time displays and covers any missed event. See
   // `observabilityBroadcast.ts` for why per-target sends are guarded.
+  //
+  // Trailing re-broadcast: the markStale debounce in db.ts lets mid-burst
+  // pushes serve ≤SUMMARY_STALE_GRACE_MS-stale summaries. The last push of a
+  // burst carries stale data, and nothing re-pushes once the grace expires —
+  // the renderer would then wait up to the 30s safety poll for the final
+  // post-burst state. The trailing scheduler fires once per workspace at
+  // grace+250ms after quiescence, by which time the cache has expired and
+  // recomputes fresh. One extra recompute per burst maximum (same storm bound).
+  // Timers are unref'd (matching widthSweep above) so they don't hold the app.
+  const trailingRebroadcast = makeTrailingRebroadcast(
+    SUMMARY_STALE_GRACE_MS + 250,
+    (workspaceId) => {
+      // Timer-driven main-thread work: post-grace this is always a cache-miss
+      // recompute + per-window structured clone, so span it like the ingest
+      // emit below — unspanned recomputes are how #382 stayed hidden.
+      perfSpan(
+        'claude_fleet.observability.trailing_rebroadcast',
+        () => {
+          const summary = summaryForWorkspace(workspaceId);
+          broadcastObservabilitySummary(
+            { workspaceId, summary },
+            BrowserWindow.getAllWindows()
+          );
+        },
+        { workspace_id: workspaceId }
+      );
+    }
+  );
   if (jsonlWatcher) {
     jsonlWatcher.on('ingest', ({ workspaceId }) => {
       // Runs from a watcher emit, not an IPC handler — the generic IPC span
@@ -852,6 +882,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
             { workspaceId, summary },
             BrowserWindow.getAllWindows()
           );
+          // Reset the trailing timer — fires once after quiescence to push the
+          // final fresh state (see comment above makeTrailingRebroadcast).
+          trailingRebroadcast.schedule(workspaceId);
         },
         { workspace_id: workspaceId }
       );
