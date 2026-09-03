@@ -852,10 +852,19 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   const trailingRebroadcast = makeTrailingRebroadcast(
     SUMMARY_STALE_GRACE_MS + 250,
     (workspaceId) => {
-      const summary = summaryForWorkspace(workspaceId);
-      broadcastObservabilitySummary(
-        { workspaceId, summary },
-        BrowserWindow.getAllWindows()
+      // Timer-driven main-thread work: post-grace this is always a cache-miss
+      // recompute + per-window structured clone, so span it like the ingest
+      // emit below — unspanned recomputes are how #382 stayed hidden.
+      perfSpan(
+        'claude_fleet.observability.trailing_rebroadcast',
+        () => {
+          const summary = summaryForWorkspace(workspaceId);
+          broadcastObservabilitySummary(
+            { workspaceId, summary },
+            BrowserWindow.getAllWindows()
+          );
+        },
+        { workspace_id: workspaceId }
       );
     }
   );
