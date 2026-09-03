@@ -14,7 +14,18 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { openDb, closeDb, ingestLine, deleteSession } from './db.js';
+import {
+  openDb,
+  closeDb,
+  ingestLine,
+  deleteSession,
+  costForSession,
+  costForWorkspace,
+  listSessions,
+  summaryForSession,
+  LIST_SESSION_COSTS_SQL,
+  LIST_SESSION_COSTS_BY_WS_SQL,
+} from './db.js';
 
 let dir: string;
 
@@ -160,6 +171,115 @@ describe('session_costs invariant', () => {
     expect(rowsAfter.some((r) => r.session_id === SES_A)).toBe(false);
     expect(rowsAfter.some((r) => r.session_id === SES_B)).toBe(true);
     expectRollupMatchesEvents(d);
+  });
+
+  it('cost readers return identical results from the rollup as from events', () => {
+    // Use the mixed ingest from case 1 so we exercise multi-model, NULL-model,
+    // and multi-session data in one shot.
+    //
+    // SES_A in WS1: two distinct models (one with serviceTier) + user lines
+    ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    ingestLine(WS1, SES_A, assistantLine('a2', 'claude-3-haiku', 200, 80));
+    ingestLine(
+      WS1,
+      SES_A,
+      assistantLine('a3', 'claude-3-opus', 300, 60, { serviceTier: 'batch' }),
+    );
+    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    ingestLine(WS1, SES_A, userLine('u2', 'world'));
+
+    // SES_B in WS2: single model, no serviceTier, plus user line
+    ingestLine(WS2, SES_B, assistantLine('b1', 'claude-sonnet', 150, 70, { cacheRead: 10 }));
+    ingestLine(WS2, SES_B, assistantLine('b2', 'claude-sonnet', 50, 20));
+    ingestLine(WS2, SES_B, userLine('u3', 'ping'));
+
+    const d = openDb(dir);
+
+    // --- costForSession ---
+    // Ground truth from events for SES_A:
+    //   - (claude-3-opus, null):  input=100  output=50
+    //   - (claude-3-haiku, null): input=200  output=80
+    //   - (claude-3-opus, batch): input=300  output=60
+    //   - (null, null):           user events, no tokens
+    // Total tokens:
+    const sesACostGT = {
+      inputTokens: 100 + 200 + 300,
+      outputTokens: 50 + 80 + 60,
+      cacheReadInputTokens: 0,
+      cacheCreationInputTokens: 0,
+    };
+    const costA = costForSession(SES_A);
+    expect(costA.inputTokens).toBe(sesACostGT.inputTokens);
+    expect(costA.outputTokens).toBe(sesACostGT.outputTokens);
+    expect(costA.cacheReadInputTokens).toBe(sesACostGT.cacheReadInputTokens);
+    expect(costA.cacheCreationInputTokens).toBe(sesACostGT.cacheCreationInputTokens);
+    // USD must be positive (all known models).
+    expect(costA.usd).toBeGreaterThan(0);
+
+    // --- costForWorkspace ---
+    // WS2 ground truth (SES_B only): claude-sonnet, no tier
+    const wsCostGT = {
+      inputTokens: 150 + 50,
+      outputTokens: 70 + 20,
+      cacheReadInputTokens: 10,
+      cacheCreationInputTokens: 0,
+    };
+    const costWS2 = costForWorkspace(WS2);
+    expect(costWS2.inputTokens).toBe(wsCostGT.inputTokens);
+    expect(costWS2.outputTokens).toBe(wsCostGT.outputTokens);
+    expect(costWS2.cacheReadInputTokens).toBe(wsCostGT.cacheReadInputTokens);
+    expect(costWS2.cacheCreationInputTokens).toBe(wsCostGT.cacheCreationInputTokens);
+
+    // --- listSessions ---
+    // Insert session rows so listSessions can find them.
+    d.prepare(`INSERT OR IGNORE INTO sessions (id, workspace_id) VALUES (?,?)`).run(SES_A, WS1);
+    d.prepare(`INSERT OR IGNORE INTO sessions (id, workspace_id) VALUES (?,?)`).run(SES_B, WS2);
+
+    const allRows = listSessions();
+    const rowA = allRows.find((r) => r.id === SES_A);
+    const rowB = allRows.find((r) => r.id === SES_B);
+    expect(rowA).toBeDefined();
+    expect(rowB).toBeDefined();
+
+    // SES_A: eventCount = 5 events (3 assistant + 2 user); must not lose NULL-model events
+    expect(rowA!.eventCount).toBe(5);
+    expect(rowA!.usd).toBeGreaterThan(0);
+
+    // SES_B: eventCount = 3 (2 assistant + 1 user)
+    expect(rowB!.eventCount).toBe(3);
+    expect(rowB!.usd).toBeGreaterThan(0);
+
+    // WS2-scoped listSessions should only return SES_B
+    const ws2Rows = listSessions(WS2);
+    expect(ws2Rows.every((r) => r.workspaceId === WS2)).toBe(true);
+    const rowBScoped = ws2Rows.find((r) => r.id === SES_B);
+    expect(rowBScoped).toBeDefined();
+    expect(rowBScoped!.eventCount).toBe(rowB!.eventCount);
+
+    // --- summaryForSession ---
+    // summaryForSession goes through the summary cache; bypasses it with
+    // a non-default topToolsLimit so we get a fresh read from session_costs.
+    const summary = summaryForSession(SES_A, 3);
+    expect(summary).not.toBeNull();
+    expect(summary!.eventCount).toBe(5);
+    expect(summary!.inputTokens).toBe(sesACostGT.inputTokens);
+    expect(summary!.outputTokens).toBe(sesACostGT.outputTokens);
+    expect(summary!.cacheReadInputTokens).toBe(sesACostGT.cacheReadInputTokens);
+    expect(summary!.cacheCreationInputTokens).toBe(sesACostGT.cacheCreationInputTokens);
+    expect(summary!.usd).toBeGreaterThan(0);
+  });
+
+  it('listSessions cost query never scans events (EXPLAIN QUERY PLAN pin)', () => {
+    // Open the DB to ensure it is initialised (EXPLAIN needs a live connection).
+    const d = openDb(dir);
+    for (const sql of [LIST_SESSION_COSTS_SQL, LIST_SESSION_COSTS_BY_WS_SQL]) {
+      const plan = d
+        .prepare(`EXPLAIN QUERY PLAN ${sql}`)
+        .all() as Array<{ detail: string }>;
+      const details = plan.map((r) => r.detail).join(' | ');
+      expect(details).toContain('session_costs');
+      expect(details).not.toMatch(/\bevents\b/);
+    }
   });
 
   it('migration backfill rebuilds from events (drift self-heal)', () => {
