@@ -23,6 +23,7 @@ import {
   costForWorkspace,
   listSessions,
   summaryForSession,
+  _summaryRecomputesForTests,
   LIST_SESSION_COSTS_SQL,
   LIST_SESSION_COSTS_BY_WS_SQL,
 } from './db.js';
@@ -298,5 +299,19 @@ describe('session_costs invariant', () => {
     openDb(dir);
     const d2 = openDb(dir);
     expectRollupMatchesEvents(d2);
+  });
+
+  it('ingest burst with interleaved summary reads recomputes at most twice (debounce end-to-end)', () => {
+    // Prime the cache once.
+    summaryForSession(SES_A);
+    const before = _summaryRecomputesForTests();
+    for (let i = 0; i < 200; i++) {
+      ingestLine(WS1, SES_A, assistantLine(`burst-${i}`, 'claude-3-opus', 10, 5));
+      summaryForSession(SES_A); // the renderer-poll stand-in
+    }
+    // Old policy: ~200 recomputes (every read after every ingest missed).
+    // markStale(3s): the first read after the first markStale horizon may
+    // recompute once; everything else inside the grace window is a hit.
+    expect(_summaryRecomputesForTests() - before).toBeLessThanOrEqual(2);
   });
 });
