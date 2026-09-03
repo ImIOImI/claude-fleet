@@ -19,6 +19,7 @@ import {
   closeDb,
   ingestLine,
   deleteSession,
+  renameSession,
   costForSession,
   costForWorkspace,
   listSessions,
@@ -313,5 +314,28 @@ describe('session_costs invariant', () => {
     // markStale(3s): the first read after the first markStale horizon may
     // recompute once; everything else inside the grace window is a hit.
     expect(_summaryRecomputesForTests() - before).toBeLessThanOrEqual(2);
+  });
+
+  it('renameSession invalidates summary cache (fix for missing invalidate call)', () => {
+    // Ingest some data and prime the summary cache.
+    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    const summaryBefore = summaryForSession(SES_A);
+    expect(summaryBefore).not.toBeNull();
+
+    // Track recomputes: the next summaryForSession call after renameSession
+    // should trigger exactly one recompute (the cache invalidation), proving
+    // that renameSession properly invalidated the cached summary.
+    const recomputesBefore = _summaryRecomputesForTests();
+    renameSession(SES_A, 'new-name');
+    const summaryAfter = summaryForSession(SES_A);
+
+    // Verify the recompute counter increased by exactly 1.
+    expect(_summaryRecomputesForTests() - recomputesBefore).toBe(1);
+    // Verify the summary is still valid (not null).
+    expect(summaryAfter).not.toBeNull();
+    // The summary should remain the same in content (no data changed, just
+    // the user_set_name in the sessions table — which doesn't appear in
+    // WorkspaceSummary but proves the summary was recomputed from fresh DB state).
   });
 });
