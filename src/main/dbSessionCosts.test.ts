@@ -275,9 +275,10 @@ describe('session_costs invariant', () => {
     // Open the DB to ensure it is initialised (EXPLAIN needs a live connection).
     const d = openDb(dir);
     for (const sql of [LIST_SESSION_COSTS_SQL, LIST_SESSION_COSTS_BY_WS_SQL]) {
-      const plan = d
-        .prepare(`EXPLAIN QUERY PLAN ${sql}`)
-        .all() as Array<{ detail: string }>;
+      // LIST_SESSION_COSTS_BY_WS_SQL contains a WHERE workspace_id = ? placeholder;
+      // better-sqlite3 requires the parameter bound even for EXPLAIN QUERY PLAN.
+      const stmt = d.prepare(`EXPLAIN QUERY PLAN ${sql}`);
+      const plan = (sql.includes('?') ? stmt.all('explain-dummy') : stmt.all()) as Array<{ detail: string }>;
       const details = plan.map((r) => r.detail).join(' | ');
       expect(details).toContain('session_costs');
       expect(details).not.toMatch(/\bevents\b/);
