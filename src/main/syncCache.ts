@@ -23,7 +23,10 @@ export function syncKeyedCache<V>(opts: {
   ttlMs?: number;
   now?: () => number;
 }): SyncKeyedCache<V> {
-  const now = opts.now ?? Date.now;
+  // Lazy lambda, not a captured `Date.now` reference: module-level caches are
+  // constructed before test fake-timers install their Date mock, and a
+  // captured reference would keep reading the real clock forever.
+  const now = opts.now ?? ((): number => Date.now());
   const entries = new Map<string, { value: V; at: number; staleAt?: number }>();
   return {
     get(key: string, compute: () => V): V {
