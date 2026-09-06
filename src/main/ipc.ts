@@ -1476,9 +1476,12 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // '' on success, or an error string. Under WSL `shell.openPath` can't reach a
   // GUI file manager (no xdg-open / no Linux file manager), so route through
   // explorer.exe instead. Neither path rejects — callers get a string.
-  ipcMain.handle('fs:openPath', async (_e, path: string) => {
+  // `distro` (wsl-launcher workspaces) marks the path as living inside that
+  // distro, so the Windows app reveals it via \\wsl.localhost\<distro>\… — a
+  // bare Linux path is not resolvable by Explorer (#387).
+  ipcMain.handle('fs:openPath', async (_e, path: string, distro?: string) => {
     if (typeof path !== 'string' || path.length === 0) return 'No path provided';
-    return openHostPath(path);
+    return openHostPath(path, typeof distro === 'string' && distro.length > 0 ? distro : undefined);
   });
 
   // ── Loadout library (#16-followup) ───────────────────────────────────────

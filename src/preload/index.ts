@@ -364,8 +364,11 @@ const api = {
   fs: {
     isDirectory: (path: string): Promise<boolean> => ipcRenderer.invoke('fs:isDirectory', path),
     mkdirp: (path: string): Promise<void> => ipcRenderer.invoke('fs:mkdirp', path),
-    /** Reveal a host path in the OS file manager. Resolves '' on success, else an error string. */
-    openPath: (path: string): Promise<string> => ipcRenderer.invoke('fs:openPath', path)
+    /** Reveal a host path in the OS file manager. Resolves '' on success, else an error string.
+     *  `distro` names the WSL distro a Linux path lives in (wsl-launcher
+     *  workspaces); omit it for ordinary host paths. */
+    openPath: (path: string, distro?: string): Promise<string> =>
+      ipcRenderer.invoke('fs:openPath', path, distro)
   },
   files: {
     /**
