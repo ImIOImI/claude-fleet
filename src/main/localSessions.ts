@@ -11,6 +11,7 @@
 
 import { Duplex } from 'node:stream';
 import type { PtyHandle } from './docker.js';
+import type { Harness } from './workspaces.js';
 
 /** Minimal PTY-process shape the manager needs. node-pty's IPty satisfies it
  *  (wrapped in local.ts); tests supply a fake. */
@@ -142,6 +143,9 @@ export interface AttachOpts {
    *  inject a stub script path when CLAUDE_FLEET_LOCAL_CLAUDE_BIN is an
    *  interpreter (e.g. `node`) rather than a self-contained binary. */
   extraArgs?: string[];
+  /** Which harness drives this workspace. Absent = 'claude-code'. qwen-code is
+   *  not yet supported for local workspaces (binary resolution deferred to Task 5). */
+  harness?: Harness;
   spawn: SpawnPty;
 }
 
@@ -152,6 +156,9 @@ export interface AttachOpts {
  * `claude`), while `stop`/`remove` (via killWorkspaceSessions) end it.
  */
 export function attachLocalSession(opts: AttachOpts): PtyHandle {
+  if (opts.harness === 'qwen-code') {
+    throw new Error('qwen-code harness is not yet supported for local workspaces');
+  }
   const key = sessionKey(opts.workspaceId, opts.sessionId);
   let session = sessions.get(key);
 

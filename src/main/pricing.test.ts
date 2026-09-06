@@ -99,3 +99,27 @@ describe('costFor', () => {
     expect(prio).toBeCloseTo(std, 6);
   });
 });
+
+describe('qwen endpoints are unpriced', () => {
+  const ZERO = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadInputTokens: 0,
+    cacheCreationInputTokens: 0,
+  };
+
+  it('familyFor(qwen) is null', () => {
+    expect(familyFor('qwen3-coder:30b')).toBeNull();
+  });
+
+  it('costFor(qwen) is 0 (renders — in UI)', () => {
+    expect(
+      costFor('qwen3-coder:30b', 'standard', {
+        inputTokens: 1_000_000,
+        outputTokens: 1_000_000,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 0,
+      }),
+    ).toBe(0);
+  });
+});

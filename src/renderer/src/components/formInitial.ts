@@ -35,6 +35,7 @@ export function workspaceToFormInitial(
     image: w.image,
     authMode: w.authMode,
     endpointId: w.endpointId,
+    harness: w.harness,
     plainEnv: w.env.plain,
     secretKeys: w.env.secretKeys,
     resources: w.resources,

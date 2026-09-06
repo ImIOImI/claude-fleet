@@ -61,6 +61,7 @@ export async function mergeWorkspaces(opts: MergeOptions): Promise<Workspace[]> 
       workspaceSubdir: w.workspaceSubdir || m?.workspaceSubdir || '',
       authMode: m?.authMode ?? w.authMode,
       endpointId: m?.endpointId,
+      harness: m?.harness,
       env: m?.env ?? w.env,
       resources: m?.resources,
       mirror: m?.mirror ?? factoryMirror,

@@ -14,7 +14,7 @@
 import { app } from 'electron';
 import Docker from 'dockerode';
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Writable, type Duplex } from 'node:stream';
 import {
   assertValidWorkspaceId,
@@ -26,8 +26,8 @@ import {
   workspaceClaudeJsonPath,
   workspaceStateDir
 } from './paths.js';
-import type { AuthMode, Workspace, WorkspaceEnv, WorkspaceResources, WorkspaceKind } from './workspaces.js';
-import { FACTORY_MIRROR } from './workspaces.js';
+import type { AuthMode, Harness, Workspace, WorkspaceEnv, WorkspaceResources, WorkspaceKind } from './workspaces.js';
+import { FACTORY_MIRROR, readWorkspaceManifest } from './workspaces.js';
 import { fleetPrivateDir, fleetSharedDir } from './config.js';
 import {
   mcpWorkspaceSocketDir,
@@ -45,7 +45,7 @@ import { logError } from './errorLog.js';
 import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
 import { resolveEnv } from './vault.js';
 import { endpointEnv } from './endpoints.js';
-import { claudeCreateArgs } from './claudeArgs.js';
+import { harnessCreateArgs } from './harnessArgs.js';
 import { injectAndSubmit } from './ptyInput.js';
 import { perfSpan, perfSpanAsync, perfSetSpanContext } from './perf.js';
 import { pullErrorFromEvent, needsRecreateForImage, shouldCheckResumeImage } from './imagePull.js';
@@ -56,6 +56,8 @@ export const NAME_LABEL = 'com.claude-fleet.name';
 export const SUBDIR_LABEL = 'com.claude-fleet.subdir';
 export const WORKSPACE_ROOT_LABEL = 'com.claude-fleet.workspace-root';
 export const RUNNER_IMAGE = 'ghcr.io/imioimi/claude-fleet/runner:latest';
+/** Variant runner image for qwen-code harness workspaces. Carries `qwen` CLI + `socat`. */
+export const QWEN_RUNNER_IMAGE = 'ghcr.io/imioimi/claude-fleet/runner-qwen:latest';
 
 const docker = new Docker();
 
@@ -148,6 +150,8 @@ export interface CreateWorkspaceInput {
    *  (<userData>/endpoints.json). A REFERENCE — resolved live at container
    *  create / local spawn, so registry edits apply on next start (#250). */
   endpointId?: string;
+  /** authMode 'endpoint' only: which harness drives this workspace. Absent = 'claude-code'. */
+  harness?: Harness;
   /**
    * Workspace kind. The Docker backend only ever sees `'container'`; the local
    * backend (#16) uses `'local'`. Optional + defaulted so existing callers and
@@ -527,6 +531,62 @@ export async function ensureWorkspaceClaudeJson(
   return filePath;
 }
 
+/**
+ * Pure helper: the MCP server object to seed into a qwen-code workspace's
+ * `~/.qwen/settings.json`. Unlike claude-code (which uses a reconnecting node
+ * bridge because its PTY persists across app restarts), qwen-code is short-lived
+ * per invocation — a direct `socat` stdio bridge is sufficient. Identity is
+ * ambient from the bind-mounted per-workspace socket path (#117).
+ */
+export function qwenSettingsContent(): object {
+  return {
+    mcpServers: {
+      'claude-fleet-state': {
+        command: 'socat',
+        args: ['-', `UNIX-CONNECT:${CONTAINER_MCP_SOCKET}`]
+      }
+    }
+  };
+}
+
+/**
+ * Ensure the per-workspace `~/.qwen/settings.json` seed exists, bind-mounted
+ * at `/home/fleet/.qwen/settings.json`. Mirrors the `ensureWorkspaceClaudeJson`
+ * pattern: seeds on first create, reconciles the managed `mcpServers` entry on
+ * every subsequent call, leaves everything else byte-for-byte.
+ *
+ * Only called for `harness === 'qwen-code'` workspaces; the bind mount is
+ * wired in `createWorkspaceInner`.
+ */
+export async function seedQwenSettings(id: string): Promise<string> {
+  const filePath = join(workspaceStateDir(id), 'qwen-settings.json');
+  await mkdir(dirname(filePath), { recursive: true });
+  const desired = qwenSettingsContent();
+  const existing = await readFile(filePath, 'utf8').catch(() => null);
+  if (existing === null) {
+    await writeFile(filePath, JSON.stringify(desired, null, 2), 'utf8');
+    return filePath;
+  }
+  // File exists. Reconcile ONLY our managed mcpServers entry; leave every other
+  // key byte-for-byte. Tolerate a malformed file — qwen will rewrite it.
+  try {
+    const parsed = JSON.parse(existing) as {
+      mcpServers?: Record<string, unknown>;
+    };
+    const current = parsed.mcpServers?.['claude-fleet-state'];
+    if (JSON.stringify(current) !== JSON.stringify((desired as { mcpServers: Record<string, unknown> }).mcpServers['claude-fleet-state'])) {
+      parsed.mcpServers = {
+        ...(parsed.mcpServers ?? {}),
+        'claude-fleet-state': (desired as { mcpServers: Record<string, unknown> }).mcpServers['claude-fleet-state']
+      };
+      await writeFile(filePath, JSON.stringify(parsed, null, 2), 'utf8');
+    }
+  } catch {
+    /* malformed qwen settings — leave it untouched */
+  }
+  return filePath;
+}
+
 export function createWorkspace(spec: CreateWorkspaceInput): Promise<Workspace> {
   return perfSpanAsync('claude_fleet.docker.create', () => createWorkspaceInner(spec), { workspace_id: spec.id });
 }
@@ -549,7 +609,7 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
   const uid = process.getuid?.() ?? 1000;
   const gid = process.getgid?.() ?? 1000;
 
-  const image = spec.image?.trim() || RUNNER_IMAGE;
+  const image = spec.image?.trim() || (spec.harness === 'qwen-code' ? QWEN_RUNNER_IMAGE : RUNNER_IMAGE);
   // Resolve secrets at create-time; the merged env goes straight to the
   // container's `Env` array. Missing secret keys resolve to empty string
   // so the container still starts (claude itself surfaces the failure
@@ -558,8 +618,33 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
   // contract (ANTHROPIC_BASE_URL/AUTH_TOKEN/MODEL/…, #250). Spread FIRST so
   // explicit workspace env still overrides it. Resolved live — registry
   // edits/key rotation apply on next create.
-  const backendVars = spec.authMode === 'endpoint' ? await endpointEnv(spec.endpointId) : {};
+  const backendVars = spec.authMode === 'endpoint' ? await endpointEnv(spec.endpointId, spec.harness) : {};
   const resolvedEnv = { ...backendVars, ...(await resolveEnv(spec.id, spec.env.plain, spec.env.secretKeys)) };
+  if (spec.harness === 'qwen-code') {
+    resolvedEnv.CLAUDE_FLEET_BROKER_CLAUDE = 'qwen';
+    // Sidecar env vars — tell the transcript sidecar where qwen writes its chat
+    // logs and where to emit the mapped claude-dialect JSONL for the host watcher.
+    //
+    // CF_QWEN_PROJECTS_DIR: the qwen projects root. The sidecar scans all immediate
+    // subdirectories of this root for a `chats/` child and watches every *.jsonl it
+    // finds there. This avoids assuming the sanitized CWD name (previously hardcoded
+    // as '-workspace') — if qwen's encodeProjectDir rule differs from claude's, or the
+    // workspace has a non-empty subdir, discovery still finds the files.
+    //
+    // CF_QWEN_CHATS_DIR: kept as an optional exact-chats-dir hint for back-compat.
+    // The sidecar treats it as one additional chats dir on top of the discovered ones.
+    // We still set it to the expected path so a sidecar from an older image (pre-discovery)
+    // continues to work without an image rebuild.
+    //
+    // CF_FLEET_PROJECTS_DIR: the claudeDir bind mounts <userData>/state/<id>/.claude
+    // at /home/fleet/.claude (see `binds` below: `${claudeDir}:/home/fleet/.claude:rw`).
+    // The host chokidar watcher watches <userData>/state/<id>/.claude/projects/-workspace/
+    // (PROJECTS_SUBDIR in jsonlWatcher.ts), which is the in-container path
+    // /home/fleet/.claude/projects/-workspace/. The sidecar appends to <sid>.jsonl there.
+    resolvedEnv.CF_QWEN_PROJECTS_DIR = '/home/fleet/.qwen/projects';
+    resolvedEnv.CF_QWEN_CHATS_DIR = '/home/fleet/.qwen/projects/-workspace/chats';
+    resolvedEnv.CF_FLEET_PROJECTS_DIR = '/home/fleet/.claude/projects/-workspace';
+  }
   const envArr = ['HOME=/home/fleet', ...Object.entries(resolvedEnv).map(([k, v]) => `${k}=${v}`)];
   // Windows: tell the broker to listen on loopback TCP instead of a unix
   // socket. The host connects via the published 127.0.0.1:<hostPort>.
@@ -632,6 +717,14 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
     binds.push(`${sharedCreds}:/home/fleet/.claude/.credentials.json:rw`);
     const sharedRemoteSettings = await ensureSharedRemoteSettingsFile();
     binds.push(`${sharedRemoteSettings}:/home/fleet/.claude/remote-settings.json:rw`);
+  }
+
+  // qwen-code workspaces: seed ~/.qwen/settings.json with the fleet-state MCP
+  // entry (socat direct bridge — no reconnect loop needed; qwen is short-lived
+  // per invocation). Bind-mounted as a file, like ~/.claude.json above.
+  if (spec.harness === 'qwen-code') {
+    const qwenSettings = await seedQwenSettings(spec.id);
+    binds.push(`${qwenSettings}:/home/fleet/.qwen/settings.json:rw`);
   }
 
   const hostCfg: Docker.HostConfig = {
@@ -955,6 +1048,9 @@ async function attachPtyInner(
   }
   perfSetSpanContext({ workspaceId });
 
+  const manifest = await readWorkspaceManifest(workspaceId);
+  const harness = manifest?.harness;
+
   const endpoint = brokerEndpointFromInfo(workspaceId, info);
   const client = new BrokerClient(endpoint);
   try {
@@ -1044,7 +1140,7 @@ async function attachPtyInner(
       sessionId,
       cols,
       rows,
-      claudeCreateArgs(resumeOf, claudeSessionId)
+      harnessCreateArgs(harness, resumeOf, claudeSessionId)
     );
     if (!createResp.ok) {
       stream.destroy();

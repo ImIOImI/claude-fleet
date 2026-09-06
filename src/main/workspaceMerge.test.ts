@@ -56,6 +56,30 @@ describe('mergeWorkspaces', () => {
     expect(lastKnown.has('l')).toBe(false);                // container-kind only
   });
 
+  // The live-workspace overlay is field-by-field, so a manifest-only field is
+  // dropped unless it is listed explicitly (#358 moved `harness` here when
+  // workspace:list stopped inlining its own overlay).
+  it('carries manifest-only `harness` onto a LIVE workspace', async () => {
+    const m = { ...spec('q', 'container'), authMode: 'endpoint', harness: 'qwen-code' } as WorkspaceSpec;
+    const out = await mergeWorkspaces({
+      dockerResult: up([live('q', 'container', 'running')]),
+      localLive: [],
+      manifests: [m],
+      lastKnown: new Map(), privateDir, factoryMirror: MIRROR
+    });
+    expect(out.find((w) => w.id === 'q')?.harness).toBe('qwen-code');
+  });
+
+  it('leaves `harness` undefined for a claude-code workspace (absent ⇒ default)', async () => {
+    const out = await mergeWorkspaces({
+      dockerResult: up([live('c', 'container', 'running')]),
+      localLive: [],
+      manifests: [spec('c', 'container')],
+      lastKnown: new Map(), privateDir, factoryMirror: MIRROR
+    });
+    expect(out.find((w) => w.id === 'c')?.harness).toBeUndefined();
+  });
+
   it('daemon down: container manifests become unreachable with lastKnownState', async () => {
     const lastKnown = new Map<string, WorkspaceState>([['a', 'running'], ['p', 'paused']]);
     const out = await mergeWorkspaces({
