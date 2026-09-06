@@ -21,7 +21,7 @@ import { workspaceManifestPath, stateRoot } from './paths.js';
 import type { WorkspaceLauncher } from './localLauncher.js';
 import type { TerminalRenderer } from './config.js';
 
-export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
+export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted' | 'unreachable';
 
 /**
  * Today: 'container' is a Docker container backend; 'local' is a planned
@@ -271,6 +271,9 @@ export interface Workspace extends WorkspaceSpec {
   // Present iff there's a live backend (container) for this workspace.
   containerId?: string;
   status?: string;
+  /** Docker daemon down (#380): the state this workspace last had while the
+   *  daemon was reachable. Present only on state:'unreachable' rows. */
+  lastKnownState?: 'running' | 'paused' | 'stopped' | 'deleted';
 }
 
 /**

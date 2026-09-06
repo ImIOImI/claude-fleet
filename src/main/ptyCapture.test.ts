@@ -7,10 +7,16 @@ import { createPtyCapture, captureDir } from './ptyCapture';
 let dir: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'ptycap-'));
+  // Clear on the way IN as well as out: "off by default" must assert the
+  // code's default, not the developer's shell. A machine that happens to have
+  // this exported (e.g. mid-investigation) failed this test spuriously.
+  delete process.env.CLAUDE_FLEET_CAPTURE_PTY;
+  delete process.env.CLAUDE_FLEET_CAPTURE_PTY_MAX_MB;
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
   delete process.env.CLAUDE_FLEET_CAPTURE_PTY;
+  delete process.env.CLAUDE_FLEET_CAPTURE_PTY_MAX_MB;
 });
 
 const base = { handleId: 'h1', workspaceId: 'ws1', brokerSessionId: 'bs1', cols: 107, rows: 45 };
@@ -37,6 +43,17 @@ describe('ptyCapture (#268 diagnostics)', () => {
 
   it('is off when the env var is empty or whitespace', () => {
     process.env.CLAUDE_FLEET_CAPTURE_PTY = '   ';
+    expect(captureDir()).toBeNull();
+    expect(createPtyCapture({ ...base })).toBeNull();
+  });
+
+  it('ignores a path that is not absolute on this platform', () => {
+    // A Windows path on POSIX is a legal relative filename with backslashes,
+    // so this would otherwise create `./C:\\Users\\…` wherever the app was
+    // started — which is exactly how capture files ended up inside a git
+    // checkout during the #268 investigation.
+    process.env.CLAUDE_FLEET_CAPTURE_PTY =
+      process.platform === 'win32' ? 'relative\\path' : 'C:\\Users\\Someone\\ptycap';
     expect(captureDir()).toBeNull();
     expect(createPtyCapture({ ...base })).toBeNull();
   });
@@ -134,5 +151,37 @@ describe('ptyCapture (#268 diagnostics)', () => {
     expect(files).toHaveLength(1);
     expect(files[0]).not.toContain('/');
     expect(files[0]).not.toContain('..');
+  });
+});
+
+// #268: capture is configurable from Settings, not only by env var. The env
+// var must still win so the e2e suite can drive it without touching config.
+describe('captureDir precedence (Settings vs env)', () => {
+  it('uses the configured directory when no env var is set', () => {
+    expect(captureDir(dir)).toBe(dir);
+  });
+
+  it('is off when neither is set', () => {
+    expect(captureDir(null)).toBeNull();
+    expect(captureDir('')).toBeNull();
+    expect(captureDir('   ')).toBeNull();
+  });
+
+  it('env var wins over the configured directory', () => {
+    process.env.CLAUDE_FLEET_CAPTURE_PTY = dir;
+    expect(captureDir('/some/other/place')).toBe(dir);
+  });
+
+  it('rejects a configured path that is not absolute', () => {
+    const rel = process.platform === 'win32' ? 'relative\\path' : 'C:\\Users\\X\\cap';
+    expect(captureDir(rel)).toBeNull();
+  });
+
+  it('createPtyCapture arms from configuredDir alone', async () => {
+    const cap = createPtyCapture({ ...base, dir: undefined, configuredDir: dir })!;
+    expect(cap).not.toBeNull();
+    cap.close();
+    const ev = await readCapture(dir);
+    expect(ev[0]).toMatchObject({ k: 'open' });
   });
 });

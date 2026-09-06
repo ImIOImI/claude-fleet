@@ -23,7 +23,7 @@
 // line-oriented and binary-safe.
 
 import { createWriteStream, mkdirSync, type WriteStream } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { logError } from './errorLog.js';
 
 /** Per-session cap so a long-running capture can't fill the disk. Override
@@ -47,12 +47,37 @@ export interface PtyCaptureOpts {
   /** Injectable for tests. */
   now?: () => number;
   dir?: string;
+  /** Settings-configured capture dir; the env var still takes precedence. */
+  configuredDir?: string | null;
   maxBytes?: number;
 }
 
-export function captureDir(): string | null {
-  const d = process.env.CLAUDE_FLEET_CAPTURE_PTY;
-  return d && d.trim() ? d.trim() : null;
+/**
+ * Where to capture, or null when off. The env var wins so the e2e suite can
+ * drive it without touching config; otherwise the Settings value is used.
+ * `configured` is passed in rather than read here so this module stays free of
+ * the config cache and remains synchronous.
+ */
+export function captureDir(configured?: string | null): string | null {
+  const d = process.env.CLAUDE_FLEET_CAPTURE_PTY ?? configured ?? '';
+  if (!d || !d.trim()) return null;
+  const dir = d.trim();
+  // Must be absolute FOR THIS PLATFORM. A Windows-style path on POSIX is a
+  // perfectly legal *relative filename* containing backslashes, so mkdir
+  // happily creates `./C:\Users\…` next to the cwd instead of failing —
+  // which is how a stray env var scattered capture files through a git
+  // checkout (and produced a path Windows then refused to check out).
+  if (!isAbsolute(dir)) {
+    logError({
+      source: 'main',
+      type: 'pty-capture-bad-dir',
+      level: 'warn',
+      message: `CLAUDE_FLEET_CAPTURE_PTY must be an absolute path on this platform; ignoring ${JSON.stringify(dir)}`,
+      extra: { dir, platform: process.platform }
+    });
+    return null;
+  }
+  return dir;
 }
 
 function maxBytesFromEnv(): number {
@@ -76,7 +101,7 @@ function safe(part: string): string {
 /** Returns null when capture is off, or if the sink can't be opened — a
  *  diagnostic must never take the terminal down with it. */
 export function createPtyCapture(opts: PtyCaptureOpts): PtyCapture | null {
-  const dir = opts.dir ?? captureDir();
+  const dir = opts.dir ?? captureDir(opts.configuredDir);
   if (!dir) return null;
 
   const now = opts.now ?? Date.now;

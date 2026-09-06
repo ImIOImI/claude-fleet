@@ -23,6 +23,7 @@ import { ModalBackdrop } from './ModalBackdrop';
 import { makeToast } from '../toasts';
 import { readyToRefresh } from './refreshQueue';
 import { reorderDragHandlers } from '../dropIngestion';
+import { resolveTabBusy } from '../sessionStatusMerge';
 import { useBlinkSync } from '../blinkSync';
 import { usePortalMenu } from './portalMenu';
 import { IconAuto, IconEject, IconPencil, IconRefresh } from './menuIcons';
@@ -162,6 +163,11 @@ interface Props {
   onRefreshUnresolved?: (sessionName: string) => void;
   /** Claude session UUIDs blocked on AskUserQuestion — drives waiting indicators (Task 7). */
   waitingSessionIds?: Set<string>;
+  /** Peer-reconciled busy *claude* session UUIDs (#371) — the same set the
+   *  workspace chip and Sessions list use, so the tab dot agrees with them.
+   *  The raw title glyph governs only tabs whose broker→claude mapping is not
+   *  yet resolved. */
+  busySessionIds?: Set<string>;
 }
 
 function contextBarPct(summary: WorkspaceObservabilitySummary | null): number {
@@ -222,7 +228,8 @@ export function TerminalPane({
   onReloadStarted,
   onRefreshRequested,
   onRefreshUnresolved,
-  waitingSessionIds
+  waitingSessionIds,
+  busySessionIds
 }: Props) {
   // Transient `[committee]` toast (#123): show the injected message briefly so a
   // human watching this expert knows why text just appeared, then auto-dismiss.
@@ -720,6 +727,13 @@ export function TerminalPane({
           const ended = endedIds.has(s.id);
           const claudeId = claudeIdByBroker.get(s.id);
           const tabWaiting = !!claudeId && (waitingSessionIds?.has(claudeId) ?? false);
+          // Busy dot on the same peer-reconciled set as the chip + Sessions list
+          // (#371); the raw glyph governs only until the broker→claude mapping
+          // resolves. When App hasn't supplied the reconciled set yet, fall back
+          // to the glyph so we never regress to a dark dot.
+          const tabBusy = busySessionIds
+            ? resolveTabBusy(claudeId, s.id, busySessionIds, busyIds)
+            : busyIds.has(s.id);
           return (
             <div
               key={s.id}
@@ -738,7 +752,7 @@ export function TerminalPane({
                 onReorder: reorderSessions
               })}
             >
-              <SessionTabDot ended={ended} busy={busyIds.has(s.id)} waiting={tabWaiting} />
+              <SessionTabDot ended={ended} busy={tabBusy} waiting={tabWaiting} />
               {renamingId === s.id ? (
                 <input
                   className="session-tab-rename"

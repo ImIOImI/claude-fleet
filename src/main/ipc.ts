@@ -20,6 +20,11 @@ import {
   getHardwareAccelDisabled,
   getTerminalRenderer,
   setTerminalRenderer,
+  getCapturePty,
+  setCapturePty,
+  getCaptureEnabled,
+  setCaptureEnabled,
+  getEffectiveCaptureDir,
   resolveTerminalRenderer,
   type TerminalRenderer,
   setHardwareAccelDisabled,
@@ -120,11 +125,13 @@ import {
   planUsageRows,
   latestAnchorCovering,
   latestLimitHitAnchor,
+  SUMMARY_STALE_GRACE_MS,
 } from './db.js';
 import { foldPlanUsage, type PlanUsageFold } from './planUsage.js';
 import { logError, getLogPath } from './errorLog.js';
 import { broadcastObservabilitySummary } from './observabilityBroadcast.js';
 import { broadcastInputWait } from './inputWaitBroadcast.js';
+import { makeTrailingRebroadcast } from './trailingBroadcast.js';
 import { consumeForWorkspace, pendingSnapshotForWorkspace, recordPendingAttach } from './pendingAttaches.js';
 import { PortForwardManager, type ServingPort } from './portforward.js';
 import { MockServingPorts } from './mockPorts.js';
@@ -132,6 +139,7 @@ import { brokerEndpoint } from './docker.js';
 import { BrokerClient } from './broker.js';
 import { MCP_TCP_PORT } from './mcpSocket.js';
 import { injectAndSubmit } from './ptyInput.js';
+import { mergeWorkspaces } from './workspaceMerge.js';
 
 export const MOCK_MODE = process.env.CLAUDE_FLEET_MOCK === '1';
 
@@ -354,79 +362,42 @@ interface WorkspaceCreatePayload {
   mirror?: WorkspaceMirror;
 }
 
+// Last-known container states for daemon-down synthesis (#380). In-memory
+// only, by design: after an app restart while the daemon is down we cannot
+// distinguish running from stopped, so everything unreachable lands cold.
+const lastKnownStates = new Map<string, Workspace['state']>();
+
+// e2e-only (mock mode): forces the docker half down without touching the
+// mock backend, which serves BOTH backends in mock mode.
+let e2eDockerDown = false;
+
 /**
  * Merge the live-workspace list (from the backend) with on-disk manifests
- * (from workspaces.ts) into a single Workspace[]. Live entries take
- * precedence for state/status; manifests provide the user-facing fields
- * (description/labels/color/env/etc.) that don't live on the container.
+ * (from workspaces.ts) into a single Workspace[]. Delegates to mergeWorkspaces
+ * in workspaceMerge.ts, which handles the full overlay including degraded
+ * synthesis when the docker daemon is unreachable (#380).
  */
 async function fetchAllWorkspaces(): Promise<Workspace[]> {
-  const [dockerLive, localLive, manifests] = await Promise.all([
-    dockerBackend.listLiveWorkspaces(),
-    localBackend.listLiveWorkspaces(),
+  const dockerPromise: Promise<Workspace[]> = e2eDockerDown
+    ? Promise.reject(Object.assign(new Error('docker daemon down (e2e)'), { code: 'ECONNREFUSED' }))
+    : dockerBackend.listLiveWorkspaces();
+  const [dockerResult, localLive, manifests] = await Promise.all([
+    dockerPromise.then(
+      (value): PromiseSettledResult<Workspace[]> => ({ status: 'fulfilled', value }),
+      (reason): PromiseSettledResult<Workspace[]> => ({ status: 'rejected', reason })
+    ),
+    // In mock mode both backends are the same module; when e2e forces the
+    // docker half down, container-kind mocks must not sneak back in as live
+    // through the local half.
+    localBackend.listLiveWorkspaces().then((ws) => (e2eDockerDown ? ws.filter((w) => w.kind === 'local') : ws)),
     listWorkspaceManifests()
   ]);
-  // Dedup by id: real backends return disjoint sets (a workspace is on exactly
-  // one), so this is a no-op there; in mock mode both `dockerBackend` and
-  // `localBackend` are the same mock module, so this collapses the duplicate.
-  const liveById = new Map<string, Workspace>();
-  for (const w of [...dockerLive, ...localLive]) if (!liveById.has(w.id)) liveById.set(w.id, w);
-  const live = [...liveById.values()];
-  const manifestById = new Map(manifests.map((m) => [m.id, m]));
-  const result: Workspace[] = [];
-
-  for (const w of live) {
-    const m = manifestById.get(w.id);
-    result.push({
-      ...w,
-      // Manifest is authoritative for user-facing fields; container labels
-      // only carry id/name/subdir/workspaceRoot.
-      name: m?.name ?? w.name,
-      description: m?.description,
-      labels: m?.labels ?? w.labels,
-      color: m?.color,
-      // Container: workspaceRoot is always the canonical private folder derived
-      // from the fleet root + id — never trust stale labels/manifests (a
-      // container created before the fleet-root migration still carries the old
-      // path). Local: the user picked an existing host dir, so honor the
-      // manifest's workspaceRoot (#16).
-      workspaceRoot:
-        w.kind === 'local'
-          ? m?.workspaceRoot ?? w.workspaceRoot
-          : await fleetPrivateDir(w.id),
-      workspaceSubdir: w.workspaceSubdir || m?.workspaceSubdir || '',
-      authMode: m?.authMode ?? w.authMode,
-      endpointId: m?.endpointId,
-      harness: m?.harness,
-      env: m?.env ?? w.env,
-      resources: m?.resources,
-      mirror: m?.mirror ?? FACTORY_MIRROR,
-      // Installed loadouts live only on the manifest (#16-followup) — carry
-      // them onto the merged workspace so the Library can show installed state.
-      installedLoadouts: m?.installedLoadouts ?? [],
-      // Committee grants/opt-in live only on the manifest (#118) — carry them
-      // through so chips show the manager/wifi glyphs and the grant matrix
-      // reflects current state.
-      control: m?.control,
-      accessibility: m?.accessibility,
-      createdAt: m?.createdAt ?? w.createdAt,
-      lastUsedAt: m?.lastUsedAt ?? w.lastUsedAt
-    });
-    manifestById.delete(w.id);
-  }
-
-  // Manifests with no live container → deleted (recoverable from spec).
-  // Local workspaces keep their user-picked workspaceRoot; only containers get
-  // the canonical `<fleetRoot>/<id>` (see the live-merge branch above).
-  for (const m of manifestById.values()) {
-    result.push({
-      ...m,
-      workspaceRoot: m.kind === 'local' ? m.workspaceRoot : await fleetPrivateDir(m.id),
-      state: 'deleted'
-    });
-  }
-
-  return result;
+  return mergeWorkspaces({
+    dockerResult, localLive, manifests,
+    lastKnown: lastKnownStates,
+    privateDir: fleetPrivateDir,
+    factoryMirror: FACTORY_MIRROR
+  });
 }
 
 // The merged list is the hot path behind workspace:list (the renderer's 5s
@@ -459,6 +430,9 @@ function invalidateWorkspaceList(): void {
 async function committeePause(callerId: string, targetId: string): Promise<{ id: string; paused: true }> {
   await assertControl(callerId, targetId, 'pause');
   const target = (await listAllWorkspaces()).find((w) => w.id === targetId);
+  if (target?.state === 'unreachable') {
+    throw new Error(`Docker daemon unreachable — target ${targetId} cannot be paused until it's back`);
+  }
   if (!target?.containerId) {
     throw new Error(`target ${targetId} has no live container to pause`);
   }
@@ -472,6 +446,12 @@ async function committeePause(callerId: string, targetId: string): Promise<{ id:
 async function committeeUnpause(callerId: string, targetId: string): Promise<{ id: string; running: true }> {
   await assertControl(callerId, targetId, 'pause');
   const kind = await resolveKind(targetId);
+  if (kind !== 'local') {
+    const t = (await listAllWorkspaces()).find((w) => w.id === targetId);
+    if (t?.state === 'unreachable') {
+      throw new Error(`Docker daemon unreachable — target ${targetId} cannot be unpaused until it's back`);
+    }
+  }
   const containerId = await backendForKind(kind).startWorkspace(targetId);
   if (!containerId) {
     throw new Error(`target ${targetId} has no container to unpause (it may need recreation)`);
@@ -832,6 +812,34 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // shared summaries map without polling. A 30s safety poll in App.tsx
   // refreshes relative-time displays and covers any missed event. See
   // `observabilityBroadcast.ts` for why per-target sends are guarded.
+  //
+  // Trailing re-broadcast: the markStale debounce in db.ts lets mid-burst
+  // pushes serve ≤SUMMARY_STALE_GRACE_MS-stale summaries. The last push of a
+  // burst carries stale data, and nothing re-pushes once the grace expires —
+  // the renderer would then wait up to the 30s safety poll for the final
+  // post-burst state. The trailing scheduler fires once per workspace at
+  // grace+250ms after quiescence, by which time the cache has expired and
+  // recomputes fresh. One extra recompute per burst maximum (same storm bound).
+  // Timers are unref'd (matching widthSweep above) so they don't hold the app.
+  const trailingRebroadcast = makeTrailingRebroadcast(
+    SUMMARY_STALE_GRACE_MS + 250,
+    (workspaceId) => {
+      // Timer-driven main-thread work: post-grace this is always a cache-miss
+      // recompute + per-window structured clone, so span it like the ingest
+      // emit below — unspanned recomputes are how #382 stayed hidden.
+      perfSpan(
+        'claude_fleet.observability.trailing_rebroadcast',
+        () => {
+          const summary = summaryForWorkspace(workspaceId);
+          broadcastObservabilitySummary(
+            { workspaceId, summary },
+            BrowserWindow.getAllWindows()
+          );
+        },
+        { workspace_id: workspaceId }
+      );
+    }
+  );
   if (jsonlWatcher) {
     jsonlWatcher.on('ingest', ({ workspaceId }) => {
       // Runs from a watcher emit, not an IPC handler — the generic IPC span
@@ -846,6 +854,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
             { workspaceId, summary },
             BrowserWindow.getAllWindows()
           );
+          // Reset the trailing timer — fires once after quiescence to push the
+          // final fresh state (see comment above makeTrailingRebroadcast).
+          trailingRebroadcast.schedule(workspaceId);
         },
         { workspace_id: workspaceId }
       );
@@ -911,13 +922,28 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
 
   // Docker-daemon reachability (drives the #23 indicator) and image pulls are
   // Docker-specific; local workspaces need neither.
-  ipcMain.handle('workspace:ping', () => dockerBackend.ping());
+  ipcMain.handle('workspace:ping', () => (e2eDockerDown ? false : dockerBackend.ping()));
   ipcMain.handle('workspace:ensureImage', async (event, channelId: string, image?: string) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     await dockerBackend.ensureImage((p) => {
       win?.webContents.send(`workspace:ensureImage:progress:${channelId}`, p);
     }, image);
   });
+
+  // Resume-time image refresh: pull the workspace's image and report whether a
+  // stopped container is now stale (a newer image landed) so the renderer can
+  // recreate it to apply the update. Reuses the ensureImage progress channel.
+  ipcMain.handle(
+    'workspace:resumeImageStale',
+    async (event, channelId: string, id: string): Promise<boolean> => {
+      const win = BrowserWindow.fromWebContents(event.sender);
+      const manifest = await readWorkspaceManifest(id);
+      if (!manifest) return false;
+      return dockerBackend.isResumeImageStale(id, manifest.image, (p) => {
+        win?.webContents.send(`workspace:ensureImage:progress:${channelId}`, p);
+      });
+    }
+  );
 
   ipcMain.handle('workspace:list', async () => {
     const all = await listAllWorkspaces();
@@ -1439,9 +1465,12 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // '' on success, or an error string. Under WSL `shell.openPath` can't reach a
   // GUI file manager (no xdg-open / no Linux file manager), so route through
   // explorer.exe instead. Neither path rejects — callers get a string.
-  ipcMain.handle('fs:openPath', async (_e, path: string) => {
+  // `distro` (wsl-launcher workspaces) marks the path as living inside that
+  // distro, so the Windows app reveals it via \\wsl.localhost\<distro>\… — a
+  // bare Linux path is not resolvable by Explorer (#387).
+  ipcMain.handle('fs:openPath', async (_e, path: string, distro?: string) => {
     if (typeof path !== 'string' || path.length === 0) return 'No path provided';
-    return openHostPath(path);
+    return openHostPath(path, typeof distro === 'string' && distro.length > 0 ? distro : undefined);
   });
 
   // ── Loadout library (#16-followup) ───────────────────────────────────────
@@ -1480,6 +1509,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     sharedDir: await fleetSharedDir(),
     disableHardwareAcceleration: await getHardwareAccelDisabled(),
     terminalRenderer: await getTerminalRenderer(),
+    capturePty: (await getCapturePty()) ?? '',
+    captureEnabled: await getCaptureEnabled(),
     autoReloadLoadouts: await getAutoReloadLoadouts(),
     usageBudget: await getUsageBudget(),
     uiPrefs: await getUiPrefs(),
@@ -1531,6 +1562,16 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       /* unknown/unreadable workspace — fall through to the global setting */
     }
     return resolveTerminalRenderer(override);
+  });
+
+  ipcMain.handle('config:setCapturePty', async (_e, dir: unknown) => {
+    await setCapturePty(typeof dir === 'string' ? dir : '');
+    return { capturePty: (await getCapturePty()) ?? '' };
+  });
+
+  ipcMain.handle('config:setCaptureEnabled', async (_e, enabled: unknown) => {
+    await setCaptureEnabled(enabled === true);
+    return { captureEnabled: await getCaptureEnabled() };
   });
 
   ipcMain.handle('config:setTerminalRenderer', async (_e, renderer: unknown) => {
@@ -1732,6 +1773,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       handleBrokerSessionId.set(ptyHandleId, brokerSessionId);
       // No-op unless CLAUDE_FLEET_CAPTURE_PTY is set (ptyCapture.ts, #268).
       const capture = createPtyCapture({
+        configuredDir: await getEffectiveCaptureDir(),
         handleId: ptyHandleId,
         workspaceId: owner?.id ?? null,
         brokerSessionId,
@@ -2131,9 +2173,20 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     'app:logError',
     (
       _e,
-      payload: { type: string; message: string; stack?: string; extra?: Record<string, unknown> }
+      payload: {
+        type: string;
+        message: string;
+        level?: 'error' | 'warn' | 'info';
+        stack?: string;
+        extra?: Record<string, unknown>;
+      }
     ) => {
-      logError({ source: 'renderer', ...payload });
+      // Allowlist the level rather than trusting the renderer verbatim.
+      const level =
+        payload.level === 'info' || payload.level === 'warn' || payload.level === 'error'
+          ? payload.level
+          : undefined;
+      logError({ source: 'renderer', ...payload, level });
     }
   );
   ipcMain.handle('app:errorLogPath', () => getLogPath());
@@ -2171,6 +2224,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     });
     ipcMain.handle('__test:setServingPorts', (_e, workspaceId: string, ports: ServingPort[]) => {
       broadcastPortsChanged(workspaceId, ports);
+    });
+    ipcMain.handle('__test:setDockerDown', (_e, downFlag: boolean) => {
+      e2eDockerDown = downFlag === true;
+      invalidateWorkspaceList();
     });
   }
 }

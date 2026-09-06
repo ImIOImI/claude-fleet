@@ -1,10 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   openDb, closeDb, ingestLine, deleteSession,
-  summaryForSession, summaryForWorkspace, tokensSpentSince
+  summaryForSession, summaryForWorkspace, tokensSpentSince,
+  SUMMARY_STALE_GRACE_MS,
 } from './db.js';
 
 let dir: string;
@@ -21,17 +22,45 @@ const userLine = (uuid: string, content: string) =>
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cf-cache-')); openDb(dir); });
 afterEach(() => { closeDb(); rmSync(dir, { recursive: true, force: true }); });
 
+// Cache-correctness contract (#383, supersedes #306):
+//   - On ingestLine, summaryCache.markStale(sessionId, SUMMARY_STALE_GRACE_MS) is called.
+//     This caps the remaining entry lifetime at 3s (debounced invalidation): reads within
+//     the grace window serve the pre-ingest cached summary (at most 3s stale); a read
+//     after the grace horizon recomputes fresh. This is intentional — it prevents a
+//     per-event recompute storm during streaming sessions (#383).
+//   - deleteSession and renameSession hard-invalidate immediately (no grace window).
+//   - The TTL (30s) is a safety net against any missed invalidation path.
+//   - The spendCache (tokensSpentSince) is still cleared immediately on every new event row.
 describe('summaryForSession cache', () => {
-  it('STALENESS REGRESSION: the very next read after an ingest reflects it', () => {
+  it('DEBOUNCE (#383): a read inside the 3s grace serves the cached summary; a post-grace read reflects the ingest', () => {
+    // Arrange: prime the cache with a pre-ingest summary (user line only, no tokens).
     ingestLine(WS, SES, userLine('u1', 'first'));
     const before = summaryForSession(SES);
     expect(before).not.toBeNull();
-    ingestLine(WS, SES, assistantLine('a1', 100));
-    const after = summaryForSession(SES);
-    // The assistant event must be visible immediately — a stale cached
-    // summary here is the bug this whole test file exists to prevent.
-    // Note: WorkspaceSummary.outputTokens is a top-level field (not nested under totals).
-    expect(after!.outputTokens).toBeGreaterThan(before!.outputTokens ?? 0);
+
+    // Fake timers so we can advance Date.now() without sleeping.
+    // NOTE: fixture timestamps are ISO strings parsed by Date.parse() — not
+    // affected by fake timers. The only Date.now() consumer here is the cache's
+    // staleAt horizon check in syncCache.ts.
+    vi.useFakeTimers();
+    try {
+      // Act: ingest an assistant event (adds outputTokens).
+      ingestLine(WS, SES, assistantLine('a1', 100));
+
+      // Within grace — cache must serve the same pre-ingest object (no recompute).
+      const withinGrace = summaryForSession(SES);
+      expect(withinGrace).toBe(before); // identity proves cache hit (debounce working)
+      // outputTokens is unchanged because it is the same cached object.
+      expect(withinGrace!.outputTokens).toBe(before!.outputTokens ?? 0);
+
+      // Post grace — advance past the stale horizon; cache must recompute.
+      vi.advanceTimersByTime(SUMMARY_STALE_GRACE_MS + 100);
+      const afterGrace = summaryForSession(SES);
+      expect(afterGrace).not.toBe(before); // different object — was recomputed
+      expect(afterGrace!.outputTokens).toBeGreaterThan(before!.outputTokens ?? 0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('repeated reads between ingests hit the cache (same object identity)', () => {

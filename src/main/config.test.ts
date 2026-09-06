@@ -24,6 +24,11 @@ const {
   getHardwareAccelDisabled,
   getTerminalRenderer,
   setTerminalRenderer,
+  getCapturePty,
+  setCapturePty,
+  getCaptureEnabled,
+  setCaptureEnabled,
+  getEffectiveCaptureDir,
   resolveTerminalRenderer,
   setHardwareAccelDisabled,
   getAutoReloadLoadouts,
@@ -441,5 +446,121 @@ describe('resolveTerminalRenderer', () => {
 
   it('defaults to dom with nothing set anywhere', async () => {
     expect(await resolveTerminalRenderer(undefined)).toBe('dom');
+  });
+});
+
+// #268: the renderer must survive a RESTART, not just an in-process round trip.
+// The original tests set-then-got in one process, where the in-memory cache
+// masked the fact that read() dropped the field on every load from disk.
+describe('terminalRenderer survives a reload from disk', () => {
+  it('is read back from an existing config.json', async () => {
+    await writeFile(configPath(), JSON.stringify({ terminalRenderer: 'canvas' }), 'utf8');
+    _resetConfigCacheForTests();
+    expect(await getTerminalRenderer()).toBe('canvas');
+  });
+
+  it('survives setTerminalRenderer + cache drop (the restart path)', async () => {
+    await setTerminalRenderer('webgl');
+    _resetConfigCacheForTests();
+    expect(await getTerminalRenderer()).toBe('webgl');
+  });
+
+  it('is not erased by writing an unrelated setting', async () => {
+    // write() spreads the parsed config, so a dropped field is destroyed on
+    // the next save of anything else — silent data loss, not just a bad read.
+    await setTerminalRenderer('canvas');
+    _resetConfigCacheForTests();
+    await setHardwareAccelDisabled(true);
+    _resetConfigCacheForTests();
+    expect(await getTerminalRenderer()).toBe('canvas');
+  });
+
+  it('coerces garbage on disk to dom', async () => {
+    await writeFile(configPath(), JSON.stringify({ terminalRenderer: 'opengl' }), 'utf8');
+    _resetConfigCacheForTests();
+    expect(await getTerminalRenderer()).toBe('dom');
+  });
+});
+
+// #268: the capture directory is a persisted setting, so it must survive a
+// reload from disk — the same field-by-field read() that dropped
+// terminalRenderer would drop this too.
+describe('get/setCapturePty', () => {
+  it('is null when unset', async () => {
+    expect(await getCapturePty()).toBeNull();
+  });
+
+  it('round-trips through disk, not just the cache', async () => {
+    await setCapturePty('/var/tmp/ptycap');
+    _resetConfigCacheForTests();
+    expect(await getCapturePty()).toBe('/var/tmp/ptycap');
+  });
+
+  it('an empty value turns capture off', async () => {
+    await setCapturePty('/var/tmp/ptycap');
+    await setCapturePty('   ');
+    _resetConfigCacheForTests();
+    expect(await getCapturePty()).toBeNull();
+  });
+
+  it('is not erased by writing an unrelated setting', async () => {
+    await setCapturePty('/var/tmp/ptycap');
+    _resetConfigCacheForTests();
+    await setHardwareAccelDisabled(true);
+    _resetConfigCacheForTests();
+    expect(await getCapturePty()).toBe('/var/tmp/ptycap');
+  });
+});
+
+// #268: capture is a toggle plus a remembered directory, so switching it off
+// doesn't make you re-pick the folder next time.
+describe('capture toggle', () => {
+  it('keeps the directory when capture is switched off', async () => {
+    await setCapturePty('/var/tmp/ptycap');
+    await setCaptureEnabled(false);
+    _resetConfigCacheForTests();
+    expect(await getCapturePty()).toBe('/var/tmp/ptycap'); // remembered
+    expect(await getCaptureEnabled()).toBe(false);
+    expect(await getEffectiveCaptureDir()).toBeNull(); // but not capturing
+  });
+
+  it('captures once switched back on, without re-picking the folder', async () => {
+    await setCapturePty('/var/tmp/ptycap');
+    await setCaptureEnabled(false);
+    await setCaptureEnabled(true);
+    _resetConfigCacheForTests();
+    expect(await getEffectiveCaptureDir()).toBe('/var/tmp/ptycap');
+  });
+
+  it('stays off when enabled with no directory', async () => {
+    await setCaptureEnabled(true);
+    _resetConfigCacheForTests();
+    expect(await getCaptureEnabled()).toBe(true);
+    expect(await getEffectiveCaptureDir()).toBeNull();
+  });
+
+  it('infers ON for a pre-toggle config that has a directory', async () => {
+    // Installs from before the toggle existed were capturing iff a path was
+    // set; they must not silently stop after upgrading.
+    await writeFile(configPath(), JSON.stringify({ capturePty: '/var/tmp/old' }), 'utf8');
+    _resetConfigCacheForTests();
+    expect(await getCaptureEnabled()).toBe(true);
+    expect(await getEffectiveCaptureDir()).toBe('/var/tmp/old');
+  });
+
+  it('infers OFF for a pre-toggle config with no directory', async () => {
+    await writeFile(configPath(), JSON.stringify({}), 'utf8');
+    _resetConfigCacheForTests();
+    expect(await getCaptureEnabled()).toBe(false);
+  });
+
+  it('survives a reload and an unrelated write', async () => {
+    await setCapturePty('/var/tmp/ptycap');
+    await setCaptureEnabled(false);
+    _resetConfigCacheForTests();
+    await setHardwareAccelDisabled(true);
+    _resetConfigCacheForTests();
+    expect(await getCapturePty()).toBe('/var/tmp/ptycap');
+    expect(await getCaptureEnabled()).toBe(false);
   });
 });

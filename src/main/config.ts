@@ -80,6 +80,13 @@ interface AppConfig {
   disableHardwareAcceleration?: boolean;
   /** xterm renderer for terminal panes. Absent ⇒ 'dom'. See TerminalRenderer. */
   terminalRenderer?: TerminalRenderer;
+  /** Directory for raw PTY capture (#268 diagnostics). Remembered even while
+   *  capture is switched off, so the toggle doesn't discard the path. Must be
+   *  absolute; validated where it is consumed (ptyCapture.ts). */
+  capturePty?: string;
+  /** Whether capture is on. Absent ⇒ infer from the directory, so installs
+   *  predating the toggle keep the behaviour they already had. */
+  captureEnabled?: boolean;
   /** When true (default), installing/updating a loadout into a running
    *  workspace auto-reloads its Claude session (`--resume`) to load the loadout
    *  — but only while Claude is idle; deferred until it stops working. (#16) */
@@ -158,6 +165,24 @@ async function read(): Promise<AppConfig> {
     cached = {
       fleetRoot: typeof parsed.fleetRoot === 'string' && parsed.fleetRoot ? parsed.fleetRoot : undefined,
       disableHardwareAcceleration: parsed.disableHardwareAcceleration === true,
+      // Read back explicitly: this normalizer is a field-by-field allowlist,
+      // so an omitted key is silently dropped on every load — the value round
+      // -tripped through setTerminalRenderer only because the in-memory cache
+      // held it, and reappeared as 'dom' after a restart. Worse, `write()`
+      // spreads this object, so saving any UNRELATED setting erased it from
+      // disk (#268).
+      capturePty:
+        typeof parsed.capturePty === 'string' && parsed.capturePty.trim()
+          ? parsed.capturePty.trim()
+          : undefined,
+      captureEnabled:
+        typeof parsed.captureEnabled === 'boolean' ? parsed.captureEnabled : undefined,
+      terminalRenderer:
+        parsed.terminalRenderer === 'canvas' ||
+        parsed.terminalRenderer === 'webgl' ||
+        parsed.terminalRenderer === 'dom'
+          ? parsed.terminalRenderer
+          : undefined,
       // Persist as-is so an explicit `false` survives a reload; absent ⇒ default
       // on (see getAutoReloadLoadouts).
       autoReloadLoadouts:
@@ -242,6 +267,40 @@ export async function getTerminalRenderer(): Promise<TerminalRenderer> {
   const cfg = await read();
   const v = cfg.terminalRenderer;
   return v === 'canvas' || v === 'webgl' ? v : 'dom';
+}
+
+/** The remembered capture directory, whether or not capture is currently on. */
+export async function getCapturePty(): Promise<string | null> {
+  const cfg = await read();
+  return cfg.capturePty && cfg.capturePty.trim() ? cfg.capturePty.trim() : null;
+}
+
+/** Persist the capture directory. Kept even while capture is off, so toggling
+ *  doesn't lose it. Takes effect for terminals attached after the change. */
+export async function setCapturePty(dir: string): Promise<void> {
+  const cfg = await read();
+  const v = typeof dir === 'string' && dir.trim() ? dir.trim() : undefined;
+  await write({ ...cfg, capturePty: v });
+}
+
+/** Whether capture is switched on. Absent in config ⇒ inferred from the
+ *  directory, so an install from before the toggle behaves as it did. */
+export async function getCaptureEnabled(): Promise<boolean> {
+  const cfg = await read();
+  if (typeof cfg.captureEnabled === 'boolean') return cfg.captureEnabled;
+  return !!(cfg.capturePty && cfg.capturePty.trim());
+}
+
+export async function setCaptureEnabled(enabled: boolean): Promise<void> {
+  const cfg = await read();
+  await write({ ...cfg, captureEnabled: enabled === true });
+}
+
+/** Directory capture should actually write to right now: the remembered path,
+ *  or null when the toggle is off. `CLAUDE_FLEET_CAPTURE_PTY` bypasses this
+ *  entirely (see ptyCapture.captureDir), so the e2e suite is unaffected. */
+export async function getEffectiveCaptureDir(): Promise<string | null> {
+  return (await getCaptureEnabled()) ? getCapturePty() : null;
 }
 
 /** Effective renderer for one workspace (#268): env override (tests) → the

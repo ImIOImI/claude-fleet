@@ -388,6 +388,12 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       fleetRoot,
       sharedDir: `${fleetRoot}/shared`,
       disableHardwareAcceleration: false,
+      // Keep the mock's shape in step with the real config:get. A field the
+      // mock omits is a field the settings modal is never exercised against —
+      // which is how a missing `capturePty` slipped through as a Save-time
+      // crash that broke an unrelated fleet-root test.
+      terminalRenderer: 'dom',
+      capturePty: '',
       autoReloadLoadouts: true,
       usageBudget: {
         preset: 'pro',

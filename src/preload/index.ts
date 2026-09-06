@@ -59,7 +59,7 @@ export interface SessionListItem {
   usd: number;
   workspaceName: string;
   workspaceColorHue: number | null;
-  workspaceState: 'running' | 'paused' | 'stopped' | 'deleted';
+  workspaceState: 'running' | 'paused' | 'stopped' | 'deleted' | 'unreachable';
   /** Latest summary-chapter tags, relevance-ordered; [] when unsummarized. */
   tags: string[];
 }
@@ -201,6 +201,10 @@ const api = {
     logError: (payload: {
       type: string;
       message: string;
+      /** Omitted ⇒ 'error' in the sink. Set 'info'/'warn' for diagnostics that
+       *  are lifecycle records rather than failures, so they don't bury real
+       *  errors in the log. */
+      level?: 'error' | 'warn' | 'info';
       stack?: string;
       extra?: Record<string, unknown>;
     }): Promise<void> => ipcRenderer.invoke('app:logError', payload),
@@ -243,6 +247,25 @@ const api = {
       ipcRenderer.on(channel, handler);
       try {
         await ipcRenderer.invoke('workspace:ensureImage', channelId, image);
+      } finally {
+        ipcRenderer.removeListener(channel, handler);
+      }
+    },
+    /**
+     * Pull the workspace's image and report whether a stopped container is now
+     * running a stale image (a newer one landed) — the cue to recreate it on
+     * resume so the update takes effect. Streams pull progress like ensureImage.
+     */
+    resumeImageStale: async (
+      id: string,
+      onProgress: (p: { message: string }) => void
+    ): Promise<boolean> => {
+      const channelId = globalThis.crypto.randomUUID();
+      const channel = `workspace:ensureImage:progress:${channelId}`;
+      const handler = (_e: IpcRendererEvent, p: { message: string }) => onProgress(p);
+      ipcRenderer.on(channel, handler);
+      try {
+        return await ipcRenderer.invoke('workspace:resumeImageStale', channelId, id);
       } finally {
         ipcRenderer.removeListener(channel, handler);
       }
@@ -360,8 +383,11 @@ const api = {
   fs: {
     isDirectory: (path: string): Promise<boolean> => ipcRenderer.invoke('fs:isDirectory', path),
     mkdirp: (path: string): Promise<void> => ipcRenderer.invoke('fs:mkdirp', path),
-    /** Reveal a host path in the OS file manager. Resolves '' on success, else an error string. */
-    openPath: (path: string): Promise<string> => ipcRenderer.invoke('fs:openPath', path)
+    /** Reveal a host path in the OS file manager. Resolves '' on success, else an error string.
+     *  `distro` names the WSL distro a Linux path lives in (wsl-launcher
+     *  workspaces); omit it for ordinary host paths. */
+    openPath: (path: string, distro?: string): Promise<string> =>
+      ipcRenderer.invoke('fs:openPath', path, distro)
   },
   files: {
     /**
@@ -446,6 +472,10 @@ const api = {
       sharedDir: string;
       disableHardwareAcceleration: boolean;
       terminalRenderer: 'dom' | 'canvas' | 'webgl';
+      /** Remembered raw-PTY-capture directory, kept even while off (#268). */
+      capturePty: string;
+      /** Whether capture is currently switched on. */
+      captureEnabled: boolean;
       autoReloadLoadouts: boolean;
       usageBudget: UsageBudget;
       uiPrefs: UiPrefs;
@@ -463,6 +493,14 @@ const api = {
      *  workspace can override it; see terminalRendererFor (#268). */
     setTerminalRenderer: (renderer: 'dom' | 'canvas' | 'webgl') =>
       ipcRenderer.invoke('config:setTerminalRenderer', renderer),
+    /** Set the raw-PTY-capture directory. Remembered while capture is off, so
+     *  the toggle doesn't discard it. Applies to terminals attached after the
+     *  change — no restart needed. */
+    setCapturePty: (dir: string): Promise<{ capturePty: string }> =>
+      ipcRenderer.invoke('config:setCapturePty', dir),
+    /** Switch raw PTY capture on/off, keeping the configured directory. */
+    setCaptureEnabled: (enabled: boolean): Promise<{ captureEnabled: boolean }> =>
+      ipcRenderer.invoke('config:setCaptureEnabled', enabled),
     /** Effective renderer for one workspace's panes — the workspace's own
      *  setting if it has one, otherwise the app-level default. */
     terminalRendererFor: (workspaceId: string): Promise<'dom' | 'canvas' | 'webgl'> =>

@@ -29,6 +29,17 @@ export interface Backend {
   inspectImage(ref: string): Promise<ImageInspectResult>;
   /** Bring an existing workspace up; returns its containerId surrogate or null. */
   startWorkspace(id: string): Promise<string | null>;
+  /**
+   * Resume-time image refresh: pull `imageRef` and report whether a **stopped**
+   * container is now running a stale image and should be recreated to pick up
+   * the newer one. False for live/paused containers and for backends with no
+   * image (local). Streams pull progress. See docker.ts `isResumeImageStale`.
+   */
+  isResumeImageStale(
+    id: string,
+    imageRef: string | undefined,
+    onProgress: (p: PullProgress) => void
+  ): Promise<boolean>;
   pauseWorkspace(containerId: string): Promise<void>;
   stopWorkspace(containerId: string): Promise<void>;
   removeWorkspace(containerId: string, opts?: RemoveWorkspaceOpts): Promise<void>;

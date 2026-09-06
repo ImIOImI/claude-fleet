@@ -440,6 +440,12 @@ export async function startWorkspace(id: string): Promise<string | null> {
   return id; // the containerId surrogate the renderer attaches against
 }
 
+export async function isResumeImageStale(): Promise<boolean> {
+  // Local workspaces run `claude` as a host process — there's no image to
+  // refresh, so resume never recreates.
+  return false;
+}
+
 /**
  * Start-time staleness check for a wsl-launcher workspace (#336): did the
  * distro grow a claude newer than the manifest-pinned one? Null for non-wsl
@@ -732,6 +738,7 @@ const _assertBackend: Backend = {
   createWorkspace,
   inspectImage,
   startWorkspace,
+  isResumeImageStale,
   pauseWorkspace,
   stopWorkspace,
   removeWorkspace,

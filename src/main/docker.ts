@@ -48,6 +48,7 @@ import { endpointEnv } from './endpoints.js';
 import { harnessCreateArgs } from './harnessArgs.js';
 import { injectAndSubmit } from './ptyInput.js';
 import { perfSpan, perfSpanAsync, perfSetSpanContext } from './perf.js';
+import { pullErrorFromEvent, needsRecreateForImage, shouldCheckResumeImage } from './imagePull.js';
 
 export const FLEET_LABEL = 'com.claude-fleet.managed';
 export const ID_LABEL = 'com.claude-fleet.id';
@@ -223,10 +224,25 @@ export async function ensureImage(
   try {
     const stream = (await docker.pull(ref)) as NodeJS.ReadableStream;
     await new Promise<void>((resolve, reject) => {
+      // The daemon reports a pull failure as an in-stream JSON line (`error`/
+      // `errorDetail`) and then ends the stream cleanly, so `followProgress`
+      // reports success. Capture the first such error and reject — otherwise a
+      // failed pull is indistinguishable from a successful one and the caller
+      // silently keeps (or recreates against) a stale image. See imagePull.ts.
+      let streamError: string | null = null;
       docker.modem.followProgress(
         stream,
-        (err: Error | null) => (err ? reject(err) : resolve()),
+        (err: Error | null) => {
+          if (err) reject(err);
+          else if (streamError) reject(new Error(streamError));
+          else resolve();
+        },
         (event: Record<string, unknown>) => {
+          const err = pullErrorFromEvent(event);
+          if (err) {
+            streamError ??= err;
+            return;
+          }
           const status = typeof event.status === 'string' ? event.status : '';
           const id = typeof event.id === 'string' ? ` ${event.id}` : '';
           if (status) onProgress({ message: `${status}${id}` });
@@ -234,8 +250,17 @@ export async function ensureImage(
       );
     });
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Durable evidence: "image lookup broke again" recurs, so record the real
+    // registry error instead of letting it vanish behind the cached fallback.
+    logError({
+      source: 'main',
+      level: localExists ? 'warn' : 'error',
+      type: 'image-pull-failed',
+      message: `pull ${ref} failed: ${msg}`,
+      extra: { ref, localExists }
+    });
     if (localExists) {
-      const msg = err instanceof Error ? err.message : String(err);
       onProgress({
         message: `Registry check failed (${msg}); using cached ${ref}.`
       });
@@ -243,6 +268,45 @@ export async function ensureImage(
     }
     throw err;
   }
+}
+
+/** The image id (`sha256:…`) the ref resolves to locally, or undefined if the
+ *  image isn't present. */
+async function inspectLocalImageId(ref: string): Promise<string | undefined> {
+  return docker
+    .getImage(ref)
+    .inspect()
+    .then((info) => info.Id)
+    .catch(() => undefined);
+}
+
+/**
+ * Resume-time image refresh (#image-recreate): for a **stopped** container
+ * workspace, pull `imageRef` and report whether the container is now running a
+ * stale image (its baked image id no longer matches what the ref resolves to).
+ *
+ * Only stopped/created containers are considered — running and paused ones
+ * hold live/suspended sessions a recreate would destroy, so they refresh only
+ * via the explicit edit → restart-to-apply banner (`shouldCheckResumeImage`).
+ * Returns false (never recreate) whenever the container is absent, live, or the
+ * ids can't be resolved — the caller then does a plain start.
+ */
+export async function isResumeImageStale(
+  id: string,
+  imageRef: string | undefined,
+  onProgress: (p: PullProgress) => void
+): Promise<boolean> {
+  assertValidWorkspaceId(id);
+  const found = await findContainerById(id);
+  if (!found) return false;
+  if (!shouldCheckResumeImage('container', found.State)) return false;
+
+  const ref = imageRef?.trim() || RUNNER_IMAGE;
+  // "Download the latest image" — a failed pull is swallowed into a cached
+  // fallback by ensureImage, so we simply compare against whatever is local.
+  await ensureImage(onProgress, ref);
+  const localId = await inspectLocalImageId(ref);
+  return needsRecreateForImage(found.ImageID, localId);
 }
 
 export function ping(): Promise<boolean> {

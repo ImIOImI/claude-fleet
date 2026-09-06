@@ -175,6 +175,165 @@ func readCmdline(pid int) string {
 	return s
 }
 
+// KillTree terminates the whole process subtree a listening port belongs to
+// — the command the user launched plus everything it spawned — rather than
+// just the socket-owning leaf. The owner pid is resolved live (no PID-reuse
+// hazard), then its /proc ppid ancestry is walked up to the child of the
+// owning session's PTY root: that child is the launched command, and its
+// entire subtree is signalled. This is what makes "kill" stick for
+// supervisors (nodemon, `next dev`, npm, a shell respawn loop) that would
+// otherwise relaunch a SIGTERM'd leaf and reopen the port. When the owner
+// can't be attributed to any session root, the subtree rooted at the owner
+// itself is used — conservative: the walk never climbs past an unknown
+// boundary toward the session shell. SIGTERM the subtree, then SIGKILL any
+// survivors after grace. `roots` is session-root-pid → session-id, as from
+// session.Manager.RootPids.
+func KillTree(port uint16, roots map[int]string, grace time.Duration) error {
+	details, err := Listening()
+	if err != nil {
+		return err
+	}
+	owner := 0
+	for _, d := range details {
+		if d.Port == port {
+			owner = d.Pid
+			break
+		}
+	}
+	if owner == 0 {
+		return fmt.Errorf("no resolvable owner for port %d", port)
+	}
+	root := subtreeRoot(owner, roots, procPpid)
+
+	// Snapshot the subtree once, then track liveness per pid — never by
+	// re-walking from root. A common dev-server shape is a light parent
+	// (npm/sh) over the socket-owning child; SIGTERM fells the parent first
+	// and the child, if it traps SIGTERM (graceful shutdown / "reload"),
+	// reparents to init while still holding the port. A tree re-walk from
+	// root loses that reparented child and would report a false success with
+	// the port still up. The captured set keeps every pid addressable so the
+	// SIGKILL escalation still reaches it. The owner is always in the set (it
+	// is root or a descendant of root).
+	targets := descendants(root)
+	signalPids(targets, syscall.SIGTERM)
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) {
+		if !anyAlive(targets) {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// Escalate to survivors, folding in any late forks still linked to root.
+	signalPids(mergePids(targets, descendants(root)), syscall.SIGKILL)
+	return nil
+}
+
+// subtreeRoot walks up from the port owner and returns the pid of the
+// command launched under a session — the highest ancestor whose parent is a
+// session root. When no ancestor is a session root (unattributed / orphaned),
+// it returns the owner itself so the kill can never climb toward the shell.
+func subtreeRoot(owner int, roots map[int]string, ppid func(int) (int, bool)) int {
+	cur := owner
+	for hops := 0; hops < maxAncestryHops; hops++ {
+		parent, ok := ppid(cur)
+		if !ok {
+			break
+		}
+		if _, isRoot := roots[parent]; isRoot {
+			return cur
+		}
+		if parent <= 1 {
+			break
+		}
+		cur = parent
+	}
+	return owner
+}
+
+// descendants returns root plus every process transitively descended from it,
+// by building the child map from a single /proc scan. A process that exits
+// mid-scan simply doesn't appear — callers re-scan to confirm liveness.
+func descendants(root int) []int {
+	children := map[int][]int{}
+	if procs, err := os.ReadDir("/proc"); err == nil {
+		for _, p := range procs {
+			pid, err := strconv.Atoi(p.Name())
+			if err != nil {
+				continue
+			}
+			if pp, ok := procPpid(pid); ok {
+				children[pp] = append(children[pp], pid)
+			}
+		}
+	}
+	// A root with no /proc entry and no children is already gone.
+	if _, exists := procPpid(root); !exists && len(children[root]) == 0 {
+		return nil
+	}
+	out := []int{}
+	seen := map[int]bool{}
+	stack := []int{root}
+	for len(stack) > 0 {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+		stack = append(stack, children[n]...)
+	}
+	return out
+}
+
+// signalPids sends sig to each pid, skipping pid<=1 (init / process-group
+// sentinels). Errors on already-gone pids are ignored: the caller polls
+// liveness. Unlike a tree walk this hits reparented survivors too, because
+// the pids were captured while the subtree was intact.
+func signalPids(pids []int, sig syscall.Signal) {
+	for _, pid := range pids {
+		if pid > 1 {
+			_ = syscall.Kill(pid, sig)
+		}
+	}
+}
+
+// alive reports whether pid still names a process. Signal 0 is delivered to
+// no one but performs the kernel's existence/permission check: nil or EPERM
+// means the pid exists (EPERM = exists but not ours — can't happen for our
+// own children, kept for safety), ESRCH means it is gone. A zombie still
+// "exists" until reaped, which is fine — the escalation SIGKILL is a no-op on
+// it and the real survivor in the set is what we care about.
+func alive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || err == syscall.EPERM
+}
+
+// anyAlive reports whether any pid in the captured set is still running.
+func anyAlive(pids []int) bool {
+	for _, pid := range pids {
+		if alive(pid) {
+			return true
+		}
+	}
+	return false
+}
+
+// mergePids returns the union of two pid slices, preserving first-seen order.
+func mergePids(a, b []int) []int {
+	seen := make(map[int]bool, len(a)+len(b))
+	out := make([]int, 0, len(a)+len(b))
+	for _, group := range [][]int{a, b} {
+		for _, pid := range group {
+			if !seen[pid] {
+				seen[pid] = true
+				out = append(out, pid)
+			}
+		}
+	}
+	return out
+}
+
 // KillOwner terminates the process listening on port. The PID is resolved
 // from the live socket AT CALL TIME — never accepted from the host — which
 // removes any PID-reuse hazard. SIGTERM first; if the process survives

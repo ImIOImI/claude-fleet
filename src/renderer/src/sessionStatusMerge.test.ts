@@ -4,6 +4,7 @@ import {
   resolveWaitingClaudeIds,
   resolveBusyByWorkspace,
   resolveWaitingByWorkspace,
+  resolveTabBusy,
   type PeerKind
 } from './sessionStatusMerge';
 
@@ -68,6 +69,39 @@ describe('resolveBusyByWorkspace', () => {
   it('no peer info → falls back to the glyph chip', () => {
     expect(resolveBusyByWorkspace({ wsA: ['b1'] }, mappings, peer([])).wsA).toBe(true);
     expect(resolveBusyByWorkspace({ wsA: [] }, mappings, peer([])).wsA).toBe(false);
+  });
+});
+
+describe('resolveTabBusy', () => {
+  it('uses the peer-reconciled set once the broker→claude mapping is resolved', () => {
+    // Mapping known (b1→c1); reconciled set says c1 busy → tab dot busy.
+    expect(resolveTabBusy('c1', 'b1', new Set(['c1']), new Set())).toBe(true);
+  });
+
+  it('clears a stuck glyph the peer reconciled away (self-heal #283)', () => {
+    // Glyph stuck busy on b1, but reconciled set (peer idle) omits c1 → not busy.
+    expect(resolveTabBusy('c1', 'b1', new Set(), new Set(['b1']))).toBe(false);
+  });
+
+  it('falls back to the raw glyph while the broker→claude mapping is unresolved', () => {
+    // claudeId not yet known → glyph (keyed by broker id) governs.
+    expect(resolveTabBusy(undefined, 'b1', new Set(), new Set(['b1']))).toBe(true);
+    expect(resolveTabBusy(undefined, 'b1', new Set(), new Set())).toBe(false);
+  });
+
+  it('agrees with the workspace chip and Sessions list for one session (#371)', () => {
+    // Same underlying state: broker b1 → claude c1, glyph stuck busy, peer idle.
+    const mappings = new Map([['wsA', new Map([['b1', 'c1']])]]);
+    const p = peer([['c1', 'idle']]);
+    // Sessions list source of truth (claude-keyed glyph = {c1} because mapping known).
+    const list = resolveBusyClaudeIds(new Set(['c1']), p);
+    // Workspace chip.
+    const chip = resolveBusyByWorkspace({ wsA: ['b1'] }, mappings, p).wsA;
+    // Tab dot, using the same reconciled set the list is built from.
+    const dot = resolveTabBusy('c1', 'b1', list, new Set(['b1']));
+    expect(chip).toBe(false);
+    expect(list.has('c1')).toBe(false);
+    expect(dot).toBe(false);
   });
 });
 

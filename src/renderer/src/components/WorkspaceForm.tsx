@@ -140,6 +140,12 @@ interface Props {
   initial?: Partial<WorkspaceFormSubmit & { id: string }>;
   workspaces: WorkspaceSummary[];
   vaultAvailable: boolean | null;
+  /**
+   * Whether Docker is reachable. When `false`, the container radio is
+   * disabled and the submit button is blocked for container-kind forms.
+   * `undefined` (default) behaves as `true` so other callsites are unchanged.
+   */
+  dockerUp?: boolean;
   onSubmit: (values: WorkspaceFormSubmit, setStatus: (s: string | null) => void) => Promise<void>;
   onCancel: () => void;
   /**
@@ -155,6 +161,12 @@ interface Props {
    * is responsible for confirming + purging state.
    */
   onDelete?: (id: string) => Promise<void>;
+  /**
+   * When set, the Delete button is rendered but disabled with this string
+   * as its tooltip. Used when Docker is down and the workspace is a
+   * container-kind row — deleting would hit ECONNREFUSED.
+   */
+  deleteDisabledReason?: string;
   /** Override the primary button label (e.g. "Save" instead of "Resume"). */
   primaryLabel?: string;
   /** Optional slot for extra footer buttons. */
@@ -169,10 +181,12 @@ export function WorkspaceForm({
   initial,
   workspaces,
   vaultAvailable,
+  dockerUp,
   onSubmit,
   onCancel,
   onClone,
   onDelete,
+  deleteDisabledReason,
   primaryLabel: primaryLabelOverride,
   extraFooterLeft,
   onOpenSettings
@@ -238,7 +252,7 @@ export function WorkspaceForm({
   );
   const toggleAcceptFrom = (id: string): void =>
     setAcceptFrom((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-  const [kind, setKind] = useState<WorkspaceKind>(initial?.kind ?? 'container');
+  const [kind, setKind] = useState<WorkspaceKind>(initial?.kind ?? (dockerUp === false ? 'local' : 'container'));
   // Local workspaces only: the host directory `claude` runs in (#16).
   const [workspaceRoot, setWorkspaceRoot] = useState<string>(initial?.workspaceRoot ?? '');
   const initialLauncher = initial?.launcher;
@@ -578,10 +592,11 @@ export function WorkspaceForm({
               value="container"
               checked={kind === 'container'}
               onChange={() => setKind('container')}
-              disabled={busy}
+              disabled={busy || dockerUp === false}
             />
             <span>Container</span>
             <span className="kind-help">isolated Docker runner</span>
+            {dockerUp === false && <span className="kind-hint">needs Docker — daemon unreachable</span>}
           </label>
           <label className={`kind-radio ${kind === 'local' ? 'active' : ''}`}>
             <input
@@ -1238,8 +1253,8 @@ export function WorkspaceForm({
             type="button"
             className="btn danger"
             onClick={handleDelete}
-            disabled={busy}
-            title="Permanently delete this workspace"
+            disabled={busy || !!deleteDisabledReason}
+            title={deleteDisabledReason ?? 'Permanently delete this workspace'}
           >
             <IconTrash /> Delete
           </button>
@@ -1259,7 +1274,12 @@ export function WorkspaceForm({
             <IconCopy /> Clone
           </button>
         )}
-        <button className="btn primary" onClick={submit} disabled={busy}>
+        <button
+          className="btn primary"
+          onClick={submit}
+          disabled={busy || (kind === 'container' && dockerUp === false)}
+          title={kind === 'container' && dockerUp === false ? 'Docker daemon unreachable' : undefined}
+        >
           {busy ? 'Working…' : primaryLabel}
         </button>
       </div>

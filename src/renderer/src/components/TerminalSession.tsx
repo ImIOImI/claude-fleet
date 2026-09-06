@@ -251,6 +251,17 @@ export function TerminalSession({
             if (disposed) return;
             term.loadAddon(new CanvasAddon());
           }
+          // Log the SUCCESS too, not just the failure. Without this, "no
+          // terminal-renderer-failed in the log" is consistent with both "the
+          // renderer attached" and "this code never ran" — which makes the
+          // setting untestable in a packaged build, and wasted a debugging
+          // cycle on #268 doing exactly that.
+          void window.api.app.logError({
+            level: 'info',
+            type: 'terminal-renderer-attached',
+            message: `terminal renderer: ${terminalRenderer}`,
+            extra: { sessionId, containerId, workspaceId, renderer: terminalRenderer }
+          });
         } catch (err) {
           // Never fault the terminal over a renderer upgrade.
           void window.api.app.logError({
@@ -260,8 +271,14 @@ export function TerminalSession({
           });
         }
       })
-      .catch(() => {
-        /* config read failed — DOM renderer stands */
+      .catch((err) => {
+        // Was silent. A failed resolve left the pane on DOM with no trace,
+        // indistinguishable from "dom was the answer" (#268).
+        void window.api.app.logError({
+          type: 'terminal-renderer-unresolved',
+          message: `could not resolve the terminal renderer; staying on DOM: ${String(err)}`,
+          extra: { sessionId, containerId, workspaceId }
+        });
       });
 
     // The bundled symbol fonts (styles.css @font-face) load lazily. The DOM
