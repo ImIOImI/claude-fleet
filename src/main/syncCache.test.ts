@@ -69,3 +69,73 @@ describe('syncKeyedCache', () => {
     expect(calls).toBe(2);
   });
 });
+
+describe('markStale', () => {
+  it('is a no-op for missing keys', () => {
+    let t = 0;
+    const c = syncKeyedCache<number>({ maxEntries: 4, ttlMs: 30_000, now: () => t });
+    c.markStale('absent', 1_000); // must not throw or create an entry
+    let computes = 0;
+    c.get('absent', () => ++computes);
+    expect(computes).toBe(1);
+  });
+
+  it('caps remaining lifetime without extending it', () => {
+    let t = 0;
+    const c = syncKeyedCache<number>({ maxEntries: 4, ttlMs: 30_000, now: () => t });
+    let computes = 0;
+    c.get('k', () => ++computes);            // cached at t=0, TTL horizon 30s
+    t = 1_000;
+    c.markStale('k', 3_000);                 // stale horizon now t=4000
+    t = 2_000;
+    c.markStale('k', 10_000);                // t=12000 later than t=4000 → must NOT extend
+    t = 3_999;
+    c.get('k', () => ++computes);
+    expect(computes).toBe(1);                // still fresh
+    t = 4_000;
+    c.get('k', () => ++computes);
+    expect(computes).toBe(2);                // stale horizon hit → recompute
+    t = 5_000;
+    c.get('k', () => ++computes);
+    expect(computes).toBe(2);                // recompute cleared the cap
+  });
+
+  it('the tighter of TTL and stale horizon wins', () => {
+    let t = 0;
+    const c = syncKeyedCache<number>({ maxEntries: 4, ttlMs: 5_000, now: () => t });
+    let computes = 0;
+    c.get('k', () => ++computes);            // TTL horizon t=5000
+    t = 1_000;
+    c.markStale('k', 10_000);                // stale horizon t=11000 — TTL is tighter
+    t = 5_000;
+    c.get('k', () => ++computes);
+    expect(computes).toBe(2);                // TTL still expired it at t=5000
+  });
+
+  // The #383 storm, reproduced: an event every 200ms + a poll every 1500ms
+  // for a simulated 60s. invalidate-per-event (the shipped policy) recomputes
+  // on EVERY poll; markStale(3s) bounds recomputes to the grace cadence.
+  it('reproduces the recompute storm and bounds it', () => {
+    let t = 0;
+    const now = (): number => t;
+    const old = syncKeyedCache<number>({ maxEntries: 4, ttlMs: 30_000, now });
+    const fixed = syncKeyedCache<number>({ maxEntries: 4, ttlMs: 30_000, now });
+    let oldComputes = 0;
+    let fixedComputes = 0;
+    for (t = 0; t <= 60_000; t += 100) {
+      if (t % 200 === 0) {
+        old.invalidate('s');
+        fixed.markStale('s', 3_000);
+      }
+      if (t % 1_500 === 0) {
+        old.get('s', () => ++oldComputes);
+        fixed.get('s', () => ++fixedComputes);
+      }
+    }
+    expect(oldComputes).toBe(41);            // every one of the 41 polls recomputed
+    // Fixed cadence: recompute at t=0, then each stale horizon lands mid-poll-
+    // gap so the next 1.5s-grid poll at +4.5s recomputes → 0,4500,…,58500.
+    expect(fixedComputes).toBe(14);
+    expect(fixedComputes).toBeLessThanOrEqual(60_000 / 3_000 + 1);
+  });
+});

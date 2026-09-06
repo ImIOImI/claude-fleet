@@ -124,11 +124,13 @@ import {
   planUsageRows,
   latestAnchorCovering,
   latestLimitHitAnchor,
+  SUMMARY_STALE_GRACE_MS,
 } from './db.js';
 import { foldPlanUsage, type PlanUsageFold } from './planUsage.js';
 import { logError, getLogPath } from './errorLog.js';
 import { broadcastObservabilitySummary } from './observabilityBroadcast.js';
 import { broadcastInputWait } from './inputWaitBroadcast.js';
+import { makeTrailingRebroadcast } from './trailingBroadcast.js';
 import { consumeForWorkspace, pendingSnapshotForWorkspace, recordPendingAttach } from './pendingAttaches.js';
 import { PortForwardManager, type ServingPort } from './portforward.js';
 import { MockServingPorts } from './mockPorts.js';
@@ -807,6 +809,34 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // shared summaries map without polling. A 30s safety poll in App.tsx
   // refreshes relative-time displays and covers any missed event. See
   // `observabilityBroadcast.ts` for why per-target sends are guarded.
+  //
+  // Trailing re-broadcast: the markStale debounce in db.ts lets mid-burst
+  // pushes serve ≤SUMMARY_STALE_GRACE_MS-stale summaries. The last push of a
+  // burst carries stale data, and nothing re-pushes once the grace expires —
+  // the renderer would then wait up to the 30s safety poll for the final
+  // post-burst state. The trailing scheduler fires once per workspace at
+  // grace+250ms after quiescence, by which time the cache has expired and
+  // recomputes fresh. One extra recompute per burst maximum (same storm bound).
+  // Timers are unref'd (matching widthSweep above) so they don't hold the app.
+  const trailingRebroadcast = makeTrailingRebroadcast(
+    SUMMARY_STALE_GRACE_MS + 250,
+    (workspaceId) => {
+      // Timer-driven main-thread work: post-grace this is always a cache-miss
+      // recompute + per-window structured clone, so span it like the ingest
+      // emit below — unspanned recomputes are how #382 stayed hidden.
+      perfSpan(
+        'claude_fleet.observability.trailing_rebroadcast',
+        () => {
+          const summary = summaryForWorkspace(workspaceId);
+          broadcastObservabilitySummary(
+            { workspaceId, summary },
+            BrowserWindow.getAllWindows()
+          );
+        },
+        { workspace_id: workspaceId }
+      );
+    }
+  );
   if (jsonlWatcher) {
     jsonlWatcher.on('ingest', ({ workspaceId }) => {
       // Runs from a watcher emit, not an IPC handler — the generic IPC span
@@ -821,6 +851,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
             { workspaceId, summary },
             BrowserWindow.getAllWindows()
           );
+          // Reset the trailing timer — fires once after quiescence to push the
+          // final fresh state (see comment above makeTrailingRebroadcast).
+          trailingRebroadcast.schedule(workspaceId);
         },
         { workspace_id: workspaceId }
       );
@@ -893,6 +926,21 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       win?.webContents.send(`workspace:ensureImage:progress:${channelId}`, p);
     }, image);
   });
+
+  // Resume-time image refresh: pull the workspace's image and report whether a
+  // stopped container is now stale (a newer image landed) so the renderer can
+  // recreate it to apply the update. Reuses the ensureImage progress channel.
+  ipcMain.handle(
+    'workspace:resumeImageStale',
+    async (event, channelId: string, id: string): Promise<boolean> => {
+      const win = BrowserWindow.fromWebContents(event.sender);
+      const manifest = await readWorkspaceManifest(id);
+      if (!manifest) return false;
+      return dockerBackend.isResumeImageStale(id, manifest.image, (p) => {
+        win?.webContents.send(`workspace:ensureImage:progress:${channelId}`, p);
+      });
+    }
+  );
 
   ipcMain.handle('workspace:list', async () => {
     const all = await listAllWorkspaces();
@@ -1412,9 +1460,12 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // '' on success, or an error string. Under WSL `shell.openPath` can't reach a
   // GUI file manager (no xdg-open / no Linux file manager), so route through
   // explorer.exe instead. Neither path rejects — callers get a string.
-  ipcMain.handle('fs:openPath', async (_e, path: string) => {
+  // `distro` (wsl-launcher workspaces) marks the path as living inside that
+  // distro, so the Windows app reveals it via \\wsl.localhost\<distro>\… — a
+  // bare Linux path is not resolvable by Explorer (#387).
+  ipcMain.handle('fs:openPath', async (_e, path: string, distro?: string) => {
     if (typeof path !== 'string' || path.length === 0) return 'No path provided';
-    return openHostPath(path);
+    return openHostPath(path, typeof distro === 'string' && distro.length > 0 ? distro : undefined);
   });
 
   // ── Loadout library (#16-followup) ───────────────────────────────────────

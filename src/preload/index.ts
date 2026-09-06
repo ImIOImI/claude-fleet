@@ -250,6 +250,25 @@ const api = {
       } finally {
         ipcRenderer.removeListener(channel, handler);
       }
+    },
+    /**
+     * Pull the workspace's image and report whether a stopped container is now
+     * running a stale image (a newer one landed) — the cue to recreate it on
+     * resume so the update takes effect. Streams pull progress like ensureImage.
+     */
+    resumeImageStale: async (
+      id: string,
+      onProgress: (p: { message: string }) => void
+    ): Promise<boolean> => {
+      const channelId = globalThis.crypto.randomUUID();
+      const channel = `workspace:ensureImage:progress:${channelId}`;
+      const handler = (_e: IpcRendererEvent, p: { message: string }) => onProgress(p);
+      ipcRenderer.on(channel, handler);
+      try {
+        return await ipcRenderer.invoke('workspace:resumeImageStale', channelId, id);
+      } finally {
+        ipcRenderer.removeListener(channel, handler);
+      }
     }
   },
   local: {
@@ -364,8 +383,11 @@ const api = {
   fs: {
     isDirectory: (path: string): Promise<boolean> => ipcRenderer.invoke('fs:isDirectory', path),
     mkdirp: (path: string): Promise<void> => ipcRenderer.invoke('fs:mkdirp', path),
-    /** Reveal a host path in the OS file manager. Resolves '' on success, else an error string. */
-    openPath: (path: string): Promise<string> => ipcRenderer.invoke('fs:openPath', path)
+    /** Reveal a host path in the OS file manager. Resolves '' on success, else an error string.
+     *  `distro` names the WSL distro a Linux path lives in (wsl-launcher
+     *  workspaces); omit it for ordinary host paths. */
+    openPath: (path: string, distro?: string): Promise<string> =>
+      ipcRenderer.invoke('fs:openPath', path, distro)
   },
   files: {
     /**
