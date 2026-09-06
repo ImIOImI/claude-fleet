@@ -479,13 +479,19 @@ function WorkspaceBlock({
   const fullPath = workspaceHostPath(workspace);
   const limits = formatResourceLimits(workspace.resources);
 
-  const openPath = async (path: string) => {
-    const err = await window.api.fs.openPath(path);
+  // A wsl-launcher workspace's root is a Linux path inside the distro; the
+  // Windows app can only reveal it through \\wsl.localhost\<distro>\…, so name
+  // the distro when asking main to open it (#387). The shared folder is a real
+  // host path and passes no distro.
+  const distro = workspace.launcher?.mode === 'wsl' ? workspace.launcher.distro : undefined;
+
+  const openPath = async (path: string, inDistro?: string) => {
+    const err = await window.api.fs.openPath(path, inDistro);
     if (err) {
       void window.api.app.logError({
         type: 'openPath',
         message: `Could not open folder: ${err}`,
-        extra: { path }
+        extra: { path, distro: inDistro }
       });
     }
   };
@@ -497,7 +503,7 @@ function WorkspaceBlock({
         <button
           type="button"
           className="obs-ws-row obs-ws-action"
-          onClick={() => openPath(fullPath)}
+          onClick={() => openPath(fullPath, distro)}
           title={`Open ${fullPath} (private — only this container)`}
         >
           <span className="obs-ws-key">private</span>
