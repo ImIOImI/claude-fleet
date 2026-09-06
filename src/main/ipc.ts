@@ -958,6 +958,21 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     }, image);
   });
 
+  // Resume-time image refresh: pull the workspace's image and report whether a
+  // stopped container is now stale (a newer image landed) so the renderer can
+  // recreate it to apply the update. Reuses the ensureImage progress channel.
+  ipcMain.handle(
+    'workspace:resumeImageStale',
+    async (event, channelId: string, id: string): Promise<boolean> => {
+      const win = BrowserWindow.fromWebContents(event.sender);
+      const manifest = await readWorkspaceManifest(id);
+      if (!manifest) return false;
+      return dockerBackend.isResumeImageStale(id, manifest.image, (p) => {
+        win?.webContents.send(`workspace:ensureImage:progress:${channelId}`, p);
+      });
+    }
+  );
+
   ipcMain.handle('workspace:list', async () => {
     const all = await listAllWorkspaces();
     // Keep the watcher's per-workspace mirror default fresh (cheap; runs on

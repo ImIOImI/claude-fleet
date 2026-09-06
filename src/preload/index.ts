@@ -250,6 +250,25 @@ const api = {
       } finally {
         ipcRenderer.removeListener(channel, handler);
       }
+    },
+    /**
+     * Pull the workspace's image and report whether a stopped container is now
+     * running a stale image (a newer one landed) — the cue to recreate it on
+     * resume so the update takes effect. Streams pull progress like ensureImage.
+     */
+    resumeImageStale: async (
+      id: string,
+      onProgress: (p: { message: string }) => void
+    ): Promise<boolean> => {
+      const channelId = globalThis.crypto.randomUUID();
+      const channel = `workspace:ensureImage:progress:${channelId}`;
+      const handler = (_e: IpcRendererEvent, p: { message: string }) => onProgress(p);
+      ipcRenderer.on(channel, handler);
+      try {
+        return await ipcRenderer.invoke('workspace:resumeImageStale', channelId, id);
+      } finally {
+        ipcRenderer.removeListener(channel, handler);
+      }
     }
   },
   local: {
