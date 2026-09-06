@@ -32,6 +32,7 @@ import {
   type PeerKind
 } from './sessionStatusMerge';
 import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget, UiPrefs } from '../../preload';
+import { isWarm } from './fleetTemperature';
 
 /** The lifecycle IPC surface `applyContainerEdit` needs, bound to `window.api`.
  *  Shared by the restart-to-apply banner and the resume-time image refresh. */
@@ -47,7 +48,7 @@ function makeLifecycleApi(): WorkspaceLifecycleApi {
   };
 }
 
-export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted';
+export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted' | 'unreachable';
 export type WorkspaceKind = 'container' | 'local';
 export type AuthMode = 'oauth' | 'apikey' | 'endpoint';
 
@@ -100,6 +101,8 @@ export interface WorkspaceSummary {
   color?: WorkspaceColor;
   containerId?: string;
   state: WorkspaceState;
+  /** Present on state:'unreachable' rows — the state before the daemon died. */
+  lastKnownState?: 'running' | 'paused' | 'stopped' | 'deleted';
   status?: string;
   workspaceRoot: string;
   workspaceSubdir: string;
@@ -353,48 +356,6 @@ export function App() {
     token: number;
   } | null>(null);
   const activateTokenRef = useRef(0);
-  const handleResumeSession = useCallback(
-    async (item: SessionListItem): Promise<void> => {
-      try {
-        // Already open as a live tab somewhere? Jump to it instead of
-        // spawning a duplicate `claude --resume` tab.
-        const openTab = openSessionsRef.current.get(item.id);
-        if (openTab) {
-          setSelectedId(openTab.workspaceId);
-          setActivateRequest({ ...openTab, token: ++activateTokenRef.current });
-          return;
-        }
-        const res = await window.api.sessions.resume(item.workspaceId);
-        if (!res) {
-          // Container gone / not recreatable here — non-fatal.
-          // eslint-disable-next-line no-console
-          console.warn('resume: workspace container could not be brought up', item.workspaceId);
-          return;
-        }
-        setSelectedId(item.workspaceId);
-        setResumeRequest({
-          workspaceId: item.workspaceId,
-          claudeSessionId: item.id,
-          title: item.userSetName || item.aiTitle || item.firstUserMessage || 'resumed',
-          token: ++resumeTokenRef.current
-        });
-        refresh();
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn('resume failed:', err);
-      }
-    },
-    []
-  );
-
-  // Loadout reload request, targeted at one workspace (#16). Set when a loadout
-  // is installed and the auto-reload setting is on; handed to the matching
-  // TerminalPane, which reloads its active session in place once idle.
-  const [reloadRequest, setReloadRequest] = useState<{
-    workspaceId: string;
-    token: number;
-  } | null>(null);
-  const reloadRequestTokenRef = useRef(0);
 
   // Toasts — one unified component (src/renderer/src/toasts.ts + components/
   // Toast.tsx) drives both the global bottom-center stack here and the in-tab
@@ -424,6 +385,61 @@ export function App() {
     },
     []
   );
+
+  const handleResumeSession = useCallback(
+    async (item: SessionListItem): Promise<void> => {
+      try {
+        // Already open as a live tab somewhere? Jump to it instead of
+        // spawning a duplicate `claude --resume` tab.
+        const openTab = openSessionsRef.current.get(item.id);
+        if (openTab) {
+          setSelectedId(openTab.workspaceId);
+          setActivateRequest({ ...openTab, token: ++activateTokenRef.current });
+          return;
+        }
+        // Guard: if the target workspace is unreachable (daemon down), calling
+        // sessions.resume would hit ECONNREFUSED. Surface a toast and bail.
+        const ws = workspacesRef.current.find((w) => w.id === item.workspaceId);
+        if (ws?.state === 'unreachable') {
+          pushToast(
+            'Docker daemon unreachable — resume this session when it\'s back.',
+            'Resume blocked',
+            6000,
+            'error'
+          );
+          return;
+        }
+        const res = await window.api.sessions.resume(item.workspaceId);
+        if (!res) {
+          // Container gone / not recreatable here — non-fatal.
+          // eslint-disable-next-line no-console
+          console.warn('resume: workspace container could not be brought up', item.workspaceId);
+          return;
+        }
+        setSelectedId(item.workspaceId);
+        setResumeRequest({
+          workspaceId: item.workspaceId,
+          claudeSessionId: item.id,
+          title: item.userSetName || item.aiTitle || item.firstUserMessage || 'resumed',
+          token: ++resumeTokenRef.current
+        });
+        refresh();
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('resume failed:', err);
+      }
+    },
+    [pushToast]
+  );
+
+  // Loadout reload request, targeted at one workspace (#16). Set when a loadout
+  // is installed and the auto-reload setting is on; handed to the matching
+  // TerminalPane, which reloads its active session in place once idle.
+  const [reloadRequest, setReloadRequest] = useState<{
+    workspaceId: string;
+    token: number;
+  } | null>(null);
+  const reloadRequestTokenRef = useRef(0);
   // MCP health → a single sticky "unreachable" toast (#159 follow-up). Main
   // broadcasts mcp:status on listener bind success/failure (change-only). While
   // down we show one keyed sticky error toast (Open log + ✕); the ✕ snoozes it
@@ -645,11 +661,6 @@ export function App() {
     if (!window.api) return;
     const ok = await window.api.workspace.backendReady();
     setBackendReady(ok);
-    if (!ok) {
-      setWorkspaces([]);
-      workspacesRef.current = [];
-      return;
-    }
     const list = applyIdOrder((await window.api.workspace.list()) as WorkspaceSummary[], wsOrderRef.current);
     setWorkspaces(list);
     workspacesRef.current = list;
@@ -716,12 +727,10 @@ export function App() {
   //   - If the selected workspace leaves the warm set (stopped/removed), fall
   //     back to the leftmost warm one (or nothing).
   useEffect(() => {
-    const warm = (w?: WorkspaceSummary): boolean =>
-      !!w && (w.state === 'running' || w.state === 'paused');
     const pending = pendingSelectRef.current;
     if (pending) {
       const pw = workspaces.find((w) => w.id === pending);
-      if (warm(pw)) {
+      if (isWarm(pw)) {
         pendingSelectRef.current = null;
         setSelectedId(pending);
         return;
@@ -730,8 +739,8 @@ export function App() {
       return;
     }
     const sel = selectedId ? workspaces.find((w) => w.id === selectedId) : undefined;
-    if (warm(sel)) return;
-    const firstWarm = workspaces.find(warm);
+    if (isWarm(sel)) return;
+    const firstWarm = workspaces.find(isWarm);
     setSelectedId(firstWarm?.id ?? null);
   }, [workspaces, selectedId]);
 
@@ -1292,7 +1301,11 @@ export function App() {
   );
 
   return (
-    <div className={`app${dragging ? ' dragging' : ''}`}>
+    <div
+      className={`app${dragging ? ' dragging' : ''}${
+        backendReady === false ? ' daemon-down' : ''
+      }`}
+    >
       <WorkspaceTabStrip
         workspaces={workspaces}
         summaries={summaries}
@@ -1311,6 +1324,14 @@ export function App() {
         onReorderWorkspace={handleReorderWorkspaces}
         waitingByWorkspace={waitingByWorkspaceFlag}
       />
+
+      {backendReady === false && (
+        <div className="daemon-banner" role="status">
+          <span className="dot" aria-hidden="true" />
+          Docker daemon unreachable — container workspaces are shown from last-known state and
+          can&apos;t be started or attached until it&apos;s back.
+        </div>
+      )}
 
       <div
         className={`app-body${leftCollapsed ? ' left-collapsed' : ''}${
@@ -1344,10 +1365,16 @@ export function App() {
           style={selected ? { ['--hue' as never]: colorFor(selected) } : undefined}
         >
           <div className="main-body">
-            {backendReady === false ? (
-              <DockerDisconnected onRetry={refresh} />
-            ) : liveCount === 0 ? (
+            {liveCount === 0 ? (
               <FirstRun onNewWorkspace={() => setCreateOpen(true)} />
+            ) : selected?.state === 'unreachable' ? (
+              <div className="empty">
+                <div className="icon-card error">!</div>
+                <h2>Docker daemon unreachable</h2>
+                <p>
+                  {selected.name} will reattach automatically when Docker is back.
+                </p>
+              </div>
             ) : !selected || !selected.containerId ? (
               <div className="empty">
                 <p style={{ color: 'var(--ink-2)' }}>No workspace selected.</p>
@@ -1439,6 +1466,7 @@ export function App() {
         open={createOpen}
         workspaces={workspaces}
         vaultAvailable={vaultAvailable}
+        dockerUp={backendReady !== false}
         onClose={() => {
           setCreateOpen(false);
           setCloneSource(null);
@@ -1536,26 +1564,6 @@ export function App() {
         </div>
       )}
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
-    </div>
-  );
-}
-
-function DockerDisconnected({ onRetry }: { onRetry: () => void }) {
-  return (
-    <div className="empty">
-      <div className="icon-card error">!</div>
-      <span className="eyebrow error">
-        <span className="dot" />
-        disconnected
-      </span>
-      <h2>Docker daemon unreachable</h2>
-      <p>
-        Start Docker Desktop (with WSL2 integration on Windows). claude-fleet will reconnect
-        automatically once it's back.
-      </p>
-      <button className="btn" onClick={onRetry}>
-        Retry connection
-      </button>
     </div>
   );
 }

@@ -15,6 +15,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ulid } from 'ulid';
 import { colorFor, type WorkspaceSummary } from '../App';
+import { isCold } from '../fleetTemperature';
 import { ModalBackdrop } from './ModalBackdrop';
 import {
   WorkspaceForm,
@@ -26,6 +27,8 @@ interface Props {
   open: boolean;
   workspaces: WorkspaceSummary[];
   vaultAvailable: boolean | null;
+  /** Whether Docker is reachable. Gates container-kind create and resume. */
+  dockerUp: boolean;
   onClose: () => void;
   onCreate: (submit: WorkspaceFormSubmit, setStatus: (msg: string | null) => void) => Promise<void>;
   onResume: (submit: WorkspaceFormSubmit, setStatus: (msg: string | null) => void) => Promise<void>;
@@ -83,6 +86,7 @@ export function WorkspaceModal({
   open,
   workspaces,
   vaultAvailable,
+  dockerUp,
   onClose,
   onCreate,
   onResume,
@@ -91,11 +95,12 @@ export function WorkspaceModal({
   initialNewTabValues,
   onOpenSettings
 }: Props) {
-  // Saved tab = the "cold" fleet: stopped + deleted (needs a restart). The
-  // "warm" fleet (running + paused) lives in the top strip and is edited from
-  // the chip ⋮ menu — so a workspace appears in exactly one place (#21).
+  // Saved tab = the "cold" fleet: stopped, deleted, and unreachable-was-cold
+  // workspaces (#21, #380). Unreachable-was-warm chips stay in the strip
+  // (Task 4); isCold encodes the invariant so a workspace appears in exactly
+  // one place.
   const saved = useMemo(
-    () => workspaces.filter((w) => w.state === 'stopped' || w.state === 'deleted'),
+    () => workspaces.filter(isCold),
     [workspaces]
   );
 
@@ -350,6 +355,7 @@ export function WorkspaceModal({
                                 initial={workspaceToFormInitial(w)}
                                 workspaces={workspaces}
                                 vaultAvailable={vaultAvailable}
+                                dockerUp={dockerUp}
                                 onSubmit={handleResume}
                                 onCancel={() => setExpandedId(null)}
                                 onClone={async (submit) => {
@@ -368,6 +374,11 @@ export function WorkspaceModal({
                                   // takes the foreground.
                                   onClose();
                                 }}
+                                deleteDisabledReason={
+                                  w.state === 'unreachable' && w.kind !== 'local'
+                                    ? 'Docker daemon unreachable'
+                                    : undefined
+                                }
                                 onOpenSettings={onOpenSettings}
                               />
                             )}
@@ -390,6 +401,7 @@ export function WorkspaceModal({
               initial={initialNewTabValues ?? undefined}
               workspaces={workspaces}
               vaultAvailable={vaultAvailable}
+              dockerUp={dockerUp}
               onSubmit={handleCreate}
               onCancel={onClose}
               onOpenSettings={onOpenSettings}

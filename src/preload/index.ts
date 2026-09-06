@@ -59,7 +59,7 @@ export interface SessionListItem {
   usd: number;
   workspaceName: string;
   workspaceColorHue: number | null;
-  workspaceState: 'running' | 'paused' | 'stopped' | 'deleted';
+  workspaceState: 'running' | 'paused' | 'stopped' | 'deleted' | 'unreachable';
   /** Latest summary-chapter tags, relevance-ordered; [] when unsummarized. */
   tags: string[];
 }
