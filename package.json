@@ -22,7 +22,8 @@
     "test:unit": "vitest run",
     "test:e2e": "playwright test",
     "pack": "electron-vite build && electron-builder --dir",
-    "dist": "electron-vite build && electron-builder"
+    "dist": "electron-vite build && electron-builder",
+    "build:qwen-sidecar": "esbuild src/main/qwenAdapter.ts --bundle --format=esm --platform=node --outfile=docker/qwen/qwenAdapter.mjs"
   },
   "dependencies": {
     "@huggingface/transformers": "^3",

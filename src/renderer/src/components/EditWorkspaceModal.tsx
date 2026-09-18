@@ -123,6 +123,7 @@ export function containerLevelChanged(
 ): boolean {
   if (before.authMode !== after.authMode) return true;
   if ((before.endpointId ?? '') !== (after.endpointId ?? '')) return true;
+  if ((before.harness ?? '') !== (after.harness ?? '')) return true;
   if ((before.image ?? '') !== (after.image ?? '')) return true;
   // env.plain values
   const beforePlain = before.env.plain;
