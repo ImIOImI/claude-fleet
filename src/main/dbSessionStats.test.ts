@@ -142,6 +142,9 @@ describe('session_stats + session_tool_counts invariant', () => {
     ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
     ingestLine(WS1, SES_A, assistantLine('a2', { inputTokens: 50, cacheRead: 400, cacheCreation: 50 }));
     ingestLine(WS1, SES_A, assistantLine('a3', { inputTokens: 200 }));
+    // Add a zero-token assistant line to SES_A AFTER the max—bearing line to prove MAX never lowers.
+    //   line 4: input=0 + 0 + 0 = 0  (must not lower the max)
+    ingestLine(WS1, SES_A, assistantLine('a4')); // no token opts → all 0
     // Tool calls for SES_A: 'Read' appears twice, 'Edit' once.
     ingestLine(WS1, SES_A, toolUseLine('t1', 'Read'));
     ingestLine(WS1, SES_A, toolUseLine('t2', 'Read'));
@@ -160,11 +163,23 @@ describe('session_stats + session_tool_counts invariant', () => {
     const d = openDb(dir);
     expectRollupsMatchEvents(d);
 
-    // Spot-check: SES_A max_context_tokens must be 500 (the a2 candidate).
-    const statsA = d
-      .prepare(`SELECT max_context_tokens FROM session_stats WHERE session_id = ?`)
-      .get(SES_A) as { max_context_tokens: number } | undefined;
-    expect(statsA?.max_context_tokens).toBe(500);
+    // Spot-check: SES_A max_context_tokens must be 500 (the a2 candidate, not lowered by a4's zeros).
+    expect(d.prepare(`SELECT max_context_tokens FROM session_stats WHERE session_id = ?`).get(SES_A))
+      .toEqual({ max_context_tokens: 500 });
+    // Spot-check: SES_A tool counts are exactly 'Read'=2 and 'Edit'=1.
+    expect(d.prepare(`SELECT count FROM session_tool_counts WHERE session_id = ? AND tool_name = ?`)
+      .get(SES_A, 'Read'))
+      .toEqual({ count: 2 });
+    expect(d.prepare(`SELECT count FROM session_tool_counts WHERE session_id = ? AND tool_name = ?`)
+      .get(SES_A, 'Edit'))
+      .toEqual({ count: 1 });
+    // Spot-check: SES_B max_context_tokens is 0 (only b1's zero-token line).
+    expect(d.prepare(`SELECT max_context_tokens FROM session_stats WHERE session_id = ?`).get(SES_B))
+      .toEqual({ max_context_tokens: 0 });
+    // Spot-check: SES_B tool count is exactly 'Bash'=1.
+    expect(d.prepare(`SELECT count FROM session_tool_counts WHERE session_id = ? AND tool_name = ?`)
+      .get(SES_B, 'Bash'))
+      .toEqual({ count: 1 });
   });
 
   it('sessions with no assistant events have NO session_stats row', () => {
