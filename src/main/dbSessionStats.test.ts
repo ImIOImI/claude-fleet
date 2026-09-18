@@ -6,6 +6,11 @@
 //   2. deleteSession (removes the session's rollup rows)
 //   3. migrate() v14 DROP+backfill (drift self-heal after user_version reset)
 //
+// Task 2 adds:
+//   4. Reader equivalence — summaryForSession reads rollups, not events
+//   5. EXPLAIN pins — OBSERVED_MAX_SQL + TOP_TOOLS_SQL never mention events
+//   6. EXPLAIN pin — LATEST_ASSISTANT_SQL uses a session-prefixed index
+//
 // NOTE: better-sqlite3 is ABI-broken in this container ("Module did not
 // self-register"). The expected local outcome is a fast import failure — CI
 // runs the real assertions. Gate locally with `npm run typecheck:node`.
@@ -14,7 +19,16 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { openDb, closeDb, ingestLine, deleteSession } from './db.js';
+import {
+  openDb,
+  closeDb,
+  ingestLine,
+  deleteSession,
+  summaryForSession,
+  OBSERVED_MAX_SQL,
+  TOP_TOOLS_SQL,
+  LATEST_ASSISTANT_SQL,
+} from './db.js';
 
 let dir: string;
 
@@ -292,5 +306,99 @@ describe('session_stats + session_tool_counts invariant', () => {
       )
       .get();
     expect(idx).toBeTruthy();
+  });
+});
+
+describe('summary reader equivalence + EXPLAIN pins (Task 2)', () => {
+  it('summaryForSession reads max/topTools from rollups, not events', () => {
+    // Reproduce case-1 data (same as 'mixed ingest' above) so we can assert
+    // hardcoded expected values derived from the known fixture.
+    //   SES_A max: a2's 50+400+50 = 500 (the winner; a3=200, a4=0 don't lower it)
+    //   SES_A tools: Read=2, Edit=1 (count desc then name asc)
+    //   SES_B max: 0  (b1's all-zero line)
+    //   SES_B tools: [{name:'Bash', count:1}]
+    ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
+    ingestLine(WS1, SES_A, assistantLine('a2', { inputTokens: 50, cacheRead: 400, cacheCreation: 50 }));
+    ingestLine(WS1, SES_A, assistantLine('a3', { inputTokens: 200 }));
+    ingestLine(WS1, SES_A, assistantLine('a4'));
+    ingestLine(WS1, SES_A, toolUseLine('t1', 'Read'));
+    ingestLine(WS1, SES_A, toolUseLine('t2', 'Read'));
+    ingestLine(WS1, SES_A, toolUseLine('t3', 'Edit'));
+    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+
+    ingestLine(WS2, SES_B, assistantLine('b1'));
+    ingestLine(WS2, SES_B, toolUseLine('t4', 'Bash'));
+
+    const summaryA = summaryForSession(SES_A);
+    expect(summaryA).not.toBeNull();
+
+    // contextWindowTokens: contextWindowFor('claude-sonnet', 500) → 200_000
+    // (500 ≤ 200K family window, [1m] marker absent)
+    expect(summaryA!.contextWindowTokens).toBe(200_000);
+
+    // topTools must be count-desc, then name-asc for ties (deterministic).
+    // Read=2 first, Edit=1 second — no ties here.
+    expect(summaryA!.topTools).toEqual([
+      { name: 'Read', count: 2 },
+      { name: 'Edit', count: 1 },
+    ]);
+
+    const summaryB = summaryForSession(SES_B);
+    expect(summaryB).not.toBeNull();
+    // SES_B has only zero-token assistant events → observedMax=0 → 200K window.
+    expect(summaryB!.contextWindowTokens).toBe(200_000);
+    expect(summaryB!.topTools).toEqual([{ name: 'Bash', count: 1 }]);
+  });
+
+  it('session with no assistant events: absent-row semantics yield safe defaults', () => {
+    // Only user lines — no assistant events. session_stats has no row for SES_A.
+    // summaryForSession must not throw and must expose:
+    //   contextWindowTokens = 200_000 (contextWindowFor(null, 0))
+    //   topTools = []
+    //   lastTurnContextTokens = null
+    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+
+    const summary = summaryForSession(SES_A);
+    expect(summary).not.toBeNull();
+    expect(summary!.contextWindowTokens).toBe(200_000);
+    expect(summary!.topTools).toEqual([]);
+    expect(summary!.lastTurnContextTokens).toBeNull();
+  });
+
+  it('observedMax/topTools EXPLAIN plans never touch events', () => {
+    // Pin: both rollup queries must be served from their tables, not events.
+    // If either plan mentions 'events', a future schema drift broke the query.
+    const d = openDb(dir);
+
+    // OBSERVED_MAX_SQL has one ? (session_id).
+    const maxPlan = d
+      .prepare(`EXPLAIN QUERY PLAN ${OBSERVED_MAX_SQL}`)
+      .all('x') as Array<{ detail: string }>;
+    const maxDetails = maxPlan.map((r) => r.detail).join(' | ');
+    expect(maxDetails).not.toMatch(/\bevents\b/);
+
+    // TOP_TOOLS_SQL has two ? (session_id, limit).
+    const toolsPlan = d
+      .prepare(`EXPLAIN QUERY PLAN ${TOP_TOOLS_SQL}`)
+      .all('x', 5) as Array<{ detail: string }>;
+    const toolsDetails = toolsPlan.map((r) => r.detail).join(' | ');
+    expect(toolsDetails).not.toMatch(/\bevents\b/);
+  });
+
+  it('LATEST_ASSISTANT_SQL EXPLAIN plan uses a session-prefixed index', () => {
+    // Pin: the query must use idx_events_session_type (or idx_events_session_ts)
+    // and must NOT use the bare idx_events_type index (which scans the entire
+    // table for assistant events across all sessions).
+    const d = openDb(dir);
+
+    const plan = d
+      .prepare(`EXPLAIN QUERY PLAN ${LATEST_ASSISTANT_SQL}`)
+      .all('x') as Array<{ detail: string }>;
+    const details = plan.map((r) => r.detail).join(' | ');
+
+    // Must use a session-prefixed index (session_type or session_ts).
+    expect(details).toMatch(/idx_events_session_type|idx_events_session_ts/);
+    // Must NOT fall back to the bare type index (no session prefix → table scan).
+    expect(details).not.toMatch(/\bidx_events_type\b/);
   });
 });
