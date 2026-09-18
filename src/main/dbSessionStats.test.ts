@@ -63,6 +63,21 @@ function assistantLine(
   });
 }
 
+// Build an assistant JSONL line with NO usage object at all (genuinely NULL
+// tokens in the database, not explicit zeros). Exercises the COALESCE(NULL, 0)
+// path in the session_stats candidate computation.
+function assistantLineNoUsage(uuid: string): string {
+  return JSON.stringify({
+    type: 'assistant',
+    uuid,
+    timestamp: '2026-07-01T00:00:00Z',
+    message: {
+      model: 'claude-sonnet',
+      content: 'response text',
+    },
+  });
+}
+
 // Build a user JSONL line — no usage, no model, no tool_name → contributes to
 // NEITHER session_stats nor session_tool_counts.
 function userLine(uuid: string, content: string): string {
@@ -156,9 +171,9 @@ describe('session_stats + session_tool_counts invariant', () => {
     ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
     ingestLine(WS1, SES_A, assistantLine('a2', { inputTokens: 50, cacheRead: 400, cacheCreation: 50 }));
     ingestLine(WS1, SES_A, assistantLine('a3', { inputTokens: 200 }));
-    // Add a zero-token assistant line to SES_A AFTER the max—bearing line to prove MAX never lowers.
-    //   line 4: input=0 + 0 + 0 = 0  (must not lower the max)
-    ingestLine(WS1, SES_A, assistantLine('a4')); // no token opts → all 0
+    // Add an explicit-zero-token assistant line to SES_A AFTER the max—bearing line to prove MAX never lowers.
+    //   line 4: input=0 + 0 + 0 = 0  (explicit zeros via ?? 0 defaults; must not lower the max)
+    ingestLine(WS1, SES_A, assistantLine('a4')); // no token opts → all explicitly 0
     // Tool calls for SES_A: 'Read' appears twice, 'Edit' once.
     ingestLine(WS1, SES_A, toolUseLine('t1', 'Read'));
     ingestLine(WS1, SES_A, toolUseLine('t2', 'Read'));
@@ -167,10 +182,11 @@ describe('session_stats + session_tool_counts invariant', () => {
     ingestLine(WS1, SES_A, userLine('u1', 'hello'));
     ingestLine(WS1, SES_A, userLine('u2', 'world'));
 
-    // SES_B: single assistant line with all-null token fields (→ candidate 0).
-    // An assistant line with all-NULL tokens: must produce max_context_tokens=0,
-    // not lower any pre-existing max (here it's the only event so 0 is correct).
-    ingestLine(WS2, SES_B, assistantLine('b1')); // no token opts → all 0
+    // SES_B: assistant lines with and without usage objects.
+    // First, a line with explicit zeros (??0 defaults).
+    ingestLine(WS2, SES_B, assistantLine('b1')); // no token opts → all explicitly 0
+    // Second, a line with NO usage object at all (NULL in DB): exercises COALESCE(NULL,0)→0.
+    ingestLine(WS2, SES_B, assistantLineNoUsage('b2'));
     // One tool call for SES_B.
     ingestLine(WS2, SES_B, toolUseLine('t4', 'Bash'));
 
@@ -187,7 +203,7 @@ describe('session_stats + session_tool_counts invariant', () => {
     expect(d.prepare(`SELECT count FROM session_tool_counts WHERE session_id = ? AND tool_name = ?`)
       .get(SES_A, 'Edit'))
       .toEqual({ count: 1 });
-    // Spot-check: SES_B max_context_tokens is 0 (only b1's zero-token line).
+    // Spot-check: SES_B max_context_tokens is 0 (b1 and b2 both yield candidate 0).
     expect(d.prepare(`SELECT max_context_tokens FROM session_stats WHERE session_id = ?`).get(SES_B))
       .toEqual({ max_context_tokens: 0 });
     // Spot-check: SES_B tool count is exactly 'Bash'=1.

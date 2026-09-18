@@ -62,10 +62,10 @@ CREATE TABLE session_tool_counts (
 When the event insert lands (`info.changes > 0` — same duplicate-replay
 guard as `session_costs`):
 
-- `type === 'assistant'` and any token column non-null → upsert
-  `session_stats` with
+- `type === 'assistant'` → upsert `session_stats` with
   `max_context_tokens = MAX(max_context_tokens, excluded.max_context_tokens)`
-  (candidate = the same COALESCE sum the reader uses today).
+  (candidate = the same COALESCE sum the reader uses today; all-NULL tokens
+  yield candidate 0).
 - `tool_name IS NOT NULL` → upsert `session_tool_counts` with
   `count = count + 1`.
 - `deleteSession` deletes both tables' rows in its existing transaction.
