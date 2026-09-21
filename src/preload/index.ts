@@ -403,18 +403,18 @@ const api = {
         return '';
       }
     },
-    /** OS file drag → saved container paths (`/workspace/_dropped/<name>`). */
+    /** OS file drag → saved paths the agent can open (backend-aware, #393). */
     dropOsFiles: (workspaceId: string, sourcePaths: string[]): Promise<string[]> =>
       ipcRenderer.invoke('files:dropOsFiles', workspaceId, sourcePaths),
-    /** Clipboard image / inline bytes → saved container path. */
+    /** Clipboard image / inline bytes → saved agent-visible path (#393). */
     dropBytes: (
       workspaceId: string,
       payload: { suggestedName?: string; mime?: string; bytes: Uint8Array }
     ): Promise<string> => ipcRenderer.invoke('files:dropBytes', workspaceId, payload),
-    /** Dragged web URL (fetched in main) → saved container path. */
+    /** Dragged web URL (fetched in main) → saved agent-visible path (#393). */
     dropUrl: (workspaceId: string, url: string): Promise<string> =>
       ipcRenderer.invoke('files:dropUrl', workspaceId, url),
-    /** Dragged text/HTML → saved container path. */
+    /** Dragged text/HTML → saved agent-visible path (#393). */
     dropText: (
       workspaceId: string,
       payload: { mime: 'text/plain' | 'text/html'; text: string }

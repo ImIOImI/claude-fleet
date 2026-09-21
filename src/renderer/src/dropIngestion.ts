@@ -136,11 +136,14 @@ export function useDropIngestion({ workspaceId, notify }: Options): { dragging: 
     const announce = (paths: string[]): void => {
       const joined = paths.join('\n');
       void window.api.clipboard.write(joined);
+      // The saved paths are backend-aware (#393); derive the shared parent
+      // from the first one rather than assuming the container's /workspace.
+      const parentDir = paths[0]?.replace(/[/\\][^/\\]*$/, '') || '_dropped';
       notify(
         'ok',
         paths.length === 1
           ? `Saved ${paths[0]} (path copied)`
-          : `Saved ${paths.length} files to /workspace/_dropped/ (paths copied)`
+          : `Saved ${paths.length} files to ${parentDir}/ (paths copied)`
       );
     };
     const fail = (err: unknown): void => {

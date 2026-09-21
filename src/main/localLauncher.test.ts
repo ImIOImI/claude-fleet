@@ -10,6 +10,7 @@ import {
   wrapSpawnForLauncher,
   wslLocalProjectsDir,
   wslInDistroPath,
+  agentDropboxPath,
   applyClaudeUpdateDecision,
   type WorkspaceLauncher
 } from './localLauncher.js';
@@ -52,6 +53,86 @@ describe('path translation', () => {
     expect(windowsPathToWslPath('C:\\Users\\troy\\AppData')).toBe('/mnt/c/Users/troy/AppData'));
   it('windowsPathToWslPath returns null for relative', () =>
     expect(windowsPathToWslPath('foo\\bar')).toBeNull());
+});
+
+describe('agentDropboxPath (#393)', () => {
+  const wslLauncher: WorkspaceLauncher = {
+    mode: 'wsl',
+    distro: 'Ubuntu',
+    shell: '/usr/bin/bash',
+    home: '/home/troy',
+    claudePath: '/home/troy/.local/bin/claude'
+  };
+
+  it('container: the bind-mount path, ignoring the host location', () =>
+    expect(
+      agentDropboxPath(
+        { kind: 'container' },
+        'C:\\Users\\troyk\\fleet\\01ID\\_dropped\\paste.png',
+        'paste.png',
+        '/workspace/_dropped'
+      )
+    ).toBe('/workspace/_dropped/paste.png'));
+
+  it('local native: the real host path (claude runs on the host)', () =>
+    expect(
+      agentDropboxPath(
+        { kind: 'local', launcher: { mode: 'native' } },
+        '/home/troy/fleet/01ID/_dropped/paste.png',
+        'paste.png',
+        '/workspace/_dropped'
+      )
+    ).toBe('/home/troy/fleet/01ID/_dropped/paste.png'));
+
+  it('local, no launcher: treated as native (host path)', () =>
+    expect(
+      agentDropboxPath(
+        { kind: 'local' },
+        '/home/troy/fleet/01ID/_dropped/paste.png',
+        'paste.png',
+        '/workspace/_dropped'
+      )
+    ).toBe('/home/troy/fleet/01ID/_dropped/paste.png'));
+
+  it('local custom launcher: the real host path', () =>
+    expect(
+      agentDropboxPath(
+        { kind: 'local', launcher: { mode: 'custom', command: '{claude} {args}' } },
+        '/home/troy/fleet/01ID/_dropped/paste.png',
+        'paste.png',
+        '/workspace/_dropped'
+      )
+    ).toBe('/home/troy/fleet/01ID/_dropped/paste.png'));
+
+  it('local wsl: drive-letter host path → the /mnt/<drive> automount view', () =>
+    expect(
+      agentDropboxPath(
+        { kind: 'local', launcher: wslLauncher },
+        'C:\\Users\\troyk\\fleet\\01ID\\_dropped\\paste.png',
+        'paste.png',
+        '/workspace/_dropped'
+      )
+    ).toBe('/mnt/c/Users/troyk/fleet/01ID/_dropped/paste.png'));
+
+  it('local wsl: UNC host path → the plain in-distro path', () =>
+    expect(
+      agentDropboxPath(
+        { kind: 'local', launcher: wslLauncher },
+        '\\\\wsl.localhost\\Ubuntu\\home\\troy\\fleet\\01ID\\_dropped\\paste.png',
+        'paste.png',
+        '/workspace/_dropped'
+      )
+    ).toBe('/home/troy/fleet/01ID/_dropped/paste.png'));
+
+  it('local wsl: an untranslatable host path fails loudly', () =>
+    expect(() =>
+      agentDropboxPath(
+        { kind: 'local', launcher: wslLauncher },
+        'relative\\_dropped\\paste.png',
+        'paste.png',
+        '/workspace/_dropped'
+      )
+    ).toThrow(/WSL/));
 });
 
 describe('buildWslSpawnEnv', () => {

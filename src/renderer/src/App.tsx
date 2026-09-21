@@ -1558,7 +1558,7 @@ export function App() {
           <div className="drop-overlay-card">
             <div className="drop-overlay-title">Drop to add to this workspace</div>
             <div className="drop-overlay-sub">
-              {selected ? `→ ${selected.name} · /workspace/_dropped/` : 'Select a workspace first'}
+              {selected ? `→ ${selected.name} · _dropped/` : 'Select a workspace first'}
             </div>
           </div>
         </div>

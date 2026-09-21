@@ -1,11 +1,17 @@
 // Drag-and-drop file ingestion.
 //
 // Drops (OS files, pasted images, dragged web content, dragged text) are
-// saved into the selected workspace's private folder under `_dropped/`, so
-// the in-container agent can read them at `/workspace/_dropped/<name>`. The
+// saved into the selected workspace's private folder under `_dropped/`. The
 // renderer routes every drop to the currently-selected workspace and shows
-// the returned container path in a toast (and on the clipboard) for the user
-// to paste into their prompt.
+// the returned path in a toast (and on the clipboard) for the user to paste
+// into their prompt. That path is BACKEND-AWARE (#393): the host always writes
+// to `<fleetRoot>/<id>/_dropped/`, but the string handed to the agent depends
+// on how *it* reaches that folder — the `/workspace` bind mount for a
+// container, the real host path for a native local workspace, or the
+// `/mnt/<drive>` automount view for a wsl-launcher one. See `agentDropboxPath`
+// in localLauncher.ts; a hard-coded `/workspace/...` here was unopenable for
+// wsl-launcher workspaces (their dropbox is a Windows path the distro agent
+// only reaches via /mnt).
 //
 // Host layout: `<fleetRoot>/<id>/_dropped/`. The dir gets a `.gitignore`
 // containing `*` so drops never get committed regardless of the repo's root
@@ -19,6 +25,8 @@
 import { access, copyFile, mkdir, readdir, stat, writeFile } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
 import { fleetPrivateDir } from './config.js';
+import { agentDropboxPath } from './localLauncher.js';
+import { readWorkspaceManifest } from './workspaces.js';
 import {
   candidateName,
   extFromMime,
@@ -51,8 +59,13 @@ export interface DropTextPayload {
   text: string;
 }
 
-function containerPath(name: string): string {
-  return `${CONTAINER_DROPBOX}/${name}`;
+/** The path the agent in `workspaceId` can actually open for a just-saved drop
+ *  whose real host location is `hostFile` (basename `name`). Backend-aware
+ *  (#393): reads the manifest to pick container / local-native / wsl mapping.
+ *  A missing manifest falls back to the container mapping (prior behavior). */
+async function agentPath(workspaceId: string, hostFile: string, name: string): Promise<string> {
+  const m = await readWorkspaceManifest(workspaceId);
+  return agentDropboxPath(m ?? { kind: 'container' }, hostFile, name, CONTAINER_DROPBOX);
 }
 
 // ── Filesystem-backed helpers ───────────────────────────────────────────
@@ -119,8 +132,9 @@ async function saveBytes(
   const dir = await ensureDropbox(workspaceId);
   if ((await dropboxUsage(dir)) + bytes.length > MAX_DROPBOX_BYTES) throw dropboxFullError();
   const name = await uniqueName(dir, desiredName);
-  await writeFile(join(dir, name), bytes);
-  return containerPath(name);
+  const hostFile = join(dir, name);
+  await writeFile(hostFile, bytes);
+  return agentPath(workspaceId, hostFile, name);
 }
 
 // ── Drop entry points (one per source) ──────────────────────────────────
@@ -142,8 +156,9 @@ export async function dropOsFiles(workspaceId: string, sourcePaths: string[]): P
   const saved: string[] = [];
   for (const src of sourcePaths) {
     const name = await uniqueName(dir, basename(src));
-    await copyFile(src, join(dir, name));
-    saved.push(containerPath(name));
+    const hostFile = join(dir, name);
+    await copyFile(src, hostFile);
+    saved.push(await agentPath(workspaceId, hostFile, name));
   }
   return saved;
 }
