@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { readFile, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { getSecret, setSecret, deleteAllForWorkspace, deleteSecret } from './vault.js';
+import type { Harness } from './workspaces.js';
 
 export interface ModelEndpoint {
   id: string;
@@ -57,8 +58,21 @@ export function parseEndpoints(raw: unknown): ModelEndpoint[] {
   return out;
 }
 
-/** Compile an endpoint into the env contract claude-code consumes (spec §B). */
-export function compileEndpointEnv(ep: ModelEndpoint, apiKey: string | null): Record<string, string> {
+/** Compile an endpoint into the env contract the active harness consumes (spec §B). */
+export function compileEndpointEnv(
+  ep: ModelEndpoint,
+  apiKey: string | null,
+  harness: Harness = 'claude-code'
+): Record<string, string> {
+  if (harness === 'qwen-code') {
+    const base = ep.baseUrl.replace(/\/+$/, '') + '/v1';
+    return {
+      OPENAI_BASE_URL: base,
+      OPENAI_API_KEY: apiKey ?? 'sk-none',
+      OPENAI_MODEL: ep.modelId
+    };
+  }
+  // existing claude-code / Anthropic dialect — unchanged
   const baseUrl = ep.baseUrl.replace(/\/+$/, '');
   const model = ep.modelId;
   return {
@@ -143,7 +157,10 @@ export async function setEndpointApiKey(id: string, value: string | null): Promi
  * known endpoint. Resolved LIVE at container create / local spawn so key
  * rotation and URL edits apply on next start (spec §B).
  */
-export async function endpointEnv(endpointId: string | undefined): Promise<Record<string, string>> {
+export async function endpointEnv(
+  endpointId: string | undefined,
+  harness: Harness = 'claude-code'
+): Promise<Record<string, string>> {
   if (!endpointId) return {};
   const ep = await getEndpoint(endpointId);
   if (!ep) {
@@ -151,7 +168,7 @@ export async function endpointEnv(endpointId: string | undefined): Promise<Recor
     return {};
   }
   const key = ep.hasApiKey ? await getSecret(endpointVaultScope(endpointId), ENDPOINT_VAULT_KEY) : null;
-  return compileEndpointEnv(ep, key);
+  return compileEndpointEnv(ep, key, harness);
 }
 
 /** Test-only: drop the in-memory cache so a fresh read hits disk. */

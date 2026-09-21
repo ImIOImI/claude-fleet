@@ -114,3 +114,26 @@ describe('backend env precedence', () => {
     expect(merged.MY_VAR).toBe('1');
   });
 });
+
+describe('compileEndpointEnv harness dialects', () => {
+  const qwenEp: ModelEndpoint = { id: 'e', name: 'n', baseUrl: 'http://10.0.20.10:11434', modelId: 'qwen3-coder:30b', hasApiKey: true };
+
+  it('claude-code → ANTHROPIC_* against /v1', () => {
+    const env = compileEndpointEnv(qwenEp, 'k', 'claude-code');
+    expect(env.ANTHROPIC_BASE_URL).toBe('http://10.0.20.10:11434');
+    expect(env.ANTHROPIC_MODEL).toBe('qwen3-coder:30b');
+    expect(env.OPENAI_BASE_URL).toBeUndefined();
+  });
+
+  it('qwen-code → OPENAI_* against /v1', () => {
+    const env = compileEndpointEnv(qwenEp, 'k', 'qwen-code');
+    expect(env.OPENAI_BASE_URL).toBe('http://10.0.20.10:11434/v1');
+    expect(env.OPENAI_MODEL).toBe('qwen3-coder:30b');
+    expect(env.OPENAI_API_KEY).toBe('k');
+    expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
+  });
+
+  it('defaults to claude-code when harness omitted', () => {
+    expect(compileEndpointEnv(qwenEp, 'k').ANTHROPIC_BASE_URL).toBe('http://10.0.20.10:11434');
+  });
+});
