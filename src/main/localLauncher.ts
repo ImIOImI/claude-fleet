@@ -11,6 +11,7 @@
 // type-only), so it loads under vitest. Same discipline as claudeResolve.ts.
 
 import type { SpawnPty } from './localSessions.js';
+import type { WorkspaceKind } from './workspaces.js';
 
 /** Per-workspace launch strategy (manifest `launcher`; absent ⇒ native). */
 export type WorkspaceLauncher =
@@ -238,4 +239,48 @@ export function wslLocalProjectsDir(
  *  ~/.claude/sessions, viewed over the 9P share (polled, like projects). #286 */
 export function wslLocalSessionsDir(distro: string, home: string): string {
   return linuxPathToUnc(distro, `${home}/.claude/sessions`);
+}
+
+/**
+ * Where a dropped file — saved by the host to `hostPath` (basename `name`) —
+ * is reachable BY THE AGENT of the target workspace (#393). The drop toast and
+ * clipboard hand this string to the user to paste, so it must be a path the
+ * agent in that workspace can actually open.
+ *
+ * - `container`: `fleetPrivateDir(id)` is bind-mounted at `/workspace`, so the
+ *   file appears under `<containerDropbox>` regardless of its host location.
+ * - `local`, native/custom launcher: `claude` runs on the host, so the real
+ *   host path is exactly what it opens.
+ * - `local`, wsl launcher: the dropbox lives on the *Windows* host (the app
+ *   runs there) while `claude` runs inside the distro, which can only reach it
+ *   through the `/mnt/<drive>` automount (or, for a `\\wsl.localhost\…` root,
+ *   the plain in-distro path). Reuses `wslInDistroPath` so the two translation
+ *   sites can't drift.
+ *
+ * Throws for a wsl launcher when `hostPath` can't be mapped into the distro,
+ * so a path the agent could never open fails loudly at drop time rather than
+ * landing silently on the clipboard.
+ */
+export function agentDropboxPath(
+  workspace: { kind: WorkspaceKind; launcher?: WorkspaceLauncher },
+  hostPath: string,
+  name: string,
+  containerDropbox: string
+): string {
+  if (workspace.kind === 'container') return `${containerDropbox}/${name}`;
+  if (workspace.launcher?.mode === 'wsl') {
+    const inDistro = wslInDistroPath(hostPath);
+    // A path the distro agent can open is always absolute POSIX. wslInDistroPath
+    // returns its input unchanged when it recognises neither a drive-letter nor
+    // a UNC path — on a wsl launcher that leaves a Windows/relative path the
+    // agent could never open. Refuse instead of clipboarding it.
+    if (!inDistro.startsWith('/')) {
+      throw new Error(
+        `Can't translate the dropbox path into the WSL distro (${hostPath}); ` +
+          'the dropped file would not be openable by the agent.'
+      );
+    }
+    return inDistro;
+  }
+  return hostPath;
 }

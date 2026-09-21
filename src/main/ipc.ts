@@ -1650,11 +1650,14 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   });
 
   // Drag-and-drop ingestion. Routed to the selected workspace by the
-  // renderer; each saves into `<fleetRoot>/<id>/_dropped/` and returns the
-  // container-visible path (`/workspace/_dropped/<name>`). Not backend-gated
-  // — these touch only the host filesystem (+ a fetch for URL drops), so the
-  // real module works in mock mode too. Errors (over-limit, unreachable URL)
-  // propagate to the renderer, which toasts them.
+  // renderer; each saves into `<fleetRoot>/<id>/_dropped/` and returns a path
+  // the agent in that workspace can actually open — backend-aware (#393): the
+  // `/workspace` bind mount for a container, the host path for a native local
+  // workspace, or the `/mnt/<drive>` in-distro view for a wsl-launcher one
+  // (files.ts:agentPath → localLauncher.ts:agentDropboxPath). These touch only
+  // the host filesystem (+ a fetch for URL drops), so the real module works in
+  // mock mode too. Errors (over-limit, unreachable URL, an untranslatable wsl
+  // path) propagate to the renderer, which toasts them.
   ipcMain.handle('files:dropOsFiles', (_e, workspaceId: string, sourcePaths: string[]) =>
     files.dropOsFiles(workspaceId, sourcePaths)
   );

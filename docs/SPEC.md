@@ -1204,15 +1204,16 @@ Drop OS files, pasted images, web content, or text fragments onto the window; th
 
 **Decisions made:**
 - **Drop target**: anywhere on the window. The file is routed to whichever workspace is currently selected. If none is selected, the drop is rejected with a hint ("Select a workspace first, then drop.").
-- **Save location**: `<fleetRoot>/<id>/_dropped/` — the selected workspace's private folder (via `config.ts:fleetPrivateDir`, the same dir mounted at `/workspace`). Filename collisions resolved by suffix (`foo.png`, `foo-2.png`, `foo-3.png`). Inside the container the agent reads from `/workspace/_dropped/<name>`.
-- **Post-save behavior**: toast confirmation showing the saved container path, plus the path is copied to the system clipboard (via `clipboard.writeText`). User pastes it into their prompt manually — no auto-typing into the PTY.
+- **Save location**: `<fleetRoot>/<id>/_dropped/` — the selected workspace's private folder (via `config.ts:fleetPrivateDir`). Filename collisions resolved by suffix (`foo.png`, `foo-2.png`, `foo-3.png`). The host **always** writes here; what differs per backend is the *path string handed back* (next bullet).
+- **Returned path is backend-aware (#393)**: the string in the toast/clipboard must be one the agent in that workspace can actually open, which is not the same as the host save path. `localLauncher.ts:agentDropboxPath` maps it by backend: **container** → `/workspace/_dropped/<name>` (the private folder is bind-mounted at `/workspace`); **local, native/custom launcher** → the real host path (claude runs on the host); **local, wsl launcher** → the in-distro view of the host path, via `wslInDistroPath` (a Windows `C:\…\_dropped\<name>` root → its `/mnt/<drive>/…` automount form; a `\\wsl.localhost\<distro>\…` root → the plain in-distro path). A hard-coded `/workspace/_dropped/<name>` here was the #393 bug: for a wsl-launcher workspace the dropbox is a Windows path the distro agent only reaches through `/mnt`, so the returned path existed nowhere for it. A wsl mapping that can't produce an absolute-POSIX path **throws** at drop time rather than clipboarding an unopenable string. (The `/mnt/<drive>` translation carries the usual 9P read cost for large drops; moving the dropbox inside the distro is a possible future optimization, not done here.)
+- **Post-save behavior**: toast confirmation showing the returned (agent-visible) path, plus the path is copied to the system clipboard (via `clipboard.writeText`). User pastes it into their prompt manually — no auto-typing into the PTY.
 - **Sources accepted**:
   - **OS file drag** — drop from Explorer/Finder/Nautilus. Renderer reads the path via `webUtils.getPathForFile(file)`; main copies from source to destination.
   - **Clipboard paste** (Cmd/Ctrl+V) anywhere on the window — image bytes from the clipboard saved as `paste-<ISO-timestamp>.<ext>` (extension derived from clipboard format).
   - **Web drag** — content dragged out of a browser. If a URL, the main process fetches it and writes the body; if inline bytes, written directly. Filename derived from the source URL or Content-Disposition; falls back to `web-<ISO-timestamp>.<ext>`.
   - **Text / HTML drag** — selected text dragged in. Written as `dropped-<ISO-timestamp>.txt` (plain text) or `.html` (when the drag carries HTML).
 
-**IPC surface (as built).** Each takes the selected `workspaceId` and returns the container-visible saved path(s):
+**IPC surface (as built).** Each takes the selected `workspaceId` and returns the agent-visible saved path(s) (backend-aware, see *Returned path* above):
 - `files:dropOsFiles(workspaceId, sourcePaths: string[])` → `string[]` (saved paths) — caps validated across the whole batch before any copy, so a partial over-limit drop writes nothing.
 - `files:dropBytes(workspaceId, payload: { suggestedName?, mime?, bytes })` → `string`
 - `files:dropUrl(workspaceId, url: string)` → `string`
