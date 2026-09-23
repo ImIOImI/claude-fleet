@@ -44,7 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # in this code path — bump deliberately, after re-verifying the prompt
 # navigates over a PTY against a built image (see issue #65 for the
 # test recipe).
-RUN npm install -g @anthropic-ai/claude-code@2.1.238
+RUN npm install -g @anthropic-ai/claude-code@2.1.281
 
 # The node:22 base ships a 'node' user at UID 1000; remove it so we can
 # claim UID 1000 for 'fleet'. Make /home/fleet world-writable so the
