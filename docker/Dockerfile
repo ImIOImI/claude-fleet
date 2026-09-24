@@ -46,6 +46,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # test recipe).
 RUN npm install -g @anthropic-ai/claude-code@2.1.281
 
+# claude's fullscreen TUI (`/tui fullscreen`, or an org's managed
+# remote-settings.json) switches to the alternate screen and turns on SGR
+# mouse tracking, capturing every click / drag / wheel. That breaks native
+# drag-select copy and right-click paste in our xterm.js terminal, and
+# claude's own clipboard fallback (xclip / wl-copy / pbcopy / PowerShell)
+# can't run in this container — none are installed and there is no display.
+# DISABLE_MOUSE_CLICKS (claude >= 2.1.195) stops the click/drag/hover capture
+# while KEEPING wheel scroll, so xterm.js selection + the app's
+# Ctrl+C -> host-clipboard path work again even in fullscreen mode.
+# See anthropics/claude-code#70857 and #72681.
+ENV CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1
+
 # The node:22 base ships a 'node' user at UID 1000; remove it so we can
 # claim UID 1000 for 'fleet'. Make /home/fleet world-writable so the
 # container can run as any host UID at start time (via docker run --user)
