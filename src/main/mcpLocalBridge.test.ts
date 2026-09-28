@@ -20,7 +20,12 @@ describe('wslMcpServerEntry', () => {
       type: 'stdio',
       command: '/mnt/c/Users/troy/AppData/Local/Programs/claude-fleet/claude-fleet.exe',
       args: ['C:\\ud\\mcp\\local-bridge.cjs'],
-      env: { ELECTRON_RUN_AS_NODE: '1', CLAUDE_FLEET_MCP_SOCKET: 'C:\\ud\\mcp\\ws1\\mcp.sock' }
+      // WSL interop only forwards vars named in WSLENV to Windows processes.
+      env: {
+        ELECTRON_RUN_AS_NODE: '1',
+        CLAUDE_FLEET_MCP_SOCKET: 'C:\\ud\\mcp\\ws1\\mcp.sock',
+        WSLENV: 'ELECTRON_RUN_AS_NODE:CLAUDE_FLEET_MCP_SOCKET'
+      }
     });
   });
   it('returns null for a non-drive exe path', () => {
@@ -38,9 +43,20 @@ describe('wslMcpServerEntry', () => {
       env: {
         ELECTRON_RUN_AS_NODE: '1',
         CLAUDE_FLEET_MCP_TCP: '127.0.0.1:7071',
-        CLAUDE_FLEET_MCP_TOKEN_FILE: 'C:\\ud\\mcp\\ws1\\token'
+        CLAUDE_FLEET_MCP_TOKEN_FILE: 'C:\\ud\\mcp\\ws1\\token',
+        WSLENV: 'ELECTRON_RUN_AS_NODE:CLAUDE_FLEET_MCP_TCP:CLAUDE_FLEET_MCP_TOKEN_FILE'
       }
     });
+  });
+  // #397: WSL interop drops env vars not named in WSLENV, so the Windows-side
+  // bridge started without ELECTRON_RUN_AS_NODE and exited → CONNECTION_CLOSED.
+  // WSLENV must name every bridge var, for both transports.
+  it('names every bridge env var in WSLENV (both transports)', () => {
+    for (const t of [UNIX, TCP] as McpTransport[]) {
+      const e = wslMcpServerEntry('C:\\Programs\\claude-fleet\\claude-fleet.exe', 'C:\\b.cjs', t);
+      const keys = Object.keys(e!.env).filter((k) => k !== 'WSLENV');
+      expect(e!.env.WSLENV.split(':').sort()).toEqual([...keys].sort());
+    }
   });
 });
 
