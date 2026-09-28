@@ -133,10 +133,15 @@ export function localMcpServerEntry(
  * Windows process and dials the same host listener as native local, so caller
  * identity (the token, or which listener accepted) is untouched — and the
  * token file must NOT be translated to /mnt/c either, since the Windows-side
- * bridge is what reads it. Plain env vars flow into interop-launched Windows
- * processes, so ELECTRON_RUN_AS_NODE and the transport vars ride through
- * unchanged. Null when the exe isn't on a drive letter (no automount form) —
- * caller then skips MCP wiring.
+ * bridge is what reads it. WSL interop only forwards env vars named in WSLENV
+ * to a Windows process, so we name every bridge var there (#397) — without it
+ * ELECTRON_RUN_AS_NODE never crossed the boundary, the exe launched as the app
+ * instead of the bridge, and the server saw CONNECTION_CLOSED. Setting WSLENV
+ * on the entry replaces the session's WSLENV for the bridge process only, which
+ * is fine: the bridge needs none of the launcher's forwarded vars. No `/p` or
+ * `/l` flags — the values are already Windows paths or plain strings, and the
+ * Windows-side bridge is what reads them. Null when the exe isn't on a drive
+ * letter (no automount form) — caller then skips MCP wiring.
  */
 export function wslMcpServerEntry(
   electronBin: string,
@@ -145,10 +150,11 @@ export function wslMcpServerEntry(
 ): { type: string; command: string; args: string[]; env: Record<string, string> } | null {
   const command = windowsPathToWslPath(electronBin);
   if (!command) return null;
+  const env = bridgeEnv(transport);
   return {
     type: 'stdio',
     command,
     args: [bridgePath],
-    env: bridgeEnv(transport)
+    env: { ...env, WSLENV: Object.keys(env).join(':') }
   };
 }
