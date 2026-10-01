@@ -22,7 +22,7 @@ import {
   type WorkspaceManifest
 } from './workspaceLifecycle';
 import { contextBarSummary } from './contextBarSource';
-import { busyClaudeIdSet, openSessionMap, type OpenTabRef } from './busySessions';
+import { busyClaudeIdSet, openSessionMap, currentSessionId, type OpenTabRef } from './busySessions';
 import { mergeWaitingSessionIds } from './waitingSessions';
 import {
   resolveBusyClaudeIds,
@@ -797,6 +797,9 @@ export function App() {
   const activeTabId = selectedWorkspaceId
     ? activeTabByWorkspace[selectedWorkspaceId] ?? null
     : null;
+  // The open session the focused terminal is showing — drives the left-rail
+  // "on screen" highlight (the active tab of the selected workspace).
+  const currentOpenSessionId = currentSessionId(openSessions, selectedWorkspaceId, activeTabId);
   useEffect(() => {
     if (!apiReady || !selectedWorkspaceId || !activeTabId) {
       setActiveTabSummary(null);
@@ -1345,6 +1348,7 @@ export function App() {
           busySessionIds={effectiveBusySessionIds}
           waitingSessionIds={waitingSessionIds}
           openSessions={openSessions}
+          currentSessionId={currentOpenSessionId}
           collapsed={leftCollapsed}
           onToggleCollapse={toggleLeftCollapsed}
           onResume={handleResumeSession}
