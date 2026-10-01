@@ -60,3 +60,23 @@ export function openSessionMap(
   }
   return out;
 }
+
+/**
+ * The "current" session: the one open tab the focused terminal is showing —
+ * the open-session whose tab ref is the *selected* workspace's *active* tab.
+ * Drives the left-rail "on screen" highlight. Returns null when the active tab
+ * isn't a known open session yet (mapping not learned) or nothing is selected.
+ */
+export function currentSessionId(
+  openSessions: Map<string, OpenTabRef> | undefined,
+  selectedWorkspaceId: string | null,
+  activeBrokerSessionId: string | null
+): string | null {
+  if (!openSessions || !selectedWorkspaceId || !activeBrokerSessionId) return null;
+  for (const [claudeId, ref] of openSessions) {
+    if (ref.workspaceId === selectedWorkspaceId && ref.brokerSessionId === activeBrokerSessionId) {
+      return claudeId;
+    }
+  }
+  return null;
+}
