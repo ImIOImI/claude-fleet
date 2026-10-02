@@ -19,6 +19,7 @@ import { wslLocalProjectsDir, wslLocalSessionsDir } from './localLauncher.js';
 import { encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir } from './paths.js';
 import { installMainProcessHandlers, getLogPath, setErrorSink, logError } from './errorLog.js';
 import { installAppMenu } from './appMenu.js';
+import { isOpenableExternalUrl } from './externalUrl.js';
 import { appBuildSha, appVersionString } from './appVersion.js';
 import { runStartupMigration } from './migration.js';
 import { ensureWorkspaceClaudeJson } from './docker.js';
@@ -102,7 +103,7 @@ function createWindow(): BrowserWindow {
 
   win.on('ready-to-show', () => win.show());
   win.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url);
+    if (isOpenableExternalUrl(details.url)) void shell.openExternal(details.url);
     return { action: 'deny' };
   });
 
