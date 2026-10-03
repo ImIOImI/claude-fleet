@@ -8,6 +8,10 @@ IMG="${1:-claude-fleet/runner-dev:test}"
 run() { docker run --rm --user fleet --entrypoint bash "$IMG" -lc "$1"; }
 
 echo "== dev runner smoke ($IMG, user=fleet) =="
+# Base-image env contract, inherited FROM base (docker/Dockerfile): the
+# fullscreen-copy/paste fix. Guards against the ENV being renamed/dropped in a
+# Dockerfile refactor. See SPEC §4 + anthropics/claude-code#70857, #72681.
+run '[ "$CLAUDE_CODE_DISABLE_MOUSE_CLICKS" = "1" ] && echo "CLAUDE_CODE_DISABLE_MOUSE_CLICKS: ok"'
 run 'gh --version         | sed -n "1p"'
 run 'gcc --version        | sed -n "1p"'
 run 'g++ --version        | sed -n "1p"'
