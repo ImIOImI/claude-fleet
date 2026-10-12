@@ -182,6 +182,7 @@ jobs:
           name: claude-fleet-${{ matrix.os }}
           path: ${{ matrix.artifact_glob }}
           if-no-files-found: error
+          retention-days: 7
 
   # Playwright end-to-end suite (tests/*.spec.ts). These drive the REAL Electron
   # app via @playwright/test's _electron.launch, so the job needs a virtual
@@ -241,6 +242,7 @@ jobs:
           name: playwright-results
           path: test-results/
           if-no-files-found: ignore
+          retention-days: 7
 
   # Windows Playwright e2e suite. Runs the same specs as the Linux e2e job but
   # on windows-latest, so the Windows-only runtime paths get real coverage:
@@ -353,6 +355,7 @@ jobs:
           name: playwright-results-windows
           path: test-results/
           if-no-files-found: ignore
+          retention-days: 7
 
   # ---------------------------------------------------------------------------
   # Required-context aggregators (#303).

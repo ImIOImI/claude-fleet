@@ -89,6 +89,7 @@ jobs:
           name: claude-fleet-${{ matrix.os }}
           path: ${{ matrix.artifact_glob }}
           if-no-files-found: error
+          retention-days: 1
 
   release:
     name: draft release
