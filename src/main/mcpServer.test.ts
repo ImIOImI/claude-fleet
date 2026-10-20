@@ -795,3 +795,35 @@ describe('perf tools', () => {
     });
   });
 });
+
+import { setInboxHandlers } from './mcpServer.js';
+
+describe('inbox tools (#407)', () => {
+  const ctx = { callerId: WS_A, allowedWorkspaces: new Set([WS_A]) } as ToolCtx;
+  const tool = (name: string) => TOOLS.find((t) => t.name === name)!;
+  afterEach(() => setInboxHandlers(null));
+
+  it('exposes post_todo / update_todo / list_todos', () => {
+    expect(TOOLS.map((t) => t.name)).toEqual(expect.arrayContaining(['post_todo', 'update_todo', 'list_todos']));
+    expect((tool('post_todo').inputSchema as { required: string[] }).required).toEqual(['title']);
+    expect((tool('update_todo').inputSchema as { required: string[] }).required).toEqual(['id']);
+  });
+
+  it('proxies each tool to the injected handler with the HOST caller id, never a wire arg', async () => {
+    const calls: Array<[string, string, Record<string, unknown>]> = [];
+    setInboxHandlers({
+      post: async (c, a) => { calls.push(['post', c, a]); return { id: 'T1', action: 'created' }; },
+      update: async (c, a) => { calls.push(['update', c, a]); return { id: 'T1' }; },
+      list: async (c, a) => { calls.push(['list', c, a]); return []; }
+    });
+    const db = null as never;
+    expect(await tool('post_todo').run(db, { title: 'x', callerId: 'SPOOF' }, ctx)).toEqual({ id: 'T1', action: 'created' });
+    await tool('update_todo').run(db, { id: 'T1', status: 'done' }, ctx);
+    await tool('list_todos').run(db, {}, ctx);
+    expect(calls.map(([k, c]) => [k, c])).toEqual([['post', WS_A], ['update', WS_A], ['list', WS_A]]);
+  });
+
+  it('fails clearly when the inbox is not wired', () => {
+    expect(() => tool('list_todos').run(null as never, {}, ctx)).toThrow(/inbox is unavailable/);
+  });
+});

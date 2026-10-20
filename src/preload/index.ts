@@ -1,4 +1,9 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent, webUtils } from 'electron';
+import type { Todo, TodoEvent, TodoFilter, InboxCounts, PostTodoInput, UpdateTodoPatch } from './inboxTypes';
+export type {
+  Todo, TodoEvent, TodoEventKind, TodoFilter, TodoSource, TodoStatus, TodoPriority, SourceKind,
+  InboxCounts, InboxConfig, PostTodoInput, UpdateTodoPatch
+} from './inboxTypes';
 
 /** Outcome of a `pty:resize`. Lives here because preload is the IPC contract
  *  surface: main imports it type-only, and the renderer picks it up through
@@ -292,6 +297,19 @@ const api = {
   },
   /** Cross-workspace committee control (#119). `callerId` is the workspace
    *  acting as manager; the host gates every call via assertControl. */
+  inbox: {
+    list: (filter?: TodoFilter): Promise<Todo[]> => ipcRenderer.invoke('inbox:list', filter),
+    get: (id: string): Promise<{ todo: Todo; events: TodoEvent[] } | null> => ipcRenderer.invoke('inbox:get', id),
+    create: (input: PostTodoInput): Promise<Todo> => ipcRenderer.invoke('inbox:create', input),
+    update: (id: string, patch: UpdateTodoPatch): Promise<Todo> => ipcRenderer.invoke('inbox:update', id, patch),
+    counts: (): Promise<InboxCounts> => ipcRenderer.invoke('inbox:counts'),
+    onChanged: (cb: (counts: InboxCounts) => void): (() => void) => {
+      const channel = 'inbox:changed';
+      const handler = (_e: IpcRendererEvent, payload: { counts: InboxCounts }): void => cb(payload.counts);
+      ipcRenderer.on(channel, handler);
+      return () => ipcRenderer.removeListener(channel, handler);
+    }
+  },
   committee: {
     pause: (callerId: string, targetId: string): Promise<{ id: string; paused: true }> =>
       ipcRenderer.invoke('committee:pause', callerId, targetId),

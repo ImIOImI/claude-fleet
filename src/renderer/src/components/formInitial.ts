@@ -39,6 +39,7 @@ export function workspaceToFormInitial(
     secretKeys: w.env.secretKeys,
     resources: w.resources,
     mirror: w.mirror,
-    accessibility: w.accessibility
+    accessibility: w.accessibility,
+    inbox: w.inbox
   };
 }

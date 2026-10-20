@@ -23,6 +23,7 @@ import { AdvancedImageSearchModal, IconSearch } from './AdvancedImageSearchModal
 import { buildWslLauncherPayload } from './wslLauncherPayload';
 import { eligibleAcceptFromManagers, ManagerGlyph } from './committee';
 import { ModelCombobox, type EndpointEntry } from './ModelCombobox';
+import type { InboxConfig } from '../../../preload';
 import {
   claudeAuthFromInitial,
   deriveAuthFields,
@@ -92,6 +93,8 @@ export interface WorkspaceFormSubmit {
    * here — those are edited in the Committee rail, not this form.
    */
   accessibility?: AccessibilityConfig;
+  /** Inbox permissions (#407); undefined when everything is at its default. */
+  inbox?: InboxConfig;
 }
 
 interface ImageEntry {
@@ -240,6 +243,10 @@ export function WorkspaceForm({
   // Empty ⇒ "any granted manager". Edited via a manager checkbox list below.
   const [acceptFrom, setAcceptFrom] = useState<string[]>(initial?.accessibility?.acceptFrom ?? []);
   const [committeeOpen, setCommitteeOpen] = useState(initial?.accessibility?.reachable ?? false);
+  // Inbox permissions (#407) — edit-mode only. Defaults: can post, 60/hour.
+  const [canPostTodos, setCanPostTodos] = useState(initial?.inbox?.canPost !== false);
+  const [postsPerHour, setPostsPerHour] = useState(String(initial?.inbox?.maxPostsPerHour ?? 60));
+  const [inboxOpen, setInboxOpen] = useState(initial?.inbox !== undefined);
   // Manager workspaces eligible for the acceptFrom list (other container managers).
   const managerOptions = useMemo(
     () => eligibleAcceptFromManagers(workspaces, initial?.id ?? ''),
@@ -478,6 +485,16 @@ export function WorkspaceForm({
           }
         : undefined;
 
+    // Only non-default values are stored; canReadAll has no Phase 1 control and
+    // is carried through untouched.
+    const pph = Math.floor(Number(postsPerHour));
+    const inboxCfg: InboxConfig = {
+      ...(canPostTodos ? {} : { canPost: false }),
+      ...(Number.isFinite(pph) && pph >= 1 && pph !== 60 ? { maxPostsPerHour: Math.min(pph, 10000) } : {}),
+      ...(initial?.inbox?.canReadAll ? { canReadAll: true } : {})
+    };
+    const inbox = mode === 'edit' && Object.keys(inboxCfg).length ? inboxCfg : undefined;
+
     return {
       id: initial?.id,
       name: effectiveName,
@@ -510,7 +527,8 @@ export function WorkspaceForm({
       secrets,
       resources,
       mirror: { default: mirrorDefault, cleanup: cleanupDefault },
-      accessibility
+      accessibility,
+      inbox
     };
   };
 
@@ -1218,6 +1236,43 @@ export function WorkspaceForm({
               </div>
             </>
           )}
+        </details>
+      )}
+
+      {mode === 'edit' && (
+        <details
+          className="form-disclosure"
+          open={inboxOpen}
+          onToggle={(e) => setInboxOpen((e.target as HTMLDetailsElement).open)}
+        >
+          <summary>
+            Inbox &amp; automations{' '}
+            <span className="form-hint">{canPostTodos ? `can post · ${postsPerHour || 60}/hour` : 'posting off'}</span>
+          </summary>
+          <label className="committee-reachable-row">
+            <input
+              type="checkbox"
+              checked={canPostTodos}
+              onChange={(e) => setCanPostTodos(e.target.checked)}
+              disabled={busy}
+            />
+            <span>Can post todos and notifications</span>
+          </label>
+          <div className="form-row ib-rate">
+            <label htmlFor="ws-inbox-rate">Posts per hour</label>
+            <input
+              id="ws-inbox-rate"
+              type="number"
+              min={1}
+              max={10000}
+              value={postsPerHour}
+              onChange={(e) => setPostsPerHour(e.target.value)}
+              disabled={busy || !canPostTodos}
+            />
+          </div>
+          <p className="form-hint">
+            Over the limit, posts are rejected and the workspace is told when it can post again.
+          </p>
         </details>
       )}
 

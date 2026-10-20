@@ -102,3 +102,18 @@ describe('control/accessibility manifest round-trip (#118)', () => {
     expect(back?.control).toBeUndefined();
   });
 });
+
+describe('inbox manifest block (#407)', () => {
+  it('round-trips through writeWorkspaceManifest and sanitizes junk', async () => {
+    await writeWorkspaceManifest(baseSpec({ inbox: { canPost: false, maxPostsPerHour: 5, junk: 1 } }) as never);
+    const back = await readWorkspaceManifest(ID);
+    expect(back?.inbox).toEqual({ canPost: false, maxPostsPerHour: 5 });
+  });
+
+  it('is absent for legacy manifests and dropped when every field is invalid', async () => {
+    await writeRaw(baseSpec());
+    expect((await readWorkspaceManifest(ID))?.inbox).toBeUndefined();
+    await writeRaw(baseSpec({ inbox: { canPost: 'no' } }));
+    expect((await readWorkspaceManifest(ID))?.inbox).toBeUndefined();
+  });
+});

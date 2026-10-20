@@ -67,6 +67,7 @@ export async function mergeWorkspaces(opts: MergeOptions): Promise<Workspace[]> 
       installedLoadouts: m?.installedLoadouts ?? [],
       control: m?.control,
       accessibility: m?.accessibility,
+      inbox: m?.inbox,
       // Manifest-only (#268). This projection is field-by-field, so an omitted
       // field is dropped for every LIVE workspace while the deleted branch
       // (`...m`) keeps it — the form would then show "Default" for a workspace

@@ -31,7 +31,9 @@ import {
   resolveWaitingByWorkspace,
   type PeerKind
 } from './sessionStatusMerge';
-import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget, UiPrefs } from '../../preload';
+import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget, UiPrefs, InboxCounts, InboxConfig } from '../../preload';
+import { InboxChip } from './components/InboxChip';
+import { InboxView } from './components/InboxView';
 import { isWarm } from './fleetTemperature';
 
 /** The lifecycle IPC surface `applyContainerEdit` needs, bound to `window.api`.
@@ -136,6 +138,8 @@ export interface WorkspaceSummary {
   control?: ControlConfig;
   /** Inbound committee opt-in (#118); absent ⇒ unreachable (default-deny). */
   accessibility?: AccessibilityConfig;
+  /** Host-private inbox permissions (#407). */
+  inbox?: InboxConfig;
   createdAt: number;
   lastUsedAt: number;
 }
@@ -207,6 +211,18 @@ export function App() {
   // Latest workspace list, readable from stable callbacks without re-binding.
   const workspacesRef = useRef<WorkspaceSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Inbox (#407): when open it takes the main pane; the workspace chip
+  // deselects but `selectedId` (and so the rails) keeps the last workspace.
+  const [inboxOpen, setInboxOpen] = useState(false);
+  const [inboxCounts, setInboxCounts] = useState<InboxCounts>({ open: 0, urgent: 0, high: 0 });
+  useEffect(() => {
+    void window.api.inbox.counts().then(setInboxCounts);
+    return window.api.inbox.onChanged(setInboxCounts);
+  }, []);
+  const workspaceNames = useMemo(
+    () => Object.fromEntries(workspaces.map((w) => [w.id, w.name])),
+    [workspaces]
+  );
   const [createOpen, setCreateOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<null | 'settings' | 'endpoints'>(null);
   const [browseOpen, setBrowseOpen] = useState(false);
@@ -1184,6 +1200,7 @@ export function App() {
       resources: submit.resources,
       mirror: submit.mirror,
       accessibility: submit.accessibility,
+      inbox: submit.inbox,
       createdAt: before.createdAt,
       lastUsedAt: Date.now()
     });
@@ -1310,10 +1327,14 @@ export function App() {
         workspaces={workspaces}
         summaries={summaries}
         busyByWorkspace={effectiveBusyByWorkspace}
-        selectedId={selectedId}
+        selectedId={inboxOpen ? null : selectedId}
         backendReady={backendReady}
         mockMode={mockMode}
-        onSelect={setSelectedId}
+        onSelect={(id) => {
+          setInboxOpen(false);
+          setSelectedId(id);
+        }}
+        inboxChip={<InboxChip counts={inboxCounts} active={inboxOpen} onOpen={() => setInboxOpen(true)} />}
         onNewWorkspace={() => setCreateOpen(true)}
         onOpenSettings={() => setSettingsTab('settings')}
         onCloseWorkspace={(w) => setCloseTargetId(w.id)}
@@ -1365,7 +1386,16 @@ export function App() {
           style={selected ? { ['--hue' as never]: colorFor(selected) } : undefined}
         >
           <div className="main-body">
-            {liveCount === 0 ? (
+            {inboxOpen ? (
+              <InboxView
+                names={workspaceNames}
+                openCount={inboxCounts.open}
+                onJump={(id) => {
+                  setInboxOpen(false);
+                  setSelectedId(id);
+                }}
+              />
+            ) : liveCount === 0 ? (
               <FirstRun onNewWorkspace={() => setCreateOpen(true)} />
             ) : selected?.state === 'unreachable' ? (
               <div className="empty">
@@ -1387,7 +1417,7 @@ export function App() {
               .map((w) => (
                 <TerminalPane
                   key={w.id}
-                  visible={selectedId === w.id}
+                  visible={!inboxOpen && selectedId === w.id}
                   workspaceId={w.id}
                   mirrorDefault={w.mirror.default}
                   cleanupDefault={w.mirror.cleanup}

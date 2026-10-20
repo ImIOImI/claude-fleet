@@ -20,6 +20,8 @@ import { dirname } from 'node:path';
 import { workspaceManifestPath, stateRoot } from './paths.js';
 import type { WorkspaceLauncher } from './localLauncher.js';
 import type { TerminalRenderer } from './config.js';
+import type { InboxConfig } from '../preload/inboxTypes.js';
+import { sanitizeInboxConfig } from './inbox/inboxPolicy.js';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted' | 'unreachable';
 
@@ -174,6 +176,8 @@ export interface WorkspaceSpec {
   control?: ControlConfig;
   /** Inbound committee opt-in (#118). Absent ⇒ unreachable (default-deny). */
   accessibility?: AccessibilityConfig;
+  /** Host-private inbox permissions (#407): can post, hourly cap, read-all. */
+  inbox?: InboxConfig;
   createdAt: number;
   lastUsedAt: number;
 }
@@ -322,6 +326,7 @@ export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec |
       installedLoadouts: Array.isArray(parsed.installedLoadouts) ? parsed.installedLoadouts : [],
       control: sanitizeControl(parsed.control),
       accessibility: sanitizeAccessibility(parsed.accessibility),
+      inbox: sanitizeInboxConfig(parsed.inbox),
       createdAt: parsed.createdAt ?? Date.now(),
       lastUsedAt: parsed.lastUsedAt ?? parsed.createdAt ?? Date.now()
     };
