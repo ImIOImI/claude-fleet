@@ -18,3 +18,4 @@ v0.14.0, CI-runnable e2e, no release.
 | 8 | 1 | Over-cap posts in Phase 1 are rejected + logged (`inbox-post-rejected` in the error log); the "one notification to you" part arrives with Phase 2 notifications. | Notifications don't exist yet in Phase 1. | `inboxIpc.ts` |
 | 9 | 1 | Executed plans inline (not subagent-driven) since Troy is asleep and can't pick. | Faster, single context. | — |
 | 10 | 1 | Edit-workspace Phase 1 shows only "Can post" + "Posts per hour"; Trusted / Read-all switches arrive with the phases that use them. | YAGNI: no behavior behind them yet. | `WorkspaceForm.tsx` |
+| 11 | 1 | Added `src/preload/inboxTypes.ts` to `tsconfig.web.json` include. | The composite web project must list a preload file imported by `preload/index.ts` (TS6307). | `tsconfig.web.json` |
