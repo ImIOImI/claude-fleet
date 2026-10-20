@@ -247,7 +247,7 @@ ${extra}`;
     await expect(card).toContainText('Catch failed nightly jobs early');
     await expect(card.locator('.flag')).toContainText('new automation');
     await expect(card.locator('.pr-caps')).toContainText('prompts prop-target (live session)');
-    await card.getByRole('button', { name: 'Approve' }).click();
+    await card.getByRole('button', { name: 'Approve', exact: true }).click();
     await expect(card).toBeHidden(); // decided proposals leave Everything (they stay under Needs approval › Decided)
     await expect.poll(async () => ((await call(p, 'get_proposal', { id: r1.id })).value as { status: string }).status).toBe('approved');
     const autos = await callTestIpc<Array<{ name: string; createdBy: { kind: string; id: string } }>>(app, 'automations:list', []);
