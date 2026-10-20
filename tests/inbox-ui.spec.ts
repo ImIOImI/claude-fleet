@@ -54,9 +54,9 @@ test('Inbox: search and tag filter; workspace chip deselects while open (#407)',
     await callTestIpc(app, 'inbox:create', [{ title: 'Disk 91% on build-01', priority: 'high', tags: ['ops'] }]);
     await callTestIpc(app, 'inbox:create', [{ title: 'Drink water', priority: 'low', tags: ['health'] }]);
     await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
-    await window.getByLabel('Workspace name').fill('alpha');
+    await window.getByLabel('Workspace name').fill('deselect-check');
     await window.getByRole('button', { name: 'Create & start' }).click();
-    const ws = window.locator('.ws-chip-group', { hasText: 'alpha' });
+    const ws = window.locator('.ws-chip-group', { hasText: 'deselect-check' });
     await expect(ws).toHaveClass(/active/);
 
     await chip(window).locator('.ws-chip').click();
