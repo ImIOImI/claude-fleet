@@ -22,11 +22,13 @@ interface Props {
   onOpenSchedules: () => void;
   /** Enabled automations, for the tab count. */
   automationCount?: number;
+  /** Pending proposals, for the Activity tab count. */
+  approvals?: number;
 }
 
 const TABS: Array<[TodoStatus | 'all', string]> = [['open', 'Open'], ['done', 'Done'], ['dismissed', 'Dismissed'], ['all', 'All']];
 
-export function InboxView({ names, openCount, quiet, focusTodoId, focusNonce, onJump, onOpenSchedules, automationCount = 0 }: Props) {
+export function InboxView({ names, openCount, quiet, focusTodoId, focusNonce, onJump, onOpenSchedules, automationCount = 0, approvals = 0 }: Props) {
   const [section, setSection] = useState<'todos' | 'automations' | 'activity'>('todos');
   const [status, setStatus] = useState<TodoStatus | 'all'>('open');
   const [todos, setTodos] = useState<Todo[]>([]);
@@ -89,7 +91,8 @@ export function InboxView({ names, openCount, quiet, focusTodoId, focusNonce, on
         </div>
         <div role="tab" aria-selected={section === 'activity'} className={`session-tab${section === 'activity' ? ' active' : ''}`} onClick={() => setSection('activity')}>
           <span className="session-tab-name">Activity</span>
-          {quiet && quiet.heldSinceQuiet > 0 && <span className="ib-count wait">{quiet.heldSinceQuiet}</span>}
+          {approvals > 0 ? <span className="ib-count wait" title="Waiting for your approval">{approvals}</span>
+            : quiet && quiet.heldSinceQuiet > 0 && <span className="ib-count" title="Held while quiet">{quiet.heldSinceQuiet}</span>}
         </div>
         <span className="ib-tabs-spacer" />
         <div className="ph-ctl">

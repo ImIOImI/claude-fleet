@@ -247,6 +247,7 @@ export function WorkspaceForm({
   const [canPostTodos, setCanPostTodos] = useState(initial?.inbox?.canPost !== false);
   const [postsPerHour, setPostsPerHour] = useState(String(initial?.inbox?.maxPostsPerHour ?? 60));
   const [inboxOpen, setInboxOpen] = useState(initial?.inbox !== undefined);
+  const [trustedEdits, setTrustedEdits] = useState(initial?.inbox?.trusted === true);
   // Manager workspaces eligible for the acceptFrom list (other container managers).
   const managerOptions = useMemo(
     () => eligibleAcceptFromManagers(workspaces, initial?.id ?? ''),
@@ -491,7 +492,8 @@ export function WorkspaceForm({
     const inboxCfg: InboxConfig = {
       ...(canPostTodos ? {} : { canPost: false }),
       ...(Number.isFinite(pph) && pph >= 1 && pph !== 60 ? { maxPostsPerHour: Math.min(pph, 10000) } : {}),
-      ...(initial?.inbox?.canReadAll ? { canReadAll: true } : {})
+      ...(initial?.inbox?.canReadAll ? { canReadAll: true } : {}),
+      ...(trustedEdits && kind === 'container' ? { trusted: true } : {})
     };
     const inbox = mode === 'edit' && Object.keys(inboxCfg).length ? inboxCfg : undefined;
 
@@ -1247,7 +1249,7 @@ export function WorkspaceForm({
         >
           <summary>
             Inbox &amp; automations{' '}
-            <span className="form-hint">{canPostTodos ? `can post · ${postsPerHour || 60}/hour` : 'posting off'}</span>
+            <span className="form-hint">{canPostTodos ? `can post · ${postsPerHour || 60}/hour` : 'posting off'}{trustedEdits && kind === 'container' ? ' · trusted' : ''}</span>
           </summary>
           <label className="committee-reachable-row">
             <input
@@ -1273,6 +1275,29 @@ export function WorkspaceForm({
           <p className="form-hint">
             Over the limit, posts are rejected and the workspace is told when it can post again.
           </p>
+          {kind === 'container' ? (
+            <>
+              <label className="committee-reachable-row">
+                <input type="checkbox" checked={trustedEdits} onChange={(e) => setTrustedEdits(e.target.checked)} disabled={busy} />
+                <span>Trusted for low-risk automation edits</span>
+              </label>
+              {trustedEdits && (
+                <div className="committee-warning" role="note">
+                  <svg viewBox="0 0 16 16" width="13" height="13" fill="none" aria-hidden="true">
+                    <path d="M8 1.5L1 14h14L8 1.5z" stroke="currentColor" strokeWidth="1.3" />
+                    <path d="M8 6v4M8 11.4v.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                  </svg>
+                  <span>
+                    Its edits to names, tags, prompt wording, params and slower schedules (no faster than every 5 min) apply
+                    without asking, and stay revertible in Activity. <strong>New automations, new prompt targets, fresh sessions,
+                    extra tools and event triggers still need you.</strong>
+                  </span>
+                </div>
+              )}
+            </>
+          ) : (
+            <p className="form-hint">Local workspaces can't be trusted: their identity can't be verified the way a container's can.</p>
+          )}
         </details>
       )}
 

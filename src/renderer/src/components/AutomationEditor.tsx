@@ -10,9 +10,13 @@ interface Props {
   initialYaml: string;
   onClose: () => void;
   onSaved: (id: string) => void;
+  /** Override saving (e.g. edit-then-approve a proposal). */
+  onSubmit?: (text: string) => Promise<void>;
+  submitLabel?: string;
+  title?: string;
 }
 
-export function AutomationEditor({ automationId, initialYaml, onClose, onSaved }: Props) {
+export function AutomationEditor({ automationId, initialYaml, onClose, onSaved, onSubmit, submitLabel, title }: Props) {
   const [text, setText] = useState(initialYaml);
   const [errors, setErrors] = useState<string[]>([]);
   const [checking, setChecking] = useState(false);
@@ -31,6 +35,11 @@ export function AutomationEditor({ automationId, initialYaml, onClose, onSaved }
     setBusy(true);
     setSaveError(null);
     try {
+      if (onSubmit) {
+        await onSubmit(text);
+        onSaved(automationId ?? '');
+        return;
+      }
       const a = automationId ? await window.api.automations.update(automationId, text) : await window.api.automations.create(text);
       onSaved(a.id);
     } catch (e) {
@@ -42,8 +51,8 @@ export function AutomationEditor({ automationId, initialYaml, onClose, onSaved }
 
   return (
     <ModalBackdrop onClose={onClose}>
-      <div className="modal auto-editor" role="dialog" aria-label={automationId ? 'Edit automation' : 'New automation'} onClick={(e) => e.stopPropagation()}>
-        <h2>{automationId ? 'Edit automation' : 'New automation'}</h2>
+      <div className="modal auto-editor" role="dialog" aria-label={title ?? (automationId ? 'Edit automation' : 'New automation')} onClick={(e) => e.stopPropagation()}>
+        <h2>{title ?? (automationId ? 'Edit automation' : 'New automation')}</h2>
         <p className="form-hint">
           Saving creates a new version. Steps name a workspace (by name); schedules use cron
           (<code>*/30 8-18 * * 1-5</code>). Describing an automation to Claude instead arrives in a later phase.
@@ -67,7 +76,7 @@ export function AutomationEditor({ automationId, initialYaml, onClose, onSaved }
         <div className="modal-footer">
           <button className="btn" onClick={onClose}>Cancel</button>
           <button className="btn primary" disabled={busy || checking || errors.length > 0} onClick={() => void save()}>
-            {automationId ? 'Save new version' : 'Create automation'}
+            {submitLabel ?? (automationId ? 'Save new version' : 'Create automation')}
           </button>
         </div>
       </div>

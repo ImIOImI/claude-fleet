@@ -1,7 +1,8 @@
 // Inbox › Activity (#407 Phase 2): the notification log — delivered and held
 // back, with the exact reason each held item was held. (Proposals join in Phase 5.)
 import { useCallback, useEffect, useState } from 'react';
-import type { Downtime, NotificationRow, NotifyRule } from '../../../preload';
+import type { Downtime, NotificationRow, NotifyRule, Proposal } from '../../../preload';
+import { ProposalCard } from './ProposalCard';
 import { heldReasonLabel, hhmm } from '../notifyView';
 import { relativeAgo, sourceLabel } from '../inboxView';
 import { BellPopover } from './BellPopover';
@@ -13,8 +14,7 @@ interface Props {
   onOpenWorkspace: (workspaceId: string) => void;
 }
 
-type Filter = 'all' | 'delivered' | 'held';
-const FILTERS: Array<[Filter, string]> = [['all', 'Everything'], ['delivered', 'Notifications'], ['held', 'Held back']];
+type Filter = 'all' | 'approvals' | 'delivered' | 'held';
 
 export function ActivityView({ names, onOpenTodo, onOpenWorkspace }: Props) {
   const [filter, setFilter] = useState<Filter>('all');
@@ -22,27 +22,47 @@ export function ActivityView({ names, onOpenTodo, onOpenWorkspace }: Props) {
   const [rules, setRules] = useState<NotifyRule[]>([]);
   const [downtimes, setDowntimes] = useState<Downtime[]>([]);
   const [bellFor, setBellFor] = useState<{ id: string; rect: DOMRect } | null>(null);
+  const [proposals, setProposals] = useState<Proposal[]>([]);
 
   const reload = useCallback(() => {
-    void window.api.notifications.list(filter).then(setRows);
+    void window.api.proposals.list().then(setProposals);
+    if (filter !== 'approvals') void window.api.notifications.list(filter).then(setRows);
     void window.api.notifications.settings().then((s) => { setRules(s.rules); setDowntimes(s.downtimes); });
   }, [filter]);
   useEffect(() => { reload(); }, [reload]);
   useEffect(() => window.api.notifications.onChanged(() => reload()), [reload]);
+  useEffect(() => window.api.proposals.onChanged(() => reload()), [reload]);
 
   const sameDay = (ts: number) => new Date(ts).toDateString() === new Date().toDateString();
+  const pendingProposals = proposals.filter((p) => p.status === 'pending');
+  const decided = proposals.filter((p) => p.status !== 'pending' && p.status !== 'superseded').slice(0, 10);
+  const FILTERS: Array<[Filter, string]> = [['all', 'Everything'], ['approvals', `Needs approval${pendingProposals.length ? ` · ${pendingProposals.length}` : ''}`], ['delivered', 'Notifications'], ['held', 'Held back']];
 
   return (
     <div className="ib-single">
       <div className="ib-toolbar row">
-        <div className="obs-scope-toggle ib-scope three" role="tablist" aria-label="Activity filter">
+        <div className="obs-scope-toggle ib-scope" role="tablist" aria-label="Activity filter">
           {FILTERS.map(([f, label]) => (
             <button key={f} role="tab" aria-selected={filter === f} className={`obs-scope-btn ${filter === f ? 'active' : ''}`} onClick={() => setFilter(f)}>{label}</button>
           ))}
         </div>
       </div>
       <div className="ib-scroll">
-        {rows.length === 0 ? (
+        {(filter === 'all' || filter === 'approvals') && pendingProposals.length > 0 && (
+          <>
+            <div className="session-group-label">Needs approval<span className="session-group-line" /></div>
+            {pendingProposals.map((p) => <ProposalCard key={p.id} proposal={p} names={names} />)}
+          </>
+        )}
+        {filter === 'approvals' && (
+          <>
+            {pendingProposals.length === 0 && <div className="ib-empty">Nothing waiting for approval. Workspaces can propose automations; they land here.</div>}
+            {decided.length > 0 && <div className="session-group-label">Decided<span className="session-group-line" /></div>}
+            {decided.map((p) => <ProposalCard key={p.id} proposal={p} names={names} />)}
+          </>
+        )}
+        {filter === 'all' && pendingProposals.length > 0 && <div className="session-group-label">Notifications<span className="session-group-line" /></div>}
+        {filter === 'approvals' ? null : rows.length === 0 ? (
           <div className="ib-empty">{filter === 'held' ? 'Nothing has been held back.' : 'No notifications yet.'}</div>
         ) : (
           <ul className="notif-log" aria-label="Notification log">

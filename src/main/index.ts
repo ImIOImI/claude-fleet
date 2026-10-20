@@ -301,13 +301,13 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   instrumentIpcHandle(ipcMain);
   registerIpc({ jsonlWatcher, peerStatusWatcher });
   const notifySvc = inboxStore ? registerNotifyIpc(inboxStore) : null;
-  const automations = inboxStore ? registerAutomationIpc(inboxStore, notifySvc) : null;
-  if (inboxStore) registerInboxIpc(inboxStore, notifySvc ?? undefined, automations ? (r, c) => automations.attribution(r, c) : undefined);
+  const auto = inboxStore ? registerAutomationIpc(inboxStore, notifySvc) : null;
+  if (inboxStore) registerInboxIpc(inboxStore, notifySvc ?? undefined, auto ? (r, c) => auto.automations.attribution(r, c) : undefined);
   registerPresenceIpc(ipcMain, { get: getKeepRunningInTray, set: setKeepRunningInTray });
   mainWindow = createWindow();
   // Desktop presence (#407 Phase 2b): tray, taskbar overlay, badge, attention.
   if (inboxStore && notifySvc) {
-    presence = startPresence(inboxStore, notifySvc);
+    presence = startPresence(inboxStore, notifySvc, () => auto?.proposals.pendingCount() ?? 0);
     attachKeepRunning(mainWindow, () => presence?.hasTray() ?? false);
   }
 

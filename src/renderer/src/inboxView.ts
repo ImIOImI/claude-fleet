@@ -21,12 +21,14 @@ export function sourceLabel(s: TodoSource, names: Record<string, string>): strin
 }
 
 export function chipSubline(c: InboxCounts): string {
-  if (c.open === 0) return 'nothing open';
-  return c.urgent > 0 ? `${c.open} open · ${c.urgent} urgent` : `${c.open} open`;
+  const approve = c.approvals ? ` · ${c.approvals} to approve` : '';
+  if (c.open === 0) return c.approvals ? `${c.approvals} to approve` : 'nothing open';
+  return (c.urgent > 0 ? `${c.open} open · ${c.urgent} urgent` : `${c.open} open`) + approve;
 }
 
-export function chipDot(c: InboxCounts): 'urgent' | 'open' | 'none' {
+export function chipDot(c: InboxCounts): 'urgent' | 'wait' | 'open' | 'none' {
   if (c.urgent > 0) return 'urgent';
+  if (c.approvals) return 'wait';
   return c.open > 0 ? 'open' : 'none';
 }
 

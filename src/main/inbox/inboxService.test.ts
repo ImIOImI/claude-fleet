@@ -55,7 +55,7 @@ describe('inbox IPC handlers', () => {
     expect(t).toMatchObject({ source: { kind: 'user', id: null }, priority: 'urgent', tags: ['health'] });
     const ws = (await svc.mcp.post('W1', { title: 'from ws' })) as { id: string };
     await svc.ipc.update(ws.id, { status: 'dismissed' });
-    expect(await svc.ipc.counts()).toEqual({ open: 1, urgent: 1, high: 0 });
+    expect(await svc.ipc.counts()).toEqual({ open: 1, urgent: 1, high: 0, approvals: 0 });
     const detail = await svc.ipc.get(t.id);
     expect(detail?.events.map((e) => e.kind)).toEqual(['created']);
     expect(await svc.ipc.get('missing')).toBeNull();

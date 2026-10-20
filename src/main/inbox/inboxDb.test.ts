@@ -96,7 +96,7 @@ describe('InboxStore.list / counts', () => {
     expect(store.list({ tags: ['ops'] }).map((t) => t.title)).toEqual(['low']);
     expect(store.list({ visibleTo: 'W1' }).map((t) => t.title).sort()).toEqual(['low', 'other', 'urgent']);
     expect(store.list({ limit: 1 })).toHaveLength(1);
-    expect(store.counts()).toEqual({ open: 4, urgent: 1, high: 0 });
+    expect(store.counts()).toEqual({ open: 4, urgent: 1, high: 0, approvals: 0 });
   });
 });
 

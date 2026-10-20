@@ -91,6 +91,8 @@ export interface InboxCounts {
   open: number;
   urgent: number;
   high: number;
+  /** Pending automation proposals (#407 Phase 5). */
+  approvals?: number;
 }
 
 /** Host-private per-workspace inbox permissions (workspace manifest `inbox`). */
@@ -101,6 +103,8 @@ export interface InboxConfig {
   maxPostsPerHour?: number;
   /** Default false. */
   canReadAll?: boolean;
+  /** Phase 5: auto-apply this workspace's low-risk automation edits. Container workspaces only. Default false. */
+  trusted?: boolean;
 }
 
 // --- Notifications (#407 Phase 2) -------------------------------------------

@@ -16,6 +16,10 @@ import { emitInboxChanged } from '../inbox/inboxEvents.js';
 import { AutomationStore } from './automationStore.js';
 import { createAutomationService, type AutomationService } from './automationService.js';
 import { STARTER_YAML } from './definition.js';
+import { ProposalStore } from './proposalStore.js';
+import { createProposalService, type ProposalService } from './proposalService.js';
+import { readWorkspaceManifest } from '../workspaces.js';
+import { broadcastInboxChanged } from '../inbox/inboxBroadcast.js';
 
 function send(channel: string, payload?: unknown): void {
   for (const w of BrowserWindow.getAllWindows()) {
@@ -24,7 +28,7 @@ function send(channel: string, payload?: unknown): void {
   }
 }
 
-export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService | null): AutomationService {
+export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService | null): { automations: AutomationService; proposals: ProposalService } {
   const store = new AutomationStore(inbox.db);
   // Name ↔ id map refreshed on use; automations name workspaces in YAML.
   let names: Array<{ id: string; name: string }> = [];
@@ -48,6 +52,26 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     changed: () => { send('automations:changed'); emitInboxChanged(); }
   });
 
+  // Proposals (#407 Phase 5): workspaces propose, the user approves.
+  const proposals = createProposalService({
+    proposals: new ProposalStore(inbox.db),
+    automations: store,
+    now: Date.now,
+    resolveWorkspace: (v) => names.find((n) => n.id === v)?.id ?? names.find((n) => n.name === v)?.id ?? null,
+    workspaceName: (id) => names.find((n) => n.id === id)?.name ?? id,
+    trusted: async (id) => {
+      const m = await readWorkspaceManifest(id);
+      return m?.kind === 'container' && m.inbox?.trusted === true;
+    },
+    notify: notify ? (n) => notify.request(n) : undefined,
+    changed: () => {
+      send('automations:changed');
+      send('proposals:changed');
+      broadcastInboxChanged(inbox.counts(), BrowserWindow.getAllWindows());
+      emitInboxChanged();
+    }
+  });
+
   try {
     svc.recover();
   } catch (e) {
@@ -68,7 +92,10 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
 
   setAutomationHandlers({
     list: async (callerId) => { await refresh(); return svc.mcp.list(callerId); },
-    run: async (callerId, args) => { await refresh(); return svc.mcp.run(callerId, args); }
+    run: async (callerId, args) => { await refresh(); return svc.mcp.run(callerId, args); },
+    propose: async (callerId, args) => { await refresh(); return proposals.mcp.propose(callerId, args); },
+    proposeChange: async (callerId, args) => { await refresh(); return proposals.mcp.proposeChange(callerId, args); },
+    getProposal: async (callerId, args) => proposals.mcp.get(callerId, args)
   });
 
   const USER = { kind: 'user' as const, id: null };
@@ -84,5 +111,11 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     withNames(() => svc.run(id, { kind: 'manual', by: USER, args: args ?? {}, coerce: true })));
   ipcMain.handle('automations:starter', () =>
     withNames(() => STARTER_YAML.replace('REPLACE-WITH-WORKSPACE-NAME', names[0]?.name ?? 'REPLACE-WITH-WORKSPACE-NAME')));
-  return svc;
+  ipcMain.handle('proposals:list', () => withNames(() => proposals.list()));
+  ipcMain.handle('proposals:yaml', (_e, id: string, index: number) => proposals.yamlOf(id, index ?? 0));
+  ipcMain.handle('proposals:approve', (_e, id: string, opts: { accept?: number[]; editedYaml?: string; editedIndex?: number }) =>
+    withNames(() => proposals.approve(id, opts ?? {})));
+  ipcMain.handle('proposals:reject', (_e, id: string, note: string | null) => proposals.reject(id, note ?? null));
+  ipcMain.handle('proposals:revert', (_e, id: string, index: number) => proposals.revert(id, index));
+  return { automations: svc, proposals };
 }

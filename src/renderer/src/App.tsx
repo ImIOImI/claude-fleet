@@ -1452,6 +1452,7 @@ export function App() {
                 openCount={inboxCounts.open}
                 quiet={quiet}
                 automationCount={automationList.filter((a) => a.enabled).length}
+                approvals={inboxCounts.approvals ?? 0}
                 focusTodoId={inboxFocus?.todoId ?? null}
                 focusNonce={inboxFocus?.nonce}
                 onOpenSchedules={() => setSettingsTab('notifications')}

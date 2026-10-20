@@ -301,7 +301,8 @@ export class InboxStore {
               SUM(CASE WHEN priority = 'high' THEN 1 ELSE 0 END) AS high
          FROM todos WHERE status = 'open'`
     ).get() as { open: number; urgent: number | null; high: number | null };
-    return { open: r.open, urgent: r.urgent ?? 0, high: r.high ?? 0 };
+    const approvals = (this.db.prepare(`SELECT COUNT(*) AS n FROM proposals WHERE status = 'pending'`).get() as { n: number }).n;
+    return { open: r.open, urgent: r.urgent ?? 0, high: r.high ?? 0, approvals };
   }
 
   // --- writes -------------------------------------------------------------
