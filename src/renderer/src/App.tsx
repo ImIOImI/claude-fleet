@@ -427,6 +427,7 @@ export function App() {
     }
   }, []);
   useEffect(() => window.api.notifications.onOpen(openNotificationTarget), [openNotificationTarget]);
+  useEffect(() => window.api.presence.onOpenInbox(() => setInboxOpen(true)), []);
   useEffect(
     () =>
       window.api.notifications.onToast((n) => {

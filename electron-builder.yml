@@ -15,6 +15,11 @@ files:
 # from inside app.asar. Force them (and any *.node binaries) to be unpacked.
 # sharp/@img are unpacked as full trees: sharp.node dlopens the libvips
 # shared libraries (.dll/.so, not *.node) relative to its own real path.
+# Tray + taskbar-overlay images (#407), loaded at runtime from
+# process.resourcesPath/presence (src/main/inbox/presence.ts).
+extraResources:
+  - from: resources/presence
+    to: presence
 asarUnpack:
   - "**/*.node"
   - "**/node_modules/@huggingface/transformers/**"
@@ -24,6 +29,8 @@ asarUnpack:
   - "**/node_modules/node-pty/**"
   - "**/node_modules/onnxruntime-node/**"
   - "**/node_modules/sharp/**"
+# App icon (#407 "Teardrop"); electron-builder derives .ico/.icns from the 1024px PNG.
+icon: resources/icon.png
 linux:
   target: AppImage
   category: Development

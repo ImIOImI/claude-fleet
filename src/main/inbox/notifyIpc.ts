@@ -11,6 +11,7 @@ import { logError } from '../errorLog.js';
 import type { InboxStore } from './inboxDb.js';
 import { NotifyStore } from './notifyStore.js';
 import { createNotifyService, type NotifyService } from './notifyService.js';
+import { emitInboxChanged, inboxEvents } from './inboxEvents.js';
 
 const LEVELS = new Set<NotifyLevel>(['all', 'high', 'urgent', 'off']);
 const SCOPES = new Set<RuleScopeKind>(['key', 'source', 'tag']);
@@ -52,7 +53,10 @@ export function registerNotifyIpc(inbox: InboxStore): NotifyService {
     now: Date.now,
     name: (id) => names.get(id) ?? 'a workspace',
     viewing: () => ({ focused: BrowserWindow.getAllWindows().some((w) => w.isFocused()), ...viewing }),
-    changed: () => send('notifications:changed', svc.quietState()),
+    changed: () => {
+      send('notifications:changed', svc.quietState());
+      emitInboxChanged();
+    },
     setTimer: (fn, ms) => setTimeout(fn, ms),
     clearTimer: (h) => clearTimeout(h as NodeJS.Timeout),
     deliver: (n: NotificationRow) => {
@@ -73,6 +77,7 @@ export function registerNotifyIpc(inbox: InboxStore): NotifyService {
       live.push(os); // keep a reference so the click handler survives GC
       if (live.length > 20) live.shift();
       os.show();
+      if (n.priority === 'urgent') inboxEvents.emit('attention');
       return 'os';
     }
   });
@@ -80,6 +85,7 @@ export function registerNotifyIpc(inbox: InboxStore): NotifyService {
   setInputWaitObserver((workspaceId, ids) => {
     if (!names.has(workspaceId)) void refreshNames();
     svc.onInputWait(workspaceId, ids);
+    emitInboxChanged();
   });
 
   const tick = setInterval(() => {

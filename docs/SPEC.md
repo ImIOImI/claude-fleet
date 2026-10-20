@@ -381,6 +381,9 @@ Wired by `src/main/inbox/notifyIpc.ts` (registered with the inbox; the effects a
 - Pushes: `notifications:changed` (QuietState), `notifications:toast` (a delivered row, shown in-app when the window is focused), `notifications:open` (`{notificationId, todoId, workspaceId, kind}` after an OS-notification click; the window is focused first).
 - Every write handler runs one ticker pass, so a resume produces its digest immediately; otherwise the ticker runs every 30 s, and a daily prune drops rows older than 30 days.
 
+### Presence (#407 Phase 2b)
+- `presence:getKeepRunning()` / `presence:setKeepRunning(v)` (config.json `keepRunningInTray`, default false). Push `presence:openInbox` (the tray's "Open Inbox").
+
 ### Clipboard + context menu
 The renderer cannot use `navigator.clipboard` reliably (focus/permission gotchas in Electron, and the renderer is contextIsolated). All clipboard access goes through main:
 - `clipboard:write(text)` → `void` — `electron.clipboard.writeText` (no-op on empty).
@@ -1054,6 +1057,15 @@ A dev server (Vite, Next, a Python server, …) started inside a workspace conta
 - **Activity tab** (`ActivityView.tsx`): Everything / Notifications / Held back, with time, title (click → its todo or workspace), source, and the delivered channel or the held reason in words.
 - **Settings › Notifications** tab (`NotificationsSettings.tsx`, saves immediately): Notify me for (default level), Downtime (a week view with a "now" marker; the schedule list with enable, Edit, Remove; an editor for name, start/end, days and bypass), Rules (the table with Remove), and Desktop notifications (support check + Send a test).
 
+### Desktop presence
+`src/main/inbox/presence.ts` (Electron) + `presenceCore.ts` (pure), refreshed on every inbox / notification / input-wait change (`inboxEvents`) and once a minute.
+- **"Needs you"** = urgent open todos + workspaces waiting for input (+ pending approvals, from Phase 5). Plain open todos never count. **1 → dot, ≥2 → count, 9+ cap; red if anything urgent, otherwise violet.**
+- **Windows:** `setOverlayIcon` with `resources/presence/overlay-<urgent|wait>[-<n>|-9plus].png`. **macOS:** `app.setBadgeCount` + `dock.setBadge(count)`. **Linux:** `app.setBadgeCount` (desktop-dependent), with the tray as the reliable signal.
+- **Tray** (all platforms): the app tile with a dot (`tray-<none|urgent|wait>-16/32.png`, never a number), a tooltip ("claude-fleet: 7 open · 1 urgent · 2 waiting for input · paused until 15:30"), click → show the window. Its menu has a status line, Open Inbox, Open claude-fleet, Pause notifications for 1 hour / Pause until tomorrow 08:00 (or Resume notifications), and Quit claude-fleet.
+- **Attention:** a *delivered* urgent desktop notification while the window isn't focused flashes the taskbar button (`flashFrame`, cleared on focus) or bounces the dock once (macOS). Held items never get attention.
+- **Keep running in the background** (Settings › Notifications, default off): when on and a tray exists, closing the window hides it instead; the tray's Quit (or app quit) really quits.
+- **App icon:** the "Teardrop" outline starship (dark tile, ink outlines, green nacelle strips). Source is `scripts/icons/build-icons-html.mjs` (SVG) and the PNG export is `scripts/icons/render-icons.mjs` (puppeteer, run by hand). It outputs `resources/icon.png` (1024px; electron-builder `icon:` derives .ico/.icns), `resources/presence/*.png` (shipped via `extraResources` → `process.resourcesPath/presence`; dev reads `<appPath>/resources/presence`), and `window-256.png` (the Linux window icon). A unit test asserts every asset name presenceCore can return exists.
+
 ## 9. Security model
 
 - **Secret env-var values stay out of the renderer except at write time.** Per-workspace secrets are persisted via `vault:setSecret(workspaceId, key, value)`. After that, the renderer holds only the *list* of secret key names (via `vault:listKeys`); the main process resolves values directly from the safeStorage vault when constructing the container env. The lone exception is the env-row in `WorkspaceForm` — the renderer briefly holds the value the user just typed before it ships to `vault:setSecret`. There is no way around that.
@@ -1178,7 +1190,7 @@ claude-fleet/
 These are decided in spirit but not yet implemented. When you implement one, move it out of this section and into the relevant body section above.
 
 ### Inbox, automations & desktop notifications (#407)
-**Phase 1 (inbox core) shipped in v0.14.0; Phase 2a (notification engine + UI) follows it** and is described in the body (§6 *Inbox*, §7 *Inbox store*, §8 *Inbox*, §9). The remaining phases are below.
+**Phase 1 (inbox core) shipped in v0.14.0; Phase 2a (notification engine + UI) and 2b (desktop presence, app icon) follow it** and is described in the body (§6 *Inbox*, §7 *Inbox store*, §8 *Inbox*, §9). The remaining phases are below.
 Designed, not built. The full design is in [`superpowers/specs/2026-10-20-inbox-automations-design.md`](superpowers/specs/2026-10-20-inbox-automations-design.md), delivered in 8 phases. Load-bearing decisions:
 - **Storage:** a separate authoritative `<userData>/inbox.db` (never `state.db`, which is a droppable cache).
 - **Inbox items:** one inbox; every item has an immutable host-stamped `source`; dedupe by poster `key`, and a recurrence reopens the item. Noise is controlled by notification rules (key > source > tag > global), downtime schedules and a global pause, never per-item mute.

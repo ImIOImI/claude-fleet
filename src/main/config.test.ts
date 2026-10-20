@@ -47,7 +47,9 @@ const {
   setPerfTelemetry,
   getPerfOtlp,
   setPerfOtlp,
-  _resetConfigCacheForTests
+  _resetConfigCacheForTests,
+  getKeepRunningInTray,
+  setKeepRunningInTray
 } = await import('./config.js');
 
 const configPath = () => join(userDataDir, 'config.json');
@@ -562,5 +564,17 @@ describe('capture toggle', () => {
     _resetConfigCacheForTests();
     expect(await getCapturePty()).toBe('/var/tmp/ptycap');
     expect(await getCaptureEnabled()).toBe(false);
+  });
+});
+
+describe('keepRunningInTray (#407 Phase 2b)', () => {
+  it('defaults off, round-trips, and survives a reload from disk', async () => {
+    expect(await getKeepRunningInTray()).toBe(false);
+    await setKeepRunningInTray(true);
+    _resetConfigCacheForTests();
+    expect(await getKeepRunningInTray()).toBe(true);
+    await setHardwareAccelDisabled(true);
+    _resetConfigCacheForTests();
+    expect(await getKeepRunningInTray()).toBe(true);
   });
 });
