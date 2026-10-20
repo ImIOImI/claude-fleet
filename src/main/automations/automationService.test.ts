@@ -15,17 +15,22 @@ function setup(opts: { state?: WorkspaceState; postGate?: Promise<void> } = {}) 
   let t = new Date(2026, 9, 19, 10, 0).getTime();
   const posts: Array<[string, string]> = [];
   const notes: Array<Record<string, unknown>> = [];
+  const timers: Array<{ fn: () => void; at: number; dead: boolean }> = [];
   const svc = createAutomationService({
     store, now: () => t, sleep: async (ms) => { t += ms; },
     workspaceState: async () => opts.state ?? 'running',
     workspaceName: (id) => Object.entries(WSS).find(([, v]) => v === id)?.[0] ?? id,
     ensureRunning: async () => {}, busy: () => false,
+    spawnFresh: async () => {}, freshState: async () => 'ended', closeFresh: async () => {},
+    setTimer: (fn, ms) => { const h = { fn, at: t + ms, dead: false }; timers.push(h); return h; },
+    clearTimer: (h) => { (h as { dead: boolean }).dead = true; },
     post: async (id, text) => { await opts.postGate; posts.push([id, text]); return { via: 'attached' }; },
     resolveWorkspace: (v) => WSS[v] ?? (Object.values(WSS).includes(v) ? v : null),
     notify: (n) => { notes.push(n as never); return null; },
     changed: () => {}
   });
-  return { store, svc, posts, notes, advance: (ms: number) => { t += ms; }, at: () => t };
+  const fire = (ms: number) => { t += ms; for (const h of timers) if (!h.dead && h.at <= t) { h.dead = true; h.fn(); } };
+  return { store, svc, posts, notes, fire, advance: (ms: number) => { t += ms; }, at: () => t };
 }
 
 const YAML = (extra = '') => `name: log-watch
@@ -136,5 +141,49 @@ describe('attribution + MCP', () => {
     expect(posts[0][1]).toContain('caller-supplied input');
     svc.setEnabled(a.id, false);
     expect(() => svc.mcp.run('W2', { id: a.id })).toThrow(/disabled/);
+  });
+});
+
+describe('event triggers (Phase 4)', () => {
+  const EV = (trigger: string) => `name: on-event
+triggers:
+  - ${trigger}
+steps:
+  - id: look
+    prompt: { workspace: ops-oncall, mode: live, message: "look" }
+`;
+  it('debounces a burst of matching events into one run', async () => {
+    const { svc, fire } = setup();
+    const a = svc.create(EV('event: { on: todo.created, tag: ops, debounce: 30s }'), USER);
+    const todo = (id: string, tags = ['ops']) => ({ id, title: `t${id}`, tags, source: { kind: 'workspace' as const, id: 'W2' } });
+    expect(svc.onEvent({ on: 'todo.created', todo: todo('1', ['other']) })).toEqual([]);
+    expect(svc.onEvent({ on: 'todo.created', todo: todo('1') })).toEqual([a.id]);
+    svc.onEvent({ on: 'todo.created', todo: todo('2') });
+    svc.onEvent({ on: 'todo.created', todo: todo('3') });
+    expect(svc.get(a.id)?.runs).toHaveLength(0);
+    fire(30_000);
+    await svc.settle();
+    const runs = svc.get(a.id)!.runs;
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: 'succeeded', trigger: { kind: 'event', event: { on: 'todo.created', todoId: '1', count: 3 } } });
+  });
+  it('filters by workspace, ignores its own todos, and ignores the workspace it just prompted', async () => {
+    const { svc, fire } = setup();
+    const a = svc.create(EV('event: { on: session.idle, debounce: 1s }'), USER);
+    expect(svc.onEvent({ on: 'session.idle', workspaceId: 'W2' })).toEqual([a.id]);
+    fire(1000);
+    await svc.settle();
+    // The run prompted W1 (ops-oncall); W1 going idle right after must not retrigger it.
+    expect(svc.onEvent({ on: 'session.idle', workspaceId: 'W1' })).toEqual([]);
+    const own = { id: 'T', title: 'x', tags: [], source: { kind: 'automation' as const, id: a.id } };
+    const b = svc.create(EV('event: { on: todo.created, debounce: 1s }').replace('on-event', 'on-todo'), USER);
+    // b never reacts to a todo it posted itself…
+    expect(svc.onEvent({ on: 'todo.created', todo: { ...own, source: { kind: 'automation', id: b.id } } })).toEqual([]);
+    // …but does react to someone else's.
+    expect(svc.onEvent({ on: 'todo.created', todo: { ...own, source: { kind: 'user', id: null } } })).toEqual([b.id]);
+    const c = svc.create(EV('event: { on: workspace.started, workspace: webex-triage, debounce: 1s }').replace('on-event', 'on-start'), USER);
+    expect(svc.onEvent({ on: 'workspace.started', workspaceId: 'W9' })).toEqual([]);
+    expect(svc.onEvent({ on: 'workspace.started', workspaceId: 'W2' })).toEqual([c.id]);
+    svc.cancelPending();
   });
 });

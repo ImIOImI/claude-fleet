@@ -14,7 +14,10 @@ const def = (over: Partial<AutomationDef> = {}): AutomationDef => ({
   steps: [step()], ...over
 });
 
-function setup(state: WorkspaceState | null = 'running', busyPlan: boolean[] = []) {
+function setup(state: WorkspaceState | null = 'running', busyPlan: boolean[] = [], freshMs = 5000) {
+  const fresh: Array<[string, string, string[]]> = [];
+  const closed: string[] = [];
+  const freshEnds = new Map<string, number>();
   inbox = InboxStore.memory();
   const store = new AutomationStore(inbox.db);
   let t = 1_000_000;
@@ -26,9 +29,12 @@ function setup(state: WorkspaceState | null = 'running', busyPlan: boolean[] = [
     workspaceState: async () => state, workspaceName: (id) => (id === 'W1' ? 'ops-oncall' : id),
     ensureRunning: async (id) => { started.push(id); state = 'running'; },
     post: async (id, text) => { posts.push([id, text]); return { via: 'attached', brokerSessionId: 'B1' }; },
-    busy: () => (busyIdx < busyPlan.length ? busyPlan[busyIdx++] : false)
+    busy: () => (busyIdx < busyPlan.length ? busyPlan[busyIdx++] : false),
+    spawnFresh: async (id, sid, args) => { fresh.push([id, sid, args]); freshEnds.set(sid, t + freshMs); },
+    freshState: async (_id, sid) => (freshEnds.has(sid) ? (t < freshEnds.get(sid)! ? 'alive' : 'ended') : 'missing'),
+    closeFresh: async (_id, sid) => { closed.push(sid); }
   };
-  return { store, deps, posts, started, advance: (ms: number) => { t += ms; } };
+  return { store, deps, posts, started, fresh, closed, advance: (ms: number) => { t += ms; } };
 }
 
 describe('executeRun', () => {
@@ -94,5 +100,37 @@ describe('scheduler', () => {
     store.setEnabled(a.id, false);
     expect(dueSchedule(store.get(a.id)!, at(20, 0))).toBeNull();
     expect(nextFireAt(store.get(a.id)!, at(20, 0))).toBeNull();
+  });
+});
+
+describe('fresh steps (Phase 4)', () => {
+  it('spawns claude -p with the inbox tools + allowedTools, waits for it to end, then closes it', async () => {
+    const s = setup('running', [], 6000);
+    const a = s.store.create(def({ steps: [step({ mode: 'fresh', allowedTools: ['Read'] })] }), USER);
+    const run = s.store.startRun(a, { kind: 'manual' }, { since: '1h' }, 'running');
+    expect(await executeRun(s.deps, a, run, { callerSupplied: false })).toEqual({ status: 'succeeded', error: null });
+    const [ws, sid, args] = s.fresh[0];
+    expect([ws, sid]).toEqual(['W1', `auto-${run.id}-check`]);
+    expect(args[0]).toBe('-p');
+    expect(args[1]).toMatch(/^check 1h/);
+    expect(args[2]).toBe('--allowedTools');
+    expect(args[3].split(',')).toEqual(expect.arrayContaining(['mcp__claude-fleet-state__post_todo', 'mcp__claude-fleet-state__notify', 'Read']));
+    expect(s.closed).toEqual([sid]);
+    expect(s.store.getRun(run.id)!.steps[0]).toMatchObject({ status: 'succeeded', brokerSessionId: sid, detail: { via: 'fresh' } });
+  });
+  it('times out a fresh session that keeps running, and still closes it', async () => {
+    const s = setup('running', [], 10 * 60_000);
+    const a = s.store.create(def({ steps: [step({ mode: 'fresh', timeout: '1m' })] }), USER);
+    const run = s.store.startRun(a, { kind: 'manual' }, {}, 'running');
+    const r = await executeRun(s.deps, a, run, { callerSupplied: false });
+    expect(r).toEqual({ status: 'timed-out', error: 'check: the fresh session in ops-oncall was still running after 1m' });
+    expect(s.closed).toHaveLength(1);
+  });
+  it('fills {{trigger.workspace}} and {{trigger.todo}} for event runs', async () => {
+    const s = setup();
+    const a = s.store.create(def({ steps: [step({ message: '{{trigger.kind}}: {{trigger.workspace}} / {{trigger.todo}}' })] }), USER);
+    const run = s.store.startRun(a, { kind: 'event', event: { on: 'todo.created', workspaceId: 'W1', todoTitle: 'Disk full', count: 2 } }, {}, 'running');
+    await executeRun(s.deps, a, run, { callerSupplied: false });
+    expect(s.posts[0][1]).toMatch(/^event: ops-oncall \/ Disk full/);
   });
 });

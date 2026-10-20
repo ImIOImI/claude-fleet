@@ -16,7 +16,15 @@ export interface RunnerDeps {
   ensureRunning(id: string): Promise<void>;
   post(id: string, text: string): Promise<{ via: string; brokerSessionId?: string }>;
   busy(id: string): boolean;
+  /** Fresh headless sessions (#407 Phase 4). */
+  spawnFresh(id: string, sessionId: string, args: string[]): Promise<void>;
+  freshState(id: string, sessionId: string): Promise<'alive' | 'ended' | 'missing'>;
+  closeFresh(id: string, sessionId: string): Promise<void>;
 }
+
+/** Tools an unattended fresh session may always use: posting back to the inbox. */
+export const INBOX_TOOLS = ['post_todo', 'update_todo', 'list_todos', 'notify', 'list_automations'].map((t) => `mcp__claude-fleet-state__${t}`);
+const FRESH_POLL_MS = 2000;
 
 export interface RunOutcome {
   status: RunStatus;
@@ -45,6 +53,18 @@ async function waitIdle(deps: RunnerDeps, ws: string, timeoutMs: number): Promis
   }
 }
 
+async function waitFresh(deps: RunnerDeps, ws: string, sessionId: string, timeoutMs: number): Promise<void> {
+  const start = deps.now();
+  for (;;) {
+    const st = await deps.freshState(ws, sessionId);
+    if (st !== 'alive') return;
+    if (deps.now() - start >= timeoutMs) {
+      throw new StepError(`the fresh session in ${deps.workspaceName(ws)} was still running after ${Math.round(timeoutMs / 60_000)}m`, 'timed-out');
+    }
+    await deps.sleep(FRESH_POLL_MS);
+  }
+}
+
 export async function executeRun(deps: RunnerDeps, a: AutomationRecord, run: RunRow, opts: { callerSupplied: boolean }): Promise<RunOutcome> {
   const runTimeout = parseDuration(a.definition.timeout) ?? DEFAULT_RUN_TIMEOUT_MS;
   const started = deps.now();
@@ -62,14 +82,28 @@ export async function executeRun(deps: RunnerDeps, a: AutomationRecord, run: Run
         if (!p.ensureRunning) throw new StepError(`target-not-running: ${name} is ${what} (set ensureRunning: true to start it)`);
         await deps.ensureRunning(p.workspace);
       }
+      const ev = run.trigger.event;
       const text = renderPrompt(p.message, {
-        automationName: a.name, runId: run.id, triggerKind: run.trigger.kind, args: run.args as Record<string, ParamValue>, callerSupplied: opts.callerSupplied
+        automationName: a.name, runId: run.id, triggerKind: run.trigger.kind, args: run.args as Record<string, ParamValue>,
+        callerSupplied: opts.callerSupplied,
+        triggerWorkspace: ev?.workspaceId ? deps.workspaceName(ev.workspaceId) : undefined,
+        triggerTodo: ev?.todoTitle
       });
-      const res = await deps.post(p.workspace, text);
-      if (p.wait) {
-        const stepTimeout = Math.min(parseDuration(p.timeout) ?? DEFAULT_STEP_TIMEOUT_MS, runTimeout - (deps.now() - started));
-        await waitIdle(deps, p.workspace, stepTimeout);
+      const stepTimeout = Math.min(parseDuration(p.timeout) ?? DEFAULT_STEP_TIMEOUT_MS, runTimeout - (deps.now() - started));
+      if (p.mode === 'fresh') {
+        const sessionId = `auto-${run.id}-${step.id}`;
+        const tools = [...INBOX_TOOLS, ...(p.allowedTools ?? [])];
+        await deps.spawnFresh(p.workspace, sessionId, ['-p', text, '--allowedTools', tools.join(',')]);
+        try {
+          await waitFresh(deps, p.workspace, sessionId, stepTimeout);
+        } finally {
+          await deps.closeFresh(p.workspace, sessionId);
+        }
+        deps.store.finishStep(stepId, 'succeeded', { brokerSessionId: sessionId, detail: { via: 'fresh' } }, deps.now());
+        continue;
       }
+      const res = await deps.post(p.workspace, text);
+      if (p.wait) await waitIdle(deps, p.workspace, stepTimeout);
       deps.store.finishStep(stepId, 'succeeded', { brokerSessionId: res.brokerSessionId ?? null, detail: { via: res.via } }, deps.now());
     } catch (e) {
       const status = e instanceof StepError ? e.status : 'failed';

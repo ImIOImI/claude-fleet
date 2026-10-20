@@ -9,6 +9,9 @@ export interface RenderCtx {
   automationName: string;
   runId: string;
   triggerKind: string;
+  /** Event runs: the workspace name / todo title that fired it. */
+  triggerWorkspace?: string;
+  triggerTodo?: string;
   args: Record<string, ParamValue>;
   callerSupplied: boolean;
 }
@@ -20,6 +23,8 @@ export function renderPrompt(message: string, ctx: RenderCtx): string {
   const body = message.replace(PLACEHOLDER_RE, (whole, ns: string, key: string | undefined) => {
     if (ns === 'run' && key === 'id') return ctx.runId;
     if (ns === 'trigger' && key === 'kind') return ctx.triggerKind;
+    if (ns === 'trigger' && key === 'workspace') return ctx.triggerWorkspace ?? '';
+    if (ns === 'trigger' && key === 'todo') return ctx.triggerTodo ?? '';
     if (ns === 'args' && key && key in ctx.args) {
       if (ctx.callerSupplied) {
         used.add(key);

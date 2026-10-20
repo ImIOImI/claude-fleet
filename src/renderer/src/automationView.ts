@@ -37,7 +37,7 @@ export function runWhen(r: RunRow, now = Date.now()): string {
   return new Date(r.startedAt).toDateString() === new Date(now).toDateString() ? hhmm(r.startedAt) : relativeAgo(r.startedAt, now);
 }
 
-export const TRIGGER_LABELS: Record<RunRow['trigger']['kind'], string> = { schedule: 'schedule', manual: 'by hand', 'catch-up': 'catch-up' };
+export const TRIGGER_LABELS: Record<RunRow['trigger']['kind'], string> = { schedule: 'schedule', manual: 'by hand', 'catch-up': 'catch-up', event: 'event' };
 
 /** Initial form values for the Run-now modal (strings, as the inputs hold them). */
 export function initialArgs(params: ParamDef[] | undefined): Record<string, string> {

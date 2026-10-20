@@ -120,3 +120,32 @@ test('Automations: a failing run raises a notification in Activity (#407)', asyn
     await app.close();
   }
 });
+
+test('Automations Phase 4: a fresh-session step, and a todo.created event trigger (#407)', async () => {
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    await callTestIpc(app, 'automations:create', [`name: e2e-fresh
+triggers:
+  - manual: {}
+  - event: { on: todo.created, tag: e2e-trigger, debounce: 1s }
+steps:
+  - id: summarize
+    prompt: { workspace: mock-alpha, mode: fresh, message: "Summarize {{trigger.todo}}", allowedTools: [Read] }
+`]);
+    const view = await openAutomations(window);
+    const detail = view.locator('.auto-detail');
+    await expect(detail.locator('.ib-steps')).toContainText('fresh session · runs to completion');
+    await expect(detail.locator('.ib-steps .tag', { hasText: 'Read' })).toBeVisible();
+    await expect(view.locator('.auto-row', { hasText: 'e2e-fresh' })).toContainText('when a todo tagged #e2e-trigger arrives');
+
+    // The event: a todo with the tag → one debounced run.
+    await callTestIpc(app, 'inbox:create', [{ title: 'Disk 95% on build-02', tags: ['e2e-trigger'] }]);
+    const run = detail.locator('.run-row').first();
+    await expect(run).toContainText('event', { timeout: 15_000 });
+    await expect(run).toContainText('succeeded', { timeout: 15_000 });
+    await run.click();
+    await expect(run.locator('.run-steps')).toContainText('fresh session');
+  } finally {
+    await app.close();
+  }
+});

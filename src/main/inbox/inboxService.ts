@@ -15,6 +15,8 @@ export interface InboxServiceDeps {
   notifications?: Pick<NotifyService, 'onTodoPosted' | 'request'>;
   /** Phase 3: a run_id names a live automation run that targets the caller. */
   attribution?(runId: string, callerId: string): { automationId: string } | null;
+  /** Phase 4: a todo was created (event triggers). */
+  onTodoCreated?(todo: Todo): void;
 }
 
 const STATUSES = new Set(['open', 'done', 'dismissed']);
@@ -93,6 +95,7 @@ export function createInboxService(store: InboxStore, deps: InboxServiceDeps) {
       );
       deps.notifyChanged();
       deps.notifications?.onTodoPosted(todo, action, args.notify === true);
+      if (action === 'created') deps.onTodoCreated?.(todo);
       return { id: todo.id, action, status: todo.status, seenCount: todo.seenCount };
     },
     async notify(callerId: string, args: Record<string, unknown>): Promise<unknown> {
@@ -145,8 +148,9 @@ export function createInboxService(store: InboxStore, deps: InboxServiceDeps) {
       return todo ? { todo, events: store.events(id) } : null;
     },
     async create(input: Record<string, unknown>): Promise<Todo> {
-      const { todo } = store.post({ kind: 'user', id: null }, validatePostInput(input), now());
+      const { todo, action } = store.post({ kind: 'user', id: null }, validatePostInput(input), now());
       deps.notifyChanged();
+      if (action === 'created') deps.onTodoCreated?.(todo);
       return todo;
     },
     async update(id: string, patch: Record<string, unknown>): Promise<Todo> {

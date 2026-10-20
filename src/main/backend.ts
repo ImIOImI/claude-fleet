@@ -61,4 +61,12 @@ export interface Backend {
    * broker session id.
    */
   committeePost(workspaceId: string, text: string): Promise<{ brokerSessionId: string }>;
+  /**
+   * Fresh automation sessions (#407 Phase 4): CREATE a headless broker session
+   * running `claude <args>` (e.g. `-p <prompt>`), observe whether it is still
+   * alive, and close it afterwards. Container-only; the local backend throws.
+   */
+  spawnHeadless(workspaceId: string, sessionId: string, args: string[]): Promise<void>;
+  headlessState(workspaceId: string, sessionId: string): Promise<'alive' | 'ended' | 'missing'>;
+  closeHeadless(workspaceId: string, sessionId: string): Promise<void>;
 }

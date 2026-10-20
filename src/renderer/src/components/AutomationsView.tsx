@@ -130,7 +130,8 @@ export function AutomationsView({ names }: Props) {
               <li key={s.id}>
                 <span className="step-k">{s.id}</span>
                 <span>prompt <b>{names[s.prompt.workspace] ?? s.prompt.workspace}</b></span>
-                <span className="ib-dim">live session{s.prompt.wait ? ' · waits' : ''}{s.prompt.ensureRunning ? ' · starts it if needed' : ''}</span>
+                <span className="ib-dim">{s.prompt.mode === 'fresh' ? 'fresh session · runs to completion' : `live session${s.prompt.wait ? ' · waits' : ''}`}{s.prompt.ensureRunning ? ' · starts it if needed' : ''}</span>
+                {s.prompt.mode === 'fresh' && (s.prompt.allowedTools ?? []).map((t) => <span key={t} className="tag" title="Extra tool this unattended session may use">{t}</span>)}
               </li>
             ))}
           </ol>
@@ -152,7 +153,7 @@ export function AutomationsView({ names }: Props) {
               {detail.runs.map((r) => (
                 <li key={r.id} className={`run-row${openRun === r.id ? ' open' : ''}`} onClick={() => setOpenRun(openRun === r.id ? null : r.id)}>
                   <span className="mono">{runWhen(r)}</span>
-                  <span className="ib-dim">{TRIGGER_LABELS[r.trigger.kind]}</span>
+                  <span className="ib-dim">{TRIGGER_LABELS[r.trigger.kind]}{r.trigger.event && r.trigger.event.count > 1 ? ` ×${r.trigger.event.count}` : ''}</span>
                   <span className={`run-chip ${runTone(r.status)}`}>{RUN_LABELS[r.status]}</span>
                   <span className="mono ib-dim">{runDuration(r)}</span>
                   {r.error && <span className="run-out">{r.error}</span>}
@@ -165,7 +166,7 @@ export function AutomationsView({ names }: Props) {
                           <span>
                             <span className={`run-chip ${runTone(s.status)}`}>{RUN_LABELS[s.status]}</span>{' '}
                             prompted {names[s.workspaceId ?? ''] ?? s.workspaceId}
-                            {s.detail?.via ? ` (${s.detail.via === 'attached' ? 'open tab' : 'background attach'})` : ''}
+                            {s.detail?.via ? ` (${s.detail.via === 'attached' ? 'open tab' : s.detail.via === 'fresh' ? 'fresh session' : 'background attach'})` : ''}
                             {s.error ? ` · ${s.error}` : ''}
                           </span>
                         </div>

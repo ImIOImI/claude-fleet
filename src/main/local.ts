@@ -727,6 +727,14 @@ export async function committeePost(_workspaceId: string, _text: string): Promis
   throw new Error('committee post is not supported for local workspaces');
 }
 
+export async function spawnHeadless(): Promise<void> {
+  throw new Error('fresh automation sessions need a container workspace (local workspaces: use mode: live)');
+}
+export async function headlessState(): Promise<'alive' | 'ended' | 'missing'> {
+  return 'missing';
+}
+export async function closeHeadless(): Promise<void> {}
+
 // Compile-time assertion that this module satisfies the Backend contract.
 const _assertBackend: Backend = {
   ping,
@@ -741,6 +749,9 @@ const _assertBackend: Backend = {
   removeWorkspace,
   attachPty,
   getBrokerLogs,
-  committeePost
+  committeePost,
+  spawnHeadless,
+  headlessState,
+  closeHeadless
 };
 void _assertBackend;
