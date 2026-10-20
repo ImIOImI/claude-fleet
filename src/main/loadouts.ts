@@ -73,6 +73,11 @@ let automationHooks: LoadoutAutomationHooks | null = null;
 export function setLoadoutAutomationHooks(h: LoadoutAutomationHooks | null): void {
   automationHooks = h;
 }
+/** Called after a loadout is installed into or uninstalled from a workspace (the automations role brief lists them). */
+let changeListener: ((workspaceId: string) => void) | null = null;
+export function setLoadoutChangeListener(fn: ((workspaceId: string) => void) | null): void {
+  changeListener = fn;
+}
 export async function previewLoadoutAutomations(workspaceId: string, loadoutId: string, allowHost = false): Promise<unknown[]> {
   return automationHooks ? automationHooks.preview(loadoutDir(loadoutId), loadoutId, workspaceId, allowHost) : [];
 }
@@ -121,6 +126,7 @@ export async function installLoadout(
   };
   const others = (ws.installedLoadouts ?? []).filter((l) => l.id !== loadoutId);
   await writeWorkspaceManifest({ ...ws, installedLoadouts: [...others, record] });
+  changeListener?.(workspaceId);
 
   // Run setup scripts in the container (after files/merges land). A non-running
   // container makes the runner reject → that script is reported as failed, not
@@ -157,6 +163,7 @@ export async function uninstallLoadout(workspaceId: string, loadoutId: string): 
     ...ws,
     installedLoadouts: (ws.installedLoadouts ?? []).filter((l) => l.id !== loadoutId)
   });
+  changeListener?.(workspaceId);
 }
 
 // ── Built-in starters ────────────────────────────────────────────────────────
