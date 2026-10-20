@@ -9,7 +9,7 @@ import type {
 } from '../../preload/inboxTypes.js';
 import { isPriority, maxPriority, normalizeTag, normalizeTags, MAX_TAGS } from './inboxCore.js';
 
-export const INBOX_SCHEMA_VERSION = 2;
+export const INBOX_SCHEMA_VERSION = 3;
 
 const MIGRATIONS: Record<number, string> = {
   1: `
@@ -99,6 +99,60 @@ const MIGRATIONS: Record<number, string> = {
       created_at INTEGER NOT NULL
     );
     CREATE TABLE notify_state (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+  `,
+  // Phase 3 (automations): definitions + their approved versions, small
+  // per-automation state, runs and step runs.
+  3: `
+    CREATE TABLE automations (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      enabled INTEGER NOT NULL,
+      version INTEGER NOT NULL,
+      definition TEXT NOT NULL,
+      created_by_kind TEXT NOT NULL,
+      created_by_id TEXT,
+      origin TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      last_scheduled_at INTEGER
+    );
+    CREATE TABLE automation_versions (
+      automation_id TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      definition TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      created_by_kind TEXT NOT NULL,
+      created_by_id TEXT,
+      PRIMARY KEY (automation_id, version)
+    );
+    CREATE TABLE automation_state (automation_id TEXT PRIMARY KEY, state TEXT NOT NULL);
+    CREATE TABLE runs (
+      id TEXT PRIMARY KEY,
+      automation_id TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      trigger TEXT NOT NULL,
+      args TEXT NOT NULL,
+      status TEXT NOT NULL,
+      started_at INTEGER NOT NULL,
+      ended_at INTEGER,
+      error TEXT
+    );
+    CREATE INDEX runs_automation ON runs (automation_id, started_at);
+    CREATE INDEX runs_status ON runs (status);
+    CREATE TABLE step_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id TEXT NOT NULL,
+      step_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      status TEXT NOT NULL,
+      workspace_id TEXT,
+      broker_session_id TEXT,
+      started_at INTEGER NOT NULL,
+      ended_at INTEGER,
+      error TEXT,
+      detail TEXT
+    );
+    CREATE INDEX step_runs_run ON step_runs (run_id, id);
   `
 };
 
@@ -266,10 +320,10 @@ export class InboxStore {
         const id = newId(now);
         this.db.prepare(
           `INSERT INTO todos (id, title, body, status, priority, source_kind, source_id, dedupe_key,
-             workspace_id, session_id, created_at, updated_at, first_seen_at, last_seen_at)
-           VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             workspace_id, session_id, via_workspace, source_run_id, created_at, updated_at, first_seen_at, last_seen_at)
+           VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).run(id, input.title, input.body ?? null, priority, source.kind, source.id, input.key ?? null,
-          input.workspaceLink ?? null, input.sessionLink ?? null, now, now, now, now);
+          input.workspaceLink ?? null, input.sessionLink ?? null, input.viaWorkspace ?? null, input.sourceRunId ?? null, now, now, now, now);
         this.addTags(id, tags);
         this.event(id, now, 'created', source, { title: input.title, priority });
         return { todo: this.get(id)!, action: 'created' as const };

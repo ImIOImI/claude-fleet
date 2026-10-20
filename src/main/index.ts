@@ -24,6 +24,7 @@ import { runStartupMigration } from './migration.js';
 import { InboxStore } from './inbox/inboxDb.js';
 import { registerInboxIpc } from './inbox/inboxIpc.js';
 import { registerNotifyIpc } from './inbox/notifyIpc.js';
+import { registerAutomationIpc } from './automations/automationIpc.js';
 import { startPresence, attachKeepRunning, markQuitting, presenceDir, registerPresenceIpc } from './inbox/presence.js';
 import { getKeepRunningInTray, setKeepRunningInTray } from './config.js';
 import { ensureWorkspaceClaudeJson } from './docker.js';
@@ -300,7 +301,8 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   instrumentIpcHandle(ipcMain);
   registerIpc({ jsonlWatcher, peerStatusWatcher });
   const notifySvc = inboxStore ? registerNotifyIpc(inboxStore) : null;
-  if (inboxStore) registerInboxIpc(inboxStore, notifySvc ?? undefined);
+  const automations = inboxStore ? registerAutomationIpc(inboxStore, notifySvc) : null;
+  if (inboxStore) registerInboxIpc(inboxStore, notifySvc ?? undefined, automations ? (r, c) => automations.attribution(r, c) : undefined);
   registerPresenceIpc(ipcMain, { get: getKeepRunningInTray, set: setKeepRunningInTray });
   mainWindow = createWindow();
   // Desktop presence (#407 Phase 2b): tray, taskbar overlay, badge, attention.

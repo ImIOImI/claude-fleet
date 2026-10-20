@@ -468,6 +468,55 @@ async function committeeUnpause(callerId: string, targetId: string): Promise<{ i
   return { id: targetId, running: true };
 }
 
+// ── Host-trusted workspace effects for automations (#407 Phase 3) ──────────
+// The same mechanisms as committee post/unpause/status, but WITHOUT the
+// committee grant gate: an automation only runs after the user approved it,
+// and that approval is the consent (design spec §3). Not reachable over MCP.
+
+/** Inject a prompt into a workspace's live session (attached tab, else a transient headless attach). */
+export async function hostPostToWorkspace(
+  targetId: string,
+  msg: string
+): Promise<{ via: 'attached' | 'headless'; brokerSessionId?: string }> {
+  const live = liveHandleForWorkspace(targetId);
+  if (live) {
+    await injectAndSubmit((chunk) => live.stream.write(chunk), msg);
+    broadcastCommitteeInbound(targetId, msg);
+    return { via: 'attached' };
+  }
+  const kind = await resolveKind(targetId);
+  if (kind === 'local') {
+    throw new Error('a local workspace can only be prompted while its terminal is open in the app');
+  }
+  const { brokerSessionId } = await backendForKind(kind).committeePost(targetId, msg);
+  broadcastCommitteeInbound(targetId, msg);
+  return { via: 'headless', brokerSessionId };
+}
+
+/** Start/unpause a workspace and wait until its broker answers. */
+export async function hostEnsureRunning(targetId: string): Promise<void> {
+  const kind = await resolveKind(targetId);
+  await backendForKind(kind).startWorkspace(targetId);
+  invalidateWorkspaceList();
+  if (!MOCK_MODE && kind === 'container') await realDocker.waitForBrokerReady(targetId);
+}
+
+/** Host-computed busy signal (broker output stream), as committee_status uses. */
+export function hostWorkspaceBusy(targetId: string): boolean {
+  return committeeBusy.get(targetId)?.busy ?? false;
+}
+
+/** Current state of a workspace, or null when it no longer exists. */
+export async function hostWorkspaceState(targetId: string): Promise<'running' | 'paused' | 'stopped' | 'deleted' | 'unreachable' | null> {
+  const w = (await listAllWorkspaces()).find((x) => x.id === targetId);
+  return (w?.state as 'running' | 'paused' | 'stopped' | 'deleted' | 'unreachable' | undefined) ?? null;
+}
+
+/** id ↔ name for every known workspace (live and saved). */
+export async function hostWorkspaceNames(): Promise<Array<{ id: string; name: string }>> {
+  return (await listAllWorkspaces()).map((w) => ({ id: w.id, name: w.name }));
+}
+
 /** Find a live renderer PtyHandle for a workspace, if one is attached. */
 function liveHandleForWorkspace(workspaceId: string): PtyHandle | null {
   for (const [handleId, wsId] of handleWorkspaceId) {

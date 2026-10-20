@@ -1,12 +1,14 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent, webUtils } from 'electron';
 import type {
   Todo, TodoEvent, TodoFilter, InboxCounts, PostTodoInput, UpdateTodoPatch, NotificationRow, NotifySettings, QuietState,
-  RuleScope, EffectiveRule, NotifyRule, NotifyLevel, RuleScopeKind, PauseState, Downtime, TodoSource, TodoPriority
+  RuleScope, EffectiveRule, NotifyRule, NotifyLevel, RuleScopeKind, PauseState, Downtime, TodoSource, TodoPriority,
+  Automation, RunRow
 } from './inboxTypes';
 export type {
   Todo, TodoEvent, TodoEventKind, TodoFilter, TodoSource, TodoStatus, TodoPriority, SourceKind,
   InboxCounts, InboxConfig, PostTodoInput, UpdateTodoPatch, NotifyLevel, NotificationKind, RuleScopeKind, DowntimeBypass,
-  NotificationRow, NotifyRule, Downtime, PauseState, QuietState, RuleScope, EffectiveRule, NotifySettings
+  NotificationRow, NotifyRule, Downtime, PauseState, QuietState, RuleScope, EffectiveRule, NotifySettings,
+  Automation, AutomationDef, ParamDef, ParamType, ParamValue, RunRow, RunStatus, StepRunRow, TriggerDef, StepDef
 } from './inboxTypes';
 
 /** Outcome of a `pty:resize`. Lives here because preload is the IPC contract
@@ -351,6 +353,23 @@ const api = {
       const h = (_e: IpcRendererEvent, t: { notificationId: string; todoId: string | null; workspaceId: string | null; kind: string }): void => cb(t);
       ipcRenderer.on('notifications:open', h);
       return () => ipcRenderer.removeListener('notifications:open', h);
+    }
+  },
+  automations: {
+    list: (): Promise<Automation[]> => ipcRenderer.invoke('automations:list'),
+    get: (id: string): Promise<{ automation: Automation; runs: RunRow[]; yaml: string; versions: number[] } | null> =>
+      ipcRenderer.invoke('automations:get', id),
+    validate: (text: string): Promise<{ ok: boolean; errors: string[] }> => ipcRenderer.invoke('automations:validate', text),
+    create: (text: string): Promise<Automation> => ipcRenderer.invoke('automations:create', text),
+    update: (id: string, text: string): Promise<Automation> => ipcRenderer.invoke('automations:update', id, text),
+    setEnabled: (id: string, enabled: boolean): Promise<void> => ipcRenderer.invoke('automations:setEnabled', id, enabled),
+    remove: (id: string): Promise<void> => ipcRenderer.invoke('automations:remove', id),
+    run: (id: string, args: Record<string, unknown>): Promise<RunRow> => ipcRenderer.invoke('automations:run', id, args),
+    starter: (): Promise<string> => ipcRenderer.invoke('automations:starter'),
+    onChanged: (cb: () => void): (() => void) => {
+      const h = (): void => cb();
+      ipcRenderer.on('automations:changed', h);
+      return () => ipcRenderer.removeListener('automations:changed', h);
     }
   },
   presence: {

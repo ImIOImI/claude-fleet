@@ -1,0 +1,237 @@
+// Automations service (#407 Phase 3): CRUD from YAML, run orchestration
+// (concurrency, rate cap, queueing), the scheduler tick, failure notifications,
+// restart recovery, the active-run registry used for todo attribution, and the
+// MCP handlers. Pure: Electron/backends are injected (automationIpc.ts).
+import type { Automation, AutomationDef, ParamValue, RunRow, RunTriggerKind, TodoSource } from '../../preload/inboxTypes.js';
+import type { NotifyInput } from '../inbox/notifyService.js';
+import { AutomationStore, type AutomationRecord } from './automationStore.js';
+import { definitionToYaml, parseDefinitionText, validateArgs, validateDefinition, type Validation } from './definition.js';
+import { executeRun, type RunnerDeps, type RunOutcome } from './runner.js';
+import { dueSchedule, nextFireAt } from './scheduler.js';
+import { describeCron } from './cron.js';
+
+export interface AutomationDeps extends Omit<RunnerDeps, 'store'> {
+  store: AutomationStore;
+  /** Resolve a workspace id or name to an id. */
+  resolveWorkspace(idOrName: string): string | null;
+  notify?: (n: NotifyInput) => unknown;
+  changed(): void;
+}
+
+const RATE_MS = 60_000;
+const RUN_RETENTION_MS = 90 * 86_400_000;
+
+export interface RunRequest {
+  kind: RunTriggerKind;
+  by?: TodoSource;
+  cron?: string;
+  args?: Record<string, unknown>;
+  /** Args came from a workspace (MCP), so prompts quote them as data. */
+  callerSupplied?: boolean;
+  /** Coerce string args (the Run-now form). */
+  coerce?: boolean;
+}
+
+export function createAutomationService(deps: AutomationDeps) {
+  const { store } = deps;
+  /** runId → automation + the workspaces its steps target (attribution). */
+  const active = new Map<string, { automationId: string; workspaces: Set<string> }>();
+  const lastStart = new Map<string, number>();
+  const inFlight = new Set<Promise<unknown>>();
+
+  const ctx = { workspace: (v: string) => deps.resolveWorkspace(v) };
+
+  function view(a: AutomationRecord): Automation {
+    const now = deps.now();
+    return {
+      id: a.id, name: a.name, description: a.definition.description ?? null, enabled: a.enabled, version: a.version,
+      definition: a.definition, tags: store.tags(a.id), createdBy: a.createdBy, createdAt: a.createdAt, updatedAt: a.updatedAt,
+      lastScheduledAt: a.lastScheduledAt, nextFireAt: nextFireAt(a, now), lastRun: store.runs(a.id, 1)[0] ?? null,
+      weekStats: store.weekStats(a.id, now),
+      triggerSummaries: a.definition.triggers.map((t) =>
+        'schedule' in t
+          ? `${describeCron(t.schedule.cron)}${t.schedule.tz ? ` (${t.schedule.tz})` : ''}`
+          : t.manual.allowFrom?.length
+            ? `by hand · also ${t.manual.allowFrom.map((w) => deps.workspaceName(w)).join(', ')}`
+            : 'by hand')
+    };
+  }
+
+  function parse(text: string): Validation<AutomationDef> {
+    const p = parseDefinitionText(text);
+    if (!p.ok) return p;
+    return validateDefinition(p.value, ctx);
+  }
+
+  function failed(a: AutomationRecord, run: RunRow, outcome: RunOutcome): void {
+    deps.notify?.({
+      kind: 'run-failed',
+      title: `${a.name} ${outcome.status === 'timed-out' ? 'timed out' : outcome.status === 'interrupted' ? 'was interrupted' : 'failed'}`,
+      body: outcome.error ?? undefined, priority: 'high',
+      source: { kind: 'automation', id: a.id }, dedupeKey: `run-failed:${a.id}`, tags: a.definition.tags ?? []
+    });
+    void run;
+  }
+
+  async function execute(a: AutomationRecord, run: RunRow, callerSupplied: boolean): Promise<void> {
+    active.set(run.id, { automationId: a.id, workspaces: new Set(a.definition.steps.map((s) => s.prompt.workspace)) });
+    deps.changed();
+    let outcome: RunOutcome;
+    try {
+      outcome = await executeRun(deps as RunnerDeps, a, run, { callerSupplied });
+    } catch (e) {
+      outcome = { status: 'failed', error: e instanceof Error ? e.message : String(e) };
+    }
+    active.delete(run.id);
+    store.setRunStatus(run.id, outcome.status, deps.now(), outcome.error);
+    if (outcome.status === 'failed' || outcome.status === 'timed-out') failed(a, run, outcome);
+    deps.changed();
+    // A queued run waits for this one.
+    const queued = store.runsWithStatus('queued').find((r) => r.automationId === a.id);
+    if (queued) {
+      const cur = store.get(a.id);
+      if (cur) {
+        store.setRunStatus(queued.id, 'running', deps.now());
+        const p = execute(cur, store.getRun(queued.id)!, queued.trigger.by?.kind === 'workspace');
+        inFlight.add(p);
+        void p.finally(() => inFlight.delete(p));
+      }
+    }
+  }
+
+  function start(id: string, req: RunRequest): RunRow {
+    const a = store.get(id);
+    if (!a) throw new Error(`automation ${id} not found`);
+    const args = validateArgs(a.definition.params, req.args, req.coerce);
+    if (!args.ok) throw new Error(`invalid arguments: ${args.errors.join('; ')}`);
+    const trigger = { kind: req.kind, ...(req.by ? { by: req.by } : {}), ...(req.cron ? { cron: req.cron } : {}) };
+    const now = deps.now();
+    const running = [...active.values()].some((r) => r.automationId === id);
+    const userManual = req.kind === 'manual' && req.by?.kind === 'user';
+    const last = lastStart.get(id);
+    if (!userManual && last !== undefined && now - last < RATE_MS && !running) {
+      return store.startRun(a, trigger, args.value, 'skipped', now, 'rate limit: at most one run per minute');
+    }
+    if (running) {
+      if (a.definition.concurrency === 'queue' && !store.runsWithStatus('queued').some((r) => r.automationId === id)) {
+        return store.startRun(a, trigger, args.value, 'queued', now);
+      }
+      return store.startRun(a, trigger, args.value, 'skipped', now, 'a run was already in progress');
+    }
+    lastStart.set(id, now);
+    const run = store.startRun(a, trigger, args.value, 'running', now);
+    const p = execute(a, run, req.callerSupplied === true);
+    inFlight.add(p);
+    void p.finally(() => inFlight.delete(p));
+    return run;
+  }
+
+  return {
+    list(): Automation[] {
+      return store.list().map(view);
+    },
+    get(id: string): { automation: Automation; runs: RunRow[]; yaml: string; versions: number[] } | null {
+      const a = store.get(id);
+      if (!a) return null;
+      return { automation: view(a), runs: store.runs(id, 30), yaml: definitionToYaml(a.definition), versions: store.versions(id).map((v) => v.version) };
+    },
+    validate(text: string): { ok: boolean; errors: string[] } {
+      const r = parse(text);
+      return r.ok ? { ok: true, errors: [] } : { ok: false, errors: r.errors };
+    },
+    create(text: string, by: TodoSource): Automation {
+      const r = parse(text);
+      if (!r.ok) throw new Error(r.errors.join('\n'));
+      const a = store.create(r.value, by, deps.now());
+      deps.changed();
+      return view(a);
+    },
+    update(id: string, text: string, by: TodoSource): Automation {
+      const r = parse(text);
+      if (!r.ok) throw new Error(r.errors.join('\n'));
+      const a = store.update(id, r.value, by, deps.now());
+      deps.changed();
+      return view(a);
+    },
+    setEnabled(id: string, enabled: boolean): void {
+      store.setEnabled(id, enabled, deps.now());
+      deps.changed();
+    },
+    remove(id: string): void {
+      store.remove(id);
+      deps.changed();
+    },
+    run: start,
+
+    /** Periodic: start whatever schedule is due (one catch-up for missed slots). */
+    tick(): RunRow[] {
+      const now = deps.now();
+      const started: RunRow[] = [];
+      for (const a of store.list()) {
+        const due = dueSchedule(a, now);
+        if (!due) continue;
+        store.setLastScheduled(a.id, now);
+        try {
+          started.push(start(a.id, { kind: due.catchUp ? 'catch-up' : 'schedule', cron: due.trigger.cron, args: due.args }));
+        } catch (e) {
+          const run = store.startRun(a, { kind: 'schedule', cron: due.trigger.cron }, {}, 'failed', now, (e as Error).message);
+          failed(a, run, { status: 'failed', error: (e as Error).message });
+          started.push(run);
+        }
+      }
+      if (started.length) deps.changed();
+      return started;
+    },
+
+    /** Startup: runs cut off by a quit become `interrupted` (one notification). */
+    recover(): RunRow[] {
+      const cut = store.markInterrupted(deps.now());
+      if (cut.length) {
+        const names = [...new Set(cut.map((r) => store.get(r.automationId)?.name ?? 'an automation'))];
+        deps.notify?.({
+          kind: 'run-failed', title: cut.length === 1 ? `${names[0]} was interrupted` : `${cut.length} automation runs were interrupted`,
+          body: `The app quit mid-run (${names.join(', ')}). They are not retried automatically.`, priority: 'normal',
+          source: { kind: 'user', id: null }
+        });
+      }
+      store.pruneRuns(deps.now() - RUN_RETENTION_MS);
+      return cut;
+    },
+
+    /** Attribution: a post that names run_id belongs to the automation only if the run is live and targets the caller. */
+    attribution(runId: string, callerId: string): { automationId: string } | null {
+      const r = active.get(runId);
+      return r && r.workspaces.has(callerId) ? { automationId: r.automationId } : null;
+    },
+
+    /** Wait for in-flight runs (tests / quit). */
+    async settle(): Promise<void> {
+      while (inFlight.size) await Promise.all([...inFlight]);
+    },
+
+    mcp: {
+      /** Automations a workspace may see: ones it can run, or whose steps prompt it. */
+      list(callerId: string): Array<Pick<Automation, 'id' | 'name' | 'description' | 'enabled' | 'nextFireAt'> & { canRun: boolean; params: AutomationDef['params'] }> {
+        return store.list()
+          .filter((a) => canRun(a, callerId) || a.definition.steps.some((s) => s.prompt.workspace === callerId))
+          .map((a) => ({ id: a.id, name: a.name, description: a.definition.description ?? null, enabled: a.enabled, nextFireAt: nextFireAt(a, deps.now()), canRun: canRun(a, callerId), params: a.definition.params ?? [] }));
+      },
+      run(callerId: string, args: Record<string, unknown>): { runId: string; status: string } {
+        const id = typeof args.id === 'string' ? args.id : '';
+        const a = store.get(id) ?? store.byName(id);
+        if (!a) throw new Error(`automation ${id || '(missing id)'} not found`);
+        if (!canRun(a, callerId)) throw new Error(`not permitted: ${a.name} doesn't list this workspace in manual.allowFrom`);
+        if (!a.enabled) throw new Error(`${a.name} is disabled`);
+        const r = start(a.id, { kind: 'manual', by: { kind: 'workspace', id: callerId }, args: (args.args as Record<string, unknown>) ?? {}, callerSupplied: true });
+        return { runId: r.id, status: r.status };
+      }
+    }
+  };
+
+  function canRun(a: AutomationRecord, callerId: string): boolean {
+    return a.definition.triggers.some((t) => 'manual' in t && (t.manual.allowFrom ?? []).includes(callerId));
+  }
+}
+
+export type AutomationService = ReturnType<typeof createAutomationService>;
+export type { ParamValue };
