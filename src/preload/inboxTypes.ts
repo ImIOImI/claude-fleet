@@ -182,3 +182,100 @@ export interface NotifySettings {
   downtimes: Downtime[];
   rules: NotifyRule[];
 }
+
+// --- Automations (#407 Phase 3) ---------------------------------------------
+
+export type ParamType = 'string' | 'number' | 'boolean' | 'enum';
+export type ParamValue = string | number | boolean;
+
+export interface ParamDef {
+  name: string;
+  type: ParamType;
+  required?: boolean;
+  default?: ParamValue;
+  /** enum only */
+  values?: string[];
+  description?: string;
+}
+
+export interface ScheduleTrigger {
+  schedule: { cron: string; tz?: string; args?: Record<string, ParamValue> };
+}
+export interface ManualTrigger {
+  /** allowFrom: workspace ids (or names, resolved at save) that may run it over MCP. */
+  manual: { allowFrom?: string[] };
+}
+export type TriggerDef = ScheduleTrigger | ManualTrigger;
+
+export interface PromptStepDef {
+  id: string;
+  prompt: {
+    /** Workspace id (names are resolved to ids at save). */
+    workspace: string;
+    mode: 'live';
+    message: string;
+    wait?: boolean;
+    ensureRunning?: boolean;
+    timeout?: string;
+  };
+}
+export type StepDef = PromptStepDef;
+
+export interface AutomationDef {
+  name: string;
+  description?: string;
+  tags?: string[];
+  triggers: TriggerDef[];
+  concurrency?: 'skip' | 'queue';
+  timeout?: string;
+  params?: ParamDef[];
+  steps: StepDef[];
+}
+
+export type RunStatus =
+  | 'queued' | 'running' | 'succeeded' | 'nothing-to-do' | 'failed' | 'timed-out' | 'skipped' | 'cancelled' | 'interrupted';
+export type RunTriggerKind = 'schedule' | 'manual' | 'catch-up';
+
+export interface StepRunRow {
+  id: number;
+  runId: string;
+  stepId: string;
+  kind: 'prompt' | 'script';
+  status: RunStatus;
+  workspaceId: string | null;
+  brokerSessionId: string | null;
+  startedAt: number;
+  endedAt: number | null;
+  error: string | null;
+  detail: Record<string, unknown> | null;
+}
+
+export interface RunRow {
+  id: string;
+  automationId: string;
+  version: number;
+  trigger: { kind: RunTriggerKind; by?: TodoSource; cron?: string };
+  args: Record<string, ParamValue>;
+  status: RunStatus;
+  startedAt: number;
+  endedAt: number | null;
+  error: string | null;
+  steps: StepRunRow[];
+}
+
+export interface Automation {
+  id: string;
+  name: string;
+  description: string | null;
+  enabled: boolean;
+  version: number;
+  definition: AutomationDef;
+  tags: string[];
+  createdBy: TodoSource;
+  createdAt: number;
+  updatedAt: number;
+  lastScheduledAt: number | null;
+  nextFireAt: number | null;
+  lastRun: RunRow | null;
+  weekStats: { runs: number; nothingToDo: number; failed: number };
+}
