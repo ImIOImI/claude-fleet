@@ -136,3 +136,65 @@ test('Notifications over MCP: notify, hold while paused, one digest on resume (#
     await app.close();
   }
 });
+
+test('Automations over MCP: list, allowFrom-gated run, failure notification, run_id check (#407)', async () => {
+  const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-auto-mcp-'));
+  const A = '01AUTOTESTWS00000000000WAA', B = '01AUTOTESTWS00000000000WBB';
+  for (const [id, name] of [[A, 'auto-target'], [B, 'auto-caller']]) {
+    mkdirSync(path.join(userDataDir, 'state', id), { recursive: true });
+    writeFileSync(path.join(userDataDir, 'state', id, 'workspace.json'), JSON.stringify({
+      id, name, labels: [], workspaceRoot: '/tmp/fleet-auto', workspaceSubdir: '', kind: 'container',
+      image: 'mock', authMode: 'oauth', env: { plain: {}, secretKeys: [] }, createdAt: Date.now(), lastUsedAt: Date.now()
+    }));
+  }
+  const app = await electron.launch({
+    args: [REPO_ROOT, `--user-data-dir=${userDataDir}`],
+    cwd: REPO_ROOT,
+    env: Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'CLAUDE_FLEET_MOCK')) as Record<string, string>
+  });
+  const window = await app.firstWindow();
+  await window.waitForLoadState('domcontentloaded');
+  const a = await connectMcp(A, userDataDir);
+  const b = await connectMcp(B, userDataDir);
+  const call = (c: RpcClient, name: string, args: Record<string, unknown>) => c.call('tools/call', { name, arguments: args }).then(text);
+  try {
+    for (const c of [a, b]) await c.call('initialize', { protocolVersion: '2024-11-05' });
+    const names = ((await a.call('tools/list')).result as { tools: Array<{ name: string }> }).tools.map((t) => t.name);
+    expect(names).toEqual(expect.arrayContaining(['list_automations', 'run_automation']));
+
+    await callTestIpc(app, 'automations:create', [`name: ping-target
+triggers:
+  - manual: { allowFrom: [auto-caller] }
+params:
+  - { name: topic, type: string, required: true }
+steps:
+  - id: ask
+    prompt: { workspace: auto-target, mode: live, message: "Look into {{args.topic}}" }
+`]);
+    expect((await call(a, 'list_automations', {})).value).toEqual([expect.objectContaining({ name: 'ping-target', canRun: false })]);
+    expect((await call(b, 'list_automations', {})).value).toEqual([expect.objectContaining({ name: 'ping-target', canRun: true })]);
+    const denied = await call(a, 'run_automation', { id: 'ping-target', args: { topic: 'x' } });
+    expect(denied.isError).toBe(true);
+    expect(denied.raw).toMatch(/not permitted/);
+    const badArgs = await call(b, 'run_automation', { id: 'ping-target', args: {} });
+    expect(badArgs.raw).toMatch(/invalid arguments: topic: required/);
+    expect((await call(b, 'run_automation', { id: 'ping-target', args: { topic: 'disk' } })).value).toMatchObject({ status: 'running' });
+
+    // auto-target has no container here, so the live step fails and the user is notified.
+    await expect.poll(async () => {
+      const list = await callTestIpc<Array<{ lastRun: { status: string } | null }>>(app, 'automations:list', []);
+      return list[0]?.lastRun?.status;
+    }, { timeout: 15_000 }).toBe('failed');
+    const notes = await callTestIpc<Array<{ kind: string; title: string; body: string | null }>>(app, 'notifications:list', ['all']);
+    expect(notes.find((n) => n.kind === 'run-failed')).toMatchObject({ title: 'ping-target failed' });
+    expect(notes.find((n) => n.kind === 'run-failed')?.body).toMatch(/target-not-running: auto-target is saved but not running/);
+
+    const forged = await call(a, 'post_todo', { title: 'x', run_id: 'NOT-A-RUN' });
+    expect(forged.isError).toBe(true);
+    expect(forged.raw).toMatch(/not an active automation run/);
+  } finally {
+    a.close();
+    b.close();
+    await app.close();
+  }
+});

@@ -55,10 +55,11 @@ export async function executeRun(deps: RunnerDeps, a: AutomationRecord, run: Run
       if (deps.now() - started >= runTimeout) throw new StepError(`the run passed its ${a.definition.timeout ?? '30m'} timeout`, 'timed-out');
       const name = deps.workspaceName(p.workspace);
       const state = await deps.workspaceState(p.workspace);
-      if (state === null || state === 'deleted') throw new StepError(`target-not-running: ${name} no longer exists`);
+      if (state === null) throw new StepError(`target-not-running: ${name} no longer exists`);
       if (state === 'unreachable') throw new StepError(`docker-unreachable: ${name} can't be reached until Docker is back`);
       if (state !== 'running') {
-        if (!p.ensureRunning) throw new StepError(`target-not-running: ${name} is ${state} (set ensureRunning: true to start it)`);
+        const what = state === 'deleted' ? 'saved but not running' : state;
+        if (!p.ensureRunning) throw new StepError(`target-not-running: ${name} is ${what} (set ensureRunning: true to start it)`);
         await deps.ensureRunning(p.workspace);
       }
       const text = renderPrompt(p.message, {
