@@ -19,3 +19,4 @@ v0.14.0, CI-runnable e2e, no release.
 | 9 | 1 | Executed plans inline (not subagent-driven) since Troy is asleep and can't pick. | Faster, single context. | — |
 | 10 | 1 | Edit-workspace Phase 1 shows only "Can post" + "Posts per hour"; Trusted / Read-all switches arrive with the phases that use them. | YAGNI: no behavior behind them yet. | `WorkspaceForm.tsx` |
 | 11 | 1 | Added `src/preload/inboxTypes.ts` to `tsconfig.web.json` include. | The composite web project must list a preload file imported by `preload/index.ts` (TS6307). | `tsconfig.web.json` |
+| 12 | 1 | `mcpLocalBridge.run.test.ts` flakes under full-suite load locally (passes 4/4 alone); untouched by this work, left as is. | Pre-existing timing test; CI is the authority. | — |
