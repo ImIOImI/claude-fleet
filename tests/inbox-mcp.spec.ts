@@ -89,3 +89,50 @@ test('Inbox MCP: post, dedupe, reopen, scope, permissions, cap (#407)', async ()
     await app.close();
   }
 });
+
+test('Notifications over MCP: notify, hold while paused, one digest on resume (#407)', async () => {
+  const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-notify-mcp-'));
+  const A = '01NOTIFYTESTWS0000000000WA';
+  mkdirSync(path.join(userDataDir, 'state', A), { recursive: true });
+  writeFileSync(path.join(userDataDir, 'state', A, 'workspace.json'), JSON.stringify({
+    id: A, name: 'notify-a', labels: [], workspaceRoot: '/tmp/fleet-notify', workspaceSubdir: '', kind: 'container',
+    image: 'mock', authMode: 'oauth', env: { plain: {}, secretKeys: [] }, createdAt: Date.now(), lastUsedAt: Date.now()
+  }));
+  const app = await electron.launch({
+    args: [REPO_ROOT, `--user-data-dir=${userDataDir}`],
+    cwd: REPO_ROOT,
+    env: Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'CLAUDE_FLEET_MOCK')) as Record<string, string>
+  });
+  const window = await app.firstWindow();
+  await window.waitForLoadState('domcontentloaded');
+  const a = await connectMcp(A, userDataDir);
+  const call = (name: string, args: Record<string, unknown>) => a.call('tools/call', { name, arguments: args }).then(text);
+  try {
+    await a.call('initialize', { protocolVersion: '2024-11-05' });
+    const names = ((await a.call('tools/list')).result as { tools: Array<{ name: string }> }).tools.map((t) => t.name);
+    expect(names).toContain('notify');
+
+    expect((await call('notify', { title: 'nightly ok' })).value).toMatchObject({ delivered: true, heldReason: null });
+
+    await callTestIpc(app, 'notifications:pause', [{ until: null, letUrgent: false }]);
+    expect((await call('notify', { title: 'held one', priority: 'high' })).value).toMatchObject({ delivered: false, heldReason: 'pause' });
+    expect((await call('post_todo', { title: 'urgent thing', priority: 'urgent' })).value).toMatchObject({ action: 'created' });
+    const q = await callTestIpc<{ heldSinceQuiet: number }>(app, 'notifications:quietState', []);
+    expect(q.heldSinceQuiet).toBe(2);
+
+    await callTestIpc(app, 'notifications:resume', []);
+    const all = await callTestIpc<Array<{ title: string; delivered: boolean; heldReason: string | null }>>(app, 'notifications:list', ['all']);
+    expect(all.find((n) => n.title.startsWith('Notifications resumed'))).toMatchObject({ title: 'Notifications resumed: 2 held', delivered: true });
+    expect(all.find((n) => n.title === 'Urgent · urgent thing')).toMatchObject({ delivered: false, heldReason: 'pause' });
+
+    await window.locator('.inbox-chip .ws-chip').click();
+    const view = window.locator('.inbox-view');
+    await view.getByRole('tab', { name: 'Activity' }).click();
+    await view.getByRole('tab', { name: 'Held back' }).click();
+    await expect(view.locator('.nl-row', { hasText: 'held one' })).toContainText('held: notifications were paused');
+    await expect(view.locator('.nl-row', { hasText: 'held one' })).toContainText('notify-a');
+  } finally {
+    a.close();
+    await app.close();
+  }
+});
