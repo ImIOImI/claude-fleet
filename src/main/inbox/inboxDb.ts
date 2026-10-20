@@ -320,10 +320,10 @@ export class InboxStore {
         const id = newId(now);
         this.db.prepare(
           `INSERT INTO todos (id, title, body, status, priority, source_kind, source_id, dedupe_key,
-             workspace_id, session_id, created_at, updated_at, first_seen_at, last_seen_at)
-           VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             workspace_id, session_id, via_workspace, source_run_id, created_at, updated_at, first_seen_at, last_seen_at)
+           VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).run(id, input.title, input.body ?? null, priority, source.kind, source.id, input.key ?? null,
-          input.workspaceLink ?? null, input.sessionLink ?? null, now, now, now, now);
+          input.workspaceLink ?? null, input.sessionLink ?? null, input.viaWorkspace ?? null, input.sourceRunId ?? null, now, now, now, now);
         this.addTags(id, tags);
         this.event(id, now, 'created', source, { title: input.title, priority });
         return { todo: this.get(id)!, action: 'created' as const };

@@ -13,6 +13,8 @@ export interface InboxServiceDeps {
   onPostRejected?(workspaceId: string, reason: string): void;
   /** Phase 2: notification side-effects of posts. Optional so Phase 1 tests stay unwired. */
   notifications?: Pick<NotifyService, 'onTodoPosted' | 'request'>;
+  /** Phase 3: a run_id names a live automation run that targets the caller. */
+  attribution?(runId: string, callerId: string): { automationId: string } | null;
 }
 
 const STATUSES = new Set(['open', 'done', 'dismissed']);
@@ -49,6 +51,15 @@ export function createInboxService(store: InboxStore, deps: InboxServiceDeps) {
   const limiter = new PostRateLimiter();
   const now = deps.now ?? Date.now;
 
+  /** A post naming run_id is attributed to that automation, if the run is live and targets the caller. */
+  function runSource(callerId: string, raw: unknown): { automationId: string; runId: string } | null {
+    if (raw === undefined || raw === null || raw === '') return null;
+    if (typeof raw !== 'string') throw new InboxInputError('run_id must be a string');
+    const at = deps.attribution?.(raw, callerId);
+    if (!at) throw new InboxInputError(`run_id ${raw} is not an active automation run that prompted this workspace`);
+    return { automationId: at.automationId, runId: raw };
+  }
+
   /** Phase 1 gate shared by post_todo and notify: permission, then the hourly cap. */
   async function gatePost(callerId: string): Promise<void> {
     const cfg = await callerConfig(callerId);
@@ -73,10 +84,11 @@ export function createInboxService(store: InboxStore, deps: InboxServiceDeps) {
   const mcp = {
     async post(callerId: string, args: Record<string, unknown>): Promise<unknown> {
       const input = validatePostInput(args);
+      const run = runSource(callerId, args.run_id);
       await gatePost(callerId);
       const { todo, action } = store.post(
-        { kind: 'workspace', id: callerId },
-        { ...input, workspaceLink: input.workspaceLink ?? callerId },
+        run ? { kind: 'automation', id: run.automationId } : { kind: 'workspace', id: callerId },
+        { ...input, workspaceLink: input.workspaceLink ?? callerId, ...(run ? { viaWorkspace: callerId, sourceRunId: run.runId } : {}) },
         now()
       );
       deps.notifyChanged();
@@ -95,10 +107,12 @@ export function createInboxService(store: InboxStore, deps: InboxServiceDeps) {
         const t = store.get(todoId);
         if (!t || !canSee(callerId, t)) throw new Error(`todo ${todoId} not found`);
       }
+      const run = runSource(callerId, args.run_id);
       await gatePost(callerId);
       if (!deps.notifications) throw new Error('notifications are unavailable');
       const n = deps.notifications.request({
-        kind: 'post', title, body, priority, source: { kind: 'workspace', id: callerId }, todoId, workspaceId: callerId,
+        kind: 'post', title, body, priority,
+        source: run ? { kind: 'automation', id: run.automationId } : { kind: 'workspace', id: callerId }, todoId, workspaceId: callerId,
         dedupeKey: typeof args.key === 'string' && args.key.trim() ? args.key.trim().slice(0, 200) : null,
         tags: normalizeTags(args.tags)
       });

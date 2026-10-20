@@ -94,3 +94,20 @@ describe('notifications wiring (#407 Phase 2)', () => {
     await expect(svc.mcp.notify('W2', { title: 'x', todo_id: id })).rejects.toThrow(/not found/);
   });
 });
+
+describe('automation attribution (#407 Phase 3)', () => {
+  it('a post with a live run_id becomes the automation\'s; a bad run_id is refused', async () => {
+    const store = InboxStore.memory();
+    const svc = createInboxService(store, {
+      manifest: async () => ({}),
+      notifyChanged: () => {},
+      attribution: (runId, caller) => (runId === 'R1' && caller === 'W1' ? { automationId: 'A1' } : null)
+    });
+    const p = (await svc.mcp.post('W1', { title: 'from a run', key: 'k', run_id: 'R1' })) as { id: string };
+    const t = (await svc.ipc.get(p.id))!.todo;
+    expect(t).toMatchObject({ source: { kind: 'automation', id: 'A1' }, viaWorkspace: 'W1', sourceRunId: 'R1', workspaceId: 'W1' });
+    expect((await svc.mcp.update('W1', { id: p.id, status: 'done' }) as { status: string }).status).toBe('done');
+    await expect(svc.mcp.post('W2', { title: 'x', run_id: 'R1' })).rejects.toThrow(/not an active automation run/);
+    await expect(svc.mcp.post('W1', { title: 'x', run_id: 7 })).rejects.toThrow(/run_id must be a string/);
+  });
+});

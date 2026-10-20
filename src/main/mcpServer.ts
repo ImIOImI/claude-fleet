@@ -140,6 +140,16 @@ export interface InboxHandlers {
   notify(callerId: string, args: Record<string, unknown>): Promise<unknown>;
 }
 let inboxHandlers: InboxHandlers | null = null;
+
+/** Injected by automationIpc (#407 Phase 3): list / run automations as the host-stamped caller. */
+export interface AutomationHandlers {
+  list(callerId: string): Promise<unknown>;
+  run(callerId: string, args: Record<string, unknown>): Promise<unknown>;
+}
+let automationHandlers: AutomationHandlers | null = null;
+export function setAutomationHandlers(h: AutomationHandlers | null): void {
+  automationHandlers = h;
+}
 export function setInboxHandlers(h: InboxHandlers | null): void {
   inboxHandlers = h;
 }
@@ -1439,7 +1449,8 @@ export const TOOLS: Tool[] = [
       'Post a todo to the user\'s inbox (claude-fleet). Use for things the user should act on. ' +
       'Args: title (required, ≤200), body (markdown), priority (low|normal|high|urgent, default normal), ' +
       'key (dedupe key: posting the same key again updates that todo — bumps its seen count — and reopens it if it was closed), ' +
-      'tags (array), session_link, notify (true to also send the user a notification; urgent todos always do). ' +
+      'tags (array), session_link, notify (true to also send the user a notification; urgent todos always do), ' +
+      'run_id (when an automation prompted you, pass its run id so the todo is filed under that automation). ' +
       'Returns {id, action: created|updated|reopened}. Rate-limited per workspace.',
     inputSchema: {
       type: 'object',
@@ -1447,13 +1458,40 @@ export const TOOLS: Tool[] = [
         title: { type: 'string' }, body: { type: 'string' },
         priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
         key: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } },
-        session_link: { type: 'string' }, notify: { type: 'boolean' }
+        session_link: { type: 'string' }, notify: { type: 'boolean' }, run_id: { type: 'string' }
       },
       required: ['title']
     },
     run: (_db, a, ctx) => {
       if (!inboxHandlers) throw new Error('the inbox is unavailable');
       return inboxHandlers.post(ctx.callerId, a);
+    }
+  },
+  {
+    name: 'list_automations',
+    description:
+      'List claude-fleet automations this workspace can see: ones it may run (canRun, with their params) and ones whose ' +
+      'steps prompt it. No args.',
+    inputSchema: { type: 'object', properties: {} },
+    run: (_db, _a, ctx) => {
+      if (!automationHandlers) throw new Error('automations are unavailable');
+      return automationHandlers.list(ctx.callerId);
+    }
+  },
+  {
+    name: 'run_automation',
+    description:
+      'Run an automation that lists THIS workspace in its manual.allowFrom. Args: id (automation id or name, required), ' +
+      'args (object of param values; they reach the prompt as quoted data). Returns {runId, status} ' +
+      '(running | queued | skipped). Runs are rate-limited to one a minute per automation.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string' }, args: { type: 'object' } },
+      required: ['id']
+    },
+    run: (_db, a, ctx) => {
+      if (!automationHandlers) throw new Error('automations are unavailable');
+      return automationHandlers.run(ctx.callerId, a);
     }
   },
   {
@@ -1468,7 +1506,8 @@ export const TOOLS: Tool[] = [
       properties: {
         title: { type: 'string' }, body: { type: 'string' },
         priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
-        key: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } }, todo_id: { type: 'string' }
+        key: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } }, todo_id: { type: 'string' },
+        run_id: { type: 'string' }
       },
       required: ['title']
     },

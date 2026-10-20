@@ -62,6 +62,9 @@ export interface PostTodoInput {
   tags?: string[];
   workspaceLink?: string;
   sessionLink?: string;
+  /** Host-set only (never from the wire): automation attribution (#407 Phase 3). */
+  viaWorkspace?: string;
+  sourceRunId?: string;
 }
 
 export interface UpdateTodoPatch {

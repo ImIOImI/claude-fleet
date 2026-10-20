@@ -13,7 +13,11 @@ import type { InboxStore } from './inboxDb.js';
 import type { NotifyService } from './notifyService.js';
 
 /** Register `inbox:*` IPC and the MCP handlers. Called once from index.ts. */
-export function registerInboxIpc(store: InboxStore, notifications?: NotifyService): void {
+export function registerInboxIpc(
+  store: InboxStore,
+  notifications?: NotifyService,
+  attribution?: (runId: string, callerId: string) => { automationId: string } | null
+): void {
   const svc = createInboxService(store, {
     manifest: (id) => readWorkspaceManifest(id),
     notifyChanged: () => {
@@ -24,7 +28,8 @@ export function registerInboxIpc(store: InboxStore, notifications?: NotifyServic
       logError({ source: 'main', type: 'inbox-post-rejected', level: 'warn', message: reason, workspaceId });
       notifications?.onPostRejected(workspaceId, reason);
     },
-    notifications
+    notifications,
+    attribution
   });
   setInboxHandlers(svc.mcp);
   ipcMain.handle('inbox:list', (_e, filter?: TodoFilter) => svc.ipc.list(filter ?? {}));
