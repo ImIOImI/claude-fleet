@@ -9,7 +9,7 @@ import type {
 } from '../../preload/inboxTypes.js';
 import { isPriority, maxPriority, normalizeTag, normalizeTags, MAX_TAGS } from './inboxCore.js';
 
-export const INBOX_SCHEMA_VERSION = 3;
+export const INBOX_SCHEMA_VERSION = 4;
 
 const MIGRATIONS: Record<number, string> = {
   1: `
@@ -153,6 +153,23 @@ const MIGRATIONS: Record<number, string> = {
       detail TEXT
     );
     CREATE INDEX step_runs_run ON step_runs (run_id, id);
+  `,
+  // Phase 5 (proposals): workspace-proposed automations and changes, with the
+  // user's decision on each item. Kept permanently as the audit trail.
+  4: `
+    CREATE TABLE proposals (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind IN ('new','change','batch')),
+      proposer_kind TEXT NOT NULL,
+      proposer_id TEXT,
+      rationale TEXT,
+      status TEXT NOT NULL,
+      items TEXT NOT NULL,
+      note TEXT,
+      created_at INTEGER NOT NULL,
+      decided_at INTEGER
+    );
+    CREATE INDEX proposals_status ON proposals (status, created_at);
   `
 };
 
