@@ -208,18 +208,26 @@ export interface ManualTrigger {
   /** allowFrom: workspace ids (or names, resolved at save) that may run it over MCP. */
   manual: { allowFrom?: string[] };
 }
-export type TriggerDef = ScheduleTrigger | ManualTrigger;
+export type EventName = 'session.idle' | 'todo.created' | 'workspace.started';
+export interface EventTrigger {
+  /** Fire when something happens in the fleet (#407 Phase 4). workspace/tag narrow it; debounce coalesces bursts. */
+  event: { on: EventName; workspace?: string; tag?: string; debounce?: string };
+}
+export type TriggerDef = ScheduleTrigger | ManualTrigger | EventTrigger;
 
 export interface PromptStepDef {
   id: string;
   prompt: {
     /** Workspace id (names are resolved to ids at save). */
     workspace: string;
-    mode: 'live';
+    /** live: inject into the open session · fresh: a new headless `claude -p` session (#407 Phase 4). */
+    mode: 'live' | 'fresh';
     message: string;
     wait?: boolean;
     ensureRunning?: boolean;
     timeout?: string;
+    /** fresh only: extra tools the unattended session may use (the inbox tools are always allowed). */
+    allowedTools?: string[];
   };
 }
 export type StepDef = PromptStepDef;
@@ -237,7 +245,7 @@ export interface AutomationDef {
 
 export type RunStatus =
   | 'queued' | 'running' | 'succeeded' | 'nothing-to-do' | 'failed' | 'timed-out' | 'skipped' | 'cancelled' | 'interrupted';
-export type RunTriggerKind = 'schedule' | 'manual' | 'catch-up';
+export type RunTriggerKind = 'schedule' | 'manual' | 'catch-up' | 'event';
 
 export interface StepRunRow {
   id: number;
@@ -257,7 +265,7 @@ export interface RunRow {
   id: string;
   automationId: string;
   version: number;
-  trigger: { kind: RunTriggerKind; by?: TodoSource; cron?: string };
+  trigger: { kind: RunTriggerKind; by?: TodoSource; cron?: string; event?: { on: EventName; workspaceId?: string; todoId?: string; todoTitle?: string; count: number } };
   args: Record<string, ParamValue>;
   status: RunStatus;
   startedAt: number;

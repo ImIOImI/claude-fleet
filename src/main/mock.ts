@@ -380,6 +380,21 @@ export async function getBrokerLogs(_containerId: string, _tailLines?: number): 
 /** Mock committee post (#120): no broker, so just acknowledge for a known
  *  workspace. Lets the authorization + dispatch path be exercised in mock
  *  e2e; the real broker round-trip is docker-only. */
+/** Mock fresh sessions (#407 Phase 4): alive for ~1.5 s, then ended. */
+const mockHeadless = new Map<string, number>();
+export async function spawnHeadless(workspaceId: string, sessionId: string, _args: string[]): Promise<void> {
+  if (!workspaces.get(workspaceId)) throw new Error(`no such workspace ${workspaceId}`);
+  mockHeadless.set(`${workspaceId}/${sessionId}`, Date.now() + 1500);
+}
+export async function headlessState(workspaceId: string, sessionId: string): Promise<'alive' | 'ended' | 'missing'> {
+  const end = mockHeadless.get(`${workspaceId}/${sessionId}`);
+  if (end === undefined) return 'missing';
+  return Date.now() < end ? 'alive' : 'ended';
+}
+export async function closeHeadless(workspaceId: string, sessionId: string): Promise<void> {
+  mockHeadless.delete(`${workspaceId}/${sessionId}`);
+}
+
 export async function committeePost(
   workspaceId: string,
   _text: string

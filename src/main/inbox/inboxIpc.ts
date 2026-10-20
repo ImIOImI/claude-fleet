@@ -7,7 +7,7 @@ import { readWorkspaceManifest } from '../workspaces.js';
 import { setInboxHandlers } from '../mcpServer.js';
 import { logError } from '../errorLog.js';
 import { broadcastInboxChanged } from './inboxBroadcast.js';
-import { emitInboxChanged } from './inboxEvents.js';
+import { emitInboxChanged, inboxEvents } from './inboxEvents.js';
 import { createInboxService } from './inboxService.js';
 import type { InboxStore } from './inboxDb.js';
 import type { NotifyService } from './notifyService.js';
@@ -29,7 +29,8 @@ export function registerInboxIpc(
       notifications?.onPostRejected(workspaceId, reason);
     },
     notifications,
-    attribution
+    attribution,
+    onTodoCreated: (todo) => inboxEvents.emit('todo', todo)
   });
   setInboxHandlers(svc.mcp);
   ipcMain.handle('inbox:list', (_e, filter?: TodoFilter) => svc.ipc.list(filter ?? {}));

@@ -2,7 +2,7 @@
 // definitions + version history, tags, per-automation state, runs, step runs.
 import type Database from 'better-sqlite3';
 import type {
-  AutomationDef, ParamValue, RunRow, RunStatus, RunTriggerKind, StepRunRow, TodoSource
+  AutomationDef, ParamValue, RunRow, RunStatus, StepRunRow, TodoSource
 } from '../../preload/inboxTypes.js';
 import { newId } from '../inbox/inboxDb.js';
 import { normalizeTags } from '../inbox/inboxCore.js';
@@ -144,7 +144,7 @@ export class AutomationStore {
     }));
   }
 
-  startRun(a: AutomationRecord, trigger: { kind: RunTriggerKind; by?: TodoSource; cron?: string }, args: Record<string, ParamValue>, status: RunStatus, now = Date.now(), error: string | null = null): RunRow {
+  startRun(a: AutomationRecord, trigger: RunRow['trigger'], args: Record<string, ParamValue>, status: RunStatus, now = Date.now(), error: string | null = null): RunRow {
     const id = newId(now);
     this.db.prepare('INSERT INTO runs (id, automation_id, version, trigger, args, status, started_at, ended_at, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
       .run(id, a.id, a.version, JSON.stringify(trigger), JSON.stringify(args), status, now, status === 'running' || status === 'queued' ? null : now, error);

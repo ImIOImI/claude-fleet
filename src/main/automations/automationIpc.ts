@@ -2,7 +2,12 @@
 // handlers, the 30 s scheduler tick and startup recovery. Effects into
 // workspaces use ipc.ts's host-trusted functions (no committee gate).
 import { BrowserWindow, ipcMain } from 'electron';
-import { hostEnsureRunning, hostPostToWorkspace, hostWorkspaceBusy, hostWorkspaceNames, hostWorkspaceState } from '../ipc.js';
+import {
+  hostCloseFresh, hostEnsureRunning, hostFreshState, hostPostToWorkspace, hostSpawnFresh, hostWorkspaceBusy, hostWorkspaceNames,
+  hostWorkspaceState, setFleetEventObserver
+} from '../ipc.js';
+import { inboxEvents } from '../inbox/inboxEvents.js';
+import type { Todo } from '../../preload/inboxTypes.js';
 import { setAutomationHandlers } from '../mcpServer.js';
 import { logError } from '../errorLog.js';
 import type { InboxStore } from '../inbox/inboxDb.js';
@@ -35,6 +40,9 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     ensureRunning: hostEnsureRunning,
     post: hostPostToWorkspace,
     busy: hostWorkspaceBusy,
+    spawnFresh: hostSpawnFresh,
+    freshState: hostFreshState,
+    closeFresh: hostCloseFresh,
     resolveWorkspace: (v) => names.find((n) => n.id === v)?.id ?? names.find((n) => n.name === v)?.id ?? null,
     notify: notify ? (n) => notify.request(n) : undefined,
     changed: () => { send('automations:changed'); emitInboxChanged(); }
@@ -51,6 +59,12 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     });
   }, 30_000);
   tick.unref?.();
+
+  // Event triggers (#407 Phase 4).
+  setFleetEventObserver((e) => { svc.onEvent(e); });
+  inboxEvents.on('todo', (t: Todo) => {
+    svc.onEvent({ on: 'todo.created', workspaceId: t.source.kind === 'workspace' ? t.source.id ?? undefined : undefined, todo: { id: t.id, title: t.title, tags: t.tags, source: t.source } });
+  });
 
   setAutomationHandlers({
     list: async (callerId) => { await refresh(); return svc.mcp.list(callerId); },

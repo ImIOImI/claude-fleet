@@ -3,7 +3,7 @@
 // Features owned by later phases are rejected with a message naming the phase.
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import type { AutomationDef, ParamDef, ParamValue, StepDef, TriggerDef } from '../../preload/inboxTypes.js';
-import { normalizeTags } from '../inbox/inboxCore.js';
+import { normalizeTag, normalizeTags } from '../inbox/inboxCore.js';
 import { parseCron, isValidTimeZone, CronError } from './cron.js';
 
 export type Validation<T> = { ok: true; value: T } | { ok: false; errors: string[] };
@@ -11,6 +11,8 @@ export type Validation<T> = { ok: true; value: T } | { ok: false; errors: string
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,59}$/;
 const STEP_RE = /^[a-z][a-z0-9_-]{0,30}$/;
 const PARAM_RE = /^[a-z_][a-z0-9_]{0,39}$/;
+const TOOL_RE = /^[A-Za-z0-9_*:.()/ -]{1,120}$/;
+const EVENTS = ['session.idle', 'todo.created', 'workspace.started'] as const;
 const PLACEHOLDER_RE = /\{\{\s*([a-z]+)(?:\.([a-z0-9_]+))?((?:\.[a-z0-9_]+)*)\s*\}\}/gi;
 
 export const DEFAULT_RUN_TIMEOUT_MS = 30 * 60_000;
@@ -90,13 +92,35 @@ function validateParams(raw: unknown, errors: string[]): ParamDef[] {
 }
 
 function validateTriggers(raw: unknown, params: ParamDef[], ctx: ResolveCtx, errors: string[]): TriggerDef[] {
-  if (!Array.isArray(raw) || raw.length === 0) { errors.push('triggers: at least one trigger (schedule or manual)'); return []; }
+  if (!Array.isArray(raw) || raw.length === 0) { errors.push('triggers: at least one trigger (schedule, manual or event)'); return []; }
   const out: TriggerDef[] = [];
   raw.forEach((t, i) => {
     const w = `triggers[${i}]`;
     if (!t || typeof t !== 'object') { errors.push(`${w}: must be an object`); return; }
     const o = t as Record<string, unknown>;
-    if ('event' in o) { errors.push(`${w}: event triggers arrive in a later phase (Phase 4)`); return; }
+    if ('event' in o) {
+      const ev = (o.event ?? {}) as Record<string, unknown>;
+      if (!EVENTS.includes(ev.on as never)) { errors.push(`${w}.event.on: one of ${EVENTS.join(', ')}`); return; }
+      const trig: { on: (typeof EVENTS)[number]; workspace?: string; tag?: string; debounce?: string } = { on: ev.on as (typeof EVENTS)[number] };
+      if (ev.workspace !== undefined) {
+        const id = typeof ev.workspace === 'string' ? ctx.workspace(ev.workspace) : null;
+        if (!id) { errors.push(`${w}.event.workspace: unknown workspace "${String(ev.workspace)}"`); return; }
+        trig.workspace = id;
+      }
+      if (ev.tag !== undefined) {
+        if (ev.on !== 'todo.created') { errors.push(`${w}.event.tag: only todo.created events have tags`); return; }
+        const t = typeof ev.tag === 'string' ? normalizeTag(ev.tag) : null;
+        if (!t) { errors.push(`${w}.event.tag: a tag like "ops"`); return; }
+        trig.tag = t;
+      }
+      if (ev.debounce !== undefined) {
+        const ms = parseDuration(ev.debounce);
+        if (ms === null || ms > 3_600_000) { errors.push(`${w}.event.debounce: a duration up to 1h, like "2m"`); return; }
+        trig.debounce = String(ev.debounce).trim();
+      }
+      out.push({ event: trig });
+      return;
+    }
     if ('schedule' in o) {
       const s = (o.schedule ?? {}) as Record<string, unknown>;
       if (typeof s.cron !== 'string') { errors.push(`${w}.schedule.cron: required, e.g. "*/30 8-18 * * 1-5"`); return; }
@@ -128,7 +152,7 @@ function validateTriggers(raw: unknown, params: ParamDef[], ctx: ResolveCtx, err
       out.push({ manual: allow.length ? { allowFrom: allow } : {} });
       return;
     }
-    errors.push(`${w}: must be a schedule or manual trigger`);
+    errors.push(`${w}: must be a schedule, manual or event trigger`);
   });
   return out;
 }
@@ -150,14 +174,22 @@ function validateSteps(raw: unknown, params: ParamDef[], ctx: ResolveCtx, errors
     const ws = typeof p.workspace === 'string' ? ctx.workspace(p.workspace) : null;
     if (!ws) { errors.push(`${w}.prompt.workspace: unknown workspace "${String(p.workspace ?? '')}"`); return; }
     const mode = p.mode ?? 'live';
-    if (mode === 'fresh') { errors.push(`${w}.prompt.mode: fresh sessions arrive in a later phase (Phase 4); use live`); return; }
-    if (mode !== 'live') { errors.push(`${w}.prompt.mode: live`); return; }
+    if (mode !== 'live' && mode !== 'fresh') { errors.push(`${w}.prompt.mode: live or fresh`); return; }
+    let allowedTools: string[] | undefined;
+    if (p.allowedTools !== undefined) {
+      if (mode !== 'fresh') { errors.push(`${w}.prompt.allowedTools: only for fresh sessions`); return; }
+      if (!Array.isArray(p.allowedTools) || p.allowedTools.length > 30 || !p.allowedTools.every((t) => typeof t === 'string' && TOOL_RE.test(t))) {
+        errors.push(`${w}.prompt.allowedTools: a list of tool names like "Bash(git log:*)" or "Read"`);
+        return;
+      }
+      allowedTools = p.allowedTools as string[];
+    }
     if (typeof p.message !== 'string' || !p.message.trim()) { errors.push(`${w}.prompt.message: required`); return; }
     if (p.message.length > 8000) errors.push(`${w}.prompt.message: longer than 8000 characters`);
     for (const m of p.message.matchAll(PLACEHOLDER_RE)) {
       const [whole, ns, key] = m;
       if (ns === 'args' && !params.some((x) => x.name === key)) errors.push(`${w}.prompt.message: ${whole} names no declared param`);
-      else if (ns === 'trigger' && key !== 'kind') errors.push(`${w}.prompt.message: ${whole}: only {{trigger.kind}} is available`);
+      else if (ns === 'trigger' && !['kind', 'workspace', 'todo'].includes(key ?? '')) errors.push(`${w}.prompt.message: ${whole}: use {{trigger.kind}}, {{trigger.workspace}} or {{trigger.todo}}`);
       else if (ns === 'run' && key !== 'id') errors.push(`${w}.prompt.message: ${whole}: only {{run.id}} is available`);
       else if (ns === 'steps') errors.push(`${w}.prompt.message: ${whole}: step output arrives with script steps (Phase 7)`);
       else if (!['args', 'trigger', 'run', 'steps'].includes(ns)) errors.push(`${w}.prompt.message: unknown placeholder ${whole}`);
@@ -171,7 +203,8 @@ function validateSteps(raw: unknown, params: ParamDef[], ctx: ResolveCtx, errors
     out.push({
       id: o.id,
       prompt: {
-        workspace: ws, mode: 'live', message: p.message,
+        workspace: ws, mode, message: p.message,
+        ...(allowedTools ? { allowedTools } : {}),
         ...(p.wait === true ? { wait: true } : {}),
         ...(p.ensureRunning === true ? { ensureRunning: true } : {}),
         ...(timeout ? { timeout } : {})

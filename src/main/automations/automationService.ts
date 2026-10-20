@@ -2,10 +2,10 @@
 // (concurrency, rate cap, queueing), the scheduler tick, failure notifications,
 // restart recovery, the active-run registry used for todo attribution, and the
 // MCP handlers. Pure: Electron/backends are injected (automationIpc.ts).
-import type { Automation, AutomationDef, ParamValue, RunRow, RunTriggerKind, TodoSource } from '../../preload/inboxTypes.js';
+import type { Automation, AutomationDef, EventName, ParamValue, RunRow, RunTriggerKind, TodoSource } from '../../preload/inboxTypes.js';
 import type { NotifyInput } from '../inbox/notifyService.js';
 import { AutomationStore, type AutomationRecord } from './automationStore.js';
-import { definitionToYaml, parseDefinitionText, validateArgs, validateDefinition, type Validation } from './definition.js';
+import { definitionToYaml, parseDefinitionText, parseDuration, validateArgs, validateDefinition, type Validation } from './definition.js';
 import { executeRun, type RunnerDeps, type RunOutcome } from './runner.js';
 import { dueSchedule, nextFireAt } from './scheduler.js';
 import { describeCron } from './cron.js';
@@ -16,7 +16,20 @@ export interface AutomationDeps extends Omit<RunnerDeps, 'store'> {
   resolveWorkspace(idOrName: string): string | null;
   notify?: (n: NotifyInput) => unknown;
   changed(): void;
+  /** Injected for tests; default setTimeout/clearTimeout (event debounce). */
+  setTimer?(fn: () => void, ms: number): unknown;
+  clearTimer?(h: unknown): void;
 }
+
+export interface FleetEvent {
+  on: EventName;
+  workspaceId?: string;
+  todo?: { id: string; title: string; tags: string[]; source: TodoSource };
+}
+
+const DEFAULT_DEBOUNCE_MS = 120_000;
+/** After a run ends, ignore events from the workspaces it prompted for this long (loop guard). */
+const SELF_GUARD_MS = 120_000;
 
 const RATE_MS = 60_000;
 const RUN_RETENTION_MS = 90 * 86_400_000;
@@ -30,6 +43,7 @@ export interface RunRequest {
   callerSupplied?: boolean;
   /** Coerce string args (the Run-now form). */
   coerce?: boolean;
+  event?: RunRow['trigger']['event'];
 }
 
 export function createAutomationService(deps: AutomationDeps) {
@@ -38,6 +52,10 @@ export function createAutomationService(deps: AutomationDeps) {
   const active = new Map<string, { automationId: string; workspaces: Set<string> }>();
   const lastStart = new Map<string, number>();
   const inFlight = new Set<Promise<unknown>>();
+  const lastEnded = new Map<string, number>();
+  const pending = new Map<string, { timer: unknown; event: NonNullable<RunRow['trigger']['event']> }>();
+  const setTimer = deps.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
+  const clearTimer = deps.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>));
 
   const ctx = { workspace: (v: string) => deps.resolveWorkspace(v) };
 
@@ -48,12 +66,18 @@ export function createAutomationService(deps: AutomationDeps) {
       definition: a.definition, tags: store.tags(a.id), createdBy: a.createdBy, createdAt: a.createdAt, updatedAt: a.updatedAt,
       lastScheduledAt: a.lastScheduledAt, nextFireAt: nextFireAt(a, now), lastRun: store.runs(a.id, 1)[0] ?? null,
       weekStats: store.weekStats(a.id, now),
-      triggerSummaries: a.definition.triggers.map((t) =>
-        'schedule' in t
-          ? `${describeCron(t.schedule.cron)}${t.schedule.tz ? ` (${t.schedule.tz})` : ''}`
-          : t.manual.allowFrom?.length
-            ? `by hand · also ${t.manual.allowFrom.map((w) => deps.workspaceName(w)).join(', ')}`
-            : 'by hand')
+      triggerSummaries: a.definition.triggers.map((t) => {
+        if ('schedule' in t) return `${describeCron(t.schedule.cron)}${t.schedule.tz ? ` (${t.schedule.tz})` : ''}`;
+        if ('manual' in t) {
+          return t.manual.allowFrom?.length ? `by hand · also ${t.manual.allowFrom.map((w) => deps.workspaceName(w)).join(', ')}` : 'by hand';
+        }
+        const e = t.event;
+        const ws = e.workspace ? deps.workspaceName(e.workspace) : null;
+        const what = e.on === 'session.idle' ? `when ${ws ?? 'any workspace'} goes idle`
+          : e.on === 'workspace.started' ? `when ${ws ?? 'a workspace'} starts`
+          : `when a todo${e.tag ? ` tagged #${e.tag}` : ''} arrives${ws ? ` from ${ws}` : ''}`;
+        return `${what} · debounce ${e.debounce ?? '2m'}`;
+      })
     };
   }
 
@@ -83,6 +107,7 @@ export function createAutomationService(deps: AutomationDeps) {
       outcome = { status: 'failed', error: e instanceof Error ? e.message : String(e) };
     }
     active.delete(run.id);
+    lastEnded.set(a.id, deps.now());
     store.setRunStatus(run.id, outcome.status, deps.now(), outcome.error);
     if (outcome.status === 'failed' || outcome.status === 'timed-out') failed(a, run, outcome);
     deps.changed();
@@ -104,7 +129,7 @@ export function createAutomationService(deps: AutomationDeps) {
     if (!a) throw new Error(`automation ${id} not found`);
     const args = validateArgs(a.definition.params, req.args, req.coerce);
     if (!args.ok) throw new Error(`invalid arguments: ${args.errors.join('; ')}`);
-    const trigger = { kind: req.kind, ...(req.by ? { by: req.by } : {}), ...(req.cron ? { cron: req.cron } : {}) };
+    const trigger = { kind: req.kind, ...(req.by ? { by: req.by } : {}), ...(req.cron ? { cron: req.cron } : {}), ...(req.event ? { event: req.event } : {}) };
     const now = deps.now();
     const running = [...active.values()].some((r) => r.automationId === id);
     const userManual = req.kind === 'manual' && req.by?.kind === 'user';
@@ -181,6 +206,62 @@ export function createAutomationService(deps: AutomationDeps) {
       }
       if (started.length) deps.changed();
       return started;
+    },
+
+    /** A fleet event (#407 Phase 4): start matching event-triggered automations after their debounce. */
+    onEvent(e: FleetEvent): string[] {
+      const now = deps.now();
+      const matched: string[] = [];
+      for (const a of store.list()) {
+        if (!a.enabled) continue;
+        const trig = a.definition.triggers.find((t) =>
+          'event' in t && t.event.on === e.on &&
+          (!t.event.workspace || t.event.workspace === (e.workspaceId ?? e.todo?.source.id)) &&
+          (!t.event.tag || (e.todo?.tags ?? []).includes(t.event.tag)));
+        if (!trig || !('event' in trig)) continue;
+        // Loop guard: never react to your own output, or to the workspaces you just prompted.
+        if (e.todo?.source.kind === 'automation' && e.todo.source.id === a.id) continue;
+        const targets = new Set(a.definition.steps.map((s) => s.prompt.workspace));
+        const ws = e.workspaceId ?? (e.todo?.source.kind === 'workspace' ? e.todo.source.id ?? undefined : undefined);
+        if (ws && targets.has(ws)) {
+          const busyHere = [...active.values()].some((r) => r.automationId === a.id);
+          const ended = lastEnded.get(a.id);
+          if (busyHere || (ended !== undefined && now - ended < SELF_GUARD_MS)) continue;
+        }
+        matched.push(a.id);
+        const p = pending.get(a.id);
+        if (p) {
+          p.event.count += 1;
+          continue;
+        }
+        const event = { on: e.on, ...(ws ? { workspaceId: ws } : {}), ...(e.todo ? { todoId: e.todo.id, todoTitle: e.todo.title } : {}), count: 1 };
+        const ms = parseDuration(trig.event.debounce) ?? DEFAULT_DEBOUNCE_MS;
+        pending.set(a.id, {
+          event,
+          timer: setTimer(() => {
+            const fired = pending.get(a.id);
+            pending.delete(a.id);
+            if (!fired) return;
+            try {
+              start(a.id, { kind: 'event', event: fired.event });
+            } catch (err) {
+              const cur = store.get(a.id);
+              if (cur) {
+                const run = store.startRun(cur, { kind: 'event', event: fired.event }, {}, 'failed', deps.now(), (err as Error).message);
+                failed(cur, run, { status: 'failed', error: (err as Error).message });
+              }
+            }
+            deps.changed();
+          }, ms)
+        });
+      }
+      return matched;
+    },
+
+    /** Cancel pending debounced event runs (quit / tests). */
+    cancelPending(): void {
+      for (const p of pending.values()) clearTimer(p.timer);
+      pending.clear();
     },
 
     /** Startup: runs cut off by a quit become `interrupted` (one notification). */

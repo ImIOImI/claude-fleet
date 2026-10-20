@@ -924,6 +924,46 @@ export async function committeePost(
   }
 }
 
+// ── Fresh automation sessions (#407 Phase 4) ────────────────────────────────
+// A distinct channel from HOST_CHANNEL so a cleanup never collides with a
+// concurrent committee/automation live post.
+const HEADLESS_CHANNEL = 7;
+
+export async function spawnHeadless(workspaceId: string, sessionId: string, args: string[]): Promise<void> {
+  const client = new BrokerClient(await brokerEndpoint(workspaceId));
+  try {
+    await client.ready();
+    const r = await client.createSession(sessionId, 120, 40, args);
+    if (!r.ok) throw new Error(`could not start a fresh session: ${r.error ?? 'unknown broker error'}`);
+  } finally {
+    client.close();
+  }
+}
+
+export async function headlessState(workspaceId: string, sessionId: string): Promise<'alive' | 'ended' | 'missing'> {
+  const client = new BrokerClient(await brokerEndpoint(workspaceId));
+  try {
+    await client.ready();
+    const s = (await client.listSessions()).find((x) => x.id === sessionId);
+    return s ? (s.alive ? 'alive' : 'ended') : 'missing';
+  } finally {
+    client.close();
+  }
+}
+
+export async function closeHeadless(workspaceId: string, sessionId: string): Promise<void> {
+  const client = new BrokerClient(await brokerEndpoint(workspaceId));
+  try {
+    await client.ready();
+    const r = await client.attachSession(sessionId, HEADLESS_CHANNEL);
+    if (r.ok) await client.closeChannel(HEADLESS_CHANNEL);
+  } catch {
+    // best effort: an already-closed session is fine
+  } finally {
+    client.close();
+  }
+}
+
 /**
  * Open a terminal session against the in-container broker.
  *

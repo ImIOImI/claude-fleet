@@ -149,6 +149,20 @@ export function setInputWaitObserver(fn: typeof inputWaitObserver): void {
   inputWaitObserver = fn;
 }
 
+/** Fleet events for automation event triggers (#407 Phase 4): a workspace's
+ *  attached session went busy → idle, or a workspace was started. */
+let fleetEventObserver: ((e: { on: 'session.idle' | 'workspace.started'; workspaceId: string }) => void) | null = null;
+export function setFleetEventObserver(fn: typeof fleetEventObserver): void {
+  fleetEventObserver = fn;
+}
+function emitFleetEvent(e: { on: 'session.idle' | 'workspace.started'; workspaceId: string }): void {
+  try {
+    fleetEventObserver?.(e);
+  } catch (err) {
+    logError({ source: 'main', type: 'fleet-event-observer', level: 'warn', message: String(err), workspaceId: e.workspaceId });
+  }
+}
+
 const execFileAsync = promisify(execFile);
 
 const wslProbeDeps: ProbeDeps = {
@@ -491,6 +505,21 @@ export async function hostPostToWorkspace(
   const { brokerSessionId } = await backendForKind(kind).committeePost(targetId, msg);
   broadcastCommitteeInbound(targetId, msg);
   return { via: 'headless', brokerSessionId };
+}
+
+/** Start a fresh headless `claude <args>` session in a container workspace. */
+export async function hostSpawnFresh(workspaceId: string, sessionId: string, args: string[]): Promise<void> {
+  const kind = await resolveKind(workspaceId);
+  if (kind === 'local') throw new Error('fresh sessions need a container workspace (use mode: live for local workspaces)');
+  await backendForKind(kind).spawnHeadless(workspaceId, sessionId, args);
+}
+
+export async function hostFreshState(workspaceId: string, sessionId: string): Promise<'alive' | 'ended' | 'missing'> {
+  return backendForKind(await resolveKind(workspaceId)).headlessState(workspaceId, sessionId);
+}
+
+export async function hostCloseFresh(workspaceId: string, sessionId: string): Promise<void> {
+  await backendForKind(await resolveKind(workspaceId)).closeHeadless(workspaceId, sessionId).catch(() => undefined);
 }
 
 /** Start/unpause a workspace and wait until its broker answers. */
@@ -1241,6 +1270,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('workspace:start', async (_e, id: string): Promise<Workspace | null> => {
     const containerId = await (await backendFor(id)).startWorkspace(id);
     if (!containerId) return null;
+    emitFleetEvent({ on: 'workspace.started', workspaceId: id });
     await touchWorkspaceUsed(id);
     scheduleClaudeFreshnessCheck(id);
     // Find the freshly-running workspace in the merged list so the
@@ -1895,6 +1925,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         recordPtyChunk(owner?.id ?? handleWorkspaceId.get(ptyHandleId) ?? null, brokerSessionId, chunk.length);
         if (owner && detector.push(chunk.toString('utf8'))) {
           committeeBusy.set(owner.id, { busy: detector.isBusy, since: Date.now() });
+          if (!detector.isBusy) emitFleetEvent({ on: 'session.idle', workspaceId: owner.id });
         }
       });
       handle.stream.on('end', () => {
