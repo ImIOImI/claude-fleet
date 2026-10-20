@@ -137,6 +137,7 @@ export interface InboxHandlers {
   post(callerId: string, args: Record<string, unknown>): Promise<unknown>;
   update(callerId: string, args: Record<string, unknown>): Promise<unknown>;
   list(callerId: string, args: Record<string, unknown>): Promise<unknown>;
+  notify(callerId: string, args: Record<string, unknown>): Promise<unknown>;
 }
 let inboxHandlers: InboxHandlers | null = null;
 export function setInboxHandlers(h: InboxHandlers | null): void {
@@ -1438,20 +1439,42 @@ export const TOOLS: Tool[] = [
       'Post a todo to the user\'s inbox (claude-fleet). Use for things the user should act on. ' +
       'Args: title (required, ≤200), body (markdown), priority (low|normal|high|urgent, default normal), ' +
       'key (dedupe key: posting the same key again updates that todo — bumps its seen count — and reopens it if it was closed), ' +
-      'tags (array), session_link. Returns {id, action: created|updated|reopened}. Rate-limited per workspace.',
+      'tags (array), session_link, notify (true to also send the user a notification; urgent todos always do). ' +
+      'Returns {id, action: created|updated|reopened}. Rate-limited per workspace.',
     inputSchema: {
       type: 'object',
       properties: {
         title: { type: 'string' }, body: { type: 'string' },
         priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
         key: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } },
-        session_link: { type: 'string' }
+        session_link: { type: 'string' }, notify: { type: 'boolean' }
       },
       required: ['title']
     },
     run: (_db, a, ctx) => {
       if (!inboxHandlers) throw new Error('the inbox is unavailable');
       return inboxHandlers.post(ctx.callerId, a);
+    }
+  },
+  {
+    name: 'notify',
+    description:
+      'Send the user a notification without creating a todo (e.g. "nightly check passed"). The user\'s rules, ' +
+      'pause and downtime decide whether it is shown now or held in the Activity log. Args: title (required, ≤200), ' +
+      'body, priority (low|normal|high|urgent, default normal), key (lets the user mute just this kind of notification), ' +
+      'tags, todo_id (link a todo you posted). Shares the post rate limit. Returns {id, delivered, heldReason}.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string' }, body: { type: 'string' },
+        priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
+        key: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } }, todo_id: { type: 'string' }
+      },
+      required: ['title']
+    },
+    run: (_db, a, ctx) => {
+      if (!inboxHandlers) throw new Error('the inbox is unavailable');
+      return inboxHandlers.notify(ctx.callerId, a);
     }
   },
   {

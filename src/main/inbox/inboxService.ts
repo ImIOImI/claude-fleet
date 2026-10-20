@@ -2,14 +2,17 @@
 // The MCP caller id is host-stamped by mcpServer (ambient socket identity).
 import type { InboxConfig, Todo, TodoEvent, TodoFilter, UpdateTodoPatch, InboxCounts } from '../../preload/inboxTypes.js';
 import { InboxStore } from './inboxDb.js';
-import { validatePostInput, isPriority, InboxInputError } from './inboxCore.js';
+import { validatePostInput, isPriority, InboxInputError, normalizeTags } from './inboxCore.js';
 import { canPost, postLimit, PostRateLimiter, canUpdate, canSee } from './inboxPolicy.js';
+import type { NotifyService } from './notifyService.js';
 
 export interface InboxServiceDeps {
   manifest(id: string): Promise<{ inbox?: InboxConfig } | null>;
   notifyChanged(): void;
   now?: () => number;
   onPostRejected?(workspaceId: string, reason: string): void;
+  /** Phase 2: notification side-effects of posts. Optional so Phase 1 tests stay unwired. */
+  notifications?: Pick<NotifyService, 'onTodoPosted' | 'request'>;
 }
 
 const STATUSES = new Set(['open', 'done', 'dismissed']);
@@ -46,6 +49,21 @@ export function createInboxService(store: InboxStore, deps: InboxServiceDeps) {
   const limiter = new PostRateLimiter();
   const now = deps.now ?? Date.now;
 
+  /** Phase 1 gate shared by post_todo and notify: permission, then the hourly cap. */
+  async function gatePost(callerId: string): Promise<void> {
+    const cfg = await callerConfig(callerId);
+    if (!canPost(cfg)) {
+      deps.onPostRejected?.(callerId, 'posting disabled');
+      throw new Error('this workspace is not allowed to post to the inbox (Edit workspace › Inbox & automations)');
+    }
+    const max = postLimit(cfg);
+    const gate = limiter.take(callerId, max, now());
+    if (!gate.ok) {
+      deps.onPostRejected?.(callerId, `post limit ${max}/hour`);
+      throw new Error(`post limit (${max}/hour) reached; retryAfterMs=${gate.retryAfterMs}`);
+    }
+  }
+
   async function callerConfig(callerId: string): Promise<InboxConfig | undefined> {
     const m = await deps.manifest(callerId);
     if (!m) throw new Error(`unknown workspace ${callerId}`);
@@ -54,25 +72,37 @@ export function createInboxService(store: InboxStore, deps: InboxServiceDeps) {
 
   const mcp = {
     async post(callerId: string, args: Record<string, unknown>): Promise<unknown> {
-      const cfg = await callerConfig(callerId);
-      if (!canPost(cfg)) {
-        deps.onPostRejected?.(callerId, 'posting disabled');
-        throw new Error('this workspace is not allowed to post to the inbox (Edit workspace › Inbox & automations)');
-      }
       const input = validatePostInput(args);
-      const max = postLimit(cfg);
-      const gate = limiter.take(callerId, max, now());
-      if (!gate.ok) {
-        deps.onPostRejected?.(callerId, `post limit ${max}/hour`);
-        throw new Error(`post limit (${max}/hour) reached; retryAfterMs=${gate.retryAfterMs}`);
-      }
+      await gatePost(callerId);
       const { todo, action } = store.post(
         { kind: 'workspace', id: callerId },
         { ...input, workspaceLink: input.workspaceLink ?? callerId },
         now()
       );
       deps.notifyChanged();
+      deps.notifications?.onTodoPosted(todo, action, args.notify === true);
       return { id: todo.id, action, status: todo.status, seenCount: todo.seenCount };
+    },
+    async notify(callerId: string, args: Record<string, unknown>): Promise<unknown> {
+      const title = typeof args.title === 'string' ? args.title.trim() : '';
+      if (!title) throw new InboxInputError('title is required');
+      if (title.length > 200) throw new InboxInputError('title is longer than 200 characters');
+      const priority = args.priority === undefined ? 'normal' : args.priority;
+      if (!isPriority(priority)) throw new InboxInputError('priority must be one of low, normal, high, urgent');
+      const body = typeof args.body === 'string' ? args.body.slice(0, 2000) : null;
+      const todoId = typeof args.todo_id === 'string' ? args.todo_id : null;
+      if (todoId) {
+        const t = store.get(todoId);
+        if (!t || !canSee(callerId, t)) throw new Error(`todo ${todoId} not found`);
+      }
+      await gatePost(callerId);
+      if (!deps.notifications) throw new Error('notifications are unavailable');
+      const n = deps.notifications.request({
+        kind: 'post', title, body, priority, source: { kind: 'workspace', id: callerId }, todoId, workspaceId: callerId,
+        dedupeKey: typeof args.key === 'string' && args.key.trim() ? args.key.trim().slice(0, 200) : null,
+        tags: normalizeTags(args.tags)
+      });
+      return { id: n.id, delivered: n.delivered, heldReason: n.heldReason };
     },
     async update(callerId: string, args: Record<string, unknown>): Promise<unknown> {
       await callerConfig(callerId);
