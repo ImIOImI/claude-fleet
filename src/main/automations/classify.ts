@@ -2,8 +2,10 @@
 // Low-risk (a trusted workspace may auto-apply): name, description, tags,
 // prompt wording, params, concurrency/timeout, schedule changes no faster than
 // every 5 minutes, removing steps or triggers. Everything that widens what an
-// automation can touch, or how often, needs the user.
-import type { AutomationDef, PromptStepDef, TriggerDef } from '../../preload/inboxTypes.js';
+// automation can touch, or how often, needs the user. Script steps (Phase 7):
+// any new or changed script, runIn, shell or secret needs the user, and an
+// automation with a host step is never low-risk.
+import type { AutomationDef, PromptStepDef, ScriptStepDef, StepDef, TriggerDef } from '../../preload/inboxTypes.js';
 import { nextFire, parseCron } from './cron.js';
 
 export const MIN_LOW_RISK_INTERVAL_MS = 5 * 60_000;
@@ -31,6 +33,16 @@ function stepKey(s: PromptStepDef): string {
   return `${s.prompt.workspace}|${s.prompt.mode}`;
 }
 
+const isPrompt = (s: StepDef): s is PromptStepDef => 'prompt' in s;
+const isScript = (s: StepDef): s is ScriptStepDef => 'script' in s;
+
+/** Flags that start with this are shown in red on approval cards. */
+export const HOST_FLAG = 'runs a script on your computer';
+
+function where(s: ScriptStepDef, name: (id: string) => string): string {
+  return s.script.runIn === 'host' ? `${HOST_FLAG} (${s.script.shell})` : `runs a script in ${s.script.runIn ? name(s.script.runIn) : 'the automations workspace'}`;
+}
+
 function every(ms: number): string {
   return ms < 3_600_000 ? `every ${Math.round(ms / 60_000)} min` : ms < 86_400_000 ? `every ${Math.round(ms / 3_600_000)} h` : 'daily or less';
 }
@@ -39,6 +51,12 @@ function every(ms: number): string {
 export function riskFlags(def: AutomationDef, name: (id: string) => string): string[] {
   const flags: string[] = [];
   for (const s of def.steps) {
+    if (isScript(s)) {
+      flags.push(where(s, name));
+      if (s.script.secrets?.length) flags.push(`uses secrets ${s.script.secrets.join(', ')}`);
+      if (s.script.ensureRunning) flags.push(`starts ${s.script.runIn ? name(s.script.runIn) : 'the automations workspace'} if needed`);
+      continue;
+    }
     flags.push(`prompts ${name(s.prompt.workspace)} (${s.prompt.mode === 'fresh' ? 'fresh session' : 'live session'})`);
     if (s.prompt.ensureRunning) flags.push(`starts ${name(s.prompt.workspace)} if needed`);
     if (s.prompt.allowedTools?.length) flags.push(`may use ${s.prompt.allowedTools.join(', ')}`);
@@ -62,9 +80,23 @@ export function classifyChange(before: AutomationDef | null, after: AutomationDe
   if (!before) return { lowRisk: false, reasons: ['new automation'] };
   const reasons: string[] = [];
   const beforeSteps = new Map(before.steps.map((s) => [s.id, s]));
-  const beforeKeys = new Set(before.steps.map(stepKey));
+  const beforeKeys = new Set(before.steps.filter(isPrompt).map(stepKey));
   for (const s of after.steps) {
-    const old = beforeSteps.get(s.id);
+    const prev = beforeSteps.get(s.id);
+    if (isScript(s)) {
+      const o = prev && isScript(prev) ? prev.script : null;
+      if (!o) reasons.push(`adds a script step (${s.id})`);
+      else {
+        if (o.run !== s.script.run) reasons.push(`changes the ${s.id} script`);
+        if ((o.runIn ?? '') !== (s.script.runIn ?? '') || (o.shell ?? '') !== (s.script.shell ?? '')) reasons.push(`moves ${s.id} to ${s.script.runIn === 'host' ? 'your computer' : s.script.runIn ? name(s.script.runIn) : 'the automations workspace'}`);
+        const had = new Set(o.secrets ?? []);
+        const gained = (s.script.secrets ?? []).filter((k) => !had.has(k));
+        if (gained.length) reasons.push(`gives ${s.id} secrets ${gained.join(', ')}`);
+        if (s.script.ensureRunning && !o.ensureRunning) reasons.push(`${s.id} may start its workspace`);
+      }
+      continue;
+    }
+    const old = prev && isPrompt(prev) ? prev : undefined;
     if (!beforeKeys.has(stepKey(s)) && (!old || stepKey(old) !== stepKey(s))) {
       reasons.push(old && old.prompt.workspace === s.prompt.workspace
         ? `switches ${s.id} to a ${s.prompt.mode} session`
@@ -84,5 +116,8 @@ export function classifyChange(before: AutomationDef | null, after: AutomationDe
   const oldIv = minScheduleInterval(before);
   if (iv !== null && iv < MIN_LOW_RISK_INTERVAL_MS && (oldIv === null || iv < oldIv)) reasons.push(`runs ${every(iv)} (faster than every 5 min)`);
   if (iv !== null && oldIv === null && !reasons.some((r) => r.startsWith('runs '))) reasons.push(`adds a schedule (${every(iv)})`);
+  if (after.steps.some((s) => isScript(s) && s.script.runIn === 'host') && !reasons.some((r) => r.includes('your computer'))) {
+    reasons.push('has a step that runs on your computer');
+  }
   return { lowRisk: reasons.length === 0, reasons };
 }

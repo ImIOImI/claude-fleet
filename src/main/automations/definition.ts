@@ -1,8 +1,10 @@
 // Automation definitions (#407 Phase 3): parse YAML/JSON, validate into an
 // AutomationDef, and validate run arguments against declared params. Pure.
 // Features owned by later phases are rejected with a message naming the phase.
+// Script steps (Phase 7) run in the automations workspace's container by
+// default, in another container workspace, or (opt-in) on the host.
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import type { AutomationDef, ParamDef, ParamValue, StepDef, TriggerDef } from '../../preload/inboxTypes.js';
+import type { AutomationDef, ParamDef, ParamValue, ScriptShell, ScriptStepDef, StepDef, TriggerDef } from '../../preload/inboxTypes.js';
 import { normalizeTag, normalizeTags } from '../inbox/inboxCore.js';
 import { parseCron, isValidTimeZone, CronError } from './cron.js';
 
@@ -13,7 +15,11 @@ const STEP_RE = /^[a-z][a-z0-9_-]{0,30}$/;
 const PARAM_RE = /^[a-z_][a-z0-9_]{0,39}$/;
 const TOOL_RE = /^[A-Za-z0-9_*:.()/ -]{1,120}$/;
 const EVENTS = ['session.idle', 'todo.created', 'workspace.started'] as const;
-const PLACEHOLDER_RE = /\{\{\s*([a-z]+)(?:\.([a-z0-9_]+))?((?:\.[a-z0-9_]+)*)\s*\}\}/gi;
+const PLACEHOLDER_RE = /\{\{\s*([a-z]+)(?:\.([a-z0-9_-]+))?((?:\.[a-z0-9_]+)*)\s*\}\}/gi;
+const SECRET_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
+const RESERVED_ENV = /^(FLEET_|ARG_)|^(PATH|HOME|USER|SHELL|PWD|LANG|TERM|SystemRoot|WSLENV)$/;
+const DISTRO_RE = /^[A-Za-z0-9._-]{1,64}$/;
+export const MAX_SCRIPT_CHARS = 20_000;
 
 export const DEFAULT_RUN_TIMEOUT_MS = 30 * 60_000;
 export const DEFAULT_STEP_TIMEOUT_MS = 10 * 60_000;
@@ -157,6 +163,51 @@ function validateTriggers(raw: unknown, params: ParamDef[], ctx: ResolveCtx, err
   return out;
 }
 
+function validateScript(raw: unknown, w: string, ctx: ResolveCtx, errors: string[]): ScriptStepDef['script'] | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) { errors.push(`${w}.script: a mapping with run: <script>`); return null; }
+  const o = raw as Record<string, unknown>;
+  if (typeof o.run !== 'string' || !o.run.trim()) { errors.push(`${w}.script.run: the script text is required`); return null; }
+  if (o.run.length > MAX_SCRIPT_CHARS) { errors.push(`${w}.script.run: longer than ${MAX_SCRIPT_CHARS} characters`); return null; }
+  const out: ScriptStepDef['script'] = { run: o.run };
+  if (o.runIn !== undefined && o.runIn !== 'automations') {
+    if (o.runIn === 'host') out.runIn = 'host';
+    else {
+      const id = typeof o.runIn === 'string' ? ctx.workspace(o.runIn) : null;
+      if (!id) { errors.push(`${w}.script.runIn: host, or a container workspace name (unknown "${String(o.runIn)}")`); return null; }
+      out.runIn = id;
+    }
+  }
+  if (o.shell !== undefined) {
+    if (out.runIn !== 'host') { errors.push(`${w}.script.shell: only for runIn: host (containers use bash)`); return null; }
+    const sh = String(o.shell);
+    if (!(sh === 'bash' || sh === 'sh' || sh === 'pwsh' || (sh.startsWith('wsl:') && DISTRO_RE.test(sh.slice(4))))) {
+      errors.push(`${w}.script.shell: bash, sh, pwsh or wsl:<distro>`);
+      return null;
+    }
+    out.shell = sh as ScriptShell;
+  } else if (out.runIn === 'host') {
+    errors.push(`${w}.script.shell: a host step must name its shell (bash, sh, pwsh or wsl:<distro>)`);
+    return null;
+  }
+  if (o.secrets !== undefined) {
+    if (!Array.isArray(o.secrets) || o.secrets.length > 20 || !o.secrets.every((k) => typeof k === 'string' && SECRET_RE.test(k) && !RESERVED_ENV.test(k))) {
+      errors.push(`${w}.script.secrets: a list of vault key names like WEBEX_TOKEN (not FLEET_*/ARG_* or PATH, HOME, …)`);
+      return null;
+    }
+    if (o.secrets.length) out.secrets = [...new Set(o.secrets as string[])];
+  }
+  if (o.ensureRunning === true) {
+    if (out.runIn === 'host') { errors.push(`${w}.script.ensureRunning: not for host steps`); return null; }
+    out.ensureRunning = true;
+  }
+  if (o.timeout !== undefined) {
+    const ms = parseDuration(o.timeout);
+    if (ms === null || ms < 5_000 || ms > 2 * 3_600_000) { errors.push(`${w}.script.timeout: a duration between 5s and 2h, like "2m"`); return null; }
+    out.timeout = String(o.timeout).trim();
+  }
+  return out;
+}
+
 function validateSteps(raw: unknown, params: ParamDef[], ctx: ResolveCtx, errors: string[]): StepDef[] {
   if (!Array.isArray(raw) || raw.length === 0) { errors.push('steps: at least one step'); return []; }
   if (raw.length > 10) errors.push('steps: at most 10 steps');
@@ -167,8 +218,12 @@ function validateSteps(raw: unknown, params: ParamDef[], ctx: ResolveCtx, errors
     const o = s as Record<string, unknown>;
     if (typeof o.id !== 'string' || !STEP_RE.test(o.id)) { errors.push(`${w}.id: lowercase id like "triage"`); return; }
     if (out.some((x) => x.id === o.id)) errors.push(`${w}.id: duplicate "${o.id}"`);
-    if ('script' in o) { errors.push(`${w}: script steps arrive in a later phase (Phase 7)`); return; }
-    if (!('prompt' in o)) { errors.push(`${w}: must be a prompt step`); return; }
+    if ('script' in o) {
+      const st = validateScript(o.script, w, ctx, errors);
+      if (st) out.push({ id: o.id, script: st });
+      return;
+    }
+    if (!('prompt' in o)) { errors.push(`${w}: must be a prompt or script step`); return; }
     const p = (o.prompt ?? {}) as Record<string, unknown>;
     if (p.workspace === '$self') { errors.push(`${w}.prompt.workspace: $self is for automations installed from a loadout (Phase 8)`); return; }
     const ws = typeof p.workspace === 'string' ? ctx.workspace(p.workspace) : null;
@@ -187,11 +242,11 @@ function validateSteps(raw: unknown, params: ParamDef[], ctx: ResolveCtx, errors
     if (typeof p.message !== 'string' || !p.message.trim()) { errors.push(`${w}.prompt.message: required`); return; }
     if (p.message.length > 8000) errors.push(`${w}.prompt.message: longer than 8000 characters`);
     for (const m of p.message.matchAll(PLACEHOLDER_RE)) {
-      const [whole, ns, key] = m;
+      const [whole, ns, key, rest] = m;
       if (ns === 'args' && !params.some((x) => x.name === key)) errors.push(`${w}.prompt.message: ${whole} names no declared param`);
       else if (ns === 'trigger' && !['kind', 'workspace', 'todo'].includes(key ?? '')) errors.push(`${w}.prompt.message: ${whole}: use {{trigger.kind}}, {{trigger.workspace}} or {{trigger.todo}}`);
       else if (ns === 'run' && key !== 'id') errors.push(`${w}.prompt.message: ${whole}: only {{run.id}} is available`);
-      else if (ns === 'steps') errors.push(`${w}.prompt.message: ${whole}: step output arrives with script steps (Phase 7)`);
+      else if (ns === 'steps' && (rest !== '.stdout' || !out.some((x) => x.id === key && 'script' in x))) errors.push(`${w}.prompt.message: ${whole}: use {{steps.<id>.stdout}} naming an earlier script step`);
       else if (!['args', 'trigger', 'run', 'steps'].includes(ns)) errors.push(`${w}.prompt.message: unknown placeholder ${whole}`);
     }
     let timeout: string | undefined;
@@ -219,7 +274,7 @@ export function validateDefinition(raw: unknown, ctx: ResolveCtx): Validation<Au
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, errors: ['the definition must be a YAML mapping'] };
   const o = raw as Record<string, unknown>;
   if (typeof o.name !== 'string' || !NAME_RE.test(o.name)) errors.push('name: lowercase letters, digits and dashes, e.g. "webex-triage"');
-  if (o.secrets !== undefined && !(Array.isArray(o.secrets) && o.secrets.length === 0)) errors.push('secrets: used by script steps, which arrive in a later phase (Phase 7)');
+  if (o.secrets !== undefined && !(Array.isArray(o.secrets) && o.secrets.length === 0)) errors.push('secrets: declare them on the script step that needs them (script.secrets)');
   if (o.concurrency !== undefined && o.concurrency !== 'skip' && o.concurrency !== 'queue') errors.push('concurrency: skip or queue');
   if (o.timeout !== undefined) {
     const ms = parseDuration(o.timeout);
@@ -284,3 +339,8 @@ steps:
         Check the service logs from the last {{args.since}} for new errors.
         Post a todo (with a dedupe key per error) for anything that needs me.
 `;
+
+/** Workspaces an automation's steps act in: prompt targets and script `runIn` workspaces (not the host or the default automations workspace). */
+export function stepWorkspaces(def: AutomationDef): string[] {
+  return [...new Set(def.steps.flatMap((s) => ('prompt' in s ? [s.prompt.workspace] : s.script.runIn && s.script.runIn !== 'host' ? [s.script.runIn] : [])))];
+}
