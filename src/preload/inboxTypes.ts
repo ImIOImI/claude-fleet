@@ -99,3 +99,86 @@ export interface InboxConfig {
   /** Default false. */
   canReadAll?: boolean;
 }
+
+// --- Notifications (#407 Phase 2) -------------------------------------------
+
+/** Rule / default level: all · high and up · urgent only · off. */
+export type NotifyLevel = 'all' | 'high' | 'urgent' | 'off';
+export type NotificationKind = 'post' | 'todo' | 'input-wait' | 'post-rejected' | 'digest' | 'test';
+export type RuleScopeKind = 'key' | 'source' | 'tag' | 'global';
+export type DowntimeBypass = 'none' | 'urgent' | 'urgent+input';
+
+export interface NotificationRow {
+  id: string;
+  ts: number;
+  kind: NotificationKind;
+  title: string;
+  body: string | null;
+  priority: TodoPriority;
+  source: TodoSource;
+  todoId: string | null;
+  workspaceId: string | null;
+  dedupeKey: string | null;
+  tags: string[];
+  delivered: boolean;
+  /** 'rule:<id>' | 'default-level' | 'pause' | 'downtime:<id>' when held. */
+  heldReason: string | null;
+  channel: 'os' | 'in-app' | null;
+  clearedAt: number | null;
+}
+
+export interface NotifyRule {
+  id: string;
+  scopeKind: RuleScopeKind;
+  /** key: `<sourceKind>:<sourceId>:<key>` · source: `user` | `workspace:<id>` | `automation:<id>` · tag: the tag · global: '' */
+  scopeValue: string;
+  level: NotifyLevel;
+  snoozeUntil: number | null;
+}
+
+export interface Downtime {
+  id: string;
+  name: string;
+  enabled: boolean;
+  /** 0 = Monday … 6 = Sunday. */
+  days: number[];
+  /** Minutes after local midnight. end ≤ start wraps past midnight. */
+  startMin: number;
+  endMin: number;
+  bypass: DowntimeBypass;
+}
+
+export interface PauseState {
+  /** Epoch ms; null = until resumed. */
+  until: number | null;
+  letUrgent: boolean;
+  setAt: number;
+}
+
+export interface QuietState {
+  pause: PauseState | null;
+  activeDowntime: Downtime | null;
+  nextDowntime: { downtime: Downtime; startsAt: number } | null;
+  /** Notifications held since the current quiet period began (0 when not quiet). */
+  heldSinceQuiet: number;
+}
+
+export interface RuleScope {
+  scopeKind: RuleScopeKind;
+  scopeValue: string;
+  label: string;
+}
+
+export interface EffectiveRule {
+  level: NotifyLevel;
+  snoozeUntil: number | null;
+  ruleId: string | null;
+  scopeKind: RuleScopeKind;
+}
+
+export interface NotifySettings {
+  defaultLevel: NotifyLevel;
+  pause: PauseState | null;
+  downtimes: Downtime[];
+  rules: NotifyRule[];
+}
