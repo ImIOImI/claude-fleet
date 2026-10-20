@@ -31,7 +31,7 @@ import {
   resolveWaitingByWorkspace,
   type PeerKind
 } from './sessionStatusMerge';
-import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget, UiPrefs, InboxCounts, InboxConfig } from '../../preload';
+import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget, UiPrefs, InboxCounts, InboxConfig, QuietState } from '../../preload';
 import { InboxChip } from './components/InboxChip';
 import { InboxView } from './components/InboxView';
 import { isWarm } from './fleetTemperature';
@@ -219,12 +219,23 @@ export function App() {
     void window.api.inbox.counts().then(setInboxCounts);
     return window.api.inbox.onChanged(setInboxCounts);
   }, []);
+  // Notifications (#407 Phase 2): quiet state for the inbox header, and the
+  // todo to focus when a toast / OS notification is opened.
+  const [quiet, setQuiet] = useState<QuietState | null>(null);
+  const [inboxFocus, setInboxFocus] = useState<{ todoId: string; nonce: number } | null>(null);
+  useEffect(() => {
+    void window.api.notifications.quietState().then(setQuiet);
+    return window.api.notifications.onChanged(setQuiet);
+  }, []);
+  useEffect(() => {
+    void window.api.notifications.setViewing({ workspaceId: selectedId, inboxOpen });
+  }, [selectedId, inboxOpen]);
   const workspaceNames = useMemo(
     () => Object.fromEntries(workspaces.map((w) => [w.id, w.name])),
     [workspaces]
   );
   const [createOpen, setCreateOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<null | 'settings' | 'endpoints'>(null);
+  const [settingsTab, setSettingsTab] = useState<null | 'settings' | 'endpoints' | 'notifications'>(null);
   const [browseOpen, setBrowseOpen] = useState(false);
   // Observability rail collapse, persisted across restarts (pure UI pref —
   // localStorage, not the main-side config.json).
@@ -400,6 +411,43 @@ export function App() {
       setTimeout(() => dispatchToast({ type: 'dismiss', id }), ttlMs);
     },
     []
+  );
+
+  // Notifications (#407 Phase 2): in-app toast when the window is focused, and
+  // click-through from either a toast or an OS notification.
+  const openNotificationTarget = useCallback((t: { todoId: string | null; workspaceId: string | null }) => {
+    if (t.todoId) {
+      setInboxOpen(true);
+      setInboxFocus({ todoId: t.todoId, nonce: Date.now() });
+    } else if (t.workspaceId) {
+      setInboxOpen(false);
+      setSelectedId(t.workspaceId);
+    } else {
+      setInboxOpen(true);
+    }
+  }, []);
+  useEffect(() => window.api.notifications.onOpen(openNotificationTarget), [openNotificationTarget]);
+  useEffect(
+    () =>
+      window.api.notifications.onToast((n) => {
+        const id = ++toastIdRef.current;
+        const urgent = n.priority === 'urgent';
+        dispatchToast({
+          type: 'push',
+          toast: makeToast(id, {
+            kind: 'info',
+            message: n.title,
+            eyebrow: n.kind === 'input-wait' ? 'needs input' : n.kind === 'digest' ? 'notifications resumed' : n.priority,
+            placement: 'global',
+            sticky: urgent,
+            dismissible: true,
+            key: n.dedupeKey ?? undefined,
+            action: { label: 'Open', onClick: () => { dispatchToast({ type: 'dismiss', id }); openNotificationTarget(n); } }
+          })
+        });
+        if (!urgent) setTimeout(() => dispatchToast({ type: 'dismiss', id }), 6000);
+      }),
+    [openNotificationTarget]
   );
 
   const handleResumeSession = useCallback(
@@ -1390,6 +1438,10 @@ export function App() {
               <InboxView
                 names={workspaceNames}
                 openCount={inboxCounts.open}
+                quiet={quiet}
+                focusTodoId={inboxFocus?.todoId ?? null}
+                focusNonce={inboxFocus?.nonce}
+                onOpenSchedules={() => setSettingsTab('notifications')}
                 onJump={(id) => {
                   setInboxOpen(false);
                   setSelectedId(id);
@@ -1571,6 +1623,7 @@ export function App() {
       {settingsTab && (
         <SettingsModal
           initialTab={settingsTab}
+          names={workspaceNames}
           onClose={() => setSettingsTab(null)}
           onSaved={(cfg) => {
             setSharedDir(cfg.sharedDir);

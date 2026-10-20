@@ -2,6 +2,8 @@
 import { useEffect, useState } from 'react';
 import type { Todo, TodoEvent, TodoPriority } from '../../../preload';
 import { eventLabel, relativeAgo, sourceLabel } from '../inboxView';
+import { BellPopover } from './BellPopover';
+import { BellIcon } from './NotifyControl';
 
 interface Props {
   todoId: string;
@@ -13,6 +15,7 @@ interface Props {
 export function TodoDetail({ todoId, names, version, onJump }: Props) {
   const [data, setData] = useState<{ todo: Todo; events: TodoEvent[] } | null>(null);
   const [tagDraft, setTagDraft] = useState('');
+  const [bellOpen, setBellOpen] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -41,6 +44,18 @@ export function TodoDetail({ todoId, names, version, onJump }: Props) {
           ) : (
             <button className="btn btn-sm" onClick={() => update({ status: 'open' })}>Reopen</button>
           )}
+          <span className="ib-bell-wrap">
+            <button className="btn btn-sm ib-bell-btn" onClick={() => setBellOpen((o) => !o)} aria-expanded={bellOpen}>
+              <BellIcon /> Notifications
+            </button>
+            {bellOpen && (
+              <BellPopover
+                item={{ source: todo.source, dedupeKey: todo.dedupeKey, tags: todo.tags, priority: todo.priority }}
+                names={names}
+                onClose={() => setBellOpen(false)}
+              />
+            )}
+          </span>
           <span className="ib-spacer" />
           <select
             className="ib-select"
