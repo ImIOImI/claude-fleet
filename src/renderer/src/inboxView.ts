@@ -17,7 +17,7 @@ export function matchesSearch(t: Todo, q: string): boolean {
 export function sourceLabel(s: TodoSource, names: Record<string, string>): string {
   if (s.kind === 'user') return 'You';
   if (s.kind === 'workspace') return (s.id && names[s.id]) || 'deleted workspace';
-  return 'automation';
+  return (s.id && names[s.id]) || 'automation';
 }
 
 export function chipSubline(c: InboxCounts): string {

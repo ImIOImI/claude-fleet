@@ -7,6 +7,7 @@ import { groupByPriority, matchesSearch, relativeAgo, sourceLabel } from '../inb
 import { mutedHint, quietLabel } from '../notifyView';
 import { TodoDetail } from './TodoDetail';
 import { ActivityView } from './ActivityView';
+import { AutomationsView } from './AutomationsView';
 import { BellPopover } from './BellPopover';
 import { BellIcon, BellOffIcon, NotifyControl } from './NotifyControl';
 
@@ -19,12 +20,14 @@ interface Props {
   focusNonce?: number;
   onJump: (workspaceId: string) => void;
   onOpenSchedules: () => void;
+  /** Enabled automations, for the tab count. */
+  automationCount?: number;
 }
 
 const TABS: Array<[TodoStatus | 'all', string]> = [['open', 'Open'], ['done', 'Done'], ['dismissed', 'Dismissed'], ['all', 'All']];
 
-export function InboxView({ names, openCount, quiet, focusTodoId, focusNonce, onJump, onOpenSchedules }: Props) {
-  const [section, setSection] = useState<'todos' | 'activity'>('todos');
+export function InboxView({ names, openCount, quiet, focusTodoId, focusNonce, onJump, onOpenSchedules, automationCount = 0 }: Props) {
+  const [section, setSection] = useState<'todos' | 'automations' | 'activity'>('todos');
   const [status, setStatus] = useState<TodoStatus | 'all'>('open');
   const [todos, setTodos] = useState<Todo[]>([]);
   const [effective, setEffective] = useState<Record<string, EffectiveRule>>({});
@@ -80,6 +83,10 @@ export function InboxView({ names, openCount, quiet, focusTodoId, focusNonce, on
           <span className="session-tab-name">Todos</span>
           <span className="ib-count">{openCount}</span>
         </div>
+        <div role="tab" aria-selected={section === 'automations'} className={`session-tab${section === 'automations' ? ' active' : ''}`} onClick={() => setSection('automations')}>
+          <span className="session-tab-name">Automations</span>
+          <span className="ib-count">{automationCount}</span>
+        </div>
         <div role="tab" aria-selected={section === 'activity'} className={`session-tab${section === 'activity' ? ' active' : ''}`} onClick={() => setSection('activity')}>
           <span className="session-tab-name">Activity</span>
           {quiet && quiet.heldSinceQuiet > 0 && <span className="ib-count wait">{quiet.heldSinceQuiet}</span>}
@@ -104,7 +111,9 @@ export function InboxView({ names, openCount, quiet, focusTodoId, focusNonce, on
           )}
         </div>
       )}
-      {section === 'activity' ? (
+      {section === 'automations' ? (
+        <AutomationsView names={names} />
+      ) : section === 'activity' ? (
         <ActivityView
           names={names}
           onOpenTodo={(id) => {

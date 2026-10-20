@@ -281,4 +281,6 @@ export interface Automation {
   nextFireAt: number | null;
   lastRun: RunRow | null;
   weekStats: { runs: number; nothingToDo: number; failed: number };
+  /** One plain-language line per trigger ("every 30 min · 08–18 · weekdays", "by hand"). */
+  triggerSummaries: string[];
 }

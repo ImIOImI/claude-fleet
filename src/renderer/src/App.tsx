@@ -230,9 +230,20 @@ export function App() {
   useEffect(() => {
     void window.api.notifications.setViewing({ workspaceId: selectedId, inboxOpen });
   }, [selectedId, inboxOpen]);
+  // Automation names (#407 Phase 3) join workspace names so automation-sourced
+  // todos and notifications read "log-watch", not "automation".
+  const [automationList, setAutomationList] = useState<Array<{ id: string; name: string; enabled: boolean }>>([]);
+  useEffect(() => {
+    const load = () => void window.api.automations.list().then((l) => setAutomationList(l.map((a) => ({ id: a.id, name: a.name, enabled: a.enabled }))));
+    load();
+    return window.api.automations.onChanged(load);
+  }, []);
   const workspaceNames = useMemo(
-    () => Object.fromEntries(workspaces.map((w) => [w.id, w.name])),
-    [workspaces]
+    () => ({
+      ...Object.fromEntries(automationList.map((a) => [a.id, a.name])),
+      ...Object.fromEntries(workspaces.map((w) => [w.id, w.name]))
+    }),
+    [workspaces, automationList]
   );
   const [createOpen, setCreateOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<null | 'settings' | 'endpoints' | 'notifications'>(null);
@@ -1440,6 +1451,7 @@ export function App() {
                 names={workspaceNames}
                 openCount={inboxCounts.open}
                 quiet={quiet}
+                automationCount={automationList.filter((a) => a.enabled).length}
                 focusTodoId={inboxFocus?.todoId ?? null}
                 focusNonce={inboxFocus?.nonce}
                 onOpenSchedules={() => setSettingsTab('notifications')}

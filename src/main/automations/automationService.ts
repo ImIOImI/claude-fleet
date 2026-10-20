@@ -8,6 +8,7 @@ import { AutomationStore, type AutomationRecord } from './automationStore.js';
 import { definitionToYaml, parseDefinitionText, validateArgs, validateDefinition, type Validation } from './definition.js';
 import { executeRun, type RunnerDeps, type RunOutcome } from './runner.js';
 import { dueSchedule, nextFireAt } from './scheduler.js';
+import { describeCron } from './cron.js';
 
 export interface AutomationDeps extends Omit<RunnerDeps, 'store'> {
   store: AutomationStore;
@@ -46,7 +47,13 @@ export function createAutomationService(deps: AutomationDeps) {
       id: a.id, name: a.name, description: a.definition.description ?? null, enabled: a.enabled, version: a.version,
       definition: a.definition, tags: store.tags(a.id), createdBy: a.createdBy, createdAt: a.createdAt, updatedAt: a.updatedAt,
       lastScheduledAt: a.lastScheduledAt, nextFireAt: nextFireAt(a, now), lastRun: store.runs(a.id, 1)[0] ?? null,
-      weekStats: store.weekStats(a.id, now)
+      weekStats: store.weekStats(a.id, now),
+      triggerSummaries: a.definition.triggers.map((t) =>
+        'schedule' in t
+          ? `${describeCron(t.schedule.cron)}${t.schedule.tz ? ` (${t.schedule.tz})` : ''}`
+          : t.manual.allowFrom?.length
+            ? `by hand · also ${t.manual.allowFrom.map((w) => deps.workspaceName(w)).join(', ')}`
+            : 'by hand')
     };
   }
 

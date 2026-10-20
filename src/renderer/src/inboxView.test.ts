@@ -25,6 +25,7 @@ describe('inboxView helpers', () => {
     expect(sourceLabel({ kind: 'workspace', id: 'W1' }, { W1: 'ops-oncall' })).toBe('ops-oncall');
     expect(sourceLabel({ kind: 'workspace', id: 'W9' }, {})).toBe('deleted workspace');
     expect(sourceLabel({ kind: 'automation', id: 'A1' }, {})).toBe('automation');
+    expect(sourceLabel({ kind: 'automation', id: 'A1' }, { A1: 'log-watch' })).toBe('log-watch');
   });
   it('builds the chip sub-line and dot', () => {
     expect(chipSubline({ open: 0, urgent: 0, high: 0 })).toBe('nothing open');
