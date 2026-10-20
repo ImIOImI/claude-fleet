@@ -96,7 +96,7 @@ describe('InboxStore.list / counts', () => {
     expect(store.list({ tags: ['ops'] }).map((t) => t.title)).toEqual(['low']);
     expect(store.list({ visibleTo: 'W1' }).map((t) => t.title).sort()).toEqual(['low', 'other', 'urgent']);
     expect(store.list({ limit: 1 })).toHaveLength(1);
-    expect(store.counts()).toEqual({ open: 4, urgent: 1, high: 0 });
+    expect(store.counts()).toEqual({ open: 4, urgent: 1, high: 0, approvals: 0 });
   });
 });
 
@@ -110,7 +110,7 @@ describe('InboxStore.open', () => {
     expect(store.list().map((t) => t.title)).toEqual(['persist me']);
     const raw = new Database(path.join(dir, 'inbox.db'), { readonly: true });
     expect(raw.pragma('user_version', { simple: true })).toBe(INBOX_SCHEMA_VERSION);
-    expect(INBOX_SCHEMA_VERSION).toBe(3);
+    expect(INBOX_SCHEMA_VERSION).toBe(4);
     expect(raw.pragma('journal_mode', { simple: true })).toBe('wal');
     raw.close();
   });

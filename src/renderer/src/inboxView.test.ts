@@ -34,6 +34,9 @@ describe('inboxView helpers', () => {
     expect(chipDot({ open: 7, urgent: 1, high: 0 })).toBe('urgent');
     expect(chipDot({ open: 2, urgent: 0, high: 0 })).toBe('open');
     expect(chipDot({ open: 0, urgent: 0, high: 0 })).toBe('none');
+    expect(chipDot({ open: 2, urgent: 0, high: 0, approvals: 1 })).toBe('wait');
+    expect(chipSubline({ open: 2, urgent: 0, high: 0, approvals: 1 })).toBe('2 open · 1 to approve');
+    expect(chipSubline({ open: 0, urgent: 0, high: 0, approvals: 3 })).toBe('3 to approve');
   });
   it('formats relative time', () => {
     expect(relativeAgo(1000, 1000 + 30_000)).toBe('just now');

@@ -2,13 +2,14 @@ import { contextBridge, ipcRenderer, IpcRendererEvent, webUtils } from 'electron
 import type {
   Todo, TodoEvent, TodoFilter, InboxCounts, PostTodoInput, UpdateTodoPatch, NotificationRow, NotifySettings, QuietState,
   RuleScope, EffectiveRule, NotifyRule, NotifyLevel, RuleScopeKind, PauseState, Downtime, TodoSource, TodoPriority,
-  Automation, RunRow
+  Automation, RunRow, Proposal
 } from './inboxTypes';
 export type {
   Todo, TodoEvent, TodoEventKind, TodoFilter, TodoSource, TodoStatus, TodoPriority, SourceKind,
   InboxCounts, InboxConfig, PostTodoInput, UpdateTodoPatch, NotifyLevel, NotificationKind, RuleScopeKind, DowntimeBypass,
   NotificationRow, NotifyRule, Downtime, PauseState, QuietState, RuleScope, EffectiveRule, NotifySettings,
-  Automation, AutomationDef, ParamDef, ParamType, ParamValue, RunRow, RunStatus, StepRunRow, TriggerDef, StepDef
+  Automation, AutomationDef, ParamDef, ParamType, ParamValue, RunRow, RunStatus, StepRunRow, TriggerDef, StepDef,
+  Proposal, ProposalItem, ProposalKind, ProposalStatus, ItemDecision
 } from './inboxTypes';
 
 /** Outcome of a `pty:resize`. Lives here because preload is the IPC contract
@@ -370,6 +371,19 @@ const api = {
       const h = (): void => cb();
       ipcRenderer.on('automations:changed', h);
       return () => ipcRenderer.removeListener('automations:changed', h);
+    }
+  },
+  proposals: {
+    list: (): Promise<Proposal[]> => ipcRenderer.invoke('proposals:list'),
+    yaml: (id: string, index: number): Promise<string | null> => ipcRenderer.invoke('proposals:yaml', id, index),
+    approve: (id: string, opts?: { accept?: number[]; editedYaml?: string; editedIndex?: number }): Promise<Proposal> =>
+      ipcRenderer.invoke('proposals:approve', id, opts),
+    reject: (id: string, note: string | null): Promise<Proposal> => ipcRenderer.invoke('proposals:reject', id, note),
+    revert: (id: string, index: number): Promise<Proposal> => ipcRenderer.invoke('proposals:revert', id, index),
+    onChanged: (cb: () => void): (() => void) => {
+      const h = (): void => cb();
+      ipcRenderer.on('proposals:changed', h);
+      return () => ipcRenderer.removeListener('proposals:changed', h);
     }
   },
   presence: {

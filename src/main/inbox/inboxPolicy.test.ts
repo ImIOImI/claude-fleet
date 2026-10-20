@@ -44,8 +44,8 @@ describe('visibility and update rights', () => {
 
 describe('sanitizeInboxConfig', () => {
   it('keeps valid fields, drops junk, returns undefined when empty', () => {
-    expect(sanitizeInboxConfig({ canPost: false, maxPostsPerHour: 10, canReadAll: true, x: 1 }))
-      .toEqual({ canPost: false, maxPostsPerHour: 10, canReadAll: true });
+    expect(sanitizeInboxConfig({ canPost: false, maxPostsPerHour: 10, canReadAll: true, trusted: true, x: 1 }))
+      .toEqual({ canPost: false, maxPostsPerHour: 10, canReadAll: true, trusted: true });
     expect(sanitizeInboxConfig({ canPost: 'no', maxPostsPerHour: -3 })).toBeUndefined();
     expect(sanitizeInboxConfig({ maxPostsPerHour: 99999 })).toEqual({ maxPostsPerHour: 10000 });
     expect(sanitizeInboxConfig(null)).toBeUndefined();

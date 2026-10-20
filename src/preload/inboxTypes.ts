@@ -91,6 +91,8 @@ export interface InboxCounts {
   open: number;
   urgent: number;
   high: number;
+  /** Pending automation proposals (#407 Phase 5). */
+  approvals?: number;
 }
 
 /** Host-private per-workspace inbox permissions (workspace manifest `inbox`). */
@@ -101,13 +103,15 @@ export interface InboxConfig {
   maxPostsPerHour?: number;
   /** Default false. */
   canReadAll?: boolean;
+  /** Phase 5: auto-apply this workspace's low-risk automation edits. Container workspaces only. Default false. */
+  trusted?: boolean;
 }
 
 // --- Notifications (#407 Phase 2) -------------------------------------------
 
 /** Rule / default level: all · high and up · urgent only · off. */
 export type NotifyLevel = 'all' | 'high' | 'urgent' | 'off';
-export type NotificationKind = 'post' | 'todo' | 'input-wait' | 'post-rejected' | 'digest' | 'test' | 'run-failed';
+export type NotificationKind = 'post' | 'todo' | 'input-wait' | 'post-rejected' | 'digest' | 'test' | 'run-failed' | 'proposal';
 export type RuleScopeKind = 'key' | 'source' | 'tag' | 'global';
 export type DowntimeBypass = 'none' | 'urgent' | 'urgent+input';
 
@@ -291,4 +295,37 @@ export interface Automation {
   weekStats: { runs: number; nothingToDo: number; failed: number };
   /** One plain-language line per trigger ("every 30 min · 08–18 · weekdays", "by hand"). */
   triggerSummaries: string[];
+}
+
+// --- Proposals (#407 Phase 5) ------------------------------------------------
+
+export type ProposalKind = 'new' | 'change' | 'batch';
+export type ProposalStatus = 'pending' | 'approved' | 'partial' | 'rejected' | 'superseded' | 'auto-approved';
+export type ItemDecision = 'pending' | 'accepted' | 'declined' | 'auto-applied' | 'reverted';
+
+export interface ProposalItem {
+  automationId: string | null;
+  name: string;
+  baseVersion: number | null;
+  before: AutomationDef | null;
+  after: AutomationDef;
+  /** Low-risk changes a trusted workspace may auto-apply. */
+  lowRisk: boolean;
+  /** Why it needs you ("adds a fresh session in ops-oncall", …). Empty when low-risk. */
+  reasons: string[];
+  /** What it will be able to do, for the card ("prompts ops-oncall (fresh)", "runs every 15 min"…). */
+  flags: string[];
+  decision: ItemDecision;
+}
+
+export interface Proposal {
+  id: string;
+  kind: ProposalKind;
+  proposer: TodoSource;
+  rationale: string | null;
+  status: ProposalStatus;
+  items: ProposalItem[];
+  note: string | null;
+  createdAt: number;
+  decidedAt: number | null;
 }

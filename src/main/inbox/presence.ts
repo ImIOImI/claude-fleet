@@ -67,7 +67,7 @@ export function attachKeepRunning(win: BrowserWindow, hasTray: () => boolean): v
   });
 }
 
-export function startPresence(inbox: InboxStore, notify: NotifyService): { hasTray: () => boolean; stop: () => void } {
+export function startPresence(inbox: InboxStore, notify: NotifyService, approvals: () => number = () => 0): { hasTray: () => boolean; stop: () => void } {
   const notifyStore = new NotifyStore(inbox.db);
   let tray: Tray | null = null;
   try {
@@ -88,7 +88,7 @@ export function startPresence(inbox: InboxStore, notify: NotifyService): { hasTr
   const update = () => {
     try {
       const counts = inbox.counts();
-      const n = needsYou(counts.urgent, notify.waitingWorkspaces().length);
+      const n = needsYou(counts.urgent, notify.waitingWorkspaces().length, approvals());
       const q = notify.quietState();
       const quietText = q.pause ? (q.pause.until === null ? 'notifications paused' : `paused until ${new Date(q.pause.until).toTimeString().slice(0, 5)}`) : q.activeDowntime ? `${q.activeDowntime.name} downtime` : null;
       const key = JSON.stringify([n, counts, quietText]);

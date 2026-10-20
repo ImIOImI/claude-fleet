@@ -145,6 +145,9 @@ let inboxHandlers: InboxHandlers | null = null;
 export interface AutomationHandlers {
   list(callerId: string): Promise<unknown>;
   run(callerId: string, args: Record<string, unknown>): Promise<unknown>;
+  propose(callerId: string, args: Record<string, unknown>): Promise<unknown>;
+  proposeChange(callerId: string, args: Record<string, unknown>): Promise<unknown>;
+  getProposal(callerId: string, args: Record<string, unknown>): Promise<unknown>;
 }
 let automationHandlers: AutomationHandlers | null = null;
 export function setAutomationHandlers(h: AutomationHandlers | null): void {
@@ -1492,6 +1495,45 @@ export const TOOLS: Tool[] = [
     run: (_db, a, ctx) => {
       if (!automationHandlers) throw new Error('automations are unavailable');
       return automationHandlers.run(ctx.callerId, a);
+    }
+  },
+  {
+    name: 'propose_automation',
+    description:
+      'Propose a NEW claude-fleet automation for the user to approve (nothing runs until they do). Args: definition ' +
+      '(required: the automation YAML — name, triggers [schedule|manual|event], params, steps [prompt: {workspace, mode: live|fresh, ' +
+      'message, …}]), rationale (why it helps, shown to the user). Returns {id, status, items[{name, decision, reasons}]}.',
+    inputSchema: { type: 'object', properties: { definition: { type: 'string' }, rationale: { type: 'string' } }, required: ['definition'] },
+    run: (_db, a, ctx) => {
+      if (!automationHandlers) throw new Error('automations are unavailable');
+      return automationHandlers.propose(ctx.callerId, a);
+    }
+  },
+  {
+    name: 'propose_automation_change',
+    description:
+      'Propose a change to an existing automation: {id (id or name), definition (the full new YAML), rationale}, or several at ' +
+      'once: {batch: [{id, definition}], rationale}. The user approves each item; if this workspace is trusted, low-risk edits ' +
+      '(wording, tags, slower schedules, params) apply at once and stay revertible. Returns {id, status, items}.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' }, definition: { type: 'string' }, rationale: { type: 'string' },
+        batch: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, definition: { type: 'string' } } } }
+      }
+    },
+    run: (_db, a, ctx) => {
+      if (!automationHandlers) throw new Error('automations are unavailable');
+      return automationHandlers.proposeChange(ctx.callerId, a);
+    }
+  },
+  {
+    name: 'get_proposal',
+    description: 'The status of a proposal THIS workspace made: {id} → {status pending|approved|partial|rejected|superseded|auto-approved, note (the user\'s reason when rejected), items}.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+    run: (_db, a, ctx) => {
+      if (!automationHandlers) throw new Error('automations are unavailable');
+      return automationHandlers.getProposal(ctx.callerId, a);
     }
   },
   {

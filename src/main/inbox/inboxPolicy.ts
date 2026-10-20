@@ -48,5 +48,6 @@ export function sanitizeInboxConfig(v: unknown): InboxConfig | undefined {
     out.maxPostsPerHour = Math.min(Math.floor(o.maxPostsPerHour), MAX_CAP);
   }
   if (typeof o.canReadAll === 'boolean') out.canReadAll = o.canReadAll;
+  if (typeof o.trusted === 'boolean') out.trusted = o.trusted;
   return Object.keys(out).length ? out : undefined;
 }

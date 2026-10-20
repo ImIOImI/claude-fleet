@@ -198,3 +198,84 @@ steps:
     await app.close();
   }
 });
+
+test('Proposals over MCP: approve in the UI, trusted auto-apply + revert, reject note (#407)', async () => {
+  const userDataDir = mkdtempSync(path.join(tmpdir(), 'claude-fleet-proposals-'));
+  const P = '01PROPTESTWS000000000000PP', T = '01PROPTESTWS000000000000TT', X = '01PROPTESTWS000000000000XX';
+  const seed = (id: string, name: string, extra: Record<string, unknown> = {}) => {
+    mkdirSync(path.join(userDataDir, 'state', id), { recursive: true });
+    writeFileSync(path.join(userDataDir, 'state', id, 'workspace.json'), JSON.stringify({
+      id, name, labels: [], workspaceRoot: '/tmp/fleet-prop', workspaceSubdir: '', kind: 'container',
+      image: 'mock', authMode: 'oauth', env: { plain: {}, secretKeys: [] }, createdAt: Date.now(), lastUsedAt: Date.now(), ...extra
+    }));
+  };
+  seed(P, 'prop-author');
+  seed(T, 'prop-trusted', { inbox: { trusted: true } });
+  seed(X, 'prop-target');
+  const app = await electron.launch({
+    args: [REPO_ROOT, `--user-data-dir=${userDataDir}`],
+    cwd: REPO_ROOT,
+    env: Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'CLAUDE_FLEET_MOCK')) as Record<string, string>
+  });
+  const window = await app.firstWindow();
+  await window.waitForLoadState('domcontentloaded');
+  const p = await connectMcp(P, userDataDir);
+  const t = await connectMcp(T, userDataDir);
+  const call = (c: RpcClient, name: string, args: Record<string, unknown>) => c.call('tools/call', { name, arguments: args }).then(text);
+  const DEF = (cron: string, extra = '') => `name: nightly-check
+triggers:
+  - schedule: { cron: "${cron}" }
+steps:
+  - id: check
+    prompt: { workspace: prop-target, mode: live, message: "check the nightly job" }
+${extra}`;
+  try {
+    for (const c of [p, t]) await c.call('initialize', { protocolVersion: '2024-11-05' });
+    const names = ((await p.call('tools/list')).result as { tools: Array<{ name: string }> }).tools.map((x) => x.name);
+    expect(names).toEqual(expect.arrayContaining(['propose_automation', 'propose_automation_change', 'get_proposal']));
+
+    // 1) A new automation, approved in the UI.
+    const r1 = (await call(p, 'propose_automation', { definition: DEF('0 6 * * *'), rationale: 'Catch failed nightly jobs early' })).value as { id: string; status: string };
+    expect(r1.status).toBe('pending');
+    await expect(window.locator('.inbox-chip .ws-chip-sub')).toContainText('1 to approve');
+    await window.locator('.inbox-chip .ws-chip').click();
+    const view = window.locator('.inbox-view');
+    await view.getByRole('tab', { name: /^Activity/ }).click();
+    const card = view.locator('.proposal', { hasText: 'nightly-check' });
+    await expect(card).toContainText('Proposal · new automation');
+    await expect(card).toContainText('prop-author');
+    await expect(card).toContainText('Catch failed nightly jobs early');
+    await expect(card.locator('.flag')).toContainText('new automation');
+    await expect(card.locator('.pr-caps')).toContainText('prompts prop-target (live session)');
+    await card.getByRole('button', { name: 'Approve', exact: true }).click();
+    await expect(card).toBeHidden(); // decided proposals leave Everything (they stay under Needs approval › Decided)
+    await expect.poll(async () => ((await call(p, 'get_proposal', { id: r1.id })).value as { status: string }).status).toBe('approved');
+    const autos = await callTestIpc<Array<{ name: string; createdBy: { kind: string; id: string } }>>(app, 'automations:list', []);
+    expect(autos).toEqual([expect.objectContaining({ name: 'nightly-check', createdBy: { kind: 'workspace', id: P } })]);
+
+    // 2) A trusted workspace's low-risk edit auto-applies, and can be reverted.
+    const r2 = (await call(t, 'propose_automation_change', { id: 'nightly-check', definition: DEF('0 7 * * *', 'tags: [ci]\n') })).value as { id: string; status: string; items: Array<{ decision: string }> };
+    expect(r2.status).toBe('auto-approved');
+    expect(r2.items[0].decision).toBe('auto-applied');
+    let after = await callTestIpc<Array<{ version: number; tags: string[] }>>(app, 'automations:list', []);
+    expect(after[0]).toMatchObject({ version: 2, tags: ['ci'] });
+    await callTestIpc(app, 'proposals:revert', [r2.id, 0]);
+    after = await callTestIpc<Array<{ version: number; tags: string[] }>>(app, 'automations:list', []);
+    expect(after[0]).toMatchObject({ version: 3, tags: [] });
+
+    // 3) The same workspace's risky edit waits; rejecting with a note reaches the workspace.
+    const r3 = (await call(t, 'propose_automation_change', { id: 'nightly-check', definition: DEF('*/2 * * * *') })).value as { id: string; status: string; items: Array<{ reasons: string[] }> };
+    expect(r3.status).toBe('pending');
+    expect(r3.items[0].reasons.join(' ')).toMatch(/faster than every 5 min/);
+    await view.getByRole('tab', { name: /^Needs approval/ }).click();
+    const card3 = view.locator('.proposal', { hasText: 'prop-trusted' }).filter({ has: window.locator('.pr-kind', { hasText: 'Proposal · change' }) }).first();
+    await card3.getByRole('button', { name: 'Reject…' }).click();
+    await card3.getByLabel('Note for the workspace').fill('every 2 minutes is too often');
+    await card3.getByRole('button', { name: 'Reject', exact: true }).click();
+    await expect.poll(async () => (await call(t, 'get_proposal', { id: r3.id })).value).toMatchObject({ status: 'rejected', note: 'every 2 minutes is too often' });
+  } finally {
+    p.close();
+    t.close();
+    await app.close();
+  }
+});
