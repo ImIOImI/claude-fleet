@@ -1200,6 +1200,7 @@ export function App() {
       resources: submit.resources,
       mirror: submit.mirror,
       accessibility: submit.accessibility,
+      inbox: submit.inbox,
       createdAt: before.createdAt,
       lastUsedAt: Date.now()
     });
