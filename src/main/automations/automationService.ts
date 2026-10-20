@@ -292,22 +292,46 @@ export function createAutomationService(deps: AutomationDeps) {
 
     mcp: {
       /** Automations a workspace may see: ones it can run, or whose steps prompt it. */
-      list(callerId: string): Array<Pick<Automation, 'id' | 'name' | 'description' | 'enabled' | 'nextFireAt'> & { canRun: boolean; params: AutomationDef['params'] }> {
+      list(callerId: string, privileged = false): Array<Pick<Automation, 'id' | 'name' | 'description' | 'enabled' | 'nextFireAt'> & { canRun: boolean; params: AutomationDef['params'] }> {
         return store.list()
-          .filter((a) => canRun(a, callerId) || a.definition.steps.some((s) => s.prompt.workspace === callerId))
-          .map((a) => ({ id: a.id, name: a.name, description: a.definition.description ?? null, enabled: a.enabled, nextFireAt: nextFireAt(a, deps.now()), canRun: canRun(a, callerId), params: a.definition.params ?? [] }));
+          .filter((a) => privileged || canRun(a, callerId) || a.definition.steps.some((s) => s.prompt.workspace === callerId))
+          .map((a) => ({ id: a.id, name: a.name, description: a.definition.description ?? null, enabled: a.enabled, nextFireAt: nextFireAt(a, deps.now()), canRun: privileged || canRun(a, callerId), params: a.definition.params ?? [] }));
       },
-      run(callerId: string, args: Record<string, unknown>): { runId: string; status: string } {
+      /** One automation's YAML + recent runs, for workspaces that may see it (all for the automations workspace). */
+      get(callerId: string, args: Record<string, unknown>, privileged = false) {
+        const key = typeof args.id === 'string' ? args.id : '';
+        const a = store.get(key) ?? store.byName(key);
+        if (!a || !(privileged || visible(a, callerId))) throw new Error(`automation ${key || '(missing id)'} not found`);
+        return { ...view(a), yaml: definitionToYaml(a.definition), runs: store.runs(a.id, 10) };
+      },
+      /** Recent runs across the automations a workspace may see, optionally filtered. */
+      listRuns(callerId: string, args: Record<string, unknown>, privileged = false) {
+        const limit = Math.min(Math.max(1, Number(args.limit) || 20), 100);
+        const key = typeof args.automation === 'string' ? args.automation : null;
+        const status = typeof args.status === 'string' ? args.status : null;
+        const since = typeof args.since === 'number' ? args.since : 0;
+        const pool = store.list().filter((a) => (privileged || visible(a, callerId)) && (!key || a.id === key || a.name === key));
+        return pool
+          .flatMap((a) => store.runs(a.id, 100).map((r) => ({ ...r, automation: a.name })))
+          .filter((r) => (!status || r.status === status) && r.startedAt >= since)
+          .sort((x, y) => y.startedAt - x.startedAt)
+          .slice(0, limit);
+      },
+      run(callerId: string, args: Record<string, unknown>, privileged = false): { runId: string; status: string } {
         const id = typeof args.id === 'string' ? args.id : '';
         const a = store.get(id) ?? store.byName(id);
         if (!a) throw new Error(`automation ${id || '(missing id)'} not found`);
-        if (!canRun(a, callerId)) throw new Error(`not permitted: ${a.name} doesn't list this workspace in manual.allowFrom`);
+        if (!privileged && !canRun(a, callerId)) throw new Error(`not permitted: ${a.name} doesn't list this workspace in manual.allowFrom`);
         if (!a.enabled) throw new Error(`${a.name} is disabled`);
         const r = start(a.id, { kind: 'manual', by: { kind: 'workspace', id: callerId }, args: (args.args as Record<string, unknown>) ?? {}, callerSupplied: true });
         return { runId: r.id, status: r.status };
       }
     }
   };
+
+  function visible(a: AutomationRecord, callerId: string): boolean {
+    return canRun(a, callerId) || a.definition.steps.some((s) => s.prompt.workspace === callerId);
+  }
 
   function canRun(a: AutomationRecord, callerId: string): boolean {
     return a.definition.triggers.some((t) => 'manual' in t && (t.manual.allowFrom ?? []).includes(callerId));

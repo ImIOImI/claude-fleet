@@ -3636,3 +3636,15 @@ button.switch { padding: 0; cursor: pointer; }
 .pr-reject { display: grid; gap: 8px; }
 .pr-reject textarea { min-height: 60px; background: var(--bg-canvas); color: var(--ink); border: 1px solid var(--rule-strong); border-radius: var(--r-md); padding: 8px 10px; font: inherit; font-size: 12.5px; }
 .ib-scope { grid-template-columns: repeat(4, 1fr); }
+
+/* ----- automations workspace (#407 Phase 5b) ----------------------------- */
+.inbox-view.header-only { bottom: auto; height: 42px; }
+.main-body.inbox-sessions > .terminal-pane { top: 42px; }
+.ib-sess-empty { display: grid; gap: 10px; justify-items: center; }
+.aw-banner { display: grid; gap: 8px; margin: 10px 12px 0; padding: 10px 12px; border: 1px solid color-mix(in oklch, var(--wait), transparent 55%); border-radius: var(--r-md); background: color-mix(in oklch, var(--wait), transparent 92%); font-size: 12px; }
+.aw-banner.set { display: flex; align-items: center; gap: 6px; border-color: var(--rule); background: var(--bg-1); }
+.aw-text { display: grid; gap: 3px; }
+.aw-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.aw-actions select { background: var(--bg-canvas); color: var(--ink-1); border: 1px solid var(--rule); border-radius: var(--r-sm); padding: 4px 6px; font: inherit; font-size: 12px; }
+.ib-tab-sep { width: 1px; margin: 9px 4px; background: var(--rule-strong); flex: none; }
+.ib-sess .ib-dim { font-size: 10px; }

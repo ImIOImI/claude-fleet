@@ -11,6 +11,8 @@ import { AutomationEditor } from './AutomationEditor';
 interface Props {
   proposal: Proposal;
   names: Record<string, string>;
+  canDiscuss?: boolean;
+  onDiscussed?: () => void;
 }
 
 const KIND = { new: 'Proposal · new automation', change: 'Proposal · change', batch: 'Proposal' } as const;
@@ -31,7 +33,7 @@ function Diff({ item }: { item: ProposalItem }) {
   );
 }
 
-export function ProposalCard({ proposal: p, names }: Props) {
+export function ProposalCard({ proposal: p, names, canDiscuss = false, onDiscussed }: Props) {
   const pending = p.status === 'pending';
   const [accept, setAccept] = useState<Set<number>>(new Set(p.items.map((_, i) => i)));
   const [rejecting, setRejecting] = useState(false);
@@ -103,6 +105,10 @@ export function ProposalCard({ proposal: p, names }: Props) {
             {single ? 'Approve' : 'Apply accepted'}
           </button>
           {single && <button className="btn" onClick={() => setEditing(toYaml(single.after))}>Edit, then approve</button>}
+          {canDiscuss && (
+            <button className="btn ask-btn" title="Sends this proposal (as data) to a session in the automations workspace for a review"
+              onClick={() => run(async () => { await window.api.automations.discuss(p.id); onDiscussed?.(); })}>Ask Claude about this</button>
+          )}
           <span className="ib-spacer" />
           <button className="btn danger" onClick={() => setRejecting(true)}>{single ? 'Reject…' : 'Decline all…'}</button>
         </div>

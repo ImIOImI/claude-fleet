@@ -24,12 +24,23 @@ interface Props {
   automationCount?: number;
   /** Pending proposals, for the Activity tab count. */
   approvals?: number;
+  /** Controlled section (App owns it so the Sessions tab can reveal the automations workspace's terminal). */
+  section: InboxSection;
+  onSection: (s: InboxSection) => void;
+  /** The automations workspace (Phase 5b), if set up; enables the Sessions tab. */
+  automationsWs?: { id: string; name: string; running: boolean } | null;
+  workspaces?: Array<{ id: string; name: string; kind: string; isAutomations?: boolean }>;
+  onCreateAutomationsWs?: () => void;
+  onEditAutomationsWs?: () => void;
+  onStartAutomationsWs?: () => void;
 }
+
+export type InboxSection = 'todos' | 'automations' | 'activity' | 'sessions';
 
 const TABS: Array<[TodoStatus | 'all', string]> = [['open', 'Open'], ['done', 'Done'], ['dismissed', 'Dismissed'], ['all', 'All']];
 
-export function InboxView({ names, openCount, quiet, focusTodoId, focusNonce, onJump, onOpenSchedules, automationCount = 0, approvals = 0 }: Props) {
-  const [section, setSection] = useState<'todos' | 'automations' | 'activity'>('todos');
+export function InboxView({ names, openCount, quiet, focusTodoId, focusNonce, onJump, onOpenSchedules, automationCount = 0, approvals = 0, section, onSection: setSection, automationsWs = null, workspaces = [],
+  onCreateAutomationsWs, onEditAutomationsWs, onStartAutomationsWs }: Props) {
   const [status, setStatus] = useState<TodoStatus | 'all'>('open');
   const [todos, setTodos] = useState<Todo[]>([]);
   const [effective, setEffective] = useState<Record<string, EffectiveRule>>({});
@@ -79,7 +90,7 @@ export function InboxView({ names, openCount, quiet, focusTodoId, focusNonce, on
   };
 
   return (
-    <div className="inbox-view">
+    <div className={`inbox-view${section === 'sessions' && automationsWs?.running ? ' header-only' : ''}`}>
       <div className="session-tab-strip ib-tabs" role="tablist" aria-label="Inbox sections">
         <div role="tab" aria-selected={section === 'todos'} className={`session-tab${section === 'todos' ? ' active' : ''}`} onClick={() => setSection('todos')}>
           <span className="session-tab-name">Todos</span>
@@ -94,6 +105,16 @@ export function InboxView({ names, openCount, quiet, focusTodoId, focusNonce, on
           {approvals > 0 ? <span className="ib-count wait" title="Waiting for your approval">{approvals}</span>
             : quiet && quiet.heldSinceQuiet > 0 && <span className="ib-count" title="Held while quiet">{quiet.heldSinceQuiet}</span>}
         </div>
+        {automationsWs && (
+          <>
+            <span className="ib-tab-sep" aria-hidden="true" />
+            <div role="tab" aria-selected={section === 'sessions'} className={`session-tab ib-sess${section === 'sessions' ? ' active' : ''}`}
+              onClick={() => setSection('sessions')} title={`Sessions in ${automationsWs.name}, the automations workspace`}>
+              <span className="session-tab-name">Sessions</span>
+              <span className="ib-dim mono">{automationsWs.name}</span>
+            </div>
+          </>
+        )}
         <span className="ib-tabs-spacer" />
         <div className="ph-ctl">
           <NotifyControl quiet={quiet} onOpenSchedules={onOpenSchedules} />
@@ -114,11 +135,26 @@ export function InboxView({ names, openCount, quiet, focusTodoId, focusNonce, on
           )}
         </div>
       )}
-      {section === 'automations' ? (
-        <AutomationsView names={names} />
+      {section === 'sessions' ? (
+        automationsWs?.running ? null : (
+          <div className="ib-empty ib-sess-empty">
+            <p>{automationsWs ? `${automationsWs.name} isn't running.` : 'No automations workspace yet.'}</p>
+            {automationsWs && <button className="btn btn-sm primary" onClick={onStartAutomationsWs}>Start it</button>}
+          </div>
+        )
+      ) : section === 'automations' ? (
+        <AutomationsView
+          names={names}
+          automationsWs={automationsWs}
+          workspaces={workspaces}
+          onCreateAutomationsWs={onCreateAutomationsWs}
+          onEditAutomationsWs={onEditAutomationsWs}
+        />
       ) : section === 'activity' ? (
         <ActivityView
           names={names}
+          canDiscuss={!!automationsWs}
+          onDiscussed={() => setSection('sessions')}
           onOpenTodo={(id) => {
             setSection('todos');
             void window.api.inbox.get(id).then((d) => { if (d) { setStatus(d.todo.status); setSelected(id); } });

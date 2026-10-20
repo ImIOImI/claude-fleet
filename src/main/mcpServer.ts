@@ -148,6 +148,8 @@ export interface AutomationHandlers {
   propose(callerId: string, args: Record<string, unknown>): Promise<unknown>;
   proposeChange(callerId: string, args: Record<string, unknown>): Promise<unknown>;
   getProposal(callerId: string, args: Record<string, unknown>): Promise<unknown>;
+  get(callerId: string, args: Record<string, unknown>): Promise<unknown>;
+  listRuns(callerId: string, args: Record<string, unknown>): Promise<unknown>;
 }
 let automationHandlers: AutomationHandlers | null = null;
 export function setAutomationHandlers(h: AutomationHandlers | null): void {
@@ -1479,6 +1481,27 @@ export const TOOLS: Tool[] = [
     run: (_db, _a, ctx) => {
       if (!automationHandlers) throw new Error('automations are unavailable');
       return automationHandlers.list(ctx.callerId);
+    }
+  },
+  {
+    name: 'get_automation',
+    description: 'One automation you can see: {id (or name)} → its definition YAML, triggers, next fire, week stats and last 10 runs (with per-step outcomes). The automations workspace can see every automation.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+    run: (_db, a, ctx) => {
+      if (!automationHandlers) throw new Error('automations are unavailable');
+      return automationHandlers.get(ctx.callerId, a);
+    }
+  },
+  {
+    name: 'list_runs',
+    description: 'Recent automation runs you can see, newest first. Args: automation (id or name), status (e.g. failed, timed-out, succeeded), since (epoch ms), limit (default 20, max 100). Each run has its trigger, args, status, error and steps.',
+    inputSchema: {
+      type: 'object',
+      properties: { automation: { type: 'string' }, status: { type: 'string' }, since: { type: 'number' }, limit: { type: 'number' } }
+    },
+    run: (_db, a, ctx) => {
+      if (!automationHandlers) throw new Error('automations are unavailable');
+      return automationHandlers.listRuns(ctx.callerId, a);
     }
   },
   {

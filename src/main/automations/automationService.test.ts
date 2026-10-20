@@ -187,3 +187,21 @@ steps:
     svc.cancelPending();
   });
 });
+
+describe('automations workspace reach (Phase 5b)', () => {
+  it('the privileged caller sees and can run every automation; get + listRuns respect visibility', async () => {
+    const { svc } = setup();
+    const a = svc.create(YAML().replace('  - manual: { allowFrom: [webex-triage] }\n', ''), USER);
+    expect(svc.mcp.list('WA')).toEqual([]);
+    expect(svc.mcp.list('WA', true)).toEqual([expect.objectContaining({ name: 'log-watch', canRun: true })]);
+    expect(() => svc.mcp.run('WA', { id: a.id })).toThrow(/not permitted/);
+    expect(svc.mcp.run('WA', { id: a.id }, true).status).toBe('running');
+    await svc.settle();
+    expect(() => svc.mcp.get('WA', { id: 'log-watch' })).toThrow(/not found/);
+    expect(svc.mcp.get('WA', { id: 'log-watch' }, true)).toMatchObject({ name: 'log-watch', yaml: expect.stringContaining('log-watch'), runs: [expect.objectContaining({ status: 'succeeded' })] });
+    expect(svc.mcp.get('W1', { id: a.id })).toMatchObject({ name: 'log-watch' }); // W1 is a step target → visible
+    expect(svc.mcp.listRuns('WA', {}, true)).toEqual([expect.objectContaining({ automation: 'log-watch', status: 'succeeded' })]);
+    expect(svc.mcp.listRuns('WA', { status: 'failed' }, true)).toEqual([]);
+    expect(svc.mcp.listRuns('W9', {})).toEqual([]);
+  });
+});

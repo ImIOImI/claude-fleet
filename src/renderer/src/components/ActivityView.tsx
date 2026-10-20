@@ -12,11 +12,14 @@ interface Props {
   names: Record<string, string>;
   onOpenTodo: (todoId: string) => void;
   onOpenWorkspace: (workspaceId: string) => void;
+  /** Phase 5b: "Ask Claude about this" needs the automations workspace. */
+  canDiscuss?: boolean;
+  onDiscussed?: () => void;
 }
 
 type Filter = 'all' | 'approvals' | 'delivered' | 'held';
 
-export function ActivityView({ names, onOpenTodo, onOpenWorkspace }: Props) {
+export function ActivityView({ names, onOpenTodo, onOpenWorkspace, canDiscuss = false, onDiscussed }: Props) {
   const [filter, setFilter] = useState<Filter>('all');
   const [rows, setRows] = useState<NotificationRow[]>([]);
   const [rules, setRules] = useState<NotifyRule[]>([]);
@@ -51,14 +54,14 @@ export function ActivityView({ names, onOpenTodo, onOpenWorkspace }: Props) {
         {(filter === 'all' || filter === 'approvals') && pendingProposals.length > 0 && (
           <>
             <div className="session-group-label">Needs approval<span className="session-group-line" /></div>
-            {pendingProposals.map((p) => <ProposalCard key={p.id} proposal={p} names={names} />)}
+            {pendingProposals.map((p) => <ProposalCard key={p.id} proposal={p} names={names} canDiscuss={canDiscuss} onDiscussed={onDiscussed} />)}
           </>
         )}
         {filter === 'approvals' && (
           <>
             {pendingProposals.length === 0 && <div className="ib-empty">Nothing waiting for approval. Workspaces can propose automations; they land here.</div>}
             {decided.length > 0 && <div className="session-group-label">Decided<span className="session-group-line" /></div>}
-            {decided.map((p) => <ProposalCard key={p.id} proposal={p} names={names} />)}
+            {decided.map((p) => <ProposalCard key={p.id} proposal={p} names={names} canDiscuss={canDiscuss} onDiscussed={onDiscussed} />)}
           </>
         )}
         {filter === 'all' && pendingProposals.length > 0 && <div className="session-group-label">Notifications<span className="session-group-line" /></div>}

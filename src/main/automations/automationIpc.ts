@@ -16,9 +16,10 @@ import { emitInboxChanged } from '../inbox/inboxEvents.js';
 import { AutomationStore } from './automationStore.js';
 import { createAutomationService, type AutomationService } from './automationService.js';
 import { STARTER_YAML } from './definition.js';
+import { reviewPrompt } from './review.js';
 import { ProposalStore } from './proposalStore.js';
 import { createProposalService, type ProposalService } from './proposalService.js';
-import { readWorkspaceManifest } from '../workspaces.js';
+import { listWorkspaceManifests, readWorkspaceManifest, writeWorkspaceManifest } from '../workspaces.js';
 import { broadcastInboxChanged } from '../inbox/inboxBroadcast.js';
 
 function send(channel: string, payload?: unknown): void {
@@ -32,7 +33,13 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
   const store = new AutomationStore(inbox.db);
   // Name ↔ id map refreshed on use; automations name workspaces in YAML.
   let names: Array<{ id: string; name: string }> = [];
-  const refresh = async () => { names = await hostWorkspaceNames().catch(() => names); };
+  /** The workspace behind the Inbox chip (manifest role 'automations'), if any. */
+  let roleWs: string | null = null;
+  const refresh = async () => {
+    names = await hostWorkspaceNames().catch(() => names);
+    roleWs = await listWorkspaceManifests().then((ms) => ms.find((m) => m.role === 'automations')?.id ?? null).catch(() => roleWs);
+  };
+  const privileged = (id: string) => id === roleWs;
   void refresh();
 
   const svc = createAutomationService({
@@ -61,7 +68,7 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     workspaceName: (id) => names.find((n) => n.id === id)?.name ?? id,
     trusted: async (id) => {
       const m = await readWorkspaceManifest(id);
-      return m?.kind === 'container' && m.inbox?.trusted === true;
+      return m?.kind === 'container' && (m.inbox?.trusted === true || m.role === 'automations');
     },
     notify: notify ? (n) => notify.request(n) : undefined,
     changed: () => {
@@ -91,8 +98,10 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
   });
 
   setAutomationHandlers({
-    list: async (callerId) => { await refresh(); return svc.mcp.list(callerId); },
-    run: async (callerId, args) => { await refresh(); return svc.mcp.run(callerId, args); },
+    list: async (callerId) => { await refresh(); return svc.mcp.list(callerId, privileged(callerId)); },
+    run: async (callerId, args) => { await refresh(); return svc.mcp.run(callerId, args, privileged(callerId)); },
+    get: async (callerId, args) => { await refresh(); return svc.mcp.get(callerId, args, privileged(callerId)); },
+    listRuns: async (callerId, args) => { await refresh(); return svc.mcp.listRuns(callerId, args, privileged(callerId)); },
     propose: async (callerId, args) => { await refresh(); return proposals.mcp.propose(callerId, args); },
     proposeChange: async (callerId, args) => { await refresh(); return proposals.mcp.proposeChange(callerId, args); },
     getProposal: async (callerId, args) => proposals.mcp.get(callerId, args)
@@ -111,6 +120,34 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     withNames(() => svc.run(id, { kind: 'manual', by: USER, args: args ?? {}, coerce: true })));
   ipcMain.handle('automations:starter', () =>
     withNames(() => STARTER_YAML.replace('REPLACE-WITH-WORKSPACE-NAME', names[0]?.name ?? 'REPLACE-WITH-WORKSPACE-NAME')));
+  // The automations workspace (#407 Phase 5b): one per fleet, container-only, trusted.
+  ipcMain.handle('automations:roleWorkspace', async () => { await refresh(); return roleWs; });
+  ipcMain.handle('automations:setRole', async (_e, id: string | null) => {
+    if (id) {
+      const target = await readWorkspaceManifest(id);
+      if (!target) throw new Error('workspace not found');
+      if (target.kind !== 'container') throw new Error('the automations workspace must be a container workspace');
+    }
+    for (const m of await listWorkspaceManifests()) {
+      if (m.role === 'automations' && m.id !== id) await writeWorkspaceManifest({ ...m, role: undefined });
+    }
+    if (id) {
+      const m = (await readWorkspaceManifest(id))!;
+      await writeWorkspaceManifest({ ...m, role: 'automations', inbox: { ...(m.inbox ?? {}), trusted: true } });
+    }
+    await refresh();
+    send('automations:changed');
+    return roleWs;
+  });
+  ipcMain.handle('automations:discuss', async (_e, proposalId: string) => {
+    await refresh();
+    if (!roleWs) throw new Error('set up an automations workspace first');
+    const p = proposals.list().find((x) => x.id === proposalId);
+    if (!p) throw new Error('proposal not found');
+    await hostPostToWorkspace(roleWs, reviewPrompt(p, (id) => names.find((n) => n.id === id)?.name ?? id));
+    return roleWs;
+  });
+
   ipcMain.handle('proposals:list', () => withNames(() => proposals.list()));
   ipcMain.handle('proposals:yaml', (_e, id: string, index: number) => proposals.yamlOf(id, index ?? 0));
   ipcMain.handle('proposals:approve', (_e, id: string, opts: { accept?: number[]; editedYaml?: string; editedIndex?: number }) =>
