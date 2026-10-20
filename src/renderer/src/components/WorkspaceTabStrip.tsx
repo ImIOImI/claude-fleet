@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import type { WorkspaceObservabilitySummary } from '../../../preload';
 import { colorFor, type WorkspaceState, type WorkspaceSummary } from '../App';
@@ -66,6 +66,8 @@ interface Props {
   onReorderWorkspace: (draggedId: string, targetId: string) => void;
   /** Per-workspace waiting flag: true when the workspace has a session blocked on AskUserQuestion. */
   waitingByWorkspace?: Record<string, boolean>;
+  /** The Inbox chip (#407), rendered after the workspace chips, before the add button. */
+  inboxChip?: ReactNode;
 }
 
 /**
@@ -120,7 +122,8 @@ export function WorkspaceTabStrip({
   onCloneWorkspace,
   onDeleteWorkspace,
   onRefresh,
-  onReorderWorkspace
+  onReorderWorkspace,
+  inboxChip
 }: Props) {
   // Chip ⋮ menu — shared portaled-menu mechanics (right-anchored).
   const { menu, toggle: toggleMenu, close: closeMenu } = usePortalMenu();
@@ -246,6 +249,8 @@ export function WorkspaceTabStrip({
         </div>
         );
       })}
+
+      {inboxChip}
 
       <button
         className="btn add-workspace"
