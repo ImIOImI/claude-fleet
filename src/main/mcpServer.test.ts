@@ -804,7 +804,7 @@ describe('inbox tools (#407)', () => {
   afterEach(() => setInboxHandlers(null));
 
   it('exposes post_todo / update_todo / list_todos', () => {
-    expect(TOOLS.map((t) => t.name)).toEqual(expect.arrayContaining(['post_todo', 'update_todo', 'list_todos']));
+    expect(TOOLS.map((t) => t.name)).toEqual(expect.arrayContaining(['post_todo', 'update_todo', 'list_todos', 'notify']));
     expect((tool('post_todo').inputSchema as { required: string[] }).required).toEqual(['title']);
     expect((tool('update_todo').inputSchema as { required: string[] }).required).toEqual(['id']);
   });
@@ -814,13 +814,15 @@ describe('inbox tools (#407)', () => {
     setInboxHandlers({
       post: async (c, a) => { calls.push(['post', c, a]); return { id: 'T1', action: 'created' }; },
       update: async (c, a) => { calls.push(['update', c, a]); return { id: 'T1' }; },
-      list: async (c, a) => { calls.push(['list', c, a]); return []; }
+      list: async (c, a) => { calls.push(['list', c, a]); return []; },
+      notify: async (c, a) => { calls.push(['notify', c, a]); return { id: 'N1' }; }
     });
     const db = null as never;
     expect(await tool('post_todo').run(db, { title: 'x', callerId: 'SPOOF' }, ctx)).toEqual({ id: 'T1', action: 'created' });
     await tool('update_todo').run(db, { id: 'T1', status: 'done' }, ctx);
     await tool('list_todos').run(db, {}, ctx);
-    expect(calls.map(([k, c]) => [k, c])).toEqual([['post', WS_A], ['update', WS_A], ['list', WS_A]]);
+    await tool('notify').run(db, { title: 'n' }, ctx);
+    expect(calls.map(([k, c]) => [k, c])).toEqual([['post', WS_A], ['update', WS_A], ['list', WS_A], ['notify', WS_A]]);
   });
 
   it('fails clearly when the inbox is not wired', () => {

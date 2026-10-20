@@ -7,6 +7,7 @@
 import { useEffect, useState } from 'react';
 import type { PerfStatusPayload, UsageBudgetPreset, UiPrefs } from '../../../preload';
 import { ModalBackdrop } from './ModalBackdrop';
+import { NotificationsSettings } from './NotificationsSettings';
 
 /** Compact token formatter for preset labels (e.g. 19_000_000 → "19M"). */
 function fmtTokens(n: number): string {
@@ -65,7 +66,7 @@ function formFromEndpoint(ep: ModelEndpoint): EndpointFormState {
   };
 }
 
-export type ActiveTab = 'settings' | 'endpoints';
+export type ActiveTab = 'settings' | 'endpoints' | 'notifications';
 
 interface Props {
   onClose: () => void;
@@ -73,9 +74,11 @@ interface Props {
   onSaved: (config: { fleetRoot: string; sharedDir: string }) => void;
   /** Open the modal directly on this tab (default: 'settings'). */
   initialTab?: ActiveTab;
+  /** Workspace names for the Notifications tab's rule labels. */
+  names?: Record<string, string>;
 }
 
-export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
+export function SettingsModal({ onClose, onSaved, initialTab, names = {} }: Props) {
   const [activeTab, setActiveTab] = useState<ActiveTab>(initialTab ?? 'settings');
 
   // ── Settings tab state ──────────────────────────────────────────────────
@@ -356,7 +359,25 @@ export function SettingsModal({ onClose, onSaved, initialTab }: Props) {
               <span className="modal-tab-count">{endpoints.length}</span>
             )}
           </div>
+          <div
+            className={`modal-tab${activeTab === 'notifications' ? ' active' : ''}`}
+            aria-current={activeTab === 'notifications' ? 'page' : undefined}
+            onClick={() => setActiveTab('notifications')}
+            style={{ cursor: 'pointer' }}
+          >
+            Notifications
+          </div>
         </div>
+
+        {activeTab === 'notifications' && (
+          <>
+            <NotificationsSettings names={names} />
+            <div className="modal-footer notif-footer">
+              <span className="modal-footer-spacer" />
+              <button type="button" className="btn" onClick={onClose}>Close</button>
+            </div>
+          </>
+        )}
 
         {/* ── Settings tab ─────────────────────────────────────────────── */}
         {activeTab === 'settings' && (

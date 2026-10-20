@@ -9,7 +9,7 @@ import type {
 } from '../../preload/inboxTypes.js';
 import { isPriority, maxPriority, normalizeTag, normalizeTags, MAX_TAGS } from './inboxCore.js';
 
-export const INBOX_SCHEMA_VERSION = 1;
+export const INBOX_SCHEMA_VERSION = 2;
 
 const MIGRATIONS: Record<number, string> = {
   1: `
@@ -54,6 +54,51 @@ const MIGRATIONS: Record<number, string> = {
       detail TEXT
     );
     CREATE INDEX todo_events_todo ON todo_events (todo_id, id);
+  `,
+  // Phase 2 (notifications): the log, the user's rules, downtime schedules and
+  // small key/value state (pause, default level).
+  2: `
+    CREATE TABLE notifications (
+      id TEXT PRIMARY KEY,
+      ts INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT,
+      priority TEXT NOT NULL,
+      source_kind TEXT NOT NULL,
+      source_id TEXT,
+      todo_id TEXT,
+      workspace_id TEXT,
+      dedupe_key TEXT,
+      tags TEXT,
+      delivered INTEGER NOT NULL,
+      held_reason TEXT,
+      channel TEXT,
+      cleared_at INTEGER,
+      digested INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX notifications_ts ON notifications (ts);
+    CREATE TABLE notification_rules (
+      id TEXT PRIMARY KEY,
+      scope_kind TEXT NOT NULL CHECK (scope_kind IN ('key','source','tag','global')),
+      scope_value TEXT NOT NULL,
+      level TEXT NOT NULL CHECK (level IN ('all','high','urgent','off')),
+      snooze_until INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE (scope_kind, scope_value)
+    );
+    CREATE TABLE downtimes (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      enabled INTEGER NOT NULL,
+      days_mask INTEGER NOT NULL,
+      start_min INTEGER NOT NULL,
+      end_min INTEGER NOT NULL,
+      bypass TEXT NOT NULL CHECK (bypass IN ('none','urgent','urgent+input')),
+      created_at INTEGER NOT NULL
+    );
+    CREATE TABLE notify_state (k TEXT PRIMARY KEY, v TEXT NOT NULL);
   `
 };
 

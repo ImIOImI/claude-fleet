@@ -142,6 +142,13 @@ import { mergeWorkspaces } from './workspaceMerge.js';
 
 export const MOCK_MODE = process.env.CLAUDE_FLEET_MOCK === '1';
 
+/** Observer for per-workspace "waiting on input" changes (#407: needs-input
+ *  notifications). Set by notifyIpc; called with the full waiting set. */
+let inputWaitObserver: ((workspaceId: string, waitingSessionIds: string[]) => void) | null = null;
+export function setInputWaitObserver(fn: typeof inputWaitObserver): void {
+  inputWaitObserver = fn;
+}
+
 const execFileAsync = promisify(execFile);
 
 const wslProbeDeps: ProbeDeps = {
@@ -1278,6 +1285,11 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       { workspaceId, waitingSessionIds: [...set] },
       BrowserWindow.getAllWindows()
     );
+    try {
+      inputWaitObserver?.(workspaceId, [...set]);
+    } catch (e) {
+      logError({ source: 'main', type: 'inputwait-observer', level: 'warn', message: String(e), workspaceId });
+    }
   }
 
   // Clear any "waiting on input" marks for the workspace backing this container

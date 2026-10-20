@@ -62,3 +62,35 @@ describe('inbox IPC handlers', () => {
     expect((await svc.ipc.list({ status: 'all' })).length).toBe(2);
   });
 });
+
+describe('notifications wiring (#407 Phase 2)', () => {
+  function setupWithNotify(manifests: Record<string, { inbox?: InboxConfig }>) {
+    const store = InboxStore.memory();
+    const posted: Array<[string, string, boolean]> = [];
+    const requests: Array<Record<string, unknown>> = [];
+    const svc = createInboxService(store, {
+      manifest: async (id) => manifests[id] ?? null,
+      notifyChanged: () => {},
+      notifications: {
+        onTodoPosted: (t, action, flag) => { posted.push([t.title, action, flag]); return null; },
+        request: (r) => { requests.push(r as never); return { id: 'N1', delivered: false, heldReason: 'pause' } as never; }
+      }
+    });
+    return { svc, posted, requests };
+  }
+  it('post_todo hands the todo, action and notify flag to notifications', async () => {
+    const { svc, posted } = setupWithNotify({ W1: {} });
+    await svc.mcp.post('W1', { title: 'a', notify: true });
+    await svc.mcp.post('W1', { title: 'b' });
+    expect(posted).toEqual([['a', 'created', true], ['b', 'created', false]]);
+  });
+  it('notify validates, gates on posting rights, scopes todo links, and reports the outcome', async () => {
+    const { svc, requests } = setupWithNotify({ W1: {}, W2: {}, OFF: { inbox: { canPost: false } } });
+    expect(await svc.mcp.notify('W1', { title: 'nightly ok', key: 'nightly', tags: ['CI'] })).toEqual({ id: 'N1', delivered: false, heldReason: 'pause' });
+    expect(requests[0]).toMatchObject({ kind: 'post', title: 'nightly ok', priority: 'normal', source: { kind: 'workspace', id: 'W1' }, dedupeKey: 'nightly', tags: ['ci'] });
+    await expect(svc.mcp.notify('W1', {})).rejects.toThrow(/title is required/);
+    await expect(svc.mcp.notify('OFF', { title: 'x' })).rejects.toThrow(/not allowed to post/);
+    const { id } = (await svc.mcp.post('W1', { title: 'mine' })) as { id: string };
+    await expect(svc.mcp.notify('W2', { title: 'x', todo_id: id })).rejects.toThrow(/not found/);
+  });
+});

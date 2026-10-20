@@ -110,6 +110,7 @@ describe('InboxStore.open', () => {
     expect(store.list().map((t) => t.title)).toEqual(['persist me']);
     const raw = new Database(path.join(dir, 'inbox.db'), { readonly: true });
     expect(raw.pragma('user_version', { simple: true })).toBe(INBOX_SCHEMA_VERSION);
+    expect(INBOX_SCHEMA_VERSION).toBe(2);
     expect(raw.pragma('journal_mode', { simple: true })).toBe('wal');
     raw.close();
   });
