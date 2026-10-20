@@ -353,6 +353,15 @@ const api = {
       return () => ipcRenderer.removeListener('notifications:open', h);
     }
   },
+  presence: {
+    getKeepRunning: (): Promise<boolean> => ipcRenderer.invoke('presence:getKeepRunning'),
+    setKeepRunning: (v: boolean): Promise<void> => ipcRenderer.invoke('presence:setKeepRunning', v),
+    onOpenInbox: (cb: () => void): (() => void) => {
+      const h = (): void => cb();
+      ipcRenderer.on('presence:openInbox', h);
+      return () => ipcRenderer.removeListener('presence:openInbox', h);
+    }
+  },
   committee: {
     pause: (callerId: string, targetId: string): Promise<{ id: string; paused: true }> =>
       ipcRenderer.invoke('committee:pause', callerId, targetId),

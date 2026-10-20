@@ -35,11 +35,13 @@ export function NotificationsSettings({ names }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [supported, setSupported] = useState<boolean | null>(null);
   const [tested, setTested] = useState(false);
+  const [keepRunning, setKeepRunning] = useState<boolean | null>(null);
 
   const reload = useCallback(() => void window.api.notifications.settings().then(setS), []);
   useEffect(() => {
     reload();
     void window.api.notifications.permission().then((p) => setSupported(p.supported));
+    void window.api.presence.getKeepRunning().then(setKeepRunning);
     return window.api.notifications.onChanged(() => reload());
   }, [reload]);
 
@@ -71,6 +73,23 @@ export function NotificationsSettings({ names }: Props) {
           <select id="sn-level" value={s.defaultLevel} onChange={(e) => void window.api.notifications.setDefaultLevel(e.target.value as NotifyLevel).then(reload)}>
             {(['all', 'high', 'urgent', 'off'] as NotifyLevel[]).map((l) => <option key={l} value={l}>{LEVEL_LABELS[l]}</option>)}
           </select>
+        </div>
+        <div className="setting-row">
+          <div className="setting-row-text">
+            <label className="setting-title" htmlFor="sn-tray">Keep running in the background</label>
+            <p className="setting-desc">Closing the window keeps claude-fleet in the tray so notifications (and, later, automations) keep working. Quit from the tray icon.</p>
+          </div>
+          <input
+            id="sn-tray"
+            type="checkbox"
+            checked={keepRunning === true}
+            disabled={keepRunning === null}
+            onChange={(e) => {
+              const v = e.target.checked;
+              setKeepRunning(v);
+              void window.api.presence.setKeepRunning(v);
+            }}
+          />
         </div>
       </div>
 

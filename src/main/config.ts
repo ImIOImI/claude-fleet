@@ -102,6 +102,8 @@ interface AppConfig {
   perfTelemetry?: boolean;
   /** OTLP export of perf traces/metrics. Default off; OTEL_EXPORTER_OTLP_ENDPOINT overrides. */
   perfOtlp?: { enabled: boolean; endpoint: string };
+  /** Closing the window keeps the app running in the tray (#407 Phase 2b). Default off. */
+  keepRunningInTray?: boolean;
 }
 
 /** Defensively parse the persisted usageBudget (untrusted JSON on disk). */
@@ -193,7 +195,8 @@ async function read(): Promise<AppConfig> {
         ? parsed.favorites.filter((x): x is string => typeof x === 'string')
         : undefined,
       perfTelemetry: typeof parsed.perfTelemetry === 'boolean' ? parsed.perfTelemetry : undefined,
-      perfOtlp: parsePerfOtlp(parsed.perfOtlp)
+      perfOtlp: parsePerfOtlp(parsed.perfOtlp),
+      keepRunningInTray: typeof parsed.keepRunningInTray === 'boolean' ? parsed.keepRunningInTray : undefined
     };
   } catch {
     cached = {};
@@ -332,6 +335,15 @@ export async function setTerminalRenderer(renderer: TerminalRenderer): Promise<v
 }
 
 /** Auto-reload loadouts into a running workspace when Claude is idle. Default on. */
+export async function getKeepRunningInTray(): Promise<boolean> {
+  return (await read()).keepRunningInTray === true; // default off
+}
+
+export async function setKeepRunningInTray(enabled: boolean): Promise<void> {
+  const cfg = await read();
+  await write({ ...cfg, keepRunningInTray: enabled });
+}
+
 export async function getAutoReloadLoadouts(): Promise<boolean> {
   const cfg = await read();
   return cfg.autoReloadLoadouts !== false; // default true

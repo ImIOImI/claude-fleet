@@ -7,6 +7,7 @@ import { readWorkspaceManifest } from '../workspaces.js';
 import { setInboxHandlers } from '../mcpServer.js';
 import { logError } from '../errorLog.js';
 import { broadcastInboxChanged } from './inboxBroadcast.js';
+import { emitInboxChanged } from './inboxEvents.js';
 import { createInboxService } from './inboxService.js';
 import type { InboxStore } from './inboxDb.js';
 import type { NotifyService } from './notifyService.js';
@@ -15,7 +16,10 @@ import type { NotifyService } from './notifyService.js';
 export function registerInboxIpc(store: InboxStore, notifications?: NotifyService): void {
   const svc = createInboxService(store, {
     manifest: (id) => readWorkspaceManifest(id),
-    notifyChanged: () => broadcastInboxChanged(store.counts(), BrowserWindow.getAllWindows()),
+    notifyChanged: () => {
+      broadcastInboxChanged(store.counts(), BrowserWindow.getAllWindows());
+      emitInboxChanged();
+    },
     onPostRejected: (workspaceId, reason) => {
       logError({ source: 'main', type: 'inbox-post-rejected', level: 'warn', message: reason, workspaceId });
       notifications?.onPostRejected(workspaceId, reason);
