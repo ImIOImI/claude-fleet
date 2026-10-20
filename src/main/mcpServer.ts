@@ -131,6 +131,18 @@ export function setSessionMappingHandler(fn: SessionMappingHandler): void {
   sessionMappingHandler = fn;
 }
 
+/** Injected by inboxService (#407): host-mediated inbox writes/reads. callerId is
+ *  the accepting listener's workspace id — never taken from the wire. */
+export interface InboxHandlers {
+  post(callerId: string, args: Record<string, unknown>): Promise<unknown>;
+  update(callerId: string, args: Record<string, unknown>): Promise<unknown>;
+  list(callerId: string, args: Record<string, unknown>): Promise<unknown>;
+}
+let inboxHandlers: InboxHandlers | null = null;
+export function setInboxHandlers(h: InboxHandlers | null): void {
+  inboxHandlers = h;
+}
+
 /** Injected by ipc.ts: record a diagnostic from the runner's chapter-summary
  *  Stop hook (`summarize.sh`, #230). The hook fails into `/dev/null` otherwise,
  *  so a dead #207 pipeline is invisible; this lands each decision point in the
@@ -1418,6 +1430,67 @@ export const TOOLS: Tool[] = [
         detail: typeof a.note === 'string' && a.note ? { note: a.note.slice(0, 500) } : undefined
       });
       return { ok: true };
+    }
+  },
+  {
+    name: 'post_todo',
+    description:
+      'Post a todo to the user\'s inbox (claude-fleet). Use for things the user should act on. ' +
+      'Args: title (required, ≤200), body (markdown), priority (low|normal|high|urgent, default normal), ' +
+      'key (dedupe key: posting the same key again updates that todo — bumps its seen count — and reopens it if it was closed), ' +
+      'tags (array), session_link. Returns {id, action: created|updated|reopened}. Rate-limited per workspace.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string' }, body: { type: 'string' },
+        priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
+        key: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } },
+        session_link: { type: 'string' }
+      },
+      required: ['title']
+    },
+    run: (_db, a, ctx) => {
+      if (!inboxHandlers) throw new Error('the inbox is unavailable');
+      return inboxHandlers.post(ctx.callerId, a);
+    }
+  },
+  {
+    name: 'update_todo',
+    description:
+      'Update a todo THIS workspace posted. Args: id (required), status (open|done|dismissed), priority, ' +
+      'tags_add, tags_remove, body_append (appended under the existing body).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' }, status: { type: 'string', enum: ['open', 'done', 'dismissed'] },
+        priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
+        tags_add: { type: 'array', items: { type: 'string' } },
+        tags_remove: { type: 'array', items: { type: 'string' } },
+        body_append: { type: 'string' }
+      },
+      required: ['id']
+    },
+    run: (_db, a, ctx) => {
+      if (!inboxHandlers) throw new Error('the inbox is unavailable');
+      return inboxHandlers.update(ctx.callerId, a);
+    }
+  },
+  {
+    name: 'list_todos',
+    description:
+      'List inbox todos this workspace can see (ones it posted or that are linked to it). ' +
+      'Args: status (open|done|dismissed|all, default open), tags (all must match), limit (default 50, max 200).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', enum: ['open', 'done', 'dismissed', 'all'] },
+        tags: { type: 'array', items: { type: 'string' } },
+        limit: { type: 'number' }
+      }
+    },
+    run: (_db, a, ctx) => {
+      if (!inboxHandlers) throw new Error('the inbox is unavailable');
+      return inboxHandlers.list(ctx.callerId, a);
     }
   },
   {

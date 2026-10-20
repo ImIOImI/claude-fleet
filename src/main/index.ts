@@ -21,6 +21,8 @@ import { installMainProcessHandlers, getLogPath, setErrorSink, logError } from '
 import { installAppMenu } from './appMenu.js';
 import { appBuildSha, appVersionString } from './appVersion.js';
 import { runStartupMigration } from './migration.js';
+import { InboxStore } from './inbox/inboxDb.js';
+import { registerInboxIpc } from './inbox/inboxIpc.js';
 import { ensureWorkspaceClaudeJson } from './docker.js';
 import { hardwareAccelDisabledAtStartup } from './config.js';
 import { setWorkspaceDefault } from './mirrorPolicy.js';
@@ -33,6 +35,8 @@ const isMock = process.env.CLAUDE_FLEET_MOCK === '1';
 const jsonlWatcher = isMock ? null : new JsonlWatcher();
 // Authoritative busy/idle/waiting from claude's peer-status files (#286).
 const peerStatusWatcher = isMock ? null : new PeerStatusWatcher();
+// Authoritative inbox store (#407); opened at ready, closed on quit.
+let inboxStore: InboxStore | null = null;
 
 /** Register each workspace's peer-status `sessions/` dir with the watcher.
  *  Container: the bind-mounted host dir. Local native/custom: the shared host
@@ -143,6 +147,14 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   // Seed the built-in loadout starters if the library doesn't exist yet
   // (#16-followup). Idempotent; non-fatal — a seeding hiccup must not block launch.
   await ensureBuiltinLoadouts().catch((e) => console.warn('[loadouts] seed failed:', e));
+
+  // Authoritative inbox (#407): opens in mock AND real mode. state.db is a
+  // droppable cache gated on the JSONL watcher; the inbox is neither.
+  try {
+    inboxStore = InboxStore.open(app.getPath('userData'));
+  } catch (e) {
+    logError({ source: 'main', type: 'inbox-open-failed', level: 'error', message: String(e) });
+  }
 
   if (jsonlWatcher) {
     const db = openDb(app.getPath('userData'));
@@ -282,6 +294,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   // With recording off the tracer is a no-op — cost is one async frame/invoke.
   instrumentIpcHandle(ipcMain);
   registerIpc({ jsonlWatcher, peerStatusWatcher });
+  if (inboxStore) registerInboxIpc(inboxStore);
   mainWindow = createWindow();
 
   app.on('activate', () => {
@@ -293,6 +306,8 @@ app.on('before-quit', async () => {
   await jsonlWatcher?.stop();
   await peerStatusWatcher?.stop();
   stopMcpServer();
+  inboxStore?.close();
+  inboxStore = null;
   await shutdownPerf();
   closeDb();
 });
