@@ -12,29 +12,37 @@ async function openInbox(window: Page) {
 
 test('Notifications: 🔔 rule mutes a source and shows in Settings (#407)', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  const T = { timeout: 10_000 };
   try {
     await callTestIpc(app, 'inbox:create', [{ title: 'Drink water', priority: 'low' }]);
     const view = await openInbox(window);
     const row = view.locator('.todo-row', { hasText: 'Drink water' });
-    await row.getByRole('button', { name: 'Notifications for "Drink water"' }).click();
     const pop = row.locator('.bell-pop');
-    await expect(pop).toBeVisible();
-    await expect(pop.getByRole('tab', { name: 'You' })).toBeVisible();
-    await expect(pop).toContainText('Now: All, from your default');
-    await pop.locator('.bp-level', { hasText: 'Off' }).click();
-    await expect(pop).toContainText('Now: Off, from rule for You');
-    await window.keyboard.press('Escape');
-    await expect(pop).toBeHidden();
-    await expect(row.locator('.todo-muted')).toHaveText('off for this source');
-
-    await window.getByRole('button', { name: 'Settings' }).click();
-    await window.locator('.modal-tab', { hasText: 'Notifications' }).click();
-    const rules = window.locator('table.rules');
-    await expect(rules.locator('tbody tr')).toHaveCount(1);
-    await expect(rules).toContainText('You');
-    await expect(rules).toContainText('Off');
-    await rules.getByRole('button', { name: 'Remove' }).click();
-    await expect(window.locator('.notif-settings')).toContainText('No rules yet.');
+    await test.step('open the bell popover', async () => {
+      await row.getByRole('button', { name: 'Notifications for "Drink water"' }).click(T);
+      await expect(pop).toBeVisible();
+      await expect(pop.getByRole('tab', { name: 'You' })).toBeVisible();
+      await expect(pop).toContainText('Now: All, from your default');
+    });
+    await test.step('set Off for this source', async () => {
+      await pop.locator('.bp-level', { hasText: 'Off' }).click(T);
+      await expect(pop).toContainText('Now: Off, from rule for You');
+    });
+    await test.step('close the popover by clicking outside', async () => {
+      await view.locator('.ib-detail').click({ ...T, position: { x: 10, y: 10 } });
+      await expect(pop).toBeHidden();
+      await expect(row.locator('.todo-muted')).toHaveText('off for this source');
+    });
+    await test.step('see and remove the rule in Settings', async () => {
+      await window.locator('.top-strip .settings-btn').click(T);
+      await window.locator('.modal-tab', { hasText: 'Notifications' }).click(T);
+      const rules = window.locator('table.rules');
+      await expect(rules.locator('tbody tr')).toHaveCount(1);
+      await expect(rules).toContainText('You');
+      await expect(rules).toContainText('Off');
+      await rules.getByRole('button', { name: 'Remove' }).click(T);
+      await expect(window.locator('.notif-settings')).toContainText('No rules yet.');
+    });
   } finally {
     await app.close();
   }
