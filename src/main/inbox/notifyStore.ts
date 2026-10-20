@@ -50,6 +50,10 @@ export class NotifyStore {
     return this.get(id)!;
   }
 
+  setChannel(id: string, channel: 'os' | 'in-app'): void {
+    this.db.prepare('UPDATE notifications SET channel = ? WHERE id = ?').run(channel, id);
+  }
+
   get(id: string): NotificationRow | null {
     const r = this.db.prepare('SELECT * FROM notifications WHERE id = ?').get(id) as NRow | undefined;
     return r ? toRow(r) : null;
