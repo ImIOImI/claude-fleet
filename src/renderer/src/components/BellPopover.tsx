@@ -44,16 +44,25 @@ export function BellPopover({ item, anchor, names, onClose, onChanged }: Props) 
       if (ref.current && !ref.current.contains(e.target as Node)) onClose();
     };
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    const onScroll = (e: Event) => { if (!ref.current?.contains(e.target as Node)) onClose(); };
+    // The popover is fixed-positioned from its trigger, so close when the list
+    // holding the trigger scrolls or the window really changes size. Scrolls
+    // elsewhere (rails, terminals) and no-op resize events must not close it.
+    const onScroll = (e: Event) => {
+      const t = e.target;
+      if (ref.current?.contains(t as Node)) return;
+      if (t === document || (t instanceof Element && t.closest('.inbox-view'))) onClose();
+    };
+    const size = { w: window.innerWidth, h: window.innerHeight };
+    const onResize = () => { if (window.innerWidth !== size.w || window.innerHeight !== size.h) onClose(); };
     document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onKey);
     window.addEventListener('scroll', onScroll, true);
-    window.addEventListener('resize', onClose);
+    window.addEventListener('resize', onResize);
     return () => {
       document.removeEventListener('mousedown', onDown);
       document.removeEventListener('keydown', onKey);
       window.removeEventListener('scroll', onScroll, true);
-      window.removeEventListener('resize', onClose);
+      window.removeEventListener('resize', onResize);
     };
   }, [onClose]);
 
