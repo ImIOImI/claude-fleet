@@ -31,7 +31,7 @@ export function InboxView({ names, openCount, quiet, focusTodoId, focusNonce, on
   const [search, setSearch] = useState('');
   const [tag, setTag] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
-  const [bellFor, setBellFor] = useState<string | null>(null);
+  const [bellFor, setBellFor] = useState<{ id: string; rect: DOMRect } | null>(null);
   const [version, setVersion] = useState(0);
   const [title, setTitle] = useState('');
   const [priority, setPriority] = useState<TodoPriority>('normal');
@@ -192,15 +192,16 @@ export function InboxView({ names, openCount, quiet, focusTodoId, focusNonce, on
                             </div>
                             <div className="todo-actions">
                               <button
-                                className={`todo-act${hint ? ' quiet' : ''}${bellFor === t.id ? ' open' : ''}`}
+                                className={`todo-act${hint ? ' quiet' : ''}${bellFor?.id === t.id ? ' open' : ''}`}
                                 aria-label={`Notifications for "${t.title}"`}
-                                onClick={(e) => { e.stopPropagation(); setBellFor(bellFor === t.id ? null : t.id); }}
+                                onClick={(e) => { e.stopPropagation(); setBellFor(bellFor?.id === t.id ? null : { id: t.id, rect: e.currentTarget.getBoundingClientRect() }); }}
                               >
                                 {hint ? <BellOffIcon /> : <BellIcon />}
                               </button>
                             </div>
-                            {bellFor === t.id && (
+                            {bellFor?.id === t.id && (
                               <BellPopover
+                                anchor={bellFor.rect}
                                 item={{ source: t.source, dedupeKey: t.dedupeKey, tags: t.tags, priority: t.priority }}
                                 names={names}
                                 onClose={() => setBellFor(null)}

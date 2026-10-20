@@ -74,3 +74,13 @@ describe('held reasons, scopes and hints', () => {
     expect(mutedHint({ level: 'off', snoozeUntil: at(23, 59), ruleId: 'R', scopeKind: 'tag' }, at(10))).toBe('snoozed for this tag · until 23:59');
   });
 });
+
+import { bellPosition } from './notifyView';
+describe('bellPosition', () => {
+  it('right-aligns under the trigger, clamps left, and flips above near the bottom', () => {
+    expect(bellPosition({ left: 500, right: 524, top: 100, bottom: 124 }, 1400, 900)).toEqual({ top: 128, left: 224 });
+    expect(bellPosition({ left: 100, right: 124, top: 100, bottom: 124 }, 1400, 900).left).toBe(8);
+    expect(bellPosition({ left: 1390, right: 1414, top: 100, bottom: 124 }, 1400, 900).left).toBe(1092);
+    expect(bellPosition({ left: 500, right: 524, top: 800, bottom: 824 }, 1400, 900)).toEqual({ top: 466, left: 224 });
+  });
+});

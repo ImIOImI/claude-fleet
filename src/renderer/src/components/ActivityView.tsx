@@ -21,7 +21,7 @@ export function ActivityView({ names, onOpenTodo, onOpenWorkspace }: Props) {
   const [rows, setRows] = useState<NotificationRow[]>([]);
   const [rules, setRules] = useState<NotifyRule[]>([]);
   const [downtimes, setDowntimes] = useState<Downtime[]>([]);
-  const [bellFor, setBellFor] = useState<string | null>(null);
+  const [bellFor, setBellFor] = useState<{ id: string; rect: DOMRect } | null>(null);
 
   const reload = useCallback(() => {
     void window.api.notifications.list(filter).then(setRows);
@@ -63,9 +63,10 @@ export function ActivityView({ names, onOpenTodo, onOpenWorkspace }: Props) {
                 </span>
                 {n.kind !== 'digest' && n.kind !== 'test' && (
                   <span className="nl-bell">
-                    <button className="todo-act" aria-label={`Notifications for things like "${n.title}"`} onClick={() => setBellFor(bellFor === n.id ? null : n.id)}><BellIcon /></button>
-                    {bellFor === n.id && (
+                    <button className="todo-act" aria-label={`Notifications for things like "${n.title}"`} onClick={(e) => setBellFor(bellFor?.id === n.id ? null : { id: n.id, rect: e.currentTarget.getBoundingClientRect() })}><BellIcon /></button>
+                    {bellFor?.id === n.id && (
                       <BellPopover
+                        anchor={bellFor.rect}
                         item={{ source: n.source, dedupeKey: n.dedupeKey, tags: n.tags, priority: n.priority }}
                         names={names}
                         onClose={() => setBellFor(null)}

@@ -17,7 +17,7 @@ test('Notifications: 🔔 rule mutes a source and shows in Settings (#407)', asy
     await callTestIpc(app, 'inbox:create', [{ title: 'Drink water', priority: 'low' }]);
     const view = await openInbox(window);
     const row = view.locator('.todo-row', { hasText: 'Drink water' });
-    const pop = row.locator('.bell-pop');
+    const pop = window.locator('.bell-pop');
     await test.step('open the bell popover', async () => {
       await row.getByRole('button', { name: 'Notifications for "Drink water"' }).click(T);
       await expect(pop).toBeVisible();

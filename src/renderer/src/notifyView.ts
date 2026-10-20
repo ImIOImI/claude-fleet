@@ -124,3 +124,16 @@ export function mutedHint(eff: EffectiveRule | undefined, now: number): string |
   if (eff.level === 'all') return null;
   return `${LEVEL_LABELS[eff.level].toLowerCase()} for ${where}`;
 }
+
+export const BELL_POP_WIDTH = 300;
+const BELL_POP_HEIGHT = 330;
+const MARGIN = 8;
+
+/** Fixed-position placement for the 🔔 popover: under the trigger, right-aligned,
+ *  flipped above when it would run off the bottom, clamped to the viewport. */
+export function bellPosition(rect: { left: number; right: number; top: number; bottom: number }, innerWidth: number, innerHeight: number): { top: number; left: number } {
+  const left = Math.max(MARGIN, Math.min(rect.right - BELL_POP_WIDTH, innerWidth - BELL_POP_WIDTH - MARGIN));
+  const below = rect.bottom + 4;
+  const top = below + BELL_POP_HEIGHT > innerHeight - MARGIN ? Math.max(MARGIN, rect.top - 4 - BELL_POP_HEIGHT) : below;
+  return { top, left };
+}

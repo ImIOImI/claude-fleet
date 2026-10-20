@@ -3530,7 +3530,7 @@ table.rules { width: 100%; border-collapse: collapse; font-size: 12px; margin-to
 .pm-state svg { color: var(--ink-1); margin-top: 2px; flex: none; }
 .pm-state > span { display: grid; gap: 2px; }
 .pm-state b { color: var(--ink); font-weight: 600; }
-.bell-pop { position: absolute; top: calc(100% - 2px); right: 6px; width: 300px; z-index: 30; padding: 12px; gap: 10px; animation: none; cursor: default; }
+.bell-pop { position: fixed; width: 300px; z-index: 60; padding: 12px; gap: 10px; animation: none; cursor: default; }
 .bp-level input { position: absolute; opacity: 0; pointer-events: none; }
 .bp-level { position: relative; }
 .todo-row { position: relative; }
@@ -3540,7 +3540,6 @@ table.rules { width: 100%; border-collapse: collapse; font-size: 12px; margin-to
 .nl-title { background: none; border: none; padding: 0; text-align: left; font: inherit; cursor: pointer; }
 .nl-title:hover { text-decoration: underline; }
 .ib-detail-actions .ib-bell-btn { display: inline-flex; gap: 5px; align-items: center; }
-.ib-detail .bell-pop { top: calc(100% + 4px); right: auto; left: 0; }
 .notif-settings .settings-section { margin-bottom: 18px; }
 .dt-list li { flex-wrap: wrap; }
 .dt-list input[type=checkbox] { margin: 0; accent-color: var(--ok); }
