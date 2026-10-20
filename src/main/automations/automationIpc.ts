@@ -3,7 +3,10 @@
 // workspaces use ipc.ts's host-trusted functions (no committee gate).
 import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'node:path';
-import { getSecret } from '../vault.js';
+import { getSecret, listKeys } from '../vault.js';
+import { setLoadoutAutomationHooks } from '../loadouts.js';
+import { prepareLoadoutAutomations, readLoadoutAutomations, readLoadoutVersion } from './loadoutAutomations.js';
+import { createLoadoutInstaller } from './loadoutInstaller.js';
 import { runScript } from './hostScript.js';
 import {
   hostCloseFresh, hostEnsureRunning, hostExecScript, hostFreshState, hostPostToWorkspace, hostSpawnFresh, hostWorkspaceBusy, hostWorkspaceNames,
@@ -96,6 +99,36 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
       send('proposals:changed');
       broadcastInboxChanged(inbox.counts(), BrowserWindow.getAllWindows());
       emitInboxChanged();
+    }
+  });
+
+  // Automations shipped in loadouts (#407 Phase 8).
+  const installer = createLoadoutInstaller({ store, now: Date.now, workspaceName: (id) => names.find((n) => n.id === id)?.name ?? id });
+  const prepareFor = async (srcDir: string, workspaceId: string) => {
+    await refresh();
+    const sources = await readLoadoutAutomations(srcDir);
+    if (!sources.length) return [];
+    const keys = new Map<string, string[]>();
+    for (const ws of new Set([workspaceId, ...(roleWs ? [roleWs] : []), ...names.map((n) => n.id)])) keys.set(ws, await listKeys(ws).catch(() => []));
+    return prepareLoadoutAutomations(sources, workspaceId, { workspace: (v) => names.find((n) => n.id === v)?.id ?? names.find((n) => n.name === v)?.id ?? null },
+      (ws) => keys.get(ws) ?? [], roleWs);
+  };
+  setLoadoutAutomationHooks({
+    preview: async (srcDir, loadoutId, workspaceId, allowHost) => installer.preview(await prepareFor(srcDir, workspaceId), loadoutId, workspaceId, allowHost),
+    install: async (srcDir, loadoutId, workspaceId, opts) => {
+      const prepared = await prepareFor(srcDir, workspaceId);
+      const empty = { created: [], updated: [], kept: [], skipped: [], names: [] };
+      if (!prepared.length) return empty;
+      const r = installer.install(prepared, {
+        loadoutId, version: await readLoadoutVersion(srcDir), targetId: workspaceId,
+        targetName: names.find((n) => n.id === workspaceId)?.name ?? workspaceId, enable: opts.enable, allowHost: opts.allowHost
+      });
+      send('automations:changed');
+      emitInboxChanged();
+      return { ...r, names: r.ids.map((id) => store.get(id)?.name).filter((n): n is string => !!n) };
+    },
+    uninstall: async (loadoutId, workspaceId) => {
+      if (installer.uninstall(loadoutId, workspaceId).length) { send('automations:changed'); emitInboxChanged(); }
     }
   });
 

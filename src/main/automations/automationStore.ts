@@ -61,14 +61,14 @@ export class AutomationStore {
     return r ? toRecord(r) : null;
   }
 
-  create(def: AutomationDef, by: TodoSource, now = Date.now(), enabled = true): AutomationRecord {
+  create(def: AutomationDef, by: TodoSource, now = Date.now(), enabled = true, origin: Record<string, unknown> | null = null): AutomationRecord {
     if (this.byName(def.name)) throw new Error(`an automation named "${def.name}" already exists`);
     const id = newId(now);
     return this.db.transaction(() => {
       this.db.prepare(
-        `INSERT INTO automations (id, name, enabled, version, definition, created_by_kind, created_by_id, created_at, updated_at, last_scheduled_at)
-         VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`
-      ).run(id, def.name, enabled ? 1 : 0, JSON.stringify(def), by.kind, by.id, now, now, now);
+        `INSERT INTO automations (id, name, enabled, version, definition, created_by_kind, created_by_id, origin, created_at, updated_at, last_scheduled_at)
+         VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(id, def.name, enabled ? 1 : 0, JSON.stringify(def), by.kind, by.id, origin ? JSON.stringify(origin) : null, now, now, now);
       this.db.prepare('INSERT INTO automation_versions VALUES (?, 1, ?, ?, ?, ?)').run(id, JSON.stringify(def), now, by.kind, by.id);
       this.setTags(id, def.tags ?? []);
       return this.get(id)!;
@@ -95,6 +95,11 @@ export class AutomationStore {
     // Re-enabling restarts the schedule clock so a long-disabled automation doesn't fire a stale catch-up.
     this.db.prepare('UPDATE automations SET enabled = ?, updated_at = ?, last_scheduled_at = CASE WHEN ? THEN ? ELSE last_scheduled_at END WHERE id = ?')
       .run(enabled ? 1 : 0, now, enabled ? 1 : 0, now, id);
+  }
+
+  /** Loadout provenance (#407 Phase 8). */
+  setOrigin(id: string, origin: Record<string, unknown> | null): void {
+    this.db.prepare('UPDATE automations SET origin = ? WHERE id = ?').run(origin ? JSON.stringify(origin) : null, id);
   }
 
   setLastScheduled(id: string, ts: number): void {

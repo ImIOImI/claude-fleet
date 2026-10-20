@@ -225,7 +225,7 @@ function validateSteps(raw: unknown, params: ParamDef[], ctx: ResolveCtx, errors
     }
     if (!('prompt' in o)) { errors.push(`${w}: must be a prompt or script step`); return; }
     const p = (o.prompt ?? {}) as Record<string, unknown>;
-    if (p.workspace === '$self') { errors.push(`${w}.prompt.workspace: $self is for automations installed from a loadout (Phase 8)`); return; }
+    if (p.workspace === '$self') { errors.push(`${w}.prompt.workspace: $self only works in automations shipped in a loadout (it means the workspace the loadout is installed into)`); return; }
     const ws = typeof p.workspace === 'string' ? ctx.workspace(p.workspace) : null;
     if (!ws) { errors.push(`${w}.prompt.workspace: unknown workspace "${String(p.workspace ?? '')}"`); return; }
     const mode = p.mode ?? 'live';

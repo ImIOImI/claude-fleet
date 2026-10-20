@@ -312,6 +312,8 @@ export interface Automation {
   weekStats: { runs: number; nothingToDo: number; failed: number };
   /** One plain-language line per trigger ("every 30 min · 08–18 · weekdays", "by hand"). */
   triggerSummaries: string[];
+  /** Installed from a loadout (#407 Phase 8). `edited` = changed since install, so updates keep your version. */
+  origin: { loadoutId: string; version: string | null; workspaceId: string; edited: boolean } | null;
 }
 
 // --- Proposals (#407 Phase 5) ------------------------------------------------
@@ -345,4 +347,17 @@ export interface Proposal {
   note: string | null;
   createdAt: number;
   decidedAt: number | null;
+}
+
+// --- Loadout automations (#407 Phase 8) --------------------------------------
+export interface LoadoutAutomationPreview {
+  folder: string;
+  name: string;
+  status: 'new' | 'update' | 'unchanged' | 'kept-edited' | 'invalid';
+  defaultOn: boolean;
+  blocked: string | null;
+  hostStep: boolean;
+  missingSecrets: string[];
+  flags: string[];
+  errors: string[];
 }

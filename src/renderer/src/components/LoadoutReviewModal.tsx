@@ -4,6 +4,7 @@
 // loadout's source folder via the WSL-aware fs:openPath.
 
 import { useEffect, useState } from 'react';
+import type { LoadoutAutomationPreview } from '../../../preload';
 import { ModalBackdrop } from './ModalBackdrop';
 
 interface LoadoutDetail {
@@ -52,6 +53,21 @@ export function LoadoutReviewModal({
   const [detail, setDetail] = useState<LoadoutDetail | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Automations the loadout ships (#407 Phase 8): ticked = turned on by this install.
+  const [autos, setAutos] = useState<LoadoutAutomationPreview[]>([]);
+  const [ticked, setTicked] = useState<Set<string>>(new Set());
+  const [allowHost, setAllowHost] = useState(false);
+
+  useEffect(() => {
+    if (!workspaceId) { setAutos([]); return; }
+    let live = true;
+    window.api.loadouts.automations(workspaceId, loadoutId, allowHost).then((rows) => {
+      if (!live) return;
+      setAutos(rows);
+      setTicked(new Set(rows.filter((r) => r.defaultOn && !r.blocked).map((r) => r.folder)));
+    }).catch(() => live && setAutos([]));
+    return () => { live = false; };
+  }, [workspaceId, loadoutId, allowHost]);
 
   useEffect(() => {
     let live = true;
@@ -69,7 +85,7 @@ export function LoadoutReviewModal({
     setBusy(true);
     setError(null);
     try {
-      const res = (await window.api.loadouts.install(workspaceId, loadoutId)) as {
+      const res = (await window.api.loadouts.install(workspaceId, loadoutId, autos.length ? { automations: [...ticked], allowHost } : undefined)) as {
         scripts?: { label: string; status: string }[];
       };
       onInstalled();
@@ -216,6 +232,42 @@ export function LoadoutReviewModal({
                     </div>
                   ))}
                 </div>
+              </>
+            )}
+
+            {autos.length > 0 && (
+              <>
+                <span className="lbl">Automations · {installed ? 'update with this install' : 'turn on with this install'}</span>
+                <div className="manifest lr-autos" aria-label="Automations in this loadout">
+                  {autos.map((a) => {
+                    const off = !!a.blocked || a.status !== 'new';
+                    return (
+                      <label className={`mf auto${a.hostStep ? ' host' : ''}`} key={a.folder}>
+                        <input
+                          type="checkbox"
+                          aria-label={`Turn on ${a.name}`}
+                          checked={ticked.has(a.folder)}
+                          disabled={off}
+                          onChange={(e) => setTicked((t) => { const n = new Set(t); if (e.target.checked) n.add(a.folder); else n.delete(a.folder); return n; })}
+                        />
+                        <span className="path">{a.name}</span>
+                        <span className="lr-auto-flags">
+                          {a.flags.map((f) => <span key={f} className={`tag${f.startsWith('runs a script on your computer') ? ' danger' : ''}`}>{f}</span>)}
+                        </span>
+                        <span className={`badge-new${a.status === 'invalid' || a.blocked ? ' warn' : ''}`}>
+                          {a.status === 'invalid' ? 'invalid' : a.status === 'kept-edited' ? 'you edited it · kept' : a.status === 'update' ? 'update' : a.status === 'unchanged' ? 'installed' : 'new'}
+                        </span>
+                        {(a.blocked || a.errors.length > 0) && <span className="lr-auto-why">{a.errors[0] ?? a.blocked}</span>}
+                      </label>
+                    );
+                  })}
+                </div>
+                {autos.some((a) => a.hostStep) && (
+                  <label className="lr-host-allow">
+                    <input type="checkbox" checked={allowHost} onChange={(e) => setAllowHost(e.target.checked)} />
+                    Allow this loadout's automations to run scripts on this computer
+                  </label>
+                )}
               </>
             )}
 

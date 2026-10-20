@@ -2,14 +2,14 @@ import { contextBridge, ipcRenderer, IpcRendererEvent, webUtils } from 'electron
 import type {
   Todo, TodoEvent, TodoFilter, InboxCounts, PostTodoInput, UpdateTodoPatch, NotificationRow, NotifySettings, QuietState,
   RuleScope, EffectiveRule, NotifyRule, NotifyLevel, RuleScopeKind, PauseState, Downtime, TodoSource, TodoPriority,
-  Automation, RunRow, Proposal
+  Automation, RunRow, Proposal, LoadoutAutomationPreview
 } from './inboxTypes';
 export type {
   Todo, TodoEvent, TodoEventKind, TodoFilter, TodoSource, TodoStatus, TodoPriority, SourceKind,
   InboxCounts, InboxConfig, PostTodoInput, UpdateTodoPatch, NotifyLevel, NotificationKind, RuleScopeKind, DowntimeBypass,
   NotificationRow, NotifyRule, Downtime, PauseState, QuietState, RuleScope, EffectiveRule, NotifySettings,
   Automation, AutomationDef, ParamDef, ParamType, ParamValue, RunRow, RunStatus, StepRunRow, TriggerDef, StepDef,
-  Proposal, ProposalItem, ProposalKind, ProposalStatus, ItemDecision
+  Proposal, ProposalItem, ProposalKind, ProposalStatus, ItemDecision, LoadoutAutomationPreview, ScriptStepDef, PromptStepDef
 } from './inboxTypes';
 
 /** Outcome of a `pty:resize`. Lives here because preload is the IPC contract
@@ -537,9 +537,12 @@ const api = {
     install: (
       workspaceId: string,
       loadoutId: string,
-      opts?: { source?: string; version?: string; force?: boolean }
+      opts?: { source?: string; version?: string; force?: boolean; automations?: string[]; allowHost?: boolean }
     ): Promise<{ status: 'installed' } | { status: 'needs-confirm'; reason: string }> =>
       ipcRenderer.invoke('loadouts:install', workspaceId, loadoutId, opts),
+    /** The automations a loadout ships, as they'd install into this workspace (#407 Phase 8). */
+    automations: (workspaceId: string, loadoutId: string, allowHost?: boolean): Promise<LoadoutAutomationPreview[]> =>
+      ipcRenderer.invoke('loadouts:automations', workspaceId, loadoutId, allowHost),
     uninstall: (workspaceId: string, loadoutId: string): Promise<void> =>
       ipcRenderer.invoke('loadouts:uninstall', workspaceId, loadoutId),
     catalog: (

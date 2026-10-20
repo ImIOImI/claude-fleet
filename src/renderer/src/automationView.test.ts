@@ -6,7 +6,7 @@ const now = new Date(2026, 9, 19, 10, 0).getTime();
 const auto = (over: Partial<Automation>): Automation => ({
   id: 'A', name: 'x', description: null, enabled: true, version: 1, definition: { name: 'x', triggers: [], steps: [] },
   tags: [], createdBy: { kind: 'user', id: null }, createdAt: 0, updatedAt: 0, lastScheduledAt: null, nextFireAt: null,
-  lastRun: null, weekStats: { runs: 0, nothingToDo: 0, failed: 0 }, triggerSummaries: [], ...over
+  lastRun: null, weekStats: { runs: 0, nothingToDo: 0, failed: 0 }, triggerSummaries: [], origin: null, ...over
 });
 
 describe('automationView', () => {

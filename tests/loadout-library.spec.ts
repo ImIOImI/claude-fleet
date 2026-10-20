@@ -4,7 +4,9 @@
 // loadout via the left-rail Library accordion.
 
 import { test, expect } from '@playwright/test';
-import { launch, mockMainIpc, getCalls } from './_helpers.js';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { launch, mockMainIpc, getCalls, callTestIpc } from './_helpers.js';
 
 test('Library: accordion lists starters, search filters, install + uninstall round-trip (#16)', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
@@ -340,6 +342,60 @@ test('Library v2: Browse-all button opens loadout browser modal', async () => {
     // Close the modal via the Close button.
     await browserModal.locator('button', { hasText: 'Close' }).click();
     await expect(browserModal).not.toBeVisible();
+  } finally {
+    await app.close();
+  }
+});
+
+test('Loadout automations: review lists them with ticks, install turns them on with $self bound, uninstall removes them (#407 Phase 8)', async () => {
+  const { app, window, userDataDir } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
+    await window.getByLabel('Workspace name').fill('lo-ws');
+    await window.getByRole('button', { name: 'Create & start' }).click();
+    await expect(window.getByRole('tab', { name: 'New' })).toBeHidden();
+    const ws = (await callTestIpc<Array<{ id: string; name: string }>>(app, 'workspace:list', [])).find((w) => w.name === 'lo-ws')!;
+
+    const dir = path.join(userDataDir, 'loadouts', 'e2e-autos');
+    const put = (rel: string, body: string) => { mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true }); writeFileSync(path.join(dir, rel), body); };
+    put('loadout.md', '---\ntitle: E2E Autos\nversion: 1.0.0\ndescription: Ships automations\n---\nAutomations for e2e.\n');
+    put('automations/watch/automation.yaml', 'name: e2e-watch\ntriggers: [{ manual: { allowFrom: [$self] } }]\nsteps:\n  - id: check\n    script: { run: ./check.sh, runIn: $self }\n  - id: tell\n    prompt: { workspace: $self, mode: live, message: "Look at {{steps.check.stdout}}" }\n');
+    put('automations/watch/check.sh', 'echo checked\n');
+    put('automations/needs-secret/automation.yaml', 'name: e2e-needs-secret\ntriggers: [{ manual: {} }]\nsteps: [{ id: s, script: { run: "echo $E2E_TOKEN", runIn: $self, secrets: [E2E_TOKEN] } }]\n');
+    put('automations/on-host/automation.yaml', 'name: e2e-on-host\ntriggers: [{ manual: {} }]\nsteps: [{ id: s, script: { run: "date", runIn: host, shell: bash } }]\n');
+
+    const preview = await callTestIpc<Array<{ folder: string; status: string; defaultOn: boolean; blocked: string | null }>>(app, 'loadouts:automations', [ws.id, 'e2e-autos']);
+    expect(preview.map((p) => [p.folder, p.status, p.defaultOn, !!p.blocked])).toEqual([
+      ['needs-secret', 'new', false, true], ['on-host', 'new', false, true], ['watch', 'new', true, false]
+    ]);
+
+    // The review shows them; install from it.
+    await window.reload();
+    await window.locator('.ws-chip', { hasText: 'lo-ws' }).click();
+    const card = window.locator('.loadout-card', { hasText: 'E2E Autos' });
+    await expect(card).toBeVisible({ timeout: 10_000 });
+    await card.locator('.lc-title').click();
+    const modal = window.locator('.modal.loadout-review');
+    const list = modal.getByLabel('Automations in this loadout');
+    await expect(list).toContainText('e2e-watch');
+    await expect(modal.getByLabel('Turn on e2e-watch')).toBeChecked();
+    await expect(modal.getByLabel('Turn on e2e-needs-secret')).toBeDisabled();
+    await expect(list).toContainText('add the secret E2E_TOKEN to turn it on');
+    await expect(list.locator('.tag.danger')).toContainText('runs a script on your computer (bash)');
+    await modal.getByRole('button', { name: /^Install/ }).click();
+    await expect(modal).toBeHidden({ timeout: 10_000 });
+
+    const autos = await callTestIpc<Array<{ name: string; enabled: boolean; definition: { steps: Array<Record<string, { workspace?: string; runIn?: string; run?: string }>> }; origin: { loadoutId: string; version: string } | null }>>(app, 'automations:list', []);
+    expect(autos.map((a) => [a.name, a.enabled])).toEqual([['e2e-needs-secret', false], ['e2e-watch', true]]);
+    const watch = autos.find((a) => a.name === 'e2e-watch')!;
+    expect(watch.origin).toMatchObject({ loadoutId: 'e2e-autos', version: '1.0.0' });
+    expect(watch.definition.steps[0].script).toEqual({ run: 'echo checked\n', runIn: ws.id });
+    expect(watch.definition.steps[1].prompt.workspace).toBe(ws.id);
+    const manifest = await callTestIpc<{ installedLoadouts: Array<{ id: string; automations?: string[] }> }>(app, 'workspace:getManifest', [ws.id]);
+    expect(manifest.installedLoadouts.find((l) => l.id === 'e2e-autos')?.automations?.sort()).toEqual(['e2e-needs-secret', 'e2e-watch']);
+
+    await callTestIpc(app, 'loadouts:uninstall', [ws.id, 'e2e-autos']);
+    expect(await callTestIpc<unknown[]>(app, 'automations:list', [])).toEqual([]);
   } finally {
     await app.close();
   }

@@ -22,7 +22,7 @@ async function presentLocally(id: string): Promise<boolean> {
 export async function ensureAndInstall(
   workspaceId: string,
   id: string,
-  opts: { source?: string; version?: string; force?: boolean } = {}
+  opts: { source?: string; version?: string; force?: boolean; automations?: string[]; allowHost?: boolean } = {}
 ): Promise<{ status: 'installed' } | { status: 'needs-confirm'; reason: string }> {
   const present = await presentLocally(id);
   const prov = await provenanceFor(id);
@@ -39,6 +39,6 @@ export async function ensureAndInstall(
     await download(opts.source, id, opts.version);
   }
 
-  await installLoadout(workspaceId, id);
+  await installLoadout(workspaceId, id, { automations: opts.automations, allowHost: opts.allowHost });
   return { status: 'installed' };
 }

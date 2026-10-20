@@ -1574,7 +1574,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('loadouts:get', (_e, id: string) => loadouts.getLoadout(id));
   // Install/uninstall write `installedLoadouts` onto the manifest, which the
   // merged workspace list carries — invalidate so the Library reflects it.
-  ipcMain.handle('loadouts:install', async (_e, workspaceId: string, loadoutId: string, opts?: { source?: string; version?: string; force?: boolean }) => {
+  ipcMain.handle('loadouts:automations', (_e, workspaceId: string, loadoutId: string, allowHost?: boolean) =>
+    loadouts.previewLoadoutAutomations(workspaceId, loadoutId, allowHost === true));
+  ipcMain.handle('loadouts:install', async (_e, workspaceId: string, loadoutId: string, opts?: { source?: string; version?: string; force?: boolean; automations?: string[]; allowHost?: boolean }) => {
     const result = await ensureAndInstall(workspaceId, loadoutId, opts ?? {});
     invalidateWorkspaceList();
     return result;
