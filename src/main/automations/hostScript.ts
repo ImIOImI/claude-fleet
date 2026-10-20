@@ -17,8 +17,9 @@ const MAX_STREAM = 1_000_000;
 const BASE_KEYS = ['PATH', 'HOME', 'USERPROFILE', 'SystemRoot', 'windir', 'TEMP', 'TMP', 'LANG', 'ComSpec', 'PATHEXT', 'SystemDrive', 'APPDATA', 'LOCALAPPDATA'];
 
 export function shellCommand(shell: ScriptShell, script: string, envKeys: string[]): { cmd: string; args: string[]; extraEnv: Record<string, string> } {
-  if (shell === 'bash' || shell === 'sh') return { cmd: shell, args: ['-c', script], extraEnv: {} };
+  if (shell === 'bash' || shell === 'sh' || shell === 'zsh') return { cmd: shell, args: ['-c', script], extraEnv: {} };
   if (shell === 'pwsh') return { cmd: 'pwsh', args: ['-NoProfile', '-NonInteractive', '-Command', script], extraEnv: {} };
+  if (shell === 'powershell') return { cmd: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], extraEnv: {} };
   // wsl.exe needs --exec (never '--'); env crosses interop only when named in WSLENV.
   return { cmd: 'wsl.exe', args: ['-d', shell.slice(4), '--exec', 'bash', '-c', script], extraEnv: { WSLENV: envKeys.join(':') } };
 }

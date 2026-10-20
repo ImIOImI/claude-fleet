@@ -8,6 +8,9 @@ import { compact, diffLines } from '../lineDiff';
 import { relativeAgo, sourceLabel } from '../inboxView';
 import { AutomationEditor } from './AutomationEditor';
 import { AskClaude } from './AskClaude';
+import { HostShellPicker } from './HostShellPicker';
+import { hostSteps, withShell } from '../automationView';
+import type { AutomationDef, ScriptShell } from '../../../preload';
 
 interface Props {
   proposal: Proposal;
@@ -44,6 +47,8 @@ export function ProposalCard({ proposal: p, names, canDiscuss = false, onDiscuss
   const [note, setNote] = useState('');
   const [editing, setEditing] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Host steps: the shell to run them with on this computer, picked here before approving.
+  const [shellPick, setShellPick] = useState<Record<string, ScriptShell>>({});
   const run = (fn: () => Promise<unknown>) => { setError(null); void fn().catch((e) => setError(err(e))); };
   const single = p.items.length === 1 ? p.items[0] : null;
   const pendingIdx = p.items.map((it, i) => (it.decision === 'pending' ? i : -1)).filter((i) => i >= 0);
@@ -68,6 +73,9 @@ export function ProposalCard({ proposal: p, names, canDiscuss = false, onDiscuss
           )}
           {single.flags.length > 0 && <div className="pr-caps">{single.flags.map((f) => <span key={f} className={`tag${f.startsWith('runs a script on your computer') ? ' danger' : ''}`}>{f}</span>)}</div>}
           <Diff item={single} />
+          {single.decision === 'pending' && hostSteps(single.after).map((h) => (
+            <HostShellPicker key={h.id} stepId={h.id} value={shellPick[h.id] ?? h.shell} onChange={(sh) => setShellPick((m) => ({ ...m, [h.id]: sh }))} />
+          ))}
         </>
       ) : (
         <ul className="batch-list">
@@ -105,7 +113,13 @@ export function ProposalCard({ proposal: p, names, canDiscuss = false, onDiscuss
         </div>
       ) : (
         <div className="pr-actions">
-          <button className="btn primary" onClick={() => run(() => window.api.proposals.approve(p.id, single ? {} : { accept: pendingIdx.filter((i) => accept.has(i)) }))}>
+          <button className="btn primary" onClick={() => run(() => {
+            if (single && Object.keys(shellPick).length) {
+              const def = Object.entries(shellPick).reduce<AutomationDef>((d, [id, sh]) => withShell(d, id, sh), single.after);
+              return window.api.proposals.approve(p.id, { editedYaml: toYaml(def), editedIndex: 0 });
+            }
+            return window.api.proposals.approve(p.id, single ? {} : { accept: pendingIdx.filter((i) => accept.has(i)) });
+          })}>
             {single ? 'Approve' : 'Apply accepted'}
           </button>
           {single && <button className="btn" onClick={() => setEditing(toYaml(single.after))}>Edit, then approve</button>}

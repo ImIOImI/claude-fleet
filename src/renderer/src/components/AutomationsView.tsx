@@ -8,6 +8,9 @@ import { RUN_LABELS, TRIGGER_LABELS, nextLabel, runDuration, runTone, runWhen } 
 import { AutomationEditor } from './AutomationEditor';
 import { RunModal } from './RunModal';
 import { AskClaude } from './AskClaude';
+import { HostShellPicker } from './HostShellPicker';
+import { stringify } from 'yaml';
+import { withShell } from '../automationView';
 
 interface Props {
   names: Record<string, string>;
@@ -191,8 +194,15 @@ export function AutomationsView({ names, automationsWs = null, workspaces = [], 
               <li key={s.id} className={s.script.runIn === 'host' ? 'host-step' : undefined}>
                 <span className="step-k">{s.id}</span>
                 <span>script {s.script.runIn === 'host'
-                  ? <>on <b>this computer</b> ({s.script.shell})</>
+                  ? <>on <b>this computer</b></>
                   : <>in <b>{s.script.runIn ? names[s.script.runIn] ?? s.script.runIn : automationsWs?.name ?? 'the automations workspace'}</b></>}</span>
+                {s.script.runIn === 'host' && (
+                  <HostShellPicker
+                    stepId={s.id}
+                    value={s.script.shell}
+                    onChange={(shell) => { void window.api.automations.update(a.id, stringify(withShell(a.definition, s.id, shell), { lineWidth: 0 })).then(reload); }}
+                  />
+                )}
                 <span className="ib-dim">{s.script.timeout ? `timeout ${s.script.timeout}` : 'timeout 5m'}{s.script.ensureRunning ? ' · starts it if needed' : ''}</span>
                 {(s.script.secrets ?? []).map((k) => <span key={k} className="tag" title="Secret injected into this script only">🔑 {k}</span>)}
                 <pre className="ib-pre step-script">{s.script.run}</pre>

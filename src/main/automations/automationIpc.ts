@@ -10,8 +10,11 @@ import { createLoadoutInstaller } from './loadoutInstaller.js';
 import { runScript } from './hostScript.js';
 import {
   hostCloseFresh, hostEnsureRunning, hostExecScript, hostFreshState, hostPostToWorkspace, hostSpawnFresh, hostWorkspaceBusy, hostWorkspaceNames,
-  hostWorkspaceState, setFleetEventObserver
+  hostWorkspaceState, hostWslDistros, setFleetEventObserver
 } from '../ipc.js';
+import { existsSync } from 'node:fs';
+import type { HostShell } from '../../preload/inboxTypes.js';
+import { detectHostShells, onPath } from './hostShells.js';
 import { inboxEvents } from '../inbox/inboxEvents.js';
 import type { Todo } from '../../preload/inboxTypes.js';
 import { setAutomationHandlers } from '../mcpServer.js';
@@ -55,6 +58,18 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     roleWs = await listWorkspaceManifests().then((ms) => ms.find((m) => m.role === 'automations')?.id ?? null).catch(() => roleWs);
   };
   const privileged = (id: string) => id === roleWs;
+  // Host shells (#407): PATH for native shells, the local-workspace WSL probe for distros. Refreshed every 5 min.
+  let shells: HostShell[] = [];
+  let shellsAt = 0;
+  const refreshShells = async (): Promise<HostShell[]> => {
+    if (Date.now() - shellsAt < 5 * 60_000 && shells.length) return shells;
+    const wsl = await hostWslDistros().catch(() => ({ distros: [], defaultDistro: null }));
+    shells = detectHostShells(process.platform, (c) => onPath(c, process.env.PATH, process.platform, existsSync), wsl.distros, wsl.defaultDistro);
+    shellsAt = Date.now();
+    return shells;
+  };
+  void refreshShells();
+  const hostShellIds = () => (shells.length ? shells.map((x) => x.id as string) : undefined);
   void refresh();
 
   const svc = createAutomationService({
@@ -78,6 +93,7 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     emitTodo: async (id, runId, input) => { if (!sink) throw new Error('the inbox is unavailable'); await sink.todoFromAutomation(id, runId, input); },
     emitNotify: async (id, runId, input) => { if (!sink) throw new Error('the inbox is unavailable'); await sink.notifyFromAutomation(id, runId, input); },
     resolveWorkspace: (v) => names.find((n) => n.id === v)?.id ?? names.find((n) => n.name === v)?.id ?? null,
+    hostShells: hostShellIds,
     notify: notify ? (n) => notify.request(n) : undefined,
     changed: () => { send('automations:changed'); emitInboxChanged(); }
   });
@@ -89,6 +105,7 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     now: Date.now,
     resolveWorkspace: (v) => names.find((n) => n.id === v)?.id ?? names.find((n) => n.name === v)?.id ?? null,
     workspaceName: (id) => names.find((n) => n.id === id)?.name ?? id,
+    hostShells: hostShellIds,
     trusted: async (id) => {
       const m = await readWorkspaceManifest(id);
       return m?.kind === 'container' && (m.inbox?.trusted === true || m.role === 'automations');
@@ -110,7 +127,8 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     if (!sources.length) return [];
     const keys = new Map<string, string[]>();
     for (const ws of new Set([workspaceId, ...(roleWs ? [roleWs] : []), ...names.map((n) => n.id)])) keys.set(ws, await listKeys(ws).catch(() => []));
-    return prepareLoadoutAutomations(sources, workspaceId, { workspace: (v) => names.find((n) => n.id === v)?.id ?? names.find((n) => n.name === v)?.id ?? null },
+    await refreshShells();
+    return prepareLoadoutAutomations(sources, workspaceId, { workspace: (v) => names.find((n) => n.id === v)?.id ?? names.find((n) => n.name === v)?.id ?? null, hostShells: hostShellIds() },
       (ws) => keys.get(ws) ?? [], roleWs);
   };
   setLoadoutAutomationHooks({
@@ -161,7 +179,8 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
   });
 
   const USER = { kind: 'user' as const, id: null };
-  const withNames = async <T>(fn: () => T): Promise<T> => { await refresh(); return fn(); };
+  const withNames = async <T>(fn: () => T): Promise<T> => { await Promise.all([refresh(), refreshShells()]); return fn(); };
+  ipcMain.handle('automations:hostShells', () => refreshShells());
   ipcMain.handle('automations:list', () => withNames(() => svc.list()));
   ipcMain.handle('automations:get', (_e, id: string) => withNames(() => svc.get(id)));
   ipcMain.handle('automations:validate', (_e, text: string) => withNames(() => svc.validate(String(text ?? ''))));
@@ -206,7 +225,7 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
   const toRole = async (prompt: (ctx: { workspaces: string[]; automations: string[] }) => string): Promise<string> => {
     await refresh();
     if (!roleWs) throw new Error('set up an automations workspace first');
-    const ctx = { workspaces: names.filter((n) => n.id !== roleWs).map((n) => n.name), automations: store.list().map((a) => a.name) };
+    const ctx = { workspaces: names.filter((n) => n.id !== roleWs).map((n) => n.name), automations: store.list().map((a) => a.name), hostShells: (await refreshShells()).map((x) => `${x.id} (${x.label})`) };
     await hostPostToWorkspace(roleWs, prompt(ctx));
     return roleWs;
   };

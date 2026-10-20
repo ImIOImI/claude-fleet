@@ -8,7 +8,7 @@ const chip = (w: Page) => w.locator('.inbox-chip');
 test('Inbox: add, tag, prioritise, mark done (#407)', async () => {
   const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
   try {
-    await expect(chip(window)).toContainText('Inbox');
+    await expect(chip(window)).toContainText('Automations');
     await expect(chip(window).locator('.ws-chip-sub')).toHaveText('nothing open');
     await chip(window).locator('.ws-chip').click();
     const view = window.locator('.inbox-view');

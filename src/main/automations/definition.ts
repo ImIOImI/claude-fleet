@@ -35,6 +35,8 @@ export function parseDuration(v: unknown): number | null {
 export interface ResolveCtx {
   /** Resolve a workspace id or name to an id (null if unknown). */
   workspace(idOrName: string): string | null;
+  /** Shells this computer offers for `runIn: host` steps (detected); undefined = don't check. */
+  hostShells?: string[];
 }
 
 export function parseDefinitionText(text: string): Validation<unknown> {
@@ -180,14 +182,22 @@ function validateScript(raw: unknown, w: string, ctx: ResolveCtx, errors: string
   if (o.shell !== undefined) {
     if (out.runIn !== 'host') { errors.push(`${w}.script.shell: only for runIn: host (containers use bash)`); return null; }
     const sh = String(o.shell);
-    if (!(sh === 'bash' || sh === 'sh' || sh === 'pwsh' || (sh.startsWith('wsl:') && DISTRO_RE.test(sh.slice(4))))) {
-      errors.push(`${w}.script.shell: bash, sh, pwsh or wsl:<distro>`);
+    if (!(['bash', 'sh', 'zsh', 'pwsh', 'powershell'].includes(sh) || (sh.startsWith('wsl:') && DISTRO_RE.test(sh.slice(4))))) {
+      errors.push(`${w}.script.shell: bash, sh, zsh, pwsh, powershell or wsl:<distro>`);
+      return null;
+    }
+    if (ctx.hostShells && !ctx.hostShells.includes(sh)) {
+      errors.push(`${w}.script.shell: ${sh} isn't available on this computer (available: ${ctx.hostShells.join(', ')})`);
       return null;
     }
     out.shell = sh as ScriptShell;
   } else if (out.runIn === 'host') {
-    errors.push(`${w}.script.shell: a host step must name its shell (bash, sh, pwsh or wsl:<distro>)`);
-    return null;
+    // One shell on this computer → use it; several → the step must pick.
+    if (ctx.hostShells?.length === 1) out.shell = ctx.hostShells[0] as ScriptShell;
+    else {
+      errors.push(`${w}.script.shell: pick the shell to run this on${ctx.hostShells?.length ? `: ${ctx.hostShells.join(', ')}` : ' (bash, sh, zsh, pwsh, powershell or wsl:<distro>)'}`);
+      return null;
+    }
   }
   if (o.secrets !== undefined) {
     if (!Array.isArray(o.secrets) || o.secrets.length > 20 || !o.secrets.every((k) => typeof k === 'string' && SECRET_RE.test(k) && !RESERVED_ENV.test(k))) {

@@ -11,6 +11,8 @@ import { dueSchedule, nextFireAt } from './scheduler.js';
 import { describeCron } from './cron.js';
 
 export interface AutomationDeps extends Omit<RunnerDeps, 'store'> {
+  /** Shells this computer offers for host steps (#407); validation checks `shell` against them. */
+  hostShells?(): string[] | undefined;
   store: AutomationStore;
   /** Resolve a workspace id or name to an id. */
   resolveWorkspace(idOrName: string): string | null;
@@ -57,7 +59,7 @@ export function createAutomationService(deps: AutomationDeps) {
   const setTimer = deps.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
   const clearTimer = deps.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>));
 
-  const ctx = { workspace: (v: string) => deps.resolveWorkspace(v) };
+  const ctx = { workspace: (v: string) => deps.resolveWorkspace(v), get hostShells() { return deps.hostShells?.(); } };
 
   function view(a: AutomationRecord): Automation {
     const now = deps.now();

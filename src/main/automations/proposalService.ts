@@ -9,6 +9,8 @@ import { classifyChange, riskFlags } from './classify.js';
 import { definitionToYaml, parseDefinitionText, validateDefinition } from './definition.js';
 
 export interface ProposalDeps {
+  /** Shells this computer offers for host steps (#407); validation checks `shell` against them. */
+  hostShells?(): string[] | undefined;
   proposals: ProposalStore;
   automations: AutomationStore;
   now(): number;
@@ -31,7 +33,7 @@ function statusOf(items: ProposalItem[]): ProposalStatus {
 }
 
 export function createProposalService(deps: ProposalDeps) {
-  const ctx = { workspace: (v: string) => deps.resolveWorkspace(v) };
+  const ctx = { workspace: (v: string) => deps.resolveWorkspace(v), get hostShells() { return deps.hostShells?.(); } };
 
   function parseDef(raw: unknown, where: string): AutomationDef {
     const parsed = typeof raw === 'string' ? parseDefinitionText(raw) : { ok: true as const, value: raw };
