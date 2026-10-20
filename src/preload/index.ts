@@ -2,14 +2,14 @@ import { contextBridge, ipcRenderer, IpcRendererEvent, webUtils } from 'electron
 import type {
   Todo, TodoEvent, TodoFilter, InboxCounts, PostTodoInput, UpdateTodoPatch, NotificationRow, NotifySettings, QuietState,
   RuleScope, EffectiveRule, NotifyRule, NotifyLevel, RuleScopeKind, PauseState, Downtime, TodoSource, TodoPriority,
-  Automation, RunRow, Proposal, LoadoutAutomationPreview
+  Automation, RunRow, Proposal, LoadoutAutomationPreview, HostShell
 } from './inboxTypes';
 export type {
   Todo, TodoEvent, TodoEventKind, TodoFilter, TodoSource, TodoStatus, TodoPriority, SourceKind,
   InboxCounts, InboxConfig, PostTodoInput, UpdateTodoPatch, NotifyLevel, NotificationKind, RuleScopeKind, DowntimeBypass,
   NotificationRow, NotifyRule, Downtime, PauseState, QuietState, RuleScope, EffectiveRule, NotifySettings,
   Automation, AutomationDef, ParamDef, ParamType, ParamValue, RunRow, RunStatus, StepRunRow, TriggerDef, StepDef,
-  Proposal, ProposalItem, ProposalKind, ProposalStatus, ItemDecision, LoadoutAutomationPreview, ScriptStepDef, PromptStepDef
+  Proposal, ProposalItem, ProposalKind, ProposalStatus, ItemDecision, LoadoutAutomationPreview, ScriptStepDef, PromptStepDef, HostShell, ScriptShell
 } from './inboxTypes';
 
 /** Outcome of a `pty:resize`. Lives here because preload is the IPC contract
@@ -367,6 +367,8 @@ const api = {
     remove: (id: string): Promise<void> => ipcRenderer.invoke('automations:remove', id),
     run: (id: string, args: Record<string, unknown>): Promise<RunRow> => ipcRenderer.invoke('automations:run', id, args),
     starter: (): Promise<string> => ipcRenderer.invoke('automations:starter'),
+    /** Shells this computer can run `runIn: host` steps with (#407). */
+    hostShells: (): Promise<HostShell[]> => ipcRenderer.invoke('automations:hostShells'),
     roleWorkspace: (): Promise<string | null> => ipcRenderer.invoke('automations:roleWorkspace'),
     setRole: (workspaceId: string | null): Promise<string | null> => ipcRenderer.invoke('automations:setRole', workspaceId),
     discuss: (proposalId: string): Promise<string> => ipcRenderer.invoke('automations:discuss', proposalId),

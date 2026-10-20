@@ -362,7 +362,9 @@ test('Loadout automations: review lists them with ticks, install turns them on w
     put('automations/watch/automation.yaml', 'name: e2e-watch\ntriggers: [{ manual: { allowFrom: [$self] } }]\nsteps:\n  - id: check\n    script: { run: ./check.sh, runIn: $self }\n  - id: tell\n    prompt: { workspace: $self, mode: live, message: "Look at {{steps.check.stdout}}" }\n');
     put('automations/watch/check.sh', 'echo checked\n');
     put('automations/needs-secret/automation.yaml', 'name: e2e-needs-secret\ntriggers: [{ manual: {} }]\nsteps: [{ id: s, script: { run: "echo $E2E_TOKEN", runIn: $self, secrets: [E2E_TOKEN] } }]\n');
-    put('automations/on-host/automation.yaml', 'name: e2e-on-host\ntriggers: [{ manual: {} }]\nsteps: [{ id: s, script: { run: "date", runIn: host, shell: bash } }]\n');
+    // A shell this computer has: Windows always has Windows PowerShell.
+    const hostShell = process.platform === 'win32' ? 'powershell' : 'sh';
+    put('automations/on-host/automation.yaml', `name: e2e-on-host\ntriggers: [{ manual: {} }]\nsteps: [{ id: s, script: { run: "date", runIn: host, shell: ${hostShell} } }]\n`);
 
     const preview = await callTestIpc<Array<{ folder: string; status: string; defaultOn: boolean; blocked: string | null }>>(app, 'loadouts:automations', [ws.id, 'e2e-autos']);
     expect(preview.map((p) => [p.folder, p.status, p.defaultOn, !!p.blocked])).toEqual([
@@ -381,7 +383,7 @@ test('Loadout automations: review lists them with ticks, install turns them on w
     await expect(modal.getByLabel('Turn on e2e-watch')).toBeChecked();
     await expect(modal.getByLabel('Turn on e2e-needs-secret')).toBeDisabled();
     await expect(list).toContainText('add the secret E2E_TOKEN to turn it on');
-    await expect(list.locator('.tag.danger')).toContainText('runs a script on your computer (bash)');
+    await expect(list.locator('.tag.danger')).toContainText(`runs a script on your computer (${hostShell})`);
     await modal.getByRole('button', { name: /^Install/ }).click();
     await expect(modal).toBeHidden({ timeout: 10_000 });
 

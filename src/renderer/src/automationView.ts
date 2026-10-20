@@ -1,5 +1,5 @@
 // Pure display helpers for Inbox › Automations (#407 Phase 3).
-import type { Automation, ParamDef, RunRow, RunStatus } from '../../preload/inboxTypes';
+import type { Automation, AutomationDef, ParamDef, RunRow, RunStatus, ScriptShell } from '../../preload/inboxTypes';
 import { hhmm } from './notifyView';
 import { relativeAgo } from './inboxView';
 
@@ -42,4 +42,14 @@ export const TRIGGER_LABELS: Record<RunRow['trigger']['kind'], string> = { sched
 /** Initial form values for the Run-now modal (strings, as the inputs hold them). */
 export function initialArgs(params: ParamDef[] | undefined): Record<string, string> {
   return Object.fromEntries((params ?? []).map((p) => [p.name, p.default === undefined ? '' : String(p.default)]));
+}
+
+/** A copy of the definition with one host step's shell changed (#407). */
+export function withShell(def: AutomationDef, stepId: string, shell: ScriptShell): AutomationDef {
+  return { ...def, steps: def.steps.map((s) => ('script' in s && s.id === stepId ? { ...s, script: { ...s.script, shell } } : s)) };
+}
+
+/** The host steps of a definition, in order. */
+export function hostSteps(def: AutomationDef): Array<{ id: string; shell: ScriptShell | undefined }> {
+  return def.steps.flatMap((s) => ('script' in s && s.script.runIn === 'host' ? [{ id: s.id, shell: s.script.shell }] : []));
 }

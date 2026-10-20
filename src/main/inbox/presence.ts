@@ -110,7 +110,7 @@ export function startPresence(inbox: InboxStore, notify: NotifyService, approval
         tray.setContextMenu(Menu.buildFromTemplate([
           { label: tooltip(PRODUCT, n, counts, quietText), enabled: false },
           { type: 'separator' },
-          { label: 'Open Inbox', click: sendOpenInbox },
+          { label: 'Open Automations', click: sendOpenInbox },
           { label: `Open ${PRODUCT}`, click: () => { showWindow(); } },
           { type: 'separator' },
           ...(paused

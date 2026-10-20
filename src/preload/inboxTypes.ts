@@ -235,7 +235,9 @@ export interface PromptStepDef {
   };
 }
 /** Where a script step runs (#407 Phase 7): the automations workspace's container (default), host, or another container workspace (id). */
-export type ScriptShell = 'bash' | 'sh' | 'pwsh' | `wsl:${string}`;
+export type ScriptShell = 'bash' | 'sh' | 'zsh' | 'pwsh' | 'powershell' | `wsl:${string}`;
+/** A shell this computer can run host steps with (#407). */
+export interface HostShell { id: ScriptShell; label: string; isDefault?: boolean }
 export interface ScriptStepDef {
   id: string;
   script: {

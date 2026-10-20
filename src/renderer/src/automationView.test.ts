@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { runTone, nextLabel, runDuration, initialArgs, RUN_LABELS } from './automationView';
+import { runTone, nextLabel, runDuration, initialArgs, RUN_LABELS, hostSteps, withShell } from './automationView';
 import type { Automation, RunRow } from '../../preload/inboxTypes';
 
 const now = new Date(2026, 9, 19, 10, 0).getTime();
@@ -30,5 +30,17 @@ describe('automationView', () => {
     expect(runDuration(r(1500))).toBe('1.5s');
     expect(runDuration(r(72_000))).toBe('1m 12s');
     expect(initialArgs([{ name: 'since', type: 'string', default: '1h' }, { name: 'dry', type: 'boolean' }])).toEqual({ since: '1h', dry: '' });
+  });
+});
+
+describe('host step shells (#407)', () => {
+  it('lists host steps and swaps one step\'s shell', () => {
+    const def = { name: 'x', triggers: [], steps: [
+      { id: 'a', script: { run: 'x', runIn: 'host', shell: 'pwsh' as const } },
+      { id: 'b', script: { run: 'y' } }
+    ] };
+    expect(hostSteps(def)).toEqual([{ id: 'a', shell: 'pwsh' }]);
+    expect(hostSteps(withShell(def, 'a', 'wsl:Ubuntu'))).toEqual([{ id: 'a', shell: 'wsl:Ubuntu' }]);
+    expect(withShell(def, 'a', 'powershell').steps[1]).toBe(def.steps[1]);
   });
 });

@@ -159,9 +159,9 @@ describe('script steps (#407 Phase 7)', () => {
   });
   it('rejects bad scripts with readable paths', () => {
     expect(errs([{ id: 'a', script: {} }])[0]).toMatch(/steps\[0\]\.script\.run: the script text is required/);
-    expect(errs([{ id: 'a', script: { run: 'x', runIn: 'host' } }])[0]).toMatch(/must name its shell/);
+    expect(errs([{ id: 'a', script: { run: 'x', runIn: 'host' } }])[0]).toMatch(/pick the shell to run this on/);
     expect(errs([{ id: 'a', script: { run: 'x', shell: 'bash' } }])[0]).toMatch(/only for runIn: host/);
-    expect(errs([{ id: 'a', script: { run: 'x', runIn: 'host', shell: 'zsh' } }])[0]).toMatch(/bash, sh, pwsh or wsl:<distro>/);
+    expect(errs([{ id: 'a', script: { run: 'x', runIn: 'host', shell: 'fish' } }])[0]).toMatch(/bash, sh, zsh, pwsh, powershell or wsl:<distro>/);
     expect(errs([{ id: 'a', script: { run: 'x', runIn: 'host', shell: 'wsl:Ubuntu-24.04' } }])).toEqual([]);
     expect(errs([{ id: 'a', script: { run: 'x', runIn: 'nope' } }])[0]).toMatch(/unknown "nope"/);
     expect(errs([{ id: 'a', script: { run: 'x', secrets: ['PATH'] } }])[0]).toMatch(/vault key names/);
@@ -172,5 +172,21 @@ describe('script steps (#407 Phase 7)', () => {
   it('{{steps.<id>.stdout}} must name an earlier script step', () => {
     expect(errs([{ id: 'tell', prompt: { workspace: 'ops-oncall', message: '{{steps.fetch.stdout}}' } }, { id: 'fetch', script: { run: 'x' } }])[0]).toMatch(/earlier script step/);
     expect(errs([{ id: 'fetch', script: { run: 'x' } }, { id: 'tell', prompt: { workspace: 'ops-oncall', message: '{{steps.fetch.exit}}' } }])[0]).toMatch(/earlier script step/);
+  });
+});
+
+describe('host shells (#407)', () => {
+  const host = (shell?: string) => ({ name: 'h', triggers: [{ manual: {} }], steps: [{ id: 'a', script: { run: 'x', runIn: 'host', ...(shell ? { shell } : {}) } }] });
+  const run = (def: unknown, shells?: string[]) => validateDefinition(def, { ...ctx, hostShells: shells });
+  it('one shell on this computer fills itself in; several must be picked from the list', () => {
+    const one = run(host(), ['powershell']);
+    expect(one.ok && (one.value.steps[0] as { script: { shell: string } }).script.shell).toBe('powershell');
+    const many = run(host(), ['pwsh', 'powershell', 'wsl:Ubuntu']);
+    expect(many.ok ? [] : many.errors).toEqual(['steps[0].script.shell: pick the shell to run this on: pwsh, powershell, wsl:Ubuntu']);
+  });
+  it('a named shell must exist on this computer when the list is known', () => {
+    expect(run(host('wsl:Ubuntu'), ['pwsh', 'wsl:Ubuntu']).ok).toBe(true);
+    const r = run(host('wsl:Debian'), ['pwsh', 'wsl:Ubuntu']);
+    expect(r.ok ? [] : r.errors).toEqual(["steps[0].script.shell: wsl:Debian isn't available on this computer (available: pwsh, wsl:Ubuntu)"]);
   });
 });

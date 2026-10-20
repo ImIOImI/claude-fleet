@@ -165,6 +165,12 @@ function emitFleetEvent(e: { on: 'session.idle' | 'workspace.started'; workspace
 
 const execFileAsync = promisify(execFile);
 
+/** The WSL distro list the local-workspace form uses, for automation host shells (#407). */
+export function hostWslDistros(): Promise<{ distros: string[]; defaultDistro: string | null }> {
+  if (process.platform !== 'win32') return Promise.resolve({ distros: [], defaultDistro: null });
+  return listWslDistros(wslProbeDeps);
+}
+
 const wslProbeDeps: ProbeDeps = {
   execBuf: async (file, args) => {
     const { stdout } = await execFileAsync(file, args, { encoding: 'buffer' as const });

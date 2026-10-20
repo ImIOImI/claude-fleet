@@ -37,18 +37,21 @@ steps:                               # 1–10, run in order
         fleet-emit state '{"since": "2026-10-20T09:00:00Z"}'                         # → $FLEET_STATE next run
         # exit 10 = nothing to do (stops the run quietly); other non-zero = failure
       secrets: [WEBEX_TOKEN]         # from the automations workspace's secrets
-      runIn: host                    # optional: this computer (needs shell: bash | sh | pwsh | wsl:<distro>); always needs approval
+      runIn: host                    # optional: this computer (shell: one of the shells listed below); always needs approval
       timeout: 2m`;
 
 export interface DraftCtx {
   workspaces: string[];
   automations: string[];
+  /** Shells for runIn: host steps on this computer, e.g. "pwsh (PowerShell 7)". */
+  hostShells?: string[];
 }
 
 function context(ctx: DraftCtx): string {
   return [
     `Workspaces you can target (by name): ${ctx.workspaces.join(', ') || '(none)'}.`,
-    `Existing automations: ${ctx.automations.join(', ') || '(none)'}.`
+    `Existing automations: ${ctx.automations.join(', ') || '(none)'}.`,
+    ...(ctx.hostShells?.length ? [`Shells for runIn: host steps on this computer: ${ctx.hostShells.join(', ')}. A host step must name one of these as shell.`] : [])
   ].join('\n');
 }
 

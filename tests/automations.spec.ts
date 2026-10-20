@@ -312,3 +312,28 @@ steps:
     await app.close();
   }
 });
+
+test('Host steps: several shells → must pick one; the detail pane switches it (#407)', async () => {
+  test.skip(process.platform === 'win32', 'shell list differs on Windows');
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    const shells = await callTestIpc<Array<{ id: string }>>(app, 'automations:hostShells', []);
+    expect(shells.map((s) => s.id)).toEqual(expect.arrayContaining(['bash', 'sh']));
+    const noShell = 'name: e2e-host\ntriggers: [{ manual: {} }]\nsteps: [{ id: local, script: { run: "echo hi", runIn: host } }]\n';
+    const v = await callTestIpc<{ ok: boolean; errors: string[] }>(app, 'automations:validate', [noShell]);
+    expect(v.ok).toBe(false);
+    expect(v.errors[0]).toMatch(/pick the shell to run this on: bash.*sh/);
+    const bad = await callTestIpc<{ ok: boolean; errors: string[] }>(app, 'automations:validate', [noShell.replace('runIn: host', 'runIn: host, shell: "wsl:Nope"')]);
+    expect(bad.errors[0]).toMatch(/wsl:Nope isn't available on this computer/);
+
+    const a = await callTestIpc<{ id: string }>(app, 'automations:create', [noShell.replace('runIn: host', 'runIn: host, shell: sh')]);
+    const view = await openAutomations(window);
+    await view.locator('.auto-row', { hasText: 'e2e-host' }).click();
+    const pick = view.getByLabel('Shell for local');
+    await expect(pick).toHaveValue('sh');
+    await pick.selectOption('bash');
+    await expect.poll(async () => (await callTestIpc<{ automation: { version: number; definition: { steps: Array<{ script: { shell: string } }> } } }>(app, 'automations:get', [a.id])).automation.definition.steps[0].script.shell).toBe('bash');
+  } finally {
+    await app.close();
+  }
+});
