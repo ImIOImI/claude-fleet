@@ -26,7 +26,7 @@ export function ActivityView({ names, onOpenTodo, onOpenWorkspace, canDiscuss = 
   const [rows, setRows] = useState<NotificationRow[]>([]);
   const [rules, setRules] = useState<NotifyRule[]>([]);
   const [downtimes, setDowntimes] = useState<Downtime[]>([]);
-  const [bellFor, setBellFor] = useState<{ id: string; rect: DOMRect } | null>(null);
+  const [bellFor, setBellFor] = useState<{ id: string; rect: DOMRect; el: HTMLElement } | null>(null);
   const [proposals, setProposals] = useState<Proposal[]>([]);
 
   const reload = useCallback(() => {
@@ -88,10 +88,11 @@ export function ActivityView({ names, onOpenTodo, onOpenWorkspace, canDiscuss = 
                 </span>
                 {n.kind !== 'digest' && n.kind !== 'test' && (
                   <span className="nl-bell">
-                    <button className="todo-act" aria-label={`Notifications for things like "${n.title}"`} onClick={(e) => setBellFor(bellFor?.id === n.id ? null : { id: n.id, rect: e.currentTarget.getBoundingClientRect() })}><BellIcon /></button>
+                    <button className="todo-act" aria-label={`Notifications for things like "${n.title}"`} onClick={(e) => setBellFor(bellFor?.id === n.id ? null : { id: n.id, rect: e.currentTarget.getBoundingClientRect(), el: e.currentTarget })}><BellIcon /></button>
                     {bellFor?.id === n.id && (
                       <BellPopover
                         anchor={bellFor.rect}
+                        anchorEl={bellFor.el}
                         item={{ source: n.source, dedupeKey: n.dedupeKey, tags: n.tags, priority: n.priority }}
                         names={names}
                         onClose={() => setBellFor(null)}
