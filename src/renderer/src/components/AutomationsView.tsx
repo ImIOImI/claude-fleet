@@ -9,9 +9,16 @@ import { RunModal } from './RunModal';
 
 interface Props {
   names: Record<string, string>;
+  automationsWs?: { id: string; name: string; running: boolean } | null;
+  workspaces?: Array<{ id: string; name: string; kind: string }>;
+  onCreateAutomationsWs?: () => void;
+  onEditAutomationsWs?: () => void;
 }
 
-export function AutomationsView({ names }: Props) {
+export function AutomationsView({ names, automationsWs = null, workspaces = [], onCreateAutomationsWs, onEditAutomationsWs }: Props) {
+  const [pick, setPick] = useState('');
+  const [roleError, setRoleError] = useState<string | null>(null);
+  const containers = workspaces.filter((w) => w.kind === 'container');
   const [list, setList] = useState<Automation[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<{ automation: Automation; runs: RunRow[]; yaml: string } | null>(null);
@@ -49,6 +56,31 @@ export function AutomationsView({ names }: Props) {
   return (
     <div className="ib-split">
       <section className="ib-listcol">
+        {automationsWs ? (
+          <div className="aw-banner set" role="note">
+            <span>Automations workspace: <b>{automationsWs.name}</b>{automationsWs.running ? '' : ' (not running)'}</span>
+            <span className="ib-spacer" />
+            <button className="btn-mini" onClick={onEditAutomationsWs}>Edit</button>
+            <button className="btn-mini" onClick={() => void window.api.automations.setRole(null)}>Stop using</button>
+          </div>
+        ) : (
+          <div className="aw-banner" role="note" aria-label="Set up the automations workspace">
+            <div className="aw-text">
+              <b>Set up an automations workspace</b>
+              <span className="ib-dim">Claude there can see and manage every automation, review proposals with you, and make bulk changes. Its sessions open inside the Inbox. It's trusted for low-risk edits.</span>
+            </div>
+            <div className="aw-actions">
+              <select aria-label="Existing workspace" value={pick} onChange={(e) => setPick(e.target.value)}>
+                <option value="">Use an existing container workspace…</option>
+                {containers.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+              </select>
+              <button className="btn btn-sm" disabled={!pick} onClick={() => { setRoleError(null); void window.api.automations.setRole(pick).catch((e) => setRoleError(String(e.message ?? e))); }}>Use it</button>
+              <span className="ib-dim">or</span>
+              <button className="btn btn-sm primary" onClick={onCreateAutomationsWs}>Create one…</button>
+            </div>
+            {roleError && <p className="form-hint error-text">{roleError}</p>}
+          </div>
+        )}
         <div className="ib-toolbar">
           <div className="obs-scope-toggle ib-scope three" role="tablist" aria-label="Automation filter">
             {([['all', `All · ${list.length}`], ['enabled', `Enabled · ${enabledCount}`], ['failing', `Failing · ${failingCount}`]] as const).map(([f, label]) => (

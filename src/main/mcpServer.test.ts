@@ -804,7 +804,7 @@ describe('inbox tools (#407)', () => {
   afterEach(() => setInboxHandlers(null));
 
   it('exposes post_todo / update_todo / list_todos', () => {
-    expect(TOOLS.map((t) => t.name)).toEqual(expect.arrayContaining(['post_todo', 'update_todo', 'list_todos', 'notify', 'list_automations', 'run_automation', 'propose_automation', 'propose_automation_change', 'get_proposal']));
+    expect(TOOLS.map((t) => t.name)).toEqual(expect.arrayContaining(['post_todo', 'update_todo', 'list_todos', 'notify', 'list_automations', 'run_automation', 'propose_automation', 'propose_automation_change', 'get_proposal', 'get_automation', 'list_runs']));
     expect((tool('post_todo').inputSchema as { required: string[] }).required).toEqual(['title']);
     expect((tool('update_todo').inputSchema as { required: string[] }).required).toEqual(['id']);
   });

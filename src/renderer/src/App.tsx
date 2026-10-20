@@ -33,7 +33,7 @@ import {
 } from './sessionStatusMerge';
 import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget, UiPrefs, InboxCounts, InboxConfig, QuietState } from '../../preload';
 import { InboxChip } from './components/InboxChip';
-import { InboxView } from './components/InboxView';
+import { InboxView, type InboxSection } from './components/InboxView';
 import { isWarm } from './fleetTemperature';
 
 /** The lifecycle IPC surface `applyContainerEdit` needs, bound to `window.api`.
@@ -214,6 +214,15 @@ export function App() {
   // Inbox (#407): when open it takes the main pane; the workspace chip
   // deselects but `selectedId` (and so the rails) keeps the last workspace.
   const [inboxOpen, setInboxOpen] = useState(false);
+  const [inboxSection, setInboxSection] = useState<InboxSection>('todos');
+  // The automations workspace (#407 Phase 5b): no chip of its own; the Inbox fronts it.
+  const [roleWsId, setRoleWsId] = useState<string | null>(null);
+  const [assignRoleOnCreate, setAssignRoleOnCreate] = useState(false);
+  useEffect(() => {
+    const load = () => void window.api.automations.roleWorkspace().then(setRoleWsId);
+    load();
+    return window.api.automations.onChanged(load);
+  }, []);
   const [inboxCounts, setInboxCounts] = useState<InboxCounts>({ open: 0, urgent: 0, high: 0 });
   useEffect(() => {
     void window.api.inbox.counts().then(setInboxCounts);
@@ -429,6 +438,7 @@ export function App() {
   const openNotificationTarget = useCallback((t: { todoId: string | null; workspaceId: string | null }) => {
     if (t.todoId) {
       setInboxOpen(true);
+      setInboxSection('todos');
       setInboxFocus({ todoId: t.todoId, nonce: Date.now() });
     } else if (t.workspaceId) {
       setInboxOpen(false);
@@ -1123,6 +1133,10 @@ export function App() {
       mirror: submit.mirror
     });
     focusWorkspaceWhenWarm(id);
+    if (assignRoleOnCreate && kind === 'container') {
+      setAssignRoleOnCreate(false);
+      await window.api.automations.setRole(id).catch(() => undefined);
+    }
     refresh();
   };
 
@@ -1384,7 +1398,7 @@ export function App() {
       }`}
     >
       <WorkspaceTabStrip
-        workspaces={workspaces}
+        workspaces={roleWsId ? workspaces.filter((w) => w.id !== roleWsId) : workspaces}
         summaries={summaries}
         busyByWorkspace={effectiveBusyByWorkspace}
         selectedId={inboxOpen ? null : selectedId}
@@ -1394,7 +1408,7 @@ export function App() {
           setInboxOpen(false);
           setSelectedId(id);
         }}
-        inboxChip={<InboxChip counts={inboxCounts} active={inboxOpen} onOpen={() => setInboxOpen(true)} />}
+        inboxChip={<InboxChip counts={inboxCounts} active={inboxOpen} onOpen={() => { setInboxOpen(true); if (roleWsId) setSelectedId(roleWsId); }} />}
         onNewWorkspace={() => setCreateOpen(true)}
         onOpenSettings={() => setSettingsTab('settings')}
         onCloseWorkspace={(w) => setCloseTargetId(w.id)}
@@ -1445,7 +1459,7 @@ export function App() {
           // invalid color there, which silently blanked the context bar.
           style={selected ? { ['--hue' as never]: colorFor(selected) } : undefined}
         >
-          <div className="main-body">
+          <div className={`main-body${inboxOpen && inboxSection === 'sessions' ? ' inbox-sessions' : ''}`}>
             {inboxOpen ? (
               <InboxView
                 names={workspaceNames}
@@ -1453,6 +1467,20 @@ export function App() {
                 quiet={quiet}
                 automationCount={automationList.filter((a) => a.enabled).length}
                 approvals={inboxCounts.approvals ?? 0}
+                section={inboxSection}
+                onSection={setInboxSection}
+                automationsWs={(() => {
+                  const w = roleWsId ? workspaces.find((x) => x.id === roleWsId) : undefined;
+                  return w ? { id: w.id, name: w.name, running: w.state === 'running' || w.state === 'paused' } : null;
+                })()}
+                workspaces={workspaces.filter((w) => w.state !== 'deleted').map((w) => ({ id: w.id, name: w.name, kind: w.kind }))}
+                onCreateAutomationsWs={() => {
+                  setCloneSource({ name: 'automations', kind: 'container', image: 'ghcr.io/imioimi/claude-fleet/runner-devops:latest' });
+                  setAssignRoleOnCreate(true);
+                  setCreateOpen(true);
+                }}
+                onEditAutomationsWs={() => { if (roleWsId) setEditTargetId(roleWsId); }}
+                onStartAutomationsWs={() => { if (roleWsId) void window.api.workspace.start(roleWsId).then(() => refresh()); }}
                 focusTodoId={inboxFocus?.todoId ?? null}
                 focusNonce={inboxFocus?.nonce}
                 onOpenSchedules={() => setSettingsTab('notifications')}
@@ -1483,7 +1511,7 @@ export function App() {
               .map((w) => (
                 <TerminalPane
                   key={w.id}
-                  visible={!inboxOpen && selectedId === w.id}
+                  visible={(!inboxOpen && selectedId === w.id) || (inboxOpen && inboxSection === 'sessions' && w.id === roleWsId)}
                   workspaceId={w.id}
                   mirrorDefault={w.mirror.default}
                   cleanupDefault={w.mirror.cleanup}
@@ -1566,6 +1594,7 @@ export function App() {
         onClose={() => {
           setCreateOpen(false);
           setCloneSource(null);
+          setAssignRoleOnCreate(false);
         }}
         onCreate={async (submit, setStatus) => {
           await handleCreate(submit, setStatus);

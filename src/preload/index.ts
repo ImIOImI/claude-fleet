@@ -367,6 +367,9 @@ const api = {
     remove: (id: string): Promise<void> => ipcRenderer.invoke('automations:remove', id),
     run: (id: string, args: Record<string, unknown>): Promise<RunRow> => ipcRenderer.invoke('automations:run', id, args),
     starter: (): Promise<string> => ipcRenderer.invoke('automations:starter'),
+    roleWorkspace: (): Promise<string | null> => ipcRenderer.invoke('automations:roleWorkspace'),
+    setRole: (workspaceId: string | null): Promise<string | null> => ipcRenderer.invoke('automations:setRole', workspaceId),
+    discuss: (proposalId: string): Promise<string> => ipcRenderer.invoke('automations:discuss', proposalId),
     onChanged: (cb: () => void): (() => void) => {
       const h = (): void => cb();
       ipcRenderer.on('automations:changed', h);

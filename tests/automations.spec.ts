@@ -149,3 +149,39 @@ steps:
     await app.close();
   }
 });
+
+test('Automations workspace: set it up, its chip folds into the Inbox, Sessions shows its terminal (#407)', async () => {
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    // A workspace created through the UI (it gets a real manifest on disk).
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
+    await window.getByLabel('Workspace name').fill('auto-ws');
+    await window.getByRole('button', { name: 'Create & start' }).click();
+    await expect(window.locator('.top-strip .ws-chip-group', { hasText: 'auto-ws' })).toHaveCount(1);
+    const autoWs = (await callTestIpc<Array<{ id: string; name: string }>>(app, 'workspace:list', [])).find((w) => w.name === 'auto-ws')!;
+
+    const view = await openAutomations(window);
+    const banner = view.getByRole('note', { name: 'Set up the automations workspace' });
+    await expect(banner).toContainText('Set up an automations workspace');
+    await banner.getByLabel('Existing workspace').selectOption({ label: 'auto-ws' });
+    await banner.getByRole('button', { name: 'Use it' }).click();
+    await expect(view.locator('.aw-banner.set')).toContainText('Automations workspace: auto-ws');
+    expect(await callTestIpc<string | null>(app, 'automations:roleWorkspace', [])).toBe(autoWs.id);
+    const manifest = await callTestIpc<{ role?: string; inbox?: { trusted?: boolean } }>(app, 'workspace:getManifest', [autoWs.id]);
+    expect(manifest).toMatchObject({ role: 'automations', inbox: { trusted: true } });
+
+    // Its chip is gone from the strip; the Inbox fronts it.
+    await expect(window.locator('.top-strip .ws-chip-group', { hasText: 'auto-ws' })).toHaveCount(0);
+    await view.getByRole('tab', { name: /Sessions/ }).click();
+    await expect(view).toHaveClass(/header-only/);
+    await expect(window.locator('.main-body.inbox-sessions .terminal-pane[aria-hidden="false"]')).toHaveCount(1);
+
+    // Stop using it: the chip comes back.
+    await view.getByRole('tab', { name: /^Automations/ }).click();
+    await view.locator('.aw-banner.set').getByRole('button', { name: 'Stop using' }).click();
+    await expect(window.locator('.top-strip .ws-chip-group', { hasText: 'auto-ws' })).toHaveCount(1);
+    await expect(view.getByRole('tab', { name: /Sessions/ })).toHaveCount(0);
+  } finally {
+    await app.close();
+  }
+});

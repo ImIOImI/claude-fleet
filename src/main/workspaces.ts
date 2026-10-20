@@ -178,6 +178,8 @@ export interface WorkspaceSpec {
   accessibility?: AccessibilityConfig;
   /** Host-private inbox permissions (#407): can post, hourly cap, read-all. */
   inbox?: InboxConfig;
+  /** 'automations' = the one workspace behind the Inbox chip (#407 Phase 5b): fleet-wide automation read + trusted. */
+  role?: 'automations';
   createdAt: number;
   lastUsedAt: number;
 }
@@ -327,6 +329,7 @@ export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec |
       control: sanitizeControl(parsed.control),
       accessibility: sanitizeAccessibility(parsed.accessibility),
       inbox: sanitizeInboxConfig(parsed.inbox),
+      role: parsed.role === 'automations' ? 'automations' : undefined,
       createdAt: parsed.createdAt ?? Date.now(),
       lastUsedAt: parsed.lastUsedAt ?? parsed.createdAt ?? Date.now()
     };
