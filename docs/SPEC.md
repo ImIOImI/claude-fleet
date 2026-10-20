@@ -1125,7 +1125,7 @@ These are decided in spirit but not yet implemented. When you implement one, mov
 Designed, not built. The full design is in [`superpowers/specs/2026-10-20-inbox-automations-design.md`](superpowers/specs/2026-10-20-inbox-automations-design.md), delivered in 8 phases. Load-bearing decisions:
 - **Storage:** a separate authoritative `<userData>/inbox.db` (never `state.db`, which is a droppable cache).
 - **Inbox items:** one inbox; every item has an immutable host-stamped `source`; dedupe by poster `key`, and a recurrence reopens the item. Noise is controlled by notification rules (key > source > tag > global), downtime schedules and a global pause, never per-item mute.
-- **Automations:** run in the main-process engine. Steps are *script* (execution environment still open; `ScriptExecutor` interface) or *prompt a workspace* (fresh headless or live).
+- **Automations:** run in the main-process engine. Steps are *script* (in the automations workspace container by default; opt-in, never-auto-approved host steps) or *prompt a workspace* (fresh headless or live).
 - **Approval:** workspace-proposed changes always need the user's approval; trusted workspaces auto-apply low-risk edits only.
 - **MCP writes:** the fleet-state MCP gains host-mediated writes for inbox, notifications and proposals only (this amends §9 when built).
 - **Automations workspace:** the Inbox chip fronts a `role: 'automations'` workspace whose sessions open inside the inbox.

@@ -19,7 +19,7 @@ Each phase is its own plan → PR(s) → SPEC.md update (per `.claude/rules/spec
 | 4 | **Headless sessions** | broker op to spawn a non-interactive session; **fresh** prompt mode; workspace-event triggers | 3 |
 | 5 | **Proposals & approval** | `propose_automation` / `propose_automation_change` (incl. batch) / `get_proposal` / `run_automation`, Activity proposal + batch cards, trusted tier + `classifyChange`, auto-approved-with-Revert, **Ask Claude about this** review conversation, the **automations workspace** (`role: 'automations'`, created on first use) and its **session tabs inside the Inbox** + Inbox chip ⋮ | 3, 4 |
 | 6 | **Claude-first authoring** | composer, drafts (proposal cards with Form/YAML + "Ask for changes" + Test run), "Ask Claude to change…" bar, `automation-author` loadout | 5 |
-| 7 | **Script steps** | `ScriptExecutor` implementation + stdout JSON-lines protocol + exit-10 | **blocked on the execution-environment decision (§12)** |
+| 7 | **Script steps** | `ScriptExecutor`: container executor (automations workspace, default) + `runIn: <workspace>` + opt-in host executor; stdout JSON-lines protocol + exit-10 | 3, 5 |
 | 8 | **Automations in loadouts** | `automations/` convention folder, install review section, `$self` binding, update Keep mine/Take update, provenance, Save/Add-to-loadout export — **cross-repo** with `claude-fleet-loadouts` | 3, 5 |
 
 The app icon (§8.6) can ship independently of all of these; it overlaps Admiral rename Phase 2 (#366, packaging/OS identity).
@@ -38,7 +38,7 @@ The app icon (§8.6) can ship independently of all of these; it overlaps Admiral
 | "Needs you" | Urgent todos + pending approvals + workspaces waiting for input. Never plain open todos. Drives the taskbar overlay and dock badge: **1 → dot, ≥2 → count**; red if anything urgent, otherwise violet (`--wait`). The tray stays dot-only. The Inbox chip counts inbox items only (waiting workspaces already show violet on their own chips). |
 | Needs-input notifications | Reuse `signal_input_wait`: a host-generated notification (no todo), fired after ~20s of waiting and only if the user isn't viewing that workspace, auto-cleared on `waiting=false`, click → that session tab, 🔔 rules apply. |
 | Triggers (v1) | Schedule, manual, workspace event. No webhook (it would be a new network port). |
-| Automation runtime | Automations run in the host engine; **steps** are *script* or *prompt a workspace*. **Where scripts execute is undecided** → `ScriptExecutor` interface (§12). |
+| Automation runtime | Automations run in the host engine; **steps** are *script* or *prompt a workspace*. Scripts run **in the automations workspace's container by default** (`docker exec`, per-automation scratch dir `/workspace/automations/<id>/`, only that automation's declared secrets injected into that process, never set as workspace env). A step may opt into **`runIn: host`** with a declared `shell` (`pwsh` / `bash` / `wsl:<distro>`); host steps are never auto-approved (even when trusted), re-approved on every script change, flagged red on every review, run with a clean env plus their declared secrets, and refused for loadout-installed automations unless the user allows host steps for that loadout. A step may also use `runIn: <workspace>` (approval-gated) to run in another workspace's container. |
 | Prompt mode | Per step: **fresh** (new headless session; default) or **live** (inject via the `committee_post` path). |
 | Script contract | Env-only inputs (`FLEET_ARGS`, `ARG_<NAME>`, `FLEET_STATE`, `FLEET_TRIGGER`, declared secrets). Stdout JSON lines `{"todo":…}` `{"notify":…}` `{"state":…}`. Exit **0** continue · **10** nothing to do (successful stop) · other = fail. Args are never interpolated into script text. |
 | Params | Typed `string` / `number` / `boolean` / `enum`; validated before a run exists; per-trigger fixed args; workspace-supplied args wrapped as labeled data in prompts. |
@@ -202,7 +202,7 @@ Phase 1 IPC (renderer → main; `window.api.inbox.*`): `inbox:listTodos(filter)`
 
 ## 12. Open questions
 
-1. **Script execution environment** (blocks Phase 7). Candidates: a dedicated runner container (the automations workspace is the natural candidate), the host, inside a chosen workspace, or an ephemeral container per run. `ScriptExecutor` keeps Phases 1–6 independent of this.
+1. *(Resolved 2026-10-20: container default plus opt-in host; see the decision log.)* Host steps deliberately amend the §9 "workspaces never reach the host" invariant for user-approved steps only; the SPEC §9 text must say so when Phase 7 lands.
 2. **Icon / name timing:** the Teardrop icon and "Admiral" strings in the tray and toasts assume the rename (#364). Until it ships, use "claude-fleet" for strings and ship the icon either way.
 
 ## 13. Phase 1 — inputs for the plan
