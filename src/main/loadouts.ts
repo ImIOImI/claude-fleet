@@ -62,16 +62,37 @@ export async function getLoadout(id: string): Promise<LoadoutDetail> {
   return { ...meta, files: await loadoutFileList(dir), merges: await loadoutMergePreview(dir) };
 }
 
+// Automations shipped in the loadout (#407 Phase 8). The automations engine
+// registers these at startup; without it (no inbox.db) they're skipped.
+export interface LoadoutAutomationHooks {
+  preview(srcDir: string, loadoutId: string, workspaceId: string, allowHost: boolean): Promise<unknown[]>;
+  install(srcDir: string, loadoutId: string, workspaceId: string, opts: { enable?: string[]; allowHost?: boolean }): Promise<{ created: string[]; updated: string[]; kept: string[]; skipped: Array<{ name: string; reason: string }>; names: string[] }>;
+  uninstall(loadoutId: string, workspaceId: string): Promise<void>;
+}
+let automationHooks: LoadoutAutomationHooks | null = null;
+export function setLoadoutAutomationHooks(h: LoadoutAutomationHooks | null): void {
+  automationHooks = h;
+}
+export async function previewLoadoutAutomations(workspaceId: string, loadoutId: string, allowHost = false): Promise<unknown[]> {
+  return automationHooks ? automationHooks.preview(loadoutDir(loadoutId), loadoutId, workspaceId, allowHost) : [];
+}
+
 export interface InstallResult {
   installed: InstalledLoadout;
   /** Files/keys skipped because they already existed (reported, not clobbered). */
   skipped: string[];
   /** Per-script outcome from the loadout's setup `scripts` (run in the container). */
   scripts: ScriptResult[];
+  /** What happened to the loadout's automations (#407 Phase 8). */
+  automations?: { created: string[]; updated: string[]; kept: string[]; skipped: Array<{ name: string; reason: string }> };
 }
 
 /** Install a loadout into a container workspace's private folder. */
-export async function installLoadout(workspaceId: string, loadoutId: string): Promise<InstallResult> {
+export async function installLoadout(
+  workspaceId: string,
+  loadoutId: string,
+  opts: { automations?: string[]; allowHost?: boolean } = {}
+): Promise<InstallResult> {
   const ws = await readWorkspaceManifest(workspaceId);
   if (!ws) throw new Error(`no workspace ${workspaceId}`);
   if (ws.kind === 'local') {
@@ -82,10 +103,14 @@ export async function installLoadout(workspaceId: string, loadoutId: string): Pr
   const src = loadoutDir(loadoutId);
   const applied = await applyLoadoutFiles(src, target, loadoutId);
   const merged = await applyLoadoutMerges(src, target);
+  const autos = automationHooks
+    ? await automationHooks.install(src, loadoutId, workspaceId, { enable: opts.automations, allowHost: opts.allowHost })
+    : null;
   const record: InstalledLoadout = {
     id: loadoutId,
     title: meta.title,
     files: applied.files,
+    ...(autos?.names.length ? { automations: autos.names } : {}),
     merges: {
       claudeMd: applied.claudeMd,
       settingsKeys: merged.settingsKeys,
@@ -107,7 +132,10 @@ export async function installLoadout(workspaceId: string, loadoutId: string): Pr
     }))
   );
 
-  return { installed: record, skipped: [...applied.skipped, ...merged.skipped], scripts };
+  return {
+    installed: record, skipped: [...applied.skipped, ...merged.skipped], scripts,
+    ...(autos ? { automations: { created: autos.created, updated: autos.updated, kept: autos.kept, skipped: autos.skipped } } : {})
+  };
 }
 
 /** Uninstall: remove exactly what was applied, keep anything else. */
@@ -124,6 +152,7 @@ export async function uninstallLoadout(workspaceId: string, loadoutId: string): 
       hooks: rec.merges?.hooks
     });
   }
+  await automationHooks?.uninstall(loadoutId, workspaceId);
   await writeWorkspaceManifest({
     ...ws,
     installedLoadouts: (ws.installedLoadouts ?? []).filter((l) => l.id !== loadoutId)

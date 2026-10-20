@@ -3667,3 +3667,12 @@ button.switch { padding: 0; cursor: pointer; }
 .run-step .run-io { grid-column: 1 / -1; max-height: 140px; overflow: auto; margin: 4px 0 0; font-size: 11px; }
 .run-step .run-io.err { color: var(--danger); }
 .pr-caps .tag.danger { color: var(--danger); border-color: color-mix(in oklch, var(--danger), transparent 50%); background: color-mix(in oklch, var(--danger), transparent 90%); }
+
+/* Loadout automations (#407 Phase 8) */
+.lr-autos .mf.auto { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 8px; align-items: center; cursor: pointer; }
+.lr-autos .mf.auto .lr-auto-flags { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 4px; }
+.lr-autos .mf.auto .lr-auto-why { grid-column: 2 / -1; font-size: 11px; color: var(--warn); }
+.lr-autos .mf.auto.host .path { color: var(--danger); }
+.lr-autos .tag.danger { color: var(--danger); }
+.lr-autos .badge-new.warn { color: var(--warn); }
+.lr-host-allow { display: flex; gap: 6px; align-items: center; margin-top: 6px; font-size: 12px; color: var(--ink-1); }

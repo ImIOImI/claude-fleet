@@ -144,6 +144,12 @@ export function AutomationsView({ names, automationsWs = null, workspaces = [], 
             </div>
             <h3 className="ib-detail-title">{a.name}</h3>
             {a.description && <p className="ib-desc">{a.description}</p>}
+            {a.origin && (
+              <p className="ib-dim auto-origin">
+                From loadout <b>{a.origin.loadoutId}</b>{a.origin.version ? ` v${a.origin.version}` : ''} · installed in {names[a.origin.workspaceId] ?? a.origin.workspaceId}
+                {a.origin.edited ? ' · you edited it, so loadout updates keep your version' : ''}
+              </p>
+            )}
             <div className="ib-detail-actions">
               <button className="btn btn-sm primary" disabled={!a.enabled} title={a.enabled ? undefined : 'Enable it first'} onClick={() => setRunning(a)}>▶ Run now…</button>
               <button className="btn btn-sm" onClick={() => setEditor({ id: a.id, yaml: detail.yaml })}>Edit YAML</button>

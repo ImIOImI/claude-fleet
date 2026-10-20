@@ -136,6 +136,8 @@ export interface InstalledLoadout {
      *  exact removal on uninstall. */
     hooks?: { event: string; entry: unknown }[];
   };
+  /** Names of the automations this install created or manages (#407 Phase 8; removed on uninstall). */
+  automations?: string[];
   installedAt: number;
 }
 

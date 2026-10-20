@@ -66,6 +66,9 @@ export function createAutomationService(deps: AutomationDeps) {
       definition: a.definition, tags: store.tags(a.id), createdBy: a.createdBy, createdAt: a.createdAt, updatedAt: a.updatedAt,
       lastScheduledAt: a.lastScheduledAt, nextFireAt: nextFireAt(a, now), lastRun: store.runs(a.id, 1)[0] ?? null,
       weekStats: store.weekStats(a.id, now),
+      origin: a.origin && typeof a.origin.loadoutId === 'string'
+        ? { loadoutId: a.origin.loadoutId, version: typeof a.origin.version === 'string' ? a.origin.version : null, workspaceId: String(a.origin.workspaceId ?? ''), edited: a.version > Number(a.origin.installedVersion ?? a.version) }
+        : null,
       triggerSummaries: a.definition.triggers.map((t) => {
         if ('schedule' in t) return `${describeCron(t.schedule.cron)}${t.schedule.tz ? ` (${t.schedule.tz})` : ''}`;
         if ('manual' in t) {

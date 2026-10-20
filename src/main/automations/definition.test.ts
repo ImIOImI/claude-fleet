@@ -25,7 +25,7 @@ describe('validateDefinition', () => {
       const r = validateDefinition({ ...base, ...over }, ctx);
       return r.ok ? [] : r.errors;
     };
-    expect(errs({ steps: [{ id: 'a', prompt: { workspace: '$self', message: 'm' } }] })[0]).toMatch(/\$self.*Phase 8/);
+    expect(errs({ steps: [{ id: 'a', prompt: { workspace: '$self', message: 'm' } }] })[0]).toMatch(/\$self only works in automations shipped in a loadout/);
     expect(errs({ secrets: ['TOKEN'] })[0]).toMatch(/declare them on the script step/);
   });
   it('reports every problem with a path', () => {
