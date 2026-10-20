@@ -35,7 +35,7 @@ const tags = (...t) => t.map((x) => `<span class="tag">${x}</span>`).join('');
 // ---------- real chrome, lightly adapted ----------
 const inboxVariants = {
   // A: compact chip in the workspace-chip language (dot + name + sub line)
-  chip: (on, paused) => `<div class="ws-chip-group inbox-chip${on ? ' active' : ''}${paused ? ' paused' : ''}" style="--hue:var(--ink-1)"><button class="ws-chip" title="Inbox — 7 open, 1 urgent"><span class="dot inbox-dot urgent"></span>${paused ? `<span class="chip-bell-off">${I.bellOff}</span>` : ''}<span class="ws-chip-text"><span class="name">Inbox</span><span class="ws-chip-sub">${paused ? 'paused · until 15:30' : '7 open · 1 urgent'}</span></span></button></div>`,
+  chip: (on, paused) => `<div class="ws-chip-group inbox-chip${on ? ' active' : ''}${paused ? ' paused' : ''}" style="--hue:var(--ink-1)"><button class="ws-chip" title="Inbox — 7 open, 1 urgent"><span class="dot inbox-dot urgent"></span>${paused ? `<span class="chip-bell-off">${I.bellOff}</span>` : ''}<span class="ws-chip-text"><span class="name">Inbox</span><span class="ws-chip-sub">${paused ? 'paused · until 15:30' : '7 open · 1 urgent'}</span></span></button><button class="ws-chip-menu-trigger" aria-label="Automations workspace actions" title="Automations workspace">⋮</button></div>`,
   // B: bare mono indicator, same shape as the Docker status
   text: (on) => `<button class="daemon-status inbox-text${on ? ' on' : ''}" title="Inbox — 7 open, 1 urgent"><span class="dot inbox-dot urgent"></span>Inbox<span class="inbox-n">7</span></button>`,
   // C: square settings-btn twin with a status dot, count in tooltip
@@ -63,13 +63,17 @@ const left = leftParts[0] + '<section class="acc open">' +
   collapsed('Library') + collapsed('Committee') + '</aside>';
 
 function frame(main, overlay = '', opts = {}) {
-  return `<div class="frame-wrap"><div class="frame-scale"><div class="app mock-app">${tabs(opts.inboxOn !== false)}<div class="app-body">${left}<main class="main-pane" style="--hue:oklch(72% 0.14 250)"><div class="main-body">${main}</div></main>${c1.obs}</div>${c1.bottom}${overlay}</div></div></div>`;
+  return `<div class="frame-wrap"><div class="frame-scale"><div class="app mock-app">${tabs(opts.inboxOn !== false)}<div class="app-body">${opts.left || left}<main class="main-pane" style="--hue:oklch(72% 0.14 250)"><div class="main-body">${main}</div></main>${opts.obs || c1.obs}</div>${c1.bottom}${overlay}</div></div></div>`;
 }
 
 // ---------- inbox shell ----------
 const NOTIFY_CTL = `<button class="btn btn-sm ph-btn on ib-notify">${I.bell}Notifying<span class="dim">· Nights at 22:00</span> ▾</button>`;
+const SESS = [['ask: failures this week', 'busy'], ['bulk retag log watchers', '']];
 const ibTabs = (active, right = '') => `<div class="session-tab-strip ib-tabs" role="tablist">
   ${[['Todos', '7', ''], ['Automations', '4', ''], ['Activity', '1', 'wait']].map(([n, c, k]) => `<div role="tab" class="session-tab${n === active ? ' active' : ''}"><span class="session-tab-name">${n}</span><span class="ib-count ${k}">${c}</span></div>`).join('')}
+  <span class="ib-tab-sep" aria-hidden="true"></span>
+  ${SESS.map(([n, st]) => `<div role="tab" class="session-tab ib-sess${n === active ? ' active' : ''}"><span class="session-tab-dot live ${st}"></span><span class="session-tab-name">${n}</span><button class="session-tab-menu-trigger" aria-label="Actions for ${n}">⋮</button></div>`).join('')}
+  <button class="session-tab-new ib-sess-new" title="New session in the automations workspace" aria-label="New session">+</button>
   <span class="ib-tabs-spacer"></span>${right}</div>`;
 
 // ---------- todos ----------
@@ -635,6 +639,61 @@ const loHtml = `<div class="dk">
     <div class="lo-prov">${originLine}</div></div>
 </div>`;
 
+
+// ---------- automations workspace sessions ----------
+const termText = `<span class="t-dim">╭─────────────────────────────────────────────────────────────╮
+│</span> <span class="t-ok">✻</span> Welcome to Claude Code   <span class="t-dim">/workspace (automations)                │
+╰─────────────────────────────────────────────────────────────╯</span>
+
+<span class="t-you">&gt; which automations failed this week, and why?</span>
+
+<span class="t-ok">⏺</span> <span class="t-tool">fleet-state:list_runs</span>(status: "failed", since: "7d")
+  <span class="t-dim">⎿  3 runs across 2 automations</span>
+
+<span class="t-ok">⏺</span> Two automations failed this week:
+
+  <b>webex-triage</b>  1 failure, Oct 19 13:00
+    fetch exited 1: <span class="t-err">401 Unauthorized</span>. The WEBEX_TOKEN in webex-triage's
+    vault expired. Runs since 13:30 succeed, so it was rotated.
+
+  <b>nightly-cost-report</b>  2 failures, Oct 17 and 18, both 02:00
+    The prompt step timed out at 10m waiting on iac-review, which was
+    paused overnight. Options: set <span class="t-code">ensureRunning: true</span>, or move it
+    to 07:00 after the Nights downtime.
+
+  Want me to propose the ensureRunning fix for nightly-cost-report?
+
+<span class="t-you">&gt; yes, and also tag every log watcher "ops" and set them to every 15 min</span>
+
+<span class="t-ok">⏺</span> <span class="t-tool">fleet-state:propose_automation_change</span>(batch: 4 changes)
+  <span class="t-dim">⎿  proposal #p-118 sent to Activity · 3 low-risk (auto-applied, trusted)
+     · 1 needs you: nightly-cost-report adds ensureRunning</span>
+
+<span class="t-prompt">&gt; </span><span class="t-cursor"> </span>`;
+const autoRows = [['ask: failures this week', 'now', ['ops'], '$0.31', true], ['bulk retag log watchers', '4m', ['ops'], '$0.12', true], ['draft: webex-triage', '1d', ['draft'], '$0.44'], ['review: webex-ops v1.3.0', '2d', ['review'], '$0.09']].map(([t, ago, tg, usd, open]) => `<li class="session-row${open ? ' open' : ''}"><div class="session-row-main"><button class="session-row-title">${t}</button><div class="session-row-meta"><span class="session-row-time">${ago === 'now' ? 'now' : ago + ' ago'}</span><span class="session-row-tags">${tg.map((x) => `<button class="tag session-row-tag">${x}</button>`).join('')}</span><span class="session-row-cost">${usd}</span></div></div></li>`);
+const autoLeft = leftParts[0] + '<section class="acc open">' + leftParts[1].replace('<div class="pane-body sessions-body"></div>', `<div class="pane-body sessions-body"><ul class="sessions-list"><li class="session-group-label" aria-hidden="true"><span class="session-group-dot"></span> Open · 2<span class="session-group-line"></span></li>${autoRows.slice(0, 2).join('')}<li class="session-group-label recent" aria-hidden="true">Recent<span class="session-group-line"></span></li>${autoRows.slice(2).join('')}</ul></div>`) + collapsed('Library') + collapsed('Committee') + '</aside>';
+const autoObs = c1.obs.replace('Inbox &amp; automations design', 'ask: failures this week').replace('$4.12', '$0.31').replace('claude-opus-5-5</span>', 'claude-opus-5-5</span>').replace('title="claude-fleet">This workspace', 'title="Inbox (automations)">This workspace');
+const sessMain = `<div class="inbox-view">${ibTabs('ask: failures this week', `<div class="ph-ctl">${NOTIFY_CTL}</div>`)}
+  <div class="terminal-accent-band-row" aria-hidden="true"><div class="terminal-accent-band" style="--pct:100%"><div class="terminal-accent-band-fill"></div></div></div>
+  <div class="ib-term"><pre>${termText}</pre></div></div>`;
+const batchCard = `<article class="proposal batch">
+  <div class="pr-eyebrow"><span class="pr-kind">Proposal · 4 changes</span><span class="dim">from</span><span class="src">${I.tray}automations session</span><span class="dim">· "bulk retag log watchers" · 1m ago</span></div>
+  <h3 class="pr-title">Tag log watchers ops, run every 15 min, and fix nightly-cost-report</h3>
+  <ul class="batch-list">
+    <li class="auto-ok">${I.auto}<b>log-watch</b><span>schedule <span class="mono">*/10</span> → <span class="mono">*/15</span> · + <span class="tag">ops</span></span><span class="b-state ok">auto-applied</span><button class="btn-mini">Revert</button></li>
+    <li class="auto-ok">${I.auto}<b>api-latency-watch</b><span>+ <span class="tag">ops</span></span><span class="b-state ok">auto-applied</span><button class="btn-mini">Revert</button></li>
+    <li class="auto-ok">${I.auto}<b>queue-depth-watch</b><span>schedule <span class="mono">*/30</span> → <span class="mono">*/15</span> · + <span class="tag">ops</span></span><span class="b-state ok">auto-applied</span><button class="btn-mini">Revert</button></li>
+    <li class="needs">${I.auto}<b>nightly-cost-report</b><span>prompt step: <span class="mono">ensureRunning: true</span> (may start iac-review at 02:00)</span><span class="b-state wait">needs you</span><span class="b-pick"><button class="btn-mini on">Accept</button><button class="btn-mini">Decline</button></span></li>
+  </ul>
+  <div class="pr-actions"><button class="btn primary">Apply accepted</button><button class="btn ask-btn">${I.chat} Ask Claude about this</button><span class="ib-spacer"></span><button class="btn danger">Decline all</button></div>
+</article>`;
+const chipMenu = `<div class="ws-chip-menu edit-menu" role="menu"><div class="pm-label">Automations workspace</div><button role="menuitem">${I.chat}New session</button><button role="menuitem">Edit workspace (env, secrets, image)…</button><button role="menuitem">Restart</button><button role="menuitem">Recreate with latest image</button></div>`;
+const sessHtml = `<div class="dk">
+  <div class="dk-block dk-split"><div><div class="dk-title">Bulk changes come back as one card</div>
+    <p class="dk-p">A session in the automations workspace can read every automation, run and result, and propose changes to any of them, as one batch. Its trusted status auto-applies the low-risk items (each with Revert). Anything touching scripts, secrets, targets or start-up behavior waits for your accept, item by item.</p>${batchCard}</div>
+    <div><div class="dk-title">Inbox chip ⋮</div><p class="dk-p">Managing the workspace behind the inbox. Pausing notifications stays in the header control.</p>${chipStrip(false)}${chipMenu}</div></div>
+</div>`;
+
 // ---------- settings ----------
 const settings = c2.settings
   .replace('<div class="modal-tab active" aria-current="page" style="cursor:pointer">Settings</div>', '<div class="modal-tab" style="cursor:pointer">Settings</div>')
@@ -743,6 +802,16 @@ const screens = [
       ['Runs', 'Expand a run to see each step: script exit code, stdout tail and saved state, or the prompt\'s session link and what it posted. Exit 10 shows as "nothing to do", not as a failure.'],
     ],
     html: frame(autoMain),
+  },
+  {
+    id: 'sessions', name: 'Sessions in the Inbox',
+    notes: [
+      ['The Inbox is the automations workspace', 'Its terminal sessions open as tabs after Todos, Automations and Activity, with + for a new one. Ask questions about automations, investigate failures, or make bulk changes right next to them.'],
+      ['Rails follow', 'With the Inbox selected, the left rail lists the automations workspace\'s sessions and the Observability rail shows its cost and context, like any workspace.'],
+      ['Fleet-wide reach, same approvals', 'Its role grants read access to every automation and run, and lets it propose changes to any of them. Changes still flow through proposals; it never approves on its own behalf.'],
+    ],
+    extra: sessHtml,
+    html: frame(sessMain, '', { left: autoLeft, obs: autoObs }),
   },
   {
     id: 'authoring', name: 'Creating & editing with Claude',
@@ -1147,6 +1216,7 @@ table.rules { width: 100%; border-collapse: collapse; font-size: 12px; margin-to
 .chip-bell-off { color: var(--ink-2); display: inline-grid; margin-left: -4px; }
 .opt-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 14px; align-items: start; }
 .opt-grid.two > .strip-crop .strip-inner { zoom: .8; min-width: 860px; }
+.dk-split .strip-crop .strip-inner { zoom: .6; min-width: 860px; }
 .opt-grid.two { grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); align-items: center; }
 .opt { min-width: 0; overflow: hidden; display: grid; gap: 10px; align-content: start; padding: 12px; border: 1px solid var(--rule); border-radius: var(--r-md); background: var(--bg); }
 .opt-k { font-size: 13px; font-weight: 600; }
@@ -1273,6 +1343,29 @@ table.rules { width: 100%; border-collapse: collapse; font-size: 12px; margin-to
 .msg-actions { margin-top: 8px; }
 .disc-in { margin: 0 16px; }
 .disc-foot { margin: 8px 16px 14px; font-size: 11px; color: var(--ink-3); }
+.ib-tab-sep { width: 1px; margin: 9px 4px; background: var(--rule-strong); flex: none; }
+.ib-sess { max-width: 150px; }
+.ib-tabs .ph-btn.on .dim { display: none; }
+.ib-sess .session-tab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ib-tabs .session-tab.ib-sess.active { border-bottom-color: var(--ok); }
+.ib-sess-new { align-self: center; }
+.ib-term { flex: 1; min-height: 0; overflow: auto; background: var(--bg-canvas); padding: 14px 18px; }
+.ib-term pre { margin: 0; font: 12.5px/1.55 var(--font-mono); color: var(--ink-1); white-space: pre; }
+.ib-term b { color: var(--ink); }
+.t-dim { color: var(--ink-3); } .t-ok { color: var(--ok); } .t-err { color: var(--danger); } .t-you { color: var(--ink); } .t-tool { color: var(--info); }
+.t-code { color: var(--warn); } .t-prompt { color: var(--ink-2); } .t-cursor { background: var(--ink-1); }
+.batch-list { list-style: none; margin: 0; padding: 0; display: grid; border: 1px solid var(--rule); border-radius: var(--r-md); }
+.batch-list li { display: flex; flex-wrap: wrap; gap: 6px 9px; align-items: center; font-size: 12px; color: var(--ink-1); padding: 8px 10px; border-bottom: 1px solid var(--rule-soft); }
+.batch-list li:last-child { border-bottom: none; }
+.batch-list li > svg { color: var(--info); }
+.batch-list li b { color: var(--ink); font-weight: 500; }
+.batch-list li.needs { background: color-mix(in oklch, var(--wait), transparent 92%); }
+.b-state { margin-left: auto; font: 10px var(--font-mono); padding: 1px 6px; border-radius: var(--r-sm); border: 1px solid var(--rule); }
+.b-state.ok { color: var(--ok); border-color: var(--c2-soft); }
+.b-state.wait { color: var(--wait); border-color: color-mix(in oklch, var(--wait), transparent 55%); }
+.b-pick { display: flex; gap: 4px; }
+.b-pick .btn-mini.on { border-color: var(--c2-soft); color: var(--ok); background: var(--c2-tint); }
+.proposal.batch { max-width: none; }
 @media (max-width: 860px) { .dk-split2 { grid-template-columns: 1fr; } }
 @media (max-width: 860px) { .dk-split { grid-template-columns: 1fr; } }
 @media (max-width: 760px) { .variant { grid-template-columns: 1fr; } }
