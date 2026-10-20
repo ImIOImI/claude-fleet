@@ -149,12 +149,15 @@ export function InboxView({ names, openCount, quiet, focusTodoId, focusNonce, on
           workspaces={workspaces}
           onCreateAutomationsWs={onCreateAutomationsWs}
           onEditAutomationsWs={onEditAutomationsWs}
+          onWatch={() => setSection('sessions')}
         />
       ) : section === 'activity' ? (
         <ActivityView
           names={names}
           canDiscuss={!!automationsWs}
           onDiscussed={() => setSection('sessions')}
+          onWatch={() => setSection('sessions')}
+          automationsWsId={automationsWs?.id ?? null}
           onOpenTodo={(id) => {
             setSection('todos');
             void window.api.inbox.get(id).then((d) => { if (d) { setStatus(d.todo.status); setSelected(id); } });

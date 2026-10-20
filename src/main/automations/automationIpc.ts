@@ -15,8 +15,9 @@ import type { NotifyService } from '../inbox/notifyService.js';
 import { emitInboxChanged } from '../inbox/inboxEvents.js';
 import { AutomationStore } from './automationStore.js';
 import { createAutomationService, type AutomationService } from './automationService.js';
-import { STARTER_YAML } from './definition.js';
+import { STARTER_YAML, definitionToYaml } from './definition.js';
 import { reviewPrompt } from './review.js';
+import { changePrompt, draftPrompt, refinePrompt } from './authoring.js';
 import { ProposalStore } from './proposalStore.js';
 import { createProposalService, type ProposalService } from './proposalService.js';
 import { listWorkspaceManifests, readWorkspaceManifest, writeWorkspaceManifest } from '../workspaces.js';
@@ -146,6 +147,39 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     if (!p) throw new Error('proposal not found');
     await hostPostToWorkspace(roleWs, reviewPrompt(p, (id) => names.find((n) => n.id === id)?.name ?? id));
     return roleWs;
+  });
+
+  // Claude-first authoring (#407 Phase 6): the request goes to the automations
+  // workspace's session as labeled data; the draft comes back as a proposal.
+  const toRole = async (prompt: (ctx: { workspaces: string[]; automations: string[] }) => string): Promise<string> => {
+    await refresh();
+    if (!roleWs) throw new Error('set up an automations workspace first');
+    const ctx = { workspaces: names.filter((n) => n.id !== roleWs).map((n) => n.name), automations: store.list().map((a) => a.name) };
+    await hostPostToWorkspace(roleWs, prompt(ctx));
+    return roleWs;
+  };
+  const need = (v: unknown, what: string): string => {
+    const t = typeof v === 'string' ? v.trim() : '';
+    if (!t) throw new Error(`describe ${what} first`);
+    return t.slice(0, 8000);
+  };
+  ipcMain.handle('automations:draft', (_e, text: string) => {
+    const d = need(text, 'the automation');
+    return toRole((ctx) => draftPrompt(d, ctx));
+  });
+  ipcMain.handle('automations:askChange', (_e, id: string, text: string) => {
+    const d = need(text, 'the change');
+    const a = store.get(id);
+    if (!a) throw new Error('automation not found');
+    return toRole((ctx) => changePrompt(a.name, definitionToYaml(a.definition), d, ctx));
+  });
+  ipcMain.handle('proposals:refine', (_e, id: string, index: number, text: string) => {
+    const d = need(text, 'the changes');
+    const p = proposals.list().find((x) => x.id === id);
+    const it = p?.items[index ?? 0];
+    if (!p || !it) throw new Error('proposal not found');
+    if (p.status !== 'pending') throw new Error(`this proposal is already ${p.status}`);
+    return toRole((ctx) => refinePrompt(definitionToYaml(it.after), d, !it.automationId, ctx));
   });
 
   ipcMain.handle('proposals:list', () => withNames(() => proposals.list()));

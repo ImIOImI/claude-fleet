@@ -1,11 +1,13 @@
 // Inbox › Automations (#407 Phase 3): the list (switch, triggers, next fire,
 // last run, tags) and the detail pane (actions, week stats, triggers, steps,
-// params, runs with per-step outcomes). Editing is YAML for now.
+// params, runs with per-step outcomes). Authoring is Claude-first (Phase 6):
+// describe it and the automations workspace drafts it; YAML is the fallback.
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Automation, RunRow } from '../../../preload';
 import { RUN_LABELS, TRIGGER_LABELS, nextLabel, runDuration, runTone, runWhen } from '../automationView';
 import { AutomationEditor } from './AutomationEditor';
 import { RunModal } from './RunModal';
+import { AskClaude } from './AskClaude';
 
 interface Props {
   names: Record<string, string>;
@@ -13,9 +15,10 @@ interface Props {
   workspaces?: Array<{ id: string; name: string; kind: string }>;
   onCreateAutomationsWs?: () => void;
   onEditAutomationsWs?: () => void;
+  onWatch?: () => void;
 }
 
-export function AutomationsView({ names, automationsWs = null, workspaces = [], onCreateAutomationsWs, onEditAutomationsWs }: Props) {
+export function AutomationsView({ names, automationsWs = null, workspaces = [], onCreateAutomationsWs, onEditAutomationsWs, onWatch }: Props) {
   const [pick, setPick] = useState('');
   const [roleError, setRoleError] = useState<string | null>(null);
   const containers = workspaces.filter((w) => w.kind === 'container');
@@ -81,6 +84,16 @@ export function AutomationsView({ names, automationsWs = null, workspaces = [], 
             {roleError && <p className="form-hint error-text">{roleError}</p>}
           </div>
         )}
+        <AskClaude
+          label="Describe a new automation"
+          placeholder="Describe an automation: what to check, how often, and what should land in your inbox…"
+          button="Draft with Claude"
+          multiline
+          send={(t) => window.api.automations.draft(t)}
+          sentNote={`Sent to ${automationsWs?.name ?? 'the automations workspace'}. Its draft will appear in Activity for you to approve.`}
+          onWatch={onWatch}
+          disabledReason={automationsWs ? null : 'Set up the automations workspace to draft automations with Claude'}
+        />
         <div className="ib-toolbar">
           <div className="obs-scope-toggle ib-scope three" role="tablist" aria-label="Automation filter">
             {([['all', `All · ${list.length}`], ['enabled', `Enabled · ${enabledCount}`], ['failing', `Failing · ${failingCount}`]] as const).map(([f, label]) => (
@@ -89,11 +102,11 @@ export function AutomationsView({ names, automationsWs = null, workspaces = [], 
           </div>
           <div className="ib-filters">
             <input className="sessions-search" type="search" aria-label="Search automations" placeholder="Search automations…" value={search} onChange={(e) => setSearch(e.target.value)} />
-            <button className="btn btn-sm primary" onClick={() => void window.api.automations.starter().then((yaml) => setEditor({ id: null, yaml }))}>+ New automation</button>
+            <button className="btn btn-sm" onClick={() => void window.api.automations.starter().then((yaml) => setEditor({ id: null, yaml }))} title="Start from a YAML template">Write YAML…</button>
           </div>
         </div>
         {visible.length === 0 ? (
-          <div className="ib-empty">{list.length === 0 ? 'No automations yet. Create one to run prompts on a schedule or by hand.' : 'No automations match.'}</div>
+          <div className="ib-empty">{list.length === 0 ? 'No automations yet. Describe one above and Claude drafts it, or write the YAML yourself.' : 'No automations match.'}</div>
         ) : (
           <ul className="auto-list" aria-label="Automations">
             {visible.map((x) => (
@@ -146,6 +159,16 @@ export function AutomationsView({ names, automationsWs = null, workspaces = [], 
               )}
             </div>
           </div>
+          <AskClaude
+            key={a.id}
+            label={`Ask Claude to change ${a.name}`}
+            placeholder="Ask Claude to change this… (e.g. run every 30 min on weekdays, skip bot authors)"
+            button="Ask"
+            send={(t) => window.api.automations.askChange(a.id, t)}
+            sentNote="Sent. The change will appear in Activity as a proposal with a diff."
+            onWatch={onWatch}
+            disabledReason={automationsWs ? null : 'Set up the automations workspace to ask Claude for changes'}
+          />
           <div className="ib-statline">
             <span><b className="mono">{a.weekStats.runs}</b> runs this week</span>
             <span><b className="mono">{a.weekStats.nothingToDo}</b> nothing to do</span>
