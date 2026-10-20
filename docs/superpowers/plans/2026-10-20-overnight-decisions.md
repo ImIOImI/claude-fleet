@@ -27,3 +27,7 @@ v0.14.0, CI-runnable e2e, no release.
 | 17 | 2a | Notification settings (rules, downtimes, pause, default level) live in `inbox.db`, not `config.json`. | Authoritative, queried together, already-migrated store. | inbox.db schema v2 |
 | 18 | 2a | Several matching tag rules → the **strictest** level wins. | Muting a tag should never be overridden by another tag's louder rule. | notifyPolicy |
 | 19 | 2a | Downtime uses host local time; a window with end ≤ start wraps past midnight and belongs to the day it starts. | "Nights 22:00–07:00 every day" must just work. | notifyPolicy `downtimeWindowAt` |
+| 20 | 2a | Version stays **0.14.0** for every phase merged tonight. | You asked for 0.14.0; no release is cut between phases, so per-phase bumps would just be noise. | package.json |
+| 21 | 2a | Settings › Notifications saves each change immediately (no Save button), unlike the main Settings tab. | Rules are also edited live from the 🔔, so a batch-save tab would show stale state. | NotificationsSettings.tsx |
+| 22 | 2a | `post_todo`/`notify` validate input **before** the rate gate. | A malformed post shouldn't use up the workspace's hourly allowance. | inboxService.ts |
+| 23 | 2a | The 🔔 popover offers only the first tag as a scope; other tags are reachable from Settings later. | Mirrors the approved mock; keeps the popover small. | notifyService.scopesFor |
