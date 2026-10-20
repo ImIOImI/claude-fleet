@@ -370,6 +370,8 @@ const api = {
     roleWorkspace: (): Promise<string | null> => ipcRenderer.invoke('automations:roleWorkspace'),
     setRole: (workspaceId: string | null): Promise<string | null> => ipcRenderer.invoke('automations:setRole', workspaceId),
     discuss: (proposalId: string): Promise<string> => ipcRenderer.invoke('automations:discuss', proposalId),
+    draft: (description: string): Promise<string> => ipcRenderer.invoke('automations:draft', description),
+    askChange: (id: string, change: string): Promise<string> => ipcRenderer.invoke('automations:askChange', id, change),
     onChanged: (cb: () => void): (() => void) => {
       const h = (): void => cb();
       ipcRenderer.on('automations:changed', h);
@@ -383,6 +385,7 @@ const api = {
       ipcRenderer.invoke('proposals:approve', id, opts),
     reject: (id: string, note: string | null): Promise<Proposal> => ipcRenderer.invoke('proposals:reject', id, note),
     revert: (id: string, index: number): Promise<Proposal> => ipcRenderer.invoke('proposals:revert', id, index),
+    refine: (id: string, index: number, change: string): Promise<string> => ipcRenderer.invoke('proposals:refine', id, index, change),
     onChanged: (cb: () => void): (() => void) => {
       const h = (): void => cb();
       ipcRenderer.on('proposals:changed', h);

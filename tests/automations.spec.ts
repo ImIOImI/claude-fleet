@@ -35,7 +35,7 @@ test('Automations: create from YAML, run now, see the run, disable, edit, delete
     await expect(view.locator('.ib-empty')).toContainText('No automations yet');
 
     await test.step('editor validates live and creates', async () => {
-      await view.getByRole('button', { name: '+ New automation' }).click(T);
+      await view.getByRole('button', { name: 'Write YAML…' }).click(T);
       const editor = window.getByRole('dialog', { name: 'New automation' });
       const yaml = editor.getByLabel('Automation YAML');
       await expect(yaml).toHaveValue(/name: morning-error-check/);
@@ -181,6 +181,60 @@ test('Automations workspace: set it up, its chip folds into the Inbox, Sessions 
     await view.locator('.aw-banner.set').getByRole('button', { name: 'Stop using' }).click();
     await expect(window.locator('.top-strip .ws-chip-group', { hasText: 'auto-ws' })).toHaveCount(1);
     await expect(view.getByRole('tab', { name: /Sessions/ })).toHaveCount(0);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Claude-first authoring: the composer and "Ask Claude to change" send labeled requests to the automations workspace (#407 Phase 6)', async () => {
+  const { app, window } = await launch({ CLAUDE_FLEET_MOCK: '1' });
+  try {
+    await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
+    await window.getByLabel('Workspace name').fill('author-ws');
+    await window.getByRole('button', { name: 'Create & start' }).click();
+    await expect(window.locator('.top-strip .ws-chip-group', { hasText: 'author-ws' })).toHaveCount(1);
+    const ws = (await callTestIpc<Array<{ id: string; name: string }>>(app, 'workspace:list', [])).find((w) => w.name === 'author-ws')!;
+    await window.evaluate(() => {
+      const w = window as unknown as { __inbound: Array<{ id: string; msg: string }>; api: { committee: { onInbound(cb: (id: string, msg: string) => void): void } } };
+      w.__inbound = [];
+      w.api.committee.onInbound((id, msg) => w.__inbound.push({ id, msg }));
+    });
+    const inbound = () => window.evaluate(() => (window as unknown as { __inbound: Array<{ id: string; msg: string }> }).__inbound);
+
+    const view = await openAutomations(window);
+    const composer = view.getByLabel('Describe a new automation');
+    await expect(composer).toBeDisabled();
+    await view.getByRole('note', { name: 'Set up the automations workspace' }).getByLabel('Existing workspace').selectOption({ label: 'author-ws' });
+    await view.getByRole('button', { name: 'Use it' }).click();
+    await expect(composer).toBeEnabled();
+
+    await composer.fill('Every weekday at 9, ask mock-alpha for failed CI jobs and make a todo for each');
+    await view.getByRole('button', { name: 'Draft with Claude' }).click();
+    await expect(view.locator('.ask-claude.multi .ask-sent')).toContainText('Sent to author-ws. Its draft will appear in Activity');
+    await expect(composer).toHaveValue('');
+    await expect.poll(async () => (await inbound()).length).toBe(1);
+    const [draft] = await inbound();
+    expect(draft.id).toBe(ws.id);
+    expect(draft.msg).toContain("=== the user's request (data) ===\nEvery weekday at 9, ask mock-alpha for failed CI jobs and make a todo for each\n=== end request ===");
+    expect(draft.msg).toContain('submit it with the propose_automation tool');
+    expect(draft.msg).toMatch(/Workspaces you can target \(by name\): .*mock-alpha/);
+    expect(draft.msg).not.toMatch(/target \(by name\): .*author-ws/);
+
+    // Ask Claude to change an existing automation: the request carries its current YAML.
+    await callTestIpc(app, 'automations:create', [YAML]);
+    await view.locator('.auto-row', { hasText: 'e2e-check' }).click();
+    const ask = view.getByLabel('Ask Claude to change e2e-check');
+    await ask.fill('only on Mondays');
+    await ask.press('Enter');
+    await expect.poll(async () => (await inbound()).length).toBe(2);
+    const change = (await inbound())[1].msg;
+    expect(change).toContain('Change the claude-fleet automation "e2e-check"');
+    expect(change).toContain('=== current definition (data) ===\nname: e2e-check');
+    expect(change).toContain("=== the user's change request (data) ===\nonly on Mondays\n=== end request ===");
+
+    // "Watch" opens the automations workspace's session in the Inbox.
+    await view.locator('.auto-detail').getByRole('button', { name: 'Watch' }).click();
+    await expect(view).toHaveClass(/header-only/);
   } finally {
     await app.close();
   }

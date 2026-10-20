@@ -391,7 +391,7 @@ Wired by `src/main/inbox/notifyIpc.ts` (registered with the inbox; the effects a
 - `automations:run(id, args)`: a user manual run (form strings coerced; never rate-limited). `automations:starter()` returns a starter YAML naming your first workspace. Push `automations:changed`.
 
 ### Proposals (#407 Phase 5a)
-- `automations:roleWorkspace()` → id | null; `automations:setRole(workspaceId | null)` (one per fleet, container-only; also sets `inbox.trusted`); `automations:discuss(proposalId)` (posts the review prompt into its live session) (#407 Phase 5b).
+- `automations:roleWorkspace()` → id | null; `automations:setRole(workspaceId | null)` (one per fleet, container-only; also sets `inbox.trusted`); `automations:discuss(proposalId)` (posts the review prompt into its live session) (#407 Phase 5b). `automations:draft(description)`, `automations:askChange(id, change)`, `proposals:refine(proposalId, index, change)` → the automations workspace id, after posting the authoring prompt into its live session; they throw when no automations workspace is set up, the text is empty, or (refine) the proposal isn't pending (#407 Phase 6).
 - `proposals:list()` → `Proposal[]` (pending first, then newest); `proposals:yaml(id, index)`; `proposals:approve(id, {accept?: itemIndexes, editedYaml?, editedIndex?})` (unlisted pending items are declined); `proposals:reject(id, note)`; `proposals:revert(id, index)` (restores the replaced definition as a new version by the user). Push `proposals:changed`, plus `inbox:changed`, whose counts carry `approvals`.
 
 ### Clipboard + context menu
@@ -1098,6 +1098,12 @@ A dev server (Vite, Next, a Python server, …) started inside a workspace conta
 - **The Inbox chip fronts it:** its own chip is hidden from the strip, and opening the Inbox selects it, so the left rail's Sessions and the Observability rail show it. Inbox › **Sessions** reveals its terminal pane (native session tabs) under the inbox header, or "isn't running · Start it".
 - **Reach:** `list_automations` / `run_automation` / `get_automation` / `list_runs` see and run **every** automation for this workspace (others see only what they may run or are prompted by). Its proposals are trusted (low-risk only).
 - **Ask Claude about this** (on proposal cards, when set up): posts `review.ts`'s prompt (the proposal between `=== begin proposal (data) ===` / `=== end proposal ===` markers, then the questions: what changes, interaction with the current version, noise, a security read, a recommendation, and "do not approve or apply anything yourself; propose a merged version with propose_automation_change") into its live session, and switches to Inbox › Sessions.
+
+### Claude-first authoring (#407 Phase 6)
+- **Composer** at the top of the Automations tab ("Describe a new automation" → **Draft with Claude**; ⌘/Ctrl+Enter). It posts `authoring.ts`'s `draftPrompt` into the automations workspace's live session: the request between `=== the user's request (data) ===` / `=== end request ===` markers, the names of the workspaces it may target (all but itself) and of existing automations, an inline reference of the YAML format, and rules (don't do the task; prefer `mode: fresh` with minimal `allowedTools`; a dedupe key per problem and `run_id`; no faster than every 5 min unless asked; no secrets in YAML; submit with `propose_automation`, fix and resubmit on validation errors). The draft returns as an ordinary **new-automation proposal** in Activity. **Write YAML…** opens the YAML editor from the starter template instead. Without an automations workspace the composer is disabled with a hint.
+- **Ask Claude to change …** (detail pane of an automation) posts `changePrompt`: the current YAML and the change request, each delimited as data; the answer is a `propose_automation_change` (a diff card).
+- **Ask for changes…** (pending single-item proposal cards whose proposer *is* the automations workspace) posts `refinePrompt` with the current draft; it keeps the name, so the new proposal supersedes the card. Proposals from other workspaces don't offer it (their proposer couldn't supersede them).
+- Each send shows "Sent to …" with **Watch** (Inbox › Sessions). Requests are capped at 8000 characters.
 
 ## 9. Security model
 

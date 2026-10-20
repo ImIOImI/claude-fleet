@@ -7,12 +7,16 @@ import type { Proposal, ProposalItem } from '../../../preload';
 import { compact, diffLines } from '../lineDiff';
 import { relativeAgo, sourceLabel } from '../inboxView';
 import { AutomationEditor } from './AutomationEditor';
+import { AskClaude } from './AskClaude';
 
 interface Props {
   proposal: Proposal;
   names: Record<string, string>;
   canDiscuss?: boolean;
   onDiscussed?: () => void;
+  onWatch?: () => void;
+  /** The automations workspace; only its own drafts can be refined in place. */
+  automationsWsId?: string | null;
 }
 
 const KIND = { new: 'Proposal · new automation', change: 'Proposal · change', batch: 'Proposal' } as const;
@@ -33,7 +37,7 @@ function Diff({ item }: { item: ProposalItem }) {
   );
 }
 
-export function ProposalCard({ proposal: p, names, canDiscuss = false, onDiscussed }: Props) {
+export function ProposalCard({ proposal: p, names, canDiscuss = false, onDiscussed, onWatch, automationsWsId = null }: Props) {
   const pending = p.status === 'pending';
   const [accept, setAccept] = useState<Set<number>>(new Set(p.items.map((_, i) => i)));
   const [rejecting, setRejecting] = useState(false);
@@ -113,6 +117,16 @@ export function ProposalCard({ proposal: p, names, canDiscuss = false, onDiscuss
           <button className="btn danger" onClick={() => setRejecting(true)}>{single ? 'Reject…' : 'Decline all…'}</button>
         </div>
       ))}
+      {pending && single && single.decision === 'pending' && !!automationsWsId && p.proposer.id === automationsWsId && !rejecting && (
+        <AskClaude
+          label={`Ask for changes to ${single.name}`}
+          placeholder="Ask for changes… (Claude revises the draft; the new version replaces this card)"
+          button="Ask for changes"
+          send={(t) => window.api.proposals.refine(p.id, 0, t)}
+          sentNote="Sent. The revised version will replace this card."
+          onWatch={onWatch}
+        />
+      )}
       {error && <p className="form-hint error-text" role="alert">{error}</p>}
       {editing !== null && (
         <AutomationEditor

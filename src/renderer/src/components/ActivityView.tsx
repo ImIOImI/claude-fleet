@@ -15,11 +15,13 @@ interface Props {
   /** Phase 5b: "Ask Claude about this" needs the automations workspace. */
   canDiscuss?: boolean;
   onDiscussed?: () => void;
+  onWatch?: () => void;
+  automationsWsId?: string | null;
 }
 
 type Filter = 'all' | 'approvals' | 'delivered' | 'held';
 
-export function ActivityView({ names, onOpenTodo, onOpenWorkspace, canDiscuss = false, onDiscussed }: Props) {
+export function ActivityView({ names, onOpenTodo, onOpenWorkspace, canDiscuss = false, onDiscussed, onWatch, automationsWsId = null }: Props) {
   const [filter, setFilter] = useState<Filter>('all');
   const [rows, setRows] = useState<NotificationRow[]>([]);
   const [rules, setRules] = useState<NotifyRule[]>([]);
@@ -54,14 +56,14 @@ export function ActivityView({ names, onOpenTodo, onOpenWorkspace, canDiscuss = 
         {(filter === 'all' || filter === 'approvals') && pendingProposals.length > 0 && (
           <>
             <div className="session-group-label">Needs approval<span className="session-group-line" /></div>
-            {pendingProposals.map((p) => <ProposalCard key={p.id} proposal={p} names={names} canDiscuss={canDiscuss} onDiscussed={onDiscussed} />)}
+            {pendingProposals.map((p) => <ProposalCard key={p.id} proposal={p} names={names} canDiscuss={canDiscuss} onDiscussed={onDiscussed} onWatch={onWatch} automationsWsId={automationsWsId} />)}
           </>
         )}
         {filter === 'approvals' && (
           <>
             {pendingProposals.length === 0 && <div className="ib-empty">Nothing waiting for approval. Workspaces can propose automations; they land here.</div>}
             {decided.length > 0 && <div className="session-group-label">Decided<span className="session-group-line" /></div>}
-            {decided.map((p) => <ProposalCard key={p.id} proposal={p} names={names} canDiscuss={canDiscuss} onDiscussed={onDiscussed} />)}
+            {decided.map((p) => <ProposalCard key={p.id} proposal={p} names={names} canDiscuss={canDiscuss} onDiscussed={onDiscussed} onWatch={onWatch} automationsWsId={automationsWsId} />)}
           </>
         )}
         {filter === 'all' && pendingProposals.length > 0 && <div className="session-group-label">Notifications<span className="session-group-line" /></div>}
