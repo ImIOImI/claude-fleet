@@ -28,7 +28,17 @@ steps:                               # 1–10, run in order
         priority, tags, run_id) or a notification (notify), or nothing when all is well.
       allowedTools: [Read, "Bash(git log:*)"]   # fresh only: extra tools the unattended session may use
       ensureRunning: true            # start the workspace if it's stopped
-      timeout: 10m`;
+      timeout: 10m
+  - id: fetch                        # or a script step (prompts after it can quote {{steps.fetch.stdout}})
+    script:
+      run: |                         # bash in the automations workspace's container; inputs are env only:
+        curl -s -H "Authorization: Bearer $WEBEX_TOKEN" "https://…" > msgs.json   # ARG_<NAME>, FLEET_ARGS, FLEET_STATE, FLEET_TRIGGER
+        fleet-emit todo "Reply to Ana" --key webex:123 --priority high --tag webex   # → inbox todo
+        fleet-emit state '{"since": "2026-10-20T09:00:00Z"}'                         # → $FLEET_STATE next run
+        # exit 10 = nothing to do (stops the run quietly); other non-zero = failure
+      secrets: [WEBEX_TOKEN]         # from the automations workspace's secrets
+      runIn: host                    # optional: this computer (needs shell: bash | sh | pwsh | wsl:<distro>); always needs approval
+      timeout: 2m`;
 
 export interface DraftCtx {
   workspaces: string[];
@@ -47,7 +57,7 @@ const RULES = [
   'Prefer mode: fresh for anything scheduled or event-driven, and list only the extra allowedTools it truly needs.',
   'Have the prompt tell the worker to use a dedupe key per distinct problem and to pass run_id, so repeats update one todo.',
   'Keep schedules no faster than every 5 minutes unless the request says otherwise.',
-  'Never put secrets in the YAML.'
+  'Never put secrets in the YAML. Prefer a container script over runIn: host unless the task needs this computer.'
 ].join('\n');
 
 export function draftPrompt(description: string, ctx: DraftCtx): string {

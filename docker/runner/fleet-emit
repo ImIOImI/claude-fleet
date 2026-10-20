@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# fleet-emit: print one claude-fleet automation stdout line (#407 Phase 7).
+# A script step's stdout lines {"todo":…} / {"notify":…} / {"state":…} become
+# inbox todos, notifications and saved state. This just builds them safely.
+#
+#   fleet-emit todo "Reply to Ana" [--key K] [--priority low|normal|high|urgent] [--body B] [--tag T]... [--notify]
+#   fleet-emit notify "Token expires tomorrow" [--key K] [--priority P] [--body B] [--tag T]...
+#   fleet-emit state '{"cursor": 42}'          # any JSON; read it back next run from $FLEET_STATE
+#   exit 10                                    # (in your script) = nothing to do; stops the run quietly
+set -euo pipefail
+
+usage() { sed -n '5,9p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+[ $# -ge 2 ] || usage
+kind=$1; shift
+
+case "$kind" in
+  state)
+    printf '%s' "$1" | jq -ce '{state: .}' || { echo "fleet-emit: state must be valid JSON" >&2; exit 2; }
+    exit 0 ;;
+  todo|notify) ;;
+  *) usage ;;
+esac
+
+title=$1; shift
+key="" priority="" body="" notify=false
+tags=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --key) key=$2; shift 2 ;;
+    --priority) priority=$2; shift 2 ;;
+    --body) body=$2; shift 2 ;;
+    --tag) tags+=("$2"); shift 2 ;;
+    --notify) notify=true; shift ;;
+    *) echo "fleet-emit: unknown option $1" >&2; exit 2 ;;
+  esac
+done
+case "$priority" in ""|low|normal|high|urgent) ;; *) echo "fleet-emit: --priority is low, normal, high or urgent" >&2; exit 2 ;; esac
+
+jq -nc --arg kind "$kind" --arg title "$title" --arg key "$key" --arg priority "$priority" --arg body "$body" \
+  --argjson notify "$notify" --args '
+  {title: $title}
+  + (if $key != "" then {key: $key} else {} end)
+  + (if $priority != "" then {priority: $priority} else {} end)
+  + (if $body != "" then {body: $body} else {} end)
+  + (if ($ARGS.positional | length) > 0 then {tags: $ARGS.positional} else {} end)
+  + (if $notify and $kind == "todo" then {notify: true} else {} end)
+  | {($kind): .}' "${tags[@]}"

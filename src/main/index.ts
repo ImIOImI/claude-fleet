@@ -302,7 +302,10 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   registerIpc({ jsonlWatcher, peerStatusWatcher });
   const notifySvc = inboxStore ? registerNotifyIpc(inboxStore) : null;
   const auto = inboxStore ? registerAutomationIpc(inboxStore, notifySvc) : null;
-  if (inboxStore) registerInboxIpc(inboxStore, notifySvc ?? undefined, auto ? (r, c) => auto.automations.attribution(r, c) : undefined);
+  if (inboxStore) {
+    const inboxHost = registerInboxIpc(inboxStore, notifySvc ?? undefined, auto ? (r, c) => auto.automations.attribution(r, c) : undefined);
+    auto?.setInboxSink(inboxHost);
+  }
   registerPresenceIpc(ipcMain, { get: getKeepRunningInTray, set: setKeepRunningInTray });
   mainWindow = createWindow();
   // Desktop presence (#407 Phase 2b): tray, taskbar overlay, badge, attention.

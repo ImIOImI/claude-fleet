@@ -17,7 +17,7 @@ export function registerInboxIpc(
   store: InboxStore,
   notifications?: NotifyService,
   attribution?: (runId: string, callerId: string) => { automationId: string } | null
-): void {
+): ReturnType<typeof createInboxService>['host'] {
   const svc = createInboxService(store, {
     manifest: (id) => readWorkspaceManifest(id),
     notifyChanged: () => {
@@ -38,4 +38,5 @@ export function registerInboxIpc(
   ipcMain.handle('inbox:create', (_e, input: Record<string, unknown>) => svc.ipc.create(input ?? {}));
   ipcMain.handle('inbox:update', (_e, id: string, patch: Record<string, unknown>) => svc.ipc.update(id, patch ?? {}));
   ipcMain.handle('inbox:counts', () => svc.ipc.counts());
+  return svc.host;
 }

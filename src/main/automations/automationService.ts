@@ -5,7 +5,7 @@
 import type { Automation, AutomationDef, EventName, ParamValue, RunRow, RunTriggerKind, TodoSource } from '../../preload/inboxTypes.js';
 import type { NotifyInput } from '../inbox/notifyService.js';
 import { AutomationStore, type AutomationRecord } from './automationStore.js';
-import { definitionToYaml, parseDefinitionText, parseDuration, validateArgs, validateDefinition, type Validation } from './definition.js';
+import { definitionToYaml, parseDefinitionText, parseDuration, stepWorkspaces, validateArgs, validateDefinition, type Validation } from './definition.js';
 import { executeRun, type RunnerDeps, type RunOutcome } from './runner.js';
 import { dueSchedule, nextFireAt } from './scheduler.js';
 import { describeCron } from './cron.js';
@@ -98,7 +98,7 @@ export function createAutomationService(deps: AutomationDeps) {
   }
 
   async function execute(a: AutomationRecord, run: RunRow, callerSupplied: boolean): Promise<void> {
-    active.set(run.id, { automationId: a.id, workspaces: new Set(a.definition.steps.map((s) => s.prompt.workspace)) });
+    active.set(run.id, { automationId: a.id, workspaces: new Set(stepWorkspaces(a.definition)) });
     deps.changed();
     let outcome: RunOutcome;
     try {
@@ -221,7 +221,7 @@ export function createAutomationService(deps: AutomationDeps) {
         if (!trig || !('event' in trig)) continue;
         // Loop guard: never react to your own output, or to the workspaces you just prompted.
         if (e.todo?.source.kind === 'automation' && e.todo.source.id === a.id) continue;
-        const targets = new Set(a.definition.steps.map((s) => s.prompt.workspace));
+        const targets = new Set(stepWorkspaces(a.definition));
         const ws = e.workspaceId ?? (e.todo?.source.kind === 'workspace' ? e.todo.source.id ?? undefined : undefined);
         if (ws && targets.has(ws)) {
           const busyHere = [...active.values()].some((r) => r.automationId === a.id);
@@ -294,7 +294,7 @@ export function createAutomationService(deps: AutomationDeps) {
       /** Automations a workspace may see: ones it can run, or whose steps prompt it. */
       list(callerId: string, privileged = false): Array<Pick<Automation, 'id' | 'name' | 'description' | 'enabled' | 'nextFireAt'> & { canRun: boolean; params: AutomationDef['params'] }> {
         return store.list()
-          .filter((a) => privileged || canRun(a, callerId) || a.definition.steps.some((s) => s.prompt.workspace === callerId))
+          .filter((a) => privileged || canRun(a, callerId) || stepWorkspaces(a.definition).includes(callerId))
           .map((a) => ({ id: a.id, name: a.name, description: a.definition.description ?? null, enabled: a.enabled, nextFireAt: nextFireAt(a, deps.now()), canRun: privileged || canRun(a, callerId), params: a.definition.params ?? [] }));
       },
       /** One automation's YAML + recent runs, for workspaces that may see it (all for the automations workspace). */
@@ -330,7 +330,7 @@ export function createAutomationService(deps: AutomationDeps) {
   };
 
   function visible(a: AutomationRecord, callerId: string): boolean {
-    return canRun(a, callerId) || a.definition.steps.some((s) => s.prompt.workspace === callerId);
+    return canRun(a, callerId) || stepWorkspaces(a.definition).includes(callerId);
   }
 
   function canRun(a: AutomationRecord, callerId: string): boolean {

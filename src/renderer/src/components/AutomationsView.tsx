@@ -181,7 +181,17 @@ export function AutomationsView({ names, automationsWs = null, workspaces = [], 
           </ul>
           <div className="ib-sec">Steps</div>
           <ol className="ib-steps">
-            {a.definition.steps.map((s) => (
+            {a.definition.steps.map((s) => 'script' in s ? (
+              <li key={s.id} className={s.script.runIn === 'host' ? 'host-step' : undefined}>
+                <span className="step-k">{s.id}</span>
+                <span>script {s.script.runIn === 'host'
+                  ? <>on <b>this computer</b> ({s.script.shell})</>
+                  : <>in <b>{s.script.runIn ? names[s.script.runIn] ?? s.script.runIn : automationsWs?.name ?? 'the automations workspace'}</b></>}</span>
+                <span className="ib-dim">{s.script.timeout ? `timeout ${s.script.timeout}` : 'timeout 5m'}{s.script.ensureRunning ? ' · starts it if needed' : ''}</span>
+                {(s.script.secrets ?? []).map((k) => <span key={k} className="tag" title="Secret injected into this script only">🔑 {k}</span>)}
+                <pre className="ib-pre step-script">{s.script.run}</pre>
+              </li>
+            ) : (
               <li key={s.id}>
                 <span className="step-k">{s.id}</span>
                 <span>prompt <b>{names[s.prompt.workspace] ?? s.prompt.workspace}</b></span>
@@ -220,10 +230,24 @@ export function AutomationsView({ names, automationsWs = null, workspaces = [], 
                           <span className="step-k">{s.stepId}</span>
                           <span>
                             <span className={`run-chip ${runTone(s.status)}`}>{RUN_LABELS[s.status]}</span>{' '}
-                            prompted {names[s.workspaceId ?? ''] ?? s.workspaceId}
-                            {s.detail?.via ? ` (${s.detail.via === 'attached' ? 'open tab' : s.detail.via === 'fresh' ? 'fresh session' : 'background attach'})` : ''}
+                            {s.kind === 'script' ? (
+                              <>
+                                script {String(s.detail?.via ?? '').startsWith('host:') ? `on this computer (${String(s.detail?.via).slice(5)})` : `in ${names[s.workspaceId ?? ''] ?? s.workspaceId ?? 'the automations workspace'}`}
+                                {s.detail?.exitCode !== undefined ? ` · exit ${String(s.detail.exitCode)}` : ''}
+                                {s.detail?.todos ? ` · ${String(s.detail.todos)} todo${s.detail.todos === 1 ? '' : 's'}` : ''}
+                                {s.detail?.notifications ? ` · ${String(s.detail.notifications)} notification${s.detail.notifications === 1 ? '' : 's'}` : ''}
+                              </>
+                            ) : (
+                              <>
+                                prompted {names[s.workspaceId ?? ''] ?? s.workspaceId}
+                                {s.detail?.via ? ` (${s.detail.via === 'attached' ? 'open tab' : s.detail.via === 'fresh' ? 'fresh session' : 'background attach'})` : ''}
+                              </>
+                            )}
                             {s.error ? ` · ${s.error}` : ''}
                           </span>
+                          {Array.isArray(s.detail?.warnings) && (s.detail.warnings as string[]).map((w, i) => <span key={i} className="run-warn">⚠ {w}</span>)}
+                          {typeof s.detail?.stdout === 'string' && <pre className="ib-pre run-io" aria-label={`${s.stepId} output`}>{s.detail.stdout}</pre>}
+                          {typeof s.detail?.stderr === 'string' && <pre className="ib-pre run-io err" aria-label={`${s.stepId} errors`}>{s.detail.stderr}</pre>}
                         </div>
                       ))}
                     </div>

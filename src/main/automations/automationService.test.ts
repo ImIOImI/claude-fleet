@@ -51,7 +51,7 @@ describe('CRUD + validation', () => {
     expect(svc.validate('name: Bad')).toMatchObject({ ok: false });
     const a = svc.create(YAML(), USER);
     expect(a).toMatchObject({ name: 'log-watch', version: 1, tags: ['ops'], enabled: true });
-    expect(a.definition.steps[0].prompt.workspace).toBe('W1');
+    expect((a.definition.steps[0] as { prompt: { workspace: string } }).prompt.workspace).toBe('W1');
     expect(a.nextFireAt).toBe(new Date(2026, 9, 19, 10, 15).getTime());
     const u = svc.update(a.id, YAML().replace('*/15', '*/30'), USER);
     expect(u.version).toBe(2);

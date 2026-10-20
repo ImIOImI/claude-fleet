@@ -16,6 +16,8 @@ interface Props {
   item: BellItem;
   /** The trigger's rect when opened; the popover is portaled and fixed-positioned from it. */
   anchor: DOMRect;
+  /** The trigger itself: on scroll/resize the popover follows it, and closes once it leaves the viewport. */
+  anchorEl?: HTMLElement | null;
   names: Record<string, string>;
   onClose: () => void;
   /** Called after a rule changes so the caller can refresh hints. */
@@ -25,7 +27,8 @@ interface Props {
 const LEVELS: NotifyLevel[] = ['all', 'high', 'urgent', 'off'];
 const HINTS: Partial<Record<NotifyLevel, string>> = { all: 'every post can notify', off: 'still lands in the inbox' };
 
-export function BellPopover({ item, anchor, names, onClose, onChanged }: Props) {
+export function BellPopover({ item, anchor, anchorEl = null, names, onClose, onChanged }: Props) {
+  const [rect, setRect] = useState<DOMRect>(anchor);
   const [scopes, setScopes] = useState<RuleScope[]>([]);
   const [rules, setRules] = useState<NotifyRule[]>([]);
   const [scopeIdx, setScopeIdx] = useState(0);
@@ -44,16 +47,18 @@ export function BellPopover({ item, anchor, names, onClose, onChanged }: Props) 
       if (ref.current && !ref.current.contains(e.target as Node)) onClose();
     };
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    // The popover is fixed-positioned from its trigger, so close when the list
-    // holding the trigger scrolls or the window really changes size. Scrolls
-    // elsewhere (rails, terminals) and no-op resize events must not close it.
-    const onScroll = (e: Event) => {
-      const t = e.target;
-      if (ref.current?.contains(t as Node)) return;
-      if (t === document || (t instanceof Element && t.closest('.inbox-view'))) onClose();
+    // The popover is fixed-positioned from its trigger: follow it on scroll or
+    // resize, and close once it's gone or off-screen. (Closing on any scroll
+    // raced Playwright's scroll-into-view on Windows and lost the popover.)
+    const follow = (e?: Event) => {
+      if (e && ref.current?.contains(e.target as Node)) return;
+      if (!anchorEl) { onClose(); return; }
+      const r = anchorEl.getBoundingClientRect();
+      if (!anchorEl.isConnected || r.width === 0 || r.bottom < 0 || r.top > window.innerHeight) { onClose(); return; }
+      setRect((cur) => (cur.top === r.top && cur.left === r.left && cur.width === r.width ? cur : r));
     };
-    const size = { w: window.innerWidth, h: window.innerHeight };
-    const onResize = () => { if (window.innerWidth !== size.w || window.innerHeight !== size.h) onClose(); };
+    const onScroll = (e: Event) => follow(e);
+    const onResize = () => follow();
     document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onKey);
     window.addEventListener('scroll', onScroll, true);
@@ -64,7 +69,7 @@ export function BellPopover({ item, anchor, names, onClose, onChanged }: Props) 
       window.removeEventListener('scroll', onScroll, true);
       window.removeEventListener('resize', onResize);
     };
-  }, [onClose]);
+  }, [onClose, anchorEl]);
 
   const scope = scopes[scopeIdx];
   const rule = scope ? rules.find((r) => r.scopeKind === scope.scopeKind && r.scopeValue === scope.scopeValue) : undefined;
@@ -90,7 +95,7 @@ export function BellPopover({ item, anchor, names, onClose, onChanged }: Props) 
       })()
     : 'your default';
 
-  const pos = bellPosition(anchor, window.innerWidth, window.innerHeight);
+  const pos = bellPosition(rect, window.innerWidth, window.innerHeight);
   return createPortal(
     <div className="ws-chip-menu bell-pop" role="dialog" aria-label="Notification settings" ref={ref} style={{ top: pos.top, left: pos.left }}
       onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>

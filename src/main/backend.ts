@@ -69,4 +69,9 @@ export interface Backend {
   spawnHeadless(workspaceId: string, sessionId: string, args: string[]): Promise<void>;
   headlessState(workspaceId: string, sessionId: string): Promise<'alive' | 'ended' | 'missing'>;
   closeHeadless(workspaceId: string, sessionId: string): Promise<void>;
+  /** Run an automation script step in the workspace (#407 Phase 7). Containers only. */
+  execScript(
+    workspaceId: string,
+    opts: { automationId: string; script: string; env: Record<string, string>; timeoutMs: number }
+  ): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean }>;
 }

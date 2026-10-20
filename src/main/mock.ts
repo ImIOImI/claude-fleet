@@ -7,6 +7,9 @@ import type {
   PtyHandle
 } from './docker.js';
 import { workspaceStateDir } from './paths.js';
+import path from 'node:path';
+import { tmpdir } from 'node:os';
+import { runScript } from './automations/hostScript.js';
 import type { Workspace } from './workspaces.js';
 import { FACTORY_MIRROR } from './workspaces.js';
 
@@ -393,6 +396,17 @@ export async function headlessState(workspaceId: string, sessionId: string): Pro
 }
 export async function closeHeadless(workspaceId: string, sessionId: string): Promise<void> {
   mockHeadless.delete(`${workspaceId}/${sessionId}`);
+}
+
+/** Mock script steps (#407 Phase 7): there's no container, so the script runs
+ *  with `bash` on this machine in a temp scratch dir. Mock mode is dev/e2e only. */
+export async function execScript(
+  workspaceId: string,
+  opts: { automationId: string; script: string; env: Record<string, string>; timeoutMs: number }
+): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean }> {
+  if (!workspaces.get(workspaceId)) throw new Error(`no such workspace ${workspaceId}`);
+  const cwd = path.join(tmpdir(), 'claude-fleet-mock-scripts', workspaceId, opts.automationId);
+  return runScript({ shell: 'bash', script: opts.script, env: opts.env, cwd, timeoutMs: opts.timeoutMs });
 }
 
 export async function committeePost(

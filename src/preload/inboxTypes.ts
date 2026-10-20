@@ -234,7 +234,24 @@ export interface PromptStepDef {
     allowedTools?: string[];
   };
 }
-export type StepDef = PromptStepDef;
+/** Where a script step runs (#407 Phase 7): the automations workspace's container (default), host, or another container workspace (id). */
+export type ScriptShell = 'bash' | 'sh' | 'pwsh' | `wsl:${string}`;
+export interface ScriptStepDef {
+  id: string;
+  script: {
+    /** The script text. Args reach it only through env (ARG_<NAME>, FLEET_ARGS), never by interpolation. */
+    run: string;
+    /** Omitted = the automations workspace; 'host' = this computer (needs shell); else a container workspace id. */
+    runIn?: string;
+    /** Host only. */
+    shell?: ScriptShell;
+    /** Vault keys injected as env into this process only (the executing workspace's vault; the automations workspace's for host steps). */
+    secrets?: string[];
+    ensureRunning?: boolean;
+    timeout?: string;
+  };
+}
+export type StepDef = PromptStepDef | ScriptStepDef;
 
 export interface AutomationDef {
   name: string;
