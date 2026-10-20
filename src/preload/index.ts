@@ -1,8 +1,12 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent, webUtils } from 'electron';
-import type { Todo, TodoEvent, TodoFilter, InboxCounts, PostTodoInput, UpdateTodoPatch } from './inboxTypes';
+import type {
+  Todo, TodoEvent, TodoFilter, InboxCounts, PostTodoInput, UpdateTodoPatch, NotificationRow, NotifySettings, QuietState,
+  RuleScope, EffectiveRule, NotifyRule, NotifyLevel, RuleScopeKind, PauseState, Downtime, TodoSource, TodoPriority
+} from './inboxTypes';
 export type {
   Todo, TodoEvent, TodoEventKind, TodoFilter, TodoSource, TodoStatus, TodoPriority, SourceKind,
-  InboxCounts, InboxConfig, PostTodoInput, UpdateTodoPatch
+  InboxCounts, InboxConfig, PostTodoInput, UpdateTodoPatch, NotifyLevel, NotificationKind, RuleScopeKind, DowntimeBypass,
+  NotificationRow, NotifyRule, Downtime, PauseState, QuietState, RuleScope, EffectiveRule, NotifySettings
 } from './inboxTypes';
 
 /** Outcome of a `pty:resize`. Lives here because preload is the IPC contract
@@ -308,6 +312,45 @@ const api = {
       const handler = (_e: IpcRendererEvent, payload: { counts: InboxCounts }): void => cb(payload.counts);
       ipcRenderer.on(channel, handler);
       return () => ipcRenderer.removeListener(channel, handler);
+    }
+  },
+  notifications: {
+    list: (filter?: 'all' | 'delivered' | 'held', limit?: number): Promise<NotificationRow[]> =>
+      ipcRenderer.invoke('notifications:list', filter, limit),
+    settings: (): Promise<NotifySettings> => ipcRenderer.invoke('notifications:settings'),
+    quietState: (): Promise<QuietState> => ipcRenderer.invoke('notifications:quietState'),
+    scopesFor: (item: { source: TodoSource; dedupeKey: string | null; tags: string[] }): Promise<RuleScope[]> =>
+      ipcRenderer.invoke('notifications:scopesFor', item),
+    effective: (item: { priority: TodoPriority; source: TodoSource; dedupeKey: string | null; tags: string[] }): Promise<EffectiveRule> =>
+      ipcRenderer.invoke('notifications:effective', item),
+    effectiveMany: (
+      items: Array<{ id: string; priority: TodoPriority; source: TodoSource; dedupeKey: string | null; tags: string[] }>
+    ): Promise<Record<string, EffectiveRule>> => ipcRenderer.invoke('notifications:effectiveMany', items),
+    setRule: (r: { scopeKind: RuleScopeKind; scopeValue: string; level: NotifyLevel; snoozeUntil?: number | null }): Promise<NotifyRule> =>
+      ipcRenderer.invoke('notifications:setRule', r),
+    removeRule: (id: string): Promise<void> => ipcRenderer.invoke('notifications:removeRule', id),
+    setDefaultLevel: (level: NotifyLevel): Promise<void> => ipcRenderer.invoke('notifications:setDefaultLevel', level),
+    pause: (p: { until: number | null; letUrgent: boolean }): Promise<PauseState> => ipcRenderer.invoke('notifications:pause', p),
+    resume: (): Promise<null> => ipcRenderer.invoke('notifications:resume'),
+    saveDowntime: (d: Omit<Downtime, 'id'> & { id?: string }): Promise<Downtime> => ipcRenderer.invoke('notifications:saveDowntime', d),
+    removeDowntime: (id: string): Promise<void> => ipcRenderer.invoke('notifications:removeDowntime', id),
+    test: (): Promise<NotificationRow> => ipcRenderer.invoke('notifications:test'),
+    setViewing: (v: { workspaceId: string | null; inboxOpen: boolean }): Promise<void> => ipcRenderer.invoke('notifications:setViewing', v),
+    permission: (): Promise<{ supported: boolean }> => ipcRenderer.invoke('notifications:permission'),
+    onChanged: (cb: (q: QuietState) => void): (() => void) => {
+      const h = (_e: IpcRendererEvent, q: QuietState): void => cb(q);
+      ipcRenderer.on('notifications:changed', h);
+      return () => ipcRenderer.removeListener('notifications:changed', h);
+    },
+    onToast: (cb: (n: NotificationRow) => void): (() => void) => {
+      const h = (_e: IpcRendererEvent, n: NotificationRow): void => cb(n);
+      ipcRenderer.on('notifications:toast', h);
+      return () => ipcRenderer.removeListener('notifications:toast', h);
+    },
+    onOpen: (cb: (t: { notificationId: string; todoId: string | null; workspaceId: string | null; kind: string }) => void): (() => void) => {
+      const h = (_e: IpcRendererEvent, t: { notificationId: string; todoId: string | null; workspaceId: string | null; kind: string }): void => cb(t);
+      ipcRenderer.on('notifications:open', h);
+      return () => ipcRenderer.removeListener('notifications:open', h);
     }
   },
   committee: {

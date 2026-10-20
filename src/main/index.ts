@@ -23,6 +23,7 @@ import { appBuildSha, appVersionString } from './appVersion.js';
 import { runStartupMigration } from './migration.js';
 import { InboxStore } from './inbox/inboxDb.js';
 import { registerInboxIpc } from './inbox/inboxIpc.js';
+import { registerNotifyIpc } from './inbox/notifyIpc.js';
 import { ensureWorkspaceClaudeJson } from './docker.js';
 import { hardwareAccelDisabledAtStartup } from './config.js';
 import { setWorkspaceDefault } from './mirrorPolicy.js';
@@ -294,7 +295,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   // With recording off the tracer is a no-op — cost is one async frame/invoke.
   instrumentIpcHandle(ipcMain);
   registerIpc({ jsonlWatcher, peerStatusWatcher });
-  if (inboxStore) registerInboxIpc(inboxStore);
+  if (inboxStore) registerInboxIpc(inboxStore, registerNotifyIpc(inboxStore));
   mainWindow = createWindow();
 
   app.on('activate', () => {
