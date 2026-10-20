@@ -101,6 +101,18 @@ export class AutomationStore {
     this.db.prepare('UPDATE automations SET last_scheduled_at = ? WHERE id = ?').run(ts, id);
   }
 
+  /** Script state (#407 Phase 7): the last `{"state": …}` a script printed. */
+  getState(id: string): unknown {
+    const row = this.db.prepare('SELECT state FROM automation_state WHERE automation_id = ?').get(id) as { state: string } | undefined;
+    if (!row) return null;
+    try { return JSON.parse(row.state); } catch { return null; }
+  }
+
+  setState(id: string, state: unknown): void {
+    this.db.prepare('INSERT INTO automation_state (automation_id, state) VALUES (?, ?) ON CONFLICT(automation_id) DO UPDATE SET state = excluded.state')
+      .run(id, JSON.stringify(state ?? null));
+  }
+
   remove(id: string): void {
     this.db.transaction(() => {
       this.db.prepare('DELETE FROM automations WHERE id = ?').run(id);

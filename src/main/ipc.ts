@@ -507,6 +507,16 @@ export async function hostPostToWorkspace(
   return { via: 'headless', brokerSessionId };
 }
 
+/** Run an automation script step in a container workspace (#407 Phase 7). */
+export async function hostExecScript(
+  workspaceId: string,
+  opts: { automationId: string; script: string; env: Record<string, string>; timeoutMs: number }
+): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean }> {
+  const kind = await resolveKind(workspaceId);
+  if (kind === 'local' && !MOCK_MODE) throw new Error('script steps run in a container workspace; for this machine use runIn: host');
+  return backendForKind(kind).execScript(workspaceId, opts);
+}
+
 /** Start a fresh headless `claude <args>` session in a container workspace. */
 export async function hostSpawnFresh(workspaceId: string, sessionId: string, args: string[]): Promise<void> {
   const kind = await resolveKind(workspaceId);

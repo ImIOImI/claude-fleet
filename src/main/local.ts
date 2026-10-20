@@ -734,6 +734,9 @@ export async function headlessState(): Promise<'alive' | 'ended' | 'missing'> {
   return 'missing';
 }
 export async function closeHeadless(): Promise<void> {}
+export async function execScript(): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean }> {
+  throw new Error('script steps run in a container workspace; for this machine use runIn: host');
+}
 
 // Compile-time assertion that this module satisfies the Backend contract.
 const _assertBackend: Backend = {
@@ -752,6 +755,7 @@ const _assertBackend: Backend = {
   committeePost,
   spawnHeadless,
   headlessState,
-  closeHeadless
+  closeHeadless,
+  execScript
 };
 void _assertBackend;

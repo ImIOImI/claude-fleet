@@ -3659,3 +3659,11 @@ button.switch { padding: 0; cursor: pointer; }
 .ask-claude input:focus, .ask-claude textarea:focus { outline: none; border-color: var(--info); }
 .ask-claude :disabled { opacity: 0.6; }
 .ask-claude .ask-sent { margin: 0; font-size: 12px; color: var(--ink-2); }
+
+/* Script steps (#407 Phase 7) */
+.ib-steps li.host-step .step-k { color: var(--danger); }
+.ib-steps .step-script { flex-basis: 100%; max-height: 160px; overflow: auto; margin: 4px 0 0; font-size: 11px; }
+.run-step .run-warn { grid-column: 1 / -1; color: var(--warn); font-size: 11px; }
+.run-step .run-io { grid-column: 1 / -1; max-height: 140px; overflow: auto; margin: 4px 0 0; font-size: 11px; }
+.run-step .run-io.err { color: var(--danger); }
+.pr-caps .tag.danger { color: var(--danger); border-color: color-mix(in oklch, var(--danger), transparent 50%); background: color-mix(in oklch, var(--danger), transparent 90%); }

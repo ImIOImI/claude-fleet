@@ -163,5 +163,30 @@ export function createInboxService(store: InboxStore, deps: InboxServiceDeps) {
     }
   };
 
-  return { mcp, ipc };
+  /** Host-trusted posts from automation script steps (#407 Phase 7): no workspace gate, attributed to the automation and run. */
+  const host = {
+    async todoFromAutomation(automationId: string, runId: string, args: Record<string, unknown>): Promise<void> {
+      const input = validatePostInput(args);
+      const { todo, action } = store.post({ kind: 'automation', id: automationId }, { ...input, sourceRunId: runId }, now());
+      deps.notifyChanged();
+      deps.notifications?.onTodoPosted(todo, action, args.notify === true);
+      if (action === 'created') deps.onTodoCreated?.(todo);
+    },
+    async notifyFromAutomation(automationId: string, _runId: string, args: Record<string, unknown>): Promise<void> {
+      const title = typeof args.title === 'string' ? args.title.trim() : '';
+      if (!title) throw new InboxInputError('title is required');
+      if (title.length > 200) throw new InboxInputError('title is longer than 200 characters');
+      const priority = args.priority === undefined ? 'normal' : args.priority;
+      if (!isPriority(priority)) throw new InboxInputError('priority must be one of low, normal, high, urgent');
+      if (!deps.notifications) throw new Error('notifications are unavailable');
+      deps.notifications.request({
+        kind: 'post', title, body: typeof args.body === 'string' ? args.body.slice(0, 2000) : null, priority,
+        source: { kind: 'automation', id: automationId }, todoId: null, workspaceId: null,
+        dedupeKey: typeof args.key === 'string' && args.key.trim() ? args.key.trim().slice(0, 200) : null,
+        tags: normalizeTags(args.tags)
+      });
+    }
+  };
+
+  return { mcp, ipc, host };
 }

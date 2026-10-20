@@ -78,12 +78,16 @@ COPY docker/runner/summarize.sh /usr/local/lib/claude-fleet/summarize.sh
 COPY docker/runner/summary-core.sh /usr/local/lib/claude-fleet/summary-core.sh
 COPY docker/runner/backfill-summaries.sh /usr/local/lib/claude-fleet/backfill-summaries.sh
 COPY docker/runner/hooks.settings.json /usr/local/lib/claude-fleet/hooks.settings.json
+# fleet-emit: builds automation script-step stdout lines ({"todo":…}, {"notify":…},
+# {"state":…}) safely with jq (#407 Phase 7). On PATH for every script step.
+COPY docker/runner/fleet-emit /usr/local/bin/fleet-emit
 RUN chmod 0755 /usr/local/lib/claude-fleet/input-wait-report.sh \
  && chmod 0755 /usr/local/lib/claude-fleet/session-report.sh \
  && chmod 0755 /usr/local/lib/claude-fleet/summarize.sh \
  && chmod 0755 /usr/local/lib/claude-fleet/summary-core.sh \
  && chmod 0755 /usr/local/lib/claude-fleet/backfill-summaries.sh \
- && chmod 0644 /usr/local/lib/claude-fleet/hooks.settings.json
+ && chmod 0644 /usr/local/lib/claude-fleet/hooks.settings.json \
+ && chmod 0755 /usr/local/bin/fleet-emit
 
 USER fleet
 WORKDIR /workspace

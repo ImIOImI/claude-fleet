@@ -1179,3 +1179,51 @@ export async function runInWorkspace(
   const info = await exec.inspect();
   return { exitCode: info.ExitCode ?? -1, output };
 }
+
+/**
+ * Run an automation script step inside a workspace's container (#407 Phase 7).
+ * `bash -c "$FLEET_SCRIPT"` in `/workspace/automations/<automationId>/` under
+ * coreutils `timeout` (exit 124 = timed out), with the step env (args, state,
+ * declared secrets) set on this exec only, never on the container. stdout and
+ * stderr are demuxed and capped. A host-side backstop ends the wait if the exec
+ * stream outlives the timeout.
+ */
+export async function execScript(
+  workspaceId: string,
+  opts: { automationId: string; script: string; env: Record<string, string>; timeoutMs: number }
+): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean }> {
+  const found = await findContainerById(workspaceId);
+  if (!found) throw new Error(`no container for workspace ${workspaceId}`);
+  const container = docker.getContainer(found.Id);
+  const secs = Math.max(1, Math.ceil(opts.timeoutMs / 1000));
+  const env = { ...opts.env, FLEET_SCRIPT: opts.script, FLEET_SCRATCH: `/workspace/automations/${opts.automationId}` };
+  const exec = await container.exec({
+    Cmd: ['sh', '-c', `mkdir -p "$FLEET_SCRATCH" && cd "$FLEET_SCRATCH" && exec timeout -k 5 ${secs} bash -c "$FLEET_SCRIPT"`],
+    Env: Object.entries(env).map(([k, v]) => `${k}=${v}`),
+    WorkingDir: '/workspace',
+    AttachStdout: true,
+    AttachStderr: true
+  });
+  const stream = await exec.start({ hijack: true, stdin: false });
+  const MAX = 1_000_000;
+  let stdout = '';
+  let stderr = '';
+  let backstop = false;
+  await new Promise<void>((resolve) => {
+    const sink = (which: 'out' | 'err') => new Writable({
+      write(chunk, _enc, cb) {
+        if (which === 'out') { if (stdout.length < MAX) stdout += chunk.toString('utf8'); } else if (stderr.length < MAX) stderr += chunk.toString('utf8');
+        cb();
+      }
+    });
+    const t = setTimeout(() => { backstop = true; stream.destroy(); resolve(); }, opts.timeoutMs + 15_000);
+    container.modem.demuxStream(stream, sink('out'), sink('err'));
+    stream.on('end', () => { clearTimeout(t); resolve(); });
+    stream.on('close', () => { clearTimeout(t); resolve(); });
+    stream.on('error', () => { clearTimeout(t); resolve(); });
+  });
+  if (backstop) return { exitCode: 124, stdout, stderr, timedOut: true };
+  const info = await exec.inspect();
+  const exitCode = info.ExitCode ?? -1;
+  return { exitCode, stdout, stderr, timedOut: exitCode === 124 || exitCode === 137 };
+}

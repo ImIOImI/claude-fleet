@@ -51,3 +51,22 @@ describe('riskFlags + minScheduleInterval', () => {
       .toEqual(['prompts ops-oncall (fresh session)', 'starts ops-oncall if needed', 'may use Read', 'runs every 15 min', 'runnable by webex-triage']);
   });
 });
+
+describe('script steps (#407 Phase 7)', () => {
+  const scripted = (script: Record<string, unknown>): AutomationDef => with_({ steps: [{ id: 'fetch', script: { run: 'curl x', ...script } } as never, ...base.steps] });
+  it('adding, changing, moving or arming a script needs the user; wording elsewhere stays low-risk', () => {
+    const r = (b: AutomationDef, a: AutomationDef) => classifyChange(b, a, name);
+    expect(r(base, scripted({})).reasons).toEqual(['adds a script step (fetch)']);
+    expect(r(scripted({}), scripted({ run: 'curl y' })).reasons).toEqual(['changes the fetch script']);
+    expect(r(scripted({}), scripted({ runIn: 'W2' })).reasons).toEqual(['moves fetch to webex-triage']);
+    expect(r(scripted({ secrets: ['A'] }), scripted({ secrets: ['A', 'B'] })).reasons).toEqual(['gives fetch secrets B']);
+    expect(r(scripted({}), { ...scripted({}), tags: ['x'] })).toEqual({ lowRisk: true, reasons: [] });
+  });
+  it('an automation with a host step is never low-risk, and its flag says so', () => {
+    const host = scripted({ runIn: 'host', shell: 'bash' });
+    expect(classifyChange(host, { ...host, tags: ['x'] }, name)).toEqual({ lowRisk: false, reasons: ['has a step that runs on your computer'] });
+    expect(classifyChange(scripted({}), host, name).reasons).toEqual(['moves fetch to your computer']);
+    expect(riskFlags(scripted({ runIn: 'host', shell: 'pwsh', secrets: ['TOKEN'] }), name).slice(0, 2)).toEqual(['runs a script on your computer (pwsh)', 'uses secrets TOKEN']);
+    expect(riskFlags(scripted({}), name)[0]).toBe('runs a script in the automations workspace');
+  });
+});

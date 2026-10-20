@@ -1,9 +1,12 @@
 // Electron wiring for automations (#407 Phase 3): `automations:*` IPC, the MCP
 // handlers, the 30 s scheduler tick and startup recovery. Effects into
 // workspaces use ipc.ts's host-trusted functions (no committee gate).
-import { BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain } from 'electron';
+import path from 'node:path';
+import { getSecret } from '../vault.js';
+import { runScript } from './hostScript.js';
 import {
-  hostCloseFresh, hostEnsureRunning, hostFreshState, hostPostToWorkspace, hostSpawnFresh, hostWorkspaceBusy, hostWorkspaceNames,
+  hostCloseFresh, hostEnsureRunning, hostExecScript, hostFreshState, hostPostToWorkspace, hostSpawnFresh, hostWorkspaceBusy, hostWorkspaceNames,
   hostWorkspaceState, setFleetEventObserver
 } from '../ipc.js';
 import { inboxEvents } from '../inbox/inboxEvents.js';
@@ -30,7 +33,15 @@ function send(channel: string, payload?: unknown): void {
   }
 }
 
-export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService | null): { automations: AutomationService; proposals: ProposalService } {
+type InboxSink = {
+  todoFromAutomation(automationId: string, runId: string, args: Record<string, unknown>): Promise<void>;
+  notifyFromAutomation(automationId: string, runId: string, args: Record<string, unknown>): Promise<void>;
+};
+
+export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService | null): {
+  automations: AutomationService; proposals: ProposalService; setInboxSink(s: InboxSink): void;
+} {
+  let sink: InboxSink | null = null;
   const store = new AutomationStore(inbox.db);
   // Name ↔ id map refreshed on use; automations name workspaces in YAML.
   let names: Array<{ id: string; name: string }> = [];
@@ -55,6 +66,14 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     spawnFresh: hostSpawnFresh,
     freshState: hostFreshState,
     closeFresh: hostCloseFresh,
+    // Script steps (#407 Phase 7).
+    execScript: (target, o) => target.kind === 'container'
+      ? hostExecScript(target.workspaceId, o)
+      : runScript({ shell: target.shell, script: o.script, env: o.env, cwd: path.join(app.getPath('userData'), 'automations', o.automationId), timeoutMs: o.timeoutMs }),
+    automationsWorkspace: () => roleWs,
+    secret: (ws, key) => getSecret(ws, key),
+    emitTodo: async (id, runId, input) => { if (!sink) throw new Error('the inbox is unavailable'); await sink.todoFromAutomation(id, runId, input); },
+    emitNotify: async (id, runId, input) => { if (!sink) throw new Error('the inbox is unavailable'); await sink.notifyFromAutomation(id, runId, input); },
     resolveWorkspace: (v) => names.find((n) => n.id === v)?.id ?? names.find((n) => n.name === v)?.id ?? null,
     notify: notify ? (n) => notify.request(n) : undefined,
     changed: () => { send('automations:changed'); emitInboxChanged(); }
@@ -188,5 +207,5 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     withNames(() => proposals.approve(id, opts ?? {})));
   ipcMain.handle('proposals:reject', (_e, id: string, note: string | null) => proposals.reject(id, note ?? null));
   ipcMain.handle('proposals:revert', (_e, id: string, index: number) => proposals.revert(id, index));
-  return { automations: svc, proposals };
+  return { automations: svc, proposals, setInboxSink: (s) => { sink = s; } };
 }

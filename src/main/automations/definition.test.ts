@@ -15,7 +15,7 @@ describe('validateDefinition', () => {
     const r = validateDefinition(base, ctx);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.value.steps[0].prompt).toMatchObject({ workspace: 'W1', mode: 'live', wait: true, timeout: '5m' });
+    expect((r.value.steps[0] as { prompt: unknown }).prompt).toMatchObject({ workspace: 'W1', mode: 'live', wait: true, timeout: '5m' });
     expect(r.value.triggers[1]).toEqual({ manual: { allowFrom: ['W2'] } });
     expect(r.value.concurrency).toBe('skip');
     expect((r.value.triggers[0] as { schedule: { args: unknown } }).schedule.args).toEqual({ channel: 'ops-alerts', since: '1h' });
@@ -25,9 +25,8 @@ describe('validateDefinition', () => {
       const r = validateDefinition({ ...base, ...over }, ctx);
       return r.ok ? [] : r.errors;
     };
-    expect(errs({ steps: [{ id: 'a', script: { run: 'x.sh' } }] })[0]).toMatch(/script steps.*Phase 7/);
     expect(errs({ steps: [{ id: 'a', prompt: { workspace: '$self', message: 'm' } }] })[0]).toMatch(/\$self.*Phase 8/);
-    expect(errs({ secrets: ['TOKEN'] })[0]).toMatch(/secrets.*Phase 7/);
+    expect(errs({ secrets: ['TOKEN'] })[0]).toMatch(/declare them on the script step/);
   });
   it('reports every problem with a path', () => {
     const r = validateDefinition({
@@ -54,7 +53,7 @@ describe('validateDefinition', () => {
     if (r.ok) return;
     expect(r.errors.join('\n')).toMatch(/channel needs a value/);
     expect(r.errors.join('\n')).toMatch(/\{\{args\.nope\}\} names no declared param/);
-    expect(r.errors.join('\n')).toMatch(/step output arrives with script steps/);
+    expect(r.errors.join('\n')).toMatch(/\{\{steps\.x\.stdout\}\}: use \{\{steps\.<id>\.stdout\}\} naming an earlier script step/);
     expect(r.errors.join('\n')).toMatch(/unknown placeholder \{\{foo\}\}/);
     expect(r.errors.join('\n')).toMatch(/between 10s and 2h/);
   });
@@ -123,7 +122,7 @@ describe('Phase 4: event triggers and fresh steps', () => {
       { event: { on: 'todo.created', tag: 'ops' } },
       { event: { on: 'workspace.started' } }
     ]);
-    expect(r.value.steps[0].prompt).toMatchObject({ mode: 'fresh', allowedTools: ['Read', 'Bash(git log:*)'] });
+    expect((r.value.steps[0] as { prompt: unknown }).prompt).toMatchObject({ mode: 'fresh', allowedTools: ['Read', 'Bash(git log:*)'] });
   });
   it('rejects bad events, tags on non-todo events, long debounces, and allowedTools on live steps', () => {
     const errs = (over: Record<string, unknown>) => {
@@ -137,5 +136,41 @@ describe('Phase 4: event triggers and fresh steps', () => {
     expect(errs({ steps: [{ id: 'a', prompt: { workspace: 'W1', mode: 'live', message: 'm', allowedTools: ['Read'] } }] })).toMatch(/only for fresh sessions/);
     expect(errs({ steps: [{ id: 'a', prompt: { workspace: 'W1', mode: 'fresh', message: 'm', allowedTools: ['rm -rf; x'] } }] })).toMatch(/tool names/);
     expect(errs({ steps: [{ id: 'a', prompt: { workspace: 'W1', message: '{{trigger.nope}}' } }] })).toMatch(/use \{\{trigger\.kind\}\}/);
+  });
+});
+
+describe('script steps (#407 Phase 7)', () => {
+  const def = (steps: unknown[]) => ({ name: 'scripted', triggers: [{ manual: {} }], params: [{ name: 'room', type: 'string', default: 'ops' }], steps });
+  const errs = (steps: unknown[]) => { const r = validateDefinition(def(steps), ctx); return r.ok ? [] : r.errors; };
+  it('accepts container (default and named) and host steps, and resolves runIn names', () => {
+    const r = validateDefinition(def([
+      { id: 'fetch', script: { run: 'echo hi', secrets: ['WEBEX_TOKEN', 'WEBEX_TOKEN'], timeout: '2m' } },
+      { id: 'there', script: { run: 'ls', runIn: 'ops-oncall', ensureRunning: true } },
+      { id: 'local', script: { run: 'Get-Date', runIn: 'host', shell: 'pwsh' } },
+      { id: 'tell', prompt: { workspace: 'ops-oncall', message: 'Triage: {{steps.fetch.stdout}}' } }
+    ]), ctx);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.steps.slice(0, 3)).toEqual([
+      { id: 'fetch', script: { run: 'echo hi', secrets: ['WEBEX_TOKEN'], timeout: '2m' } },
+      { id: 'there', script: { run: 'ls', runIn: 'W1', ensureRunning: true } },
+      { id: 'local', script: { run: 'Get-Date', runIn: 'host', shell: 'pwsh' } }
+    ]);
+  });
+  it('rejects bad scripts with readable paths', () => {
+    expect(errs([{ id: 'a', script: {} }])[0]).toMatch(/steps\[0\]\.script\.run: the script text is required/);
+    expect(errs([{ id: 'a', script: { run: 'x', runIn: 'host' } }])[0]).toMatch(/must name its shell/);
+    expect(errs([{ id: 'a', script: { run: 'x', shell: 'bash' } }])[0]).toMatch(/only for runIn: host/);
+    expect(errs([{ id: 'a', script: { run: 'x', runIn: 'host', shell: 'zsh' } }])[0]).toMatch(/bash, sh, pwsh or wsl:<distro>/);
+    expect(errs([{ id: 'a', script: { run: 'x', runIn: 'host', shell: 'wsl:Ubuntu-24.04' } }])).toEqual([]);
+    expect(errs([{ id: 'a', script: { run: 'x', runIn: 'nope' } }])[0]).toMatch(/unknown "nope"/);
+    expect(errs([{ id: 'a', script: { run: 'x', secrets: ['PATH'] } }])[0]).toMatch(/vault key names/);
+    expect(errs([{ id: 'a', script: { run: 'x', secrets: ['FLEET_ARGS'] } }])[0]).toMatch(/vault key names/);
+    expect(errs([{ id: 'a', script: { run: 'x', runIn: 'host', shell: 'sh', ensureRunning: true } }])[0]).toMatch(/not for host steps/);
+    expect(errs([{ id: 'a', script: { run: 'x'.repeat(20_001) } }])[0]).toMatch(/longer than 20000/);
+  });
+  it('{{steps.<id>.stdout}} must name an earlier script step', () => {
+    expect(errs([{ id: 'tell', prompt: { workspace: 'ops-oncall', message: '{{steps.fetch.stdout}}' } }, { id: 'fetch', script: { run: 'x' } }])[0]).toMatch(/earlier script step/);
+    expect(errs([{ id: 'fetch', script: { run: 'x' } }, { id: 'tell', prompt: { workspace: 'ops-oncall', message: '{{steps.fetch.exit}}' } }])[0]).toMatch(/earlier script step/);
   });
 });

@@ -66,7 +66,7 @@ export function ProposalCard({ proposal: p, names, canDiscuss = false, onDiscuss
               {single.reasons.map((r) => <span key={r} className="flag">{r}</span>)}
             </div>
           )}
-          {single.flags.length > 0 && <div className="pr-caps">{single.flags.map((f) => <span key={f} className="tag">{f}</span>)}</div>}
+          {single.flags.length > 0 && <div className="pr-caps">{single.flags.map((f) => <span key={f} className={`tag${f.startsWith('runs a script on your computer') ? ' danger' : ''}`}>{f}</span>)}</div>}
           <Diff item={single} />
         </>
       ) : (
