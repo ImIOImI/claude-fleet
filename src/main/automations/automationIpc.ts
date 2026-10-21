@@ -4,7 +4,7 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'node:path';
 import { getSecret, listKeys } from '../vault.js';
-import { setLoadoutAutomationHooks } from '../loadouts.js';
+import { setLoadoutAutomationHooks, setLoadoutChangeListener } from '../loadouts.js';
 import { prepareLoadoutAutomations, readLoadoutAutomations, readLoadoutVersion } from './loadoutAutomations.js';
 import { createLoadoutInstaller } from './loadoutInstaller.js';
 import { runScript } from './hostScript.js';
@@ -30,6 +30,7 @@ import { changePrompt, draftPrompt, refinePrompt } from './authoring.js';
 import { ProposalStore } from './proposalStore.js';
 import { createProposalService, type ProposalService } from './proposalService.js';
 import { listWorkspaceManifests, readWorkspaceManifest, writeWorkspaceManifest } from '../workspaces.js';
+import { removeRoleBrief, writeRoleBrief } from './roleBrief.js';
 import { broadcastInboxChanged } from '../inbox/inboxBroadcast.js';
 
 function send(channel: string, payload?: unknown): void {
@@ -70,7 +71,13 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
   };
   void refreshShells();
   const hostShellIds = () => (shells.length ? shells.map((x) => x.id as string) : undefined);
-  void refresh();
+  // The role brief (roleBrief.ts): the automations workspace's generated CLAUDE.md block.
+  const syncBrief = (id: string | null) => {
+    if (!id) return;
+    void writeRoleBrief(id).catch((e) => logError({ source: 'main', type: 'automation-role-brief', level: 'warn', message: String(e) }));
+  };
+  void refresh().then(() => syncBrief(roleWs));
+  setLoadoutChangeListener((workspaceId) => { if (workspaceId === roleWs) syncBrief(workspaceId); });
 
   const svc = createAutomationService({
     store,
@@ -201,11 +208,15 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
       if (target.kind !== 'container') throw new Error('the automations workspace must be a container workspace');
     }
     for (const m of await listWorkspaceManifests()) {
-      if (m.role === 'automations' && m.id !== id) await writeWorkspaceManifest({ ...m, role: undefined });
+      if (m.role === 'automations' && m.id !== id) {
+        await writeWorkspaceManifest({ ...m, role: undefined });
+        await removeRoleBrief(m.id).catch((e) => logError({ source: 'main', type: 'automation-role-brief', level: 'warn', message: String(e) }));
+      }
     }
     if (id) {
       const m = (await readWorkspaceManifest(id))!;
       await writeWorkspaceManifest({ ...m, role: 'automations', inbox: { ...(m.inbox ?? {}), trusted: true } });
+      await writeRoleBrief(id).catch((e) => logError({ source: 'main', type: 'automation-role-brief', level: 'warn', message: String(e) }));
     }
     await refresh();
     send('automations:changed');
