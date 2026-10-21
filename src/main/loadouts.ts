@@ -27,7 +27,7 @@ import {
 } from './loadoutCore.js';
 import { runInWorkspace } from './docker.js';
 
-export type LoadoutSummary = Pick<LoadoutMeta, 'id' | 'title' | 'description' | 'tags'>;
+export type LoadoutSummary = Pick<LoadoutMeta, 'id' | 'title' | 'description' | 'tags' | 'version'>;
 /** Full loadout for the review modal: metadata + the files + merges it applies. */
 export type LoadoutDetail = LoadoutMeta & {
   files: string[];
@@ -47,7 +47,7 @@ export async function listLoadouts(): Promise<LoadoutSummary[]> {
     if (!e.isDirectory()) continue;
     try {
       const m = await parseLoadout(loadoutDir(e.name));
-      out.push({ id: m.id, title: m.title, description: m.description, tags: m.tags });
+      out.push({ id: m.id, title: m.title, description: m.description, tags: m.tags, ...(m.version ? { version: m.version } : {}) });
     } catch {
       /* not a loadout (no loadout.md) — skip */
     }
@@ -114,6 +114,7 @@ export async function installLoadout(
   const record: InstalledLoadout = {
     id: loadoutId,
     title: meta.title,
+    ...(meta.version ? { version: meta.version } : {}),
     files: applied.files,
     ...(autos?.names.length ? { automations: autos.names } : {}),
     merges: {

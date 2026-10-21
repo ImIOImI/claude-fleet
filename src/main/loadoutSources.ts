@@ -10,6 +10,7 @@ import { loadoutsRoot, loadoutDir } from './paths.js';
 import { pullArtifact } from './ociClient.js';
 import { parseIndex, loadoutRefFromSource, type RemoteLoadout } from './ociCore.js';
 import { logError } from './errorLog.js';
+import { parseLoadout } from './loadoutCore.js';
 
 export interface SourcesFile {
   sources: string[];
@@ -115,9 +116,11 @@ export async function download(source: string, id: string, version?: string): Pr
   const b = normalizeBase(source);
   const ref = loadoutRefFromSource(b, id, version);
   await pullArtifact(ref, loadoutDir(id));
+  // Record the version actually pulled (a `latest` pull reports its loadout.md version).
+  const pulled = await parseLoadout(loadoutDir(id)).then((m) => m.version).catch(() => undefined);
   const cur = await read();
   await write({
     ...cur,
-    provenance: { ...cur.provenance, [id]: { source: b, version: version ?? 'latest', downloadedAt: Date.now() } }
+    provenance: { ...cur.provenance, [id]: { source: b, version: pulled ?? version ?? 'latest', downloadedAt: Date.now() } }
   });
 }

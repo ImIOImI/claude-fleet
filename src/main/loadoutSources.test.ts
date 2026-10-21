@@ -58,6 +58,12 @@ describe('loadoutSources', () => {
     expect(await sources.provenanceFor('spec-driven')).toMatchObject({ source: SRC, version: '1.0.0' });
   });
 
+  it('download of latest records the version it actually pulled', async () => {
+    await sources.download(SRC, 'spec-driven');
+    expect(pulled.some((p) => p.ref === `${SRC}/spec-driven:latest`)).toBe(true);
+    expect(await sources.provenanceFor('spec-driven')).toMatchObject({ version: '1.0.0' });
+  });
+
   it('allRemote skips a source whose index fails to pull', async () => {
     await sources.addSource(SRC);
     const client = await import('./ociClient.js');

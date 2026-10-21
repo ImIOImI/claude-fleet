@@ -43,6 +43,8 @@ export interface LoadoutMeta {
   title: string;
   description: string;
   tags: string[];
+  /** Semver from frontmatter `version` (a bare YAML number like 1.0 is stringified); absent when unset. */
+  version?: string;
   dependencies?: { loadouts?: string[]; tools?: string[] };
   /** Parsed but applied in PR2 (the run layer). */
   scripts?: LoadoutScript[];
@@ -117,6 +119,11 @@ async function listFilesRec(dir: string, base = dir): Promise<string[]> {
  * Parse a loadout folder's `loadout.md`. `id` defaults to the folder name (the
  * stable identity). Tolerant: missing/!string fields fall back to safe defaults.
  */
+function parseVersion(v: unknown): string | undefined {
+  const s = typeof v === 'string' ? v.trim() : typeof v === 'number' && Number.isFinite(v) ? String(v) : '';
+  return s || undefined;
+}
+
 export async function parseLoadout(dir: string, id = basename(dir)): Promise<LoadoutMeta> {
   const raw = await readFile(join(dir, 'loadout.md'), 'utf8');
   const { fm, body } = splitFrontmatter(raw);
@@ -128,6 +135,7 @@ export async function parseLoadout(dir: string, id = basename(dir)): Promise<Loa
     title: typeof data.title === 'string' ? data.title : id,
     description: typeof data.description === 'string' ? data.description : '',
     tags: strArr(data.tags),
+    ...(parseVersion(data.version) ? { version: parseVersion(data.version) } : {}),
     dependencies:
       data.dependencies && typeof data.dependencies === 'object'
         ? (data.dependencies as LoadoutMeta['dependencies'])
