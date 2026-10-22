@@ -2580,9 +2580,56 @@ label.setting-title { display: block; cursor: pointer; }
 .env-editor { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
 .env-row {
   display: grid;
-  grid-template-columns: 140px 1fr auto auto;
+  grid-template-columns: 140px 1fr auto auto auto;
   gap: 8px;
   align-items: center;
+}
+/* Show/hide a secret value. Amber (--warn) marks a value that is on screen. */
+.env-reveal,
+.env-reveal-slot {
+  width: 24px;
+  height: 24px;
+}
+.env-reveal {
+  display: grid;
+  place-items: center;
+  padding: 0;
+  background: none;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-sm);
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.env-reveal:hover:not(:disabled) { color: var(--ink); background: var(--bg-hover); }
+.env-reveal:disabled { opacity: 0.45; cursor: default; }
+.env-reveal.on {
+  color: var(--warn);
+  border-color: color-mix(in oklch, var(--warn) 55%, var(--rule));
+  background: color-mix(in oklch, var(--warn) 8%, transparent);
+}
+.env-row input.env-value.revealed {
+  border-color: color-mix(in oklch, var(--warn) 55%, var(--rule));
+  background: color-mix(in oklch, var(--warn) 6%, var(--bg-canvas));
+}
+.env-reveal-note {
+  grid-column: 2 / -1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: -4px;
+  font-size: 11px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.env-reveal-note.warn { color: var(--warn); }
+.env-reveal-note.err { color: var(--danger); }
+.env-reveal-hint { color: var(--ink-3); }
+.env-reveal-ring { transform: rotate(-90deg); flex: none; }
+.env-reveal-ring circle { fill: none; stroke-width: 2; }
+.env-reveal-ring .track { stroke: var(--rule-strong); }
+.env-reveal-ring .left { stroke: var(--warn); stroke-linecap: round; transition: stroke-dashoffset 1s linear; }
+@media (prefers-reduced-motion: reduce) {
+  .env-reveal-ring .left { transition: none; }
 }
 .env-row input {
   padding: 4px 8px;
