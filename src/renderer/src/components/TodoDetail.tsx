@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import type { Todo, TodoEvent, TodoPriority } from '../../../preload';
 import { eventLabel, relativeAgo, sourceLabel } from '../inboxView';
+import { linkify } from '../linkify';
 import { BellPopover } from './BellPopover';
 import { BellIcon } from './NotifyControl';
 
@@ -106,7 +107,18 @@ export function TodoDetail({ todoId, names, version, onJump }: Props) {
           />
         </dd>
       </dl>
-      {todo.body && <div className="ib-body"><pre className="ib-pre">{todo.body}</pre></div>}
+      {todo.body && (
+        <div className="ib-body">
+          {/* http(s) links open in the browser via the main window's setWindowOpenHandler. */}
+          <pre className="ib-pre">
+            {linkify(todo.body).map((s, i) =>
+              s.kind === 'link'
+                ? <a key={i} className="ib-link" href={s.href} target="_blank" rel="noopener noreferrer">{s.text}</a>
+                : <span key={i}>{s.text}</span>
+            )}
+          </pre>
+        </div>
+      )}
       <div className="ib-hist-title">History</div>
       <ol className="ib-hist">
         {[...events].reverse().map((e) => (
