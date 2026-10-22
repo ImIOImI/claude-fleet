@@ -11,6 +11,7 @@ import { AskClaude } from './AskClaude';
 import { HostShellPicker } from './HostShellPicker';
 import { hostSteps, withShell } from '../automationView';
 import type { AutomationDef, ScriptShell } from '../../../preload';
+import { Markdown } from './Markdown';
 
 interface Props {
   proposal: Proposal;
@@ -62,7 +63,7 @@ export function ProposalCard({ proposal: p, names, canDiscuss = false, onDiscuss
         {!pending && <span className="state-chip">{p.status}</span>}
       </div>
       <h3 className="pr-title">{single ? single.name : p.rationale?.split('\n')[0].slice(0, 90) ?? `${p.items.length} automation changes`}</h3>
-      {p.rationale && <blockquote className="pr-why">{p.rationale}</blockquote>}
+      {p.rationale && <blockquote className="pr-why"><Markdown text={p.rationale} /></blockquote>}
 
       {single ? (
         <>
@@ -101,7 +102,7 @@ export function ProposalCard({ proposal: p, names, canDiscuss = false, onDiscuss
       {single && (single.decision === 'auto-applied' || single.decision === 'accepted') && single.before && (
         <div className="pr-actions"><button className="btn btn-sm" onClick={() => run(() => window.api.proposals.revert(p.id, 0))}>Revert this change</button></div>
       )}
-      {p.note && <p className="pr-note"><span className="ib-dim">Your note:</span> {p.note}</p>}
+      {p.note && <p className="pr-note"><span className="ib-dim">Your note:</span> <Markdown text={p.note} inline /></p>}
 
       {pending && (rejecting ? (
         <div className="pr-reject">

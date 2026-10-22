@@ -11,6 +11,7 @@ import { AskClaude } from './AskClaude';
 import { HostShellPicker } from './HostShellPicker';
 import { stringify } from 'yaml';
 import { withShell } from '../automationView';
+import { Markdown } from './Markdown';
 
 interface Props {
   names: Record<string, string>;
@@ -146,7 +147,7 @@ export function AutomationsView({ names, automationsWs = null, workspaces = [], 
               <span className="mono ib-dim">v{a.version} · {a.createdBy.kind === 'user' ? 'created by you' : `created by ${names[a.createdBy.id ?? ''] ?? 'a workspace'}`}</span>
             </div>
             <h3 className="ib-detail-title">{a.name}</h3>
-            {a.description && <p className="ib-desc">{a.description}</p>}
+            {a.description && <p className="ib-desc"><Markdown text={a.description} inline /></p>}
             {a.origin && (
               <p className="ib-dim auto-origin">
                 From loadout <b>{a.origin.loadoutId}</b>{a.origin.version ? ` v${a.origin.version}` : ''} · installed in {names[a.origin.workspaceId] ?? a.origin.workspaceId}

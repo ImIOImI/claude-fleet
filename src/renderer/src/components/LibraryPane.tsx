@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { WorkspaceSummary } from '../App';
 import { LoadoutReviewModal } from './LoadoutReviewModal';
+import { Markdown } from './Markdown';
 
 type Entry = Awaited<ReturnType<typeof window.api.loadouts.catalog>>[number];
 
@@ -303,7 +304,7 @@ export function LibraryPane({ selectedWorkspace, onChanged, onInstalled, onBrows
                   )}
                 </div>
               </div>
-              {!isCollapsed && e.description && <div className="lc-desc">{e.description}</div>}
+              {!isCollapsed && e.description && <div className="lc-desc"><Markdown text={e.description} inline /></div>}
               {!isCollapsed && e.tags.length > 0 && (
                 <div className="tags">
                   {e.tags.map((t) => (

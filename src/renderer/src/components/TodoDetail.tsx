@@ -4,6 +4,7 @@ import type { Todo, TodoEvent, TodoPriority } from '../../../preload';
 import { eventLabel, relativeAgo, sourceLabel } from '../inboxView';
 import { BellPopover } from './BellPopover';
 import { BellIcon } from './NotifyControl';
+import { Markdown } from './Markdown';
 
 interface Props {
   todoId: string;
@@ -106,7 +107,11 @@ export function TodoDetail({ todoId, names, version, onJump }: Props) {
           />
         </dd>
       </dl>
-      {todo.body && <div className="ib-body"><pre className="ib-pre">{todo.body}</pre></div>}
+      {todo.body && (
+        <div className="ib-body">
+          <Markdown text={todo.body} />
+        </div>
+      )}
       <div className="ib-hist-title">History</div>
       <ol className="ib-hist">
         {[...events].reverse().map((e) => (
