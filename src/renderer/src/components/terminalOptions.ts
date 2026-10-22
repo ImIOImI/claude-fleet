@@ -79,6 +79,17 @@ export function buildTerminalOptions(): ITerminalOptions {
     // is in fact only enabled for conpty < 21376, so this exact value turns
     // reflow off without touching selection/copy of wrapped lines. Pinned by
     // terminalOptions.test.ts.
-    windowsPty: { backend: 'winpty', buildNumber: 1 }
+    windowsPty: { backend: 'winpty', buildNumber: 1 },
+    // OSC 8 hyperlinks (claude prints auth URLs, PR links, etc. this way).
+    // Without a handler xterm falls back to a blocking confirm() and then
+    // window.open() with NO url, assigning the href afterwards — so the main
+    // process's window-open handler only ever saw `about:blank`, and Windows
+    // tried to install an "About" app from the Store. Open the real URI
+    // directly; main's setWindowOpenHandler filters it (externalUrl.ts).
+    linkHandler: {
+      activate: (_event, uri) => {
+        window.open(uri, '_blank', 'noopener');
+      }
+    }
   };
 }
