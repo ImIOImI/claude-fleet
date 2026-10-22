@@ -128,5 +128,7 @@ describe('watcher durable mirror', () => {
     expect(count(A)).toBe(1); // not re-appended on the post-shrink re-read
     expect(count(B)).toBe(1);
     for (const f of fillers) expect(count(f)).toBe(1);
-  });
+    // Two sequential waitUntil()s of up to 5s each can't fit vitest's default
+    // 5s budget on a slow CI runner — give the test room for both.
+  }, 15_000);
 });
