@@ -105,13 +105,20 @@ export function isInside(realBase: string, real: string): boolean {
 const OPEN_FLAGS = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0);
 
 /**
- * Read `file` only if it resolves inside `realBase` — TOCTOU-safe: open first
- * (following links), THEN realpath the name and require the realpath'd inode
- * to be the very inode we hold open. Swapping the path for an escaping
- * symlink before the open fails the containment check; swapping it after the
- * open fails the dev/ino match. Content always comes from the checked fd.
+ * Read `file` only if it resolves inside `realBase`. Containment is checked
+ * BEFORE the host ever opens the target: realpath the name first and bail if
+ * it's already outside, so an escaping path is never opened at all. The
+ * open itself is still TOCTOU-safe against a *race* (the name getting
+ * swapped between that check and the open, or between the open and this
+ * second check): open first (following links), THEN realpath the name again
+ * and require the realpath'd inode to be the very inode we hold open.
+ * Swapping the path for an escaping symlink before the open fails the
+ * pre-open containment check; swapping it after the open fails the dev/ino
+ * match. Content always comes from the checked fd.
  */
 async function readContained(file: string, realBase: string): Promise<string> {
+  const preOpenReal = await realpath(file);
+  if (!isInside(realBase, preOpenReal)) throw new OutsideError();
   const fh = await open(file, OPEN_FLAGS);
   try {
     const held = await fh.stat({ bigint: true });
@@ -151,11 +158,20 @@ async function filesIn(root: SkillRoot, dir: string): Promise<Array<[string, str
  * > project commands > user skills). Containment (SPEC §9): the root dir and
  * every file must realpath-resolve inside realpath(root.base) — a workspace
  * can write its own `.claude/**`, so a symlink there must never make the HOST
- * read another workspace's files. Escapes are skipped with a path-free warning.
+ * read another workspace's files. Escapes are skipped with a path-free
+ * warning. Per-file escapes are never named individually (a directory can be
+ * swapped for a symlink between the containment check and the `readdir` that
+ * lists it, so the listed "name" can't be trusted to belong to the workspace
+ * — see `readContained`/`isInside`); instead they're counted and rolled up
+ * into a single aggregate warning once the whole scan is done. A whole-root
+ * escape (the root dir itself resolves outside) still gets its own warning,
+ * but that one names only the root's kind/source (e.g. "project commands"),
+ * never a file.
  */
 export async function scanSkillRoots(roots: SkillRoot[]): Promise<ScanResult> {
   const byName = new Map<string, SkillEntry>();
   const warnings: string[] = [];
+  let escapedFiles = 0;
   const realBases = new Map<string, Promise<string>>();
   for (const root of roots) {
     const label = `${root.source} ${root.kind}s`;
@@ -179,8 +195,8 @@ export async function scanSkillRoots(roots: SkillRoot[]): Promise<ScanResult> {
       try {
         raw = await readContained(file, realBase);
       } catch (e) {
-        if (e instanceof OutsideError) warnings.push(`${fallback}: skipped (resolves outside the workspace)`);
-        else if (!isMissing(e)) warnings.push(`${fallback}: unreadable: ${errText(e)}`);
+        if (e instanceof OutsideError) { escapedFiles += 1; continue; }
+        if (!isMissing(e)) warnings.push(`${fallback}: unreadable: ${errText(e)}`);
         continue;
       }
       const p = parseSkillFile(raw, fallback);
@@ -197,6 +213,8 @@ export async function scanSkillRoots(roots: SkillRoot[]): Promise<ScanResult> {
       });
     }
   }
+  if (escapedFiles === 1) warnings.push('1 entry skipped (resolves outside the workspace)');
+  else if (escapedFiles > 1) warnings.push(`${escapedFiles} entries skipped (resolve outside the workspace)`);
   const skills = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
   return { skills, warnings };
 }

@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { BODY_CAP, DESCRIPTION_CAP, invokeHint, parseSkillFile, readSkillBody, scanSkillRoots, type SkillRoot } from './skillIndex.js';
+import { BODY_CAP, DESCRIPTION_CAP, invokeHint, isInside, parseSkillFile, readSkillBody, scanSkillRoots, type SkillRoot } from './skillIndex.js';
 
 let root: string;
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'skills-')); });
@@ -83,6 +83,17 @@ describe('scanSkillRoots', () => {
   });
 });
 
+describe('isInside', () => {
+  it('rejects a sibling directory that merely shares a name prefix', () => {
+    expect(isInside('/fleet/W1', '/fleet/W10')).toBe(false);
+    expect(isInside('/fleet/W1', '/fleet/W10/sub')).toBe(false);
+  });
+  it('accepts the base itself and real descendants', () => {
+    expect(isInside('/fleet/W1', '/fleet/W1')).toBe(true);
+    expect(isInside('/fleet/W1', '/fleet/W1/sub')).toBe(true);
+  });
+});
+
 describe('scanSkillRoots containment (symlinks)', () => {
   const OUTSIDE = /resolves outside the workspace/;
   beforeEach(() => {
@@ -109,19 +120,39 @@ describe('scanSkillRoots containment (symlinks)', () => {
     expect(r.warnings.some((w) => OUTSIDE.test(w))).toBe(true);
     noLeak(r);
   });
-  it('skips a skill dir symlinked outside the workspace', async () => {
+  it('skips a skill dir symlinked outside the workspace, with a nameless aggregated warning', async () => {
     symlinkSync(join(root, 'other/.claude/skills/stolen'), join(root, 'proj/.claude/skills/stolen'));
     const r = await scanSkillRoots(roots());
     expect(r.skills.map((s) => s.name)).toEqual(['ok']);
-    expect(r.warnings).toEqual(['stolen: skipped (resolves outside the workspace)']);
+    expect(r.warnings).toEqual(['1 entry skipped (resolves outside the workspace)']);
     noLeak(r);
   });
-  it('skips a SKILL.md file symlinked outside the workspace', async () => {
+  it('skips a SKILL.md file symlinked outside the workspace, with a nameless aggregated warning', async () => {
     mkdirSync(join(root, 'proj/.claude/skills/evil'));
     symlinkSync(join(root, 'other/.claude/skills/stolen/SKILL.md'), join(root, 'proj/.claude/skills/evil/SKILL.md'));
     const r = await scanSkillRoots(roots());
     expect(r.skills.map((s) => s.name)).toEqual(['ok']);
-    expect(r.warnings).toEqual(['evil: skipped (resolves outside the workspace)']);
+    expect(r.warnings).toEqual(['1 entry skipped (resolves outside the workspace)']);
+    noLeak(r);
+  });
+  it('aggregates multiple per-file escapes across roots into a single plural warning, no names', async () => {
+    mkdirSync(join(root, 'proj/.claude/skills/evil1'));
+    symlinkSync(join(root, 'other/.claude/skills/stolen/SKILL.md'), join(root, 'proj/.claude/skills/evil1/SKILL.md'));
+    symlinkSync(join(root, 'other/.claude/skills/stolen'), join(root, 'proj/.claude/skills/evil2'));
+    mkdirSync(join(root, 'home/.claude/skills'), { recursive: true });
+    symlinkSync(join(root, 'other/.claude/skills/stolen'), join(root, 'home/.claude/skills/evil3'));
+    const r = await scanSkillRoots(roots());
+    expect(r.skills.map((s) => s.name)).toEqual(['ok']);
+    expect(r.warnings).toEqual(['3 entries skipped (resolve outside the workspace)']);
+    noLeak(r);
+  });
+  it('does not follow a command subdir that is itself a symlink', async () => {
+    put('proj/external-cmds/deploy.md', '---\ndescription: Deploy.\n---\n');
+    mkdirSync(join(root, 'proj/.claude/commands'), { recursive: true });
+    symlinkSync(join(root, 'proj/external-cmds'), join(root, 'proj/.claude/commands/ns'));
+    const r = await scanSkillRoots(roots());
+    expect(r.skills.map((s) => s.name)).toEqual(['ok']);
+    expect(r.skills.some((s) => s.name.startsWith('ns:'))).toBe(false);
     noLeak(r);
   });
   it('lists symlinks that stay inside the workspace', async () => {

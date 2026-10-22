@@ -153,15 +153,36 @@ copy, them.
 **Containment.** A workspace can write its own `.claude/**` (containers via
 the bind mounts), and the host follows symlinks, so every root dir and every
 file must `realpath`-resolve inside `realpath(base)` — `base` is the project
-root for project roots and the user `.claude` dir for the user root (all
-backends). Escapes are skipped with a `<name>: skipped (resolves outside the
-workspace)` warning; in-root symlinks are fine. Files are read TOCTOU-safely:
-open first (`O_NONBLOCK`, so a planted FIFO can't block), then realpath the
-name, require containment and that the realpath'd inode equals the open fd's
-`dev`/`ino`, and read from that fd. `get_workspace_skill` re-checks at read
-time (the scan cache lives 30 s), refusing with `skill file resolves outside
-the workspace`. Warnings and errors returned over MCP never contain host
-paths — only skill/dir names and errno codes.
+root for project roots and the user `.claude` dir for the user root. This
+applies on **every backend**, not just containers: a skill symlinked in from
+outside the workspace root (e.g. a dotfiles repo linked into `~/.claude/skills`
+on a native local workspace) is skipped with a warning exactly like a
+container symlink escape, never read.
+
+Files are read TOCTOU-safely, checked *before* the open and again after:
+realpath the name and require containment first, so the host never opens an
+escaping target at all; open (`O_NONBLOCK`, so a planted FIFO can't block);
+then realpath the name a second time and require that it still resolves
+inside *and* that the realpath'd inode equals the open fd's `dev`/`ino`. That
+post-open check makes file **contents** race-proof — whatever we return
+always came from the inode that passed containment, whether the name got
+swapped before the open (caught by the pre-open check) or after it (caught by
+the dev/ino mismatch). What *isn't* equally race-proof is a plain directory
+listing: between the per-root containment check and the `readdir` that lists
+it, a container can swap a directory for a symlink, so an escaping entry's
+name can briefly appear in that listing before its file read is refused.
+Concretely, that means a racing directory swap can at most cause entries to
+be **skipped** — never read — and skip warnings for those entries carry no
+names: `scanSkillRoots` counts per-file escapes and rolls them into one
+aggregate warning per scan (`N entries skipped (resolve outside the
+workspace)`, singular `1 entry skipped (resolves outside the workspace)`)
+instead of naming each file. A whole-root escape (the root dir itself
+resolves outside) still gets its own warning, but that one names only the
+root's kind/source (`project commands skipped (resolves outside the
+workspace)` is fine — it names no file). `get_workspace_skill` re-checks at
+read time (the scan cache lives 30 s), refusing with `skill file resolves
+outside the workspace`. Warnings and errors returned over MCP never contain
+host paths or file names — only root kind/source, counts, and errno codes.
 
 ## Testing
 
