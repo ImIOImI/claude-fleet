@@ -15,7 +15,8 @@
 // Sensitive material (env-var secrets) is NOT persisted here — only the
 // list of secret keys; values live in keytar.
 
-import { readFile, writeFile, readdir, mkdir } from 'node:fs/promises';
+import { readFile, readdir, mkdir } from 'node:fs/promises';
+import { writeFileAtomic } from './atomicWrite.js';
 import { dirname } from 'node:path';
 import { workspaceManifestPath, stateRoot } from './paths.js';
 import type { WorkspaceLauncher } from './localLauncher.js';
@@ -398,7 +399,9 @@ export async function writeWorkspaceManifest(spec: WorkspaceSpec): Promise<void>
   // mock backend doesn't, and edit/migration paths shouldn't assume it's there.
   const manifestPath = workspaceManifestPath(spec.id);
   await mkdir(dirname(manifestPath), { recursive: true });
-  await writeFile(manifestPath, JSON.stringify(spec, null, 2) + '\n', 'utf8');
+  // Atomic replace: readers (e.g. the 30 s automations-role refresh) must never
+  // see a truncated manifest, which would drop the workspace from the list.
+  await writeFileAtomic(manifestPath, JSON.stringify(spec, null, 2) + '\n');
 }
 
 export async function touchWorkspaceUsed(id: string): Promise<void> {
