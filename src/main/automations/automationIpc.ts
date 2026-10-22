@@ -56,7 +56,23 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
   let roleWs: string | null = null;
   const refresh = async () => {
     names = await hostWorkspaceNames().catch(() => names);
-    roleWs = await listWorkspaceManifests().then((ms) => ms.find((m) => m.role === 'automations')?.id ?? null).catch(() => roleWs);
+    const prev = roleWs;
+    let manifests = -1;
+    roleWs = await listWorkspaceManifests()
+      .then((ms) => { manifests = ms.length; return ms.find((m) => m.role === 'automations')?.id ?? null; })
+      .catch((e) => {
+        logError({ source: 'main', type: 'automations-role-refresh', level: 'warn', message: `couldn't list workspace manifests; keeping the automations workspace as ${prev ?? 'unset'}: ${String(e)}` });
+        return prev;
+      });
+    // Every change of the automations workspace is recorded, so a run that fails
+    // with "no automations workspace" can be matched to when and why it went unset.
+    if (roleWs !== prev) {
+      logError({
+        source: 'main', type: 'automations-role-change', level: roleWs ? 'info' : 'warn',
+        message: `automations workspace ${prev ?? 'unset'} → ${roleWs ?? 'unset'} (${manifests} manifests read)`,
+        ...(roleWs ?? prev ? { workspaceId: (roleWs ?? prev)! } : {})
+      });
+    }
   };
   const privileged = (id: string) => id === roleWs;
   // Host shells (#407): PATH for native shells, the local-workspace WSL probe for distros. Refreshed every 5 min.

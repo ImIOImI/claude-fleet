@@ -288,8 +288,14 @@ export interface Workspace extends WorkspaceSpec {
  * for upgrading legacy on-disk shapes to the current one.
  */
 export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec | null> {
+  let path: string;
   try {
-    const raw = await readFile(workspaceManifestPath(id), 'utf8');
+    path = workspaceManifestPath(id);
+  } catch {
+    return null; // not a workspace id (e.g. a stray file in the state root)
+  }
+  try {
+    const raw = await readFile(path, 'utf8');
     const parsed = JSON.parse(raw) as Partial<WorkspaceSpec>;
     if (
       typeof parsed.id !== 'string' ||
@@ -335,7 +341,24 @@ export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec |
       createdAt: parsed.createdAt ?? Date.now(),
       lastUsedAt: parsed.lastUsedAt ?? parsed.createdAt ?? Date.now()
     };
-  } catch {
+  } catch (err: unknown) {
+    // A missing manifest is normal (a state dir without one, or a non-directory
+    // entry). Anything else, e.g. a truncated file read mid-write, makes
+    // this workspace silently vanish from listWorkspaceManifests for that call,
+    // so record it.
+    const code = (err as { code?: string }).code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+      try {
+        const { logError } = await import('./errorLog.js');
+        logError({
+          source: 'main',
+          type: 'manifest-unreadable',
+          level: 'warn',
+          message: `workspace.json for ${id} couldn't be read; treating the workspace as absent for this read: ${String(err)}`,
+          workspaceId: id
+        });
+      } catch { /* logging must not change the result */ }
+    }
     return null;
   }
 }
