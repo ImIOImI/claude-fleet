@@ -43,7 +43,7 @@ Host-side path resolution per backend:
 |---|---|---|
 | container | `<fleetRoot>/<id>` | `workspaceClaudeDir(id)` (mounted as `/home/fleet/.claude`) |
 | local, native | `workspaceRoot` | `os.homedir()/.claude` |
-| local, WSL launcher | `workspaceRoot` (UNC as stored) | `linuxPathToUnc(distro, home)/.claude` (home probed at save time) |
+| local, WSL launcher | `linuxPathToUnc(distro, workspaceRoot)` (saved as an in-distro Linux path; a legacy UNC or `C:\…` root is used as-is) | `linuxPathToUnc(distro, home)/.claude` (home probed at save time) |
 
 `name` = frontmatter `name`, else the skill folder name / command file stem
 (nested commands use `ns:name`, as claude does). `description` = frontmatter
@@ -110,14 +110,21 @@ Same rule as the other read tools:
 ## Architecture
 
 - **`src/main/skills/skillIndex.ts` (pure, fs + yaml only).**
-  `scanSkillRoots(roots: {dir, kind, source}[], opts) → { skills, warnings }`:
+  `scanSkillRoots(roots: {dir, kind, source, base}[]) → { skills, warnings }`:
   directory walk, frontmatter parse, name/description fallbacks, precedence,
-  caps. `readSkillBody(entry, cap)`. Unit-tested on temp dirs.
+  caps, symlink containment (see Security). `readSkillBody(file, base, cap)`
+  re-checks containment. Unit-tested on temp dirs.
 - **`src/main/skills/workspaceSkills.ts` (electron-aware wrapper).** Resolves
   roots per backend (table above), runs the scan with a **3 s per-workspace
   timeout** (a stopped/slow WSL distro can't stall the call) and a **30 s
   per-workspace scan cache** keyed by id + roots (cleared on loadout
-  install/uninstall for that workspace; timeouts are not cached). Manifests —
+  install/uninstall for that workspace; timeouts are not cached). At most
+  **one scan per workspace is in flight**: concurrent and repeat calls share
+  the pending scan, which stays registered after a caller's timeout until the
+  fs work settles (a late success fills the cache; a late failure is
+  swallowed), so a stalled distro can't pile up threadpool reads. `list`
+  scans the visible workspaces in parallel; `get`'s body read has the same
+  timeout. Manifests —
   and so exposure and scope — are re-read on every call, so turning exposure
   off takes effect immediately.
 - **`mcpServer.ts`** — the two tool definitions and handlers, delegating to the
@@ -142,6 +149,19 @@ transcript watcher). Exposure is opt-out per workspace. Skill bodies are
 workspace-authored text and are delivered labelled as data, consistent with
 the prompt-hygiene rules; the drafting rule tells the drafter to invoke, not
 copy, them.
+
+**Containment.** A workspace can write its own `.claude/**` (containers via
+the bind mounts), and the host follows symlinks, so every root dir and every
+file must `realpath`-resolve inside `realpath(base)` — `base` is the project
+root for project roots and the user `.claude` dir for the user root (all
+backends). Escapes are skipped with a `<name>: skipped (resolves outside the
+workspace)` warning; in-root symlinks are fine. Files are read TOCTOU-safely:
+open first (`O_NONBLOCK`, so a planted FIFO can't block), then realpath the
+name, require containment and that the realpath'd inode equals the open fd's
+`dev`/`ino`, and read from that fd. `get_workspace_skill` re-checks at read
+time (the scan cache lives 30 s), refusing with `skill file resolves outside
+the workspace`. Warnings and errors returned over MCP never contain host
+paths — only skill/dir names and errno codes.
 
 ## Testing
 

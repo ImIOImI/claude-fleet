@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -15,9 +15,9 @@ function put(rel: string, text: string): string {
   return p;
 }
 const roots = (): SkillRoot[] => [
-  { dir: join(root, 'proj/.claude/skills'), kind: 'skill', source: 'project' },
-  { dir: join(root, 'proj/.claude/commands'), kind: 'command', source: 'project' },
-  { dir: join(root, 'home/.claude/skills'), kind: 'skill', source: 'user' }
+  { dir: join(root, 'proj/.claude/skills'), kind: 'skill', source: 'project', base: join(root, 'proj') },
+  { dir: join(root, 'proj/.claude/commands'), kind: 'command', source: 'project', base: join(root, 'proj') },
+  { dir: join(root, 'home/.claude/skills'), kind: 'skill', source: 'user', base: join(root, 'home/.claude') }
 ];
 
 describe('parseSkillFile', () => {
@@ -68,6 +68,13 @@ describe('scanSkillRoots', () => {
     mkdirSync(join(root, 'proj/.claude/skills/empty'), { recursive: true });
     expect(await scanSkillRoots(roots())).toEqual({ skills: [], warnings: [] });
   });
+  it('a project skill beats a project command of the same name', async () => {
+    put('proj/.claude/skills/ship/SKILL.md', '---\ndescription: Skill ship.\n---\n');
+    put('proj/.claude/commands/ship.md', 'Command ship.');
+    const r = await scanSkillRoots(roots());
+    expect(r.skills).toHaveLength(1);
+    expect(r.skills[0]).toMatchObject({ name: 'ship', kind: 'skill', description: 'Skill ship.' });
+  });
   it('warns on bad frontmatter but keeps the entry', async () => {
     put('proj/.claude/skills/bad/SKILL.md', '---\nname: [oops\n---\nStill useful');
     const r = await scanSkillRoots(roots());
@@ -76,12 +83,93 @@ describe('scanSkillRoots', () => {
   });
 });
 
+describe('scanSkillRoots containment (symlinks)', () => {
+  const OUTSIDE = /resolves outside the workspace/;
+  beforeEach(() => {
+    put('other/.claude/commands/secret.md', '---\ndescription: OTHER WORKSPACE SECRET\n---\nsecret body');
+    put('other/.claude/skills/stolen/SKILL.md', '---\ndescription: STOLEN\n---\nsecret');
+    put('proj/.claude/skills/ok/SKILL.md', '---\ndescription: Ok.\n---\n');
+  });
+  const noLeak = (r: Awaited<ReturnType<typeof scanSkillRoots>>) => {
+    expect(JSON.stringify(r.skills)).not.toMatch(/SECRET|STOLEN/);
+    for (const w of r.warnings) expect(w).not.toContain(root);
+  };
+  it('skips a commands dir symlinked outside the workspace, with a warning', async () => {
+    symlinkSync(join(root, 'other/.claude/commands'), join(root, 'proj/.claude/commands'));
+    const r = await scanSkillRoots(roots());
+    expect(r.skills.map((s) => s.name)).toEqual(['ok']);
+    expect(r.warnings.some((w) => OUTSIDE.test(w))).toBe(true);
+    noLeak(r);
+  });
+  it('skips a .claude dir symlinked outside the workspace', async () => {
+    rmSync(join(root, 'proj/.claude'), { recursive: true });
+    symlinkSync(join(root, 'other/.claude'), join(root, 'proj/.claude'));
+    const r = await scanSkillRoots(roots());
+    expect(r.skills).toEqual([]);
+    expect(r.warnings.some((w) => OUTSIDE.test(w))).toBe(true);
+    noLeak(r);
+  });
+  it('skips a skill dir symlinked outside the workspace', async () => {
+    symlinkSync(join(root, 'other/.claude/skills/stolen'), join(root, 'proj/.claude/skills/stolen'));
+    const r = await scanSkillRoots(roots());
+    expect(r.skills.map((s) => s.name)).toEqual(['ok']);
+    expect(r.warnings).toEqual(['stolen: skipped (resolves outside the workspace)']);
+    noLeak(r);
+  });
+  it('skips a SKILL.md file symlinked outside the workspace', async () => {
+    mkdirSync(join(root, 'proj/.claude/skills/evil'));
+    symlinkSync(join(root, 'other/.claude/skills/stolen/SKILL.md'), join(root, 'proj/.claude/skills/evil/SKILL.md'));
+    const r = await scanSkillRoots(roots());
+    expect(r.skills.map((s) => s.name)).toEqual(['ok']);
+    expect(r.warnings).toEqual(['evil: skipped (resolves outside the workspace)']);
+    noLeak(r);
+  });
+  it('lists symlinks that stay inside the workspace', async () => {
+    put('proj/lib/shared-skill/SKILL.md', '---\ndescription: Shared.\n---\n');
+    symlinkSync(join(root, 'proj/lib/shared-skill'), join(root, 'proj/.claude/skills/shared'));
+    const r = await scanSkillRoots(roots());
+    expect(r.skills.map((s) => s.name)).toEqual(['ok', 'shared']);
+    expect(r.warnings).toEqual([]);
+  });
+  it('accepts a workspace whose base is itself a symlink (realpath on both sides)', async () => {
+    symlinkSync(join(root, 'proj'), join(root, 'proj-link'));
+    const linked: SkillRoot[] = [{ dir: join(root, 'proj-link/.claude/skills'), kind: 'skill', source: 'project', base: join(root, 'proj-link') }];
+    const r = await scanSkillRoots(linked);
+    expect(r.skills.map((s) => s.name)).toEqual(['ok']);
+    expect(r.warnings).toEqual([]);
+  });
+  it('a missing base is an empty root, no warning', async () => {
+    const r = await scanSkillRoots([{ dir: join(root, 'nope/.claude/skills'), kind: 'skill', source: 'project', base: join(root, 'nope') }]);
+    expect(r).toEqual({ skills: [], warnings: [] });
+  });
+  it('unreadable-file warnings carry no host path', async () => {
+    mkdirSync(join(root, 'proj/.claude/skills/dirskill/SKILL.md'), { recursive: true }); // a dir, not a file
+    const r = await scanSkillRoots(roots());
+    expect(r.skills.map((s) => s.name)).toEqual(['ok']);
+    noLeak(r);
+  });
+});
+
 describe('readSkillBody / invokeHint', () => {
+  it('refuses a file swapped for an escaping symlink after the scan', async () => {
+    const f = put('proj/.claude/skills/ok/SKILL.md', 'fine');
+    const secret = put('other/secret.md', 'SECRET');
+    const base = join(root, 'proj');
+    expect(await readSkillBody(f, base)).toBe('fine');
+    unlinkSync(f);
+    symlinkSync(secret, f);
+    await expect(readSkillBody(f, base)).rejects.toThrow('skill file resolves outside the workspace');
+  });
+  it('read errors carry no host path', async () => {
+    const err = await readSkillBody(join(root, 'proj/missing.md'), root).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).not.toContain(root);
+  });
   it('returns the whole file, truncating past the cap', async () => {
     const small = put('a.md', '---\nname: a\n---\nhello');
-    expect(await readSkillBody(small)).toBe('---\nname: a\n---\nhello');
+    expect(await readSkillBody(small, root)).toBe('---\nname: a\n---\nhello');
     const big = put('b.md', 'x'.repeat(BODY_CAP + 10));
-    const body = await readSkillBody(big);
+    const body = await readSkillBody(big, root);
     expect(body.endsWith('\n[truncated]')).toBe(true);
     expect(body.length).toBe(BODY_CAP + '\n[truncated]'.length);
   });
