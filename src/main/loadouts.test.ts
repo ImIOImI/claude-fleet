@@ -34,6 +34,16 @@ afterEach(async () => {
   await rm(userDataDir, { recursive: true, force: true });
 });
 
+describe('listLoadouts', () => {
+  it('skips hidden download staging dirs a crash left behind', async () => {
+    for (const d of ['real', '.pull-real-ab12cd34', '.old-real-ab12cd34']) {
+      await mkdir(join(userDataDir, 'loadouts', d), { recursive: true });
+      await writeFile(join(userDataDir, 'loadouts', d, 'loadout.md'), '---\ntitle: Real\n---\n', 'utf8');
+    }
+    expect((await listLoadouts()).map((l) => l.id)).toEqual(['real']);
+  });
+});
+
 describe('ensureBuiltinLoadouts', () => {
   it('seeds the built-in starters, including the loadout-author skill', async () => {
     await ensureBuiltinLoadouts();
