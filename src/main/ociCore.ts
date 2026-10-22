@@ -52,9 +52,16 @@ export function parseImageRef(ref: string): ParsedRef {
 }
 
 /** Derive a loadout's pull ref from a source base + id (+ optional version). */
+/** OCI artifactType of one loadout and of a source's discovery index (claude-fleet-loadouts' publish scripts). */
+export const LOADOUT_ARTIFACT_TYPE = 'application/vnd.claude-fleet.loadout.v1';
+export const INDEX_ARTIFACT_TYPE = 'application/vnd.claude-fleet.loadout-index.v1';
+/** Ids a loadout can't use: `<source>/index` is the discovery index artifact. */
+export const RESERVED_LOADOUT_IDS = new Set(['index']);
+
 export function loadoutRefFromSource(sourceBase: string, id: string, version?: string): string {
   const base = sourceBase.trim().replace(/\/+$/, '');
   if (!id || /[\s/:]/.test(id)) throw new Error(`invalid loadout id "${id}"`);
+  if (RESERVED_LOADOUT_IDS.has(id)) throw new Error(`"${id}" is reserved (it names the source's index artifact)`);
   return `${base}/${id}:${version && version.trim() ? version.trim() : 'latest'}`;
 }
 
@@ -94,7 +101,8 @@ export function parseIndex(input: string | unknown): RemoteLoadout[] {
   const data = typeof input === 'string' ? JSON.parse(input) : input;
   const arr = Array.isArray(data) ? data : (data as { loadouts?: unknown })?.loadouts;
   if (!Array.isArray(arr)) throw new Error('index is not an array of loadouts');
-  return arr.map((raw, i) => {
+  // A reserved id can't be pulled as a loadout, so leave it out of the catalog.
+  return arr.filter((raw) => !RESERVED_LOADOUT_IDS.has((raw as { id?: unknown })?.id as string)).map((raw, i) => {
     const e = raw as Record<string, unknown>;
     if (typeof e?.id !== 'string' || !e.id) throw new Error(`index entry ${i}: missing id`);
     if (typeof e.version !== 'string' || !e.version) throw new Error(`index entry ${i} (${e.id}): missing version`);

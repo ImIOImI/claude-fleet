@@ -4,11 +4,13 @@
 // written through ociCore.safeLayerPath, confined to destDir, with a per-blob
 // size cap — the security spine for pulling untrusted artifacts.
 
+import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { parseImageRef, safeLayerPath } from './ociCore.js';
 
 export const MAX_BLOB_BYTES = 5_242_880; // 5 MiB/layer — loadout files are small.
+const DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
 const MANIFEST_ACCEPT = 'application/vnd.oci.image.manifest.v1+json';
 const TIMEOUT_MS = 30_000;
 
@@ -20,9 +22,13 @@ interface OciLayer {
 export interface PullOptions {
   /** GitHub token with read:packages, sent as Basic auth to the token endpoint. */
   credential?: string;
+  /** Required manifest artifactType (or config.mediaType); the pull is refused on a mismatch. */
+  artifactType?: string;
 }
 
 interface OciManifest {
+  artifactType?: string;
+  config?: { mediaType?: string };
   annotations?: Record<string, string>;
   layers?: OciLayer[];
 }
@@ -86,6 +92,10 @@ export async function fetchAnnotations(ref: string, opts: PullOptions = {}): Pro
 export async function pullArtifact(ref: string, destDir: string, opts: PullOptions = {}): Promise<void> {
   const { manifest, repository, token } = await fetchManifest(ref, opts);
   const { registry } = parseImageRef(ref);
+  if (opts.artifactType) {
+    const got = manifest.artifactType ?? manifest.config?.mediaType;
+    if (got !== opts.artifactType) throw new Error(`${ref} is not a ${opts.artifactType} artifact (got ${got ?? 'none'})`);
+  }
   const layers = manifest.layers ?? [];
   if (!layers.length) throw new Error(`artifact ${ref} has no layers`);
   for (const layer of layers) {
@@ -96,6 +106,8 @@ export async function pullArtifact(ref: string, destDir: string, opts: PullOptio
     if (layer.size != null && layer.size > MAX_BLOB_BYTES) {
       throw new Error(`layer ${title} too large (${layer.size} > ${MAX_BLOB_BYTES})`);
     }
+    // Also keeps anything but a plain sha256 digest out of the blob URL.
+    if (!DIGEST_RE.test(layer.digest)) throw new Error(`layer ${title} has an unsupported digest "${layer.digest}"`);
     const { signal, done } = withTimeout();
     try {
       const headers: Record<string, string> = {};
@@ -108,6 +120,9 @@ export async function pullArtifact(ref: string, destDir: string, opts: PullOptio
       }
       const buf = new Uint8Array(await res.arrayBuffer());
       if (buf.byteLength > MAX_BLOB_BYTES) throw new Error(`layer ${title} too large (${buf.byteLength} > ${MAX_BLOB_BYTES})`);
+      if (layer.size != null && buf.byteLength !== layer.size) throw new Error(`layer ${title} size mismatch (${buf.byteLength} != ${layer.size})`);
+      const actual = `sha256:${createHash('sha256').update(buf).digest('hex')}`;
+      if (actual !== layer.digest) throw new Error(`layer ${title} digest mismatch (${actual} != ${layer.digest})`);
       await mkdir(dirname(target), { recursive: true });
       await writeFile(target, buf);
     } finally {
