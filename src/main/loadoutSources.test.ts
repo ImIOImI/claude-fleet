@@ -56,6 +56,27 @@ describe('loadoutSources', () => {
     expect(raw.sources).toEqual([SRC]);
   });
 
+  it('a fresh install starts with the default source and saves it', async () => {
+    expect(await sources.listSources()).toEqual(sources.DEFAULT_SOURCES);
+    const raw = JSON.parse(await readFile(join(userDataDir, 'loadouts', 'sources.json'), 'utf8'));
+    expect(raw.sources).toEqual(sources.DEFAULT_SOURCES);
+  });
+
+  it('a removed default source stays removed', async () => {
+    for (const d of sources.DEFAULT_SOURCES) await sources.removeSource(d);
+    expect(await sources.listSources()).toEqual([]);
+    expect(await sources.listSources()).toEqual([]);
+  });
+
+  it('never seeds over an existing sources.json, even a corrupt one', async () => {
+    await mkdir(join(userDataDir, 'loadouts'), { recursive: true });
+    await writeFile(join(userDataDir, 'loadouts', 'sources.json'), JSON.stringify({ sources: ['ghcr.io/other/loadouts'], provenance: {} }));
+    expect(await sources.listSources()).toEqual(['ghcr.io/other/loadouts']);
+    await writeFile(join(userDataDir, 'loadouts', 'sources.json'), '{not json');
+    expect(await sources.listSources()).toEqual([]);
+    expect(await readFile(join(userDataDir, 'loadouts', 'sources.json'), 'utf8')).toBe('{not json');
+  });
+
   it('removeSource drops a source', async () => {
     await sources.addSource(SRC);
     await sources.removeSource(SRC);
