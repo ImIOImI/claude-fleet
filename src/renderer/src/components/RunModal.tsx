@@ -4,6 +4,7 @@ import { useState } from 'react';
 import type { Automation } from '../../../preload';
 import { initialArgs } from '../automationView';
 import { ModalBackdrop } from './ModalBackdrop';
+import { Markdown } from './Markdown';
 
 interface Props {
   automation: Automation;
@@ -65,7 +66,7 @@ export function RunModal({ automation, running, onClose, onStarted }: Props) {
               ) : (
                 <input id={`rf-${p.name}`} type={p.type === 'number' ? 'number' : 'text'} value={values[p.name]} onChange={(e) => set(p.name, e.target.value)} />
               )}
-              {p.description && <p className="form-hint">{p.description}</p>}
+              {p.description && <p className="form-hint"><Markdown text={p.description} inline /></p>}
             </div>
           ))}
         </div>

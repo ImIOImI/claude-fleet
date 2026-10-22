@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { WorkspaceSummary } from '../App';
 import { ModalBackdrop } from './ModalBackdrop';
+import { Markdown } from './Markdown';
 
 type Entry = Awaited<ReturnType<typeof window.api.loadouts.catalog>>[number];
 
@@ -163,7 +164,7 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
                       {e.tags.map((t) => <span className="tag" key={t}>{t}</span>)}
                     </span>
                   )}
-                  {e.description && <span className="lb-row-desc">{e.description}</span>}
+                  {e.description && <span className="lb-row-desc"><Markdown text={e.description} inline /></span>}
                 </div>
                 <div className="lb-row-actions">
                   <button

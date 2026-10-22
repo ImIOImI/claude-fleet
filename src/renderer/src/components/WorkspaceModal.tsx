@@ -22,6 +22,7 @@ import {
   type WorkspaceFormSubmit
 } from './WorkspaceForm';
 import { workspaceToFormInitial } from './formInitial';
+import { Markdown } from './Markdown';
 
 interface Props {
   open: boolean;
@@ -333,7 +334,7 @@ export function WorkspaceModal({
                           <span className="saved-row-text">
                             <span className="saved-row-name">{w.name}</span>
                             {w.description && (
-                              <span className="saved-row-desc">{w.description}</span>
+                              <span className="saved-row-desc"><Markdown text={w.description} inline /></span>
                             )}
                           </span>
                           <span className="saved-row-meta">

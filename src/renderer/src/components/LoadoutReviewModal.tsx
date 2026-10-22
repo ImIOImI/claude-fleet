@@ -6,6 +6,7 @@
 import { useEffect, useState } from 'react';
 import type { LoadoutAutomationPreview } from '../../../preload';
 import { ModalBackdrop } from './ModalBackdrop';
+import { Markdown } from './Markdown';
 
 interface LoadoutDetail {
   id: string;
@@ -155,7 +156,7 @@ export function LoadoutReviewModal({
                 </div>
               )}
             </div>
-            {detail.description && <p className="lr-desc">{detail.description}</p>}
+            {detail.description && <p className="lr-desc"><Markdown text={detail.description} inline /></p>}
             {(loadoutDeps.length > 0 || toolDeps.length > 0) && (
               <div className="lr-deps">
                 {loadoutDeps.map((d) => (
@@ -274,7 +275,7 @@ export function LoadoutReviewModal({
             {detail.instructions && (
               <>
                 <span className="lbl">Instructions</span>
-                <div className="lr-instructions">{detail.instructions}</div>
+                <Markdown className="lr-instructions" text={detail.instructions} />
               </>
             )}
 

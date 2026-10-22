@@ -3352,7 +3352,7 @@ label.setting-title { display: block; cursor: pointer; }
 .manifest .mf.exec { background: color-mix(in oklch, var(--warn), transparent 92%); }
 .manifest .mf .badge-run { color: var(--warn); font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; }
 .lr-instructions {
-  font-size: 11.5px; color: var(--ink-1); line-height: 1.5; white-space: pre-wrap;
+  font-size: 11.5px; color: var(--ink-1); line-height: 1.5;
   background: var(--bg-2); border: 1px solid var(--rule); border-radius: var(--r-md);
   padding: 10px 11px; margin-bottom: 12px; max-height: 160px; overflow: auto;
 }
@@ -3477,7 +3477,25 @@ button.ib-link { background: none; border: none; padding: 0; font: inherit; font
 .ib-detail .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .ib-detail code { font-family: var(--font-mono); font-size: 11px; color: var(--ink-1); background: var(--bg-2); border: 1px solid var(--rule-soft); border-radius: 3px; padding: 0 4px; }
 .ib-pre { white-space: pre-wrap; word-break: break-word; }
-.ib-pre a.ib-link { color: var(--info); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+/* Markdown text fields (Markdown.tsx): compact, sized to the pane they sit in. */
+.md { font-size: 12.5px; line-height: 1.5; color: var(--ink-1); overflow-wrap: anywhere; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p, .md ul, .md ol, .md pre, .md table, .md blockquote { margin: 0 0 8px; }
+.md ul, .md ol { padding-left: 18px; }
+.md li + li { margin-top: 2px; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 10px 0 6px; font-size: 13px; font-weight: 600; color: var(--ink-0, var(--ink-1)); }
+.md code { font: 11px/1.4 var(--font-mono); background: var(--bg-canvas); border: 1px solid var(--rule-soft); border-radius: 4px; padding: 0 4px; }
+.md pre { padding: 8px 10px; background: var(--bg-canvas); border: 1px solid var(--rule-soft); border-radius: var(--r-md); overflow-x: auto; }
+.md pre code { border: 0; padding: 0; background: none; }
+.md table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 12px; }
+.md th, .md td { border: 1px solid var(--rule-soft); padding: 4px 8px; text-align: left; vertical-align: top; }
+.md th { color: var(--ink-2); font-weight: 600; }
+.md blockquote { padding-left: 10px; border-left: 2px solid var(--rule-soft); color: var(--ink-2); }
+.md hr { border: 0; border-top: 1px solid var(--rule-soft); margin: 10px 0; }
+.md a.md-link { color: var(--info); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.md .md-img-alt { color: var(--ink-2); }
+.md-inline { font-size: inherit; line-height: inherit; color: inherit; }
 .ib-rate { flex-direction: row; align-items: center; gap: 10px; margin: 0 0 6px 24px; }
 .ib-rate label { margin: 0; }
 .ib-rate input { width: 80px; }
