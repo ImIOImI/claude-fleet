@@ -19,6 +19,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { isBusyTitle, isUnknownTitleGlyph } from '../activityDetector';
 import { busyFlagIsStale } from '../staleBusy';
 import { decideTerminalKeyAction } from '../terminalKeymap';
+import { decodeOsc52 } from '../osc52';
 import { EchoRttTracker } from '../echoRtt';
 import { initPerfState, perfRecording } from '../perfState';
 import { buildTerminalOptions } from './terminalOptions';
@@ -211,6 +212,15 @@ export function TerminalSession({
     const unicode11 = new Unicode11Addon();
     term.loadAddon(unicode11);
     term.unicode.activeVersion = '11';
+    // OSC 52 → host clipboard. claude's own copy (fullscreen selection,
+    // `/copy`) lands here inside the container, where it has no native
+    // clipboard tool; unhandled, the copy silently vanishes. Write-only —
+    // see osc52.ts. Returning true marks the sequence handled.
+    term.parser.registerOscHandler(52, (payload) => {
+      const text = decodeOsc52(payload);
+      if (text) void window.api.clipboard.write(text);
+      return true;
+    });
     term.open(host);
 
     // Optional GPU/canvas renderer (#268). The DOM renderer paints the grid as
