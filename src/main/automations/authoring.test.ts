@@ -31,3 +31,16 @@ describe('authoring prompts', () => {
     expect(DRAFT_TOOLS.some((t) => /post_todo|run_automation/.test(t))).toBe(false);
   });
 });
+
+describe('skills discovery in drafting', () => {
+  it('tells the drafter to check target workspaces\' skills first', () => {
+    for (const p of [draftPrompt('x', ctx), changePrompt('log-watch', 'name: log-watch', 'y', ctx)]) {
+      expect(p).toMatch(/list_workspace_skills/);
+      expect(p).toMatch(/get_workspace_skill/);
+    }
+  });
+  it('allows the read-only skill tools while drafting', () => {
+    expect(DRAFT_TOOLS).toContain('mcp__claude-fleet-state__list_workspace_skills');
+    expect(DRAFT_TOOLS).toContain('mcp__claude-fleet-state__get_workspace_skill');
+  });
+});

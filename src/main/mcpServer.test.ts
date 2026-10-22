@@ -796,7 +796,7 @@ describe('perf tools', () => {
   });
 });
 
-import { setInboxHandlers } from './mcpServer.js';
+import { setInboxHandlers, setSkillHandlers } from './mcpServer.js';
 
 describe('inbox tools (#407)', () => {
   const ctx = { callerId: WS_A, allowedWorkspaces: new Set([WS_A]) } as ToolCtx;
@@ -827,5 +827,26 @@ describe('inbox tools (#407)', () => {
 
   it('fails clearly when the inbox is not wired', () => {
     expect(() => tool('list_todos').run(null as never, {}, ctx)).toThrow(/inbox is unavailable/);
+  });
+
+  it('exposes the workspace-skill tools and proxies them with the host caller + allowed set', async () => {
+    expect(TOOLS.map((t) => t.name)).toEqual(expect.arrayContaining(['list_workspace_skills', 'get_workspace_skill']));
+    expect((tool('get_workspace_skill').inputSchema as { required: string[] }).required).toEqual(['workspace', 'name']);
+    const calls: Array<[string, string, string[], Record<string, unknown>]> = [];
+    setSkillHandlers({
+      list: async (c, al, a) => { calls.push(['list', c, [...al], a]); return []; },
+      get: async (c, al, a) => { calls.push(['get', c, [...al], a]); return { name: 'x' }; }
+    });
+    try {
+      await tool('list_workspace_skills').run(null as never, { workspace: 'ops' }, ctx);
+      await tool('get_workspace_skill').run(null as never, { workspace: 'ops', name: 'x' }, ctx);
+      expect(calls).toEqual([
+        ['list', WS_A, [WS_A], { workspace: 'ops' }],
+        ['get', WS_A, [WS_A], { workspace: 'ops', name: 'x' }]
+      ]);
+    } finally {
+      setSkillHandlers(null);
+    }
+    expect(() => tool('list_workspace_skills').run(null as never, {}, ctx)).toThrow(/skills are unavailable/);
   });
 });

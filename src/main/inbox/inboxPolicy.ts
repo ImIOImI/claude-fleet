@@ -49,5 +49,6 @@ export function sanitizeInboxConfig(v: unknown): InboxConfig | undefined {
   }
   if (typeof o.canReadAll === 'boolean') out.canReadAll = o.canReadAll;
   if (typeof o.trusted === 'boolean') out.trusted = o.trusted;
+  if (typeof o.exposeSkills === 'boolean') out.exposeSkills = o.exposeSkills;
   return Object.keys(out).length ? out : undefined;
 }

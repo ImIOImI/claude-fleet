@@ -270,6 +270,7 @@ export function WorkspaceForm({
   const [postsPerHour, setPostsPerHour] = useState(String(initial?.inbox?.maxPostsPerHour ?? 60));
   const [inboxOpen, setInboxOpen] = useState(initial?.inbox !== undefined);
   const [trustedEdits, setTrustedEdits] = useState(initial?.inbox?.trusted === true);
+  const [exposeSkills, setExposeSkills] = useState(initial?.inbox?.exposeSkills !== false);
   // Manager workspaces eligible for the acceptFrom list (other container managers).
   const managerOptions = useMemo(
     () => eligibleAcceptFromManagers(workspaces, initial?.id ?? ''),
@@ -531,7 +532,8 @@ export function WorkspaceForm({
       ...(canPostTodos ? {} : { canPost: false }),
       ...(Number.isFinite(pph) && pph >= 1 && pph !== 60 ? { maxPostsPerHour: Math.min(pph, 10000) } : {}),
       ...(initial?.inbox?.canReadAll ? { canReadAll: true } : {}),
-      ...(trustedEdits && kind === 'container' ? { trusted: true } : {})
+      ...(trustedEdits && kind === 'container' ? { trusted: true } : {}),
+      ...(exposeSkills ? {} : { exposeSkills: false })
     };
     const inbox = mode === 'edit' && Object.keys(inboxCfg).length ? inboxCfg : undefined;
 
@@ -1345,7 +1347,7 @@ export function WorkspaceForm({
         >
           <summary>
             Inbox &amp; automations{' '}
-            <span className="form-hint">{canPostTodos ? `can post · ${postsPerHour || 60}/hour` : 'posting off'}{trustedEdits && kind === 'container' ? ' · trusted' : ''}</span>
+            <span className="form-hint">{canPostTodos ? `can post · ${postsPerHour || 60}/hour` : 'posting off'}{trustedEdits && kind === 'container' ? ' · trusted' : ''}{exposeSkills ? '' : ' · skills hidden'}</span>
           </summary>
           <label className="committee-reachable-row">
             <input
@@ -1370,6 +1372,13 @@ export function WorkspaceForm({
           </div>
           <p className="form-hint">
             Over the limit, posts are rejected and the workspace is told when it can post again.
+          </p>
+          <label className="committee-reachable-row">
+            <input type="checkbox" checked={exposeSkills} onChange={(e) => setExposeSkills(e.target.checked)} disabled={busy} />
+            <span>Expose skills to automations</span>
+          </label>
+          <p className="form-hint">
+            Automations can see this workspace's skills (names, descriptions, and full text on request).
           </p>
           {kind === 'container' ? (
             <>

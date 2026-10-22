@@ -52,6 +52,21 @@ describe('renderRoleBrief', () => {
     expect(renderRoleBrief(withAuthor)).not.toContain('Suggest the user install it');
   });
 
+  it('lists the skill tools with the automation tools', () => {
+    const b = renderRoleBrief({
+      ...ctx,
+      tools: [
+        ...ctx.tools,
+        { name: 'list_workspace_skills', description: 'List the skills and slash commands of workspaces you can see.' },
+        { name: 'get_workspace_skill', description: 'Read one skill.' }
+      ]
+    });
+    const automations = b.slice(b.indexOf('Automations:'), b.indexOf('Fleet state and messaging:'));
+    expect(automations).toContain('- `list_workspace_skills`: List the skills and slash commands of workspaces you can see.');
+    expect(automations).toContain('- `get_workspace_skill`: Read one skill.');
+    expect(b).toContain('Use `list_workspace_skills` to see what each workspace can already do');
+  });
+
   it('says so when nothing is installed or configured', () => {
     const b = renderRoleBrief({ ...ctx, installedLoadouts: [], sources: [] });
     expect(b).toContain('Installed in this workspace: none');

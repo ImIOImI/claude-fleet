@@ -5,7 +5,9 @@ import { existsSync } from 'node:fs';
 import { unlink, readdir } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { workspaceTranscriptPath, workspaceHistoryFile, workspaceHistoryDir, encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir } from './paths.js';
+import { homedir } from 'node:os';
+import { workspaceTranscriptPath, workspaceHistoryFile, workspaceHistoryDir, encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir, workspaceClaudeDir } from './paths.js';
+import { createWorkspaceSkills, toSkillWorkspace } from './skills/workspaceSkills.js';
 import {
   setWorkspaceDefault,
   setSessionOverride,
@@ -68,6 +70,7 @@ import {
   setConfigResolver,
   currentMcpStatus,
   setPlanUsageHandler,
+  setSkillHandlers,
 } from './mcpServer.js';
 import * as vault from './vault.js';
 import { listEndpoints, saveEndpoint, deleteEndpoint, setEndpointApiKey, probeEndpoint, getEndpoint, type ModelEndpoint } from './endpoints.js';
@@ -441,6 +444,21 @@ async function listAllWorkspaces(): Promise<Workspace[]> {
 function invalidateWorkspaceList(): void {
   workspaceListCache.invalidate();
 }
+
+// Workspace skills for automations (list_workspace_skills / get_workspace_skill).
+// Manifests are re-read per call so scope + exposure are live; scans are cached.
+const workspaceSkills = createWorkspaceSkills({
+  listWorkspaces: async () =>
+    Promise.all(
+      (await listWorkspaceManifests()).map(async (m) =>
+        toSkillWorkspace(m, {
+          privateDir: m.kind === 'local' ? m.workspaceRoot : await fleetPrivateDir(m.id),
+          containerClaudeDir: workspaceClaudeDir(m.id),
+          homedir: homedir()
+        })
+      )
+    )
+});
 
 // ── Cross-workspace committee control (#119) ───────────────────────────────
 // The single place pause/unpause effects are performed, shared by the MCP
@@ -1440,6 +1458,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   });
   // Scoped reads (#122): teach the MCP read tools the caller's allowed set.
   setReadScopeResolver(allowedReadWorkspaces);
+  setSkillHandlers({
+    list: (callerId, allowed, args) => workspaceSkills.list(callerId, allowed, args),
+    get: (callerId, allowed, args) => workspaceSkills.get(callerId, allowed, args)
+  });
   setInputWaitHandler((callerId, sessionId, waiting) => {
     let set = inputWaitByWorkspace.get(callerId);
     if (!set) { set = new Set(); inputWaitByWorkspace.set(callerId, set); }
@@ -1585,11 +1607,13 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('loadouts:install', async (_e, workspaceId: string, loadoutId: string, opts?: { source?: string; version?: string; force?: boolean; automations?: string[]; allowHost?: boolean }) => {
     const result = await ensureAndInstall(workspaceId, loadoutId, opts ?? {});
     invalidateWorkspaceList();
+    workspaceSkills.invalidate(workspaceId);
     return result;
   });
   ipcMain.handle('loadouts:uninstall', async (_e, workspaceId: string, loadoutId: string) => {
     const result = await loadouts.uninstallLoadout(workspaceId, loadoutId);
     invalidateWorkspaceList();
+    workspaceSkills.invalidate(workspaceId);
     return result;
   });
   // Reveal a loadout's source folder in the OS file manager (review-modal action).

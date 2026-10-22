@@ -159,6 +159,18 @@ export function setInboxHandlers(h: InboxHandlers | null): void {
   inboxHandlers = h;
 }
 
+/** Injected by ipc.ts: list / read workspace skills (workspaceSkills.ts). Scope
+ *  (automations role → every exposed workspace; else the allowed read set) and
+ *  the inbox.exposeSkills opt-out are enforced by the handler. */
+export interface SkillHandlers {
+  list(callerId: string, allowed: Set<string>, args: Record<string, unknown>): Promise<unknown>;
+  get(callerId: string, allowed: Set<string>, args: Record<string, unknown>): Promise<unknown>;
+}
+let skillHandlers: SkillHandlers | null = null;
+export function setSkillHandlers(h: SkillHandlers | null): void {
+  skillHandlers = h;
+}
+
 /** Injected by ipc.ts: record a diagnostic from the runner's chapter-summary
  *  Stop hook (`summarize.sh`, #230). The hook fails into `/dev/null` otherwise,
  *  so a dead #207 pipeline is invisible; this lands each decision point in the
@@ -1518,6 +1530,33 @@ export const TOOLS: Tool[] = [
     run: (_db, a, ctx) => {
       if (!automationHandlers) throw new Error('automations are unavailable');
       return automationHandlers.run(ctx.callerId, a);
+    }
+  },
+  {
+    name: 'list_workspace_skills',
+    description:
+      'List the skills and slash commands of workspaces you can see, with what each does and how to invoke it from an automation prompt step. ' +
+      'The automations workspace sees every workspace that exposes its skills; others see themselves plus workspaces they hold a read grant over. ' +
+      'Args: workspace (name or id, optional; omit for all). Returns [{workspace: {id, name, kind}, skills: [{name, kind: skill|command, source: project|user, description, argumentHint?, invoke}], warnings?}].',
+    inputSchema: { type: 'object', properties: { workspace: { type: 'string' } } },
+    run: (_db, a, ctx) => {
+      if (!skillHandlers) throw new Error('skills are unavailable');
+      return skillHandlers.list(ctx.callerId, ctx.allowedWorkspaces, a);
+    }
+  },
+  {
+    name: 'get_workspace_skill',
+    description:
+      'Read one skill or command from a workspace listed by list_workspace_skills: {workspace (name or id), name} → its summary plus body ' +
+      '(the full SKILL.md or command file, up to 20 000 chars, delimited as data). Use it to learn a skill\'s inputs before writing a prompt step that invokes it.',
+    inputSchema: {
+      type: 'object',
+      properties: { workspace: { type: 'string' }, name: { type: 'string' } },
+      required: ['workspace', 'name']
+    },
+    run: (_db, a, ctx) => {
+      if (!skillHandlers) throw new Error('skills are unavailable');
+      return skillHandlers.get(ctx.callerId, ctx.allowedWorkspaces, a);
     }
   },
   {
