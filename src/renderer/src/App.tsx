@@ -415,7 +415,7 @@ export function App() {
   const toastIdRef = useRef(0);
   const dismissToast = useCallback((id: number): void => dispatchToast({ type: 'dismiss', id }), []);
   const pushToast = useCallback(
-    (message: string, eyebrow?: string, ttlMs = 4000, kind: ToastKind = 'progress'): void => {
+    (message: string, eyebrow?: string, ttlMs = 4000, kind: ToastKind = 'progress', key?: string): void => {
       const id = ++toastIdRef.current;
       dispatchToast({
         type: 'push',
@@ -425,7 +425,8 @@ export function App() {
           eyebrow,
           placement: 'global',
           sticky: false,
-          dismissible: false
+          dismissible: false,
+          key
         })
       });
       setTimeout(() => dispatchToast({ type: 'dismiss', id }), ttlMs);
@@ -1334,11 +1335,15 @@ export function App() {
     // Container-level edits (image/env/resources/authMode) are fixed at
     // create time, so applying them means RECREATING the container from the
     // saved manifest — not a stop→start, which would reuse the old spec.
+    // One keyed toast per recreate: image-pull progress fires many times a
+    // second per layer, so unkeyed pushes stacked dozens of identical
+    // toasts. The keyed toast updates in place and the result replaces it.
+    const toastKey = `recreate:${workspaceId}`;
     try {
       await applyContainerEdit(
         makeLifecycleApi(),
         { id: workspaceId, containerId },
-        (message) => pushToast(message, 'Recreating', 4000, 'progress')
+        (message) => pushToast(message, 'Recreating', 4000, 'progress', toastKey)
       );
       setRestartBannerIds((prev) => {
         if (!prev.has(workspaceId)) return prev;
@@ -1347,11 +1352,11 @@ export function App() {
         return next;
       });
       focusWorkspaceWhenWarm(workspaceId);
-      pushToast('Workspace recreated with the updated settings.', 'Recreated', 4000, 'ok');
+      pushToast('Workspace recreated with the updated settings.', 'Recreated', 4000, 'ok', toastKey);
     } catch (err) {
       // Keep the banner up so the user can retry.
       console.error('recreate from restart-banner failed:', err);
-      pushToast(`Recreate failed: ${(err as Error).message}`, 'Recreate failed', 8000, 'error');
+      pushToast(`Recreate failed: ${(err as Error).message}`, 'Recreate failed', 8000, 'error', toastKey);
     } finally {
       refresh();
     }
