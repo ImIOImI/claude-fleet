@@ -24,9 +24,23 @@ function normalizeBase(base: string): string {
   return base.trim().replace(/\/+$/, '');
 }
 
+/**
+ * Sources a fresh install starts with (seeded only when sources.json doesn't
+ * exist yet; removing one writes the file, so it is never re-added).
+ */
+export const DEFAULT_SOURCES = ['ghcr.io/imioimi/claude-fleet-loadouts'];
+
 async function read(): Promise<SourcesFile> {
+  let raw: string;
   try {
-    const raw = await readFile(sourcesPath(), 'utf8');
+    raw = await readFile(sourcesPath(), 'utf8');
+  } catch (err: unknown) {
+    if ((err as { code?: string }).code !== 'ENOENT') return { sources: [], provenance: {} };
+    const seeded: SourcesFile = { sources: [...DEFAULT_SOURCES], provenance: {} };
+    await write(seeded).catch(() => undefined); // still seeded for this read if the write fails
+    return seeded;
+  }
+  try {
     const parsed = JSON.parse(raw) as Partial<SourcesFile>;
     return {
       sources: Array.isArray(parsed.sources) ? parsed.sources.filter((s): s is string => typeof s === 'string') : [],
