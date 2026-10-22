@@ -5,12 +5,13 @@
 // A source may carry a token (vault, never sources.json) for private packages;
 // sources without one fall back to $GH_TOKEN.
 
-import { mkdir, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, mkdtemp, readFile, writeFile, rename, rm } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { basename, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadoutsRoot, loadoutDir } from './paths.js';
 import { pullArtifact } from './ociClient.js';
-import { parseIndex, loadoutRefFromSource, type RemoteLoadout } from './ociCore.js';
+import { parseIndex, loadoutRefFromSource, INDEX_ARTIFACT_TYPE, LOADOUT_ARTIFACT_TYPE, type RemoteLoadout } from './ociCore.js';
 import { logError } from './errorLog.js';
 import { getSecret, setSecret, deleteSecret } from './vault.js';
 
@@ -60,7 +61,7 @@ async function pullIndex(base: string, credential?: string): Promise<RemoteLoado
   const tmp = await mkdtemp(join(tmpdir(), 'cf-index-'));
   try {
     const b = normalizeBase(base);
-    await pullArtifact(`${b}/index:latest`, tmp, { credential: credential ?? (await credentialFor(b)) });
+    await pullArtifact(`${b}/index:latest`, tmp, { credential: credential ?? (await credentialFor(b)), artifactType: INDEX_ARTIFACT_TYPE });
     return parseIndex(await readFile(join(tmp, 'index.json'), 'utf8'));
   } finally {
     await rm(tmp, { recursive: true, force: true });
@@ -128,11 +129,48 @@ export async function provenanceFor(id: string): Promise<{ source: string; versi
   return p ? { source: p.source, version: p.version } : null;
 }
 
+/**
+ * Pull into a hidden staging dir beside `dest`, then swap it in, so files a
+ * newer version dropped don't linger and a failed pull leaves the old copy
+ * intact. Staging/backup dirs start with "." so the library listing skips any
+ * a crash leaves behind.
+ */
+async function pullReplacing(dest: string, pull: (stage: string) => Promise<void>): Promise<void> {
+  const tag = randomBytes(4).toString('hex');
+  const stage = join(dirname(dest), `.pull-${basename(dest)}-${tag}`);
+  const backup = join(dirname(dest), `.old-${basename(dest)}-${tag}`);
+  try {
+    await pull(stage);
+  } catch (err) {
+    await rm(stage, { recursive: true, force: true });
+    throw err;
+  }
+  let hadOld = true;
+  try {
+    await rename(dest, backup);
+  } catch (err: unknown) {
+    if ((err as { code?: string }).code !== 'ENOENT') {
+      await rm(stage, { recursive: true, force: true });
+      throw err;
+    }
+    hadOld = false;
+  }
+  try {
+    await rename(stage, dest);
+  } catch (err) {
+    if (hadOld) await rename(backup, dest).catch(() => undefined);
+    await rm(stage, { recursive: true, force: true });
+    throw err;
+  }
+  if (hadOld) await rm(backup, { recursive: true, force: true }).catch(() => undefined);
+}
+
 /** Pull a loadout's artifact into <userData>/loadouts/<id>/ and record provenance. */
 export async function download(source: string, id: string, version?: string): Promise<void> {
   const b = normalizeBase(source);
   const ref = loadoutRefFromSource(b, id, version);
-  await pullArtifact(ref, loadoutDir(id), { credential: await credentialFor(b) });
+  const credential = await credentialFor(b);
+  await pullReplacing(loadoutDir(id), (stage) => pullArtifact(ref, stage, { credential, artifactType: LOADOUT_ARTIFACT_TYPE }));
   const cur = await read();
   await write({
     ...cur,

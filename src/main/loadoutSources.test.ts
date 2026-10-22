@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, readFile, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, readdir, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -15,11 +15,11 @@ vi.mock('./vault.js', () => ({
 }));
 
 // Mock the network client; assert sources logic in isolation.
-const pulled: Array<{ ref: string; dest: string; credential?: string }> = [];
+const pulled: Array<{ ref: string; dest: string; credential?: string; artifactType?: string }> = [];
 vi.mock('./ociClient.js', () => ({
   fetchAnnotations: vi.fn(),
-  pullArtifact: vi.fn(async (ref: string, dest: string, opts?: { credential?: string }) => {
-    pulled.push({ ref, dest, credential: opts?.credential });
+  pullArtifact: vi.fn(async (ref: string, dest: string, opts?: { credential?: string; artifactType?: string }) => {
+    pulled.push({ ref, dest, credential: opts?.credential, artifactType: opts?.artifactType });
     // Simulate a pulled tree: write a loadout.md (or index.json for the index ref).
     await mkdir(dest, { recursive: true });
     if (ref.endsWith('/index:latest')) {
@@ -65,8 +65,43 @@ describe('loadoutSources', () => {
   it('download pulls into <userData>/loadouts/<id>/ and records provenance', async () => {
     await sources.addSource(SRC);
     await sources.download(SRC, 'spec-driven', '1.0.0');
-    expect(pulled.some((p) => p.ref === `${SRC}/spec-driven:1.0.0` && p.dest.endsWith('/loadouts/spec-driven'))).toBe(true);
+    expect(pulled.some((p) => p.ref === `${SRC}/spec-driven:1.0.0` && p.artifactType === 'application/vnd.claude-fleet.loadout.v1')).toBe(true);
+    expect(await readFile(join(userDataDir, 'loadouts', 'spec-driven', 'loadout.md'), 'utf8')).toContain('Spec-Driven');
     expect(await sources.provenanceFor('spec-driven')).toMatchObject({ source: SRC, version: '1.0.0' });
+  });
+
+  it('pulls the index as an index artifact', async () => {
+    await sources.addSource(SRC);
+    expect(pulled.find((p) => p.ref === `${SRC}/index:latest`)?.artifactType).toBe('application/vnd.claude-fleet.loadout-index.v1');
+  });
+
+  it('a re-download replaces the folder: files dropped upstream do not linger, no staging dirs remain', async () => {
+    const dir = join(userDataDir, 'loadouts', 'spec-driven');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'removed-upstream.md'), 'old');
+    await sources.download(SRC, 'spec-driven', '1.0.0');
+    expect(await readdir(dir)).toEqual(['loadout.md']);
+    expect((await readdir(join(userDataDir, 'loadouts'))).filter((n) => n.startsWith('.'))).toEqual([]);
+  });
+
+  it('a failed pull leaves the existing copy untouched and cleans up its staging dir', async () => {
+    const dir = join(userDataDir, 'loadouts', 'spec-driven');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'loadout.md'), 'old copy');
+    const client = await import('./ociClient.js');
+    (client.pullArtifact as ReturnType<typeof vi.fn>).mockImplementationOnce(async (_ref: string, dest: string) => {
+      await mkdir(dest, { recursive: true });
+      await writeFile(join(dest, 'partial.md'), 'half');
+      throw new Error('layer loadout.md digest mismatch');
+    });
+    await expect(sources.download(SRC, 'spec-driven', '1.0.0')).rejects.toThrow(/digest mismatch/);
+    expect(await readFile(join(dir, 'loadout.md'), 'utf8')).toBe('old copy');
+    expect((await readdir(join(userDataDir, 'loadouts'))).filter((n) => n.startsWith('.'))).toEqual([]);
+  });
+
+  it('refuses the reserved id "index"', async () => {
+    await expect(sources.download(SRC, 'index')).rejects.toThrow(/reserved/);
+    expect(pulled.some((p) => p.ref.endsWith('/index:latest') && !p.artifactType?.includes('index'))).toBe(false);
   });
 
   it('addSource with a token stores it in the vault (not sources.json) and pulls with it', async () => {
