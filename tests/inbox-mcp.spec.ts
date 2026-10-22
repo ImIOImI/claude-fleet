@@ -160,7 +160,7 @@ test('Automations over MCP: list, allowFrom-gated run, failure notification, run
   try {
     for (const c of [a, b]) await c.call('initialize', { protocolVersion: '2024-11-05' });
     const names = ((await a.call('tools/list')).result as { tools: Array<{ name: string }> }).tools.map((t) => t.name);
-    expect(names).toEqual(expect.arrayContaining(['list_automations', 'run_automation']));
+    expect(names).toEqual(expect.arrayContaining(['list_automations', 'run_automation', 'list_workspace_skills', 'get_workspace_skill']));
 
     await callTestIpc(app, 'automations:create', [`name: ping-target
 triggers:
