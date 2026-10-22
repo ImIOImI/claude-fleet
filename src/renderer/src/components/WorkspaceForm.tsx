@@ -23,6 +23,7 @@ import { AdvancedImageSearchModal, IconSearch } from './AdvancedImageSearchModal
 import { buildWslLauncherPayload } from './wslLauncherPayload';
 import { eligibleAcceptFromManagers, ManagerGlyph } from './committee';
 import { ModelCombobox, type EndpointEntry } from './ModelCombobox';
+import { createSecretRevealer, REVEAL_SECONDS, type RevealState } from './secretReveal';
 import type { InboxConfig } from '../../../preload';
 import {
   claudeAuthFromInitial,
@@ -132,6 +133,8 @@ interface EnvRow {
   secret: boolean;
   /** Pre-existing secret keys in edit mode show as a placeholder "•••••" until the user types. */
   preExisting?: boolean;
+  /** A typed (not yet saved) secret value is shown as plain text. */
+  shown?: boolean;
 }
 
 interface Props {
@@ -221,6 +224,25 @@ export function WorkspaceForm({
     }
     return rows;
   });
+  // Temporary reveal of saved secret values (vault:getSecret on click,
+  // auto-hidden after REVEAL_SECONDS). Keyed by env var name. Only possible
+  // with a workspace id — a clone carries the source's keys but not its id.
+  const [reveals, setReveals] = useState<Record<string, RevealState>>({});
+  const [revealer] = useState(() => {
+    const id = initial?.id;
+    if (!id) return null;
+    return createSecretRevealer({
+      fetch: (key) => window.api.vault.getSecret(id, key),
+      onChange: (key, state) =>
+        setReveals((prev) => {
+          const next = { ...prev };
+          if (state) next[key] = state;
+          else delete next[key];
+          return next;
+        })
+    });
+  });
+  useEffect(() => () => revealer?.hideAll(), [revealer]);
   const [cpus, setCpus] = useState<string>(
     initial?.resources?.cpus != null ? String(initial.resources.cpus) : ''
   );
@@ -363,7 +385,10 @@ export function WorkspaceForm({
 
   const addEnvRow = () =>
     setEnvRows((prev) => [...prev, { key: '', value: '', secret: false }]);
-  const updateEnvRow = (i: number, patch: Partial<EnvRow>) =>
+  const updateEnvRow = (i: number, patch: Partial<EnvRow>) => {
+    // Any edit to a revealed row (rename, new value, untick secret) masks it.
+    const current = envRows[i];
+    if (current?.preExisting) revealer?.hide(current.key);
     setEnvRows((prev) =>
       prev.map((r, idx) => {
         if (idx !== i) return r;
@@ -373,8 +398,21 @@ export function WorkspaceForm({
         return next;
       })
     );
-  const removeEnvRow = (i: number) =>
+  };
+  const removeEnvRow = (i: number) => {
+    const current = envRows[i];
+    if (current?.preExisting) revealer?.hide(current.key);
     setEnvRows((prev) => prev.filter((_, idx) => idx !== i));
+  };
+  const toggleReveal = (row: EnvRow, i: number) => {
+    if (!row.preExisting) {
+      updateEnvRow(i, { shown: !row.shown });
+      return;
+    }
+    if (!revealer) return;
+    if (revealer.isActive(row.key)) revealer.hide(row.key);
+    else revealer.reveal(row.key);
+  };
 
   /**
    * Validate the form and assemble a `WorkspaceFormSubmit`. Returns null
@@ -1032,7 +1070,12 @@ export function WorkspaceForm({
           </span>
         </summary>
         <div className="env-editor">
-          {envRows.map((row, i) => (
+          {envRows.map((row, i) => {
+            const reveal = row.preExisting ? reveals[row.key] : undefined;
+            const revealedValue = reveal?.status === 'shown' ? reveal.value : null;
+            const visible = row.preExisting ? revealedValue !== null : !!row.shown;
+            const revealBlocked = !!row.preExisting && !revealer;
+            return (
             <div className="env-row" key={i}>
               <input
                 aria-label={`Env key ${i + 1}`}
@@ -1044,13 +1087,45 @@ export function WorkspaceForm({
               />
               <input
                 aria-label={`Env value ${i + 1}`}
-                className="env-value"
-                value={row.value}
-                onChange={(e) => updateEnvRow(i, { value: e.target.value })}
+                className={revealedValue !== null ? 'env-value revealed' : 'env-value'}
+                value={revealedValue ?? row.value}
+                // Editing a revealed value replaces the secret; the new text
+                // stays visible (typed values have no countdown).
+                onChange={(e) =>
+                  updateEnvRow(
+                    i,
+                    revealedValue !== null ? { value: e.target.value, shown: true } : { value: e.target.value }
+                  )
+                }
                 placeholder={row.preExisting ? '••••• (set; type to replace)' : row.secret ? '••••• (stored in keychain)' : 'value'}
-                type={row.secret ? 'password' : 'text'}
+                type={row.secret && !visible ? 'password' : 'text'}
+                autoComplete="off"
+                spellCheck={false}
                 disabled={busy}
               />
+              {row.secret ? (
+                <button
+                  type="button"
+                  className={visible ? 'env-reveal on' : 'env-reveal'}
+                  aria-label={`${visible ? 'Hide' : 'Show'} value of ${row.key || 'env var'}`}
+                  aria-pressed={visible}
+                  title={
+                    revealBlocked
+                      ? "This secret belongs to the workspace you cloned from, so it can't be shown here"
+                      : visible
+                        ? 'Hide value'
+                        : row.preExisting
+                          ? `Show the saved value for ${REVEAL_SECONDS}s`
+                          : 'Show value'
+                  }
+                  onClick={() => toggleReveal(row, i)}
+                  disabled={busy || revealBlocked || reveal?.status === 'loading'}
+                >
+                  {visible ? <IconEyeOff /> : <IconEye />}
+                </button>
+              ) : (
+                <span className="env-reveal-slot" aria-hidden="true" />
+              )}
               <label
                 className="env-secret-toggle"
                 title={
@@ -1076,8 +1151,29 @@ export function WorkspaceForm({
               >
                 ×
               </button>
+              {reveal?.status === 'shown' && (
+                <div className="env-reveal-note warn" role="status">
+                  <RevealRing remainingS={reveal.remainingS} />
+                  Hides in {reveal.remainingS}s
+                  <span className="env-reveal-hint">· type over it to replace</span>
+                </div>
+              )}
+              {reveal?.status === 'loading' && (
+                <div className="env-reveal-note" role="status">Loading…</div>
+              )}
+              {reveal?.status === 'missing' && (
+                <div className="env-reveal-note err" role="status">
+                  Not in the vault. Type a value to set it, or remove the row.
+                </div>
+              )}
+              {reveal?.status === 'error' && (
+                <div className="env-reveal-note err" role="status">
+                  Couldn't load the value: {reveal.message}
+                </div>
+              )}
             </div>
-          ))}
+            );
+          })}
           <button
             type="button"
             className="btn"
@@ -1477,6 +1573,34 @@ function IconCopy(): JSX.Element {
     <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.2" aria-hidden="true">
       <rect x="3" y="3" width="7" height="8" rx="0.8" />
       <path d="M2 8 V2 a1 1 0 0 1 1 -1 H8" />
+    </svg>
+  );
+}
+
+function IconEye() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+      <path fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" />
+      <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" strokeWidth="1.8" />
+    </svg>
+  );
+}
+
+function IconEyeOff() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+      <path fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" d="M3 3l18 18M10.6 5.1A10.8 10.8 0 0 1 12 5c6.4 0 10 7 10 7a17.6 17.6 0 0 1-3.2 4.1M6.6 6.6C3.8 8.4 2 12 2 12s3.6 7 10 7a10 10 0 0 0 5.4-1.6M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+    </svg>
+  );
+}
+
+/** Countdown ring for a revealed secret: the arc shrinks as time runs out. */
+function RevealRing({ remainingS }: { remainingS: number }) {
+  const c = 2 * Math.PI * 5;
+  return (
+    <svg className="env-reveal-ring" viewBox="0 0 14 14" width="12" height="12" aria-hidden="true">
+      <circle className="track" cx="7" cy="7" r="5" />
+      <circle className="left" cx="7" cy="7" r="5" strokeDasharray={c} strokeDashoffset={c * (1 - remainingS / REVEAL_SECONDS)} />
     </svg>
   );
 }
