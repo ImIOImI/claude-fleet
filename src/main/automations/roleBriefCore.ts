@@ -49,7 +49,7 @@ function summary(description: string): string {
 /** Tools only the runner's hooks call ("Internal (called by …"); listing them would invite misuse. */
 const isInternal = (t: RoleBriefTool) => /^Internal\b/.test(t.description);
 
-const AUTHORING_TOOLS = new Set(['propose_automation', 'propose_automation_change', 'get_proposal', 'list_automations', 'get_automation', 'list_runs', 'run_automation']);
+const AUTHORING_TOOLS = new Set(['propose_automation', 'propose_automation_change', 'get_proposal', 'list_automations', 'get_automation', 'list_runs', 'run_automation', 'list_workspace_skills', 'get_workspace_skill']);
 
 export function renderRoleBrief(ctx: RoleBriefContext): string {
   const name = inline(ctx.workspaceName, 60) || 'unnamed';
@@ -104,7 +104,7 @@ export function renderRoleBrief(ctx: RoleBriefContext): string {
     `- Installed in this workspace: ${loadouts}`,
     `- Registry sources the app pulls from: ${sources}`,
     '',
-    'If an automation needs a skill that isn\'t installed in the workspace that will run it, tell the user which loadout to install there from the app\'s Library. Don\'t recreate the skill by hand.',
+    'Use `list_workspace_skills` to see what each workspace can already do, and have prompt steps invoke those skills. If an automation needs a skill that isn\'t installed in the workspace that will run it, tell the user which loadout to install there from the app\'s Library. Don\'t recreate the skill by hand.',
     '',
     '### Your tools (`claude-fleet-state` MCP server)',
     'Automations:',

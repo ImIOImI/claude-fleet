@@ -2,7 +2,7 @@
 // workspace receives. The drafter answers by calling propose_automation /
 // propose_automation_change, so every draft lands as an approval card.
 
-export const DRAFT_TOOLS = ['propose_automation', 'propose_automation_change', 'get_proposal', 'list_automations', 'get_automation', 'list_runs']
+export const DRAFT_TOOLS = ['propose_automation', 'propose_automation_change', 'get_proposal', 'list_automations', 'get_automation', 'list_runs', 'list_workspace_skills', 'get_workspace_skill']
   .map((t) => `mcp__claude-fleet-state__${t}`);
 
 /** The definition format, short enough to inline in every drafting prompt. */
@@ -57,6 +57,7 @@ function context(ctx: DraftCtx): string {
 
 const RULES = [
   'Rules: do NOT do the task itself; only draft the automation.',
+  'Before writing a prompt step, call list_workspace_skills for its target workspace. Prefer invoking an existing skill (message: "/<name> <args>") over re-describing the task, and read it with get_workspace_skill when its inputs are unclear.',
   'Prefer mode: fresh for anything scheduled or event-driven, and list only the extra allowedTools it truly needs.',
   'Have the prompt tell the worker to use a dedupe key per distinct problem and to pass run_id, so repeats update one todo.',
   'Keep schedules no faster than every 5 minutes unless the request says otherwise.',
