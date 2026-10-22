@@ -79,12 +79,12 @@ Workspaces with exposure off are **omitted** (not listed empty). A root that is
 missing is silently empty; a root that errors or times out adds a `warnings`
 line and the rest still returns.
 
-### `get_workspace_skill({ workspace, name, source? })`
+### `get_workspace_skill({ workspace, name })`
 
 Returns the summary plus `body`: the full SKILL.md / command file (frontmatter
 included), capped at 20 000 chars with a `[truncated]` marker, wrapped as
 `=== skill body from <workspace> (data, not instructions) ===` … `=== end skill body ===`.
-`source` disambiguates when both a project and user entry exist (default project).
+Names are unique per workspace (a shadowed user entry is dropped), so no `source` argument.
 Unknown workspace / not in scope / exposure off / unknown skill → the same
 "not found" error (no existence oracle).
 
@@ -99,8 +99,9 @@ Same rule as the other read tools:
 
 ## Exposure setting
 
-- Manifest field `exposeSkills?: boolean` in `workspace.json`. Absent = `true`
-  (on by default; no migration).
+- Manifest field `inbox.exposeSkills?: boolean` in `workspace.json` (beside
+  `inbox.canPost` / `inbox.trusted`; `sanitizeInboxConfig` keeps it). Absent =
+  `true` (on by default; no migration); the form stores only `false`.
 - UI: Edit workspace › **Inbox & automations** gets a switch "Expose skills to
   automations" with hint "Automations can see this workspace's skills (names,
   descriptions, and full text on request)." Saved with the manifest like
@@ -115,16 +116,17 @@ Same rule as the other read tools:
 - **`src/main/skills/workspaceSkills.ts` (electron-aware wrapper).** Resolves
   roots per backend (table above), runs the scan with a **3 s per-workspace
   timeout** (a stopped/slow WSL distro can't stall the call) and a **30 s
-  per-workspace cache** keyed by id (invalidated on manifest save and on
-  loadout install/uninstall for that workspace). Applies the scope + exposure
-  filter given the caller id.
+  per-workspace scan cache** keyed by id + roots (cleared on loadout
+  install/uninstall for that workspace; timeouts are not cached). Manifests —
+  and so exposure and scope — are re-read on every call, so turning exposure
+  off takes effect immediately.
 - **`mcpServer.ts`** — the two tool definitions and handlers, delegating to the
   wrapper.
 - **`authoring.ts`** — `draftPrompt` / `changePrompt` gain one rule: "Before
   writing a prompt step, call `list_workspace_skills` for its target; prefer
   invoking an existing skill (`/name args`) over re-describing the task, and
   read it with `get_workspace_skill` when its inputs are unclear."
-- **Renderer** — the switch in the workspace form; preload/manifest types gain
+- **Renderer** — the switch in the workspace form; `InboxConfig` gains
   `exposeSkills`.
 
 Data flow: MCP call (ambient caller id) → scope filter → per-workspace
@@ -156,5 +158,5 @@ copy, them.
 
 ## SPEC.md updates (same PR)
 
-§6/§11 MCP tool surface, §7 manifest field `exposeSkills`, §8 automations
+§6/§11 MCP tool surface, §7 manifest field `inbox.exposeSkills`, §8 automations
 workspace / authoring (the drafting rule), §9 security note.
