@@ -51,3 +51,10 @@ describe('sanitizeInboxConfig', () => {
     expect(sanitizeInboxConfig(null)).toBeUndefined();
   });
 });
+
+describe('sanitizeInboxConfig keeps exposeSkills', () => {
+  it('round-trips a boolean and drops garbage', () => {
+    expect(sanitizeInboxConfig({ exposeSkills: false })).toEqual({ exposeSkills: false });
+    expect(sanitizeInboxConfig({ exposeSkills: 'no' })).toBeUndefined();
+  });
+});

@@ -105,6 +105,8 @@ export interface InboxConfig {
   canReadAll?: boolean;
   /** Phase 5: auto-apply this workspace's low-risk automation edits. Container workspaces only. Default false. */
   trusted?: boolean;
+  /** Let automations list this workspace's skills (list_workspace_skills). Default true. */
+  exposeSkills?: boolean;
 }
 
 // --- Notifications (#407 Phase 2) -------------------------------------------
