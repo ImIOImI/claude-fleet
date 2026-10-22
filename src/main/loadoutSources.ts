@@ -2,6 +2,8 @@
 // source list + per-loadout download provenance in <userData>/loadouts/sources.json,
 // browse a source's index artifact, and download a loadout's artifact into the
 // host-private library. Networking is in ociClient; pure helpers in ociCore.
+// A source may carry a token (vault, never sources.json) for private packages;
+// sources without one fall back to $GH_TOKEN.
 
 import { mkdir, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -10,6 +12,7 @@ import { loadoutsRoot, loadoutDir } from './paths.js';
 import { pullArtifact } from './ociClient.js';
 import { parseIndex, loadoutRefFromSource, type RemoteLoadout } from './ociCore.js';
 import { logError } from './errorLog.js';
+import { getSecret, setSecret, deleteSecret } from './vault.js';
 
 export interface SourcesFile {
   sources: string[];
@@ -22,6 +25,16 @@ function sourcesPath(): string {
 
 function normalizeBase(base: string): string {
   return base.trim().replace(/\/+$/, '');
+}
+
+const SOURCE_VAULT_KEY = 'TOKEN';
+function sourceVaultScope(base: string): string {
+  return `loadout-source:${base}`;
+}
+
+/** Stored per-source token, else $GH_TOKEN. Safe only while ociCore.parseImageRef is ghcr.io-only. */
+async function credentialFor(base: string): Promise<string | undefined> {
+  return (await getSecret(sourceVaultScope(base), SOURCE_VAULT_KEY)) ?? (process.env.GH_TOKEN || undefined);
 }
 
 async function read(): Promise<SourcesFile> {
@@ -43,10 +56,11 @@ async function write(next: SourcesFile): Promise<void> {
 }
 
 /** Pull `<base>/index:latest` into a temp dir, parse + validate index.json. */
-async function pullIndex(base: string): Promise<RemoteLoadout[]> {
+async function pullIndex(base: string, credential?: string): Promise<RemoteLoadout[]> {
   const tmp = await mkdtemp(join(tmpdir(), 'cf-index-'));
   try {
-    await pullArtifact(`${normalizeBase(base)}/index:latest`, tmp);
+    const b = normalizeBase(base);
+    await pullArtifact(`${b}/index:latest`, tmp, { credential: credential ?? (await credentialFor(b)) });
     return parseIndex(await readFile(join(tmp, 'index.json'), 'utf8'));
   } finally {
     await rm(tmp, { recursive: true, force: true });
@@ -59,9 +73,12 @@ export async function listSources(): Promise<string[]> {
   return (await read()).sources;
 }
 
-export async function addSource(base: string): Promise<RemoteLoadout[]> {
+/** Add (or re-add) a source. A non-empty `token` is stored once the index pull succeeds with it. */
+export async function addSource(base: string, token?: string): Promise<RemoteLoadout[]> {
   const b = normalizeBase(base);
-  const index = await pullIndex(b); // validates: throws on a bad/hostile index
+  const t = token?.trim() || undefined;
+  const index = await pullIndex(b, t); // validates: throws on a bad/hostile index
+  if (t) await setSecret(sourceVaultScope(b), SOURCE_VAULT_KEY, t);
   const cur = await read();
   if (!cur.sources.includes(b)) {
     await write({ ...cur, sources: [...cur.sources, b] });
@@ -74,6 +91,7 @@ export async function removeSource(base: string): Promise<void> {
   const b = normalizeBase(base);
   const cur = await read();
   await write({ ...cur, sources: cur.sources.filter((s) => s !== b) });
+  await deleteSecret(sourceVaultScope(b), SOURCE_VAULT_KEY);
   indexCache.delete(b);
 }
 
@@ -114,7 +132,7 @@ export async function provenanceFor(id: string): Promise<{ source: string; versi
 export async function download(source: string, id: string, version?: string): Promise<void> {
   const b = normalizeBase(source);
   const ref = loadoutRefFromSource(b, id, version);
-  await pullArtifact(ref, loadoutDir(id));
+  await pullArtifact(ref, loadoutDir(id), { credential: await credentialFor(b) });
   const cur = await read();
   await write({
     ...cur,

@@ -13,6 +13,8 @@ function fakeGhcr(opts: {
   manifest: object;
   blobs?: Record<string, { body: string; contentLength?: number }>;
   failTokenAuth?: boolean;
+  /** Private repo: the token endpoint 401s unless this Basic credential is sent. */
+  requireBasic?: string;
 }) {
   const manifestJson = JSON.stringify(opts.manifest);
   return vi.fn(async (url: string, init?: RequestInit) => {
@@ -20,6 +22,9 @@ function fakeGhcr(opts: {
     const auth = (init?.headers as Record<string, string> | undefined)?.['Authorization'];
     // Token endpoint.
     if (u.startsWith('https://ghcr.io/token')) {
+      if (opts.requireBasic && auth !== `Basic ${opts.requireBasic}`) {
+        return new Response('denied', { status: 401 });
+      }
       return new Response(JSON.stringify({ token: 'fake-bearer' }), { status: 200 });
     }
     // Manifest: 401 without bearer (triggers the token flow), 200 with it.
@@ -70,6 +75,37 @@ describe('ociClient.fetchAnnotations', () => {
     expect(ann['com.claude-fleet.loadout.id']).toBe('spec-driven');
     // No blob endpoint was hit.
     expect(fetchMock.mock.calls.some((c) => String(c[0]).includes('/blobs/'))).toBe(false);
+  });
+});
+
+describe('ociClient credentials', () => {
+  const basic = Buffer.from('token:ghp_secret').toString('base64');
+  const privateGhcr = () => fakeGhcr({
+    manifest: { annotations: { 'com.claude-fleet.loadout.id': 'spec-driven' }, layers: [layer('sha256:a1', 'loadout.md')] },
+    blobs: { 'sha256:a1': { body: 'TITLE' } },
+    requireBasic: basic
+  });
+
+  it('sends the credential as Basic auth on the token request for a private repo', async () => {
+    vi.stubGlobal('fetch', privateGhcr());
+    const ann = await fetchAnnotations(REF, { credential: 'ghp_secret' });
+    expect(ann['com.claude-fleet.loadout.id']).toBe('spec-driven');
+  });
+
+  it('fails the token request on a private repo without a credential', async () => {
+    vi.stubGlobal('fetch', privateGhcr());
+    await expect(fetchAnnotations(REF)).rejects.toThrow(/token request failed \(HTTP 401\)/);
+  });
+
+  it('pullArtifact uses the credential', async () => {
+    vi.stubGlobal('fetch', privateGhcr());
+    const dest = await mkdtemp(join(tmpdir(), 'oci-pull-'));
+    try {
+      await pullArtifact(REF, dest, { credential: 'ghp_secret' });
+      expect(await readFile(join(dest, 'loadout.md'), 'utf8')).toBe('TITLE');
+    } finally {
+      await rm(dest, { recursive: true, force: true });
+    }
   });
 });
 

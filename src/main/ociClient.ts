@@ -1,5 +1,6 @@
-// Native, zero-dependency OCI pull for public GHCR (loadout-library-v2 Phase 2).
-// No `oras` binary. Anonymous token flow only (public repos). Every layer is
+// Native, zero-dependency OCI pull for GHCR (loadout-library-v2 Phase 2).
+// No `oras` binary. Token flow is anonymous, or Basic-authenticated with a
+// credential (a GitHub token with read:packages) for private repos. Every layer is
 // written through ociCore.safeLayerPath, confined to destDir, with a per-blob
 // size cap — the security spine for pulling untrusted artifacts.
 
@@ -16,6 +17,11 @@ interface OciLayer {
   size?: number;
   annotations?: Record<string, string>;
 }
+export interface PullOptions {
+  /** GitHub token with read:packages, sent as Basic auth to the token endpoint. */
+  credential?: string;
+}
+
 interface OciManifest {
   annotations?: Record<string, string>;
   layers?: OciLayer[];
@@ -27,9 +33,10 @@ function withTimeout(): { signal: AbortSignal; done: () => void } {
   return { signal: c.signal, done: () => clearTimeout(t) };
 }
 
-/** Anonymous bearer via the 401 → WWW-Authenticate → /token flow. `repository`
- *  is the GHCR path after the host (e.g. owner/claude-fleet-loadouts/spec-driven). */
-async function anonToken(repository: string, manifestUrl: string): Promise<string | null> {
+/** Bearer via the 401 → WWW-Authenticate → /token flow, anonymous unless a
+ *  credential is given. `repository` is the GHCR path after the host
+ *  (e.g. owner/claude-fleet-loadouts/spec-driven). */
+async function registryToken(repository: string, manifestUrl: string, credential?: string): Promise<string | null> {
   const { signal, done } = withTimeout();
   try {
     const probe = await fetch(manifestUrl, { headers: { Accept: MANIFEST_ACCEPT }, signal });
@@ -39,7 +46,9 @@ async function anonToken(repository: string, manifestUrl: string): Promise<strin
     const service = /service="([^"]+)"/.exec(www)?.[1] ?? 'ghcr.io';
     const scope = /scope="([^"]+)"/.exec(www)?.[1] ?? `repository:${repository}:pull`;
     const tokenUrl = `${realm}?service=${encodeURIComponent(service)}&scope=${encodeURIComponent(scope)}`;
-    const res = await fetch(tokenUrl, { signal });
+    const headers: Record<string, string> = {};
+    if (credential) headers['Authorization'] = `Basic ${Buffer.from(`token:${credential}`).toString('base64')}`;
+    const res = await fetch(tokenUrl, { headers, signal });
     if (!res.ok) throw new Error(`token request failed (HTTP ${res.status})`);
     const body = (await res.json()) as { token?: string; access_token?: string };
     return body.token ?? body.access_token ?? null;
@@ -48,10 +57,10 @@ async function anonToken(repository: string, manifestUrl: string): Promise<strin
   }
 }
 
-async function fetchManifest(ref: string): Promise<{ manifest: OciManifest; repository: string; token: string | null }> {
+async function fetchManifest(ref: string, opts: PullOptions): Promise<{ manifest: OciManifest; repository: string; token: string | null }> {
   const { registry, repository, tag } = parseImageRef(ref);
   const manifestUrl = `https://${registry}/v2/${repository}/manifests/${tag}`;
-  const token = await anonToken(repository, manifestUrl);
+  const token = await registryToken(repository, manifestUrl, opts.credential);
   const { signal, done } = withTimeout();
   try {
     const headers: Record<string, string> = { Accept: MANIFEST_ACCEPT };
@@ -66,16 +75,16 @@ async function fetchManifest(ref: string): Promise<{ manifest: OciManifest; repo
 
 /** Manifest annotations (the com.claude-fleet.loadout.* + org.opencontainers.* set)
  *  without pulling any blob. */
-export async function fetchAnnotations(ref: string): Promise<Record<string, string>> {
-  const { manifest } = await fetchManifest(ref);
+export async function fetchAnnotations(ref: string, opts: PullOptions = {}): Promise<Record<string, string>> {
+  const { manifest } = await fetchManifest(ref, opts);
   return manifest.annotations ?? {};
 }
 
 /** Pull every layer to destDir, each written at its
  *  org.opencontainers.image.title path via safeLayerPath. Aborts the whole pull
  *  on a traversal title or an over-cap blob. */
-export async function pullArtifact(ref: string, destDir: string): Promise<void> {
-  const { manifest, repository, token } = await fetchManifest(ref);
+export async function pullArtifact(ref: string, destDir: string, opts: PullOptions = {}): Promise<void> {
+  const { manifest, repository, token } = await fetchManifest(ref, opts);
   const { registry } = parseImageRef(ref);
   const layers = manifest.layers ?? [];
   if (!layers.length) throw new Error(`artifact ${ref} has no layers`);

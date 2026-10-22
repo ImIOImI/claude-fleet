@@ -6,12 +6,20 @@ import { tmpdir } from 'node:os';
 let userDataDir = '';
 vi.mock('electron', () => ({ app: { getPath: () => userDataDir } }));
 
+// In-memory vault (the real one needs Electron safeStorage).
+const vaultStore = new Map<string, string>();
+vi.mock('./vault.js', () => ({
+  getSecret: vi.fn(async (scope: string, key: string) => vaultStore.get(`${scope}|${key}`) ?? null),
+  setSecret: vi.fn(async (scope: string, key: string, value: string) => { vaultStore.set(`${scope}|${key}`, value); }),
+  deleteSecret: vi.fn(async (scope: string, key: string) => { vaultStore.delete(`${scope}|${key}`); })
+}));
+
 // Mock the network client; assert sources logic in isolation.
-const pulled: Array<{ ref: string; dest: string }> = [];
+const pulled: Array<{ ref: string; dest: string; credential?: string }> = [];
 vi.mock('./ociClient.js', () => ({
   fetchAnnotations: vi.fn(),
-  pullArtifact: vi.fn(async (ref: string, dest: string) => {
-    pulled.push({ ref, dest });
+  pullArtifact: vi.fn(async (ref: string, dest: string, opts?: { credential?: string }) => {
+    pulled.push({ ref, dest, credential: opts?.credential });
     // Simulate a pulled tree: write a loadout.md (or index.json for the index ref).
     await mkdir(dest, { recursive: true });
     if (ref.endsWith('/index:latest')) {
@@ -30,8 +38,11 @@ const SRC = 'ghcr.io/imioimi/claude-fleet-loadouts';
 beforeEach(async () => {
   userDataDir = await mkdtemp(join(tmpdir(), 'lsrc-'));
   pulled.length = 0;
+  vaultStore.clear();
+  vi.stubEnv('GH_TOKEN', '');
 });
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await rm(userDataDir, { recursive: true, force: true });
   vi.clearAllMocks();
 });
@@ -56,6 +67,40 @@ describe('loadoutSources', () => {
     await sources.download(SRC, 'spec-driven', '1.0.0');
     expect(pulled.some((p) => p.ref === `${SRC}/spec-driven:1.0.0` && p.dest.endsWith('/loadouts/spec-driven'))).toBe(true);
     expect(await sources.provenanceFor('spec-driven')).toMatchObject({ source: SRC, version: '1.0.0' });
+  });
+
+  it('addSource with a token stores it in the vault (not sources.json) and pulls with it', async () => {
+    await sources.addSource(SRC, 'ghp_source');
+    await sources.download(SRC, 'spec-driven', '1.0.0');
+    expect(pulled.map((p) => p.credential)).toEqual(['ghp_source', 'ghp_source']);
+    expect(await readFile(join(userDataDir, 'loadouts', 'sources.json'), 'utf8')).not.toContain('ghp_source');
+  });
+
+  it('falls back to GH_TOKEN when no token is stored', async () => {
+    vi.stubEnv('GH_TOKEN', 'ghp_env');
+    await sources.addSource(SRC);
+    expect(pulled[0].credential).toBe('ghp_env');
+  });
+
+  it('prefers the stored token over GH_TOKEN', async () => {
+    vi.stubEnv('GH_TOKEN', 'ghp_env');
+    await sources.addSource(SRC, 'ghp_source');
+    expect(pulled[0].credential).toBe('ghp_source');
+  });
+
+  it('does not keep the token when the source fails to add', async () => {
+    const client = await import('./ociClient.js');
+    (client.pullArtifact as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('HTTP 401'));
+    await expect(sources.addSource(SRC, 'ghp_bad')).rejects.toThrow(/401/);
+    expect(vaultStore.size).toBe(0);
+  });
+
+  it('removeSource deletes the stored token', async () => {
+    await sources.addSource(SRC, 'ghp_source');
+    await sources.removeSource(SRC);
+    pulled.length = 0;
+    await sources.addSource(SRC);
+    expect(pulled[0].credential).toBeUndefined();
   });
 
   it('allRemote skips a source whose index fails to pull', async () => {
