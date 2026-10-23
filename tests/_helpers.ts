@@ -470,8 +470,8 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
     // add/remove/refresh calls so tests can assert source management flows.
     const sourcesState: string[] = [...(opts.loadoutSources ?? [])];
     ipcMain.handle('loadouts:listSources', () => [...sourcesState]);
-    ipcMain.handle('loadouts:addSource', (_e, base: string) => {
-      g.__calls.addSource.push(base);
+    ipcMain.handle('loadouts:addSource', (_e, base: string, token?: string) => {
+      g.__calls.addSource.push({ base, token });
       if (!sourcesState.includes(base)) sourcesState.push(base);
       return undefined;
     });
