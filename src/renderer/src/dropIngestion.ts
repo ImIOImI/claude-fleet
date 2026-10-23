@@ -125,13 +125,57 @@ export function shouldClaimDragOver(internalActive: boolean): boolean {
   return !internalActive;
 }
 
+// --- Drop-overlay depth state machine -------------------------------------
+// The "Drop to add to this workspace" overlay is shown while `dragging`. A
+// plain boolean flickers off when the cursor crosses between child elements
+// (dragenter on the child fires before dragleave on the parent), so we count
+// depth and only hide at 0. Extracted as pure functions so the stuck-overlay
+// behaviour is unit-testable without a live DragEvent.
+
+export interface OverlayState {
+  depth: number;
+  dragging: boolean;
+}
+
+export const IDLE_OVERLAY: OverlayState = { depth: 0, dragging: false };
+
+/** An external drag entered an element: deepen and show the overlay. */
+export function overlayEntered(s: OverlayState): OverlayState {
+  return { depth: s.depth + 1, dragging: true };
+}
+
+/** A dragleave fired. `leftWindow` is true when the pointer crossed out of the
+ *  window entirely (see {@link dragLeftWindow}) — then we HARD-reset rather
+ *  than decrement. This fixes the stuck overlay: a drag that enters the window
+ *  and ends off-window (dropped on another app) never delivers a balancing
+ *  `drop`, and if depth was > 1 at the edge the lone exit leave would leave it
+ *  pinned on. An intra-window leave (crossing between child elements) just
+ *  decrements, clamped at 0. */
+export function overlayLeft(s: OverlayState, leftWindow: boolean): OverlayState {
+  if (leftWindow) return IDLE_OVERLAY;
+  const depth = Math.max(0, s.depth - 1);
+  return { depth, dragging: depth > 0 };
+}
+
+/** Whether a dragleave's relatedTarget means the drag left the window. In
+ *  Chromium/Electron, relatedTarget is the element the pointer entered — null
+ *  when it exits the window to another app. */
+export function dragLeftWindow(relatedTarget: EventTarget | null): boolean {
+  return relatedTarget === null;
+}
+
 export function useDropIngestion({ workspaceId, notify }: Options): { dragging: boolean } {
   const [dragging, setDragging] = useState(false);
 
   useEffect(() => {
-    // Depth counter so nested dragenter/leave (crossing child elements)
-    // doesn't flicker the overlay off mid-drag.
-    let depth = 0;
+    // Depth-counted overlay state (see the state-machine functions above) so
+    // nested dragenter/leave doesn't flicker the overlay, and a drag that ends
+    // off-window hard-resets instead of sticking on.
+    let overlay = IDLE_OVERLAY;
+    const apply = (next: OverlayState): void => {
+      overlay = next;
+      setDragging(next.dragging);
+    };
 
     const announce = (paths: string[]): void => {
       const joined = paths.join('\n');
@@ -177,12 +221,10 @@ export function useDropIngestion({ workspaceId, notify }: Options): { dragging: 
       // overlay (#147). Genuine file/URL/text drags raise it as before.
       if (!isExternalDrag(e.dataTransfer?.types)) return;
       e.preventDefault();
-      depth++;
-      setDragging(true);
+      apply(overlayEntered(overlay));
     };
-    const onDragLeave = (): void => {
-      depth = Math.max(0, depth - 1);
-      if (depth === 0) setDragging(false);
+    const onDragLeave = (e: DragEvent): void => {
+      apply(overlayLeft(overlay, dragLeftWindow(e.relatedTarget)));
     };
 
     const onDrop = (e: DragEvent): void => {
@@ -192,8 +234,7 @@ export function useDropIngestion({ workspaceId, notify }: Options): { dragging: 
       // the reorder (#147). At drop time dataTransfer.types is fully readable.
       if (!dt || !isExternalDrag(dt.types)) return;
       e.preventDefault();
-      depth = 0;
-      setDragging(false);
+      apply(IDLE_OVERLAY);
       const ws = requireWorkspace();
       if (!ws) return;
 
