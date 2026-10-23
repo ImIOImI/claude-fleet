@@ -1,7 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
+  IDLE_OVERLAY,
+  dragLeftWindow,
   isExternalDrag,
   isInternalDragActive,
+  overlayEntered,
+  overlayLeft,
   reorderDragHandlers,
   setInternalDragActive,
   shouldClaimDragOver
@@ -33,6 +37,56 @@ describe('isExternalDrag', () => {
 
   it('ignores unrelated-only type lists', () => {
     expect(isExternalDrag(['application/x-internal-thing'])).toBe(false);
+  });
+});
+
+describe('drop-overlay depth state machine', () => {
+  // The "Drop to add to this workspace" overlay is driven by a dragenter/
+  // dragleave depth counter. The stuck-overlay bug: a drag that ENTERS the
+  // window (depth>0, overlay shown) and then ends OFF-window — dropped on
+  // another app — doesn't deliver a balancing drop to us, and the lone
+  // boundary dragleave only decremented depth by one. With depth left >0 the
+  // overlay never hid. The window-exit leave (relatedTarget === null in
+  // Chromium/Electron) must hard-reset depth, not just decrement.
+
+  it('shows the overlay once an external drag enters', () => {
+    const s = overlayEntered(IDLE_OVERLAY);
+    expect(s).toEqual({ depth: 1, dragging: true });
+  });
+
+  it('keeps the overlay up across nested child enter/leave (no flicker)', () => {
+    // enter window, enter child, leave old element — depth must stay > 0.
+    let s = overlayEntered(IDLE_OVERLAY); // depth 1
+    s = overlayEntered(s); // crossed into a child: depth 2
+    s = overlayLeft(s, false); // left the parent element: depth 1
+    expect(s.dragging).toBe(true);
+    expect(s.depth).toBe(1);
+  });
+
+  it('hides the overlay when a balanced intra-window leave returns depth to 0', () => {
+    let s = overlayEntered(IDLE_OVERLAY);
+    s = overlayLeft(s, false);
+    expect(s).toEqual({ depth: 0, dragging: false });
+  });
+
+  it('clamps depth at 0 so an unmatched leave never goes negative', () => {
+    const s = overlayLeft(IDLE_OVERLAY, false);
+    expect(s).toEqual({ depth: 0, dragging: false });
+  });
+
+  it('hard-resets when the drag leaves the window, even with depth > 1 (the stuck bug)', () => {
+    // Two unbalanced enters (nested traversal) leave depth at 2 when the drag
+    // reaches the window edge. The single exit leave must clear it fully.
+    let s = overlayEntered(IDLE_OVERLAY);
+    s = overlayEntered(s);
+    expect(s.depth).toBe(2);
+    s = overlayLeft(s, true); // relatedTarget === null: left the window
+    expect(s).toEqual(IDLE_OVERLAY);
+  });
+
+  it('treats a null relatedTarget as leaving the window', () => {
+    expect(dragLeftWindow(null)).toBe(true);
+    expect(dragLeftWindow({} as EventTarget)).toBe(false);
   });
 });
 
