@@ -44,6 +44,9 @@ interface Props {
   waitingSessionIds?: Set<string>;
   /** Claude session UUID → open tab address; drives the Open group (Task 6). */
   openSessions?: Map<string, OpenTabRef>;
+  /** Claude session UUID the focused terminal is showing — gets the "on screen"
+   *  highlight (always one of the open rows, or null). */
+  currentSessionId?: string | null;
   /** Resume a session — App brings the container up, then opens a resume tab. */
   onResume: (item: SessionListItem) => void;
   /** Display prefs (uiPrefs): hide the per-session USD badge. Default show. */
@@ -83,6 +86,7 @@ export function SessionsPane({
   busySessionIds,
   waitingSessionIds,
   openSessions,
+  currentSessionId,
   onResume,
   showSessionCost = true,
   maxSessions = 0,
@@ -217,8 +221,15 @@ export function SessionsPane({
     const busy = busySessionIds?.has(s.id) ?? false;
     const waiting = waitingSessionIds?.has(s.id) ?? false;
     const isOpen = openSessions?.has(s.id) ?? false;
+    const isCurrent = currentSessionId != null && s.id === currentSessionId;
     return (
-      <li key={s.id} ref={rowRef(s.id)} data-sid={s.id} className={`session-row${waiting ? ' waiting' : busy ? ' busy' : ''}${isOpen ? ' open' : ''}`}>
+      <li
+        key={s.id}
+        ref={rowRef(s.id)}
+        data-sid={s.id}
+        aria-current={isCurrent ? 'true' : undefined}
+        className={`session-row${waiting ? ' waiting' : busy ? ' busy' : ''}${isOpen ? ' open' : ''}${isCurrent ? ' current' : ''}`}
+      >
         {(busy || waiting) && <SessionBusyDot waiting={waiting} />}
         <div className="session-row-main">
           {editing ? (
@@ -254,6 +265,7 @@ export function SessionsPane({
                 {s.workspaceName}
               </span>
             )}
+            {isCurrent && <span className="session-row-here">on screen</span>}
             {s.lastActiveAt != null && (
               <span className="session-row-time">{relativeTime(s.lastActiveAt)}</span>
             )}
