@@ -124,6 +124,8 @@ export interface AccessibilityConfig {
 export interface InstalledLoadout {
   id: string;
   title: string;
+  /** The loadout.md `version` at install time (drives Update ↑); absent for unversioned loadouts and older records. */
+  version?: string;
   /** Workspace-relative paths this loadout dropped (deleted on uninstall). */
   files: string[];
   merges?: {

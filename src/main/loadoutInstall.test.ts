@@ -43,6 +43,11 @@ describe('ensureAndInstall', () => {
     expect(installed).toEqual(['seen']);
   });
 
+  it('refuses a not-present loadout with no source instead of failing deep in install', async () => {
+    await expect(ensureAndInstall('ws1', 'remote-only')).rejects.toThrow(/isn't in the local library/);
+    expect(installed).toEqual([]);
+  });
+
   it('asks for confirmation before overwriting a locally-authored loadout (present, no provenance)', async () => {
     await mkdir(loadoutDir('mine'), { recursive: true });
     await writeFile(join(loadoutDir('mine'), 'loadout.md'), '---\ntitle: mine\n---\n');

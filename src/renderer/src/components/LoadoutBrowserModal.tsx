@@ -22,6 +22,7 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
   const [sources, setSources] = useState<string[]>([]);
   const [selectedSources, setSelectedSources] = useState<string[]>([]);
   const [addingSource, setAddingSource] = useState('');
+  const [addingToken, setAddingToken] = useState('');
   const [sourceError, setSourceError] = useState<string | null>(null);
 
   const installable =
@@ -61,8 +62,9 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
     if (!base) return;
     setSourceError(null);
     try {
-      await window.api.loadouts.addSource(base);
+      await window.api.loadouts.addSource(base, addingToken.trim() || undefined);
       setAddingSource('');
+      setAddingToken('');
       await reloadSources();
       await reload();
     } catch (err) {
@@ -148,6 +150,14 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
                   placeholder="ghcr.io/owner/repo"
                   value={addingSource}
                   onChange={(e) => setAddingSource(e.target.value)}
+                />
+                <input
+                  type="password"
+                  placeholder="token (optional, read:packages)"
+                  title="For private packages. Without one, the app's $GH_TOKEN is used."
+                  autoComplete="off"
+                  value={addingToken}
+                  onChange={(e) => setAddingToken(e.target.value)}
                 />
                 <button type="button" onClick={() => void addSource()}>+ Add</button>
               </div>

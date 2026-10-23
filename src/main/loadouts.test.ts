@@ -34,6 +34,16 @@ afterEach(async () => {
   await rm(userDataDir, { recursive: true, force: true });
 });
 
+describe('listLoadouts', () => {
+  it('skips hidden download staging dirs a crash left behind', async () => {
+    for (const d of ['real', '.pull-real-ab12cd34', '.old-real-ab12cd34']) {
+      await mkdir(join(userDataDir, 'loadouts', d), { recursive: true });
+      await writeFile(join(userDataDir, 'loadouts', d, 'loadout.md'), '---\ntitle: Real\n---\n', 'utf8');
+    }
+    expect((await listLoadouts()).map((l) => l.id)).toEqual(['real']);
+  });
+});
+
 describe('ensureBuiltinLoadouts', () => {
   it('seeds the built-in starters, including the loadout-author skill', async () => {
     await ensureBuiltinLoadouts();
@@ -96,7 +106,7 @@ describe('install / uninstall with the full apply model (files + merges)', () =>
     // Author a loadout exercising every apply path.
     const ld = loadoutDir('test-merge');
     await mkdir(join(ld, 'skills', 'demo'), { recursive: true });
-    await writeFile(join(ld, 'loadout.md'), '---\ntitle: Test Merge\n---\nbody', 'utf8');
+    await writeFile(join(ld, 'loadout.md'), '---\ntitle: Test Merge\nversion: 1.3.0\n---\nbody', 'utf8');
     await writeFile(join(ld, 'skills', 'demo', 'SKILL.md'), '# demo', 'utf8');
     await writeFile(join(ld, 'CLAUDE.md'), 'rule line', 'utf8');
     await writeFile(join(ld, 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: 'x' } }), 'utf8');
@@ -122,7 +132,8 @@ describe('install / uninstall with the full apply model (files + merges)', () =>
     expect(s.statusLine).toBeDefined();
     expect(s.hooks.PreToolUse).toHaveLength(1);
     expect(JSON.parse(await readFile(join(priv, '.mcp.json'), 'utf8')).mcpServers.demo).toBeDefined();
-    expect((await readWorkspaceManifest(wsId))?.installedLoadouts?.[0].id).toBe('test-merge');
+    expect((await readWorkspaceManifest(wsId))?.installedLoadouts?.[0]).toMatchObject({ id: 'test-merge', version: '1.3.0' });
+    expect((await listLoadouts()).find((l) => l.id === 'test-merge')?.version).toBe('1.3.0');
 
     await uninstallLoadout(wsId, 'test-merge');
     expect(await present(join(priv, '.claude/skills/demo/SKILL.md'))).toBe(false);

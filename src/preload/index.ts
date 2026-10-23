@@ -569,9 +569,10 @@ const api = {
       ipcRenderer.invoke('loadouts:setFavorite', id, on),
     listSources: (): Promise<string[]> => ipcRenderer.invoke('loadouts:listSources'),
     addSource: (
-      base: string
+      base: string,
+      token?: string
     ): Promise<Array<{ id: string; title: string; description: string; tags: string[]; version: string }>> =>
-      ipcRenderer.invoke('loadouts:addSource', base),
+      ipcRenderer.invoke('loadouts:addSource', base, token),
     removeSource: (base: string): Promise<void> => ipcRenderer.invoke('loadouts:removeSource', base),
     refreshSource: (
       base: string

@@ -115,9 +115,11 @@ export function LibraryPane({ selectedWorkspace, onChanged, onInstalled, onBrows
       return next;
     });
 
-  const doInstall = async (id: string): Promise<void> => {
+  const doInstall = async (e: Entry): Promise<void> => {
     if (!selectedWorkspace || !installable) return;
-    await window.api.loadouts.install(selectedWorkspace.id, id);
+    // A remote-only loadout has to be pulled from a source first.
+    const remote = !e.present && e.sources[0] ? { source: e.sources[0], version: e.remoteVersion } : undefined;
+    await window.api.loadouts.install(selectedWorkspace.id, e.id, remote);
     onChanged();
     onInstalled?.(selectedWorkspace.id);
     void reload();
@@ -297,7 +299,7 @@ export function LibraryPane({ selectedWorkspace, onChanged, onInstalled, onBrows
                     <button
                       className="btn primary btn-sm"
                       disabled={!installable}
-                      onClick={() => void doInstall(e.id)}
+                      onClick={() => void doInstall(e)}
                     >
                       + Install
                     </button>
