@@ -16,6 +16,7 @@ triggers:                            # one or more
   - event: { on: session.idle | workspace.started | todo.created, workspace: name, tag: ops, debounce: 2m }
 concurrency: skip | queue
 timeout: 30m
+reschedule: { min: 30m }             # optional: runs may pick the next run time (never sooner than min after a run ends); a cron is then optional
 params:
   - { name: since, type: string | number | boolean | enum, default: "1h", values: [a, b], required: true, description: … }
 steps:                               # 1–10, run in order
@@ -35,6 +36,7 @@ steps:                               # 1–10, run in order
         curl -s -H "Authorization: Bearer $WEBEX_TOKEN" "https://…" > msgs.json   # ARG_<NAME>, FLEET_ARGS, FLEET_STATE, FLEET_TRIGGER
         fleet-emit todo "Reply to Ana" --key webex:123 --priority high --tag webex   # → inbox todo
         fleet-emit state '{"since": "2026-10-20T09:00:00Z"}'                         # → $FLEET_STATE next run
+        fleet-emit next 4h                           # with reschedule: run next in 4h (prompt steps: schedule_next with run_id)
         # exit 10 = nothing to do (stops the run quietly); other non-zero = failure
       secrets: [WEBEX_TOKEN]         # from the automations workspace's secrets
       runIn: host                    # optional: this computer (shell: one of the shells listed below); always needs approval
@@ -61,6 +63,7 @@ const RULES = [
   'Prefer mode: fresh for anything scheduled or event-driven, and list only the extra allowedTools it truly needs.',
   'Have the prompt tell the worker to use a dedupe key per distinct problem and to pass run_id, so repeats update one todo.',
   'Keep schedules no faster than every 5 minutes unless the request says otherwise.',
+  'When how soon to check again depends on what a run finds, add reschedule: { min } and have the run set its next time (fleet-emit next / schedule_next); keep a slow cron as a safety net unless asked not to.',
   'Never put secrets in the YAML. Prefer a container script over runIn: host unless the task needs this computer.'
 ].join('\n');
 

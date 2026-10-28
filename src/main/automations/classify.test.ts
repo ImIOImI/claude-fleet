@@ -70,3 +70,20 @@ describe('script steps (#407 Phase 7)', () => {
     expect(riskFlags(scripted({}), name)[0]).toBe('runs a script in the automations workspace');
   });
 });
+
+describe('reschedule (#437)', () => {
+  const r30 = with_({ reschedule: { min: '30m' } });
+  it('adding it, lowering the floor, or dropping the last schedule needs the user', () => {
+    expect(classifyChange(base, r30, name).reasons).toEqual(['sets its own next run (no sooner than 30m)']);
+    expect(classifyChange(r30, with_({ reschedule: { min: '10m' } }), name).reasons).toEqual(['lets it set its next run sooner (30m → 10m)']);
+    expect(classifyChange(r30, with_({ reschedule: { min: '30m' }, triggers: [{ manual: { allowFrom: ['W2'] } }] }), name).reasons)
+      .toEqual(['drops its schedule (it then runs only when a run reschedules it, by hand or on an event)']);
+  });
+  it('raising the floor or removing reschedule is low-risk', () => {
+    expect(classifyChange(r30, with_({ reschedule: { min: '2h' } }), name).lowRisk).toBe(true);
+    expect(classifyChange(r30, base, name).lowRisk).toBe(true);
+  });
+  it('is flagged on approval cards', () => {
+    expect(riskFlags(r30, name)).toContain('sets its own next run (no sooner than 30m)');
+  });
+});

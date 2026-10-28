@@ -6,16 +6,25 @@
 #   fleet-emit todo "Reply to Ana" [--key K] [--priority low|normal|high|urgent] [--body B] [--tag T]... [--notify]
 #   fleet-emit notify "Token expires tomorrow" [--key K] [--priority P] [--body B] [--tag T]...
 #   fleet-emit state '{"cursor": 42}'          # any JSON; read it back next run from $FLEET_STATE
+#   fleet-emit next 4h | fleet-emit next --at 2026-10-29T09:00:00Z   # run next then (needs reschedule: { min })
 #   exit 10                                    # (in your script) = nothing to do; stops the run quietly
 set -euo pipefail
 
-usage() { sed -n '5,9p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '5,10p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 [ $# -ge 2 ] || usage
 kind=$1; shift
 
 case "$kind" in
   state)
     printf '%s' "$1" | jq -ce '{state: .}' || { echo "fleet-emit: state must be valid JSON" >&2; exit 2; }
+    exit 0 ;;
+  next)
+    if [ "$1" = "--at" ]; then
+      [ $# -ge 2 ] || usage
+      jq -nc --arg at "$2" '{next: {at: $at}}'
+    else
+      jq -nc --arg in "$1" '{next: {in: $in}}'
+    fi
     exit 0 ;;
   todo|notify) ;;
   *) usage ;;

@@ -38,6 +38,12 @@ describe('scriptEnv', () => {
       FLEET_TRIGGER: '{"kind":"manual"}', ARG_ROOM: 'ops', ARG_LIMIT: '5', WEBEX_TOKEN: 's3cret'
     });
   });
+  it('keeps the last {"next": …} request (#437)', () => {
+    const r = parseScriptOutput('{"next": {"in": "1h"}}\n{"next": {"at": "2026-10-29T09:00:00Z"}}\nok');
+    expect(r.next).toEqual({ at: '2026-10-29T09:00:00Z' });
+    expect(r.text).toBe('ok');
+    expect(parseScriptOutput('ok').next).toBeUndefined();
+  });
   it('tail keeps the last lines', () => {
     expect(tail('a\nb\nc\nd\ne\nf\n', 2)).toBe('e\nf');
   });

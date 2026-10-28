@@ -265,12 +265,14 @@ export interface AutomationDef {
   concurrency?: 'skip' | 'queue';
   timeout?: string;
   params?: ParamDef[];
+  /** Runs may set their own next fire (#437), never sooner than `min` after the run ends. */
+  reschedule?: { min: string };
   steps: StepDef[];
 }
 
 export type RunStatus =
   | 'queued' | 'running' | 'succeeded' | 'nothing-to-do' | 'failed' | 'timed-out' | 'skipped' | 'cancelled' | 'interrupted';
-export type RunTriggerKind = 'schedule' | 'manual' | 'catch-up' | 'event';
+export type RunTriggerKind = 'schedule' | 'manual' | 'catch-up' | 'event' | 'rescheduled';
 
 export interface StepRunRow {
   id: number;
@@ -297,6 +299,8 @@ export interface RunRow {
   endedAt: number | null;
   error: string | null;
   steps: StepRunRow[];
+  /** A next fire this run requested (#437): `appliedAt` is null when the run's outcome discarded it. */
+  reschedule?: { requestedAt: number; appliedAt: number | null; clamped: boolean; by: string; reason?: string };
 }
 
 export interface Automation {
@@ -312,6 +316,8 @@ export interface Automation {
   updatedAt: number;
   lastScheduledAt: number | null;
   nextFireAt: number | null;
+  /** The next fire was chosen by this run (#437), not the cron. */
+  nextSetByRun: string | null;
   lastRun: RunRow | null;
   weekStats: { runs: number; nothingToDo: number; failed: number };
   /** One plain-language line per trigger ("every 30 min · 08–18 · weekdays", "by hand"). */

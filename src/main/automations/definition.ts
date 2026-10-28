@@ -24,12 +24,30 @@ export const MAX_SCRIPT_CHARS = 20_000;
 export const DEFAULT_RUN_TIMEOUT_MS = 30 * 60_000;
 export const DEFAULT_STEP_TIMEOUT_MS = 10 * 60_000;
 
-/** "90s" | "10m" | "2h" → ms, or null. */
+const UNIT_MS: Record<string, number> = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
+
+/** "90s" | "10m" | "2h" | "1d" → ms, or null. */
 export function parseDuration(v: unknown): number | null {
   if (typeof v !== 'string') return null;
-  const m = /^(\d+)\s*(s|m|h)$/.exec(v.trim());
+  const m = /^(\d+)\s*(s|m|h|d)$/.exec(v.trim());
   if (!m) return null;
-  return Number(m[1]) * (m[2] === 's' ? 1000 : m[2] === 'm' ? 60_000 : 3_600_000);
+  return Number(m[1]) * UNIT_MS[m[2]];
+}
+
+/** A run may set its next fire no sooner than this after it ends (#437). */
+export const MIN_RESCHEDULE_FLOOR_MS = 5 * 60_000;
+const MAX_RESCHEDULE_FLOOR_MS = 30 * 86_400_000;
+
+function validateReschedule(raw: unknown, errors: string[]): AutomationDef['reschedule'] {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) { errors.push('reschedule: a mapping like { min: 30m }'); return undefined; }
+  const min = (raw as Record<string, unknown>).min;
+  const ms = parseDuration(min);
+  if (ms === null || ms < MIN_RESCHEDULE_FLOOR_MS || ms > MAX_RESCHEDULE_FLOOR_MS) {
+    errors.push('reschedule.min: the soonest a run may schedule the next one, between 5m and 30d, like "30m"');
+    return undefined;
+  }
+  return { min: String(min).trim() };
 }
 
 export interface ResolveCtx {
@@ -293,6 +311,7 @@ export function validateDefinition(raw: unknown, ctx: ResolveCtx): Validation<Au
   const params = validateParams(o.params, errors);
   const triggers = validateTriggers(o.triggers, params, ctx, errors);
   const steps = validateSteps(o.steps, params, ctx, errors);
+  const reschedule = validateReschedule(o.reschedule, errors);
   if (errors.length) return { ok: false, errors };
   const def: AutomationDef = {
     name: o.name as string,
@@ -302,6 +321,7 @@ export function validateDefinition(raw: unknown, ctx: ResolveCtx): Validation<Au
     concurrency: o.concurrency === 'queue' ? 'queue' : 'skip',
     ...(typeof o.timeout === 'string' ? { timeout: o.timeout.trim() } : {}),
     ...(params.length ? { params } : {}),
+    ...(reschedule ? { reschedule } : {}),
     steps
   };
   return { ok: true, value: def };

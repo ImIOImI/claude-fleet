@@ -33,10 +33,14 @@ export interface RunnerDeps {
   /** Post what a script printed. Throws on invalid input (recorded as a step warning). */
   emitTodo?(automationId: string, runId: string, input: Record<string, unknown>): Promise<void>;
   emitNotify?(automationId: string, runId: string, input: Record<string, unknown>): Promise<void>;
+  /** A `{"next": …}` request (#437). Throws on invalid input (recorded as a step warning). */
+  requestNext?(runId: string, raw: unknown, by: string): unknown;
 }
 
 /** Tools an unattended fresh session may always use: posting back to the inbox. */
 export const INBOX_TOOLS = ['post_todo', 'update_todo', 'list_todos', 'notify', 'list_automations'].map((t) => `mcp__claude-fleet-state__${t}`);
+/** Added for automations that may set their own next run (#437). */
+export const SCHEDULE_NEXT_TOOL = 'mcp__claude-fleet-state__schedule_next';
 const FRESH_POLL_MS = 2000;
 const DEFAULT_SCRIPT_TIMEOUT_MS = 5 * 60_000;
 
@@ -130,6 +134,9 @@ async function runScriptStep(
       try { await deps.emitNotify?.(a.id, run.id, n); notes++; } catch (e) { warnings.push(`notify "${String(n.title ?? '')}": ${(e as Error).message}`); }
     }
     if (out.state !== undefined) deps.store.setState(a.id, out.state);
+    if (out.next !== undefined) {
+      try { deps.requestNext?.(run.id, out.next, step.id); } catch (e) { warnings.push(`next: ${(e as Error).message}`); }
+    }
   }
   const detail = {
     via: host ? `host:${sc.shell}` : 'container', exitCode: res.exitCode, todos, notifications: notes,
@@ -193,7 +200,7 @@ export async function executeRun(deps: RunnerDeps, a: AutomationRecord, run: Run
       const stepTimeout = Math.min(parseDuration(p.timeout) ?? DEFAULT_STEP_TIMEOUT_MS, runTimeout - (deps.now() - started));
       if (p.mode === 'fresh') {
         const sessionId = `auto-${run.id}-${step.id}`;
-        const tools = [...INBOX_TOOLS, ...(p.allowedTools ?? [])];
+        const tools = [...INBOX_TOOLS, ...(a.definition.reschedule ? [SCHEDULE_NEXT_TOOL] : []), ...(p.allowedTools ?? [])];
         await deps.spawnFresh(p.workspace, sessionId, ['-p', text, '--allowedTools', tools.join(',')]);
         try {
           await waitFresh(deps, p.workspace, sessionId, stepTimeout);

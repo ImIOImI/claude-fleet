@@ -9,6 +9,7 @@ import { definitionToYaml, parseDefinitionText, parseDuration, stepWorkspaces, v
 import { executeRun, type RunnerDeps, type RunOutcome } from './runner.js';
 import { dueSchedule, nextFireAt } from './scheduler.js';
 import { describeCron } from './cron.js';
+import { applyFloor, parseNextRequest } from './reschedule.js';
 
 export interface AutomationDeps extends Omit<RunnerDeps, 'store'> {
   /** Shells this computer offers for host steps (#407); validation checks `shell` against them. */
@@ -51,7 +52,7 @@ export interface RunRequest {
 export function createAutomationService(deps: AutomationDeps) {
   const { store } = deps;
   /** runId → automation + the workspaces its steps target (attribution). */
-  const active = new Map<string, { automationId: string; workspaces: Set<string> }>();
+  const active = new Map<string, { automationId: string; workspaces: Set<string>; next?: { at: number; by: string } }>();
   const lastStart = new Map<string, number>();
   const inFlight = new Set<Promise<unknown>>();
   const lastEnded = new Map<string, number>();
@@ -67,6 +68,7 @@ export function createAutomationService(deps: AutomationDeps) {
       id: a.id, name: a.name, description: a.definition.description ?? null, enabled: a.enabled, version: a.version,
       definition: a.definition, tags: store.tags(a.id), createdBy: a.createdBy, createdAt: a.createdAt, updatedAt: a.updatedAt,
       lastScheduledAt: a.lastScheduledAt, nextFireAt: nextFireAt(a, now), lastRun: store.runs(a.id, 1)[0] ?? null,
+      nextSetByRun: a.enabled && a.nextRunAt !== null ? a.nextRunBy : null,
       weekStats: store.weekStats(a.id, now),
       origin: a.origin && typeof a.origin.loadoutId === 'string'
         ? { loadoutId: a.origin.loadoutId, version: typeof a.origin.version === 'string' ? a.origin.version : null, workspaceId: String(a.origin.workspaceId ?? ''), edited: a.version > Number(a.origin.installedVersion ?? a.version) }
@@ -102,18 +104,50 @@ export function createAutomationService(deps: AutomationDeps) {
     void run;
   }
 
+  /** A live run asks to fire next at a time (#437); the last request wins, applied when the run ends. */
+  function requestNext(runId: string, raw: unknown, by: string): { requestedAt: number; min: string } {
+    const r = active.get(runId);
+    if (!r) throw new Error('that run has ended');
+    const a = store.get(r.automationId);
+    const min = a?.definition.reschedule?.min;
+    if (!a || !min) throw new Error(`${a?.name ?? 'this automation'} can't set its next run: add reschedule: { min: 30m } to its definition`);
+    const p = parseNextRequest(raw, deps.now());
+    if (!p.ok) throw new Error(p.error);
+    r.next = { at: p.at, by };
+    return { requestedAt: p.at, min };
+  }
+
+  /** At run end: apply the last request if the run went well and the automation is unchanged. */
+  function settleNext(a: AutomationRecord, run: RunRow, outcome: RunOutcome, next: { at: number; by: string } | undefined): void {
+    if (!next) return;
+    const now = deps.now();
+    const cur = store.get(a.id);
+    const floorMs = parseDuration(cur?.definition.reschedule?.min);
+    const ok = outcome.status === 'succeeded' || outcome.status === 'nothing-to-do';
+    const unchanged = cur !== null && cur.enabled && cur.version === a.version && floorMs !== null;
+    if (!ok || !unchanged) {
+      store.setRunReschedule(run.id, { requestedAt: next.at, appliedAt: null, clamped: false, by: next.by, reason: ok ? 'the automation was changed or disabled during the run' : `the run ${outcome.status === 'timed-out' ? 'timed out' : 'failed'}` });
+      return;
+    }
+    const applied = applyFloor(next.at, now, floorMs);
+    store.setNextRun(a.id, applied.at, run.id);
+    store.setRunReschedule(run.id, { requestedAt: next.at, appliedAt: applied.at, clamped: applied.clamped, by: next.by });
+  }
+
   async function execute(a: AutomationRecord, run: RunRow, callerSupplied: boolean): Promise<void> {
     active.set(run.id, { automationId: a.id, workspaces: new Set(stepWorkspaces(a.definition)) });
     deps.changed();
     let outcome: RunOutcome;
     try {
-      outcome = await executeRun(deps as RunnerDeps, a, run, { callerSupplied });
+      outcome = await executeRun({ ...deps, requestNext } as RunnerDeps, a, run, { callerSupplied });
     } catch (e) {
       outcome = { status: 'failed', error: e instanceof Error ? e.message : String(e) };
     }
+    const next = active.get(run.id)?.next;
     active.delete(run.id);
     lastEnded.set(a.id, deps.now());
     store.setRunStatus(run.id, outcome.status, deps.now(), outcome.error);
+    settleNext(a, run, outcome, next);
     if (outcome.status === 'failed' || outcome.status === 'timed-out') failed(a, run, outcome);
     deps.changed();
     // A queued run waits for this one.
@@ -201,10 +235,11 @@ export function createAutomationService(deps: AutomationDeps) {
         const due = dueSchedule(a, now);
         if (!due) continue;
         store.setLastScheduled(a.id, now);
+        if (due.kind === 'rescheduled') store.setNextRun(a.id, null);
         try {
-          started.push(start(a.id, { kind: due.catchUp ? 'catch-up' : 'schedule', cron: due.trigger.cron, args: due.args }));
+          started.push(start(a.id, { kind: due.kind, ...(due.cron ? { cron: due.cron } : {}), args: due.args }));
         } catch (e) {
-          const run = store.startRun(a, { kind: 'schedule', cron: due.trigger.cron }, {}, 'failed', now, (e as Error).message);
+          const run = store.startRun(a, { kind: due.kind, ...(due.cron ? { cron: due.cron } : {}) }, {}, 'failed', now, (e as Error).message);
           failed(a, run, { status: 'failed', error: (e as Error).message });
           started.push(run);
         }
@@ -321,6 +356,18 @@ export function createAutomationService(deps: AutomationDeps) {
           .filter((r) => (!status || r.status === status) && r.startedAt >= since)
           .sort((x, y) => y.startedAt - x.startedAt)
           .slice(0, limit);
+      },
+      /** schedule_next (#437): a workspace a live run prompted picks that automation's next fire. */
+      scheduleNext(callerId: string, args: Record<string, unknown>): { requestedAt: string; note: string } {
+        const runId = typeof args.run_id === 'string' ? args.run_id : '';
+        const r = active.get(runId);
+        if (!r || !r.workspaces.has(callerId)) throw new Error('not permitted: run_id must be a live run of an automation that prompted this workspace');
+        const raw = { ...(args.in !== undefined ? { in: args.in } : {}), ...(args.at !== undefined ? { at: args.at } : {}) };
+        const res = requestNext(runId, raw, deps.workspaceName(callerId));
+        return {
+          requestedAt: new Date(res.requestedAt).toISOString(),
+          note: `applied when the run ends successfully, never sooner than ${res.min} after it ends; a later request in this run replaces it`
+        };
       },
       run(callerId: string, args: Record<string, unknown>, privileged = false): { runId: string; status: string } {
         const id = typeof args.id === 'string' ? args.id : '';

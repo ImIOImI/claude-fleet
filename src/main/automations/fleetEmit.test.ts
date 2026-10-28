@@ -22,6 +22,10 @@ describe.runIf(process.platform !== 'win32' && has('jq'))('fleet-emit', () => {
     expect(p.state).toEqual({ cursor: 42 });
     expect(p.text).toBe('');
   });
+  it('emits a next-run request (#437)', () => {
+    expect(parseScriptOutput(run('next', '4h')).next).toEqual({ in: '4h' });
+    expect(parseScriptOutput(run('next', '--at', '2026-10-29T09:00:00Z')).next).toEqual({ at: '2026-10-29T09:00:00Z' });
+  });
   it('rejects bad priorities and bad state JSON', () => {
     expect(spawnSync('bash', [SCRIPT, 'todo', 'x', '--priority', 'meh']).status).toBe(2);
     expect(spawnSync('bash', [SCRIPT, 'state', '{nope']).status).toBe(2);

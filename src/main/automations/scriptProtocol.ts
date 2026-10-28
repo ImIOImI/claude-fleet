@@ -5,6 +5,7 @@
 //   {"todo": {title, key?, priority?, body?, tags?}}  → an inbox todo
 //   {"notify": {title, body?, priority?, key?}}       → a notification
 //   {"state": <any JSON>}                             → saved for the next run
+//   {"next": {in: "4h"} | {at: "<ISO>"}}              → when to run next (#437; last wins)
 // Other lines are plain output ({{steps.<id>.stdout}}). Exit 0 continues, 10
 // stops the run as "nothing to do", anything else fails it.
 import type { ParamValue } from '../../preload/inboxTypes.js';
@@ -20,6 +21,8 @@ export interface ScriptEmits {
   notifies: Array<Record<string, unknown>>;
   /** undefined = the script didn't write state (keep the old one). */
   state?: unknown;
+  /** The last `{"next": …}` request, unvalidated (the runner checks it). */
+  next?: unknown;
   text: string;
   warnings: string[];
 }
@@ -41,6 +44,10 @@ export function parseScriptOutput(stdout: string): ScriptEmits {
         const list = keys[0] === 'todo' ? out.todos : out.notifies;
         if (out.todos.length + out.notifies.length >= MAX_EMITS_PER_STEP) { dropped++; continue; }
         list.push(body as Record<string, unknown>);
+        continue;
+      }
+      if (keys.length === 1 && keys[0] === 'next') {
+        out.next = o.next;
         continue;
       }
       if (keys.length === 1 && keys[0] === 'state') {
