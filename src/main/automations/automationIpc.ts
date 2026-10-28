@@ -196,6 +196,7 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     run: async (callerId, args) => { await refresh(); return svc.mcp.run(callerId, args, privileged(callerId)); },
     get: async (callerId, args) => { await refresh(); return svc.mcp.get(callerId, args, privileged(callerId)); },
     listRuns: async (callerId, args) => { await refresh(); return svc.mcp.listRuns(callerId, args, privileged(callerId)); },
+    scheduleNext: async (callerId, args) => { await refresh(); return svc.mcp.scheduleNext(callerId, args); },
     propose: async (callerId, args) => { await refresh(); return proposals.mcp.propose(callerId, args); },
     proposeChange: async (callerId, args) => { await refresh(); return proposals.mcp.proposeChange(callerId, args); },
     getProposal: async (callerId, args) => proposals.mcp.get(callerId, args)

@@ -92,8 +92,8 @@ describe('scheduler', () => {
     const store = new AutomationStore(inbox.db);
     const a = store.create(def({ triggers: [{ schedule: { cron: '*/30 * * * *', args: { since: '3h' } } }] }), USER, at(10, 5));
     expect(dueSchedule(store.get(a.id)!, at(10, 20))).toBeNull();
-    expect(dueSchedule(store.get(a.id)!, at(10, 30))).toMatchObject({ slot: at(10, 30), catchUp: false, args: { since: '3h' } });
-    expect(dueSchedule(store.get(a.id)!, at(14, 0))).toMatchObject({ slot: at(10, 30), catchUp: true });
+    expect(dueSchedule(store.get(a.id)!, at(10, 30))).toMatchObject({ slot: at(10, 30), kind: 'schedule', args: { since: '3h' } });
+    expect(dueSchedule(store.get(a.id)!, at(14, 0))).toMatchObject({ slot: at(10, 30), kind: 'catch-up' });
     store.setLastScheduled(a.id, at(14, 0));
     expect(dueSchedule(store.get(a.id)!, at(14, 10))).toBeNull();
     expect(nextFireAt(store.get(a.id)!, at(14, 10))).toBe(at(14, 30));

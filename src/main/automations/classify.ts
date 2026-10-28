@@ -4,9 +4,11 @@
 // every 5 minutes, removing steps or triggers. Everything that widens what an
 // automation can touch, or how often, needs the user. Script steps (Phase 7):
 // any new or changed script, runIn, shell or secret needs the user, and an
-// automation with a host step is never low-risk.
+// automation with a host step is never low-risk. Reschedule (#437): adding it,
+// lowering its floor, or dropping every schedule while it is on needs the user.
 import type { AutomationDef, PromptStepDef, ScriptStepDef, StepDef, TriggerDef } from '../../preload/inboxTypes.js';
 import { nextFire, parseCron } from './cron.js';
+import { parseDuration } from './definition.js';
 
 export const MIN_LOW_RISK_INTERVAL_MS = 5 * 60_000;
 
@@ -63,9 +65,18 @@ export function riskFlags(def: AutomationDef, name: (id: string) => string): str
   }
   const iv = minScheduleInterval(def);
   if (iv !== null) flags.push(`runs ${every(iv)}`);
+  if (def.reschedule) flags.push(rescheduleFlag(def.reschedule.min));
   for (const t of def.triggers) if ('event' in t) flags.push(`runs on ${t.event.on}${t.event.tag ? ` #${t.event.tag}` : ''}`);
   for (const t of def.triggers) if ('manual' in t && t.manual.allowFrom?.length) flags.push(`runnable by ${t.manual.allowFrom.map(name).join(', ')}`);
   return [...new Set(flags)];
+}
+
+function rescheduleFlag(min: string): string {
+  return `sets its own next run (no sooner than ${min})`;
+}
+
+function hasSchedule(def: AutomationDef): boolean {
+  return def.triggers.some((t) => 'schedule' in t);
 }
 
 function allowFrom(ts: TriggerDef[]): Set<string> {
@@ -116,6 +127,13 @@ export function classifyChange(before: AutomationDef | null, after: AutomationDe
   const oldIv = minScheduleInterval(before);
   if (iv !== null && iv < MIN_LOW_RISK_INTERVAL_MS && (oldIv === null || iv < oldIv)) reasons.push(`runs ${every(iv)} (faster than every 5 min)`);
   if (iv !== null && oldIv === null && !reasons.some((r) => r.startsWith('runs '))) reasons.push(`adds a schedule (${every(iv)})`);
+  if (after.reschedule) {
+    if (!before.reschedule) reasons.push(rescheduleFlag(after.reschedule.min));
+    else if ((parseDuration(after.reschedule.min) ?? 0) < (parseDuration(before.reschedule.min) ?? 0)) {
+      reasons.push(`lets it set its next run sooner (${before.reschedule.min} → ${after.reschedule.min})`);
+    }
+    if (hasSchedule(before) && !hasSchedule(after)) reasons.push('drops its schedule (it then runs only when a run reschedules it, by hand or on an event)');
+  }
   if (after.steps.some((s) => isScript(s) && s.script.runIn === 'host') && !reasons.some((r) => r.includes('your computer'))) {
     reasons.push('has a step that runs on your computer');
   }

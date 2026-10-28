@@ -150,6 +150,7 @@ export interface AutomationHandlers {
   getProposal(callerId: string, args: Record<string, unknown>): Promise<unknown>;
   get(callerId: string, args: Record<string, unknown>): Promise<unknown>;
   listRuns(callerId: string, args: Record<string, unknown>): Promise<unknown>;
+  scheduleNext(callerId: string, args: Record<string, unknown>): Promise<unknown>;
 }
 let automationHandlers: AutomationHandlers | null = null;
 export function setAutomationHandlers(h: AutomationHandlers | null): void {
@@ -1530,6 +1531,23 @@ export const TOOLS: Tool[] = [
     run: (_db, a, ctx) => {
       if (!automationHandlers) throw new Error('automations are unavailable');
       return automationHandlers.run(ctx.callerId, a);
+    }
+  },
+  {
+    name: 'schedule_next',
+    description:
+      'Choose when the automation that prompted you runs next (only automations whose definition has reschedule: { min }). ' +
+      'Args: run_id (required, the run that prompted you), and exactly one of in (a duration like "45m", "4h", "2d") or at (an ISO time). ' +
+      'Applied when the run ends successfully, never sooner than the approved min after it ends; it replaces the cron until it fires. ' +
+      'The last request in a run wins. Returns {requestedAt, note}.',
+    inputSchema: {
+      type: 'object',
+      properties: { run_id: { type: 'string' }, in: { type: 'string' }, at: { type: 'string' } },
+      required: ['run_id']
+    },
+    run: (_db, a, ctx) => {
+      if (!automationHandlers) throw new Error('automations are unavailable');
+      return automationHandlers.scheduleNext(ctx.callerId, a);
     }
   },
   {

@@ -18,11 +18,25 @@ export function runTone(s: RunStatus): 'ok' | 'idle' | 'bad' | 'warn' {
 
 export function nextLabel(a: Automation, now = Date.now()): string {
   if (!a.enabled) return 'disabled';
-  if (a.nextFireAt === null) return 'by hand only';
-  const mins = Math.round((a.nextFireAt - now) / 60_000);
+  if (a.nextFireAt === null) return a.definition.reschedule ? 'not scheduled (until a run sets a time)' : 'by hand only';
+  const when = clockLabel(a.nextFireAt, now);
+  return a.nextSetByRun ? `${when} (set by a run)` : when;
+}
+
+function clockLabel(at: number, now: number): string {
+  const mins = Math.round((at - now) / 60_000);
   if (mins < 60) return `in ${Math.max(mins, 1)}m`;
-  const sameDay = new Date(a.nextFireAt).toDateString() === new Date(now).toDateString();
-  return sameDay ? hhmm(a.nextFireAt) : `${new Date(a.nextFireAt).toLocaleDateString(undefined, { weekday: 'short' })} ${hhmm(a.nextFireAt)}`;
+  const sameDay = new Date(at).toDateString() === new Date(now).toDateString();
+  return sameDay ? hhmm(at) : `${new Date(at).toLocaleDateString(undefined, { weekday: 'short' })} ${hhmm(at)}`;
+}
+
+/** What a run asked for as its next fire and what happened to it (#437). */
+export function rescheduleLabel(r: RunRow, now = Date.now()): string | null {
+  const x = r.reschedule;
+  if (!x) return null;
+  const asked = `${x.by} asked for ${clockLabel(x.requestedAt, now)}`;
+  if (x.appliedAt === null) return `${asked} · not applied: ${x.reason ?? 'the run did not succeed'}`;
+  return x.clamped ? `${asked} · given ${clockLabel(x.appliedAt, now)}, the soonest allowed` : asked;
 }
 
 export function runDuration(r: RunRow): string {
@@ -37,7 +51,7 @@ export function runWhen(r: RunRow, now = Date.now()): string {
   return new Date(r.startedAt).toDateString() === new Date(now).toDateString() ? hhmm(r.startedAt) : relativeAgo(r.startedAt, now);
 }
 
-export const TRIGGER_LABELS: Record<RunRow['trigger']['kind'], string> = { schedule: 'schedule', manual: 'by hand', 'catch-up': 'catch-up', event: 'event' };
+export const TRIGGER_LABELS: Record<RunRow['trigger']['kind'], string> = { schedule: 'schedule', manual: 'by hand', 'catch-up': 'catch-up', event: 'event', rescheduled: 'set by a run' };
 
 /** Initial form values for the Run-now modal (strings, as the inputs hold them). */
 export function initialArgs(params: ParamDef[] | undefined): Record<string, string> {

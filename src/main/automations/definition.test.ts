@@ -190,3 +190,27 @@ describe('host shells (#407)', () => {
     expect(r.ok ? [] : r.errors).toEqual(["steps[0].script.shell: wsl:Debian isn't available on this computer (available: pwsh, wsl:Ubuntu)"]);
   });
 });
+
+describe('reschedule (#437)', () => {
+  const errs = (over: Record<string, unknown>) => {
+    const r = validateDefinition({ ...base, ...over }, ctx);
+    return r.ok ? [] : r.errors;
+  };
+  it('parses days', () => {
+    expect(parseDuration('2d')).toBe(2 * 86_400_000);
+  });
+  it('accepts a floor and keeps it on the definition', () => {
+    const r = validateDefinition({ ...base, reschedule: { min: '30m' } }, ctx);
+    expect(r.ok && r.value.reschedule).toEqual({ min: '30m' });
+  });
+  it('allows no cron at all', () => {
+    const r = validateDefinition({ ...base, triggers: [{ manual: {} }], reschedule: { min: '1h' } }, ctx);
+    expect(r.ok).toBe(true);
+  });
+  it('needs a floor between 5m and 30d', () => {
+    expect(errs({ reschedule: {} })[0]).toMatch(/^reschedule\.min:/);
+    expect(errs({ reschedule: { min: '1m' } })[0]).toMatch(/^reschedule\.min:/);
+    expect(errs({ reschedule: { min: '31d' } })[0]).toMatch(/^reschedule\.min:/);
+    expect(errs({ reschedule: '30m' })[0]).toMatch(/^reschedule:/);
+  });
+});

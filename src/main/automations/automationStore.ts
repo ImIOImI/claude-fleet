@@ -18,24 +18,30 @@ export interface AutomationRecord {
   createdAt: number;
   updatedAt: number;
   lastScheduledAt: number | null;
+  /** A next fire chosen by a run (#437); replaces the cron until it fires. */
+  nextRunAt: number | null;
+  /** The run that chose it. */
+  nextRunBy: string | null;
 }
 
 interface ARow {
   id: string; name: string; enabled: number; version: number; definition: string; created_by_kind: TodoSource['kind'];
   created_by_id: string | null; origin: string | null; created_at: number; updated_at: number; last_scheduled_at: number | null;
+  next_run_at: number | null; next_run_by: string | null;
 }
 
 function toRecord(r: ARow): AutomationRecord {
   return {
     id: r.id, name: r.name, enabled: r.enabled === 1, version: r.version, definition: JSON.parse(r.definition) as AutomationDef,
     createdBy: { kind: r.created_by_kind, id: r.created_by_id }, origin: r.origin ? (JSON.parse(r.origin) as Record<string, unknown>) : null,
-    createdAt: r.created_at, updatedAt: r.updated_at, lastScheduledAt: r.last_scheduled_at
+    createdAt: r.created_at, updatedAt: r.updated_at, lastScheduledAt: r.last_scheduled_at,
+    nextRunAt: r.next_run_at, nextRunBy: r.next_run_by
   };
 }
 
 interface RRow {
   id: string; automation_id: string; version: number; trigger: string; args: string; status: RunStatus;
-  started_at: number; ended_at: number | null; error: string | null;
+  started_at: number; ended_at: number | null; error: string | null; reschedule: string | null;
 }
 interface SRow {
   id: number; run_id: string; step_id: string; kind: 'prompt' | 'script'; status: RunStatus; workspace_id: string | null;
@@ -83,7 +89,8 @@ export class AutomationStore {
     if (clash && clash.id !== id) throw new Error(`an automation named "${def.name}" already exists`);
     const version = cur.version + 1;
     return this.db.transaction(() => {
-      this.db.prepare('UPDATE automations SET name = ?, version = ?, definition = ?, updated_at = ? WHERE id = ?')
+      // A new version drops any next fire a run of the old one chose (#437).
+      this.db.prepare('UPDATE automations SET name = ?, version = ?, definition = ?, updated_at = ?, next_run_at = NULL, next_run_by = NULL WHERE id = ?')
         .run(def.name, version, JSON.stringify(def), now, id);
       this.db.prepare('INSERT INTO automation_versions VALUES (?, ?, ?, ?, ?, ?)').run(id, version, JSON.stringify(def), now, by.kind, by.id);
       this.setTags(id, def.tags ?? []);
@@ -93,7 +100,8 @@ export class AutomationStore {
 
   setEnabled(id: string, enabled: boolean, now = Date.now()): void {
     // Re-enabling restarts the schedule clock so a long-disabled automation doesn't fire a stale catch-up.
-    this.db.prepare('UPDATE automations SET enabled = ?, updated_at = ?, last_scheduled_at = CASE WHEN ? THEN ? ELSE last_scheduled_at END WHERE id = ?')
+    // Either way a run-chosen next fire (#437) is dropped.
+    this.db.prepare('UPDATE automations SET enabled = ?, updated_at = ?, last_scheduled_at = CASE WHEN ? THEN ? ELSE last_scheduled_at END, next_run_at = NULL, next_run_by = NULL WHERE id = ?')
       .run(enabled ? 1 : 0, now, enabled ? 1 : 0, now, id);
   }
 
@@ -104,6 +112,11 @@ export class AutomationStore {
 
   setLastScheduled(id: string, ts: number): void {
     this.db.prepare('UPDATE automations SET last_scheduled_at = ? WHERE id = ?').run(ts, id);
+  }
+
+  /** A run-chosen next fire (#437); null clears it. */
+  setNextRun(id: string, at: number | null, byRun: string | null = null): void {
+    this.db.prepare('UPDATE automations SET next_run_at = ?, next_run_by = ? WHERE id = ?').run(at, at === null ? null : byRun, id);
   }
 
   /** Script state (#407 Phase 7): the last `{"state": …}` a script printed. */
@@ -149,7 +162,8 @@ export class AutomationStore {
     return {
       id: r.id, automationId: r.automation_id, version: r.version,
       trigger: JSON.parse(r.trigger) as RunRow['trigger'], args: JSON.parse(r.args) as Record<string, ParamValue>,
-      status: r.status, startedAt: r.started_at, endedAt: r.ended_at, error: r.error, steps: this.steps(r.id)
+      status: r.status, startedAt: r.started_at, endedAt: r.ended_at, error: r.error, steps: this.steps(r.id),
+      ...(r.reschedule ? { reschedule: JSON.parse(r.reschedule) as NonNullable<RunRow['reschedule']> } : {})
     };
   }
 
@@ -171,6 +185,11 @@ export class AutomationStore {
   setRunStatus(id: string, status: RunStatus, now = Date.now(), error: string | null = null): void {
     const ended = status === 'running' || status === 'queued' ? null : now;
     this.db.prepare('UPDATE runs SET status = ?, ended_at = ?, error = ? WHERE id = ?').run(status, ended, error, id);
+  }
+
+  /** What a run asked for as its next fire and what it was given (#437). */
+  setRunReschedule(id: string, r: NonNullable<RunRow['reschedule']>): void {
+    this.db.prepare('UPDATE runs SET reschedule = ? WHERE id = ?').run(JSON.stringify(r), id);
   }
 
   getRun(id: string): RunRow | null {

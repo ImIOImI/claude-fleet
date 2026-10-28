@@ -4,7 +4,7 @@
 // describe it and the automations workspace drafts it; YAML is the fallback.
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Automation, RunRow } from '../../../preload';
-import { RUN_LABELS, TRIGGER_LABELS, nextLabel, runDuration, runTone, runWhen } from '../automationView';
+import { RUN_LABELS, TRIGGER_LABELS, nextLabel, rescheduleLabel, runDuration, runTone, runWhen } from '../automationView';
 import { AutomationEditor } from './AutomationEditor';
 import { RunModal } from './RunModal';
 import { AskClaude } from './AskClaude';
@@ -242,6 +242,7 @@ export function AutomationsView({ names, automationsWs = null, workspaces = [], 
                   {openRun === r.id && (
                     <div className="run-steps">
                       {Object.keys(r.args).length > 0 && <div className="run-step"><span className="step-k">args</span><code>{JSON.stringify(r.args)}</code></div>}
+                      {r.reschedule && <div className="run-step"><span className="step-k">next</span><span>{rescheduleLabel(r)}</span></div>}
                       {r.steps.map((s) => (
                         <div className="run-step" key={s.id}>
                           <span className="step-k">{s.stepId}</span>

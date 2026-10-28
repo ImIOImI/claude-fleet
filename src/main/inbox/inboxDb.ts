@@ -9,7 +9,7 @@ import type {
 } from '../../preload/inboxTypes.js';
 import { isPriority, maxPriority, normalizeTag, normalizeTags, MAX_TAGS } from './inboxCore.js';
 
-export const INBOX_SCHEMA_VERSION = 4;
+export const INBOX_SCHEMA_VERSION = 5;
 
 const MIGRATIONS: Record<number, string> = {
   1: `
@@ -170,6 +170,13 @@ const MIGRATIONS: Record<number, string> = {
       decided_at INTEGER
     );
     CREATE INDEX proposals_status ON proposals (status, created_at);
+  `,
+  // #437: a next fire chosen by a run (replaces the cron until it fires), and
+  // what each run requested / was given.
+  5: `
+    ALTER TABLE automations ADD COLUMN next_run_at INTEGER;
+    ALTER TABLE automations ADD COLUMN next_run_by TEXT;
+    ALTER TABLE runs ADD COLUMN reschedule TEXT;
   `
 };
 

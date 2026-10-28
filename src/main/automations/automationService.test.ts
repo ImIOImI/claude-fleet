@@ -9,7 +9,7 @@ afterEach(() => inbox?.close());
 const USER = { kind: 'user' as const, id: null };
 const WSS: Record<string, string> = { 'ops-oncall': 'W1', 'webex-triage': 'W2' };
 
-function setup(opts: { state?: WorkspaceState; postGate?: Promise<void> } = {}) {
+function setup(opts: { state?: WorkspaceState; postGate?: Promise<void>; exec?: (script: string) => { exitCode: number; stdout: string } } = {}) {
   inbox = InboxStore.memory();
   const store = new AutomationStore(inbox.db);
   let t = new Date(2026, 9, 19, 10, 0).getTime();
@@ -27,7 +27,9 @@ function setup(opts: { state?: WorkspaceState; postGate?: Promise<void> } = {}) 
     post: async (id, text) => { await opts.postGate; posts.push([id, text]); return { via: 'attached' }; },
     resolveWorkspace: (v) => WSS[v] ?? (Object.values(WSS).includes(v) ? v : null),
     notify: (n) => { notes.push(n as never); return null; },
-    changed: () => {}
+    changed: () => {},
+    automationsWorkspace: () => 'W1',
+    execScript: async (_target, o) => ({ ...(opts.exec ?? (() => ({ exitCode: 0, stdout: '' })))(o.script), stderr: '', timedOut: false })
   });
   const fire = (ms: number) => { t += ms; for (const h of timers) if (!h.dead && h.at <= t) { h.dead = true; h.fn(); } };
   return { store, svc, posts, notes, fire, advance: (ms: number) => { t += ms; }, at: () => t };
@@ -203,5 +205,84 @@ describe('automations workspace reach (Phase 5b)', () => {
     expect(svc.mcp.listRuns('WA', {}, true)).toEqual([expect.objectContaining({ automation: 'log-watch', status: 'succeeded' })]);
     expect(svc.mcp.listRuns('WA', { status: 'failed' }, true)).toEqual([]);
     expect(svc.mcp.listRuns('W9', {})).toEqual([]);
+  });
+});
+
+describe('reschedule: a run sets its next fire (#437)', () => {
+  const SCRIPT = (extra = 'reschedule: { min: 30m }\n', triggers = '  - schedule: { cron: "0 * * * *" }\n  - manual: {}\n') => `name: watch
+triggers:
+${triggers}${extra}steps:
+  - id: look
+    script: { run: "look" }
+`;
+  const HOUR = 3_600_000;
+
+  it('a successful run applies its request; it replaces the cron and records what it asked for', async () => {
+    const { svc, at } = setup({ exec: () => ({ exitCode: 0, stdout: '{"next": {"in": "3h"}}' }) });
+    const a = svc.create(SCRIPT(), USER);
+    const r = svc.run(a.id, { kind: 'manual', by: USER });
+    await svc.settle();
+    const v = svc.list()[0];
+    expect(v.nextFireAt).toBe(at() + 3 * HOUR);
+    expect(v.nextSetByRun).toBe(r.id);
+    expect(svc.get(a.id)?.runs[0].reschedule).toMatchObject({ requestedAt: at() + 3 * HOUR, appliedAt: at() + 3 * HOUR, clamped: false, by: 'look' });
+  });
+  it('clamps to the floor after the run ends', async () => {
+    const { svc, at } = setup({ exec: () => ({ exitCode: 10, stdout: '{"next": {"in": "1m"}}' }) });
+    const a = svc.create(SCRIPT(), USER);
+    svc.run(a.id, { kind: 'manual', by: USER });
+    await svc.settle();
+    expect(svc.list()[0].nextFireAt).toBe(at() + 30 * 60_000);
+    expect(svc.get(a.id)?.runs[0]).toMatchObject({ status: 'nothing-to-do', reschedule: { clamped: true } });
+  });
+  it('a failed run applies nothing', async () => {
+    const { svc } = setup({ exec: () => ({ exitCode: 1, stdout: '{"next": {"in": "3h"}}' }) });
+    const a = svc.create(SCRIPT(), USER);
+    svc.run(a.id, { kind: 'manual', by: USER });
+    await svc.settle();
+    expect(svc.list()[0].nextSetByRun).toBeNull();
+  });
+  it('without reschedule in the definition the request is a step warning', async () => {
+    const { svc } = setup({ exec: () => ({ exitCode: 0, stdout: '{"next": {"in": "3h"}}' }) });
+    const a = svc.create(SCRIPT(''), USER);
+    svc.run(a.id, { kind: 'manual', by: USER });
+    await svc.settle();
+    expect(svc.list()[0].nextSetByRun).toBeNull();
+    expect(JSON.stringify(svc.get(a.id)?.runs[0].steps[0].detail)).toMatch(/reschedule/);
+  });
+  it('fires at the chosen time as "rescheduled", then the cron resumes; edits clear it', async () => {
+    const { svc, advance } = setup({ exec: () => ({ exitCode: 0, stdout: '{"next": {"in": "3h"}}' }) });
+    const a = svc.create(SCRIPT(), USER);
+    svc.run(a.id, { kind: 'manual', by: USER });
+    await svc.settle();
+    advance(HOUR);
+    expect(svc.tick()).toEqual([]); // the 11:00 cron slot is replaced
+    advance(2 * HOUR);
+    const fired = svc.tick();
+    expect(fired[0].trigger.kind).toBe('rescheduled');
+    await svc.settle();
+    svc.update(a.id, SCRIPT('reschedule: { min: 45m }\n'), USER);
+    expect(svc.list()[0].nextSetByRun).toBeNull();
+  });
+  it('no cron: idles until a run sets a time', () => {
+    const { svc } = setup();
+    svc.create(SCRIPT('reschedule: { min: 30m }\n', '  - manual: {}\n'), USER);
+    expect(svc.list()[0].nextFireAt).toBeNull();
+  });
+  it('schedule_next from a prompted workspace, gated like post_todo, last request wins', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const { svc, at } = setup({ postGate: gate });
+    const a = svc.create(YAML('reschedule: { min: 30m }\n'), USER);
+    const r = svc.run(a.id, { kind: 'manual', by: USER });
+    expect(() => svc.mcp.scheduleNext('W2', { run_id: r.id, in: '2h' })).toThrow(/not permitted/);
+    expect(() => svc.mcp.scheduleNext('W1', { run_id: r.id })).toThrow(/exactly one/);
+    svc.mcp.scheduleNext('W1', { run_id: r.id, in: '5h' });
+    svc.mcp.scheduleNext('W1', { run_id: r.id, in: '2h' });
+    release();
+    await svc.settle();
+    expect(svc.list()[0].nextFireAt).toBe(at() + 2 * HOUR);
+    expect(svc.get(a.id)?.runs[0].reschedule?.by).toBe('ops-oncall');
+    expect(() => svc.mcp.scheduleNext('W1', { run_id: r.id, in: '2h' })).toThrow(/not permitted/);
   });
 });
