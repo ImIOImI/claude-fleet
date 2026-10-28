@@ -61,6 +61,29 @@ export function partitionByOpen<T extends { id: string }>(
   return { open, recent };
 }
 
+/** Order the Open group by tab-strip position (workspace order, then tab index
+ *  within it) instead of last-active. Activity then never moves a row — only
+ *  opening, closing or dragging a tab does — so the current session stays put
+ *  while busy siblings write transcripts. Rows whose tab isn't resolved yet
+ *  trail in input order. */
+export function orderOpenByTabs<T extends { id: string }>(
+  open: readonly T[],
+  openSessions: ReadonlyMap<string, { workspaceId: string; brokerSessionId: string }>,
+  liveTabOrder: Readonly<Record<string, readonly string[]>>
+): T[] {
+  const wsIndex = new Map(Object.keys(liveTabOrder).map((ws, i) => [ws, i]));
+  const rank = (id: string): [number, number] => {
+    const ref = openSessions.get(id);
+    const tab = ref ? liveTabOrder[ref.workspaceId]?.indexOf(ref.brokerSessionId) ?? -1 : -1;
+    if (!ref || tab < 0) return [Infinity, 0];
+    return [wsIndex.get(ref.workspaceId) ?? Infinity, tab];
+  };
+  return open
+    .map((s, i) => ({ s, i, r: rank(s.id) }))
+    .sort((a, b) => a.r[0] - b.r[0] || a.r[1] - b.r[1] || a.i - b.i)
+    .map((x) => x.s);
+}
+
 /** Distinct tags with session counts for the Tags ▾ menu, most-used first,
  *  alphabetical within a count. */
 export function tagCounts(items: ReadonlyArray<{ tags: string[] }>): Array<[string, number]> {

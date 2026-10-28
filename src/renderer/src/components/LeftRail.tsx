@@ -20,6 +20,10 @@ interface Props {
   waitingSessionIds?: Set<string>;
   /** Claude session UUID → open tab address; used by SessionsPane to group/jump. */
   openSessions?: Map<string, OpenTabRef>;
+  /** Workspace id → live broker ids in tab-strip order; orders the Open group. */
+  liveTabOrder?: Record<string, string[]>;
+  /** Claude session UUID of the active tab in the selected workspace. */
+  currentSessionId?: string | null;
   /** Display prefs (uiPrefs): hide the per-session USD badge. Default show. */
   showSessionCost?: boolean;
   /** Display prefs: trim the Recent list to the newest N (0 = unlimited). */
@@ -65,6 +69,8 @@ export function LeftRail({
   busySessionIds,
   waitingSessionIds,
   openSessions,
+  liveTabOrder,
+  currentSessionId,
   showSessionCost,
   maxSessions,
   maxSessionAgeDays,
@@ -131,6 +137,8 @@ export function LeftRail({
             busySessionIds={busySessionIds}
             waitingSessionIds={waitingSessionIds}
             openSessions={openSessions}
+            liveTabOrder={liveTabOrder}
+            currentSessionId={currentSessionId}
             showSessionCost={showSessionCost}
             maxSessions={maxSessions}
             maxSessionAgeDays={maxSessionAgeDays}
