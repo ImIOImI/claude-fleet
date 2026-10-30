@@ -34,6 +34,7 @@ folders:
     branch: main                   # default: main
     mode: auto-sync                # auto-sync | mirror (default: mirror)
     author: troy@platform          # required for auto-sync: commit name; email <author>@fleet.invalid
+    author_scoped: true            # default true: commit only <author>/…; false = whole tree
   - name: fleet-expertise
     remote: https://github.com/SumerSports/fleet-expertise.git
     mode: mirror
@@ -53,14 +54,30 @@ Usage: `fleet-git-sync [--config PATH] [--root PATH]` (defaults `/shared/.git-sy
 git's credential helper for `github.com` with it for the run, never in `.git/config` or on disk.
 Otherwise it uses whatever git/gh already provide.
 
+**One sync per `/shared`.** Several workspace containers bind-mount the same `/shared` on a
+desktop. The script takes an exclusive `flock` on `<root>/.git-sync.lock` and exits `10` if it is
+already held, so a second installed copy of the automation (or an overlapping manual run) is a
+no-op instead of a race on `.git/index.lock`. The loadout doc still says "install once per node".
+
 For each folder, independently (one folder's failure never blocks another):
 
 1. **Missing** → `git clone --branch <branch> <remote> <root>/<name>`, then set
-   `core.autocrlf=false` and `core.fileMode=false` (Windows bind mounts).
+   `core.autocrlf=false`, `core.fileMode=false` (Windows bind mounts), `core.untrackedCache=false`
+   and `core.preloadIndex=true` (slow `lstat` on the Windows 9p mount).
    A non-empty, non-git directory at that path is an error for that folder (never clobbered).
 2. **auto-sync**
-   - Local changes → `git add -A`, then commit with author/committer `<author> <<author>@fleet.invalid>`
-     and the message `sync: <n> files from <author>`.
+   - **Hold:** if `<name>/<author>/.sync-hold` exists, the whole folder is skipped this tick (no
+     commit, pull or push; a rebase over a half-written tree would fail anyway). A long writer such as review-pr creates
+     the hold at its start and deletes it when its output is complete, so other nodes never read a
+     half-written record. A hold older than 2 h is ignored, and the script emits a todo keyed
+     `git-sync:<name>:stale-hold`, so a crashed writer can't block sync forever. `.sync-hold` is
+     listed in the repo's `.gitignore`.
+   - **Only the node's own folder is committed:** `git add -A -- <author>/`, then commit with
+     author/committer `<author> <<author>@fleet.invalid>` and the message `sync: <n> files from <author>`.
+     Changes **outside** `<author>/` are never staged. They're reported like mirror local edits
+     (a todo keyed `git-sync:<name>:outside-edits`, listing the paths) and stay local. That makes the
+     single-writer convention enforced, not just assumed. If the repo isn't author-partitioned
+     (`author_scoped: false` in the config), the whole tree is staged.
    - `git pull --rebase`. On a rebase conflict: `git rebase --abort` (local commits kept), emit a
      todo keyed `git-sync:<name>:conflict`, and move to the next folder.
    - `git push`. On a non-fast-forward rejection, pull --rebase and push once more. A second
@@ -103,7 +120,8 @@ steps:
 Every 5 minutes is the low-risk floor, so it is not an approval-gated schedule. `runIn: $self`
 binds to the installing workspace, whose env and `gh auth` provide credentials. On the agent the
 same loadout is pinned in `FLEET_LOADOUTS`, and fleet-node exports the GitHub App installation token
-as `GH_TOKEN` to script steps.
+as `GH_TOKEN` to script steps. The App needs `contents: write` on repos it auto-syncs
+(`fleet-reviews`) and only `contents: read` on mirrored ones (`fleet-expertise`). It never pushes there.
 
 The loadout's `loadout.md` documents the config file and points to this spec. The loadout
 carries no script: it calls the image's `fleet-git-sync`, so the script version follows the
@@ -118,6 +136,25 @@ image, not the loadout.
   Maintainers run **auto-sync** only if the repo allows direct pushes for them; otherwise they use
   mirror plus PRs. CODEOWNERS decides; the script doesn't.
 
+## Rollout order (cross-workspace)
+
+The paths change: `/shared/expert-*` becomes `/shared/fleet-expertise/expert-*`, and
+`/shared/reviews/…` becomes `/shared/fleet-reviews/<author>/…`. The old paths are hard-coded in
+review-pr, curate-experts, the `committee-pr-review` loadout, the `webex-pr-review` /
+`pr-review-followup` prompts, workspace `CLAUDE.md`s and memories, and the libraries' own
+cross-links. The Windows 9p mount can't symlink old paths to new ones, so this is one coordinated
+cutover:
+
+1. **Writers first.** review-pr stops editing `INDEX.md` and the Operator migration map
+   (counts are dropped; MAP UPDATES go to the record's handoff). Otherwise every review would
+   leave local edits in the `fleet-expertise` mirror and stall its pulls.
+2. **Seed the repos:** `fleet-reviews` with today's records under the owner's author folder, and
+   `fleet-expertise` with the `expert-*` libraries.
+3. **Switch every reader and writer** to the new roots in one change set, and teach review-pr the
+   `.sync-hold` file.
+4. **Freeze the old directories** as read-only snapshots, then install the `git-sync` loadout once per
+   node.
+
 ## Testing
 
 - `src/main/automations/fleetGitSync.test.ts` (vitest, the `fleetEmit.test.ts` pattern; skipped on
@@ -130,6 +167,13 @@ image, not the loadout.
     failure, and a success resets the counter.
   - **Exit codes:** 10 when current, 0 when changed, 2 on a bad config.
   - **GH_TOKEN:** the token is never written to `.git/config`.
+  - **Lock:** a second concurrent run exits 10 and touches nothing.
+  - **Hold:** an author folder with `.sync-hold` isn't committed; a hold older than 2 h is ignored and
+    emits a stale-hold todo.
+  - **Author scope:** edits outside `<author>/` are never pushed and emit an outside-edits todo;
+    `author_scoped: false` stages everything.
+  - **Performance:** a no-op tick on a repo the size of today's reviews (66 records, about 2 MB) is
+    timed on a Windows bind mount during host verification.
 - The loadout's `automation.yaml` validates through `loadoutAutomations` (an existing test pattern),
   run in the loadouts repo's `make dry-run`.
 
