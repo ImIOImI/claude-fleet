@@ -133,20 +133,38 @@ a killed git). A second install still runs with its own workspace's env, so a di
 **Clones are untrusted.** Every workspace on the node can write `/shared`, so anyone could plant
 a hook, `core.fsmonitor`, `include.path`, filter, `sshCommand` or `pushurl` in a clone and run code
 in (or steal the token of) the syncing workspace. So:
+- The script unsets `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE`/`GIT_OBJECT_DIRECTORY`/
+  `GIT_ALTERNATE_OBJECT_DIRECTORIES` on entry, so no inherited env can redirect its own git calls.
 - Every git call passes `-c core.hooksPath=/dev/null -c core.fsmonitor=false`.
-- Before touching an existing clone, its `remote.origin.url` and branch must match the config,
-  else todo `git-sync:<name>:remote-changed` and skip.
+- Before touching an existing clone: a detached HEAD (no branch checked out) gets its own todo
+  `git-sync:<name>:detached` ("check out `<branch>` to resume syncing") and is skipped — distinct
+  from, and checked before, the remote/branch-mismatch check below, so it doesn't read as tampering.
+- Otherwise its `remote.origin.url` and branch must match the config, else todo
+  `git-sync:<name>:remote-changed` and skip.
 - Its `git config --local --no-includes` keys must be on an allowlist: `core.{repositoryformatversion,
   filemode,bare,logallrefupdates,autocrlf,untrackedcache,preloadindex,ignorecase,symlinks,
-  precomposeunicode}`, `remote.origin.{url,fetch}`, `branch.<branch>.{remote,merge}`. Anything else
-  (including `include.*`/`includeIf.*`) gets todo `git-sync:<name>:unsafe-config`, listing key names
-  but never values, and the folder is skipped.
+  precomposeunicode}`, `user.{name,email}`, `remote.origin.{url,fetch}`, `branch.<branch>.{remote,merge}`.
+  Anything else (including `include.*`/`includeIf.*`) gets todo `git-sync:<name>:unsafe-config`,
+  listing key names but never values, and the folder is skipped.
 
-Neither counts as a failure.
+None of the above counts as a failure.
+
+**Scoped auto-sync never pushes someone else's commit.** `ahead=@{u}..HEAD` can include a commit
+nobody here made — e.g. another workspace committing directly into the shared clone outside its
+own `<author>/` folder. So, with `author_scoped:true`, before every push attempt (the initial one
+and the race retry) the script checks `git diff --name-only @{u} HEAD -- . ":(exclude)<author>"`;
+anything outside `<author>/` raises todo `git-sync:<name>:outside-commits` (the paths, and
+`git reset --soft @{u}` as the way to drop them) and **holds the whole push**, not just the
+offending commit. Not counted as a failure. `author_scoped:false` has no such guard — it pushes
+any local commit by design, so it's only safe where every writer in the folder is trusted.
 
 **Bounded runs.** The step timeout is 4 min, and a killed script saves no state. So:
-- Network calls run under `timeout` (60 s at most, less near the deadline; exit 124 counts as a
-  "timed out" failure), with `http.lowSpeedLimit=1000`/`lowSpeedTime=30`.
+- `fetch`/`pull`/`push` run under `timeout` (60 s at most, less near the deadline; exit 124 counts
+  as a "timed out" failure), with `http.lowSpeedLimit=1000`/`lowSpeedTime=30`.
+- A first **clone** isn't capped at 60 s: it gets the full remaining budget
+  (`DEADLINE+30-SECONDS`), since it can't be chunked like a later fetch. It only starts with at
+  least 90 s of that budget left; otherwise it's deferred to the next run exactly like a folder
+  past the deadline (named in stdout, its state carried over).
 - `GIT_SSH_COMMAND`, when unset, is the workspace's `core.sshCommand` (or `ssh`) plus
   `-o BatchMode=yes -o ConnectTimeout=20`.
 - After 200 s no new folder starts; the deferred ones are named in stdout, and the state is
@@ -180,8 +198,11 @@ For each folder, independently (one folder's failure never blocks another):
      edits stay in `git stash list` with the same todo, which explains how to recover them. A
      folder that already has unmerged paths when a run starts is skipped with that todo. A rebase
      stuck for any other reason is aborted and counted as a failure.
-   - `git push`. On a rejection, pull --rebase and push once more. A second failure counts as a
-     failure for this folder.
+   - Before each push attempt (scoped folders only; see "Scoped auto-sync never pushes someone
+     else's commit" above): if HEAD carries a commit outside `<author>/`, hold the push and todo
+     `…:outside-commits` instead.
+   - `git push`. On a rejection, pull --rebase and push once more (re-checking outside-commits
+     first). A second failure counts as a failure for this folder.
 3. **mirror**
    - Local edits (tracked changes or untracked files) are **not discarded**. They raise a todo keyed
      `git-sync:<name>:local-edits` ("local edits in mirror <name>: propose them upstream or
@@ -265,12 +286,15 @@ that relies on one. It checks stdout with the script-step protocol's line shapes
   `FLEET_NODE_ID` skips the folder and emits the node-id todo; deleting the node's folder is
   pushed; a file over the size limit stays local with a large-file todo.
 - **Untrusted clones:** a planted `core.fsmonitor`, `include.path` or hooks never run; a changed
-  origin URL, config remote or config branch raises remote-changed.
+  origin URL, config remote or config branch raises remote-changed; a detached HEAD raises its own
+  todo, not remote-changed; a locally-set `user.name`/`user.email` is allowed, not unsafe-config.
 - **Runs:** a todo is posted once and again after its body changes or it recurs; state is pruned
-  to configured folders; a tiny deadline defers and rotates folders; a hung remote times out and
-  the state is still printed; the failure message is the error line, not prose.
+  to configured folders; a tiny deadline defers and rotates folders; a small deadline also defers a
+  folder that still needs its first clone, once less than 90 s of budget remains; a hung remote
+  times out and the state is still printed; the failure message is the error line, not prose.
 - **Author scope:** edits outside `<author>/` are never pushed and emit an outside-edits todo;
-  `author_scoped: false` stages everything.
+  a local commit someone else made outside `<author>/` holds the whole push and emits an
+  outside-commits todo instead of being pushed; `author_scoped: false` stages everything.
 - **Hold:** a held folder is untouched; a hold older than 2 h is ignored and emits a stale-hold todo.
 - **mirror:** fast-forward; local edits are kept and emit a todo; divergence is skipped.
 - **Failures:** an unreachable remote increments state, notifies on the 3rd consecutive failure
