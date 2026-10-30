@@ -36,16 +36,14 @@ loadouts/git-sync/
   automations/git-sync/
     automation.yaml           # schedule, runIn: $self
     fleet-git-sync.sh         # the sync script, inlined into the automation at install
-  examples/example.yaml       # copied to /shared/.git-sync.d/example.yaml.sample
+  install/write-example.sh    # writes /shared/.git-sync.d/example.json.sample
 ```
 
 `loadout.md` frontmatter:
 - `dependencies.tools`: `git`, `jq`.
 - `scripts` (run at install, inside the workspace):
-  - **ensure `yq`:** install it if missing (`unless: command -v yq`), as an arch-aware static
-    binary into `~/.local/bin`;
-  - **write the example:** create `/shared/.git-sync.d/` and copy the example as
-    `example.yaml.sample` (`unless:` it exists). The `.sample` suffix means it's never loaded.
+  - **write the example:** create `/shared/.git-sync.d/` and write the example as
+    `example.json.sample` (`unless:` it exists). The `.sample` suffix means it's never loaded.
 
 The script is inlined through the existing `run: ./file.sh` mechanism (limit 20,000 characters), so
 **updating sync is a loadout version bump**, not an image republish and workspace recreate.
@@ -63,29 +61,40 @@ dependencies:
     - { id: git-sync, version: "^1.0.0" }
 scripts:
   - label: write Acme git-sync config
-    run: mkdir -p /shared/.git-sync.d && cp ./acme.yaml /shared/.git-sync.d/acme.yaml
-    unless: test -f /shared/.git-sync.d/acme.yaml
+    file: install/write-config.sh
 ```
+
+```sh
+# install/write-config.sh: rewrites the managed file on every install, so new versions apply.
+set -e
+mkdir -p /shared/.git-sync.d
+cat >/shared/.git-sync.d/acme.json.tmp <<'EOF'
+{ "folders": [ { "name": "reviews", "remote": "https://git.example.com/acme/reviews.git", "mode": "auto-sync" } ] }
+EOF
+mv /shared/.git-sync.d/acme.json.tmp /shared/.git-sync.d/acme.json
+```
+
+Install scripts run in the container with cwd `/workspace` and without the loadout's files, so
+config content is embedded in the script. The script rewrites the managed file on every install,
+so a new loadout version applies.
 
 It carries **config only**. The script and automation come from `git-sync` through the
 dependency, so there's no copy to drift. An organisation can ship several config loadouts (per team,
 per project); each drops its own file into the conf.d directory.
 
-## Config: `/shared/.git-sync.d/*.yaml`
+## Config: `/shared/.git-sync.d/*.json`
 
-The script loads every `*.yaml` in the directory (sorted). `*.sample` files are ignored. Plain
+The script loads every `*.json` in the directory (sorted). `*.sample` files are ignored. Plain
 data, no secrets.
 
-```yaml
-folders:
-  - name: reviews                  # → /shared/reviews; [a-z0-9._-]+, no slashes
-    remote: https://git.example.com/acme/reviews.git
-    branch: main                   # default: main
-    mode: auto-sync                # auto-sync | mirror (default: mirror)
-    author_scoped: true            # default true: commit only <author>/…; false = whole tree
-  - name: knowledge
-    remote: https://git.example.com/acme/knowledge.git
-    mode: mirror
+```json
+{
+  "folders": [
+    { "name": "reviews", "remote": "https://git.example.com/acme/reviews.git",
+      "branch": "main", "mode": "auto-sync", "author_scoped": true },
+    { "name": "knowledge", "remote": "https://git.example.com/acme/knowledge.git", "mode": "mirror" }
+  ]
+}
 ```
 
 **Author = the node id.** It's not in the config, because config files are shared across an
@@ -101,7 +110,7 @@ with the file and error on stderr, and nothing is touched. No config files at al
 
 ## Script: `fleet-git-sync.sh`
 
-Needs bash, git, jq and yq. Credentials come from the environment: when `GH_TOKEN` is set, it
+Needs bash, git, jq and flock. Credentials come from the environment: when `GH_TOKEN` is set, it
 configures a run-scoped credential helper for `github.com`, never written to `.git/config` or to
 disk. Otherwise it uses whatever git/gh/SSH already provide. `GIT_SYNC_ROOT` (default `/shared`)
 and `GIT_SYNC_CONF` (default `$GIT_SYNC_ROOT/.git-sync.d`) can be overridden for tests.
@@ -193,9 +202,11 @@ on repos the node auto-syncs and read access on mirrored ones.
 
 ## Testing
 
-`tests/git-sync/run.sh` (bash; needs git, jq and yq) runs the real script against throwaway
-bare repos in a temp dir, with `GIT_SYNC_ROOT` / `GIT_SYNC_CONF` pointing into it, and checks
-stdout with the script-step protocol's line shapes:
+`tests/git-sync/run.sh` (bash; needs git, jq and flock) runs the real script against throwaway
+bare repos in a temp dir, with `GIT_SYNC_ROOT` / `GIT_SYNC_CONF` pointing into it. The script
+itself always runs with an empty `GIT_CONFIG_GLOBAL` (no `user.name`/`user.email`), matching a
+runner container with no global git identity, so the suite catches any `git commit` or `rebase`
+that relies on one. It checks stdout with the script-step protocol's line shapes:
 - **Config:** several conf.d files merge; `.sample` is ignored; a duplicate name or bad mode exits 2
   untouched; no config exits 10.
 - **Clone:** a missing folder is cloned; a non-git directory is refused.
