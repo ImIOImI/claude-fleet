@@ -101,14 +101,26 @@ data, no secrets.
 }
 ```
 
-**Author = the node id.** It's not in the config, because config files are shared across an
-organisation. The script reads `FLEET_NODE_ID` (format `<name>@<team>` for people,
-`agent-<name>@<team>` for agents). It must be **unique per node**: the same person on two
-machines uses two ids (e.g. `troy-laptop@platform`), since each node is the single writer of its
-own folder. A headless node's runtime sets it; on a desktop it's set
-once as an env var on the workspace the loadout is installed into. Without it, **auto-sync
-folders are skipped** and a todo keyed `git-sync:node-id` explains how to set it. Mirror folders
-still sync.
+**Author = a real GitHub identity.** It's not in the config, because config files are shared
+across an organisation. The script resolves it once per run:
+
+1. `GIT_SYNC_IDENTITY` env, formatted `login <email>` or `login|Display Name <email>`. The login
+   must match `^[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?$` (a GitHub login, optionally with `[bot]`);
+   any other value is ignored. **Required for bot/App tokens and non-GitHub remotes**: a GitHub
+   App installation token gets `403 Resource not accessible by integration` on `GET /user`.
+2. Otherwise `gh api user` with the workspace's own credentials (`gh auth login` or `GH_TOKEN`):
+   the name is the profile `name` (the login when it's unset) and the email the noreply address
+   `<id>+<login>@users.noreply.github.com`.
+3. Otherwise the identity cached in the step's `state.identity` (login, name, email), refreshed
+   whenever 1 or 2 succeeds, so syncing works offline after one success. Any `gh` failure
+   (missing, offline, 403) falls through to this step.
+
+With none, **auto-sync folders are skipped** and a todo keyed `git-sync:identity` says to sign the
+sync workspace in to GitHub or set `GIT_SYNC_IDENTITY`. Mirror folders still sync. The author
+folder (`<author>` below) is the **login, lowercased**, since logins are case-insensitive and
+display names aren't unique. Every workspace on a machine shares one `/shared` root, so there's
+one identity per root. One person on several machines shares one folder; concurrent edits to the
+same file become an ordinary conflict todo.
 
 **Validation:** an unknown mode, a bad name, a missing remote, an empty or non-string `branch`, a
 non-boolean `author_scoped`, a non-object entry or a duplicate name across files fails the run
@@ -128,7 +140,7 @@ The script takes an exclusive `flock -n -E 75` on `<root>/.git-sync.lock` and ex
 already held (any other lock error exits 1), so an overlapping run is a no-op instead of a race on
 `.git/index.lock`. Holding that lock, it removes a `.git/index.lock` older than 10 minutes (left by
 a killed git). A second install still runs with its own workspace's env, so a different
-`FLEET_NODE_ID` or credentials there makes results flip between runs.
+identity or credentials there makes results flip between runs.
 
 **Clones are untrusted.** Every workspace on the node can write `/shared`, so anyone could plant
 a hook, `core.fsmonitor`, `include.path`, filter, `sshCommand` or `pushurl` in a clone and run code
@@ -177,15 +189,16 @@ For each folder, independently (one folder's failure never blocks another):
    `core.autocrlf=false` and `core.fileMode=false` (Windows bind mounts), plus
    `core.untrackedCache=false` and `core.preloadIndex=true` (slow `lstat` on the Windows 9p mount).
    A non-empty, non-git directory at that path is an error for that folder (never clobbered).
-2. **auto-sync** (requires `FLEET_NODE_ID`; called `<author>` below)
+2. **auto-sync** (requires an identity; `<author>` is the lowercased login)
    - **Hold:** if `<name>/<author>/.sync-hold` exists, the whole folder is skipped this tick (no
      commit, pull or push). A long writer creates the hold when it starts and deletes it when its
      output is complete, so other nodes never read a half-written result. A hold older than 2 h is
      ignored and raises a todo keyed `git-sync:<name>:stale-hold`, so a crashed writer can't block
      sync forever. `.sync-hold` belongs in the repo's `.gitignore`, and is never committed.
-   - **Only the node's own folder is committed:** `git add -A -- <author>/` (also when the folder
-     was deleted), then a path-limited `git commit -- <author>/` with author/committer
-     `<author> <<author>@fleet.invalid>` and the message `sync: <n> files from <author>`.
+   - **Only the author's own folder is committed:** `git add -A -- ":(literal)<author>"` (also when
+     the folder was deleted), then a path-limited `git commit -- ":(literal)<author>"` with
+     author/committer `<name> <<email>>` and the message `sync: <n> files from <login>`. Every
+     author-folder pathspec uses `literal` magic, because a `[bot]` login contains glob characters.
      Changes **outside** `<author>/` are never committed, even if pre-staged. They raise a todo
      keyed `git-sync:<name>:outside-edits` (listing the paths) and stay local, which enforces the
      single-writer convention. With `author_scoped: false` the whole tree is staged.
@@ -246,7 +259,7 @@ steps:
 Every 5 minutes is the low-risk floor, so the schedule isn't approval-gated. `runIn: $self` binds to
 the installing workspace, whose env and git auth provide credentials. **Install once per node**,
 normally in the automations workspace. On a headless node, the runtime installs the same
-loadouts and supplies `FLEET_NODE_ID` and a token as `GH_TOKEN`. Grant that token write access only
+loadouts and supplies `GIT_SYNC_IDENTITY` and a token as `GH_TOKEN`. Grant that token write access only
 on repos the node auto-syncs and read access on mirrored ones.
 
 ## Conventions this enables
@@ -280,11 +293,16 @@ that relies on one. It checks stdout with the script-step protocol's line shapes
 - **Config:** several conf.d files merge; `.sample` is ignored; a duplicate name, bad mode, empty
   branch or string `author_scoped` exits 2 untouched, naming the file; no config exits 10.
 - **Clone:** a missing folder is cloned; a non-git directory is refused.
-- **auto-sync:** a commit carries `FLEET_NODE_ID` as author; a push race (a PATH-shim `git` that
+- **auto-sync:** a commit carries `GIT_SYNC_IDENTITY` as author; a push race (a PATH-shim `git` that
   lets another clone push first) resolves with one retry; a rebase conflict keeps local commits and
-  an autostash conflict keeps the edits in the stash, both with a conflict todo; no
-  `FLEET_NODE_ID` skips the folder and emits the node-id todo; deleting the node's folder is
-  pushed; a file over the size limit stays local with a large-file todo.
+  an autostash conflict keeps the edits in the stash, both with a conflict todo; deleting the
+  author's folder is pushed; a file over the size limit stays local with a large-file todo.
+- **Identity** (a PATH-shim `gh` printing a canned `/user`, a 403 body, or failing): the identity
+  is derived from `gh` (folder = lowercased login, author = profile name + noreply email); a cached
+  identity is used when `gh` fails; a `login|Display Name <email>` override sets name and folder;
+  no identity (gh 403, no cache) emits the identity todo while mirrors still sync; an invalid
+  `GIT_SYNC_IDENTITY` counts as missing; a `[bot]` identity commits only its own folder, without
+  tripping outside-edits/outside-commits, and a glob-matching sibling folder stays local.
 - **Untrusted clones:** a planted `core.fsmonitor`, `include.path` or hooks never run; a changed
   origin URL, config remote or config branch raises remote-changed; a detached HEAD raises its own
   todo, not remote-changed; a locally-set `user.name`/`user.email` is allowed, not unsafe-config.
@@ -312,7 +330,7 @@ through the inlined-script size limit). Host verification times a no-op tick on 
 ## SPEC.md changes (in claude-fleet, alongside the loadout release)
 
 - §8 *Automations*: sharing folders between nodes is done with the `git-sync` loadout plus an
-  organisation config loadout. The conf.d config, `FLEET_NODE_ID` as the commit author,
+  organisation config loadout. The conf.d config, the resolved GitHub identity as the commit author,
   `.sync-hold`, and the per-root lock.
 - §9 *Security*: synced repos live under `/shared`, so the existing "no secrets in `/shared`" rule
   applies to them. Tokens never touch disk. Clones are untrusted (allowlisted config, no hooks or
