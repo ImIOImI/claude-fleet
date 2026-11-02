@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDb, closeDb, recordError, learnBrokerSessionMapping, recordBrokerSessionMapping, lookupBrokerSession, lookupVerifiedBrokerSession, lookupResumableBrokerSession, summaryForBrokerSession, ingestLine, ERRORS_RETENTION, recordUsageEvent } from './db.js';
+import { openDb, closeDb, recordError, learnBrokerSessionMapping, recordBrokerSessionMapping, lookupBrokerSession, lookupVerifiedBrokerSession, lookupResumableBrokerSession, listSessions, summaryForBrokerSession, ingestLine, ERRORS_RETENTION, recordUsageEvent } from './db.js';
 
 // A minimal well-formed transcript line that makes `sessionId` a *real*
 // session (any ingested line upserts the sessions row). The `user` string
@@ -247,6 +247,23 @@ describe('usage_events (#207)', () => {
       const rows = db.prepare('SELECT kind, session_id, detail FROM usage_events ORDER BY id').all() as Array<Record<string, unknown>>;
       expect(rows.map((r) => r.kind)).toEqual(['search-impression', 'resumed']);
       expect(JSON.parse(rows[0].detail as string)).toEqual({ query: 'broker hang' });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('listSessions — headless flag', () => {
+  it('flags sessions mapped from an automation (auto-*) broker id', () => {
+    const dir = freshDb();
+    try {
+      realSession('ws-a', 'claude-tab');
+      realSession('ws-a', 'claude-auto');
+      realSession('ws-a', 'claude-unmapped');
+      recordBrokerSessionMapping('ws-a', 'tab-1', 'claude-tab');
+      recordBrokerSessionMapping('ws-a', 'auto-run1-step1', 'claude-auto');
+      const byId = new Map(listSessions('ws-a').map((s) => [s.id, s.headless]));
+      expect(byId.get('claude-tab')).toBe(false);
+      expect(byId.get('claude-auto')).toBe(true);
+      expect(byId.get('claude-unmapped')).toBe(false);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

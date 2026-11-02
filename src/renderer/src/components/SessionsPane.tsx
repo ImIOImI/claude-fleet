@@ -16,7 +16,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { createPortal } from 'react-dom';
 import { colorFor } from '../App';
 import type { SessionListItem } from '../../../preload';
-import { sessionsForScope, filterSessions, partitionByOpen, orderOpenByTabs, tagCounts, limitSessions } from '../sessionsView';
+import { sessionsForScope, filterSessions, partitionByOpen, orderOpenByTabs, splitHeadless, tagCounts, limitSessions } from '../sessionsView';
 import { useBlinkSync } from '../blinkSync';
 import type { OpenTabRef } from '../busySessions';
 import { usePortalMenu } from './portalMenu';
@@ -98,6 +98,7 @@ export function SessionsPane({
 }: Props) {
   const [scope, setScope] = useState<Scope>('workspace');
   const [query, setQuery] = useState('');
+  const [headlessExpanded, setHeadlessExpanded] = useState(false);
   const [items, setItems] = useState<SessionListItem[]>([]);
   const [loaded, setLoaded] = useState(false);
   // Inline-edit + inline-delete-confirm state, keyed by session id.
@@ -174,18 +175,28 @@ export function SessionsPane({
   const openIds = new Set(openSessions?.keys() ?? []);
   const parts = partitionByOpen(filtered, openIds);
   const openRows = orderOpenByTabs(parts.open, openSessions ?? new Map(), liveTabOrder ?? {});
-  const recentRows = parts.recent;
+  // Automation runs leave Recent for their own collapsed group at the bottom,
+  // so a new run never pushes the user's own sessions down.
+  const { headless: headlessRows, rest: recentRows } = splitHeadless(parts.recent);
   const limitOpts = { maxCount: maxSessions, maxAgeDays: maxSessionAgeDays };
   const bypassLimits = q !== '' || activeTags.length > 0;
   const recentShown = bypassLimits
     ? recentRows
     : limitSessions(recentRows, limitOpts, Date.now());
+  const headlessShown = bypassLimits
+    ? headlessRows
+    : limitSessions(headlessRows, limitOpts, Date.now());
+  // Collapsed by default; a search/tag filter opens it so matches are visible.
+  const showHeadless = headlessExpanded || bypassLimits;
   // "All · N" badge: what the All view lists under the current limits (#149) —
   // open rows + the limited recent rows over the FULL list, search ignored
   // (searching never changed the badge before either).
   const allParts = partitionByOpen(items, openIds);
+  const allSplit = splitHeadless(allParts.recent);
   const allSessionsCount =
-    allParts.open.length + limitSessions(allParts.recent, limitOpts, Date.now()).length;
+    allParts.open.length +
+    limitSessions(allSplit.rest, limitOpts, Date.now()).length +
+    limitSessions(allSplit.headless, limitOpts, Date.now()).length;
   const allTags = tagCounts(scoped);
 
   // FLIP: rows animate to their new slot when they move between the Open and
@@ -396,7 +407,7 @@ export function SessionsPane({
             <strong>No workspace selected</strong>
             Pick a workspace above, or switch to <em>All</em> to see every session.
           </div>
-        ) : openRows.length + recentShown.length === 0 ? (
+        ) : openRows.length + recentShown.length + headlessShown.length === 0 ? (
           <div className="pane-placeholder subdued">
             <strong>
               {q || activeTags.length > 0
@@ -426,6 +437,23 @@ export function SessionsPane({
               </li>
             )}
             {recentShown.map(renderRow)}
+            {headlessShown.length > 0 && (
+              <li className="session-group-label recent">
+                <button
+                  className="session-group-toggle"
+                  aria-expanded={showHeadless}
+                  onClick={() => setHeadlessExpanded((v) => !v)}
+                  title={showHeadless ? 'Hide automation runs' : 'Show automation runs'}
+                >
+                  <span className={`acc-chev ${showHeadless ? 'open' : ''}`} aria-hidden>
+                    ▾
+                  </span>
+                  Automation runs · {headlessShown.length}
+                </button>
+                <span className="session-group-line" />
+              </li>
+            )}
+            {showHeadless && headlessShown.map(renderRow)}
           </ul>
         )}
       </div>

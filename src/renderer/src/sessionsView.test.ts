@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sessionsForScope, filterSessions, partitionByOpen, orderOpenByTabs, tagCounts, limitSessions } from './sessionsView';
+import { sessionsForScope, filterSessions, partitionByOpen, orderOpenByTabs, splitHeadless, tagCounts, limitSessions } from './sessionsView';
 
 // Minimal session shape — only what the scope logic touches.
 const S = (id: string, workspaceId: string): { id: string; workspaceId: string } => ({
@@ -76,6 +76,20 @@ describe('filterSessions', () => {
     expect(filterSessions(items, '', ['mcp']).map((s) => s.id)).toEqual(['a', 'c']);
     expect(filterSessions(items, '', ['mcp', 'ci']).map((s) => s.id)).toEqual(['a', 'b', 'c']);
     expect(filterSessions(items, 'three', ['mcp']).map((s) => s.id)).toEqual(['c']);
+  });
+});
+
+describe('splitHeadless', () => {
+  it('moves automation runs out, preserving order on both sides', () => {
+    const rows = [
+      { id: 'a', headless: false },
+      { id: 'r1', headless: true },
+      { id: 'b' },
+      { id: 'r2', headless: true }
+    ];
+    const { headless, rest } = splitHeadless(rows);
+    expect(headless.map((s) => s.id)).toEqual(['r1', 'r2']);
+    expect(rest.map((s) => s.id)).toEqual(['a', 'b']);
   });
 });
 
