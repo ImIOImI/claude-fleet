@@ -34,7 +34,7 @@ export interface RunnerDeps {
   emitTodo?(automationId: string, runId: string, input: Record<string, unknown>): Promise<void>;
   emitNotify?(automationId: string, runId: string, input: Record<string, unknown>): Promise<void>;
   /** A `{"next": …}` request (#437). Throws on invalid input (recorded as a step warning). */
-  requestNext?(runId: string, raw: unknown, by: string): unknown;
+  requestNext?(runId: string, raw: unknown, by: string): unknown | Promise<unknown>;
 }
 
 /** Tools an unattended fresh session may always use: posting back to the inbox. */
@@ -116,7 +116,7 @@ async function runScriptStep(
   }
   const ev = run.trigger.event;
   const env = scriptEnv({
-    runId: run.id, automationName: a.name, args: run.args as Record<string, ParamValue>, state: deps.store.getState(a.id),
+    runId: run.id, automationName: a.name, args: run.args as Record<string, ParamValue>, state: await deps.store.getState(a.id),
     trigger: { kind: run.trigger.kind, ...(ev?.workspaceId ? { workspace: deps.workspaceName(ev.workspaceId) } : {}), ...(ev?.todoTitle ? { todo: ev.todoTitle } : {}) },
     secrets
   });
@@ -133,9 +133,9 @@ async function runScriptStep(
     for (const n of out.notifies) {
       try { await deps.emitNotify?.(a.id, run.id, n); notes++; } catch (e) { warnings.push(`notify "${String(n.title ?? '')}": ${(e as Error).message}`); }
     }
-    if (out.state !== undefined) deps.store.setState(a.id, out.state);
+    if (out.state !== undefined) await deps.store.setState(a.id, out.state);
     if (out.next !== undefined) {
-      try { deps.requestNext?.(run.id, out.next, step.id); } catch (e) { warnings.push(`next: ${(e as Error).message}`); }
+      try { await deps.requestNext?.(run.id, out.next, step.id); } catch (e) { warnings.push(`next: ${(e as Error).message}`); }
     }
   }
   const detail = {
@@ -145,16 +145,16 @@ async function runScriptStep(
     ...(res.stderr.trim() ? { stderr: tail(res.stderr, 20, 2000) } : {})
   };
   if (res.timedOut) {
-    deps.store.finishStep(stepRow, 'timed-out', { error: `the script was still running after ${Math.round(timeoutMs / 1000)}s`, detail }, deps.now());
+    await deps.store.finishStep(stepRow, 'timed-out', { error: `the script was still running after ${Math.round(timeoutMs / 1000)}s`, detail }, deps.now());
     throw new HandledStepError(`the script was still running after ${Math.round(timeoutMs / 1000)}s`, 'timed-out');
   }
   if (failed) {
     const why = `exited ${res.exitCode}${res.stderr.trim() ? `: ${tail(res.stderr, 3, 300)}` : ''}`;
-    deps.store.finishStep(stepRow, 'failed', { error: why, detail }, deps.now());
+    await deps.store.finishStep(stepRow, 'failed', { error: why, detail }, deps.now());
     throw new HandledStepError(why, 'failed');
   }
   const stop = res.exitCode === EXIT_NOTHING_TO_DO;
-  deps.store.finishStep(stepRow, stop ? 'nothing-to-do' : 'succeeded', { detail }, deps.now());
+  await deps.store.finishStep(stepRow, stop ? 'nothing-to-do' : 'succeeded', { detail }, deps.now());
   return { text: out.text, stop };
 }
 
@@ -169,7 +169,7 @@ export async function executeRun(deps: RunnerDeps, a: AutomationRecord, run: Run
     if ('script' in step) {
       const sc = step.script;
       const where = sc.runIn === 'host' ? null : sc.runIn ?? deps.automationsWorkspace?.() ?? null;
-      const stepRow = deps.store.startStep(run.id, step.id, 'script', where, deps.now());
+      const stepRow = await deps.store.startStep(run.id, step.id, 'script', where, deps.now());
       try {
         if (deps.now() - started >= runTimeout) throw new StepError(`the run passed its ${a.definition.timeout ?? '30m'} timeout`, 'timed-out');
         const timeout = Math.min(parseDuration(sc.timeout) ?? DEFAULT_SCRIPT_TIMEOUT_MS, runTimeout - (deps.now() - started));
@@ -179,13 +179,13 @@ export async function executeRun(deps: RunnerDeps, a: AutomationRecord, run: Run
       } catch (e) {
         const status = e instanceof StepError ? e.status : 'failed';
         const message = e instanceof Error ? e.message : String(e);
-        if (!(e instanceof HandledStepError)) deps.store.finishStep(stepRow, status, { error: message }, deps.now());
+        if (!(e instanceof HandledStepError)) await deps.store.finishStep(stepRow, status, { error: message }, deps.now());
         return { status, error: `${step.id}: ${message}` };
       }
       continue;
     }
     const p = step.prompt;
-    const stepId = deps.store.startStep(run.id, step.id, 'prompt', p.workspace, deps.now());
+    const stepId = await deps.store.startStep(run.id, step.id, 'prompt', p.workspace, deps.now());
     try {
       if (deps.now() - started >= runTimeout) throw new StepError(`the run passed its ${a.definition.timeout ?? '30m'} timeout`, 'timed-out');
       await prepare(deps, p.workspace, p.ensureRunning);
@@ -207,16 +207,16 @@ export async function executeRun(deps: RunnerDeps, a: AutomationRecord, run: Run
         } finally {
           await deps.closeFresh(p.workspace, sessionId);
         }
-        deps.store.finishStep(stepId, 'succeeded', { brokerSessionId: sessionId, detail: { via: 'fresh' } }, deps.now());
+        await deps.store.finishStep(stepId, 'succeeded', { brokerSessionId: sessionId, detail: { via: 'fresh' } }, deps.now());
         continue;
       }
       const res = await deps.post(p.workspace, text);
       if (p.wait) await waitIdle(deps, p.workspace, stepTimeout);
-      deps.store.finishStep(stepId, 'succeeded', { brokerSessionId: res.brokerSessionId ?? null, detail: { via: res.via } }, deps.now());
+      await deps.store.finishStep(stepId, 'succeeded', { brokerSessionId: res.brokerSessionId ?? null, detail: { via: res.via } }, deps.now());
     } catch (e) {
       const status = e instanceof StepError ? e.status : 'failed';
       const message = e instanceof Error ? e.message : String(e);
-      deps.store.finishStep(stepId, status, { error: message }, deps.now());
+      await deps.store.finishStep(stepId, status, { error: message }, deps.now());
       return { status, error: `${step.id}: ${message}` };
     }
   }

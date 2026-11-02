@@ -67,8 +67,10 @@ export function attachKeepRunning(win: BrowserWindow, hasTray: () => boolean): v
   });
 }
 
-export function startPresence(inbox: InboxStore, notify: NotifyService, approvals: () => number = () => 0): { hasTray: () => boolean; stop: () => void } {
-  const notifyStore = new NotifyStore(inbox.db);
+export function startPresence(
+  inbox: InboxStore, notify: NotifyService, approvals: () => number | Promise<number> = () => 0
+): { hasTray: () => boolean; stop: () => void } {
+  const notifyStore = new NotifyStore(inbox.kysely);
   let tray: Tray | null = null;
   try {
     tray = new Tray(trayImage('tray-none-16', 'tray-none-32'));
@@ -79,17 +81,22 @@ export function startPresence(inbox: InboxStore, notify: NotifyService, approval
     tray = null;
   }
   let lastKey = '';
+  let seq = 0;
 
   const sendOpenInbox = () => {
     const w = showWindow();
     w?.webContents.send('presence:openInbox');
   };
+  const fail = (e: unknown) => logError({ source: 'main', type: 'presence-update', level: 'warn', message: String(e) });
+  /** Tray menu actions write through the store, re-tick, then refresh everything. */
+  const act = (fn: () => Promise<unknown>) => () => { void fn().then(() => notify.tick()).then(emit, fail); };
 
-  const update = () => {
+  const update = async (): Promise<void> => {
+    const mine = ++seq;
     try {
-      const counts = inbox.counts();
-      const n = needsYou(counts.urgent, notify.waitingWorkspaces().length, approvals());
-      const q = notify.quietState();
+      const [counts, waitingApprovals, q] = await Promise.all([inbox.counts(), approvals(), notify.quietState()]);
+      if (mine !== seq) return; // a newer update is in flight
+      const n = needsYou(counts.urgent, notify.waitingWorkspaces().length, waitingApprovals);
       const quietText = q.pause ? (q.pause.until === null ? 'notifications paused' : `paused until ${new Date(q.pause.until).toTimeString().slice(0, 5)}`) : q.activeDowntime ? `${q.activeDowntime.name} downtime` : null;
       const key = JSON.stringify([n, counts, quietText]);
       if (key === lastKey) return;
@@ -114,31 +121,31 @@ export function startPresence(inbox: InboxStore, notify: NotifyService, approval
           { label: `Open ${PRODUCT}`, click: () => { showWindow(); } },
           { type: 'separator' },
           ...(paused
-            ? [{ label: 'Resume notifications', click: () => { notifyStore.clearPause(); notify.tick(); emit(); } }]
+            ? [{ label: 'Resume notifications', click: act(() => notifyStore.clearPause()) }]
             : [
-                { label: 'Pause notifications for 1 hour', click: () => { notifyStore.setPause({ until: Date.now() + 3_600_000, letUrgent: true, setAt: Date.now() }); notify.tick(); emit(); } },
-                { label: 'Pause until tomorrow 08:00', click: () => {
+                { label: 'Pause notifications for 1 hour', click: act(() => notifyStore.setPause({ until: Date.now() + 3_600_000, letUrgent: true, setAt: Date.now() })) },
+                { label: 'Pause until tomorrow 08:00', click: act(() => {
                   const d = new Date();
                   const until = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 8, 0).getTime();
-                  notifyStore.setPause({ until, letUrgent: true, setAt: Date.now() });
-                  notify.tick();
-                  emit();
-                } }
+                  return notifyStore.setPause({ until, letUrgent: true, setAt: Date.now() });
+                }) }
               ]),
           { type: 'separator' },
           { label: `Quit ${PRODUCT}`, click: () => { markQuitting(); app.quit(); } }
         ]));
       }
     } catch (e) {
-      logError({ source: 'main', type: 'presence-update', level: 'warn', message: String(e) });
+      fail(e);
     }
   };
+  const runUpdate = () => { void update(); };
   // Tray pause/resume go through the store directly, so tell the renderers too.
-  const emit = () => {
+  const emit = async (): Promise<void> => {
+    const q = await notify.quietState();
     for (const w of BrowserWindow.getAllWindows()) {
-      if (!w.isDestroyed()) w.webContents.send('notifications:changed', notify.quietState());
+      if (!w.isDestroyed()) w.webContents.send('notifications:changed', q);
     }
-    update();
+    await update();
   };
 
   const attention = () => {
@@ -151,17 +158,17 @@ export function startPresence(inbox: InboxStore, notify: NotifyService, approval
     }
   };
 
-  inboxEvents.on('changed', update);
+  inboxEvents.on('changed', runUpdate);
   inboxEvents.on('attention', attention);
-  const timer = setInterval(update, 60_000); // pauses/downtimes expire on their own
+  const timer = setInterval(runUpdate, 60_000); // pauses/downtimes expire on their own
   timer.unref?.();
-  update();
+  runUpdate();
 
   return {
     hasTray: () => tray !== null,
     stop: () => {
       clearInterval(timer);
-      inboxEvents.off('changed', update);
+      inboxEvents.off('changed', runUpdate);
       inboxEvents.off('attention', attention);
       tray?.destroy();
       tray = null;

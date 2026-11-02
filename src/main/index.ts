@@ -330,7 +330,7 @@ app.on('before-quit', async () => {
   await jsonlWatcher?.stop();
   await peerStatusWatcher?.stop();
   stopMcpServer();
-  inboxStore?.close();
+  await inboxStore?.close();
   inboxStore = null;
   await shutdownPerf();
   closeDb();
