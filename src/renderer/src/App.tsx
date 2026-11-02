@@ -348,7 +348,9 @@ export function App() {
   const handleLiveIds = useCallback((workspaceId: string, ids: string[]) => {
     setLiveBrokerByWorkspace((prev) => {
       const prevIds = prev[workspaceId] ?? [];
-      if (prevIds.length === ids.length && prevIds.every((id) => ids.includes(id))) return prev;
+      // Order-SENSITIVE: the Open group follows tab-strip order, so a tab drag
+      // must propagate even when the id set is unchanged.
+      if (prevIds.length === ids.length && prevIds.every((id, i) => id === ids[i])) return prev;
       return { ...prev, [workspaceId]: ids };
     });
   }, []);
@@ -884,6 +886,15 @@ export function App() {
   const activeTabId = selectedWorkspaceId
     ? activeTabByWorkspace[selectedWorkspaceId] ?? null
     : null;
+  // Claude session UUID of the tab the user is looking at — highlighted in
+  // the Sessions list so "where am I" is answerable at a glance.
+  let currentSessionId: string | null = null;
+  for (const [claudeId, ref] of openSessions) {
+    if (ref.workspaceId === selectedWorkspaceId && ref.brokerSessionId === activeTabId) {
+      currentSessionId = claudeId;
+      break;
+    }
+  }
   useEffect(() => {
     if (!apiReady || !selectedWorkspaceId || !activeTabId) {
       setActiveTabSummary(null);
@@ -1445,6 +1456,8 @@ export function App() {
           busySessionIds={effectiveBusySessionIds}
           waitingSessionIds={waitingSessionIds}
           openSessions={openSessions}
+          liveTabOrder={liveBrokerByWorkspace}
+          currentSessionId={currentSessionId}
           collapsed={leftCollapsed}
           onToggleCollapse={toggleLeftCollapsed}
           onResume={handleResumeSession}

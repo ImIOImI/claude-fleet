@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sessionsForScope, filterSessions, partitionByOpen, tagCounts, limitSessions } from './sessionsView';
+import { sessionsForScope, filterSessions, partitionByOpen, orderOpenByTabs, tagCounts, limitSessions } from './sessionsView';
 
 // Minimal session shape — only what the scope logic touches.
 const S = (id: string, workspaceId: string): { id: string; workspaceId: string } => ({
@@ -76,6 +76,32 @@ describe('filterSessions', () => {
     expect(filterSessions(items, '', ['mcp']).map((s) => s.id)).toEqual(['a', 'c']);
     expect(filterSessions(items, '', ['mcp', 'ci']).map((s) => s.id)).toEqual(['a', 'b', 'c']);
     expect(filterSessions(items, 'three', ['mcp']).map((s) => s.id)).toEqual(['c']);
+  });
+});
+
+describe('orderOpenByTabs', () => {
+  const ref = (workspaceId: string, brokerSessionId: string) => ({ workspaceId, brokerSessionId });
+  const open = new Map([
+    ['x', ref('wsA', 'b2')],
+    ['y', ref('wsA', 'b1')],
+    ['z', ref('wsB', 'b9')]
+  ]);
+  const live = { wsA: ['b1', 'b2'], wsB: ['b9'] };
+
+  it('follows tab-strip order, not activity order', () => {
+    const rows = [{ id: 'x' }, { id: 'z' }, { id: 'y' }];
+    expect(orderOpenByTabs(rows, open, live).map((s) => s.id)).toEqual(['y', 'x', 'z']);
+  });
+
+  it('is stable when activity reorders the input', () => {
+    const a = orderOpenByTabs([{ id: 'x' }, { id: 'y' }, { id: 'z' }], open, live);
+    const b = orderOpenByTabs([{ id: 'z' }, { id: 'y' }, { id: 'x' }], open, live);
+    expect(a.map((s) => s.id)).toEqual(b.map((s) => s.id));
+  });
+
+  it('keeps unmapped rows after mapped ones, in input order', () => {
+    const rows = [{ id: 'q' }, { id: 'x' }, { id: 'r' }];
+    expect(orderOpenByTabs(rows, open, live).map((s) => s.id)).toEqual(['x', 'q', 'r']);
   });
 });
 

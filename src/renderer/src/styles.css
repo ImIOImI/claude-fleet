@@ -552,6 +552,15 @@ body {
   background: color-mix(in oklch, var(--ok), transparent 93%);
 }
 .session-row.open:hover { border-color: var(--rule); border-left-color: var(--ok); }
+/* The tab you're in: full green outline, thick edge, stronger tint, bold
+   title — the one row in the list that reads as "you are here". */
+.session-row.open.current,
+.session-row.open.current:hover {
+  border: 1px solid color-mix(in oklch, var(--ok), transparent 45%);
+  border-left: 4px solid var(--ok);
+  background: color-mix(in oklch, var(--ok), transparent 80%);
+}
+.session-row.current .session-row-title { font-weight: 600; color: var(--ink); }
 .session-group-label {
   display: flex;
   align-items: center;
