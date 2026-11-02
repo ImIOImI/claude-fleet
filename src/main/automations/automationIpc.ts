@@ -119,7 +119,7 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     hostShells: hostShellIds,
     notify: notify ? (n) => { void notify.request(n).catch((e) => logError({ source: 'main', type: 'notify-request', level: 'warn', message: String(e) })); } : undefined,
     changed: () => { send('automations:changed'); emitInboxChanged(); },
-    onError: (e) => logError({ source: 'main', type: 'automation-event-run', level: 'warn', message: String(e) })
+    onError: (e) => logError({ source: 'main', type: 'automation-run', level: 'warn', message: String(e) })
   });
 
   // Proposals (#407 Phase 5): workspaces propose, the user approves.

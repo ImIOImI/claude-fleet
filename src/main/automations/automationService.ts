@@ -55,6 +55,11 @@ export interface RunRequest {
   event?: RunRow['trigger']['event'];
 }
 
+/** A non-manual start of a disabled automation; timer callers skip it quietly. */
+class DisabledError extends Error {
+  constructor(name: string) { super(`${name} is disabled`); }
+}
+
 export function createAutomationService(deps: AutomationDeps) {
   const { store } = deps;
   /** runId → automation + the workspaces its steps target (attribution). */
@@ -146,12 +151,18 @@ export function createAutomationService(deps: AutomationDeps) {
     const floorMs = parseDuration(cur?.definition.reschedule?.min);
     const ok = outcome.status === 'succeeded' || outcome.status === 'nothing-to-do';
     const unchanged = cur !== null && cur.enabled && cur.version === a.version && floorMs !== null;
+    const drop = (reason: string) => store.setRunReschedule(run.id, { requestedAt: next.at, appliedAt: null, clamped: false, by: next.by, reason });
+    const changedReason = 'the automation was changed or disabled during the run';
     if (!ok || !unchanged) {
-      await store.setRunReschedule(run.id, { requestedAt: next.at, appliedAt: null, clamped: false, by: next.by, reason: ok ? 'the automation was changed or disabled during the run' : `the run ${outcome.status === 'timed-out' ? 'timed out' : 'failed'}` });
+      await drop(ok ? changedReason : `the run ${outcome.status === 'timed-out' ? 'timed out' : 'failed'}`);
       return;
     }
     const applied = applyFloor(next.at, now, floorMs);
-    await store.setNextRun(a.id, applied.at, run.id);
+    // Conditional in the store: an edit or disable after the read above wins over this run's request.
+    if (!(await store.setNextRun(a.id, applied.at, run.id, { version: a.version, enabled: true }))) {
+      await drop(changedReason);
+      return;
+    }
     await store.setRunReschedule(run.id, { requestedAt: next.at, appliedAt: applied.at, clamped: applied.clamped, by: next.by });
   }
 
@@ -200,6 +211,8 @@ export function createAutomationService(deps: AutomationDeps) {
     const trigger = { kind: req.kind, ...(req.by ? { by: req.by } : {}), ...(req.cron ? { cron: req.cron } : {}), ...(req.event ? { event: req.event } : {}) };
     const now = deps.now();
     // --- synchronous from here to each store call: read + claim atomically ---
+    // Only a manual run may start a disabled automation (the user's Run now; MCP checks enabled itself).
+    if (!a.enabled && req.kind !== 'manual') throw new DisabledError(a.name);
     const running = claimed.has(id);
     const userManual = req.kind === 'manual' && req.by?.kind === 'user';
     const last = lastStart.get(id);
@@ -241,11 +254,14 @@ export function createAutomationService(deps: AutomationDeps) {
     for (const a of await store.list()) {
       const due = dueSchedule(a, now);
       if (!due) continue;
-      await store.setLastScheduled(a.id, now);
-      if (due.kind === 'rescheduled') await store.setNextRun(a.id, null);
+      // Conditional on the listed snapshot: a disable, edit or fresh run-chosen next fire since the list skips this fire.
+      const guard = { version: a.version, enabled: true as const, nextRunAt: a.nextRunAt };
+      if (!(await store.setLastScheduled(a.id, now, guard))) continue;
+      if (due.kind === 'rescheduled' && !(await store.setNextRun(a.id, null, null, guard))) continue;
       try {
         started.push(await start(a.id, { kind: due.kind, ...(due.cron ? { cron: due.cron } : {}), args: due.args }));
       } catch (e) {
+        if (e instanceof DisabledError) continue;
         started.push(await failedStart(a, { kind: due.kind, ...(due.cron ? { cron: due.cron } : {}) }, (e as Error).message));
       }
     }
@@ -337,6 +353,7 @@ export function createAutomationService(deps: AutomationDeps) {
               try {
                 await start(a.id, { kind: 'event', event: fired.event });
               } catch (err) {
+                if (err instanceof DisabledError) return;
                 const cur = await store.get(a.id);
                 if (cur) await failedStart(cur, { kind: 'event', event: fired.event }, (err as Error).message);
               }

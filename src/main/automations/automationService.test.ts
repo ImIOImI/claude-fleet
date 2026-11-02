@@ -330,3 +330,74 @@ describe('concurrent starts (async store)', () => {
     expect((await svc.get(a.id))?.runs.map((r) => r.status).sort()).toEqual(['skipped', 'succeeded']);
   });
 });
+
+describe('check-then-act stays atomic across awaits', () => {
+  const RESCHED = (min = '30m') => `name: watch\ntriggers:\n  - schedule: { cron: "0 * * * *" }\n  - manual: {}\nreschedule: { min: ${min} }\nsteps:\n  - id: look\n    script: { run: "look" }\n`;
+  const HOUR = 3_600_000;
+
+  it("an edit that lands while a run settles keeps the old run's next fire off the new version", async () => {
+    const { svc, store, at } = setup({ exec: () => ({ exitCode: 0, stdout: '{"next": {"in": "3h"}}' }) });
+    const a = await svc.create(RESCHED(), USER);
+    // Interleave deterministically: settleNext's read sees v1, then the edit commits before its write.
+    const get = store.get.bind(store);
+    const setRunStatus = store.setRunStatus.bind(store);
+    let armed = false;
+    store.setRunStatus = async (...args: Parameters<typeof setRunStatus>) => { await setRunStatus(...args); if (args[1] === 'succeeded') armed = true; };
+    store.get = async (id: string) => {
+      const r = await get(id);
+      if (armed) { armed = false; await Promise.all([svc.update(a.id, RESCHED('45m'), USER)]); }
+      return r;
+    };
+    await svc.run(a.id, { kind: 'manual', by: USER });
+    await svc.settle();
+    const v = (await svc.list())[0];
+    expect(v.version).toBe(2);
+    expect(v.nextSetByRun).toBeNull();
+    expect(v.nextFireAt).not.toBe(at() + 3 * HOUR);
+    expect((await get(a.id))?.nextRunAt).toBeNull();
+    expect((await svc.get(a.id))?.runs[0].reschedule).toMatchObject({ requestedAt: at() + 3 * HOUR, appliedAt: null, reason: 'the automation was changed or disabled during the run' });
+  });
+
+  it('a disable that lands after the tick lists automations fires nothing', async () => {
+    const { svc, store, advance } = setup();
+    const a = await svc.create(YAML(), USER);
+    advance(20 * 60_000); // the 10:15 slot is due
+    const list = store.list.bind(store);
+    let once = true;
+    store.list = async () => { const r = await list(); if (once) { once = false; await svc.setEnabled(a.id, false); } return r; };
+    expect(await svc.tick()).toEqual([]);
+    await svc.settle();
+    expect((await svc.get(a.id))?.runs).toEqual([]);
+  });
+
+  it('a fresh next_run_at written after the tick lists automations survives the tick', async () => {
+    const { svc, store, advance, at } = setup({ exec: () => ({ exitCode: 0, stdout: '{"next": {"in": "3h"}}' }) });
+    const a = await svc.create(RESCHED(), USER);
+    await svc.run(a.id, { kind: 'manual', by: USER });
+    await svc.settle();
+    advance(3 * HOUR); // the run-chosen fire is due
+    const fresh = at() + 5 * HOUR;
+    const list = store.list.bind(store);
+    let once = true;
+    store.list = async () => { const r = await list(); if (once) { once = false; await store.setNextRun(a.id, fresh, 'fresh-run'); } return r; };
+    expect(await svc.tick()).toEqual([]);
+    await svc.settle();
+    expect(await store.get(a.id)).toMatchObject({ nextRunAt: fresh, nextRunBy: 'fresh-run' });
+  });
+
+  it('a debounced event run is refused once the automation is disabled; a user run still starts', async () => {
+    const { svc, fire, notes } = setup();
+    const ev = `name: on-idle\ntriggers:\n  - event: { on: session.idle, debounce: 1s }\n  - manual: {}\nsteps:\n  - id: look\n    prompt: { workspace: ops-oncall, mode: live, message: "look" }\n`;
+    const a = await svc.create(ev, USER);
+    await svc.onEvent({ on: 'session.idle', workspaceId: 'W2' });
+    await svc.setEnabled(a.id, false);
+    await fire(1000);
+    await svc.settle();
+    expect((await svc.get(a.id))?.runs).toEqual([]);
+    expect(notes).toEqual([]);
+    await expect(svc.run(a.id, { kind: 'schedule' })).rejects.toThrow(/disabled/);
+    const r = await svc.run(a.id, { kind: 'manual', by: USER });
+    expect(r.status).toBe('running');
+    await svc.settle();
+  });
+});

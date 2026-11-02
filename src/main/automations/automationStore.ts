@@ -1,7 +1,7 @@
 // Automations repository (#407 Phase 3) over the inbox.db connection:
 // definitions + version history, tags, per-automation state, runs, step runs.
 // Async on Kysely; multi-statement writes are transactions (use trx inside).
-import { sql, type Kysely, type Transaction } from 'kysely';
+import { sql, type Kysely, type Transaction, type UpdateQueryBuilder, type UpdateResult } from 'kysely';
 import type {
   AutomationDef, ParamValue, RunRow, RunStatus, StepRunRow, TodoSource
 } from '../../preload/inboxTypes.js';
@@ -36,6 +36,20 @@ function toRecord(r: AutomationRow): AutomationRecord {
     createdAt: r.created_at, updatedAt: r.updated_at, lastScheduledAt: r.last_scheduled_at,
     nextRunAt: r.next_run_at, nextRunBy: r.next_run_by
   };
+}
+
+/** A conditional write: the row must still be this version, enabled, and (when given) hold this next_run_at. */
+export interface WriteGuard {
+  version: number;
+  enabled: true;
+  nextRunAt?: number | null;
+}
+
+function guarded<Q extends UpdateQueryBuilder<InboxDb, 'automations', 'automations', UpdateResult>>(q: Q, g: WriteGuard | undefined): Q {
+  if (!g) return q;
+  let w = q.where('version', '=', g.version).where('enabled', '=', 1);
+  if (g.nextRunAt !== undefined) w = g.nextRunAt === null ? w.where('next_run_at', 'is', null) : w.where('next_run_at', '=', g.nextRunAt);
+  return w as Q;
 }
 
 export class AutomationStore {
@@ -117,13 +131,16 @@ export class AutomationStore {
     await this.db.updateTable('automations').set({ origin: origin ? JSON.stringify(origin) : null }).where('id', '=', id).execute();
   }
 
-  async setLastScheduled(id: string, ts: number): Promise<void> {
-    await this.db.updateTable('automations').set({ last_scheduled_at: ts }).where('id', '=', id).execute();
+  /** With a guard, writes only if the row still matches it (check-then-act in one statement); true if a row changed. */
+  async setLastScheduled(id: string, ts: number, guard?: WriteGuard): Promise<boolean> {
+    const r = await guarded(this.db.updateTable('automations').set({ last_scheduled_at: ts }).where('id', '=', id), guard).executeTakeFirst();
+    return num(r.numUpdatedRows) > 0;
   }
 
-  /** A run-chosen next fire (#437); null clears it. */
-  async setNextRun(id: string, at: number | null, byRun: string | null = null): Promise<void> {
-    await this.db.updateTable('automations').set({ next_run_at: at, next_run_by: at === null ? null : byRun }).where('id', '=', id).execute();
+  /** A run-chosen next fire (#437); null clears it. Guarded like setLastScheduled. */
+  async setNextRun(id: string, at: number | null, byRun: string | null = null, guard?: WriteGuard): Promise<boolean> {
+    const r = await guarded(this.db.updateTable('automations').set({ next_run_at: at, next_run_by: at === null ? null : byRun }).where('id', '=', id), guard).executeTakeFirst();
+    return num(r.numUpdatedRows) > 0;
   }
 
   /** Script state (#407 Phase 7): the last `{"state": …}` a script printed. */
