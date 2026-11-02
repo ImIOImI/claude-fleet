@@ -8,7 +8,7 @@ import { InboxStore, INBOX_SCHEMA_VERSION } from './inboxDb.js';
 const WS = { kind: 'workspace', id: 'W1' } as const;
 const USER = { kind: 'user', id: null } as const;
 let store: InboxStore;
-afterEach(() => store?.close());
+afterEach(async () => await store?.close());
 
 describe('InboxStore.post', () => {
   it('creates a todo with defaults and a created event', () => {
@@ -101,11 +101,11 @@ describe('InboxStore.list / counts', () => {
 });
 
 describe('InboxStore.open', () => {
-  it('creates inbox.db with WAL and the schema version', () => {
+  it('creates inbox.db with WAL and the schema version', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'inbox-'));
     store = InboxStore.open(dir);
     store.post(USER, { title: 'persist me' });
-    store.close();
+    await store.close();
     store = InboxStore.open(dir);
     expect(store.list().map((t) => t.title)).toEqual(['persist me']);
     const raw = new Database(path.join(dir, 'inbox.db'), { readonly: true });

@@ -3,10 +3,12 @@
 // that names the SQLite dialect. Part 3 adds the Postgres dialect beside it.
 //
 // Invariant the stores rely on: Kysely's SQLite driver runs every query on the
-// single wrapped connection behind a mutex, and a transaction holds that mutex
-// until it commits. So no other store call can interleave inside an open
-// transaction — and a query on the OUTER handle from inside a transaction
-// callback deadlocks. Inside `transaction().execute(async (trx) => …)`, use trx.
+// single wrapped connection behind a ConnectionMutex, so Kysely queries and
+// transactions on this instance are serialized. However, raw better-sqlite3 calls
+// on the same connection bypass the mutex. While any store is still raw, a
+// Kysely transaction callback must not await anything except Kysely queries on
+// its `trx` — a raw call could run between awaits and lose writes. The gap
+// closes when the raw handle is removed (part 1, Task 5).
 import type Database from 'better-sqlite3';
 import { Kysely, SqliteDialect } from 'kysely';
 
