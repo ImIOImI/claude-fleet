@@ -46,10 +46,13 @@ const isAuthStatus = (status: number): boolean => status === 401 || status === 4
 
 /** An empty/whitespace-only token is treated as "no credential" (#444 minor),
  *  not a malformed one — the distinction matters because the former should
- *  fall through to the anonymous flow and the latter should reject outright. */
+ *  fall through to the anonymous flow and the latter should reject outright.
+ *  A pasted token is trimmed here so leading/trailing whitespace from a copy
+ *  doesn't make it into a header; inner characters are still validated by
+ *  assertTokenShape. */
 function normalizeCred(cred?: RegistryCredential | null): RegistryCredential | null {
   if (!cred || !cred.token || !cred.token.trim()) return null;
-  return cred;
+  return { ...cred, token: cred.token.trim() };
 }
 
 /**

@@ -335,6 +335,21 @@ describe('ociClient sanitised errors (#444 security review)', () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.message).not.toContain('maybe-a-secret-looking string');
   });
+
+  it('wraps a non-JSON manifest response body in a generic error (no body snippet)', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes('/token?')) return Response.json({ token: 'public-bearer' });
+      if (/\/manifests\/[^/]+$/.test(u)) {
+        return new Response('<html>not json, maybe-a-secret-looking string</html>', { status: 200 });
+      }
+      return new Response('not found', { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const err = await fetchAnnotations(REF).catch((e: unknown) => e as Error);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).not.toContain('maybe-a-secret-looking string');
+  });
 });
 
 describe('ociClient minor hardening (#444 security review)', () => {
