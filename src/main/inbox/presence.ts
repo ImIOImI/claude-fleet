@@ -89,7 +89,7 @@ export function startPresence(
   };
   const fail = (e: unknown) => logError({ source: 'main', type: 'presence-update', level: 'warn', message: String(e) });
   /** Tray menu actions write through the store, re-tick, then refresh everything. */
-  const act = (fn: () => Promise<unknown>) => () => { void fn().then(() => notify.tick()).then(emit, fail); };
+  const act = (fn: () => Promise<unknown>) => () => { void fn().then(() => notify.tick()).then(emit).catch(fail); };
 
   const update = async (): Promise<void> => {
     const mine = ++seq;

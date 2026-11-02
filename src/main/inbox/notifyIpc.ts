@@ -36,6 +36,7 @@ function focusMain(): BrowserWindow | null {
   return w;
 }
 
+/** Wire notifications. Returns the service so inboxIpc can route post side-effects. */
 export function registerNotifyIpc(inbox: InboxStore): NotifyService {
   const store = new NotifyStore(inbox.kysely);
   const names = new Map<string, string>();
