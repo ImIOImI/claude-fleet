@@ -1,15 +1,11 @@
 // Proposals repository (#407 Phase 5) over the inbox.db connection. Never
-// pruned: proposals and decisions are the audit trail.
-import type Database from 'better-sqlite3';
-import type { Proposal, ProposalItem, ProposalKind, ProposalStatus, TodoSource } from '../../preload/inboxTypes.js';
+// pruned: proposals and decisions are the audit trail. Async on Kysely.
+import { sql, type Kysely } from 'kysely';
+import type { Proposal, ProposalItem } from '../../preload/inboxTypes.js';
 import { newId } from '../inbox/inboxDb.js';
+import type { InboxDb, ProposalRow } from '../store/inboxSchema.js';
 
-interface PRow {
-  id: string; kind: ProposalKind; proposer_kind: TodoSource['kind']; proposer_id: string | null; rationale: string | null;
-  status: ProposalStatus; items: string; note: string | null; created_at: number; decided_at: number | null;
-}
-
-function toProposal(r: PRow): Proposal {
+function toProposal(r: ProposalRow): Proposal {
   return {
     id: r.id, kind: r.kind, proposer: { kind: r.proposer_kind, id: r.proposer_id }, rationale: r.rationale, status: r.status,
     items: JSON.parse(r.items) as ProposalItem[], note: r.note, createdAt: r.created_at, decidedAt: r.decided_at
@@ -17,30 +13,36 @@ function toProposal(r: PRow): Proposal {
 }
 
 export class ProposalStore {
-  constructor(private readonly db: Database.Database) {}
+  constructor(private readonly db: Kysely<InboxDb>) {}
 
-  create(p: Omit<Proposal, 'id' | 'decidedAt' | 'note'>, now = Date.now()): Proposal {
+  async create(p: Omit<Proposal, 'id' | 'decidedAt' | 'note'>, now = Date.now()): Promise<Proposal> {
     const id = newId(now);
-    this.db.prepare('INSERT INTO proposals (id, kind, proposer_kind, proposer_id, rationale, status, items, created_at, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(id, p.kind, p.proposer.kind, p.proposer.id, p.rationale, p.status, JSON.stringify(p.items), now, p.status === 'pending' ? null : now);
-    return this.get(id)!;
+    await this.db.insertInto('proposals').values({
+      id, kind: p.kind, proposer_kind: p.proposer.kind, proposer_id: p.proposer.id, rationale: p.rationale, status: p.status,
+      items: JSON.stringify(p.items), created_at: now, decided_at: p.status === 'pending' ? null : now
+    }).execute();
+    return (await this.get(id))!;
   }
 
-  get(id: string): Proposal | null {
-    const r = this.db.prepare('SELECT * FROM proposals WHERE id = ?').get(id) as PRow | undefined;
+  async get(id: string): Promise<Proposal | null> {
+    const r = await this.db.selectFrom('proposals').selectAll().where('id', '=', id).executeTakeFirst();
     return r ? toProposal(r) : null;
   }
 
-  list(limit = 100): Proposal[] {
-    return (this.db.prepare(`SELECT * FROM proposals ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, created_at DESC LIMIT ?`).all(limit) as PRow[]).map(toProposal);
+  async list(limit = 100): Promise<Proposal[]> {
+    const rows = await this.db.selectFrom('proposals').selectAll()
+      .orderBy(sql`CASE status WHEN 'pending' THEN 0 ELSE 1 END`).orderBy('created_at', 'desc').limit(limit).execute();
+    return rows.map(toProposal);
   }
 
-  pending(): Proposal[] {
-    return (this.db.prepare(`SELECT * FROM proposals WHERE status = 'pending' ORDER BY created_at`).all() as PRow[]).map(toProposal);
+  async pending(): Promise<Proposal[]> {
+    const rows = await this.db.selectFrom('proposals').selectAll().where('status', '=', 'pending').orderBy('created_at').execute();
+    return rows.map(toProposal);
   }
 
-  save(p: Proposal): void {
-    this.db.prepare('UPDATE proposals SET status = ?, items = ?, note = ?, decided_at = ? WHERE id = ?')
-      .run(p.status, JSON.stringify(p.items), p.note, p.decidedAt, p.id);
+  async save(p: Proposal): Promise<void> {
+    await this.db.updateTable('proposals')
+      .set({ status: p.status, items: JSON.stringify(p.items), note: p.note, decided_at: p.decidedAt })
+      .where('id', '=', p.id).execute();
   }
 }

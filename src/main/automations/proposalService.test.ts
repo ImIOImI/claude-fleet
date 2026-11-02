@@ -14,7 +14,7 @@ function setup(trusted: string[] = []) {
   const notes: Array<Record<string, unknown>> = [];
   let t = 1_000_000;
   const svc = createProposalService({
-    proposals: new ProposalStore(inbox.db), automations, now: () => ++t,
+    proposals: new ProposalStore(inbox.kysely), automations, now: () => ++t,
     resolveWorkspace: (v) => WSS[v] ?? (Object.values(WSS).includes(v) ? v : null),
     workspaceName: (id) => Object.entries(WSS).find(([, v]) => v === id)?.[0] ?? id,
     trusted: async (id) => trusted.includes(id),
@@ -37,11 +37,11 @@ describe('proposing', () => {
     const { svc, notes } = setup();
     const r = await svc.mcp.propose('W2', { definition: YAML(), rationale: 'I keep missing 5xx spikes' });
     expect(r).toMatchObject({ status: 'pending', items: [{ name: 'log-watch', decision: 'pending', reasons: ['new automation'] }] });
-    const p = svc.list()[0];
+    const p = (await svc.list())[0];
     expect(p).toMatchObject({ kind: 'new', proposer: { kind: 'workspace', id: 'W2' }, rationale: 'I keep missing 5xx spikes' });
     expect(p.items[0].flags).toEqual(['prompts ops-oncall (live session)', 'runs every 15 min']);
     expect(notes[0]).toMatchObject({ kind: 'proposal', title: 'webex-triage proposes a new automation: log-watch' });
-    expect(svc.pendingCount()).toBe(1);
+    expect(await svc.pendingCount()).toBe(1);
   });
   it('rejects invalid definitions and name collisions with readable errors', async () => {
     const { svc, automations } = setup();
@@ -53,7 +53,7 @@ describe('proposing', () => {
     const { svc } = setup();
     await svc.mcp.propose('W2', { definition: YAML() });
     await svc.mcp.propose('W2', { definition: YAML('log-watch', '*/30 * * * *') });
-    expect(svc.list().map((p) => p.status).sort()).toEqual(['pending', 'superseded']);
+    expect((await svc.list()).map((p) => p.status).sort()).toEqual(['pending', 'superseded']);
   });
 });
 
@@ -61,17 +61,17 @@ describe('approving', () => {
   it('approve creates the automation as the proposer; edit-then-approve uses the edited YAML', async () => {
     const { svc, automations } = setup();
     const { id } = await svc.mcp.propose('W2', { definition: YAML() });
-    const p = svc.approve(id, { editedYaml: YAML('log-watch', '*/20 * * * *') });
+    const p = await svc.approve(id, { editedYaml: YAML('log-watch', '*/20 * * * *') });
     expect(p.status).toBe('approved');
     const a = automations.byName('log-watch')!;
     expect(a.createdBy).toEqual({ kind: 'workspace', id: 'W2' });
     expect((a.definition.triggers[0] as { schedule: { cron: string } }).schedule.cron).toBe('*/20 * * * *');
-    expect(() => svc.approve(id)).toThrow(/already approved/);
+    await expect(svc.approve(id)).rejects.toThrow(/already approved/);
   });
   it('reject declines with a note the workspace can read', async () => {
     const { svc } = setup();
     const { id } = await svc.mcp.propose('W2', { definition: YAML() });
-    svc.reject(id, 'too noisy');
+    await svc.reject(id, 'too noisy');
     expect(await svc.mcp.get('W2', { id })).toMatchObject({ status: 'rejected', note: 'too noisy' });
     await expect(svc.mcp.get('W1', { id })).rejects.toThrow(/not found/);
   });
@@ -80,7 +80,7 @@ describe('approving', () => {
     const a = automations.create({ name: 'log-watch', triggers: [{ schedule: { cron: '*/15 * * * *' } }], steps: [{ id: 'check', prompt: { workspace: 'W1', mode: 'live', message: 'check logs' } }] }, { kind: 'user', id: null });
     const { id } = await svc.mcp.proposeChange('W2', { id: 'log-watch', definition: YAML('log-watch', '*/15 * * * *', 'tags: [ops]\n') });
     automations.update(a.id, { ...automations.get(a.id)!.definition, description: 'edited by you' }, { kind: 'user', id: null });
-    expect(() => svc.approve(id)).toThrow(/changed since this was proposed \(now v2\)/);
+    await expect(svc.approve(id)).rejects.toThrow(/changed since this was proposed \(now v2\)/);
   });
 });
 
@@ -101,10 +101,10 @@ describe('trusted tier + batches', () => {
     expect(r.status).toBe('pending');
     expect(r.items.map((i) => [i.name, i.decision])).toEqual([['log-watch', 'auto-applied'], ['queue-watch', 'pending']]);
     expect(automations.byName('log-watch')!.version).toBe(2);
-    const p = svc.approve(r.id, { accept: [] });
+    const p = await svc.approve(r.id, { accept: [] });
     expect(p.status).toBe('partial');
     expect(p.items[1].decision).toBe('declined');
-    const reverted = svc.revert(r.id, 0);
+    const reverted = await svc.revert(r.id, 0);
     expect(reverted.items[0].decision).toBe('reverted');
     expect(automations.byName('log-watch')!.definition.tags).toBeUndefined();
     expect(automations.byName('log-watch')!.version).toBe(3);
@@ -114,5 +114,17 @@ describe('trusted tier + batches', () => {
     seed(automations, 'log-watch');
     const r = await svc.mcp.proposeChange('W2', { id: 'log-watch', definition: YAML('log-watch', '*/15 * * * *', 'tags: [ops]\n') });
     expect(r.items[0]).toMatchObject({ decision: 'pending', lowRisk: true });
+  });
+});
+
+describe('decision guard', () => {
+  it('two concurrent approvals of one proposal apply it once', async () => {
+    const { svc, automations } = setup();
+    await svc.mcp.propose('W2', { definition: YAML() });
+    const p = (await svc.list())[0];
+    const results = await Promise.allSettled([svc.approve(p.id), svc.approve(p.id)]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(String((results.find((r) => r.status === 'rejected') as PromiseRejectedResult).reason)).toMatch(/already being decided|already approved/);
+    expect((await automations.list()).filter((a) => a.name === 'log-watch')).toHaveLength(1);
   });
 });

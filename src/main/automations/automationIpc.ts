@@ -123,7 +123,7 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
 
   // Proposals (#407 Phase 5): workspaces propose, the user approves.
   const proposals = createProposalService({
-    proposals: new ProposalStore(inbox.db),
+    proposals: new ProposalStore(inbox.kysely),
     automations: store,
     now: Date.now,
     resolveWorkspace: (v) => names.find((n) => n.id === v)?.id ?? names.find((n) => n.name === v)?.id ?? null,
@@ -242,7 +242,7 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
   ipcMain.handle('automations:discuss', async (_e, proposalId: string) => {
     await refresh();
     if (!roleWs) throw new Error('set up an automations workspace first');
-    const p = proposals.list().find((x) => x.id === proposalId);
+    const p = (await proposals.list()).find((x) => x.id === proposalId);
     if (!p) throw new Error('proposal not found');
     await hostPostToWorkspace(roleWs, reviewPrompt(p, (id) => names.find((n) => n.id === id)?.name ?? id));
     return roleWs;
@@ -272,9 +272,9 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     if (!a) throw new Error('automation not found');
     return toRole((ctx) => changePrompt(a.name, definitionToYaml(a.definition), d, ctx));
   });
-  ipcMain.handle('proposals:refine', (_e, id: string, index: number, text: string) => {
+  ipcMain.handle('proposals:refine', async (_e, id: string, index: number, text: string) => {
     const d = need(text, 'the changes');
-    const p = proposals.list().find((x) => x.id === id);
+    const p = (await proposals.list()).find((x) => x.id === id);
     const it = p?.items[index ?? 0];
     if (!p || !it) throw new Error('proposal not found');
     if (p.status !== 'pending') throw new Error(`this proposal is already ${p.status}`);
