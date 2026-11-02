@@ -98,13 +98,19 @@ canary or rolling deploy overlaps old and new, and a warm-standby cluster may ru
 Two schedulers would fire every automation twice, and two ingesters would race on the same
 transcripts. So:
 - **The deployment should run one replica and avoid overlap** (scale a standby to zero,
-  `Recreate` strategy). That's the first line of defence, but it isn't relied on.
+  `Recreate` where the platform offers it). That's the first line of defence, but it isn't relied on; canary and rolling deploys also work because of the lease (below).
 - **A fenced lease in the host DB is the correctness backstop.** The row is
   `host_lease(workspace_id PK, holder, epoch, expires_at)`.
   - On start, `fleet-host` acquires the lease by taking it when expired and bumping `epoch`, then
     renews it every 10 s with a 30 s TTL.
-  - Until it holds the lease, the process is **standby**. It reports not-ready, runs no scheduler
-    or ingest, serves no RPC or attach, and creates no broker sessions.
+  - Until it holds the lease, the process is **standby**. It runs no scheduler or ingest, serves no
+    RPC or attach, and creates no broker sessions.
+  - **Readiness is not lease state.** The pod is *ready* when the process is healthy (DB reachable,
+    lease loop running), whether it's holder or standby. Lease state is reported as data (below). If
+    readiness waited for the lease, a rolling or canary deploy would deadlock: the new pod waits on
+    the lease the old pod keeps renewing, and the rollout waits on the new pod.
+  - **On SIGTERM the holder releases the lease.** It finishes or abandons the in-flight step, closes
+    broker sessions cleanly, then clears `holder`, so the next pod takes it within one renew tick (≤10 s).
   - Every write transaction checks `epoch` against the lease row inside the transaction. A stale
     holder's write fails, and the process drops to standby and exits.
 
@@ -232,7 +238,8 @@ request carries `Authorization: Bearer <GitHub token>`. WebSockets send it on up
 
 | Route | Purpose | Tier |
 |---|---|---|
-| `GET /healthz` | Liveness and lease state (`ready` only while holding the lease). Unauthenticated. | none |
+| `GET /healthz` | Process health, used by liveness/readiness probes. 200 whenever healthy, holder or standby. The body reports `{"lease": "holder" \| "standby"}`. Unauthenticated. | none |
+| `GET /leader` | 200 only on the lease holder, 503 on a standby. For routing or diagnostics; **no Kubernetes probe uses it.** Unauthenticated. | none |
 | `GET /whoami` | `{ workspace: {id, name, description, color}, user, tier }` | read |
 | `POST /rpc/<channel>` | RPC mirroring IPC channel names and payloads (`sessions:list`, `observability:summaryForWorkspace`, `observability:eventsForSession`, `automations:list`, `automations:get`, `automations:run`, `proposals:list`, `proposals:approve`, `inbox:list`, `inbox:update`, …). Each channel declares its tier. | per channel |
 | `GET /attach` (WebSocket) | Terminal attach: tunnels the broker frame protocol (`[u32 len][u8 type][payload]`, §5 *Broker frame protocol*). | read; frame-gated |
@@ -286,6 +293,11 @@ request carries `Authorization: Bearer <GitHub token>`. WebSockets send it on up
   BLOBs (`vectors.ts`). Postgres uses pgvector (`vector(384)`, cosine distance, an HNSW index).
   Both sit behind `searchEmbeddings(query, scope, limit)`.
 - `fleet-host` uses the same store layer, always on Postgres.
+- **The Postgres password comes from a provider, not a fixed string.** Config is
+  `password: { kind: 'static' | 'env' | 'aws-rds-iam' }`. The pool calls the provider on **every new
+  connection** (the `pg` pool's async `password` function). `aws-rds-iam` mints a 15-minute token with
+  the RDS signer, using the pod's workload identity, so no long-lived DB password exists. Other
+  clouds' IAM tokens can be added as providers.
 
 **Remote hosts keep their own data.** Each remote host's Postgres holds its workspace's data. None
 of it is copied into a desktop's DB.
