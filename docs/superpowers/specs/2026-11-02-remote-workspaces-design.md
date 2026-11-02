@@ -261,9 +261,11 @@ request carries `Authorization: Bearer <GitHub token>`. WebSockets send it on up
   with backoff) and the token.
 - **TLS** terminates wherever the deployment provides it: an ingress, a load balancer or a
   service-mesh gateway. In-pod TLS is optional. It isn't needed where a mesh already encrypts
-  pod-to-pod traffic and the client path is encrypted (TLS ingress or an encrypted tunnel). The
-  desktop refuses plain `http://` URLs except for loopback and hosts the user explicitly marks
-  "encrypted by network" when adding the workspace, because bearer tokens cross the wire.
+  pod-to-pod traffic and the client path is encrypted (TLS ingress or an encrypted tunnel). Plain
+  `http://` host URLs are **allowed** for now, so deployments that rely on network-level encryption
+  (a mesh or an encrypted tunnel) work without in-pod certificates. The add-workspace form shows a
+  one-line warning for a non-loopback `http://` URL, because bearer tokens cross the wire. Requiring
+  TLS is an open question (§13).
 
 ## 7. Data architecture: federation, not replication
 
@@ -555,3 +557,6 @@ Each change lands in the same commit as the sub-project that causes it.
 5. **Caching remote data later.** Live-only is decided for now. If offline viewing becomes
    necessary, *recommendation:* a read-through cache of recent session metadata and summaries
    (not raw events) with a visible "as of" time, keeping the host authoritative.
+6. **Requiring TLS.** Plain `http://` is allowed for now (§6), relying on network-level encryption.
+   *Recommendation:* revisit before any deployment where the client path isn't encrypted by a mesh
+   or tunnel. The options are refusing non-loopback `http://`, or an explicit per-host opt-in.
