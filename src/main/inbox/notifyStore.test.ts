@@ -93,7 +93,7 @@ describe('schema v1 → v2 migration', () => {
       PRAGMA user_version = 1;`);
     v1.close();
     inbox = InboxStore.open(dir);
-    expect(inbox.list().map((t) => t.title)).toEqual(['kept']);
+    expect((await inbox.list()).map((t) => t.title)).toEqual(['kept']);
     expect(readdirSync(dir).some((f) => /^inbox\.db\.bak-v1-\d+$/.test(f))).toBe(true);
     expect(await new NotifyStore(inbox.kysely).rules()).toEqual([]);
   });

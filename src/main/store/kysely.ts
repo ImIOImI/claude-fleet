@@ -4,11 +4,12 @@
 //
 // Invariant the stores rely on: Kysely's SQLite driver runs every query on the
 // single wrapped connection behind a ConnectionMutex, so Kysely queries and
-// transactions on this instance are serialized. However, raw better-sqlite3 calls
-// on the same connection bypass the mutex. While any store is still raw, a
-// Kysely transaction callback must not await anything except Kysely queries on
-// its `trx` — a raw call could run between awaits and lose writes. The gap
-// closes when the raw handle is removed (part 1, Task 5).
+// transactions on this instance are serialized — every inbox.db query goes
+// through this mutex, with no raw better-sqlite3 handle left to bypass it. A
+// transaction callback must still await only Kysely queries on its `trx`
+// (never the outer `db`/`kysely` handle): an outer-handle query inside a
+// transaction would queue behind the mutex the transaction already holds and
+// deadlock.
 import type Database from 'better-sqlite3';
 import { Kysely, SqliteDialect } from 'kysely';
 

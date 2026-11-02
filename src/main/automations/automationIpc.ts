@@ -138,7 +138,9 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     changed: () => {
       send('automations:changed');
       send('proposals:changed');
-      broadcastInboxChanged(inbox.counts(), BrowserWindow.getAllWindows());
+      void inbox.counts()
+        .then((c) => broadcastInboxChanged(c, BrowserWindow.getAllWindows()))
+        .catch((e) => logError({ source: 'main', type: 'inbox-broadcast', level: 'warn', message: String(e) }));
       emitInboxChanged();
     }
   });

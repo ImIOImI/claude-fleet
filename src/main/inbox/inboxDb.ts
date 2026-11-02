@@ -4,13 +4,13 @@
 import Database from 'better-sqlite3';
 import { copyFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
+import { sql, type Kysely, type Transaction } from 'kysely';
 import type {
-  InboxCounts, PostTodoInput, Todo, TodoEvent, TodoEventKind, TodoFilter, TodoSource, UpdateTodoPatch
+  InboxCounts, PostTodoInput, Todo, TodoEvent, TodoFilter, TodoSource, UpdateTodoPatch
 } from '../../preload/inboxTypes.js';
 import { isPriority, maxPriority, normalizeTag, normalizeTags, MAX_TAGS } from './inboxCore.js';
-import type { Kysely } from 'kysely';
-import { sqliteKysely } from '../store/kysely.js';
-import type { InboxDb } from '../store/inboxSchema.js';
+import { num, sqliteKysely } from '../store/kysely.js';
+import type { InboxDb, TodoRow } from '../store/inboxSchema.js';
 
 export const INBOX_SCHEMA_VERSION = 5;
 
@@ -197,19 +197,12 @@ export function newId(now = Date.now()): string {
   return time + rand;
 }
 
-interface TodoRow {
-  id: string; title: string; body: string | null; status: Todo['status']; priority: Todo['priority'];
-  source_kind: TodoSource['kind']; source_id: string | null; source_run_id: string | null;
-  via_workspace: string | null; dedupe_key: string | null; seen_count: number; recurred: number;
-  workspace_id: string | null; session_id: string | null; created_at: number; updated_at: number;
-  first_seen_at: number; last_seen_at: number; closed_at: number | null;
-}
+type Q = Kysely<InboxDb> | Transaction<InboxDb>;
 
-const PRIORITY_ORDER = `CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END`;
+const PRIORITY_ORDER = sql<number>`CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END`;
 
 export class InboxStore {
-  /** `db` is the raw connection (removed once every store is on `kysely`, Task 5). */
-  private constructor(readonly db: Database.Database, readonly kysely: Kysely<InboxDb>) {}
+  private constructor(private readonly raw: Database.Database, readonly kysely: Kysely<InboxDb>) {}
 
   static open(dir: string): InboxStore {
     const file = path.join(dir, 'inbox.db');
@@ -244,172 +237,174 @@ export class InboxStore {
   async close(): Promise<void> {
     // destroy() only closes the connection if Kysely ever ran a query, so close the raw handle too.
     await this.kysely.destroy();
-    if (this.db.open) this.db.close();
+    if (this.raw.open) this.raw.close();
   }
 
   // --- reads --------------------------------------------------------------
 
-  private tagsFor(id: string): string[] {
-    return (this.db
-      .prepare(`SELECT tag FROM tags WHERE entity_kind = 'todo' AND entity_id = ? ORDER BY tag`)
-      .all(id) as Array<{ tag: string }>).map((r) => r.tag);
+  private async tagsFor(q: Q, id: string): Promise<string[]> {
+    const rows = await q.selectFrom('tags').select('tag').where('entity_kind', '=', 'todo').where('entity_id', '=', id).orderBy('tag').execute();
+    return rows.map((r) => r.tag);
   }
 
-  private toTodo(r: TodoRow): Todo {
+  private async toTodo(q: Q, r: TodoRow): Promise<Todo> {
     return {
       id: r.id, title: r.title, body: r.body, status: r.status, priority: r.priority,
       source: { kind: r.source_kind, id: r.source_id }, sourceRunId: r.source_run_id,
       viaWorkspace: r.via_workspace, dedupeKey: r.dedupe_key, seenCount: r.seen_count,
       recurred: r.recurred === 1, workspaceId: r.workspace_id, sessionId: r.session_id,
-      tags: this.tagsFor(r.id), createdAt: r.created_at, updatedAt: r.updated_at,
+      tags: await this.tagsFor(q, r.id), createdAt: r.created_at, updatedAt: r.updated_at,
       firstSeenAt: r.first_seen_at, lastSeenAt: r.last_seen_at, closedAt: r.closed_at
     };
   }
 
-  get(id: string): Todo | null {
-    const r = this.db.prepare('SELECT * FROM todos WHERE id = ?').get(id) as TodoRow | undefined;
-    return r ? this.toTodo(r) : null;
+  private async getWith(q: Q, id: string): Promise<Todo | null> {
+    const r = await q.selectFrom('todos').selectAll().where('id', '=', id).executeTakeFirst();
+    return r ? this.toTodo(q, r) : null;
   }
 
-  events(id: string): TodoEvent[] {
-    const rows = this.db.prepare('SELECT * FROM todo_events WHERE todo_id = ? ORDER BY id').all(id) as Array<{
-      id: number; todo_id: string; ts: number; kind: TodoEventKind; actor_kind: TodoSource['kind'];
-      actor_id: string | null; run_id: string | null; detail: string | null;
-    }>;
+  get(id: string): Promise<Todo | null> {
+    return this.getWith(this.kysely, id);
+  }
+
+  async events(id: string): Promise<TodoEvent[]> {
+    const rows = await this.kysely.selectFrom('todo_events').selectAll().where('todo_id', '=', id).orderBy('id').execute();
     return rows.map((e) => ({
       id: e.id, todoId: e.todo_id, ts: e.ts, kind: e.kind, actor: { kind: e.actor_kind, id: e.actor_id },
       runId: e.run_id, detail: e.detail ? (JSON.parse(e.detail) as Record<string, unknown>) : null
     }));
   }
 
-  list(filter: TodoFilter = {}): Todo[] {
-    const where: string[] = [];
-    const params: unknown[] = [];
+  async list(filter: TodoFilter = {}): Promise<Todo[]> {
     const status = filter.status ?? 'open';
-    if (status !== 'all') {
-      where.push('status = ?');
-      params.push(status);
-    }
-    if (filter.visibleTo) {
-      where.push(`((source_kind = 'workspace' AND source_id = ?) OR workspace_id = ? OR via_workspace = ?)`);
-      params.push(filter.visibleTo, filter.visibleTo, filter.visibleTo);
+    const limit = Math.min(Math.max(1, Math.floor(filter.limit ?? 200)), 500);
+    let q = this.kysely.selectFrom('todos').selectAll();
+    if (status !== 'all') q = q.where('status', '=', status);
+    const v = filter.visibleTo;
+    if (v) {
+      q = q.where((eb) => eb.or([
+        eb.and([eb('source_kind', '=', 'workspace'), eb('source_id', '=', v)]),
+        eb('workspace_id', '=', v),
+        eb('via_workspace', '=', v)
+      ]));
     }
     for (const raw of filter.tags ?? []) {
       const t = normalizeTag(raw);
       if (!t) continue;
-      where.push(`EXISTS (SELECT 1 FROM tags g WHERE g.entity_kind = 'todo' AND g.entity_id = todos.id AND g.tag = ?)`);
-      params.push(t);
+      q = q.where((eb) => eb.exists(
+        eb.selectFrom('tags as g').select('g.tag')
+          .where('g.entity_kind', '=', 'todo').whereRef('g.entity_id', '=', 'todos.id').where('g.tag', '=', t)
+      ));
     }
-    const limit = Math.min(Math.max(1, Math.floor(filter.limit ?? 200)), 500);
-    const sql =
-      `SELECT * FROM todos ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ` +
-      `ORDER BY ${PRIORITY_ORDER}, last_seen_at DESC, id DESC LIMIT ${limit}`;
-    return (this.db.prepare(sql).all(...params) as TodoRow[]).map((r) => this.toTodo(r));
+    const rows = await q.orderBy(PRIORITY_ORDER).orderBy('last_seen_at', 'desc').orderBy('id', 'desc').limit(limit).execute();
+    return Promise.all(rows.map((r) => this.toTodo(this.kysely, r)));
   }
 
-  counts(): InboxCounts {
-    const r = this.db.prepare(
-      `SELECT COUNT(*) AS open,
-              SUM(CASE WHEN priority = 'urgent' THEN 1 ELSE 0 END) AS urgent,
-              SUM(CASE WHEN priority = 'high' THEN 1 ELSE 0 END) AS high
-         FROM todos WHERE status = 'open'`
-    ).get() as { open: number; urgent: number | null; high: number | null };
-    const approvals = (this.db.prepare(`SELECT COUNT(*) AS n FROM proposals WHERE status = 'pending'`).get() as { n: number }).n;
-    return { open: r.open, urgent: r.urgent ?? 0, high: r.high ?? 0, approvals };
+  async counts(): Promise<InboxCounts> {
+    const r = await this.kysely.selectFrom('todos')
+      .select([
+        (eb) => eb.fn.countAll().as('open'),
+        sql<number | null>`SUM(CASE WHEN priority = 'urgent' THEN 1 ELSE 0 END)`.as('urgent'),
+        sql<number | null>`SUM(CASE WHEN priority = 'high' THEN 1 ELSE 0 END)`.as('high')
+      ])
+      .where('status', '=', 'open').executeTakeFirstOrThrow();
+    const a = await this.kysely.selectFrom('proposals').select((eb) => eb.fn.countAll().as('n')).where('status', '=', 'pending').executeTakeFirstOrThrow();
+    return { open: num(r.open), urgent: num(r.urgent), high: num(r.high), approvals: num(a.n) };
   }
 
   // --- writes -------------------------------------------------------------
 
-  private event(todoId: string, ts: number, kind: TodoEventKind, actor: TodoSource, detail?: Record<string, unknown>): void {
-    this.db.prepare(
-      'INSERT INTO todo_events (todo_id, ts, kind, actor_kind, actor_id, run_id, detail) VALUES (?, ?, ?, ?, ?, NULL, ?)'
-    ).run(todoId, ts, kind, actor.kind, actor.id, detail ? JSON.stringify(detail) : null);
+  private async event(q: Q, todoId: string, ts: number, kind: TodoEvent['kind'], actor: TodoSource, detail?: Record<string, unknown>): Promise<void> {
+    await q.insertInto('todo_events').values({
+      todo_id: todoId, ts, kind, actor_kind: actor.kind, actor_id: actor.id, run_id: null, detail: detail ? JSON.stringify(detail) : null
+    }).execute();
   }
 
-  private addTags(id: string, tags: string[]): string[] {
-    const existing = this.tagsFor(id);
+  private async addTags(q: Q, id: string, tags: string[]): Promise<string[]> {
+    const existing = await this.tagsFor(q, id);
     const added: string[] = [];
     for (const t of tags) {
       if (existing.length + added.length >= MAX_TAGS) break;
       if (existing.includes(t) || added.includes(t)) continue;
-      this.db.prepare(`INSERT OR IGNORE INTO tags (entity_kind, entity_id, tag) VALUES ('todo', ?, ?)`).run(id, t);
+      await q.insertInto('tags').values({ entity_kind: 'todo', entity_id: id, tag: t }).onConflict((oc) => oc.doNothing()).execute();
       added.push(t);
     }
     return added;
   }
 
-  post(source: TodoSource, input: PostTodoInput, now = Date.now()): { todo: Todo; action: 'created' | 'updated' | 'reopened' } {
-    return this.db.transaction(() => {
+  post(source: TodoSource, input: PostTodoInput, now = Date.now()): Promise<{ todo: Todo; action: 'created' | 'updated' | 'reopened' }> {
+    return this.kysely.transaction().execute(async (trx) => {
       const priority = input.priority ?? 'normal';
       const tags = normalizeTags(input.tags ?? []);
       const existing = input.key
-        ? (this.db.prepare(
-            `SELECT * FROM todos WHERE source_kind = ? AND IFNULL(source_id, '') = ? AND dedupe_key = ?`
-          ).get(source.kind, source.id ?? '', input.key) as TodoRow | undefined)
+        ? await trx.selectFrom('todos').selectAll()
+            .where('source_kind', '=', source.kind)
+            .where(sql<string>`coalesce(source_id, '')`, '=', source.id ?? '')
+            .where('dedupe_key', '=', input.key)
+            .executeTakeFirst()
         : undefined;
       if (!existing) {
         const id = newId(now);
-        this.db.prepare(
-          `INSERT INTO todos (id, title, body, status, priority, source_kind, source_id, dedupe_key,
-             workspace_id, session_id, via_workspace, source_run_id, created_at, updated_at, first_seen_at, last_seen_at)
-           VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        ).run(id, input.title, input.body ?? null, priority, source.kind, source.id, input.key ?? null,
-          input.workspaceLink ?? null, input.sessionLink ?? null, input.viaWorkspace ?? null, input.sourceRunId ?? null, now, now, now, now);
-        this.addTags(id, tags);
-        this.event(id, now, 'created', source, { title: input.title, priority });
-        return { todo: this.get(id)!, action: 'created' as const };
+        await trx.insertInto('todos').values({
+          id, title: input.title, body: input.body ?? null, status: 'open', priority, source_kind: source.kind, source_id: source.id,
+          dedupe_key: input.key ?? null, workspace_id: input.workspaceLink ?? null, session_id: input.sessionLink ?? null,
+          via_workspace: input.viaWorkspace ?? null, source_run_id: input.sourceRunId ?? null,
+          created_at: now, updated_at: now, first_seen_at: now, last_seen_at: now
+        }).execute();
+        await this.addTags(trx, id, tags);
+        await this.event(trx, id, now, 'created', source, { title: input.title, priority });
+        return { todo: (await this.getWith(trx, id))!, action: 'created' as const };
       }
       const reopen = existing.status !== 'open';
-      this.db.prepare(
-        `UPDATE todos SET seen_count = seen_count + 1, last_seen_at = ?, updated_at = ?, priority = ?,
-           body = COALESCE(?, body), status = 'open',
-           recurred = CASE WHEN ? THEN 1 ELSE recurred END,
-           closed_at = CASE WHEN ? THEN NULL ELSE closed_at END
-         WHERE id = ?`
-      ).run(now, now, maxPriority(existing.priority, priority), input.body ?? null, reopen ? 1 : 0, reopen ? 1 : 0, existing.id);
-      this.addTags(existing.id, tags);
-      this.event(existing.id, now, reopen ? 'reopened' : 'seen', source,
+      // Same effect as the old single UPDATE: computed from the row read in this transaction.
+      await trx.updateTable('todos').set((eb) => ({
+        seen_count: eb('seen_count', '+', 1), last_seen_at: now, updated_at: now,
+        priority: maxPriority(existing.priority, priority),
+        body: input.body ?? existing.body, status: 'open',
+        recurred: reopen ? 1 : existing.recurred,
+        closed_at: reopen ? null : existing.closed_at
+      })).where('id', '=', existing.id).execute();
+      await this.addTags(trx, existing.id, tags);
+      await this.event(trx, existing.id, now, reopen ? 'reopened' : 'seen', source,
         { priority, ...(input.body !== undefined ? { body: input.body } : {}), ...(reopen ? { from: existing.status } : {}) });
-      return { todo: this.get(existing.id)!, action: reopen ? ('reopened' as const) : ('updated' as const) };
-    })();
+      return { todo: (await this.getWith(trx, existing.id))!, action: reopen ? ('reopened' as const) : ('updated' as const) };
+    });
   }
 
-  update(actor: TodoSource, id: string, patch: UpdateTodoPatch, now = Date.now()): Todo {
-    return this.db.transaction(() => {
-      const cur = this.db.prepare('SELECT * FROM todos WHERE id = ?').get(id) as TodoRow | undefined;
+  update(actor: TodoSource, id: string, patch: UpdateTodoPatch, now = Date.now()): Promise<Todo> {
+    return this.kysely.transaction().execute(async (trx) => {
+      const cur = await trx.selectFrom('todos').selectAll().where('id', '=', id).executeTakeFirst();
       if (!cur) throw new Error(`todo ${id} not found`);
       if (patch.status && patch.status !== cur.status) {
-        this.db.prepare('UPDATE todos SET status = ?, closed_at = ?, updated_at = ? WHERE id = ?')
-          .run(patch.status, patch.status === 'open' ? null : now, now, id);
-        this.event(id, now, 'status', actor, { from: cur.status, to: patch.status });
+        await trx.updateTable('todos').set({ status: patch.status, closed_at: patch.status === 'open' ? null : now, updated_at: now }).where('id', '=', id).execute();
+        await this.event(trx, id, now, 'status', actor, { from: cur.status, to: patch.status });
       }
       if (patch.priority && isPriority(patch.priority) && patch.priority !== cur.priority) {
-        this.db.prepare('UPDATE todos SET priority = ?, updated_at = ? WHERE id = ?').run(patch.priority, now, id);
-        this.event(id, now, 'priority', actor, { from: cur.priority, to: patch.priority });
+        await trx.updateTable('todos').set({ priority: patch.priority, updated_at: now }).where('id', '=', id).execute();
+        await this.event(trx, id, now, 'priority', actor, { from: cur.priority, to: patch.priority });
       }
       const title = patch.title?.trim();
       if (title && title !== cur.title) {
-        this.db.prepare('UPDATE todos SET title = ?, updated_at = ? WHERE id = ?').run(title.slice(0, 200), now, id);
-        this.event(id, now, 'title', actor, { from: cur.title, to: title });
+        await trx.updateTable('todos').set({ title: title.slice(0, 200), updated_at: now }).where('id', '=', id).execute();
+        await this.event(trx, id, now, 'title', actor, { from: cur.title, to: title });
       }
-      const added = this.addTags(id, normalizeTags(patch.tagsAdd ?? []));
-      if (added.length) this.event(id, now, 'tag_add', actor, { tags: added });
+      const added = await this.addTags(trx, id, normalizeTags(patch.tagsAdd ?? []));
+      if (added.length) await this.event(trx, id, now, 'tag_add', actor, { tags: added });
       const removed: string[] = [];
       for (const t of normalizeTags(patch.tagsRemove ?? [])) {
-        const r = this.db.prepare(`DELETE FROM tags WHERE entity_kind = 'todo' AND entity_id = ? AND tag = ?`).run(id, t);
-        if (r.changes) removed.push(t);
+        const r = await trx.deleteFrom('tags').where('entity_kind', '=', 'todo').where('entity_id', '=', id).where('tag', '=', t).executeTakeFirst();
+        if (Number(r.numDeletedRows)) removed.push(t);
       }
-      if (removed.length) this.event(id, now, 'tag_remove', actor, { tags: removed });
+      if (removed.length) await this.event(trx, id, now, 'tag_remove', actor, { tags: removed });
       if (patch.bodyAppend && patch.bodyAppend.trim()) {
         const text = patch.bodyAppend.slice(0, 20_000);
-        this.db.prepare(
-          `UPDATE todos SET body = CASE WHEN body IS NULL OR body = '' THEN ? ELSE body || char(10) || char(10) || ? END,
-             updated_at = ? WHERE id = ?`
-        ).run(text, text, now, id);
-        this.event(id, now, 'body_append', actor, { text });
+        // body was not touched earlier in this transaction, so cur.body is current.
+        const body = cur.body === null || cur.body === '' ? text : `${cur.body}\n\n${text}`;
+        await trx.updateTable('todos').set({ body, updated_at: now }).where('id', '=', id).execute();
+        await this.event(trx, id, now, 'body_append', actor, { text });
       }
-      if (added.length || removed.length) this.db.prepare('UPDATE todos SET updated_at = ? WHERE id = ?').run(now, id);
-      return this.get(id)!;
-    })();
+      if (added.length || removed.length) await trx.updateTable('todos').set({ updated_at: now }).where('id', '=', id).execute();
+      return (await this.getWith(trx, id))!;
+    });
   }
 }

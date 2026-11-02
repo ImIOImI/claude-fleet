@@ -11,92 +11,105 @@ let store: InboxStore;
 afterEach(async () => await store?.close());
 
 describe('InboxStore.post', () => {
-  it('creates a todo with defaults and a created event', () => {
+  it('creates a todo with defaults and a created event', async () => {
     store = InboxStore.memory();
-    const { todo, action } = store.post(WS, { title: 'Disk full', tags: ['ops'] }, 1000);
+    const { todo, action } = await store.post(WS, { title: 'Disk full', tags: ['ops'] }, 1000);
     expect(action).toBe('created');
     expect(todo).toMatchObject({
       title: 'Disk full', status: 'open', priority: 'normal', source: WS, seenCount: 1,
       recurred: false, tags: ['ops'], createdAt: 1000, firstSeenAt: 1000, lastSeenAt: 1000, closedAt: null
     });
     expect(todo.id).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
-    expect(store.events(todo.id).map((e) => e.kind)).toEqual(['created']);
+    expect((await store.events(todo.id)).map((e) => e.kind)).toEqual(['created']);
   });
 
-  it('dedupes by key per source: bumps seen, keeps max priority, unions tags, replaces body', () => {
+  it('dedupes by key per source: bumps seen, keeps max priority, unions tags, replaces body', async () => {
     store = InboxStore.memory();
-    const a = store.post(WS, { title: '5xx', key: 'k', priority: 'urgent', tags: ['ops'], body: 'one' }, 1000);
-    const b = store.post(WS, { title: '5xx again', key: 'k', priority: 'low', tags: ['prod'], body: 'two' }, 2000);
+    const a = await store.post(WS, { title: '5xx', key: 'k', priority: 'urgent', tags: ['ops'], body: 'one' }, 1000);
+    const b = await store.post(WS, { title: '5xx again', key: 'k', priority: 'low', tags: ['prod'], body: 'two' }, 2000);
     expect(b.action).toBe('updated');
     expect(b.todo.id).toBe(a.todo.id);
     expect(b.todo).toMatchObject({ seenCount: 2, priority: 'urgent', lastSeenAt: 2000, body: 'two', title: '5xx' });
     expect(b.todo.tags.sort()).toEqual(['ops', 'prod']);
-    expect(store.events(a.todo.id).map((e) => e.kind)).toEqual(['created', 'seen']);
+    expect((await store.events(a.todo.id)).map((e) => e.kind)).toEqual(['created', 'seen']);
   });
 
-  it('the same key from a different source is a different todo', () => {
+  it('the same key from a different source is a different todo', async () => {
     store = InboxStore.memory();
-    const a = store.post(WS, { title: 'x', key: 'k' });
-    const b = store.post({ kind: 'workspace', id: 'W2' }, { title: 'x', key: 'k' });
+    const a = await store.post(WS, { title: 'x', key: 'k' });
+    const b = await store.post({ kind: 'workspace', id: 'W2' }, { title: 'x', key: 'k' });
     expect(b.action).toBe('created');
     expect(b.todo.id).not.toBe(a.todo.id);
   });
 
-  it('reopens a done or dismissed todo when its key recurs', () => {
+  it('reopens a done or dismissed todo when its key recurs', async () => {
     store = InboxStore.memory();
-    const { todo } = store.post(WS, { title: 'x', key: 'k' }, 1000);
-    store.update(USER, todo.id, { status: 'done' }, 1500);
-    const r = store.post(WS, { title: 'x', key: 'k' }, 2000);
+    const { todo } = await store.post(WS, { title: 'x', key: 'k' }, 1000);
+    await store.update(USER, todo.id, { status: 'done' }, 1500);
+    const r = await store.post(WS, { title: 'x', key: 'k' }, 2000);
     expect(r.action).toBe('reopened');
     expect(r.todo).toMatchObject({ status: 'open', recurred: true, closedAt: null, seenCount: 2 });
-    store.update(USER, todo.id, { status: 'dismissed' }, 2500);
-    expect(store.post(WS, { title: 'x', key: 'k' }, 3000).action).toBe('reopened');
-    expect(store.events(todo.id).map((e) => e.kind)).toEqual(['created', 'status', 'reopened', 'status', 'reopened']);
+    await store.update(USER, todo.id, { status: 'dismissed' }, 2500);
+    expect((await store.post(WS, { title: 'x', key: 'k' }, 3000)).action).toBe('reopened');
+    expect((await store.events(todo.id)).map((e) => e.kind)).toEqual(['created', 'status', 'reopened', 'status', 'reopened']);
   });
 
-  it('posts without a key never dedupe', () => {
+  it('posts without a key never dedupe', async () => {
     store = InboxStore.memory();
-    store.post(WS, { title: 'x' });
-    store.post(WS, { title: 'x' });
-    expect(store.list()).toHaveLength(2);
+    await store.post(WS, { title: 'x' });
+    await store.post(WS, { title: 'x' });
+    expect(await store.list()).toHaveLength(2);
+  });
+});
+
+describe('InboxStore.post concurrency', () => {
+  it('two concurrent posts with the same key make one todo (created + updated)', async () => {
+    store = InboxStore.memory();
+    const [a, b] = await Promise.all([
+      store.post(WS, { title: 'x', key: 'k' }, 1000),
+      store.post(WS, { title: 'x', key: 'k' }, 1001)
+    ]);
+    expect([a.action, b.action].sort()).toEqual(['created', 'updated']);
+    expect(a.todo.id).toBe(b.todo.id);
+    expect(await store.list({ status: 'all' })).toHaveLength(1);
   });
 });
 
 describe('InboxStore.update', () => {
-  it('applies status, priority, title, tags and body append with events', () => {
+  it('applies status, priority, title, tags and body append with events', async () => {
     store = InboxStore.memory();
-    const { todo } = store.post(WS, { title: 'x', tags: ['a'], body: 'hello' }, 1000);
-    const u = store.update(USER, todo.id, {
+    const { todo } = await store.post(WS, { title: 'x', tags: ['a'], body: 'hello' }, 1000);
+    const u = await store.update(USER, todo.id, {
       status: 'done', priority: 'high', title: 'y', tagsAdd: ['B'], tagsRemove: ['a'], bodyAppend: 'more'
     }, 2000);
     expect(u).toMatchObject({ status: 'done', priority: 'high', title: 'y', tags: ['b'], closedAt: 2000, body: 'hello\n\nmore' });
-    expect(store.events(todo.id).map((e) => e.kind)).toEqual(
+    expect((await store.events(todo.id)).map((e) => e.kind)).toEqual(
       ['created', 'status', 'priority', 'title', 'tag_add', 'tag_remove', 'body_append']
     );
-    expect(store.update(USER, todo.id, { status: 'open' }, 3000).closedAt).toBeNull();
+    expect((await store.update(USER, todo.id, { status: 'open' }, 3000)).closedAt).toBeNull();
   });
-  it('throws for an unknown id', () => {
+  it('throws for an unknown id', async () => {
     store = InboxStore.memory();
-    expect(() => store.update(USER, 'nope', { status: 'done' })).toThrow(/not found/);
+    await expect(store.update(USER, 'nope', { status: 'done' })).rejects.toThrow(/not found/);
   });
 });
 
 describe('InboxStore.list / counts', () => {
-  it('filters by status, tags and visibility; orders by priority then recency', () => {
+  it('filters by status, tags and visibility; orders by priority then recency', async () => {
     store = InboxStore.memory();
-    store.post(WS, { title: 'low', priority: 'low', tags: ['ops'] }, 1);
-    store.post(WS, { title: 'urgent', priority: 'urgent' }, 2);
-    store.post({ kind: 'workspace', id: 'W2' }, { title: 'other', workspaceLink: 'W1' }, 3);
-    store.post({ kind: 'workspace', id: 'W2' }, { title: 'hidden' }, 4);
-    const done = store.post(USER, { title: 'done' }, 5).todo;
-    store.update(USER, done.id, { status: 'done' });
-    expect(store.list().map((t) => t.title)).toEqual(['urgent', 'hidden', 'other', 'low']);
-    expect(store.list({ status: 'done' }).map((t) => t.title)).toEqual(['done']);
-    expect(store.list({ status: 'all' })).toHaveLength(5);
-    expect(store.list({ tags: ['ops'] }).map((t) => t.title)).toEqual(['low']);
-    expect(store.list({ visibleTo: 'W1' }).map((t) => t.title).sort()).toEqual(['low', 'other', 'urgent']);
-    expect(store.list({ limit: 1 })).toHaveLength(1);
-    expect(store.counts()).toEqual({ open: 4, urgent: 1, high: 0, approvals: 0 });
+    await store.post(WS, { title: 'low', priority: 'low', tags: ['ops'] }, 1);
+    await store.post(WS, { title: 'urgent', priority: 'urgent' }, 2);
+    await store.post({ kind: 'workspace', id: 'W2' }, { title: 'other', workspaceLink: 'W1' }, 3);
+    await store.post({ kind: 'workspace', id: 'W2' }, { title: 'hidden' }, 4);
+    const done = (await store.post(USER, { title: 'done' }, 5)).todo;
+    await store.update(USER, done.id, { status: 'done' });
+    expect((await store.list()).map((t) => t.title)).toEqual(['urgent', 'hidden', 'other', 'low']);
+    expect((await store.list({ status: 'done' })).map((t) => t.title)).toEqual(['done']);
+    expect(await store.list({ status: 'all' })).toHaveLength(5);
+    expect((await store.list({ tags: ['ops'] })).map((t) => t.title)).toEqual(['low']);
+    expect((await store.list({ visibleTo: 'W1' })).map((t) => t.title).sort()).toEqual(['low', 'other', 'urgent']);
+    expect(await store.list({ limit: 1 })).toHaveLength(1);
+    expect(await store.counts()).toEqual({ open: 4, urgent: 1, high: 0, approvals: 0 });
   });
 });
 
@@ -104,10 +117,10 @@ describe('InboxStore.open', () => {
   it('creates inbox.db with WAL and the schema version', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'inbox-'));
     store = InboxStore.open(dir);
-    store.post(USER, { title: 'persist me' });
+    await store.post(USER, { title: 'persist me' });
     await store.close();
     store = InboxStore.open(dir);
-    expect(store.list().map((t) => t.title)).toEqual(['persist me']);
+    expect((await store.list()).map((t) => t.title)).toEqual(['persist me']);
     const raw = new Database(path.join(dir, 'inbox.db'), { readonly: true });
     expect(raw.pragma('user_version', { simple: true })).toBe(INBOX_SCHEMA_VERSION);
     expect(INBOX_SCHEMA_VERSION).toBe(5);
@@ -133,7 +146,7 @@ describe('InboxStore.open', () => {
 describe('InboxStore.kysely', () => {
   it('exposes a Kysely handle over the same connection, and close() closes it', async () => {
     store = InboxStore.memory();
-    const { todo } = store.post(WS, { title: 'via raw' }, 1000);
+    const { todo } = await store.post(WS, { title: 'via raw' }, 1000);
     const rows = await store.kysely.selectFrom('todos').select(['id', 'title']).execute();
     expect(rows).toEqual([{ id: todo.id, title: 'via raw' }]);
     await store.close();

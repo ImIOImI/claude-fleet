@@ -21,7 +21,9 @@ export function registerInboxIpc(
   const svc = createInboxService(store, {
     manifest: (id) => readWorkspaceManifest(id),
     notifyChanged: () => {
-      broadcastInboxChanged(store.counts(), BrowserWindow.getAllWindows());
+      void store.counts()
+        .then((c) => broadcastInboxChanged(c, BrowserWindow.getAllWindows()))
+        .catch((e) => logError({ source: 'main', type: 'inbox-broadcast', level: 'warn', message: String(e) }));
       emitInboxChanged();
     },
     onPostRejected: (workspaceId, reason) => {
