@@ -293,11 +293,16 @@ request carries `Authorization: Bearer <GitHub token>`. WebSockets send it on up
   BLOBs (`vectors.ts`). Postgres uses pgvector (`vector(384)`, cosine distance, an HNSW index).
   Both sit behind `searchEmbeddings(query, scope, limit)`.
 - `fleet-host` uses the same store layer, always on Postgres.
-- **The Postgres password comes from a provider, not a fixed string.** Config is
-  `password: { kind: 'static' | 'env' | 'aws-rds-iam' }`. The pool calls the provider on **every new
-  connection** (the `pg` pool's async `password` function). `aws-rds-iam` mints a 15-minute token with
-  the RDS signer, using the pod's workload identity, so no long-lived DB password exists. Other
-  clouds' IAM tokens can be added as providers.
+- **Connection config: a connection string or fields, plus a password provider.**
+  - **A connection string** (`connectionString: 'postgres://user:pass@host:5432/db?sslmode=…'`, or
+    `env: DATABASE_URL`) is the simple path. It's what the app-managed local container uses, and the
+    vault holds it.
+  - **Or discrete fields** (`host`, `port`, `database`, `user`, `ssl`) plus
+    `password: { kind: 'static' | 'env' | 'aws-rds-iam' }`. The pool calls the provider on **every new
+    connection** (the `pg` pool's async `password` function).
+  - **On AWS, use `aws-rds-iam`.** It mints a 15-minute token with the RDS signer from the pod's
+    workload identity, so no long-lived DB password exists. That's the recommended setup for any
+    host running in AWS. Other clouds' IAM tokens can be added as providers.
 
 **Remote hosts keep their own data.** Each remote host's Postgres holds its workspace's data. None
 of it is copied into a desktop's DB.
