@@ -6,34 +6,73 @@ import { tmpdir } from 'node:os';
 let userDataDir = '';
 vi.mock('electron', () => ({ app: { getPath: () => userDataDir } }));
 
-// Mock the network client; assert sources logic in isolation.
-const pulled: Array<{ ref: string; dest: string }> = [];
-vi.mock('./ociClient.js', () => ({
-  fetchAnnotations: vi.fn(),
-  pullArtifact: vi.fn(async (ref: string, dest: string) => {
-    pulled.push({ ref, dest });
-    // Simulate a pulled tree: write a loadout.md (or index.json for the index ref).
-    await mkdir(dest, { recursive: true });
-    if (ref.endsWith('/index:latest')) {
-      await writeFile(join(dest, 'index.json'), JSON.stringify([
-        { id: 'spec-driven', title: 'Spec-Driven', description: 'd', tags: ['workflow'], version: '1.0.0' }
-      ]));
-    } else {
-      await writeFile(join(dest, 'loadout.md'), '---\ntitle: Spec-Driven\nversion: 1.0.0\n---\n');
-    }
+// In-memory vault keyed `<scope>|<key>` (the real one needs safeStorage).
+const vaultStore = new Map<string, string>();
+vi.mock('./vault.js', () => ({
+  getSecret: vi.fn(async (scope: string, key: string) => vaultStore.get(`${scope}|${key}`) ?? null),
+  setSecret: vi.fn(async (scope: string, key: string, value: string) => {
+    vaultStore.set(`${scope}|${key}`, value);
+  }),
+  deleteAllForWorkspace: vi.fn(async (scope: string) => {
+    for (const k of [...vaultStore.keys()]) if (k.startsWith(`${scope}|`)) vaultStore.delete(k);
   })
 }));
 
+// Mock the network client; assert sources logic in isolation. `privateBases`
+// maps a source base → the only token its fake registry accepts.
+type Cred = { token: string; username?: string };
+const pulled: Array<{ ref: string; dest: string; cred: Cred | null }> = [];
+const privateBases = new Map<string, string>();
+vi.mock('./ociClient.js', async () => {
+  const { RegistryAuthError } = await import('./ociCore.js');
+  return {
+    fetchAnnotations: vi.fn(),
+    pullArtifact: vi.fn(async (ref: string, dest: string, opts?: { cred?: Cred | null }) => {
+      const cred = opts?.cred ?? null;
+      pulled.push({ ref, dest, cred });
+      for (const [base, token] of privateBases) {
+        if (ref.startsWith(`${base}/`) && cred?.token !== token) {
+          throw new RegistryAuthError(cred ? 'credential-rejected' : 'needs-credential', 401);
+        }
+      }
+      // Simulate a pulled tree: write a loadout.md (or index.json for the index ref).
+      await mkdir(dest, { recursive: true });
+      if (ref.endsWith('/index:latest')) {
+        await writeFile(join(dest, 'index.json'), JSON.stringify([
+          { id: 'spec-driven', title: 'Spec-Driven', description: 'd', tags: ['workflow'], version: '1.0.0' }
+        ]));
+      } else {
+        await writeFile(join(dest, 'loadout.md'), '---\ntitle: Spec-Driven\nversion: 1.0.0\n---\n');
+      }
+    })
+  };
+});
+
 const sources = await import('./loadoutSources.js');
 const SRC = 'ghcr.io/imioimi/claude-fleet-loadouts';
+const PRIV = 'ghcr.io/acme/private';
+const VAULT_KEY = `loadout-source:${PRIV}|TOKEN`;
+
+const sourcesJson = (): Promise<string> => readFile(join(userDataDir, 'loadouts', 'sources.json'), 'utf8');
+async function writeSourcesFile(f: object): Promise<void> {
+  await mkdir(join(userDataDir, 'loadouts'), { recursive: true });
+  await writeFile(join(userDataDir, 'loadouts', 'sources.json'), JSON.stringify(f));
+}
 
 beforeEach(async () => {
   userDataDir = await mkdtemp(join(tmpdir(), 'lsrc-'));
   pulled.length = 0;
+  vaultStore.clear();
+  privateBases.clear();
+  sources.setGithubTokenProvider(undefined);
+  // Empty ⇒ treated as unset, so a developer's real env can't leak into tests.
+  vi.stubEnv('FLEET_LOADOUT_TOKEN', '');
+  vi.stubEnv(sources.sourceEnvVarName(PRIV), '');
 });
 afterEach(async () => {
   await rm(userDataDir, { recursive: true, force: true });
   vi.clearAllMocks();
+  vi.unstubAllEnvs();
 });
 
 describe('loadoutSources', () => {
@@ -85,5 +124,55 @@ describe('loadoutSources', () => {
     (client.pullArtifact as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('network'));
     const all = await sources.allRemote();
     expect(all).toEqual([]); // the one source failed → skipped, no throw
+  });
+});
+
+describe('loadoutSources.credentialFor (#444)', () => {
+  it('is null when no credential exists anywhere', async () => {
+    expect(await sources.credentialFor(PRIV)).toBeNull();
+  });
+
+  it('prefers the vault token, with the username recorded in sources.json', async () => {
+    await writeSourcesFile({ sources: [PRIV], provenance: {}, credentials: { [PRIV]: { username: 'alice' } } });
+    vaultStore.set(VAULT_KEY, 'vault-tok');
+    vi.stubEnv(sources.sourceEnvVarName(PRIV), 'env-tok');
+    vi.stubEnv('FLEET_LOADOUT_TOKEN', 'generic-tok');
+    sources.setGithubTokenProvider(async () => 'gh-tok');
+    expect(await sources.credentialFor(`${PRIV}/`)).toEqual({ token: 'vault-tok', username: 'alice' });
+  });
+
+  it('reads a pre-#444 sources.json that has no credentials map', async () => {
+    await writeSourcesFile({ sources: [PRIV], provenance: {} });
+    vaultStore.set(VAULT_KEY, 'vault-tok');
+    expect(await sources.credentialFor(PRIV)).toEqual({ token: 'vault-tok' });
+  });
+
+  it('names the per-source env var from the sanitised base', () => {
+    expect(sources.sourceEnvVarName('ghcr.io/Acme/private-loadouts/')).toBe(
+      'FLEET_LOADOUT_TOKEN_GHCR_IO_ACME_PRIVATE_LOADOUTS'
+    );
+  });
+
+  it('falls back to the per-source env var before the GitHub token', async () => {
+    vi.stubEnv(sources.sourceEnvVarName(PRIV), 'env-tok');
+    sources.setGithubTokenProvider(async () => 'gh-tok');
+    expect(await sources.credentialFor(PRIV)).toEqual({ token: 'env-tok' });
+  });
+
+  it('uses the signed-in GitHub token for ghcr.io sources only', async () => {
+    sources.setGithubTokenProvider(async () => 'gh-tok');
+    expect(await sources.credentialFor(PRIV)).toEqual({ token: 'gh-tok' });
+    expect(await sources.credentialFor('registry.gitlab.com/acme/loadouts')).toBeNull();
+  });
+
+  it('a GitHub provider returning null falls through', async () => {
+    sources.setGithubTokenProvider(async () => null);
+    expect(await sources.credentialFor(PRIV)).toBeNull();
+  });
+
+  it('uses FLEET_LOADOUT_TOKEN for a non-default source, never for the public default', async () => {
+    vi.stubEnv('FLEET_LOADOUT_TOKEN', 'generic-tok');
+    expect(await sources.credentialFor(PRIV)).toEqual({ token: 'generic-tok' });
+    expect(await sources.credentialFor(sources.DEFAULT_SOURCES[0])).toBeNull();
   });
 });
