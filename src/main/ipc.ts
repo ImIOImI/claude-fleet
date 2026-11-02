@@ -73,6 +73,7 @@ import {
   setSkillHandlers,
 } from './mcpServer.js';
 import * as vault from './vault.js';
+import { assertRendererVaultScope } from './vaultScopes.js';
 import { listEndpoints, saveEndpoint, deleteEndpoint, setEndpointApiKey, probeEndpoint, getEndpoint, type ModelEndpoint } from './endpoints.js';
 import * as fs from './fs.js';
 import * as imageLibrary from './imageLibrary.js';
@@ -1850,19 +1851,28 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // explicit getSecret. setSecret/deleteSecret update the per-workspace
   // index in keytar; deleteAllForWorkspace runs at workspace delete time.
   ipcMain.handle('vault:available', () => vault.isVaultAvailable());
-  ipcMain.handle('vault:listKeys', (_e, workspaceId: string) => vault.listKeys(workspaceId));
-  ipcMain.handle('vault:getSecret', (_e, workspaceId: string, key: string) =>
-    vault.getSecret(workspaceId, key)
-  );
-  ipcMain.handle('vault:setSecret', (_e, workspaceId: string, key: string, value: string) =>
-    vault.setSecret(workspaceId, key, value)
-  );
-  ipcMain.handle('vault:deleteSecret', (_e, workspaceId: string, key: string) =>
-    vault.deleteSecret(workspaceId, key)
-  );
-  ipcMain.handle('vault:deleteAllForWorkspace', (_e, workspaceId: string) =>
-    vault.deleteAllForWorkspace(workspaceId)
-  );
+  // Every scope-taking vault:* handler refuses host-only scopes
+  // (loadout-source:*, #444) — those are written via loadouts:* and never read back.
+  ipcMain.handle('vault:listKeys', (_e, workspaceId: string) => {
+    assertRendererVaultScope(workspaceId);
+    return vault.listKeys(workspaceId);
+  });
+  ipcMain.handle('vault:getSecret', (_e, workspaceId: string, key: string) => {
+    assertRendererVaultScope(workspaceId);
+    return vault.getSecret(workspaceId, key);
+  });
+  ipcMain.handle('vault:setSecret', (_e, workspaceId: string, key: string, value: string) => {
+    assertRendererVaultScope(workspaceId);
+    return vault.setSecret(workspaceId, key, value);
+  });
+  ipcMain.handle('vault:deleteSecret', (_e, workspaceId: string, key: string) => {
+    assertRendererVaultScope(workspaceId);
+    return vault.deleteSecret(workspaceId, key);
+  });
+  ipcMain.handle('vault:deleteAllForWorkspace', (_e, workspaceId: string) => {
+    assertRendererVaultScope(workspaceId);
+    return vault.deleteAllForWorkspace(workspaceId);
+  });
 
   ipcMain.handle(
     'pty:attach',
