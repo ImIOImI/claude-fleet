@@ -8,6 +8,9 @@ import type {
   InboxCounts, PostTodoInput, Todo, TodoEvent, TodoEventKind, TodoFilter, TodoSource, UpdateTodoPatch
 } from '../../preload/inboxTypes.js';
 import { isPriority, maxPriority, normalizeTag, normalizeTags, MAX_TAGS } from './inboxCore.js';
+import type { Kysely } from 'kysely';
+import { sqliteKysely } from '../store/kysely.js';
+import type { InboxDb } from '../store/inboxSchema.js';
 
 export const INBOX_SCHEMA_VERSION = 5;
 
@@ -205,7 +208,8 @@ interface TodoRow {
 const PRIORITY_ORDER = `CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END`;
 
 export class InboxStore {
-  private constructor(readonly db: Database.Database) {}
+  /** `db` is the raw connection (removed once every store is on `kysely`, Task 5). */
+  private constructor(readonly db: Database.Database, readonly kysely: Kysely<InboxDb>) {}
 
   static open(dir: string): InboxStore {
     const file = path.join(dir, 'inbox.db');
@@ -234,11 +238,13 @@ export class InboxStore {
         db.pragma(`user_version = ${v}`);
       })();
     }
-    return new InboxStore(db);
+    return new InboxStore(db, sqliteKysely<InboxDb>(db));
   }
 
-  close(): void {
-    this.db.close();
+  async close(): Promise<void> {
+    // destroy() only closes the connection if Kysely ever ran a query, so close the raw handle too.
+    await this.kysely.destroy();
+    if (this.db.open) this.db.close();
   }
 
   // --- reads --------------------------------------------------------------

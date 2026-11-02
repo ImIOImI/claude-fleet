@@ -129,3 +129,15 @@ describe('InboxStore.open', () => {
     writeFileSync(path.join(dir, 'unused'), '');
   });
 });
+
+describe('InboxStore.kysely', () => {
+  it('exposes a Kysely handle over the same connection, and close() closes it', async () => {
+    store = InboxStore.memory();
+    const { todo } = store.post(WS, { title: 'via raw' }, 1000);
+    const rows = await store.kysely.selectFrom('todos').select(['id', 'title']).execute();
+    expect(rows).toEqual([{ id: todo.id, title: 'via raw' }]);
+    await store.close();
+    await expect(store.kysely.selectFrom('todos').selectAll().execute()).rejects.toThrow();
+    store = InboxStore.memory(); // afterEach closes a live store
+  });
+});
