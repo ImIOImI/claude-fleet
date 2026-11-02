@@ -115,6 +115,21 @@ export const KNOWN_REALM_HOSTS: Readonly<Record<string, readonly string[]>> = {
   'registry-1.docker.io': ['auth.docker.io']
 };
 
+/**
+ * Guard against a token that would make `Headers.append` throw with the raw
+ * header value in its message (undici: any byte outside `\x21-\x7e` — CR, LF,
+ * NUL, space, non-ASCII — is rejected as "invalid header value"). Validating
+ * the shape up front, before the token ever reaches a `Headers`/`fetch` call,
+ * means the rejection is ours (token-free message) rather than undici's
+ * (which would echo the token). Call this on any credential before putting it
+ * in a header.
+ */
+export function assertTokenShape(token: string): void {
+  if (!/^[\x21-\x7e]+$/.test(token)) {
+    throw new RegistryAuthError('credential-rejected', 400);
+  }
+}
+
 /** True when `realm` may receive the registry's Basic credentials: https, and
  *  either the registry's own host or a KNOWN_REALM_HOSTS pairing. */
 export function realmMayReceiveCredential(registryHost: string, realm: string): boolean {

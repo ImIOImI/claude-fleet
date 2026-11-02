@@ -217,4 +217,140 @@ describe('ociClient private registries (#444)', () => {
       expect(h.startsWith('Basic ')).toBe(false);
     }
   });
+
+  it('integration: cross-host realm + manifest 401 — the raw token is sent only in requests to ghcr.io, never to the realm host', async () => {
+    const fetchMock = fakeRegistry({
+      manifest: ANN_MANIFEST,
+      private: { token: 'ghp_good' },
+      realm: 'https://evil.example/token'
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(fetchAnnotations(REF, { cred: { token: 'ghp_good' } })).rejects.toMatchObject({
+      name: 'RegistryAuthError',
+      kind: 'credential-rejected',
+      status: 401
+    });
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(0);
+    for (const c of fetchMock.mock.calls) {
+      const url = String(c[0]);
+      const auth = (c[1] as Init | undefined)?.headers?.['Authorization'] ?? '';
+      if (auth.includes('ghp_good')) {
+        expect(url).toContain('ghcr.io');
+      }
+      if (url.includes('evil.example')) {
+        expect(auth).not.toContain('ghp_good');
+      }
+    }
+  });
+});
+
+describe('ociClient sanitised errors (#444 security review)', () => {
+  it('rejects a malformed token up front (credential-rejected, no token in the message) without making any network call', async () => {
+    const fetchMock = fakeRegistry({ manifest: ANN_MANIFEST, private: { token: 'ghp_good' } });
+    vi.stubGlobal('fetch', fetchMock);
+    const bad = 'ghp_SECRET\nX-Injected: evil';
+    const err = await fetchAnnotations(REF, { cred: { token: bad } }).catch((e: unknown) => e as Error);
+    expect(err).toMatchObject({ name: 'RegistryAuthError', kind: 'credential-rejected' });
+    expect(err.message).not.toContain('ghp_SECRET');
+    expect(err.message).not.toContain(bad);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('sanitises a transport-level throw from the token-exchange fetch so the token never surfaces', async () => {
+    const token = 'ghp_leaked_token_value';
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).includes('/token?')) {
+        throw new TypeError(`Bearer ${token}\n" is an invalid header value`);
+      }
+      return new Response('unauthorized', {
+        status: 401,
+        headers: { 'WWW-Authenticate': `Bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:${REPO}:pull"` }
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const err = await fetchAnnotations(REF, { cred: { token } }).catch((e: unknown) => e as Error);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).not.toContain(token);
+    expect((err as Error & { cause?: unknown }).cause).toBeUndefined();
+  });
+
+  it('sanitises a transport-level throw from the manifest fetch so the token never surfaces', async () => {
+    const token = 'ghp_leaked_token_value';
+    // No WWW-Authenticate realm on the anonymous probe ⇒ registryToken takes the
+    // static-Bearer-fallback path (no token-exchange call at all) and the *real*
+    // manifest fetch — the only authenticated call here — carries the raw token.
+    const fetchMock = vi.fn(async (url: string, init?: Init) => {
+      const u = String(url);
+      if (/\/manifests\//.test(u)) {
+        const auth = init?.headers?.['Authorization'];
+        if (auth) throw new TypeError(`"${auth}" is an invalid header value`);
+        return new Response('unauthorized', { status: 401 }); // probe: no realm advertised
+      }
+      return new Response('not found', { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const err = await fetchAnnotations(REF, { cred: { token } }).catch((e: unknown) => e as Error);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).not.toContain(token);
+    expect((err as Error & { cause?: unknown }).cause).toBeUndefined();
+  });
+
+  it('sanitises a transport-level throw from the blob fetch so the token never surfaces', async () => {
+    const token = 'ghp_leaked_token_value';
+    const fetchMock = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes('/token?')) return Response.json({ token: 'public-bearer' });
+      if (/\/manifests\//.test(u)) return new Response(JSON.stringify({ layers: [layer('sha256:a1', 'loadout.md')] }), { status: 200 });
+      if (/\/blobs\//.test(u)) throw new TypeError(`"Bearer ${token}" is an invalid header value`);
+      return new Response('not found', { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const dest = await mkdtemp(join(tmpdir(), 'oci-pull-'));
+    try {
+      let err: Error | undefined;
+      try {
+        await pullArtifact(REF, dest, { cred: { token } });
+      } catch (e) {
+        err = e as Error;
+      }
+      expect(err).toBeInstanceOf(Error);
+      expect(err!.message).not.toContain(token);
+      expect((err as Error & { cause?: unknown }).cause).toBeUndefined();
+    } finally {
+      await rm(dest, { recursive: true, force: true });
+    }
+  });
+
+  it('wraps a non-JSON token-exchange response body in a generic error (no body snippet)', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes('/token?')) return new Response('<html>not json, maybe-a-secret-looking string</html>', { status: 200 });
+      return new Response('unauthorized', {
+        status: 401,
+        headers: { 'WWW-Authenticate': `Bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:${REPO}:pull"` }
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const err = await fetchAnnotations(REF).catch((e: unknown) => e as Error);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).not.toContain('maybe-a-secret-looking string');
+  });
+});
+
+describe('ociClient minor hardening (#444 security review)', () => {
+  it('treats an empty-string token as no credential (anonymous flow, not a rejection)', async () => {
+    const fetchMock = fakeRegistry({ manifest: ANN_MANIFEST });
+    vi.stubGlobal('fetch', fetchMock);
+    const ann = await fetchAnnotations(REF, { cred: { token: '' } });
+    expect(ann['com.claude-fleet.loadout.id']).toBe('spec-driven');
+    expect(authHeaders(fetchMock, '/token?')).toEqual([undefined]);
+  });
+
+  it('treats a whitespace-only token as no credential (anonymous flow, not a rejection)', async () => {
+    const fetchMock = fakeRegistry({ manifest: ANN_MANIFEST });
+    vi.stubGlobal('fetch', fetchMock);
+    const ann = await fetchAnnotations(REF, { cred: { token: '   ' } });
+    expect(ann['com.claude-fleet.loadout.id']).toBe('spec-driven');
+    expect(authHeaders(fetchMock, '/token?')).toEqual([undefined]);
+  });
 });

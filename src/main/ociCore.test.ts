@@ -15,7 +15,8 @@ import {
   toggleFavorite,
   SUPPORTED_REGISTRY,
   RegistryAuthError,
-  realmMayReceiveCredential
+  realmMayReceiveCredential,
+  assertTokenShape
 } from './ociCore.js';
 
 describe('parseImageRef', () => {
@@ -208,6 +209,64 @@ describe('RegistryAuthError (#444)', () => {
     expect(a).toMatchObject({ name: 'RegistryAuthError', kind: 'needs-credential', status: 401 });
     expect(a.message).toBe('registry requires a credential (HTTP 401)');
     expect(new RegistryAuthError('credential-rejected', 403).message).toBe('credential rejected (HTTP 403)');
+  });
+});
+
+// ── Security review follow-up (#444) ────────────────────────────────────────
+
+describe('realmMayReceiveCredential — host-pin hardening (security review)', () => {
+  it('refuses a non-default port on the registry host', () => {
+    expect(realmMayReceiveCredential('ghcr.io', 'https://ghcr.io:8443/token')).toBe(false);
+  });
+  it('refuses userinfo smuggling the registry host as a username (actual host is after the @)', () => {
+    expect(realmMayReceiveCredential('ghcr.io', 'https://ghcr.io@evil.com/token')).toBe(false);
+  });
+  it('refuses a similarly-named but distinct host', () => {
+    expect(realmMayReceiveCredential('ghcr.io', 'https://evilghcr.io/token')).toBe(false);
+  });
+  it('refuses a subdomain lookalike', () => {
+    expect(realmMayReceiveCredential('ghcr.io', 'https://ghcr.io.evil.com/token')).toBe(false);
+  });
+  it('refuses a trailing-dot FQDN', () => {
+    expect(realmMayReceiveCredential('ghcr.io', 'https://ghcr.io./token')).toBe(false);
+  });
+  it('refuses plain http on the registry host', () => {
+    expect(realmMayReceiveCredential('ghcr.io', 'http://ghcr.io/token')).toBe(false);
+  });
+  it('allows a case-insensitive host match', () => {
+    expect(realmMayReceiveCredential('ghcr.io', 'https://GHCR.IO/token')).toBe(true);
+  });
+  it('allows the default https port written out explicitly', () => {
+    expect(realmMayReceiveCredential('ghcr.io', 'https://ghcr.io:443/token')).toBe(true);
+  });
+});
+
+describe('assertTokenShape (security review)', () => {
+  it('accepts an ordinary token', () => {
+    expect(() => assertTokenShape('ghp_abcDEF123')).not.toThrow();
+  });
+  it('rejects a token containing a newline, naming no part of the token', () => {
+    const bad = 'ghp_SECRET\nX-Injected: 1';
+    let caught: unknown;
+    try {
+      assertTokenShape(bad);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(RegistryAuthError);
+    expect((caught as RegistryAuthError).kind).toBe('credential-rejected');
+    expect((caught as Error).message).not.toContain('ghp_SECRET');
+    expect((caught as Error).message).not.toContain(bad);
+  });
+  it('rejects a token containing a carriage return', () => {
+    expect(() => assertTokenShape('ghp_good\rtail')).toThrow(RegistryAuthError);
+  });
+  it('rejects a token containing a NUL byte', () => {
+    expect(() => assertTokenShape('ghp_good\u0000tail')).toThrow(RegistryAuthError);
+  });
+  it('rejects a token containing a character outside \\x21-\\x7e (space, unicode)', () => {
+    expect(() => assertTokenShape('ghp good')).toThrow(RegistryAuthError);
+    expect(() => assertTokenShape('ghp_tøken')).toThrow(RegistryAuthError);
   });
 });
 

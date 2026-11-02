@@ -13,6 +13,7 @@ import {
   safeLayerPath,
   RegistryAuthError,
   realmMayReceiveCredential,
+  assertTokenShape,
   type RegistryCredential
 } from './ociCore.js';
 
@@ -43,6 +44,38 @@ function withTimeout(): { signal: AbortSignal; done: () => void } {
 
 const isAuthStatus = (status: number): boolean => status === 401 || status === 403;
 
+/** An empty/whitespace-only token is treated as "no credential" (#444 minor),
+ *  not a malformed one — the distinction matters because the former should
+ *  fall through to the anonymous flow and the latter should reject outright. */
+function normalizeCred(cred?: RegistryCredential | null): RegistryCredential | null {
+  if (!cred || !cred.token || !cred.token.trim()) return null;
+  return cred;
+}
+
+/**
+ * Fetch wrapped so a transport-level throw never reaches the caller verbatim.
+ * undici throws `Headers.append` errors (and some network errors) with the
+ * offending value embedded in the message — if that value is an
+ * `Authorization: Bearer <token>` header, the token would otherwise leak into
+ * logs/toasts via the rejected promise. `assertTokenShape` is meant to catch
+ * malformed tokens before they ever reach a header, so this is the backstop
+ * for anything else that throws (DNS failures, aborts, a future bug): name
+ * only the stage and host, never the original message or `cause`.
+ */
+async function safeFetch(stage: string, url: string, init?: Record<string, unknown>): Promise<Response> {
+  try {
+    return await fetch(url, init as RequestInit | undefined);
+  } catch {
+    let host = url;
+    try {
+      host = new URL(url).host;
+    } catch {
+      /* leave the raw url if it doesn't even parse */
+    }
+    throw new Error(`${stage} failed for ${host}`);
+  }
+}
+
 /**
  * The Authorization header value for the manifest + blob fetches, or null when
  * the registry needs none. Probe → 401 → WWW-Authenticate realm → token. With
@@ -53,10 +86,18 @@ const isAuthStatus = (status: number): boolean => status === 401 || status === 4
 async function registryToken(
   repository: string,
   manifestUrl: string,
-  cred?: RegistryCredential | null
+  credIn?: RegistryCredential | null
 ): Promise<string | null> {
+  // An empty/whitespace token is "no credential" (#444 minor), not malformed.
+  const cred = normalizeCred(credIn);
+  // Up-front shape guard (#444 security review): reject a token that would
+  // make `Headers.append` throw with the raw header value in its message,
+  // before it ever reaches a header — no network call, no leak either way.
+  if (cred) assertTokenShape(cred.token);
+
   const { signal, done } = withTimeout();
   try {
+    // Anonymous probe — no credential attached, so there is nothing to sanitise.
     const probe = await fetch(manifestUrl, { headers: { Accept: MANIFEST_ACCEPT }, signal });
     if (probe.status !== 401) return null; // public-unauthed or already ok; 403/404 surface on the real fetch
     const www = probe.headers.get('WWW-Authenticate') ?? '';
@@ -67,11 +108,18 @@ async function registryToken(
     const scope = /scope="([^"]+)"/.exec(www)?.[1] ?? `repository:${repository}:pull`;
     const tokenUrl = `${realm}?service=${encodeURIComponent(service)}&scope=${encodeURIComponent(scope)}`;
     const headers: Record<string, string> = {};
-    if (cred && realmMayReceiveCredential(new URL(manifestUrl).host, realm)) {
+    // Guard the exact URL we're about to fetch (post-query), not just the
+    // advertised `realm` substring — check what you use, not an intermediate
+    // value that happens to share its host today (#444 minor).
+    if (cred && realmMayReceiveCredential(new URL(manifestUrl).host, tokenUrl)) {
       const basic = Buffer.from(`${cred.username || 'token'}:${cred.token}`).toString('base64');
       headers['Authorization'] = `Basic ${basic}`;
     }
-    const res = await fetch(tokenUrl, { headers, signal });
+    // Relies on fetch (undici) stripping Authorization on a cross-origin
+    // redirect (see ociRedirect.test.ts) — do not swap fetch implementations
+    // without that guarantee, and do not add an explicit `redirect` option
+    // that changes this default.
+    const res = await safeFetch('token exchange', tokenUrl, { headers, signal });
     if (!res.ok) {
       if (isAuthStatus(res.status)) {
         if (cred) return `Bearer ${cred.token}`;
@@ -79,7 +127,13 @@ async function registryToken(
       }
       throw new Error(`token request failed (HTTP ${res.status})`);
     }
-    const body = (await res.json()) as { token?: string; access_token?: string };
+    let body: { token?: string; access_token?: string };
+    try {
+      body = (await res.json()) as { token?: string; access_token?: string };
+    } catch {
+      // #444 minor: never echo the (possibly attacker-controlled) response body.
+      throw new Error(`token exchange response was not valid JSON for ${new URL(tokenUrl).host}`);
+    }
     const token = body.token ?? body.access_token;
     return token ? `Bearer ${token}` : null;
   } finally {
@@ -89,8 +143,11 @@ async function registryToken(
 
 async function fetchManifest(
   ref: string,
-  cred?: RegistryCredential | null
+  credIn?: RegistryCredential | null
 ): Promise<{ manifest: OciManifest; repository: string; auth: string | null }> {
+  // Same empty/whitespace-token normalisation as registryToken, so an
+  // ignored-as-anonymous credential doesn't get misreported as "rejected".
+  const cred = normalizeCred(credIn);
   const { registry, repository, tag } = parseImageRef(ref);
   const manifestUrl = `https://${registry}/v2/${repository}/manifests/${tag}`;
   const auth = await registryToken(repository, manifestUrl, cred);
@@ -98,12 +155,21 @@ async function fetchManifest(
   try {
     const headers: Record<string, string> = { Accept: MANIFEST_ACCEPT };
     if (auth) headers['Authorization'] = auth;
-    const res = await fetch(manifestUrl, { headers, signal });
+    // Relies on fetch (undici) stripping Authorization on a cross-origin
+    // redirect (see ociRedirect.test.ts) — do not swap fetch implementations
+    // without that guarantee, and do not add an explicit `redirect` option
+    // that changes this default.
+    const res = await safeFetch('manifest fetch', manifestUrl, { headers, signal });
     if (isAuthStatus(res.status)) {
       throw new RegistryAuthError(cred ? 'credential-rejected' : 'needs-credential', res.status);
     }
     if (!res.ok) throw new Error(`manifest fetch failed for ${ref} (HTTP ${res.status})`);
-    return { manifest: (await res.json()) as OciManifest, repository, auth };
+    try {
+      return { manifest: (await res.json()) as OciManifest, repository, auth };
+    } catch {
+      // #444 minor: never echo the (possibly attacker-controlled) response body.
+      throw new Error(`manifest response was not valid JSON for ${ref}`);
+    }
   } finally {
     done();
   }
@@ -136,7 +202,12 @@ export async function pullArtifact(ref: string, destDir: string, opts: PullOpts 
     try {
       const headers: Record<string, string> = {};
       if (auth) headers['Authorization'] = auth;
-      const res = await fetch(`https://${registry}/v2/${repository}/blobs/${layer.digest}`, { headers, signal });
+      const blobUrl = `https://${registry}/v2/${repository}/blobs/${layer.digest}`;
+      // Relies on fetch (undici) stripping Authorization on a cross-origin
+      // redirect — this is the GHCR blob → CDN hop (see ociRedirect.test.ts).
+      // Do not swap fetch implementations without that guarantee, and do not
+      // add an explicit `redirect` option that changes this default.
+      const res = await safeFetch('blob fetch', blobUrl, { headers, signal });
       if (!res.ok) throw new Error(`blob fetch failed for ${title} (HTTP ${res.status})`);
       const declared = Number(res.headers.get('content-length'));
       if (Number.isFinite(declared) && declared > MAX_BLOB_BYTES) {
