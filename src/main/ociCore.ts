@@ -76,6 +76,60 @@ export function safeLayerPath(destDir: string, title: string): string {
   return target;
 }
 
+/** A loadout source's credential (#444). `username` defaults to "token" in the
+ *  Basic exchange (GHCR, GitLab and Harbor accept any username with a token). */
+export interface RegistryCredential {
+  token: string;
+  username?: string;
+}
+
+export type RegistryAuthKind = 'needs-credential' | 'credential-rejected';
+
+/**
+ * A registry refused us. `needs-credential` = we sent no credential;
+ * `credential-rejected` = we sent one and it was refused. The message never
+ * contains the token, only the HTTP status.
+ */
+export class RegistryAuthError extends Error {
+  readonly kind: RegistryAuthKind;
+  readonly status: number;
+  constructor(kind: RegistryAuthKind, status: number) {
+    super(
+      kind === 'needs-credential'
+        ? `registry requires a credential (HTTP ${status})`
+        : `credential rejected (HTTP ${status})`
+    );
+    this.name = 'RegistryAuthError';
+    this.kind = kind;
+    this.status = status;
+  }
+}
+
+/**
+ * Registry host → token-realm hosts that may receive its Basic credentials
+ * besides the registry host itself. Anything not listed is asked anonymously,
+ * so a hostile WWW-Authenticate can't redirect a source's token.
+ */
+export const KNOWN_REALM_HOSTS: Readonly<Record<string, readonly string[]>> = {
+  'ghcr.io': ['ghcr.io'],
+  'registry-1.docker.io': ['auth.docker.io']
+};
+
+/** True when `realm` may receive the registry's Basic credentials: https, and
+ *  either the registry's own host or a KNOWN_REALM_HOSTS pairing. */
+export function realmMayReceiveCredential(registryHost: string, realm: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(realm);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== 'https:') return false;
+  const host = u.host.toLowerCase();
+  const reg = registryHost.toLowerCase();
+  return host === reg || (KNOWN_REALM_HOSTS[reg] ?? []).includes(host);
+}
+
 export interface RemoteLoadout {
   id: string;
   title: string;

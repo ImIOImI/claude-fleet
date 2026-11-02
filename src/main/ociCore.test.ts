@@ -13,7 +13,9 @@ import {
   isUpdateAvailable,
   assembleCatalog,
   toggleFavorite,
-  SUPPORTED_REGISTRY
+  SUPPORTED_REGISTRY,
+  RegistryAuthError,
+  realmMayReceiveCredential
 } from './ociCore.js';
 
 describe('parseImageRef', () => {
@@ -175,6 +177,37 @@ describe('toggleFavorite', () => {
 
   it('preserves existing order and appends new ids', () => {
     expect(toggleFavorite(['b', 'a'], 'c', true)).toEqual(['b', 'a', 'c']);
+  });
+});
+
+describe('realmMayReceiveCredential (#444)', () => {
+  it('allows an https realm on the registry host', () => {
+    expect(realmMayReceiveCredential('ghcr.io', 'https://ghcr.io/token')).toBe(true);
+  });
+  it('allows a known cross-host pairing', () => {
+    expect(realmMayReceiveCredential('registry-1.docker.io', 'https://auth.docker.io/token')).toBe(true);
+  });
+  it('refuses a realm on a different host', () => {
+    expect(realmMayReceiveCredential('ghcr.io', 'https://evil.example/token')).toBe(false);
+  });
+  it('refuses a lookalike host', () => {
+    expect(realmMayReceiveCredential('ghcr.io', 'https://ghcr.io.evil.example/token')).toBe(false);
+  });
+  it('refuses plain http even on the registry host', () => {
+    expect(realmMayReceiveCredential('ghcr.io', 'http://ghcr.io/token')).toBe(false);
+  });
+  it('refuses an unparseable realm', () => {
+    expect(realmMayReceiveCredential('ghcr.io', 'not a url')).toBe(false);
+  });
+});
+
+describe('RegistryAuthError (#444)', () => {
+  it('carries kind + status and a token-free message', () => {
+    const a = new RegistryAuthError('needs-credential', 401);
+    expect(a).toBeInstanceOf(Error);
+    expect(a).toMatchObject({ name: 'RegistryAuthError', kind: 'needs-credential', status: 401 });
+    expect(a.message).toBe('registry requires a credential (HTTP 401)');
+    expect(new RegistryAuthError('credential-rejected', 403).message).toBe('credential rejected (HTTP 403)');
   });
 });
 
