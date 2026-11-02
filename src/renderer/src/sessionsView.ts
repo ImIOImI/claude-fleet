@@ -61,6 +61,19 @@ export function partitionByOpen<T extends { id: string }>(
   return { open, recent };
 }
 
+/** Pull automation-run (headless) sessions out of the Recent rows, keeping
+ *  input order in both. They churn — every run lands a new transcript at the
+ *  top of a last-active list — so they get their own collapsed group instead
+ *  of shoving the user's own sessions down. */
+export function splitHeadless<T extends { headless?: boolean }>(
+  rows: readonly T[]
+): { headless: T[]; rest: T[] } {
+  const headless: T[] = [];
+  const rest: T[] = [];
+  for (const s of rows) (s.headless ? headless : rest).push(s);
+  return { headless, rest };
+}
+
 /** Order the Open group by tab-strip position (workspace order, then tab index
  *  within it) instead of last-active. Activity then never moves a row — only
  *  opening, closing or dragging a tab does — so the current session stays put

@@ -74,6 +74,8 @@ export interface SessionListItem {
   workspaceState: 'running' | 'paused' | 'stopped' | 'deleted' | 'unreachable';
   /** Latest summary-chapter tags, relevance-ordered; [] when unsummarized. */
   tags: string[];
+  /** Started by an automation fresh step, not a terminal tab. */
+  headless: boolean;
 }
 
 /**
