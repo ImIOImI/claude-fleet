@@ -56,11 +56,11 @@ function originOf(a: AutomationRecord): LoadoutOrigin | null {
 
 export function createLoadoutInstaller(deps: { store: AutomationStore; now(): number; workspaceName(id: string): string }) {
   const { store } = deps;
-  const installedFrom = (loadoutId: string, targetId: string) =>
-    store.list().filter((a) => { const o = originOf(a); return o?.loadoutId === loadoutId && o.workspaceId === targetId; });
+  const installedFrom = async (loadoutId: string, targetId: string) =>
+    (await store.list()).filter((a) => { const o = originOf(a); return o?.loadoutId === loadoutId && o.workspaceId === targetId; });
 
-  function preview(prepared: PreparedAutomation[], loadoutId: string, targetId: string, allowHost = false): LoadoutAutomationPreview[] {
-    const existing = installedFrom(loadoutId, targetId);
+  async function preview(prepared: PreparedAutomation[], loadoutId: string, targetId: string, allowHost = false): Promise<LoadoutAutomationPreview[]> {
+    const existing = await installedFrom(loadoutId, targetId);
     const firstInstall = existing.length === 0;
     return prepared.map((p) => {
       const cur = existing.find((a) => originOf(a)!.folder === p.folder);
@@ -80,42 +80,44 @@ export function createLoadoutInstaller(deps: { store: AutomationStore; now(): nu
     });
   }
 
-  function install(prepared: PreparedAutomation[], opts: InstallOpts): InstallSummary {
-    const rows = preview(prepared, opts.loadoutId, opts.targetId, opts.allowHost === true);
+  async function install(prepared: PreparedAutomation[], opts: InstallOpts): Promise<InstallSummary> {
+    const rows = await preview(prepared, opts.loadoutId, opts.targetId, opts.allowHost === true);
     const enable = opts.enable ? new Set(opts.enable) : new Set(rows.filter((r) => r.defaultOn).map((r) => r.folder));
     const out: InstallSummary = { ids: [], created: [], updated: [], kept: [], skipped: [] };
-    const existing = installedFrom(opts.loadoutId, opts.targetId);
-    prepared.forEach((p, i) => {
+    const existing = await installedFrom(opts.loadoutId, opts.targetId);
+    const taken = new Set((await store.list()).map((a) => a.name));
+    for (const [i, p] of prepared.entries()) {
       const row = rows[i];
       const cur = existing.find((a) => originOf(a)!.folder === p.folder);
       if (cur) out.ids.push(cur.id);
-      if (row.status === 'invalid' || !p.definition) { out.skipped.push({ name: p.name, reason: row.blocked ?? 'invalid' }); return; }
-      if (p.hostStep && opts.allowHost !== true) { out.skipped.push({ name: p.name, reason: row.blocked! }); return; }
+      if (row.status === 'invalid' || !p.definition) { out.skipped.push({ name: p.name, reason: row.blocked ?? 'invalid' }); continue; }
+      if (p.hostStep && opts.allowHost !== true) { out.skipped.push({ name: p.name, reason: row.blocked! }); continue; }
       const origin = (version: number): LoadoutOrigin => ({ loadoutId: opts.loadoutId, version: opts.version, workspaceId: opts.targetId, folder: p.folder, installedVersion: version });
       if (cur) {
-        if (row.status === 'kept-edited') { out.kept.push(cur.name); return; }
+        if (row.status === 'kept-edited') { out.kept.push(cur.name); continue; }
         if (row.status === 'update') {
           const def: AutomationDef = { ...p.definition, name: cur.name };
-          const next = store.update(cur.id, def, USER, deps.now());
-          store.setOrigin(cur.id, { ...origin(next.version) });
+          const next = await store.update(cur.id, def, USER, deps.now());
+          await store.setOrigin(cur.id, { ...origin(next.version) });
           out.updated.push(cur.name);
         } else {
-          store.setOrigin(cur.id, { ...origin(cur.version) });
+          await store.setOrigin(cur.id, { ...origin(cur.version) });
         }
-        return;
+        continue;
       }
-      const name = copyName(p.definition.name, opts.targetName, (n) => !!store.byName(n));
+      const name = copyName(p.definition.name, opts.targetName, (n) => taken.has(n));
       const on = enable.has(p.folder) && !row.blocked;
-      const a = store.create({ ...p.definition, name }, USER, deps.now(), on, { ...origin(1) });
+      const a = await store.create({ ...p.definition, name }, USER, deps.now(), on, { ...origin(1) });
+      taken.add(a.name);
       out.ids.push(a.id);
       out.created.push(a.name);
-    });
+    }
     return out;
   }
 
-  function uninstall(loadoutId: string, targetId: string): string[] {
-    const gone = installedFrom(loadoutId, targetId);
-    for (const a of gone) store.remove(a.id);
+  async function uninstall(loadoutId: string, targetId: string): Promise<string[]> {
+    const gone = await installedFrom(loadoutId, targetId);
+    for (const a of gone) await store.remove(a.id);
     return gone.map((a) => a.name);
   }
 

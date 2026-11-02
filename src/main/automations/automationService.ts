@@ -2,6 +2,10 @@
 // (concurrency, rate cap, queueing), the scheduler tick, failure notifications,
 // restart recovery, the active-run registry used for todo attribution, and the
 // MCP handlers. Pure: Electron/backends are injected (automationIpc.ts).
+// Async on the store layer. Concurrency decisions read and write the in-memory
+// claims (`claimed`, `queued`) synchronously after the last await, so two
+// concurrent starts can't both run (the guarantee the sync store gave for free).
+// tick() is serialized so overlapping ticks can't both fire one due slot.
 import type { Automation, AutomationDef, EventName, ParamValue, RunRow, RunTriggerKind, TodoSource } from '../../preload/inboxTypes.js';
 import type { NotifyInput } from '../inbox/notifyService.js';
 import { AutomationStore, type AutomationRecord } from './automationStore.js';
@@ -22,6 +26,8 @@ export interface AutomationDeps extends Omit<RunnerDeps, 'store'> {
   /** Injected for tests; default setTimeout/clearTimeout (event debounce). */
   setTimer?(fn: () => void, ms: number): unknown;
   clearTimer?(h: unknown): void;
+  /** A timer-started run failed to record (automationIpc logs it). */
+  onError?(e: unknown): void;
 }
 
 export interface FleetEvent {
@@ -53,23 +59,37 @@ export function createAutomationService(deps: AutomationDeps) {
   const { store } = deps;
   /** runId → automation + the workspaces its steps target (attribution). */
   const active = new Map<string, { automationId: string; workspaces: Set<string>; next?: { at: number; by: string } }>();
+  /** Automation ids with a run starting, running or finishing. */
+  const claimed = new Set<string>();
+  /** Automation id → its one queued run (the insert's promise). */
+  const queued = new Map<string, Promise<RunRow>>();
   const lastStart = new Map<string, number>();
   const inFlight = new Set<Promise<unknown>>();
   const lastEnded = new Map<string, number>();
   const pending = new Map<string, { timer: unknown; event: NonNullable<RunRow['trigger']['event']> }>();
+  /** tick() is serialized: two overlapping ticks would both see a slot due and fire it twice. */
+  let ticking: Promise<unknown> = Promise.resolve();
   const setTimer = deps.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
   const clearTimer = deps.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>));
 
   const ctx = { workspace: (v: string) => deps.resolveWorkspace(v), get hostShells() { return deps.hostShells?.(); } };
 
-  function view(a: AutomationRecord): Automation {
+  /** Registers a background run for settle(); a failure goes to onError, never an unhandled rejection. */
+  function track(p: Promise<unknown>): void {
+    const q = p.catch((e) => deps.onError?.(e));
+    inFlight.add(q);
+    void q.finally(() => inFlight.delete(q));
+  }
+
+  async function view(a: AutomationRecord): Promise<Automation> {
     const now = deps.now();
+    const [tags, lastRuns, weekStats] = await Promise.all([store.tags(a.id), store.runs(a.id, 1), store.weekStats(a.id, now)]);
     return {
       id: a.id, name: a.name, description: a.definition.description ?? null, enabled: a.enabled, version: a.version,
-      definition: a.definition, tags: store.tags(a.id), createdBy: a.createdBy, createdAt: a.createdAt, updatedAt: a.updatedAt,
-      lastScheduledAt: a.lastScheduledAt, nextFireAt: nextFireAt(a, now), lastRun: store.runs(a.id, 1)[0] ?? null,
+      definition: a.definition, tags, createdBy: a.createdBy, createdAt: a.createdAt, updatedAt: a.updatedAt,
+      lastScheduledAt: a.lastScheduledAt, nextFireAt: nextFireAt(a, now), lastRun: lastRuns[0] ?? null,
       nextSetByRun: a.enabled && a.nextRunAt !== null ? a.nextRunBy : null,
-      weekStats: store.weekStats(a.id, now),
+      weekStats,
       origin: a.origin && typeof a.origin.loadoutId === 'string'
         ? { loadoutId: a.origin.loadoutId, version: typeof a.origin.version === 'string' ? a.origin.version : null, workspaceId: String(a.origin.workspaceId ?? ''), edited: a.version > Number(a.origin.installedVersion ?? a.version) }
         : null,
@@ -105,35 +125,37 @@ export function createAutomationService(deps: AutomationDeps) {
   }
 
   /** A live run asks to fire next at a time (#437); the last request wins, applied when the run ends. */
-  function requestNext(runId: string, raw: unknown, by: string): { requestedAt: number; min: string } {
+  async function requestNext(runId: string, raw: unknown, by: string): Promise<{ requestedAt: number; min: string }> {
     const r = active.get(runId);
     if (!r) throw new Error('that run has ended');
-    const a = store.get(r.automationId);
+    const a = await store.get(r.automationId);
     const min = a?.definition.reschedule?.min;
     if (!a || !min) throw new Error(`${a?.name ?? 'this automation'} can't set its next run: add reschedule: { min: 30m } to its definition`);
     const p = parseNextRequest(raw, deps.now());
     if (!p.ok) throw new Error(p.error);
+    if (active.get(runId) !== r) throw new Error('that run has ended'); // it ended during the await
     r.next = { at: p.at, by };
     return { requestedAt: p.at, min };
   }
 
   /** At run end: apply the last request if the run went well and the automation is unchanged. */
-  function settleNext(a: AutomationRecord, run: RunRow, outcome: RunOutcome, next: { at: number; by: string } | undefined): void {
+  async function settleNext(a: AutomationRecord, run: RunRow, outcome: RunOutcome, next: { at: number; by: string } | undefined): Promise<void> {
     if (!next) return;
     const now = deps.now();
-    const cur = store.get(a.id);
+    const cur = await store.get(a.id);
     const floorMs = parseDuration(cur?.definition.reschedule?.min);
     const ok = outcome.status === 'succeeded' || outcome.status === 'nothing-to-do';
     const unchanged = cur !== null && cur.enabled && cur.version === a.version && floorMs !== null;
     if (!ok || !unchanged) {
-      store.setRunReschedule(run.id, { requestedAt: next.at, appliedAt: null, clamped: false, by: next.by, reason: ok ? 'the automation was changed or disabled during the run' : `the run ${outcome.status === 'timed-out' ? 'timed out' : 'failed'}` });
+      await store.setRunReschedule(run.id, { requestedAt: next.at, appliedAt: null, clamped: false, by: next.by, reason: ok ? 'the automation was changed or disabled during the run' : `the run ${outcome.status === 'timed-out' ? 'timed out' : 'failed'}` });
       return;
     }
     const applied = applyFloor(next.at, now, floorMs);
-    store.setNextRun(a.id, applied.at, run.id);
-    store.setRunReschedule(run.id, { requestedAt: next.at, appliedAt: applied.at, clamped: applied.clamped, by: next.by });
+    await store.setNextRun(a.id, applied.at, run.id);
+    await store.setRunReschedule(run.id, { requestedAt: next.at, appliedAt: applied.at, clamped: applied.clamped, by: next.by });
   }
 
+  /** Runs one run to completion. The caller holds claimed[a.id]; it is released here or handed to a promoted queued run. */
   async function execute(a: AutomationRecord, run: RunRow, callerSupplied: boolean): Promise<void> {
     active.set(run.id, { automationId: a.id, workspaces: new Set(stepWorkspaces(a.definition)) });
     deps.changed();
@@ -146,113 +168,143 @@ export function createAutomationService(deps: AutomationDeps) {
     const next = active.get(run.id)?.next;
     active.delete(run.id);
     lastEnded.set(a.id, deps.now());
-    store.setRunStatus(run.id, outcome.status, deps.now(), outcome.error);
-    settleNext(a, run, outcome, next);
-    if (outcome.status === 'failed' || outcome.status === 'timed-out') failed(a, run, outcome);
-    deps.changed();
-    // A queued run waits for this one.
-    const queued = store.runsWithStatus('queued').find((r) => r.automationId === a.id);
-    if (queued) {
-      const cur = store.get(a.id);
-      if (cur) {
-        store.setRunStatus(queued.id, 'running', deps.now());
-        const p = execute(cur, store.getRun(queued.id)!, queued.trigger.by?.kind === 'workspace');
-        inFlight.add(p);
-        void p.finally(() => inFlight.delete(p));
+    let handedOn = false;
+    try {
+      await store.setRunStatus(run.id, outcome.status, deps.now(), outcome.error);
+      await settleNext(a, run, outcome, next);
+      if (outcome.status === 'failed' || outcome.status === 'timed-out') failed(a, run, outcome);
+      deps.changed();
+      // A queued run waits for this one.
+      const waiting = queued.get(a.id);
+      if (waiting) {
+        queued.delete(a.id);
+        const q = await waiting;
+        const cur = await store.get(a.id);
+        if (cur) {
+          await store.setRunStatus(q.id, 'running', deps.now());
+          const promoted = (await store.getRun(q.id))!;
+          handedOn = true;
+          track(execute(cur, promoted, q.trigger.by?.kind === 'workspace'));
+        }
       }
+    } finally {
+      if (!handedOn) claimed.delete(a.id);
     }
   }
 
-  function start(id: string, req: RunRequest): RunRow {
-    const a = store.get(id);
+  async function start(id: string, req: RunRequest): Promise<RunRow> {
+    const a = await store.get(id);
     if (!a) throw new Error(`automation ${id} not found`);
     const args = validateArgs(a.definition.params, req.args, req.coerce);
     if (!args.ok) throw new Error(`invalid arguments: ${args.errors.join('; ')}`);
     const trigger = { kind: req.kind, ...(req.by ? { by: req.by } : {}), ...(req.cron ? { cron: req.cron } : {}), ...(req.event ? { event: req.event } : {}) };
     const now = deps.now();
-    const running = [...active.values()].some((r) => r.automationId === id);
+    // --- synchronous from here to each store call: read + claim atomically ---
+    const running = claimed.has(id);
     const userManual = req.kind === 'manual' && req.by?.kind === 'user';
     const last = lastStart.get(id);
     if (!userManual && last !== undefined && now - last < RATE_MS && !running) {
       return store.startRun(a, trigger, args.value, 'skipped', now, 'rate limit: at most one run per minute');
     }
     if (running) {
-      if (a.definition.concurrency === 'queue' && !store.runsWithStatus('queued').some((r) => r.automationId === id)) {
-        return store.startRun(a, trigger, args.value, 'queued', now);
+      if (a.definition.concurrency === 'queue' && !queued.has(id)) {
+        const p = store.startRun(a, trigger, args.value, 'queued', now);
+        queued.set(id, p);
+        p.catch(() => { if (queued.get(id) === p) queued.delete(id); });
+        return p;
       }
       return store.startRun(a, trigger, args.value, 'skipped', now, 'a run was already in progress');
     }
+    claimed.add(id);
     lastStart.set(id, now);
-    const run = store.startRun(a, trigger, args.value, 'running', now);
-    const p = execute(a, run, req.callerSupplied === true);
-    inFlight.add(p);
-    void p.finally(() => inFlight.delete(p));
+    let run: RunRow;
+    try {
+      run = await store.startRun(a, trigger, args.value, 'running', now);
+    } catch (e) {
+      claimed.delete(id);
+      throw e;
+    }
+    track(execute(a, run, req.callerSupplied === true));
     return run;
   }
 
+  /** Record a run that failed before starting (bad args, missing automation) and notify. */
+  async function failedStart(a: AutomationRecord, trigger: RunRow['trigger'], message: string): Promise<RunRow> {
+    const run = await store.startRun(a, trigger, {}, 'failed', deps.now(), message);
+    failed(a, run, { status: 'failed', error: message });
+    return run;
+  }
+
+  async function tickOnce(): Promise<RunRow[]> {
+    const now = deps.now();
+    const started: RunRow[] = [];
+    for (const a of await store.list()) {
+      const due = dueSchedule(a, now);
+      if (!due) continue;
+      await store.setLastScheduled(a.id, now);
+      if (due.kind === 'rescheduled') await store.setNextRun(a.id, null);
+      try {
+        started.push(await start(a.id, { kind: due.kind, ...(due.cron ? { cron: due.cron } : {}), args: due.args }));
+      } catch (e) {
+        started.push(await failedStart(a, { kind: due.kind, ...(due.cron ? { cron: due.cron } : {}) }, (e as Error).message));
+      }
+    }
+    if (started.length) deps.changed();
+    return started;
+  }
+
   return {
-    list(): Automation[] {
-      return store.list().map(view);
+    async list(): Promise<Automation[]> {
+      return Promise.all((await store.list()).map(view));
     },
-    get(id: string): { automation: Automation; runs: RunRow[]; yaml: string; versions: number[] } | null {
-      const a = store.get(id);
+    async get(id: string): Promise<{ automation: Automation; runs: RunRow[]; yaml: string; versions: number[] } | null> {
+      const a = await store.get(id);
       if (!a) return null;
-      return { automation: view(a), runs: store.runs(id, 30), yaml: definitionToYaml(a.definition), versions: store.versions(id).map((v) => v.version) };
+      const [automation, runs, versions] = await Promise.all([view(a), store.runs(id, 30), store.versions(id)]);
+      return { automation, runs, yaml: definitionToYaml(a.definition), versions: versions.map((v) => v.version) };
     },
     validate(text: string): { ok: boolean; errors: string[] } {
       const r = parse(text);
       return r.ok ? { ok: true, errors: [] } : { ok: false, errors: r.errors };
     },
-    create(text: string, by: TodoSource): Automation {
+    async create(text: string, by: TodoSource): Promise<Automation> {
       const r = parse(text);
       if (!r.ok) throw new Error(r.errors.join('\n'));
-      const a = store.create(r.value, by, deps.now());
+      const a = await store.create(r.value, by, deps.now());
       deps.changed();
       return view(a);
     },
-    update(id: string, text: string, by: TodoSource): Automation {
+    async update(id: string, text: string, by: TodoSource): Promise<Automation> {
       const r = parse(text);
       if (!r.ok) throw new Error(r.errors.join('\n'));
-      const a = store.update(id, r.value, by, deps.now());
+      const a = await store.update(id, r.value, by, deps.now());
       deps.changed();
       return view(a);
     },
-    setEnabled(id: string, enabled: boolean): void {
-      store.setEnabled(id, enabled, deps.now());
+    async setEnabled(id: string, enabled: boolean): Promise<void> {
+      await store.setEnabled(id, enabled, deps.now());
       deps.changed();
     },
-    remove(id: string): void {
-      store.remove(id);
+    async remove(id: string): Promise<void> {
+      await store.remove(id);
       deps.changed();
     },
     run: start,
 
-    /** Periodic: start whatever schedule is due (one catch-up for missed slots). */
-    tick(): RunRow[] {
-      const now = deps.now();
-      const started: RunRow[] = [];
-      for (const a of store.list()) {
-        const due = dueSchedule(a, now);
-        if (!due) continue;
-        store.setLastScheduled(a.id, now);
-        if (due.kind === 'rescheduled') store.setNextRun(a.id, null);
-        try {
-          started.push(start(a.id, { kind: due.kind, ...(due.cron ? { cron: due.cron } : {}), args: due.args }));
-        } catch (e) {
-          const run = store.startRun(a, { kind: due.kind, ...(due.cron ? { cron: due.cron } : {}) }, {}, 'failed', now, (e as Error).message);
-          failed(a, run, { status: 'failed', error: (e as Error).message });
-          started.push(run);
-        }
-      }
-      if (started.length) deps.changed();
-      return started;
+    /** Periodic: start whatever schedule is due (one catch-up for missed slots). Serialized. */
+    tick(): Promise<RunRow[]> {
+      const run = ticking.then(tickOnce);
+      ticking = run.catch(() => undefined);
+      return run;
     },
 
     /** A fleet event (#407 Phase 4): start matching event-triggered automations after their debounce. */
-    onEvent(e: FleetEvent): string[] {
+    async onEvent(e: FleetEvent): Promise<string[]> {
+      const all = await store.list();
+      // --- synchronous from here: the pending map is read and written without awaits ---
       const now = deps.now();
       const matched: string[] = [];
-      for (const a of store.list()) {
+      for (const a of all) {
         if (!a.enabled) continue;
         const trig = a.definition.triggers.find((t) =>
           'event' in t && t.event.on === e.on &&
@@ -264,9 +316,8 @@ export function createAutomationService(deps: AutomationDeps) {
         const targets = new Set(stepWorkspaces(a.definition));
         const ws = e.workspaceId ?? (e.todo?.source.kind === 'workspace' ? e.todo.source.id ?? undefined : undefined);
         if (ws && targets.has(ws)) {
-          const busyHere = [...active.values()].some((r) => r.automationId === a.id);
           const ended = lastEnded.get(a.id);
-          if (busyHere || (ended !== undefined && now - ended < SELF_GUARD_MS)) continue;
+          if (claimed.has(a.id) || (ended !== undefined && now - ended < SELF_GUARD_MS)) continue;
         }
         matched.push(a.id);
         const p = pending.get(a.id);
@@ -282,16 +333,16 @@ export function createAutomationService(deps: AutomationDeps) {
             const fired = pending.get(a.id);
             pending.delete(a.id);
             if (!fired) return;
-            try {
-              start(a.id, { kind: 'event', event: fired.event });
-            } catch (err) {
-              const cur = store.get(a.id);
-              if (cur) {
-                const run = store.startRun(cur, { kind: 'event', event: fired.event }, {}, 'failed', deps.now(), (err as Error).message);
-                failed(cur, run, { status: 'failed', error: (err as Error).message });
+            const p = (async () => {
+              try {
+                await start(a.id, { kind: 'event', event: fired.event });
+              } catch (err) {
+                const cur = await store.get(a.id);
+                if (cur) await failedStart(cur, { kind: 'event', event: fired.event }, (err as Error).message);
               }
-            }
-            deps.changed();
+              deps.changed();
+            })().catch((err) => deps.onError?.(err));
+            track(p);
           }, ms)
         });
       }
@@ -305,17 +356,17 @@ export function createAutomationService(deps: AutomationDeps) {
     },
 
     /** Startup: runs cut off by a quit become `interrupted` (one notification). */
-    recover(): RunRow[] {
-      const cut = store.markInterrupted(deps.now());
+    async recover(): Promise<RunRow[]> {
+      const cut = await store.markInterrupted(deps.now());
       if (cut.length) {
-        const names = [...new Set(cut.map((r) => store.get(r.automationId)?.name ?? 'an automation'))];
+        const names = [...new Set(await Promise.all(cut.map(async (r) => (await store.get(r.automationId))?.name ?? 'an automation')))];
         deps.notify?.({
           kind: 'run-failed', title: cut.length === 1 ? `${names[0]} was interrupted` : `${cut.length} automation runs were interrupted`,
           body: `The app quit mid-run (${names.join(', ')}). They are not retried automatically.`, priority: 'normal',
           source: { kind: 'user', id: null }
         });
       }
-      store.pruneRuns(deps.now() - RUN_RETENTION_MS);
+      await store.pruneRuns(deps.now() - RUN_RETENTION_MS);
       return cut;
     },
 
@@ -332,50 +383,50 @@ export function createAutomationService(deps: AutomationDeps) {
 
     mcp: {
       /** Automations a workspace may see: ones it can run, or whose steps prompt it. */
-      list(callerId: string, privileged = false): Array<Pick<Automation, 'id' | 'name' | 'description' | 'enabled' | 'nextFireAt'> & { canRun: boolean; params: AutomationDef['params'] }> {
-        return store.list()
+      async list(callerId: string, privileged = false): Promise<Array<Pick<Automation, 'id' | 'name' | 'description' | 'enabled' | 'nextFireAt'> & { canRun: boolean; params: AutomationDef['params'] }>> {
+        return (await store.list())
           .filter((a) => privileged || canRun(a, callerId) || stepWorkspaces(a.definition).includes(callerId))
           .map((a) => ({ id: a.id, name: a.name, description: a.definition.description ?? null, enabled: a.enabled, nextFireAt: nextFireAt(a, deps.now()), canRun: privileged || canRun(a, callerId), params: a.definition.params ?? [] }));
       },
       /** One automation's YAML + recent runs, for workspaces that may see it (all for the automations workspace). */
-      get(callerId: string, args: Record<string, unknown>, privileged = false) {
+      async get(callerId: string, args: Record<string, unknown>, privileged = false) {
         const key = typeof args.id === 'string' ? args.id : '';
-        const a = store.get(key) ?? store.byName(key);
+        const a = (await store.get(key)) ?? (await store.byName(key));
         if (!a || !(privileged || visible(a, callerId))) throw new Error(`automation ${key || '(missing id)'} not found`);
-        return { ...view(a), yaml: definitionToYaml(a.definition), runs: store.runs(a.id, 10) };
+        return { ...(await view(a)), yaml: definitionToYaml(a.definition), runs: await store.runs(a.id, 10) };
       },
       /** Recent runs across the automations a workspace may see, optionally filtered. */
-      listRuns(callerId: string, args: Record<string, unknown>, privileged = false) {
+      async listRuns(callerId: string, args: Record<string, unknown>, privileged = false) {
         const limit = Math.min(Math.max(1, Number(args.limit) || 20), 100);
         const key = typeof args.automation === 'string' ? args.automation : null;
         const status = typeof args.status === 'string' ? args.status : null;
         const since = typeof args.since === 'number' ? args.since : 0;
-        const pool = store.list().filter((a) => (privileged || visible(a, callerId)) && (!key || a.id === key || a.name === key));
-        return pool
-          .flatMap((a) => store.runs(a.id, 100).map((r) => ({ ...r, automation: a.name })))
+        const pool = (await store.list()).filter((a) => (privileged || visible(a, callerId)) && (!key || a.id === key || a.name === key));
+        const perAutomation = await Promise.all(pool.map(async (a) => (await store.runs(a.id, 100)).map((r) => ({ ...r, automation: a.name }))));
+        return perAutomation.flat()
           .filter((r) => (!status || r.status === status) && r.startedAt >= since)
           .sort((x, y) => y.startedAt - x.startedAt)
           .slice(0, limit);
       },
       /** schedule_next (#437): a workspace a live run prompted picks that automation's next fire. */
-      scheduleNext(callerId: string, args: Record<string, unknown>): { requestedAt: string; note: string } {
+      async scheduleNext(callerId: string, args: Record<string, unknown>): Promise<{ requestedAt: string; note: string }> {
         const runId = typeof args.run_id === 'string' ? args.run_id : '';
         const r = active.get(runId);
         if (!r || !r.workspaces.has(callerId)) throw new Error('not permitted: run_id must be a live run of an automation that prompted this workspace');
         const raw = { ...(args.in !== undefined ? { in: args.in } : {}), ...(args.at !== undefined ? { at: args.at } : {}) };
-        const res = requestNext(runId, raw, deps.workspaceName(callerId));
+        const res = await requestNext(runId, raw, deps.workspaceName(callerId));
         return {
           requestedAt: new Date(res.requestedAt).toISOString(),
           note: `applied when the run ends successfully, never sooner than ${res.min} after it ends; a later request in this run replaces it`
         };
       },
-      run(callerId: string, args: Record<string, unknown>, privileged = false): { runId: string; status: string } {
+      async run(callerId: string, args: Record<string, unknown>, privileged = false): Promise<{ runId: string; status: string }> {
         const id = typeof args.id === 'string' ? args.id : '';
-        const a = store.get(id) ?? store.byName(id);
+        const a = (await store.get(id)) ?? (await store.byName(id));
         if (!a) throw new Error(`automation ${id || '(missing id)'} not found`);
         if (!privileged && !canRun(a, callerId)) throw new Error(`not permitted: ${a.name} doesn't list this workspace in manual.allowFrom`);
         if (!a.enabled) throw new Error(`${a.name} is disabled`);
-        const r = start(a.id, { kind: 'manual', by: { kind: 'workspace', id: callerId }, args: (args.args as Record<string, unknown>) ?? {}, callerSupplied: true });
+        const r = await start(a.id, { kind: 'manual', by: { kind: 'workspace', id: callerId }, args: (args.args as Record<string, unknown>) ?? {}, callerSupplied: true });
         return { runId: r.id, status: r.status };
       }
     }

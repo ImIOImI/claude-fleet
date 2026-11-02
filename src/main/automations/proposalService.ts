@@ -75,7 +75,7 @@ export function createProposalService(deps: ProposalDeps) {
     const cur = await deps.automations.get(it.automationId);
     if (!cur) throw new Error(`${it.name} no longer exists`);
     if (cur.version !== it.baseVersion) throw new Error(`${it.name} changed since this was proposed (now v${cur.version}); ask for a fresh proposal`);
-    await deps.automations.update(cur.id, it.after, by, now);
+    await deps.automations.update(cur.id, it.after, by, now, it.baseVersion ?? undefined);
   }
 
   /** Mark older pending proposals from the same workspace for the same automations as superseded. */
@@ -234,7 +234,7 @@ export function createProposalService(deps: ProposalDeps) {
         if ((it.decision !== 'auto-applied' && it.decision !== 'accepted') || !it.before || !it.automationId) throw new Error('only an applied change can be reverted');
         const cur = await deps.automations.get(it.automationId);
         if (!cur) throw new Error(`${it.name} no longer exists`);
-        await deps.automations.update(cur.id, it.before, { kind: 'user', id: null }, deps.now());
+        await deps.automations.update(cur.id, it.before, { kind: 'user', id: null }, deps.now(), cur.version);
         it.decision = 'reverted';
         await deps.proposals.save(p);
         deps.changed();

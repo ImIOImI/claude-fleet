@@ -17,7 +17,7 @@ const prep = (folder: string, d: AutomationDef | null, over: Partial<PreparedAut
 
 function setup() {
   inbox = InboxStore.memory();
-  const store = new AutomationStore(inbox.db);
+  const store = new AutomationStore(inbox.kysely);
   let t = 1_000;
   const inst = createLoadoutInstaller({ store, now: () => ++t, workspaceName: (id) => ({ T1: 'ops', T2: 'build' } as Record<string, string>)[id] ?? id });
   return { store, inst };
@@ -25,7 +25,7 @@ function setup() {
 const base = { loadoutId: 'webex', version: '1.0.0', targetId: 'T1', targetName: 'ops' };
 
 describe('loadout installer', () => {
-  it('first install turns on valid automations, holds back missing secrets and host steps, and skips invalid ones', () => {
+  it('first install turns on valid automations, holds back missing secrets and host steps, and skips invalid ones', async () => {
     const { store, inst } = setup();
     const ps = [
       prep('watch', def('webex-watch')),
@@ -33,46 +33,46 @@ describe('loadout installer', () => {
       prep('on-host', def('on-host'), { hostStep: true }),
       prep('broken', null)
     ];
-    const rows = inst.preview(ps, 'webex', 'T1');
+    const rows = await inst.preview(ps, 'webex', 'T1');
     expect(rows.map((r) => [r.folder, r.status, r.defaultOn, r.blocked])).toEqual([
       ['watch', 'new', true, null],
       ['needs-secret', 'new', false, 'add the secret WEBEX_TOKEN to turn it on'],
       ['on-host', 'new', false, 'runs a script on your computer: allow that for this loadout to install it'],
       ['broken', 'invalid', false, 'bad']
     ]);
-    const r = inst.install(ps, base);
+    const r = await inst.install(ps, base);
     expect(r).toMatchObject({ created: ['webex-watch', 'needs-secret'], skipped: [{ name: 'on-host' }, { name: 'broken' }] });
-    expect(store.byName('webex-watch')!.enabled).toBe(true);
-    expect(store.byName('needs-secret')!.enabled).toBe(false);
-    expect(store.byName('webex-watch')!.origin).toEqual({ loadoutId: 'webex', version: '1.0.0', workspaceId: 'T1', folder: 'watch', installedVersion: 1 });
-    expect(inst.install([prep('on-host', def('on-host'), { hostStep: true })], { ...base, allowHost: true }).created).toEqual(['on-host']);
+    expect((await store.byName('webex-watch'))!.enabled).toBe(true);
+    expect((await store.byName('needs-secret'))!.enabled).toBe(false);
+    expect((await store.byName('webex-watch'))!.origin).toEqual({ loadoutId: 'webex', version: '1.0.0', workspaceId: 'T1', folder: 'watch', installedVersion: 1 });
+    expect((await inst.install([prep('on-host', def('on-host'), { hostStep: true })], { ...base, allowHost: true })).created).toEqual(['on-host']);
   });
-  it('honours the review ticks, and a second install target gets its own copy', () => {
+  it('honours the review ticks, and a second install target gets its own copy', async () => {
     const { store, inst } = setup();
-    inst.install([prep('watch', def('webex-watch'))], { ...base, enable: [] });
-    expect(store.byName('webex-watch')!.enabled).toBe(false);
-    const r = inst.install([prep('watch', def('webex-watch', 'check', { steps: [{ id: 's', prompt: { workspace: 'T2', mode: 'live', message: 'check' } }] }))], { ...base, targetId: 'T2', targetName: 'build' });
+    await inst.install([prep('watch', def('webex-watch'))], { ...base, enable: [] });
+    expect((await store.byName('webex-watch'))!.enabled).toBe(false);
+    const r = await inst.install([prep('watch', def('webex-watch', 'check', { steps: [{ id: 's', prompt: { workspace: 'T2', mode: 'live', message: 'check' } }] }))], { ...base, targetId: 'T2', targetName: 'build' });
     expect(r.created).toEqual(['webex-watch-build']);
   });
-  it('update: unedited automations take the new version, edited ones are kept, new ones arrive off', () => {
+  it('update: unedited automations take the new version, edited ones are kept, new ones arrive off', async () => {
     const { store, inst } = setup();
-    inst.install([prep('a', def('a')), prep('b', def('b'))], base);
-    const b = store.byName('b')!;
-    store.update(b.id, { ...b.definition, description: 'my edit' }, { kind: 'user', id: null });
+    await inst.install([prep('a', def('a')), prep('b', def('b'))], base);
+    const b = (await store.byName('b'))!;
+    await store.update(b.id, { ...b.definition, description: 'my edit' }, { kind: 'user', id: null });
     const next = [prep('a', def('a', 'check v2')), prep('b', def('b', 'check v2')), prep('c', def('c'))];
-    expect(inst.preview(next, 'webex', 'T1').map((r) => [r.folder, r.status, r.defaultOn])).toEqual([['a', 'update', true], ['b', 'kept-edited', true], ['c', 'new', false]]);
-    const r = inst.install(next, { ...base, version: '1.1.0' });
+    expect((await inst.preview(next, 'webex', 'T1')).map((r) => [r.folder, r.status, r.defaultOn])).toEqual([['a', 'update', true], ['b', 'kept-edited', true], ['c', 'new', false]]);
+    const r = await inst.install(next, { ...base, version: '1.1.0' });
     expect(r).toMatchObject({ updated: ['a'], kept: ['b'], created: ['c'] });
-    expect(store.byName('a')).toMatchObject({ version: 2, enabled: true, origin: { version: '1.1.0', installedVersion: 2 } });
-    expect(store.byName('c')!.enabled).toBe(false);
-    expect(inst.preview(next, 'webex', 'T1').map((r) => r.status)).toEqual(['unchanged', 'kept-edited', 'unchanged']);
+    expect(await store.byName('a')).toMatchObject({ version: 2, enabled: true, origin: { version: '1.1.0', installedVersion: 2 } });
+    expect((await store.byName('c'))!.enabled).toBe(false);
+    expect((await inst.preview(next, 'webex', 'T1')).map((r) => r.status)).toEqual(['unchanged', 'kept-edited', 'unchanged']);
     expect(r.ids).toHaveLength(3);
   });
-  it('uninstall removes only that install target\'s automations', () => {
+  it('uninstall removes only that install target\'s automations', async () => {
     const { store, inst } = setup();
-    inst.install([prep('a', def('a'))], base);
-    inst.install([prep('a', def('a'))], { ...base, targetId: 'T2', targetName: 'build' });
-    expect(inst.uninstall('webex', 'T1')).toEqual(['a']);
-    expect(store.list().map((a) => a.name)).toEqual(['a-build']);
+    await inst.install([prep('a', def('a'))], base);
+    await inst.install([prep('a', def('a'))], { ...base, targetId: 'T2', targetName: 'build' });
+    expect(await inst.uninstall('webex', 'T1')).toEqual(['a']);
+    expect((await store.list()).map((a) => a.name)).toEqual(['a-build']);
   });
 });

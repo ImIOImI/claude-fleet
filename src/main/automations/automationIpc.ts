@@ -49,7 +49,7 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
   automations: AutomationService; proposals: ProposalService; setInboxSink(s: InboxSink): void;
 } {
   let sink: InboxSink | null = null;
-  const store = new AutomationStore(inbox.db);
+  const store = new AutomationStore(inbox.kysely);
   // Name ↔ id map refreshed on use; automations name workspaces in YAML.
   let names: Array<{ id: string; name: string }> = [];
   /** The workspace behind the Inbox chip (manifest role 'automations'), if any. */
@@ -118,7 +118,8 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     resolveWorkspace: (v) => names.find((n) => n.id === v)?.id ?? names.find((n) => n.name === v)?.id ?? null,
     hostShells: hostShellIds,
     notify: notify ? (n) => { void notify.request(n).catch((e) => logError({ source: 'main', type: 'notify-request', level: 'warn', message: String(e) })); } : undefined,
-    changed: () => { send('automations:changed'); emitInboxChanged(); }
+    changed: () => { send('automations:changed'); emitInboxChanged(); },
+    onError: (e) => logError({ source: 'main', type: 'automation-event-run', level: 'warn', message: String(e) })
   });
 
   // Proposals (#407 Phase 5): workspaces propose, the user approves.
@@ -160,35 +161,33 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
       const prepared = await prepareFor(srcDir, workspaceId);
       const empty = { created: [], updated: [], kept: [], skipped: [], names: [] };
       if (!prepared.length) return empty;
-      const r = installer.install(prepared, {
+      const r = await installer.install(prepared, {
         loadoutId, version: await readLoadoutVersion(srcDir), targetId: workspaceId,
         targetName: names.find((n) => n.id === workspaceId)?.name ?? workspaceId, enable: opts.enable, allowHost: opts.allowHost
       });
       send('automations:changed');
       emitInboxChanged();
-      return { ...r, names: r.ids.map((id) => store.get(id)?.name).filter((n): n is string => !!n) };
+      const named = await Promise.all(r.ids.map(async (id) => (await store.get(id))?.name));
+      return { ...r, names: named.filter((n): n is string => !!n) };
     },
     uninstall: async (loadoutId, workspaceId) => {
-      if (installer.uninstall(loadoutId, workspaceId).length) { send('automations:changed'); emitInboxChanged(); }
+      if ((await installer.uninstall(loadoutId, workspaceId)).length) { send('automations:changed'); emitInboxChanged(); }
     }
   });
 
-  try {
-    svc.recover();
-  } catch (e) {
-    logError({ source: 'main', type: 'automation-recover', level: 'warn', message: String(e) });
-  }
+  svc.recover().catch((e) => logError({ source: 'main', type: 'automation-recover', level: 'warn', message: String(e) }));
   const tick = setInterval(() => {
-    void refresh().then(() => {
-      try { svc.tick(); } catch (e) { logError({ source: 'main', type: 'automation-tick', level: 'warn', message: String(e) }); }
-    });
+    void refresh()
+      .then(() => svc.tick())
+      .catch((e) => logError({ source: 'main', type: 'automation-tick', level: 'warn', message: String(e) }));
   }, 30_000);
   tick.unref?.();
 
   // Event triggers (#407 Phase 4).
-  setFleetEventObserver((e) => { svc.onEvent(e); });
+  setFleetEventObserver((e) => { svc.onEvent(e).catch((err) => logError({ source: 'main', type: 'automation-event', level: 'warn', message: String(err) })); });
   inboxEvents.on('todo', (t: Todo) => {
-    svc.onEvent({ on: 'todo.created', workspaceId: t.source.kind === 'workspace' ? t.source.id ?? undefined : undefined, todo: { id: t.id, title: t.title, tags: t.tags, source: t.source } });
+    svc.onEvent({ on: 'todo.created', workspaceId: t.source.kind === 'workspace' ? t.source.id ?? undefined : undefined, todo: { id: t.id, title: t.title, tags: t.tags, source: t.source } })
+      .catch((err) => logError({ source: 'main', type: 'automation-event', level: 'warn', message: String(err) }));
   });
 
   setAutomationHandlers({
@@ -203,7 +202,7 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
   });
 
   const USER = { kind: 'user' as const, id: null };
-  const withNames = async <T>(fn: () => T): Promise<T> => { await Promise.all([refresh(), refreshShells()]); return fn(); };
+  const withNames = async <T>(fn: () => T | Promise<T>): Promise<T> => { await Promise.all([refresh(), refreshShells()]); return await fn(); };
   ipcMain.handle('automations:hostShells', () => refreshShells());
   ipcMain.handle('automations:list', () => withNames(() => svc.list()));
   ipcMain.handle('automations:get', (_e, id: string) => withNames(() => svc.get(id)));
@@ -253,7 +252,7 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
   const toRole = async (prompt: (ctx: { workspaces: string[]; automations: string[] }) => string): Promise<string> => {
     await refresh();
     if (!roleWs) throw new Error('set up an automations workspace first');
-    const ctx = { workspaces: names.filter((n) => n.id !== roleWs).map((n) => n.name), automations: store.list().map((a) => a.name), hostShells: (await refreshShells()).map((x) => `${x.id} (${x.label})`) };
+    const ctx = { workspaces: names.filter((n) => n.id !== roleWs).map((n) => n.name), automations: (await store.list()).map((a) => a.name), hostShells: (await refreshShells()).map((x) => `${x.id} (${x.label})`) };
     await hostPostToWorkspace(roleWs, prompt(ctx));
     return roleWs;
   };
@@ -266,9 +265,9 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     const d = need(text, 'the automation');
     return toRole((ctx) => draftPrompt(d, ctx));
   });
-  ipcMain.handle('automations:askChange', (_e, id: string, text: string) => {
+  ipcMain.handle('automations:askChange', async (_e, id: string, text: string) => {
     const d = need(text, 'the change');
-    const a = store.get(id);
+    const a = await store.get(id);
     if (!a) throw new Error('automation not found');
     return toRole((ctx) => changePrompt(a.name, definitionToYaml(a.definition), d, ctx));
   });

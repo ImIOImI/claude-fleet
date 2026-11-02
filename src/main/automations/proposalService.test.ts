@@ -10,7 +10,7 @@ const WSS: Record<string, string> = { 'ops-oncall': 'W1', 'webex-triage': 'W2', 
 
 function setup(trusted: string[] = []) {
   inbox = InboxStore.memory();
-  const automations = new AutomationStore(inbox.db);
+  const automations = new AutomationStore(inbox.kysely);
   const notes: Array<Record<string, unknown>> = [];
   let t = 1_000_000;
   const svc = createProposalService({
@@ -46,7 +46,7 @@ describe('proposing', () => {
   it('rejects invalid definitions and name collisions with readable errors', async () => {
     const { svc, automations } = setup();
     await expect(svc.mcp.propose('W2', { definition: 'name: Bad' })).rejects.toThrow(/definition: name:/);
-    automations.create({ name: 'log-watch', triggers: [{ manual: {} }], steps: [{ id: 'a', prompt: { workspace: 'W1', mode: 'live', message: 'm' } }] }, { kind: 'user', id: null });
+    await automations.create({ name: 'log-watch', triggers: [{ manual: {} }], steps: [{ id: 'a', prompt: { workspace: 'W1', mode: 'live', message: 'm' } }] }, { kind: 'user', id: null });
     await expect(svc.mcp.propose('W2', { definition: YAML() })).rejects.toThrow(/already exists; propose a change/);
   });
   it('a newer proposal from the same workspace supersedes the older one', async () => {
@@ -63,7 +63,7 @@ describe('approving', () => {
     const { id } = await svc.mcp.propose('W2', { definition: YAML() });
     const p = await svc.approve(id, { editedYaml: YAML('log-watch', '*/20 * * * *') });
     expect(p.status).toBe('approved');
-    const a = automations.byName('log-watch')!;
+    const a = (await automations.byName('log-watch'))!;
     expect(a.createdBy).toEqual({ kind: 'workspace', id: 'W2' });
     expect((a.definition.triggers[0] as { schedule: { cron: string } }).schedule.cron).toBe('*/20 * * * *');
     await expect(svc.approve(id)).rejects.toThrow(/already approved/);
@@ -77,9 +77,9 @@ describe('approving', () => {
   });
   it('a change whose automation moved on since it was proposed is refused', async () => {
     const { svc, automations } = setup();
-    const a = automations.create({ name: 'log-watch', triggers: [{ schedule: { cron: '*/15 * * * *' } }], steps: [{ id: 'check', prompt: { workspace: 'W1', mode: 'live', message: 'check logs' } }] }, { kind: 'user', id: null });
+    const a = await automations.create({ name: 'log-watch', triggers: [{ schedule: { cron: '*/15 * * * *' } }], steps: [{ id: 'check', prompt: { workspace: 'W1', mode: 'live', message: 'check logs' } }] }, { kind: 'user', id: null });
     const { id } = await svc.mcp.proposeChange('W2', { id: 'log-watch', definition: YAML('log-watch', '*/15 * * * *', 'tags: [ops]\n') });
-    automations.update(a.id, { ...automations.get(a.id)!.definition, description: 'edited by you' }, { kind: 'user', id: null });
+    await automations.update(a.id, { ...(await automations.get(a.id))!.definition, description: 'edited by you' }, { kind: 'user', id: null });
     await expect(svc.approve(id)).rejects.toThrow(/changed since this was proposed \(now v2\)/);
   });
 });
@@ -89,8 +89,8 @@ describe('trusted tier + batches', () => {
     automations.create({ name, triggers: [{ schedule: { cron: '*/10 * * * *' } }], steps: [{ id: 'check', prompt: { workspace: 'W1', mode: 'live', message: 'check logs' } }] }, { kind: 'user', id: null });
   it('a trusted workspace auto-applies low-risk items; the rest wait, item by item', async () => {
     const { svc, automations } = setup(['WA']);
-    seed(automations, 'log-watch');
-    seed(automations, 'queue-watch');
+    await seed(automations, 'log-watch');
+    await seed(automations, 'queue-watch');
     const r = await svc.mcp.proposeChange('WA', {
       rationale: 'tag the watchers and slow them down',
       batch: [
@@ -100,18 +100,18 @@ describe('trusted tier + batches', () => {
     });
     expect(r.status).toBe('pending');
     expect(r.items.map((i) => [i.name, i.decision])).toEqual([['log-watch', 'auto-applied'], ['queue-watch', 'pending']]);
-    expect(automations.byName('log-watch')!.version).toBe(2);
+    expect((await automations.byName('log-watch'))!.version).toBe(2);
     const p = await svc.approve(r.id, { accept: [] });
     expect(p.status).toBe('partial');
     expect(p.items[1].decision).toBe('declined');
     const reverted = await svc.revert(r.id, 0);
     expect(reverted.items[0].decision).toBe('reverted');
-    expect(automations.byName('log-watch')!.definition.tags).toBeUndefined();
-    expect(automations.byName('log-watch')!.version).toBe(3);
+    expect((await automations.byName('log-watch'))!.definition.tags).toBeUndefined();
+    expect((await automations.byName('log-watch'))!.version).toBe(3);
   });
   it('an untrusted workspace never auto-applies, even low-risk edits', async () => {
     const { svc, automations } = setup();
-    seed(automations, 'log-watch');
+    await seed(automations, 'log-watch');
     const r = await svc.mcp.proposeChange('W2', { id: 'log-watch', definition: YAML('log-watch', '*/15 * * * *', 'tags: [ops]\n') });
     expect(r.items[0]).toMatchObject({ decision: 'pending', lowRisk: true });
   });
@@ -126,5 +126,16 @@ describe('decision guard', () => {
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     expect(String((results.find((r) => r.status === 'rejected') as PromiseRejectedResult).reason)).toMatch(/already being decided|already approved/);
     expect((await automations.list()).filter((a) => a.name === 'log-watch')).toHaveLength(1);
+  });
+  it('two different proposals for one automation, approved concurrently: one applies, the other is refused', async () => {
+    const { svc, automations } = setup();
+    await automations.create({ name: 'log-watch', triggers: [{ schedule: { cron: '*/10 * * * *' } }], steps: [{ id: 'check', prompt: { workspace: 'W1', mode: 'live', message: 'check logs' } }] }, { kind: 'user', id: null });
+    const p1 = await svc.mcp.proposeChange('W2', { id: 'log-watch', definition: YAML('log-watch', '*/20 * * * *') });
+    const p2 = await svc.mcp.proposeChange('WA', { id: 'log-watch', definition: YAML('log-watch', '*/30 * * * *') });
+    const results = await Promise.allSettled([svc.approve(p1.id), svc.approve(p2.id)]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(String((results.find((r) => r.status === 'rejected') as PromiseRejectedResult).reason)).toMatch(/changed/);
+    expect((await automations.byName('log-watch'))!.version).toBe(2);
+    expect((await automations.versions((await automations.byName('log-watch'))!.id)).map((v) => v.version)).toEqual([2, 1]);
   });
 });
