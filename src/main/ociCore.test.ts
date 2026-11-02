@@ -40,6 +40,10 @@ describe('parseImageRef', () => {
 });
 
 describe('loadoutRefFromSource', () => {
+  it('rejects the reserved id "index"', () => {
+    expect(() => loadoutRefFromSource('ghcr.io/o/r', 'index')).toThrow(/reserved/);
+  });
+
   it('joins base + id + version', () => {
     expect(loadoutRefFromSource('ghcr.io/o/claude-fleet-loadouts', 'spec-driven', '1.2.0')).toBe(
       'ghcr.io/o/claude-fleet-loadouts/spec-driven:1.2.0'
@@ -69,6 +73,11 @@ describe('safeLayerPath (security-critical)', () => {
 });
 
 describe('parseIndex', () => {
+  it('drops an entry using the reserved id "index"', () => {
+    const out = parseIndex([{ id: 'index', version: '1.0.0' }, { id: 'a', version: '1.0.0' }]);
+    expect(out.map((e) => e.id)).toEqual(['a']);
+  });
+
   it('parses + normalizes a valid index (string or object)', () => {
     const json = JSON.stringify([
       { id: 'spec-driven', title: 'Spec Driven', description: 'd', tags: ['workflow'], version: '1.1.0' },

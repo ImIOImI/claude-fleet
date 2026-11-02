@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -13,6 +14,8 @@ function fakeGhcr(opts: {
   manifest: object;
   blobs?: Record<string, { body: string; contentLength?: number }>;
   failTokenAuth?: boolean;
+  /** Private repo: the token endpoint 401s unless this Basic credential is sent. */
+  requireBasic?: string;
 }) {
   const manifestJson = JSON.stringify(opts.manifest);
   return vi.fn(async (url: string, init?: RequestInit) => {
@@ -20,6 +23,9 @@ function fakeGhcr(opts: {
     const auth = (init?.headers as Record<string, string> | undefined)?.['Authorization'];
     // Token endpoint.
     if (u.startsWith('https://ghcr.io/token')) {
+      if (opts.requireBasic && auth !== `Basic ${opts.requireBasic}`) {
+        return new Response('denied', { status: 401 });
+      }
       return new Response(JSON.stringify({ token: 'fake-bearer' }), { status: 200 });
     }
     // Manifest: 401 without bearer (triggers the token flow), 200 with it.
@@ -48,6 +54,9 @@ function fakeGhcr(opts: {
 
 afterEach(() => vi.unstubAllGlobals());
 
+/** A blob's real sha256 digest, as a registry would report it. */
+const sha = (body: string) => `sha256:${createHash('sha256').update(body).digest('hex')}`;
+
 const layer = (digest: string, title: string, size = 10) => ({
   mediaType: 'application/vnd.oci.image.layer.v1.tar',
   digest,
@@ -73,11 +82,42 @@ describe('ociClient.fetchAnnotations', () => {
   });
 });
 
+describe('ociClient credentials', () => {
+  const basic = Buffer.from('token:ghp_secret').toString('base64');
+  const privateGhcr = () => fakeGhcr({
+    manifest: { annotations: { 'com.claude-fleet.loadout.id': 'spec-driven' }, layers: [layer(sha('TITLE'), 'loadout.md', 5)] },
+    blobs: { [sha('TITLE')]: { body: 'TITLE' } },
+    requireBasic: basic
+  });
+
+  it('sends the credential as Basic auth on the token request for a private repo', async () => {
+    vi.stubGlobal('fetch', privateGhcr());
+    const ann = await fetchAnnotations(REF, { credential: 'ghp_secret' });
+    expect(ann['com.claude-fleet.loadout.id']).toBe('spec-driven');
+  });
+
+  it('fails the token request on a private repo without a credential', async () => {
+    vi.stubGlobal('fetch', privateGhcr());
+    await expect(fetchAnnotations(REF)).rejects.toThrow(/token request failed \(HTTP 401\)/);
+  });
+
+  it('pullArtifact uses the credential', async () => {
+    vi.stubGlobal('fetch', privateGhcr());
+    const dest = await mkdtemp(join(tmpdir(), 'oci-pull-'));
+    try {
+      await pullArtifact(REF, dest, { credential: 'ghp_secret' });
+      expect(await readFile(join(dest, 'loadout.md'), 'utf8')).toBe('TITLE');
+    } finally {
+      await rm(dest, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('ociClient.pullArtifact', () => {
   it('pulls every layer blob by digest and reconstructs the tree from layer titles', async () => {
     vi.stubGlobal('fetch', fakeGhcr({
-      manifest: { layers: [layer('sha256:a1', 'loadout.md'), layer('sha256:b2', 'skills/x/SKILL.md')] },
-      blobs: { 'sha256:a1': { body: 'TITLE' }, 'sha256:b2': { body: 'SKILL' } }
+      manifest: { layers: [layer(sha('TITLE'), 'loadout.md', 5), layer(sha('SKILL'), 'skills/x/SKILL.md', 5)] },
+      blobs: { [sha('TITLE')]: { body: 'TITLE' }, [sha('SKILL')]: { body: 'SKILL' } }
     }));
     const dest = await mkdtemp(join(tmpdir(), 'oci-pull-'));
     try {
@@ -113,5 +153,40 @@ describe('ociClient.pullArtifact', () => {
     } finally {
       await rm(dest, { recursive: true, force: true });
     }
+  });
+
+  const pullFails = async (manifest: object, blobs: Record<string, { body: string }>, opts = {}) => {
+    vi.stubGlobal('fetch', fakeGhcr({ manifest, blobs }));
+    const dest = await mkdtemp(join(tmpdir(), 'oci-pull-'));
+    try {
+      return await pullArtifact(REF, dest, opts).then(() => null, (e: Error) => e.message);
+    } finally {
+      await rm(dest, { recursive: true, force: true });
+    }
+  };
+
+  it('rejects a blob whose bytes do not hash to its digest', async () => {
+    const msg = await pullFails({ layers: [layer(sha('TITLE'), 'loadout.md', 5)] }, { [sha('TITLE')]: { body: 'EVILS' } });
+    expect(msg).toMatch(/digest mismatch/);
+  });
+
+  it('rejects a blob whose length differs from the manifest size', async () => {
+    const msg = await pullFails({ layers: [layer(sha('TITLE'), 'loadout.md', 4)] }, { [sha('TITLE')]: { body: 'TITLE' } });
+    expect(msg).toMatch(/size mismatch/);
+  });
+
+  it('rejects a digest that is not plain sha256 before fetching it', async () => {
+    const msg = await pullFails({ layers: [layer('sha256:../../x', 'loadout.md', 5)] }, {});
+    expect(msg).toMatch(/unsupported digest/);
+  });
+
+  it('enforces the expected artifactType (falling back to config.mediaType)', async () => {
+    const ok = { [sha('TITLE')]: { body: 'TITLE' } };
+    const layers = [layer(sha('TITLE'), 'loadout.md', 5)];
+    const want = { artifactType: 'application/vnd.claude-fleet.loadout.v1' };
+    expect(await pullFails({ artifactType: 'application/vnd.example.other', layers }, ok, want)).toMatch(/is not a application\/vnd.claude-fleet.loadout.v1 artifact/);
+    expect(await pullFails({ layers }, ok, want)).toMatch(/got none/);
+    expect(await pullFails({ artifactType: want.artifactType, layers }, ok, want)).toBeNull();
+    expect(await pullFails({ config: { mediaType: want.artifactType }, layers }, ok, want)).toBeNull();
   });
 });

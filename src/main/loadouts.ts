@@ -44,7 +44,7 @@ export async function listLoadouts(): Promise<LoadoutSummary[]> {
   }
   const out: LoadoutSummary[] = [];
   for (const e of entries) {
-    if (!e.isDirectory()) continue;
+    if (!e.isDirectory() || e.name.startsWith('.')) continue; // .pull-*/.old-* download staging
     try {
       const m = await parseLoadout(loadoutDir(e.name));
       out.push({ id: m.id, title: m.title, description: m.description, tags: m.tags });

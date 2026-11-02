@@ -307,6 +307,37 @@ test('Library v2 Phase 2: source checkbox in browser modal + Update ↑ in rail'
   }
 });
 
+test('Library v2: adding a source passes the optional access token', async () => {
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, { workspaceList: [], loadoutCatalog: [PHASE1_ENTRY] });
+    await window.waitForTimeout(400);
+
+    const libraryAccHeader = window.locator('.acc-header', { hasText: 'Library' });
+    await libraryAccHeader.waitFor({ state: 'visible', timeout: 8_000 });
+    if ((await libraryAccHeader.getAttribute('aria-expanded')) !== 'true') {
+      await libraryAccHeader.click();
+      await window.waitForTimeout(200);
+    }
+    await window.locator('.lib-browse').click();
+    const browserModal = window.locator('.modal.loadout-browser');
+    await browserModal.waitFor({ state: 'visible', timeout: 6_000 });
+
+    const add = browserModal.locator('.lb-add-source');
+    await add.locator('input[placeholder="ghcr.io/owner/repo"]').fill('ghcr.io/sumersports/claude-fleet-loadouts');
+    const tokenInput = add.locator('input[type="password"]');
+    await tokenInput.fill('ghp_test');
+    await add.locator('button', { hasText: 'Add' }).click();
+
+    await expect.poll(async () => (await getCalls(app)).addSource).toEqual([
+      { base: 'ghcr.io/sumersports/claude-fleet-loadouts', token: 'ghp_test' },
+    ]);
+    await expect(tokenInput).toHaveValue('');
+  } finally {
+    await app.close();
+  }
+});
+
 test('Library v2: Browse-all button opens loadout browser modal', async () => {
   const { app, window } = await launch();
   try {
