@@ -176,3 +176,112 @@ describe('loadoutSources.credentialFor (#444)', () => {
     expect(await sources.credentialFor(sources.DEFAULT_SOURCES[0])).toBeNull();
   });
 });
+
+describe('private sources (#444)', () => {
+  it('addSource on a private index without a token rejects with needs-credential and saves nothing', async () => {
+    privateBases.set(PRIV, 'ghp_good');
+    await expect(sources.addSource(PRIV)).rejects.toThrow(/^needs-credential: ghcr\.io\/acme\/private$/);
+    expect(await sources.listSources()).not.toContain(PRIV);
+  });
+
+  it('addSource with a token stores it in the vault and never in sources.json', async () => {
+    privateBases.set(PRIV, 'ghp_good');
+    await sources.addSource(PRIV, { token: 'ghp_good', username: 'alice' });
+    expect(vaultStore.get(VAULT_KEY)).toBe('ghp_good');
+    const raw = await sourcesJson();
+    expect(raw).not.toContain('ghp_good');
+    expect(JSON.parse(raw).credentials).toEqual({ [PRIV]: { username: 'alice' } });
+    expect(JSON.parse(raw).sources).toContain(PRIV);
+    expect(pulled.at(-1)?.cred).toEqual({ token: 'ghp_good', username: 'alice' });
+  });
+
+  it('a rejected token on a new source rejects with credential-rejected and leaves no credential behind', async () => {
+    privateBases.set(PRIV, 'ghp_good');
+    await expect(sources.addSource(PRIV, { token: 'ghp_bad' })).rejects.toThrow(
+      /^credential-rejected: ghcr\.io\/acme\/private \(HTTP 401\)$/
+    );
+    expect(vaultStore.size).toBe(0);
+    expect(JSON.parse(await sourcesJson()).credentials).toEqual({});
+    expect(await sources.listSources()).not.toContain(PRIV);
+  });
+
+  it('rejects an empty token before touching the vault', async () => {
+    await expect(sources.addSource(PRIV, { token: '   ' })).rejects.toThrow(/token is required/);
+    expect(vaultStore.size).toBe(0);
+  });
+
+  it('rejects a malformed token before touching the vault (addSource)', async () => {
+    await expect(sources.addSource(PRIV, { token: 'bad token with spaces' })).rejects.toThrow(
+      /^malformed-credential: ghcr\.io\/acme\/private$/
+    );
+    expect(vaultStore.size).toBe(0);
+    expect(await sources.listSources()).not.toContain(PRIV);
+  });
+
+  it('rejects a malformed token before touching the vault (setSourceCredential), leaving the old one in place', async () => {
+    privateBases.set(PRIV, 'ghp_good');
+    await sources.addSource(PRIV, { token: 'ghp_good' });
+    await expect(sources.setSourceCredential(PRIV, { token: 'bad\ttoken' })).rejects.toThrow(
+      /^malformed-credential: ghcr\.io\/acme\/private$/
+    );
+    expect(vaultStore.get(VAULT_KEY)).toBe('ghp_good');
+  });
+
+  it('listSourceInfo reports hasCredential + username, never the token', async () => {
+    privateBases.set(PRIV, 'ghp_good');
+    await sources.addSource(PRIV, { token: 'ghp_good', username: 'alice' });
+    const info = await sources.listSourceInfo();
+    expect(info).toEqual([
+      { base: sources.DEFAULT_SOURCES[0], hasCredential: false },
+      { base: PRIV, hasCredential: true, username: 'alice' }
+    ]);
+    expect(JSON.stringify(info)).not.toContain('ghp_good');
+  });
+
+  it('setSourceCredential replaces the token and refreshes the index', async () => {
+    privateBases.set(PRIV, 'ghp_old');
+    await sources.addSource(PRIV, { token: 'ghp_old' });
+    privateBases.set(PRIV, 'ghp_new');
+    const idx = await sources.setSourceCredential(PRIV, { token: 'ghp_new' });
+    expect(idx.map((l) => l.id)).toContain('spec-driven');
+    expect(vaultStore.get(VAULT_KEY)).toBe('ghp_new');
+    expect(pulled.at(-1)).toMatchObject({ ref: `${PRIV}/index:latest`, cred: { token: 'ghp_new' } });
+  });
+
+  it('setSourceCredential(null) removes the token; a private source then needs one again', async () => {
+    privateBases.set(PRIV, 'ghp_good');
+    await sources.addSource(PRIV, { token: 'ghp_good' });
+    await expect(sources.setSourceCredential(PRIV, null)).rejects.toThrow(/^needs-credential: /);
+    expect(vaultStore.size).toBe(0);
+    expect((await sources.listSourceInfo()).find((s) => s.base === PRIV)).toEqual({ base: PRIV, hasCredential: false });
+  });
+
+  it('setSourceCredential refuses a source that is not configured', async () => {
+    await expect(sources.setSourceCredential(PRIV, { token: 'ghp_x' })).rejects.toThrow(/unknown source/);
+    expect(vaultStore.size).toBe(0);
+  });
+
+  it('removeSource purges the source vault scope and its credentials entry', async () => {
+    privateBases.set(PRIV, 'ghp_good');
+    await sources.addSource(PRIV, { token: 'ghp_good' });
+    await sources.removeSource(PRIV);
+    expect(vaultStore.size).toBe(0);
+    expect(JSON.parse(await sourcesJson()).credentials).toEqual({});
+  });
+
+  it('download pulls with the resolved credential and maps a refused token', async () => {
+    privateBases.set(PRIV, 'ghp_good');
+    await sources.addSource(PRIV, { token: 'ghp_good' });
+    await sources.download(PRIV, 'spec-driven', '1.0.0');
+    expect(pulled.at(-1)).toMatchObject({ ref: `${PRIV}/spec-driven:1.0.0`, cred: { token: 'ghp_good' } });
+    privateBases.set(PRIV, 'ghp_rotated');
+    await expect(sources.download(PRIV, 'spec-driven', '1.0.0')).rejects.toThrow(
+      /^credential-rejected: ghcr\.io\/acme\/private \(HTTP 401\)$/
+    );
+  });
+
+  it('public sources still pull anonymously', async () => {
+    await sources.addSource(SRC);
+    expect(pulled.at(-1)).toMatchObject({ ref: `${SRC}/index:latest`, cred: null });
+  });
+});

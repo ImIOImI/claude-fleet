@@ -11,8 +11,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadoutsRoot, loadoutDir } from './paths.js';
 import { pullArtifact } from './ociClient.js';
-import { parseIndex, loadoutRefFromSource, type RemoteLoadout, type RegistryCredential } from './ociCore.js';
-import { getSecret } from './vault.js';
+import { parseIndex, loadoutRefFromSource, RegistryAuthError, type RemoteLoadout, type RegistryCredential } from './ociCore.js';
+import { getSecret, setSecret, deleteAllForWorkspace } from './vault.js';
 import { sourceVaultScope, SOURCE_VAULT_KEY } from './vaultScopes.js';
 import { logError } from './errorLog.js';
 
@@ -21,6 +21,19 @@ export interface SourcesFile {
   provenance: Record<string, { source: string; version: string; downloadedAt: number }>;
   /** Sources that have a vault credential, plus its non-secret username. Never a token. */
   credentials: Record<string, { username?: string }>;
+}
+
+/** What the renderer sees per source (loadouts:listSources). Never the token. */
+export interface SourceInfo {
+  base: string;
+  hasCredential: boolean;
+  username?: string;
+}
+
+/** What the renderer may submit (loadouts:addSource / setSourceCredential). */
+export interface SourceCredentialInput {
+  token: string;
+  username?: string;
 }
 
 function sourcesPath(): string {
@@ -114,11 +127,61 @@ export async function credentialFor(base: string): Promise<RegistryCredential | 
   return null;
 }
 
-/** Pull `<base>/index:latest` into a temp dir, parse + validate index.json. */
+/**
+ * Map a registry auth failure to the IPC error contract. Electron carries only
+ * an Error's message across ipcMain.handle, so the kind is a parseable prefix
+ * (renderer: sourceErrors.ts). Names the source, never the token.
+ */
+async function withSourceAuth<T>(b: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err instanceof RegistryAuthError) {
+      throw new Error(
+        err.kind === 'needs-credential' ? `needs-credential: ${b}` : `credential-rejected: ${b} (HTTP ${err.status})`
+      );
+    }
+    throw err;
+  }
+}
+
+/**
+ * Validate a renderer-submitted credential before it ever reaches the vault:
+ * trim the token, require it to be non-empty, and require it to be shaped
+ * like a header value (`assertTokenShape`'s rule). The malformed-credential
+ * rejection carries no token and no HTTP status (#444 security review).
+ */
+function cleanCredential(base: string, cred: SourceCredentialInput): SourceCredentialInput {
+  const token = typeof cred?.token === 'string' ? cred.token.trim() : '';
+  if (!token) throw new Error('A token is required');
+  if (!/^[\x21-\x7e]+$/.test(token)) throw new Error(`malformed-credential: ${base}`);
+  const username = typeof cred.username === 'string' && cred.username.trim() ? cred.username.trim() : undefined;
+  return username ? { token, username } : { token };
+}
+
+async function storeCredential(b: string, cred: SourceCredentialInput): Promise<void> {
+  await setSecret(sourceVaultScope(b), SOURCE_VAULT_KEY, cred.token);
+  const cur = await read();
+  await write({ ...cur, credentials: { ...cur.credentials, [b]: cred.username ? { username: cred.username } : {} } });
+}
+
+async function clearCredential(b: string): Promise<void> {
+  await deleteAllForWorkspace(sourceVaultScope(b));
+  const cur = await read();
+  if (!(b in cur.credentials)) return;
+  const credentials = { ...cur.credentials };
+  delete credentials[b];
+  await write({ ...cur, credentials });
+}
+
+/** Pull `<base>/index:latest` (with the source's credential) into a temp dir,
+ *  parse + validate index.json. */
 async function pullIndex(base: string): Promise<RemoteLoadout[]> {
+  const b = normalizeBase(base);
+  const cred: RegistryCredential | null = await credentialFor(b);
   const tmp = await mkdtemp(join(tmpdir(), 'cf-index-'));
   try {
-    await pullArtifact(`${normalizeBase(base)}/index:latest`, tmp);
+    await withSourceAuth(b, () => pullArtifact(`${b}/index:latest`, tmp, { cred }));
     return parseIndex(await readFile(join(tmp, 'index.json'), 'utf8'));
   } finally {
     await rm(tmp, { recursive: true, force: true });
@@ -131,9 +194,33 @@ export async function listSources(): Promise<string[]> {
   return (await read()).sources;
 }
 
-export async function addSource(base: string): Promise<RemoteLoadout[]> {
+export async function listSourceInfo(): Promise<SourceInfo[]> {
+  const { sources, credentials } = await read();
+  return sources.map((base) => {
+    const c = credentials[base];
+    if (!c) return { base, hasCredential: false };
+    return c.username ? { base, hasCredential: true, username: c.username } : { base, hasCredential: true };
+  });
+}
+
+/**
+ * Validate (pull + parse the index) and add a source. With `cred`, the token is
+ * stored in the vault first so validation can use it; if validation then fails
+ * for a source that wasn't already configured, the token is deleted again.
+ */
+export async function addSource(base: string, cred?: SourceCredentialInput): Promise<RemoteLoadout[]> {
   const b = normalizeBase(base);
-  const index = await pullIndex(b); // validates: throws on a bad/hostile index
+  const before = await read();
+  const known = before.sources.includes(b);
+  const hadCredential = b in before.credentials;
+  if (cred) await storeCredential(b, cleanCredential(b, cred));
+  let index: RemoteLoadout[];
+  try {
+    index = await pullIndex(b); // validates: throws on a bad/hostile index or an auth failure
+  } catch (err) {
+    if (cred && !known && !hadCredential) await clearCredential(b).catch(() => undefined);
+    throw err;
+  }
   const cur = await read();
   if (!cur.sources.includes(b)) {
     await write({ ...cur, sources: [...cur.sources, b] });
@@ -142,10 +229,20 @@ export async function addSource(base: string): Promise<RemoteLoadout[]> {
   return index;
 }
 
+/** Set/replace (or, with null, remove) a configured source's token, then force-refresh it. */
+export async function setSourceCredential(base: string, cred: SourceCredentialInput | null): Promise<RemoteLoadout[]> {
+  const b = normalizeBase(base);
+  if (!(await read()).sources.includes(b)) throw new Error(`unknown source: ${b}`);
+  if (cred) await storeCredential(b, cleanCredential(b, cred));
+  else await clearCredential(b);
+  return browseSource(b, { refresh: true });
+}
+
 export async function removeSource(base: string): Promise<void> {
   const b = normalizeBase(base);
   const cur = await read();
   await write({ ...cur, sources: cur.sources.filter((s) => s !== b) });
+  await clearCredential(b);
   indexCache.delete(b);
 }
 
@@ -186,7 +283,8 @@ export async function provenanceFor(id: string): Promise<{ source: string; versi
 export async function download(source: string, id: string, version?: string): Promise<void> {
   const b = normalizeBase(source);
   const ref = loadoutRefFromSource(b, id, version);
-  await pullArtifact(ref, loadoutDir(id));
+  const cred = await credentialFor(b);
+  await withSourceAuth(b, () => pullArtifact(ref, loadoutDir(id), { cred }));
   const cur = await read();
   await write({
     ...cur,
