@@ -1,24 +1,19 @@
 // Notifications repository (#407 Phase 2) over the inbox.db connection: the
 // notification log, the user's rules, downtime schedules and small state
-// (pause, default level). No policy here — see notifyPolicy.ts.
-import type Database from 'better-sqlite3';
+// (pause, default level). No policy here — see notifyPolicy.ts. Async on the
+// Kysely store layer (store/kysely.ts).
+import type { Kysely } from 'kysely';
 import type {
-  Downtime, NotificationKind, NotificationRow, NotifyLevel, NotifyRule, PauseState, TodoPriority, TodoSource
+  Downtime, NotificationRow, NotifyLevel, NotifyRule, PauseState
 } from '../../preload/inboxTypes.js';
 import { newId } from './inboxDb.js';
+import type { InboxDb, NotificationRowSql } from '../store/inboxSchema.js';
 
 export type NewNotification = Omit<NotificationRow, 'id' | 'clearedAt'>;
 
-interface NRow {
-  id: string; ts: number; kind: NotificationKind; title: string; body: string | null; priority: TodoPriority;
-  source_kind: TodoSource['kind']; source_id: string | null; todo_id: string | null; workspace_id: string | null;
-  dedupe_key: string | null; tags: string | null; delivered: number; held_reason: string | null;
-  channel: 'os' | 'in-app' | null; cleared_at: number | null;
-}
-
 const LEVELS = new Set<NotifyLevel>(['all', 'high', 'urgent', 'off']);
 
-function toRow(r: NRow): NotificationRow {
+function toRow(r: NotificationRowSql): NotificationRow {
   return {
     id: r.id, ts: r.ts, kind: r.kind, title: r.title, body: r.body, priority: r.priority,
     source: { kind: r.source_kind, id: r.source_id }, todoId: r.todo_id, workspaceId: r.workspace_id,
@@ -35,152 +30,176 @@ function daysOf(mask: number): number[] {
 }
 
 export class NotifyStore {
-  constructor(private readonly db: Database.Database) {}
+  constructor(private readonly db: Kysely<InboxDb>) {}
 
   // --- notification log ---------------------------------------------------
 
-  insert(n: NewNotification): NotificationRow {
+  async insert(n: NewNotification): Promise<NotificationRow> {
     const id = newId(n.ts);
-    this.db.prepare(
-      `INSERT INTO notifications (id, ts, kind, title, body, priority, source_kind, source_id, todo_id, workspace_id,
-         dedupe_key, tags, delivered, held_reason, channel)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(id, n.ts, n.kind, n.title, n.body, n.priority, n.source.kind, n.source.id, n.todoId, n.workspaceId,
-      n.dedupeKey, n.tags.length ? JSON.stringify(n.tags) : null, n.delivered ? 1 : 0, n.heldReason, n.channel);
-    return this.get(id)!;
+    await this.db.insertInto('notifications').values({
+      id, ts: n.ts, kind: n.kind, title: n.title, body: n.body, priority: n.priority, source_kind: n.source.kind,
+      source_id: n.source.id, todo_id: n.todoId, workspace_id: n.workspaceId, dedupe_key: n.dedupeKey,
+      tags: n.tags.length ? JSON.stringify(n.tags) : null, delivered: n.delivered ? 1 : 0,
+      held_reason: n.heldReason, channel: n.channel
+    }).execute();
+    return (await this.get(id))!;
   }
 
-  setChannel(id: string, channel: 'os' | 'in-app'): void {
-    this.db.prepare('UPDATE notifications SET channel = ? WHERE id = ?').run(channel, id);
+  async setChannel(id: string, channel: 'os' | 'in-app'): Promise<void> {
+    await this.db.updateTable('notifications').set({ channel }).where('id', '=', id).execute();
   }
 
-  get(id: string): NotificationRow | null {
-    const r = this.db.prepare('SELECT * FROM notifications WHERE id = ?').get(id) as NRow | undefined;
+  async get(id: string): Promise<NotificationRow | null> {
+    const r = await this.db.selectFrom('notifications').selectAll().where('id', '=', id).executeTakeFirst();
     return r ? toRow(r) : null;
   }
 
-  list(opts: { filter?: 'all' | 'delivered' | 'held'; limit?: number } = {}): NotificationRow[] {
-    const where = opts.filter === 'held' ? 'WHERE delivered = 0' : opts.filter === 'delivered' ? 'WHERE delivered = 1' : '';
+  async list(opts: { filter?: 'all' | 'delivered' | 'held'; limit?: number } = {}): Promise<NotificationRow[]> {
     const limit = Math.min(Math.max(1, Math.floor(opts.limit ?? 200)), 1000);
-    return (this.db.prepare(`SELECT * FROM notifications ${where} ORDER BY ts DESC, id DESC LIMIT ${limit}`).all() as NRow[]).map(toRow);
+    let q = this.db.selectFrom('notifications').selectAll();
+    if (opts.filter === 'held') q = q.where('delivered', '=', 0);
+    else if (opts.filter === 'delivered') q = q.where('delivered', '=', 1);
+    const rows = await q.orderBy('ts', 'desc').orderBy('id', 'desc').limit(limit).execute();
+    return rows.map(toRow);
   }
 
   /** Mark every uncleared notification with this dedupe key cleared; returns their ids. */
-  clearByKey(key: string, now: number): string[] {
-    const ids = (this.db.prepare('SELECT id FROM notifications WHERE dedupe_key = ? AND cleared_at IS NULL').all(key) as Array<{ id: string }>).map((r) => r.id);
-    if (ids.length) this.db.prepare('UPDATE notifications SET cleared_at = ? WHERE dedupe_key = ? AND cleared_at IS NULL').run(now, key);
-    return ids;
+  async clearByKey(key: string, now: number): Promise<string[]> {
+    return this.db.transaction().execute(async (trx) => {
+      const ids = (await trx.selectFrom('notifications').select('id')
+        .where('dedupe_key', '=', key).where('cleared_at', 'is', null).execute()).map((r) => r.id);
+      if (ids.length) {
+        await trx.updateTable('notifications').set({ cleared_at: now })
+          .where('dedupe_key', '=', key).where('cleared_at', 'is', null).execute();
+      }
+      return ids;
+    });
   }
 
   /** Held by a pause or downtime since `since`, and not yet summarized in a digest. */
-  heldQuietSince(since: number): NotificationRow[] {
-    return (this.db.prepare(
-      `SELECT * FROM notifications WHERE delivered = 0 AND digested = 0 AND ts >= ?
-         AND (held_reason = 'pause' OR held_reason LIKE 'downtime:%') ORDER BY ts`
-    ).all(since) as NRow[]).map(toRow);
+  async heldQuietSince(since: number): Promise<NotificationRow[]> {
+    const rows = await this.db.selectFrom('notifications').selectAll()
+      .where('delivered', '=', 0).where('digested', '=', 0).where('ts', '>=', since)
+      .where((eb) => eb.or([eb('held_reason', '=', 'pause'), eb('held_reason', 'like', 'downtime:%')]))
+      .orderBy('ts').execute();
+    return rows.map(toRow);
   }
 
-  markDigested(ids: string[]): void {
-    const stmt = this.db.prepare('UPDATE notifications SET digested = 1 WHERE id = ?');
-    this.db.transaction(() => ids.forEach((id) => stmt.run(id)))();
+  async markDigested(ids: string[]): Promise<void> {
+    if (!ids.length) return;
+    await this.db.updateTable('notifications').set({ digested: 1 }).where('id', 'in', ids).execute();
   }
 
-  prune(olderThan: number): number {
-    return this.db.prepare('DELETE FROM notifications WHERE ts < ?').run(olderThan).changes;
+  async prune(olderThan: number): Promise<number> {
+    const r = await this.db.deleteFrom('notifications').where('ts', '<', olderThan).executeTakeFirst();
+    return Number(r.numDeletedRows);
   }
 
   // --- rules ---------------------------------------------------------------
 
-  rules(): NotifyRule[] {
-    return (this.db.prepare('SELECT id, scope_kind, scope_value, level, snooze_until FROM notification_rules ORDER BY created_at, id').all() as Array<{
-      id: string; scope_kind: NotifyRule['scopeKind']; scope_value: string; level: NotifyLevel; snooze_until: number | null;
-    }>).map((r) => ({ id: r.id, scopeKind: r.scope_kind, scopeValue: r.scope_value, level: r.level, snoozeUntil: r.snooze_until }));
+  async rules(): Promise<NotifyRule[]> {
+    const rows = await this.db.selectFrom('notification_rules')
+      .select(['id', 'scope_kind', 'scope_value', 'level', 'snooze_until'])
+      .orderBy('created_at').orderBy('id').execute();
+    return rows.map((r) => ({ id: r.id, scopeKind: r.scope_kind, scopeValue: r.scope_value, level: r.level, snoozeUntil: r.snooze_until }));
   }
 
   /** Upsert by (scopeKind, scopeValue): one rule per scope. */
-  setRule(rule: Omit<NotifyRule, 'id'>, now = Date.now()): NotifyRule {
+  async setRule(rule: Omit<NotifyRule, 'id'>, now = Date.now()): Promise<NotifyRule> {
     if (!LEVELS.has(rule.level)) throw new Error(`invalid level ${rule.level}`);
-    const existing = this.db.prepare('SELECT id FROM notification_rules WHERE scope_kind = ? AND scope_value = ?')
-      .get(rule.scopeKind, rule.scopeValue) as { id: string } | undefined;
-    if (existing) {
-      this.db.prepare('UPDATE notification_rules SET level = ?, snooze_until = ?, updated_at = ? WHERE id = ?')
-        .run(rule.level, rule.snoozeUntil, now, existing.id);
-      return { ...rule, id: existing.id };
-    }
-    const id = newId(now);
-    this.db.prepare(
-      'INSERT INTO notification_rules (id, scope_kind, scope_value, level, snooze_until, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(id, rule.scopeKind, rule.scopeValue, rule.level, rule.snoozeUntil, now, now);
-    return { ...rule, id };
+    return this.db.transaction().execute(async (trx) => {
+      const existing = await trx.selectFrom('notification_rules').select('id')
+        .where('scope_kind', '=', rule.scopeKind).where('scope_value', '=', rule.scopeValue).executeTakeFirst();
+      if (existing) {
+        await trx.updateTable('notification_rules').set({ level: rule.level, snooze_until: rule.snoozeUntil, updated_at: now })
+          .where('id', '=', existing.id).execute();
+        return { ...rule, id: existing.id };
+      }
+      const id = newId(now);
+      await trx.insertInto('notification_rules').values({
+        id, scope_kind: rule.scopeKind, scope_value: rule.scopeValue, level: rule.level, snooze_until: rule.snoozeUntil,
+        created_at: now, updated_at: now
+      }).execute();
+      return { ...rule, id };
+    });
   }
 
-  removeRule(id: string): void {
-    this.db.prepare('DELETE FROM notification_rules WHERE id = ?').run(id);
+  async removeRule(id: string): Promise<void> {
+    await this.db.deleteFrom('notification_rules').where('id', '=', id).execute();
   }
 
   // --- downtimes -----------------------------------------------------------
 
-  downtimes(): Downtime[] {
-    return (this.db.prepare('SELECT * FROM downtimes ORDER BY created_at, id').all() as Array<{
-      id: string; name: string; enabled: number; days_mask: number; start_min: number; end_min: number; bypass: Downtime['bypass'];
-    }>).map((d) => ({ id: d.id, name: d.name, enabled: d.enabled === 1, days: daysOf(d.days_mask), startMin: d.start_min, endMin: d.end_min, bypass: d.bypass }));
+  async downtimes(): Promise<Downtime[]> {
+    const rows = await this.db.selectFrom('downtimes').selectAll().orderBy('created_at').orderBy('id').execute();
+    return rows.map((d) => ({ id: d.id, name: d.name, enabled: d.enabled === 1, days: daysOf(d.days_mask), startMin: d.start_min, endMin: d.end_min, bypass: d.bypass }));
   }
 
-  saveDowntime(d: Omit<Downtime, 'id'> & { id?: string }, now = Date.now()): Downtime {
+  async saveDowntime(d: Omit<Downtime, 'id'> & { id?: string }, now = Date.now()): Promise<Downtime> {
     const clamp = (m: number) => Math.min(Math.max(0, Math.floor(m)), 1439);
     const row = { ...d, startMin: clamp(d.startMin), endMin: clamp(d.endMin), name: d.name.trim().slice(0, 60) || 'Downtime' };
-    if (d.id && this.db.prepare('SELECT 1 FROM downtimes WHERE id = ?').get(d.id)) {
-      this.db.prepare('UPDATE downtimes SET name = ?, enabled = ?, days_mask = ?, start_min = ?, end_min = ?, bypass = ? WHERE id = ?')
-        .run(row.name, row.enabled ? 1 : 0, maskOf(row.days), row.startMin, row.endMin, row.bypass, d.id);
-      return { ...row, id: d.id, days: daysOf(maskOf(row.days)) };
-    }
-    const id = newId(now);
-    this.db.prepare('INSERT INTO downtimes (id, name, enabled, days_mask, start_min, end_min, bypass, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(id, row.name, row.enabled ? 1 : 0, maskOf(row.days), row.startMin, row.endMin, row.bypass, now);
-    return { id, name: row.name, enabled: row.enabled, days: daysOf(maskOf(row.days)), startMin: row.startMin, endMin: row.endMin, bypass: row.bypass };
+    return this.db.transaction().execute(async (trx) => {
+      const found = d.id ? await trx.selectFrom('downtimes').select('id').where('id', '=', d.id).executeTakeFirst() : undefined;
+      if (d.id && found) {
+        await trx.updateTable('downtimes').set({
+          name: row.name, enabled: row.enabled ? 1 : 0, days_mask: maskOf(row.days), start_min: row.startMin, end_min: row.endMin, bypass: row.bypass
+        }).where('id', '=', d.id).execute();
+        return { ...row, id: d.id, days: daysOf(maskOf(row.days)) };
+      }
+      const id = newId(now);
+      await trx.insertInto('downtimes').values({
+        id, name: row.name, enabled: row.enabled ? 1 : 0, days_mask: maskOf(row.days), start_min: row.startMin,
+        end_min: row.endMin, bypass: row.bypass, created_at: now
+      }).execute();
+      return { id, name: row.name, enabled: row.enabled, days: daysOf(maskOf(row.days)), startMin: row.startMin, endMin: row.endMin, bypass: row.bypass };
+    });
   }
 
-  removeDowntime(id: string): void {
-    this.db.prepare('DELETE FROM downtimes WHERE id = ?').run(id);
+  async removeDowntime(id: string): Promise<void> {
+    await this.db.deleteFrom('downtimes').where('id', '=', id).execute();
   }
 
   // --- small state ---------------------------------------------------------
 
-  private getState(k: string): string | null {
-    const r = this.db.prepare('SELECT v FROM notify_state WHERE k = ?').get(k) as { v: string } | undefined;
+  private async getState(k: string): Promise<string | null> {
+    const r = await this.db.selectFrom('notify_state').select('v').where('k', '=', k).executeTakeFirst();
     return r?.v ?? null;
   }
-  private setState(k: string, v: string | null): void {
-    if (v === null) this.db.prepare('DELETE FROM notify_state WHERE k = ?').run(k);
-    else this.db.prepare('INSERT INTO notify_state (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v').run(k, v);
+  private async setState(k: string, v: string | null): Promise<void> {
+    if (v === null) {
+      await this.db.deleteFrom('notify_state').where('k', '=', k).execute();
+      return;
+    }
+    await this.db.insertInto('notify_state').values({ k, v })
+      .onConflict((oc) => oc.column('k').doUpdateSet({ v: (eb) => eb.ref('excluded.v') })).execute();
   }
 
-  getPause(): PauseState | null {
-    const v = this.getState('pause');
+  async getPause(): Promise<PauseState | null> {
+    const v = await this.getState('pause');
     return v ? (JSON.parse(v) as PauseState) : null;
   }
-  setPause(p: PauseState): void {
-    this.setState('pause', JSON.stringify(p));
+  async setPause(p: PauseState): Promise<void> {
+    await this.setState('pause', JSON.stringify(p));
   }
-  clearPause(): void {
-    this.setState('pause', null);
+  async clearPause(): Promise<void> {
+    await this.setState('pause', null);
   }
 
-  getDefaultLevel(): NotifyLevel {
-    const v = this.getState('defaultLevel') as NotifyLevel | null;
+  async getDefaultLevel(): Promise<NotifyLevel> {
+    const v = (await this.getState('defaultLevel')) as NotifyLevel | null;
     return v && LEVELS.has(v) ? v : 'all';
   }
-  setDefaultLevel(level: NotifyLevel): void {
+  async setDefaultLevel(level: NotifyLevel): Promise<void> {
     if (!LEVELS.has(level)) throw new Error(`invalid level ${level}`);
-    this.setState('defaultLevel', level);
+    await this.setState('defaultLevel', level);
   }
 
   /** Marker for digest bookkeeping: when the current quiet period began (or null). */
-  getQuietSince(): number | null {
-    const v = this.getState('quietSince');
+  async getQuietSince(): Promise<number | null> {
+    const v = await this.getState('quietSince');
     return v ? Number(v) : null;
   }
-  setQuietSince(ts: number | null): void {
-    this.setState('quietSince', ts === null ? null : String(ts));
+  async setQuietSince(ts: number | null): Promise<void> {
+    await this.setState('quietSince', ts === null ? null : String(ts));
   }
 }

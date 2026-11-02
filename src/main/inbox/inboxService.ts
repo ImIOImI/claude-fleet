@@ -88,13 +88,13 @@ export function createInboxService(store: InboxStore, deps: InboxServiceDeps) {
       const input = validatePostInput(args);
       const run = runSource(callerId, args.run_id);
       await gatePost(callerId);
-      const { todo, action } = store.post(
+      const { todo, action } = await store.post(
         run ? { kind: 'automation', id: run.automationId } : { kind: 'workspace', id: callerId },
         { ...input, workspaceLink: input.workspaceLink ?? callerId, ...(run ? { viaWorkspace: callerId, sourceRunId: run.runId } : {}) },
         now()
       );
       deps.notifyChanged();
-      deps.notifications?.onTodoPosted(todo, action, args.notify === true);
+      await deps.notifications?.onTodoPosted(todo, action, args.notify === true);
       if (action === 'created') deps.onTodoCreated?.(todo);
       return { id: todo.id, action, status: todo.status, seenCount: todo.seenCount };
     },
@@ -107,13 +107,13 @@ export function createInboxService(store: InboxStore, deps: InboxServiceDeps) {
       const body = typeof args.body === 'string' ? args.body.slice(0, 2000) : null;
       const todoId = typeof args.todo_id === 'string' ? args.todo_id : null;
       if (todoId) {
-        const t = store.get(todoId);
+        const t = await store.get(todoId);
         if (!t || !canSee(callerId, t)) throw new Error(`todo ${todoId} not found`);
       }
       const run = runSource(callerId, args.run_id);
       await gatePost(callerId);
       if (!deps.notifications) throw new Error('notifications are unavailable');
-      const n = deps.notifications.request({
+      const n = await deps.notifications.request({
         kind: 'post', title, body, priority,
         source: run ? { kind: 'automation', id: run.automationId } : { kind: 'workspace', id: callerId }, todoId, workspaceId: callerId,
         dedupeKey: typeof args.key === 'string' && args.key.trim() ? args.key.trim().slice(0, 200) : null,
@@ -124,17 +124,17 @@ export function createInboxService(store: InboxStore, deps: InboxServiceDeps) {
     async update(callerId: string, args: Record<string, unknown>): Promise<unknown> {
       await callerConfig(callerId);
       const id = typeof args.id === 'string' ? args.id : '';
-      const cur = id ? store.get(id) : null;
+      const cur = id ? await store.get(id) : null;
       if (!cur) throw new Error(`todo ${id || '(missing id)'} not found`);
       if (!canUpdate(callerId, cur)) throw new Error('not permitted: a workspace can only update todos it posted');
-      const todo = store.update({ kind: 'workspace', id: callerId }, id, toPatch(args), now());
+      const todo = await store.update({ kind: 'workspace', id: callerId }, id, toPatch(args), now());
       deps.notifyChanged();
       return todo;
     },
     async list(callerId: string, args: Record<string, unknown>): Promise<unknown> {
       const cfg = await callerConfig(callerId);
       const f = toFilter(args);
-      const todos = store.list({ ...f, limit: Math.min(f.limit ?? 50, 200), ...(cfg?.canReadAll ? {} : { visibleTo: callerId }) });
+      const todos = await store.list({ ...f, limit: Math.min(f.limit ?? 50, 200), ...(cfg?.canReadAll ? {} : { visibleTo: callerId }) });
       return todos.filter((t) => canSee(callerId, t, cfg));
     }
   };
@@ -144,17 +144,17 @@ export function createInboxService(store: InboxStore, deps: InboxServiceDeps) {
       return store.list(filter);
     },
     async get(id: string): Promise<{ todo: Todo; events: TodoEvent[] } | null> {
-      const todo = store.get(id);
-      return todo ? { todo, events: store.events(id) } : null;
+      const todo = await store.get(id);
+      return todo ? { todo, events: await store.events(id) } : null;
     },
     async create(input: Record<string, unknown>): Promise<Todo> {
-      const { todo, action } = store.post({ kind: 'user', id: null }, validatePostInput(input), now());
+      const { todo, action } = await store.post({ kind: 'user', id: null }, validatePostInput(input), now());
       deps.notifyChanged();
       if (action === 'created') deps.onTodoCreated?.(todo);
       return todo;
     },
     async update(id: string, patch: Record<string, unknown>): Promise<Todo> {
-      const todo = store.update({ kind: 'user', id: null }, id, toPatch(patch), now());
+      const todo = await store.update({ kind: 'user', id: null }, id, toPatch(patch), now());
       deps.notifyChanged();
       return todo;
     },
@@ -167,9 +167,9 @@ export function createInboxService(store: InboxStore, deps: InboxServiceDeps) {
   const host = {
     async todoFromAutomation(automationId: string, runId: string, args: Record<string, unknown>): Promise<void> {
       const input = validatePostInput(args);
-      const { todo, action } = store.post({ kind: 'automation', id: automationId }, { ...input, sourceRunId: runId }, now());
+      const { todo, action } = await store.post({ kind: 'automation', id: automationId }, { ...input, sourceRunId: runId }, now());
       deps.notifyChanged();
-      deps.notifications?.onTodoPosted(todo, action, args.notify === true);
+      await deps.notifications?.onTodoPosted(todo, action, args.notify === true);
       if (action === 'created') deps.onTodoCreated?.(todo);
     },
     async notifyFromAutomation(automationId: string, _runId: string, args: Record<string, unknown>): Promise<void> {
@@ -179,7 +179,7 @@ export function createInboxService(store: InboxStore, deps: InboxServiceDeps) {
       const priority = args.priority === undefined ? 'normal' : args.priority;
       if (!isPriority(priority)) throw new InboxInputError('priority must be one of low, normal, high, urgent');
       if (!deps.notifications) throw new Error('notifications are unavailable');
-      deps.notifications.request({
+      await deps.notifications.request({
         kind: 'post', title, body: typeof args.body === 'string' ? args.body.slice(0, 2000) : null, priority,
         source: { kind: 'automation', id: automationId }, todoId: null, workspaceId: null,
         dedupeKey: typeof args.key === 'string' && args.key.trim() ? args.key.trim().slice(0, 200) : null,

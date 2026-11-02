@@ -72,8 +72,8 @@ describe('notifications wiring (#407 Phase 2)', () => {
       manifest: async (id) => manifests[id] ?? null,
       notifyChanged: () => {},
       notifications: {
-        onTodoPosted: (t, action, flag) => { posted.push([t.title, action, flag]); return null; },
-        request: (r) => { requests.push(r as never); return { id: 'N1', delivered: false, heldReason: 'pause' } as never; }
+        onTodoPosted: async (t, action, flag) => { posted.push([t.title, action, flag]); return null; },
+        request: async (r) => { requests.push(r as never); return { id: 'N1', delivered: false, heldReason: 'pause' } as never; }
       }
     });
     return { svc, posted, requests };

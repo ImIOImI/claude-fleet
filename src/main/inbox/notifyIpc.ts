@@ -36,9 +36,8 @@ function focusMain(): BrowserWindow | null {
   return w;
 }
 
-/** Wire notifications. Returns the service so inboxIpc can route post side-effects. */
 export function registerNotifyIpc(inbox: InboxStore): NotifyService {
-  const store = new NotifyStore(inbox.db);
+  const store = new NotifyStore(inbox.kysely);
   const names = new Map<string, string>();
   const refreshNames = () =>
     listWorkspaceManifests()
@@ -47,6 +46,7 @@ export function registerNotifyIpc(inbox: InboxStore): NotifyService {
   void refreshNames();
   const viewing = { workspaceId: null as string | null, inboxOpen: false };
   const live: Notification[] = [];
+  const warn = (type: string) => (e: unknown) => logError({ source: 'main', type, level: 'warn', message: String(e) });
 
   const svc = createNotifyService({
     store,
@@ -54,11 +54,12 @@ export function registerNotifyIpc(inbox: InboxStore): NotifyService {
     name: (id) => names.get(id) ?? 'a workspace',
     viewing: () => ({ focused: BrowserWindow.getAllWindows().some((w) => w.isFocused()), ...viewing }),
     changed: () => {
-      send('notifications:changed', svc.quietState());
+      void svc.quietState().then((q) => send('notifications:changed', q), warn('notify-changed'));
       emitInboxChanged();
     },
     setTimer: (fn, ms) => setTimeout(fn, ms),
     clearTimer: (h) => clearTimeout(h as NodeJS.Timeout),
+    onError: warn('notify-timer'),
     deliver: (n: NotificationRow) => {
       const focused = BrowserWindow.getAllWindows().some((w) => w.isFocused());
       if (focused || !Notification.isSupported()) {
@@ -84,33 +85,25 @@ export function registerNotifyIpc(inbox: InboxStore): NotifyService {
 
   setInputWaitObserver((workspaceId, ids) => {
     if (!names.has(workspaceId)) void refreshNames();
-    svc.onInputWait(workspaceId, ids);
+    svc.onInputWait(workspaceId, ids).catch(warn('notify-input-wait'));
     emitInboxChanged();
   });
 
-  const tick = setInterval(() => {
-    try {
-      svc.tick();
-    } catch (e) {
-      logError({ source: 'main', type: 'notify-tick', level: 'warn', message: String(e) });
-    }
-  }, 30_000);
+  const tick = setInterval(() => { svc.tick().catch(warn('notify-tick')); }, 30_000);
   tick.unref?.();
-  try {
-    svc.prune();
-  } catch (e) {
-    logError({ source: 'main', type: 'notify-prune', level: 'warn', message: String(e) });
-  }
-  const daily = setInterval(() => { try { svc.prune(); } catch { /* next day */ } }, 86_400_000);
+  svc.prune().catch(warn('notify-prune'));
+  const daily = setInterval(() => { svc.prune().catch(() => { /* next day */ }); }, 86_400_000);
   daily.unref?.();
 
-  const settings = () => ({
-    defaultLevel: store.getDefaultLevel(), pause: svc.quietState().pause, downtimes: store.downtimes(), rules: store.rules()
-  });
-  const after = <T>(v: T): T => {
-    svc.tick();
-    send('notifications:changed', svc.quietState());
-    return v;
+  const settings = async () => {
+    const [defaultLevel, q, downtimes, rules] = await Promise.all([store.getDefaultLevel(), svc.quietState(), store.downtimes(), store.rules()]);
+    return { defaultLevel, pause: q.pause, downtimes, rules };
+  };
+  const after = async <T>(v: T | Promise<T>): Promise<T> => {
+    const r = await v;
+    await svc.tick();
+    send('notifications:changed', await svc.quietState());
+    return r;
   };
 
   ipcMain.handle('notifications:list', (_e, filter?: 'all' | 'delivered' | 'held', limit?: number) => store.list({ filter, limit }));
@@ -118,8 +111,8 @@ export function registerNotifyIpc(inbox: InboxStore): NotifyService {
   ipcMain.handle('notifications:quietState', () => svc.quietState());
   ipcMain.handle('notifications:scopesFor', (_e, item: { source: TodoSource; dedupeKey: string | null; tags: string[] }) => svc.scopesFor(item));
   ipcMain.handle('notifications:effective', (_e, item: { priority: TodoPriority; source: TodoSource; dedupeKey: string | null; tags: string[] }) => svc.effectiveFor(item));
-  ipcMain.handle('notifications:effectiveMany', (_e, items: Array<{ id: string; priority: TodoPriority; source: TodoSource; dedupeKey: string | null; tags: string[] }>) =>
-    Object.fromEntries((items ?? []).map((i) => [i.id, svc.effectiveFor(i)])));
+  ipcMain.handle('notifications:effectiveMany', async (_e, items: Array<{ id: string; priority: TodoPriority; source: TodoSource; dedupeKey: string | null; tags: string[] }>) =>
+    Object.fromEntries(await Promise.all((items ?? []).map(async (i) => [i.id, await svc.effectiveFor(i)] as const))));
   ipcMain.handle('notifications:setRule', (_e, r: { scopeKind: RuleScopeKind; scopeValue: string; level: NotifyLevel; snoozeUntil?: number | null }) => {
     if (!SCOPES.has(r?.scopeKind) || typeof r.scopeValue !== 'string' || !LEVELS.has(r.level)) throw new Error('invalid rule');
     return after(store.setRule({ scopeKind: r.scopeKind, scopeValue: r.scopeValue, level: r.level, snoozeUntil: r.snoozeUntil ?? null }));
@@ -129,13 +122,13 @@ export function registerNotifyIpc(inbox: InboxStore): NotifyService {
     if (!LEVELS.has(level)) throw new Error('invalid level');
     return after(store.setDefaultLevel(level));
   });
-  ipcMain.handle('notifications:pause', (_e, p: { until: number | null; letUrgent: boolean }) => {
+  ipcMain.handle('notifications:pause', async (_e, p: { until: number | null; letUrgent: boolean }) => {
     const pause: PauseState = { until: typeof p?.until === 'number' ? p.until : null, letUrgent: p?.letUrgent === true, setAt: Date.now() };
-    store.setPause(pause);
+    await store.setPause(pause);
     return after(pause);
   });
-  ipcMain.handle('notifications:resume', () => {
-    store.clearPause();
+  ipcMain.handle('notifications:resume', async () => {
+    await store.clearPause();
     return after(null);
   });
   ipcMain.handle('notifications:saveDowntime', (_e, d: Omit<Downtime, 'id'> & { id?: string }) => {

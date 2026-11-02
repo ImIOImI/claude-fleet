@@ -26,7 +26,8 @@ export function registerInboxIpc(
     },
     onPostRejected: (workspaceId, reason) => {
       logError({ source: 'main', type: 'inbox-post-rejected', level: 'warn', message: reason, workspaceId });
-      notifications?.onPostRejected(workspaceId, reason);
+      void notifications?.onPostRejected(workspaceId, reason).catch((e) =>
+        logError({ source: 'main', type: 'notify-post-rejected', level: 'warn', message: String(e) }));
     },
     notifications,
     attribution,

@@ -117,7 +117,7 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     emitNotify: async (id, runId, input) => { if (!sink) throw new Error('the inbox is unavailable'); await sink.notifyFromAutomation(id, runId, input); },
     resolveWorkspace: (v) => names.find((n) => n.id === v)?.id ?? names.find((n) => n.name === v)?.id ?? null,
     hostShells: hostShellIds,
-    notify: notify ? (n) => notify.request(n) : undefined,
+    notify: notify ? (n) => { void notify.request(n).catch((e) => logError({ source: 'main', type: 'notify-request', level: 'warn', message: String(e) })); } : undefined,
     changed: () => { send('automations:changed'); emitInboxChanged(); }
   });
 
@@ -133,7 +133,7 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
       const m = await readWorkspaceManifest(id);
       return m?.kind === 'container' && (m.inbox?.trusted === true || m.role === 'automations');
     },
-    notify: notify ? (n) => notify.request(n) : undefined,
+    notify: notify ? (n) => { void notify.request(n).catch((e) => logError({ source: 'main', type: 'notify-request', level: 'warn', message: String(e) })); } : undefined,
     changed: () => {
       send('automations:changed');
       send('proposals:changed');
