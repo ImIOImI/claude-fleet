@@ -548,8 +548,20 @@ export async function hostSpawnFresh(workspaceId: string, sessionId: string, arg
   // Pin the claude UUID up front (as tab CREATE does, #195) and record the
   // broker→claude mapping, so the Sessions list can tell this transcript came
   // from an automation (`auto-*` broker id) and file it out of Recent.
+  // Best-effort: the mapping only drives the Sessions-list grouping, so a
+  // closed DB (mock mode) must not fail the run.
   const claudeSessionId = randomUUID();
-  recordBrokerSessionMapping(workspaceId, sessionId, claudeSessionId);
+  try {
+    recordBrokerSessionMapping(workspaceId, sessionId, claudeSessionId);
+  } catch (e) {
+    logError({
+      source: 'main',
+      type: 'fresh-mapping-failed',
+      level: 'info',
+      message: `could not record ${sessionId} → ${claudeSessionId}: ${e instanceof Error ? e.message : String(e)}`,
+      workspaceId
+    });
+  }
   await backendForKind(kind).spawnHeadless(workspaceId, sessionId, [...args, '--session-id', claudeSessionId]);
 }
 
