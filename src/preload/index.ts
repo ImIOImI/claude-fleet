@@ -569,11 +569,21 @@ const api = {
     > => ipcRenderer.invoke('loadouts:catalog', workspaceId),
     setFavorite: (id: string, on: boolean): Promise<string[]> =>
       ipcRenderer.invoke('loadouts:setFavorite', id, on),
-    listSources: (): Promise<string[]> => ipcRenderer.invoke('loadouts:listSources'),
+    /** Configured sources; `hasCredential` says a vault token exists — the token itself never crosses IPC (#444). */
+    listSources: (): Promise<Array<{ base: string; hasCredential: boolean; username?: string }>> =>
+      ipcRenderer.invoke('loadouts:listSources'),
+    /** Rejects with `needs-credential: <base>` / `credential-rejected: <base> (HTTP <n>)` (see sourceErrors.ts). */
     addSource: (
-      base: string
+      base: string,
+      cred?: { token: string; username?: string }
     ): Promise<Array<{ id: string; title: string; description: string; tags: string[]; version: string }>> =>
-      ipcRenderer.invoke('loadouts:addSource', base),
+      ipcRenderer.invoke('loadouts:addSource', base, cred),
+    /** Set/replace (or with null remove) a source's token, then refresh it. Write-only: no read path. */
+    setSourceCredential: (
+      base: string,
+      cred: { token: string; username?: string } | null
+    ): Promise<Array<{ id: string; title: string; description: string; tags: string[]; version: string }>> =>
+      ipcRenderer.invoke('loadouts:setSourceCredential', base, cred),
     removeSource: (base: string): Promise<void> => ipcRenderer.invoke('loadouts:removeSource', base),
     refreshSource: (
       base: string

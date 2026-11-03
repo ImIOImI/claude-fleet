@@ -24,6 +24,7 @@ import { app, safeStorage } from 'electron';
 import { perfSpanAsync } from './perf.js';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { assertNotReservedVaultScope } from './vaultScopes.js';
 
 type Store = Record<string, Record<string, string>>;
 
@@ -180,6 +181,9 @@ async function resolveEnvInner(
   plain: Record<string, string>,
   secretKeys: string[]
 ): Promise<Record<string, string>> {
+  // A workspace's id is its scope; a reserved (host-only / endpoint) bag must
+  // never be injected into a workspace env, whatever id reached here (#444).
+  assertNotReservedVaultScope(workspaceId);
   const merged: Record<string, string> = { ...plain };
   for (const key of secretKeys) {
     const value = await getSecret(workspaceId, key);

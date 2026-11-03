@@ -195,6 +195,16 @@ export interface MockOpts {
   }>;
   // Source list returned from loadouts:listSources. Defaults to [].
   loadoutSources?: string[];
+  // Private sources (#444): base → the only token loadouts:addSource accepts.
+  // Without a token addSource rejects `needs-credential: <base>`; with the wrong
+  // one, `credential-rejected: <base> (HTTP 401)`.
+  privateLoadoutSources?: Record<string, string>;
+  // Bases where an automatic (env) credential is already bad: the first
+  // addSource(base) — no cred, nothing the user typed — rejects
+  // `credential-rejected` rather than `needs-credential`, as if main already
+  // tried a FLEET_LOADOUT_TOKEN* and the registry refused it. Any submitted
+  // credential (from the token form) succeeds (#444 final review M3).
+  envRejectedLoadoutSources?: string[];
 }
 
 export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {}): Promise<void> {
@@ -219,7 +229,8 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       setFavorite: [],
       addSource: [],
       removeSource: [],
-      refreshSource: []
+      refreshSource: [],
+      setSourceCredential: []
     };
 
     const channels = [
@@ -257,6 +268,7 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       'loadouts:addSource',
       'loadouts:removeSource',
       'loadouts:refreshSource',
+      'loadouts:setSourceCredential',
       'endpoints:list'
     ];
     for (const ch of channels) {
@@ -468,19 +480,49 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
 
     // Loadout sources mocks (Phase 2). Return the caller's sources list and record
     // add/remove/refresh calls so tests can assert source management flows.
-    const sourcesState: string[] = [...(opts.loadoutSources ?? [])];
-    ipcMain.handle('loadouts:listSources', () => [...sourcesState]);
-    ipcMain.handle('loadouts:addSource', (_e, base: string) => {
-      g.__calls.addSource.push(base);
-      if (!sourcesState.includes(base)) sourcesState.push(base);
-      return undefined;
+    const sourcesState: Array<{ base: string; hasCredential: boolean; username?: string }> = (
+      opts.loadoutSources ?? []
+    ).map((base) => ({ base, hasCredential: false }));
+    const privateSources: Record<string, string> = { ...(opts.privateLoadoutSources ?? {}) };
+    const envRejectedSources = new Set(opts.envRejectedLoadoutSources ?? []);
+    ipcMain.handle('loadouts:listSources', () => sourcesState.map((s) => ({ ...s })));
+    ipcMain.handle('loadouts:addSource', (_e, base: string, cred?: { token: string; username?: string }) => {
+      g.__calls.addSource.push({ base, withToken: !!cred });
+      const want = privateSources[base];
+      if (want !== undefined) {
+        if (!cred) throw new Error(`needs-credential: ${base}`);
+        if (cred.token !== want) throw new Error(`credential-rejected: ${base} (HTTP 401)`);
+      } else if (envRejectedSources.has(base) && !cred) {
+        // Simulates main already trying (and failing with) an automatic env
+        // token, as opposed to needs-credential (no credential was ever sent).
+        throw new Error(`credential-rejected: ${base} (HTTP 403)`);
+      }
+      if (!sourcesState.some((s) => s.base === base)) {
+        sourcesState.push(
+          cred?.username ? { base, hasCredential: !!cred, username: cred.username } : { base, hasCredential: !!cred }
+        );
+      }
+      return [];
     });
     ipcMain.handle('loadouts:removeSource', (_e, base: string) => {
       g.__calls.removeSource.push(base);
-      const idx = sourcesState.indexOf(base);
+      const idx = sourcesState.findIndex((s) => s.base === base);
       if (idx >= 0) sourcesState.splice(idx, 1);
       return undefined;
     });
+    ipcMain.handle(
+      'loadouts:setSourceCredential',
+      (_e, base: string, cred: { token: string; username?: string } | null) => {
+        g.__calls.setSourceCredential.push({ base, cleared: cred === null });
+        const s = sourcesState.find((x) => x.base === base);
+        if (s) {
+          s.hasCredential = cred !== null;
+          if (cred?.username) s.username = cred.username;
+          else delete s.username;
+        }
+        return [];
+      }
+    );
     ipcMain.handle('loadouts:refreshSource', (_e, base: string) => {
       g.__calls.refreshSource.push(base);
       return undefined;

@@ -73,6 +73,8 @@ import {
   setSkillHandlers,
 } from './mcpServer.js';
 import * as vault from './vault.js';
+import { assertRendererWorkspaceId } from './vaultScopes.js';
+import { registerVaultIpc } from './vaultIpc.js';
 import { listEndpoints, saveEndpoint, deleteEndpoint, setEndpointApiKey, probeEndpoint, getEndpoint, type ModelEndpoint } from './endpoints.js';
 import * as fs from './fs.js';
 import * as imageLibrary from './imageLibrary.js';
@@ -1096,6 +1098,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle(
     'workspace:create',
     async (_e, input: WorkspaceCreatePayload) => {
+      // The id becomes this workspace's vault scope (resolveEnv injects that
+      // bag into its env), so it may never name a host-only scope (#444).
+      assertRendererWorkspaceId(input?.id);
       const kind: WorkspaceKind = input.kind ?? 'container';
       const launcher = kind === 'local' ? sanitizeLauncher(input.launcher) : undefined;
       // Local workspaces run `claude` in a user-chosen host directory; validate
@@ -1364,6 +1369,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle(
     'workspace:writeManifest',
     async (_e, spec: Omit<WorkspaceSpec, 'workspaceRoot'> & { workspaceRoot?: string }) => {
+      assertRendererWorkspaceId(spec?.id); // the id is a vault scope (#444)
       // Name-uniqueness across the fleet (own row excluded).
       const clash = await findWorkspaceByName(spec.name);
       if (clash && clash.id !== spec.id) {
@@ -1640,8 +1646,15 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   });
   ipcMain.handle('loadouts:catalog', (_e, workspaceId?: string) => buildLoadoutCatalog(workspaceId));
   ipcMain.handle('loadouts:setFavorite', (_e, id: string, on: boolean) => setFavorite(id, on));
-  ipcMain.handle('loadouts:listSources', () => loadoutSources.listSources());
-  ipcMain.handle('loadouts:addSource', (_e, base: string) => loadoutSources.addSource(base));
+  ipcMain.handle('loadouts:listSources', () => loadoutSources.listSourceInfo());
+  ipcMain.handle('loadouts:addSource', (_e, base: string, cred?: loadoutSources.SourceCredentialInput) =>
+    loadoutSources.addSource(base, cred)
+  );
+  ipcMain.handle(
+    'loadouts:setSourceCredential',
+    (_e, base: string, cred: loadoutSources.SourceCredentialInput | null) =>
+      loadoutSources.setSourceCredential(base, cred)
+  );
   ipcMain.handle('loadouts:removeSource', (_e, base: string) => loadoutSources.removeSource(base));
   ipcMain.handle('loadouts:refreshSource', (_e, base: string) => loadoutSources.browseSource(base, { refresh: true }));
 
@@ -1862,25 +1875,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     }
   );
 
-  // Per-workspace vault. All operations are keyed by the workspace's id
-  // (the ULID). The renderer never sees raw secret values for keys it
-  // didn't just set — only the list of keys + the secret value on
-  // explicit getSecret. setSecret/deleteSecret update the per-workspace
-  // index in keytar; deleteAllForWorkspace runs at workspace delete time.
-  ipcMain.handle('vault:available', () => vault.isVaultAvailable());
-  ipcMain.handle('vault:listKeys', (_e, workspaceId: string) => vault.listKeys(workspaceId));
-  ipcMain.handle('vault:getSecret', (_e, workspaceId: string, key: string) =>
-    vault.getSecret(workspaceId, key)
-  );
-  ipcMain.handle('vault:setSecret', (_e, workspaceId: string, key: string, value: string) =>
-    vault.setSecret(workspaceId, key, value)
-  );
-  ipcMain.handle('vault:deleteSecret', (_e, workspaceId: string, key: string) =>
-    vault.deleteSecret(workspaceId, key)
-  );
-  ipcMain.handle('vault:deleteAllForWorkspace', (_e, workspaceId: string) =>
-    vault.deleteAllForWorkspace(workspaceId)
-  );
+  // Per-workspace vault (vault:*): the guarded surface lives in vaultIpc.ts so
+  // its fail-closed scope/key checks unit-test without electron (#444).
+  registerVaultIpc(ipcMain, vault);
 
   ipcMain.handle(
     'pty:attach',

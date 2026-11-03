@@ -76,6 +76,97 @@ export function safeLayerPath(destDir: string, title: string): string {
   return target;
 }
 
+/** A loadout source's credential (#444). `username` defaults to "token" in the
+ *  Basic exchange (GHCR, GitLab and Harbor accept any username with a token). */
+export interface RegistryCredential {
+  token: string;
+  username?: string;
+}
+
+export type RegistryAuthKind = 'needs-credential' | 'credential-rejected' | 'malformed';
+
+/**
+ * A registry refused us, or we refused to send what we were given.
+ * `needs-credential` = we sent no credential; `credential-rejected` = we sent
+ * one and the registry refused it (a real HTTP status); `malformed` = the
+ * credential never made it to the network because its shape is invalid
+ * (`assertTokenShape`) — there is no HTTP status, because no request was
+ * made. The message never contains the token.
+ */
+export class RegistryAuthError extends Error {
+  readonly kind: RegistryAuthKind;
+  readonly status: number;
+  constructor(kind: RegistryAuthKind, status: number) {
+    super(
+      kind === 'needs-credential'
+        ? `registry requires a credential (HTTP ${status})`
+        : kind === 'credential-rejected'
+          ? `credential rejected (HTTP ${status})`
+          : 'credential is malformed'
+    );
+    this.name = 'RegistryAuthError';
+    this.kind = kind;
+    this.status = status;
+  }
+}
+
+/**
+ * Registry host → token-realm hosts that may receive its Basic credentials
+ * besides the registry host itself. Anything not listed is asked anonymously,
+ * so a hostile WWW-Authenticate can't redirect a source's token.
+ */
+export const KNOWN_REALM_HOSTS: Readonly<Record<string, readonly string[]>> = {
+  'ghcr.io': ['ghcr.io'],
+  'registry-1.docker.io': ['auth.docker.io']
+};
+
+/** Longest token accepted from the renderer or put in a header. */
+export const MAX_TOKEN_LENGTH = 4096;
+
+/**
+ * The one token-shape rule (shared by assertTokenShape and loadoutSources'
+ * cleanCredential): a primitive string of 1..MAX_TOKEN_LENGTH header-safe
+ * bytes (`\x21-\x7e`).
+ */
+export function isTokenShaped(token: unknown): token is string {
+  return typeof token === 'string' && token.length <= MAX_TOKEN_LENGTH && /^[\x21-\x7e]+$/.test(token);
+}
+
+/**
+ * Guard against a token that would make `Headers.append` throw with the raw
+ * header value in its message (undici: any byte outside `\x21-\x7e` — CR, LF,
+ * NUL, space, non-ASCII — is rejected as "invalid header value"). Validating
+ * the shape up front, before the token ever reaches a `Headers`/`fetch` call,
+ * means the rejection is ours (token-free message) rather than undici's
+ * (which would echo the token). Call this on any credential before putting it
+ * in a header.
+ *
+ * Throws `RegistryAuthError('malformed', …)`, never `credential-rejected`: no
+ * request is made, so there is no real HTTP status to report, and claiming
+ * one (#444 final review M2: this used to fake a 400) would misrepresent a
+ * shape problem as a registry decision.
+ */
+export function assertTokenShape(token: string): void {
+  if (!isTokenShaped(token)) {
+    throw new RegistryAuthError('malformed', 0);
+  }
+}
+
+/** True when `realm` may receive the registry's Basic credentials: https, and
+ *  either the registry's own host or a KNOWN_REALM_HOSTS pairing. */
+export function realmMayReceiveCredential(registryHost: string, realm: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(realm);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== 'https:') return false;
+  const host = u.host.toLowerCase();
+  const reg = registryHost.toLowerCase();
+  return host === reg || (KNOWN_REALM_HOSTS[reg] ?? []).includes(host);
+}
+
 export interface RemoteLoadout {
   id: string;
   title: string;
