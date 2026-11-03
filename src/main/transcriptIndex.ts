@@ -5,6 +5,7 @@
 import type Database from 'better-sqlite3';
 import { insertEmbedding, unembeddedTurnEvents, unembeddedSummaries, getDb } from './db.js';
 import { encodeVector, decodeVector, topK, EMBED_MODEL_ID, EMBED_DIM } from './vectors.js';
+import { perfSpan } from './perf.js';
 
 export type EmbedFn = (texts: string[]) => Promise<Float32Array[]>;
 
@@ -37,7 +38,10 @@ export async function indexSessionTurns(sessionId: string, embed: EmbedFn, batch
   // unembeddedTurnEvents only returns rows still lacking an embedding, so the
   // cursor advances naturally as rows are inserted.
   for (;;) {
-    const pending = unembeddedTurnEvents(sessionId, EMBED_MODEL_ID, batch);
+    // Sync SQLite read on the main loop, once per session in the startup
+    // backfill — spanned so stalls it causes self-attribute.
+    const pending = perfSpan('claude_fleet.index.pending_turns',
+      () => unembeddedTurnEvents(sessionId, EMBED_MODEL_ID, batch), { session_id: sessionId });
     if (pending.length === 0) break;
 
     const prepared = pending
@@ -111,13 +115,17 @@ export async function searchTranscripts(
   const params: unknown[] = [...ids, EMBED_MODEL_ID];
   if (opts.kind) { where.push('kind = ?'); params.push(opts.kind); }
 
-  const rows = db
-    .prepare(`SELECT session_id AS sessionId, workspace_id AS workspaceId, kind, ts, text, vec
-              FROM embeddings WHERE ${where.join(' AND ')}`)
-    .all(...params) as Array<{ sessionId: string; workspaceId: string; kind: 'turn' | 'summary'; ts: number | null; text: string; vec: Buffer }>;
-
-  const cands = rows.map((r) => ({ vec: decodeVector(r.vec) }));
-  return topK(qvec, cands, limit).map(({ index, score }) => {
+  // Brute-force scan: every allowed vector is read and scored synchronously.
+  // Spanned because its cost (and transient memory) grows with the corpus.
+  const { rows, ranked } = perfSpan('claude_fleet.search.scan', () => {
+    const rows = db
+      .prepare(`SELECT session_id AS sessionId, workspace_id AS workspaceId, kind, ts, text, vec
+                FROM embeddings WHERE ${where.join(' AND ')}`)
+      .all(...params) as Array<{ sessionId: string; workspaceId: string; kind: 'turn' | 'summary'; ts: number | null; text: string; vec: Buffer }>;
+    const cands = rows.map((r) => ({ vec: decodeVector(r.vec) }));
+    return { rows, ranked: topK(qvec, cands, limit) };
+  });
+  return ranked.map(({ index, score }) => {
     const r = rows[index];
     return { sessionId: r.sessionId, workspaceId: r.workspaceId, kind: r.kind, ts: r.ts, text: r.text, score };
   });
@@ -126,7 +134,7 @@ export async function searchTranscripts(
 export async function indexSessionSummaries(embed: EmbedFn, batch = EMBED_BATCH): Promise<number> {
   let total = 0;
   for (;;) {
-    const pending = unembeddedSummaries(EMBED_MODEL_ID, batch);
+    const pending = perfSpan('claude_fleet.index.pending_summaries', () => unembeddedSummaries(EMBED_MODEL_ID, batch));
     if (pending.length === 0) break;
     const vecs = await embed(pending.map((p) => p.summary.slice(0, MAX_CHARS)));
     pending.forEach((p, i) => {

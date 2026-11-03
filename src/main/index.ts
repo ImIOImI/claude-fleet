@@ -2,7 +2,7 @@ import { app, BrowserWindow, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
 import { registerIpc } from './ipc.js';
 import { openDb, closeDb, deleteEmbeddingsForOtherModels, recordError, listSessions } from './db.js';
-import { initPerf, shutdownPerf } from './perf.js';
+import { initPerf, shutdownPerf, perfSpan, perfSpanAsync } from './perf.js';
 import { PerfStore } from './perfStore.js';
 import { resolvePerfConfig } from './perfConfig.js';
 import { getPerfTelemetry, getPerfOtlp } from './config.js';
@@ -188,7 +188,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     );
     // Read-only MCP server over <userData>/mcp.sock so in-container claude can
     // query the state DB (sessions/events/cost). Opens its own readonly conn.
-    startMcpServer(app.getPath('userData'));
+    perfSpan('claude_fleet.boot.mcp_server', () => startMcpServer(app.getPath('userData')));
     // Local embedder for semantic transcript search (native onnxruntime-node, on-host).
     const embed = makeEmbedder(join(app.getPath('userData'), 'models'));
     setQueryEmbedder(embed);
@@ -211,7 +211,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     // Re-establish a per-workspace MCP listener for every known workspace (#117)
     // so a paused container that survived the restart finds its socket again
     // (its bind points at <userData>/mcp/<id>/, whose listener must be rebuilt).
-    for (const m of manifests) ensureWorkspaceSocket(m.id);
+    perfSpan('claude_fleet.boot.workspace_sockets', () => { for (const m of manifests) ensureWorkspaceSocket(m.id); });
     // Reconcile the app-managed mcpServers entry in every container workspace's
     // bind-mounted ~/.claude.json at startup — not just at container create.
     // Without this, a bridge fix never reaches an existing workspace until its
@@ -236,7 +236,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     // watcher starts ingesting, so the very first lines are mirrored per the
     // saved setting — not dependent on the renderer's later workspace:list poll.
     for (const m of manifests) setWorkspaceDefault(m.id, m.mirror.default);
-    await jsonlWatcher.start(manifests.map((m) => m.id));
+    await perfSpanAsync('claude_fleet.boot.jsonl_watcher_start', () => jsonlWatcher.start(manifests.map((m) => m.id)));
     // Local-backend workspaces write to the host's real ~/.claude, not the
     // per-workspace state dir — register those host project dirs so their
     // (and their subagents') token spend is ingested (#plan-usage).
@@ -273,7 +273,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     // `sessions/<pid>.json` files and push an authoritative busy/idle/waiting
     // snapshot to every renderer, which merges it over the title glyph.
     if (peerStatusWatcher) {
-      await peerStatusWatcher.start();
+      await perfSpanAsync('claude_fleet.boot.peer_status_start', () => peerStatusWatcher.start());
       registerPeerStatusDirs(peerStatusWatcher, manifests);
       peerStatusWatcher.on('change', (snapshot) => {
         broadcastSessionStatus(
@@ -288,9 +288,15 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       try {
         // A model/dtype change re-keys EMBED_MODEL_ID; drop vectors under
         // retired keys so they don't accumulate as dead weight.
-        deleteEmbeddingsForOtherModels(EMBED_MODEL_ID);
-        for (const s of listSessions()) await indexSessionTurns(s.id, embed);
-        await indexSessionSummaries(embed);
+        // Spanned (#perf boot attribution): the post-launch stall storm overlaps
+        // this backfill; boot.embed_backfill is wall time, the index.* / embed.*
+        // child spans carry the synchronous parts that can block the loop.
+        await perfSpanAsync('claude_fleet.boot.embed_backfill', async () => {
+          perfSpan('claude_fleet.index.delete_stale_models', () => deleteEmbeddingsForOtherModels(EMBED_MODEL_ID));
+          const sessions = perfSpan('claude_fleet.index.list_sessions', () => listSessions());
+          for (const s of sessions) await indexSessionTurns(s.id, embed);
+          await indexSessionSummaries(embed);
+        });
       } catch (e) {
         logError({ source: 'main', level: 'warn', type: 'index-backfill', message: String(e) });
       }
@@ -300,7 +306,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   // registered handler runs inside a claude_fleet.ipc.<channel> span.
   // With recording off the tracer is a no-op — cost is one async frame/invoke.
   instrumentIpcHandle(ipcMain);
-  registerIpc({ jsonlWatcher, peerStatusWatcher });
+  perfSpan('claude_fleet.boot.register_ipc', () => registerIpc({ jsonlWatcher, peerStatusWatcher }));
   const notifySvc = inboxStore ? registerNotifyIpc(inboxStore) : null;
   const auto = inboxStore ? registerAutomationIpc(inboxStore, notifySvc) : null;
   if (inboxStore) {
