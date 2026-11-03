@@ -115,6 +115,18 @@ export const KNOWN_REALM_HOSTS: Readonly<Record<string, readonly string[]>> = {
   'registry-1.docker.io': ['auth.docker.io']
 };
 
+/** Longest token accepted from the renderer or put in a header. */
+export const MAX_TOKEN_LENGTH = 4096;
+
+/**
+ * The one token-shape rule (shared by assertTokenShape and loadoutSources'
+ * cleanCredential): a primitive string of 1..MAX_TOKEN_LENGTH header-safe
+ * bytes (`\x21-\x7e`).
+ */
+export function isTokenShaped(token: unknown): token is string {
+  return typeof token === 'string' && token.length <= MAX_TOKEN_LENGTH && /^[\x21-\x7e]+$/.test(token);
+}
+
 /**
  * Guard against a token that would make `Headers.append` throw with the raw
  * header value in its message (undici: any byte outside `\x21-\x7e` — CR, LF,
@@ -125,7 +137,7 @@ export const KNOWN_REALM_HOSTS: Readonly<Record<string, readonly string[]>> = {
  * in a header.
  */
 export function assertTokenShape(token: string): void {
-  if (!/^[\x21-\x7e]+$/.test(token)) {
+  if (!isTokenShaped(token)) {
     throw new RegistryAuthError('credential-rejected', 400);
   }
 }

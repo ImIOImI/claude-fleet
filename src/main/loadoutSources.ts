@@ -6,12 +6,20 @@
 // host-private library. Networking is in ociClient; pure helpers in ociCore.
 // Tokens live only in the vault (scope loadout-source:<base>) — never here.
 
-import { mkdir, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadoutsRoot, loadoutDir } from './paths.js';
 import { pullArtifact } from './ociClient.js';
-import { parseIndex, loadoutRefFromSource, RegistryAuthError, type RemoteLoadout, type RegistryCredential } from './ociCore.js';
+import { writeFileAtomic } from './atomicWrite.js';
+import {
+  parseIndex,
+  loadoutRefFromSource,
+  RegistryAuthError,
+  isTokenShaped,
+  type RemoteLoadout,
+  type RegistryCredential
+} from './ociCore.js';
 import { getSecret, setSecret, deleteAllForWorkspace } from './vault.js';
 import { sourceVaultScope, SOURCE_VAULT_KEY } from './vaultScopes.js';
 import { logError } from './errorLog.js';
@@ -40,8 +48,14 @@ function sourcesPath(): string {
   return join(loadoutsRoot(), 'sources.json');
 }
 
+/**
+ * Canonical form of a source base: trimmed, no `oci://`, no trailing `/`,
+ * lower-cased (OCI repository names are lower-case). One repo ⇒ one vault
+ * scope, and the default-source exclusion can't be dodged by case or prefix.
+ */
 function normalizeBase(base: string): string {
-  return base.trim().replace(/\/+$/, '');
+  if (typeof base !== 'string') throw new Error('source must be a string');
+  return base.trim().replace(/^oci:\/\//i, '').replace(/\/+$/, '').toLowerCase();
 }
 
 /**
@@ -55,40 +69,76 @@ function parseCredentials(v: unknown): SourcesFile['credentials'] {
   const out: SourcesFile['credentials'] = {};
   for (const [base, entry] of Object.entries(v as Record<string, unknown>)) {
     const username = (entry as { username?: unknown } | null)?.username;
-    out[base] = typeof username === 'string' && username ? { username } : {};
+    out[normalizeBase(base)] = typeof username === 'string' && username ? { username } : {};
   }
   return out;
 }
 
+// Every sources.json read-modify-write (and each paired vault + JSON write)
+// runs under this one promise-chain mutex, like vault.ts withLock, so
+// concurrent IPC calls can't lose each other's updates. Not re-entrant: code
+// running under the lock calls read()/write() directly, never withSourcesLock.
+let sourcesChain: Promise<unknown> = Promise.resolve();
+function withSourcesLock<T>(fn: () => Promise<T>): Promise<T> {
+  const next = sourcesChain.then(fn, fn);
+  sourcesChain = next.catch(() => undefined);
+  return next;
+}
+
+/**
+ * Read sources.json. Caller holds the lock (it may write the fresh-install
+ * seed). Fails closed: a corrupt or unreadable file throws rather than
+ * returning an empty list the next write would persist over the user's data.
+ * Only ENOENT (fresh install) yields the seeded defaults.
+ */
 async function read(): Promise<SourcesFile> {
   let raw: string;
   try {
     raw = await readFile(sourcesPath(), 'utf8');
   } catch (err: unknown) {
-    if ((err as { code?: string }).code !== 'ENOENT') return { sources: [], provenance: {}, credentials: {} };
+    if ((err as { code?: string }).code !== 'ENOENT') {
+      throw new Error(`sources.json is unreadable (${(err as { code?: string }).code ?? 'error'})`);
+    }
     const seeded: SourcesFile = { sources: [...DEFAULT_SOURCES], provenance: {}, credentials: {} };
     await write(seeded).catch(() => undefined); // still seeded for this read if the write fails
     return seeded;
   }
+  let parsed: Partial<SourcesFile>;
   try {
-    const parsed = JSON.parse(raw) as Partial<SourcesFile>;
-    return {
-      sources: Array.isArray(parsed.sources) ? parsed.sources.filter((s): s is string => typeof s === 'string') : [],
-      provenance: parsed.provenance && typeof parsed.provenance === 'object' ? parsed.provenance : {},
-      credentials: parseCredentials(parsed.credentials)
-    };
+    parsed = JSON.parse(raw) as Partial<SourcesFile>;
   } catch {
-    return { sources: [], provenance: {}, credentials: {} };
+    throw new Error('sources.json is corrupt (invalid JSON); fix or delete it');
   }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('sources.json is corrupt (not an object); fix or delete it');
+  }
+  const list = Array.isArray(parsed.sources) ? parsed.sources.filter((s): s is string => typeof s === 'string') : [];
+  return {
+    sources: [...new Set(list.map(normalizeBase))],
+    provenance: parsed.provenance && typeof parsed.provenance === 'object' ? parsed.provenance : {},
+    credentials: parseCredentials(parsed.credentials)
+  };
 }
 
+/** Read under the lock, for callers that only look. */
+function readLocked(): Promise<SourcesFile> {
+  return withSourcesLock(read);
+}
+
+/** Atomic replace (tmp file beside it + rename). Caller holds the lock. */
 async function write(next: SourcesFile): Promise<void> {
   await mkdir(loadoutsRoot(), { recursive: true });
-  await writeFile(sourcesPath(), JSON.stringify(next, null, 2) + '\n', 'utf8');
+  await writeFileAtomic(sourcesPath(), JSON.stringify(next, null, 2) + '\n');
 }
 
-/** `FLEET_LOADOUT_TOKEN_<SANITISED_BASE>`: base upper-cased, every
- *  non-alphanumeric → `_` (headless/remote hosts, spec #444). */
+/**
+ * `FLEET_LOADOUT_TOKEN_<SANITISED_BASE>`: base upper-cased, every
+ * non-alphanumeric → `_` (headless/remote hosts, spec #444). The mapping is
+ * lossy: distinct bases can share a name (`ghcr.io/a-b/x` and `ghcr.io/a/b-x`
+ * → `…_GHCR_IO_A_B_X`), so one env token may be offered to both. That is
+ * acceptable because a token is still only ever sent to its registry host
+ * (ociClient's realm guard + registry pin) — never to another host.
+ */
 export function sourceEnvVarName(base: string): string {
   return `FLEET_LOADOUT_TOKEN_${normalizeBase(base).toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
 }
@@ -113,7 +163,7 @@ export async function credentialFor(base: string): Promise<RegistryCredential | 
   const b = normalizeBase(base);
   const vaultToken = await getSecret(sourceVaultScope(b), SOURCE_VAULT_KEY);
   if (vaultToken) {
-    const username = (await read()).credentials[b]?.username;
+    const username = (await readLocked()).credentials[b]?.username;
     return username ? { token: vaultToken, username } : { token: vaultToken };
   }
   const envToken = process.env[sourceEnvVarName(b)];
@@ -145,33 +195,74 @@ async function withSourceAuth<T>(b: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
+const MAX_USERNAME_LENGTH = 256;
+
 /**
  * Validate a renderer-submitted credential before it ever reaches the vault:
- * trim the token, require it to be non-empty, and require it to be shaped
- * like a header value (`assertTokenShape`'s rule). The malformed-credential
- * rejection carries no token and no HTTP status (#444 security review).
+ * trim the token, require it to be non-empty and header-shaped
+ * (ociCore.isTokenShaped — the rule assertTokenShape enforces, length-capped),
+ * and require any username to be short, control-free and colon-free (it is
+ * the `user:` half of a Basic credential). The malformed-credential rejection
+ * carries no token and no HTTP status (#444 security review).
  */
 function cleanCredential(base: string, cred: SourceCredentialInput): SourceCredentialInput {
   const token = typeof cred?.token === 'string' ? cred.token.trim() : '';
   if (!token) throw new Error('A token is required');
-  if (!/^[\x21-\x7e]+$/.test(token)) throw new Error(`malformed-credential: ${base}`);
+  if (!isTokenShaped(token)) throw new Error(`malformed-credential: ${base}`);
   const username = typeof cred.username === 'string' && cred.username.trim() ? cred.username.trim() : undefined;
+  if (
+    username !== undefined &&
+    (username.length > MAX_USERNAME_LENGTH || username.includes(':') || /[\x00-\x1f\x7f]/.test(username))
+  ) {
+    throw new Error(`malformed-credential: ${base}`);
+  }
   return username ? { token, username } : { token };
 }
 
-async function storeCredential(b: string, cred: SourceCredentialInput): Promise<void> {
-  await setSecret(sourceVaultScope(b), SOURCE_VAULT_KEY, cred.token);
-  const cur = await read();
-  await write({ ...cur, credentials: { ...cur.credentials, [b]: cred.username ? { username: cred.username } : {} } });
+/** What a source's credential looked like before a store, for rollback. */
+interface CredentialSnapshot {
+  token: string | null;
+  entry: { username?: string } | undefined;
 }
 
-async function clearCredential(b: string): Promise<void> {
-  await deleteAllForWorkspace(sourceVaultScope(b));
-  const cur = await read();
-  if (!(b in cur.credentials)) return;
-  const credentials = { ...cur.credentials };
-  delete credentials[b];
-  await write({ ...cur, credentials });
+/** Store a credential (vault + sources.json). Caller holds the lock; returns the prior state. */
+async function storeCredentialLocked(b: string, cred: SourceCredentialInput, cur: SourcesFile): Promise<CredentialSnapshot> {
+  const snap: CredentialSnapshot = { token: await getSecret(sourceVaultScope(b), SOURCE_VAULT_KEY), entry: cur.credentials[b] };
+  await setSecret(sourceVaultScope(b), SOURCE_VAULT_KEY, cred.token);
+  await write({ ...cur, credentials: { ...cur.credentials, [b]: cred.username ? { username: cred.username } : {} } });
+  return snap;
+}
+
+/** Put a source's credential back as it was (or clear it, if none existed). */
+function restoreCredential(b: string, snap: CredentialSnapshot): Promise<void> {
+  return withSourcesLock(async () => {
+    if (snap.token !== null) await setSecret(sourceVaultScope(b), SOURCE_VAULT_KEY, snap.token);
+    else await deleteAllForWorkspace(sourceVaultScope(b));
+    const cur = await read();
+    const credentials = { ...cur.credentials };
+    if (snap.entry) credentials[b] = snap.entry;
+    else delete credentials[b];
+    await write({ ...cur, credentials });
+  });
+}
+
+/** Restore after a failed validation; a failed restore is logged (base only, never the token). */
+async function rollbackCredential(b: string, snap: CredentialSnapshot): Promise<void> {
+  try {
+    await restoreCredential(b, snap);
+  } catch (err) {
+    logError({
+      source: 'main',
+      type: 'loadoutSources.credentialRollback',
+      message: `could not roll back the credential for source ${b}: ${(err as Error).message}`
+    });
+  }
+}
+
+/** True for the IPC auth-error contract withSourceAuth produces. */
+function isAuthFailure(err: unknown): boolean {
+  const m = (err as Error | undefined)?.message ?? '';
+  return m.startsWith('needs-credential: ') || m.startsWith('credential-rejected: ');
 }
 
 /** Pull `<base>/index:latest` (with the source's credential) into a temp dir,
@@ -191,11 +282,11 @@ async function pullIndex(base: string): Promise<RemoteLoadout[]> {
 const indexCache = new Map<string, RemoteLoadout[]>();
 
 export async function listSources(): Promise<string[]> {
-  return (await read()).sources;
+  return (await readLocked()).sources;
 }
 
 export async function listSourceInfo(): Promise<SourceInfo[]> {
-  const { sources, credentials } = await read();
+  const { sources, credentials } = await readLocked();
   return sources.map((base) => {
     const c = credentials[base];
     if (!c) return { base, hasCredential: false };
@@ -205,44 +296,71 @@ export async function listSourceInfo(): Promise<SourceInfo[]> {
 
 /**
  * Validate (pull + parse the index) and add a source. With `cred`, the token is
- * stored in the vault first so validation can use it; if validation then fails
- * for a source that wasn't already configured, the token is deleted again.
+ * stored in the vault first so validation can use it. If validation fails, the
+ * previous credential is restored: always for a source that had none (the new
+ * token is removed), and on an auth failure for one that had one — so a bad
+ * re-add never destroys a working token. The network pull runs outside the
+ * sources.json lock; the list is re-read under it afterwards.
  */
 export async function addSource(base: string, cred?: SourceCredentialInput): Promise<RemoteLoadout[]> {
   const b = normalizeBase(base);
-  const before = await read();
-  const known = before.sources.includes(b);
-  const hadCredential = b in before.credentials;
-  if (cred) await storeCredential(b, cleanCredential(b, cred));
+  const clean = cred ? cleanCredential(b, cred) : undefined;
+  let snap: CredentialSnapshot | undefined;
+  if (clean) snap = await withSourcesLock(async () => storeCredentialLocked(b, clean, await read()));
+  else await readLocked(); // fail closed on a corrupt file before any network
   let index: RemoteLoadout[];
   try {
     index = await pullIndex(b); // validates: throws on a bad/hostile index or an auth failure
   } catch (err) {
-    if (cred && !known && !hadCredential) await clearCredential(b).catch(() => undefined);
+    if (snap && ((snap.token === null && !snap.entry) || isAuthFailure(err))) await rollbackCredential(b, snap);
     throw err;
   }
-  const cur = await read();
-  if (!cur.sources.includes(b)) {
-    await write({ ...cur, sources: [...cur.sources, b] });
-  }
+  await withSourcesLock(async () => {
+    const cur = await read();
+    if (!cur.sources.includes(b)) await write({ ...cur, sources: [...cur.sources, b] });
+  });
   indexCache.set(b, index);
   return index;
 }
 
-/** Set/replace (or, with null, remove) a configured source's token, then force-refresh it. */
+/**
+ * Set/replace (or, with null, remove) a configured source's token, then
+ * force-refresh it. A replacement the registry refuses is rolled back to the
+ * previous credential (or cleared, if there was none) before rethrowing.
+ */
 export async function setSourceCredential(base: string, cred: SourceCredentialInput | null): Promise<RemoteLoadout[]> {
   const b = normalizeBase(base);
-  if (!(await read()).sources.includes(b)) throw new Error(`unknown source: ${b}`);
-  if (cred) await storeCredential(b, cleanCredential(b, cred));
-  else await clearCredential(b);
-  return browseSource(b, { refresh: true });
+  const clean = cred ? cleanCredential(b, cred) : null;
+  const snap = await withSourcesLock(async () => {
+    const cur = await read();
+    if (!cur.sources.includes(b)) throw new Error(`unknown source: ${b}`);
+    if (clean) return storeCredentialLocked(b, clean, cur);
+    await deleteAllForWorkspace(sourceVaultScope(b));
+    if (b in cur.credentials) {
+      const credentials = { ...cur.credentials };
+      delete credentials[b];
+      await write({ ...cur, credentials });
+    }
+    return undefined;
+  });
+  try {
+    return await browseSource(b, { refresh: true });
+  } catch (err) {
+    if (snap && isAuthFailure(err)) await rollbackCredential(b, snap);
+    throw err;
+  }
 }
 
+/** Purge the source's vault scope first, then drop it from the list (one locked step). */
 export async function removeSource(base: string): Promise<void> {
   const b = normalizeBase(base);
-  const cur = await read();
-  await write({ ...cur, sources: cur.sources.filter((s) => s !== b) });
-  await clearCredential(b);
+  await withSourcesLock(async () => {
+    const cur = await read();
+    await deleteAllForWorkspace(sourceVaultScope(b));
+    const credentials = { ...cur.credentials };
+    delete credentials[b];
+    await write({ ...cur, sources: cur.sources.filter((s) => s !== b), credentials });
+  });
   indexCache.delete(b);
 }
 
@@ -275,7 +393,7 @@ export async function allRemote(): Promise<{ source: string; loadouts: RemoteLoa
 }
 
 export async function provenanceFor(id: string): Promise<{ source: string; version: string } | null> {
-  const p = (await read()).provenance[id];
+  const p = (await readLocked()).provenance[id];
   return p ? { source: p.source, version: p.version } : null;
 }
 
@@ -285,9 +403,11 @@ export async function download(source: string, id: string, version?: string): Pr
   const ref = loadoutRefFromSource(b, id, version);
   const cred = await credentialFor(b);
   await withSourceAuth(b, () => pullArtifact(ref, loadoutDir(id), { cred }));
-  const cur = await read();
-  await write({
-    ...cur,
-    provenance: { ...cur.provenance, [id]: { source: b, version: version ?? 'latest', downloadedAt: Date.now() } }
+  await withSourcesLock(async () => {
+    const cur = await read();
+    await write({
+      ...cur,
+      provenance: { ...cur.provenance, [id]: { source: b, version: version ?? 'latest', downloadedAt: Date.now() } }
+    });
   });
 }

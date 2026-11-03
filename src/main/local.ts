@@ -354,6 +354,12 @@ export async function buildEnv(
   // no busy attribution (#285). Scrub the markers so it saves its transcript.
   // (An explicit workspace env override re-appears below via `resolved`.)
   for (const marker of CLAUDE_CHILD_SESSION_MARKERS) delete base[marker];
+  // Loadout-source tokens are host-only (#444): the main process reads them to
+  // pull loadouts, but a workspace's claude must never inherit them.
+  for (const k of Object.keys(base)) {
+    const u = k.toUpperCase();
+    if (u === 'FLEET_LOADOUT_TOKEN' || u.startsWith('FLEET_LOADOUT_TOKEN_')) delete base[k];
+  }
   return { ...base, ...backendVars, ...resolved, TERM: 'xterm-256color' };
 }
 

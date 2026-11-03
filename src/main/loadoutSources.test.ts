@@ -18,6 +18,11 @@ vi.mock('./vault.js', () => ({
   })
 }));
 
+const logged: Array<{ type: string; message: string }> = [];
+vi.mock('./errorLog.js', () => ({
+  logError: vi.fn((e: { type: string; message: string }) => void logged.push(e))
+}));
+
 // Mock the network client; assert sources logic in isolation. `privateBases`
 // maps a source base → the only token its fake registry accepts.
 type Cred = { token: string; username?: string };
@@ -62,6 +67,7 @@ async function writeSourcesFile(f: object): Promise<void> {
 beforeEach(async () => {
   userDataDir = await mkdtemp(join(tmpdir(), 'lsrc-'));
   pulled.length = 0;
+  logged.length = 0;
   vaultStore.clear();
   privateBases.clear();
   sources.setGithubTokenProvider(undefined);
@@ -96,12 +102,12 @@ describe('loadoutSources', () => {
     expect(await sources.listSources()).toEqual([]);
   });
 
-  it('never seeds over an existing sources.json, even a corrupt one', async () => {
+  it('never seeds over an existing sources.json, and fails closed on a corrupt one', async () => {
     await mkdir(join(userDataDir, 'loadouts'), { recursive: true });
     await writeFile(join(userDataDir, 'loadouts', 'sources.json'), JSON.stringify({ sources: ['ghcr.io/other/loadouts'], provenance: {} }));
     expect(await sources.listSources()).toEqual(['ghcr.io/other/loadouts']);
     await writeFile(join(userDataDir, 'loadouts', 'sources.json'), '{not json');
-    expect(await sources.listSources()).toEqual([]);
+    await expect(sources.listSources()).rejects.toThrow(/sources\.json/);
     expect(await readFile(join(userDataDir, 'loadouts', 'sources.json'), 'utf8')).toBe('{not json');
   });
 
@@ -283,5 +289,132 @@ describe('private sources (#444)', () => {
   it('public sources still pull anonymously', async () => {
     await sources.addSource(SRC);
     expect(pulled.at(-1)).toMatchObject({ ref: `${SRC}/index:latest`, cred: null });
+  });
+});
+
+describe('security review fixes (#444)', () => {
+  const corrupt = async (body: string) => {
+    await mkdir(join(userDataDir, 'loadouts'), { recursive: true });
+    await writeFile(join(userDataDir, 'loadouts', 'sources.json'), body);
+  };
+
+  it('a corrupt sources.json makes every writer throw instead of wiping the file', async () => {
+    await corrupt('{not json');
+    await expect(sources.addSource(SRC)).rejects.toThrow(/sources\.json/);
+    await expect(sources.removeSource(SRC)).rejects.toThrow(/sources\.json/);
+    await expect(sources.download(SRC, 'spec-driven')).rejects.toThrow(/sources\.json/);
+    await expect(sources.listSourceInfo()).rejects.toThrow(/sources\.json/);
+    expect(await sourcesJson()).toBe('{not json');
+  });
+
+  it('a non-object sources.json also fails closed', async () => {
+    await corrupt('null');
+    await expect(sources.listSources()).rejects.toThrow(/sources\.json/);
+    await corrupt('[1,2]');
+    await expect(sources.listSources()).rejects.toThrow(/sources\.json/);
+  });
+
+  it('writes sources.json atomically (no temp file left beside it)', async () => {
+    await sources.addSource(SRC);
+    const { readdir } = await import('node:fs/promises');
+    expect((await readdir(join(userDataDir, 'loadouts'))).filter((f) => f.startsWith('sources.json'))).toEqual(['sources.json']);
+  });
+
+  it('concurrent credential writes and downloads all persist (serialised writers)', async () => {
+    privateBases.set(PRIV, 'ghp_good');
+    await sources.addSource(PRIV, { token: 'ghp_good' });
+    const ids = ['a1', 'a2', 'a3', 'a4', 'a5'];
+    await Promise.all([
+      sources.setSourceCredential(PRIV, { token: 'ghp_good', username: 'bob' }),
+      ...ids.map((id) => sources.download(SRC, id))
+    ]);
+    const raw = JSON.parse(await sourcesJson());
+    expect(raw.credentials[PRIV]).toEqual({ username: 'bob' });
+    expect(Object.keys(raw.provenance).sort()).toEqual(ids);
+  });
+
+  it('re-adding a known source with a bad token keeps the working token', async () => {
+    privateBases.set(PRIV, 'ghp_good');
+    await sources.addSource(PRIV, { token: 'ghp_good', username: 'alice' });
+    const infoBefore = await sources.listSourceInfo();
+    await expect(sources.addSource(PRIV, { token: 'ghp_bad', username: 'mallory' })).rejects.toThrow(/^credential-rejected: /);
+    expect(vaultStore.get(VAULT_KEY)).toBe('ghp_good');
+    expect(await sources.listSourceInfo()).toEqual(infoBefore);
+  });
+
+  it('re-adding an unlisted source that still has a credential restores it on rejection', async () => {
+    privateBases.set(PRIV, 'ghp_good');
+    await writeSourcesFile({ sources: [], provenance: {}, credentials: { [PRIV]: { username: 'alice' } } });
+    vaultStore.set(VAULT_KEY, 'ghp_good');
+    await expect(sources.addSource(PRIV, { token: 'ghp_bad' })).rejects.toThrow(/^credential-rejected: /);
+    expect(vaultStore.get(VAULT_KEY)).toBe('ghp_good');
+    expect(JSON.parse(await sourcesJson()).credentials).toEqual({ [PRIV]: { username: 'alice' } });
+  });
+
+  it('setSourceCredential with a rejected token restores the previous token and username', async () => {
+    privateBases.set(PRIV, 'ghp_good');
+    await sources.addSource(PRIV, { token: 'ghp_good', username: 'alice' });
+    await expect(sources.setSourceCredential(PRIV, { token: 'ghp_bad', username: 'eve' })).rejects.toThrow(
+      /^credential-rejected: /
+    );
+    expect(vaultStore.get(VAULT_KEY)).toBe('ghp_good');
+    expect((await sources.listSourceInfo()).find((s) => s.base === PRIV)).toEqual({
+      base: PRIV,
+      hasCredential: true,
+      username: 'alice'
+    });
+    // ...and the source still browses with the restored token.
+    expect((await sources.browseSource(PRIV, { refresh: true })).map((l) => l.id)).toContain('spec-driven');
+  });
+
+  it('setSourceCredential with a rejected token clears it when no credential existed before', async () => {
+    privateBases.set(PRIV, 'ghp_good');
+    await writeSourcesFile({ sources: [PRIV], provenance: {}, credentials: {} });
+    await expect(sources.setSourceCredential(PRIV, { token: 'ghp_bad' })).rejects.toThrow(/^credential-rejected: /);
+    expect(vaultStore.size).toBe(0);
+    expect(JSON.parse(await sourcesJson()).credentials).toEqual({});
+  });
+
+  it('logs (base, never token) when a rollback cannot clear the token', async () => {
+    privateBases.set(PRIV, 'ghp_good');
+    const v = await import('./vault.js');
+    (v.deleteAllForWorkspace as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('vault locked'));
+    await expect(sources.addSource(PRIV, { token: 'ghp_bad_secret' })).rejects.toThrow(/^credential-rejected: /);
+    expect(logged.length).toBe(1);
+    expect(logged[0].message).toContain(PRIV);
+    expect(JSON.stringify(logged)).not.toContain('ghp_bad_secret');
+  });
+
+  it('removeSource purges the vault before dropping the source, so a failed purge leaves it listed', async () => {
+    privateBases.set(PRIV, 'ghp_good');
+    await sources.addSource(PRIV, { token: 'ghp_good' });
+    const v = await import('./vault.js');
+    (v.deleteAllForWorkspace as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('vault locked'));
+    await expect(sources.removeSource(PRIV)).rejects.toThrow(/vault locked/);
+    expect(await sources.listSources()).toContain(PRIV);
+    expect(vaultStore.get(VAULT_KEY)).toBe('ghp_good');
+  });
+
+  it('canonicalises bases: oci:// prefix and case map to one scope', async () => {
+    privateBases.set(PRIV, 'ghp_good');
+    await sources.addSource('oci://GHCR.io/Acme/Private/', { token: 'ghp_good' });
+    expect(vaultStore.get(VAULT_KEY)).toBe('ghp_good');
+    expect(await sources.listSources()).toContain(PRIV);
+    expect(await sources.credentialFor('ghcr.io/ACME/private')).toEqual({ token: 'ghp_good' });
+  });
+
+  it('the default-source exclusion for FLEET_LOADOUT_TOKEN survives case and oci:// tricks', async () => {
+    vi.stubEnv('FLEET_LOADOUT_TOKEN', 'generic-tok');
+    expect(await sources.credentialFor('oci://ghcr.io/imioimi/claude-fleet-loadouts')).toBeNull();
+    expect(await sources.credentialFor('GHCR.IO/Imioimi/Claude-Fleet-Loadouts')).toBeNull();
+  });
+
+  it('caps token and username length and refuses a username with a colon', async () => {
+    await expect(sources.addSource(PRIV, { token: 'x'.repeat(4097) })).rejects.toThrow(/^malformed-credential: /);
+    await expect(sources.addSource(PRIV, { token: 'ghp_ok', username: 'u'.repeat(257) })).rejects.toThrow(
+      /^malformed-credential: /
+    );
+    await expect(sources.addSource(PRIV, { token: 'ghp_ok', username: 'a:b' })).rejects.toThrow(/^malformed-credential: /);
+    expect(vaultStore.size).toBe(0);
   });
 });

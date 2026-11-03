@@ -16,7 +16,9 @@ import {
   SUPPORTED_REGISTRY,
   RegistryAuthError,
   realmMayReceiveCredential,
-  assertTokenShape
+  assertTokenShape,
+  isTokenShaped,
+  MAX_TOKEN_LENGTH
 } from './ociCore.js';
 
 describe('parseImageRef', () => {
@@ -270,3 +272,21 @@ describe('assertTokenShape (security review)', () => {
   });
 });
 
+
+describe('isTokenShaped (#444 security review)', () => {
+  it('accepts header-safe tokens up to the length cap', () => {
+    expect(MAX_TOKEN_LENGTH).toBe(4096);
+    expect(isTokenShaped('ghp_abcDEF123')).toBe(true);
+    expect(isTokenShaped('x'.repeat(4096))).toBe(true);
+  });
+  it('rejects empty, oversize, non-string and non-header-safe tokens', () => {
+    expect(isTokenShaped('')).toBe(false);
+    expect(isTokenShaped('x'.repeat(4097))).toBe(false);
+    expect(isTokenShaped('a b')).toBe(false);
+    expect(isTokenShaped('a\nb')).toBe(false);
+    expect(isTokenShaped(['ghp_x'] as unknown as string)).toBe(false);
+  });
+  it('assertTokenShape enforces the same cap', () => {
+    expect(() => assertTokenShape('x'.repeat(4097))).toThrow(RegistryAuthError);
+  });
+});

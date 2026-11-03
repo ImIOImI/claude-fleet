@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { readFile, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { getSecret, setSecret, deleteAllForWorkspace, deleteSecret } from './vault.js';
+import { ENDPOINT_VAULT_PREFIX } from './vaultScopes.js';
 
 export interface ModelEndpoint {
   id: string;
@@ -27,7 +28,7 @@ export interface ModelEndpoint {
 
 export const ENDPOINT_VAULT_KEY = 'ANTHROPIC_AUTH_TOKEN';
 export function endpointVaultScope(id: string): string {
-  return `endpoint:${id}`;
+  return `${ENDPOINT_VAULT_PREFIX}${id}`;
 }
 
 export function parseEndpoints(raw: unknown): ModelEndpoint[] {

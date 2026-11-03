@@ -8,14 +8,40 @@
 
 export const SOURCE_VAULT_PREFIX = 'loadout-source:';
 export const SOURCE_VAULT_KEY = 'TOKEN';
+/** Scope prefix of a model endpoint's API key (endpoints.ts). */
+export const ENDPOINT_VAULT_PREFIX = 'endpoint:';
+
+/**
+ * Every vault scope prefix that names a non-workspace bag. A workspace's id is
+ * its vault scope (resolveEnv injects that bag into the workspace's env), so a
+ * workspace may never be created under one of these.
+ */
+export const RESERVED_VAULT_PREFIXES: readonly string[] = [SOURCE_VAULT_PREFIX, ENDPOINT_VAULT_PREFIX];
 
 export function sourceVaultScope(normalisedBase: string): string {
   return `${SOURCE_VAULT_PREFIX}${normalisedBase}`;
 }
 
-/** Throw when a renderer-supplied vault scope names a host-only bag. */
-export function assertRendererVaultScope(scope: unknown): void {
-  if (typeof scope === 'string' && scope.startsWith(SOURCE_VAULT_PREFIX)) {
-    throw new Error('vault scope is host-only');
+/**
+ * Throw when a renderer-supplied vault scope names a host-only bag. Fails
+ * closed: anything that isn't a primitive string is refused, because an array
+ * or String object survives structured clone and is coerced to the real scope
+ * string when vault.ts indexes its store.
+ */
+export function assertRendererVaultScope(scope: unknown): asserts scope is string {
+  if (typeof scope !== 'string') throw new Error('vault scope must be a string');
+  if (scope.startsWith(SOURCE_VAULT_PREFIX)) throw new Error('vault scope is host-only');
+}
+
+/**
+ * Throw unless a renderer-supplied workspace id is safe to use as a vault
+ * scope: a non-empty primitive string with no `:` (so it can never collide
+ * with a reserved `<kind>:` scope) and no reserved prefix. ULID format is not
+ * required — tests, mock mode and e2e use other ids.
+ */
+export function assertRendererWorkspaceId(id: unknown): asserts id is string {
+  if (typeof id !== 'string' || !id) throw new Error('workspace id must be a non-empty string');
+  if (id.includes(':') || RESERVED_VAULT_PREFIXES.some((p) => id.startsWith(p))) {
+    throw new Error('workspace id may not contain ":" or use a reserved vault prefix');
   }
 }

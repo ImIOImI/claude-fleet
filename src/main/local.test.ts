@@ -154,3 +154,19 @@ describe('localMcpTransport — #295', () => {
     }
   });
 });
+
+describe('buildEnv — loadout-source tokens never reach a workspace (#444)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('strips FLEET_LOADOUT_TOKEN and FLEET_LOADOUT_TOKEN_* from the inherited host env', async () => {
+    vi.stubEnv('FLEET_LOADOUT_TOKEN', 'sentinel-generic-tok');
+    vi.stubEnv('FLEET_LOADOUT_TOKEN_GHCR_IO_ACME_PRIVATE', 'sentinel-specific-tok');
+    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+    expect(env.FLEET_LOADOUT_TOKEN).toBeUndefined();
+    expect(env.FLEET_LOADOUT_TOKEN_GHCR_IO_ACME_PRIVATE).toBeUndefined();
+    // Boolean assertion: a failure must not print the (real host) env.
+    expect(Object.values(env).some((v) => typeof v === 'string' && v.startsWith('sentinel-'))).toBe(false);
+  });
+});
