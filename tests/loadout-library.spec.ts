@@ -465,3 +465,49 @@ test('Library: a private source prompts for a token, rejects a bad one, then add
     await app.close();
   }
 });
+
+test('Library: an already-rejected (env) credential also opens the token prompt (#444 final review M3)', async () => {
+  const ENV_BAD = 'ghcr.io/acme/envbad';
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [],
+      loadoutCatalog: [PHASE1_ENTRY],
+      loadoutSources: [],
+      envRejectedLoadoutSources: [ENV_BAD],
+    });
+
+    await window.waitForTimeout(400);
+
+    const libraryAccHeader = window.locator('.acc-header', { hasText: 'Library' });
+    await libraryAccHeader.waitFor({ state: 'visible', timeout: 8_000 });
+    if ((await libraryAccHeader.getAttribute('aria-expanded')) !== 'true') {
+      await libraryAccHeader.click();
+      await window.waitForTimeout(200);
+    }
+
+    await window.locator('.lib-browse').click();
+    const modal = window.locator('.modal.loadout-browser');
+    await modal.waitFor({ state: 'visible', timeout: 6_000 });
+
+    // The initial add is submitted without a token (none typed yet), but main
+    // rejects it with credential-rejected (an automatic env token was already
+    // tried and refused) rather than needs-credential — the prompt still opens
+    // so the user can enter a vault token to override it.
+    await modal.getByPlaceholder('ghcr.io/owner/repo').fill(ENV_BAD);
+    await modal.getByRole('button', { name: '+ Add' }).click();
+    const form = modal.locator('.lb-cred');
+    await expect(form).toBeVisible({ timeout: 4_000 });
+    await expect(form).toContainText('This source is private. Add a token:');
+
+    await form.getByLabel('Source token').fill('a-vault-token');
+    await form.getByRole('button', { name: 'Save token' }).click();
+    await expect(form).toBeHidden({ timeout: 4_000 });
+    expect((await getCalls(app)).addSource).toEqual([
+      { base: ENV_BAD, withToken: false },
+      { base: ENV_BAD, withToken: true },
+    ]);
+  } finally {
+    await app.close();
+  }
+});

@@ -23,6 +23,14 @@ vi.mock('./errorLog.js', () => ({
   logError: vi.fn((e: { type: string; message: string }) => void logged.push(e))
 }));
 
+// loadoutInstall.js's only other dependency (besides the real loadoutSources.js
+// under test): stub it out so `ensureAndInstall` can be exercised here without
+// a real workspace/manifest/container stack (#444 final review I1).
+const installed: string[] = [];
+vi.mock('./loadouts.js', () => ({
+  installLoadout: vi.fn(async (_ws: string, id: string) => { installed.push(id); return { installed: { id } }; })
+}));
+
 // Mock the network client; assert sources logic in isolation. `privateBases`
 // maps a source base → the only token its fake registry accepts.
 type Cred = { token: string; username?: string };
@@ -68,6 +76,7 @@ beforeEach(async () => {
   userDataDir = await mkdtemp(join(tmpdir(), 'lsrc-'));
   pulled.length = 0;
   logged.length = 0;
+  installed.length = 0;
   vaultStore.clear();
   privateBases.clear();
   sources.setGithubTokenProvider(undefined);
@@ -517,5 +526,69 @@ describe('security review fixes (#444)', () => {
     );
     expect(vaultStore.size).toBe(0);
     expect(await sources.listSources()).not.toContain(PRIV);
+  });
+});
+
+describe('final review follow-ups (#444)', () => {
+  const corrupt = async (body: string) => {
+    await mkdir(join(userDataDir, 'loadouts'), { recursive: true });
+    await writeFile(join(userDataDir, 'loadouts', 'sources.json'), body);
+  };
+
+  it('I1: allRemote degrades to an empty remote catalog (not a throw) on a corrupt sources.json', async () => {
+    await corrupt('{not json');
+    await expect(sources.allRemote()).resolves.toEqual([]);
+    const entry = logged.find((e) => e.type === 'loadoutSources.allRemote');
+    expect(entry?.message).toMatch(/could not list sources/);
+    expect(entry?.message).not.toContain('{not json'); // the raw file body never leaks into the log
+  });
+
+  it('I1: provenanceFor returns null (not a throw) on a corrupt sources.json', async () => {
+    await corrupt('{not json');
+    await expect(sources.provenanceFor('spec-driven')).resolves.toBeNull();
+  });
+
+  it('I1: a local install still succeeds through ensureAndInstall when sources.json is corrupt', async () => {
+    // ensureAndInstall's first call is provenanceFor(id); before this fix that
+    // threw on a corrupt file and broke every install, even a purely local one
+    // (no opts.source, so sources.json is otherwise irrelevant to it).
+    await corrupt('{not json');
+    const { ensureAndInstall } = await import('./loadoutInstall.js');
+    await expect(ensureAndInstall('ws1', 'local-only')).resolves.toEqual({ status: 'installed' });
+    expect(installed).toEqual(['local-only']);
+  });
+
+  it('I1: mutating paths still fail closed on a corrupt sources.json (addSource, setSourceCredential, removeSource, download)', async () => {
+    await corrupt('{not json');
+    await expect(sources.addSource(SRC)).rejects.toThrow(/sources\.json/);
+    await expect(sources.setSourceCredential(SRC, { token: 'ghp_x' })).rejects.toThrow(/sources\.json/);
+    await expect(sources.removeSource(SRC)).rejects.toThrow(/sources\.json/);
+    await expect(sources.download(SRC, 'spec-driven')).rejects.toThrow(/sources\.json/);
+    expect(await sourcesJson()).toBe('{not json'); // never wiped
+  });
+
+  it('M4: a base smuggling embedded credentials is rejected generically, echoing nothing', async () => {
+    const hostile = 'oci://user:ghp_SECRETTOKEN@ghcr.io/org/repo';
+    const err = (await sources.addSource(hostile).catch((e: unknown) => e)) as Error;
+    expect(err.message).toBe('invalid source');
+    expect(err.message).not.toContain('ghp_SECRETTOKEN');
+    expect(err.message).not.toContain('@');
+    expect(pulled).toEqual([]); // never even attempted a pull
+  });
+
+  it('M2: a malformed-credential registry error surfaces as malformed-credential, never a fake HTTP status', async () => {
+    const { RegistryAuthError } = await import('./ociCore.js');
+    const client = await import('./ociClient.js');
+    (client.pullArtifact as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new RegistryAuthError('malformed', 0));
+    const err = (await sources.addSource(SRC).catch((e: unknown) => e)) as Error;
+    expect(err.message).toBe(`malformed-credential: ${SRC}`);
+    expect(err.message).not.toMatch(/HTTP/);
+  });
+
+  it('M4: a base containing "://" after the oci:// prefix is rejected generically, with no "@" involved', async () => {
+    const hostile = 'oci://ghcr.io/org/repo?redirect=http://evil.example';
+    const err = (await sources.addSource(hostile).catch((e: unknown) => e)) as Error;
+    expect(err.message).toBe('invalid source');
+    expect(pulled).toEqual([]);
   });
 });

@@ -4,6 +4,7 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'node:path';
 import { getSecret, listKeys } from '../vault.js';
+import { assertNotReservedVaultScope } from '../vaultScopes.js';
 import { setLoadoutAutomationHooks, setLoadoutChangeListener } from '../loadouts.js';
 import { prepareLoadoutAutomations, readLoadoutAutomations, readLoadoutVersion } from './loadoutAutomations.js';
 import { createLoadoutInstaller } from './loadoutInstaller.js';
@@ -112,7 +113,12 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
       ? hostExecScript(target.workspaceId, o)
       : runScript({ shell: target.shell, script: o.script, env: o.env, cwd: path.join(app.getPath('userData'), 'automations', o.automationId), timeoutMs: o.timeoutMs }),
     automationsWorkspace: () => roleWs,
-    secret: (ws, key) => getSecret(ws, key),
+    // Same reserved-scope backstop vault.resolveEnv applies before injecting a
+    // bag into a workspace env: `ws` here is resolveWorkspace's output or the
+    // automations workspace id, which should already be an ordinary workspace
+    // id, but a script step secret is read on a less-trusted path than a
+    // container's own env, so this is defence in depth (#444 final review M6).
+    secret: (ws, key) => { assertNotReservedVaultScope(ws); return getSecret(ws, key); },
     emitTodo: async (id, runId, input) => { if (!sink) throw new Error('the inbox is unavailable'); await sink.todoFromAutomation(id, runId, input); },
     emitNotify: async (id, runId, input) => { if (!sink) throw new Error('the inbox is unavailable'); await sink.notifyFromAutomation(id, runId, input); },
     resolveWorkspace: (v) => names.find((n) => n.id === v)?.id ?? names.find((n) => n.name === v)?.id ?? null,

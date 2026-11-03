@@ -199,6 +199,12 @@ export interface MockOpts {
   // Without a token addSource rejects `needs-credential: <base>`; with the wrong
   // one, `credential-rejected: <base> (HTTP 401)`.
   privateLoadoutSources?: Record<string, string>;
+  // Bases where an automatic (env) credential is already bad: the first
+  // addSource(base) — no cred, nothing the user typed — rejects
+  // `credential-rejected` rather than `needs-credential`, as if main already
+  // tried a FLEET_LOADOUT_TOKEN* and the registry refused it. Any submitted
+  // credential (from the token form) succeeds (#444 final review M3).
+  envRejectedLoadoutSources?: string[];
 }
 
 export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {}): Promise<void> {
@@ -478,6 +484,7 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       opts.loadoutSources ?? []
     ).map((base) => ({ base, hasCredential: false }));
     const privateSources: Record<string, string> = { ...(opts.privateLoadoutSources ?? {}) };
+    const envRejectedSources = new Set(opts.envRejectedLoadoutSources ?? []);
     ipcMain.handle('loadouts:listSources', () => sourcesState.map((s) => ({ ...s })));
     ipcMain.handle('loadouts:addSource', (_e, base: string, cred?: { token: string; username?: string }) => {
       g.__calls.addSource.push({ base, withToken: !!cred });
@@ -485,6 +492,10 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       if (want !== undefined) {
         if (!cred) throw new Error(`needs-credential: ${base}`);
         if (cred.token !== want) throw new Error(`credential-rejected: ${base} (HTTP 401)`);
+      } else if (envRejectedSources.has(base) && !cred) {
+        // Simulates main already trying (and failing with) an automatic env
+        // token, as opposed to needs-credential (no credential was ever sent).
+        throw new Error(`credential-rejected: ${base} (HTTP 403)`);
       }
       if (!sourcesState.some((s) => s.base === base)) {
         sourcesState.push(

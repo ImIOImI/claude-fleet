@@ -5,7 +5,8 @@ import {
   RESERVED_VAULT_PREFIXES,
   sourceVaultScope,
   assertRendererVaultScope,
-  assertRendererWorkspaceId
+  assertRendererWorkspaceId,
+  assertNotReservedVaultScope
 } from './vaultScopes.js';
 
 describe('vaultScopes (#444)', () => {
@@ -55,5 +56,17 @@ describe('assertRendererWorkspaceId (#444 security review)', () => {
   });
   it.each(['01HZXYWORKSPACEULID0000000', 'ws-1', 'expert-security', 'aaa'])('allows %s', (id) => {
     expect(() => assertRendererWorkspaceId(id)).not.toThrow();
+  });
+});
+
+describe('assertNotReservedVaultScope (#444 final review M6)', () => {
+  it.each([
+    ['a loadout-source scope', 'loadout-source:ghcr.io/acme/private'],
+    ['an endpoint scope', 'endpoint:3f0c']
+  ])('refuses %s', (_label, scope) => {
+    expect(() => assertNotReservedVaultScope(scope)).toThrow(/reserved/);
+  });
+  it.each(['01HZXYWORKSPACEULID0000000', 'ws-1', ''])('allows %s', (scope) => {
+    expect(() => assertNotReservedVaultScope(scope)).not.toThrow();
   });
 });

@@ -83,12 +83,15 @@ export interface RegistryCredential {
   username?: string;
 }
 
-export type RegistryAuthKind = 'needs-credential' | 'credential-rejected';
+export type RegistryAuthKind = 'needs-credential' | 'credential-rejected' | 'malformed';
 
 /**
- * A registry refused us. `needs-credential` = we sent no credential;
- * `credential-rejected` = we sent one and it was refused. The message never
- * contains the token, only the HTTP status.
+ * A registry refused us, or we refused to send what we were given.
+ * `needs-credential` = we sent no credential; `credential-rejected` = we sent
+ * one and the registry refused it (a real HTTP status); `malformed` = the
+ * credential never made it to the network because its shape is invalid
+ * (`assertTokenShape`) — there is no HTTP status, because no request was
+ * made. The message never contains the token.
  */
 export class RegistryAuthError extends Error {
   readonly kind: RegistryAuthKind;
@@ -97,7 +100,9 @@ export class RegistryAuthError extends Error {
     super(
       kind === 'needs-credential'
         ? `registry requires a credential (HTTP ${status})`
-        : `credential rejected (HTTP ${status})`
+        : kind === 'credential-rejected'
+          ? `credential rejected (HTTP ${status})`
+          : 'credential is malformed'
     );
     this.name = 'RegistryAuthError';
     this.kind = kind;
@@ -135,10 +140,15 @@ export function isTokenShaped(token: unknown): token is string {
  * means the rejection is ours (token-free message) rather than undici's
  * (which would echo the token). Call this on any credential before putting it
  * in a header.
+ *
+ * Throws `RegistryAuthError('malformed', …)`, never `credential-rejected`: no
+ * request is made, so there is no real HTTP status to report, and claiming
+ * one (#444 final review M2: this used to fake a 400) would misrepresent a
+ * shape problem as a registry decision.
  */
 export function assertTokenShape(token: string): void {
   if (!isTokenShaped(token)) {
-    throw new RegistryAuthError('credential-rejected', 400);
+    throw new RegistryAuthError('malformed', 0);
   }
 }
 

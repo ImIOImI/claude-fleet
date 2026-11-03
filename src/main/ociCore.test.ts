@@ -212,6 +212,13 @@ describe('RegistryAuthError (#444)', () => {
     expect(a.message).toBe('registry requires a credential (HTTP 401)');
     expect(new RegistryAuthError('credential-rejected', 403).message).toBe('credential rejected (HTTP 403)');
   });
+
+  it('a malformed credential carries no HTTP status in its message (#444 final review M2)', () => {
+    const a = new RegistryAuthError('malformed', 0);
+    expect(a).toMatchObject({ name: 'RegistryAuthError', kind: 'malformed' });
+    expect(a.message).toBe('credential is malformed');
+    expect(a.message).not.toMatch(/HTTP/);
+  });
 });
 
 // ── Security review follow-up (#444) ────────────────────────────────────────
@@ -256,7 +263,7 @@ describe('assertTokenShape (security review)', () => {
       caught = e;
     }
     expect(caught).toBeInstanceOf(RegistryAuthError);
-    expect((caught as RegistryAuthError).kind).toBe('credential-rejected');
+    expect((caught as RegistryAuthError).kind).toBe('malformed'); // #444 final review M2: not a fake HTTP status
     expect((caught as Error).message).not.toContain('ghp_SECRET');
     expect((caught as Error).message).not.toContain(bad);
   });

@@ -55,7 +55,15 @@ function sourcesPath(): string {
  */
 function normalizeBase(base: string): string {
   if (typeof base !== 'string') throw new Error('source must be a string');
-  return base.trim().replace(/^oci:\/\//i, '').replace(/\/+$/, '').toLowerCase();
+  const stripped = base.trim().replace(/^oci:\/\//i, '');
+  // A base smuggling embedded credentials (`user:pass@host/repo`) or another
+  // `scheme://` would otherwise reach `parseImageRef`, whose error messages
+  // echo the invalid segment verbatim — e.g. an "unsupported registry
+  // user:ghp_x@ghcr.io" message leaking the token (#444 final review M4).
+  // Reject it here, before it is ever used to build a ref, with a message
+  // that names nothing from the input.
+  if (stripped.includes('@') || stripped.includes('://')) throw new Error('invalid source');
+  return stripped.replace(/\/+$/, '').toLowerCase();
 }
 
 /**
@@ -187,9 +195,12 @@ async function withSourceAuth<T>(b: string, fn: () => Promise<T>): Promise<T> {
     return await fn();
   } catch (err) {
     if (err instanceof RegistryAuthError) {
-      throw new Error(
-        err.kind === 'needs-credential' ? `needs-credential: ${b}` : `credential-rejected: ${b} (HTTP ${err.status})`
-      );
+      if (err.kind === 'needs-credential') throw new Error(`needs-credential: ${b}`);
+      // A malformed credential (e.g. a bad FLEET_LOADOUT_TOKEN*) never made a
+      // request — report it as malformed, not a fake HTTP status (#444 final
+      // review M2).
+      if (err.kind === 'malformed') throw new Error(`malformed-credential: ${b}`);
+      throw new Error(`credential-rejected: ${b} (HTTP ${err.status})`);
     }
     throw err;
   }
@@ -378,9 +389,26 @@ export async function browseSource(base: string, opts: { refresh?: boolean } = {
   return index;
 }
 
-/** Every configured source's index, failed sources skipped (logged), for the catalog. */
+/**
+ * Every configured source's index, failed sources skipped (logged), for the
+ * catalog. A read-only caller, so a corrupt/unreadable `sources.json` must
+ * not take the whole catalog (including local loadouts) down with it — it
+ * degrades to "no remote sources" rather than throwing (#444 final review
+ * I1: `ensureAndInstall`/`loadouts:catalog` call this before anything local).
+ */
 export async function allRemote(): Promise<{ source: string; loadouts: RemoteLoadout[] }[]> {
-  const srcs = await listSources();
+  let srcs: string[];
+  try {
+    srcs = await listSources();
+  } catch (err) {
+    logError({
+      source: 'main',
+      type: 'loadoutSources.allRemote',
+      message: `could not list sources, serving an empty remote catalog: ${(err as Error).message}`,
+      stack: (err as Error).stack
+    });
+    return [];
+  }
   const out: { source: string; loadouts: RemoteLoadout[] }[] = [];
   for (const source of srcs) {
     try {
@@ -398,8 +426,21 @@ export async function allRemote(): Promise<{ source: string; loadouts: RemoteLoa
   return out;
 }
 
+/**
+ * A loadout's download provenance, or null if it has none — including when
+ * `sources.json` itself is corrupt/unreadable. Read-only, and the first thing
+ * `ensureAndInstall` calls (#444 final review I1): a purely local install
+ * (no `opts.source`) must still succeed when the file is broken, so this
+ * degrades instead of throwing.
+ */
 export async function provenanceFor(id: string): Promise<{ source: string; version: string } | null> {
-  const p = (await readLocked()).provenance[id];
+  let file: SourcesFile;
+  try {
+    file = await readLocked();
+  } catch {
+    return null;
+  }
+  const p = file.provenance[id];
   return p ? { source: p.source, version: p.version } : null;
 }
 

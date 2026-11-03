@@ -84,7 +84,11 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
       await reload();
     } catch (err) {
       const e = parseSourceError(err);
-      if (e.kind === 'needs-credential') {
+      // `credential-rejected` here means an automatic credential (an env
+      // token — this call never sent one of its own) was refused; the user
+      // can still enter a vault token to override it, same as needs-credential
+      // (#444 final review M3).
+      if (e.kind === 'needs-credential' || e.kind === 'credential-rejected') {
         closeCred();
         setCredPrompt({ base, mode: 'add' });
         return;

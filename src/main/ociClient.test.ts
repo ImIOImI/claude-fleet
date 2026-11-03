@@ -245,14 +245,15 @@ describe('ociClient private registries (#444)', () => {
 });
 
 describe('ociClient sanitised errors (#444 security review)', () => {
-  it('rejects a malformed token up front (credential-rejected, no token in the message) without making any network call', async () => {
+  it('rejects a malformed token up front (malformed, no fake HTTP status, no token in the message) without making any network call', async () => {
     const fetchMock = fakeRegistry({ manifest: ANN_MANIFEST, private: { token: 'ghp_good' } });
     vi.stubGlobal('fetch', fetchMock);
     const bad = 'ghp_SECRET\nX-Injected: evil';
     const err = await fetchAnnotations(REF, { cred: { token: bad } }).catch((e: unknown) => e as Error);
-    expect(err).toMatchObject({ name: 'RegistryAuthError', kind: 'credential-rejected' });
+    expect(err).toMatchObject({ name: 'RegistryAuthError', kind: 'malformed' }); // #444 final review M2
     expect(err.message).not.toContain('ghp_SECRET');
     expect(err.message).not.toContain(bad);
+    expect(err.message).not.toMatch(/HTTP/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
