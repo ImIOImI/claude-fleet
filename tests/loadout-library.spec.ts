@@ -402,3 +402,66 @@ test('Loadout automations: review lists them with ticks, install turns them on w
     await app.close();
   }
 });
+
+// ── Private loadout sources (#444) ───────────────────────────────────────────
+
+test('Library: a private source prompts for a token, rejects a bad one, then adds with a 🔒 (#444)', async () => {
+  const PRIVATE = 'ghcr.io/acme/private';
+  const { app, window } = await launch();
+  try {
+    await mockMainIpc(app, {
+      workspaceList: [],
+      loadoutCatalog: [PHASE1_ENTRY],
+      loadoutSources: [],
+      privateLoadoutSources: { [PRIVATE]: 'good-token' },
+    });
+
+    await window.waitForTimeout(400);
+
+    const libraryAccHeader = window.locator('.acc-header', { hasText: 'Library' });
+    await libraryAccHeader.waitFor({ state: 'visible', timeout: 8_000 });
+    if ((await libraryAccHeader.getAttribute('aria-expanded')) !== 'true') {
+      await libraryAccHeader.click();
+      await window.waitForTimeout(200);
+    }
+
+    await window.locator('.lib-browse').click();
+    const modal = window.locator('.modal.loadout-browser');
+    await modal.waitFor({ state: 'visible', timeout: 6_000 });
+
+    // Adding the private source without a token opens the prompt.
+    await modal.getByPlaceholder('ghcr.io/owner/repo').fill(PRIVATE);
+    await modal.getByRole('button', { name: '+ Add' }).click();
+    const form = modal.locator('.lb-cred');
+    await expect(form).toBeVisible({ timeout: 4_000 });
+    await expect(form).toContainText('This source is private. Add a token:');
+    const tokenInput = form.getByLabel('Source token');
+    await expect(tokenInput).toHaveAttribute('type', 'password');
+
+    // A wrong token shows the rejection and keeps the prompt open.
+    await tokenInput.fill('bad-token');
+    await form.getByRole('button', { name: 'Save token' }).click();
+    await expect(form.locator('.lb-source-error')).toHaveText('credential rejected (HTTP 401)');
+
+    // The right token adds the source with a lock badge.
+    await tokenInput.fill('good-token');
+    await form.getByRole('button', { name: 'Save token' }).click();
+    await expect(form).toBeHidden({ timeout: 4_000 });
+    const item = modal.locator('.lb-source-item', { hasText: 'acme/private' });
+    await expect(item.locator('.lb-source-lock')).toBeVisible();
+
+    const calls = await getCalls(app);
+    expect(calls.addSource).toEqual([
+      { base: PRIVATE, withToken: false },
+      { base: PRIVATE, withToken: true },
+      { base: PRIVATE, withToken: true },
+    ]);
+
+    // Remove token → setSourceCredential(base, null), lock goes away.
+    await item.getByRole('button', { name: 'Remove token' }).click();
+    await expect(item.locator('.lb-source-lock')).toHaveCount(0, { timeout: 4_000 });
+    expect((await getCalls(app)).setSourceCredential).toEqual([{ base: PRIVATE, cleared: true }]);
+  } finally {
+    await app.close();
+  }
+});
