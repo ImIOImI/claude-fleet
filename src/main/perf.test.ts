@@ -6,7 +6,8 @@ import { closeDb, openDb } from './db.js';
 import { PerfStore } from './perfStore.js';
 import {
   initPerf, shutdownPerf, reconfigurePerf, perfSpan, perfSpanAsync, perfSetSpanContext, getEffectivePerf,
-  recordPtyChunk, getPerfStatus, recordLatencySample, setPerfStateListener, perfNotePowerEvent, recordGcEntries
+  recordPtyChunk, getPerfStatus, recordLatencySample, setPerfStateListener, perfNotePowerEvent, recordGcEntries,
+  sampleMemory, setPerfMemorySource
 } from './perf.js';
 import { armSentinel, disarmSentinel, sentinelStatus } from './perfSentinel.js';
 import type { EffectivePerfConfig } from './perfConfig.js';
@@ -348,5 +349,77 @@ describe('stall rows: cpu + sentinel enrichment', () => {
     initPerf(store, ON);
     const s = getPerfStatus();
     expect(s.sentinel).toEqual({ enabled: false, startedAt: null, expiresAt: null, lastWorkerWindow: null, workerDead: false });
+  });
+});
+
+describe('memory sampling (mem rows)', () => {
+  afterEach(() => setPerfMemorySource(null));
+
+  const memRows = () =>
+    db.prepare(`SELECT name, workspace_id, dur_ms, meta FROM perf_events WHERE kind = 'mem'`)
+      .all() as Array<{ name: string; workspace_id: string | null; dur_ms: number; meta: string }>;
+
+  it('writes a mem row with the main-process V8 heap even without an injected source', async () => {
+    initPerf(store, ON);
+    sampleMemory();
+    await shutdownPerf();
+    const rows = memRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].name).toBe('claude_fleet.mem');
+    expect(rows[0].workspace_id).toBeNull();
+    const meta = JSON.parse(rows[0].meta);
+    expect(meta.main.heapUsedMb).toBeGreaterThan(0);
+    expect(meta.main.rssMb).toBeGreaterThan(0);
+    expect(meta.procs).toEqual([]);
+  });
+
+  it('includes per-process working sets, per-type totals, and context from the source', async () => {
+    setPerfMemorySource(() => ({
+      procs: [
+        { pid: 1, type: 'Browser', workingSetMb: 200 },
+        { pid: 2, type: 'Tab', workingSetMb: 350, privateMb: 300 },
+        { pid: 3, type: 'Tab', workingSetMb: 50 },
+        { pid: 4, type: 'GPU', workingSetMb: 120 }
+      ],
+      context: { ptySessions: 6 }
+    }));
+    initPerf(store, ON);
+    sampleMemory();
+    await shutdownPerf();
+    const [row] = memRows();
+    const meta = JSON.parse(row.meta);
+    expect(meta.byType).toEqual({ Browser: 200, Tab: 400, GPU: 120 });
+    expect(meta.totalWorkingSetMb).toBe(720);
+    expect(meta.procs).toHaveLength(4);
+    expect(meta.context).toEqual({ ptySessions: 6 });
+    // dur_ms carries the app-wide total so SQL can chart it without json_extract.
+    expect(row.dur_ms).toBe(720);
+  });
+
+  it('a throwing source still records the main heap and never throws', async () => {
+    setPerfMemorySource(() => { throw new Error('metrics unavailable'); });
+    initPerf(store, ON);
+    expect(() => sampleMemory()).not.toThrow();
+    await shutdownPerf();
+    const meta = JSON.parse(memRows()[0].meta);
+    expect(meta.main.heapUsedMb).toBeGreaterThan(0);
+    expect(meta.procs).toEqual([]);
+  });
+
+  it('samples on the configured interval and stops on shutdown', async () => {
+    initPerf(store, ON, { memSampleIntervalMs: 20 });
+    await sleep(75);
+    await shutdownPerf();
+    const n = memRows().length;
+    expect(n).toBeGreaterThanOrEqual(2);
+    await sleep(50);
+    expect(memRows()).toHaveLength(n);
+  });
+
+  it('records nothing while recording is off', async () => {
+    initPerf(store, OFF);
+    sampleMemory();
+    await shutdownPerf();
+    expect(memRows()).toEqual([]);
   });
 });

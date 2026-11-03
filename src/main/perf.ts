@@ -33,6 +33,7 @@ export const SLOW_OP_MS = 25;
 export const FLUSH_INTERVAL_MS = 5000;
 export const STALL_THRESHOLD_MS = 50;
 export const SAMPLE_INTERVAL_MS = 5000;
+export const MEM_SAMPLE_INTERVAL_MS = 60_000;
 const TRACER_NAME = 'claude-fleet';
 const METER_NAME = 'claude-fleet';
 export type LatencyKind = 'input_hop' | 'output_hop' | 'echo_rtt';
@@ -148,6 +149,7 @@ export interface PerfInitHooks {
   /** Test seam: replaces the monitorEventLoopDelay read (values in ms). */
   delaySource?: () => { p50: number; p99: number; max: number };
   sampleIntervalMs?: number;
+  memSampleIntervalMs?: number;
 }
 
 interface Runtime {
@@ -157,6 +159,7 @@ interface Runtime {
   flushTimer: NodeJS.Timeout | null;
   meterProvider: MeterProvider | null;
   sampleTimer: NodeJS.Timeout | null;
+  memTimer: NodeJS.Timeout | null;
   loopHistogram: ReturnType<typeof monitorEventLoopDelay> | null;
   ptyBytes: Counter | null;
   ptyChunks: Counter | null;
@@ -247,6 +250,7 @@ export function initPerf(store: PerfStore, effective: EffectivePerfConfig, hooks
     flushTimer: null,
     meterProvider: null,
     sampleTimer: null,
+    memTimer: null,
     loopHistogram: null,
     ptyBytes: null,
     ptyChunks: null,
@@ -363,6 +367,9 @@ export function initPerf(store: PerfStore, effective: EffectivePerfConfig, hooks
   }, hooks?.sampleIntervalMs ?? SAMPLE_INTERVAL_MS);
   rt.sampleTimer.unref();
 
+  rt.memTimer = setInterval(sampleMemory, hooks?.memSampleIntervalMs ?? MEM_SAMPLE_INTERVAL_MS);
+  rt.memTimer.unref();
+
   stateListener?.(effective.recording);
 }
 
@@ -375,6 +382,7 @@ export async function shutdownPerf(): Promise<void> {
   rt = null;
   if (r.flushTimer) clearInterval(r.flushTimer);
   if (r.sampleTimer) clearInterval(r.sampleTimer);
+  if (r.memTimer) clearInterval(r.memTimer);
   r.loopHistogram?.disable();
   r.gcObserver?.disconnect();
   await r.meterProvider?.shutdown().catch(() => undefined); // final metric collection → exporter
@@ -459,6 +467,74 @@ export function recordGcEntries(
       meta: { gcKind: kindName, flags: detail.flags ?? 0 }
     });
   }
+}
+
+/** One Electron process in a memory sample (app.getAppMetrics, MB). */
+export interface MemProcSample {
+  pid: number;
+  /** Electron process type: Browser (main) | Tab (renderer) | GPU | Utility | … */
+  type: string;
+  name?: string;
+  workingSetMb: number;
+  /** Windows-only in Electron; absent elsewhere. */
+  privateMb?: number;
+}
+export interface MemSource {
+  procs: MemProcSample[];
+  /** Load context so memory can be normalized (e.g. MB per live PTY). */
+  context?: Record<string, number>;
+}
+
+/** Injected per-process memory source (ipc.ts wires app.getAppMetrics —
+ *  perf.ts stays Electron-free). Without one, mem rows still carry the main
+ *  process's V8 heap from process.memoryUsage(). */
+let memSource: (() => MemSource) | null = null;
+export function setPerfMemorySource(cb: (() => MemSource) | null): void {
+  memSource = cb;
+}
+
+const toMb = (bytes: number) => Math.round((bytes / (1024 * 1024)) * 10) / 10;
+
+/** Writes one app-global `mem` row: main V8 heap + per-process working sets.
+ *  dur_ms holds the summed working set (MB) so trends chart without
+ *  json_extract. Runs every MEM_SAMPLE_INTERVAL_MS while recording; exported
+ *  for tests. A failing source degrades to heap-only, never throws. */
+export function sampleMemory(): void {
+  const r = rt;
+  if (!r?.effective.recording) return;
+  const m = process.memoryUsage();
+  let src: MemSource = { procs: [] };
+  try {
+    if (memSource) src = memSource();
+  } catch {
+    src = { procs: [] };
+  }
+  const byType: Record<string, number> = {};
+  let total = 0;
+  for (const p of src.procs) {
+    byType[p.type] = Math.round(((byType[p.type] ?? 0) + p.workingSetMb) * 10) / 10;
+    total += p.workingSetMb;
+  }
+  total = Math.round(total * 10) / 10;
+  r.store.enqueue({
+    ts: Date.now(),
+    kind: 'mem',
+    name: 'claude_fleet.mem',
+    durMs: total,
+    meta: {
+      main: {
+        rssMb: toMb(m.rss),
+        heapUsedMb: toMb(m.heapUsed),
+        heapTotalMb: toMb(m.heapTotal),
+        externalMb: toMb(m.external),
+        arrayBuffersMb: toMb(m.arrayBuffers)
+      },
+      byType,
+      totalWorkingSetMb: total,
+      procs: src.procs,
+      ...(src.context ? { context: src.context } : {})
+    }
+  });
 }
 
 /** PTY throughput instrumentation point (ipc.ts pty:attach data handler).

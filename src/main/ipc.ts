@@ -1,4 +1,4 @@
-import { ipcMain, BrowserWindow, dialog, clipboard, Menu, shell, powerMonitor } from 'electron';
+import { app, ipcMain, BrowserWindow, dialog, clipboard, Menu, shell, powerMonitor } from 'electron';
 import { appBuildSha, appVersionString } from './appVersion.js';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -45,7 +45,7 @@ import {
   getPerfOtlp,
   setPerfOtlp
 } from './config.js';
-import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk, perfSetSpanContext, recordLatencySample, setPerfStateListener, perfNotePowerEvent, perfSpan } from './perf.js';
+import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk, perfSetSpanContext, recordLatencySample, setPerfStateListener, perfNotePowerEvent, perfSpan, setPerfMemorySource } from './perf.js';
 import { resolvePerfConfig } from './perfConfig.js';
 import { sanitizePerfSamples } from './perfSamples.js';
 import { buildLoadoutCatalog } from './loadoutCatalog.js';
@@ -1763,6 +1763,24 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // OS suspend/resume → stall-sampler discard (perf.ts stays Electron-free).
   powerMonitor.on('suspend', () => perfNotePowerEvent('suspend'));
   powerMonitor.on('resume', () => perfNotePowerEvent('resume'));
+
+  // Per-process memory for the 60 s `mem` rows (perf.ts stays Electron-free).
+  // Electron reports KB; privateBytes exists on Windows only. The context
+  // counts let analysis normalize RAM by load (MB per attached PTY / workspace).
+  setPerfMemorySource(() => ({
+    procs: app.getAppMetrics().map((p) => ({
+      pid: p.pid,
+      type: p.type,
+      ...(p.name ? { name: p.name } : {}),
+      workingSetMb: Math.round(p.memory.workingSetSize / 102.4) / 10,
+      ...(p.memory.privateBytes !== undefined ? { privateMb: Math.round(p.memory.privateBytes / 102.4) / 10 } : {})
+    })),
+    context: {
+      ptySessions: ptySessions.size,
+      workspacesAttached: new Set(handleWorkspaceId.values()).size,
+      windows: BrowserWindow.getAllWindows().length
+    }
+  }));
 
   // ── Model-endpoint registry (#250) ─────────────────────────────────────
   ipcMain.handle('endpoints:list', () => listEndpoints());
