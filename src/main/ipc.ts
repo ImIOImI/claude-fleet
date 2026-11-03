@@ -1646,8 +1646,15 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   });
   ipcMain.handle('loadouts:catalog', (_e, workspaceId?: string) => buildLoadoutCatalog(workspaceId));
   ipcMain.handle('loadouts:setFavorite', (_e, id: string, on: boolean) => setFavorite(id, on));
-  ipcMain.handle('loadouts:listSources', () => loadoutSources.listSources());
-  ipcMain.handle('loadouts:addSource', (_e, base: string) => loadoutSources.addSource(base));
+  ipcMain.handle('loadouts:listSources', () => loadoutSources.listSourceInfo());
+  ipcMain.handle('loadouts:addSource', (_e, base: string, cred?: loadoutSources.SourceCredentialInput) =>
+    loadoutSources.addSource(base, cred)
+  );
+  ipcMain.handle(
+    'loadouts:setSourceCredential',
+    (_e, base: string, cred: loadoutSources.SourceCredentialInput | null) =>
+      loadoutSources.setSourceCredential(base, cred)
+  );
   ipcMain.handle('loadouts:removeSource', (_e, base: string) => loadoutSources.removeSource(base));
   ipcMain.handle('loadouts:refreshSource', (_e, base: string) => loadoutSources.browseSource(base, { refresh: true }));
 

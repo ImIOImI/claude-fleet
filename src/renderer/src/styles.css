@@ -3407,6 +3407,15 @@ label.setting-title { display: block; cursor: pointer; }
 .lb-add-source { display: flex; gap: 4px; margin-top: 4px; }
 .lb-add-source input { flex: 1; min-width: 0; }
 .lb-source-error { font-size: 11px; color: var(--danger); }
+.lb-source-item { display: flex; flex-direction: column; gap: 2px; }
+.lb-source-lock { font-size: 11px; flex-shrink: 0; }
+.lb-source-cred-actions { display: flex; gap: 8px; padding-left: 20px; }
+.lb-source-cred-actions button { border: none; background: none; padding: 0; color: var(--ink-2); cursor: pointer; font-size: 11px; text-decoration: underline; }
+.lb-source-cred-actions button:hover { color: var(--ink-1); }
+.lb-cred { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; padding: 6px; border: 1px solid var(--rule-strong); border-radius: 6px; }
+.lb-cred-head { font-size: 11px; color: var(--ink-1); }
+.lb-cred input { min-width: 0; }
+.lb-cred-actions { display: flex; gap: 4px; }
 .btn.update { background: color-mix(in oklch, var(--warn) 22%, transparent); color: var(--warn); border-color: var(--warn); }
 
 /* ----- inbox (#407) ----------------------------------------------------- */

@@ -1,13 +1,18 @@
 // Full-catalog browse modal (#16 Phase 1). Facet sidebar (tag cloud + search)
 // + results list with install / favorite actions. Phase 2 adds source
-// checkboxes (Task 5) and the Update ↑ affordance (Task 6).
+// checkboxes and the Update ↑ affordance; #444 adds private-source tokens
+// (token prompt on a needs-credential add, 🔒 badge, Change/Remove token).
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { WorkspaceSummary } from '../App';
 import { ModalBackdrop } from './ModalBackdrop';
 import { Markdown } from './Markdown';
+import { parseSourceError, SOURCE_PRIVATE_PROMPT } from '../sourceErrors';
 
 type Entry = Awaited<ReturnType<typeof window.api.loadouts.catalog>>[number];
+type SourceInfo = Awaited<ReturnType<typeof window.api.loadouts.listSources>>[number];
+
+const shortBase = (s: string): string => s.replace(/^ghcr\.io\//, '');
 
 interface Props {
   workspace: WorkspaceSummary | null;
@@ -19,10 +24,15 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
   const [entries, setEntries] = useState<Entry[]>([]);
   const [query, setQuery] = useState('');
   const [activeTags, setActiveTags] = useState<string[]>([]);
-  const [sources, setSources] = useState<string[]>([]);
+  const [sources, setSources] = useState<SourceInfo[]>([]);
   const [selectedSources, setSelectedSources] = useState<string[]>([]);
   const [addingSource, setAddingSource] = useState('');
   const [sourceError, setSourceError] = useState<string | null>(null);
+  // Token prompt (#444): 'add' after a needs-credential add, 'change' from a row.
+  const [credPrompt, setCredPrompt] = useState<{ base: string; mode: 'add' | 'change' } | null>(null);
+  const [credToken, setCredToken] = useState('');
+  const [credUser, setCredUser] = useState('');
+  const [credError, setCredError] = useState<string | null>(null);
 
   const installable =
     !!workspace &&
@@ -56,6 +66,13 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
   const toggleTag = (t: string): void =>
     setActiveTags((prev) => (prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]));
 
+  const closeCred = (): void => {
+    setCredPrompt(null);
+    setCredToken('');
+    setCredUser('');
+    setCredError(null);
+  };
+
   const addSource = async (): Promise<void> => {
     const base = addingSource.trim();
     if (!base) return;
@@ -66,8 +83,43 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
       await reloadSources();
       await reload();
     } catch (err) {
-      setSourceError((err as Error).message);
+      const e = parseSourceError(err);
+      if (e.kind === 'needs-credential') {
+        closeCred();
+        setCredPrompt({ base, mode: 'add' });
+        return;
+      }
+      setSourceError(e.message);
     }
+  };
+
+  const submitCredential = async (): Promise<void> => {
+    if (!credPrompt || !credToken.trim()) return;
+    setCredError(null);
+    const cred = credUser.trim() ? { token: credToken, username: credUser.trim() } : { token: credToken };
+    try {
+      if (credPrompt.mode === 'add') await window.api.loadouts.addSource(credPrompt.base, cred);
+      else await window.api.loadouts.setSourceCredential(credPrompt.base, cred);
+      if (credPrompt.mode === 'add') setAddingSource('');
+      closeCred();
+      await reloadSources();
+      await reload();
+    } catch (err) {
+      setCredError(parseSourceError(err).message);
+    }
+  };
+
+  const removeToken = async (base: string): Promise<void> => {
+    setSourceError(null);
+    try {
+      await window.api.loadouts.setSourceCredential(base, null);
+    } catch (err) {
+      // A private source that now has no token just stops listing; that's expected.
+      const e = parseSourceError(err);
+      if (e.kind !== 'needs-credential') setSourceError(e.message);
+    }
+    await reloadSources();
+    await reload();
   };
 
   const onInstall = async (e: Entry): Promise<void> => {
@@ -118,30 +170,52 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
             <div className="lb-sources">
               <div className="lb-sources-head">Sources</div>
               {sources.map((s) => (
-                <label key={s} className="lb-source-row" title={s}>
-                  <input
-                    type="checkbox"
-                    checked={selectedSources.includes(s)}
-                    onChange={() =>
-                      setSelectedSources((p) => (p.includes(s) ? p.filter((x) => x !== s) : [...p, s]))
-                    }
-                  />
-                  <span className="lb-source-name">{s.replace(/^ghcr\.io\//, '')}</span>
-                  <button
-                    type="button"
-                    className="lb-source-remove"
-                    aria-label={`Remove ${s}`}
-                    onClick={async (ev) => {
-                      ev.stopPropagation();
-                      ev.preventDefault();
-                      await window.api.loadouts.removeSource(s);
-                      await reloadSources();
-                      await reload();
-                    }}
-                  >
-                    ×
-                  </button>
-                </label>
+                <div key={s.base} className="lb-source-item">
+                  <label className="lb-source-row" title={s.base}>
+                    <input
+                      type="checkbox"
+                      checked={selectedSources.includes(s.base)}
+                      onChange={() =>
+                        setSelectedSources((p) => (p.includes(s.base) ? p.filter((x) => x !== s.base) : [...p, s.base]))
+                      }
+                    />
+                    <span className="lb-source-name">{shortBase(s.base)}</span>
+                    {s.hasCredential && (
+                      <span className="lb-source-lock" title="Has a token" aria-label="Has a token">🔒</span>
+                    )}
+                    <button
+                      type="button"
+                      className="lb-source-remove"
+                      aria-label={`Remove ${s.base}`}
+                      onClick={async (ev) => {
+                        ev.stopPropagation();
+                        ev.preventDefault();
+                        await window.api.loadouts.removeSource(s.base);
+                        await reloadSources();
+                        await reload();
+                      }}
+                    >
+                      ×
+                    </button>
+                  </label>
+                  {s.hasCredential && (
+                    <div className="lb-source-cred-actions">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          closeCred();
+                          setCredUser(s.username ?? '');
+                          setCredPrompt({ base: s.base, mode: 'change' });
+                        }}
+                      >
+                        Change token…
+                      </button>
+                      <button type="button" onClick={() => void removeToken(s.base)}>
+                        Remove token
+                      </button>
+                    </div>
+                  )}
+                </div>
               ))}
               <div className="lb-add-source">
                 <input
@@ -152,6 +226,43 @@ export default function LoadoutBrowserModal({ workspace, onClose, onChanged }: P
                 <button type="button" onClick={() => void addSource()}>+ Add</button>
               </div>
               {sourceError && <div className="lb-source-error">{sourceError}</div>}
+              {credPrompt && (
+                <form
+                  className="lb-cred"
+                  onSubmit={(ev) => {
+                    ev.preventDefault();
+                    void submitCredential();
+                  }}
+                >
+                  <div className="lb-cred-head">
+                    {credPrompt.mode === 'add' ? SOURCE_PRIVATE_PROMPT : `Change token for ${shortBase(credPrompt.base)}:`}
+                  </div>
+                  <input
+                    type="password"
+                    aria-label="Source token"
+                    placeholder="Token"
+                    autoComplete="off"
+                    value={credToken}
+                    onChange={(e) => setCredToken(e.target.value)}
+                  />
+                  <input
+                    aria-label="Source username (optional)"
+                    placeholder="Username (optional)"
+                    autoComplete="off"
+                    value={credUser}
+                    onChange={(e) => setCredUser(e.target.value)}
+                  />
+                  <div className="lb-cred-actions">
+                    <button type="submit" className="btn btn-sm primary" disabled={!credToken.trim()}>
+                      Save token
+                    </button>
+                    <button type="button" className="btn btn-sm" onClick={closeCred}>
+                      Cancel
+                    </button>
+                  </div>
+                  {credError && <div className="lb-source-error">{credError}</div>}
+                </form>
+              )}
             </div>
           </aside>
           <ul className="lb-results">
