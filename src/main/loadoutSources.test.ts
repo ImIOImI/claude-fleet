@@ -417,4 +417,105 @@ describe('security review fixes (#444)', () => {
     await expect(sources.addSource(PRIV, { token: 'ghp_ok', username: 'a:b' })).rejects.toThrow(/^malformed-credential: /);
     expect(vaultStore.size).toBe(0);
   });
+
+  it('a known source with an existing token restores it on a network failure during re-validation (addSource)', async () => {
+    privateBases.set(PRIV, 'ghp_good');
+    await sources.addSource(PRIV, { token: 'ghp_good', username: 'alice' });
+    const client = await import('./ociClient.js');
+    (client.pullArtifact as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('network unreachable'));
+    await expect(sources.addSource(PRIV, { token: 'ghp_new', username: 'mallory' })).rejects.toThrow(
+      /network unreachable/
+    );
+    expect(vaultStore.get(VAULT_KEY)).toBe('ghp_good');
+    expect((await sources.listSourceInfo()).find((s) => s.base === PRIV)).toEqual({
+      base: PRIV,
+      hasCredential: true,
+      username: 'alice'
+    });
+  });
+
+  it('a known source with an existing token restores it on a network failure during re-validation (setSourceCredential)', async () => {
+    privateBases.set(PRIV, 'ghp_good');
+    await sources.addSource(PRIV, { token: 'ghp_good', username: 'alice' });
+    const client = await import('./ociClient.js');
+    (client.pullArtifact as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('index is not an array'));
+    await expect(sources.setSourceCredential(PRIV, { token: 'ghp_new', username: 'mallory' })).rejects.toThrow(
+      /index is not an array/
+    );
+    expect(vaultStore.get(VAULT_KEY)).toBe('ghp_good');
+    expect((await sources.listSourceInfo()).find((s) => s.base === PRIV)).toEqual({
+      base: PRIV,
+      hasCredential: true,
+      username: 'alice'
+    });
+  });
+
+  it('a brand-new source leaves no credential behind on a network failure, not just an auth failure', async () => {
+    const client = await import('./ociClient.js');
+    (client.pullArtifact as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('network unreachable'));
+    await expect(sources.addSource(PRIV, { token: 'ghp_x' })).rejects.toThrow(/network unreachable/);
+    expect(vaultStore.size).toBe(0);
+    expect(await sources.listSources()).not.toContain(PRIV);
+  });
+
+  it('rollback does not clobber a credential a concurrent call already changed', async () => {
+    privateBases.set(PRIV, 'ghp_good');
+    await sources.addSource(PRIV, { token: 'ghp_good', username: 'alice' });
+
+    const client = await import('./ociClient.js');
+    let releaseFirst: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let firstCall = true;
+    (client.pullArtifact as ReturnType<typeof vi.fn>).mockImplementation(
+      async (ref: string, dest: string, opts?: { cred?: Cred | null }) => {
+        if (firstCall) {
+          firstCall = false;
+          await gate; // block the first (stale) call until the second has fully landed
+          throw new Error('network unreachable');
+        }
+        pulled.push({ ref, dest, cred: opts?.cred ?? null });
+        await mkdir(dest, { recursive: true });
+        await writeFile(
+          join(dest, 'index.json'),
+          JSON.stringify([{ id: 'spec-driven', title: 'x', description: 'd', tags: [], version: '1.0.0' }])
+        );
+      }
+    );
+
+    const p1 = sources.setSourceCredential(PRIV, { token: 'ghp_stale', username: 'mallory' });
+    await new Promise((r) => setTimeout(r, 0));
+    const p2 = sources.setSourceCredential(PRIV, { token: 'ghp_fresh', username: 'bob' });
+    await new Promise((r) => setTimeout(r, 0));
+    releaseFirst();
+
+    await expect(p1).rejects.toThrow(/network unreachable/);
+    await expect(p2).resolves.toBeDefined();
+
+    // p1's rollback must not have reverted p2's (newer, successful) write.
+    expect(vaultStore.get(VAULT_KEY)).toBe('ghp_fresh');
+    expect((await sources.listSourceInfo()).find((s) => s.base === PRIV)).toEqual({
+      base: PRIV,
+      hasCredential: true,
+      username: 'bob'
+    });
+  });
+
+  it('rollback does not resurrect a source removed while its re-validation was in flight', async () => {
+    privateBases.set(PRIV, 'ghp_good');
+    await sources.addSource(PRIV, { token: 'ghp_good', username: 'alice' });
+
+    const client = await import('./ociClient.js');
+    (client.pullArtifact as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      await sources.removeSource(PRIV); // lands while this call's validation is "in flight"
+      throw new Error('network unreachable');
+    });
+
+    await expect(sources.setSourceCredential(PRIV, { token: 'ghp_new', username: 'mallory' })).rejects.toThrow(
+      /network unreachable/
+    );
+    expect(vaultStore.size).toBe(0);
+    expect(await sources.listSources()).not.toContain(PRIV);
+  });
 });

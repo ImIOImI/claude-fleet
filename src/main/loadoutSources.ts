@@ -233,9 +233,18 @@ async function storeCredentialLocked(b: string, cred: SourceCredentialInput, cur
   return snap;
 }
 
-/** Put a source's credential back as it was (or clear it, if none existed). */
-function restoreCredential(b: string, snap: CredentialSnapshot): Promise<void> {
+/**
+ * Put a source's credential back as it was (or clear it, if none existed).
+ * `storedToken` is the token *this call* wrote before validating; if the vault
+ * no longer holds that value, a concurrent call already changed it (a second
+ * credential write landed, or the source was removed — removeSource purges
+ * the scope first), so this rolls back nothing rather than clobbering
+ * whatever is there now (#444 security review).
+ */
+function restoreCredential(b: string, snap: CredentialSnapshot, storedToken: string): Promise<void> {
   return withSourcesLock(async () => {
+    const current = await getSecret(sourceVaultScope(b), SOURCE_VAULT_KEY);
+    if (current !== storedToken) return;
     if (snap.token !== null) await setSecret(sourceVaultScope(b), SOURCE_VAULT_KEY, snap.token);
     else await deleteAllForWorkspace(sourceVaultScope(b));
     const cur = await read();
@@ -247,9 +256,9 @@ function restoreCredential(b: string, snap: CredentialSnapshot): Promise<void> {
 }
 
 /** Restore after a failed validation; a failed restore is logged (base only, never the token). */
-async function rollbackCredential(b: string, snap: CredentialSnapshot): Promise<void> {
+async function rollbackCredential(b: string, snap: CredentialSnapshot, storedToken: string): Promise<void> {
   try {
-    await restoreCredential(b, snap);
+    await restoreCredential(b, snap, storedToken);
   } catch (err) {
     logError({
       source: 'main',
@@ -257,12 +266,6 @@ async function rollbackCredential(b: string, snap: CredentialSnapshot): Promise<
       message: `could not roll back the credential for source ${b}: ${(err as Error).message}`
     });
   }
-}
-
-/** True for the IPC auth-error contract withSourceAuth produces. */
-function isAuthFailure(err: unknown): boolean {
-  const m = (err as Error | undefined)?.message ?? '';
-  return m.startsWith('needs-credential: ') || m.startsWith('credential-rejected: ');
 }
 
 /** Pull `<base>/index:latest` (with the source's credential) into a temp dir,
@@ -296,11 +299,12 @@ export async function listSourceInfo(): Promise<SourceInfo[]> {
 
 /**
  * Validate (pull + parse the index) and add a source. With `cred`, the token is
- * stored in the vault first so validation can use it. If validation fails, the
- * previous credential is restored: always for a source that had none (the new
- * token is removed), and on an auth failure for one that had one — so a bad
- * re-add never destroys a working token. The network pull runs outside the
- * sources.json lock; the list is re-read under it afterwards.
+ * stored in the vault first so validation can use it. If validation fails for
+ * any reason — an auth rejection, a network error, a bad index, anything —
+ * the previous credential is restored (or cleared, for a source that had
+ * none), so a bad re-add never destroys a working token (#444 security
+ * review: this used to restore only on an auth failure). The network pull
+ * runs outside the sources.json lock; the list is re-read under it afterwards.
  */
 export async function addSource(base: string, cred?: SourceCredentialInput): Promise<RemoteLoadout[]> {
   const b = normalizeBase(base);
@@ -312,7 +316,7 @@ export async function addSource(base: string, cred?: SourceCredentialInput): Pro
   try {
     index = await pullIndex(b); // validates: throws on a bad/hostile index or an auth failure
   } catch (err) {
-    if (snap && ((snap.token === null && !snap.entry) || isAuthFailure(err))) await rollbackCredential(b, snap);
+    if (snap) await rollbackCredential(b, snap, clean!.token);
     throw err;
   }
   await withSourcesLock(async () => {
@@ -325,8 +329,10 @@ export async function addSource(base: string, cred?: SourceCredentialInput): Pro
 
 /**
  * Set/replace (or, with null, remove) a configured source's token, then
- * force-refresh it. A replacement the registry refuses is rolled back to the
- * previous credential (or cleared, if there was none) before rethrowing.
+ * force-refresh it. A replacement that fails validation for any reason is
+ * rolled back to the previous credential (or cleared, if there was none)
+ * before rethrowing (#444 security review: this used to restore only on an
+ * auth failure).
  */
 export async function setSourceCredential(base: string, cred: SourceCredentialInput | null): Promise<RemoteLoadout[]> {
   const b = normalizeBase(base);
@@ -346,7 +352,7 @@ export async function setSourceCredential(base: string, cred: SourceCredentialIn
   try {
     return await browseSource(b, { refresh: true });
   } catch (err) {
-    if (snap && isAuthFailure(err)) await rollbackCredential(b, snap);
+    if (snap) await rollbackCredential(b, snap, clean!.token);
     throw err;
   }
 }
