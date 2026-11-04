@@ -28,6 +28,7 @@ import { workspaceClaudeDir, workspaceHistoryDir, workspaceHistoryFile, hostLoca
 import { ingestLine } from './db.js';
 import { effectiveForClaudeSession } from './mirrorPolicy.js';
 import { perfSpan } from './perf.js';
+import { keyedSerialQueue } from './state/serialQueue.js';
 
 /**
  * Fire-and-forget structured log for watcher lifecycle events (#323).
@@ -141,9 +142,14 @@ export class JsonlWatcher extends EventEmitter {
   private readonly polledDirs = new Set<string>();
   private readonly files = new Map<string, FileState>();
   private readonly watchedDirs = new Set<string>();
-  // Per-file mutex (sequenced via a chained promise) so concurrent
-  // add/change events on the same file don't race the byte offset.
-  private readonly chains = new Map<string, Promise<void>>();
+  // Per-file serial queue: a file's process() runs never overlap and run in
+  // event order, so its lines ingest strictly in file order (ingest is async;
+  // nothing else serializes it). Tails self-clean when they settle and are
+  // NOT dropped on unlink/unregister — a re-added file still waits for its
+  // in-flight batch — and stop() drains every queued batch.
+  private readonly queue = keyedSerialQueue((path, err) => {
+    console.error(`[jsonlWatcher] process failed for ${path}:`, err);
+  });
   // Sessions already announced via 'new-session'. Keyed by session id (the
   // session's stable identity), and deliberately OUTLIVES the `files` map:
   // `files` entries are dropped on chokidar unlink, unregister, and stat
@@ -198,7 +204,7 @@ export class JsonlWatcher extends EventEmitter {
       }
       const prefix = dir + pathSep;
       for (const path of [...this.files.keys()]) {
-        if (path === dir || path.startsWith(prefix)) { this.files.delete(path); this.chains.delete(path); }
+        if (path === dir || path.startsWith(prefix)) this.files.delete(path);
       }
     }
   }
@@ -271,7 +277,6 @@ export class JsonlWatcher extends EventEmitter {
       .on('change', (p) => this.enqueue(p))
       .on('unlink', (p) => {
         this.files.delete(p);
-        this.chains.delete(p);
       })
       .on('error', (err) => console.error('[jsonlWatcher] error:', err));
   }
@@ -305,9 +310,11 @@ export class JsonlWatcher extends EventEmitter {
     await poller?.close();
     this.pollWatcher = null;
     this.pollWatcherPromise = null;
+    // No new events can arrive now; let every queued batch finish before the
+    // caller closes state.db.
+    await this.queue.drain();
     this.polledDirs.clear();
     this.files.clear();
-    this.chains.clear();
     this.watchedDirs.clear();
     this.announcedSessions.clear();
   }
@@ -347,18 +354,13 @@ export class JsonlWatcher extends EventEmitter {
     for (const path of [...this.files.keys()]) {
       if (path === dir || path.startsWith(prefix)) {
         this.files.delete(path);
-        this.chains.delete(path);
       }
     }
   }
 
   private enqueue(path: string): void {
     if (extname(path) !== '.jsonl') return;
-    const prev = this.chains.get(path) ?? Promise.resolve();
-    const next = prev.then(() => this.process(path)).catch((err) => {
-      console.error(`[jsonlWatcher] process failed for ${path}:`, err);
-    });
-    this.chains.set(path, next);
+    void this.queue.enqueue(path, () => this.process(path));
   }
 
   private async process(path: string): Promise<void> {
