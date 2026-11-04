@@ -189,6 +189,16 @@ steps:
     expect(await svc.onEvent({ on: 'workspace.started', workspaceId: 'W2' })).toEqual([c.id]);
     svc.cancelPending();
   });
+  it('cancelPending cancels a pending debounce so it never fires, and is safe to call again (#457 quit)', async () => {
+    const { svc, fire } = setup();
+    const a = await svc.create(EV('event: { on: session.idle, debounce: 30s }'), USER);
+    expect(await svc.onEvent({ on: 'session.idle', workspaceId: 'W2' })).toEqual([a.id]);
+    expect(() => svc.cancelPending()).not.toThrow();
+    await fire(30_000);
+    await svc.settle();
+    expect((await svc.get(a.id))?.runs).toHaveLength(0);
+    expect(() => svc.cancelPending()).not.toThrow();
+  });
 });
 
 describe('automations workspace reach (Phase 5b)', () => {
