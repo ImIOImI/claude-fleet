@@ -31,8 +31,8 @@ It is an operator console that runs on the user's machine against the user's loc
 
 ## 3. Non-goals
 
-- **Not a remote orchestrator.** The app never drives remote Docker, SSH or Kubernetes. Cross-node sharing is limited to git-synced folders, run as an ordinary automation.
-- **Not multi-user.** One user, one machine, one keychain.
+- **Not a remote orchestrator.** The app never drives remote Docker, SSH or Kubernetes. A *remote workspace's* container lifecycle belongs to its deployment; the desktop only talks to that host's `fleet-host` API (§7 *Remote host*). Cross-node file sharing is git-synced folders, run as an ordinary automation.
+- **One user per desktop; shared remote hosts.** A desktop has one user, machine and keychain. A remote host is shared by everyone its deployment grants, verified per request by GitHub identity.
 - **Not a generic terminal multiplexer.** Every session targets `claude` in a managed container. No arbitrary shells, no `docker exec` on unmanaged containers.
 - **Not a session recorder.** Terminal output is rendered but not persisted; durable history comes from Claude's own transcript JSONL, not from the PTY stream.
 - **Not a Claude Code replacement.** The CLI inside the container is the source of truth for what runs. This app is a viewport and lifecycle manager around it.
@@ -86,6 +86,14 @@ Every in-container `claude` launch passes `--settings /usr/local/lib/claude-flee
 
 **DevOps image** (`…/claude-fleet/runner-devops`, `docker/devops/Dockerfile`) is built **`FROM` the base** and layers the SumerSports platform-engineering toolset: GitHub CLI, `yq`, tenv + OpenTofu, Terramate, OPA, tflint + trivy, kubectl + kustomize, helm, `dnsutils` (`dig`), and the AWS CLI; the **Azure CLI is opt-in** (`--build-arg INSTALL_AZURE_CLI=true` — its pip tree ~doubles image size, so it's off by default). The image carries **capability labels** (`com.claude-fleet.capabilities`, `com.claude-fleet.cloud=aws=…/azure=…`, `com.claude-fleet.variant=devops`) that the app surfaces as searchable chips in the workspace image picker, so you can find "the one with kubectl/aws/tofu". **Committee experts/managers run on this image** — their loadouts reach for `gh`/IaC tools. Install logic lives in **shared, standalone, arch-aware scripts under `docker/scripts/`** (one per toolset) that any image composes; pinned versions live in `docker/versions.yaml` (org-canon pins mirror `ci-images`). All images build with the **repo root as context** (so `docker/scripts/` + the broker module are reachable; `.dockerignore` opts those paths in). The publish workflow (`publish-runner.yml`) is **native multi-arch**: each architecture builds on its own **native runner** (`amd64` on `ubuntu-24.04`, `arm64` on `ubuntu-24.04-arm` — no QEMU emulation), pushing each arch **by digest** (no tag); a per-image **merge** job then stitches the arch digests into one tagged multi-arch manifest via `docker buildx imagetools create`. The stages are `base-build` (arch fan-out) → `base-merge` → `variant-build` (**variant × arch** fan-out, each `FROM` the base manifest digest via `--build-arg BASE_IMAGE=<base digest>` so they stay in lockstep) → `variant-merge`. Everything within a stage runs in parallel, and variants only wait on `base-merge`. Adding a variant is a new entry in the `variant-build`/`variant-merge` matrices (`variant`/`image`/`file`/optional `smoke`), not another sequential step. Future images stack the same way (e.g. a `platform` image `FROM` devops adding Java/.NET).
 
+**Host images** (`…/claude-fleet/runner-host` FROM the base, `…/claude-fleet/runner-devops-host` FROM `runner-devops` of the same commit; `docker/host/Dockerfile`) add `fleet-host` (§7 *Remote host*):
+- `/usr/local/lib/fleet-host/fleet-host.mjs` is one Vite-bundled ESM file for plain Node 22 (`vite.host.config.ts`, `npm run build:host`), so the image has no `node_modules`. A build stage runs `npm ci --ignore-scripts` and the bundle.
+- `/usr/local/bin/fleet-host` wraps it (`fleet-host init`); `/usr/local/bin/fleet-host-entry` is the `CMD`, run by the base's tini.
+- `/etc/ssl/certs/rds-global-bundle.pem` is the AWS RDS global CA bundle, fetched with `ADD --checksum=sha256:…`. AWS re-issues the file when it adds CAs; the pinned checksum is updated with it.
+- Env defaults: `FLEET_HOST_PORT=8080`, `FLEET_HOST_CONFIG=/etc/fleet-host/config.yaml`, `FLEET_HOST_STATE=/home/fleet/.claude/fleet-host`; uid/gid 1000 (`fleet`).
+- **Supervision** (`fleet-host-entry`): runs the broker and fleet-host side by side. Broker exit ends the container (with the broker's status, after stopping fleet-host); fleet-host is restarted with backoff (1 s doubling to 10 s; PTYs live in the broker and survive), and the container exits only when fleet-host exits more than 5 times in 60 s. SIGTERM/SIGINT stops fleet-host first (so it releases the lease), then the broker, and never restarts. SIGHUP is forwarded to fleet-host. The script refuses to start when `CLAUDE_FLEET_BROKER_TCP_PORT` is set, since TCP mode would serve the broker unauthenticated on the pod IP. Knobs: `FLEET_HOST_MAX_RESTARTS`, `FLEET_HOST_RESTART_WINDOW_S`, `FLEET_HOST_BACKOFF_START_MS`, `FLEET_HOST_BACKOFF_MAX_MS`.
+- The bundle inputs are opted into `.dockerignore` (tests and `testFakes.ts` excluded). `runner-host` is a `variant-build` entry; `devops-host-build`/`devops-host-merge` follow `variant-merge` and resolve `runner-devops:sha-<short>` to its digest. `docker/host/smoke.test.sh` (probes on 8080, `/whoami` 401, uid 1000, `fleet-host init`, the CA bundle, a clean SIGTERM) gates both publishes on amd64, and `test-runner-images.yml` builds and smokes `runner-host` and runs `docker/host/fleet-host-entry.test.sh` pre-merge. Organisations extend a host image `FROM <pinned digest>`.
+
 Because `publish-runner.yml` only runs **post-merge on `main`**, a separate **pre-merge gate** (`test-runner-images.yml`, on `pull_request` touching `docker/**`/`broker/**`) builds **every** image on a native amd64 runner and smoke-tests the ones that ship a test — **without pushing to GHCR**: the freshly-built base goes to an ephemeral **local registry** (a `registry:2` service container on `localhost:5000`) so the variants build `FROM` it. This catches build breaks (a bad install script) and runtime/PATH regressions before they can merge. It's amd64-only (native/fast; script and Dockerfile errors are arch-independent) — full multi-arch is still validated by the post-merge publish.
 
 **Dev image** (`…/claude-fleet/runner-dev`, `docker/dev/Dockerfile`) is built **`FROM` the base** (not devops — it carries none of the cloud/k8s tooling) and layers a **polyglot dev toolchain**: the **GitHub CLI** (`gh`, shared `docker/scripts/gh.sh`), C/C++ `build-essential` (gcc/g++/make/pkg-config) + `libsecret-1-dev`, Python (`python3`/`pip`/`venv` + `uv`), Go (`/usr/local/go`), Rust (rustup into world-readable `/opt/cargo`+`/opt/rustup`), and the **Playwright browser system libraries** (browsers themselves install non-root at runtime via `npx playwright install`). This is the image for developing/building **claude-fleet itself** inside a workspace — it compiles the app's native modules (`better-sqlite3`, `node-pty`, `keytar`), runs `npx electron-rebuild`, and runs the e2e suite. Toolchains install as root at build time into **world-readable** locations (so any `docker run --user` UID reaches them on `PATH`); the container still runs non-root as `fleet`. Capability label `com.claude-fleet.variant=dev`. Version pins for gh/go/rust/uv live in `docker/versions.yaml`; the publish workflow builds it in the **variant fan-out** (pinned to the base manifest digest) and runs `docker/dev/smoke.test.sh` on its **native amd64** image (asserts every toolchain is reachable as `fleet`).
@@ -134,6 +142,21 @@ binds (per container):
   state/<id>/claude.json → /home/fleet/.claude.json   (onboarding/trust seed)
   state/<id>/broker      → /run/broker   (broker socket directory)
 ```
+
+A **remote workspace** runs `fleet-host` next to the broker in one container; desktops reach it over HTTP/WebSocket instead of a bind-mounted socket:
+
+```
+┌──────────────────────────────────────────┐
+│ runner-host container (one pod)          │
+│   tini → fleet-host-entry                │
+│     ├─ broker ◄── unix socket ──┐        │
+│     │    └─ claude PTYs         │        │      HTTP / WS, Bearer
+│     └─ fleet-host (node) ───────┘  :8080 │ ◄──  GitHub token ── desktops
+│          one upstream per session        │
+└──────────────────────────────────────────┘
+```
+
+`src/host/` is Electron-free and reuses `src/main/identity/`, the broker codec (`src/main/broker.ts`), `claudeArgs.ts` and `vaultScopes.ts`; `src/host/importGraph.test.ts` pins its graph to those modules plus `ws`, `yaml` and `ulid`.
 
 
 The **broker** is a small Go daemon (//broker) shipped inside the runner image. It owns every claude PTY in the container and exposes them via a Unix-socket protocol. The host's Electron main process attaches via the bind-mounted socket directory rather than running `docker exec claude` directly. This is the foundation of "expert workspaces" (issue #18): PTYs outlive any individual host disconnect (app quit, app crash), so when the user pauses + closes the app + reopens + unpauses, every session reattaches to the same live `claude` process with its in-memory context (analyses, file watches, MCP server state) intact.
@@ -1022,6 +1045,77 @@ The renderer parses them in `sourceErrors.ts`.
 
 **Host-private invariant (§9).** All downloaded artifacts land exclusively in `<userData>/loadouts/<id>/` via `loadoutDir(id)` — the host-private library, never bind-mounted into any container. A workspace only ever sees the installed snapshot in its own `.claude/`. The `safeLayerPath` + `MAX_BLOB_BYTES` cap (5 MiB/layer) enforces this at the pull layer: traversal attempts abort the pull before writing anything; oversized blobs are rejected.
 
+### Remote host (`fleet-host`)
+
+`src/host/` (bundle entry `cli.ts`, wiring `main.ts`) serves one hosted workspace from a `runner-host` pod (§4 *Host images*). It runs no scheduler and no ingest and has no DB yet (§11 *Remote host DB*).
+
+**Topology.** Twingate → internal ALB → Istio ingress gateway → sidecar → `:8080`. The ALB and Envoy append `X-Forwarded-For`, but its client entry is always a Twingate connector IP, so nothing keys on XFF and `trustedProxyHops` stays 0. Plain `http://` to the pod is allowed; there is no in-pod TLS.
+
+**Env contract.**
+
+| Var | Default | Meaning |
+|---|---|---|
+| `FLEET_HOST_PORT` | `8080` | listen port (`0.0.0.0`) |
+| `FLEET_HOST_CONFIG` | `/etc/fleet-host/config.yaml` | read-only ConfigMap mount |
+| `FLEET_HOST_STATE` | `/home/fleet/.claude/fleet-host` | shared volume; holds `workspace-id.json` |
+| `CLAUDE_FLEET_BROKER_SOCKET` | `/run/broker/broker.sock` | the in-pod broker |
+
+**Config** (`config.ts`; unknown keys are refused at the top level and in `workspace` and `identity`):
+- `workspace: { id?, name, description?, color?: { hue } }`. `name` is 1–64 trimmed characters with no control characters; `id` is a ULID; `hue` is in [0, 360).
+- `identity: { provider: github, org? }`.
+- `grants` and `machines` (GitHub team / App installation → tier), validated by `parseGrantConfig`. A person's tier is the highest matching grant; no match is 403.
+- `trustedProxyHops` (integer 0–10, default 0). Above 0 the per-address limiter keys on the XFF entry that many hops from the right; here that is the Twingate connector, so a value above 0 logs a warning ("per-address limiting keys on the Twingate connector here; leave 0").
+
+**Reload.**
+- Mount the ConfigMap as a directory, not `subPath` (a `subPath` mount never updates). Kubelet propagation takes ~60–90 s; SIGHUP forces a reload.
+- Triggers: a change to the file or the `..data` symlink in its directory (debounced 250 ms), and SIGHUP. The SIGHUP handler is installed first thing at start and stays through shutdown, so a SIGHUP never kills the process.
+- Reloads are serialized. The first accepted config (`reload('start')`) is the baseline, and it is the same object passed to `resolveWorkspaceId`. A file that fails to parse, or whose `workspace.id` differs from the running one (including set ↔ unset), is refused before anything applies and the current config is kept. A deep-equal config is a no-op that keeps the verify cache.
+- An applied reload swaps one immutable `AuthContext` (provider, verify cache and negative cache built together by `buildAuthContext`), then re-verifies every open socket. Each request reads the context once, at its start.
+
+**Workspace id.** A configured `workspace.id` is authoritative. Without one, a ULID is minted once into `$FLEET_HOST_STATE/workspace-id.json` (written, fsynced, then `link()`ed so concurrent pods agree). A state file holding a different id than the config refuses start. `fleet-host init` resolves the id the same way and prints `{"workspaceId": …}`.
+
+**Lease and standby.** The lease is a `LeaseStore` seam (`lease.ts`); c1 ships `memoryLeaseStore()`, correct only for one replica. The holder renews every 10 s with a 30 s TTL, fenced by epoch; a store call is raced against the remaining validity. Until it holds the lease the process is **standby**: every authenticated route (`/whoami`, `/rpc`, `/attach`, `/events`) answers 503 `{"error":"standby"}`, and it creates no broker sessions. `/healthz` is 200 `{status:"ok", lease}` while the lease loop runs, holder or standby; `/leader` is 200 only on the holder. Losing the lease shuts the process down with exit 1.
+
+**Routes.**
+
+| Route | Auth | Tier | Notes |
+|---|---|---|---|
+| `GET /healthz`, `GET /leader` | none | — | probes |
+| `GET /whoami` | Bearer | any grant | `{ workspace: { id, name, description, color }, user, tier }` |
+| `POST /rpc/<channel>` | Bearer | per channel | body `{"args":[…]}` (JSON, ≤ 1 MiB) → `{"ok":true,"result":…}` or `{"ok":false,"error":"…"}`; 404 unlisted channel, 403 tier, 400 args, 413 body, 415 content type, 500 redacted `internal error` |
+| `GET /attach` (WS) | Bearer on upgrade | per frame | binary broker frames |
+| `GET /events` (WS) | Bearer on upgrade | `read` | server push `{channel, payload}` |
+
+RPC channels: `sessions:live` (`read`, broker `LIST`), `ports:list` (`read`), `ports:kill` (`steer`). Unlisted channels (vault, filesystem, config, image, Docker) don't exist on the host.
+
+**Verify limits** (`server.ts` `gate()`, in order): halted → 503 `shutting down`; standby → 503; a missing or malformed bearer → 401 with `WWW-Authenticate: Bearer` (not counted); a token the caches already answer (`AuthContext.peek`: verified for 5 min, or rejected for 30 s in a 1000-entry SHA-256-keyed LRU) is answered without any limit; a cache miss then passes the per-address limiter (only when `trustedProxyHops > 0`), an in-flight cap of 16 GitHub verifications (503, `Retry-After: 1`) and a global budget of 30 GitHub-confirmed rejections per minute (429 with `Retry-After`) before it reaches GitHub. Network failures and machine refusals are never negatively cached.
+
+**Connections.**
+- At most 8 concurrent `/attach` + `/events` sockets per identity (`<provider>:<id>`); more get 429 with `Retry-After: 5`.
+- `requestTimeout` 30 s, `headersTimeout` 10 s (per request), `keepAliveTimeout` 65 s (above the 60 s idle timeout of the ALB and Envoy, so the proxy closes idle connections first).
+- Every WebSocket is pinged every 25 s (`PING_MS`) and terminated after 2 unanswered pings, which keeps idle sockets inside the ALB's 60 s idle timeout.
+- A socket whose send buffer exceeds 8 MiB is closed 1013 (`viewer too slow`). Revoking a socket stops its frames at once, unsubscribes or disposes it, sends the close, and terminates it after 1 s.
+- **Re-verify:** every open socket is re-checked every 60 s and after every applied reload. A lowered tier applies to the next frame; a rejected token closes 4401; a removed grant or refused machine closes 4403. While GitHub is unreachable (502/503) a socket is kept until it has gone unverified for more than 5 min, then closed 4401.
+
+**`/attach`.**
+- Each WebSocket binary message carries broker frames; frames may span messages, and channel numbers are per viewer connection.
+- The host holds one upstream broker attachment per session (the broker allows one writer) and fans `OUTPUT` to every viewer. A newcomer gets a 64 KiB replay trimmed with the broker's `trimToSafeStart` rule. The last viewer leaving detaches the upstream and leaves the session alive. A second `ATTACH` of the same session on one connection is refused.
+- Frame tiers: `ATTACH`, `HISTORY`, `LIST`, `LISTPORTS` need `read`; `INPUT`, `RESIZE`, `KILLPORT`, `DIAL` need `steer`; `CREATE`, `CLOSE` need `session`. `read` input is dropped. Server-only frame types close the socket 1008.
+- `CREATE` args are rebuilt by the host: only optional `--settings <hooks>`, then `--resume <uuid>` or `--session-id <uuid>`; anything else is refused.
+- `CLOSE` ownership: an in-memory map `broker session id → <provider>:<account id>`, set on a successful `CREATE`. Only the owner, at `session` tier, may close; sessions the process didn't create can't be closed by anyone. Owners are dropped when their session exits, and a 60 s timer (while holder) prunes owners of sessions the broker no longer lists as alive.
+- `DIAL` passes the `steer` gate, then is refused ("port forwarding is not available on remote hosts").
+- `KILLPORT` (and `ports:kill`, which answers 403) refuses the host's own port and any port the broker doesn't attribute to a session. Gaps: a TOCTOU window between `LISTPORTS` and `KILLPORT`, and a port owned by a session's root process itself kills that session (§11 *Remote host DB*).
+- PTY size follows the most recent `steer` viewer's `RESIZE`, clamped to 1–1000.
+- Per viewer: at most 256 frames pending (more closes 1008); control frames (all but `INPUT` and `RESIZE`) pass a token bucket of 20 burst, 10/s, answering `rate limited` beyond it.
+
+**`/events`.** c1 publishes `sessions:changed` and `ports:changed`, from a broker poll every 2 s that runs only while the process holds the lease and something subscribes. The other desktop event channels are allowlisted for later publishers.
+
+**Shutdown and crashes.**
+- SIGTERM/SIGINT: halt (authenticated routes and upgrades answer 503; every socket revoked with 1001) → release the lease (bounded) → finish `close()` (`hub.shutdown()` detaches every upstream, bounded at 5 s; sessions stay alive) → exit 0. All of it fits the 30 s k8s grace.
+- An uncaught exception or unhandled rejection is logged once per arrival with its redacted stack. The first one halts the endpoint (sockets revoked 1011), races the lease release against 2 s, and exits 1 without draining; the entry script restarts fleet-host.
+
+**Logging.** One JSON line per event on stdout; one per request (`method`, `path`, `status`, `login`, `ms`; `/healthz` is not logged). Request headers are never logged, and every string, nested value and the final line are redacted (bearer, Basic, `gh*_`, `github_pat_`, `sk-ant-`, PEM private keys, URL credentials).
+
 ## 8. User flows
 
 ### Startup
@@ -1254,6 +1348,9 @@ Settings has an **Account** tab (`AccountSettings.tsx`). Each action applies at 
 - **Verified identities are cached for 5 minutes** (`withVerifyCache`, keyed by the token's SHA-256; failures aren't cached). Revoking a token, removing someone from a team, or moving an App installation out of its org takes effect within that window.
 - **Team lookups fail closed.** A `/user/teams` 403 is read as "no teams" only when it carries an SSO hint or an `X-OAuth-Scopes` header lacking `read:org`; a 403 with no `X-OAuth-Scopes` header (e.g. a fine-grained token) can't be verified and throws `upstream`.
 - **Machine tokens are org-bound.** A `machines` rule's tier applies only to an installation whose every repository is owned by the rule's org (`org` or `identity.org`), with at least one repository. An installation with more than 1000 repositories (10 pages) or a pagination link off `api.github.com` is refused. GitHub-operated shared Apps (`github-actions` 15368, `dependabot` 29110) are rejected at config parse: use a dedicated org-owned App.
+- **fleet-host authenticates every request** except `/healthz` and `/leader`, and enforces tiers per route and per frame on the host (§7 *Remote host*); the desktop's greying is UX only.
+- **fleet-host never stores, logs or echoes a bearer token.** The verify and negative caches are keyed by the token's SHA-256 and rebuilt with the provider on every applied reload. An open socket keeps its raw token in memory only for its 60 s re-verify. Error bodies are generic; refusal detail goes to the redacted log.
+- **No person's credentials enter a remote container.** `CREATE` args are rebuilt by the host, so a viewer can't append claude flags. The broker stays on its Unix socket: `fleet-host-entry` refuses to start with `CLAUDE_FLEET_BROKER_TCP_PORT` set. Plain `http://` host URLs are allowed (remote-workspaces §13 Q6 is open).
 - **Renderer is isolated.** `contextIsolation: true`, `nodeIntegration: false`. No `require`, no `process`, no `fs` from renderer code.
 - **`sandbox: false`** because preload uses `ipcRenderer`. The renderer itself still has no Node access.
 - **Renderer cannot escape the IPC surface.** It can: list/create/start/stop/remove workspaces carrying the fleet label, list/get/set/delete per-workspace secrets, attach/detach a PTY. It cannot: shell out, read arbitrary files, touch other Docker containers, hit the network with Node APIs.
@@ -1299,7 +1396,11 @@ claude-fleet/
 │   │   └── aws-cli.sh  azure-cli.sh   #   AWS CLI v2; Azure CLI (build-arg gated)
 │   └── devops/
 │       └── Dockerfile                 # FROM base + the platform-engineering toolset (runner-devops)
-├── .dockerignore                      # opt-in: broker/** + docker/Dockerfile + docker/scripts/** + docker/runner/**
+│   └── host/
+│       ├── Dockerfile                 # FROM a runner + fleet-host bundle (runner-host, runner-devops-host)
+│       ├── fleet-host-entry           # tini CMD: broker + fleet-host, restart/give-up, signal order
+│       └── *.test.sh                  # entry-script harness; image smoke
+├── .dockerignore                      # opt-in: broker/** + docker/Dockerfile + docker/scripts/** + docker/runner/** + docker/host/** + the fleet-host bundle inputs
 ├── broker/                            # in-container session multiplexer (Go)
 │   ├── go.mod / go.sum
 │   ├── cmd/broker/main.go             # entrypoint; reads env, listens on socket
@@ -1312,9 +1413,12 @@ claude-fleet/
 ├── Makefile                           # cross-build unsigned Windows installer from Linux/WSL via Wine
 ├── package.json
 ├── tsconfig.json                      # references node + web tsconfigs
-├── tsconfig.node.json                 # main + preload
+├── tsconfig.node.json                 # main + preload + host
+├── tsconfig.host.json                 # NodeNext typecheck of src/host
+├── vite.host.config.ts                # bundles src/host/cli.ts → out/host/fleet-host.mjs
 ├── tsconfig.web.json                  # renderer
 └── src/
+    ├── host/                          # fleet-host (remote workspace endpoint; Electron-free, §7 Remote host)
     ├── main/
     │   ├── index.ts                   # app lifecycle, BrowserWindow
     │   ├── ipc.ts                     # registerIpc() — workspace:* / pty:* / etc. live here
@@ -1381,6 +1485,9 @@ claude-fleet/
 ## 11. Open decisions
 
 These are decided in spirit but not yet implemented. When you implement one, move it out of this section and into the relevant body section above.
+
+### Remote host DB
+The `fleet-host` lease (`memoryLeaseStore`) is process-local and the workspace id is file-backed until the host store lands (Postgres, `host_lease`, `host_meta` adopting the file's id). Until then a deployment must run one replica without overlap (`maxSurge: 0`, `maxUnavailable: 1`). `CLOSE` owners are in memory and lost on restart. KILLPORT can still end a session whose root process itself listens on the port, because the broker's `LIST`/`LISTPORTS` don't expose session root pids (#489).
 
 ### Inbox, automations & desktop notifications (#407)
 All eight phases are in the body (§6 *Inbox* / *Automations*, §7 *Inbox store*, §8 *Inbox*, §9). The design is in [`superpowers/specs/2026-10-20-inbox-automations-design.md`](superpowers/specs/2026-10-20-inbox-automations-design.md); overnight build decisions are in `superpowers/plans/2026-10-20-overnight-decisions.md`. Still open from that design:
@@ -1750,9 +1857,9 @@ The current flow is three sequential `window.prompt()` dialogs. Functional but c
 Right now the profile name is stamped on the container as a label and the API key is baked into env at create time. If the user rotates the key in the vault, existing containers keep the old one until recreated. We may want a "rotate" action that recreates the container with the new key; we may not. Open.
 
 ### Runner image build
-The runner image is published by CI (`.github/workflows/publish-runner.yml`) to `ghcr.io/imioimi/claude-fleet/runner:latest` as a multi-arch (`linux/amd64` + `linux/arm64`) image on every push to `main` that touches `docker/**`. Tags emitted: `latest` (main only) and `sha-<short>`.
+The runner image is published by CI (`.github/workflows/publish-runner.yml`) to `ghcr.io/imioimi/claude-fleet/runner:latest` as a multi-arch (`linux/amd64` + `linux/arm64`) image on every push to `main` that touches `docker/**`, `broker/**` or a fleet-host bundle input (`src/host/**`, the reused `src/main` modules, `package-lock.json`, `tsconfig.host.json`, `vite.host.config.ts`). Tags emitted: `latest` (main only) and `sha-<short>`.
 
-**Build-context contract (load-bearing).** The Docker build context is the repo root with a deny-all `.dockerignore` that opts paths back in (`!broker/**`, `!docker/Dockerfile`, `!docker/scripts/**`, `!docker/runner/**`). **Anything the Dockerfile `COPY`s must be opted in here** — a `COPY` of an unlisted path fails the build with `"…": not found` and **nothing publishes**, leaving the previous (stale) `:latest` in place. This is exactly how the runner hook assets (`docker/runner/hooks.settings.json` + `input-wait-report.sh`) were once added with the `--settings` launch flag but *without* the `.dockerignore` opt-in: the app shipped a flag pointing at a file no published image contained, so every new in-container `claude` died with "Settings file not found". The publish workflow **should also smoke-test the built base image** (`test -f …/hooks.settings.json`) so a silently-absent asset can't ship green. Coupling note: the app's `claude --settings …` launch (§4 hooks) hard-depends on the image carrying that file; keep the flag and the image asset in lockstep, or make the launch degrade gracefully when the file is absent.
+**Build-context contract (load-bearing).** The Docker build context is the repo root with a deny-all `.dockerignore` that opts paths back in (`!broker/**`, `!docker/Dockerfile`, `!docker/scripts/**`, `!docker/runner/**`, and for the host images `!docker/host/**` plus the fleet-host bundle inputs). **Anything the Dockerfile `COPY`s must be opted in here** — a `COPY` of an unlisted path fails the build with `"…": not found` and **nothing publishes**, leaving the previous (stale) `:latest` in place. This is exactly how the runner hook assets (`docker/runner/hooks.settings.json` + `input-wait-report.sh`) were once added with the `--settings` launch flag but *without* the `.dockerignore` opt-in: the app shipped a flag pointing at a file no published image contained, so every new in-container `claude` died with "Settings file not found". The publish workflow **should also smoke-test the built base image** (`test -f …/hooks.settings.json`) so a silently-absent asset can't ship green. Coupling note: the app's `claude --settings …` launch (§4 hooks) hard-depends on the image carrying that file; keep the flag and the image asset in lockstep, or make the launch degrade gracefully when the file is absent.
 
 On first container-create (or app startup), the app should `docker pull` the image if it isn't already present locally. New IPC channel `docker:ensureImage` returns a pull-progress stream; the UI surfaces this as a one-time toast or as part of the create-container flow.
 
