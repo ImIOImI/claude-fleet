@@ -57,6 +57,26 @@ describe('withVerifyCache', () => {
     expect(verify).toHaveBeenCalledTimes(1);
   });
 
+  it('hands out frozen identities so callers cannot mutate the cached entry', async () => {
+    const { p } = inner(async (tok) => ({ ...who(tok), teams: ['acme/eng'] }));
+    const cached = withVerifyCache(p);
+    const first = await cached.verify('a');
+    expect(() => {
+      (first as { login: string }).login = 'admin';
+    }).toThrow(TypeError);
+    expect(() => first.teams.push('acme/platform')).toThrow(TypeError);
+    const again = await cached.verify('a');
+    expect(again.login).toBe('a');
+    expect(again.teams).toEqual(['acme/eng']);
+  });
+
+  it('does not freeze the inner provider\'s own object', async () => {
+    const original = who('a');
+    const { p } = inner(async () => original);
+    await withVerifyCache(p).verify('a');
+    expect(Object.isFrozen(original)).toBe(false);
+  });
+
   it('evicts the oldest entry past maxEntries', async () => {
     const { p, verify } = inner(async (tok) => who(tok));
     const cached = withVerifyCache(p, { maxEntries: 2 });

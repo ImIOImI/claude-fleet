@@ -6,13 +6,14 @@
 //    installation token mapped to a configured machine rule.
 // Every request goes to api.github.com; error messages never carry the token.
 
-import type { Identity, IdentityProvider } from './types.js';
+import type { Identity, IdentityProvider, UserIdentity } from './types.js';
 import { IdentityError } from './types.js';
 import type { MachineRule } from './grants.js';
 import { GITHUB_API, mergeSso, nextLink, parseScopes, parseSsoHeader, type SsoHint } from './githubHeaders.js';
 
 export interface GithubProbe {
-  identity: Identity;
+  /** probe() only ever signs in a person. */
+  identity: UserIdentity;
   scopes: string[];
   sso: SsoHint | null;
 }
@@ -22,6 +23,9 @@ export interface GithubProvider extends IdentityProvider {
 }
 
 const MAX_TEAM_PAGES = 10;
+const MAX_REPO_PAGES = 10;
+/** Classic OAuth scopes that let GET /user/teams answer. */
+const ORG_READ_SCOPES = ['read:org', 'write:org', 'admin:org'];
 const INTEGRATION_MSG = 'Resource not accessible by integration';
 const VIEWER_QUERY = 'query { viewer { __typename login ... on Bot { databaseId } } }';
 
@@ -36,7 +40,9 @@ function headers(token: string): Record<string, string> {
 
 async function ghFetch(url: string, init: { method?: string; headers: Record<string, string>; body?: string }): Promise<Response> {
   try {
-    return await fetch(url, init);
+    // redirect: 'error' — a redirect would carry the bearer token to a URL we
+    // didn't vet; GitHub's REST API never needs one for these endpoints.
+    return await fetch(url, { ...init, redirect: 'error' });
   } catch (err) {
     throw new IdentityError('network', `GitHub unreachable (${(err as Error).name})`);
   }
@@ -66,17 +72,45 @@ function isGhUser(v: unknown): v is GhUser {
   return !!v && typeof v === 'object' && typeof (v as GhUser).login === 'string' && typeof (v as GhUser).id === 'number';
 }
 
+function rateLimited(res: Response, msg: string): boolean {
+  return (
+    res.status === 429 ||
+    res.headers.get('retry-after') !== null ||
+    res.headers.get('x-ratelimit-remaining') === '0' ||
+    /rate limit/i.test(msg)
+  );
+}
+
+/**
+ * The user's teams. Only two failures are an acceptable *partial* result
+ * (cached by verifyCache like any success): a 403 carrying an X-GitHub-SSO
+ * hint (SAML org not yet authorised for this token), or a 403 for a token
+ * whose granted scopes lack read:org. Anything transient or unexplained —
+ * 5xx, 429, a (secondary) rate limit, any other status, a non-array page,
+ * or more pages than MAX_TEAM_PAGES — throws `upstream`, which is never
+ * cached, so a blip can't pin someone at reduced access for the TTL.
+ */
 async function fetchTeams(token: string): Promise<{ teams: string[]; sso: SsoHint | null }> {
   const teams = new Set<string>();
   let sso: SsoHint | null = null;
   let url: string | null = `${GITHUB_API}/user/teams?per_page=100`;
   for (let page = 0; url && page < MAX_TEAM_PAGES; page++) {
     const res = await ghFetch(url, { headers: headers(token) });
-    sso = mergeSso(sso, parseSsoHeader(res.headers.get('x-github-sso')));
-    // 403 without read:org, or SAML-protected: teams stay partial, sso says why.
-    if (!res.ok) break;
+    const pageSso = parseSsoHeader(res.headers.get('x-github-sso'));
+    sso = mergeSso(sso, pageSso);
+    if (!res.ok) {
+      const msg = res.status === 403 ? message(await readJson(res)) : '';
+      if (res.status === 403 && !rateLimited(res, msg)) {
+        if (pageSso) return { teams: [...teams].sort(), sso };
+        const granted = res.headers.get('x-oauth-scopes');
+        if (granted !== null && !parseScopes(granted).some((sc) => ORG_READ_SCOPES.includes(sc))) {
+          return { teams: [...teams].sort(), sso };
+        }
+      }
+      throw new IdentityError('upstream', `GitHub GET /user/teams answered HTTP ${res.status}`, res.status);
+    }
     const body = await readJson(res);
-    if (!Array.isArray(body)) break;
+    if (!Array.isArray(body)) throw new IdentityError('upstream', 'GitHub GET /user/teams returned an unexpected body');
     for (const t of body as Array<{ slug?: unknown; organization?: { login?: unknown } } | null>) {
       const slug = t?.slug;
       const org = t?.organization?.login;
@@ -84,7 +118,43 @@ async function fetchTeams(token: string): Promise<{ teams: string[]; sso: SsoHin
     }
     url = nextLink(res.headers.get('link'));
   }
+  if (url) throw new IdentityError('upstream', `GitHub GET /user/teams has more than ${MAX_TEAM_PAGES} pages`);
   return { teams: [...teams].sort(), sso };
+}
+
+/**
+ * Prove the installation behind `token` belongs to `org`: every repository it
+ * can reach (GET /installation/repositories, all pages) must be owned by `org`
+ * (case-insensitive), and there must be at least one. An App's configured tier
+ * applies ONLY to installations within its org — this is what stops a
+ * GitHub-run App (github-actions, dependabot, …) installed on someone else's
+ * repositories from borrowing a tier configured for the org's own workflows.
+ * Fails closed (`forbidden`) on a foreign repo, zero repos, an unreadable
+ * owner, or more pages than MAX_REPO_PAGES.
+ */
+async function assertInstallationInOrg(token: string, org: string, slug: string): Promise<void> {
+  const want = org.toLowerCase();
+  const refuse = (why: string): IdentityError =>
+    new IdentityError('forbidden', `GitHub App ${slug} installation is not limited to org ${org}: ${why}`, 403);
+  let count = 0;
+  let url: string | null = `${GITHUB_API}/installation/repositories?per_page=100`;
+  for (let page = 0; url && page < MAX_REPO_PAGES; page++) {
+    const res = await ghFetch(url, { headers: headers(token) });
+    if (res.status === 401) throw new IdentityError('unauthorized', 'GitHub rejected the token', 401);
+    if (!res.ok) throw new IdentityError('upstream', `GitHub GET /installation/repositories answered HTTP ${res.status}`, res.status);
+    const body = (await readJson(res)) as { repositories?: unknown } | null;
+    const list = body?.repositories;
+    if (!Array.isArray(list)) throw new IdentityError('upstream', 'GitHub GET /installation/repositories returned an unexpected body');
+    for (const r of list as Array<{ owner?: { login?: unknown } } | null>) {
+      const owner = r?.owner?.login;
+      if (typeof owner !== 'string') throw refuse('a repository has no owner login');
+      if (owner.toLowerCase() !== want) throw refuse('it reaches a repository outside the org');
+      count++;
+    }
+    url = nextLink(res.headers.get('link'));
+  }
+  if (url) throw refuse(`more than ${MAX_REPO_PAGES} pages of repositories`);
+  if (count === 0) throw refuse('it reaches no repositories');
 }
 
 type UserResult = { kind: 'user'; probe: GithubProbe } | { kind: 'integration' };
@@ -145,7 +215,8 @@ async function verifyMachine(token: string, machines: readonly MachineRule[]): P
   if (appId === null) throw new IdentityError('upstream', `GitHub GET /apps/${slug} returned an unexpected body`);
   const rule = machines.find((m) => m.appId === appId);
   if (!rule) throw new IdentityError('machine-unknown', `GitHub App ${slug} (id ${appId}) is not a configured machine`);
-  return { provider: 'github', kind: 'machine', login: rule.login, id: v.databaseId, name: null, avatarUrl: null, teams: [] };
+  await assertInstallationInOrg(token, rule.org, slug);
+  return { provider: 'github', kind: 'machine', appId, login: rule.login, id: v.databaseId, name: null, avatarUrl: null, teams: [] };
 }
 
 export function createGithubProvider(opts: { machines?: readonly MachineRule[] } = {}): GithubProvider {

@@ -9,6 +9,14 @@ import type { Identity, IdentityProvider } from './types.js';
 
 export const VERIFY_TTL_MS = 5 * 60_000;
 
+/** A deep-frozen private copy: every caller shares the cached entry, so none
+ *  may mutate it (e.g. push a team) and poison later hits. */
+function frozenCopy(identity: Identity): Identity {
+  const copy = structuredClone(identity);
+  Object.freeze(copy.teams);
+  return Object.freeze(copy);
+}
+
 export function withVerifyCache(
   inner: IdentityProvider,
   opts: { ttlMs?: number; now?: () => number; maxEntries?: number } = {}
@@ -31,7 +39,8 @@ export function withVerifyCache(
       if (pending) return pending;
       const p = inner
         .verify(token)
-        .then((identity) => {
+        .then((verified) => {
+          const identity = frozenCopy(verified);
           if (hits.size >= max) {
             const oldest = hits.keys().next().value;
             if (oldest !== undefined) hits.delete(oldest);

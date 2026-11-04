@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createGithubProvider } from './githubProvider.js';
+import { resolveTier } from './grants.js';
+import { withVerifyCache } from './verifyCache.js';
 
 type Init = { method?: string; headers?: Record<string, string>; body?: string };
 
@@ -18,7 +20,9 @@ const json = (body: unknown, status = 200, headers: Record<string, string> = {})
 const API = 'https://api.github.com';
 const TOKEN = 'gho_secret_token';
 const USER = { login: 'octo', id: 42, name: 'Octo Cat', avatar_url: 'https://avatars.githubusercontent.com/u/42' };
-const MACHINES = [{ appId: 123456, login: 'acme-reviewer[bot]', tier: 'steer' as const }];
+const MACHINES = [{ appId: 123456, login: 'acme-reviewer[bot]', org: 'acme', tier: 'steer' as const }];
+const repos = (...owners: string[]) => ({ total_count: owners.length, repositories: owners.map((o, i) => ({ name: `r${i}`, owner: { login: o } })) });
+const INSTALL_REPOS = `${API}/installation/repositories?per_page=100`;
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -111,6 +115,76 @@ describe('github provider: users', () => {
     expect(f.mock.calls.some(([u]) => String(u).includes('evil.example'))).toBe(false);
   });
 
+  it.each([
+    ['a 502', () => json({ message: 'Bad gateway' }, 502)],
+    ['a 429', () => json({ message: 'slow down' }, 429)],
+    ['a 403 with no scopes header (cannot prove a missing scope)', () => json({ message: 'Forbidden' }, 403)],
+    ['a secondary rate limit 403', () => json({ message: 'You have exceeded a secondary rate limit.' }, 403, { 'retry-after': '60', 'x-oauth-scopes': 'read:packages' })],
+    ['a primary rate limit 403', () => json({ message: 'API rate limit exceeded' }, 403, { 'x-ratelimit-remaining': '0', 'x-oauth-scopes': 'read:packages' })],
+    ['an unexplained 403', () => json({ message: 'Forbidden' }, 403, { 'x-oauth-scopes': 'read:org' })],
+    ['a non-array page', () => json({ not: 'a list' })]
+  ])('throws upstream (never partial teams) on %s from /user/teams', async (_l, teamsRes) => {
+    stubGithub({ [`GET ${API}/user`]: () => json(USER), [`GET ${API}/user/teams?per_page=100`]: teamsRes });
+    await expect(createGithubProvider().verify(TOKEN)).rejects.toMatchObject({ name: 'IdentityError', kind: 'upstream' });
+  });
+
+  it('names an unexpected teams body as such', async () => {
+    stubGithub({ [`GET ${API}/user`]: () => json(USER), [`GET ${API}/user/teams?per_page=100`]: () => json({ not: 'a list' }) });
+    await expect(createGithubProvider().verify(TOKEN)).rejects.toThrow(/unexpected body/);
+  });
+
+  it('throws upstream when a later teams page fails', async () => {
+    stubGithub({
+      [`GET ${API}/user`]: () => json(USER),
+      [`GET ${API}/user/teams?per_page=100`]: () =>
+        json([{ slug: 'eng', organization: { login: 'acme' } }], 200, { link: `<${API}/user/teams?per_page=100&page=2>; rel="next"` }),
+      [`GET ${API}/user/teams?per_page=100&page=2`]: () => json({ message: 'oops' }, 503)
+    });
+    await expect(createGithubProvider().verify(TOKEN)).rejects.toMatchObject({ kind: 'upstream', status: 503 });
+  });
+
+  it('throws upstream when teams hit the page cap', async () => {
+    let n = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (String(url) === `${API}/user`) return json(USER);
+        n++;
+        return json([{ slug: `t${n}`, organization: { login: 'acme' } }], 200, { link: `<${API}/user/teams?per_page=100&page=${n + 1}>; rel="next"` });
+      })
+    );
+    await expect(createGithubProvider().verify(TOKEN)).rejects.toMatchObject({ kind: 'upstream' });
+    expect(n).toBeLessThanOrEqual(10);
+  });
+
+  it('accepts a 403 from /user/teams when the token lacks read:org', async () => {
+    stubGithub({
+      [`GET ${API}/user`]: () => json(USER, 200, { 'x-oauth-scopes': 'read:packages' }),
+      [`GET ${API}/user/teams?per_page=100`]: () => json({ message: 'Forbidden' }, 403, { 'x-oauth-scopes': 'read:packages' })
+    });
+    expect((await createGithubProvider().probe(TOKEN)).identity.teams).toEqual([]);
+  });
+
+  it('a 502 from /user/teams is not cached as reduced access', async () => {
+    let fail = true;
+    const f = stubGithub({
+      [`GET ${API}/user`]: () => json(USER),
+      [`GET ${API}/user/teams?per_page=100`]: () => (fail ? json({ message: 'Bad gateway' }, 502) : json([{ slug: 'eng', organization: { login: 'acme' } }]))
+    });
+    const cached = withVerifyCache(createGithubProvider());
+    await expect(cached.verify(TOKEN)).rejects.toMatchObject({ kind: 'upstream' });
+    fail = false;
+    expect((await cached.verify(TOKEN)).teams).toEqual(['acme/eng']);
+    expect(f.mock.calls.filter(([u]) => String(u).startsWith(`${API}/user/teams`))).toHaveLength(2);
+  });
+
+  it('sends every request with redirect: error', async () => {
+    const f = stubGithub({ [`GET ${API}/user`]: () => json(USER), [`GET ${API}/user/teams?per_page=100`]: () => json([]) });
+    await createGithubProvider().verify(TOKEN);
+    expect(f.mock.calls.length).toBeGreaterThan(0);
+    for (const [, init] of f.mock.calls) expect((init as Init & { redirect?: string }).redirect).toBe('error');
+  });
+
   it('maps a transport failure to a network error', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('fetch failed'); }));
     await expect(createGithubProvider().probe(TOKEN)).rejects.toMatchObject({ kind: 'network' });
@@ -124,11 +198,13 @@ describe('github provider: machines (GitHub App installation tokens)', () => {
     const f = stubGithub({
       [`GET ${API}/user`]: integration403,
       [`POST ${API}/graphql`]: () => json({ data: { viewer: { __typename: 'Bot', login: 'acme-reviewer[bot]', databaseId: 9001 } } }),
-      [`GET ${API}/apps/acme-reviewer`]: () => json({ id: 123456, slug: 'acme-reviewer' })
+      [`GET ${API}/apps/acme-reviewer`]: () => json({ id: 123456, slug: 'acme-reviewer' }),
+      [`GET ${INSTALL_REPOS}`]: () => json(repos('acme', 'ACME'))
     });
     expect(await createGithubProvider({ machines: MACHINES }).verify(TOKEN)).toEqual({
       provider: 'github',
       kind: 'machine',
+      appId: 123456,
       login: 'acme-reviewer[bot]',
       id: 9001,
       name: null,
@@ -143,7 +219,8 @@ describe('github provider: machines (GitHub App installation tokens)', () => {
     stubGithub({
       [`GET ${API}/user`]: integration403,
       [`POST ${API}/graphql`]: () => json({ data: { viewer: { __typename: 'Bot', login: 'acme-reviewer', databaseId: 9001 } } }),
-      [`GET ${API}/apps/acme-reviewer`]: () => json({ id: 123456, slug: 'acme-reviewer' })
+      [`GET ${API}/apps/acme-reviewer`]: () => json({ id: 123456, slug: 'acme-reviewer' }),
+      [`GET ${INSTALL_REPOS}`]: () => json(repos('acme'))
     });
     expect((await createGithubProvider({ machines: MACHINES }).verify(TOKEN)).login).toBe('acme-reviewer[bot]');
   });
@@ -163,6 +240,93 @@ describe('github provider: machines (GitHub App installation tokens)', () => {
       [`POST ${API}/graphql`]: () => json({ data: { viewer: { __typename: 'User', login: 'octo' } } })
     });
     await expect(createGithubProvider({ machines: MACHINES }).verify(TOKEN)).rejects.toMatchObject({ kind: 'upstream' });
+  });
+
+  // Item 1: two rules whose logins differ only by case can't both exist, and
+  // with distinct logins the identity carries the App's own appId + login.
+  it('maps App 1 to its own rule even when another App has a higher tier', async () => {
+    const machines = [
+      { appId: 1, login: 'ci[bot]', org: 'acme', tier: 'read' as const },
+      { appId: 2, login: 'ci-deploy[bot]', org: 'acme', tier: 'session' as const }
+    ];
+    stubGithub({
+      [`GET ${API}/user`]: integration403,
+      [`POST ${API}/graphql`]: () => json({ data: { viewer: { __typename: 'Bot', login: 'ci[bot]', databaseId: 11 } } }),
+      [`GET ${API}/apps/ci`]: () => json({ id: 1, slug: 'ci' }),
+      [`GET ${INSTALL_REPOS}`]: () => json(repos('acme'))
+    });
+    const who = await createGithubProvider({ machines }).verify(TOKEN);
+    expect(who).toMatchObject({ kind: 'machine', appId: 1, login: 'ci[bot]' });
+    expect(resolveTier(who, { grants: [], machines })).toBe('read');
+  });
+
+  describe('installation must belong to the rule\'s org', () => {
+    const base = {
+      [`GET ${API}/user`]: integration403,
+      [`POST ${API}/graphql`]: () => json({ data: { viewer: { __typename: 'Bot', login: 'acme-reviewer[bot]', databaseId: 9001 } } }),
+      [`GET ${API}/apps/acme-reviewer`]: () => json({ id: 123456, slug: 'acme-reviewer' })
+    };
+
+    it('accepts an installation whose every repo (across pages) is owned by the org', async () => {
+      stubGithub({
+        ...base,
+        [`GET ${INSTALL_REPOS}`]: () => json(repos('acme'), 200, { link: `<${INSTALL_REPOS}&page=2>; rel="next"` }),
+        [`GET ${INSTALL_REPOS}&page=2`]: () => json(repos('Acme'))
+      });
+      await expect(createGithubProvider({ machines: MACHINES }).verify(TOKEN)).resolves.toMatchObject({ appId: 123456 });
+    });
+
+    it('refuses an installation with one foreign repo', async () => {
+      stubGithub({
+        ...base,
+        [`GET ${INSTALL_REPOS}`]: () => json(repos('acme'), 200, { link: `<${INSTALL_REPOS}&page=2>; rel="next"` }),
+        [`GET ${INSTALL_REPOS}&page=2`]: () => json(repos('acme', 'someone-else'))
+      });
+      const err = await createGithubProvider({ machines: MACHINES }).verify(TOKEN).catch((e: unknown) => e);
+      expect(err).toMatchObject({ name: 'IdentityError', kind: 'forbidden' });
+      expect(String((err as Error).message)).not.toContain(TOKEN);
+    });
+
+    it('refuses an installation with zero repos', async () => {
+      stubGithub({ ...base, [`GET ${INSTALL_REPOS}`]: () => json(repos()) });
+      await expect(createGithubProvider({ machines: MACHINES }).verify(TOKEN)).rejects.toMatchObject({ kind: 'forbidden' });
+    });
+
+    it('refuses a repo without an owner login', async () => {
+      stubGithub({ ...base, [`GET ${INSTALL_REPOS}`]: () => json({ repositories: [{ name: 'x' }] }) });
+      await expect(createGithubProvider({ machines: MACHINES }).verify(TOKEN)).rejects.toMatchObject({ kind: 'forbidden' });
+    });
+
+    it('bounds pagination and fails closed at the page cap', async () => {
+      let n = 0;
+      const f = vi.fn(async (url: string, init: Init = {}) => {
+        const key = `${init.method ?? 'GET'} ${String(url)}`;
+        const h = (base as Record<string, (i: Init) => Response>)[key];
+        if (h) return h(init);
+        if (String(url).startsWith(`${API}/installation/repositories`)) {
+          n++;
+          return json(repos('acme'), 200, { link: `<${INSTALL_REPOS}&page=${n + 1}>; rel="next"` });
+        }
+        return new Response('not found', { status: 404 });
+      });
+      vi.stubGlobal('fetch', f);
+      await expect(createGithubProvider({ machines: MACHINES }).verify(TOKEN)).rejects.toMatchObject({ kind: 'forbidden' });
+      expect(n).toBeLessThanOrEqual(10);
+    });
+
+    it('never follows a repo pagination link off api.github.com', async () => {
+      const f = stubGithub({
+        ...base,
+        [`GET ${INSTALL_REPOS}`]: () => json(repos('acme'), 200, { link: '<https://evil.example/r?page=2>; rel="next"' })
+      });
+      await createGithubProvider({ machines: MACHINES }).verify(TOKEN).catch(() => undefined);
+      expect(f.mock.calls.some(([u]) => String(u).includes('evil.example'))).toBe(false);
+    });
+
+    it('maps a failed repo listing to upstream', async () => {
+      stubGithub({ ...base, [`GET ${INSTALL_REPOS}`]: () => json({ message: 'boom' }, 502) });
+      await expect(createGithubProvider({ machines: MACHINES }).verify(TOKEN)).rejects.toMatchObject({ kind: 'upstream', status: 502 });
+    });
   });
 
   it('probe (desktop sign-in) refuses an installation token', async () => {

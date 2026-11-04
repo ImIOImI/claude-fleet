@@ -8,7 +8,7 @@ const CONFIG: GrantConfig = {
     { team: 'acme/engineering', tier: 'read' },
     { login: 'some-contractor', tier: 'steer' }
   ],
-  machines: [{ appId: 123456, login: 'acme-reviewer[bot]', tier: 'steer' }]
+  machines: [{ appId: 123456, login: 'acme-reviewer[bot]', org: 'acme', tier: 'steer' }]
 };
 const user = (login: string, teams: string[] = []) => ({ kind: 'user' as const, login, teams });
 
@@ -34,9 +34,24 @@ describe('resolveTier', () => {
   });
 
   it('gives machines a tier only from machines rules', () => {
-    expect(resolveTier({ kind: 'machine', login: 'acme-reviewer[bot]', teams: [] }, CONFIG)).toBe('steer');
-    expect(resolveTier({ kind: 'machine', login: 'some-contractor', teams: ['acme/platform'] }, CONFIG)).toBeNull();
+    expect(resolveTier({ kind: 'machine', appId: 123456 }, CONFIG)).toBe('steer');
+    expect(resolveTier({ kind: 'machine', appId: 999 }, CONFIG)).toBeNull();
     expect(resolveTier(user('acme-reviewer[bot]'), CONFIG)).toBeNull();
+  });
+
+  it('resolves machines by appId, never by login', () => {
+    const two: GrantConfig = {
+      grants: [{ login: 'ci', tier: 'session' }],
+      machines: [
+        { appId: 1, login: 'ci[bot]', org: 'acme', tier: 'read' },
+        { appId: 2, login: 'ci-deploy[bot]', org: 'acme', tier: 'session' }
+      ]
+    };
+    // A machine identity for App 1 whose login happens to name App 2's rule
+    // (or a user rule) still gets only App 1's tier.
+    const m = { kind: 'machine' as const, appId: 1, login: 'ci-deploy[bot]', teams: [] };
+    expect(resolveTier(m, two)).toBe('read');
+    expect(resolveTier({ kind: 'machine', appId: 2, login: 'ci[bot]', teams: [] }, two)).toBe('session');
   });
 });
 
@@ -61,7 +76,27 @@ describe('parseGrantConfig', () => {
       ],
       machines: [{ appId: 123456, login: 'acme-reviewer[bot]', tier: 'steer' }]
     });
+    // The machine rule inherits identity.org.
     expect(parsed).toEqual(CONFIG);
+  });
+
+  it('keeps a machine rule\'s own org over identity.org', () => {
+    const parsed = parseGrantConfig({
+      identity: { org: 'acme' },
+      machines: [{ appId: 1, login: 'ci[bot]', org: 'Other-Org', tier: 'read' }]
+    });
+    expect(parsed.machines).toEqual([{ appId: 1, login: 'ci[bot]', org: 'Other-Org', tier: 'read' }]);
+  });
+
+  it('accepts distinct machine logins', () => {
+    const parsed = parseGrantConfig({
+      identity: { org: 'acme' },
+      machines: [
+        { appId: 1, login: 'ci[bot]', tier: 'read' },
+        { appId: 2, login: 'ci-deploy[bot]', tier: 'session' }
+      ]
+    });
+    expect(parsed.machines.map((m) => m.appId)).toEqual([1, 2]);
   });
 
   it('defaults missing lists to empty', () => {
@@ -78,7 +113,20 @@ describe('parseGrantConfig', () => {
     ['a bad login', { grants: [{ login: 'has space', tier: 'read' }] }, /GitHub login/],
     ['a bad appId', { machines: [{ appId: -1, login: 'x[bot]', tier: 'read' }] }, /machines\[0\]\.appId/],
     ['a machine login without [bot]', { machines: [{ appId: 1, login: 'x', tier: 'read' }] }, /\[bot\]/],
-    ['a duplicate appId', { machines: [{ appId: 1, login: 'a[bot]', tier: 'read' }, { appId: 1, login: 'b[bot]', tier: 'read' }] }, /appId 1 listed twice/]
+    ['a duplicate appId', { machines: [{ appId: 1, login: 'a[bot]', org: 'acme', tier: 'read' }, { appId: 1, login: 'b[bot]', org: 'acme', tier: 'read' }] }, /appId 1 listed twice/],
+    [
+      'a duplicate machine login (case-insensitive)',
+      {
+        machines: [
+          { appId: 1, login: 'ci[bot]', org: 'acme', tier: 'read' },
+          { appId: 2, login: 'CI[bot]', org: 'acme', tier: 'session' }
+        ]
+      },
+      /machines\[1\]\.login ci\[bot\] listed twice/i
+    ],
+    ['a machine without org or identity.org', { machines: [{ appId: 1, login: 'x[bot]', tier: 'read' }] }, /machines\[0\]\.org is required/],
+    ['a bad machine org', { machines: [{ appId: 1, login: 'x[bot]', org: 'not an org', tier: 'read' }] }, /machines\[0\]\.org must be a GitHub org login/],
+    ['a bad identity.org when inherited', { identity: { org: 'a/b' }, machines: [{ appId: 1, login: 'x[bot]', tier: 'read' }] }, /identity\.org must be a GitHub org login/]
   ])('rejects %s', (_label, raw, msg) => {
     expect(() => parseGrantConfig(raw)).toThrow(GrantConfigError);
     expect(() => parseGrantConfig(raw)).toThrow(msg);

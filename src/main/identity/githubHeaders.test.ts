@@ -19,6 +19,12 @@ describe('hasPackagesRead', () => {
 });
 
 describe('parseSsoHeader', () => {
+  it('URL-decodes the org, and drops one that is malformed or not a login', () => {
+    expect(parseSsoHeader('required; url=https://github.com/orgs/Acme%2DCorp/sso')?.org).toBe('Acme-Corp');
+    expect(parseSsoHeader('required; url=https://github.com/orgs/%E0%A4%A/sso')?.org).toBeNull();
+    expect(parseSsoHeader('required; url=https://github.com/orgs/a%20b/sso')?.org).toBeNull();
+  });
+
   it('parses the required form with the org from the URL', () => {
     expect(parseSsoHeader('required; url=https://github.com/orgs/acme/sso?authorization_request=AbC123')).toEqual({
       url: 'https://github.com/orgs/acme/sso?authorization_request=AbC123',

@@ -6,11 +6,12 @@
 
 export type IdentityKind = 'user' | 'machine';
 
-export interface Identity {
+interface IdentityBase {
   /** Id of the provider that verified this identity, e.g. 'github'. */
   provider: string;
   kind: IdentityKind;
-  /** For machines: the bot login configured in the host's `machines` rules. */
+  /** For machines: the bot login configured in the host's `machines` rules
+   *  (display only — grants resolve machines by `appId`, never by login). */
   login: string;
   /** Provider's numeric account id (GitHub user id, or the bot user's id). */
   id: number;
@@ -21,13 +22,27 @@ export interface Identity {
   teams: string[];
 }
 
+export interface UserIdentity extends IdentityBase {
+  kind: 'user';
+}
+
+export interface MachineIdentity extends IdentityBase {
+  kind: 'machine';
+  /** The GitHub App id the token was proven to belong to. resolveTier keys on this. */
+  appId: number;
+}
+
+export type Identity = UserIdentity | MachineIdentity;
+
 export interface IdentityProvider {
   readonly id: string;
   /** Verify a bearer token and say who it belongs to. Throws IdentityError. */
   verify(token: string): Promise<Identity>;
 }
 
-export type IdentityErrorKind = 'unauthorized' | 'machine-unknown' | 'network' | 'upstream';
+/** `forbidden`: the token is genuine but not acceptable here (e.g. an App
+ *  installation that reaches repositories outside the rule's org). */
+export type IdentityErrorKind = 'unauthorized' | 'forbidden' | 'machine-unknown' | 'network' | 'upstream';
 
 /** Messages never contain the token. */
 export class IdentityError extends Error {

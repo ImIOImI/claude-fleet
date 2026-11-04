@@ -35,6 +35,19 @@ function githubUrl(raw: string): URL | null {
   }
 }
 
+/** `/orgs/<org>/sso` → the URL-decoded org login, or null if it isn't one. */
+function ssoOrg(u: URL): string | null {
+  const raw = /^\/orgs\/([^/]+)\/sso/.exec(u.pathname)?.[1];
+  if (!raw) return null;
+  let org: string;
+  try {
+    org = decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+  return /^[A-Za-z0-9-]+$/.test(org) ? org : null;
+}
+
 export function parseSsoHeader(header: string | null): SsoHint | null {
   if (!header) return null;
   const rawUrl = /(?:^|;)\s*url=([^;\s]+)/.exec(header)?.[1] ?? null;
@@ -49,7 +62,7 @@ export function parseSsoHeader(header: string | null): SsoHint | null {
   if (!u && orgIds.length === 0) return null;
   return {
     url: u ? u.toString() : null,
-    org: u ? (/^\/orgs\/([^/]+)\/sso/.exec(u.pathname)?.[1] ?? null) : null,
+    org: u ? ssoOrg(u) : null,
     orgIds
   };
 }
