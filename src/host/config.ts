@@ -2,7 +2,7 @@
 // on every reload; grants are validated by the shared identity layer.
 import { readFile } from 'node:fs/promises';
 import { parse } from 'yaml';
-import { parseGrantConfig, type GrantConfig } from '../main/identity/grants.js';
+import { ORG_RE, parseGrantConfig, type GrantConfig } from '../main/identity/grants.js';
 
 export const DEFAULT_CONFIG_PATH = '/etc/fleet-host/config.yaml';
 export const DEFAULT_PORT = 8080;
@@ -33,14 +33,22 @@ function record(v: unknown, path: string): Record<string, unknown> {
   return v as Record<string, unknown>;
 }
 
+// Unknown keys are refused so a typo (e.g. `Id`) can't silently fall back to minting.
+function onlyKeys(o: Record<string, unknown>, path: string, allowed: readonly string[]): void {
+  for (const k of Object.keys(o)) if (!allowed.includes(k)) throw new HostConfigError(`${path} has unknown key ${k}`);
+}
+
 function parseWorkspace(v: unknown): HostWorkspaceInfo {
   const w = record(v, 'workspace');
+  onlyKeys(w, 'workspace', ['id', 'name', 'description', 'color']);
   if (w.id !== undefined && (typeof w.id !== 'string' || !ULID_RE.test(w.id))) {
     throw new HostConfigError('workspace.id must be a ULID');
   }
-  if (typeof w.name !== 'string' || !w.name.trim() || w.name.length > 64) {
+  const name = typeof w.name === 'string' ? w.name.trim() : '';
+  if (!name || name.length > 64) {
     throw new HostConfigError('workspace.name must be a non-empty string of at most 64 characters');
   }
+  if (/\p{Cc}/u.test(name)) throw new HostConfigError('workspace.name must not contain control characters');
   if (w.description !== undefined && typeof w.description !== 'string') {
     throw new HostConfigError('workspace.description must be a string');
   }
@@ -54,7 +62,7 @@ function parseWorkspace(v: unknown): HostWorkspaceInfo {
   }
   return {
     id: typeof w.id === 'string' ? w.id : null,
-    name: w.name.trim(),
+    name,
     description: typeof w.description === 'string' ? w.description : null,
     color
   };
@@ -62,11 +70,15 @@ function parseWorkspace(v: unknown): HostWorkspaceInfo {
 
 export function parseHostConfig(raw: unknown): HostConfig {
   const o = record(raw, 'host config');
+  onlyKeys(o, 'host config', ['workspace', 'identity', 'grants', 'machines']);
   const id = o.identity === undefined ? {} : record(o.identity, 'identity');
+  onlyKeys(id, 'identity', ['provider', 'org']);
   if (id.provider !== undefined && id.provider !== 'github') {
     throw new HostConfigError('identity.provider must be github');
   }
-  if (id.org !== undefined && typeof id.org !== 'string') throw new HostConfigError('identity.org must be a string');
+  if (id.org !== undefined && (typeof id.org !== 'string' || !ORG_RE.test(id.org))) {
+    throw new HostConfigError('identity.org must be a GitHub org login');
+  }
   let grants: GrantConfig;
   try {
     grants = parseGrantConfig(o);

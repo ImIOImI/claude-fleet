@@ -26,6 +26,10 @@ describe('parseHostConfig', () => {
     expect(c.grants).toEqual({ grants: [], machines: [] });
   });
 
+  it('limits workspace.name by its trimmed length', () => {
+    expect(parseHostConfig({ workspace: { name: ` ${'a'.repeat(64)} ` } }).workspace.name).toBe('a'.repeat(64));
+  });
+
   it('accepts a ULID workspace.id from the deployment', () => {
     const c = parseHostConfig({ workspace: { id: '01JC0000000000000000000000', name: 'review-agent' } });
     expect(c.workspace.id).toBe('01JC0000000000000000000000');
@@ -39,7 +43,14 @@ describe('parseHostConfig', () => {
     [{ ...base, workspace: { name: ' ' } }, /workspace.name/],
     [{ ...base, workspace: { name: 'w', color: { hue: 400 } } }, /hue/],
     [{ ...base, identity: { provider: 'oidc' } }, /identity.provider/],
-    [{ ...base, grants: [{ team: 'acme/x', tier: 'admin' }] }, /tier must be one of/]
+    [{ ...base, grants: [{ team: 'acme/x', tier: 'admin' }] }, /tier must be one of/],
+    [{ workspace: { name: 'w' }, identity: { provider: 'github', org: 'not an org!' } }, /identity.org must be a GitHub org login/],
+    [{ ...base, workspace: { name: 'a'.repeat(65) } }, /workspace.name/],
+    [{ ...base, workspace: { name: 'evil\u001b[2Jname' } }, /control characters/],
+    [{ ...base, workspace: { name: 'two\nlines' } }, /control characters/],
+    [{ ...base, grant: [] }, /host config has unknown key grant/],
+    [{ ...base, workspace: { Id: '01JC0000000000000000000000', name: 'w' } }, /workspace has unknown key Id/],
+    [{ ...base, identity: { provider: 'github', orgs: 'acme' } }, /identity has unknown key orgs/]
   ])('rejects %#', (raw, msg) => {
     expect(() => parseHostConfig(raw)).toThrow(HostConfigError);
     expect(() => parseHostConfig(raw)).toThrow(msg);

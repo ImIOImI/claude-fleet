@@ -72,7 +72,7 @@ export class GrantConfigError extends Error {
 const TEAM_RE = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 const LOGIN_RE = /^[A-Za-z0-9-]+$/;
 const BOT_RE = /^[A-Za-z0-9-]+\[bot\]$/;
-const ORG_RE = LOGIN_RE;
+export const ORG_RE = LOGIN_RE;
 /** GitHub-operated Apps whose tokens any repo's workflow (incl. fork PRs) can mint. */
 export const GITHUB_SHARED_APPS = new Map<number, string>([
   [15368, 'github-actions'],

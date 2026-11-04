@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { authenticate, bearerToken, buildAuthContext, type AuthContext } from './auth.js';
 import { parseHostConfig } from './config.js';
+import { createLogger } from './log.js';
 import { IdentityError, type Identity, type IdentityProvider } from '../main/identity/types.js';
 
 const TOKEN = 'gho_' + 'A'.repeat(36);
@@ -51,6 +52,19 @@ describe('authenticate', () => {
   ] as const)('maps IdentityError %s to %d', async (kind, status) => {
     const r = await authenticate(`Bearer ${TOKEN}`, ctxWith(async () => { throw new IdentityError(kind, 'nope'); }));
     expect(r).toMatchObject({ ok: false, status });
+  });
+
+  it.each(['forbidden', 'machine-unknown'] as const)('a %s machine gets a generic 403; the detail goes only to the log', async (kind) => {
+    const lines: string[] = [];
+    const detail = 'GitHub App acme-reviewer installation is not limited to org acme';
+    const r = await authenticate(
+      `Bearer ${TOKEN}`,
+      ctxWith(async () => { throw new IdentityError(kind, detail); }),
+      createLogger((l) => lines.push(l))
+    );
+    expect(r).toEqual({ ok: false, status: 403, error: 'machine not permitted' });
+    expect(lines.join('\n')).toContain(detail);
+    expect(lines.join('\n')).not.toContain(TOKEN);
   });
 
   it('never echoes a non-IdentityError message (it may carry the token)', async () => {

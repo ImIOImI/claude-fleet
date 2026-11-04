@@ -6,6 +6,10 @@ import { EventEmitter } from 'node:events';
 export const LEASE_RENEW_MS = 10_000;
 export const LEASE_TTL_MS = 30_000;
 
+/**
+ * `now` is the caller's wall clock. A store shared between pods must judge
+ * expiry on its own clock (e.g. the DB's `now()`), never the caller's.
+ */
 export interface LeaseStore {
   /** Take the lease if free or expired; returns the new epoch, or null if another holder has it. */
   tryAcquire(holder: string, now: number, ttlMs: number): Promise<number | null>;
@@ -41,28 +45,52 @@ export interface LeaseOptions {
   holder: string;
   store: LeaseStore;
   now?: () => number;
+  /** Local deadline clock; must not jump with wall time. */
+  monotonic?: () => number;
   renewMs?: number;
   ttlMs?: number;
+  /** Bound on how long stop() waits for an in-flight step and for release. */
+  stopWaitMs?: number;
   onError?: (err: Error) => void;
+}
+
+class StoreTimeout extends Error {
+  constructor() {
+    super('lease store call timed out');
+  }
+}
+
+function within<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new StoreTimeout()), Math.max(0, ms));
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
 
 /** Events: 'acquired' (epoch), 'lost' (). */
 export class LeaseManager extends EventEmitter {
   private _state: LeaseState = 'standby';
   private _epoch = 0;
-  private validUntil = 0;
+  /** Monotonic time at which the holder gives up: one renew interval short of the TTL. */
+  private deadline = 0;
+  private deadlineTimer: NodeJS.Timeout | null = null;
   private timer: NodeJS.Timeout | null = null;
   private ticking: Promise<void> | null = null;
   private stopped = false;
   private readonly now: () => number;
+  private readonly mono: () => number;
   private readonly renewMs: number;
   private readonly ttlMs: number;
+  private readonly stopWaitMs: number;
 
   constructor(private readonly opts: LeaseOptions) {
     super();
     this.now = opts.now ?? Date.now;
+    this.mono = opts.monotonic ?? (() => performance.now());
     this.renewMs = opts.renewMs ?? LEASE_RENEW_MS;
     this.ttlMs = opts.ttlMs ?? LEASE_TTL_MS;
+    this.stopWaitMs = opts.stopWaitMs ?? 2_000;
   }
 
   get state(): LeaseState {
@@ -93,29 +121,49 @@ export class LeaseManager extends EventEmitter {
     if (this.stopped) return;
     const { store, holder } = this.opts;
     const t = this.now();
+    const m = this.mono();
     try {
       if (this._state === 'standby') {
-        const epoch = await store.tryAcquire(holder, t, this.ttlMs);
-        if (epoch !== null && !this.stopped) {
-          this._state = 'holder';
-          this._epoch = epoch;
-          this.validUntil = t + this.ttlMs;
-          this.emit('acquired', epoch);
-        }
+        const epoch = await within(store.tryAcquire(holder, t, this.ttlMs), this.ttlMs - this.renewMs);
+        if (epoch === null) return;
+        this._state = 'holder';
+        this._epoch = epoch;
+        if (this.stopped) return;
+        this.extend(m);
+        this.emit('acquired', epoch);
         return;
       }
-      if (await store.renew(holder, this._epoch, t, this.ttlMs)) {
-        this.validUntil = t + this.ttlMs;
+      if (m >= this.deadline) return this.lose();
+      if (await within(store.renew(holder, this._epoch, t, this.ttlMs), this.deadline - m)) {
+        if (this._state === 'holder' && !this.stopped) this.extend(m);
         return;
       }
       this.lose();
     } catch (err) {
       this.opts.onError?.(err as Error);
-      if (this._state === 'holder' && this.now() >= this.validUntil) this.lose();
+      // A timeout was sized to the remaining validity; timers may fire just short of it.
+      if (this._state === 'holder' && (err instanceof StoreTimeout || this.mono() >= this.deadline)) this.lose();
     }
   }
 
+  private extend(from: number): void {
+    this.deadline = from + this.ttlMs - this.renewMs;
+    this.armDeadline();
+  }
+
+  private armDeadline(): void {
+    if (this.deadlineTimer) clearTimeout(this.deadlineTimer);
+    this.deadlineTimer = setTimeout(() => {
+      this.deadlineTimer = null;
+      if (this._state !== 'holder' || this.stopped) return;
+      if (this.mono() >= this.deadline) this.lose();
+      else this.armDeadline();
+    }, Math.max(0, this.deadline - this.mono()));
+    this.deadlineTimer.unref();
+  }
+
   private lose(): void {
+    if (this._state !== 'holder') return;
     this._state = 'standby';
     this.halt();
     this.emit('lost');
@@ -125,14 +173,16 @@ export class LeaseManager extends EventEmitter {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    if (this.deadlineTimer) clearTimeout(this.deadlineTimer);
+    this.deadlineTimer = null;
   }
 
   /** Stop renewing and release the lease if held (SIGTERM path). */
   async stop(): Promise<void> {
-    await this.ticking;
-    const wasHolder = this._state === 'holder';
     this.halt();
+    if (this.ticking) await within(this.ticking, this.stopWaitMs).catch(() => undefined);
+    const wasHolder = this._state === 'holder';
     this._state = 'standby';
-    if (wasHolder) await this.opts.store.release(this.opts.holder, this._epoch);
+    if (wasHolder) await within(this.opts.store.release(this.opts.holder, this._epoch), this.stopWaitMs).catch(() => undefined);
   }
 }

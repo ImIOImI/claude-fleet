@@ -7,6 +7,7 @@ import { resolveTier, type GrantConfig, type MachineRule, type Tier } from '../m
 import { IdentityError, type Identity, type IdentityProvider } from '../main/identity/types.js';
 import { withVerifyCache } from '../main/identity/verifyCache.js';
 import type { HostConfig } from './config.js';
+import type { Logger } from './log.js';
 
 export interface AuthContext {
   readonly provider: IdentityProvider;
@@ -33,7 +34,7 @@ export function bearerToken(header: string | string[] | undefined): string | nul
   return m ? m[1] : null;
 }
 
-export async function authenticate(header: string | string[] | undefined, ctx: AuthContext): Promise<AuthResult> {
+export async function authenticate(header: string | string[] | undefined, ctx: AuthContext, log?: Logger): Promise<AuthResult> {
   const token = bearerToken(header);
   if (!token) return { ok: false, status: 401, error: 'missing or malformed bearer token' };
   let identity: Identity;
@@ -46,7 +47,8 @@ export async function authenticate(header: string | string[] | undefined, ctx: A
         return { ok: false, status: 401, error: 'token rejected by GitHub' };
       case 'forbidden':
       case 'machine-unknown':
-        return { ok: false, status: 403, error: err.message };
+        log?.log('warn', 'machine identity refused', { kind: err.kind, detail: err.message });
+        return { ok: false, status: 403, error: 'machine not permitted' };
       case 'network':
         return { ok: false, status: 503, error: 'GitHub unreachable' };
       default:

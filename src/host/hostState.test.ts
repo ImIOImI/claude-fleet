@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadOrMintWorkspaceId, resolveWorkspaceId, WORKSPACE_ID_FILE } from './hostState.js';
@@ -25,6 +25,26 @@ describe('loadOrMintWorkspaceId', () => {
     const dir = mkdtempSync(join(tmpdir(), 'fh-state-'));
     writeFileSync(join(dir, WORKSPACE_ID_FILE), JSON.stringify({ id: 'not-a-ulid' }));
     await expect(loadOrMintWorkspaceId(dir, () => A)).rejects.toThrow(/no valid workspace id/);
+  });
+});
+
+describe('loadOrMintWorkspaceId: damaged state', () => {
+  it.each([['not JSON', '{"id": '], ['JSON null', 'null']])('names the file when it holds %s', async (_, text) => {
+    const dir = mkdtempSync(join(tmpdir(), 'fh-state-'));
+    writeFileSync(join(dir, WORKSPACE_ID_FILE), text);
+    await expect(loadOrMintWorkspaceId(dir, () => A)).rejects.toThrow(`${join(dir, WORKSPACE_ID_FILE)} holds no valid workspace id`);
+  });
+
+  it('sweeps stale tmp files from interrupted mints, but not fresh ones', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fh-state-'));
+    const stale = `.${WORKSPACE_ID_FILE}.stale`;
+    const fresh = `.${WORKSPACE_ID_FILE}.fresh`;
+    writeFileSync(join(dir, stale), '{}');
+    writeFileSync(join(dir, fresh), '{}');
+    const old = new Date(Date.now() - 3_600_000);
+    utimesSync(join(dir, stale), old, old);
+    expect(await loadOrMintWorkspaceId(dir, () => A)).toBe(A);
+    expect(readdirSync(dir).sort()).toEqual([fresh, WORKSPACE_ID_FILE].sort());
   });
 });
 
