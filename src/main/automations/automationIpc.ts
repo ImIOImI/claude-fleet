@@ -47,7 +47,7 @@ type InboxSink = {
 };
 
 export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService | null): {
-  automations: AutomationService; proposals: ProposalService; setInboxSink(s: InboxSink): void;
+  automations: AutomationService; proposals: ProposalService; setInboxSink(s: InboxSink): void; stop(): void;
 } {
   let sink: InboxSink | null = null;
   const store = new AutomationStore(inbox.kysely);
@@ -184,7 +184,12 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
   });
 
   svc.recover().catch((e) => logError({ source: 'main', type: 'automation-recover', level: 'warn', message: String(e) }));
+  // Quit (#457): stop() flips `stopped` and clears the interval so a tick
+  // already queued when stop() runs is a no-op, and cancels pending
+  // event-debounce timers — all before the main process closes inbox.db.
+  let stopped = false;
   const tick = setInterval(() => {
+    if (stopped) return;
     void refresh()
       .then(() => svc.tick())
       .catch((e) => logError({ source: 'main', type: 'automation-tick', level: 'warn', message: String(e) }));
@@ -294,5 +299,14 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     withNames(() => proposals.approve(id, opts ?? {})));
   ipcMain.handle('proposals:reject', (_e, id: string, note: string | null) => proposals.reject(id, note ?? null));
   ipcMain.handle('proposals:revert', (_e, id: string, index: number) => proposals.revert(id, index));
-  return { automations: svc, proposals, setInboxSink: (s) => { sink = s; } };
+
+  /** Quit (#457): idempotent — clears the tick interval and cancels pending event debounces. */
+  function stop(): void {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(tick);
+    svc.cancelPending();
+  }
+
+  return { automations: svc, proposals, setInboxSink: (s) => { sink = s; }, stop };
 }

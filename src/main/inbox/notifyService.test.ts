@@ -119,6 +119,26 @@ describe('onInputWait', () => {
   });
 });
 
+describe('cancelPending (#457 quit)', () => {
+  it('cancels a pending input-wait timer so it never fires, touching no store', async () => {
+    const { svc, delivered, advance } = setup();
+    await svc.onInputWait('W2', ['s1']);
+    svc.cancelPending();
+    await advance(INPUT_WAIT_DELAY_MS);
+    expect(delivered).toHaveLength(0);
+    expect(svc.waitingWorkspaces()).toEqual([]);
+  });
+  it('is safe to call twice, and safe with nothing pending', async () => {
+    const { svc, delivered, advance } = setup();
+    expect(() => svc.cancelPending()).not.toThrow();
+    await svc.onInputWait('W2', ['s1']);
+    svc.cancelPending();
+    expect(() => svc.cancelPending()).not.toThrow();
+    await advance(INPUT_WAIT_DELAY_MS);
+    expect(delivered).toHaveLength(0);
+  });
+});
+
 describe('quiet periods and the digest', () => {
   it('holds during a pause, then sends one digest when it ends', async () => {
     const { store, svc, delivered, advance, at } = setup();
