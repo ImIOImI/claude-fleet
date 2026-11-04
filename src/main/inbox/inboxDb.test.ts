@@ -161,9 +161,19 @@ describe('InboxStore.open', () => {
     expect((await store.list()).map((t) => t.title)).toEqual(['persist me']);
     const raw = new Database(path.join(dir, 'inbox.db'), { readonly: true });
     expect(raw.pragma('user_version', { simple: true })).toBe(INBOX_SCHEMA_VERSION);
-    expect(INBOX_SCHEMA_VERSION).toBe(5);
+    expect(INBOX_SCHEMA_VERSION).toBe(6);
     expect(raw.pragma('journal_mode', { simple: true })).toBe('wal');
     raw.close();
+  });
+  it('v6 creates the claims tables and an FTS5 index', () => {
+    store = InboxStore.memory();
+    const raw = (store as unknown as { raw: import('better-sqlite3').Database }).raw;
+    const names = (raw.prepare(`SELECT name FROM sqlite_master WHERE type IN ('table') ORDER BY name`).all() as { name: string }[]).map((r) => r.name);
+    expect(names).toEqual(expect.arrayContaining(['claims', 'claim_sources', 'claim_vectors', 'claims_fts', 'capture_runs']));
+    raw.prepare(`INSERT INTO claims_fts (claim_id, text, topics) VALUES ('c1', 'query snapshot froze the app', 'mcp-query')`).run();
+    const hit = raw.prepare(`SELECT claim_id FROM claims_fts WHERE claims_fts MATCH '"snapshot"'`).get() as { claim_id: string };
+    expect(hit.claim_id).toBe('c1');
+    store.close();
   });
   it('backs up an existing older database before migrating', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'inbox-'));

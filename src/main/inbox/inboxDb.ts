@@ -12,7 +12,7 @@ import { isPriority, maxPriority, normalizeTag, normalizeTags, MAX_TAGS } from '
 import { chunked, num, sqliteKysely } from '../store/kysely.js';
 import type { InboxDb, TodoRow } from '../store/inboxSchema.js';
 
-export const INBOX_SCHEMA_VERSION = 5;
+export const INBOX_SCHEMA_VERSION = 6;
 
 const MIGRATIONS: Record<number, string> = {
   1: `
@@ -180,6 +180,30 @@ const MIGRATIONS: Record<number, string> = {
     ALTER TABLE automations ADD COLUMN next_run_at INTEGER;
     ALTER TABLE automations ADD COLUMN next_run_by TEXT;
     ALTER TABLE runs ADD COLUMN reschedule TEXT;
+  `,
+  // #483: knowledge claims (phase 1) + background capture runs.
+  6: `
+    CREATE TABLE claims (
+      id TEXT PRIMARY KEY, text TEXT NOT NULL, kind TEXT NOT NULL, topics TEXT NOT NULL,
+      refs TEXT, visibility TEXT NOT NULL DEFAULT 'fleet', status TEXT NOT NULL DEFAULT 'current',
+      superseded_by TEXT, retract_reason TEXT, workspace_id TEXT NOT NULL,
+      confirmations INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX idx_claims_status_vis ON claims (status, visibility, workspace_id);
+    CREATE TABLE claim_sources (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, claim_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+      session_id TEXT, via TEXT NOT NULL, capture_run TEXT, ts INTEGER NOT NULL
+    );
+    CREATE INDEX idx_claim_sources_claim ON claim_sources (claim_id);
+    CREATE TABLE claim_vectors (claim_id TEXT PRIMARY KEY, model_id TEXT NOT NULL, vec BLOB NOT NULL);
+    CREATE VIRTUAL TABLE claims_fts USING fts5(claim_id UNINDEXED, text, topics);
+    CREATE TABLE capture_runs (
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, session_id TEXT NOT NULL, fork_session_id TEXT,
+      trigger TEXT NOT NULL, status TEXT NOT NULL, claims_recorded INTEGER NOT NULL DEFAULT 0,
+      usage TEXT, error TEXT, started_at INTEGER NOT NULL, ended_at INTEGER
+    );
+    CREATE INDEX idx_capture_runs_session ON capture_runs (session_id, started_at);
+    CREATE INDEX idx_capture_runs_status ON capture_runs (status);
   `
 };
 
