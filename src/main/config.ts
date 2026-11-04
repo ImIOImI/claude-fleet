@@ -104,6 +104,9 @@ interface AppConfig {
   perfOtlp?: { enabled: boolean; endpoint: string };
   /** Closing the window keeps the app running in the tray (#407 Phase 2b). Default off. */
   keepRunningInTray?: boolean;
+  /** Hand-edited only: an org's own GitHub OAuth app. Env
+   *  CLAUDE_FLEET_GITHUB_CLIENT_ID wins (identity/clientId.ts). */
+  identity?: { github?: { clientId?: string } };
 }
 
 /** Defensively parse the persisted usageBudget (untrusted JSON on disk). */
@@ -146,6 +149,15 @@ function parsePerfOtlp(v: unknown): { enabled: boolean; endpoint: string } | und
     enabled: o.enabled === true,
     endpoint: typeof o.endpoint === 'string' ? o.endpoint : ''
   };
+}
+
+/** Defensively parse identity overrides (untrusted JSON on disk). */
+function parseIdentityConfig(v: unknown): AppConfig['identity'] {
+  if (!v || typeof v !== 'object') return undefined;
+  const gh = (v as { github?: unknown }).github;
+  if (!gh || typeof gh !== 'object') return undefined;
+  const clientId = (gh as { clientId?: unknown }).clientId;
+  return typeof clientId === 'string' && clientId.trim() ? { github: { clientId: clientId.trim() } } : undefined;
 }
 
 function configPath(): string {
@@ -196,7 +208,8 @@ async function read(): Promise<AppConfig> {
         : undefined,
       perfTelemetry: typeof parsed.perfTelemetry === 'boolean' ? parsed.perfTelemetry : undefined,
       perfOtlp: parsePerfOtlp(parsed.perfOtlp),
-      keepRunningInTray: typeof parsed.keepRunningInTray === 'boolean' ? parsed.keepRunningInTray : undefined
+      keepRunningInTray: typeof parsed.keepRunningInTray === 'boolean' ? parsed.keepRunningInTray : undefined,
+      identity: parseIdentityConfig(parsed.identity)
     };
   } catch {
     cached = {};
@@ -342,6 +355,11 @@ export async function getKeepRunningInTray(): Promise<boolean> {
 export async function setKeepRunningInTray(enabled: boolean): Promise<void> {
   const cfg = await read();
   await write({ ...cfg, keepRunningInTray: enabled });
+}
+
+/** config.json identity.github.clientId, or null. Validation and precedence: identity/clientId.ts. */
+export async function getGithubClientIdConfig(): Promise<string | null> {
+  return (await read()).identity?.github?.clientId ?? null;
 }
 
 export async function getAutoReloadLoadouts(): Promise<boolean> {
