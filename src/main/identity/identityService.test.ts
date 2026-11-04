@@ -1,0 +1,418 @@
+import { describe, expect, it, vi } from 'vitest';
+import { IdentityService, toAccountSso } from './identityService.js';
+import { DeviceFlowError, type DeviceCode, type PollResult } from './deviceFlow.js';
+import { IdentityError, type Identity } from './types.js';
+import type { GithubProbe } from './githubProvider.js';
+
+const CODE: DeviceCode = {
+  deviceCode: 'dc-secret',
+  userCode: 'ABCD-1234',
+  verificationUri: 'https://github.com/login/device',
+  expiresAt: 900_000,
+  intervalMs: 5000
+};
+const IDENT: Identity = {
+  provider: 'github',
+  kind: 'user',
+  login: 'octo',
+  id: 42,
+  name: null,
+  avatarUrl: 'https://avatars.githubusercontent.com/u/42',
+  teams: ['acme/platform']
+};
+const PROBE: GithubProbe = { identity: IDENT, scopes: ['read:org', 'read:packages'], sso: null };
+const TOKEN = 'gho_secret_token';
+const DONE: PollResult = { status: 'done', token: TOKEN, scopes: ['read:org', 'read:packages'] };
+
+function fakeVault(available: boolean) {
+  const store = new Map<string, string>();
+  return {
+    store,
+    api: {
+      isVaultAvailable: vi.fn(async () => available),
+      getSecret: vi.fn(async (s: string, k: string) => store.get(`${s}|${k}`) ?? null),
+      setSecret: vi.fn(async (s: string, k: string, v: string) => void store.set(`${s}|${k}`, v)),
+      deleteAllForWorkspace: vi.fn(async (s: string) => {
+        for (const k of [...store.keys()]) if (k.startsWith(`${s}|`)) store.delete(k);
+      })
+    }
+  };
+}
+
+function setup(o: { clientId?: string | null; vaultAvailable?: boolean; polls?: Array<PollResult | Error>; probe?: GithubProbe | Error } = {}) {
+  let t = 0;
+  const polls = [...(o.polls ?? [])];
+  let probe: GithubProbe | Error = o.probe ?? PROBE;
+  const vault = fakeVault(o.vaultAvailable ?? true);
+  const github = {
+    requestDeviceCode: vi.fn(async () => CODE),
+    pollDeviceToken: vi.fn(async () => {
+      const r = polls.shift();
+      if (!r) throw new Error('unexpected poll');
+      if (r instanceof Error) throw r;
+      return r;
+    }),
+    probe: vi.fn(async () => {
+      if (probe instanceof Error) throw probe;
+      return probe;
+    })
+  };
+  const svc = new IdentityService({
+    vault: vault.api,
+    clientId: async () => (o.clientId === undefined ? 'Iv1.testclient' : o.clientId),
+    github,
+    now: () => t
+  });
+  return {
+    svc,
+    vault,
+    github,
+    advance: (ms: number) => {
+      t += ms;
+    },
+    setProbe: (p: GithubProbe | Error) => {
+      probe = p;
+    }
+  };
+}
+
+async function signIn(s: ReturnType<typeof setup>) {
+  await s.svc.signInStart();
+  s.advance(5000);
+  const r = await s.svc.signInPoll();
+  if (r.state !== 'done') throw new Error(`expected done, got ${JSON.stringify(r)}`);
+  return r.status;
+}
+
+describe('IdentityService status', () => {
+  it('reports signed out with configured + persisted', async () => {
+    const { svc } = setup();
+    expect(await svc.status()).toEqual({
+      configured: true,
+      persisted: true,
+      signedIn: false,
+      identity: null,
+      scopes: [],
+      packagesAccess: false,
+      sso: null,
+      notice: null
+    });
+  });
+
+  it('reports not configured when no client id resolves', async () => {
+    const { svc } = setup({ clientId: null });
+    expect((await svc.status()).configured).toBe(false);
+    await expect(svc.signInStart()).rejects.toThrow(
+      "not-configured: GitHub sign-in isn't configured: no OAuth client id. Set CLAUDE_FLEET_GITHUB_CLIENT_ID or identity.github.clientId in config.json."
+    );
+  });
+});
+
+describe('IdentityService device-flow sign-in', () => {
+  it('runs start → pending → done, stores the token in the vault and never returns it', async () => {
+    const s = setup({ polls: [{ status: 'pending', intervalMs: 5000 }, DONE] });
+    const start = await s.svc.signInStart();
+    expect(start).toEqual({ userCode: 'ABCD-1234', verificationUri: 'https://github.com/login/device', expiresAt: 900_000, intervalMs: 5000 });
+    expect(JSON.stringify(start)).not.toContain('dc-secret');
+
+    // Too early: answered locally, no request to GitHub.
+    expect(await s.svc.signInPoll()).toEqual({ state: 'pending', intervalMs: 5000 });
+    expect(s.github.pollDeviceToken).not.toHaveBeenCalled();
+
+    s.advance(5000);
+    expect(await s.svc.signInPoll()).toEqual({ state: 'pending', intervalMs: 5000 });
+    expect(s.github.pollDeviceToken).toHaveBeenCalledWith('Iv1.testclient', 'dc-secret', 5000);
+
+    s.advance(5000);
+    const done = await s.svc.signInPoll();
+    expect(done.state).toBe('done');
+    if (done.state !== 'done') return;
+    expect(done.status).toMatchObject({
+      signedIn: true,
+      persisted: true,
+      packagesAccess: true,
+      scopes: ['read:org', 'read:packages'],
+      identity: { provider: 'github', login: 'octo', id: 42, name: null, displayName: 'octo', teams: ['acme/platform'] }
+    });
+    expect(JSON.stringify(done)).not.toContain(TOKEN);
+    expect(s.vault.store.get('identity:github|TOKEN')).toBe(TOKEN);
+    expect(JSON.parse(s.vault.store.get('identity:github|PROFILE') ?? '{}').identity.login).toBe('octo');
+    expect(s.github.probe).toHaveBeenCalledWith(TOKEN);
+    expect(JSON.stringify(await s.svc.status())).not.toContain(TOKEN);
+  });
+
+  it('adopts a slower interval after slow_down', async () => {
+    const s = setup({ polls: [{ status: 'pending', intervalMs: 10_000 }] });
+    await s.svc.signInStart();
+    s.advance(5000);
+    expect(await s.svc.signInPoll()).toEqual({ state: 'pending', intervalMs: 10_000 });
+    s.advance(5000);
+    expect(await s.svc.signInPoll()).toEqual({ state: 'pending', intervalMs: 5000 });
+    expect(s.github.pollDeviceToken).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports an expired code without polling', async () => {
+    const s = setup();
+    await s.svc.signInStart();
+    s.advance(900_000);
+    expect(await s.svc.signInPoll()).toEqual({ state: 'error', message: 'The sign-in code expired. Start again.' });
+    expect(s.github.pollDeviceToken).not.toHaveBeenCalled();
+  });
+
+  it('ends the flow on a terminal device-flow error', async () => {
+    const s = setup({ polls: [new DeviceFlowError('denied', 'Sign-in was cancelled on GitHub.')] });
+    await s.svc.signInStart();
+    s.advance(5000);
+    expect(await s.svc.signInPoll()).toEqual({ state: 'error', message: 'Sign-in was cancelled on GitHub.' });
+    expect(await s.svc.signInPoll()).toEqual({ state: 'error', message: 'No sign-in in progress.' });
+  });
+
+  it('keeps polling through a network blip', async () => {
+    const s = setup({ polls: [new DeviceFlowError('network', 'offline'), DONE] });
+    await s.svc.signInStart();
+    s.advance(5000);
+    expect(await s.svc.signInPoll()).toEqual({ state: 'pending', intervalMs: 5000 });
+    s.advance(5000);
+    expect((await s.svc.signInPoll()).state).toBe('done');
+  });
+
+  it('cancel abandons the flow', async () => {
+    const s = setup({ polls: [DONE] });
+    await s.svc.signInStart();
+    s.svc.signInCancel();
+    s.advance(5000);
+    expect(await s.svc.signInPoll()).toEqual({ state: 'error', message: 'No sign-in in progress.' });
+    expect(s.vault.store.size).toBe(0);
+  });
+
+  it('keeps the sign-in in memory when the vault is unavailable', async () => {
+    const s = setup({ vaultAvailable: false, polls: [DONE] });
+    const status = await signIn(s);
+    expect(status).toMatchObject({ signedIn: true, persisted: false });
+    expect(s.vault.api.setSecret).not.toHaveBeenCalled();
+    expect((await s.svc.status()).signedIn).toBe(true);
+    expect(await s.svc.packagesToken()).toBe(TOKEN);
+  });
+});
+
+describe('IdentityService refresh, sign-out and the packages token', () => {
+  it('clears a revoked token on refresh and says why', async () => {
+    const s = setup({ polls: [DONE] });
+    await signIn(s);
+    s.setProbe(new IdentityError('unauthorized', 'GitHub rejected the token', 401));
+    const st = await s.svc.status({ refresh: true });
+    expect(st.signedIn).toBe(false);
+    expect(st.notice).toBe('GitHub no longer accepts the saved sign-in (revoked or expired). Sign in again.');
+    expect(s.vault.store.size).toBe(0);
+  });
+
+  it('keeps the cached profile when GitHub is unreachable', async () => {
+    const s = setup({ polls: [DONE] });
+    await signIn(s);
+    s.setProbe(new IdentityError('network', 'GitHub unreachable (TypeError)'));
+    expect((await s.svc.status({ refresh: true })).identity?.login).toBe('octo');
+  });
+
+  it('refresh picks up new teams and SSO hints', async () => {
+    const s = setup({ polls: [DONE] });
+    await signIn(s);
+    s.setProbe({ ...PROBE, identity: { ...IDENT, teams: ['acme/eng'] }, sso: { url: 'https://github.com/orgs/acme/sso', org: 'acme', orgIds: [] } });
+    const st = await s.svc.status({ refresh: true });
+    expect(st.identity?.teams).toEqual(['acme/eng']);
+    expect(st.sso).toEqual({
+      url: 'https://github.com/orgs/acme/sso',
+      org: 'acme',
+      orgCount: 0,
+      appSettingsUrl: 'https://github.com/settings/connections/applications/Iv1.testclient'
+    });
+  });
+
+  it('sign-out purges the identity scope', async () => {
+    const s = setup({ polls: [DONE] });
+    await signIn(s);
+    await s.svc.signOut();
+    expect(s.vault.api.deleteAllForWorkspace).toHaveBeenCalledWith('identity:github');
+    expect((await s.svc.status()).signedIn).toBe(false);
+    expect(await s.svc.packagesToken()).toBeNull();
+  });
+
+  it('offers the token for packages only with read:packages', async () => {
+    const withPkgs = setup({ polls: [DONE] });
+    await signIn(withPkgs);
+    expect(await withPkgs.svc.packagesToken()).toBe(TOKEN);
+
+    const without = setup({ polls: [{ status: 'done', token: TOKEN, scopes: ['read:org'] }], probe: { ...PROBE, scopes: ['read:org'] } });
+    await signIn(without);
+    expect(await without.svc.packagesToken()).toBeNull();
+    expect((await without.svc.status()).packagesAccess).toBe(false);
+
+    expect(await setup().svc.packagesToken()).toBeNull();
+  });
+});
+
+describe('toAccountSso', () => {
+  it('counts partial-results orgs and links the app settings page', () => {
+    expect(toAccountSso({ url: null, org: null, orgIds: [7, 9] }, 'Iv1.testclient')).toEqual({
+      url: null,
+      org: null,
+      orgCount: 2,
+      appSettingsUrl: 'https://github.com/settings/connections/applications/Iv1.testclient'
+    });
+    expect(toAccountSso({ url: null, org: null, orgIds: [] }, null).appSettingsUrl).toBeNull();
+  });
+});
+
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+describe('IdentityService transient failures', () => {
+  it('keeps the saved sign-in and says so when a refresh fails transiently', async () => {
+    for (const err of [
+      new IdentityError('network', 'GitHub unreachable (TypeError)'),
+      new IdentityError('upstream', 'GitHub teams lookup failed (HTTP 502)', 502),
+      new IdentityError('forbidden', 'not acceptable', 403)
+    ]) {
+      const s = setup({ polls: [DONE] });
+      await signIn(s);
+      s.setProbe(err);
+      const st = await s.svc.status({ refresh: true });
+      expect(st).toMatchObject({ signedIn: true, identity: { login: 'octo', teams: ['acme/platform'] } });
+      expect(st.notice).toMatch(/^Couldn't refresh your GitHub account/);
+      expect(s.vault.store.get('identity:github|TOKEN')).toBe(TOKEN);
+    }
+  });
+
+  it('clears the refresh notice once a refresh succeeds', async () => {
+    const s = setup({ polls: [DONE] });
+    await signIn(s);
+    s.setProbe(new IdentityError('network', 'offline'));
+    await s.svc.status({ refresh: true });
+    s.setProbe(PROBE);
+    expect((await s.svc.status({ refresh: true })).notice).toBeNull();
+  });
+
+  it('fails a sign-in whose profile read fails transiently, storing nothing', async () => {
+    const s = setup({ polls: [DONE], probe: new IdentityError('upstream', 'GitHub teams lookup failed (HTTP 502)', 502) });
+    await s.svc.signInStart();
+    s.advance(5000);
+    const r = await s.svc.signInPoll();
+    expect(r.state).toBe('error');
+    if (r.state === 'error') expect(r.message).toMatch(/try again/i);
+    expect(s.vault.store.size).toBe(0);
+    expect((await s.svc.status()).signedIn).toBe(false);
+  });
+
+  it('never echoes a non-IdentityError message from the profile read', async () => {
+    const s = setup({ polls: [DONE], probe: new Error(`boom ${TOKEN}`) });
+    await s.svc.signInStart();
+    s.advance(5000);
+    const r = await s.svc.signInPoll();
+    expect(r.state).toBe('error');
+    expect(JSON.stringify(r).includes(TOKEN)).toBe(false);
+  });
+});
+
+describe('IdentityService sign-out wins races', () => {
+  function racing() {
+    const s = setup({ polls: [DONE] });
+    const gate = deferred<GithubProbe>();
+    return { s, gate, hold: () => s.github.probe.mockImplementationOnce(() => gate.promise) };
+  }
+
+  it('a refresh in flight during sign-out does not resurrect the token', async () => {
+    const { s, gate, hold } = racing();
+    await signIn(s);
+    hold();
+    const refreshing = s.svc.status({ refresh: true });
+    await s.svc.signOut();
+    gate.resolve(PROBE);
+    expect((await refreshing).signedIn).toBe(false);
+    expect(s.vault.store.size).toBe(0);
+    expect(await s.svc.packagesToken()).toBeNull();
+  });
+
+  it('a sign-in whose profile read is in flight during sign-out is discarded', async () => {
+    const { s, gate, hold } = racing();
+    hold();
+    await s.svc.signInStart();
+    s.advance(5000);
+    const polling = s.svc.signInPoll();
+    await vi.waitFor(() => expect(s.github.probe).toHaveBeenCalled());
+    await s.svc.signOut();
+    gate.resolve(PROBE);
+    expect((await polling).state).toBe('error');
+    expect(s.vault.store.size).toBe(0);
+  });
+
+  it('a sign-in whose profile read is in flight during cancel is discarded', async () => {
+    const { s, gate, hold } = racing();
+    hold();
+    await s.svc.signInStart();
+    s.advance(5000);
+    const polling = s.svc.signInPoll();
+    await vi.waitFor(() => expect(s.github.probe).toHaveBeenCalled());
+    s.svc.signInCancel();
+    gate.resolve(PROBE);
+    expect((await polling).state).toBe('error');
+    expect(s.vault.store.size).toBe(0);
+  });
+
+  it('a refresh in flight while a new sign-in completes does not restore the old token', async () => {
+    const NEW = 'gho_new_token';
+    const s = setup({ polls: [DONE, { status: 'done', token: NEW, scopes: ['read:org', 'read:packages'] }] });
+    await signIn(s);
+    const gate = deferred<GithubProbe>();
+    s.github.probe.mockImplementationOnce(() => gate.promise);
+    const refreshing = s.svc.status({ refresh: true });
+    await signIn(s);
+    gate.resolve(PROBE);
+    await refreshing;
+    expect(s.vault.store.get('identity:github|TOKEN') === NEW).toBe(true);
+  });
+
+  it('sign-out clears an in-memory sign-in when the vault is unavailable', async () => {
+    const s = setup({ vaultAvailable: false, polls: [DONE] });
+    await signIn(s);
+    await s.svc.signOut();
+    expect((await s.svc.status()).signedIn).toBe(false);
+    expect(await s.svc.packagesToken()).toBeNull();
+  });
+});
+
+describe('IdentityService saved-profile validation', () => {
+  async function withProfile(profile: unknown) {
+    const s = setup();
+    s.vault.store.set('identity:github|TOKEN', TOKEN);
+    s.vault.store.set('identity:github|PROFILE', typeof profile === 'string' ? profile : JSON.stringify(profile));
+    return s;
+  }
+  const GOOD = { identity: IDENT, scopes: ['read:org', 'read:packages'], sso: null, verifiedAt: 1 };
+
+  it('accepts a well-formed saved profile', async () => {
+    const s = await withProfile(GOOD);
+    expect((await s.svc.status()).signedIn).toBe(true);
+  });
+
+  it.each([
+    ['a machine identity', { ...GOOD, identity: { ...IDENT, kind: 'machine', appId: 1 } }],
+    ['a non-github provider', { ...GOOD, identity: { ...IDENT, provider: 'other' } }],
+    ['non-string teams', { ...GOOD, identity: { ...IDENT, teams: [1] } }],
+    ['non-string scopes', { ...GOOD, scopes: [1] }],
+    ['malformed sso', { ...GOOD, sso: { url: 1, org: null, orgIds: [] } }],
+    ['invalid JSON', '{nope']
+  ])('treats %s as signed out and withholds the token', async (_label, profile) => {
+    const s = await withProfile(profile);
+    expect((await s.svc.status()).signedIn).toBe(false);
+    expect(await s.svc.packagesToken()).toBeNull();
+  });
+
+  it('drops a saved SSO url that is not https://github.com', async () => {
+    const s = await withProfile({ ...GOOD, sso: { url: 'https://evil.example/orgs/acme/sso', org: 'acme', orgIds: [] } });
+    expect((await s.svc.status()).sso?.url).toBeNull();
+  });
+});
