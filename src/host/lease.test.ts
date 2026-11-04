@@ -23,6 +23,14 @@ describe('memoryLeaseStore', () => {
     expect(await s.renew('a', 1, 31, 30)).toBe(false);
   });
 
+  it('re-grants to the current holder, so a timed-out acquire can be recovered', async () => {
+    const s = memoryLeaseStore();
+    expect(await s.tryAcquire('a', 0, 30)).toBe(1);
+    expect(await s.tryAcquire('a', 1, 30)).toBe(2);
+    expect(await s.renew('a', 1, 2, 30)).toBe(false);
+    expect(await s.renew('a', 2, 2, 30)).toBe(true);
+  });
+
   it('release frees the lease only for the current holder and epoch', async () => {
     const s = memoryLeaseStore();
     await s.tryAcquire('a', 0, 30);
@@ -218,6 +226,66 @@ describe('LeaseManager', () => {
     await stopping;
     expect(acquired).not.toHaveBeenCalled();
     expect(release).toHaveBeenCalledWith('a', 1);
+  });
+});
+
+describe('LeaseManager edge cases', () => {
+  it('rejects renewMs >= ttlMs', () => {
+    expect(() => new LeaseManager({ holder: 'a', store: memoryLeaseStore(), renewMs: 30, ttlMs: 30 })).toThrow(/renewMs/);
+  });
+
+  it('reports standby once past its deadline, even before any tick or timer runs', async () => {
+    const c = clock();
+    const m = new LeaseManager({ holder: 'a', store: memoryLeaseStore(), now: c.now, monotonic: c.now });
+    await m.tick();
+    expect(m.state).toBe('holder');
+    c.advance(20_000);
+    expect(m.state).toBe('standby');
+  });
+
+  it('an acquire that lands after stop() returned is released and stays standby', async () => {
+    const inner = memoryLeaseStore();
+    let finish!: () => void;
+    const gate = new Promise<void>((r) => (finish = r));
+    let landed!: () => void;
+    const done = new Promise<void>((r) => (landed = r));
+    const release = vi.fn(async (h: string, e: number) => { await inner.release(h, e); landed(); });
+    const store: LeaseStore = { ...inner, release, tryAcquire: async (...a) => { await gate; return inner.tryAcquire(...a); } };
+    const m = new LeaseManager({ holder: 'a', store, stopWaitMs: 10 });
+    const acquired = vi.fn();
+    m.on('acquired', acquired);
+    void m.tick();
+    await m.stop();
+    expect(release).not.toHaveBeenCalled();
+    finish();
+    await done;
+    expect(release).toHaveBeenCalledWith('a', 1);
+    expect(m.state).toBe('standby');
+    expect(acquired).not.toHaveBeenCalled();
+    expect(await inner.tryAcquire('b', 0, 30_000)).toBe(2);
+  });
+
+  it('recovers a grant whose acquire timed out on the next tick', async () => {
+    const inner = memoryLeaseStore();
+    let first = true;
+    const store: LeaseStore = {
+      ...inner,
+      tryAcquire: (...a) => {
+        if (!first) return inner.tryAcquire(...a);
+        first = false;
+        void inner.tryAcquire(...a);
+        return new Promise<number | null>(() => undefined);
+      }
+    };
+    const onError = vi.fn();
+    const m = new LeaseManager({ holder: 'a', store, renewMs: 20, ttlMs: 80, onError });
+    await m.tick();
+    expect(onError).toHaveBeenCalledOnce();
+    expect(m.state).toBe('standby');
+    await m.tick();
+    expect(m.state).toBe('holder');
+    expect(m.epoch).toBe(2);
+    await m.stop();
   });
 });
 

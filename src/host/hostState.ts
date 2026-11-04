@@ -56,6 +56,15 @@ async function writeDurably(path: string, text: string): Promise<void> {
   }
 }
 
+async function syncDir(dir: string): Promise<void> {
+  const fh = await open(dir, 'r');
+  try {
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+}
+
 export async function loadOrMintWorkspaceId(stateDir: string, mint: () => string = ulid): Promise<string> {
   const path = join(stateDir, WORKSPACE_ID_FILE);
   await sweepStaleTmp(stateDir);
@@ -67,6 +76,7 @@ export async function loadOrMintWorkspaceId(stateDir: string, mint: () => string
   try {
     // link() fails with EEXIST if another pod minted first; its id wins.
     await link(tmp, path);
+    await syncDir(stateDir);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
   } finally {

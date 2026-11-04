@@ -29,12 +29,25 @@ export interface Logger {
   log(level: LogLevel, msg: string, fields?: LogFields): void;
 }
 
+function redactValue(_key: string, v: unknown): unknown {
+  if (typeof v === 'string') return redactSecrets(v);
+  if (typeof v === 'bigint') return v.toString();
+  if (v instanceof Error) return { name: v.name, message: v.message };
+  return v;
+}
+
 export function createLogger(sink: LogSink = (l) => process.stdout.write(l + '\n'), now: () => number = Date.now): Logger {
   return {
     log(level, msg, fields = {}) {
-      const rec: Record<string, unknown> = { ts: new Date(now()).toISOString(), level, msg: redactSecrets(msg) };
-      for (const [k, v] of Object.entries(fields)) rec[k] = typeof v === 'string' ? redactSecrets(v) : v;
-      sink(redactSecrets(JSON.stringify(rec)));
+      const head = { ts: new Date(now()).toISOString(), level, msg: redactSecrets(msg) };
+      let line: string;
+      try {
+        line = JSON.stringify({ ...head, ...fields, ...head }, redactValue);
+      } catch {
+        line = JSON.stringify({ ...head, error: 'unserializable fields' });
+      }
+      // Backstop only: escapes such as `\n` hide token boundaries from this pass.
+      sink(redactSecrets(line));
     }
   };
 }

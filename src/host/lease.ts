@@ -9,9 +9,12 @@ export const LEASE_TTL_MS = 30_000;
 /**
  * `now` is the caller's wall clock. A store shared between pods must judge
  * expiry on its own clock (e.g. the DB's `now()`), never the caller's.
+ * `holder` must be unique per process: `tryAcquire` by the current holder
+ * re-grants with a new epoch, so a caller whose acquire timed out after the
+ * store granted it recovers the lease on its next tick.
  */
 export interface LeaseStore {
-  /** Take the lease if free or expired; returns the new epoch, or null if another holder has it. */
+  /** Take the lease if free, expired or already ours; returns the new epoch, or null if another holder has it. */
   tryAcquire(holder: string, now: number, ttlMs: number): Promise<number | null>;
   /** Extend the lease; false when `holder`/`epoch` no longer own it. */
   renew(holder: string, epoch: number, now: number, ttlMs: number): Promise<boolean>;
@@ -24,7 +27,7 @@ export function memoryLeaseStore(): LeaseStore {
   let row = { holder: null as string | null, epoch: 0, expiresAt: 0 };
   return {
     async tryAcquire(holder, now, ttlMs) {
-      if (row.holder !== null && row.expiresAt > now) return null;
+      if (row.holder !== null && row.holder !== holder && row.expiresAt > now) return null;
       row = { holder, epoch: row.epoch + 1, expiresAt: now + ttlMs };
       return row.epoch;
     },
@@ -91,10 +94,11 @@ export class LeaseManager extends EventEmitter {
     this.renewMs = opts.renewMs ?? LEASE_RENEW_MS;
     this.ttlMs = opts.ttlMs ?? LEASE_TTL_MS;
     this.stopWaitMs = opts.stopWaitMs ?? 2_000;
+    if (!(this.renewMs < this.ttlMs)) throw new RangeError('lease renewMs must be less than ttlMs');
   }
 
   get state(): LeaseState {
-    return this._state;
+    return this._state === 'holder' && this.mono() >= this.deadline ? 'standby' : this._state;
   }
 
   get epoch(): number {
@@ -126,9 +130,12 @@ export class LeaseManager extends EventEmitter {
       if (this._state === 'standby') {
         const epoch = await within(store.tryAcquire(holder, t, this.ttlMs), this.ttlMs - this.renewMs);
         if (epoch === null) return;
+        if (this.stopped) {
+          await within(store.release(holder, epoch), this.stopWaitMs).catch(() => undefined);
+          return;
+        }
         this._state = 'holder';
         this._epoch = epoch;
-        if (this.stopped) return;
         this.extend(m);
         this.emit('acquired', epoch);
         return;
