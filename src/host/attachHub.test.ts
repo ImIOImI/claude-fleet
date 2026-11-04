@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { FrameType, encodeFrame } from '../main/broker.js';
 import type { Tier } from '../main/identity/grants.js';
-import { AttachHub, ReplayBuffer, trimToSafeStart } from './attachHub.js';
+import { AttachHub, MAX_PENDING_FRAMES, ReplayBuffer, trimToSafeStart } from './attachHub.js';
+import { createLogger } from './log.js';
 import { RUNNER_HOOK_SETTINGS } from '../main/claudeArgs.js';
 import { fakeBroker, inputFrame, jsonFrame, person, resizeFrame, sinkRecorder } from './testFakes.js';
 
@@ -242,5 +243,109 @@ describe('AttachHub.shutdown', () => {
     expect(broker.sessions.get('s1')!.detached).toBe(1);
     expect(broker.sessions.get('s1')!.closed).toBe(false);
     expect(hub.liveTaps).toBe(0);
+  });
+});
+
+describe('KILLPORT scope', () => {
+  it('refuses the host port, refuses an unattributed port, allows a session-owned one', async () => {
+    const broker = fakeBroker(['s1']);
+    broker.ports.push({ port: 8080 }, { port: 9229, pid: 7 });
+    const hub = new AttachHub(broker.ops, { hostPort: 8080 });
+    const rec = sinkRecorder();
+    const v = hub.viewer({ identity: alice, tier: 'steer' }, rec.sink);
+    await v.receive(jsonFrame(FrameType.KILLPORT, { port: 8080 }));
+    expect(last(rec).json).toMatchObject({ ok: false, error: 'forbidden: that port belongs to the host' });
+    await v.receive(jsonFrame(FrameType.KILLPORT, { port: 9229 }));
+    expect(last(rec).json).toMatchObject({ ok: false, error: 'forbidden: that port is not owned by a session' });
+    await v.receive(jsonFrame(FrameType.KILLPORT, { port: 3000 }));
+    expect(last(rec).json).toMatchObject({ ok: true });
+    expect(broker.killed).toEqual([3000]);
+  });
+
+  it('refuses the host port even when a session appears to own it', async () => {
+    const broker = fakeBroker(['s1']);
+    broker.ports.push({ port: 8080, session: 's1' });
+    const v = new AttachHub(broker.ops, { hostPort: 8080 }).viewer({ identity: alice, tier: 'steer' }, sinkRecorder().sink);
+    await v.receive(jsonFrame(FrameType.KILLPORT, { port: 8080 }));
+    expect(broker.killed).toEqual([]);
+  });
+});
+
+describe('viewer limits', () => {
+  it('closes with 1008 once more than MAX_PENDING_FRAMES frames are queued', async () => {
+    const broker = fakeBroker(['s1']);
+    broker.ops.list = () => new Promise(() => undefined);
+    const rec = sinkRecorder();
+    const v = new AttachHub(broker.ops).viewer({ identity: alice, tier: 'steer' }, rec.sink);
+    void v.receive(encodeFrame(FrameType.LIST, Buffer.alloc(0)));
+    void v.receive(Buffer.concat(Array.from({ length: MAX_PENDING_FRAMES }, () => inputFrame(1, 'x'))));
+    expect(rec.closes).toEqual([[1008, 'too many pending frames']]);
+  });
+
+  it('rate-limits control frames per viewer but not INPUT', async () => {
+    let t = 0;
+    const broker = fakeBroker(['s1']);
+    const hub = new AttachHub(broker.ops, { now: () => t, controlBurst: 2, controlPerSec: 1 });
+    const rec = sinkRecorder();
+    const v = hub.viewer({ identity: alice, tier: 'steer' }, rec.sink);
+    await v.receive(jsonFrame(FrameType.ATTACH, { id: 's1', channel: 1 }));
+    await v.receive(encodeFrame(FrameType.LISTPORTS, Buffer.alloc(0)));
+    await v.receive(encodeFrame(FrameType.LISTPORTS, Buffer.alloc(0)));
+    expect(last(rec)).toMatchObject({ type: FrameType.PORTS, json: { ok: false, error: 'rate limited' } });
+    for (let i = 0; i < 5; i++) await v.receive(inputFrame(1, 'k'));
+    expect(broker.sessions.get('s1')!.inputs).toHaveLength(5);
+    t = 1000;
+    await v.receive(encodeFrame(FrameType.LISTPORTS, Buffer.alloc(0)));
+    expect(last(rec).json).toHaveProperty('ports');
+  });
+
+  it('refuses a second ATTACH to a session the viewer already holds', async () => {
+    const { rec, hub, v } = setup('read');
+    await v.receive(jsonFrame(FrameType.ATTACH, { id: 's1', channel: 1 }));
+    await v.receive(jsonFrame(FrameType.ATTACH, { id: 's1', channel: 2 }));
+    expect(last(rec).json).toMatchObject({ channel: 2, ok: false, error: 'session already attached on this connection' });
+    expect(hub.liveTaps).toBe(1);
+  });
+
+  it('clamps RESIZE to 1-1000', async () => {
+    const { broker, v } = setup('steer');
+    await v.receive(jsonFrame(FrameType.ATTACH, { id: 's1', channel: 1 }));
+    await v.receive(resizeFrame(1, 0, 5000));
+    expect(broker.sessions.get('s1')!.resizes).toEqual([[1, 1000]]);
+  });
+
+  it('answers a failed broker request generically and logs the detail', async () => {
+    const lines: string[] = [];
+    const broker = fakeBroker(['s1']);
+    broker.ops.list = async () => { throw new Error('dial /run/broker/broker.sock: secret detail'); };
+    const rec = sinkRecorder();
+    const v = new AttachHub(broker.ops, { log: createLogger((l) => lines.push(l)) }).viewer({ identity: alice, tier: 'read' }, rec.sink);
+    await v.receive(encodeFrame(FrameType.LIST, Buffer.alloc(0)));
+    expect(last(rec).json).toEqual({ ok: false, error: 'broker request failed' });
+    expect(lines.join('\n')).toContain('secret detail');
+  });
+});
+
+describe('owner pruning', () => {
+  it('forgets the owner when the session exits', async () => {
+    const broker = fakeBroker([]);
+    const hub = new AttachHub(broker.ops);
+    const v = hub.viewer({ identity: alice, tier: 'session' }, sinkRecorder().sink);
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'x' }));
+    await v.receive(jsonFrame(FrameType.ATTACH, { id: 'x', channel: 1 }));
+    broker.sessions.get('x')!.handlers!.onEnded();
+    expect(hub.owners.has('x')).toBe(false);
+  });
+
+  it('prunes owners missing from a broker listing taken after they were set, never newer ones', async () => {
+    const broker = fakeBroker([]);
+    const hub = new AttachHub(broker.ops);
+    const v = hub.viewer({ identity: alice, tier: 'session' }, sinkRecorder().sink);
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'gone' }));
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'kept' }));
+    const mark = hub.ownerMark();
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'newer' }));
+    hub.pruneOwners(new Set(['kept']), mark);
+    expect([...hub.owners.keys()].sort()).toEqual(['kept', 'newer']);
   });
 });

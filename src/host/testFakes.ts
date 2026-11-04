@@ -1,5 +1,6 @@
 // Test doubles shared by the host's unit tests (not shipped: only *.test.ts import it).
 import { FrameReader, FrameType, decodeChannelData, encodeChannelData, encodeFrame, encodeJSONFrame } from '../main/broker.js';
+import type { BrokerPortInfo } from '../main/broker.js';
 import type { Identity } from '../main/identity/types.js';
 import type { BrokerOps, Upstream, UpstreamHandlers } from './brokerOps.js';
 import type { ViewerSink } from './attachHub.js';
@@ -22,6 +23,7 @@ export function fakeBroker(initial: string[] = []) {
   const sessions = new Map<string, FakeSession>();
   const created: Array<{ id: string; args: string[] }> = [];
   const killed: number[] = [];
+  const ports: BrokerPortInfo[] = [{ port: 3000, session: 's1' }];
   const add = (id: string): FakeSession => {
     const s: FakeSession = { handlers: null, inputs: [], resizes: [], closed: false, detached: 0 };
     sessions.set(id, s);
@@ -60,14 +62,14 @@ export function fakeBroker(initial: string[] = []) {
       return [...sessions.keys()].map((id) => ({ id, alive: !sessions.get(id)!.closed }));
     },
     async listPorts() {
-      return [{ port: 3000 }];
+      return ports.map((p) => ({ ...p }));
     },
     async killPort(port) {
       killed.push(port);
       return { ok: true };
     }
   };
-  return { ops, sessions, created, killed, attachCalls: () => attachCalls };
+  return { ops, sessions, created, killed, ports, attachCalls: () => attachCalls };
 }
 
 export interface Received {

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Tier } from '../main/identity/grants.js';
 import { brokerRpcChannels, dispatchRpc, RpcArgError, type RpcChannel } from './rpc.js';
+import { createLogger } from './log.js';
 import { fakeBroker, person } from './testFakes.js';
 
 const caller = (tier: Tier) => ({ identity: person('alice', 1), tier });
@@ -30,7 +31,13 @@ describe('dispatchRpc', () => {
       ['boom', { tier: 'read', handle: async () => { throw new Error('Bearer gho_' + 'a'.repeat(36)); } }]
     ]);
     expect(await dispatchRpc(r, 'bad', { args: [] }, caller('read'))).toEqual({ status: 400, body: { ok: false, error: 'port must be 1-65535' } });
-    expect(await dispatchRpc(r, 'boom', { args: [] }, caller('read'))).toEqual({ status: 500, body: { ok: false, error: '[redacted]' } });
+    const lines: string[] = [];
+    expect(await dispatchRpc(r, 'boom', { args: [] }, caller('read'), createLogger((l) => lines.push(l)))).toEqual({
+      status: 500,
+      body: { ok: false, error: 'internal error' }
+    });
+    expect(lines.join('\n')).toContain('"channel":"boom"');
+    expect(lines.join('\n')).not.toContain('gho_');
   });
 });
 
@@ -45,5 +52,18 @@ describe('brokerRpcChannels', () => {
     const reg = brokerRpcChannels(b.ops);
     expect((await dispatchRpc(reg, 'ports:kill', { args: ['22; rm'] }, caller('steer'))).status).toBe(400);
     expect(b.killed).toEqual([]);
+  });
+
+  it('ports:kill refuses the host port and unattributed ports with 403', async () => {
+    const b = fakeBroker(['s1']);
+    b.ports.push({ port: 8080 }, { port: 9229 });
+    const reg = brokerRpcChannels(b.ops, 8080);
+    expect(await dispatchRpc(reg, 'ports:kill', { args: [8080] }, caller('session'))).toEqual({
+      status: 403,
+      body: { ok: false, error: 'forbidden: that port belongs to the host' }
+    });
+    expect((await dispatchRpc(reg, 'ports:kill', { args: [9229] }, caller('session'))).status).toBe(403);
+    expect((await dispatchRpc(reg, 'ports:kill', { args: [3000] }, caller('steer'))).status).toBe(200);
+    expect(b.killed).toEqual([3000]);
   });
 });

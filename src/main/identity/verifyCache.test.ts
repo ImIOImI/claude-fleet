@@ -86,4 +86,17 @@ describe('withVerifyCache', () => {
     await cached.verify('a');
     expect(verify).toHaveBeenCalledTimes(4);
   });
+
+  it('peek reports a live cached success without calling the provider', async () => {
+    let t = 0;
+    const { p, verify } = inner(async (tok) => who(tok));
+    const cached = withVerifyCache(p, { now: () => t });
+    expect(cached.peek('a')).toBe(false);
+    await cached.verify('a');
+    expect(cached.peek('a')).toBe(true);
+    expect(cached.peek('b')).toBe(false);
+    t = VERIFY_TTL_MS + 1;
+    expect(cached.peek('a')).toBe(false);
+    expect(verify).toHaveBeenCalledTimes(1);
+  });
 });

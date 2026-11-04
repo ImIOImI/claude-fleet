@@ -36,12 +36,19 @@ export class EventHub {
   }
 }
 
+export interface OwnerPruner {
+  ownerMark(): number;
+  pruneOwners(live: ReadonlySet<string>, mark: number): void;
+}
+
 /** Polls the broker and publishes sessions:changed / ports:changed on a change. */
-export function brokerWatch(ops: BrokerOps, hub: EventHub) {
+export function brokerWatch(ops: BrokerOps, hub: EventHub, owners?: OwnerPruner) {
   let lastSessions = '';
   let lastPorts = '';
   async function poll(): Promise<void> {
+    const mark = owners?.ownerMark() ?? 0;
     const sessions = await ops.list();
+    owners?.pruneOwners(new Set(sessions.filter((x) => x.alive).map((x) => x.id)), mark);
     const s = JSON.stringify([...sessions].sort((a, b) => a.id.localeCompare(b.id)));
     if (s !== lastSessions) {
       lastSessions = s;

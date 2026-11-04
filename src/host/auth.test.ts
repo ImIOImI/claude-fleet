@@ -156,3 +156,23 @@ describe('negative verify cache', () => {
     expect(verify).toHaveBeenCalledTimes(4);
   });
 });
+
+describe('AuthContext.peek', () => {
+  const config = parseHostConfig({ workspace: { name: 'w' }, grants: [{ login: 'alice', tier: 'read' }] });
+
+  it('is valid for a cached success, rejected for a cached unauthorized, miss otherwise; never calls the provider', async () => {
+    const BAD = 'gho_' + 'D'.repeat(36);
+    const verify = vi.fn(async (t: string): Promise<Identity> => {
+      if (t === TOKEN) return alice;
+      throw new IdentityError(t === BAD ? 'unauthorized' : 'network', 'no', 401);
+    });
+    const ctx = buildAuthContext(config, () => ({ id: 'github', verify }));
+    expect(ctx.peek(TOKEN)).toBe('miss');
+    await authenticate(`Bearer ${TOKEN}`, ctx);
+    await authenticate(`Bearer ${BAD}`, ctx);
+    await authenticate('Bearer gho_net', ctx);
+    expect(verify).toHaveBeenCalledTimes(3);
+    expect([ctx.peek(TOKEN), ctx.peek(BAD), ctx.peek('gho_net')]).toEqual(['valid', 'rejected', 'miss']);
+    expect(verify).toHaveBeenCalledTimes(3);
+  });
+});

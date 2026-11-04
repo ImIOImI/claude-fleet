@@ -1,5 +1,5 @@
-// Per-address limit on 401s, checked before verify so a flood of garbage
-// tokens can't drive GitHub calls.
+// Limits on token verifications that would reach GitHub. Cached tokens skip
+// these entirely (see server.ts gate()).
 import type { IncomingMessage } from 'node:http';
 import { isIP } from 'node:net';
 
@@ -23,6 +23,12 @@ export class UnauthLimiter {
 
   get size(): number {
     return this.hits.size;
+  }
+
+  /** Ms until `ip` is no longer limited; 0 when it isn't. */
+  retryAfterMs(ip: string): number {
+    const h = this.hits.get(ip);
+    return h && this.limited(ip) ? h.start + this.opts.windowMs - this.now() : 0;
   }
 
   limited(ip: string): boolean {
@@ -51,4 +57,35 @@ export function clientAddress(req: IncomingMessage, trustedHops: number): string
     .filter(Boolean);
   const hop = parts.length >= trustedHops ? parts[parts.length - trustedHops] : undefined;
   return hop && isIP(hop) ? hop : socket;
+}
+
+/** Global budget of GitHub-confirmed rejections, refilled evenly over a minute. */
+export class RejectionBudget {
+  private tokens: number;
+  private at: number;
+
+  constructor(
+    private readonly perMinute: number,
+    private readonly now: () => number = Date.now
+  ) {
+    this.tokens = perMinute;
+    this.at = now();
+  }
+
+  private refill(): void {
+    const t = this.now();
+    this.tokens = Math.min(this.perMinute, this.tokens + ((t - this.at) * this.perMinute) / 60_000);
+    this.at = t;
+  }
+
+  /** Ms until one more rejection fits; 0 when one fits now. */
+  waitMs(): number {
+    this.refill();
+    return this.tokens >= 1 ? 0 : Math.ceil(((1 - this.tokens) * 60_000) / this.perMinute);
+  }
+
+  spend(): void {
+    this.refill();
+    this.tokens = Math.max(0, this.tokens - 1);
+  }
 }

@@ -12,11 +12,27 @@ import {
 } from '../main/broker.js';
 import { tierAtLeast, type Tier } from '../main/identity/grants.js';
 import type { Identity } from '../main/identity/types.js';
-import type { BrokerOps, Upstream } from './brokerOps.js';
+import { DEFAULT_PORT } from './config.js';
+import { portKillRefusal, type BrokerOps, type Upstream } from './brokerOps.js';
+import type { Logger } from './log.js';
 import { CLIENT_FRAME_TIER, RESPONSE_OF, decodeResize, hostCreateArgs, validSessionId } from './frameGate.js';
 
 /** Matches the broker's per-session ring. */
 export const REPLAY_BYTES = 64 * 1024;
+/** Frames received but not yet handled; past this the viewer is closed with 1008. */
+export const MAX_PENDING_FRAMES = 256;
+/** Per-viewer token bucket for every frame but INPUT and RESIZE (each may open a broker connection). */
+export const CONTROL_BURST = 20;
+export const CONTROL_PER_SEC = 10;
+
+export interface AttachHubOptions {
+  /** fleet-host's own port, which KILLPORT must never reach. */
+  hostPort?: number;
+  log?: Logger;
+  now?: () => number;
+  controlBurst?: number;
+  controlPerSec?: number;
+}
 
 export interface Principal {
   identity: Identity;
@@ -86,7 +102,8 @@ class SessionTap {
   constructor(
     readonly id: string,
     private readonly ops: BrokerOps,
-    private readonly onRetire: (tap: SessionTap) => void
+    private readonly onRetire: (tap: SessionTap) => void,
+    private readonly onExit: (id: string) => void
   ) {}
 
   async join(v: Viewer, channel: number): Promise<JoinResult> {
@@ -125,6 +142,7 @@ class SessionTap {
     this.ended = true;
     this.upstream = null;
     this.onRetire(this);
+    if (reason === 'exit') this.onExit(this.id);
     for (const [v, ch] of this.viewers) v.deliverEnded(ch, reason);
   }
 
@@ -167,15 +185,55 @@ export class AttachHub {
   private readonly taps = new Map<string, SessionTap>();
   /** Broker session id → ownerKey of the person who CREATEd it (in memory; PTYs die with the container). */
   readonly owners = new Map<string, string>();
+  private readonly ownerSeq = new Map<string, number>();
+  private seq = 0;
+  readonly hostPort: number;
+  readonly log: Logger | undefined;
+  readonly now: () => number;
+  readonly controlBurst: number;
+  readonly controlPerSec: number;
 
-  constructor(readonly ops: BrokerOps) {}
+  constructor(
+    readonly ops: BrokerOps,
+    opts: AttachHubOptions = {}
+  ) {
+    this.hostPort = opts.hostPort ?? DEFAULT_PORT;
+    this.log = opts.log;
+    this.now = opts.now ?? Date.now;
+    this.controlBurst = opts.controlBurst ?? CONTROL_BURST;
+    this.controlPerSec = opts.controlPerSec ?? CONTROL_PER_SEC;
+  }
+
+  setOwner(id: string, key: string): void {
+    this.owners.set(id, key);
+    this.ownerSeq.set(id, ++this.seq);
+  }
+
+  dropOwner(id: string): void {
+    this.owners.delete(id);
+    this.ownerSeq.delete(id);
+  }
+
+  /** Take before listing the broker; pruneOwners then spares owners set after it. */
+  ownerMark(): number {
+    return this.seq;
+  }
+
+  pruneOwners(live: ReadonlySet<string>, mark: number): void {
+    for (const [id, seq] of this.ownerSeq) if (seq <= mark && !live.has(id)) this.dropOwner(id);
+  }
 
   tap(id: string): SessionTap {
     let t = this.taps.get(id);
     if (!t) {
-      t = new SessionTap(id, this.ops, (gone) => {
-        if (this.taps.get(gone.id) === gone) this.taps.delete(gone.id);
-      });
+      t = new SessionTap(
+        id,
+        this.ops,
+        (gone) => {
+          if (this.taps.get(gone.id) === gone) this.taps.delete(gone.id);
+        },
+        (exited) => this.dropOwner(exited)
+      );
       this.taps.set(id, t);
     }
     return t;
@@ -207,12 +265,17 @@ function parseJson(payload: Buffer): Json | null {
 
 const isChannel = (c: unknown): c is number => typeof c === 'number' && Number.isInteger(c) && c >= 0 && c <= 0xffffffff;
 const dim = (n: unknown, d: number): number => (typeof n === 'number' && Number.isInteger(n) && n > 0 && n <= 1000 ? n : d);
+const clampDim = (n: number): number => Math.min(1000, Math.max(1, n));
+const UNMETERED = new Set([FrameType.INPUT, FrameType.RESIZE]);
 
 export class Viewer {
   private readonly channels = new Map<number, SessionTap>();
   private readonly reader = new FrameReader();
   private queue: Promise<void> = Promise.resolve();
   private closed = false;
+  private pending = 0;
+  private tokens: number;
+  private refilledAt: number;
   /** Frames refused for insufficient tier. */
   denied = 0;
 
@@ -220,7 +283,19 @@ export class Viewer {
     private readonly hub: AttachHub,
     public principal: Principal,
     private readonly sink: ViewerSink
-  ) {}
+  ) {
+    this.tokens = hub.controlBurst;
+    this.refilledAt = hub.now();
+  }
+
+  private takeControlToken(): boolean {
+    const t = this.hub.now();
+    this.tokens = Math.min(this.hub.controlBurst, this.tokens + ((t - this.refilledAt) / 1000) * this.hub.controlPerSec);
+    this.refilledAt = t;
+    if (this.tokens < 1) return false;
+    this.tokens -= 1;
+    return true;
+  }
 
   /** Raw bytes from the viewer's socket; frames may span messages. */
   receive(chunk: Buffer): Promise<void> {
@@ -228,7 +303,13 @@ export class Viewer {
     try {
       this.reader.push(chunk);
       for (const f of this.reader.consume()) {
-        this.queue = this.queue.then(() => (this.closed ? undefined : this.safeHandle(f.type, f.payload)));
+        if (++this.pending > MAX_PENDING_FRAMES) {
+          this.fail(1008, 'too many pending frames');
+          break;
+        }
+        this.queue = this.queue
+          .then(() => (this.closed ? undefined : this.safeHandle(f.type, f.payload)))
+          .finally(() => this.pending--);
       }
     } catch {
       this.fail(1002, 'malformed frame');
@@ -272,7 +353,8 @@ export class Viewer {
   private async safeHandle(type: FrameType, payload: Buffer): Promise<void> {
     try {
       await this.handle(type, payload);
-    } catch {
+    } catch (err) {
+      this.hub.log?.log('error', 'attach frame failed', { type, error: err });
       const resp = RESPONSE_OF.get(type);
       if (resp !== undefined) this.reply(resp, { ok: false, error: 'broker request failed' });
     }
@@ -282,6 +364,12 @@ export class Viewer {
     const need = CLIENT_FRAME_TIER.get(type);
     if (need === undefined) return this.fail(1008, `frame type ${type} not accepted`);
     if (!tierAtLeast(this.principal.tier, need)) return this.deny(type, payload, need);
+    if (!UNMETERED.has(type) && !this.takeControlToken()) {
+      const resp = RESPONSE_OF.get(type);
+      const req = parseJson(payload) ?? {};
+      if (resp !== undefined) this.reply(resp, { id: req.id, channel: req.channel, ok: false, error: 'rate limited' });
+      return;
+    }
     switch (type) {
       case FrameType.INPUT: {
         const { channel, body } = decodeChannelData(payload);
@@ -290,7 +378,7 @@ export class Viewer {
       }
       case FrameType.RESIZE: {
         const { channel, cols, rows } = decodeResize(payload);
-        this.channels.get(channel)?.resize(cols, rows);
+        this.channels.get(channel)?.resize(clampDim(cols), clampDim(rows));
         return;
       }
       case FrameType.LIST:
@@ -320,6 +408,8 @@ export class Viewer {
         if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) {
           return this.reply(resp, { ok: false, error: 'bad port' });
         }
+        const refusal = await portKillRefusal(this.hub.ops, port, this.hub.hostPort);
+        if (refusal) return this.reply(resp, { ok: false, error: refusal });
         return this.reply(resp, await this.hub.ops.killPort(port));
       }
       case FrameType.DIAL:
@@ -334,6 +424,9 @@ export class Viewer {
     }
     if (this.channels.has(channel)) {
       return this.reply(FrameType.ATTACHED, { channel, ok: false, error: 'channel in use' });
+    }
+    if ([...this.channels.values()].some((t) => t.id === id)) {
+      return this.reply(FrameType.ATTACHED, { channel, ok: false, error: 'session already attached on this connection' });
     }
     const tap = this.hub.tap(id);
     const r = await tap.join(this, channel);
@@ -354,7 +447,7 @@ export class Viewer {
     }
     this.channels.delete(req.channel as number);
     await tap.closeSession();
-    this.hub.owners.delete(tap.id);
+    this.hub.dropOwner(tap.id);
     this.reply(FrameType.CLOSED, { channel: req.channel, ok: true });
   }
 
@@ -364,7 +457,7 @@ export class Viewer {
     const args = hostCreateArgs(req.args);
     if (!args) return this.reply(FrameType.CREATED, { id, ok: false, error: 'forbidden: unsupported create args' });
     const r = await this.hub.ops.create(id, dim(req.cols, 80), dim(req.rows, 24), args);
-    if (r.ok) this.hub.owners.set(id, ownerKey(this.principal.identity));
+    if (r.ok) this.hub.setOwner(id, ownerKey(this.principal.identity));
     this.reply(FrameType.CREATED, { id, ok: r.ok, ...(r.error ? { error: r.error } : {}) });
   }
 }

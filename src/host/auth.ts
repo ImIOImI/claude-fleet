@@ -10,9 +10,13 @@ import { withVerifyCache } from '../main/identity/verifyCache.js';
 import type { HostConfig } from './config.js';
 import type { Logger } from './log.js';
 
+export type PeekResult = 'valid' | 'rejected' | 'miss';
+
 export interface AuthContext {
   readonly provider: IdentityProvider;
   readonly grants: GrantConfig;
+  /** What `provider.verify(token)` would answer from cache alone; 'miss' means it would call GitHub. */
+  peek(token: string): PeekResult;
 }
 
 export type ProviderFactory = (machines: readonly MachineRule[]) => IdentityProvider;
@@ -30,7 +34,7 @@ export interface AuthContextOptions {
 
 /** Remembers tokens the provider called `unauthorized`, so a replayed bad token can't drive GitHub calls.
  *  Network and upstream failures are never cached: an outage is not a rejection. */
-function withNegativeCache(inner: IdentityProvider, opts: AuthContextOptions): IdentityProvider {
+function withNegativeCache(inner: IdentityProvider, opts: AuthContextOptions): IdentityProvider & { rejected(token: string): boolean } {
   const ttl = opts.negativeTtlMs ?? NEGATIVE_TTL_MS;
   const max = opts.negativeMaxEntries ?? NEGATIVE_MAX_ENTRIES;
   const now = opts.now ?? Date.now;
@@ -38,6 +42,7 @@ function withNegativeCache(inner: IdentityProvider, opts: AuthContextOptions): I
   const keyOf = (token: string): string => createHash('sha256').update(token).digest('hex');
   return {
     id: inner.id,
+    rejected: (token) => (rejected.get(keyOf(token)) ?? 0) > now(),
     async verify(token) {
       const key = keyOf(token);
       const until = rejected.get(key);
@@ -66,7 +71,13 @@ export function buildAuthContext(
   factory: ProviderFactory = githubProviderFactory,
   opts: AuthContextOptions = {}
 ): AuthContext {
-  return { provider: withNegativeCache(withVerifyCache(factory(config.grants.machines)), opts), grants: config.grants };
+  const cached = withVerifyCache(factory(config.grants.machines));
+  const provider = withNegativeCache(cached, opts);
+  return {
+    provider,
+    grants: config.grants,
+    peek: (token) => (cached.peek(token) ? 'valid' : provider.rejected(token) ? 'rejected' : 'miss')
+  };
 }
 
 export type AuthResult =

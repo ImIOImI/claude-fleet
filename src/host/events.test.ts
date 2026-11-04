@@ -35,4 +35,15 @@ describe('brokerWatch', () => {
     await w.poll();
     expect(got).toEqual(['sessions:changed', 'ports:changed', 'sessions:changed']);
   });
+
+  it('prunes hub owners against the listing', async () => {
+    const b = fakeBroker(['s1']);
+    const marks: number[] = [];
+    const pruned: string[][] = [];
+    const owners = { ownerMark: () => (marks.push(7), 7), pruneOwners: (live: ReadonlySet<string>, mark: number) => pruned.push([...live, String(mark)]) };
+    b.sessions.get('s1')!.closed = true;
+    await b.ops.create('s2', 80, 24, []);
+    await brokerWatch(b.ops, new EventHub(), owners).poll();
+    expect(pruned).toEqual([['s2', '7']]);
+  });
 });

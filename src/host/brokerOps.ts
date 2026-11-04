@@ -30,6 +30,16 @@ export interface BrokerOps {
   killPort(port: number): Promise<{ ok: boolean; error?: string }>;
 }
 
+/**
+ * Why a viewer may not kill `port`, or null if it may. The broker kills an
+ * unattributed port's owner outright, which could be fleet-host itself.
+ */
+export async function portKillRefusal(ops: BrokerOps, port: number, hostPort: number): Promise<string | null> {
+  if (port === hostPort) return 'forbidden: that port belongs to the host';
+  const info = (await ops.listPorts()).find((p) => p.port === port);
+  return info?.session ? null : 'forbidden: that port is not owned by a session';
+}
+
 async function withClient<T>(socket: string, fn: (c: BrokerClient) => Promise<T>): Promise<T> {
   const c = new BrokerClient(socket);
   try {
@@ -55,7 +65,7 @@ export function brokerOps(socket: string): BrokerOps {
       c.on('ended', (ch: number) => ch === UPSTREAM_CHANNEL && h.onEnded());
       c.on('error', () => undefined);
       c.on('close', () => h.onGone());
-      const r = await c.attachSession(id, UPSTREAM_CHANNEL).catch((err: Error) => ({ ok: false, error: err.message }));
+      const r = await c.attachSession(id, UPSTREAM_CHANNEL).catch(() => ({ ok: false, error: 'attach failed' }));
       if (!r.ok) {
         c.removeAllListeners('close');
         c.close();
