@@ -107,6 +107,10 @@ interface AppConfig {
   /** Hand-edited only: an org's own GitHub OAuth app. Env
    *  CLAUDE_FLEET_GITHUB_CLIENT_ID wins (identity/clientId.ts). */
   identity?: { github?: { clientId?: string } };
+  /** Background knowledge capture, global switch (#483). Absent ⇒ default ON;
+   *  a per-workspace `WorkspaceSpec.knowledgeCapture` flag can still disable
+   *  capture for one workspace even while this stays on. */
+  knowledgeCapture?: boolean;
 }
 
 /** Defensively parse the persisted usageBudget (untrusted JSON on disk). */
@@ -209,7 +213,8 @@ async function read(): Promise<AppConfig> {
       perfTelemetry: typeof parsed.perfTelemetry === 'boolean' ? parsed.perfTelemetry : undefined,
       perfOtlp: parsePerfOtlp(parsed.perfOtlp),
       keepRunningInTray: typeof parsed.keepRunningInTray === 'boolean' ? parsed.keepRunningInTray : undefined,
-      identity: parseIdentityConfig(parsed.identity)
+      identity: parseIdentityConfig(parsed.identity),
+      knowledgeCapture: typeof parsed.knowledgeCapture === 'boolean' ? parsed.knowledgeCapture : undefined
     };
   } catch {
     cached = {};
@@ -381,6 +386,14 @@ export async function getPerfTelemetry(): Promise<boolean> {
 export async function setPerfTelemetry(enabled: boolean): Promise<void> {
   const cfg = await read();
   await write({ ...cfg, perfTelemetry: enabled });
+}
+
+/** Background knowledge capture (#483) — default on; only an explicit false disables it. */
+export async function getKnowledgeCapture(): Promise<boolean> {
+  return (await read()).knowledgeCapture !== false;
+}
+export async function setKnowledgeCapture(enabled: boolean): Promise<void> {
+  const cfg = await read(); await write({ ...cfg, knowledgeCapture: enabled });
 }
 
 /** OTLP export setting (endpoint kept even while disabled — the Settings UI

@@ -96,6 +96,9 @@ export interface WorkspaceFormSubmit {
   accessibility?: AccessibilityConfig;
   /** Inbox permissions (#407); undefined when everything is at its default. */
   inbox?: InboxConfig;
+  /** Background knowledge capture (#483); absent/true = on. Only an explicit
+   *  `false` is ever submitted. */
+  knowledgeCapture?: boolean;
 }
 
 interface ImageEntry {
@@ -271,6 +274,8 @@ export function WorkspaceForm({
   const [inboxOpen, setInboxOpen] = useState(initial?.inbox !== undefined);
   const [trustedEdits, setTrustedEdits] = useState(initial?.inbox?.trusted === true);
   const [exposeSkills, setExposeSkills] = useState(initial?.inbox?.exposeSkills !== false);
+  // Background knowledge capture (#483) — edit-mode only. Default on.
+  const [knowledgeCapture, setKnowledgeCapture] = useState(initial?.knowledgeCapture !== false);
   // Manager workspaces eligible for the acceptFrom list (other container managers).
   const managerOptions = useMemo(
     () => eligibleAcceptFromManagers(workspaces, initial?.id ?? ''),
@@ -570,7 +575,8 @@ export function WorkspaceForm({
       resources,
       mirror: { default: mirrorDefault, cleanup: cleanupDefault },
       accessibility,
-      inbox
+      inbox,
+      ...(knowledgeCapture ? {} : { knowledgeCapture: false })
     };
   };
 
@@ -1380,6 +1386,11 @@ export function WorkspaceForm({
           <p className="form-hint">
             Automations can see this workspace's skills (names, descriptions, and full text on request).
           </p>
+          <label className="committee-reachable-row">
+            <input type="checkbox" checked={knowledgeCapture} onChange={(e) => setKnowledgeCapture(e.target.checked)} disabled={busy} />
+            <span>Background knowledge capture</span>
+          </label>
+          <p className="form-hint">Periodically runs a hidden fork of each session that records durable decisions, root causes and gotchas as fleet claims.</p>
           {kind === 'container' ? (
             <>
               <label className="committee-reachable-row">

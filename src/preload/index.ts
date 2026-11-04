@@ -609,6 +609,7 @@ const api = {
       uiPrefs: UiPrefs;
       perfTelemetry: boolean;
       perfOtlp: { enabled: boolean; endpoint: string };
+      knowledgeCapture: boolean;
     }> => ipcRenderer.invoke('config:get'),
     setFleetRoot: (path: string): Promise<{ fleetRoot: string; sharedDir: string }> =>
       ipcRenderer.invoke('config:setFleetRoot', path),
@@ -645,7 +646,11 @@ const api = {
     setPerfTelemetry: (enabled: boolean): Promise<PerfStatusPayload> =>
       ipcRenderer.invoke('config:setPerfTelemetry', enabled),
     setPerfOtlp: (enabled: boolean, endpoint: string): Promise<PerfStatusPayload> =>
-      ipcRenderer.invoke('config:setPerfOtlp', enabled, endpoint)
+      ipcRenderer.invoke('config:setPerfOtlp', enabled, endpoint),
+    /** Global knowledge-capture switch (#483); default on. A per-workspace
+     *  manifest flag can still disable capture for one workspace. */
+    setKnowledgeCapture: (enabled: boolean): Promise<void> =>
+      ipcRenderer.invoke('config:setKnowledgeCapture', enabled)
   },
   usage: {
     /** Total tokens spent across the fleet in the trailing rolling window —

@@ -1287,6 +1287,7 @@ export function App() {
       mirror: submit.mirror,
       accessibility: submit.accessibility,
       inbox: submit.inbox,
+      knowledgeCapture: submit.knowledgeCapture,
       createdAt: before.createdAt,
       lastUsedAt: Date.now()
     });

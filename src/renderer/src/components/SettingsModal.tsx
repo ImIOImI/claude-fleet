@@ -112,6 +112,10 @@ export function SettingsModal({ onClose, onSaved, initialTab, names = {} }: Prop
   const [perfOtlpEnabled, setPerfOtlpEnabled] = useState(false);
   const [perfOtlpEndpoint, setPerfOtlpEndpoint] = useState('');
   const [perfStatus, setPerfStatus] = useState<PerfStatusPayload | null>(null);
+  // Global knowledge-capture switch (#483). Applied immediately on change
+  // (unlike the other Diagnostics settings, which wait for Save) because it
+  // has no dependent fields to batch with.
+  const [knowledgeCapture, setKnowledgeCaptureState] = useState(true);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -159,6 +163,9 @@ export function SettingsModal({ onClose, onSaved, initialTab, names = {} }: Prop
         if (cfg.perfOtlp) {
           setPerfOtlpEnabled(cfg.perfOtlp.enabled);
           setPerfOtlpEndpoint(cfg.perfOtlp.endpoint ?? '');
+        }
+        if (cfg.knowledgeCapture !== undefined) {
+          setKnowledgeCaptureState(cfg.knowledgeCapture);
         }
         setLoaded(true);
       }
@@ -734,6 +741,14 @@ export function SettingsModal({ onClose, onSaved, initialTab, names = {} }: Prop
                   OTLP/HTTP endpoint. <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> overrides this when
                   set; auth headers via <code>OTEL_EXPORTER_OTLP_HEADERS</code>.
                 </p>
+              </div>
+              <div className="setting-row">
+                <div className="setting-row-text">
+                  <label className="setting-title" htmlFor="knowledge-capture">Background knowledge capture</label>
+                  <p className="setting-desc">Global switch for capture forks (per-workspace switches still apply).</p>
+                </div>
+                <input id="knowledge-capture" type="checkbox" checked={knowledgeCapture}
+                  onChange={async (e) => { const v = e.target.checked; setKnowledgeCaptureState(v); await window.api.config.setKnowledgeCapture(v); }} />
               </div>
             </div>
 

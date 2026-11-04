@@ -47,6 +47,8 @@ const {
   setPerfTelemetry,
   getPerfOtlp,
   setPerfOtlp,
+  getKnowledgeCapture,
+  setKnowledgeCapture,
   _resetConfigCacheForTests,
   getKeepRunningInTray,
   setKeepRunningInTray,
@@ -380,6 +382,16 @@ describe('perf telemetry config', () => {
     await expect(setPerfOtlp(true, 'ftp://nope')).rejects.toThrow(/http/i);
     await expect(setPerfOtlp(true, '')).rejects.toThrow(/endpoint/i);
     await expect(setPerfOtlp(false, '')).resolves.toBeUndefined(); // disabling never validates
+  });
+});
+
+describe('knowledge capture config (#483)', () => {
+  it('knowledgeCapture defaults on and persists an explicit false', async () => {
+    _resetConfigCacheForTests();
+    expect(await getKnowledgeCapture()).toBe(true);
+    await setKnowledgeCapture(false);
+    _resetConfigCacheForTests();
+    expect(await getKnowledgeCapture()).toBe(false);
   });
 });
 

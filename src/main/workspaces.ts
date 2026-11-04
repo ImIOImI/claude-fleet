@@ -183,6 +183,8 @@ export interface WorkspaceSpec {
   inbox?: InboxConfig;
   /** 'automations' = the one workspace behind the Inbox chip (#407 Phase 5b): fleet-wide automation read + trusted. */
   role?: 'automations';
+  /** Background knowledge capture (#483); absent = on. */
+  knowledgeCapture?: boolean;
   createdAt: number;
   lastUsedAt: number;
 }
@@ -339,6 +341,7 @@ export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec |
       accessibility: sanitizeAccessibility(parsed.accessibility),
       inbox: sanitizeInboxConfig(parsed.inbox),
       role: parsed.role === 'automations' ? 'automations' : undefined,
+      ...(parsed.knowledgeCapture === false ? { knowledgeCapture: false } : {}),
       createdAt: parsed.createdAt ?? Date.now(),
       lastUsedAt: parsed.lastUsedAt ?? parsed.createdAt ?? Date.now()
     };

@@ -119,3 +119,29 @@ it('drops an unrecognised terminalRenderer rather than persisting it', async () 
   await writeWorkspaceManifest(rendererSpec('vulkan'));
   expect((await readWorkspaceManifest(ID))?.terminalRenderer).toBeUndefined();
 });
+
+// #483: per-workspace knowledge-capture switch. Absent ⇒ on; the manifest
+// parser is a strict allowlist, so an unlisted field silently vanishes on
+// the next read/write — which is exactly how this would regress.
+const knowledgeCaptureSpec = (knowledgeCapture?: boolean) =>
+  ({
+    id: ID,
+    name: 'knowledge-capture-test',
+    labels: [],
+    workspaceRoot: tmpdir(),
+    workspaceSubdir: '',
+    kind: 'local',
+    authMode: 'oauth',
+    ...(knowledgeCapture !== undefined ? { knowledgeCapture } : {}),
+    env: { plain: {}, secretKeys: [] },
+    mirror: { default: 'on', cleanup: 'delete' },
+    createdAt: 1,
+    lastUsedAt: 1
+  }) as unknown as Parameters<typeof writeWorkspaceManifest>[0];
+
+it('round-trips knowledgeCapture: false and omits it when absent', async () => {
+  await writeWorkspaceManifest(knowledgeCaptureSpec(false));
+  expect((await readWorkspaceManifest(ID))?.knowledgeCapture).toBe(false);
+  await writeWorkspaceManifest(knowledgeCaptureSpec());
+  expect((await readWorkspaceManifest(ID))?.knowledgeCapture).toBeUndefined();
+});

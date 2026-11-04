@@ -17,6 +17,8 @@ export interface WorkspaceManifest {
   env: unknown;
   resources?: unknown;
   mirror: unknown;
+  /** Background knowledge capture (#483); absent = on. */
+  knowledgeCapture?: boolean;
 }
 
 /** The workspace lifecycle calls this orchestration needs (injected for tests). */
