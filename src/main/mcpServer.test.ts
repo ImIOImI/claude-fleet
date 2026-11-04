@@ -233,7 +233,7 @@ describe('typed read tools are workspace-scoped (#146)', () => {
   });
 });
 
-describe('scoped query tool (#174)', () => {
+describe('scoped query tool (#174)', { timeout: 30_000 }, () => {
   let fdb: Database.Database;
   let cleanup: () => void;
   beforeEach(() => {
@@ -245,51 +245,51 @@ describe('scoped query tool (#174)', () => {
   });
   const run = (args: Record<string, unknown>) => tool('query').run(fdb, args, ctxA);
 
-  it('returns only the caller\'s rows for a plain select', () => {
-    const rows = run({ sql: 'SELECT workspace_id FROM sessions' }) as Array<{ workspace_id: string }>;
+  it('returns only the caller\'s rows for a plain select', async () => {
+    const rows = (await run({ sql: 'SELECT workspace_id FROM sessions' })) as Array<{ workspace_id: string }>;
     expect(rows.every((r) => r.workspace_id === WS_A)).toBe(true);
     expect(rows.length).toBe(1);
   });
 
-  it('cannot reach another workspace via UNION / subquery / where', () => {
-    const r1 = run({ sql: "SELECT * FROM sessions WHERE workspace_id = '" + WS_B + "'" }) as unknown[];
+  it('cannot reach another workspace via UNION / subquery / where', async () => {
+    const r1 = (await run({ sql: "SELECT * FROM sessions WHERE workspace_id = '" + WS_B + "'" })) as unknown[];
     expect(r1).toEqual([]);
-    const r2 = run({ sql: 'SELECT count(*) AS n FROM events' }) as Array<{ n: number }>;
+    const r2 = (await run({ sql: 'SELECT count(*) AS n FROM events' })) as Array<{ n: number }>;
     expect(r2[0].n).toBe(1); // only A's event is in the snapshot
   });
 
-  it('cannot introspect/escape via sqlite_master', () => {
-    const names = run({ sql: 'SELECT name FROM sqlite_master ORDER BY name' }) as Array<{ name: string }>;
+  it('cannot introspect/escape via sqlite_master', async () => {
+    const names = (await run({ sql: 'SELECT name FROM sqlite_master ORDER BY name' })) as Array<{ name: string }>;
     expect(names.map((r) => r.name).sort()).toEqual(
       ['broker_sessions', 'events', 'perf_events', 'session_summaries', 'session_tags', 'sessions', 'usage_events']
     );
   });
 
-  it('omits raw_jsonl by default and includes it only with include_raw', () => {
-    expect(() => run({ sql: 'SELECT raw_jsonl FROM events' })).toThrow(); // column not in snapshot
-    const rows = run({ sql: 'SELECT raw_jsonl FROM events', include_raw: true }) as Array<{ raw_jsonl: string }>;
+  it('omits raw_jsonl by default and includes it only with include_raw', async () => {
+    await expect(run({ sql: 'SELECT raw_jsonl FROM events' })).rejects.toThrow(); // column not in snapshot
+    const rows = (await run({ sql: 'SELECT raw_jsonl FROM events', include_raw: true })) as Array<{ raw_jsonl: string }>;
     expect(rows[0].raw_jsonl).toBe('{"a":1}'); // A\'s own row only
   });
 
-  it('rejects writes / DDL / multi-statement', () => {
-    expect(() => run({ sql: "INSERT INTO events (session_id) VALUES ('x')" })).toThrow(/read-only/i);
-    expect(() => run({ sql: 'DROP TABLE events' })).toThrow(/read-only/i);
-    expect(() => run({ sql: 'UPDATE sessions SET ai_title = 1' })).toThrow(/read-only/i);
-    expect(() => run({ sql: 'SELECT 1; SELECT 2' })).toThrow();
+  it('rejects writes / DDL / multi-statement', async () => {
+    await expect(run({ sql: "INSERT INTO events (session_id) VALUES ('x')" })).rejects.toThrow(/read-only/i);
+    await expect(run({ sql: 'DROP TABLE events' })).rejects.toThrow(/read-only/i);
+    await expect(run({ sql: 'UPDATE sessions SET ai_title = 1' })).rejects.toThrow(/read-only/i);
+    await expect(run({ sql: 'SELECT 1; SELECT 2' })).rejects.toThrow();
   });
 
-  it('caps result rows via max_rows', () => {
-    const rows = run({ sql: 'SELECT 1 AS x FROM sessions, events', max_rows: 1 }) as unknown[];
+  it('caps result rows via max_rows', async () => {
+    const rows = (await run({ sql: 'SELECT 1 AS x FROM sessions, events', max_rows: 1 })) as unknown[];
     expect(rows.length).toBe(1);
   });
 
-  it('supports bound params', () => {
-    const rows = run({ sql: 'SELECT id FROM sessions WHERE id = ?', params: ['sa'] }) as Array<{ id: string }>;
+  it('supports bound params', async () => {
+    const rows = (await run({ sql: 'SELECT id FROM sessions WHERE id = ?', params: ['sa'] })) as Array<{ id: string }>;
     expect(rows).toEqual([{ id: 'sa' }]);
   });
 });
 
-describe('query snapshot exposes phase-2 tables, workspace-scoped (#207)', () => {
+describe('query snapshot exposes phase-2 tables, workspace-scoped (#207)', { timeout: 30_000 }, () => {
   let fdb: Database.Database;
   let cleanup: () => void;
   beforeEach(() => {
@@ -301,30 +301,30 @@ describe('query snapshot exposes phase-2 tables, workspace-scoped (#207)', () =>
   });
   const run = (args: Record<string, unknown>) => tool('query').run(fdb, args, ctxA);
 
-  it('session_tags are readable and scoped', () => {
+  it('session_tags are readable and scoped', async () => {
     fdb.prepare(`INSERT INTO session_tags VALUES (?, 'sa', 'broker')`).run(WS_A);
     fdb.prepare(`INSERT INTO session_tags VALUES (?, 'sb', 'secret-tag')`).run(WS_B);
-    const rows = run({ sql: 'SELECT tag FROM session_tags ORDER BY tag' }) as Array<{ tag: string }>;
+    const rows = (await run({ sql: 'SELECT tag FROM session_tags ORDER BY tag' })) as Array<{ tag: string }>;
     expect(rows.map((r) => r.tag)).toEqual(['broker']);
   });
 
-  it('session_summaries are readable and scoped', () => {
+  it('session_summaries are readable and scoped', async () => {
     fdb.prepare(`INSERT INTO session_summaries (session_id, workspace_id, summary, source_max_event_id, generated_at) VALUES (?, ?, ?, ?, ?)`).run('sa', WS_A, 'A summary', 1, 1000);
     fdb.prepare(`INSERT INTO session_summaries (session_id, workspace_id, summary, source_max_event_id, generated_at) VALUES (?, ?, ?, ?, ?)`).run('sb', WS_B, 'B secret summary', 2, 2000);
-    const rows = run({ sql: 'SELECT session_id FROM session_summaries ORDER BY session_id' }) as Array<{ session_id: string }>;
+    const rows = (await run({ sql: 'SELECT session_id FROM session_summaries ORDER BY session_id' })) as Array<{ session_id: string }>;
     expect(rows.map((r) => r.session_id)).toEqual(['sa']);
   });
 
-  it('usage_events are readable and scoped', () => {
+  it('usage_events are readable and scoped', async () => {
     fdb.prepare(`INSERT INTO usage_events (ts, workspace_id, session_id, kind) VALUES (?, ?, ?, ?)`).run(1000, WS_A, 'sa', 'marked-useful');
     fdb.prepare(`INSERT INTO usage_events (ts, workspace_id, session_id, kind) VALUES (?, ?, ?, ?)`).run(2000, WS_B, 'sb', 'secret-event');
-    const rows = run({ sql: 'SELECT kind FROM usage_events ORDER BY kind' }) as Array<{ kind: string }>;
+    const rows = (await run({ sql: 'SELECT kind FROM usage_events ORDER BY kind' })) as Array<{ kind: string }>;
     expect(rows.map((r) => r.kind)).toEqual(['marked-useful']);
   });
 });
 
 describe('list_events richer projection (#174)', () => {
-  it('includes parsed tool-detail columns by default', () => {
+  it('includes parsed tool-detail columns by default', async () => {
     const rows = tool('list_events').run(db, { session_id: 'sa' }, ctxA) as Array<Record<string, unknown>>;
     const edit = rows.find((r) => r.tool_name === 'Edit')!;
     expect(edit.tool_input).toBe('/workspace/foo.ts');
@@ -710,7 +710,7 @@ describe('perf tools', () => {
     });
   });
 
-  describe('perf_events in query snapshot', () => {
+  describe('perf_events in query snapshot', { timeout: 30_000 }, () => {
     let fdb: Database.Database;
     let cleanup: () => void;
     beforeEach(() => {
@@ -721,11 +721,11 @@ describe('perf tools', () => {
       cleanup();
     });
 
-    it('scopes perf_events to allowed workspaces + app-global rows', () => {
+    it('scopes perf_events to allowed workspaces + app-global rows', async () => {
       fdb.prepare(`INSERT INTO perf_events (ts, kind, workspace_id, name, dur_ms) VALUES (1, 'pty_window', ?, 'claude_fleet.pty.bytes', NULL)`).run(WS_A);
       fdb.prepare(`INSERT INTO perf_events (ts, kind, workspace_id, name, dur_ms) VALUES (2, 'pty_window', ?, 'claude_fleet.pty.bytes', NULL)`).run(WS_B);
       fdb.prepare(`INSERT INTO perf_events (ts, kind, dur_ms) VALUES (3, 'stall', 80)`).run();
-      const rows = tool('query').run(fdb, { sql: 'SELECT kind, workspace_id FROM perf_events ORDER BY ts' }, ctxA) as Array<{ kind: string; workspace_id: string | null }>;
+      const rows = (await tool('query').run(fdb, { sql: 'SELECT kind, workspace_id FROM perf_events ORDER BY ts' }, ctxA)) as Array<{ kind: string; workspace_id: string | null }>;
       expect(rows).toEqual([
         { kind: 'pty_window', workspace_id: WS_A },
         { kind: 'stall', workspace_id: null }

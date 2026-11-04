@@ -22,7 +22,7 @@
 // transcripts. The typed tools enforce this server-side by filtering all queries
 // through the caller's `allowedWorkspaces` set. The `query` tool (#174) runs
 // arbitrary READ-ONLY SQL against a per-call in-memory SNAPSHOT seeded only with
-// the caller's allowed-workspace rows (buildSnapshot); the real DB is DETACHed
+// the caller's allowed-workspace rows (queryWorker.ts, off the main thread); the real DB is DETACHed
 // before the caller's SQL runs, so isolation is structural — no join/UNION/
 // subquery/sqlite_master trick can reach another workspace's rows.
 //
@@ -50,6 +50,7 @@ import { getPerfStatus, reconfigurePerf, getEffectivePerf } from './perf.js';
 import { getPerfTelemetry, setPerfTelemetry, getPerfOtlp } from './config.js';
 import { resolvePerfConfig } from './perfConfig.js';
 import { armSentinel, disarmSentinel } from './perfSentinel.js';
+import { runQueryInWorker } from './queryWorker.js';
 
 // A Windows host can't listen() on a unix-domain socket at a Windows path
 // (EACCES), so the per-workspace-socket transport (#117) can't work there. On
@@ -798,74 +799,6 @@ function inClause(col: string, allowed: Set<string>): { sql: string; params: str
   return { sql: `${col} IN (${ids.map(() => '?').join(',')})`, params: ids };
 }
 
-const MAX_QUERY_BYTES = 50_000;
-
-// Columns copied into a query snapshot's events table (raw_jsonl appended only
-// when include_raw). Mirrors the real events schema minus dedup_key.
-const SNAPSHOT_EVENT_COLS =
-  'id, session_id, workspace_id, ts, type, subtype, uuid, parent_uuid, model, ' +
-  'input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, ' +
-  'service_tier, tool_name, tool_use_id, tool_input, tool_result_is_error';
-
-/** Build a throwaway in-memory DB containing ONLY the caller's allowed-workspace
- *  rows, copied from the source DB at `srcPath` (the live state.db). The source
- *  is DETACHed before the caller's SQL ever runs, so isolation is structural:
- *  no subquery/UNION/sqlite_master trick can reach unfiltered rows (#146). The
- *  caller owns the returned DB and must close it. */
-function buildSnapshot(srcPath: string, allowed: Set<string>, includeRaw: boolean): Database.Database {
-  const mem = new Database(':memory:');
-  try {
-    const alias = 'src_' + randomBytes(6).toString('hex');
-    const { sql: scope, params } = inClause('workspace_id', allowed);
-    // ATTACH the real DB. Path is escaped into the statement (ATTACH filename is
-    // not reliably bindable); paths never contain single quotes in practice, but
-    // double any just in case.
-    const attached = srcPath.replace(/'/g, "''");
-    mem.exec(`ATTACH DATABASE '${attached}' AS ${alias}`);
-    try {
-      const eventCols = includeRaw ? `${SNAPSHOT_EVENT_COLS}, raw_jsonl` : SNAPSHOT_EVENT_COLS;
-      mem.prepare(
-        `CREATE TABLE events AS SELECT ${eventCols} FROM ${alias}.events WHERE ${scope}`
-      ).run(...params);
-      mem.prepare(`CREATE TABLE sessions AS SELECT * FROM ${alias}.sessions WHERE ${scope}`).run(...params);
-      mem.prepare(
-        `CREATE TABLE broker_sessions AS SELECT * FROM ${alias}.broker_sessions WHERE ${scope}`
-      ).run(...params);
-      mem.prepare(
-        `CREATE TABLE session_summaries AS SELECT * FROM ${alias}.session_summaries WHERE ${scope}`
-      ).run(...params);
-      mem.prepare(
-        `CREATE TABLE session_tags AS SELECT * FROM ${alias}.session_tags WHERE ${scope}`
-      ).run(...params);
-      mem.prepare(
-        `CREATE TABLE usage_events AS SELECT * FROM ${alias}.usage_events WHERE ${scope}`
-      ).run(...params);
-      // perf_events: app-global rows (workspace_id NULL — stalls, slow ops)
-      // are host-process facts visible to every caller; workspace-tagged rows
-      // (pty windows, terminal latency) are scoped like everything else.
-      // Wrapped in try/catch so an older DB without the table doesn't break
-      // snapshot creation for callers that don't query perf_events.
-      try {
-        mem.prepare(
-          `CREATE TABLE perf_events AS SELECT * FROM ${alias}.perf_events WHERE workspace_id IS NULL OR ${scope}`
-        ).run(...params);
-      } catch (e) {
-        // Pre-v11 DB (no perf_events yet): give callers an empty, correctly-shaped
-        // table. Anything else is a real failure and must surface, not read as
-        // "no perf data".
-        if (!(e instanceof Error && /no such table/i.test(e.message))) throw e;
-        mem.exec(`CREATE TABLE perf_events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, kind TEXT NOT NULL, workspace_id TEXT, session_id TEXT, name TEXT, dur_ms REAL, trace_id TEXT, span_id TEXT, meta TEXT)`);
-      }
-    } finally {
-      mem.exec(`DETACH ${alias}`);
-    }
-    return mem;
-  } catch (e) {
-    mem.close();
-    throw e;
-  }
-}
-
 /** Whether a session's workspace is within the caller's allowed read set (#122). */
 function sessionAllowed(db: Database.Database, sessionId: string, allowed: Set<string>): boolean {
   const row = db.prepare('SELECT workspace_id FROM sessions WHERE id = ?').get(sessionId) as
@@ -1142,7 +1075,7 @@ export const TOOLS: Tool[] = [
     },
   },
   // `query` runs arbitrary READ-ONLY SQL against a per-call in-memory SNAPSHOT
-  // seeded only with the caller's allowed-workspace rows (buildSnapshot). The
+  // seeded only with the caller's allowed-workspace rows (runSnapshotQuery, in a worker). The
   // real DB is DETACHed before the caller's SQL runs, so isolation is structural
   // — no join/UNION/subquery/sqlite_master trick can reach another workspace's
   // rows (#146/§9). raw_jsonl is excluded unless include_raw, and even then only
@@ -1166,28 +1099,19 @@ export const TOOLS: Tool[] = [
       },
       required: ['sql']
     },
+    // Runs in a worker thread with a hard timeout (#476): the snapshot copy is
+    // O(the caller's whole history) and used to freeze the main thread for
+    // minutes on a multi-GB state.db. See queryWorker.ts.
     run: (db, a, ctx) => {
       if (typeof a.sql !== 'string') throw new Error('sql is required');
-      const params = Array.isArray(a.params) ? a.params : [];
-      const includeRaw = a.include_raw === true;
-      const maxRows = clampLimit(a.max_rows);
-      const srcPath = db.name; // live state.db path; ':memory:' in some tests
-      const snap = buildSnapshot(srcPath, ctx.allowedWorkspaces, includeRaw);
-      try {
-        const stmt = snap.prepare(a.sql);
-        if (!stmt.reader) throw new Error('read-only SELECT statements only');
-        const rows = stmt.all(...params) as unknown[];
-        const capped = rows.slice(0, maxRows);
-        const json = JSON.stringify(capped);
-        if (json.length > MAX_QUERY_BYTES) {
-          throw new Error(
-            `result too large (${json.length} bytes > ${MAX_QUERY_BYTES}); add LIMIT or aggregate server-side`
-          );
-        }
-        return capped;
-      } finally {
-        snap.close();
-      }
+      return runQueryInWorker({
+        srcPath: db.name, // live state.db path
+        allowed: [...ctx.allowedWorkspaces],
+        includeRaw: a.include_raw === true,
+        sql: a.sql,
+        params: Array.isArray(a.params) ? a.params : [],
+        maxRows: clampLimit(a.max_rows)
+      });
     }
   },
   // Perf-telemetry tools. perf_status is a read-only snapshot; perf_set
