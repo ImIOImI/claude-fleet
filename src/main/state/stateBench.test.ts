@@ -14,6 +14,9 @@
 // Machine noise is large (about ±25% on read metrics between quiet and busy
 // minutes), so the gate is A/B: baseline and candidate runs alternate in one
 // session (the plan's perf-gate task has the loop). Numbers are machine-specific.
+//
+// embed_insert_us_per_row needs db.insertEmbeddings (the batched insert),
+// which exists at the pre-port baseline.
 import { describe, it, expect } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -31,6 +34,7 @@ const N_EMBEDDINGS = 5000;
 /** transcriptIndex's EMBED_BATCH: the backfill inserts at most this many rows per call. */
 const EMBED_BATCH_ROWS = 8;
 const N_LOOKUPS = 2000;
+const N_READ_ROUNDS = 50;
 const N_WRITES = 500;
 const N_PERF_ROWS = 5000;
 
@@ -49,6 +53,7 @@ export const GATE: Record<string, { tol: number; slack: number }> = {
   lookup_mapping_us: { tol: 0.25, slack: 15 },
   events_page_ms: { tol: 0.25, slack: 0 },
   list_sessions_ms: { tol: 0.25, slack: 0.15 },
+  read_round_stall_ms: { tol: 0.25, slack: 1 },
   search_ms: { tol: 0.25, slack: 0 },
   embed_insert_us_per_row: { tol: 0.25, slack: 0 },
   stall_p50_ms: { tol: 0.25, slack: 2 },
@@ -101,7 +106,9 @@ async function time(fn: () => Promise<unknown> | unknown): Promise<number> {
 }
 
 /** Gaps between consecutive 0 ms timer ticks: how long the loop went without
- *  reaching its timers phase (≈1 ms when idle). */
+ *  reaching its timers phase. Under load (ingest + readers running
+ *  concurrently), the median reflects both; it is not an idle floor — run it
+ *  with nothing else competing to measure one side alone. */
 function stallProbe(): { stop: () => number[] } {
   const gaps: number[] = [];
   let last = performance.now();
@@ -170,6 +177,17 @@ async function oneRun(): Promise<Metrics> {
     const gaps = loop.stop().sort((a, b) => a - b);
     m.stall_p50_ms = median(gaps);
     m.stall_max_ms = gaps[gaps.length - 1];
+
+    // Reader-only stall: no concurrent ingest, so each probe gap is ~one reader round.
+    // stall_p50_ms above can't isolate a reader regression — it's dominated by ingest.
+    const readLoop = stallProbe();
+    for (let i = 0; i < N_READ_ROUNDS; i++) {
+      await db.summaryForSession('big', 6);
+      await db.listSessions();
+      await db.eventsForSession('big', 0, 200);
+      await new Promise<void>((r) => setImmediate(r));
+    }
+    m.read_round_stall_ms = median(readLoop.stop());
 
     const rows = Array.from({ length: N_EMBEDDINGS }, (_, i) => {
       const vec = new Float32Array(EMBED_DIM);

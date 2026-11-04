@@ -716,3 +716,114 @@ exports[`every state.db read returns the recorded value 1`] = `
   ],
 }
 `;
+
+exports[`multi-session ordering, NULL last_active_at, and unverified/unreal mappings 1`] = `
+{
+  "light3SessionLastActiveAt": null,
+  "lightSessionLastActiveAt": null,
+  "listSessionsAll": [
+    {
+      "id": "sess-reads-2",
+      "lastActiveAt": 1782867608000,
+      "workspaceId": "01WSREADS2",
+    },
+    {
+      "id": "sess-ingest",
+      "lastActiveAt": 1782864012000,
+      "workspaceId": "01WSINGEST",
+    },
+    {
+      "id": "sess-reads-old",
+      "lastActiveAt": 1780272005000,
+      "workspaceId": "01WSINGEST",
+    },
+    {
+      "id": "sess-reads-light",
+      "lastActiveAt": null,
+      "workspaceId": "01WSINGEST",
+    },
+    {
+      "id": "sess-reads-light-3",
+      "lastActiveAt": null,
+      "workspaceId": "01WSREADS3",
+    },
+  ],
+  "listSessionsWs": [
+    {
+      "id": "sess-ingest",
+      "lastActiveAt": 1782864012000,
+    },
+    {
+      "id": "sess-reads-old",
+      "lastActiveAt": 1780272005000,
+    },
+    {
+      "id": "sess-reads-light",
+      "lastActiveAt": null,
+    },
+  ],
+  "lookupBrokerSessionUnverified": "sess-ingest",
+  "lookupResumableUnreal": null,
+  "lookupResumableUnverified": null,
+  "lookupVerifiedUnreal": "ghost-session-never-real",
+  "lookupVerifiedUnverified": null,
+  "summaryForWorkspace": {
+    "cacheCreationInputTokens": 5,
+    "cacheReadInputTokens": 1002,
+    "contextWindowTokens": 200000,
+    "costSeries": [
+      0.00324375,
+      0.000114,
+      0.750078,
+    ],
+    "eventCount": 15,
+    "inputTokens": 50013,
+    "lastActiveAt": 1782864012000,
+    "lastTurnContextTokens": 50002,
+    "model": "claude-opus-4-1",
+    "outputTokens": 28,
+    "recentToolCalls": [
+      {
+        "durationMs": null,
+        "input": "npm test",
+        "name": "Bash",
+        "status": "pending",
+        "ts": 1782864012000,
+      },
+      {
+        "durationMs": 1000,
+        "input": "/x.ts",
+        "name": "Read",
+        "status": "ok",
+        "ts": 1782864006000,
+      },
+      {
+        "durationMs": 1000,
+        "input": "ls -la",
+        "name": "Bash",
+        "status": "error",
+        "ts": 1782864004000,
+      },
+    ],
+    "sessionId": "sess-ingest",
+    "startedAt": 1782864000000,
+    "title": "Reconnect bug, fixed",
+    "tokenSeries": [
+      1035,
+      10,
+      50003,
+    ],
+    "topTools": [
+      {
+        "count": 2,
+        "name": "Bash",
+      },
+      {
+        "count": 1,
+        "name": "Read",
+      },
+    ],
+    "usd": 0.75343575,
+  },
+}
+`;

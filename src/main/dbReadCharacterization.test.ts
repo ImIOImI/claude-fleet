@@ -76,3 +76,52 @@ it('every state.db read returns the recorded value', async () => {
   };
   expect(reads).toMatchSnapshot();
 });
+
+const WS3 = '01WSREADS3';
+const S_OLD = 'sess-reads-old';
+const S_LIGHT = 'sess-reads-light';
+const S_LIGHT3 = 'sess-reads-light-3';
+
+// A second, independent snapshot (own `it`, same beforeEach/afterEach as
+// above): multi-session ordering with an older real session and NULL
+// last_active_at sessions mixed in, plus the unverified/unreal broker-mapping
+// negative cases. Does not touch the fixture or snapshot above. Recorded now,
+// while reads are pre-port — never run `-u` on this once committed.
+it('multi-session ordering, NULL last_active_at, and unverified/unreal mappings', async () => {
+  await db.ingestLine(WS, S_OLD, JSON.stringify({ type: 'user', uuid: 'o1', timestamp: '2026-06-01T00:00:00.000Z', message: { role: 'user', content: 'an older prompt' } }));
+  await db.ingestLine(WS, S_OLD, JSON.stringify({ type: 'assistant', uuid: 'o2', timestamp: '2026-06-01T00:00:05.000Z', message: { model: 'claude-sonnet-4-5', usage: { input_tokens: 2, output_tokens: 3 }, content: [{ type: 'text', text: 'ok' }] } }));
+
+  // A trailing timestamp-less line nulls last_active_at (bare MAX(ts, NULL)
+  // poisoning, preserved pre-port — see dbIngestBatch.test.ts).
+  await db.ingestLine(WS, S_LIGHT, JSON.stringify({ type: 'user', uuid: 'l1', timestamp: '2026-07-02T00:00:00.000Z', message: { role: 'user', content: 'light session prompt' } }));
+  await db.ingestLine(WS, S_LIGHT, JSON.stringify({ type: 'ai-title', aiTitle: 'Light session', sessionId: S_LIGHT }));
+
+  await db.ingestLine(WS3, S_LIGHT3, JSON.stringify({ type: 'user', uuid: 'm1', timestamp: '2026-07-03T00:00:00.000Z', message: { role: 'user', content: 'third workspace light prompt' } }));
+  await db.ingestLine(WS3, S_LIGHT3, JSON.stringify({ type: 'ai-title', aiTitle: 'Light session 3', sessionId: S_LIGHT3 }));
+
+  // Pre-#198 legacy row (verified=0), written directly: no app-level API
+  // commits an unverified mapping any more (learnBrokerSessionMapping always
+  // sets verified=1).
+  const raw = db.openDb(dir);
+  raw.prepare(`
+    INSERT INTO broker_sessions (workspace_id, broker_session_id, claude_session_id, learned_at, verified)
+    VALUES (?, ?, ?, ?, 0)
+  `).run(WS, 'tab-unverified', S, Date.now());
+
+  // A mapping to a session id that never ingested a transcript line (#170 phantom).
+  await db.learnBrokerSessionMapping(WS, 'tab-unreal', 'ghost-session-never-real');
+
+  const reads = {
+    summaryForWorkspace: await db.summaryForWorkspace(WS),
+    listSessionsWs: (await db.listSessions(WS)).map((s) => ({ id: s.id, lastActiveAt: s.lastActiveAt })),
+    listSessionsAll: (await db.listSessions()).map((s) => ({ id: s.id, workspaceId: s.workspaceId, lastActiveAt: s.lastActiveAt })),
+    lightSessionLastActiveAt: (await db.getSession(S_LIGHT))?.lastActiveAt ?? null,
+    light3SessionLastActiveAt: (await db.getSession(S_LIGHT3))?.lastActiveAt ?? null,
+    lookupBrokerSessionUnverified: await db.lookupBrokerSession(WS, 'tab-unverified'),
+    lookupVerifiedUnverified: await db.lookupVerifiedBrokerSession(WS, 'tab-unverified'),
+    lookupResumableUnverified: await db.lookupResumableBrokerSession(WS, 'tab-unverified'),
+    lookupVerifiedUnreal: await db.lookupVerifiedBrokerSession(WS, 'tab-unreal'),
+    lookupResumableUnreal: await db.lookupResumableBrokerSession(WS, 'tab-unreal'),
+  };
+  expect(reads).toMatchSnapshot();
+});

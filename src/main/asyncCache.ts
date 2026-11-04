@@ -50,22 +50,30 @@ export function asyncKeyedCache<V>(opts: {
       if (hit && fresh) return Promise.resolve(hit.value);
       const inFlight = flights.get(key);
       if (inFlight) return inFlight.promise;
-      const flight: Flight<V> = { promise: Promise.resolve(undefined as V), dropped: false };
-      // Registered before compute() runs, so a synchronous throw still unregisters it.
+      let resolve!: (v: V) => void;
+      let reject!: (e: unknown) => void;
+      const promise = new Promise<V>((res, rej) => { resolve = res; reject = rej; });
+      const flight: Flight<V> = { promise, dropped: false };
+      // The flight holds its real (deferred) promise from the start, before
+      // compute() runs, so a synchronous reentrant get(key) from inside
+      // compute() shares it instead of a placeholder, and a synchronous throw
+      // still unregisters the flight.
       flights.set(key, flight);
-      flight.promise = (async () => {
+      (async () => {
         try {
           const value = await compute(); // a rejection propagates; nothing is stored
           if (!flight.dropped) {
             if (!entries.has(key) && entries.size >= opts.maxEntries) entries.clear();
             entries.set(key, { value, at: now(), staleAt: flight.staleAt });
           }
-          return value;
+          resolve(value);
+        } catch (err) {
+          reject(err);
         } finally {
           if (flights.get(key) === flight) flights.delete(key);
         }
       })();
-      return flight.promise;
+      return promise;
     },
     invalidate(key: string): void {
       entries.delete(key);

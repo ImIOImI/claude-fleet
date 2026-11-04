@@ -127,6 +127,50 @@ describe('in-flight semantics', () => {
     expect(await c.get('a', async () => 2)).toBe(2);
   });
 
+  it('a read after clear() during a compute does not share the dropped compute', async () => {
+    let calls = 0;
+    const c = asyncKeyedCache<number>({ maxEntries: 8 });
+    const d = deferred<number>();
+    const stale = c.get('a', () => { calls += 1; return d.promise; });
+    c.clear();
+    const fresh = c.get('a', async () => { calls += 1; return 2; });
+    expect(fresh).not.toBe(stale);
+    expect(await fresh).toBe(2);
+    d.resolve(1);
+    expect(await stale).toBe(1);
+    expect(calls).toBe(2);
+  });
+
+  it('a dropped compute settling does not deregister its replacement', async () => {
+    let calls = 0;
+    const c = asyncKeyedCache<number>({ maxEntries: 8 });
+    const dA = deferred<number>();
+    const stale = c.get('a', () => { calls += 1; return dA.promise; });
+    c.invalidate('a');
+    const dB = deferred<number>();
+    const fresh = c.get('a', () => { calls += 1; return dB.promise; });
+    dA.resolve(1);
+    await stale;
+    // While B is still in flight, a concurrent get must share it, not start a third compute.
+    const alsoFresh = c.get('a', () => { calls += 1; return Promise.resolve(99); });
+    expect(alsoFresh).toBe(fresh);
+    dB.resolve(2);
+    expect(await fresh).toBe(2);
+    expect(calls).toBe(2);
+  });
+
+  it('a re-entrant get(sameKey) during compute shares the real promise, not a placeholder', async () => {
+    const c = asyncKeyedCache<number>({ maxEntries: 8 });
+    let reentrant: Promise<number> | undefined;
+    const outer = c.get('a', () => {
+      reentrant = c.get('a', async () => 99);
+      return Promise.resolve(1);
+    });
+    expect(reentrant).toBe(outer);
+    expect(await outer).toBe(1);
+    expect(await reentrant!).toBe(1);
+  });
+
   it('a markStale during the compute caps the stored result', async () => {
     let t = 0; let calls = 0;
     const c = asyncKeyedCache<number>({ maxEntries: 8, ttlMs: 30_000, now: () => t });
