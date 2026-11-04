@@ -1,5 +1,5 @@
 // Pure copy, control state and the poll loop for Settings → Account.
-import type { AccountSso, AccountStatus, SignInPoll } from '../../preload/identityTypes';
+import type { AccountSso, AccountStatus, SignInPoll, SignInStart } from '../../preload/identityTypes';
 
 const IPC_PREFIX = /^Error invoking remote method '[^']+': (Error: )?/;
 
@@ -60,19 +60,22 @@ export interface SignInRun {
   cancelled: boolean;
 }
 
+export const SIGN_IN_EXPIRED = 'The sign-in code expired. Start again.';
+
 export type SignInOutcome = { kind: 'done'; status: AccountStatus } | { kind: 'error'; message: string } | { kind: 'cancelled' };
 
-/** Polls strictly one at a time. A `done` is honoured even after Cancel: the
- *  sign-in had already been saved. */
+/** Polls strictly one at a time and stops at the code's expiry. A `done` is
+ *  honoured even after Cancel: the sign-in had already been saved. */
 export async function driveSignIn(
-  firstDelayMs: number,
-  api: { poll(): Promise<SignInPoll>; wait(ms: number): Promise<void> },
+  flow: Pick<SignInStart, 'intervalMs' | 'expiresAt'>,
+  api: { poll(): Promise<SignInPoll>; wait(ms: number): Promise<void>; now(): number },
   run: SignInRun
 ): Promise<SignInOutcome> {
-  let delay = firstDelayMs;
+  let delay = flow.intervalMs;
   for (;;) {
-    await api.wait(delay);
+    await api.wait(Math.max(0, Math.min(delay, flow.expiresAt - api.now())));
     if (run.cancelled) return { kind: 'cancelled' };
+    if (api.now() >= flow.expiresAt) return { kind: 'error', message: SIGN_IN_EXPIRED };
     let r: SignInPoll;
     try {
       r = await api.poll();
@@ -83,5 +86,24 @@ export async function driveSignIn(
     if (run.cancelled) return { kind: 'cancelled' };
     if (r.state === 'error') return { kind: 'error', message: r.message };
     delay = r.intervalMs;
+  }
+}
+
+/** Shows the local cached status, then the GitHub-refreshed one. Returns the
+ *  error message, if any. */
+export async function loadAccount(
+  status: (opts?: { refresh?: boolean }) => Promise<AccountStatus>,
+  show: (s: AccountStatus) => void
+): Promise<string | null> {
+  try {
+    show(await status());
+  } catch (err) {
+    return parseIdentityError(err).message;
+  }
+  try {
+    show(await status({ refresh: true }));
+    return null;
+  } catch (err) {
+    return parseIdentityError(err).message;
   }
 }

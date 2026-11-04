@@ -16,6 +16,8 @@ export const PROFILE_KEY = 'PROFILE';
 const REVOKED_NOTICE = 'GitHub no longer accepts the saved sign-in (revoked or expired). Sign in again.';
 const NO_FLOW = 'No sign-in in progress.';
 const CANCELLED = 'Sign-in was cancelled.';
+/** The renderer re-asks at least this often; main still gates real polls. */
+const MAX_WAIT_MS = 60_000;
 
 export interface IdentityVault {
   isVaultAvailable(): Promise<boolean>;
@@ -69,6 +71,15 @@ function githubUrlOrNull(raw: string | null): string | null {
   try {
     const u = new URL(raw);
     return u.protocol === 'https:' && u.hostname === 'github.com' && !u.port && !u.username && !u.password ? u.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function httpsUrlOrNull(raw: string | null): string | null {
+  if (!raw) return null;
+  try {
+    return new URL(raw).protocol === 'https:' ? raw : null;
   } catch {
     return null;
   }
@@ -137,8 +148,8 @@ export class IdentityService {
   private memory: Saved | null = null;
   private pending: Pending | null = null;
   private notice: string | null = null;
-  /** Bumped by sign-out, cancel, start, revocation and a completed sign-in: a
-   *  save started under an older epoch is dropped. */
+  /** Bumped by sign-out, cancel, start and a completed sign-in: a save
+   *  started under an older epoch is dropped. */
   private epoch = 0;
   /** Serialises vault writes so a sign-out can't interleave with a save. */
   private chain: Promise<unknown> = Promise.resolve();
@@ -174,11 +185,13 @@ export class IdentityService {
     return next;
   }
 
-  /** False when superseded before the write began. A clear() requested during
-   *  the write is queued behind it, so it still wins. */
-  private save(s: Saved, epoch: number): Promise<boolean> {
+  /** False when superseded before the write began, or (with `sameToken`) when
+   *  the stored token is no longer that one. A clear() requested during the
+   *  write is queued behind it, so it still wins. */
+  private save(s: Saved, epoch: number, sameToken = false): Promise<boolean> {
     return this.serial(async () => {
       if (epoch !== this.epoch) return false;
+      if (sameToken && (await this.load())?.token !== s.token) return false;
       if (!(await this.persisted())) {
         this.memory = s;
         return true;
@@ -204,6 +217,16 @@ export class IdentityService {
     return this.serial(() => this.clearNow());
   }
 
+  /** Clears only if `token` is still the stored one, so revoking an old token
+   *  can't undo a newer sign-in. */
+  private revoke(token: string): Promise<boolean> {
+    return this.serial(async () => {
+      if ((await this.load())?.token !== token) return false;
+      await this.clearNow();
+      return true;
+    });
+  }
+
   private async toStatus(saved: Saved | null): Promise<AccountStatus> {
     const clientId = await this.clientId();
     const p = saved?.profile ?? null;
@@ -218,7 +241,7 @@ export class IdentityService {
             id: p.identity.id,
             name: p.identity.name,
             displayName: displayName(p.identity),
-            avatarUrl: p.identity.avatarUrl,
+            avatarUrl: httpsUrlOrNull(p.identity.avatarUrl),
             teams: [...p.identity.teams]
           }
         : null,
@@ -233,7 +256,7 @@ export class IdentityService {
    *  notice); any other failure keeps the cached profile (with a notice). */
   async status(opts: { refresh?: boolean } = {}): Promise<AccountStatus> {
     const epoch = this.epoch;
-    let saved = await this.load();
+    let saved = await this.settled();
     if (saved && opts.refresh) {
       try {
         const probe = await this.github.probe(saved.token);
@@ -241,16 +264,16 @@ export class IdentityService {
           token: saved.token,
           profile: { identity: probe.identity, scopes: probe.scopes, sso: probe.sso, verifiedAt: this.now() }
         };
-        if (!(await this.save(next, epoch)) || epoch !== this.epoch) return this.toStatus(await this.settled());
+        if (!(await this.save(next, epoch, true)) || epoch !== this.epoch) return this.toStatus(await this.settled());
         saved = next;
         this.notice = null;
       } catch (err) {
-        if (epoch !== this.epoch) return this.toStatus(await this.load());
         if (err instanceof IdentityError && err.kind === 'unauthorized') {
-          this.epoch++;
-          await this.clear();
+          if (!(await this.revoke(saved.token))) return this.toStatus(await this.settled());
           saved = null;
           this.notice = REVOKED_NOTICE;
+        } else if (epoch !== this.epoch) {
+          return this.toStatus(await this.settled());
         } else {
           this.notice = `Couldn't refresh your GitHub account (${safeMessage(err)}). Showing the last saved details.`;
         }
@@ -266,7 +289,11 @@ export class IdentityService {
     this.epoch++;
     this.pending = { clientId, code, intervalMs: code.intervalMs, nextPollAt: this.now() + code.intervalMs, inflight: false, finishing: false };
     this.notice = null;
-    return { userCode: code.userCode, verificationUri: code.verificationUri, expiresAt: code.expiresAt, intervalMs: code.intervalMs };
+    return { userCode: code.userCode, verificationUri: code.verificationUri, expiresAt: code.expiresAt, intervalMs: this.waitFor(this.pending, code.intervalMs) };
+  }
+
+  private waitFor(p: Pending, ms: number): number {
+    return Math.max(0, Math.min(ms, MAX_WAIT_MS, p.code.expiresAt - this.now()));
   }
 
   /** One step of the flow. Never polls GitHub faster than its interval, and
@@ -274,13 +301,13 @@ export class IdentityService {
   async signInPoll(): Promise<SignInPoll> {
     const p = this.pending;
     if (!p) return { state: 'error', message: NO_FLOW };
-    if (p.inflight || p.finishing) return { state: 'pending', intervalMs: p.intervalMs };
+    if (p.inflight || p.finishing) return { state: 'pending', intervalMs: this.waitFor(p, p.intervalMs) };
     const now = this.now();
     if (now >= p.code.expiresAt) {
       this.pending = null;
       return { state: 'error', message: 'The sign-in code expired. Start again.' };
     }
-    if (now < p.nextPollAt) return { state: 'pending', intervalMs: p.nextPollAt - now };
+    if (now < p.nextPollAt) return { state: 'pending', intervalMs: this.waitFor(p, p.nextPollAt - now) };
 
     p.inflight = true;
     let r: PollResult;
@@ -291,7 +318,7 @@ export class IdentityService {
       if (err instanceof DeviceFlowError && err.kind === 'network') {
         if (err.throttled) p.intervalMs += SLOW_DOWN_STEP_MS;
         p.nextPollAt = this.now() + p.intervalMs;
-        return { state: 'pending', intervalMs: p.intervalMs };
+        return { state: 'pending', intervalMs: this.waitFor(p, p.intervalMs) };
       }
       this.pending = null;
       return { state: 'error', message: err instanceof DeviceFlowError ? err.message : 'GitHub sign-in failed unexpectedly.' };
@@ -302,7 +329,7 @@ export class IdentityService {
     if (r.status === 'pending') {
       p.intervalMs = r.intervalMs;
       p.nextPollAt = this.now() + r.intervalMs;
-      return { state: 'pending', intervalMs: r.intervalMs };
+      return { state: 'pending', intervalMs: this.waitFor(p, r.intervalMs) };
     }
 
     p.finishing = true;
@@ -351,7 +378,7 @@ export class IdentityService {
   /** For loadoutSources.setGithubTokenProvider: the token, only if it can pull
    *  from GHCR. Main process only. */
   async packagesToken(): Promise<string | null> {
-    const s = await this.load();
+    const s = await this.settled();
     return s && hasPackagesRead(s.profile.scopes) ? s.token : null;
   }
 }

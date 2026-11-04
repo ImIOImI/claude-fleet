@@ -2,7 +2,7 @@
 // applies at once (no batch Save). This panel only ever sees AccountStatus.
 import { useEffect, useRef, useState } from 'react';
 import type { AccountStatus, SignInStart } from '../../../preload';
-import { accountControls, countdown, driveSignIn, packagesNote, parseIdentityError, ssoPrompt, type SignInRun } from '../accountView';
+import { accountControls, countdown, driveSignIn, loadAccount, packagesNote, parseIdentityError, ssoPrompt, type SignInRun } from '../accountView';
 
 interface ActiveRun extends SignInRun {
   wake: () => void;
@@ -19,12 +19,18 @@ export function AccountSettings() {
   const run = useRef<ActiveRun | null>(null);
   const mounted = useRef(true);
 
+  async function load(): Promise<void> {
+    setError(null);
+    const err = await loadAccount(
+      (opts) => window.api.identity.status(opts),
+      (s) => mounted.current && setStatus(s)
+    );
+    if (err && mounted.current) setError(err);
+  }
+
   useEffect(() => {
     mounted.current = true;
-    window.api.identity
-      .status({ refresh: true })
-      .then((s) => mounted.current && setStatus(s))
-      .catch((e: unknown) => mounted.current && setError(parseIdentityError(e).message));
+    void load();
     return () => {
       mounted.current = false;
       // Leaving the tab abandons a half-done sign-in.
@@ -70,8 +76,9 @@ export function AccountSettings() {
     setNow(Date.now());
     setSigningIn(true);
     const outcome = await driveSignIn(
-      f.intervalMs,
+      f,
       {
+        now: () => Date.now(),
         poll: () => window.api.identity.signInPoll(),
         wait: (ms) =>
           new Promise<void>((resolve) => {
@@ -130,7 +137,16 @@ export function AccountSettings() {
   if (!status) {
     return (
       <div className="new-tab account-tab" role="tabpanel">
-        {error ? <div className="form-hint error-text">{error}</div> : <p className="setting-desc">Loading…</p>}
+        {error ? (
+          <>
+            <div className="form-hint error-text">{error}</div>
+            <button type="button" className="btn" onClick={() => void load()}>
+              Retry
+            </button>
+          </>
+        ) : (
+          <p className="setting-desc">Loading…</p>
+        )}
       </div>
     );
   }

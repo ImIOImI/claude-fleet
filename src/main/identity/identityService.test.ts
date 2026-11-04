@@ -369,6 +369,7 @@ describe('IdentityService sign-out wins races', () => {
     const gate = deferred<GithubProbe>();
     s.github.probe.mockImplementationOnce(() => gate.promise);
     const refreshing = s.svc.status({ refresh: true });
+    await vi.waitFor(() => expect(s.github.probe).toHaveBeenCalledTimes(2));
     await signIn(s);
     gate.resolve(PROBE);
     await refreshing;
@@ -573,5 +574,176 @@ describe('IdentityService throttled polling', () => {
     await s.svc.signInStart();
     s.advance(5000);
     expect(await s.svc.signInPoll()).toEqual({ state: 'pending', intervalMs: 5000 });
+  });
+});
+
+describe('IdentityService final-review fixes', () => {
+  const NEW = 'gho_new_token';
+  const DONE_NEW: PollResult = { status: 'done', token: NEW, scopes: ['read:org', 'read:packages'] };
+  const UNAUTH = () => new IdentityError('unauthorized', 'GitHub rejected the token', 401);
+
+  function rejectable<T>() {
+    let resolve!: (v: T) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  it('a 401 for the old token does not cancel a sign-in that is finishing', async () => {
+    const s = setup({ polls: [DONE, DONE_NEW] });
+    await signIn(s);
+    await s.svc.signInStart();
+    const oldProbe = rejectable<GithubProbe>();
+    const newProbe = rejectable<GithubProbe>();
+    s.github.probe.mockImplementationOnce(() => oldProbe.promise).mockImplementationOnce(() => newProbe.promise);
+    const refreshing = s.svc.status({ refresh: true });
+    await vi.waitFor(() => expect(s.github.probe).toHaveBeenCalledTimes(2));
+    s.advance(5000);
+    const polling = s.svc.signInPoll();
+    await vi.waitFor(() => expect(s.github.probe).toHaveBeenCalledTimes(3));
+    oldProbe.reject(UNAUTH());
+    await refreshing;
+    newProbe.resolve(PROBE);
+    expect((await polling).state).toBe('done');
+    expect(s.vault.store.get('identity:github|TOKEN') === NEW).toBe(true);
+  });
+
+  it('a 401 for the old token arriving after a new sign-in saved leaves the new token', async () => {
+    const s = setup({ polls: [DONE, DONE_NEW] });
+    await signIn(s);
+    const oldProbe = rejectable<GithubProbe>();
+    s.github.probe.mockImplementationOnce(() => oldProbe.promise);
+    const refreshing = s.svc.status({ refresh: true });
+    await vi.waitFor(() => expect(s.github.probe).toHaveBeenCalledTimes(2));
+    await signIn(s);
+    oldProbe.reject(UNAUTH());
+    const st = await refreshing;
+    expect(st.signedIn).toBe(true);
+    expect(st.notice).toBeNull();
+    expect(s.vault.store.get('identity:github|TOKEN') === NEW).toBe(true);
+  });
+
+  it('a 401 still clears the revoked token after an unrelated cancel', async () => {
+    const s = setup({ polls: [DONE] });
+    await signIn(s);
+    const oldProbe = rejectable<GithubProbe>();
+    s.github.probe.mockImplementationOnce(() => oldProbe.promise);
+    const refreshing = s.svc.status({ refresh: true });
+    s.svc.signInCancel();
+    oldProbe.reject(UNAUTH());
+    expect((await refreshing).signedIn).toBe(false);
+    expect(s.vault.store.size).toBe(0);
+  });
+
+  it('a concurrent successful refresh of a revoked token does not save it back', async () => {
+    const s = setup({ polls: [DONE] });
+    await signIn(s);
+    const a = rejectable<GithubProbe>();
+    const b = rejectable<GithubProbe>();
+    s.github.probe.mockImplementationOnce(() => a.promise).mockImplementationOnce(() => b.promise);
+    const ra = s.svc.status({ refresh: true });
+    const rb = s.svc.status({ refresh: true });
+    await vi.waitFor(() => expect(s.github.probe).toHaveBeenCalledTimes(3));
+    a.reject(UNAUTH());
+    await ra;
+    b.resolve(PROBE);
+    expect((await rb).signedIn).toBe(false);
+    expect(s.vault.store.size).toBe(0);
+  });
+
+  describe('reads wait for queued writes', () => {
+    function heldSave() {
+      const s = setup({ polls: [DONE] });
+      let release!: () => void;
+      return {
+        s,
+        async start() {
+          await signIn(s);
+          s.vault.api.setSecret.mockImplementationOnce(async (sc: string, k: string, v: string) => {
+            await new Promise<void>((r) => (release = r));
+            s.vault.store.set(`${sc}|${k}`, v);
+          });
+          const refreshing = s.svc.status({ refresh: true });
+          await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+          const out = s.svc.signOut();
+          return { refreshing, out, release: () => release() };
+        }
+      };
+    }
+
+    it('packagesToken() during a queued sign-out returns null', async () => {
+      const h = heldSave();
+      const { refreshing, out, release } = await h.start();
+      const tok = h.s.svc.packagesToken();
+      release();
+      await Promise.all([refreshing, out]);
+      expect(await tok).toBeNull();
+    });
+
+    it('status() during a queued sign-out reports signed out', async () => {
+      const h = heldSave();
+      const { refreshing, out, release } = await h.start();
+      const st = h.s.svc.status();
+      release();
+      await Promise.all([refreshing, out]);
+      expect((await st).signedIn).toBe(false);
+    });
+  });
+
+  describe('signInPoll waits', () => {
+    function soon(expiresAt: number, polls: Array<PollResult | Error> = []) {
+      const s = setup({ polls });
+      s.github.requestDeviceCode.mockResolvedValueOnce({ ...CODE, expiresAt });
+      return s;
+    }
+
+    it('caps the start interval and every pending wait at the time left', async () => {
+      const s = soon(8000, [{ status: 'pending', intervalMs: 5000 }]);
+      expect((await s.svc.signInStart()).intervalMs).toBe(5000);
+      s.advance(1000);
+      expect(await s.svc.signInPoll()).toEqual({ state: 'pending', intervalMs: 4000 });
+      s.advance(4000);
+      expect(await s.svc.signInPoll()).toEqual({ state: 'pending', intervalMs: 3000 });
+
+      const t = soon(3000);
+      expect((await t.svc.signInStart()).intervalMs).toBe(3000);
+      expect(await t.svc.signInPoll()).toEqual({ state: 'pending', intervalMs: 3000 });
+    });
+
+    it('caps the wait after a network blip at the time left', async () => {
+      const s = soon(7000, [new DeviceFlowError('network', 'offline')]);
+      await s.svc.signInStart();
+      s.advance(5000);
+      expect(await s.svc.signInPoll()).toEqual({ state: 'pending', intervalMs: 2000 });
+    });
+
+    it('caps every returned wait at 60s but still polls GitHub no faster than its interval', async () => {
+      const s = setup({ polls: [{ status: 'pending', intervalMs: 90_000 }] });
+      await s.svc.signInStart();
+      s.advance(5000);
+      expect(await s.svc.signInPoll()).toEqual({ state: 'pending', intervalMs: 60_000 });
+      s.advance(60_000);
+      expect(await s.svc.signInPoll()).toEqual({ state: 'pending', intervalMs: 30_000 });
+      expect(s.github.pollDeviceToken).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it.each([
+    ['http:', 'http://avatars.githubusercontent.com/u/42'],
+    ['javascript:', 'javascript:alert(1)'],
+    ['data:', 'data:image/png;base64,AAAA'],
+    ['garbage', 'not a url']
+  ])('drops a %s avatar URL', async (_label, avatarUrl) => {
+    const s = setup({ polls: [DONE], probe: { ...PROBE, identity: { ...IDENT, avatarUrl } } });
+    expect((await signIn(s)).identity?.avatarUrl).toBeNull();
+    expect((await s.svc.status()).identity?.avatarUrl).toBeNull();
+  });
+
+  it('keeps an https avatar URL', async () => {
+    const s = setup({ polls: [DONE] });
+    expect((await signIn(s)).identity?.avatarUrl).toBe('https://avatars.githubusercontent.com/u/42');
   });
 });

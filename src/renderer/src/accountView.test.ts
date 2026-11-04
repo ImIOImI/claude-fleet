@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AccountStatus, SignInPoll } from '../../preload/identityTypes';
-import { accountControls, countdown, driveSignIn, packagesNote, parseIdentityError, ssoPrompt, type SignInRun } from './accountView';
+import { SIGN_IN_EXPIRED, accountControls, countdown, driveSignIn, loadAccount, packagesNote, parseIdentityError, ssoPrompt, type SignInRun } from './accountView';
 
 describe('parseIdentityError', () => {
   it('unwraps the IPC prefix and recognises not-configured', () => {
@@ -66,6 +66,7 @@ describe('accountControls', () => {
 });
 
 const STATUS = { signedIn: true, identity: { login: 'octo' } } as unknown as AccountStatus;
+const FLOW = { intervalMs: 5000, expiresAt: 1e12 };
 
 /** A fake poll API + manual clock: records every wait and the max polls in flight. */
 function rig(results: Array<SignInPoll | Error | ((run: SignInRun) => SignInPoll)>) {
@@ -73,8 +74,10 @@ function rig(results: Array<SignInPoll | Error | ((run: SignInRun) => SignInPoll
   let inflight = 0;
   let maxInflight = 0;
   let polls = 0;
+  let clock = 0;
   const run: SignInRun = { cancelled: false };
   const api = {
+    now: () => clock,
     poll: async (): Promise<SignInPoll> => {
       inflight++;
       maxInflight = Math.max(maxInflight, inflight);
@@ -89,6 +92,7 @@ function rig(results: Array<SignInPoll | Error | ((run: SignInRun) => SignInPoll
     },
     wait: async (ms: number): Promise<void> => {
       waits.push(ms);
+      clock += ms;
     }
   };
   return { api, run, waits, stats: () => ({ polls, maxInflight }) };
@@ -102,19 +106,19 @@ describe('driveSignIn', () => {
       { state: 'pending', intervalMs: 2500 },
       { state: 'done', status: STATUS }
     ]);
-    expect(await driveSignIn(5000, r.api, r.run)).toEqual({ kind: 'done', status: STATUS });
+    expect(await driveSignIn(FLOW, r.api, r.run)).toEqual({ kind: 'done', status: STATUS });
     expect(r.waits).toEqual([5000, 5000, 10_000, 2500]);
     expect(r.stats()).toEqual({ polls: 4, maxInflight: 1 });
   });
 
   it('reports a service error', async () => {
     const r = rig([{ state: 'error', message: 'The sign-in code expired. Start again.' }]);
-    expect(await driveSignIn(5000, r.api, r.run)).toEqual({ kind: 'error', message: 'The sign-in code expired. Start again.' });
+    expect(await driveSignIn(FLOW, r.api, r.run)).toEqual({ kind: 'error', message: 'The sign-in code expired. Start again.' });
   });
 
   it('reports a rejected poll with the IPC prefix stripped', async () => {
     const r = rig([new Error("Error invoking remote method 'identity:signInPoll': Error: boom")]);
-    expect(await driveSignIn(5000, r.api, r.run)).toEqual({ kind: 'error', message: 'boom' });
+    expect(await driveSignIn(FLOW, r.api, r.run)).toEqual({ kind: 'error', message: 'boom' });
   });
 
   it('shows the signed-in state when a poll finishes after Cancel', async () => {
@@ -124,7 +128,7 @@ describe('driveSignIn', () => {
         return { state: 'done', status: STATUS };
       }
     ]);
-    expect(await driveSignIn(5000, r.api, r.run)).toEqual({ kind: 'done', status: STATUS });
+    expect(await driveSignIn(FLOW, r.api, r.run)).toEqual({ kind: 'done', status: STATUS });
   });
 
   it('stops quietly after Cancel when the in-flight poll is pending or cancelled', async () => {
@@ -134,7 +138,7 @@ describe('driveSignIn', () => {
         return { state: 'pending', intervalMs: 5000 };
       }
     ]);
-    expect(await driveSignIn(5000, pending.api, pending.run)).toEqual({ kind: 'cancelled' });
+    expect(await driveSignIn(FLOW, pending.api, pending.run)).toEqual({ kind: 'cancelled' });
     expect(pending.stats().polls).toBe(1);
 
     const err = rig([
@@ -143,17 +147,18 @@ describe('driveSignIn', () => {
         return { state: 'error', message: 'Sign-in was cancelled.' };
       }
     ]);
-    expect(await driveSignIn(5000, err.api, err.run)).toEqual({ kind: 'cancelled' });
+    expect(await driveSignIn(FLOW, err.api, err.run)).toEqual({ kind: 'cancelled' });
 
     const run: SignInRun = { cancelled: false };
     const rejecting = {
+      now: () => 0,
       wait: async () => undefined,
       poll: async (): Promise<SignInPoll> => {
         run.cancelled = true;
         throw new Error('x');
       }
     };
-    expect(await driveSignIn(5000, rejecting, run)).toEqual({ kind: 'cancelled' });
+    expect(await driveSignIn(FLOW, rejecting, run)).toEqual({ kind: 'cancelled' });
   });
 
   it('never polls when cancelled during the wait', async () => {
@@ -164,7 +169,74 @@ describe('driveSignIn', () => {
         r.run.cancelled = true;
       }
     };
-    expect(await driveSignIn(5000, api, r.run)).toEqual({ kind: 'cancelled' });
+    expect(await driveSignIn(FLOW, api, r.run)).toEqual({ kind: 'cancelled' });
     expect(r.stats().polls).toBe(0);
+  });
+});
+
+describe('driveSignIn expiry', () => {
+  it('caps the last wait at the expiry and stops without polling', async () => {
+    const r = rig([
+      { state: 'pending', intervalMs: 5000 },
+      { state: 'pending', intervalMs: 5000 }
+    ]);
+    expect(await driveSignIn({ intervalMs: 5000, expiresAt: 12_000 }, r.api, r.run)).toEqual({ kind: 'error', message: SIGN_IN_EXPIRED });
+    expect(r.waits).toEqual([5000, 5000, 2000]);
+    expect(r.stats().polls).toBe(2);
+  });
+
+  it('stops before the first poll when the code expires first', async () => {
+    const r = rig([]);
+    expect(await driveSignIn({ intervalMs: 5000, expiresAt: 3000 }, r.api, r.run)).toEqual({ kind: 'error', message: SIGN_IN_EXPIRED });
+    expect(r.waits).toEqual([3000]);
+    expect(r.stats().polls).toBe(0);
+  });
+});
+
+describe('loadAccount', () => {
+  const CACHED = { signedIn: true, notice: null } as unknown as AccountStatus;
+  const FRESH = { signedIn: false, notice: 'revoked' } as unknown as AccountStatus;
+
+  it('shows the cached status first, then the refreshed one', async () => {
+    const calls: unknown[] = [];
+    const shown: AccountStatus[] = [];
+    const err = await loadAccount(
+      async (o) => {
+        calls.push(o);
+        return o?.refresh ? FRESH : CACHED;
+      },
+      (st) => shown.push(st)
+    );
+    expect(err).toBeNull();
+    expect(calls).toEqual([undefined, { refresh: true }]);
+    expect(shown).toEqual([CACHED, FRESH]);
+  });
+
+  it('returns the error and skips the refresh when the cached read fails', async () => {
+    const calls: unknown[] = [];
+    const shown: AccountStatus[] = [];
+    const err = await loadAccount(
+      async (o) => {
+        calls.push(o);
+        throw new Error("Error invoking remote method 'identity:status': Error: vault locked");
+      },
+      (st) => shown.push(st)
+    );
+    expect(err).toBe('vault locked');
+    expect(calls).toEqual([undefined]);
+    expect(shown).toEqual([]);
+  });
+
+  it('keeps the cached status when the refresh fails', async () => {
+    const shown: AccountStatus[] = [];
+    const err = await loadAccount(
+      async (o) => {
+        if (o?.refresh) throw new Error('offline');
+        return CACHED;
+      },
+      (st) => shown.push(st)
+    );
+    expect(err).toBe('offline');
+    expect(shown).toEqual([CACHED]);
   });
 });
