@@ -160,6 +160,28 @@ export function setInboxHandlers(h: InboxHandlers | null): void {
   inboxHandlers = h;
 }
 
+/** Knowledge claims (#483) — injected by index.ts so mcpServer stays store-free. */
+export interface ClaimHandlers {
+  record(callerId: string, args: Record<string, unknown>): Promise<unknown>;
+  search(callerId: string, args: Record<string, unknown>): Promise<unknown>;
+  retract(callerId: string, args: Record<string, unknown>): Promise<unknown>;
+}
+let claimHandlers: ClaimHandlers | null = null;
+export function setClaimHandlers(h: ClaimHandlers | null): void { claimHandlers = h; }
+function claims(): ClaimHandlers {
+  if (!claimHandlers) throw new Error('claims are unavailable');
+  return claimHandlers;
+}
+
+/** Fleet-wide standing rule, delivered as the MCP initialize `instructions`
+ *  (Claude Code injects it as a first-turn system reminder; 2,048-char cap). */
+export const STANDING_RULE =
+  'Fleet knowledge: when you settle a decision, find a root cause, learn a non-obvious fact or gotcha, ' +
+  'or rule something out (and why), call record_claim with one short self-contained sentence or two, ' +
+  '1-3 topic slugs, and refs (issue/PR/file). Before re-investigating something, call search_claims — ' +
+  'another session may already know. Never put secrets in claims; use visibility "private" for ' +
+  'workspace-specific details.';
+
 /** Injected by ipc.ts: list / read workspace skills (workspaceSkills.ts). Scope
  *  (automations role → every exposed workspace; else the allowed read set) and
  *  the inbox.exposeSkills opt-out are enforced by the handler. */
@@ -605,7 +627,8 @@ function handleMethod(method: string, params: Record<string, unknown>, callerId:
       return {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: {} },
-        serverInfo: SERVER_INFO
+        serverInfo: SERVER_INFO,
+        instructions: STANDING_RULE
       };
     case 'ping':
       return {};
@@ -1011,7 +1034,7 @@ export const TOOLS: Tool[] = [
   {
     name: 'search_transcripts',
     description:
-      'Semantic search over past transcript content in your allowed workspaces. Embeds the query and returns the most similar turns (and session summaries) by meaning. Args: query (required), limit (default 10, max 50), workspace_id (narrows), kind ("turn"|"summary"). If a result leads you to the information you needed, call mark_useful with its sessionId.',
+      'Semantic search over past transcript content in your allowed workspaces. Embeds the query and returns the most similar turns (and session summaries) by meaning. Args: query (required), limit (default 10, max 50), workspace_id (narrows), kind ("turn"|"summary"). For settled knowledge (decisions, root causes, gotchas), prefer search_claims.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1676,6 +1699,48 @@ export const TOOLS: Tool[] = [
       if (!inboxHandlers) throw new Error('the inbox is unavailable');
       return inboxHandlers.list(ctx.callerId, a);
     }
+  },
+  {
+    name: 'record_claim',
+    description:
+      'Record one durable piece of fleet knowledge: a decision, root cause, non-obvious fact, gotcha, or a rejected option with its reason. ' +
+      'Args: text (required, <=600 chars, self-contained), kind (required: decision|fact|gotcha|root-cause|rejected), ' +
+      'topics (required, 1-3 slugs like "mcp-query"), refs (optional issue/PR/file strings), visibility ("fleet" default | "private"), ' +
+      'supersedes (optional claim id this replaces), capture_run (only when a capture prompt gives you one). ' +
+      'Near-duplicates are merged. Never include secrets. Returns { id, deduped, suggestedTopics }.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string' }, kind: { type: 'string', enum: ['decision', 'fact', 'gotcha', 'root-cause', 'rejected'] },
+        topics: { type: 'array', items: { type: 'string' } }, refs: { type: 'array', items: { type: 'string' } },
+        visibility: { type: 'string', enum: ['fleet', 'private'] }, supersedes: { type: 'string' }, capture_run: { type: 'string' }
+      },
+      required: ['text', 'kind', 'topics']
+    },
+    run: (_db, a, ctx) => claims().record(ctx.callerId, a)
+  },
+  {
+    name: 'search_claims',
+    description:
+      'Search fleet knowledge claims (decisions, root causes, gotchas, rejected options) by keyword and meaning. ' +
+      'Args: query (required), topics (optional slugs), kind (optional), include_superseded (default false), limit (default 10, max 50). ' +
+      'Returns claims with provenance (workspace, session when known, date) and supersededBy links.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string' }, topics: { type: 'array', items: { type: 'string' } },
+        kind: { type: 'string', enum: ['decision', 'fact', 'gotcha', 'root-cause', 'rejected'] },
+        include_superseded: { type: 'boolean' }, limit: { type: 'number' }
+      },
+      required: ['query']
+    },
+    run: (_db, a, ctx) => claims().search(ctx.callerId, a)
+  },
+  {
+    name: 'retract_claim',
+    description: 'Retract a claim your workspace recorded that turned out to be wrong. Args: id (required), reason (required). To replace a claim with a corrected one, use record_claim with supersedes instead.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' }, reason: { type: 'string' } }, required: ['id', 'reason'] },
+    run: (_db, a, ctx) => claims().retract(ctx.callerId, a)
   },
   {
     name: 'get_config',

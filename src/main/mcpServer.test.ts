@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setSessionMappingHandler, setSummaryStatusHandler, setQueryEmbedder, setUsageRecorder, setConfigResolver, _resetTelemetryForTests, type ToolCtx } from './mcpServer.js';
+import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setSessionMappingHandler, setSummaryStatusHandler, setQueryEmbedder, setUsageRecorder, setConfigResolver, setClaimHandlers, STANDING_RULE, _resetTelemetryForTests, type ToolCtx } from './mcpServer.js';
 import { EMBED_DIM, EMBED_MODEL_ID } from './vectors.js';
 import { closeDb, openDb } from './db.js';
 import { PerfStore } from './perfStore.js';
@@ -848,5 +848,35 @@ describe('inbox tools (#407)', () => {
       setSkillHandlers(null);
     }
     expect(() => tool('list_workspace_skills').run(null as never, {}, ctx)).toThrow(/skills are unavailable/);
+  });
+});
+
+describe('knowledge claims tools (#483)', () => {
+  afterEach(() => setClaimHandlers(null));
+  it('registers record_claim, search_claims, retract_claim', () => {
+    expect(TOOLS.map((t) => t.name)).toEqual(expect.arrayContaining(['record_claim', 'search_claims', 'retract_claim']));
+  });
+  it('passes the host caller id, never a wire-supplied one', async () => {
+    const seen: string[] = [];
+    setClaimHandlers({
+      record: async (c) => { seen.push(c); return { id: 'x' }; },
+      search: async (c) => { seen.push(c); return { results: [] }; },
+      retract: async (c) => { seen.push(c); return { id: 'x', status: 'retracted' }; }
+    });
+    await tool('record_claim').run(makeDb(), { text: 't', kind: 'fact', topics: ['a1'], callerId: 'evil' }, ctxA);
+    await tool('search_claims').run(makeDb(), { query: 'q' }, ctxA);
+    await tool('retract_claim').run(makeDb(), { id: 'x', reason: 'r' }, ctxA);
+    expect(seen).toEqual([WS_A, WS_A, WS_A]);
+  });
+  it('fails clearly when claims are unavailable', () => {
+    expect(() => tool('search_claims').run(makeDb(), { query: 'q' }, ctxA)).toThrow(/claims are unavailable/);
+  });
+  it('search_transcripts no longer instructs agents to call mark_useful', () => {
+    expect(tool('search_transcripts').description).not.toMatch(/mark_useful/);
+  });
+  it('the standing rule fits the 2048-char MCP instructions budget and names the tools', () => {
+    expect(STANDING_RULE.length).toBeLessThan(1200);
+    expect(STANDING_RULE).toMatch(/record_claim/);
+    expect(STANDING_RULE).toMatch(/search_claims/);
   });
 });

@@ -8,13 +8,13 @@ import { resolvePerfConfig } from './perfConfig.js';
 import { getPerfTelemetry, getPerfOtlp } from './config.js';
 import { instrumentIpcHandle } from './perfIpc.js';
 import { EMBED_MODEL_ID } from './vectors.js';
-import { startMcpServer, stopMcpServer, ensureWorkspaceSocket, setMcpStatusListener, setQueryEmbedder } from './mcpServer.js';
+import { startMcpServer, stopMcpServer, ensureWorkspaceSocket, setMcpStatusListener, setQueryEmbedder, setClaimHandlers } from './mcpServer.js';
 import { broadcastMcpStatus } from './mcpStatusBroadcast.js';
 import { ensureBuiltinLoadouts } from './loadouts.js';
 import { JsonlWatcher } from './jsonlWatcher.js';
 import { PeerStatusWatcher } from './peerStatusWatcher.js';
 import { broadcastSessionStatus } from './sessionStatusBroadcast.js';
-import { listWorkspaceManifests, manifestInvariant } from './workspaces.js';
+import { listWorkspaceManifests, manifestInvariant, readWorkspaceManifest } from './workspaces.js';
 import { wslLocalProjectsDir, wslLocalSessionsDir } from './localLauncher.js';
 import { encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir } from './paths.js';
 import { installMainProcessHandlers, getLogPath, setErrorSink, logError } from './errorLog.js';
@@ -33,6 +33,9 @@ import { hardwareAccelDisabledAtStartup } from './config.js';
 import { setWorkspaceDefault } from './mirrorPolicy.js';
 import { makeEmbedder } from './embeddings.js';
 import { indexSessionTurns, indexSessionSummaries } from './transcriptIndex.js';
+import { ClaimStore } from './claims/claimStore.js';
+import { CaptureRunStore } from './claims/captureRunStore.js';
+import { ClaimService } from './claims/claimService.js';
 
 // Mock mode is for UI iteration without Docker; no real JSONLs exist, so the
 // watcher and DB stay dormant.
@@ -42,6 +45,10 @@ const jsonlWatcher = isMock ? null : new JsonlWatcher();
 const peerStatusWatcher = isMock ? null : new PeerStatusWatcher();
 // Authoritative inbox store (#407); opened at ready, closed on quit.
 let inboxStore: InboxStore | null = null;
+// Knowledge claims (#483); assigned once the inbox (and its Kysely handle) is
+// open. Reused by the background capture scheduler (Task 9).
+let captureRuns: CaptureRunStore | null = null;
+let claimService: ClaimService | null = null;
 let presence: ReturnType<typeof startPresence> | null = null;
 // Notification + automation timers (#457): stopped in before-quit, ahead of inboxStore.close().
 let notifySvc: ReturnType<typeof registerNotifyIpc> | null = null;
@@ -195,6 +202,26 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     // Local embedder for semantic transcript search (native onnxruntime-node, on-host).
     const embed = makeEmbedder(join(app.getPath('userData'), 'models'));
     setQueryEmbedder(embed);
+
+    // Knowledge claims (#483): record_claim/search_claims/retract_claim MCP
+    // tools, backed by the inbox's Kysely handle. captureRuns/claimService are
+    // module-scoped so the background capture scheduler (Task 9) can reuse them.
+    if (inboxStore) {
+      const claimStore = new ClaimStore(inboxStore.kysely);
+      captureRuns = new CaptureRunStore(inboxStore.kysely);
+      claimService = new ClaimService({
+        claims: claimStore, runs: captureRuns, embed,
+        workspaceName: async (id) => (await readWorkspaceManifest(id))?.name ?? null
+      });
+      setClaimHandlers({
+        record: (c, a) => claimService!.record(c, a),
+        search: (c, a) => claimService!.search(c, a),
+        retract: (c, a) => claimService!.retract(c, a)
+      });
+      void captureRuns.failRunning(Date.now(), 'interrupted by app restart');
+      void claimService.backfillVectors().catch((e) =>
+        logError({ source: 'main', level: 'warn', type: 'claims-backfill', message: String(e) }));
+    }
 
     // Index new turns/summaries as they land. Fire-and-forget: indexing must
     // never block ingest, and a failure degrades search silently (logged).
