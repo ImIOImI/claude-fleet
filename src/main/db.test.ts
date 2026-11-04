@@ -285,7 +285,7 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it('a failed remap does not evict a pending key that predates it (M1)', async () => {
+  it('a failed remap does not evict a pending key that predates it', async () => {
     const dir = freshDb();
     try {
       await realSession('ws-a', 'claude-real');
@@ -314,9 +314,35 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
       expect(__pendingClaudeIdsForTest()).toEqual(new Set([pendingKeyForTest('ws-a', 'claude-x')]));
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+
+  it('a key added by a failed transaction is left in place, not deleted', async () => {
+    const dir = freshDb();
+    try {
+      await realSession('ws-a', 'claude-real');
+      await learnBrokerSessionMapping('ws-a', 'tab-1', 'claude-real');
+      expect(__pendingClaudeIdsForTest()).toEqual(new Set());
+
+      // Same injected post-write commit failure as above, but this time the
+      // key being parked is new to this call (not pre-existing). The rollback
+      // path must only ever re-add keys it removed, never delete a key it
+      // added — so this key survives as a harmless superset.
+      const commitSpy = vi
+        .spyOn(SqliteDriver.prototype, 'commitTransaction')
+        .mockImplementationOnce(() => { throw new Error('injected commit failure'); });
+      try {
+        await expect(recordBrokerSessionMapping('ws-a', 'tab-1', 'claude-y')).rejects.toThrow(
+          'injected commit failure',
+        );
+      } finally {
+        commitSpy.mockRestore();
+      }
+
+      expect(__pendingClaudeIdsForTest()).toEqual(new Set([pendingKeyForTest('ws-a', 'claude-y')]));
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
 });
 
-describe('closeDb (M1)', () => {
+describe('closeDb', () => {
   it('does not clear in-memory caches if something reopened the db while closing', async () => {
     const dir = freshDb();
     try {

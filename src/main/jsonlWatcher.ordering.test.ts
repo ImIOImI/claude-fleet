@@ -111,6 +111,7 @@ describe('JsonlWatcher per-file ingest ordering', () => {
   it('stop() resolves only after every queued batch has finished', async () => {
     h.maxDelayMs = 300; // keep the batch in flight while stop() is called
     writeFileSync(join(dir, `${SESSION}.jsonl`), line('s1') + line('s2'));
+    nudge(join(dir, `${SESSION}.jsonl`));
     await waitUntil(() => h.inFlight.get(SESSION) === 1);
     await watcher.stop();
     expect(h.inFlight.get(SESSION)).toBe(0);

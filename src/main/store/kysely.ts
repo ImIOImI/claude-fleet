@@ -30,6 +30,7 @@ function cachingDatabase(raw: Database.Database, max: number): SqliteDatabase {
   const cache = new Map<string, Database.Statement>();
   return {
     prepare(sqlText: string) {
+      if (sqlText.length > 2048) return raw.prepare(sqlText);
       let stmt = cache.get(sqlText);
       if (!stmt) {
         stmt = raw.prepare(sqlText);

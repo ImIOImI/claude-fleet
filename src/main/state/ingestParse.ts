@@ -1,6 +1,5 @@
 // Pure JSONL-line → events-row extraction for the state.db ingest path.
-// No DB access: db.ts's ingest transaction consumes ParsedLine. Moved verbatim
-// out of db.ts (async store part 2) so the extraction is testable on its own.
+// No DB access: db.ts's ingest transaction consumes ParsedLine.
 import { createHash } from 'node:crypto';
 
 export interface ParsedLine {

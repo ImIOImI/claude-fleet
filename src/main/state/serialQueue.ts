@@ -1,8 +1,6 @@
 // Keyed serial task queue: tasks under one key run strictly one after another
 // in enqueue order; different keys run independently. The JSONL watcher keys
-// it by file path so a file's batches can never overlap or reorder (async
-// store part 2 — ingest is async now, so the old "the loop can't interleave"
-// guarantee has to be explicit).
+// it by file path so a file's batches never overlap or reorder.
 
 export interface KeyedSerialQueue {
   /** Run `task` once every task enqueued earlier under `key` has settled. A

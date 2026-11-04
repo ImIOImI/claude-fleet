@@ -169,8 +169,9 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   if (jsonlWatcher) {
     openDb(app.getPath('userData'));
     // Wire the crash-safe DB sink so every logError call is also persisted to
-    // the errors table (best-effort; a wedged DB must never break crash logging —
-    // the write is async now, so its rejection is swallowed here, not in logError).
+    // the errors table.
+    // best-effort; a wedged DB must never break crash logging, so the async
+    // write's rejection is swallowed here.
     setErrorSink((row) => {
       void recordError(row).catch(() => undefined);
     });

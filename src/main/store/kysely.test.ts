@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
+import { sql } from 'kysely';
 import { sqliteKysely, num, chunked } from './kysely.js';
 
 interface T { t: { v: number } }
@@ -123,5 +124,20 @@ describe('sqliteKysely statementCache', () => {
     await k.selectFrom('t').selectAll().execute();
     await k.destroy();
     expect(raw.open).toBe(false);
+  });
+
+  it('skips the cache for SQL text over 2048 chars but still caches short statements', async () => {
+    const { raw, prepares } = counting();
+    const k = sqliteKysely<T>(raw, { statementCache: 8 });
+    const longComment = '/* ' + 'x'.repeat(2050) + ' */';
+    await sql`SELECT 1 ${sql.raw(longComment)}`.execute(k);
+    await sql`SELECT 1 ${sql.raw(longComment)}`.execute(k);
+    expect(prepares()).toBe(2); // not cached: re-prepared every call
+
+    await k.selectFrom('t').select('v').execute();
+    await k.selectFrom('t').select('v').execute();
+    expect(prepares()).toBe(3); // short statement: prepared once, reused
+
+    await k.destroy();
   });
 });

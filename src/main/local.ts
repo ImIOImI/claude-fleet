@@ -537,6 +537,15 @@ export function effectiveResumeOf(
   }
 }
 
+/** Fire-and-forget the resume usage signal off the attach path, matching
+ *  docker.ts's recordResumeUsageQuietly: the write must never delay or fail a
+ *  spawn, so a rejection is logged, not thrown. */
+export function recordResumeUsageQuietly(workspaceId: string, sessionId: string): void {
+  void recordUsageEvent({ workspaceId, sessionId, kind: 'resumed' }).catch((e: unknown) =>
+    logError({ source: 'main', level: 'warn', type: 'usage-record-failed', message: String(e), workspaceId })
+  );
+}
+
 export async function attachPty(
   containerId: string,
   sessionId: string,
@@ -603,6 +612,7 @@ export async function attachPty(
       // mirror mapping is in-memory and set first, before any transcript line
       // can be read.
       learnMirrorMapping(id, sessionId, claudeSessionId);
+      if (resume) recordResumeUsageQuietly(id, resume);
       void (async () => {
         const { mode, previous } = await recordBrokerSessionMapping(id, sessionId, claudeSessionId);
         if (mode === 'deferred') {
@@ -636,7 +646,6 @@ export async function attachPty(
             extra: { claudeSessionId, brokerSessionId: sessionId, how: resume ? 'resume' : 'session-id' }
           });
         }
-        if (resume) await recordUsageEvent({ workspaceId: id, sessionId: resume, kind: 'resumed' });
       })().catch((e: unknown) =>
         logError({
           source: 'main',

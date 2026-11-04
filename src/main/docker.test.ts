@@ -1,8 +1,7 @@
 // Unit tests for the small, Docker/broker-free async helpers in docker.ts.
 // docker.ts imports fine with no daemon present (dockerode's constructor
-// doesn't connect eagerly) — only electron needs a stub, matching
-// claudeJsonSeed.test.ts's setup.
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+// doesn't connect eagerly) — only electron needs a stub.
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({
   app: { getPath: () => '/tmp' }
@@ -24,7 +23,6 @@ beforeEach(() => {
   recordUsageEventMock.mockReset();
   logErrorMock.mockReset();
 });
-afterEach(() => vi.restoreAllMocks());
 
 describe('recordResumeUsageQuietly', () => {
   it('fires a resumed usage event and returns without waiting on it', () => {
