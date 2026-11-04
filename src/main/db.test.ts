@@ -46,7 +46,7 @@ describe('recordError', () => {
   it('resolves session_id from a broker id in extra via the mapping', async () => {
     const dir = freshDb();
     try {
-      learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-uuid-1');
+      await learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-uuid-1');
       recordError({ ts: 1, source: 'main', type: 'x', message: 'm', workspaceId: 'ws-a',
         extra: { brokerSessionId: 'broker-1' } });
       const db = openDb(dir);
@@ -85,12 +85,12 @@ describe('learnBrokerSessionMapping remap reporting (#195)', () => {
   it('returns null on first learn, the previous claude id thereafter', async () => {
     const dir = freshDb();
     try {
-      expect(learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-1')).toBeNull();
+      expect(await learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-1')).toBeNull();
       // Idempotent relearn still reports what was there before.
-      expect(learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-1')).toBe('claude-1');
+      expect(await learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-1')).toBe('claude-1');
       // A remap to a DIFFERENT claude session (the #195 cross-wiring event)
       // must surface the overwritten id so callers can log it.
-      expect(learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-2')).toBe('claude-1');
+      expect(await learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-2')).toBe('claude-1');
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
@@ -99,7 +99,7 @@ describe('verified resume mappings (poisoned legacy rows)', () => {
   it('new learns are verified; lookupVerifiedBrokerSession returns them', async () => {
     const dir = freshDb();
     try {
-      learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-1');
+      await learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-1');
       expect(lookupVerifiedBrokerSession('ws-a', 'broker-1')).toBe('claude-1');
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
@@ -115,7 +115,7 @@ describe('verified resume mappings (poisoned legacy rows)', () => {
       expect(lookupBrokerSession('ws-a', 'broker-legacy')).toBe('claude-guessed'); // observability OK
       expect(lookupVerifiedBrokerSession('ws-a', 'broker-legacy')).toBeNull();     // resume refused
       // A deterministic relearn upgrades the row to verified.
-      learnBrokerSessionMapping('ws-a', 'broker-legacy', 'claude-real');
+      await learnBrokerSessionMapping('ws-a', 'broker-legacy', 'claude-real');
       expect(lookupVerifiedBrokerSession('ws-a', 'broker-legacy')).toBe('claude-real');
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
@@ -125,7 +125,7 @@ describe('lookupResumableBrokerSession — cross-restart auto-resume gate', () =
   it('returns the mapping only once the session has ingested a transcript line', async () => {
     const dir = freshDb();
     try {
-      learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-1');
+      await learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-1');
       // Verified but never produced a transcript: `claude --resume` of it
       // would error visibly in the tab, so refuse and let the attach spawn fresh.
       expect(lookupResumableBrokerSession('ws-a', 'broker-1')).toBeNull();
@@ -158,7 +158,7 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
   it('commits directly for a fresh tab with no prior mapping', async () => {
     const dir = freshDb();
     try {
-      const r = recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-1');
+      const r = await recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-1');
       expect(r).toEqual({ mode: 'committed', previous: null });
       expect(lookupBrokerSession('ws-a', 'broker-1')).toBe('claude-1');
     } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -168,7 +168,7 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
     const dir = freshDb();
     try {
       realSession('ws-a', 'claude-real');
-      const r = recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-real');
+      const r = await recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-real');
       expect(r.mode).toBe('committed');
       expect(lookupBrokerSession('ws-a', 'broker-1')).toBe('claude-real');
     } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -178,10 +178,10 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
     const dir = freshDb();
     try {
       realSession('ws-a', 'claude-real', 'first conversation');
-      recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-real');
+      await recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-real');
 
       // /clear reports a brand-new session id that has no transcript yet.
-      const r = recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-phantom');
+      const r = await recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-phantom');
       expect(r).toEqual({ mode: 'deferred', previous: 'claude-real' });
 
       // The tab must NOT be black-holed onto the phantom: reads still resolve
@@ -195,8 +195,8 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
     const dir = freshDb();
     try {
       realSession('ws-a', 'claude-real', 'first conversation');
-      recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-real');
-      recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-next'); // deferred
+      await recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-real');
+      await recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-next'); // deferred
 
       // The cleared session finally writes its first line → the tab follows it.
       realSession('ws-a', 'claude-next', 'second conversation');
@@ -211,12 +211,12 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
     const dir = freshDb();
     try {
       // Simulate a tab already stuck on a phantom (written by pre-#170 code).
-      recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-dead'); // commits (nothing better)
+      await recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-dead'); // commits (nothing better)
       expect(lookupBrokerSession('ws-a', 'broker-1')).toBe('claude-dead');
 
       // Next session-start event replaces the phantom rather than deferring
       // behind it — a broken mapping must never win.
-      const r = recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-fresh');
+      const r = await recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-fresh');
       expect(r.mode).toBe('committed');
       expect(lookupBrokerSession('ws-a', 'broker-1')).toBe('claude-fresh');
     } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -226,13 +226,36 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
     const dir = freshDb();
     try {
       realSession('ws-a', 'claude-real');
-      recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-real');
-      recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-next'); // deferred (pending persisted)
+      await recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-real');
+      await recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-next'); // deferred (pending persisted)
       await closeDb();
       openDb(dir); // reopen — in-memory pending set must rehydrate from the row
 
       realSession('ws-a', 'claude-next');
       expect(lookupBrokerSession('ws-a', 'broker-1')).toBe('claude-next');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('concurrent remaps of one tab serialize and leave DB + in-memory pending in agreement', async () => {
+    const dir = freshDb();
+    try {
+      await realSession('ws-a', 'claude-real');
+      await learnBrokerSessionMapping('ws-a', 'tab-1', 'claude-real');
+      const results = await Promise.all([
+        recordBrokerSessionMapping('ws-a', 'tab-1', 'claude-n1'),
+        recordBrokerSessionMapping('ws-a', 'tab-1', 'claude-n2'),
+      ]);
+      expect(results.map((r) => r.mode)).toEqual(['deferred', 'deferred']);
+      const db = openDb(dir);
+      const { pending_claude_session_id: pending } = db
+        .prepare('SELECT pending_claude_session_id FROM broker_sessions WHERE broker_session_id = ?')
+        .get('tab-1') as { pending_claude_session_id: string };
+      expect(['claude-n1', 'claude-n2']).toContain(pending);
+      const loser = pending === 'claude-n1' ? 'claude-n2' : 'claude-n1';
+      await realSession('ws-a', loser); // the superseded id must NOT promote
+      expect(lookupBrokerSession('ws-a', 'tab-1')).toBe('claude-real');
+      await realSession('ws-a', pending); // the surviving pending id must promote
+      expect(lookupBrokerSession('ws-a', 'tab-1')).toBe(pending);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
@@ -258,8 +281,8 @@ describe('listSessions — headless flag', () => {
       realSession('ws-a', 'claude-tab');
       realSession('ws-a', 'claude-auto');
       realSession('ws-a', 'claude-unmapped');
-      recordBrokerSessionMapping('ws-a', 'tab-1', 'claude-tab');
-      recordBrokerSessionMapping('ws-a', 'auto-run1-step1', 'claude-auto');
+      await recordBrokerSessionMapping('ws-a', 'tab-1', 'claude-tab');
+      await recordBrokerSessionMapping('ws-a', 'auto-run1-step1', 'claude-auto');
       const byId = new Map(listSessions('ws-a').map((s) => [s.id, s.headless]));
       expect(byId.get('claude-tab')).toBe(false);
       expect(byId.get('claude-auto')).toBe(true);

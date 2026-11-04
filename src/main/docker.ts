@@ -1046,7 +1046,7 @@ async function attachPtyInner(
     // conversation). Learning is deliberately NOT done on the plain-ATTACH
     // path above: an already-live claude keeps whatever id it already has.
     const claudeSessionId = resumeOf ?? randomUUID();
-    const { mode, previous } = recordBrokerSessionMapping(workspaceId, sessionId, claudeSessionId);
+    const { mode, previous } = await recordBrokerSessionMapping(workspaceId, sessionId, claudeSessionId);
     if (mode === 'deferred') {
       // Re-CREATE of a tab that still holds a real conversation, onto a fresh
       // (not-yet-written) session id. Parked until it produces a transcript so

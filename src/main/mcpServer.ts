@@ -125,7 +125,7 @@ export function setInputWaitHandler(fn: InputWaitHandler): void {
 /** Injected by ipc.ts: persist claude's self-reported tab↔session mapping
  *  (SessionStart hook, #207). callerId is host-assigned; the handler may only
  *  ever write the caller's own workspace rows. */
-export type SessionMappingHandler = (callerId: string, brokerSessionId: string, sessionId: string) => void;
+export type SessionMappingHandler = (callerId: string, brokerSessionId: string, sessionId: string) => void | Promise<void>;
 let sessionMappingHandler: SessionMappingHandler | null = null;
 export function setSessionMappingHandler(fn: SessionMappingHandler): void {
   sessionMappingHandler = fn;
@@ -1395,12 +1395,12 @@ export const TOOLS: Tool[] = [
       properties: { brokerSessionId: { type: 'string' }, sessionId: { type: 'string' } },
       required: ['brokerSessionId', 'sessionId']
     },
-    run: (_db, a, ctx) => {
+    run: async (_db, a, ctx) => {
       if (!sessionMappingHandler) throw new Error('session-mapping reporting is unavailable');
       if (typeof a.brokerSessionId !== 'string' || typeof a.sessionId !== 'string') {
         throw new Error('brokerSessionId (string) and sessionId (string) are required');
       }
-      sessionMappingHandler(ctx.callerId, a.brokerSessionId, a.sessionId);
+      await sessionMappingHandler(ctx.callerId, a.brokerSessionId, a.sessionId);
       return { ok: true };
     }
   },

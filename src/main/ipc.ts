@@ -554,7 +554,7 @@ export async function hostSpawnFresh(workspaceId: string, sessionId: string, arg
   // closed DB (mock mode) must not fail the run.
   const claudeSessionId = randomUUID();
   try {
-    recordBrokerSessionMapping(workspaceId, sessionId, claudeSessionId);
+    await recordBrokerSessionMapping(workspaceId, sessionId, claudeSessionId);
   } catch (e) {
     logError({
       source: 'main',
@@ -1017,41 +1017,52 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         });
         return;
       }
-      const previous = learnBrokerSessionMapping(workspaceId, brokerSessionId, claudeSessionId);
-      // Every learn leaves a trace; the two warn cases are the #195 evidence
-      // trail — a FIFO consume that had to guess between tabs, and a mapping
-      // silently flipping to a different claude session.
-      if (queued.length > 1) {
-        logError({
-          source: 'main',
-          type: 'mapping-ambiguous-consume',
-          level: 'warn',
-          message: `paired ${claudeSessionId} with broker ${brokerSessionId} by FIFO with ${queued.length} tabs pending — pairing is a guess`,
-          workspaceId,
-          extra: { claudeSessionId, consumed: brokerSessionId, queued }
-        });
-      } else {
-        logError({
-          source: 'main',
-          type: 'mapping-learned',
-          level: 'info',
-          message: `paired ${claudeSessionId} with broker ${brokerSessionId}`,
-          workspaceId,
-          extra: { claudeSessionId, consumed: brokerSessionId }
-        });
-      }
-      if (previous && previous !== claudeSessionId) {
-        logError({
-          source: 'main',
-          type: 'mapping-remapped',
-          level: 'warn',
-          message: `broker ${brokerSessionId} remapped ${previous} → ${claudeSessionId}; a tab Refresh will now resume a different conversation`,
-          workspaceId,
-          extra: { brokerSessionId, from: previous, to: claudeSessionId }
-        });
-      }
-      // Propagate any pending per-session mirror override onto the claude id.
+      // Propagate any pending per-session mirror override onto the claude id —
+      // synchronously, before this file's first batch reads the mirror policy.
       learnMirrorMapping(workspaceId, brokerSessionId, claudeSessionId);
+      void (async () => {
+        const previous = await learnBrokerSessionMapping(workspaceId, brokerSessionId, claudeSessionId);
+        // Every learn leaves a trace; the two warn cases are the #195 evidence
+        // trail — a FIFO consume that had to guess between tabs, and a mapping
+        // silently flipping to a different claude session.
+        if (queued.length > 1) {
+          logError({
+            source: 'main',
+            type: 'mapping-ambiguous-consume',
+            level: 'warn',
+            message: `paired ${claudeSessionId} with broker ${brokerSessionId} by FIFO with ${queued.length} tabs pending — pairing is a guess`,
+            workspaceId,
+            extra: { claudeSessionId, consumed: brokerSessionId, queued }
+          });
+        } else {
+          logError({
+            source: 'main',
+            type: 'mapping-learned',
+            level: 'info',
+            message: `paired ${claudeSessionId} with broker ${brokerSessionId}`,
+            workspaceId,
+            extra: { claudeSessionId, consumed: brokerSessionId }
+          });
+        }
+        if (previous && previous !== claudeSessionId) {
+          logError({
+            source: 'main',
+            type: 'mapping-remapped',
+            level: 'warn',
+            message: `broker ${brokerSessionId} remapped ${previous} → ${claudeSessionId}; a tab Refresh will now resume a different conversation`,
+            workspaceId,
+            extra: { brokerSessionId, from: previous, to: claudeSessionId }
+          });
+        }
+      })().catch((e: unknown) =>
+        logError({
+          source: 'main',
+          type: 'mapping-learn-failed',
+          level: 'warn',
+          message: `could not record ${brokerSessionId} → ${claudeSessionId}: ${e instanceof Error ? e.message : String(e)}`,
+          workspaceId
+        })
+      );
     });
   }
 
@@ -1491,8 +1502,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     if (waiting) set.add(sessionId); else set.delete(sessionId);
     pushInputWait(callerId);
   });
-  setSessionMappingHandler((callerId, brokerSessionId, claudeSessionId) => {
-    const { mode, previous } = recordBrokerSessionMapping(callerId, brokerSessionId, claudeSessionId);
+  setSessionMappingHandler(async (callerId, brokerSessionId, claudeSessionId) => {
+    const { mode, previous } = await recordBrokerSessionMapping(callerId, brokerSessionId, claudeSessionId);
     if (mode === 'deferred') {
       // The hook named a session that hasn't written a transcript yet (a fresh
       // `/clear`). Parked rather than committed so an abandoned cleared session
