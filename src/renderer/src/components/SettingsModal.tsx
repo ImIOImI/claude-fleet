@@ -112,9 +112,7 @@ export function SettingsModal({ onClose, onSaved, initialTab, names = {} }: Prop
   const [perfOtlpEnabled, setPerfOtlpEnabled] = useState(false);
   const [perfOtlpEndpoint, setPerfOtlpEndpoint] = useState('');
   const [perfStatus, setPerfStatus] = useState<PerfStatusPayload | null>(null);
-  // Global knowledge-capture switch (#483). Applied immediately on change
-  // (unlike the other Diagnostics settings, which wait for Save) because it
-  // has no dependent fields to batch with.
+  // Global knowledge-capture switch (#483).
   const [knowledgeCapture, setKnowledgeCaptureState] = useState(true);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -240,6 +238,7 @@ export function SettingsModal({ onClose, onSaved, initialTab, names = {} }: Prop
       await window.api.config.setUiPrefs(uiPrefs);
       await window.api.config.setPerfTelemetry(perfTelemetry);
       await window.api.config.setPerfOtlp(perfOtlpEnabled, perfOtlpEndpoint);
+      await window.api.config.setKnowledgeCapture(knowledgeCapture);
       const cfg = await window.api.config.setFleetRoot(trimmed);
       onSaved(cfg);
       onClose();
@@ -747,8 +746,11 @@ export function SettingsModal({ onClose, onSaved, initialTab, names = {} }: Prop
                   <label className="setting-title" htmlFor="knowledge-capture">Background knowledge capture</label>
                   <p className="setting-desc">Global switch for capture forks (per-workspace switches still apply).</p>
                 </div>
-                <input id="knowledge-capture" type="checkbox" checked={knowledgeCapture}
-                  onChange={async (e) => { const v = e.target.checked; setKnowledgeCaptureState(v); await window.api.config.setKnowledgeCapture(v); }} />
+                <input
+                  id="knowledge-capture" type="checkbox" checked={knowledgeCapture}
+                  disabled={busy || !loaded}
+                  onChange={(e) => setKnowledgeCaptureState(e.target.checked)}
+                />
               </div>
             </div>
 
