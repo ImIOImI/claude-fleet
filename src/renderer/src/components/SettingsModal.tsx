@@ -6,6 +6,7 @@
 
 import { useEffect, useState } from 'react';
 import type { PerfStatusPayload, UsageBudgetPreset, UiPrefs } from '../../../preload';
+import { clampDailyCap, DAILY_CAP_DEFAULT } from '../../../preload/captureSettings';
 import { ModalBackdrop } from './ModalBackdrop';
 import { NotificationsSettings } from './NotificationsSettings';
 import { AccountSettings } from './AccountSettings';
@@ -114,6 +115,7 @@ export function SettingsModal({ onClose, onSaved, initialTab, names = {} }: Prop
   const [perfStatus, setPerfStatus] = useState<PerfStatusPayload | null>(null);
   // Global knowledge-capture switch (#483).
   const [knowledgeCapture, setKnowledgeCaptureState] = useState(true);
+  const [dailyCap, setDailyCap] = useState(String(DAILY_CAP_DEFAULT));
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -165,6 +167,7 @@ export function SettingsModal({ onClose, onSaved, initialTab, names = {} }: Prop
         if (cfg.knowledgeCapture !== undefined) {
           setKnowledgeCaptureState(cfg.knowledgeCapture);
         }
+        if (cfg.knowledgeCaptureDailyCap !== undefined) setDailyCap(String(cfg.knowledgeCaptureDailyCap));
         setLoaded(true);
       }
     });
@@ -239,6 +242,7 @@ export function SettingsModal({ onClose, onSaved, initialTab, names = {} }: Prop
       await window.api.config.setPerfTelemetry(perfTelemetry);
       await window.api.config.setPerfOtlp(perfOtlpEnabled, perfOtlpEndpoint);
       await window.api.config.setKnowledgeCapture(knowledgeCapture);
+      await window.api.config.setKnowledgeCaptureDailyCap(clampDailyCap(dailyCap.trim() === '' ? undefined : Number(dailyCap)));
       const cfg = await window.api.config.setFleetRoot(trimmed);
       onSaved(cfg);
       onClose();
@@ -750,6 +754,17 @@ export function SettingsModal({ onClose, onSaved, initialTab, names = {} }: Prop
                   id="knowledge-capture" type="checkbox" checked={knowledgeCapture}
                   disabled={busy || !loaded}
                   onChange={(e) => setKnowledgeCaptureState(e.target.checked)}
+                />
+              </div>
+              <div className="setting-row">
+                <div className="setting-row-text">
+                  <label className="setting-title" htmlFor="knowledge-capture-cap">Knowledge captures per day</label>
+                  <p className="setting-desc">App-wide cap on capture runs per calendar day (0–500; 0 = none). Extra triggers are dropped.</p>
+                </div>
+                <input
+                  id="knowledge-capture-cap" type="number" min={0} max={500} value={dailyCap}
+                  disabled={busy || !loaded || !knowledgeCapture}
+                  onChange={(e) => setDailyCap(e.target.value)}
                 />
               </div>
             </div>

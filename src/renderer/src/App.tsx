@@ -32,6 +32,7 @@ import {
   type PeerKind
 } from './sessionStatusMerge';
 import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget, UiPrefs, InboxCounts, InboxConfig, QuietState } from '../../preload';
+import type { CaptureSettings } from '../../preload/captureSettings';
 import { InboxChip } from './components/InboxChip';
 import { InboxView, type InboxSection } from './components/InboxView';
 import { isWarm } from './fleetTemperature';
@@ -140,6 +141,8 @@ export interface WorkspaceSummary {
   accessibility?: AccessibilityConfig;
   /** Host-private inbox permissions (#407). */
   inbox?: InboxConfig;
+  /** Knowledge capture settings (#483 §5a); absent = all defaults. */
+  knowledgeCapture?: CaptureSettings;
   createdAt: number;
   lastUsedAt: number;
 }

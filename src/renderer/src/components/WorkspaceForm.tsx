@@ -25,6 +25,8 @@ import { eligibleAcceptFromManagers, ManagerGlyph } from './committee';
 import { ModelCombobox, type EndpointEntry } from './ModelCombobox';
 import { createSecretRevealer, REVEAL_SECONDS, type RevealState } from './secretReveal';
 import type { InboxConfig } from '../../../preload';
+import type { CaptureSettings } from '../../../preload/captureSettings';
+import { captureSubmitValue, captureSummary, fromCaptureForm, toCaptureForm, type CaptureFormState } from '../captureSettingsView';
 import {
   claudeAuthFromInitial,
   deriveAuthFields,
@@ -96,9 +98,10 @@ export interface WorkspaceFormSubmit {
   accessibility?: AccessibilityConfig;
   /** Inbox permissions (#407); undefined when everything is at its default. */
   inbox?: InboxConfig;
-  /** Background knowledge capture (#483); absent/true = on. Only an explicit
-   *  `false` is ever submitted. */
-  knowledgeCapture?: boolean;
+  /** Knowledge capture settings (#483 §5a); absent = all defaults. Always
+   *  submitted (undefined clears back to defaults — writeManifest treats a
+   *  present key as authoritative). */
+  knowledgeCapture?: CaptureSettings;
 }
 
 interface ImageEntry {
@@ -274,8 +277,11 @@ export function WorkspaceForm({
   const [inboxOpen, setInboxOpen] = useState(initial?.inbox !== undefined);
   const [trustedEdits, setTrustedEdits] = useState(initial?.inbox?.trusted === true);
   const [exposeSkills, setExposeSkills] = useState(initial?.inbox?.exposeSkills !== false);
-  // Background knowledge capture (#483) — edit-mode only. Default on.
-  const [knowledgeCapture, setKnowledgeCapture] = useState(initial?.knowledgeCapture !== false);
+  // Knowledge capture settings (#483 §5a) — edit-mode only; new workspaces start on defaults.
+  const [capture, setCapture] = useState<CaptureFormState>(() => toCaptureForm(initial?.knowledgeCapture));
+  const [captureOpen, setCaptureOpen] = useState(false);
+  const setCap = <K extends keyof CaptureFormState>(k: K, v: CaptureFormState[K]): void =>
+    setCapture((c) => ({ ...c, [k]: v }));
   // Manager workspaces eligible for the acceptFrom list (other container managers).
   const managerOptions = useMemo(
     () => eligibleAcceptFromManagers(workspaces, initial?.id ?? ''),
@@ -542,6 +548,12 @@ export function WorkspaceForm({
     };
     const inbox = mode === 'edit' && Object.keys(inboxCfg).length ? inboxCfg : undefined;
 
+    const cap = fromCaptureForm(capture);
+    if (cap.error) {
+      setError(cap.error);
+      return null;
+    }
+
     return {
       id: initial?.id,
       name: effectiveName,
@@ -576,7 +588,7 @@ export function WorkspaceForm({
       mirror: { default: mirrorDefault, cleanup: cleanupDefault },
       accessibility,
       inbox,
-      ...(knowledgeCapture ? {} : { knowledgeCapture: false })
+      knowledgeCapture: captureSubmitValue(cap.settings)
     };
   };
 
@@ -1386,11 +1398,6 @@ export function WorkspaceForm({
           <p className="form-hint">
             Automations can see this workspace's skills (names, descriptions, and full text on request).
           </p>
-          <label className="committee-reachable-row">
-            <input type="checkbox" checked={knowledgeCapture} onChange={(e) => setKnowledgeCapture(e.target.checked)} disabled={busy} />
-            <span>Background knowledge capture</span>
-          </label>
-          <p className="form-hint">Periodically runs a hidden fork of each session that records durable decisions, root causes and gotchas as fleet claims.</p>
           {kind === 'container' ? (
             <>
               <label className="committee-reachable-row">
@@ -1414,6 +1421,74 @@ export function WorkspaceForm({
           ) : (
             <p className="form-hint">Local workspaces can't be trusted: their identity can't be verified the way a container's can.</p>
           )}
+        </details>
+      )}
+
+      {mode === 'edit' && (
+        <details
+          className="form-disclosure"
+          open={captureOpen}
+          onToggle={(e) => setCaptureOpen((e.target as HTMLDetailsElement).open)}
+        >
+          <summary>
+            Knowledge capture <span className="form-hint">{captureSummary(fromCaptureForm(capture).settings)}</span>
+          </summary>
+          <label className="committee-reachable-row">
+            <input type="checkbox" checked={capture.enabled} onChange={(e) => setCap('enabled', e.target.checked)} disabled={busy} />
+            <span>Background knowledge capture</span>
+          </label>
+          <p className="form-hint">
+            Runs a hidden fork of a session, limited to the claims tools, that records durable decisions, root causes and gotchas.
+            A run costs about one more turn of that session.
+          </p>
+          <label className="committee-reachable-row">
+            <input type="checkbox" checked={capture.onSearchHit} onChange={(e) => setCap('onSearchHit', e.target.checked)} disabled={busy || !capture.enabled} />
+            <span>Capture sessions this workspace's searches find</span>
+          </label>
+          <div className="form-row ib-rate">
+            <label htmlFor="ws-cap-top">Sessions per search</label>
+            <input id="ws-cap-top" type="number" min={1} max={5} value={capture.searchTopSessions}
+              onChange={(e) => setCap('searchTopSessions', e.target.value)} disabled={busy || !capture.enabled || !capture.onSearchHit} />
+          </div>
+          <div className="form-row ib-rate">
+            <label htmlFor="ws-cap-recap">Recapture after (new turns)</label>
+            <input id="ws-cap-recap" type="number" min={10} max={500} value={capture.recaptureAfterTurns}
+              onChange={(e) => setCap('recaptureAfterTurns', e.target.value)} disabled={busy || !capture.enabled} />
+          </div>
+          <div className="form-row ib-rate">
+            <label htmlFor="ws-cap-bands">Context bands (%)</label>
+            <input id="ws-cap-bands" type="text" placeholder="85" value={capture.contextBands}
+              onChange={(e) => setCap('contextBands', e.target.value)} disabled={busy || !capture.enabled} />
+          </div>
+          <p className="form-hint">Capture when the context first fills past each band: 50–95, up to 4, comma-separated. Blank = never on context fill.</p>
+          <div className="form-row ib-rate">
+            <label htmlFor="ws-cap-turns">Every N turns (0 = off)</label>
+            <input id="ws-cap-turns" type="number" min={0} max={500} value={capture.turnsEvery}
+              onChange={(e) => setCap('turnsEvery', e.target.value)} disabled={busy || !capture.enabled} />
+          </div>
+          <div className="form-row ib-rate">
+            <label htmlFor="ws-cap-model">Model</label>
+            <input id="ws-cap-model" type="text" placeholder="session" value={capture.model}
+              onChange={(e) => setCap('model', e.target.value)} disabled={busy || !capture.enabled} />
+          </div>
+          <p className="form-hint">"session" reuses the session's own model and its prompt cache. Any other model re-reads the whole conversation at full price.</p>
+          <div className="form-row ib-rate">
+            <label htmlFor="ws-cap-vis">Claims visibility</label>
+            <select id="ws-cap-vis" value={capture.captureVisibility}
+              onChange={(e) => setCap('captureVisibility', e.target.value === 'private' ? 'private' : 'fleet')} disabled={busy || !capture.enabled}>
+              <option value="fleet">Fleet</option>
+              <option value="private">This workspace only</option>
+            </select>
+          </div>
+          <div className="form-row ib-rate">
+            <label htmlFor="ws-cap-keep">Keep transcripts (days)</label>
+            <input id="ws-cap-keep" type="number" min={30} max={3650} value={capture.transcriptRetentionDays}
+              onChange={(e) => setCap('transcriptRetentionDays', e.target.value)} disabled={busy} />
+          </div>
+          <p className="form-hint">
+            Sets Claude Code's cleanupPeriodDays for the sessions the app runs here, so older sessions can still be captured.
+            Claude runs you start yourself outside the app keep their own setting.
+          </p>
         </details>
       )}
 

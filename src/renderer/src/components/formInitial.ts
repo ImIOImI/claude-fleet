@@ -40,6 +40,7 @@ export function workspaceToFormInitial(
     resources: w.resources,
     mirror: w.mirror,
     accessibility: w.accessibility,
-    inbox: w.inbox
+    inbox: w.inbox,
+    knowledgeCapture: w.knowledgeCapture
   };
 }
