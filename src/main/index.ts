@@ -1,7 +1,7 @@
 import { app, BrowserWindow, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
 import { registerIpc } from './ipc.js';
-import { openDb, closeDb, deleteEmbeddingsForOtherModels, recordError, listSessions, stateKysely } from './db.js';
+import { openDb, closeDb, deleteEmbeddingsForOtherModels, recordError, stateKysely } from './db.js';
 import { initPerf, shutdownPerf, perfSpan, perfSpanAsync } from './perf.js';
 import { PerfStore } from './perfStore.js';
 import { resolvePerfConfig } from './perfConfig.js';
@@ -300,7 +300,8 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         // child spans carry the synchronous parts that can block the loop.
         await perfSpanAsync('claude_fleet.boot.embed_backfill', async () => {
           await perfSpanAsync('claude_fleet.index.delete_stale_models', () => deleteEmbeddingsForOtherModels(EMBED_MODEL_ID));
-          const sessions = await perfSpanAsync('claude_fleet.index.list_sessions', () => listSessions());
+          const sessions = await perfSpanAsync('claude_fleet.index.list_sessions',
+            () => stateKysely().selectFrom('sessions').select('id').execute());
           for (const s of sessions) await indexSessionTurns(s.id, embed);
           await indexSessionSummaries(embed);
         });

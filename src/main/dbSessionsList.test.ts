@@ -4,7 +4,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDb, closeDb, ingestLine, listSessions, latestActivityByWorkspace } from './db.js';
+import { openDb, closeDb, ingestLine, listSessions, latestActivityByWorkspace, latestSessionId } from './db.js';
 
 let dir: string;
 const WS = '01WS';
@@ -68,5 +68,21 @@ describe('latestActivityByWorkspace', () => {
     expect(got.get('ws-a')).toBe(Date.parse('2026-07-01T00:05:00Z'));
     expect(got.get('ws-b')).toBeNull();
     expect(got.has('ws-none')).toBe(false);
+  });
+});
+
+describe('latestSessionId', () => {
+  it('matches listSessions(ws)[0]?.id, including when the only session has a NULL last_active_at', async () => {
+    await ingestLine('ws-c', 'c1', userLine('u1', 'first'));
+    await ingestLine('ws-c', 'c2', userLine('u2', 'second'));
+    expect(await latestSessionId('ws-c')).toBe((await listSessions('ws-c'))[0]?.id ?? null);
+
+    // A light session (only a timestamp-less line) never gets a real
+    // last_active_at; it must still resolve as "latest" when it's the only one.
+    await ingestLine('ws-d', 'd1', JSON.stringify({ type: 'ai-title', aiTitle: 't', sessionId: 'd1' }));
+    expect(await latestSessionId('ws-d')).toBe('d1');
+    expect(await latestSessionId('ws-d')).toBe((await listSessions('ws-d'))[0]?.id ?? null);
+
+    expect(await latestSessionId('ws-none')).toBeNull();
   });
 });

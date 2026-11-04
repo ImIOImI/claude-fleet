@@ -126,6 +126,7 @@ import {
   lookupBrokerSession,
   lookupVerifiedBrokerSession,
   listSessions,
+  latestSessionId,
   latestActivityByWorkspace,
   renameSession,
   deleteSession,
@@ -783,7 +784,7 @@ async function committeeCollect(
   since: number
 ): Promise<{ id: string; sessionId: string | null; cursor: number; turns: CollectTurn[] }> {
   await assertControl(callerId, targetId, 'read');
-  const sessionId = (await listSessions(targetId))[0]?.id ?? null;
+  const sessionId = await latestSessionId(targetId);
   if (!sessionId) return { id: targetId, sessionId: null, cursor: since, turns: [] };
   const events = await eventsForSession(sessionId, since, 500);
   const cursor = events.length ? events[events.length - 1].id : since;
