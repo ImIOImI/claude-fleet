@@ -1,7 +1,7 @@
 # Knowledge claims, phase 1: record, search, and background capture
 
 **Date:** 2026-11-04
-**Status:** Design approved in conversation with Troy; awaiting spec review
+**Status:** Approved 2026-11-04; revised the same day (search-triggered capture + configurable settings, §5/§5a)
 **Supersedes:** #206 (Phase 3 session value scoring and tiering)
 **Related:** #476 (state.db growth and `query` freeze), #465 (runtime decision gate), Rust embedder sidecar spec (separate, parallel), state.db retention spec (separate)
 
@@ -118,14 +118,19 @@ The fleet-state server returns an `instructions` string in its MCP `initialize` 
 
 The app launches a **headless fork** of a live session that extracts claims, without touching the live session.
 
-**Trigger policy** (main process, per interactive session):
-- **Context fill** comes from the newest assistant event's usage: `input + cache_read + cache_creation` tokens ÷ the model's window (200K, or 1M for `[1m]` models; the model comes from the JSONL). Captures fire when fill first crosses **60%** and **85%**. Both reset when a compaction boundary is ingested.
-- **Turns:** also fire after **30 completed turns** since the last capture for that session.
+**Triggers** (revised 2026-11-04 after the feasibility gate measured $0.34–$0.53 per fork at ~50K context; see the gate results). Every value below is a per-workspace setting (§5a).
+- **Search hit (primary).** After a `search_transcripts`, `search_claims` or `query` call returns, the app takes the top **N** distinct sessions the results reference (default **3**) and queues a capture for each that:
+  - has never been captured, or has grown by at least `recaptureAfterTurns` (default **30**) user turns since its last capture;
+  - is not the caller's own session (when known) and not a capture fork.
+
+  The search response is never delayed. The capture prompt carries the search query, so the fork extracts what made the session relevant as well as general learnings.
+- **Context fill (safety net before compaction).** Fill comes from the newest assistant event's usage: `input + cache_read + cache_creation` tokens ÷ the model's window (200K, or 1M for `[1m]` models; the model comes from the JSONL). A capture fires when fill first crosses each configured band. The default is **`[0.85]`**, one capture right before Claude Code would auto-compact. Bands reset when a compaction boundary is ingested.
+- **Periodic (optional).** Every `turnsEvery` user turns. Default **off**.
 - **Guards:**
   - At most one running capture per session, and at least 10 minutes between captures of the same session.
   - At most **2** concurrent captures app-wide; extra triggers queue. A queued trigger is dropped when a newer trigger for the same session replaces it, or after 15 minutes in the queue.
-  - Never for automation runs, for capture forks themselves, or for sessions whose workspace has capture turned off.
-- All thresholds are settings (config with defaults; no new UI in phase 1 beyond the switches below).
+  - An **app-wide daily cap** (default **40** captures per local calendar day; global setting). Triggers over the cap are dropped and counted.
+  - Never for automation runs, for capture forks themselves, or for sessions whose workspace has capture disabled.
 
 **Execution** goes through the existing per-backend launch paths (`docker exec` into the container; the local or WSL launcher on the host), with the session's cwd:
 
@@ -136,17 +141,52 @@ claude -p "<capture prompt>" --resume <session-id> --fork-session \
   --max-turns 12 --output-format json
 ```
 
-- The **same model** as the session, so the re-read of the conversation prefix hits the prompt cache.
+- The **same model** as the session by default (setting `model: "session"`), so the re-read of the conversation prefix hits the prompt cache. A specific model id may be configured instead; it gets no cache benefit.
 - **Tools are restricted** to the two claims tools, so the fork can't read files, run commands, or call other MCP tools.
-- The **capture prompt** includes the run token (passed to `record_claim` as `capture_run`) and the workspace's top existing topics. It instructs: search before recording; only durable, cross-session-useful knowledge; at most 10 claims; record nothing if nothing new; no secrets.
+- The **capture prompt** includes the run token (passed to `record_claim` as `capture_run`), the workspace's top existing topics, and, for search-hit captures, the search query ("someone searched for … and this session matched; what was it about and what did it learn?"). It instructs: search before recording; only durable, cross-session-useful knowledge; at most 10 claims; record nothing if nothing new; no secrets.
 - **Wall-clock timeout:** 5 minutes. On timeout the fork process is killed and the run is marked `timed-out`.
 - From the JSON output, the app records `fork_session_id`, usage (tokens and cost) and status in `capture_runs`. `claims_recorded` is counted from `claim_sources`.
 
 **Fork bookkeeping:** the fork writes its own transcript into the workspace's projects directory, so the JSONL watcher will ingest it as a session. Sessions whose id appears as `capture_runs.fork_session_id` are filed under a collapsed **Knowledge capture** group in the Sessions rail, like automation runs (#448). Their cost stays in usage totals.
 
-**Switches:**
-- Per-workspace `knowledgeCapture: boolean` in the workspace manifest, default **on**, shown as a checkbox in the workspace form.
-- A global kill switch in Settings → Diagnostics.
+### 5a. Capture settings (per workspace, editable in the UI and by Claude)
+
+The manifest field `knowledgeCapture` is an object (absent = all defaults). The parser is an allowlist, and every value is clamped to its range on read and on write:
+
+| Field | Default | Range |
+|---|---|---|
+| `enabled` | `true` | boolean |
+| `onSearchHit` | `true` | boolean |
+| `searchTopSessions` | `3` | 1–5 |
+| `recaptureAfterTurns` | `30` | 10–500 |
+| `contextBands` | `[0.85]` | 0–4 values, each 0.50–0.95 (deduplicated, sorted) |
+| `turnsEvery` | `0` (off) | 0, or 10–500 |
+| `model` | `"session"` | `"session"` or a model id matching `^claude-[a-z0-9.\-\[\]]{1,60}$` |
+| `transcriptRetentionDays` | `365` | 30–3650 |
+| `captureVisibility` | `"fleet"` | `fleet` / `private`; the default visibility the capture prompt asks the fork to use |
+
+The task-10 `knowledgeCapture: false` boolean becomes `{ enabled: false }`. A manifest still holding the boolean is read as that.
+
+**Global settings** (config.json, Settings → Diagnostics, UI only):
+- `knowledgeCapture` kill switch (default on, from task 10)
+- `knowledgeCaptureDailyCap` (default 40, range 0–500; 0 = no captures)
+
+**UI:** a **Knowledge capture** disclosure in the edit-workspace form, with one control per field, replaces the task-10 checkbox.
+
+**Claude edits, via two new MCP tools** (fleet-state; caller's own workspace only):
+- `get_capture_settings()` → the effective settings, with defaults filled in, plus the global cap and how many captures have run today.
+- `set_capture_settings({ ...partial, reason })`:
+  1. Validates and clamps each field, and rejects unknown fields.
+  2. Classifies the change. It **increases cost** if it turns `enabled` or `onSearchHit` on, raises `searchTopSessions`, lowers `recaptureAfterTurns`, adds a band or lowers one, turns `turnsEvery` on or lowers it, or changes `model` away from `"session"`. Any other change (including `transcriptRetentionDays` and `captureVisibility`) is cost-neutral or cost-reducing.
+  3. **Cost-reducing or neutral** changes apply immediately: the manifest is written through the main process, a change-log row is appended, and a low-priority notification is sent ("<workspace> changed its knowledge-capture settings: …").
+  4. **Cost-increasing** changes apply immediately only when the workspace is `inbox.trusted`. Otherwise they become a **proposal** in the existing proposals flow (approve or reject, like automation proposals). The response then says `{ status: "proposed", proposalId }`.
+- Change log: `capture_settings_log(id, workspace_id, ts, actor 'user'|'workspace', before JSON, after JSON, reason, applied 0|1, proposal_id)` in inbox.db (v7).
+
+**Transcript retention:** the app makes `transcriptRetentionDays` effective as Claude Code's `cleanupPeriodDays`, so search-hit captures can still fork sessions older than Claude's 30-day default.
+- **Container:** written into the container user's Claude settings file (bind-mounted state) at container start and when the setting changes.
+- **Local and WSL:** passed on the app's own `claude` launches as `--settings '{"cleanupPeriodDays":N}'`.
+
+Limitation: the user's own non-app `claude` runs on the same machine still apply their own `cleanupPeriodDays`. The workspace form says so.
 
 ### 6. Retiring `mark_useful`
 
