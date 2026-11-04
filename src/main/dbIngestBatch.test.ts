@@ -80,9 +80,9 @@ describe('ingestBatch (async store part 2a)', () => {
     await db.ingestLine(WS, 'claude-real', FIXTURE[3]);
     await db.learnBrokerSessionMapping(WS, 'tab-1', 'claude-real');
     expect(await db.recordBrokerSessionMapping(WS, 'tab-1', 'claude-next')).toEqual({ mode: 'deferred', previous: 'claude-real' });
-    expect(db.lookupBrokerSession(WS, 'tab-1')).toBe('claude-real');
+    expect(await db.lookupBrokerSession(WS, 'tab-1')).toBe('claude-real');
     await db.ingestBatch(WS, 'claude-next', [FIXTURE[4], FIXTURE[6]]);
-    expect(db.lookupBrokerSession(WS, 'tab-1')).toBe('claude-next');
+    expect(await db.lookupBrokerSession(WS, 'tab-1')).toBe('claude-next');
     expect(raw.prepare('SELECT pending_claude_session_id FROM broker_sessions').get()).toEqual({ pending_claude_session_id: null });
   });
 

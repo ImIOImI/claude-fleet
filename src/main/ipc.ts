@@ -46,7 +46,7 @@ import {
   setPerfOtlp,
   getGithubClientIdConfig
 } from './config.js';
-import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk, perfSetSpanContext, recordLatencySample, setPerfStateListener, perfNotePowerEvent, perfSpan, setPerfMemorySource } from './perf.js';
+import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk, perfSetSpanContext, recordLatencySample, setPerfStateListener, perfNotePowerEvent, perfSpanAsync, setPerfMemorySource } from './perf.js';
 import { resolvePerfConfig } from './perfConfig.js';
 import { sanitizePerfSamples } from './perfSamples.js';
 import { buildLoadoutCatalog } from './loadoutCatalog.js';
@@ -938,6 +938,12 @@ async function normalizeAndValidateWslRoot(
   return linuxRoot;
 }
 
+/** A failed live summary push is logged, not thrown: it runs from a watcher
+ *  emit or a timer, where a rejection would go unhandled. */
+function logBroadcastFailure(workspaceId: string, e: unknown): void {
+  logError({ source: 'main', level: 'warn', type: 'observability-broadcast', message: String(e), workspaceId });
+}
+
 export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): void {
   // Width-agreement sweep (#268). unref'd so it never holds the process open.
   const widthSweep = setInterval(sweepWidthAgreement, WIDTH_SWEEP_MS);
@@ -966,17 +972,17 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // Timer-driven main-thread work: post-grace this is always a cache-miss
       // recompute + per-window structured clone, so span it like the ingest
       // emit below — unspanned recomputes are how #382 stayed hidden.
-      perfSpan(
+      void perfSpanAsync(
         'claude_fleet.observability.trailing_rebroadcast',
-        () => {
-          const summary = summaryForWorkspace(workspaceId);
+        async () => {
+          const summary = await summaryForWorkspace(workspaceId);
           broadcastObservabilitySummary(
             { workspaceId, summary },
             BrowserWindow.getAllWindows()
           );
         },
         { workspace_id: workspaceId }
-      );
+      ).catch((e: unknown) => logBroadcastFailure(workspaceId, e));
     }
   );
   if (jsonlWatcher) {
@@ -985,20 +991,20 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // wrapper never covered it, so the summary recompute + the per-window
       // structured clone inside webContents.send were invisible to stall
       // attribution until this span (2026-08-17 analysis).
-      perfSpan(
+      // Reset the trailing timer — fires once after quiescence to push the
+      // final fresh state (see comment above makeTrailingRebroadcast).
+      trailingRebroadcast.schedule(workspaceId);
+      void perfSpanAsync(
         'claude_fleet.observability.ingest_broadcast',
-        () => {
-          const summary = summaryForWorkspace(workspaceId);
+        async () => {
+          const summary = await summaryForWorkspace(workspaceId);
           broadcastObservabilitySummary(
             { workspaceId, summary },
             BrowserWindow.getAllWindows()
           );
-          // Reset the trailing timer — fires once after quiescence to push the
-          // final fresh state (see comment above makeTrailingRebroadcast).
-          trailingRebroadcast.schedule(workspaceId);
         },
         { workspace_id: workspaceId }
-      );
+      ).catch((e: unknown) => logBroadcastFailure(workspaceId, e));
     });
     // Per-tab mapping: when a brand-new claude JSONL appears in a
     // workspace, ask the pending-attach map if there's exactly one
@@ -1709,10 +1715,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   });
   // Plan-usage bar numerator: total tokens spent across the fleet in the
   // trailing rolling window. The allowance (denominator) lives in config.
-  ipcMain.handle('usage:rollingSpend', () => {
+  ipcMain.handle('usage:rollingSpend', async () => {
     const windowMs = USAGE_BUDGET_WINDOW_HOURS * 60 * 60 * 1000;
     return {
-      spentTokens: tokensSpentSince(Date.now() - windowMs),
+      spentTokens: await tokensSpentSince(Date.now() - windowMs),
       windowHours: USAGE_BUDGET_WINDOW_HOURS
     };
   });
@@ -2225,21 +2231,21 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // Resolve a renderer broker session id to its claude session id. Tolerant
   // of a dormant DB (mock mode, where the watcher/DB never opened): returns
   // null instead of throwing, so the mirror handlers degrade to no-ops.
-  const claudeIdFor = (workspaceId: string, brokerSessionId: string): string | null => {
+  const claudeIdFor = async (workspaceId: string, brokerSessionId: string): Promise<string | null> => {
     try {
-      return lookupBrokerSession(workspaceId, brokerSessionId) ?? null;
+      return (await lookupBrokerSession(workspaceId, brokerSessionId)) ?? null;
     } catch {
       return null;
     }
   };
   ipcMain.handle(
     'mirror:setOverride',
-    (_e, workspaceId: string, brokerSessionId: string, setting: 'on' | 'off') => {
+    async (_e, workspaceId: string, brokerSessionId: string, setting: 'on' | 'off') => {
       setSessionOverride(workspaceId, brokerSessionId, setting === 'off' ? 'off' : 'on');
       // If the broker→claude mapping is already known (a live flip mid-session),
       // propagate the new override onto the claude key immediately; otherwise
       // the watcher's new-session hook will do it once the mapping lands.
-      const claudeId = claudeIdFor(workspaceId, brokerSessionId);
+      const claudeId = await claudeIdFor(workspaceId, brokerSessionId);
       if (claudeId) learnMirrorMapping(workspaceId, brokerSessionId, claudeId);
     }
   );
@@ -2248,15 +2254,15 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // up in that case, so the close-time modal is correctly skipped.
   ipcMain.handle(
     'transcript:hasForBrokerSession',
-    (_e, workspaceId: string, brokerSessionId: string) => {
-      const claudeId = claudeIdFor(workspaceId, brokerSessionId);
+    async (_e, workspaceId: string, brokerSessionId: string) => {
+      const claudeId = await claudeIdFor(workspaceId, brokerSessionId);
       return claudeId ? existsSync(workspaceHistoryFile(workspaceId, claudeId)) : false;
     }
   );
   ipcMain.handle(
     'transcript:deleteForBrokerSession',
     async (_e, workspaceId: string, brokerSessionId: string) => {
-      const claudeId = claudeIdFor(workspaceId, brokerSessionId);
+      const claudeId = await claudeIdFor(workspaceId, brokerSessionId);
       if (!claudeId) return;
       await unlink(workspaceHistoryFile(workspaceId, claudeId)).catch(() => {});
     }
@@ -2318,12 +2324,12 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
 
   ipcMain.handle(
     'observability:summaryForBrokerSession',
-    (_e, workspaceId: string, brokerSessionId: string) => {
-      const summary = summaryForBrokerSession(workspaceId, brokerSessionId);
+    async (_e, workspaceId: string, brokerSessionId: string) => {
+      const summary = await summaryForBrokerSession(workspaceId, brokerSessionId);
       if (!summary) {
         // Blank-rail root signal: no-mapping = why the per-tab summary is null;
         // mapped-no-session = stale mapping. Deduped per (workspace:tab:outcome).
-        const claudeId = lookupBrokerSession(workspaceId, brokerSessionId);
+        const claudeId = await lookupBrokerSession(workspaceId, brokerSessionId);
         const outcome = claudeId ? 'mapped-no-session' : 'no-mapping';
         const key = `${workspaceId}:${brokerSessionId}:${outcome}`;
         if (!mappingUnresolvedSeen.has(key)) {

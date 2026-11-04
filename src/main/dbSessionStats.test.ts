@@ -8,8 +8,8 @@
 //
 // Task 2 adds:
 //   4. Reader equivalence — summaryForSession reads rollups, not events
-//   5. EXPLAIN pins — OBSERVED_MAX_SQL + TOP_TOOLS_SQL never mention events
-//   6. EXPLAIN pin — LATEST_ASSISTANT_SQL uses a session-prefixed index
+//   5. EXPLAIN pins — observedMaxQuery + topToolsQuery never mention events
+//   6. EXPLAIN pin — latestAssistantQuery uses a session-prefixed index
 //
 // NOTE: better-sqlite3 is ABI-broken in this container ("Module did not
 // self-register"). The expected local outcome is a fast import failure — CI
@@ -25,10 +25,12 @@ import {
   ingestLine,
   deleteSession,
   summaryForSession,
-  OBSERVED_MAX_SQL,
-  TOP_TOOLS_SQL,
-  LATEST_ASSISTANT_SQL,
+  stateKysely,
+  observedMaxQuery,
+  topToolsQuery,
+  latestAssistantQuery,
 } from './db.js';
+import { explainPlan } from './state/explainPlan.js';
 
 let dir: string;
 
@@ -345,7 +347,7 @@ describe('summary reader equivalence + EXPLAIN pins (Task 2)', () => {
     await ingestLine(WS2, SES_B, assistantLine('b1'));
     await ingestLine(WS2, SES_B, toolUseLine('t4', 'Bash'));
 
-    const summaryA = summaryForSession(SES_A);
+    const summaryA = await summaryForSession(SES_A);
     expect(summaryA).not.toBeNull();
 
     // contextWindowTokens: contextWindowFor('claude-sonnet', 500) → 200_000
@@ -359,7 +361,7 @@ describe('summary reader equivalence + EXPLAIN pins (Task 2)', () => {
       { name: 'Edit', count: 1 },
     ]);
 
-    const summaryB = summaryForSession(SES_B);
+    const summaryB = await summaryForSession(SES_B);
     expect(summaryB).not.toBeNull();
     // SES_B has only zero-token assistant events → observedMax=0 → 200K window.
     expect(summaryB!.contextWindowTokens).toBe(200_000);
@@ -374,7 +376,7 @@ describe('summary reader equivalence + EXPLAIN pins (Task 2)', () => {
     //   lastTurnContextTokens = null
     await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
 
-    const summary = summaryForSession(SES_A);
+    const summary = await summaryForSession(SES_A);
     expect(summary).not.toBeNull();
     expect(summary!.contextWindowTokens).toBe(200_000);
     expect(summary!.topTools).toEqual([]);
@@ -385,36 +387,18 @@ describe('summary reader equivalence + EXPLAIN pins (Task 2)', () => {
     // Pin: both rollup queries must be served from their tables, not events.
     // If either plan mentions 'events', a future schema drift broke the query.
     const d = openDb(dir);
-
-    // OBSERVED_MAX_SQL has one ? (session_id).
-    const maxPlan = d
-      .prepare(`EXPLAIN QUERY PLAN ${OBSERVED_MAX_SQL}`)
-      .all('x') as Array<{ detail: string }>;
-    const maxDetails = maxPlan.map((r) => r.detail).join(' | ');
-    expect(maxDetails).not.toMatch(/\bevents\b/);
-
-    // TOP_TOOLS_SQL has two ? (session_id, limit).
-    const toolsPlan = d
-      .prepare(`EXPLAIN QUERY PLAN ${TOP_TOOLS_SQL}`)
-      .all('x', 5) as Array<{ detail: string }>;
-    const toolsDetails = toolsPlan.map((r) => r.detail).join(' | ');
-    expect(toolsDetails).not.toMatch(/\bevents\b/);
+    const k = stateKysely();
+    expect(explainPlan(d, observedMaxQuery(k, 'x'))).not.toMatch(/\bevents\b/);
+    expect(explainPlan(d, topToolsQuery(k, 'x', 5))).not.toMatch(/\bevents\b/);
   });
 
-  it('LATEST_ASSISTANT_SQL EXPLAIN plan uses a session-prefixed index', async () => {
+  it('latestAssistantQuery EXPLAIN plan uses a session-prefixed index', async () => {
     // Pin: the query must use idx_events_session_type (or idx_events_session_ts)
     // and must NOT use the bare idx_events_type index (which scans the entire
     // table for assistant events across all sessions).
     const d = openDb(dir);
-
-    const plan = d
-      .prepare(`EXPLAIN QUERY PLAN ${LATEST_ASSISTANT_SQL}`)
-      .all('x') as Array<{ detail: string }>;
-    const details = plan.map((r) => r.detail).join(' | ');
-
-    // Must use a session-prefixed index (session_type or session_ts).
+    const details = explainPlan(d, latestAssistantQuery(stateKysely(), 'x'));
     expect(details).toMatch(/idx_events_session_type|idx_events_session_ts/);
-    // Must NOT fall back to the bare type index (no session prefix → table scan).
     expect(details).not.toMatch(/\bidx_events_type\b/);
   });
 });
