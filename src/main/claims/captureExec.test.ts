@@ -1,3 +1,4 @@
+import { homedir } from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
 vi.mock('electron', () => ({ app: { getPath: () => '/tmp', isPackaged: false } }));
 const { runCapture } = await import('./captureExec.js');
@@ -16,20 +17,63 @@ describe('runCapture', () => {
       script: `cd '/workspace/app' && exec claude '-p' 'it'\\''s'`
     }));
   });
-  it('wsl: runs claude through wsl.exe --exec with the in-distro cwd', async () => {
+
+  it('wsl: runs claude through wsl.exe --exec with the in-distro cwd, forwarding WSLENV + --mcp-config', async () => {
     const spawnFile = vi.fn(async () => ({ exitCode: 0, stdout: '{}', stderr: '', timedOut: false }));
     const launcher = { mode: 'wsl', distro: 'Ubuntu', shell: '/bin/bash', home: '/home/t', claudePath: '/home/t/.local/bin/claude', interop: true } as never;
     await runCapture({ kind: 'local', workspaceId: 'w2', launcher, workspaceRoot: '\\\\wsl.localhost\\Ubuntu\\home\\t\\repo' }, ['-p', 'x'], 1000,
-      { spawnFile, buildEnv: async () => ({}), ensureMcpConfig: async () => undefined, resolveClaude: async () => 'claude' } as never);
-    const [file, args] = spawnFile.mock.calls[0] as unknown as [string, string[]];
+      {
+        spawnFile,
+        buildEnv: async () => ({ ANTHROPIC_API_KEY: 'sk-x', PATH: '/usr/bin' }),
+        // Per-workspace keys (not matching ANTHROPIC_/CLAUDE_) must still cross
+        // the WSL boundary, exactly like a real session's passEnvKeys.
+        workspaceEnvKeys: async () => ['MY_WORKSPACE_TOKEN'],
+        ensureMcpConfig: async () => 'C:\\Users\\t\\mcp.json',
+        resolveClaude: async () => 'claude'
+      } as never);
+    const [file, args, opts] = spawnFile.mock.calls[0] as unknown as [string, string[], { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }];
     expect(file).toBe('wsl.exe');
     expect(args.slice(0, 6)).toEqual(['-d', 'Ubuntu', '--cd', '/home/t/repo', '--exec', '/bin/bash']);
-    expect(args[7]).toBe(`exec '/home/t/.local/bin/claude' '-p' 'x'`);
+    // --mcp-config is appended to the claude invocation, translated into the
+    // in-distro /mnt/<drive> form (claude reads it INSIDE the distro).
+    expect(args[7]).toBe(`exec '/home/t/.local/bin/claude' '-p' 'x' '--mcp-config' '/mnt/c/Users/t/mcp.json'`);
+    // wsl.exe itself needs a valid WINDOWS cwd (the Linux cwd rides --cd),
+    // same as wrapSpawnForLauncher's windowsCwd — not process.cwd().
+    expect(opts.cwd).toBe(homedir());
+    // Auth/endpoint vars (ANTHROPIC_*) and per-workspace keys must actually
+    // cross the wsl.exe boundary via WSLENV, or the forked claude can't
+    // authenticate like the workspace's real sessions do.
+    expect(opts.env.WSLENV).toContain('ANTHROPIC_API_KEY/u');
+    expect(opts.env.WSLENV).toContain('MY_WORKSPACE_TOKEN/u');
   });
-  it('native: spawns the resolved claude binary in the workspace root', async () => {
+
+  it('native: spawns the resolved claude binary in the workspace root with --mcp-config appended', async () => {
     const spawnFile = vi.fn(async () => ({ exitCode: 0, stdout: '{}', stderr: '', timedOut: false }));
     await runCapture({ kind: 'local', workspaceId: 'w3', launcher: { mode: 'native' }, workspaceRoot: '/repo' }, ['-p', 'x'], 1000,
-      { spawnFile, buildEnv: async () => ({ A: '1' }), ensureMcpConfig: async () => undefined, resolveClaude: async () => '/usr/bin/claude' } as never);
+      {
+        spawnFile,
+        buildEnv: async () => ({ A: '1' }),
+        workspaceEnvKeys: async () => [],
+        ensureMcpConfig: async () => '/home/t/.config/fleet/mcp/w3/mcp.json',
+        resolveClaude: async () => '/usr/bin/claude'
+      } as never);
+    expect(spawnFile).toHaveBeenCalledWith(
+      '/usr/bin/claude',
+      ['-p', 'x', '--mcp-config', '/home/t/.config/fleet/mcp/w3/mcp.json'],
+      expect.objectContaining({ cwd: '/repo', timeoutMs: 1000 })
+    );
+  });
+
+  it('native: omits --mcp-config when ensureMcpConfig has nothing to offer yet', async () => {
+    const spawnFile = vi.fn(async () => ({ exitCode: 0, stdout: '{}', stderr: '', timedOut: false }));
+    await runCapture({ kind: 'local', workspaceId: 'w4', launcher: { mode: 'native' }, workspaceRoot: '/repo' }, ['-p', 'x'], 1000,
+      {
+        spawnFile,
+        buildEnv: async () => ({ A: '1' }),
+        workspaceEnvKeys: async () => [],
+        ensureMcpConfig: async () => undefined,
+        resolveClaude: async () => '/usr/bin/claude'
+      } as never);
     expect(spawnFile).toHaveBeenCalledWith('/usr/bin/claude', ['-p', 'x'], expect.objectContaining({ cwd: '/repo', timeoutMs: 1000 }));
   });
 });

@@ -121,6 +121,23 @@ export function buildWslSpawnEnv(
  *  keys are appended at wrap time. TERM rides along so the TUI renders. */
 const BASE_WSL_PASS_KEYS = ['CLAUDE_FLEET_BROKER_SESSION_ID', 'TERM'];
 
+/** The full, de-duplicated set of env var names to forward across the wsl.exe
+ *  boundary via WSLENV: fleet's own base keys, every `env` key starting with
+ *  `ANTHROPIC_`/`CLAUDE_` (model/auth/endpoint vars claude itself reads), and
+ *  any caller-supplied `extraKeys` (e.g. a workspace's own plain+secret env
+ *  keys, which may not match either prefix). Shared by `wrapSpawnForLauncher`
+ *  and any other wsl spawn path (knowledge-capture's `runCapture`) so the two
+ *  never drift on what "forward env like a real session" means. */
+export function wslPassKeys(env: NodeJS.ProcessEnv, extraKeys: string[]): string[] {
+  return [
+    ...new Set([
+      ...BASE_WSL_PASS_KEYS,
+      ...Object.keys(env).filter((k) => k.startsWith('ANTHROPIC_') || k.startsWith('CLAUDE_')),
+      ...extraKeys
+    ])
+  ];
+}
+
 /**
  * Wrap a SpawnPty so the launcher decides what actually gets spawned.
  * - native: passthrough.
@@ -157,19 +174,12 @@ export function wrapSpawnForLauncher(
       // opts.passEnvKeys carries any non-prefixed per-workspace keys (e.g. a
       // custom MYAPP_TOKEN in the workspace env) that the caller knows should
       // cross the WSL boundary; they're unioned with the auto-detected ones.
-      const passKeys = [
-        ...BASE_WSL_PASS_KEYS,
-        ...Object.keys(spawnOpts.env).filter(
-          (k) => k.startsWith('ANTHROPIC_') || k.startsWith('CLAUDE_')
-        ),
-        ...(opts.passEnvKeys ?? [])
-      ];
       return inner({
         ...spawnOpts,
         file: 'wsl.exe',
         args: ['-d', launcher.distro, '--cd', spawnOpts.cwd, '--exec', launcher.shell, '-lic', cmd],
         cwd: windowsCwd,
-        env: buildWslSpawnEnv(spawnOpts.env, [...new Set(passKeys)])
+        env: buildWslSpawnEnv(spawnOpts.env, wslPassKeys(spawnOpts.env, opts.passEnvKeys ?? []))
       });
     };
   }

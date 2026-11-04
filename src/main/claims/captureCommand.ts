@@ -24,9 +24,16 @@ export function captureArgs(o: { prompt: string; sessionId: string; forkSessionI
 }
 
 export function parseCaptureOutput(stdout: string): { ok: boolean; sessionId: string | null; usage: unknown; error: string | null } {
-  let j: Record<string, unknown>;
-  try { j = JSON.parse(stdout.trim().split('\n').pop() ?? '') as Record<string, unknown>; }
+  let parsed: unknown;
+  try { parsed = JSON.parse(stdout.trim().split('\n').pop() ?? ''); }
   catch { return { ok: false, sessionId: null, usage: null, error: `unparseable claude output: ${stdout.slice(0, 200)}` }; }
+  // JSON.parse succeeds on non-object top-level values too (`null`, `42`,
+  // `"x"`, …) — claude's json output is always an object, so anything else
+  // is as unparseable as a syntax error, not a session-less "success".
+  if (typeof parsed !== 'object' || parsed === null) {
+    return { ok: false, sessionId: null, usage: null, error: `unparseable claude output: ${stdout.slice(0, 200)}` };
+  }
+  const j = parsed as Record<string, unknown>;
   const sessionId = typeof j.session_id === 'string' ? j.session_id : null;
   const usage = { total_cost_usd: j.total_cost_usd, usage: j.usage };
   if (j.is_error === true) return { ok: false, sessionId, usage, error: `claude ${String(j.subtype ?? 'error')}` };

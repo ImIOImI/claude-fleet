@@ -35,4 +35,8 @@ describe('parseCaptureOutput', () => {
     expect(parseCaptureOutput(JSON.stringify({ is_error: true, subtype: 'error_max_turns', session_id: 'f' })).ok).toBe(false);
     expect(parseCaptureOutput('not json')).toMatchObject({ ok: false, error: expect.stringMatching(/unparseable/) });
   });
+
+  it('treats a non-object JSON value (e.g. null) as unparseable, not a session-less success', () => {
+    expect(parseCaptureOutput('null')).toMatchObject({ ok: false, sessionId: null, error: expect.stringMatching(/unparseable/) });
+  });
 });
