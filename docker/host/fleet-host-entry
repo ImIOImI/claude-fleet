@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Runs the broker and fleet-host side by side under tini. The broker exiting
+# ends the container; fleet-host is restarted with backoff (PTYs live in the
+# broker) unless it crash-loops. SIGTERM stops fleet-host first so it releases
+# the lease, then the broker. SIGHUP is forwarded to fleet-host (config reload).
+set -u
+broker_bin=${FLEET_BROKER_BIN:-/usr/local/bin/broker}
+host_js=${FLEET_HOST_JS:-/usr/local/lib/fleet-host/fleet-host.mjs}
+max_restarts=${FLEET_HOST_MAX_RESTARTS:-5}
+window_s=${FLEET_HOST_RESTART_WINDOW_S:-60}
+backoff_start_ms=${FLEET_HOST_BACKOFF_START_MS:-1000}
+backoff_max_ms=${FLEET_HOST_BACKOFF_MAX_MS:-10000}
+
+log() { printf '{"level":"%s","msg":"fleet-host-entry: %s"%s}\n' "$1" "$2" "${3:-}" >&2; }
+
+host=
+pause=
+stop() {
+  [ -n "$pause" ] && kill "$pause" 2>/dev/null
+  if [ -n "$host" ]; then
+    kill -TERM "$host" 2>/dev/null
+    wait "$host" 2>/dev/null
+  fi
+  kill -TERM "$broker" 2>/dev/null
+  wait "$broker" 2>/dev/null
+}
+trap 'stop; exit 0' TERM INT
+trap '[ -n "$host" ] && kill -HUP "$host" 2>/dev/null' HUP
+
+"$broker_bin" &
+broker=$!
+
+starts=()
+delay_ms=$backoff_start_ms
+start_host() {
+  node "$host_js" &
+  host=$!
+  starts+=("$SECONDS")
+}
+start_host
+
+while :; do
+  done_pid=
+  wait -n -p done_pid "$broker" "$host"
+  status=$?
+  # A trapped signal (e.g. HUP) interrupts wait without any child exiting.
+  [ -z "${done_pid:-}" ] && continue
+  if [ "$done_pid" = "$broker" ]; then
+    log error "broker exited; stopping" ",\"status\":$status"
+    broker=
+    kill -TERM "$host" 2>/dev/null
+    wait "$host" 2>/dev/null
+    exit "$status"
+  fi
+  host=
+  recent=()
+  for t in "${starts[@]}"; do (( SECONDS - t < window_s )) && recent+=("$t"); done
+  starts=("${recent[@]}")
+  # starts holds this run plus the restarts inside the window.
+  if (( ${#starts[@]} > max_restarts )); then
+    log error "fleet-host crash-looping; giving up" ",\"status\":$status,\"restarts\":$(( ${#starts[@]} - 1 ))"
+    stop
+    (( status == 0 )) && status=1
+    exit "$status"
+  fi
+  (( ${#starts[@]} == 1 )) && delay_ms=$backoff_start_ms
+  log warn "fleet-host exited; restarting" ",\"status\":$status,\"delayMs\":$delay_ms"
+  sleep "$(( delay_ms / 1000 )).$(printf '%03d' $(( delay_ms % 1000 )))" &
+  pause=$!
+  while kill -0 "$pause" 2>/dev/null; do wait "$pause" 2>/dev/null; done
+  pause=
+  delay_ms=$(( delay_ms * 2 > backoff_max_ms ? backoff_max_ms : delay_ms * 2 ))
+  if ! kill -0 "$broker" 2>/dev/null; then
+    wait "$broker"
+    status=$?
+    log error "broker exited; stopping" ",\"status\":$status"
+    exit "$status"
+  fi
+  start_host
+done
