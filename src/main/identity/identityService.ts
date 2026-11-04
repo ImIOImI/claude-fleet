@@ -53,6 +53,8 @@ interface Pending {
   intervalMs: number;
   nextPollAt: number;
   inflight: boolean;
+  /** Token received; the profile read and save are in progress. */
+  finishing: boolean;
 }
 
 export class IdentityNotConfiguredError extends Error {
@@ -135,9 +137,11 @@ export class IdentityService {
   private memory: Saved | null = null;
   private pending: Pending | null = null;
   private notice: string | null = null;
-  /** Bumped by sign-out, cancel, revocation and a new sign-in: a save started
-   *  under an older epoch is dropped. */
+  /** Bumped by sign-out, cancel, start, revocation and a completed sign-in: a
+   *  save started under an older epoch is dropped. */
   private epoch = 0;
+  /** Serialises vault writes so a sign-out can't interleave with a save. */
+  private chain: Promise<unknown> = Promise.resolve();
 
   constructor(deps: IdentityServiceDeps) {
     this.vault = deps.vault;
@@ -164,19 +168,37 @@ export class IdentityService {
     return isProfile(profile) ? { token, profile } : null;
   }
 
-  private async save(s: Saved): Promise<void> {
-    if (!(await this.persisted())) {
-      this.memory = s;
-      return;
-    }
-    // PROFILE first: a TOKEN is never visible without its profile.
-    await this.vault.setSecret(GITHUB_IDENTITY_SCOPE, PROFILE_KEY, JSON.stringify(s.profile));
-    await this.vault.setSecret(GITHUB_IDENTITY_SCOPE, TOKEN_KEY, s.token);
+  private serial<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.chain.then(fn);
+    this.chain = next.catch(() => undefined);
+    return next;
   }
 
-  private async clear(): Promise<void> {
+  /** False when the epoch moved before or during the write (anything written is wiped). */
+  private save(s: Saved, epoch: number): Promise<boolean> {
+    return this.serial(async () => {
+      if (epoch !== this.epoch) return false;
+      if (!(await this.persisted())) {
+        if (epoch !== this.epoch) return false;
+        this.memory = s;
+        return true;
+      }
+      // PROFILE first: a TOKEN is never visible without its profile.
+      await this.vault.setSecret(GITHUB_IDENTITY_SCOPE, PROFILE_KEY, JSON.stringify(s.profile));
+      if (epoch === this.epoch) await this.vault.setSecret(GITHUB_IDENTITY_SCOPE, TOKEN_KEY, s.token);
+      if (epoch === this.epoch) return true;
+      await this.clearNow();
+      return false;
+    });
+  }
+
+  private async clearNow(): Promise<void> {
     this.memory = null;
     if (await this.persisted()) await this.vault.deleteAllForWorkspace(GITHUB_IDENTITY_SCOPE);
+  }
+
+  private clear(): Promise<void> {
+    return this.serial(() => this.clearNow());
   }
 
   private async toStatus(saved: Saved | null): Promise<AccountStatus> {
@@ -207,15 +229,17 @@ export class IdentityService {
   /** `refresh` re-verifies with GitHub: a rejected token is cleared (with a
    *  notice); any other failure keeps the cached profile (with a notice). */
   async status(opts: { refresh?: boolean } = {}): Promise<AccountStatus> {
+    const epoch = this.epoch;
     let saved = await this.load();
     if (saved && opts.refresh) {
-      const epoch = this.epoch;
       try {
         const probe = await this.github.probe(saved.token);
-        if (epoch !== this.epoch) return this.toStatus(await this.load());
-        const scopes = probe.scopes.length > 0 ? probe.scopes : saved.profile.scopes;
-        saved = { token: saved.token, profile: { identity: probe.identity, scopes, sso: probe.sso, verifiedAt: this.now() } };
-        await this.save(saved);
+        const next: Saved = {
+          token: saved.token,
+          profile: { identity: probe.identity, scopes: probe.scopes, sso: probe.sso, verifiedAt: this.now() }
+        };
+        if (!(await this.save(next, epoch))) return this.toStatus(await this.load());
+        saved = next;
         this.notice = null;
       } catch (err) {
         if (epoch !== this.epoch) return this.toStatus(await this.load());
@@ -236,7 +260,8 @@ export class IdentityService {
     const clientId = await this.clientId();
     if (!clientId) throw new IdentityNotConfiguredError();
     const code = await this.github.requestDeviceCode(clientId);
-    this.pending = { clientId, code, intervalMs: code.intervalMs, nextPollAt: this.now() + code.intervalMs, inflight: false };
+    this.epoch++;
+    this.pending = { clientId, code, intervalMs: code.intervalMs, nextPollAt: this.now() + code.intervalMs, inflight: false, finishing: false };
     this.notice = null;
     return { userCode: code.userCode, verificationUri: code.verificationUri, expiresAt: code.expiresAt, intervalMs: code.intervalMs };
   }
@@ -246,12 +271,12 @@ export class IdentityService {
   async signInPoll(): Promise<SignInPoll> {
     const p = this.pending;
     if (!p) return { state: 'error', message: NO_FLOW };
+    if (p.inflight || p.finishing) return { state: 'pending', intervalMs: p.intervalMs };
     const now = this.now();
     if (now >= p.code.expiresAt) {
       this.pending = null;
       return { state: 'error', message: 'The sign-in code expired. Start again.' };
     }
-    if (p.inflight) return { state: 'pending', intervalMs: p.intervalMs };
     if (now < p.nextPollAt) return { state: 'pending', intervalMs: p.nextPollAt - now };
 
     p.inflight = true;
@@ -276,20 +301,28 @@ export class IdentityService {
       return { state: 'pending', intervalMs: r.intervalMs };
     }
 
-    this.pending = null;
+    p.finishing = true;
+    try {
+      return await this.finishSignIn(r.token, r.scopes);
+    } finally {
+      if (this.pending === p) this.pending = null;
+    }
+  }
+
+  private async finishSignIn(token: string, tokenScopes: string[]): Promise<SignInPoll> {
     const epoch = this.epoch;
     let probe: GithubProbe;
     try {
-      probe = await this.github.probe(r.token);
+      probe = await this.github.probe(token);
     } catch (err) {
       if (epoch !== this.epoch) return { state: 'error', message: CANCELLED };
       return { state: 'error', message: `Signed in, but reading your GitHub profile failed (${safeMessage(err)}). Try again.` };
     }
     if (epoch !== this.epoch) return { state: 'error', message: CANCELLED };
-    const scopes = probe.scopes.length > 0 ? probe.scopes : r.scopes;
-    const saved: Saved = { token: r.token, profile: { identity: probe.identity, scopes, sso: probe.sso, verifiedAt: this.now() } };
-    this.epoch++;
-    await this.save(saved);
+    const scopes = probe.scopes.length > 0 ? probe.scopes : tokenScopes;
+    const saved: Saved = { token, profile: { identity: probe.identity, scopes, sso: probe.sso, verifiedAt: this.now() } };
+    const saveEpoch = ++this.epoch;
+    if (!(await this.save(saved, saveEpoch))) return { state: 'error', message: CANCELLED };
     return { state: 'done', status: await this.toStatus(saved) };
   }
 

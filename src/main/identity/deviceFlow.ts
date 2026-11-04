@@ -45,13 +45,18 @@ async function post(url: string, params: Record<string, string>): Promise<Record
   } catch (err) {
     throw new DeviceFlowError('network', `Couldn't reach github.com (${(err as Error).name}). Check your network.`);
   }
+  const unavailable = () => new DeviceFlowError('network', `GitHub is temporarily unavailable (HTTP ${res.status}). Try again shortly.`);
+  if (res.status >= 500) throw unavailable();
   let body: unknown = null;
   try {
     body = await res.json();
   } catch {
     body = null;
   }
-  if (!body || typeof body !== 'object') throw new DeviceFlowError('unexpected', `GitHub answered HTTP ${res.status} without JSON`);
+  if (!body || typeof body !== 'object') {
+    if (res.status === 429) throw unavailable();
+    throw new DeviceFlowError('unexpected', `GitHub answered HTTP ${res.status} without JSON`);
+  }
   return body as Record<string, unknown>;
 }
 

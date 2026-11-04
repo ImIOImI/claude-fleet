@@ -121,3 +121,28 @@ describe('device flow hardening', () => {
     await expect(pollDeviceToken(CLIENT, 'dc', 5000)).rejects.toMatchObject({ kind: 'unexpected' });
   });
 });
+
+describe('transient GitHub failures are network errors', () => {
+  const html = (status: number) => new Response('<html>oops</html>', { status, headers: { 'content-type': 'text/html' } });
+  it.each([502, 503])('maps HTTP %i to network', async (status) => {
+    stub(() => html(status));
+    await expect(requestDeviceCode(CLIENT)).rejects.toMatchObject({ kind: 'network' });
+    await expect(pollDeviceToken(CLIENT, 'dc', 5000)).rejects.toMatchObject({ kind: 'network' });
+  });
+  it('maps HTTP 500 with a JSON body to network', async () => {
+    stub(() => json({ error: 'server_error' }, 500));
+    await expect(pollDeviceToken(CLIENT, 'dc', 5000)).rejects.toMatchObject({ kind: 'network' });
+  });
+  it('maps a non-JSON 429 to network', async () => {
+    stub(() => html(429));
+    await expect(pollDeviceToken(CLIENT, 'dc', 5000)).rejects.toMatchObject({ kind: 'network' });
+  });
+  it('still reads a JSON 429 body', async () => {
+    stub(() => json({ error: 'slow_down' }, 429));
+    expect(await pollDeviceToken(CLIENT, 'dc', 5000)).toEqual({ status: 'pending', intervalMs: 10_000 });
+  });
+  it('still treats a non-JSON 4xx as unexpected', async () => {
+    stub(() => html(404));
+    await expect(pollDeviceToken(CLIENT, 'dc', 5000)).rejects.toMatchObject({ kind: 'unexpected' });
+  });
+});

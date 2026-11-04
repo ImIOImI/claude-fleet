@@ -416,3 +416,125 @@ describe('IdentityService saved-profile validation', () => {
     expect((await s.svc.status()).sso?.url).toBeNull();
   });
 });
+
+describe('IdentityService review fixes', () => {
+  /** Serialises writes like vault.ts withLock; holds the next PROFILE write until released. */
+  function lockingVault() {
+    const store = new Map<string, string>();
+    let chain: Promise<unknown> = Promise.resolve();
+    let release: (() => void) | null = null;
+    let armed = false;
+    const lock = <T>(fn: () => Promise<T>) => {
+      const n = chain.then(fn);
+      chain = n.catch(() => {});
+      return n;
+    };
+    const api = {
+      isVaultAvailable: vi.fn(async () => true),
+      getSecret: vi.fn(async (s: string, k: string) => store.get(`${s}|${k}`) ?? null),
+      setSecret: vi.fn((s: string, k: string, v: string) =>
+        lock(async () => {
+          if (k === 'PROFILE' && armed) {
+            armed = false;
+            await new Promise<void>((r) => (release = r));
+          }
+          store.set(`${s}|${k}`, v);
+        })
+      ),
+      deleteAllForWorkspace: vi.fn((s: string) =>
+        lock(async () => {
+          for (const k of [...store.keys()]) if (k.startsWith(`${s}|`)) store.delete(k);
+        })
+      )
+    };
+    return {
+      store,
+      api,
+      arm: () => {
+        armed = true;
+      },
+      held: () => release !== null,
+      release: () => release?.()
+    };
+  }
+
+  function lockedSetup(polls: PollResult[] = [DONE]) {
+    const v = lockingVault();
+    let t = 0;
+    const queue = [...polls];
+    const github = {
+      requestDeviceCode: vi.fn(async () => CODE),
+      pollDeviceToken: vi.fn(async () => queue.shift() ?? { status: 'pending' as const, intervalMs: 5000 }),
+      probe: vi.fn(async (): Promise<GithubProbe> => PROBE)
+    };
+    const svc = new IdentityService({ vault: v.api, clientId: async () => 'Iv1.testclient', github, now: () => t });
+    return { v, svc, github, advance: (ms: number) => void (t += ms) };
+  }
+
+  it('sign-out during a refresh save leaves no TOKEN behind', async () => {
+    const { v, svc } = lockedSetup();
+    v.store.set('identity:github|TOKEN', TOKEN);
+    v.store.set('identity:github|PROFILE', JSON.stringify({ identity: IDENT, scopes: ['read:org', 'read:packages'], sso: null, verifiedAt: 0 }));
+    v.arm();
+    const refreshing = svc.status({ refresh: true });
+    await vi.waitFor(() => expect(v.held()).toBe(true));
+    const out = svc.signOut();
+    v.release();
+    const [st] = await Promise.all([refreshing, out]);
+    expect(st.signedIn).toBe(false);
+    expect([...v.store.keys()]).toEqual([]);
+  });
+
+  it('sign-out during a sign-in save leaves no TOKEN behind', async () => {
+    const { v, svc, advance } = lockedSetup();
+    await svc.signInStart();
+    advance(5000);
+    v.arm();
+    const polling = svc.signInPoll();
+    await vi.waitFor(() => expect(v.held()).toBe(true));
+    const out = svc.signOut();
+    v.release();
+    const [r] = await Promise.all([polling, out]);
+    expect(r.state).toBe('error');
+    expect([...v.store.keys()]).toEqual([]);
+    expect(await svc.packagesToken()).toBeNull();
+  });
+
+  it('a concurrent poll while the profile is being read says pending, not "no sign-in"', async () => {
+    const { svc, github, advance } = lockedSetup();
+    const gate = deferred<GithubProbe>();
+    github.probe.mockImplementationOnce(() => gate.promise);
+    await svc.signInStart();
+    advance(5000);
+    const first = svc.signInPoll();
+    await vi.waitFor(() => expect(github.probe).toHaveBeenCalled());
+    expect((await svc.signInPoll()).state).toBe('pending');
+    expect(github.pollDeviceToken).toHaveBeenCalledTimes(1);
+    gate.resolve(PROBE);
+    expect((await first).state).toBe('done');
+    expect((await svc.signInPoll()).state).toBe('error');
+  });
+
+  it('starting a new sign-in discards one whose profile read is in flight', async () => {
+    const { v, svc, github, advance } = lockedSetup();
+    const gate = deferred<GithubProbe>();
+    github.probe.mockImplementationOnce(() => gate.promise);
+    await svc.signInStart();
+    advance(5000);
+    const first = svc.signInPoll();
+    await vi.waitFor(() => expect(github.probe).toHaveBeenCalled());
+    await svc.signInStart();
+    gate.resolve(PROBE);
+    expect((await first).state).toBe('error');
+    expect(v.store.size).toBe(0);
+  });
+
+  it('a refresh with no granted scopes drops packages access', async () => {
+    const s = setup({ polls: [DONE] });
+    await signIn(s);
+    s.setProbe({ ...PROBE, scopes: [] });
+    const st = await s.svc.status({ refresh: true });
+    expect(st).toMatchObject({ scopes: [], packagesAccess: false });
+    expect(await s.svc.packagesToken()).toBeNull();
+  });
+});
