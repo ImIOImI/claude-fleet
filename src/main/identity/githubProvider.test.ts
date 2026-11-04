@@ -189,6 +189,11 @@ describe('github provider: users', () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('fetch failed'); }));
     await expect(createGithubProvider().probe(TOKEN)).rejects.toMatchObject({ kind: 'network' });
   });
+
+  it('maps a request timeout to a network error', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); }));
+    await expect(createGithubProvider().probe(TOKEN)).rejects.toMatchObject({ kind: 'network' });
+  });
 });
 
 describe('github provider: machines (GitHub App installation tokens)', () => {
@@ -225,6 +230,16 @@ describe('github provider: machines (GitHub App installation tokens)', () => {
     expect((await createGithubProvider({ machines: MACHINES }).verify(TOKEN)).login).toBe('acme-reviewer[bot]');
   });
 
+  it('refuses a GitHub-operated shared App even if listed as a configured machine', async () => {
+    stubGithub({
+      [`GET ${API}/user`]: integration403,
+      [`POST ${API}/graphql`]: () => json({ data: { viewer: { __typename: 'Bot', login: 'github-actions[bot]', databaseId: 1 } } }),
+      [`GET ${API}/apps/github-actions`]: () => json({ id: 15368, slug: 'github-actions' })
+    });
+    const machines = [{ appId: 15368, login: 'github-actions[bot]', org: 'acme', tier: 'session' as const }];
+    await expect(createGithubProvider({ machines }).verify(TOKEN)).rejects.toMatchObject({ kind: 'forbidden' });
+  });
+
   it('refuses an App that is not configured', async () => {
     stubGithub({
       [`GET ${API}/user`]: integration403,
@@ -242,8 +257,6 @@ describe('github provider: machines (GitHub App installation tokens)', () => {
     await expect(createGithubProvider({ machines: MACHINES }).verify(TOKEN)).rejects.toMatchObject({ kind: 'upstream' });
   });
 
-  // Item 1: two rules whose logins differ only by case can't both exist, and
-  // with distinct logins the identity carries the App's own appId + login.
   it('maps App 1 to its own rule even when another App has a higher tier', async () => {
     const machines = [
       { appId: 1, login: 'ci[bot]', org: 'acme', tier: 'read' as const },

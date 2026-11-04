@@ -1,7 +1,6 @@
-// Settings › Account (remote-workspaces (b)), mock backend. No GitHub traffic:
-// a fresh userData has no token, and status({refresh}) only calls GitHub when
-// a token is saved. The real Sign in button is never clicked; the second test
-// stubs identity:* in main.
+// Settings › Account, mock backend. No GitHub traffic: a fresh userData has no
+// token, and status({refresh}) only calls GitHub when a token is saved. The
+// real Sign in button is never clicked; the second test stubs identity:* in main.
 import { test, expect } from '@playwright/test';
 import { getCalls, launch, mockMainIpc } from './_helpers.js';
 

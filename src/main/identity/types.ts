@@ -1,8 +1,4 @@
-// Identity-provider seam (remote-workspaces §5, sub-project (b)). Pure — no
-// electron — so fleet-host (sub-project (c)) imports it unchanged. GitHub is
-// the first provider (githubProvider.ts); OIDC (e.g. Entra ID) is a later
-// second implementation of the same IdentityProvider interface: verify an ID
-// token against the issuer's JWKS, map groups to `teams`.
+// Identity-provider seam. Pure (no electron) so fleet-host imports it unchanged.
 
 export type IdentityKind = 'user' | 'machine';
 

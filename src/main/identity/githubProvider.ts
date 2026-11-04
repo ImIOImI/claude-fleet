@@ -8,7 +8,7 @@
 
 import type { Identity, IdentityProvider, UserIdentity } from './types.js';
 import { IdentityError } from './types.js';
-import type { MachineRule } from './grants.js';
+import { GITHUB_SHARED_APPS, type MachineRule } from './grants.js';
 import { GITHUB_API, hasNextRel, mergeSso, nextLink, parseScopes, parseSsoHeader, type SsoHint } from './githubHeaders.js';
 
 export interface GithubProbe {
@@ -42,7 +42,7 @@ async function ghFetch(url: string, init: { method?: string; headers: Record<str
   try {
     // redirect: 'error' — a redirect would carry the bearer token to a URL we
     // didn't vet; GitHub's REST API never needs one for these endpoints.
-    return await fetch(url, { ...init, redirect: 'error' });
+    return await fetch(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(30_000) });
   } catch (err) {
     throw new IdentityError('network', `GitHub unreachable (${(err as Error).name})`);
   }
@@ -210,6 +210,8 @@ async function verifyMachine(token: string, machines: readonly MachineRule[]): P
   const rawId = app ? app.id : undefined;
   const appId = typeof rawId === 'number' ? rawId : null;
   if (appId === null) throw new IdentityError('upstream', `GitHub GET /apps/${slug} returned an unexpected body`);
+  const shared = GITHUB_SHARED_APPS.get(appId);
+  if (shared) throw new IdentityError('forbidden', `GitHub App ${slug} (id ${appId}) is GitHub's shared ${shared} App, not a dedicated org-owned App`, 403);
   const rule = machines.find((m) => m.appId === appId);
   if (!rule) throw new IdentityError('machine-unknown', `GitHub App ${slug} (id ${appId}) is not a configured machine`);
   await assertInstallationInOrg(token, rule.org, slug);

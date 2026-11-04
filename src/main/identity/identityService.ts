@@ -260,9 +260,13 @@ export class IdentityService {
     if (saved && opts.refresh) {
       try {
         const probe = await this.github.probe(saved.token);
+        // parseScopes can't tell a missing X-OAuth-Scopes header from an empty
+        // one, so an empty probe falls back to the saved scopes rather than
+        // wiping them, matching finishSignIn's fallback to the token response.
+        const scopes = probe.scopes.length > 0 ? probe.scopes : saved.profile.scopes;
         const next: Saved = {
           token: saved.token,
-          profile: { identity: probe.identity, scopes: probe.scopes, sso: probe.sso, verifiedAt: this.now() }
+          profile: { identity: probe.identity, scopes, sso: probe.sso, verifiedAt: this.now() }
         };
         if (!(await this.save(next, epoch, true)) || epoch !== this.epoch) return this.toStatus(await this.settled());
         saved = next;

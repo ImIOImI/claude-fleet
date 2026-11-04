@@ -50,6 +50,11 @@ describe('requestDeviceCode', () => {
     await expect(requestDeviceCode(CLIENT)).rejects.toBeInstanceOf(DeviceFlowError);
     await expect(requestDeviceCode(CLIENT)).rejects.toMatchObject({ kind: 'network' });
   });
+
+  it('maps a request timeout to network', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); }));
+    await expect(requestDeviceCode(CLIENT)).rejects.toMatchObject({ kind: 'network' });
+  });
 });
 
 describe('pollDeviceToken', () => {

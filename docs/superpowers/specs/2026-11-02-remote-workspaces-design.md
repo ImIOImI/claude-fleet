@@ -169,13 +169,24 @@ transcripts. So:
 **Identity-provider interface.** The host verifies every request through a pluggable provider:
 
 ```ts
+type Identity = UserIdentity | MachineIdentity;
+interface IdentityBase {
+  provider: string;           // e.g. 'github'
+  kind: 'user' | 'machine';
+  login: string;
+  id: number;                 // provider's numeric account id
+  name: string | null;
+  avatarUrl: string | null;
+  teams: string[];            // 'org/team-slug', lower-cased and sorted; empty for machines
+}
+interface UserIdentity extends IdentityBase { kind: 'user'; }
+interface MachineIdentity extends IdentityBase {
+  kind: 'machine';
+  appId: number;               // the GitHub App id the token was proven to belong to
+}
 interface IdentityProvider {
-  id: 'github' | string;
-  verify(token: string): Promise<{
-    user: { login: string; id: number; name: string | null; avatarUrl?: string };
-    teams: string[];          // 'org/team-slug'
-    kind: 'user' | 'machine';
-  }>;
+  readonly id: string;
+  verify(token: string): Promise<Identity>;
 }
 ```
 
@@ -196,7 +207,7 @@ takes effect within that window.
 - **SSO organisations.** Under SAML SSO a token is useless for the org until it's authorised for
   that org once. When GitHub answers with an `X-GitHub-SSO` header, or the teams list lacks the
   org the host expects, the desktop shows "Authorise claude-fleet for *org*". It explains that this
-  is a one-time GitHub step and links the URL from the header. After that, it retries.
+  is a one-time GitHub step and links the URL from the header. The next Account-tab open re-verifies.
 - **Later providers.** OIDC (for example Entra ID) is a second provider: an ID token is verified
   against the issuer's JWKS, and groups map to teams. It isn't in the first release.
 - **Machines.** Callers such as CI use **GitHub App installation tokens**. An installation token
@@ -441,7 +452,7 @@ Nothing remote is shown stale, because remote data is live-only.
 - **Token storage.** The GitHub token is stored in the safeStorage vault in the reserved,
   host-only scope `identity:github` (key `TOKEN`; it follows the `loadout-source:` pattern) and
   is never sent to the renderer. `RemoteClient`
-  (main) attaches it to requests. The renderer sees only `{login, name, avatar}`. A degraded
+  (main) attaches it to requests. The renderer sees only `AccountStatus` (never the token). A degraded
   vault (no keychain) means sign-in isn't persisted, and the user signs in each run.
 - **Who can do what** is the tier table in §5, enforced per route and per frame on the host. The
   desktop greys out controls too, but only as UX, not enforcement.

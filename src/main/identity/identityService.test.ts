@@ -418,7 +418,7 @@ describe('IdentityService saved-profile validation', () => {
   });
 });
 
-describe('IdentityService review fixes', () => {
+describe('IdentityService save/sign-out serialisation', () => {
   /** Serialises writes like vault.ts withLock; holds the next PROFILE write until released. */
   function lockingVault() {
     const store = new Map<string, string>();
@@ -545,13 +545,13 @@ describe('IdentityService review fixes', () => {
     expect(v.store.size).toBe(0);
   });
 
-  it('a refresh with no granted scopes drops packages access', async () => {
+  it('a refresh probe with no scopes (missing X-OAuth-Scopes) keeps the saved scopes', async () => {
     const s = setup({ polls: [DONE] });
     await signIn(s);
     s.setProbe({ ...PROBE, scopes: [] });
     const st = await s.svc.status({ refresh: true });
-    expect(st).toMatchObject({ scopes: [], packagesAccess: false });
-    expect(await s.svc.packagesToken()).toBeNull();
+    expect(st).toMatchObject({ scopes: ['read:org', 'read:packages'], packagesAccess: true });
+    expect(await s.svc.packagesToken()).toBe(TOKEN);
   });
 });
 
@@ -577,7 +577,7 @@ describe('IdentityService throttled polling', () => {
   });
 });
 
-describe('IdentityService final-review fixes', () => {
+describe('IdentityService revocation and expiry caps', () => {
   const NEW = 'gho_new_token';
   const DONE_NEW: PollResult = { status: 'done', token: NEW, scopes: ['read:org', 'read:packages'] };
   const UNAUTH = () => new IdentityError('unauthorized', 'GitHub rejected the token', 401);

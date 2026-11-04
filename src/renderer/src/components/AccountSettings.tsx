@@ -129,7 +129,11 @@ export function AccountSettings() {
 
   async function copyCode(): Promise<void> {
     if (!flow) return;
-    await window.api.clipboard.write(flow.userCode);
+    try {
+      await window.api.clipboard.write(flow.userCode);
+    } catch {
+      return;
+    }
     setCopied(true);
     setTimeout(() => mounted.current && setCopied(false), 1500);
   }

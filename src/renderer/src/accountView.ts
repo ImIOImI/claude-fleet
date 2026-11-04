@@ -1,7 +1,7 @@
 // Pure copy, control state and the poll loop for Settings → Account.
 import type { AccountSso, AccountStatus, SignInPoll, SignInStart } from '../../preload/identityTypes';
 
-const IPC_PREFIX = /^Error invoking remote method '[^']+': (Error: )?/;
+const IPC_PREFIX = /^Error invoking remote method '[^']+': (?:[A-Za-z]*Error: )?/;
 
 export type IdentityUiError = { kind: 'not-configured' | 'other'; message: string };
 

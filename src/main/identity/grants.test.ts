@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { GrantConfigError, parseGrantConfig, resolveTier, tierAtLeast, TIERS, type GrantConfig } from './grants.js';
+import { GITHUB_SHARED_APPS, GrantConfigError, parseGrantConfig, resolveTier, tierAtLeast, TIERS, type GrantConfig } from './grants.js';
 import { displayName } from './types.js';
 
 const CONFIG: GrantConfig = {
@@ -132,6 +132,14 @@ describe('parseGrantConfig', () => {
   ])('rejects %s', (_label, raw, msg) => {
     expect(() => parseGrantConfig(raw)).toThrow(GrantConfigError);
     expect(() => parseGrantConfig(raw)).toThrow(msg);
+  });
+});
+
+describe('GITHUB_SHARED_APPS', () => {
+  it('names the github-actions and dependabot app ids', () => {
+    expect(GITHUB_SHARED_APPS.get(15368)).toBe('github-actions');
+    expect(GITHUB_SHARED_APPS.get(29110)).toBe('dependabot');
+    expect(GITHUB_SHARED_APPS.get(1)).toBeUndefined();
   });
 });
 

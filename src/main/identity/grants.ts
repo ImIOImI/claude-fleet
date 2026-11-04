@@ -1,6 +1,6 @@
-// Grant tiers (remote-workspaces §5). Pure: fleet-host (sub-project (c)) maps a
-// verified Identity plus its deployment's grant rules to a tier, and checks
-// each route/frame with tierAtLeast. No match means no access (403).
+// Grant tiers. Pure: fleet-host maps a verified Identity plus its deployment's
+// grant rules to a tier, and checks each route/frame with tierAtLeast. No
+// match means no access (403).
 
 import type { Identity } from './types.js';
 
@@ -74,7 +74,7 @@ const LOGIN_RE = /^[A-Za-z0-9-]+$/;
 const BOT_RE = /^[A-Za-z0-9-]+\[bot\]$/;
 const ORG_RE = LOGIN_RE;
 /** GitHub-operated Apps whose tokens any repo's workflow (incl. fork PRs) can mint. */
-const GITHUB_SHARED_APPS = new Map<number, string>([
+export const GITHUB_SHARED_APPS = new Map<number, string>([
   [15368, 'github-actions'],
   [29110, 'dependabot']
 ]);

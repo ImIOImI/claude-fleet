@@ -53,7 +53,8 @@ async function post(url: string, params: Record<string, string>): Promise<Record
       method: 'POST',
       headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'claude-fleet' },
       body: new URLSearchParams(params).toString(),
-      redirect: 'error'
+      redirect: 'error',
+      signal: AbortSignal.timeout(30_000)
     });
   } catch (err) {
     throw new DeviceFlowError('network', `Couldn't reach github.com (${(err as Error).name}). Check your network.`);

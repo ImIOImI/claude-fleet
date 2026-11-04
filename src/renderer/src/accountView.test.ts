@@ -4,9 +4,16 @@ import { SIGN_IN_EXPIRED, accountControls, countdown, driveSignIn, loadAccount, 
 
 describe('parseIdentityError', () => {
   it('unwraps the IPC prefix and recognises not-configured', () => {
+    // Electron's real wire format is `error.toString()`: 'Name: message', so the
+    // thrown class name (IdentityNotConfiguredError, DeviceFlowError, plain Error) rides along.
     expect(
-      parseIdentityError(new Error("Error invoking remote method 'identity:signInStart': Error: not-configured: GitHub sign-in isn't configured."))
+      parseIdentityError(
+        new Error("Error invoking remote method 'identity:signInStart': IdentityNotConfiguredError: not-configured: GitHub sign-in isn't configured.")
+      )
     ).toEqual({ kind: 'not-configured', message: "GitHub sign-in isn't configured." });
+    expect(
+      parseIdentityError(new Error("Error invoking remote method 'identity:signInPoll': DeviceFlowError: boom"))
+    ).toEqual({ kind: 'other', message: 'boom' });
     expect(parseIdentityError(new Error("Error invoking remote method 'identity:signInStart': Error: boom"))).toEqual({ kind: 'other', message: 'boom' });
     expect(parseIdentityError('plain')).toEqual({ kind: 'other', message: 'plain' });
   });
