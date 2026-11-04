@@ -27,10 +27,7 @@ function freshDb() {
   return dir;
 }
 
-// Mirrors db.ts's private `pendingKey`. Pre-existing quirk (present before
-// this plan, origin/main b3d6922): the separator is an actual NUL byte, not
-// the space its own doc comment describes — harmless (never serialized,
-// write and read sides agree), out of scope here, called out for the record.
+// Mirrors db.ts's private `pendingKey` (NUL-separated).
 const pendingKeyForTest = (workspaceId: string, claudeSessionId: string): string =>
   `${workspaceId}\0${claudeSessionId}`;
 
@@ -297,6 +294,27 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
       }
 
       expect(__pendingClaudeIdsForTest()).toEqual(new Set([pendingKeyForTest('ws-a', 'claude-x')]));
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('closeDb (M1)', () => {
+  it('does not clear in-memory caches if something reopened the db while closing', async () => {
+    const dir = freshDb();
+    try {
+      await realSession('ws-a', 'claude-real');
+      await recordBrokerSessionMapping('ws-a', 'tab-1', 'claude-real'); // commits
+      const r = await recordBrokerSessionMapping('ws-a', 'tab-1', 'claude-pending'); // defers, parks a pending key
+      expect(r.mode).toBe('deferred');
+      expect(__pendingClaudeIdsForTest()).toEqual(new Set([pendingKeyForTest('ws-a', 'claude-pending')]));
+
+      const closing = closeDb();
+      // Reopen before closeDb's post-await clears run: rehydrate repopulates
+      // the pending set from the row, still committed, on disk.
+      openDb(dir);
+      await closing;
+
+      expect(__pendingClaudeIdsForTest()).toEqual(new Set([pendingKeyForTest('ws-a', 'claude-pending')]));
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
