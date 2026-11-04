@@ -4,7 +4,8 @@ import type { Kysely } from 'kysely';
 import { newId } from '../inbox/inboxDb.js';
 import type { CaptureRunRow, InboxDb } from '../store/inboxSchema.js';
 
-export type CaptureTrigger = 'ctx-60' | 'ctx-85' | 'turns';
+/** `ctx-<pct>` per configured context band (e.g. ctx-85), `turns` (periodic), `search` (search hit). */
+export type CaptureTrigger = `ctx-${number}` | 'turns' | 'search';
 export type CaptureStatus = 'running' | 'done' | 'failed' | 'timed-out';
 
 export class CaptureRunStore {

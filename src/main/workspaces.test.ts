@@ -3,9 +3,9 @@
 // the rest is plain fs against workspace.json.
 
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 let userDataDir = '';
 
@@ -22,6 +22,8 @@ vi.mock('electron', () => ({
 const { readWorkspaceManifest, writeWorkspaceManifest, FACTORY_MIRROR } = await import(
   './workspaces.js'
 );
+const { workspaceManifestPath } = await import('./paths.js');
+const { defaultCaptureSettings } = await import('../preload/captureSettings.js');
 
 const ID = '01ENDPOINTTEST0000000000WS';
 
@@ -120,10 +122,10 @@ it('drops an unrecognised terminalRenderer rather than persisting it', async () 
   expect((await readWorkspaceManifest(ID))?.terminalRenderer).toBeUndefined();
 });
 
-// #483: per-workspace knowledge-capture switch. Absent ⇒ on; the manifest
-// parser is a strict allowlist, so an unlisted field silently vanishes on
-// the next read/write — which is exactly how this would regress.
-const knowledgeCaptureSpec = (knowledgeCapture?: boolean) =>
+// #483 §5a: knowledgeCapture is an object of capture settings. Absent ⇒ all
+// defaults; the parser is a strict allowlist that clamps every value; the
+// task-10 boolean `false` still reads as { enabled: false }.
+const knowledgeCaptureSpec = (knowledgeCapture?: unknown) =>
   ({
     id: ID,
     name: 'knowledge-capture-test',
@@ -139,9 +141,23 @@ const knowledgeCaptureSpec = (knowledgeCapture?: boolean) =>
     lastUsedAt: 1
   }) as unknown as Parameters<typeof writeWorkspaceManifest>[0];
 
-it('round-trips knowledgeCapture: false and omits it when absent', async () => {
-  await writeWorkspaceManifest(knowledgeCaptureSpec(false));
-  expect((await readWorkspaceManifest(ID))?.knowledgeCapture).toBe(false);
+it('reads a legacy on-disk knowledgeCapture: false as { enabled: false } with every other default', async () => {
+  const path = workspaceManifestPath(ID);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, JSON.stringify(knowledgeCaptureSpec(false)));
+  expect((await readWorkspaceManifest(ID))?.knowledgeCapture).toEqual({ ...defaultCaptureSettings(), enabled: false });
+});
+
+it('omits knowledgeCapture when absent or a legacy true', async () => {
   await writeWorkspaceManifest(knowledgeCaptureSpec());
   expect((await readWorkspaceManifest(ID))?.knowledgeCapture).toBeUndefined();
+  await writeWorkspaceManifest(knowledgeCaptureSpec(true));
+  expect((await readWorkspaceManifest(ID))?.knowledgeCapture).toBeUndefined();
+});
+
+it('clamps knowledgeCapture on write and drops unknown fields', async () => {
+  await writeWorkspaceManifest(knowledgeCaptureSpec({ searchTopSessions: 99, contextBands: [0.2], model: 'gpt-4', evil: true }));
+  const raw = JSON.parse(await readFile(workspaceManifestPath(ID), 'utf8')) as { knowledgeCapture: unknown };
+  expect(raw.knowledgeCapture).toEqual({ ...defaultCaptureSettings(), searchTopSessions: 5, contextBands: [0.5] });
+  expect((await readWorkspaceManifest(ID))?.knowledgeCapture).toEqual(raw.knowledgeCapture);
 });

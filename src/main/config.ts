@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { assertValidWorkspaceId } from './paths.js';
 import { toggleFavorite } from './ociCore.js';
+import { clampDailyCap } from '../preload/captureSettings.js';
 
 /** Which plan the usage bar measures spend against. `custom` uses the
  *  user-entered token amount; the rest resolve to USAGE_BUDGET_PRESETS. */
@@ -111,6 +112,9 @@ interface AppConfig {
    *  a per-workspace `WorkspaceSpec.knowledgeCapture` flag can still disable
    *  capture for one workspace even while this stays on. */
   knowledgeCapture?: boolean;
+  /** Knowledge capture (#483 §5a): app-wide cap on capture runs started per
+   *  local calendar day. Absent ⇒ 40; clamped to 0–500; 0 ⇒ no captures. */
+  knowledgeCaptureDailyCap?: number;
 }
 
 /** Defensively parse the persisted usageBudget (untrusted JSON on disk). */
@@ -214,7 +218,9 @@ async function read(): Promise<AppConfig> {
       perfOtlp: parsePerfOtlp(parsed.perfOtlp),
       keepRunningInTray: typeof parsed.keepRunningInTray === 'boolean' ? parsed.keepRunningInTray : undefined,
       identity: parseIdentityConfig(parsed.identity),
-      knowledgeCapture: typeof parsed.knowledgeCapture === 'boolean' ? parsed.knowledgeCapture : undefined
+      knowledgeCapture: typeof parsed.knowledgeCapture === 'boolean' ? parsed.knowledgeCapture : undefined,
+      knowledgeCaptureDailyCap:
+        typeof parsed.knowledgeCaptureDailyCap === 'number' ? clampDailyCap(parsed.knowledgeCaptureDailyCap) : undefined
     };
   } catch {
     cached = {};
@@ -394,6 +400,14 @@ export async function getKnowledgeCapture(): Promise<boolean> {
 }
 export async function setKnowledgeCapture(enabled: boolean): Promise<void> {
   const cfg = await read(); await write({ ...cfg, knowledgeCapture: enabled });
+}
+
+/** App-wide daily cap on capture runs (#483 §5a). Default 40; 0 disables capture. */
+export async function getKnowledgeCaptureDailyCap(): Promise<number> {
+  return clampDailyCap((await read()).knowledgeCaptureDailyCap);
+}
+export async function setKnowledgeCaptureDailyCap(n: number): Promise<void> {
+  const cfg = await read(); await write({ ...cfg, knowledgeCaptureDailyCap: clampDailyCap(n) });
 }
 
 /** OTLP export setting (endpoint kept even while disabled — the Settings UI

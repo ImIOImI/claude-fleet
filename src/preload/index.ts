@@ -610,6 +610,7 @@ const api = {
       perfTelemetry: boolean;
       perfOtlp: { enabled: boolean; endpoint: string };
       knowledgeCapture: boolean;
+      knowledgeCaptureDailyCap: number;
     }> => ipcRenderer.invoke('config:get'),
     setFleetRoot: (path: string): Promise<{ fleetRoot: string; sharedDir: string }> =>
       ipcRenderer.invoke('config:setFleetRoot', path),
@@ -650,7 +651,10 @@ const api = {
     /** Global knowledge-capture switch (#483); default on. A per-workspace
      *  manifest flag can still disable capture for one workspace. */
     setKnowledgeCapture: (enabled: boolean): Promise<void> =>
-      ipcRenderer.invoke('config:setKnowledgeCapture', enabled)
+      ipcRenderer.invoke('config:setKnowledgeCapture', enabled),
+    /** App-wide daily cap on knowledge-capture runs (#483 §5a); clamped 0–500 in main. */
+    setKnowledgeCaptureDailyCap: (n: number): Promise<void> =>
+      ipcRenderer.invoke('config:setKnowledgeCaptureDailyCap', n)
   },
   usage: {
     /** Total tokens spent across the fleet in the trailing rolling window —

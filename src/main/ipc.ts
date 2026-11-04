@@ -46,6 +46,8 @@ import {
   setPerfOtlp,
   getKnowledgeCapture,
   setKnowledgeCapture,
+  getKnowledgeCaptureDailyCap,
+  setKnowledgeCaptureDailyCap,
   getGithubClientIdConfig
 } from './config.js';
 import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk, perfSetSpanContext, recordLatencySample, setPerfStateListener, perfNotePowerEvent, perfSpan, setPerfMemorySource } from './perf.js';
@@ -1680,7 +1682,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     uiPrefs: await getUiPrefs(),
     perfTelemetry: await getPerfTelemetry(),
     perfOtlp: await getPerfOtlp(),
-    knowledgeCapture: await getKnowledgeCapture()
+    knowledgeCapture: await getKnowledgeCapture(),
+    knowledgeCaptureDailyCap: await getKnowledgeCaptureDailyCap()
   }));
   ipcMain.handle('config:setAutoReloadLoadouts', async (_e, enabled: boolean) => {
     await setAutoReloadLoadouts(!!enabled);
@@ -1759,6 +1762,11 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('config:setKnowledgeCapture', (_e, enabled: unknown) => {
     if (typeof enabled !== 'boolean') throw new Error('config:setKnowledgeCapture expects a boolean');
     return setKnowledgeCapture(enabled);
+  });
+
+  ipcMain.handle('config:setKnowledgeCaptureDailyCap', (_e, n: unknown) => {
+    if (typeof n !== 'number' || !Number.isFinite(n)) throw new Error('config:setKnowledgeCaptureDailyCap expects a number');
+    return setKnowledgeCaptureDailyCap(n);
   });
 
   ipcMain.handle('perf:status', async () => getEffectivePerf() ? getPerfStatus() : PERF_STATUS_UNINITIALIZED);
