@@ -1,4 +1,4 @@
-// state.db read characterization (async store part 2b). Recorded on the
+// state.db read characterization. Recorded on the
 // pre-port synchronous reads; every later version of the read path must
 // reproduce it unmodified. `await` on a sync return is a no-op, so the same
 // file runs on both sides.
