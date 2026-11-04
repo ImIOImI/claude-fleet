@@ -8,14 +8,22 @@ import type { CaptureRunRow, InboxDb } from '../store/inboxSchema.js';
 export type CaptureTrigger = `ctx-${number}` | 'turns' | 'search';
 export type CaptureStatus = 'running' | 'done' | 'failed' | 'timed-out';
 
+/** Local midnight of the day containing `now` (the daily cap resets at local midnight). */
+export function startOfLocalDay(now: number): number {
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
 export class CaptureRunStore {
   constructor(private readonly db: Kysely<InboxDb>) {}
 
-  async start(o: { workspaceId: string; sessionId: string; forkSessionId: string; trigger: CaptureTrigger; now: number }): Promise<string> {
+  async start(o: { workspaceId: string; sessionId: string; forkSessionId: string; trigger: CaptureTrigger; userTurns?: number; now: number }): Promise<string> {
     const id = newId(o.now);
     await this.db.insertInto('capture_runs').values({
       id, workspace_id: o.workspaceId, session_id: o.sessionId, fork_session_id: o.forkSessionId,
-      trigger: o.trigger, status: 'running', usage: null, error: null, started_at: o.now, ended_at: null
+      trigger: o.trigger, status: 'running', usage: null, error: null, started_at: o.now, ended_at: null,
+      user_turns: o.userTurns ?? null
     }).execute();
     return id;
   }
@@ -40,6 +48,13 @@ export class CaptureRunStore {
   async lastFor(sessionId: string): Promise<CaptureRunRow | null> {
     return (await this.db.selectFrom('capture_runs').selectAll().where('session_id', '=', sessionId)
       .orderBy('started_at', 'desc').limit(1).executeTakeFirst()) ?? null;
+  }
+
+  /** Runs started at or after `ts` (any status) — the daily cap's numerator. */
+  async countSince(ts: number): Promise<number> {
+    const r = await this.db.selectFrom('capture_runs').select((eb) => eb.fn.countAll<number>().as('n'))
+      .where('started_at', '>=', ts).executeTakeFirst();
+    return Number(r?.n ?? 0);
   }
 
   async forkSessionIds(): Promise<string[]> {

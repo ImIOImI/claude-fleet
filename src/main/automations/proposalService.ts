@@ -2,7 +2,7 @@
 // the user approves. Trusted workspaces auto-apply only low-risk items (see
 // classify.ts); every auto-applied item stays visible with Revert. Pure.
 // Async on the store layer; one decision per proposal at a time (`deciding`).
-import type { AutomationDef, Proposal, ProposalItem, ProposalStatus, TodoSource } from '../../preload/inboxTypes.js';
+import type { AutomationDef, CaptureSettingsChange, Proposal, ProposalItem, ProposalStatus, TodoSource } from '../../preload/inboxTypes.js';
 import type { NotifyInput } from '../inbox/notifyService.js';
 import type { AutomationStore } from './automationStore.js';
 import type { ProposalStore } from './proposalStore.js';
@@ -37,6 +37,10 @@ export function createProposalService(deps: ProposalDeps) {
   const ctx = { workspace: (v: string) => deps.resolveWorkspace(v), get hostShells() { return deps.hostShells?.(); } };
   /** Proposal ids with a decision in progress (approve/reject/revert). Claimed before the first await. */
   const deciding = new Set<string>();
+  /** Applies an approved capture-settings change (#483 §5a). Late-bound: the
+   *  capture settings service is created after this one and needs proposeCaptureSettings. */
+  type CaptureApplier = (workspaceId: string, change: CaptureSettingsChange, proposalId: string) => Promise<void>;
+  let captureApplier: CaptureApplier | null = null;
 
   async function decide<T>(id: string, fn: () => Promise<T>): Promise<T> {
     if (deciding.has(id)) throw new Error('this proposal is already being decided');
@@ -128,7 +132,8 @@ export function createProposalService(deps: ProposalDeps) {
   function summary(p: Proposal) {
     return {
       id: p.id, status: p.status, note: p.note,
-      items: p.items.map((i) => ({ name: i.name, automationId: i.automationId, decision: i.decision, lowRisk: i.lowRisk, reasons: i.reasons }))
+      items: p.items.map((i) => ({ name: i.name, automationId: i.automationId, decision: i.decision, lowRisk: i.lowRisk, reasons: i.reasons })),
+      ...(p.captureSettings ? { captureSettings: p.captureSettings } : {})
     };
   }
 
@@ -163,7 +168,35 @@ export function createProposalService(deps: ProposalDeps) {
       return deps.proposals.list();
     },
     async pendingCount(): Promise<number> {
-      return (await deps.proposals.pending()).reduce((n, p) => n + p.items.filter((i) => i.decision === 'pending').length, 0);
+      return (await deps.proposals.pending()).reduce(
+        (n, p) => n + (p.kind === 'capture-settings' ? 1 : p.items.filter((i) => i.decision === 'pending').length), 0);
+    },
+
+    setCaptureSettingsApplier(fn: CaptureApplier | null): void {
+      captureApplier = fn;
+    },
+
+    /** A workspace's cost-increasing capture-settings change (#483 §5a), held for the user. */
+    async proposeCaptureSettings(callerId: string, change: CaptureSettingsChange, rationale: unknown): Promise<Proposal> {
+      const now = deps.now();
+      for (const old of await deps.proposals.pending()) {
+        if (old.kind !== 'capture-settings' || old.proposer.id !== callerId) continue;
+        old.status = 'superseded';
+        old.decidedAt = now;
+        await deps.proposals.save(old);
+      }
+      const by: TodoSource = { kind: 'workspace', id: callerId };
+      const p = await deps.proposals.create({
+        kind: 'capture-settings', proposer: by,
+        rationale: typeof rationale === 'string' && rationale.trim() ? rationale.trim().slice(0, 2000) : null,
+        status: 'pending', items: [], captureSettings: change, createdAt: now
+      }, now);
+      deps.notify?.({
+        kind: 'proposal', title: `${deps.workspaceName(callerId)} proposes knowledge-capture changes: ${change.changes.join(', ')}`.slice(0, 200),
+        body: change.reasons.slice(0, 3).join(' · ') || null, priority: 'normal', source: by, workspaceId: callerId, dedupeKey: `proposal:${p.id}`
+      });
+      deps.changed();
+      return p;
     },
     async yamlOf(id: string, index: number): Promise<string | null> {
       const it = (await deps.proposals.get(id))?.items[index];
@@ -176,6 +209,16 @@ export function createProposalService(deps: ProposalDeps) {
         const p = await deps.proposals.get(id);
         if (!p) throw new Error('proposal not found');
         if (p.status !== 'pending') throw new Error(`this proposal is already ${p.status}`);
+        if (p.kind === 'capture-settings') {
+          if (!p.captureSettings) throw new Error('this proposal has no settings change');
+          if (!captureApplier) throw new Error('knowledge capture settings are unavailable');
+          await captureApplier(p.captureSettings.workspaceId, p.captureSettings, p.id);
+          p.status = 'approved';
+          p.decidedAt = deps.now();
+          await deps.proposals.save(p);
+          deps.changed();
+          return p;
+        }
         if (opts.editedYaml !== undefined) {
           const idx = opts.editedIndex ?? 0;
           const it = p.items[idx];

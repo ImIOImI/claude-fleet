@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { InboxStore } from '../inbox/inboxDb.js';
-import { CaptureRunStore } from './captureRunStore.js';
+import { CaptureRunStore, startOfLocalDay } from './captureRunStore.js';
 
 let inbox: InboxStore; let r: CaptureRunStore;
 beforeEach(() => { inbox = InboxStore.memory(); r = new CaptureRunStore(inbox.kysely); });
@@ -24,5 +24,16 @@ describe('CaptureRunStore', () => {
     expect((await r.forkSessionIds()).sort()).toEqual(['f1', 'f2']);
     expect(await r.failRunning(9, 'interrupted by app restart')).toBe(2);
     expect(await r.runningFor(a, 'wsA')).toBeNull();
+  });
+  it('stores the user-turn baseline and counts runs started since a time', async () => {
+    await r.start({ workspaceId: 'wsA', sessionId: 's1', forkSessionId: 'f1', trigger: 'search', userTurns: 42, now: 100 });
+    await r.start({ workspaceId: 'wsA', sessionId: 's2', forkSessionId: 'f2', trigger: 'ctx-85', now: 200 });
+    expect((await r.lastFor('s1'))?.user_turns).toBe(42);
+    expect((await r.lastFor('s2'))?.user_turns).toBeNull();
+    expect(await r.countSince(150)).toBe(1);
+    expect(await r.countSince(0)).toBe(2);
+  });
+  it('startOfLocalDay is local midnight', () => {
+    expect(startOfLocalDay(new Date(2026, 10, 4, 15, 30).getTime())).toBe(new Date(2026, 10, 4).getTime());
   });
 });

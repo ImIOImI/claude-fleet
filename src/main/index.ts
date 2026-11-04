@@ -5,16 +5,16 @@ import { openDb, closeDb, deleteEmbeddingsForOtherModels, recordError, listSessi
 import { initPerf, shutdownPerf, perfSpan, perfSpanAsync } from './perf.js';
 import { PerfStore } from './perfStore.js';
 import { resolvePerfConfig } from './perfConfig.js';
-import { getPerfTelemetry, getPerfOtlp } from './config.js';
+import { getPerfTelemetry, getPerfOtlp, getKnowledgeCapture, getKnowledgeCaptureDailyCap } from './config.js';
 import { instrumentIpcHandle } from './perfIpc.js';
 import { EMBED_MODEL_ID } from './vectors.js';
-import { startMcpServer, stopMcpServer, ensureWorkspaceSocket, setMcpStatusListener, setQueryEmbedder, setClaimHandlers } from './mcpServer.js';
+import { startMcpServer, stopMcpServer, ensureWorkspaceSocket, setMcpStatusListener, setQueryEmbedder, setClaimHandlers, setCaptureSettingsHandlers } from './mcpServer.js';
 import { broadcastMcpStatus } from './mcpStatusBroadcast.js';
 import { ensureBuiltinLoadouts } from './loadouts.js';
 import { JsonlWatcher } from './jsonlWatcher.js';
 import { PeerStatusWatcher } from './peerStatusWatcher.js';
 import { broadcastSessionStatus } from './sessionStatusBroadcast.js';
-import { listWorkspaceManifests, manifestInvariant, readWorkspaceManifest } from './workspaces.js';
+import { listWorkspaceManifests, manifestInvariant, readWorkspaceManifest, writeWorkspaceManifest } from './workspaces.js';
 import { wslLocalProjectsDir, wslLocalSessionsDir } from './localLauncher.js';
 import { encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir } from './paths.js';
 import { installMainProcessHandlers, getLogPath, setErrorSink, logError } from './errorLog.js';
@@ -34,7 +34,10 @@ import { setWorkspaceDefault } from './mirrorPolicy.js';
 import { makeEmbedder } from './embeddings.js';
 import { indexSessionTurns, indexSessionSummaries } from './transcriptIndex.js';
 import { ClaimStore } from './claims/claimStore.js';
-import { CaptureRunStore } from './claims/captureRunStore.js';
+import { CaptureRunStore, startOfLocalDay } from './claims/captureRunStore.js';
+import { CaptureSettingsLogStore } from './claims/captureSettingsLog.js';
+import { createCaptureSettingsService } from './claims/captureSettingsService.js';
+import { onCaptureSettingsChanged } from './claims/captureSettingsEvents.js';
 import { ClaimService } from './claims/claimService.js';
 
 // Mock mode is for UI iteration without Docker; no real JSONLs exist, so the
@@ -343,6 +346,40 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     const inboxHost = registerInboxIpc(inboxStore, notifySvc ?? undefined, auto ? (r, c) => auto!.automations.attribution(r, c) : undefined);
     auto?.setInboxSink(inboxHost);
   }
+  // Knowledge capture settings (#483 §5a): get/set_capture_settings MCP tools,
+  // capture-settings proposals, and the change log for form edits.
+  if (inboxStore && auto) {
+    const settingsLog = new CaptureSettingsLogStore(inboxStore.kysely);
+    const runsForCount = captureRuns ?? new CaptureRunStore(inboxStore.kysely);
+    const proposals = auto.proposals;
+    const captureSettings = createCaptureSettingsService({
+      readManifest: (id) => readWorkspaceManifest(id),
+      writeManifest: (spec) => writeWorkspaceManifest(spec),
+      trusted: async (id) => {
+        const m = await readWorkspaceManifest(id);
+        return m?.kind === 'container' && (m.inbox?.trusted === true || m.role === 'automations');
+      },
+      log: settingsLog,
+      propose: (callerId, change, reason) => proposals.proposeCaptureSettings(callerId, change, reason),
+      notify: (n) => {
+        if (!notifySvc) return;
+        void notifySvc.request(n).catch((e) => logError({ source: 'main', type: 'notify-request', level: 'warn', message: String(e) }));
+      },
+      globalEnabled: () => getKnowledgeCapture(),
+      dailyCap: () => getKnowledgeCaptureDailyCap(),
+      capturesToday: () => runsForCount.countSince(startOfLocalDay(Date.now())),
+      workspaceName: async (id) => (await readWorkspaceManifest(id))?.name ?? id,
+      now: () => Date.now()
+    });
+    proposals.setCaptureSettingsApplier((ws, change, proposalId) => captureSettings.applyApproved(ws, change, proposalId));
+    setCaptureSettingsHandlers({ get: (c) => captureSettings.get(c), set: (c, a) => captureSettings.set(c, a) });
+    onCaptureSettingsChanged((e) => {
+      if (e.source !== 'form') return; // MCP/proposal writes log themselves (with their reason)
+      void settingsLog.append({
+        workspaceId: e.workspaceId, actor: 'user', before: e.before, after: e.after, reason: null, applied: true, proposalId: null, now: Date.now()
+      }).catch((err) => logError({ source: 'main', type: 'capture-settings-log', level: 'warn', message: String(err), workspaceId: e.workspaceId }));
+    });
+  }
   registerPresenceIpc(ipcMain, { get: getKeepRunningInTray, set: setKeepRunningInTray });
   mainWindow = createWindow();
   // Desktop presence (#407 Phase 2b): tray, taskbar overlay, badge, attention.
@@ -367,6 +404,7 @@ app.on('before-quit', async () => {
   // inbox.db (#457), so nothing fires against a destroyed driver.
   notifySvc?.stop();
   notifySvc = null;
+  setCaptureSettingsHandlers(null);
   auto?.stop();
   auto = null;
   await jsonlWatcher?.stop();

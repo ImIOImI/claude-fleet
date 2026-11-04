@@ -161,7 +161,7 @@ describe('InboxStore.open', () => {
     expect((await store.list()).map((t) => t.title)).toEqual(['persist me']);
     const raw = new Database(path.join(dir, 'inbox.db'), { readonly: true });
     expect(raw.pragma('user_version', { simple: true })).toBe(INBOX_SCHEMA_VERSION);
-    expect(INBOX_SCHEMA_VERSION).toBe(6);
+    expect(INBOX_SCHEMA_VERSION).toBe(7);
     expect(raw.pragma('journal_mode', { simple: true })).toBe('wal');
     raw.close();
   });
@@ -173,6 +173,20 @@ describe('InboxStore.open', () => {
     raw.prepare(`INSERT INTO claims_fts (claim_id, text, topics) VALUES ('c1', 'query snapshot froze the app', 'mcp-query')`).run();
     const hit = raw.prepare(`SELECT claim_id FROM claims_fts WHERE claims_fts MATCH '"snapshot"'`).get() as { claim_id: string };
     expect(hit.claim_id).toBe('c1');
+    store.close();
+  });
+  it('v7 adds capture_settings_log, proposals.payload and capture_runs.user_turns', () => {
+    store = InboxStore.memory();
+    const raw = (store as unknown as { raw: import('better-sqlite3').Database }).raw;
+    const cols = (t: string) => (raw.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
+    expect(cols('capture_settings_log')).toEqual(['id', 'workspace_id', 'ts', 'actor', 'before', 'after', 'reason', 'applied', 'proposal_id']);
+    expect(cols('proposals')).toContain('payload');
+    expect(cols('capture_runs')).toContain('user_turns');
+    // The rebuilt proposals table admits the new kind and still rejects junk.
+    const ins = (kind: string) => raw.prepare(`INSERT INTO proposals (id, kind, proposer_kind, status, items, created_at) VALUES (?, ?, 'workspace', 'pending', '[]', 1)`).run(`p-${kind}`, kind);
+    expect(() => ins('capture-settings')).not.toThrow();
+    expect(() => ins('bogus')).toThrow(/CHECK constraint/);
+    expect(raw.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'proposals_status'`).get()).toBeTruthy();
     store.close();
   });
   it('backs up an existing older database before migrating', () => {

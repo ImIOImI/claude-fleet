@@ -173,6 +173,19 @@ function claims(): ClaimHandlers {
   return claimHandlers;
 }
 
+/** Knowledge capture settings (#483 §5a) — injected by index.ts. Always the
+ *  caller's own workspace: ctx.callerId is the only target, never a wire value. */
+export interface CaptureSettingsHandlers {
+  get(callerId: string): Promise<unknown>;
+  set(callerId: string, args: Record<string, unknown>): Promise<unknown>;
+}
+let captureSettingsHandlers: CaptureSettingsHandlers | null = null;
+export function setCaptureSettingsHandlers(h: CaptureSettingsHandlers | null): void { captureSettingsHandlers = h; }
+function captureSettingsApi(): CaptureSettingsHandlers {
+  if (!captureSettingsHandlers) throw new Error('knowledge capture settings are unavailable');
+  return captureSettingsHandlers;
+}
+
 /** Fleet-wide standing rule, delivered as the MCP initialize `instructions`
  *  (Claude Code injects it as a first-turn system reminder; 2,048-char cap). */
 export const STANDING_RULE =
@@ -1741,6 +1754,36 @@ export const TOOLS: Tool[] = [
     description: 'Retract a claim your workspace recorded that turned out to be wrong. Args: id (required), reason (required). To replace a claim with a corrected one, use record_claim with supersedes instead.',
     inputSchema: { type: 'object', properties: { id: { type: 'string' }, reason: { type: 'string' } }, required: ['id', 'reason'] },
     run: (_db, a, ctx) => claims().retract(ctx.callerId, a)
+  },
+  {
+    name: 'get_capture_settings',
+    description:
+      "Your workspace's background knowledge-capture settings with defaults filled in, plus the app-wide switch, the daily capture cap and how many captures ran today. " +
+      'Fields: enabled, onSearchHit, searchTopSessions (1-5), recaptureAfterTurns (10-500), contextBands (0-4 fractions, 0.5-0.95), ' +
+      'turnsEvery (0 = off, or 10-500), model ("session" or a claude model id), transcriptRetentionDays (30-3650), captureVisibility (fleet|private). No args.',
+    inputSchema: { type: 'object', properties: {} },
+    run: (_db, _a, ctx) => captureSettingsApi().get(ctx.callerId)
+  },
+  {
+    name: 'set_capture_settings',
+    description:
+      "Change your own workspace's knowledge-capture settings. Pass only the fields to change, plus reason (required). Values are clamped to their ranges; unknown fields are rejected. " +
+      'Changes that lower cost or are cost-neutral (including transcriptRetentionDays and captureVisibility) apply immediately and the user is notified. ' +
+      'Changes that raise cost (turning capture or search-hit capture on, more sessions per search, recapturing sooner, adding or lowering a context band, ' +
+      'turning turnsEvery on or lowering it, a model other than "session") become a proposal the user approves, unless this workspace is trusted. ' +
+      'Returns { status: applied|proposed|unchanged, settings?, proposalId?, changes, reasons }.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        enabled: { type: 'boolean' }, onSearchHit: { type: 'boolean' },
+        searchTopSessions: { type: 'number' }, recaptureAfterTurns: { type: 'number' },
+        contextBands: { type: 'array', items: { type: 'number' } }, turnsEvery: { type: 'number' },
+        model: { type: 'string' }, transcriptRetentionDays: { type: 'number' },
+        captureVisibility: { type: 'string', enum: ['fleet', 'private'] }, reason: { type: 'string' }
+      },
+      required: ['reason']
+    },
+    run: (_db, a, ctx) => captureSettingsApi().set(ctx.callerId, a)
   },
   {
     name: 'get_config',

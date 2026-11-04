@@ -23,7 +23,7 @@ interface Props {
   automationsWsId?: string | null;
 }
 
-const KIND = { new: 'Proposal · new automation', change: 'Proposal · change', batch: 'Proposal' } as const;
+const KIND = { new: 'Proposal · new automation', change: 'Proposal · change', batch: 'Proposal', 'capture-settings': 'Proposal · knowledge capture settings' } as const;
 const DECISION: Record<ProposalItem['decision'], string> = {
   pending: 'needs you', accepted: 'approved', declined: 'declined', 'auto-applied': 'auto-applied', reverted: 'reverted'
 };

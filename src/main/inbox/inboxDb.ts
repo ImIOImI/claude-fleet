@@ -12,7 +12,7 @@ import { isPriority, maxPriority, normalizeTag, normalizeTags, MAX_TAGS } from '
 import { chunked, num, sqliteKysely } from '../store/kysely.js';
 import type { InboxDb, TodoRow } from '../store/inboxSchema.js';
 
-export const INBOX_SCHEMA_VERSION = 6;
+export const INBOX_SCHEMA_VERSION = 7;
 
 const MIGRATIONS: Record<number, string> = {
   1: `
@@ -204,6 +204,37 @@ const MIGRATIONS: Record<number, string> = {
     );
     CREATE INDEX idx_capture_runs_session ON capture_runs (session_id, started_at);
     CREATE INDEX idx_capture_runs_status ON capture_runs (status);
+  `,
+  // #483 §5a: capture-settings change log, capture-settings proposals (payload),
+  // and the user-turn baseline that recaptureAfterTurns is measured from.
+  7: `
+    CREATE TABLE capture_settings_log (
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, ts INTEGER NOT NULL, actor TEXT NOT NULL,
+      "before" TEXT NOT NULL, "after" TEXT NOT NULL, reason TEXT, applied INTEGER NOT NULL, proposal_id TEXT
+    );
+    CREATE INDEX idx_capture_settings_log_ws ON capture_settings_log (workspace_id, ts);
+    -- proposals.kind has a CHECK (v4) that SQLite can't alter: rebuild the
+    -- table to admit 'capture-settings' and add the payload column.
+    CREATE TABLE proposals_v7 (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind IN ('new','change','batch','capture-settings')),
+      proposer_kind TEXT NOT NULL,
+      proposer_id TEXT,
+      rationale TEXT,
+      status TEXT NOT NULL,
+      items TEXT NOT NULL,
+      note TEXT,
+      created_at INTEGER NOT NULL,
+      decided_at INTEGER,
+      payload TEXT
+    );
+    INSERT INTO proposals_v7 (id, kind, proposer_kind, proposer_id, rationale, status, items, note, created_at, decided_at)
+      SELECT id, kind, proposer_kind, proposer_id, rationale, status, items, note, created_at, decided_at FROM proposals;
+    DROP TABLE proposals;
+    ALTER TABLE proposals_v7 RENAME TO proposals;
+    CREATE INDEX proposals_status ON proposals (status, created_at);
+    ALTER TABLE capture_runs ADD COLUMN user_turns INTEGER;
+    CREATE INDEX idx_capture_runs_started ON capture_runs (started_at);
   `
 };
 

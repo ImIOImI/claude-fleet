@@ -14,6 +14,8 @@ import {
   learnMapping as learnMirrorMapping
 } from './mirrorPolicy.js';
 import { openHostPath } from './openHostPath.js';
+import { captureSettingsEqual, effectiveCaptureSettings } from '../preload/captureSettings.js';
+import { emitCaptureSettingsChanged } from './claims/captureSettingsEvents.js';
 import {
   getFleetRoot,
   setFleetRoot,
@@ -1407,12 +1409,19 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // this merge a plain edit would silently wipe both. A key present in the
       // incoming spec — even set to undefined, e.g. clearing `accessibility` by
       // toggling reachability off — is authoritative and overrides existing.
+      const beforeCapture = effectiveCaptureSettings(existing);
       await writeWorkspaceManifest({
         ...(existing ?? {}),
         ...spec,
         workspaceRoot,
         launcher: incomingLauncher
       });
+      // #483 §5a: a form edit of the capture settings is logged (actor 'user')
+      // and re-applies transcript retention — both listen for this event.
+      const afterCapture = effectiveCaptureSettings(await readWorkspaceManifest(spec.id));
+      if (!captureSettingsEqual(beforeCapture, afterCapture)) {
+        emitCaptureSettingsChanged({ workspaceId: spec.id, before: beforeCapture, after: afterCapture, actor: 'user', source: 'form' });
+      }
     invalidateWorkspaceList();
     // Reflect a mirror-default edit in the watcher immediately (don't wait for
     // the next list poll).

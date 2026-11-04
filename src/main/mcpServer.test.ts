@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setSessionMappingHandler, setSummaryStatusHandler, setQueryEmbedder, setUsageRecorder, setConfigResolver, setClaimHandlers, STANDING_RULE, _resetTelemetryForTests, type ToolCtx } from './mcpServer.js';
+import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setSessionMappingHandler, setSummaryStatusHandler, setQueryEmbedder, setUsageRecorder, setConfigResolver, setClaimHandlers, setCaptureSettingsHandlers, STANDING_RULE, _resetTelemetryForTests, type ToolCtx } from './mcpServer.js';
 import { EMBED_DIM, EMBED_MODEL_ID } from './vectors.js';
 import { closeDb, openDb } from './db.js';
 import { PerfStore } from './perfStore.js';
@@ -878,5 +878,26 @@ describe('knowledge claims tools (#483)', () => {
     expect(STANDING_RULE.length).toBeLessThan(1200);
     expect(STANDING_RULE).toMatch(/record_claim/);
     expect(STANDING_RULE).toMatch(/search_claims/);
+  });
+});
+
+describe('capture settings tools (#483 §5a)', () => {
+  afterEach(() => setCaptureSettingsHandlers(null));
+  it('registers get_capture_settings and set_capture_settings', () => {
+    expect(TOOLS.map((t) => t.name)).toEqual(expect.arrayContaining(['get_capture_settings', 'set_capture_settings']));
+    expect(tool('set_capture_settings').inputSchema.required).toEqual(['reason']);
+  });
+  it('targets only the caller workspace, whatever the args say', async () => {
+    const seen: string[] = [];
+    setCaptureSettingsHandlers({
+      get: async (c) => { seen.push(c); return {}; },
+      set: async (c) => { seen.push(c); return {}; }
+    });
+    await tool('get_capture_settings').run(makeDb(), { workspace_id: WS_B }, ctxA);
+    await tool('set_capture_settings').run(makeDb(), { searchTopSessions: 1, reason: 'r', callerId: WS_B }, ctxA);
+    expect(seen).toEqual([WS_A, WS_A]);
+  });
+  it('fails clearly when unavailable', () => {
+    expect(() => tool('get_capture_settings').run(makeDb(), {}, ctxA)).toThrow(/knowledge capture settings are unavailable/);
   });
 });

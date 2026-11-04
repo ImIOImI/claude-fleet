@@ -125,6 +125,8 @@ test('MCP server: initialize, tools, typed reads, committee control', async () =
         'record_claim',
         'search_claims',
         'retract_claim',
+        'get_capture_settings',
+        'set_capture_settings',
         'get_config',
         'perf_status',
         'perf_set',
