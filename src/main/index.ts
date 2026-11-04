@@ -300,7 +300,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         // child spans carry the synchronous parts that can block the loop.
         await perfSpanAsync('claude_fleet.boot.embed_backfill', async () => {
           await perfSpanAsync('claude_fleet.index.delete_stale_models', () => deleteEmbeddingsForOtherModels(EMBED_MODEL_ID));
-          const sessions = perfSpan('claude_fleet.index.list_sessions', () => listSessions());
+          const sessions = await perfSpanAsync('claude_fleet.index.list_sessions', () => listSessions());
           for (const s of sessions) await indexSessionTurns(s.id, embed);
           await indexSessionSummaries(embed);
         });

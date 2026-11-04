@@ -123,7 +123,7 @@ describe('verified resume mappings (poisoned legacy rows)', () => {
     const dir = freshDb();
     try {
       await learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-1');
-      expect(lookupVerifiedBrokerSession('ws-a', 'broker-1')).toBe('claude-1');
+      expect(await lookupVerifiedBrokerSession('ws-a', 'broker-1')).toBe('claude-1');
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
@@ -136,10 +136,10 @@ describe('verified resume mappings (poisoned legacy rows)', () => {
         VALUES ('ws-a', 'broker-legacy', 'claude-guessed', 1, 0)
       `).run();
       expect(await lookupBrokerSession('ws-a', 'broker-legacy')).toBe('claude-guessed'); // observability OK
-      expect(lookupVerifiedBrokerSession('ws-a', 'broker-legacy')).toBeNull();     // resume refused
+      expect(await lookupVerifiedBrokerSession('ws-a', 'broker-legacy')).toBeNull();     // resume refused
       // A deterministic relearn upgrades the row to verified.
       await learnBrokerSessionMapping('ws-a', 'broker-legacy', 'claude-real');
-      expect(lookupVerifiedBrokerSession('ws-a', 'broker-legacy')).toBe('claude-real');
+      expect(await lookupVerifiedBrokerSession('ws-a', 'broker-legacy')).toBe('claude-real');
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
@@ -151,9 +151,9 @@ describe('lookupResumableBrokerSession — cross-restart auto-resume gate', () =
       await learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-1');
       // Verified but never produced a transcript: `claude --resume` of it
       // would error visibly in the tab, so refuse and let the attach spawn fresh.
-      expect(lookupResumableBrokerSession('ws-a', 'broker-1')).toBeNull();
+      expect(await lookupResumableBrokerSession('ws-a', 'broker-1')).toBeNull();
       await realSession('ws-a', 'claude-1');
-      expect(lookupResumableBrokerSession('ws-a', 'broker-1')).toBe('claude-1');
+      expect(await lookupResumableBrokerSession('ws-a', 'broker-1')).toBe('claude-1');
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
@@ -165,14 +165,14 @@ describe('lookupResumableBrokerSession — cross-restart auto-resume gate', () =
         VALUES ('ws-a', 'broker-legacy', 'claude-guessed', 1, 0)
       `).run();
       await realSession('ws-a', 'claude-guessed');
-      expect(lookupResumableBrokerSession('ws-a', 'broker-legacy')).toBeNull();
+      expect(await lookupResumableBrokerSession('ws-a', 'broker-legacy')).toBeNull();
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
   it('returns null for an unmapped broker session', async () => {
     const dir = freshDb();
     try {
-      expect(lookupResumableBrokerSession('ws-a', 'broker-unknown')).toBeNull();
+      expect(await lookupResumableBrokerSession('ws-a', 'broker-unknown')).toBeNull();
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
@@ -226,7 +226,7 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
       expect(await lookupBrokerSession('ws-a', 'broker-1')).toBe('claude-next');
       expect((await summaryForBrokerSession('ws-a', 'broker-1'))?.title).toBe('second conversation');
       // Promotion keeps the row resume-grade.
-      expect(lookupVerifiedBrokerSession('ws-a', 'broker-1')).toBe('claude-next');
+      expect(await lookupVerifiedBrokerSession('ws-a', 'broker-1')).toBe('claude-next');
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
@@ -386,7 +386,7 @@ describe('listSessions — headless flag', () => {
       await realSession('ws-a', 'claude-unmapped');
       await recordBrokerSessionMapping('ws-a', 'tab-1', 'claude-tab');
       await recordBrokerSessionMapping('ws-a', 'auto-run1-step1', 'claude-auto');
-      const byId = new Map(listSessions('ws-a').map((s) => [s.id, s.headless]));
+      const byId = new Map((await listSessions('ws-a')).map((s) => [s.id, s.headless]));
       expect(byId.get('claude-tab')).toBe(false);
       expect(byId.get('claude-auto')).toBe(true);
       expect(byId.get('claude-unmapped')).toBe(false);

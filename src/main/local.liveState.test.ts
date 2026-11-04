@@ -140,27 +140,27 @@ describe('local warm-state persistence across app restarts', () => {
 });
 
 describe('effectiveResumeOf — cross-restart auto-resume decision', () => {
-  it('prefers an explicit resume target', () => {
-    expect(local.effectiveResumeOf('explicit-uuid', false, () => 'mapped-uuid')).toBe(
+  it('prefers an explicit resume target', async () => {
+    expect(await local.effectiveResumeOf('explicit-uuid', false, async () => 'mapped-uuid')).toBe(
       'explicit-uuid'
     );
   });
 
-  it('never auto-resumes over a live pty (re-attach ignores resume args anyway)', () => {
-    expect(local.effectiveResumeOf(undefined, true, () => 'mapped-uuid')).toBeUndefined();
+  it('never auto-resumes over a live pty (re-attach ignores resume args anyway)', async () => {
+    expect(await local.effectiveResumeOf(undefined, true, async () => 'mapped-uuid')).toBeUndefined();
   });
 
-  it('auto-resumes the mapped conversation when the tab has no live pty', () => {
-    expect(local.effectiveResumeOf(undefined, false, () => 'mapped-uuid')).toBe('mapped-uuid');
+  it('auto-resumes the mapped conversation when the tab has no live pty', async () => {
+    expect(await local.effectiveResumeOf(undefined, false, async () => 'mapped-uuid')).toBe('mapped-uuid');
   });
 
-  it('spawns fresh when no resumable mapping exists', () => {
-    expect(local.effectiveResumeOf(undefined, false, () => null)).toBeUndefined();
+  it('spawns fresh when no resumable mapping exists', async () => {
+    expect(await local.effectiveResumeOf(undefined, false, async () => null)).toBeUndefined();
   });
 
-  it('spawns fresh when the DB is dormant (lookup throws — mock mode)', () => {
+  it('spawns fresh when the DB is dormant (lookup rejects — mock mode)', async () => {
     expect(
-      local.effectiveResumeOf(undefined, false, () => {
+      await local.effectiveResumeOf(undefined, false, async () => {
         throw new Error('db not open');
       })
     ).toBeUndefined();

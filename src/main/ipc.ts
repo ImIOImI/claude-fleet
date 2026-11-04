@@ -126,6 +126,7 @@ import {
   lookupBrokerSession,
   lookupVerifiedBrokerSession,
   listSessions,
+  latestActivityByWorkspace,
   renameSession,
   deleteSession,
   tokensSpentSince,
@@ -782,9 +783,9 @@ async function committeeCollect(
   since: number
 ): Promise<{ id: string; sessionId: string | null; cursor: number; turns: CollectTurn[] }> {
   await assertControl(callerId, targetId, 'read');
-  const sessionId = listSessions(targetId)[0]?.id ?? null;
+  const sessionId = (await listSessions(targetId))[0]?.id ?? null;
   if (!sessionId) return { id: targetId, sessionId: null, cursor: since, turns: [] };
-  const events = eventsForSession(sessionId, since, 500);
+  const events = await eventsForSession(sessionId, since, 500);
   const cursor = events.length ? events[events.length - 1].id : since;
   const turns = events
     .filter((e) => e.type === 'assistant' || e.type === 'user')
@@ -796,20 +797,23 @@ async function committeeCollect(
 /**
  * Liveness for an expert (#121): `busy` is host-computed from the broker output
  * stream (renderer-independent); `stalled` = busy past the turn timeout (the
- * "it's wedged" signal); `lastActiveAt` is best-effort from the DB (null when the
- * DB isn't open). Shared by committee_status and committee_roster.
+ * "it's wedged" signal); `lastActiveAt` is best-effort from the DB (see
+ * `lastActiveAtFor`). Shared by committee_status and committee_roster.
  */
-function liveStatusFields(targetId: string, paused: boolean): RosterStatus {
+function liveStatusFields(targetId: string, paused: boolean, lastActiveAt: number | null): RosterStatus {
   const b = committeeBusy.get(targetId);
   const busy = b?.busy ?? false;
   const stalled = busy && b ? Date.now() - b.since > COMMITTEE_CAPS.turnTimeoutMs : false;
-  let lastActiveAt: number | null = null;
-  try {
-    lastActiveAt = listSessions(targetId)[0]?.lastActiveAt ?? null;
-  } catch {
-    /* DB not open (mock) — leave null */
-  }
   return { paused, busy, stalled, lastActiveAt };
+}
+
+/** Latest session activity per workspace; empty when the DB isn't open (mock). */
+async function lastActiveAtFor(workspaceIds: string[]): Promise<Map<string, number | null>> {
+  try {
+    return await latestActivityByWorkspace(workspaceIds);
+  } catch {
+    return new Map();
+  }
 }
 
 /**
@@ -843,7 +847,7 @@ async function committeeStatus(
       id: l.id,
       title: l.title.slice(0, ROSTER_TITLE_MAX)
     })),
-    ...liveStatusFields(targetId, ws?.state === 'paused')
+    ...liveStatusFields(targetId, ws?.state === 'paused', (await lastActiveAtFor([targetId])).get(targetId) ?? null)
   };
 }
 
@@ -859,7 +863,10 @@ async function committeeRoster(callerId: string): Promise<RosterEntry[]> {
   const all = await listAllWorkspaces();
   const caller = all.find((w) => w.id === callerId) ?? null;
   const stateById = new Map(all.map((w) => [w.id, w.state]));
-  return buildRoster(caller, callerId, all, (id) => liveStatusFields(id, stateById.get(id) === 'paused'));
+  const lastActive = await lastActiveAtFor(all.map((w) => w.id));
+  return buildRoster(caller, callerId, all, (id) =>
+    liveStatusFields(id, stateById.get(id) === 'paused', lastActive.get(id) ?? null)
+  );
 }
 
 // ── Plan-wide usage (#plan-usage-ledger) ─────────────────────────────────
@@ -876,7 +883,7 @@ async function computePlanUsage(opts?: { windowS?: number; at?: number }): Promi
   const at = opts?.at ?? Date.now();
   const windowMs = (opts?.windowS ?? 5 * 60 * 60) * 1000;
 
-  const covering = latestAnchorCovering(at);
+  const covering = await latestAnchorCovering(at);
   const window = covering && covering.windowStart != null && covering.resetAt != null
     ? { startMs: covering.windowStart, endMs: covering.resetAt, source: 'anchor' as const }
     : { startMs: at - windowMs, endMs: at, source: 'rolling' as const };
@@ -884,14 +891,14 @@ async function computePlanUsage(opts?: { windowS?: number; at?: number }): Promi
   const all = await listAllWorkspaces();
   const localIds = new Set(all.filter((w) => w.kind === 'local').map((w) => w.id));
 
-  const fold = foldPlanUsage(planUsageRows(window.startMs, window.endMs), localIds);
+  const fold = foldPlanUsage(await planUsageRows(window.startMs, window.endMs), localIds);
 
   // Cap seed: the window cost recomputed at the most recent limit-hit anchor
   // (now including local + subagent spend). null until a limit-hit exists.
-  const hit = latestLimitHitAnchor();
+  const hit = await latestLimitHitAnchor();
   let capUsd: number | null = null;
   if (hit && hit.windowStart != null && hit.resetAt != null) {
-    capUsd = foldPlanUsage(planUsageRows(hit.windowStart, hit.resetAt), localIds).spend.usd;
+    capUsd = foldPlanUsage(await planUsageRows(hit.windowStart, hit.resetAt), localIds).spend.usd;
   }
 
   return {
@@ -1271,7 +1278,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('sessions:list', async (_e, workspaceId?: string) => {
     const all = await listAllWorkspaces();
     const byId = new Map(all.map((w) => [w.id, w]));
-    const rows = listSessions(workspaceId);
+    const rows = await listSessions(workspaceId);
     return rows.flatMap((r) => {
       const w = byId.get(r.workspaceId);
       // Eligibility: show a session iff its workspace still exists (manifest

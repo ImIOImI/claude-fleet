@@ -519,19 +519,19 @@ export async function removeWorkspace(
  *   restarted (a local claude dies with the Electron main process). Resume
  *   the tab's verified broker→claude mapping so the restored chip's tabs
  *   pick their conversations back up instead of spawning fresh ones.
- * - A throwing lookup (dormant DB in mock mode) degrades to a fresh spawn.
+ * - A rejecting lookup (dormant DB in mock mode) degrades to a fresh spawn.
  *
  * Exported for tests.
  */
-export function effectiveResumeOf(
+export async function effectiveResumeOf(
   explicit: string | undefined,
   hasLivePty: boolean,
-  lookupResumable: () => string | null
-): string | undefined {
+  lookupResumable: () => Promise<string | null>
+): Promise<string | undefined> {
   if (explicit) return explicit;
   if (hasLivePty) return undefined;
   try {
-    return lookupResumable() ?? undefined;
+    return (await lookupResumable()) ?? undefined;
   } catch {
     return undefined;
   }
@@ -589,7 +589,7 @@ export async function attachPty(
   // Cross-restart continuity: a restored tab whose process died with the
   // previous app run resumes its mapped conversation instead of spawning a
   // fresh one.
-  const resume = effectiveResumeOf(resumeOf, hasLiveSession(id, sessionId), () =>
+  const resume = await effectiveResumeOf(resumeOf, hasLiveSession(id, sessionId), () =>
     lookupResumableBrokerSession(id, sessionId)
   );
   return attachLocalSession({

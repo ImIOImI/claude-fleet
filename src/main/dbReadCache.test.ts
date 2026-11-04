@@ -111,7 +111,7 @@ describe('summaryForSession cache', () => {
 
 // Concurrent misses share one recompute. The write-during-recompute rules are
 // unit-tested in asyncCache.test.ts: on the SQLite driver a read stores its
-// result before a queued write can commit, so they can't be provoked here.
+// result before a queued write can commit, so timing here isn't deterministic.
 describe('summaryForSession cache, in flight', () => {
   it('concurrent misses share one recompute', async () => {
     await ingestLine(WS, SES, userLine('u1', 'first'));
