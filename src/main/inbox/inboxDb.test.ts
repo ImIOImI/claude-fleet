@@ -192,3 +192,42 @@ describe('InboxStore.kysely', () => {
     store = InboxStore.memory(); // afterEach closes a live store
   });
 });
+
+describe('InboxStore chunked tag fetching', () => {
+  it('correctly merges tags across the 500-item chunk boundary', async () => {
+    store = InboxStore.memory();
+    // Seed 501 todos, each with a distinct tag
+    const todoIds: string[] = [];
+    for (let i = 0; i < 501; i++) {
+      const { todo } = await store.post(WS, { title: `todo-${i}`, tags: [`tag-${i}`] }, 1000 + i);
+      todoIds.push(todo.id);
+    }
+    // Add one todo with no tags
+    const { todo: noTagTodo } = await store.post(WS, { title: 'no-tags' }, 1500);
+    todoIds.push(noTagTodo.id);
+
+    // List all todos with their tags (bypasses pagination)
+    const todos = await store.list({ status: 'all', limit: 500 });
+    expect(todos).toHaveLength(500); // list caps at 500
+
+    // Verify that the first 500 todos returned have exactly their own tag
+    for (let i = 0; i < Math.min(500, todos.length); i++) {
+      // The todos are returned in reverse order (by last_seen_at desc), so we need to find our todos
+      const todo = todos.find((t) => t.title === `todo-${i}`);
+      if (todo) {
+        expect(todo.tags).toEqual([`tag-${i}`]);
+      }
+    }
+
+    // Additionally, test tagsForIds directly to verify 501 boundary
+    const allTodoIds = [noTagTodo.id, ...todoIds.slice(0, 501)];
+    const tagsMap = await (store as any).tagsForIds((store as any).kysely, allTodoIds);
+    for (let i = 0; i < 501; i++) {
+      const expectedTag = i < 501 ? [`tag-${i}`] : [];
+      const actualTag = tagsMap.get(todoIds[i]) ?? [];
+      expect(actualTag).toEqual(expectedTag);
+    }
+    // Verify the no-tags todo
+    expect(tagsMap.get(noTagTodo.id) ?? []).toEqual([]);
+  });
+});
