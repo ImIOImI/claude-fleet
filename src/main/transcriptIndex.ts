@@ -3,7 +3,7 @@
 // function is injected so this module has no dependency on the model runtime
 // (and tests can stub it).
 import type Database from 'better-sqlite3';
-import { insertEmbedding, unembeddedTurnEvents, unembeddedSummaries, getDb } from './db.js';
+import { insertEmbeddings, unembeddedTurnEvents, unembeddedSummaries, getDb } from './db.js';
 import { encodeVector, decodeVector, topK, EMBED_MODEL_ID, EMBED_DIM } from './vectors.js';
 import { perfSpan } from './perf.js';
 
@@ -52,40 +52,31 @@ export async function indexSessionTurns(sessionId: string, embed: EmbedFn, batch
       })
       .filter((p) => p.text.length > 0);
 
+    const placeholder = (ev: (typeof pending)[number]) => ({
+      workspaceId: ev.workspaceId, sessionId, kind: 'turn' as const, refEventId: ev.id, ts: ev.ts,
+      text: '', modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
+      vec: encodeVector(new Float32Array(EMBED_DIM)), dedupKey: `t${ev.id}`,
+    });
+
     if (prepared.length === 0) {
       // Nothing embeddable in this batch (all tool-only/empty). Insert a
       // zero-vector placeholder so these rows leave the pending set and the
       // loop terminates. They score ~0 and never surface in search.
-      for (const ev of pending) {
-        insertEmbedding({
-          workspaceId: ev.workspaceId, sessionId, kind: 'turn', refEventId: ev.id, ts: ev.ts,
-          text: '', modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
-          vec: encodeVector(new Float32Array(EMBED_DIM)), dedupKey: `t${ev.id}`,
-        });
-      }
+      await insertEmbeddings(pending.map(placeholder));
       continue;
     }
 
     const vecs = await embed(prepared.map((p) => p.text));
-    prepared.forEach((p, i) => {
-      const ok = insertEmbedding({
-        workspaceId: p.ev.workspaceId, sessionId, kind: 'turn', refEventId: p.ev.id, ts: p.ev.ts,
+    total += await insertEmbeddings(
+      prepared.map((p, i) => ({
+        workspaceId: p.ev.workspaceId, sessionId, kind: 'turn' as const, refEventId: p.ev.id, ts: p.ev.ts,
         text: p.text, modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
         vec: encodeVector(vecs[i]), dedupKey: `t${p.ev.id}`,
-      });
-      if (ok) total++;
-    });
+      }))
+    );
     // Placeholder-insert the skipped (empty) rows in this batch too, so they
     // don't reappear as pending forever.
-    for (const ev of pending) {
-      if (!prepared.some((p) => p.ev.id === ev.id)) {
-        insertEmbedding({
-          workspaceId: ev.workspaceId, sessionId, kind: 'turn', refEventId: ev.id, ts: ev.ts,
-          text: '', modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
-          vec: encodeVector(new Float32Array(EMBED_DIM)), dedupKey: `t${ev.id}`,
-        });
-      }
-    }
+    await insertEmbeddings(pending.filter((ev) => !prepared.some((p) => p.ev.id === ev.id)).map(placeholder));
   }
   return total;
 }
@@ -137,14 +128,13 @@ export async function indexSessionSummaries(embed: EmbedFn, batch = EMBED_BATCH)
     const pending = perfSpan('claude_fleet.index.pending_summaries', () => unembeddedSummaries(EMBED_MODEL_ID, batch));
     if (pending.length === 0) break;
     const vecs = await embed(pending.map((p) => p.summary.slice(0, MAX_CHARS)));
-    pending.forEach((p, i) => {
-      const ok = insertEmbedding({
-        workspaceId: p.workspaceId, sessionId: p.sessionId, kind: 'summary', refEventId: null, ts: p.ts,
+    total += await insertEmbeddings(
+      pending.map((p, i) => ({
+        workspaceId: p.workspaceId, sessionId: p.sessionId, kind: 'summary' as const, refEventId: null, ts: p.ts,
         text: p.summary.slice(0, MAX_CHARS), modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
         vec: encodeVector(vecs[i]), dedupKey: String(p.sourceMaxEventId),
-      });
-      if (ok) total++;
-    });
+      }))
+    );
     if (pending.length < batch) break;
   }
   return total;

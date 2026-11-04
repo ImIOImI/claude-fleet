@@ -1,7 +1,7 @@
 import { app, BrowserWindow, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
 import { registerIpc } from './ipc.js';
-import { openDb, closeDb, deleteEmbeddingsForOtherModels, recordError, listSessions } from './db.js';
+import { openDb, closeDb, deleteEmbeddingsForOtherModels, recordError, listSessions, stateKysely } from './db.js';
 import { initPerf, shutdownPerf, perfSpan, perfSpanAsync } from './perf.js';
 import { PerfStore } from './perfStore.js';
 import { resolvePerfConfig } from './perfConfig.js';
@@ -167,10 +167,14 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   }
 
   if (jsonlWatcher) {
-    const db = openDb(app.getPath('userData'));
+    openDb(app.getPath('userData'));
     // Wire the crash-safe DB sink so every logError call is also persisted to
-    // the errors table (best-effort; a wedged DB must never break crash logging).
-    setErrorSink((row) => recordError(row));
+    // the errors table.
+    // best-effort; a wedged DB must never break crash logging, so the async
+    // write's rejection is swallowed here.
+    setErrorSink((row) => {
+      void recordError(row).catch(() => undefined);
+    });
     // One line per app run identifying the build (#298): the error.log header
     // and an errors-table row that lets historical telemetry be partitioned by
     // build sha when two builds share a semver.
@@ -181,7 +185,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       message: `claude-fleet ${appVersionString()} starting`,
       extra: { sha: appBuildSha() ?? null }
     });
-    const perfStore = new PerfStore(db);
+    const perfStore = new PerfStore(stateKysely());
     initPerf(
       perfStore,
       resolvePerfConfig(
@@ -295,7 +299,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         // this backfill; boot.embed_backfill is wall time, the index.* / embed.*
         // child spans carry the synchronous parts that can block the loop.
         await perfSpanAsync('claude_fleet.boot.embed_backfill', async () => {
-          perfSpan('claude_fleet.index.delete_stale_models', () => deleteEmbeddingsForOtherModels(EMBED_MODEL_ID));
+          await perfSpanAsync('claude_fleet.index.delete_stale_models', () => deleteEmbeddingsForOtherModels(EMBED_MODEL_ID));
           const sessions = perfSpan('claude_fleet.index.list_sessions', () => listSessions());
           for (const s of sessions) await indexSessionTurns(s.id, embed);
           await indexSessionSummaries(embed);
@@ -348,7 +352,7 @@ app.on('before-quit', async () => {
   await inboxStore?.close();
   inboxStore = null;
   await shutdownPerf();
-  closeDb();
+  await closeDb();
 });
 
 app.on('window-all-closed', () => {

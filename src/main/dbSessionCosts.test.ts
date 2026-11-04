@@ -103,47 +103,47 @@ function expectRollupMatchesEvents(d: Database.Database): void {
   expect(d.prepare(ROLLUP_SQL).all()).toEqual(d.prepare(GROUND_TRUTH_SQL).all());
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'cf-costs-'));
   openDb(dir);
 });
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
   rmSync(dir, { recursive: true, force: true });
 });
 
 describe('session_costs invariant', () => {
-  it('mixed ingest: multi-session/multi-workspace rollup matches ground truth', () => {
+  it('mixed ingest: multi-session/multi-workspace rollup matches ground truth', async () => {
     // SES_A in WS1: two distinct models, one with a service_tier, plus user lines.
-    ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
-    ingestLine(WS1, SES_A, assistantLine('a2', 'claude-3-haiku', 200, 80));
-    ingestLine(
+    await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    await ingestLine(WS1, SES_A, assistantLine('a2', 'claude-3-haiku', 200, 80));
+    await ingestLine(
       WS1,
       SES_A,
       assistantLine('a3', 'claude-3-opus', 300, 60, { serviceTier: 'batch' }),
     );
-    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
-    ingestLine(WS1, SES_A, userLine('u2', 'world'));
+    await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    await ingestLine(WS1, SES_A, userLine('u2', 'world'));
 
     // SES_B in WS2: single model, no service_tier, plus user lines.
-    ingestLine(WS2, SES_B, assistantLine('b1', 'claude-sonnet', 150, 70, { cacheRead: 10 }));
-    ingestLine(WS2, SES_B, assistantLine('b2', 'claude-sonnet', 50, 20));
-    ingestLine(WS2, SES_B, userLine('u3', 'ping'));
+    await ingestLine(WS2, SES_B, assistantLine('b1', 'claude-sonnet', 150, 70, { cacheRead: 10 }));
+    await ingestLine(WS2, SES_B, assistantLine('b2', 'claude-sonnet', 50, 20));
+    await ingestLine(WS2, SES_B, userLine('u3', 'ping'));
 
     const d = openDb(dir);
     expectRollupMatchesEvents(d);
   });
 
-  it('duplicate replay is a no-op: same uuid re-ingested does not double-count', () => {
-    ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
-    ingestLine(WS1, SES_A, userLine('u1', 'first'));
+  it('duplicate replay is a no-op: same uuid re-ingested does not double-count', async () => {
+    await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    await ingestLine(WS1, SES_A, userLine('u1', 'first'));
 
     const d = openDb(dir);
     // Snapshot the rollup before replay.
     const before = d.prepare(ROLLUP_SQL).all();
 
     // Re-ingest the exact same assistant line (same uuid = same dedup_key).
-    const result = ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    const result = await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
     expect(result.inserted).toBe(false);
 
     // Rollup must be unchanged AND still match ground truth.
@@ -151,12 +151,12 @@ describe('session_costs invariant', () => {
     expectRollupMatchesEvents(d);
   });
 
-  it('deleteSession removes its rollup rows; peer session remains intact', () => {
+  it('deleteSession removes its rollup rows; peer session remains intact', async () => {
     // Two sessions in WS1.
-    ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
-    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
-    ingestLine(WS1, SES_B, assistantLine('b1', 'claude-3-haiku', 200, 80));
-    ingestLine(WS1, SES_B, userLine('u2', 'world'));
+    await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    await ingestLine(WS1, SES_B, assistantLine('b1', 'claude-3-haiku', 200, 80));
+    await ingestLine(WS1, SES_B, userLine('u2', 'world'));
 
     const d = openDb(dir);
 
@@ -166,7 +166,7 @@ describe('session_costs invariant', () => {
     expect(rowsBefore.some((r) => r.session_id === SES_B)).toBe(true);
 
     // Delete SES_A.
-    deleteSession(SES_A);
+    await deleteSession(SES_A);
 
     // SES_A gone from session_costs; SES_B intact; ground truth still matches.
     const rowsAfter = d.prepare(ROLLUP_SQL).all() as Array<{ session_id: string }>;
@@ -175,25 +175,25 @@ describe('session_costs invariant', () => {
     expectRollupMatchesEvents(d);
   });
 
-  it('cost readers return identical results from the rollup as from events', () => {
+  it('cost readers return identical results from the rollup as from events', async () => {
     // Use the mixed ingest from case 1 so we exercise multi-model, NULL-model,
     // and multi-session data in one shot.
     //
     // SES_A in WS1: two distinct models (one with serviceTier) + user lines
-    ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
-    ingestLine(WS1, SES_A, assistantLine('a2', 'claude-3-haiku', 200, 80));
-    ingestLine(
+    await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    await ingestLine(WS1, SES_A, assistantLine('a2', 'claude-3-haiku', 200, 80));
+    await ingestLine(
       WS1,
       SES_A,
       assistantLine('a3', 'claude-3-opus', 300, 60, { serviceTier: 'batch' }),
     );
-    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
-    ingestLine(WS1, SES_A, userLine('u2', 'world'));
+    await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    await ingestLine(WS1, SES_A, userLine('u2', 'world'));
 
     // SES_B in WS2: single model, no serviceTier, plus user line
-    ingestLine(WS2, SES_B, assistantLine('b1', 'claude-sonnet', 150, 70, { cacheRead: 10 }));
-    ingestLine(WS2, SES_B, assistantLine('b2', 'claude-sonnet', 50, 20));
-    ingestLine(WS2, SES_B, userLine('u3', 'ping'));
+    await ingestLine(WS2, SES_B, assistantLine('b1', 'claude-sonnet', 150, 70, { cacheRead: 10 }));
+    await ingestLine(WS2, SES_B, assistantLine('b2', 'claude-sonnet', 50, 20));
+    await ingestLine(WS2, SES_B, userLine('u3', 'ping'));
 
     const d = openDb(dir);
 
@@ -271,7 +271,7 @@ describe('session_costs invariant', () => {
     expect(summary!.usd).toBeGreaterThan(0);
   });
 
-  it('listSessions cost query never scans events (EXPLAIN QUERY PLAN pin)', () => {
+  it('listSessions cost query never scans events (EXPLAIN QUERY PLAN pin)', async () => {
     // Open the DB to ensure it is initialised (EXPLAIN needs a live connection).
     const d = openDb(dir);
     for (const sql of [LIST_SESSION_COSTS_SQL, LIST_SESSION_COSTS_BY_WS_SQL]) {
@@ -285,17 +285,17 @@ describe('session_costs invariant', () => {
     }
   });
 
-  it('migration backfill rebuilds from events (drift self-heal)', () => {
+  it('migration backfill rebuilds from events (drift self-heal)', async () => {
     // Ingest data at version 13 (the normal path).
-    ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
-    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
-    ingestLine(WS2, SES_B, assistantLine('b1', 'claude-sonnet', 150, 70, { cacheRead: 10 }));
+    await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    await ingestLine(WS2, SES_B, assistantLine('b1', 'claude-sonnet', 150, 70, { cacheRead: 10 }));
 
     // Wind the version back to 12 — simulates a future schema bump that will
     // re-run the v13 block with DROP + rebuild on next open.
     const d = openDb(dir);
     d.pragma('user_version = 12');
-    closeDb();
+    await closeDb();
 
     // Re-open: migrate() sees current < 13, drops and rebuilds session_costs.
     openDb(dir);
@@ -303,12 +303,12 @@ describe('session_costs invariant', () => {
     expectRollupMatchesEvents(d2);
   });
 
-  it('ingest burst with interleaved summary reads recomputes at most twice (debounce end-to-end)', () => {
+  it('ingest burst with interleaved summary reads recomputes at most twice (debounce end-to-end)', async () => {
     // Prime the cache once.
     summaryForSession(SES_A);
     const before = _summaryRecomputesForTests();
     for (let i = 0; i < 200; i++) {
-      ingestLine(WS1, SES_A, assistantLine(`burst-${i}`, 'claude-3-opus', 10, 5));
+      await ingestLine(WS1, SES_A, assistantLine(`burst-${i}`, 'claude-3-opus', 10, 5));
       summaryForSession(SES_A); // the renderer-poll stand-in
     }
     // Old policy: ~200 recomputes (every read after every ingest missed).
@@ -317,10 +317,10 @@ describe('session_costs invariant', () => {
     expect(_summaryRecomputesForTests() - before).toBeLessThanOrEqual(2);
   });
 
-  it('renameSession invalidates summary cache (fix for missing invalidate call)', () => {
+  it('renameSession invalidates summary cache (fix for missing invalidate call)', async () => {
     // Ingest some data and prime the summary cache.
-    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
-    ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
     const summaryBefore = summaryForSession(SES_A);
     expect(summaryBefore).not.toBeNull();
 
@@ -328,7 +328,7 @@ describe('session_costs invariant', () => {
     // should trigger exactly one recompute (the cache invalidation), proving
     // that renameSession properly invalidated the cached summary.
     const recomputesBefore = _summaryRecomputesForTests();
-    renameSession(SES_A, 'new-name');
+    await renameSession(SES_A, 'new-name');
     const summaryAfter = summaryForSession(SES_A);
 
     // Verify the recompute counter increased by exactly 1.
@@ -338,5 +338,24 @@ describe('session_costs invariant', () => {
     // The summary should remain the same in content (no data changed, just
     // the user_set_name in the sessions table — which doesn't appear in
     // WorkspaceSummary but proves the summary was recomputed from fresh DB state).
+  });
+});
+
+describe('rename/delete are awaited writes', () => {
+  it('deleteSession removes every per-session row in one transaction', async () => {
+    const raw = openDb(dir);
+    await ingestLine('w', 's-del', JSON.stringify({ type: 'assistant', uuid: 'd1', message: { model: 'claude-opus-4-1', usage: { output_tokens: 3 }, content: [{ type: 'tool_use', id: 't', name: 'Bash', input: {} }] } }));
+    await deleteSession('s-del');
+    for (const t of ['events', 'session_costs', 'session_stats', 'session_tool_counts', 'sessions']) {
+      const col = t === 'sessions' ? 'id' : 'session_id';
+      expect(raw.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE ${col} = 's-del'`).get()).toEqual({ n: 0 });
+    }
+  });
+
+  it('renameSession resolves after the row is updated', async () => {
+    const raw = openDb(dir);
+    await ingestLine('w', 's-ren', JSON.stringify({ type: 'user', uuid: 'r1', message: { content: 'hi' } }));
+    await renameSession('s-ren', '  Named  ');
+    expect(raw.prepare('SELECT user_set_name FROM sessions WHERE id = ?').get('s-ren')).toEqual({ user_set_name: 'Named' });
   });
 });

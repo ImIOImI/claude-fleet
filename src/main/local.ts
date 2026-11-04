@@ -537,6 +537,15 @@ export function effectiveResumeOf(
   }
 }
 
+/** Fire-and-forget the resume usage signal off the attach path, matching
+ *  docker.ts's recordResumeUsageQuietly: the write must never delay or fail a
+ *  spawn, so a rejection is logged, not thrown. */
+export function recordResumeUsageQuietly(workspaceId: string, sessionId: string): void {
+  void recordUsageEvent({ workspaceId, sessionId, kind: 'resumed' }).catch((e: unknown) =>
+    logError({ source: 'main', level: 'warn', type: 'usage-record-failed', message: String(e), workspaceId })
+  );
+}
+
 export async function attachPty(
   containerId: string,
   sessionId: string,
@@ -599,40 +608,53 @@ export async function attachPty(
     // silently degraded to workspace-level guesses.
     claudeSessionId: randomUUID(),
     onFreshSpawn: (claudeSessionId) => {
-      const { mode, previous } = recordBrokerSessionMapping(id, sessionId, claudeSessionId);
-      if (mode === 'deferred') {
-        // Re-spawn of a tab that still holds a real conversation onto a fresh
-        // (not-yet-written) id — parked until it produces a transcript so an
-        // unused session can't black-hole the tab (#170).
-        logError({
-          source: 'main',
-          type: 'mapping-deferred',
-          level: 'info',
-          message: `broker ${sessionId} parked → ${claudeSessionId} at local spawn (awaiting transcript; keeping ${previous})`,
-          workspaceId: id,
-          extra: { brokerSessionId: sessionId, pending: claudeSessionId, keeping: previous }
-        });
-      } else if (previous && previous !== claudeSessionId) {
-        logError({
-          source: 'main',
-          type: 'mapping-remapped',
-          level: 'warn',
-          message: `broker ${sessionId} remapped ${previous} → ${claudeSessionId} at local spawn`,
-          workspaceId: id,
-          extra: { brokerSessionId: sessionId, from: previous, to: claudeSessionId }
-        });
-      } else if (!previous) {
-        logError({
-          source: 'main',
-          type: 'mapping-learned',
-          level: 'info',
-          message: `paired ${claudeSessionId} with broker ${sessionId} at local spawn (${resume ? 'resume' : 'session-id'})`,
-          workspaceId: id,
-          extra: { claudeSessionId, brokerSessionId: sessionId, how: resume ? 'resume' : 'session-id' }
-        });
-      }
+      // The spawn callback is synchronous; the mapping write is async. The
+      // mirror mapping is in-memory and set first, before any transcript line
+      // can be read.
       learnMirrorMapping(id, sessionId, claudeSessionId);
-      if (resume) recordUsageEvent({ workspaceId: id, sessionId: resume, kind: 'resumed' });
+      if (resume) recordResumeUsageQuietly(id, resume);
+      void (async () => {
+        const { mode, previous } = await recordBrokerSessionMapping(id, sessionId, claudeSessionId);
+        if (mode === 'deferred') {
+          // Re-spawn of a tab that still holds a real conversation onto a fresh
+          // (not-yet-written) id — parked until it produces a transcript so an
+          // unused session can't black-hole the tab (#170).
+          logError({
+            source: 'main',
+            type: 'mapping-deferred',
+            level: 'info',
+            message: `broker ${sessionId} parked → ${claudeSessionId} at local spawn (awaiting transcript; keeping ${previous})`,
+            workspaceId: id,
+            extra: { brokerSessionId: sessionId, pending: claudeSessionId, keeping: previous }
+          });
+        } else if (previous && previous !== claudeSessionId) {
+          logError({
+            source: 'main',
+            type: 'mapping-remapped',
+            level: 'warn',
+            message: `broker ${sessionId} remapped ${previous} → ${claudeSessionId} at local spawn`,
+            workspaceId: id,
+            extra: { brokerSessionId: sessionId, from: previous, to: claudeSessionId }
+          });
+        } else if (!previous) {
+          logError({
+            source: 'main',
+            type: 'mapping-learned',
+            level: 'info',
+            message: `paired ${claudeSessionId} with broker ${sessionId} at local spawn (${resume ? 'resume' : 'session-id'})`,
+            workspaceId: id,
+            extra: { claudeSessionId, brokerSessionId: sessionId, how: resume ? 'resume' : 'session-id' }
+          });
+        }
+      })().catch((e: unknown) =>
+        logError({
+          source: 'main',
+          type: 'mapping-learn-failed',
+          level: 'warn',
+          message: `could not record ${sessionId} → ${claudeSessionId}: ${e instanceof Error ? e.message : String(e)}`,
+          workspaceId: id
+        })
+      );
     },
     extraArgs,
     mcpConfigPath: mcpConfigArg,

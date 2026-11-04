@@ -7,8 +7,8 @@ import { openDb, closeDb, costForWorkspace } from './db.js';
 
 let dir: string;
 const UUID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cf-localdir-')); openDb(dir); });
-afterEach(async () => { closeDb(); rmSync(dir, { recursive: true, force: true }); });
+beforeEach(async () => { dir = mkdtempSync(join(tmpdir(), 'cf-localdir-')); openDb(dir); });
+afterEach(async () => { await closeDb(); rmSync(dir, { recursive: true, force: true }); });
 
 const line = JSON.stringify({
   type: 'assistant', uuid: 'e1', timestamp: '2026-07-12T13:10:00Z',

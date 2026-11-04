@@ -22,17 +22,18 @@ vi.mock('electron', () => ({
   },
 }));
 
-// Stub the DB layer so ingestLine works without a real better-sqlite3 binary.
+// Stub the DB layer so ingestBatch works without a real better-sqlite3 binary.
 // uuid-based dedup mirrors the real dedup_key behaviour.
 const h = vi.hoisted(() => ({ seen: new Set<string>() }));
 vi.mock('./db.js', () => ({
-  ingestLine: (_workspaceId: string, sessionId: string, raw: string) => {
-    const parsed = JSON.parse(raw) as { uuid?: string };
-    const uuid = parsed.uuid ?? raw;
-    const inserted = !h.seen.has(uuid);
-    h.seen.add(uuid);
-    return { inserted, sessionId, type: 'user' };
-  },
+  ingestBatch: async (_workspaceId: string, sessionId: string, raws: string[]) =>
+    raws.map((raw) => {
+      const parsed = JSON.parse(raw) as { uuid?: string };
+      const uuid = parsed.uuid ?? raw;
+      const inserted = !h.seen.has(uuid);
+      h.seen.add(uuid);
+      return { inserted, sessionId, type: 'user' };
+    }),
 }));
 
 const { JsonlWatcher } = await import('./jsonlWatcher.js');

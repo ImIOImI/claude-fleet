@@ -17,12 +17,12 @@ import { openDb, closeDb } from './db.js';
 
 const SID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 let dir: string;
-beforeEach(() => {
+beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'cf-newsession-'));
   openDb(dir);
 });
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
   rmSync(dir, { recursive: true, force: true });
 });
 

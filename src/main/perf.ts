@@ -208,14 +208,16 @@ export function getEffectivePerf(): EffectivePerfConfig | null {
 }
 
 /** One-call status for perf_status (MCP) and perf:status (Settings UI). */
-export function getPerfStatus(): PerfStatus {
-  if (!rt) throw new Error('perf not initialized');
-  rt.store.flush(); // counts include anything still buffered
+export async function getPerfStatus(): Promise<PerfStatus> {
+  const r = rt; // captured: a shutdown during the awaits must not swap it under us
+  if (!r) throw new Error('perf not initialized');
+  await r.store.flush(); // counts include anything still buffered
+  const eventCounts = await r.store.counts24h();
   return {
-    enabled: rt.effective.recording,
-    source: rt.effective.recordingSource,
-    otlp: rt.effective.otlp,
-    eventCounts: rt.store.counts24h(),
+    enabled: r.effective.recording,
+    source: r.effective.recordingSource,
+    otlp: r.effective.otlp,
+    eventCounts,
     sentinel: sentinelStatus()
   };
 }
@@ -258,7 +260,7 @@ export function initPerf(store: PerfStore, effective: EffectivePerfConfig, hooks
     sampleIntervalMs: hooks?.sampleIntervalMs ?? SAMPLE_INTERVAL_MS,
     gcObserver: null
   };
-  store.prune(RETENTION_MS);
+  void store.prune(RETENTION_MS).catch((err: unknown) => console.warn('[perf] prune failed:', err));
   if (!effective.recording) {
     stateListener?.(effective.recording);
     return; // globals stay no-op
@@ -286,7 +288,12 @@ export function initPerf(store: PerfStore, effective: EffectivePerfConfig, hooks
   trace.setGlobalTracerProvider(rt.tracerProvider);
 
   rt.flushTimer = setInterval(() => {
-    perfSpan('claude_fleet.perf.flush', () => rt?.store.flush());
+    const r = rt;
+    if (!r) return;
+    // A failed flush keeps its rows buffered (PerfStore) for the next tick.
+    void perfSpanAsync('claude_fleet.perf.flush', () => r.store.flush()).catch((err: unknown) =>
+      console.warn('[perf] flush failed:', err)
+    );
   }, FLUSH_INTERVAL_MS);
   rt.flushTimer.unref();
 
@@ -391,7 +398,9 @@ export async function shutdownPerf(): Promise<void> {
   metrics.disable();
   // context.disable() resets the global manager, so a later initPerf can re-register one.
   context.disable();
-  r.store.flush();
+  // A rejection here must not propagate: callers chain closeDb() right after
+  // shutdownPerf() on the before-quit path, and a thrown flush would skip it.
+  await r.store.flush().catch((err: unknown) => console.warn('[perf] shutdown flush failed:', err));
 }
 
 export async function reconfigurePerf(effective: EffectivePerfConfig): Promise<void> {
