@@ -9,7 +9,7 @@ import type {
   InboxCounts, PostTodoInput, Todo, TodoEvent, TodoFilter, TodoSource, UpdateTodoPatch
 } from '../../preload/inboxTypes.js';
 import { isPriority, maxPriority, normalizeTag, normalizeTags, MAX_TAGS } from './inboxCore.js';
-import { num, sqliteKysely } from '../store/kysely.js';
+import { chunked, num, sqliteKysely } from '../store/kysely.js';
 import type { InboxDb, TodoRow } from '../store/inboxSchema.js';
 
 export const INBOX_SCHEMA_VERSION = 5;
@@ -247,15 +247,34 @@ export class InboxStore {
     return rows.map((r) => r.tag);
   }
 
-  private async toTodo(q: Q, r: TodoRow): Promise<Todo> {
+  /** Batched tagsFor for N todos: one `entity_id IN (...)` query per ≤500-id chunk instead of one per todo. */
+  private async tagsForIds(q: Q, ids: string[]): Promise<Map<string, string[]>> {
+    const out = new Map<string, string[]>();
+    if (ids.length === 0) return out;
+    for (const chunk of chunked(ids)) {
+      const rows = await q.selectFrom('tags').select(['entity_id', 'tag']).where('entity_kind', '=', 'todo')
+        .where('entity_id', 'in', chunk).orderBy('entity_id').orderBy('tag').execute();
+      for (const r of rows) {
+        const list = out.get(r.entity_id);
+        if (list) list.push(r.tag); else out.set(r.entity_id, [r.tag]);
+      }
+    }
+    return out;
+  }
+
+  private rowToTodo(r: TodoRow, tags: string[]): Todo {
     return {
       id: r.id, title: r.title, body: r.body, status: r.status, priority: r.priority,
       source: { kind: r.source_kind, id: r.source_id }, sourceRunId: r.source_run_id,
       viaWorkspace: r.via_workspace, dedupeKey: r.dedupe_key, seenCount: r.seen_count,
       recurred: r.recurred === 1, workspaceId: r.workspace_id, sessionId: r.session_id,
-      tags: await this.tagsFor(q, r.id), createdAt: r.created_at, updatedAt: r.updated_at,
+      tags, createdAt: r.created_at, updatedAt: r.updated_at,
       firstSeenAt: r.first_seen_at, lastSeenAt: r.last_seen_at, closedAt: r.closed_at
     };
+  }
+
+  private async toTodo(q: Q, r: TodoRow): Promise<Todo> {
+    return this.rowToTodo(r, await this.tagsFor(q, r.id));
   }
 
   private async getWith(q: Q, id: string): Promise<Todo | null> {
@@ -297,7 +316,8 @@ export class InboxStore {
       ));
     }
     const rows = await q.orderBy(PRIORITY_ORDER).orderBy('last_seen_at', 'desc').orderBy('id', 'desc').limit(limit).execute();
-    return Promise.all(rows.map((r) => this.toTodo(this.kysely, r)));
+    const tagsById = await this.tagsForIds(this.kysely, rows.map((r) => r.id));
+    return rows.map((r) => this.rowToTodo(r, tagsById.get(r.id) ?? []));
   }
 
   async counts(): Promise<InboxCounts> {

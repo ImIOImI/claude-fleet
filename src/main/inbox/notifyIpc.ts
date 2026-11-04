@@ -112,8 +112,8 @@ export function registerNotifyIpc(inbox: InboxStore): NotifyService {
   ipcMain.handle('notifications:quietState', () => svc.quietState());
   ipcMain.handle('notifications:scopesFor', (_e, item: { source: TodoSource; dedupeKey: string | null; tags: string[] }) => svc.scopesFor(item));
   ipcMain.handle('notifications:effective', (_e, item: { priority: TodoPriority; source: TodoSource; dedupeKey: string | null; tags: string[] }) => svc.effectiveFor(item));
-  ipcMain.handle('notifications:effectiveMany', async (_e, items: Array<{ id: string; priority: TodoPriority; source: TodoSource; dedupeKey: string | null; tags: string[] }>) =>
-    Object.fromEntries(await Promise.all((items ?? []).map(async (i) => [i.id, await svc.effectiveFor(i)] as const))));
+  ipcMain.handle('notifications:effectiveMany', (_e, items: Array<{ id: string; priority: TodoPriority; source: TodoSource; dedupeKey: string | null; tags: string[] }>) =>
+    svc.effectiveForMany(items ?? []));
   ipcMain.handle('notifications:setRule', (_e, r: { scopeKind: RuleScopeKind; scopeValue: string; level: NotifyLevel; snoozeUntil?: number | null }) => {
     if (!SCOPES.has(r?.scopeKind) || typeof r.scopeValue !== 'string' || !LEVELS.has(r.level)) throw new Error('invalid rule');
     return after(store.setRule({ scopeKind: r.scopeKind, scopeValue: r.scopeValue, level: r.level, snoozeUntil: r.snoozeUntil ?? null }));

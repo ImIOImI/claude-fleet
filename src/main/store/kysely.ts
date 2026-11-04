@@ -22,3 +22,15 @@ export function num(v: unknown): number {
   if (v === null || v === undefined) return 0;
   return typeof v === 'number' ? v : Number(v);
 }
+
+/**
+ * Split `items` into chunks of at most `size` (default 500). Used to keep
+ * `WHERE col IN (...)` batches under SQLite's default ~999-parameter limit
+ * while leaving headroom for other bound parameters in the same query.
+ */
+export function chunked<T>(items: readonly T[], size = 500): T[][] {
+  if (items.length === 0) return [];
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}

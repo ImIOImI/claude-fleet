@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import Database from 'better-sqlite3';
 import { InboxStore } from '../inbox/inboxDb.js';
 import { AutomationStore } from './automationStore.js';
 import type { AutomationDef } from '../../preload/inboxTypes.js';
@@ -10,6 +11,16 @@ const def = (over: Partial<AutomationDef> = {}): AutomationDef => ({
   name: 'log-watch', tags: ['ops', 'Prod'], triggers: [{ manual: {} }], concurrency: 'skip',
   steps: [{ id: 'check', prompt: { workspace: 'W1', mode: 'live', message: 'check logs' } }], ...over
 });
+
+/** Counts `better-sqlite3` statements prepared on an inbox store's raw connection — one per Kysely
+ *  query (see store/kysely.ts) — to assert a call makes a constant number of round trips, not N+1. */
+function countQueries(s: InboxStore): { count(): number } {
+  const raw = (s as unknown as { raw: Database.Database }).raw;
+  let n = 0;
+  const orig = raw.prepare.bind(raw);
+  raw.prepare = ((sql: string) => { n++; return orig(sql); }) as typeof raw.prepare;
+  return { count: () => n };
+}
 
 describe('AutomationStore definitions', () => {
   it('creates v1 with tags and history, versions on update, enforces unique names', async () => {
@@ -66,6 +77,43 @@ describe('AutomationStore runs', () => {
     expect((await s.getRun(r5.id))!.steps[0].status).toBe('interrupted');
     expect(await s.pruneRuns(now + 25)).toBe(3);
     expect(await s.runs(a.id)).toHaveLength(2);
+  });
+});
+
+describe('AutomationStore.runs batches steps (#456)', () => {
+  it('attaches identical per-run steps in a constant number of queries, regardless of run count', async () => {
+    inbox = InboxStore.memory();
+    const s = new AutomationStore(inbox.kysely);
+    const a = await s.create(def(), USER, 1000);
+    const now = 10 * 86_400_000;
+    const runCount = 30;
+    const runs = [];
+    for (let i = 0; i < runCount; i++) {
+      const r = await s.startRun(a, { kind: 'manual' }, {}, 'running', now + i);
+      // Vary step counts (including zero) across runs.
+      for (let j = 0; j < i % 4; j++) {
+        const st = await s.startStep(r.id, `step-${j}`, 'prompt', 'W1', now + i);
+        await s.finishStep(st, 'succeeded', { detail: { i, j } }, now + i + 1);
+      }
+      await s.setRunStatus(r.id, 'succeeded', now + i + 1);
+      runs.push(r);
+    }
+    const counter = countQueries(inbox);
+    const got = await s.runs(a.id, 100);
+    const queriesForRuns = counter.count();
+    expect(got).toHaveLength(runCount);
+    // Cross-check every run's steps against the single-run path (getRun), which still queries per id.
+    for (const r of got) {
+      const solo = await s.getRun(r.id);
+      expect(r.steps).toEqual(solo!.steps);
+    }
+    expect(queriesForRuns).toBeLessThanOrEqual(3);
+
+    // runsWithStatus takes the same batched path.
+    const counter2 = countQueries(inbox);
+    const running = await s.runsWithStatus('succeeded');
+    expect(running).toHaveLength(runCount);
+    expect(counter2.count()).toBeLessThanOrEqual(3);
   });
 });
 

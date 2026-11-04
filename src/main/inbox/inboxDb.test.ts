@@ -10,6 +10,16 @@ const USER = { kind: 'user', id: null } as const;
 let store: InboxStore;
 afterEach(async () => await store?.close());
 
+/** Counts `better-sqlite3` statements prepared on a store's raw connection — one per Kysely query
+ *  (see store/kysely.ts) — to assert a call makes a constant number of round trips, not N+1. */
+function countQueries(s: InboxStore): { count(): number } {
+  const raw = (s as unknown as { raw: Database.Database }).raw;
+  let n = 0;
+  const orig = raw.prepare.bind(raw);
+  raw.prepare = ((sql: string) => { n++; return orig(sql); }) as typeof raw.prepare;
+  return { count: () => n };
+}
+
 describe('InboxStore.post', () => {
   it('creates a todo with defaults and a created event', async () => {
     store = InboxStore.memory();
@@ -110,6 +120,34 @@ describe('InboxStore.list / counts', () => {
     expect((await store.list({ visibleTo: 'W1' })).map((t) => t.title).sort()).toEqual(['low', 'other', 'urgent']);
     expect(await store.list({ limit: 1 })).toHaveLength(1);
     expect(await store.counts()).toEqual({ open: 4, urgent: 1, high: 0, approvals: 0 });
+  });
+});
+
+describe('InboxStore.list batches tags (#456)', () => {
+  it('returns identical tags/ordering to per-todo fetches, in a constant number of queries', async () => {
+    store = InboxStore.memory();
+    // Seed enough todos, with varied tag counts (including none), that an N+1 loop would show up
+    // as a growing query count against a flat batched one.
+    const titles = Array.from({ length: 40 }, (_, i) => `todo-${i}`);
+    for (const [i, title] of titles.entries()) {
+      const tags = i % 5 === 0 ? [] : [`tag-${i % 5}`, `tag-${i % 3}`, 'shared'];
+      await store.post(WS, { title, tags, priority: i % 7 === 0 ? 'urgent' : 'normal' }, 1000 + i);
+    }
+    const counter = countQueries(store);
+    const rows = await store.list({ status: 'all', limit: 500 });
+    const queriesFor40 = counter.count();
+    expect(rows).toHaveLength(40);
+    // Cross-check every row's tags against the single-todo path (`get`), which still queries per id.
+    for (const row of rows) {
+      const solo = await store.get(row.id);
+      expect(row.tags).toEqual(solo!.tags);
+    }
+    // A handful more todos should not grow the query count for list() itself.
+    for (let i = 0; i < 10; i++) await store.post(WS, { title: `extra-${i}`, tags: ['x', 'y'] }, 5000 + i);
+    const counter2 = countQueries(store);
+    await store.list({ status: 'all', limit: 500 });
+    expect(counter2.count()).toBe(queriesFor40);
+    expect(queriesFor40).toBeLessThanOrEqual(3);
   });
 });
 
