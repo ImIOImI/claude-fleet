@@ -10,13 +10,21 @@ export const SOURCE_VAULT_PREFIX = 'loadout-source:';
 export const SOURCE_VAULT_KEY = 'TOKEN';
 /** Scope prefix of a model endpoint's API key (endpoints.ts). */
 export const ENDPOINT_VAULT_PREFIX = 'endpoint:';
+/** Scope prefix of a signed-in identity's bag (identity/identityService.ts).
+ *  Host-only: the renderer sees AccountStatus via identity:* IPC instead. */
+export const IDENTITY_VAULT_PREFIX = 'identity:';
+/** The GitHub sign-in bag: keys TOKEN (OAuth token) and PROFILE (JSON). */
+export const GITHUB_IDENTITY_SCOPE = `${IDENTITY_VAULT_PREFIX}github`;
 
 /**
  * Every vault scope prefix that names a non-workspace bag. A workspace's id is
  * its vault scope (resolveEnv injects that bag into the workspace's env), so a
  * workspace may never be created under one of these.
  */
-export const RESERVED_VAULT_PREFIXES: readonly string[] = [SOURCE_VAULT_PREFIX, ENDPOINT_VAULT_PREFIX];
+export const RESERVED_VAULT_PREFIXES: readonly string[] = [SOURCE_VAULT_PREFIX, ENDPOINT_VAULT_PREFIX, IDENTITY_VAULT_PREFIX];
+
+/** Reserved prefixes the renderer may not read or write through vault:*. */
+const HOST_ONLY_PREFIXES: readonly string[] = [SOURCE_VAULT_PREFIX, IDENTITY_VAULT_PREFIX];
 
 export function sourceVaultScope(normalisedBase: string): string {
   return `${SOURCE_VAULT_PREFIX}${normalisedBase}`;
@@ -30,7 +38,7 @@ export function sourceVaultScope(normalisedBase: string): string {
  */
 export function assertRendererVaultScope(scope: unknown): asserts scope is string {
   if (typeof scope !== 'string') throw new Error('vault scope must be a string');
-  if (scope.startsWith(SOURCE_VAULT_PREFIX)) throw new Error('vault scope is host-only');
+  if (HOST_ONLY_PREFIXES.some((p) => scope.startsWith(p))) throw new Error('vault scope is host-only');
 }
 
 /**
@@ -48,7 +56,7 @@ export function assertRendererWorkspaceId(id: unknown): asserts id is string {
 
 /**
  * Throw when a vault scope used to read/write a secret is one of the reserved
- * (non-workspace) bags — `loadout-source:` or `endpoint:` — rather than an
+ * (non-workspace) bags — `loadout-source:`, `endpoint:` or `identity:` — rather than an
  * actual workspace id. `vault.resolveEnv` applies this before injecting a
  * vault bag into a workspace's env; any other main-process call site that
  * takes a caller-influenced scope and hands its secrets somewhere (a script
