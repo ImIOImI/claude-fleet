@@ -3771,3 +3771,14 @@ button.switch { padding: 0; cursor: pointer; }
 .host-shell-pick { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
 .proposal .host-shell-pick { margin-top: 8px; }
 .host-shell-pick select { font: inherit; font-size: 12px; padding: 2px 6px; border: 1px solid var(--rule); border-radius: var(--r-md); background: var(--bg-1); color: var(--ink); }
+
+/* Settings › Account */
+.account-card { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--rule); border-radius: var(--r-md); margin-bottom: 8px; }
+.account-avatar { border-radius: 50%; flex-shrink: 0; }
+.account-who { flex: 1; min-width: 0; }
+.account-name { color: var(--ink); font-weight: 600; }
+.account-login { color: var(--ink-1); font-size: 12px; }
+.device-code { font-family: var(--font-mono); font-size: 22px; letter-spacing: 0.18em; color: var(--ink); padding: 8px 0; user-select: all; }
+.device-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.device-actions a.btn { text-decoration: none; display: inline-flex; align-items: center; }
+.account-notice { color: var(--warn); }
