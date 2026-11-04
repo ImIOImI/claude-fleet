@@ -398,7 +398,9 @@ export async function shutdownPerf(): Promise<void> {
   metrics.disable();
   // context.disable() resets the global manager, so a later initPerf can re-register one.
   context.disable();
-  await r.store.flush();
+  // A rejection here must not propagate: callers chain closeDb() right after
+  // shutdownPerf() on the before-quit path, and a thrown flush would skip it.
+  await r.store.flush().catch((err: unknown) => console.warn('[perf] shutdown flush failed:', err));
 }
 
 export async function reconfigurePerf(effective: EffectivePerfConfig): Promise<void> {

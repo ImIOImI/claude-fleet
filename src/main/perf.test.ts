@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { closeDb, openDb, stateKysely } from './db.js';
 import { PerfStore } from './perfStore.js';
 import {
@@ -84,6 +84,14 @@ describe('perf tracer pipeline', () => {
     initPerf(store, ON);
     await shutdownPerf();
     await expect(shutdownPerf()).resolves.toBeUndefined();
+  });
+
+  it('shutdownPerf resolves even if its final flush rejects, so a caller can still run closeDb() after', async () => {
+    initPerf(store, ON);
+    store.enqueue({ ts: Date.now(), kind: 'stall', durMs: 60 });
+    const flushSpy = vi.spyOn(store, 'flush').mockRejectedValueOnce(new Error('disk full'));
+    await expect(shutdownPerf()).resolves.toBeUndefined();
+    flushSpy.mockRestore();
   });
 
   it('nested perfSpanAsync spans share a trace_id (child parents under the active span)', async () => {

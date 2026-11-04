@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDb, closeDb, deleteEmbeddingsForOtherModels, ingestLine, insertEmbedding, unembeddedTurnEvents, maxEventId } from './db.js';
+import { openDb, closeDb, deleteEmbeddingsForOtherModels, ingestLine, insertEmbedding, insertEmbeddings, unembeddedTurnEvents, maxEventId } from './db.js';
 import { encodeVector, EMBED_MODEL_ID, EMBED_DIM } from './vectors.js';
 
 let dir: string;
@@ -48,6 +48,44 @@ describe('embeddings schema + helpers', () => {
     await ingestLine(WS, SES, userLine('u1', 'a'));
     await ingestLine(WS, SES, userLine('u2', 'b'));
     expect(maxEventId(SES)).toBeGreaterThan(0);
+  });
+});
+
+describe('insertEmbeddings (batch)', () => {
+  it('inserts every row in one call and counts only the ones that actually landed', async () => {
+    await ingestLine(WS, SES, userLine('u1', 'first'));
+    await ingestLine(WS, SES, userLine('u2', 'second'));
+    const pending = unembeddedTurnEvents(SES, EMBED_MODEL_ID);
+    expect(pending.length).toBe(2);
+    const row = (ev: (typeof pending)[number], text: string) => ({
+      workspaceId: WS, sessionId: SES, kind: 'turn' as const, refEventId: ev.id,
+      ts: ev.ts, text, modelId: EMBED_MODEL_ID, dim: 3,
+      vec: encodeVector(Float32Array.from([1, 0, 0])), dedupKey: `t${ev.id}`,
+    });
+    const rows = [row(pending[0], 'first'), row(pending[1], 'second')];
+
+    expect(await insertEmbeddings(rows)).toBe(2);
+    expect(unembeddedTurnEvents(SES, EMBED_MODEL_ID).length).toBe(0);
+
+    // Re-inserting the same dedup keys lands zero new rows (ON CONFLICT DO NOTHING).
+    expect(await insertEmbeddings(rows)).toBe(0);
+  });
+
+  it('a partial duplicate counts only the rows that landed, same as single-row insertEmbedding', async () => {
+    await ingestLine(WS, SES, userLine('u1', 'first'));
+    const [ev] = unembeddedTurnEvents(SES, EMBED_MODEL_ID);
+    const row = {
+      workspaceId: WS, sessionId: SES, kind: 'turn' as const, refEventId: ev.id,
+      ts: ev.ts, text: 'first', modelId: EMBED_MODEL_ID, dim: 3,
+      vec: encodeVector(Float32Array.from([1, 0, 0])), dedupKey: `t${ev.id}`,
+    };
+    expect(await insertEmbedding(row)).toBe(true); // already there before the batch call
+    const other = { ...row, sessionId: 'ses-2', dedupKey: `t${ev.id}-other` };
+    expect(await insertEmbeddings([row, other])).toBe(1); // row dupes, other lands
+  });
+
+  it('an empty batch is a no-op', async () => {
+    expect(await insertEmbeddings([])).toBe(0);
   });
 });
 

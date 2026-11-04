@@ -964,6 +964,15 @@ export async function closeHeadless(workspaceId: string, sessionId: string): Pro
   }
 }
 
+/** Fire-and-forget the resume usage signal (#207) off the attach path: the
+ *  write must never delay or fail a CREATE/attach, so a rejection is logged,
+ *  not thrown. */
+export function recordResumeUsageQuietly(workspaceId: string, sessionId: string): void {
+  void recordUsageEvent({ workspaceId, sessionId, kind: 'resumed' }).catch((e: unknown) =>
+    logError({ source: 'main', level: 'warn', type: 'usage-record-failed', message: String(e), workspaceId })
+  );
+}
+
 /**
  * Open a terminal session against the in-container broker.
  *
@@ -1079,7 +1088,7 @@ async function attachPtyInner(
       });
     }
     learnMirrorMapping(workspaceId, sessionId, claudeSessionId);
-    if (resumeOf) await recordUsageEvent({ workspaceId, sessionId: resumeOf, kind: 'resumed' });
+    if (resumeOf) recordResumeUsageQuietly(workspaceId, resumeOf);
     const createResp = await client.createSession(
       sessionId,
       cols,
