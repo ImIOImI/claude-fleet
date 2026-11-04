@@ -15,6 +15,7 @@
     "src/main/**/*.ts",
     "src/host/**/*.ts",
     "src/preload/**/*.ts",
-    "electron.vite.config.ts"
+    "electron.vite.config.ts",
+    "vite.host.config.ts"
   ]
 }

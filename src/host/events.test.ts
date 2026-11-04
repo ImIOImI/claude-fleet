@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { brokerWatch, EventHub } from './events.js';
+import { brokerWatch, EventHub, pruneDeadOwners } from './events.js';
+import { AttachHub } from './attachHub.js';
 import { fakeBroker } from './testFakes.js';
 
 describe('EventHub', () => {
@@ -45,5 +46,24 @@ describe('brokerWatch', () => {
     await b.ops.create('s2', 80, 24, []);
     await brokerWatch(b.ops, new EventHub(), owners).poll();
     expect(pruned).toEqual([['s2', '7']]);
+  });
+});
+
+describe('pruneDeadOwners', () => {
+  it('drops owners of sessions missing from or dead in the listing, sparing owners set after the mark', async () => {
+    const b = fakeBroker(['live', 'dead']);
+    b.sessions.get('dead')!.closed = true;
+    const hub = new AttachHub(b.ops);
+    hub.setOwner('live', 'github:1');
+    hub.setOwner('dead', 'github:1');
+    hub.setOwner('gone', 'github:1');
+    const list = b.ops.list;
+    b.ops.list = async () => {
+      const r = await list();
+      hub.setOwner('late', 'github:2');
+      return r;
+    };
+    await pruneDeadOwners(b.ops, hub);
+    expect([...hub.owners.keys()].sort()).toEqual(['late', 'live']);
   });
 });

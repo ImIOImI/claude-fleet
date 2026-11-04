@@ -58,9 +58,12 @@ describe('createLogger', () => {
     expect(JSON.parse(line).cfg.key).toBe('[redacted]"tail"');
   });
 
-  it('serializes an Error as name and redacted message', () => {
+  it('serializes an Error as name, redacted message and redacted stack', () => {
     const line = one({ err: new TypeError(`fetch failed\nBearer ${GHO}`) });
-    expect(JSON.parse(line).err).toEqual({ name: 'TypeError', message: 'fetch failed\n[redacted]' });
+    const err = JSON.parse(line).err;
+    expect(err).toMatchObject({ name: 'TypeError', message: 'fetch failed\n[redacted]' });
+    expect(err.stack).toMatch(/^TypeError: fetch failed\n\[redacted\]\n\s+at /);
+    expect(line).not.toContain(GHO);
   });
 
   it('the line pass catches a token used as an object key', () => {

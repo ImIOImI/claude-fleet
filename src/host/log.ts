@@ -32,7 +32,7 @@ export interface Logger {
 function redactValue(_key: string, v: unknown): unknown {
   if (typeof v === 'string') return redactSecrets(v);
   if (typeof v === 'bigint') return v.toString();
-  if (v instanceof Error) return { name: v.name, message: v.message };
+  if (v instanceof Error) return { name: v.name, message: v.message, stack: v.stack };
   return v;
 }
 

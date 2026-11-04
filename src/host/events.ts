@@ -41,6 +41,13 @@ export interface OwnerPruner {
   pruneOwners(live: ReadonlySet<string>, mark: number): void;
 }
 
+/** Drops CLOSE owners of sessions the broker no longer lists as alive. */
+export async function pruneDeadOwners(ops: BrokerOps, owners: OwnerPruner): Promise<void> {
+  const mark = owners.ownerMark();
+  const sessions = await ops.list();
+  owners.pruneOwners(new Set(sessions.filter((x) => x.alive).map((x) => x.id)), mark);
+}
+
 /** Polls the broker and publishes sessions:changed / ports:changed on a change. */
 export function brokerWatch(ops: BrokerOps, hub: EventHub, owners?: OwnerPruner) {
   let lastSessions = '';

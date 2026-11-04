@@ -26,6 +26,10 @@ export const UNAUTH_PER_MINUTE = 30;
 export const MAX_SOCKETS_PER_IDENTITY = 8;
 /** How long a socket sent a close frame may linger before it is terminated. */
 export const CLOSE_GRACE_MS = 1_000;
+/** Under the 60 s idle timeout of an ALB in front of the pod. */
+export const PING_MS = 25_000;
+/** Unanswered pings after which a socket is terminated. */
+export const MAX_MISSED_PONGS = 2;
 export const REQUEST_TIMEOUT_MS = 30_000;
 export const HEADERS_TIMEOUT_MS = 10_000;
 
@@ -54,6 +58,8 @@ export interface HostServerDeps {
   verifyLimits?: VerifyLimits;
   maxSocketsPerIdentity?: number;
   closeGraceMs?: number;
+  maxViewerBuffer?: number;
+  pingMs?: number;
   now?: () => number;
 }
 
@@ -61,6 +67,8 @@ export interface HostServer {
   server: Server;
   /** Re-check every open socket against the current AuthContext. */
   reverifyAll(): Promise<void>;
+  /** Revoke every open socket now; the listener stays up. */
+  revokeAll(code: number, reason: string): void;
   /** Closes every socket, detaches every broker upstream (hub.shutdown) and stops listening. */
   close(): Promise<void>;
 }
@@ -70,9 +78,13 @@ interface LiveSocket {
   principal: Principal;
   verifiedAt: number;
   revoked: boolean;
+  missedPongs: number;
   setPrincipal(p: Principal): void;
   /** Stop handling frames now, then close; terminate if the peer ignores the close. */
   revoke(code: number, reason: string): void;
+  ping(): void;
+  /** Stop handling frames and drop the connection without a close handshake. */
+  kill(): void;
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown, headers: OutgoingHttpHeaders = {}): void {
@@ -131,10 +143,19 @@ function failureHeaders(r: GateResult): OutgoingHttpHeaders {
   return {};
 }
 
-/** Last-resort process handlers: log (redacted) and keep serving, since exiting kills every PTY. */
-export function installCrashGuards(log: Logger, proc: NodeJS.EventEmitter = process): () => void {
-  const onException = (err: unknown): void => log.log('error', 'uncaught exception', { error: err });
-  const onRejection = (err: unknown): void => log.log('error', 'unhandled rejection', { error: err });
+/**
+ * Last-resort process handlers: log every arrival (redacted, with stack) and
+ * call `onFatal` once. State may be corrupt, so the caller exits; PTYs live in
+ * the broker and survive a fleet-host restart.
+ */
+export function installCrashGuards(log: Logger, onFatal: () => void, proc: NodeJS.EventEmitter = process): () => void {
+  let count = 0;
+  const arrive = (msg: string, err: unknown): void => {
+    log.log('error', msg, { error: err, count: ++count });
+    if (count === 1) onFatal();
+  };
+  const onException = (err: unknown): void => arrive('uncaught exception', err);
+  const onRejection = (err: unknown): void => arrive('unhandled rejection', err);
   proc.on('uncaughtException', onException);
   proc.on('unhandledRejection', onRejection);
   return () => {
@@ -146,6 +167,7 @@ export function installCrashGuards(log: Logger, proc: NodeJS.EventEmitter = proc
 export function createHostServer(deps: HostServerDeps): HostServer {
   const now = deps.now ?? Date.now;
   const grace = deps.closeGraceMs ?? CLOSE_GRACE_MS;
+  const maxBuffer = deps.maxViewerBuffer ?? MAX_VIEWER_BUFFER;
   const live = new Set<LiveSocket>();
   const openByIdentity = new Map<string, number>();
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_PAYLOAD + 5 });
@@ -209,6 +231,16 @@ export function createHostServer(deps: HostServerDeps): HostServer {
 
   const timer = setInterval(() => void reverifyAll(), deps.reverifyMs ?? REVERIFY_MS);
   timer.unref();
+  const pinger = setInterval(() => {
+    for (const s of live) {
+      if (s.missedPongs >= MAX_MISSED_PONGS) s.kill();
+      else {
+        s.missedPongs++;
+        s.ping();
+      }
+    }
+  }, deps.pingMs ?? PING_MS);
+  pinger.unref();
 
   /** Returns the caller's login once authenticated, for the request log. */
   async function handle(req: IncomingMessage, res: ServerResponse, path: string): Promise<string | null> {
@@ -301,6 +333,10 @@ export function createHostServer(deps: HostServerDeps): HostServer {
       principal,
       verifiedAt: now(),
       revoked: false,
+      missedPongs: 0,
+      ping() {
+        if (ws.readyState === ws.OPEN) ws.ping();
+      },
       setPrincipal(p) {
         s.principal = p;
         onPrincipal(p);
@@ -311,8 +347,16 @@ export function createHostServer(deps: HostServerDeps): HostServer {
         onRevoke();
         ws.close(code, reason);
         setTimeout(() => ws.terminate(), grace).unref();
+      },
+      kill() {
+        if (!s.revoked) {
+          s.revoked = true;
+          onRevoke();
+        }
+        ws.terminate();
       }
     };
+    ws.on('pong', () => (s.missedPongs = 0));
     live.add(s);
     ws.on('close', () => live.delete(s));
     return s;
@@ -320,7 +364,7 @@ export function createHostServer(deps: HostServerDeps): HostServer {
 
   function guardedSend(ws: WebSocket, s: LiveSocket, data: Buffer | string): void {
     if (s.revoked || ws.readyState !== ws.OPEN) return;
-    if (ws.bufferedAmount > MAX_VIEWER_BUFFER) return s.revoke(1013, 'viewer too slow');
+    if (ws.bufferedAmount > maxBuffer) return s.revoke(1013, 'viewer too slow');
     ws.send(data);
   }
 
@@ -378,12 +422,18 @@ export function createHostServer(deps: HostServerDeps): HostServer {
       });
   });
 
+  function revokeAll(code: number, reason: string): void {
+    for (const s of live) s.revoke(code, reason);
+  }
+
   return {
     server,
     reverifyAll,
+    revokeAll,
     async close() {
       clearInterval(timer);
-      for (const s of live) s.revoke(1001, 'host shutting down');
+      clearInterval(pinger);
+      revokeAll(1001, 'host shutting down');
       await deps.hub.shutdown();
       const done = new Promise<void>((resolve) => server.close(() => resolve()));
       server.closeIdleConnections();

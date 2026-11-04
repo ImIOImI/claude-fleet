@@ -13,7 +13,7 @@ import { EventHub } from './events.js';
 import type { LeaseState } from './lease.js';
 import { createLogger } from './log.js';
 import { brokerRpcChannels, type RpcChannel } from './rpc.js';
-import { createHostServer, installCrashGuards, MAX_RPC_BODY, REVERIFY_MS, type HostServer, type HostServerDeps } from './server.js';
+import { createHostServer, installCrashGuards, MAX_RPC_BODY, PING_MS, REVERIFY_MS, type HostServer, type HostServerDeps } from './server.js';
 import { decodeAll, fakeBroker, inputFrame, jsonFrame, person, TOKEN } from './testFakes.js';
 
 const WS = { id: '01JC0000000000000000000000', name: 'review-bot', description: 'reviews', color: { hue: 210 } };
@@ -549,16 +549,132 @@ describe('connection limits', () => {
 });
 
 describe('installCrashGuards', () => {
-  it('logs uncaught errors and rejections redacted, without exiting', () => {
+  it('logs every arrival redacted with its stack, and calls onFatal once', () => {
     const lines: string[] = [];
     const proc = new EventEmitter();
-    const off = installCrashGuards(createLogger((l) => lines.push(l)), proc);
+    const onFatal = vi.fn();
+    const off = installCrashGuards(createLogger((l) => lines.push(l)), onFatal, proc);
     proc.emit('uncaughtException', new Error(`boom Bearer ${TOKEN}`));
     proc.emit('unhandledRejection', new Error('later'));
     expect(lines).toHaveLength(2);
     expect(lines.join('\n')).toContain('boom');
     expect(lines.join('\n')).not.toContain(TOKEN);
+    const first = JSON.parse(lines[0]);
+    expect(first).toMatchObject({ msg: 'uncaught exception', count: 1 });
+    expect(first.error.stack).toContain('server.test.ts');
+    expect(JSON.parse(lines[1])).toMatchObject({ msg: 'unhandled rejection', count: 2 });
+    expect(onFatal).toHaveBeenCalledTimes(1);
     off();
     expect(proc.listenerCount('uncaughtException') + proc.listenerCount('unhandledRejection')).toBe(0);
+  });
+});
+
+/** Close code of the first WebSocket close frame (opcode 8) in raw server bytes, or null. */
+function closeCode(data: Buffer[]): number | null {
+  const b = Buffer.concat(data);
+  let i = 0;
+  while (i + 2 <= b.length) {
+    const op = b[i] & 0x0f;
+    let len = b[i + 1] & 0x7f;
+    let at = i + 2;
+    if (len === 126) {
+      len = b.readUInt16BE(at);
+      at += 2;
+    }
+    if (op === 8) return len >= 2 ? b.readUInt16BE(at) : null;
+    i = at + len;
+  }
+  return null;
+}
+
+describe('slow viewers (1013)', () => {
+  it('an /attach viewer over the buffer limit is closed 1013, disposed and terminated', async () => {
+    const r = await start([], { maxViewerBuffer: -1, closeGraceMs: 100 });
+    const c = await rawUpgrade(r, '/attach', `${TOKEN}s`);
+    c.sock.write(wsFrame(jsonFrame(FrameType.ATTACH, { id: 's1', channel: 1 })));
+    await vi.waitFor(() => expect(closeCode(c.data)).toBe(1013));
+    c.sock.write(wsFrame(inputFrame(1, 'after')));
+    await c.ended;
+    expect(r.broker.sessions.get('s1')!.inputs).toEqual([]);
+    expect(r.hub.liveTaps).toBe(0);
+  });
+
+  it('an /events subscriber over the buffer limit is unsubscribed, closed 1013 and terminated', async () => {
+    const r = await start([], { maxViewerBuffer: -1, closeGraceMs: 100 });
+    const c = await rawUpgrade(r, '/events', `${TOKEN}r`);
+    expect(r.events.size).toBe(1);
+    r.events.publish('sessions:changed', { sessions: [] });
+    expect(r.events.size).toBe(0);
+    await c.ended;
+    expect(closeCode(c.data)).toBe(1013);
+  });
+});
+
+describe('revokeAll', () => {
+  it('revokes every socket at once without closing the listener', async () => {
+    const r = await start([], { closeGraceMs: 100 });
+    const c = await rawUpgrade(r, '/events', `${TOKEN}r`);
+    r.host.revokeAll(1001, 'host shutting down');
+    expect(r.events.size).toBe(0);
+    await c.ended;
+    expect(closeCode(c.data)).toBe(1001);
+    expect(r.host.server.listening).toBe(true);
+  });
+});
+
+const realSleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+describe('WebSocket keepalive', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('pings at most every 25 s by default', () => {
+    expect(PING_MS).toBeLessThanOrEqual(25_000);
+  });
+
+  it('pings every open socket each interval and keeps one that answers', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const r = await start([], { pingMs: 25_000 });
+    const ws = await openWs(r, '/events', `${TOKEN}r`);
+    let pings = 0;
+    ws.on('ping', () => pings++);
+    for (let i = 0; i < 4; i++) {
+      await vi.advanceTimersByTimeAsync(25_000);
+      await realSleep(30);
+    }
+    expect(pings).toBe(4);
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+    expect(r.events.size).toBe(1);
+    ws.close();
+  });
+
+  it('terminates a socket that misses 2 pongs, and unsubscribes it', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const r = await start([], { pingMs: 25_000 });
+    const c = await rawUpgrade(r, '/events', `${TOKEN}r`);
+    let gone = false;
+    void c.ended.then(() => (gone = true));
+    await vi.advanceTimersByTimeAsync(25_000);
+    await realSleep(30);
+    expect(Buffer.concat(c.data)[0]).toBe(0x89);
+    await vi.advanceTimersByTimeAsync(25_000);
+    await realSleep(30);
+    expect(gone).toBe(false);
+    expect(r.events.size).toBe(1);
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(r.events.size).toBe(0);
+    await c.ended;
+  });
+
+  it('terminates a silent /attach viewer and detaches its upstream', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const r = await start([], { pingMs: 1_000 });
+    const c = await rawUpgrade(r, '/attach', `${TOKEN}r`);
+    c.sock.write(wsFrame(jsonFrame(FrameType.ATTACH, { id: 's1', channel: 1 })));
+    await vi.waitFor(() => expect(r.hub.liveTaps).toBe(1));
+    for (let i = 0; i < 3; i++) await vi.advanceTimersByTimeAsync(1_000);
+    await c.ended;
+    await vi.waitFor(() => expect(r.broker.sessions.get('s1')!.detached).toBe(1));
   });
 });
