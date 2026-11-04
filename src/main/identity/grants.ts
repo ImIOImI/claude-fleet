@@ -73,6 +73,11 @@ const TEAM_RE = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 const LOGIN_RE = /^[A-Za-z0-9-]+$/;
 const BOT_RE = /^[A-Za-z0-9-]+\[bot\]$/;
 const ORG_RE = LOGIN_RE;
+/** GitHub-operated Apps whose tokens any repo's workflow (incl. fork PRs) can mint. */
+const GITHUB_SHARED_APPS = new Map<number, string>([
+  [15368, 'github-actions'],
+  [29110, 'dependabot']
+]);
 
 function parseTier(v: unknown, path: string): Tier {
   if (v === 'read' || v === 'steer' || v === 'session') return v;
@@ -138,6 +143,12 @@ export function parseGrantConfig(raw: unknown): GrantConfig {
       throw new GrantConfigError(`${p}.login must be a bot login ending in [bot]`);
     }
     const tier = parseTier(r.tier, p);
+    const shared = GITHUB_SHARED_APPS.get(r.appId);
+    if (shared) {
+      throw new GrantConfigError(
+        `${p}.appId ${r.appId} is GitHub's shared ${shared} App, whose tokens any workflow can obtain; use a dedicated org-owned GitHub App`
+      );
+    }
     if (seen.has(r.appId)) throw new GrantConfigError(`machines: appId ${r.appId} listed twice`);
     seen.add(r.appId);
     if (seenLogins.has(lc(r.login))) {

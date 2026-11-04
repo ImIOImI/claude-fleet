@@ -314,12 +314,12 @@ describe('github provider: machines (GitHub App installation tokens)', () => {
       expect(n).toBeLessThanOrEqual(10);
     });
 
-    it('never follows a repo pagination link off api.github.com', async () => {
+    it('refuses (and never follows) a repo pagination link off api.github.com', async () => {
       const f = stubGithub({
         ...base,
         [`GET ${INSTALL_REPOS}`]: () => json(repos('acme'), 200, { link: '<https://evil.example/r?page=2>; rel="next"' })
       });
-      await createGithubProvider({ machines: MACHINES }).verify(TOKEN).catch(() => undefined);
+      await expect(createGithubProvider({ machines: MACHINES }).verify(TOKEN)).rejects.toMatchObject({ kind: 'forbidden' });
       expect(f.mock.calls.some(([u]) => String(u).includes('evil.example'))).toBe(false);
     });
 

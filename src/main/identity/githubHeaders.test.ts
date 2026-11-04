@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { GITHUB_API, hasPackagesRead, mergeSso, nextLink, parseScopes, parseSsoHeader } from './githubHeaders.js';
+import { GITHUB_API, hasNextRel, hasPackagesRead, mergeSso, nextLink, parseScopes, parseSsoHeader } from './githubHeaders.js';
 
 describe('parseScopes', () => {
   it('splits X-OAuth-Scopes', () => {
@@ -60,6 +60,15 @@ describe('mergeSso', () => {
     expect(mergeSso(null, b)).toBe(b);
     expect(mergeSso(a, null)).toBe(a);
     expect(mergeSso(null, null)).toBeNull();
+  });
+});
+
+describe('hasNextRel', () => {
+  it('sees a rel="next" on any host, and nothing else', () => {
+    expect(hasNextRel('<https://evil.example/r?page=2>; rel="next"')).toBe(true);
+    expect(hasNextRel(`<${GITHUB_API}/r?page=2>; rel="next"`)).toBe(true);
+    expect(hasNextRel(`<${GITHUB_API}/r?page=1>; rel="prev"`)).toBe(false);
+    expect(hasNextRel(null)).toBe(false);
   });
 });
 

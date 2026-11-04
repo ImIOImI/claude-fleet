@@ -9,7 +9,7 @@
 import type { Identity, IdentityProvider, UserIdentity } from './types.js';
 import { IdentityError } from './types.js';
 import type { MachineRule } from './grants.js';
-import { GITHUB_API, mergeSso, nextLink, parseScopes, parseSsoHeader, type SsoHint } from './githubHeaders.js';
+import { GITHUB_API, hasNextRel, mergeSso, nextLink, parseScopes, parseSsoHeader, type SsoHint } from './githubHeaders.js';
 
 export interface GithubProbe {
   /** probe() only ever signs in a person. */
@@ -123,14 +123,9 @@ async function fetchTeams(token: string): Promise<{ teams: string[]; sso: SsoHin
 }
 
 /**
- * Prove the installation behind `token` belongs to `org`: every repository it
- * can reach (GET /installation/repositories, all pages) must be owned by `org`
- * (case-insensitive), and there must be at least one. An App's configured tier
- * applies ONLY to installations within its org — this is what stops a
- * GitHub-run App (github-actions, dependabot, …) installed on someone else's
- * repositories from borrowing a tier configured for the org's own workflows.
- * Fails closed (`forbidden`) on a foreign repo, zero repos, an unreadable
- * owner, or more pages than MAX_REPO_PAGES.
+ * A machine tier applies only to installations whose every repository (≥1) is
+ * owned by the rule's org. This does not make GitHub-operated shared Apps safe;
+ * parseGrantConfig rejects those. Fails closed (`forbidden`).
  */
 async function assertInstallationInOrg(token: string, org: string, slug: string): Promise<void> {
   const want = org.toLowerCase();
@@ -151,7 +146,9 @@ async function assertInstallationInOrg(token: string, org: string, slug: string)
       if (owner.toLowerCase() !== want) throw refuse('it reaches a repository outside the org');
       count++;
     }
-    url = nextLink(res.headers.get('link'));
+    const link = res.headers.get('link');
+    url = nextLink(link);
+    if (!url && hasNextRel(link)) throw refuse('a pagination link leaves api.github.com');
   }
   if (url) throw refuse(`more than ${MAX_REPO_PAGES} pages of repositories`);
   if (count === 0) throw refuse('it reaches no repositories');

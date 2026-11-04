@@ -124,6 +124,8 @@ describe('parseGrantConfig', () => {
       },
       /machines\[1\]\.login ci\[bot\] listed twice/i
     ],
+    ['the github-actions shared App', { machines: [{ appId: 15368, login: 'github-actions[bot]', org: 'acme', tier: 'read' }] }, /appId 15368 is GitHub's shared github-actions App.*dedicated org-owned GitHub App/],
+    ['the dependabot shared App', { machines: [{ appId: 29110, login: 'dependabot[bot]', org: 'acme', tier: 'read' }] }, /appId 29110 is GitHub's shared dependabot App.*dedicated org-owned GitHub App/],
     ['a machine without org or identity.org', { machines: [{ appId: 1, login: 'x[bot]', tier: 'read' }] }, /machines\[0\]\.org is required/],
     ['a bad machine org', { machines: [{ appId: 1, login: 'x[bot]', org: 'not an org', tier: 'read' }] }, /machines\[0\]\.org must be a GitHub org login/],
     ['a bad identity.org when inherited', { identity: { org: 'a/b' }, machines: [{ appId: 1, login: 'x[bot]', tier: 'read' }] }, /identity\.org must be a GitHub org login/]

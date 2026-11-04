@@ -87,3 +87,8 @@ export function nextLink(header: string | null): string | null {
   }
   return null;
 }
+
+/** Whether the Link header has any rel="next", followable or not. */
+export function hasNextRel(header: string | null): boolean {
+  return !!header && header.split(',').some((part) => /<[^>]+>\s*;\s*rel="next"/.test(part));
+}

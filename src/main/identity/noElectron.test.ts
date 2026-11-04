@@ -6,7 +6,7 @@
 //   - `../../preload/identityTypes.js`, type-only (`import type` / `export type`);
 //   - `node:*` builtins.
 // Anything else — electron, electron/main, ../vault.js, ../db.js, a bare
-// package, an extensionless path, a non-literal import()/require() — fails.
+// package, an extensionless path, a non-literal import()/require(), createRequire — fails.
 import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, posix, relative, sep } from 'node:path';
@@ -30,6 +30,8 @@ const PATTERNS: Array<{ re: RegExp; typeOnly?: (m: RegExpExecArray) => boolean }
 ];
 // import(x) / require(x) with a non-literal argument can't be checked.
 const NON_LITERAL = /\b(?:import|require)\s*\(\s*(?![\s'"`])/g;
+// createRequire builds a require() the patterns above can't see.
+const CREATE_REQUIRE = /\bcreateRequire\b/g;
 
 function extractSpecifiers(src: string): Specifier[] {
   const out: Specifier[] = [];
@@ -41,6 +43,8 @@ function extractSpecifiers(src: string): Specifier[] {
   }
   NON_LITERAL.lastIndex = 0;
   for (let m = NON_LITERAL.exec(src); m; m = NON_LITERAL.exec(src)) out.push({ spec: '<non-literal>', typeOnly: false });
+  CREATE_REQUIRE.lastIndex = 0;
+  for (let m = CREATE_REQUIRE.exec(src); m; m = CREATE_REQUIRE.exec(src)) out.push({ spec: '<createRequire>', typeOnly: false });
   return out;
 }
 
@@ -72,6 +76,8 @@ describe('identity import guard (extractor + allowlist)', () => {
     ['electron/main', `import { safeStorage } from "electron/main";`],
     ['side-effect electron', `import 'electron';`],
     ['require electron', `const e = require('electron');`],
+    ['createRequire from node:module', `import { createRequire } from 'node:module';\nconst r = createRequire(import.meta.url);\nr('electron');`],
+    ['createRequire via a namespace', `import * as m from 'node:module';\nconst e = m.createRequire(import.meta.url)(name);`],
     ['dynamic electron', `const e = await import('electron');`],
     ['template-literal dynamic electron', 'const e = await import(`electron`);'],
     ['non-literal dynamic import', `const e = await import(name);`],
