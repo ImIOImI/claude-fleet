@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
-import { sqliteKysely, num } from './kysely.js';
+import { sqliteKysely, num, chunked } from './kysely.js';
 
 interface T { t: { v: number } }
 
@@ -58,5 +58,22 @@ describe('sqliteKysely', () => {
     })).rejects.toThrow('boom');
     expect(await k.selectFrom('t').selectAll().execute()).toEqual([]);
     await k.destroy();
+  });
+});
+
+describe('chunked', () => {
+  it('splits items into chunks at the 500-item boundary', () => {
+    expect(chunked([])).toEqual([]);
+    expect(chunked([1])).toEqual([[1]]);
+    expect(chunked(Array.from({ length: 500 }, (_, i) => i))).toHaveLength(1);
+    expect(chunked(Array.from({ length: 501 }, (_, i) => i))).toHaveLength(2);
+    expect(chunked(Array.from({ length: 1001 }, (_, i) => i))).toHaveLength(3);
+  });
+
+  it('preserves order and content when reassembling chunks', () => {
+    const items = Array.from({ length: 1001 }, (_, i) => `item-${i}`);
+    const chunks = chunked(items);
+    const reassembled = chunks.flat();
+    expect(reassembled).toEqual(items);
   });
 });

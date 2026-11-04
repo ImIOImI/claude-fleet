@@ -228,6 +228,24 @@ export function createNotifyService(deps: NotifyDeps) {
         { kind: item.kind ?? 'todo', priority: item.priority, source: item.source, dedupeKey: item.dedupeKey, tags: item.tags },
         rules, level, deps.now()
       );
+    },
+
+    /** Batched effectiveFor: rules() and getDefaultLevel() are invariant across the whole call, so they're
+     *  read once (not once per item) and every item is resolved against that one snapshot. */
+    async effectiveForMany(
+      items: Array<{ id: string; kind?: NotificationKind; priority: TodoPriority; source: TodoSource; dedupeKey: string | null; tags: string[] }>
+    ): Promise<Record<string, EffectiveRule>> {
+      if (items.length === 0) return {};
+      const [rules, level] = await Promise.all([store.rules(), store.getDefaultLevel()]);
+      const now = deps.now();
+      const out: Record<string, EffectiveRule> = {};
+      for (const item of items) {
+        out[item.id] = effectiveRule(
+          { kind: item.kind ?? 'todo', priority: item.priority, source: item.source, dedupeKey: item.dedupeKey, tags: item.tags },
+          rules, level, now
+        );
+      }
+      return out;
     }
   };
 }

@@ -1,12 +1,24 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import Database from 'better-sqlite3';
 import { InboxStore } from '../inbox/inboxDb.js';
 import { AutomationStore } from './automationStore.js';
 import { createAutomationService } from './automationService.js';
 import type { WorkspaceState } from './runner.js';
+import type { AutomationDef } from '../../preload/inboxTypes.js';
 
 let inbox: InboxStore;
 const flush = async () => { for (let i = 0; i < 3; i++) await new Promise<void>((r) => setImmediate(r)); };
 afterEach(() => inbox?.close());
+
+/** Counts `better-sqlite3` statements prepared on an inbox store's raw connection — one per Kysely
+ *  query (see store/kysely.ts) — to assert a call makes a bounded number of round trips, not N+1. */
+function countQueries(s: InboxStore): { count(): number } {
+  const raw = (s as unknown as { raw: Database.Database }).raw;
+  let n = 0;
+  const orig = raw.prepare.bind(raw);
+  raw.prepare = ((sql: string) => { n++; return orig(sql); }) as typeof raw.prepare;
+  return { count: () => n };
+}
 const USER = { kind: 'user' as const, id: null };
 const WSS: Record<string, string> = { 'ops-oncall': 'W1', 'webex-triage': 'W2' };
 
@@ -216,6 +228,39 @@ describe('automations workspace reach (Phase 5b)', () => {
     expect(await svc.mcp.listRuns('WA', {}, true)).toEqual([expect.objectContaining({ automation: 'log-watch', status: 'succeeded' })]);
     expect(await svc.mcp.listRuns('WA', { status: 'failed' }, true)).toEqual([]);
     expect(await svc.mcp.listRuns('W9', {})).toEqual([]);
+  });
+});
+
+describe('mcp.listRuns batches steps per run (#456)', () => {
+  it('returns steps identical to the single-run path in a bounded number of queries', async () => {
+    const { svc, store } = setup();
+    const def = (name: string): AutomationDef => ({
+      name, triggers: [{ manual: {} }], concurrency: 'skip',
+      steps: [{ id: 'check', prompt: { workspace: 'W1', mode: 'live', message: 'check' } }]
+    });
+    const automations = [];
+    for (let k = 0; k < 3; k++) automations.push(await store.create(def(`auto-${k}`), USER, 1000 + k));
+    const now = 10 * 86_400_000;
+    for (const [k, a] of automations.entries()) {
+      for (let i = 0; i < 8; i++) {
+        const r = await store.startRun(a, { kind: 'manual' }, {}, 'running', now + k * 1000 + i);
+        for (let j = 0; j < i % 3; j++) {
+          const st = await store.startStep(r.id, `step-${j}`, 'prompt', 'W1', now + i);
+          await store.finishStep(st, 'succeeded', { detail: { k, i, j } }, now + i + 1);
+        }
+        await store.setRunStatus(r.id, 'succeeded', now + i + 1);
+      }
+    }
+    const counter = countQueries(inbox);
+    const got = await svc.mcp.listRuns('whoever', { limit: 100 }, true);
+    const queries = counter.count();
+    expect(got).toHaveLength(24); // 3 automations x 8 runs
+    for (const r of got) {
+      const solo = await store.getRun(r.id);
+      expect(r.steps).toEqual(solo!.steps);
+    }
+    // Bounded by automation count (a couple of queries each), never by total run/step count.
+    expect(queries).toBeLessThan(24);
   });
 });
 

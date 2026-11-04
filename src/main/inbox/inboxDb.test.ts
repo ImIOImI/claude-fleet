@@ -10,6 +10,16 @@ const USER = { kind: 'user', id: null } as const;
 let store: InboxStore;
 afterEach(async () => await store?.close());
 
+/** Counts `better-sqlite3` statements prepared on a store's raw connection — one per Kysely query
+ *  (see store/kysely.ts) — to assert a call makes a constant number of round trips, not N+1. */
+function countQueries(s: InboxStore): { count(): number } {
+  const raw = (s as unknown as { raw: Database.Database }).raw;
+  let n = 0;
+  const orig = raw.prepare.bind(raw);
+  raw.prepare = ((sql: string) => { n++; return orig(sql); }) as typeof raw.prepare;
+  return { count: () => n };
+}
+
 describe('InboxStore.post', () => {
   it('creates a todo with defaults and a created event', async () => {
     store = InboxStore.memory();
@@ -113,6 +123,34 @@ describe('InboxStore.list / counts', () => {
   });
 });
 
+describe('InboxStore.list batches tags (#456)', () => {
+  it('returns identical tags/ordering to per-todo fetches, in a constant number of queries', async () => {
+    store = InboxStore.memory();
+    // Seed enough todos, with varied tag counts (including none), that an N+1 loop would show up
+    // as a growing query count against a flat batched one.
+    const titles = Array.from({ length: 40 }, (_, i) => `todo-${i}`);
+    for (const [i, title] of titles.entries()) {
+      const tags = i % 5 === 0 ? [] : [`tag-${i % 5}`, `tag-${i % 3}`, 'shared'];
+      await store.post(WS, { title, tags, priority: i % 7 === 0 ? 'urgent' : 'normal' }, 1000 + i);
+    }
+    const counter = countQueries(store);
+    const rows = await store.list({ status: 'all', limit: 500 });
+    const queriesFor40 = counter.count();
+    expect(rows).toHaveLength(40);
+    // Cross-check every row's tags against the single-todo path (`get`), which still queries per id.
+    for (const row of rows) {
+      const solo = await store.get(row.id);
+      expect(row.tags).toEqual(solo!.tags);
+    }
+    // A handful more todos should not grow the query count for list() itself.
+    for (let i = 0; i < 10; i++) await store.post(WS, { title: `extra-${i}`, tags: ['x', 'y'] }, 5000 + i);
+    const counter2 = countQueries(store);
+    await store.list({ status: 'all', limit: 500 });
+    expect(counter2.count()).toBe(queriesFor40);
+    expect(queriesFor40).toBeLessThanOrEqual(3);
+  });
+});
+
 describe('InboxStore.open', () => {
   it('creates inbox.db with WAL and the schema version', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'inbox-'));
@@ -152,5 +190,44 @@ describe('InboxStore.kysely', () => {
     await store.close();
     await expect(store.kysely.selectFrom('todos').selectAll().execute()).rejects.toThrow();
     store = InboxStore.memory(); // afterEach closes a live store
+  });
+});
+
+describe('InboxStore chunked tag fetching', () => {
+  it('correctly merges tags across the 500-item chunk boundary', async () => {
+    store = InboxStore.memory();
+    // Seed 501 todos, each with a distinct tag
+    const todoIds: string[] = [];
+    for (let i = 0; i < 501; i++) {
+      const { todo } = await store.post(WS, { title: `todo-${i}`, tags: [`tag-${i}`] }, 1000 + i);
+      todoIds.push(todo.id);
+    }
+    // Add one todo with no tags
+    const { todo: noTagTodo } = await store.post(WS, { title: 'no-tags' }, 1500);
+    todoIds.push(noTagTodo.id);
+
+    // List all todos with their tags (bypasses pagination)
+    const todos = await store.list({ status: 'all', limit: 500 });
+    expect(todos).toHaveLength(500); // list caps at 500
+
+    // Verify that the first 500 todos returned have exactly their own tag
+    for (let i = 0; i < Math.min(500, todos.length); i++) {
+      // The todos are returned in reverse order (by last_seen_at desc), so we need to find our todos
+      const todo = todos.find((t) => t.title === `todo-${i}`);
+      if (todo) {
+        expect(todo.tags).toEqual([`tag-${i}`]);
+      }
+    }
+
+    // Additionally, test tagsForIds directly to verify 501 boundary
+    const allTodoIds = [noTagTodo.id, ...todoIds.slice(0, 501)];
+    const tagsMap = await (store as any).tagsForIds((store as any).kysely, allTodoIds);
+    for (let i = 0; i < 501; i++) {
+      const expectedTag = i < 501 ? [`tag-${i}`] : [];
+      const actualTag = tagsMap.get(todoIds[i]) ?? [];
+      expect(actualTag).toEqual(expectedTag);
+    }
+    // Verify the no-tags todo
+    expect(tagsMap.get(noTagTodo.id) ?? []).toEqual([]);
   });
 });

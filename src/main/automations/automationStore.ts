@@ -7,8 +7,8 @@ import type {
 } from '../../preload/inboxTypes.js';
 import { newId } from '../inbox/inboxDb.js';
 import { normalizeTags } from '../inbox/inboxCore.js';
-import { num } from '../store/kysely.js';
-import type { AutomationRow, InboxDb, RunRowSql } from '../store/inboxSchema.js';
+import { chunked, num } from '../store/kysely.js';
+import type { AutomationRow, InboxDb, RunRowSql, StepRunRowSql } from '../store/inboxSchema.js';
 
 type Q = Kysely<InboxDb> | Transaction<InboxDb>;
 
@@ -183,22 +183,52 @@ export class AutomationStore {
 
   // --- runs ----------------------------------------------------------------
 
-  private async toRun(q: Q, r: RunRowSql): Promise<RunRow> {
+  private toStepRunRow(s: StepRunRowSql): StepRunRow {
+    return {
+      id: s.id, runId: s.run_id, stepId: s.step_id, kind: s.kind, status: s.status, workspaceId: s.workspace_id,
+      brokerSessionId: s.broker_session_id, startedAt: s.started_at, endedAt: s.ended_at, error: s.error,
+      detail: s.detail ? (JSON.parse(s.detail) as Record<string, unknown>) : null
+    };
+  }
+
+  private rowToRun(r: RunRowSql, steps: StepRunRow[]): RunRow {
     return {
       id: r.id, automationId: r.automation_id, version: r.version,
       trigger: JSON.parse(r.trigger) as RunRow['trigger'], args: JSON.parse(r.args) as Record<string, ParamValue>,
-      status: r.status, startedAt: r.started_at, endedAt: r.ended_at, error: r.error, steps: await this.stepsWith(q, r.id),
+      status: r.status, startedAt: r.started_at, endedAt: r.ended_at, error: r.error, steps,
       ...(r.reschedule ? { reschedule: JSON.parse(r.reschedule) as NonNullable<RunRow['reschedule']> } : {})
     };
   }
 
+  private async toRun(q: Q, r: RunRowSql): Promise<RunRow> {
+    return this.rowToRun(r, await this.stepsWith(q, r.id));
+  }
+
+  /** Batched stepsWith for N runs: one `run_id IN (...)` query per ≤500-id chunk instead of one per run. */
+  private async stepsForRunIds(q: Q, runIds: string[]): Promise<Map<string, StepRunRow[]>> {
+    const out = new Map<string, StepRunRow[]>();
+    if (runIds.length === 0) return out;
+    for (const chunk of chunked(runIds)) {
+      const rows = await q.selectFrom('step_runs').selectAll().where('run_id', 'in', chunk).orderBy('run_id').orderBy('id').execute();
+      for (const s of rows) {
+        const step = this.toStepRunRow(s);
+        const list = out.get(s.run_id);
+        if (list) list.push(step); else out.set(s.run_id, [step]);
+      }
+    }
+    return out;
+  }
+
+  /** Attaches steps to several run rows with one batched query instead of one per run. */
+  private async toRuns(q: Q, rows: RunRowSql[]): Promise<RunRow[]> {
+    if (rows.length === 0) return [];
+    const stepsByRun = await this.stepsForRunIds(q, rows.map((r) => r.id));
+    return rows.map((r) => this.rowToRun(r, stepsByRun.get(r.id) ?? []));
+  }
+
   private async stepsWith(q: Q, runId: string): Promise<StepRunRow[]> {
     const rows = await q.selectFrom('step_runs').selectAll().where('run_id', '=', runId).orderBy('id').execute();
-    return rows.map((s) => ({
-      id: s.id, runId: s.run_id, stepId: s.step_id, kind: s.kind, status: s.status, workspaceId: s.workspace_id,
-      brokerSessionId: s.broker_session_id, startedAt: s.started_at, endedAt: s.ended_at, error: s.error,
-      detail: s.detail ? (JSON.parse(s.detail) as Record<string, unknown>) : null
-    }));
+    return rows.map((s) => this.toStepRunRow(s));
   }
   steps(runId: string): Promise<StepRunRow[]> {
     return this.stepsWith(this.db, runId);
@@ -231,14 +261,12 @@ export class AutomationStore {
   async runs(automationId: string, limit = 50): Promise<RunRow[]> {
     const rows = await this.db.selectFrom('runs').selectAll().where('automation_id', '=', automationId)
       .orderBy('started_at', 'desc').orderBy('id', 'desc').limit(limit).execute();
-    return Promise.all(rows.map((r) => this.toRun(this.db, r)));
+    return this.toRuns(this.db, rows);
   }
 
   private async runsWith(q: Q, status: RunStatus): Promise<RunRow[]> {
     const rows = await q.selectFrom('runs').selectAll().where('status', '=', status).orderBy('started_at').orderBy('id').execute();
-    const out: RunRow[] = [];
-    for (const r of rows) out.push(await this.toRun(q, r));
-    return out;
+    return this.toRuns(q, rows);
   }
   runsWithStatus(status: RunStatus): Promise<RunRow[]> {
     return this.runsWith(this.db, status);

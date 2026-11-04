@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import Database from 'better-sqlite3';
 import { InboxStore } from './inboxDb.js';
 import { NotifyStore } from './notifyStore.js';
 import { createNotifyService, INPUT_WAIT_DELAY_MS } from './notifyService.js';
@@ -8,6 +9,16 @@ let inbox: InboxStore;
 afterEach(() => inbox?.close());
 
 const flush = async () => { for (let i = 0; i < 3; i++) await new Promise<void>((r) => setImmediate(r)); };
+
+/** Counts `better-sqlite3` statements prepared on an inbox store's raw connection — one per Kysely
+ *  query (see store/kysely.ts) — to assert a call makes a constant number of round trips, not N+1. */
+function countQueries(s: InboxStore): { count(): number } {
+  const raw = (s as unknown as { raw: Database.Database }).raw;
+  let n = 0;
+  const orig = raw.prepare.bind(raw);
+  raw.prepare = ((sql: string) => { n++; return orig(sql); }) as typeof raw.prepare;
+  return { count: () => n };
+}
 
 function setup(opts: { focused?: boolean; viewing?: string | null; inboxOpen?: boolean } = {}) {
   inbox = InboxStore.memory();
@@ -172,6 +183,37 @@ describe('scopes, effective rule, test, prune', () => {
     expect((await svc.test()).delivered).toBe(true);
     await advance(31 * 86_400_000);
     expect(await svc.prune()).toBe(1);
+  });
+});
+
+describe('effectiveForMany batches rules()/getDefaultLevel() (#456)', () => {
+  it('matches per-item effectiveFor output, reading rules/level once regardless of item count', async () => {
+    const { svc, store } = setup();
+    await store.setRule({ scopeKind: 'tag', scopeValue: 'ops', level: 'urgent', snoozeUntil: null });
+    await store.setRule({ scopeKind: 'source', scopeValue: 'workspace:W1', level: 'off', snoozeUntil: null });
+    await store.setDefaultLevel('high');
+    const items = Array.from({ length: 20 }, (_, i) => ({
+      id: `item-${i}`,
+      priority: i % 3 === 0 ? ('urgent' as const) : ('normal' as const),
+      source: i % 2 === 0 ? { kind: 'workspace' as const, id: 'W1' } : { kind: 'user' as const, id: null },
+      dedupeKey: null,
+      tags: i % 4 === 0 ? ['ops'] : []
+    }));
+    const counter = countQueries(inbox);
+    const batched = await svc.effectiveForMany(items);
+    const queriesForMany = counter.count();
+    expect(Object.keys(batched)).toHaveLength(20);
+    for (const item of items) {
+      const solo = await svc.effectiveFor(item);
+      expect(batched[item.id]).toEqual(solo);
+    }
+    await expect(svc.effectiveForMany([])).resolves.toEqual({});
+    // A larger batch must not cost more queries than a smaller one.
+    const moreItems = [...items, ...items.map((i) => ({ ...i, id: `${i.id}-dup` }))];
+    const counter2 = countQueries(inbox);
+    await svc.effectiveForMany(moreItems);
+    expect(counter2.count()).toBe(queriesForMany);
+    expect(queriesForMany).toBeLessThanOrEqual(3);
   });
 });
 
