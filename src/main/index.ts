@@ -1,7 +1,7 @@
 import { app, BrowserWindow, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
 import { registerIpc } from './ipc.js';
-import { openDb, closeDb, deleteEmbeddingsForOtherModels, recordError, listSessions } from './db.js';
+import { openDb, closeDb, deleteEmbeddingsForOtherModels, recordError, listSessions, stateKysely } from './db.js';
 import { initPerf, shutdownPerf, perfSpan, perfSpanAsync } from './perf.js';
 import { PerfStore } from './perfStore.js';
 import { resolvePerfConfig } from './perfConfig.js';
@@ -167,7 +167,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   }
 
   if (jsonlWatcher) {
-    const db = openDb(app.getPath('userData'));
+    openDb(app.getPath('userData'));
     // Wire the crash-safe DB sink so every logError call is also persisted to
     // the errors table (best-effort; a wedged DB must never break crash logging —
     // the write is async now, so its rejection is swallowed here, not in logError).
@@ -184,7 +184,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       message: `claude-fleet ${appVersionString()} starting`,
       extra: { sha: appBuildSha() ?? null }
     });
-    const perfStore = new PerfStore(db);
+    const perfStore = new PerfStore(stateKysely());
     initPerf(
       perfStore,
       resolvePerfConfig(

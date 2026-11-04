@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { closeDb, openDb } from './db.js';
+import { closeDb, openDb, stateKysely } from './db.js';
 import { PerfStore } from './perfStore.js';
 import {
   initPerf, shutdownPerf, reconfigurePerf, perfSpan, perfSpanAsync, perfSetSpanContext, getEffectivePerf,
@@ -32,7 +32,7 @@ let store: PerfStore;
 beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'perf-'));
   db = openDb(dir);
-  store = new PerfStore(db);
+  store = new PerfStore(stateKysely());
 });
 afterEach(async () => {
   await shutdownPerf();
@@ -208,7 +208,7 @@ describe('getPerfStatus', () => {
   it('reflects effective config + 24h counts (flushing pending rows first)', async () => {
     initPerf(store, ON);
     store.enqueue({ ts: Date.now(), kind: 'stall', durMs: 60 });
-    const s = getPerfStatus();
+    const s = await getPerfStatus();
     expect(s.enabled).toBe(true);
     expect(s.source).toBe('settings');
     expect(s.otlp).toEqual({ enabled: false, endpoint: null, source: 'settings' });
@@ -217,7 +217,7 @@ describe('getPerfStatus', () => {
 
   it('throws before init', async () => {
     await shutdownPerf();
-    expect(() => getPerfStatus()).toThrow(/init/i);
+    await expect(getPerfStatus()).rejects.toThrow(/init/i);
   });
 });
 
@@ -239,7 +239,7 @@ describe('perfNotePowerEvent (suspend filtering)', () => {
     initPerf(store, ON, { delaySource: () => ({ p50: 2, p99: 8, max: 30000 }), sampleIntervalMs: 100 });
     perfNotePowerEvent('suspend');
     await sleep(350); // several suspended windows
-    store.flush(); // rows are buffered — flush before counting
+    await store.flush(); // rows are buffered — flush before counting
     const midCount = (db.prepare(`SELECT COUNT(*) AS n FROM perf_events WHERE kind='stall'`).get() as { n: number }).n;
     expect(midCount).toBe(0);
     perfNotePowerEvent('resume');
@@ -347,7 +347,7 @@ describe('stall rows: cpu + sentinel enrichment', () => {
 
   it('getPerfStatus includes the sentinel block', async () => {
     initPerf(store, ON);
-    const s = getPerfStatus();
+    const s = await getPerfStatus();
     expect(s.sentinel).toEqual({ enabled: false, startedAt: null, expiresAt: null, lastWorkerWindow: null, workerDead: false });
   });
 });

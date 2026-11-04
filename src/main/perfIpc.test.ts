@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { closeDb, openDb } from './db.js';
+import { closeDb, openDb, stateKysely } from './db.js';
 import { PerfStore } from './perfStore.js';
 import { initPerf, shutdownPerf } from './perf.js';
 import { channelAttrs, instrumentIpcHandle } from './perfIpc.js';
@@ -56,7 +56,7 @@ describe('instrumentIpcHandle + channelAttrs integration', () => {
   it('a mapped channel invoke produces an attributed slow_op row', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'perfipc-'));
     const db = openDb(dir);
-    const store = new PerfStore(db);
+    const store = new PerfStore(stateKysely());
     initPerf(store, {
       recording: true, recordingSource: 'settings',
       otlp: { enabled: false, endpoint: null, source: 'settings' }

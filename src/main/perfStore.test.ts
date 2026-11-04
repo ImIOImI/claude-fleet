@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { closeDb, openDb } from './db.js';
+import { closeDb, openDb, stateKysely } from './db.js';
 import { PerfStore } from './perfStore.js';
 import type Database from 'better-sqlite3';
 
@@ -14,7 +14,7 @@ describe('PerfStore', () => {
   beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), 'perfstore-'));
     db = openDb(dir);
-    store = new PerfStore(db);
+    store = new PerfStore(stateKysely());
   });
   afterEach(async () => {
     await closeDb();
@@ -32,22 +32,22 @@ describe('PerfStore', () => {
     store.enqueue({ ts: 1000, kind: 'slow_op', name: 'claude_fleet.ingest', durMs: 40 });
     store.enqueue({ ts: 1001, kind: 'stall', durMs: 80, meta: { p50: 1, p99: 60, max: 80 } });
     expect(db.prepare(`SELECT COUNT(*) AS n FROM perf_events`).get()).toEqual({ n: 0 });
-    expect(store.flush()).toBe(2);
+    expect(await store.flush()).toBe(2);
     expect(store.pending()).toBe(0);
     const rows = db.prepare(`SELECT kind, name, dur_ms, meta FROM perf_events ORDER BY id`).all();
     expect(rows).toEqual([
       { kind: 'slow_op', name: 'claude_fleet.ingest', dur_ms: 40, meta: null },
       { kind: 'stall', name: null, dur_ms: 80, meta: JSON.stringify({ p50: 1, p99: 60, max: 80 }) }
     ]);
-    expect(store.flush()).toBe(0); // idempotent when empty
+    expect(await store.flush()).toBe(0); // idempotent when empty
   });
 
   it('prune deletes rows older than the retention window', async () => {
     const now = 10 * 24 * 60 * 60 * 1000;
     store.enqueue({ ts: now - 8 * 24 * 60 * 60 * 1000, kind: 'stall', durMs: 60 });
     store.enqueue({ ts: now - 1000, kind: 'stall', durMs: 60 });
-    store.flush();
-    expect(store.prune(7 * 24 * 60 * 60 * 1000, now)).toBe(1);
+    await store.flush();
+    expect(await store.prune(7 * 24 * 60 * 60 * 1000, now)).toBe(1);
     expect(db.prepare(`SELECT COUNT(*) AS n FROM perf_events`).get()).toEqual({ n: 1 });
   });
 
@@ -57,8 +57,8 @@ describe('PerfStore', () => {
     store.enqueue({ ts: now - 2000, kind: 'slow_op', name: 'x', durMs: 30 });
     store.enqueue({ ts: now - 3000, kind: 'slow_op', name: 'y', durMs: 30 });
     store.enqueue({ ts: now - 30 * 60 * 60 * 1000, kind: 'slow_op', name: 'old', durMs: 30 });
-    store.flush();
-    expect(store.counts24h(now)).toEqual({ stall: 1, slow_op: 2 });
+    await store.flush();
+    expect(await store.counts24h(now)).toEqual({ stall: 1, slow_op: 2 });
   });
 
   it('buffer is capped so a runaway producer cannot exhaust memory', async () => {
@@ -69,13 +69,16 @@ describe('PerfStore', () => {
   it('flush restores the buffer when the transaction throws', async () => {
     store.enqueue({ ts: 1, kind: 'stall', durMs: 60 });
     db.exec(`DROP TABLE perf_events`); // force the transaction to throw
-    let threwError = false;
-    try {
-      store.flush();
-    } catch (e) {
-      threwError = true;
-    }
-    expect(threwError).toBe(true);
+    await expect(store.flush()).rejects.toThrow();
     expect(store.pending()).toBe(1);
+  });
+
+  it('concurrent flushes run one at a time and write every row exactly once', async () => {
+    for (let i = 0; i < 250; i++) store.enqueue({ ts: i, kind: 'stall', durMs: 60 });
+    const first = store.flush();
+    for (let i = 250; i < 300; i++) store.enqueue({ ts: i, kind: 'stall', durMs: 60 });
+    const second = store.flush();
+    expect(await Promise.all([first, second])).toEqual([250, 50]);
+    expect(db.prepare('SELECT COUNT(*) AS n, COUNT(DISTINCT ts) AS d FROM perf_events').get()).toEqual({ n: 300, d: 300 });
   });
 });

@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setSessionMappingHandler, setSummaryStatusHandler, setQueryEmbedder, setUsageRecorder, setConfigResolver, _resetTelemetryForTests, type ToolCtx } from './mcpServer.js';
 import { EMBED_DIM, EMBED_MODEL_ID } from './vectors.js';
-import { closeDb, openDb } from './db.js';
+import { closeDb, openDb, stateKysely } from './db.js';
 import { PerfStore } from './perfStore.js';
 import { initPerf, shutdownPerf } from './perf.js';
 import { disarmSentinel } from './perfSentinel.js';
@@ -690,8 +690,8 @@ describe('perf tools', () => {
     let perfDir: string;
     beforeEach(async () => {
       perfDir = mkdtempSync(join(tmpdir(), 'mcp-perf-'));
-      const perfDb = openDb(perfDir);
-      const store = new PerfStore(perfDb);
+      openDb(perfDir);
+      const store = new PerfStore(stateKysely());
       initPerf(store, PERF_ON);
     });
     afterEach(async () => {
@@ -737,8 +737,8 @@ describe('perf tools', () => {
     let perfDir: string;
     beforeEach(async () => {
       perfDir = mkdtempSync(join(tmpdir(), 'mcp-sentinel-'));
-      const perfDb = openDb(perfDir);
-      const store = new PerfStore(perfDb);
+      openDb(perfDir);
+      const store = new PerfStore(stateKysely());
       initPerf(store, PERF_ON);
     });
     afterEach(async () => {
@@ -784,8 +784,8 @@ describe('perf tools', () => {
       await closeDb();
       rmSync(perfDir, { recursive: true, force: true });
       perfDir = mkdtempSync(join(tmpdir(), 'mcp-sentinel-off-'));
-      const perfDb = openDb(perfDir);
-      const store = new PerfStore(perfDb);
+      openDb(perfDir);
+      const store = new PerfStore(stateKysely());
       initPerf(store, PERF_OFF);
 
       const t = TOOLS.find((x) => x.name === 'perf_sentinel_set')!;
