@@ -25,9 +25,10 @@ import {
   listSessions,
   summaryForSession,
   _summaryRecomputesForTests,
-  LIST_SESSION_COSTS_SQL,
-  LIST_SESSION_COSTS_BY_WS_SQL,
+  stateKysely,
+  listSessionCostsQuery,
 } from './db.js';
+import { explainPlan } from './state/explainPlan.js';
 
 let dir: string;
 
@@ -210,7 +211,7 @@ describe('session_costs invariant', () => {
       cacheReadInputTokens: 0,
       cacheCreationInputTokens: 0,
     };
-    const costA = costForSession(SES_A);
+    const costA = await costForSession(SES_A);
     expect(costA.inputTokens).toBe(sesACostGT.inputTokens);
     expect(costA.outputTokens).toBe(sesACostGT.outputTokens);
     expect(costA.cacheReadInputTokens).toBe(sesACostGT.cacheReadInputTokens);
@@ -226,7 +227,7 @@ describe('session_costs invariant', () => {
       cacheReadInputTokens: 10,
       cacheCreationInputTokens: 0,
     };
-    const costWS2 = costForWorkspace(WS2);
+    const costWS2 = await costForWorkspace(WS2);
     expect(costWS2.inputTokens).toBe(wsCostGT.inputTokens);
     expect(costWS2.outputTokens).toBe(wsCostGT.outputTokens);
     expect(costWS2.cacheReadInputTokens).toBe(wsCostGT.cacheReadInputTokens);
@@ -237,7 +238,7 @@ describe('session_costs invariant', () => {
     d.prepare(`INSERT OR IGNORE INTO sessions (id, workspace_id) VALUES (?,?)`).run(SES_A, WS1);
     d.prepare(`INSERT OR IGNORE INTO sessions (id, workspace_id) VALUES (?,?)`).run(SES_B, WS2);
 
-    const allRows = listSessions();
+    const allRows = await listSessions();
     const rowA = allRows.find((r) => r.id === SES_A);
     const rowB = allRows.find((r) => r.id === SES_B);
     expect(rowA).toBeDefined();
@@ -252,7 +253,7 @@ describe('session_costs invariant', () => {
     expect(rowB!.usd).toBeGreaterThan(0);
 
     // WS2-scoped listSessions should only return SES_B
-    const ws2Rows = listSessions(WS2);
+    const ws2Rows = await listSessions(WS2);
     expect(ws2Rows.every((r) => r.workspaceId === WS2)).toBe(true);
     const rowBScoped = ws2Rows.find((r) => r.id === SES_B);
     expect(rowBScoped).toBeDefined();
@@ -261,7 +262,7 @@ describe('session_costs invariant', () => {
     // --- summaryForSession ---
     // summaryForSession goes through the summary cache; bypasses it with
     // a non-default topToolsLimit so we get a fresh read from session_costs.
-    const summary = summaryForSession(SES_A, 3);
+    const summary = await summaryForSession(SES_A, 3);
     expect(summary).not.toBeNull();
     expect(summary!.eventCount).toBe(5);
     expect(summary!.inputTokens).toBe(sesACostGT.inputTokens);
@@ -272,14 +273,9 @@ describe('session_costs invariant', () => {
   });
 
   it('listSessions cost query never scans events (EXPLAIN QUERY PLAN pin)', async () => {
-    // Open the DB to ensure it is initialised (EXPLAIN needs a live connection).
     const d = openDb(dir);
-    for (const sql of [LIST_SESSION_COSTS_SQL, LIST_SESSION_COSTS_BY_WS_SQL]) {
-      // LIST_SESSION_COSTS_BY_WS_SQL contains a WHERE workspace_id = ? placeholder;
-      // better-sqlite3 requires the parameter bound even for EXPLAIN QUERY PLAN.
-      const stmt = d.prepare(`EXPLAIN QUERY PLAN ${sql}`);
-      const plan = (sql.includes('?') ? stmt.all('explain-dummy') : stmt.all()) as Array<{ detail: string }>;
-      const details = plan.map((r) => r.detail).join(' | ');
+    for (const ws of [undefined, 'explain-dummy']) {
+      const details = explainPlan(d, listSessionCostsQuery(stateKysely(), ws));
       expect(details).toContain('session_costs');
       expect(details).not.toMatch(/\bevents\b/);
     }
@@ -305,11 +301,11 @@ describe('session_costs invariant', () => {
 
   it('ingest burst with interleaved summary reads recomputes at most twice (debounce end-to-end)', async () => {
     // Prime the cache once.
-    summaryForSession(SES_A);
+    await summaryForSession(SES_A);
     const before = _summaryRecomputesForTests();
     for (let i = 0; i < 200; i++) {
       await ingestLine(WS1, SES_A, assistantLine(`burst-${i}`, 'claude-3-opus', 10, 5));
-      summaryForSession(SES_A); // the renderer-poll stand-in
+      await summaryForSession(SES_A); // the renderer-poll stand-in
     }
     // Old policy: ~200 recomputes (every read after every ingest missed).
     // markStale(3s): the first read after the first markStale horizon may
@@ -321,7 +317,7 @@ describe('session_costs invariant', () => {
     // Ingest some data and prime the summary cache.
     await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
     await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
-    const summaryBefore = summaryForSession(SES_A);
+    const summaryBefore = await summaryForSession(SES_A);
     expect(summaryBefore).not.toBeNull();
 
     // Track recomputes: the next summaryForSession call after renameSession
@@ -329,7 +325,7 @@ describe('session_costs invariant', () => {
     // that renameSession properly invalidated the cached summary.
     const recomputesBefore = _summaryRecomputesForTests();
     await renameSession(SES_A, 'new-name');
-    const summaryAfter = summaryForSession(SES_A);
+    const summaryAfter = await summaryForSession(SES_A);
 
     // Verify the recompute counter increased by exactly 1.
     expect(_summaryRecomputesForTests() - recomputesBefore).toBe(1);

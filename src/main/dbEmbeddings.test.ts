@@ -26,14 +26,14 @@ describe('embeddings schema + helpers', () => {
   it('lists user/assistant events that have no turn embedding yet', async () => {
     await ingestLine(WS, SES, userLine('u1', 'hello there'));
     await ingestLine(WS, SES, userLine('u2', 'second message'));
-    const pending = unembeddedTurnEvents(SES, EMBED_MODEL_ID);
+    const pending = await unembeddedTurnEvents(SES, EMBED_MODEL_ID);
     expect(pending.length).toBe(2);
     expect(pending[0].rawJsonl).toContain('hello there');
   });
 
   it('insertEmbedding removes a turn from the pending set and dedupes', async () => {
     await ingestLine(WS, SES, userLine('u1', 'hello there'));
-    const [ev] = unembeddedTurnEvents(SES, EMBED_MODEL_ID);
+    const [ev] = await unembeddedTurnEvents(SES, EMBED_MODEL_ID);
     const row = {
       workspaceId: WS, sessionId: SES, kind: 'turn' as const, refEventId: ev.id,
       ts: ev.ts, text: 'hello there', modelId: EMBED_MODEL_ID, dim: 3,
@@ -41,13 +41,13 @@ describe('embeddings schema + helpers', () => {
     };
     expect(await insertEmbedding(row)).toBe(true);
     expect(await insertEmbedding(row)).toBe(false); // dedup
-    expect(unembeddedTurnEvents(SES, EMBED_MODEL_ID).length).toBe(0);
+    expect((await unembeddedTurnEvents(SES, EMBED_MODEL_ID)).length).toBe(0);
   });
 
   it('maxEventId returns the largest event id for a session', async () => {
     await ingestLine(WS, SES, userLine('u1', 'a'));
     await ingestLine(WS, SES, userLine('u2', 'b'));
-    expect(maxEventId(SES)).toBeGreaterThan(0);
+    expect(await maxEventId(SES)).toBeGreaterThan(0);
   });
 });
 
@@ -55,7 +55,7 @@ describe('insertEmbeddings (batch)', () => {
   it('inserts every row in one call and counts only the ones that actually landed', async () => {
     await ingestLine(WS, SES, userLine('u1', 'first'));
     await ingestLine(WS, SES, userLine('u2', 'second'));
-    const pending = unembeddedTurnEvents(SES, EMBED_MODEL_ID);
+    const pending = await unembeddedTurnEvents(SES, EMBED_MODEL_ID);
     expect(pending.length).toBe(2);
     const row = (ev: (typeof pending)[number], text: string) => ({
       workspaceId: WS, sessionId: SES, kind: 'turn' as const, refEventId: ev.id,
@@ -65,7 +65,7 @@ describe('insertEmbeddings (batch)', () => {
     const rows = [row(pending[0], 'first'), row(pending[1], 'second')];
 
     expect(await insertEmbeddings(rows)).toBe(2);
-    expect(unembeddedTurnEvents(SES, EMBED_MODEL_ID).length).toBe(0);
+    expect((await unembeddedTurnEvents(SES, EMBED_MODEL_ID)).length).toBe(0);
 
     // Re-inserting the same dedup keys lands zero new rows (ON CONFLICT DO NOTHING).
     expect(await insertEmbeddings(rows)).toBe(0);
@@ -73,7 +73,7 @@ describe('insertEmbeddings (batch)', () => {
 
   it('a partial duplicate counts only the rows that landed, same as single-row insertEmbedding', async () => {
     await ingestLine(WS, SES, userLine('u1', 'first'));
-    const [ev] = unembeddedTurnEvents(SES, EMBED_MODEL_ID);
+    const [ev] = await unembeddedTurnEvents(SES, EMBED_MODEL_ID);
     const row = {
       workspaceId: WS, sessionId: SES, kind: 'turn' as const, refEventId: ev.id,
       ts: ev.ts, text: 'first', modelId: EMBED_MODEL_ID, dim: 3,
@@ -92,7 +92,7 @@ describe('insertEmbeddings (batch)', () => {
 describe('deleteEmbeddingsForOtherModels', () => {
   it('drops rows keyed to a different model, keeps the current ones', async () => {
     await ingestLine(WS, SES, userLine('u1', 'hello there'));
-    const [ev] = unembeddedTurnEvents(SES, EMBED_MODEL_ID);
+    const [ev] = await unembeddedTurnEvents(SES, EMBED_MODEL_ID);
     await insertEmbedding({
       workspaceId: WS, sessionId: SES, kind: 'turn', refEventId: ev.id,
       ts: ev.ts, text: 'old fp32 row', modelId: 'Xenova/bge-small-en-v1.5', dim: EMBED_DIM,
@@ -105,7 +105,7 @@ describe('deleteEmbeddingsForOtherModels', () => {
     });
     expect(await deleteEmbeddingsForOtherModels(EMBED_MODEL_ID)).toBe(1);
     // The current-model row still satisfies the pending query (row is embedded).
-    expect(unembeddedTurnEvents(SES, EMBED_MODEL_ID).length).toBe(0);
+    expect((await unembeddedTurnEvents(SES, EMBED_MODEL_ID)).length).toBe(0);
     expect(await deleteEmbeddingsForOtherModels(EMBED_MODEL_ID)).toBe(0);
   });
 });

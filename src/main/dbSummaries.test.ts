@@ -16,7 +16,7 @@ describe('session-summary ingest', () => {
   it('routes a session-summary event into session_summaries as a pending embedding', async () => {
     await ingestLine(WS, SES, line({ type: 'user', uuid: 'u1', timestamp: '2026-07-01T00:00:00Z', message: { content: 'hi' } }));
     await ingestLine(WS, SES, line({ type: 'session-summary', summary: 'Worked on the broker reconnect bug.', timestamp: '2026-07-01T00:01:00Z' }));
-    const pending = unembeddedSummaries(EMBED_MODEL_ID);
+    const pending = await unembeddedSummaries(EMBED_MODEL_ID);
     expect(pending.length).toBe(1);
     expect(pending[0].summary).toContain('broker reconnect');
     expect(pending[0].sourceMaxEventId).toBeGreaterThan(0);

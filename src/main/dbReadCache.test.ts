@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import {
   openDb, closeDb, ingestLine, deleteSession,
   summaryForSession, summaryForWorkspace, tokensSpentSince,
-  SUMMARY_STALE_GRACE_MS,
+  SUMMARY_STALE_GRACE_MS, _summaryRecomputesForTests,
 } from './db.js';
 
 let dir: string;
@@ -35,27 +35,27 @@ describe('summaryForSession cache', () => {
   it('DEBOUNCE (#383): a read inside the 3s grace serves the cached summary; a post-grace read reflects the ingest', async () => {
     // Arrange: prime the cache with a pre-ingest summary (user line only, no tokens).
     await ingestLine(WS, SES, userLine('u1', 'first'));
-    const before = summaryForSession(SES);
+    const before = await summaryForSession(SES);
     expect(before).not.toBeNull();
 
     // Fake timers so we can advance Date.now() without sleeping.
     // NOTE: fixture timestamps are ISO strings parsed by Date.parse() — not
     // affected by fake timers. The only Date.now() consumer here is the cache's
-    // staleAt horizon check in syncCache.ts.
+    // staleAt horizon check in asyncCache.ts.
     vi.useFakeTimers();
     try {
       // Act: ingest an assistant event (adds outputTokens).
       await ingestLine(WS, SES, assistantLine('a1', 100));
 
       // Within grace — cache must serve the same pre-ingest object (no recompute).
-      const withinGrace = summaryForSession(SES);
+      const withinGrace = await summaryForSession(SES);
       expect(withinGrace).toBe(before); // identity proves cache hit (debounce working)
       // outputTokens is unchanged because it is the same cached object.
       expect(withinGrace!.outputTokens).toBe(before!.outputTokens ?? 0);
 
       // Post grace — advance past the stale horizon; cache must recompute.
       vi.advanceTimersByTime(SUMMARY_STALE_GRACE_MS + 100);
-      const afterGrace = summaryForSession(SES);
+      const afterGrace = await summaryForSession(SES);
       expect(afterGrace).not.toBe(before); // different object — was recomputed
       expect(afterGrace!.outputTokens).toBeGreaterThan(before!.outputTokens ?? 0);
     } finally {
@@ -65,47 +65,60 @@ describe('summaryForSession cache', () => {
 
   it('repeated reads between ingests hit the cache (same object identity)', async () => {
     await ingestLine(WS, SES, userLine('u1', 'first'));
-    const a = summaryForSession(SES);
-    const b = summaryForSession(SES);
+    const a = await summaryForSession(SES);
+    const b = await summaryForSession(SES);
     expect(b).toBe(a); // identity, not equality: proves no recompute
   });
 
   it('summaryForWorkspace serves the same cache (funnels into summaryForSession)', async () => {
     await ingestLine(WS, SES, userLine('u1', 'first'));
-    const direct = summaryForSession(SES);
-    const viaWorkspace = summaryForWorkspace(WS);
+    const direct = await summaryForSession(SES);
+    const viaWorkspace = await summaryForWorkspace(WS);
     expect(viaWorkspace).toBe(direct);
   });
 
   it('a non-default topToolsLimit bypasses the cache', async () => {
     await ingestLine(WS, SES, userLine('u1', 'first'));
-    const a = summaryForSession(SES, 3);
-    const b = summaryForSession(SES, 3);
+    const a = await summaryForSession(SES, 3);
+    const b = await summaryForSession(SES, 3);
     expect(b).not.toBe(a); // recomputed each time — deliberate bypass
   });
 
   it('deleteSession invalidates immediately', async () => {
     await ingestLine(WS, SES, userLine('u1', 'first'));
-    expect(summaryForSession(SES)).not.toBeNull();
+    expect(await summaryForSession(SES)).not.toBeNull();
     await deleteSession(SES);
-    expect(summaryForSession(SES)).toBeNull();
+    expect(await summaryForSession(SES)).toBeNull();
   });
 
   it('the cached summary is frozen — decoration throws instead of corrupting the cache', async () => {
     await ingestLine(WS, SES, userLine('u1', 'first'));
-    const s = summaryForSession(SES);
+    const s = await summaryForSession(SES);
     expect(Object.isFrozen(s)).toBe(true);
     expect(() => { (s as unknown as Record<string, unknown>).decorated = true; }).toThrow();
   });
 
   it('reopening a different DB never serves the previous DB values', async () => {
     await ingestLine(WS, SES, userLine('u1', 'first'));
-    expect(summaryForSession(SES)).not.toBeNull();
+    expect(await summaryForSession(SES)).not.toBeNull();
     await closeDb();
     rmSync(dir, { recursive: true, force: true });
     dir = mkdtempSync(join(tmpdir(), 'cf-cache2-'));
     openDb(dir); // fresh empty DB — the cached summary must not leak across
-    expect(summaryForSession(SES)).toBeNull();
+    expect(await summaryForSession(SES)).toBeNull();
+  });
+});
+
+// Concurrent misses share one recompute. The write-during-recompute rules are
+// unit-tested in asyncCache.test.ts: on the SQLite driver a read stores its
+// result before a queued write can commit, so timing here isn't deterministic.
+describe('summaryForSession cache, in flight', () => {
+  it('concurrent misses share one recompute', async () => {
+    await ingestLine(WS, SES, userLine('u1', 'first'));
+    const before = _summaryRecomputesForTests();
+    const [a, b] = await Promise.all([summaryForSession(SES), summaryForSession(SES)]);
+    expect(b).toBe(a);
+    expect(_summaryRecomputesForTests() - before).toBe(1);
   });
 });
 
@@ -113,10 +126,10 @@ describe('tokensSpentSince cache', () => {
   it('STALENESS REGRESSION: an ingested token event is visible immediately', async () => {
     await ingestLine(WS, SES, assistantLine('a1', 100));
     const floor = Date.parse('2026-07-01T00:00:00Z') - 1000;
-    const before = tokensSpentSince(floor);
+    const before = await tokensSpentSince(floor);
     expect(before).toBeGreaterThan(0);
     await ingestLine(WS, SES, assistantLine('a2', 5000));
-    expect(tokensSpentSince(floor)).toBeGreaterThan(before);
+    expect(await tokensSpentSince(floor)).toBeGreaterThan(before);
   });
 
   it('same 15s bucket serves the cache; different bucket recomputes', async () => {
@@ -128,9 +141,9 @@ describe('tokensSpentSince cache', () => {
     await ingestLine(WS, SES, assistantLine('a1', 100));
     const evTs = Date.parse('2026-07-01T00:00:05Z');
     const floor = evTs - 20_000;
-    const a = tokensSpentSince(floor);
-    const b = tokensSpentSince(floor + 14_000); // same 15s bucket key as floor
-    const c = tokensSpentSince(floor + 15_000); // different bucket key, same underlying data
+    const a = await tokensSpentSince(floor);
+    const b = await tokensSpentSince(floor + 14_000); // same 15s bucket key as floor
+    const c = await tokensSpentSince(floor + 15_000); // different bucket key, same underlying data
     expect(b).toBe(a);
     expect(c).toBe(a); // same data → same value, but computed via a different key
   });
@@ -138,8 +151,8 @@ describe('tokensSpentSince cache', () => {
   it('deleteSession clears the spend cache (deleted tokens vanish)', async () => {
     await ingestLine(WS, SES, assistantLine('a1', 5000));
     const floor = Date.parse('2026-07-01T00:00:00Z') - 1000;
-    const before = tokensSpentSince(floor);
+    const before = await tokensSpentSince(floor);
     await deleteSession(SES);
-    expect(tokensSpentSince(floor)).toBeLessThan(before);
+    expect(await tokensSpentSince(floor)).toBeLessThan(before);
   });
 });

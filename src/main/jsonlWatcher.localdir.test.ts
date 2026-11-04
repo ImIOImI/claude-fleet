@@ -30,6 +30,6 @@ describe('local-workspace host-dir ingestion', () => {
     await new Promise((r) => setTimeout(r, 300));
     await w.stop();
 
-    expect(costForWorkspace('ws-local').outputTokens).toBe(1000);
+    expect((await costForWorkspace('ws-local')).outputTokens).toBe(1000);
   });
 });

@@ -39,6 +39,6 @@ describe('subagent ingestion', () => {
     await new Promise((r) => setTimeout(r, 400));
     await w.stop();
 
-    expect(costForSession(PARENT).outputTokens).toBe(500);
+    expect((await costForSession(PARENT)).outputTokens).toBe(500);
   });
 });

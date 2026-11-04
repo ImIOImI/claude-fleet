@@ -3,9 +3,9 @@
 // function is injected so this module has no dependency on the model runtime
 // (and tests can stub it).
 import type Database from 'better-sqlite3';
-import { insertEmbeddings, unembeddedTurnEvents, unembeddedSummaries, getDb } from './db.js';
+import { insertEmbeddings, unembeddedTurnEvents, unembeddedSummaries } from './db.js';
 import { encodeVector, decodeVector, topK, EMBED_MODEL_ID, EMBED_DIM } from './vectors.js';
-import { perfSpan } from './perf.js';
+import { perfSpan, perfSpanAsync } from './perf.js';
 
 export type EmbedFn = (texts: string[]) => Promise<Float32Array[]>;
 
@@ -38,9 +38,9 @@ export async function indexSessionTurns(sessionId: string, embed: EmbedFn, batch
   // unembeddedTurnEvents only returns rows still lacking an embedding, so the
   // cursor advances naturally as rows are inserted.
   for (;;) {
-    // Sync SQLite read on the main loop, once per session in the startup
-    // backfill — spanned so stalls it causes self-attribute.
-    const pending = perfSpan('claude_fleet.index.pending_turns',
+    // Once per session in the startup backfill — spanned so stalls it causes
+    // self-attribute.
+    const pending = await perfSpanAsync('claude_fleet.index.pending_turns',
       () => unembeddedTurnEvents(sessionId, EMBED_MODEL_ID, batch), { session_id: sessionId });
     if (pending.length === 0) break;
 
@@ -94,8 +94,10 @@ export async function searchTranscripts(
   query: string,
   allowedWorkspaces: Set<string>,
   embed: EmbedFn,
-  opts: { limit?: number; kind?: 'turn' | 'summary' } = {},
-  db: Database.Database = getDb(),
+  opts: { limit?: number; kind?: 'turn' | 'summary' },
+  /** The MCP server's read-only connection: search stays raw better-sqlite3
+   *  (SPEC §11); Postgres gets its own pgvector search in part 3. */
+  db: Database.Database,
 ): Promise<SearchHit[]> {
   const ids = [...allowedWorkspaces];
   if (ids.length === 0 || query.trim().length === 0) return [];
@@ -125,7 +127,7 @@ export async function searchTranscripts(
 export async function indexSessionSummaries(embed: EmbedFn, batch = EMBED_BATCH): Promise<number> {
   let total = 0;
   for (;;) {
-    const pending = perfSpan('claude_fleet.index.pending_summaries', () => unembeddedSummaries(EMBED_MODEL_ID, batch));
+    const pending = await perfSpanAsync('claude_fleet.index.pending_summaries', () => unembeddedSummaries(EMBED_MODEL_ID, batch));
     if (pending.length === 0) break;
     const vecs = await embed(pending.map((p) => p.summary.slice(0, MAX_CHARS)));
     total += await insertEmbeddings(

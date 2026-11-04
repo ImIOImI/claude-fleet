@@ -38,7 +38,7 @@ describe('indexSessionTurns', () => {
 
     const inserted = await indexSessionTurns(SES, stubEmbed);
     expect(inserted).toBe(2); // two text turns; tool-only assistant skipped
-    expect(unembeddedTurnEvents(SES, EMBED_MODEL_ID).length).toBe(0);
+    expect((await unembeddedTurnEvents(SES, EMBED_MODEL_ID)).length).toBe(0);
   });
 
   it('is idempotent — a second run inserts nothing', async () => {
