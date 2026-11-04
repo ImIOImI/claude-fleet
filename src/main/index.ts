@@ -1,14 +1,14 @@
 import { app, BrowserWindow, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
 import { registerIpc } from './ipc.js';
-import { openDb, closeDb, deleteEmbeddingsForOtherModels, recordError, listSessions } from './db.js';
+import { openDb, closeDb, deleteEmbeddingsForOtherModels, recordError, listSessions, sessionCaptureSignals, isAutomationSession } from './db.js';
 import { initPerf, shutdownPerf, perfSpan, perfSpanAsync } from './perf.js';
 import { PerfStore } from './perfStore.js';
 import { resolvePerfConfig } from './perfConfig.js';
 import { getPerfTelemetry, getPerfOtlp, getKnowledgeCapture, getKnowledgeCaptureDailyCap } from './config.js';
 import { instrumentIpcHandle } from './perfIpc.js';
 import { EMBED_MODEL_ID } from './vectors.js';
-import { startMcpServer, stopMcpServer, ensureWorkspaceSocket, setMcpStatusListener, setQueryEmbedder, setClaimHandlers, setCaptureSettingsHandlers } from './mcpServer.js';
+import { startMcpServer, stopMcpServer, ensureWorkspaceSocket, setMcpStatusListener, setQueryEmbedder, setClaimHandlers, setCaptureSettingsHandlers, setSearchHitHook } from './mcpServer.js';
 import { broadcastMcpStatus } from './mcpStatusBroadcast.js';
 import { ensureBuiltinLoadouts } from './loadouts.js';
 import { JsonlWatcher } from './jsonlWatcher.js';
@@ -39,6 +39,11 @@ import { CaptureSettingsLogStore } from './claims/captureSettingsLog.js';
 import { createCaptureSettingsService } from './claims/captureSettingsService.js';
 import { onCaptureSettingsChanged } from './claims/captureSettingsEvents.js';
 import { ClaimService } from './claims/claimService.js';
+import { CaptureScheduler } from './claims/captureScheduler.js';
+import { loadCaptureForks } from './claims/captureForks.js';
+import { runCapture } from './claims/captureExec.js';
+import { effectiveCaptureSettings } from '../preload/captureSettings.js';
+import { randomUUID } from 'node:crypto';
 
 // Mock mode is for UI iteration without Docker; no real JSONLs exist, so the
 // watcher and DB stay dormant.
@@ -52,6 +57,7 @@ let inboxStore: InboxStore | null = null;
 // open. Reused by the background capture scheduler (Task 9).
 let captureRuns: CaptureRunStore | null = null;
 let claimService: ClaimService | null = null;
+let captureScheduler: CaptureScheduler | null = null;
 let presence: ReturnType<typeof startPresence> | null = null;
 // Notification + automation timers (#457): stopped in before-quit, ahead of inboxStore.close().
 let notifySvc: ReturnType<typeof registerNotifyIpc> | null = null;
@@ -270,6 +276,40 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     // saved setting — not dependent on the renderer's later workspace:list poll.
     for (const m of manifests) setWorkspaceDefault(m.id, m.mirror.default);
     await perfSpanAsync('claude_fleet.boot.jsonl_watcher_start', () => jsonlWatcher.start(manifests.map((m) => m.id)));
+    // Knowledge capture (#483 §5): background capture forks, triggered by
+    // context bands on ingest and by search hits from the MCP search tools.
+    if (inboxStore && captureRuns && claimService) {
+      const runs = captureRuns;
+      const claimsSvc = claimService;
+      loadCaptureForks(await runs.forkSessionIds());
+      const scheduler = new CaptureScheduler({
+        runs,
+        signals: (id) => sessionCaptureSignals(id),
+        isAutomation: (id) => isAutomationSession(id),
+        globalEnabled: () => getKnowledgeCapture(),
+        settings: async (ws) => {
+          const m = await readWorkspaceManifest(ws);
+          return m ? effectiveCaptureSettings(m) : null;
+        },
+        dailyCap: () => getKnowledgeCaptureDailyCap(),
+        target: async (ws) => {
+          const m = await readWorkspaceManifest(ws);
+          if (!m) return null;
+          if (m.kind === 'container') {
+            return { kind: 'container', workspaceId: ws, cwd: `/workspace/${m.workspaceSubdir}`.replace(/\/$/, '') || '/workspace' };
+          }
+          return { kind: 'local', workspaceId: ws, launcher: m.launcher ?? { mode: 'native' }, workspaceRoot: m.workspaceRoot };
+        },
+        topTopics: async (ws) => (await claimsSvc.search(ws, { query: 'fleet', limit: 20 })).results.flatMap((r) => r.topics).slice(0, 15),
+        exec: (t, args, timeoutMs) => runCapture(t, args, timeoutMs),
+        newUuid: () => randomUUID(),
+        now: () => Date.now(),
+        log: (message, extra) => logError({ source: 'main', level: 'info', type: 'knowledge-capture', message, extra })
+      });
+      captureScheduler = scheduler;
+      jsonlWatcher.on('ingest', (e: { workspaceId: string; sessionId: string }) => scheduler.onIngest(e));
+      setSearchHitHook((e) => scheduler.onSearchHit(e));
+    }
     // Local-backend workspaces write to the host's real ~/.claude, not the
     // per-workspace state dir — register those host project dirs so their
     // (and their subagents') token spend is ingested (#plan-usage).
@@ -405,6 +445,9 @@ app.on('before-quit', async () => {
   notifySvc?.stop();
   notifySvc = null;
   setCaptureSettingsHandlers(null);
+  setSearchHitHook(null);
+  captureScheduler?.stop();
+  captureScheduler = null;
   auto?.stop();
   auto = null;
   await jsonlWatcher?.stop();

@@ -38,6 +38,7 @@ import { costFor } from './pricing.js';
 import { logError } from './errorLog.js';
 import { ensureContainerBridgeScript } from './mcpContainerBridge.js';
 import { searchTranscripts, type EmbedFn } from './transcriptIndex.js';
+import { sessionIdsFromClaimResults, sessionIdsFromQueryRows, sessionIdsFromTranscriptHits, type SearchHitEvent } from './claims/searchHits.js';
 import { describeListenerError, type ListenerScope } from './mcpListenerError.js';
 import { type McpStatus } from './mcpStatusBroadcast.js';
 import {
@@ -184,6 +185,22 @@ export function setCaptureSettingsHandlers(h: CaptureSettingsHandlers | null): v
 function captureSettingsApi(): CaptureSettingsHandlers {
   if (!captureSettingsHandlers) throw new Error('knowledge capture settings are unavailable');
   return captureSettingsHandlers;
+}
+
+/** Knowledge capture (#483 §5): told which sessions search_transcripts /
+ *  search_claims / query results referenced, so the scheduler can capture
+ *  them. Injected by index.ts. Synchronous and fire-and-forget: it must never
+ *  delay or fail the search response. */
+export type SearchHitHook = (e: SearchHitEvent) => void;
+let searchHitHook: SearchHitHook | null = null;
+export function setSearchHitHook(fn: SearchHitHook | null): void { searchHitHook = fn; }
+function emitSearchHits(ctx: ToolCtx, tool: SearchHitEvent['tool'], query: string, sessionIds: string[]): void {
+  if (!searchHitHook || sessionIds.length === 0) return;
+  try {
+    searchHitHook({ callerWorkspaceId: ctx.callerId, allowedWorkspaces: new Set(ctx.allowedWorkspaces), tool, query: query.slice(0, 1000), sessionIds });
+  } catch (err) {
+    logError({ source: 'main', type: 'search-hit-hook', level: 'warn', message: String(err), workspaceId: ctx.callerId });
+  }
 }
 
 /** Fleet-wide standing rule, delivered as the MCP initialize `instructions`
@@ -1071,6 +1088,7 @@ export const TOOLS: Tool[] = [
       const hits = await searchTranscripts(a.query, allowed, queryEmbedder, { limit, kind }, _db);
       // Record one search-impression per distinct result session (#207).
       noteSearchResults(ctx.callerId, a.query, (hits as Array<{ sessionId?: string }>).map((h) => h.sessionId ?? '').filter(Boolean));
+      emitSearchHits(ctx, 'search_transcripts', a.query, sessionIdsFromTranscriptHits(hits));
       return hits;
     },
   },
@@ -1220,6 +1238,7 @@ export const TOOLS: Tool[] = [
             `result too large (${json.length} bytes > ${MAX_QUERY_BYTES}); add LIMIT or aggregate server-side`
           );
         }
+        emitSearchHits(ctx, 'query', a.sql, sessionIdsFromQueryRows(capped));
         return capped;
       } finally {
         snap.close();
@@ -1747,7 +1766,13 @@ export const TOOLS: Tool[] = [
       },
       required: ['query']
     },
-    run: (_db, a, ctx) => claims().search(ctx.callerId, a)
+    run: (_db, a, ctx) => {
+      const api = claims(); // throws synchronously when unwired (contract test)
+      return api.search(ctx.callerId, a).then((r) => {
+        emitSearchHits(ctx, 'search_claims', typeof a.query === 'string' ? a.query : '', sessionIdsFromClaimResults(r));
+        return r;
+      });
+    }
   },
   {
     name: 'retract_claim',

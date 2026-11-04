@@ -15,7 +15,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setSessionMappingHandler, setSummaryStatusHandler, setQueryEmbedder, setUsageRecorder, setConfigResolver, setClaimHandlers, setCaptureSettingsHandlers, STANDING_RULE, _resetTelemetryForTests, type ToolCtx } from './mcpServer.js';
+import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setSessionMappingHandler, setSummaryStatusHandler, setQueryEmbedder, setUsageRecorder, setConfigResolver, setClaimHandlers, setCaptureSettingsHandlers, setSearchHitHook, STANDING_RULE, _resetTelemetryForTests, type ToolCtx } from './mcpServer.js';
+import type { SearchHitEvent } from './claims/searchHits.js';
 import { EMBED_DIM, EMBED_MODEL_ID } from './vectors.js';
 import { closeDb, openDb } from './db.js';
 import { PerfStore } from './perfStore.js';
@@ -899,5 +900,51 @@ describe('capture settings tools (#483 §5a)', () => {
   });
   it('fails clearly when unavailable', () => {
     expect(() => tool('get_capture_settings').run(makeDb(), {}, ctxA)).toThrow(/knowledge capture settings are unavailable/);
+  });
+});
+
+describe('search-hit capture hook (#483 §5)', () => {
+  afterEach(() => { setSearchHitHook(null); setClaimHandlers(null); });
+  const unitEmbed = async (texts: string[]) => texts.map(() => { const v = new Float32Array(EMBED_DIM); v[0] = 1; return v; });
+
+  it('search_transcripts reports result sessions with the query and the caller scope', async () => {
+    const seen: SearchHitEvent[] = [];
+    setSearchHitHook((e) => seen.push(e));
+    setQueryEmbedder(unitEmbed);
+    seedEmbedding(db, WS_A, 'sa');
+    await tool('search_transcripts').run(db, { query: 'broker hang' }, ctxA);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ callerWorkspaceId: WS_A, tool: 'search_transcripts', query: 'broker hang', sessionIds: ['sa'] });
+    expect([...seen[0].allowedWorkspaces]).toEqual([WS_A]);
+  });
+  it('search_claims reports the sessions behind the returned claims', async () => {
+    const seen: SearchHitEvent[] = [];
+    setSearchHitHook((e) => seen.push(e));
+    setClaimHandlers({
+      record: async () => ({}), retract: async () => ({}),
+      search: async () => ({ results: [{ sources: [{ sessionId: 's1' }] }] })
+    });
+    await tool('search_claims').run(makeDb(), { query: 'q' }, ctxA);
+    expect(seen[0]).toMatchObject({ tool: 'search_claims', query: 'q', sessionIds: ['s1'] });
+  });
+  it('query reports session ids from the result rows', () => {
+    const { db: fdb, cleanup } = makeFileDb();
+    try {
+      const seen: SearchHitEvent[] = [];
+      setSearchHitHook((e) => seen.push(e));
+      tool('query').run(fdb, { sql: 'SELECT id AS session_id FROM sessions' }, ctxA);
+      expect(seen[0]).toMatchObject({ tool: 'query', query: 'SELECT id AS session_id FROM sessions' });
+      expect(seen[0].sessionIds.length).toBeGreaterThan(0);
+    } finally { fdb.close(); cleanup(); }
+  });
+  it('a throwing hook never fails the search, and no results means no event', async () => {
+    setSearchHitHook(() => { throw new Error('boom'); });
+    setClaimHandlers({ record: async () => ({}), retract: async () => ({}), search: async () => ({ results: [{ sources: [{ sessionId: 's1' }] }] }) });
+    await expect(tool('search_claims').run(makeDb(), { query: 'q' }, ctxA)).resolves.toBeTruthy();
+    const seen: SearchHitEvent[] = [];
+    setSearchHitHook((e) => seen.push(e));
+    setClaimHandlers({ record: async () => ({}), retract: async () => ({}), search: async () => ({ results: [] }) });
+    await tool('search_claims').run(makeDb(), { query: 'q' }, ctxA);
+    expect(seen).toHaveLength(0);
   });
 });
