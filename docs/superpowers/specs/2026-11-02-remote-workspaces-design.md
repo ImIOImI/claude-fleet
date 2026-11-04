@@ -184,7 +184,9 @@ takes effect within that window.
 
 **GitHub first: device flow.**
 - The desktop signs in with the **OAuth device flow** (`POST /login/device/code`, then poll
-  `/login/oauth/access_token`) and requests scopes `read:user read:org`.
+  `/login/oauth/access_token`) and requests scopes `read:org read:packages`. A token with no scope
+  already reads the public profile (`login`, `id`, `name`, `avatar_url`), so `read:user` isn't
+  needed. `read:packages` lets the same token pull private `ghcr.io` loadout sources.
 - It uses **claude-fleet's own OAuth app**, separate from the `gh` CLI. Every `gh auth login`
   counts against the gh app's per-user token cap, and the oldest token is revoked when a new one
   is minted, so sharing gh's app would sign people out at random. An organisation that restricts
@@ -198,10 +200,20 @@ takes effect within that window.
 - **Later providers.** OIDC (for example Entra ID) is a second provider: an ID token is verified
   against the issuer's JWKS, and groups map to teams. It isn't in the first release.
 - **Machines.** Callers such as CI use **GitHub App installation tokens**. An installation token
-  can't call `GET /user` (403 "Resource not accessible by integration"), so the provider verifies
-  it with an installation-scoped call (`GET /installation/repositories`) and maps it to a **bot
-  identity configured explicitly** in the host config: `machines: [{ appId, login:
-  "acme-reviewer[bot]", tier }]`.
+  can't call `GET /user` (403 "Resource not accessible by integration"), so the provider asks
+  GraphQL `viewer` (which returns the App's bot, `<slug>[bot]`), resolves the slug's app id with
+  `GET /apps/<slug>`, and maps it to a **bot identity configured explicitly** in the host config:
+  `machines: [{ appId, login: "acme-reviewer[bot]", org?, tier }]`. Each rule is bound to an org
+  (`org`, or inherited from `identity.org`; one of them is required), and the provider then lists
+  `GET /installation/repositories` (all pages, bounded) and requires **every** repository to be
+  owned by that org, with at least one; a pagination link off `api.github.com` is refused too —
+  otherwise the token is refused (`forbidden`). An App's tier applies only to installations
+  within its org. Org binding does **not** make GitHub-operated shared Apps safe (a fork PR's
+  workflow gets a `github-actions[bot]` token on the org's own repo), so `parseGrantConfig`
+  rejects their app ids — `github-actions` (15368) and `dependabot` (29110) — and tells the
+  operator to use a dedicated org-owned GitHub App (an OIDC provider for Actions is future work).
+  Machines resolve to a tier **by `appId`**, never by login; machine logins must be unique
+  (case-insensitively).
 
 **Grants.** The host config maps GitHub teams (and, optionally, individual logins) to tiers. This
 extends the committee grant model (§11 *Cross-workspace committee control*: `read`/`post`/`pause`)
@@ -426,8 +438,9 @@ Nothing remote is shown stale, because remote data is live-only.
 
   Vault contents, local transcripts of non-published workspaces, `config.json` and local inbox
   rows never leave the desktop.
-- **Token storage.** The GitHub token is stored in the safeStorage vault in a reserved app-level
-  bag (`"__app": { "identity:github": … }`) and is never sent to the renderer. `RemoteClient`
+- **Token storage.** The GitHub token is stored in the safeStorage vault in the reserved,
+  host-only scope `identity:github` (key `TOKEN`; it follows the `loadout-source:` pattern) and
+  is never sent to the renderer. `RemoteClient`
   (main) attaches it to requests. The renderer sees only `{login, name, avatar}`. A degraded
   vault (no keychain) means sign-in isn't persisted, and the user signs in each run.
 - **Who can do what** is the tier table in §5, enforced per route and per frame on the host. The
@@ -469,7 +482,7 @@ Ordered. Each one ships on its own and leaves the app working.
 2. **(b) Identity provider + GitHub device flow + grants.**
    - The `IdentityProvider` interface, the `github` provider (device flow, `/user`, `/user/teams`,
      SSO detection), machine tokens, grant resolution (team/login → tier) as a pure tested module,
-     and the vault `__app` bag.
+     and the vault `identity:github` scope.
    - Settings → Account sign-in and sign-out.
    - *Ships:* a signed-in identity on the desktop, and the grant module ready for hosts.
 3. **(c) `fleet-host` + `kind: 'remote'` + transport.**
@@ -521,7 +534,7 @@ Each change lands in the same commit as the sub-project that causes it.
   - §8 *Startup*: the store choice.
 - **(b):**
   - §6: the `identity:*` channels (sign-in start/poll/status/sign-out).
-  - §7 *Vault layout*: the `__app` bag.
+  - §7 *Vault layout*: the `identity:github` scope.
   - §9: token handling.
   - §8: Settings → Account.
 - **(c):**
