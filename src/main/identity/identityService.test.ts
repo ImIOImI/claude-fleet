@@ -500,6 +500,21 @@ describe('IdentityService review fixes', () => {
     expect(await svc.packagesToken()).toBeNull();
   });
 
+  it.each(['cancel', 'start'] as const)('%s during a refresh save keeps the valid sign-in', async (action) => {
+    const { v, svc } = lockedSetup();
+    v.store.set('identity:github|TOKEN', TOKEN);
+    v.store.set('identity:github|PROFILE', JSON.stringify({ identity: IDENT, scopes: ['read:org', 'read:packages'], sso: null, verifiedAt: 0 }));
+    v.arm();
+    const refreshing = svc.status({ refresh: true });
+    await vi.waitFor(() => expect(v.held()).toBe(true));
+    if (action === 'cancel') svc.signInCancel();
+    else await svc.signInStart();
+    v.release();
+    expect((await refreshing).signedIn).toBe(true);
+    expect([...v.store.keys()].sort()).toEqual(['identity:github|PROFILE', 'identity:github|TOKEN']);
+    expect(await svc.packagesToken() === TOKEN).toBe(true);
+  });
+
   it('a concurrent poll while the profile is being read says pending, not "no sign-in"', async () => {
     const { svc, github, advance } = lockedSetup();
     const gate = deferred<GithubProbe>();
@@ -536,5 +551,27 @@ describe('IdentityService review fixes', () => {
     const st = await s.svc.status({ refresh: true });
     expect(st).toMatchObject({ scopes: [], packagesAccess: false });
     expect(await s.svc.packagesToken()).toBeNull();
+  });
+});
+
+describe('IdentityService throttled polling', () => {
+  it('backs off after a throttled (429/5xx) network result', async () => {
+    const s = setup({ polls: [new DeviceFlowError('network', 'GitHub is temporarily unavailable (HTTP 503).', true), DONE] });
+    await s.svc.signInStart();
+    s.advance(5000);
+    expect(await s.svc.signInPoll()).toEqual({ state: 'pending', intervalMs: 10_000 });
+    s.advance(5000);
+    expect((await s.svc.signInPoll()).state).toBe('pending');
+    expect(s.github.pollDeviceToken).toHaveBeenCalledTimes(1);
+    s.advance(5000);
+    expect((await s.svc.signInPoll()).state).toBe('done');
+    expect(s.github.pollDeviceToken).toHaveBeenLastCalledWith('Iv1.testclient', 'dc-secret', 10_000);
+  });
+
+  it('keeps the interval after a plain transport failure', async () => {
+    const s = setup({ polls: [new DeviceFlowError('network', 'offline')] });
+    await s.svc.signInStart();
+    s.advance(5000);
+    expect(await s.svc.signInPoll()).toEqual({ state: 'pending', intervalMs: 5000 });
   });
 });

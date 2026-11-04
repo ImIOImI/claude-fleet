@@ -146,3 +146,22 @@ describe('transient GitHub failures are network errors', () => {
     await expect(pollDeviceToken(CLIENT, 'dc', 5000)).rejects.toMatchObject({ kind: 'unexpected' });
   });
 });
+
+describe('throttling', () => {
+  it('maps a JSON 429 without a recognised error to throttled network', async () => {
+    stub(() => json({ message: 'API rate limit exceeded' }, 429));
+    await expect(pollDeviceToken(CLIENT, 'dc', 5000)).rejects.toMatchObject({ kind: 'network', throttled: true });
+    stub(() => json({ error: 'rate_limited' }, 429));
+    await expect(requestDeviceCode(CLIENT)).rejects.toMatchObject({ kind: 'network', throttled: true });
+  });
+  it('marks 5xx as throttled and a transport failure as not', async () => {
+    stub(() => new Response('x', { status: 502 }));
+    await expect(pollDeviceToken(CLIENT, 'dc', 5000)).rejects.toMatchObject({ kind: 'network', throttled: true });
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('fetch failed'); }));
+    await expect(pollDeviceToken(CLIENT, 'dc', 5000)).rejects.toMatchObject({ kind: 'network', throttled: false });
+  });
+  it('still honours a recognised error on a 429', async () => {
+    stub(() => json({ error: 'access_denied' }, 429));
+    await expect(pollDeviceToken(CLIENT, 'dc', 5000)).rejects.toMatchObject({ kind: 'denied' });
+  });
+});

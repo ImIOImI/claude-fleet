@@ -3,7 +3,7 @@
 // ipc.ts injects the real vault + client-id resolver; tests inject fakes.
 
 import { GITHUB_IDENTITY_SCOPE } from '../vaultScopes.js';
-import { DeviceFlowError, pollDeviceToken, requestDeviceCode, type DeviceCode, type PollResult } from './deviceFlow.js';
+import { DeviceFlowError, SLOW_DOWN_STEP_MS, pollDeviceToken, requestDeviceCode, type DeviceCode, type PollResult } from './deviceFlow.js';
 import { createGithubProvider, type GithubProbe } from './githubProvider.js';
 import { hasPackagesRead, type SsoHint } from './githubHeaders.js';
 import { IdentityError, displayName, type UserIdentity } from './types.js';
@@ -174,22 +174,25 @@ export class IdentityService {
     return next;
   }
 
-  /** False when the epoch moved before or during the write (anything written is wiped). */
+  /** False when superseded before the write began. A clear() requested during
+   *  the write is queued behind it, so it still wins. */
   private save(s: Saved, epoch: number): Promise<boolean> {
     return this.serial(async () => {
       if (epoch !== this.epoch) return false;
       if (!(await this.persisted())) {
-        if (epoch !== this.epoch) return false;
         this.memory = s;
         return true;
       }
       // PROFILE first: a TOKEN is never visible without its profile.
       await this.vault.setSecret(GITHUB_IDENTITY_SCOPE, PROFILE_KEY, JSON.stringify(s.profile));
-      if (epoch === this.epoch) await this.vault.setSecret(GITHUB_IDENTITY_SCOPE, TOKEN_KEY, s.token);
-      if (epoch === this.epoch) return true;
-      await this.clearNow();
-      return false;
+      await this.vault.setSecret(GITHUB_IDENTITY_SCOPE, TOKEN_KEY, s.token);
+      return true;
     });
+  }
+
+  /** Read after every queued write and clear has settled. */
+  private settled(): Promise<Saved | null> {
+    return this.serial(() => this.load());
   }
 
   private async clearNow(): Promise<void> {
@@ -238,7 +241,7 @@ export class IdentityService {
           token: saved.token,
           profile: { identity: probe.identity, scopes: probe.scopes, sso: probe.sso, verifiedAt: this.now() }
         };
-        if (!(await this.save(next, epoch))) return this.toStatus(await this.load());
+        if (!(await this.save(next, epoch)) || epoch !== this.epoch) return this.toStatus(await this.settled());
         saved = next;
         this.notice = null;
       } catch (err) {
@@ -286,6 +289,7 @@ export class IdentityService {
     } catch (err) {
       if (this.pending !== p) return { state: 'error', message: CANCELLED };
       if (err instanceof DeviceFlowError && err.kind === 'network') {
+        if (err.throttled) p.intervalMs += SLOW_DOWN_STEP_MS;
         p.nextPollAt = this.now() + p.intervalMs;
         return { state: 'pending', intervalMs: p.intervalMs };
       }
@@ -323,6 +327,10 @@ export class IdentityService {
     const saved: Saved = { token, profile: { identity: probe.identity, scopes, sso: probe.sso, verifiedAt: this.now() } };
     const saveEpoch = ++this.epoch;
     if (!(await this.save(saved, saveEpoch))) return { state: 'error', message: CANCELLED };
+    if (saveEpoch !== this.epoch) {
+      const now = await this.settled();
+      if (now?.token !== token) return { state: 'error', message: CANCELLED };
+    }
     return { state: 'done', status: await this.toStatus(saved) };
   }
 

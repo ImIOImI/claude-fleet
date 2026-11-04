@@ -8,8 +8,18 @@ export const GITHUB_DEVICE_PAGE = 'https://github.com/login/device';
 export const GITHUB_SCOPES: readonly string[] = ['read:org', 'read:packages'];
 
 const GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code';
-const SLOW_DOWN_STEP_MS = 5000;
+export const SLOW_DOWN_STEP_MS = 5000;
 const DEFAULT_INTERVAL_S = 5;
+const KNOWN_ERRORS = new Set([
+  'authorization_pending',
+  'slow_down',
+  'expired_token',
+  'access_denied',
+  'device_flow_disabled',
+  'incorrect_client_credentials',
+  'incorrect_device_code',
+  'unsupported_grant_type'
+]);
 
 export interface DeviceCode {
   deviceCode: string;
@@ -24,10 +34,13 @@ export type DeviceFlowErrorKind = 'expired' | 'denied' | 'disabled' | 'bad-clien
 /** Messages are user-facing and never carry the token or device code. */
 export class DeviceFlowError extends Error {
   readonly kind: DeviceFlowErrorKind;
-  constructor(kind: DeviceFlowErrorKind, message: string) {
+  /** GitHub answered 429/5xx: retry, but back off. */
+  readonly throttled: boolean;
+  constructor(kind: DeviceFlowErrorKind, message: string, throttled = false) {
     super(message);
     this.name = 'DeviceFlowError';
     this.kind = kind;
+    this.throttled = throttled;
   }
 }
 
@@ -45,7 +58,7 @@ async function post(url: string, params: Record<string, string>): Promise<Record
   } catch (err) {
     throw new DeviceFlowError('network', `Couldn't reach github.com (${(err as Error).name}). Check your network.`);
   }
-  const unavailable = () => new DeviceFlowError('network', `GitHub is temporarily unavailable (HTTP ${res.status}). Try again shortly.`);
+  const unavailable = () => new DeviceFlowError('network', `GitHub is temporarily unavailable (HTTP ${res.status}). Try again shortly.`, true);
   if (res.status >= 500) throw unavailable();
   let body: unknown = null;
   try {
@@ -57,6 +70,8 @@ async function post(url: string, params: Record<string, string>): Promise<Record
     if (res.status === 429) throw unavailable();
     throw new DeviceFlowError('unexpected', `GitHub answered HTTP ${res.status} without JSON`);
   }
+  const error = (body as { error?: unknown }).error;
+  if (res.status === 429 && !(typeof error === 'string' && KNOWN_ERRORS.has(error))) throw unavailable();
   return body as Record<string, unknown>;
 }
 
