@@ -3,7 +3,7 @@ import { mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { InboxStore, INBOX_SCHEMA_VERSION } from './inboxDb.js';
+import { InboxStore, INBOX_SCHEMA_VERSION, MIGRATIONS } from './inboxDb.js';
 
 const WS = { kind: 'workspace', id: 'W1' } as const;
 const USER = { kind: 'user', id: null } as const;
@@ -189,6 +189,63 @@ describe('InboxStore.open', () => {
     expect(raw.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'proposals_status'`).get()).toBeTruthy();
     store.close();
   });
+  it('v6 → v7 rebuilds proposals without losing a row, and adds the new v7 objects', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'inbox-v6v7-'));
+    const file = path.join(dir, 'inbox.db');
+    const raw = new Database(file);
+    for (let v = 1; v <= 6; v++) {
+      raw.transaction(() => {
+        raw.exec(MIGRATIONS[v]);
+        raw.pragma(`user_version = ${v}`);
+      })();
+    }
+    const insProposal = raw.prepare(
+      `INSERT INTO proposals (id, kind, proposer_kind, proposer_id, rationale, status, items, note, created_at, decided_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    // All optional columns NULL.
+    insProposal.run('P-new', 'new', 'workspace', null, null, 'pending', '[]', null, 1000, null);
+    // All optional columns non-NULL, including a unicode rationale.
+    insProposal.run('P-change', 'change', 'user', 'U1', 'café ☕ 更新 — widen the kind CHECK', 'approved', '[{"a":1}]', 'noted', 2000, 2500);
+    insProposal.run('P-batch', 'batch', 'workspace', 'W9', null, 'rejected', '[{"b":2},{"c":3}]', 'no thanks', 3000, 3100);
+    raw.prepare(
+      `INSERT INTO capture_runs (id, workspace_id, session_id, fork_session_id, trigger, status, claims_recorded, usage, error, started_at, ended_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run('R1', 'W1', 'S1', 'F1', 'ctx-85', 'done', 2, JSON.stringify({ in: 1, out: 2 }), null, 500, 600);
+    const before = raw.prepare(
+      `SELECT id, kind, proposer_kind, proposer_id, rationale, status, items, note, created_at, decided_at FROM proposals ORDER BY id`
+    ).all() as Array<Record<string, unknown>>;
+    raw.close();
+
+    store = InboxStore.open(dir);
+    const rawHandle = (store as unknown as { raw: import('better-sqlite3').Database }).raw;
+
+    expect(rawHandle.pragma('user_version', { simple: true })).toBe(7);
+    expect(rawHandle.pragma('integrity_check', { simple: true })).toBe('ok');
+
+    const after = rawHandle.prepare(
+      `SELECT id, kind, proposer_kind, proposer_id, rationale, status, items, note, created_at, decided_at, payload FROM proposals ORDER BY id`
+    ).all() as Array<Record<string, unknown>>;
+    expect(after.map(({ payload: _payload, ...rest }) => rest)).toEqual(before);
+    expect(after.every((r) => r.payload === null)).toBe(true);
+
+    expect(rawHandle.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'proposals_status'`).get()).toBeTruthy();
+    const insKind = (kind: string) => rawHandle.prepare(
+      `INSERT INTO proposals (id, kind, proposer_kind, status, items, created_at) VALUES (?, ?, 'workspace', 'pending', '[]', 1)`
+    ).run(`chk-${kind}`, kind);
+    expect(() => insKind('capture-settings')).not.toThrow();
+    expect(() => insKind('bogus')).toThrow(/CHECK constraint/);
+
+    const run = rawHandle.prepare(`SELECT * FROM capture_runs WHERE id = 'R1'`).get() as Record<string, unknown>;
+    expect(run).toMatchObject({
+      id: 'R1', workspace_id: 'W1', session_id: 'S1', fork_session_id: 'F1', trigger: 'ctx-85',
+      status: 'done', started_at: 500, ended_at: 600, user_turns: null
+    });
+
+    expect(rawHandle.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'capture_settings_log'`).get()).toBeTruthy();
+    expect(readdirSync(dir).some((f) => /^inbox\.db\.bak-v6-\d+$/.test(f))).toBe(true);
+  });
+
   it('backs up an existing older database before migrating', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'inbox-'));
     const old = new Database(path.join(dir, 'inbox.db'));

@@ -14,7 +14,10 @@ import type { InboxDb, TodoRow } from '../store/inboxSchema.js';
 
 export const INBOX_SCHEMA_VERSION = 7;
 
-const MIGRATIONS: Record<number, string> = {
+/** @internal for tests — lets a migration test build a real file DB at an
+ *  older schema version (running a prefix of these) without duplicating the
+ *  SQL here. Not part of the module's public contract. */
+export const MIGRATIONS: Record<number, string> = {
   1: `
     CREATE TABLE todos (
       id TEXT PRIMARY KEY,

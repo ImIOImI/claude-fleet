@@ -1,6 +1,6 @@
 import { app, BrowserWindow, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
-import { registerIpc } from './ipc.js';
+import { registerIpc, invalidateWorkspaceList } from './ipc.js';
 import { openDb, closeDb, deleteEmbeddingsForOtherModels, recordError, listSessions, sessionCaptureSignals, isAutomationSession } from './db.js';
 import { initPerf, shutdownPerf, perfSpan, perfSpanAsync } from './perf.js';
 import { PerfStore } from './perfStore.js';
@@ -409,7 +409,8 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       dailyCap: () => getKnowledgeCaptureDailyCap(),
       capturesToday: () => runsForCount.countSince(startOfLocalDay(Date.now())),
       workspaceName: async (id) => (await readWorkspaceManifest(id))?.name ?? id,
-      now: () => Date.now()
+      now: () => Date.now(),
+      invalidateWorkspaceList
     });
     proposals.setCaptureSettingsApplier((ws, change, proposalId) => captureSettings.applyApproved(ws, change, proposalId));
     setCaptureSettingsHandlers({ get: (c) => captureSettings.get(c), set: (c, a) => captureSettings.set(c, a) });

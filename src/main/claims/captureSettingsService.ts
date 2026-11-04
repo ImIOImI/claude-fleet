@@ -25,6 +25,11 @@ export interface CaptureSettingsDeps {
   capturesToday(): Promise<number>;
   workspaceName(id: string): Promise<string>;
   now(): number;
+  /** Invalidates the cached workspace list (ipc.ts) after a manifest write, so
+   *  an open edit form or live list doesn't hold a stale knowledgeCapture.
+   *  Injected rather than importing ipc.ts, which would pull Electron into
+   *  this otherwise Electron-free module. */
+  invalidateWorkspaceList(): void;
 }
 
 export function createCaptureSettingsService(d: CaptureSettingsDeps) {
@@ -40,6 +45,7 @@ export function createCaptureSettingsService(d: CaptureSettingsDeps) {
   ): Promise<void> {
     const before = effectiveCaptureSettings(m);
     await d.writeManifest({ ...m, knowledgeCapture: isDefaultCaptureSettings(next) ? undefined : next });
+    d.invalidateWorkspaceList();
     await d.log.append({ workspaceId: m.id, actor, before, after: next, reason, applied: true, proposalId, now: d.now() });
     emitCaptureSettingsChanged({ workspaceId: m.id, before, after: next, actor, source });
   }

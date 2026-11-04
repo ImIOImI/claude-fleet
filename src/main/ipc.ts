@@ -453,7 +453,11 @@ async function listAllWorkspaces(): Promise<Workspace[]> {
   return workspaceListCache.get();
 }
 
-function invalidateWorkspaceList(): void {
+// Exported so callers outside ipc.ts's own handlers (currently just the
+// capture-settings service, injected via index.ts) can invalidate the cache
+// after a manifest write of their own, without importing ipc.ts into an
+// otherwise Electron-free module.
+export function invalidateWorkspaceList(): void {
   workspaceListCache.invalidate();
 }
 

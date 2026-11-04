@@ -12,6 +12,7 @@ function setup(o: { trusted?: boolean; knowledgeCapture?: unknown } = {}) {
   const logRows: Array<Record<string, unknown>> = [];
   const notes: Array<Record<string, unknown>> = [];
   const proposals: Array<Record<string, unknown>> = [];
+  let invalidateCalls = 0;
   const deps: CaptureSettingsDeps = {
     readManifest: async (id) => (id === WS ? manifest : null),
     writeManifest: async (spec) => { manifest = spec; },
@@ -23,9 +24,10 @@ function setup(o: { trusted?: boolean; knowledgeCapture?: unknown } = {}) {
     dailyCap: async () => 40,
     capturesToday: async () => 7,
     workspaceName: async () => 'ops',
-    now: () => 1000
+    now: () => 1000,
+    invalidateWorkspaceList: () => { invalidateCalls++; }
   };
-  return { svc: createCaptureSettingsService(deps), manifest: () => manifest, logRows, notes, proposals };
+  return { svc: createCaptureSettingsService(deps), manifest: () => manifest, logRows, notes, proposals, invalidateCalls: () => invalidateCalls };
 }
 
 describe('capture settings service (#483 §5a)', () => {
@@ -79,5 +81,16 @@ describe('capture settings service (#483 §5a)', () => {
     await t.svc.applyApproved(WS, { workspaceId: WS, before: D, after: { ...D, turnsEvery: 30 }, changes: [], reasons: [] }, 'P9');
     expect(t.manifest().knowledgeCapture).toEqual({ ...D, transcriptRetentionDays: 90, turnsEvery: 30 });
     expect(t.logRows[0]).toMatchObject({ actor: 'user', applied: true, proposalId: 'P9', reason: 'approved proposal' });
+  });
+  it('invalidates the cached workspace list on every applied write, but not on an unchanged set or a proposed one', async () => {
+    const t = setup();
+    expect(await t.svc.set(WS, { searchTopSessions: 1, reason: 'applied' })).toMatchObject({ status: 'applied' });
+    expect(t.invalidateCalls()).toBe(1);
+    expect(await t.svc.set(WS, { searchTopSessions: 1, reason: 'again' })).toMatchObject({ status: 'unchanged' });
+    expect(t.invalidateCalls()).toBe(1);
+    expect(await t.svc.set(WS, { turnsEvery: 30, reason: 'long sessions' })).toMatchObject({ status: 'proposed' });
+    expect(t.invalidateCalls()).toBe(1);
+    await t.svc.applyApproved(WS, { workspaceId: WS, before: D, after: { ...D, turnsEvery: 30 }, changes: [], reasons: [] }, 'P9');
+    expect(t.invalidateCalls()).toBe(2);
   });
 });
