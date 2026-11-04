@@ -19,6 +19,8 @@ export interface HostConfig {
   workspace: HostWorkspaceInfo;
   identity: { provider: 'github'; org: string | null };
   grants: GrantConfig;
+  /** Proxies in front of the pod that append to X-Forwarded-For; 0 means key on the socket address. */
+  trustedProxyHops: number;
 }
 
 export class HostConfigError extends Error {
@@ -70,7 +72,7 @@ function parseWorkspace(v: unknown): HostWorkspaceInfo {
 
 export function parseHostConfig(raw: unknown): HostConfig {
   const o = record(raw, 'host config');
-  onlyKeys(o, 'host config', ['workspace', 'identity', 'grants', 'machines']);
+  onlyKeys(o, 'host config', ['workspace', 'identity', 'grants', 'machines', 'trustedProxyHops']);
   const id = o.identity === undefined ? {} : record(o.identity, 'identity');
   onlyKeys(id, 'identity', ['provider', 'org']);
   if (id.provider !== undefined && id.provider !== 'github') {
@@ -78,6 +80,10 @@ export function parseHostConfig(raw: unknown): HostConfig {
   }
   if (id.org !== undefined && (typeof id.org !== 'string' || !ORG_RE.test(id.org))) {
     throw new HostConfigError('identity.org must be a GitHub org login');
+  }
+  const hops = o.trustedProxyHops ?? 0;
+  if (typeof hops !== 'number' || !Number.isInteger(hops) || hops < 0 || hops > 10) {
+    throw new HostConfigError('trustedProxyHops must be an integer from 0 to 10');
   }
   let grants: GrantConfig;
   try {
@@ -88,7 +94,8 @@ export function parseHostConfig(raw: unknown): HostConfig {
   return {
     workspace: parseWorkspace(o.workspace),
     identity: { provider: 'github', org: typeof id.org === 'string' ? id.org : null },
-    grants
+    grants,
+    trustedProxyHops: hops
   };
 }
 

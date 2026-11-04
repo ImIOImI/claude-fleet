@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { authenticate, bearerToken, buildAuthContext, type AuthContext } from './auth.js';
+import { authenticate, bearerToken, buildAuthContext, NEGATIVE_TTL_MS, type AuthContext } from './auth.js';
 import { parseHostConfig } from './config.js';
 import { createLogger } from './log.js';
 import { IdentityError, type Identity, type IdentityProvider } from '../main/identity/types.js';
@@ -102,5 +102,57 @@ describe('config reload (#479)', () => {
     await authenticate(`Bearer ${TOKEN}`, after);
     expect(seen).toEqual([['acme'], ['other-org']]);
     expect(after.provider).not.toBe(before.provider);
+  });
+});
+
+describe('negative verify cache', () => {
+  const OTHER = 'gho_' + 'B'.repeat(36);
+  const THIRD = 'gho_' + 'C'.repeat(36);
+  const config = parseHostConfig({ workspace: { name: 'w' }, grants: [{ login: 'alice', tier: 'read' }] });
+  const rejecting = () => vi.fn(async (_t: string): Promise<Identity> => { throw new IdentityError('unauthorized', 'bad credentials', 401); });
+
+  it('a rejected token reaches the provider once within the TTL, then again after it', async () => {
+    let t = 0;
+    const verify = rejecting();
+    const ctx = buildAuthContext(config, () => ({ id: 'github', verify }), { now: () => t });
+    for (let i = 0; i < 3; i++) expect(await authenticate(`Bearer ${TOKEN}`, ctx)).toMatchObject({ ok: false, status: 401 });
+    expect(verify).toHaveBeenCalledTimes(1);
+    t = NEGATIVE_TTL_MS + 1;
+    await authenticate(`Bearer ${TOKEN}`, ctx);
+    expect(verify).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['network', 'upstream', 'forbidden', 'machine-unknown'] as const)('never caches a %s error', async (kind) => {
+    const verify = vi.fn(async (): Promise<Identity> => { throw new IdentityError(kind, 'nope'); });
+    const ctx = buildAuthContext(config, () => ({ id: 'github', verify }));
+    await authenticate(`Bearer ${TOKEN}`, ctx);
+    await authenticate(`Bearer ${TOKEN}`, ctx);
+    expect(verify).toHaveBeenCalledTimes(2);
+  });
+
+  it('a reload clears it: the new context re-verifies a token the old one rejected', async () => {
+    const verify = rejecting();
+    const factory = () => ({ id: 'github', verify });
+    const old = buildAuthContext(config, factory);
+    await authenticate(`Bearer ${TOKEN}`, old);
+    await authenticate(`Bearer ${TOKEN}`, old);
+    expect(verify).toHaveBeenCalledTimes(1);
+    verify.mockImplementation(async () => alice);
+    expect(await authenticate(`Bearer ${TOKEN}`, buildAuthContext(config, factory))).toMatchObject({ ok: true });
+    expect(verify).toHaveBeenCalledTimes(2);
+  });
+
+  it('is a bounded LRU', async () => {
+    const verify = rejecting();
+    const ctx = buildAuthContext(config, () => ({ id: 'github', verify }), { negativeMaxEntries: 2 });
+    await authenticate(`Bearer ${TOKEN}`, ctx);
+    await authenticate(`Bearer ${OTHER}`, ctx);
+    await authenticate(`Bearer ${TOKEN}`, ctx);
+    await authenticate(`Bearer ${THIRD}`, ctx);
+    expect(verify).toHaveBeenCalledTimes(3);
+    await authenticate(`Bearer ${TOKEN}`, ctx);
+    expect(verify).toHaveBeenCalledTimes(3);
+    await authenticate(`Bearer ${OTHER}`, ctx);
+    expect(verify).toHaveBeenCalledTimes(4);
   });
 });

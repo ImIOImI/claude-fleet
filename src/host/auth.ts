@@ -2,6 +2,7 @@
 // and its verify cache are built together from one config snapshot, so a
 // reload never pairs a new grant list with identities cached under the old
 // one.
+import { createHash } from 'node:crypto';
 import { createGithubProvider } from '../main/identity/githubProvider.js';
 import { resolveTier, type GrantConfig, type MachineRule, type Tier } from '../main/identity/grants.js';
 import { IdentityError, type Identity, type IdentityProvider } from '../main/identity/types.js';
@@ -18,8 +19,54 @@ export type ProviderFactory = (machines: readonly MachineRule[]) => IdentityProv
 
 export const githubProviderFactory: ProviderFactory = (machines) => createGithubProvider({ machines });
 
-export function buildAuthContext(config: HostConfig, factory: ProviderFactory = githubProviderFactory): AuthContext {
-  return { provider: withVerifyCache(factory(config.grants.machines)), grants: config.grants };
+export const NEGATIVE_TTL_MS = 30_000;
+export const NEGATIVE_MAX_ENTRIES = 1000;
+
+export interface AuthContextOptions {
+  negativeTtlMs?: number;
+  negativeMaxEntries?: number;
+  now?: () => number;
+}
+
+/** Remembers tokens the provider called `unauthorized`, so a replayed bad token can't drive GitHub calls.
+ *  Network and upstream failures are never cached: an outage is not a rejection. */
+function withNegativeCache(inner: IdentityProvider, opts: AuthContextOptions): IdentityProvider {
+  const ttl = opts.negativeTtlMs ?? NEGATIVE_TTL_MS;
+  const max = opts.negativeMaxEntries ?? NEGATIVE_MAX_ENTRIES;
+  const now = opts.now ?? Date.now;
+  const rejected = new Map<string, number>();
+  const keyOf = (token: string): string => createHash('sha256').update(token).digest('hex');
+  return {
+    id: inner.id,
+    async verify(token) {
+      const key = keyOf(token);
+      const until = rejected.get(key);
+      if (until !== undefined) {
+        rejected.delete(key);
+        if (until > now()) {
+          rejected.set(key, until);
+          throw new IdentityError('unauthorized', 'token recently rejected', 401);
+        }
+      }
+      try {
+        return await inner.verify(token);
+      } catch (err) {
+        if (err instanceof IdentityError && err.kind === 'unauthorized') {
+          if (rejected.size >= max) rejected.delete(rejected.keys().next().value as string);
+          rejected.set(key, now() + ttl);
+        }
+        throw err;
+      }
+    }
+  };
+}
+
+export function buildAuthContext(
+  config: HostConfig,
+  factory: ProviderFactory = githubProviderFactory,
+  opts: AuthContextOptions = {}
+): AuthContext {
+  return { provider: withNegativeCache(withVerifyCache(factory(config.grants.machines)), opts), grants: config.grants };
 }
 
 export type AuthResult =

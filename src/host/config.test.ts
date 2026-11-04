@@ -35,7 +35,16 @@ describe('parseHostConfig', () => {
     expect(c.workspace.id).toBe('01JC0000000000000000000000');
   });
 
+  it('trusts no forwarding proxies unless trustedProxyHops is set', () => {
+    expect(parseHostConfig(base).trustedProxyHops).toBe(0);
+    expect(parseHostConfig({ ...base, trustedProxyHops: 2 }).trustedProxyHops).toBe(2);
+  });
+
   it.each([
+    [{ ...base, trustedProxyHops: -1 }, /trustedProxyHops must be an integer from 0 to 10/],
+    [{ ...base, trustedProxyHops: 1.5 }, /trustedProxyHops must be an integer from 0 to 10/],
+    [{ ...base, trustedProxyHops: '1' }, /trustedProxyHops must be an integer from 0 to 10/],
+    [{ ...base, trustedProxyHops: 11 }, /trustedProxyHops must be an integer from 0 to 10/],
     [{ ...base, workspace: undefined }, /workspace must be an object/],
     [{ ...base, workspace: { id: 'not-a-ulid', name: 'w' } }, /workspace.id must be a ULID/],
     [{ ...base, workspace: { id: '01JC000000000000000000000I', name: 'w' } }, /workspace.id must be a ULID/],
