@@ -1283,8 +1283,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     });
   });
 
-  ipcMain.handle('sessions:rename', (_e, sessionId: string, name: string) => {
-    renameSession(sessionId, name);
+  ipcMain.handle('sessions:rename', async (_e, sessionId: string, name: string) => {
+    await renameSession(sessionId, name);
   });
 
   // Remove a session from the cache AND delete its on-disk transcript.
@@ -1292,7 +1292,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // does NOT drop DB rows, so deleteSession() does that explicitly. Unlink
   // is best-effort: a missing file (already gone) is fine.
   ipcMain.handle('sessions:delete', async (_e, workspaceId: string, sessionId: string) => {
-    deleteSession(sessionId);
+    await deleteSession(sessionId);
     try {
       await unlink(workspaceTranscriptPath(workspaceId, sessionId));
     } catch (err) {

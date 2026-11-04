@@ -169,8 +169,11 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   if (jsonlWatcher) {
     const db = openDb(app.getPath('userData'));
     // Wire the crash-safe DB sink so every logError call is also persisted to
-    // the errors table (best-effort; a wedged DB must never break crash logging).
-    setErrorSink((row) => recordError(row));
+    // the errors table (best-effort; a wedged DB must never break crash logging —
+    // the write is async now, so its rejection is swallowed here, not in logError).
+    setErrorSink((row) => {
+      void recordError(row).catch(() => undefined);
+    });
     // One line per app run identifying the build (#298): the error.log header
     // and an errors-table row that lets historical telemetry be partitioned by
     // build sha when two builds share a semver.
@@ -295,7 +298,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         // this backfill; boot.embed_backfill is wall time, the index.* / embed.*
         // child spans carry the synchronous parts that can block the loop.
         await perfSpanAsync('claude_fleet.boot.embed_backfill', async () => {
-          perfSpan('claude_fleet.index.delete_stale_models', () => deleteEmbeddingsForOtherModels(EMBED_MODEL_ID));
+          await perfSpanAsync('claude_fleet.index.delete_stale_models', () => deleteEmbeddingsForOtherModels(EMBED_MODEL_ID));
           const sessions = perfSpan('claude_fleet.index.list_sessions', () => listSessions());
           for (const s of sessions) await indexSessionTurns(s.id, embed);
           await indexSessionSummaries(embed);

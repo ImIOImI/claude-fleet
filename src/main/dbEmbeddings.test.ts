@@ -39,8 +39,8 @@ describe('embeddings schema + helpers', () => {
       ts: ev.ts, text: 'hello there', modelId: EMBED_MODEL_ID, dim: 3,
       vec: encodeVector(Float32Array.from([1, 0, 0])), dedupKey: `t${ev.id}`,
     };
-    expect(insertEmbedding(row)).toBe(true);
-    expect(insertEmbedding(row)).toBe(false); // dedup
+    expect(await insertEmbedding(row)).toBe(true);
+    expect(await insertEmbedding(row)).toBe(false); // dedup
     expect(unembeddedTurnEvents(SES, EMBED_MODEL_ID).length).toBe(0);
   });
 
@@ -55,19 +55,19 @@ describe('deleteEmbeddingsForOtherModels', () => {
   it('drops rows keyed to a different model, keeps the current ones', async () => {
     await ingestLine(WS, SES, userLine('u1', 'hello there'));
     const [ev] = unembeddedTurnEvents(SES, EMBED_MODEL_ID);
-    insertEmbedding({
+    await insertEmbedding({
       workspaceId: WS, sessionId: SES, kind: 'turn', refEventId: ev.id,
       ts: ev.ts, text: 'old fp32 row', modelId: 'Xenova/bge-small-en-v1.5', dim: EMBED_DIM,
       vec: encodeVector(new Float32Array(EMBED_DIM)), dedupKey: `t${ev.id}-old`,
     });
-    insertEmbedding({
+    await insertEmbedding({
       workspaceId: WS, sessionId: SES, kind: 'turn', refEventId: ev.id,
       ts: ev.ts, text: 'current row', modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
       vec: encodeVector(new Float32Array(EMBED_DIM)), dedupKey: `t${ev.id}`,
     });
-    expect(deleteEmbeddingsForOtherModels(EMBED_MODEL_ID)).toBe(1);
+    expect(await deleteEmbeddingsForOtherModels(EMBED_MODEL_ID)).toBe(1);
     // The current-model row still satisfies the pending query (row is embedded).
     expect(unembeddedTurnEvents(SES, EMBED_MODEL_ID).length).toBe(0);
-    expect(deleteEmbeddingsForOtherModels(EMBED_MODEL_ID)).toBe(0);
+    expect(await deleteEmbeddingsForOtherModels(EMBED_MODEL_ID)).toBe(0);
   });
 });

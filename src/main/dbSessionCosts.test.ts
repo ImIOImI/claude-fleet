@@ -166,7 +166,7 @@ describe('session_costs invariant', () => {
     expect(rowsBefore.some((r) => r.session_id === SES_B)).toBe(true);
 
     // Delete SES_A.
-    deleteSession(SES_A);
+    await deleteSession(SES_A);
 
     // SES_A gone from session_costs; SES_B intact; ground truth still matches.
     const rowsAfter = d.prepare(ROLLUP_SQL).all() as Array<{ session_id: string }>;
@@ -328,7 +328,7 @@ describe('session_costs invariant', () => {
     // should trigger exactly one recompute (the cache invalidation), proving
     // that renameSession properly invalidated the cached summary.
     const recomputesBefore = _summaryRecomputesForTests();
-    renameSession(SES_A, 'new-name');
+    await renameSession(SES_A, 'new-name');
     const summaryAfter = summaryForSession(SES_A);
 
     // Verify the recompute counter increased by exactly 1.
@@ -338,5 +338,24 @@ describe('session_costs invariant', () => {
     // The summary should remain the same in content (no data changed, just
     // the user_set_name in the sessions table — which doesn't appear in
     // WorkspaceSummary but proves the summary was recomputed from fresh DB state).
+  });
+});
+
+describe('rename/delete are awaited writes', () => {
+  it('deleteSession removes every per-session row in one transaction', async () => {
+    const raw = openDb(dir);
+    await ingestLine('w', 's-del', JSON.stringify({ type: 'assistant', uuid: 'd1', message: { model: 'claude-opus-4-1', usage: { output_tokens: 3 }, content: [{ type: 'tool_use', id: 't', name: 'Bash', input: {} }] } }));
+    await deleteSession('s-del');
+    for (const t of ['events', 'session_costs', 'session_stats', 'session_tool_counts', 'sessions']) {
+      const col = t === 'sessions' ? 'id' : 'session_id';
+      expect(raw.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE ${col} = 's-del'`).get()).toEqual({ n: 0 });
+    }
+  });
+
+  it('renameSession resolves after the row is updated', async () => {
+    const raw = openDb(dir);
+    await ingestLine('w', 's-ren', JSON.stringify({ type: 'user', uuid: 'r1', message: { content: 'hi' } }));
+    await renameSession('s-ren', '  Named  ');
+    expect(raw.prepare('SELECT user_set_name FROM sessions WHERE id = ?').get('s-ren')).toEqual({ user_set_name: 'Named' });
   });
 });

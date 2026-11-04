@@ -636,7 +636,7 @@ export async function attachPty(
             extra: { claudeSessionId, brokerSessionId: sessionId, how: resume ? 'resume' : 'session-id' }
           });
         }
-        if (resume) recordUsageEvent({ workspaceId: id, sessionId: resume, kind: 'resumed' });
+        if (resume) await recordUsageEvent({ workspaceId: id, sessionId: resume, kind: 'resumed' });
       })().catch((e: unknown) =>
         logError({
           source: 'main',

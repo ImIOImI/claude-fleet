@@ -87,7 +87,7 @@ describe('summaryForSession cache', () => {
   it('deleteSession invalidates immediately', async () => {
     await ingestLine(WS, SES, userLine('u1', 'first'));
     expect(summaryForSession(SES)).not.toBeNull();
-    deleteSession(SES);
+    await deleteSession(SES);
     expect(summaryForSession(SES)).toBeNull();
   });
 
@@ -139,7 +139,7 @@ describe('tokensSpentSince cache', () => {
     await ingestLine(WS, SES, assistantLine('a1', 5000));
     const floor = Date.parse('2026-07-01T00:00:00Z') - 1000;
     const before = tokensSpentSince(floor);
-    deleteSession(SES);
+    await deleteSession(SES);
     expect(tokensSpentSince(floor)).toBeLessThan(before);
   });
 });

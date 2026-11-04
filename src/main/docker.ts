@@ -1079,7 +1079,7 @@ async function attachPtyInner(
       });
     }
     learnMirrorMapping(workspaceId, sessionId, claudeSessionId);
-    if (resumeOf) recordUsageEvent({ workspaceId, sessionId: resumeOf, kind: 'resumed' });
+    if (resumeOf) await recordUsageEvent({ workspaceId, sessionId: resumeOf, kind: 'resumed' });
     const createResp = await client.createSession(
       sessionId,
       cols,

@@ -276,7 +276,7 @@ describe('session_stats + session_tool_counts invariant', () => {
     expect(statsB).toBeTruthy();
 
     // Delete SES_A.
-    deleteSession(SES_A);
+    await deleteSession(SES_A);
 
     // SES_A gone from both tables; SES_B intact.
     expect(

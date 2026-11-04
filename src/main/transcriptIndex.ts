@@ -57,7 +57,7 @@ export async function indexSessionTurns(sessionId: string, embed: EmbedFn, batch
       // zero-vector placeholder so these rows leave the pending set and the
       // loop terminates. They score ~0 and never surface in search.
       for (const ev of pending) {
-        insertEmbedding({
+        await insertEmbedding({
           workspaceId: ev.workspaceId, sessionId, kind: 'turn', refEventId: ev.id, ts: ev.ts,
           text: '', modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
           vec: encodeVector(new Float32Array(EMBED_DIM)), dedupKey: `t${ev.id}`,
@@ -67,19 +67,19 @@ export async function indexSessionTurns(sessionId: string, embed: EmbedFn, batch
     }
 
     const vecs = await embed(prepared.map((p) => p.text));
-    prepared.forEach((p, i) => {
-      const ok = insertEmbedding({
+    for (const [i, p] of prepared.entries()) {
+      const ok = await insertEmbedding({
         workspaceId: p.ev.workspaceId, sessionId, kind: 'turn', refEventId: p.ev.id, ts: p.ev.ts,
         text: p.text, modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
         vec: encodeVector(vecs[i]), dedupKey: `t${p.ev.id}`,
       });
       if (ok) total++;
-    });
+    }
     // Placeholder-insert the skipped (empty) rows in this batch too, so they
     // don't reappear as pending forever.
     for (const ev of pending) {
       if (!prepared.some((p) => p.ev.id === ev.id)) {
-        insertEmbedding({
+        await insertEmbedding({
           workspaceId: ev.workspaceId, sessionId, kind: 'turn', refEventId: ev.id, ts: ev.ts,
           text: '', modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
           vec: encodeVector(new Float32Array(EMBED_DIM)), dedupKey: `t${ev.id}`,
@@ -137,14 +137,14 @@ export async function indexSessionSummaries(embed: EmbedFn, batch = EMBED_BATCH)
     const pending = perfSpan('claude_fleet.index.pending_summaries', () => unembeddedSummaries(EMBED_MODEL_ID, batch));
     if (pending.length === 0) break;
     const vecs = await embed(pending.map((p) => p.summary.slice(0, MAX_CHARS)));
-    pending.forEach((p, i) => {
-      const ok = insertEmbedding({
+    for (const [i, p] of pending.entries()) {
+      const ok = await insertEmbedding({
         workspaceId: p.workspaceId, sessionId: p.sessionId, kind: 'summary', refEventId: null, ts: p.ts,
         text: p.summary.slice(0, MAX_CHARS), modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
         vec: encodeVector(vecs[i]), dedupKey: String(p.sourceMaxEventId),
       });
       if (ok) total++;
-    });
+    }
     if (pending.length < batch) break;
   }
   return total;

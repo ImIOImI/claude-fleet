@@ -37,7 +37,7 @@ describe('recordError', () => {
   it('inserts a row with all fields', async () => {
     const dir = freshDb();
     try {
-      recordError({ ts: 1000, source: 'main', type: 'pty-attach-failed', message: 'boom',
+      await recordError({ ts: 1000, source: 'main', type: 'pty-attach-failed', message: 'boom',
         level: 'error', workspaceId: 'ws-a', extra: { foo: 1 } });
       const db = openDb(dir);
       const row = db.prepare('SELECT * FROM errors').get() as Record<string, unknown>;
@@ -52,7 +52,7 @@ describe('recordError', () => {
     const dir = freshDb();
     try {
       await learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-uuid-1');
-      recordError({ ts: 1, source: 'main', type: 'x', message: 'm', workspaceId: 'ws-a',
+      await recordError({ ts: 1, source: 'main', type: 'x', message: 'm', workspaceId: 'ws-a',
         extra: { brokerSessionId: 'broker-1' } });
       const db = openDb(dir);
       const row = db.prepare('SELECT session_id FROM errors').get() as { session_id: string };
@@ -63,7 +63,7 @@ describe('recordError', () => {
   it('leaves session_id NULL when the broker mapping is absent', async () => {
     const dir = freshDb();
     try {
-      recordError({ ts: 1, source: 'main', type: 'mapping-unresolved', message: 'm',
+      await recordError({ ts: 1, source: 'main', type: 'mapping-unresolved', message: 'm',
         level: 'warn', workspaceId: 'ws-a', extra: { brokerSessionId: 'unmapped' } });
       const db = openDb(dir);
       const row = db.prepare('SELECT session_id FROM errors').get() as { session_id: string | null };
@@ -75,7 +75,7 @@ describe('recordError', () => {
     const dir = freshDb();
     try {
       for (let i = 0; i < ERRORS_RETENTION + 5; i++) {
-        recordError({ ts: i, source: 'main', type: 't', message: `m${i}` });
+        await recordError({ ts: i, source: 'main', type: 't', message: `m${i}` });
       }
       const db = openDb(dir);
       const count = (db.prepare('SELECT COUNT(*) AS c FROM errors').get() as { c: number }).c;
@@ -83,6 +83,24 @@ describe('recordError', () => {
       const oldest = db.prepare('SELECT MIN(ts) AS m FROM errors').get() as { m: number };
       expect(oldest.m).toBe(5); // first 5 pruned
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('keeps exactly the newest ERRORS_RETENTION rows across many inserts (PK-seek prune)', async () => {
+    const dir = freshDb();
+    try {
+      for (let i = 0; i < ERRORS_RETENTION + 25; i++) {
+        await recordError({ ts: i, source: 'main', type: 't', message: `m${i}` });
+      }
+      const db = openDb(dir);
+      const r = db.prepare('SELECT COUNT(*) AS n, MIN(ts) AS lo, MAX(ts) AS hi FROM errors').get();
+      expect(r).toEqual({ n: ERRORS_RETENTION, lo: 25, hi: ERRORS_RETENTION + 24 });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('rejects (never throws synchronously) when the DB is closed — the sink swallows it', async () => {
+    await closeDb();
+    const p = recordError({ ts: 1, source: 'main', type: 't', message: 'm' });
+    await expect(p).rejects.toThrow(/db not opened/);
   });
 });
 
@@ -323,8 +341,8 @@ describe('usage_events (#207)', () => {
   it('recordUsageEvent appends rows with JSON detail', async () => {
     const dir = freshDb();
     try {
-      recordUsageEvent({ workspaceId: 'ws-a', sessionId: 's1', kind: 'search-impression', detail: { query: 'broker hang' } });
-      recordUsageEvent({ workspaceId: 'ws-a', kind: 'resumed', sessionId: 's1' });
+      await recordUsageEvent({ workspaceId: 'ws-a', sessionId: 's1', kind: 'search-impression', detail: { query: 'broker hang' } });
+      await recordUsageEvent({ workspaceId: 'ws-a', kind: 'resumed', sessionId: 's1' });
       const db = openDb(dir);
       const rows = db.prepare('SELECT kind, session_id, detail FROM usage_events ORDER BY id').all() as Array<Record<string, unknown>>;
       expect(rows.map((r) => r.kind)).toEqual(['search-impression', 'resumed']);

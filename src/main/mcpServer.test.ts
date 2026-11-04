@@ -497,14 +497,14 @@ describe('mark_useful + get_config (#207)', () => {
 
   it('mark_useful records a marked-useful usage event for an allowed session', async () => {
     const events: unknown[] = [];
-    setUsageRecorder((e) => events.push(e));
-    tool('mark_useful').run(db, { sessionId: 'sa', note: 'led me to the fix' }, ctxA);
+    setUsageRecorder((e) => { events.push(e); });
+    await tool('mark_useful').run(db, { sessionId: 'sa', note: 'led me to the fix' }, ctxA);
     expect(events).toEqual([{ workspaceId: WS_A, sessionId: 'sa', kind: 'marked-useful', detail: { note: 'led me to the fix' } }]);
   });
 
   it("mark_useful refuses a session outside the caller's allowed set", async () => {
     setUsageRecorder(() => { throw new Error('must not be called'); });
-    expect(() => tool('mark_useful').run(db, { sessionId: 'sb' }, ctxA)).toThrow(/not found/);
+    await expect(tool('mark_useful').run(db, { sessionId: 'sb' }, ctxA)).rejects.toThrow(/not found/);
   });
 
   it('get_config returns the resolver output for the caller', async () => {
@@ -608,7 +608,7 @@ describe('implicit usage telemetry (#207)', () => {
 
   it('search_transcripts records one impression per distinct result session, carrying the query', async () => {
     const events: Array<Record<string, unknown>> = [];
-    setUsageRecorder((e) => events.push(e as Record<string, unknown>));
+    setUsageRecorder((e) => { events.push(e as Record<string, unknown>); });
     setQueryEmbedder(async (texts) => texts.map(() => { const v = new Float32Array(EMBED_DIM); v[0] = 1; return v; }));
     // seed one embedding row for WS_A (reuse the insert helper pattern from the scoping describe)
     seedEmbedding(db, WS_A, 'sa');
@@ -621,7 +621,7 @@ describe('implicit usage telemetry (#207)', () => {
 
   it('a read of a recently-searched session records a clickthrough', async () => {
     const events: Array<Record<string, unknown>> = [];
-    setUsageRecorder((e) => events.push(e as Record<string, unknown>));
+    setUsageRecorder((e) => { events.push(e as Record<string, unknown>); });
     setQueryEmbedder(async (texts) => texts.map(() => { const v = new Float32Array(EMBED_DIM); v[0] = 1; return v; }));
     seedEmbedding(db, WS_A, 'sa');
     await tool('search_transcripts').run(db, { query: 'x' }, ctxA);
@@ -631,7 +631,7 @@ describe('implicit usage telemetry (#207)', () => {
 
   it('a read WITHOUT a recent search records no clickthrough', async () => {
     const events: Array<Record<string, unknown>> = [];
-    setUsageRecorder((e) => events.push(e as Record<string, unknown>));
+    setUsageRecorder((e) => { events.push(e as Record<string, unknown>); });
     tool('get_session').run(db, { id: 'sa' }, ctxA);
     expect(events.filter((e) => e.kind === 'clickthrough')).toHaveLength(0);
   });
