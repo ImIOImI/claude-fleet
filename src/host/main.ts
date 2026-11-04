@@ -42,12 +42,16 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   const log = createLogger(opts.logSink);
   const proc = opts.proc ?? process;
   const exit = opts.exit ?? ((code: number) => process.exit(code));
+  // Node's default SIGHUP action exits; the handler stays for the life of the process.
+  let onHup = (): void => undefined;
+  proc.on('SIGHUP', () => onHup());
   let lease: LeaseManager | undefined;
   let fatal = false;
   const uninstallGuards = installCrashGuards(
     log,
     () => {
       fatal = true;
+      host?.halt(1011, 'host failed');
       const stopped = lease ? lease.stop() : Promise.resolve();
       const bound = new Promise<void>((resolve) => setTimeout(resolve, opts.fatalStopMs ?? FATAL_STOP_MS).unref());
       void Promise.race([stopped, bound]).finally(() => exit(1));
@@ -68,7 +72,7 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
       config = next;
       auth = buildAuthContext(next, factory);
       if (next.trustedProxyHops > 0) {
-        log.log('warn', 'trustedProxyHops > 0 trusts X-Forwarded-For; correct only behind an L7 proxy that appends it', {
+        log.log('warn', 'trustedProxyHops > 0: per-address limiting keys on the Twingate connector here; leave 0', {
           trustedProxyHops: next.trustedProxyHops
         });
       }
@@ -110,8 +114,7 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     undefined,
     (err) => log.log('warn', 'config watch failed; SIGHUP still reloads', { error: err.message })
   );
-  const onHup = (): void => void reloader.reload('SIGHUP');
-  proc.on('SIGHUP', onHup);
+  onHup = () => void reloader.reload('SIGHUP');
 
   const watch = brokerWatch(ops, events, hub);
   const poller = setInterval(() => {
@@ -130,11 +133,11 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
       clearInterval(poller);
       clearInterval(pruner);
       stopWatch();
-      proc.off('SIGHUP', onHup);
+      onHup = () => undefined;
       proc.off('SIGTERM', onTerm);
       proc.off('SIGINT', onTerm);
       // Frames stop before the lease is released, so no viewer acts during the handover.
-      server.revokeAll(1001, 'host shutting down');
+      server.halt(1001, 'host shutting down');
       await leaseMgr.stop();
       await server.close();
       uninstallGuards();

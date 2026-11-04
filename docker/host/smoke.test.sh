@@ -16,6 +16,7 @@ done
 curl -fsS "http://127.0.0.1:$port/healthz" | grep -q '"lease":"holder"'
 test "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/whoami")" = 401
 test "$(docker exec "$cid" id -u)" = 1000
+docker exec "$cid" sh -c 'test -s /etc/ssl/certs/rds-global-bundle.pem && grep -q "BEGIN CERTIFICATE" /etc/ssl/certs/rds-global-bundle.pem'
 docker exec "$cid" fleet-host init | grep -q '"workspaceId"'
 docker stop -t 15 "$cid" >/dev/null
 docker logs "$cid" 2>&1 | grep -q '"msg":"shutting down"'

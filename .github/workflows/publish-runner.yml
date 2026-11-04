@@ -338,6 +338,23 @@ jobs:
           cache-from: type=gha,scope=devops-host-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=devops-host-${{ matrix.arch }}
 
+      - name: Load runner-devops-host (amd64) for smoke
+        if: matrix.arch == 'amd64'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/host/Dockerfile
+          platforms: linux/amd64
+          load: true
+          build-args: |
+            BASE_IMAGE=${{ steps.base.outputs.ref }}
+          tags: claude-fleet/runner-devops-host:test
+          cache-from: type=gha,scope=devops-host-amd64
+
+      - name: Smoke runner-devops-host image
+        if: matrix.arch == 'amd64'
+        run: bash docker/host/smoke.test.sh claude-fleet/runner-devops-host:test
+
       - name: Export digest
         run: |
           mkdir -p /tmp/digests

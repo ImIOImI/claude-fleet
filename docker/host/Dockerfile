@@ -13,9 +13,12 @@ RUN npx vite build --config vite.host.config.ts
 
 FROM ${BASE_IMAGE}
 USER root
+# AWS RDS global CA bundle for the host store's TLS to RDS. AWS re-issues it
+# when CAs are added; update the checksum with it.
+ADD --checksum=sha256:90a6f1a7978a1b1b096dca6c57511ca48d3b8cf052f8e704baf358f34ea2f21b https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /etc/ssl/certs/rds-global-bundle.pem
 COPY --from=host-build /src/out/host/fleet-host.mjs /usr/local/lib/fleet-host/fleet-host.mjs
 COPY docker/host/fleet-host-entry /usr/local/bin/fleet-host-entry
-RUN chmod 0644 /usr/local/lib/fleet-host/fleet-host.mjs \
+RUN chmod 0644 /usr/local/lib/fleet-host/fleet-host.mjs /etc/ssl/certs/rds-global-bundle.pem \
  && chmod 0755 /usr/local/bin/fleet-host-entry \
  && printf '#!/bin/sh\nexec node /usr/local/lib/fleet-host/fleet-host.mjs "$@"\n' > /usr/local/bin/fleet-host \
  && chmod 0755 /usr/local/bin/fleet-host \

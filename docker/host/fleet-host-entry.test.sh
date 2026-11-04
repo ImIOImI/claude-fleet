@@ -40,7 +40,7 @@ JS
 run() {
   dir="$tmp/case-$1"; shift
   mkdir -p "$dir"; : > "$dir/events"
-  env FAKE_DIR="$dir" FLEET_BROKER_BIN="$tmp/broker" FLEET_HOST_JS="$tmp/host.mjs" \
+  env -u CLAUDE_FLEET_BROKER_TCP_PORT FAKE_DIR="$dir" FLEET_BROKER_BIN="$tmp/broker" FLEET_HOST_JS="$tmp/host.mjs" \
     FLEET_HOST_BACKOFF_START_MS=20 FLEET_HOST_BACKOFF_MAX_MS=80 "$@" \
     bash "$here/fleet-host-entry" 2> "$dir/log" &
   pid=$!
@@ -50,7 +50,7 @@ until_count() { for _ in $(seq 1 100); do [ "$(count "$1")" -ge "$2" ] && return
 # Waits in this shell (never a subshell) so the entry's status is visible.
 finish() {
   for _ in $(seq 1 200); do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
-  if kill -0 "$pid" 2>/dev/null; then pkill -KILL -P "$pid"; kill -KILL "$pid"; wait "$pid"; st=timeout; return; fi
+  if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid"; wait "$pid"; st=timeout; return; fi
   wait "$pid"; st=$?
 }
 
@@ -99,6 +99,14 @@ sleep 0.2
 kill -0 "$pid" 2>/dev/null; assert "$?" "0" "entry still running after SIGHUP"
 assert "$(count host-start)" "1" "SIGHUP causes no restart"
 kill -TERM "$pid"; finish
+
+# 7. A TCP broker port is refused: the broker would listen unauthenticated on the pod IP.
+run tcp CLAUDE_FLEET_BROKER_TCP_PORT=7070
+finish
+assert "$st" "1" "refuses to start with CLAUDE_FLEET_BROKER_TCP_PORT set"
+assert "$(count broker-start)" "0" "broker never started"
+assert "$(count host-start)" "0" "fleet-host never started"
+grep -q 'CLAUDE_FLEET_BROKER_TCP_PORT is set' "$dir/log"; assert "$?" "0" "refusal logged"
 
 # 6. SIGTERM during a restart backoff exits at once without restarting.
 run backoff FAKE_HOST_CRASHES=all FLEET_HOST_BACKOFF_START_MS=5000

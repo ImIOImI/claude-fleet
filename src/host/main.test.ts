@@ -125,7 +125,9 @@ describe('runHost', () => {
 
   it('warns when trustedProxyHops is above 0', async () => {
     const r = await start(CONFIG + 'trustedProxyHops: 1\n');
-    expect(msgs(r).some((m) => m.level === 'warn' && m.msg.includes('trustedProxyHops'))).toBe(true);
+    expect(
+      msgs(r).some((m) => m.level === 'warn' && m.msg.includes('trustedProxyHops') && m.msg.includes('per-address limiting keys on the Twingate connector here; leave 0'))
+    ).toBe(true);
     const quiet = await start();
     expect(msgs(quiet).some((m) => m.msg.includes('trustedProxyHops'))).toBe(false);
   });
@@ -154,6 +156,27 @@ describe('runHost', () => {
     await new Promise((res) => setTimeout(res, 100));
     await host.shutdown(0);
     expect(list).not.toHaveBeenCalled();
+  });
+});
+
+describe('SIGHUP', () => {
+  it('is handled from the first tick of startup and through shutdown', async () => {
+    const proc = new EventEmitter();
+    const dir = mkdtempSync(join(tmpdir(), 'fh-main-'));
+    writeFileSync(join(dir, 'c.yaml'), CONFIG);
+    const pending = runHost({
+      env: { FLEET_HOST_PORT: String(await freePort()), FLEET_HOST_CONFIG: join(dir, 'c.yaml'), FLEET_HOST_STATE: join(dir, 's') },
+      exit: vi.fn(),
+      proc,
+      logSink: () => undefined,
+      brokerOps: fakeBroker().ops
+    });
+    expect(proc.listenerCount('SIGHUP')).toBe(1);
+    proc.emit('SIGHUP');
+    const host = await pending;
+    await host.shutdown(0);
+    expect(proc.listenerCount('SIGHUP')).toBe(1);
+    proc.emit('SIGHUP');
   });
 });
 
@@ -196,6 +219,30 @@ describe('crash guard', () => {
     expect(await inner.tryAcquire('other', Date.now(), 30_000)).not.toBeNull();
     expect(msgs(r).filter((m) => m.level === 'error' && /uncaught|unhandled/.test(m.msg))).toHaveLength(2);
     expect(r.logs.join('\n')).not.toContain(TOKEN);
+  });
+
+  it('revokes sockets and refuses new requests before the bounded lease release', async () => {
+    const order: string[] = [];
+    const inner = memoryLeaseStore();
+    let r!: Rig;
+    const store: LeaseStore = {
+      tryAcquire: inner.tryAcquire,
+      renew: inner.renew,
+      async release(h, e) {
+        const res = await fetch(`${r.url}/whoami`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+        order.push(`whoami:${res.status}`);
+        await new Promise((done) => setTimeout(done, 150));
+        await inner.release(h, e);
+        order.push('released');
+      }
+    };
+    r = await start(CONFIG, { leaseStore: store });
+    const ws = await openEvents(r);
+    ws.once('close', (code) => order.push(`ws-close:${code}`));
+    r.proc.emit('uncaughtException', new Error('boom'));
+    await vi.waitFor(() => expect(r.exit).toHaveBeenCalledWith(1));
+    expect(order.at(-1)).toBe('released');
+    expect(order.slice(0, -1).sort()).toEqual(['whoami:503', 'ws-close:1011']);
   });
 
   it('exits 1 even when releasing the lease hangs', async () => {

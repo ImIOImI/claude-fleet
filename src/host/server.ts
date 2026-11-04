@@ -31,6 +31,9 @@ export const PING_MS = 25_000;
 /** Unanswered pings after which a socket is terminated. */
 export const MAX_MISSED_PONGS = 2;
 export const REQUEST_TIMEOUT_MS = 30_000;
+/** Above the 60 s idle timeout of the ALB and Envoy in front, so the proxy closes idle connections first. */
+export const KEEP_ALIVE_TIMEOUT_MS = 65_000;
+export const HUB_SHUTDOWN_MS = 5_000;
 export const HEADERS_TIMEOUT_MS = 10_000;
 
 export interface VerifyLimits {
@@ -60,6 +63,7 @@ export interface HostServerDeps {
   closeGraceMs?: number;
   maxViewerBuffer?: number;
   pingMs?: number;
+  hubShutdownMs?: number;
   now?: () => number;
 }
 
@@ -67,8 +71,8 @@ export interface HostServer {
   server: Server;
   /** Re-check every open socket against the current AuthContext. */
   reverifyAll(): Promise<void>;
-  /** Revoke every open socket now; the listener stays up. */
-  revokeAll(code: number, reason: string): void;
+  /** Refuse authenticated routes and upgrades (503) and revoke every open socket now; the listener stays up. */
+  halt(code: number, reason: string): void;
   /** Closes every socket, detaches every broker upstream (hub.shutdown) and stops listening. */
   close(): Promise<void>;
 }
@@ -176,10 +180,12 @@ export function createHostServer(deps: HostServerDeps): HostServer {
   const budget = new RejectionBudget(limits.unauthPerMinute ?? UNAUTH_PER_MINUTE, now);
   const perAddress = new UnauthLimiter({ ...(limits.perAddress ?? UNAUTH_LIMIT), now });
   let inFlight = 0;
+  let halted = false;
 
   // Cached answers (valid or rejected) never touch a limit, so one bad client
   // can't lock out users whose tokens are already known.
   async function gate(req: IncomingMessage, ctx: AuthContext): Promise<GateResult> {
+    if (halted) return { ok: false, status: 503, error: 'shutting down' };
     if (deps.lease() !== 'holder') return { ok: false, status: 503, error: 'standby' };
     const header = req.headers.authorization;
     const token = bearerToken(header);
@@ -326,6 +332,7 @@ export function createHostServer(deps: HostServerDeps): HostServer {
   });
   server.requestTimeout = REQUEST_TIMEOUT_MS;
   server.headersTimeout = HEADERS_TIMEOUT_MS;
+  server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
 
   function track(ws: WebSocket, token: string, principal: Principal, onPrincipal: (p: Principal) => void, onRevoke: () => void): LiveSocket {
     const s: LiveSocket = {
@@ -422,19 +429,25 @@ export function createHostServer(deps: HostServerDeps): HostServer {
       });
   });
 
-  function revokeAll(code: number, reason: string): void {
+  function halt(code: number, reason: string): void {
+    halted = true;
     for (const s of live) s.revoke(code, reason);
   }
 
   return {
     server,
     reverifyAll,
-    revokeAll,
+    halt,
     async close() {
       clearInterval(timer);
       clearInterval(pinger);
-      revokeAll(1001, 'host shutting down');
-      await deps.hub.shutdown();
+      halt(1001, 'host shutting down');
+      let bound: NodeJS.Timeout | undefined;
+      await Promise.race([
+        deps.hub.shutdown(),
+        new Promise<void>((resolve) => (bound = setTimeout(resolve, deps.hubShutdownMs ?? HUB_SHUTDOWN_MS)))
+      ]);
+      clearTimeout(bound);
       const done = new Promise<void>((resolve) => server.close(() => resolve()));
       server.closeIdleConnections();
       const force = setTimeout(() => server.closeAllConnections(), grace);

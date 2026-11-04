@@ -13,6 +13,12 @@ backoff_max_ms=${FLEET_HOST_BACKOFF_MAX_MS:-10000}
 
 log() { printf '{"level":"%s","msg":"fleet-host-entry: %s"%s}\n' "$1" "$2" "${3:-}" >&2; }
 
+# TCP mode would serve the broker, unauthenticated, on the pod IP.
+if [ -n "${CLAUDE_FLEET_BROKER_TCP_PORT:-}" ]; then
+  log error "CLAUDE_FLEET_BROKER_TCP_PORT is set; refusing to start (the broker must stay on its Unix socket)"
+  exit 1
+fi
+
 host=
 pause=
 stop() {

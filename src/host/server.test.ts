@@ -13,7 +13,7 @@ import { EventHub } from './events.js';
 import type { LeaseState } from './lease.js';
 import { createLogger } from './log.js';
 import { brokerRpcChannels, type RpcChannel } from './rpc.js';
-import { createHostServer, installCrashGuards, MAX_RPC_BODY, PING_MS, REVERIFY_MS, type HostServer, type HostServerDeps } from './server.js';
+import { createHostServer, HUB_SHUTDOWN_MS, installCrashGuards, MAX_RPC_BODY, PING_MS, REVERIFY_MS, type HostServer, type HostServerDeps } from './server.js';
 import { decodeAll, fakeBroker, inputFrame, jsonFrame, person, TOKEN } from './testFakes.js';
 
 const WS = { id: '01JC0000000000000000000000', name: 'review-bot', description: 'reviews', color: { hue: 210 } };
@@ -542,9 +542,10 @@ describe('connection limits', () => {
     other.close();
   });
 
-  it('sets explicit request and header timeouts', async () => {
+  it('sets explicit request and header timeouts, and keep-alive above the ALB and Envoy idle timeouts', async () => {
     const r = await start();
     expect([r.host.server.requestTimeout, r.host.server.headersTimeout]).toEqual([30_000, 10_000]);
+    expect(r.host.server.keepAliveTimeout).toBe(65_000);
   });
 });
 
@@ -610,15 +611,41 @@ describe('slow viewers (1013)', () => {
   });
 });
 
-describe('revokeAll', () => {
+describe('halt', () => {
   it('revokes every socket at once without closing the listener', async () => {
     const r = await start([], { closeGraceMs: 100 });
     const c = await rawUpgrade(r, '/events', `${TOKEN}r`);
-    r.host.revokeAll(1001, 'host shutting down');
+    r.host.halt(1001, 'host shutting down');
     expect(r.events.size).toBe(0);
     await c.ended;
     expect(closeCode(c.data)).toBe(1001);
     expect(r.host.server.listening).toBe(true);
+  });
+
+  it('answers 503 to authenticated routes and upgrades afterwards; probes still answer', async () => {
+    const r = await start();
+    r.host.halt(1001, 'host shutting down');
+    const res = await fetch(`${r.url}/whoami`, { headers: bearer(`${TOKEN}r`) });
+    expect([res.status, await res.json()]).toEqual([503, { error: 'shutting down' }]);
+    await expect(rawUpgrade(r, '/events', `${TOKEN}r`)).rejects.toThrow('HTTP/1.1 503');
+    expect(r.verify).not.toHaveBeenCalled();
+    expect((await fetch(`${r.url}/healthz`)).status).toBe(200);
+  });
+});
+
+describe('close bounds', () => {
+  it('finishes even when hub.shutdown hangs', async () => {
+    const r = await start([], { hubShutdownMs: 100 });
+    vi.spyOn(r.hub, 'shutdown').mockReturnValue(new Promise(() => undefined));
+    const t0 = Date.now();
+    await r.host.close();
+    rig = null;
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(r.host.server.listening).toBe(false);
+  });
+
+  it('bounds hub.shutdown at 5 s by default', () => {
+    expect(HUB_SHUTDOWN_MS).toBe(5_000);
   });
 });
 
