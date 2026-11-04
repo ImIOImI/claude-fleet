@@ -182,6 +182,13 @@ export function createNotifyService(deps: NotifyDeps) {
       return run;
     },
 
+    /** Cancel pending input-wait timers (quit / tests). */
+    cancelPending(): void {
+      for (const t of waitTimers.values()) deps.clearTimer(t);
+      waitTimers.clear();
+      waiting.clear();
+    },
+
     async quietState(): Promise<QuietState> {
       const now = deps.now();
       const [pause, ds, since] = await Promise.all([store.getPause(), store.downtimes(), store.getQuietSince()]);

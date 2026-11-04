@@ -43,6 +43,9 @@ const peerStatusWatcher = isMock ? null : new PeerStatusWatcher();
 // Authoritative inbox store (#407); opened at ready, closed on quit.
 let inboxStore: InboxStore | null = null;
 let presence: ReturnType<typeof startPresence> | null = null;
+// Notification + automation timers (#457): stopped in before-quit, ahead of inboxStore.close().
+let notifySvc: ReturnType<typeof registerNotifyIpc> | null = null;
+let auto: ReturnType<typeof registerAutomationIpc> | null = null;
 
 /** Register each workspace's peer-status `sessions/` dir with the watcher.
  *  Container: the bind-mounted host dir. Local native/custom: the shared host
@@ -307,10 +310,10 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   // With recording off the tracer is a no-op — cost is one async frame/invoke.
   instrumentIpcHandle(ipcMain);
   perfSpan('claude_fleet.boot.register_ipc', () => registerIpc({ jsonlWatcher, peerStatusWatcher }));
-  const notifySvc = inboxStore ? registerNotifyIpc(inboxStore) : null;
-  const auto = inboxStore ? registerAutomationIpc(inboxStore, notifySvc) : null;
+  notifySvc = inboxStore ? registerNotifyIpc(inboxStore) : null;
+  auto = inboxStore ? registerAutomationIpc(inboxStore, notifySvc) : null;
   if (inboxStore) {
-    const inboxHost = registerInboxIpc(inboxStore, notifySvc ?? undefined, auto ? (r, c) => auto.automations.attribution(r, c) : undefined);
+    const inboxHost = registerInboxIpc(inboxStore, notifySvc ?? undefined, auto ? (r, c) => auto!.automations.attribution(r, c) : undefined);
     auto?.setInboxSink(inboxHost);
   }
   registerPresenceIpc(ipcMain, { get: getKeepRunningInTray, set: setKeepRunningInTray });
@@ -333,6 +336,12 @@ app.on('before-quit', async () => {
   markQuitting();
   presence?.stop();
   presence = null;
+  // Stop the notify/automation tick + debounce/input-wait timers before closing
+  // inbox.db (#457), so nothing fires against a destroyed driver.
+  notifySvc?.stop();
+  notifySvc = null;
+  auto?.stop();
+  auto = null;
   await jsonlWatcher?.stop();
   await peerStatusWatcher?.stop();
   stopMcpServer();
