@@ -12,7 +12,7 @@
 // newlines, ingest complete lines, and stash the offset of any trailing
 // partial line for the next change event.
 //
-// Re-ingestion is idempotent: db.ingestLine uses uuid (or a content hash for
+// Re-ingestion is idempotent: db.ingestBatch uses uuid (or a content hash for
 // light events) as a dedup key. The byte offset is an in-memory optimization
 // only — if we lose it (process restart, watch dropped), re-reading from
 // offset 0 produces the same end state.
@@ -25,9 +25,9 @@ import { join, basename, extname, sep as pathSep } from 'node:path';
 // ERR_REQUIRE_ESM. Load it via dynamic import inside `start()`.
 import type { FSWatcher } from 'chokidar';
 import { workspaceClaudeDir, workspaceHistoryDir, workspaceHistoryFile, hostLocalProjectsDir } from './paths.js';
-import { ingestLine } from './db.js';
+import { ingestBatch } from './db.js';
 import { effectiveForClaudeSession } from './mirrorPolicy.js';
-import { perfSpan } from './perf.js';
+import { perfSpanAsync } from './perf.js';
 import { keyedSerialQueue } from './state/serialQueue.js';
 
 /**
@@ -478,27 +478,22 @@ async function readAndIngest(path: string, state: FileState): Promise<ReadResult
     // mirror is a conversation-history backup, not a DB replica.
     const mirrorOn =
       !state.sidecar && effectiveForClaudeSession(state.workspaceId, state.sessionId);
+    const batch = text.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+    const results = await perfSpanAsync(
+      'claude_fleet.ingest',
+      () => ingestBatch(state.workspaceId, state.sessionId, batch),
+      { workspace_id: state.workspaceId, session_id: state.sessionId, lines: batch.length }
+    );
     let insertedCount = 0;
     let mirrorBuf = '';
-    const lines = text.split('\n');
-    perfSpan(
-      'claude_fleet.ingest',
-      () => {
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          const result = ingestLine(state.workspaceId, state.sessionId, trimmed);
-          // Mirror only genuinely-new inserts: the DB dedup key suppresses
-          // re-reads after a compaction shrink, so we never double-append and the
-          // mirror stays append-only / compaction-proof for free.
-          if (result.inserted) {
-            insertedCount++;
-            if (mirrorOn) mirrorBuf += trimmed + '\n';
-          }
-        }
-      },
-      { workspace_id: state.workspaceId, session_id: state.sessionId, lines: lines.length }
-    );
+    results.forEach((result, i) => {
+      // Mirror only genuinely-new inserts: the DB dedup key suppresses
+      // re-reads after a compaction shrink, so we never double-append and the
+      // mirror stays append-only / compaction-proof for free.
+      if (!result.inserted) return;
+      insertedCount++;
+      if (mirrorOn) mirrorBuf += batch[i] + '\n';
+    });
 
     if (mirrorBuf) {
       // Host-private location — never bind-mounted (SPEC §9). mkdir is cheap

@@ -34,7 +34,7 @@ afterEach(async () => { await closeDb(); rmSync(dir, { recursive: true, force: t
 describe('summaryForSession cache', () => {
   it('DEBOUNCE (#383): a read inside the 3s grace serves the cached summary; a post-grace read reflects the ingest', async () => {
     // Arrange: prime the cache with a pre-ingest summary (user line only, no tokens).
-    ingestLine(WS, SES, userLine('u1', 'first'));
+    await ingestLine(WS, SES, userLine('u1', 'first'));
     const before = summaryForSession(SES);
     expect(before).not.toBeNull();
 
@@ -45,7 +45,7 @@ describe('summaryForSession cache', () => {
     vi.useFakeTimers();
     try {
       // Act: ingest an assistant event (adds outputTokens).
-      ingestLine(WS, SES, assistantLine('a1', 100));
+      await ingestLine(WS, SES, assistantLine('a1', 100));
 
       // Within grace — cache must serve the same pre-ingest object (no recompute).
       const withinGrace = summaryForSession(SES);
@@ -64,42 +64,42 @@ describe('summaryForSession cache', () => {
   });
 
   it('repeated reads between ingests hit the cache (same object identity)', async () => {
-    ingestLine(WS, SES, userLine('u1', 'first'));
+    await ingestLine(WS, SES, userLine('u1', 'first'));
     const a = summaryForSession(SES);
     const b = summaryForSession(SES);
     expect(b).toBe(a); // identity, not equality: proves no recompute
   });
 
   it('summaryForWorkspace serves the same cache (funnels into summaryForSession)', async () => {
-    ingestLine(WS, SES, userLine('u1', 'first'));
+    await ingestLine(WS, SES, userLine('u1', 'first'));
     const direct = summaryForSession(SES);
     const viaWorkspace = summaryForWorkspace(WS);
     expect(viaWorkspace).toBe(direct);
   });
 
   it('a non-default topToolsLimit bypasses the cache', async () => {
-    ingestLine(WS, SES, userLine('u1', 'first'));
+    await ingestLine(WS, SES, userLine('u1', 'first'));
     const a = summaryForSession(SES, 3);
     const b = summaryForSession(SES, 3);
     expect(b).not.toBe(a); // recomputed each time — deliberate bypass
   });
 
   it('deleteSession invalidates immediately', async () => {
-    ingestLine(WS, SES, userLine('u1', 'first'));
+    await ingestLine(WS, SES, userLine('u1', 'first'));
     expect(summaryForSession(SES)).not.toBeNull();
     deleteSession(SES);
     expect(summaryForSession(SES)).toBeNull();
   });
 
   it('the cached summary is frozen — decoration throws instead of corrupting the cache', async () => {
-    ingestLine(WS, SES, userLine('u1', 'first'));
+    await ingestLine(WS, SES, userLine('u1', 'first'));
     const s = summaryForSession(SES);
     expect(Object.isFrozen(s)).toBe(true);
     expect(() => { (s as unknown as Record<string, unknown>).decorated = true; }).toThrow();
   });
 
   it('reopening a different DB never serves the previous DB values', async () => {
-    ingestLine(WS, SES, userLine('u1', 'first'));
+    await ingestLine(WS, SES, userLine('u1', 'first'));
     expect(summaryForSession(SES)).not.toBeNull();
     await closeDb();
     rmSync(dir, { recursive: true, force: true });
@@ -111,11 +111,11 @@ describe('summaryForSession cache', () => {
 
 describe('tokensSpentSince cache', () => {
   it('STALENESS REGRESSION: an ingested token event is visible immediately', async () => {
-    ingestLine(WS, SES, assistantLine('a1', 100));
+    await ingestLine(WS, SES, assistantLine('a1', 100));
     const floor = Date.parse('2026-07-01T00:00:00Z') - 1000;
     const before = tokensSpentSince(floor);
     expect(before).toBeGreaterThan(0);
-    ingestLine(WS, SES, assistantLine('a2', 5000));
+    await ingestLine(WS, SES, assistantLine('a2', 5000));
     expect(tokensSpentSince(floor)).toBeGreaterThan(before);
   });
 
@@ -125,7 +125,7 @@ describe('tokensSpentSince cache', () => {
     //   floor+15s lands in the next bucket (118857600)
     //   the event at evTs is within ALL three query windows (evTs >= floor+15s)
     // So value equality holds whether or not the cache fires.
-    ingestLine(WS, SES, assistantLine('a1', 100));
+    await ingestLine(WS, SES, assistantLine('a1', 100));
     const evTs = Date.parse('2026-07-01T00:00:05Z');
     const floor = evTs - 20_000;
     const a = tokensSpentSince(floor);
@@ -136,7 +136,7 @@ describe('tokensSpentSince cache', () => {
   });
 
   it('deleteSession clears the spend cache (deleted tokens vanish)', async () => {
-    ingestLine(WS, SES, assistantLine('a1', 5000));
+    await ingestLine(WS, SES, assistantLine('a1', 5000));
     const floor = Date.parse('2026-07-01T00:00:00Z') - 1000;
     const before = tokensSpentSince(floor);
     deleteSession(SES);

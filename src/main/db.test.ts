@@ -8,8 +8,8 @@ import { openDb, closeDb, recordError, learnBrokerSessionMapping, recordBrokerSe
 // A minimal well-formed transcript line that makes `sessionId` a *real*
 // session (any ingested line upserts the sessions row). The `user` string
 // content also populates first_user_message so summaries resolve a title.
-function realSession(workspaceId: string, sessionId: string, prompt = 'hello there'): void {
-  ingestLine(
+async function realSession(workspaceId: string, sessionId: string, prompt = 'hello there'): Promise<void> {
+  await ingestLine(
     workspaceId,
     sessionId,
     JSON.stringify({
@@ -137,7 +137,7 @@ describe('lookupResumableBrokerSession — cross-restart auto-resume gate', () =
       // Verified but never produced a transcript: `claude --resume` of it
       // would error visibly in the tab, so refuse and let the attach spawn fresh.
       expect(lookupResumableBrokerSession('ws-a', 'broker-1')).toBeNull();
-      realSession('ws-a', 'claude-1');
+      await realSession('ws-a', 'claude-1');
       expect(lookupResumableBrokerSession('ws-a', 'broker-1')).toBe('claude-1');
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
@@ -149,7 +149,7 @@ describe('lookupResumableBrokerSession — cross-restart auto-resume gate', () =
         INSERT INTO broker_sessions (workspace_id, broker_session_id, claude_session_id, learned_at, verified)
         VALUES ('ws-a', 'broker-legacy', 'claude-guessed', 1, 0)
       `).run();
-      realSession('ws-a', 'claude-guessed');
+      await realSession('ws-a', 'claude-guessed');
       expect(lookupResumableBrokerSession('ws-a', 'broker-legacy')).toBeNull();
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
@@ -175,7 +175,7 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
   it('commits immediately when the new claude session already has a transcript', async () => {
     const dir = freshDb();
     try {
-      realSession('ws-a', 'claude-real');
+      await realSession('ws-a', 'claude-real');
       const r = await recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-real');
       expect(r.mode).toBe('committed');
       expect(lookupBrokerSession('ws-a', 'broker-1')).toBe('claude-real');
@@ -185,7 +185,7 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
   it('DEFERS a remap to a transcript-less session, keeping the committed real mapping', async () => {
     const dir = freshDb();
     try {
-      realSession('ws-a', 'claude-real', 'first conversation');
+      await realSession('ws-a', 'claude-real', 'first conversation');
       await recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-real');
 
       // /clear reports a brand-new session id that has no transcript yet.
@@ -202,12 +202,12 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
   it('PROMOTES the pending mapping once its session produces a transcript', async () => {
     const dir = freshDb();
     try {
-      realSession('ws-a', 'claude-real', 'first conversation');
+      await realSession('ws-a', 'claude-real', 'first conversation');
       await recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-real');
       await recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-next'); // deferred
 
       // The cleared session finally writes its first line → the tab follows it.
-      realSession('ws-a', 'claude-next', 'second conversation');
+      await realSession('ws-a', 'claude-next', 'second conversation');
       expect(lookupBrokerSession('ws-a', 'broker-1')).toBe('claude-next');
       expect(summaryForBrokerSession('ws-a', 'broker-1')?.title).toBe('second conversation');
       // Promotion keeps the row resume-grade.
@@ -233,13 +233,13 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
   it('re-populates pending promotions across a reopen (persisted, not just in-memory)', async () => {
     const dir = freshDb();
     try {
-      realSession('ws-a', 'claude-real');
+      await realSession('ws-a', 'claude-real');
       await recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-real');
       await recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-next'); // deferred (pending persisted)
       await closeDb();
       openDb(dir); // reopen — in-memory pending set must rehydrate from the row
 
-      realSession('ws-a', 'claude-next');
+      await realSession('ws-a', 'claude-next');
       expect(lookupBrokerSession('ws-a', 'broker-1')).toBe('claude-next');
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
@@ -319,9 +319,9 @@ describe('listSessions — headless flag', () => {
   it('flags sessions mapped from an automation (auto-*) broker id', async () => {
     const dir = freshDb();
     try {
-      realSession('ws-a', 'claude-tab');
-      realSession('ws-a', 'claude-auto');
-      realSession('ws-a', 'claude-unmapped');
+      await realSession('ws-a', 'claude-tab');
+      await realSession('ws-a', 'claude-auto');
+      await realSession('ws-a', 'claude-unmapped');
       await recordBrokerSessionMapping('ws-a', 'tab-1', 'claude-tab');
       await recordBrokerSessionMapping('ws-a', 'auto-run1-step1', 'claude-auto');
       const byId = new Map(listSessions('ws-a').map((s) => [s.id, s.headless]));

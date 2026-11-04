@@ -17,8 +17,8 @@ beforeEach(async () => { dir = mkdtempSync(join(tmpdir(), 'cf-search-')); openDb
 afterEach(async () => { await closeDb(); rmSync(dir, { recursive: true, force: true }); });
 
 async function seed() {
-  ingestLine(A, 'sa', line({ type: 'user', uuid: 'a1', timestamp: '2026-07-01T00:00:00Z', message: { content: 'fixing the broker bug' } }));
-  ingestLine(B, 'sb', line({ type: 'user', uuid: 'b1', timestamp: '2026-07-01T00:00:00Z', message: { content: 'a banana recipe' } }));
+  await ingestLine(A, 'sa', line({ type: 'user', uuid: 'a1', timestamp: '2026-07-01T00:00:00Z', message: { content: 'fixing the broker bug' } }));
+  await ingestLine(B, 'sb', line({ type: 'user', uuid: 'b1', timestamp: '2026-07-01T00:00:00Z', message: { content: 'a banana recipe' } }));
   await indexSessionTurns('sa', stub);
   await indexSessionTurns('sb', stub);
 }

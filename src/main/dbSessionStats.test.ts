@@ -168,27 +168,27 @@ describe('session_stats + session_tool_counts invariant', () => {
     //   line 1: input=100 + 0 + 0 = 100  (not the max)
     //   line 2: input=50  + 400 + 50 = 500  ← the MAX
     //   line 3: input=200 + 0 + 0 = 200  (not the max)
-    ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
-    ingestLine(WS1, SES_A, assistantLine('a2', { inputTokens: 50, cacheRead: 400, cacheCreation: 50 }));
-    ingestLine(WS1, SES_A, assistantLine('a3', { inputTokens: 200 }));
+    await ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
+    await ingestLine(WS1, SES_A, assistantLine('a2', { inputTokens: 50, cacheRead: 400, cacheCreation: 50 }));
+    await ingestLine(WS1, SES_A, assistantLine('a3', { inputTokens: 200 }));
     // Add an explicit-zero-token assistant line to SES_A AFTER the max—bearing line to prove MAX never lowers.
     //   line 4: input=0 + 0 + 0 = 0  (explicit zeros via ?? 0 defaults; must not lower the max)
-    ingestLine(WS1, SES_A, assistantLine('a4')); // no token opts → all explicitly 0
+    await ingestLine(WS1, SES_A, assistantLine('a4')); // no token opts → all explicitly 0
     // Tool calls for SES_A: 'Read' appears twice, 'Edit' once.
-    ingestLine(WS1, SES_A, toolUseLine('t1', 'Read'));
-    ingestLine(WS1, SES_A, toolUseLine('t2', 'Read'));
-    ingestLine(WS1, SES_A, toolUseLine('t3', 'Edit'));
+    await ingestLine(WS1, SES_A, toolUseLine('t1', 'Read'));
+    await ingestLine(WS1, SES_A, toolUseLine('t2', 'Read'));
+    await ingestLine(WS1, SES_A, toolUseLine('t3', 'Edit'));
     // User lines contribute to NEITHER rollup.
-    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
-    ingestLine(WS1, SES_A, userLine('u2', 'world'));
+    await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    await ingestLine(WS1, SES_A, userLine('u2', 'world'));
 
     // SES_B: assistant lines with and without usage objects.
     // First, a line with explicit zeros (??0 defaults).
-    ingestLine(WS2, SES_B, assistantLine('b1')); // no token opts → all explicitly 0
+    await ingestLine(WS2, SES_B, assistantLine('b1')); // no token opts → all explicitly 0
     // Second, a line with NO usage object at all (NULL in DB): exercises COALESCE(NULL,0)→0.
-    ingestLine(WS2, SES_B, assistantLineNoUsage('b2'));
+    await ingestLine(WS2, SES_B, assistantLineNoUsage('b2'));
     // One tool call for SES_B.
-    ingestLine(WS2, SES_B, toolUseLine('t4', 'Bash'));
+    await ingestLine(WS2, SES_B, toolUseLine('t4', 'Bash'));
 
     const d = openDb(dir);
     expectRollupsMatchEvents(d);
@@ -214,8 +214,8 @@ describe('session_stats + session_tool_counts invariant', () => {
 
   it('sessions with no assistant events have NO session_stats row', async () => {
     // Only user lines — no assistant events → no session_stats row.
-    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
-    ingestLine(WS1, SES_A, userLine('u2', 'world'));
+    await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    await ingestLine(WS1, SES_A, userLine('u2', 'world'));
 
     const d = openDb(dir);
     const statsRows = d.prepare(STATS_ROLLUP_SQL).all() as Array<{ session_id: string }>;
@@ -227,7 +227,7 @@ describe('session_stats + session_tool_counts invariant', () => {
 
   it('sessions with no tool calls have no session_tool_counts rows', async () => {
     // Only pure assistant lines (no tool_use content) → no tool rows.
-    ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
+    await ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
 
     const d = openDb(dir);
     const toolRows = d.prepare(TOOLS_ROLLUP_SQL).all() as Array<{ session_id: string }>;
@@ -237,16 +237,16 @@ describe('session_stats + session_tool_counts invariant', () => {
   });
 
   it('duplicate replay is a no-op: same uuid does not inflate max or counts', async () => {
-    ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
-    ingestLine(WS1, SES_A, toolUseLine('t1', 'Read'));
+    await ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
+    await ingestLine(WS1, SES_A, toolUseLine('t1', 'Read'));
 
     const d = openDb(dir);
     const statsBefore = d.prepare(STATS_ROLLUP_SQL).all();
     const toolsBefore = d.prepare(TOOLS_ROLLUP_SQL).all();
 
     // Re-ingest the exact same lines (same uuid = same dedup_key).
-    const r1 = ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
-    const r2 = ingestLine(WS1, SES_A, toolUseLine('t1', 'Read'));
+    const r1 = await ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
+    const r2 = await ingestLine(WS1, SES_A, toolUseLine('t1', 'Read'));
     expect(r1.inserted).toBe(false);
     expect(r2.inserted).toBe(false);
 
@@ -258,10 +258,10 @@ describe('session_stats + session_tool_counts invariant', () => {
 
   it('deleteSession removes only that session from both rollup tables', async () => {
     // Two sessions in WS1.
-    ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
-    ingestLine(WS1, SES_A, toolUseLine('t1', 'Read'));
-    ingestLine(WS1, SES_B, assistantLine('b1', { inputTokens: 200 }));
-    ingestLine(WS1, SES_B, toolUseLine('t2', 'Edit'));
+    await ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
+    await ingestLine(WS1, SES_A, toolUseLine('t1', 'Read'));
+    await ingestLine(WS1, SES_B, assistantLine('b1', { inputTokens: 200 }));
+    await ingestLine(WS1, SES_B, toolUseLine('t2', 'Edit'));
 
     const d = openDb(dir);
 
@@ -298,10 +298,10 @@ describe('session_stats + session_tool_counts invariant', () => {
 
   it('migration rebuild reconstructs both tables and index from events', async () => {
     // Ingest data at v14 (normal path).
-    ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
-    ingestLine(WS1, SES_A, toolUseLine('t1', 'Read'));
-    ingestLine(WS2, SES_B, assistantLine('b1', { inputTokens: 200, cacheRead: 50 }));
-    ingestLine(WS2, SES_B, toolUseLine('t2', 'Bash'));
+    await ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
+    await ingestLine(WS1, SES_A, toolUseLine('t1', 'Read'));
+    await ingestLine(WS2, SES_B, assistantLine('b1', { inputTokens: 200, cacheRead: 50 }));
+    await ingestLine(WS2, SES_B, toolUseLine('t2', 'Bash'));
 
     // Wind user_version back to 13 — simulates re-running the v14 block with
     // DROP + rebuild on next open (same drift self-heal as v13 did for costs).
@@ -333,17 +333,17 @@ describe('summary reader equivalence + EXPLAIN pins (Task 2)', () => {
     //   SES_A tools: Read=2, Edit=1 (count desc then name asc)
     //   SES_B max: 0  (b1's all-zero line)
     //   SES_B tools: [{name:'Bash', count:1}]
-    ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
-    ingestLine(WS1, SES_A, assistantLine('a2', { inputTokens: 50, cacheRead: 400, cacheCreation: 50 }));
-    ingestLine(WS1, SES_A, assistantLine('a3', { inputTokens: 200 }));
-    ingestLine(WS1, SES_A, assistantLine('a4'));
-    ingestLine(WS1, SES_A, toolUseLine('t1', 'Read'));
-    ingestLine(WS1, SES_A, toolUseLine('t2', 'Read'));
-    ingestLine(WS1, SES_A, toolUseLine('t3', 'Edit'));
-    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    await ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
+    await ingestLine(WS1, SES_A, assistantLine('a2', { inputTokens: 50, cacheRead: 400, cacheCreation: 50 }));
+    await ingestLine(WS1, SES_A, assistantLine('a3', { inputTokens: 200 }));
+    await ingestLine(WS1, SES_A, assistantLine('a4'));
+    await ingestLine(WS1, SES_A, toolUseLine('t1', 'Read'));
+    await ingestLine(WS1, SES_A, toolUseLine('t2', 'Read'));
+    await ingestLine(WS1, SES_A, toolUseLine('t3', 'Edit'));
+    await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
 
-    ingestLine(WS2, SES_B, assistantLine('b1'));
-    ingestLine(WS2, SES_B, toolUseLine('t4', 'Bash'));
+    await ingestLine(WS2, SES_B, assistantLine('b1'));
+    await ingestLine(WS2, SES_B, toolUseLine('t4', 'Bash'));
 
     const summaryA = summaryForSession(SES_A);
     expect(summaryA).not.toBeNull();
@@ -372,7 +372,7 @@ describe('summary reader equivalence + EXPLAIN pins (Task 2)', () => {
     //   contextWindowTokens = 200_000 (contextWindowFor(null, 0))
     //   topTools = []
     //   lastTurnContextTokens = null
-    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
 
     const summary = summaryForSession(SES_A);
     expect(summary).not.toBeNull();

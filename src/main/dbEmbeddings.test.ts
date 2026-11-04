@@ -24,15 +24,15 @@ afterEach(async () => {
 
 describe('embeddings schema + helpers', () => {
   it('lists user/assistant events that have no turn embedding yet', async () => {
-    ingestLine(WS, SES, userLine('u1', 'hello there'));
-    ingestLine(WS, SES, userLine('u2', 'second message'));
+    await ingestLine(WS, SES, userLine('u1', 'hello there'));
+    await ingestLine(WS, SES, userLine('u2', 'second message'));
     const pending = unembeddedTurnEvents(SES, EMBED_MODEL_ID);
     expect(pending.length).toBe(2);
     expect(pending[0].rawJsonl).toContain('hello there');
   });
 
   it('insertEmbedding removes a turn from the pending set and dedupes', async () => {
-    ingestLine(WS, SES, userLine('u1', 'hello there'));
+    await ingestLine(WS, SES, userLine('u1', 'hello there'));
     const [ev] = unembeddedTurnEvents(SES, EMBED_MODEL_ID);
     const row = {
       workspaceId: WS, sessionId: SES, kind: 'turn' as const, refEventId: ev.id,
@@ -45,15 +45,15 @@ describe('embeddings schema + helpers', () => {
   });
 
   it('maxEventId returns the largest event id for a session', async () => {
-    ingestLine(WS, SES, userLine('u1', 'a'));
-    ingestLine(WS, SES, userLine('u2', 'b'));
+    await ingestLine(WS, SES, userLine('u1', 'a'));
+    await ingestLine(WS, SES, userLine('u2', 'b'));
     expect(maxEventId(SES)).toBeGreaterThan(0);
   });
 });
 
 describe('deleteEmbeddingsForOtherModels', () => {
   it('drops rows keyed to a different model, keeps the current ones', async () => {
-    ingestLine(WS, SES, userLine('u1', 'hello there'));
+    await ingestLine(WS, SES, userLine('u1', 'hello there'));
     const [ev] = unembeddedTurnEvents(SES, EMBED_MODEL_ID);
     insertEmbedding({
       workspaceId: WS, sessionId: SES, kind: 'turn', refEventId: ev.id,

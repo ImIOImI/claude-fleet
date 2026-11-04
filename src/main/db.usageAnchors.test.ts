@@ -19,7 +19,7 @@ const limitHit = {
 
 describe('usage_anchors', () => {
   it('inserts and finds the anchor covering a moment inside its window', async () => {
-    insertUsageAnchor('ws1', 'sess1', HIT, limitHit);
+    await insertUsageAnchor('ws1', 'sess1', HIT, limitHit);
     const cov = latestAnchorCovering(HIT);
     expect(cov?.resetAt).toBe(RESET);
     expect(cov?.windowStart).toBe(WSTART);
@@ -28,18 +28,18 @@ describe('usage_anchors', () => {
   });
 
   it('returns null when the moment is outside every window', async () => {
-    insertUsageAnchor('ws1', 'sess1', HIT, limitHit);
+    await insertUsageAnchor('ws1', 'sess1', HIT, limitHit);
     expect(latestAnchorCovering(Date.parse('2026-07-12T19:00:00Z'))).toBeNull();
   });
 
   it('dedups on dedup_key (idempotent re-ingest)', async () => {
-    insertUsageAnchor('ws1', 'sess1', HIT, limitHit);
-    insertUsageAnchor('ws1', 'sess1', HIT, limitHit);
+    await insertUsageAnchor('ws1', 'sess1', HIT, limitHit);
+    await insertUsageAnchor('ws1', 'sess1', HIT, limitHit);
     expect(latestLimitHitAnchor()?.resetAt).toBe(RESET);
   });
 
   it('latestLimitHitAnchor ignores throttle rows', async () => {
-    insertUsageAnchor('ws1', 's', HIT, { kind: 'throttle', httpStatus: 429, scope: null, resetAt: null, windowStart: null, message: null, rateLimits: '{}', dedupKey: 't1' });
+    await insertUsageAnchor('ws1', 's', HIT, { kind: 'throttle', httpStatus: 429, scope: null, resetAt: null, windowStart: null, message: null, rateLimits: '{}', dedupKey: 't1' });
     expect(latestLimitHitAnchor()).toBeNull();
   });
 });

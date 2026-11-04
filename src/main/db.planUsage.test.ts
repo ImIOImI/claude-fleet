@@ -14,9 +14,9 @@ function assistant(uuid: string, tsIso: string, out: number, model = 'claude-opu
 
 describe('planUsageRows', () => {
   it('sums assistant tokens across workspaces within the window only', async () => {
-    ingestLine('wsA', 's1', assistant('a', '2026-07-12T13:10:00Z', 100));
-    ingestLine('wsB', 's2', assistant('b', '2026-07-12T13:20:00Z', 200, 'claude-haiku-4-5'));
-    ingestLine('wsA', 's1', assistant('c', '2026-07-12T09:00:00Z', 999)); // before window
+    await ingestLine('wsA', 's1', assistant('a', '2026-07-12T13:10:00Z', 100));
+    await ingestLine('wsB', 's2', assistant('b', '2026-07-12T13:20:00Z', 200, 'claude-haiku-4-5'));
+    await ingestLine('wsA', 's1', assistant('c', '2026-07-12T09:00:00Z', 999)); // before window
     const rows = planUsageRows(Date.parse('2026-07-12T13:00:00Z'), Date.parse('2026-07-12T18:00:00Z'));
     const total = rows.reduce((n, r) => n + r.outputTokens, 0);
     expect(total).toBe(300);
@@ -25,9 +25,9 @@ describe('planUsageRows', () => {
   });
 
   it('excludes non-assistant events even if they carry usage', async () => {
-    ingestLine('wsA', 's1', assistant('a', '2026-07-12T13:10:00Z', 100));
+    await ingestLine('wsA', 's1', assistant('a', '2026-07-12T13:10:00Z', 100));
     // A 'user' event inside the window with a usage block must NOT be summed.
-    ingestLine('wsA', 's1', JSON.stringify({
+    await ingestLine('wsA', 's1', JSON.stringify({
       type: 'user', uuid: 'u-usage', timestamp: '2026-07-12T13:15:00Z',
       message: { model: 'claude-opus-4-8', usage: { output_tokens: 5000 } },
     }));
@@ -37,7 +37,7 @@ describe('planUsageRows', () => {
   });
 
   it('maps all token fields to camelCase', async () => {
-    ingestLine('wsA', 's1', JSON.stringify({
+    await ingestLine('wsA', 's1', JSON.stringify({
       type: 'assistant', uuid: 'full', timestamp: '2026-07-12T13:10:00Z',
       message: { model: 'claude-opus-4-8', usage: {
         input_tokens: 11, output_tokens: 22,

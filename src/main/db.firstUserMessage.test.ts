@@ -48,9 +48,9 @@ describe('ingestLine first_user_message derivation', () => {
   it('skips the bare local-command caveat (older claude CLIs omit the wrapper tag)', async () => {
     const dir = freshDb();
     try {
-      ingestLine('ws-a', 's1', userLine('u1', BARE_CAVEAT, { isMeta: true }));
-      ingestLine('ws-a', 's1', userLine('u2', '<bash-input>ls</bash-input>'));
-      ingestLine('ws-a', 's1', userLine('u3', 'fix the login bug'));
+      await ingestLine('ws-a', 's1', userLine('u1', BARE_CAVEAT, { isMeta: true }));
+      await ingestLine('ws-a', 's1', userLine('u2', '<bash-input>ls</bash-input>'));
+      await ingestLine('ws-a', 's1', userLine('u3', 'fix the login bug'));
       expect(fum(dir, 's1')).toBe('fix the login bug');
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -60,9 +60,9 @@ describe('ingestLine first_user_message derivation', () => {
   it('skips isMeta user events even when their text matches no known wrapper', async () => {
     const dir = freshDb();
     try {
-      ingestLine('ws-a', 's2', userLine('u1', '[Image: original 2080x184]', { isMeta: true }));
+      await ingestLine('ws-a', 's2', userLine('u1', '[Image: original 2080x184]', { isMeta: true }));
       expect(fum(dir, 's2')).toBeNull();
-      ingestLine('ws-a', 's2', userLine('u2', 'what does this screenshot show?'));
+      await ingestLine('ws-a', 's2', userLine('u2', 'what does this screenshot show?'));
       expect(fum(dir, 's2')).toBe('what does this screenshot show?');
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -84,9 +84,9 @@ describe('migration 12: repair poisoned first_user_message', () => {
   it('recomputes the title from the first real user prompt in events', async () => {
     const dir = freshDb();
     try {
-      ingestLine('ws-a', 's3', userLine('u1', BARE_CAVEAT, { isMeta: true }));
-      ingestLine('ws-a', 's3', userLine('u2', '<bash-input>npm test</bash-input>'));
-      ingestLine('ws-a', 's3', userLine('u3', 'why is CI red?'));
+      await ingestLine('ws-a', 's3', userLine('u1', BARE_CAVEAT, { isMeta: true }));
+      await ingestLine('ws-a', 's3', userLine('u2', '<bash-input>npm test</bash-input>'));
+      await ingestLine('ws-a', 's3', userLine('u3', 'why is CI red?'));
       await poison(dir, 's3', BARE_CAVEAT);
       expect(fum(dir, 's3')).toBe('why is CI red?'); // reopen runs migration 12
     } finally {
@@ -97,8 +97,8 @@ describe('migration 12: repair poisoned first_user_message', () => {
   it('clears the title to NULL when the session has no real prompt', async () => {
     const dir = freshDb();
     try {
-      ingestLine('ws-a', 's4', userLine('u1', BARE_CAVEAT, { isMeta: true }));
-      ingestLine('ws-a', 's4', userLine('u2', '<bash-input>ls</bash-input>'));
+      await ingestLine('ws-a', 's4', userLine('u1', BARE_CAVEAT, { isMeta: true }));
+      await ingestLine('ws-a', 's4', userLine('u2', '<bash-input>ls</bash-input>'));
       await poison(dir, 's4', BARE_CAVEAT);
       expect(fum(dir, 's4')).toBeNull();
     } finally {
@@ -109,7 +109,7 @@ describe('migration 12: repair poisoned first_user_message', () => {
   it('leaves healthy titles untouched', async () => {
     const dir = freshDb();
     try {
-      ingestLine('ws-a', 's5', userLine('u1', 'ship the release'));
+      await ingestLine('ws-a', 's5', userLine('u1', 'ship the release'));
       const d = openDb(dir);
       d.pragma('user_version = 11');
       await closeDb();

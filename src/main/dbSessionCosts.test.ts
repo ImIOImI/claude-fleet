@@ -115,35 +115,35 @@ afterEach(async () => {
 describe('session_costs invariant', () => {
   it('mixed ingest: multi-session/multi-workspace rollup matches ground truth', async () => {
     // SES_A in WS1: two distinct models, one with a service_tier, plus user lines.
-    ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
-    ingestLine(WS1, SES_A, assistantLine('a2', 'claude-3-haiku', 200, 80));
-    ingestLine(
+    await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    await ingestLine(WS1, SES_A, assistantLine('a2', 'claude-3-haiku', 200, 80));
+    await ingestLine(
       WS1,
       SES_A,
       assistantLine('a3', 'claude-3-opus', 300, 60, { serviceTier: 'batch' }),
     );
-    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
-    ingestLine(WS1, SES_A, userLine('u2', 'world'));
+    await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    await ingestLine(WS1, SES_A, userLine('u2', 'world'));
 
     // SES_B in WS2: single model, no service_tier, plus user lines.
-    ingestLine(WS2, SES_B, assistantLine('b1', 'claude-sonnet', 150, 70, { cacheRead: 10 }));
-    ingestLine(WS2, SES_B, assistantLine('b2', 'claude-sonnet', 50, 20));
-    ingestLine(WS2, SES_B, userLine('u3', 'ping'));
+    await ingestLine(WS2, SES_B, assistantLine('b1', 'claude-sonnet', 150, 70, { cacheRead: 10 }));
+    await ingestLine(WS2, SES_B, assistantLine('b2', 'claude-sonnet', 50, 20));
+    await ingestLine(WS2, SES_B, userLine('u3', 'ping'));
 
     const d = openDb(dir);
     expectRollupMatchesEvents(d);
   });
 
   it('duplicate replay is a no-op: same uuid re-ingested does not double-count', async () => {
-    ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
-    ingestLine(WS1, SES_A, userLine('u1', 'first'));
+    await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    await ingestLine(WS1, SES_A, userLine('u1', 'first'));
 
     const d = openDb(dir);
     // Snapshot the rollup before replay.
     const before = d.prepare(ROLLUP_SQL).all();
 
     // Re-ingest the exact same assistant line (same uuid = same dedup_key).
-    const result = ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    const result = await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
     expect(result.inserted).toBe(false);
 
     // Rollup must be unchanged AND still match ground truth.
@@ -153,10 +153,10 @@ describe('session_costs invariant', () => {
 
   it('deleteSession removes its rollup rows; peer session remains intact', async () => {
     // Two sessions in WS1.
-    ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
-    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
-    ingestLine(WS1, SES_B, assistantLine('b1', 'claude-3-haiku', 200, 80));
-    ingestLine(WS1, SES_B, userLine('u2', 'world'));
+    await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    await ingestLine(WS1, SES_B, assistantLine('b1', 'claude-3-haiku', 200, 80));
+    await ingestLine(WS1, SES_B, userLine('u2', 'world'));
 
     const d = openDb(dir);
 
@@ -180,20 +180,20 @@ describe('session_costs invariant', () => {
     // and multi-session data in one shot.
     //
     // SES_A in WS1: two distinct models (one with serviceTier) + user lines
-    ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
-    ingestLine(WS1, SES_A, assistantLine('a2', 'claude-3-haiku', 200, 80));
-    ingestLine(
+    await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    await ingestLine(WS1, SES_A, assistantLine('a2', 'claude-3-haiku', 200, 80));
+    await ingestLine(
       WS1,
       SES_A,
       assistantLine('a3', 'claude-3-opus', 300, 60, { serviceTier: 'batch' }),
     );
-    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
-    ingestLine(WS1, SES_A, userLine('u2', 'world'));
+    await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    await ingestLine(WS1, SES_A, userLine('u2', 'world'));
 
     // SES_B in WS2: single model, no serviceTier, plus user line
-    ingestLine(WS2, SES_B, assistantLine('b1', 'claude-sonnet', 150, 70, { cacheRead: 10 }));
-    ingestLine(WS2, SES_B, assistantLine('b2', 'claude-sonnet', 50, 20));
-    ingestLine(WS2, SES_B, userLine('u3', 'ping'));
+    await ingestLine(WS2, SES_B, assistantLine('b1', 'claude-sonnet', 150, 70, { cacheRead: 10 }));
+    await ingestLine(WS2, SES_B, assistantLine('b2', 'claude-sonnet', 50, 20));
+    await ingestLine(WS2, SES_B, userLine('u3', 'ping'));
 
     const d = openDb(dir);
 
@@ -287,9 +287,9 @@ describe('session_costs invariant', () => {
 
   it('migration backfill rebuilds from events (drift self-heal)', async () => {
     // Ingest data at version 13 (the normal path).
-    ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
-    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
-    ingestLine(WS2, SES_B, assistantLine('b1', 'claude-sonnet', 150, 70, { cacheRead: 10 }));
+    await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    await ingestLine(WS2, SES_B, assistantLine('b1', 'claude-sonnet', 150, 70, { cacheRead: 10 }));
 
     // Wind the version back to 12 — simulates a future schema bump that will
     // re-run the v13 block with DROP + rebuild on next open.
@@ -308,7 +308,7 @@ describe('session_costs invariant', () => {
     summaryForSession(SES_A);
     const before = _summaryRecomputesForTests();
     for (let i = 0; i < 200; i++) {
-      ingestLine(WS1, SES_A, assistantLine(`burst-${i}`, 'claude-3-opus', 10, 5));
+      await ingestLine(WS1, SES_A, assistantLine(`burst-${i}`, 'claude-3-opus', 10, 5));
       summaryForSession(SES_A); // the renderer-poll stand-in
     }
     // Old policy: ~200 recomputes (every read after every ingest missed).
@@ -319,8 +319,8 @@ describe('session_costs invariant', () => {
 
   it('renameSession invalidates summary cache (fix for missing invalidate call)', async () => {
     // Ingest some data and prime the summary cache.
-    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
-    ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
     const summaryBefore = summaryForSession(SES_A);
     expect(summaryBefore).not.toBeNull();
 
