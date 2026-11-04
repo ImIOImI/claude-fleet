@@ -95,8 +95,8 @@ export async function searchTranscripts(
   allowedWorkspaces: Set<string>,
   embed: EmbedFn,
   opts: { limit?: number; kind?: 'turn' | 'summary' },
-  /** The MCP server's read-only connection: search stays raw better-sqlite3
-   *  (SPEC §11); Postgres gets its own pgvector search in part 3. */
+  /** The MCP server's read-only connection; search stays raw better-sqlite3
+   *  (SPEC §11). */
   db: Database.Database,
 ): Promise<SearchHit[]> {
   const ids = [...allowedWorkspaces];
