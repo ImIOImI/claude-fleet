@@ -287,7 +287,7 @@ const claudeResolver = cachedNullableResolver(
   () => findClaude((file, args) => execFileAsync(file, args), homedir()),
   { nullTtlMs: 5 * 60_000 }
 );
-function resolveClaude(): Promise<string | null> {
+export function resolveClaude(): Promise<string | null> {
   return claudeResolver.get();
 }
 

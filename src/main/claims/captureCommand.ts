@@ -1,0 +1,34 @@
+// Knowledge capture (#483): headless fork command, prompt, and output parsing.
+export const CAPTURE_TOOLS = 'mcp__claude-fleet-state__record_claim,mcp__claude-fleet-state__search_claims';
+
+export function capturePrompt(o: { runToken: string; topTopics: string[] }): string {
+  return [
+    '[fleet:knowledge-capture] You are a background knowledge-capture pass over the conversation above.',
+    `Pass capture_run "${o.runToken}" on every record_claim call.`,
+    'Record only durable, cross-session-useful knowledge from this conversation: decisions and their reasons, root causes,',
+    'non-obvious facts and gotchas, and options that were rejected (with why). Skip task progress, transient state, and anything',
+    'only meaningful inside this session. One self-contained claim per call; record at most 10; record nothing if nothing new.',
+    'Call search_claims first for each idea and skip or supersede what already exists.',
+    o.topTopics.length ? `Prefer existing topic slugs where they fit: ${o.topTopics.join(', ')}.` : '',
+    'Never include secrets, tokens, passwords, or connection strings. Do not reply with prose; just make the tool calls.'
+  ].filter(Boolean).join('\n');
+}
+
+export function captureArgs(o: { prompt: string; sessionId: string; forkSessionId: string; model: string | null; mcpConfigPath?: string }): string[] {
+  return [
+    '-p', o.prompt, '--resume', o.sessionId, '--fork-session', '--session-id', o.forkSessionId,
+    ...(o.model ? ['--model', o.model] : []),
+    '--allowedTools', CAPTURE_TOOLS, '--max-turns', '12', '--output-format', 'json',
+    ...(o.mcpConfigPath ? ['--mcp-config', o.mcpConfigPath] : [])
+  ];
+}
+
+export function parseCaptureOutput(stdout: string): { ok: boolean; sessionId: string | null; usage: unknown; error: string | null } {
+  let j: Record<string, unknown>;
+  try { j = JSON.parse(stdout.trim().split('\n').pop() ?? '') as Record<string, unknown>; }
+  catch { return { ok: false, sessionId: null, usage: null, error: `unparseable claude output: ${stdout.slice(0, 200)}` }; }
+  const sessionId = typeof j.session_id === 'string' ? j.session_id : null;
+  const usage = { total_cost_usd: j.total_cost_usd, usage: j.usage };
+  if (j.is_error === true) return { ok: false, sessionId, usage, error: `claude ${String(j.subtype ?? 'error')}` };
+  return { ok: true, sessionId, usage, error: null };
+}
