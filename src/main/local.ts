@@ -601,7 +601,7 @@ export async function attachPty(
     onFreshSpawn: (claudeSessionId) => {
       // The spawn callback is synchronous; the mapping write is async. The
       // mirror mapping is in-memory and set first, before any transcript line
-      // can be read; the DB write lands within this turn (no I/O inside it).
+      // can be read.
       learnMirrorMapping(id, sessionId, claudeSessionId);
       void (async () => {
         const { mode, previous } = await recordBrokerSessionMapping(id, sessionId, claudeSessionId);

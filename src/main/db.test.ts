@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDb, closeDb, recordError, learnBrokerSessionMapping, recordBrokerSessionMapping, lookupBrokerSession, lookupVerifiedBrokerSession, lookupResumableBrokerSession, listSessions, summaryForBrokerSession, ingestLine, ERRORS_RETENTION, recordUsageEvent } from './db.js';
+import { SqliteDriver } from 'kysely';
+import { openDb, closeDb, recordError, learnBrokerSessionMapping, recordBrokerSessionMapping, lookupBrokerSession, lookupVerifiedBrokerSession, lookupResumableBrokerSession, listSessions, summaryForBrokerSession, ingestLine, ERRORS_RETENTION, recordUsageEvent, __pendingClaudeIdsForTest } from './db.js';
 
 // A minimal well-formed transcript line that makes `sessionId` a *real*
 // session (any ingested line upserts the sessions row). The `user` string
@@ -25,6 +26,13 @@ function freshDb() {
   openDb(dir);
   return dir;
 }
+
+// Mirrors db.ts's private `pendingKey`. Pre-existing quirk (present before
+// this plan, origin/main b3d6922): the separator is an actual NUL byte, not
+// the space its own doc comment describes — harmless (never serialized,
+// write and read sides agree), out of scope here, called out for the record.
+const pendingKeyForTest = (workspaceId: string, claudeSessionId: string): string =>
+  `${workspaceId}\0${claudeSessionId}`;
 
 afterEach(() => closeDb());
 
@@ -251,11 +259,44 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
         .prepare('SELECT pending_claude_session_id FROM broker_sessions WHERE broker_session_id = ?')
         .get('tab-1') as { pending_claude_session_id: string };
       expect(['claude-n1', 'claude-n2']).toContain(pending);
+      // The in-memory guard must agree with the DB exactly: only the survivor
+      // pending, the loser's key evicted when the second transaction replaced it.
+      expect(__pendingClaudeIdsForTest()).toEqual(new Set([pendingKeyForTest('ws-a', pending)]));
       const loser = pending === 'claude-n1' ? 'claude-n2' : 'claude-n1';
       await realSession('ws-a', loser); // the superseded id must NOT promote
       expect(lookupBrokerSession('ws-a', 'tab-1')).toBe('claude-real');
       await realSession('ws-a', pending); // the surviving pending id must promote
       expect(lookupBrokerSession('ws-a', 'tab-1')).toBe(pending);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('a failed remap does not evict a pending key that predates it (M1)', async () => {
+    const dir = freshDb();
+    try {
+      await realSession('ws-a', 'claude-real');
+      await learnBrokerSessionMapping('ws-a', 'tab-1', 'claude-real');
+      // Legitimately parks claude-x as pending.
+      const first = await recordBrokerSessionMapping('ws-a', 'tab-1', 'claude-x');
+      expect(first.mode).toBe('deferred');
+      expect(__pendingClaudeIdsForTest()).toEqual(new Set([pendingKeyForTest('ws-a', 'claude-x')]));
+
+      // Force the transaction's COMMIT to fail — a real post-write failure
+      // (a dropped connection, a Postgres serialization error under Part 3)
+      // AFTER this call's own write already landed. The pre-existing key must
+      // survive: it belongs to the FIRST call's already-committed state, not
+      // to this failing one.
+      const commitSpy = vi
+        .spyOn(SqliteDriver.prototype, 'commitTransaction')
+        .mockImplementationOnce(() => { throw new Error('injected commit failure'); });
+      try {
+        await expect(recordBrokerSessionMapping('ws-a', 'tab-1', 'claude-x')).rejects.toThrow(
+          'injected commit failure',
+        );
+      } finally {
+        commitSpy.mockRestore();
+      }
+
+      expect(__pendingClaudeIdsForTest()).toEqual(new Set([pendingKeyForTest('ws-a', 'claude-x')]));
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
