@@ -152,17 +152,17 @@ function expectRollupsMatchEvents(d: Database.Database): void {
   expect(d.prepare(TOOLS_ROLLUP_SQL).all()).toEqual(d.prepare(TOOLS_GROUND_TRUTH_SQL).all());
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'cf-stats-'));
   openDb(dir);
 });
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
   rmSync(dir, { recursive: true, force: true });
 });
 
 describe('session_stats + session_tool_counts invariant', () => {
-  it('mixed ingest: rollups match ground truth for multi-session, multi-tool data', () => {
+  it('mixed ingest: rollups match ground truth for multi-session, multi-tool data', async () => {
     // SES_A: three assistant lines; the second has the highest context count so
     // MAX must pick it, not the last. A sum-instead-of-max bug would fail.
     //   line 1: input=100 + 0 + 0 = 100  (not the max)
@@ -212,7 +212,7 @@ describe('session_stats + session_tool_counts invariant', () => {
       .toEqual({ count: 1 });
   });
 
-  it('sessions with no assistant events have NO session_stats row', () => {
+  it('sessions with no assistant events have NO session_stats row', async () => {
     // Only user lines — no assistant events → no session_stats row.
     ingestLine(WS1, SES_A, userLine('u1', 'hello'));
     ingestLine(WS1, SES_A, userLine('u2', 'world'));
@@ -225,7 +225,7 @@ describe('session_stats + session_tool_counts invariant', () => {
     expectRollupsMatchEvents(d);
   });
 
-  it('sessions with no tool calls have no session_tool_counts rows', () => {
+  it('sessions with no tool calls have no session_tool_counts rows', async () => {
     // Only pure assistant lines (no tool_use content) → no tool rows.
     ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
 
@@ -236,7 +236,7 @@ describe('session_stats + session_tool_counts invariant', () => {
     expectRollupsMatchEvents(d);
   });
 
-  it('duplicate replay is a no-op: same uuid does not inflate max or counts', () => {
+  it('duplicate replay is a no-op: same uuid does not inflate max or counts', async () => {
     ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
     ingestLine(WS1, SES_A, toolUseLine('t1', 'Read'));
 
@@ -256,7 +256,7 @@ describe('session_stats + session_tool_counts invariant', () => {
     expectRollupsMatchEvents(d);
   });
 
-  it('deleteSession removes only that session from both rollup tables', () => {
+  it('deleteSession removes only that session from both rollup tables', async () => {
     // Two sessions in WS1.
     ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
     ingestLine(WS1, SES_A, toolUseLine('t1', 'Read'));
@@ -296,7 +296,7 @@ describe('session_stats + session_tool_counts invariant', () => {
     expectRollupsMatchEvents(d);
   });
 
-  it('migration rebuild reconstructs both tables and index from events', () => {
+  it('migration rebuild reconstructs both tables and index from events', async () => {
     // Ingest data at v14 (normal path).
     ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
     ingestLine(WS1, SES_A, toolUseLine('t1', 'Read'));
@@ -307,7 +307,7 @@ describe('session_stats + session_tool_counts invariant', () => {
     // DROP + rebuild on next open (same drift self-heal as v13 did for costs).
     const d = openDb(dir);
     d.pragma('user_version = 13');
-    closeDb();
+    await closeDb();
 
     // Re-open: migrate() sees current < 14, drops and rebuilds both tables.
     openDb(dir);
@@ -326,7 +326,7 @@ describe('session_stats + session_tool_counts invariant', () => {
 });
 
 describe('summary reader equivalence + EXPLAIN pins (Task 2)', () => {
-  it('summaryForSession reads max/topTools from rollups, not events', () => {
+  it('summaryForSession reads max/topTools from rollups, not events', async () => {
     // Reproduce case-1 data (same as 'mixed ingest' above) so we can assert
     // hardcoded expected values derived from the known fixture.
     //   SES_A max: a2's 50+400+50 = 500 (the winner; a3=200, a4=0 don't lower it)
@@ -366,7 +366,7 @@ describe('summary reader equivalence + EXPLAIN pins (Task 2)', () => {
     expect(summaryB!.topTools).toEqual([{ name: 'Bash', count: 1 }]);
   });
 
-  it('session with no assistant events: absent-row semantics yield safe defaults', () => {
+  it('session with no assistant events: absent-row semantics yield safe defaults', async () => {
     // Only user lines — no assistant events. session_stats has no row for SES_A.
     // summaryForSession must not throw and must expose:
     //   contextWindowTokens = 200_000 (contextWindowFor(null, 0))
@@ -381,7 +381,7 @@ describe('summary reader equivalence + EXPLAIN pins (Task 2)', () => {
     expect(summary!.lastTurnContextTokens).toBeNull();
   });
 
-  it('observedMax/topTools EXPLAIN plans never touch events', () => {
+  it('observedMax/topTools EXPLAIN plans never touch events', async () => {
     // Pin: both rollup queries must be served from their tables, not events.
     // If either plan mentions 'events', a future schema drift broke the query.
     const d = openDb(dir);
@@ -401,7 +401,7 @@ describe('summary reader equivalence + EXPLAIN pins (Task 2)', () => {
     expect(toolsDetails).not.toMatch(/\bevents\b/);
   });
 
-  it('LATEST_ASSISTANT_SQL EXPLAIN plan uses a session-prefixed index', () => {
+  it('LATEST_ASSISTANT_SQL EXPLAIN plan uses a session-prefixed index', async () => {
     // Pin: the query must use idx_events_session_type (or idx_events_session_ts)
     // and must NOT use the bare idx_events_type index (which scans the entire
     // table for assistant events across all sessions).

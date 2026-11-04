@@ -29,7 +29,7 @@ function freshDb() {
 afterEach(() => closeDb());
 
 describe('recordError', () => {
-  it('inserts a row with all fields', () => {
+  it('inserts a row with all fields', async () => {
     const dir = freshDb();
     try {
       recordError({ ts: 1000, source: 'main', type: 'pty-attach-failed', message: 'boom',
@@ -43,7 +43,7 @@ describe('recordError', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it('resolves session_id from a broker id in extra via the mapping', () => {
+  it('resolves session_id from a broker id in extra via the mapping', async () => {
     const dir = freshDb();
     try {
       learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-uuid-1');
@@ -55,7 +55,7 @@ describe('recordError', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it('leaves session_id NULL when the broker mapping is absent', () => {
+  it('leaves session_id NULL when the broker mapping is absent', async () => {
     const dir = freshDb();
     try {
       recordError({ ts: 1, source: 'main', type: 'mapping-unresolved', message: 'm',
@@ -66,7 +66,7 @@ describe('recordError', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it('prunes to the most recent ERRORS_RETENTION rows', () => {
+  it('prunes to the most recent ERRORS_RETENTION rows', async () => {
     const dir = freshDb();
     try {
       for (let i = 0; i < ERRORS_RETENTION + 5; i++) {
@@ -82,7 +82,7 @@ describe('recordError', () => {
 });
 
 describe('learnBrokerSessionMapping remap reporting (#195)', () => {
-  it('returns null on first learn, the previous claude id thereafter', () => {
+  it('returns null on first learn, the previous claude id thereafter', async () => {
     const dir = freshDb();
     try {
       expect(learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-1')).toBeNull();
@@ -96,7 +96,7 @@ describe('learnBrokerSessionMapping remap reporting (#195)', () => {
 });
 
 describe('verified resume mappings (poisoned legacy rows)', () => {
-  it('new learns are verified; lookupVerifiedBrokerSession returns them', () => {
+  it('new learns are verified; lookupVerifiedBrokerSession returns them', async () => {
     const dir = freshDb();
     try {
       learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-1');
@@ -104,7 +104,7 @@ describe('verified resume mappings (poisoned legacy rows)', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it('legacy (unverified) rows resolve for observability but never for resume', () => {
+  it('legacy (unverified) rows resolve for observability but never for resume', async () => {
     const dir = freshDb();
     try {
       // Simulate a pre-#198 FIFO-guessed row: present, but verified=0.
@@ -122,7 +122,7 @@ describe('verified resume mappings (poisoned legacy rows)', () => {
 });
 
 describe('lookupResumableBrokerSession — cross-restart auto-resume gate', () => {
-  it('returns the mapping only once the session has ingested a transcript line', () => {
+  it('returns the mapping only once the session has ingested a transcript line', async () => {
     const dir = freshDb();
     try {
       learnBrokerSessionMapping('ws-a', 'broker-1', 'claude-1');
@@ -134,7 +134,7 @@ describe('lookupResumableBrokerSession — cross-restart auto-resume gate', () =
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it('never resumes an unverified (FIFO-guessed) mapping, even with a real session', () => {
+  it('never resumes an unverified (FIFO-guessed) mapping, even with a real session', async () => {
     const dir = freshDb();
     try {
       openDb(dir).prepare(`
@@ -146,7 +146,7 @@ describe('lookupResumableBrokerSession — cross-restart auto-resume gate', () =
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it('returns null for an unmapped broker session', () => {
+  it('returns null for an unmapped broker session', async () => {
     const dir = freshDb();
     try {
       expect(lookupResumableBrokerSession('ws-a', 'broker-unknown')).toBeNull();
@@ -155,7 +155,7 @@ describe('lookupResumableBrokerSession — cross-restart auto-resume gate', () =
 });
 
 describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
-  it('commits directly for a fresh tab with no prior mapping', () => {
+  it('commits directly for a fresh tab with no prior mapping', async () => {
     const dir = freshDb();
     try {
       const r = recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-1');
@@ -164,7 +164,7 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it('commits immediately when the new claude session already has a transcript', () => {
+  it('commits immediately when the new claude session already has a transcript', async () => {
     const dir = freshDb();
     try {
       realSession('ws-a', 'claude-real');
@@ -174,7 +174,7 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it('DEFERS a remap to a transcript-less session, keeping the committed real mapping', () => {
+  it('DEFERS a remap to a transcript-less session, keeping the committed real mapping', async () => {
     const dir = freshDb();
     try {
       realSession('ws-a', 'claude-real', 'first conversation');
@@ -191,7 +191,7 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it('PROMOTES the pending mapping once its session produces a transcript', () => {
+  it('PROMOTES the pending mapping once its session produces a transcript', async () => {
     const dir = freshDb();
     try {
       realSession('ws-a', 'claude-real', 'first conversation');
@@ -207,7 +207,7 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it('replaces a phantom committed mapping directly (self-heals a previously-stuck tab)', () => {
+  it('replaces a phantom committed mapping directly (self-heals a previously-stuck tab)', async () => {
     const dir = freshDb();
     try {
       // Simulate a tab already stuck on a phantom (written by pre-#170 code).
@@ -222,13 +222,13 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it('re-populates pending promotions across a reopen (persisted, not just in-memory)', () => {
+  it('re-populates pending promotions across a reopen (persisted, not just in-memory)', async () => {
     const dir = freshDb();
     try {
       realSession('ws-a', 'claude-real');
       recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-real');
       recordBrokerSessionMapping('ws-a', 'broker-1', 'claude-next'); // deferred (pending persisted)
-      closeDb();
+      await closeDb();
       openDb(dir); // reopen — in-memory pending set must rehydrate from the row
 
       realSession('ws-a', 'claude-next');
@@ -238,7 +238,7 @@ describe('recordBrokerSessionMapping — phantom-safe remaps (#170)', () => {
 });
 
 describe('usage_events (#207)', () => {
-  it('recordUsageEvent appends rows with JSON detail', () => {
+  it('recordUsageEvent appends rows with JSON detail', async () => {
     const dir = freshDb();
     try {
       recordUsageEvent({ workspaceId: 'ws-a', sessionId: 's1', kind: 'search-impression', detail: { query: 'broker hang' } });
@@ -252,7 +252,7 @@ describe('usage_events (#207)', () => {
 });
 
 describe('listSessions — headless flag', () => {
-  it('flags sessions mapped from an automation (auto-*) broker id', () => {
+  it('flags sessions mapped from an automation (auto-*) broker id', async () => {
     const dir = freshDb();
     try {
       realSession('ws-a', 'claude-tab');

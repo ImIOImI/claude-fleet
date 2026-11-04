@@ -7,8 +7,8 @@ import { openDb, closeDb, costForSession } from './db.js';
 
 const PARENT = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 let dir: string;
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cf-subagent-')); openDb(dir); });
-afterEach(() => { closeDb(); rmSync(dir, { recursive: true, force: true }); });
+beforeEach(async () => { dir = mkdtempSync(join(tmpdir(), 'cf-subagent-')); openDb(dir); });
+afterEach(async () => { await closeDb(); rmSync(dir, { recursive: true, force: true }); });
 
 const subLine = JSON.stringify({
   type: 'assistant', uuid: 'sa1', timestamp: '2026-07-12T13:20:00Z',
@@ -16,11 +16,11 @@ const subLine = JSON.stringify({
 });
 
 describe('parseSubagentPath', () => {
-  it('extracts the parent session id from a subagent file path', () => {
+  it('extracts the parent session id from a subagent file path', async () => {
     const p = `/x/projects/-workspace/${PARENT}/subagents/agent-123.jsonl`;
     expect(parseSubagentPath(p)).toEqual({ parentSessionId: PARENT });
   });
-  it('returns null for a primary transcript path', () => {
+  it('returns null for a primary transcript path', async () => {
     expect(parseSubagentPath(`/x/projects/-workspace/${PARENT}.jsonl`)).toBeNull();
   });
 });

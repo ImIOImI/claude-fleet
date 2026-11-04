@@ -11,24 +11,24 @@ describe('PerfStore', () => {
   let db: Database.Database;
   let store: PerfStore;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), 'perfstore-'));
     db = openDb(dir);
     store = new PerfStore(db);
   });
-  afterEach(() => {
-    closeDb();
+  afterEach(async () => {
+    await closeDb();
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('migration creates perf_events with the expected columns', () => {
+  it('migration creates perf_events with the expected columns', async () => {
     const cols = db.prepare(`PRAGMA table_info(perf_events)`).all() as Array<{ name: string }>;
     expect(cols.map((c) => c.name)).toEqual([
       'id', 'ts', 'kind', 'workspace_id', 'session_id', 'name', 'dur_ms', 'trace_id', 'span_id', 'meta'
     ]);
   });
 
-  it('enqueue is buffered; flush writes one transaction and empties the buffer', () => {
+  it('enqueue is buffered; flush writes one transaction and empties the buffer', async () => {
     store.enqueue({ ts: 1000, kind: 'slow_op', name: 'claude_fleet.ingest', durMs: 40 });
     store.enqueue({ ts: 1001, kind: 'stall', durMs: 80, meta: { p50: 1, p99: 60, max: 80 } });
     expect(db.prepare(`SELECT COUNT(*) AS n FROM perf_events`).get()).toEqual({ n: 0 });
@@ -42,7 +42,7 @@ describe('PerfStore', () => {
     expect(store.flush()).toBe(0); // idempotent when empty
   });
 
-  it('prune deletes rows older than the retention window', () => {
+  it('prune deletes rows older than the retention window', async () => {
     const now = 10 * 24 * 60 * 60 * 1000;
     store.enqueue({ ts: now - 8 * 24 * 60 * 60 * 1000, kind: 'stall', durMs: 60 });
     store.enqueue({ ts: now - 1000, kind: 'stall', durMs: 60 });
@@ -51,7 +51,7 @@ describe('PerfStore', () => {
     expect(db.prepare(`SELECT COUNT(*) AS n FROM perf_events`).get()).toEqual({ n: 1 });
   });
 
-  it('counts24h groups by kind within the window', () => {
+  it('counts24h groups by kind within the window', async () => {
     const now = 2 * 24 * 60 * 60 * 1000;
     store.enqueue({ ts: now - 1000, kind: 'stall', durMs: 60 });
     store.enqueue({ ts: now - 2000, kind: 'slow_op', name: 'x', durMs: 30 });
@@ -61,12 +61,12 @@ describe('PerfStore', () => {
     expect(store.counts24h(now)).toEqual({ stall: 1, slow_op: 2 });
   });
 
-  it('buffer is capped so a runaway producer cannot exhaust memory', () => {
+  it('buffer is capped so a runaway producer cannot exhaust memory', async () => {
     for (let i = 0; i < 11_000; i++) store.enqueue({ ts: i, kind: 'stall', durMs: 60 });
     expect(store.pending()).toBe(10_000);
   });
 
-  it('flush restores the buffer when the transaction throws', () => {
+  it('flush restores the buffer when the transaction throws', async () => {
     store.enqueue({ ts: 1, kind: 'stall', durMs: 60 });
     db.exec(`DROP TABLE perf_events`); // force the transaction to throw
     let threwError = false;

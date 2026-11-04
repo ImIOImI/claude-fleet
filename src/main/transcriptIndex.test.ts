@@ -14,18 +14,18 @@ let dir: string;
 const WS = '01WS', SES = 'ses-1';
 const line = (o: object) => JSON.stringify(o);
 
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cf-idx-')); openDb(dir); });
-afterEach(() => { closeDb(); rmSync(dir, { recursive: true, force: true }); });
+beforeEach(async () => { dir = mkdtempSync(join(tmpdir(), 'cf-idx-')); openDb(dir); });
+afterEach(async () => { await closeDb(); rmSync(dir, { recursive: true, force: true }); });
 
 describe('extractText', () => {
-  it('reads a string content', () => {
+  it('reads a string content', async () => {
     expect(extractText({ content: 'hello' })).toBe('hello');
   });
-  it('joins text blocks and ignores tool blocks', () => {
+  it('joins text blocks and ignores tool blocks', async () => {
     const msg = { content: [{ type: 'text', text: 'part one' }, { type: 'tool_use', name: 'Bash', input: {} }, { type: 'text', text: 'part two' }] };
     expect(extractText(msg)).toBe('part one\npart two');
   });
-  it('returns empty for a tool-only message', () => {
+  it('returns empty for a tool-only message', async () => {
     expect(extractText({ content: [{ type: 'tool_result', tool_use_id: 'x' }] })).toBe('');
   });
 });

@@ -348,7 +348,7 @@ app.on('before-quit', async () => {
   await inboxStore?.close();
   inboxStore = null;
   await shutdownPerf();
-  closeDb();
+  await closeDb();
 });
 
 app.on('window-all-closed', () => {

@@ -29,14 +29,14 @@ let dir: string;
 let db: Database.Database;
 let store: PerfStore;
 
-beforeEach(() => {
+beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'perf-'));
   db = openDb(dir);
   store = new PerfStore(db);
 });
 afterEach(async () => {
   await shutdownPerf();
-  closeDb();
+  await closeDb();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -205,7 +205,7 @@ describe('stall sampler + pty counters', () => {
 });
 
 describe('getPerfStatus', () => {
-  it('reflects effective config + 24h counts (flushing pending rows first)', () => {
+  it('reflects effective config + 24h counts (flushing pending rows first)', async () => {
     initPerf(store, ON);
     store.enqueue({ ts: Date.now(), kind: 'stall', durMs: 60 });
     const s = getPerfStatus();
@@ -249,7 +249,7 @@ describe('perfNotePowerEvent (suspend filtering)', () => {
     expect(after).toBeGreaterThanOrEqual(1);
   });
 
-  it('is a no-op before initPerf', () => {
+  it('is a no-op before initPerf', async () => {
     expect(() => perfNotePowerEvent('resume')).not.toThrow();
   });
 });
@@ -345,7 +345,7 @@ describe('stall rows: cpu + sentinel enrichment', () => {
     expect(sentinelStatus().enabled).toBe(false);
   });
 
-  it('getPerfStatus includes the sentinel block', () => {
+  it('getPerfStatus includes the sentinel block', async () => {
     initPerf(store, ON);
     const s = getPerfStatus();
     expect(s.sentinel).toEqual({ enabled: false, startedAt: null, expiresAt: null, lastWorkerWindow: null, workerDead: false });

@@ -9,11 +9,11 @@ let dir: string; const WS = '01WS', SES = 'ses-1';
 const line = (o: object) => JSON.stringify(o);
 const userLine = (uuid: string, content: string) =>
   JSON.stringify({ type: 'user', uuid, timestamp: '2026-07-01T00:00:00Z', message: { content } });
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cf-sum-')); openDb(dir); });
-afterEach(() => { closeDb(); rmSync(dir, { recursive: true, force: true }); });
+beforeEach(async () => { dir = mkdtempSync(join(tmpdir(), 'cf-sum-')); openDb(dir); });
+afterEach(async () => { await closeDb(); rmSync(dir, { recursive: true, force: true }); });
 
 describe('session-summary ingest', () => {
-  it('routes a session-summary event into session_summaries as a pending embedding', () => {
+  it('routes a session-summary event into session_summaries as a pending embedding', async () => {
     ingestLine(WS, SES, line({ type: 'user', uuid: 'u1', timestamp: '2026-07-01T00:00:00Z', message: { content: 'hi' } }));
     ingestLine(WS, SES, line({ type: 'session-summary', summary: 'Worked on the broker reconnect bug.', timestamp: '2026-07-01T00:01:00Z' }));
     const pending = unembeddedSummaries(EMBED_MODEL_ID);
@@ -22,7 +22,7 @@ describe('session-summary ingest', () => {
     expect(pending[0].sourceMaxEventId).toBeGreaterThan(0);
   });
 
-  it('appends chapter rows per source_max_event_id, never replaces (#207)', () => {
+  it('appends chapter rows per source_max_event_id, never replaces (#207)', async () => {
     ingestLine(WS, SES, userLine('u1', 'first prompt'));
     ingestLine(WS, SES, JSON.stringify({ type: 'session-summary', summary: 'chapter one', tags: ['a', 'b'], model: 'haiku' }));
     ingestLine(WS, SES, userLine('u2', 'second prompt'));
@@ -32,7 +32,7 @@ describe('session-summary ingest', () => {
     expect(rows.map((r) => r.summary)).toEqual(['chapter one', 'chapter two']);
   });
 
-  it('accumulates tags as a union across chapters', () => {
+  it('accumulates tags as a union across chapters', async () => {
     ingestLine(WS, SES, userLine('u1', 'x'));
     ingestLine(WS, SES, JSON.stringify({ type: 'session-summary', summary: 's1', tags: ['a', 'b'] }));
     ingestLine(WS, SES, userLine('u2', 'y'));

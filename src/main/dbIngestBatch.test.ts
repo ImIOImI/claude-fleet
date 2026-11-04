@@ -53,7 +53,7 @@ export function dump(raw: Database.Database): Record<string, unknown[]> {
 
 let dir: string;
 let raw: Database.Database;
-beforeEach(() => {
+beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'cf-ingest-batch-'));
   raw = db.openDb(dir);
 });

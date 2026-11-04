@@ -19,8 +19,8 @@ const assistantLine = (uuid: string, outputTokens: number) =>
 const userLine = (uuid: string, content: string) =>
   JSON.stringify({ type: 'user', uuid, timestamp: '2026-07-01T00:00:00Z', message: { content } });
 
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cf-cache-')); openDb(dir); });
-afterEach(() => { closeDb(); rmSync(dir, { recursive: true, force: true }); });
+beforeEach(async () => { dir = mkdtempSync(join(tmpdir(), 'cf-cache-')); openDb(dir); });
+afterEach(async () => { await closeDb(); rmSync(dir, { recursive: true, force: true }); });
 
 // Cache-correctness contract (#383, supersedes #306):
 //   - On ingestLine, summaryCache.markStale(sessionId, SUMMARY_STALE_GRACE_MS) is called.
@@ -32,7 +32,7 @@ afterEach(() => { closeDb(); rmSync(dir, { recursive: true, force: true }); });
 //   - The TTL (30s) is a safety net against any missed invalidation path.
 //   - The spendCache (tokensSpentSince) is still cleared immediately on every new event row.
 describe('summaryForSession cache', () => {
-  it('DEBOUNCE (#383): a read inside the 3s grace serves the cached summary; a post-grace read reflects the ingest', () => {
+  it('DEBOUNCE (#383): a read inside the 3s grace serves the cached summary; a post-grace read reflects the ingest', async () => {
     // Arrange: prime the cache with a pre-ingest summary (user line only, no tokens).
     ingestLine(WS, SES, userLine('u1', 'first'));
     const before = summaryForSession(SES);
@@ -63,45 +63,45 @@ describe('summaryForSession cache', () => {
     }
   });
 
-  it('repeated reads between ingests hit the cache (same object identity)', () => {
+  it('repeated reads between ingests hit the cache (same object identity)', async () => {
     ingestLine(WS, SES, userLine('u1', 'first'));
     const a = summaryForSession(SES);
     const b = summaryForSession(SES);
     expect(b).toBe(a); // identity, not equality: proves no recompute
   });
 
-  it('summaryForWorkspace serves the same cache (funnels into summaryForSession)', () => {
+  it('summaryForWorkspace serves the same cache (funnels into summaryForSession)', async () => {
     ingestLine(WS, SES, userLine('u1', 'first'));
     const direct = summaryForSession(SES);
     const viaWorkspace = summaryForWorkspace(WS);
     expect(viaWorkspace).toBe(direct);
   });
 
-  it('a non-default topToolsLimit bypasses the cache', () => {
+  it('a non-default topToolsLimit bypasses the cache', async () => {
     ingestLine(WS, SES, userLine('u1', 'first'));
     const a = summaryForSession(SES, 3);
     const b = summaryForSession(SES, 3);
     expect(b).not.toBe(a); // recomputed each time — deliberate bypass
   });
 
-  it('deleteSession invalidates immediately', () => {
+  it('deleteSession invalidates immediately', async () => {
     ingestLine(WS, SES, userLine('u1', 'first'));
     expect(summaryForSession(SES)).not.toBeNull();
     deleteSession(SES);
     expect(summaryForSession(SES)).toBeNull();
   });
 
-  it('the cached summary is frozen — decoration throws instead of corrupting the cache', () => {
+  it('the cached summary is frozen — decoration throws instead of corrupting the cache', async () => {
     ingestLine(WS, SES, userLine('u1', 'first'));
     const s = summaryForSession(SES);
     expect(Object.isFrozen(s)).toBe(true);
     expect(() => { (s as unknown as Record<string, unknown>).decorated = true; }).toThrow();
   });
 
-  it('reopening a different DB never serves the previous DB values', () => {
+  it('reopening a different DB never serves the previous DB values', async () => {
     ingestLine(WS, SES, userLine('u1', 'first'));
     expect(summaryForSession(SES)).not.toBeNull();
-    closeDb();
+    await closeDb();
     rmSync(dir, { recursive: true, force: true });
     dir = mkdtempSync(join(tmpdir(), 'cf-cache2-'));
     openDb(dir); // fresh empty DB — the cached summary must not leak across
@@ -110,7 +110,7 @@ describe('summaryForSession cache', () => {
 });
 
 describe('tokensSpentSince cache', () => {
-  it('STALENESS REGRESSION: an ingested token event is visible immediately', () => {
+  it('STALENESS REGRESSION: an ingested token event is visible immediately', async () => {
     ingestLine(WS, SES, assistantLine('a1', 100));
     const floor = Date.parse('2026-07-01T00:00:00Z') - 1000;
     const before = tokensSpentSince(floor);
@@ -119,7 +119,7 @@ describe('tokensSpentSince cache', () => {
     expect(tokensSpentSince(floor)).toBeGreaterThan(before);
   });
 
-  it('same 15s bucket serves the cache; different bucket recomputes', () => {
+  it('same 15s bucket serves the cache; different bucket recomputes', async () => {
     // Event at :05 (5s past midnight). floor = evTs - 20s ensures:
     //   floor and floor+14s share the same 15s bucket key (verified: both → 118857599)
     //   floor+15s lands in the next bucket (118857600)
@@ -135,7 +135,7 @@ describe('tokensSpentSince cache', () => {
     expect(c).toBe(a); // same data → same value, but computed via a different key
   });
 
-  it('deleteSession clears the spend cache (deleted tokens vanish)', () => {
+  it('deleteSession clears the spend cache (deleted tokens vanish)', async () => {
     ingestLine(WS, SES, assistantLine('a1', 5000));
     const floor = Date.parse('2026-07-01T00:00:00Z') - 1000;
     const before = tokensSpentSince(floor);

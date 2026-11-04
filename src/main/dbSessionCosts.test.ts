@@ -103,17 +103,17 @@ function expectRollupMatchesEvents(d: Database.Database): void {
   expect(d.prepare(ROLLUP_SQL).all()).toEqual(d.prepare(GROUND_TRUTH_SQL).all());
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'cf-costs-'));
   openDb(dir);
 });
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
   rmSync(dir, { recursive: true, force: true });
 });
 
 describe('session_costs invariant', () => {
-  it('mixed ingest: multi-session/multi-workspace rollup matches ground truth', () => {
+  it('mixed ingest: multi-session/multi-workspace rollup matches ground truth', async () => {
     // SES_A in WS1: two distinct models, one with a service_tier, plus user lines.
     ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
     ingestLine(WS1, SES_A, assistantLine('a2', 'claude-3-haiku', 200, 80));
@@ -134,7 +134,7 @@ describe('session_costs invariant', () => {
     expectRollupMatchesEvents(d);
   });
 
-  it('duplicate replay is a no-op: same uuid re-ingested does not double-count', () => {
+  it('duplicate replay is a no-op: same uuid re-ingested does not double-count', async () => {
     ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
     ingestLine(WS1, SES_A, userLine('u1', 'first'));
 
@@ -151,7 +151,7 @@ describe('session_costs invariant', () => {
     expectRollupMatchesEvents(d);
   });
 
-  it('deleteSession removes its rollup rows; peer session remains intact', () => {
+  it('deleteSession removes its rollup rows; peer session remains intact', async () => {
     // Two sessions in WS1.
     ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
     ingestLine(WS1, SES_A, userLine('u1', 'hello'));
@@ -175,7 +175,7 @@ describe('session_costs invariant', () => {
     expectRollupMatchesEvents(d);
   });
 
-  it('cost readers return identical results from the rollup as from events', () => {
+  it('cost readers return identical results from the rollup as from events', async () => {
     // Use the mixed ingest from case 1 so we exercise multi-model, NULL-model,
     // and multi-session data in one shot.
     //
@@ -271,7 +271,7 @@ describe('session_costs invariant', () => {
     expect(summary!.usd).toBeGreaterThan(0);
   });
 
-  it('listSessions cost query never scans events (EXPLAIN QUERY PLAN pin)', () => {
+  it('listSessions cost query never scans events (EXPLAIN QUERY PLAN pin)', async () => {
     // Open the DB to ensure it is initialised (EXPLAIN needs a live connection).
     const d = openDb(dir);
     for (const sql of [LIST_SESSION_COSTS_SQL, LIST_SESSION_COSTS_BY_WS_SQL]) {
@@ -285,7 +285,7 @@ describe('session_costs invariant', () => {
     }
   });
 
-  it('migration backfill rebuilds from events (drift self-heal)', () => {
+  it('migration backfill rebuilds from events (drift self-heal)', async () => {
     // Ingest data at version 13 (the normal path).
     ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
     ingestLine(WS1, SES_A, userLine('u1', 'hello'));
@@ -295,7 +295,7 @@ describe('session_costs invariant', () => {
     // re-run the v13 block with DROP + rebuild on next open.
     const d = openDb(dir);
     d.pragma('user_version = 12');
-    closeDb();
+    await closeDb();
 
     // Re-open: migrate() sees current < 13, drops and rebuilds session_costs.
     openDb(dir);
@@ -303,7 +303,7 @@ describe('session_costs invariant', () => {
     expectRollupMatchesEvents(d2);
   });
 
-  it('ingest burst with interleaved summary reads recomputes at most twice (debounce end-to-end)', () => {
+  it('ingest burst with interleaved summary reads recomputes at most twice (debounce end-to-end)', async () => {
     // Prime the cache once.
     summaryForSession(SES_A);
     const before = _summaryRecomputesForTests();
@@ -317,7 +317,7 @@ describe('session_costs invariant', () => {
     expect(_summaryRecomputesForTests() - before).toBeLessThanOrEqual(2);
   });
 
-  it('renameSession invalidates summary cache (fix for missing invalidate call)', () => {
+  it('renameSession invalidates summary cache (fix for missing invalidate call)', async () => {
     // Ingest some data and prime the summary cache.
     ingestLine(WS1, SES_A, userLine('u1', 'hello'));
     ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));

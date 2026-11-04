@@ -6,8 +6,8 @@ import { join } from 'node:path';
 import { openDb, closeDb, ingestLine, latestLimitHitAnchor } from './db.js';
 
 let dir: string;
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cf-ingest-anchor-')); openDb(dir); });
-afterEach(() => { closeDb(); rmSync(dir, { recursive: true, force: true }); });
+beforeEach(async () => { dir = mkdtempSync(join(tmpdir(), 'cf-ingest-anchor-')); openDb(dir); });
+afterEach(async () => { await closeDb(); rmSync(dir, { recursive: true, force: true }); });
 
 const LINE_429 = JSON.stringify({
   type: 'assistant',
@@ -20,7 +20,7 @@ const LINE_429 = JSON.stringify({
 });
 
 describe('ingestLine → usage_anchors', () => {
-  it('records a limit-hit anchor from a 429 assistant line', () => {
+  it('records a limit-hit anchor from a 429 assistant line', async () => {
     ingestLine('ws1', 'sess1', LINE_429);
     const a = latestLimitHitAnchor();
     expect(a?.kind).toBe('limit-hit');
@@ -29,7 +29,7 @@ describe('ingestLine → usage_anchors', () => {
     expect(a?.ts).toBe(Date.parse('2026-07-12T13:54:34.503Z'));
   });
 
-  it('does not record an anchor for an ordinary assistant line', () => {
+  it('does not record an anchor for an ordinary assistant line', async () => {
     ingestLine('ws1', 'sess1', JSON.stringify({ type: 'assistant', uuid: 'u2', message: { model: 'claude-opus-4-8', usage: { output_tokens: 5 } } }));
     expect(latestLimitHitAnchor()).toBeNull();
   });

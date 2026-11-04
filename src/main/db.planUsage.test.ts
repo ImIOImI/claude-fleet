@@ -5,15 +5,15 @@ import { join } from 'node:path';
 import { openDb, closeDb, ingestLine, planUsageRows } from './db.js';
 
 let dir: string;
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cf-planrows-')); openDb(dir); });
-afterEach(() => { closeDb(); rmSync(dir, { recursive: true, force: true }); });
+beforeEach(async () => { dir = mkdtempSync(join(tmpdir(), 'cf-planrows-')); openDb(dir); });
+afterEach(async () => { await closeDb(); rmSync(dir, { recursive: true, force: true }); });
 
 function assistant(uuid: string, tsIso: string, out: number, model = 'claude-opus-4-8') {
   return JSON.stringify({ type: 'assistant', uuid, timestamp: tsIso, message: { model, usage: { output_tokens: out } } });
 }
 
 describe('planUsageRows', () => {
-  it('sums assistant tokens across workspaces within the window only', () => {
+  it('sums assistant tokens across workspaces within the window only', async () => {
     ingestLine('wsA', 's1', assistant('a', '2026-07-12T13:10:00Z', 100));
     ingestLine('wsB', 's2', assistant('b', '2026-07-12T13:20:00Z', 200, 'claude-haiku-4-5'));
     ingestLine('wsA', 's1', assistant('c', '2026-07-12T09:00:00Z', 999)); // before window
@@ -24,7 +24,7 @@ describe('planUsageRows', () => {
     expect(rows.some((r) => r.workspaceId === 'wsB')).toBe(true);
   });
 
-  it('excludes non-assistant events even if they carry usage', () => {
+  it('excludes non-assistant events even if they carry usage', async () => {
     ingestLine('wsA', 's1', assistant('a', '2026-07-12T13:10:00Z', 100));
     // A 'user' event inside the window with a usage block must NOT be summed.
     ingestLine('wsA', 's1', JSON.stringify({
@@ -36,7 +36,7 @@ describe('planUsageRows', () => {
     expect(total).toBe(100);
   });
 
-  it('maps all token fields to camelCase', () => {
+  it('maps all token fields to camelCase', async () => {
     ingestLine('wsA', 's1', JSON.stringify({
       type: 'assistant', uuid: 'full', timestamp: '2026-07-12T13:10:00Z',
       message: { model: 'claude-opus-4-8', usage: {

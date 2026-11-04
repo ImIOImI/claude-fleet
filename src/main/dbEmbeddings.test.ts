@@ -13,17 +13,17 @@ function userLine(id: string, text: string): string {
   return JSON.stringify({ type: 'user', uuid: id, timestamp: '2026-07-01T00:00:00Z', message: { content: text } });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'cf-emb-'));
   openDb(dir);
 });
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
   rmSync(dir, { recursive: true, force: true });
 });
 
 describe('embeddings schema + helpers', () => {
-  it('lists user/assistant events that have no turn embedding yet', () => {
+  it('lists user/assistant events that have no turn embedding yet', async () => {
     ingestLine(WS, SES, userLine('u1', 'hello there'));
     ingestLine(WS, SES, userLine('u2', 'second message'));
     const pending = unembeddedTurnEvents(SES, EMBED_MODEL_ID);
@@ -31,7 +31,7 @@ describe('embeddings schema + helpers', () => {
     expect(pending[0].rawJsonl).toContain('hello there');
   });
 
-  it('insertEmbedding removes a turn from the pending set and dedupes', () => {
+  it('insertEmbedding removes a turn from the pending set and dedupes', async () => {
     ingestLine(WS, SES, userLine('u1', 'hello there'));
     const [ev] = unembeddedTurnEvents(SES, EMBED_MODEL_ID);
     const row = {
@@ -44,7 +44,7 @@ describe('embeddings schema + helpers', () => {
     expect(unembeddedTurnEvents(SES, EMBED_MODEL_ID).length).toBe(0);
   });
 
-  it('maxEventId returns the largest event id for a session', () => {
+  it('maxEventId returns the largest event id for a session', async () => {
     ingestLine(WS, SES, userLine('u1', 'a'));
     ingestLine(WS, SES, userLine('u2', 'b'));
     expect(maxEventId(SES)).toBeGreaterThan(0);
@@ -52,7 +52,7 @@ describe('embeddings schema + helpers', () => {
 });
 
 describe('deleteEmbeddingsForOtherModels', () => {
-  it('drops rows keyed to a different model, keeps the current ones', () => {
+  it('drops rows keyed to a different model, keeps the current ones', async () => {
     ingestLine(WS, SES, userLine('u1', 'hello there'));
     const [ev] = unembeddedTurnEvents(SES, EMBED_MODEL_ID);
     insertEmbedding({

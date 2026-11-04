@@ -31,7 +31,7 @@ describe('instrumentIpcHandle', () => {
 });
 
 describe('channelAttrs', () => {
-  it('maps workspace/session args for mapped channels', () => {
+  it('maps workspace/session args for mapped channels', async () => {
     expect(channelAttrs('sessions:write', ['ws-1', { sessions: [] }]))
       .toEqual({ workspace_id: 'ws-1' });
     expect(channelAttrs('observability:summaryForBrokerSession', ['ws-1', 'bs-2']))
@@ -40,12 +40,12 @@ describe('channelAttrs', () => {
       .toEqual({ workspace_id: 'ws-caller' });
   });
 
-  it('deliberately excludes session-only channels (globally visible rows would leak cross-workspace)', () => {
+  it('deliberately excludes session-only channels (globally visible rows would leak cross-workspace)', async () => {
     // id-bearing but unmapped: session-only rows would be globally visible in the MCP snapshot
     expect(channelAttrs('observability:eventsForSession', ['sess-uuid', 0, 500])).toBeUndefined();
   });
 
-  it('returns undefined for unmapped channels and non-string args', () => {
+  it('returns undefined for unmapped channels and non-string args', async () => {
     expect(channelAttrs('workspace:list', [])).toBeUndefined();
     expect(channelAttrs('sessions:write', [undefined, {}])).toBeUndefined();
     expect(channelAttrs('sessions:list', [undefined])).toBeUndefined(); // optional arg omitted
@@ -76,7 +76,7 @@ describe('instrumentIpcHandle + channelAttrs integration', () => {
       `SELECT workspace_id FROM perf_events WHERE kind = 'slow_op' AND name = 'claude_fleet.ipc.sessions:write'`
     ).get() as { workspace_id: string };
     expect(row).toEqual({ workspace_id: 'ws-int' });
-    closeDb();
+    await closeDb();
     rmSync(dir, { recursive: true, force: true });
   });
 });
