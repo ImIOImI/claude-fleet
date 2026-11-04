@@ -8,6 +8,7 @@ import { useEffect, useState } from 'react';
 import type { PerfStatusPayload, UsageBudgetPreset, UiPrefs } from '../../../preload';
 import { ModalBackdrop } from './ModalBackdrop';
 import { NotificationsSettings } from './NotificationsSettings';
+import { AccountSettings } from './AccountSettings';
 
 /** Compact token formatter for preset labels (e.g. 19_000_000 → "19M"). */
 function fmtTokens(n: number): string {
@@ -66,7 +67,7 @@ function formFromEndpoint(ep: ModelEndpoint): EndpointFormState {
   };
 }
 
-export type ActiveTab = 'settings' | 'endpoints' | 'notifications';
+export type ActiveTab = 'settings' | 'endpoints' | 'notifications' | 'account';
 
 interface Props {
   onClose: () => void;
@@ -367,7 +368,25 @@ export function SettingsModal({ onClose, onSaved, initialTab, names = {} }: Prop
           >
             Notifications
           </div>
+          <div
+            className={`modal-tab${activeTab === 'account' ? ' active' : ''}`}
+            aria-current={activeTab === 'account' ? 'page' : undefined}
+            onClick={() => setActiveTab('account')}
+            style={{ cursor: 'pointer' }}
+          >
+            Account
+          </div>
         </div>
+
+        {activeTab === 'account' && (
+          <>
+            <AccountSettings />
+            <div className="modal-footer notif-footer">
+              <span className="modal-footer-spacer" />
+              <button type="button" className="btn" onClick={onClose}>Close</button>
+            </div>
+          </>
+        )}
 
         {activeTab === 'notifications' && (
           <>

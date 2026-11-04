@@ -205,6 +205,10 @@ export interface MockOpts {
   // tried a FLEET_LOADOUT_TOKEN* and the registry refused it. Any submitted
   // credential (from the token form) succeeds (#444 final review M3).
   envRejectedLoadoutSources?: string[];
+  // Fields merged over a signed-out AccountStatus for identity:status.
+  // identity:signInStart returns a fixed code and identity:signInPoll stays
+  // pending; identity:signOut resets to signed out. No GitHub traffic.
+  identityStatus?: Record<string, unknown>;
 }
 
 export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {}): Promise<void> {
@@ -230,7 +234,11 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       addSource: [],
       removeSource: [],
       refreshSource: [],
-      setSourceCredential: []
+      setSourceCredential: [],
+      identityStatus: [],
+      identitySignInStart: [],
+      identitySignInCancel: [],
+      identitySignOut: []
     };
 
     const channels = [
@@ -269,7 +277,12 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       'loadouts:removeSource',
       'loadouts:refreshSource',
       'loadouts:setSourceCredential',
-      'endpoints:list'
+      'endpoints:list',
+      'identity:status',
+      'identity:signInStart',
+      'identity:signInPoll',
+      'identity:signInCancel',
+      'identity:signOut'
     ];
     for (const ch of channels) {
       try {
@@ -382,6 +395,33 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
         g.__calls.vaultDeleteAllForWorkspace.push(id);
       }
     );
+    const signedOut = {
+      configured: true,
+      persisted: true,
+      signedIn: false,
+      identity: null,
+      scopes: [],
+      packagesAccess: false,
+      sso: null,
+      notice: null
+    };
+    let account: Record<string, unknown> = { ...signedOut, ...(opts.identityStatus ?? {}) };
+    ipcMain.handle('identity:status', (_e, o: { refresh?: boolean }) => {
+      g.__calls.identityStatus.push(o);
+      return account;
+    });
+    ipcMain.handle('identity:signInStart', () => {
+      g.__calls.identitySignInStart.push(true);
+      return { userCode: 'E2E0-0000', verificationUri: 'https://github.com/login/device', expiresAt: Date.now() + 900_000, intervalMs: 5000 };
+    });
+    ipcMain.handle('identity:signInPoll', () => ({ state: 'pending', intervalMs: 5000 }));
+    ipcMain.handle('identity:signInCancel', () => {
+      g.__calls.identitySignInCancel.push(true);
+    });
+    ipcMain.handle('identity:signOut', () => {
+      g.__calls.identitySignOut.push(true);
+      account = { ...signedOut };
+    });
     ipcMain.handle('fs:isDirectory', async (_e, p: string) => {
       g.__calls.isDirectory.push(p);
       return opts.isDirectoryReturns ?? true;

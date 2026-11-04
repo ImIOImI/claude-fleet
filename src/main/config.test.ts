@@ -49,7 +49,8 @@ const {
   setPerfOtlp,
   _resetConfigCacheForTests,
   getKeepRunningInTray,
-  setKeepRunningInTray
+  setKeepRunningInTray,
+  getGithubClientIdConfig
 } = await import('./config.js');
 
 const configPath = () => join(userDataDir, 'config.json');
@@ -576,5 +577,30 @@ describe('keepRunningInTray (#407 Phase 2b)', () => {
     await setHardwareAccelDisabled(true);
     _resetConfigCacheForTests();
     expect(await getKeepRunningInTray()).toBe(true);
+  });
+});
+
+describe('identity.github.clientId', () => {
+  it('is null when unset or malformed', async () => {
+    expect(await getGithubClientIdConfig()).toBeNull();
+    for (const identity of [{ github: { clientId: 42 } }, { github: { clientId: '   ' } }, { github: 'x' }, 'x']) {
+      await writeFile(configPath(), JSON.stringify({ identity }), 'utf8');
+      _resetConfigCacheForTests();
+      expect(await getGithubClientIdConfig()).toBeNull();
+    }
+  });
+
+  it('reads a configured client id', async () => {
+    await writeFile(configPath(), JSON.stringify({ identity: { github: { clientId: '  Iv1.orgowned1 ' } } }), 'utf8');
+    _resetConfigCacheForTests();
+    expect(await getGithubClientIdConfig()).toBe('Iv1.orgowned1');
+  });
+
+  it('survives saving an unrelated setting', async () => {
+    await writeFile(configPath(), JSON.stringify({ identity: { github: { clientId: 'Iv1.orgowned1' } } }), 'utf8');
+    _resetConfigCacheForTests();
+    await setKeepRunningInTray(true);
+    const disk = JSON.parse(await readFile(configPath(), 'utf8'));
+    expect(disk.identity).toEqual({ github: { clientId: 'Iv1.orgowned1' } });
   });
 });

@@ -154,9 +154,10 @@ export function sourceEnvVarName(base: string): string {
 let githubTokenProvider: (() => Promise<string | null>) | undefined;
 
 /**
- * Extension point for GitHub sign-in (remote-workspaces sub-project (b)): once
- * registered, ghcr.io sources without a vault/env token use the signed-in
- * user's read:packages token. Nothing registers a provider yet.
+ * GitHub sign-in hook: ipc.ts registers IdentityService.packagesToken, so
+ * ghcr.io sources without a vault/env token use the signed-in user's token when
+ * it has read:packages. Never used for DEFAULT_SOURCES (public: a revoked or
+ * SSO-limited token must not break the default catalog).
  */
 export function setGithubTokenProvider(fn: (() => Promise<string | null>) | undefined): void {
   githubTokenProvider = fn;
@@ -176,7 +177,7 @@ export async function credentialFor(base: string): Promise<RegistryCredential | 
   }
   const envToken = process.env[sourceEnvVarName(b)];
   if (envToken) return { token: envToken };
-  if (b.startsWith('ghcr.io/') && githubTokenProvider) {
+  if (b.startsWith('ghcr.io/') && githubTokenProvider && !DEFAULT_SOURCES.includes(b)) {
     const gh = await githubTokenProvider();
     if (gh) return { token: gh };
   }

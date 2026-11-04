@@ -43,7 +43,8 @@ import {
   getPerfTelemetry,
   setPerfTelemetry,
   getPerfOtlp,
-  setPerfOtlp
+  setPerfOtlp,
+  getGithubClientIdConfig
 } from './config.js';
 import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk, perfSetSpanContext, recordLatencySample, setPerfStateListener, perfNotePowerEvent, perfSpan, setPerfMemorySource } from './perf.js';
 import { resolvePerfConfig } from './perfConfig.js';
@@ -75,6 +76,9 @@ import {
 import * as vault from './vault.js';
 import { assertRendererWorkspaceId } from './vaultScopes.js';
 import { registerVaultIpc } from './vaultIpc.js';
+import { IdentityService } from './identity/identityService.js';
+import { pickGithubClientId, GITHUB_CLIENT_ID_ENV } from './identity/clientId.js';
+import { registerIdentityIpc } from './identityIpc.js';
 import { listEndpoints, saveEndpoint, deleteEndpoint, setEndpointApiKey, probeEndpoint, getEndpoint, type ModelEndpoint } from './endpoints.js';
 import * as fs from './fs.js';
 import * as imageLibrary from './imageLibrary.js';
@@ -1878,6 +1882,16 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // Per-workspace vault (vault:*): the guarded surface lives in vaultIpc.ts so
   // its fail-closed scope/key checks unit-test without electron (#444).
   registerVaultIpc(ipcMain, vault);
+
+  // GitHub sign-in (identity:*). The token stays in the host-only vault scope
+  // identity:github; private ghcr.io loadout sources borrow it via the hook.
+  const identity = new IdentityService({
+    vault,
+    clientId: async () =>
+      pickGithubClientId({ env: process.env[GITHUB_CLIENT_ID_ENV], config: await getGithubClientIdConfig() })
+  });
+  registerIdentityIpc(ipcMain, identity);
+  loadoutSources.setGithubTokenProvider(() => identity.packagesToken());
 
   ipcMain.handle(
     'pty:attach',

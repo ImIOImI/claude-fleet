@@ -11,6 +11,8 @@ export type {
   Automation, AutomationDef, ParamDef, ParamType, ParamValue, RunRow, RunStatus, StepRunRow, TriggerDef, StepDef,
   Proposal, ProposalItem, ProposalKind, ProposalStatus, ItemDecision, LoadoutAutomationPreview, ScriptStepDef, PromptStepDef, HostShell, ScriptShell
 } from './inboxTypes';
+import type { AccountStatus, SignInStart, SignInPoll } from './identityTypes';
+export type { AccountStatus, AccountIdentity, AccountSso, SignInStart, SignInPoll } from './identityTypes';
 
 /** Outcome of a `pty:resize`. Lives here because preload is the IPC contract
  *  surface: main imports it type-only, and the renderer picks it up through
@@ -686,6 +688,18 @@ const api = {
     /** Purge every secret for a workspace + its index. Called on workspace delete. */
     deleteAllForWorkspace: (workspaceId: string): Promise<void> =>
       ipcRenderer.invoke('vault:deleteAllForWorkspace', workspaceId)
+  },
+  identity: {
+    /** Signed-in GitHub account (never the token). `refresh` re-verifies with GitHub. */
+    status: (opts?: { refresh?: boolean }): Promise<AccountStatus> =>
+      ipcRenderer.invoke('identity:status', { refresh: opts?.refresh === true }),
+    /** Start the device flow. Rejects with `not-configured: …` when no client id resolves. */
+    signInStart: (): Promise<SignInStart> => ipcRenderer.invoke('identity:signInStart'),
+    /** One poll step; await it, then call again after `intervalMs` while `pending`. */
+    signInPoll: (): Promise<SignInPoll> => ipcRenderer.invoke('identity:signInPoll'),
+    signInCancel: (): Promise<void> => ipcRenderer.invoke('identity:signInCancel'),
+    /** Delete the token from this computer's vault. */
+    signOut: (): Promise<void> => ipcRenderer.invoke('identity:signOut')
   },
   endpoints: {
     list: (): Promise<unknown[]> => ipcRenderer.invoke('endpoints:list'),
