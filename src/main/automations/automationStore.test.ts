@@ -1,5 +1,4 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import Database from 'better-sqlite3';
 import { InboxStore } from '../inbox/inboxDb.js';
 import { AutomationStore } from './automationStore.js';
 import type { AutomationDef } from '../../preload/inboxTypes.js';

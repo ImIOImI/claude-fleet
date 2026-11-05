@@ -1,5 +1,4 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import Database from 'better-sqlite3';
 import { InboxStore } from './inboxDb.js';
 import { NotifyStore } from './notifyStore.js';
 import { createNotifyService, INPUT_WAIT_DELAY_MS } from './notifyService.js';
@@ -9,11 +8,10 @@ import { openTestInbox, countQueries, settle } from '../store/testStore.js';
 let inbox: InboxStore;
 afterEach(() => inbox?.close());
 
-const flush = () => settle(inbox);
-
 async function setup(opts: { focused?: boolean; viewing?: string | null; inboxOpen?: boolean } = {}) {
-  inbox = (await openTestInbox());
-  const store = new NotifyStore(inbox.kysely);
+  inbox = await openTestInbox();
+  const thisInbox = inbox;
+  const store = new NotifyStore(thisInbox.kysely);
   let t = new Date(2026, 9, 19, 10, 0).getTime(); // Monday 10:00 local
   const delivered: NotificationRow[] = [];
   const timers: Array<{ fn: () => void; at: number; dead: boolean }> = [];
@@ -31,7 +29,7 @@ async function setup(opts: { focused?: boolean; viewing?: string | null; inboxOp
   const advance = async (ms: number) => {
     t += ms;
     for (const h of timers) if (!h.dead && h.at <= t) { h.dead = true; h.fn(); }
-    await flush();
+    await settle(thisInbox);
   };
   return { store, svc, delivered, advance, view, at: () => t };
 }

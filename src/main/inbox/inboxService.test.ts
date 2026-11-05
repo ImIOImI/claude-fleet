@@ -1,5 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import { InboxStore } from './inboxDb.js';
 import { createInboxService } from './inboxService.js';
 import type { InboxConfig } from '../../preload/inboxTypes.js';
 import { openTestInbox } from '../store/testStore.js';

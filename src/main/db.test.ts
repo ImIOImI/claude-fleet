@@ -1,9 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { rmSync } from 'node:fs';
 import { PostgresDriver, SqliteDriver } from 'kysely';
-import { openDb, closeDb, recordError, learnBrokerSessionMapping, recordBrokerSessionMapping, lookupBrokerSession, lookupVerifiedBrokerSession, lookupResumableBrokerSession, listSessions, summaryForBrokerSession, ingestLine, ERRORS_RETENTION, recordUsageEvent, __pendingClaudeIdsForTest } from './db.js';
+import { closeDb, recordError, learnBrokerSessionMapping, recordBrokerSessionMapping, lookupBrokerSession, lookupVerifiedBrokerSession, lookupResumableBrokerSession, listSessions, summaryForBrokerSession, ingestLine, ERRORS_RETENTION, recordUsageEvent, __pendingClaudeIdsForTest } from './db.js';
 import { openTestState, queryRows, isPg, type TestState } from './store/testStore.js';
 
 /** The driver whose commitTransaction the store's transactions end in. */
@@ -353,6 +351,7 @@ describe('closeDb', () => {
       const closing = closeDb();
       // Reopen before closeDb's post-await clears run: rehydrate repopulates
       // the pending set from the row, still committed.
+      // On Postgres this ordering isn't forced (no spy pins it); the assertion still holds either way.
       const reopened = st!.open();
       await closing;
       await reopened;

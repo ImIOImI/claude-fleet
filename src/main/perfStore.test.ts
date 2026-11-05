@@ -1,21 +1,14 @@
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { closeDb, openDb, stateKysely } from './db.js';
+import { stateKysely } from './db.js';
 import { PerfStore } from './perfStore.js';
-import type Database from 'better-sqlite3';
 import { openTestState, queryRows, isPg, type TestState } from './store/testStore.js';
 
 let st: TestState;
 describe('PerfStore', () => {
-  let dir: string;
-  let db: Database.Database;
   let store: PerfStore;
 
   beforeEach(async () => {
     st = await openTestState('perfstore-');
-    dir = st.dir;
     store = new PerfStore(stateKysely());
   });
   afterEach(async () => {

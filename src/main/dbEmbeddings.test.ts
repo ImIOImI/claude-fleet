@@ -1,12 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { openDb, closeDb, deleteEmbeddingsForOtherModels, ingestLine, insertEmbedding, insertEmbeddings, unembeddedTurnEvents, maxEventId } from './db.js';
+import { deleteEmbeddingsForOtherModels, ingestLine, insertEmbedding, insertEmbeddings, unembeddedTurnEvents, maxEventId } from './db.js';
 import { encodeVector, EMBED_MODEL_ID, EMBED_DIM } from './vectors.js';
 import { openTestState, type TestState } from './store/testStore.js';
 
-let dir: string;
 const WS = '01WS';
 const SES = 'ses-1';
 /** Postgres stores vector(EMBED_DIM), so test vectors are full-width. */
@@ -19,7 +15,6 @@ function userLine(id: string, text: string): string {
 let st: TestState;
 beforeEach(async () => {
   st = await openTestState('cf-emb-');
-  dir = st.dir;
 });
 afterEach(async () => {
   await st.close();

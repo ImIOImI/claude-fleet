@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { onTestFinished } from 'vitest';
 import type pg from 'pg';
 import type Database from 'better-sqlite3';
 import { CompiledQuery, type Kysely } from 'kysely';
@@ -43,33 +44,54 @@ export interface TestState {
   close(): Promise<void>;
 }
 
-/** openDb on a fresh tmpdir (SQLite) or openDbPostgres on a fresh schema. */
+/** openDb on a fresh tmpdir (SQLite) or openDbPostgres on a fresh schema. Registers
+ *  its own onTestFinished cleanup, so a test that forgets (or re-creates mid-test
+ *  without closing the previous one) never leaks a schema/pool; close() is
+ *  idempotent so an explicit afterEach close doesn't double up. */
 export async function openTestState(prefix = 'cf-state-'): Promise<TestState> {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   const t = isPg ? await testPgSchema() : null;
   const open = async () => { if (t) await db.openDbPostgres(t.pool); else db.openDb(dir); };
   await open();
-  return {
+  let closed = false;
+  const state: TestState = {
     dir, pg: t, open,
     async reopen() { await db.closeDb(); await open(); },
     async close() {
+      if (closed) return;
+      closed = true;
       await db.closeDb();
       await t?.drop();
       rmSync(dir, { recursive: true, force: true });
     },
   };
+  onTestFinished(() => state.close());
+  return state;
 }
 
 const inboxPools = new WeakMap<InboxStore, pg.Pool>();
 
-/** InboxStore.memory() (SQLite) or a fresh-schema store whose close() drops it. */
+/** InboxStore.memory() (SQLite) or a fresh-schema store whose close() drops it.
+ *  Registers its own onTestFinished cleanup (see openTestState); close() is
+ *  idempotent. */
 export async function openTestInbox(): Promise<InboxStore> {
-  if (!isPg) return InboxStore.memory();
+  if (!isPg) {
+    const store = InboxStore.memory();
+    onTestFinished(() => store.close());
+    return store;
+  }
   const t = await testPgSchema();
   const store = await InboxStore.openPostgres(t.pool);
   inboxPools.set(store, t.pool);
   const close = store.close.bind(store);
-  store.close = async () => { await close(); await t.drop(); };
+  let closed = false;
+  store.close = async () => {
+    if (closed) return;
+    closed = true;
+    await close();
+    await t.drop();
+  };
+  onTestFinished(() => store.close());
   return store;
 }
 

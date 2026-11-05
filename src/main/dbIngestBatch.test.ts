@@ -2,20 +2,13 @@
 // was recorded on the pre-port synchronous ingestLine; every later version of
 // the ingest path must reproduce it byte-for-byte.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import type Database from 'better-sqlite3';
 import * as db from './db.js';
 import { WS, S, at, FIXTURE, dump } from './state/ingestFixture.js';
 import { openTestState, queryRows, type TestState } from './store/testStore.js';
 
-let dir: string;
-let raw: Database.Database;
 let st: TestState;
 beforeEach(async () => {
   st = await openTestState('cf-ingest-batch-');
-  dir = st.dir;
 });
 afterEach(async () => {
   await st.close();
@@ -43,7 +36,6 @@ describe('ingestBatch (async store part 2a)', () => {
     const lineState = await dump();
     await st.close();
     st = await openTestState('cf-ingest-batch-');
-    dir = st.dir;
     expect(await db.ingestBatch(WS, S, FIXTURE)).toEqual(lineResults);
     expect(await dump()).toEqual(lineState);
   });

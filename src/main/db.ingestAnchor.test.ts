@@ -1,14 +1,10 @@
 // src/main/db.ingestAnchor.test.ts
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { openDb, closeDb, ingestLine, latestLimitHitAnchor } from './db.js';
+import { ingestLine, latestLimitHitAnchor } from './db.js';
 import { openTestState, type TestState } from './store/testStore.js';
 
-let dir: string;
 let st: TestState;
-beforeEach(async () => { st = await openTestState('cf-ingest-anchor-'); dir = st.dir; });
+beforeEach(async () => { st = await openTestState('cf-ingest-anchor-'); });
 afterEach(async () => { await st.close(); });
 
 const LINE_429 = JSON.stringify({

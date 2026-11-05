@@ -11,7 +11,15 @@ import { InboxStore } from '../inbox/inboxDb.js';
 import { isPg, testPgSchema } from './testStore.js';
 import { postgresKysely } from './postgres.js';
 
-interface Shape { columns: Record<string, { notNull: boolean }>; pk: string[]; uniques: string[] }
+interface Shape {
+  columns: Record<string, { notNull: boolean }>;
+  pk: string[];
+  uniques: string[];
+  /** Explicitly named indexes (CREATE INDEX, not a PK/UNIQUE constraint's
+   *  auto-named backing index): name -> ordered column list, '<expr>' for a
+   *  non-column key part (e.g. todos_dedupe's IFNULL/COALESCE expression). */
+  indexes: Record<string, string[]>;
+}
 
 function sqliteShapes(raw: Database.Database): Record<string, Shape> {
   const out: Record<string, Shape> = {};
@@ -23,9 +31,17 @@ function sqliteShapes(raw: Database.Database): Record<string, Shape> {
       .filter((i) => i.unique && i.origin !== 'pk' && !i.partial)
       .map((i) => (raw.prepare(`PRAGMA index_info(${i.name})`).all() as { name: string }[]).map((c) => c.name).join(','))
       .sort();
+    // Auto-indexes backing a PK/UNIQUE constraint have a NULL sql column; only
+    // explicit CREATE INDEX statements are named on both dialects.
+    const idxNames = (raw.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL`).all(name) as { name: string }[]);
+    const indexes: Record<string, string[]> = {};
+    for (const { name: idxName } of idxNames) {
+      const info = raw.prepare(`PRAGMA index_info(${idxName})`).all() as { name: string | null }[];
+      indexes[idxName] = info.map((c) => c.name ?? '<expr>');
+    }
     out[name] = {
       columns: Object.fromEntries(cols.map((c) => [c.name, { notNull: c.notnull === 1 || pk.includes(c.name) }])),
-      pk, uniques,
+      pk, uniques, indexes,
     };
   }
   return out;
@@ -47,7 +63,7 @@ async function pgShapes(schema: string, k: ReturnType<typeof postgresKysely>): P
     GROUP BY rel.relname, con.conname, con.contype`.execute(k)).rows;
   const out: Record<string, Shape> = {};
   for (const r of cols) {
-    out[r.t] ??= { columns: {}, pk: [], uniques: [] };
+    out[r.t] ??= { columns: {}, pk: [], uniques: [], indexes: {} };
     out[r.t].columns[r.c] = { notNull: r.nn === 'NO' };
   }
   for (const r of keys) {
@@ -55,6 +71,22 @@ async function pgShapes(schema: string, k: ReturnType<typeof postgresKysely>): P
     else out[r.t].uniques.push(r.cols);
   }
   for (const s of Object.values(out)) s.uniques.sort();
+  // btree only (excludes pgvector's HNSW index, which has no SQLite
+  // counterpart); excludes a PK/UNIQUE constraint's auto-named backing index.
+  const idx = (await sql<{ t: string; name: string; cols: string }>`
+    SELECT tc.relname AS t, ic.relname AS name,
+           string_agg(COALESCE(att.attname, '<expr>'), ',' ORDER BY k.ord) AS cols
+    FROM pg_index ix
+    JOIN pg_class ic ON ic.oid = ix.indexrelid
+    JOIN pg_class tc ON tc.oid = ix.indrelid
+    JOIN pg_am am ON am.oid = ic.relam
+    JOIN pg_namespace ns ON ns.oid = tc.relnamespace
+    CROSS JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord)
+    LEFT JOIN pg_attribute att ON att.attrelid = ix.indrelid AND att.attnum = k.attnum AND k.attnum <> 0
+    WHERE ns.nspname = ${schema} AND tc.relname <> 'schema_migrations' AND am.amname = 'btree'
+      AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = ix.indexrelid)
+    GROUP BY tc.relname, ic.relname`.execute(k)).rows;
+  for (const r of idx) out[r.t].indexes[r.name] = r.cols.split(',');
   return out;
 }
 

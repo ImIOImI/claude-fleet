@@ -10,10 +10,6 @@
 // self-register"). The expected local outcome is a fast import failure — CI
 // runs the real assertions. Gate locally with `npm run typecheck:node`.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import Database from 'better-sqlite3';
 import {
   openDb,
   closeDb,

@@ -1,17 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { openDb, closeDb, ingestLine, unembeddedSummaries } from './db.js';
+import { ingestLine, unembeddedSummaries } from './db.js';
 import { EMBED_MODEL_ID } from './vectors.js';
 import { openTestState, queryRows, type TestState } from './store/testStore.js';
 
-let dir: string; const WS = '01WS', SES = 'ses-1';
+const WS = '01WS', SES = 'ses-1';
 const line = (o: object) => JSON.stringify(o);
 const userLine = (uuid: string, content: string) =>
   JSON.stringify({ type: 'user', uuid, timestamp: '2026-07-01T00:00:00Z', message: { content } });
 let st: TestState;
-beforeEach(async () => { st = await openTestState('cf-sum-'); dir = st.dir; });
+beforeEach(async () => { st = await openTestState('cf-sum-'); });
 afterEach(async () => { await st.close(); });
 
 describe('session-summary ingest', () => {

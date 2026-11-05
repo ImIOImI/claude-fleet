@@ -5,7 +5,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { InboxStore } from './inboxDb.js';
 import { NotifyStore, type NewNotification } from './notifyStore.js';
-import { openTestInbox } from '../store/testStore.js';
+import { openTestInbox, isPg } from '../store/testStore.js';
 
 let inbox: InboxStore;
 afterEach(() => inbox?.close());
@@ -79,7 +79,7 @@ describe('NotifyStore rules, downtimes, state', () => {
   });
 });
 
-describe('schema v1 → v2 migration', () => {
+describe.skipIf(isPg)('schema v1 → v2 migration', () => {
   it('backs up a v1 file and keeps its todos', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'inbox-mig-'));
     const v1 = new Database(path.join(dir, 'inbox.db'));

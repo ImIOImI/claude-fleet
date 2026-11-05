@@ -1,13 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { openDb, closeDb, ingestLine, planUsageRows } from './db.js';
+import { ingestLine, planUsageRows } from './db.js';
 import { openTestState, type TestState } from './store/testStore.js';
 
-let dir: string;
 let st: TestState;
-beforeEach(async () => { st = await openTestState('cf-planrows-'); dir = st.dir; });
+beforeEach(async () => { st = await openTestState('cf-planrows-'); });
 afterEach(async () => { await st.close(); });
 
 function assistant(uuid: string, tsIso: string, out: number, model = 'claude-opus-4-8') {

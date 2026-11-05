@@ -1,13 +1,9 @@
 // listSessions() tags enrichment: each row carries the tags of its LATEST
 // tagged summary chapter (ordered as emitted), [] when none exists.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { openDb, closeDb, ingestLine, listSessions, listSessionIds, latestActivityByWorkspace, latestSessionId } from './db.js';
+import { ingestLine, listSessions, listSessionIds, latestActivityByWorkspace, latestSessionId } from './db.js';
 import { openTestState, type TestState } from './store/testStore.js';
 
-let dir: string;
 const WS = '01WS';
 const userLine = (uuid: string, content: string) =>
   JSON.stringify({ type: 'user', uuid, timestamp: '2026-07-01T00:00:00Z', message: { content } });
@@ -15,7 +11,7 @@ const summaryLine = (summary: string, tags?: string[]) =>
   JSON.stringify({ type: 'session-summary', summary, tags, model: 'haiku' });
 
 let st: TestState;
-beforeEach(async () => { st = await openTestState('cf-sesslist-'); dir = st.dir; });
+beforeEach(async () => { st = await openTestState('cf-sesslist-'); });
 afterEach(async () => { await st.close(); });
 
 describe('listSessions tags', () => {

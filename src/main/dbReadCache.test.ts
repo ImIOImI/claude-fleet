@@ -1,15 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import {
-  openDb, closeDb, ingestLine, deleteSession,
+  ingestLine, deleteSession,
   summaryForSession, summaryForWorkspace, tokensSpentSince,
   SUMMARY_STALE_GRACE_MS, _summaryRecomputesForTests,
 } from './db.js';
 import { openTestState, type TestState } from './store/testStore.js';
 
-let dir: string;
 const WS = '01WS';
 const SES = 'ses-cache-1';
 const assistantLine = (uuid: string, outputTokens: number) =>
@@ -21,7 +17,7 @@ const userLine = (uuid: string, content: string) =>
   JSON.stringify({ type: 'user', uuid, timestamp: '2026-07-01T00:00:00Z', message: { content } });
 
 let st: TestState;
-beforeEach(async () => { st = await openTestState('cf-cache-'); dir = st.dir; });
+beforeEach(async () => { st = await openTestState('cf-cache-'); });
 afterEach(async () => { await st.close(); });
 
 // Cache-correctness contract (#383, supersedes #306):
@@ -104,8 +100,7 @@ describe('summaryForSession cache', () => {
     await ingestLine(WS, SES, userLine('u1', 'first'));
     expect(await summaryForSession(SES)).not.toBeNull();
     await st.close();
-    st = await openTestState('cf-cache2-');
-    dir = st.dir; // fresh empty DB — the cached summary must not leak across
+    st = await openTestState('cf-cache2-'); // fresh empty DB — the cached summary must not leak across
     expect(await summaryForSession(SES)).toBeNull();
   });
 });
