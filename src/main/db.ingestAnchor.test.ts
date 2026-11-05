@@ -4,10 +4,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb, closeDb, ingestLine, latestLimitHitAnchor } from './db.js';
+import { openTestState, type TestState } from './store/testStore.js';
 
 let dir: string;
-beforeEach(async () => { dir = mkdtempSync(join(tmpdir(), 'cf-ingest-anchor-')); openDb(dir); });
-afterEach(async () => { await closeDb(); rmSync(dir, { recursive: true, force: true }); });
+let st: TestState;
+beforeEach(async () => { st = await openTestState('cf-ingest-anchor-'); dir = st.dir; });
+afterEach(async () => { await st.close(); });
 
 const LINE_429 = JSON.stringify({
   type: 'assistant',

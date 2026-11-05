@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { openDb, closeDb, ingestLine, unembeddedTurnEvents } from './db.js';
 import { extractText, indexSessionTurns, indexSessionSummaries } from './transcriptIndex.js';
 import { EMBED_MODEL_ID, EMBED_DIM } from './vectors.js';
+import { openTestState, type TestState } from './store/testStore.js';
 
 // Deterministic stub embedder: unit vector whose first slot is text length mod 1.
 const stubEmbed = async (texts: string[]) =>
@@ -14,8 +15,9 @@ let dir: string;
 const WS = '01WS', SES = 'ses-1';
 const line = (o: object) => JSON.stringify(o);
 
-beforeEach(async () => { dir = mkdtempSync(join(tmpdir(), 'cf-idx-')); openDb(dir); });
-afterEach(async () => { await closeDb(); rmSync(dir, { recursive: true, force: true }); });
+let st: TestState;
+beforeEach(async () => { st = await openTestState('cf-idx-'); dir = st.dir; });
+afterEach(async () => { await st.close(); });
 
 describe('extractText', () => {
   it('reads a string content', async () => {

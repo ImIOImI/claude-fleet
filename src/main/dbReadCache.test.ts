@@ -7,6 +7,7 @@ import {
   summaryForSession, summaryForWorkspace, tokensSpentSince,
   SUMMARY_STALE_GRACE_MS, _summaryRecomputesForTests,
 } from './db.js';
+import { openTestState, type TestState } from './store/testStore.js';
 
 let dir: string;
 const WS = '01WS';
@@ -19,8 +20,9 @@ const assistantLine = (uuid: string, outputTokens: number) =>
 const userLine = (uuid: string, content: string) =>
   JSON.stringify({ type: 'user', uuid, timestamp: '2026-07-01T00:00:00Z', message: { content } });
 
-beforeEach(async () => { dir = mkdtempSync(join(tmpdir(), 'cf-cache-')); openDb(dir); });
-afterEach(async () => { await closeDb(); rmSync(dir, { recursive: true, force: true }); });
+let st: TestState;
+beforeEach(async () => { st = await openTestState('cf-cache-'); dir = st.dir; });
+afterEach(async () => { await st.close(); });
 
 // Cache-correctness contract (#383, supersedes #306):
 //   - On ingestLine, summaryCache.markStale(sessionId, SUMMARY_STALE_GRACE_MS) is called.
@@ -101,10 +103,9 @@ describe('summaryForSession cache', () => {
   it('reopening a different DB never serves the previous DB values', async () => {
     await ingestLine(WS, SES, userLine('u1', 'first'));
     expect(await summaryForSession(SES)).not.toBeNull();
-    await closeDb();
-    rmSync(dir, { recursive: true, force: true });
-    dir = mkdtempSync(join(tmpdir(), 'cf-cache2-'));
-    openDb(dir); // fresh empty DB — the cached summary must not leak across
+    await st.close();
+    st = await openTestState('cf-cache2-');
+    dir = st.dir; // fresh empty DB — the cached summary must not leak across
     expect(await summaryForSession(SES)).toBeNull();
   });
 });

@@ -4,13 +4,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb, closeDb, ingestLine, unembeddedSummaries } from './db.js';
 import { EMBED_MODEL_ID } from './vectors.js';
+import { openTestState, queryRows, type TestState } from './store/testStore.js';
 
 let dir: string; const WS = '01WS', SES = 'ses-1';
 const line = (o: object) => JSON.stringify(o);
 const userLine = (uuid: string, content: string) =>
   JSON.stringify({ type: 'user', uuid, timestamp: '2026-07-01T00:00:00Z', message: { content } });
-beforeEach(async () => { dir = mkdtempSync(join(tmpdir(), 'cf-sum-')); openDb(dir); });
-afterEach(async () => { await closeDb(); rmSync(dir, { recursive: true, force: true }); });
+let st: TestState;
+beforeEach(async () => { st = await openTestState('cf-sum-'); dir = st.dir; });
+afterEach(async () => { await st.close(); });
 
 describe('session-summary ingest', () => {
   it('routes a session-summary event into session_summaries as a pending embedding', async () => {
@@ -27,8 +29,7 @@ describe('session-summary ingest', () => {
     await ingestLine(WS, SES, JSON.stringify({ type: 'session-summary', summary: 'chapter one', tags: ['a', 'b'], model: 'haiku' }));
     await ingestLine(WS, SES, userLine('u2', 'second prompt'));
     await ingestLine(WS, SES, JSON.stringify({ type: 'session-summary', summary: 'chapter two', tags: ['b', 'c'], model: 'haiku' }));
-    const db = openDb(dir);
-    const rows = db.prepare('SELECT summary FROM session_summaries WHERE session_id = ? ORDER BY id').all(SES) as Array<{ summary: string }>;
+    const rows = (await queryRows('SELECT summary FROM session_summaries WHERE session_id = ? ORDER BY id', [SES])) as Array<{ summary: string }>;
     expect(rows.map((r) => r.summary)).toEqual(['chapter one', 'chapter two']);
   });
 
@@ -37,8 +38,7 @@ describe('session-summary ingest', () => {
     await ingestLine(WS, SES, JSON.stringify({ type: 'session-summary', summary: 's1', tags: ['a', 'b'] }));
     await ingestLine(WS, SES, userLine('u2', 'y'));
     await ingestLine(WS, SES, JSON.stringify({ type: 'session-summary', summary: 's2', tags: ['b', 'c'] }));
-    const db = openDb(dir);
-    const tags = db.prepare('SELECT tag FROM session_tags WHERE session_id = ? ORDER BY tag').all(SES) as Array<{ tag: string }>;
+    const tags = (await queryRows('SELECT tag FROM session_tags WHERE session_id = ? ORDER BY tag', [SES])) as Array<{ tag: string }>;
     expect(tags.map((t) => t.tag)).toEqual(['a', 'b', 'c']);
   });
 });

@@ -4,22 +4,25 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb, closeDb, deleteEmbeddingsForOtherModels, ingestLine, insertEmbedding, insertEmbeddings, unembeddedTurnEvents, maxEventId } from './db.js';
 import { encodeVector, EMBED_MODEL_ID, EMBED_DIM } from './vectors.js';
+import { openTestState, type TestState } from './store/testStore.js';
 
 let dir: string;
 const WS = '01WS';
 const SES = 'ses-1';
+/** Postgres stores vector(EMBED_DIM), so test vectors are full-width. */
+const unitVec = (): Float32Array => { const v = new Float32Array(EMBED_DIM); v[0] = 1; return v; };
 
 function userLine(id: string, text: string): string {
   return JSON.stringify({ type: 'user', uuid: id, timestamp: '2026-07-01T00:00:00Z', message: { content: text } });
 }
 
+let st: TestState;
 beforeEach(async () => {
-  dir = mkdtempSync(join(tmpdir(), 'cf-emb-'));
-  openDb(dir);
+  st = await openTestState('cf-emb-');
+  dir = st.dir;
 });
 afterEach(async () => {
-  await closeDb();
-  rmSync(dir, { recursive: true, force: true });
+  await st.close();
 });
 
 describe('embeddings schema + helpers', () => {
@@ -36,8 +39,8 @@ describe('embeddings schema + helpers', () => {
     const [ev] = await unembeddedTurnEvents(SES, EMBED_MODEL_ID);
     const row = {
       workspaceId: WS, sessionId: SES, kind: 'turn' as const, refEventId: ev.id,
-      ts: ev.ts, text: 'hello there', modelId: EMBED_MODEL_ID, dim: 3,
-      vec: encodeVector(Float32Array.from([1, 0, 0])), dedupKey: `t${ev.id}`,
+      ts: ev.ts, text: 'hello there', modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
+      vec: encodeVector(unitVec()), dedupKey: `t${ev.id}`,
     };
     expect(await insertEmbedding(row)).toBe(true);
     expect(await insertEmbedding(row)).toBe(false); // dedup
@@ -59,8 +62,8 @@ describe('insertEmbeddings (batch)', () => {
     expect(pending.length).toBe(2);
     const row = (ev: (typeof pending)[number], text: string) => ({
       workspaceId: WS, sessionId: SES, kind: 'turn' as const, refEventId: ev.id,
-      ts: ev.ts, text, modelId: EMBED_MODEL_ID, dim: 3,
-      vec: encodeVector(Float32Array.from([1, 0, 0])), dedupKey: `t${ev.id}`,
+      ts: ev.ts, text, modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
+      vec: encodeVector(unitVec()), dedupKey: `t${ev.id}`,
     });
     const rows = [row(pending[0], 'first'), row(pending[1], 'second')];
 
@@ -76,8 +79,8 @@ describe('insertEmbeddings (batch)', () => {
     const [ev] = await unembeddedTurnEvents(SES, EMBED_MODEL_ID);
     const row = {
       workspaceId: WS, sessionId: SES, kind: 'turn' as const, refEventId: ev.id,
-      ts: ev.ts, text: 'first', modelId: EMBED_MODEL_ID, dim: 3,
-      vec: encodeVector(Float32Array.from([1, 0, 0])), dedupKey: `t${ev.id}`,
+      ts: ev.ts, text: 'first', modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
+      vec: encodeVector(unitVec()), dedupKey: `t${ev.id}`,
     };
     expect(await insertEmbedding(row)).toBe(true); // already there before the batch call
     const other = { ...row, sessionId: 'ses-2', dedupKey: `t${ev.id}-other` };

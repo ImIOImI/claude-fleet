@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb, closeDb, ingestLine, listSessions, listSessionIds, latestActivityByWorkspace, latestSessionId } from './db.js';
+import { openTestState, type TestState } from './store/testStore.js';
 
 let dir: string;
 const WS = '01WS';
@@ -13,8 +14,9 @@ const userLine = (uuid: string, content: string) =>
 const summaryLine = (summary: string, tags?: string[]) =>
   JSON.stringify({ type: 'session-summary', summary, tags, model: 'haiku' });
 
-beforeEach(async () => { dir = mkdtempSync(join(tmpdir(), 'cf-sesslist-')); openDb(dir); });
-afterEach(async () => { await closeDb(); rmSync(dir, { recursive: true, force: true }); });
+let st: TestState;
+beforeEach(async () => { st = await openTestState('cf-sesslist-'); dir = st.dir; });
+afterEach(async () => { await st.close(); });
 
 describe('listSessions tags', () => {
   it('returns [] for a session with no summary', async () => {

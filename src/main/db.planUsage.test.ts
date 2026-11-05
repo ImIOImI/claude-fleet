@@ -3,10 +3,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb, closeDb, ingestLine, planUsageRows } from './db.js';
+import { openTestState, type TestState } from './store/testStore.js';
 
 let dir: string;
-beforeEach(async () => { dir = mkdtempSync(join(tmpdir(), 'cf-planrows-')); openDb(dir); });
-afterEach(async () => { await closeDb(); rmSync(dir, { recursive: true, force: true }); });
+let st: TestState;
+beforeEach(async () => { st = await openTestState('cf-planrows-'); dir = st.dir; });
+afterEach(async () => { await st.close(); });
 
 function assistant(uuid: string, tsIso: string, out: number, model = 'claude-opus-4-8') {
   return JSON.stringify({ type: 'assistant', uuid, timestamp: tsIso, message: { model, usage: { output_tokens: out } } });

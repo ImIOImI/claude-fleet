@@ -8,16 +8,17 @@ import { join } from 'node:path';
 import type Database from 'better-sqlite3';
 import * as db from './db.js';
 import { WS, S, at, FIXTURE, dump } from './state/ingestFixture.js';
+import { openTestState, queryRows, type TestState } from './store/testStore.js';
 
 let dir: string;
 let raw: Database.Database;
+let st: TestState;
 beforeEach(async () => {
-  dir = mkdtempSync(join(tmpdir(), 'cf-ingest-batch-'));
-  raw = db.openDb(dir);
+  st = await openTestState('cf-ingest-batch-');
+  dir = st.dir;
 });
 afterEach(async () => {
-  await db.closeDb();
-  rmSync(dir, { recursive: true, force: true });
+  await st.close();
 });
 
 describe('ingest characterization (recorded on the pre-port code)', () => {
@@ -25,13 +26,13 @@ describe('ingest characterization (recorded on the pre-port code)', () => {
     const results = [];
     for (const line of FIXTURE) results.push(await db.ingestLine(WS, S, line));
     expect(results).toMatchSnapshot('results');
-    expect(dump(raw)).toMatchSnapshot('state');
+    expect(await dump()).toMatchSnapshot('state');
   });
 
   it('a trailing ts-less line nulls last_active_at (pre-existing MAX(…, NULL) rule, preserved)', async () => {
     for (const line of FIXTURE) await db.ingestLine(WS, S, line);
     await db.ingestLine(WS, S, JSON.stringify({ type: 'ai-title', aiTitle: 'light', sessionId: S }));
-    expect(raw.prepare('SELECT started_at, last_active_at FROM sessions WHERE id = ?').get(S)).toMatchSnapshot();
+    expect((await queryRows('SELECT started_at, last_active_at FROM sessions WHERE id = ?', [S]))[0]).toMatchSnapshot();
   });
 });
 
@@ -39,13 +40,12 @@ describe('ingestBatch (async store part 2a)', () => {
   it('one batch produces exactly the line-by-line state and per-line results', async () => {
     const lineResults = [];
     for (const line of FIXTURE) lineResults.push(await db.ingestLine(WS, S, line));
-    const lineState = dump(raw);
-    await db.closeDb();
-    rmSync(dir, { recursive: true, force: true });
-    dir = mkdtempSync(join(tmpdir(), 'cf-ingest-batch-'));
-    raw = db.openDb(dir);
+    const lineState = await dump();
+    await st.close();
+    st = await openTestState('cf-ingest-batch-');
+    dir = st.dir;
     expect(await db.ingestBatch(WS, S, FIXTURE)).toEqual(lineResults);
-    expect(dump(raw)).toEqual(lineState);
+    expect(await dump()).toEqual(lineState);
   });
 
   it('returns one result per line, in input order, malformed included', async () => {
@@ -65,15 +65,15 @@ describe('ingestBatch (async store part 2a)', () => {
     const results = await db.ingestBatch(WS, S, lines);
     expect(results).toHaveLength(n);
     expect(results.filter((r) => r.inserted)).toHaveLength(n - 3); // the last 3 replay earlier uuids across a chunk boundary
-    expect(raw.prepare('SELECT COUNT(*) AS n FROM events').get()).toEqual({ n: n - 3 });
-    expect(raw.prepare('SELECT event_count FROM session_costs WHERE session_id = ?').get(S)).toEqual({ event_count: n - 3 });
+    expect((await queryRows('SELECT COUNT(*) AS n FROM events'))[0]).toEqual({ n: n - 3 });
+    expect((await queryRows('SELECT event_count FROM session_costs WHERE session_id = ?', [S]))[0]).toEqual({ event_count: n - 3 });
   });
 
   it('a failing line rolls back its whole chunk and rejects', async () => {
-    raw.exec('DROP TABLE session_tags'); // the session-summary line's tag insert will throw
+    await queryRows('DROP TABLE session_tags'); // the session-summary line's tag insert will throw
     await expect(db.ingestBatch(WS, S, FIXTURE)).rejects.toThrow(/session_tags/);
-    expect(raw.prepare('SELECT COUNT(*) AS n FROM events').get()).toEqual({ n: 0 });
-    expect(raw.prepare('SELECT COUNT(*) AS n FROM session_costs').get()).toEqual({ n: 0 });
+    expect((await queryRows('SELECT COUNT(*) AS n FROM events'))[0]).toEqual({ n: 0 });
+    expect((await queryRows('SELECT COUNT(*) AS n FROM session_costs'))[0]).toEqual({ n: 0 });
   });
 
   it('promotes a parked remap inside the batch that makes its session real', async () => {
@@ -83,7 +83,7 @@ describe('ingestBatch (async store part 2a)', () => {
     expect(await db.lookupBrokerSession(WS, 'tab-1')).toBe('claude-real');
     await db.ingestBatch(WS, 'claude-next', [FIXTURE[4], FIXTURE[6]]);
     expect(await db.lookupBrokerSession(WS, 'tab-1')).toBe('claude-next');
-    expect(raw.prepare('SELECT pending_claude_session_id FROM broker_sessions').get()).toEqual({ pending_claude_session_id: null });
+    expect((await queryRows('SELECT pending_claude_session_id FROM broker_sessions'))[0]).toEqual({ pending_claude_session_id: null });
   });
 
   it('a remap racing the first batch of its session always ends committed, never stranded', async () => {
@@ -93,7 +93,7 @@ describe('ingestBatch (async store part 2a)', () => {
       db.recordBrokerSessionMapping(WS, 'tab-1', 'claude-next'),
       db.ingestBatch(WS, 'claude-next', [FIXTURE[4]]),
     ]);
-    expect(raw.prepare('SELECT claude_session_id, pending_claude_session_id FROM broker_sessions').get())
+    expect((await queryRows('SELECT claude_session_id, pending_claude_session_id FROM broker_sessions'))[0])
       .toEqual({ claude_session_id: 'claude-next', pending_claude_session_id: null });
   });
 
@@ -101,7 +101,7 @@ describe('ingestBatch (async store part 2a)', () => {
     const pending = db.ingestBatch(WS, S, FIXTURE);
     await db.closeDb();
     await expect(pending).resolves.toHaveLength(FIXTURE.length);
-    raw = db.openDb(dir); // afterEach closes it again
-    expect(raw.prepare('SELECT COUNT(*) AS n FROM events').get()).toEqual({ n: 15 });
+    await st.open(); // afterEach closes it again
+    expect((await queryRows('SELECT COUNT(*) AS n FROM events'))[0]).toEqual({ n: 15 });
   });
 });

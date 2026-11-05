@@ -1,6 +1,7 @@
 // The state.db ingest fixture shared by the ingest and read characterization
 // tests. Test support only: never imported by app code.
-import type Database from 'better-sqlite3';
+import { sql } from 'kysely';
+import { stateKysely } from '../db.js';
 
 export const WS = '01WSINGEST';
 export const S = 'sess-ingest';
@@ -29,18 +30,18 @@ export const FIXTURE: string[] = [
 ];
 
 /** Every ingest-maintained table, in primary-key order, minus raw_jsonl. */
-export function dump(raw: Database.Database): Record<string, unknown[]> {
-  const q = (sqlText: string): unknown[] => raw.prepare(sqlText).all();
+export async function dump(): Promise<Record<string, unknown[]>> {
+  const q = async (sqlText: string): Promise<unknown[]> => (await sql.raw(sqlText).execute(stateKysely())).rows as unknown[];
   return {
-    events: q(`SELECT id, session_id, workspace_id, ts, type, subtype, uuid, parent_uuid, model, input_tokens, output_tokens,
+    events: await q(`SELECT id, session_id, workspace_id, ts, type, subtype, uuid, parent_uuid, model, input_tokens, output_tokens,
                       cache_read_input_tokens, cache_creation_input_tokens, service_tier, tool_name, tool_use_id, tool_input,
                       tool_result_is_error, dedup_key FROM events ORDER BY id`),
-    sessions: q(`SELECT * FROM sessions ORDER BY id`),
-    session_costs: q(`SELECT * FROM session_costs ORDER BY session_id, workspace_id, model, service_tier`),
-    session_stats: q(`SELECT * FROM session_stats ORDER BY session_id`),
-    session_tool_counts: q(`SELECT * FROM session_tool_counts ORDER BY session_id, tool_name`),
-    session_summaries: q(`SELECT * FROM session_summaries ORDER BY id`),
-    session_tags: q(`SELECT * FROM session_tags ORDER BY session_id, tag`),
-    usage_anchors: q(`SELECT * FROM usage_anchors ORDER BY id`),
+    sessions: await q(`SELECT * FROM sessions ORDER BY id`),
+    session_costs: await q(`SELECT * FROM session_costs ORDER BY session_id, workspace_id, model, service_tier`),
+    session_stats: await q(`SELECT * FROM session_stats ORDER BY session_id`),
+    session_tool_counts: await q(`SELECT * FROM session_tool_counts ORDER BY session_id, tool_name`),
+    session_summaries: await q(`SELECT * FROM session_summaries ORDER BY id`),
+    session_tags: await q(`SELECT * FROM session_tags ORDER BY session_id, tag`),
+    usage_anchors: await q(`SELECT * FROM usage_anchors ORDER BY id`),
   };
 }
