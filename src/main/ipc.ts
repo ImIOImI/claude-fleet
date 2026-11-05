@@ -54,7 +54,7 @@ import * as realDocker from './docker.js';
 import * as realLocal from './local.js';
 import * as mockDocker from './mock.js';
 import type { Backend } from './backend.js';
-import { resolveKind } from './backendRouter.js';
+import { resolveKind, resolveRemoveKind } from './backendRouter.js';
 import { findLiveHandleId } from './ptyHandleLookup.js';
 import { assertControl, buildRoster, ROSTER_TITLE_MAX, type RosterStatus, type RosterEntry } from './control.js';
 import { ActivityDetector } from './activityDetector.js';
@@ -80,7 +80,7 @@ import { IdentityService } from './identity/identityService.js';
 import { pickGithubClientId, GITHUB_CLIENT_ID_ENV } from './identity/clientId.js';
 import { registerIdentityIpc } from './identityIpc.js';
 import { createRemoteBackend } from './remote.js';
-import { assertNotRemoteSpec, registerRemoteIpc } from './remoteIpc.js';
+import { assertNotRemoteSpec, confirmText, registerRemoteIpc, type RemoteConfirm } from './remoteIpc.js';
 import { listEndpoints, saveEndpoint, deleteEndpoint, setEndpointApiKey, probeEndpoint, getEndpoint, type ModelEndpoint } from './endpoints.js';
 import * as fs from './fs.js';
 import * as imageLibrary from './imageLibrary.js';
@@ -304,6 +304,18 @@ const remoteBackend = createRemoteBackend({
   writeManifest: (spec) => writeWorkspaceManifest(spec),
   deleteState: (id) => rm(workspaceStateDir(id), { recursive: true, force: true })
 });
+
+export function stopRemoteBackend(): void {
+  remoteBackend.stop();
+}
+
+async function confirmRemote(r: RemoteConfirm): Promise<boolean> {
+  const t = confirmText(r);
+  const box = { type: 'warning' as const, message: t.message, detail: t.detail, buttons: ['Cancel', t.button], defaultId: 0, cancelId: 0, noLink: true };
+  const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+  const res = win ? await dialog.showMessageBox(win, box) : await dialog.showMessageBox(box);
+  return res.response === 1;
+}
 
 function backendForKind(kind: WorkspaceKind): Backend {
   if (MOCK_MODE) return mockDocker;
@@ -1588,7 +1600,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     await clearInputWaitForContainer(containerId);
     // A saved (no-live) workspace passes its ULID in opts.id; prefer it so the
     // kind resolves even when there's no live containerId.
-    const result = await (await backendFor(opts?.id ?? containerId)).removeWorkspace(containerId, opts);
+    const backend = MOCK_MODE ? mockDocker : backendForKind(await resolveRemoveKind(containerId, opts?.id));
+    const result = await backend.removeWorkspace(containerId, opts);
     invalidateWorkspaceList();
     // Tear down the per-id MCP listener + socket dir (#117). Keyed by workspace
     // id, which lives in opts.id (containerId is the Docker id). Best-effort.
@@ -1936,6 +1949,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     backend: remoteBackend,
     accountStatus: () => identity.status(),
     readManifest: readWorkspaceManifest,
+    listManifests: listWorkspaceManifests,
+    confirm: confirmRemote,
     writeManifest: writeWorkspaceManifest,
     findByName: findWorkspaceByName,
     invalidate: invalidateWorkspaceList

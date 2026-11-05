@@ -65,7 +65,7 @@ const TIERS: readonly string[] = ['read', 'steer', 'session'];
 const TOKEN_RE = /^[A-Za-z0-9_.~+/=-]{1,4096}$/;
 /** The host's id is always a ULID; it becomes a directory name under <userData>/state. */
 const WORKSPACE_ID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
-const CONTROL_RE = /[\x00-\x1f\x7f]+/g;
+export const CONTROL_RE = /[\x00-\x1f\x7f]+/g;
 
 function isWhoAmI(v: unknown): v is WhoAmI {
   const o = v as WhoAmI | null;
@@ -79,7 +79,7 @@ function isWhoAmI(v: unknown): v is WhoAmI {
   );
 }
 
-const oneLine = (s: string, max: number): string => s.replace(CONTROL_RE, ' ').trim().slice(0, max);
+export const oneLine = (s: string, max: number): string => s.replace(CONTROL_RE, ' ').trim().slice(0, max);
 
 function httpsOrNull(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;

@@ -18,3 +18,12 @@ export async function resolveKind(idOrContainerId: string): Promise<WorkspaceKin
   const m = await readWorkspaceManifest(idOrContainerId);
   return m?.kind ?? 'container';
 }
+
+/** workspace:remove routes by `optsId` but acts on `containerId`; refuse when they name different kinds. */
+export async function resolveRemoveKind(containerId: string, optsId?: string): Promise<WorkspaceKind> {
+  const kind = await resolveKind(optsId ?? containerId);
+  if (optsId && containerId && optsId !== containerId && (await resolveKind(containerId)) !== kind) {
+    throw new Error('workspace:remove: the container id belongs to a different workspace');
+  }
+  return kind;
+}

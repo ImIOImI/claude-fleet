@@ -344,7 +344,9 @@ export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec |
     ) {
       return null;
     }
-    const kind: WorkspaceKind = parsed.kind === 'local' || parsed.kind === 'remote' ? parsed.kind : 'container';
+    const rawKind: unknown = parsed.kind ?? 'container';
+    if (rawKind !== 'container' && rawKind !== 'local' && rawKind !== 'remote') return null;
+    const kind: WorkspaceKind = rawKind;
     const remote = kind === 'remote' ? sanitizeRemote(parsed.remote) : undefined;
     // A bookmark's id is the host's; removeWorkspace deletes state/<id>, so it must be this dir.
     if (kind === 'remote' && (!remote || parsed.id !== id || !REMOTE_ID_RE.test(id))) return null;

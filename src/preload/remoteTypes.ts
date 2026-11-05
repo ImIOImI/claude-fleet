@@ -29,7 +29,9 @@ export type RemoteProbeErrorKind =
   /** The host's id is already a workspace on this computer that is not a remote bookmark. */
   | 'clash'
   /** The host's id is bookmarked at another URL and `sameHostNewAddress` was not set. */
-  | 'moved';
+  | 'moved'
+  /** The user declined main's confirm (sending the token, or moving a bookmark). */
+  | 'declined';
 
 export interface RemoteProbeErr {
   ok: false;

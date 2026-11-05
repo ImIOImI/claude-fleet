@@ -1,6 +1,6 @@
 import { app, BrowserWindow, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
-import { registerIpc } from './ipc.js';
+import { registerIpc, stopRemoteBackend } from './ipc.js';
 import { openDb, closeDb, deleteEmbeddingsForOtherModels, listSessionIds, recordError, stateKysely } from './db.js';
 import { initPerf, shutdownPerf, perfSpan, perfSpanAsync } from './perf.js';
 import { PerfStore } from './perfStore.js';
@@ -347,6 +347,7 @@ app.on('before-quit', async () => {
   notifySvc = null;
   auto?.stop();
   auto = null;
+  stopRemoteBackend();
   await jsonlWatcher?.stop();
   await peerStatusWatcher?.stop();
   stopMcpServer();

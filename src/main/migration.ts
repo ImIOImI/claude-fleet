@@ -78,7 +78,7 @@ export async function migrateFleetFolders(): Promise<void> {
   await mkdir(await fleetSharedDir(), { recursive: true });
   const manifests = await listWorkspaceManifests();
   for (const m of manifests) {
-    if (m.kind === 'local') continue; // user-picked root is authoritative — never rewrite
+    if (m.kind !== 'container') continue; // local: user-picked root is authoritative; remote: no local folder
     const privateDir = await fleetPrivateDir(m.id);
     await mkdir(privateDir, { recursive: true });
     if (m.workspaceRoot !== privateDir) {

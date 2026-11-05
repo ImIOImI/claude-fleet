@@ -66,12 +66,16 @@ describe('remote manifests on disk', () => {
     expect(await listWorkspaceManifests()).toEqual([]);
   });
 
-  it('never carries a bookmark on a non-remote kind, and an unknown kind is a container', async () => {
+  it('never carries a bookmark on a non-remote kind; an unknown kind is dropped, an absent one is a container', async () => {
     await put('L', base('L', { kind: 'local', workspaceRoot: '/x', remote: { url: 'https://h' } }));
     const l = await readWorkspaceManifest('L');
     expect(l?.kind).toBe('local');
     expect(l).not.toHaveProperty('remote');
     await put('Q', base('Q', { kind: 'weird' }));
-    expect((await readWorkspaceManifest('Q'))?.kind).toBe('container');
+    expect(await readWorkspaceManifest('Q')).toBeNull();
+    await put('C', base('C', {}));
+    expect((await readWorkspaceManifest('C'))?.kind).toBe('container');
+    await put('D', base('D', { kind: 'container' }));
+    expect((await readWorkspaceManifest('D'))?.kind).toBe('container');
   });
 });

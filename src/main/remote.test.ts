@@ -1,14 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { person, TOKEN } from '../host/testFakes.js';
 import { startTestHost, TEST_WORKSPACE_ID as ID } from '../host/testHost.js';
-import { createRemoteBackend, MANAGED_MSG, TIER_REFRESH_MS } from './remote.js';
+import { CHECKING_STATUS, createRemoteBackend, HEALTH_POLL_MS, MANAGED_MSG, TIER_REFRESH_MS, type RemoteBackend } from './remote.js';
 import { RemoteClient } from './remoteClient.js';
 import type { RemoteBookmark, WorkspaceSpec } from './workspaces.js';
 
 const realWhoami = RemoteClient.prototype.whoami;
 const OTHER_ID = '01JC0000000000000000000009';
 let close: (() => Promise<void>) | null = null;
+let live: RemoteBackend | null = null;
 afterEach(async () => {
+  live?.stop();
+  live = null;
   vi.restoreAllMocks();
   await close?.();
   close = null;
@@ -25,7 +28,13 @@ async function rig(tier: 'read' | 'session', o: { cached?: RemoteBookmark['tier'
   const deleted: string[] = [];
   let t = 1_000_000;
   let whoamiCalls = 0;
+  const timers: Array<{ fn: () => void; ms: number; cancelled: boolean }> = [];
   const backend = createRemoteBackend({
+    schedule: (fn, ms) => {
+      const e = { fn, ms, cancelled: false };
+      timers.push(e);
+      return () => void (e.cancelled = true);
+    },
     token: async () => TOKEN,
     listManifests: async () => manifests,
     writeManifest: async (s) => void (manifests = manifests.map((m) => (m.id === s.id ? s : m))),
@@ -36,7 +45,9 @@ async function rig(tier: 'read' | 'session', o: { cached?: RemoteBookmark['tier'
     whoamiCalls++;
     return realWhoami.call(this);
   });
+  live = backend;
   return {
+    timers,
     ...h,
     backend,
     manifests: () => manifests,
@@ -50,8 +61,9 @@ async function rig(tier: 'read' | 'session', o: { cached?: RemoteBookmark['tier'
 describe('remote backend', () => {
   it('lists every bookmark as running or unreachable and persists the reported tier', async () => {
     const r = await rig('read');
+    await r.backend.refresh();
     const rows = await r.backend.listLiveWorkspaces();
-    expect(rows.map((w) => [w.id, w.state, w.containerId])).toEqual([[ID, 'running', ID], ['gone', 'unreachable', 'gone']]);
+    expect(rows.map((w) => [w.id, w.state, w.containerId, w.status])).toEqual([[ID, 'running', ID, undefined], ['gone', 'unreachable', 'gone', undefined]]);
     expect(rows[0].remote).toMatchObject({ tier: 'read', login: 'alice' });
     expect(r.manifests()[0].remote).toMatchObject({ tier: 'read', login: 'alice', url: r.url });
   });
@@ -59,6 +71,7 @@ describe('remote backend', () => {
   it('a standby host is shown unreachable', async () => {
     const r = await rig('read');
     r.setLease('standby');
+    await r.backend.refresh();
     expect((await r.backend.listLiveWorkspaces())[0].state).toBe('unreachable');
   });
 
@@ -66,6 +79,7 @@ describe('remote backend', () => {
     const r = await rig('session');
     const wrong = { id: OTHER_ID, name: 'x', kind: 'remote', remote: { url: r.url, tier: 'read', login: 'alice', checkedAt: 0 } } as WorkspaceSpec;
     r.setManifests([wrong]);
+    await r.backend.refresh();
     expect((await r.backend.listLiveWorkspaces())[0].state).toBe('unreachable');
     expect(r.manifests()[0].remote?.tier).toBe('read');
     await expect(r.backend.attachPty(OTHER_ID, 'tab1', 80, 24)).rejects.toThrow(/different workspace/);
@@ -81,14 +95,72 @@ describe('remote backend', () => {
     expect(r.manifests()[0].remote).toEqual(moved.remote);
   });
 
-  it('re-asks /whoami at most once a minute while listing', async () => {
+  it('re-asks /whoami at most once a minute across probes', async () => {
     const r = await rig('read');
-    await r.backend.listLiveWorkspaces();
-    await r.backend.listLiveWorkspaces();
+    await r.backend.refresh();
+    await r.backend.refresh();
     expect(r.whoamiCalls()).toBe(1);
     r.advance(TIER_REFRESH_MS);
-    await r.backend.listLiveWorkspaces();
+    await r.backend.refresh();
     expect(r.whoamiCalls()).toBe(2);
+  });
+
+  it('listing never waits on the network: a hanging /healthz still lists at once, as checking', async () => {
+    const r = await rig('read');
+    let healthz = 0;
+    vi.spyOn(RemoteClient.prototype, 'healthz').mockImplementation(() => (healthz++, new Promise(() => undefined)));
+    const rows = await Promise.race([
+      r.backend.listLiveWorkspaces(),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('listLiveWorkspaces waited on the network')), 200))
+    ]);
+    expect(rows.map((w) => [w.state, w.status])).toEqual([['unreachable', CHECKING_STATUS], ['unreachable', CHECKING_STATUS]]);
+    await r.backend.listLiveWorkspaces();
+    expect(healthz).toBe(2);
+  });
+
+  it('keeps the last-known state between probes and re-probes every HEALTH_POLL_MS', async () => {
+    const r = await rig('read');
+    await r.backend.refresh();
+    r.setLease('standby');
+    expect((await r.backend.listLiveWorkspaces())[0].state).toBe('running');
+    const next = r.timers.filter((t) => !t.cancelled);
+    expect(next.map((t) => t.ms)).toEqual([HEALTH_POLL_MS, HEALTH_POLL_MS]);
+    for (const t of next) t.fn();
+    await r.backend.refresh(ID);
+    expect((await r.backend.listLiveWorkspaces())[0].state).toBe('unreachable');
+  });
+
+  it('stop cancels every probe and starts no new ones', async () => {
+    const r = await rig('read');
+    await r.backend.refresh();
+    let healthz = 0;
+    vi.spyOn(RemoteClient.prototype, 'healthz').mockImplementation(async () => (healthz++, { status: 'ok', lease: 'holder' }));
+    r.backend.stop();
+    expect(r.timers.every((t) => t.cancelled)).toBe(true);
+    await r.backend.listLiveWorkspaces();
+    await r.backend.refresh();
+    expect(healthz).toBe(0);
+  });
+
+  it('a probe that lands after its bookmark was forgotten records nothing and schedules nothing', async () => {
+    const r = await rig('read');
+    const pending: Array<() => void> = [];
+    vi.spyOn(RemoteClient.prototype, 'healthz').mockImplementation(
+      () => new Promise((res) => pending.push(() => res({ status: 'ok', lease: 'standby' })))
+    );
+    await r.backend.listLiveWorkspaces();
+    await r.backend.removeWorkspace(ID);
+    pending.forEach((f) => f());
+    await new Promise((res) => setTimeout(res, 20));
+    expect(r.timers.filter((t) => !t.cancelled)).toHaveLength(1);
+  });
+
+  it('forget stops that bookmark\'s probe', async () => {
+    const r = await rig('read');
+    await r.backend.refresh();
+    const before = r.timers.length;
+    await r.backend.removeWorkspace(ID);
+    expect(r.timers.slice(0, before).filter((t) => !t.cancelled)).toHaveLength(1);
   });
 
   it('attach starts a missing session only for the session tier', async () => {

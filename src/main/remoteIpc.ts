@@ -5,7 +5,7 @@ import type { IpcHandleLike } from './vaultIpc.js';
 import type { AccountStatus } from '../preload/identityTypes.js';
 import type { RemoteAddOptions, RemoteLiveSession, RemoteProbe, RemoteProbeErr, RemoteProbeOk } from '../preload/remoteTypes.js';
 import type { RemoteBackend } from './remote.js';
-import { RemoteError } from './remoteClient.js';
+import { oneLine, RemoteError } from './remoteClient.js';
 import { normalizeHostUrl, plainHttpWarning, RemoteUrlError } from './remoteUrl.js';
 import { assertValidWorkspaceName } from './paths.js';
 import { assertRendererWorkspaceId } from './vaultScopes.js';
@@ -15,11 +15,34 @@ export const REMOTE_CHANNELS = ['remote:probe', 'remote:add', 'remote:rename', '
 
 const MAX_URL_LEN = 2048;
 const MAX_LIVE_SESSIONS = 1000;
+/** One approval covers probe → add. */
+export const APPROVAL_MS = 2 * 60_000;
+
+export type RemoteConfirm = { kind: 'send-token'; origin: string } | { kind: 're-point'; from: string; to: string };
+
+/** Text for main's native confirm; origins are punycode (URL.origin), so look-alike hosts show as xn--. */
+export function confirmText(r: RemoteConfirm): { message: string; detail: string; button: string } {
+  if (r.kind === 'send-token') {
+    return {
+      message: `Send your GitHub sign-in to ${r.origin}?`,
+      detail: 'claude-fleet sends your GitHub token to this host to check your access. Continue only if you trust it.',
+      button: 'Send'
+    };
+  }
+  return {
+    message: 'Move this remote workspace to a new address?',
+    detail: `From: ${r.from}\nTo: ${r.to}\nYour GitHub sign-in will be sent to the new address from now on.`,
+    button: 'Move'
+  };
+}
 
 export interface RemoteIpcDeps {
   backend: RemoteBackend;
   accountStatus(): Promise<AccountStatus>;
   readManifest(id: string): Promise<WorkspaceSpec | null>;
+  listManifests(): Promise<WorkspaceSpec[]>;
+  /** Native main-process dialog; the renderer can't answer it. */
+  confirm(r: RemoteConfirm): Promise<boolean>;
   writeManifest(spec: WorkspaceSpec): Promise<void>;
   findByName(name: string): Promise<WorkspaceSpec | null>;
   invalidate(): void;
@@ -47,8 +70,30 @@ export function assertNotRemoteSpec(incomingKind: unknown, existing: WorkspaceSp
   }
 }
 
+const DECLINED: RemoteProbeErr = { ok: false, kind: 'declined', message: 'Cancelled: nothing was sent to the host.' };
+
 export function registerRemoteIpc(ipc: IpcHandleLike, deps: RemoteIpcDeps): void {
   const now = deps.now ?? Date.now;
+  const approvedUntil = new Map<string, number>();
+  const asking = new Map<string, Promise<boolean>>();
+
+  async function bookmarked(origin: string): Promise<boolean> {
+    return (await deps.listManifests()).some((m) => m.kind === 'remote' && m.remote && new URL(m.remote.url).origin === origin);
+  }
+
+  /** Consent before the token goes to an origin that isn't already bookmarked. */
+  async function tokenAllowed(url: string): Promise<boolean> {
+    const origin = new URL(url).origin;
+    if ((approvedUntil.get(origin) ?? 0) > now() || (await bookmarked(origin))) return true;
+    let pending = asking.get(origin);
+    if (!pending) {
+      pending = deps.confirm({ kind: 'send-token', origin }).catch(() => false).finally(() => asking.delete(origin));
+      asking.set(origin, pending);
+    }
+    const ok = await pending;
+    if (ok) approvedUntil.set(origin, now() + APPROVAL_MS);
+    return ok;
+  }
 
   async function classify(err: unknown, url: string | null): Promise<RemoteProbeErr> {
     if (err instanceof RemoteUrlError) return { ok: false, kind: 'invalid-url', message: err.message };
@@ -83,7 +128,11 @@ export function registerRemoteIpc(ipc: IpcHandleLike, deps: RemoteIpcDeps): void
     try {
       if (typeof raw !== 'string' || raw.length > MAX_URL_LEN) throw new RemoteUrlError('Enter a host URL');
       url = normalizeHostUrl(raw);
-      const who = await deps.backend.clientFor(url).whoami();
+      const client = deps.backend.clientFor(url);
+      // Unauthenticated: a URL that isn't a fleet-host never sees the token or a dialog.
+      await client.healthz();
+      if (!(await tokenAllowed(url))) return DECLINED;
+      const who = await client.whoami();
       const prior = await deps.readManifest(who.workspace.id);
       const priorUrl = prior?.kind === 'remote' ? prior.remote?.url ?? null : null;
       const ok: RemoteProbeOk = {
@@ -91,11 +140,11 @@ export function registerRemoteIpc(ipc: IpcHandleLike, deps: RemoteIpcDeps): void
         url,
         workspace: {
           id: who.workspace.id,
-          name: who.workspace.name,
-          description: who.workspace.description,
+          name: oneLine(who.workspace.name, 64),
+          description: typeof who.workspace.description === 'string' ? oneLine(who.workspace.description, 500) : null,
           color: hueOrUndefined(who.workspace.color) ?? null
         },
-        user: { login: who.user.login, name: who.user.name, avatarUrl: who.user.avatarUrl },
+        user: { login: who.user.login, name: typeof who.user.name === 'string' ? oneLine(who.user.name, 64) : null, avatarUrl: who.user.avatarUrl },
         tier: who.tier,
         warning: plainHttpWarning(url),
         existing: prior !== null,
@@ -118,13 +167,17 @@ export function registerRemoteIpc(ipc: IpcHandleLike, deps: RemoteIpcDeps): void
     if (prior && (prior.kind !== 'remote' || !prior.remote)) {
       return { ok: false, kind: 'clash', message: `Workspace id ${id} already belongs to a workspace on this computer` };
     }
-    if (prior?.remote && prior.remote.url !== p.url && !opts.sameHostNewAddress) {
-      return {
-        ok: false,
-        kind: 'moved',
-        message: `This workspace id belongs to the remote at ${prior.remote.url}. Confirm it moved to ${p.url} to update the bookmark.`,
-        existingUrl: prior.remote.url
-      };
+    if (prior?.remote && prior.remote.url !== p.url) {
+      if (!opts.sameHostNewAddress) {
+        return {
+          ok: false,
+          kind: 'moved',
+          message: `This workspace id belongs to the remote at ${prior.remote.url}. Confirm it moved to ${p.url} to update the bookmark.`,
+          existingUrl: prior.remote.url
+        };
+      }
+      const moved = await deps.confirm({ kind: 're-point', from: prior.remote.url, to: p.url }).catch(() => false);
+      if (!moved) return DECLINED;
     }
     const t = now();
     const remote = { url: p.url, tier: p.tier, login: p.user.login, checkedAt: t };

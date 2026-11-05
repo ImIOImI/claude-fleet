@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AccountStatus } from '../preload/identityTypes.js';
 import type { RemoteBackend } from './remote.js';
 import { RemoteError, type WhoAmI } from './remoteClient.js';
-import { assertNotRemoteSpec, REMOTE_CHANNELS, registerRemoteIpc, type RemoteIpcDeps } from './remoteIpc.js';
+import { APPROVAL_MS, assertNotRemoteSpec, confirmText, REMOTE_CHANNELS, registerRemoteIpc, type RemoteConfirm, type RemoteIpcDeps } from './remoteIpc.js';
 import type { WorkspaceSpec } from './workspaces.js';
 
 vi.mock('electron', () => ({ app: { getPath: () => '/nonexistent' } }));
@@ -17,12 +17,23 @@ const WHO: WhoAmI = {
 const bookmarkAt = (url: string, extra: Partial<WorkspaceSpec> = {}) =>
   ({ id: ID, name: 'my-name', kind: 'remote', remote: { url, tier: 'read', login: 'alice', checkedAt: 1 }, ...extra }) as WorkspaceSpec;
 
-function harness(whoami: () => Promise<WhoAmI>, opts: { manifests?: WorkspaceSpec[]; sso?: AccountStatus['sso']; rpc?: (...a: unknown[]) => Promise<unknown> } = {}) {
+interface HarnessOpts {
+  manifests?: WorkspaceSpec[];
+  sso?: AccountStatus['sso'];
+  rpc?: (...a: unknown[]) => Promise<unknown>;
+  confirm?: (r: RemoteConfirm) => Promise<boolean>;
+  healthz?: () => Promise<unknown>;
+}
+
+function harness(whoami: () => Promise<WhoAmI>, opts: HarnessOpts = {}) {
+  let t = 5;
   const store = new Map((opts.manifests ?? []).map((m) => [m.id, m]));
   const handlers = new Map<string, (...a: unknown[]) => unknown>();
   const urls: string[] = [];
+  const whoamiSpy = vi.fn(whoami);
   const client = {
-    whoami,
+    whoami: whoamiSpy,
+    healthz: opts.healthz ?? (async () => ({ status: 'ok', lease: 'holder' })),
     rpc: opts.rpc ?? (async () => []),
     redact: async (t: string) => t.split(TOKEN).join('[redacted]')
   };
@@ -30,14 +41,16 @@ function harness(whoami: () => Promise<WhoAmI>, opts: { manifests?: WorkspaceSpe
     backend: { clientFor: (u: string) => (urls.push(u), client) } as unknown as RemoteBackend,
     accountStatus: async () => ({ sso: opts.sso ?? null }) as AccountStatus,
     readManifest: async (id) => store.get(id) ?? null,
+    listManifests: async () => [...store.values()],
     writeManifest: vi.fn(async (s: WorkspaceSpec) => void store.set(s.id, s)),
     findByName: async (n) => [...store.values()].find((m) => m.name === n) ?? null,
     invalidate: vi.fn(),
-    now: () => 5
+    confirm: vi.fn(opts.confirm ?? (async () => true)),
+    now: () => t
   };
   registerRemoteIpc({ handle: (ch, fn) => void handlers.set(ch, fn as (...a: unknown[]) => unknown) }, deps);
   const call = (ch: string, ...a: unknown[]) => Promise.resolve(handlers.get(ch)!({}, ...a));
-  return { call, store, handlers, deps, urls };
+  return { call, store, handlers, deps, urls, whoami: whoamiSpy, advance: (ms: number) => void (t += ms) };
 }
 
 describe('remote:* IPC', () => {
@@ -48,7 +61,7 @@ describe('remote:* IPC', () => {
   it('probe normalizes the URL, reports tier and the plain-http warning, and returns only the probe fields', async () => {
     const h = harness(async () => ({ ...WHO, user: { ...WHO.user, token: TOKEN } as never, extra: TOKEN }) as WhoAmI);
     const r = await h.call('remote:probe', ' http://fleet-agent-svc:8080/ ');
-    expect(h.urls).toEqual(['http://fleet-agent-svc:8080']);
+    expect([...new Set(h.urls)]).toEqual(['http://fleet-agent-svc:8080']);
     expect(r).toEqual({
       ok: true,
       url: 'http://fleet-agent-svc:8080',
@@ -173,7 +186,7 @@ describe('remote:* IPC', () => {
     const h = harness(async () => WHO, { manifests: [bookmarkAt('https://h')], rpc });
     expect(await h.call('remote:liveSessions', ID)).toEqual([{ id: 's1', alive: true }]);
     expect(rpc).toHaveBeenCalledWith('sessions:live', []);
-    expect(h.urls).toEqual(['https://h']);
+    expect([...new Set(h.urls)]).toEqual(['https://h']);
     await expect(h.call('remote:liveSessions', 'nope')).rejects.toThrow(/Not a remote/);
     await expect(h.call('remote:liveSessions', ['x'])).rejects.toThrow();
   });
@@ -204,5 +217,86 @@ describe('assertNotRemoteSpec', () => {
     expect(() => assertNotRemoteSpec('container', bookmarkAt('https://h'))).toThrow(/Remote workspaces/);
     expect(() => assertNotRemoteSpec('local', null)).not.toThrow();
     expect(() => assertNotRemoteSpec(undefined, { id: ID, kind: 'container' } as WorkspaceSpec)).not.toThrow();
+  });
+});
+
+describe('remote:* token consent (main-process confirm)', () => {
+  it('a probe to an unbookmarked origin asks main first; declining sends no token-bearing request', async () => {
+    const h = harness(async () => WHO, { confirm: async () => false });
+    expect(await h.call('remote:probe', 'https://h/x/')).toEqual({ ok: false, kind: 'declined', message: expect.any(String) });
+    expect(h.deps.confirm).toHaveBeenCalledWith({ kind: 'send-token', origin: 'https://h' });
+    expect(h.whoami).not.toHaveBeenCalled();
+    expect(await h.call('remote:add', 'https://h')).toMatchObject({ ok: false, kind: 'declined' });
+    expect(h.whoami).not.toHaveBeenCalled();
+    expect(h.deps.writeManifest).not.toHaveBeenCalled();
+  });
+
+  it('a host that is not a fleet-host by /healthz never gets the token or a dialog', async () => {
+    const h = harness(async () => WHO, { healthz: async () => { throw new RemoteError('protocol', 'not a fleet-host'); } });
+    expect(await h.call('remote:probe', 'https://h')).toMatchObject({ ok: false, kind: 'protocol' });
+    expect(h.deps.confirm).not.toHaveBeenCalled();
+    expect(h.whoami).not.toHaveBeenCalled();
+  });
+
+  it('approval is per origin and expires', async () => {
+    const h = harness(async () => WHO);
+    await h.call('remote:probe', 'https://h');
+    await h.call('remote:add', 'https://h/sub');
+    expect(h.deps.confirm).toHaveBeenCalledTimes(1);
+    await h.call('remote:probe', 'https://h:8443');
+    expect(h.deps.confirm).toHaveBeenLastCalledWith({ kind: 'send-token', origin: 'https://h:8443' });
+    expect(h.deps.confirm).toHaveBeenCalledTimes(2);
+    h.advance(APPROVAL_MS);
+    await h.call('remote:probe', 'https://h:8443');
+    expect(h.deps.confirm).toHaveBeenCalledTimes(3);
+  });
+
+  it('a bookmarked origin needs no dialog', async () => {
+    const h = harness(async () => WHO, { manifests: [bookmarkAt('https://h')] });
+    expect(await h.call('remote:probe', 'https://h')).toMatchObject({ ok: true });
+    expect(h.deps.confirm).not.toHaveBeenCalled();
+  });
+
+  it('a bookmark on a local or container spec grants no trust', async () => {
+    const h = harness(async () => WHO, { manifests: [{ id: 'L', name: 'l', kind: 'local', remote: { url: 'https://h' } } as unknown as WorkspaceSpec] });
+    await h.call('remote:probe', 'https://h');
+    expect(h.deps.confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('concurrent probes to one origin share one dialog', async () => {
+    let answer!: (v: boolean) => void;
+    const h = harness(async () => WHO, { confirm: () => new Promise((r) => (answer = r)) });
+    const a = h.call('remote:probe', 'https://h');
+    const b = h.call('remote:probe', 'https://h');
+    await new Promise((r) => setTimeout(r, 10));
+    answer(true);
+    expect(await a).toMatchObject({ ok: true });
+    expect(await b).toMatchObject({ ok: true });
+    expect(h.deps.confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('the renderer flag alone cannot re-point a bookmark: main confirms with both URLs', async () => {
+    const prior = bookmarkAt('https://old');
+    const answers: Record<string, boolean> = { 'send-token': true, 're-point': false };
+    const h = harness(async () => WHO, { manifests: [prior], confirm: async (r) => answers[r.kind] });
+    expect(await h.call('remote:add', 'https://new', { sameHostNewAddress: true })).toMatchObject({ ok: false, kind: 'declined' });
+    expect(h.deps.confirm).toHaveBeenCalledWith({ kind: 're-point', from: 'https://old', to: 'https://new' });
+    expect(h.store.get(ID)).toBe(prior);
+    expect(h.deps.writeManifest).not.toHaveBeenCalled();
+  });
+
+  it('confirmText names the origin, or both URLs', () => {
+    expect(confirmText({ kind: 'send-token', origin: 'https://xn--e1afmkfd.example' }).message).toBe('Send your GitHub sign-in to https://xn--e1afmkfd.example?');
+    const t = confirmText({ kind: 're-point', from: 'https://old', to: 'https://new' });
+    expect(`${t.message} ${t.detail}`).toMatch(/https:\/\/old[\s\S]*https:\/\/new/);
+  });
+
+  it('caps and strips host display text in the probe reply', async () => {
+    const h = harness(async () => ({ ...WHO, workspace: { ...WHO.workspace, name: 'a\u001b[31m' + 'n'.repeat(100), description: 'd\r\n' + 'x'.repeat(600) } }));
+    const r = (await h.call('remote:probe', 'https://h')) as { workspace: { name: string; description: string } };
+    expect(r.workspace.name).toHaveLength(64);
+    expect(r.workspace.name).not.toMatch(/[\x00-\x1f\x7f]/);
+    expect(r.workspace.description.length).toBeLessThanOrEqual(500);
+    expect(r.workspace.description).not.toMatch(/[\x00-\x1f\x7f]/);
   });
 });

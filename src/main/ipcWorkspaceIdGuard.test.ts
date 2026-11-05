@@ -52,6 +52,17 @@ describe('remote bookmark wiring', () => {
     expect(write).toMatch(/remote: undefined/);
   });
 
+  it('workspace:remove routes through resolveRemoveKind', () => {
+    expect(handlerSource('workspace:remove')).toMatch(/backendForKind\(await resolveRemoveKind\(containerId, opts\?\.id\)\)/);
+  });
+
+  it('remote token consent is a main-process dialog, and the refresher stops on quit', () => {
+    expect(src).toMatch(/async function confirmRemote[\s\S]*?dialog\.showMessageBox[\s\S]*?response === 1/);
+    expect(src).toMatch(/confirm: confirmRemote,/);
+    const index = readFileSync(new URL('./index.ts', import.meta.url), 'utf8');
+    expect(index).toMatch(/app\.on\('before-quit'[\s\S]*?stopRemoteBackend\(\);/);
+  });
+
   it('port forwarding is reconciled for containers only', () => {
     expect(handlerSource('workspace:list')).toMatch(/w\.state === 'running' && w\.kind === 'container'/);
   });

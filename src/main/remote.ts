@@ -9,6 +9,9 @@ import { RemoteClient, RemoteError, type WhoAmI } from './remoteClient.js';
 
 export const MANAGED_MSG = 'This remote workspace is managed by its deployment';
 export const TIER_REFRESH_MS = 60_000;
+export const HEALTH_POLL_MS = 15_000;
+/** `status` of a bookmark not probed yet this run. */
+export const CHECKING_STATUS = 'checking host';
 
 type RemoteSpec = WorkspaceSpec & { kind: 'remote'; remote: NonNullable<WorkspaceSpec['remote']> };
 
@@ -19,12 +22,25 @@ export interface RemoteBackendDeps {
   /** Delete the bookmark's local state dir (manifest + local tab list). */
   deleteState(id: string): Promise<void>;
   now?: () => number;
+  /** Timer seam; returns a cancel. Default: an unref'd setTimeout. */
+  schedule?: (fn: () => void, ms: number) => () => void;
 }
 
 export interface RemoteBackend extends Backend {
   clientFor(url: string): RemoteClient;
   /** Re-read /whoami for a bookmark and persist a changed tier. */
   refreshTier(spec: WorkspaceSpec): Promise<WhoAmI>;
+  /** Probe now (one bookmark or all known) and wait for the result. */
+  refresh(id?: string): Promise<void>;
+  /** Stop every background probe (app quit). */
+  stop(): void;
+}
+
+interface Watch {
+  spec: RemoteSpec;
+  state: 'running' | 'unreachable' | null;
+  inflight: Promise<void> | null;
+  cancel: (() => void) | null;
 }
 
 const managed = async (): Promise<never> => {
@@ -46,6 +62,15 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
   const now = deps.now ?? Date.now;
   const clients = new Map<string, RemoteClient>();
   const lastWhoami = new Map<string, number>();
+  const watches = new Map<string, Watch>();
+  let stopped = false;
+  const schedule =
+    deps.schedule ??
+    ((fn: () => void, ms: number) => {
+      const t = setTimeout(fn, ms);
+      t.unref?.();
+      return () => clearTimeout(t);
+    });
 
   function clientFor(url: string): RemoteClient {
     let c = clients.get(url);
@@ -78,20 +103,59 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
     return who;
   }
 
-  async function liveRow(spec: RemoteSpec): Promise<Workspace> {
-    const row = (state: Workspace['state'], s: WorkspaceSpec = spec): Workspace => ({ ...s, state, containerId: spec.id });
+  async function probeState(spec: RemoteSpec): Promise<'running' | 'unreachable'> {
     try {
-      if ((await clientFor(spec.remote.url).healthz()).lease !== 'holder') return row('unreachable');
+      if ((await clientFor(spec.remote.url).healthz()).lease !== 'holder') return 'unreachable';
     } catch {
-      return row('unreachable');
+      return 'unreachable';
     }
-    if (now() - (lastWhoami.get(spec.id) ?? -Infinity) < TIER_REFRESH_MS) return row('running');
+    if (now() - (lastWhoami.get(spec.id) ?? -Infinity) < TIER_REFRESH_MS) return 'running';
     try {
-      const who = await refreshTier(spec);
-      return row('running', { ...spec, remote: { ...spec.remote, tier: who.tier, login: who.user.login } });
+      await refreshTier(spec);
+      return 'running';
     } catch (err) {
-      return row(err instanceof WrongWorkspaceError ? 'unreachable' : 'running');
+      return err instanceof WrongWorkspaceError ? 'unreachable' : 'running';
     }
+  }
+
+  function unwatch(id: string): void {
+    watches.get(id)?.cancel?.();
+    watches.delete(id);
+  }
+
+  function probe(w: Watch): Promise<void> {
+    if (w.inflight) return w.inflight;
+    w.cancel?.();
+    w.cancel = null;
+    w.inflight = probeState(w.spec).then((state) => {
+      w.inflight = null;
+      if (watches.get(w.spec.id) !== w || stopped) return;
+      w.state = state;
+      w.cancel = schedule(() => void probe(w), HEALTH_POLL_MS);
+    });
+    return w.inflight;
+  }
+
+  /** Track the current bookmarks; never waits on the network. */
+  function sync(remotes: RemoteSpec[]): void {
+    const ids = new Set(remotes.map((r) => r.id));
+    for (const id of [...watches.keys()]) if (!ids.has(id)) unwatch(id);
+    for (const spec of remotes) {
+      const w = watches.get(spec.id);
+      if (w && w.spec.remote.url === spec.remote.url) {
+        w.spec = spec;
+        continue;
+      }
+      unwatch(spec.id);
+      const fresh: Watch = { spec, state: null, inflight: null, cancel: null };
+      watches.set(spec.id, fresh);
+      if (!stopped) void probe(fresh);
+    }
+  }
+
+  function row(spec: RemoteSpec): Workspace {
+    const state = watches.get(spec.id)?.state ?? null;
+    return { ...spec, state: state ?? 'unreachable', containerId: spec.id, ...(state === null ? { status: CHECKING_STATUS } : {}) };
   }
 
   return {
@@ -100,7 +164,18 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
     ping: async () => true,
     ensureImage: managed,
     async listLiveWorkspaces() {
-      return Promise.all((await deps.listManifests()).filter(isRemote).map(liveRow));
+      const remotes = (await deps.listManifests()).filter(isRemote);
+      sync(remotes);
+      return remotes.map(row);
+    },
+    async refresh(id) {
+      if (stopped) return;
+      sync((await deps.listManifests()).filter(isRemote));
+      await Promise.all([...watches.values()].filter((w) => id === undefined || w.spec.id === id).map(probe));
+    },
+    stop() {
+      stopped = true;
+      for (const id of [...watches.keys()]) unwatch(id);
     },
     createWorkspace: managed,
     inspectImage: managed,
@@ -112,6 +187,7 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
       const spec = await bookmark(containerId);
       await deps.deleteState(spec.id);
       lastWhoami.delete(spec.id);
+      unwatch(spec.id);
     },
     async attachPty(containerId, sessionId, cols, rows, resumeOf) {
       const spec = await bookmark(containerId);
