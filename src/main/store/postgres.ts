@@ -1,0 +1,188 @@
+// The Postgres dialect of the async store layer (remote-workspaces spec §7
+// "One store layer"). Stores stay dialect-neutral; this file owns the pool
+// shape, type parsing, search_path and the in-process write lock.
+import pg from 'pg';
+import {
+  CompiledQuery, Kysely, PostgresDialect,
+  type DatabaseConnection, type Driver, type QueryResult, type TransactionSettings,
+} from 'kysely';
+
+const INT8 = 20;
+const NUMERIC = 1700;
+
+/** int8 (COUNT, BIGINT columns) and numeric (SUM of BIGINT) parse to number,
+ *  as SQLite returns them. Per pool, never pg's global registry. */
+export const pgTypes = {
+  getTypeParser(oid: number, format?: 'text' | 'binary') {
+    if (oid === INT8 || oid === NUMERIC) return (v: string) => Number(v);
+    return pg.types.getTypeParser(oid, format);
+  },
+};
+
+export interface PgPoolConfig extends Omit<pg.PoolConfig, 'types'> {
+  /** Every store table lives here; it must already exist. */
+  schema: string;
+}
+
+const SCHEMA_NAME = /^[a-z_][a-z0-9_]*$/;
+const poolSchema = new WeakMap<pg.Pool, string>();
+const inSchema = new WeakSet<pg.PoolClient>();
+
+export function createPgPool(cfg: PgPoolConfig): pg.Pool {
+  const { schema, ...rest } = cfg;
+  if (!SCHEMA_NAME.test(schema)) throw new Error(`invalid store schema name: ${schema}`);
+  const pool = new pg.Pool({ ...rest, types: pgTypes });
+  poolSchema.set(pool, schema);
+  return pool;
+}
+
+/** The schema a pool was created for. */
+export function schemaOf(pool: pg.Pool): string {
+  const s = poolSchema.get(pool);
+  if (!s) throw new Error('not a store pool: create it with createPgPool');
+  return s;
+}
+
+/** pool.connect() with search_path set once per physical connection. A
+ *  startup `options` parameter would do it too, but poolers and some servers
+ *  drop it; an explicit SET is honored everywhere. */
+async function connectInSchema(pool: pg.Pool): Promise<pg.PoolClient> {
+  const client = await pool.connect();
+  if (!inSchema.has(client)) {
+    const schema = poolSchema.get(pool);
+    if (schema) await client.query(`SET search_path TO ${schema}, public`);
+    inSchema.add(client);
+  }
+  return client;
+}
+
+/** Promise-chain mutex: `await lock()` resolves to its release function. */
+export function writeLock(): () => Promise<() => void> {
+  let tail = Promise.resolve();
+  return () => {
+    let release!: () => void;
+    const next = new Promise<void>((r) => { release = r; });
+    const acquired = tail.then(() => release);
+    tail = tail.then(() => next);
+    return acquired;
+  };
+}
+
+/** Runs first in every read-write transaction (and around a bare write);
+ *  a throw rolls the transaction back. fleet-host's lease fence plugs in here. */
+export type WriteHook = (exec: (sqlText: string, params?: readonly unknown[]) => Promise<unknown[]>) => Promise<void>;
+
+// Raw `sql` statements count as writes: closeDb's `select 1` must queue behind
+// in-flight write transactions, as it did on the SQLite mutex.
+const WRITE_KINDS = new Set(['InsertQueryNode', 'UpdateQueryNode', 'DeleteQueryNode', 'MergeQueryNode', 'RawNode']);
+
+interface Conn extends DatabaseConnection { inner: DatabaseConnection; inTx: boolean; unlock: (() => void) | null }
+
+/** Serializes every in-process write (read-write transactions and bare write
+ *  statements), as SQLite's connection mutex did; reads and read-only
+ *  transactions run concurrently on the pool. */
+class SerializingDriver implements Driver {
+  constructor(
+    private readonly inner: Driver,
+    private readonly lock: () => Promise<() => void>,
+    private readonly hook: WriteHook | undefined,
+  ) {}
+
+  init(): Promise<void> { return this.inner.init(); }
+
+  async acquireConnection(): Promise<DatabaseConnection> {
+    const inner = await this.inner.acquireConnection();
+    const conn: Conn = {
+      inner, inTx: false, unlock: null,
+      executeQuery: <R>(cq: CompiledQuery) => this.execute<R>(conn, cq),
+      streamQuery: (cq, chunk) => inner.streamQuery(cq, chunk),
+    };
+    return conn;
+  }
+
+  private async execute<R>(conn: Conn, cq: CompiledQuery): Promise<QueryResult<R>> {
+    if (conn.inTx || !WRITE_KINDS.has(cq.query.kind)) return conn.inner.executeQuery<R>(cq);
+    const unlock = await this.lock();
+    try {
+      if (!this.hook) return await conn.inner.executeQuery<R>(cq);
+      await conn.inner.executeQuery(CompiledQuery.raw('begin'));
+      try {
+        await this.hook(this.exec(conn.inner));
+        const r = await conn.inner.executeQuery<R>(cq);
+        await conn.inner.executeQuery(CompiledQuery.raw('commit'));
+        return r;
+      } catch (e) {
+        await conn.inner.executeQuery(CompiledQuery.raw('rollback')).catch(() => undefined);
+        throw e;
+      }
+    } finally {
+      unlock();
+    }
+  }
+
+  async beginTransaction(c: DatabaseConnection, settings: TransactionSettings): Promise<void> {
+    const conn = c as Conn;
+    const write = settings.accessMode !== 'read only';
+    if (write) conn.unlock = await this.lock();
+    conn.inTx = true;
+    try {
+      await this.inner.beginTransaction(conn.inner, settings);
+    } catch (e) {
+      this.end(conn);
+      throw e;
+    }
+    if (!write || !this.hook) return;
+    try {
+      await this.hook(this.exec(conn.inner));
+    } catch (e) {
+      await this.inner.rollbackTransaction(conn.inner).catch(() => undefined);
+      this.end(conn);
+      throw e;
+    }
+  }
+
+  async commitTransaction(c: DatabaseConnection): Promise<void> {
+    try { await this.inner.commitTransaction((c as Conn).inner); } finally { this.end(c as Conn); }
+  }
+
+  async rollbackTransaction(c: DatabaseConnection): Promise<void> {
+    try { await this.inner.rollbackTransaction((c as Conn).inner); } finally { this.end(c as Conn); }
+  }
+
+  releaseConnection(c: DatabaseConnection): Promise<void> { return this.inner.releaseConnection((c as Conn).inner); }
+
+  destroy(): Promise<void> { return this.inner.destroy(); }
+
+  private exec(inner: DatabaseConnection) {
+    return async (sqlText: string, params: readonly unknown[] = []) =>
+      (await inner.executeQuery(CompiledQuery.raw(sqlText, [...params]))).rows as unknown[];
+  }
+
+  private end(conn: Conn): void {
+    conn.inTx = false;
+    conn.unlock?.();
+    conn.unlock = null;
+  }
+}
+
+class SerializingPostgresDialect extends PostgresDialect {
+  constructor(
+    cfg: ConstructorParameters<typeof PostgresDialect>[0],
+    private readonly lock: () => Promise<() => void>,
+    private readonly hook: WriteHook | undefined,
+  ) { super(cfg); }
+  override createDriver(): Driver { return new SerializingDriver(super.createDriver(), this.lock, this.hook); }
+}
+
+export interface PostgresKyselyOptions { afterBeginWrite?: WriteHook }
+
+/** A Kysely handle on a shared pool, with its own write lock (one per store,
+ *  as each SQLite file had its own mutex). destroy() leaves the pool open: the
+ *  store factory owns it. */
+export function postgresKysely<DB>(pool: pg.Pool, opts: PostgresKyselyOptions = {}): Kysely<DB> {
+  return new Kysely<DB>({
+    dialect: new SerializingPostgresDialect(
+      { pool: { connect: () => connectInSchema(pool), end: async () => undefined } }, writeLock(), opts.afterBeginWrite,
+    ),
+  });
+}
