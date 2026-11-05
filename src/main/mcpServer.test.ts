@@ -20,6 +20,7 @@ import type { SearchHitEvent } from './claims/searchHits.js';
 import { CAPTURE_TOOL_NAMES, captureArgs } from './claims/captureCommand.js';
 import { initializeResult, setPortExposureHandlers } from './mcpServer.js';
 import { EMBED_DIM, EMBED_MODEL_ID } from './vectors.js';
+import { sqliteReadSource } from './sqliteReadSource.js';
 import { closeDb, openDb, stateKysely } from './db.js';
 import { PerfStore } from './perfStore.js';
 import { initPerf, shutdownPerf } from './perf.js';
@@ -185,6 +186,8 @@ function makeFileDb(): { db: Database.Database; cleanup: () => void } {
   return { db: fileDb, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
+const rs = (d: Database.Database) => sqliteReadSource(d);
+
 function tool(name: string) {
   const t = TOOLS.find((x) => x.name === name);
   if (!t) throw new Error(`tool ${name} not found`);
@@ -211,28 +214,28 @@ describe('default read scope (#146)', () => {
 
 describe('typed read tools are workspace-scoped (#146)', () => {
   it('list_sessions returns only the caller\'s sessions', async () => {
-    const rows = tool('list_sessions').run(db, {}, ctxA) as Array<{ workspace_id: string }>;
+    const rows = (await tool('list_sessions').run(rs(db), {}, ctxA)) as Array<{ workspace_id: string }>;
     expect(rows.length).toBe(1);
     expect(rows.every((r) => r.workspace_id === WS_A)).toBe(true);
   });
 
   it('list_sessions cannot escape scope by naming another workspace', async () => {
-    const rows = tool('list_sessions').run(db, { workspace_id: WS_B }, ctxA) as unknown[];
+    const rows = (await tool('list_sessions').run(rs(db), { workspace_id: WS_B }, ctxA)) as unknown[];
     expect(rows).toEqual([]);
   });
 
   it('get_session hides another workspace\'s session', async () => {
-    expect(tool('get_session').run(db, { id: 'sb' }, ctxA)).toBeNull();
-    expect(tool('get_session').run(db, { id: 'sa' }, ctxA)).not.toBeNull();
+    expect(await tool('get_session').run(rs(db), { id: 'sb' }, ctxA)).toBeNull();
+    expect(await tool('get_session').run(rs(db), { id: 'sa' }, ctxA)).not.toBeNull();
   });
 
   it('get_cost refuses another workspace\'s session', async () => {
-    expect(() => tool('get_cost').run(db, { session_id: 'sb' }, ctxA)).toThrow(/not authorized/i);
-    expect(() => tool('get_cost').run(db, { session_id: 'sa' }, ctxA)).not.toThrow();
+    await expect(tool('get_cost').run(rs(db), { session_id: 'sb' }, ctxA)).rejects.toThrow(/not authorized/i);
+    await expect(tool('get_cost').run(rs(db), { session_id: 'sa' }, ctxA)).resolves.toBeDefined();
   });
 
   it('list_events refuses another workspace\'s session', async () => {
-    expect(() => tool('list_events').run(db, { session_id: 'sb' }, ctxA)).toThrow(/not authorized/i);
+    await expect(tool('list_events').run(rs(db), { session_id: 'sb' }, ctxA)).rejects.toThrow(/not authorized/i);
   });
 });
 
@@ -246,23 +249,23 @@ describe('scoped query tool (#174)', () => {
     fdb.close();
     cleanup();
   });
-  const run = (args: Record<string, unknown>) => tool('query').run(fdb, args, ctxA);
+  const run = (args: Record<string, unknown>) => tool('query').run(rs(fdb), args, ctxA);
 
   it('returns only the caller\'s rows for a plain select', async () => {
-    const rows = run({ sql: 'SELECT workspace_id FROM sessions' }) as Array<{ workspace_id: string }>;
+    const rows = (await run({ sql: 'SELECT workspace_id FROM sessions' })) as Array<{ workspace_id: string }>;
     expect(rows.every((r) => r.workspace_id === WS_A)).toBe(true);
     expect(rows.length).toBe(1);
   });
 
   it('cannot reach another workspace via UNION / subquery / where', async () => {
-    const r1 = run({ sql: "SELECT * FROM sessions WHERE workspace_id = '" + WS_B + "'" }) as unknown[];
+    const r1 = (await run({ sql: "SELECT * FROM sessions WHERE workspace_id = '" + WS_B + "'" })) as unknown[];
     expect(r1).toEqual([]);
-    const r2 = run({ sql: 'SELECT count(*) AS n FROM events' }) as Array<{ n: number }>;
+    const r2 = (await run({ sql: 'SELECT count(*) AS n FROM events' })) as Array<{ n: number }>;
     expect(r2[0].n).toBe(1); // only A's event is in the snapshot
   });
 
   it('cannot introspect/escape via sqlite_master', async () => {
-    const names = run({ sql: 'SELECT name FROM sqlite_master ORDER BY name' }) as Array<{ name: string }>;
+    const names = (await run({ sql: 'SELECT name FROM sqlite_master ORDER BY name' })) as Array<{ name: string }>;
     expect(names.map((r) => r.name).sort()).toEqual(
       [
         'broker_sessions', 'events', 'perf_events', 'port_exposures', 'session_summaries', 'session_tags',
@@ -272,25 +275,25 @@ describe('scoped query tool (#174)', () => {
   });
 
   it('omits raw_jsonl by default and includes it only with include_raw', async () => {
-    expect(() => run({ sql: 'SELECT raw_jsonl FROM events' })).toThrow(); // column not in snapshot
-    const rows = run({ sql: 'SELECT raw_jsonl FROM events', include_raw: true }) as Array<{ raw_jsonl: string }>;
+    await expect(run({ sql: 'SELECT raw_jsonl FROM events' })).rejects.toThrow(); // column not in snapshot
+    const rows = (await run({ sql: 'SELECT raw_jsonl FROM events', include_raw: true })) as Array<{ raw_jsonl: string }>;
     expect(rows[0].raw_jsonl).toBe('{"a":1}'); // A\'s own row only
   });
 
   it('rejects writes / DDL / multi-statement', async () => {
-    expect(() => run({ sql: "INSERT INTO events (session_id) VALUES ('x')" })).toThrow(/read-only/i);
-    expect(() => run({ sql: 'DROP TABLE events' })).toThrow(/read-only/i);
-    expect(() => run({ sql: 'UPDATE sessions SET ai_title = 1' })).toThrow(/read-only/i);
-    expect(() => run({ sql: 'SELECT 1; SELECT 2' })).toThrow();
+    await expect(run({ sql: "INSERT INTO events (session_id) VALUES ('x')" })).rejects.toThrow(/read-only/i);
+    await expect(run({ sql: 'DROP TABLE events' })).rejects.toThrow(/read-only/i);
+    await expect(run({ sql: 'UPDATE sessions SET ai_title = 1' })).rejects.toThrow(/read-only/i);
+    await expect(run({ sql: 'SELECT 1; SELECT 2' })).rejects.toThrow();
   });
 
   it('caps result rows via max_rows', async () => {
-    const rows = run({ sql: 'SELECT 1 AS x FROM sessions, events', max_rows: 1 }) as unknown[];
+    const rows = (await run({ sql: 'SELECT 1 AS x FROM sessions, events', max_rows: 1 })) as unknown[];
     expect(rows.length).toBe(1);
   });
 
   it('supports bound params', async () => {
-    const rows = run({ sql: 'SELECT id FROM sessions WHERE id = ?', params: ['sa'] }) as Array<{ id: string }>;
+    const rows = (await run({ sql: 'SELECT id FROM sessions WHERE id = ?', params: ['sa'] })) as Array<{ id: string }>;
     expect(rows).toEqual([{ id: 'sa' }]);
   });
 });
@@ -305,33 +308,33 @@ describe('query snapshot exposes phase-2 tables, workspace-scoped (#207)', () =>
     fdb.close();
     cleanup();
   });
-  const run = (args: Record<string, unknown>) => tool('query').run(fdb, args, ctxA);
+  const run = (args: Record<string, unknown>) => tool('query').run(rs(fdb), args, ctxA);
 
   it('session_tags are readable and scoped', async () => {
     fdb.prepare(`INSERT INTO session_tags VALUES (?, 'sa', 'broker')`).run(WS_A);
     fdb.prepare(`INSERT INTO session_tags VALUES (?, 'sb', 'secret-tag')`).run(WS_B);
-    const rows = run({ sql: 'SELECT tag FROM session_tags ORDER BY tag' }) as Array<{ tag: string }>;
+    const rows = (await run({ sql: 'SELECT tag FROM session_tags ORDER BY tag' })) as Array<{ tag: string }>;
     expect(rows.map((r) => r.tag)).toEqual(['broker']);
   });
 
   it('session_summaries are readable and scoped', async () => {
     fdb.prepare(`INSERT INTO session_summaries (session_id, workspace_id, summary, source_max_event_id, generated_at) VALUES (?, ?, ?, ?, ?)`).run('sa', WS_A, 'A summary', 1, 1000);
     fdb.prepare(`INSERT INTO session_summaries (session_id, workspace_id, summary, source_max_event_id, generated_at) VALUES (?, ?, ?, ?, ?)`).run('sb', WS_B, 'B secret summary', 2, 2000);
-    const rows = run({ sql: 'SELECT session_id FROM session_summaries ORDER BY session_id' }) as Array<{ session_id: string }>;
+    const rows = (await run({ sql: 'SELECT session_id FROM session_summaries ORDER BY session_id' })) as Array<{ session_id: string }>;
     expect(rows.map((r) => r.session_id)).toEqual(['sa']);
   });
 
   it('usage_events are readable and scoped', async () => {
     fdb.prepare(`INSERT INTO usage_events (ts, workspace_id, session_id, kind) VALUES (?, ?, ?, ?)`).run(1000, WS_A, 'sa', 'marked-useful');
     fdb.prepare(`INSERT INTO usage_events (ts, workspace_id, session_id, kind) VALUES (?, ?, ?, ?)`).run(2000, WS_B, 'sb', 'secret-event');
-    const rows = run({ sql: 'SELECT kind FROM usage_events ORDER BY kind' }) as Array<{ kind: string }>;
+    const rows = (await run({ sql: 'SELECT kind FROM usage_events ORDER BY kind' })) as Array<{ kind: string }>;
     expect(rows.map((r) => r.kind)).toEqual(['marked-useful']);
   });
 });
 
 describe('list_events richer projection (#174)', () => {
   it('includes parsed tool-detail columns by default', async () => {
-    const rows = tool('list_events').run(db, { session_id: 'sa' }, ctxA) as Array<Record<string, unknown>>;
+    const rows = (await tool('list_events').run(rs(db), { session_id: 'sa' }, ctxA)) as Array<Record<string, unknown>>;
     const edit = rows.find((r) => r.tool_name === 'Edit')!;
     expect(edit.tool_input).toBe('/workspace/foo.ts');
     expect(edit).toHaveProperty('tool_use_id', 'u2');
@@ -339,44 +342,44 @@ describe('list_events richer projection (#174)', () => {
   });
 
   it('filters by tool_name', async () => {
-    const rows = tool('list_events').run(db, { session_id: 'sa', tool_name: 'Bash' }, ctxA) as unknown[];
+    const rows = (await tool('list_events').run(rs(db), { session_id: 'sa', tool_name: 'Bash' }, ctxA)) as unknown[];
     expect(rows.length).toBe(1);
     expect((rows[0] as { tool_input: string }).tool_input).toBe('npm test');
   });
 
   it('projects only requested columns', async () => {
-    const rows = tool('list_events').run(
-      db, { session_id: 'sa', tool_name: 'Edit', columns: ['tool_name', 'tool_input'] }, ctxA
-    ) as Array<Record<string, unknown>>;
+    const rows = (await tool('list_events').run(
+      rs(db), { session_id: 'sa', tool_name: 'Edit', columns: ['tool_name', 'tool_input'] }, ctxA
+    )) as Array<Record<string, unknown>>;
     expect(Object.keys(rows[0]).sort()).toEqual(['tool_input', 'tool_name']);
   });
 
   it('rejects unknown column names', async () => {
-    expect(() =>
-      tool('list_events').run(db, { session_id: 'sa', columns: ['raw_jsonl; DROP TABLE events'] }, ctxA)
-    ).toThrow(/unknown column/i);
+    await expect(
+      tool('list_events').run(rs(db), { session_id: 'sa', columns: ['raw_jsonl; DROP TABLE events'] }, ctxA)
+    ).rejects.toThrow(/unknown column/i);
   });
 
   it('rejects raw_jsonl in the columns projection', async () => {
-    expect(() => tool('list_events').run(db, { session_id: 'sa', columns: ['raw_jsonl'] }, ctxA)).toThrow(/unknown column/i);
+    await expect(tool('list_events').run(rs(db), { session_id: 'sa', columns: ['raw_jsonl'] }, ctxA)).rejects.toThrow(/unknown column/i);
   });
 });
 
 describe('ISO timestamps (#174)', () => {
   it('list_sessions adds ISO siblings for epoch fields', async () => {
-    const rows = tool('list_sessions').run(db, {}, ctxA) as Array<Record<string, unknown>>;
+    const rows = (await tool('list_sessions').run(rs(db), {}, ctxA)) as Array<Record<string, unknown>>;
     expect(rows[0].last_active_at_iso).toBe(new Date(1000).toISOString());
   });
 
   it('list_events adds ts_iso', async () => {
-    const rows = tool('list_events').run(db, { session_id: 'sa', tool_name: 'Bash' }, ctxA) as Array<Record<string, unknown>>;
+    const rows = (await tool('list_events').run(rs(db), { session_id: 'sa', tool_name: 'Bash' }, ctxA)) as Array<Record<string, unknown>>;
     expect(rows[0].ts_iso).toBe(new Date(1100).toISOString());
   });
 });
 
 describe('session_summary (#174)', () => {
   it('summarizes files, commands, cost and time span for an allowed session', async () => {
-    const s = tool('session_summary').run(db, { id: 'sa' }, ctxA) as Record<string, unknown>;
+    const s = (await tool('session_summary').run(rs(db), { id: 'sa' }, ctxA)) as Record<string, unknown>;
     expect(s.session_id).toBe('sa');
     expect(s.filesEdited).toEqual(['/workspace/foo.ts']);
     expect(s.commands).toEqual(['npm test']);
@@ -387,7 +390,7 @@ describe('session_summary (#174)', () => {
   });
 
   it('refuses a session outside the allowed set', async () => {
-    expect(() => tool('session_summary').run(db, { id: 'sb' }, ctxA)).toThrow(/not authorized/i);
+    await expect(tool('session_summary').run(rs(db), { id: 'sb' }, ctxA)).rejects.toThrow(/not authorized/i);
   });
 });
 
@@ -398,7 +401,7 @@ describe('list_errors', () => {
   });
 
   it('returns own-workspace errors + global (NULL) rows, never another workspace', async () => {
-    const rows = t.run(db, {}, ctx([WS_A])) as Array<Record<string, unknown>>;
+    const rows = (await t.run(rs(db), {}, ctx([WS_A]))) as Array<Record<string, unknown>>;
     const types = rows.map((r) => r.type);
     expect(types).toContain('mapping-unresolved'); // WS_A
     expect(types).toContain('uncaughtException');  // global
@@ -406,19 +409,19 @@ describe('list_errors', () => {
   });
 
   it('includes a ts_iso sibling and orders newest-first', async () => {
-    const rows = t.run(db, {}, ctx([WS_A])) as Array<Record<string, unknown>>;
+    const rows = (await t.run(rs(db), {}, ctx([WS_A]))) as Array<Record<string, unknown>>;
     expect(typeof rows[0].ts_iso).toBe('string');
     expect(rows[0].ts as number).toBeGreaterThanOrEqual(rows[rows.length - 1].ts as number);
   });
 
   it('filters by level', async () => {
-    const rows = t.run(db, { level: 'warn' }, ctx([WS_A])) as Array<Record<string, unknown>>;
+    const rows = (await t.run(rs(db), { level: 'warn' }, ctx([WS_A]))) as Array<Record<string, unknown>>;
     expect(rows.every((r) => r.level === 'warn')).toBe(true);
   });
 
   it('workspace_id filter preserves global (NULL) crash rows', async () => {
     // An agent narrowing to its own workspace must still see global app crashes.
-    const rows = t.run(db, { workspace_id: WS_A }, ctx([WS_A])) as Array<Record<string, unknown>>;
+    const rows = (await t.run(rs(db), { workspace_id: WS_A }, ctx([WS_A]))) as Array<Record<string, unknown>>;
     const types = rows.map((r) => r.type);
     expect(types).toContain('mapping-unresolved'); // WS_A own row
     expect(types).toContain('uncaughtException');  // global NULL row
@@ -491,7 +494,7 @@ describe('search_transcripts is workspace-scoped (#146)', () => {
     ins.run(WS_B, 'sb', 'turn', 2, 2000, 'B secret content', EMBED_MODEL_ID, EMBED_DIM, enc(unit()), 't2');
 
     setQueryEmbedder(async (texts) => texts.map(() => unit()));
-    const hits = (await tool('search_transcripts').run(db, { query: 'anything' }, ctxA)) as Array<{ workspace_id?: string; workspaceId?: string }>;
+    const hits = (await tool('search_transcripts').run(rs(db), { query: 'anything' }, ctxA)) as Array<{ workspace_id?: string; workspaceId?: string }>;
     const wss = hits.map((h) => h.workspaceId ?? h.workspace_id);
     expect(wss).not.toContain(WS_B);
     expect(wss).toContain(WS_A);
@@ -504,18 +507,18 @@ describe('mark_useful + get_config (#207)', () => {
   it('mark_useful records a marked-useful usage event for an allowed session', async () => {
     const events: unknown[] = [];
     setUsageRecorder((e) => { events.push(e); });
-    await tool('mark_useful').run(db, { sessionId: 'sa', note: 'led me to the fix' }, ctxA);
+    await tool('mark_useful').run(rs(db), { sessionId: 'sa', note: 'led me to the fix' }, ctxA);
     expect(events).toEqual([{ workspaceId: WS_A, sessionId: 'sa', kind: 'marked-useful', detail: { note: 'led me to the fix' } }]);
   });
 
   it("mark_useful refuses a session outside the caller's allowed set", async () => {
     setUsageRecorder(() => { throw new Error('must not be called'); });
-    await expect(tool('mark_useful').run(db, { sessionId: 'sb' }, ctxA)).rejects.toThrow(/not found/);
+    await expect(tool('mark_useful').run(rs(db), { sessionId: 'sb' }, ctxA)).rejects.toThrow(/not found/);
   });
 
   it('get_config returns the resolver output for the caller', async () => {
     setConfigResolver((callerId) => ({ summarizer: { model: 'haiku', minNewTurns: 20 }, workspaceId: callerId }));
-    const out = await tool('get_config').run(db, {}, ctxA) as Record<string, unknown>;
+    const out = await tool('get_config').run(rs(db), {}, ctxA) as Record<string, unknown>;
     expect(out.workspaceId).toBe(WS_A);
   });
 });
@@ -618,7 +621,7 @@ describe('implicit usage telemetry (#207)', () => {
     setQueryEmbedder(async (texts) => texts.map(() => { const v = new Float32Array(EMBED_DIM); v[0] = 1; return v; }));
     // seed one embedding row for WS_A (reuse the insert helper pattern from the scoping describe)
     seedEmbedding(db, WS_A, 'sa');
-    await tool('search_transcripts').run(db, { query: 'the broker hang' }, ctxA);
+    await tool('search_transcripts').run(rs(db), { query: 'the broker hang' }, ctxA);
     const imp = events.filter((e) => e.kind === 'search-impression');
     expect(imp).toHaveLength(1);
     expect(imp[0].sessionId).toBe('sa');
@@ -630,15 +633,15 @@ describe('implicit usage telemetry (#207)', () => {
     setUsageRecorder((e) => { events.push(e as Record<string, unknown>); });
     setQueryEmbedder(async (texts) => texts.map(() => { const v = new Float32Array(EMBED_DIM); v[0] = 1; return v; }));
     seedEmbedding(db, WS_A, 'sa');
-    await tool('search_transcripts').run(db, { query: 'x' }, ctxA);
-    tool('get_session').run(db, { id: 'sa' }, ctxA);
+    await tool('search_transcripts').run(rs(db), { query: 'x' }, ctxA);
+    await tool('get_session').run(rs(db), { id: 'sa' }, ctxA);
     expect(events.some((e) => e.kind === 'clickthrough' && e.sessionId === 'sa')).toBe(true);
   });
 
   it('a read WITHOUT a recent search records no clickthrough', async () => {
     const events: Array<Record<string, unknown>> = [];
     setUsageRecorder((e) => { events.push(e as Record<string, unknown>); });
-    tool('get_session').run(db, { id: 'sa' }, ctxA);
+    await tool('get_session').run(rs(db), { id: 'sa' }, ctxA);
     expect(events.filter((e) => e.kind === 'clickthrough')).toHaveLength(0);
   });
 });
@@ -667,10 +670,10 @@ describe('perf tools', () => {
   it('perf_set rejects export-config arguments', async () => {
     const set = TOOLS.find((t) => t.name === 'perf_set')!;
     await expect(
-      set.run(db, { enabled: true, endpoint: 'http://evil:4318' }, ctxA)
+      set.run(rs(db), { enabled: true, endpoint: 'http://evil:4318' }, ctxA)
     ).rejects.toThrow(/export/i);
     await expect(
-      set.run(db, { enabled: true, otlp: { enabled: true } }, ctxA)
+      set.run(rs(db), { enabled: true, otlp: { enabled: true } }, ctxA)
     ).rejects.toThrow(/export/i);
   });
 
@@ -681,10 +684,10 @@ describe('perf tools', () => {
       const set = TOOLS.find((t) => t.name === 'perf_set')!;
       // Both enabled: false and enabled: true should be rejected
       await expect(
-        set.run(db, { enabled: false }, ctxA)
+        set.run(rs(db), { enabled: false }, ctxA)
       ).rejects.toThrow(/CLAUDE_FLEET_PERF/i);
       await expect(
-        set.run(db, { enabled: true }, ctxA)
+        set.run(rs(db), { enabled: true }, ctxA)
       ).rejects.toThrow(/CLAUDE_FLEET_PERF/i);
     } finally {
       if (saved === undefined) delete process.env.CLAUDE_FLEET_PERF;
@@ -708,7 +711,7 @@ describe('perf tools', () => {
 
     it('perf_status returns status without throwing', async () => {
       const statusTool = TOOLS.find((t) => t.name === 'perf_status')!;
-      const result = await statusTool.run(db, {}, ctxA);
+      const result = await statusTool.run(rs(db), {}, ctxA);
       expect(result).toHaveProperty('enabled');
       expect(result).toHaveProperty('source');
       expect(result).toHaveProperty('otlp');
@@ -731,7 +734,7 @@ describe('perf tools', () => {
       fdb.prepare(`INSERT INTO perf_events (ts, kind, workspace_id, name, dur_ms) VALUES (1, 'pty_window', ?, 'claude_fleet.pty.bytes', NULL)`).run(WS_A);
       fdb.prepare(`INSERT INTO perf_events (ts, kind, workspace_id, name, dur_ms) VALUES (2, 'pty_window', ?, 'claude_fleet.pty.bytes', NULL)`).run(WS_B);
       fdb.prepare(`INSERT INTO perf_events (ts, kind, dur_ms) VALUES (3, 'stall', 80)`).run();
-      const rows = tool('query').run(fdb, { sql: 'SELECT kind, workspace_id FROM perf_events ORDER BY ts' }, ctxA) as Array<{ kind: string; workspace_id: string | null }>;
+      const rows = (await tool('query').run(rs(fdb), { sql: 'SELECT kind, workspace_id FROM perf_events ORDER BY ts' }, ctxA)) as Array<{ kind: string; workspace_id: string | null }>;
       expect(rows).toEqual([
         { kind: 'pty_window', workspace_id: WS_A },
         { kind: 'stall', workspace_id: null }
@@ -766,18 +769,18 @@ describe('perf tools', () => {
 
     it('perf_sentinel_set arms (with ttl), reports via perf_status, and disarms', async () => {
       const t = TOOLS.find((x) => x.name === 'perf_sentinel_set')!;
-      const armed = await t.run(db, { enabled: true, ttlHours: 1 }, ctxA);
+      const armed = await t.run(rs(db), { enabled: true, ttlHours: 1 }, ctxA);
       expect((armed as { sentinel: { enabled: boolean; expiresAt: number | null } }).sentinel.enabled).toBe(true);
       expect((armed as { sentinel: { expiresAt: number | null } }).sentinel.expiresAt).not.toBeNull();
-      const disarmed = await t.run(db, { enabled: false }, ctxA);
+      const disarmed = await t.run(rs(db), { enabled: false }, ctxA);
       expect((disarmed as { sentinel: { enabled: boolean } }).sentinel.enabled).toBe(false);
     });
 
     it('perf_sentinel_set validates ttlHours and rejects extra args', async () => {
       const t = TOOLS.find((x) => x.name === 'perf_sentinel_set')!;
-      await expect(t.run(db, { enabled: true, ttlHours: 0 }, ctxA)).rejects.toThrow(/ttlHours/);
-      await expect(t.run(db, { enabled: true, ttlHours: 169 }, ctxA)).rejects.toThrow(/ttlHours/);
-      await expect(t.run(db, { enabled: true, endpoint: 'http://evil' }, ctxA)).rejects.toThrow(/unexpected/);
+      await expect(t.run(rs(db), { enabled: true, ttlHours: 0 }, ctxA)).rejects.toThrow(/ttlHours/);
+      await expect(t.run(rs(db), { enabled: true, ttlHours: 169 }, ctxA)).rejects.toThrow(/ttlHours/);
+      await expect(t.run(rs(db), { enabled: true, endpoint: 'http://evil' }, ctxA)).rejects.toThrow(/unexpected/);
     });
 
     it('perf_sentinel_set refuses to arm while recording is disabled', async () => {
@@ -795,9 +798,9 @@ describe('perf tools', () => {
       initPerf(store, PERF_OFF);
 
       const t = TOOLS.find((x) => x.name === 'perf_sentinel_set')!;
-      await expect(t.run(db, { enabled: true }, ctxA)).rejects.toThrow(/recording/);
+      await expect(t.run(rs(db), { enabled: true }, ctxA)).rejects.toThrow(/recording/);
       // disarm must still work while recording is off:
-      await expect(t.run(db, { enabled: false }, ctxA)).resolves.toBeTruthy();
+      await expect(t.run(rs(db), { enabled: false }, ctxA)).resolves.toBeTruthy();
     });
   });
 });
@@ -824,10 +827,10 @@ describe('inbox tools (#407)', () => {
       notify: async (c, a) => { calls.push(['notify', c, a]); return { id: 'N1' }; }
     });
     const db = null as never;
-    expect(await tool('post_todo').run(db, { title: 'x', callerId: 'SPOOF' }, ctx)).toEqual({ id: 'T1', action: 'created' });
-    await tool('update_todo').run(db, { id: 'T1', status: 'done' }, ctx);
-    await tool('list_todos').run(db, {}, ctx);
-    await tool('notify').run(db, { title: 'n' }, ctx);
+    expect(await tool('post_todo').run(rs(db), { title: 'x', callerId: 'SPOOF' }, ctx)).toEqual({ id: 'T1', action: 'created' });
+    await tool('update_todo').run(rs(db), { id: 'T1', status: 'done' }, ctx);
+    await tool('list_todos').run(rs(db), {}, ctx);
+    await tool('notify').run(rs(db), { title: 'n' }, ctx);
     expect(calls.map(([k, c]) => [k, c])).toEqual([['post', WS_A], ['update', WS_A], ['list', WS_A], ['notify', WS_A]]);
   });
 
@@ -879,13 +882,13 @@ describe('knowledge claims tools (#483)', () => {
       search: async (c) => { seen.push(c); return { results: [] }; },
       retract: async (c) => { seen.push(c); return { id: 'x', status: 'retracted' }; }
     });
-    await tool('record_claim').run(makeDb(), { text: 't', kind: 'fact', topics: ['a1'], callerId: 'evil' }, ctxA);
-    await tool('search_claims').run(makeDb(), { query: 'q' }, ctxA);
-    await tool('retract_claim').run(makeDb(), { id: 'x', reason: 'r' }, ctxA);
+    await tool('record_claim').run(null, { text: 't', kind: 'fact', topics: ['a1'], callerId: 'evil' }, ctxA);
+    await tool('search_claims').run(null, { query: 'q' }, ctxA);
+    await tool('retract_claim').run(null, { id: 'x', reason: 'r' }, ctxA);
     expect(seen).toEqual([WS_A, WS_A, WS_A]);
   });
   it('fails clearly when claims are unavailable', () => {
-    expect(() => tool('search_claims').run(makeDb(), { query: 'q' }, ctxA)).toThrow(/claims are unavailable/);
+    expect(() => tool('search_claims').run(null, { query: 'q' }, ctxA)).toThrow(/claims are unavailable/);
   });
   it('search_transcripts no longer instructs agents to call mark_useful', () => {
     expect(tool('search_transcripts').description).not.toMatch(/mark_useful/);
@@ -914,12 +917,12 @@ describe('capture settings tools (#483 §5a)', () => {
       get: async (c) => { seen.push(c); return {}; },
       set: async (c) => { seen.push(c); return {}; }
     });
-    await tool('get_capture_settings').run(makeDb(), { workspace_id: WS_B }, ctxA);
-    await tool('set_capture_settings').run(makeDb(), { searchTopSessions: 1, reason: 'r', callerId: WS_B }, ctxA);
+    await tool('get_capture_settings').run(null, { workspace_id: WS_B }, ctxA);
+    await tool('set_capture_settings').run(null, { searchTopSessions: 1, reason: 'r', callerId: WS_B }, ctxA);
     expect(seen).toEqual([WS_A, WS_A]);
   });
   it('fails clearly when unavailable', () => {
-    expect(() => tool('get_capture_settings').run(makeDb(), {}, ctxA)).toThrow(/knowledge capture settings are unavailable/);
+    expect(() => tool('get_capture_settings').run(null, {}, ctxA)).toThrow(/knowledge capture settings are unavailable/);
   });
 });
 
@@ -932,7 +935,7 @@ describe('search-hit capture hook (#483 §5)', () => {
     setSearchHitHook((e) => seen.push(e));
     setQueryEmbedder(unitEmbed);
     seedEmbedding(db, WS_A, 'sa');
-    await tool('search_transcripts').run(db, { query: 'broker hang' }, ctxA);
+    await tool('search_transcripts').run(rs(db), { query: 'broker hang' }, ctxA);
     expect(seen).toHaveLength(1);
     expect(seen[0]).toMatchObject({ callerWorkspaceId: WS_A, tool: 'search_transcripts', query: 'broker hang', sessionIds: ['sa'] });
     expect([...seen[0].allowedWorkspaces]).toEqual([WS_A]);
@@ -944,15 +947,15 @@ describe('search-hit capture hook (#483 §5)', () => {
       record: async () => ({}), retract: async () => ({}),
       search: async () => ({ results: [{ sources: [{ sessionId: 's1' }] }] })
     });
-    await tool('search_claims').run(makeDb(), { query: 'q' }, ctxA);
+    await tool('search_claims').run(null, { query: 'q' }, ctxA);
     expect(seen[0]).toMatchObject({ tool: 'search_claims', query: 'q', sessionIds: ['s1'] });
   });
-  it('query reports session ids from the result rows', () => {
+  it('query reports session ids from the result rows', async () => {
     const { db: fdb, cleanup } = makeFileDb();
     try {
       const seen: SearchHitEvent[] = [];
       setSearchHitHook((e) => seen.push(e));
-      tool('query').run(fdb, { sql: 'SELECT id AS session_id FROM sessions' }, ctxA);
+      await tool('query').run(rs(fdb), { sql: 'SELECT id AS session_id FROM sessions' }, ctxA);
       expect(seen[0]).toMatchObject({ tool: 'query', query: 'SELECT id AS session_id FROM sessions' });
       expect(seen[0].sessionIds.length).toBeGreaterThan(0);
     } finally { fdb.close(); cleanup(); }
@@ -960,11 +963,11 @@ describe('search-hit capture hook (#483 §5)', () => {
   it('a throwing hook never fails the search, and no results means no event', async () => {
     setSearchHitHook(() => { throw new Error('boom'); });
     setClaimHandlers({ record: async () => ({}), retract: async () => ({}), search: async () => ({ results: [{ sources: [{ sessionId: 's1' }] }] }) });
-    await expect(tool('search_claims').run(makeDb(), { query: 'q' }, ctxA)).resolves.toBeTruthy();
+    await expect(tool('search_claims').run(null, { query: 'q' }, ctxA)).resolves.toBeTruthy();
     const seen: SearchHitEvent[] = [];
     setSearchHitHook((e) => seen.push(e));
     setClaimHandlers({ record: async () => ({}), retract: async () => ({}), search: async () => ({ results: [] }) });
-    await tool('search_claims').run(makeDb(), { query: 'q' }, ctxA);
+    await tool('search_claims').run(null, { query: 'q' }, ctxA);
     expect(seen).toHaveLength(0);
   });
 });
@@ -975,19 +978,19 @@ describe('search-hit capture hook (#483 §5)', () => {
 
 import { startMcpServer, stopMcpServer } from './mcpServer.js';
 
-describe('startMcpServer({ stateDb: false })', () => {
+describe('startMcpServer({ readSource: null })', () => {
   afterEach(() => stopMcpServer());
 
   it('history tools return an unavailable error; tools that do not read state.db still run', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cf-mcp-pg-'));
     try {
-      startMcpServer(dir, { stateDb: false });
+      startMcpServer(dir, { readSource: null });
       const hist = (await callTool({ name: 'list_sessions', arguments: {} }, WS_A)) as { isError?: boolean; content: Array<{ text: string }> };
       expect(hist.isError).toBe(true);
-      expect(hist.content[0].text).toBe('Error: list_sessions is unavailable on the Postgres store');
+      expect(hist.content[0].text).toBe('Error: list_sessions is unavailable while the history store is not open');
       for (const name of ['get_session', 'get_cost', 'list_events', 'search_transcripts', 'session_summary', 'list_errors', 'query', 'mark_useful']) {
         const r = (await callTool({ name, arguments: {} }, WS_A)) as { isError?: boolean; content: Array<{ text: string }> };
-        expect(r.content[0].text).toBe(`Error: ${name} is unavailable on the Postgres store`);
+        expect(r.content[0].text).toBe(`Error: ${name} is unavailable while the history store is not open`);
       }
       setConfigResolver(() => ({ probe: true }));
       const cfg = (await callTool({ name: 'get_config', arguments: {} }, WS_A)) as { isError?: boolean; content: Array<{ text: string }> };
@@ -1044,17 +1047,17 @@ describe('query snapshot exposes port_exposures, workspace-scoped (#505)', () =>
     cleanup();
   });
 
-  it('copies only the allowed workspaces rows', () => {
+  it('copies only the allowed workspaces rows', async () => {
     fdb.exec(PORT_EXPOSURES_DDL);
     const ins = fdb.prepare(`INSERT INTO port_exposures (id, workspace_id, port, source) VALUES (?, ?, ?, ?)`);
     ins.run('ra', WS_A, 5173, 'declared');
     ins.run('rb', WS_B, 3000, 'scanned');
-    const rows = tool('query').run(fdb, { sql: 'SELECT id FROM port_exposures' }, ctxA) as Array<{ id: string }>;
+    const rows = (await tool('query').run(rs(fdb), { sql: 'SELECT id FROM port_exposures' }, ctxA)) as Array<{ id: string }>;
     expect(rows.map((r) => r.id)).toEqual(['ra']);
   });
 
-  it('an older state.db without the table yields an empty table', () => {
-    const rows = tool('query').run(fdb, { sql: 'SELECT count(*) AS n FROM port_exposures' }, ctxA);
+  it('an older state.db without the table yields an empty table', async () => {
+    const rows = await tool('query').run(rs(fdb), { sql: 'SELECT count(*) AS n FROM port_exposures' }, ctxA);
     expect(rows).toEqual([{ n: 0 }]);
   });
 });

@@ -236,7 +236,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     );
     // Read-only MCP server over <userData>/mcp.sock so in-container claude can
     // query the state DB (sessions/events/cost). Opens its own readonly conn.
-    perfSpan('claude_fleet.boot.mcp_server', () => startMcpServer(app.getPath('userData'), { stateDb: !pgStores }));
+    perfSpan('claude_fleet.boot.mcp_server', () => startMcpServer(app.getPath('userData'), pgStores ? { readSource: null } : {}));
     // Local embedder for semantic transcript search (native onnxruntime-node, on-host).
     const embed = makeEmbedder(join(app.getPath('userData'), 'models'));
     setQueryEmbedder(embed);
