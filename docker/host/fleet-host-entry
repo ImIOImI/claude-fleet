@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Runs the broker and fleet-host side by side under tini. The broker exiting
 # ends the container; fleet-host is restarted with backoff (PTYs live in the
-# broker) unless it crash-loops. SIGTERM stops fleet-host first so it releases
-# the lease, then the broker. SIGHUP is forwarded to fleet-host (config reload).
+# broker) unless it crash-loops. Exit 75 (host DB unavailable) is restarted
+# with backoff but never counts toward the crash-loop give-up. SIGTERM stops
+# fleet-host first so it releases the lease, then the broker. SIGHUP is
+# forwarded to fleet-host (config reload).
 # fleet-host never starts onto a port someone else holds: sessions share its
 # uid, so a session could kill it and listen in its place to collect bearer
 # tokens. The container exits instead.
@@ -81,6 +83,11 @@ while :; do
     exit "$status"
   fi
   host=
+  # 75 = EXIT_DB_UNAVAILABLE in src/host/main.ts.
+  if (( status == 75 )); then
+    unset 'starts[-1]'
+    starts=("${starts[@]}")
+  fi
   recent=()
   for t in "${starts[@]}"; do (( SECONDS - t < window_s )) && recent+=("$t"); done
   starts=("${recent[@]}")
@@ -91,8 +98,12 @@ while :; do
     (( status == 0 )) && status=1
     exit "$status"
   fi
-  (( ${#starts[@]} == 1 )) && delay_ms=$backoff_start_ms
-  log warn "fleet-host exited; restarting" ",\"status\":$status,\"delayMs\":$delay_ms"
+  (( status != 75 && ${#starts[@]} == 1 )) && delay_ms=$backoff_start_ms
+  if (( status == 75 )); then
+    log warn "fleet-host exited (db unavailable); restarting" ",\"status\":$status,\"delayMs\":$delay_ms"
+  else
+    log warn "fleet-host exited; restarting" ",\"status\":$status,\"delayMs\":$delay_ms"
+  fi
   sleep "$(( delay_ms / 1000 )).$(printf '%03d' $(( delay_ms % 1000 )))" &
   pause=$!
   while kill -0 "$pause" 2>/dev/null; do wait "$pause" 2>/dev/null; done

@@ -3,10 +3,20 @@
 import type pg from 'pg';
 import type { Kysely } from 'kysely';
 import { migratePostgres } from '../main/store/pgMigrate.js';
-import { createPgPool, postgresKysely } from '../main/store/postgres.js';
+import { createPgPool, postgresKysely, type PgPoolConfig } from '../main/store/postgres.js';
 import { iamAuthHint, pgPoolConfig, StoreConfigError, type PostgresStoreConfig } from '../main/store/storeConfig.js';
 import { HOST_TRACK, type HostDb } from './hostSchema.js';
 import type { Logger } from './log.js';
+
+/** Below TTL − renew (20 s), so a partitioned holder's FOR SHARE can't block a takeover for long. */
+export const HOST_PG_SESSION = { idleInTransactionMs: 10_000, statementTimeoutMs: 30_000 };
+
+/** For both host pools (host and store). */
+export const HOST_PG_POOL: Pick<PgPoolConfig, 'session' | 'keepAlive' | 'keepAliveInitialDelayMillis'> = {
+  session: HOST_PG_SESSION,
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10_000
+};
 
 export interface HostDbHandle {
   pool: pg.Pool;
@@ -16,7 +26,7 @@ export interface HostDbHandle {
 }
 
 export async function openHostDb(cfg: PostgresStoreConfig, o: { env?: NodeJS.ProcessEnv; log: Logger }): Promise<HostDbHandle> {
-  const pool = createPgPool({ ...pgPoolConfig(cfg, o.env), max: 2 });
+  const pool = createPgPool({ ...pgPoolConfig(cfg, o.env), ...HOST_PG_POOL, max: 2 });
   pool.on('error', (e) => o.log.log('warn', 'host db pool error', { error: e.message }));
   const k = postgresKysely<HostDb>(pool);
   try {

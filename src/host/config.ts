@@ -131,8 +131,15 @@ function parseGithub(v: unknown): HostGithubConfig {
 function parseDb(v: unknown): PostgresStoreConfig {
   const d = record(v, 'db');
   if ('kind' in d) throw new HostConfigError('db has unknown key kind (the host store is always Postgres)');
+  // The config is a ConfigMap that sessions can read.
+  const noStatic = 'db: a static password is not allowed (sessions can read the host config); use password "env" or "aws-rds-iam"';
+  if ((d.password as { kind?: unknown } | undefined)?.kind === 'static') throw new HostConfigError(noStatic);
+  if (typeof d.connectionString === 'string' && URL.canParse(d.connectionString)) {
+    const u = new URL(d.connectionString);
+    if (u.password || u.searchParams.has('password')) throw new HostConfigError(noStatic);
+  }
   try {
-    return parseStoreConfig({ ...d, kind: 'postgres' }, { allowStaticSecrets: true }) as PostgresStoreConfig;
+    return parseStoreConfig({ ...d, kind: 'postgres' }, { allowStaticSecrets: false }) as PostgresStoreConfig;
   } catch (err) {
     if (err instanceof StoreConfigError) throw new HostConfigError(`db: ${err.message.replace(/^store: /, '')}`);
     throw err;

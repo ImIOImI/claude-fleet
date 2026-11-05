@@ -6,11 +6,13 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { connect, createServer, type AddressInfo, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { sql } from 'kysely';
 import pg from 'pg';
 import * as db from '../main/db.js';
 import { IdentityError, type IdentityProvider } from '../main/identity/types.js';
 import { isPg, testPgSchema, type TestPg } from '../main/store/testStore.js';
-import { runHost, type RunHostOptions } from './main.js';
+import { HOST_PG_SESSION } from './hostDb.js';
+import { EXIT_DB_UNAVAILABLE, runHost, type RunHostOptions } from './main.js';
 import { fakeBroker, person, TOKEN } from './testFakes.js';
 
 const ID = '01JC0000000000000000000000';
@@ -48,7 +50,7 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     const host = await runHost({
       env: { FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock') },
       exit, proc: new EventEmitter(), logSink: (l) => logs.push(l), authFactory: () => ({ id: 'github', verify }),
-      brokerOps: fakeBroker([]).ops, leaseRenewMs: 200, leaseTtlMs: 10_000,
+      brokerOps: fakeBroker([]).ops, leaseRenewMs: 200, leaseTtlMs: 1_000,
       ...opts
     });
     hosts.push(host);
@@ -72,6 +74,28 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     await db.recordUsageEvent({ workspaceId: ID, sessionId: null, kind: 'resumed' });
   }, 30_000);
 
+  it('a store migration longer than TTL − renew runs unfenced: the holder keeps its lease', async () => {
+    const slow = { track: 'slow_test', baselineVersion: 1, baseline: 'SELECT pg_sleep(2)', steps: [] };
+    const a = await start({ extraStoreTracks: [slow] });
+    await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+    await storesOpen();
+    expect(a.exit).not.toHaveBeenCalled();
+    expect(a.logs.join('\n')).not.toMatch(/lease lost/);
+    const row = await t!.pool.query(`SELECT epoch FROM ${t!.schema}.host_lease`);
+    expect(row.rows[0].epoch).toBe(1);
+    const v = await t!.pool.query(`SELECT version FROM ${t!.schema}.schema_migrations WHERE track = 'slow_test'`);
+    expect(v.rows).toHaveLength(1);
+  }, 30_000);
+
+  it('the holder’s store connections carry the host session timeouts', async () => {
+    const a = await start();
+    await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+    await storesOpen();
+    const show = async (n: string) => (await sql<Record<string, string>>`${sql.raw(`SHOW ${n}`)}`.execute(db.stateKysely())).rows[0][n];
+    expect(await show('idle_in_transaction_session_timeout')).toBe(`${HOST_PG_SESSION.idleInTransactionMs / 1000}s`);
+    expect(await show('statement_timeout')).toBe(`${HOST_PG_SESSION.statementTimeoutMs / 1000}s`);
+  }, 30_000);
+
   it('a stale holder’s store write fails and the process exits 1', async () => {
     const a = await start({ leaseRenewMs: 10_000, leaseTtlMs: 30_000 });
     await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
@@ -85,7 +109,7 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
 });
 
 /** A TCP front for the test server's Unix socket that refuses connections until opened. */
-async function gatedProxy(): Promise<{ url: string; open(): void; close(): Promise<void> }> {
+async function gatedProxy(): Promise<{ url: string; open(): void; cut(): void; close(): Promise<void> }> {
   const u = new URL(process.env.PG_TEST_URL!);
   const sock = join(u.searchParams.get('host')!, `.s.PGSQL.${u.searchParams.get('port') || u.port || '5432'}`);
   let open = false;
@@ -104,6 +128,10 @@ async function gatedProxy(): Promise<{ url: string; open(): void; close(): Promi
   return {
     url: `postgres://${u.username}@127.0.0.1:${port}${u.pathname}`,
     open: () => (open = true),
+    cut: () => {
+      open = false;
+      for (const c of conns) c.destroy();
+    },
     close: async () => {
       for (const c of conns) c.destroy();
       await new Promise<void>((r) => srv.close(() => r()));
@@ -131,7 +159,7 @@ describe.skipIf(!isPg)('runHost on Postgres: start and stop', () => {
     const host = await runHost({
       env: { FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock') },
       exit, proc, logSink: (l) => logs.push(l), authFactory: () => ({ id: 'github', verify }),
-      brokerOps: fakeBroker([]).ops, leaseRenewMs: 200, leaseTtlMs: 10_000, ...extra
+      brokerOps: fakeBroker([]).ops, leaseRenewMs: 200, leaseTtlMs: 1_000, ...extra
     });
     return { url: `http://127.0.0.1:${port}`, host, exit, proc, logs };
   }
@@ -151,6 +179,21 @@ describe.skipIf(!isPg)('runHost on Postgres: start and stop', () => {
       expect((await whoami(a.url)).status).toBe(200);
       await a.host.shutdown(0);
       expect(a.exit).toHaveBeenCalledWith(0);
+    } finally {
+      await proxy.close();
+    }
+  }, 30_000);
+
+  it(`a holder that loses the db exits ${EXIT_DB_UNAVAILABLE}, not 1`, async () => {
+    const proxy = await gatedProxy();
+    proxy.open();
+    try {
+      const a = await boot(proxy.url, { storeCloseMs: 500 });
+      await vi.waitFor(async () => expect((await fetch(`${a.url}/leader`)).status).toBe(200), { timeout: 10_000 });
+      await vi.waitFor(() => expect(() => db.stateKysely()).not.toThrow(), { timeout: 10_000 });
+      proxy.cut();
+      await vi.waitFor(() => expect(a.exit).toHaveBeenCalled(), { timeout: 15_000 });
+      expect(a.exit).toHaveBeenCalledWith(EXIT_DB_UNAVAILABLE);
     } finally {
       await proxy.close();
     }

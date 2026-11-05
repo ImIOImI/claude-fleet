@@ -43,6 +43,8 @@ export function memoryLeaseStore(): LeaseStore {
 }
 
 export type LeaseState = 'standby' | 'holder';
+/** superseded: the row names another holder or epoch. unreachable: the store didn't confirm in time. */
+export type LostReason = 'superseded' | 'unreachable';
 
 export interface LeaseOptions {
   holder: string;
@@ -71,7 +73,7 @@ function within<T>(p: Promise<T>, ms: number): Promise<T> {
   return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
 
-/** Events: 'acquired' (epoch), 'lost' (). */
+/** Events: 'acquired' (epoch), 'lost' (LostReason). */
 export class LeaseManager extends EventEmitter {
   private _state: LeaseState = 'standby';
   private _epoch = 0;
@@ -140,16 +142,16 @@ export class LeaseManager extends EventEmitter {
         this.emit('acquired', epoch);
         return;
       }
-      if (m >= this.deadline) return this.lose();
+      if (m >= this.deadline) return this.lose('unreachable');
       if (await within(store.renew(holder, this._epoch, t, this.ttlMs), this.deadline - m)) {
         if (this._state === 'holder' && !this.stopped) this.extend(m);
         return;
       }
-      this.lose();
+      this.lose('superseded');
     } catch (err) {
       this.opts.onError?.(err as Error);
       // A timeout was sized to the remaining validity; timers may fire just short of it.
-      if (this._state === 'holder' && (err instanceof StoreTimeout || this.mono() >= this.deadline)) this.lose();
+      if (this._state === 'holder' && (err instanceof StoreTimeout || this.mono() >= this.deadline)) this.lose('unreachable');
     }
   }
 
@@ -163,22 +165,22 @@ export class LeaseManager extends EventEmitter {
     this.deadlineTimer = setTimeout(() => {
       this.deadlineTimer = null;
       if (this._state !== 'holder' || this.stopped) return;
-      if (this.mono() >= this.deadline) this.lose();
+      if (this.mono() >= this.deadline) this.lose('unreachable');
       else this.armDeadline();
     }, Math.max(0, this.deadline - this.mono()));
     this.deadlineTimer.unref();
   }
 
   /** A fenced write found the lease row moved on: give up now, as a failed renew would. */
-  markLost(): void {
-    this.lose();
+  markLost(reason: LostReason = 'superseded'): void {
+    this.lose(reason);
   }
 
-  private lose(): void {
+  private lose(reason: LostReason): void {
     if (this._state !== 'holder') return;
     this._state = 'standby';
     this.halt();
-    this.emit('lost');
+    this.emit('lost', reason);
   }
 
   private halt(): void {

@@ -1,5 +1,7 @@
 // Postgres DDL for inbox.db's schema at INBOX_SCHEMA_VERSION 5.
 // Byte-order text, as SQLite compares it: sort order must not follow the server locale.
+import type { PgTrack } from '../pgMigrate.js';
+
 const T = 'TEXT COLLATE "C"';
 
 export const INBOX_PG_BASELINE_VERSION = 5;
@@ -157,3 +159,5 @@ CREATE TABLE proposals (
 );
 CREATE INDEX proposals_status ON proposals (status, created_at);
 `;
+
+export const INBOX_PG_TRACK: PgTrack = { track: 'inbox', baselineVersion: INBOX_PG_BASELINE_VERSION, baseline: INBOX_PG_BASELINE, steps: [] };

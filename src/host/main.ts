@@ -9,11 +9,12 @@ import { loadHostConfig, readHostEnv, type HostConfig } from './config.js';
 import { createReloader, watchConfigDir } from './configReload.js';
 import { startCredHelper, type CredServer } from './credServer.js';
 import { brokerWatch, EventHub, pruneDeadOwners } from './events.js';
+import type { PgTrack } from '../main/store/pgMigrate.js';
 import { pgPoolConfig } from '../main/store/storeConfig.js';
 import { openHostDbRetrying, startDbHealth, type DbHealth, type HostDbHandle } from './hostDb.js';
 import { resolveWorkspaceId } from './hostState.js';
 import { startHolder, type Holder } from './holder.js';
-import { LeaseManager, memoryLeaseStore, type LeaseStore } from './lease.js';
+import { LEASE_RENEW_MS, LEASE_TTL_MS, LeaseManager, memoryLeaseStore, type LeaseStore, type LostReason } from './lease.js';
 import { postgresLeaseStore } from './pgLease.js';
 import { createLogger, type LogSink } from './log.js';
 import { brokerRpcChannels } from './rpc.js';
@@ -25,6 +26,17 @@ export const OWNER_PRUNE_MS = 60_000;
 export const FATAL_STOP_MS = 2_000;
 /** Bound on each of closing the holder's stores and the host pool on shutdown, inside the 30 s grace period. */
 export const STORE_CLOSE_MS = 5_000;
+/** EX_TEMPFAIL: the host DB is unreachable. fleet-host-entry restarts it without counting toward its crash-loop give-up. */
+export const EXIT_DB_UNAVAILABLE = 75;
+
+const PG_CONN_ERRNO = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE']);
+
+/** Connection-level failures (network, server shutdown, pool connect timeout), not SQL or code errors. */
+export function isDbUnavailable(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (typeof code === 'string' && (PG_CONN_ERRNO.has(code) || /^(08|57P0)/.test(code))) return true;
+  return /Connection terminated|timeout exceeded when trying to connect/i.test((err as Error | null)?.message ?? '');
+}
 
 export interface RunHostOptions {
   env?: NodeJS.ProcessEnv;
@@ -42,6 +54,8 @@ export interface RunHostOptions {
   brokerPollMs?: number;
   fatalStopMs?: number;
   storeCloseMs?: number;
+  /** Tests: more store migrations on the holder, run like the real ones. */
+  extraStoreTracks?: readonly PgTrack[];
   /** GitHub API base for the App credential helper (tests). */
   githubApiBase?: string;
 }
@@ -219,12 +233,14 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     }
     const id = await resolveWorkspaceId(env.stateDir, config.workspace.id);
     if (startAbort.signal.aborted) return;
+    const renewMs = opts.leaseRenewMs ?? LEASE_RENEW_MS;
+    const ttlMs = opts.leaseTtlMs ?? LEASE_TTL_MS;
     workspaceId = id;
     const m = new LeaseManager({
       holder: holderId,
-      store: opts.leaseStore ?? (hostDb ? postgresLeaseStore(hostDb.k, id) : memoryLeaseStore()),
-      renewMs: opts.leaseRenewMs,
-      ttlMs: opts.leaseTtlMs,
+      store: opts.leaseStore ?? (hostDb ? postgresLeaseStore(hostDb.k, id, { lockTimeoutMs: Math.floor((ttlMs - renewMs) / 2) }) : memoryLeaseStore()),
+      renewMs,
+      ttlMs,
       onError: (err) => log.log('warn', 'lease store error', { error: err.message })
     });
     leaseMgr = m;
@@ -232,24 +248,25 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     m.on('acquired', (epoch: number) => {
       log.log('info', 'lease acquired', { epoch, workspaceId: id });
       const db = config.db;
-      if (!db) return;
+      if (!db || startAbort.signal.aborted) return;
       holderP = startHolder({
         db,
         env: procEnv,
         workspaceId: id,
         holder: holderId,
         epoch: () => (m.state === 'holder' ? m.epoch : null),
-        onLost: () => m.markLost(),
-        log
+        onLost: () => m.markLost('superseded'),
+        log,
+        extraTracks: opts.extraStoreTracks
       }).catch((err: Error) => {
         log.log('error', 'holder start failed; giving up the lease', { error: err.message });
-        m.markLost();
+        m.markLost(isDbUnavailable(err) ? 'unreachable' : 'superseded');
         return null;
       });
     });
-    m.on('lost', () => {
-      log.log('error', 'lease lost; exiting');
-      void shutdown(1);
+    m.on('lost', (reason: LostReason) => {
+      log.log('error', 'lease lost; exiting', { reason });
+      void shutdown(reason === 'unreachable' ? EXIT_DB_UNAVAILABLE : 1);
     });
     m.start();
     if (config.db) await m.tick();

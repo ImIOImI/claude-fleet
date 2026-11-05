@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { sql, type Generated, type Kysely } from 'kysely';
-import { postgresKysely } from '../main/store/postgres.js';
+import { createPgPool, postgresKysely } from '../main/store/postgres.js';
 import { migratePostgres } from '../main/store/pgMigrate.js';
 import { isPg, pgMultiConnection, testPgSchema, type TestPg } from '../main/store/testStore.js';
 import { HOST_TRACK } from './hostSchema.js';
@@ -59,6 +59,75 @@ describe.skipIf(!isPg)('postgresLeaseStore + leaseFence', () => {
     expect(lost).toHaveLength(3);
     expect((await q(`SELECT count(*)::int AS n FROM $S.w`)).rows[0].n).toBe(1);
   });
+
+  it('calls onLost once per fence, and keeps refusing after', async () => {
+    const s = await setup();
+    const e = (await s.tryAcquire('a', 0, 30_000))!;
+    const lost: Error[] = [];
+    const k = fenced('b', () => e, lost);
+    await expect(k.insertInto('w').values({ epoch: e }).execute()).rejects.toBeInstanceOf(LeaseLostError);
+    await expect(k.insertInto('w').values({ epoch: e }).execute()).rejects.toBeInstanceOf(LeaseLostError);
+    await expect(sql`select 1`.execute(k)).rejects.toBeInstanceOf(LeaseLostError);
+    expect(lost).toHaveLength(1);
+  });
+
+  it.skipIf(!pgMultiConnection)('lease statements give up on a held row lock after lockTimeoutMs instead of waiting', async () => {
+    const s0 = await setup();
+    const s = postgresLeaseStore(postgresKysely(t!.pool), WS, { lockTimeoutMs: 200 });
+    const e = (await s0.tryAcquire('a', 0, 30_000))!;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let inTx!: () => void;
+    const entered = new Promise<void>((r) => (inTx = r));
+    const tx = fenced('a', () => e).transaction().execute(async (trx) => {
+      await trx.insertInto('w').values({ epoch: e }).execute();
+      inTx();
+      await gate;
+    });
+    await entered;
+    const t0 = Date.now();
+    await expect(s.renew('a', e, 0, 30_000)).rejects.toThrow(/lock timeout/);
+    await expect(s.tryAcquire('a', 0, 30_000)).rejects.toThrow(/lock timeout/);
+    expect(Date.now() - t0).toBeLessThan(3_000);
+    release();
+    await tx;
+    expect(await s.renew('a', e, 0, 30_000)).toBe(true);
+  }, 30_000);
+
+  it.skipIf(!pgMultiConnection)('a holder left idle in a fenced transaction is rolled back, and a standby takes over within TTL + the idle timeout', async () => {
+    const s = await setup();
+    const ttl = 1_000;
+    const idle = 1_000;
+    const pool = createPgPool({ connectionString: process.env.PG_TEST_URL, schema: t!.schema, max: 1, session: { idleInTransactionMs: idle } });
+    pool.on('error', () => undefined);
+    try {
+      const e = (await s.tryAcquire('a', 0, ttl))!;
+      const ka = postgresKysely<T>(pool, { afterBeginWrite: leaseFence({ workspaceId: WS, holder: 'a', epoch: () => e, onLost: () => undefined }) });
+      let inTx!: () => void;
+      const entered = new Promise<void>((r) => (inTx = r));
+      // A partitioned holder: the transaction stays open, holding FOR SHARE, and never finishes.
+      const stuck = ka.transaction().execute(async (trx) => {
+        await trx.insertInto('w').values({ epoch: e }).execute();
+        inTx();
+        await new Promise(() => undefined);
+      });
+      void stuck.catch(() => undefined);
+      await entered;
+      const sb = postgresLeaseStore(postgresKysely(t!.pool), WS, { lockTimeoutMs: 200 });
+      const t0 = Date.now();
+      let got: number | null = null;
+      while (got === null && Date.now() - t0 < 10_000) {
+        got = await sb.tryAcquire('b', 0, 30_000).catch(() => null);
+        if (got === null) await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(got).toBe(e + 1);
+      expect(Date.now() - t0).toBeLessThan(ttl + idle + 1_500);
+      expect((await q(`SELECT count(*)::int AS n FROM $S.w`)).rows[0].n).toBe(0);
+    } finally {
+      // The stuck transaction's client is never released, so end() may not settle.
+      await Promise.race([pool.end().catch(() => undefined), new Promise((r) => setTimeout(r, 500))]);
+    }
+  }, 30_000);
 
   it.skipIf(!pgMultiConnection)('a takeover waits for an in-flight fenced write; the stale holder then fails', async () => {
     const s = await setup();

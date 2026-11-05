@@ -97,7 +97,7 @@ describe('parseHostConfig', () => {
     expect(() => parseHostConfig({ ...base, github: { ...app, keyFile: 'k' } })).toThrow(/github.keyFile must be an absolute path/);
   });
 
-  it('parses an optional db block as a Postgres store config (static secrets allowed: the config is a mounted secret)', () => {
+  it('parses an optional db block as a Postgres store config', () => {
     expect(parseHostConfig(base).db).toBeNull();
     const c = parseHostConfig({
       ...base,
@@ -110,7 +110,26 @@ describe('parseHostConfig', () => {
         password: { kind: 'aws-rds-iam', region: 'us-east-1' }, ssl: 'verify-full', caFile: '/etc/ssl/certs/rds-global-bundle.pem'
       }
     });
-    expect(parseHostConfig({ ...base, db: { connectionString: 'postgres://u:pw@localhost/fleet' } }).db?.connection).toEqual({ connectionString: 'postgres://u:pw@localhost/fleet' });
+    expect(parseHostConfig({ ...base, db: { connectionString: 'postgres://u@localhost/fleet' } }).db?.connection).toEqual({ connectionString: 'postgres://u@localhost/fleet' });
+    expect(parseHostConfig({ ...base, db: { env: 'FLEET_DB_URL' } }).db?.connection).toEqual({ env: 'FLEET_DB_URL' });
+    expect(parseHostConfig({
+      ...base, db: { host: 'db.internal', database: 'fleet', user: 'fleet_agent', password: { kind: 'env', name: 'FLEET_DB_PASSWORD' }, ssl: 'disable' }
+    }).db?.connection).toMatchObject({ password: { kind: 'env', name: 'FLEET_DB_PASSWORD' } });
+  });
+
+  it('refuses a static db password in any form: sessions can read the host config', () => {
+    const cases = [
+      { host: 'db.internal', database: 'fleet', user: 'fleet_agent', password: { kind: 'static', value: 'hunter2' }, ssl: 'disable' },
+      { connectionString: 'postgres://u:hunter2@localhost/fleet' },
+      { connectionString: 'postgres://u@localhost/fleet?password=hunter2' }
+    ];
+    for (const db of cases) {
+      let msg = '';
+      try { parseHostConfig({ ...base, db }); } catch (err) { msg = (err as Error).message; }
+      expect(msg).toMatch(/^db: .*(static|password).*"env" or "aws-rds-iam"/);
+      expect(msg).not.toContain('hunter2');
+      expect(msg).not.toContain('config.json');
+    }
   });
 
   it('refuses a db block with kind, an unknown key, or no connection', () => {

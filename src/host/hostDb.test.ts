@@ -4,7 +4,8 @@ import { randomBytes } from 'node:crypto';
 import { createServer, type AddressInfo } from 'node:net';
 import type { PostgresStoreConfig } from '../main/store/storeConfig.js';
 import { isPg } from '../main/store/testStore.js';
-import { openHostDb, openHostDbRetrying, startDbHealth, type HostDbHandle } from './hostDb.js';
+import { sql } from 'kysely';
+import { HOST_PG_SESSION, openHostDb, openHostDbRetrying, startDbHealth, type HostDbHandle } from './hostDb.js';
 import { createLogger } from './log.js';
 
 const quiet = createLogger(() => undefined);
@@ -82,6 +83,15 @@ describe.skipIf(!isPg)('openHostDb', () => {
     expect(v.rows).toEqual([{ version: '1' }]);
     const t = await admin(`SELECT table_name FROM information_schema.tables WHERE table_schema = '${schema}' AND table_name LIKE 'host_%' ORDER BY 1`);
     expect(t.rows.map((r) => r.table_name)).toEqual(['host_ingest_offsets', 'host_lease', 'host_meta']);
+  });
+
+  it('sets keepAlive and the host session timeouts on its connections', async () => {
+    await admin(`CREATE SCHEMA ${schema}`);
+    h = await openHostDb(cfg, { log: quiet });
+    expect(h.pool.options.keepAlive).toBe(true);
+    const show = async (n: string) => (await sql<Record<string, string>>`${sql.raw(`SHOW ${n}`)}`.execute(h!.k)).rows[0][n];
+    expect(await show('idle_in_transaction_session_timeout')).toBe(`${HOST_PG_SESSION.idleInTransactionMs / 1000}s`);
+    expect(await show('statement_timeout')).toBe(`${HOST_PG_SESSION.statementTimeoutMs / 1000}s`);
   });
 
   it('retries until the schema exists, logging each failure', async () => {

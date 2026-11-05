@@ -46,6 +46,16 @@ describe.skipIf(!isPg)('migratePostgres', () => {
     expect(await columns('a')).toEqual([]);
   });
 
+  it('is not capped by a session statement_timeout', async () => {
+    const pool = createPgPool({ connectionString: process.env.PG_TEST_URL, schema: t.schema, max: 1, session: { statementTimeoutMs: 100 } });
+    const kk = postgresKysely(pool);
+    await migratePostgres(kk, t.schema, { track: 'demo', baselineVersion: 1, baseline: 'SELECT pg_sleep(0.3); CREATE TABLE a (x BIGINT);', steps: [] });
+    expect(await version()).toBe(1);
+    await expect(sql`SELECT pg_sleep(0.3)`.execute(kk)).rejects.toThrow(/statement timeout/);
+    await kk.destroy();
+    await pool.end();
+  });
+
   it('refuses a schema that does not exist instead of creating tables elsewhere', async () => {
     const pool = createPgPool({ connectionString: process.env.PG_TEST_URL, schema: 'no_such_schema_x', max: 1 });
     const kk = postgresKysely(pool);

@@ -4,7 +4,7 @@
 import pg from 'pg';
 import {
   CompiledQuery, Kysely, PostgresDialect,
-  type DatabaseConnection, type Driver, type QueryResult, type TransactionSettings,
+  type DatabaseConnection, type Driver, type OperationNode, type QueryResult, type TransactionSettings, type WithNode,
 } from 'kysely';
 
 const INT8 = 20;
@@ -19,21 +19,39 @@ export const pgTypes = {
   },
 };
 
+export interface PgSessionSettings {
+  /** idle_in_transaction_session_timeout: the server ends a session (and its locks) left idle in a transaction. */
+  idleInTransactionMs?: number;
+  statementTimeoutMs?: number;
+}
+
 export interface PgPoolConfig extends Omit<pg.PoolConfig, 'types'> {
   /** Every store table lives here; it must already exist. */
   schema: string;
+  session?: PgSessionSettings;
 }
 
 const SCHEMA_NAME = /^[a-z_][a-z0-9_]*$/;
 const poolSchema = new WeakMap<pg.Pool, string>();
+const poolSession = new WeakMap<pg.Pool, string>();
 const inSchema = new WeakSet<pg.PoolClient>();
 
 export function createPgPool(cfg: PgPoolConfig): pg.Pool {
-  const { schema, ...rest } = cfg;
+  const { schema, session, ...rest } = cfg;
   if (!SCHEMA_NAME.test(schema)) throw new Error(`invalid store schema name: ${schema}`);
   const pool = new pg.Pool({ ...rest, types: pgTypes });
   poolSchema.set(pool, schema);
+  poolSession.set(pool, sessionSql(session));
   return pool;
+}
+
+function sessionSql(s: PgSessionSettings | undefined): string {
+  const ms = (n: number | undefined, name: string) => {
+    if (n === undefined) return '';
+    if (!Number.isSafeInteger(n) || n < 0) throw new Error(`invalid ${name}: ${n}`);
+    return `; SET ${name} = ${n}`;
+  };
+  return ms(s?.idleInTransactionMs, 'idle_in_transaction_session_timeout') + ms(s?.statementTimeoutMs, 'statement_timeout');
 }
 
 /** The schema a pool was created for. */
@@ -51,12 +69,14 @@ async function connectInSchema(pool: pg.Pool): Promise<pg.PoolClient> {
   if (!inSchema.has(client)) {
     const schema = poolSchema.get(pool);
     try {
-      if (schema) await client.query(`SET search_path TO ${schema}, public`);
+      if (schema) await client.query(`SET search_path TO ${schema}, public${poolSession.get(pool) ?? ''}`);
     } catch (e) {
       client.release(e as Error);
       throw e;
     }
     inSchema.add(client);
+    // pg leaves a checked-out client's 'error' (server ended the session) unhandled, which would crash the process.
+    client.on('error', (e) => pool.emit('error', e, client));
   }
   return client;
 }
@@ -80,6 +100,13 @@ export type WriteHook = (exec: (sqlText: string, params?: readonly unknown[]) =>
 // Raw `sql` statements count as writes: closeDb's `select 1` must queue behind
 // in-flight write transactions, as it did on the SQLite mutex.
 const WRITE_KINDS = new Set(['InsertQueryNode', 'UpdateQueryNode', 'DeleteQueryNode', 'MergeQueryNode', 'RawNode']);
+
+/** A SELECT whose WITH holds an INSERT/UPDATE/DELETE/MERGE (at any depth) writes too. */
+function isWrite(node: OperationNode): boolean {
+  if (WRITE_KINDS.has(node.kind)) return true;
+  const w = (node as { with?: WithNode }).with;
+  return !!w?.expressions.some((cte) => isWrite(cte.expression));
+}
 
 /** Postgres rejects a NUL (U+0000) anywhere in a text value outright
  *  ("invalid byte sequence for encoding UTF8: 0x00"), which would otherwise
@@ -129,7 +156,7 @@ class SerializingDriver implements Driver {
 
   private async execute<R>(conn: Conn, cq0: CompiledQuery): Promise<QueryResult<R>> {
     const cq = sanitizeNulParams(cq0);
-    if (conn.inTx || !WRITE_KINDS.has(cq.query.kind)) return (await this.innerOf(conn)).executeQuery<R>(cq);
+    if (conn.inTx || !isWrite(cq.query)) return (await this.innerOf(conn)).executeQuery<R>(cq);
     const unlock = await this.lock();
     try {
       const inner = await this.innerOf(conn);

@@ -21,7 +21,7 @@ while :; do sleep 0.05; done
 SH
 chmod +x "$tmp/broker"
 
-# FAKE_HOST_CRASHES: how many starts exit 1 at once ("all" = every start).
+# FAKE_HOST_CRASHES: how many starts exit at once ("all" = every start), with FAKE_HOST_EXIT (default 1).
 cat > "$tmp/host.mjs" <<'JS'
 import { appendFileSync, readFileSync } from 'node:fs';
 const ev = `${process.env.FAKE_DIR}/events`;
@@ -30,7 +30,7 @@ note('host-start');
 appendFileSync(`${process.env.FAKE_DIR}/pids`, `${process.pid}\n`);
 const starts = readFileSync(ev, 'utf8').split('\n').filter((l) => l === 'host-start').length;
 const crashes = process.env.FAKE_HOST_CRASHES ?? '0';
-if (crashes === 'all' || starts <= Number(crashes)) process.exit(1);
+if (crashes === 'all' || starts <= Number(crashes)) process.exit(Number(process.env.FAKE_HOST_EXIT ?? 1));
 process.on('SIGTERM', () => { note('host-term'); process.exit(0); });
 process.on('SIGHUP', () => note('host-hup'));
 setInterval(() => undefined, 1000);
@@ -142,5 +142,15 @@ finish
 kill "$squatter" 2>/dev/null; wait "$squatter" 2>/dev/null
 assert "$st" "1" "port taken (IPv6) at first start exits non-zero"
 assert "$(count host-start)" "0" "fleet-host never started on a taken port"
+
+# 10. Exit 75 (host DB unavailable) restarts with backoff but never counts toward the crash-loop give-up.
+run tempfail FAKE_HOST_CRASHES=all FAKE_HOST_EXIT=75 FLEET_HOST_MAX_RESTARTS=2
+until_count host-start 6
+kill -0 "$pid" 2>/dev/null; assert "$?" "0" "entry still running after repeated exit 75"
+grep -q 'crash-looping' "$dir/log"; assert "$?" "1" "exit 75 never triggers the give-up"
+grep -q '"msg":"fleet-host-entry: fleet-host exited (db unavailable); restarting"' "$dir/log"; assert "$?" "0" "db-unavailable restart logged"
+grep -q '"delayMs":80' "$dir/log"; assert "$?" "0" "exit 75 restarts back off"
+kill -TERM "$pid"; finish
+assert "$st" "0" "SIGTERM exits 0 after exit-75 restarts"
 
 [ "$fails" -eq 0 ] && echo "ALL PASS" || exit 1

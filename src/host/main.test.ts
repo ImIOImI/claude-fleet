@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import WebSocket from 'ws';
 import { IdentityError, type IdentityProvider } from '../main/identity/types.js';
 import { memoryLeaseStore, type LeaseStore } from './lease.js';
-import { runHost, type RunHostOptions } from './main.js';
+import { isDbUnavailable, runHost, type RunHostOptions } from './main.js';
 import { fakeBroker, person, TOKEN } from './testFakes.js';
 
 const ID_A = '01JC0000000000000000000000';
@@ -340,5 +340,17 @@ describe('runHost with db: listen first', () => {
       env: { FLEET_HOST_PORT: String(await freePort()), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock') },
       exit: vi.fn(), proc: new EventEmitter(), logSink: () => undefined, authFactory: () => ({ id: 'github', verify }), brokerOps: fakeBroker([]).ops
     })).rejects.toThrow(/FLEET_DB_UNSET is not set/);
+  });
+});
+
+describe('isDbUnavailable', () => {
+  it('is true for connection-level failures only', () => {
+    const e = (code: string, message = 'x') => Object.assign(new Error(message), { code });
+    for (const err of [e('ECONNREFUSED'), e('ETIMEDOUT'), e('08006'), e('57P01'), new Error('Connection terminated unexpectedly'), new Error('timeout exceeded when trying to connect')]) {
+      expect(isDbUnavailable(err)).toBe(true);
+    }
+    for (const err of [e('42P01'), e('28P01'), new Error('pgvector is not installed'), new TypeError('x is undefined'), null]) {
+      expect(isDbUnavailable(err)).toBe(false);
+    }
   });
 });
