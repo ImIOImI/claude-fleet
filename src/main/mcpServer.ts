@@ -1738,8 +1738,8 @@ export const TOOLS: Tool[] = [
       'Record one durable piece of fleet knowledge: a decision, root cause, non-obvious fact, gotcha, or a rejected option with its reason. ' +
       'Args: text (required, <=600 chars, self-contained), kind (required: decision|fact|gotcha|root-cause|rejected), ' +
       'topics (required, 1-3 slugs like "mcp-query"), refs (optional issue/PR/file strings), visibility ("fleet" default | "private"), ' +
-      'supersedes (optional claim id this replaces), capture_run (only when a capture prompt gives you one). ' +
-      'Near-duplicates are merged. Never include secrets. Returns { id, deduped, suggestedTopics }.',
+      'supersedes (optional claim id this replaces; a fleet claim can only be superseded by a fleet claim), capture_run (only when a capture prompt gives you one). ' +
+      'Near-duplicates of the same kind and visibility are merged. Never include secrets. Returns { id, deduped, suggestedTopics }.',
     inputSchema: {
       type: 'object',
       properties: {

@@ -21,7 +21,10 @@ function toRecord(r: ClaimRow): ClaimRecord {
 export class ClaimStore {
   constructor(private readonly db: Kysely<InboxDb>) {}
 
-  async insert(c: NewClaim, vec: Buffer | null, modelId: string, src: ClaimSourceInput): Promise<void> {
+  /** Insert a claim with its FTS row, vector and first source. With
+   *  `supersedes`, the target is marked superseded in the SAME transaction —
+   *  if it is no longer current the whole insert rolls back. */
+  async insert(c: NewClaim, vec: Buffer | null, modelId: string, src: ClaimSourceInput, opts: { supersedes?: string | null } = {}): Promise<void> {
     await this.db.transaction().execute(async (trx) => {
       await trx.insertInto('claims').values({
         id: c.id, text: c.text, kind: c.kind, topics: JSON.stringify(c.topics),
@@ -34,6 +37,12 @@ export class ClaimStore {
         claim_id: c.id, workspace_id: src.workspaceId, session_id: src.sessionId, via: src.via,
         capture_run: src.captureRun, ts: c.now
       }).execute();
+      // Last, so a vanished or no-longer-current target rolls back everything above.
+      if (opts.supersedes) {
+        const r = await trx.updateTable('claims').set({ status: 'superseded', superseded_by: c.id, updated_at: c.now })
+          .where('id', '=', opts.supersedes).where('status', '=', 'current').executeTakeFirst();
+        if (Number(r.numUpdatedRows) !== 1) throw new Error('cannot supersede: the target claim is no longer current');
+      }
     });
   }
 

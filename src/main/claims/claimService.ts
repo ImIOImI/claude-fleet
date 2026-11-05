@@ -43,15 +43,25 @@ export class ClaimService {
     }
     const vec = await this.embedOne(input.text);
     const visible = await this.d.claims.visible(callerId, EMBED_MODEL_ID, false);
-    if (input.supersedes && !visible.some((v) => v.claim.id === input.supersedes)) {
-      throw new Error('supersedes must name a current claim you can see');
+    if (input.supersedes) {
+      const target = visible.find((v) => v.claim.id === input.supersedes)?.claim;
+      if (!target) throw new Error('supersedes must name a current claim you can see');
+      // A supersede hides the target from search, so a private replacement
+      // would hide a fleet claim from every other workspace.
+      if (target.visibility === 'fleet' && input.visibility !== 'fleet') {
+        throw new Error('a fleet claim can only be superseded by a fleet claim (visibility "fleet")');
+      }
     }
     const scored = vec
       ? visible.filter((v) => v.vec).map((v) => ({ v, score: dot(vec, decodeVector(v.vec as Buffer)) })).sort((a, b) => b.score - a.score)
       : [];
     const suggested = suggestTopics(scored.slice(0, 5).map((s) => s.v.claim), input.topics);
     const now = this.now();
-    const dup = input.supersedes ? undefined : scored.find((s) => s.score >= DEDUPE_COSINE && s.v.claim.kind === input.kind);
+    // Merge only within the same visibility: a private record must never add a
+    // source to (or confirm) a fleet claim, nor a fleet record vanish into a
+    // private one.
+    const dup = input.supersedes ? undefined : scored.find((s) =>
+      s.score >= DEDUPE_COSINE && s.v.claim.kind === input.kind && s.v.claim.visibility === input.visibility);
     if (dup) {
       await this.d.claims.confirm(dup.v.claim.id, source, now);
       if (source.captureRun) await this.d.runs.incrementClaims(source.captureRun);
@@ -60,9 +70,8 @@ export class ClaimService {
     const id = newId(now);
     await this.d.claims.insert(
       { id, text: input.text, kind: input.kind, topics: input.topics, refs: input.refs, visibility: input.visibility, workspaceId: callerId, now },
-      vec ? encodeVector(vec) : null, EMBED_MODEL_ID, source
+      vec ? encodeVector(vec) : null, EMBED_MODEL_ID, source, { supersedes: input.supersedes }
     );
-    if (input.supersedes) await this.d.claims.supersede(input.supersedes, id, now);
     if (source.captureRun) await this.d.runs.incrementClaims(source.captureRun);
     return { id, deduped: false, suggestedTopics: suggested };
   }

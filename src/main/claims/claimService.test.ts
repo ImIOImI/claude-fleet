@@ -50,6 +50,43 @@ describe('ClaimService.record', () => {
     const hits = await svc.search('wsA', { query: 'snapshot', include_superseded: true });
     expect(hits.results.find((h) => h.id === a.id)).toMatchObject({ status: 'superseded', supersededBy: b.id });
   });
+  it('refuses to hide a fleet claim behind a private replacement, and leaves the target current', async () => {
+    const a = await svc.record('wsA', { ...base, text: 'snapshot copies history' });
+    await expect(svc.record('wsB', { ...base, text: 'snapshot is fine actually', visibility: 'private', supersedes: a.id }))
+      .rejects.toThrow(/fleet claim.*fleet/);
+    expect((await svc.search('wsB', { query: 'snapshot' })).results.find((h) => h.id === a.id)?.status).toBe('current');
+    // A private capture run forces private, so it can't supersede a fleet claim either.
+    const run = await runs.start({ workspaceId: 'wsB', sessionId: 'l', forkSessionId: 'f', trigger: 'ctx-85', visibility: 'private', now: 1 });
+    await expect(svc.record('wsB', { ...base, text: 'other view', supersedes: a.id, capture_run: run })).rejects.toThrow(/fleet/);
+    // Private → fleet (raising visibility) and private → private are fine.
+    const p = await svc.record('wsA', { ...base, kind: 'gotcha', text: 'private note', visibility: 'private' });
+    const q = await svc.record('wsA', { ...base, kind: 'gotcha', text: 'published note', supersedes: p.id });
+    expect((await svc.search('wsA', { query: 'note', include_superseded: true })).results.find((h) => h.id === p.id))
+      .toMatchObject({ status: 'superseded', supersededBy: q.id });
+  });
+  it('rolls back the new claim when the supersede fails (insert + supersede are one transaction)', async () => {
+    const a = await svc.record('wsA', { ...base, text: 'snapshot copies history' });
+    const store = new ClaimStore(inbox.kysely);
+    const boom = Object.assign(Object.create(store) as ClaimStore, {
+      visible: store.visible.bind(store),
+      insert: (...args: Parameters<ClaimStore['insert']>) => store.insert(args[0], args[1], args[2], args[3], { ...args[4]!, supersedes: 'no-such-claim' })
+    });
+    const s2 = new ClaimService({ claims: boom, runs, embed: fakeEmbed, workspaceName: async () => null, now: () => ++t });
+    await expect(s2.record('wsA', { ...base, text: 'replacement claim', supersedes: a.id })).rejects.toThrow(/supersede/);
+    expect((await svc.search('wsA', { query: 'replacement', include_superseded: true })).results.map((h) => h.text)).toEqual(['snapshot copies history']);
+    expect((await svc.search('wsA', { query: 'snapshot' })).results.find((h) => h.id === a.id)?.status).toBe('current');
+  });
+  it('never merges a near-duplicate across visibilities', async () => {
+    const fleet = await svc.record('wsA', { ...base, text: 'snapshot copies history' });
+    const priv = await svc.record('wsA', { ...base, text: 'snapshot copies everything', visibility: 'private' });
+    expect(priv.deduped).toBe(false);
+    expect(priv.id).not.toBe(fleet.id);
+    const hit = (await svc.search('wsA', { query: 'snapshot' })).results.find((h) => h.id === fleet.id);
+    expect(hit?.sources).toHaveLength(1);
+    expect(hit?.confirmations).toBe(1);
+    // Same visibility still merges.
+    expect(await svc.record('wsA', { ...base, text: 'snapshot copies all', visibility: 'private' })).toMatchObject({ id: priv.id, deduped: true });
+  });
   it('refuses to supersede another workspace\'s private claim', async () => {
     const a = await svc.record('wsB', { ...base, text: 'private thing', visibility: 'private' });
     await expect(svc.record('wsA', { ...base, text: 'other thing', supersedes: a.id })).rejects.toThrow(/supersedes/);
