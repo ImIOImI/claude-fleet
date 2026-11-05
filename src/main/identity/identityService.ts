@@ -379,6 +379,11 @@ export class IdentityService {
     await this.clear();
   }
 
+  /** For RemoteClient: the signed-in token, attached to fleet-host requests. Main process only. */
+  async bearerToken(): Promise<string | null> {
+    return (await this.settled())?.token ?? null;
+  }
+
   /** For loadoutSources.setGithubTokenProvider: the token, only if it can pull
    *  from GHCR. Main process only. */
   async packagesToken(): Promise<string | null> {

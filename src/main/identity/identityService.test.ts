@@ -248,6 +248,15 @@ describe('IdentityService refresh, sign-out and the packages token', () => {
 
     expect(await setup().svc.packagesToken()).toBeNull();
   });
+
+  it('offers the bearer token for remote hosts whatever its scopes, and none once signed out', async () => {
+    const s = setup({ polls: [{ status: 'done', token: TOKEN, scopes: ['read:org'] }], probe: { ...PROBE, scopes: ['read:org'] } });
+    expect(await s.svc.bearerToken()).toBeNull();
+    await signIn(s);
+    expect(await s.svc.bearerToken()).toBe(TOKEN);
+    await s.svc.signOut();
+    expect(await s.svc.bearerToken()).toBeNull();
+  });
 });
 
 describe('toAccountSso', () => {
