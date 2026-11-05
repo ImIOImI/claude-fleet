@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HostConfigError, loadHostConfig, parseHostConfig, readHostEnv } from './config.js';
 
@@ -64,6 +64,79 @@ describe('parseHostConfig', () => {
     expect(() => parseHostConfig(raw)).toThrow(HostConfigError);
     expect(() => parseHostConfig(raw)).toThrow(msg);
   });
+
+  it('parses an optional github block: the App, a repositories allowlist and default permissions', () => {
+    expect(parseHostConfig(base).github).toBeNull();
+    const c = parseHostConfig({
+      ...base,
+      github: {
+        appId: 5612251,
+        installationId: '178595648',
+        keyFile: '/var/run/secrets/github-app/key.pem',
+        repositories: ['fleet-reviews', 'Fleet-Expertise'],
+        permissions: { contents: 'write', pull_requests: 'write' }
+      }
+    });
+    expect(c.github).toEqual({
+      app: { appId: '5612251', installationId: '178595648', keyFile: '/var/run/secrets/github-app/key.pem' },
+      repositories: ['fleet-expertise', 'fleet-reviews'],
+      permissions: { contents: 'write', pull_requests: 'write' }
+    });
+    expect(parseHostConfig({ ...base, github: {} }).github).toEqual({ app: null, repositories: null, permissions: null });
+  });
+
+  it('refuses a malformed github block', () => {
+    const app = { appId: 1, installationId: 2, keyFile: '/k' };
+    expect(() => parseHostConfig({ ...base, github: { repositories: [] } })).toThrow(/github.repositories/);
+    expect(() => parseHostConfig({ ...base, github: { repositories: ['SumerSports/x'] } })).toThrow(/github.repositories/);
+    expect(() => parseHostConfig({ ...base, github: { permissions: { contents: 'admin' } } })).toThrow(/github.permissions/);
+    expect(() => parseHostConfig({ ...base, github: { repos: ['x'] } })).toThrow(/unknown key repos/);
+    expect(() => parseHostConfig({ ...base, github: { appId: 1 } })).toThrow(/set together/);
+    expect(() => parseHostConfig({ ...base, github: { ...app, appId: 'x' } })).toThrow(/github.appId must be a positive integer/);
+    expect(() => parseHostConfig({ ...base, github: { ...app, installationId: 1.5 } })).toThrow(/github.installationId must be a positive integer/);
+    expect(() => parseHostConfig({ ...base, github: { ...app, keyFile: 'k' } })).toThrow(/github.keyFile must be an absolute path/);
+  });
+
+  it('parses an optional db block as a Postgres store config', () => {
+    expect(parseHostConfig(base).db).toBeNull();
+    const c = parseHostConfig({
+      ...base,
+      db: { host: 'fleet.cluster-abc.us-east-1.rds.amazonaws.com', database: 'fleet', user: 'fleet_agent', password: { kind: 'aws-rds-iam', region: 'us-east-1' }, caFile: '/etc/ssl/certs/rds-global-bundle.pem' }
+    });
+    expect(c.db).toEqual({
+      kind: 'postgres', schema: 'fleet', poolMax: 4,
+      connection: {
+        host: 'fleet.cluster-abc.us-east-1.rds.amazonaws.com', port: 5432, database: 'fleet', user: 'fleet_agent',
+        password: { kind: 'aws-rds-iam', region: 'us-east-1' }, ssl: 'verify-full', caFile: '/etc/ssl/certs/rds-global-bundle.pem'
+      }
+    });
+    expect(parseHostConfig({ ...base, db: { connectionString: 'postgres://u@localhost/fleet' } }).db?.connection).toEqual({ connectionString: 'postgres://u@localhost/fleet' });
+    expect(parseHostConfig({ ...base, db: { env: 'FLEET_DB_URL' } }).db?.connection).toEqual({ env: 'FLEET_DB_URL' });
+    expect(parseHostConfig({
+      ...base, db: { host: 'db.internal', database: 'fleet', user: 'fleet_agent', password: { kind: 'env', name: 'FLEET_DB_PASSWORD' }, ssl: 'disable' }
+    }).db?.connection).toMatchObject({ password: { kind: 'env', name: 'FLEET_DB_PASSWORD' } });
+  });
+
+  it('refuses a static db password in any form: sessions can read the host config', () => {
+    const cases = [
+      { host: 'db.internal', database: 'fleet', user: 'fleet_agent', password: { kind: 'static', value: 'hunter2' }, ssl: 'disable' },
+      { connectionString: 'postgres://u:hunter2@localhost/fleet' },
+      { connectionString: 'postgres://u@localhost/fleet?password=hunter2' }
+    ];
+    for (const db of cases) {
+      let msg = '';
+      try { parseHostConfig({ ...base, db }); } catch (err) { msg = (err as Error).message; }
+      expect(msg).toMatch(/^db: .*(static|password).*"env" or "aws-rds-iam"/);
+      expect(msg).not.toContain('hunter2');
+      expect(msg).not.toContain('config.json');
+    }
+  });
+
+  it('refuses a db block with kind, an unknown key, or no connection', () => {
+    expect(() => parseHostConfig({ ...base, db: { kind: 'postgres', connectionString: 'postgres://x' } })).toThrow(/db has unknown key kind/);
+    expect(() => parseHostConfig({ ...base, db: { connectionString: 'postgres://x', name: 'fleet' } })).toThrow(/db: unknown key "name"/);
+    expect(() => parseHostConfig({ ...base, db: {} })).toThrow(/db: needs exactly one of/);
+  });
 });
 
 describe('loadHostConfig', () => {
@@ -89,6 +162,8 @@ describe('readHostEnv', () => {
       port: 8080,
       configPath: '/etc/fleet-host/config.yaml',
       stateDir: '/home/fleet/.claude/fleet-host',
+      credSocket: '/run/fleet-host/cred.sock',
+      projectsDir: join(homedir(), '.claude', 'projects'),
       brokerSocket: '/run/broker/broker.sock'
     });
   });

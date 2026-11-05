@@ -40,6 +40,7 @@ export const REQUEST_TIMEOUT_MS = 30_000;
 export const KEEP_ALIVE_TIMEOUT_MS = 65_000;
 export const HUB_SHUTDOWN_MS = 5_000;
 export const HEADERS_TIMEOUT_MS = 10_000;
+export const STARTING_RETRY_AFTER_SEC = 5;
 
 export interface VerifyLimits {
   maxInFlight?: number;
@@ -53,6 +54,10 @@ export interface HostServerDeps {
   auth(): AuthContext;
   lease(): LeaseState;
   healthy(): boolean;
+  /** Absent: no host store. */
+  db?(): 'ok' | 'down' | 'connecting' | 'none';
+  /** True until the host store is open and the lease resolved: unready, and authenticated routes answer 503. */
+  starting?(): boolean;
   hub: AttachHub;
   events: EventHub;
   rpc: RpcRegistry;
@@ -204,6 +209,7 @@ export function createHostServer(deps: HostServerDeps): HostServer {
   // can't lock out users whose tokens are already known.
   async function gate(req: IncomingMessage, ctx: AuthContext): Promise<GateResult> {
     if (halted) return { ok: false, status: 503, error: 'shutting down' };
+    if (deps.starting?.()) return { ok: false, status: 503, error: 'host starting', retryAfterSec: STARTING_RETRY_AFTER_SEC };
     if (deps.lease() !== 'holder') return { ok: false, status: 503, error: 'standby' };
     const header = req.headers.authorization;
     const token = bearerToken(header);
@@ -282,7 +288,10 @@ export function createHostServer(deps: HostServerDeps): HostServer {
   async function handle(req: IncomingMessage, res: ServerResponse, path: string): Promise<string | null> {
     if (path === '/healthz' || path === '/leader') {
       if (req.method !== 'GET') sendJson(res, 405, { error: 'method not allowed' });
-      else if (path === '/healthz') sendJson(res, deps.healthy() ? 200 : 503, { status: deps.healthy() ? 'ok' : 'unhealthy', lease: deps.lease() });
+      else if (path === '/healthz') {
+        const status = deps.starting?.() ? 'starting' : deps.healthy() ? 'ok' : 'unhealthy';
+        sendJson(res, status === 'ok' ? 200 : 503, { status, lease: deps.lease(), db: deps.db?.() ?? 'none' });
+      }
       else sendJson(res, deps.lease() === 'holder' ? 200 : 503, { lease: deps.lease() });
       return null;
     }

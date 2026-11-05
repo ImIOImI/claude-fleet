@@ -13,7 +13,7 @@ import { chunked, num, sqliteKysely } from '../store/kysely.js';
 import type pg from 'pg';
 import { postgresKysely, schemaOf, type PostgresKyselyOptions } from '../store/postgres.js';
 import { migratePostgres } from '../store/pgMigrate.js';
-import { INBOX_PG_BASELINE, INBOX_PG_BASELINE_VERSION } from '../store/migrations/inboxPg.js';
+import { INBOX_PG_TRACK } from '../store/migrations/inboxPg.js';
 import type { InboxDb, TodoRow } from '../store/inboxSchema.js';
 
 export const INBOX_SCHEMA_VERSION = 5;
@@ -209,12 +209,11 @@ export class InboxStore {
   private constructor(private readonly raw: Database.Database | null, readonly kysely: Kysely<InboxDb>) {}
 
   /** The inbox tables on a Postgres store pool. No file
-   *  backup: the migration is one transaction, and the database is the operator's. */
-  static async openPostgres(pool: pg.Pool, opts: PostgresKyselyOptions = {}): Promise<InboxStore> {
+   *  backup: the migration is one transaction, and the database is the operator's.
+   *  `migrate: false`: the caller already ran migratePgStores (fleet-host migrates unfenced). */
+  static async openPostgres(pool: pg.Pool, opts: PostgresKyselyOptions & { migrate?: boolean } = {}): Promise<InboxStore> {
     const k = postgresKysely<InboxDb>(pool, opts);
-    await migratePostgres(k, schemaOf(pool), {
-      track: 'inbox', baselineVersion: INBOX_PG_BASELINE_VERSION, baseline: INBOX_PG_BASELINE, steps: [],
-    });
+    if (opts.migrate !== false) await migratePostgres(k, schemaOf(pool), INBOX_PG_TRACK);
     return new InboxStore(null, k);
   }
 

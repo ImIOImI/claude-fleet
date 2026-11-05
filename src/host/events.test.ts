@@ -17,6 +17,28 @@ describe('EventHub', () => {
     expect(b).toHaveLength(1);
   });
 
+  it('redacts secrets from every frame, keeping it valid JSON', () => {
+    const hub = new EventHub();
+    const got: string[] = [];
+    hub.add({ send: (t) => got.push(t) });
+    const token = 'ghs_' + 'A1b2C3d4E5'.repeat(3) + 'abcdef';
+    hub.publish('sessions:changed', { sessions: [{ id: 's1', title: `ran gh auth token: ${token}` }] });
+    expect(got[0]).not.toContain(token);
+    expect(JSON.parse(got[0]).payload.sessions[0].title).toBe('ran gh auth token: [redacted]');
+  });
+
+  it.each(['\n', '\t', '\u001b[0m', '\u001b]8;;x\u0007'])('redacts a token or Bearer value after %j in a payload string', (prefix) => {
+    const hub = new EventHub();
+    const got: string[] = [];
+    hub.add({ send: (t) => got.push(t) });
+    const token = 'ghs_' + 'A1b2C3d4E5'.repeat(3) + 'abcdef';
+    hub.publish('sessions:changed', { sessions: [{ title: `done${prefix}${token}`, cmd: `hdr${prefix}Bearer abcDEF123.xyz-TOKEN` }] });
+    expect(got[0]).not.toContain(token);
+    expect(got[0]).not.toContain('abcDEF123.xyz-TOKEN');
+    const s = JSON.parse(got[0]).payload.sessions[0];
+    expect(s).toEqual({ title: `done${prefix}[redacted]`, cmd: `hdr${prefix}[redacted]` });
+  });
+
   it('refuses an unknown channel', () => {
     expect(() => new EventHub().publish('vault:get', {})).toThrow(/unknown event channel/);
   });

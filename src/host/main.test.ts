@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import WebSocket from 'ws';
 import { IdentityError, type IdentityProvider } from '../main/identity/types.js';
 import { memoryLeaseStore, type LeaseStore } from './lease.js';
-import { runHost, type RunHostOptions } from './main.js';
+import { isDbUnavailable, runHost, type RunHostOptions } from './main.js';
 import { fakeBroker, person, TOKEN } from './testFakes.js';
 
 const ID_A = '01JC0000000000000000000000';
@@ -89,6 +89,36 @@ function openEvents(r: Rig): Promise<WebSocket> {
 const msgs = (r: Rig) => r.logs.map((l) => JSON.parse(l) as { msg: string; [k: string]: unknown });
 
 describe('runHost', () => {
+  it('serves App tokens on the credential socket when github.appId, installationId and keyFile are set', async () => {
+    const { startFakeGithubApp } = await import('./testGithubApp.js');
+    const { requestToken } = await import('./credCli.js');
+    const gh = await startFakeGithubApp({ appId: '9', installationId: '8', account: 'acme', repos: ['a', 'b'] });
+    const dir = mkdtempSync(join(tmpdir(), 'fh-cred-'));
+    writeFileSync(join(dir, 'key.pem'), gh.privatePem, { mode: 0o400 });
+    const sock = join(dir, 'run', 'cred.sock');
+    const port = await freePort();
+    const cfgPath = join(dir, 'config.yaml');
+    writeFileSync(cfgPath, CONFIG + `github: { appId: 9, installationId: 8, keyFile: ${join(dir, 'key.pem')}, repositories: [a] }\n`);
+    const logs: string[] = [];
+    const host = await runHost({
+      env: {
+        FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'),
+        FLEET_HOST_CRED_SOCKET: sock
+      },
+      exit: vi.fn(), proc: new EventEmitter(), logSink: (l) => logs.push(l), authFactory: () => ({ id: 'github', verify }),
+      brokerOps: fakeBroker([]).ops, githubApiBase: gh.url
+    });
+    try {
+      const token = await requestToken(sock, { repositories: ['a'] });
+      expect(token).toMatch(/^ghs_fake/);
+      await expect(requestToken(sock, { repositories: ['b'] })).rejects.toThrow(/403/);
+      expect(logs.join('\n')).not.toContain(token);
+    } finally {
+      await host.shutdown(0);
+      await gh.close();
+    }
+  });
+
   it('serves the configured workspace id after one start load', async () => {
     const r = await start();
     expect(await whoami(r)).toMatchObject({ status: 200, body: { workspace: { id: ID_A, name: 'smoke' } } });
@@ -268,5 +298,59 @@ describe('broker polling', () => {
     await new Promise((res) => setTimeout(res, 100));
     expect(calls).toBe(1);
     ws.close();
+  });
+});
+
+describe('runHost with db: listen first', () => {
+  it('accepts at once while the db is unreachable: /healthz 503 connecting, routes 503 host starting; SIGTERM still exits promptly', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fh-main-'));
+    const cfgPath = join(dir, 'config.yaml');
+    const dead = await freePort();
+    writeFileSync(cfgPath, `${CONFIG}db: { connectionString: "postgres://u@127.0.0.1:${dead}/fleet" }\n`);
+    const port = await freePort();
+    const proc = new EventEmitter();
+    const exit = vi.fn();
+    const logs: string[] = [];
+    const host = await runHost({
+      env: { FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock') },
+      exit, proc, logSink: (l) => logs.push(l), authFactory: () => ({ id: 'github', verify }), brokerOps: fakeBroker([]).ops
+    });
+    const url = `http://127.0.0.1:${port}`;
+    const h = await fetch(`${url}/healthz`);
+    expect(h.status).toBe(503);
+    expect(await h.json()).toEqual({ status: 'starting', lease: 'standby', db: 'connecting' });
+    const w = await fetch(`${url}/whoami`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    expect(w.status).toBe(503);
+    expect(w.headers.get('retry-after')).toBe('5');
+    expect(await w.json()).toEqual({ error: 'host starting' });
+    await vi.waitFor(() => expect(logs.join('\n')).toMatch(/host db unavailable; retrying/));
+    const t0 = Date.now();
+    proc.emit('SIGTERM');
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
+    expect(Date.now() - t0).toBeLessThan(3_000);
+    expect(host.server.listening).toBe(false);
+    expect(logs.join('\n')).not.toMatch(/lease acquired/);
+  });
+
+  it('an invalid db block still fails at start, before listening', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fh-main-'));
+    const cfgPath = join(dir, 'config.yaml');
+    writeFileSync(cfgPath, `${CONFIG}db: { env: FLEET_DB_UNSET }\n`);
+    await expect(runHost({
+      env: { FLEET_HOST_PORT: String(await freePort()), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock') },
+      exit: vi.fn(), proc: new EventEmitter(), logSink: () => undefined, authFactory: () => ({ id: 'github', verify }), brokerOps: fakeBroker([]).ops
+    })).rejects.toThrow(/FLEET_DB_UNSET is not set/);
+  });
+});
+
+describe('isDbUnavailable', () => {
+  it('is true for connection-level failures only', () => {
+    const e = (code: string, message = 'x') => Object.assign(new Error(message), { code });
+    for (const err of [e('ECONNREFUSED'), e('ETIMEDOUT'), e('08006'), e('57P01'), new Error('Connection terminated unexpectedly'), new Error('timeout exceeded when trying to connect')]) {
+      expect(isDbUnavailable(err)).toBe(true);
+    }
+    for (const err of [e('42P01'), e('28P01'), new Error('pgvector is not installed'), new TypeError('x is undefined'), null]) {
+      expect(isDbUnavailable(err)).toBe(false);
+    }
   });
 });

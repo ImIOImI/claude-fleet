@@ -23,6 +23,8 @@ export async function migratePostgres<DB>(k: Kysely<DB>, schema: string, t: PgTr
     throw new Error(`the store schema "${schema}" does not exist: create it (and grant this role CREATE on it) before first start`);
   }
   await k.transaction().execute(async (trx) => {
+    // A session statement_timeout (fleet-host) must not cut a migration short.
+    await sql`SET LOCAL statement_timeout = 0`.execute(trx);
     await sql`SELECT pg_advisory_xact_lock(${MIGRATE_LOCK})`.execute(trx);
     await sql`CREATE TABLE IF NOT EXISTS schema_migrations (track TEXT PRIMARY KEY, version BIGINT NOT NULL)`.execute(trx);
     const row = await sql<{ version: number }>`SELECT version FROM schema_migrations WHERE track = ${t.track}`.execute(trx);

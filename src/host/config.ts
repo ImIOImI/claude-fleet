@@ -1,8 +1,11 @@
 // fleet-host deployment config (/etc/fleet-host/config.yaml). Read at start and
 // on every reload; grants are validated by the shared identity layer.
 import { readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { parse } from 'yaml';
 import { ORG_RE, parseGrantConfig, type GrantConfig } from '../main/identity/grants.js';
+import { parseStoreConfig, StoreConfigError, type PostgresStoreConfig } from '../main/store/storeConfig.js';
 
 export const DEFAULT_CONFIG_PATH = '/etc/fleet-host/config.yaml';
 export const DEFAULT_PORT = 8080;
@@ -15,8 +18,29 @@ export interface HostWorkspaceInfo {
   color: { hue: number } | null;
 }
 
+/** The GitHub App whose installation tokens the credential helper mints. */
+export interface GithubAppConfig {
+  appId: string;
+  installationId: string;
+  /** PEM private key path (a Secret volume); read once at start. */
+  keyFile: string;
+}
+
+/** Host config `github`. */
+export interface HostGithubConfig {
+  /** null = the credential helper is off. */
+  app: GithubAppConfig | null;
+  /** Repository names in the installation's account; null = any. */
+  repositories: string[] | null;
+  /** Default and ceiling for every token's `permissions`; null = DEFAULT_PERMISSIONS in appToken.ts. */
+  permissions: Record<string, 'read' | 'write'> | null;
+}
+
 export interface HostConfig {
   workspace: HostWorkspaceInfo;
+  github: HostGithubConfig | null;
+  /** The host store; null runs without one (process-local lease, no ingest). */
+  db: PostgresStoreConfig | null;
   identity: { provider: 'github'; org: string | null };
   grants: GrantConfig;
   /** Proxies in front of the pod that append to X-Forwarded-For; 0 means key on the socket address. */
@@ -70,9 +94,63 @@ function parseWorkspace(v: unknown): HostWorkspaceInfo {
   };
 }
 
+function positiveInt(v: unknown, path: string): string {
+  const s = typeof v === 'number' ? String(v) : v;
+  if (typeof s !== 'string' || !/^[1-9]\d{0,15}$/.test(s)) throw new HostConfigError(`${path} must be a positive integer`);
+  return s;
+}
+
+function parseGithub(v: unknown): HostGithubConfig {
+  const g = record(v, 'github');
+  onlyKeys(g, 'github', ['appId', 'installationId', 'keyFile', 'repositories', 'permissions']);
+  let app: GithubAppConfig | null = null;
+  const set = [g.appId, g.installationId, g.keyFile].filter((x) => x !== undefined).length;
+  if (set !== 0 && set !== 3) throw new HostConfigError('github.appId, github.installationId and github.keyFile must be set together');
+  if (set === 3) {
+    if (typeof g.keyFile !== 'string' || !g.keyFile.startsWith('/')) throw new HostConfigError('github.keyFile must be an absolute path');
+    app = { appId: positiveInt(g.appId, 'github.appId'), installationId: positiveInt(g.installationId, 'github.installationId'), keyFile: g.keyFile };
+  }
+  let repositories: string[] | null = null;
+  if (g.repositories !== undefined) {
+    const r = g.repositories;
+    if (!Array.isArray(r) || r.length === 0 || r.length > 500 || r.some((x) => typeof x !== 'string' || !/^[A-Za-z0-9_.-]{1,100}$/.test(x))) {
+      throw new HostConfigError('github.repositories must list 1 to 500 repository names (no owner)');
+    }
+    repositories = [...new Set((r as string[]).map((x) => x.toLowerCase()))].sort();
+  }
+  let permissions: Record<string, 'read' | 'write'> | null = null;
+  if (g.permissions !== undefined) {
+    const p = record(g.permissions, 'github.permissions');
+    permissions = {};
+    for (const [k, val] of Object.entries(p)) {
+      if (!/^[a-z_]{1,64}$/.test(k) || (val !== 'read' && val !== 'write')) throw new HostConfigError('github.permissions must map permission names to read or write');
+      permissions[k] = val;
+    }
+  }
+  return { app, repositories, permissions };
+}
+
+function parseDb(v: unknown): PostgresStoreConfig {
+  const d = record(v, 'db');
+  if ('kind' in d) throw new HostConfigError('db has unknown key kind (the host store is always Postgres)');
+  // The config is a ConfigMap that sessions can read.
+  const noStatic = 'db: a static password is not allowed (sessions can read the host config); use password "env" or "aws-rds-iam"';
+  if ((d.password as { kind?: unknown } | undefined)?.kind === 'static') throw new HostConfigError(noStatic);
+  if (typeof d.connectionString === 'string' && URL.canParse(d.connectionString)) {
+    const u = new URL(d.connectionString);
+    if (u.password || u.searchParams.has('password')) throw new HostConfigError(noStatic);
+  }
+  try {
+    return parseStoreConfig({ ...d, kind: 'postgres' }, { allowStaticSecrets: false }) as PostgresStoreConfig;
+  } catch (err) {
+    if (err instanceof StoreConfigError) throw new HostConfigError(`db: ${err.message.replace(/^store: /, '')}`);
+    throw err;
+  }
+}
+
 export function parseHostConfig(raw: unknown): HostConfig {
   const o = record(raw, 'host config');
-  onlyKeys(o, 'host config', ['workspace', 'identity', 'grants', 'machines', 'trustedProxyHops']);
+  onlyKeys(o, 'host config', ['workspace', 'identity', 'grants', 'machines', 'trustedProxyHops', 'github', 'db']);
   const id = o.identity === undefined ? {} : record(o.identity, 'identity');
   onlyKeys(id, 'identity', ['provider', 'org']);
   if (id.provider !== undefined && id.provider !== 'github') {
@@ -93,6 +171,8 @@ export function parseHostConfig(raw: unknown): HostConfig {
   }
   return {
     workspace: parseWorkspace(o.workspace),
+    github: o.github === undefined ? null : parseGithub(o.github),
+    db: o.db === undefined ? null : parseDb(o.db),
     identity: { provider: 'github', org: typeof id.org === 'string' ? id.org : null },
     grants,
     trustedProxyHops: hops
@@ -120,6 +200,9 @@ export interface HostEnv {
   configPath: string;
   stateDir: string;
   brokerSocket: string;
+  credSocket: string;
+  /** Claude's transcripts in this container, ingested by the holder. */
+  projectsDir: string;
 }
 
 export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
@@ -130,6 +213,8 @@ export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
     port,
     configPath: env.FLEET_HOST_CONFIG || DEFAULT_CONFIG_PATH,
     stateDir: env.FLEET_HOST_STATE || '/home/fleet/.claude/fleet-host',
-    brokerSocket: env.CLAUDE_FLEET_BROKER_SOCKET || '/run/broker/broker.sock'
+    brokerSocket: env.CLAUDE_FLEET_BROKER_SOCKET || '/run/broker/broker.sock',
+    credSocket: env.FLEET_HOST_CRED_SOCKET || '/run/fleet-host/cred.sock',
+    projectsDir: env.FLEET_HOST_PROJECTS || join(homedir(), '.claude', 'projects')
   };
 }

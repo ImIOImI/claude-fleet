@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { createLogger, redactSecrets } from './log.js';
+import { createLogger, redactJsonLine, redactSecrets } from './log.js';
 
-const GHO = 'gho_' + 'a'.repeat(36);
+const GHO = 'gho_' + 'a1B2c3D4e5'.repeat(3) + 'aBcDeF';
+const GHS = 'ghs_' + 'A1b2C3d4E5'.repeat(3) + 'abcdef';
+const BEARER = 'Bearer abcDEF123.xyz-TOKEN';
+/** Escapes and ANSI codes whose last character is alphanumeric, so a plain word-boundary check misses them. */
+const PREFIXES = ['\n', '\t', '\u001b[0m'];
+const AFTER_ESCAPES = PREFIXES.flatMap((p) => [GHS, BEARER].map((secret) => [JSON.stringify(p), secret, p] as const));
 
 describe('redactSecrets', () => {
   it.each([
@@ -32,8 +37,29 @@ describe('redactSecrets', () => {
     expect(redactSecrets('clone https://user:hunter2@example.com/r failed')).toBe('clone https://[redacted]@example.com/r failed');
   });
 
+  it.each(AFTER_ESCAPES)('redacts a secret after %s, raw or JSON-escaped (%s)', (_label, secret, prefix) => {
+    const raw = `done${prefix}${secret} ok`;
+    expect(redactSecrets(raw)).toBe(`done${prefix}[redacted] ok`);
+    expect(redactSecrets(JSON.stringify({ t: raw }))).not.toContain(secret.split(' ').pop());
+  });
+
+  it('a digit-free GitHub token after Bearer is still cut by its own pattern', () => {
+    expect(redactSecrets(`Bearer gho_${'a'.repeat(36)}`)).toBe('Bearer [redacted]');
+  });
+
   it('leaves ordinary text alone', () => {
     expect(redactSecrets('GET /whoami 200 @alice')).toBe('GET /whoami 200 @alice');
+  });
+
+  it.each([
+    'the basic workflow is documented',
+    'Basic authentication is disabled here',
+    'the bearer of bad news',
+    'Bearer tokens are short-lived',
+    'Authorization: Bearer <token>',
+    'Basic usage: run fleet-host-cred serve'
+  ])('leaves prose mentioning bearer/basic alone: %s', (s) => {
+    expect(redactSecrets(s)).toBe(s);
   });
 });
 
@@ -48,7 +74,7 @@ describe('createLogger', () => {
   it.each(['\n', '\t', '\r'])('redacts a token after an escaped %j at depth', (esc) => {
     const line = one({ a: { b: [`line1${esc}Bearer ${GHO}`, `x${esc}${GHO}`] } });
     expect(line).not.toContain(GHO);
-    expect(line).not.toContain('a'.repeat(36));
+    expect(line).not.toContain(GHO.slice(4));
   });
 
   it('a nested PEM followed by a quote yields valid, redacted JSON', () => {
@@ -96,5 +122,25 @@ describe('createLogger', () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).not.toContain(GHO);
     expect(JSON.parse(lines[0])).toEqual({ ts: '1970-01-01T00:00:00.000Z', level: 'warn', msg: 'failed with [redacted]', error: '[redacted]', n: 1 });
+  });
+});
+
+const AFTER_ANY_ESCAPE = [...AFTER_ESCAPES, ...[GHS, BEARER].map((secret) => [JSON.stringify('\u0007'), secret, '\u0007'] as const)];
+
+describe('redactJsonLine', () => {
+  it.each(AFTER_ANY_ESCAPE)('redacts a secret after %s inside any nested string (%s)', (_label, secret, prefix) => {
+    const line = JSON.stringify({ type: 'user', message: { content: [{ text: `x${prefix}${secret}` }] } });
+    const out = redactJsonLine(line);
+    expect(out).not.toContain(secret.split(' ').pop());
+    expect(JSON.parse(out).message.content[0].text).toBe(`x${prefix}[redacted]`);
+  });
+
+  it('keeps a line without secrets byte for byte', () => {
+    const line = '{"type":"user",  "uuid":"u1","message":{"content":"caf\\u00e9"}}';
+    expect(redactJsonLine(line)).toBe(line);
+  });
+
+  it('falls back to the text pass for a line that is not JSON', () => {
+    expect(redactJsonLine(`{"partial ${GHS}`)).toBe('{"partial [redacted]');
   });
 });

@@ -8,15 +8,22 @@ import { parse } from 'yaml';
 
 const SRC = resolve(__dirname, '..');
 const ROOT = resolve(SRC, '..');
-const ENTRY = join(SRC, 'host', 'cli.ts');
-const BARE_ALLOWED = new Set(['ws', 'yaml', 'ulid']);
-const MAIN_ALLOWED = [/^main\/identity\/[^/]+\.ts$/, /^main\/broker\.ts$/, /^main\/claudeArgs\.ts$/, /^main\/vaultScopes\.ts$/, /^preload\/identityTypes\.ts$/];
+const ENTRIES = [join(SRC, 'host', 'cli.ts'), join(SRC, 'host', 'credMain.ts')];
+// better-sqlite3 resolves to src/host/sqliteStub.ts in the bundle (vite.host.config.ts).
+const BARE_ALLOWED = new Set(['ws', 'yaml', 'ulid', 'kysely', 'pg', 'pg-connection-string', '@aws-sdk', 'better-sqlite3']);
+const MAIN_ALLOWED = [/^main\/identity\/[^/]+\.ts$/, /^main\/broker\.ts$/, /^main\/claudeArgs\.ts$/, /^main\/vaultScopes\.ts$/, /^preload\/identityTypes\.ts$/,
+  /^main\/store\/(kysely|postgres|pgMigrate|storeConfig|passwordProvider|pgSsl|pgStores|stateSchema|inboxSchema)\.ts$/,
+  /^main\/store\/migrations\/(statePg|inboxPg)\.ts$/,
+  /^main\/(db|asyncCache|contextWindow|pricing|usageAnchors|userPromptText|vectors)\.ts$/,
+  /^main\/state\/(ingestParse|serialQueue|transcriptPaths)\.ts$/,
+  /^main\/inbox\/(inboxDb|inboxCore)\.ts$/,
+  /^preload\/inboxTypes\.ts$/];
 const SPEC_RE = /\b(?:import|export)\s+(?:type\s+)?(?:[^'"`;]*?\bfrom\s*)?['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]|\brequire\s*\(\s*['"]([^'"]+)['"]/g;
 
 function walk(): { files: string[]; bare: Set<string> } {
   const seen = new Set<string>();
   const bare = new Set<string>();
-  const stack = [ENTRY];
+  const stack = [...ENTRIES];
   while (stack.length) {
     const file = stack.pop()!;
     if (seen.has(file)) continue;

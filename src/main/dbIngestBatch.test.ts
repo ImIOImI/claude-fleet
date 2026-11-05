@@ -2,6 +2,7 @@
 // was recorded on the pre-port synchronous ingestLine; every later version of
 // the ingest path must reproduce it byte-for-byte.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { sql } from 'kysely';
 import * as db from './db.js';
 import { WS, S, at, FIXTURE, dump } from './state/ingestFixture.js';
 import { isPg, openTestState, queryRows, type TestState } from './store/testStore.js';
@@ -111,5 +112,45 @@ describe('ingestBatch (async store part 2a)', () => {
       JSON.stringify({ type: 'ai-title', aiTitle: 'second', sessionId: S }),
     ]);
     expect(next).toEqual([{ inserted: true, sessionId: S, type: 'ai-title' }]);
+  });
+
+  it('runs inTx last, inside the chunk transaction', async () => {
+    const seen: number[] = [];
+    await db.ingestBatch(WS, S, [FIXTURE[3], FIXTURE[4]], {
+      inTx: async (trx) => {
+        seen.push(Number((await sql<{ n: number }>`SELECT COUNT(*) AS n FROM events`.execute(trx)).rows[0].n));
+      },
+    });
+    expect(seen).toEqual([2]);
+  });
+
+  it('runs atStart first in every chunk transaction', async () => {
+    const seen: number[] = [];
+    const lines = Array.from({ length: db.INGEST_TX_LINES + 1 }, (_, i) => JSON.stringify({ type: 'assistant', uuid: `as-${i}`, timestamp: at(1), message: { model: 'claude-opus-4-1', usage: { input_tokens: 1, output_tokens: 1 } } }));
+    await db.ingestBatch(WS, S, lines, {
+      atStart: async (trx) => {
+        seen.push(Number((await sql<{ n: number }>`SELECT COUNT(*) AS n FROM events`.execute(trx)).rows[0].n));
+      },
+    });
+    expect(seen).toEqual([0, db.INGEST_TX_LINES]);
+  });
+
+  it('runs inTx even when every line is malformed', async () => {
+    let ran = 0;
+    await db.ingestBatch(WS, S, ['{"nope'], { inTx: async () => { ran++; } });
+    expect(ran).toBe(1);
+  });
+
+  it('an inTx that throws rolls back the chunk’s rows', async () => {
+    await expect(db.ingestBatch(WS, S, [FIXTURE[3]], { inTx: async () => { throw new Error('boom'); } })).rejects.toThrow('boom');
+    expect((await queryRows('SELECT COUNT(*) AS n FROM events'))[0]).toEqual({ n: 0 });
+  });
+
+  it('refuses inTx with more than one chunk of lines, naming the limit', async () => {
+    const lines = Array.from({ length: db.INGEST_TX_LINES + 1 }, (_, i) => JSON.stringify({ type: 'ai-title', aiTitle: `t${i}`, sessionId: S }));
+    let ran = 0;
+    await expect(db.ingestBatch(WS, S, lines, { inTx: async () => { ran++; } })).rejects.toThrow(String(db.INGEST_TX_LINES));
+    expect(ran).toBe(0);
+    expect((await queryRows('SELECT COUNT(*) AS n FROM sessions'))[0]).toEqual({ n: 0 });
   });
 });

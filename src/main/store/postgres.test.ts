@@ -151,4 +151,43 @@ describe.skipIf(!isPg)('postgresKysely', () => {
     expect(await k.selectFrom('t').selectAll().execute()).toEqual([]);
     await hk.destroy();
   });
+
+  it('a data-modifying CTE under a SELECT takes the write path: the hook runs and it is fenced', async () => {
+    await k.insertInto('t').values({ v: 'x' }).execute();
+    const hk = postgresKysely<T>(t.pool, { afterBeginWrite: async () => { throw new Error('lease lost'); } });
+    const cte = hk.with('d', (db) => db.deleteFrom('t').returning('id')).selectFrom('d').selectAll();
+    await expect(cte.execute()).rejects.toThrow('lease lost');
+    const nested = hk.with('o', (db) => db.with('d', (d2) => d2.updateTable('t').set({ v: 'y' }).returning('id')).selectFrom('d').selectAll()).selectFrom('o').selectAll();
+    await expect(nested.execute()).rejects.toThrow('lease lost');
+    expect(await k.selectFrom('t').select('v').execute()).toEqual([{ v: 'x' }]);
+    await expect(hk.with('r', (db) => db.selectFrom('t').select('id')).selectFrom('r').selectAll().execute()).resolves.toHaveLength(1);
+    await hk.destroy();
+  });
+
+  it('applies session timeouts on every pooled connection when configured', async () => {
+    const pool = createPgPool({ connectionString: process.env.PG_TEST_URL, schema: t.schema, max: 1, session: { idleInTransactionMs: 7_000, statementTimeoutMs: 9_000 } });
+    const pk = postgresKysely(pool);
+    const show = async (n: string) => (await sql<Record<string, string>>`${sql.raw(`SHOW ${n}`)}`.execute(pk)).rows[0][n];
+    expect(await show('idle_in_transaction_session_timeout')).toBe('7s');
+    expect(await show('statement_timeout')).toBe('9s');
+    expect(await show('search_path')).toBe(`${t.schema}, public`);
+    await pk.destroy();
+    await pool.end();
+  });
+
+  it('a checked-out connection the server ends goes to the pool error listener, not an uncaught error', async () => {
+    const pool = createPgPool({ connectionString: process.env.PG_TEST_URL, schema: t.schema, max: 1, session: { idleInTransactionMs: 200 } });
+    const errors: Error[] = [];
+    pool.on('error', (e) => errors.push(e));
+    const pk = postgresKysely<T>(pool);
+    await expect(pk.transaction().execute(async (trx) => {
+      await trx.insertInto('t').values({ v: 'a' }).execute();
+      await new Promise((r) => setTimeout(r, 600));
+      await trx.insertInto('t').values({ v: 'b' }).execute();
+    })).rejects.toThrow();
+    expect(errors.map((e) => (e as { code?: string }).code)).toContain('25P03');
+    expect(await pk.selectFrom('t').selectAll().execute()).toEqual([]);
+    await pk.destroy();
+    await pool.end();
+  });
 });

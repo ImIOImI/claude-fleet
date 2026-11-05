@@ -227,6 +227,19 @@ describe('LeaseManager', () => {
     expect(acquired).not.toHaveBeenCalled();
     expect(release).toHaveBeenCalledWith('a', 1);
   });
+
+  it('markLost gives up a held lease and emits lost once', async () => {
+    const m = new LeaseManager({ holder: 'h', store: memoryLeaseStore() });
+    const lost = vi.fn();
+    m.on('lost', lost);
+    await m.tick();
+    expect(m.state).toBe('holder');
+    m.markLost();
+    m.markLost();
+    expect(m.state).toBe('standby');
+    expect(lost).toHaveBeenCalledTimes(1);
+    await m.stop();
+  });
 });
 
 describe('LeaseManager edge cases', () => {
@@ -288,6 +301,47 @@ describe('LeaseManager edge cases', () => {
     await m.stop();
   });
 });
+
+describe('LeaseManager lost reason', () => {
+  it("'superseded' when another holder owns the row; 'unreachable' when the store can't answer in time", async () => {
+    const store = memoryLeaseStore();
+    const a = new LeaseManager({ holder: 'a', store, renewMs: 20, ttlMs: 80 });
+    const lostA = vi.fn();
+    a.on('lost', lostA);
+    await a.tick();
+    await store.tryAcquire('b', Date.now() + 1_000_000, 80);
+    await a.tick();
+    expect(lostA).toHaveBeenCalledWith('superseded');
+
+    const hung: LeaseStore = { ...memoryLeaseStore(), renew: () => new Promise<boolean>(() => undefined) };
+    const b = new LeaseManager({ holder: 'a', store: hung, renewMs: 20, ttlMs: 80 });
+    const lostB = vi.fn();
+    b.on('lost', lostB);
+    await b.tick();
+    await b.tick();
+    expect(lostB).toHaveBeenCalledWith('unreachable');
+
+    const c = new LeaseManager({ holder: 'a', store: memoryLeaseStore(), renewMs: 20, ttlMs: 80 });
+    const lostC = vi.fn();
+    c.on('lost', lostC);
+    await c.tick();
+    await sleep(150);
+    expect(lostC).toHaveBeenCalledWith('unreachable');
+  });
+
+  it('markLost takes a reason, superseded by default', async () => {
+    for (const [arg, want] of [[undefined, 'superseded'], ['unreachable', 'unreachable']] as const) {
+      const m = new LeaseManager({ holder: 'h', store: memoryLeaseStore() });
+      const lost = vi.fn();
+      m.on('lost', lost);
+      await m.tick();
+      m.markLost(arg);
+      expect(lost).toHaveBeenCalledWith(want);
+      await m.stop();
+    }
+  });
+});
+
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));

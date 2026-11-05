@@ -41,6 +41,11 @@ export function createReloader(opts: {
       if (cfg.workspace.id !== current.workspace.id) {
         return reject(`workspace.id cannot change on reload (running ${current.workspace.id ?? 'unset'}, file ${cfg.workspace.id ?? 'unset'})`);
       }
+      // The credential helper loads the App key once at start.
+      if (!isDeepStrictEqual(cfg.github?.app ?? null, current.github?.app ?? null)) {
+        return reject('github.appId, github.installationId and github.keyFile cannot change on reload');
+      }
+      if (!isDeepStrictEqual(cfg.db, current.db)) return reject('db cannot change on reload; restart to apply');
       if (isDeepStrictEqual(cfg, current)) {
         opts.log.log('info', 'config unchanged', { reason });
         return true;

@@ -1,0 +1,4 @@
+[credential "https://github.com"]
+	helper =
+	helper = !fleet-host-cred git-credential
+	useHttpPath = true
