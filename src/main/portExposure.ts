@@ -224,7 +224,7 @@ export class PortExposureService {
       localFails: 0,
       writes: this.deps.sink.insert({ ...row }).catch((e) => this.deps.onWriteError?.(e))
     };
-    this.allWrites = Promise.all([this.allWrites, l.writes]);
+    this.allWrites = this.allWrites.then(() => l.writes);
     this.live.set(keyOf(workspaceId, port), l);
     return l;
   }
@@ -232,7 +232,7 @@ export class PortExposureService {
   private patch(l: Live, p: ExposurePatch): void {
     Object.assign(l.row, p);
     l.writes = l.writes.then(() => this.deps.sink.update(l.row.id, p)).catch((e) => this.deps.onWriteError?.(e));
-    this.allWrites = Promise.all([this.allWrites, l.writes]);
+    this.allWrites = this.allWrites.then(() => l.writes);
   }
 
   private showPopup(l: Live, declared: boolean): void {
