@@ -43,3 +43,24 @@ describe('workspace id guard wiring (#444 security review)', () => {
     expect(handlerSource('workspace:writeManifest')).toMatch(/assertRendererWorkspaceId\(spec\?\.id\)/);
   });
 });
+
+describe('remote bookmark wiring', () => {
+  it('workspace:create and workspace:writeManifest refuse remote specs before writing anything', () => {
+    expect(handlerSource('workspace:create')).toMatch(/assertNotRemoteSpec\(input\.kind, await readWorkspaceManifest\(input\.id\)\)\s*;\s*const kind/);
+    const write = handlerSource('workspace:writeManifest');
+    expect(write).toMatch(/const existing = await readWorkspaceManifest\(spec\.id\);\s*assertNotRemoteSpec\(spec\.kind, existing\);/);
+    expect(write).toMatch(/remote: undefined/);
+  });
+
+  it('port forwarding is reconciled for containers only', () => {
+    expect(handlerSource('workspace:list')).toMatch(/w\.state === 'running' && w\.kind === 'container'/);
+  });
+
+  it('the bearer token is bound only in main and exposed by no preload or renderer code', () => {
+    expect(src).toMatch(/remoteToken = \(\) => identity\.bearerToken\(\);/);
+    const preload = readFileSync(new URL('../preload/index.ts', import.meta.url), 'utf8');
+    expect(preload).not.toMatch(/bearerToken|remoteToken|packagesToken/);
+    expect(readFileSync(new URL('./identityIpc.ts', import.meta.url), 'utf8')).not.toMatch(/bearerToken/);
+    expect(readFileSync(new URL('./remoteIpc.ts', import.meta.url), 'utf8')).not.toMatch(/bearerToken|token\(\)/);
+  });
+});

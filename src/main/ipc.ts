@@ -2,11 +2,11 @@ import { app, ipcMain, BrowserWindow, dialog, clipboard, Menu, shell, powerMonit
 import { appBuildSha, appVersionString } from './appVersion.js';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { unlink, readdir } from 'node:fs/promises';
+import { unlink, readdir, rm } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
-import { workspaceTranscriptPath, workspaceHistoryFile, workspaceHistoryDir, encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir, workspaceClaudeDir } from './paths.js';
+import { workspaceTranscriptPath, workspaceHistoryFile, workspaceHistoryDir, encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir, workspaceClaudeDir, workspaceStateDir } from './paths.js';
 import { createWorkspaceSkills, toSkillWorkspace } from './skills/workspaceSkills.js';
 import {
   setWorkspaceDefault,
@@ -79,6 +79,8 @@ import { registerVaultIpc } from './vaultIpc.js';
 import { IdentityService } from './identity/identityService.js';
 import { pickGithubClientId, GITHUB_CLIENT_ID_ENV } from './identity/clientId.js';
 import { registerIdentityIpc } from './identityIpc.js';
+import { createRemoteBackend } from './remote.js';
+import { assertNotRemoteSpec, registerRemoteIpc } from './remoteIpc.js';
 import { listEndpoints, saveEndpoint, deleteEndpoint, setEndpointApiKey, probeEndpoint, getEndpoint, type ModelEndpoint } from './endpoints.js';
 import * as fs from './fs.js';
 import * as imageLibrary from './imageLibrary.js';
@@ -294,9 +296,18 @@ const mockPorts: MockServingPorts | null = MOCK_MODE && process.env.CLAUDE_FLEET
 // `Backend` contract. In mock mode everything routes to the mock backend.
 const dockerBackend: Backend = MOCK_MODE ? mockDocker : realDocker;
 const localBackend: Backend = MOCK_MODE ? mockDocker : realLocal;
+// Bound to the signed-in GitHub token once registerIpc builds the identity service.
+let remoteToken: () => Promise<string | null> = async () => null;
+const remoteBackend = createRemoteBackend({
+  token: () => remoteToken(),
+  listManifests: () => listWorkspaceManifests(),
+  writeManifest: (spec) => writeWorkspaceManifest(spec),
+  deleteState: (id) => rm(workspaceStateDir(id), { recursive: true, force: true })
+});
 
 function backendForKind(kind: WorkspaceKind): Backend {
   if (MOCK_MODE) return mockDocker;
+  if (kind === 'remote') return remoteBackend;
   return kind === 'local' ? localBackend : dockerBackend;
 }
 
@@ -416,7 +427,7 @@ async function fetchAllWorkspaces(): Promise<Workspace[]> {
   const dockerPromise: Promise<Workspace[]> = e2eDockerDown
     ? Promise.reject(Object.assign(new Error('docker daemon down (e2e)'), { code: 'ECONNREFUSED' }))
     : dockerBackend.listLiveWorkspaces();
-  const [dockerResult, localLive, manifests] = await Promise.all([
+  const [dockerResult, localLive, remoteLive, manifests] = await Promise.all([
     dockerPromise.then(
       (value): PromiseSettledResult<Workspace[]> => ({ status: 'fulfilled', value }),
       (reason): PromiseSettledResult<Workspace[]> => ({ status: 'rejected', reason })
@@ -425,10 +436,11 @@ async function fetchAllWorkspaces(): Promise<Workspace[]> {
     // docker half down, container-kind mocks must not sneak back in as live
     // through the local half.
     localBackend.listLiveWorkspaces().then((ws) => (e2eDockerDown ? ws.filter((w) => w.kind === 'local') : ws)),
+    MOCK_MODE ? Promise.resolve([]) : remoteBackend.listLiveWorkspaces(),
     listWorkspaceManifests()
   ]);
   return mergeWorkspaces({
-    dockerResult, localLive, manifests,
+    dockerResult, localLive, remoteLive, manifests,
     lastKnown: lastKnownStates,
     privateDir: fleetPrivateDir,
     factoryMirror: FACTORY_MIRROR
@@ -458,7 +470,7 @@ function invalidateWorkspaceList(): void {
 const workspaceSkills = createWorkspaceSkills({
   listWorkspaces: async () =>
     Promise.all(
-      (await listWorkspaceManifests()).map(async (m) =>
+      (await listWorkspaceManifests()).filter((m) => m.kind !== 'remote').map(async (m) =>
         toSkillWorkspace(m, {
           privateDir: m.kind === 'local' ? m.workspaceRoot : await fleetPrivateDir(m.id),
           containerClaudeDir: workspaceClaudeDir(m.id),
@@ -1118,7 +1130,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     // Reconciling here (the renderer polls workspace:list) covers start, pause,
     // stop, remove, and app launch without per-action hooks.
     portForward?.reconcile(
-      all.filter((w) => w.state === 'running' && w.kind !== 'local').map((w) => w.id)
+      all.filter((w) => w.state === 'running' && w.kind === 'container').map((w) => w.id)
     );
     mockPorts?.reconcile(all.filter((w) => w.state === 'running').map((w) => w.id));
     return all;
@@ -1130,6 +1142,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // The id becomes this workspace's vault scope (resolveEnv injects that
       // bag into its env), so it may never name a host-only scope (#444).
       assertRendererWorkspaceId(input?.id);
+      assertNotRemoteSpec(input.kind, await readWorkspaceManifest(input.id));
       const kind: WorkspaceKind = input.kind ?? 'container';
       const launcher = kind === 'local' ? sanitizeLauncher(input.launcher) : undefined;
       // Local workspaces run `claude` in a user-chosen host directory; validate
@@ -1405,6 +1418,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         throw new Error(`A workspace named "${spec.name}" already exists.`);
       }
       const existing = await readWorkspaceManifest(spec.id);
+      assertNotRemoteSpec(spec.kind, existing);
       // Container: workspaceRoot is derived — the canonical private folder under
       // the fleet root. Local (#16): it's the user-chosen host dir, supplied by
       // the renderer; fall back to the existing manifest's value if absent.
@@ -1432,7 +1446,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         ...(existing ?? {}),
         ...spec,
         workspaceRoot,
-        launcher: incomingLauncher
+        launcher: incomingLauncher,
+        remote: undefined
       });
     invalidateWorkspaceList();
     // Reflect a mirror-default edit in the watcher immediately (don't wait for
@@ -1916,6 +1931,15 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       pickGithubClientId({ env: process.env[GITHUB_CLIENT_ID_ENV], config: await getGithubClientIdConfig() })
   });
   registerIdentityIpc(ipcMain, identity);
+  remoteToken = () => identity.bearerToken();
+  registerRemoteIpc(ipcMain, {
+    backend: remoteBackend,
+    accountStatus: () => identity.status(),
+    readManifest: readWorkspaceManifest,
+    writeManifest: writeWorkspaceManifest,
+    findByName: findWorkspaceByName,
+    invalidate: invalidateWorkspaceList
+  });
   loadoutSources.setGithubTokenProvider(() => identity.packagesToken());
 
   ipcMain.handle(

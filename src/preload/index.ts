@@ -13,6 +13,8 @@ export type {
 } from './inboxTypes';
 import type { AccountStatus, SignInStart, SignInPoll } from './identityTypes';
 export type { AccountStatus, AccountIdentity, AccountSso, SignInStart, SignInPoll } from './identityTypes';
+import type { RemoteAddOptions, RemoteLiveSession, RemoteProbe } from './remoteTypes';
+export type { RemoteAddOptions, RemoteLiveSession, RemoteProbe, RemoteProbeOk, RemoteProbeErr, RemoteProbeErrorKind, RemoteTier } from './remoteTypes';
 
 /** Outcome of a `pty:resize`. Lives here because preload is the IPC contract
  *  surface: main imports it type-only, and the renderer picks it up through
@@ -700,6 +702,16 @@ const api = {
     signInCancel: (): Promise<void> => ipcRenderer.invoke('identity:signInCancel'),
     /** Delete the token from this computer's vault. */
     signOut: (): Promise<void> => ipcRenderer.invoke('identity:signOut')
+  },
+  remote: {
+    /** /whoami a host URL with the signed-in token; never returns the token. */
+    probe: (url: string): Promise<RemoteProbe> => ipcRenderer.invoke('remote:probe', url),
+    /** Probe, then write the bookmark under the host's workspace id. A bookmark at another URL needs `sameHostNewAddress`. */
+    add: (url: string, opts?: RemoteAddOptions): Promise<RemoteProbe> => ipcRenderer.invoke('remote:add', url, opts),
+    /** Rename the local bookmark; the host's name is unchanged. */
+    rename: (id: string, name: string): Promise<void> => ipcRenderer.invoke('remote:rename', id, name),
+    /** Broker sessions live on the host (any tier may watch them). */
+    liveSessions: (id: string): Promise<RemoteLiveSession[]> => ipcRenderer.invoke('remote:liveSessions', id)
   },
   endpoints: {
     list: (): Promise<unknown[]> => ipcRenderer.invoke('endpoints:list'),
