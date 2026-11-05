@@ -27,14 +27,15 @@ export async function startTestHost(opts: { tokens: Record<string, Identity>; gr
       return who;
     }
   }));
+  const hub = new AttachHub(broker.ops);
   const host = createHostServer({
     workspace: () => ({ ...config.workspace, id: TEST_WORKSPACE_ID }),
     auth: () => auth,
     lease: () => lease,
     healthy: () => true,
-    hub: new AttachHub(broker.ops),
+    hub,
     events,
-    rpc: brokerRpcChannels(broker.ops),
+    rpc: brokerRpcChannels(broker.ops, hub.owners),
     log: createLogger(() => undefined),
     pingMs: opts.pingMs
   });

@@ -55,7 +55,7 @@ import * as realLocal from './local.js';
 import * as mockDocker from './mock.js';
 import type { Backend } from './backend.js';
 import { resolveKind, resolveRemoveKind } from './backendRouter.js';
-import { findLiveHandleId } from './ptyHandleLookup.js';
+import { findLiveHandleId, tabCloseVerb } from './ptyHandleLookup.js';
 import { assertControl, buildRoster, ROSTER_TITLE_MAX, type RosterStatus, type RosterEntry } from './control.js';
 import { ActivityDetector } from './activityDetector.js';
 import { wouldExceed, recordPost, COMMITTEE_CAPS } from './committeeRuns.js';
@@ -2191,7 +2191,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     }
   );
 
-  ipcMain.handle('pty:detach', (_e, sessionId: string) => {
+  const detachHandle = (sessionId: string): void => {
     const present = ptySessions.has(sessionId);
     ptySessions.get(sessionId)?.detach();
     ptySessions.delete(sessionId);
@@ -2216,6 +2216,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         : `pty:detach for unknown handle (live=${ptySessions.size})`,
       extra: { ptyHandleId: sessionId, hadHandle: present, live: ptySessions.size }
     });
+  };
+
+  ipcMain.handle('pty:detach', (_e, sessionId: string) => {
+    detachHandle(sessionId);
   });
 
   // Terminate the broker session behind a handle (kills claude, drops the
@@ -2260,17 +2264,28 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // relaunch re-attaches). Returns whether a live handle was found.
   ipcMain.handle(
     'pty:closeSessionByBroker',
-    (_e, workspaceId: string, brokerSessionId: string) => {
+    async (_e, workspaceId: string, brokerSessionId: string) => {
       const ptyHandleId = findLiveHandleId(
         handleWorkspaceId,
         handleBrokerSessionId,
         workspaceId,
         brokerSessionId
       );
-      if (!ptyHandleId) return Promise.resolve(false);
+      if (!ptyHandleId) return false;
+      if (tabCloseVerb(await resolveKind(workspaceId)) === 'detach') {
+        detachHandle(ptyHandleId);
+        return true;
+      }
       return reapHandle(ptyHandleId, 'pty:closeSessionByBroker');
     }
   );
+
+  // Remote "End session": CLOSE the host session (the host refuses a non-owner).
+  ipcMain.handle('pty:endSessionByBroker', async (_e, workspaceId: string, brokerSessionId: string) => {
+    const ptyHandleId = findLiveHandleId(handleWorkspaceId, handleBrokerSessionId, workspaceId, brokerSessionId);
+    if (!ptyHandleId) return false;
+    return reapHandle(ptyHandleId, 'pty:endSessionByBroker');
+  });
 
   // Durable transcript mirror (#10). The renderer holds broker session ids;
   // mirror files are named by claude session id, so the transcript handlers

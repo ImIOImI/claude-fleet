@@ -103,7 +103,7 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     healthy: () => leaseMgr.running,
     hub,
     events,
-    rpc: brokerRpcChannels(ops, env.port),
+    rpc: brokerRpcChannels(ops, hub.owners, env.port),
     log,
     trustedProxyHops: () => config.trustedProxyHops
   });

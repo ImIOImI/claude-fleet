@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { RemoteProbeErr, RemoteProbeOk } from '../../preload/remoteTypes';
 import { readFileSync } from 'node:fs';
-import { applyProbe, canStartSessions, CHECKING_STATUS, joinableSessions, paneRules, remoteChip, remotePane, unreachableRemoteNames, canType, ipcErrorText, probeErrorText, remoteFormView, tierTitle, unreachableBanner, type RemoteFormState } from './remoteView';
+import { applyProbe, canEndSession, canStartSessions, defaultTabOnTierChange, forgetText, mineIds, CHECKING_STATUS, joinableSessions, paneRules, remoteChip, remotePane, unreachableRemoteNames, canType, ipcErrorText, probeErrorText, remoteFormView, tierTitle, unreachableBanner, type RemoteFormState } from './remoteView';
 
 const OK: RemoteProbeOk = {
   ok: true,
@@ -156,11 +156,11 @@ describe('paneRules', () => {
 describe('joinableSessions', () => {
   it('lists live host sessions that are not already tabs', () => {
     const live = [
-      { id: 'a', alive: true },
-      { id: 'b', alive: false },
-      { id: 'c', alive: true }
+      { id: 'a', alive: true, mine: false },
+      { id: 'b', alive: false, mine: false },
+      { id: 'c', alive: true, mine: true }
     ];
-    expect(joinableSessions(live, ['c'])).toEqual([{ id: 'a', alive: true }]);
+    expect(joinableSessions(live, ['c'])).toEqual([{ id: 'a', alive: true, mine: false }]);
     expect(joinableSessions([], [])).toEqual([]);
   });
 });
@@ -198,5 +198,43 @@ describe('remotePane', () => {
       title: 'Host unreachable',
       body: "r (https://h) isn't answering. Its sessions reappear when it's back."
     });
+  });
+});
+
+describe('End session gating', () => {
+  it('needs the session tier and a host-reported mine', () => {
+    const mine = new Set(['s1']);
+    expect(canEndSession('session', mine, 's1')).toBe(true);
+    expect(canEndSession('session', mine, 's2')).toBe(false);
+    expect(canEndSession('steer', mine, 's1')).toBe(false);
+    expect(canEndSession('read', mine, 's1')).toBe(false);
+    expect(canEndSession(null, mine, 's1')).toBe(false);
+    expect(canEndSession(undefined, mine, 's1')).toBe(false);
+  });
+
+  it('mineIds keeps live sessions the host says are mine', () => {
+    expect([...mineIds([{ id: 'a', alive: true, mine: true }, { id: 'b', alive: true, mine: false }, { id: 'c', alive: false, mine: true }])]).toEqual(['a']);
+  });
+});
+
+describe('defaultTabOnTierChange', () => {
+  it('opens the default tab once the host reports session for an empty, loaded pane', () => {
+    expect(defaultTabOnTierChange(null, 'session', true, 0)).toBe(true);
+  });
+
+  it('does nothing otherwise', () => {
+    expect(defaultTabOnTierChange(null, 'read', true, 0)).toBe(false);
+    expect(defaultTabOnTierChange(null, 'steer', true, 0)).toBe(false);
+    expect(defaultTabOnTierChange(null, 'session', false, 0)).toBe(false);
+    expect(defaultTabOnTierChange(null, 'session', true, 1)).toBe(false);
+    expect(defaultTabOnTierChange('session', 'session', true, 0)).toBe(false);
+    expect(defaultTabOnTierChange('read', 'session', true, 0)).toBe(false);
+    expect(defaultTabOnTierChange(undefined, undefined, true, 0)).toBe(false);
+  });
+});
+
+describe('forgetText', () => {
+  it('names the workspace and says the host is untouched', () => {
+    expect(forgetText('review-bot')).toBe("Forget review-bot? Removes the bookmark and this computer's tab list. The host and its sessions are untouched.");
   });
 });

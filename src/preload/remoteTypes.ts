@@ -53,4 +53,6 @@ export interface RemoteAddOptions {
 export interface RemoteLiveSession {
   id: string;
   alive: boolean;
+  /** The viewer created it (host-reported; the host still decides CLOSE). */
+  mine: boolean;
 }

@@ -747,9 +747,12 @@ const api = {
       ipcRenderer.invoke('pty:closeSession', sessionId),
     /** Terminate a session by (workspace, broker session id) — used by tab-close,
      *  which knows the stable broker session id but not the per-attach handle.
-     *  Kills claude via the same broker CLOSE the refresh path uses. */
+     *  Kills claude via the same broker CLOSE the refresh path uses; a remote tab only detaches. */
     closeSessionByBroker: (workspaceId: string, brokerSessionId: string): Promise<boolean> =>
       ipcRenderer.invoke('pty:closeSessionByBroker', workspaceId, brokerSessionId),
+    /** Remote only: CLOSE the host session behind a tab (tab-close merely detaches there). */
+    endSessionByBroker: (workspaceId: string, brokerSessionId: string): Promise<boolean> =>
+      ipcRenderer.invoke('pty:endSessionByBroker', workspaceId, brokerSessionId),
     onData: (sessionId: string, cb: (chunk: Uint8Array, ts?: number) => void) => {
       const channel = `pty:data:${sessionId}`;
       const handler = (_e: IpcRendererEvent, chunk: Buffer, ts?: number) => cb(new Uint8Array(chunk), ts);

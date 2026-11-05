@@ -534,7 +534,8 @@ export function TerminalSession({
         ptyHandleRef.current = sid;
         resizePusher = createResizePusher({
           getSize: () => ({ cols: term.cols, rows: term.rows }),
-          push: (cols, rows) => window.api.pty.resize(sid, cols, rows),
+          // Watch-only: the local fit still runs, but the viewer never resizes a shared PTY.
+          push: (cols, rows) => (readOnlyRef.current ? Promise.resolve({ ok: true, cols, rows }) : window.api.pty.resize(sid, cols, rows)),
           onGiveUp: (cols, rows, attempts) => {
             // Worth a line: from here on xterm and the pty disagree, and the
             // transcript will accumulate overflow fragments in its first

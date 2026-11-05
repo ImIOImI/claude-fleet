@@ -63,6 +63,12 @@ describe('remote bookmark wiring', () => {
     expect(index).toMatch(/app\.on\('before-quit'[\s\S]*?stopRemoteBackend\(\);/);
   });
 
+  it('tab-close detaches remote sessions; only endSessionByBroker CLOSEs them', () => {
+    expect(handlerSource('pty:closeSessionByBroker')).toMatch(/tabCloseVerb\(await resolveKind\(workspaceId\)\) === 'detach'[\s\S]*?detachHandle\(ptyHandleId\)[\s\S]*?reapHandle\(/);
+    expect(handlerSource('pty:endSessionByBroker')).toMatch(/reapHandle\(ptyHandleId, 'pty:endSessionByBroker'\)/);
+    expect(handlerSource('pty:detach')).toMatch(/detachHandle\(sessionId\)/);
+  });
+
   it('port forwarding is reconciled for containers only', () => {
     expect(handlerSource('workspace:list')).toMatch(/w\.state === 'running' && w\.kind === 'container'/);
   });

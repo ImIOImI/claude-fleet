@@ -129,3 +129,22 @@ export function remotePane(w: RemoteRow): { tone: 'neutral' | 'error'; title: st
   if (phase === 'unreachable') return { tone: 'error', title: 'Host unreachable', body: `${where} isn't answering. Its sessions reappear when it's back.` };
   return null;
 }
+
+/** Ids of live host sessions the viewer created. */
+export function mineIds(live: RemoteLiveSession[]): Set<string> {
+  return new Set(live.filter((l) => l.alive && l.mine).map((l) => l.id));
+}
+
+/** Advisory: the host refuses CLOSE from anyone but the creator. */
+export function canEndSession(t: MaybeTier, mine: ReadonlySet<string>, id: string): boolean {
+  return canStartSessions(t) && mine.has(id);
+}
+
+/** The tier was unknown at inventory load; once it turns out to be `session`, an empty pane gets its default tab. */
+export function defaultTabOnTierChange(prev: MaybeTier, next: MaybeTier, loaded: boolean, tabCount: number): boolean {
+  return prev === null && canStartSessions(next) && loaded && tabCount === 0;
+}
+
+export function forgetText(name: string): string {
+  return `Forget ${name}? Removes the bookmark and this computer's tab list. The host and its sessions are untouched.`;
+}

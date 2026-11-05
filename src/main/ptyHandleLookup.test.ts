@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { findLiveHandleId } from './ptyHandleLookup.js';
+import { findLiveHandleId, tabCloseVerb } from './ptyHandleLookup.js';
 
 // Maps are keyed by ptyHandleId, mirroring ipc.ts.
 const wsMap = new Map<string, string>([
@@ -31,5 +31,16 @@ describe('findLiveHandleId', () => {
 
   it('returns null on empty maps', () => {
     expect(findLiveHandleId(new Map(), new Map(), 'wsA', 's1')).toBeNull();
+  });
+});
+
+describe('tabCloseVerb', () => {
+  it('a remote tab detaches: the shared session outlives this desktop', () => {
+    expect(tabCloseVerb('remote')).toBe('detach');
+  });
+
+  it('container and local tabs reap their session', () => {
+    expect(tabCloseVerb('container')).toBe('close');
+    expect(tabCloseVerb('local')).toBe('close');
   });
 });

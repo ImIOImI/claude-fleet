@@ -181,14 +181,44 @@ describe('remote:* IPC', () => {
     }
   });
 
-  it("liveSessions asks the bookmark's host over sessions:live and returns only id/alive", async () => {
+  it("liveSessions asks the bookmark's host over sessions:live and returns only id/alive/mine", async () => {
     const rpc = vi.fn(async () => [{ id: 's1', alive: true, owner: TOKEN }, { id: 5 }, 'junk', { id: 's2', alive: 'yes' }]);
     const h = harness(async () => WHO, { manifests: [bookmarkAt('https://h')], rpc });
-    expect(await h.call('remote:liveSessions', ID)).toEqual([{ id: 's1', alive: true }]);
+    expect(await h.call('remote:liveSessions', ID)).toEqual([{ id: 's1', alive: true, mine: false }]);
     expect(rpc).toHaveBeenCalledWith('sessions:live', []);
     expect([...new Set(h.urls)]).toEqual(['https://h']);
     await expect(h.call('remote:liveSessions', 'nope')).rejects.toThrow(/Not a remote/);
     await expect(h.call('remote:liveSessions', ['x'])).rejects.toThrow();
+  });
+
+  it('liveSessions passes mine through only as a boolean', async () => {
+    const rpc = vi.fn(async () => [
+      { id: 'a', alive: true, mine: true },
+      { id: 'b', alive: true, mine: false },
+      { id: 'c', alive: true },
+      { id: 'd', alive: true, mine: 'yes' },
+      { id: 'e', alive: true, mine: 1 }
+    ]);
+    const h = harness(async () => WHO, { manifests: [bookmarkAt('https://h')], rpc });
+    expect(await h.call('remote:liveSessions', ID)).toEqual([
+      { id: 'a', alive: true, mine: true },
+      { id: 'b', alive: true, mine: false },
+      { id: 'c', alive: true, mine: false }
+    ]);
+  });
+
+  it("liveSessions drops ids the host's validSessionId would refuse", async () => {
+    const rpc = vi.fn(async () => [
+      { id: 'ok_1-A', alive: true },
+      { id: '', alive: true },
+      { id: 'x'.repeat(129), alive: true },
+      { id: 'x'.repeat(128), alive: true },
+      { id: '../etc', alive: true },
+      { id: 'a b', alive: true },
+      { id: 'a\nb', alive: true }
+    ]);
+    const h = harness(async () => WHO, { manifests: [bookmarkAt('https://h')], rpc });
+    expect(((await h.call('remote:liveSessions', ID)) as Array<{ id: string }>).map((r) => r.id)).toEqual(['ok_1-A', 'x'.repeat(128)]);
   });
 
   it('liveSessions refuses a workspace that is not a remote bookmark', async () => {
@@ -339,6 +369,40 @@ describe('remote:* token consent (main-process confirm)', () => {
     expect(h.deps.confirm).toHaveBeenLastCalledWith({ kind: 'send-token', origin: 'http://localhost:8080' });
     expect(confirmText({ kind: 'send-token', origin: 'http://x', warning: 'Plain http: W' }).detail).toMatch(/Plain http: W$/);
     expect(confirmText({ kind: 'send-token', origin: 'https://x' }).detail).not.toMatch(/Plain http/);
+  });
+
+  it('a declined re-point is remembered per (from, to)', async () => {
+    const answers: Record<string, boolean> = { 'send-token': true, 're-point': false };
+    const h = harness(async () => WHO, { manifests: [bookmarkAt('https://old')], confirm: async (r) => answers[r.kind] });
+    await h.call('remote:add', 'https://new', { sameHostNewAddress: true });
+    h.advance(DIALOG_GAP_MS);
+    expect(await h.call('remote:add', 'https://new', { sameHostNewAddress: true })).toMatchObject({ ok: false, kind: 'declined', message: expect.stringMatching(/earlier/) });
+    expect(h.deps.confirm).toHaveBeenCalledTimes(2);
+    h.advance(DIALOG_GAP_MS);
+    answers['re-point'] = true;
+    expect(await h.call('remote:add', 'https://other', { sameHostNewAddress: true })).toMatchObject({ ok: true });
+    expect(h.deps.confirm).toHaveBeenLastCalledWith({ kind: 're-point', from: 'https://old', to: 'https://other' });
+  });
+
+  it('the re-point dialog shares the dialog gap, except right after approving its own destination', async () => {
+    const other = { ...bookmarkAt('https://new'), id: '01JC0000000000000000000001', name: 'other' } as WorkspaceSpec;
+    const h = harness(async () => WHO, { manifests: [bookmarkAt('https://old'), other] });
+    await h.call('remote:probe', 'https://a');
+    expect(await h.call('remote:add', 'https://new', { sameHostNewAddress: true })).toMatchObject({ ok: false, kind: 'declined', message: expect.stringMatching(/few seconds/) });
+    expect(h.deps.confirm).toHaveBeenCalledTimes(1);
+    expect(h.deps.writeManifest).not.toHaveBeenCalled();
+    h.advance(DIALOG_GAP_MS);
+    expect(await h.call('remote:add', 'https://new', { sameHostNewAddress: true })).toMatchObject({ ok: true });
+    expect(h.deps.confirm).toHaveBeenCalledTimes(2);
+  });
+
+  it('a send-token dialog right after a re-point dialog waits the gap', async () => {
+    const h = harness(async () => WHO, { manifests: [bookmarkAt('https://old')] });
+    await h.call('remote:probe', 'https://new');
+    h.advance(DIALOG_GAP_MS);
+    await h.call('remote:add', 'https://new', { sameHostNewAddress: true });
+    h.advance(DIALOG_GAP_MS - 1);
+    expect(await h.call('remote:probe', 'https://third')).toMatchObject({ ok: false, kind: 'declined', message: expect.stringMatching(/few seconds/) });
   });
 
   it('confirmText names the origin, or both URLs', () => {

@@ -9,7 +9,8 @@ import { dotClass } from './chipState';
 import { usePortalMenu } from './portalMenu';
 import { IconCopy, IconEject, IconPause, IconPencil, IconPlay, IconStop, IconTrash } from './menuIcons';
 import { isWarm } from '../fleetTemperature';
-import { remoteChip, tierTitle } from '../remoteView';
+import { forgetText, remoteChip, tierTitle } from '../remoteView';
+import { ModalBackdrop } from './ModalBackdrop';
 
 /**
  * The chip's status dot. A separate component so the busy pulse can be
@@ -149,6 +150,7 @@ export function WorkspaceTabStrip({
   const { menu, toggle: toggleMenu, close: closeMenu } = usePortalMenu();
   // Id of the chip currently being dragged (for reorder), null when idle.
   const [dragId, setDragId] = useState<string | null>(null);
+  const [forgetTarget, setForgetTarget] = useState<WorkspaceSummary | null>(null);
 
   // Top strip = the "warm" fleet: running + paused, and unreachable-was-warm
   // (#380). A daemon flap must not make chips vanish mid-session.
@@ -356,11 +358,11 @@ export function WorkspaceTabStrip({
                   title="Remove the bookmark from this computer; the host is untouched"
                   onClick={() => {
                     closeMenu();
-                    void window.api.workspace.remove(menuWorkspace.id, { id: menuWorkspace.id }).finally(onRefresh);
+                    setForgetTarget(menuWorkspace);
                   }}
                 >
                   <IconEject />
-                  <span>Forget</span>
+                  <span>Forget…</span>
                 </button>
               </>
             ) : (
@@ -439,6 +441,31 @@ export function WorkspaceTabStrip({
             </>
             )}
           </div>,
+          document.body
+        )}
+      {forgetTarget &&
+        createPortal(
+        <ModalBackdrop onClose={() => setForgetTarget(null)}>
+          <div className="modal" role="dialog" aria-label="Forget remote workspace" onClick={(e) => e.stopPropagation()}>
+            <h2>Forget remote workspace</h2>
+            <p className="muted">{forgetText(forgetTarget.name)}</p>
+            <div className="modal-footer">
+              <button className="btn" onClick={() => setForgetTarget(null)} autoFocus>
+                Cancel
+              </button>
+              <button
+                className="btn danger"
+                onClick={() => {
+                  const id = forgetTarget.id;
+                  setForgetTarget(null);
+                  void window.api.workspace.remove(id, { id }).finally(onRefresh);
+                }}
+              >
+                Forget
+              </button>
+            </div>
+          </div>
+        </ModalBackdrop>,
           document.body
         )}
     </div>

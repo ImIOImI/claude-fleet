@@ -80,6 +80,12 @@ const DECLINED_EARLIER: RemoteProbeErr = {
   kind: 'declined',
   message: 'You declined sending your sign-in to this host earlier, so nothing was sent. Restart claude-fleet to be asked again.'
 };
+const MOVE_DECLINED_EARLIER: RemoteProbeErr = {
+  ok: false,
+  kind: 'declined',
+  message: 'You declined moving this workspace to this address earlier, so nothing changed. Restart claude-fleet to be asked again.'
+};
+const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const DIALOG_BUSY: RemoteProbeErr = {
   ok: false,
   kind: 'declined',
@@ -92,7 +98,16 @@ export function registerRemoteIpc(ipc: IpcHandleLike, deps: RemoteIpcDeps): void
   const asking = new Map<string, Promise<boolean | null>>();
   // App-session memory: a declined origin is never re-prompted.
   const declined = new Set<string>();
-  let lastDialogAt = -Infinity;
+  const declinedMoves = new Set<string>();
+  let repointing = false;
+  // When the last dialog closed, and the origin it approved for sending (probe → Move here is one flow).
+  let lastDialog: { at: number; approvedOrigin: string | null } = { at: -Infinity, approvedOrigin: null };
+
+  function dialogAllowed(followsApprovalOf?: string): boolean {
+    if (asking.size > 0 || repointing) return false;
+    if (followsApprovalOf !== undefined && lastDialog.approvedOrigin === followsApprovalOf) return true;
+    return now() - lastDialog.at >= DIALOG_GAP_MS;
+  }
 
   async function bookmarked(origin: string): Promise<boolean> {
     return (await deps.listManifests()).some((m) => m.kind === 'remote' && m.remote && new URL(m.remote.url).origin === origin);
@@ -105,15 +120,16 @@ export function registerRemoteIpc(ipc: IpcHandleLike, deps: RemoteIpcDeps): void
     if (declined.has(origin)) return DECLINED_EARLIER;
     let pending = asking.get(origin);
     if (!pending) {
-      if (asking.size > 0 || now() - lastDialogAt < DIALOG_GAP_MS) return DIALOG_BUSY;
-      lastDialogAt = now();
+      if (!dialogAllowed()) return DIALOG_BUSY;
+      lastDialog = { at: now(), approvedOrigin: null };
       const warning = plainHttpWarning(url);
       pending = deps
         .confirm({ kind: 'send-token', origin, ...(warning ? { warning } : {}) })
         .then((v) => v === true, () => null)
-        .finally(() => {
+        .then((v) => {
           asking.delete(origin);
-          lastDialogAt = now();
+          lastDialog = { at: now(), approvedOrigin: v === true ? origin : null };
+          return v;
         });
       asking.set(origin, pending);
     }
@@ -208,8 +224,15 @@ export function registerRemoteIpc(ipc: IpcHandleLike, deps: RemoteIpcDeps): void
           existingUrl: prior.remote.url
         };
       }
-      const moved = await deps.confirm({ kind: 're-point', from: prior.remote.url, to: p.url }).catch(() => false);
-      if (!moved) return DECLINED;
+      const move = `${prior.remote.url} ${p.url}`;
+      if (declinedMoves.has(move)) return MOVE_DECLINED_EARLIER;
+      if (!dialogAllowed(new URL(p.url).origin)) return DIALOG_BUSY;
+      repointing = true;
+      const moved = await deps.confirm({ kind: 're-point', from: prior.remote.url, to: p.url }).then((v) => v === true, () => null);
+      repointing = false;
+      lastDialog = { at: now(), approvedOrigin: null };
+      if (moved === false) declinedMoves.add(move);
+      if (moved !== true) return DECLINED;
     }
     const t = now();
     const remote = { url: p.url, tier: p.tier, login: p.user.login, checkedAt: t };
@@ -249,8 +272,10 @@ export function registerRemoteIpc(ipc: IpcHandleLike, deps: RemoteIpcDeps): void
     if (!Array.isArray(rows)) return [];
     const out: RemoteLiveSession[] = [];
     for (const r of rows.slice(0, MAX_LIVE_SESSIONS)) {
-      const o = r as { id?: unknown; alive?: unknown } | null;
-      if (o && typeof o.id === 'string' && typeof o.alive === 'boolean') out.push({ id: o.id, alive: o.alive });
+      const o = r as { id?: unknown; alive?: unknown; mine?: unknown } | null;
+      if (!o || typeof o.id !== 'string' || !SESSION_ID_RE.test(o.id) || typeof o.alive !== 'boolean') continue;
+      if (o.mine !== undefined && typeof o.mine !== 'boolean') continue;
+      out.push({ id: o.id, alive: o.alive, mine: o.mine === true });
     }
     return out;
   });

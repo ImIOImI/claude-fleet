@@ -16,7 +16,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { RemoteLiveSession, RemoteTier } from '../../../preload';
-import { joinableSessions, paneRules, tierTitle } from '../remoteView';
+import { canEndSession, defaultTabOnTierChange, ipcErrorText, joinableSessions, mineIds, paneRules, tierTitle } from '../remoteView';
 import type { WorkspaceObservabilitySummary } from '../../../preload';
 import type { MirrorSetting, CleanupSetting } from '../App';
 import { TerminalSession } from './TerminalSession';
@@ -28,7 +28,7 @@ import { reorderDragHandlers } from '../dropIngestion';
 import { resolveTabBusy } from '../sessionStatusMerge';
 import { useBlinkSync } from '../blinkSync';
 import { usePortalMenu } from './portalMenu';
-import { IconAuto, IconEject, IconPencil, IconRefresh } from './menuIcons';
+import { IconAuto, IconEject, IconPencil, IconRefresh, IconTrash } from './menuIcons';
 
 /**
  * A session tab's status dot. `live`/`ended` colors it; `busy` makes it pulse
@@ -384,7 +384,9 @@ export function TerminalPane({
 
   const rules = paneRules(remoteTier);
   const { menu: joinMenu, toggle: toggleJoinMenu, close: closeJoinMenu } = usePortalMenu();
-  const [joinable, setJoinable] = useState<RemoteLiveSession[] | null>(null);
+  const [joinable, setJoinable] = useState<RemoteLiveSession[] | { error: string } | null>(null);
+  const [mine, setMine] = useState<ReadonlySet<string>>(() => new Set());
+  const [endTarget, setEndTarget] = useState<{ id: string; name: string } | null>(null);
 
   function openJoin(trigger: HTMLElement): void {
     const opening = joinMenu === null;
@@ -392,11 +394,41 @@ export function TerminalPane({
     if (!opening) return;
     setJoinable(null);
     const tabIds = sessions.map((s) => s.id);
-    void window.api.remote
-      .liveSessions(workspaceId)
-      .catch((): RemoteLiveSession[] => [])
-      .then((live) => setJoinable(joinableSessions(live, tabIds)));
+    window.api.remote.liveSessions(workspaceId).then(
+      (live) => {
+        setMine(mineIds(live));
+        setJoinable(joinableSessions(live, tabIds));
+      },
+      (err) => setJoinable({ error: ipcErrorText(err) })
+    );
   }
+
+  /** The session tier's tab menu waits for `mine` so End session never pops in after it opens. */
+  async function openTabMenu(trigger: HTMLElement, id: string): Promise<void> {
+    if (rules.remote && rules.canNew && tabMenu?.id !== id) {
+      const live = await window.api.remote.liveSessions(workspaceId).catch(() => null);
+      if (live) setMine(mineIds(live));
+      if (!trigger.isConnected) return;
+    }
+    toggleTabMenu(trigger, id);
+  }
+
+  async function endSession(id: string): Promise<void> {
+    setEndTarget(null);
+    await window.api.pty.endSessionByBroker(workspaceId, id).catch(() => {});
+    await closeSession(id);
+  }
+
+  const prevTierRef = useRef(remoteTier);
+  useEffect(() => {
+    const prev = prevTierRef.current;
+    prevTierRef.current = remoteTier;
+    if (!defaultTabOnTierChange(prev, remoteTier, loaded, sessions.length)) return;
+    const main: Session = { id: uid(), name: 'main', createdAt: Date.now() };
+    setSessions([main]);
+    setActiveId(main.id);
+    setNextNum(2);
+  }, [remoteTier]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function joinSession(id: string): void {
     closeJoinMenu();
@@ -641,7 +673,8 @@ export function TerminalPane({
     // unmount `detach` (which, for local, leaves claude alive) can't win the
     // race: by the time we remove the tab the handle is already closed+gone, so
     // the detach is a no-op on an unknown handle. Only explicit tab-close reaps;
-    // app quit leaves sessions alive for relaunch to re-attach.
+    // app quit leaves sessions alive for relaunch to re-attach. Remote tabs
+    // only detach here (main decides); End session is the explicit CLOSE.
     await window.api.pty.closeSessionByBroker(workspaceId, id).catch(() => {});
     // Drop the closed tab from the ended-set so a future tab that
     // happens to recycle the id (unlikely with uid(), but cheap insurance)
@@ -827,7 +860,7 @@ export function TerminalPane({
                 title="Session actions"
                 onClick={(e) => {
                   e.stopPropagation();
-                  toggleTabMenu(e.currentTarget, s.id);
+                  void openTabMenu(e.currentTarget, s.id);
                 }}
               >
                 ⋮
@@ -889,6 +922,8 @@ export function TerminalPane({
           >
             {joinable === null ? (
               <div className="session-join-empty">Loading…</div>
+            ) : 'error' in joinable ? (
+              <div className="session-join-empty error-text">{joinable.error}</div>
             ) : joinable.length === 0 ? (
               <div className="session-join-empty">No other sessions are running on the host.</div>
             ) : (
@@ -957,6 +992,20 @@ export function TerminalPane({
               </button>
               )}
               <div className="ws-chip-menu-divider" />
+              {canEndSession(remoteTier, mine, s.id) && (
+                <button
+                  role="menuitem"
+                  className="danger"
+                  title="Stop this session on the host for everyone watching"
+                  onClick={() => {
+                    closeTabMenu();
+                    setEndTarget({ id: s.id, name: s.name });
+                  }}
+                >
+                  <IconTrash />
+                  <span>End session…</span>
+                </button>
+              )}
               <button
                 role="menuitem"
                 className="danger"
@@ -1074,6 +1123,22 @@ export function TerminalPane({
                 onClick={() => void confirmClose(true)}
               >
                 Delete &amp; close
+              </button>
+            </div>
+          </div>
+        </ModalBackdrop>
+      )}
+      {endTarget && (
+        <ModalBackdrop onClose={() => setEndTarget(null)}>
+          <div className="modal" role="dialog" aria-label="End session" onClick={(e) => e.stopPropagation()}>
+            <h2>End {endTarget.name}?</h2>
+            <p className="muted">This stops the session on the host for everyone watching it.</p>
+            <div className="modal-footer">
+              <button type="button" className="btn" onClick={() => setEndTarget(null)} autoFocus>
+                Cancel
+              </button>
+              <button type="button" className="btn danger" onClick={() => void endSession(endTarget.id)}>
+                End session
               </button>
             </div>
           </div>
