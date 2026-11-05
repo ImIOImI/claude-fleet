@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { assertValidWorkspaceId } from './paths.js';
 import { toggleFavorite } from './ociCore.js';
+import { parseStoreConfig, type StoreConfig } from './store/storeConfig.js';
 
 /** Which plan the usage bar measures spend against. `custom` uses the
  *  user-entered token amount; the rest resolve to USAGE_BUDGET_PRESETS. */
@@ -107,6 +108,9 @@ interface AppConfig {
   /** Hand-edited only: an org's own GitHub OAuth app. Env
    *  CLAUDE_FLEET_GITHUB_CLIENT_ID wins (identity/clientId.ts). */
   identity?: { github?: { clientId?: string } };
+  /** Hand-edited only: the store choice, kept verbatim and validated by
+   *  getStoreConfig (store/storeConfig.ts). Absent ⇒ SQLite. */
+  store?: unknown;
 }
 
 /** Defensively parse the persisted usageBudget (untrusted JSON on disk). */
@@ -209,7 +213,8 @@ async function read(): Promise<AppConfig> {
       perfTelemetry: typeof parsed.perfTelemetry === 'boolean' ? parsed.perfTelemetry : undefined,
       perfOtlp: parsePerfOtlp(parsed.perfOtlp),
       keepRunningInTray: typeof parsed.keepRunningInTray === 'boolean' ? parsed.keepRunningInTray : undefined,
-      identity: parseIdentityConfig(parsed.identity)
+      identity: parseIdentityConfig(parsed.identity),
+      store: parsed.store
     };
   } catch {
     cached = {};
@@ -355,6 +360,12 @@ export async function getKeepRunningInTray(): Promise<boolean> {
 export async function setKeepRunningInTray(enabled: boolean): Promise<void> {
   const cfg = await read();
   await write({ ...cfg, keepRunningInTray: enabled });
+}
+
+/** The validated store choice. Throws StoreConfigError on an invalid `store`
+ *  rather than falling back to SQLite, which would split the data. */
+export async function getStoreConfig(): Promise<StoreConfig> {
+  return parseStoreConfig((await read()).store, { allowStaticSecrets: false });
 }
 
 /** config.json identity.github.clientId, or null. Validation and precedence: identity/clientId.ts. */

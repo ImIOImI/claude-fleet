@@ -30,6 +30,7 @@ export default defineConfig({
       'src/main/inbox/notifyStore.test.ts',
       'src/main/perfStore.test.ts',
       'src/main/store/pgMigrate.test.ts',
+      'src/main/store/pgStores.test.ts',
       'src/main/store/postgres.test.ts',
       'src/main/store/schemaParity.test.ts',
       'src/main/transcriptIndex.test.ts',
