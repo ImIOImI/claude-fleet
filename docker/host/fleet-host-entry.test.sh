@@ -36,11 +36,13 @@ process.on('SIGHUP', () => note('host-hup'));
 setInterval(() => undefined, 1000);
 JS
 
+free_port() { node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})"; }
+
 # run <case> [env...]: starts the entry script in the background; sets $pid and $dir.
 run() {
   dir="$tmp/case-$1"; shift
   mkdir -p "$dir"; : > "$dir/events"
-  env -u CLAUDE_FLEET_BROKER_TCP_PORT FAKE_DIR="$dir" FLEET_BROKER_BIN="$tmp/broker" FLEET_HOST_JS="$tmp/host.mjs" \
+  env -u CLAUDE_FLEET_BROKER_TCP_PORT FAKE_DIR="$dir" FLEET_BROKER_BIN="$tmp/broker" FLEET_HOST_JS="$tmp/host.mjs" FLEET_HOST_PORT="$(free_port)" \
     FLEET_HOST_BACKOFF_START_MS=20 FLEET_HOST_BACKOFF_MAX_MS=80 "$@" \
     bash "$here/fleet-host-entry" 2> "$dir/log" &
   pid=$!
@@ -116,5 +118,29 @@ kill -TERM "$pid"; t0=$SECONDS; finish
 assert "$st" "0" "SIGTERM during backoff exits 0"
 assert "$(( SECONDS - t0 < 3 ))" "1" "backoff sleep is interrupted"
 assert "$(count host-start)" "1" "no restart after SIGTERM in backoff"
+
+# 8. Someone else listening on the fleet-host port during a restart ends the container, never a retry onto it.
+squat_port=$(free_port)
+run squat FAKE_HOST_CRASHES=1 FLEET_HOST_BACKOFF_START_MS=1000 FLEET_HOST_PORT="$squat_port"
+until_count host-start 1
+node -e "require('net').createServer().listen($squat_port,'0.0.0.0')" &
+squatter=$!
+finish
+kill "$squatter" 2>/dev/null; wait "$squatter" 2>/dev/null
+assert "$st" "1" "port taken at restart exits non-zero"
+assert "$(count host-start)" "1" "fleet-host not restarted onto a taken port"
+assert "$(count broker-term)" "1" "broker stopped when the port is taken"
+grep -q "port $squat_port is already bound" "$dir/log"; assert "$?" "0" "taken port logged"
+
+# 9. The same check runs before the first start.
+squat_port=$(free_port)
+node -e "require('net').createServer().listen($squat_port,'::')" &
+squatter=$!
+for _ in $(seq 1 50); do (exec 3<>"/dev/tcp/127.0.0.1/$squat_port") 2>/dev/null && break; sleep 0.05; done
+run squat6 FLEET_HOST_PORT="$squat_port"
+finish
+kill "$squatter" 2>/dev/null; wait "$squatter" 2>/dev/null
+assert "$st" "1" "port taken (IPv6) at first start exits non-zero"
+assert "$(count host-start)" "0" "fleet-host never started on a taken port"
 
 [ "$fails" -eq 0 ] && echo "ALL PASS" || exit 1

@@ -4,8 +4,10 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
+import { parse } from 'yaml';
 
 const SRC = resolve(__dirname, '..');
+const ROOT = resolve(SRC, '..');
 const ENTRY = join(SRC, 'host', 'cli.ts');
 const BARE_ALLOWED = new Set(['ws', 'yaml', 'ulid']);
 const MAIN_ALLOWED = [/^main\/identity\/[^/]+\.ts$/, /^main\/broker\.ts$/, /^main\/claudeArgs\.ts$/, /^main\/vaultScopes\.ts$/, /^preload\/identityTypes\.ts$/];
@@ -49,5 +51,45 @@ describe('fleet-host import graph', () => {
 
   it('never ships test fakes', () => {
     expect(files.filter((f) => /test/i.test(f))).toEqual([]);
+  });
+});
+
+/** `.dockerignore` semantics: the last matching pattern wins, and a pattern also matches everything under a matched directory. */
+function dockerIncluded(rules: string, file: string): boolean {
+  const toRe = (glob: string): RegExp =>
+    new RegExp(
+      '^' +
+        glob
+          .replace(/^\//, '')
+          .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+          .replace(/\*\*\/?|\*|\?/g, (m) => (m.startsWith('**') ? '.*' : m === '*' ? '[^/]*' : '[^/]')) +
+        '(/.*)?$'
+    );
+  let included = true;
+  for (const line of rules.split('\n').map((l) => l.trim())) {
+    if (!line || line.startsWith('#')) continue;
+    const negated = line.startsWith('!');
+    if (toRe(negated ? line.slice(1) : line).test(file)) included = negated;
+  }
+  return included;
+}
+
+describe('fleet-host build inputs', () => {
+  const graph = walk().files.map((f) => `src/${f}`);
+  const read = (p: string): string => readFileSync(join(ROOT, p), 'utf8');
+
+  it('every import-graph file is in the Docker build context', () => {
+    const rules = read('.dockerignore');
+    expect(graph.filter((f) => !dockerIncluded(rules, f))).toEqual([]);
+    expect(dockerIncluded(rules, 'src/host/server.test.ts')).toBe(false);
+  });
+
+  it('every import-graph file triggers publish-runner and build-app', () => {
+    const paths = (parse(read('.github/workflows/publish-runner.yml')) as { on: { push: { paths: string[] } } }).on.push.paths;
+    const globs = paths.map((g) => new RegExp('^' + g.replace(/\./g, '\\.').replace(/\*\*/g, '.*').replace(/(?<!\.)\*/g, '[^/]*') + '$'));
+    expect(graph.filter((f) => !globs.some((re) => re.test(f)))).toEqual([]);
+    const filter = /grep -qE '([^']+)'/.exec(read('.github/workflows/build-app.yml'))?.[1];
+    expect(filter).toBeDefined();
+    expect(graph.filter((f) => !new RegExp(filter!).test(f))).toEqual([]);
   });
 });

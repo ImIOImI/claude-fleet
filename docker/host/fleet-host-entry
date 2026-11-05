@@ -3,9 +3,13 @@
 # ends the container; fleet-host is restarted with backoff (PTYs live in the
 # broker) unless it crash-loops. SIGTERM stops fleet-host first so it releases
 # the lease, then the broker. SIGHUP is forwarded to fleet-host (config reload).
+# fleet-host never starts onto a port someone else holds: sessions share its
+# uid, so a session could kill it and listen in its place to collect bearer
+# tokens. The container exits instead.
 set -u
 broker_bin=${FLEET_BROKER_BIN:-/usr/local/bin/broker}
 host_js=${FLEET_HOST_JS:-/usr/local/lib/fleet-host/fleet-host.mjs}
+host_port=${FLEET_HOST_PORT:-8080}
 max_restarts=${FLEET_HOST_MAX_RESTARTS:-5}
 window_s=${FLEET_HOST_RESTART_WINDOW_S:-60}
 backoff_start_ms=${FLEET_HOST_BACKOFF_START_MS:-1000}
@@ -18,6 +22,19 @@ if [ -n "${CLAUDE_FLEET_BROKER_TCP_PORT:-}" ]; then
   log error "CLAUDE_FLEET_BROKER_TCP_PORT is set; refusing to start (the broker must stay on its Unix socket)"
   exit 1
 fi
+
+# True if any socket in this network namespace listens on $host_port (IPv4 or IPv6, any address).
+port_bound() {
+  local hex sl local_addr rem st rest
+  hex=$(printf '%04X' "$host_port")
+  for f in /proc/net/tcp /proc/net/tcp6; do
+    [ -r "$f" ] || continue
+    while read -r sl local_addr rem st rest; do
+      [ "$st" = 0A ] && [ "${local_addr##*:}" = "$hex" ] && return 0
+    done < "$f"
+  done
+  return 1
+}
 
 host=
 pause=
@@ -39,6 +56,11 @@ broker=$!
 starts=()
 delay_ms=$backoff_start_ms
 start_host() {
+  if port_bound; then
+    log error "port $host_port is already bound; refusing to start fleet-host" ",\"port\":$host_port"
+    stop
+    exit 1
+  fi
   node "$host_js" &
   host=$!
   starts+=("$SECONDS")

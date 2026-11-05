@@ -21,7 +21,7 @@ export const FATAL_STOP_MS = 2_000;
 
 export interface RunHostOptions {
   env?: NodeJS.ProcessEnv;
-  /** The c3 Postgres store replaces this; memory is single-replica only. */
+  /** Defaults to memoryLeaseStore(), which is correct only for a single replica. */
   leaseStore?: LeaseStore;
   exit?: (code: number) => void;
   /** Signal and crash-event source. */
@@ -30,6 +30,7 @@ export interface RunHostOptions {
   authFactory?: ProviderFactory;
   brokerOps?: BrokerOps;
   ownerPruneMs?: number;
+  brokerPollMs?: number;
   fatalStopMs?: number;
 }
 
@@ -117,10 +118,15 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   onHup = () => void reloader.reload('SIGHUP');
 
   const watch = brokerWatch(ops, events, hub);
+  let polling = false;
   const poller = setInterval(() => {
-    if (leaseMgr.state !== 'holder' || events.size === 0) return;
-    watch.poll().catch((err: Error) => log.log('warn', 'broker poll failed', { error: err.message }));
-  }, BROKER_POLL_MS);
+    if (polling || leaseMgr.state !== 'holder' || events.size === 0) return;
+    polling = true;
+    watch
+      .poll()
+      .catch((err: Error) => log.log('warn', 'broker poll failed', { error: err.message }))
+      .finally(() => (polling = false));
+  }, opts.brokerPollMs ?? BROKER_POLL_MS);
   const pruner = setInterval(() => {
     if (leaseMgr.state !== 'holder') return;
     pruneDeadOwners(ops, hub).catch((err: Error) => log.log('warn', 'owner prune failed', { error: err.message }));

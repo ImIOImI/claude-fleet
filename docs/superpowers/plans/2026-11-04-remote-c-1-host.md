@@ -70,7 +70,7 @@ Copied from the spec and design-state. Every task implicitly includes these.
   - Node has no WebSocket server.
   - The standard `WebSocket` client can't set `Authorization` on the upgrade, and the spec requires the bearer header there.
 - **D4 — How `/attach` relays frames.**
-  - Each binary WebSocket message carries broker frames. Frames may span messages.
+  - Each binary WebSocket message carries whole broker frames only. A message that ends mid-frame closes the socket with 1002.
   - Channel numbers are per viewer connection.
   - The host keeps one upstream broker connection per attached session.
   - Newcomers get a 64 KiB replay buffer, the same size as the broker's ring, trimmed with the broker's `trimToSafeStart` rule.

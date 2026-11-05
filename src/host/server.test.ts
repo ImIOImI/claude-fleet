@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { connect, type AddressInfo, type Socket } from 'node:net';
 import WebSocket from 'ws';
-import { FrameType } from '../main/broker.js';
+import { FrameType, MAX_FRAME_PAYLOAD } from '../main/broker.js';
 import { IdentityError, type Identity, type IdentityProvider } from '../main/identity/types.js';
 import { VERIFY_TTL_MS } from '../main/identity/verifyCache.js';
 import { AttachHub } from './attachHub.js';
@@ -13,7 +13,19 @@ import { EventHub } from './events.js';
 import type { LeaseState } from './lease.js';
 import { createLogger } from './log.js';
 import { brokerRpcChannels, type RpcChannel } from './rpc.js';
-import { createHostServer, HUB_SHUTDOWN_MS, installCrashGuards, MAX_RPC_BODY, PING_MS, REVERIFY_MS, type HostServer, type HostServerDeps } from './server.js';
+import {
+  createHostServer,
+  HUB_SHUTDOWN_MS,
+  installCrashGuards,
+  KNOWN_GOOD_TTL_MS,
+  MAX_RPC_BODY,
+  MAX_RPC_PER_IDENTITY,
+  MAX_SOCKETS_PER_IDENTITY,
+  PING_MS,
+  REVERIFY_MS,
+  type HostServer,
+  type HostServerDeps
+} from './server.js';
 import { decodeAll, fakeBroker, inputFrame, jsonFrame, person, TOKEN } from './testFakes.js';
 
 const WS = { id: '01JC0000000000000000000000', name: 'review-bot', description: 'reviews', color: { hue: 210 } };
@@ -430,10 +442,10 @@ function rawHttp(r: Rig, target: string, upgrade = false): Promise<string> {
   });
 }
 
-/** A WebSocket client that never answers a close frame. */
-function rawUpgrade(r: Rig, path: string, token: string): Promise<{ sock: Socket; data: Buffer[]; ended: Promise<void> }> {
+/** A WebSocket client that never answers a close frame; `halfOpen` also keeps its side open after the server ends. */
+function rawUpgrade(r: Rig, path: string, token: string, halfOpen = false): Promise<{ sock: Socket; data: Buffer[]; ended: Promise<void> }> {
   return new Promise((resolve, reject) => {
-    const sock = connect(Number(new URL(r.url).port), '127.0.0.1');
+    const sock = connect({ port: Number(new URL(r.url).port), host: '127.0.0.1', allowHalfOpen: halfOpen });
     const data: Buffer[] = [];
     const ended = new Promise<void>((res) => sock.once('close', () => res()));
     let head = '';
@@ -703,5 +715,161 @@ describe('WebSocket keepalive', () => {
     for (let i = 0; i < 3; i++) await vi.advanceTimersByTimeAsync(1_000);
     await c.ended;
     await vi.waitFor(() => expect(r.broker.sessions.get('s1')!.detached).toBe(1));
+  });
+});
+
+describe('WebSocket protocol errors', () => {
+  const rsv1 = (payload: Buffer) => {
+    const f = wsFrame(payload);
+    f[0] |= 0x40;
+    return f;
+  };
+
+  it.each(['/attach', '/events'])('%s: an oversize message or an RSV1 frame kills only that socket', async (path) => {
+    const fatal = vi.fn();
+    const off = installCrashGuards(createLogger(() => undefined), fatal);
+    try {
+      const r = await start();
+      const ws = await openWs(r, path, `${TOKEN}s`);
+      ws.on('error', () => undefined);
+      const done = closed(ws);
+      ws.send(Buffer.alloc(MAX_FRAME_PAYLOAD + 64));
+      await done;
+      // Half-open: only a server-side terminate (not ws's own close handshake) releases the socket at once.
+      const c = await rawUpgrade(r, path, `${TOKEN}s`, true);
+      if (path === '/attach') {
+        c.sock.write(wsFrame(jsonFrame(FrameType.ATTACH, { id: 's1', channel: 1 })));
+        await vi.waitFor(() => expect(r.hub.liveTaps).toBe(1));
+      } else expect(r.events.size).toBe(1);
+      const end = new Promise((res) => c.sock.once('end', res));
+      c.sock.write(rsv1(inputFrame(1, 'x')));
+      await end;
+      await new Promise((res) => setTimeout(res, 50));
+      expect(fatal).not.toHaveBeenCalled();
+      expect((await fetch(`${r.url}/healthz`)).status).toBe(200);
+      expect(r.logs.filter((l) => l.includes('"msg":"websocket error"'))).toHaveLength(2);
+      expect(r.events.size).toBe(0);
+      expect(r.hub.liveTaps).toBe(0);
+      c.sock.destroy();
+    } finally {
+      off();
+    }
+  });
+});
+
+describe('socket slots across aborted upgrades', () => {
+  it('a client reset during a slow verify releases its slot', async () => {
+    const r = await start();
+    for (let i = 0; i < MAX_SOCKETS_PER_IDENTITY; i++) {
+      let release!: () => void;
+      const held = new Promise<void>((res) => (release = res));
+      const verify = vi.fn(async () => {
+        await held;
+        return TOKENS[`${TOKEN}r`];
+      });
+      r.setAuth(provider(verify));
+      const sock = connect(Number(new URL(r.url).port), '127.0.0.1');
+      sock.on('error', () => undefined);
+      await new Promise((res) => sock.once('connect', res));
+      sock.write(`GET /events HTTP/1.1\r\nHost: x\r\n${UPGRADE_HEADERS()}Authorization: Bearer ${TOKEN}r\r\n\r\n`);
+      await vi.waitFor(() => expect(verify).toHaveBeenCalled());
+      sock.resetAndDestroy();
+      await new Promise((res) => setTimeout(res, 30));
+      release();
+      await new Promise((res) => setTimeout(res, 30));
+    }
+    const ws = await openWs(r, '/events', `${TOKEN}r`);
+    ws.close();
+  });
+});
+
+describe('known-good tokens and the rejection budget', () => {
+  const whoami = async (r: Rig, token: string) => (await fetch(`${r.url}/whoami`, { headers: bearer(token) })).status;
+
+  it('serves a token verified OK earlier, past its cache entry, while the budget is spent', async () => {
+    const r = await start([], { verifyLimits: { unauthPerMinute: 1 } });
+    expect(await whoami(r, `${TOKEN}r`)).toBe(200);
+    r.setAuth(provider(r.verify));
+    expect(await whoami(r, 'ghp_bad1')).toBe(401);
+    expect(await whoami(r, 'ghp_bad2')).toBe(429);
+    expect(await whoami(r, `${TOKEN}s`)).toBe(429);
+    expect(await whoami(r, `${TOKEN}r`)).toBe(200);
+    expect(vi.mocked(r.verify).mock.calls.filter(([t]) => t === `${TOKEN}r`)).toHaveLength(2);
+  });
+
+  it('drops the exemption once GitHub rejects the token, and after 24 h', async () => {
+    let t = 0;
+    const r = await start([], { verifyLimits: { unauthPerMinute: 1 }, now: () => t });
+    expect(await whoami(r, `${TOKEN}r`)).toBe(200);
+    expect(await whoami(r, `${TOKEN}s`)).toBe(200);
+    r.setAuth(provider(async () => { throw new IdentityError('unauthorized', 'revoked', 401); }));
+    expect(await whoami(r, `${TOKEN}r`)).toBe(401);
+    r.setAuth(provider(r.verify));
+    expect(await whoami(r, `${TOKEN}r`)).toBe(429);
+    t = KNOWN_GOOD_TTL_MS + 1;
+    r.setAuth(provider(r.verify));
+    expect(await whoami(r, 'ghp_bad1')).toBe(401);
+    expect(await whoami(r, `${TOKEN}s`)).toBe(429);
+  });
+
+  it('still applies the in-flight cap to a known-good token', async () => {
+    const r = await start([], { verifyLimits: { maxInFlight: 1 } });
+    expect(await whoami(r, `${TOKEN}r`)).toBe(200);
+    r.setAuth(provider(r.verify));
+    let release!: () => void;
+    const held = new Promise<void>((res) => (release = res));
+    vi.mocked(r.verify).mockImplementationOnce(async () => {
+      await held;
+      return TOKENS[`${TOKEN}s`];
+    });
+    const slow = whoami(r, `${TOKEN}s`);
+    await vi.waitFor(() => expect(r.verify).toHaveBeenCalledTimes(2));
+    expect(await whoami(r, `${TOKEN}r`)).toBe(503);
+    release();
+    expect(await slow).toBe(200);
+  });
+
+  it.each(['forbidden', 'machine-unknown'] as const)('a %s refusal spends the budget', async (kind) => {
+    const r = await start([], { verifyLimits: { unauthPerMinute: 2 } });
+    r.setAuth(provider(async () => { throw new IdentityError(kind, 'refused'); }));
+    expect(await whoami(r, 'ghp_m1')).toBe(403);
+    expect(await whoami(r, 'ghp_m2')).toBe(403);
+    expect(await whoami(r, 'ghp_m3')).toBe(429);
+  });
+
+  it('a grant-less identity and an upstream failure spend the budget; a network error does not', async () => {
+    const r = await start([], { verifyLimits: { unauthPerMinute: 2 } });
+    r.setAuth(provider(async () => { throw new IdentityError('network', 'ECONNRESET'); }));
+    for (let i = 0; i < 3; i++) expect(await whoami(r, `ghp_n${i}`)).toBe(503);
+    r.setAuth(provider(r.verify));
+    expect(await whoami(r, `${TOKEN}n`)).toBe(403);
+    r.setAuth(provider(async () => { throw new IdentityError('upstream', 'GitHub 500'); }));
+    expect(await whoami(r, 'ghp_u1')).toBe(502);
+    expect(await whoami(r, 'ghp_u2')).toBe(429);
+  });
+});
+
+describe('rpc limits', () => {
+  it('caps the body at 64 KiB', () => {
+    expect(MAX_RPC_BODY).toBe(64 * 1024);
+  });
+
+  it('caps concurrent /rpc per identity at 8 with 429, other identities unaffected', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((res) => (release = res));
+    const r = await start([['slow:op', { tier: 'read', handle: async () => { await held; return 1; } }]]);
+    const pending = Array.from({ length: MAX_RPC_PER_IDENTITY }, () => rpc(r, 'slow:op', [], `${TOKEN}r`));
+    await vi.waitFor(async () => expect((await rpc(r, 'slow:op', [], `${TOKEN}r`)).status).toBe(429));
+    const res = await fetch(`${r.url}/rpc/ports:list`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...bearer(`${TOKEN}r`) },
+      body: '{"args":[]}'
+    });
+    expect(res.status).toBe(429);
+    expect(res.headers.get('retry-after')).toBe('1');
+    expect((await rpc(r, 'ports:list', [], `${TOKEN}s`)).status).toBe(200);
+    release();
+    expect((await Promise.all(pending)).map((p) => p.status)).toEqual(Array(MAX_RPC_PER_IDENTITY).fill(200));
+    expect((await rpc(r, 'ports:list', [], `${TOKEN}r`)).status).toBe(200);
   });
 });

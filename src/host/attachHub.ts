@@ -3,8 +3,8 @@
 // attachment per session, fanning OUTPUT out and replaying recent output to
 // newcomers as HISTORY.
 import {
-  FrameReader,
   FrameType,
+  MAX_FRAME_PAYLOAD,
   decodeChannelData,
   encodeChannelData,
   encodeFrame,
@@ -21,6 +21,8 @@ import { CLIENT_FRAME_TIER, RESPONSE_OF, decodeResize, hostCreateArgs, validSess
 export const REPLAY_BYTES = 64 * 1024;
 /** Frames received but not yet handled; past this the viewer is closed with 1008. */
 export const MAX_PENDING_FRAMES = 256;
+/** Payload bytes received but not yet handled; past this the viewer is closed with 1008. */
+export const MAX_PENDING_BYTES = 8 << 20;
 /** Per-viewer token bucket for every frame but INPUT and RESIZE (each may open a broker connection). */
 export const CONTROL_BURST = 20;
 export const CONTROL_PER_SEC = 10;
@@ -254,6 +256,21 @@ export class AttachHub {
 
 type Json = Record<string, unknown>;
 
+class PartialFrame extends Error {}
+
+/** Splits one WebSocket message into frames. A message may not end mid-frame, so reassembly never copies across messages. */
+function* wholeFrames(msg: Buffer): IterableIterator<{ type: FrameType; payload: Buffer }> {
+  let at = 0;
+  while (at < msg.length) {
+    if (msg.length - at < 4) throw new PartialFrame();
+    const totalLen = msg.readUInt32BE(at);
+    if (totalLen === 0 || totalLen - 1 > MAX_FRAME_PAYLOAD) throw new Error('bad frame length');
+    if (msg.length - at < 4 + totalLen) throw new PartialFrame();
+    yield { type: msg[at + 4] as FrameType, payload: Buffer.from(msg.subarray(at + 5, at + 4 + totalLen)) };
+    at += 4 + totalLen;
+  }
+}
+
 function parseJson(payload: Buffer): Json | null {
   try {
     const v: unknown = JSON.parse(payload.toString('utf8'));
@@ -270,10 +287,10 @@ const UNMETERED = new Set([FrameType.INPUT, FrameType.RESIZE]);
 
 export class Viewer {
   private readonly channels = new Map<number, SessionTap>();
-  private readonly reader = new FrameReader();
   private queue: Promise<void> = Promise.resolve();
   private closed = false;
   private pending = 0;
+  private pendingBytes = 0;
   private tokens: number;
   private refilledAt: number;
   /** Frames refused for insufficient tier. */
@@ -297,22 +314,30 @@ export class Viewer {
     return true;
   }
 
-  /** Raw bytes from the viewer's socket; frames may span messages. */
-  receive(chunk: Buffer): Promise<void> {
+  /** One binary WebSocket message: whole frames only. */
+  receive(msg: Buffer): Promise<void> {
     if (this.closed) return this.queue;
     try {
-      this.reader.push(chunk);
-      for (const f of this.reader.consume()) {
+      for (const f of wholeFrames(msg)) {
         if (++this.pending > MAX_PENDING_FRAMES) {
           this.fail(1008, 'too many pending frames');
           break;
         }
+        const size = f.payload.length;
+        this.pendingBytes += size;
+        if (this.pendingBytes > MAX_PENDING_BYTES) {
+          this.fail(1008, 'too many pending bytes');
+          break;
+        }
         this.queue = this.queue
           .then(() => (this.closed ? undefined : this.safeHandle(f.type, f.payload)))
-          .finally(() => this.pending--);
+          .finally(() => {
+            this.pending--;
+            this.pendingBytes -= size;
+          });
       }
-    } catch {
-      this.fail(1002, 'malformed frame');
+    } catch (err) {
+      this.fail(1002, err instanceof PartialFrame ? 'partial frame' : 'malformed frame');
     }
     return this.queue;
   }

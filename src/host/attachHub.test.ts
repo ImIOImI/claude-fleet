@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { FrameType, encodeFrame } from '../main/broker.js';
+import { FrameType, MAX_FRAME_PAYLOAD, encodeChannelData, encodeFrame } from '../main/broker.js';
 import type { Tier } from '../main/identity/grants.js';
-import { AttachHub, MAX_PENDING_FRAMES, ReplayBuffer, trimToSafeStart } from './attachHub.js';
+import { AttachHub, MAX_PENDING_BYTES, MAX_PENDING_FRAMES, ReplayBuffer, trimToSafeStart } from './attachHub.js';
 import { createLogger } from './log.js';
 import { RUNNER_HOOK_SETTINGS } from '../main/claudeArgs.js';
 import { fakeBroker, inputFrame, jsonFrame, person, resizeFrame, sinkRecorder } from './testFakes.js';
@@ -347,5 +347,64 @@ describe('owner pruning', () => {
     await v.receive(jsonFrame(FrameType.CREATE, { id: 'newer' }));
     hub.pruneOwners(new Set(['kept']), mark);
     expect([...hub.owners.keys()].sort()).toEqual(['kept', 'newer']);
+  });
+});
+
+describe('whole frames per message (D4)', () => {
+  it('closes 1002 on a message that ends mid-frame', async () => {
+    const { broker, rec, v } = setup('steer');
+    await v.receive(jsonFrame(FrameType.ATTACH, { id: 's1', channel: 1 }));
+    const f = inputFrame(1, 'hello');
+    await v.receive(Buffer.concat([inputFrame(1, 'a'), f.subarray(0, 7)]));
+    await v.receive(f.subarray(7));
+    expect(rec.closes).toEqual([[1002, 'partial frame']]);
+    expect(broker.sessions.get('s1')!.inputs).toEqual([]);
+  });
+
+  it('closes 1002 on a message shorter than a frame header', async () => {
+    const { rec, v } = setup('steer');
+    await v.receive(Buffer.from([0, 0]));
+    expect(rec.closes).toEqual([[1002, 'partial frame']]);
+  });
+
+  it('accepts a 1 MiB frame in one message', async () => {
+    const { broker, rec, v } = setup('steer');
+    await v.receive(jsonFrame(FrameType.ATTACH, { id: 's1', channel: 1 }));
+    const body = Buffer.alloc(MAX_FRAME_PAYLOAD - 4, 0x61);
+    await v.receive(encodeFrame(FrameType.INPUT, encodeChannelData(1, body)));
+    expect(rec.closes).toEqual([]);
+    expect(broker.sessions.get('s1')!.inputs[0].length).toBe(body.length);
+  });
+
+  it('handles 10k tiny messages, and 10k slivers of one frame, in linear time', async () => {
+    const { rec, v } = setup('steer');
+    await v.receive(jsonFrame(FrameType.ATTACH, { id: 's1', channel: 1 }));
+    const tiny = inputFrame(1, 'k');
+    // 10k x 105 bytes: one 1 MiB frame, the reviewer's quadratic-concat case.
+    const sliver = Buffer.alloc(105);
+    sliver.writeUInt32BE(MAX_FRAME_PAYLOAD, 0);
+    const t0 = performance.now();
+    for (let i = 0; i < 10_000; i++) await v.receive(tiny);
+    const fresh = setup('steer');
+    for (let i = 0; i < 10_000; i++) await fresh.v.receive(i === 0 ? sliver : Buffer.alloc(105));
+    expect(performance.now() - t0).toBeLessThan(200);
+    expect(rec.closes).toEqual([]);
+    expect(fresh.rec.closes).toEqual([[1002, 'partial frame']]);
+  });
+});
+
+describe('pending bytes cap', () => {
+  it('closes 1008 once more than MAX_PENDING_BYTES are queued', async () => {
+    const broker = fakeBroker(['s1']);
+    broker.ops.list = () => new Promise(() => undefined);
+    const rec = sinkRecorder();
+    const v = new AttachHub(broker.ops).viewer({ identity: alice, tier: 'steer' }, rec.sink);
+    void v.receive(encodeFrame(FrameType.LIST, Buffer.alloc(0)));
+    const big = encodeFrame(FrameType.INPUT, encodeChannelData(1, Buffer.alloc(MAX_FRAME_PAYLOAD - 4)));
+    const fit = Math.floor(MAX_PENDING_BYTES / MAX_FRAME_PAYLOAD);
+    for (let i = 0; i < fit; i++) void v.receive(big);
+    expect(rec.closes).toEqual([]);
+    void v.receive(big);
+    expect(rec.closes).toEqual([[1008, 'too many pending bytes']]);
   });
 });

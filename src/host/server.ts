@@ -2,6 +2,7 @@
 // /leader authenticates every request; WebSockets authenticate on upgrade and
 // re-verify on a timer and on config reload.
 import { createServer, STATUS_CODES, type IncomingMessage, type OutgoingHttpHeaders, type Server, type ServerResponse } from 'node:http';
+import { createHash } from 'node:crypto';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { MAX_FRAME_PAYLOAD } from '../main/broker.js';
@@ -15,14 +16,18 @@ import type { Logger } from './log.js';
 import { clientAddress, RejectionBudget, UNAUTH_LIMIT, UnauthLimiter, type UnauthLimitOptions } from './rateLimit.js';
 import { dispatchRpc, type RpcRegistry } from './rpc.js';
 
-export const MAX_RPC_BODY = 1 << 20;
+export const MAX_RPC_BODY = 64 * 1024;
+export const MAX_RPC_PER_IDENTITY = 8;
 export const REVERIFY_MS = 60_000;
 /** A viewer this far behind is dropped rather than buffered without bound. */
 export const MAX_VIEWER_BUFFER = 8 << 20;
 /** Concurrent GitHub verifications; more get 503. */
 export const MAX_VERIFY_IN_FLIGHT = 16;
-/** GitHub-confirmed rejections per minute across all callers; more misses get 429. */
+/** Non-OK GitHub verifications per minute across all callers; more misses get 429. */
 export const UNAUTH_PER_MINUTE = 30;
+/** Hashes of tokens GitHub verified OK; a miss on one skips the rejection limits. */
+export const KNOWN_GOOD_MAX = 10_000;
+export const KNOWN_GOOD_TTL_MS = 24 * 60 * 60_000;
 export const MAX_SOCKETS_PER_IDENTITY = 8;
 /** How long a socket sent a close frame may linger before it is terminated. */
 export const CLOSE_GRACE_MS = 1_000;
@@ -60,6 +65,7 @@ export interface HostServerDeps {
   trustedProxyHops?(): number;
   verifyLimits?: VerifyLimits;
   maxSocketsPerIdentity?: number;
+  maxRpcPerIdentity?: number;
   closeGraceMs?: number;
   maxViewerBuffer?: number;
   pingMs?: number;
@@ -181,8 +187,20 @@ export function createHostServer(deps: HostServerDeps): HostServer {
   const perAddress = new UnauthLimiter({ ...(limits.perAddress ?? UNAUTH_LIMIT), now });
   let inFlight = 0;
   let halted = false;
+  const rpcByIdentity = new Map<string, number>();
+  const knownGood = new Map<string, number>();
+  const tokenKey = (t: string): string => createHash('sha256').update(t).digest('hex');
+  function isKnownGood(key: string): boolean {
+    const at = knownGood.get(key);
+    if (at === undefined) return false;
+    knownGood.delete(key);
+    if (now() - at > KNOWN_GOOD_TTL_MS) return false;
+    knownGood.set(key, at);
+    return true;
+  }
 
-  // Cached answers (valid or rejected) never touch a limit, so one bad client
+  // Cached answers (valid or rejected) never touch a limit, and a token GitHub
+  // accepted in the last 24 h skips the rejection limits, so one bad client
   // can't lock out users whose tokens are already known.
   async function gate(req: IncomingMessage, ctx: AuthContext): Promise<GateResult> {
     if (halted) return { ok: false, status: 503, error: 'shutting down' };
@@ -191,13 +209,15 @@ export function createHostServer(deps: HostServerDeps): HostServer {
     const token = bearerToken(header);
     if (!token) return { ok: false, status: 401, error: 'missing or malformed bearer token' };
     if (ctx.peek(token) !== 'miss') return authenticate(header, ctx, deps.log);
+    const key = tokenKey(token);
+    const trusted = isKnownGood(key);
     const hops = deps.trustedProxyHops?.() ?? 0;
     const ip = hops > 0 ? clientAddress(req, hops) : null;
-    if (ip && perAddress.limited(ip)) {
+    if (!trusted && ip && perAddress.limited(ip)) {
       return { ok: false, status: 429, error: 'too many rejected tokens', retryAfterSec: Math.ceil(perAddress.retryAfterMs(ip) / 1000) };
     }
     if (inFlight >= maxInFlight) return { ok: false, status: 503, error: 'identity checks busy', retryAfterSec: 1 };
-    const wait = budget.waitMs();
+    const wait = trusted ? 0 : budget.waitMs();
     if (wait > 0) return { ok: false, status: 429, error: 'too many rejected tokens', retryAfterSec: Math.ceil(wait / 1000) };
     inFlight++;
     let r: AuthResult;
@@ -206,11 +226,19 @@ export function createHostServer(deps: HostServerDeps): HostServer {
     } finally {
       inFlight--;
     }
-    if (!r.ok && r.status === 401) {
+    if (r.ok) rememberGood(key);
+    else if (r.status !== 503) {
+      knownGood.delete(key);
       budget.spend();
       if (ip) perAddress.record(ip);
     }
     return r;
+  }
+
+  function rememberGood(key: string): void {
+    knownGood.delete(key);
+    if (knownGood.size >= KNOWN_GOOD_MAX) knownGood.delete(knownGood.keys().next().value as string);
+    knownGood.set(key, now());
   }
 
   async function reverify(s: LiveSocket): Promise<void> {
@@ -219,6 +247,7 @@ export function createHostServer(deps: HostServerDeps): HostServer {
     if (s.revoked) return;
     if (r.ok) {
       s.verifiedAt = now();
+      rememberGood(tokenKey(s.token));
       return s.setPrincipal({ identity: r.identity, tier: r.tier });
     }
     if (r.status === 502 || r.status === 503) {
@@ -282,7 +311,20 @@ export function createHostServer(deps: HostServerDeps): HostServer {
         tier: auth.tier
       });
     } else {
-      await handleRpc(req, res, path, auth);
+      const key = ownerKey(auth.identity);
+      const n = rpcByIdentity.get(key) ?? 0;
+      if (n >= (deps.maxRpcPerIdentity ?? MAX_RPC_PER_IDENTITY)) {
+        sendJson(res, 429, { ok: false, error: 'too many concurrent requests' }, { 'Retry-After': '1' });
+        return login;
+      }
+      rpcByIdentity.set(key, n + 1);
+      try {
+        await handleRpc(req, res, path, auth);
+      } finally {
+        const left = (rpcByIdentity.get(key) ?? 1) - 1;
+        if (left > 0) rpcByIdentity.set(key, left);
+        else rpcByIdentity.delete(key);
+      }
     }
     return login;
   }
@@ -364,6 +406,11 @@ export function createHostServer(deps: HostServerDeps): HostServer {
       }
     };
     ws.on('pong', () => (s.missedPongs = 0));
+    // ws emits protocol violations (oversize message, RSV1, bad opcode, bad UTF-8) here; unhandled, they would crash the process.
+    ws.on('error', (err) => {
+      deps.log.log('warn', 'websocket error', { login: s.principal.identity.login, error: err.message });
+      s.kill();
+    });
     live.add(s);
     ws.on('close', () => live.delete(s));
     return s;
@@ -399,6 +446,19 @@ export function createHostServer(deps: HostServerDeps): HostServer {
     ws.on('close', () => off());
   }
 
+  /** Counts the socket against its identity until it closes; false at the cap. */
+  function reserveSlot(key: string, socket: Duplex): boolean {
+    const open = openByIdentity.get(key) ?? 0;
+    if (open >= (deps.maxSocketsPerIdentity ?? MAX_SOCKETS_PER_IDENTITY)) return false;
+    openByIdentity.set(key, open + 1);
+    socket.once('close', () => {
+      const n = (openByIdentity.get(key) ?? 1) - 1;
+      if (n > 0) openByIdentity.set(key, n);
+      else openByIdentity.delete(key);
+    });
+    return true;
+  }
+
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     socket.on('error', () => socket.destroy());
     const path = pathOf(req);
@@ -407,18 +467,12 @@ export function createHostServer(deps: HostServerDeps): HostServer {
     void gate(req, deps.auth())
       .then((auth) => {
         deps.log.log('info', 'upgrade', { path, status: auth.ok ? 101 : auth.status, login: auth.ok ? auth.identity.login : null });
+        // The client may have gone while GitHub answered; its 'close' has then already fired.
+        if (socket.destroyed) return;
         if (!auth.ok) return rejectUpgrade(socket, auth.status, auth.error, failureHeaders(auth));
-        const key = ownerKey(auth.identity);
-        const open = openByIdentity.get(key) ?? 0;
-        if (open >= (deps.maxSocketsPerIdentity ?? MAX_SOCKETS_PER_IDENTITY)) {
+        if (!reserveSlot(ownerKey(auth.identity), socket)) {
           return rejectUpgrade(socket, 429, 'too many open sockets', { 'Retry-After': '5' });
         }
-        openByIdentity.set(key, open + 1);
-        socket.once('close', () => {
-          const n = (openByIdentity.get(key) ?? 1) - 1;
-          if (n > 0) openByIdentity.set(key, n);
-          else openByIdentity.delete(key);
-        });
         const token = bearerToken(req.headers.authorization) as string;
         const principal: Principal = { identity: auth.identity, tier: auth.tier };
         wss.handleUpgrade(req, socket, head, (ws) => (path === '/attach' ? onAttach : onEvents)(ws, token, principal));

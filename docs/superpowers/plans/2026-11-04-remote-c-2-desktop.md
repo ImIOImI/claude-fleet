@@ -694,7 +694,9 @@ Expected: FAIL, cannot resolve `./remoteAttach.js`.
 ```ts
 // A remote host's /attach socket speaks the broker frame protocol, so the
 // ordinary BrokerClient drives it over a WebSocket stream and the renderer's
-// pty:* channels see the same PtyHandle as for a container.
+// pty:* channels see the same PtyHandle as for a container. The host requires
+// whole frames per message: BrokerClient writes one frame per write, and the
+// ws stream sends each write as one message.
 import { randomUUID } from 'node:crypto';
 import { createWebSocketStream } from 'ws';
 import { BrokerClient, brokerPtyStream } from './broker.js';

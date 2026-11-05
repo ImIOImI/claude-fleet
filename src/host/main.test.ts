@@ -253,3 +253,20 @@ describe('crash guard', () => {
     await vi.waitFor(() => expect(r.exit).toHaveBeenCalledWith(1), { timeout: 1000 });
   });
 });
+
+describe('broker polling', () => {
+  it('skips a tick while the previous poll is still in flight', async () => {
+    const broker = fakeBroker(['s1']);
+    let calls = 0;
+    broker.ops.list = () => {
+      calls++;
+      return new Promise(() => undefined);
+    };
+    const r = await start(CONFIG, { brokerOps: broker.ops, brokerPollMs: 10 });
+    const ws = await openEvents(r);
+    await vi.waitFor(() => expect(calls).toBe(1));
+    await new Promise((res) => setTimeout(res, 100));
+    expect(calls).toBe(1);
+    ws.close();
+  });
+});
