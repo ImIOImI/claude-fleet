@@ -3805,3 +3805,23 @@ button.switch { padding: 0; cursor: pointer; }
 /* Remote dots don't pulse. */
 .ws-chip .dot.remote.unreachable { animation: none; }
 .ws-chip .dot.remote.checking { background: var(--ink-3); animation: none; }
+.session-tab-watching {
+  margin-left: 6px;
+  font-size: 9px;
+  color: var(--ink-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.session-tab-join {
+  background: transparent;
+  border: none;
+  color: var(--ink-2);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.session-tab-join:hover:not(:disabled) { color: var(--ink); background: var(--bg-card); }
+.session-join-menu { max-height: 320px; max-width: 360px; overflow-y: auto; }
+.session-join-item span { min-width: 0; font-family: var(--font-mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-join-empty { padding: 6px 8px; font-size: 11px; color: var(--ink-2); }

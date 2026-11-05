@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { RemoteProbeErr, RemoteProbeOk } from '../../preload/remoteTypes';
 import { readFileSync } from 'node:fs';
-import { applyProbe, canStartSessions, CHECKING_STATUS, remoteChip, canType, ipcErrorText, probeErrorText, remoteFormView, tierTitle, unreachableBanner, type RemoteFormState } from './remoteView';
+import { applyProbe, canStartSessions, CHECKING_STATUS, joinableSessions, paneRules, remoteChip, canType, ipcErrorText, probeErrorText, remoteFormView, tierTitle, unreachableBanner, type RemoteFormState } from './remoteView';
 
 const OK: RemoteProbeOk = {
   ok: true,
@@ -128,5 +128,39 @@ describe('remoteChip', () => {
 
   it("matches main's checking status", () => {
     expect(readFileSync('src/main/remote.ts', 'utf8')).toContain(`CHECKING_STATUS = '${CHECKING_STATUS}'`);
+  });
+});
+
+describe('paneRules', () => {
+  it('local and container panes are unrestricted', () => {
+    expect(paneRules(undefined)).toEqual({ remote: false, readOnly: false, canNew: true, defaultTab: true });
+  });
+
+  it('read watches only and opens no default tab', () => {
+    expect(paneRules('read')).toEqual({ remote: true, readOnly: true, canNew: false, defaultTab: false });
+  });
+
+  it('steer types but cannot start sessions', () => {
+    expect(paneRules('steer')).toEqual({ remote: true, readOnly: false, canNew: false, defaultTab: false });
+  });
+
+  it('session is unrestricted', () => {
+    expect(paneRules('session')).toEqual({ remote: true, readOnly: false, canNew: true, defaultTab: true });
+  });
+
+  it('an unknown tier is treated as read until the host answers', () => {
+    expect(paneRules(null)).toEqual(paneRules('read'));
+  });
+});
+
+describe('joinableSessions', () => {
+  it('lists live host sessions that are not already tabs', () => {
+    const live = [
+      { id: 'a', alive: true },
+      { id: 'b', alive: false },
+      { id: 'c', alive: true }
+    ];
+    expect(joinableSessions(live, ['c'])).toEqual([{ id: 'a', alive: true }]);
+    expect(joinableSessions([], [])).toEqual([]);
   });
 });

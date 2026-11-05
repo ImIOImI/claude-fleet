@@ -1,5 +1,5 @@
 // Pure copy and tier rules for remote workspaces. Display only: the host enforces every tier.
-import type { RemoteProbe, RemoteProbeErr, RemoteProbeOk, RemoteTier } from '../../preload/remoteTypes';
+import type { RemoteLiveSession, RemoteProbe, RemoteProbeErr, RemoteProbeOk, RemoteTier } from '../../preload/remoteTypes';
 
 export type MaybeTier = RemoteTier | null | undefined;
 
@@ -87,4 +87,24 @@ export function remoteChip(w: { kind: string; state: string; status?: string }):
   if (w.state !== 'unreachable') return { phase: 'live', sub: null };
   if (w.status === CHECKING_STATUS) return { phase: 'checking', sub: 'checking host…' };
   return { phase: 'unreachable', sub: 'host unreachable' };
+}
+
+export interface PaneRules {
+  remote: boolean;
+  /** Keystrokes are dropped; the host drops them too. */
+  readOnly: boolean;
+  canNew: boolean;
+  /** An empty inventory (or closing the last tab) gets a fresh tab; creating one would fail below `session`. */
+  defaultTab: boolean;
+}
+
+/** `undefined` means a local or container workspace. */
+export function paneRules(t: RemoteTier | null | undefined): PaneRules {
+  if (t === undefined) return { remote: false, readOnly: false, canNew: true, defaultTab: true };
+  const canNew = canStartSessions(t);
+  return { remote: true, readOnly: !canType(t), canNew, defaultTab: canNew };
+}
+
+export function joinableSessions(live: RemoteLiveSession[], tabIds: string[]): RemoteLiveSession[] {
+  return live.filter((l) => l.alive && !tabIds.includes(l.id));
 }

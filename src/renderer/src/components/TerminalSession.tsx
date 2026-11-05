@@ -112,6 +112,8 @@ interface Props {
    * replays its ring buffer) when it flips back to false on resume. (#18)
    */
   paused?: boolean;
+  /** Remote viewer below `steer`: no input is sent (the host would drop it). */
+  readOnly?: boolean;
   /**
    * Called when the PTY signals end-of-life (user `/exit`, claude
    * crash, docker stop, etc.). The parent TerminalPane uses this to
@@ -151,6 +153,7 @@ export function TerminalSession({
   resumeOf,
   visible,
   paused = false,
+  readOnly = false,
   onLifecycleChange,
   onActivityChange,
   reloadToken,
@@ -160,6 +163,8 @@ export function TerminalSession({
   // The live xterm, so effects outside the attach effect can force a repaint
   // without reaching into its closure (#268).
   const termRef = useRef<Terminal | null>(null);
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
   // Bumped when the user clicks "Start new session" / "Retry" after a
   // session ends. The effect deps on containerId+sessionEpoch, so a new
   // attach happens with a fresh xterm instance (no stale state from the
@@ -447,7 +452,7 @@ export function TerminalSession({
           return;
         }
         return window.api.clipboard.read().then((text) => {
-          if (text && ptyHandleId) window.api.pty.input(ptyHandleId, text);
+          if (text && ptyHandleId && !readOnlyRef.current) window.api.pty.input(ptyHandleId, text);
         });
       });
     };
@@ -632,6 +637,7 @@ export function TerminalSession({
           }
         });
         term.onData((data) => {
+          if (readOnlyRef.current) return;
           // First user keystroke ⇒ they're interacting; cancel any pending
           // repaint nudge so we never inject Ctrl+L into an active session.
           disarmNudge();
@@ -725,7 +731,7 @@ export function TerminalSession({
             nudgeTimer = null;
             const handle = ptyHandleId;
             disarmNudge();
-            if (handle) {
+            if (handle && !readOnlyRef.current) {
               try {
                 window.api.pty.input(handle, '\x0c');
               } catch {

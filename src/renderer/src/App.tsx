@@ -1535,6 +1535,7 @@ export function App() {
               .map((w) => (
                 <TerminalPane
                   key={w.id}
+                  remoteTier={w.kind === 'remote' ? w.remote?.tier ?? null : undefined}
                   visible={(!inboxOpen && selectedId === w.id) || (inboxOpen && inboxSection === 'sessions' && w.id === roleWsId)}
                   workspaceId={w.id}
                   mirrorDefault={w.mirror.default}

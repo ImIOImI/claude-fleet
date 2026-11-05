@@ -15,6 +15,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import type { RemoteLiveSession, RemoteTier } from '../../../preload';
+import { joinableSessions, paneRules, tierTitle } from '../remoteView';
 import type { WorkspaceObservabilitySummary } from '../../../preload';
 import type { MirrorSetting, CleanupSetting } from '../App';
 import { TerminalSession } from './TerminalSession';
@@ -51,6 +53,8 @@ function SessionTabDot({ ended, busy, waiting }: { ended: boolean; busy: boolean
 
 interface Props {
   containerId: string;
+  /** Remote workspaces only: the viewer's tier (null until the host answers); undefined for local/container. */
+  remoteTier?: RemoteTier | null;
   /** ULID — used for sessions.json path and observability lookups. */
   workspaceId: string;
   /** The workspace's durable-mirror defaults (manifest). New tabs inherit
@@ -204,6 +208,7 @@ function uid(): string {
 
 export function TerminalPane({
   containerId,
+  remoteTier,
   workspaceId,
   mirrorDefault,
   cleanupDefault,
@@ -242,6 +247,8 @@ export function TerminalPane({
   }, [inbound?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [loaded, setLoaded] = useState(false);
+  const remoteTierRef = useRef(remoteTier);
+  remoteTierRef.current = remoteTier;
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeId, setActiveId] = useState<string>('');
   const [nextNum, setNextNum] = useState(2);
@@ -316,7 +323,10 @@ export function TerminalPane({
     (async () => {
       const inv = await window.api.sessions.read(workspaceId);
       if (cancelled) return;
-      if (inv.sessions.length === 0) {
+      if (inv.sessions.length === 0 && !paneRules(remoteTierRef.current).defaultTab) {
+        setSessions([]);
+        setActiveId('');
+      } else if (inv.sessions.length === 0) {
         const main: Session = { id: uid(), name: 'main', createdAt: Date.now() };
         setSessions([main]);
         setActiveId(main.id);
@@ -372,8 +382,35 @@ export function TerminalPane({
     onActiveTabChange?.(workspaceId, activeId, freshIdsRef.current.has(activeId));
   }, [activeId, workspaceId, onActiveTabChange]);
 
+  const rules = paneRules(remoteTier);
+  const { menu: joinMenu, toggle: toggleJoinMenu, close: closeJoinMenu } = usePortalMenu();
+  const [joinable, setJoinable] = useState<RemoteLiveSession[] | null>(null);
+
+  function openJoin(trigger: HTMLElement): void {
+    const opening = joinMenu === null;
+    toggleJoinMenu(trigger, 'join', 'right');
+    if (!opening) return;
+    setJoinable(null);
+    const tabIds = sessions.map((s) => s.id);
+    void window.api.remote
+      .liveSessions(workspaceId)
+      .catch((): RemoteLiveSession[] => [])
+      .then((live) => setJoinable(joinableSessions(live, tabIds)));
+  }
+
+  function joinSession(id: string): void {
+    closeJoinMenu();
+    if (sessions.some((s) => s.id === id)) {
+      setActiveId(id);
+      return;
+    }
+    setSessions((prev) => [...prev, { id, name: `session ${nextNum}`, createdAt: Date.now() }]);
+    setActiveId(id);
+    setNextNum((n) => n + 1);
+  }
+
   function addSession(): void {
-    if (!loaded) return;
+    if (!loaded || !rules.canNew) return;
     const id = uid();
     const name = `session ${nextNum}`;
     freshIdsRef.current.add(id);
@@ -619,6 +656,10 @@ export function TerminalPane({
       const idx = prev.findIndex((s) => s.id === id);
       if (idx < 0) return prev;
       const next = prev.filter((s) => s.id !== id);
+      if (next.length === 0 && !rules.defaultTab) {
+        setActiveId('');
+        return next;
+      }
       if (next.length === 0) {
         // Never leave the workspace with zero sessions — drop a fresh
         // main back in so there's always somewhere to type. Mark it
@@ -771,6 +812,11 @@ export function TerminalPane({
                 <span className="session-tab-name">
                   {s.autoName && <span className="session-tab-auto" title="Auto-named from Claude's summary" aria-hidden="true">✦</span>}
                   {s.name}
+                  {rules.readOnly && (
+                    <span className="session-tab-watching" title={tierTitle(remoteTier)}>
+                      watching
+                    </span>
+                  )}
                 </span>
               )}
               <button
@@ -789,16 +835,34 @@ export function TerminalPane({
             </div>
           );
         })}
-        <button
-          className="session-tab-new"
-          onClick={addSession}
-          title="New session in this workspace"
-          aria-label="New session"
-          disabled={!loaded || paused}
-        >
-          +
-        </button>
+        {rules.canNew && (
+          <button
+            className="session-tab-new"
+            onClick={addSession}
+            title="New session in this workspace"
+            aria-label="New session"
+            disabled={!loaded || paused}
+          >
+            +
+          </button>
+        )}
+        {rules.remote && (
+          <button
+            className="session-tab-join"
+            onClick={(e) => {
+              e.stopPropagation();
+              openJoin(e.currentTarget);
+            }}
+            title="Open a session that is running on the host"
+            aria-haspopup="menu"
+            aria-expanded={joinMenu !== null}
+            disabled={!loaded}
+          >
+            Join…
+          </button>
+        )}
         {/* Per-session durable-mirror toggle for the active tab. */}
+        {!rules.remote && (
         <button
           className={`session-mirror-toggle ${activeMirror === 'on' ? 'on' : 'off'}`}
           onClick={toggleMirror}
@@ -813,7 +877,30 @@ export function TerminalPane({
           <span className="session-mirror-dot" aria-hidden="true" />
           mirror {activeMirror}
         </button>
+        )}
       </div>
+      {joinMenu &&
+        createPortal(
+          <div
+            className="ws-chip-menu session-join-menu"
+            role="menu"
+            style={{ position: 'fixed', top: joinMenu.top, right: joinMenu.right }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {joinable === null ? (
+              <div className="session-join-empty">Loading…</div>
+            ) : joinable.length === 0 ? (
+              <div className="session-join-empty">No other sessions are running on the host.</div>
+            ) : (
+              joinable.map((l) => (
+                <button key={l.id} role="menuitem" className="session-join-item" onClick={() => joinSession(l.id)}>
+                  <span>{l.id}</span>
+                </button>
+              ))
+            )}
+          </div>,
+          document.body
+        )}
       {tabMenu &&
         (() => {
           const s = sessions.find((x) => x.id === tabMenu.id);
@@ -835,6 +922,7 @@ export function TerminalPane({
                 <IconPencil />
                 <span>Rename</span>
               </button>
+              {!rules.remote && (
               <button
                 role="menuitem"
                 disabled={endedIds.has(s.id)}
@@ -848,6 +936,8 @@ export function TerminalPane({
                 <IconRefresh />
                 <span>Refresh</span>
               </button>
+              )}
+              {!rules.remote && (
               <button
                 role="menuitemcheckbox"
                 aria-checked={!!s.autoName}
@@ -865,6 +955,7 @@ export function TerminalPane({
                   </span>
                 )}
               </button>
+              )}
               <div className="ws-chip-menu-divider" />
               <button
                 role="menuitem"
@@ -922,12 +1013,18 @@ export function TerminalPane({
             // later in DOM order won the stacking contest.
             visible={visible && s.id === activeId}
             paused={paused}
+            readOnly={rules.readOnly}
             onLifecycleChange={handleLifecycle}
             onActivityChange={handleActivity}
             reloadToken={reloadTargets[s.id] ?? null}
             onRefreshUnresolved={handleRefreshUnresolved}
           />
         ))}
+        {loaded && sessions.length === 0 && rules.remote && (
+          <div className="empty">
+            <p>No sessions open here. Use Join… to open one that is running on the host.</p>
+          </div>
+        )}
         {paused && (
           <div className="paused-overlay" role="alertdialog" aria-label="Workspace paused">
             <div className="paused-card">
