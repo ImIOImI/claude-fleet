@@ -16,8 +16,6 @@ export interface CommitteeFields {
   accessibility?: AccessibilityConfig;
 }
 
-/** A workspace is a manager iff it holds at least one outbound grant. Mirrors
- *  `control.ts:isManager` on the main side — keep them in lockstep. */
 /** Why `kind` can't manage a committee, or null for a container. */
 export function managerUnavailableText(kind: string): string | null {
   if (kind === 'container') return null;
@@ -26,6 +24,8 @@ export function managerUnavailableText(kind: string): string | null {
   return "Only container workspaces can act as a committee manager.";
 }
 
+/** A workspace is a manager iff it holds at least one outbound grant. Mirrors
+ *  `control.ts:isManager` on the main side — keep them in lockstep. */
 export function isManager(ws: { control?: ControlConfig }): boolean {
   return (ws.control?.canControl?.length ?? 0) > 0;
 }
