@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef, useReducer, useMemo } from 'react';
+import type { RemoteTier } from '../../preload/remoteTypes';
 import { usePorts } from './usePorts';
 import { useServingSessionNames } from './useServingSessionNames';
 import { WorkspaceTabStrip } from './components/WorkspaceTabStrip';
@@ -51,7 +52,7 @@ function makeLifecycleApi(): WorkspaceLifecycleApi {
 }
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted' | 'unreachable';
-export type WorkspaceKind = 'container' | 'local';
+export type WorkspaceKind = 'container' | 'local' | 'remote';
 export type AuthMode = 'oauth' | 'apikey' | 'endpoint';
 
 export interface WorkspaceColor {
@@ -140,6 +141,8 @@ export interface WorkspaceSummary {
   accessibility?: AccessibilityConfig;
   /** Host-private inbox permissions (#407). */
   inbox?: InboxConfig;
+  /** kind 'remote' only: the fleet-host bookmark (tier is display only). */
+  remote?: { url: string; tier: RemoteTier | null; login: string | null; checkedAt: number };
   createdAt: number;
   lastUsedAt: number;
 }
@@ -1321,7 +1324,7 @@ export function App() {
       labels: source.labels,
       color: undefined, // fresh hue
       workspaceSubdir: source.workspaceSubdir,
-      kind: source.kind,
+      kind: source.kind === 'remote' ? 'container' : source.kind,
       workspaceRoot: source.workspaceRoot,
       launcher: source.launcher,
       image: source.image,
@@ -1623,6 +1626,11 @@ export function App() {
         onDelete={(w) => setDeleteTargetId(w.id)}
         initialNewTabValues={cloneSource}
         onOpenSettings={(tab) => setSettingsTab(tab)}
+        onRemoteAdded={(id) => {
+          setCreateOpen(false);
+          focusWorkspaceWhenWarm(id);
+          refresh();
+        }}
       />
       {(() => {
         if (!editTargetId) return null;

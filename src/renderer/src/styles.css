@@ -3782,3 +3782,22 @@ button.switch { padding: 0; cursor: pointer; }
 .device-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
 .device-actions a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .account-notice { color: var(--warn); }
+
+/* Remote workspaces. */
+.remote-form { display: flex; flex-direction: column; gap: 10px; }
+.remote-form .form-row { margin-bottom: 0; }
+.remote-form .form-hint { font-size: 11px; color: var(--ink-2); margin: 0; }
+.remote-form .form-hint.error-text { color: var(--danger); }
+.remote-probe { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border: 1px solid var(--rule); border-radius: var(--r-md); font-size: 12px; color: var(--ink-1); }
+.remote-probe-name { color: var(--ink); font-weight: 600; }
+.remote-probe-desc { color: var(--ink-2); }
+.remote-warning { color: var(--warn); font-size: 11px; }
+.tier-badge {
+  font-size: 9px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--rule-strong);
+  color: var(--ink-1);
+  text-transform: lowercase;
+}

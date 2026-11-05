@@ -11,7 +11,7 @@ export const COMMITTEE_VERBS: CommitteeVerb[] = ['read', 'post', 'pause'];
 /** Minimal shape the helpers need (a WorkspaceSummary structurally satisfies it). */
 export interface CommitteeFields {
   id: string;
-  kind: 'container' | 'local';
+  kind: 'container' | 'local' | 'remote';
   control?: ControlConfig;
   accessibility?: AccessibilityConfig;
 }

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AccountStatus } from '../preload/identityTypes.js';
 import type { RemoteBackend } from './remote.js';
 import { RemoteError, type WhoAmI } from './remoteClient.js';
-import { APPROVAL_MS, assertNotRemoteSpec, confirmText, REMOTE_CHANNELS, registerRemoteIpc, type RemoteConfirm, type RemoteIpcDeps } from './remoteIpc.js';
+import { APPROVAL_MS, assertNotRemoteSpec, DIALOG_GAP_MS, confirmText, REMOTE_CHANNELS, registerRemoteIpc, type RemoteConfirm, type RemoteIpcDeps } from './remoteIpc.js';
 import type { WorkspaceSpec } from './workspaces.js';
 
 vi.mock('electron', () => ({ app: { getPath: () => '/nonexistent' } }));
@@ -243,6 +243,7 @@ describe('remote:* token consent (main-process confirm)', () => {
     await h.call('remote:probe', 'https://h');
     await h.call('remote:add', 'https://h/sub');
     expect(h.deps.confirm).toHaveBeenCalledTimes(1);
+    h.advance(DIALOG_GAP_MS);
     await h.call('remote:probe', 'https://h:8443');
     expect(h.deps.confirm).toHaveBeenLastCalledWith({ kind: 'send-token', origin: 'https://h:8443' });
     expect(h.deps.confirm).toHaveBeenCalledTimes(2);
@@ -283,6 +284,61 @@ describe('remote:* token consent (main-process confirm)', () => {
     expect(h.deps.confirm).toHaveBeenCalledWith({ kind: 're-point', from: 'https://old', to: 'https://new' });
     expect(h.store.get(ID)).toBe(prior);
     expect(h.deps.writeManifest).not.toHaveBeenCalled();
+  });
+
+  it('a declined origin is remembered: no second dialog, still declined', async () => {
+    const h = harness(async () => WHO, { confirm: async () => false });
+    await h.call('remote:probe', 'https://h');
+    h.advance(APPROVAL_MS * 10);
+    expect(await h.call('remote:probe', 'https://h/other')).toMatchObject({ ok: false, kind: 'declined', message: expect.stringMatching(/earlier/) });
+    expect(h.deps.confirm).toHaveBeenCalledTimes(1);
+    expect(h.whoami).not.toHaveBeenCalled();
+  });
+
+  it('a failed dialog is not remembered as a decline', async () => {
+    let fail = true;
+    const h = harness(async () => WHO, { confirm: async () => { if (fail) throw new Error('no window'); return true; } });
+    expect(await h.call('remote:probe', 'https://h')).toMatchObject({ ok: false, kind: 'declined' });
+    fail = false;
+    h.advance(DIALOG_GAP_MS);
+    expect(await h.call('remote:probe', 'https://h')).toMatchObject({ ok: true });
+  });
+
+  it('at most one send-token dialog per gap across origins; a rate-limited ask is not remembered', async () => {
+    const h = harness(async () => WHO);
+    await h.call('remote:probe', 'https://a');
+    h.advance(DIALOG_GAP_MS - 1);
+    expect(await h.call('remote:probe', 'https://b')).toMatchObject({ ok: false, kind: 'declined', message: expect.stringMatching(/few seconds/) });
+    expect(h.deps.confirm).toHaveBeenCalledTimes(1);
+    expect(h.whoami).toHaveBeenCalledTimes(1);
+    h.advance(1);
+    expect(await h.call('remote:probe', 'https://b')).toMatchObject({ ok: true });
+    expect(h.deps.confirm).toHaveBeenCalledTimes(2);
+  });
+
+  it('the gap counts from when the last dialog closed', async () => {
+    let answer!: (v: boolean) => void;
+    const h = harness(async () => WHO, { confirm: () => new Promise((r) => (answer = r)) });
+    const a = h.call('remote:probe', 'https://a');
+    await new Promise((r) => setTimeout(r, 10));
+    h.advance(DIALOG_GAP_MS * 3);
+    expect(await h.call('remote:probe', 'https://b')).toMatchObject({ ok: false, kind: 'declined' });
+    answer(true);
+    await a;
+    h.advance(DIALOG_GAP_MS - 1);
+    expect(await h.call('remote:probe', 'https://b')).toMatchObject({ ok: false, kind: 'declined' });
+    expect(h.deps.confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('the send-token dialog carries the plain-http warning for a non-loopback http origin', async () => {
+    const h = harness(async () => WHO);
+    await h.call('remote:probe', 'http://fleet-agent-svc:8080');
+    expect(h.deps.confirm).toHaveBeenLastCalledWith({ kind: 'send-token', origin: 'http://fleet-agent-svc:8080', warning: expect.stringMatching(/unencrypted/) });
+    h.advance(DIALOG_GAP_MS);
+    await h.call('remote:probe', 'http://localhost:8080');
+    expect(h.deps.confirm).toHaveBeenLastCalledWith({ kind: 'send-token', origin: 'http://localhost:8080' });
+    expect(confirmText({ kind: 'send-token', origin: 'http://x', warning: 'Plain http: W' }).detail).toMatch(/Plain http: W$/);
+    expect(confirmText({ kind: 'send-token', origin: 'https://x' }).detail).not.toMatch(/Plain http/);
   });
 
   it('confirmText names the origin, or both URLs', () => {

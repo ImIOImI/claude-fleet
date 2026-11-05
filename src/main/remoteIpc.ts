@@ -17,15 +17,19 @@ const MAX_URL_LEN = 2048;
 const MAX_LIVE_SESSIONS = 1000;
 /** One approval covers probe → add. */
 export const APPROVAL_MS = 2 * 60_000;
+/** Minimum quiet time between send-token dialogs, across all origins. */
+export const DIALOG_GAP_MS = 10_000;
 
-export type RemoteConfirm = { kind: 'send-token'; origin: string } | { kind: 're-point'; from: string; to: string };
+export type RemoteConfirm =
+  | { kind: 'send-token'; origin: string; warning?: string }
+  | { kind: 're-point'; from: string; to: string };
 
 /** Text for main's native confirm; origins are punycode (URL.origin), so look-alike hosts show as xn--. */
 export function confirmText(r: RemoteConfirm): { message: string; detail: string; button: string } {
   if (r.kind === 'send-token') {
     return {
       message: `Send your GitHub sign-in to ${r.origin}?`,
-      detail: 'claude-fleet sends your GitHub token to this host to check your access. Continue only if you trust it.',
+      detail: `claude-fleet sends your GitHub token to this host to check your access. Continue only if you trust it.${r.warning ? `\n\n${r.warning}` : ''}`,
       button: 'Send'
     };
   }
@@ -71,28 +75,55 @@ export function assertNotRemoteSpec(incomingKind: unknown, existing: WorkspaceSp
 }
 
 const DECLINED: RemoteProbeErr = { ok: false, kind: 'declined', message: 'Cancelled: nothing was sent to the host.' };
+const DECLINED_EARLIER: RemoteProbeErr = {
+  ok: false,
+  kind: 'declined',
+  message: 'You declined sending your sign-in to this host earlier, so nothing was sent. Restart claude-fleet to be asked again.'
+};
+const DIALOG_BUSY: RemoteProbeErr = {
+  ok: false,
+  kind: 'declined',
+  message: 'A sign-in confirmation was shown moments ago, so nothing was sent. Try again in a few seconds.'
+};
 
 export function registerRemoteIpc(ipc: IpcHandleLike, deps: RemoteIpcDeps): void {
   const now = deps.now ?? Date.now;
   const approvedUntil = new Map<string, number>();
-  const asking = new Map<string, Promise<boolean>>();
+  const asking = new Map<string, Promise<boolean | null>>();
+  // App-session memory: a declined origin is never re-prompted.
+  const declined = new Set<string>();
+  let lastDialogAt = -Infinity;
 
   async function bookmarked(origin: string): Promise<boolean> {
     return (await deps.listManifests()).some((m) => m.kind === 'remote' && m.remote && new URL(m.remote.url).origin === origin);
   }
 
-  /** Consent before the token goes to an origin that isn't already bookmarked. */
-  async function tokenAllowed(url: string): Promise<boolean> {
+  /** Consent before the token goes to an origin that isn't already bookmarked; null means allowed. */
+  async function tokenRefusal(url: string): Promise<RemoteProbeErr | null> {
     const origin = new URL(url).origin;
-    if ((approvedUntil.get(origin) ?? 0) > now() || (await bookmarked(origin))) return true;
+    if ((approvedUntil.get(origin) ?? 0) > now() || (await bookmarked(origin))) return null;
+    if (declined.has(origin)) return DECLINED_EARLIER;
     let pending = asking.get(origin);
     if (!pending) {
-      pending = deps.confirm({ kind: 'send-token', origin }).catch(() => false).finally(() => asking.delete(origin));
+      if (asking.size > 0 || now() - lastDialogAt < DIALOG_GAP_MS) return DIALOG_BUSY;
+      lastDialogAt = now();
+      const warning = plainHttpWarning(url);
+      pending = deps
+        .confirm({ kind: 'send-token', origin, ...(warning ? { warning } : {}) })
+        .then((v) => v === true, () => null)
+        .finally(() => {
+          asking.delete(origin);
+          lastDialogAt = now();
+        });
       asking.set(origin, pending);
     }
-    const ok = await pending;
-    if (ok) approvedUntil.set(origin, now() + APPROVAL_MS);
-    return ok;
+    const answer = await pending;
+    if (answer === true) {
+      approvedUntil.set(origin, now() + APPROVAL_MS);
+      return null;
+    }
+    if (answer === false) declined.add(origin);
+    return DECLINED;
   }
 
   async function classify(err: unknown, url: string | null): Promise<RemoteProbeErr> {
@@ -131,7 +162,8 @@ export function registerRemoteIpc(ipc: IpcHandleLike, deps: RemoteIpcDeps): void
       const client = deps.backend.clientFor(url);
       // Unauthenticated: a URL that isn't a fleet-host never sees the token or a dialog.
       await client.healthz();
-      if (!(await tokenAllowed(url))) return DECLINED;
+      const refusal = await tokenRefusal(url);
+      if (refusal) return refusal;
       const who = await client.whoami();
       const prior = await deps.readManifest(who.workspace.id);
       const priorUrl = prior?.kind === 'remote' ? prior.remote?.url ?? null : null;

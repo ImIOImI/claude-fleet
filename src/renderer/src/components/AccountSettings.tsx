@@ -8,8 +8,11 @@ interface ActiveRun extends SignInRun {
   wake: () => void;
 }
 
-export function AccountSettings() {
+export function AccountSettings({ onStatus }: { onStatus?: (s: AccountStatus) => void } = {}) {
   const [status, setStatus] = useState<AccountStatus | null>(null);
+  useEffect(() => {
+    if (status) onStatus?.(status);
+  }, [status, onStatus]);
   const [flow, setFlow] = useState<SignInStart | null>(null);
   const [signingIn, setSigningIn] = useState(false);
   const [error, setError] = useState<string | null>(null);
