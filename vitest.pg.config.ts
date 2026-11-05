@@ -16,6 +16,7 @@ export default defineConfig({
       'src/main/db.usageAnchors.test.ts',
       'src/main/dbEmbeddings.test.ts',
       'src/main/dbIngestBatch.test.ts',
+      'src/main/dbPgConcurrency.test.ts',
       'src/main/dbReadCache.test.ts',
       'src/main/dbReadCharacterization.test.ts',
       'src/main/dbSearchEmbeddings.test.ts',
