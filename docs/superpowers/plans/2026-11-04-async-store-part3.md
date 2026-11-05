@@ -3740,6 +3740,8 @@ gh pr merge --auto --squash "$(gh pr view feat/async-store-p3 --repo ImIOImI/cla
 
 ## Part 4 outline (written in full when part 3 has merged)
 
+Written in full as `2026-11-05-async-store-part4a.md` (MCP on Postgres) and `2026-11-05-async-store-part4b.md` (the managed container, Settings → *Storage*, the first-switch copy, the degraded state).
+
 **Goal:** users pick Postgres locally in Settings, and everything works on it: the app-managed container, the first-switch copy, the Docker-down state, and the MCP server, typed tools and `query` included, with structural isolation. That completes sub-project (a).
 
 - **Managed local Postgres** (`src/main/store/managedPostgres.ts` on `docker.ts`):

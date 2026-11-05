@@ -3524,7 +3524,7 @@ gh pr merge --auto --squash
 
 **Goal:** remote automations run on the host, and its sessions get the fleet-state MCP tools.
 
-**Gate:** c3 merged; async-store part 4's typed tools on a `ReadSource` (D34's history tools on Postgres). The inbox and automation tools don't need part 4, but splitting the MCP server twice isn't worth it.
+**Gate:** c3 merged; async-store part 4a's `ReadSource` (`2026-11-05-async-store-part4a.md`): the host serves `pgReadSource({ isolation: null })`, so `query` reports unavailable until (d) provisions isolation there. The inbox and automation tools don't need part 4, but splitting the MCP server twice isn't worth it.
 
 - **MCP on the container socket.** Split `mcpServer.ts` so the tool registry and socket server reach no `electron` (`config.ts`, `errorLog.ts`, `paths.ts`) and no OpenTelemetry (`perf.ts`): inject the error log, perf status and config getters. `fleet-host` serves it on the socket the container's `claude` already dials, scoped to the hosted workspace; `query` stays off until (d)'s role + RLS.
 - **Scheduler and runner on the holder** (outline F7): `automationService` with `spawnFresh`/`freshState`/`closeFresh` through c1's `BrokerOps` (CREATE with the bot as owner), `runIn: host` and cross-workspace targets refused at definition validation on the host, `execScript` in the container. Started after the stores open, stopped before they close; their writes are fenced like every other.
