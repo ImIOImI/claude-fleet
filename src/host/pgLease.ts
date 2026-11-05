@@ -18,8 +18,12 @@ export function postgresLeaseStore(k: Kysely<HostDb>, workspaceId: string, o: { 
       await sql`SELECT set_config('lock_timeout', ${lockMs}, true)`.execute(trx);
       return f(trx);
     });
+  // FOR UPDATE conflicts with the fence's FOR KEY SHARE: a takeover or release waits for in-flight fenced writes.
+  // renew is a non-key UPDATE, which doesn't, so fenced writes can't starve it.
+  const exclusive = (trx: Transaction<HostDb>) => sql`SELECT 1 FROM host_lease WHERE workspace_id = ${workspaceId} FOR UPDATE`.execute(trx);
   return {
     tryAcquire: (holder, _now, ttlMs) => inTx(async (trx) => {
+      await exclusive(trx);
       const r = await sql<{ epoch: number }>`
         INSERT INTO host_lease AS l (workspace_id, holder, epoch, expires_at)
           VALUES (${workspaceId}, ${holder}, 1, clock_timestamp() + ${ms(ttlMs)})
@@ -36,6 +40,7 @@ export function postgresLeaseStore(k: Kysely<HostDb>, workspaceId: string, o: { 
       return r.numAffectedRows === 1n;
     }),
     release: (holder, epoch) => inTx(async (trx) => {
+      await exclusive(trx);
       await sql`
         UPDATE host_lease SET holder = NULL, expires_at = clock_timestamp()
          WHERE workspace_id = ${workspaceId} AND holder = ${holder} AND epoch = ${epoch}`.execute(trx);
@@ -58,7 +63,7 @@ export interface FenceTarget {
   onLost(err: LeaseLostError): void;
 }
 
-/** part 3's afterBeginWrite. FOR SHARE makes a takeover wait for in-flight fenced writes, and every write after it see the new epoch. */
+/** part 3's afterBeginWrite. FOR KEY SHARE makes a takeover (FOR UPDATE) wait for in-flight fenced writes, and every write after it see the new epoch. */
 export function leaseFence(t: FenceTarget): WriteHook {
   let reported = false;
   // onLost once: later refusals (closeDb's `select 1` on the way out) only throw.
@@ -74,7 +79,7 @@ export function leaseFence(t: FenceTarget): WriteHook {
     const mine = t.epoch();
     if (mine === null) return lost('not the holder');
     const rows = (await exec(
-      'SELECT holder, epoch, expires_at > clock_timestamp() AS live FROM host_lease WHERE workspace_id = $1 FOR SHARE',
+      'SELECT holder, epoch, expires_at > clock_timestamp() AS live FROM host_lease WHERE workspace_id = $1 FOR KEY SHARE',
       [t.workspaceId]
     )) as { holder: string | null; epoch: number; live: boolean }[];
     const row = rows[0];

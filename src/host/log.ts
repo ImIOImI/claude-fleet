@@ -21,6 +21,26 @@ function redactValue(_key: string, v: unknown): unknown {
   return v;
 }
 
+function redactDeep(v: unknown): unknown {
+  if (typeof v === 'string') return redactSecrets(v);
+  if (Array.isArray(v)) return v.map(redactDeep);
+  if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, redactDeep(x)]));
+  return v;
+}
+
+/** Redacts every string of a JSON line after decoding, so escapes can't hide a token's boundary; unchanged lines keep their bytes. */
+export function redactJsonLine(line: string): string {
+  let out = line;
+  try {
+    const parsed: unknown = JSON.parse(line);
+    const redacted = redactDeep(parsed);
+    if (JSON.stringify(redacted) !== JSON.stringify(parsed)) out = JSON.stringify(redacted);
+  } catch {
+    // Not JSON: ingest skips it; the text pass below still applies.
+  }
+  return redactSecrets(out);
+}
+
 export function createLogger(sink: LogSink = (l) => process.stdout.write(l + '\n'), now: () => number = Date.now): Logger {
   return {
     log(level, msg, fields = {}) {

@@ -47,7 +47,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
     afterBeginWrite: fence,
     onPoolError: (e) => o.log.log('warn', 'store pool error', { error: e.message }),
     pool: HOST_PG_POOL,
-    // Unfenced: a fenced migration would hold FOR SHARE on host_lease and block renew past TTL − renew.
+    // Unfenced: a fenced migration would hold its fence lock on host_lease, stalling any takeover for the whole run.
     // The advisory lock still serializes migrators.
     migrate: async (pool) => {
       held('before');

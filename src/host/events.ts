@@ -3,6 +3,8 @@
 import type { BrokerOps } from './brokerOps.js';
 import { redactSecrets } from './log.js';
 
+const redactStrings = (_k: string, v: unknown): unknown => (typeof v === 'string' ? redactSecrets(v) : v);
+
 export const EVENT_CHANNELS = new Set([
   'sessions:changed',
   'ports:changed',
@@ -32,8 +34,8 @@ export class EventHub {
 
   publish(channel: string, payload: unknown): void {
     if (!EVENT_CHANNELS.has(channel)) throw new Error(`unknown event channel ${channel}`);
-    // Titles and session text can carry a printed token.
-    const text = redactSecrets(JSON.stringify({ channel, payload }));
+    // Titles and session text can carry a printed token. Strings first (escapes hide boundaries), the line as a backstop.
+    const text = redactSecrets(JSON.stringify({ channel, payload }, redactStrings));
     for (const s of this.subs) s.send(text);
   }
 }

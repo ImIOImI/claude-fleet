@@ -8,7 +8,7 @@ import { iamAuthHint, pgPoolConfig, StoreConfigError, type PostgresStoreConfig }
 import { HOST_TRACK, type HostDb } from './hostSchema.js';
 import type { Logger } from './log.js';
 
-/** Below TTL − renew (20 s), so a partitioned holder's FOR SHARE can't block a takeover for long. */
+/** Below TTL − renew (20 s), so a partitioned holder's fence lock can't block a takeover for long. */
 export const HOST_PG_SESSION = { idleInTransactionMs: 10_000, statementTimeoutMs: 30_000 };
 
 /** For both host pools (host and store). */

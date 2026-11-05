@@ -79,8 +79,9 @@ describe.skipIf(!isPg)('postgresLeaseStore + leaseFence', () => {
     const gate = new Promise<void>((r) => (release = r));
     let inTx!: () => void;
     const entered = new Promise<void>((r) => (inTx = r));
-    const tx = fenced('a', () => e).transaction().execute(async (trx) => {
-      await trx.insertInto('w').values({ epoch: e }).execute();
+    // A takeover in progress holds the row FOR UPDATE.
+    const tx = postgresKysely(t!.pool).transaction().execute(async (trx) => {
+      await sql`SELECT 1 FROM host_lease WHERE workspace_id = ${WS} FOR UPDATE`.execute(trx);
       inTx();
       await gate;
     });
@@ -92,6 +93,36 @@ describe.skipIf(!isPg)('postgresLeaseStore + leaseFence', () => {
     release();
     await tx;
     expect(await s.renew('a', e, 0, 30_000)).toBe(true);
+  }, 30_000);
+
+  it.skipIf(!pgMultiConnection)('a fenced transaction held past TTL − renew: the holder still renews at once, a standby acquire waits for it', async () => {
+    const s = await setup();
+    const e = (await s.tryAcquire('a', 0, 1_000))!;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let inTx!: () => void;
+    const entered = new Promise<void>((r) => (inTx = r));
+    const tx = fenced('a', () => e).transaction().execute(async (trx) => {
+      await trx.insertInto('w').values({ epoch: e }).execute();
+      inTx();
+      await gate;
+    });
+    await entered;
+    const quick = postgresLeaseStore(postgresKysely(t!.pool), WS, { lockTimeoutMs: 300 });
+    for (let i = 0; i < 6; i++) {
+      expect(await quick.renew('a', e, 0, 1_000)).toBe(true);
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    let acquired: number | null | undefined;
+    const take = s.tryAcquire('b', 0, 30_000).then((x) => (acquired = x));
+    await new Promise((r) => setTimeout(r, 300));
+    expect(acquired).toBeUndefined();
+    release();
+    await tx;
+    await take;
+    expect(acquired).toBeNull();
+    const row = (await q(`SELECT holder, epoch FROM $S.host_lease`)).rows[0];
+    expect([row.holder, Number(row.epoch)]).toEqual(['a', e]);
   }, 30_000);
 
   it.skipIf(!pgMultiConnection)('a holder left idle in a fenced transaction is rolled back, and a standby takes over within TTL + the idle timeout', async () => {

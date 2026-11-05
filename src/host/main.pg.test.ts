@@ -126,6 +126,20 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     expect(v.rows).toHaveLength(1);
   }, 30_000);
 
+  it('a fenced store transaction held past TTL − renew doesn’t cost the holder its lease', async () => {
+    const a = await start();
+    await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+    await storesOpen();
+    await db.stateKysely().transaction().execute(async (trx) => {
+      await sql`select 1`.execute(trx);
+      await new Promise((r) => setTimeout(r, 2_000));
+    });
+    expect(a.exit).not.toHaveBeenCalled();
+    expect(a.logs.join('\n')).not.toMatch(/lease lost|lease store error/);
+    const row = await t!.pool.query(`SELECT epoch FROM ${t!.schema}.host_lease`);
+    expect(Number(row.rows[0].epoch)).toBe(1);
+  }, 30_000);
+
   it('the holder’s store connections carry the host session timeouts', async () => {
     const a = await start();
     await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });

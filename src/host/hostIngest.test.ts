@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { appendFileSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sql } from 'kysely';
@@ -8,7 +8,7 @@ import { migratePostgres } from '../main/store/pgMigrate.js';
 import { postgresKysely } from '../main/store/postgres.js';
 import { isPg, openTestState, queryRows } from '../main/store/testStore.js';
 import { HOST_TRACK, type HostDb } from './hostSchema.js';
-import { HostIngest } from './hostIngest.js';
+import { HostIngest, INGEST_STATEMENT_TIMEOUT, type HostIngestOptions } from './hostIngest.js';
 import { createLogger } from './log.js';
 import { leaseFence } from './pgLease.js';
 
@@ -30,8 +30,8 @@ describe.skipIf(!isPg)('HostIngest', () => {
     const projects = mkdtempSync(join(tmpdir(), 'proj-'));
     mkdirSync(join(projects, '-workspace'));
     const logs: string[] = [];
-    const make = (o: { ingest?: typeof db.ingestBatch } = {}) => {
-      const h = new HostIngest({ projectsDir: projects, workspaceId: WS, offsetsRead, log: createLogger((l) => logs.push(l)), ingest: o.ingest, rescanMs: 3_600_000 });
+    const make = (o: Partial<Pick<HostIngestOptions, 'ingest' | 'maxReadBytes' | 'maxLineBytes' | 'maxChunkBytes'>> = {}) => {
+      const h = new HostIngest({ projectsDir: projects, workspaceId: WS, offsetsRead, log: createLogger((l) => logs.push(l)), rescanMs: 3_600_000, ...o });
       running.push(h);
       return h;
     };
@@ -124,6 +124,21 @@ describe.skipIf(!isPg)('HostIngest', () => {
     expect(JSON.stringify([rows, sessions])).not.toContain(token);
   });
 
+  it.each(['\n', '\t', '\u001b[0m', '\u001b]8;;x\u0007'])('redacts a token and a Bearer value that follow %j', async (prefix) => {
+    const { make, file } = await rig();
+    const token = 'ghs_' + 'A1b2C3d4E5'.repeat(3) + 'abcdef';
+    writeFileSync(file, line('a', `done${prefix}${token}`) + line('b', `hdr${prefix}Bearer abcDEF123.xyz`));
+    const h = make();
+    await h.start();
+    await h.scan();
+    const rows = await queryRows<Record<string, unknown>>('SELECT * FROM events WHERE workspace_id = ?', [WS]);
+    expect(rows).toHaveLength(2);
+    const sessions = await queryRows('SELECT * FROM sessions');
+    const all = JSON.stringify([rows, sessions]);
+    expect(all).not.toContain(token);
+    expect(all).not.toContain('abcDEF123.xyz');
+  });
+
   it('ingests a line carrying a NUL (U+FFFD on Postgres) and a raw NUL byte does not stick the file', async () => {
     const { make, file } = await rig();
     writeFileSync(file, line('a', 'x \u0000 y') + `{"type":"user","uuid":"b\u0000","sessionId":"${S1}"}\n` + line('c'));
@@ -207,5 +222,74 @@ describe.skipIf(!isPg)('HostIngest', () => {
     expect(await count('host_ingest_offsets')).toBe(0);
     expect(lost).toHaveLength(1);
     expect(logs.join('\n')).toMatch(/transcript ingest failed.*lease lost/);
+  });
+
+  it('caps each chunk by bytes as well as lines', async () => {
+    const { make, file } = await rig();
+    const ls = Array.from({ length: 5 }, (_, i) => line(`b${i}`));
+    writeFileSync(file, ls.join(''));
+    const cap = ls[0].length * 2 + 10;
+    const spy = vi.fn(db.ingestBatch);
+    const h = make({ ingest: spy, maxChunkBytes: cap });
+    await h.start();
+    await h.scan();
+    expect(spy.mock.calls.map((c) => c[2].length)).toEqual([2, 2, 1]);
+    expect(await events()).toBe(5);
+    expect(await offsets()).toEqual([{ path: file, byte_offset: statSync(file).size }]);
+  });
+
+  it('runs each ingest transaction under a short statement timeout', async () => {
+    const { make, file } = await rig();
+    writeFileSync(file, line('a'));
+    const seen: string[] = [];
+    const h = make({
+      ingest: (ws, sid, lines, opts) =>
+        db.ingestBatch(ws, sid, lines, {
+          ...opts,
+          inTx: async (trx) => {
+            await opts!.inTx!(trx);
+            seen.push((await sql<{ statement_timeout: string }>`SHOW statement_timeout`.execute(trx)).rows[0].statement_timeout);
+          }
+        })
+    });
+    await h.start();
+    await h.scan();
+    expect(seen).toEqual([INGEST_STATEMENT_TIMEOUT]);
+  });
+
+  it('skips and logs a line over the size cap, reading a long one under it whole', async () => {
+    const { make, file, logs } = await rig();
+    const long = line('long', 'x'.repeat(200));
+    const huge = line('huge', 'y'.repeat(600));
+    writeFileSync(file, line('a') + long + huge + line('b'));
+    const h = make({ maxReadBytes: 64, maxLineBytes: 400 });
+    await h.start();
+    await h.scan();
+    expect(await events()).toBe(3);
+    expect(await events('dedup_key = ?', ['huge'])).toBe(0);
+    expect(logs.join('\n')).toMatch(/transcript line over the size cap; skipped/);
+    expect(await offsets()).toEqual([{ path: file, byte_offset: statSync(file).size }]);
+  });
+
+  it('re-reads a transcript replaced by a new file, live and across a restart', async () => {
+    const { make, file, projects } = await rig();
+    const replace = (text: string) => {
+      const tmp = join(projects, 'tmp');
+      writeFileSync(tmp, text);
+      renameSync(tmp, file);
+    };
+    writeFileSync(file, line('a') + line('b'));
+    const first = make();
+    await first.start();
+    await first.scan();
+    replace(line('c') + line('d') + line('e') + line('f'));
+    await first.scan();
+    expect(await events()).toBe(6);
+    await first.stop();
+    replace(line('g') + line('h') + line('i') + line('j') + line('k'));
+    const second = make();
+    await second.start();
+    await second.scan();
+    expect(await events()).toBe(11);
   });
 });

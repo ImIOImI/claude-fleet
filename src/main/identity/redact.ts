@@ -1,7 +1,8 @@
 // Secret shapes cut from text that may be shown or logged. Pure: shared by fleet-host and the desktop.
 
 // `"` is excluded from token classes so redacting a serialized line keeps it valid JSON.
-const NB = '(?<![A-Za-z0-9])';
+// Not preceded by an alphanumeric, unless that ends a JSON escape (`\n`) or an ANSI CSI code (raw or `\u001b`-escaped).
+const NB = '(?:(?<![A-Za-z0-9])|(?<=\\\\[nrtbf])|(?<=\\x1b\\[[0-9;?]*[A-Za-z])|(?<=\\\\u001[bB]\\[[0-9;?]*[A-Za-z]))';
 const PATTERNS: Array<[RegExp, string]> = [
   [/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[^"]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|(?=")|$)/g, '[redacted]'],
   [/([a-z][a-z0-9+.-]*:\/\/)[^\s/@:"]+:[^\s/@"]+@/gi, '$1[redacted]@'],

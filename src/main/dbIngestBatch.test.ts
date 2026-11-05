@@ -124,6 +124,17 @@ describe('ingestBatch (async store part 2a)', () => {
     expect(seen).toEqual([2]);
   });
 
+  it('runs atStart first in every chunk transaction', async () => {
+    const seen: number[] = [];
+    const lines = Array.from({ length: db.INGEST_TX_LINES + 1 }, (_, i) => JSON.stringify({ type: 'assistant', uuid: `as-${i}`, timestamp: at(1), message: { model: 'claude-opus-4-1', usage: { input_tokens: 1, output_tokens: 1 } } }));
+    await db.ingestBatch(WS, S, lines, {
+      atStart: async (trx) => {
+        seen.push(Number((await sql<{ n: number }>`SELECT COUNT(*) AS n FROM events`.execute(trx)).rows[0].n));
+      },
+    });
+    expect(seen).toEqual([0, db.INGEST_TX_LINES]);
+  });
+
   it('runs inTx even when every line is malformed', async () => {
     let ran = 0;
     await db.ingestBatch(WS, S, ['{"nope'], { inTx: async () => { ran++; } });

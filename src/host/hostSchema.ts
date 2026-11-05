@@ -4,7 +4,7 @@ import type { PgTrack } from '../main/store/pgMigrate.js';
 export interface HostDb {
   host_meta: { singleton: boolean; workspace_id: string; created_at: number };
   host_lease: { workspace_id: string; holder: string | null; epoch: number; expires_at: Date };
-  host_ingest_offsets: { path: string; byte_offset: number; updated_at: number };
+  host_ingest_offsets: { path: string; byte_offset: number; ino: string | null; updated_at: number };
 }
 
 export const HOST_PG_BASELINE_VERSION = 1;
@@ -24,6 +24,7 @@ CREATE TABLE host_lease (
 CREATE TABLE host_ingest_offsets (
   path TEXT COLLATE "C" PRIMARY KEY,
   byte_offset BIGINT NOT NULL,
+  ino TEXT COLLATE "C",
   updated_at BIGINT NOT NULL
 );
 `;

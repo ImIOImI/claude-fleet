@@ -2,7 +2,7 @@
 // Offsets persist in host_ingest_offsets, so a restart resumes instead of
 // re-reading every transcript on shared storage.
 import { watch, type FSWatcher } from 'node:fs';
-import { mkdir, open, readdir, stat } from 'node:fs/promises';
+import { mkdir, open, readdir, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { sql, type Kysely, type Transaction } from 'kysely';
 import { ingestBatch, INGEST_TX_LINES } from '../main/db.js';
@@ -10,11 +10,17 @@ import type { StateDb } from '../main/store/stateSchema.js';
 import { keyedSerialQueue, type KeyedSerialQueue } from '../main/state/serialQueue.js';
 import { parseSubagentPath, parseTranscriptFilename } from '../main/state/transcriptPaths.js';
 import type { HostDb } from './hostSchema.js';
-import { redactSecrets, type Logger } from './log.js';
+import { redactJsonLine, type Logger } from './log.js';
 
 export const RESCAN_MS = 60_000;
 /** One read's bound; a larger delta is ingested over several reads. */
 export const MAX_READ_BYTES = 8 * 1024 * 1024;
+/** A longer line is skipped and logged. */
+export const MAX_LINE_BYTES = 64 * 1024 * 1024;
+/** Per ingest transaction, with INGEST_TX_LINES: a fenced transaction delays any takeover until it ends. */
+export const MAX_CHUNK_BYTES = 1024 * 1024;
+/** A slow chunk aborts and is retried on the next change or rescan. */
+export const INGEST_STATEMENT_TIMEOUT = '5s';
 
 export interface HostIngestOptions {
   projectsDir: string;
@@ -24,10 +30,19 @@ export interface HostIngestOptions {
   log: Logger;
   ingest?: typeof ingestBatch;
   rescanMs?: number;
+  maxReadBytes?: number;
+  maxLineBytes?: number;
+  maxChunkBytes?: number;
+}
+
+interface FileMark {
+  offset: number;
+  /** Detects a transcript replaced by a new file. */
+  ino: string | null;
 }
 
 export class HostIngest {
-  private readonly done = new Map<string, number>();
+  private readonly done = new Map<string, FileMark>();
   private readonly queue: KeyedSerialQueue;
   private readonly ingest: typeof ingestBatch;
   private watcher: FSWatcher | null = null;
@@ -41,8 +56,8 @@ export class HostIngest {
 
   /** Loads offsets and starts watching; the first full scan runs in the background. */
   async start(): Promise<void> {
-    const rows = await this.o.offsetsRead.selectFrom('host_ingest_offsets').select(['path', 'byte_offset']).orderBy('path').execute();
-    for (const r of rows) this.done.set(r.path, Number(r.byte_offset));
+    const rows = await this.o.offsetsRead.selectFrom('host_ingest_offsets').select(['path', 'byte_offset', 'ino']).orderBy('path').execute();
+    for (const r of rows) this.done.set(r.path, { offset: Number(r.byte_offset), ino: r.ino });
     await mkdir(this.o.projectsDir, { recursive: true });
     try {
       // Writers are local processes, so inotify fires even on an NFS mount.
@@ -91,61 +106,100 @@ export class HostIngest {
     if (this.stopped) return;
     const sessionId = parseSubagentPath(path)?.parentSessionId ?? parseTranscriptFilename(path)?.sessionId;
     if (!sessionId) return;
-    const size = (await stat(path).catch(() => null))?.size;
-    if (size === undefined) return;
-    let offset = this.done.get(path) ?? 0;
-    // Shrunk (compaction): re-read; dedup keys keep existing rows.
-    if (size < offset) offset = 0;
-    while (offset < size && !this.stopped) {
-      const next = await this.readFrom(path, offset, size, sessionId);
-      if (next === offset) break;
-      offset = next;
-    }
-  }
-
-  /** Ingests the complete lines from `offset`, one chunk per call; returns the offset after the last one. */
-  private async readFrom(path: string, offset: number, size: number, sessionId: string): Promise<number> {
-    const fh = await open(path, 'r');
-    let buf: Buffer;
-    let lastNl: number;
+    let fh: FileHandle;
     try {
-      let want = Math.min(size - offset, MAX_READ_BYTES);
-      buf = Buffer.alloc(want);
-      let { bytesRead } = await fh.read(buf, 0, want, offset);
-      lastNl = buf.subarray(0, bytesRead).lastIndexOf(0x0a);
-      if (lastNl === -1 && want < size - offset) {
-        // One line longer than the bound: read the rest in one go.
-        want = size - offset;
-        buf = Buffer.alloc(want);
-        ({ bytesRead } = await fh.read(buf, 0, want, offset));
-        lastNl = buf.subarray(0, bytesRead).lastIndexOf(0x0a);
+      fh = await open(path, 'r');
+    } catch {
+      return;
+    }
+    try {
+      const st = await fh.stat({ bigint: true });
+      const ino = String(st.ino);
+      const size = Number(st.size);
+      const prev = this.done.get(path);
+      let offset = prev?.offset ?? 0;
+      // Replaced or shrunk (compaction): re-read; dedup keys keep existing rows.
+      if ((prev?.ino != null && prev.ino !== ino) || size < offset) offset = 0;
+      while (offset < size && !this.stopped) {
+        const next = await this.readFrom(fh, path, ino, offset, size, sessionId);
+        if (next === offset) break;
+        offset = next;
       }
     } finally {
       await fh.close();
     }
-    if (lastNl === -1) return offset;
+  }
+
+  /** Absolute position of the first newline at or after `from`, or -1. */
+  private async findNewline(fh: FileHandle, from: number, size: number): Promise<number> {
+    const step = this.o.maxReadBytes ?? MAX_READ_BYTES;
+    const buf = Buffer.alloc(step);
+    for (let at = from; at < size; at += step) {
+      const { bytesRead } = await fh.read(buf, 0, Math.min(step, size - at), at);
+      const i = buf.subarray(0, bytesRead).indexOf(0x0a);
+      if (i !== -1) return at + i;
+      if (bytesRead === 0) break;
+    }
+    return -1;
+  }
+
+  /** Ingests the complete lines from `offset` in bounded chunks; returns the offset after the last one committed. */
+  private async readFrom(fh: FileHandle, path: string, ino: string, offset: number, size: number, sessionId: string): Promise<number> {
+    const want = Math.min(size - offset, this.o.maxReadBytes ?? MAX_READ_BYTES);
+    let buf = Buffer.alloc(want);
+    buf = buf.subarray(0, (await fh.read(buf, 0, want, offset)).bytesRead);
+    let lastNl = buf.lastIndexOf(0x0a);
+    if (lastNl === -1) {
+      if (offset + buf.length >= size) return offset;
+      const nl = await this.findNewline(fh, offset + buf.length, size);
+      if (nl === -1) return offset;
+      const len = nl + 1 - offset;
+      if (len > (this.o.maxLineBytes ?? MAX_LINE_BYTES)) {
+        this.o.log.log('warn', 'transcript line over the size cap; skipped', { path, offset, bytes: len });
+        this.done.set(path, { offset: nl + 1, ino });
+        return nl + 1;
+      }
+      buf = Buffer.alloc(len);
+      await fh.read(buf, 0, len, offset);
+      lastNl = len - 1;
+    }
+    const maxChunk = this.o.maxChunkBytes ?? MAX_CHUNK_BYTES;
     let at = offset;
-    let pos = 0;
     let lines: string[] = [];
-    while (pos <= lastNl && !this.stopped) {
-      const nl = buf.indexOf(0x0a, pos);
-      const l = buf.subarray(pos, nl).toString('utf8').trim();
-      pos = nl + 1;
-      if (l) lines.push(redactSecrets(l));
-      if (lines.length < INGEST_TX_LINES && pos <= lastNl) continue;
-      const end = offset + pos;
-      if (lines.length) await this.ingest(this.o.workspaceId, sessionId, lines, { inTx: (trx) => this.saveOffset(trx, path, end) });
-      this.done.set(path, end);
+    let bytes = 0;
+    const flush = async (end: number) => {
+      if (lines.length) {
+        await this.ingest(this.o.workspaceId, sessionId, lines, {
+          atStart: async (trx) => void (await sql`SET LOCAL statement_timeout = ${sql.lit(INGEST_STATEMENT_TIMEOUT)}`.execute(trx)),
+          inTx: (trx) => this.saveOffset(trx, path, ino, end)
+        });
+      }
+      this.done.set(path, { offset: end, ino });
       at = end;
       lines = [];
+      bytes = 0;
+    };
+    let pos = 0;
+    while (pos <= lastNl) {
+      if (this.stopped) return at;
+      const nl = buf.indexOf(0x0a, pos);
+      const raw = buf.subarray(pos, nl);
+      const l = raw.toString('utf8').trim();
+      if (l && lines.length && (lines.length >= INGEST_TX_LINES || bytes + raw.length > maxChunk)) await flush(offset + pos);
+      if (l) {
+        lines.push(redactJsonLine(l));
+        bytes += raw.length;
+      }
+      pos = nl + 1;
     }
+    await flush(offset + pos);
     return at;
   }
 
   // host_ingest_offsets shares the store schema but not StateDb's types.
-  private async saveOffset(trx: Transaction<StateDb>, path: string, offset: number): Promise<void> {
+  private async saveOffset(trx: Transaction<StateDb>, path: string, ino: string, offset: number): Promise<void> {
     const now = Date.now();
-    await sql`INSERT INTO host_ingest_offsets (path, byte_offset, updated_at) VALUES (${path}, ${offset}, ${now})
-      ON CONFLICT (path) DO UPDATE SET byte_offset = EXCLUDED.byte_offset, updated_at = EXCLUDED.updated_at`.execute(trx);
+    await sql`INSERT INTO host_ingest_offsets (path, byte_offset, ino, updated_at) VALUES (${path}, ${offset}, ${ino}, ${now})
+      ON CONFLICT (path) DO UPDATE SET byte_offset = EXCLUDED.byte_offset, ino = EXCLUDED.ino, updated_at = EXCLUDED.updated_at`.execute(trx);
   }
 }
