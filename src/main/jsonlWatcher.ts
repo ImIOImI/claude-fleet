@@ -19,7 +19,7 @@
 
 import { EventEmitter } from 'node:events';
 import { mkdirSync, promises as fsp, type Stats } from 'node:fs';
-import { join, basename, extname, sep as pathSep } from 'node:path';
+import { join, extname, sep as pathSep } from 'node:path';
 // chokidar v5 is ESM-only. Our main bundle is CommonJS (per
 // electron.vite.config.ts), so `require('chokidar')` would throw
 // ERR_REQUIRE_ESM. Load it via dynamic import inside `start()`.
@@ -29,6 +29,7 @@ import { ingestBatch } from './db.js';
 import { effectiveForClaudeSession } from './mirrorPolicy.js';
 import { perfSpanAsync } from './perf.js';
 import { keyedSerialQueue } from './state/serialQueue.js';
+import { parseSubagentPath, parseTranscriptFilename } from './state/transcriptPaths.js';
 
 /**
  * Fire-and-forget structured log for watcher lifecycle events (#323).
@@ -52,40 +53,7 @@ function logWatcherEvent(payload: {
 }
 
 const PROJECTS_SUBDIR = join('projects', '-workspace');
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-const AGENT_FILE_RE = /^agent-.*\.jsonl$/i;
-
-/** Parent session id from a subagent transcript path
- *  `.../<parent-session-uuid>/subagents/agent-*.jsonl`, or null. */
-export function parseSubagentPath(path: string): { parentSessionId: string } | null {
-  const segs = path.split(/[\\/]/);
-  const file = segs[segs.length - 1] ?? '';
-  if (!AGENT_FILE_RE.test(file)) return null;
-  if (segs[segs.length - 2] !== 'subagents') return null;
-  const parent = segs[segs.length - 3] ?? '';
-  return UUID_RE.test(parent) ? { parentSessionId: parent } : null;
-}
-
-/** Session id + sidecar flag from a watched file path, or null if neither a
- *  primary transcript (<uuid>.jsonl) nor a fleet sidecar (<uuid>.fleet.jsonl).
- *  Sidecars carry host-bound events (session-summary chapters, #207) and are
- *  ingested under their session id but NEVER fire 'new-session' — they must
- *  not touch the pending-attach fallback or look like fresh conversations. */
-export function parseTranscriptFilename(
-  path: string
-): { sessionId: string; sidecar: boolean } | null {
-  if (extname(path) !== '.jsonl') return null;
-  let stem = basename(path, '.jsonl');
-  let sidecar = false;
-  if (stem.endsWith('.fleet')) {
-    stem = stem.slice(0, -'.fleet'.length);
-    sidecar = true;
-  }
-  if (!UUID_RE.test(stem)) return null;
-  return { sessionId: stem, sidecar };
-}
+export { parseSubagentPath, parseTranscriptFilename };
 
 interface FileState {
   workspaceId: string;

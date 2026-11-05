@@ -1,6 +1,8 @@
 // fleet-host deployment config (/etc/fleet-host/config.yaml). Read at start and
 // on every reload; grants are validated by the shared identity layer.
 import { readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { parse } from 'yaml';
 import { ORG_RE, parseGrantConfig, type GrantConfig } from '../main/identity/grants.js';
 import { parseStoreConfig, StoreConfigError, type PostgresStoreConfig } from '../main/store/storeConfig.js';
@@ -199,6 +201,8 @@ export interface HostEnv {
   stateDir: string;
   brokerSocket: string;
   credSocket: string;
+  /** Claude's transcripts in this container, ingested by the holder. */
+  projectsDir: string;
 }
 
 export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
@@ -210,6 +214,7 @@ export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
     configPath: env.FLEET_HOST_CONFIG || DEFAULT_CONFIG_PATH,
     stateDir: env.FLEET_HOST_STATE || '/home/fleet/.claude/fleet-host',
     brokerSocket: env.CLAUDE_FLEET_BROKER_SOCKET || '/run/broker/broker.sock',
-    credSocket: env.FLEET_HOST_CRED_SOCKET || '/run/fleet-host/cred.sock'
+    credSocket: env.FLEET_HOST_CRED_SOCKET || '/run/fleet-host/cred.sock',
+    projectsDir: env.FLEET_HOST_PROJECTS || join(homedir(), '.claude', 'projects')
   };
 }

@@ -1,9 +1,12 @@
-// What only the lease holder runs: the stores, fenced by the lease epoch.
+// What only the lease holder runs: the stores, fenced by the lease epoch, and ingest.
 import { closeDb } from '../main/db.js';
+import { postgresKysely } from '../main/store/postgres.js';
 import type { PgTrack } from '../main/store/pgMigrate.js';
 import { migratePgStores, openPgStores, type PgStores } from '../main/store/pgStores.js';
 import type { PostgresStoreConfig } from '../main/store/storeConfig.js';
 import { HOST_PG_POOL } from './hostDb.js';
+import { HostIngest } from './hostIngest.js';
+import type { HostDb } from './hostSchema.js';
 import type { Logger } from './log.js';
 import { leaseFence, LeaseLostError } from './pgLease.js';
 
@@ -15,6 +18,7 @@ export interface HolderOptions {
   epoch(): number | null;
   onLost(): void;
   log: Logger;
+  projectsDir: string;
   /** Tests: more store migrations, run like the real ones. */
   extraTracks?: readonly PgTrack[];
 }
@@ -51,11 +55,26 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
       held('after');
     }
   });
+  // Fenced although only read: offsets are written inside ingest's chunk transaction.
+  const offsetsRead = postgresKysely<HostDb>(stores.pool, { afterBeginWrite: fence });
+  const ingest = new HostIngest({ projectsDir: o.projectsDir, workspaceId: o.workspaceId, offsetsRead, log: o.log });
+  try {
+    await ingest.start();
+  } catch (err) {
+    await ingest.stop();
+    await offsetsRead.destroy();
+    await stores.inbox.close();
+    await closeDb();
+    await stores.end();
+    throw err;
+  }
   let stopping: Promise<void> | null = null;
   return {
     stores,
     stop() {
       stopping ??= (async () => {
+        await ingest.stop();
+        await offsetsRead.destroy();
         await stores.inbox.close();
         await closeDb();
         await stores.end();

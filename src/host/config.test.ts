@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HostConfigError, loadHostConfig, parseHostConfig, readHostEnv } from './config.js';
 
@@ -163,6 +163,7 @@ describe('readHostEnv', () => {
       configPath: '/etc/fleet-host/config.yaml',
       stateDir: '/home/fleet/.claude/fleet-host',
       credSocket: '/run/fleet-host/cred.sock',
+      projectsDir: join(homedir(), '.claude', 'projects'),
       brokerSocket: '/run/broker/broker.sock'
     });
   });

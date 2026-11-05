@@ -6,6 +6,7 @@ export default defineConfig({
   test: {
     include: [
       'src/host/hostDb.test.ts',
+      'src/host/hostIngest.test.ts',
       'src/host/hostState.pg.test.ts',
       'src/host/main.pg.test.ts',
       'src/host/pgLease.test.ts',

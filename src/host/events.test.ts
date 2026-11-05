@@ -17,6 +17,16 @@ describe('EventHub', () => {
     expect(b).toHaveLength(1);
   });
 
+  it('redacts secrets from every frame, keeping it valid JSON', () => {
+    const hub = new EventHub();
+    const got: string[] = [];
+    hub.add({ send: (t) => got.push(t) });
+    const token = 'ghs_' + 'A1b2C3d4E5'.repeat(3) + 'abcdef';
+    hub.publish('sessions:changed', { sessions: [{ id: 's1', title: `ran gh auth token: ${token}` }] });
+    expect(got[0]).not.toContain(token);
+    expect(JSON.parse(got[0]).payload.sessions[0].title).toBe('ran gh auth token: [redacted]');
+  });
+
   it('refuses an unknown channel', () => {
     expect(() => new EventHub().publish('vault:get', {})).toThrow(/unknown event channel/);
   });

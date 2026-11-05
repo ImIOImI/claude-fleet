@@ -2,7 +2,7 @@
 // singleton, so only one holder may have its stores open at a time.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { connect, createServer, type AddressInfo, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -53,7 +53,7 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     const exit = vi.fn();
     const logs: string[] = [];
     const host = await runHost({
-      env: { FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock') },
+      env: { FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'), FLEET_HOST_PROJECTS: join(dir, 'projects') },
       exit, proc: new EventEmitter(), logSink: (l) => logs.push(l), authFactory: () => ({ id: 'github', verify }),
       brokerOps: fakeBroker([]).ops, leaseRenewMs: 200, leaseTtlMs: 1_000,
       ...opts
@@ -94,6 +94,23 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     const a = await start();
     await vi.waitFor(() => expect(a.exit).toHaveBeenCalledWith(1), { timeout: 10_000 });
     expect(a.logs.join('\n')).toMatch(new RegExp(`host start failed.*${OTHER}.*${ID}`));
+  }, 30_000);
+
+  it('the holder ingests transcripts written in its container, offsets included', async () => {
+    const a = await start();
+    await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+    await storesOpen();
+    const sid = '22222222-2222-4222-8222-222222222222';
+    const proj = join(a.dir, 'projects', '-workspace');
+    mkdirSync(proj, { recursive: true });
+    const text = JSON.stringify({ type: 'user', uuid: 'u1', sessionId: sid, timestamp: '2026-11-05T00:00:00Z', message: { role: 'user', content: 'hi' } }) + '\n';
+    writeFileSync(join(proj, `${sid}.jsonl`), text);
+    await vi.waitFor(async () => {
+      const r = await t!.pool.query(`SELECT COUNT(*)::int AS n FROM ${t!.schema}.events WHERE workspace_id = $1 AND session_id = $2`, [ID, sid]);
+      expect(r.rows[0].n).toBe(1);
+    }, { timeout: 10_000 });
+    const off = await t!.pool.query(`SELECT byte_offset FROM ${t!.schema}.host_ingest_offsets`);
+    expect(off.rows.map((r) => Number(r.byte_offset))).toEqual([Buffer.byteLength(text)]);
   }, 30_000);
 
   it('a store migration longer than TTL − renew runs unfenced: the holder keeps its lease', async () => {
@@ -179,7 +196,7 @@ describe.skipIf(!isPg)('runHost on Postgres: start and stop', () => {
     const proc = new EventEmitter();
     const logs: string[] = [];
     const host = await runHost({
-      env: { FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock') },
+      env: { FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'), FLEET_HOST_PROJECTS: join(dir, 'projects') },
       exit, proc, logSink: (l) => logs.push(l), authFactory: () => ({ id: 'github', verify }),
       brokerOps: fakeBroker([]).ops, leaseRenewMs: 200, leaseTtlMs: 1_000, ...extra
     });

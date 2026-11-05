@@ -260,6 +260,7 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
         epoch: () => (m.state === 'holder' ? m.epoch : null),
         onLost: () => m.markLost('superseded'),
         log,
+        projectsDir: env.projectsDir,
         extraTracks: opts.extraStoreTracks
       }).catch((err: Error) => {
         log.log('error', 'holder start failed; giving up the lease', { error: err.message });
