@@ -312,7 +312,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
           }
           return { kind: 'local', workspaceId: ws, launcher: m.launcher ?? { mode: 'native' }, workspaceRoot: m.workspaceRoot };
         },
-        topTopics: async (ws) => (await claimsSvc.search(ws, { query: 'fleet', limit: 20 })).results.flatMap((r) => r.topics).slice(0, 15),
+        topTopics: async (ws) => [...new Set((await claimsSvc.search(ws, { query: 'fleet', limit: 20 })).results.flatMap((r) => r.topics))].slice(0, 15),
         exec: (t, args, timeoutMs) => runCapture(t, args, timeoutMs),
         newUuid: () => randomUUID(),
         now: () => Date.now(),

@@ -12,7 +12,7 @@ type Last = { started_at: number; user_turns: number | null } | null;
 function setup(o: {
   settingsBy?: Record<string, Partial<CaptureSettings>>; exec?: SchedulerDeps['exec']; last?: (id: string) => Last;
   today?: number; cap?: number; isAutomation?: (id: string) => boolean; globalEnabled?: boolean;
-  topTopics?: SchedulerDeps['topTopics']
+  topTopics?: SchedulerDeps['topTopics']; target?: SchedulerDeps['target']
 } = {}) {
   let n = 0;
   const runs = {
@@ -29,7 +29,7 @@ function setup(o: {
     globalEnabled: async () => o.globalEnabled ?? true,
     settings: async (ws: string) => (ws === 'gone' ? null : { ...defaultCaptureSettings(), ...(o.settingsBy?.[ws] ?? {}) }),
     dailyCap: async () => o.cap ?? 40,
-    target: async (ws: string) => ({ kind: 'container' as const, workspaceId: ws, cwd: '/workspace' }),
+    target: o.target ?? (async (ws: string) => ({ kind: 'container' as const, workspaceId: ws, cwd: '/workspace' })),
     topTopics: o.topTopics ?? (async () => []),
     exec,
     newUuid: (() => { let i = 0; return () => `fork-${++i}`; })(),
@@ -152,6 +152,49 @@ describe('CaptureScheduler — search hits', () => {
     s.onSearchHit(hit({ callerWorkspaceId: 'w', sessionIds: ['s2'] })); // a real hit once 'w' is idle again
     await s.drain();
     expect(runs.start.mock.calls.map((c) => c[0].sessionId)).toEqual(['s1', 's2']);
+  });
+  it('two overlapping search hits for the same session re-check the interval at admit and result in exactly one capture', async () => {
+    // Both hits reach the single-flight/interval pre-checks in considerSearch
+    // (await settings + runs.lastFor) before either has enqueued, so without
+    // the admit()-time re-check both would be admitted — one right after the
+    // other finishes. Gate exec so the first run stays in-flight long enough
+    // for the second hit's own pre-checks to run and queue behind it.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const { s, runs, exec } = setup({ exec: async () => { await gate; return OK; } });
+    s.onSearchHit(hit({ sessionIds: ['s1'] }));
+    s.onSearchHit(hit({ sessionIds: ['s1'] }));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(exec).toHaveBeenCalledTimes(1); // only the first hit's run actually started
+    expect(runs.start).toHaveBeenCalledTimes(1);
+    release();
+    await s.drain();
+    // The second hit's queued trigger is admitted right after the first
+    // finishes but dropped at admit (same session, well inside 10 min).
+    expect(runs.start).toHaveBeenCalledTimes(1);
+  });
+  it('drops an ingest band trigger that is admitted right after a search-hit capture for the same session, arriving between pump and admit', async () => {
+    let releaseTarget!: () => void;
+    const targetGate = new Promise<void>((r) => { releaseTarget = r; });
+    let first = true;
+    const { s, runs } = setup({
+      target: async (ws: string) => {
+        if (first) { first = false; await targetGate; }
+        return { kind: 'container' as const, workspaceId: ws, cwd: '/workspace' };
+      }
+    });
+    // Starts a capture for s1 via a search hit; pump() has already added s1 to
+    // inFlight, but run() is paused awaiting target() — i.e. between pump and admit.
+    s.onSearchHit(hit({ sessionIds: ['s1'] }));
+    await new Promise((r) => setTimeout(r, 20));
+    // First-ever ingest decision for s1 crosses the 85% band and queues behind
+    // the in-flight session (pump() skips sessions already in-flight).
+    s.onIngest({ workspaceId: 'w', sessionId: 's1' });
+    await new Promise((r) => setTimeout(r, 20));
+    releaseTarget();
+    await s.drain();
+    expect(runs.start).toHaveBeenCalledTimes(1);
+    expect(runs.start).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 's1', trigger: 'search' }));
   });
   it('recaptures only after recaptureAfterTurns new user turns and 10 minutes', async () => {
     const recent = setup({ last: () => ({ started_at: NOW - 20 * 60_000, user_turns: 40 }) });
