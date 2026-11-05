@@ -24,3 +24,8 @@ export function findLiveHandleId(
   }
   return null;
 }
+
+/** Tab-close on a remote only detaches: others may be watching, and End session is the explicit CLOSE. */
+export function tabCloseVerb(kind: string): 'detach' | 'close' {
+  return kind === 'remote' ? 'detach' : 'close';
+}

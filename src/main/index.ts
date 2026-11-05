@@ -1,6 +1,6 @@
 import { app, BrowserWindow, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
-import { registerIpc } from './ipc.js';
+import { registerIpc, stopRemoteBackend } from './ipc.js';
 import { openDb, closeDb, deleteEmbeddingsForOtherModels, listSessionIds, recordError, stateKysely } from './db.js';
 import { initPerf, shutdownPerf, perfSpan, perfSpanAsync } from './perf.js';
 import { PerfStore } from './perfStore.js';
@@ -214,7 +214,8 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     // sticky toast (#159 follow-up): fan the change-only status out to every
     // window. Wired before the listener can fail so the first event is caught.
     setMcpStatusListener((s) => broadcastMcpStatus(s, BrowserWindow.getAllWindows()));
-    const manifests = await listWorkspaceManifests();
+    // Remote bookmarks have no local socket, transcripts or peer-status dir.
+    const manifests = (await listWorkspaceManifests()).filter((m) => m.kind !== 'remote');
     // Re-establish a per-workspace MCP listener for every known workspace (#117)
     // so a paused container that survived the restart finds its socket again
     // (its bind points at <userData>/mcp/<id>/, whose listener must be rebuilt).
@@ -346,6 +347,7 @@ app.on('before-quit', async () => {
   notifySvc = null;
   auto?.stop();
   auto = null;
+  stopRemoteBackend();
   await jsonlWatcher?.stop();
   await peerStatusWatcher?.stop();
   stopMcpServer();

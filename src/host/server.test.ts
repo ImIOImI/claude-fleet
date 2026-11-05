@@ -75,8 +75,8 @@ async function start(extraRpc: Array<[string, RpcChannel]> = [], opts: Partial<H
     return who;
   });
   let auth = provider(verify);
-  const rpc = new Map([...brokerRpcChannels(broker.ops), ...extraRpc]);
   const hub = new AttachHub(broker.ops);
+  const rpc = new Map([...brokerRpcChannels(broker.ops, hub.owners), ...extraRpc]);
   const host = createHostServer({
     workspace: () => WS,
     auth: () => auth,

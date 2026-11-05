@@ -43,13 +43,27 @@ describe('dispatchRpc', () => {
 
 describe('brokerRpcChannels', () => {
   it('declares read for listings and steer for ports:kill', () => {
-    const reg = brokerRpcChannels(fakeBroker().ops);
+    const reg = brokerRpcChannels(fakeBroker().ops, new Map());
     expect(Object.fromEntries([...reg].map(([k, v]) => [k, v.tier]))).toEqual({ 'sessions:live': 'read', 'ports:list': 'read', 'ports:kill': 'steer' });
+  });
+
+  it('sessions:live marks the sessions the caller created', async () => {
+    const b = fakeBroker(['s1', 's2', 's3']);
+    const owners = new Map([['s1', 'github:1'], ['s2', 'github:2']]);
+    const r = await dispatchRpc(brokerRpcChannels(b.ops, owners), 'sessions:live', { args: [] }, caller('read'));
+    expect(r.body).toEqual({
+      ok: true,
+      result: [
+        { id: 's1', alive: true, mine: true },
+        { id: 's2', alive: true, mine: false },
+        { id: 's3', alive: true, mine: false }
+      ]
+    });
   });
 
   it('ports:kill validates its port', async () => {
     const b = fakeBroker();
-    const reg = brokerRpcChannels(b.ops);
+    const reg = brokerRpcChannels(b.ops, new Map());
     expect((await dispatchRpc(reg, 'ports:kill', { args: ['22; rm'] }, caller('steer'))).status).toBe(400);
     expect(b.killed).toEqual([]);
   });
@@ -57,7 +71,7 @@ describe('brokerRpcChannels', () => {
   it('ports:kill refuses the host port and unattributed ports with 403', async () => {
     const b = fakeBroker(['s1']);
     b.ports.push({ port: 8080 }, { port: 9229 });
-    const reg = brokerRpcChannels(b.ops, 8080);
+    const reg = brokerRpcChannels(b.ops, new Map(), 8080);
     expect(await dispatchRpc(reg, 'ports:kill', { args: [8080] }, caller('session'))).toEqual({
       status: 403,
       body: { ok: false, error: 'forbidden: that port belongs to the host' }

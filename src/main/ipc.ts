@@ -2,11 +2,11 @@ import { app, ipcMain, BrowserWindow, dialog, clipboard, Menu, shell, powerMonit
 import { appBuildSha, appVersionString } from './appVersion.js';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { unlink, readdir } from 'node:fs/promises';
+import { unlink, readdir, rm } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
-import { workspaceTranscriptPath, workspaceHistoryFile, workspaceHistoryDir, encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir, workspaceClaudeDir } from './paths.js';
+import { workspaceTranscriptPath, workspaceHistoryFile, workspaceHistoryDir, encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir, workspaceClaudeDir, workspaceStateDir } from './paths.js';
 import { createWorkspaceSkills, toSkillWorkspace } from './skills/workspaceSkills.js';
 import {
   setWorkspaceDefault,
@@ -54,8 +54,8 @@ import * as realDocker from './docker.js';
 import * as realLocal from './local.js';
 import * as mockDocker from './mock.js';
 import type { Backend } from './backend.js';
-import { resolveKind } from './backendRouter.js';
-import { findLiveHandleId } from './ptyHandleLookup.js';
+import { hostRunsSignals, resolveAutomationKind, resolveKind, resolveRemoveKind } from './backendRouter.js';
+import { findLiveHandleId, tabCloseVerb } from './ptyHandleLookup.js';
 import { assertControl, buildRoster, ROSTER_TITLE_MAX, type RosterStatus, type RosterEntry } from './control.js';
 import { ActivityDetector } from './activityDetector.js';
 import { wouldExceed, recordPost, COMMITTEE_CAPS } from './committeeRuns.js';
@@ -79,6 +79,8 @@ import { registerVaultIpc } from './vaultIpc.js';
 import { IdentityService } from './identity/identityService.js';
 import { pickGithubClientId, GITHUB_CLIENT_ID_ENV } from './identity/clientId.js';
 import { registerIdentityIpc } from './identityIpc.js';
+import { createRemoteBackend } from './remote.js';
+import { assertNotRemoteSpec, confirmText, registerRemoteIpc, type RemoteConfirm } from './remoteIpc.js';
 import { listEndpoints, saveEndpoint, deleteEndpoint, setEndpointApiKey, probeEndpoint, getEndpoint, type ModelEndpoint } from './endpoints.js';
 import * as fs from './fs.js';
 import * as imageLibrary from './imageLibrary.js';
@@ -294,9 +296,32 @@ const mockPorts: MockServingPorts | null = MOCK_MODE && process.env.CLAUDE_FLEET
 // `Backend` contract. In mock mode everything routes to the mock backend.
 const dockerBackend: Backend = MOCK_MODE ? mockDocker : realDocker;
 const localBackend: Backend = MOCK_MODE ? mockDocker : realLocal;
+// Bound to the signed-in GitHub token once registerIpc builds the identity service.
+let remoteToken: () => Promise<string | null> = async () => null;
+let remoteLogin: () => Promise<string | null> = async () => null;
+const remoteBackend = createRemoteBackend({
+  token: () => remoteToken(),
+  login: () => remoteLogin(),
+  listManifests: () => listWorkspaceManifests(),
+  writeManifest: (spec) => writeWorkspaceManifest(spec),
+  deleteState: (id) => rm(workspaceStateDir(id), { recursive: true, force: true })
+});
+
+export function stopRemoteBackend(): void {
+  remoteBackend.stop();
+}
+
+async function confirmRemote(r: RemoteConfirm): Promise<boolean> {
+  const t = confirmText(r);
+  const box = { type: 'warning' as const, message: t.message, detail: t.detail, buttons: ['Cancel', t.button], defaultId: 0, cancelId: 0, noLink: true };
+  const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+  const res = win ? await dialog.showMessageBox(win, box) : await dialog.showMessageBox(box);
+  return res.response === 1;
+}
 
 function backendForKind(kind: WorkspaceKind): Backend {
   if (MOCK_MODE) return mockDocker;
+  if (kind === 'remote') return remoteBackend;
   return kind === 'local' ? localBackend : dockerBackend;
 }
 
@@ -416,7 +441,7 @@ async function fetchAllWorkspaces(): Promise<Workspace[]> {
   const dockerPromise: Promise<Workspace[]> = e2eDockerDown
     ? Promise.reject(Object.assign(new Error('docker daemon down (e2e)'), { code: 'ECONNREFUSED' }))
     : dockerBackend.listLiveWorkspaces();
-  const [dockerResult, localLive, manifests] = await Promise.all([
+  const [dockerResult, localLive, remoteLive, manifests] = await Promise.all([
     dockerPromise.then(
       (value): PromiseSettledResult<Workspace[]> => ({ status: 'fulfilled', value }),
       (reason): PromiseSettledResult<Workspace[]> => ({ status: 'rejected', reason })
@@ -425,10 +450,11 @@ async function fetchAllWorkspaces(): Promise<Workspace[]> {
     // docker half down, container-kind mocks must not sneak back in as live
     // through the local half.
     localBackend.listLiveWorkspaces().then((ws) => (e2eDockerDown ? ws.filter((w) => w.kind === 'local') : ws)),
+    MOCK_MODE ? Promise.resolve([]) : remoteBackend.listLiveWorkspaces(),
     listWorkspaceManifests()
   ]);
   return mergeWorkspaces({
-    dockerResult, localLive, manifests,
+    dockerResult, localLive, remoteLive, manifests,
     lastKnown: lastKnownStates,
     privateDir: fleetPrivateDir,
     factoryMirror: FACTORY_MIRROR
@@ -458,7 +484,7 @@ function invalidateWorkspaceList(): void {
 const workspaceSkills = createWorkspaceSkills({
   listWorkspaces: async () =>
     Promise.all(
-      (await listWorkspaceManifests()).map(async (m) =>
+      (await listWorkspaceManifests()).filter((m) => m.kind !== 'remote').map(async (m) =>
         toSkillWorkspace(m, {
           privateDir: m.kind === 'local' ? m.workspaceRoot : await fleetPrivateDir(m.id),
           containerClaudeDir: workspaceClaudeDir(m.id),
@@ -524,13 +550,13 @@ export async function hostPostToWorkspace(
   targetId: string,
   msg: string
 ): Promise<{ via: 'attached' | 'headless'; brokerSessionId?: string }> {
+  const kind = await resolveAutomationKind(targetId);
   const live = liveHandleForWorkspace(targetId);
   if (live) {
     await injectAndSubmit((chunk) => live.stream.write(chunk), msg);
     broadcastCommitteeInbound(targetId, msg);
     return { via: 'attached' };
   }
-  const kind = await resolveKind(targetId);
   if (kind === 'local') {
     throw new Error('a local workspace can only be prompted while its terminal is open in the app');
   }
@@ -551,7 +577,7 @@ export async function hostExecScript(
 
 /** Start a fresh headless `claude <args>` session in a container workspace. */
 export async function hostSpawnFresh(workspaceId: string, sessionId: string, args: string[]): Promise<void> {
-  const kind = await resolveKind(workspaceId);
+  const kind = await resolveAutomationKind(workspaceId);
   if (kind === 'local') throw new Error('fresh sessions need a container workspace (use mode: live for local workspaces)');
   // Pin the claude UUID up front (as tab CREATE does, #195) and record the
   // broker→claude mapping, so the Sessions list can tell this transcript came
@@ -583,7 +609,7 @@ export async function hostCloseFresh(workspaceId: string, sessionId: string): Pr
 
 /** Start/unpause a workspace and wait until its broker answers. */
 export async function hostEnsureRunning(targetId: string): Promise<void> {
-  const kind = await resolveKind(targetId);
+  const kind = await resolveAutomationKind(targetId);
   await backendForKind(kind).startWorkspace(targetId);
   invalidateWorkspaceList();
   if (!MOCK_MODE && kind === 'container') await realDocker.waitForBrokerReady(targetId);
@@ -1118,7 +1144,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     // Reconciling here (the renderer polls workspace:list) covers start, pause,
     // stop, remove, and app launch without per-action hooks.
     portForward?.reconcile(
-      all.filter((w) => w.state === 'running' && w.kind !== 'local').map((w) => w.id)
+      all.filter((w) => w.state === 'running' && w.kind === 'container').map((w) => w.id)
     );
     mockPorts?.reconcile(all.filter((w) => w.state === 'running').map((w) => w.id));
     return all;
@@ -1130,6 +1156,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // The id becomes this workspace's vault scope (resolveEnv injects that
       // bag into its env), so it may never name a host-only scope (#444).
       assertRendererWorkspaceId(input?.id);
+      assertNotRemoteSpec(input.kind, await readWorkspaceManifest(input.id));
       const kind: WorkspaceKind = input.kind ?? 'container';
       const launcher = kind === 'local' ? sanitizeLauncher(input.launcher) : undefined;
       // Local workspaces run `claude` in a user-chosen host directory; validate
@@ -1405,6 +1432,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         throw new Error(`A workspace named "${spec.name}" already exists.`);
       }
       const existing = await readWorkspaceManifest(spec.id);
+      assertNotRemoteSpec(spec.kind, existing);
       // Container: workspaceRoot is derived — the canonical private folder under
       // the fleet root. Local (#16): it's the user-chosen host dir, supplied by
       // the renderer; fall back to the existing manifest's value if absent.
@@ -1432,7 +1460,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         ...(existing ?? {}),
         ...spec,
         workspaceRoot,
-        launcher: incomingLauncher
+        launcher: incomingLauncher,
+        remote: undefined
       });
     invalidateWorkspaceList();
     // Reflect a mirror-default edit in the watcher immediately (don't wait for
@@ -1573,7 +1602,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     await clearInputWaitForContainer(containerId);
     // A saved (no-live) workspace passes its ULID in opts.id; prefer it so the
     // kind resolves even when there's no live containerId.
-    const result = await (await backendFor(opts?.id ?? containerId)).removeWorkspace(containerId, opts);
+    const backend = MOCK_MODE ? mockDocker : backendForKind(await resolveRemoveKind(containerId, opts?.id));
+    const result = await backend.removeWorkspace(containerId, opts);
     invalidateWorkspaceList();
     // Tear down the per-id MCP listener + socket dir (#117). Keyed by workspace
     // id, which lives in opts.id (containerId is the Docker id). Best-effort.
@@ -1916,6 +1946,18 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       pickGithubClientId({ env: process.env[GITHUB_CLIENT_ID_ENV], config: await getGithubClientIdConfig() })
   });
   registerIdentityIpc(ipcMain, identity);
+  remoteToken = () => identity.bearerToken();
+  remoteLogin = () => identity.currentLogin();
+  registerRemoteIpc(ipcMain, {
+    backend: remoteBackend,
+    accountStatus: () => identity.status(),
+    readManifest: readWorkspaceManifest,
+    listManifests: listWorkspaceManifests,
+    confirm: confirmRemote,
+    writeManifest: writeWorkspaceManifest,
+    findByName: findWorkspaceByName,
+    invalidate: invalidateWorkspaceList
+  });
   loadoutSources.setGithubTokenProvider(() => identity.packagesToken());
 
   ipcMain.handle(
@@ -1972,6 +2014,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         (w) => w.containerId === containerId || w.id === containerId
       );
       if (owner) handleWorkspaceId.set(ptyHandleId, owner.id);
+      const signalOwner = owner && hostRunsSignals(owner.kind) ? owner : null;
       handleBrokerSessionId.set(ptyHandleId, brokerSessionId);
       // No-op unless CLAUDE_FLEET_CAPTURE_PTY is set (ptyCapture.ts, #268).
       const capture = createPtyCapture({
@@ -2036,9 +2079,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         // Capture exactly what the renderer got, not what we think we sent.
         ptyCaptures.get(ptyHandleId)?.data(chunk);
         recordPtyChunk(owner?.id ?? handleWorkspaceId.get(ptyHandleId) ?? null, brokerSessionId, chunk.length);
-        if (owner && detector.push(chunk.toString('utf8'))) {
-          committeeBusy.set(owner.id, { busy: detector.isBusy, since: Date.now() });
-          if (!detector.isBusy) emitFleetEvent({ on: 'session.idle', workspaceId: owner.id });
+        if (signalOwner && detector.push(chunk.toString('utf8'))) {
+          committeeBusy.set(signalOwner.id, { busy: detector.isBusy, since: Date.now() });
+          if (!detector.isBusy) emitFleetEvent({ on: 'session.idle', workspaceId: signalOwner.id });
         }
       });
       handle.stream.on('end', () => {
@@ -2152,7 +2195,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     }
   );
 
-  ipcMain.handle('pty:detach', (_e, sessionId: string) => {
+  const detachHandle = (sessionId: string): void => {
     const present = ptySessions.has(sessionId);
     ptySessions.get(sessionId)?.detach();
     ptySessions.delete(sessionId);
@@ -2177,6 +2220,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         : `pty:detach for unknown handle (live=${ptySessions.size})`,
       extra: { ptyHandleId: sessionId, hadHandle: present, live: ptySessions.size }
     });
+  };
+
+  ipcMain.handle('pty:detach', (_e, sessionId: string) => {
+    detachHandle(sessionId);
   });
 
   // Terminate the broker session behind a handle (kills claude, drops the
@@ -2221,17 +2268,28 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // relaunch re-attaches). Returns whether a live handle was found.
   ipcMain.handle(
     'pty:closeSessionByBroker',
-    (_e, workspaceId: string, brokerSessionId: string) => {
+    async (_e, workspaceId: string, brokerSessionId: string) => {
       const ptyHandleId = findLiveHandleId(
         handleWorkspaceId,
         handleBrokerSessionId,
         workspaceId,
         brokerSessionId
       );
-      if (!ptyHandleId) return Promise.resolve(false);
+      if (!ptyHandleId) return false;
+      if (tabCloseVerb(await resolveKind(workspaceId)) === 'detach') {
+        detachHandle(ptyHandleId);
+        return true;
+      }
       return reapHandle(ptyHandleId, 'pty:closeSessionByBroker');
     }
   );
+
+  // Remote "End session": CLOSE the host session (the host refuses a non-owner).
+  ipcMain.handle('pty:endSessionByBroker', async (_e, workspaceId: string, brokerSessionId: string) => {
+    const ptyHandleId = findLiveHandleId(handleWorkspaceId, handleBrokerSessionId, workspaceId, brokerSessionId);
+    if (!ptyHandleId) return false;
+    return reapHandle(ptyHandleId, 'pty:endSessionByBroker');
+  });
 
   // Durable transcript mirror (#10). The renderer holds broker session ids;
   // mirror files are named by claude session id, so the transcript handlers

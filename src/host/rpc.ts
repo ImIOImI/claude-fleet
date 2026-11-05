@@ -1,7 +1,7 @@
 // POST /rpc/<channel>: IPC channel names and argument lists, each channel
 // allowlisted with the tier it needs. Anything not registered doesn't exist.
 import { tierAtLeast, type Tier } from '../main/identity/grants.js';
-import type { Principal } from './attachHub.js';
+import { ownerKey, type Principal } from './attachHub.js';
 import { DEFAULT_PORT } from './config.js';
 import { portKillRefusal, type BrokerOps } from './brokerOps.js';
 import type { Logger } from './log.js';
@@ -37,9 +37,19 @@ export async function dispatchRpc(reg: RpcRegistry, channel: string, body: unkno
   }
 }
 
-export function brokerRpcChannels(ops: BrokerOps, hostPort: number = DEFAULT_PORT): Map<string, RpcChannel> {
+/** `owners` is AttachHub.owners: session id → ownerKey of its creator. */
+export function brokerRpcChannels(ops: BrokerOps, owners: ReadonlyMap<string, string>, hostPort: number = DEFAULT_PORT): Map<string, RpcChannel> {
   return new Map<string, RpcChannel>([
-    ['sessions:live', { tier: 'read', handle: () => ops.list() }],
+    [
+      'sessions:live',
+      {
+        tier: 'read',
+        handle: async (_args, caller) => {
+          const me = ownerKey(caller.identity);
+          return (await ops.list()).map((s) => ({ id: s.id, alive: s.alive, mine: owners.get(s.id) === me }));
+        }
+      }
+    ],
     ['ports:list', { tier: 'read', handle: () => ops.listPorts() }],
     [
       'ports:kill',
