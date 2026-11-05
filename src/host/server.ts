@@ -53,6 +53,8 @@ export interface HostServerDeps {
   auth(): AuthContext;
   lease(): LeaseState;
   healthy(): boolean;
+  /** Absent: no host store. */
+  db?(): 'ok' | 'down' | 'none';
   hub: AttachHub;
   events: EventHub;
   rpc: RpcRegistry;
@@ -282,7 +284,7 @@ export function createHostServer(deps: HostServerDeps): HostServer {
   async function handle(req: IncomingMessage, res: ServerResponse, path: string): Promise<string | null> {
     if (path === '/healthz' || path === '/leader') {
       if (req.method !== 'GET') sendJson(res, 405, { error: 'method not allowed' });
-      else if (path === '/healthz') sendJson(res, deps.healthy() ? 200 : 503, { status: deps.healthy() ? 'ok' : 'unhealthy', lease: deps.lease() });
+      else if (path === '/healthz') sendJson(res, deps.healthy() ? 200 : 503, { status: deps.healthy() ? 'ok' : 'unhealthy', lease: deps.lease(), db: deps.db?.() ?? 'none' });
       else sendJson(res, deps.lease() === 'holder' ? 200 : 503, { lease: deps.lease() });
       return null;
     }

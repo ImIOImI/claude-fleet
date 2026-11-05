@@ -3,6 +3,7 @@
 import { readFile } from 'node:fs/promises';
 import { parse } from 'yaml';
 import { ORG_RE, parseGrantConfig, type GrantConfig } from '../main/identity/grants.js';
+import { parseStoreConfig, StoreConfigError, type PostgresStoreConfig } from '../main/store/storeConfig.js';
 
 export const DEFAULT_CONFIG_PATH = '/etc/fleet-host/config.yaml';
 export const DEFAULT_PORT = 8080;
@@ -36,6 +37,8 @@ export interface HostGithubConfig {
 export interface HostConfig {
   workspace: HostWorkspaceInfo;
   github: HostGithubConfig | null;
+  /** The host store; null runs without one (process-local lease, no ingest). */
+  db: PostgresStoreConfig | null;
   identity: { provider: 'github'; org: string | null };
   grants: GrantConfig;
   /** Proxies in front of the pod that append to X-Forwarded-For; 0 means key on the socket address. */
@@ -125,9 +128,20 @@ function parseGithub(v: unknown): HostGithubConfig {
   return { app, repositories, permissions };
 }
 
+function parseDb(v: unknown): PostgresStoreConfig {
+  const d = record(v, 'db');
+  if ('kind' in d) throw new HostConfigError('db has unknown key kind (the host store is always Postgres)');
+  try {
+    return parseStoreConfig({ ...d, kind: 'postgres' }, { allowStaticSecrets: true }) as PostgresStoreConfig;
+  } catch (err) {
+    if (err instanceof StoreConfigError) throw new HostConfigError(`db: ${err.message.replace(/^store: /, '')}`);
+    throw err;
+  }
+}
+
 export function parseHostConfig(raw: unknown): HostConfig {
   const o = record(raw, 'host config');
-  onlyKeys(o, 'host config', ['workspace', 'identity', 'grants', 'machines', 'trustedProxyHops', 'github']);
+  onlyKeys(o, 'host config', ['workspace', 'identity', 'grants', 'machines', 'trustedProxyHops', 'github', 'db']);
   const id = o.identity === undefined ? {} : record(o.identity, 'identity');
   onlyKeys(id, 'identity', ['provider', 'org']);
   if (id.provider !== undefined && id.provider !== 'github') {
@@ -149,6 +163,7 @@ export function parseHostConfig(raw: unknown): HostConfig {
   return {
     workspace: parseWorkspace(o.workspace),
     github: o.github === undefined ? null : parseGithub(o.github),
+    db: o.db === undefined ? null : parseDb(o.db),
     identity: { provider: 'github', org: typeof id.org === 'string' ? id.org : null },
     grants,
     trustedProxyHops: hops

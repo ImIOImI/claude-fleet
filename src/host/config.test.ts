@@ -96,6 +96,28 @@ describe('parseHostConfig', () => {
     expect(() => parseHostConfig({ ...base, github: { ...app, installationId: 1.5 } })).toThrow(/github.installationId must be a positive integer/);
     expect(() => parseHostConfig({ ...base, github: { ...app, keyFile: 'k' } })).toThrow(/github.keyFile must be an absolute path/);
   });
+
+  it('parses an optional db block as a Postgres store config (static secrets allowed: the config is a mounted secret)', () => {
+    expect(parseHostConfig(base).db).toBeNull();
+    const c = parseHostConfig({
+      ...base,
+      db: { host: 'fleet.cluster-abc.us-east-1.rds.amazonaws.com', database: 'fleet', user: 'fleet_agent', password: { kind: 'aws-rds-iam', region: 'us-east-1' }, caFile: '/etc/ssl/certs/rds-global-bundle.pem' }
+    });
+    expect(c.db).toEqual({
+      kind: 'postgres', schema: 'fleet', poolMax: 4,
+      connection: {
+        host: 'fleet.cluster-abc.us-east-1.rds.amazonaws.com', port: 5432, database: 'fleet', user: 'fleet_agent',
+        password: { kind: 'aws-rds-iam', region: 'us-east-1' }, ssl: 'verify-full', caFile: '/etc/ssl/certs/rds-global-bundle.pem'
+      }
+    });
+    expect(parseHostConfig({ ...base, db: { connectionString: 'postgres://u:pw@localhost/fleet' } }).db?.connection).toEqual({ connectionString: 'postgres://u:pw@localhost/fleet' });
+  });
+
+  it('refuses a db block with kind, an unknown key, or no connection', () => {
+    expect(() => parseHostConfig({ ...base, db: { kind: 'postgres', connectionString: 'postgres://x' } })).toThrow(/db has unknown key kind/);
+    expect(() => parseHostConfig({ ...base, db: { connectionString: 'postgres://x', name: 'fleet' } })).toThrow(/db: unknown key "name"/);
+    expect(() => parseHostConfig({ ...base, db: {} })).toThrow(/db: needs exactly one of/);
+  });
 });
 
 describe('loadHostConfig', () => {

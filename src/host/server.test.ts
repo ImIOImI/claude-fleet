@@ -131,12 +131,22 @@ const closed = (ws: WebSocket) => new Promise<[number, string]>((r) => ws.once('
 describe('unauthenticated routes', () => {
   it('/healthz reports lease state without a token, holder or standby', async () => {
     const r = await start();
-    expect(await (await fetch(`${r.url}/healthz`)).json()).toEqual({ status: 'ok', lease: 'holder' });
+    expect(await (await fetch(`${r.url}/healthz`)).json()).toEqual({ status: 'ok', lease: 'holder', db: 'none' });
     r.setLease('standby');
     const res = await fetch(`${r.url}/healthz`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ status: 'ok', lease: 'standby' });
+    expect(await res.json()).toEqual({ status: 'ok', lease: 'standby', db: 'none' });
     expect(r.verify).not.toHaveBeenCalled();
+  });
+
+  it('/healthz reports the host db, and a down db makes the pod unready', async () => {
+    let db: 'ok' | 'down' = 'ok';
+    const r = await start([], { db: () => db, healthy: () => db === 'ok' });
+    expect(await (await fetch(`${r.url}/healthz`)).json()).toEqual({ status: 'ok', lease: 'holder', db: 'ok' });
+    db = 'down';
+    const res = await fetch(`${r.url}/healthz`);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ status: 'unhealthy', lease: 'holder', db: 'down' });
   });
 
   it('/leader is 200 only on the holder', async () => {

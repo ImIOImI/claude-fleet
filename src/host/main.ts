@@ -9,6 +9,7 @@ import { loadHostConfig, readHostEnv, type HostConfig } from './config.js';
 import { createReloader, watchConfigDir } from './configReload.js';
 import { startCredHelper, type CredServer } from './credServer.js';
 import { brokerWatch, EventHub, pruneDeadOwners } from './events.js';
+import { openHostDbRetrying, startDbHealth, type DbHealth, type HostDbHandle } from './hostDb.js';
 import { resolveWorkspaceId } from './hostState.js';
 import { LeaseManager, memoryLeaseStore, type LeaseStore } from './lease.js';
 import { createLogger, type LogSink } from './log.js';
@@ -88,6 +89,19 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     uninstallGuards();
     throw new Error(`host config rejected: ${env.configPath}`);
   }
+  let hostDb: HostDbHandle | null = null;
+  let dbHealth: DbHealth | null = null;
+  try {
+    if (config.db) {
+      hostDb = await openHostDbRetrying(config.db, { env: opts.env ?? process.env, log });
+      dbHealth = startDbHealth(hostDb.ping, { log });
+    } else {
+      log.log('warn', 'no db configured: process-local lease and no ingest; run exactly one replica');
+    }
+  } catch (err) {
+    uninstallGuards();
+    throw err;
+  }
   const workspaceId = await resolveWorkspaceId(env.stateDir, config.workspace.id);
   let cred: CredServer | null = null;
   try {
@@ -112,7 +126,8 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     workspace: () => ({ ...config.workspace, id: workspaceId }),
     auth: () => auth,
     lease: () => leaseMgr.state,
-    healthy: () => leaseMgr.running,
+    healthy: () => leaseMgr.running && (dbHealth?.ok() ?? true),
+    db: () => (dbHealth ? (dbHealth.ok() ? 'ok' : 'down') : 'none'),
     hub,
     events,
     rpc: brokerRpcChannels(ops, hub.owners, env.port),
@@ -159,6 +174,8 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
       await leaseMgr.stop();
       await server.close();
       await cred?.close();
+      dbHealth?.stop();
+      await hostDb?.end().catch(() => undefined);
       uninstallGuards();
       if (!fatal) exit(code);
     })();

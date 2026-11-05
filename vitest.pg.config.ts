@@ -5,6 +5,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'src/host/hostDb.test.ts',
       'src/main/automations/automationService.test.ts',
       'src/main/automations/automationStore.test.ts',
       'src/main/automations/loadoutInstaller.test.ts',
