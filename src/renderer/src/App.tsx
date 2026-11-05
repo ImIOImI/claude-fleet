@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef, useReducer, useMemo } from 'react';
 import type { RemoteTier } from '../../preload/remoteTypes';
 import { RenameRemoteModal } from './components/RenameRemoteModal';
+import { remotePane, unreachableBanner, unreachableRemoteNames } from './remoteView';
 import { usePorts } from './usePorts';
 import { useServingSessionNames } from './useServingSessionNames';
 import { WorkspaceTabStrip } from './components/WorkspaceTabStrip';
@@ -1412,11 +1413,14 @@ export function App() {
     [busyBrokerByWorkspace, claudeMappings, peerStatus]
   );
 
+  const remoteBanner = unreachableBanner(unreachableRemoteNames(workspaces));
+  const selectedRemotePane = selected ? remotePane(selected) : null;
+
   return (
     <div
       className={`app${dragging ? ' dragging' : ''}${
         backendReady === false ? ' daemon-down' : ''
-      }`}
+      }${remoteBanner ? ' remote-down' : ''}`}
     >
       <WorkspaceTabStrip
         workspaces={roleWsId ? workspaces.filter((w) => w.id !== roleWsId) : workspaces}
@@ -1447,6 +1451,12 @@ export function App() {
           <span className="dot" aria-hidden="true" />
           Docker daemon unreachable — container workspaces are shown from last-known state and
           can&apos;t be started or attached until it&apos;s back.
+        </div>
+      )}
+      {remoteBanner && (
+        <div className="daemon-banner remote-banner" role="status">
+          <span className="dot" aria-hidden="true" />
+          {remoteBanner}
         </div>
       )}
 
@@ -1515,6 +1525,12 @@ export function App() {
               />
             ) : liveCount === 0 ? (
               <FirstRun onNewWorkspace={() => setCreateOpen(true)} />
+            ) : selectedRemotePane ? (
+              <div className="empty">
+                {selectedRemotePane.tone === 'error' && <div className="icon-card error">!</div>}
+                <h2>{selectedRemotePane.title}</h2>
+                <p>{selectedRemotePane.body}</p>
+              </div>
             ) : selected?.state === 'unreachable' ? (
               <div className="empty">
                 <div className="icon-card error">!</div>

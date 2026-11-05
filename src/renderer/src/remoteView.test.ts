@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { RemoteProbeErr, RemoteProbeOk } from '../../preload/remoteTypes';
 import { readFileSync } from 'node:fs';
-import { applyProbe, canStartSessions, CHECKING_STATUS, joinableSessions, paneRules, remoteChip, canType, ipcErrorText, probeErrorText, remoteFormView, tierTitle, unreachableBanner, type RemoteFormState } from './remoteView';
+import { applyProbe, canStartSessions, CHECKING_STATUS, joinableSessions, paneRules, remoteChip, remotePane, unreachableRemoteNames, canType, ipcErrorText, probeErrorText, remoteFormView, tierTitle, unreachableBanner, type RemoteFormState } from './remoteView';
 
 const OK: RemoteProbeOk = {
   ok: true,
@@ -162,5 +162,41 @@ describe('joinableSessions', () => {
     ];
     expect(joinableSessions(live, ['c'])).toEqual([{ id: 'a', alive: true }]);
     expect(joinableSessions([], [])).toEqual([]);
+  });
+});
+
+describe('unreachableRemoteNames', () => {
+  it('names probed, failing remotes only', () => {
+    const ws = [
+      { kind: 'remote', state: 'unreachable', name: 'down', status: 'refused' },
+      { kind: 'remote', state: 'unreachable', name: 'new', status: CHECKING_STATUS },
+      { kind: 'remote', state: 'running', name: 'up' },
+      { kind: 'container', state: 'unreachable', name: 'docker' }
+    ];
+    expect(unreachableRemoteNames(ws)).toEqual(['down']);
+  });
+});
+
+describe('remotePane', () => {
+  const url = 'https://h';
+  it('is null unless the selected remote is not running', () => {
+    expect(remotePane({ kind: 'container', state: 'unreachable', name: 'c' })).toBeNull();
+    expect(remotePane({ kind: 'remote', state: 'running', name: 'r', remote: { url } })).toBeNull();
+  });
+
+  it('a checking host is neutral', () => {
+    expect(remotePane({ kind: 'remote', state: 'unreachable', name: 'r', status: CHECKING_STATUS, remote: { url } })).toEqual({
+      tone: 'neutral',
+      title: 'Checking host…',
+      body: 'Contacting r (https://h).'
+    });
+  });
+
+  it('an unreachable host is an error naming it', () => {
+    expect(remotePane({ kind: 'remote', state: 'unreachable', name: 'r', remote: { url } })).toEqual({
+      tone: 'error',
+      title: 'Host unreachable',
+      body: "r (https://h) isn't answering. Its sessions reappear when it's back."
+    });
   });
 });

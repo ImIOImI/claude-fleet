@@ -108,3 +108,24 @@ export function paneRules(t: RemoteTier | null | undefined): PaneRules {
 export function joinableSessions(live: RemoteLiveSession[], tabIds: string[]): RemoteLiveSession[] {
   return live.filter((l) => l.alive && !tabIds.includes(l.id));
 }
+
+interface RemoteRow {
+  kind: string;
+  state: string;
+  name: string;
+  status?: string;
+  remote?: { url: string };
+}
+
+/** Banner names: an unprobed bookmark isn't reported down. */
+export function unreachableRemoteNames(ws: RemoteRow[]): string[] {
+  return ws.filter((w) => remoteChip(w)?.phase === 'unreachable').map((w) => w.name);
+}
+
+export function remotePane(w: RemoteRow): { tone: 'neutral' | 'error'; title: string; body: string } | null {
+  const phase = remoteChip(w)?.phase;
+  const where = `${w.name} (${w.remote?.url ?? 'unknown URL'})`;
+  if (phase === 'checking') return { tone: 'neutral', title: 'Checking host…', body: `Contacting ${where}.` };
+  if (phase === 'unreachable') return { tone: 'error', title: 'Host unreachable', body: `${where} isn't answering. Its sessions reappear when it's back.` };
+  return null;
+}
