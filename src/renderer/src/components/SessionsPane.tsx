@@ -16,7 +16,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { createPortal } from 'react-dom';
 import { colorFor } from '../App';
 import type { SessionListItem } from '../../../preload';
-import { sessionsForScope, filterSessions, partitionByOpen, orderOpenByTabs, splitHeadless, tagCounts, limitSessions } from '../sessionsView';
+import { sessionsForScope, filterSessions, partitionByOpen, orderOpenByTabs, splitHeadless, splitCapture, tagCounts, limitSessions } from '../sessionsView';
 import { useBlinkSync } from '../blinkSync';
 import type { OpenTabRef } from '../busySessions';
 import { usePortalMenu } from './portalMenu';
@@ -99,6 +99,7 @@ export function SessionsPane({
   const [scope, setScope] = useState<Scope>('workspace');
   const [query, setQuery] = useState('');
   const [headlessExpanded, setHeadlessExpanded] = useState(false);
+  const [captureExpanded, setCaptureExpanded] = useState(false);
   const [items, setItems] = useState<SessionListItem[]>([]);
   const [loaded, setLoaded] = useState(false);
   // Inline-edit + inline-delete-confirm state, keyed by session id.
@@ -178,24 +179,30 @@ export function SessionsPane({
   // Automation runs leave Recent for their own collapsed group at the bottom,
   // so a new run never pushes the user's own sessions down.
   const { headless: headlessRows, rest: recentRows } = splitHeadless(parts.recent);
+  // Knowledge-capture forks (#483) leave Recent for their own collapsed
+  // group too, like automation runs.
+  const { capture: captureRows, rest: recentRowsNoCapture } = splitCapture(recentRows);
   const limitOpts = { maxCount: maxSessions, maxAgeDays: maxSessionAgeDays };
   const bypassLimits = q !== '' || activeTags.length > 0;
   const recentShown = bypassLimits
-    ? recentRows
-    : limitSessions(recentRows, limitOpts, Date.now());
+    ? recentRowsNoCapture
+    : limitSessions(recentRowsNoCapture, limitOpts, Date.now());
   const headlessShown = bypassLimits
     ? headlessRows
     : limitSessions(headlessRows, limitOpts, Date.now());
+  const captureShown = bypassLimits ? captureRows : limitSessions(captureRows, limitOpts, Date.now());
   // Collapsed by default; a search/tag filter opens it so matches are visible.
   const showHeadless = headlessExpanded || bypassLimits;
+  const showCapture = captureExpanded || bypassLimits;
   // "All · N" badge: what the All view lists under the current limits (#149) —
   // open rows + the limited recent rows over the FULL list, search ignored
-  // (searching never changed the badge before either).
+  // (searching never changed the badge before either). Capture forks never
+  // count toward the badge.
   const allParts = partitionByOpen(items, openIds);
   const allSplit = splitHeadless(allParts.recent);
   const allSessionsCount =
     allParts.open.length +
-    limitSessions(allSplit.rest, limitOpts, Date.now()).length +
+    limitSessions(splitCapture(allSplit.rest).rest, limitOpts, Date.now()).length +
     limitSessions(allSplit.headless, limitOpts, Date.now()).length;
   const allTags = tagCounts(scoped);
 
@@ -407,7 +414,7 @@ export function SessionsPane({
             <strong>No workspace selected</strong>
             Pick a workspace above, or switch to <em>All</em> to see every session.
           </div>
-        ) : openRows.length + recentShown.length + headlessShown.length === 0 ? (
+        ) : openRows.length + recentShown.length + headlessShown.length + captureShown.length === 0 ? (
           <div className="pane-placeholder subdued">
             <strong>
               {q || activeTags.length > 0
@@ -454,6 +461,21 @@ export function SessionsPane({
               </li>
             )}
             {showHeadless && headlessShown.map(renderRow)}
+            {captureShown.length > 0 && (
+              <li className="session-group-label recent">
+                <button
+                  className="session-group-toggle"
+                  aria-expanded={showCapture}
+                  onClick={() => setCaptureExpanded((v) => !v)}
+                  title={showCapture ? 'Hide knowledge capture runs' : 'Show knowledge capture runs'}
+                >
+                  <span className={`acc-chev ${showCapture ? 'open' : ''}`} aria-hidden>▾</span>
+                  Knowledge capture · {captureShown.length}
+                </button>
+                <span className="session-group-line" />
+              </li>
+            )}
+            {showCapture && captureShown.map(renderRow)}
           </ul>
         )}
       </div>

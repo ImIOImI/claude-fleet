@@ -16,6 +16,7 @@ import {
 import { openHostPath } from './openHostPath.js';
 import { captureSettingsEqual, effectiveCaptureSettings } from '../preload/captureSettings.js';
 import { emitCaptureSettingsChanged } from './claims/captureSettingsEvents.js';
+import { isCaptureFork } from './claims/captureForks.js';
 import {
   getFleetRoot,
   setFleetRoot,
@@ -1281,6 +1282,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
           workspaceName: w.name,
           workspaceColorHue: w.color?.hue ?? null,
           workspaceState: w.state,
+          capture: isCaptureFork(r.id),
         }
       ];
     });

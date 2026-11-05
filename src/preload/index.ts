@@ -78,6 +78,8 @@ export interface SessionListItem {
   tags: string[];
   /** Started by an automation fresh step, not a terminal tab. */
   headless: boolean;
+  /** A background knowledge-capture fork (#483), not a terminal tab. */
+  capture: boolean;
 }
 
 /**

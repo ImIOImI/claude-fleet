@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sessionsForScope, filterSessions, partitionByOpen, orderOpenByTabs, splitHeadless, tagCounts, limitSessions } from './sessionsView';
+import { sessionsForScope, filterSessions, partitionByOpen, orderOpenByTabs, splitHeadless, splitCapture, tagCounts, limitSessions } from './sessionsView';
 
 // Minimal session shape — only what the scope logic touches.
 const S = (id: string, workspaceId: string): { id: string; workspaceId: string } => ({
@@ -89,6 +89,15 @@ describe('splitHeadless', () => {
     ];
     const { headless, rest } = splitHeadless(rows);
     expect(headless.map((s) => s.id)).toEqual(['r1', 'r2']);
+    expect(rest.map((s) => s.id)).toEqual(['a', 'b']);
+  });
+});
+
+describe('splitCapture', () => {
+  it('moves capture forks out, preserving order', () => {
+    const rows = [{ id: 'a' }, { id: 'f1', capture: true }, { id: 'b', capture: false }, { id: 'f2', capture: true }];
+    const { capture, rest } = splitCapture(rows);
+    expect(capture.map((s) => s.id)).toEqual(['f1', 'f2']);
     expect(rest.map((s) => s.id)).toEqual(['a', 'b']);
   });
 });
