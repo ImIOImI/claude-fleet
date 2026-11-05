@@ -28,6 +28,8 @@ export interface Toast {
   /** Optional second inline action, e.g. the "Keep" next to "Use newer" on
    *  the newer-claude toast (#336). Rendered after `action`. */
   secondaryAction?: ToastAction;
+  /** Runs when the user closes the toast with ✕ (not when an action dismisses it). */
+  onClose?: () => void;
   /** Dedupe key: pushing another toast with the same key REPLACES the existing
    *  one rather than stacking — e.g. the single "MCP unreachable" toast. */
   key?: string;

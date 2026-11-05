@@ -1,4 +1,4 @@
-// Postgres DDL for state.db's schema at SQLite user_version 14.
+// Postgres DDL for state.db: the baseline mirrors SQLite user_version 14; later versions are steps.
 // Byte-order text, as SQLite compares it: sort order must not follow the server locale.
 import type { PgTrack } from '../pgMigrate.js';
 
@@ -186,4 +186,31 @@ CREATE TABLE session_tool_counts (
 );
 `;
 
-export const STATE_PG_TRACK: PgTrack = { track: 'state', baselineVersion: STATE_PG_BASELINE_VERSION, baseline: STATE_PG_BASELINE, steps: [] };
+const PORT_EXPOSURES_V15 = `
+CREATE TABLE port_exposures (
+  id ${T} PRIMARY KEY,
+  workspace_id ${T} NOT NULL,
+  session_id ${T},
+  port BIGINT NOT NULL,
+  cmdline ${T},
+  label ${T},
+  reason ${T},
+  source ${T} NOT NULL,
+  first_scanned_at BIGINT,
+  declared_at BIGINT,
+  popup_shown_at BIGINT,
+  outcome ${T},
+  opened_via ${T},
+  open_count BIGINT NOT NULL DEFAULT 0,
+  ended_at BIGINT
+);
+CREATE INDEX idx_port_exposures_workspace ON port_exposures (workspace_id, port);
+CREATE INDEX idx_port_exposures_ended ON port_exposures (ended_at);
+`;
+
+export const STATE_PG_TRACK: PgTrack = {
+  track: 'state',
+  baselineVersion: STATE_PG_BASELINE_VERSION,
+  baseline: STATE_PG_BASELINE,
+  steps: [{ version: 15, postgres: PORT_EXPOSURES_V15 }]
+};

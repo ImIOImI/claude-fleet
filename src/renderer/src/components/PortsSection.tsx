@@ -88,10 +88,16 @@ function PortRow({
         </>
       )}
       <span className="obs-port-num mono">:{row.port}</span>
-      {row.cmdline && (
-        <span className="obs-port-cmd" title={row.cmdline}>
-          {row.cmdline}
+      {row.label ? (
+        <span className="obs-port-cmd" title={row.cmdline ?? row.label}>
+          {row.label}
         </span>
+      ) : (
+        row.cmdline && (
+          <span className="obs-port-cmd" title={row.cmdline}>
+            {row.cmdline}
+          </span>
+        )
       )}
       {row.sessionId && row.sessionName && (
         <button

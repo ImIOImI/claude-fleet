@@ -52,7 +52,8 @@ import {
   getKnowledgeCaptureDailyCap,
   setKnowledgeCaptureDailyCap,
   getGithubClientIdConfig,
-  configUnreadablePath
+  configUnreadablePath,
+  getUndeclaredToastAfterSec
 } from './config.js';
 import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk, perfSetSpanContext, recordLatencySample, setPerfStateListener, perfNotePowerEvent, perfSpanAsync, setPerfMemorySource } from './perf.js';
 import { resolvePerfConfig } from './perfConfig.js';
@@ -80,6 +81,7 @@ import {
   currentMcpStatus,
   setPlanUsageHandler,
   setSkillHandlers,
+  setPortExposureHandlers,
 } from './mcpServer.js';
 import * as vault from './vault.js';
 import { assertRendererWorkspaceId } from './vaultScopes.js';
@@ -146,6 +148,7 @@ import {
   latestAnchorCovering,
   latestLimitHitAnchor,
   SUMMARY_STALE_GRACE_MS,
+  stateKysely,
 } from './db.js';
 import { foldPlanUsage, type PlanUsageFold } from './planUsage.js';
 import { logError, getLogPath } from './errorLog.js';
@@ -155,6 +158,9 @@ import { makeTrailingRebroadcast } from './trailingBroadcast.js';
 import { consumeForWorkspace, pendingSnapshotForWorkspace, recordPendingAttach } from './pendingAttaches.js';
 import { PortForwardManager, type ServingPort } from './portforward.js';
 import { MockServingPorts } from './mockPorts.js';
+import { PortExposureService, type PortPopup } from './portExposure.js';
+import { PortExposureStore, gatedSink, type OpenVia } from './portExposureStore.js';
+import { probeLocalHttp } from './localPortProbe.js';
 import { brokerEndpoint } from './docker.js';
 import { BrokerClient } from './broker.js';
 import { MCP_TCP_PORT } from './mcpSocket.js';
@@ -231,12 +237,12 @@ async function reapplyPerfConfig(): Promise<void> {
   );
 }
 
-/** Tell every window a forwardable dev-server port appeared (toast cue). */
-function broadcastPortDetected(workspaceId: string, port: number): void {
+/** Tell every window to show the preview popup for a port. */
+function broadcastPortDetected(p: PortPopup): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed()) continue;
     try {
-      win.webContents.send('ports:detected', { workspaceId, port });
+      win.webContents.send('ports:detected', p);
     } catch {
       /* frame disposed mid-send */
     }
@@ -263,17 +269,56 @@ function scheduleClaudeFreshnessCheck(workspaceId: string): void {
     .catch(() => {});
 }
 
-/** Tell every window a workspace's Serving snapshot changed (rail state). */
-function broadcastPortsChanged(workspaceId: string, ports: ServingPort[]): void {
+// Last Serving snapshot per workspace, re-sent when a declaration adds a label.
+const lastServing = new Map<string, ServingPort[]>();
+
+function labeled(workspaceId: string, ports: ServingPort[]): Array<ServingPort & { label: string | null }> {
+  return ports.map((p) => ({ ...p, label: portExposure.labelFor(workspaceId, p.port) }));
+}
+
+function sendPortsChanged(workspaceId: string, ports: ServingPort[]): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed()) continue;
     try {
-      win.webContents.send('ports:changed', { workspaceId, ports });
+      win.webContents.send('ports:changed', { workspaceId, ports: labeled(workspaceId, ports) });
     } catch {
       /* frame disposed mid-send */
     }
   }
 }
+
+/** A workspace's Serving snapshot changed: feed exposure tracking, then the rail. */
+function broadcastPortsChanged(workspaceId: string, ports: ServingPort[]): void {
+  if (ports.length > 0) lastServing.set(workspaceId, ports);
+  else lastServing.delete(workspaceId);
+  portExposure.onSnapshot(workspaceId, ports);
+  sendPortsChanged(workspaceId, ports);
+}
+
+// state.db opens after module load, so the startup sweep runs from registerIpc;
+// exposure writes wait on it.
+let releaseExposureWrites: (sweep: Promise<void>) => void = () => undefined;
+const exposureSwept = new Promise<void>((resolve) => {
+  releaseExposureWrites = (sweep) =>
+    void sweep
+      .catch((err: unknown) => logError({ source: 'main', level: 'warn', type: 'port-exposure-sweep', message: String(err) }))
+      .finally(resolve);
+});
+const exposureStore = new PortExposureStore(stateKysely);
+
+const portExposure = new PortExposureService({
+  // Mock mode opens no state.db.
+  sink: MOCK_MODE ? { insert: async () => undefined, update: async () => undefined } : gatedSink(exposureStore, exposureSwept),
+  workspace: async (id) => {
+    const w = (await listAllWorkspaces()).find((x) => x.id === id);
+    return w ? { kind: w.kind, running: w.state === 'running' } : null;
+  },
+  onPopup: broadcastPortDetected,
+  onLabelsChanged: (id) => sendPortsChanged(id, lastServing.get(id) ?? []),
+  undeclaredToastAfterSec: getUndeclaredToastAfterSec,
+  probeLocal: (port) => probeLocalHttp(port),
+  onWriteError: (err) => logError({ source: 'main', level: 'warn', type: 'port-exposure-write', message: String(err) })
+});
 
 // Real-backend only: in mock mode there is no broker to poll, so detection is
 // driven by the e2e test-only handler below and `ports:open` returns a stub.
@@ -282,7 +327,8 @@ const portForward: PortForwardManager | null = MOCK_MODE
   : new PortForwardManager({
       resolveEndpoint: brokerEndpoint,
       makeClient: (ep) => new BrokerClient(ep),
-      onDetected: broadcastPortDetected,
+      // Popups come from portExposure (declared ports), not raw detection.
+      onDetected: () => undefined,
       onChanged: broadcastPortsChanged,
       excludePorts: () => INFRA_PORTS
     });
@@ -293,10 +339,15 @@ const portForward: PortForwardManager | null = MOCK_MODE
 // state deterministically through the __test:setServingPorts IPC handle, so
 // the timed fakes must stay silent or they race the injected snapshots.
 const mockPorts: MockServingPorts | null = MOCK_MODE && process.env.CLAUDE_FLEET_E2E !== '1'
-  ? new MockServingPorts(broadcastPortsChanged, undefined, async (workspaceId) => {
-      const inv = await sessions.readInventory(workspaceId);
-      return inv.sessions[0]?.id ?? null;
-    })
+  ? new MockServingPorts(
+      broadcastPortsChanged,
+      undefined,
+      async (workspaceId) => {
+        const inv = await sessions.readInventory(workspaceId);
+        return inv.sessions[0]?.id ?? null;
+      },
+      (workspaceId, port, label) => void portExposure.declare(workspaceId, { port, label }).catch(() => undefined)
+    )
   : null;
 
 // Per-workspace backend dispatch (#16). A workspace's `kind` decides whether
@@ -998,6 +1049,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   widthSweep.unref?.();
 
   const { jsonlWatcher, peerStatusWatcher } = opts;
+  // No watcher means no state.db: release the gate so writes fail via onWriteError instead of queueing forever.
+  releaseExposureWrites(jsonlWatcher && !MOCK_MODE ? exposureStore.sweep() : Promise.resolve());
 
   // Live summary push: when the watcher ingests new lines, compute the
   // workspace summary once and broadcast to every BrowserWindow. The renderer
@@ -1575,6 +1628,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     list: (callerId, allowed, args) => workspaceSkills.list(callerId, allowed, args),
     get: (callerId, allowed, args) => workspaceSkills.get(callerId, allowed, args)
   });
+  setPortExposureHandlers({ expose: (callerId, args) => portExposure.declare(callerId, args) });
   setInputWaitHandler((callerId, sessionId, waiting) => {
     let set = inputWaitByWorkspace.get(callerId);
     if (!set) { set = new Set(); inputWaitByWorkspace.set(callerId, set); }
@@ -1653,11 +1707,18 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
 
   ipcMain.handle(
     'ports:open',
-    async (_e, workspaceId: string, containerPort: number): Promise<{ hostPort: number | null }> => {
+    async (_e, workspaceId: string, containerPort: number, via?: OpenVia): Promise<{ hostPort: number | null }> => {
+      const v: OpenVia = via === 'popup' || via === 'fallback' ? via : 'rail';
       if (!portForward) {
-        // Mock mode: no real broker; hand back a deterministic stub host port
-        // so the e2e can assert the round-trip without a container.
+        // Mock mode: no real broker; a deterministic stub host port.
+        portExposure.recordOpen(workspaceId, containerPort, v);
         return { hostPort: 65000 };
+      }
+      if (portExposure.isLocalServing(workspaceId, containerPort)) {
+        if (!(await probeLocalHttp(containerPort))) return { hostPort: null };
+        portExposure.recordOpen(workspaceId, containerPort, v);
+        void shell.openExternal(`http://localhost:${containerPort}`);
+        return { hostPort: containerPort };
       }
       // The toast is sticky, so the server may be long gone by click time.
       // hostPort: null tells the renderer to toast an error instead of the
@@ -1666,14 +1727,24 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         return { hostPort: null };
       }
       const { hostPort } = await portForward.openPort(workspaceId, containerPort);
+      portExposure.recordOpen(workspaceId, containerPort, v);
       void shell.openExternal(`http://127.0.0.1:${hostPort}`);
       return { hostPort };
     }
   );
 
+  ipcMain.handle('ports:dismiss', (_e, workspaceId: string, port: number) => {
+    portExposure.recordDismiss(workspaceId, port);
+  });
+
   // Serving rail state: seed on renderer mount/reload. Mock mode serves the
   // fake feed; real mode the PortForwardManager snapshot.
-  ipcMain.handle('ports:list', () => (portForward ?? mockPorts)?.snapshot() ?? []);
+  ipcMain.handle('ports:list', () =>
+    ((portForward ?? mockPorts)?.snapshot() ?? []).map(({ workspaceId, ports }) => ({
+      workspaceId,
+      ports: labeled(workspaceId, ports)
+    }))
+  );
 
   ipcMain.handle(
     'ports:kill',
@@ -2525,9 +2596,12 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       (_e, workspaceId: string, brokerSessionId: string) =>
         lookupBrokerSession(workspaceId, brokerSessionId)
     );
-    ipcMain.handle('__test:emitDetectedPort', (_e, workspaceId: string, port: number) => {
-      broadcastPortDetected(workspaceId, port);
+    ipcMain.handle('__test:emitDetectedPort', (_e, popup: PortPopup) => {
+      broadcastPortDetected(popup);
     });
+    ipcMain.handle('__test:declarePort', (_e, workspaceId: string, port: number, label: string) =>
+      portExposure.declare(workspaceId, { port, label })
+    );
     ipcMain.handle('__test:setServingPorts', (_e, workspaceId: string, ports: ServingPort[]) => {
       broadcastPortsChanged(workspaceId, ports);
     });

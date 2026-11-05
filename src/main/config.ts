@@ -119,6 +119,9 @@ interface AppConfig {
   /** Hand-edited only: the store choice, kept verbatim and validated by
    *  getStoreConfig (store/storeConfig.ts). Absent ⇒ SQLite. */
   store?: unknown;
+  /** Hand-edited only. Seconds an undeclared scanned port must keep serving
+   *  before the fallback preview toast; absent/invalid ⇒ 0 (never). */
+  ports?: { undeclaredToastAfterSec?: number };
 }
 
 /** Defensively parse the persisted usageBudget (untrusted JSON on disk). */
@@ -170,6 +173,13 @@ function parseIdentityConfig(v: unknown): AppConfig['identity'] {
   if (!gh || typeof gh !== 'object') return undefined;
   const clientId = (gh as { clientId?: unknown }).clientId;
   return typeof clientId === 'string' && clientId.trim() ? { github: { clientId: clientId.trim() } } : undefined;
+}
+
+/** Defensively parse the persisted ports config (untrusted JSON on disk). */
+function parsePortsConfig(v: unknown): AppConfig['ports'] {
+  if (!v || typeof v !== 'object') return undefined;
+  const s = (v as Record<string, unknown>).undeclaredToastAfterSec;
+  return typeof s === 'number' && Number.isFinite(s) && s >= 0 ? { undeclaredToastAfterSec: Math.floor(s) } : undefined;
 }
 
 function configPath(): string {
@@ -229,7 +239,8 @@ async function read(): Promise<AppConfig> {
       knowledgeCapture: typeof parsed.knowledgeCapture === 'boolean' ? parsed.knowledgeCapture : undefined,
       knowledgeCaptureDailyCap:
         typeof parsed.knowledgeCaptureDailyCap === 'number' ? clampDailyCap(parsed.knowledgeCaptureDailyCap) : undefined,
-      store: parsed.store
+      store: parsed.store,
+      ports: parsePortsConfig(parsed.ports)
     };
   } catch (e) {
     unreadable = (e as NodeJS.ErrnoException).code !== 'ENOENT';
@@ -398,6 +409,11 @@ export async function getStoreConfig(): Promise<StoreConfig> {
 /** config.json identity.github.clientId, or null. Validation and precedence: identity/clientId.ts. */
 export async function getGithubClientIdConfig(): Promise<string | null> {
   return (await read()).identity?.github?.clientId ?? null;
+}
+
+/** Seconds an undeclared scanned port must keep serving before fallback preview; 0 when absent/invalid. */
+export async function getUndeclaredToastAfterSec(): Promise<number> {
+  return (await read()).ports?.undeclaredToastAfterSec ?? 0;
 }
 
 export async function getAutoReloadLoadouts(): Promise<boolean> {

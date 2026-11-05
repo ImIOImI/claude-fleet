@@ -134,6 +134,18 @@ test('MCP server: initialize, tools, typed reads, committee control', async () =
       ])
     );
 
+    // expose_port: listed, advertised in the server instructions, validated host-side.
+    expect(names).toContain('expose_port');
+    expect((init.result as { instructions?: string }).instructions ?? '').toContain('expose_port');
+    const eph = (await client.call('tools/call', { name: 'expose_port', arguments: { port: 45000, label: 'x' } }))
+      .result as { isError?: boolean; content?: Array<{ text?: string }> };
+    expect(eph.isError).toBe(true);
+    expect(eph.content?.[0]?.text ?? '').toContain('ephemeral range');
+    const stopped = (await client.call('tools/call', { name: 'expose_port', arguments: { port: 5173, label: 'Vite' } }))
+      .result as { isError?: boolean; content?: Array<{ text?: string }> };
+    expect(stopped.isError).toBe(true);
+    expect(stopped.content?.[0]?.text ?? '').toMatch(/not running|unknown workspace/);
+
     // get_config surfaces the live host app version (#219) and build sha
     // (#298) so a workspace can tell exactly what claude-fleet it's talking
     // to. The e2e app is unpackaged, so it reports the dev-decorated form

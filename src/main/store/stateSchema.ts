@@ -1,5 +1,5 @@
 // Kysely table types for state.db (the JSONL→SQLite cache). Mirrors migrate()
-// v1–v14 in db.ts exactly; a migration that changes a table changes it here too.
+// v1–v15 in db.ts exactly; a migration that changes a table changes it here too.
 import type { Generated, Selectable } from 'kysely';
 
 export interface EventsTable {
@@ -129,6 +129,24 @@ export interface SessionCostsTable {
 export interface SessionStatsTable { session_id: string; max_context_tokens: number }
 export interface SessionToolCountsTable { session_id: string; tool_name: string; count: number }
 
+export interface PortExposuresTable {
+  id: string;
+  workspace_id: string;
+  session_id: string | null;
+  port: number;
+  cmdline: string | null;
+  label: string | null;
+  reason: string | null;
+  source: string;
+  first_scanned_at: number | null;
+  declared_at: number | null;
+  popup_shown_at: number | null;
+  outcome: string | null;
+  opened_via: string | null;
+  open_count: Generated<number>;
+  ended_at: number | null;
+}
+
 export interface StateDb {
   events: EventsTable;
   sessions: SessionsTable;
@@ -143,6 +161,7 @@ export interface StateDb {
   session_costs: SessionCostsTable;
   session_stats: SessionStatsTable;
   session_tool_counts: SessionToolCountsTable;
+  port_exposures: PortExposuresTable;
 }
 
 export type EventRowSel = Selectable<EventsTable>;

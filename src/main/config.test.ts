@@ -56,7 +56,8 @@ const {
   setKeepRunningInTray,
   getGithubClientIdConfig,
   getStoreConfig,
-  configUnreadablePath
+  configUnreadablePath,
+  getUndeclaredToastAfterSec
 } = await import('./config.js');
 const { ConfigJsonError } = await import('./store/storeConfig.js');
 
@@ -661,5 +662,32 @@ describe('getStoreConfig', () => {
     await writeFile(configPath(), JSON.stringify({ store: { kind: 'postgres', connectionString: 'postgres://u:pw@h/d' } }));
     _resetConfigCacheForTests();
     await expect(getStoreConfig()).rejects.toThrow(/must not embed a password/);
+  });
+});
+
+describe('ports.undeclaredToastAfterSec', () => {
+  it('defaults to 0 (fallback off)', async () => {
+    expect(await getUndeclaredToastAfterSec()).toBe(0);
+  });
+
+  it('reads a hand-edited value, floored to whole seconds', async () => {
+    await writeFile(configPath(), JSON.stringify({ ports: { undeclaredToastAfterSec: 60.7 } }));
+    _resetConfigCacheForTests();
+    expect(await getUndeclaredToastAfterSec()).toBe(60);
+  });
+
+  it.each([-5, 'soon', null])('treats %j as off', async (v) => {
+    await writeFile(configPath(), JSON.stringify({ ports: { undeclaredToastAfterSec: v } }));
+    _resetConfigCacheForTests();
+    expect(await getUndeclaredToastAfterSec()).toBe(0);
+  });
+
+  it('survives saving an unrelated setting', async () => {
+    await writeFile(configPath(), JSON.stringify({ ports: { undeclaredToastAfterSec: 30 } }));
+    _resetConfigCacheForTests();
+    await setAutoReloadLoadouts(false);
+    _resetConfigCacheForTests();
+    expect(await getUndeclaredToastAfterSec()).toBe(30);
+    expect(JSON.parse(await readFile(configPath(), 'utf8')).ports).toEqual({ undeclaredToastAfterSec: 30 });
   });
 });

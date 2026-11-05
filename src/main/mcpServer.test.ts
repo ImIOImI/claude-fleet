@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setSessionMappingHandler, setSummaryStatusHandler, setQueryEmbedder, setUsageRecorder, setConfigResolver, setClaimHandlers, setCaptureSettingsHandlers, setSearchHitHook, STANDING_RULE, _resetTelemetryForTests, type ToolCtx } from './mcpServer.js';
 import type { SearchHitEvent } from './claims/searchHits.js';
 import { CAPTURE_TOOL_NAMES, captureArgs } from './claims/captureCommand.js';
+import { initializeResult, setPortExposureHandlers } from './mcpServer.js';
 import { EMBED_DIM, EMBED_MODEL_ID } from './vectors.js';
 import { closeDb, openDb, stateKysely } from './db.js';
 import { PerfStore } from './perfStore.js';
@@ -263,7 +264,10 @@ describe('scoped query tool (#174)', () => {
   it('cannot introspect/escape via sqlite_master', async () => {
     const names = run({ sql: 'SELECT name FROM sqlite_master ORDER BY name' }) as Array<{ name: string }>;
     expect(names.map((r) => r.name).sort()).toEqual(
-      ['broker_sessions', 'events', 'perf_events', 'session_summaries', 'session_tags', 'sessions', 'usage_events']
+      [
+        'broker_sessions', 'events', 'perf_events', 'port_exposures', 'session_summaries', 'session_tags',
+        'sessions', 'sqlite_autoindex_port_exposures_1', 'usage_events'
+      ]
     );
   });
 
@@ -890,6 +894,11 @@ describe('knowledge claims tools (#483)', () => {
     expect(STANDING_RULE.length).toBeLessThan(1200);
     expect(STANDING_RULE).toMatch(/record_claim/);
     expect(STANDING_RULE).toMatch(/search_claims/);
+    // Delivered alongside the expose_port line, together under the 2,048-char cap.
+    const instructions = String(initializeResult().instructions);
+    expect(instructions.startsWith(STANDING_RULE)).toBe(true);
+    expect(instructions).toMatch(/expose_port/);
+    expect(instructions.length).toBeLessThan(2048);
   });
 });
 
@@ -987,5 +996,65 @@ describe('startMcpServer({ stateDb: false })', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+const PORT_EXPOSURES_DDL = `CREATE TABLE port_exposures (
+  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, session_id TEXT, port INTEGER NOT NULL, cmdline TEXT,
+  label TEXT, reason TEXT, source TEXT NOT NULL, first_scanned_at INTEGER, declared_at INTEGER,
+  popup_shown_at INTEGER, outcome TEXT, opened_via TEXT, open_count INTEGER NOT NULL DEFAULT 0, ended_at INTEGER)`;
+
+describe('expose_port (#505)', () => {
+  afterEach(() => setPortExposureHandlers(null));
+
+  it('is listed with port and label required', () => {
+    expect((tool('expose_port').inputSchema as { required: string[] }).required).toEqual(['port', 'label']);
+  });
+
+  it('proxies to the injected handler with the HOST caller id', async () => {
+    const calls: Array<[string, Record<string, unknown>]> = [];
+    setPortExposureHandlers({
+      expose: async (c, a) => {
+        calls.push([c, a]);
+        return { status: 'waiting' };
+      }
+    });
+    const out = await tool('expose_port').run(null as never, { port: 5173, label: 'Vite', callerId: 'SPOOF' }, ctxA);
+    expect(out).toEqual({ status: 'waiting' });
+    expect(calls.map(([c]) => c)).toEqual([WS_A]);
+  });
+
+  it('fails clearly when not wired', () => {
+    expect(() => tool('expose_port').run(null as never, { port: 5173, label: 'Vite' }, ctxA)).toThrow(/port exposure is unavailable/);
+  });
+
+  it('the server instructions tell agents to call it', () => {
+    expect(initializeResult().instructions).toMatch(/expose_port/);
+  });
+});
+
+describe('query snapshot exposes port_exposures, workspace-scoped (#505)', () => {
+  let fdb: Database.Database;
+  let cleanup: () => void;
+  beforeEach(() => {
+    ({ db: fdb, cleanup } = makeFileDb());
+  });
+  afterEach(() => {
+    fdb.close();
+    cleanup();
+  });
+
+  it('copies only the allowed workspaces rows', () => {
+    fdb.exec(PORT_EXPOSURES_DDL);
+    const ins = fdb.prepare(`INSERT INTO port_exposures (id, workspace_id, port, source) VALUES (?, ?, ?, ?)`);
+    ins.run('ra', WS_A, 5173, 'declared');
+    ins.run('rb', WS_B, 3000, 'scanned');
+    const rows = tool('query').run(fdb, { sql: 'SELECT id FROM port_exposures' }, ctxA) as Array<{ id: string }>;
+    expect(rows.map((r) => r.id)).toEqual(['ra']);
+  });
+
+  it('an older state.db without the table yields an empty table', () => {
+    const rows = tool('query').run(fdb, { sql: 'SELECT count(*) AS n FROM port_exposures' }, ctxA);
+    expect(rows).toEqual([{ n: 0 }]);
   });
 });

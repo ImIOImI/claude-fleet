@@ -59,6 +59,7 @@ const CHANNEL_CONTEXT: Record<string, { workspaceArg?: number; sessionArg?: numb
   'mirror:setOverride': W0S1,
   'ports:open': W0,
   'ports:kill': W0,
+  'ports:dismiss': W0,
   'observability:summaryForWorkspace': W0,
   'observability:getCostForWorkspace': W0,
   'observability:summaryForBrokerSession': W0S1
