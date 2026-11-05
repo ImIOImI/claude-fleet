@@ -24,7 +24,9 @@
 // arbitrary READ-ONLY SQL against a per-call in-memory SNAPSHOT seeded only with
 // the caller's allowed-workspace rows (buildSnapshot); the real DB is DETACHed
 // before the caller's SQL runs, so isolation is structural — no join/UNION/
-// subquery/sqlite_master trick can reach another workspace's rows.
+// subquery/sqlite_master trick can reach another workspace's rows. On the
+// Postgres store `query` runs under the caller's own role with row-level
+// security instead (store/pgQueryIsolation.ts).
 //
 // Safety: a single connection opened `{ readonly: true }` is the hard guarantee
 // that nothing here can mutate the DB; the typed tools use parameterized SQL.
@@ -712,6 +714,11 @@ class RpcError extends Error {
   }
 }
 
+/** Test-only: one JSON-RPC method as a caller, without a socket. */
+export function handleMcpRequestForTests(method: string, params: Record<string, unknown> = {}, callerId = 'test'): unknown {
+  return handleMethod(method, params, callerId);
+}
+
 function handleMethod(method: string, params: Record<string, unknown>, callerId: string): unknown {
   switch (method) {
     case 'initialize':
@@ -1134,7 +1141,7 @@ export const TOOLS: Tool[] = [
       'them to the rows you may read, so SELECT freely (joins, aggregates, GROUP BY, to_timestamp(ts / 1000.0) for UTC). ' +
       'raw_jsonl is excluded unless include_raw=true. ' +
       'Args: sql (required), params (array of values bound to $1, $2, …), include_raw (bool), max_rows (default ' +
-      `${DEFAULT_LIMIT}, max ${MAX_LIMIT}). Only SELECT/VALUES/WITH (no data-modifying WITH); one statement; 10 s limit.`,
+      `${DEFAULT_LIMIT}, max ${MAX_LIMIT}). Only SELECT/VALUES/WITH (no data-modifying WITH); one statement; 5 s limit.`,
     inputSchema: {
       type: 'object',
       properties: {

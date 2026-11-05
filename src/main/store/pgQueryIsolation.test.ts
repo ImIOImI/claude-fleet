@@ -1,12 +1,17 @@
 // `query` isolation on Postgres (role + RLS). Postgres only: SQLite isolates
 // with the in-memory snapshot (mcpServer.test.ts). Every test reads as caller
 // A and must never see a row of workspace B.
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import pg from 'pg';
 import { sql } from 'kysely';
 import * as db from '../db.js';
 import { callerRole, isolationRoles, PgQueryIsolation, QueryUnavailableError, rolePoolConfig } from './pgQueryIsolation.js';
 import { MCP_QUERY_TABLES } from './readSource.js';
+import { openPgMcpReadSource } from './pgReadSource.js';
+import { callTool, handleMcpRequestForTests, startMcpServer, stopMcpServer } from '../mcpServer.js';
 import { isPg, queryRows, testPgAppSchema, type TestPgApp } from './testStore.js';
 
 const A = 'W-A';
@@ -451,3 +456,37 @@ describe.skipIf(!isPg)('query isolation on Postgres (role + RLS)', () => {
   });
 });
 
+
+describe.skipIf(!isPg)('query through the MCP server on Postgres', () => {
+  let dir: string;
+  beforeEach(async () => {
+    t = await testPgAppSchema();
+    await db.openDbPostgres(t.appPool);
+    await seed();
+    dir = mkdtempSync(join(tmpdir(), 'cf-mcp-pgq-'));
+  });
+  afterEach(async () => {
+    stopMcpServer();
+    await db.closeDb();
+    await t.drop();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('callTool runs query isolated, and tools/list describes Postgres SQL', async () => {
+    startMcpServer(dir, { readSource: await openPgMcpReadSource(t.schema, t.appConfig, () => undefined) });
+    const r = (await callTool({ name: 'query', arguments: { sql: 'SELECT DISTINCT workspace_id FROM events' } }, A)) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(r.isError).toBeUndefined();
+    expect(JSON.parse(r.content[0].text)).toEqual([{ workspace_id: A }]);
+    const list = (await handleMcpRequestForTests('tools/list')) as { tools: Array<{ name: string; description: string }> };
+    expect(list.tools.find((x) => x.name === 'query')?.description).toMatch(/Postgres/);
+  });
+
+  it('a store role without CREATEROLE: query reports why; typed tools still work', async () => {
+    await t.pool.query(`ALTER ROLE ${t.appRole} NOCREATEROLE`);
+    startMcpServer(dir, { readSource: await openPgMcpReadSource(t.schema, t.appConfig, () => undefined) });
+    const r = (await callTool({ name: 'query', arguments: { sql: 'SELECT 1' } }, A)) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(r.content[0].text).toBe('Error: query is unavailable on this Postgres store: the store role needs CREATEROLE (it creates one read-only role per workspace)');
+    const s = (await callTool({ name: 'list_sessions', arguments: {} }, A)) as { content: Array<{ text: string }> };
+    expect((JSON.parse(s.content[0].text) as Array<{ id: string }>).map((x) => x.id)).toEqual(['sa']);
+  });
+});

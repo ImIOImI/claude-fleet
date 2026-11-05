@@ -10,6 +10,8 @@ import { iamAuthHint, pgPoolConfig, type PostgresStoreConfig } from './storeConf
 
 export interface PgStores {
   pool: pg.Pool;
+  /** The options `pool` was built from (the MCP caller roles connect the same way). */
+  poolConfig: PgPoolConfig;
   inbox: InboxStore;
   /** Ends the pool; close the inbox and state.db (closeDb) first. */
   end(): Promise<void>;
@@ -44,7 +46,8 @@ export async function migratePgStores(pool: pg.Pool, o: { state: boolean; extraT
 }
 
 export async function openPgStores(cfg: PostgresStoreConfig, o: OpenPgStoresOptions): Promise<PgStores> {
-  const pool = createPgPool({ ...pgPoolConfig(cfg, o.env), ...o.pool });
+  const poolConfig: PgPoolConfig = { ...pgPoolConfig(cfg, o.env), ...o.pool };
+  const pool = createPgPool(poolConfig);
   pool.on('error', o.onPoolError);
   const hook = { afterBeginWrite: o.afterBeginWrite, migrate: o.migrate ? false : undefined };
   try {
@@ -56,7 +59,7 @@ export async function openPgStores(cfg: PostgresStoreConfig, o: OpenPgStoresOpti
       await inbox.close();
       throw e;
     }
-    return { pool, inbox, end: () => pool.end() };
+    return { pool, poolConfig, inbox, end: () => pool.end() };
   } catch (e) {
     await closeDb();
     await pool.end();
