@@ -209,8 +209,8 @@ export class InboxStore {
   private constructor(private readonly raw: Database.Database | null, readonly kysely: Kysely<InboxDb>) {}
 
   /** The inbox tables on a Postgres store pool. No file
-   *  backup: the migration is one transaction, and the database is the operator's. */
-  /** `migrate: false`: the caller already ran migratePgStores (fleet-host migrates unfenced). */
+   *  backup: the migration is one transaction, and the database is the operator's.
+   *  `migrate: false`: the caller already ran migratePgStores (fleet-host migrates unfenced). */
   static async openPostgres(pool: pg.Pool, opts: PostgresKyselyOptions & { migrate?: boolean } = {}): Promise<InboxStore> {
     const k = postgresKysely<InboxDb>(pool, opts);
     if (opts.migrate !== false) await migratePostgres(k, schemaOf(pool), INBOX_PG_TRACK);

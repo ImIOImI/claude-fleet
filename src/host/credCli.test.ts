@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { repoFromCredentialInput, repoFromGhArgs, repoFromGitUrl, runCredCli, type CredIo } from './credCli.js';
@@ -120,12 +121,30 @@ describe('runCredCli', () => {
     }
   });
 
-  it('with the helper off, git-credential and gh-token print nothing and exit 0', async () => {
-    for (const argv of [['git-credential', 'get'], ['gh-token', '--', 'pr', 'view', '-R', 'acme/a']]) {
-      const { o, out, err } = io(null, 'protocol=https\nhost=github.com\npath=acme/a\n');
-      expect(await runCredCli(argv, o)).toBe(0);
+  it('with the helper off (no socket, or nothing listening), git-credential and gh-token print nothing and exit 0', async () => {
+    const dead = join(mkdtempSync(join(tmpdir(), 'credcli-')), 'cred.sock');
+    writeFileSync(dead, '');
+    for (const sock of [null, dead]) {
+      for (const argv of [['git-credential', 'get'], ['gh-token', '--', 'pr', 'view', '-R', 'acme/a']]) {
+        const { o, out, err } = io(sock, 'protocol=https\nhost=github.com\npath=acme/a\n');
+        expect(await runCredCli(argv, o)).toBe(0);
+        expect(out).toEqual([]);
+        expect(err).toEqual([]);
+      }
+    }
+  });
+
+  it('a helper error is reported on stderr and still exits 0', async () => {
+    const sock = join(mkdtempSync(join(tmpdir(), 'credcli-')), 'cred.sock');
+    const failing = createServer((_req, res) => res.writeHead(500, { 'content-type': 'application/json' }).end('{"error":"internal error"}'));
+    await new Promise<void>((r) => failing.listen(sock, () => r()));
+    try {
+      const { o, out, err } = io(sock, 'protocol=https\nhost=github.com\npath=acme/a\n');
+      expect(await runCredCli(['git-credential', 'get'], o)).toBe(0);
       expect(out).toEqual([]);
-      expect(err.join('')).toMatch(/fleet-host-cred: /);
+      expect(err.join('')).toMatch(/fleet-host-cred: 500: internal error/);
+    } finally {
+      await new Promise<void>((r) => failing.close(() => r()));
     }
   });
 

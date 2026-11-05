@@ -300,7 +300,7 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
       (err: Error) => {
         if (startAbort.signal.aborted) return;
         log.log('error', 'host start failed; exiting', { error: err.message });
-        void shutdown(1);
+        void shutdown(isDbUnavailable(err) ? EXIT_DB_UNAVAILABLE : 1);
       }
     );
   }

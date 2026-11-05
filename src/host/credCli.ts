@@ -106,7 +106,7 @@ export function requestToken(socketPath: string, body: unknown): Promise<string>
       });
     });
     req.on('timeout', () => req.destroy(new Error('timed out')));
-    req.on('error', (e: NodeJS.ErrnoException) => reject(new Error(`credential helper unavailable (${e.code ?? e.message})`)));
+    req.on('error', (e: NodeJS.ErrnoException) => reject(Object.assign(new Error(`credential helper unavailable (${e.code ?? e.message})`), { code: e.code })));
     req.end(JSON.stringify(body));
   });
 }
@@ -126,7 +126,12 @@ const USAGE = 'usage: fleet-host-cred git-credential <get|store|erase> | gh-toke
 
 export async function runCredCli(argv: string[], io: CredIo): Promise<number> {
   const sock = io.env.FLEET_HOST_CRED_SOCKET || DEFAULT_CRED_SOCKET;
-  const say = (e: unknown) => io.err(`fleet-host-cred: ${(e as Error).message}\n`);
+  // The helper is off by default, so a missing or unbound socket is not worth a line in every git call.
+  const say = (e: unknown) => {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ECONNREFUSED') return;
+    io.err(`fleet-host-cred: ${(e as Error).message}\n`);
+  };
   const isGet = argv[0] === 'gh-token' || (argv[0] === 'git-credential' && argv[1] === 'get');
   if (isGet && io.stdoutIsTty) {
     io.err('fleet-host-cred: refusing to print a token to a terminal\n');

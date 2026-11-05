@@ -63,7 +63,7 @@ export interface FenceTarget {
   onLost(err: LeaseLostError): void;
 }
 
-/** part 3's afterBeginWrite. FOR KEY SHARE makes a takeover (FOR UPDATE) wait for in-flight fenced writes, and every write after it see the new epoch. */
+/** The store's afterBeginWrite hook. FOR KEY SHARE makes a takeover (FOR UPDATE) wait for in-flight fenced writes, and every write after it see the new epoch. */
 export function leaseFence(t: FenceTarget): WriteHook {
   let reported = false;
   // onLost once: later refusals (closeDb's `select 1` on the way out) only throw.

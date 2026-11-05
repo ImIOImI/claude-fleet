@@ -9,6 +9,8 @@ import type { Logger } from './log.js';
 
 export const DEFAULT_CRED_SOCKET = '/run/fleet-host/cred.sock';
 const MAX_BODY = 8 * 1024;
+/** After close(), in-flight requests get this long before their connections are cut. */
+export const CRED_CLOSE_GRACE_MS = 2_000;
 
 export interface CredServer { close(): Promise<void> }
 
@@ -56,6 +58,8 @@ export async function listenCredSocket(socketPath: string, minter: TokenMinter, 
       }
     });
   });
+  // A session that stalls mid-request mustn't hold a socket slot (or shutdown) open.
+  server.requestTimeout = 20_000;
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
     server.listen(socketPath, () => {
@@ -64,7 +68,17 @@ export async function listenCredSocket(socketPath: string, minter: TokenMinter, 
     });
   });
   await chmod(socketPath, 0o600);
-  return { close: () => new Promise<void>((r) => server.close(() => r())) };
+  return {
+    close: () =>
+      new Promise<void>((r) => {
+        const cut = setTimeout(() => server.closeAllConnections(), CRED_CLOSE_GRACE_MS);
+        server.close(() => {
+          clearTimeout(cut);
+          r();
+        });
+        server.closeIdleConnections();
+      })
+  };
 }
 
 export interface CredHelperOptions {

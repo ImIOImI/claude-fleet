@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createLogger, redactJsonLine, redactSecrets } from './log.js';
 
-const GHO = 'gho_' + 'a'.repeat(36);
+const GHO = 'gho_' + 'a1B2c3D4e5'.repeat(3) + 'aBcDeF';
 const GHS = 'ghs_' + 'A1b2C3d4E5'.repeat(3) + 'abcdef';
 const BEARER = 'Bearer abcDEF123.xyz-TOKEN';
 /** Escapes and ANSI codes whose last character is alphanumeric, so a plain word-boundary check misses them. */
@@ -43,8 +43,23 @@ describe('redactSecrets', () => {
     expect(redactSecrets(JSON.stringify({ t: raw }))).not.toContain(secret.split(' ').pop());
   });
 
+  it('a digit-free GitHub token after Bearer is still cut by its own pattern', () => {
+    expect(redactSecrets(`Bearer gho_${'a'.repeat(36)}`)).toBe('Bearer [redacted]');
+  });
+
   it('leaves ordinary text alone', () => {
     expect(redactSecrets('GET /whoami 200 @alice')).toBe('GET /whoami 200 @alice');
+  });
+
+  it.each([
+    'the basic workflow is documented',
+    'Basic authentication is disabled here',
+    'the bearer of bad news',
+    'Bearer tokens are short-lived',
+    'Authorization: Bearer <token>',
+    'Basic usage: run fleet-host-cred serve'
+  ])('leaves prose mentioning bearer/basic alone: %s', (s) => {
+    expect(redactSecrets(s)).toBe(s);
   });
 });
 
@@ -59,7 +74,7 @@ describe('createLogger', () => {
   it.each(['\n', '\t', '\r'])('redacts a token after an escaped %j at depth', (esc) => {
     const line = one({ a: { b: [`line1${esc}Bearer ${GHO}`, `x${esc}${GHO}`] } });
     expect(line).not.toContain(GHO);
-    expect(line).not.toContain('a'.repeat(36));
+    expect(line).not.toContain(GHO.slice(4));
   });
 
   it('a nested PEM followed by a quote yields valid, redacted JSON', () => {

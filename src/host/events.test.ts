@@ -32,9 +32,9 @@ describe('EventHub', () => {
     const got: string[] = [];
     hub.add({ send: (t) => got.push(t) });
     const token = 'ghs_' + 'A1b2C3d4E5'.repeat(3) + 'abcdef';
-    hub.publish('sessions:changed', { sessions: [{ title: `done${prefix}${token}`, cmd: `hdr${prefix}Bearer abcDEF123.xyz` }] });
+    hub.publish('sessions:changed', { sessions: [{ title: `done${prefix}${token}`, cmd: `hdr${prefix}Bearer abcDEF123.xyz-TOKEN` }] });
     expect(got[0]).not.toContain(token);
-    expect(got[0]).not.toContain('abcDEF123.xyz');
+    expect(got[0]).not.toContain('abcDEF123.xyz-TOKEN');
     const s = JSON.parse(got[0]).payload.sessions[0];
     expect(s).toEqual({ title: `done${prefix}[redacted]`, cmd: `hdr${prefix}[redacted]` });
   });

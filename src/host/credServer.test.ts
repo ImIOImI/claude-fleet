@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { chmodSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
+import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTokenMinter, DEFAULT_PERMISSIONS, loadAppCredentials } from './appToken.js';
-import { listenCredSocket, startCredHelper, type CredServer } from './credServer.js';
+import { CRED_CLOSE_GRACE_MS, listenCredSocket, startCredHelper, type CredServer } from './credServer.js';
 import { requestToken } from './credCli.js';
 import { createLogger } from './log.js';
 import { startFakeGithubApp, type FakeGithubApp } from './testGithubApp.js';
@@ -53,6 +54,20 @@ describe('credential socket', () => {
     expect(all).toContain('app token issued');
     expect(all).not.toContain(token);
     expect(all).not.toContain(gh.privatePem.split('\n')[1]);
+  });
+
+  it('close() is bounded by a hung, half-sent request', async () => {
+    const { sock } = await rig();
+    const c = connect(sock);
+    await new Promise<void>((r) => c.once('connect', () => r()));
+    c.on('error', () => undefined);
+    c.write('POST /token HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n{"repo');
+    await new Promise((r) => setTimeout(r, 50));
+    const t0 = Date.now();
+    await srv!.close();
+    srv = null;
+    expect(Date.now() - t0).toBeLessThan(CRED_CLOSE_GRACE_MS + 1_000);
+    c.destroy();
   });
 
   it('replaces a stale socket but refuses to unlink a regular file', async () => {

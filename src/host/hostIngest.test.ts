@@ -127,7 +127,7 @@ describe.skipIf(!isPg)('HostIngest', () => {
   it.each(['\n', '\t', '\u001b[0m', '\u001b]8;;x\u0007'])('redacts a token and a Bearer value that follow %j', async (prefix) => {
     const { make, file } = await rig();
     const token = 'ghs_' + 'A1b2C3d4E5'.repeat(3) + 'abcdef';
-    writeFileSync(file, line('a', `done${prefix}${token}`) + line('b', `hdr${prefix}Bearer abcDEF123.xyz`));
+    writeFileSync(file, line('a', `done${prefix}${token}`) + line('b', `hdr${prefix}Bearer abcDEF123.xyz-TOKEN`));
     const h = make();
     await h.start();
     await h.scan();
@@ -136,7 +136,7 @@ describe.skipIf(!isPg)('HostIngest', () => {
     const sessions = await queryRows('SELECT * FROM sessions');
     const all = JSON.stringify([rows, sessions]);
     expect(all).not.toContain(token);
-    expect(all).not.toContain('abcDEF123.xyz');
+    expect(all).not.toContain('abcDEF123.xyz-TOKEN');
   });
 
   it('ingests a line carrying a NUL (U+FFFD on Postgres) and a raw NUL byte does not stick the file', async () => {

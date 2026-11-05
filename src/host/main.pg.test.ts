@@ -26,6 +26,11 @@ const verify: IdentityProvider['verify'] = async (t) => {
   return person('owner', 1, ['acme/platform']);
 };
 
+const hostEnv = (dir: string, port: number, cfgPath: string): NodeJS.ProcessEnv => ({
+  FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'),
+  CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'), FLEET_HOST_PROJECTS: join(dir, 'projects')
+});
+
 async function freePort(): Promise<number> {
   const s = createServer();
   await new Promise<void>((r) => s.listen(0, '127.0.0.1', () => r()));
@@ -47,13 +52,13 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     t ??= await testPgSchema();
     const dir = mkdtempSync(join(tmpdir(), 'fh-pg-'));
     const cfgPath = join(dir, 'config.yaml');
-    const dbBlock = JSON.stringify({ connectionString: process.env.PG_TEST_URL, schema: t.schema, poolMax: 2 });
+    const dbBlock = JSON.stringify({ env: 'FLEET_TEST_PG_URL', schema: t.schema, poolMax: 2 });
     writeFileSync(cfgPath, `workspace: { id: ${ID}, name: smoke }\ngrants:\n  - { team: acme/platform, tier: session }\ndb: ${dbBlock}\n`);
     const port = await freePort();
     const exit = vi.fn();
     const logs: string[] = [];
     const host = await runHost({
-      env: { FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'), FLEET_HOST_PROJECTS: join(dir, 'projects') },
+      env: { ...hostEnv(dir, port, cfgPath), FLEET_TEST_PG_URL: process.env.PG_TEST_URL },
       exit, proc: new EventEmitter(), logSink: (l) => logs.push(l), authFactory: () => ({ id: 'github', verify }),
       brokerOps: fakeBroker([]).ops, leaseRenewMs: 200, leaseTtlMs: 1_000,
       ...opts
@@ -161,15 +166,18 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
   }, 30_000);
 });
 
-/** A TCP front for the test server's Unix socket that refuses connections until opened. */
+/** A TCP front for the test server (Unix socket or TCP) that refuses connections until opened. */
 async function gatedProxy(): Promise<{ url: string; open(): void; cut(): void; close(): Promise<void> }> {
   const u = new URL(process.env.PG_TEST_URL!);
-  const sock = join(u.searchParams.get('host')!, `.s.PGSQL.${u.searchParams.get('port') || u.port || '5432'}`);
+  const sockDir = u.searchParams.get('host');
+  const upstream = (): Socket => sockDir
+    ? connect(join(sockDir, `.s.PGSQL.${u.searchParams.get('port') || u.port || '5432'}`))
+    : connect(Number(u.port || 5432), u.hostname);
   let open = false;
   const conns = new Set<Socket>();
   const srv: Server = createServer((c) => {
     if (!open) return c.destroy();
-    const up = connect(sock);
+    const up = upstream();
     conns.add(c).add(up);
     c.pipe(up).pipe(c);
     const done = () => { c.destroy(); up.destroy(); };
@@ -178,8 +186,13 @@ async function gatedProxy(): Promise<{ url: string; open(): void; cut(): void; c
   });
   await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
   const { port } = srv.address() as AddressInfo;
+  const proxied = new URL(u);
+  proxied.hostname = '127.0.0.1';
+  proxied.port = String(port);
+  proxied.searchParams.delete('host');
+  proxied.searchParams.delete('port');
   return {
-    url: `postgres://${u.username}@127.0.0.1:${port}${u.pathname}`,
+    url: proxied.toString(),
     open: () => (open = true),
     cut: () => {
       open = false;
@@ -204,13 +217,13 @@ describe.skipIf(!isPg)('runHost on Postgres: start and stop', () => {
     t ??= await testPgSchema();
     const dir = mkdtempSync(join(tmpdir(), 'fh-pg-'));
     const cfgPath = join(dir, 'config.yaml');
-    writeFileSync(cfgPath, `workspace: { id: ${ID}, name: smoke }\ngrants:\n  - { team: acme/platform, tier: session }\ndb: ${JSON.stringify({ connectionString: dbUrl, schema: t.schema, poolMax: 2 })}\n`);
+    writeFileSync(cfgPath, `workspace: { id: ${ID}, name: smoke }\ngrants:\n  - { team: acme/platform, tier: session }\ndb: ${JSON.stringify({ env: 'FLEET_TEST_PG_URL', schema: t.schema, poolMax: 2 })}\n`);
     const port = await freePort();
     const exit = vi.fn();
     const proc = new EventEmitter();
     const logs: string[] = [];
     const host = await runHost({
-      env: { FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'), FLEET_HOST_PROJECTS: join(dir, 'projects') },
+      env: { ...hostEnv(dir, port, cfgPath), FLEET_TEST_PG_URL: dbUrl },
       exit, proc, logSink: (l) => logs.push(l), authFactory: () => ({ id: 'github', verify }),
       brokerOps: fakeBroker([]).ops, leaseRenewMs: 200, leaseTtlMs: 1_000, ...extra
     });
@@ -250,6 +263,20 @@ describe.skipIf(!isPg)('runHost on Postgres: start and stop', () => {
     } finally {
       await proxy.close();
     }
+  }, 30_000);
+
+  it(`a db connection failure after the pool opens exits ${EXIT_DB_UNAVAILABLE}, not 1`, async () => {
+    t ??= await testPgSchema();
+    await migratePostgres(postgresKysely(t.pool), t.schema, HOST_TRACK);
+    // host_meta reads fail with a connection-class SQLSTATE once the host track is migrated.
+    await t.pool.query(`CREATE FUNCTION ${t.schema}.meta_down() RETURNS TABLE (singleton boolean, workspace_id text, created_at bigint)
+      LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'connection failure' USING ERRCODE = '08006'; END $$`);
+    await t.pool.query(`DROP TABLE ${t.schema}.host_meta`);
+    await t.pool.query(`CREATE VIEW ${t.schema}.host_meta AS SELECT * FROM ${t.schema}.meta_down()`);
+    const a = await boot(process.env.PG_TEST_URL!);
+    await vi.waitFor(() => expect(a.exit).toHaveBeenCalled(), { timeout: 10_000 });
+    expect(a.exit).toHaveBeenCalledWith(EXIT_DB_UNAVAILABLE);
+    expect(a.logs.join('\n')).toMatch(/host start failed/);
   }, 30_000);
 
   it('SIGTERM shutdown is bounded when the pools never finish ending', async () => {

@@ -119,9 +119,9 @@ export async function writeWorkspaceIdFile(stateDir: string, id: string): Promis
 
 /**
  * With a host DB, host_meta is authoritative. An empty table is seeded from
- * config workspace.id, else the c1 file, else a new ULID, under c1's rules
- * (a config/file mismatch or an unreadable file refuses start). The file is
- * then rewritten from the row.
+ * config workspace.id, else the workspace-id file, else a new ULID, under the
+ * same rules as without a DB (a config/file mismatch or an unreadable file
+ * refuses start). The file is then rewritten from the row.
  */
 export async function resolveHostWorkspaceId(
   k: Kysely<HostDb>,
