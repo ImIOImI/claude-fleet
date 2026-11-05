@@ -571,7 +571,9 @@ export async function attachPty(
       ? (windowsPathToWslPath(mcpConfigPath) ?? undefined)
       : mcpConfigPath;
   // #483 §5a: transcriptRetentionDays → cleanupPeriodDays on this launch.
-  const retentionHost = await ensureLocalRetentionSettings(id, effectiveCaptureSettings(m).transcriptRetentionDays)
+  // Only ever raises the user's own retention: undefined (no --settings) when
+  // their effective cleanupPeriodDays is already at least the workspace's.
+  const retentionHost = await ensureLocalRetentionSettings(id, effectiveCaptureSettings(m).transcriptRetentionDays, launcher)
     .catch((e) => {
       logError({ source: 'main', type: 'claude-retention', level: 'warn', message: String(e), workspaceId: id });
       return undefined;

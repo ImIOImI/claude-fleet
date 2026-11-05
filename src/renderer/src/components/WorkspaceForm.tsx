@@ -1486,7 +1486,7 @@ export function WorkspaceForm({
               onChange={(e) => setCap('transcriptRetentionDays', e.target.value)} disabled={busy} />
           </div>
           <p className="form-hint">
-            Sets Claude Code's cleanupPeriodDays for the sessions the app runs here, so older sessions can still be captured.
+            Raises Claude Code's cleanupPeriodDays for the sessions the app runs here, so older sessions can still be captured. It never lowers a longer retention you already set.
             Claude runs you start yourself outside the app keep their own setting.
           </p>
         </details>

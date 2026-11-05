@@ -184,9 +184,9 @@ The task-10 `knowledgeCapture: false` boolean becomes `{ enabled: false }`. A ma
   4. Changes that **need approval** apply immediately only when the workspace is `inbox.trusted`. Otherwise they become a **proposal** in the existing proposals flow (approve or reject, like automation proposals). The response then says `{ status: "proposed", proposalId }`.
 - Change log: `capture_settings_log(id, workspace_id, ts, actor 'user'|'workspace', before JSON, after JSON, reason, applied 0|1, proposal_id)` in inbox.db (v7).
 
-**Transcript retention:** the app makes `transcriptRetentionDays` effective as Claude Code's `cleanupPeriodDays`, so search-hit captures can still fork sessions older than Claude's 30-day default.
-- **Container:** written into the container user's Claude settings file (bind-mounted state) at container start and when the setting changes.
-- **Local and WSL:** passed on the app's own `claude` launches as `--settings '{"cleanupPeriodDays":N}'`.
+**Transcript retention:** the app makes `transcriptRetentionDays` effective as Claude Code's `cleanupPeriodDays`, so search-hit captures can still fork sessions older than Claude's 30-day default. It only ever **raises** retention.
+- **Container:** written into the container user's Claude settings file (bind-mounted state) at container start and when the setting changes. A higher value already there is never lowered.
+- **Local and WSL:** these share the user's real `~/.claude/projects`, and `--settings` overrides the user's own value, so the app passes `--settings '{"cleanupPeriodDays":N}'` on its own `claude` launches only when N beats the user's effective `cleanupPeriodDays` (read from their `settings.json` on the host or in the distro; unreadable or absent counts as 30). Otherwise nothing is passed.
 
 Limitation: the user's own non-app `claude` runs on the same machine still apply their own `cleanupPeriodDays`. The workspace form says so.
 

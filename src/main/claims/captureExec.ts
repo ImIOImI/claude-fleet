@@ -36,9 +36,10 @@ export interface CaptureExecDeps {
   workspaceEnvKeys: (id: string) => Promise<string[]>;
   ensureMcpConfig: (id: string, launcher: WorkspaceLauncher) => Promise<string | undefined>;
   resolveClaude: () => Promise<string>;
-  /** Host path of the workspace's cleanupPeriodDays settings file (#483 §5a).
+  /** Host path of the workspace's cleanupPeriodDays settings file (#483 §5a),
+   *  or undefined when the user's own retention already covers it (only raises).
    *  Optional so older test doubles keep working; absent ⇒ no --settings. */
-  retentionSettings?: (id: string) => Promise<string | undefined>;
+  retentionSettings?: (id: string, launcher: WorkspaceLauncher) => Promise<string | undefined>;
 }
 
 function defaultSpawnFile(file: string, args: string[], o: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }): Promise<ExecOutcome> {
@@ -76,9 +77,9 @@ const DEFAULT_DEPS: CaptureExecDeps = {
     if (!p) throw new Error('knowledge capture: claude binary not found on this host');
     return p;
   },
-  retentionSettings: async (id) => {
+  retentionSettings: async (id, launcher) => {
     const m = await readWorkspaceManifest(id);
-    return ensureLocalRetentionSettings(id, effectiveCaptureSettings(m).transcriptRetentionDays);
+    return ensureLocalRetentionSettings(id, effectiveCaptureSettings(m).transcriptRetentionDays, launcher);
   }
 };
 
@@ -101,7 +102,7 @@ export async function runCapture(target: CaptureTarget, args: string[], timeoutM
   // must carry the workspace's cleanupPeriodDays (#483 §5a).
   let retentionHostPath: string | undefined;
   try {
-    retentionHostPath = await deps.retentionSettings?.(target.workspaceId);
+    retentionHostPath = await deps.retentionSettings?.(target.workspaceId, l);
   } catch (err) {
     logError({ source: 'main', type: 'capture-retention-failed', level: 'warn', message: String(err), workspaceId: target.workspaceId });
   }
