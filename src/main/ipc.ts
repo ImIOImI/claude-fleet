@@ -2,11 +2,11 @@ import { app, ipcMain, BrowserWindow, dialog, clipboard, Menu, shell, powerMonit
 import { appBuildSha, appVersionString } from './appVersion.js';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { unlink, readdir } from 'node:fs/promises';
+import { unlink, readdir, rm } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
-import { workspaceTranscriptPath, workspaceHistoryFile, workspaceHistoryDir, encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir, workspaceClaudeDir } from './paths.js';
+import { workspaceTranscriptPath, workspaceHistoryFile, workspaceHistoryDir, encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir, workspaceClaudeDir, workspaceStateDir } from './paths.js';
 import { createWorkspaceSkills, toSkillWorkspace } from './skills/workspaceSkills.js';
 import {
   setWorkspaceDefault,
@@ -51,9 +51,10 @@ import {
   setKnowledgeCapture,
   getKnowledgeCaptureDailyCap,
   setKnowledgeCaptureDailyCap,
-  getGithubClientIdConfig
+  getGithubClientIdConfig,
+  configUnreadablePath
 } from './config.js';
-import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk, perfSetSpanContext, recordLatencySample, setPerfStateListener, perfNotePowerEvent, perfSpan, setPerfMemorySource } from './perf.js';
+import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk, perfSetSpanContext, recordLatencySample, setPerfStateListener, perfNotePowerEvent, perfSpanAsync, setPerfMemorySource } from './perf.js';
 import { resolvePerfConfig } from './perfConfig.js';
 import { sanitizePerfSamples } from './perfSamples.js';
 import { buildLoadoutCatalog } from './loadoutCatalog.js';
@@ -61,8 +62,8 @@ import * as realDocker from './docker.js';
 import * as realLocal from './local.js';
 import * as mockDocker from './mock.js';
 import type { Backend } from './backend.js';
-import { resolveKind } from './backendRouter.js';
-import { findLiveHandleId } from './ptyHandleLookup.js';
+import { hostRunsSignals, resolveAutomationKind, resolveKind, resolveRemoveKind } from './backendRouter.js';
+import { findLiveHandleId, tabCloseVerb } from './ptyHandleLookup.js';
 import { assertControl, buildRoster, ROSTER_TITLE_MAX, type RosterStatus, type RosterEntry } from './control.js';
 import { ActivityDetector } from './activityDetector.js';
 import { wouldExceed, recordPost, COMMITTEE_CAPS } from './committeeRuns.js';
@@ -86,6 +87,8 @@ import { registerVaultIpc } from './vaultIpc.js';
 import { IdentityService } from './identity/identityService.js';
 import { pickGithubClientId, GITHUB_CLIENT_ID_ENV } from './identity/clientId.js';
 import { registerIdentityIpc } from './identityIpc.js';
+import { createRemoteBackend } from './remote.js';
+import { assertNotRemoteSpec, confirmText, registerRemoteIpc, type RemoteConfirm } from './remoteIpc.js';
 import { listEndpoints, saveEndpoint, deleteEndpoint, setEndpointApiKey, probeEndpoint, getEndpoint, type ModelEndpoint } from './endpoints.js';
 import * as fs from './fs.js';
 import * as imageLibrary from './imageLibrary.js';
@@ -133,6 +136,8 @@ import {
   lookupBrokerSession,
   lookupVerifiedBrokerSession,
   listSessions,
+  latestSessionId,
+  latestActivityByWorkspace,
   renameSession,
   deleteSession,
   tokensSpentSince,
@@ -144,7 +149,7 @@ import {
 } from './db.js';
 import { foldPlanUsage, type PlanUsageFold } from './planUsage.js';
 import { logError, getLogPath } from './errorLog.js';
-import { broadcastObservabilitySummary } from './observabilityBroadcast.js';
+import { broadcastObservabilitySummary, latestWins } from './observabilityBroadcast.js';
 import { broadcastInputWait } from './inputWaitBroadcast.js';
 import { makeTrailingRebroadcast } from './trailingBroadcast.js';
 import { consumeForWorkspace, pendingSnapshotForWorkspace, recordPendingAttach } from './pendingAttaches.js';
@@ -299,9 +304,32 @@ const mockPorts: MockServingPorts | null = MOCK_MODE && process.env.CLAUDE_FLEET
 // `Backend` contract. In mock mode everything routes to the mock backend.
 const dockerBackend: Backend = MOCK_MODE ? mockDocker : realDocker;
 const localBackend: Backend = MOCK_MODE ? mockDocker : realLocal;
+// Bound to the signed-in GitHub token once registerIpc builds the identity service.
+let remoteToken: () => Promise<string | null> = async () => null;
+let remoteLogin: () => Promise<string | null> = async () => null;
+const remoteBackend = createRemoteBackend({
+  token: () => remoteToken(),
+  login: () => remoteLogin(),
+  listManifests: () => listWorkspaceManifests(),
+  writeManifest: (spec) => writeWorkspaceManifest(spec),
+  deleteState: (id) => rm(workspaceStateDir(id), { recursive: true, force: true })
+});
+
+export function stopRemoteBackend(): void {
+  remoteBackend.stop();
+}
+
+async function confirmRemote(r: RemoteConfirm): Promise<boolean> {
+  const t = confirmText(r);
+  const box = { type: 'warning' as const, message: t.message, detail: t.detail, buttons: ['Cancel', t.button], defaultId: 0, cancelId: 0, noLink: true };
+  const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+  const res = win ? await dialog.showMessageBox(win, box) : await dialog.showMessageBox(box);
+  return res.response === 1;
+}
 
 function backendForKind(kind: WorkspaceKind): Backend {
   if (MOCK_MODE) return mockDocker;
+  if (kind === 'remote') return remoteBackend;
   return kind === 'local' ? localBackend : dockerBackend;
 }
 
@@ -423,7 +451,7 @@ async function fetchAllWorkspaces(): Promise<Workspace[]> {
   const dockerPromise: Promise<Workspace[]> = e2eDockerDown
     ? Promise.reject(Object.assign(new Error('docker daemon down (e2e)'), { code: 'ECONNREFUSED' }))
     : dockerBackend.listLiveWorkspaces();
-  const [dockerResult, localLive, manifests] = await Promise.all([
+  const [dockerResult, localLive, remoteLive, manifests] = await Promise.all([
     dockerPromise.then(
       (value): PromiseSettledResult<Workspace[]> => ({ status: 'fulfilled', value }),
       (reason): PromiseSettledResult<Workspace[]> => ({ status: 'rejected', reason })
@@ -432,10 +460,11 @@ async function fetchAllWorkspaces(): Promise<Workspace[]> {
     // docker half down, container-kind mocks must not sneak back in as live
     // through the local half.
     localBackend.listLiveWorkspaces().then((ws) => (e2eDockerDown ? ws.filter((w) => w.kind === 'local') : ws)),
+    MOCK_MODE ? Promise.resolve([]) : remoteBackend.listLiveWorkspaces(),
     listWorkspaceManifests()
   ]);
   return mergeWorkspaces({
-    dockerResult, localLive, manifests,
+    dockerResult, localLive, remoteLive, manifests,
     lastKnown: lastKnownStates,
     privateDir: fleetPrivateDir,
     factoryMirror: FACTORY_MIRROR
@@ -469,7 +498,7 @@ export function invalidateWorkspaceList(): void {
 const workspaceSkills = createWorkspaceSkills({
   listWorkspaces: async () =>
     Promise.all(
-      (await listWorkspaceManifests()).map(async (m) =>
+      (await listWorkspaceManifests()).filter((m) => m.kind !== 'remote').map(async (m) =>
         toSkillWorkspace(m, {
           privateDir: m.kind === 'local' ? m.workspaceRoot : await fleetPrivateDir(m.id),
           containerClaudeDir: workspaceClaudeDir(m.id),
@@ -535,13 +564,13 @@ export async function hostPostToWorkspace(
   targetId: string,
   msg: string
 ): Promise<{ via: 'attached' | 'headless'; brokerSessionId?: string }> {
+  const kind = await resolveAutomationKind(targetId);
   const live = liveHandleForWorkspace(targetId);
   if (live) {
     await injectAndSubmit((chunk) => live.stream.write(chunk), msg);
     broadcastCommitteeInbound(targetId, msg);
     return { via: 'attached' };
   }
-  const kind = await resolveKind(targetId);
   if (kind === 'local') {
     throw new Error('a local workspace can only be prompted while its terminal is open in the app');
   }
@@ -562,7 +591,7 @@ export async function hostExecScript(
 
 /** Start a fresh headless `claude <args>` session in a container workspace. */
 export async function hostSpawnFresh(workspaceId: string, sessionId: string, args: string[]): Promise<void> {
-  const kind = await resolveKind(workspaceId);
+  const kind = await resolveAutomationKind(workspaceId);
   if (kind === 'local') throw new Error('fresh sessions need a container workspace (use mode: live for local workspaces)');
   // Pin the claude UUID up front (as tab CREATE does, #195) and record the
   // broker→claude mapping, so the Sessions list can tell this transcript came
@@ -571,7 +600,7 @@ export async function hostSpawnFresh(workspaceId: string, sessionId: string, arg
   // closed DB (mock mode) must not fail the run.
   const claudeSessionId = randomUUID();
   try {
-    recordBrokerSessionMapping(workspaceId, sessionId, claudeSessionId);
+    await recordBrokerSessionMapping(workspaceId, sessionId, claudeSessionId);
   } catch (e) {
     logError({
       source: 'main',
@@ -594,7 +623,7 @@ export async function hostCloseFresh(workspaceId: string, sessionId: string): Pr
 
 /** Start/unpause a workspace and wait until its broker answers. */
 export async function hostEnsureRunning(targetId: string): Promise<void> {
-  const kind = await resolveKind(targetId);
+  const kind = await resolveAutomationKind(targetId);
   await backendForKind(kind).startWorkspace(targetId);
   invalidateWorkspaceList();
   if (!MOCK_MODE && kind === 'container') await realDocker.waitForBrokerReady(targetId);
@@ -795,9 +824,9 @@ async function committeeCollect(
   since: number
 ): Promise<{ id: string; sessionId: string | null; cursor: number; turns: CollectTurn[] }> {
   await assertControl(callerId, targetId, 'read');
-  const sessionId = listSessions(targetId)[0]?.id ?? null;
+  const sessionId = await latestSessionId(targetId);
   if (!sessionId) return { id: targetId, sessionId: null, cursor: since, turns: [] };
-  const events = eventsForSession(sessionId, since, 500);
+  const events = await eventsForSession(sessionId, since, 500);
   const cursor = events.length ? events[events.length - 1].id : since;
   const turns = events
     .filter((e) => e.type === 'assistant' || e.type === 'user')
@@ -809,20 +838,23 @@ async function committeeCollect(
 /**
  * Liveness for an expert (#121): `busy` is host-computed from the broker output
  * stream (renderer-independent); `stalled` = busy past the turn timeout (the
- * "it's wedged" signal); `lastActiveAt` is best-effort from the DB (null when the
- * DB isn't open). Shared by committee_status and committee_roster.
+ * "it's wedged" signal); `lastActiveAt` is best-effort from the DB (see
+ * `lastActiveAtFor`). Shared by committee_status and committee_roster.
  */
-function liveStatusFields(targetId: string, paused: boolean): RosterStatus {
+function liveStatusFields(targetId: string, paused: boolean, lastActiveAt: number | null): RosterStatus {
   const b = committeeBusy.get(targetId);
   const busy = b?.busy ?? false;
   const stalled = busy && b ? Date.now() - b.since > COMMITTEE_CAPS.turnTimeoutMs : false;
-  let lastActiveAt: number | null = null;
-  try {
-    lastActiveAt = listSessions(targetId)[0]?.lastActiveAt ?? null;
-  } catch {
-    /* DB not open (mock) — leave null */
-  }
   return { paused, busy, stalled, lastActiveAt };
+}
+
+/** Latest session activity per workspace; empty when the DB isn't open (mock). */
+async function lastActiveAtFor(workspaceIds: string[]): Promise<Map<string, number | null>> {
+  try {
+    return await latestActivityByWorkspace(workspaceIds);
+  } catch {
+    return new Map();
+  }
 }
 
 /**
@@ -856,7 +888,7 @@ async function committeeStatus(
       id: l.id,
       title: l.title.slice(0, ROSTER_TITLE_MAX)
     })),
-    ...liveStatusFields(targetId, ws?.state === 'paused')
+    ...liveStatusFields(targetId, ws?.state === 'paused', (await lastActiveAtFor([targetId])).get(targetId) ?? null)
   };
 }
 
@@ -872,7 +904,10 @@ async function committeeRoster(callerId: string): Promise<RosterEntry[]> {
   const all = await listAllWorkspaces();
   const caller = all.find((w) => w.id === callerId) ?? null;
   const stateById = new Map(all.map((w) => [w.id, w.state]));
-  return buildRoster(caller, callerId, all, (id) => liveStatusFields(id, stateById.get(id) === 'paused'));
+  const lastActive = await lastActiveAtFor(all.map((w) => w.id));
+  return buildRoster(caller, callerId, all, (id) =>
+    liveStatusFields(id, stateById.get(id) === 'paused', lastActive.get(id) ?? null)
+  );
 }
 
 // ── Plan-wide usage (#plan-usage-ledger) ─────────────────────────────────
@@ -889,7 +924,7 @@ async function computePlanUsage(opts?: { windowS?: number; at?: number }): Promi
   const at = opts?.at ?? Date.now();
   const windowMs = (opts?.windowS ?? 5 * 60 * 60) * 1000;
 
-  const covering = latestAnchorCovering(at);
+  const covering = await latestAnchorCovering(at);
   const window = covering && covering.windowStart != null && covering.resetAt != null
     ? { startMs: covering.windowStart, endMs: covering.resetAt, source: 'anchor' as const }
     : { startMs: at - windowMs, endMs: at, source: 'rolling' as const };
@@ -897,14 +932,14 @@ async function computePlanUsage(opts?: { windowS?: number; at?: number }): Promi
   const all = await listAllWorkspaces();
   const localIds = new Set(all.filter((w) => w.kind === 'local').map((w) => w.id));
 
-  const fold = foldPlanUsage(planUsageRows(window.startMs, window.endMs), localIds);
+  const fold = foldPlanUsage(await planUsageRows(window.startMs, window.endMs), localIds);
 
   // Cap seed: the window cost recomputed at the most recent limit-hit anchor
   // (now including local + subagent spend). null until a limit-hit exists.
-  const hit = latestLimitHitAnchor();
+  const hit = await latestLimitHitAnchor();
   let capUsd: number | null = null;
   if (hit && hit.windowStart != null && hit.resetAt != null) {
-    capUsd = foldPlanUsage(planUsageRows(hit.windowStart, hit.resetAt), localIds).spend.usd;
+    capUsd = foldPlanUsage(await planUsageRows(hit.windowStart, hit.resetAt), localIds).spend.usd;
   }
 
   return {
@@ -951,6 +986,12 @@ async function normalizeAndValidateWslRoot(
   return linuxRoot;
 }
 
+/** A failed live summary push is logged, not thrown: it runs from a watcher
+ *  emit or a timer, where a rejection would go unhandled. */
+function logBroadcastFailure(workspaceId: string, e: unknown): void {
+  logError({ source: 'main', level: 'warn', type: 'observability-broadcast', message: String(e), workspaceId });
+}
+
 export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): void {
   // Width-agreement sweep (#268). unref'd so it never holds the process open.
   const widthSweep = setInterval(sweepWidthAgreement, WIDTH_SWEEP_MS);
@@ -973,23 +1014,28 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // grace+250ms after quiescence, by which time the cache has expired and
   // recomputes fresh. One extra recompute per burst maximum (same storm bound).
   // Timers are unref'd (matching widthSweep above) so they don't hold the app.
+  // Both pushes share one ordering: on pooled Postgres reads two summaries for
+  // one workspace can resolve out of order.
+  const summaryPushes = latestWins();
   const trailingRebroadcast = makeTrailingRebroadcast(
     SUMMARY_STALE_GRACE_MS + 250,
     (workspaceId) => {
       // Timer-driven main-thread work: post-grace this is always a cache-miss
       // recompute + per-window structured clone, so span it like the ingest
       // emit below — unspanned recomputes are how #382 stayed hidden.
-      perfSpan(
+      void perfSpanAsync(
         'claude_fleet.observability.trailing_rebroadcast',
-        () => {
-          const summary = summaryForWorkspace(workspaceId);
+        async () => {
+          const isLatest = summaryPushes.begin(workspaceId);
+          const summary = await summaryForWorkspace(workspaceId);
+          if (!isLatest()) return;
           broadcastObservabilitySummary(
             { workspaceId, summary },
             BrowserWindow.getAllWindows()
           );
         },
         { workspace_id: workspaceId }
-      );
+      ).catch((e: unknown) => logBroadcastFailure(workspaceId, e));
     }
   );
   if (jsonlWatcher) {
@@ -998,20 +1044,22 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // wrapper never covered it, so the summary recompute + the per-window
       // structured clone inside webContents.send were invisible to stall
       // attribution until this span (2026-08-17 analysis).
-      perfSpan(
+      // Reset the trailing timer — fires once after quiescence to push the
+      // final fresh state (see comment above makeTrailingRebroadcast).
+      trailingRebroadcast.schedule(workspaceId);
+      void perfSpanAsync(
         'claude_fleet.observability.ingest_broadcast',
-        () => {
-          const summary = summaryForWorkspace(workspaceId);
+        async () => {
+          const isLatest = summaryPushes.begin(workspaceId);
+          const summary = await summaryForWorkspace(workspaceId);
+          if (!isLatest()) return;
           broadcastObservabilitySummary(
             { workspaceId, summary },
             BrowserWindow.getAllWindows()
           );
-          // Reset the trailing timer — fires once after quiescence to push the
-          // final fresh state (see comment above makeTrailingRebroadcast).
-          trailingRebroadcast.schedule(workspaceId);
         },
         { workspace_id: workspaceId }
-      );
+      ).catch((e: unknown) => logBroadcastFailure(workspaceId, e));
     });
     // Per-tab mapping: when a brand-new claude JSONL appears in a
     // workspace, ask the pending-attach map if there's exactly one
@@ -1034,41 +1082,52 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         });
         return;
       }
-      const previous = learnBrokerSessionMapping(workspaceId, brokerSessionId, claudeSessionId);
-      // Every learn leaves a trace; the two warn cases are the #195 evidence
-      // trail — a FIFO consume that had to guess between tabs, and a mapping
-      // silently flipping to a different claude session.
-      if (queued.length > 1) {
-        logError({
-          source: 'main',
-          type: 'mapping-ambiguous-consume',
-          level: 'warn',
-          message: `paired ${claudeSessionId} with broker ${brokerSessionId} by FIFO with ${queued.length} tabs pending — pairing is a guess`,
-          workspaceId,
-          extra: { claudeSessionId, consumed: brokerSessionId, queued }
-        });
-      } else {
-        logError({
-          source: 'main',
-          type: 'mapping-learned',
-          level: 'info',
-          message: `paired ${claudeSessionId} with broker ${brokerSessionId}`,
-          workspaceId,
-          extra: { claudeSessionId, consumed: brokerSessionId }
-        });
-      }
-      if (previous && previous !== claudeSessionId) {
-        logError({
-          source: 'main',
-          type: 'mapping-remapped',
-          level: 'warn',
-          message: `broker ${brokerSessionId} remapped ${previous} → ${claudeSessionId}; a tab Refresh will now resume a different conversation`,
-          workspaceId,
-          extra: { brokerSessionId, from: previous, to: claudeSessionId }
-        });
-      }
-      // Propagate any pending per-session mirror override onto the claude id.
+      // Propagate any pending per-session mirror override onto the claude id —
+      // synchronously, before this file's first batch reads the mirror policy.
       learnMirrorMapping(workspaceId, brokerSessionId, claudeSessionId);
+      void (async () => {
+        const previous = await learnBrokerSessionMapping(workspaceId, brokerSessionId, claudeSessionId);
+        // Every learn leaves a trace; the two warn cases are the #195 evidence
+        // trail — a FIFO consume that had to guess between tabs, and a mapping
+        // silently flipping to a different claude session.
+        if (queued.length > 1) {
+          logError({
+            source: 'main',
+            type: 'mapping-ambiguous-consume',
+            level: 'warn',
+            message: `paired ${claudeSessionId} with broker ${brokerSessionId} by FIFO with ${queued.length} tabs pending — pairing is a guess`,
+            workspaceId,
+            extra: { claudeSessionId, consumed: brokerSessionId, queued }
+          });
+        } else {
+          logError({
+            source: 'main',
+            type: 'mapping-learned',
+            level: 'info',
+            message: `paired ${claudeSessionId} with broker ${brokerSessionId}`,
+            workspaceId,
+            extra: { claudeSessionId, consumed: brokerSessionId }
+          });
+        }
+        if (previous && previous !== claudeSessionId) {
+          logError({
+            source: 'main',
+            type: 'mapping-remapped',
+            level: 'warn',
+            message: `broker ${brokerSessionId} remapped ${previous} → ${claudeSessionId}; a tab Refresh will now resume a different conversation`,
+            workspaceId,
+            extra: { brokerSessionId, from: previous, to: claudeSessionId }
+          });
+        }
+      })().catch((e: unknown) =>
+        logError({
+          source: 'main',
+          type: 'mapping-learn-failed',
+          level: 'warn',
+          message: `could not record ${brokerSessionId} → ${claudeSessionId}: ${e instanceof Error ? e.message : String(e)}`,
+          workspaceId
+        })
+      );
     });
   }
 
@@ -1106,7 +1165,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     // Reconciling here (the renderer polls workspace:list) covers start, pause,
     // stop, remove, and app launch without per-action hooks.
     portForward?.reconcile(
-      all.filter((w) => w.state === 'running' && w.kind !== 'local').map((w) => w.id)
+      all.filter((w) => w.state === 'running' && w.kind === 'container').map((w) => w.id)
     );
     mockPorts?.reconcile(all.filter((w) => w.state === 'running').map((w) => w.id));
     return all;
@@ -1118,6 +1177,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // The id becomes this workspace's vault scope (resolveEnv injects that
       // bag into its env), so it may never name a host-only scope (#444).
       assertRendererWorkspaceId(input?.id);
+      assertNotRemoteSpec(input.kind, await readWorkspaceManifest(input.id));
       const kind: WorkspaceKind = input.kind ?? 'container';
       const launcher = kind === 'local' ? sanitizeLauncher(input.launcher) : undefined;
       // Local workspaces run `claude` in a user-chosen host directory; validate
@@ -1270,7 +1330,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('sessions:list', async (_e, workspaceId?: string) => {
     const all = await listAllWorkspaces();
     const byId = new Map(all.map((w) => [w.id, w]));
-    const rows = listSessions(workspaceId);
+    const rows = await listSessions(workspaceId);
     return rows.flatMap((r) => {
       const w = byId.get(r.workspaceId);
       // Eligibility: show a session iff its workspace still exists (manifest
@@ -1293,8 +1353,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     });
   });
 
-  ipcMain.handle('sessions:rename', (_e, sessionId: string, name: string) => {
-    renameSession(sessionId, name);
+  ipcMain.handle('sessions:rename', async (_e, sessionId: string, name: string) => {
+    await renameSession(sessionId, name);
   });
 
   // Remove a session from the cache AND delete its on-disk transcript.
@@ -1302,7 +1362,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // does NOT drop DB rows, so deleteSession() does that explicitly. Unlink
   // is best-effort: a missing file (already gone) is fine.
   ipcMain.handle('sessions:delete', async (_e, workspaceId: string, sessionId: string) => {
-    deleteSession(sessionId);
+    await deleteSession(sessionId);
     try {
       await unlink(workspaceTranscriptPath(workspaceId, sessionId));
     } catch (err) {
@@ -1397,6 +1457,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         throw new Error(`A workspace named "${spec.name}" already exists.`);
       }
       const existing = await readWorkspaceManifest(spec.id);
+      assertNotRemoteSpec(spec.kind, existing);
       // Container: workspaceRoot is derived — the canonical private folder under
       // the fleet root. Local (#16): it's the user-chosen host dir, supplied by
       // the renderer; fall back to the existing manifest's value if absent.
@@ -1425,7 +1486,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         ...(existing ?? {}),
         ...spec,
         workspaceRoot,
-        launcher: incomingLauncher
+        launcher: incomingLauncher,
+        remote: undefined
       });
       // #483 §5a: a form edit of the capture settings is logged (actor 'user')
       // and re-applies transcript retention — both listen for this event.
@@ -1519,8 +1581,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     if (waiting) set.add(sessionId); else set.delete(sessionId);
     pushInputWait(callerId);
   });
-  setSessionMappingHandler((callerId, brokerSessionId, claudeSessionId) => {
-    const { mode, previous } = recordBrokerSessionMapping(callerId, brokerSessionId, claudeSessionId);
+  setSessionMappingHandler(async (callerId, brokerSessionId, claudeSessionId) => {
+    const { mode, previous } = await recordBrokerSessionMapping(callerId, brokerSessionId, claudeSessionId);
     if (mode === 'deferred') {
       // The hook named a session that hasn't written a transcript yet (a fresh
       // `/clear`). Parked rather than committed so an abandoned cleared session
@@ -1572,7 +1634,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     await clearInputWaitForContainer(containerId);
     // A saved (no-live) workspace passes its ULID in opts.id; prefer it so the
     // kind resolves even when there's no live containerId.
-    const result = await (await backendFor(opts?.id ?? containerId)).removeWorkspace(containerId, opts);
+    const backend = MOCK_MODE ? mockDocker : backendForKind(await resolveRemoveKind(containerId, opts?.id));
+    const result = await backend.removeWorkspace(containerId, opts);
     invalidateWorkspaceList();
     // Tear down the per-id MCP listener + socket dir (#117). Keyed by workspace
     // id, which lives in opts.id (containerId is the Docker id). Best-effort.
@@ -1690,6 +1753,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // workspace's private folder (<root>/<id>) plus the shared folder
   // (<root>/shared). `sharedDir` is returned alongside so the renderer can
   // surface a "Shared" link without recomputing the join.
+  ipcMain.handle('config:unreadablePath', () => configUnreadablePath());
   ipcMain.handle('config:get', async () => ({
     fleetRoot: await getFleetRoot(),
     sharedDir: await fleetSharedDir(),
@@ -1724,10 +1788,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   });
   // Plan-usage bar numerator: total tokens spent across the fleet in the
   // trailing rolling window. The allowance (denominator) lives in config.
-  ipcMain.handle('usage:rollingSpend', () => {
+  ipcMain.handle('usage:rollingSpend', async () => {
     const windowMs = USAGE_BUDGET_WINDOW_HOURS * 60 * 60 * 1000;
     return {
-      spentTokens: tokensSpentSince(Date.now() - windowMs),
+      spentTokens: await tokensSpentSince(Date.now() - windowMs),
       windowHours: USAGE_BUDGET_WINDOW_HOURS
     };
   });
@@ -1927,6 +1991,18 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       pickGithubClientId({ env: process.env[GITHUB_CLIENT_ID_ENV], config: await getGithubClientIdConfig() })
   });
   registerIdentityIpc(ipcMain, identity);
+  remoteToken = () => identity.bearerToken();
+  remoteLogin = () => identity.currentLogin();
+  registerRemoteIpc(ipcMain, {
+    backend: remoteBackend,
+    accountStatus: () => identity.status(),
+    readManifest: readWorkspaceManifest,
+    listManifests: listWorkspaceManifests,
+    confirm: confirmRemote,
+    writeManifest: writeWorkspaceManifest,
+    findByName: findWorkspaceByName,
+    invalidate: invalidateWorkspaceList
+  });
   loadoutSources.setGithubTokenProvider(() => identity.packagesToken());
 
   ipcMain.handle(
@@ -1983,6 +2059,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         (w) => w.containerId === containerId || w.id === containerId
       );
       if (owner) handleWorkspaceId.set(ptyHandleId, owner.id);
+      const signalOwner = owner && hostRunsSignals(owner.kind) ? owner : null;
       handleBrokerSessionId.set(ptyHandleId, brokerSessionId);
       // No-op unless CLAUDE_FLEET_CAPTURE_PTY is set (ptyCapture.ts, #268).
       const capture = createPtyCapture({
@@ -2047,9 +2124,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         // Capture exactly what the renderer got, not what we think we sent.
         ptyCaptures.get(ptyHandleId)?.data(chunk);
         recordPtyChunk(owner?.id ?? handleWorkspaceId.get(ptyHandleId) ?? null, brokerSessionId, chunk.length);
-        if (owner && detector.push(chunk.toString('utf8'))) {
-          committeeBusy.set(owner.id, { busy: detector.isBusy, since: Date.now() });
-          if (!detector.isBusy) emitFleetEvent({ on: 'session.idle', workspaceId: owner.id });
+        if (signalOwner && detector.push(chunk.toString('utf8'))) {
+          committeeBusy.set(signalOwner.id, { busy: detector.isBusy, since: Date.now() });
+          if (!detector.isBusy) emitFleetEvent({ on: 'session.idle', workspaceId: signalOwner.id });
         }
       });
       handle.stream.on('end', () => {
@@ -2163,7 +2240,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     }
   );
 
-  ipcMain.handle('pty:detach', (_e, sessionId: string) => {
+  const detachHandle = (sessionId: string): void => {
     const present = ptySessions.has(sessionId);
     ptySessions.get(sessionId)?.detach();
     ptySessions.delete(sessionId);
@@ -2188,6 +2265,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         : `pty:detach for unknown handle (live=${ptySessions.size})`,
       extra: { ptyHandleId: sessionId, hadHandle: present, live: ptySessions.size }
     });
+  };
+
+  ipcMain.handle('pty:detach', (_e, sessionId: string) => {
+    detachHandle(sessionId);
   });
 
   // Terminate the broker session behind a handle (kills claude, drops the
@@ -2232,17 +2313,28 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // relaunch re-attaches). Returns whether a live handle was found.
   ipcMain.handle(
     'pty:closeSessionByBroker',
-    (_e, workspaceId: string, brokerSessionId: string) => {
+    async (_e, workspaceId: string, brokerSessionId: string) => {
       const ptyHandleId = findLiveHandleId(
         handleWorkspaceId,
         handleBrokerSessionId,
         workspaceId,
         brokerSessionId
       );
-      if (!ptyHandleId) return Promise.resolve(false);
+      if (!ptyHandleId) return false;
+      if (tabCloseVerb(await resolveKind(workspaceId)) === 'detach') {
+        detachHandle(ptyHandleId);
+        return true;
+      }
       return reapHandle(ptyHandleId, 'pty:closeSessionByBroker');
     }
   );
+
+  // Remote "End session": CLOSE the host session (the host refuses a non-owner).
+  ipcMain.handle('pty:endSessionByBroker', async (_e, workspaceId: string, brokerSessionId: string) => {
+    const ptyHandleId = findLiveHandleId(handleWorkspaceId, handleBrokerSessionId, workspaceId, brokerSessionId);
+    if (!ptyHandleId) return false;
+    return reapHandle(ptyHandleId, 'pty:endSessionByBroker');
+  });
 
   // Durable transcript mirror (#10). The renderer holds broker session ids;
   // mirror files are named by claude session id, so the transcript handlers
@@ -2250,21 +2342,21 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // Resolve a renderer broker session id to its claude session id. Tolerant
   // of a dormant DB (mock mode, where the watcher/DB never opened): returns
   // null instead of throwing, so the mirror handlers degrade to no-ops.
-  const claudeIdFor = (workspaceId: string, brokerSessionId: string): string | null => {
+  const claudeIdFor = async (workspaceId: string, brokerSessionId: string): Promise<string | null> => {
     try {
-      return lookupBrokerSession(workspaceId, brokerSessionId) ?? null;
+      return (await lookupBrokerSession(workspaceId, brokerSessionId)) ?? null;
     } catch {
       return null;
     }
   };
   ipcMain.handle(
     'mirror:setOverride',
-    (_e, workspaceId: string, brokerSessionId: string, setting: 'on' | 'off') => {
+    async (_e, workspaceId: string, brokerSessionId: string, setting: 'on' | 'off') => {
       setSessionOverride(workspaceId, brokerSessionId, setting === 'off' ? 'off' : 'on');
       // If the broker→claude mapping is already known (a live flip mid-session),
       // propagate the new override onto the claude key immediately; otherwise
       // the watcher's new-session hook will do it once the mapping lands.
-      const claudeId = claudeIdFor(workspaceId, brokerSessionId);
+      const claudeId = await claudeIdFor(workspaceId, brokerSessionId);
       if (claudeId) learnMirrorMapping(workspaceId, brokerSessionId, claudeId);
     }
   );
@@ -2273,15 +2365,15 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // up in that case, so the close-time modal is correctly skipped.
   ipcMain.handle(
     'transcript:hasForBrokerSession',
-    (_e, workspaceId: string, brokerSessionId: string) => {
-      const claudeId = claudeIdFor(workspaceId, brokerSessionId);
+    async (_e, workspaceId: string, brokerSessionId: string) => {
+      const claudeId = await claudeIdFor(workspaceId, brokerSessionId);
       return claudeId ? existsSync(workspaceHistoryFile(workspaceId, claudeId)) : false;
     }
   );
   ipcMain.handle(
     'transcript:deleteForBrokerSession',
     async (_e, workspaceId: string, brokerSessionId: string) => {
-      const claudeId = claudeIdFor(workspaceId, brokerSessionId);
+      const claudeId = await claudeIdFor(workspaceId, brokerSessionId);
       if (!claudeId) return;
       await unlink(workspaceHistoryFile(workspaceId, claudeId)).catch(() => {});
     }
@@ -2343,12 +2435,12 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
 
   ipcMain.handle(
     'observability:summaryForBrokerSession',
-    (_e, workspaceId: string, brokerSessionId: string) => {
-      const summary = summaryForBrokerSession(workspaceId, brokerSessionId);
+    async (_e, workspaceId: string, brokerSessionId: string) => {
+      const summary = await summaryForBrokerSession(workspaceId, brokerSessionId);
       if (!summary) {
         // Blank-rail root signal: no-mapping = why the per-tab summary is null;
         // mapped-no-session = stale mapping. Deduped per (workspace:tab:outcome).
-        const claudeId = lookupBrokerSession(workspaceId, brokerSessionId);
+        const claudeId = await lookupBrokerSession(workspaceId, brokerSessionId);
         const outcome = claudeId ? 'mapped-no-session' : 'no-mapping';
         const key = `${workspaceId}:${brokerSessionId}:${outcome}`;
         if (!mappingUnresolvedSeen.has(key)) {

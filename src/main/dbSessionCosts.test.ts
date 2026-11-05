@@ -10,10 +10,6 @@
 // self-register"). The expected local outcome is a fast import failure — CI
 // runs the real assertions. Gate locally with `npm run typecheck:node`.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import Database from 'better-sqlite3';
 import {
   openDb,
   closeDb,
@@ -25,9 +21,11 @@ import {
   listSessions,
   summaryForSession,
   _summaryRecomputesForTests,
-  LIST_SESSION_COSTS_SQL,
-  LIST_SESSION_COSTS_BY_WS_SQL,
+  stateKysely,
+  listSessionCostsQuery,
 } from './db.js';
+import { explainPlan } from './state/explainPlan.js';
+import { openTestState, queryRows, isPg, type TestState } from './store/testStore.js';
 
 let dir: string;
 
@@ -99,103 +97,99 @@ const ROLLUP_SQL = `
   FROM session_costs
   ORDER BY session_id, workspace_id, model, service_tier`;
 
-function expectRollupMatchesEvents(d: Database.Database): void {
-  expect(d.prepare(ROLLUP_SQL).all()).toEqual(d.prepare(GROUND_TRUTH_SQL).all());
+async function expectRollupMatchesEvents(): Promise<void> {
+  expect((await queryRows(ROLLUP_SQL))).toEqual((await queryRows(GROUND_TRUTH_SQL)));
 }
 
-beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'cf-costs-'));
-  openDb(dir);
+let st: TestState;
+beforeEach(async () => {
+  st = await openTestState('cf-costs-');
+  dir = st.dir;
 });
-afterEach(() => {
-  closeDb();
-  rmSync(dir, { recursive: true, force: true });
+afterEach(async () => {
+  await st.close();
 });
 
 describe('session_costs invariant', () => {
-  it('mixed ingest: multi-session/multi-workspace rollup matches ground truth', () => {
+  it('mixed ingest: multi-session/multi-workspace rollup matches ground truth', async () => {
     // SES_A in WS1: two distinct models, one with a service_tier, plus user lines.
-    ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
-    ingestLine(WS1, SES_A, assistantLine('a2', 'claude-3-haiku', 200, 80));
-    ingestLine(
+    await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    await ingestLine(WS1, SES_A, assistantLine('a2', 'claude-3-haiku', 200, 80));
+    await ingestLine(
       WS1,
       SES_A,
       assistantLine('a3', 'claude-3-opus', 300, 60, { serviceTier: 'batch' }),
     );
-    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
-    ingestLine(WS1, SES_A, userLine('u2', 'world'));
+    await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    await ingestLine(WS1, SES_A, userLine('u2', 'world'));
 
     // SES_B in WS2: single model, no service_tier, plus user lines.
-    ingestLine(WS2, SES_B, assistantLine('b1', 'claude-sonnet', 150, 70, { cacheRead: 10 }));
-    ingestLine(WS2, SES_B, assistantLine('b2', 'claude-sonnet', 50, 20));
-    ingestLine(WS2, SES_B, userLine('u3', 'ping'));
+    await ingestLine(WS2, SES_B, assistantLine('b1', 'claude-sonnet', 150, 70, { cacheRead: 10 }));
+    await ingestLine(WS2, SES_B, assistantLine('b2', 'claude-sonnet', 50, 20));
+    await ingestLine(WS2, SES_B, userLine('u3', 'ping'));
 
-    const d = openDb(dir);
-    expectRollupMatchesEvents(d);
+    await expectRollupMatchesEvents();
   });
 
-  it('duplicate replay is a no-op: same uuid re-ingested does not double-count', () => {
-    ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
-    ingestLine(WS1, SES_A, userLine('u1', 'first'));
+  it('duplicate replay is a no-op: same uuid re-ingested does not double-count', async () => {
+    await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    await ingestLine(WS1, SES_A, userLine('u1', 'first'));
 
-    const d = openDb(dir);
     // Snapshot the rollup before replay.
-    const before = d.prepare(ROLLUP_SQL).all();
+    const before = (await queryRows(ROLLUP_SQL));
 
     // Re-ingest the exact same assistant line (same uuid = same dedup_key).
-    const result = ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    const result = await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
     expect(result.inserted).toBe(false);
 
     // Rollup must be unchanged AND still match ground truth.
-    expect(d.prepare(ROLLUP_SQL).all()).toEqual(before);
-    expectRollupMatchesEvents(d);
+    expect((await queryRows(ROLLUP_SQL))).toEqual(before);
+    await expectRollupMatchesEvents();
   });
 
-  it('deleteSession removes its rollup rows; peer session remains intact', () => {
+  it('deleteSession removes its rollup rows; peer session remains intact', async () => {
     // Two sessions in WS1.
-    ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
-    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
-    ingestLine(WS1, SES_B, assistantLine('b1', 'claude-3-haiku', 200, 80));
-    ingestLine(WS1, SES_B, userLine('u2', 'world'));
+    await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    await ingestLine(WS1, SES_B, assistantLine('b1', 'claude-3-haiku', 200, 80));
+    await ingestLine(WS1, SES_B, userLine('u2', 'world'));
 
-    const d = openDb(dir);
 
     // Verify both sessions have rollup rows before deletion.
-    const rowsBefore = d.prepare(ROLLUP_SQL).all() as Array<{ session_id: string }>;
+    const rowsBefore = (await queryRows(ROLLUP_SQL)) as Array<{ session_id: string }>;
     expect(rowsBefore.some((r) => r.session_id === SES_A)).toBe(true);
     expect(rowsBefore.some((r) => r.session_id === SES_B)).toBe(true);
 
     // Delete SES_A.
-    deleteSession(SES_A);
+    await deleteSession(SES_A);
 
     // SES_A gone from session_costs; SES_B intact; ground truth still matches.
-    const rowsAfter = d.prepare(ROLLUP_SQL).all() as Array<{ session_id: string }>;
+    const rowsAfter = (await queryRows(ROLLUP_SQL)) as Array<{ session_id: string }>;
     expect(rowsAfter.some((r) => r.session_id === SES_A)).toBe(false);
     expect(rowsAfter.some((r) => r.session_id === SES_B)).toBe(true);
-    expectRollupMatchesEvents(d);
+    await expectRollupMatchesEvents();
   });
 
-  it('cost readers return identical results from the rollup as from events', () => {
+  it('cost readers return identical results from the rollup as from events', async () => {
     // Use the mixed ingest from case 1 so we exercise multi-model, NULL-model,
     // and multi-session data in one shot.
     //
     // SES_A in WS1: two distinct models (one with serviceTier) + user lines
-    ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
-    ingestLine(WS1, SES_A, assistantLine('a2', 'claude-3-haiku', 200, 80));
-    ingestLine(
+    await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    await ingestLine(WS1, SES_A, assistantLine('a2', 'claude-3-haiku', 200, 80));
+    await ingestLine(
       WS1,
       SES_A,
       assistantLine('a3', 'claude-3-opus', 300, 60, { serviceTier: 'batch' }),
     );
-    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
-    ingestLine(WS1, SES_A, userLine('u2', 'world'));
+    await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    await ingestLine(WS1, SES_A, userLine('u2', 'world'));
 
     // SES_B in WS2: single model, no serviceTier, plus user line
-    ingestLine(WS2, SES_B, assistantLine('b1', 'claude-sonnet', 150, 70, { cacheRead: 10 }));
-    ingestLine(WS2, SES_B, assistantLine('b2', 'claude-sonnet', 50, 20));
-    ingestLine(WS2, SES_B, userLine('u3', 'ping'));
+    await ingestLine(WS2, SES_B, assistantLine('b1', 'claude-sonnet', 150, 70, { cacheRead: 10 }));
+    await ingestLine(WS2, SES_B, assistantLine('b2', 'claude-sonnet', 50, 20));
+    await ingestLine(WS2, SES_B, userLine('u3', 'ping'));
 
-    const d = openDb(dir);
 
     // --- costForSession ---
     // Ground truth from events for SES_A:
@@ -210,7 +204,7 @@ describe('session_costs invariant', () => {
       cacheReadInputTokens: 0,
       cacheCreationInputTokens: 0,
     };
-    const costA = costForSession(SES_A);
+    const costA = await costForSession(SES_A);
     expect(costA.inputTokens).toBe(sesACostGT.inputTokens);
     expect(costA.outputTokens).toBe(sesACostGT.outputTokens);
     expect(costA.cacheReadInputTokens).toBe(sesACostGT.cacheReadInputTokens);
@@ -226,7 +220,7 @@ describe('session_costs invariant', () => {
       cacheReadInputTokens: 10,
       cacheCreationInputTokens: 0,
     };
-    const costWS2 = costForWorkspace(WS2);
+    const costWS2 = await costForWorkspace(WS2);
     expect(costWS2.inputTokens).toBe(wsCostGT.inputTokens);
     expect(costWS2.outputTokens).toBe(wsCostGT.outputTokens);
     expect(costWS2.cacheReadInputTokens).toBe(wsCostGT.cacheReadInputTokens);
@@ -234,10 +228,10 @@ describe('session_costs invariant', () => {
 
     // --- listSessions ---
     // Insert session rows so listSessions can find them.
-    d.prepare(`INSERT OR IGNORE INTO sessions (id, workspace_id) VALUES (?,?)`).run(SES_A, WS1);
-    d.prepare(`INSERT OR IGNORE INTO sessions (id, workspace_id) VALUES (?,?)`).run(SES_B, WS2);
+    await queryRows(`INSERT INTO sessions (id, workspace_id) VALUES (?,?) ON CONFLICT DO NOTHING`, [SES_A, WS1]);
+    await queryRows(`INSERT INTO sessions (id, workspace_id) VALUES (?,?) ON CONFLICT DO NOTHING`, [SES_B, WS2]);
 
-    const allRows = listSessions();
+    const allRows = await listSessions();
     const rowA = allRows.find((r) => r.id === SES_A);
     const rowB = allRows.find((r) => r.id === SES_B);
     expect(rowA).toBeDefined();
@@ -252,7 +246,7 @@ describe('session_costs invariant', () => {
     expect(rowB!.usd).toBeGreaterThan(0);
 
     // WS2-scoped listSessions should only return SES_B
-    const ws2Rows = listSessions(WS2);
+    const ws2Rows = await listSessions(WS2);
     expect(ws2Rows.every((r) => r.workspaceId === WS2)).toBe(true);
     const rowBScoped = ws2Rows.find((r) => r.id === SES_B);
     expect(rowBScoped).toBeDefined();
@@ -261,7 +255,7 @@ describe('session_costs invariant', () => {
     // --- summaryForSession ---
     // summaryForSession goes through the summary cache; bypasses it with
     // a non-default topToolsLimit so we get a fresh read from session_costs.
-    const summary = summaryForSession(SES_A, 3);
+    const summary = await summaryForSession(SES_A, 3);
     expect(summary).not.toBeNull();
     expect(summary!.eventCount).toBe(5);
     expect(summary!.inputTokens).toBe(sesACostGT.inputTokens);
@@ -271,45 +265,39 @@ describe('session_costs invariant', () => {
     expect(summary!.usd).toBeGreaterThan(0);
   });
 
-  it('listSessions cost query never scans events (EXPLAIN QUERY PLAN pin)', () => {
-    // Open the DB to ensure it is initialised (EXPLAIN needs a live connection).
+  it.skipIf(isPg)('listSessions cost query never scans events (EXPLAIN QUERY PLAN pin)', async () => {
     const d = openDb(dir);
-    for (const sql of [LIST_SESSION_COSTS_SQL, LIST_SESSION_COSTS_BY_WS_SQL]) {
-      // LIST_SESSION_COSTS_BY_WS_SQL contains a WHERE workspace_id = ? placeholder;
-      // better-sqlite3 requires the parameter bound even for EXPLAIN QUERY PLAN.
-      const stmt = d.prepare(`EXPLAIN QUERY PLAN ${sql}`);
-      const plan = (sql.includes('?') ? stmt.all('explain-dummy') : stmt.all()) as Array<{ detail: string }>;
-      const details = plan.map((r) => r.detail).join(' | ');
+    for (const ws of [undefined, 'explain-dummy']) {
+      const details = explainPlan(d, listSessionCostsQuery(stateKysely(), ws));
       expect(details).toContain('session_costs');
       expect(details).not.toMatch(/\bevents\b/);
     }
   });
 
-  it('migration backfill rebuilds from events (drift self-heal)', () => {
+  it.skipIf(isPg)('migration backfill rebuilds from events (drift self-heal)', async () => {
     // Ingest data at version 13 (the normal path).
-    ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
-    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
-    ingestLine(WS2, SES_B, assistantLine('b1', 'claude-sonnet', 150, 70, { cacheRead: 10 }));
+    await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    await ingestLine(WS2, SES_B, assistantLine('b1', 'claude-sonnet', 150, 70, { cacheRead: 10 }));
 
     // Wind the version back to 12 — simulates a future schema bump that will
     // re-run the v13 block with DROP + rebuild on next open.
     const d = openDb(dir);
     d.pragma('user_version = 12');
-    closeDb();
+    await closeDb();
 
     // Re-open: migrate() sees current < 13, drops and rebuilds session_costs.
     openDb(dir);
-    const d2 = openDb(dir);
-    expectRollupMatchesEvents(d2);
+    await expectRollupMatchesEvents();
   });
 
-  it('ingest burst with interleaved summary reads recomputes at most twice (debounce end-to-end)', () => {
+  it('ingest burst with interleaved summary reads recomputes at most twice (debounce end-to-end)', async () => {
     // Prime the cache once.
-    summaryForSession(SES_A);
+    await summaryForSession(SES_A);
     const before = _summaryRecomputesForTests();
     for (let i = 0; i < 200; i++) {
-      ingestLine(WS1, SES_A, assistantLine(`burst-${i}`, 'claude-3-opus', 10, 5));
-      summaryForSession(SES_A); // the renderer-poll stand-in
+      await ingestLine(WS1, SES_A, assistantLine(`burst-${i}`, 'claude-3-opus', 10, 5));
+      await summaryForSession(SES_A); // the renderer-poll stand-in
     }
     // Old policy: ~200 recomputes (every read after every ingest missed).
     // markStale(3s): the first read after the first markStale horizon may
@@ -317,19 +305,19 @@ describe('session_costs invariant', () => {
     expect(_summaryRecomputesForTests() - before).toBeLessThanOrEqual(2);
   });
 
-  it('renameSession invalidates summary cache (fix for missing invalidate call)', () => {
+  it('renameSession invalidates summary cache (fix for missing invalidate call)', async () => {
     // Ingest some data and prime the summary cache.
-    ingestLine(WS1, SES_A, userLine('u1', 'hello'));
-    ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
-    const summaryBefore = summaryForSession(SES_A);
+    await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
+    await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
+    const summaryBefore = await summaryForSession(SES_A);
     expect(summaryBefore).not.toBeNull();
 
     // Track recomputes: the next summaryForSession call after renameSession
     // should trigger exactly one recompute (the cache invalidation), proving
     // that renameSession properly invalidated the cached summary.
     const recomputesBefore = _summaryRecomputesForTests();
-    renameSession(SES_A, 'new-name');
-    const summaryAfter = summaryForSession(SES_A);
+    await renameSession(SES_A, 'new-name');
+    const summaryAfter = await summaryForSession(SES_A);
 
     // Verify the recompute counter increased by exactly 1.
     expect(_summaryRecomputesForTests() - recomputesBefore).toBe(1);
@@ -338,5 +326,22 @@ describe('session_costs invariant', () => {
     // The summary should remain the same in content (no data changed, just
     // the user_set_name in the sessions table — which doesn't appear in
     // WorkspaceSummary but proves the summary was recomputed from fresh DB state).
+  });
+});
+
+describe('rename/delete are awaited writes', () => {
+  it('deleteSession removes every per-session row in one transaction', async () => {
+    await ingestLine('w', 's-del', JSON.stringify({ type: 'assistant', uuid: 'd1', message: { model: 'claude-opus-4-1', usage: { output_tokens: 3 }, content: [{ type: 'tool_use', id: 't', name: 'Bash', input: {} }] } }));
+    await deleteSession('s-del');
+    for (const t of ['events', 'session_costs', 'session_stats', 'session_tool_counts', 'sessions']) {
+      const col = t === 'sessions' ? 'id' : 'session_id';
+      expect((await queryRows(`SELECT COUNT(*) AS n FROM ${t} WHERE ${col} = 's-del'`))[0]).toEqual({ n: 0 });
+    }
+  });
+
+  it('renameSession resolves after the row is updated', async () => {
+    await ingestLine('w', 's-ren', JSON.stringify({ type: 'user', uuid: 'r1', message: { content: 'hi' } }));
+    await renameSession('s-ren', '  Named  ');
+    expect((await queryRows('SELECT user_set_name FROM sessions WHERE id = ?', ['s-ren']))[0]).toEqual({ user_set_name: 'Named' });
   });
 });

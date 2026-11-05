@@ -17,10 +17,15 @@ function frozenCopy(identity: Identity): Identity {
   return Object.freeze(copy);
 }
 
+export interface CachedProvider extends IdentityProvider {
+  /** True when `verify(token)` would be answered from the cache. */
+  peek(token: string): boolean;
+}
+
 export function withVerifyCache(
   inner: IdentityProvider,
   opts: { ttlMs?: number; now?: () => number; maxEntries?: number } = {}
-): IdentityProvider {
+): CachedProvider {
   const ttl = opts.ttlMs ?? VERIFY_TTL_MS;
   const now = opts.now ?? Date.now;
   const max = opts.maxEntries ?? 1000;
@@ -30,6 +35,10 @@ export function withVerifyCache(
 
   return {
     id: inner.id,
+    peek(token) {
+      const hit = hits.get(keyOf(token));
+      return !!hit && hit.expiresAt > now();
+    },
     verify(token) {
       const key = keyOf(token);
       const hit = hits.get(key);

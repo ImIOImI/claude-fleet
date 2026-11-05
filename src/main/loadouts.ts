@@ -11,7 +11,8 @@ import { fleetPrivateDir } from './config.js';
 import {
   readWorkspaceManifest,
   writeWorkspaceManifest,
-  type InstalledLoadout
+  type InstalledLoadout,
+  type WorkspaceSpec
 } from './workspaces.js';
 import {
   parseLoadout,
@@ -78,7 +79,17 @@ let changeListener: ((workspaceId: string) => void) | null = null;
 export function setLoadoutChangeListener(fn: ((workspaceId: string) => void) | null): void {
   changeListener = fn;
 }
+async function assertContainerTarget(workspaceId: string): Promise<WorkspaceSpec> {
+  const ws = await readWorkspaceManifest(workspaceId);
+  if (!ws) throw new Error(`no workspace ${workspaceId}`);
+  if (ws.kind !== 'container') {
+    throw new Error('Loadouts can only be installed into container workspaces (local runs in your own repo; remote is managed by its deployment).');
+  }
+  return ws;
+}
+
 export async function previewLoadoutAutomations(workspaceId: string, loadoutId: string, allowHost = false): Promise<unknown[]> {
+  await assertContainerTarget(workspaceId);
   return automationHooks ? automationHooks.preview(loadoutDir(loadoutId), loadoutId, workspaceId, allowHost) : [];
 }
 
@@ -98,11 +109,7 @@ export async function installLoadout(
   loadoutId: string,
   opts: { automations?: string[]; allowHost?: boolean } = {}
 ): Promise<InstallResult> {
-  const ws = await readWorkspaceManifest(workspaceId);
-  if (!ws) throw new Error(`no workspace ${workspaceId}`);
-  if (ws.kind === 'local') {
-    throw new Error('Loadouts can only be installed into container workspaces (local runs in your own repo).');
-  }
+  const ws = await assertContainerTarget(workspaceId);
   const meta = await getLoadout(loadoutId);
   const target = await fleetPrivateDir(workspaceId);
   const src = loadoutDir(loadoutId);

@@ -6,6 +6,39 @@ on:
     paths:
       - 'docker/**'
       - 'broker/**'
+      - 'src/host/**'
+      - 'src/main/identity/**'
+      - 'src/main/broker.ts'
+      - 'src/main/claudeArgs.ts'
+      - 'src/main/vaultScopes.ts'
+      - 'src/preload/identityTypes.ts'
+      - 'src/main/store/kysely.ts'
+      - 'src/main/store/postgres.ts'
+      - 'src/main/store/pgMigrate.ts'
+      - 'src/main/store/storeConfig.ts'
+      - 'src/main/store/passwordProvider.ts'
+      - 'src/main/store/pgSsl.ts'
+      - 'src/main/store/pgStores.ts'
+      - 'src/main/store/stateSchema.ts'
+      - 'src/main/store/inboxSchema.ts'
+      - 'src/main/store/migrations/**'
+      - 'src/main/db.ts'
+      - 'src/main/asyncCache.ts'
+      - 'src/main/contextWindow.ts'
+      - 'src/main/pricing.ts'
+      - 'src/main/usageAnchors.ts'
+      - 'src/main/userPromptText.ts'
+      - 'src/main/vectors.ts'
+      - 'src/main/state/ingestParse.ts'
+      - 'src/main/state/serialQueue.ts'
+      - 'src/main/state/transcriptPaths.ts'
+      - 'src/main/inbox/inboxDb.ts'
+      - 'src/main/inbox/inboxCore.ts'
+      - 'src/preload/inboxTypes.ts'
+      - 'src/preload/captureSettings.ts'
+      - 'package-lock.json'
+      - 'tsconfig.host.json'
+      - 'vite.host.config.ts'
       - '.github/workflows/publish-runner.yml'
   workflow_dispatch:
 
@@ -19,8 +52,9 @@ permissions:
 # `docker buildx imagetools create`. Images fan out in parallel; a variant only
 # waits on the base manifest it is FROM.
 #
-#   base-build (amd64 ‖ arm64) ─▶ base-merge ─▶ variant-build ({devops,dev}×{amd64,arm64})
-#                                                          └─▶ variant-merge ({devops,dev})
+#   base-build (amd64 ‖ arm64) ─▶ base-merge ─▶ variant-build ({devops,dev,host}×{amd64,arm64})
+#                                                          └─▶ variant-merge ({devops,dev,host})
+#                                                                 └─▶ devops-host-build ─▶ devops-host-merge
 
 env:
   REGISTRY: ghcr.io
@@ -146,7 +180,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [devops, dev]
+        variant: [devops, dev, host]
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -161,6 +195,10 @@ jobs:
             image: runner-dev
             file: docker/dev/Dockerfile
             smoke: docker/dev/smoke.test.sh
+          - variant: host
+            image: runner-host
+            file: docker/host/Dockerfile
+            smoke: docker/host/smoke.test.sh
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -243,6 +281,7 @@ jobs:
         include:
           - image: runner-devops
           - image: runner-dev
+          - image: runner-host
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4
@@ -276,3 +315,118 @@ jobs:
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf '${{ env.REGISTRY }}/${{ needs.base-merge.outputs.owner }}/claude-fleet/${{ matrix.image }}@sha256:%s ' *)
+
+  # ── runner-devops-host: FROM the runner-devops manifest this run produced ──
+  devops-host-build:
+    needs: [base-merge, variant-merge]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve the runner-devops digest for this commit
+        id: base
+        run: |
+          ref="${{ env.REGISTRY }}/${{ needs.base-merge.outputs.owner }}/claude-fleet/runner-devops:sha-${GITHUB_SHA::7}"
+          d="$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          echo "ref=${ref%:*}@${d}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push runner-devops-host (${{ matrix.arch }}) by digest
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/host/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            BASE_IMAGE=${{ steps.base.outputs.ref }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ needs.base-merge.outputs.owner }}/claude-fleet/runner-devops-host,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=devops-host-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=devops-host-${{ matrix.arch }}
+
+      - name: Load runner-devops-host (amd64) for smoke
+        if: matrix.arch == 'amd64'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/host/Dockerfile
+          platforms: linux/amd64
+          load: true
+          build-args: |
+            BASE_IMAGE=${{ steps.base.outputs.ref }}
+          tags: claude-fleet/runner-devops-host:test
+          cache-from: type=gha,scope=devops-host-amd64
+
+      - name: Smoke runner-devops-host image
+        if: matrix.arch == 'amd64'
+        run: bash docker/host/smoke.test.sh claude-fleet/runner-devops-host:test
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-runner-devops-host-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  devops-host-merge:
+    needs: [base-merge, devops-host-build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-runner-devops-host-*
+          merge-multiple: true
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ needs.base-merge.outputs.owner }}/claude-fleet/runner-devops-host
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ needs.base-merge.outputs.owner }}/claude-fleet/runner-devops-host@sha256:%s ' *)

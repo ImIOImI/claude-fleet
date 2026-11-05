@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { defaultCaptureSettings } from '../../preload/captureSettings.js';
-import { InboxStore } from '../inbox/inboxDb.js';
+import type { InboxStore } from '../inbox/inboxDb.js';
+import { openTestInbox } from '../store/testStore.js';
 import { CaptureSettingsLogStore } from './captureSettingsLog.js';
 
 let inbox: InboxStore; let log: CaptureSettingsLogStore;
-beforeEach(() => { inbox = InboxStore.memory(); log = new CaptureSettingsLogStore(inbox.kysely); });
-afterEach(() => inbox.close());
+beforeEach(async () => { inbox = await openTestInbox(); log = new CaptureSettingsLogStore(inbox.kysely); });
+afterEach(async () => { await inbox.close(); });
 
 describe('CaptureSettingsLogStore', () => {
   it('appends and lists newest first per workspace', async () => {

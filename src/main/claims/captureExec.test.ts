@@ -143,7 +143,8 @@ describe('resolveCaptureTarget', () => {
   const manifests: Record<string, unknown> = {
     c1: { id: 'c1', kind: 'container', workspaceSubdir: 'app' },
     c2: { id: 'c2', kind: 'container', workspaceSubdir: '' },
-    l1: { id: 'l1', kind: 'local', workspaceRoot: '/repo' }
+    l1: { id: 'l1', kind: 'local', workspaceRoot: '/repo' },
+    r1: { id: 'r1', kind: 'remote', workspaceRoot: '', remote: { url: 'https://host.example' } }
   };
   const deps = (running: Set<string>) => ({
     readManifest: async (id: string) => (manifests[id] ?? null) as never,
@@ -156,6 +157,11 @@ describe('resolveCaptureTarget', () => {
     expect(await resolveCaptureTarget('l1', d)).toEqual({ kind: 'local', workspaceId: 'l1', launcher: { mode: 'native' }, workspaceRoot: '/repo' });
     expect(await resolveCaptureTarget('gone', d)).toBeNull();
     expect(d.containerRunning).not.toHaveBeenCalledWith('l1');
+  });
+  it('never captures a remote bookmark (its sessions live on the fleet-host)', async () => {
+    const d = deps(new Set(['r1']));
+    expect(await resolveCaptureTarget('r1', d)).toBeNull();
+    expect(d.containerRunning).not.toHaveBeenCalled();
   });
   it('treats a failed container-state lookup (daemon down) as not running', async () => {
     expect(await resolveCaptureTarget('c1', { ...deps(new Set()), containerRunning: async () => { throw new Error('daemon down'); } })).toBeNull();

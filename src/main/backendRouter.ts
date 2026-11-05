@@ -18,3 +18,24 @@ export async function resolveKind(idOrContainerId: string): Promise<WorkspaceKin
   const m = await readWorkspaceManifest(idOrContainerId);
   return m?.kind ?? 'container';
 }
+
+/** workspace:remove routes by `optsId` but acts on `containerId`; refuse when they name different kinds. */
+export async function resolveRemoveKind(containerId: string, optsId?: string): Promise<WorkspaceKind> {
+  const kind = await resolveKind(optsId ?? containerId);
+  if (optsId && containerId && optsId !== containerId && (await resolveKind(containerId)) !== kind) {
+    throw new Error('workspace:remove: the container id belongs to a different workspace');
+  }
+  return kind;
+}
+
+export const REMOTE_AUTOMATION_MSG = 'remote automations run on their host';
+
+/** resolveKind for a desktop automation's target; a remote workspace's automations belong to its host. */
+export async function resolveAutomationKind(id: string): Promise<WorkspaceKind> {
+  const kind = await resolveKind(id);
+  if (kind === 'remote') throw new Error(REMOTE_AUTOMATION_MSG);
+  return kind;
+}
+
+/** A remote session's busy/idle belongs to its host, so it feeds neither desktop automations nor committee status. */
+export const hostRunsSignals = (kind: WorkspaceKind): boolean => kind !== 'remote';

@@ -49,7 +49,9 @@ export enum FrameType {
   KILLED = 0x19
 }
 
-const MAX_FRAME_PAYLOAD = 1 << 20; // mirror proto.MaxFramePayload
+export const MAX_FRAME_PAYLOAD = 1 << 20; // mirror proto.MaxFramePayload
+/** INPUT body bytes per frame; the payload also carries a u32 channel. */
+const MAX_INPUT_CHUNK = MAX_FRAME_PAYLOAD - 4;
 
 /** Timeout for control-RPC responses. See `rpc()` for the rationale. */
 export const RPC_TIMEOUT_MS = 30_000;
@@ -58,7 +60,7 @@ export const RPC_TIMEOUT_MS = 30_000;
  * Splits a stream of socket bytes into discrete frames. Push raw
  * chunks; pull complete frames via the iterator returned by `consume`.
  */
-class FrameReader {
+export class FrameReader {
   // Buffer<ArrayBufferLike> is the broader type that's compatible with
   // both Buffer.alloc() and Buffer.concat()/subarray() return shapes in
   // @types/node 22+. Without the explicit annotation the field gets
@@ -96,7 +98,7 @@ class FrameReader {
   }
 }
 
-function encodeFrame(type: FrameType, payload: Buffer): Buffer {
+export function encodeFrame(type: FrameType, payload: Buffer): Buffer {
   const totalLen = payload.length + 1;
   const out = Buffer.allocUnsafe(4 + totalLen);
   out.writeUInt32BE(totalLen, 0);
@@ -105,23 +107,23 @@ function encodeFrame(type: FrameType, payload: Buffer): Buffer {
   return out;
 }
 
-function encodeJSONFrame(type: FrameType, value: unknown): Buffer {
+export function encodeJSONFrame(type: FrameType, value: unknown): Buffer {
   return encodeFrame(type, Buffer.from(JSON.stringify(value), 'utf8'));
 }
 
-function encodeChannelData(channel: number, body: Buffer): Buffer {
+export function encodeChannelData(channel: number, body: Buffer): Buffer {
   const out = Buffer.allocUnsafe(4 + body.length);
   out.writeUInt32BE(channel, 0);
   body.copy(out, 4);
   return out;
 }
 
-function decodeChannelData(payload: Buffer): { channel: number; body: Buffer } {
+export function decodeChannelData(payload: Buffer): { channel: number; body: Buffer } {
   if (payload.length < 4) throw new Error('broker: channel-data frame too short');
   return { channel: payload.readUInt32BE(0), body: payload.subarray(4) };
 }
 
-function encodeResize(channel: number, cols: number, rows: number): Buffer {
+export function encodeResize(channel: number, cols: number, rows: number): Buffer {
   const out = Buffer.allocUnsafe(8);
   out.writeUInt32BE(channel, 0);
   out.writeUInt16BE(cols, 4);
@@ -178,23 +180,31 @@ export interface BrokerPortInfo {
  *   'close'   ()                 — socket closed
  */
 export class BrokerClient extends EventEmitter {
-  private socket: net.Socket;
+  private socket: Duplex;
   private reader = new FrameReader();
   private connected = false;
   // One outstanding waiter per response-frame type. Resolves when the
   // matching frame arrives. Reset to null on resolve so the next RPC
   // can take it.
-  private waiters: Partial<Record<FrameType, (payload: Buffer) => void>> = {};
+  private waiters: Partial<Record<FrameType, { resolve: (payload: Buffer) => void; reject: (err: Error) => void }>> = {};
 
-  constructor(endpoint: string | { host: string; port: number }) {
+  constructor(endpoint: string | { host: string; port: number } | Duplex) {
     super();
     // A string is a unix-socket path (Linux/macOS). An {host,port} object
     // is a loopback TCP endpoint (Windows), where the broker can't be
-    // reached over an AF_UNIX socket living inside Docker's Linux VM.
-    this.socket =
-      typeof endpoint === 'string'
-        ? net.createConnection(endpoint)
-        : net.createConnection(endpoint.port, endpoint.host);
+    // reached over an AF_UNIX socket living inside Docker's Linux VM. A
+    // Duplex is an already-open transport (a remote host's /attach socket).
+    if (endpoint instanceof Duplex) {
+      this.socket = endpoint;
+      this.connected = true;
+      // A generic Duplex may not close itself when the peer ends (ws streams don't).
+      endpoint.on('end', () => endpoint.destroy());
+    } else {
+      this.socket =
+        typeof endpoint === 'string'
+          ? net.createConnection(endpoint)
+          : net.createConnection(endpoint.port, endpoint.host);
+    }
     this.socket.on('data', (chunk: Buffer) => this.onData(chunk));
     // Re-emit socket errors on the BrokerClient EventEmitter — but ONLY
     // when a consumer has actually attached an 'error' listener. Without
@@ -216,6 +226,9 @@ export class BrokerClient extends EventEmitter {
     });
     this.socket.on('close', () => {
       this.connected = false;
+      const pending = Object.values(this.waiters);
+      this.waiters = {};
+      for (const w of pending) w?.reject(new Error('broker: connection closed'));
       this.emit('close');
     });
   }
@@ -275,7 +288,7 @@ export class BrokerClient extends EventEmitter {
         const waiter = this.waiters[type];
         if (waiter) {
           this.waiters[type] = undefined;
-          waiter(payload);
+          waiter.resolve(payload);
           return;
         }
         // Unknown / unsolicited — log and drop. Robust forward-compat.
@@ -292,6 +305,7 @@ export class BrokerClient extends EventEmitter {
     if (this.waiters[responseType]) {
       return Promise.reject(new Error(`broker: ${FrameType[responseType]} already in flight`));
     }
+    if (this.socket.destroyed) return Promise.reject(new Error('broker: connection closed'));
     return new Promise<Buffer>((resolve, reject) => {
       // Why 30s and not 10s: the host-side flow does ATTACH → CREATE (if
       // missing) → ATTACH on the same connection. CREATE inside the
@@ -309,9 +323,15 @@ export class BrokerClient extends EventEmitter {
         this.waiters[responseType] = undefined;
         reject(new Error(`broker: ${FrameType[responseType]} timed out`));
       }, RPC_TIMEOUT_MS);
-      this.waiters[responseType] = (payload: Buffer): void => {
-        clearTimeout(timer);
-        resolve(payload);
+      this.waiters[responseType] = {
+        resolve: (payload: Buffer): void => {
+          clearTimeout(timer);
+          resolve(payload);
+        },
+        reject: (err: Error): void => {
+          clearTimeout(timer);
+          reject(err);
+        }
       };
       this.socket.write(encodeFrame(request.type, request.payload), (err) => {
         if (err) {
@@ -412,8 +432,11 @@ export class BrokerClient extends EventEmitter {
     return JSON.parse(payload.toString('utf8')) as { ok: boolean; error?: string };
   }
 
+  /** One write per frame: a remote host refuses a WebSocket message that ends mid-frame. */
   sendInput(channel: number, data: Buffer): void {
-    this.socket.write(encodeFrame(FrameType.INPUT, encodeChannelData(channel, data)));
+    for (let at = 0; at < data.length; at += MAX_INPUT_CHUNK) {
+      this.socket.write(encodeFrame(FrameType.INPUT, encodeChannelData(channel, data.subarray(at, at + MAX_INPUT_CHUNK))));
+    }
   }
 
   sendResize(channel: number, cols: number, rows: number): void {

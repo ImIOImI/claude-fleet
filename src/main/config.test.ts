@@ -54,8 +54,11 @@ const {
   _resetConfigCacheForTests,
   getKeepRunningInTray,
   setKeepRunningInTray,
-  getGithubClientIdConfig
+  getGithubClientIdConfig,
+  getStoreConfig,
+  configUnreadablePath
 } = await import('./config.js');
+const { ConfigJsonError } = await import('./store/storeConfig.js');
 
 const configPath = () => join(userDataDir, 'config.json');
 
@@ -627,5 +630,36 @@ describe('identity.github.clientId', () => {
     await setKeepRunningInTray(true);
     const disk = JSON.parse(await readFile(configPath(), 'utf8'));
     expect(disk.identity).toEqual({ github: { clientId: 'Iv1.orgowned1' } });
+  });
+});
+
+describe('getStoreConfig', () => {
+  it('defaults to SQLite and keeps a hand-edited store block across unrelated writes', async () => {
+    expect(await getStoreConfig()).toEqual({ kind: 'sqlite' });
+    expect(await configUnreadablePath()).toBeNull();
+    const store = { kind: 'postgres', env: 'DATABASE_URL' };
+    await writeFile(configPath(), JSON.stringify({ store }));
+    _resetConfigCacheForTests();
+    expect(await getStoreConfig()).toEqual({ kind: 'postgres', schema: 'fleet', poolMax: 4, connection: { env: 'DATABASE_URL' } });
+    await setKeepRunningInTray(true);
+    expect(JSON.parse(await readFile(configPath(), 'utf8')).store).toEqual(store);
+  });
+
+  it('a config.json that does not parse stops the store choice and is never overwritten', async () => {
+    const broken = '{ "store": { "kind": "postgres", "env": "DATABASE_URL" }, ';
+    await writeFile(configPath(), broken);
+    _resetConfigCacheForTests();
+    await expect(getStoreConfig()).rejects.toThrow(ConfigJsonError);
+    await expect(getStoreConfig()).rejects.toThrow(/config.json is not valid JSON/);
+    expect(await configUnreadablePath()).toBe(configPath());
+    await expect(setKeepRunningInTray(true)).rejects.toThrow(/not valid JSON/);
+    expect(await readFile(configPath(), 'utf8')).toBe(broken);
+    expect(await getKeepRunningInTray()).toBe(false);
+  });
+
+  it('throws on an invalid store block instead of falling back to SQLite', async () => {
+    await writeFile(configPath(), JSON.stringify({ store: { kind: 'postgres', connectionString: 'postgres://u:pw@h/d' } }));
+    _resetConfigCacheForTests();
+    await expect(getStoreConfig()).rejects.toThrow(/must not embed a password/);
   });
 });

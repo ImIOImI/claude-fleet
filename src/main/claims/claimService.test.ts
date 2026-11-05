@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { InboxStore } from '../inbox/inboxDb.js';
+import type { InboxStore } from '../inbox/inboxDb.js';
+import { openTestInbox } from '../store/testStore.js';
 import { ClaimStore } from './claimStore.js';
 import { CaptureRunStore } from './captureRunStore.js';
 import { ClaimService } from './claimService.js';
@@ -12,13 +13,13 @@ const fakeEmbed = async (texts: string[]) => texts.map((t) => {
 });
 
 let inbox: InboxStore; let svc: ClaimService; let runs: CaptureRunStore; let t = 1000;
-beforeEach(() => {
-  inbox = InboxStore.memory();
+beforeEach(async () => {
+  inbox = await openTestInbox();
   runs = new CaptureRunStore(inbox.kysely);
-  svc = new ClaimService({ claims: new ClaimStore(inbox.kysely), runs, embed: fakeEmbed,
+  svc = new ClaimService({ claims: new ClaimStore(inbox.kysely, inbox.dialect), runs, embed: fakeEmbed,
     workspaceName: async (id) => `name-${id}`, now: () => ++t });
 });
-afterEach(() => inbox.close());
+afterEach(async () => { await inbox.close(); });
 
 const base = { kind: 'root-cause', topics: ['mcp-query'] };
 
@@ -66,7 +67,7 @@ describe('ClaimService.record', () => {
   });
   it('rolls back the new claim when the supersede fails (insert + supersede are one transaction)', async () => {
     const a = await svc.record('wsA', { ...base, text: 'snapshot copies history' });
-    const store = new ClaimStore(inbox.kysely);
+    const store = new ClaimStore(inbox.kysely, inbox.dialect);
     const boom = Object.assign(Object.create(store) as ClaimStore, {
       visible: store.visible.bind(store),
       insert: (...args: Parameters<ClaimStore['insert']>) => store.insert(args[0], args[1], args[2], args[3], { ...args[4]!, supersedes: 'no-such-claim' })
@@ -111,7 +112,7 @@ describe('ClaimService.record', () => {
     expect((await svc.search('wsB', { query: 'captured' })).results.map((h) => h.id)).toEqual([r.id]);
   });
   it('still records (FTS-only) when the embedder throws, and backfills later', async () => {
-    const failing = new ClaimService({ claims: new ClaimStore(inbox.kysely), runs, embed: async () => { throw new Error('model down'); },
+    const failing = new ClaimService({ claims: new ClaimStore(inbox.kysely, inbox.dialect), runs, embed: async () => { throw new Error('model down'); },
       workspaceName: async () => null, now: () => ++t });
     const r = await failing.record('wsA', { ...base, text: 'offline claim' });
     expect((await failing.search('wsA', { query: 'offline' })).results.map((h) => h.id)).toEqual([r.id]);

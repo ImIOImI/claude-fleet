@@ -13,6 +13,8 @@ export type {
 } from './inboxTypes';
 import type { AccountStatus, SignInStart, SignInPoll } from './identityTypes';
 export type { AccountStatus, AccountIdentity, AccountSso, SignInStart, SignInPoll } from './identityTypes';
+import type { RemoteAddOptions, RemoteLiveSession, RemoteProbe } from './remoteTypes';
+export type { RemoteAddOptions, RemoteLiveSession, RemoteProbe, RemoteProbeOk, RemoteProbeErr, RemoteProbeErrorKind, RemoteTier } from './remoteTypes';
 
 /** Outcome of a `pty:resize`. Lives here because preload is the IPC contract
  *  surface: main imports it type-only, and the renderer picks it up through
@@ -614,6 +616,9 @@ const api = {
       knowledgeCapture: boolean;
       knowledgeCaptureDailyCap: number;
     }> => ipcRenderer.invoke('config:get'),
+    /** config.json's path when it isn't valid JSON (settings run on defaults
+     *  and can't be saved), else null. */
+    unreadablePath: (): Promise<string | null> => ipcRenderer.invoke('config:unreadablePath'),
     setFleetRoot: (path: string): Promise<{ fleetRoot: string; sharedDir: string }> =>
       ipcRenderer.invoke('config:setFleetRoot', path),
     setHardwareAccelDisabled: (
@@ -712,6 +717,16 @@ const api = {
     /** Delete the token from this computer's vault. */
     signOut: (): Promise<void> => ipcRenderer.invoke('identity:signOut')
   },
+  remote: {
+    /** /whoami a host URL with the signed-in token; never returns the token. */
+    probe: (url: string): Promise<RemoteProbe> => ipcRenderer.invoke('remote:probe', url),
+    /** Probe, then write the bookmark under the host's workspace id. A bookmark at another URL needs `sameHostNewAddress`. */
+    add: (url: string, opts?: RemoteAddOptions): Promise<RemoteProbe> => ipcRenderer.invoke('remote:add', url, opts),
+    /** Rename the local bookmark; the host's name is unchanged. */
+    rename: (id: string, name: string): Promise<void> => ipcRenderer.invoke('remote:rename', id, name),
+    /** Broker sessions live on the host (any tier may watch them). */
+    liveSessions: (id: string): Promise<RemoteLiveSession[]> => ipcRenderer.invoke('remote:liveSessions', id)
+  },
   endpoints: {
     list: (): Promise<unknown[]> => ipcRenderer.invoke('endpoints:list'),
     save: (input: unknown): Promise<unknown> => ipcRenderer.invoke('endpoints:save', input),
@@ -746,9 +761,12 @@ const api = {
       ipcRenderer.invoke('pty:closeSession', sessionId),
     /** Terminate a session by (workspace, broker session id) — used by tab-close,
      *  which knows the stable broker session id but not the per-attach handle.
-     *  Kills claude via the same broker CLOSE the refresh path uses. */
+     *  Kills claude via the same broker CLOSE the refresh path uses; a remote tab only detaches. */
     closeSessionByBroker: (workspaceId: string, brokerSessionId: string): Promise<boolean> =>
       ipcRenderer.invoke('pty:closeSessionByBroker', workspaceId, brokerSessionId),
+    /** Remote only: CLOSE the host session behind a tab (tab-close merely detaches there). */
+    endSessionByBroker: (workspaceId: string, brokerSessionId: string): Promise<boolean> =>
+      ipcRenderer.invoke('pty:endSessionByBroker', workspaceId, brokerSessionId),
     onData: (sessionId: string, cb: (chunk: Uint8Array, ts?: number) => void) => {
       const channel = `pty:data:${sessionId}`;
       const handler = (_e: IpcRendererEvent, chunk: Buffer, ts?: number) => cb(new Uint8Array(chunk), ts);

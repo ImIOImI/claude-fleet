@@ -45,6 +45,8 @@ interface Props {
   initialNewTabValues?: Partial<WorkspaceFormSubmit & { id: string }> | null;
   /** Open Settings modal on a specific tab (e.g. deep-link to Model Endpoints). */
   onOpenSettings?: (tab: 'endpoints') => void;
+  /** A remote workspace was bookmarked from the New tab. */
+  onRemoteAdded?: (id: string) => void;
 }
 
 /**
@@ -94,7 +96,8 @@ export function WorkspaceModal({
   onClone,
   onDelete,
   initialNewTabValues,
-  onOpenSettings
+  onOpenSettings,
+  onRemoteAdded
 }: Props) {
   // Saved tab = the "cold" fleet: stopped, deleted, and unreachable-was-cold
   // workspaces (#21, #380). Unreachable-was-warm chips stay in the strip
@@ -406,6 +409,7 @@ export function WorkspaceModal({
               onSubmit={handleCreate}
               onCancel={onClose}
               onOpenSettings={onOpenSettings}
+              onRemoteAdded={onRemoteAdded}
             />
           </div>
         )}

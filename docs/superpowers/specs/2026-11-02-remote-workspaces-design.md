@@ -462,6 +462,12 @@ Nothing remote is shown stale, because remote data is live-only.
 - **Shared Linux user.** Sessions in a remote container aren't isolated from each other (§4). The
   `session` tier is owner-equivalent, and `steer` lets someone type into any session, so it's
   nearly as strong. Grant them accordingly.
+- **fleet-host shares uid 1000 with the broker and every session.** Anyone who can type into a
+  session (`steer` and above) can kill fleet-host, read its `/proc` entries (and its memory where
+  ptrace is allowed, including open sockets' bearer tokens), or listen on :8080 during a restart to
+  collect reconnecting viewers' tokens. c1's interim mitigation: `fleet-host-entry` refuses to
+  start fleet-host onto a port something else already listens on and exits the container. The
+  durable fix is running fleet-host under its own uid, apart from the sessions.
 - **The host's MCP server** keeps the §11 invariants: read-only, scoped visibility, identity
   ambient from the socket. On Postgres, `query` isolation is role plus RLS (§7).
 - **Local workspaces don't change.** Their MCP sockets, the host-private `<userData>` zone, the

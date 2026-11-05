@@ -9,6 +9,7 @@
 
 import type { ReactNode } from 'react';
 import { useEffect, useMemo, useState } from 'react';
+import { RemoteWorkspaceForm } from './RemoteWorkspaceForm';
 import type {
   AuthMode,
   WorkspaceColor,
@@ -182,6 +183,8 @@ interface Props {
   /** Opens the app Settings modal on a tab — used by "＋ Add endpoint…" and
    *  the endpoint auth note's "edit" link. Threaded from App.tsx. */
   onOpenSettings?: (tab: 'endpoints') => void;
+  /** Create mode: offers the Remote kind; called with the bookmarked workspace id. */
+  onRemoteAdded?: (id: string) => void;
 }
 
 export function WorkspaceForm({
@@ -197,8 +200,10 @@ export function WorkspaceForm({
   deleteDisabledReason,
   primaryLabel: primaryLabelOverride,
   extraFooterLeft,
-  onOpenSettings
+  onOpenSettings,
+  onRemoteAdded
 }: Props) {
+  const [remoteMode, setRemoteMode] = useState(false);
   const [name, setName] = useState(initial?.name ?? '');
   const [description, setDescription] = useState(initial?.description ?? '');
   const [labelInput, setLabelInput] = useState('');
@@ -650,38 +655,72 @@ export function WorkspaceForm({
   const swatchStyle = hue !== null ? { background: `oklch(72% 0.14 ${hue})` } : undefined;
   const primaryLabel = primaryLabelOverride ?? (mode === 'create' ? 'Create & start' : 'Resume');
 
-  return (
-    <div className="workspace-form">
-      <div className="form-row" aria-label="Workspace kind">
-        <label>Type</label>
-        <div className="kind-radios" role="radiogroup">
-          <label className={`kind-radio ${kind === 'container' ? 'active' : ''}`}>
+  const remoteOffered = mode === 'create' && !!onRemoteAdded;
+  const kindRow = (
+    <div className="form-row" aria-label="Workspace kind">
+      <label>Type</label>
+      <div className="kind-radios" role="radiogroup">
+        <label className={`kind-radio ${!remoteMode && kind === 'container' ? 'active' : ''}`}>
+          <input
+            type="radio"
+            name="workspace-kind"
+            value="container"
+            checked={!remoteMode && kind === 'container'}
+            onChange={() => {
+              setRemoteMode(false);
+              setKind('container');
+            }}
+            disabled={busy || dockerUp === false}
+          />
+          <span>Container</span>
+          <span className="kind-help">isolated Docker runner</span>
+          {dockerUp === false && <span className="kind-hint">needs Docker — daemon unreachable</span>}
+        </label>
+        <label className={`kind-radio ${!remoteMode && kind === 'local' ? 'active' : ''}`}>
+          <input
+            type="radio"
+            name="workspace-kind"
+            value="local"
+            checked={!remoteMode && kind === 'local'}
+            onChange={() => {
+              setRemoteMode(false);
+              setKind('local');
+            }}
+            disabled={busy}
+          />
+          <span>Local</span>
+          <span className="kind-help">runs claude on this host</span>
+        </label>
+        {remoteOffered && (
+          <label className={`kind-radio ${remoteMode ? 'active' : ''}`}>
             <input
               type="radio"
               name="workspace-kind"
-              value="container"
-              checked={kind === 'container'}
-              onChange={() => setKind('container')}
-              disabled={busy || dockerUp === false}
-            />
-            <span>Container</span>
-            <span className="kind-help">isolated Docker runner</span>
-            {dockerUp === false && <span className="kind-hint">needs Docker — daemon unreachable</span>}
-          </label>
-          <label className={`kind-radio ${kind === 'local' ? 'active' : ''}`}>
-            <input
-              type="radio"
-              name="workspace-kind"
-              value="local"
-              checked={kind === 'local'}
-              onChange={() => setKind('local')}
+              value="remote"
+              checked={remoteMode}
+              onChange={() => setRemoteMode(true)}
               disabled={busy}
             />
-            <span>Local</span>
-            <span className="kind-help">runs claude on this host</span>
+            <span>Remote</span>
+            <span className="kind-help">a fleet-host someone deployed</span>
           </label>
-        </div>
+        )}
       </div>
+    </div>
+  );
+
+  if (remoteMode && remoteOffered) {
+    return (
+      <div className="workspace-form">
+        {kindRow}
+        <RemoteWorkspaceForm onAdded={onRemoteAdded!} onCancel={onCancel} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="workspace-form">
+      {kindRow}
 
       {kind === 'local' && (
         <>

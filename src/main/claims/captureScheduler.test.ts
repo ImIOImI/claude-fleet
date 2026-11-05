@@ -11,7 +11,7 @@ type Last = { started_at: number; user_turns: number | null; trigger?: string; c
 
 function setup(o: {
   settingsBy?: Record<string, Partial<CaptureSettings>>; exec?: SchedulerDeps['exec']; last?: (id: string) => Last;
-  today?: number; cap?: number; isAutomation?: (id: string) => boolean; globalEnabled?: boolean;
+  today?: number; cap?: number; isAutomation?: (id: string) => boolean | Promise<boolean>; globalEnabled?: boolean;
   topTopics?: SchedulerDeps['topTopics']; target?: SchedulerDeps['target']; killInFlight?: () => void
 } = {}) {
   let n = 0;
@@ -24,8 +24,8 @@ function setup(o: {
   const exec = vi.fn<SchedulerDeps['exec']>(o.exec ?? (async () => OK));
   const d = {
     runs,
-    signals: (id: string) => ({ workspaceId: id.startsWith('b-') ? 'wB' : 'w', model: 'claude-sonnet-5', contextTokens: 175_000, userTurns: 50, compactions: 0 }),
-    isAutomation: o.isAutomation ?? (() => false),
+    signals: async (id: string) => ({ workspaceId: id.startsWith('b-') ? 'wB' : 'w', model: 'claude-sonnet-5', contextTokens: 175_000, userTurns: 50, compactions: 0 }),
+    isAutomation: async (id: string) => (o.isAutomation ? await o.isAutomation(id) : false),
     globalEnabled: async () => o.globalEnabled ?? true,
     settings: async (ws: string) => (ws === 'gone' ? null : { ...defaultCaptureSettings(), ...(o.settingsBy?.[ws] ?? {}) }),
     dailyCap: async () => o.cap ?? 40,

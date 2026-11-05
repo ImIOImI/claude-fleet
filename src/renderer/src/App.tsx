@@ -1,4 +1,7 @@
 import { useEffect, useState, useCallback, useRef, useReducer, useMemo } from 'react';
+import type { RemoteTier } from '../../preload/remoteTypes';
+import { RenameRemoteModal } from './components/RenameRemoteModal';
+import { remotePane, unreachableBanner, unreachableRemoteNames } from './remoteView';
 import { usePorts } from './usePorts';
 import { useServingSessionNames } from './useServingSessionNames';
 import { WorkspaceTabStrip } from './components/WorkspaceTabStrip';
@@ -52,7 +55,7 @@ function makeLifecycleApi(): WorkspaceLifecycleApi {
 }
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted' | 'unreachable';
-export type WorkspaceKind = 'container' | 'local';
+export type WorkspaceKind = 'container' | 'local' | 'remote';
 export type AuthMode = 'oauth' | 'apikey' | 'endpoint';
 
 export interface WorkspaceColor {
@@ -143,6 +146,8 @@ export interface WorkspaceSummary {
   inbox?: InboxConfig;
   /** Knowledge capture settings (#483 §5a); absent = all defaults. */
   knowledgeCapture?: CaptureSettings;
+  /** kind 'remote' only: the fleet-host bookmark (tier is display only). */
+  remote?: { url: string; tier: RemoteTier | null; login: string | null; checkedAt: number };
   createdAt: number;
   lastUsedAt: number;
 }
@@ -304,6 +309,7 @@ export function App() {
   const [closeTargetId, setCloseTargetId] = useState<string | null>(null);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const [editTargetId, setEditTargetId] = useState<string | null>(null);
+  const [renameRemoteId, setRenameRemoteId] = useState<string | null>(null);
   // When the user clicks Clone (Saved-row footer, chip menu, or
   // EditWorkspaceModal), the source spec lands here and the modal
   // reopens on the New tab pre-filled. Cleared when modal closes.
@@ -559,6 +565,28 @@ export function App() {
     };
     void window.api.app.getMcpStatus().then(apply).catch(() => {});
     return window.api.app.onMcpStatus(apply);
+  }, []);
+  // Started via "Continue without settings": config.json is unreadable, so
+  // settings run on defaults and every save is refused until it's fixed.
+  useEffect(() => {
+    void window.api.config
+      .unreadablePath()
+      .then((path) => {
+        if (!path) return;
+        dispatchToast({
+          type: 'push',
+          toast: makeToast(++toastIdRef.current, {
+            kind: 'error',
+            eyebrow: "Settings can't be saved",
+            message: `${path} is not valid JSON. Running on default settings; fix the file and restart.`,
+            placement: 'global',
+            sticky: true,
+            dismissible: false,
+            key: 'config-unreadable'
+          })
+        });
+      })
+      .catch(() => {});
   }, []);
   // Open the loopback preview for a serving port — shared by the detection
   // toast and the rail's Serving section. Errors surface as toasts.
@@ -1325,7 +1353,7 @@ export function App() {
       labels: source.labels,
       color: undefined, // fresh hue
       workspaceSubdir: source.workspaceSubdir,
-      kind: source.kind,
+      kind: source.kind === 'remote' ? 'container' : source.kind,
       workspaceRoot: source.workspaceRoot,
       launcher: source.launcher,
       image: source.image,
@@ -1411,11 +1439,14 @@ export function App() {
     [busyBrokerByWorkspace, claudeMappings, peerStatus]
   );
 
+  const remoteBanner = unreachableBanner(unreachableRemoteNames(workspaces));
+  const selectedRemotePane = selected ? remotePane(selected) : null;
+
   return (
     <div
       className={`app${dragging ? ' dragging' : ''}${
         backendReady === false ? ' daemon-down' : ''
-      }`}
+      }${remoteBanner ? ' remote-down' : ''}`}
     >
       <WorkspaceTabStrip
         workspaces={roleWsId ? workspaces.filter((w) => w.id !== roleWsId) : workspaces}
@@ -1437,6 +1468,7 @@ export function App() {
         onDeleteWorkspace={(w) => setDeleteTargetId(w.id)}
         onRefresh={refresh}
         onReorderWorkspace={handleReorderWorkspaces}
+        onRenameRemote={(w) => setRenameRemoteId(w.id)}
         waitingByWorkspace={waitingByWorkspaceFlag}
       />
 
@@ -1445,6 +1477,12 @@ export function App() {
           <span className="dot" aria-hidden="true" />
           Docker daemon unreachable — container workspaces are shown from last-known state and
           can&apos;t be started or attached until it&apos;s back.
+        </div>
+      )}
+      {remoteBanner && (
+        <div className="daemon-banner remote-banner" role="status">
+          <span className="dot" aria-hidden="true" />
+          {remoteBanner}
         </div>
       )}
 
@@ -1513,6 +1551,12 @@ export function App() {
               />
             ) : liveCount === 0 ? (
               <FirstRun onNewWorkspace={() => setCreateOpen(true)} />
+            ) : selectedRemotePane ? (
+              <div className="empty">
+                {selectedRemotePane.tone === 'error' && <div className="icon-card error">!</div>}
+                <h2>{selectedRemotePane.title}</h2>
+                <p>{selectedRemotePane.body}</p>
+              </div>
             ) : selected?.state === 'unreachable' ? (
               <div className="empty">
                 <div className="icon-card error">!</div>
@@ -1533,6 +1577,7 @@ export function App() {
               .map((w) => (
                 <TerminalPane
                   key={w.id}
+                  remoteTier={w.kind === 'remote' ? w.remote?.tier ?? null : undefined}
                   visible={(!inboxOpen && selectedId === w.id) || (inboxOpen && inboxSection === 'sessions' && w.id === roleWsId)}
                   workspaceId={w.id}
                   mirrorDefault={w.mirror.default}
@@ -1627,7 +1672,26 @@ export function App() {
         onDelete={(w) => setDeleteTargetId(w.id)}
         initialNewTabValues={cloneSource}
         onOpenSettings={(tab) => setSettingsTab(tab)}
+        onRemoteAdded={(id) => {
+          setCreateOpen(false);
+          focusWorkspaceWhenWarm(id);
+          refresh();
+        }}
       />
+      {(() => {
+        const target = renameRemoteId ? workspaces.find((w) => w.id === renameRemoteId && w.kind === 'remote') : undefined;
+        if (!target) return null;
+        return (
+          <RenameRemoteModal
+            id={target.id}
+            name={target.name}
+            onClose={() => {
+              setRenameRemoteId(null);
+              refresh();
+            }}
+          />
+        );
+      })()}
       {(() => {
         if (!editTargetId) return null;
         const target = workspaces.find((w) => w.id === editTargetId);

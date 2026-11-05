@@ -23,8 +23,8 @@ function scheduler(settings: Partial<CaptureSettings> = {}): { s: CaptureSchedul
   const forkArgs: string[][] = [];
   const d: SchedulerDeps = {
     runs,
-    signals: () => ({ workspaceId: 'wsA', model: 'claude-sonnet-5', contextTokens: 180_000, userTurns: 12, compactions: 0 }),
-    isAutomation: () => false,
+    signals: async () => ({ workspaceId: 'wsA', model: 'claude-sonnet-5', contextTokens: 180_000, userTurns: 12, compactions: 0 }),
+    isAutomation: async () => false,
     globalEnabled: async () => true,
     settings: async () => ({ ...defaultCaptureSettings(), ...settings }),
     dailyCap: async () => 40,

@@ -19,7 +19,7 @@ import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setSessionMapping
 import type { SearchHitEvent } from './claims/searchHits.js';
 import { CAPTURE_TOOL_NAMES, captureArgs } from './claims/captureCommand.js';
 import { EMBED_DIM, EMBED_MODEL_ID } from './vectors.js';
-import { closeDb, openDb } from './db.js';
+import { closeDb, openDb, stateKysely } from './db.js';
 import { PerfStore } from './perfStore.js';
 import { initPerf, shutdownPerf } from './perf.js';
 import { disarmSentinel } from './perfSentinel.js';
@@ -194,10 +194,10 @@ function tool(name: string) {
 const ctxA: ToolCtx = { callerId: WS_A, allowedWorkspaces: new Set([WS_A]) };
 
 let db: Database.Database;
-beforeEach(() => {
+beforeEach(async () => {
   db = makeDb();
 });
-afterEach(() => {
+afterEach(async () => {
   db.close();
 });
 
@@ -209,28 +209,28 @@ describe('default read scope (#146)', () => {
 });
 
 describe('typed read tools are workspace-scoped (#146)', () => {
-  it('list_sessions returns only the caller\'s sessions', () => {
+  it('list_sessions returns only the caller\'s sessions', async () => {
     const rows = tool('list_sessions').run(db, {}, ctxA) as Array<{ workspace_id: string }>;
     expect(rows.length).toBe(1);
     expect(rows.every((r) => r.workspace_id === WS_A)).toBe(true);
   });
 
-  it('list_sessions cannot escape scope by naming another workspace', () => {
+  it('list_sessions cannot escape scope by naming another workspace', async () => {
     const rows = tool('list_sessions').run(db, { workspace_id: WS_B }, ctxA) as unknown[];
     expect(rows).toEqual([]);
   });
 
-  it('get_session hides another workspace\'s session', () => {
+  it('get_session hides another workspace\'s session', async () => {
     expect(tool('get_session').run(db, { id: 'sb' }, ctxA)).toBeNull();
     expect(tool('get_session').run(db, { id: 'sa' }, ctxA)).not.toBeNull();
   });
 
-  it('get_cost refuses another workspace\'s session', () => {
+  it('get_cost refuses another workspace\'s session', async () => {
     expect(() => tool('get_cost').run(db, { session_id: 'sb' }, ctxA)).toThrow(/not authorized/i);
     expect(() => tool('get_cost').run(db, { session_id: 'sa' }, ctxA)).not.toThrow();
   });
 
-  it('list_events refuses another workspace\'s session', () => {
+  it('list_events refuses another workspace\'s session', async () => {
     expect(() => tool('list_events').run(db, { session_id: 'sb' }, ctxA)).toThrow(/not authorized/i);
   });
 });
@@ -238,54 +238,54 @@ describe('typed read tools are workspace-scoped (#146)', () => {
 describe('scoped query tool (#174)', () => {
   let fdb: Database.Database;
   let cleanup: () => void;
-  beforeEach(() => {
+  beforeEach(async () => {
     ({ db: fdb, cleanup } = makeFileDb());
   });
-  afterEach(() => {
+  afterEach(async () => {
     fdb.close();
     cleanup();
   });
   const run = (args: Record<string, unknown>) => tool('query').run(fdb, args, ctxA);
 
-  it('returns only the caller\'s rows for a plain select', () => {
+  it('returns only the caller\'s rows for a plain select', async () => {
     const rows = run({ sql: 'SELECT workspace_id FROM sessions' }) as Array<{ workspace_id: string }>;
     expect(rows.every((r) => r.workspace_id === WS_A)).toBe(true);
     expect(rows.length).toBe(1);
   });
 
-  it('cannot reach another workspace via UNION / subquery / where', () => {
+  it('cannot reach another workspace via UNION / subquery / where', async () => {
     const r1 = run({ sql: "SELECT * FROM sessions WHERE workspace_id = '" + WS_B + "'" }) as unknown[];
     expect(r1).toEqual([]);
     const r2 = run({ sql: 'SELECT count(*) AS n FROM events' }) as Array<{ n: number }>;
     expect(r2[0].n).toBe(1); // only A's event is in the snapshot
   });
 
-  it('cannot introspect/escape via sqlite_master', () => {
+  it('cannot introspect/escape via sqlite_master', async () => {
     const names = run({ sql: 'SELECT name FROM sqlite_master ORDER BY name' }) as Array<{ name: string }>;
     expect(names.map((r) => r.name).sort()).toEqual(
       ['broker_sessions', 'events', 'perf_events', 'session_summaries', 'session_tags', 'sessions', 'usage_events']
     );
   });
 
-  it('omits raw_jsonl by default and includes it only with include_raw', () => {
+  it('omits raw_jsonl by default and includes it only with include_raw', async () => {
     expect(() => run({ sql: 'SELECT raw_jsonl FROM events' })).toThrow(); // column not in snapshot
     const rows = run({ sql: 'SELECT raw_jsonl FROM events', include_raw: true }) as Array<{ raw_jsonl: string }>;
     expect(rows[0].raw_jsonl).toBe('{"a":1}'); // A\'s own row only
   });
 
-  it('rejects writes / DDL / multi-statement', () => {
+  it('rejects writes / DDL / multi-statement', async () => {
     expect(() => run({ sql: "INSERT INTO events (session_id) VALUES ('x')" })).toThrow(/read-only/i);
     expect(() => run({ sql: 'DROP TABLE events' })).toThrow(/read-only/i);
     expect(() => run({ sql: 'UPDATE sessions SET ai_title = 1' })).toThrow(/read-only/i);
     expect(() => run({ sql: 'SELECT 1; SELECT 2' })).toThrow();
   });
 
-  it('caps result rows via max_rows', () => {
+  it('caps result rows via max_rows', async () => {
     const rows = run({ sql: 'SELECT 1 AS x FROM sessions, events', max_rows: 1 }) as unknown[];
     expect(rows.length).toBe(1);
   });
 
-  it('supports bound params', () => {
+  it('supports bound params', async () => {
     const rows = run({ sql: 'SELECT id FROM sessions WHERE id = ?', params: ['sa'] }) as Array<{ id: string }>;
     expect(rows).toEqual([{ id: 'sa' }]);
   });
@@ -294,30 +294,30 @@ describe('scoped query tool (#174)', () => {
 describe('query snapshot exposes phase-2 tables, workspace-scoped (#207)', () => {
   let fdb: Database.Database;
   let cleanup: () => void;
-  beforeEach(() => {
+  beforeEach(async () => {
     ({ db: fdb, cleanup } = makeFileDb());
   });
-  afterEach(() => {
+  afterEach(async () => {
     fdb.close();
     cleanup();
   });
   const run = (args: Record<string, unknown>) => tool('query').run(fdb, args, ctxA);
 
-  it('session_tags are readable and scoped', () => {
+  it('session_tags are readable and scoped', async () => {
     fdb.prepare(`INSERT INTO session_tags VALUES (?, 'sa', 'broker')`).run(WS_A);
     fdb.prepare(`INSERT INTO session_tags VALUES (?, 'sb', 'secret-tag')`).run(WS_B);
     const rows = run({ sql: 'SELECT tag FROM session_tags ORDER BY tag' }) as Array<{ tag: string }>;
     expect(rows.map((r) => r.tag)).toEqual(['broker']);
   });
 
-  it('session_summaries are readable and scoped', () => {
+  it('session_summaries are readable and scoped', async () => {
     fdb.prepare(`INSERT INTO session_summaries (session_id, workspace_id, summary, source_max_event_id, generated_at) VALUES (?, ?, ?, ?, ?)`).run('sa', WS_A, 'A summary', 1, 1000);
     fdb.prepare(`INSERT INTO session_summaries (session_id, workspace_id, summary, source_max_event_id, generated_at) VALUES (?, ?, ?, ?, ?)`).run('sb', WS_B, 'B secret summary', 2, 2000);
     const rows = run({ sql: 'SELECT session_id FROM session_summaries ORDER BY session_id' }) as Array<{ session_id: string }>;
     expect(rows.map((r) => r.session_id)).toEqual(['sa']);
   });
 
-  it('usage_events are readable and scoped', () => {
+  it('usage_events are readable and scoped', async () => {
     fdb.prepare(`INSERT INTO usage_events (ts, workspace_id, session_id, kind) VALUES (?, ?, ?, ?)`).run(1000, WS_A, 'sa', 'marked-useful');
     fdb.prepare(`INSERT INTO usage_events (ts, workspace_id, session_id, kind) VALUES (?, ?, ?, ?)`).run(2000, WS_B, 'sb', 'secret-event');
     const rows = run({ sql: 'SELECT kind FROM usage_events ORDER BY kind' }) as Array<{ kind: string }>;
@@ -326,7 +326,7 @@ describe('query snapshot exposes phase-2 tables, workspace-scoped (#207)', () =>
 });
 
 describe('list_events richer projection (#174)', () => {
-  it('includes parsed tool-detail columns by default', () => {
+  it('includes parsed tool-detail columns by default', async () => {
     const rows = tool('list_events').run(db, { session_id: 'sa' }, ctxA) as Array<Record<string, unknown>>;
     const edit = rows.find((r) => r.tool_name === 'Edit')!;
     expect(edit.tool_input).toBe('/workspace/foo.ts');
@@ -334,44 +334,44 @@ describe('list_events richer projection (#174)', () => {
     expect(edit).toHaveProperty('tool_result_is_error');
   });
 
-  it('filters by tool_name', () => {
+  it('filters by tool_name', async () => {
     const rows = tool('list_events').run(db, { session_id: 'sa', tool_name: 'Bash' }, ctxA) as unknown[];
     expect(rows.length).toBe(1);
     expect((rows[0] as { tool_input: string }).tool_input).toBe('npm test');
   });
 
-  it('projects only requested columns', () => {
+  it('projects only requested columns', async () => {
     const rows = tool('list_events').run(
       db, { session_id: 'sa', tool_name: 'Edit', columns: ['tool_name', 'tool_input'] }, ctxA
     ) as Array<Record<string, unknown>>;
     expect(Object.keys(rows[0]).sort()).toEqual(['tool_input', 'tool_name']);
   });
 
-  it('rejects unknown column names', () => {
+  it('rejects unknown column names', async () => {
     expect(() =>
       tool('list_events').run(db, { session_id: 'sa', columns: ['raw_jsonl; DROP TABLE events'] }, ctxA)
     ).toThrow(/unknown column/i);
   });
 
-  it('rejects raw_jsonl in the columns projection', () => {
+  it('rejects raw_jsonl in the columns projection', async () => {
     expect(() => tool('list_events').run(db, { session_id: 'sa', columns: ['raw_jsonl'] }, ctxA)).toThrow(/unknown column/i);
   });
 });
 
 describe('ISO timestamps (#174)', () => {
-  it('list_sessions adds ISO siblings for epoch fields', () => {
+  it('list_sessions adds ISO siblings for epoch fields', async () => {
     const rows = tool('list_sessions').run(db, {}, ctxA) as Array<Record<string, unknown>>;
     expect(rows[0].last_active_at_iso).toBe(new Date(1000).toISOString());
   });
 
-  it('list_events adds ts_iso', () => {
+  it('list_events adds ts_iso', async () => {
     const rows = tool('list_events').run(db, { session_id: 'sa', tool_name: 'Bash' }, ctxA) as Array<Record<string, unknown>>;
     expect(rows[0].ts_iso).toBe(new Date(1100).toISOString());
   });
 });
 
 describe('session_summary (#174)', () => {
-  it('summarizes files, commands, cost and time span for an allowed session', () => {
+  it('summarizes files, commands, cost and time span for an allowed session', async () => {
     const s = tool('session_summary').run(db, { id: 'sa' }, ctxA) as Record<string, unknown>;
     expect(s.session_id).toBe('sa');
     expect(s.filesEdited).toEqual(['/workspace/foo.ts']);
@@ -382,7 +382,7 @@ describe('session_summary (#174)', () => {
     expect(s.inputTokens).toBe(10);
   });
 
-  it('refuses a session outside the allowed set', () => {
+  it('refuses a session outside the allowed set', async () => {
     expect(() => tool('session_summary').run(db, { id: 'sb' }, ctxA)).toThrow(/not authorized/i);
   });
 });
@@ -393,7 +393,7 @@ describe('list_errors', () => {
     callerId: allowed[0], allowedWorkspaces: new Set(allowed)
   });
 
-  it('returns own-workspace errors + global (NULL) rows, never another workspace', () => {
+  it('returns own-workspace errors + global (NULL) rows, never another workspace', async () => {
     const rows = t.run(db, {}, ctx([WS_A])) as Array<Record<string, unknown>>;
     const types = rows.map((r) => r.type);
     expect(types).toContain('mapping-unresolved'); // WS_A
@@ -401,18 +401,18 @@ describe('list_errors', () => {
     expect(types).not.toContain('pty-attach-failed'); // WS_B — must be hidden
   });
 
-  it('includes a ts_iso sibling and orders newest-first', () => {
+  it('includes a ts_iso sibling and orders newest-first', async () => {
     const rows = t.run(db, {}, ctx([WS_A])) as Array<Record<string, unknown>>;
     expect(typeof rows[0].ts_iso).toBe('string');
     expect(rows[0].ts as number).toBeGreaterThanOrEqual(rows[rows.length - 1].ts as number);
   });
 
-  it('filters by level', () => {
+  it('filters by level', async () => {
     const rows = t.run(db, { level: 'warn' }, ctx([WS_A])) as Array<Record<string, unknown>>;
     expect(rows.every((r) => r.level === 'warn')).toBe(true);
   });
 
-  it('workspace_id filter preserves global (NULL) crash rows', () => {
+  it('workspace_id filter preserves global (NULL) crash rows', async () => {
     // An agent narrowing to its own workspace must still see global app crashes.
     const rows = t.run(db, { workspace_id: WS_A }, ctx([WS_A])) as Array<Record<string, unknown>>;
     const types = rows.map((r) => r.type);
@@ -428,14 +428,14 @@ describe('signal_input_wait', () => {
 
   afterEach(() => setInputWaitHandler(() => {}));
 
-  it('forwards (callerId, sessionId, waiting) to the injected handler', () => {
+  it('forwards (callerId, sessionId, waiting) to the injected handler', async () => {
     const calls: Array<[string, string, boolean]> = [];
     setInputWaitHandler((c, s, w) => calls.push([c, s, w]));
     tool().run({} as never, { sessionId: 'sess-1', waiting: true }, ctx);
     expect(calls).toEqual([['ws-A', 'sess-1', true]]);
   });
 
-  it('rejects bad args', () => {
+  it('rejects bad args', async () => {
     setInputWaitHandler(() => {});
     expect(() => tool().run({} as never, { sessionId: 'x' }, ctx)).toThrow(/required/);
   });
@@ -443,34 +443,34 @@ describe('signal_input_wait', () => {
 
 describe('report_session_mapping (#207)', () => {
   afterEach(() => setSessionMappingHandler(() => {}));
-  it('forwards (callerId, brokerSessionId, sessionId) to the injected handler', () => {
+  it('forwards (callerId, brokerSessionId, sessionId) to the injected handler', async () => {
     const calls: Array<[string, string, string]> = [];
-    setSessionMappingHandler((c, b, s) => calls.push([c, b, s]));
-    tool('report_session_mapping').run({} as never, { brokerSessionId: 'tab-1', sessionId: 'uuid-9' }, ctxA);
+    setSessionMappingHandler((c, b, s) => { calls.push([c, b, s]); });
+    await tool('report_session_mapping').run({} as never, { brokerSessionId: 'tab-1', sessionId: 'uuid-9' }, ctxA);
     expect(calls).toEqual([[WS_A, 'tab-1', 'uuid-9']]);
   });
-  it('rejects bad args', () => {
+  it('rejects bad args', async () => {
     setSessionMappingHandler(() => {});
-    expect(() => tool('report_session_mapping').run({} as never, { brokerSessionId: 'x' }, ctxA)).toThrow(/required/);
+    await expect(tool('report_session_mapping').run({} as never, { brokerSessionId: 'x' }, ctxA)).rejects.toThrow(/required/);
   });
 });
 
 describe('report_summary_status (#230)', () => {
   afterEach(() => setSummaryStatusHandler(() => {}));
-  it('forwards (callerId, sessionId, phase, detail) to the injected handler', () => {
+  it('forwards (callerId, sessionId, phase, detail) to the injected handler', async () => {
     const calls: Array<[string, string, string, Record<string, unknown>]> = [];
     setSummaryStatusHandler((c, s, p, d) => calls.push([c, s, p, d]));
     tool('report_summary_status').run({} as never, { sessionId: 'uuid-9', phase: 'rejected', detail: { rawLen: 12 } }, ctxA);
     expect(calls).toEqual([[WS_A, 'uuid-9', 'rejected', { rawLen: 12 }]]);
   });
-  it('defaults detail to {} and tolerates a non-object detail', () => {
+  it('defaults detail to {} and tolerates a non-object detail', async () => {
     const calls: Array<Record<string, unknown>> = [];
     setSummaryStatusHandler((_c, _s, _p, d) => calls.push(d));
     tool('report_summary_status').run({} as never, { sessionId: 'uuid-9', phase: 'attempt' }, ctxA);
     tool('report_summary_status').run({} as never, { sessionId: 'uuid-9', phase: 'attempt', detail: 'nope' }, ctxA);
     expect(calls).toEqual([{}, {}]);
   });
-  it('rejects bad args', () => {
+  it('rejects bad args', async () => {
     setSummaryStatusHandler(() => {});
     expect(() => tool('report_summary_status').run({} as never, { sessionId: 'x' }, ctxA)).toThrow(/required/);
   });
@@ -495,18 +495,18 @@ describe('search_transcripts is workspace-scoped (#146)', () => {
 });
 
 describe('mark_useful + get_config (#207)', () => {
-  afterEach(() => { setUsageRecorder(() => {}); setConfigResolver(() => ({})); });
+  afterEach(async () => { setUsageRecorder(() => {}); setConfigResolver(() => ({})); });
 
-  it('mark_useful records a marked-useful usage event for an allowed session', () => {
+  it('mark_useful records a marked-useful usage event for an allowed session', async () => {
     const events: unknown[] = [];
-    setUsageRecorder((e) => events.push(e));
-    tool('mark_useful').run(db, { sessionId: 'sa', note: 'led me to the fix' }, ctxA);
+    setUsageRecorder((e) => { events.push(e); });
+    await tool('mark_useful').run(db, { sessionId: 'sa', note: 'led me to the fix' }, ctxA);
     expect(events).toEqual([{ workspaceId: WS_A, sessionId: 'sa', kind: 'marked-useful', detail: { note: 'led me to the fix' } }]);
   });
 
-  it("mark_useful refuses a session outside the caller's allowed set", () => {
+  it("mark_useful refuses a session outside the caller's allowed set", async () => {
     setUsageRecorder(() => { throw new Error('must not be called'); });
-    expect(() => tool('mark_useful').run(db, { sessionId: 'sb' }, ctxA)).toThrow(/not found/);
+    await expect(tool('mark_useful').run(db, { sessionId: 'sb' }, ctxA)).rejects.toThrow(/not found/);
   });
 
   it('get_config returns the resolver output for the caller', async () => {
@@ -531,11 +531,11 @@ describe('callTool diagnostics', () => {
   let rows: ErrorRow[] = [];
   let harness: { db: Database.Database; cleanup: () => void } | null = null;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     rows = [];
     setErrorSink((r) => rows.push(r));
   });
-  afterEach(() => {
+  afterEach(async () => {
     setErrorSink(null);
     _setDbForTests(null);
     setReadScopeResolver(async (id) => [id]);
@@ -610,7 +610,7 @@ describe('implicit usage telemetry (#207)', () => {
 
   it('search_transcripts records one impression per distinct result session, carrying the query', async () => {
     const events: Array<Record<string, unknown>> = [];
-    setUsageRecorder((e) => events.push(e as Record<string, unknown>));
+    setUsageRecorder((e) => { events.push(e as Record<string, unknown>); });
     setQueryEmbedder(async (texts) => texts.map(() => { const v = new Float32Array(EMBED_DIM); v[0] = 1; return v; }));
     // seed one embedding row for WS_A (reuse the insert helper pattern from the scoping describe)
     seedEmbedding(db, WS_A, 'sa');
@@ -623,7 +623,7 @@ describe('implicit usage telemetry (#207)', () => {
 
   it('a read of a recently-searched session records a clickthrough', async () => {
     const events: Array<Record<string, unknown>> = [];
-    setUsageRecorder((e) => events.push(e as Record<string, unknown>));
+    setUsageRecorder((e) => { events.push(e as Record<string, unknown>); });
     setQueryEmbedder(async (texts) => texts.map(() => { const v = new Float32Array(EMBED_DIM); v[0] = 1; return v; }));
     seedEmbedding(db, WS_A, 'sa');
     await tool('search_transcripts').run(db, { query: 'x' }, ctxA);
@@ -631,9 +631,9 @@ describe('implicit usage telemetry (#207)', () => {
     expect(events.some((e) => e.kind === 'clickthrough' && e.sessionId === 'sa')).toBe(true);
   });
 
-  it('a read WITHOUT a recent search records no clickthrough', () => {
+  it('a read WITHOUT a recent search records no clickthrough', async () => {
     const events: Array<Record<string, unknown>> = [];
-    setUsageRecorder((e) => events.push(e as Record<string, unknown>));
+    setUsageRecorder((e) => { events.push(e as Record<string, unknown>); });
     tool('get_session').run(db, { id: 'sa' }, ctxA);
     expect(events.filter((e) => e.kind === 'clickthrough')).toHaveLength(0);
   });
@@ -648,7 +648,7 @@ const PERF_ON: EffectivePerfConfig = {
 };
 
 describe('perf tools', () => {
-  it('perf_status and perf_set are registered with the pinned schemas', () => {
+  it('perf_status and perf_set are registered with the pinned schemas', async () => {
     const status = TOOLS.find((t) => t.name === 'perf_status');
     const set = TOOLS.find((t) => t.name === 'perf_set');
     expect(status).toBeDefined();
@@ -690,15 +690,15 @@ describe('perf tools', () => {
 
   describe('perf_status with live runtime', () => {
     let perfDir: string;
-    beforeEach(() => {
+    beforeEach(async () => {
       perfDir = mkdtempSync(join(tmpdir(), 'mcp-perf-'));
-      const perfDb = openDb(perfDir);
-      const store = new PerfStore(perfDb);
+      openDb(perfDir);
+      const store = new PerfStore(stateKysely());
       initPerf(store, PERF_ON);
     });
     afterEach(async () => {
       await shutdownPerf();
-      closeDb();
+      await closeDb();
       rmSync(perfDir, { recursive: true, force: true });
     });
 
@@ -715,15 +715,15 @@ describe('perf tools', () => {
   describe('perf_events in query snapshot', () => {
     let fdb: Database.Database;
     let cleanup: () => void;
-    beforeEach(() => {
+    beforeEach(async () => {
       ({ db: fdb, cleanup } = makeFileDb());
     });
-    afterEach(() => {
+    afterEach(async () => {
       fdb.close();
       cleanup();
     });
 
-    it('scopes perf_events to allowed workspaces + app-global rows', () => {
+    it('scopes perf_events to allowed workspaces + app-global rows', async () => {
       fdb.prepare(`INSERT INTO perf_events (ts, kind, workspace_id, name, dur_ms) VALUES (1, 'pty_window', ?, 'claude_fleet.pty.bytes', NULL)`).run(WS_A);
       fdb.prepare(`INSERT INTO perf_events (ts, kind, workspace_id, name, dur_ms) VALUES (2, 'pty_window', ?, 'claude_fleet.pty.bytes', NULL)`).run(WS_B);
       fdb.prepare(`INSERT INTO perf_events (ts, kind, dur_ms) VALUES (3, 'stall', 80)`).run();
@@ -737,20 +737,20 @@ describe('perf tools', () => {
 
   describe('perf_sentinel_set', () => {
     let perfDir: string;
-    beforeEach(() => {
+    beforeEach(async () => {
       perfDir = mkdtempSync(join(tmpdir(), 'mcp-sentinel-'));
-      const perfDb = openDb(perfDir);
-      const store = new PerfStore(perfDb);
+      openDb(perfDir);
+      const store = new PerfStore(stateKysely());
       initPerf(store, PERF_ON);
     });
     afterEach(async () => {
       disarmSentinel();
       await shutdownPerf();
-      closeDb();
+      await closeDb();
       rmSync(perfDir, { recursive: true, force: true });
     });
 
-    it('perf_sentinel_set is registered with the pinned schema', () => {
+    it('perf_sentinel_set is registered with the pinned schema', async () => {
       const t = TOOLS.find((x) => x.name === 'perf_sentinel_set')!;
       expect(t).toBeDefined();
       expect(t.inputSchema).toEqual({
@@ -783,11 +783,11 @@ describe('perf tools', () => {
       };
       // Shut down the perf-on runtime and restart with recording disabled
       await shutdownPerf();
-      closeDb();
+      await closeDb();
       rmSync(perfDir, { recursive: true, force: true });
       perfDir = mkdtempSync(join(tmpdir(), 'mcp-sentinel-off-'));
-      const perfDb = openDb(perfDir);
-      const store = new PerfStore(perfDb);
+      openDb(perfDir);
+      const store = new PerfStore(stateKysely());
       initPerf(store, PERF_OFF);
 
       const t = TOOLS.find((x) => x.name === 'perf_sentinel_set')!;
@@ -805,7 +805,7 @@ describe('inbox tools (#407)', () => {
   const tool = (name: string) => TOOLS.find((t) => t.name === name)!;
   afterEach(() => setInboxHandlers(null));
 
-  it('exposes post_todo / update_todo / list_todos', () => {
+  it('exposes post_todo / update_todo / list_todos', async () => {
     expect(TOOLS.map((t) => t.name)).toEqual(expect.arrayContaining(['post_todo', 'update_todo', 'list_todos', 'notify', 'list_automations', 'run_automation', 'propose_automation', 'propose_automation_change', 'get_proposal', 'get_automation', 'list_runs']));
     expect((tool('post_todo').inputSchema as { required: string[] }).required).toEqual(['title']);
     expect((tool('update_todo').inputSchema as { required: string[] }).required).toEqual(['id']);
@@ -827,7 +827,7 @@ describe('inbox tools (#407)', () => {
     expect(calls.map(([k, c]) => [k, c])).toEqual([['post', WS_A], ['update', WS_A], ['list', WS_A], ['notify', WS_A]]);
   });
 
-  it('fails clearly when the inbox is not wired', () => {
+  it('fails clearly when the inbox is not wired', async () => {
     expect(() => tool('list_todos').run(null as never, {}, ctx)).toThrow(/inbox is unavailable/);
   });
 
@@ -957,5 +957,35 @@ describe('search-hit capture hook (#483 §5)', () => {
     setClaimHandlers({ record: async () => ({}), retract: async () => ({}), search: async () => ({ results: [] }) });
     await tool('search_claims').run(makeDb(), { query: 'q' }, ctxA);
     expect(seen).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Postgres store: the server starts without the state.db connection
+// ---------------------------------------------------------------------------
+
+import { startMcpServer, stopMcpServer } from './mcpServer.js';
+
+describe('startMcpServer({ stateDb: false })', () => {
+  afterEach(() => stopMcpServer());
+
+  it('history tools return an unavailable error; tools that do not read state.db still run', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cf-mcp-pg-'));
+    try {
+      startMcpServer(dir, { stateDb: false });
+      const hist = (await callTool({ name: 'list_sessions', arguments: {} }, WS_A)) as { isError?: boolean; content: Array<{ text: string }> };
+      expect(hist.isError).toBe(true);
+      expect(hist.content[0].text).toBe('Error: list_sessions is unavailable on the Postgres store');
+      for (const name of ['get_session', 'get_cost', 'list_events', 'search_transcripts', 'session_summary', 'list_errors', 'query', 'mark_useful']) {
+        const r = (await callTool({ name, arguments: {} }, WS_A)) as { isError?: boolean; content: Array<{ text: string }> };
+        expect(r.content[0].text).toBe(`Error: ${name} is unavailable on the Postgres store`);
+      }
+      setConfigResolver(() => ({ probe: true }));
+      const cfg = (await callTool({ name: 'get_config', arguments: {} }, WS_A)) as { isError?: boolean; content: Array<{ text: string }> };
+      expect(cfg.isError).toBeUndefined();
+      expect(JSON.parse(cfg.content[0].text)).toEqual({ probe: true });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

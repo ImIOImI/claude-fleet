@@ -19,7 +19,10 @@ function toRecord(r: ClaimRow): ClaimRecord {
 }
 
 export class ClaimStore {
-  constructor(private readonly db: Kysely<InboxDb>) {}
+  /** `dialect`: InboxStore.dialect. Only full-text search differs — SQLite's
+   *  claims_fts is an FTS5 table, Postgres's a plain side table searched with
+   *  to_tsvector (inbox Postgres step 6, store/migrations/inboxPg.ts). */
+  constructor(private readonly db: Kysely<InboxDb>, private readonly dialect: 'sqlite' | 'postgres' = 'sqlite') {}
 
   /** Insert a claim with its FTS row, vector and first source. With
    *  `supersedes`, the target is marked superseded in the SAME transaction —
@@ -79,12 +82,31 @@ export class ClaimStore {
   }
 
   async ftsIds(callerId: string, match: string, limit: number, includeInactive: boolean): Promise<string[]> {
+    if (this.dialect === 'postgres') return this.ftsIdsPostgres(callerId, match, limit, includeInactive);
     const rows = await sql<{ id: string }>`
       SELECT c.id AS id FROM claims_fts f JOIN claims c ON c.id = f.claim_id
       WHERE claims_fts MATCH ${match}
         AND (c.visibility = 'fleet' OR c.workspace_id = ${callerId})
         AND (${includeInactive ? 1 : 0} = 1 OR c.status = 'current')
       ORDER BY bm25(claims_fts) LIMIT ${limit}`.execute(this.db);
+    return rows.rows.map((r) => r.id);
+  }
+
+  /** Postgres twin of the FTS5 query: `match` is claimRank.ftsQuery's
+   *  `"tok" OR "tok"` form; each quoted token becomes its own plainto_tsquery
+   *  (bound, so no operator injection), ORed, ranked by ts_rank. */
+  private async ftsIdsPostgres(callerId: string, match: string, limit: number, includeInactive: boolean): Promise<string[]> {
+    const toks = [...match.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+    if (toks.length === 0) return [];
+    const q = sql.join(toks.map((t) => sql`plainto_tsquery('simple', ${t})`), sql` || `);
+    const rows = await sql<{ id: string }>`
+      SELECT c.id AS id FROM (
+        SELECT claim_id, to_tsvector('simple', coalesce(text, '') || ' ' || coalesce(topics, '')) AS doc FROM claims_fts
+      ) f JOIN claims c ON c.id = f.claim_id, (SELECT ${q} AS q) tq
+      WHERE f.doc @@ tq.q
+        AND (c.visibility = 'fleet' OR c.workspace_id = ${callerId})
+        AND (${includeInactive ? 1 : 0} = 1 OR c.status = 'current')
+      ORDER BY ts_rank(f.doc, tq.q) DESC, c.id LIMIT ${limit}`.execute(this.db);
     return rows.rows.map((r) => r.id);
   }
 

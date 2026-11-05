@@ -131,6 +131,9 @@ export async function resolveCaptureTarget(ws: string, deps: TargetDeps = DEFAUL
     if (!(await deps.containerRunning(ws).catch(() => false))) return null;
     return { kind: 'container', workspaceId: ws, cwd: `/workspace/${m.workspaceSubdir}`.replace(/\/$/, '') || '/workspace' };
   }
+  // A remote bookmark's sessions run on its fleet-host: the desktop has no
+  // exec path into them (and never ingests their transcripts), so no capture.
+  if (m.kind !== 'local') return null;
   return { kind: 'local', workspaceId: ws, launcher: m.launcher ?? { mode: 'native' }, workspaceRoot: m.workspaceRoot };
 }
 

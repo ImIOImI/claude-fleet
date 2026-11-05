@@ -22,6 +22,8 @@ export function isDaemonConnectError(err: unknown): boolean {
 export interface MergeOptions {
   dockerResult: PromiseSettledResult<Workspace[]>;
   localLive: Workspace[];
+  /** One row per remote bookmark, running or unreachable (remote.ts). */
+  remoteLive?: Workspace[];
   manifests: WorkspaceSpec[];
   /** Mutated in place: repopulated from merged container states on docker
    *  success; read for synthesis on daemon-connect failure. */
@@ -32,13 +34,14 @@ export interface MergeOptions {
 
 export async function mergeWorkspaces(opts: MergeOptions): Promise<Workspace[]> {
   const { dockerResult, localLive, manifests, lastKnown, privateDir, factoryMirror } = opts;
+  const remoteLive = opts.remoteLive ?? [];
   const dockerDown = dockerResult.status === 'rejected';
   if (dockerDown && !isDaemonConnectError(dockerResult.reason)) throw dockerResult.reason;
   const dockerLive = dockerResult.status === 'fulfilled' ? dockerResult.value : [];
 
   // ── manifest overlay: identical merge logic to ipc.ts ──────────────────────
   const liveById = new Map<string, Workspace>();
-  for (const w of [...dockerLive, ...localLive]) if (!liveById.has(w.id)) liveById.set(w.id, w);
+  for (const w of [...dockerLive, ...localLive, ...remoteLive]) if (!liveById.has(w.id)) liveById.set(w.id, w);
   const manifestById = new Map(manifests.map((m) => [m.id, m]));
   const result: Workspace[] = [];
 
@@ -57,7 +60,8 @@ export async function mergeWorkspaces(opts: MergeOptions): Promise<Workspace[]> 
       // container created before the fleet-root migration still carries the old
       // path). Local: the user picked an existing host dir, so honor the
       // manifest's workspaceRoot (#16).
-      workspaceRoot: w.kind === 'local' ? m?.workspaceRoot ?? w.workspaceRoot : await privateDir(w.id),
+      workspaceRoot:
+        w.kind === 'remote' ? '' : w.kind === 'local' ? m?.workspaceRoot ?? w.workspaceRoot : await privateDir(w.id),
       workspaceSubdir: w.workspaceSubdir || m?.workspaceSubdir || '',
       authMode: m?.authMode ?? w.authMode,
       endpointId: m?.endpointId,
@@ -70,6 +74,7 @@ export async function mergeWorkspaces(opts: MergeOptions): Promise<Workspace[]> 
       inbox: m?.inbox,
       role: m?.role,
       knowledgeCapture: m?.knowledgeCapture,
+      remote: w.kind === 'remote' ? m?.remote ?? w.remote : undefined,
       // Manifest-only (#268). This projection is field-by-field, so an omitted
       // field is dropped for every LIVE workspace while the deleted branch
       // (`...m`) keeps it — the form would then show "Default" for a workspace
@@ -82,6 +87,7 @@ export async function mergeWorkspaces(opts: MergeOptions): Promise<Workspace[]> 
   }
 
   for (const m of manifestById.values()) {
+    if (m.kind === 'remote') continue;
     const root = m.kind === 'local' ? m.workspaceRoot : await privateDir(m.id);
     if (dockerDown && m.kind !== 'local') {
       // Degraded synthesis (#380). Honest-state rule: a last-known 'deleted'
@@ -105,7 +111,7 @@ export async function mergeWorkspaces(opts: MergeOptions): Promise<Workspace[]> 
   // down-merge must not overwrite the states it needs for synthesis.
   if (!dockerDown) {
     lastKnown.clear();
-    for (const w of result) if (w.kind !== 'local') lastKnown.set(w.id, w.state);
+    for (const w of result) if (w.kind === 'container') lastKnown.set(w.id, w.state);
   }
   return result;
 }

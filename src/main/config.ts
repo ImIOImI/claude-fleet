@@ -11,6 +11,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { assertValidWorkspaceId } from './paths.js';
 import { toggleFavorite } from './ociCore.js';
 import { clampDailyCap } from '../preload/captureSettings.js';
+import { ConfigJsonError, parseStoreConfig, type StoreConfig } from './store/storeConfig.js';
 
 /** Which plan the usage bar measures spend against. `custom` uses the
  *  user-entered token amount; the rest resolve to USAGE_BUDGET_PRESETS. */
@@ -115,6 +116,9 @@ interface AppConfig {
   /** Knowledge capture (#483 §5a): app-wide cap on capture runs started per
    *  local calendar day. Absent ⇒ 40; clamped to 0–500; 0 ⇒ no captures. */
   knowledgeCaptureDailyCap?: number;
+  /** Hand-edited only: the store choice, kept verbatim and validated by
+   *  getStoreConfig (store/storeConfig.ts). Absent ⇒ SQLite. */
+  store?: unknown;
 }
 
 /** Defensively parse the persisted usageBudget (untrusted JSON on disk). */
@@ -178,9 +182,13 @@ export function defaultFleetRoot(): string {
 }
 
 let cached: AppConfig | null = null;
+/** config.json exists but could not be read or parsed: defaults are served,
+ *  and write() refuses to replace the file (it may hold a `store` choice). */
+let unreadable = false;
 
 async function read(): Promise<AppConfig> {
   if (cached) return cached;
+  unreadable = false;
   try {
     const raw = await readFile(configPath(), 'utf8');
     const parsed = JSON.parse(raw) as AppConfig;
@@ -220,15 +228,19 @@ async function read(): Promise<AppConfig> {
       identity: parseIdentityConfig(parsed.identity),
       knowledgeCapture: typeof parsed.knowledgeCapture === 'boolean' ? parsed.knowledgeCapture : undefined,
       knowledgeCaptureDailyCap:
-        typeof parsed.knowledgeCaptureDailyCap === 'number' ? clampDailyCap(parsed.knowledgeCaptureDailyCap) : undefined
+        typeof parsed.knowledgeCaptureDailyCap === 'number' ? clampDailyCap(parsed.knowledgeCaptureDailyCap) : undefined,
+      store: parsed.store
     };
-  } catch {
+  } catch (e) {
+    unreadable = (e as NodeJS.ErrnoException).code !== 'ENOENT';
     cached = {};
   }
   return cached;
 }
 
 async function write(next: AppConfig): Promise<void> {
+  await read();
+  if (unreadable) throw new Error(`${configPath()} is not valid JSON; fix or remove it before changing settings`);
   cached = next;
   await writeFile(configPath(), JSON.stringify(next, null, 2) + '\n', 'utf8');
 }
@@ -366,6 +378,21 @@ export async function getKeepRunningInTray(): Promise<boolean> {
 export async function setKeepRunningInTray(enabled: boolean): Promise<void> {
   const cfg = await read();
   await write({ ...cfg, keepRunningInTray: enabled });
+}
+
+/** config.json's path when it exists but can't be read or parsed (settings
+ *  then run on defaults and can't be saved), else null. */
+export async function configUnreadablePath(): Promise<string | null> {
+  await read();
+  return unreadable ? configPath() : null;
+}
+
+/** The validated store choice. Throws StoreConfigError on an invalid `store`
+ *  rather than falling back to SQLite, which would split the data. */
+export async function getStoreConfig(): Promise<StoreConfig> {
+  const cfg = await read();
+  if (unreadable) throw new ConfigJsonError('config.json is not valid JSON');
+  return parseStoreConfig(cfg.store, { allowStaticSecrets: false });
 }
 
 /** config.json identity.github.clientId, or null. Validation and precedence: identity/clientId.ts. */

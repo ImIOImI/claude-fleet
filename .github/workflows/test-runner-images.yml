@@ -5,6 +5,39 @@ on:
     paths:
       - 'docker/**'
       - 'broker/**'
+      - 'src/host/**'
+      - 'src/main/identity/**'
+      - 'src/main/broker.ts'
+      - 'src/main/claudeArgs.ts'
+      - 'src/main/vaultScopes.ts'
+      - 'src/preload/identityTypes.ts'
+      - 'src/main/store/kysely.ts'
+      - 'src/main/store/postgres.ts'
+      - 'src/main/store/pgMigrate.ts'
+      - 'src/main/store/storeConfig.ts'
+      - 'src/main/store/passwordProvider.ts'
+      - 'src/main/store/pgSsl.ts'
+      - 'src/main/store/pgStores.ts'
+      - 'src/main/store/stateSchema.ts'
+      - 'src/main/store/inboxSchema.ts'
+      - 'src/main/store/migrations/**'
+      - 'src/main/db.ts'
+      - 'src/main/asyncCache.ts'
+      - 'src/main/contextWindow.ts'
+      - 'src/main/pricing.ts'
+      - 'src/main/usageAnchors.ts'
+      - 'src/main/userPromptText.ts'
+      - 'src/main/vectors.ts'
+      - 'src/main/state/ingestParse.ts'
+      - 'src/main/state/serialQueue.ts'
+      - 'src/main/state/transcriptPaths.ts'
+      - 'src/main/inbox/inboxDb.ts'
+      - 'src/main/inbox/inboxCore.ts'
+      - 'src/preload/inboxTypes.ts'
+      - 'src/preload/captureSettings.ts'
+      - 'package-lock.json'
+      - 'tsconfig.host.json'
+      - 'vite.host.config.ts'
       - '.github/workflows/test-runner-images.yml'
 
 permissions:
@@ -86,3 +119,21 @@ jobs:
 
       - name: Smoke dev image
         run: bash docker/dev/smoke.test.sh claude-fleet/runner-dev:test
+
+      - name: Build host (amd64) FROM local base
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/host/Dockerfile
+          platforms: linux/amd64
+          load: true
+          build-args: |
+            BASE_IMAGE=${{ env.BASE_REF }}
+          tags: claude-fleet/runner-host:test
+          cache-from: type=gha,scope=host-amd64
+
+      - name: Test fleet-host-entry
+        run: bash docker/host/fleet-host-entry.test.sh
+
+      - name: Smoke host image
+        run: bash docker/host/smoke.test.sh claude-fleet/runner-host:test

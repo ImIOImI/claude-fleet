@@ -4,25 +4,16 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { InboxStore, INBOX_SCHEMA_VERSION, MIGRATIONS } from './inboxDb.js';
+import { openTestInbox, countQueries, isPg } from '../store/testStore.js';
 
 const WS = { kind: 'workspace', id: 'W1' } as const;
 const USER = { kind: 'user', id: null } as const;
 let store: InboxStore;
 afterEach(async () => await store?.close());
 
-/** Counts `better-sqlite3` statements prepared on a store's raw connection — one per Kysely query
- *  (see store/kysely.ts) — to assert a call makes a constant number of round trips, not N+1. */
-function countQueries(s: InboxStore): { count(): number } {
-  const raw = (s as unknown as { raw: Database.Database }).raw;
-  let n = 0;
-  const orig = raw.prepare.bind(raw);
-  raw.prepare = ((sql: string) => { n++; return orig(sql); }) as typeof raw.prepare;
-  return { count: () => n };
-}
-
 describe('InboxStore.post', () => {
   it('creates a todo with defaults and a created event', async () => {
-    store = InboxStore.memory();
+    store = (await openTestInbox());
     const { todo, action } = await store.post(WS, { title: 'Disk full', tags: ['ops'] }, 1000);
     expect(action).toBe('created');
     expect(todo).toMatchObject({
@@ -34,7 +25,7 @@ describe('InboxStore.post', () => {
   });
 
   it('dedupes by key per source: bumps seen, keeps max priority, unions tags, replaces body', async () => {
-    store = InboxStore.memory();
+    store = (await openTestInbox());
     const a = await store.post(WS, { title: '5xx', key: 'k', priority: 'urgent', tags: ['ops'], body: 'one' }, 1000);
     const b = await store.post(WS, { title: '5xx again', key: 'k', priority: 'low', tags: ['prod'], body: 'two' }, 2000);
     expect(b.action).toBe('updated');
@@ -45,7 +36,7 @@ describe('InboxStore.post', () => {
   });
 
   it('the same key from a different source is a different todo', async () => {
-    store = InboxStore.memory();
+    store = (await openTestInbox());
     const a = await store.post(WS, { title: 'x', key: 'k' });
     const b = await store.post({ kind: 'workspace', id: 'W2' }, { title: 'x', key: 'k' });
     expect(b.action).toBe('created');
@@ -53,7 +44,7 @@ describe('InboxStore.post', () => {
   });
 
   it('reopens a done or dismissed todo when its key recurs', async () => {
-    store = InboxStore.memory();
+    store = (await openTestInbox());
     const { todo } = await store.post(WS, { title: 'x', key: 'k' }, 1000);
     await store.update(USER, todo.id, { status: 'done' }, 1500);
     const r = await store.post(WS, { title: 'x', key: 'k' }, 2000);
@@ -65,7 +56,7 @@ describe('InboxStore.post', () => {
   });
 
   it('posts without a key never dedupe', async () => {
-    store = InboxStore.memory();
+    store = (await openTestInbox());
     await store.post(WS, { title: 'x' });
     await store.post(WS, { title: 'x' });
     expect(await store.list()).toHaveLength(2);
@@ -74,7 +65,7 @@ describe('InboxStore.post', () => {
 
 describe('InboxStore.post concurrency', () => {
   it('two concurrent posts with the same key make one todo (created + updated)', async () => {
-    store = InboxStore.memory();
+    store = (await openTestInbox());
     const [a, b] = await Promise.all([
       store.post(WS, { title: 'x', key: 'k' }, 1000),
       store.post(WS, { title: 'x', key: 'k' }, 1001)
@@ -87,7 +78,7 @@ describe('InboxStore.post concurrency', () => {
 
 describe('InboxStore.update', () => {
   it('applies status, priority, title, tags and body append with events', async () => {
-    store = InboxStore.memory();
+    store = (await openTestInbox());
     const { todo } = await store.post(WS, { title: 'x', tags: ['a'], body: 'hello' }, 1000);
     const u = await store.update(USER, todo.id, {
       status: 'done', priority: 'high', title: 'y', tagsAdd: ['B'], tagsRemove: ['a'], bodyAppend: 'more'
@@ -99,14 +90,14 @@ describe('InboxStore.update', () => {
     expect((await store.update(USER, todo.id, { status: 'open' }, 3000)).closedAt).toBeNull();
   });
   it('throws for an unknown id', async () => {
-    store = InboxStore.memory();
+    store = (await openTestInbox());
     await expect(store.update(USER, 'nope', { status: 'done' })).rejects.toThrow(/not found/);
   });
 });
 
 describe('InboxStore.list / counts', () => {
   it('filters by status, tags and visibility; orders by priority then recency', async () => {
-    store = InboxStore.memory();
+    store = (await openTestInbox());
     await store.post(WS, { title: 'low', priority: 'low', tags: ['ops'] }, 1);
     await store.post(WS, { title: 'urgent', priority: 'urgent' }, 2);
     await store.post({ kind: 'workspace', id: 'W2' }, { title: 'other', workspaceLink: 'W1' }, 3);
@@ -125,7 +116,7 @@ describe('InboxStore.list / counts', () => {
 
 describe('InboxStore.list batches tags (#456)', () => {
   it('returns identical tags/ordering to per-todo fetches, in a constant number of queries', async () => {
-    store = InboxStore.memory();
+    store = (await openTestInbox());
     // Seed enough todos, with varied tag counts (including none), that an N+1 loop would show up
     // as a growing query count against a flat batched one.
     const titles = Array.from({ length: 40 }, (_, i) => `todo-${i}`);
@@ -151,7 +142,7 @@ describe('InboxStore.list batches tags (#456)', () => {
   });
 });
 
-describe('InboxStore.open', () => {
+describe.skipIf(isPg)('InboxStore.open', () => {
   it('creates inbox.db with WAL and the schema version', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'inbox-'));
     store = InboxStore.open(dir);
@@ -165,7 +156,7 @@ describe('InboxStore.open', () => {
     expect(raw.pragma('journal_mode', { simple: true })).toBe('wal');
     raw.close();
   });
-  it('v6 creates the claims tables and an FTS5 index', () => {
+  it('v6 creates the claims tables and an FTS5 index', async () => {
     store = InboxStore.memory();
     const raw = (store as unknown as { raw: import('better-sqlite3').Database }).raw;
     const names = (raw.prepare(`SELECT name FROM sqlite_master WHERE type IN ('table') ORDER BY name`).all() as { name: string }[]).map((r) => r.name);
@@ -173,9 +164,9 @@ describe('InboxStore.open', () => {
     raw.prepare(`INSERT INTO claims_fts (claim_id, text, topics) VALUES ('c1', 'query snapshot froze the app', 'mcp-query')`).run();
     const hit = raw.prepare(`SELECT claim_id FROM claims_fts WHERE claims_fts MATCH '"snapshot"'`).get() as { claim_id: string };
     expect(hit.claim_id).toBe('c1');
-    store.close();
+    await store.close();
   });
-  it('v7 adds capture_settings_log, proposals.payload and capture_runs.user_turns', () => {
+  it('v7 adds capture_settings_log, proposals.payload and capture_runs.user_turns', async () => {
     store = InboxStore.memory();
     const raw = (store as unknown as { raw: import('better-sqlite3').Database }).raw;
     const cols = (t: string) => (raw.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
@@ -187,9 +178,9 @@ describe('InboxStore.open', () => {
     expect(() => ins('capture-settings')).not.toThrow();
     expect(() => ins('bogus')).toThrow(/CHECK constraint/);
     expect(raw.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'proposals_status'`).get()).toBeTruthy();
-    store.close();
+    await store.close();
   });
-  it('v6 → v7 rebuilds proposals without losing a row, and adds the new v7 objects', () => {
+  it('v6 → v7 rebuilds proposals without losing a row, and adds the new v7 objects', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'inbox-v6v7-'));
     const file = path.join(dir, 'inbox.db');
     const raw = new Database(file);
@@ -246,7 +237,7 @@ describe('InboxStore.open', () => {
     expect(readdirSync(dir).some((f) => /^inbox\.db\.bak-v6-\d+$/.test(f))).toBe(true);
   });
 
-  it('backs up an existing older database before migrating', () => {
+  it('backs up an existing older database before migrating', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'inbox-'));
     const old = new Database(path.join(dir, 'inbox.db'));
     old.exec('CREATE TABLE legacy (x)');
@@ -254,7 +245,7 @@ describe('InboxStore.open', () => {
     store = InboxStore.open(dir);
     expect(readdirSync(dir).some((f) => /^inbox\.db\.bak-v0-\d+$/.test(f))).toBe(true);
   });
-  it('does not back up a brand-new database', () => {
+  it('does not back up a brand-new database', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'inbox-'));
     store = InboxStore.open(dir);
     expect(readdirSync(dir).some((f) => f.includes('.bak-'))).toBe(false);
@@ -264,19 +255,19 @@ describe('InboxStore.open', () => {
 
 describe('InboxStore.kysely', () => {
   it('exposes a Kysely handle over the same connection, and close() closes it', async () => {
-    store = InboxStore.memory();
+    store = (await openTestInbox());
     const { todo } = await store.post(WS, { title: 'via raw' }, 1000);
     const rows = await store.kysely.selectFrom('todos').select(['id', 'title']).execute();
     expect(rows).toEqual([{ id: todo.id, title: 'via raw' }]);
     await store.close();
     await expect(store.kysely.selectFrom('todos').selectAll().execute()).rejects.toThrow();
-    store = InboxStore.memory(); // afterEach closes a live store
+    store = (await openTestInbox()); // afterEach closes a live store
   });
 });
 
 describe('InboxStore chunked tag fetching', () => {
   it('correctly merges tags across the 500-item chunk boundary', async () => {
-    store = InboxStore.memory();
+    store = (await openTestInbox());
     // Seed 501 todos, each with a distinct tag
     const todoIds: string[] = [];
     for (let i = 0; i < 501; i++) {

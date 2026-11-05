@@ -1,9 +1,11 @@
 // Buffered writer for the perf_events table. Producers (span/metric
 // exporters, the stall sampler) enqueue rows in memory; a single flush()
 // writes them in one transaction so telemetry never adds per-event
-// synchronous SQLite work to the hot path. perf.ts owns the flush timer.
+// SQLite work to the hot path. perf.ts owns the flush timer.
 
-import type Database from 'better-sqlite3';
+import type { Kysely } from 'kysely';
+import { chunked, num } from './store/kysely.js';
+import type { StateDb } from './store/stateSchema.js';
 
 export type PerfKind = 'stall' | 'slow_op' | 'pty_window' | 'input_hop' | 'output_hop' | 'echo_rtt' | 'gc' | 'mem';
 
@@ -23,11 +25,17 @@ export interface PerfRow {
 const BUFFER_CAP = 10_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 export const RETENTION_MS = 7 * DAY_MS;
+/** perf_events has 9 bound columns: 500 rows = 4,500 parameters per INSERT —
+ *  under SQLite's 32,766 bound-parameter limit (3.32+, which better-sqlite3
+ *  bundles) and Postgres's 65,535. */
+const FLUSH_ROWS_PER_INSERT = 500;
 
 export class PerfStore {
   private buf: PerfRow[] = [];
+  /** flush() calls run one at a time, in call order. */
+  private flushChain: Promise<unknown> = Promise.resolve();
 
-  constructor(private readonly db: Database.Database) {}
+  constructor(private readonly db: Kysely<StateDb>) {}
 
   enqueue(row: PerfRow): void {
     this.buf.push(row);
@@ -38,25 +46,43 @@ export class PerfStore {
     return this.buf.length;
   }
 
-  /** Write all buffered rows in one transaction. Returns rows written. */
-  flush(): number {
-    if (this.buf.length === 0) return 0;
+  /** Write all buffered rows in one transaction. Resolves to rows written.
+   *  Takes the buffer synchronously, before any awaiting: two flush() calls
+   *  issued back to back (no await between them) must each own a disjoint
+   *  slice of what was enqueued by then, not race over the same buffer once
+   *  their deferred writes eventually run. Rows enqueued after this point
+   *  land in the fresh buffer for the next flush. */
+  flush(): Promise<number> {
     const rows = this.buf;
     this.buf = [];
+    const run = this.flushChain.catch(() => undefined).then(() => this.flushNow(rows));
+    this.flushChain = run;
+    return run;
+  }
+
+  private async flushNow(rows: PerfRow[]): Promise<number> {
+    if (rows.length === 0) return 0;
     try {
-      const ins = this.db.prepare(`
-        INSERT INTO perf_events (ts, kind, workspace_id, session_id, name, dur_ms, trace_id, span_id, meta)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      this.db.transaction((rs: PerfRow[]) => {
-        for (const r of rs) {
-          ins.run(
-            r.ts, r.kind, r.workspaceId ?? null, r.sessionId ?? null, r.name ?? null,
-            r.durMs ?? null, r.traceId ?? null, r.spanId ?? null,
-            r.meta ? JSON.stringify(r.meta) : null
-          );
+      await this.db.transaction().execute(async (trx) => {
+        for (const part of chunked(rows, FLUSH_ROWS_PER_INSERT)) {
+          await trx
+            .insertInto('perf_events')
+            .values(
+              part.map((r) => ({
+                ts: r.ts,
+                kind: r.kind,
+                workspace_id: r.workspaceId ?? null,
+                session_id: r.sessionId ?? null,
+                name: r.name ?? null,
+                dur_ms: r.durMs ?? null,
+                trace_id: r.traceId ?? null,
+                span_id: r.spanId ?? null,
+                meta: r.meta ? JSON.stringify(r.meta) : null,
+              }))
+            )
+            .execute();
         }
-      })(rows);
+      });
       return rows.length;
     } catch (err) {
       // Telemetry rows must not vanish silently on a transient DB error —
@@ -66,16 +92,20 @@ export class PerfStore {
     }
   }
 
-  /** Delete rows older than the retention window. Returns rows deleted. */
-  prune(olderThanMs: number = RETENTION_MS, now: number = Date.now()): number {
-    return this.db.prepare(`DELETE FROM perf_events WHERE ts < ?`).run(now - olderThanMs).changes;
+  /** Delete rows older than the retention window. Resolves to rows deleted. */
+  async prune(olderThanMs: number = RETENTION_MS, now: number = Date.now()): Promise<number> {
+    const r = await this.db.deleteFrom('perf_events').where('ts', '<', now - olderThanMs).executeTakeFirst();
+    return num(r.numDeletedRows);
   }
 
   /** Row counts per kind over the trailing 24 h (perf_status / Settings UI). */
-  counts24h(now: number = Date.now()): Record<string, number> {
-    const rows = this.db
-      .prepare(`SELECT kind, COUNT(*) AS n FROM perf_events WHERE ts >= ? GROUP BY kind`)
-      .all(now - DAY_MS) as Array<{ kind: string; n: number }>;
-    return Object.fromEntries(rows.map((r) => [r.kind, r.n]));
+  async counts24h(now: number = Date.now()): Promise<Record<string, number>> {
+    const rows = await this.db
+      .selectFrom('perf_events')
+      .select((eb) => ['kind', eb.fn.countAll().as('n')])
+      .where('ts', '>=', now - DAY_MS)
+      .groupBy('kind')
+      .execute();
+    return Object.fromEntries(rows.map((r) => [r.kind, num(r.n)]));
   }
 }

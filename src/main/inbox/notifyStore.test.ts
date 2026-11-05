@@ -5,6 +5,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { InboxStore } from './inboxDb.js';
 import { NotifyStore, type NewNotification } from './notifyStore.js';
+import { openTestInbox, isPg } from '../store/testStore.js';
 
 let inbox: InboxStore;
 afterEach(() => inbox?.close());
@@ -17,7 +18,7 @@ const req = (over: Partial<NewNotification> = {}): NewNotification => ({
 
 describe('NotifyStore notifications', () => {
   it('inserts and lists newest first, filtered by delivered / held', async () => {
-    inbox = InboxStore.memory();
+    inbox = (await openTestInbox());
     const s = new NotifyStore(inbox.kysely);
     await s.insert(req({ ts: 1, title: 'a' }));
     await s.insert(req({ ts: 2, title: 'b', delivered: false, heldReason: 'pause', channel: null, tags: ['ops'] }));
@@ -26,7 +27,7 @@ describe('NotifyStore notifications', () => {
     expect((await s.list({ filter: 'delivered' })).map((n) => n.title)).toEqual(['a']);
   });
   it('clears by dedupe key, tracks held-since and digested, prunes old rows', async () => {
-    inbox = InboxStore.memory();
+    inbox = (await openTestInbox());
     const s = new NotifyStore(inbox.kysely);
     const a = await s.insert(req({ ts: 10, dedupeKey: 'input-wait:W1', kind: 'input-wait' }));
     await s.insert(req({ ts: 20, delivered: false, heldReason: 'pause', channel: null }));
@@ -45,7 +46,7 @@ describe('NotifyStore notifications', () => {
 
 describe('NotifyStore rules, downtimes, state', () => {
   it('upserts a rule by scope and removes it', async () => {
-    inbox = InboxStore.memory();
+    inbox = (await openTestInbox());
     const s = new NotifyStore(inbox.kysely);
     const r1 = await s.setRule({ scopeKind: 'source', scopeValue: 'workspace:W1', level: 'urgent', snoozeUntil: null }, 1);
     const r2 = await s.setRule({ scopeKind: 'source', scopeValue: 'workspace:W1', level: 'off', snoozeUntil: 99 }, 2);
@@ -55,7 +56,7 @@ describe('NotifyStore rules, downtimes, state', () => {
     expect(await s.rules()).toEqual([]);
   });
   it('saves, updates and removes downtimes with a day mask round-trip', async () => {
-    inbox = InboxStore.memory();
+    inbox = (await openTestInbox());
     const s = new NotifyStore(inbox.kysely);
     const d = await s.saveDowntime({ name: 'Nights', enabled: true, days: [0, 1, 2, 3, 4, 5, 6], startMin: 1320, endMin: 420, bypass: 'none' }, 1);
     expect(await s.downtimes()).toEqual([{ ...d }]);
@@ -65,7 +66,7 @@ describe('NotifyStore rules, downtimes, state', () => {
     expect(await s.downtimes()).toEqual([]);
   });
   it('stores pause and default level', async () => {
-    inbox = InboxStore.memory();
+    inbox = (await openTestInbox());
     const s = new NotifyStore(inbox.kysely);
     expect(await s.getPause()).toBeNull();
     expect(await s.getDefaultLevel()).toBe('all');
@@ -78,7 +79,7 @@ describe('NotifyStore rules, downtimes, state', () => {
   });
 });
 
-describe('schema v1 → v2 migration', () => {
+describe.skipIf(isPg)('schema v1 → v2 migration', () => {
   it('backs up a v1 file and keeps its todos', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'inbox-mig-'));
     const v1 = new Database(path.join(dir, 'inbox.db'));

@@ -72,6 +72,8 @@ import { logError } from './errorLog.js';
 import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
 import { workspaceStateDir, assertValidWorkspaceId } from './paths.js';
 import { resolveEnv } from './vault.js';
+import { getStoreConfig } from './config.js';
+import { storeSecretEnvNames, type StoreConfig } from './store/storeConfig.js';
 import { endpointEnv } from './endpoints.js';
 import { effectiveCaptureSettings } from '../preload/captureSettings.js';
 import { ensureLocalRetentionSettings } from './claims/retention.js';
@@ -286,7 +288,7 @@ const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
  *  which remains under investigation. Null re-probes after 5 min; a spawn
  *  failure invalidates so a moved binary is re-resolved. */
 const claudeResolver = cachedNullableResolver(
-  () => findClaude((file, args) => execFileAsync(file, args), homedir()),
+  () => findClaude(async (file, args) => execFileAsync(file, args, { env: await hostEnvForWorkspaces() }), homedir()),
   { nullTtlMs: 5 * 60_000 }
 );
 export function resolveClaude(): Promise<string | null> {
@@ -325,6 +327,19 @@ async function signalWslSessions(
 // scrubbed from the inherited host env before spawn (see buildEnv, #285).
 const CLAUDE_CHILD_SESSION_MARKERS = ['CLAUDE_CODE_CHILD_SESSION', 'CLAUDECODE'] as const;
 
+/** The host env minus host-only secrets: loadout-source tokens (#444) and the
+ *  store's DB credentials, which would bypass MCP read isolation. */
+async function hostEnvForWorkspaces(): Promise<NodeJS.ProcessEnv> {
+  const base: NodeJS.ProcessEnv = { ...process.env };
+  const store = await getStoreConfig().catch((): StoreConfig | null => null);
+  const storeSecrets = new Set(storeSecretEnvNames(store).map((n) => n.toUpperCase()));
+  for (const k of Object.keys(base)) {
+    const u = k.toUpperCase();
+    if (u === 'FLEET_LOADOUT_TOKEN' || u.startsWith('FLEET_LOADOUT_TOKEN_') || storeSecrets.has(u)) delete base[k];
+  }
+  return base;
+}
+
 /**
  * Build the spawn env. A *local* workspace IS the user's host claude, so it
  * inherits the real host environment — crucially `HOME`, so claude uses the
@@ -343,7 +358,7 @@ export async function buildEnv(
 ): Promise<NodeJS.ProcessEnv> {
   const backendVars = ws.authMode === 'endpoint' ? await endpointEnv(ws.endpointId) : {};
   const resolved = await resolveEnv(id, ws.env.plain, ws.env.secretKeys);
-  const base: NodeJS.ProcessEnv = { ...process.env };
+  const base = await hostEnvForWorkspaces();
   // Endpoint workspaces must not inherit the host's real Anthropic key (dev
   // fallback mode) into a process whose base URL is a third-party endpoint.
   if (ws.authMode === 'endpoint') delete base.ANTHROPIC_API_KEY;
@@ -356,12 +371,6 @@ export async function buildEnv(
   // no busy attribution (#285). Scrub the markers so it saves its transcript.
   // (An explicit workspace env override re-appears below via `resolved`.)
   for (const marker of CLAUDE_CHILD_SESSION_MARKERS) delete base[marker];
-  // Loadout-source tokens are host-only (#444): the main process reads them to
-  // pull loadouts, but a workspace's claude must never inherit them.
-  for (const k of Object.keys(base)) {
-    const u = k.toUpperCase();
-    if (u === 'FLEET_LOADOUT_TOKEN' || u.startsWith('FLEET_LOADOUT_TOKEN_')) delete base[k];
-  }
   return { ...base, ...backendVars, ...resolved, TERM: 'xterm-256color' };
 }
 
@@ -521,22 +530,31 @@ export async function removeWorkspace(
  *   restarted (a local claude dies with the Electron main process). Resume
  *   the tab's verified broker→claude mapping so the restored chip's tabs
  *   pick their conversations back up instead of spawning fresh ones.
- * - A throwing lookup (dormant DB in mock mode) degrades to a fresh spawn.
+ * - A rejecting lookup (dormant DB in mock mode) degrades to a fresh spawn.
  *
  * Exported for tests.
  */
-export function effectiveResumeOf(
+export async function effectiveResumeOf(
   explicit: string | undefined,
   hasLivePty: boolean,
-  lookupResumable: () => string | null
-): string | undefined {
+  lookupResumable: () => Promise<string | null>
+): Promise<string | undefined> {
   if (explicit) return explicit;
   if (hasLivePty) return undefined;
   try {
-    return lookupResumable() ?? undefined;
+    return (await lookupResumable()) ?? undefined;
   } catch {
     return undefined;
   }
+}
+
+/** Fire-and-forget the resume usage signal off the attach path, matching
+ *  docker.ts's recordResumeUsageQuietly: the write must never delay or fail a
+ *  spawn, so a rejection is logged, not thrown. */
+export function recordResumeUsageQuietly(workspaceId: string, sessionId: string): void {
+  void recordUsageEvent({ workspaceId, sessionId, kind: 'resumed' }).catch((e: unknown) =>
+    logError({ source: 'main', level: 'warn', type: 'usage-record-failed', message: String(e), workspaceId })
+  );
 }
 
 export async function attachPty(
@@ -592,7 +610,7 @@ export async function attachPty(
   // Cross-restart continuity: a restored tab whose process died with the
   // previous app run resumes its mapped conversation instead of spawning a
   // fresh one.
-  const resume = effectiveResumeOf(resumeOf, hasLiveSession(id, sessionId), () =>
+  const resume = await effectiveResumeOf(resumeOf, hasLiveSession(id, sessionId), () =>
     lookupResumableBrokerSession(id, sessionId)
   );
   return attachLocalSession({
@@ -611,40 +629,53 @@ export async function attachPty(
     // silently degraded to workspace-level guesses.
     claudeSessionId: randomUUID(),
     onFreshSpawn: (claudeSessionId) => {
-      const { mode, previous } = recordBrokerSessionMapping(id, sessionId, claudeSessionId);
-      if (mode === 'deferred') {
-        // Re-spawn of a tab that still holds a real conversation onto a fresh
-        // (not-yet-written) id — parked until it produces a transcript so an
-        // unused session can't black-hole the tab (#170).
-        logError({
-          source: 'main',
-          type: 'mapping-deferred',
-          level: 'info',
-          message: `broker ${sessionId} parked → ${claudeSessionId} at local spawn (awaiting transcript; keeping ${previous})`,
-          workspaceId: id,
-          extra: { brokerSessionId: sessionId, pending: claudeSessionId, keeping: previous }
-        });
-      } else if (previous && previous !== claudeSessionId) {
-        logError({
-          source: 'main',
-          type: 'mapping-remapped',
-          level: 'warn',
-          message: `broker ${sessionId} remapped ${previous} → ${claudeSessionId} at local spawn`,
-          workspaceId: id,
-          extra: { brokerSessionId: sessionId, from: previous, to: claudeSessionId }
-        });
-      } else if (!previous) {
-        logError({
-          source: 'main',
-          type: 'mapping-learned',
-          level: 'info',
-          message: `paired ${claudeSessionId} with broker ${sessionId} at local spawn (${resume ? 'resume' : 'session-id'})`,
-          workspaceId: id,
-          extra: { claudeSessionId, brokerSessionId: sessionId, how: resume ? 'resume' : 'session-id' }
-        });
-      }
+      // The spawn callback is synchronous; the mapping write is async. The
+      // mirror mapping is in-memory and set first, before any transcript line
+      // can be read.
       learnMirrorMapping(id, sessionId, claudeSessionId);
-      if (resume) recordUsageEvent({ workspaceId: id, sessionId: resume, kind: 'resumed' });
+      if (resume) recordResumeUsageQuietly(id, resume);
+      void (async () => {
+        const { mode, previous } = await recordBrokerSessionMapping(id, sessionId, claudeSessionId);
+        if (mode === 'deferred') {
+          // Re-spawn of a tab that still holds a real conversation onto a fresh
+          // (not-yet-written) id — parked until it produces a transcript so an
+          // unused session can't black-hole the tab (#170).
+          logError({
+            source: 'main',
+            type: 'mapping-deferred',
+            level: 'info',
+            message: `broker ${sessionId} parked → ${claudeSessionId} at local spawn (awaiting transcript; keeping ${previous})`,
+            workspaceId: id,
+            extra: { brokerSessionId: sessionId, pending: claudeSessionId, keeping: previous }
+          });
+        } else if (previous && previous !== claudeSessionId) {
+          logError({
+            source: 'main',
+            type: 'mapping-remapped',
+            level: 'warn',
+            message: `broker ${sessionId} remapped ${previous} → ${claudeSessionId} at local spawn`,
+            workspaceId: id,
+            extra: { brokerSessionId: sessionId, from: previous, to: claudeSessionId }
+          });
+        } else if (!previous) {
+          logError({
+            source: 'main',
+            type: 'mapping-learned',
+            level: 'info',
+            message: `paired ${claudeSessionId} with broker ${sessionId} at local spawn (${resume ? 'resume' : 'session-id'})`,
+            workspaceId: id,
+            extra: { claudeSessionId, brokerSessionId: sessionId, how: resume ? 'resume' : 'session-id' }
+          });
+        }
+      })().catch((e: unknown) =>
+        logError({
+          source: 'main',
+          type: 'mapping-learn-failed',
+          level: 'warn',
+          message: `could not record ${sessionId} → ${claudeSessionId}: ${e instanceof Error ? e.message : String(e)}`,
+          workspaceId: id
+        })
+      );
     },
     extraArgs,
     mcpConfigPath: mcpConfigArg,

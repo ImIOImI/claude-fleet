@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { InboxStore } from '../inbox/inboxDb.js';
+import type { InboxStore } from '../inbox/inboxDb.js';
+import { openTestInbox } from '../store/testStore.js';
 import { ClaimStore, type NewClaim } from './claimStore.js';
 import type { ClaimSourceInput } from './types.js';
 
 let inbox: InboxStore; let s: ClaimStore;
-beforeEach(() => { inbox = InboxStore.memory(); s = new ClaimStore(inbox.kysely); });
-afterEach(() => inbox.close());
+beforeEach(async () => { inbox = await openTestInbox(); s = new ClaimStore(inbox.kysely, inbox.dialect); });
+afterEach(async () => { await inbox.close(); });
 
 const M = 'model@q8';
 const src = (ws: string): ClaimSourceInput => ({ workspaceId: ws, sessionId: null, via: 'agent', captureRun: null });

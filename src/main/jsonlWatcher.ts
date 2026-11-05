@@ -12,22 +12,24 @@
 // newlines, ingest complete lines, and stash the offset of any trailing
 // partial line for the next change event.
 //
-// Re-ingestion is idempotent: db.ingestLine uses uuid (or a content hash for
+// Re-ingestion is idempotent: db.ingestBatch uses uuid (or a content hash for
 // light events) as a dedup key. The byte offset is an in-memory optimization
 // only — if we lose it (process restart, watch dropped), re-reading from
 // offset 0 produces the same end state.
 
 import { EventEmitter } from 'node:events';
 import { mkdirSync, promises as fsp, type Stats } from 'node:fs';
-import { join, basename, extname, sep as pathSep } from 'node:path';
+import { join, extname, sep as pathSep } from 'node:path';
 // chokidar v5 is ESM-only. Our main bundle is CommonJS (per
 // electron.vite.config.ts), so `require('chokidar')` would throw
 // ERR_REQUIRE_ESM. Load it via dynamic import inside `start()`.
 import type { FSWatcher } from 'chokidar';
 import { workspaceClaudeDir, workspaceHistoryDir, workspaceHistoryFile, hostLocalProjectsDir } from './paths.js';
-import { ingestLine } from './db.js';
+import { ingestBatch } from './db.js';
 import { effectiveForClaudeSession } from './mirrorPolicy.js';
-import { perfSpan } from './perf.js';
+import { perfSpanAsync } from './perf.js';
+import { keyedSerialQueue } from './state/serialQueue.js';
+import { parseSubagentPath, parseTranscriptFilename } from './state/transcriptPaths.js';
 
 /**
  * Fire-and-forget structured log for watcher lifecycle events (#323).
@@ -51,40 +53,7 @@ function logWatcherEvent(payload: {
 }
 
 const PROJECTS_SUBDIR = join('projects', '-workspace');
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-const AGENT_FILE_RE = /^agent-.*\.jsonl$/i;
-
-/** Parent session id from a subagent transcript path
- *  `.../<parent-session-uuid>/subagents/agent-*.jsonl`, or null. */
-export function parseSubagentPath(path: string): { parentSessionId: string } | null {
-  const segs = path.split(/[\\/]/);
-  const file = segs[segs.length - 1] ?? '';
-  if (!AGENT_FILE_RE.test(file)) return null;
-  if (segs[segs.length - 2] !== 'subagents') return null;
-  const parent = segs[segs.length - 3] ?? '';
-  return UUID_RE.test(parent) ? { parentSessionId: parent } : null;
-}
-
-/** Session id + sidecar flag from a watched file path, or null if neither a
- *  primary transcript (<uuid>.jsonl) nor a fleet sidecar (<uuid>.fleet.jsonl).
- *  Sidecars carry host-bound events (session-summary chapters, #207) and are
- *  ingested under their session id but NEVER fire 'new-session' — they must
- *  not touch the pending-attach fallback or look like fresh conversations. */
-export function parseTranscriptFilename(
-  path: string
-): { sessionId: string; sidecar: boolean } | null {
-  if (extname(path) !== '.jsonl') return null;
-  let stem = basename(path, '.jsonl');
-  let sidecar = false;
-  if (stem.endsWith('.fleet')) {
-    stem = stem.slice(0, -'.fleet'.length);
-    sidecar = true;
-  }
-  if (!UUID_RE.test(stem)) return null;
-  return { sessionId: stem, sidecar };
-}
+export { parseSubagentPath, parseTranscriptFilename };
 
 interface FileState {
   workspaceId: string;
@@ -141,9 +110,14 @@ export class JsonlWatcher extends EventEmitter {
   private readonly polledDirs = new Set<string>();
   private readonly files = new Map<string, FileState>();
   private readonly watchedDirs = new Set<string>();
-  // Per-file mutex (sequenced via a chained promise) so concurrent
-  // add/change events on the same file don't race the byte offset.
-  private readonly chains = new Map<string, Promise<void>>();
+  // Per-file serial queue: a file's process() runs never overlap and run in
+  // event order, so its lines ingest strictly in file order (ingest is async;
+  // nothing else serializes it). Tails self-clean when they settle and are
+  // NOT dropped on unlink/unregister — a re-added file still waits for its
+  // in-flight batch — and stop() drains every queued batch.
+  private readonly queue = keyedSerialQueue((path, err) => {
+    console.error(`[jsonlWatcher] process failed for ${path}:`, err);
+  });
   // Sessions already announced via 'new-session'. Keyed by session id (the
   // session's stable identity), and deliberately OUTLIVES the `files` map:
   // `files` entries are dropped on chokidar unlink, unregister, and stat
@@ -198,7 +172,7 @@ export class JsonlWatcher extends EventEmitter {
       }
       const prefix = dir + pathSep;
       for (const path of [...this.files.keys()]) {
-        if (path === dir || path.startsWith(prefix)) { this.files.delete(path); this.chains.delete(path); }
+        if (path === dir || path.startsWith(prefix)) this.files.delete(path);
       }
     }
   }
@@ -271,7 +245,6 @@ export class JsonlWatcher extends EventEmitter {
       .on('change', (p) => this.enqueue(p))
       .on('unlink', (p) => {
         this.files.delete(p);
-        this.chains.delete(p);
       })
       .on('error', (err) => console.error('[jsonlWatcher] error:', err));
   }
@@ -305,9 +278,11 @@ export class JsonlWatcher extends EventEmitter {
     await poller?.close();
     this.pollWatcher = null;
     this.pollWatcherPromise = null;
+    // No new events can arrive now; let every queued batch finish before the
+    // caller closes state.db.
+    await this.queue.drain();
     this.polledDirs.clear();
     this.files.clear();
-    this.chains.clear();
     this.watchedDirs.clear();
     this.announcedSessions.clear();
   }
@@ -347,18 +322,13 @@ export class JsonlWatcher extends EventEmitter {
     for (const path of [...this.files.keys()]) {
       if (path === dir || path.startsWith(prefix)) {
         this.files.delete(path);
-        this.chains.delete(path);
       }
     }
   }
 
   private enqueue(path: string): void {
     if (extname(path) !== '.jsonl') return;
-    const prev = this.chains.get(path) ?? Promise.resolve();
-    const next = prev.then(() => this.process(path)).catch((err) => {
-      console.error(`[jsonlWatcher] process failed for ${path}:`, err);
-    });
-    this.chains.set(path, next);
+    void this.queue.enqueue(path, () => this.process(path));
   }
 
   private async process(path: string): Promise<void> {
@@ -476,27 +446,22 @@ async function readAndIngest(path: string, state: FileState): Promise<ReadResult
     // mirror is a conversation-history backup, not a DB replica.
     const mirrorOn =
       !state.sidecar && effectiveForClaudeSession(state.workspaceId, state.sessionId);
+    const batch = text.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+    const results = await perfSpanAsync(
+      'claude_fleet.ingest',
+      () => ingestBatch(state.workspaceId, state.sessionId, batch),
+      { workspace_id: state.workspaceId, session_id: state.sessionId, lines: batch.length }
+    );
     let insertedCount = 0;
     let mirrorBuf = '';
-    const lines = text.split('\n');
-    perfSpan(
-      'claude_fleet.ingest',
-      () => {
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          const result = ingestLine(state.workspaceId, state.sessionId, trimmed);
-          // Mirror only genuinely-new inserts: the DB dedup key suppresses
-          // re-reads after a compaction shrink, so we never double-append and the
-          // mirror stays append-only / compaction-proof for free.
-          if (result.inserted) {
-            insertedCount++;
-            if (mirrorOn) mirrorBuf += trimmed + '\n';
-          }
-        }
-      },
-      { workspace_id: state.workspaceId, session_id: state.sessionId, lines: lines.length }
-    );
+    results.forEach((result, i) => {
+      // Mirror only genuinely-new inserts: the DB dedup key suppresses
+      // re-reads after a compaction shrink, so we never double-append and the
+      // mirror stays append-only / compaction-proof for free.
+      if (!result.inserted) return;
+      insertedCount++;
+      if (mirrorOn) mirrorBuf += batch[i] + '\n';
+    });
 
     if (mirrorBuf) {
       // Host-private location — never bind-mounted (SPEC §9). mkdir is cheap

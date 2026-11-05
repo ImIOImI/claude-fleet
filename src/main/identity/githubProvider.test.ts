@@ -289,6 +289,13 @@ describe('github provider: machines (GitHub App installation tokens)', () => {
       await expect(createGithubProvider({ machines: MACHINES }).verify(TOKEN)).resolves.toMatchObject({ appId: 123456 });
     });
 
+    it('refuses an installation larger than the org check covers, saying how large', async () => {
+      const f = stubGithub({ ...base, [`GET ${INSTALL_REPOS}`]: () => json({ ...repos('acme'), total_count: 1500 }) });
+      const err = await createGithubProvider({ machines: MACHINES }).verify(TOKEN).catch((e: unknown) => e);
+      expect(err).toMatchObject({ kind: 'forbidden', message: expect.stringContaining('reaches 1500 repositories; the org check covers at most 1000') });
+      expect(f.mock.calls.filter(([u]) => String(u).startsWith(INSTALL_REPOS))).toHaveLength(1);
+    });
+
     it('refuses an installation with one foreign repo', async () => {
       stubGithub({
         ...base,

@@ -121,3 +121,47 @@ describe('mergeWorkspaces', () => {
     expect(out[0]).toMatchObject({ id: 'a', terminalRenderer: 'webgl' });
   });
 });
+
+describe('mergeWorkspaces: remote bookmarks', () => {
+  const bookmark = { url: 'https://h', tier: 'read' as const, login: 'a', checkedAt: 1 };
+  const remoteSpec = (id: string): WorkspaceSpec => ({ ...spec(id, 'container'), kind: 'remote', workspaceRoot: '', remote: bookmark }) as WorkspaceSpec;
+
+  it('a remote row comes only from remoteLive, never from docker-down synthesis or lastKnown', async () => {
+    const lastKnown = new Map<string, WorkspaceState>();
+    const out = await mergeWorkspaces({
+      dockerResult: down(),
+      localLive: [],
+      remoteLive: [{ ...remoteSpec('r1'), state: 'unreachable', containerId: 'r1' } as Workspace],
+      manifests: [remoteSpec('r1'), remoteSpec('r2')],
+      lastKnown,
+      privateDir,
+      factoryMirror: MIRROR
+    });
+    expect(out.map((w) => [w.id, w.state, w.workspaceRoot, w.remote?.url])).toEqual([['r1', 'unreachable', '', 'https://h']]);
+    const up2 = await mergeWorkspaces({
+      dockerResult: up([]),
+      localLive: [],
+      remoteLive: [{ ...remoteSpec('r1'), state: 'running', containerId: 'r1' } as Workspace],
+      manifests: [remoteSpec('r1')],
+      lastKnown,
+      privateDir,
+      factoryMirror: MIRROR
+    });
+    expect(up2[0].state).toBe('running');
+    expect(lastKnown.has('r1')).toBe(false);
+  });
+
+  it('a non-remote live row never picks up a bookmark from a same-id manifest', async () => {
+    const out = await mergeWorkspaces({
+      dockerResult: up([live('r1', 'container', 'running')]),
+      localLive: [],
+      remoteLive: [],
+      manifests: [remoteSpec('r1')],
+      lastKnown: new Map(),
+      privateDir,
+      factoryMirror: MIRROR
+    });
+    expect(out[0]).toMatchObject({ kind: 'container', workspaceRoot: '/fleet/r1' });
+    expect(out[0].remote).toBeUndefined();
+  });
+});

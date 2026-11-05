@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { InboxStore } from '../inbox/inboxDb.js';
+import type { InboxStore } from '../inbox/inboxDb.js';
+import { openTestInbox } from '../store/testStore.js';
 import { CaptureRunStore, startOfLocalDay } from './captureRunStore.js';
 
 let inbox: InboxStore; let r: CaptureRunStore;
-beforeEach(() => { inbox = InboxStore.memory(); r = new CaptureRunStore(inbox.kysely); });
-afterEach(() => inbox.close());
+beforeEach(async () => { inbox = await openTestInbox(); r = new CaptureRunStore(inbox.kysely); });
+afterEach(async () => { await inbox.close(); });
 
 describe('CaptureRunStore', () => {
   it('validates tokens only for running runs in the same workspace', async () => {

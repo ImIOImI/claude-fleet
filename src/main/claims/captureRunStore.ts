@@ -55,7 +55,7 @@ export class CaptureRunStore {
 
   async lastFor(sessionId: string): Promise<CaptureRunRow | null> {
     return (await this.db.selectFrom('capture_runs').selectAll().where('session_id', '=', sessionId)
-      .orderBy('started_at', 'desc').limit(1).executeTakeFirst()) ?? null;
+      .orderBy('started_at', 'desc').orderBy('id', 'desc').limit(1).executeTakeFirst()) ?? null;
   }
 
   /** Runs started at or after `ts` (any status) — the daily cap's numerator. */

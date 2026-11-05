@@ -18,8 +18,9 @@ export const QUEUE_TTL_MS = 15 * 60_000;
 
 export interface SchedulerDeps {
   runs: Pick<CaptureRunStore, 'start' | 'finish' | 'lastFor' | 'countSince'>;
-  signals: (sessionId: string) => CaptureSignals | null;
-  isAutomation: (sessionId: string) => boolean;
+  /** Async state.db reads (db.ts sessionCaptureSignals / isAutomationSession). */
+  signals: (sessionId: string) => Promise<CaptureSignals | null>;
+  isAutomation: (sessionId: string) => Promise<boolean>;
   globalEnabled: () => Promise<boolean>;
   /** Effective settings for a workspace; null when it has no manifest. */
   settings: (workspaceId: string) => Promise<CaptureSettings | null>;
@@ -92,10 +93,10 @@ export class CaptureScheduler {
   }
 
   private async considerIngest(e: { workspaceId: string; sessionId: string }): Promise<void> {
-    if (this.d.isAutomation(e.sessionId) || !(await this.d.globalEnabled())) return;
+    if ((await this.d.isAutomation(e.sessionId)) || !(await this.d.globalEnabled())) return;
     const settings = await this.d.settings(e.workspaceId);
     if (!settings?.enabled) return;
-    const sig = this.d.signals(e.sessionId);
+    const sig = await this.d.signals(e.sessionId);
     if (!sig) return;
     const now = this.d.now();
     // A search-hit capture just ran: leave the policy state untouched so a
@@ -126,8 +127,8 @@ export class CaptureScheduler {
     if (!caller?.enabled || !caller.onSearchHit) return;
     const query = e.tool === 'query' ? `SQL: ${e.query}` : e.query;
     for (const sessionId of [...new Set(e.sessionIds)].slice(0, caller.searchTopSessions)) {
-      if (isCaptureFork(sessionId) || this.d.isAutomation(sessionId) || this.inFlight.has(sessionId)) continue;
-      const sig = this.d.signals(sessionId);
+      if (isCaptureFork(sessionId) || this.inFlight.has(sessionId) || (await this.d.isAutomation(sessionId))) continue;
+      const sig = await this.d.signals(sessionId);
       if (!sig || !e.allowedWorkspaces.has(sig.workspaceId)) continue;
       const own = sig.workspaceId === e.callerWorkspaceId ? caller : await this.d.settings(sig.workspaceId);
       if (!own?.enabled) continue;

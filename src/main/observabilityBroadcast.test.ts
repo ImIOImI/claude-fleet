@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   broadcastObservabilitySummary,
+  latestWins,
   type BroadcastTarget,
 } from './observabilityBroadcast.js';
 
@@ -75,5 +76,24 @@ describe('broadcastObservabilitySummary', () => {
 
   it('no-ops when target list is empty', () => {
     expect(() => broadcastObservabilitySummary(PAYLOAD, [])).not.toThrow();
+  });
+});
+
+describe('latestWins', () => {
+  it('drops a push that resolves after a later one for the same key began', () => {
+    const pushes = latestWins();
+    const first = pushes.begin('ws');
+    const second = pushes.begin('ws');
+    const other = pushes.begin('ws2');
+    expect(first()).toBe(false);
+    expect(second()).toBe(true);
+    expect(other()).toBe(true);
+  });
+  it('a push is latest until another begins', () => {
+    const pushes = latestWins();
+    const only = pushes.begin('ws');
+    expect(only()).toBe(true);
+    pushes.begin('ws');
+    expect(only()).toBe(false);
   });
 });

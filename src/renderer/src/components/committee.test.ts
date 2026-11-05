@@ -2,7 +2,7 @@
 // container workspaces that are currently managers are eligible.
 
 import { describe, expect, it } from 'vitest';
-import { eligibleAcceptFromManagers, type CommitteeFields } from './committee';
+import { eligibleAcceptFromManagers, managerUnavailableText, type CommitteeFields } from './committee';
 
 function ws(id: string, over: Partial<CommitteeFields> = {}): CommitteeFields {
   return { id, kind: 'container', ...over };
@@ -35,5 +35,14 @@ describe('eligibleAcceptFromManagers', () => {
 
   it('returns empty for an empty fleet', () => {
     expect(eligibleAcceptFromManagers([], '01SELF')).toEqual([]);
+  });
+});
+
+describe('managerUnavailableText', () => {
+  it('only a container workspace can manage a committee', () => {
+    expect(managerUnavailableText('container')).toBeNull();
+    expect(managerUnavailableText('local')).toMatch(/Local workspaces/);
+    expect(managerUnavailableText('remote')).toMatch(/Remote workspaces/);
+    expect(managerUnavailableText('something-new')).not.toBeNull();
   });
 });

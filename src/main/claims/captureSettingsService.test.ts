@@ -7,8 +7,8 @@ import { createCaptureSettingsService, type CaptureSettingsDeps } from './captur
 const WS = 'W1';
 const D = defaultCaptureSettings();
 
-function setup(o: { trusted?: boolean; knowledgeCapture?: unknown } = {}) {
-  let manifest = { id: WS, name: 'ops', kind: 'container', knowledgeCapture: o.knowledgeCapture } as unknown as WorkspaceSpec;
+function setup(o: { trusted?: boolean; knowledgeCapture?: unknown; kind?: string } = {}) {
+  let manifest = { id: WS, name: 'ops', kind: o.kind ?? 'container', knowledgeCapture: o.knowledgeCapture } as unknown as WorkspaceSpec;
   const logRows: Array<Record<string, unknown>> = [];
   const notes: Array<Record<string, unknown>> = [];
   const proposals: Array<Record<string, unknown>> = [];
@@ -31,6 +31,13 @@ function setup(o: { trusted?: boolean; knowledgeCapture?: unknown } = {}) {
 }
 
 describe('capture settings service (#483 §5a)', () => {
+  it('a remote bookmark reads its settings but cannot change them (no capture runs for remote workspaces)', async () => {
+    const t = setup({ kind: 'remote' });
+    expect((await t.svc.get(WS)).settings).toEqual(D);
+    await expect(t.svc.set(WS, { searchTopSessions: 1, reason: 'r' })).rejects.toThrow(/not available for remote workspaces/);
+    expect(t.logRows).toHaveLength(0);
+    expect(t.manifest().knowledgeCapture).toBeUndefined();
+  });
   it('get returns the effective settings, the defaults and the global numbers', async () => {
     const t = setup({ knowledgeCapture: { searchTopSessions: 2 } });
     expect(await t.svc.get(WS)).toEqual({

@@ -1,7 +1,7 @@
-import { app, BrowserWindow, shell, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
-import { registerIpc, invalidateWorkspaceList } from './ipc.js';
-import { openDb, closeDb, deleteEmbeddingsForOtherModels, recordError, listSessions, sessionCaptureSignals, isAutomationSession } from './db.js';
+import { registerIpc, invalidateWorkspaceList, stopRemoteBackend } from './ipc.js';
+import { openDb, closeDb, deleteEmbeddingsForOtherModels, listSessionIds, recordError, stateKysely, sessionCaptureSignals, isAutomationSession } from './db.js';
 import { initPerf, shutdownPerf, perfSpan, perfSpanAsync } from './perf.js';
 import { PerfStore } from './perfStore.js';
 import { resolvePerfConfig } from './perfConfig.js';
@@ -27,7 +27,9 @@ import { registerInboxIpc } from './inbox/inboxIpc.js';
 import { registerNotifyIpc } from './inbox/notifyIpc.js';
 import { registerAutomationIpc } from './automations/automationIpc.js';
 import { startPresence, attachKeepRunning, markQuitting, presenceDir, registerPresenceIpc } from './inbox/presence.js';
-import { getKeepRunningInTray, setKeepRunningInTray } from './config.js';
+import { getKeepRunningInTray, setKeepRunningInTray, getStoreConfig } from './config.js';
+import { openPgStores, type PgStores } from './store/pgStores.js';
+import { storeStartupOutcome, storeStartupPrompt } from './store/startupPrompt.js';
 import { ensureWorkspaceClaudeJson } from './docker.js';
 import { hardwareAccelDisabledAtStartup } from './config.js';
 import { setWorkspaceDefault } from './mirrorPolicy.js';
@@ -59,6 +61,8 @@ let inboxStore: InboxStore | null = null;
 let captureRuns: CaptureRunStore | null = null;
 let claimService: ClaimService | null = null;
 let captureScheduler: CaptureScheduler | null = null;
+// The Postgres store's shared pool when config.json chooses it.
+let pgStores: PgStores | null = null;
 let presence: ReturnType<typeof startPresence> | null = null;
 // Notification + automation timers (#457): stopped in before-quit, ahead of inboxStore.close().
 let notifySvc: ReturnType<typeof registerNotifyIpc> | null = null;
@@ -175,19 +179,43 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   // (#16-followup). Idempotent; non-fatal — a seeding hiccup must not block launch.
   await ensureBuiltinLoadouts().catch((e) => console.warn('[loadouts] seed failed:', e));
 
+  // A configured Postgres store that cannot open stops the launch: silently
+  // using SQLite instead would split the history and inbox in two.
+  try {
+    const storeCfg = await getStoreConfig();
+    if (storeCfg.kind === 'postgres') {
+      pgStores = await openPgStores(storeCfg, {
+        state: jsonlWatcher !== null,
+        onPoolError: (e) => logError({ source: 'main', type: 'store-pool-error', level: 'warn', message: String(e) }),
+      });
+    }
+  } catch (e) {
+    logError({ source: 'main', type: 'store-open-failed', level: 'error', message: String(e) });
+    const prompt = storeStartupPrompt(e, join(app.getPath('userData'), 'config.json'));
+    const { response } = await dialog.showMessageBox({ type: 'error', noLink: true, ...prompt });
+    if (storeStartupOutcome(prompt, response) === 'quit') {
+      app.exit(1);
+      return;
+    }
+  }
+
   // Authoritative inbox (#407): opens in mock AND real mode. state.db is a
   // droppable cache gated on the JSONL watcher; the inbox is neither.
   try {
-    inboxStore = InboxStore.open(app.getPath('userData'));
+    inboxStore = pgStores ? pgStores.inbox : InboxStore.open(app.getPath('userData'));
   } catch (e) {
     logError({ source: 'main', type: 'inbox-open-failed', level: 'error', message: String(e) });
   }
 
   if (jsonlWatcher) {
-    const db = openDb(app.getPath('userData'));
+    if (!pgStores) openDb(app.getPath('userData'));
     // Wire the crash-safe DB sink so every logError call is also persisted to
-    // the errors table (best-effort; a wedged DB must never break crash logging).
-    setErrorSink((row) => recordError(row));
+    // the errors table.
+    // best-effort; a wedged DB must never break crash logging, so the async
+    // write's rejection is swallowed here.
+    setErrorSink((row) => {
+      void recordError(row).catch(() => undefined);
+    });
     // One line per app run identifying the build (#298): the error.log header
     // and an errors-table row that lets historical telemetry be partitioned by
     // build sha when two builds share a semver.
@@ -198,7 +226,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       message: `claude-fleet ${appVersionString()} starting`,
       extra: { sha: appBuildSha() ?? null }
     });
-    const perfStore = new PerfStore(db);
+    const perfStore = new PerfStore(stateKysely());
     initPerf(
       perfStore,
       resolvePerfConfig(
@@ -208,7 +236,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     );
     // Read-only MCP server over <userData>/mcp.sock so in-container claude can
     // query the state DB (sessions/events/cost). Opens its own readonly conn.
-    perfSpan('claude_fleet.boot.mcp_server', () => startMcpServer(app.getPath('userData')));
+    perfSpan('claude_fleet.boot.mcp_server', () => startMcpServer(app.getPath('userData'), { stateDb: !pgStores }));
     // Local embedder for semantic transcript search (native onnxruntime-node, on-host).
     const embed = makeEmbedder(join(app.getPath('userData'), 'models'));
     setQueryEmbedder(embed);
@@ -217,7 +245,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     // tools, backed by the inbox's Kysely handle. captureRuns/claimService are
     // module-scoped so the background capture scheduler (Task 9) can reuse them.
     if (inboxStore) {
-      const claimStore = new ClaimStore(inboxStore.kysely);
+      const claimStore = new ClaimStore(inboxStore.kysely, inboxStore.dialect);
       captureRuns = new CaptureRunStore(inboxStore.kysely);
       claimService = new ClaimService({
         claims: claimStore, runs: captureRuns, embed,
@@ -248,7 +276,8 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     // sticky toast (#159 follow-up): fan the change-only status out to every
     // window. Wired before the listener can fail so the first event is caught.
     setMcpStatusListener((s) => broadcastMcpStatus(s, BrowserWindow.getAllWindows()));
-    const manifests = await listWorkspaceManifests();
+    // Remote bookmarks have no local socket, transcripts or peer-status dir.
+    const manifests = (await listWorkspaceManifests()).filter((m) => m.kind !== 'remote');
     // Re-establish a per-workspace MCP listener for every known workspace (#117)
     // so a paused container that survived the restart finds its socket again
     // (its bind points at <userData>/mcp/<id>/, whose listener must be rebuilt).
@@ -380,9 +409,9 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         // this backfill; boot.embed_backfill is wall time, the index.* / embed.*
         // child spans carry the synchronous parts that can block the loop.
         await perfSpanAsync('claude_fleet.boot.embed_backfill', async () => {
-          perfSpan('claude_fleet.index.delete_stale_models', () => deleteEmbeddingsForOtherModels(EMBED_MODEL_ID));
-          const sessions = perfSpan('claude_fleet.index.list_sessions', () => listSessions());
-          for (const s of sessions) await indexSessionTurns(s.id, embed);
+          await perfSpanAsync('claude_fleet.index.delete_stale_models', () => deleteEmbeddingsForOtherModels(EMBED_MODEL_ID));
+          const sessionIds = await perfSpanAsync('claude_fleet.index.list_sessions', () => listSessionIds());
+          for (const id of sessionIds) await indexSessionTurns(id, embed);
           await indexSessionSummaries(embed);
         });
       } catch (e) {
@@ -466,13 +495,16 @@ app.on('before-quit', async () => {
   captureScheduler = null;
   auto?.stop();
   auto = null;
+  stopRemoteBackend();
   await jsonlWatcher?.stop();
   await peerStatusWatcher?.stop();
   stopMcpServer();
   await inboxStore?.close();
   inboxStore = null;
   await shutdownPerf();
-  closeDb();
+  await closeDb();
+  await pgStores?.end();
+  pgStores = null;
 });
 
 app.on('window-all-closed', () => {

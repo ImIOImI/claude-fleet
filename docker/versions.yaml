@@ -32,3 +32,8 @@ helm: latest
 go: 1.23.5            # Go — official tarball into /usr/local/go
 rust: 1.84.0          # Rust — rustup toolchain (cargo/rustc/clippy)
 uv: 0.5.14            # uv — fast Python package/venv manager
+
+# AWS RDS CA bundle for sslmode=verify-full (docker/scripts/rds-ca-bundle.sh).
+# AWS rotates it; bump the sha256 deliberately.
+rds_ca_bundle_url: https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+rds_ca_bundle_sha256: 90a6f1a7978a1b1b096dca6c57511ca48d3b8cf052f8e704baf358f34ea2f21b

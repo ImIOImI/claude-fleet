@@ -9,6 +9,8 @@ import { dotClass } from './chipState';
 import { usePortalMenu } from './portalMenu';
 import { IconCopy, IconEject, IconPause, IconPencil, IconPlay, IconStop, IconTrash } from './menuIcons';
 import { isWarm } from '../fleetTemperature';
+import { forgetText, remoteChip, tierTitle } from '../remoteView';
+import { ModalBackdrop } from './ModalBackdrop';
 
 /**
  * The chip's status dot. A separate component so the busy pulse can be
@@ -16,9 +18,25 @@ import { isWarm } from '../fleetTemperature';
  * `.map()` over workspaces) — keeping the chip dot in lockstep with the session
  * tab + Sessions-row busy pulses.
  */
-function ChipDot({ state, busy, waiting }: { state: WorkspaceState; busy: boolean; waiting: boolean }): JSX.Element {
+function ChipDot({ state, busy, waiting, remote }: { state: WorkspaceState; busy: boolean; waiting: boolean; remote?: string }): JSX.Element {
   const blink = useBlinkSync(busy || waiting);
-  return <span className={`${dotClass({ base: `dot ${state}`, busy, waiting })}`} style={blink} />;
+  const base = remote ? `dot ${state} remote ${remote}` : `dot ${state}`;
+  return <span className={`${dotClass({ base, busy, waiting })}`} style={blink} />;
+}
+
+function CloudGlyph({ title }: { title: string }): JSX.Element {
+  return (
+    <svg className="remote-glyph" width={14} height={14} viewBox="0 0 16 16" aria-hidden={!title}>
+      <title>{title}</title>
+      <path
+        d="M4.5 12.5h7a3 3 0 00.4-5.97A4 4 0 004.3 7.1 2.7 2.7 0 004.5 12.5z"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        fill="none"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
 }
 
 /** Tooltip describing a reachable workspace's committee opt-in. */
@@ -66,6 +84,8 @@ interface Props {
   onReorderWorkspace: (draggedId: string, targetId: string) => void;
   /** Per-workspace waiting flag: true when the workspace has a session blocked on AskUserQuestion. */
   waitingByWorkspace?: Record<string, boolean>;
+  /** Remote chips' ⋮ Rename locally (App opens the dialog). */
+  onRenameRemote?: (workspace: WorkspaceSummary) => void;
   /** The Inbox chip (#407), rendered after the workspace chips, before the add button. */
   inboxChip?: ReactNode;
 }
@@ -123,12 +143,14 @@ export function WorkspaceTabStrip({
   onDeleteWorkspace,
   onRefresh,
   onReorderWorkspace,
+  onRenameRemote,
   inboxChip
 }: Props) {
   // Chip ⋮ menu — shared portaled-menu mechanics (right-anchored).
   const { menu, toggle: toggleMenu, close: closeMenu } = usePortalMenu();
   // Id of the chip currently being dragged (for reorder), null when idle.
   const [dragId, setDragId] = useState<string | null>(null);
+  const [forgetTarget, setForgetTarget] = useState<WorkspaceSummary | null>(null);
 
   // Top strip = the "warm" fleet: running + paused, and unreachable-was-warm
   // (#380). A daemon flap must not make chips vanish mid-session.
@@ -168,6 +190,7 @@ export function WorkspaceTabStrip({
         // "Busy" = claude actively working in a running workspace (PTY title
         // glyph is a spinner). Drives a pulsing dot + "working…" sub-line.
         const unreachable = w.state === 'unreachable';
+        const rc = remoteChip(w);
         const busy = w.state === 'running' && busyByWorkspace[w.id] === true;
         const waiting = w.state === 'running' && waitingByWorkspace[w.id] === true;
         return (
@@ -175,7 +198,7 @@ export function WorkspaceTabStrip({
           key={w.id}
           className={`ws-chip-group ${w.id === selectedId ? 'active' : ''} ${
             dragId === w.id ? 'dragging' : ''
-          } ${unreachable ? 'unreachable' : ''}`}
+          } ${unreachable ? (rc?.phase === 'checking' ? 'checking' : 'unreachable') : ''}`}
           style={{ ['--hue' as never]: colorFor(w) }}
           draggable
           {...reorderDragHandlers({
@@ -190,7 +213,7 @@ export function WorkspaceTabStrip({
             onClick={() => onSelect(w.id)}
             title={waiting ? 'Waiting on your input' : busy ? 'Claude is working…' : w.status}
           >
-            <ChipDot state={w.state} busy={busy} waiting={waiting} />
+            <ChipDot state={w.state} busy={busy} waiting={waiting} remote={rc?.phase} />
             {w.state === 'paused' && (
               <svg
                 viewBox="0 0 8 8"
@@ -217,11 +240,21 @@ export function WorkspaceTabStrip({
                 without showing any visible character.
               */}
               <span className={`ws-chip-sub ${busy || waiting ? 'busy' : ''}`}>
-                {unreachable
+                {rc?.sub
+                  ? rc.sub
+                  : unreachable
                   ? `unreachable${w.lastKnownState ? ` · was ${w.lastKnownState}` : ''}`
                   : waiting ? 'needs input' : busy ? 'working…' : chipActivityText(summaries[w.id]) ?? ' '}
               </span>
             </span>
+            {rc && (
+              <span className="ws-chip-roles">
+                <CloudGlyph title={`Remote · ${w.remote?.url ?? ''}`} />
+                <span className={`tier-badge tier-${w.remote?.tier ?? 'unknown'}`} title={tierTitle(w.remote?.tier)}>
+                  {w.remote?.tier ?? '?'}
+                </span>
+              </span>
+            )}
             {(isManager(w) || isReachable(w)) && (
               <span className="ws-chip-roles">
                 {isManager(w) && (
@@ -231,7 +264,7 @@ export function WorkspaceTabStrip({
               </span>
             )}
           </button>
-          {!unreachable && (
+          {(!unreachable || rc) && (
             <button
               className="ws-chip-menu-trigger"
               aria-label={`Actions for ${w.name}`}
@@ -296,6 +329,44 @@ export function WorkspaceTabStrip({
             style={{ position: 'fixed', top: menu.top, right: menu.right }}
             onClick={(e) => e.stopPropagation()}
           >
+            {menuWorkspace.kind === 'remote' ? (
+              <>
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    closeMenu();
+                    onRenameRemote?.(menuWorkspace);
+                  }}
+                >
+                  <IconPencil />
+                  <span>Rename locally…</span>
+                </button>
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    closeMenu();
+                    void window.api.clipboard.write(menuWorkspace.remote?.url ?? '');
+                  }}
+                >
+                  <IconCopy />
+                  <span>Copy host URL</span>
+                </button>
+                <div className="ws-chip-menu-divider" />
+                <button
+                  role="menuitem"
+                  className="danger"
+                  title="Remove the bookmark from this computer; the host is untouched"
+                  onClick={() => {
+                    closeMenu();
+                    setForgetTarget(menuWorkspace);
+                  }}
+                >
+                  <IconEject />
+                  <span>Forget…</span>
+                </button>
+              </>
+            ) : (
+            <>
             {menuWorkspace.state === 'running' && (
               <>
                 {(menuWorkspace.kind !== 'local' || menuWorkspace.launcher?.mode === 'wsl') && (
@@ -367,7 +438,34 @@ export function WorkspaceTabStrip({
               <IconTrash />
               <span>Delete…</span>
             </button>
+            </>
+            )}
           </div>,
+          document.body
+        )}
+      {forgetTarget &&
+        createPortal(
+        <ModalBackdrop onClose={() => setForgetTarget(null)}>
+          <div className="modal" role="dialog" aria-label="Forget remote workspace" onClick={(e) => e.stopPropagation()}>
+            <h2>Forget remote workspace</h2>
+            <p className="muted">{forgetText(forgetTarget.name)}</p>
+            <div className="modal-footer">
+              <button className="btn" onClick={() => setForgetTarget(null)} autoFocus>
+                Cancel
+              </button>
+              <button
+                className="btn danger"
+                onClick={() => {
+                  const id = forgetTarget.id;
+                  setForgetTarget(null);
+                  void window.api.workspace.remove(id, { id }).finally(onRefresh);
+                }}
+              >
+                Forget
+              </button>
+            </div>
+          </div>
+        </ModalBackdrop>,
           document.body
         )}
     </div>

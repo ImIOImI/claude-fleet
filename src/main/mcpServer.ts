@@ -126,7 +126,7 @@ export function setInputWaitHandler(fn: InputWaitHandler): void {
 /** Injected by ipc.ts: persist claude's self-reported tab↔session mapping
  *  (SessionStart hook, #207). callerId is host-assigned; the handler may only
  *  ever write the caller's own workspace rows. */
-export type SessionMappingHandler = (callerId: string, brokerSessionId: string, sessionId: string) => void;
+export type SessionMappingHandler = (callerId: string, brokerSessionId: string, sessionId: string) => void | Promise<void>;
 let sessionMappingHandler: SessionMappingHandler | null = null;
 export function setSessionMappingHandler(fn: SessionMappingHandler): void {
   sessionMappingHandler = fn;
@@ -270,7 +270,7 @@ function noteSearchResults(callerId: string, query: string, sessionIds: string[]
   const now = Date.now();
   for (const sid of new Set(sessionIds)) {
     ring.set(sid, now);
-    usageRecorder?.({ workspaceId: callerId, sessionId: sid, kind: 'search-impression', detail: { query: query.slice(0, 300) } });
+    recordUsageQuietly({ workspaceId: callerId, sessionId: sid, kind: 'search-impression', detail: { query: query.slice(0, 300) } });
   }
   recentSearchHits.set(callerId, ring);
 }
@@ -281,7 +281,7 @@ function noteRead(callerId: string, sessionId: string): void {
   if (ts === undefined) return;
   if (Date.now() - ts > CLICKTHROUGH_WINDOW_MS) { ring!.delete(sessionId); return; }
   ring!.delete(sessionId); // one clickthrough per impression
-  usageRecorder?.({ workspaceId: callerId, sessionId, kind: 'clickthrough' });
+  recordUsageQuietly({ workspaceId: callerId, sessionId, kind: 'clickthrough' });
 }
 
 /** Injected by ipc.ts: persist a value signal (marked-useful, clickthrough,
@@ -292,10 +292,19 @@ export type UsageRecorder = (e: {
   sessionId?: string | null;
   kind: 'search-impression' | 'clickthrough' | 'marked-useful' | 'resumed';
   detail?: Record<string, unknown>;
-}) => void;
+}) => void | Promise<void>;
 let usageRecorder: UsageRecorder | null = null;
 export function setUsageRecorder(fn: UsageRecorder): void {
   usageRecorder = fn;
+}
+
+/** Fire-and-forget a value signal from a read path: a failed write is logged,
+ *  never surfaced to the tool caller. */
+function recordUsageQuietly(e: Parameters<UsageRecorder>[0]): void {
+  if (!usageRecorder) return;
+  void Promise.resolve(usageRecorder(e)).catch((err: unknown) =>
+    logError({ source: 'main', level: 'warn', type: 'usage-record-failed', message: String(err), workspaceId: e.workspaceId })
+  );
 }
 
 /** Injected by ipc.ts: resolve the effective fleet tunables for a workspace
@@ -321,6 +330,13 @@ function reportListenerError(where: ListenerScope, err: unknown): void {
 
 let userDataDir: string | null = null;
 let rodb: Database.Database | null = null;
+/** Started without state.db (the Postgres store): STATE_DB_TOOLS report unavailable. */
+let storeless = false;
+/** Tools that read the read-only state.db connection. */
+const STATE_DB_TOOLS = new Set([
+  'list_sessions', 'get_session', 'get_cost', 'list_events', 'search_transcripts', 'session_summary',
+  'list_errors', 'query', 'mark_useful',
+]);
 // One listening socket per workspace, keyed by workspace id. The id is captured
 // in each listener's accept callback and becomes the connection's caller id.
 // (Unix transport — Linux/macOS.)
@@ -363,10 +379,13 @@ function setMcpHealth(ok: boolean, detail?: string): void {
  *  lazily via {@link ensureWorkspaceSocket}. No-op if already started. On
  *  Windows this also binds the single loopback-TCP listener that fronts every
  *  workspace (identity comes from the per-connection token, not the socket). */
-export function startMcpServer(dir: string): void {
-  if (rodb) return;
-  const dbPath = join(dir, 'state.db');
-  rodb = new Database(dbPath, { readonly: true, fileMustExist: true });
+export function startMcpServer(dir: string, opts: { stateDb?: boolean } = {}): void {
+  if (userDataDir) return;
+  if (opts.stateDb === false) {
+    storeless = true;
+  } else {
+    rodb = new Database(join(dir, 'state.db'), { readonly: true, fileMustExist: true });
+  }
   userDataDir = dir;
 
   if (isWindows && !tcpListener) {
@@ -396,7 +415,7 @@ export function startMcpServer(dir: string): void {
  *  leaf dir, bind-mounted into only that container) and is registered, so the
  *  shared TCP listener can map an incoming token to this id. */
 export function ensureWorkspaceSocket(id: string): void {
-  if (!rodb || !userDataDir) return;
+  if (!userDataDir) return;
   // Refresh the container-side bridge script in the per-id dir (bind-mounted
   // into exactly that container) so an app upgrade updates every workspace's
   // bridge without a runner-image rebuild. Best-effort: a failed write leaves
@@ -510,6 +529,7 @@ export function stopMcpServer(): void {
     /* ignore */
   }
   rodb = null;
+  storeless = false;
   userDataDir = null;
 }
 
@@ -691,7 +711,7 @@ export async function callTool(params: Record<string, unknown>, callerId: string
   const args = (params.arguments as Record<string, unknown>) ?? {};
   const tool = TOOLS.find((t) => t.name === name);
   if (!tool) throw new RpcError(-32602, `Unknown tool: ${name}`);
-  if (!rodb) throw new RpcError(-32603, 'Database not open');
+  if (!rodb && !storeless) throw new RpcError(-32603, 'Database not open');
   const startedAt = Date.now();
   let stage: 'resolve-allowed' | 'run-tool' = 'resolve-allowed';
   const watchdog = setTimeout(() => {
@@ -713,7 +733,8 @@ export async function callTool(params: Record<string, unknown>, callerId: string
     const allowedWorkspaces = await resolveAllowedWorkspaces(callerId);
     const resolveMs = Date.now() - startedAt;
     stage = 'run-tool';
-    const result = await tool.run(rodb, args, { callerId, allowedWorkspaces });
+    if (!rodb && STATE_DB_TOOLS.has(name)) throw new Error(`${name} is unavailable on the Postgres store`);
+    const result = await tool.run(rodb as Database.Database, args, { callerId, allowedWorkspaces });
     const totalMs = Date.now() - startedAt;
     if (resolveMs >= SLOW_RESOLVE_MS || totalMs >= SLOW_TOTAL_MS) {
       logError({
@@ -1450,12 +1471,12 @@ export const TOOLS: Tool[] = [
       properties: { brokerSessionId: { type: 'string' }, sessionId: { type: 'string' } },
       required: ['brokerSessionId', 'sessionId']
     },
-    run: (_db, a, ctx) => {
+    run: async (_db, a, ctx) => {
       if (!sessionMappingHandler) throw new Error('session-mapping reporting is unavailable');
       if (typeof a.brokerSessionId !== 'string' || typeof a.sessionId !== 'string') {
         throw new Error('brokerSessionId (string) and sessionId (string) are required');
       }
-      sessionMappingHandler(ctx.callerId, a.brokerSessionId, a.sessionId);
+      await sessionMappingHandler(ctx.callerId, a.brokerSessionId, a.sessionId);
       return { ok: true };
     }
   },
@@ -1500,14 +1521,14 @@ export const TOOLS: Tool[] = [
       properties: { sessionId: { type: 'string' }, note: { type: 'string' } },
       required: ['sessionId']
     },
-    run: (db, a, ctx) => {
+    run: async (db, a, ctx) => {
       if (!usageRecorder) throw new Error('usage recording is unavailable');
       if (typeof a.sessionId !== 'string') throw new Error('sessionId (string) is required');
       // Scope: the session must belong to an allowed workspace (same check
       // shape as get_session — reuse its row lookup against `db`).
       const row = db.prepare('SELECT workspace_id FROM sessions WHERE id = ?').get(a.sessionId) as { workspace_id: string } | undefined;
       if (!row || !ctx.allowedWorkspaces.has(row.workspace_id)) throw new Error(`session not found: ${a.sessionId}`);
-      usageRecorder({
+      await usageRecorder({
         workspaceId: ctx.callerId,
         sessionId: a.sessionId,
         kind: 'marked-useful',

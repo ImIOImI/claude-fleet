@@ -1,13 +1,11 @@
 // src/main/db.ingestAnchor.test.ts
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { openDb, closeDb, ingestLine, latestLimitHitAnchor } from './db.js';
+import { ingestLine, latestLimitHitAnchor } from './db.js';
+import { openTestState, type TestState } from './store/testStore.js';
 
-let dir: string;
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cf-ingest-anchor-')); openDb(dir); });
-afterEach(() => { closeDb(); rmSync(dir, { recursive: true, force: true }); });
+let st: TestState;
+beforeEach(async () => { st = await openTestState('cf-ingest-anchor-'); });
+afterEach(async () => { await st.close(); });
 
 const LINE_429 = JSON.stringify({
   type: 'assistant',
@@ -20,17 +18,17 @@ const LINE_429 = JSON.stringify({
 });
 
 describe('ingestLine → usage_anchors', () => {
-  it('records a limit-hit anchor from a 429 assistant line', () => {
-    ingestLine('ws1', 'sess1', LINE_429);
-    const a = latestLimitHitAnchor();
+  it('records a limit-hit anchor from a 429 assistant line', async () => {
+    await ingestLine('ws1', 'sess1', LINE_429);
+    const a = await latestLimitHitAnchor();
     expect(a?.kind).toBe('limit-hit');
     expect(a?.resetAt).toBe(Date.parse('2026-07-12T18:00:00Z'));
     expect(a?.windowStart).toBe(Date.parse('2026-07-12T13:00:00Z'));
     expect(a?.ts).toBe(Date.parse('2026-07-12T13:54:34.503Z'));
   });
 
-  it('does not record an anchor for an ordinary assistant line', () => {
-    ingestLine('ws1', 'sess1', JSON.stringify({ type: 'assistant', uuid: 'u2', message: { model: 'claude-opus-4-8', usage: { output_tokens: 5 } } }));
-    expect(latestLimitHitAnchor()).toBeNull();
+  it('does not record an anchor for an ordinary assistant line', async () => {
+    await ingestLine('ws1', 'sess1', JSON.stringify({ type: 'assistant', uuid: 'u2', message: { model: 'claude-opus-4-8', usage: { output_tokens: 5 } } }));
+    expect(await latestLimitHitAnchor()).toBeNull();
   });
 });

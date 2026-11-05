@@ -17,7 +17,7 @@ vi.mock('electron', () => ({
   }
 }));
 
-const { ensureBuiltinLoadouts, listLoadouts, getLoadout, installLoadout, uninstallLoadout } =
+const { ensureBuiltinLoadouts, listLoadouts, getLoadout, installLoadout, uninstallLoadout, previewLoadoutAutomations } =
   await import('./loadouts.js');
 const { loadoutDir } = await import('./paths.js');
 const { writeWorkspaceManifest, readWorkspaceManifest } = await import('./workspaces.js');
@@ -130,5 +130,20 @@ describe('install / uninstall with the full apply model (files + merges)', () =>
     expect(await present(join(priv, '.mcp.json'))).toBe(false);
     expect(await readFile(join(priv, 'CLAUDE.md'), 'utf8').catch(() => '')).not.toContain('rule line');
     expect((await readWorkspaceManifest(wsId))?.installedLoadouts).toEqual([]);
+  });
+});
+
+describe('install target kinds', () => {
+  it('installs only into container workspaces, never a local or remote one', async () => {
+    process.env.CLAUDE_FLEET_ROOT = join(userDataDir, 'fleet');
+    const ld = loadoutDir('test-kinds');
+    await mkdir(ld, { recursive: true });
+    await writeFile(join(ld, 'loadout.md'), '---\ntitle: Kinds\n---\nbody', 'utf8');
+    const base = { name: 'ws', labels: [], workspaceRoot: '', workspaceSubdir: '', authMode: 'oauth' as const, env: { plain: {}, secretKeys: [] }, mirror: { default: 'on' as const, cleanup: 'delete' as const }, createdAt: 1, lastUsedAt: 1 };
+    const remoteId = '01WSREMQTE0000000000000000';
+    await writeWorkspaceManifest({ ...base, id: remoteId, kind: 'remote', remote: { url: 'https://h', tier: 'session', login: 'a', checkedAt: 0 } });
+    await expect(installLoadout(remoteId, 'test-kinds')).rejects.toThrow(/container workspaces/);
+    await expect(previewLoadoutAutomations(remoteId, 'test-kinds')).rejects.toThrow(/container workspaces/);
+    expect(await present(join(userDataDir, 'fleet', remoteId))).toBe(false);
   });
 });

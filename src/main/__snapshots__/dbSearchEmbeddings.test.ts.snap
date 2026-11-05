@@ -1,0 +1,54 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ranks the allowed workspaces by similarity, recorded across dialects 1`] = `
+[
+  {
+    "kind": "turn",
+    "score": 1,
+    "sessionId": "s4",
+    "text": "text 4",
+    "ts": 1004,
+    "workspaceId": "W-A",
+  },
+  {
+    "kind": "summary",
+    "score": 0.12383,
+    "sessionId": "s5",
+    "text": "text 5",
+    "ts": 1005,
+    "workspaceId": "W-A",
+  },
+  {
+    "kind": "turn",
+    "score": 0.11894,
+    "sessionId": "s1",
+    "text": "text 8",
+    "ts": 1008,
+    "workspaceId": "W-A",
+  },
+  {
+    "kind": "turn",
+    "score": 0.08367,
+    "sessionId": "s5",
+    "text": "text 47",
+    "ts": 1047,
+    "workspaceId": "W-A",
+  },
+  {
+    "kind": "summary",
+    "score": 0.08213,
+    "sessionId": "s1",
+    "text": "text 50",
+    "ts": 1050,
+    "workspaceId": "W-A",
+  },
+]
+`;
+
+exports[`ranks the allowed workspaces by similarity, recorded across dialects 2`] = `
+[
+  "text 10",
+  "text 50",
+  "text 25",
+]
+`;

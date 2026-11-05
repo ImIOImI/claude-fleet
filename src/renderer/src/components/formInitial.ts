@@ -28,7 +28,7 @@ export function workspaceToFormInitial(
     labels: w.labels,
     color: w.color,
     workspaceSubdir: w.workspaceSubdir,
-    kind: w.kind,
+    kind: w.kind === 'remote' ? 'container' : w.kind,
     workspaceRoot: w.workspaceRoot,
     launcher: w.launcher,
     terminalRenderer: w.terminalRenderer,

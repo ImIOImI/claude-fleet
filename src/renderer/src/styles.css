@@ -106,8 +106,12 @@ body {
    the body out of the 1fr row into `auto`, so the banner would swallow all the
    spare height (worse the larger the window). Add a second `auto` row for the
    banner while the body keeps 1fr. */
-.app.daemon-down {
+.app.daemon-down,
+.app.remote-down {
   grid-template-rows: auto auto 1fr auto;
+}
+.app.daemon-down.remote-down {
+  grid-template-rows: auto auto auto 1fr auto;
 }
 
 .app-body {
@@ -3782,3 +3786,47 @@ button.switch { padding: 0; cursor: pointer; }
 .device-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
 .device-actions a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .account-notice { color: var(--warn); }
+
+/* Remote workspaces. */
+.remote-form { display: flex; flex-direction: column; gap: 10px; }
+.remote-form .form-row { margin-bottom: 0; }
+.remote-form .form-hint { font-size: 11px; color: var(--ink-2); margin: 0; }
+.remote-form .form-hint.error-text { color: var(--danger); }
+.remote-probe { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border: 1px solid var(--rule); border-radius: var(--r-md); font-size: 12px; color: var(--ink-1); }
+.remote-probe-name { color: var(--ink); font-weight: 600; }
+.remote-probe-desc { color: var(--ink-2); }
+.remote-warning { color: var(--warn); font-size: 11px; }
+.tier-badge {
+  font-size: 9px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--rule-strong);
+  color: var(--ink-1);
+  text-transform: lowercase;
+}
+.remote-glyph { flex: 0 0 auto; color: var(--ink-1); }
+/* Remote dots don't pulse. */
+.ws-chip .dot.remote.unreachable { animation: none; }
+.ws-chip .dot.remote.checking { background: var(--ink-3); animation: none; }
+.session-tab-watching {
+  margin-left: 6px;
+  font-size: 9px;
+  color: var(--ink-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.session-tab-join {
+  background: transparent;
+  border: none;
+  color: var(--ink-2);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.session-tab-join:hover:not(:disabled) { color: var(--ink); background: var(--bg-card); }
+.session-join-menu { max-height: 320px; max-width: 360px; overflow-y: auto; }
+.session-join-item span { min-width: 0; font-family: var(--font-mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-join-empty { padding: 6px 8px; font-size: 11px; color: var(--ink-2); }
+.remote-banner .dot { animation: none; }

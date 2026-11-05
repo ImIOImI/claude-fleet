@@ -63,6 +63,9 @@ export function createCaptureSettingsService(d: CaptureSettingsDeps) {
     async set(callerId: string, args: Record<string, unknown>) {
       const { patch, reason } = parseCaptureSettingsPatch(args);
       const m = await load(callerId);
+      // A remote bookmark's sessions run on its fleet-host, which this desktop
+      // never captures (captureExec.ts:resolveCaptureTarget): a change would be a no-op.
+      if (m.kind === 'remote') throw new Error('knowledge capture is not available for remote workspaces');
       const before = effectiveCaptureSettings(m);
       const after = normalizeCaptureSettings({ ...before, ...patch });
       const changes = describeCaptureChange(before, after);
