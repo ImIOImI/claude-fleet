@@ -81,6 +81,19 @@ export type WriteHook = (exec: (sqlText: string, params?: readonly unknown[]) =>
 // in-flight write transactions, as it did on the SQLite mutex.
 const WRITE_KINDS = new Set(['InsertQueryNode', 'UpdateQueryNode', 'DeleteQueryNode', 'MergeQueryNode', 'RawNode']);
 
+/** Postgres rejects a NUL (U+0000) anywhere in a text value outright
+ *  ("invalid byte sequence for encoding UTF8: 0x00"), which would otherwise
+ *  stick an ingest batch forever at the same offset. SQLite has no such
+ *  restriction, so this runs only on this dialect. Only top-level string
+ *  params are mapped: arrays and buffers pass through unchanged. */
+function sanitizeNul<T>(value: T): T {
+  return (typeof value === 'string' ? value.replace(/\u0000/g, '�') : value) as T;
+}
+
+function sanitizeNulParams(cq: CompiledQuery): CompiledQuery {
+  return { ...cq, parameters: cq.parameters.map(sanitizeNul) };
+}
+
 interface Conn extends DatabaseConnection { inner: DatabaseConnection | null; inTx: boolean; unlock: (() => void) | null }
 
 /** Serializes every in-process write (read-write transactions and bare write
@@ -111,10 +124,11 @@ class SerializingDriver implements Driver {
   }
 
   private async *stream<R>(conn: Conn, cq: CompiledQuery, chunk?: number): AsyncIterableIterator<QueryResult<R>> {
-    yield* (await this.innerOf(conn)).streamQuery<R>(cq, chunk);
+    yield* (await this.innerOf(conn)).streamQuery<R>(sanitizeNulParams(cq), chunk);
   }
 
-  private async execute<R>(conn: Conn, cq: CompiledQuery): Promise<QueryResult<R>> {
+  private async execute<R>(conn: Conn, cq0: CompiledQuery): Promise<QueryResult<R>> {
+    const cq = sanitizeNulParams(cq0);
     if (conn.inTx || !WRITE_KINDS.has(cq.query.kind)) return (await this.innerOf(conn)).executeQuery<R>(cq);
     const unlock = await this.lock();
     try {
@@ -176,7 +190,7 @@ class SerializingDriver implements Driver {
 
   private exec(inner: DatabaseConnection) {
     return async (sqlText: string, params: readonly unknown[] = []) =>
-      (await inner.executeQuery(CompiledQuery.raw(sqlText, [...params]))).rows as unknown[];
+      (await inner.executeQuery(CompiledQuery.raw(sqlText, params.map(sanitizeNul)))).rows as unknown[];
   }
 
   private end(conn: Conn): void {

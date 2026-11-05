@@ -93,14 +93,14 @@ D1–D19 from parts 2a and 2b still bind. The ones part 3 leans on: **D1** (the 
 - **D23 — The store never creates its schema or extension:**
   - The schema (default `fleet`) must exist, as with `fleet_agent`. `migratePostgres` checks `current_schema()` equals it.
   - Why the check: with `search_path = fleet, public`, a missing `fleet` makes unqualified DDL land in `public`. The prototype did exactly that.
-  - pgvector ≥ 0.8.0 (iterative index scans) must be installed. `ensureVector` creates it when the role may. Otherwise it fails, naming the admin step.
+  - pgvector ≥ 0.8.0 must be installed. `ensureVector` creates it when the role may. Otherwise it fails, naming the admin step.
 - **D24 — `search_path`** is set by an explicit `SET search_path TO <schema>, public` once per physical connection, in the pool adapter.
   - Why not a startup `options` parameter: poolers and some servers drop it. PGlite ignored it in the prototype.
   - Why `public`: so extension types resolve.
 - **D25 — Type parsing per pool.** `int8` and `numeric` parse as `number`, as SQLite returns them. The values are epoch ms and token counts, all below 2^53. The parsers go on the pool's `types`, never pg's global registry.
 - **D26 — Result-order parity.** Every list read has a total `ORDER BY`, and nullable keys sort `NULLS FIRST`, SQLite's default. This found and fixes:
   - **#491 canonical cost-row order:**
-    - `listSessionCostsQuery` orders by `(session_id, workspace_id, model, service_tier)`.
+    - The per-session USD sum is ordered in JS by `(session_id, workspace_id, model, service_tier)`, with no SQL `ORDER BY`.
     - `listSessions`' per-session USD float sum becomes order-independent of storage.
     - This is the one deliberate snapshot change: `0.7534357500000001` → `0.75343575`.
   - **#491 latest-session tiebreak:**
@@ -191,6 +191,7 @@ D1–D19 from parts 2a and 2b still bind. The ones part 3 leans on: **D1** (the 
   - The prototype's gate passed (Task 10 lists the numbers).
 - **D38 — Dependencies:**
   - `pg` `^8.23.1` and `@types/pg` `^8` (dev).
+  - `pg-connection-string` `^2.14.1`, direct (parses connection strings for the sslmode/host validation in D32, rather than relying on it only as `pg`'s transitive dependency).
   - `@aws-sdk/rds-signer` and `@aws-sdk/credential-providers` pinned at `3.1162.0`. They add about 8 MB of JS (`@aws-sdk` + `@smithy`) to the package, externalized like every main dependency.
   - Nothing native.
 
@@ -874,6 +875,8 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
   - `openDbPostgres(pool, opts?): Promise<void>`;
   - `InboxStore.openPostgres(pool, opts?): Promise<InboxStore>`.
   - Test support: `openTestState(prefix?): Promise<TestState>` (`{ dir, pg, open(), reopen(), close() }`), `openTestInbox()`, `queryRows(sql, params?, k?)`.
+
+> Note: the `idx_emb_vec` HNSW index in the embeddings baseline below was superseded by D30 (exact search, no ANN index); the shipped baseline omits it.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2409,6 +2412,8 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
   - `searchEmbeddings(qvec: Float32Array, scope: readonly string[], opts: { limit: number; kind?: 'turn' | 'summary' }): Promise<EmbeddingHit[]>`;
   - `EmbeddingHit = { sessionId, workspaceId, kind, ts, text, score }`, the same shape as `SearchHit`.
   - Part 4 and c3 call `searchEmbeddings`; `searchTranscripts` (MCP, SQLite) is unchanged (D30).
+
+> Note: the "partial HNSW index" referenced above was superseded by D30 (exact search, no ANN index); `searchEmbeddings` does a sequential `ORDER BY vec <=> q, id` scan instead.
 
 - [ ] **Step 1: Write the failing test**
 

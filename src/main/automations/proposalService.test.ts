@@ -140,3 +140,18 @@ describe('decision guard', () => {
     expect((await automations.versions((await automations.byName('log-watch'))!.id)).map((v) => v.version)).toEqual([2, 1]);
   });
 });
+
+describe('ProposalStore ordering (M3 id tiebreaks)', () => {
+  it('breaks a created_at tie by id, the same way on both dialects', async () => {
+    inbox = (await openTestInbox());
+    const store = new ProposalStore(inbox.kysely);
+    const row = (id: string) => ({
+      id, kind: 'new' as const, proposer_kind: 'workspace' as const, proposer_id: 'W1', rationale: null,
+      status: 'pending' as const, items: '[]', created_at: 100, decided_at: null
+    });
+    await inbox.kysely.insertInto('proposals').values(row('b')).execute();
+    await inbox.kysely.insertInto('proposals').values(row('a')).execute();
+    expect((await store.pending()).map((p) => p.id)).toEqual(['a', 'b']);
+    expect((await store.list()).map((p) => p.id)).toEqual(['b', 'a']);
+  });
+});

@@ -4,7 +4,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as db from './db.js';
 import { WS, S, at, FIXTURE, dump } from './state/ingestFixture.js';
-import { openTestState, queryRows, type TestState } from './store/testStore.js';
+import { isPg, openTestState, queryRows, type TestState } from './store/testStore.js';
 
 let st: TestState;
 beforeEach(async () => {
@@ -95,5 +95,21 @@ describe('ingestBatch (async store part 2a)', () => {
     await expect(pending).resolves.toHaveLength(FIXTURE.length);
     await st.open(); // afterEach closes it again
     expect((await queryRows('SELECT COUNT(*) AS n FROM events'))[0]).toEqual({ n: 15 });
+  });
+
+  it('a NUL (U+0000) in ingested text does not stick the batch (I1)', async () => {
+    const results = await db.ingestBatch(WS, S, [
+      JSON.stringify({ type: 'ai-title', aiTitle: 'hello \u0000 world', sessionId: S }),
+    ]);
+    expect(results).toEqual([{ inserted: true, sessionId: S, type: 'ai-title' }]);
+    const [{ ai_title }] = await queryRows<{ ai_title: string }>('SELECT ai_title FROM sessions WHERE id = ?', [S]);
+    // Postgres rejects a literal NUL outright; the driver maps it to U+FFFD. SQLite stores it as-is.
+    expect(ai_title).toBe(isPg ? 'hello � world' : 'hello \u0000 world');
+
+    // The offset advanced: a later, independent batch for the same session still ingests.
+    const next = await db.ingestBatch(WS, S, [
+      JSON.stringify({ type: 'ai-title', aiTitle: 'second', sessionId: S }),
+    ]);
+    expect(next).toEqual([{ inserted: true, sessionId: S, type: 'ai-title' }]);
   });
 });

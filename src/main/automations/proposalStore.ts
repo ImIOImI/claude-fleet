@@ -31,12 +31,12 @@ export class ProposalStore {
 
   async list(limit = 100): Promise<Proposal[]> {
     const rows = await this.db.selectFrom('proposals').selectAll()
-      .orderBy(sql`CASE status WHEN 'pending' THEN 0 ELSE 1 END`).orderBy('created_at', 'desc').limit(limit).execute();
+      .orderBy(sql`CASE status WHEN 'pending' THEN 0 ELSE 1 END`).orderBy('created_at', 'desc').orderBy('id', 'desc').limit(limit).execute();
     return rows.map(toProposal);
   }
 
   async pending(): Promise<Proposal[]> {
-    const rows = await this.db.selectFrom('proposals').selectAll().where('status', '=', 'pending').orderBy('created_at').execute();
+    const rows = await this.db.selectFrom('proposals').selectAll().where('status', '=', 'pending').orderBy('created_at').orderBy('id').execute();
     return rows.map(toProposal);
   }
 
