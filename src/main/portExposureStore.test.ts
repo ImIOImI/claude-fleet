@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { stateKysely } from './db.js';
 import { openTestState } from './store/testStore.js';
-import { PortExposureStore, PORT_EXPOSURE_RETENTION_MS, type ExposureRow } from './portExposureStore.js';
+import { PortExposureStore, PORT_EXPOSURE_RETENTION_MS, gatedSink, type ExposureRow, type ExposureSink } from './portExposureStore.js';
 
 const row = (over: Partial<ExposureRow> = {}): ExposureRow => ({
   id: 'R1', workspaceId: 'W1', sessionId: null, port: 5173, cmdline: null, label: null, reason: null,
@@ -57,5 +57,47 @@ describe('PortExposureStore', () => {
     await s.insert(row({ id: 'open' }));
     expect(await s.prune(PORT_EXPOSURE_RETENTION_MS, now)).toBe(1);
     expect((await rows()).map((r) => r.id)).toEqual(['open', 'recent']);
+  });
+});
+
+describe('gatedSink', () => {
+  const recorder = () => {
+    const calls: string[] = [];
+    const sink: ExposureSink = {
+      insert: async (r) => void calls.push(`insert ${r.id}`),
+      update: async (id) => void calls.push(`update ${id}`)
+    };
+    return { calls, sink };
+  };
+
+  it('holds writes until ready settles, then delegates in order', async () => {
+    const { calls, sink } = recorder();
+    let release!: () => void;
+    const g = gatedSink(sink, new Promise<void>((r) => (release = r)));
+    const w1 = g.insert(row());
+    const w2 = g.update('R1', { label: 'x' });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls).toEqual([]);
+    release();
+    await Promise.all([w1, w2]);
+    expect(calls).toEqual(['insert R1', 'update R1']);
+  });
+
+  it('a rejected ready still releases writes', async () => {
+    const { calls, sink } = recorder();
+    const ready = Promise.reject(new Error('sweep failed'));
+    await gatedSink(sink, ready).insert(row());
+    expect(calls).toEqual(['insert R1']);
+  });
+
+  it('the startup sweep does not close a row inserted while it runs', async () => {
+    await openTestState();
+    const store = new PortExposureStore(stateKysely);
+    await store.insert(row({ id: 'OLD' }));
+    const g = gatedSink(store, store.sweep());
+    await g.insert(row({ id: 'NEW', port: 3000 }));
+    const byId = Object.fromEntries((await rows()).map((r) => [r.id, r.ended_at]));
+    expect(byId.OLD).not.toBeNull();
+    expect(byId.NEW).toBeNull();
   });
 });

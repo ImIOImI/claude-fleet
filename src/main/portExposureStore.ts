@@ -109,3 +109,21 @@ export class PortExposureStore implements ExposureSink {
     await this.prune(PORT_EXPOSURE_RETENTION_MS, now);
   }
 }
+
+/** Holds every write until `ready` settles, so the startup sweep can't close rows this run inserts. */
+export function gatedSink(sink: ExposureSink, ready: Promise<unknown>): ExposureSink {
+  const gate = ready.then(
+    () => undefined,
+    () => undefined
+  );
+  return {
+    insert: async (r) => {
+      await gate;
+      await sink.insert(r);
+    },
+    update: async (id, patch) => {
+      await gate;
+      await sink.update(id, patch);
+    }
+  };
+}

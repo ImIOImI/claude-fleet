@@ -7,8 +7,8 @@
 
 import type { ServingPort } from './portforward.js';
 
-const FAKES: ReadonlyArray<{ afterMs: number; port: number; pid: number; cmdline: string; attributed: boolean }> = [
-  { afterMs: 10_000, port: 3000, pid: 4242, cmdline: 'node /workspace/node_modules/.bin/vite dev', attributed: true },
+const FAKES: ReadonlyArray<{ afterMs: number; port: number; pid: number; cmdline: string; attributed: boolean; label?: string }> = [
+  { afterMs: 10_000, port: 3000, pid: 4242, cmdline: 'node /workspace/node_modules/.bin/vite dev', attributed: true, label: 'Vite dev server' },
   { afterMs: 25_000, port: 8765, pid: 4343, cmdline: 'python3 -m http.server 8765', attributed: false }
 ];
 
@@ -22,7 +22,9 @@ export class MockServingPorts {
     /** Maps a workspace to the broker session id its first fake port is
      *  attributed to (mock stand-in for the broker's ancestry walk).
      *  Undefined/null → the port renders without a session chip. */
-    private readonly resolveSessionId?: (workspaceId: string) => Promise<string | null>
+    private readonly resolveSessionId?: (workspaceId: string) => Promise<string | null>,
+    /** Mock stand-in for an agent's expose_port call on labeled fakes. */
+    private readonly onDeclare?: (workspaceId: string, port: number, label: string) => void
   ) {}
 
   reconcile(runningIds: string[]): void {
@@ -53,6 +55,7 @@ export class MockServingPorts {
       }
       ports.set(f.port, { port: f.port, pid: f.pid, cmdline: f.cmdline, sessionId: null, firstSeenAt: this.now() });
       this.emit(id);
+      if (f.label) this.onDeclare?.(id, f.port, f.label);
       return;
     }
 
@@ -66,6 +69,7 @@ export class MockServingPorts {
       }
       ports.set(f.port, { port: f.port, pid: f.pid, cmdline: f.cmdline, sessionId, firstSeenAt: this.now() });
       this.emit(id);
+      if (f.label) this.onDeclare?.(id, f.port, f.label);
     });
   }
 
