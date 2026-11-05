@@ -5,6 +5,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'src/host/bootstrap.pg.test.ts',
       'src/host/hostDb.test.ts',
       'src/host/hostIngest.test.ts',
       'src/host/hostState.pg.test.ts',

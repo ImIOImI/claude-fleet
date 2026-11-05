@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Smoke-test a runner-host image: probes on 8080, auth required, uid 1000,
-# `fleet-host init`, and a clean SIGTERM that reaches fleet-host.
+# `fleet-host init`, the bootstrap/migrate subcommands, and a clean SIGTERM that reaches fleet-host.
 set -euo pipefail
 image=$1
 cfg=$(mktemp -d)
@@ -18,6 +18,8 @@ test "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/whoami")"
 test "$(docker exec "$cid" id -u)" = 1000
 docker exec "$cid" sh -c 'test -s /etc/ssl/certs/rds-global-bundle.pem && grep -q "BEGIN CERTIFICATE" /etc/ssl/certs/rds-global-bundle.pem'
 docker exec "$cid" fleet-host init | grep -q '"workspaceId"'
+test "$(docker exec "$cid" sh -c 'fleet-host bootstrap >/dev/null; echo rc=$?')" = rc=2
+docker exec "$cid" sh -c 'fleet-host migrate; true' | grep -q 'has no db: block'
 docker exec "$cid" git config --system --get-all credential.https://github.com.helper | grep -q 'fleet-host-cred git-credential'
 test "$(docker exec "$cid" sh -c 'printf "protocol=https\nhost=github.com\npath=a/b\n\n" | fleet-host-cred git-credential get 2>/dev/null; echo rc=$?')" = rc=0
 test "$(docker exec "$cid" sh -c 'command -v gh || true')" != /usr/local/bin/gh

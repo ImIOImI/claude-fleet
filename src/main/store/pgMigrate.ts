@@ -10,6 +10,7 @@ export interface PgTrack {
   track: string;
   baselineVersion: number;
   baseline: string;
+  /** Expand/contract: the previous release may still be running (fleet-host migrate is a PreSync Job); no drops or renames it uses, no long table rewrites. */
   steps: readonly PgMigrationStep[];
 }
 
