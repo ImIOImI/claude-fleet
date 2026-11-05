@@ -19,7 +19,7 @@ export type GetSecretString = (arn: string, region: string) => Promise<string>;
 
 export class AdminCredentialError extends Error {}
 
-const SECRET_ARN = /^arn:aws[a-z-]*:secretsmanager:([a-z]{2}(?:-[a-z]+)+-\d+):\d{12}:secret:[A-Za-z0-9/_+=.@-]+$/;
+const SECRET_ARN = /^arn:aws[a-z-]*:secretsmanager:([a-z]{2}(?:-[a-z]+)+-\d+):\d{12}:secret:[A-Za-z0-9/_+=.@!-]+$/;
 
 /** The AWS SDK default chain (Pod Identity, IRSA, env, profile). */
 export const awsGetSecret: GetSecretString = async (arn, region) => {

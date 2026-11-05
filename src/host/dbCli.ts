@@ -110,6 +110,7 @@ export async function runDbCommand(argv: string[], d: DbCliDeps): Promise<number
       const cfg = await dbConfig(env.configPath);
       const target = bootstrapTarget(cfg, d.env, args.appPasswordFile);
       let src = args.admin;
+      if (src.kind === 'aws-rds-iam' && target.ssl === false) throw new UsageError('--admin-iam needs ssl "verify-full" on db:');
       const c = cfg.connection;
       if (src.kind === 'aws-rds-iam' && !src.region && 'password' in c && c.password.kind === 'aws-rds-iam') src = { ...src, region: c.password.region };
       const admin = await resolveAdminCredential(src, { env: d.env, getSecret: d.getSecret ?? awsGetSecret, target });

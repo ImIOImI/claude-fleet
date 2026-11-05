@@ -43,6 +43,8 @@ interface Step {
 }
 
 const id = pg.escapeIdentifier;
+// Arbitrary constant: serializes concurrent bootstraps on one server.
+const BOOTSTRAP_LOCK = 7_340_212;
 
 /** Endpoint, role and TLS from the host config `db:` block, under the same rules the host connects with. */
 export function bootstrapTarget(cfg: PostgresStoreConfig, env: NodeJS.ProcessEnv, appPasswordFile?: string): BootstrapTarget {
@@ -74,6 +76,8 @@ export function bootstrapTarget(cfg: PostgresStoreConfig, env: NodeJS.ProcessEnv
 }
 
 export async function bootstrap(t: BootstrapTarget, admin: AdminCredential, o: BootstrapOptions): Promise<string[]> {
+  const sameRole = () => new BootstrapError(`the admin user ${admin.user} is the app role (db.user); use the master credential`);
+  if (admin.user === t.user) throw sameRole();
   const changed: string[] = [];
   const run = async (steps: Step[]) => {
     for (const s of steps) {
@@ -86,15 +90,18 @@ export async function bootstrap(t: BootstrapTarget, admin: AdminCredential, o: B
   };
   const m = await adminClient(t, admin, o.maintenanceDb ?? 'postgres', o);
   try {
+    if ((await one<{ same: boolean }>(m, 'SELECT current_user = $1 AS same', [t.user]))?.same) throw sameRole();
+    // Session-level, held until the target steps finish; released when m ends.
+    await m.query('SELECT pg_advisory_lock($1)', [BOOTSTRAP_LOCK]);
     await run(databaseSteps(m, t));
+    const c = await adminClient(t, admin, t.database, o);
+    try {
+      await run(targetSteps(c, t, o));
+    } finally {
+      await c.end().catch(() => undefined);
+    }
   } finally {
     await m.end().catch(() => undefined);
-  }
-  const c = await adminClient(t, admin, t.database, o);
-  try {
-    await run(targetSteps(c, t, o));
-  } finally {
-    await c.end().catch(() => undefined);
   }
   return changed;
 }
@@ -136,9 +143,17 @@ function databaseSteps(c: pg.Client, t: BootstrapTarget): Step[] {
 }
 
 function targetSteps(c: pg.Client, t: BootstrapTarget, o: BootstrapOptions): Step[] {
-  type Role = { login: boolean; super: boolean; createdb: boolean; createrole: boolean };
+  type Role = { login: boolean; super: boolean; createdb: boolean; createrole: boolean; privileged: boolean };
   const role = () =>
-    one<Role>(c, 'SELECT rolcanlogin AS login, rolsuper AS super, rolcreatedb AS createdb, rolcreaterole AS createrole FROM pg_roles WHERE rolname = $1', [t.user]);
+    one<Role>(
+      c,
+      `SELECT rolcanlogin AS login, rolsuper AS super, rolcreatedb AS createdb, rolcreaterole AS createrole,
+              rolbypassrls OR rolreplication OR CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rds_superuser')
+                THEN pg_has_role(rolname, 'rds_superuser', 'MEMBER') ELSE false END AS privileged
+         FROM pg_roles WHERE rolname = $1`,
+      [t.user]
+    );
+  const admin = adminOf(c);
   const ok = async (text: string, params: unknown[]) => !!(await one<{ ok: boolean }>(c, text, params))?.ok;
   const searchPath = `${t.schema}, public`;
   const steps: Step[] = [
@@ -147,10 +162,12 @@ function targetSteps(c: pg.Client, t: BootstrapTarget, o: BootstrapOptions): Ste
       async check() {
         const r = await role();
         if (r?.super) throw new BootstrapError(`role ${t.user} is a superuser; refusing it as the app role`);
+        if (r?.privileged) throw new BootstrapError(`role ${t.user} has BYPASSRLS, REPLICATION or rds_superuser; refusing it as the app role`);
         return !!r && r.login && !r.createdb && !r.createrole;
       },
       async apply() {
         if (await role()) {
+          await admin.need(t.user, 'alter it');
           await c.query(`ALTER ROLE ${id(t.user)} LOGIN NOCREATEDB NOCREATEROLE`);
           return `altered role ${t.user} to LOGIN NOCREATEDB NOCREATEROLE`;
         }
@@ -171,6 +188,7 @@ function targetSteps(c: pg.Client, t: BootstrapTarget, o: BootstrapOptions): Ste
         return ok(`SELECT pg_has_role($1, 'rds_iam', 'MEMBER') AS ok`, [t.user]);
       },
       async apply() {
+        await admin.need('rds_iam', `grant it to ${t.user}`);
         await c.query(`GRANT rds_iam TO ${id(t.user)}`);
         return `granted rds_iam to ${t.user}`;
       }
@@ -188,6 +206,7 @@ function targetSteps(c: pg.Client, t: BootstrapTarget, o: BootstrapOptions): Ste
         return (r?.cfg ?? []).some((e) => e.replace(/"/g, '') === `search_path=${searchPath}`);
       },
       async apply() {
+        await admin.need(t.user, 'set its search_path');
         await c.query(`ALTER ROLE ${id(t.user)} SET search_path = ${id(t.schema)}, public`);
         return `set search_path of ${t.user} to ${searchPath}`;
       }
@@ -213,8 +232,12 @@ function targetSteps(c: pg.Client, t: BootstrapTarget, o: BootstrapOptions): Ste
       what: `schema ${t.schema} owned by ${t.user}`,
       check: async () => (await one<{ owner: string }>(c, 'SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = $1', [t.schema]))?.owner === t.user,
       async apply() {
-        const exists = !!(await one(c, 'SELECT 1 FROM pg_namespace WHERE nspname = $1', [t.schema]));
-        await asRole(c, t.user, () =>
+        const owner = (await one<{ owner: string }>(c, 'SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = $1', [t.schema]))?.owner;
+        const exists = owner !== undefined;
+        if (exists && !(await ok(`SELECT pg_has_role(current_user, $1, 'USAGE') AS ok`, [owner]))) {
+          throw new BootstrapError(`schema ${t.schema} is owned by ${owner}, which the admin cannot act as; change its owner to ${t.user} or drop it`);
+        }
+        await asRole(c, admin, t.user, () =>
           c.query(exists ? `ALTER SCHEMA ${id(t.schema)} OWNER TO ${id(t.user)}` : `CREATE SCHEMA ${id(t.schema)} AUTHORIZATION ${id(t.user)}`)
         );
         return exists ? `changed owner of schema ${t.schema} to ${t.user}` : `created schema ${t.schema} owned by ${t.user}`;
@@ -235,6 +258,14 @@ function targetSteps(c: pg.Client, t: BootstrapTarget, o: BootstrapOptions): Ste
         await c.query(`GRANT USAGE ON SCHEMA public TO ${id(t.user)}`);
         return `granted USAGE on schema public to ${t.user}`;
       }
+    },
+    {
+      what: `no CREATE on schema public for ${t.user}`,
+      check: async () => !(await ok(`SELECT has_schema_privilege($1, 'public', 'CREATE') AS ok`, [t.user])),
+      async apply() {
+        await c.query('REVOKE CREATE ON SCHEMA public FROM PUBLIC');
+        return 'revoked CREATE on schema public from PUBLIC';
+      }
     }
   );
   return steps;
@@ -242,13 +273,14 @@ function targetSteps(c: pg.Client, t: BootstrapTarget, o: BootstrapOptions): Ste
 
 /** Runs `fn` able to SET ROLE to `role`. A PG16 CREATEROLE admin (the RDS master) holds only ADMIN on roles it
  *  created; the grant it takes here is revoked in the same transaction. */
-async function asRole(c: pg.Client, role: string, fn: () => Promise<unknown>): Promise<void> {
-  const v16 = (await one<{ v: number }>(c, `SELECT current_setting('server_version_num')::int AS v`))!.v >= 160000;
+async function asRole(c: pg.Client, admin: AdminRights, role: string, fn: () => Promise<unknown>): Promise<void> {
+  const v16 = await admin.v16();
   const can = (await one<{ ok: boolean }>(c, `SELECT pg_has_role(current_user, $1, '${v16 ? 'SET' : 'MEMBER'}') AS ok`, [role]))!.ok;
   if (can) {
     await fn();
     return;
   }
+  await admin.need(role, 'make it a schema owner');
   await c.query('BEGIN');
   try {
     await c.query(`GRANT ${id(role)} TO CURRENT_USER${v16 ? ' WITH INHERIT FALSE, SET TRUE' : ''}`);
@@ -259,4 +291,29 @@ async function asRole(c: pg.Client, role: string, fn: () => Promise<unknown>): P
     await c.query('ROLLBACK').catch(() => undefined);
     throw e;
   }
+}
+
+interface AdminRights {
+  v16(): Promise<boolean>;
+  /** Throws a BootstrapError naming `role` unless the admin may administer it. */
+  need(role: string, why: string): Promise<void>;
+}
+
+/** PG16 needs the ADMIN option to alter or grant a role; before 16, CREATEROLE sufficed. */
+function adminOf(c: pg.Client): AdminRights {
+  let info: Promise<{ v16: boolean; super: boolean; createrole: boolean }> | null = null;
+  const get = () =>
+    (info ??= one<{ v: number; super: boolean; createrole: boolean }>(
+      c,
+      `SELECT current_setting('server_version_num')::int AS v, rolsuper AS super, rolcreaterole AS createrole FROM pg_roles WHERE rolname = current_user`
+    ).then((r) => ({ v16: r!.v >= 160000, super: r!.super, createrole: r!.createrole })));
+  return {
+    v16: async () => (await get()).v16,
+    async need(role, why) {
+      const a = await get();
+      if (a.super || (!a.v16 && a.createrole)) return;
+      const r = await one<{ ok: boolean }>(c, `SELECT pg_has_role(current_user, $1, 'MEMBER WITH ADMIN OPTION') AS ok`, [role]);
+      if (!r?.ok) throw new BootstrapError(`the admin has no ADMIN option on role ${role} (needed to ${why})`);
+    }
+  };
 }

@@ -126,6 +126,38 @@ describe.skipIf(!isPg)('bootstrap', () => {
     await expect(bootstrap(target(n), superAdmin(), quiet)).rejects.toThrow(/is a superuser/);
   });
 
+  it('refuses an admin that is the app role, before changing anything', async () => {
+    const n = names();
+    await expect(bootstrap(target(n, { user: SUPER }), superAdmin(), quiet)).rejects.toThrow(/admin user .* is the app role/);
+    // Refused before connecting: nothing listens on port 1.
+    await expect(bootstrap(target(n, { user: SUPER, port: 1 }), superAdmin(), quiet)).rejects.toThrow(/admin user .* is the app role/);
+    expect(await su(async (c) => (await c.query('SELECT 1 FROM pg_database WHERE datname = $1', [n.db])).rowCount)).toBe(0);
+  });
+
+  it('refuses an app role with BYPASSRLS, REPLICATION or rds_superuser membership', async () => {
+    const made = await su(async (c) => (await c.query(`SELECT 1 FROM pg_roles WHERE rolname = 'rds_superuser'`)).rowCount === 0 && (await c.query('CREATE ROLE rds_superuser NOLOGIN'), true));
+    if (made) cleanups.unshift(() => su(async (c) => void (await c.query('DROP ROLE IF EXISTS rds_superuser'))));
+    for (const attr of ['BYPASSRLS', 'REPLICATION', 'IN ROLE rds_superuser']) {
+      const n = names();
+      await su((c) => c.query(`CREATE ROLE ${id(n.app)} LOGIN ${attr}`));
+      await expect(bootstrap(target(n), superAdmin(), quiet)).rejects.toThrow(/refusing it as the app role/);
+    }
+  });
+
+  it('serialises concurrent runs on an advisory lock', async () => {
+    const n = names();
+    const [a, b] = await Promise.all([bootstrap(target(n), superAdmin(), quiet), bootstrap(target(n), superAdmin(), quiet)]);
+    expect([a, b].map((x) => x.length).sort()).toEqual([0, 5]);
+  });
+
+  it('revokes CREATE on schema public from PUBLIC', async () => {
+    const n = names();
+    await bootstrap(target(n), superAdmin(), quiet);
+    await su((c) => c.query('GRANT CREATE ON SCHEMA public TO PUBLIC'), n.db);
+    expect(await bootstrap(target(n), superAdmin(), quiet)).toEqual(['revoked CREATE on schema public from PUBLIC']);
+    expect(await bootstrap(target(n), superAdmin(), quiet)).toEqual([]);
+  });
+
   it('aws-rds-iam: grants rds_iam and sets no password', async () => {
     const n = names();
     const made = await su(async (c) => (await c.query(`SELECT 1 FROM pg_roles WHERE rolname = 'rds_iam'`)).rowCount === 0 && (await c.query('CREATE ROLE rds_iam NOLOGIN'), true));
@@ -144,16 +176,36 @@ describe.skipIf(!isPg)('bootstrap', () => {
     await expect(bootstrap(target(n, { iam: true, appPassword: null }), superAdmin(), quiet)).rejects.toThrow(/rds_iam does not exist/);
   });
 
-  it('works as a non-superuser CREATEDB CREATEROLE admin (the RDS master) and leaves it no SET on the app role', async () => {
-    const n = names();
+  /** A CREATEDB CREATEROLE admin, as the RDS master; the superuser pre-creates the database and pgvector (untrusted). */
+  async function rdsLikeAdmin(n: ReturnType<typeof names>): Promise<AdminCredential> {
     const adminPw = `adm-${randomBytes(9).toString('hex')}`;
     await su(async (c) => {
       await c.query(`CREATE ROLE ${id(n.admin)} LOGIN CREATEDB CREATEROLE PASSWORD ${pg.escapeLiteral(adminPw)}`);
-      // pgvector is untrusted; on RDS rds_superuser creates it.
       await c.query(`CREATE DATABASE ${id(n.db)} OWNER ${id(n.admin)}`);
     });
     await su((c) => c.query('CREATE EXTENSION vector SCHEMA public'), n.db);
-    const admin: AdminCredential = { user: n.admin, password: adminPw, secrets: [adminPw] };
+    return { user: n.admin, password: adminPw, secrets: [adminPw] };
+  }
+
+  it('a non-superuser admin is told who owns a foreign schema or which role it lacks ADMIN on', async () => {
+    const n = names();
+    const admin = await rdsLikeAdmin(n);
+    await su((c) => c.query(`CREATE SCHEMA fleet AUTHORIZATION ${id(SUPER)}`), n.db);
+    const e1 = (await bootstrap(target(n), admin, quiet).catch((e: Error) => e)) as Error & { code?: string };
+    expect(e1.message).toMatch(new RegExp(`schema fleet is owned by ${SUPER}`));
+    expect(e1.code).toBeUndefined();
+
+    const m = names();
+    const admin2 = await rdsLikeAdmin(m);
+    await su((c) => c.query(`CREATE ROLE ${id(m.app)} LOGIN`));
+    const e2 = (await bootstrap(target(m), admin2, quiet).catch((e: Error) => e)) as Error & { code?: string };
+    expect(e2.message).toMatch(new RegExp(`no ADMIN option on role ${m.app}`));
+    expect(e2.code).toBeUndefined();
+  });
+
+  it('works as a non-superuser CREATEDB CREATEROLE admin (the RDS master) and leaves it no SET on the app role', async () => {
+    const n = names();
+    const admin = await rdsLikeAdmin(n);
     expect(await bootstrap(target(n), admin, quiet)).toEqual([
       `created role ${n.app} (LOGIN, password set)`,
       `set search_path of ${n.app} to fleet, public`,
@@ -175,10 +227,13 @@ describe.skipIf(!isPg)('bootstrap', () => {
 });
 const ARN = 'arn:aws:secretsmanager:us-east-1:567639518918:secret:fleet-agent-infra-use1-rds--connection-string-glXLj2';
 
+// Output is scrubbed of the admin password, which is "fleet" on CI; the schema must not collide.
+const CLI_SCHEMA = 'fb_store';
+
 function hostConfig(n: ReturnType<typeof names>): string {
   const dir = mkdtempSync(join(tmpdir(), 'fh-boot-'));
   const path = join(dir, 'config.yaml');
-  const dbBlock = { host: HOST, port: PORT, database: n.db, user: n.app, password: { kind: 'env', name: 'FB_APP_PW' }, ssl: 'disable', poolMax: 2 };
+  const dbBlock = { host: HOST, port: PORT, database: n.db, user: n.app, password: { kind: 'env', name: 'FB_APP_PW' }, ssl: 'disable', poolMax: 2, schema: CLI_SCHEMA };
   writeFileSync(path, `workspace: { id: 01JC0000000000000000000000, name: boot }\ngrants:\n  - { team: acme/platform, tier: session }\ndb: ${JSON.stringify(dbBlock)}\n`);
   return path;
 }
@@ -197,7 +252,7 @@ describe.skipIf(!isPg)('fleet-host bootstrap / migrate (CLI)', () => {
     const secret = JSON.stringify({ DB_USER: SUPER, DB_PASSWORD: SUPER_PW });
     const first = await cmd(['bootstrap', '--admin-secret-arn', ARN, '--admin-user-field', 'DB_USER', '--admin-password-field', 'DB_PASSWORD'], env, async () => secret);
     expect(first.code).toBe(0);
-    expect(first.last).toMatchObject({ msg: 'bootstrap complete', database: n.db, role: n.app, schema: 'fleet' });
+    expect(first.last).toMatchObject({ msg: 'bootstrap complete', database: n.db, role: n.app, schema: CLI_SCHEMA });
     expect((first.last.changed as string[]).length).toBe(5);
     expect(first.out).not.toContain(n.appPw);
     if (url?.password) expect(first.out).not.toContain(SUPER_PW);
@@ -216,7 +271,7 @@ describe.skipIf(!isPg)('fleet-host bootstrap / migrate (CLI)', () => {
     try {
       await expect(app.query(`CREATE DATABASE ${id(`${n.db}_x`)}`)).rejects.toMatchObject({ code: '42501' });
       await expect(app.query(`CREATE ROLE ${id(`${n.app}_x`)}`)).rejects.toMatchObject({ code: '42501' });
-      expect((await app.query('SELECT current_schema() AS s')).rows[0].s).toBe('fleet');
+      expect((await app.query('SELECT current_schema() AS s')).rows[0].s).toBe(CLI_SCHEMA);
     } finally {
       await app.end();
     }

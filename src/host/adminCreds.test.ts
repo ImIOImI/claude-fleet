@@ -54,6 +54,12 @@ describe('resolveAdminCredential: Secrets Manager', () => {
     const e = await failure(resolveAdminCredential({ ...secret(), arn: 'arn:aws:s3:::bucket' }, { env: {}, getSecret: fake('{}'), target }));
     expect(e.message).toMatch(/not a Secrets Manager secret ARN/);
   });
+
+  it('accepts an RDS-managed secret ARN (rds!cluster-…)', async () => {
+    const rds = 'arn:aws:secretsmanager:us-east-1:567639518918:secret:rds!cluster-0a1b2c3d-4e5f-6789-abcd-ef0123456789-AbCdEf';
+    const c = await resolveAdminCredential({ ...secret(), arn: rds }, { env: {}, getSecret: fake(JSON.stringify({ username: 'm', password: PW })), target });
+    expect(c.user).toBe('m');
+  });
 });
 
 describe('resolveAdminCredential: file, env, aws-rds-iam', () => {

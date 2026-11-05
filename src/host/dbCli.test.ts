@@ -89,6 +89,12 @@ describe('runDbCommand', () => {
     }
   });
 
+  it('--admin-iam refuses a db: with ssl disabled', async () => {
+    const r = await run(['bootstrap', '--admin-iam', '--admin-user', 'm', '--region', 'us-east-1'], { FLEET_HOST_CONFIG: config(closedDb) });
+    expect(r.code).toBe(2);
+    expect(String(r.last.error)).toMatch(/--admin-iam needs ssl "verify-full"/);
+  });
+
   it('usage errors exit 2 and print the usage', async () => {
     const r = await run(['migrate', '--force'], {});
     expect(r.code).toBe(2);
