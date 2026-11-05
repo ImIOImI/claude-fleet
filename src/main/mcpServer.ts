@@ -1137,7 +1137,7 @@ export const TOOLS: Tool[] = [
       `${DEFAULT_LIMIT}, max ${MAX_LIMIT}). Writes/DDL/multi-statement are rejected.`,
     pgDescription:
       'Run a single read-only Postgres SELECT against your workspace data. Tables: events, sessions, ' +
-      'broker_sessions, session_summaries, session_tags, usage_events, perf_events — row-level security limits ' +
+      'broker_sessions, session_summaries, session_tags, usage_events, perf_events, port_exposures — row-level security limits ' +
       'them to the rows you may read, so SELECT freely (joins, aggregates, GROUP BY, to_timestamp(ts / 1000.0) for UTC). ' +
       'raw_jsonl is excluded unless include_raw=true. ' +
       'Args: sql (required), params (array of values bound to $1, $2, …), include_raw (bool), max_rows (default ' +

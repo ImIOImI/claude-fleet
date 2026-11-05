@@ -38,6 +38,7 @@ async function seed(): Promise<void> {
     await queryRows('INSERT INTO usage_events (ts, workspace_id, session_id, kind) VALUES (?, ?, ?, ?)', [1, ws, s, 'search-impression']);
     await queryRows('INSERT INTO perf_events (ts, kind, workspace_id, name) VALUES (?, ?, ?, ?)', [1, 'span', ws, `perf-${ws}`]);
     await queryRows("INSERT INTO errors (ts, workspace_id, source, level, type, message) VALUES (?, ?, 'main', 'error', 'x', ?)", [1, ws, `err-${ws}`]);
+    await queryRows('INSERT INTO port_exposures (id, workspace_id, port, source) VALUES (?, ?, ?, ?)', [`pe-${ws}`, ws, 5173, 'declared']);
   }
   await queryRows("INSERT INTO perf_events (ts, kind, workspace_id, name) VALUES (1, 'stall', NULL, 'global')");
 }
