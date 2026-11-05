@@ -117,6 +117,17 @@ describe('CaptureScheduler — ingest triggers', () => {
     await s.drain();
     expect(runs.start).not.toHaveBeenCalled();
   });
+  it('a target that is not running (resolver returns null) launches nothing and uses no daily-cap slot', async () => {
+    const { s, runs, exec } = setup({ cap: 1, target: async (ws) => (ws === 'stopped' ? null : { kind: 'container' as const, workspaceId: ws, cwd: '/workspace' }) });
+    s.onIngest({ workspaceId: 'stopped', sessionId: 's1' });
+    await s.drain();
+    expect(runs.countSince).not.toHaveBeenCalled();
+    expect(runs.start).not.toHaveBeenCalled();
+    expect(exec).not.toHaveBeenCalled();
+    s.onIngest({ workspaceId: 'w', sessionId: 's2' });
+    await s.drain();
+    expect(runs.start).toHaveBeenCalledTimes(1);
+  });
   it('marks timed-out runs', async () => {
     const { s, runs } = setup({ exec: async () => ({ exitCode: 124, stdout: '', stderr: '', timedOut: true }) });
     s.onIngest({ workspaceId: 'w', sessionId: 's9' });

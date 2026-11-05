@@ -215,7 +215,7 @@ export class CaptureScheduler {
     const settings = await this.d.settings(p.workspaceId);
     if (!settings?.enabled) return; // switched off while queued
     const target = await this.d.target(p.workspaceId);
-    if (!target) return;
+    if (!target) { this.d.log('capture-skipped-no-target', { sessionId: p.sessionId, workspaceId: p.workspaceId, trigger: p.trigger }); return; }
     const forkSessionId = this.d.newUuid();
     const runId = await this.admit(p, forkSessionId, settings.captureVisibility);
     if (!runId) return;

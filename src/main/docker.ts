@@ -347,6 +347,11 @@ async function findContainerById(
   return raw[0];
 }
 
+/** Whether the workspace's container exists and is running (not paused/stopped). */
+export async function isContainerRunning(id: string): Promise<boolean> {
+  return (await findContainerById(id))?.State === 'running';
+}
+
 /**
  * Live workspaces — those whose Docker container currently exists
  * (running or stopped). Does not include "deleted" workspaces (manifest

@@ -41,7 +41,7 @@ import { onCaptureSettingsChanged } from './claims/captureSettingsEvents.js';
 import { ClaimService } from './claims/claimService.js';
 import { CaptureScheduler } from './claims/captureScheduler.js';
 import { loadCaptureForks } from './claims/captureForks.js';
-import { killLocalCaptures, runCapture } from './claims/captureExec.js';
+import { killLocalCaptures, resolveCaptureTarget, runCapture } from './claims/captureExec.js';
 import { ensureContainerRetention } from './claims/retention.js';
 import { effectiveCaptureSettings } from '../preload/captureSettings.js';
 import { randomUUID } from 'node:crypto';
@@ -311,14 +311,8 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
           return m ? effectiveCaptureSettings(m) : null;
         },
         dailyCap: () => getKnowledgeCaptureDailyCap(),
-        target: async (ws) => {
-          const m = await readWorkspaceManifest(ws);
-          if (!m) return null;
-          if (m.kind === 'container') {
-            return { kind: 'container', workspaceId: ws, cwd: `/workspace/${m.workspaceSubdir}`.replace(/\/$/, '') || '/workspace' };
-          }
-          return { kind: 'local', workspaceId: ws, launcher: m.launcher ?? { mode: 'native' }, workspaceRoot: m.workspaceRoot };
-        },
+        // Null for a container that isn't running, before admit: no daily-cap slot.
+        target: (ws) => resolveCaptureTarget(ws),
         topTopics: async (ws) => [...new Set((await claimsSvc.search(ws, { query: 'fleet', limit: 20 })).results.flatMap((r) => r.topics))].slice(0, 15),
         exec: (t, args, timeoutMs) => runCapture(t, args, timeoutMs),
         fleetToolNames: TOOLS.map((t) => t.name),

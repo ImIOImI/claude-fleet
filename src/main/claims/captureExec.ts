@@ -1,7 +1,7 @@
 // Knowledge capture (#483): run a headless fork in the session's own backend.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { homedir } from 'node:os';
-import { execScript as dockerExecScript, managedMcpConfigJson } from '../docker.js';
+import { execScript as dockerExecScript, isContainerRunning, managedMcpConfigJson } from '../docker.js';
 import { buildEnv as localBuildEnv, ensureMcpConfig as localEnsureMcpConfig, resolveClaude as localResolveClaude } from '../local.js';
 import { logError } from '../errorLog.js';
 import { killTree } from '../automations/hostScript.js';
@@ -13,7 +13,7 @@ import {
   wslPassKeys,
   type WorkspaceLauncher
 } from '../localLauncher.js';
-import { readWorkspaceManifest } from '../workspaces.js';
+import { readWorkspaceManifest, type WorkspaceSpec } from '../workspaces.js';
 import { effectiveCaptureSettings } from '../../preload/captureSettings.js';
 import { ensureLocalRetentionSettings } from './retention.js';
 
@@ -113,6 +113,26 @@ const DEFAULT_DEPS: CaptureExecDeps = {
     return ensureLocalRetentionSettings(id, effectiveCaptureSettings(m).transcriptRetentionDays, launcher);
   }
 };
+
+export interface TargetDeps {
+  readManifest: (id: string) => Promise<WorkspaceSpec | null>;
+  containerRunning: (id: string) => Promise<boolean>;
+}
+const DEFAULT_TARGET_DEPS: TargetDeps = { readManifest: readWorkspaceManifest, containerRunning: isContainerRunning };
+
+/** Where a workspace's capture fork would run, or null when it can't run now:
+ *  no manifest, or a container that isn't running (paused, stopped, gone, or
+ *  the daemon is unreachable). Resolved before admit, so a skipped target never
+ *  consumes a daily-cap slot. */
+export async function resolveCaptureTarget(ws: string, deps: TargetDeps = DEFAULT_TARGET_DEPS): Promise<CaptureTarget | null> {
+  const m = await deps.readManifest(ws);
+  if (!m) return null;
+  if (m.kind === 'container') {
+    if (!(await deps.containerRunning(ws).catch(() => false))) return null;
+    return { kind: 'container', workspaceId: ws, cwd: `/workspace/${m.workspaceSubdir}`.replace(/\/$/, '') || '/workspace' };
+  }
+  return { kind: 'local', workspaceId: ws, launcher: m.launcher ?? { mode: 'native' }, workspaceRoot: m.workspaceRoot };
+}
 
 export async function runCapture(target: CaptureTarget, args: string[], timeoutMs: number, deps: CaptureExecDeps = DEFAULT_DEPS): Promise<ExecOutcome> {
   if (target.kind === 'container') {

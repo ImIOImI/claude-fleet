@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
 vi.mock('electron', () => ({ app: { getPath: () => '/tmp', isPackaged: false } }));
-const { runCapture, spawnCaptureProcess, killLocalCaptures } = await import('./captureExec.js');
+const { runCapture, spawnCaptureProcess, killLocalCaptures, resolveCaptureTarget } = await import('./captureExec.js');
 
 describe('runCapture', () => {
   it('container: cds into the session cwd and runs quoted claude args via execScript', async () => {
@@ -136,6 +136,29 @@ describe('runCapture', () => {
     // args[7] should be the full exec command with --settings appended and WSL-translated path
     expect(args[7]).toContain("'--settings'");
     expect(args[7]).toContain("'/mnt/c/state/w7/claude-retention.settings.json'");
+  });
+});
+
+describe('resolveCaptureTarget', () => {
+  const manifests: Record<string, unknown> = {
+    c1: { id: 'c1', kind: 'container', workspaceSubdir: 'app' },
+    c2: { id: 'c2', kind: 'container', workspaceSubdir: '' },
+    l1: { id: 'l1', kind: 'local', workspaceRoot: '/repo' }
+  };
+  const deps = (running: Set<string>) => ({
+    readManifest: async (id: string) => (manifests[id] ?? null) as never,
+    containerRunning: vi.fn(async (id: string) => running.has(id))
+  });
+  it('skips a container that is not running (no fork, no daily-cap slot) and resolves running/local ones', async () => {
+    const d = deps(new Set(['c2']));
+    expect(await resolveCaptureTarget('c1', d)).toBeNull();
+    expect(await resolveCaptureTarget('c2', d)).toEqual({ kind: 'container', workspaceId: 'c2', cwd: '/workspace' });
+    expect(await resolveCaptureTarget('l1', d)).toEqual({ kind: 'local', workspaceId: 'l1', launcher: { mode: 'native' }, workspaceRoot: '/repo' });
+    expect(await resolveCaptureTarget('gone', d)).toBeNull();
+    expect(d.containerRunning).not.toHaveBeenCalledWith('l1');
+  });
+  it('treats a failed container-state lookup (daemon down) as not running', async () => {
+    expect(await resolveCaptureTarget('c1', { ...deps(new Set()), containerRunning: async () => { throw new Error('daemon down'); } })).toBeNull();
   });
 });
 
