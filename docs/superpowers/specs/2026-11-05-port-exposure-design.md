@@ -17,6 +17,7 @@ Make exposure intentional: an agent declares the port it wants the user to see, 
 - Remote (fleet-host) workspaces.
 - An allow/deny permission gate — the preview path is already loopback-only and created on click.
 - A UI panel for the evaluation metrics; analysis is SQL via fleet-state `query`.
+- claude's `/login` OAuth callback port (#405). It becomes undeclared/silent here, which is correct — Preview never completed that flow; #405 replaces it with a `BROWSER` shim.
 
 ## Design
 
