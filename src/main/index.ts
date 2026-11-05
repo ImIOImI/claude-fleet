@@ -29,6 +29,7 @@ import { registerAutomationIpc } from './automations/automationIpc.js';
 import { startPresence, attachKeepRunning, markQuitting, presenceDir, registerPresenceIpc } from './inbox/presence.js';
 import { getKeepRunningInTray, setKeepRunningInTray, getStoreConfig } from './config.js';
 import { openPgStores, type PgStores } from './store/pgStores.js';
+import { storeStartupOutcome, storeStartupPrompt } from './store/startupPrompt.js';
 import { ensureWorkspaceClaudeJson } from './docker.js';
 import { hardwareAccelDisabledAtStartup } from './config.js';
 import { setWorkspaceDefault } from './mirrorPolicy.js';
@@ -173,10 +174,12 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     }
   } catch (e) {
     logError({ source: 'main', type: 'store-open-failed', level: 'error', message: String(e) });
-    dialog.showErrorBox('Postgres store unavailable',
-      `${String(e)}\n\nFix ${join(app.getPath('userData'), 'config.json')}, or remove its "store" key to use the built-in SQLite store.`);
-    app.exit(1);
-    return;
+    const prompt = storeStartupPrompt(e, join(app.getPath('userData'), 'config.json'));
+    const { response } = await dialog.showMessageBox({ type: 'error', noLink: true, ...prompt });
+    if (storeStartupOutcome(prompt, response) === 'quit') {
+      app.exit(1);
+      return;
+    }
   }
 
   // Authoritative inbox (#407): opens in mock AND real mode. state.db is a

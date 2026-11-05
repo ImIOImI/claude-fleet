@@ -44,7 +44,8 @@ import {
   setPerfTelemetry,
   getPerfOtlp,
   setPerfOtlp,
-  getGithubClientIdConfig
+  getGithubClientIdConfig,
+  configUnreadablePath
 } from './config.js';
 import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk, perfSetSpanContext, recordLatencySample, setPerfStateListener, perfNotePowerEvent, perfSpanAsync, setPerfMemorySource } from './perf.js';
 import { resolvePerfConfig } from './perfConfig.js';
@@ -1728,6 +1729,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // workspace's private folder (<root>/<id>) plus the shared folder
   // (<root>/shared). `sharedDir` is returned alongside so the renderer can
   // surface a "Shared" link without recomputing the join.
+  ipcMain.handle('config:unreadablePath', () => configUnreadablePath());
   ipcMain.handle('config:get', async () => ({
     fleetRoot: await getFleetRoot(),
     sharedDir: await fleetSharedDir(),

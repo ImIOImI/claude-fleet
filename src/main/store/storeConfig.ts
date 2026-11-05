@@ -31,6 +31,9 @@ export type StoreConfig = { kind: 'sqlite' } | PostgresStoreConfig;
 
 export class StoreConfigError extends Error {}
 
+/** config.json exists but isn't valid JSON. */
+export class ConfigJsonError extends StoreConfigError {}
+
 export interface ParseOptions {
   /** fleet-host only: a desktop config.json is not a secret store. */
   allowStaticSecrets: boolean;

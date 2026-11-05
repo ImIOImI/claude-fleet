@@ -51,8 +51,10 @@ const {
   getKeepRunningInTray,
   setKeepRunningInTray,
   getGithubClientIdConfig,
-  getStoreConfig
+  getStoreConfig,
+  configUnreadablePath
 } = await import('./config.js');
+const { ConfigJsonError } = await import('./store/storeConfig.js');
 
 const configPath = () => join(userDataDir, 'config.json');
 
@@ -609,6 +611,7 @@ describe('identity.github.clientId', () => {
 describe('getStoreConfig', () => {
   it('defaults to SQLite and keeps a hand-edited store block across unrelated writes', async () => {
     expect(await getStoreConfig()).toEqual({ kind: 'sqlite' });
+    expect(await configUnreadablePath()).toBeNull();
     const store = { kind: 'postgres', env: 'DATABASE_URL' };
     await writeFile(configPath(), JSON.stringify({ store }));
     _resetConfigCacheForTests();
@@ -621,9 +624,12 @@ describe('getStoreConfig', () => {
     const broken = '{ "store": { "kind": "postgres", "env": "DATABASE_URL" }, ';
     await writeFile(configPath(), broken);
     _resetConfigCacheForTests();
+    await expect(getStoreConfig()).rejects.toThrow(ConfigJsonError);
     await expect(getStoreConfig()).rejects.toThrow(/config.json is not valid JSON/);
+    expect(await configUnreadablePath()).toBe(configPath());
     await expect(setKeepRunningInTray(true)).rejects.toThrow(/not valid JSON/);
     expect(await readFile(configPath(), 'utf8')).toBe(broken);
+    expect(await getKeepRunningInTray()).toBe(false);
   });
 
   it('throws on an invalid store block instead of falling back to SQLite', async () => {

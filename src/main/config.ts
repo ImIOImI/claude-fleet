@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { assertValidWorkspaceId } from './paths.js';
 import { toggleFavorite } from './ociCore.js';
-import { parseStoreConfig, StoreConfigError, type StoreConfig } from './store/storeConfig.js';
+import { ConfigJsonError, parseStoreConfig, type StoreConfig } from './store/storeConfig.js';
 
 /** Which plan the usage bar measures spend against. `custom` uses the
  *  user-entered token amount; the rest resolve to USAGE_BUDGET_PRESETS. */
@@ -369,11 +369,18 @@ export async function setKeepRunningInTray(enabled: boolean): Promise<void> {
   await write({ ...cfg, keepRunningInTray: enabled });
 }
 
+/** config.json's path when it exists but can't be read or parsed (settings
+ *  then run on defaults and can't be saved), else null. */
+export async function configUnreadablePath(): Promise<string | null> {
+  await read();
+  return unreadable ? configPath() : null;
+}
+
 /** The validated store choice. Throws StoreConfigError on an invalid `store`
  *  rather than falling back to SQLite, which would split the data. */
 export async function getStoreConfig(): Promise<StoreConfig> {
   const cfg = await read();
-  if (unreadable) throw new StoreConfigError('config.json is not valid JSON');
+  if (unreadable) throw new ConfigJsonError('config.json is not valid JSON');
   return parseStoreConfig(cfg.store, { allowStaticSecrets: false });
 }
 
