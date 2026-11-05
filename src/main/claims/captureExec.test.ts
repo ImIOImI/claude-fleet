@@ -6,7 +6,8 @@ const { runCapture } = await import('./captureExec.js');
 describe('runCapture', () => {
   it('container: cds into the session cwd and runs quoted claude args via execScript', async () => {
     const execScript = vi.fn(async () => ({ exitCode: 0, stdout: '{}', stderr: '', timedOut: false }));
-    await runCapture({ kind: 'container', workspaceId: 'w1', cwd: '/workspace/app' }, ['-p', "it's"], 300_000, { execScript } as never);
+    await runCapture({ kind: 'container', workspaceId: 'w1', cwd: '/workspace/app' }, ['-p', "it's"], 300_000,
+      { execScript, containerMcpConfig: () => '{"mcpServers":{}}' } as never);
     // NOTE: the brief's expected script used double-quote embedding
     // (`'it'"'"'s'`) for the escaped apostrophe, but the real `posixQuote` in
     // localLauncher.ts uses backslash-escaping (`'it'\''s'`) — verified by
@@ -14,7 +15,9 @@ describe('runCapture', () => {
     // than weakening it.
     expect(execScript).toHaveBeenCalledWith('w1', expect.objectContaining({
       automationId: 'knowledge-capture', timeoutMs: 300_000,
-      script: `cd '/workspace/app' && exec claude '-p' 'it'\\''s'`
+      // The fleet-state-only inline --mcp-config pairs with the fork's
+      // --strict-mcp-config, so no other server in ~/.claude.json loads.
+      script: `cd '/workspace/app' && exec claude '-p' 'it'\\''s' '--mcp-config' '{"mcpServers":{}}'`
     }));
   });
 

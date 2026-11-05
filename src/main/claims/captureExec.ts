@@ -1,7 +1,7 @@
 // Knowledge capture (#483): run a headless fork in the session's own backend.
 import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
-import { execScript as dockerExecScript } from '../docker.js';
+import { execScript as dockerExecScript, managedMcpConfigJson } from '../docker.js';
 import { buildEnv as localBuildEnv, ensureMcpConfig as localEnsureMcpConfig, resolveClaude as localResolveClaude } from '../local.js';
 import { logError } from '../errorLog.js';
 import {
@@ -23,6 +23,8 @@ export interface ExecOutcome { exitCode: number; stdout: string; stderr: string;
 
 export interface CaptureExecDeps {
   execScript: typeof dockerExecScript;
+  /** Inline `--mcp-config` JSON naming only the container's fleet-state server. */
+  containerMcpConfig: () => string;
   spawnFile: (file: string, args: string[], o: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }) => Promise<ExecOutcome>;
   buildEnv: (id: string) => Promise<NodeJS.ProcessEnv>;
   /** The workspace's own plain+secret env key names (not the values) — needed
@@ -50,6 +52,7 @@ function defaultSpawnFile(file: string, args: string[], o: { cwd: string; env: N
 
 const DEFAULT_DEPS: CaptureExecDeps = {
   execScript: dockerExecScript,
+  containerMcpConfig: managedMcpConfigJson,
   spawnFile: defaultSpawnFile,
   buildEnv: async (id) => {
     const m = await readWorkspaceManifest(id);
@@ -81,9 +84,10 @@ const DEFAULT_DEPS: CaptureExecDeps = {
 
 export async function runCapture(target: CaptureTarget, args: string[], timeoutMs: number, deps: CaptureExecDeps = DEFAULT_DEPS): Promise<ExecOutcome> {
   if (target.kind === 'container') {
-    // Container targets don't use --mcp-config: the fleet-state MCP server is
-    // already wired into the container's own ~/.claude.json.
-    const script = `cd ${posixQuote(target.cwd)} && exec claude ${args.map(posixQuote).join(' ')}`;
+    // The fork runs with --strict-mcp-config, so it ignores the container's
+    // ~/.claude.json servers: hand it the fleet-state entry (and only that) inline.
+    const fullArgs = [...args, '--mcp-config', deps.containerMcpConfig()];
+    const script = `cd ${posixQuote(target.cwd)} && exec claude ${fullArgs.map(posixQuote).join(' ')}`;
     return deps.execScript(target.workspaceId, { automationId: 'knowledge-capture', script, env: {}, timeoutMs });
   }
   const env = await deps.buildEnv(target.workspaceId);

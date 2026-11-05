@@ -137,12 +137,14 @@ The app launches a **headless fork** of a live session that extracts claims, wit
 ```
 claude -p "<capture prompt>" --resume <session-id> --fork-session \
   --model <session model> \
+  --tools "" --permission-mode dontAsk \
   --allowedTools mcp__claude-fleet-state__record_claim,mcp__claude-fleet-state__search_claims \
-  --max-turns 12 --output-format json
+  --disallowedTools <every other fleet-state tool> --strict-mcp-config \
+  --max-turns 12 --output-format json --mcp-config <fleet-state only>
 ```
 
 - The **same model** as the session by default (setting `model: "session"`), so the re-read of the conversation prefix hits the prompt cache. A specific model id may be configured instead; it gets no cache benefit.
-- **Tools are restricted** to the two claims tools, so the fork can't read files, run commands, or call other MCP tools.
+- **Tools are restricted** to the two claims tools, so the fork can't read files, run commands, or call other MCP tools. `--allowedTools` alone only *pre-approves* (it removes nothing, and user/project allow rules or a `bypassPermissions`/`auto` default would still apply), so the restriction is four flags together: `--tools ""` removes every built-in tool; `--permission-mode dontAsk` denies anything not pre-approved and overrides the user's default mode; `--disallowedTools` names every other fleet-state tool (derived from the server's `TOOLS`), and deny beats any settings allow rule such as `mcp__claude-fleet-state`; `--strict-mcp-config` plus a fleet-state-only `--mcp-config` drops every other MCP server (claude.ai connectors, user/project servers). Setting sources are not narrowed, because user settings may carry auth or endpoint env. Verified empirically (gate results, "C1 tool-restriction verification").
 - The **capture prompt** includes the run token (passed to `record_claim` as `capture_run`), the workspace's top existing topics, and, for search-hit captures, the search query ("someone searched for … and this session matched; what was it about and what did it learn?"). It instructs: search before recording; only durable, cross-session-useful knowledge; at most 10 claims; record nothing if nothing new; no secrets.
 - **Wall-clock timeout:** 5 minutes. On timeout the fork process is killed and the run is marked `timed-out`.
 - From the JSON output, the app records `fork_session_id`, usage (tokens and cost) and status in `capture_runs`. `claims_recorded` is counted from `claim_sources`.
@@ -196,7 +198,7 @@ Remove the `search_transcripts` description text that tells agents to call `mark
 
 - `fleet` claims are an **intentional, agent-authored exception to workspace isolation**. They're short statements an agent chose to publish, not transcript content. `private` claims stay with the authoring workspace.
 - The secret filter is a backstop, not a guarantee. The standing rule and capture prompt both forbid secrets.
-- Capture forks run with tools restricted to the two claims tools. They read only the conversation the user's own session already holds.
+- Capture forks can use only the two claims tools (`--tools ""`, `--permission-mode dontAsk`, `--disallowedTools` for every other fleet-state tool, `--strict-mcp-config`; see §5). They read only the conversation the user's own session already holds.
 - Provenance (`workspace_id`, `via`, `capture_run` → `session_id`) is host-stamped. Agents can't forge another workspace's or session's authorship.
 
 ## Feasibility gate (first implementation task)

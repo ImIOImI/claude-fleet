@@ -474,6 +474,13 @@ function managedMcpServerEntry(): {
   };
 }
 
+/** The fleet-state server alone, as an inline `--mcp-config` JSON string —
+ *  what a knowledge-capture fork passes with `--strict-mcp-config` (#483 §5)
+ *  so no other MCP server in the container's ~/.claude.json is loaded. */
+export function managedMcpConfigJson(): string {
+  return JSON.stringify({ mcpServers: { 'claude-fleet-state': managedMcpServerEntry() } });
+}
+
 /**
  * Ensure the per-workspace `~/.claude.json` seed exists, bind-mounted at
  * `/home/fleet/.claude.json`. claude-code stores its onboarding/account

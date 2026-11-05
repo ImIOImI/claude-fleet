@@ -27,6 +27,9 @@ export interface SchedulerDeps {
   target: (workspaceId: string) => Promise<CaptureTarget | null>;
   topTopics: (workspaceId: string) => Promise<string[]>;
   exec: (target: CaptureTarget, args: string[], timeoutMs: number) => Promise<ExecOutcome>;
+  /** Every fleet-state MCP tool name (mcpServer TOOLS) — all but the capture
+   *  tools are passed to the fork as --disallowedTools. */
+  fleetToolNames: readonly string[];
   newUuid: () => string;
   now: () => number;
   log: (msg: string, extra?: Record<string, unknown>) => void;
@@ -220,8 +223,8 @@ export class CaptureScheduler {
         return [] as string[];
       });
       const prompt = capturePrompt({ runToken: runId, topTopics, searchQuery: p.query, visibility: settings.captureVisibility });
-      // No mcpConfigPath: runCapture appends --mcp-config for local targets itself (Task 8 fix).
-      const out = await this.d.exec(target, captureArgs({ prompt, sessionId: p.sessionId, forkSessionId, model: p.model }), CAPTURE_TIMEOUT_MS);
+      // runCapture appends the backend's fleet-state-only --mcp-config (strict MCP).
+      const out = await this.d.exec(target, captureArgs({ prompt, sessionId: p.sessionId, forkSessionId, model: p.model, fleetToolNames: this.d.fleetToolNames }), CAPTURE_TIMEOUT_MS);
       if (out.timedOut) {
         await this.d.runs.finish(runId, { status: 'timed-out', usage: null, error: `timed out after ${CAPTURE_TIMEOUT_MS / 1000}s`, now: this.d.now() });
         return;

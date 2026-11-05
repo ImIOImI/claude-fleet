@@ -32,6 +32,7 @@ function setup(o: {
     target: o.target ?? (async (ws: string) => ({ kind: 'container' as const, workspaceId: ws, cwd: '/workspace' })),
     topTopics: o.topTopics ?? (async () => []),
     exec,
+    fleetToolNames: ['list_sessions', 'record_claim', 'search_claims', 'get_config'],
     newUuid: (() => { let i = 0; return () => `fork-${++i}`; })(),
     now: () => NOW,
     log: () => undefined

@@ -2,16 +2,27 @@ import { describe, expect, it } from 'vitest';
 import { CAPTURE_TOOLS, captureArgs, capturePrompt, parseCaptureOutput } from './captureCommand.js';
 
 describe('captureArgs', () => {
-  it('forks with a pre-assigned id, same model, restricted tools, turn cap, json output', () => {
-    expect(captureArgs({ prompt: 'P', sessionId: 'live', forkSessionId: 'fork', model: 'claude-opus-5-5' })).toEqual([
+  const FLEET = ['list_sessions', 'query', 'record_claim', 'search_claims', 'retract_claim', 'get_config', 'set_capture_settings'];
+  it('forks with a pre-assigned id, no built-in tools, dontAsk, only record/search allowed, every other fleet tool denied, strict MCP', () => {
+    expect(captureArgs({ prompt: 'P', sessionId: 'live', forkSessionId: 'fork', model: 'claude-opus-5-5', fleetToolNames: FLEET })).toEqual([
       '-p', 'P', '--resume', 'live', '--fork-session', '--session-id', 'fork', '--model', 'claude-opus-5-5',
-      '--allowedTools', CAPTURE_TOOLS, '--max-turns', '12', '--output-format', 'json'
+      '--tools', '',
+      '--permission-mode', 'dontAsk',
+      '--allowedTools', 'mcp__claude-fleet-state__record_claim,mcp__claude-fleet-state__search_claims',
+      '--disallowedTools',
+      'mcp__claude-fleet-state__list_sessions,mcp__claude-fleet-state__query,mcp__claude-fleet-state__retract_claim,' +
+        'mcp__claude-fleet-state__get_config,mcp__claude-fleet-state__set_capture_settings',
+      '--strict-mcp-config',
+      '--max-turns', '12', '--output-format', 'json'
     ]);
+    expect(CAPTURE_TOOLS).toBe('mcp__claude-fleet-state__record_claim,mcp__claude-fleet-state__search_claims');
   });
-  it('omits --model when unknown and adds --mcp-config when given', () => {
-    const a = captureArgs({ prompt: 'P', sessionId: 'l', forkSessionId: 'f', model: null, mcpConfigPath: '/x/mcp.json' });
-    expect(a).not.toContain('--model');
-    expect(a.slice(-2)).toEqual(['--mcp-config', '/x/mcp.json']);
+  it('omits --model when unknown', () => {
+    expect(captureArgs({ prompt: 'P', sessionId: 'l', forkSessionId: 'f', model: null, fleetToolNames: FLEET })).not.toContain('--model');
+  });
+  it('refuses to build a fork without the fleet tool list (the deny list would be empty)', () => {
+    expect(() => captureArgs({ prompt: 'P', sessionId: 'l', forkSessionId: 'f', model: null, fleetToolNames: ['record_claim', 'search_claims'] }))
+      .toThrow(/fleet tool/);
   });
 });
 

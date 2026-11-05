@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setSessionMappingHandler, setSummaryStatusHandler, setQueryEmbedder, setUsageRecorder, setConfigResolver, setClaimHandlers, setCaptureSettingsHandlers, setSearchHitHook, STANDING_RULE, _resetTelemetryForTests, type ToolCtx } from './mcpServer.js';
 import type { SearchHitEvent } from './claims/searchHits.js';
+import { CAPTURE_TOOL_NAMES, captureArgs } from './claims/captureCommand.js';
 import { EMBED_DIM, EMBED_MODEL_ID } from './vectors.js';
 import { closeDb, openDb } from './db.js';
 import { PerfStore } from './perfStore.js';
@@ -856,6 +857,16 @@ describe('knowledge claims tools (#483)', () => {
   afterEach(() => setClaimHandlers(null));
   it('registers record_claim, search_claims, retract_claim', () => {
     expect(TOOLS.map((t) => t.name)).toEqual(expect.arrayContaining(['record_claim', 'search_claims', 'retract_claim']));
+  });
+  it('capture forks get the capture tools allowed and every other TOOLS name denied', () => {
+    const names = TOOLS.map((t) => t.name);
+    expect(names).toEqual(expect.arrayContaining([...CAPTURE_TOOL_NAMES]));
+    const args = captureArgs({ prompt: 'P', sessionId: 's', forkSessionId: 'f', model: null, fleetToolNames: names });
+    const denied = args[args.indexOf('--disallowedTools') + 1].split(',');
+    expect(denied).toHaveLength(names.length - CAPTURE_TOOL_NAMES.length);
+    expect(denied).toContain('mcp__claude-fleet-state__get_config');
+    expect(denied).toContain('mcp__claude-fleet-state__set_capture_settings');
+    expect(denied.some((d) => /record_claim|search_claims/.test(d))).toBe(false);
   });
   it('passes the host caller id, never a wire-supplied one', async () => {
     const seen: string[] = [];

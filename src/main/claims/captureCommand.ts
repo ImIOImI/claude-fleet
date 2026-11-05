@@ -1,7 +1,10 @@
 // Knowledge capture (#483): headless fork command, prompt, and output parsing.
 import type { CaptureVisibility } from '../../preload/captureSettings.js';
 
-export const CAPTURE_TOOLS = 'mcp__claude-fleet-state__record_claim,mcp__claude-fleet-state__search_claims';
+const FLEET_MCP_PREFIX = 'mcp__claude-fleet-state__';
+/** The only fleet-state tools a capture fork may use. */
+export const CAPTURE_TOOL_NAMES = ['record_claim', 'search_claims'] as const;
+export const CAPTURE_TOOLS = CAPTURE_TOOL_NAMES.map((n) => FLEET_MCP_PREFIX + n).join(',');
 
 export function capturePrompt(o: {
   runToken: string; topTopics: string[]; searchQuery?: string | null; visibility?: CaptureVisibility;
@@ -24,12 +27,33 @@ export function capturePrompt(o: {
   ].filter(Boolean).join('\n');
 }
 
-export function captureArgs(o: { prompt: string; sessionId: string; forkSessionId: string; model: string | null; mcpConfigPath?: string }): string[] {
+/** Headless fork argv (#483 §5). `--allowedTools` alone only PRE-APPROVES —
+ *  it removes nothing — so the fork is locked down explicitly:
+ *   - `--tools ""`                 no built-in tools at all (Bash/Read/Edit/Agent…)
+ *   - `--permission-mode dontAsk`  anything not pre-approved is DENIED, never
+ *                                  prompted; overrides a user's bypass/auto default
+ *   - `--allowedTools`             record_claim + search_claims only
+ *   - `--disallowedTools`          every OTHER fleet-state tool (the caller derives
+ *                                  the list from the server's TOOLS), so a settings
+ *                                  allow rule like `mcp__claude-fleet-state` can't
+ *                                  re-open them — deny beats allow
+ *   - `--strict-mcp-config`        no MCP server except the fleet-state one the
+ *                                  backend passes via `--mcp-config` (runCapture)
+ *  Setting sources are NOT narrowed: user settings may carry auth/endpoint env. */
+export function captureArgs(o: {
+  prompt: string; sessionId: string; forkSessionId: string; model: string | null; fleetToolNames: readonly string[];
+}): string[] {
+  const denied = o.fleetToolNames.filter((n) => !(CAPTURE_TOOL_NAMES as readonly string[]).includes(n));
+  if (denied.length === 0) throw new Error('knowledge capture: the fleet tool list is required to deny every non-capture fleet tool');
   return [
     '-p', o.prompt, '--resume', o.sessionId, '--fork-session', '--session-id', o.forkSessionId,
     ...(o.model ? ['--model', o.model] : []),
-    '--allowedTools', CAPTURE_TOOLS, '--max-turns', '12', '--output-format', 'json',
-    ...(o.mcpConfigPath ? ['--mcp-config', o.mcpConfigPath] : [])
+    '--tools', '',
+    '--permission-mode', 'dontAsk',
+    '--allowedTools', CAPTURE_TOOLS,
+    '--disallowedTools', denied.map((n) => FLEET_MCP_PREFIX + n).join(','),
+    '--strict-mcp-config',
+    '--max-turns', '12', '--output-format', 'json'
   ];
 }
 

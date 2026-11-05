@@ -8,7 +8,7 @@ import { resolvePerfConfig } from './perfConfig.js';
 import { getPerfTelemetry, getPerfOtlp, getKnowledgeCapture, getKnowledgeCaptureDailyCap } from './config.js';
 import { instrumentIpcHandle } from './perfIpc.js';
 import { EMBED_MODEL_ID } from './vectors.js';
-import { startMcpServer, stopMcpServer, ensureWorkspaceSocket, setMcpStatusListener, setQueryEmbedder, setClaimHandlers, setCaptureSettingsHandlers, setSearchHitHook } from './mcpServer.js';
+import { startMcpServer, stopMcpServer, ensureWorkspaceSocket, setMcpStatusListener, setQueryEmbedder, setClaimHandlers, setCaptureSettingsHandlers, setSearchHitHook, TOOLS } from './mcpServer.js';
 import { broadcastMcpStatus } from './mcpStatusBroadcast.js';
 import { ensureBuiltinLoadouts } from './loadouts.js';
 import { JsonlWatcher } from './jsonlWatcher.js';
@@ -314,6 +314,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         },
         topTopics: async (ws) => [...new Set((await claimsSvc.search(ws, { query: 'fleet', limit: 20 })).results.flatMap((r) => r.topics))].slice(0, 15),
         exec: (t, args, timeoutMs) => runCapture(t, args, timeoutMs),
+        fleetToolNames: TOOLS.map((t) => t.name),
         newUuid: () => randomUUID(),
         now: () => Date.now(),
         log: (message, extra) => logError({ source: 'main', level: 'info', type: 'knowledge-capture', message, extra })
