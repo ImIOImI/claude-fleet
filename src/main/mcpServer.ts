@@ -61,6 +61,17 @@ const isWindows = process.platform === 'win32';
 
 const PROTOCOL_VERSION = '2024-11-05';
 const SERVER_INFO = { name: 'claude-fleet-state', version: '1.0.0' };
+export const SERVER_INSTRUCTIONS =
+  'When you start a server for the user to view (dev server, docs preview, report), call expose_port with its port and a short label.';
+
+export function initializeResult(): Record<string, unknown> {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    capabilities: { tools: {} },
+    serverInfo: SERVER_INFO,
+    instructions: SERVER_INSTRUCTIONS
+  };
+}
 const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 1000;
 
@@ -170,6 +181,15 @@ export interface SkillHandlers {
 let skillHandlers: SkillHandlers | null = null;
 export function setSkillHandlers(h: SkillHandlers | null): void {
   skillHandlers = h;
+}
+
+/** Injected by ipc.ts: declared port exposure. callerId is host-assigned. */
+export interface PortExposureHandlers {
+  expose(callerId: string, args: Record<string, unknown>): Promise<unknown>;
+}
+let portExposureHandlers: PortExposureHandlers | null = null;
+export function setPortExposureHandlers(h: PortExposureHandlers | null): void {
+  portExposureHandlers = h;
 }
 
 /** Injected by ipc.ts: record a diagnostic from the runner's chapter-summary
@@ -622,11 +642,7 @@ class RpcError extends Error {
 function handleMethod(method: string, params: Record<string, unknown>, callerId: string): unknown {
   switch (method) {
     case 'initialize':
-      return {
-        protocolVersion: PROTOCOL_VERSION,
-        capabilities: { tools: {} },
-        serverInfo: SERVER_INFO
-      };
+      return initializeResult();
     case 'ping':
       return {};
     case 'tools/list':
@@ -876,6 +892,20 @@ function buildSnapshot(srcPath: string, allowed: Set<string>, includeRaw: boolea
         // "no perf data".
         if (!(e instanceof Error && /no such table/i.test(e.message))) throw e;
         mem.exec(`CREATE TABLE perf_events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, kind TEXT NOT NULL, workspace_id TEXT, session_id TEXT, name TEXT, dur_ms REAL, trace_id TEXT, span_id TEXT, meta TEXT)`);
+      }
+      try {
+        mem.prepare(
+          `CREATE TABLE port_exposures AS SELECT * FROM ${alias}.port_exposures WHERE ${scope}`
+        ).run(...params);
+      } catch (e) {
+        // Pre-v15 DB: an empty, correctly-shaped table instead of an error.
+        if (!(e instanceof Error && /no such table/i.test(e.message))) throw e;
+        mem.exec(
+          `CREATE TABLE port_exposures (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, session_id TEXT, ` +
+            `port INTEGER NOT NULL, cmdline TEXT, label TEXT, reason TEXT, source TEXT NOT NULL, ` +
+            `first_scanned_at INTEGER, declared_at INTEGER, popup_shown_at INTEGER, outcome TEXT, ` +
+            `opened_via TEXT, open_count INTEGER NOT NULL DEFAULT 0, ended_at INTEGER)`
+        );
       }
     } finally {
       mem.exec(`DETACH ${alias}`);
@@ -1172,7 +1202,7 @@ export const TOOLS: Tool[] = [
     name: 'query',
     description:
       'Run a single read-only SQL statement against your workspace data. Tables: events, sessions, ' +
-      'broker_sessions, session_summaries, session_tags, usage_events, perf_events — pre-filtered to the rows you may ' +
+      'broker_sessions, session_summaries, session_tags, usage_events, perf_events, port_exposures — pre-filtered to the rows you may ' +
       'read, so SELECT freely (joins, aggregates, GROUP BY, datetime(ts/1000,"unixepoch") for UTC). ' +
       'raw_jsonl is excluded unless include_raw=true. ' +
       'Args: sql (required), params (array of bound ? values), include_raw (bool), max_rows (default ' +
@@ -1657,6 +1687,24 @@ export const TOOLS: Tool[] = [
     run: (_db, a, ctx) => {
       if (!inboxHandlers) throw new Error('the inbox is unavailable');
       return inboxHandlers.notify(ctx.callerId, a);
+    }
+  },
+  {
+    name: 'expose_port',
+    description:
+      'Show the user a server you started in THIS workspace: raises a preview popup with an Open button. Call it ' +
+      'after starting something the user should look at (dev server, docs preview, report); not for test fixtures ' +
+      'or internal tools. Args: port (required; the OS ephemeral range 32768–60999 is rejected — bind a fixed port), ' +
+      'label (required, ≤80 chars, e.g. "Vite dev server"), reason (≤200 chars). Returns {status: shown|waiting}; ' +
+      'waiting means the popup appears once the port answers HTTP (within 30s).',
+    inputSchema: {
+      type: 'object',
+      properties: { port: { type: 'number' }, label: { type: 'string' }, reason: { type: 'string' } },
+      required: ['port', 'label']
+    },
+    run: (_db, a, ctx) => {
+      if (!portExposureHandlers) throw new Error('port exposure is unavailable');
+      return portExposureHandlers.expose(ctx.callerId, a);
     }
   },
   {
