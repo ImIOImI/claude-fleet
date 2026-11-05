@@ -1,7 +1,8 @@
-import { homedir } from 'node:os';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
 vi.mock('electron', () => ({ app: { getPath: () => '/tmp', isPackaged: false } }));
-const { runCapture } = await import('./captureExec.js');
+const { runCapture, spawnCaptureProcess, killLocalCaptures } = await import('./captureExec.js');
 
 describe('runCapture', () => {
   it('container: cds into the session cwd and runs quoted claude args via execScript', async () => {
@@ -39,7 +40,9 @@ describe('runCapture', () => {
     expect(args.slice(0, 6)).toEqual(['-d', 'Ubuntu', '--cd', '/home/t/repo', '--exec', '/bin/bash']);
     // --mcp-config is appended to the claude invocation, translated into the
     // in-distro /mnt/<drive> form (claude reads it INSIDE the distro).
-    expect(args[7]).toBe(`exec '/home/t/.local/bin/claude' '-p' 'x' '--mcp-config' '/mnt/c/Users/t/mcp.json'`);
+    // In-distro backstop: killing wsl.exe on the host doesn't reach the Linux
+    // process, so coreutils timeout (5s past the host timer, then SIGKILL) does.
+    expect(args[7]).toBe(`exec timeout -k 10 6 '/home/t/.local/bin/claude' '-p' 'x' '--mcp-config' '/mnt/c/Users/t/mcp.json'`);
     // wsl.exe itself needs a valid WINDOWS cwd (the Linux cwd rides --cd),
     // same as wrapSpawnForLauncher's windowsCwd — not process.cwd().
     expect(opts.cwd).toBe(homedir());
@@ -133,5 +136,45 @@ describe('runCapture', () => {
     // args[7] should be the full exec command with --settings appended and WSL-translated path
     expect(args[7]).toContain("'--settings'");
     expect(args[7]).toContain("'/mnt/c/state/w7/claude-retention.settings.json'");
+  });
+});
+
+const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const waitFor = async (f: () => boolean, ms = 3000): Promise<boolean> => {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { if (f()) return true; await new Promise((r) => setTimeout(r, 25)); }
+  return f();
+};
+
+describe.skipIf(process.platform === 'win32')('local fork processes (spawnCaptureProcess)', () => {
+  // A stand-in fork that ignores SIGTERM and leaves a grandchild behind: an
+  // execFile timeout (SIGTERM to the direct child only) would leak both.
+  const stubborn = (pidFile: string) => ['-c', `trap '' TERM; sleep 30 & echo $! > ${pidFile}; wait`];
+
+  it('kills the whole tree with SIGKILL on timeout and reports timedOut', async () => {
+    const pidFile = `${tmpdir()}/capture-tree-${process.pid}-${Date.now()}`;
+    const t0 = Date.now();
+    const out = await spawnCaptureProcess('/bin/sh', stubborn(pidFile), { cwd: tmpdir(), env: process.env, timeoutMs: 300 });
+    expect(out.timedOut).toBe(true);
+    expect(Date.now() - t0).toBeLessThan(5000);
+    const grandchild = Number(readFileSync(pidFile, 'utf8'));
+    expect(await waitFor(() => !alive(grandchild))).toBe(true);
+  });
+
+  it('killLocalCaptures kills in-flight forks (scheduler stop / app quit)', async () => {
+    const pidFile = `${tmpdir()}/capture-quit-${process.pid}-${Date.now()}`;
+    const p = spawnCaptureProcess('/bin/sh', stubborn(pidFile), { cwd: tmpdir(), env: process.env, timeoutMs: 60_000 });
+    expect(await waitFor(() => existsSync(pidFile) && readFileSync(pidFile, 'utf8').trim() !== '')).toBe(true);
+    expect(killLocalCaptures()).toBe(1);
+    const out = await p;
+    expect(out.timedOut).toBe(false);
+    expect(out.exitCode).not.toBe(0);
+    expect(await waitFor(() => !alive(Number(readFileSync(pidFile, 'utf8'))))).toBe(true);
+    expect(killLocalCaptures()).toBe(0);
+  });
+
+  it('collects stdout and the exit code of a normal run', async () => {
+    expect(await spawnCaptureProcess('/bin/sh', ['-c', 'echo hi; exit 3'], { cwd: tmpdir(), env: process.env, timeoutMs: 5000 }))
+      .toEqual({ exitCode: 3, stdout: 'hi\n', stderr: '', timedOut: false });
   });
 });

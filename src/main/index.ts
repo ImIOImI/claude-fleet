@@ -41,7 +41,7 @@ import { onCaptureSettingsChanged } from './claims/captureSettingsEvents.js';
 import { ClaimService } from './claims/claimService.js';
 import { CaptureScheduler } from './claims/captureScheduler.js';
 import { loadCaptureForks } from './claims/captureForks.js';
-import { runCapture } from './claims/captureExec.js';
+import { killLocalCaptures, runCapture } from './claims/captureExec.js';
 import { ensureContainerRetention } from './claims/retention.js';
 import { effectiveCaptureSettings } from '../preload/captureSettings.js';
 import { randomUUID } from 'node:crypto';
@@ -315,6 +315,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         topTopics: async (ws) => [...new Set((await claimsSvc.search(ws, { query: 'fleet', limit: 20 })).results.flatMap((r) => r.topics))].slice(0, 15),
         exec: (t, args, timeoutMs) => runCapture(t, args, timeoutMs),
         fleetToolNames: TOOLS.map((t) => t.name),
+        killInFlight: () => { killLocalCaptures(); },
         newUuid: () => randomUUID(),
         now: () => Date.now(),
         log: (message, extra) => logError({ source: 'main', level: 'info', type: 'knowledge-capture', message, extra })

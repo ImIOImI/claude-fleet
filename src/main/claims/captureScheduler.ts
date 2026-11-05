@@ -33,6 +33,8 @@ export interface SchedulerDeps {
   newUuid: () => string;
   now: () => number;
   log: (msg: string, extra?: Record<string, unknown>) => void;
+  /** Kill in-flight fork processes (captureExec.ts:killLocalCaptures); called by stop(). */
+  killInFlight?: () => void;
 }
 
 interface Pending {
@@ -246,5 +248,7 @@ export class CaptureScheduler {
     while (this.active.size > 0) await Promise.allSettled([...this.active]);
   }
 
-  stop(): void { this.stopped = true; this.queue.clear(); }
+  /** Stop scheduling and kill in-flight local/WSL forks (app quit). Their runs
+   *  are failed at the next startup (failRunning) if not finished by then. */
+  stop(): void { this.stopped = true; this.queue.clear(); this.d.killInFlight?.(); }
 }

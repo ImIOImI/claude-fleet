@@ -12,7 +12,7 @@ type Last = { started_at: number; user_turns: number | null; trigger?: string; c
 function setup(o: {
   settingsBy?: Record<string, Partial<CaptureSettings>>; exec?: SchedulerDeps['exec']; last?: (id: string) => Last;
   today?: number; cap?: number; isAutomation?: (id: string) => boolean; globalEnabled?: boolean;
-  topTopics?: SchedulerDeps['topTopics']; target?: SchedulerDeps['target']
+  topTopics?: SchedulerDeps['topTopics']; target?: SchedulerDeps['target']; killInFlight?: () => void
 } = {}) {
   let n = 0;
   const runs = {
@@ -35,7 +35,8 @@ function setup(o: {
     fleetToolNames: ['list_sessions', 'record_claim', 'search_claims', 'get_config'],
     newUuid: (() => { let i = 0; return () => `fork-${++i}`; })(),
     now: () => NOW,
-    log: () => undefined
+    log: () => undefined,
+    killInFlight: o.killInFlight
   } as unknown as SchedulerDeps;
   return { s: new CaptureScheduler(d), runs, exec };
 }
@@ -106,6 +107,15 @@ describe('CaptureScheduler — ingest triggers', () => {
     compacted.s.onIngest({ workspaceId: 'w', sessionId: 's1' });
     await compacted.s.drain();
     expect(compacted.runs.start).toHaveBeenCalledWith(expect.objectContaining({ trigger: 'ctx-85' }));
+  });
+  it('stop() kills in-flight fork processes and schedules nothing more', async () => {
+    const killInFlight = vi.fn();
+    const { s, runs } = setup({ killInFlight });
+    s.stop();
+    expect(killInFlight).toHaveBeenCalledTimes(1);
+    s.onIngest({ workspaceId: 'w', sessionId: 's1' });
+    await s.drain();
+    expect(runs.start).not.toHaveBeenCalled();
   });
   it('marks timed-out runs', async () => {
     const { s, runs } = setup({ exec: async () => ({ exitCode: 124, stdout: '', stderr: '', timedOut: true }) });

@@ -1,9 +1,10 @@
 // Knowledge capture (#483): run a headless fork in the session's own backend.
-import { execFile } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { homedir } from 'node:os';
 import { execScript as dockerExecScript, managedMcpConfigJson } from '../docker.js';
 import { buildEnv as localBuildEnv, ensureMcpConfig as localEnsureMcpConfig, resolveClaude as localResolveClaude } from '../local.js';
 import { logError } from '../errorLog.js';
+import { killTree } from '../automations/hostScript.js';
 import {
   buildWslSpawnEnv,
   posixQuote,
@@ -42,19 +43,49 @@ export interface CaptureExecDeps {
   retentionSettings?: (id: string, launcher: WorkspaceLauncher) => Promise<string | undefined>;
 }
 
-function defaultSpawnFile(file: string, args: string[], o: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }): Promise<ExecOutcome> {
+const MAX_STREAM = 8 * 1024 * 1024;
+/** Local/WSL fork processes still running — killed on scheduler stop / app quit. */
+const liveForks = new Set<ChildProcess>();
+
+/** Run a local fork process. Unlike execFile's timeout (SIGTERM to the direct
+ *  child only), a timeout kills the WHOLE tree with SIGKILL (the process runs
+ *  in its own group; `taskkill /T /F` on Windows), like automations' host
+ *  scripts. Exported for tests. */
+export function spawnCaptureProcess(file: string, args: string[], o: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }): Promise<ExecOutcome> {
   return new Promise((resolve) => {
-    execFile(file, args, { cwd: o.cwd, env: o.env, timeout: o.timeoutMs, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
-      const e = err as (NodeJS.ErrnoException & { killed?: boolean; code?: number | string }) | null;
-      resolve({ exitCode: e ? (typeof e.code === 'number' ? e.code : 1) : 0, stdout: String(stdout), stderr: String(stderr), timedOut: !!e?.killed });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    let settled = false;
+    const child = spawn(file, args, {
+      cwd: o.cwd, env: o.env, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32', windowsHide: true
     });
+    liveForks.add(child);
+    const timer = setTimeout(() => { timedOut = true; if (child.pid) killTree(child.pid); }, o.timeoutMs);
+    const done = (r: ExecOutcome): void => {
+      if (settled) return;
+      settled = true; clearTimeout(timer); liveForks.delete(child); resolve(r);
+    };
+    child.stdout?.on('data', (d: Buffer) => { if (stdout.length < MAX_STREAM) stdout += d.toString('utf8'); });
+    child.stderr?.on('data', (d: Buffer) => { if (stderr.length < MAX_STREAM) stderr += d.toString('utf8'); });
+    child.on('error', (e) => done({ exitCode: 127, stdout, stderr: stderr + String(e.message), timedOut: false }));
+    child.on('close', (code, signal) => done({ exitCode: code ?? (signal ? 137 : -1), stdout, stderr, timedOut }));
   });
+}
+
+/** Kill every in-flight local/WSL fork tree (scheduler stop / app quit).
+ *  Returns how many were signalled. Container forks run inside the container
+ *  and are bounded by execScript's own timeout. */
+export function killLocalCaptures(): number {
+  let n = 0;
+  for (const c of liveForks) if (c.pid) { killTree(c.pid); n++; }
+  return n;
 }
 
 const DEFAULT_DEPS: CaptureExecDeps = {
   execScript: dockerExecScript,
   containerMcpConfig: managedMcpConfigJson,
-  spawnFile: defaultSpawnFile,
+  spawnFile: spawnCaptureProcess,
   buildEnv: async (id) => {
     const m = await readWorkspaceManifest(id);
     // `local.ts:buildEnv`'s second parameter types `env` as `Workspace['env']`
@@ -116,7 +147,11 @@ export async function runCapture(target: CaptureTarget, args: string[], timeoutM
       ...(mcpConfigArg ? ['--mcp-config', mcpConfigArg] : []),
       ...(retentionArg ? ['--settings', retentionArg] : [])
     ];
-    const cmd = `exec ${[l.claudePath, ...fullArgs].map(posixQuote).join(' ')}`;
+    // Killing wsl.exe on the host (timeout / quit) doesn't reach the Linux
+    // process, so coreutils `timeout` bounds it in-distro too: 5s past the host
+    // timer (which fires first and marks the run timed-out), then SIGKILL.
+    const inDistroSecs = Math.ceil(timeoutMs / 1000) + 5;
+    const cmd = `exec timeout -k 10 ${inDistroSecs} ${[l.claudePath, ...fullArgs].map(posixQuote).join(' ')}`;
     const extraKeys = await deps.workspaceEnvKeys(target.workspaceId);
     return deps.spawnFile('wsl.exe', ['-d', l.distro, '--cd', wslInDistroPath(target.workspaceRoot), '--exec', l.shell, '-lic', cmd],
       // wsl.exe itself needs a valid WINDOWS cwd (the Linux cwd goes via
