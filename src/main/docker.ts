@@ -27,7 +27,9 @@ import {
   workspaceStateDir
 } from './paths.js';
 import type { AuthMode, Workspace, WorkspaceEnv, WorkspaceResources, WorkspaceKind } from './workspaces.js';
-import { FACTORY_MIRROR } from './workspaces.js';
+import { FACTORY_MIRROR, readWorkspaceManifest } from './workspaces.js';
+import { effectiveCaptureSettings } from '../preload/captureSettings.js';
+import { ensureContainerRetention } from './claims/retention.js';
 import { fleetPrivateDir, fleetSharedDir } from './config.js';
 import {
   mcpWorkspaceSocketDir,
@@ -543,6 +545,9 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
 
   const claudeDir = workspaceClaudeDir(spec.id);
   await mkdir(claudeDir, { recursive: true });
+  // #483 §5a: transcriptRetentionDays → ~/.claude/settings.json cleanupPeriodDays.
+  await ensureContainerRetention(spec.id, effectiveCaptureSettings(await readWorkspaceManifest(spec.id)).transcriptRetentionDays)
+    .catch((e) => logError({ source: 'main', type: 'claude-retention', level: 'warn', message: String(e), workspaceId: spec.id }));
   const brokerDir = workspaceBrokerDir(spec.id);
   await mkdir(brokerDir, { recursive: true });
 

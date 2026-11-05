@@ -12,6 +12,8 @@ import {
   type WorkspaceLauncher
 } from '../localLauncher.js';
 import { readWorkspaceManifest } from '../workspaces.js';
+import { effectiveCaptureSettings } from '../../preload/captureSettings.js';
+import { ensureLocalRetentionSettings } from './retention.js';
 
 export type CaptureTarget =
   | { kind: 'container'; workspaceId: string; cwd: string }
@@ -31,6 +33,9 @@ export interface CaptureExecDeps {
   workspaceEnvKeys: (id: string) => Promise<string[]>;
   ensureMcpConfig: (id: string, launcher: WorkspaceLauncher) => Promise<string | undefined>;
   resolveClaude: () => Promise<string>;
+  /** Host path of the workspace's cleanupPeriodDays settings file (#483 §5a).
+   *  Optional so older test doubles keep working; absent ⇒ no --settings. */
+  retentionSettings?: (id: string) => Promise<string | undefined>;
 }
 
 function defaultSpawnFile(file: string, args: string[], o: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }): Promise<ExecOutcome> {
@@ -66,6 +71,10 @@ const DEFAULT_DEPS: CaptureExecDeps = {
     const p = await localResolveClaude();
     if (!p) throw new Error('knowledge capture: claude binary not found on this host');
     return p;
+  },
+  retentionSettings: async (id) => {
+    const m = await readWorkspaceManifest(id);
+    return ensureLocalRetentionSettings(id, effectiveCaptureSettings(m).transcriptRetentionDays);
   }
 };
 
@@ -83,11 +92,19 @@ export async function runCapture(target: CaptureTarget, args: string[], timeoutM
   // call record_claim — without this the fork authenticates fine but has no
   // tool to record anything with.
   const mcpConfigHostPath = await deps.ensureMcpConfig(target.workspaceId, l);
+  // A fork's own claude startup runs Claude's transcript cleanup too, so it
+  // must carry the workspace's cleanupPeriodDays (#483 §5a).
+  const retentionHostPath = await deps.retentionSettings?.(target.workspaceId);
   if (l.mode === 'wsl') {
     // claude reads --mcp-config INSIDE the distro, so the host path must be
     // translated the same way local.ts:attachPty does for real sessions.
     const mcpConfigArg = mcpConfigHostPath ? (windowsPathToWslPath(mcpConfigHostPath) ?? mcpConfigHostPath) : undefined;
-    const fullArgs = mcpConfigArg ? [...args, '--mcp-config', mcpConfigArg] : args;
+    const retentionArg = retentionHostPath ? (windowsPathToWslPath(retentionHostPath) ?? retentionHostPath) : undefined;
+    const fullArgs = [
+      ...args,
+      ...(mcpConfigArg ? ['--mcp-config', mcpConfigArg] : []),
+      ...(retentionArg ? ['--settings', retentionArg] : [])
+    ];
     const cmd = `exec ${[l.claudePath, ...fullArgs].map(posixQuote).join(' ')}`;
     const extraKeys = await deps.workspaceEnvKeys(target.workspaceId);
     return deps.spawnFile('wsl.exe', ['-d', l.distro, '--cd', wslInDistroPath(target.workspaceRoot), '--exec', l.shell, '-lic', cmd],
@@ -96,6 +113,10 @@ export async function runCapture(target: CaptureTarget, args: string[], timeoutM
       { cwd: homedir(), env: buildWslSpawnEnv(env, wslPassKeys(env, extraKeys)), timeoutMs });
   }
   if (l.mode !== 'native') throw new Error(`knowledge capture does not support launcher mode "${l.mode}" yet`);
-  const fullArgs = mcpConfigHostPath ? [...args, '--mcp-config', mcpConfigHostPath] : args;
+  const fullArgs = [
+    ...args,
+    ...(mcpConfigHostPath ? ['--mcp-config', mcpConfigHostPath] : []),
+    ...(retentionHostPath ? ['--settings', retentionHostPath] : [])
+  ];
   return deps.spawnFile(await deps.resolveClaude(), fullArgs, { cwd: target.workspaceRoot, env, timeoutMs });
 }

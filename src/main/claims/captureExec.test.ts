@@ -64,6 +64,20 @@ describe('runCapture', () => {
     );
   });
 
+  it('native: appends --settings with the retention file when provided (#483 §5a)', async () => {
+    const spawnFile = vi.fn(async () => ({ exitCode: 0, stdout: '{}', stderr: '', timedOut: false }));
+    await runCapture({ kind: 'local', workspaceId: 'w5', launcher: { mode: 'native' }, workspaceRoot: '/repo' }, ['-p', 'x'], 1000,
+      {
+        spawnFile,
+        buildEnv: async () => ({}),
+        workspaceEnvKeys: async () => [],
+        ensureMcpConfig: async () => undefined,
+        resolveClaude: async () => '/usr/bin/claude',
+        retentionSettings: async () => '/state/w5/claude-retention.settings.json'
+      } as never);
+    expect(spawnFile).toHaveBeenCalledWith('/usr/bin/claude', ['-p', 'x', '--settings', '/state/w5/claude-retention.settings.json'], expect.anything());
+  });
+
   it('native: omits --mcp-config when ensureMcpConfig has nothing to offer yet', async () => {
     const spawnFile = vi.fn(async () => ({ exitCode: 0, stdout: '{}', stderr: '', timedOut: false }));
     await runCapture({ kind: 'local', workspaceId: 'w4', launcher: { mode: 'native' }, workspaceRoot: '/repo' }, ['-p', 'x'], 1000,

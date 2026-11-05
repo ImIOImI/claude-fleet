@@ -42,6 +42,7 @@ import { ClaimService } from './claims/claimService.js';
 import { CaptureScheduler } from './claims/captureScheduler.js';
 import { loadCaptureForks } from './claims/captureForks.js';
 import { runCapture } from './claims/captureExec.js';
+import { ensureContainerRetention } from './claims/retention.js';
 import { effectiveCaptureSettings } from '../preload/captureSettings.js';
 import { randomUUID } from 'node:crypto';
 
@@ -270,7 +271,18 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
           workspaceId: m.id
         })
       );
+      ensureContainerRetention(m.id, effectiveCaptureSettings(m).transcriptRetentionDays).catch((e) =>
+        logError({ source: 'main', type: 'claude-retention', level: 'warn', message: String(e), workspaceId: m.id }));
     }
+    // #483 §5a: re-apply container retention when a workspace's setting changes
+    // (form save, MCP set_capture_settings, or an approved proposal). Local
+    // workspaces pick it up on their next launch.
+    onCaptureSettingsChanged((e) => {
+      if (e.before.transcriptRetentionDays === e.after.transcriptRetentionDays) return;
+      void readWorkspaceManifest(e.workspaceId)
+        .then((m) => (m?.kind === 'container' ? ensureContainerRetention(m.id, e.after.transcriptRetentionDays) : false))
+        .catch((err) => logError({ source: 'main', type: 'claude-retention', level: 'warn', message: String(err), workspaceId: e.workspaceId }));
+    });
     // Seed each workspace's durable-mirror default from its manifest before the
     // watcher starts ingesting, so the very first lines are mirrored per the
     // saved setting — not dependent on the renderer's later workspace:list poll.
