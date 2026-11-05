@@ -5,6 +5,11 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'src/main/automations/automationService.test.ts',
+      'src/main/automations/automationStore.test.ts',
+      'src/main/automations/loadoutInstaller.test.ts',
+      'src/main/automations/proposalService.test.ts',
+      'src/main/automations/runner.test.ts',
       'src/main/db.ingestAnchor.test.ts',
       'src/main/db.planUsage.test.ts',
       'src/main/db.test.ts',
@@ -17,6 +22,10 @@ export default defineConfig({
       'src/main/dbSessionStats.test.ts',
       'src/main/dbSessionsList.test.ts',
       'src/main/dbSummaries.test.ts',
+      'src/main/inbox/inboxDb.test.ts',
+      'src/main/inbox/inboxService.test.ts',
+      'src/main/inbox/notifyService.test.ts',
+      'src/main/inbox/notifyStore.test.ts',
       'src/main/perfStore.test.ts',
       'src/main/store/pgMigrate.test.ts',
       'src/main/store/postgres.test.ts',

@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import { InboxStore } from '../inbox/inboxDb.js';
 import { AutomationStore } from './automationStore.js';
 import type { AutomationDef } from '../../preload/inboxTypes.js';
+import { openTestInbox, countQueries } from '../store/testStore.js';
 
 let inbox: InboxStore;
 afterEach(() => inbox?.close());
@@ -12,19 +13,9 @@ const def = (over: Partial<AutomationDef> = {}): AutomationDef => ({
   steps: [{ id: 'check', prompt: { workspace: 'W1', mode: 'live', message: 'check logs' } }], ...over
 });
 
-/** Counts `better-sqlite3` statements prepared on an inbox store's raw connection — one per Kysely
- *  query (see store/kysely.ts) — to assert a call makes a constant number of round trips, not N+1. */
-function countQueries(s: InboxStore): { count(): number } {
-  const raw = (s as unknown as { raw: Database.Database }).raw;
-  let n = 0;
-  const orig = raw.prepare.bind(raw);
-  raw.prepare = ((sql: string) => { n++; return orig(sql); }) as typeof raw.prepare;
-  return { count: () => n };
-}
-
 describe('AutomationStore definitions', () => {
   it('creates v1 with tags and history, versions on update, enforces unique names', async () => {
-    inbox = InboxStore.memory();
+    inbox = (await openTestInbox());
     const s = new AutomationStore(inbox.kysely);
     const a = await s.create(def(), USER, 1000);
     expect(a).toMatchObject({ name: 'log-watch', enabled: true, version: 1, createdBy: USER, lastScheduledAt: 1000 });
@@ -38,7 +29,7 @@ describe('AutomationStore definitions', () => {
     await expect(s.update(a.id, def({ name: 'other' }), USER)).rejects.toThrow(/already exists/);
   });
   it('re-enabling resets the schedule clock; remove keeps run history', async () => {
-    inbox = InboxStore.memory();
+    inbox = (await openTestInbox());
     const s = new AutomationStore(inbox.kysely);
     const a = await s.create(def(), USER, 1000);
     await s.setEnabled(a.id, false, 2000);
@@ -54,7 +45,7 @@ describe('AutomationStore definitions', () => {
 
 describe('AutomationStore runs', () => {
   it('records runs and steps, stats the week, marks interrupted, prunes', async () => {
-    inbox = InboxStore.memory();
+    inbox = (await openTestInbox());
     const s = new AutomationStore(inbox.kysely);
     const a = await s.create(def(), USER, 1000);
     const now = 10 * 86_400_000;
@@ -82,7 +73,7 @@ describe('AutomationStore runs', () => {
 
 describe('AutomationStore.runs batches steps (#456)', () => {
   it('attaches identical per-run steps in a constant number of queries, regardless of run count', async () => {
-    inbox = InboxStore.memory();
+    inbox = (await openTestInbox());
     const s = new AutomationStore(inbox.kysely);
     const a = await s.create(def(), USER, 1000);
     const now = 10 * 86_400_000;
@@ -119,7 +110,7 @@ describe('AutomationStore.runs batches steps (#456)', () => {
 
 describe('optimistic version check', () => {
   it('update with a stale expectedVersion rejects and writes nothing', async () => {
-    inbox = InboxStore.memory();
+    inbox = (await openTestInbox());
     const s = new AutomationStore(inbox.kysely);
     const def = { name: 'a', triggers: [{ manual: {} }], steps: [{ id: 's', prompt: { workspace: 'W1', mode: 'live', message: 'hi' } }] } as never;
     const a = await s.create(def, { kind: 'user', id: null }, 1);

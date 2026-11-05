@@ -4,24 +4,15 @@ import { InboxStore } from './inboxDb.js';
 import { NotifyStore } from './notifyStore.js';
 import { createNotifyService, INPUT_WAIT_DELAY_MS } from './notifyService.js';
 import type { NotificationRow } from '../../preload/inboxTypes.js';
+import { openTestInbox, countQueries, settle } from '../store/testStore.js';
 
 let inbox: InboxStore;
 afterEach(() => inbox?.close());
 
-const flush = async () => { for (let i = 0; i < 3; i++) await new Promise<void>((r) => setImmediate(r)); };
+const flush = () => settle(inbox);
 
-/** Counts `better-sqlite3` statements prepared on an inbox store's raw connection — one per Kysely
- *  query (see store/kysely.ts) — to assert a call makes a constant number of round trips, not N+1. */
-function countQueries(s: InboxStore): { count(): number } {
-  const raw = (s as unknown as { raw: Database.Database }).raw;
-  let n = 0;
-  const orig = raw.prepare.bind(raw);
-  raw.prepare = ((sql: string) => { n++; return orig(sql); }) as typeof raw.prepare;
-  return { count: () => n };
-}
-
-function setup(opts: { focused?: boolean; viewing?: string | null; inboxOpen?: boolean } = {}) {
-  inbox = InboxStore.memory();
+async function setup(opts: { focused?: boolean; viewing?: string | null; inboxOpen?: boolean } = {}) {
+  inbox = (await openTestInbox());
   const store = new NotifyStore(inbox.kysely);
   let t = new Date(2026, 9, 19, 10, 0).getTime(); // Monday 10:00 local
   const delivered: NotificationRow[] = [];
@@ -54,7 +45,7 @@ const todo = (over: Record<string, unknown> = {}) => ({
 
 describe('request + delivery', () => {
   it('delivers and records the channel; holds by rule with the reason', async () => {
-    const { store, svc, delivered } = setup();
+    const { store, svc, delivered } = await setup();
     const a = await svc.request({ kind: 'post', title: 'hi', priority: 'normal', source: { kind: 'workspace', id: 'W1' } });
     expect(a).toMatchObject({ delivered: true, channel: 'os' });
     expect((await store.get(a.id))?.channel).toBe('os');
@@ -67,7 +58,7 @@ describe('request + delivery', () => {
 
 describe('onTodoPosted', () => {
   it('notifies on request, or when a todo arrives urgent; not on a plain dedupe update', async () => {
-    const { svc } = setup();
+    const { svc } = await setup();
     expect(await svc.onTodoPosted(todo(), 'created', false)).toBeNull();
     expect(await svc.onTodoPosted(todo(), 'created', true)).toMatchObject({ kind: 'todo', title: 'prod-api 5xx', body: 'ops-oncall' });
     expect(await svc.onTodoPosted(todo({ priority: 'urgent', seenCount: 3 }), 'reopened', false))
@@ -78,7 +69,7 @@ describe('onTodoPosted', () => {
 
 describe('onPostRejected', () => {
   it('tells the user once per workspace per hour', async () => {
-    const { svc, advance } = setup();
+    const { svc, advance } = await setup();
     expect((await svc.onPostRejected('W1', 'post limit 2/hour'))?.title).toBe('ops-oncall hit its post limit');
     expect(await svc.onPostRejected('W1', 'post limit 2/hour')).toBeNull();
     expect((await svc.onPostRejected('W2', 'posting disabled'))?.title).toBe('webex-triage tried to post, but posting is off');
@@ -89,7 +80,7 @@ describe('onPostRejected', () => {
 
 describe('onInputWait', () => {
   it('notifies after the delay when the user is not looking, once per episode, and clears when answered', async () => {
-    const { store, svc, delivered, advance } = setup();
+    const { store, svc, delivered, advance } = await setup();
     await svc.onInputWait('W2', ['s1']);
     await svc.onInputWait('W2', ['s1', 's2']);
     await advance(INPUT_WAIT_DELAY_MS - 1);
@@ -102,17 +93,17 @@ describe('onInputWait', () => {
     expect(svc.waitingWorkspaces()).toEqual([]);
   });
   it('skips the notification when answered quickly or when the user is viewing that workspace', async () => {
-    const a = setup();
+    const a = await setup();
     await a.svc.onInputWait('W2', ['s1']);
     await a.advance(5_000);
     await a.svc.onInputWait('W2', []);
     await a.advance(INPUT_WAIT_DELAY_MS);
     expect(a.delivered).toHaveLength(0);
-    const b = setup({ focused: true, viewing: 'W2' });
+    const b = await setup({ focused: true, viewing: 'W2' });
     await b.svc.onInputWait('W2', ['s1']);
     await b.advance(INPUT_WAIT_DELAY_MS);
     expect(b.delivered).toHaveLength(0);
-    const c = setup({ focused: true, viewing: 'W2', inboxOpen: true });
+    const c = await setup({ focused: true, viewing: 'W2', inboxOpen: true });
     await c.svc.onInputWait('W2', ['s1']);
     await c.advance(INPUT_WAIT_DELAY_MS);
     expect(c.delivered).toHaveLength(1);
@@ -121,7 +112,7 @@ describe('onInputWait', () => {
 
 describe('cancelPending (#457 quit)', () => {
   it('cancels a pending input-wait timer so it never fires, touching no store', async () => {
-    const { svc, delivered, advance } = setup();
+    const { svc, delivered, advance } = await setup();
     await svc.onInputWait('W2', ['s1']);
     svc.cancelPending();
     await advance(INPUT_WAIT_DELAY_MS);
@@ -129,7 +120,7 @@ describe('cancelPending (#457 quit)', () => {
     expect(svc.waitingWorkspaces()).toEqual([]);
   });
   it('is safe to call twice, and safe with nothing pending', async () => {
-    const { svc, delivered, advance } = setup();
+    const { svc, delivered, advance } = await setup();
     expect(() => svc.cancelPending()).not.toThrow();
     await svc.onInputWait('W2', ['s1']);
     svc.cancelPending();
@@ -141,7 +132,7 @@ describe('cancelPending (#457 quit)', () => {
 
 describe('quiet periods and the digest', () => {
   it('holds during a pause, then sends one digest when it ends', async () => {
-    const { store, svc, delivered, advance, at } = setup();
+    const { store, svc, delivered, advance, at } = await setup();
     await store.setPause({ until: at() + 3_600_000, letUrgent: true, setAt: at() });
     await svc.tick();
     await svc.onTodoPosted(todo(), 'created', true);
@@ -156,7 +147,7 @@ describe('quiet periods and the digest', () => {
     expect(await svc.tick()).toBeNull();
   });
   it('a downtime with nothing held ends without a digest; quietState reports the next downtime', async () => {
-    const { store, svc, advance } = setup();
+    const { store, svc, advance } = await setup();
     const d = await store.saveDowntime({ name: 'Lunch', enabled: true, days: [0], startMin: 10 * 60, endMin: 11 * 60, bypass: 'none' });
     await svc.tick();
     expect((await svc.quietState()).activeDowntime?.id).toBe(d.id);
@@ -168,7 +159,7 @@ describe('quiet periods and the digest', () => {
 
 describe('scopes, effective rule, test, prune', () => {
   it('offers key / source / first tag scopes with labels', async () => {
-    const { svc, store } = setup();
+    const { svc, store } = await setup();
     expect(svc.scopesFor({ source: { kind: 'workspace', id: 'W1' }, dedupeKey: 'k', tags: ['ops', 'prod'] })).toEqual([
       { scopeKind: 'key', scopeValue: 'workspace:W1:k', label: 'This item' },
       { scopeKind: 'source', scopeValue: 'workspace:W1', label: 'ops-oncall' },
@@ -178,7 +169,7 @@ describe('scopes, effective rule, test, prune', () => {
     expect((await svc.effectiveFor({ priority: 'normal', source: { kind: 'user', id: null }, dedupeKey: null, tags: ['ops'] })).level).toBe('urgent');
   });
   it('test bypasses quiet; prune drops rows older than 30 days', async () => {
-    const { store, svc, advance, at } = setup();
+    const { store, svc, advance, at } = await setup();
     await store.setPause({ until: null, letUrgent: false, setAt: at() });
     expect((await svc.test()).delivered).toBe(true);
     await advance(31 * 86_400_000);
@@ -188,7 +179,7 @@ describe('scopes, effective rule, test, prune', () => {
 
 describe('effectiveForMany batches rules()/getDefaultLevel() (#456)', () => {
   it('matches per-item effectiveFor output, reading rules/level once regardless of item count', async () => {
-    const { svc, store } = setup();
+    const { svc, store } = await setup();
     await store.setRule({ scopeKind: 'tag', scopeValue: 'ops', level: 'urgent', snoozeUntil: null });
     await store.setRule({ scopeKind: 'source', scopeValue: 'workspace:W1', level: 'off', snoozeUntil: null });
     await store.setDefaultLevel('high');
@@ -219,7 +210,7 @@ describe('effectiveForMany batches rules()/getDefaultLevel() (#456)', () => {
 
 describe('tick serialization', () => {
   it('two overlapping ticks when a pause ends send exactly one digest', async () => {
-    const { store, svc, delivered } = setup();
+    const { store, svc, delivered } = await setup();
     await store.setPause({ until: null, letUrgent: false, setAt: 0 });
     await svc.tick(); // the quiet period begins
     const held = await svc.request({ kind: 'post', title: 'x', priority: 'normal', source: { kind: 'workspace', id: 'W1' } });

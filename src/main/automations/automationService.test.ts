@@ -5,25 +5,17 @@ import { AutomationStore } from './automationStore.js';
 import { createAutomationService } from './automationService.js';
 import type { WorkspaceState } from './runner.js';
 import type { AutomationDef } from '../../preload/inboxTypes.js';
+import { openTestInbox, countQueries } from '../store/testStore.js';
 
 let inbox: InboxStore;
 const flush = async () => { for (let i = 0; i < 3; i++) await new Promise<void>((r) => setImmediate(r)); };
 afterEach(() => inbox?.close());
 
-/** Counts `better-sqlite3` statements prepared on an inbox store's raw connection — one per Kysely
- *  query (see store/kysely.ts) — to assert a call makes a bounded number of round trips, not N+1. */
-function countQueries(s: InboxStore): { count(): number } {
-  const raw = (s as unknown as { raw: Database.Database }).raw;
-  let n = 0;
-  const orig = raw.prepare.bind(raw);
-  raw.prepare = ((sql: string) => { n++; return orig(sql); }) as typeof raw.prepare;
-  return { count: () => n };
-}
 const USER = { kind: 'user' as const, id: null };
 const WSS: Record<string, string> = { 'ops-oncall': 'W1', 'webex-triage': 'W2' };
 
-function setup(opts: { state?: WorkspaceState; postGate?: Promise<void>; exec?: (script: string) => { exitCode: number; stdout: string } } = {}) {
-  inbox = InboxStore.memory();
+async function setup(opts: { state?: WorkspaceState; postGate?: Promise<void>; exec?: (script: string) => { exitCode: number; stdout: string } } = {}) {
+  inbox = (await openTestInbox());
   const store = new AutomationStore(inbox.kysely);
   let t = new Date(2026, 9, 19, 10, 0).getTime();
   const posts: Array<[string, string]> = [];
@@ -62,7 +54,7 @@ ${extra}`;
 
 describe('CRUD + validation', () => {
   it('validates, creates with a resolved workspace, updates to v2, exposes YAML', async () => {
-    const { svc } = setup();
+    const { svc } = await setup();
     expect(svc.validate('name: Bad')).toMatchObject({ ok: false });
     const a = await svc.create(YAML(), USER);
     expect(a).toMatchObject({ name: 'log-watch', version: 1, tags: ['ops'], enabled: true });
@@ -77,7 +69,7 @@ describe('CRUD + validation', () => {
 
 describe('runs', () => {
   it('runs now with validated args; records success', async () => {
-    const { svc, posts } = setup();
+    const { svc, posts } = await setup();
     const a = await svc.create(YAML(), USER);
     await expect(svc.run(a.id, { kind: 'manual', by: USER, args: { nope: 1 } })).rejects.toThrow(/invalid arguments: nope: no such param/);
     const r = await svc.run(a.id, { kind: 'manual', by: USER, args: { since: '6h' } });
@@ -88,7 +80,7 @@ describe('runs', () => {
   });
   it('skips while a run is in progress', async () => {
     let release!: () => void;
-    const { svc } = setup({ postGate: new Promise<void>((r) => { release = r; }) });
+    const { svc } = await setup({ postGate: new Promise<void>((r) => { release = r; }) });
     const a = await svc.create(YAML(), USER);
     await svc.run(a.id, { kind: 'manual', by: USER });
     expect(await svc.run(a.id, { kind: 'manual', by: USER })).toMatchObject({ status: 'skipped', error: 'a run was already in progress' });
@@ -97,7 +89,7 @@ describe('runs', () => {
   });
   it('queues one run behind an in-progress run when concurrency is queue', async () => {
     let release!: () => void;
-    const { svc } = setup({ postGate: new Promise<void>((r) => { release = r; }) });
+    const { svc } = await setup({ postGate: new Promise<void>((r) => { release = r; }) });
     const q = await svc.create(YAML() + 'concurrency: queue\n', USER);
     await svc.run(q.id, { kind: 'manual', by: USER });
     expect((await svc.run(q.id, { kind: 'manual', by: USER })).status).toBe('queued');
@@ -107,7 +99,7 @@ describe('runs', () => {
     expect((await svc.get(q.id))?.runs.map((r) => r.status).sort()).toEqual(['skipped', 'succeeded', 'succeeded']);
   });
   it('schedule tick fires once (catch-up after a gap), then rate-limits a second schedule within a minute', async () => {
-    const { svc, advance, store } = setup();
+    const { svc, advance, store } = await setup();
     const a = await svc.create(YAML(), USER);
     advance(3 * 3_600_000);
     const fired = await svc.tick();
@@ -118,7 +110,7 @@ describe('runs', () => {
     expect((await svc.tick())[0].status).toBe('skipped');
   });
   it('a failing run notifies; restart marks running runs interrupted with one notification', async () => {
-    const { svc, notes, store } = setup({ state: 'paused' });
+    const { svc, notes, store } = await setup({ state: 'paused' });
     const a = await svc.create(YAML(), USER);
     await svc.run(a.id, { kind: 'manual', by: USER });
     await svc.settle();
@@ -133,7 +125,7 @@ describe('runs', () => {
 describe('attribution + MCP', () => {
   it('attributes a run_id only while the run is live and the caller is a target', async () => {
     let release!: () => void;
-    const { svc } = setup({ postGate: new Promise<void>((r) => { release = r; }) });
+    const { svc } = await setup({ postGate: new Promise<void>((r) => { release = r; }) });
     const a = await svc.create(YAML(), USER);
     const r = await svc.run(a.id, { kind: 'manual', by: USER });
     expect(svc.attribution(r.id, 'W1')).toEqual({ automationId: a.id });
@@ -144,7 +136,7 @@ describe('attribution + MCP', () => {
     expect(svc.attribution(r.id, 'W1')).toBeNull();
   });
   it('lists what a workspace may see and lets only allowFrom workspaces run it, quoting their args', async () => {
-    const { svc, posts } = setup();
+    const { svc, posts } = await setup();
     const a = await svc.create(YAML(), USER);
     expect(await svc.mcp.list('W1')).toEqual([expect.objectContaining({ name: 'log-watch', canRun: false })]);
     expect(await svc.mcp.list('W2')).toEqual([expect.objectContaining({ name: 'log-watch', canRun: true })]);
@@ -168,7 +160,7 @@ steps:
     prompt: { workspace: ops-oncall, mode: live, message: "look" }
 `;
   it('debounces a burst of matching events into one run', async () => {
-    const { svc, fire } = setup();
+    const { svc, fire } = await setup();
     const a = await svc.create(EV('event: { on: todo.created, tag: ops, debounce: 30s }'), USER);
     const todo = (id: string, tags = ['ops']) => ({ id, title: `t${id}`, tags, source: { kind: 'workspace' as const, id: 'W2' } });
     expect(await svc.onEvent({ on: 'todo.created', todo: todo('1', ['other']) })).toEqual([]);
@@ -183,7 +175,7 @@ steps:
     expect(runs[0]).toMatchObject({ status: 'succeeded', trigger: { kind: 'event', event: { on: 'todo.created', todoId: '1', count: 3 } } });
   });
   it('filters by workspace, ignores its own todos, and ignores the workspace it just prompted', async () => {
-    const { svc, fire } = setup();
+    const { svc, fire } = await setup();
     const a = await svc.create(EV('event: { on: session.idle, debounce: 1s }'), USER);
     expect(await svc.onEvent({ on: 'session.idle', workspaceId: 'W2' })).toEqual([a.id]);
     await fire(1000);
@@ -202,7 +194,7 @@ steps:
     svc.cancelPending();
   });
   it('cancelPending cancels a pending debounce so it never fires, and is safe to call again (#457 quit)', async () => {
-    const { svc, fire } = setup();
+    const { svc, fire } = await setup();
     const a = await svc.create(EV('event: { on: session.idle, debounce: 30s }'), USER);
     expect(await svc.onEvent({ on: 'session.idle', workspaceId: 'W2' })).toEqual([a.id]);
     expect(() => svc.cancelPending()).not.toThrow();
@@ -215,7 +207,7 @@ steps:
 
 describe('automations workspace reach (Phase 5b)', () => {
   it('the privileged caller sees and can run every automation; get + listRuns respect visibility', async () => {
-    const { svc } = setup();
+    const { svc } = await setup();
     const a = await svc.create(YAML().replace('  - manual: { allowFrom: [webex-triage] }\n', ''), USER);
     expect(await svc.mcp.list('WA')).toEqual([]);
     expect(await svc.mcp.list('WA', true)).toEqual([expect.objectContaining({ name: 'log-watch', canRun: true })]);
@@ -233,7 +225,7 @@ describe('automations workspace reach (Phase 5b)', () => {
 
 describe('mcp.listRuns batches steps per run (#456)', () => {
   it('returns steps identical to the single-run path in a bounded number of queries', async () => {
-    const { svc, store } = setup();
+    const { svc, store } = await setup();
     const def = (name: string): AutomationDef => ({
       name, triggers: [{ manual: {} }], concurrency: 'skip',
       steps: [{ id: 'check', prompt: { workspace: 'W1', mode: 'live', message: 'check' } }]
@@ -274,7 +266,7 @@ ${triggers}${extra}steps:
   const HOUR = 3_600_000;
 
   it('a successful run applies its request; it replaces the cron and records what it asked for', async () => {
-    const { svc, at } = setup({ exec: () => ({ exitCode: 0, stdout: '{"next": {"in": "3h"}}' }) });
+    const { svc, at } = await setup({ exec: () => ({ exitCode: 0, stdout: '{"next": {"in": "3h"}}' }) });
     const a = await svc.create(SCRIPT(), USER);
     const r = await svc.run(a.id, { kind: 'manual', by: USER });
     await svc.settle();
@@ -284,7 +276,7 @@ ${triggers}${extra}steps:
     expect((await svc.get(a.id))?.runs[0].reschedule).toMatchObject({ requestedAt: at() + 3 * HOUR, appliedAt: at() + 3 * HOUR, clamped: false, by: 'look' });
   });
   it('clamps to the floor after the run ends', async () => {
-    const { svc, at } = setup({ exec: () => ({ exitCode: 10, stdout: '{"next": {"in": "1m"}}' }) });
+    const { svc, at } = await setup({ exec: () => ({ exitCode: 10, stdout: '{"next": {"in": "1m"}}' }) });
     const a = await svc.create(SCRIPT(), USER);
     await svc.run(a.id, { kind: 'manual', by: USER });
     await svc.settle();
@@ -292,14 +284,14 @@ ${triggers}${extra}steps:
     expect((await svc.get(a.id))?.runs[0]).toMatchObject({ status: 'nothing-to-do', reschedule: { clamped: true } });
   });
   it('a failed run applies nothing', async () => {
-    const { svc } = setup({ exec: () => ({ exitCode: 1, stdout: '{"next": {"in": "3h"}}' }) });
+    const { svc } = await setup({ exec: () => ({ exitCode: 1, stdout: '{"next": {"in": "3h"}}' }) });
     const a = await svc.create(SCRIPT(), USER);
     await svc.run(a.id, { kind: 'manual', by: USER });
     await svc.settle();
     expect((await svc.list())[0].nextSetByRun).toBeNull();
   });
   it('without reschedule in the definition the request is a step warning', async () => {
-    const { svc } = setup({ exec: () => ({ exitCode: 0, stdout: '{"next": {"in": "3h"}}' }) });
+    const { svc } = await setup({ exec: () => ({ exitCode: 0, stdout: '{"next": {"in": "3h"}}' }) });
     const a = await svc.create(SCRIPT(''), USER);
     await svc.run(a.id, { kind: 'manual', by: USER });
     await svc.settle();
@@ -307,7 +299,7 @@ ${triggers}${extra}steps:
     expect(JSON.stringify((await svc.get(a.id))?.runs[0].steps[0].detail)).toMatch(/reschedule/);
   });
   it('fires at the chosen time as "rescheduled", then the cron resumes; edits clear it', async () => {
-    const { svc, advance } = setup({ exec: () => ({ exitCode: 0, stdout: '{"next": {"in": "3h"}}' }) });
+    const { svc, advance } = await setup({ exec: () => ({ exitCode: 0, stdout: '{"next": {"in": "3h"}}' }) });
     const a = await svc.create(SCRIPT(), USER);
     await svc.run(a.id, { kind: 'manual', by: USER });
     await svc.settle();
@@ -321,14 +313,14 @@ ${triggers}${extra}steps:
     expect((await svc.list())[0].nextSetByRun).toBeNull();
   });
   it('no cron: idles until a run sets a time', async () => {
-    const { svc } = setup();
+    const { svc } = await setup();
     await svc.create(SCRIPT('reschedule: { min: 30m }\n', '  - manual: {}\n'), USER);
     expect((await svc.list())[0].nextFireAt).toBeNull();
   });
   it('schedule_next from a prompted workspace, gated like post_todo, last request wins', async () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
-    const { svc, at } = setup({ postGate: gate });
+    const { svc, at } = await setup({ postGate: gate });
     const a = await svc.create(YAML('reschedule: { min: 30m }\n'), USER);
     const r = await svc.run(a.id, { kind: 'manual', by: USER });
     await expect(svc.mcp.scheduleNext('W2', { run_id: r.id, in: '2h' })).rejects.toThrow(/not permitted/);
@@ -346,7 +338,7 @@ ${triggers}${extra}steps:
 describe('concurrent starts (async store)', () => {
   it('two concurrent manual runs: one runs, one is skipped', async () => {
     let release!: () => void;
-    const { svc } = setup({ postGate: new Promise<void>((r) => { release = r; }) });
+    const { svc } = await setup({ postGate: new Promise<void>((r) => { release = r; }) });
     const a = await svc.create(YAML(), USER);
     const [r1, r2] = await Promise.all([svc.run(a.id, { kind: 'manual', by: USER }), svc.run(a.id, { kind: 'manual', by: USER })]);
     expect([r1.status, r2.status].sort()).toEqual(['running', 'skipped']);
@@ -355,7 +347,7 @@ describe('concurrent starts (async store)', () => {
   });
   it('three concurrent runs with concurrency: queue → one running, one queued, one skipped; the queued one runs after', async () => {
     let release!: () => void;
-    const { svc } = setup({ postGate: new Promise<void>((r) => { release = r; }) });
+    const { svc } = await setup({ postGate: new Promise<void>((r) => { release = r; }) });
     const q = await svc.create(YAML() + 'concurrency: queue\n', USER);
     const rs = await Promise.all([0, 1, 2].map(() => svc.run(q.id, { kind: 'manual', by: USER })));
     expect(rs.map((r) => r.status).sort()).toEqual(['queued', 'running', 'skipped']);
@@ -364,7 +356,7 @@ describe('concurrent starts (async store)', () => {
     expect((await svc.get(q.id))?.runs.map((r) => r.status).sort()).toEqual(['skipped', 'succeeded', 'succeeded']);
   });
   it('two overlapping ticks fire a due schedule once, even with concurrency: queue', async () => {
-    const { svc, advance } = setup();
+    const { svc, advance } = await setup();
     const a = await svc.create(YAML() + 'concurrency: queue\n', USER);
     advance(3 * 3_600_000);
     const [t1, t2] = await Promise.all([svc.tick(), svc.tick()]);
@@ -374,7 +366,7 @@ describe('concurrent starts (async store)', () => {
   });
   it('an event timer that fires during a live run is skipped (the claim holds across timer starts)', async () => {
     let release!: () => void;
-    const { svc, fire } = setup({ postGate: new Promise<void>((r) => { release = r; }) });
+    const { svc, fire } = await setup({ postGate: new Promise<void>((r) => { release = r; }) });
     const ev = (n: string) => `name: ${n}\ntriggers:\n  - event: { on: session.idle, debounce: 1s }\n  - manual: {}\nsteps:\n  - id: look\n    prompt: { workspace: ops-oncall, mode: live, message: "look" }\n`;
     const a = await svc.create(ev('on-idle'), USER);
     await svc.run(a.id, { kind: 'manual', by: USER });
@@ -391,7 +383,7 @@ describe('check-then-act stays atomic across awaits', () => {
   const HOUR = 3_600_000;
 
   it("an edit that lands while a run settles keeps the old run's next fire off the new version", async () => {
-    const { svc, store, at } = setup({ exec: () => ({ exitCode: 0, stdout: '{"next": {"in": "3h"}}' }) });
+    const { svc, store, at } = await setup({ exec: () => ({ exitCode: 0, stdout: '{"next": {"in": "3h"}}' }) });
     const a = await svc.create(RESCHED(), USER);
     // Interleave deterministically: settleNext's read sees v1, then the edit commits before its write.
     const get = store.get.bind(store);
@@ -414,7 +406,7 @@ describe('check-then-act stays atomic across awaits', () => {
   });
 
   it('a disable that lands after the tick lists automations fires nothing', async () => {
-    const { svc, store, advance } = setup();
+    const { svc, store, advance } = await setup();
     const a = await svc.create(YAML(), USER);
     advance(20 * 60_000); // the 10:15 slot is due
     const list = store.list.bind(store);
@@ -426,7 +418,7 @@ describe('check-then-act stays atomic across awaits', () => {
   });
 
   it('a fresh next_run_at written after the tick lists automations survives the tick', async () => {
-    const { svc, store, advance, at } = setup({ exec: () => ({ exitCode: 0, stdout: '{"next": {"in": "3h"}}' }) });
+    const { svc, store, advance, at } = await setup({ exec: () => ({ exitCode: 0, stdout: '{"next": {"in": "3h"}}' }) });
     const a = await svc.create(RESCHED(), USER);
     await svc.run(a.id, { kind: 'manual', by: USER });
     await svc.settle();
@@ -441,7 +433,7 @@ describe('check-then-act stays atomic across awaits', () => {
   });
 
   it('a debounced event run is refused once the automation is disabled; a user run still starts', async () => {
-    const { svc, fire, notes } = setup();
+    const { svc, fire, notes } = await setup();
     const ev = `name: on-idle\ntriggers:\n  - event: { on: session.idle, debounce: 1s }\n  - manual: {}\nsteps:\n  - id: look\n    prompt: { workspace: ops-oncall, mode: live, message: "look" }\n`;
     const a = await svc.create(ev, USER);
     await svc.onEvent({ on: 'session.idle', workspaceId: 'W2' });

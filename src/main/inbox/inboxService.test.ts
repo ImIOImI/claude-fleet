@@ -2,9 +2,10 @@ import { describe, it, expect } from 'vitest';
 import { InboxStore } from './inboxDb.js';
 import { createInboxService } from './inboxService.js';
 import type { InboxConfig } from '../../preload/inboxTypes.js';
+import { openTestInbox } from '../store/testStore.js';
 
-function setup(manifests: Record<string, { inbox?: InboxConfig }>) {
-  const store = InboxStore.memory();
+async function setup(manifests: Record<string, { inbox?: InboxConfig }>) {
+  const store = (await openTestInbox());
   let changed = 0;
   let t = 1000;
   const svc = createInboxService(store, {
@@ -17,7 +18,7 @@ function setup(manifests: Record<string, { inbox?: InboxConfig }>) {
 
 describe('inbox MCP handlers', () => {
   it('post_todo creates, dedupes and reports the action; links the caller by default', async () => {
-    const { svc, changed } = setup({ W1: {} });
+    const { svc, changed } = await setup({ W1: {} });
     const a = (await svc.mcp.post('W1', { title: 'disk 91%', key: 'disk', priority: 'high' })) as { id: string; action: string };
     expect(a.action).toBe('created');
     const b = (await svc.mcp.post('W1', { title: 'disk 92%', key: 'disk' })) as { id: string; action: string };
@@ -28,7 +29,7 @@ describe('inbox MCP handlers', () => {
   });
 
   it('rejects unknown callers, disabled posting, and posts over the hourly cap', async () => {
-    const { svc } = setup({ OFF: { inbox: { canPost: false } }, CAP: { inbox: { maxPostsPerHour: 2 } } });
+    const { svc } = await setup({ OFF: { inbox: { canPost: false } }, CAP: { inbox: { maxPostsPerHour: 2 } } });
     await expect(svc.mcp.post('NOPE', { title: 'x' })).rejects.toThrow(/unknown workspace/);
     await expect(svc.mcp.post('OFF', { title: 'x' })).rejects.toThrow(/not allowed to post/);
     await svc.mcp.post('CAP', { title: '1' });
@@ -37,7 +38,7 @@ describe('inbox MCP handlers', () => {
   });
 
   it('update_todo is limited to the caller’s own todos; list is scoped', async () => {
-    const { svc } = setup({ W1: {}, W2: {}, ALL: { inbox: { canReadAll: true } } });
+    const { svc } = await setup({ W1: {}, W2: {}, ALL: { inbox: { canReadAll: true } } });
     const { id } = (await svc.mcp.post('W1', { title: 'mine' })) as { id: string };
     await expect(svc.mcp.update('W2', { id, status: 'done' })).rejects.toThrow(/not permitted/);
     const u = (await svc.mcp.update('W1', { id, status: 'done', tags_add: ['ops'] })) as { status: string; tags: string[] };
@@ -50,7 +51,7 @@ describe('inbox MCP handlers', () => {
 
 describe('inbox IPC handlers', () => {
   it('create posts as the user; update may change anything; counts reflect open items', async () => {
-    const { svc } = setup({ W1: {} });
+    const { svc } = await setup({ W1: {} });
     const t = await svc.ipc.create({ title: 'From me', priority: 'urgent', tags: ['Health'] });
     expect(t).toMatchObject({ source: { kind: 'user', id: null }, priority: 'urgent', tags: ['health'] });
     const ws = (await svc.mcp.post('W1', { title: 'from ws' })) as { id: string };
@@ -64,8 +65,8 @@ describe('inbox IPC handlers', () => {
 });
 
 describe('notifications wiring (#407 Phase 2)', () => {
-  function setupWithNotify(manifests: Record<string, { inbox?: InboxConfig }>) {
-    const store = InboxStore.memory();
+  async function setupWithNotify(manifests: Record<string, { inbox?: InboxConfig }>) {
+    const store = (await openTestInbox());
     const posted: Array<[string, string, boolean]> = [];
     const requests: Array<Record<string, unknown>> = [];
     const svc = createInboxService(store, {
@@ -79,13 +80,13 @@ describe('notifications wiring (#407 Phase 2)', () => {
     return { svc, posted, requests };
   }
   it('post_todo hands the todo, action and notify flag to notifications', async () => {
-    const { svc, posted } = setupWithNotify({ W1: {} });
+    const { svc, posted } = await setupWithNotify({ W1: {} });
     await svc.mcp.post('W1', { title: 'a', notify: true });
     await svc.mcp.post('W1', { title: 'b' });
     expect(posted).toEqual([['a', 'created', true], ['b', 'created', false]]);
   });
   it('notify validates, gates on posting rights, scopes todo links, and reports the outcome', async () => {
-    const { svc, requests } = setupWithNotify({ W1: {}, W2: {}, OFF: { inbox: { canPost: false } } });
+    const { svc, requests } = await setupWithNotify({ W1: {}, W2: {}, OFF: { inbox: { canPost: false } } });
     expect(await svc.mcp.notify('W1', { title: 'nightly ok', key: 'nightly', tags: ['CI'] })).toEqual({ id: 'N1', delivered: false, heldReason: 'pause' });
     expect(requests[0]).toMatchObject({ kind: 'post', title: 'nightly ok', priority: 'normal', source: { kind: 'workspace', id: 'W1' }, dedupeKey: 'nightly', tags: ['ci'] });
     await expect(svc.mcp.notify('W1', {})).rejects.toThrow(/title is required/);
@@ -97,7 +98,7 @@ describe('notifications wiring (#407 Phase 2)', () => {
 
 describe('automation attribution (#407 Phase 3)', () => {
   it('a post with a live run_id becomes the automation\'s; a bad run_id is refused', async () => {
-    const store = InboxStore.memory();
+    const store = (await openTestInbox());
     const svc = createInboxService(store, {
       manifest: async () => ({}),
       notifyChanged: () => {},

@@ -4,6 +4,7 @@ import { AutomationStore } from './automationStore.js';
 import { createLoadoutInstaller } from './loadoutInstaller.js';
 import type { PreparedAutomation } from './loadoutAutomations.js';
 import type { AutomationDef } from '../../preload/inboxTypes.js';
+import { openTestInbox } from '../store/testStore.js';
 
 let inbox: InboxStore;
 afterEach(() => inbox?.close());
@@ -15,8 +16,8 @@ const prep = (folder: string, d: AutomationDef | null, over: Partial<PreparedAut
   folder, name: d?.name ?? folder, ok: !!d, errors: d ? [] : ['bad'], definition: d, hostStep: false, missingSecrets: [], ...over
 });
 
-function setup() {
-  inbox = InboxStore.memory();
+async function setup() {
+  inbox = (await openTestInbox());
   const store = new AutomationStore(inbox.kysely);
   let t = 1_000;
   const inst = createLoadoutInstaller({ store, now: () => ++t, workspaceName: (id) => ({ T1: 'ops', T2: 'build' } as Record<string, string>)[id] ?? id });
@@ -26,7 +27,7 @@ const base = { loadoutId: 'webex', version: '1.0.0', targetId: 'T1', targetName:
 
 describe('loadout installer', () => {
   it('first install turns on valid automations, holds back missing secrets and host steps, and skips invalid ones', async () => {
-    const { store, inst } = setup();
+    const { store, inst } = await setup();
     const ps = [
       prep('watch', def('webex-watch')),
       prep('needs-secret', def('needs-secret'), { missingSecrets: ['WEBEX_TOKEN'] }),
@@ -48,14 +49,14 @@ describe('loadout installer', () => {
     expect((await inst.install([prep('on-host', def('on-host'), { hostStep: true })], { ...base, allowHost: true })).created).toEqual(['on-host']);
   });
   it('honours the review ticks, and a second install target gets its own copy', async () => {
-    const { store, inst } = setup();
+    const { store, inst } = await setup();
     await inst.install([prep('watch', def('webex-watch'))], { ...base, enable: [] });
     expect((await store.byName('webex-watch'))!.enabled).toBe(false);
     const r = await inst.install([prep('watch', def('webex-watch', 'check', { steps: [{ id: 's', prompt: { workspace: 'T2', mode: 'live', message: 'check' } }] }))], { ...base, targetId: 'T2', targetName: 'build' });
     expect(r.created).toEqual(['webex-watch-build']);
   });
   it('update: unedited automations take the new version, edited ones are kept, new ones arrive off', async () => {
-    const { store, inst } = setup();
+    const { store, inst } = await setup();
     await inst.install([prep('a', def('a')), prep('b', def('b'))], base);
     const b = (await store.byName('b'))!;
     await store.update(b.id, { ...b.definition, description: 'my edit' }, { kind: 'user', id: null });
@@ -69,7 +70,7 @@ describe('loadout installer', () => {
     expect(r.ids).toHaveLength(3);
   });
   it('uninstall removes only that install target\'s automations', async () => {
-    const { store, inst } = setup();
+    const { store, inst } = await setup();
     await inst.install([prep('a', def('a'))], base);
     await inst.install([prep('a', def('a'))], { ...base, targetId: 'T2', targetName: 'build' });
     expect(await inst.uninstall('webex', 'T1')).toEqual(['a']);
