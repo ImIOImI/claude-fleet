@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef, useReducer, useMemo } from 'react';
 import type { RemoteTier } from '../../preload/remoteTypes';
+import { RenameRemoteModal } from './components/RenameRemoteModal';
 import { usePorts } from './usePorts';
 import { useServingSessionNames } from './useServingSessionNames';
 import { WorkspaceTabStrip } from './components/WorkspaceTabStrip';
@@ -304,6 +305,7 @@ export function App() {
   const [closeTargetId, setCloseTargetId] = useState<string | null>(null);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const [editTargetId, setEditTargetId] = useState<string | null>(null);
+  const [renameRemoteId, setRenameRemoteId] = useState<string | null>(null);
   // When the user clicks Clone (Saved-row footer, chip menu, or
   // EditWorkspaceModal), the source spec lands here and the modal
   // reopens on the New tab pre-filled. Cleared when modal closes.
@@ -1436,6 +1438,7 @@ export function App() {
         onDeleteWorkspace={(w) => setDeleteTargetId(w.id)}
         onRefresh={refresh}
         onReorderWorkspace={handleReorderWorkspaces}
+        onRenameRemote={(w) => setRenameRemoteId(w.id)}
         waitingByWorkspace={waitingByWorkspaceFlag}
       />
 
@@ -1632,6 +1635,20 @@ export function App() {
           refresh();
         }}
       />
+      {(() => {
+        const target = renameRemoteId ? workspaces.find((w) => w.id === renameRemoteId && w.kind === 'remote') : undefined;
+        if (!target) return null;
+        return (
+          <RenameRemoteModal
+            id={target.id}
+            name={target.name}
+            onClose={() => {
+              setRenameRemoteId(null);
+              refresh();
+            }}
+          />
+        );
+      })()}
       {(() => {
         if (!editTargetId) return null;
         const target = workspaces.find((w) => w.id === editTargetId);

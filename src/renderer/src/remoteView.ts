@@ -72,3 +72,19 @@ const IPC_PREFIX = /^Error invoking remote method '[^']+': (?:[A-Za-z]*Error: )?
 export function ipcErrorText(err: unknown): string {
   return String((err as Error | undefined)?.message ?? err).replace(IPC_PREFIX, '');
 }
+
+/** Row `status` of a bookmark main hasn't probed yet (remote.ts). */
+export const CHECKING_STATUS = 'checking host';
+
+export interface RemoteChip {
+  phase: 'live' | 'checking' | 'unreachable';
+  /** Replaces the chip's sub-line, or null to keep the normal activity text. */
+  sub: string | null;
+}
+
+export function remoteChip(w: { kind: string; state: string; status?: string }): RemoteChip | null {
+  if (w.kind !== 'remote') return null;
+  if (w.state !== 'unreachable') return { phase: 'live', sub: null };
+  if (w.status === CHECKING_STATUS) return { phase: 'checking', sub: 'checking host…' };
+  return { phase: 'unreachable', sub: 'host unreachable' };
+}

@@ -3801,3 +3801,7 @@ button.switch { padding: 0; cursor: pointer; }
   color: var(--ink-1);
   text-transform: lowercase;
 }
+.remote-glyph { flex: 0 0 auto; color: var(--ink-1); }
+/* Remote dots don't pulse. */
+.ws-chip .dot.remote.unreachable { animation: none; }
+.ws-chip .dot.remote.checking { background: var(--ink-3); animation: none; }

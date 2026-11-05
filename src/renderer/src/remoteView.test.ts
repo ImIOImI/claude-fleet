@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { RemoteProbeErr, RemoteProbeOk } from '../../preload/remoteTypes';
-import { applyProbe, canStartSessions, canType, ipcErrorText, probeErrorText, remoteFormView, tierTitle, unreachableBanner, type RemoteFormState } from './remoteView';
+import { readFileSync } from 'node:fs';
+import { applyProbe, canStartSessions, CHECKING_STATUS, remoteChip, canType, ipcErrorText, probeErrorText, remoteFormView, tierTitle, unreachableBanner, type RemoteFormState } from './remoteView';
 
 const OK: RemoteProbeOk = {
   ok: true,
@@ -101,5 +102,31 @@ describe('ipcErrorText', () => {
   it("strips Electron's invoke prefix", () => {
     expect(ipcErrorText(new Error("Error invoking remote method 'remote:rename': Error: A name is required"))).toBe('A name is required');
     expect(ipcErrorText('plain')).toBe('plain');
+  });
+});
+
+describe('remoteChip', () => {
+  const remote = (state: 'running' | 'unreachable', status?: string) => ({ kind: 'remote' as const, state, status });
+
+  it('is null for local and container chips', () => {
+    expect(remoteChip({ kind: 'container', state: 'unreachable' })).toBeNull();
+    expect(remoteChip({ kind: 'local', state: 'running' })).toBeNull();
+  });
+
+  it('a reachable host is live with no sub-line override', () => {
+    expect(remoteChip(remote('running'))).toEqual({ phase: 'live', sub: null });
+  });
+
+  it('an unprobed bookmark is checking, not an error', () => {
+    expect(remoteChip(remote('unreachable', CHECKING_STATUS))).toEqual({ phase: 'checking', sub: 'checking host…' });
+  });
+
+  it('a probed, failing host is unreachable', () => {
+    expect(remoteChip(remote('unreachable', 'connect ECONNREFUSED'))).toEqual({ phase: 'unreachable', sub: 'host unreachable' });
+    expect(remoteChip(remote('unreachable'))).toEqual({ phase: 'unreachable', sub: 'host unreachable' });
+  });
+
+  it("matches main's checking status", () => {
+    expect(readFileSync('src/main/remote.ts', 'utf8')).toContain(`CHECKING_STATUS = '${CHECKING_STATUS}'`);
   });
 });
