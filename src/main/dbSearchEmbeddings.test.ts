@@ -1,0 +1,29 @@
+import { afterEach, beforeEach, expect, it } from 'vitest';
+import * as db from './db.js';
+import { EMBED_DIM, EMBED_MODEL_ID, encodeVector } from './vectors.js';
+import { openTestState, type TestState } from './store/testStore.js';
+
+let st: TestState;
+beforeEach(async () => { st = await openTestState('cf-search-emb-'); });
+afterEach(() => st.close());
+
+function unit(seed: number): Float32Array {
+  const v = new Float32Array(EMBED_DIM);
+  let x = seed * 9301 + 49297;
+  for (let i = 0; i < EMBED_DIM; i++) { x = (x * 9301 + 49297) % 233280; v[i] = x / 233280 - 0.5; }
+  const n = Math.hypot(...v);
+  return v.map((c) => c / n);
+}
+
+it('ranks the allowed workspaces by similarity, recorded across dialects', async () => {
+  const rows = Array.from({ length: 60 }, (_, i) => ({
+    workspaceId: i % 3 === 0 ? 'W-OTHER' : 'W-A', sessionId: `s${i % 7}`, kind: (i % 5 === 0 ? 'summary' : 'turn') as 'turn' | 'summary',
+    refEventId: i, ts: 1000 + i, text: i % 11 === 0 ? '' : `text ${i}`, modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
+    vec: encodeVector(unit(i)), dedupKey: `t${i}`,
+  }));
+  await db.insertEmbeddings(rows);
+  const hits = await db.searchEmbeddings(unit(4), ['W-A'], { limit: 5 });
+  expect(hits.map((h) => ({ ...h, score: Math.round(h.score * 1e5) / 1e5 }))).toMatchSnapshot();
+  const kinds = await db.searchEmbeddings(unit(10), ['W-A', 'W-OTHER'], { limit: 3, kind: 'summary' });
+  expect(kinds.map((h) => h.text)).toMatchSnapshot();
+});

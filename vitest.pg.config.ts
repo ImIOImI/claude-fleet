@@ -18,6 +18,7 @@ export default defineConfig({
       'src/main/dbIngestBatch.test.ts',
       'src/main/dbReadCache.test.ts',
       'src/main/dbReadCharacterization.test.ts',
+      'src/main/dbSearchEmbeddings.test.ts',
       'src/main/dbSessionCosts.test.ts',
       'src/main/dbSessionStats.test.ts',
       'src/main/dbSessionsList.test.ts',
