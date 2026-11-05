@@ -14,6 +14,27 @@ describe('portPopupCopy', () => {
     );
   });
 
+  it('declared: includes the cmdline, joined with the reason when both are known', () => {
+    expect(
+      portPopupCopy(
+        { ...base, label: 'Vite dev server', reason: 'new header', cmdline: 'node server.js' },
+        'Work'
+      ).message
+    ).toBe('Work wants to show you Vite dev server on :5173 — new header · node server.js');
+  });
+
+  it('declared: includes the cmdline alone when no reason was given', () => {
+    expect(
+      portPopupCopy({ ...base, label: 'Vite dev server', cmdline: 'node server.js' }, 'Work').message
+    ).toBe('Work wants to show you Vite dev server on :5173 — node server.js');
+  });
+
+  it('declared: omits the trailing line when neither reason nor cmdline is known', () => {
+    expect(portPopupCopy({ ...base, label: 'Vite dev server' }, 'Work').message).toBe(
+      'Work wants to show you Vite dev server on :5173'
+    );
+  });
+
   it('undeclared fallback: tagged, with the command when known', () => {
     expect(portPopupCopy({ ...base, declared: false, cmdline: 'node server.js' }, 'Work')).toEqual({
       eyebrow: 'Preview · undeclared',
