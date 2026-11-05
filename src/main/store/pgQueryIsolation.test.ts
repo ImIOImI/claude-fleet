@@ -104,7 +104,9 @@ describe.skipIf(!isPg)('query isolation on Postgres (role + RLS)', () => {
   });
 
   it('accepts one SELECT only: writes, DDL, utility statements and a second statement are refused', async () => {
-    await expect(q('SELECT 1; SELECT 2')).rejects.toThrow(/multiple commands/);
+    await expect(q('SELECT 1; SELECT 2')).rejects.toThrow(/syntax error/);
+    // Closing the wrapper's parentheses yields a second statement, which the extended protocol refuses.
+    await expect(q('SELECT 1) a) b; SELECT 1 FROM (SELECT 1 FROM (SELECT 1')).rejects.toThrow(/multiple commands/);
     await expect(q(`DELETE FROM ${t.schema}.events`)).rejects.toThrow(/syntax error/);
     await expect(q(`WITH d AS (DELETE FROM ${t.schema}.events RETURNING 1) SELECT * FROM d`)).rejects.toThrow(/data-modifying/);
     await expect(q('SET ROLE NONE')).rejects.toThrow(/syntax error/);
@@ -120,9 +122,9 @@ describe.skipIf(!isPg)('query isolation on Postgres (role + RLS)', () => {
   });
 
   it('session-level effects do not outlive a call', async () => {
-    await q('SELECT pg_advisory_lock(7340211) AS l');
+    await q('SELECT pg_advisory_lock(7340215) AS l');
     await q(`SELECT set_config('search_path', 'pg_catalog', false) AS s`);
-    const held = await sql<{ n: number }>`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND objid = 7340211`.execute(db.stateKysely());
+    const held = await sql<{ n: number }>`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND objid = 7340215`.execute(db.stateKysely());
     expect(held.rows[0].n).toBe(0);
     expect(await q('SELECT count(*) AS n FROM sessions')).toEqual([{ n: 1 }]);
   });
@@ -258,6 +260,145 @@ describe.skipIf(!isPg)('query isolation on Postgres (role + RLS)', () => {
     } finally {
       await c.query('ROLLBACK');
       c.release();
+    }
+  });
+
+  it('a long run of whitespace or semicolons costs linear time and never blocks the event loop', async () => {
+    let last = Date.now();
+    let maxGap = 0;
+    const probe = setInterval(() => { const now = Date.now(); maxGap = Math.max(maxGap, now - last); last = now; }, 5);
+    try {
+      // A whitespace run followed by more SQL is the quadratic case for a /[\s;]+$/ strip.
+      expect(await q('SELECT 1 AS x' + ' '.repeat(60_000) + ', 2 AS y')).toEqual([{ x: 1, y: 2 }]);
+      expect(await q('SELECT 1 AS x' + ' '.repeat(60_000) + ';')).toEqual([{ x: 1 }]);
+      expect(await q('SELECT 1 AS x;' + '; \n\t'.repeat(15_000))).toEqual([{ x: 1 }]);
+      expect(await q('SELECT 1 AS x -- trailing comment')).toEqual([{ x: 1 }]);
+    } finally {
+      clearInterval(probe);
+    }
+    expect(maxGap).toBeLessThan(250);
+  });
+
+  it('the wrapper cannot be escaped to skip the size guard', async () => {
+    // Balanced against the wrapper's shape: only the random aliases make it fail.
+    await expect(q(`SELECT 1 AS v) q) r UNION ALL SELECT 'escaped' AS j FROM (SELECT 1 FROM (SELECT 1`)).rejects.toThrow(/"[qrj]_[0-9a-f]+" does not exist|missing FROM-clause entry/);
+  });
+
+  it('rows come back with SQLite-like shapes', async () => {
+    expect(await q(`SELECT 1 AS i, 'a' AS s, 1.5::float8 AS f, true AS b, NULL AS n, ARRAY[1, 2] AS arr, count(*) AS c, 12345678901 AS big FROM sessions`))
+      .toEqual([{ i: 1, s: 'a', f: 1.5, b: true, n: null, arr: [1, 2], c: 1, big: 12345678901 }]);
+    expect(await q('SELECT id, workspace_id FROM sessions')).toEqual([{ id: 'sa', workspace_id: A }]);
+  });
+
+  it('caps bytes per row and per result on the server side, fetching in batches', async () => {
+    await expect(q(`SELECT repeat('x', 60000) AS v`)).rejects.toThrow(/a row is \d+ bytes \(max 50000\)/);
+    // The datum is checked before any JSON is built.
+    await expect(q(`SELECT repeat('x', 300000) AS v`)).rejects.toThrow(/a row is \d+ bytes \(max 200000\)/);
+    await expect(q(`SELECT repeat('x', 1000) AS v FROM generate_series(1, 100)`)).rejects.toThrow(/result too large \(over 50000 bytes\)/);
+    expect((await q('SELECT g FROM generate_series(1, 150) g', { maxRows: 200 })).length).toBe(150);
+    expect((await q('SELECT g FROM generate_series(1, 150) g', { maxRows: 120 })).length).toBe(120);
+  });
+
+  it('a value past the client string limit fails fast and leaves the caller usable', async () => {
+    const started = Date.now();
+    await expect(q(`SELECT repeat('x', 540000000) AS v`)).rejects.toThrow(/too large|statement timeout/);
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(await q('SELECT 1 AS x')).toEqual([{ x: 1 }]);
+    await iso.end();
+    iso = await PgQueryIsolation.open(db.stateKysely(), t.schema, t.appConfig);
+  }, 30_000);
+
+  it('an oversized backend message destroys the connection instead of reaching the protocol parser', async () => {
+    await iso.end();
+    iso = await PgQueryIsolation.open(db.stateKysely(), t.schema, t.appConfig, { maxMessageBytes: 1_000_000 });
+    await expect(q(`SELECT repeat('x', 2000000)::int`)).rejects.toThrow(/exceeds/);
+    expect(await q('SELECT 1 AS x')).toEqual([{ x: 1 }]);
+  });
+
+  it('a call past its overall deadline is abandoned and the caller stays usable', async () => {
+    await iso.end();
+    iso = await PgQueryIsolation.open(db.stateKysely(), t.schema, t.appConfig, { statementTimeoutMs: 20_000, callTimeoutMs: 300 });
+    const started = Date.now();
+    await expect(q('SELECT pg_sleep(3)')).rejects.toThrow(/did not finish/);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(await q('SELECT 1 AS x')).toEqual([{ x: 1 }]);
+  });
+
+  it('runs at most maxConcurrent queries at once and refuses past the queue limit', async () => {
+    await iso.end();
+    iso = await PgQueryIsolation.open(db.stateKysely(), t.schema, t.appConfig, { maxConcurrent: 2, maxQueued: 1 });
+    for (const c of ['c1', 'c2', 'c3', 'c4']) await q('SELECT 1', { caller: c, scope: scopeA });
+    const started = Date.now();
+    const runs = await Promise.allSettled(['c1', 'c2', 'c3', 'c4'].map((c) => q('SELECT pg_sleep(0.4)', { caller: c, scope: scopeA })));
+    const busy = runs.filter((r) => r.status === 'rejected');
+    expect(busy).toHaveLength(1);
+    expect(String((busy[0] as PromiseRejectedResult).reason)).toMatch(/busy/);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(750);
+  });
+
+  it('query runs under a 5 s statement timeout by default', async () => {
+    expect(await q(`SELECT current_setting('statement_timeout') AS t`)).toEqual([{ t: '5s' }]);
+  });
+
+  it('forgetCaller waits for an in-flight call and refuses one queued before it', async () => {
+    await q('SELECT 1');
+    const inFlight = q('SELECT pg_sleep(0.4) AS s');
+    await new Promise((r) => setTimeout(r, 150));
+    const queued = q('SELECT 1 AS x');
+    const forgotten = iso.forgetCaller(A);
+    await expect(inFlight).resolves.toEqual([{ s: '' }]);
+    await expect(queued).rejects.toThrow(/removed/);
+    await forgotten;
+    const roles = await sql<{ n: number }>`SELECT count(*) AS n FROM pg_roles WHERE rolname LIKE ${callerRole(t.schema, A) + '%'}`.execute(db.stateKysely());
+    expect(roles.rows[0].n).toBe(0);
+    const grants = await sql<{ n: number }>`SELECT count(*) AS n FROM mcp_grants WHERE role_name = ${callerRole(t.schema, A)}`.execute(db.stateKysely());
+    expect(grants.rows[0].n).toBe(0);
+    expect(await q('SELECT 1 AS x')).toEqual([{ x: 1 }]);
+  });
+
+  it('forgetCaller racing a first call refuses the call and leaves no role behind', async () => {
+    const C = 'W-C';
+    const first = q('SELECT 1 AS x', { caller: C, scope: new Set([C]) });
+    const forgotten = iso.forgetCaller(C);
+    await expect(first).rejects.toThrow(/removed/);
+    await forgotten;
+    const roles = await sql<{ n: number }>`SELECT count(*) AS n FROM pg_roles WHERE rolname LIKE ${callerRole(t.schema, C) + '%'}`.execute(db.stateKysely());
+    expect(roles.rows[0].n).toBe(0);
+  });
+
+  it('a caller role whose password changed elsewhere is re-provisioned once', async () => {
+    await q('SELECT 1');
+    const role = callerRole(t.schema, A);
+    await t.appPool.query(`ALTER ROLE ${role} PASSWORD 'changed-by-another-process'`);
+    await t.pool.query('SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = $1', [role]);
+    expect(await q('SELECT 1 AS x')).toEqual([{ x: 1 }]);
+  });
+
+  it('a stale table grant to the reader role is revoked on open', async () => {
+    await t.appPool.query(`GRANT SELECT ON ${t.schema}.errors TO ${isolationRoles(t.schema).reader}`);
+    await iso.end();
+    iso = await PgQueryIsolation.open(db.stateKysely(), t.schema, t.appConfig);
+    await expect(q(`SELECT * FROM ${t.schema}.errors`)).rejects.toThrow(/permission denied/);
+  });
+
+  it('mcp_scope() is immune to functions shadowed on the caller\'s search_path', async () => {
+    await t.appPool.query(`CREATE FUNCTION ${t.schema}.mcp_evil_sfunc(text[], text) RETURNS text[] LANGUAGE sql AS $$ SELECT ARRAY['${A}', '${B}'] $$`);
+    await t.appPool.query(`CREATE AGGREGATE ${t.schema}.array_agg(text) (SFUNC = ${t.schema}.mcp_evil_sfunc, STYPE = text[], INITCOND = '{}')`);
+    expect(await q('SELECT DISTINCT workspace_id FROM sessions')).toEqual([{ workspace_id: A }]);
+  });
+
+  it('a notification sent by the caller is discarded with its transaction', async () => {
+    const listener = await t.appPool.connect();
+    const got: string[] = [];
+    listener.on('notification', (n) => got.push(n.channel));
+    try {
+      await listener.query('LISTEN mcp_probe');
+      await q(`SELECT pg_notify('mcp_probe', 'leak') AS n`);
+      await new Promise((r) => setTimeout(r, 300));
+      expect(got).toEqual([]);
+    } finally {
+      await listener.query('UNLISTEN *');
+      listener.release();
     }
   });
 });

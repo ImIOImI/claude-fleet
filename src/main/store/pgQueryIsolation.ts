@@ -8,12 +8,19 @@ import { sql, type Kysely } from 'kysely';
 import { parse as parseConnectionString } from 'pg-connection-string';
 import { pgTypes, writeLock, type PgPoolConfig } from './postgres.js';
 import { scramVerifier } from './scram.js';
-import { MCP_QUERY_TABLES, SNAPSHOT_EVENT_COLS, type QueryArgs, type QueryCaller, type QueryRunner } from './readSource.js';
+import { MAX_QUERY_BYTES, MCP_QUERY_TABLES, SNAPSHOT_EVENT_COLS, type QueryArgs, type QueryCaller, type QueryRunner } from './readSource.js';
 
 /** Role names are `<schema>_mcp_<16 hex>_raw` at most: within Postgres's 63. */
 const MAX_SCHEMA_LEN = 32;
-const DEFAULT_STATEMENT_TIMEOUT_MS = 10_000;
+const DEFAULT_STATEMENT_TIMEOUT_MS = 5_000;
 const DEFAULT_LOCK_TIMEOUT_MS = 2_000;
+// set_config can raise work_mem per statement, so concurrency is the memory bound.
+const DEFAULT_MAX_CONCURRENT = 2;
+const DEFAULT_MAX_QUEUED = 8;
+// pg-protocol throws outside any promise when it decodes a string past V8's limit.
+const DEFAULT_MAX_MESSAGE_BYTES = 64 << 20;
+const FETCH_BATCH = 50;
+const INVALID_PASSWORD = '28P01';
 
 export class QueryUnavailableError extends Error {}
 
@@ -44,6 +51,7 @@ export function rolePoolConfig(base: PgPoolConfig, user: string, password: strin
   };
 }
 
+// Policies target the reader role only: any other non-owner role sees no rows.
 const POLICY = (schema: string, table: string): string =>
   table === 'perf_events'
     ? `workspace_id IS NULL OR workspace_id IN (SELECT unnest(${schema}.mcp_scope()))`
@@ -64,8 +72,14 @@ export async function ensureIsolation<DB>(k: Kysely<DB>, schema: string): Promis
       SET search_path = pg_catalog
       AS $f$ SELECT coalesce(array_agg(workspace_id), '{}') FROM ${schema}.mcp_grants WHERE role_name = session_user $f$`);
     await run(`REVOKE ALL ON FUNCTION mcp_scope() FROM PUBLIC`);
+    await run(`CREATE OR REPLACE FUNCTION mcp_row_too_large(n bigint, cap bigint) RETURNS text LANGUAGE plpgsql VOLATILE
+      SET search_path = pg_catalog
+      AS $f$ BEGIN RAISE EXCEPTION 'result too large: a row is % bytes (max %); select fewer or narrower columns', n, cap
+        USING ERRCODE = 'program_limit_exceeded'; END $f$`);
+    await run(`REVOKE ALL ON FUNCTION mcp_row_too_large(bigint, bigint) FROM PUBLIC`);
+    await run(`REVOKE ALL ON ALL TABLES IN SCHEMA ${schema} FROM ${r.reader}, ${r.raw}`);
     await run(`GRANT USAGE ON SCHEMA ${schema} TO ${r.reader}`);
-    await run(`GRANT EXECUTE ON FUNCTION mcp_scope() TO ${r.reader}`);
+    await run(`GRANT EXECUTE ON FUNCTION mcp_scope(), mcp_row_too_large(bigint, bigint) TO ${r.reader}`);
     await run(`GRANT SELECT (${SNAPSHOT_EVENT_COLS}) ON events TO ${r.reader}`);
     await run(`GRANT SELECT (raw_jsonl) ON events TO ${r.raw}`);
     await run(`GRANT SELECT ON ${MCP_QUERY_TABLES.filter((t) => t !== 'events').join(', ')} TO ${r.reader}`);
@@ -88,12 +102,62 @@ export async function isolationBlocker<DB>(k: Kysely<DB>, schema: string): Promi
   return null;
 }
 
-export interface QueryIsolationOptions { statementTimeoutMs?: number; lockTimeoutMs?: number; onPoolError?: (e: Error) => void }
+export interface QueryIsolationOptions {
+  statementTimeoutMs?: number;
+  lockTimeoutMs?: number;
+  /** Whole-call deadline; past it the connection is destroyed. */
+  callTimeoutMs?: number;
+  maxConcurrent?: number;
+  maxQueued?: number;
+  maxMessageBytes?: number;
+  onPoolError?: (e: Error) => void;
+}
+
+/** Destroys `stream` when a backend message header announces more than `max`
+ *  bytes, before pg-protocol buffers and decodes it. */
+export function guardMessageSize(stream: NodeJS.ReadableStream & { destroy(e?: Error): void }, max: number): void {
+  let body = 0;
+  let head: Buffer = Buffer.alloc(0);
+  stream.prependListener('data', (chunk: Buffer) => {
+    let off = 0;
+    while (off < chunk.length) {
+      if (body > 0) {
+        const n = Math.min(body, chunk.length - off);
+        body -= n;
+        off += n;
+        continue;
+      }
+      const take = chunk.subarray(off, off + 5 - head.length);
+      head = Buffer.concat([head, take]);
+      off += take.length;
+      if (head.length < 5) return;
+      const len = head.readUInt32BE(1) - 4;
+      head = Buffer.alloc(0);
+      if (len > max) {
+        stream.destroy(new Error(`a Postgres message of ${len} bytes exceeds ${max}`));
+        return;
+      }
+      body = len;
+    }
+  });
+}
+
+/** Trailing whitespace and semicolons, in linear time: the caller's SQL sits inside a subquery. */
+function trimTail(text: string): string {
+  let end = text.length;
+  while (end > 0 && /[\s;]/.test(text[end - 1])) end--;
+  return text.slice(0, end);
+}
 
 export class PgQueryIsolation implements QueryRunner {
   private readonly pools = new Map<string, pg.Pool>();
   private readonly locks = new Map<string, () => Promise<() => void>>();
   private readonly ensured = new Map<string, Promise<void>>();
+  /** Bumped by forgetCaller; a call that began under an older value is refused. */
+  private readonly generations = new Map<string, number>();
+  private readonly guarded = new WeakSet<pg.PoolClient>();
+  private active = 0;
+  private readonly waiting: Array<() => void> = [];
 
   private constructor(
     private readonly app: Kysely<unknown>,
@@ -112,13 +176,26 @@ export class PgQueryIsolation implements QueryRunner {
 
   async query(caller: QueryCaller, q: QueryArgs): Promise<unknown[]> {
     const role = callerRole(this.schema, caller.callerId);
-    let lock = this.locks.get(role);
-    if (!lock) { lock = writeLock(); this.locks.set(role, lock); }
-    const release = await lock();
+    const gen = this.generation(role);
+    const release = await this.lockFor(role)();
     try {
-      await this.ensureRole(role);
-      await this.writeScope(role, caller.scope);
-      return await this.runAs(role, q);
+      this.checkGeneration(role, gen);
+      const free = await this.slot();
+      try {
+        await this.ensureRole(role, gen);
+        await this.writeScope(role, gen, caller.scope);
+        try {
+          return await this.runAs(role, q);
+        } catch (e) {
+          // Another process re-provisioned the role (one process per schema is the supported mode).
+          if ((e as { code?: string }).code !== INVALID_PASSWORD) throw e;
+          this.ensured.delete(role);
+          await this.ensureRole(role, gen);
+          return await this.runAs(role, q);
+        }
+      } finally {
+        free();
+      }
     } finally {
       release();
     }
@@ -126,14 +203,20 @@ export class PgQueryIsolation implements QueryRunner {
 
   async forgetCaller(callerId: string): Promise<void> {
     const role = callerRole(this.schema, callerId);
-    await this.pools.get(role)?.end();
-    this.pools.delete(role);
-    this.ensured.delete(role);
-    await this.app.transaction().execute(async (trx) => {
-      await sql`DELETE FROM mcp_grants WHERE role_name = ${role}`.execute(trx);
-      await sql.raw(`DROP ROLE IF EXISTS ${role}`).execute(trx);
-      await sql.raw(`DROP ROLE IF EXISTS ${role}_raw`).execute(trx);
-    });
+    this.generations.set(role, this.generation(role) + 1);
+    const release = await this.lockFor(role)();
+    try {
+      await this.pools.get(role)?.end();
+      this.pools.delete(role);
+      this.ensured.delete(role);
+      await this.app.transaction().execute(async (trx) => {
+        await sql`DELETE FROM mcp_grants WHERE role_name = ${role}`.execute(trx);
+        await sql.raw(`DROP ROLE IF EXISTS ${role}`).execute(trx);
+        await sql.raw(`DROP ROLE IF EXISTS ${role}_raw`).execute(trx);
+      });
+    } finally {
+      release();
+    }
   }
 
   async end(): Promise<void> {
@@ -141,18 +224,50 @@ export class PgQueryIsolation implements QueryRunner {
     this.pools.clear();
   }
 
+  private generation(role: string): number {
+    return this.generations.get(role) ?? 0;
+  }
+
+  private checkGeneration(role: string, gen: number): void {
+    if (this.generation(role) !== gen) throw new Error('the caller workspace was removed');
+  }
+
+  private lockFor(role: string): () => Promise<() => void> {
+    let lock = this.locks.get(role);
+    if (!lock) { lock = writeLock(); this.locks.set(role, lock); }
+    return lock;
+  }
+
+  /** A global slot: at most maxConcurrent calls run, maxQueued wait, the rest are refused. */
+  private async slot(): Promise<() => void> {
+    const free = () => {
+      const next = this.waiting.shift();
+      if (next) next(); else this.active--;
+    };
+    if (this.active < (this.opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT)) {
+      this.active++;
+      return free;
+    }
+    if (this.waiting.length >= (this.opts.maxQueued ?? DEFAULT_MAX_QUEUED)) {
+      throw new Error('query is busy: too many queries are running; retry shortly');
+    }
+    await new Promise<void>((r) => this.waiting.push(r));
+    return free;
+  }
+
   /** The role exists, with a password minted for this process and never stored. */
-  private ensureRole(role: string): Promise<void> {
+  private ensureRole(role: string, gen: number): Promise<void> {
     let p = this.ensured.get(role);
     if (!p) {
-      p = this.provision(role);
+      p = this.provision(role, gen);
       this.ensured.set(role, p);
       p.catch(() => this.ensured.delete(role));
     }
     return p;
   }
 
-  private async provision(role: string): Promise<void> {
+  private async provision(role: string, gen: number): Promise<void> {
+    this.checkGeneration(role, gen);
     const r = isolationRoles(this.schema);
     const password = randomBytes(32).toString('base64url');
     await this.app.transaction().execute(async (trx) => {
@@ -173,7 +288,8 @@ export class PgQueryIsolation implements QueryRunner {
   }
 
   /** Rewritten on every call, so a revoked grant stops applying at once. */
-  private async writeScope(role: string, scope: ReadonlySet<string>): Promise<void> {
+  private async writeScope(role: string, gen: number, scope: ReadonlySet<string>): Promise<void> {
+    this.checkGeneration(role, gen);
     await this.app.transaction().execute(async (trx) => {
       await sql`DELETE FROM mcp_grants WHERE role_name = ${role}`.execute(trx);
       const ids = [...scope];
@@ -183,41 +299,89 @@ export class PgQueryIsolation implements QueryRunner {
     });
   }
 
+  /** Runs `exec` on one pooled connection. A client-level error or the call
+   *  deadline destroys the connection and rejects, so the role lock is always released. */
   private async runAs(role: string, q: QueryArgs): Promise<unknown[]> {
     if (!Number.isSafeInteger(q.maxRows) || q.maxRows < 1) throw new Error('maxRows must be a positive integer');
     const pool = this.pools.get(role);
     if (!pool) throw new Error('caller role pool missing');
     const c = await pool.connect();
-    let broken: Error | undefined;
+    if (!this.guarded.has(c)) {
+      const stream = (c as unknown as { connection: { stream: NodeJS.ReadableStream & { destroy(e?: Error): void } } }).connection.stream;
+      guardMessageSize(stream, this.opts.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES);
+      this.guarded.add(c);
+    }
+    const statementMs = this.opts.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS;
+    const callMs = this.opts.callTimeoutMs ?? 2 * statementMs + 10_000;
+    let failure: Error | undefined;
+    let fail!: (e: Error) => void;
+    const failed = new Promise<never>((_, reject) => {
+      fail = (e) => { failure ??= e; reject(e); };
+    });
+    failed.catch(() => undefined);
+    c.on('error', fail);
+    const timer = setTimeout(() => fail(new Error(`query did not finish within ${callMs} ms`)), callMs);
     try {
-      await c.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
-      try {
-        if (q.includeRaw) await c.query(`SET LOCAL ROLE ${role}_raw`);
-        await c.query(`SET LOCAL statement_timeout = ${this.opts.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS}`);
-        await c.query(`SET LOCAL lock_timeout = ${this.opts.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS}`);
-        await c.query(`SET LOCAL search_path = ${this.schema}, public`);
-        // Temp views shadow the tables, so `SELECT * FROM events` works without raw_jsonl.
-        await c.query(`CREATE TEMP VIEW events AS SELECT ${SNAPSHOT_EVENT_COLS}${q.includeRaw ? ', raw_jsonl' : ''} FROM ${this.schema}.events`);
-        for (const t of MCP_QUERY_TABLES) {
-          if (t !== 'events') await c.query(`CREATE TEMP VIEW ${t} AS SELECT * FROM ${this.schema}.${t}`);
-        }
-        await c.query('SET TRANSACTION READ ONLY');
-        // A cursor accepts only SELECT/VALUES/WITH (no data-modifying WITH);
-        // the extended protocol refuses a second statement.
-        const declare: pg.QueryConfig & { queryMode: 'extended' } = {
-          text: `DECLARE mcp_q NO SCROLL CURSOR FOR ${q.sql.replace(/[\s;]+$/, '')}`,
-          values: q.params,
-          queryMode: 'extended',
-        };
-        await c.query(declare);
-        return (await c.query(`FETCH FORWARD ${q.maxRows} FROM mcp_q`)).rows;
-      } finally {
-        await c.query('ROLLBACK');
-      }
+      return await Promise.race([this.exec(c, role, q, statementMs), failed]);
     } finally {
-      // Session-level effects outlive a rollback (advisory locks, LISTEN).
-      try { await c.query('DISCARD ALL'); } catch (e) { broken = e as Error; }
-      c.release(broken);
+      clearTimeout(timer);
+      if (!failure) {
+        // Session-level effects outlive a rollback (advisory locks, LISTEN).
+        try { await Promise.race([c.query('DISCARD ALL'), failed]); } catch (e) { failure ??= e as Error; }
+      }
+      c.removeListener('error', fail);
+      if (failure) c.on('error', () => undefined);
+      c.release(failure);
+    }
+  }
+
+  private async exec(c: pg.PoolClient, role: string, q: QueryArgs, statementMs: number): Promise<unknown[]> {
+    await c.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+    try {
+      if (q.includeRaw) await c.query(`SET LOCAL ROLE ${role}_raw`);
+      await c.query(`SET LOCAL statement_timeout = ${statementMs}`);
+      await c.query(`SET LOCAL lock_timeout = ${this.opts.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS}`);
+      await c.query(`SET LOCAL search_path = ${this.schema}, public`);
+      // Temp views shadow the tables, so `SELECT * FROM events` works without raw_jsonl.
+      await c.query(`CREATE TEMP VIEW events AS SELECT ${SNAPSHOT_EVENT_COLS}${q.includeRaw ? ', raw_jsonl' : ''} FROM ${this.schema}.events`);
+      for (const t of MCP_QUERY_TABLES) {
+        if (t !== 'events') await c.query(`CREATE TEMP VIEW ${t} AS SELECT * FROM ${this.schema}.${t}`);
+      }
+      await c.query('SET TRANSACTION READ ONLY');
+      // Each row comes back as one JSON text, size-checked on the server. The
+      // aliases are random so the caller's SQL can't close the subquery and
+      // select around the checks. A cursor accepts only SELECT/VALUES/WITH (no
+      // data-modifying WITH); the extended protocol refuses a second statement.
+      const tag = randomBytes(12).toString('hex');
+      const [qa, ra, ja] = [`q_${tag}`, `r_${tag}`, `j_${tag}`];
+      const tooLarge = `${this.schema}.mcp_row_too_large`;
+      const declare: pg.QueryConfig & { queryMode: 'extended' } = {
+        text: `DECLARE mcp_q NO SCROLL CURSOR FOR
+          SELECT CASE WHEN octet_length(${ra}.${ja}) > ${MAX_QUERY_BYTES} THEN ${tooLarge}(octet_length(${ra}.${ja}), ${MAX_QUERY_BYTES}) ELSE ${ra}.${ja} END AS j
+          FROM (SELECT CASE WHEN pg_column_size(${qa}) > ${4 * MAX_QUERY_BYTES} THEN ${tooLarge}(pg_column_size(${qa}), ${4 * MAX_QUERY_BYTES})
+                       ELSE row_to_json(${qa})::text END AS ${ja}
+                FROM (\n${trimTail(q.sql)}\n) ${qa}) ${ra}`,
+        values: q.params,
+        queryMode: 'extended',
+      };
+      await c.query(declare);
+      const rows: unknown[] = [];
+      let bytes = 2;
+      while (rows.length < q.maxRows) {
+        const n = Math.min(FETCH_BATCH, q.maxRows - rows.length);
+        const batch = (await c.query<{ j: string }>(`FETCH FORWARD ${n} FROM mcp_q`)).rows;
+        for (const { j } of batch) {
+          bytes += Buffer.byteLength(j) + 1;
+          if (bytes > MAX_QUERY_BYTES) {
+            throw new Error(`result too large (over ${MAX_QUERY_BYTES} bytes); add LIMIT or aggregate server-side`);
+          }
+          rows.push(JSON.parse(j));
+        }
+        if (batch.length < n) break;
+      }
+      return rows;
+    } finally {
+      await c.query('ROLLBACK');
     }
   }
 }

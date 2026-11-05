@@ -35,6 +35,9 @@ export function checkEventColumns(cols: readonly string[]): void {
 
 export const NOT_AUTHORIZED = 'not authorized to read this session';
 
+/** `query`'s result cap, as JSON bytes. */
+export const MAX_QUERY_BYTES = 50_000;
+
 export interface SessionListFilter { workspaceId?: string; since?: number; until?: number; limit: number }
 /** `columns`: each source rejects any outside LIST_EVENT_COL_ALLOWLIST. */
 export interface EventListFilter { type?: string; toolName?: string; since?: number; limit: number; columns: readonly string[] }

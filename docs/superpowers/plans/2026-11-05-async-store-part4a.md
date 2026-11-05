@@ -116,6 +116,11 @@ D1–D38 from parts 2a–3 still bind. Part 4a adds D39–D44, recorded in SPEC.
   - **Accepted, documented:**
     - Catalog views stay visible: table names, and per-table activity counters in `pg_stat_user_tables`. These are counts, not rows.
     - `pg_stats`, which holds column values, is hidden for RLS tables. A test pins that.
+    - Other catalog metadata: role names and connected state (`pg_roles`, `pg_stat_activity`), `reltuples` and relation sizes, gaps in `events.id`, and `application_name` as a signalling channel.
+    - **Memory:** `set_config` can raise `work_mem` / `hash_mem_multiplier`, and no in-database block exists. This is bounded by a global cap of 2 concurrent `query` calls (8 queued, the rest busy) and `statement_timeout` 5 s.
+    - **Advisory locks:** `pg_advisory_*` is PUBLIC and only a superuser can revoke it, so migrations take their lock with a bounded `lock_timeout` and retry.
+    - **Policy scope:** only the reader role has policies, so any other non-owner role sees zero rows.
+    - **Deployment:** one process per schema is the supported mode. Passwords are minted per process; a 28P01 re-provisions once.
   - **Not isolated here:** `fleet-host`. (d) applies the same module there.
 - **D43 — `search_transcripts` on Postgres calls `db.searchEmbeddings`** (part 3's exact pgvector scan; this closes #491).
   - The tool embeds the query once and hands the vector to the source. A scope narrowed to nothing returns `[]` without embedding, as on SQLite.

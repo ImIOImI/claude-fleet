@@ -35,7 +35,8 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { sqliteReadSource } from './sqliteReadSource.js';
-import { LIST_EVENT_COLS, LIST_EVENT_COL_ALLOWLIST, type OwnedReadSource, type ReadSource, type TokenGroup } from './store/readSource.js';
+import { lineSplitter, MAX_LINE_BYTES } from './mcpLines.js';
+import { LIST_EVENT_COLS, LIST_EVENT_COL_ALLOWLIST, MAX_QUERY_BYTES, type OwnedReadSource, type ReadSource, type TokenGroup } from './store/readSource.js';
 import { costFor } from './pricing.js';
 import { logError } from './errorLog.js';
 import { ensureContainerBridgeScript } from './mcpContainerBridge.js';
@@ -562,22 +563,18 @@ export function stopMcpServer(): void {
   userDataDir = null;
 }
 
+const OVERSIZE_ERROR = { jsonrpc: '2.0', id: null, error: { code: -32600, message: `request line exceeds ${MAX_LINE_BYTES} bytes` } };
+
 function handleConnection(sock: Socket, callerId: string): void {
   const conn = trackConnection('unix', callerId, sock);
-  let buf = '';
   sock.setEncoding('utf8');
-  sock.on('data', (chunk: string) => {
-    buf += chunk;
-    let nl: number;
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (line) {
-        conn.rpcCount++;
-        dispatchLine(line, sock, callerId);
-      }
+  sock.on('data', lineSplitter((raw) => {
+    const line = raw.trim();
+    if (line) {
+      conn.rpcCount++;
+      dispatchLine(line, sock, callerId);
     }
-  });
+  }, () => send(sock, OVERSIZE_ERROR)));
   sock.on('error', () => sock.destroy());
 }
 
@@ -621,41 +618,38 @@ function trackConnection(
  *  lines are the normal newline-delimited JSON-RPC stream. An unknown token
  *  drops the connection before any tool can run. */
 function handleTcpConnection(sock: Socket): void {
-  let buf = '';
   let callerId: string | null = null;
   let conn: { rpcCount: number } | null = null;
   sock.setEncoding('utf8');
   sock.on('error', () => sock.destroy());
-  sock.on('data', (chunk: string) => {
-    buf += chunk;
-    let nl: number;
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (callerId === null) {
-        if (!line) continue; // tolerate leading blank lines before the token
-        const id = tokenToId.get(line);
-        if (!id) {
-          console.warn('[mcp] tcp connection presented an unknown token; closing');
-          logError({
-            source: 'main',
-            type: 'mcp-auth-failed',
-            level: 'warn',
-            message: 'mcp tcp connection presented an unknown token; closed'
-          });
-          sock.destroy();
-          return;
-        }
-        callerId = id;
-        conn = trackConnection('tcp', callerId, sock);
-        continue;
+  sock.on('data', lineSplitter((raw) => {
+    const line = raw.trim();
+    if (callerId === null) {
+      if (!line) return; // tolerate leading blank lines before the token
+      const id = tokenToId.get(line);
+      if (!id) {
+        console.warn('[mcp] tcp connection presented an unknown token; closing');
+        logError({
+          source: 'main',
+          type: 'mcp-auth-failed',
+          level: 'warn',
+          message: 'mcp tcp connection presented an unknown token; closed'
+        });
+        sock.destroy();
+        return false;
       }
-      if (line) {
-        if (conn) conn.rpcCount++;
-        dispatchLine(line, sock, callerId);
-      }
+      callerId = id;
+      conn = trackConnection('tcp', callerId, sock);
+      return;
     }
-  });
+    if (line) {
+      if (conn) conn.rpcCount++;
+      dispatchLine(line, sock, callerId);
+    }
+  }, () => {
+    if (callerId === null) sock.destroy();
+    else send(sock, OVERSIZE_ERROR);
+  }));
 }
 
 function dispatchLine(line: string, sock: Socket, callerId: string): void {
@@ -867,8 +861,6 @@ function source(rs: ReadSource | null): ReadSource {
   if (!rs) throw new Error('the history store is not open');
   return rs;
 }
-
-const MAX_QUERY_BYTES = 50_000;
 
 /** Whether a session's workspace is within the caller's allowed read set (#122). */
 async function sessionAllowed(rs: ReadSource, sessionId: string, allowed: Set<string>): Promise<boolean> {
