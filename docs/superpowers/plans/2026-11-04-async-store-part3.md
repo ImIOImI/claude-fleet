@@ -3740,6 +3740,8 @@ gh pr merge --auto --squash "$(gh pr view feat/async-store-p3 --repo ImIOImI/cla
 
 ## Part 4 outline (written in full when part 3 has merged)
 
+Written in full as `2026-11-05-async-store-part4a.md` (MCP on Postgres) and `2026-11-05-async-store-part4b.md` (the managed container, Settings → *Storage*, the first-switch copy, the degraded state).
+
 **Goal:** users pick Postgres locally in Settings, and everything works on it: the app-managed container, the first-switch copy, the Docker-down state, and the MCP server, typed tools and `query` included, with structural isolation. That completes sub-project (a).
 
 - **Managed local Postgres** (`src/main/store/managedPostgres.ts` on `docker.ts`):
@@ -3763,6 +3765,9 @@ gh pr merge --auto --squash "$(gh pr view feat/async-store-p3 --repo ImIOImI/cla
   - **Each call:** `BEGIN READ ONLY; SET LOCAL ROLE …; SET LOCAL statement_timeout …`. The single-statement, row-cap and result-cap guards stay.
   - **Contract tests:** `mcpServer.test.ts` and `tests/mcp-*.spec.ts` (memory: MCP contract tests) run on both dialects.
   - **Host:** this is the same isolation (d) needs on the host.
+  - **`ReadSource` gaps that (d)'s `FederatedReader` must close** (found in the 4a review):
+    - *No origin identity.* Rows carry no field naming the store or host they came from. Merged results can't be attributed or deduplicated across sources.
+    - *No stable cursor.* `list_sessions`/`list_events` page by `since` on a timestamp, and that isn't tie-safe: rows sharing a `ts` at a page boundary are skipped or repeated. (d) needs a total-order cursor, e.g. `(ts, origin, id)`.
 - **Approximate search (HNSW), if the measured ceiling is reached** (D30 revised part 3 to exact search; this is the follow-up, not committed to): a subquery form — compute the ANN candidate set in an inner query (`ORDER BY vec <=> q LIMIT n`, no `id` tiebreak, so the HNSW index is actually read), then re-rank/tiebreak in an outer query — plus `SET LOCAL hnsw.ef_search = max(200, 4 × limit)` and `hnsw.iterative_scan = relaxed_order`. Needs a recall test at the row counts the ceiling was measured at (20k/100k/250k; see D30's latency table) before shipping, since relaxed/approximate ordering trades correctness for speed.
 - **Perf:** a Postgres bench, the 2b metrics on the managed container over loopback, gated against SQLite with stated tolerances (ingest is expected to be slower per line; reads must stay within one IPC frame).
 - **SPEC:** §4 (the managed image), §6 (*Settings* channels and the Storage section), §8 *Startup* (managed start and the degraded state), §9 (DB credentials in the vault), §11 (role + RLS isolation).

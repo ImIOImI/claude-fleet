@@ -17,16 +17,37 @@ export interface PgTrack {
 // Arbitrary constant: serializes concurrent migrators (two host pods, two tracks).
 const MIGRATE_LOCK = 7_340_211;
 
-/** Migrate `t` inside `schema`, which must exist (the store never creates it). */
-export async function migratePostgres<DB>(k: Kysely<DB>, schema: string, t: PgTrack): Promise<void> {
+export interface MigrateLockOptions { lockTimeoutMs?: number; attempts?: number; backoffMs?: number }
+
+const LOCK_NOT_AVAILABLE = '55P03';
+
+/** Migrate `t` inside `schema`, which must exist (the store never creates it).
+ *  The lock wait is bounded and retried: any session may take MIGRATE_LOCK
+ *  (pg_advisory_lock is PUBLIC and only a superuser can revoke it). */
+export async function migratePostgres<DB>(k: Kysely<DB>, schema: string, t: PgTrack, o: MigrateLockOptions = {}): Promise<void> {
   const cur = await sql<{ s: string | null }>`SELECT current_schema() AS s`.execute(k);
   if (cur.rows[0]?.s !== schema) {
     throw new Error(`the store schema "${schema}" does not exist: create it (and grant this role CREATE on it) before first start`);
   }
+  const attempts = o.attempts ?? 12;
+  for (let i = 1; ; i++) {
+    try {
+      await migrateOnce(k, t, o.lockTimeoutMs ?? 5_000);
+      return;
+    } catch (e) {
+      if ((e as { code?: string }).code !== LOCK_NOT_AVAILABLE || i >= attempts) throw e;
+      await new Promise((r) => setTimeout(r, Math.min(5_000, (o.backoffMs ?? 250) * 2 ** (i - 1))));
+    }
+  }
+}
+
+async function migrateOnce<DB>(k: Kysely<DB>, t: PgTrack, lockTimeoutMs: number): Promise<void> {
   await k.transaction().execute(async (trx) => {
     // A session statement_timeout (fleet-host) must not cut a migration short.
     await sql`SET LOCAL statement_timeout = 0`.execute(trx);
+    await sql.raw(`SET LOCAL lock_timeout = ${Math.floor(lockTimeoutMs)}`).execute(trx);
     await sql`SELECT pg_advisory_xact_lock(${MIGRATE_LOCK})`.execute(trx);
+    await sql`SET LOCAL lock_timeout = 0`.execute(trx);
     await sql`CREATE TABLE IF NOT EXISTS schema_migrations (track TEXT PRIMARY KEY, version BIGINT NOT NULL)`.execute(trx);
     const row = await sql<{ version: number }>`SELECT version FROM schema_migrations WHERE track = ${t.track}`.execute(trx);
     let v = row.rows[0]?.version ?? 0;

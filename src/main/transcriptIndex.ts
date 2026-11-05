@@ -90,20 +90,15 @@ export interface SearchHit {
   score: number;
 }
 
-export async function searchTranscripts(
-  query: string,
-  allowedWorkspaces: Set<string>,
-  embed: EmbedFn,
-  opts: { limit?: number; kind?: 'turn' | 'summary' },
-  /** The MCP server's read-only connection; search stays raw better-sqlite3
-   *  (SPEC §11). */
+/** Brute-force cosine scan of `ids`' current-model embeddings on a SQLite
+ *  connection (the MCP server's read-only one). */
+export function searchVectorsSqlite(
   db: Database.Database,
-): Promise<SearchHit[]> {
-  const ids = [...allowedWorkspaces];
-  if (ids.length === 0 || query.trim().length === 0) return [];
-  const limit = Math.max(1, Math.min(50, opts.limit ?? 10));
-
-  const [qvec] = await embed([query.trim()]);
+  qvec: Float32Array,
+  ids: readonly string[],
+  opts: { limit: number; kind?: 'turn' | 'summary' },
+): SearchHit[] {
+  if (ids.length === 0) return [];
   const where = [`workspace_id IN (${ids.map(() => '?').join(',')})`, `model_id = ?`, `text <> ''`];
   const params: unknown[] = [...ids, EMBED_MODEL_ID];
   if (opts.kind) { where.push('kind = ?'); params.push(opts.kind); }
@@ -116,12 +111,30 @@ export async function searchTranscripts(
                 FROM embeddings WHERE ${where.join(' AND ')}`)
       .all(...params) as Array<{ sessionId: string; workspaceId: string; kind: 'turn' | 'summary'; ts: number | null; text: string; vec: Buffer }>;
     const cands = rows.map((r) => ({ vec: decodeVector(r.vec) }));
-    return { rows, ranked: topK(qvec, cands, limit) };
+    return { rows, ranked: topK(qvec, cands, opts.limit) };
   });
   return ranked.map(({ index, score }) => {
     const r = rows[index];
     return { sessionId: r.sessionId, workspaceId: r.workspaceId, kind: r.kind, ts: r.ts, text: r.text, score };
   });
+}
+
+/** Embed `query`, then searchVectorsSqlite. Kept for the state bench and
+ *  transcriptSearch.test.ts; the MCP tool embeds and calls its ReadSource. */
+export async function searchTranscripts(
+  query: string,
+  allowedWorkspaces: Set<string>,
+  embed: EmbedFn,
+  opts: { limit?: number; kind?: 'turn' | 'summary' },
+  /** The MCP server's read-only connection; search stays raw better-sqlite3
+   *  (SPEC §11). */
+  db: Database.Database,
+): Promise<SearchHit[]> {
+  const ids = [...allowedWorkspaces];
+  if (ids.length === 0 || query.trim().length === 0) return [];
+  const limit = Math.max(1, Math.min(50, opts.limit ?? 10));
+  const [qvec] = await embed([query.trim()]);
+  return searchVectorsSqlite(db, qvec, ids, { limit, kind: opts.kind });
 }
 
 export async function indexSessionSummaries(embed: EmbedFn, batch = EMBED_BATCH): Promise<number> {

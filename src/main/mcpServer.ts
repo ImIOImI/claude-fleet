@@ -24,7 +24,9 @@
 // arbitrary READ-ONLY SQL against a per-call in-memory SNAPSHOT seeded only with
 // the caller's allowed-workspace rows (buildSnapshot); the real DB is DETACHed
 // before the caller's SQL runs, so isolation is structural — no join/UNION/
-// subquery/sqlite_master trick can reach another workspace's rows.
+// subquery/sqlite_master trick can reach another workspace's rows. On the
+// Postgres store `query` runs under the caller's own role with row-level
+// security instead (store/pgQueryIsolation.ts).
 //
 // Safety: a single connection opened `{ readonly: true }` is the hard guarantee
 // that nothing here can mutate the DB; the typed tools use parameterized SQL.
@@ -34,10 +36,13 @@ import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync 
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
+import { sqliteReadSource } from './sqliteReadSource.js';
+import { lineSplitter, MAX_LINE_BYTES } from './mcpLines.js';
+import { LIST_EVENT_COLS, LIST_EVENT_COL_ALLOWLIST, MAX_QUERY_BYTES, type OwnedReadSource, type ReadSource, type TokenGroup } from './store/readSource.js';
 import { costFor } from './pricing.js';
-import { logError } from './errorLog.js';
+import { clipText, logError } from './errorLog.js';
 import { ensureContainerBridgeScript } from './mcpContainerBridge.js';
-import { searchTranscripts, type EmbedFn } from './transcriptIndex.js';
+import { type EmbedFn } from './transcriptIndex.js';
 import { sessionIdsFromClaimResults, sessionIdsFromQueryRows, sessionIdsFromTranscriptHits, type SearchHitEvent } from './claims/searchHits.js';
 import { describeListenerError, type ListenerScope } from './mcpListenerError.js';
 import { type McpStatus } from './mcpStatusBroadcast.js';
@@ -351,10 +356,10 @@ function reportListenerError(where: ListenerScope, err: unknown): void {
 }
 
 let userDataDir: string | null = null;
-let rodb: Database.Database | null = null;
-/** Started without state.db (the Postgres store): STATE_DB_TOOLS report unavailable. */
+let readSource: OwnedReadSource | null = null;
+/** Started with no history store yet: STATE_DB_TOOLS report unavailable. */
 let storeless = false;
-/** Tools that read the read-only state.db connection. */
+/** Tools that read the history store through the ReadSource. */
 const STATE_DB_TOOLS = new Set([
   'list_sessions', 'get_session', 'get_cost', 'list_events', 'search_transcripts', 'session_summary',
   'list_errors', 'query', 'mark_useful',
@@ -401,12 +406,12 @@ function setMcpHealth(ok: boolean, detail?: string): void {
  *  lazily via {@link ensureWorkspaceSocket}. No-op if already started. On
  *  Windows this also binds the single loopback-TCP listener that fronts every
  *  workspace (identity comes from the per-connection token, not the socket). */
-export function startMcpServer(dir: string, opts: { stateDb?: boolean } = {}): void {
+export function startMcpServer(dir: string, opts: { readSource?: OwnedReadSource | null } = {}): void {
   if (userDataDir) return;
-  if (opts.stateDb === false) {
+  if (opts.readSource === null) {
     storeless = true;
   } else {
-    rodb = new Database(join(dir, 'state.db'), { readonly: true, fileMustExist: true });
+    readSource = opts.readSource ?? sqliteReadSource(new Database(join(dir, 'state.db'), { readonly: true, fileMustExist: true }));
   }
   userDataDir = dir;
 
@@ -425,6 +430,13 @@ export function startMcpServer(dir: string, opts: { stateDb?: boolean } = {}): v
     });
     tcpListener = srv;
   }
+}
+
+/** Attach the history store once it opens after startup (null detaches it). */
+export function setReadSource(rs: OwnedReadSource | null): void {
+  if (readSource && readSource !== rs) void readSource.close().catch(() => undefined);
+  readSource = rs;
+  storeless = rs === null;
 }
 
 /** Ensure `id` is reachable from its container. Idempotent; safe to call before
@@ -502,6 +514,8 @@ function ensureWorkspaceToken(id: string): void {
  *  cleanup on workspace removal; surviving listeners are harmless and get
  *  rebuilt from the manifest list on next launch. */
 export function removeWorkspaceSocket(id: string): void {
+  void readSource?.forgetCaller(id).catch((e: unknown) =>
+    logError({ source: 'main', type: 'mcp-forget-caller', level: 'warn', message: String(e), workspaceId: id }));
   const server = listeners.get(id);
   if (server) {
     try {
@@ -545,32 +559,24 @@ export function stopMcpServer(): void {
   }
   tokenToId.clear();
   idToToken.clear();
-  try {
-    rodb?.close();
-  } catch {
-    /* ignore */
-  }
-  rodb = null;
+  void readSource?.close().catch(() => undefined);
+  readSource = null;
   storeless = false;
   userDataDir = null;
 }
 
+const OVERSIZE_ERROR = { jsonrpc: '2.0', id: null, error: { code: -32600, message: `request line exceeds ${MAX_LINE_BYTES} bytes` } };
+
 function handleConnection(sock: Socket, callerId: string): void {
   const conn = trackConnection('unix', callerId, sock);
-  let buf = '';
   sock.setEncoding('utf8');
-  sock.on('data', (chunk: string) => {
-    buf += chunk;
-    let nl: number;
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (line) {
-        conn.rpcCount++;
-        dispatchLine(line, sock, callerId);
-      }
+  sock.on('data', lineSplitter((raw) => {
+    const line = raw.trim();
+    if (line) {
+      conn.rpcCount++;
+      dispatchLine(line, sock, callerId);
     }
-  });
+  }, () => send(sock, OVERSIZE_ERROR)));
   sock.on('error', () => sock.destroy());
 }
 
@@ -614,44 +620,50 @@ function trackConnection(
  *  lines are the normal newline-delimited JSON-RPC stream. An unknown token
  *  drops the connection before any tool can run. */
 function handleTcpConnection(sock: Socket): void {
-  let buf = '';
   let callerId: string | null = null;
   let conn: { rpcCount: number } | null = null;
   sock.setEncoding('utf8');
   sock.on('error', () => sock.destroy());
-  sock.on('data', (chunk: string) => {
-    buf += chunk;
-    let nl: number;
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (callerId === null) {
-        if (!line) continue; // tolerate leading blank lines before the token
-        const id = tokenToId.get(line);
-        if (!id) {
-          console.warn('[mcp] tcp connection presented an unknown token; closing');
-          logError({
-            source: 'main',
-            type: 'mcp-auth-failed',
-            level: 'warn',
-            message: 'mcp tcp connection presented an unknown token; closed'
-          });
-          sock.destroy();
-          return;
-        }
-        callerId = id;
-        conn = trackConnection('tcp', callerId, sock);
-        continue;
+  sock.on('data', lineSplitter((raw) => {
+    const line = raw.trim();
+    if (callerId === null) {
+      if (!line) return; // tolerate leading blank lines before the token
+      const id = tokenToId.get(line);
+      if (!id) {
+        console.warn('[mcp] tcp connection presented an unknown token; closing');
+        logError({
+          source: 'main',
+          type: 'mcp-auth-failed',
+          level: 'warn',
+          message: 'mcp tcp connection presented an unknown token; closed'
+        });
+        sock.destroy();
+        return false;
       }
-      if (line) {
-        if (conn) conn.rpcCount++;
-        dispatchLine(line, sock, callerId);
-      }
+      callerId = id;
+      conn = trackConnection('tcp', callerId, sock);
+      return;
     }
-  });
+    if (line) {
+      if (conn) conn.rpcCount++;
+      dispatchLine(line, sock, callerId);
+    }
+  }, () => {
+    if (callerId === null) sock.destroy();
+    else send(sock, OVERSIZE_ERROR);
+  }));
 }
 
-function dispatchLine(line: string, sock: Socket, callerId: string): void {
+const MAX_TOOL_ERROR_CHARS = 4_096;
+export const MAX_IN_FLIGHT_PER_CONNECTION = 16;
+const inFlight = new WeakMap<Out, number>();
+
+/** Test-only: dispatch one request line as `callerId` on a fake connection. */
+export function dispatchLineForTests(line: string, sock: Out, callerId: string): void {
+  dispatchLine(line, sock, callerId);
+}
+
+function dispatchLine(line: string, sock: Out, callerId: string): void {
   let msg: { id?: unknown; method?: string; params?: Record<string, unknown> };
   try {
     msg = JSON.parse(line);
@@ -662,6 +674,14 @@ function dispatchLine(line: string, sock: Socket, callerId: string): void {
   const { id, method, params } = msg;
   // Notifications (no id) get no reply — e.g. notifications/initialized.
   const isNotification = id === undefined || id === null;
+  const busy = inFlight.get(sock) ?? 0;
+  if (busy >= MAX_IN_FLIGHT_PER_CONNECTION) {
+    if (!isNotification) {
+      send(sock, { jsonrpc: '2.0', id, error: { code: -32000, message: `busy: ${busy} requests already in flight on this connection` } });
+    }
+    return;
+  }
+  inFlight.set(sock, busy + 1);
 
   // handleMethod may return a Promise (the committee_* tools call async backend
   // effects); Promise.resolve() funnels both sync throws and async rejections
@@ -675,11 +695,12 @@ function dispatchLine(line: string, sock: Socket, callerId: string): void {
     })
     .catch((err) => {
       if (!isNotification) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = clipText(err instanceof Error ? err.message : String(err), MAX_TOOL_ERROR_CHARS);
         const code = err instanceof RpcError ? err.code : -32603;
         send(sock, { jsonrpc: '2.0', id, error: { code, message } });
       }
-    });
+    })
+    .finally(() => inFlight.set(sock, (inFlight.get(sock) ?? 1) - 1));
 }
 
 const NO_REPLY = Symbol('no-reply');
@@ -693,6 +714,11 @@ class RpcError extends Error {
   }
 }
 
+/** Test-only: one JSON-RPC method as a caller, without a socket. */
+export function handleMcpRequestForTests(method: string, params: Record<string, unknown> = {}, callerId = 'test'): unknown {
+  return handleMethod(method, params, callerId);
+}
+
 function handleMethod(method: string, params: Record<string, unknown>, callerId: string): unknown {
   switch (method) {
     case 'initialize':
@@ -700,7 +726,7 @@ function handleMethod(method: string, params: Record<string, unknown>, callerId:
     case 'ping':
       return {};
     case 'tools/list':
-      return { tools: TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })) };
+      return { tools: TOOLS.map((t) => ({ name: t.name, description: toolDescription(t), inputSchema: t.inputSchema })) };
     case 'tools/call':
       return callTool(params, callerId); // may be a Promise (committee_* tools)
     default:
@@ -720,7 +746,7 @@ const SLOW_TOTAL_MS = 10_000;
 
 /** Test-only: swap the read-only DB handle without a real listener. */
 export function _setDbForTests(db: Database.Database | null): void {
-  rodb = db;
+  readSource = db ? sqliteReadSource(db) : null;
 }
 
 export async function callTool(params: Record<string, unknown>, callerId: string): Promise<unknown> {
@@ -728,7 +754,7 @@ export async function callTool(params: Record<string, unknown>, callerId: string
   const args = (params.arguments as Record<string, unknown>) ?? {};
   const tool = TOOLS.find((t) => t.name === name);
   if (!tool) throw new RpcError(-32602, `Unknown tool: ${name}`);
-  if (!rodb && !storeless) throw new RpcError(-32603, 'Database not open');
+  if (!readSource && !storeless) throw new RpcError(-32603, 'Database not open');
   const startedAt = Date.now();
   let stage: 'resolve-allowed' | 'run-tool' = 'resolve-allowed';
   const watchdog = setTimeout(() => {
@@ -750,8 +776,8 @@ export async function callTool(params: Record<string, unknown>, callerId: string
     const allowedWorkspaces = await resolveAllowedWorkspaces(callerId);
     const resolveMs = Date.now() - startedAt;
     stage = 'run-tool';
-    if (!rodb && STATE_DB_TOOLS.has(name)) throw new Error(`${name} is unavailable on the Postgres store`);
-    const result = await tool.run(rodb as Database.Database, args, { callerId, allowedWorkspaces });
+    if (!readSource && STATE_DB_TOOLS.has(name)) throw new Error(`${name} is unavailable while the history store is not open`);
+    const result = await tool.run(readSource, args, { callerId, allowedWorkspaces });
     const totalMs = Date.now() - startedAt;
     if (resolveMs >= SLOW_RESOLVE_MS || totalMs >= SLOW_TOTAL_MS) {
       logError({
@@ -770,7 +796,7 @@ export async function callTool(params: Record<string, unknown>, callerId: string
     // The full stack goes to the error log — the caller-facing message alone
     // proved undebuggable when the packaged app's embedder failed to load
     // (#194: a bare ERR_MODULE_NOT_FOUND one-liner with no trace anywhere).
-    const message = err instanceof Error ? err.message : String(err);
+    const message = clipText(err instanceof Error ? err.message : String(err), MAX_TOOL_ERROR_CHARS);
     logError({
       source: 'main',
       type: 'mcp-tool-error',
@@ -786,7 +812,9 @@ export async function callTool(params: Record<string, unknown>, callerId: string
   }
 }
 
-function send(sock: Socket, obj: unknown): void {
+type Out = Pick<Socket, 'write'>;
+
+function send(sock: Out, obj: unknown): void {
   try {
     sock.write(JSON.stringify(obj) + '\n');
   } catch {
@@ -813,36 +841,15 @@ function withIso<T extends Record<string, unknown>>(row: T, fields: string[]): T
   return out as T;
 }
 
-/** Sum a session's assistant-event token usage per (model, service_tier) and
- *  derive USD via the pricing table. Shared by get_cost and session_summary. */
-function aggregateSessionCost(
-  db: Database.Database,
-  sessionId: string
-): {
+/** Derive USD + token totals from a session's per-(model, service_tier)
+ *  token groups via the pricing table. Shared by get_cost and session_summary. */
+function aggregateSessionCost(rows: TokenGroup[]): {
   usd: number;
   inputTokens: number;
   outputTokens: number;
   cacheReadInputTokens: number;
   cacheCreationInputTokens: number;
 } {
-  const rows = db
-    .prepare(
-      `SELECT model, service_tier,
-              SUM(COALESCE(input_tokens,0)) AS input,
-              SUM(COALESCE(output_tokens,0)) AS output,
-              SUM(COALESCE(cache_read_input_tokens,0)) AS cacheRead,
-              SUM(COALESCE(cache_creation_input_tokens,0)) AS cacheCreate
-       FROM events WHERE session_id = ? AND type = 'assistant'
-       GROUP BY model, service_tier`
-    )
-    .all(sessionId) as Array<{
-    model: string | null;
-    service_tier: string | null;
-    input: number;
-    output: number;
-    cacheRead: number;
-    cacheCreate: number;
-  }>;
   let usd = 0;
   const totals = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
   for (const r of rows) {
@@ -861,122 +868,31 @@ function aggregateSessionCost(
   return { usd, ...totals };
 }
 
-interface Tool {
+export interface Tool {
   name: string;
   description: string;
+  /** Replaces `description` in tools/list when the history store is Postgres. */
+  pgDescription?: string;
   inputSchema: Record<string, unknown>;
-  // ctx carries the host-assigned caller workspace id. Existing tools omit it
-  // (a narrower fn satisfies the wider type); #122's scoped reads consume it.
-  run: (db: Database.Database, args: Record<string, unknown>, ctx: ToolCtx) => unknown;
+  // ctx carries the host-assigned caller workspace id; `rs` is null only when
+  // the history store isn't open (callTool refuses STATE_DB_TOOLS then).
+  run: (rs: ReadSource | null, args: Record<string, unknown>, ctx: ToolCtx) => unknown;
 }
 
-// Curated event columns (omit raw_jsonl by default — it's large/sensitive and
-// the extract columns below cover the common needs). tool_input/tool_use_id/
-// tool_result_is_error carry the parsed which-file/which-command detail (#174).
-const EVENT_COLS =
-  'id, session_id, workspace_id, ts, type, subtype, model, tool_name, tool_use_id, tool_input, tool_result_is_error, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, service_tier';
-
-// Columns a caller may request via list_events `columns` projection. Excludes
-// raw_jsonl by design (#146) — use the `query` tool with include_raw for that.
-const EVENT_COL_ALLOWLIST = new Set(
-  EVENT_COLS.split(',').map((c) => c.trim()).concat(['uuid', 'parent_uuid'])
-);
-
-/** SQL `IN (?,…)` fragment + params for an allowed-workspace set (#122). */
-function inClause(col: string, allowed: Set<string>): { sql: string; params: string[] } {
-  const ids = [...allowed];
-  if (ids.length === 0) return { sql: '0 = 1', params: [] }; // match nothing (self is always present, so unreachable)
-  return { sql: `${col} IN (${ids.map(() => '?').join(',')})`, params: ids };
+/** Exported for tests. */
+export function toolDescription(t: Tool): string {
+  return readSource?.queryFlavor === 'postgres' && t.pgDescription ? t.pgDescription : t.description;
 }
 
-const MAX_QUERY_BYTES = 50_000;
-
-// Columns copied into a query snapshot's events table (raw_jsonl appended only
-// when include_raw). Mirrors the real events schema minus dedup_key.
-const SNAPSHOT_EVENT_COLS =
-  'id, session_id, workspace_id, ts, type, subtype, uuid, parent_uuid, model, ' +
-  'input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, ' +
-  'service_tier, tool_name, tool_use_id, tool_input, tool_result_is_error';
-
-/** Build a throwaway in-memory DB containing ONLY the caller's allowed-workspace
- *  rows, copied from the source DB at `srcPath` (the live state.db). The source
- *  is DETACHed before the caller's SQL ever runs, so isolation is structural:
- *  no subquery/UNION/sqlite_master trick can reach unfiltered rows (#146). The
- *  caller owns the returned DB and must close it. */
-function buildSnapshot(srcPath: string, allowed: Set<string>, includeRaw: boolean): Database.Database {
-  const mem = new Database(':memory:');
-  try {
-    const alias = 'src_' + randomBytes(6).toString('hex');
-    const { sql: scope, params } = inClause('workspace_id', allowed);
-    // ATTACH the real DB. Path is escaped into the statement (ATTACH filename is
-    // not reliably bindable); paths never contain single quotes in practice, but
-    // double any just in case.
-    const attached = srcPath.replace(/'/g, "''");
-    mem.exec(`ATTACH DATABASE '${attached}' AS ${alias}`);
-    try {
-      const eventCols = includeRaw ? `${SNAPSHOT_EVENT_COLS}, raw_jsonl` : SNAPSHOT_EVENT_COLS;
-      mem.prepare(
-        `CREATE TABLE events AS SELECT ${eventCols} FROM ${alias}.events WHERE ${scope}`
-      ).run(...params);
-      mem.prepare(`CREATE TABLE sessions AS SELECT * FROM ${alias}.sessions WHERE ${scope}`).run(...params);
-      mem.prepare(
-        `CREATE TABLE broker_sessions AS SELECT * FROM ${alias}.broker_sessions WHERE ${scope}`
-      ).run(...params);
-      mem.prepare(
-        `CREATE TABLE session_summaries AS SELECT * FROM ${alias}.session_summaries WHERE ${scope}`
-      ).run(...params);
-      mem.prepare(
-        `CREATE TABLE session_tags AS SELECT * FROM ${alias}.session_tags WHERE ${scope}`
-      ).run(...params);
-      mem.prepare(
-        `CREATE TABLE usage_events AS SELECT * FROM ${alias}.usage_events WHERE ${scope}`
-      ).run(...params);
-      // perf_events: app-global rows (workspace_id NULL — stalls, slow ops)
-      // are host-process facts visible to every caller; workspace-tagged rows
-      // (pty windows, terminal latency) are scoped like everything else.
-      // Wrapped in try/catch so an older DB without the table doesn't break
-      // snapshot creation for callers that don't query perf_events.
-      try {
-        mem.prepare(
-          `CREATE TABLE perf_events AS SELECT * FROM ${alias}.perf_events WHERE workspace_id IS NULL OR ${scope}`
-        ).run(...params);
-      } catch (e) {
-        // Pre-v11 DB (no perf_events yet): give callers an empty, correctly-shaped
-        // table. Anything else is a real failure and must surface, not read as
-        // "no perf data".
-        if (!(e instanceof Error && /no such table/i.test(e.message))) throw e;
-        mem.exec(`CREATE TABLE perf_events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, kind TEXT NOT NULL, workspace_id TEXT, session_id TEXT, name TEXT, dur_ms REAL, trace_id TEXT, span_id TEXT, meta TEXT)`);
-      }
-      try {
-        mem.prepare(
-          `CREATE TABLE port_exposures AS SELECT * FROM ${alias}.port_exposures WHERE ${scope}`
-        ).run(...params);
-      } catch (e) {
-        // Pre-v15 DB: an empty, correctly-shaped table instead of an error.
-        if (!(e instanceof Error && /no such table/i.test(e.message))) throw e;
-        mem.exec(
-          `CREATE TABLE port_exposures (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, session_id TEXT, ` +
-            `port INTEGER NOT NULL, cmdline TEXT, label TEXT, reason TEXT, source TEXT NOT NULL, ` +
-            `first_scanned_at INTEGER, declared_at INTEGER, popup_shown_at INTEGER, outcome TEXT, ` +
-            `opened_via TEXT, open_count INTEGER NOT NULL DEFAULT 0, ended_at INTEGER)`
-        );
-      }
-    } finally {
-      mem.exec(`DETACH ${alias}`);
-    }
-    return mem;
-  } catch (e) {
-    mem.close();
-    throw e;
-  }
+function source(rs: ReadSource | null): ReadSource {
+  if (!rs) throw new Error('the history store is not open');
+  return rs;
 }
 
 /** Whether a session's workspace is within the caller's allowed read set (#122). */
-function sessionAllowed(db: Database.Database, sessionId: string, allowed: Set<string>): boolean {
-  const row = db.prepare('SELECT workspace_id FROM sessions WHERE id = ?').get(sessionId) as
-    | { workspace_id?: string }
-    | undefined;
-  return !!row && typeof row.workspace_id === 'string' && allowed.has(row.workspace_id);
+async function sessionAllowed(rs: ReadSource, sessionId: string, allowed: Set<string>): Promise<boolean> {
+  const ws = await rs.sessionWorkspace(allowed, sessionId);
+  return ws !== null && allowed.has(ws);
 }
 
 // Exported for the cross-workspace isolation regression test (mcpServer.test.ts).
@@ -994,28 +910,15 @@ export const TOOLS: Tool[] = [
         limit: { type: 'number', description: `default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}` }
       }
     },
-    run: (db, a, ctx) => {
-      const where: string[] = [];
-      const p: unknown[] = [];
-      if (typeof a.workspace_id === 'string') {
-        where.push('workspace_id = ?');
-        p.push(a.workspace_id);
-      }
-      if (typeof a.since === 'number') {
-        where.push('last_active_at >= ?');
-        p.push(a.since);
-      }
-      if (typeof a.until === 'number') {
-        where.push('last_active_at <= ?');
-        p.push(a.until);
-      }
-      // Always restrict to the caller's allowed workspaces (#146) — a
-      // caller-supplied workspace_id above can only narrow, never widen.
-      const { sql: scopeSql, params } = inClause('workspace_id', ctx.allowedWorkspaces);
-      where.push(scopeSql);
-      p.push(...params);
-      const sql = `SELECT * FROM sessions ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY last_active_at DESC LIMIT ?`;
-      const rows = db.prepare(sql).all(...p, clampLimit(a.limit)) as Array<Record<string, unknown>>;
+    run: async (rs, a, ctx) => {
+      // Always restricted to the caller's allowed workspaces (#146) — a
+      // caller-supplied workspace_id can only narrow, never widen.
+      const rows = await source(rs).listSessions(ctx.allowedWorkspaces, {
+        workspaceId: typeof a.workspace_id === 'string' ? a.workspace_id : undefined,
+        since: typeof a.since === 'number' ? a.since : undefined,
+        until: typeof a.until === 'number' ? a.until : undefined,
+        limit: clampLimit(a.limit)
+      });
       return rows.map((r) => withIso(r, ['started_at', 'last_active_at']));
     }
   },
@@ -1027,11 +930,9 @@ export const TOOLS: Tool[] = [
       properties: { id: { type: 'string' } },
       required: ['id']
     },
-    run: (db, a, ctx) => {
+    run: async (rs, a, ctx) => {
       if (typeof a.id !== 'string') throw new Error('id is required');
-      const row = db.prepare('SELECT * FROM sessions WHERE id = ?').get(a.id) as
-        | { workspace_id?: string }
-        | undefined;
+      const row = await source(rs).getSession(ctx.allowedWorkspaces, a.id);
       if (!row) return null;
       // Hide a session outside the caller's allowed set (#146).
       if (!(typeof row.workspace_id === 'string' && ctx.allowedWorkspaces.has(row.workspace_id))) {
@@ -1039,7 +940,7 @@ export const TOOLS: Tool[] = [
       }
       // Record clickthrough if this session was recently returned by a search (#207).
       noteRead(ctx.callerId, a.id);
-      return withIso(row as Record<string, unknown>, ['started_at', 'last_active_at']);
+      return withIso(row, ['started_at', 'last_active_at']);
     }
   },
   {
@@ -1051,14 +952,14 @@ export const TOOLS: Tool[] = [
       properties: { session_id: { type: 'string' } },
       required: ['session_id']
     },
-    run: (db, a, ctx) => {
+    run: async (rs, a, ctx) => {
       if (typeof a.session_id !== 'string') throw new Error('session_id is required');
-      if (!sessionAllowed(db, a.session_id, ctx.allowedWorkspaces)) {
+      if (!(await sessionAllowed(source(rs), a.session_id, ctx.allowedWorkspaces))) {
         throw new Error('not authorized to read this session');
       }
       // Record clickthrough if this session was recently returned by a search (#207).
       noteRead(ctx.callerId, a.session_id);
-      return { session_id: a.session_id, ...aggregateSessionCost(db, a.session_id) };
+      return { session_id: a.session_id, ...aggregateSessionCost(await source(rs).tokenGroups(ctx.allowedWorkspaces, a.session_id)) };
     }
   },
   {
@@ -1079,37 +980,28 @@ export const TOOLS: Tool[] = [
       },
       required: ['session_id']
     },
-    run: (db, a, ctx) => {
+    run: async (rs, a, ctx) => {
       if (typeof a.session_id !== 'string') throw new Error('session_id is required');
-      if (!sessionAllowed(db, a.session_id, ctx.allowedWorkspaces)) {
+      if (!(await sessionAllowed(source(rs), a.session_id, ctx.allowedWorkspaces))) {
         throw new Error('not authorized to read this session');
       }
       // Record clickthrough if this session was recently returned by a search (#207).
       noteRead(ctx.callerId, a.session_id);
-      let cols = EVENT_COLS;
+      let cols = LIST_EVENT_COLS;
       if (Array.isArray(a.columns)) {
         const names = a.columns.map((c) => String(c));
         for (const n of names) {
-          if (!EVENT_COL_ALLOWLIST.has(n)) throw new Error(`unknown column: ${n}`);
+          if (!LIST_EVENT_COL_ALLOWLIST.has(n)) throw new Error(`unknown column: ${n}`);
         }
-        if (names.length > 0) cols = names.join(', ');
+        if (names.length > 0) cols = names;
       }
-      const where = ['session_id = ?'];
-      const p: unknown[] = [a.session_id];
-      if (typeof a.type === 'string') {
-        where.push('type = ?');
-        p.push(a.type);
-      }
-      if (typeof a.tool_name === 'string') {
-        where.push('tool_name = ?');
-        p.push(a.tool_name);
-      }
-      if (typeof a.since === 'number') {
-        where.push('ts >= ?');
-        p.push(a.since);
-      }
-      const sql = `SELECT ${cols} FROM events WHERE ${where.join(' AND ')} ORDER BY id ASC LIMIT ?`;
-      const rows = db.prepare(sql).all(...p, clampLimit(a.limit)) as Array<Record<string, unknown>>;
+      const rows = await source(rs).listEvents(ctx.allowedWorkspaces, a.session_id, {
+        type: typeof a.type === 'string' ? a.type : undefined,
+        toolName: typeof a.tool_name === 'string' ? a.tool_name : undefined,
+        since: typeof a.since === 'number' ? a.since : undefined,
+        limit: clampLimit(a.limit),
+        columns: cols
+      });
       return rows.map((r) => withIso(r, ['ts']));
     }
   },
@@ -1127,7 +1019,7 @@ export const TOOLS: Tool[] = [
       },
       required: ['query'],
     },
-    run: async (_db, a, ctx) => {
+    run: async (rs, a, ctx) => {
       if (typeof a.query !== 'string' || a.query.trim().length === 0) throw new Error('query is required');
       if (!queryEmbedder) throw new Error('transcript search index is unavailable');
       // A caller-supplied workspace_id can only NARROW within the allowed set.
@@ -1137,9 +1029,13 @@ export const TOOLS: Tool[] = [
       }
       const limit = typeof a.limit === 'number' ? Math.max(1, Math.min(50, Math.floor(a.limit))) : 10;
       const kind = a.kind === 'turn' || a.kind === 'summary' ? a.kind : undefined;
-      const hits = await searchTranscripts(a.query, allowed, queryEmbedder, { limit, kind }, _db);
+      let hits: Array<{ sessionId: string }> = [];
+      if (allowed.size > 0) {
+        const [qvec] = await queryEmbedder([a.query.trim()]);
+        hits = await source(rs).searchEmbeddings(qvec, allowed, { limit, kind });
+      }
       // Record one search-impression per distinct result session (#207).
-      noteSearchResults(ctx.callerId, a.query, (hits as Array<{ sessionId?: string }>).map((h) => h.sessionId ?? '').filter(Boolean));
+      noteSearchResults(ctx.callerId, a.query, hits.map((h) => h.sessionId ?? '').filter(Boolean));
       emitSearchHits(ctx, 'search_transcripts', a.query, sessionIdsFromTranscriptHits(hits));
       return hits;
     },
@@ -1151,43 +1047,25 @@ export const TOOLS: Tool[] = [
       '(Bash), token totals + derived USD, and the UTC time span (epoch ms + ISO). Lists are capped; ' +
       '*Count fields give the true totals. Collapses list_events + get_cost into one request (#174).',
     inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
-    run: (db, a, ctx) => {
+    run: async (rs, a, ctx) => {
       if (typeof a.id !== 'string') throw new Error('id is required');
-      if (!sessionAllowed(db, a.id, ctx.allowedWorkspaces)) {
+      if (!(await sessionAllowed(source(rs), a.id, ctx.allowedWorkspaces))) {
         throw new Error('not authorized to read this session');
       }
       // Record clickthrough if this session was recently returned by a search (#207).
       noteRead(ctx.callerId, a.id);
       const MAX_SUMMARY_ITEMS = 100;
-      const distinctInputs = (names: string[]): { items: string[]; count: number } => {
-        const placeholders = names.map(() => '?').join(',');
-        const rows = db
-          .prepare(
-            `SELECT DISTINCT tool_input FROM events
-             WHERE session_id = ? AND tool_name IN (${placeholders}) AND tool_input IS NOT NULL
-             ORDER BY tool_input`
-          )
-          .all(a.id, ...names) as Array<{ tool_input: string }>;
-        const items = rows.map((r) => r.tool_input);
-        return { items: items.slice(0, MAX_SUMMARY_ITEMS), count: items.length };
-      };
-      const files = distinctInputs(['Write', 'Edit', 'NotebookEdit']);
-      const cmds = distinctInputs(['Bash']);
-
-      const span = db
-        .prepare(`SELECT MIN(ts) AS started_at, MAX(ts) AS last_active_at FROM events WHERE session_id = ?`)
-        .get(a.id) as { started_at: number | null; last_active_at: number | null };
-
+      const parts = await source(rs).summaryParts(ctx.allowedWorkspaces, a.id);
       return withIso(
         {
           session_id: a.id,
-          filesEdited: files.items,
-          filesEditedCount: files.count,
-          commands: cmds.items,
-          commandsCount: cmds.count,
-          ...aggregateSessionCost(db, a.id),
-          started_at: span.started_at,
-          last_active_at: span.last_active_at
+          filesEdited: parts.files.slice(0, MAX_SUMMARY_ITEMS),
+          filesEditedCount: parts.files.length,
+          commands: parts.commands.slice(0, MAX_SUMMARY_ITEMS),
+          commandsCount: parts.commands.length,
+          ...aggregateSessionCost(parts.tokens),
+          started_at: parts.span.started_at,
+          last_active_at: parts.span.last_active_at
         },
         ['started_at', 'last_active_at']
       );
@@ -1208,20 +1086,15 @@ export const TOOLS: Tool[] = [
         limit: { type: 'number', description: `default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}` }
       }
     },
-    run: (db, a, ctx) => {
-      const where: string[] = [];
-      const p: unknown[] = [];
-      // Always: own workspace(s) OR a global (NULL-workspace) crash row.
-      const { sql: scopeSql, params } = inClause('workspace_id', ctx.allowedWorkspaces);
-      where.push(`(${scopeSql} OR workspace_id IS NULL)`);
-      p.push(...params);
-      if (typeof a.workspace_id === 'string') { where.push('(workspace_id = ? OR workspace_id IS NULL)'); p.push(a.workspace_id); }
-      if (typeof a.session_id === 'string') { where.push('session_id = ?'); p.push(a.session_id); }
-      if (typeof a.level === 'string') { where.push('level = ?'); p.push(a.level); }
-      if (typeof a.type === 'string') { where.push('type = ?'); p.push(a.type); }
-      if (typeof a.since === 'number') { where.push('ts >= ?'); p.push(a.since); }
-      const sql = `SELECT * FROM errors WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ?`;
-      const rows = db.prepare(sql).all(...p, clampLimit(a.limit)) as Array<Record<string, unknown>>;
+    run: async (rs, a, ctx) => {
+      const rows = await source(rs).listErrors(ctx.allowedWorkspaces, {
+        workspaceId: typeof a.workspace_id === 'string' ? a.workspace_id : undefined,
+        sessionId: typeof a.session_id === 'string' ? a.session_id : undefined,
+        level: typeof a.level === 'string' ? a.level : undefined,
+        type: typeof a.type === 'string' ? a.type : undefined,
+        since: typeof a.since === 'number' ? a.since : undefined,
+        limit: clampLimit(a.limit)
+      });
       return rows.map((r) => ({ ...r, ts_iso: new Date(r.ts as number).toISOString() }));
     }
   },
@@ -1262,6 +1135,13 @@ export const TOOLS: Tool[] = [
       'raw_jsonl is excluded unless include_raw=true. ' +
       'Args: sql (required), params (array of bound ? values), include_raw (bool), max_rows (default ' +
       `${DEFAULT_LIMIT}, max ${MAX_LIMIT}). Writes/DDL/multi-statement are rejected.`,
+    pgDescription:
+      'Run a single read-only Postgres SELECT against your workspace data. Tables: events, sessions, ' +
+      'broker_sessions, session_summaries, session_tags, usage_events, perf_events, port_exposures — row-level security limits ' +
+      'them to the rows you may read, so SELECT freely (joins, aggregates, GROUP BY, to_timestamp(ts / 1000.0) for UTC). ' +
+      'raw_jsonl is excluded unless include_raw=true. ' +
+      'Args: sql (required), params (array of values bound to $1, $2, …), include_raw (bool), max_rows (default ' +
+      `${DEFAULT_LIMIT}, max ${MAX_LIMIT}). Only SELECT/VALUES/WITH (no data-modifying WITH); one statement; 5 s limit.`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -1272,29 +1152,20 @@ export const TOOLS: Tool[] = [
       },
       required: ['sql']
     },
-    run: (db, a, ctx) => {
+    run: async (rs, a, ctx) => {
       if (typeof a.sql !== 'string') throw new Error('sql is required');
-      const params = Array.isArray(a.params) ? a.params : [];
-      const includeRaw = a.include_raw === true;
-      const maxRows = clampLimit(a.max_rows);
-      const srcPath = db.name; // live state.db path; ':memory:' in some tests
-      const snap = buildSnapshot(srcPath, ctx.allowedWorkspaces, includeRaw);
-      try {
-        const stmt = snap.prepare(a.sql);
-        if (!stmt.reader) throw new Error('read-only SELECT statements only');
-        const rows = stmt.all(...params) as unknown[];
-        const capped = rows.slice(0, maxRows);
-        const json = JSON.stringify(capped);
-        if (json.length > MAX_QUERY_BYTES) {
-          throw new Error(
-            `result too large (${json.length} bytes > ${MAX_QUERY_BYTES}); add LIMIT or aggregate server-side`
-          );
-        }
-        emitSearchHits(ctx, 'query', a.sql, sessionIdsFromQueryRows(capped));
-        return capped;
-      } finally {
-        snap.close();
+      const rows = await source(rs).query(
+        { callerId: ctx.callerId, scope: ctx.allowedWorkspaces },
+        { sql: a.sql, params: Array.isArray(a.params) ? a.params : [], includeRaw: a.include_raw === true, maxRows: clampLimit(a.max_rows) }
+      );
+      const json = JSON.stringify(rows);
+      if (json.length > MAX_QUERY_BYTES) {
+        throw new Error(
+          `result too large (${json.length} bytes > ${MAX_QUERY_BYTES}); add LIMIT or aggregate server-side`
+        );
       }
+      emitSearchHits(ctx, 'query', a.sql, sessionIdsFromQueryRows(rows));
+      return rows;
     }
   },
   // Perf-telemetry tools. perf_status is a read-only snapshot; perf_set
@@ -1323,7 +1194,7 @@ export const TOOLS: Tool[] = [
       properties: { enabled: { type: 'boolean' } },
       required: ['enabled']
     },
-    run: async (_db: Database.Database, args: Record<string, unknown>) => {
+    run: async (_rs: ReadSource | null, args: Record<string, unknown>) => {
       const extras = Object.keys(args).filter((k) => k !== 'enabled');
       if (extras.length > 0) {
         throw new Error(`perf_set cannot change export config (unexpected: ${extras.join(', ')})`);
@@ -1353,7 +1224,7 @@ export const TOOLS: Tool[] = [
       properties: { enabled: { type: 'boolean' }, ttlHours: { type: 'number' } },
       required: ['enabled']
     },
-    run: async (_db: Database.Database, args: Record<string, unknown>) => {
+    run: async (_rs: ReadSource | null, args: Record<string, unknown>) => {
       const extras = Object.keys(args).filter((k) => k !== 'enabled' && k !== 'ttlHours');
       if (extras.length > 0) {
         throw new Error(`perf_sentinel_set: unexpected arguments: ${extras.join(', ')}`);
@@ -1552,13 +1423,11 @@ export const TOOLS: Tool[] = [
       properties: { sessionId: { type: 'string' }, note: { type: 'string' } },
       required: ['sessionId']
     },
-    run: async (db, a, ctx) => {
+    run: async (rs, a, ctx) => {
       if (!usageRecorder) throw new Error('usage recording is unavailable');
       if (typeof a.sessionId !== 'string') throw new Error('sessionId (string) is required');
-      // Scope: the session must belong to an allowed workspace (same check
-      // shape as get_session — reuse its row lookup against `db`).
-      const row = db.prepare('SELECT workspace_id FROM sessions WHERE id = ?').get(a.sessionId) as { workspace_id: string } | undefined;
-      if (!row || !ctx.allowedWorkspaces.has(row.workspace_id)) throw new Error(`session not found: ${a.sessionId}`);
+      // Scope: the session must belong to an allowed workspace (as get_session).
+      if (!(await sessionAllowed(source(rs), a.sessionId, ctx.allowedWorkspaces))) throw new Error(`session not found: ${a.sessionId}`);
       await usageRecorder({
         workspaceId: ctx.callerId,
         sessionId: a.sessionId,

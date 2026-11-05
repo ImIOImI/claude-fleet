@@ -43,9 +43,22 @@ function ensureLogPath(): string {
   return p;
 }
 
-/** Append one JSON line to the log. Best-effort — never throws. */
-export function logError(payload: LogPayload): void {
+const MAX_FIELD_CHARS = 8_192;
+
+/** `text` cut to `max` chars, marked when cut. */
+export function clipText(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max)}… [truncated ${text.length - max} chars]`;
+}
+
+/** Append one JSON line to the log. Best-effort — never throws. Message and
+ *  stack are capped: an error can echo an arbitrarily large value. */
+export function logError(raw: LogPayload): void {
   const tsMs = Date.now();
+  const payload: LogPayload = {
+    ...raw,
+    message: clipText(String(raw.message), MAX_FIELD_CHARS),
+    ...(raw.stack !== undefined ? { stack: clipText(String(raw.stack), MAX_FIELD_CHARS) } : {}),
+  };
   try {
     const row = { ts: new Date(tsMs).toISOString(), ...payload };
     appendFileSync(ensureLogPath(), JSON.stringify(row) + '\n', 'utf8');

@@ -26,6 +26,22 @@ describe.skipIf(!isPg)('migratePostgres', () => {
   const columns = async (table: string) =>
     (await sql<{ c: string }>`SELECT column_name AS c FROM information_schema.columns WHERE table_schema = ${t.schema} AND table_name = ${table} ORDER BY ordinal_position`.execute(k)).rows.map((r) => r.c);
 
+  it('waits for the advisory lock with bounded retries, so a session holding it cannot stall migration forever', async () => {
+    const holder = await t.pool.connect();
+    try {
+      await holder.query('SELECT pg_advisory_lock(7340211)');
+      const started = Date.now();
+      await expect(migratePostgres(k, t.schema, TRACK, { lockTimeoutMs: 100, attempts: 3, backoffMs: 20 })).rejects.toThrow(/lock timeout/);
+      expect(Date.now() - started).toBeLessThan(5_000);
+      setTimeout(() => void holder.query('SELECT pg_advisory_unlock(7340211)'), 300);
+      await migratePostgres(k, t.schema, { ...TRACK, steps: [] }, { lockTimeoutMs: 100, attempts: 10, backoffMs: 50 });
+      expect(await version()).toBe(3);
+    } finally {
+      await holder.query('SELECT pg_advisory_unlock_all()');
+      holder.release();
+    }
+  });
+
   it('applies the baseline, skips steps at or below it, runs later ones, and is idempotent', async () => {
     await migratePostgres(k, t.schema, TRACK);
     expect(await version()).toBe(4);

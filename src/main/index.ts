@@ -29,6 +29,8 @@ import { registerAutomationIpc } from './automations/automationIpc.js';
 import { startPresence, attachKeepRunning, markQuitting, presenceDir, registerPresenceIpc } from './inbox/presence.js';
 import { getKeepRunningInTray, setKeepRunningInTray, getStoreConfig } from './config.js';
 import { openPgStores, type PgStores } from './store/pgStores.js';
+import { openPgMcpReadSource } from './store/pgReadSource.js';
+import { schemaOf } from './store/postgres.js';
 import { storeStartupOutcome, storeStartupPrompt } from './store/startupPrompt.js';
 import { ensureWorkspaceClaudeJson } from './docker.js';
 import { hardwareAccelDisabledAtStartup } from './config.js';
@@ -235,8 +237,13 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       )
     );
     // Read-only MCP server over <userData>/mcp.sock so in-container claude can
-    // query the state DB (sessions/events/cost). Opens its own readonly conn.
-    perfSpan('claude_fleet.boot.mcp_server', () => startMcpServer(app.getPath('userData'), { stateDb: !pgStores }));
+    // read history (sessions/events/cost): its own read-only state.db
+    // connection on SQLite, the store pool on Postgres.
+    const pgMcp = pgStores
+      ? await openPgMcpReadSource(schemaOf(pgStores.pool), pgStores.poolConfig, (message) =>
+          logError({ source: 'main', type: 'mcp-query-isolation', level: 'warn', message }))
+      : null;
+    perfSpan('claude_fleet.boot.mcp_server', () => startMcpServer(app.getPath('userData'), pgMcp ? { readSource: pgMcp } : {}));
     // Local embedder for semantic transcript search (native onnxruntime-node, on-host).
     const embed = makeEmbedder(join(app.getPath('userData'), 'models'));
     setQueryEmbedder(embed);
