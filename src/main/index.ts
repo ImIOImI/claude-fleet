@@ -174,7 +174,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   } catch (e) {
     logError({ source: 'main', type: 'store-open-failed', level: 'error', message: String(e) });
     dialog.showErrorBox('Postgres store unavailable',
-      `${String(e)}\n\nRemove the "store" key from ${join(app.getPath('userData'), 'config.json')} to use the built-in SQLite store.`);
+      `${String(e)}\n\nFix ${join(app.getPath('userData'), 'config.json')}, or remove its "store" key to use the built-in SQLite store.`);
     app.exit(1);
     return;
   }

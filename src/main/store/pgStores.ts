@@ -3,7 +3,7 @@ import type pg from 'pg';
 import { closeDb, openDbPostgres } from '../db.js';
 import { InboxStore } from '../inbox/inboxDb.js';
 import { createPgPool, type WriteHook } from './postgres.js';
-import { pgPoolConfig, type PostgresStoreConfig } from './storeConfig.js';
+import { iamAuthHint, pgPoolConfig, type PostgresStoreConfig } from './storeConfig.js';
 
 export interface PgStores {
   pool: pg.Pool;
@@ -37,6 +37,8 @@ export async function openPgStores(cfg: PostgresStoreConfig, o: OpenPgStoresOpti
   } catch (e) {
     await closeDb();
     await pool.end();
+    const hint = iamAuthHint(cfg, e);
+    if (hint) (e as Error).message += ` (${hint})`;
     throw e;
   }
 }

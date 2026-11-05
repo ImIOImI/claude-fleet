@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  DEFAULT_CA_FILE, parseStoreConfig, pgPoolConfig, StoreConfigError, type PostgresStoreConfig,
+  DEFAULT_CA_FILE, iamAuthHint, parseStoreConfig, pgPoolConfig, storeSecretEnvNames, StoreConfigError, type PostgresStoreConfig,
 } from './storeConfig.js';
 import { fakePgAuth } from './fakePgAuth.js';
 import { createPgPool } from './postgres.js';
@@ -82,6 +82,8 @@ describe('parseStoreConfig', () => {
     [{ kind: 'postgres', connectionString: 'postgres://u@h/d?ssl=true' }, /"ssl" is not allowed/],
     [{ kind: 'postgres', connectionString: 'postgres://u@h/d?sslrootcert=/x.pem' }, /"sslrootcert" is not allowed/],
     ['postgres://u@h/d', /must be an object/],
+    [{ kind: 'postgres', connectionString: 'postgres://u@h/d?sslmode=disable', caFile: '/ca.pem' }, /caFile with ssl "disable"/],
+    [{ kind: 'postgres', host: 'h', database: 'd', user: 'u', password: { kind: 'env', name: 'P' }, ssl: 'disable', caFile: '/ca.pem' }, /caFile with ssl "disable"/],
   ])('rejects %j on the desktop', (v, re) => {
     expect(() => parseStoreConfig(v, DESKTOP)).toThrow(StoreConfigError);
     expect(() => parseStoreConfig(v, DESKTOP)).toThrow(re);
@@ -116,13 +118,14 @@ describe('parseStoreConfig', () => {
 describe('pgPoolConfig', () => {
   it('resolves an env connection string at open time', () => {
     const cfg = parseStoreConfig({ kind: 'postgres', env: 'DATABASE_URL' }, DESKTOP) as PostgresStoreConfig;
-    expect(pgPoolConfig(cfg, { DATABASE_URL: 'postgres://u@h/d' })).toEqual({ schema: 'fleet', max: 4, connectionString: 'postgres://u@h/d', ssl: false });
+    expect(pgPoolConfig(cfg, { DATABASE_URL: 'postgres://u@localhost/d' }))
+      .toEqual({ schema: 'fleet', max: 4, connectionTimeoutMillis: 10_000, connectionString: 'postgres://u@localhost/d', ssl: false });
     expect(() => pgPoolConfig(cfg, {})).toThrow(/DATABASE_URL is not set/);
   });
 
   it('an env connection string may carry a password but gets the same TLS rules, without echoing it', () => {
     const cfg = parseStoreConfig({ kind: 'postgres', env: 'DATABASE_URL' }, DESKTOP) as PostgresStoreConfig;
-    expect(pgPoolConfig(cfg, { DATABASE_URL: `postgres://u:${SECRET}@h/d` })).toMatchObject({ connectionString: `postgres://u:${SECRET}@h/d` });
+    expect(pgPoolConfig(cfg, { DATABASE_URL: `postgres://u:${SECRET}@h/d?sslmode=disable` })).toMatchObject({ connectionString: `postgres://u:${SECRET}@h/d` });
     for (const bad of [`postgres://u:${SECRET}@h/d?sslmode=no-verify`, `postgres://u:${SECRET}@h/d?ssl=1`, `%%${SECRET}`]) {
       const e = thrown(() => pgPoolConfig(cfg, { DATABASE_URL: bad }, noDefaultCa));
       expect(e).toBeInstanceOf(StoreConfigError);
@@ -136,7 +139,8 @@ describe('pgPoolConfig', () => {
       writeFileSync(join(dir, 'ca.pem'), 'CA-PEM');
       const cs = parseStoreConfig({ kind: 'postgres', connectionString: 'postgres://u@h/d?sslmode=verify-full&application_name=x', caFile: join(dir, 'ca.pem') }, DESKTOP) as PostgresStoreConfig;
       expect(pgPoolConfig(cs, {}, noDefaultCa)).toEqual({
-        schema: 'fleet', max: 4, connectionString: 'postgres://u@h/d?application_name=x', ssl: { ca: 'CA-PEM', rejectUnauthorized: true },
+        schema: 'fleet', max: 4, connectionTimeoutMillis: 10_000,
+        connectionString: 'postgres://u@h/d?application_name=x', ssl: { ca: 'CA-PEM', rejectUnauthorized: true },
       });
       const env = parseStoreConfig({ kind: 'postgres', env: 'DATABASE_URL' }, DESKTOP) as PostgresStoreConfig;
       expect(() => pgPoolConfig(env, { DATABASE_URL: 'postgres://u@h/d?sslmode=verify-full' }, noDefaultCa)).toThrow(/needs caFile/);
@@ -144,7 +148,7 @@ describe('pgPoolConfig', () => {
       expect(() => pgPoolConfig(env, { DATABASE_URL: 'postgres://u@h/d?sslmode=verify-full' }, (p) => p === DEFAULT_CA_FILE))
         .toThrow(DEFAULT_CA_FILE);
       expect(pgPoolConfig(env, { DATABASE_URL: 'postgres://u@h/d?sslmode=disable' }, noDefaultCa))
-        .toEqual({ schema: 'fleet', max: 4, connectionString: 'postgres://u@h/d', ssl: false });
+        .toEqual({ schema: 'fleet', max: 4, connectionTimeoutMillis: 10_000, connectionString: 'postgres://u@h/d', ssl: false });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -158,11 +162,49 @@ describe('pgPoolConfig', () => {
         kind: 'postgres', host: 'h', database: 'd', user: 'u', password: { kind: 'env', name: 'PGPW' }, caFile: join(dir, 'ca.pem'),
       }, DESKTOP) as PostgresStoreConfig;
       const opts = pgPoolConfig(cfg, { PGPW: 'secret' });
-      expect(opts).toMatchObject({ schema: 'fleet', max: 4, host: 'h', port: 5432, database: 'd', user: 'u', ssl: { ca: 'CA-PEM', rejectUnauthorized: true } });
+      expect(opts).toMatchObject({ schema: 'fleet', max: 4, connectionTimeoutMillis: 10_000, host: 'h', port: 5432, database: 'd', user: 'u', ssl: { ca: 'CA-PEM', rejectUnauthorized: true } });
       expect(await (opts.password as () => Promise<string>)()).toBe('secret');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  describe('a connection string without sslmode', () => {
+    const env = parseStoreConfig({ kind: 'postgres', env: 'DATABASE_URL' }, DESKTOP) as PostgresStoreConfig;
+    const sslFor = (url: string, extra: NodeJS.ProcessEnv = {}) => pgPoolConfig(env, { DATABASE_URL: url, ...extra }, noDefaultCa).ssl;
+
+    it('is verify-full for a remote host, so it needs a CA', () => {
+      for (const url of ['postgres://u@db.example.com/d', 'postgres://u@10.0.0.5:5432/d', 'postgres://u@localhost.evil.com/d', 'postgres://u@128.0.0.1/d', 'postgres://u@127.evil.com/d']) {
+        expect(() => sslFor(url)).toThrow(/needs caFile/);
+      }
+      expect(() => sslFor('postgres:///d', { PGHOST: 'db.example.com' })).toThrow(/needs caFile/);
+    });
+
+    it('is disabled for a Unix socket or loopback host, honouring ?host=', () => {
+      for (const url of [
+        'postgres://postgres@localhost/postgres?host=/tmp/fleet-pg-test/sock', 'postgres://u@remote.example.com/d?host=/run/pg',
+        'postgres://u@localhost/d', 'postgres://u@LOCALHOST:5432/d', 'postgres://u@127.0.0.1/d', 'postgres://u@127.9.8.7/d', 'postgres://u@[::1]:5432/d',
+        'postgres:///d',
+      ]) expect(sslFor(url)).toBe(false);
+      expect(() => sslFor('postgres://u@db.example.com/d?host=localhost.evil.com')).toThrow(/needs caFile/);
+    });
+
+    it('a configured caFile means verify-full even on loopback', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'cf-storecfg-'));
+      try {
+        writeFileSync(join(dir, 'ca.pem'), 'CA-PEM');
+        const withCa = parseStoreConfig({ kind: 'postgres', env: 'DATABASE_URL', caFile: join(dir, 'ca.pem') }, DESKTOP) as PostgresStoreConfig;
+        expect(pgPoolConfig(withCa, { DATABASE_URL: 'postgres://u@localhost/d' }, noDefaultCa).ssl).toEqual({ ca: 'CA-PEM', rejectUnauthorized: true });
+        expect(pgPoolConfig(withCa, { DATABASE_URL: 'postgres://u@db.example.com/d' }, noDefaultCa).ssl).toEqual({ ca: 'CA-PEM', rejectUnauthorized: true });
+        expect(() => pgPoolConfig(withCa, { DATABASE_URL: 'postgres://u@db.example.com/d?sslmode=disable' }, noDefaultCa)).toThrow(/caFile with ssl "disable"/);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('an explicit sslmode=disable on a remote host is allowed', () => {
+      expect(sslFor('postgres://u@db.example.com/d?sslmode=disable')).toBe(false);
+    });
   });
 
   it('aws-rds-iam without verify-full is refused even when parseStoreConfig is bypassed', () => {
@@ -190,5 +232,30 @@ describe('pgPoolConfig', () => {
       await pool.end();
       await fake.close();
     }
+  });
+});
+
+describe('storeSecretEnvNames', () => {
+  it('names the env vars that carry the store credentials, plus libpq credential vars, only for Postgres', () => {
+    expect(storeSecretEnvNames({ kind: 'sqlite' })).toEqual([]);
+    const libpq = ['PGPASSWORD', 'PGPASSFILE', 'PGSERVICE', 'PGSERVICEFILE', 'PGSSLKEY', 'PGSSLCERT'];
+    expect(storeSecretEnvNames(parseStoreConfig({ kind: 'postgres', env: 'FLEET_DB_URL' }, DESKTOP))).toEqual(['FLEET_DB_URL', ...libpq]);
+    expect(storeSecretEnvNames(parseStoreConfig({ kind: 'postgres', host: 'h', database: 'd', user: 'u', password: { kind: 'env', name: 'FLEET_DB_PW' }, ssl: 'disable' }, DESKTOP)))
+      .toEqual(['FLEET_DB_PW', ...libpq]);
+    expect(storeSecretEnvNames(parseStoreConfig({ kind: 'postgres', connectionString: 'postgres://u@localhost/d' }, DESKTOP))).toEqual(libpq);
+    expect(storeSecretEnvNames(null)).toEqual(libpq);
+  });
+});
+
+describe('iamAuthHint', () => {
+  const iam = parseStoreConfig({ kind: 'postgres', host: 'h', database: 'd', user: 'u', password: { kind: 'aws-rds-iam', region: 'us-east-1' }, caFile: '/ca.pem' }, DESKTOP) as PostgresStoreConfig;
+  const envPw = parseStoreConfig({ kind: 'postgres', host: 'h', database: 'd', user: 'u', password: { kind: 'env', name: 'P' }, ssl: 'disable' }, DESKTOP) as PostgresStoreConfig;
+  const pgErr = (code: string) => Object.assign(new Error('password authentication failed for user "u"'), { code });
+
+  it('hints at IAM causes on an auth failure, naming no secret', () => {
+    for (const code of ['28P01', '28000']) expect(iamAuthHint(iam, pgErr(code))).toMatch(/rds_iam.*rds-db:connect.*clock/s);
+    expect(iamAuthHint(iam, pgErr('3D000'))).toBeNull();
+    expect(iamAuthHint(envPw, pgErr('28P01'))).toBeNull();
+    expect(iamAuthHint(iam, new Error('x'))).toBeNull();
   });
 });

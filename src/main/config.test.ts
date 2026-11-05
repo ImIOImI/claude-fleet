@@ -617,6 +617,15 @@ describe('getStoreConfig', () => {
     expect(JSON.parse(await readFile(configPath(), 'utf8')).store).toEqual(store);
   });
 
+  it('a config.json that does not parse stops the store choice and is never overwritten', async () => {
+    const broken = '{ "store": { "kind": "postgres", "env": "DATABASE_URL" }, ';
+    await writeFile(configPath(), broken);
+    _resetConfigCacheForTests();
+    await expect(getStoreConfig()).rejects.toThrow(/config.json is not valid JSON/);
+    await expect(setKeepRunningInTray(true)).rejects.toThrow(/not valid JSON/);
+    expect(await readFile(configPath(), 'utf8')).toBe(broken);
+  });
+
   it('throws on an invalid store block instead of falling back to SQLite', async () => {
     await writeFile(configPath(), JSON.stringify({ store: { kind: 'postgres', connectionString: 'postgres://u:pw@h/d' } }));
     _resetConfigCacheForTests();

@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { assertValidWorkspaceId } from './paths.js';
 import { toggleFavorite } from './ociCore.js';
-import { parseStoreConfig, type StoreConfig } from './store/storeConfig.js';
+import { parseStoreConfig, StoreConfigError, type StoreConfig } from './store/storeConfig.js';
 
 /** Which plan the usage bar measures spend against. `custom` uses the
  *  user-entered token amount; the rest resolve to USAGE_BUDGET_PRESETS. */
@@ -174,9 +174,13 @@ export function defaultFleetRoot(): string {
 }
 
 let cached: AppConfig | null = null;
+/** config.json exists but could not be read or parsed: defaults are served,
+ *  and write() refuses to replace the file (it may hold a `store` choice). */
+let unreadable = false;
 
 async function read(): Promise<AppConfig> {
   if (cached) return cached;
+  unreadable = false;
   try {
     const raw = await readFile(configPath(), 'utf8');
     const parsed = JSON.parse(raw) as AppConfig;
@@ -216,13 +220,16 @@ async function read(): Promise<AppConfig> {
       identity: parseIdentityConfig(parsed.identity),
       store: parsed.store
     };
-  } catch {
+  } catch (e) {
+    unreadable = (e as NodeJS.ErrnoException).code !== 'ENOENT';
     cached = {};
   }
   return cached;
 }
 
 async function write(next: AppConfig): Promise<void> {
+  await read();
+  if (unreadable) throw new Error(`${configPath()} is not valid JSON; fix or remove it before changing settings`);
   cached = next;
   await writeFile(configPath(), JSON.stringify(next, null, 2) + '\n', 'utf8');
 }
@@ -365,7 +372,9 @@ export async function setKeepRunningInTray(enabled: boolean): Promise<void> {
 /** The validated store choice. Throws StoreConfigError on an invalid `store`
  *  rather than falling back to SQLite, which would split the data. */
 export async function getStoreConfig(): Promise<StoreConfig> {
-  return parseStoreConfig((await read()).store, { allowStaticSecrets: false });
+  const cfg = await read();
+  if (unreadable) throw new StoreConfigError('config.json is not valid JSON');
+  return parseStoreConfig(cfg.store, { allowStaticSecrets: false });
 }
 
 /** config.json identity.github.clientId, or null. Validation and precedence: identity/clientId.ts. */

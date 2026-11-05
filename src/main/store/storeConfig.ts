@@ -2,7 +2,9 @@
 // pool options only; no I/O beyond checking for and reading a CA file.
 // Errors name keys, never values: config values may hold secrets.
 import { existsSync } from 'node:fs';
+import { isIP } from 'node:net';
 import { isAbsolute } from 'node:path';
+import { parse as parseConnectionString } from 'pg-connection-string';
 import type pg from 'pg';
 import { passwordProvider, type PasswordSource } from './passwordProvider.js';
 import { pgSsl, type SslMode } from './pgSsl.js';
@@ -115,6 +117,15 @@ function resolveCaFile(caFile: string | undefined, fileExists: (p: string) => bo
 }
 
 const TOP = ['kind', 'schema', 'poolMax'];
+const CA_WITH_DISABLE = 'caFile with ssl "disable" is contradictory; use "verify-full" or drop caFile';
+
+/** A Unix socket directory or a loopback address: traffic never leaves the machine. */
+function isLocalHost(host: string): boolean {
+  if (host.startsWith('/')) return true;
+  const h = host.toLowerCase();
+  if (h === 'localhost' || h === '::1') return true;
+  return isIP(h) === 4 && h.startsWith('127.');
+}
 
 function parseConnection(o: Obj, opts: ParseOptions): PgConnection {
   const forms = ['connectionString', 'env', 'host'].filter((k) => o[k] !== undefined);
@@ -122,8 +133,9 @@ function parseConnection(o: Obj, opts: ParseOptions): PgConnection {
   if (o.connectionString !== undefined) {
     onlyKeys(o, [...TOP, 'connectionString', 'caFile']);
     const cs = str(o, 'connectionString');
-    splitConnectionString(cs, opts.allowStaticSecrets);
+    const { ssl } = splitConnectionString(cs, opts.allowStaticSecrets);
     const caFile = caFileOf(o);
+    if (caFile && ssl === 'disable') fail(CA_WITH_DISABLE);
     return caFile ? { connectionString: cs, caFile } : { connectionString: cs };
   }
   if (o.env !== undefined) {
@@ -145,7 +157,7 @@ function parseConnection(o: Obj, opts: ParseOptions): PgConnection {
   };
   const caFile = caFileOf(o);
   if (conn.ssl === 'verify-full') conn.caFile = resolveCaFile(caFile, opts.fileExists ?? existsSync);
-  else if (caFile) conn.caFile = caFile;
+  else if (caFile) fail(CA_WITH_DISABLE);
   return conn;
 }
 
@@ -170,7 +182,7 @@ export function parseStoreConfig(v: unknown, opts: ParseOptions): StoreConfig {
 export function pgPoolConfig(
   cfg: PostgresStoreConfig, env: NodeJS.ProcessEnv = process.env, fileExists: (p: string) => boolean = existsSync,
 ): PgPoolConfig {
-  const base = { schema: cfg.schema, max: cfg.poolMax };
+  const base = { schema: cfg.schema, max: cfg.poolMax, connectionTimeoutMillis: 10_000 };
   const c = cfg.connection;
   if ('connectionString' in c || 'env' in c) {
     let cs: string;
@@ -183,7 +195,12 @@ export function pgPoolConfig(
     }
     // An env var is a secret channel: a password in it is fine.
     const split = splitConnectionString(cs, true);
-    const ssl = split.ssl === 'verify-full' ? pgSsl('verify-full', resolveCaFile(c.caFile, fileExists)) : false;
+    if (split.ssl === 'disable' && c.caFile) throw new StoreConfigError(`store: ${CA_WITH_DISABLE}`);
+    // No sslmode: verify-full unless the connection stays on this machine (pg's
+    // own host fallback: ?host=, then the URL host, then PGHOST, then localhost).
+    const mode = split.ssl
+      ?? (c.caFile || !isLocalHost(parseConnectionString(cs).host || env.PGHOST || 'localhost') ? 'verify-full' : 'disable');
+    const ssl = mode === 'verify-full' ? pgSsl('verify-full', resolveCaFile(c.caFile, fileExists)) : false;
     return { ...base, connectionString: split.connectionString, ssl };
   }
   if (c.password.kind === 'aws-rds-iam' && c.ssl !== 'verify-full') throw new StoreConfigError('store: aws-rds-iam needs ssl "verify-full"');
@@ -193,4 +210,25 @@ export function pgPoolConfig(
     ssl: pgSsl(c.ssl, c.caFile),
   };
   return out;
+}
+
+/** libpq/pg env vars that carry or locate credentials. */
+const LIBPQ_SECRET_ENV = ['PGPASSWORD', 'PGPASSFILE', 'PGSERVICE', 'PGSERVICEFILE', 'PGSSLKEY', 'PGSSLCERT'];
+
+/** Env vars that hold the store's credentials: host-only, never passed to a
+ *  workspace process. `null` (config unreadable) assumes Postgres. */
+export function storeSecretEnvNames(cfg: StoreConfig | null): string[] {
+  if (cfg?.kind === 'sqlite') return [];
+  const c = cfg?.connection;
+  const own = !c ? [] : 'env' in c ? [c.env] : 'password' in c && c.password.kind === 'env' ? [c.password.name] : [];
+  return [...own, ...LIBPQ_SECRET_ENV];
+}
+
+/** A hint for an auth failure on aws-rds-iam; null otherwise. Names no secret. */
+export function iamAuthHint(cfg: PostgresStoreConfig, e: unknown): string | null {
+  const c = cfg.connection;
+  if (!('password' in c) || c.password.kind !== 'aws-rds-iam') return null;
+  const code = (e as { code?: unknown } | null)?.code;
+  if (code !== '28P01' && code !== '28000') return null;
+  return 'aws-rds-iam auth failed: check the DB user has the rds_iam role, the IAM policy allows rds-db:connect for it, host is the writer endpoint, and the system clock is synced';
 }
