@@ -5,10 +5,13 @@
 interface TemperatureInput {
   state: 'running' | 'paused' | 'stopped' | 'deleted' | 'unreachable';
   lastKnownState?: 'running' | 'paused' | 'stopped' | 'deleted';
+  kind?: string;
 }
 
 export function isWarm(w: TemperatureInput | undefined): boolean {
   if (!w) return false;
+  // A remote bookmark is never cold: unreachable shows as a dimmed chip.
+  if (w.kind === 'remote') return true;
   if (w.state === 'running' || w.state === 'paused') return true;
   return w.state === 'unreachable' && (w.lastKnownState === 'running' || w.lastKnownState === 'paused');
 }
