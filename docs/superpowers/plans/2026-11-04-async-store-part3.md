@@ -3729,6 +3729,7 @@ gh pr merge --auto --squash "$(gh pr view feat/async-store-p3 --repo ImIOImI/cla
   - Settings → *Storage* (SQLite | local Postgres | external Postgres), with `config:getStore` / `config:setStore` IPC. Restart to apply.
   - The external option edits the same shapes as D31, with secrets in the vault: a new `password: { kind: 'vault', key }` source.
   - A one-shot copy of `inbox.db` into Postgres on the first switch, verified by row counts before `inbox.db` is renamed `inbox.db.migrated-<epochMs>`. `state.db` isn't copied: it is re-ingested from JSONL (the watcher's normal cold start).
+  - The copy inserts explicit ids into identity columns (`todo_events`, `step_runs`), so it must `setval(pg_get_serial_sequence(table, 'id'), max(id))` on each afterwards, or the next insert collides.
 - **Docker-down / unreachable degraded state:**
   - It replaces part 3's startup dialog (D33). History and inbox are unavailable, with a banner reusing #380's `unreachable` pattern.
   - IPC handlers return the empty or degraded shapes the renderer already handles. The watcher retries the store open on a backoff, and ingest resumes from JSONL offsets.

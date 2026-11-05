@@ -50,7 +50,12 @@ async function connectInSchema(pool: pg.Pool): Promise<pg.PoolClient> {
   const client = await pool.connect();
   if (!inSchema.has(client)) {
     const schema = poolSchema.get(pool);
-    if (schema) await client.query(`SET search_path TO ${schema}, public`);
+    try {
+      if (schema) await client.query(`SET search_path TO ${schema}, public`);
+    } catch (e) {
+      client.release(e as Error);
+      throw e;
+    }
     inSchema.add(client);
   }
   return client;
@@ -76,11 +81,12 @@ export type WriteHook = (exec: (sqlText: string, params?: readonly unknown[]) =>
 // in-flight write transactions, as it did on the SQLite mutex.
 const WRITE_KINDS = new Set(['InsertQueryNode', 'UpdateQueryNode', 'DeleteQueryNode', 'MergeQueryNode', 'RawNode']);
 
-interface Conn extends DatabaseConnection { inner: DatabaseConnection; inTx: boolean; unlock: (() => void) | null }
+interface Conn extends DatabaseConnection { inner: DatabaseConnection | null; inTx: boolean; unlock: (() => void) | null }
 
 /** Serializes every in-process write (read-write transactions and bare write
  *  statements), as SQLite's connection mutex did; reads and read-only
- *  transactions run concurrently on the pool. */
+ *  transactions run concurrently on the pool. The pool connection is taken
+ *  lazily, after the write lock, so queued writers never starve reads. */
 class SerializingDriver implements Driver {
   constructor(
     private readonly inner: Driver,
@@ -91,28 +97,37 @@ class SerializingDriver implements Driver {
   init(): Promise<void> { return this.inner.init(); }
 
   async acquireConnection(): Promise<DatabaseConnection> {
-    const inner = await this.inner.acquireConnection();
     const conn: Conn = {
-      inner, inTx: false, unlock: null,
+      inner: null, inTx: false, unlock: null,
       executeQuery: <R>(cq: CompiledQuery) => this.execute<R>(conn, cq),
-      streamQuery: (cq, chunk) => inner.streamQuery(cq, chunk),
+      streamQuery: (cq, chunk) => this.stream(conn, cq, chunk),
     };
     return conn;
   }
 
+  private async innerOf(conn: Conn): Promise<DatabaseConnection> {
+    conn.inner ??= await this.inner.acquireConnection();
+    return conn.inner;
+  }
+
+  private async *stream<R>(conn: Conn, cq: CompiledQuery, chunk?: number): AsyncIterableIterator<QueryResult<R>> {
+    yield* (await this.innerOf(conn)).streamQuery<R>(cq, chunk);
+  }
+
   private async execute<R>(conn: Conn, cq: CompiledQuery): Promise<QueryResult<R>> {
-    if (conn.inTx || !WRITE_KINDS.has(cq.query.kind)) return conn.inner.executeQuery<R>(cq);
+    if (conn.inTx || !WRITE_KINDS.has(cq.query.kind)) return (await this.innerOf(conn)).executeQuery<R>(cq);
     const unlock = await this.lock();
     try {
-      if (!this.hook) return await conn.inner.executeQuery<R>(cq);
-      await conn.inner.executeQuery(CompiledQuery.raw('begin'));
+      const inner = await this.innerOf(conn);
+      if (!this.hook) return await inner.executeQuery<R>(cq);
+      await inner.executeQuery(CompiledQuery.raw('begin'));
       try {
-        await this.hook(this.exec(conn.inner));
-        const r = await conn.inner.executeQuery<R>(cq);
-        await conn.inner.executeQuery(CompiledQuery.raw('commit'));
+        await this.hook(this.exec(inner));
+        const r = await inner.executeQuery<R>(cq);
+        await inner.executeQuery(CompiledQuery.raw('commit'));
         return r;
       } catch (e) {
-        await conn.inner.executeQuery(CompiledQuery.raw('rollback')).catch(() => undefined);
+        await inner.executeQuery(CompiledQuery.raw('rollback')).catch(() => undefined);
         throw e;
       }
     } finally {
@@ -125,31 +140,37 @@ class SerializingDriver implements Driver {
     const write = settings.accessMode !== 'read only';
     if (write) conn.unlock = await this.lock();
     conn.inTx = true;
+    let inner: DatabaseConnection;
     try {
-      await this.inner.beginTransaction(conn.inner, settings);
+      inner = await this.innerOf(conn);
+      await this.inner.beginTransaction(inner, settings);
     } catch (e) {
       this.end(conn);
       throw e;
     }
     if (!write || !this.hook) return;
     try {
-      await this.hook(this.exec(conn.inner));
+      await this.hook(this.exec(inner));
     } catch (e) {
-      await this.inner.rollbackTransaction(conn.inner).catch(() => undefined);
+      await this.inner.rollbackTransaction(inner).catch(() => undefined);
       this.end(conn);
       throw e;
     }
   }
 
   async commitTransaction(c: DatabaseConnection): Promise<void> {
-    try { await this.inner.commitTransaction((c as Conn).inner); } finally { this.end(c as Conn); }
+    try { await this.inner.commitTransaction(await this.innerOf(c as Conn)); } finally { this.end(c as Conn); }
   }
 
   async rollbackTransaction(c: DatabaseConnection): Promise<void> {
-    try { await this.inner.rollbackTransaction((c as Conn).inner); } finally { this.end(c as Conn); }
+    try { await this.inner.rollbackTransaction(await this.innerOf(c as Conn)); } finally { this.end(c as Conn); }
   }
 
-  releaseConnection(c: DatabaseConnection): Promise<void> { return this.inner.releaseConnection((c as Conn).inner); }
+  async releaseConnection(c: DatabaseConnection): Promise<void> {
+    const conn = c as Conn;
+    if (conn.inner) await this.inner.releaseConnection(conn.inner);
+    conn.inner = null;
+  }
 
   destroy(): Promise<void> { return this.inner.destroy(); }
 

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { sql, type Generated, type Kysely } from 'kysely';
 import { createPgPool, postgresKysely, writeLock, type WriteHook } from './postgres.js';
 import { isPg, pgMultiConnection, testPgSchema, type TestPg } from './testStore.js';
+import { isStaleTestSchema } from './pgGlobalSetup.js';
 
 interface T { t: { id: Generated<number>; v: string } }
 
@@ -32,6 +33,16 @@ describe('createPgPool', () => {
   });
 });
 
+describe('isStaleTestSchema', () => {
+  const now = 1_800_000_000;
+  it('drops only t_<epochSec>_<hex> schemas older than an hour', () => {
+    expect(isStaleTestSchema(`t_${now - 3601}_ab12`, now)).toBe(true);
+    expect(isStaleTestSchema(`t_${now - 60}_ab12`, now)).toBe(false);
+    expect(isStaleTestSchema('t_ab12cd', now)).toBe(false);
+    expect(isStaleTestSchema('fleet', now)).toBe(false);
+  });
+});
+
 describe.skipIf(!isPg)('postgresKysely', () => {
   let t: TestPg;
   let k: Kysely<T>;
@@ -47,9 +58,13 @@ describe.skipIf(!isPg)('postgresKysely', () => {
     await t.drop();
   });
 
+  it('names test schemas t_<epochSec>_<hex>', () => {
+    expect(t.schema).toMatch(/^t_\d{10}_[0-9a-f]{12}$/);
+  });
+
   it('creates and reads unqualified tables in the store schema, BIGINT and COUNT as numbers', async () => {
     await k.insertInto('t').values({ v: 'a' }).execute();
-    const where = await sql<{ s: string }>`SELECT table_schema AS s FROM information_schema.tables WHERE table_name = 't'`.execute(k);
+    const where = await sql<{ s: string }>`SELECT table_schema AS s FROM information_schema.tables WHERE table_name = 't' AND table_schema IN (${t.schema}, 'public')`.execute(k);
     expect(where.rows).toEqual([{ s: t.schema }]);
     const r = await k.selectFrom('t').select((eb) => ['id', eb.fn.countAll().as('n'), eb.fn.sum<number>('id').as('s')]).groupBy('id').executeTakeFirstOrThrow();
     expect(r).toEqual({ id: 1, n: 1, s: 1 });
@@ -72,6 +87,45 @@ describe.skipIf(!isPg)('postgresKysely', () => {
     release();
     await Promise.all([tx, write]);
     expect(order).toEqual(['tx-commit', 'bare-write']);
+  });
+
+  it.skipIf(!pgMultiConnection)('writers queued on the write lock hold no pool connection: a read still runs', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const holder = k.transaction().execute(async (trx) => {
+      await trx.insertInto('t').values({ v: 'holder' }).execute();
+      await gate;
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    const max = t.pool.options.max ?? 10;
+    const queued = Array.from({ length: max }, (_, i) => i % 2
+      ? k.insertInto('t').values({ v: `bare-${i}` }).execute()
+      : k.transaction().execute(async (trx) => { await trx.insertInto('t').values({ v: `tx-${i}` }).execute(); }));
+    await new Promise((r) => setTimeout(r, 20));
+    const read = k.selectFrom('t').selectAll().execute();
+    const timeout = new Promise<'blocked'>((r) => setTimeout(() => r('blocked'), 1000));
+    const got = await Promise.race([read, timeout]);
+    release();
+    await Promise.all([holder, ...queued]);
+    expect(got).toEqual([]);
+    expect(await k.selectFrom('t').select('id').execute()).toHaveLength(max + 1);
+  });
+
+  it('a failed SET search_path releases its client', async () => {
+    const pool = createPgPool({ connectionString: process.env.PG_TEST_URL, schema: t.schema, max: 1 });
+    let failed = false;
+    pool.on('connect', (c) => {
+      const q = c.query.bind(c) as (...a: unknown[]) => unknown;
+      (c as unknown as { query: (...a: unknown[]) => unknown }).query = (...a: unknown[]) => {
+        if (!failed && String(a[0]).startsWith('SET search_path')) { failed = true; return Promise.reject(new Error('boom')); }
+        return q(...a);
+      };
+    });
+    const pk = postgresKysely<T>(pool);
+    await expect(pk.selectFrom('t').selectAll().execute()).rejects.toThrow('boom');
+    expect(await pk.selectFrom('t').selectAll().execute()).toEqual([]);
+    await pk.destroy();
+    await pool.end();
   });
 
   it('runs afterBeginWrite first in every write transaction and around bare writes, never for reads', async () => {

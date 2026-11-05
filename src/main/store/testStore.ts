@@ -20,7 +20,7 @@ export interface TestPg { pool: pg.Pool; schema: string; drop(): Promise<void> }
 export async function testPgSchema(): Promise<TestPg> {
   const url = process.env.PG_TEST_URL;
   if (!url) throw new Error('STORE_TEST_DIALECT=postgres needs PG_TEST_URL');
-  const schema = `t_${randomBytes(6).toString('hex')}`;
+  const schema = `t_${Math.floor(Date.now() / 1000)}_${randomBytes(6).toString('hex')}`;
   const pool = createPgPool({ connectionString: url, schema, max: POOL_MAX });
   await pool.query(`CREATE SCHEMA ${schema}`);
   return {

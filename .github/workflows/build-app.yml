@@ -54,7 +54,7 @@ jobs:
           changed=$(git diff --name-only "$base" "$head")
           echo "changed files:"; echo "$changed" | sed 's/^/  /'
           # Mirrors the old on.pull_request.paths list.
-          if echo "$changed" | grep -qE '^(src/|tests/|playwright\.config\.ts$|package\.json$|package-lock\.json$|electron-builder\.yml$|electron\.vite\.config\.ts$|tsconfig\.host\.json$|vite\.host\.config\.ts$|broker/|\.github/workflows/build-app\.yml$)'; then
+          if echo "$changed" | grep -qE '^(src/|tests/|playwright\.config\.ts$|package\.json$|package-lock\.json$|electron-builder\.yml$|electron\.vite\.config\.ts$|tsconfig\.host\.json$|vite\.host\.config\.ts$|vitest(\.pg)?\.config\.ts$|scripts/pg-test-server\.sh$|broker/|\.github/workflows/build-app\.yml$)'; then
             echo "→ code paths touched; running the full pipeline"
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
