@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  captureSettingsEqual, clampDailyCap, classifyCostIncrease, defaultCaptureSettings, describeCaptureChange,
+  captureSettingsEqual, clampDailyCap, classifyNeedsApproval, defaultCaptureSettings, describeCaptureChange,
   diffCaptureSettings, effectiveCaptureSettings, isDefaultCaptureSettings, normalizeCaptureSettings,
   parseCaptureSettingsPatch
 } from './captureSettings.js';
@@ -61,9 +61,9 @@ describe('comparison and description', () => {
   });
 });
 
-describe('classifyCostIncrease', () => {
+describe('classifyNeedsApproval', () => {
   const inc = (after: Partial<typeof D>, before: Partial<typeof D> = {}) =>
-    classifyCostIncrease({ ...D, ...before }, { ...D, ...before, ...after }).increases;
+    classifyNeedsApproval({ ...D, ...before }, { ...D, ...before, ...after }).needsApproval;
   it('flags every cost-raising change from the spec', () => {
     expect(inc({ enabled: true }, { enabled: false })).toBe(true);
     expect(inc({ onSearchHit: true }, { onSearchHit: false })).toBe(true);
@@ -75,7 +75,15 @@ describe('classifyCostIncrease', () => {
     expect(inc({ turnsEvery: 20 }, { turnsEvery: 40 })).toBe(true);
     expect(inc({ model: 'claude-haiku-5' })).toBe(true);
   });
-  it('treats reductions and neutral fields as not increasing cost', () => {
+  it('flags exposure-raising and destructive changes: private → fleet visibility, shorter retention', () => {
+    expect(inc({ captureVisibility: 'fleet' }, { captureVisibility: 'private' })).toBe(true);
+    expect(inc({ transcriptRetentionDays: 90 })).toBe(true);
+    expect(classifyNeedsApproval({ ...D, captureVisibility: 'private' }, D).reasons)
+      .toEqual(['publishes captured claims to the whole fleet (captureVisibility private → fleet)']);
+    expect(classifyNeedsApproval(D, { ...D, transcriptRetentionDays: 60 }).reasons)
+      .toEqual(['deletes transcripts sooner (transcriptRetentionDays 365 → 60)']);
+  });
+  it('treats reductions and neutral fields as not needing approval', () => {
     expect(inc({ enabled: false })).toBe(false);
     expect(inc({ onSearchHit: false })).toBe(false);
     expect(inc({ searchTopSessions: 1 })).toBe(false);
@@ -85,9 +93,10 @@ describe('classifyCostIncrease', () => {
     expect(inc({ turnsEvery: 0 }, { turnsEvery: 40 })).toBe(false);
     expect(inc({ model: 'session' }, { model: 'claude-haiku-5' })).toBe(false);
     expect(inc({ transcriptRetentionDays: 3650, captureVisibility: 'private' })).toBe(false);
+    expect(inc({ transcriptRetentionDays: 400 }, { transcriptRetentionDays: 400 })).toBe(false);
   });
   it('explains why', () => {
-    expect(classifyCostIncrease(D, { ...D, turnsEvery: 30 }).reasons).toEqual(['turns periodic capture on (every 30 turns)']);
+    expect(classifyNeedsApproval(D, { ...D, turnsEvery: 30 }).reasons).toEqual(['turns periodic capture on (every 30 turns)']);
   });
 });
 

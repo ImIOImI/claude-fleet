@@ -3,7 +3,7 @@
 // low-priority notification); cost-increasing ones apply now only for a
 // trusted workspace, otherwise they become a proposal the user approves.
 import {
-  classifyCostIncrease, defaultCaptureSettings, describeCaptureChange, diffCaptureSettings, effectiveCaptureSettings,
+  classifyNeedsApproval, defaultCaptureSettings, describeCaptureChange, diffCaptureSettings, effectiveCaptureSettings,
   isDefaultCaptureSettings, normalizeCaptureSettings, parseCaptureSettingsPatch, type CaptureSettings
 } from '../../preload/captureSettings.js';
 import type { CaptureSettingsChange } from '../../preload/inboxTypes.js';
@@ -67,19 +67,19 @@ export function createCaptureSettingsService(d: CaptureSettingsDeps) {
       const after = normalizeCaptureSettings({ ...before, ...patch });
       const changes = describeCaptureChange(before, after);
       if (changes.length === 0) return { status: 'unchanged' as const, settings: before, changes, reasons: [] as string[] };
-      const cost = classifyCostIncrease(before, after);
-      if (!cost.increases || (await d.trusted(callerId))) {
+      const gate = classifyNeedsApproval(before, after);
+      if (!gate.needsApproval || (await d.trusted(callerId))) {
         await write(m, after, 'workspace', 'mcp', reason, null);
         const who = await d.workspaceName(callerId);
         d.notify({
           kind: 'capture-settings', title: `${who} changed its knowledge-capture settings: ${changes.join(', ')}`.slice(0, 200),
           body: reason, priority: 'low', source: { kind: 'workspace', id: callerId }, workspaceId: callerId
         });
-        return { status: 'applied' as const, settings: after, changes, costIncrease: cost.increases, reasons: cost.reasons };
+        return { status: 'applied' as const, settings: after, changes, needsApproval: gate.needsApproval, reasons: gate.reasons };
       }
-      const p = await d.propose(callerId, { workspaceId: callerId, before, after, changes, reasons: cost.reasons }, reason);
+      const p = await d.propose(callerId, { workspaceId: callerId, before, after, changes, reasons: gate.reasons }, reason);
       await d.log.append({ workspaceId: callerId, actor: 'workspace', before, after, reason, applied: false, proposalId: p.id, now: d.now() });
-      return { status: 'proposed' as const, proposalId: p.id, changes, reasons: cost.reasons };
+      return { status: 'proposed' as const, proposalId: p.id, changes, reasons: gate.reasons };
     },
 
     /** The user approved a proposal: apply only the fields it changed onto the

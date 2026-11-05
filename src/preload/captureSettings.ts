@@ -118,9 +118,11 @@ export function describeCaptureChange(before: CaptureSettings, after: CaptureSet
     .map((k) => `${k}: ${fmt(k, before[k])} → ${fmt(k, after[k])}`);
 }
 
-/** Spec §5a step 2: which changes raise capture cost (and so need approval
- *  unless the workspace is trusted). Everything else is neutral or cheaper. */
-export function classifyCostIncrease(before: CaptureSettings, after: CaptureSettings): { increases: boolean; reasons: string[] } {
+/** Spec §5a step 2: which changes need the user's approval unless the
+ *  workspace is trusted — anything that raises capture cost, publishes
+ *  privately-captured knowledge to the fleet, or deletes transcripts sooner.
+ *  Everything else is neutral, cheaper, or more private. */
+export function classifyNeedsApproval(before: CaptureSettings, after: CaptureSettings): { needsApproval: boolean; reasons: string[] } {
   const r: string[] = [];
   if (!before.enabled && after.enabled) r.push('turns knowledge capture on');
   if (!before.onSearchHit && after.onSearchHit) r.push('turns search-hit capture on');
@@ -141,7 +143,13 @@ export function classifyCostIncrease(before: CaptureSettings, after: CaptureSett
   if (after.model !== 'session' && after.model !== before.model) {
     r.push(`uses ${after.model} instead of the session's model (no prompt-cache reuse)`);
   }
-  return { increases: r.length > 0, reasons: r };
+  if (before.captureVisibility === 'private' && after.captureVisibility === 'fleet') {
+    r.push('publishes captured claims to the whole fleet (captureVisibility private → fleet)');
+  }
+  if (after.transcriptRetentionDays < before.transcriptRetentionDays) {
+    r.push(`deletes transcripts sooner (transcriptRetentionDays ${before.transcriptRetentionDays} → ${after.transcriptRetentionDays})`);
+  }
+  return { needsApproval: r.length > 0, reasons: r };
 }
 
 /** set_capture_settings args → a typed partial. Unknown fields and wrong types

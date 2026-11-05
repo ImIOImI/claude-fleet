@@ -43,7 +43,7 @@ describe('capture settings service (#483 §5a)', () => {
     const off = onCaptureSettingsChanged((e) => events.push(e));
     const r = await t.svc.set(WS, { searchTopSessions: 1, reason: 'too costly' });
     off();
-    expect(r).toMatchObject({ status: 'applied', costIncrease: false, changes: ['searchTopSessions: 3 → 1'] });
+    expect(r).toMatchObject({ status: 'applied', needsApproval: false, changes: ['searchTopSessions: 3 → 1'] });
     expect(t.manifest().knowledgeCapture).toEqual({ ...D, searchTopSessions: 1 });
     expect(t.logRows[0]).toMatchObject({ workspaceId: WS, actor: 'workspace', applied: true, proposalId: null, reason: 'too costly' });
     expect(t.notes[0]).toMatchObject({ kind: 'capture-settings', priority: 'low', workspaceId: WS, title: 'ops changed its knowledge-capture settings: searchTopSessions: 3 → 1' });
@@ -60,8 +60,22 @@ describe('capture settings service (#483 §5a)', () => {
   });
   it('a trusted workspace applies a cost increase immediately', async () => {
     const t = setup({ trusted: true });
-    expect(await t.svc.set(WS, { turnsEvery: 30, reason: 'r' })).toMatchObject({ status: 'applied', costIncrease: true });
+    expect(await t.svc.set(WS, { turnsEvery: 30, reason: 'r' })).toMatchObject({ status: 'applied', needsApproval: true });
     expect(t.manifest().knowledgeCapture).toEqual({ ...D, turnsEvery: 30 });
+  });
+  it('publishing private captures to the fleet or shortening retention needs approval like a cost increase', async () => {
+    const t = setup({ knowledgeCapture: { captureVisibility: 'private' } });
+    expect(await t.svc.set(WS, { captureVisibility: 'fleet', reason: 'share' })).toMatchObject({
+      status: 'proposed', reasons: ['publishes captured claims to the whole fleet (captureVisibility private → fleet)']
+    });
+    expect(await t.svc.set(WS, { transcriptRetentionDays: 30, reason: 'disk' })).toMatchObject({
+      status: 'proposed', reasons: ['deletes transcripts sooner (transcriptRetentionDays 365 → 30)']
+    });
+    expect(t.manifest().knowledgeCapture).toEqual({ captureVisibility: 'private' });
+    const trusted = setup({ trusted: true, knowledgeCapture: { captureVisibility: 'private' } });
+    expect(await trusted.svc.set(WS, { captureVisibility: 'fleet', transcriptRetentionDays: 30, reason: 'r' }))
+      .toMatchObject({ status: 'applied', needsApproval: true });
+    expect(trusted.manifest().knowledgeCapture).toEqual({ ...D, transcriptRetentionDays: 30 });
   });
   it('clamps values, reports no-ops, and rejects bad input or an unknown workspace', async () => {
     const t = setup();

@@ -357,7 +357,7 @@ export interface CaptureSettingsChange {
   after: CaptureSettings;
   /** "field: before → after" lines (describeCaptureChange). */
   changes: string[];
-  /** Why it needs approval (classifyCostIncrease). */
+  /** Why it needs approval (classifyNeedsApproval). */
   reasons: string[];
 }
 

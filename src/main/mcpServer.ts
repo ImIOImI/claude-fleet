@@ -1793,10 +1793,11 @@ export const TOOLS: Tool[] = [
     name: 'set_capture_settings',
     description:
       "Change your own workspace's knowledge-capture settings. Pass only the fields to change, plus reason (required). Values are clamped to their ranges; unknown fields are rejected. " +
-      'Changes that lower cost or are cost-neutral (including transcriptRetentionDays and captureVisibility) apply immediately and the user is notified. ' +
+      'Changes that lower cost or are cost-neutral (including longer transcriptRetentionDays and captureVisibility fleet → private) apply immediately and the user is notified. ' +
       'Changes that raise cost (turning capture or search-hit capture on, more sessions per search, recapturing sooner, adding or lowering a context band, ' +
-      'turning turnsEvery on or lowering it, a model other than "session") become a proposal the user approves, unless this workspace is trusted. ' +
-      'Returns { status: applied|proposed|unchanged, settings?, proposalId?, changes, reasons }.',
+      'turning turnsEvery on or lowering it, a model other than "session"), captureVisibility private → fleet, or a shorter transcriptRetentionDays ' +
+      'become a proposal the user approves, unless this workspace is trusted. ' +
+      'Returns { status: applied|proposed|unchanged, settings?, needsApproval?, proposalId?, changes, reasons }.',
     inputSchema: {
       type: 'object',
       properties: {
