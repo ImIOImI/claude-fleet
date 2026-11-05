@@ -93,12 +93,57 @@ describe('RemoteClient', () => {
     expect(seen).toEqual([]);
   });
 
-  it('rejects a /whoami whose workspace id could escape the state directory', async () => {
+  async function whoamiServing(body: unknown) {
     const { url } = await rawServer((_req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ workspace: { id: '../../evil', name: 'x' }, user: { login: 'a' }, tier: 'read' }));
+      res.end(JSON.stringify(body));
     });
-    await expect(new RemoteClient({ url, token: async () => TOKEN }).whoami()).rejects.toMatchObject({ kind: 'protocol' });
+    return new RemoteClient({ url, token: async () => TOKEN }).whoami();
+  }
+  const WHO = (workspace: Record<string, unknown>, user: Record<string, unknown> = {}) => ({
+    workspace: { id: TEST_WORKSPACE_ID, name: 'x', description: null, color: null, ...workspace },
+    user: { provider: 'github', kind: 'user', login: 'a', id: 1, name: null, avatarUrl: null, ...user },
+    tier: 'read'
+  });
+
+  it.each(['../../evil', 'CON', 'nul', 'a'.repeat(64), '01JC000000000000000000000', '01JC0000000000000000000000X', '01JC000000000000000000000I', '01jc0000000000000000000000'])(
+    'refuses a /whoami workspace id that is not a ULID: %s',
+    async (id) => {
+      await expect(whoamiServing(WHO({ id }))).rejects.toMatchObject({ kind: 'protocol' });
+    }
+  );
+
+  it('sanitises /whoami display fields', async () => {
+    const who = await whoamiServing(WHO({ name: `ev\u0007il${'n'.repeat(100)}`, description: `d\r\n${'d'.repeat(600)}` }, { avatarUrl: 'http://x/a.png' }));
+    expect(who.workspace.id).toBe(TEST_WORKSPACE_ID);
+    expect(who.workspace.name).toHaveLength(64);
+    expect(who.workspace.name).not.toMatch(/[\x00-\x1f\x7f]/);
+    expect(who.workspace.description!.length).toBeLessThanOrEqual(500);
+    expect(who.workspace.description).not.toMatch(/[\x00-\x1f\x7f]/);
+    expect(who.user.avatarUrl).toBeNull();
+    expect((await whoamiServing(WHO({}, { avatarUrl: 'https://x/a.png' }))).user.avatarUrl).toBe('https://x/a.png');
+    expect((await whoamiServing(WHO({}, { avatarUrl: 'javascript:alert(1)' }))).user.avatarUrl).toBeNull();
+  });
+
+  it('redacts a token that straddles the 200-character cut', async () => {
+    const { url } = await rawServer((req, res) => {
+      const t = String(req.headers.authorization).slice('Bearer '.length);
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `${'x'.repeat(190)}${t} tail` }));
+    });
+    const err = (await new RemoteClient({ url, token: async () => TOKEN }).whoami().catch((e: unknown) => e)) as RemoteError;
+    expect(err.message).not.toContain(TOKEN.slice(0, 8));
+    expect(err.message).toContain('[redacted]');
+  });
+
+  it('redacts other secret shapes the host echoes', async () => {
+    const other = 'ghp_' + 'Q'.repeat(36);
+    const { url } = await rawServer((_req, res) => {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `leaked ${other}` }));
+    });
+    const err = (await new RemoteClient({ url, token: async () => TOKEN }).whoami().catch((e: unknown) => e)) as RemoteError;
+    expect(err.message).not.toContain('QQQQ');
   });
 
   it('carries Retry-After from 429 and 503', async () => {

@@ -164,3 +164,33 @@ describe('BrokerClient over an already-open Duplex', () => {
     expect(Date.now() - started).toBeLessThan(1000);
   });
 });
+
+describe('BrokerClient over a unix socket (container path)', () => {
+  let server: net.Server | undefined;
+  afterEach(() => server?.close());
+
+  it('rejects a pending request at once when the broker drops the socket mid-LIST', async () => {
+    const sock = path.join(mkdtempSync(path.join(tmpdir(), 'broker-test-')), 'b.sock');
+    server = net.createServer((s) => s.on('data', () => s.destroy()));
+    await new Promise<void>((r) => server!.listen(sock, () => r()));
+    const client = new BrokerClient(sock);
+    await client.ready();
+    const started = Date.now();
+    await expect(client.listSessions()).rejects.toThrow(/closed/);
+    expect(Date.now() - started).toBeLessThan(1000);
+    client.close();
+  });
+
+  it('does not add the Duplex end→destroy hook to a net.Socket', async () => {
+    const sock = path.join(mkdtempSync(path.join(tmpdir(), 'broker-test-')), 'b.sock');
+    server = net.createServer(() => undefined);
+    await new Promise<void>((r) => server!.listen(sock, () => r()));
+    const baseline = net.createConnection(sock);
+    const client = new BrokerClient(sock);
+    await client.ready();
+    const socket = (client as unknown as { socket: net.Socket }).socket;
+    expect(socket.listenerCount('end')).toBe(baseline.listenerCount('end'));
+    baseline.destroy();
+    client.close();
+  });
+});

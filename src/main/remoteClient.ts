@@ -5,6 +5,7 @@
 import WebSocket from 'ws';
 import { MAX_FRAME_PAYLOAD } from './broker.js';
 import type { Tier } from './identity/grants.js';
+import { redactSecrets } from './identity/redact.js';
 import { normalizeHostUrl, wsUrl } from './remoteUrl.js';
 
 export type RemoteErrorKind = 'not-signed-in' | 'unreachable' | 'unauthorized' | 'forbidden' | 'standby' | 'protocol';
@@ -62,8 +63,9 @@ const MAX_EVENT_BYTES = 1 << 20;
 const TIERS: readonly string[] = ['read', 'steer', 'session'];
 /** Same charset the host accepts (src/host/auth.ts); also keeps CR/LF out of the header. */
 const TOKEN_RE = /^[A-Za-z0-9_.~+/=-]{1,4096}$/;
-/** The id becomes a directory name under <userData>/state. */
-const WORKSPACE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+/** The host's id is always a ULID; it becomes a directory name under <userData>/state. */
+const WORKSPACE_ID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
+const CONTROL_RE = /[\x00-\x1f\x7f]+/g;
 
 function isWhoAmI(v: unknown): v is WhoAmI {
   const o = v as WhoAmI | null;
@@ -77,11 +79,35 @@ function isWhoAmI(v: unknown): v is WhoAmI {
   );
 }
 
-/** Host text is untrusted: one short line, with the token cut out in case the host echoes it. */
+const oneLine = (s: string, max: number): string => s.replace(CONTROL_RE, ' ').trim().slice(0, max);
+
+function httpsOrNull(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  try {
+    return new URL(raw).protocol === 'https:' ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Display fields are untrusted host text. */
+function sanitizeWhoAmI(w: WhoAmI): WhoAmI {
+  return {
+    ...w,
+    workspace: {
+      ...w.workspace,
+      name: oneLine(w.workspace.name, 64),
+      description: typeof w.workspace.description === 'string' ? oneLine(w.workspace.description, 500) : null
+    },
+    user: { ...w.user, avatarUrl: httpsOrNull(w.user.avatarUrl) }
+  };
+}
+
+/** Host text is untrusted: secrets cut out (before truncating, so none survive the cut), then one short line. */
 function scrub(text: string, token: string | null): string {
-  let t = text.replace(/[\x00-\x1f\x7f]+/g, ' ').slice(0, 200);
-  if (token) t = t.split(token).join('[redacted]');
-  return t.trim();
+  let t = token ? text.split(token).join('[redacted]') : text;
+  t = redactSecrets(t);
+  return oneLine(t, 200);
 }
 
 export function parseRetryAfter(v: string | string[] | null | undefined, now = Date.now()): number | undefined {
@@ -201,7 +227,7 @@ export class RemoteClient {
   async whoami(): Promise<WhoAmI> {
     const body = await this.json(await this.request('/whoami', { method: 'GET', auth: true }));
     if (!isWhoAmI(body)) throw new RemoteError('protocol', `${this.url} is not a fleet-host (unexpected /whoami reply)`);
-    return body;
+    return sanitizeWhoAmI(body);
   }
 
   async rpc<T>(channel: string, args: unknown[]): Promise<T> {

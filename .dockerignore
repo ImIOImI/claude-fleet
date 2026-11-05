@@ -33,4 +33,5 @@ broker/cmd/**/testdata/**
 docker/runner/*.test.sh
 src/**/*.test.ts
 src/host/testFakes.ts
+src/host/testHost.ts
 docker/host/*.test.sh
