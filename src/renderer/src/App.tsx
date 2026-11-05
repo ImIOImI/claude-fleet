@@ -34,7 +34,17 @@ import {
   resolveWaitingByWorkspace,
   type PeerKind
 } from './sessionStatusMerge';
-import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget, UiPrefs, InboxCounts, InboxConfig, QuietState } from '../../preload';
+import type {
+  WorkspaceObservabilitySummary,
+  SessionListItem,
+  UsageBudget,
+  UiPrefs,
+  InboxCounts,
+  InboxConfig,
+  QuietState,
+  PortOpenVia
+} from '../../preload';
+import { portPopupCopy } from './portToast';
 import { InboxChip } from './components/InboxChip';
 import { InboxView, type InboxSection } from './components/InboxView';
 import { isWarm } from './fleetTemperature';
@@ -587,10 +597,10 @@ export function App() {
   }, []);
   // Open the loopback preview for a serving port — shared by the detection
   // toast and the rail's Serving section. Errors surface as toasts.
-  const openPreview = useCallback((workspaceId: string, port: number) => {
+  const openPreview = useCallback((workspaceId: string, port: number, via: PortOpenVia = 'rail') => {
     const name = workspacesRef.current.find((w) => w.id === workspaceId)?.name ?? 'workspace';
     void window.api.ports
-      .open(workspaceId, port)
+      .open(workspaceId, port, via)
       .then(({ hostPort }) => {
         if (hostPort === null) {
           pushToast(
@@ -630,42 +640,36 @@ export function App() {
     setActivateRequest({ workspaceId, brokerSessionId, token: ++activateTokenRef.current });
   }, []);
 
-  // Dev-server detection (#port-forward): the broker spotted a new listening
-  // port inside a workspace container. Offer a one-click preview that opens
-  // the system browser via a loopback forward over the broker socket.
+  // Preview popup: a declared port began serving (or the undeclared fallback
+  // fired). Sticky — the toast or the rail are the only ways to reach the
+  // preview (bridge IPs aren't routable from the host on Windows). Keyed per
+  // workspace+port so a re-fire replaces rather than stacks.
   useEffect(() => {
-    return window.api.ports.onDetected((workspaceId, port) => {
-      const name = workspacesRef.current.find((w) => w.id === workspaceId)?.name ?? 'workspace';
-      // Sticky: this toast is the only way to reach the preview (bridge IPs
-      // aren't routable from the host on Windows), so it must never expire —
-      // missing it means restarting the dev server to re-trigger detection.
-      // It clears on click or ✕. Keyed per workspace+port so a server that
-      // restarts (port disappears and returns) replaces its toast instead of
-      // stacking a duplicate; distinct ports still stack.
+    return window.api.ports.onDetected((p) => {
+      const name = workspacesRef.current.find((w) => w.id === p.workspaceId)?.name ?? 'workspace';
+      const { eyebrow, message } = portPopupCopy(p, name);
       const id = ++toastIdRef.current;
       dispatchToast({
         type: 'push',
         toast: makeToast(id, {
           kind: 'info',
-          eyebrow: 'Preview',
-          key: `port:${workspaceId}:${port}`,
-          message: `Dev server detected on port ${port} in ${name}`,
+          eyebrow,
+          key: `port:${p.workspaceId}:${p.port}`,
+          message,
           placement: 'global',
           sticky: true,
           dismissible: true,
+          onClose: () => void window.api.ports.dismiss(p.workspaceId, p.port),
           action: {
             label: 'Open preview',
             onClick: () => {
               dispatchToast({ type: 'dismiss', id });
-              openPreview(workspaceId, port);
+              openPreview(p.workspaceId, p.port, p.declared ? 'popup' : 'fallback');
             }
           }
         })
       });
     });
-    // pushToast/dispatchToast are stable (useCallback []/useReducer).
-    // openPreview is a stable useCallback([]) — adding it to the dep array
-    // keeps the linter happy while the effect still runs once.
   }, [openPreview]);
 
   // Newer-claude cue (#336): a wsl-launcher workspace started and its distro
