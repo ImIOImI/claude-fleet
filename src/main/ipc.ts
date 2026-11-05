@@ -288,8 +288,6 @@ function broadcastPortsChanged(workspaceId: string, ports: ServingPort[]): void 
   sendPortsChanged(workspaceId, ports);
 }
 
-// Real-backend only: in mock mode there is no broker to poll, so detection is
-// driven by the e2e test-only handler below and `ports:open` returns a stub.
 // state.db opens after module load, so the startup sweep runs from registerIpc;
 // exposure writes wait on it.
 let releaseExposureWrites: (sweep: Promise<void>) => void = () => undefined;
@@ -315,6 +313,8 @@ const portExposure = new PortExposureService({
   onWriteError: (err) => logError({ source: 'main', level: 'warn', type: 'port-exposure-write', message: String(err) })
 });
 
+// Real-backend only: in mock mode there is no broker to poll, so detection is
+// driven by the e2e test-only handler below and `ports:open` returns a stub.
 const portForward: PortForwardManager | null = MOCK_MODE
   ? null
   : new PortForwardManager({
