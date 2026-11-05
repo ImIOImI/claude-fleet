@@ -98,6 +98,18 @@ describe('createReloader', () => {
     expect(logs.filter((l) => l.includes('config reloaded'))).toHaveLength(1);
   });
 
+  it('refuses a reload that changes the GitHub App, but applies a new allowlist', async () => {
+    const app = 'github: { appId: 1, installationId: 2, keyFile: /k, repositories: [a] }\n';
+    const { path, applied, logs, r } = rig('workspace: { name: a }\n' + app);
+    expect(await r.reload('start')).toBe(true);
+    writeFileSync(path, 'workspace: { name: a }\n' + app.replace('/k', '/other'));
+    expect(await r.reload('SIGHUP')).toBe(false);
+    expect(logs.some((l) => l.includes('config reload rejected') && l.includes('github.appId'))).toBe(true);
+    writeFileSync(path, 'workspace: { name: a }\n' + app.replace('[a]', '[a, b]'));
+    expect(await r.reload('SIGHUP')).toBe(true);
+    expect(applied.at(-1)!.github!.repositories).toEqual(['a', 'b']);
+  });
+
   it('keeps accepting reloads after apply throws, and keeps the old config', async () => {
     const { path } = fixture('workspace: { name: a }\n');
     const logs: string[] = [];

@@ -34,4 +34,5 @@ docker/runner/*.test.sh
 src/**/*.test.ts
 src/host/testFakes.ts
 src/host/testHost.ts
+src/host/testGithubApp.ts
 docker/host/*.test.sh

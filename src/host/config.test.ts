@@ -64,6 +64,38 @@ describe('parseHostConfig', () => {
     expect(() => parseHostConfig(raw)).toThrow(HostConfigError);
     expect(() => parseHostConfig(raw)).toThrow(msg);
   });
+
+  it('parses an optional github block: the App, a repositories allowlist and default permissions', () => {
+    expect(parseHostConfig(base).github).toBeNull();
+    const c = parseHostConfig({
+      ...base,
+      github: {
+        appId: 5612251,
+        installationId: '178595648',
+        keyFile: '/var/run/secrets/github-app/key.pem',
+        repositories: ['fleet-reviews', 'Fleet-Expertise'],
+        permissions: { contents: 'write', pull_requests: 'write' }
+      }
+    });
+    expect(c.github).toEqual({
+      app: { appId: '5612251', installationId: '178595648', keyFile: '/var/run/secrets/github-app/key.pem' },
+      repositories: ['fleet-expertise', 'fleet-reviews'],
+      permissions: { contents: 'write', pull_requests: 'write' }
+    });
+    expect(parseHostConfig({ ...base, github: {} }).github).toEqual({ app: null, repositories: null, permissions: null });
+  });
+
+  it('refuses a malformed github block', () => {
+    const app = { appId: 1, installationId: 2, keyFile: '/k' };
+    expect(() => parseHostConfig({ ...base, github: { repositories: [] } })).toThrow(/github.repositories/);
+    expect(() => parseHostConfig({ ...base, github: { repositories: ['SumerSports/x'] } })).toThrow(/github.repositories/);
+    expect(() => parseHostConfig({ ...base, github: { permissions: { contents: 'admin' } } })).toThrow(/github.permissions/);
+    expect(() => parseHostConfig({ ...base, github: { repos: ['x'] } })).toThrow(/unknown key repos/);
+    expect(() => parseHostConfig({ ...base, github: { appId: 1 } })).toThrow(/set together/);
+    expect(() => parseHostConfig({ ...base, github: { ...app, appId: 'x' } })).toThrow(/github.appId must be a positive integer/);
+    expect(() => parseHostConfig({ ...base, github: { ...app, installationId: 1.5 } })).toThrow(/github.installationId must be a positive integer/);
+    expect(() => parseHostConfig({ ...base, github: { ...app, keyFile: 'k' } })).toThrow(/github.keyFile must be an absolute path/);
+  });
 });
 
 describe('loadHostConfig', () => {

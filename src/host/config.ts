@@ -15,8 +15,27 @@ export interface HostWorkspaceInfo {
   color: { hue: number } | null;
 }
 
+/** The GitHub App whose installation tokens the credential helper mints. */
+export interface GithubAppConfig {
+  appId: string;
+  installationId: string;
+  /** PEM private key path (a Secret volume); read once at start. */
+  keyFile: string;
+}
+
+/** Host config `github`. */
+export interface HostGithubConfig {
+  /** null = the credential helper is off. */
+  app: GithubAppConfig | null;
+  /** Repository names in the installation's account; null = any. */
+  repositories: string[] | null;
+  /** Default `permissions` for every token; null = the installation's. */
+  permissions: Record<string, 'read' | 'write'> | null;
+}
+
 export interface HostConfig {
   workspace: HostWorkspaceInfo;
+  github: HostGithubConfig | null;
   identity: { provider: 'github'; org: string | null };
   grants: GrantConfig;
   /** Proxies in front of the pod that append to X-Forwarded-For; 0 means key on the socket address. */
@@ -70,9 +89,45 @@ function parseWorkspace(v: unknown): HostWorkspaceInfo {
   };
 }
 
+function positiveInt(v: unknown, path: string): string {
+  const s = typeof v === 'number' ? String(v) : v;
+  if (typeof s !== 'string' || !/^[1-9]\d{0,15}$/.test(s)) throw new HostConfigError(`${path} must be a positive integer`);
+  return s;
+}
+
+function parseGithub(v: unknown): HostGithubConfig {
+  const g = record(v, 'github');
+  onlyKeys(g, 'github', ['appId', 'installationId', 'keyFile', 'repositories', 'permissions']);
+  let app: GithubAppConfig | null = null;
+  const set = [g.appId, g.installationId, g.keyFile].filter((x) => x !== undefined).length;
+  if (set !== 0 && set !== 3) throw new HostConfigError('github.appId, github.installationId and github.keyFile must be set together');
+  if (set === 3) {
+    if (typeof g.keyFile !== 'string' || !g.keyFile.startsWith('/')) throw new HostConfigError('github.keyFile must be an absolute path');
+    app = { appId: positiveInt(g.appId, 'github.appId'), installationId: positiveInt(g.installationId, 'github.installationId'), keyFile: g.keyFile };
+  }
+  let repositories: string[] | null = null;
+  if (g.repositories !== undefined) {
+    const r = g.repositories;
+    if (!Array.isArray(r) || r.length === 0 || r.length > 500 || r.some((x) => typeof x !== 'string' || !/^[A-Za-z0-9_.-]{1,100}$/.test(x))) {
+      throw new HostConfigError('github.repositories must list 1 to 500 repository names (no owner)');
+    }
+    repositories = [...new Set((r as string[]).map((x) => x.toLowerCase()))].sort();
+  }
+  let permissions: Record<string, 'read' | 'write'> | null = null;
+  if (g.permissions !== undefined) {
+    const p = record(g.permissions, 'github.permissions');
+    permissions = {};
+    for (const [k, val] of Object.entries(p)) {
+      if (!/^[a-z_]{1,64}$/.test(k) || (val !== 'read' && val !== 'write')) throw new HostConfigError('github.permissions must map permission names to read or write');
+      permissions[k] = val;
+    }
+  }
+  return { app, repositories, permissions };
+}
+
 export function parseHostConfig(raw: unknown): HostConfig {
   const o = record(raw, 'host config');
-  onlyKeys(o, 'host config', ['workspace', 'identity', 'grants', 'machines', 'trustedProxyHops']);
+  onlyKeys(o, 'host config', ['workspace', 'identity', 'grants', 'machines', 'trustedProxyHops', 'github']);
   const id = o.identity === undefined ? {} : record(o.identity, 'identity');
   onlyKeys(id, 'identity', ['provider', 'org']);
   if (id.provider !== undefined && id.provider !== 'github') {
@@ -93,6 +148,7 @@ export function parseHostConfig(raw: unknown): HostConfig {
   }
   return {
     workspace: parseWorkspace(o.workspace),
+    github: o.github === undefined ? null : parseGithub(o.github),
     identity: { provider: 'github', org: typeof id.org === 'string' ? id.org : null },
     grants,
     trustedProxyHops: hops
