@@ -1,7 +1,7 @@
 // The + modal's Remote kind: sign in, check a host URL, bookmark it.
 import { useCallback, useEffect, useState } from 'react';
 import type { AccountStatus, RemoteProbe } from '../../../preload';
-import { applyProbe, remoteFormView, tierTitle, type RemoteFormState } from '../remoteView';
+import { applyProbe, ipcFailure, remoteFormView, tierTitle, type RemoteFormState } from '../remoteView';
 import { AccountSettings } from './AccountSettings';
 
 export function RemoteWorkspaceForm({ onAdded, onCancel }: { onAdded: (id: string) => void; onCancel: () => void }) {
@@ -21,6 +21,8 @@ export function RemoteWorkspaceForm({ onAdded, onCancel }: { onAdded: (id: strin
       const r = await call();
       setState((prev) => applyProbe(prev, r));
       if (addsOnOk && r.ok) onAdded(r.workspace.id);
+    } catch (err) {
+      setState((prev) => applyProbe(prev, ipcFailure(err)));
     } finally {
       setBusy(false);
     }

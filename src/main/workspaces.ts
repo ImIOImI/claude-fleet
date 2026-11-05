@@ -23,7 +23,7 @@ import type { WorkspaceLauncher } from './localLauncher.js';
 import type { TerminalRenderer } from './config.js';
 import type { InboxConfig } from '../preload/inboxTypes.js';
 import { sanitizeInboxConfig } from './inbox/inboxPolicy.js';
-import { normalizeHostUrl } from './remoteUrl.js';
+import { normalizeHostUrl, safeLogin } from './remoteUrl.js';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted' | 'unreachable';
 
@@ -64,7 +64,7 @@ export function sanitizeRemote(r: unknown): RemoteBookmark | undefined {
   return {
     url: o.url,
     tier,
-    login: typeof o.login === 'string' ? o.login : null,
+    login: safeLogin(o.login),
     checkedAt: typeof o.checkedAt === 'number' && Number.isFinite(o.checkedAt) ? o.checkedAt : 0
   };
 }

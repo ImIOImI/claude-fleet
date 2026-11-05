@@ -69,12 +69,32 @@ describe('remote bookmark wiring', () => {
     expect(handlerSource('pty:detach')).toMatch(/detachHandle\(sessionId\)/);
   });
 
+  it('desktop automations refuse remote targets before any live-handle shortcut', () => {
+    const fn = (name: string): string => {
+      const start = src.indexOf(`export async function ${name}(`);
+      if (start < 0) throw new Error(`ipc.ts: no ${name}`);
+      return src.slice(start, src.indexOf('\n}\n', start));
+    };
+    expect(fn('hostPostToWorkspace')).toMatch(/> \{\s*const kind = await resolveAutomationKind\(targetId\);\s*const live = liveHandleForWorkspace/);
+    expect(fn('hostSpawnFresh')).toMatch(/> \{\s*const kind = await resolveAutomationKind\(workspaceId\);/);
+    expect(fn('hostEnsureRunning')).toMatch(/> \{\s*const kind = await resolveAutomationKind\(targetId\);/);
+  });
+
+  it('a remote owner feeds neither committee busy nor session.idle', () => {
+    const attach = handlerSource('pty:attach');
+    expect(attach).toMatch(/const signalOwner = owner && hostRunsSignals\(owner\.kind\) \? owner : null;/);
+    expect(attach).toMatch(/if \(signalOwner && detector\.push\([\s\S]*?committeeBusy\.set\(signalOwner\.id[\s\S]*?emitFleetEvent\(\{ on: 'session\.idle', workspaceId: signalOwner\.id \}\)/);
+    expect(attach).not.toMatch(/committeeBusy\.set\(owner\.id/);
+  });
+
   it('port forwarding is reconciled for containers only', () => {
     expect(handlerSource('workspace:list')).toMatch(/w\.state === 'running' && w\.kind === 'container'/);
   });
 
   it('the bearer token is bound only in main and exposed by no preload or renderer code', () => {
     expect(src).toMatch(/remoteToken = \(\) => identity\.bearerToken\(\);/);
+    expect(src).toMatch(/remoteLogin = \(\) => identity\.currentLogin\(\);/);
+    expect(src).toMatch(/login: \(\) => remoteLogin\(\),/);
     const preload = readFileSync(new URL('../preload/index.ts', import.meta.url), 'utf8');
     expect(preload).not.toMatch(/bearerToken|remoteToken|packagesToken/);
     expect(readFileSync(new URL('./identityIpc.ts', import.meta.url), 'utf8')).not.toMatch(/bearerToken/);

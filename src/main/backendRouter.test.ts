@@ -18,7 +18,7 @@ vi.mock('electron', () => ({
   }
 }));
 
-const { resolveKind, resolveRemoveKind } = await import('./backendRouter.js');
+const { hostRunsSignals, REMOTE_AUTOMATION_MSG, resolveAutomationKind, resolveKind, resolveRemoveKind } = await import('./backendRouter.js');
 const { workspaceManifestPath } = await import('./paths.js');
 
 async function writeManifest(id: string, kind: 'container' | 'local'): Promise<void> {
@@ -98,5 +98,32 @@ describe('resolveRemoveKind', () => {
     await writeRemote(REMOTE);
     await expect(resolveRemoveKind('01LOCAL00000000000000000WS', REMOTE)).rejects.toThrow(/different workspace/);
     await expect(resolveRemoveKind(REMOTE, '01LOCAL00000000000000000WS')).rejects.toThrow(/different workspace/);
+  });
+});
+
+describe('automation targets', () => {
+  const REMOTE = '01REMQTE000000000000000000';
+
+  it('refuses a remote bookmark and routes everything else', async () => {
+    await mkdir(join(userDataDir, 'state', REMOTE), { recursive: true });
+    await writeFile(
+      workspaceManifestPath(REMOTE),
+      JSON.stringify({
+        id: REMOTE, name: 'r', workspaceRoot: '', workspaceSubdir: '', kind: 'remote', authMode: 'oauth',
+        env: { plain: {}, secretKeys: [] }, remote: { url: 'https://h', tier: 'session', login: null, checkedAt: 0 }, createdAt: 1, lastUsedAt: 1
+      }),
+      'utf8'
+    );
+    await writeManifest('01LOCAL00000000000000000WS', 'local');
+    expect(REMOTE_AUTOMATION_MSG).toBe('remote automations run on their host');
+    await expect(resolveAutomationKind(REMOTE)).rejects.toThrow(REMOTE_AUTOMATION_MSG);
+    expect(await resolveAutomationKind('01LOCAL00000000000000000WS')).toBe('local');
+    expect(await resolveAutomationKind('a'.repeat(64))).toBe('container');
+  });
+
+  it('only workspaces this desktop runs feed automation events and committee busy', () => {
+    expect(hostRunsSignals('remote')).toBe(false);
+    expect(hostRunsSignals('container')).toBe(true);
+    expect(hostRunsSignals('local')).toBe(true);
   });
 });

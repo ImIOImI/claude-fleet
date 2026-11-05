@@ -12,7 +12,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import type { WorkspaceSummary, CommitteeVerb, ControlConfig, ControlGrant } from '../App';
-import { COMMITTEE_VERBS, isManager, isReachable, ManagerGlyph, WifiGlyph } from './committee';
+import { COMMITTEE_VERBS, isManager, isReachable, ManagerGlyph, managerUnavailableText, WifiGlyph } from './committee';
 
 interface Props {
   /** The workspace acting as manager (the currently-selected one). */
@@ -82,12 +82,9 @@ export function CommitteePane({ selectedWorkspace, workspaces, onChanged }: Prop
   if (!manager) {
     return <div className="committee-empty">Select a workspace to manage its committee grants.</div>;
   }
-  if (manager.kind === 'local') {
-    return (
-      <div className="committee-empty">
-        Local workspaces can&apos;t act as a committee manager — control is container-only.
-      </div>
-    );
+  const unavailable = managerUnavailableText(manager.kind);
+  if (unavailable) {
+    return <div className="committee-empty">{unavailable}</div>;
   }
 
   // Candidate targets: every other container workspace. Reachable non-managers

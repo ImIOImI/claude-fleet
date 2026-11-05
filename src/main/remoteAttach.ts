@@ -13,6 +13,8 @@ import { closeKind, RemoteError, type RemoteClient } from './remoteClient.js';
 const CHANNEL = 1;
 /** How long a closing socket may wait for the host's close frame. */
 const CLOSE_GRACE_MS = 1_000;
+/** How long End session waits for CLOSED before dropping the socket. */
+const CLOSE_WAIT_MS = 3_000;
 
 /** Fixed text per host close code; the host's reason string is untrusted. */
 function closeNotice(code: number): string | null {
@@ -33,6 +35,7 @@ export interface RemoteAttachOptions {
   resumeOf?: string;
   /** The viewer's tier allows CREATE (`session`). */
   canCreate: boolean;
+  closeWaitMs?: number;
 }
 
 export async function attachRemotePty(o: RemoteAttachOptions): Promise<PtyHandle> {
@@ -62,7 +65,8 @@ export async function attachRemotePty(o: RemoteAttachOptions): Promise<PtyHandle
     try {
       return await p;
     } catch (err) {
-      if (closedWith === null) fail(`host attach failed: ${(err as Error).message}`);
+      // A JSON.parse message quotes the host's bytes, too few to redact reliably.
+      if (closedWith === null) fail(`host attach failed: ${err instanceof SyntaxError ? 'malformed host reply' : await o.client.redact((err as Error).message)}`);
       const kind = closeKind(closedWith!);
       closing = true;
       stream.destroy();
@@ -88,7 +92,10 @@ export async function attachRemotePty(o: RemoteAttachOptions): Promise<PtyHandle
     close: async () => {
       closing = true;
       // The host refuses CLOSE of someone else's session; dropping the socket then just detaches.
-      await broker.closeChannel(CHANNEL).catch(() => undefined);
+      let timer: NodeJS.Timeout | undefined;
+      const waited = new Promise<void>((ok) => (timer = setTimeout(ok, o.closeWaitMs ?? CLOSE_WAIT_MS)));
+      await Promise.race([broker.closeChannel(CHANNEL).catch(() => undefined), waited]);
+      clearTimeout(timer);
       shut();
     }
   };

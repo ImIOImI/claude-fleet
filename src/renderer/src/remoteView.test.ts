@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { RemoteProbeErr, RemoteProbeOk } from '../../preload/remoteTypes';
 import { readFileSync } from 'node:fs';
-import { applyProbe, canEndSession, canStartSessions, defaultTabOnTierChange, forgetText, mineIds, CHECKING_STATUS, joinableSessions, paneRules, remoteChip, remotePane, unreachableRemoteNames, canType, ipcErrorText, probeErrorText, remoteFormView, tierTitle, unreachableBanner, type RemoteFormState } from './remoteView';
+import { applyProbe, canEndSession, ipcFailure, raceTimeout, canStartSessions, defaultTabOnTierChange, forgetText, mineIds, CHECKING_STATUS, joinableSessions, paneRules, remoteChip, remotePane, unreachableRemoteNames, canType, ipcErrorText, probeErrorText, remoteFormView, tierTitle, unreachableBanner, type RemoteFormState } from './remoteView';
 
 const OK: RemoteProbeOk = {
   ok: true,
@@ -236,5 +236,28 @@ describe('defaultTabOnTierChange', () => {
 describe('forgetText', () => {
   it('names the workspace and says the host is untouched', () => {
     expect(forgetText('review-bot')).toBe("Forget review-bot? Removes the bookmark and this computer's tab list. The host and its sessions are untouched.");
+  });
+});
+
+describe('ipcFailure', () => {
+  it('turns an IPC throw into an error notice and clears the last probe', () => {
+    const err = ipcFailure(new Error("Error invoking remote method 'remote:probe': Error: boom"));
+    expect(err).toEqual({ ok: false, kind: 'protocol', message: 'boom' });
+    const next = applyProbe({ ok: OK, err: null }, err);
+    expect(next.ok).toBeNull();
+    expect(remoteFormView(next).notice).toEqual({ tone: 'error', text: 'boom' });
+  });
+});
+
+describe('raceTimeout', () => {
+  it('resolves the value when it lands in time', async () => {
+    expect(await raceTimeout(Promise.resolve(7), 50)).toBe(7);
+  });
+
+  it('resolves null after the timeout, and null on rejection', async () => {
+    const started = Date.now();
+    expect(await raceTimeout(new Promise(() => undefined), 30)).toBeNull();
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(await raceTimeout(Promise.reject(new Error('x')), 30)).toBeNull();
   });
 });

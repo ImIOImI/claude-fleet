@@ -54,7 +54,7 @@ import * as realDocker from './docker.js';
 import * as realLocal from './local.js';
 import * as mockDocker from './mock.js';
 import type { Backend } from './backend.js';
-import { resolveKind, resolveRemoveKind } from './backendRouter.js';
+import { hostRunsSignals, resolveAutomationKind, resolveKind, resolveRemoveKind } from './backendRouter.js';
 import { findLiveHandleId, tabCloseVerb } from './ptyHandleLookup.js';
 import { assertControl, buildRoster, ROSTER_TITLE_MAX, type RosterStatus, type RosterEntry } from './control.js';
 import { ActivityDetector } from './activityDetector.js';
@@ -298,8 +298,10 @@ const dockerBackend: Backend = MOCK_MODE ? mockDocker : realDocker;
 const localBackend: Backend = MOCK_MODE ? mockDocker : realLocal;
 // Bound to the signed-in GitHub token once registerIpc builds the identity service.
 let remoteToken: () => Promise<string | null> = async () => null;
+let remoteLogin: () => Promise<string | null> = async () => null;
 const remoteBackend = createRemoteBackend({
   token: () => remoteToken(),
+  login: () => remoteLogin(),
   listManifests: () => listWorkspaceManifests(),
   writeManifest: (spec) => writeWorkspaceManifest(spec),
   deleteState: (id) => rm(workspaceStateDir(id), { recursive: true, force: true })
@@ -548,13 +550,13 @@ export async function hostPostToWorkspace(
   targetId: string,
   msg: string
 ): Promise<{ via: 'attached' | 'headless'; brokerSessionId?: string }> {
+  const kind = await resolveAutomationKind(targetId);
   const live = liveHandleForWorkspace(targetId);
   if (live) {
     await injectAndSubmit((chunk) => live.stream.write(chunk), msg);
     broadcastCommitteeInbound(targetId, msg);
     return { via: 'attached' };
   }
-  const kind = await resolveKind(targetId);
   if (kind === 'local') {
     throw new Error('a local workspace can only be prompted while its terminal is open in the app');
   }
@@ -575,7 +577,7 @@ export async function hostExecScript(
 
 /** Start a fresh headless `claude <args>` session in a container workspace. */
 export async function hostSpawnFresh(workspaceId: string, sessionId: string, args: string[]): Promise<void> {
-  const kind = await resolveKind(workspaceId);
+  const kind = await resolveAutomationKind(workspaceId);
   if (kind === 'local') throw new Error('fresh sessions need a container workspace (use mode: live for local workspaces)');
   // Pin the claude UUID up front (as tab CREATE does, #195) and record the
   // broker→claude mapping, so the Sessions list can tell this transcript came
@@ -607,7 +609,7 @@ export async function hostCloseFresh(workspaceId: string, sessionId: string): Pr
 
 /** Start/unpause a workspace and wait until its broker answers. */
 export async function hostEnsureRunning(targetId: string): Promise<void> {
-  const kind = await resolveKind(targetId);
+  const kind = await resolveAutomationKind(targetId);
   await backendForKind(kind).startWorkspace(targetId);
   invalidateWorkspaceList();
   if (!MOCK_MODE && kind === 'container') await realDocker.waitForBrokerReady(targetId);
@@ -1945,6 +1947,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   });
   registerIdentityIpc(ipcMain, identity);
   remoteToken = () => identity.bearerToken();
+  remoteLogin = () => identity.currentLogin();
   registerRemoteIpc(ipcMain, {
     backend: remoteBackend,
     accountStatus: () => identity.status(),
@@ -2011,6 +2014,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         (w) => w.containerId === containerId || w.id === containerId
       );
       if (owner) handleWorkspaceId.set(ptyHandleId, owner.id);
+      const signalOwner = owner && hostRunsSignals(owner.kind) ? owner : null;
       handleBrokerSessionId.set(ptyHandleId, brokerSessionId);
       // No-op unless CLAUDE_FLEET_CAPTURE_PTY is set (ptyCapture.ts, #268).
       const capture = createPtyCapture({
@@ -2075,9 +2079,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         // Capture exactly what the renderer got, not what we think we sent.
         ptyCaptures.get(ptyHandleId)?.data(chunk);
         recordPtyChunk(owner?.id ?? handleWorkspaceId.get(ptyHandleId) ?? null, brokerSessionId, chunk.length);
-        if (owner && detector.push(chunk.toString('utf8'))) {
-          committeeBusy.set(owner.id, { busy: detector.isBusy, since: Date.now() });
-          if (!detector.isBusy) emitFleetEvent({ on: 'session.idle', workspaceId: owner.id });
+        if (signalOwner && detector.push(chunk.toString('utf8'))) {
+          committeeBusy.set(signalOwner.id, { busy: detector.isBusy, since: Date.now() });
+          if (!detector.isBusy) emitFleetEvent({ on: 'session.idle', workspaceId: signalOwner.id });
         }
       });
       handle.stream.on('end', () => {

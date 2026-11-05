@@ -3,6 +3,21 @@
 
 export class RemoteUrlError extends Error {}
 
+/** Controls plus Unicode format characters (bidi overrides, zero-widths). */
+export const CONTROL_RE = /[\x00-\x1f\x7f\p{Cf}]+/gu;
+/** A GitHub user login, or a machine's `<app>[bot]`. */
+const LOGIN_RE = /^[A-Za-z0-9-]{1,39}(?:\[bot\])?$/;
+
+/** Untrusted host text as one short line. */
+export const oneLine = (s: string, max: number): string => s.replace(CONTROL_RE, ' ').trim().slice(0, max);
+
+/** A login that is safe to show and store, or null. */
+export function safeLogin(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const s = oneLine(raw, 64);
+  return LOGIN_RE.test(s) ? s : null;
+}
+
 /** Errors never echo the input: it may hold a credential. */
 export function normalizeHostUrl(input: string): string {
   const raw = input.trim();

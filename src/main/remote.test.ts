@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { person, TOKEN } from '../host/testFakes.js';
 import { startTestHost, TEST_WORKSPACE_ID as ID } from '../host/testHost.js';
 import { CHECKING_STATUS, createRemoteBackend, HEALTH_POLL_MS, MANAGED_MSG, TIER_REFRESH_MS, type RemoteBackend } from './remote.js';
-import { RemoteClient } from './remoteClient.js';
+import { RemoteClient, RemoteError } from './remoteClient.js';
 import type { RemoteBookmark, WorkspaceSpec } from './workspaces.js';
 
 const realWhoami = RemoteClient.prototype.whoami;
@@ -28,6 +28,7 @@ async function rig(tier: 'read' | 'session', o: { cached?: RemoteBookmark['tier'
   const deleted: string[] = [];
   let t = 1_000_000;
   let whoamiCalls = 0;
+  let login: string | null = 'alice';
   const timers: Array<{ fn: () => void; ms: number; cancelled: boolean }> = [];
   const backend = createRemoteBackend({
     schedule: (fn, ms) => {
@@ -36,6 +37,7 @@ async function rig(tier: 'read' | 'session', o: { cached?: RemoteBookmark['tier'
       return () => void (e.cancelled = true);
     },
     token: async () => TOKEN,
+    login: async () => login,
     listManifests: async () => manifests,
     writeManifest: async (s) => void (manifests = manifests.map((m) => (m.id === s.id ? s : m))),
     deleteState: async (id) => void deleted.push(id),
@@ -54,6 +56,7 @@ async function rig(tier: 'read' | 'session', o: { cached?: RemoteBookmark['tier'
     setManifests: (m: WorkspaceSpec[]) => void (manifests = m),
     deleted,
     advance: (ms: number) => void (t += ms),
+    setLogin: (l: string | null) => void (login = l),
     whoamiCalls: () => whoamiCalls
   };
 }
@@ -103,6 +106,38 @@ describe('remote backend', () => {
     r.advance(TIER_REFRESH_MS);
     await r.backend.refresh();
     expect(r.whoamiCalls()).toBe(2);
+  });
+
+  it('a sign-in change re-asks /whoami inside the minute', async () => {
+    const r = await rig('read');
+    await r.backend.refresh(ID);
+    r.setLogin(null);
+    await r.backend.refresh(ID);
+    expect(r.whoamiCalls()).toBe(2);
+    r.setLogin('alice');
+    await r.backend.refresh(ID);
+    expect(r.whoamiCalls()).toBe(3);
+    await r.backend.refresh(ID);
+    expect(r.whoamiCalls()).toBe(3);
+  });
+
+  it.each([
+    [60_000, 60_000],
+    [1_000, HEALTH_POLL_MS]
+  ])('the health poll waits max(HEALTH_POLL_MS, Retry-After %i)', async (retryAfterMs, wait) => {
+    const r = await rig('read');
+    vi.spyOn(RemoteClient.prototype, 'healthz').mockRejectedValue(new RemoteError('unreachable', 'busy', 429, retryAfterMs));
+    await r.backend.refresh(ID);
+    expect(r.timers.filter((t) => !t.cancelled).map((t) => t.ms)).toContain(wait);
+    expect(r.timers.filter((t) => !t.cancelled).every((t) => t.ms >= HEALTH_POLL_MS)).toBe(true);
+  });
+
+  it('a throttled /whoami also stretches the health poll', async () => {
+    const r = await rig('read');
+    vi.spyOn(RemoteClient.prototype, 'whoami').mockRejectedValue(new RemoteError('unreachable', 'busy', 429, 90_000));
+    await r.backend.refresh(ID);
+    expect((await r.backend.listLiveWorkspaces())[0].state).toBe('running');
+    expect(r.timers.filter((t) => !t.cancelled).map((t) => t.ms)).toContain(90_000);
   });
 
   it('listing never waits on the network: a hanging /healthz still lists at once, as checking', async () => {

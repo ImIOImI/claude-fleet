@@ -73,6 +73,21 @@ export function ipcErrorText(err: unknown): string {
   return String((err as Error | undefined)?.message ?? err).replace(IPC_PREFIX, '');
 }
 
+export function ipcFailure(err: unknown): RemoteProbeErr {
+  return { ok: false, kind: 'protocol', message: ipcErrorText(err) };
+}
+
+/** The value, or null if `p` rejects or takes longer than `ms`. */
+export function raceTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(null), ms);
+    p.then(
+      (v) => (clearTimeout(t), resolve(v)),
+      () => (clearTimeout(t), resolve(null))
+    );
+  });
+}
+
 /** Row `status` of a bookmark main hasn't probed yet (remote.ts). */
 export const CHECKING_STATUS = 'checking host';
 

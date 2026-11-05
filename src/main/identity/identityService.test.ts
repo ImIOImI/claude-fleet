@@ -257,6 +257,15 @@ describe('IdentityService refresh, sign-out and the packages token', () => {
     await s.svc.signOut();
     expect(await s.svc.bearerToken()).toBeNull();
   });
+
+  it('reports the signed-in login, and null once signed out', async () => {
+    const s = setup({ polls: [{ status: 'done', token: TOKEN, scopes: ['read:org'] }], probe: { ...PROBE, scopes: ['read:org'] } });
+    expect(await s.svc.currentLogin()).toBeNull();
+    await signIn(s);
+    expect(await s.svc.currentLogin()).toBe(PROBE.identity.login);
+    await s.svc.signOut();
+    expect(await s.svc.currentLogin()).toBeNull();
+  });
 });
 
 describe('toAccountSso', () => {

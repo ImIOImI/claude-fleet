@@ -384,6 +384,11 @@ export class IdentityService {
     return (await this.settled())?.token ?? null;
   }
 
+  /** The signed-in login; remote.ts keys its /whoami throttle by it. */
+  async currentLogin(): Promise<string | null> {
+    return (await this.settled())?.profile.identity.login ?? null;
+  }
+
   /** For loadoutSources.setGithubTokenProvider: the token, only if it can pull
    *  from GHCR. Main process only. */
   async packagesToken(): Promise<string | null> {

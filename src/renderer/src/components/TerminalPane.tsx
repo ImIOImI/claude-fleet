@@ -16,7 +16,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { RemoteLiveSession, RemoteTier } from '../../../preload';
-import { canEndSession, defaultTabOnTierChange, ipcErrorText, joinableSessions, mineIds, paneRules, tierTitle } from '../remoteView';
+import { canEndSession, defaultTabOnTierChange, ipcErrorText, joinableSessions, mineIds, paneRules, raceTimeout, tierTitle } from '../remoteView';
 import type { WorkspaceObservabilitySummary } from '../../../preload';
 import type { MirrorSetting, CleanupSetting } from '../App';
 import { TerminalSession } from './TerminalSession';
@@ -29,6 +29,9 @@ import { resolveTabBusy } from '../sessionStatusMerge';
 import { useBlinkSync } from '../blinkSync';
 import { usePortalMenu } from './portalMenu';
 import { IconAuto, IconEject, IconPencil, IconRefresh, IconTrash } from './menuIcons';
+
+/** How long a remote tab menu waits for the host's session list. */
+const TAB_MENU_WAIT_MS = 1_000;
 
 /**
  * A session tab's status dot. `live`/`ended` colors it; `busy` makes it pulse
@@ -403,11 +406,18 @@ export function TerminalPane({
     );
   }
 
-  /** The session tier's tab menu waits for `mine` so End session never pops in after it opens. */
+  const tabMenuFetching = useRef(false);
+  /** The session tier's tab menu waits (briefly) for `mine` so End session never pops in after it opens; a slow host gets the cached `mine`. */
   async function openTabMenu(trigger: HTMLElement, id: string): Promise<void> {
+    if (tabMenuFetching.current) return;
     if (rules.remote && rules.canNew && tabMenu?.id !== id) {
-      const live = await window.api.remote.liveSessions(workspaceId).catch(() => null);
-      if (live) setMine(mineIds(live));
+      tabMenuFetching.current = true;
+      try {
+        const live = await raceTimeout(window.api.remote.liveSessions(workspaceId), TAB_MENU_WAIT_MS);
+        if (live) setMine(mineIds(live));
+      } finally {
+        tabMenuFetching.current = false;
+      }
       if (!trigger.isConnected) return;
     }
     toggleTabMenu(trigger, id);
@@ -1063,6 +1073,7 @@ export function TerminalPane({
             visible={visible && s.id === activeId}
             paused={paused}
             readOnly={rules.readOnly}
+            remote={rules.remote}
             onLifecycleChange={handleLifecycle}
             onActivityChange={handleActivity}
             reloadToken={reloadTargets[s.id] ?? null}

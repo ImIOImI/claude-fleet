@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { WebSocketServer } from 'ws';
 import { person, TOKEN } from '../host/testFakes.js';
 import { startTestHost, TEST_WORKSPACE_ID } from '../host/testHost.js';
-import { reconnectDelay, RemoteClient, RemoteError, type RemoteDisconnect, type RemoteEvent } from './remoteClient.js';
+import { MAX_RPC_BODY, MAX_SMALL_BODY, oneLine, reconnectDelay, RemoteClient, RemoteError, type RemoteDisconnect, type RemoteEvent } from './remoteClient.js';
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
@@ -125,6 +125,18 @@ describe('RemoteClient', () => {
     expect((await whoamiServing(WHO({}, { avatarUrl: 'javascript:alert(1)' }))).user.avatarUrl).toBeNull();
   });
 
+  it.each([' alice ', 'a-b', 'renovate[bot]', 'A'.repeat(39)])('accepts the GitHub login %j', async (login) => {
+    expect((await whoamiServing(WHO({}, { login }))).user.login).toBe(login.trim());
+  });
+
+  it.each(['', 'al ice', 'al\u202eice', 'a/b', '<b>', 'a'.repeat(40), 'x[bot][bot]', 'a\u0007b'])('refuses the /whoami login %j', async (login) => {
+    await expect(whoamiServing(WHO({}, { login }))).rejects.toMatchObject({ kind: 'protocol' });
+  });
+
+  it('oneLine strips bidi and other format characters', () => {
+    expect(oneLine('ev\u202eil\u200b\u2066x\u00ad\ufeff', 64)).toBe('ev il x');
+  });
+
   it('redacts a token that straddles the 200-character cut', async () => {
     const { url } = await rawServer((req, res) => {
       const t = String(req.headers.authorization).slice('Bearer '.length);
@@ -154,6 +166,68 @@ describe('RemoteClient', () => {
     const c = new RemoteClient({ url, token: async () => TOKEN });
     await expect(c.whoami()).rejects.toMatchObject({ kind: 'unreachable', status: 429, retryAfterMs: 7000 });
     await expect(c.rpc('sessions:live', [])).rejects.toMatchObject({ status: 503, retryAfterMs: 2000 });
+  });
+
+  /** Streams 64 KB chunks until the client goes away; resolves `aborted` when it does. */
+  async function endless(status: number, headers: Record<string, string> = {}) {
+    let aborted!: () => void;
+    const gone = new Promise<void>((ok) => (aborted = ok));
+    const chunk = Buffer.alloc(64 * 1024, 0x20);
+    const { url } = await rawServer((_req, res) => {
+      res.writeHead(status, { 'Content-Type': 'application/json', ...headers });
+      res.write('{"error":"');
+      const pump = (): void => {
+        while (!res.destroyed && res.write(chunk));
+        if (!res.destroyed) res.once('drain', pump);
+      };
+      res.on('close', aborted);
+      pump();
+    });
+    return { client: new RemoteClient({ url, token: async () => TOKEN }), gone };
+  }
+
+  it.each([
+    ['healthz', (c: RemoteClient) => c.healthz()],
+    ['whoami', (c: RemoteClient) => c.whoami()],
+    ['rpc', (c: RemoteClient) => c.rpc('sessions:live', [])]
+  ] as const)('%s aborts a reply that never ends', async (_name, call) => {
+    const { client, gone } = await endless(200);
+    await expect(call(client)).rejects.toMatchObject({ kind: 'protocol', message: expect.stringMatching(/too large/) });
+    await gone;
+  });
+
+  it('aborts an error body that never ends and still classifies the status', async () => {
+    const { client, gone } = await endless(503, { 'Retry-After': '3' });
+    await expect(client.whoami()).rejects.toMatchObject({ kind: 'unreachable', status: 503, retryAfterMs: 3000 });
+    await gone;
+  });
+
+  it('refuses a declared content-length over the cap without reading it', async () => {
+    let wrote = 0;
+    const { url } = await rawServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(MAX_SMALL_BODY + 1) });
+      res.write('{');
+      wrote++;
+    });
+    await expect(new RemoteClient({ url, token: async () => TOKEN }).healthz()).rejects.toMatchObject({ message: expect.stringMatching(/too large/) });
+    expect(wrote).toBe(1);
+  });
+
+  it('caps healthz at 64 KB and rpc at 2 MB', async () => {
+    const pad = (n: number) => JSON.stringify({ status: 'ok', lease: 'holder', ok: true, result: [], pad: 'p'.repeat(n) });
+    let size = 0;
+    const { url } = await rawServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(pad(size));
+    });
+    const c = new RemoteClient({ url, token: async () => TOKEN });
+    size = MAX_SMALL_BODY - 200;
+    await expect(c.healthz()).resolves.toMatchObject({ status: 'ok' });
+    size = MAX_SMALL_BODY + 1;
+    await expect(c.healthz()).rejects.toMatchObject({ message: expect.stringMatching(/too large/) });
+    await expect(c.rpc('x', [])).resolves.toEqual([]);
+    size = MAX_RPC_BODY + 1;
+    await expect(c.rpc('x', [])).rejects.toMatchObject({ message: expect.stringMatching(/too large/) });
   });
 
   it('never follows a redirect with the token', async () => {

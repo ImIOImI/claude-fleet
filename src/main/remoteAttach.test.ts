@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { encodeJSONFrame, FrameType } from './broker.js';
+import { encodeFrame, encodeJSONFrame, FrameType } from './broker.js';
 import { person, TOKEN } from '../host/testFakes.js';
 import { startTestHost } from '../host/testHost.js';
 import { attachRemotePty } from './remoteAttach.js';
@@ -130,6 +130,28 @@ describe('attachRemotePty', () => {
       const err = (await attachRemotePty({ client: c, sessionId: 's', cols: 80, rows: 24, canCreate: true }).catch((e: unknown) => e)) as Error;
       expect(err.message).toMatch(/host refused to attach/);
       expect(err.message).not.toContain(OWNER);
+    });
+
+    it('redacts host text inside a malformed attach reply', async () => {
+      const c = await wsHost((ws, token) => ws.send(encodeFrame(FrameType.ATTACHED, Buffer.from(`[\x1b[31m${token}`))));
+      const err = (await attachRemotePty({ client: c, sessionId: 's', cols: 80, rows: 24, canCreate: true }).catch((e: unknown) => e)) as Error;
+      expect(err.message).toBe('host attach failed: malformed host reply');
+      expect(err.message).not.toContain(OWNER.slice(0, 6));
+      expect(err.message).not.toMatch(/[\x00-\x1f]/);
+    });
+
+    it('End session gives up waiting for CLOSED and drops the socket', async () => {
+      let n = 0;
+      let dropped = false;
+      const c = await wsHost((ws) => {
+        ws.once('close', () => (dropped = true));
+        if (n++ === 0) ws.send(encodeJSONFrame(FrameType.ATTACHED, { channel: 1, ok: true }));
+      });
+      const h = await attachRemotePty({ client: c, sessionId: 's', cols: 80, rows: 24, canCreate: true, closeWaitMs: 100 });
+      const started = Date.now();
+      await h.close();
+      expect(Date.now() - started).toBeLessThan(1000);
+      await expect.poll(() => dropped).toBe(true);
     });
 
     it('a close during attach fails at once with the close-code reason', async () => {

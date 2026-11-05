@@ -17,6 +17,8 @@ type RemoteSpec = WorkspaceSpec & { kind: 'remote'; remote: NonNullable<Workspac
 
 export interface RemoteBackendDeps {
   token(): Promise<string | null>;
+  /** The signed-in login; a change voids the /whoami throttle. */
+  login?: () => Promise<string | null>;
   listManifests(): Promise<WorkspaceSpec[]>;
   writeManifest(spec: WorkspaceSpec): Promise<void>;
   /** Delete the bookmark's local state dir (manifest + local tab list). */
@@ -61,7 +63,8 @@ const isRemote = (s: WorkspaceSpec | undefined): s is RemoteSpec => s?.kind === 
 export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
   const now = deps.now ?? Date.now;
   const clients = new Map<string, RemoteClient>();
-  const lastWhoami = new Map<string, number>();
+  const login = deps.login ?? (async () => null);
+  const lastWhoami = new Map<string, { at: number; login: string | null }>();
   const watches = new Map<string, Watch>();
   let stopped = false;
   const schedule =
@@ -90,7 +93,7 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
   async function refreshTier(spec: WorkspaceSpec): Promise<WhoAmI> {
     if (!isRemote(spec)) throw new Error(`no remote workspace ${spec.id}`);
     const url = spec.remote.url;
-    lastWhoami.set(spec.id, now());
+    lastWhoami.set(spec.id, { at: now(), login: await login().catch(() => null) });
     const who = await clientFor(url).whoami();
     if (who.workspace.id !== spec.id) {
       throw new WrongWorkspaceError(`${url} now serves a different workspace; forget this one and add it again`);
@@ -103,18 +106,25 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
     return who;
   }
 
-  async function probeState(spec: RemoteSpec): Promise<'running' | 'unreachable'> {
+  async function whoamiFresh(id: string): Promise<boolean> {
+    const last = lastWhoami.get(id);
+    return !!last && now() - last.at < TIER_REFRESH_MS && last.login === (await login().catch(() => null));
+  }
+
+  const retryAfter = (err: unknown): number => (err instanceof RemoteError ? (err.retryAfterMs ?? 0) : 0);
+
+  async function probeState(spec: RemoteSpec): Promise<{ state: 'running' | 'unreachable'; retryAfterMs: number }> {
     try {
-      if ((await clientFor(spec.remote.url).healthz()).lease !== 'holder') return 'unreachable';
-    } catch {
-      return 'unreachable';
+      if ((await clientFor(spec.remote.url).healthz()).lease !== 'holder') return { state: 'unreachable', retryAfterMs: 0 };
+    } catch (err) {
+      return { state: 'unreachable', retryAfterMs: retryAfter(err) };
     }
-    if (now() - (lastWhoami.get(spec.id) ?? -Infinity) < TIER_REFRESH_MS) return 'running';
+    if (await whoamiFresh(spec.id)) return { state: 'running', retryAfterMs: 0 };
     try {
       await refreshTier(spec);
-      return 'running';
+      return { state: 'running', retryAfterMs: 0 };
     } catch (err) {
-      return err instanceof WrongWorkspaceError ? 'unreachable' : 'running';
+      return { state: err instanceof WrongWorkspaceError ? 'unreachable' : 'running', retryAfterMs: retryAfter(err) };
     }
   }
 
@@ -127,11 +137,11 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
     if (w.inflight) return w.inflight;
     w.cancel?.();
     w.cancel = null;
-    w.inflight = probeState(w.spec).then((state) => {
+    w.inflight = probeState(w.spec).then(({ state, retryAfterMs }) => {
       w.inflight = null;
       if (watches.get(w.spec.id) !== w || stopped) return;
       w.state = state;
-      w.cancel = schedule(() => void probe(w), HEALTH_POLL_MS);
+      w.cancel = schedule(() => void probe(w), Math.max(HEALTH_POLL_MS, retryAfterMs));
     });
     return w.inflight;
   }

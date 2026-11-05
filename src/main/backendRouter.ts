@@ -27,3 +27,15 @@ export async function resolveRemoveKind(containerId: string, optsId?: string): P
   }
   return kind;
 }
+
+export const REMOTE_AUTOMATION_MSG = 'remote automations run on their host';
+
+/** resolveKind for a desktop automation's target; a remote workspace's automations belong to its host. */
+export async function resolveAutomationKind(id: string): Promise<WorkspaceKind> {
+  const kind = await resolveKind(id);
+  if (kind === 'remote') throw new Error(REMOTE_AUTOMATION_MSG);
+  return kind;
+}
+
+/** A remote session's busy/idle belongs to its host, so it feeds neither desktop automations nor committee status. */
+export const hostRunsSignals = (kind: WorkspaceKind): boolean => kind !== 'remote';

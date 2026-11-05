@@ -22,6 +22,11 @@ describe('sanitizeRemote', () => {
     expect(sanitizeRemote({ url: 'http://h:8080', tier: 'admin' })).toEqual({ url: 'http://h:8080', tier: null, login: null, checkedAt: 0 });
   });
 
+  it.each(['a b', 'x\u202ey', '<img>', 'a'.repeat(40), 7])('drops a stored login that is not a GitHub login: %j', (login) => {
+    expect(sanitizeRemote({ url: 'https://h', tier: 'read', login })?.login).toBeNull();
+    expect(sanitizeRemote({ url: 'https://h', tier: 'read', login: 'ci[bot]' })?.login).toBe('ci[bot]');
+  });
+
   it('rejects a bookmark without an http(s) URL', () => {
     expect(sanitizeRemote(undefined)).toBeUndefined();
     expect(sanitizeRemote({ url: 'file:///etc/passwd' })).toBeUndefined();

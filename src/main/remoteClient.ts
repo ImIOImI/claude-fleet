@@ -6,7 +6,9 @@ import WebSocket from 'ws';
 import { MAX_FRAME_PAYLOAD } from './broker.js';
 import type { Tier } from './identity/grants.js';
 import { redactSecrets } from './identity/redact.js';
-import { normalizeHostUrl, wsUrl } from './remoteUrl.js';
+import { normalizeHostUrl, oneLine, safeLogin, wsUrl } from './remoteUrl.js';
+
+export { CONTROL_RE, oneLine, safeLogin } from './remoteUrl.js';
 
 export type RemoteErrorKind = 'not-signed-in' | 'unreachable' | 'unauthorized' | 'forbidden' | 'standby' | 'protocol';
 
@@ -65,7 +67,9 @@ const TIERS: readonly string[] = ['read', 'steer', 'session'];
 const TOKEN_RE = /^[A-Za-z0-9_.~+/=-]{1,4096}$/;
 /** The host's id is always a ULID; it becomes a directory name under <userData>/state. */
 const WORKSPACE_ID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
-export const CONTROL_RE = /[\x00-\x1f\x7f]+/g;
+/** Reply caps: a hostile host could otherwise stream until main runs out of memory. */
+export const MAX_SMALL_BODY = 64 * 1024;
+export const MAX_RPC_BODY = 2 * 1024 * 1024;
 
 function isWhoAmI(v: unknown): v is WhoAmI {
   const o = v as WhoAmI | null;
@@ -79,8 +83,6 @@ function isWhoAmI(v: unknown): v is WhoAmI {
   );
 }
 
-export const oneLine = (s: string, max: number): string => s.replace(CONTROL_RE, ' ').trim().slice(0, max);
-
 function httpsOrNull(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;
   try {
@@ -91,7 +93,9 @@ function httpsOrNull(raw: unknown): string | null {
 }
 
 /** Display fields are untrusted host text. */
-function sanitizeWhoAmI(w: WhoAmI): WhoAmI {
+function sanitizeWhoAmI(url: string, w: WhoAmI): WhoAmI {
+  const login = safeLogin(w.user.login);
+  if (!login) throw new RemoteError('protocol', `${url} is not a fleet-host (unexpected /whoami login)`);
   return {
     ...w,
     workspace: {
@@ -99,7 +103,7 @@ function sanitizeWhoAmI(w: WhoAmI): WhoAmI {
       name: oneLine(w.workspace.name, 64),
       description: typeof w.workspace.description === 'string' ? oneLine(w.workspace.description, 500) : null
     },
-    user: { ...w.user, avatarUrl: httpsOrNull(w.user.avatarUrl) }
+    user: { ...w.user, login, avatarUrl: httpsOrNull(w.user.avatarUrl) }
   };
 }
 
@@ -115,6 +119,31 @@ export function parseRetryAfter(v: string | string[] | null | undefined, now = D
   if (!s) return undefined;
   const ms = /^\d+$/.test(s.trim()) ? Number(s.trim()) * 1000 : Date.parse(s) - now;
   return Number.isFinite(ms) ? Math.min(Math.max(ms, 0), MAX_RETRY_AFTER_MS) : undefined;
+}
+
+/** The body as text, or null once it exceeds `cap` (the request is then aborted). */
+async function readCapped(res: Response, cap: number, abort: () => void): Promise<string | null> {
+  const declared = Number(res.headers.get('content-length'));
+  if (declared > cap) {
+    abort();
+    return null;
+  }
+  if (!res.body) return '';
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value.byteLength;
+    if (n > cap) {
+      abort();
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 function statusError(url: string, status: number, text: string, retryAfterMs?: number): RemoteError {
@@ -177,11 +206,13 @@ export class RemoteClient {
     return scrub(text, await this.token().catch(() => null));
   }
 
-  private async request(path: string, init: { method: string; body?: string; auth: boolean; timeoutMs?: number }): Promise<Response> {
+  private async request(path: string, init: { method: string; body?: string; auth: boolean; timeoutMs?: number; maxBody: number }): Promise<unknown> {
     const headers: Record<string, string> = { Accept: 'application/json' };
     const token = init.auth ? await this.bearer() : null;
     if (token) headers.Authorization = `Bearer ${token}`;
     if (init.body !== undefined) headers['Content-Type'] = 'application/json';
+    const ctrl = new AbortController();
+    const abort = (): void => ctrl.abort();
     let res: Response;
     try {
       // A redirect would replay the bearer token to a URL the user never added.
@@ -190,34 +221,41 @@ export class RemoteClient {
         headers,
         body: init.body,
         redirect: 'error',
-        signal: AbortSignal.timeout(init.timeoutMs ?? this.timeoutMs)
+        signal: AbortSignal.any([ctrl.signal, AbortSignal.timeout(init.timeoutMs ?? this.timeoutMs)])
       });
     } catch (err) {
       const e = err as Error & { cause?: { code?: unknown } };
       const why = e.name === 'TimeoutError' ? 'timed out' : typeof e.cause?.code === 'string' ? e.cause.code : e.name;
       throw new RemoteError('unreachable', `${this.url} is not reachable (${scrub(why, token)}); check your network or VPN`);
     }
-    if (res.ok) return res;
-    let text = '';
-    try {
-      const b = (await res.json()) as { error?: unknown };
-      if (typeof b.error === 'string') text = scrub(b.error, token);
-    } catch {
-      /* non-JSON error body */
+    if (!res.ok) {
+      let text = '';
+      try {
+        const raw = await readCapped(res, MAX_SMALL_BODY, abort);
+        const b = raw === null ? null : (JSON.parse(raw) as { error?: unknown } | null);
+        if (typeof b?.error === 'string') text = scrub(b.error, token);
+      } catch {
+        /* non-JSON or interrupted error body */
+      }
+      throw statusError(this.url, res.status, text, parseRetryAfter(res.headers.get('retry-after')));
     }
-    throw statusError(this.url, res.status, text, parseRetryAfter(res.headers.get('retry-after')));
-  }
-
-  private async json(res: Response): Promise<unknown> {
+    let raw: string | null;
     try {
-      return await res.json();
+      raw = await readCapped(res, init.maxBody, abort);
+    } catch (err) {
+      const why = (err as Error).name === 'TimeoutError' ? 'timed out' : 'interrupted';
+      throw new RemoteError('unreachable', `${this.url} reply ${why}; check your network or VPN`);
+    }
+    if (raw === null) throw new RemoteError('protocol', `${this.url} reply is too large`);
+    try {
+      return JSON.parse(raw);
     } catch {
       throw new RemoteError('protocol', `${this.url} is not a fleet-host (reply is not JSON)`);
     }
   }
 
   async healthz(timeoutMs = 3_000): Promise<{ status: string; lease: string }> {
-    const body = (await this.json(await this.request('/healthz', { method: 'GET', auth: false, timeoutMs }))) as { status?: unknown; lease?: unknown } | null;
+    const body = (await this.request('/healthz', { method: 'GET', auth: false, timeoutMs, maxBody: MAX_SMALL_BODY })) as { status?: unknown; lease?: unknown } | null;
     if (typeof body?.status !== 'string' || typeof body.lease !== 'string') {
       throw new RemoteError('protocol', `${this.url} is not a fleet-host (unexpected /healthz reply)`);
     }
@@ -225,14 +263,18 @@ export class RemoteClient {
   }
 
   async whoami(): Promise<WhoAmI> {
-    const body = await this.json(await this.request('/whoami', { method: 'GET', auth: true }));
+    const body = await this.request('/whoami', { method: 'GET', auth: true, maxBody: MAX_SMALL_BODY });
     if (!isWhoAmI(body)) throw new RemoteError('protocol', `${this.url} is not a fleet-host (unexpected /whoami reply)`);
-    return sanitizeWhoAmI(body);
+    return sanitizeWhoAmI(this.url, body);
   }
 
   async rpc<T>(channel: string, args: unknown[]): Promise<T> {
-    const res = await this.request(`/rpc/${encodeURIComponent(channel)}`, { method: 'POST', auth: true, body: JSON.stringify({ args }) });
-    const body = (await this.json(res)) as { ok?: unknown; result?: T } | null;
+    const body = (await this.request(`/rpc/${encodeURIComponent(channel)}`, {
+      method: 'POST',
+      auth: true,
+      body: JSON.stringify({ args }),
+      maxBody: MAX_RPC_BODY
+    })) as { ok?: unknown; result?: T } | null;
     if (body?.ok !== true) throw new RemoteError('protocol', `${this.url} rpc ${channel} failed`);
     return body.result as T;
   }
