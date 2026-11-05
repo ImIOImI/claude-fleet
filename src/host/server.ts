@@ -228,7 +228,7 @@ export function createHostServer(deps: HostServerDeps): HostServer {
     }
     if (r.ok) rememberGood(key);
     else if (r.status !== 503) {
-      knownGood.delete(key);
+      if (r.status === 401 || r.status === 403) knownGood.delete(key);
       budget.spend();
       if (ip) perAddress.record(ip);
     }
@@ -257,6 +257,7 @@ export function createHostServer(deps: HostServerDeps): HostServer {
       }
       return s.revoke(4401, 'identity unverifiable');
     }
+    knownGood.delete(tokenKey(s.token));
     s.revoke(r.status === 401 ? 4401 : 4403, r.error);
   }
 

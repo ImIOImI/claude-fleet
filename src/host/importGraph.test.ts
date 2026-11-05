@@ -84,12 +84,15 @@ describe('fleet-host build inputs', () => {
     expect(dockerIncluded(rules, 'src/host/server.test.ts')).toBe(false);
   });
 
-  it('every import-graph file triggers publish-runner and build-app', () => {
+  it('every import-graph file triggers publish-runner, build-app and test-runner-images', () => {
     const paths = (parse(read('.github/workflows/publish-runner.yml')) as { on: { push: { paths: string[] } } }).on.push.paths;
     const globs = paths.map((g) => new RegExp('^' + g.replace(/\./g, '\\.').replace(/\*\*/g, '.*').replace(/(?<!\.)\*/g, '[^/]*') + '$'));
     expect(graph.filter((f) => !globs.some((re) => re.test(f)))).toEqual([]);
     const filter = /grep -qE '([^']+)'/.exec(read('.github/workflows/build-app.yml'))?.[1];
     expect(filter).toBeDefined();
     expect(graph.filter((f) => !new RegExp(filter!).test(f))).toEqual([]);
+    const prPaths = (parse(read('.github/workflows/test-runner-images.yml')) as { on: { pull_request: { paths: string[] } } }).on.pull_request.paths;
+    const prGlobs = prPaths.map((g) => new RegExp('^' + g.replace(/\./g, '\\.').replace(/\*\*/g, '.*').replace(/(?<!\.)\*/g, '[^/]*') + '$'));
+    expect(graph.filter((f) => !prGlobs.some((re) => re.test(f)))).toEqual([]);
   });
 });
