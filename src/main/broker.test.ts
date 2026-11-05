@@ -104,3 +104,63 @@ describe('BrokerClient port-forward RPCs', () => {
     client.close();
   });
 });
+
+describe('BrokerClient over an already-open Duplex', () => {
+  async function pipe(reply?: (frame: Buffer, peer: import('node:stream').Duplex) => void) {
+    const { Duplex } = await import('node:stream');
+    const written: Buffer[] = [];
+    const stream: import('node:stream').Duplex = new Duplex({
+      read() {},
+      write(chunk: Buffer, _enc, cb) {
+        written.push(chunk);
+        reply?.(chunk, stream);
+        cb();
+      }
+    });
+    return { stream, written };
+  }
+
+  it('speaks the frame protocol on the given stream without connecting', async () => {
+    const { encodeJSONFrame } = await import('./broker.js');
+    const { stream, written } = await pipe((_f, peer) => peer.push(encodeJSONFrame(FrameType.SESSIONS, { sessions: [{ id: 's1', alive: true }] })));
+    const c = new BrokerClient(stream);
+    await c.ready();
+    expect(await c.listSessions()).toEqual([{ id: 's1', alive: true }]);
+    expect(written[0][4]).toBe(FrameType.LIST);
+    c.close();
+  });
+
+  it('writes exactly one whole frame per write, splitting oversized input', async () => {
+    const { FrameReader, MAX_FRAME_PAYLOAD, decodeChannelData } = await import('./broker.js');
+    const { stream, written } = await pipe();
+    const c = new BrokerClient(stream);
+    const big = Buffer.alloc(MAX_FRAME_PAYLOAD * 2 + 10, 0x61);
+    c.sendInput(1, big);
+    c.sendResize(1, 80, 24);
+    let total = 0;
+    for (const w of written) {
+      const r = new FrameReader();
+      r.push(w);
+      const frames = [...r.consume()];
+      expect(frames).toHaveLength(1);
+      expect(w.length).toBe(4 + w.readUInt32BE(0));
+      expect(w.length).toBeLessThanOrEqual(MAX_FRAME_PAYLOAD + 5);
+      if (frames[0].type === FrameType.INPUT) total += decodeChannelData(frames[0].payload).body.length;
+    }
+    expect(total).toBe(big.length);
+    expect(written.length).toBe(4);
+    c.close();
+  });
+
+  it('treats the peer ending the stream as close and fails a pending request at once', async () => {
+    const { stream } = await pipe();
+    const c = new BrokerClient(stream);
+    const closed = new Promise<void>((r) => c.once('close', () => r()));
+    const pending = c.listSessions();
+    stream.push(null);
+    await closed;
+    const started = Date.now();
+    await expect(pending).rejects.toThrow(/closed/);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+});
