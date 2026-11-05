@@ -11,7 +11,8 @@ type Last = { started_at: number; user_turns: number | null } | null;
 
 function setup(o: {
   settingsBy?: Record<string, Partial<CaptureSettings>>; exec?: SchedulerDeps['exec']; last?: (id: string) => Last;
-  today?: number; cap?: number; isAutomation?: (id: string) => boolean; globalEnabled?: boolean
+  today?: number; cap?: number; isAutomation?: (id: string) => boolean; globalEnabled?: boolean;
+  topTopics?: SchedulerDeps['topTopics']
 } = {}) {
   let n = 0;
   const runs = {
@@ -29,7 +30,7 @@ function setup(o: {
     settings: async (ws: string) => (ws === 'gone' ? null : { ...defaultCaptureSettings(), ...(o.settingsBy?.[ws] ?? {}) }),
     dailyCap: async () => o.cap ?? 40,
     target: async (ws: string) => ({ kind: 'container' as const, workspaceId: ws, cwd: '/workspace' }),
-    topTopics: async () => [],
+    topTopics: o.topTopics ?? (async () => []),
     exec,
     newUuid: (() => { let i = 0; return () => `fork-${++i}`; })(),
     now: () => NOW,
@@ -96,6 +97,13 @@ describe('CaptureScheduler — ingest triggers', () => {
     await s.drain();
     expect(runs.finish).toHaveBeenCalledWith('run1', expect.objectContaining({ status: 'timed-out' }));
   });
+  it('proceeds with no topics, instead of failing the run, when the topTopics dep throws', async () => {
+    const { s, runs, exec } = setup({ topTopics: async () => { throw new Error('embedder unavailable'); } });
+    s.onIngest({ workspaceId: 'w', sessionId: 's1' });
+    await s.drain();
+    expect(promptOf(exec)).not.toMatch(/Prefer existing topic slugs/);
+    expect(runs.finish).toHaveBeenCalledWith('run1', expect.objectContaining({ status: 'done' }));
+  });
 });
 
 describe('CaptureScheduler — search hits', () => {
@@ -127,6 +135,23 @@ describe('CaptureScheduler — search hits', () => {
     s.onSearchHit(hit());
     await s.drain();
     expect(runs.start).not.toHaveBeenCalled();
+  });
+  it("ignores a hit from a workspace with a running capture (a fork's own search_claims can't cascade), then queues normally once it finishes", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const { s, runs, exec } = setup({ exec: async () => { await gate; return OK; } });
+    s.onIngest({ workspaceId: 'w', sessionId: 's1' }); // starts a capture for workspace 'w', held open by the gate
+    await new Promise((r) => setTimeout(r, 20));
+    expect(exec).toHaveBeenCalledTimes(1);
+    s.onSearchHit(hit({ callerWorkspaceId: 'w', sessionIds: ['s2'] })); // the fork's own search_claims call
+    await new Promise((r) => setTimeout(r, 20));
+    expect(runs.start).toHaveBeenCalledTimes(1); // nothing queued for s2
+    release();
+    await s.drain();
+    expect(runs.start).toHaveBeenCalledTimes(1);
+    s.onSearchHit(hit({ callerWorkspaceId: 'w', sessionIds: ['s2'] })); // a real hit once 'w' is idle again
+    await s.drain();
+    expect(runs.start.mock.calls.map((c) => c[0].sessionId)).toEqual(['s1', 's2']);
   });
   it('recaptures only after recaptureAfterTurns new user turns and 10 minutes', async () => {
     const recent = setup({ last: () => ({ started_at: NOW - 20 * 60_000, user_turns: 40 }) });

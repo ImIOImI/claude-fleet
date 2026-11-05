@@ -43,6 +43,12 @@ export class CaptureScheduler {
   private readonly lastStartedAt = new Map<string, number>();
   private readonly queue = new Map<string, Pending>();
   private readonly inFlight = new Set<string>();
+  // Refcounted by workspace id (a fork's own workspace can have at most
+  // MAX_CONCURRENT_CAPTURES running, but never more than one in practice today).
+  // Used to break the cascade where a capture fork's own search_claims call
+  // (the prompt tells every fork to search before recording) reports a search
+  // hit from its own workspace and would otherwise queue a second capture.
+  private readonly inFlightWorkspaces = new Map<string, number>();
   private readonly checking = new Set<string>();
   private readonly active = new Set<Promise<void>>();
   private admitting: Promise<unknown> = Promise.resolve();
@@ -101,6 +107,12 @@ export class CaptureScheduler {
   }
 
   private async considerSearch(e: SearchHitEvent): Promise<void> {
+    // A capture fork's own search_claims call (every capture prompt tells the
+    // fork to search before recording) arrives here as a search hit from its
+    // workspace, since MCP identity is per workspace: ignore it entirely while
+    // that workspace has a running capture, so it can't cascade into capturing
+    // itself again. A hit queued once that capture finishes is a normal hit.
+    if (this.inFlightWorkspaces.has(e.callerWorkspaceId)) return;
     if (!(await this.d.globalEnabled())) return;
     const caller = await this.d.settings(e.callerWorkspaceId);
     if (!caller?.enabled || !caller.onSearchHit) return;
@@ -135,9 +147,16 @@ export class CaptureScheduler {
       this.queue.delete(next.sessionId);
       if (this.d.now() - next.queuedAt > QUEUE_TTL_MS) continue;
       this.inFlight.add(next.sessionId);
+      this.inFlightWorkspaces.set(next.workspaceId, (this.inFlightWorkspaces.get(next.workspaceId) ?? 0) + 1);
       const p: Promise<void> = this.run(next)
         .catch((err) => this.d.log('capture-run-failed', { sessionId: next.sessionId, error: String(err) }))
-        .finally(() => { this.inFlight.delete(next.sessionId); this.active.delete(p); this.pump(); });
+        .finally(() => {
+          this.inFlight.delete(next.sessionId);
+          const n = (this.inFlightWorkspaces.get(next.workspaceId) ?? 1) - 1;
+          if (n <= 0) this.inFlightWorkspaces.delete(next.workspaceId); else this.inFlightWorkspaces.set(next.workspaceId, n);
+          this.active.delete(p);
+          this.pump();
+        });
       this.active.add(p);
     }
   }
@@ -171,9 +190,14 @@ export class CaptureScheduler {
     const runId = await this.admit(p, forkSessionId);
     if (!runId) return;
     try {
-      const prompt = capturePrompt({
-        runToken: runId, topTopics: await this.d.topTopics(p.workspaceId), searchQuery: p.query, visibility: settings.captureVisibility
+      // A topics lookup failure (e.g. the embedder is unavailable) shouldn't
+      // fail the whole run — the fork still records useful claims without the
+      // "prefer existing topic slugs" hint.
+      const topTopics = await this.d.topTopics(p.workspaceId).catch((err) => {
+        this.d.log('capture-top-topics-failed', { workspaceId: p.workspaceId, error: String(err) });
+        return [] as string[];
       });
+      const prompt = capturePrompt({ runToken: runId, topTopics, searchQuery: p.query, visibility: settings.captureVisibility });
       // No mcpConfigPath: runCapture appends --mcp-config for local targets itself (Task 8 fix).
       const out = await this.d.exec(target, captureArgs({ prompt, sessionId: p.sessionId, forkSessionId, model: p.model }), CAPTURE_TIMEOUT_MS);
       if (out.timedOut) {
