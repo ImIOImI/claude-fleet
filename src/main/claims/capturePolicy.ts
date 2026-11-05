@@ -26,6 +26,23 @@ export function policyFromSettings(s: CaptureSettings): CapturePolicyConfig {
   return { bands: [...s.contextBands].sort((a, b) => a - b), turnsEvery: s.turnsEvery, minIntervalMs: CAPTURE_MIN_INTERVAL_MS };
 }
 
+/** The policy state for a session first seen in this app run, rebuilt from its
+ *  last persisted capture run so an app restart doesn't re-fire a band. When
+ *  that run was a context-band capture and the session hasn't compacted since
+ *  (`capture_runs.compactions`), every band up to it counts as already fired. */
+export function seedCaptureState(
+  sig: CaptureSignals,
+  last: { trigger: string; compactions: number | null; started_at: number } | null,
+  cfg: CapturePolicyConfig
+): SessionCaptureState {
+  // A never-captured session gets its history captured once (turn counter from 0).
+  if (!last) return { fired: [], compactionsSeen: sig.compactions, turnsAtLastCapture: 0, lastCaptureAt: null };
+  const m = /^ctx-(\d+)$/.exec(last.trigger);
+  const sameEpoch = last.compactions !== null && last.compactions === sig.compactions;
+  const fired = m && sameEpoch ? cfg.bands.filter((b) => Math.round(b * 100) <= Number(m[1])) : [];
+  return { fired, compactionsSeen: sig.compactions, turnsAtLastCapture: sig.userTurns, lastCaptureAt: last.started_at };
+}
+
 export function decideCapture(
   sig: CaptureSignals, state: SessionCaptureState | undefined, hasPriorRun: boolean, cfg: CapturePolicyConfig, now: number
 ): { trigger: CaptureTrigger | null; next: SessionCaptureState } {

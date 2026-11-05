@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { defaultCaptureSettings } from '../../preload/captureSettings.js';
-import { bandTrigger, decideCapture, DEFAULT_CAPTURE_POLICY as P, policyFromSettings, type CapturePolicyConfig } from './capturePolicy.js';
+import { bandTrigger, decideCapture, DEFAULT_CAPTURE_POLICY as P, policyFromSettings, seedCaptureState, type CapturePolicyConfig } from './capturePolicy.js';
 
 const sig = (contextTokens: number, userTurns = 1, compactions = 0) =>
   ({ workspaceId: 'w', model: 'claude-sonnet-5', contextTokens, userTurns, compactions });
@@ -64,5 +64,25 @@ describe('policyFromSettings / bandTrigger', () => {
   it('names band triggers by percent', () => {
     expect(bandTrigger(0.85)).toBe('ctx-85');
     expect(bandTrigger(0.6)).toBe('ctx-60');
+  });
+});
+
+describe('seedCaptureState (restart)', () => {
+  const last = (trigger: string, compactions: number | null, user_turns = 40, started_at = 0) => ({ trigger, compactions, user_turns, started_at });
+  it("treats bands up to the last run's band as fired while the compaction count is unchanged", () => {
+    const s = seedCaptureState(sig(180_000, 50, 2), last('ctx-60', 2), TWO);
+    expect(s).toEqual({ fired: [0.6], compactionsSeen: 2, turnsAtLastCapture: 50, lastCaptureAt: 0 });
+    // After a restart 60% doesn't re-fire, but 85% (never fired) still does…
+    expect(decideCapture(sig(180_000, 50, 2), s, true, TWO, 20 * MIN).trigger).toBe('ctx-85');
+    // …and once 85% fired before the restart, nothing re-fires.
+    expect(decideCapture(sig(180_000, 50, 2), seedCaptureState(sig(180_000, 50, 2), last('ctx-85', 2), TWO), true, TWO, 20 * MIN).trigger).toBeNull();
+  });
+  it('seeds nothing fired when the session compacted since, the run was not a band, or the count is unknown', () => {
+    expect(seedCaptureState(sig(180_000, 50, 3), last('ctx-85', 2), TWO).fired).toEqual([]);
+    expect(seedCaptureState(sig(180_000, 50, 2), last('search', 2), TWO).fired).toEqual([]);
+    expect(seedCaptureState(sig(180_000, 50, 2), last('ctx-85', null), TWO).fired).toEqual([]);
+  });
+  it('a never-captured session starts from scratch (its history is captured once)', () => {
+    expect(seedCaptureState(sig(180_000, 50, 2), null, TWO)).toEqual({ fired: [], compactionsSeen: 2, turnsAtLastCapture: 0, lastCaptureAt: null });
   });
 });

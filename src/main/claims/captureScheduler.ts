@@ -8,7 +8,7 @@ import type { CaptureSignals } from '../db.js';
 import { captureArgs, capturePrompt, parseCaptureOutput } from './captureCommand.js';
 import type { CaptureTarget, ExecOutcome } from './captureExec.js';
 import { isCaptureFork, markCaptureFork } from './captureForks.js';
-import { CAPTURE_MIN_INTERVAL_MS, decideCapture, policyFromSettings, type SessionCaptureState } from './capturePolicy.js';
+import { CAPTURE_MIN_INTERVAL_MS, decideCapture, policyFromSettings, seedCaptureState, type SessionCaptureState } from './capturePolicy.js';
 import { startOfLocalDay, type CaptureRunStore, type CaptureTrigger } from './captureRunStore.js';
 import type { SearchHitEvent } from './searchHits.js';
 
@@ -42,7 +42,6 @@ interface Pending {
 
 export class CaptureScheduler {
   private readonly state = new Map<string, SessionCaptureState>();
-  private readonly priorRun = new Map<string, boolean>();
   private readonly lastStartedAt = new Map<string, number>();
   private readonly queue = new Map<string, Pending>();
   private readonly inFlight = new Set<string>();
@@ -100,14 +99,16 @@ export class CaptureScheduler {
     // A search-hit capture just ran: leave the policy state untouched so a
     // band crossed meanwhile still fires once the interval has passed.
     if (this.recentlyStarted(e.sessionId, now)) return;
-    if (!this.priorRun.has(e.sessionId)) this.priorRun.set(e.sessionId, !!(await this.d.runs.lastFor(e.sessionId)));
-    const { trigger, next } = decideCapture(sig, this.state.get(e.sessionId), this.priorRun.get(e.sessionId) ?? true,
-      policyFromSettings(settings), now);
+    const policy = policyFromSettings(settings);
+    // First sight of this session in this app run: rebuild its policy state
+    // from the last persisted run, so a restart doesn't re-fire a band that
+    // already captured (and a never-captured session captures its history once).
+    const state = this.state.get(e.sessionId) ?? seedCaptureState(sig, await this.d.runs.lastFor(e.sessionId), policy);
+    const { trigger, next } = decideCapture(sig, state, true, policy, now);
     this.state.set(e.sessionId, next);
     if (!trigger) return;
-    // priorRun (and the fork id, in run()/admit()) is marked only once the run
-    // is actually admitted — a cap-dropped or TTL-expired trigger never ran,
-    // so it must not count as this session's prior run.
+    // The fork id (in run()/admit()) is marked only once the run is actually
+    // admitted — a cap-dropped or TTL-expired trigger never ran.
     this.enqueue({ workspaceId: e.workspaceId, sessionId: e.sessionId, model: this.modelFor(settings, sig), userTurns: sig.userTurns, compactions: sig.compactions, trigger, query: null, queuedAt: now });
   }
 
@@ -176,8 +177,8 @@ export class CaptureScheduler {
    *  start time and the persisted run, so a trigger that arrives (or is
    *  merely queued) too soon after another is dropped instead of running
    *  back-to-back. Only a run that actually gets admitted here marks the
-   *  fork id and this session's priorRun — a cap- or interval-dropped
-   *  trigger never ran, so it must not count as one. */
+   *  fork id and books a run row (which later seeds the policy state) — a
+   *  cap- or interval-dropped trigger never ran, so it must not count as one. */
   private admit(p: Pending, forkSessionId: string, visibility: CaptureVisibility): Promise<string | null> {
     const next = this.admitting.then(async () => {
       const now = this.d.now();
@@ -198,7 +199,6 @@ export class CaptureScheduler {
       }
       this.lastStartedAt.set(p.sessionId, now);
       markCaptureFork(forkSessionId);
-      this.priorRun.set(p.sessionId, true);
       return this.d.runs.start({
         workspaceId: p.workspaceId, sessionId: p.sessionId, forkSessionId, trigger: p.trigger, userTurns: p.userTurns,
         visibility, compactions: p.compactions, now

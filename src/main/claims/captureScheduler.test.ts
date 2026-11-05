@@ -7,7 +7,7 @@ import type { SearchHitEvent } from './searchHits.js';
 
 const NOW = 1_000_000_000;
 const OK: ExecOutcome = { exitCode: 0, stdout: JSON.stringify({ session_id: 'x', is_error: false }), stderr: '', timedOut: false };
-type Last = { started_at: number; user_turns: number | null } | null;
+type Last = { started_at: number; user_turns: number | null; trigger?: string; compactions?: number | null } | null;
 
 function setup(o: {
   settingsBy?: Record<string, Partial<CaptureSettings>>; exec?: SchedulerDeps['exec']; last?: (id: string) => Last;
@@ -93,6 +93,19 @@ describe('CaptureScheduler — ingest triggers', () => {
     release();
     await s.drain();
     expect(exec).toHaveBeenCalledTimes(3);
+  });
+  it('does not re-fire a band after an app restart (state seeded from the last persisted run)', async () => {
+    // A fresh scheduler (= app restart) seeing a session at 87.5% whose last
+    // run was the ctx-85 capture, with no compaction since: nothing to do.
+    const same = setup({ last: () => ({ started_at: NOW - 60 * 60_000, user_turns: 50, trigger: 'ctx-85', compactions: 0 }) });
+    same.s.onIngest({ workspaceId: 'w', sessionId: 's1' });
+    await same.s.drain();
+    expect(same.runs.start).not.toHaveBeenCalled();
+    // The session compacted since that run (count 1 then, 0 now ≠): the band fires again.
+    const compacted = setup({ last: () => ({ started_at: NOW - 60 * 60_000, user_turns: 50, trigger: 'ctx-85', compactions: 1 }) });
+    compacted.s.onIngest({ workspaceId: 'w', sessionId: 's1' });
+    await compacted.s.drain();
+    expect(compacted.runs.start).toHaveBeenCalledWith(expect.objectContaining({ trigger: 'ctx-85' }));
   });
   it('marks timed-out runs', async () => {
     const { s, runs } = setup({ exec: async () => ({ exitCode: 124, stdout: '', stderr: '', timedOut: true }) });
