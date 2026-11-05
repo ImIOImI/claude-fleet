@@ -14,7 +14,7 @@ import {
   learnMapping as learnMirrorMapping
 } from './mirrorPolicy.js';
 import { openHostPath } from './openHostPath.js';
-import { captureSettingsEqual, effectiveCaptureSettings } from '../preload/captureSettings.js';
+import { captureSettingsEqual, effectiveCaptureSettings, normalizeCaptureSettings } from '../preload/captureSettings.js';
 import { emitCaptureSettingsChanged } from './claims/captureSettingsEvents.js';
 import { isCaptureFork } from './claims/captureForks.js';
 import {
@@ -400,6 +400,8 @@ interface WorkspaceCreatePayload {
   env: WorkspaceEnv;
   resources?: WorkspaceResources;
   mirror?: WorkspaceMirror;
+  /** Knowledge-capture settings (#483 §5a); normalized server-side, absent ⇒ defaults. */
+  knowledgeCapture?: unknown;
 }
 
 // Last-known container states for daemon-down synthesis (#380). In-memory
@@ -1150,6 +1152,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // the socket present as soon as it starts.
       ensureWorkspaceSocket(input.id);
 
+      const knowledgeCapture = input.knowledgeCapture === undefined ? undefined : normalizeCaptureSettings(input.knowledgeCapture);
       const ws = await backendForKind(kind).createWorkspace({
         id: input.id,
         name: input.name,
@@ -1160,7 +1163,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         authMode: input.authMode,
         endpointId: input.endpointId,
         kind,
-        workspaceRoot: input.workspaceRoot
+        workspaceRoot: input.workspaceRoot,
+        knowledgeCapture
       });
 
       const spec: WorkspaceSpec = {
@@ -1189,6 +1193,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         env: input.env,
         resources: input.resources,
         mirror: input.mirror ?? FACTORY_MIRROR,
+        knowledgeCapture,
         createdAt: ws.createdAt,
         lastUsedAt: ws.lastUsedAt
       };

@@ -27,8 +27,8 @@ import {
   workspaceStateDir
 } from './paths.js';
 import type { AuthMode, Workspace, WorkspaceEnv, WorkspaceResources, WorkspaceKind } from './workspaces.js';
-import { FACTORY_MIRROR, readWorkspaceManifest } from './workspaces.js';
-import { effectiveCaptureSettings } from '../preload/captureSettings.js';
+import { FACTORY_MIRROR } from './workspaces.js';
+import { effectiveCaptureSettings, type CaptureSettings } from '../preload/captureSettings.js';
 import { ensureContainerRetention } from './claims/retention.js';
 import { fleetPrivateDir, fleetSharedDir } from './config.js';
 import {
@@ -162,6 +162,9 @@ export interface CreateWorkspaceInput {
    * fleet root.
    */
   workspaceRoot?: string;
+  /** The workspace's knowledge-capture settings (#483 §5a); absent ⇒ defaults.
+   *  The container's transcript retention is written from this at create. */
+  knowledgeCapture?: CaptureSettings;
 }
 
 export interface ImageInspectResult {
@@ -552,8 +555,9 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
 
   const claudeDir = workspaceClaudeDir(spec.id);
   await mkdir(claudeDir, { recursive: true });
-  // #483 §5a: transcriptRetentionDays → ~/.claude/settings.json cleanupPeriodDays.
-  await ensureContainerRetention(spec.id, effectiveCaptureSettings(await readWorkspaceManifest(spec.id)).transcriptRetentionDays)
+  // #483 §5a: transcriptRetentionDays → ~/.claude/settings.json cleanupPeriodDays,
+  // from the spec being created (its manifest isn't written until after create).
+  await ensureContainerRetention(spec.id, effectiveCaptureSettings(spec).transcriptRetentionDays)
     .catch((e) => logError({ source: 'main', type: 'claude-retention', level: 'warn', message: String(e), workspaceId: spec.id }));
   const brokerDir = workspaceBrokerDir(spec.id);
   await mkdir(brokerDir, { recursive: true });
