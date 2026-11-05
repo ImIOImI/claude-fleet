@@ -5,6 +5,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'src/main/dbReadCharacterization.test.ts',
       'src/main/store/pgMigrate.test.ts',
       'src/main/store/postgres.test.ts',
       'src/main/store/schemaParity.test.ts',

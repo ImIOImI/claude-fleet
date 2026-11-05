@@ -104,4 +104,13 @@ describe('latestSessionId', () => {
 
     expect(await latestSessionId('ws-none')).toBeNull();
   });
+
+  it('orders sessions tied on last_active_at by id', async () => {
+    for (const id of ['s-b', 's-a', 's-c']) {
+      await ingestLine('ws-tie', id, JSON.stringify({ type: 'ai-title', aiTitle: id, sessionId: id }));
+    }
+    expect((await listSessions('ws-tie')).map((s) => s.id)).toEqual(['s-a', 's-b', 's-c']);
+    expect((await listSessionIds()).filter((id) => id.startsWith('s-'))).toEqual(['s-a', 's-b', 's-c']);
+    expect(await latestSessionId('ws-tie')).toBe('s-a');
+  });
 });

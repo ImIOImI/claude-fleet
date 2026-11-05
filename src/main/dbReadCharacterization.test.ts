@@ -3,12 +3,10 @@
 // reproduce it unmodified. `await` on a sync return is a no-op, so the same
 // file runs on both sides.
 import { afterEach, beforeEach, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import * as db from './db.js';
 import { EMBED_DIM, EMBED_MODEL_ID, encodeVector } from './vectors.js';
 import { WS, S, FIXTURE } from './state/ingestFixture.js';
+import { openTestState, type TestState } from './store/testStore.js';
 
 const WS2 = '01WSREADS2';
 const S2 = 'sess-reads-2';
@@ -21,10 +19,9 @@ const S2_LINES = [
   JSON.stringify({ type: 'session-summary', summary: 'Newer chapter.', tags: ['new', 'tags'], model: 'haiku', fromEventTs: '2026-07-01T01:00:00.000Z', toEventTs: '2026-07-01T01:00:07.000Z', timestamp: '2026-07-01T01:00:08.000Z' }),
 ];
 
-let dir: string;
+let st: TestState;
 beforeEach(async () => {
-  dir = mkdtempSync(join(tmpdir(), 'cf-read-char-'));
-  db.openDb(dir);
+  st = await openTestState('cf-read-char-');
   for (const line of FIXTURE) await db.ingestLine(WS, S, line);
   for (const line of S2_LINES) await db.ingestLine(WS2, S2, line);
   await db.learnBrokerSessionMapping(WS, 'tab-1', S);
@@ -35,10 +32,7 @@ beforeEach(async () => {
     modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec: encodeVector(new Float32Array(EMBED_DIM)), dedupKey: `t${turn.id}`,
   });
 });
-afterEach(async () => {
-  await db.closeDb();
-  rmSync(dir, { recursive: true, force: true });
-});
+afterEach(() => st.close());
 
 it('every state.db read returns the recorded value', async () => {
   const insideWindow = Date.UTC(2026, 6, 1, 14);
@@ -102,11 +96,9 @@ it('multi-session ordering, NULL last_active_at, and unverified/unreal mappings'
   // Pre-#198 legacy row (verified=0), written directly: no app-level API
   // commits an unverified mapping any more (learnBrokerSessionMapping always
   // sets verified=1).
-  const raw = db.openDb(dir);
-  raw.prepare(`
-    INSERT INTO broker_sessions (workspace_id, broker_session_id, claude_session_id, learned_at, verified)
-    VALUES (?, ?, ?, ?, 0)
-  `).run(WS, 'tab-unverified', S, Date.now());
+  await db.stateKysely().insertInto('broker_sessions')
+    .values({ workspace_id: WS, broker_session_id: 'tab-unverified', claude_session_id: S, learned_at: Date.now(), verified: 0 })
+    .execute();
 
   // A mapping to a session id that never ingested a transcript line (#170 phantom).
   await db.learnBrokerSessionMapping(WS, 'tab-unreal', 'ghost-session-never-real');

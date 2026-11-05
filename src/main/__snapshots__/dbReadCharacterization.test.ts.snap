@@ -361,7 +361,7 @@ exports[`every state.db read returns the recorded value 1`] = `
         "Broker",
         " reconnect ",
       ],
-      "usd": 0.7534357500000001,
+      "usd": 0.75343575,
       "userSetName": null,
       "workspaceId": "01WSINGEST",
     },

@@ -11,7 +11,7 @@
 // transaction would queue behind the mutex the transaction already holds and
 // deadlock.
 import type Database from 'better-sqlite3';
-import { Kysely, SqliteDialect, type SqliteDatabase } from 'kysely';
+import { Kysely, SqliteDialect, type SqliteDatabase, type Transaction } from 'kysely';
 
 export interface SqliteKyselyOptions {
   /** Reuse up to this many prepared statements, keyed by SQL text (0 = off,
@@ -62,4 +62,11 @@ export function chunked<T>(items: readonly T[], size = 500): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
+}
+
+/** A multi-query read on one snapshot: REPEATABLE READ, READ ONLY on Postgres
+ *  (no write lock, no serialization failures); a plain transaction on SQLite,
+ *  whose driver ignores the settings. */
+export function readTransaction<DB, T>(k: Kysely<DB>, fn: (trx: Transaction<DB>) => Promise<T>): Promise<T> {
+  return k.transaction().setIsolationLevel('repeatable read').setAccessMode('read only').execute(fn);
 }
