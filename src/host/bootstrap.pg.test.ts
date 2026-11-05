@@ -1,20 +1,30 @@
 // fleet-host bootstrap against a real server. The test superuser stands in for the RDS master; every test makes its
 // own database and roles and drops them after.
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
+import { EventEmitter } from 'node:events';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { createServer, type AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import pg from 'pg';
 import { parse as parseConnectionString } from 'pg-connection-string';
+import * as db from '../main/db.js';
+import { IdentityError } from '../main/identity/types.js';
 import { isPg } from '../main/store/testStore.js';
 import type { AdminCredential } from './adminCreds.js';
 import { bootstrap, type BootstrapTarget } from './bootstrap.js';
+import { runDbCommand } from './dbCli.js';
 import { createLogger } from './log.js';
+import { runHost } from './main.js';
 import { scramVerifier } from './scram.js';
+import { fakeBroker, person, TOKEN } from './testFakes.js';
 
 const url = isPg ? parseConnectionString(process.env.PG_TEST_URL as string) : null;
 const HOST = url?.host ?? '';
-const PORT = Number(url?.port ?? 5432);
-const SUPER = url?.user ?? 'postgres';
-const SUPER_PW = url?.password ?? 'trust-auth-ignores-this';
+const PORT = Number(url?.port || 5432);
+const SUPER = url?.user || 'postgres';
+const SUPER_PW = url?.password || 'trust-auth-ignores-this';
 const id = pg.escapeIdentifier;
 
 async function client(user: string, password: string, database = 'postgres'): Promise<pg.Client> {
@@ -163,3 +173,104 @@ describe.skipIf(!isPg)('bootstrap', () => {
     expect((err as Error).message).not.toContain('S3cret-never-printed');
   });
 });
+const ARN = 'arn:aws:secretsmanager:us-east-1:567639518918:secret:fleet-agent-infra-use1-rds--connection-string-glXLj2';
+
+function hostConfig(n: ReturnType<typeof names>): string {
+  const dir = mkdtempSync(join(tmpdir(), 'fh-boot-'));
+  const path = join(dir, 'config.yaml');
+  const dbBlock = { host: HOST, port: PORT, database: n.db, user: n.app, password: { kind: 'env', name: 'FB_APP_PW' }, ssl: 'disable', poolMax: 2 };
+  writeFileSync(path, `workspace: { id: 01JC0000000000000000000000, name: boot }\ngrants:\n  - { team: acme/platform, tier: session }\ndb: ${JSON.stringify(dbBlock)}\n`);
+  return path;
+}
+
+async function cmd(argv: string[], env: NodeJS.ProcessEnv, getSecret?: (a: string, r: string) => Promise<string>) {
+  const lines: string[] = [];
+  const code = await runDbCommand(argv, { env, sink: (l) => lines.push(l), getSecret });
+  return { code, out: lines.join('\n'), last: JSON.parse(lines.at(-1) as string) as Record<string, unknown> };
+}
+
+describe.skipIf(!isPg)('fleet-host bootstrap / migrate (CLI)', () => {
+  it('bootstrap via the secret ARN (DB_USER/DB_PASSWORD), again via env; then the app role migrates and runs the host', async () => {
+    const n = names();
+    const cfg = hostConfig(n);
+    const env = { FLEET_HOST_CONFIG: cfg, FB_APP_PW: n.appPw };
+    const secret = JSON.stringify({ DB_USER: SUPER, DB_PASSWORD: SUPER_PW });
+    const first = await cmd(['bootstrap', '--admin-secret-arn', ARN, '--admin-user-field', 'DB_USER', '--admin-password-field', 'DB_PASSWORD'], env, async () => secret);
+    expect(first.code).toBe(0);
+    expect(first.last).toMatchObject({ msg: 'bootstrap complete', database: n.db, role: n.app, schema: 'fleet' });
+    expect((first.last.changed as string[]).length).toBe(5);
+    expect(first.out).not.toContain(n.appPw);
+    if (url?.password) expect(first.out).not.toContain(SUPER_PW);
+
+    const again = await cmd(['bootstrap', '--admin-password-env', 'FB_ADMIN_PW', '--admin-user', SUPER], { ...env, FB_ADMIN_PW: SUPER_PW });
+    expect(again.code).toBe(0);
+    expect(again.last).toMatchObject({ msg: 'bootstrap complete: already in place, nothing changed', changed: [] });
+    expect(again.out.split('\n')).toHaveLength(1);
+
+    const mig = await cmd(['migrate'], env);
+    expect(mig.code).toBe(0);
+    expect(mig.last).toMatchObject({ msg: 'migrate complete', versions: { host: expect.any(Number), inbox: expect.any(Number), state: expect.any(Number) } });
+    expect((await cmd(['migrate'], env)).last.versions).toEqual(mig.last.versions);
+
+    const app = await client(n.app, n.appPw, n.db);
+    try {
+      await expect(app.query(`CREATE DATABASE ${id(`${n.db}_x`)}`)).rejects.toMatchObject({ code: '42501' });
+      await expect(app.query(`CREATE ROLE ${id(`${n.app}_x`)}`)).rejects.toMatchObject({ code: '42501' });
+      expect((await app.query('SELECT current_schema() AS s')).rows[0].s).toBe('fleet');
+    } finally {
+      await app.end();
+    }
+
+    const port = await freePort();
+    const dir = mkdtempSync(join(tmpdir(), 'fh-boot-host-'));
+    const host = await runHost({
+      env: { ...env, FLEET_HOST_PORT: String(port), FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'), FLEET_HOST_PROJECTS: join(dir, 'projects') },
+      exit: vi.fn(), proc: new EventEmitter(), logSink: () => undefined,
+      authFactory: () => ({ id: 'github', verify: async (t) => { if (t !== TOKEN) throw new IdentityError('unauthorized', 'bad', 401); return person('owner', 1, ['acme/platform']); } }),
+      brokerOps: fakeBroker([]).ops, leaseRenewMs: 200, leaseTtlMs: 1_000
+    });
+    try {
+      await vi.waitFor(async () => expect((await fetch(`http://127.0.0.1:${port}/leader`)).status).toBe(200), { timeout: 10_000 });
+      await vi.waitFor(() => expect(() => db.stateKysely()).not.toThrow(), { timeout: 10_000 });
+    } finally {
+      await host.shutdown(0);
+    }
+  });
+
+  it('missing or wrong admin credentials fail cleanly and echo nothing', async () => {
+    const n = names();
+    const env = { FLEET_HOST_CONFIG: hostConfig(n), FB_APP_PW: n.appPw };
+    const bad = 'Wr0ng-Admin-Secret';
+    const cases: [string[], NodeJS.ProcessEnv, RegExp][] = [
+      [['bootstrap', '--admin-password-env', 'FB_ADMIN_PW', '--admin-user', SUPER], env, /FB_ADMIN_PW is not set/],
+      [['bootstrap', '--admin-password-file', '/nonexistent/pw', '--admin-user', SUPER], env, /cannot read --admin-password-file: ENOENT/],
+      [['bootstrap', '--admin-password-env', 'FB_ADMIN_PW', '--admin-user', n.admin], { ...env, FB_ADMIN_PW: bad }, /admin login to database "postgres"/]
+    ];
+    if (await passwordsChecked()) cases.push([['bootstrap', '--admin-password-env', 'FB_ADMIN_PW', '--admin-user', SUPER], { ...env, FB_ADMIN_PW: bad }, /28P01/]);
+    for (const [argv, e, re] of cases) {
+      const r = await cmd(argv, e);
+      expect(r.code).toBe(1);
+      expect(String(r.last.error)).toMatch(re);
+      expect(r.out).not.toContain(bad);
+      expect(r.out).not.toContain(n.appPw);
+    }
+    expect(await su(async (c) => (await c.query('SELECT 1 FROM pg_database WHERE datname = $1', [n.db])).rowCount)).toBe(0);
+  });
+});
+
+async function passwordsChecked(): Promise<boolean> {
+  try {
+    await (await client(SUPER, `${SUPER_PW}-wrong`)).end();
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+async function freePort(): Promise<number> {
+  const s = createServer();
+  await new Promise<void>((r) => s.listen(0, '127.0.0.1', () => r()));
+  const { port } = s.address() as AddressInfo;
+  await new Promise<void>((r) => s.close(() => r()));
+  return port;
+}

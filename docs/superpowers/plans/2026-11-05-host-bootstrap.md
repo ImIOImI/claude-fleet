@@ -343,9 +343,9 @@ import { scramVerifier } from './scram.js';
 
 const url = isPg ? parseConnectionString(process.env.PG_TEST_URL as string) : null;
 const HOST = url?.host ?? '';
-const PORT = Number(url?.port ?? 5432);
-const SUPER = url?.user ?? 'postgres';
-const SUPER_PW = url?.password ?? 'trust-auth-ignores-this';
+const PORT = Number(url?.port || 5432);
+const SUPER = url?.user || 'postgres';
+const SUPER_PW = url?.password || 'trust-auth-ignores-this';
 const id = pg.escapeIdentifier;
 
 async function client(user: string, password: string, database = 'postgres'): Promise<pg.Client> {
@@ -873,7 +873,7 @@ describe('parseBootstrapArgs', () => {
     expect(() => parseBootstrapArgs(['--admin-password-env', 'A', '--admin-iam', '--admin-user', 'm'])).toThrow(/exactly one of/);
     expect(() => parseBootstrapArgs(['--admin-password-env', 'A', '--admin-user', 'm', '--admin-user-field', 'X'])).toThrow(/need --admin-secret-arn/);
     expect(() => parseBootstrapArgs(['--admin-password-env', 'not-a-name', '--admin-user', 'm'])).toThrow(/env var name/);
-    const e = (() => { try { parseBootstrapArgs([`--admin-password=${PW}`]); } catch (x) { return x as Error; } })();
+    const e = (() => { try { parseBootstrapArgs(['--admin-iam', '--admin-user', 'm', PW]); } catch (x) { return x as Error; } })();
     expect(e).toBeInstanceOf(UsageError);
     expect(e?.message).not.toContain('Secret');
   });

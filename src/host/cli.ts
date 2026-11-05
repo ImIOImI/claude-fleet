@@ -1,8 +1,9 @@
-// Bundle entry. `fleet-host init` resolves (or mints) the workspace id and exits.
+// Bundle entry: the host, or a one-shot `init` (resolve or mint the workspace id), `bootstrap` or `migrate` (dbCli.ts).
 import { existsSync } from 'node:fs';
 import { loadHostConfig, readHostEnv } from './config.js';
 import { openHostDb } from './hostDb.js';
 import { resolveHostWorkspaceId, resolveWorkspaceId } from './hostState.js';
+import { runDbCommand } from './dbCli.js';
 import { createLogger, redactSecrets } from './log.js';
 import { runHost } from './main.js';
 
@@ -25,6 +26,12 @@ async function cli(argv: string[]): Promise<void> {
   if (argv[0] === 'init') {
     process.stdout.write(JSON.stringify({ workspaceId: await init() }) + '\n');
     return;
+  }
+  // Anything else exits (2 if unknown) rather than starting a host inside a Job.
+  if (argv.length > 0) {
+    const code = await runDbCommand(argv, { env: process.env, sink: (l) => process.stdout.write(l + '\n') });
+    await new Promise<void>((r) => process.stdout.write('', () => r()));
+    process.exit(code);
   }
   await runHost();
 }
