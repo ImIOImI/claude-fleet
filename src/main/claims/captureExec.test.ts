@@ -90,4 +90,42 @@ describe('runCapture', () => {
       } as never);
     expect(spawnFile).toHaveBeenCalledWith('/usr/bin/claude', ['-p', 'x'], expect.objectContaining({ cwd: '/repo', timeoutMs: 1000 }));
   });
+
+  it('native: degradation when retentionSettings rejects — still spawns, args contain no --settings', async () => {
+    const spawnFile = vi.fn(async () => ({ exitCode: 0, stdout: '{}', stderr: '', timedOut: false }));
+    await runCapture({ kind: 'local', workspaceId: 'w6', launcher: { mode: 'native' }, workspaceRoot: '/repo' }, ['-p', 'x'], 1000,
+      {
+        spawnFile,
+        buildEnv: async () => ({}),
+        workspaceEnvKeys: async () => [],
+        ensureMcpConfig: async () => '/etc/mcp.json',
+        resolveClaude: async () => '/usr/bin/claude',
+        retentionSettings: async () => { throw new Error('retention write failed'); }
+      } as never);
+    // Should still spawn despite the retention failure, with --mcp-config but no --settings
+    expect(spawnFile).toHaveBeenCalledWith(
+      '/usr/bin/claude',
+      ['-p', 'x', '--mcp-config', '/etc/mcp.json'],
+      expect.objectContaining({ cwd: '/repo', timeoutMs: 1000 })
+    );
+  });
+
+  it('wsl: appends --settings with the WSL-translated path when retentionSettings succeeds (#483 §5a)', async () => {
+    const spawnFile = vi.fn(async () => ({ exitCode: 0, stdout: '{}', stderr: '', timedOut: false }));
+    const launcher = { mode: 'wsl', distro: 'Ubuntu', shell: '/bin/bash', home: '/home/t', claudePath: '/home/t/.local/bin/claude', interop: true } as never;
+    await runCapture({ kind: 'local', workspaceId: 'w7', launcher, workspaceRoot: '\\\\wsl.localhost\\Ubuntu\\home\\t\\repo' }, ['-p', 'x'], 1000,
+      {
+        spawnFile,
+        buildEnv: async () => ({ ANTHROPIC_API_KEY: 'sk-x' }),
+        workspaceEnvKeys: async () => [],
+        ensureMcpConfig: async () => 'C:\\Users\\t\\mcp.json',
+        resolveClaude: async () => 'claude',
+        retentionSettings: async () => 'C:\\state\\w7\\claude-retention.settings.json'
+      } as never);
+    const [file, args] = spawnFile.mock.calls[0] as unknown as [string, string[], { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }];
+    expect(file).toBe('wsl.exe');
+    // args[7] should be the full exec command with --settings appended and WSL-translated path
+    expect(args[7]).toContain("'--settings'");
+    expect(args[7]).toContain("'/mnt/c/state/w7/claude-retention.settings.json'");
+  });
 });

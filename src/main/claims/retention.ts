@@ -37,6 +37,6 @@ export async function ensureLocalRetentionSettings(id: string, days: number): Pr
   const dir = workspaceStateDir(id);
   await mkdir(dir, { recursive: true });
   const file = join(dir, LOCAL_RETENTION_SETTINGS_FILE);
-  await writeFile(file, JSON.stringify({ cleanupPeriodDays: days }) + '\n', 'utf8');
+  await writeFileAtomic(file, JSON.stringify({ cleanupPeriodDays: days }) + '\n');
   return file;
 }

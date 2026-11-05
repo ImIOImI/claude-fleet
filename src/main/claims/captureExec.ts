@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
 import { execScript as dockerExecScript } from '../docker.js';
 import { buildEnv as localBuildEnv, ensureMcpConfig as localEnsureMcpConfig, resolveClaude as localResolveClaude } from '../local.js';
+import { logError } from '../errorLog.js';
 import {
   buildWslSpawnEnv,
   posixQuote,
@@ -94,7 +95,12 @@ export async function runCapture(target: CaptureTarget, args: string[], timeoutM
   const mcpConfigHostPath = await deps.ensureMcpConfig(target.workspaceId, l);
   // A fork's own claude startup runs Claude's transcript cleanup too, so it
   // must carry the workspace's cleanupPeriodDays (#483 §5a).
-  const retentionHostPath = await deps.retentionSettings?.(target.workspaceId);
+  let retentionHostPath: string | undefined;
+  try {
+    retentionHostPath = await deps.retentionSettings?.(target.workspaceId);
+  } catch (err) {
+    logError({ source: 'main', type: 'capture-retention-failed', level: 'warn', message: String(err), workspaceId: target.workspaceId });
+  }
   if (l.mode === 'wsl') {
     // claude reads --mcp-config INSIDE the distro, so the host path must be
     // translated the same way local.ts:attachPty does for real sessions.
