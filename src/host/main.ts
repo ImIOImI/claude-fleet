@@ -7,6 +7,7 @@ import { buildAuthContext, githubProviderFactory, type AuthContext, type Provide
 import { brokerOps as realBrokerOps, type BrokerOps } from './brokerOps.js';
 import { loadHostConfig, readHostEnv, type HostConfig } from './config.js';
 import { createReloader, watchConfigDir } from './configReload.js';
+import { startCredHelper, type CredServer } from './credServer.js';
 import { brokerWatch, EventHub, pruneDeadOwners } from './events.js';
 import { resolveWorkspaceId } from './hostState.js';
 import { LeaseManager, memoryLeaseStore, type LeaseStore } from './lease.js';
@@ -32,6 +33,8 @@ export interface RunHostOptions {
   ownerPruneMs?: number;
   brokerPollMs?: number;
   fatalStopMs?: number;
+  /** GitHub API base for the App credential helper (tests). */
+  githubApiBase?: string;
 }
 
 export interface RunningHost {
@@ -86,6 +89,15 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     throw new Error(`host config rejected: ${env.configPath}`);
   }
   const workspaceId = await resolveWorkspaceId(env.stateDir, config.workspace.id);
+  let cred: CredServer | null = null;
+  try {
+    const app = config.github?.app;
+    if (app) cred = await startCredHelper({ app, socketPath: env.credSocket, github: () => config.github, log, apiBase: opts.githubApiBase });
+    else log.log('info', 'github app credential helper off (github.appId unset)');
+  } catch (err) {
+    uninstallGuards();
+    throw err;
+  }
 
   const ops = opts.brokerOps ?? realBrokerOps(env.brokerSocket);
   const hub = new AttachHub(ops, { hostPort: env.port, log });
@@ -146,6 +158,7 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
       server.halt(1001, 'host shutting down');
       await leaseMgr.stop();
       await server.close();
+      await cred?.close();
       uninstallGuards();
       if (!fatal) exit(code);
     })();

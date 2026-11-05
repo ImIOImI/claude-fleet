@@ -8,7 +8,7 @@ import { parse } from 'yaml';
 
 const SRC = resolve(__dirname, '..');
 const ROOT = resolve(SRC, '..');
-const ENTRY = join(SRC, 'host', 'cli.ts');
+const ENTRIES = [join(SRC, 'host', 'cli.ts'), join(SRC, 'host', 'credMain.ts')];
 const BARE_ALLOWED = new Set(['ws', 'yaml', 'ulid']);
 const MAIN_ALLOWED = [/^main\/identity\/[^/]+\.ts$/, /^main\/broker\.ts$/, /^main\/claudeArgs\.ts$/, /^main\/vaultScopes\.ts$/, /^preload\/identityTypes\.ts$/];
 const SPEC_RE = /\b(?:import|export)\s+(?:type\s+)?(?:[^'"`;]*?\bfrom\s*)?['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]|\brequire\s*\(\s*['"]([^'"]+)['"]/g;
@@ -16,7 +16,7 @@ const SPEC_RE = /\b(?:import|export)\s+(?:type\s+)?(?:[^'"`;]*?\bfrom\s*)?['"]([
 function walk(): { files: string[]; bare: Set<string> } {
   const seen = new Set<string>();
   const bare = new Set<string>();
-  const stack = [ENTRY];
+  const stack = [...ENTRIES];
   while (stack.length) {
     const file = stack.pop()!;
     if (seen.has(file)) continue;

@@ -176,6 +176,7 @@ export interface HostEnv {
   configPath: string;
   stateDir: string;
   brokerSocket: string;
+  credSocket: string;
 }
 
 export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
@@ -186,6 +187,7 @@ export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
     port,
     configPath: env.FLEET_HOST_CONFIG || DEFAULT_CONFIG_PATH,
     stateDir: env.FLEET_HOST_STATE || '/home/fleet/.claude/fleet-host',
-    brokerSocket: env.CLAUDE_FLEET_BROKER_SOCKET || '/run/broker/broker.sock'
+    brokerSocket: env.CLAUDE_FLEET_BROKER_SOCKET || '/run/broker/broker.sock',
+    credSocket: env.FLEET_HOST_CRED_SOCKET || '/run/fleet-host/cred.sock'
   };
 }

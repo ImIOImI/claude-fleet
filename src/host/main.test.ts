@@ -89,6 +89,36 @@ function openEvents(r: Rig): Promise<WebSocket> {
 const msgs = (r: Rig) => r.logs.map((l) => JSON.parse(l) as { msg: string; [k: string]: unknown });
 
 describe('runHost', () => {
+  it('serves App tokens on the credential socket when github.appId, installationId and keyFile are set', async () => {
+    const { startFakeGithubApp } = await import('./testGithubApp.js');
+    const { requestToken } = await import('./credCli.js');
+    const gh = await startFakeGithubApp({ appId: '9', installationId: '8', account: 'acme', repos: ['a', 'b'] });
+    const dir = mkdtempSync(join(tmpdir(), 'fh-cred-'));
+    writeFileSync(join(dir, 'key.pem'), gh.privatePem, { mode: 0o400 });
+    const sock = join(dir, 'run', 'cred.sock');
+    const port = await freePort();
+    const cfgPath = join(dir, 'config.yaml');
+    writeFileSync(cfgPath, CONFIG + `github: { appId: 9, installationId: 8, keyFile: ${join(dir, 'key.pem')}, repositories: [a] }\n`);
+    const logs: string[] = [];
+    const host = await runHost({
+      env: {
+        FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'),
+        FLEET_HOST_CRED_SOCKET: sock
+      },
+      exit: vi.fn(), proc: new EventEmitter(), logSink: (l) => logs.push(l), authFactory: () => ({ id: 'github', verify }),
+      brokerOps: fakeBroker([]).ops, githubApiBase: gh.url
+    });
+    try {
+      const token = await requestToken(sock, { repositories: ['a'] });
+      expect(token).toMatch(/^ghs_fake/);
+      await expect(requestToken(sock, { repositories: ['b'] })).rejects.toThrow(/403/);
+      expect(logs.join('\n')).not.toContain(token);
+    } finally {
+      await host.shutdown(0);
+      await gh.close();
+    }
+  });
+
   it('serves the configured workspace id after one start load', async () => {
     const r = await start();
     expect(await whoami(r)).toMatchObject({ status: 200, body: { workspace: { id: ID_A, name: 'smoke' } } });

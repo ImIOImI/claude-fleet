@@ -1,0 +1,16 @@
+#!/bin/sh
+# gh with a short-lived App token scoped to the repo it acts on (fleet-host-cred
+# gh-token). An explicit GH_TOKEN wins; no resolvable repo runs gh without one.
+real=${FLEET_GH_REAL:-/usr/local/bin/gh}
+if [ ! -x "$real" ]; then
+  echo "gh is not installed in this image" >&2
+  exit 127
+fi
+if [ -z "${GH_TOKEN:-}" ]; then
+  tok=$(fleet-host-cred gh-token -- "$@" 2>/dev/null) || tok=
+  if [ -n "$tok" ]; then
+    GH_TOKEN=$tok
+    export GH_TOKEN
+  fi
+fi
+exec "$real" "$@"

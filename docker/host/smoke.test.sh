@@ -18,6 +18,9 @@ test "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/whoami")"
 test "$(docker exec "$cid" id -u)" = 1000
 docker exec "$cid" sh -c 'test -s /etc/ssl/certs/rds-global-bundle.pem && grep -q "BEGIN CERTIFICATE" /etc/ssl/certs/rds-global-bundle.pem'
 docker exec "$cid" fleet-host init | grep -q '"workspaceId"'
+docker exec "$cid" git config --system --get-all credential.https://github.com.helper | grep -q 'fleet-host-cred git-credential'
+test "$(docker exec "$cid" sh -c 'printf "protocol=https\nhost=github.com\npath=a/b\n\n" | fleet-host-cred git-credential get 2>/dev/null; echo rc=$?')" = rc=0
+test "$(docker exec "$cid" sh -c 'command -v gh || true')" != /usr/local/bin/gh
 docker stop -t 15 "$cid" >/dev/null
 docker logs "$cid" 2>&1 | grep -q '"msg":"shutting down"'
 echo "runner-host smoke: OK"

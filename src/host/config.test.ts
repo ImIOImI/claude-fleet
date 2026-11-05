@@ -121,6 +121,7 @@ describe('readHostEnv', () => {
       port: 8080,
       configPath: '/etc/fleet-host/config.yaml',
       stateDir: '/home/fleet/.claude/fleet-host',
+      credSocket: '/run/fleet-host/cred.sock',
       brokerSocket: '/run/broker/broker.sock'
     });
   });
