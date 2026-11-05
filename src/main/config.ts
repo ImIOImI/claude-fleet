@@ -403,7 +403,7 @@ export async function configUnreadablePath(): Promise<string | null> {
 export async function getStoreConfig(): Promise<StoreConfig> {
   const cfg = await read();
   if (unreadable) throw new ConfigJsonError('config.json is not valid JSON');
-  return parseStoreConfig(cfg.store, { allowStaticSecrets: false });
+  return parseStoreConfig(cfg.store, { allowStaticSecrets: false, allowManaged: true });
 }
 
 /** config.json identity.github.clientId, or null. Validation and precedence: identity/clientId.ts. */

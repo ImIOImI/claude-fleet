@@ -185,6 +185,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   // using SQLite instead would split the history and inbox in two.
   try {
     const storeCfg = await getStoreConfig();
+    if (storeCfg.kind === 'managed') throw new Error('store: the managed Postgres store needs a newer build');
     if (storeCfg.kind === 'postgres') {
       pgStores = await openPgStores(storeCfg, {
         state: jsonlWatcher !== null,

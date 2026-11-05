@@ -44,7 +44,7 @@ describe('assertRendererVaultScope fails closed (#444 security review)', () => {
 
 describe('assertRendererWorkspaceId (#444 security review)', () => {
   it('exports the reserved vault prefixes', () => {
-    expect(RESERVED_VAULT_PREFIXES).toEqual(['loadout-source:', 'endpoint:', 'identity:']);
+    expect(RESERVED_VAULT_PREFIXES).toEqual(['loadout-source:', 'endpoint:', 'identity:', 'store:']);
   });
   it.each([
     ['a loadout-source scope', 'loadout-source:ghcr.io/acme/private'],
