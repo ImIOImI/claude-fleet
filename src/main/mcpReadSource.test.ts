@@ -5,11 +5,11 @@ import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as db from './db.js';
-import { TOOLS, setQueryEmbedder, setUsageRecorder, type ToolCtx } from './mcpServer.js';
+import { TOOLS, setQueryEmbedder, setReadSource, setUsageRecorder, type ToolCtx } from './mcpServer.js';
 import { costFor } from './pricing.js';
 import { sqliteReadSource } from './sqliteReadSource.js';
 import { pgReadSource } from './store/pgReadSource.js';
-import type { ReadSource } from './store/readSource.js';
+import type { ReadSource, ReadSourceAdmin } from './store/readSource.js';
 import { isPg, openTestState, queryRows, type TestState } from './store/testStore.js';
 import { EMBED_DIM, EMBED_MODEL_ID, encodeVector } from './vectors.js';
 
@@ -19,7 +19,8 @@ const ctxA: ToolCtx = { callerId: WS_A, allowedWorkspaces: new Set([WS_A]) };
 const unit = (i: number): Float32Array => { const v = new Float32Array(EMBED_DIM); v[i] = 1; return v; };
 
 let st: TestState;
-let rs: ReadSource;
+let rs: ReadSource & ReadSourceAdmin;
+const scopeA = new Set([WS_A]);
 
 async function seed(): Promise<void> {
   await queryRows(
@@ -53,6 +54,13 @@ describe(`fleet-state read tools on ${isPg ? 'Postgres' : 'SQLite'}`, () => {
   beforeEach(async () => {
     st = await openTestState('cf-mcp-rs-');
     await seed();
+    // An en-US ICU collation on the sorted text columns, as an RDS/en_US
+    // database default would give them; COLLATE "C" must keep SQLite's order.
+    if (isPg) {
+      for (const [t, c] of [['events', 'tool_input'], ['events', 'model'], ['events', 'service_tier'], ['sessions', 'id']]) {
+        await queryRows(`ALTER TABLE ${t} ALTER COLUMN ${c} TYPE text COLLATE "en-US-x-icu"`);
+      }
+    }
     rs = isPg ? pgReadSource({ isolation: null }) : sqliteReadSource(new Database(join(st.dir, 'state.db'), { readonly: true, fileMustExist: true }));
   });
   afterEach(async () => {
@@ -128,5 +136,92 @@ describe(`fleet-state read tools on ${isPg ? 'Postgres' : 'SQLite'}`, () => {
     await expect(run('mark_useful', { sessionId: 'sb' })).rejects.toThrow(/not found/);
     expect(events).toEqual([{ workspaceId: WS_A, sessionId: 'sa', kind: 'marked-useful', detail: undefined }]);
     setUsageRecorder(() => {});
+  });
+
+  it('list_sessions: until bounds last_active_at; a tie returns both', async () => {
+    const ids = async (args: Record<string, unknown>) => (await run('list_sessions', args) as Array<{ id: string }>).map((r) => r.id);
+    expect(await ids({ until: 1000 })).toEqual(['sa']);
+    expect(await ids({ until: 999 })).toEqual([]);
+    await queryRows('INSERT INTO sessions (id, workspace_id, started_at, last_active_at) VALUES (?,?,?,?)', ['sa-tie', WS_A, 950, 1000]);
+    const all = await ids({});
+    expect(new Set(all.slice(0, 2))).toEqual(new Set(['sa', 'sa-tie']));
+    expect(all[2]).toBe('sa-old');
+  });
+
+  it('session_summary: files and commands in byte order on any collation', async () => {
+    const ev = 'INSERT INTO events (session_id, workspace_id, ts, type, tool_name, tool_input, raw_jsonl, dedup_key) VALUES (?,?,?,?,?,?,?,?)';
+    let n = 0;
+    for (const [tool, input] of [['Edit', 'a.ts'], ['Write', 'B.ts'], ['Edit', '_x.ts'], ['Edit', 'a.ts'], ['Bash', 'npm test'], ['Bash', 'ls'], ['Bash', 'Z run']]) {
+      await queryRows(ev, ['sa', WS_A, 1400 + n, 'assistant', tool, input, '{}', `c${n++}`]);
+    }
+    const s = await run('session_summary', { id: 'sa' }) as { filesEdited: string[]; commands: string[]; commandsCount: number };
+    expect(s.filesEdited).toEqual(['/workspace/foo.ts', 'B.ts', '_x.ts', 'a.ts']);
+    expect(s.commands).toEqual(['Z run', 'ls', 'npm test']);
+    expect(s.commandsCount).toBe(3);
+  });
+
+  it('get_cost adds token groups in byte order of (model, tier)', async () => {
+    await queryRows('INSERT INTO sessions (id, workspace_id, started_at, last_active_at) VALUES (?,?,?,?)', ['sf', WS_A, 1, 1]);
+    const ev = 'INSERT INTO events (session_id, workspace_id, ts, type, model, service_tier, input_tokens, output_tokens, raw_jsonl, dedup_key) VALUES (?,?,?,?,?,?,?,?,?,?)';
+    const groups: Array<[string, number]> = [['opus-b', 7000], ['haiku-a', 5000], ['Sonnet-z', 1000]];
+    for (const [i, [model, input]] of groups.entries()) await queryRows(ev, ['sf', WS_A, i, 'assistant', model, 'standard', input, 0, '{}', `f${i}`]);
+    const c = (m: string, input: number) => costFor(m, 'standard', { inputTokens: input, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 });
+    const byteOrder = ((0 + c('Sonnet-z', 1000)) + c('haiku-a', 5000)) + c('opus-b', 7000);
+    const icuOrder = ((0 + c('haiku-a', 5000)) + c('opus-b', 7000)) + c('Sonnet-z', 1000);
+    expect(byteOrder).not.toBe(icuOrder);
+    expect((await run('get_cost', { session_id: 'sf' }) as { usd: number }).usd).toBe(byteOrder);
+  });
+
+  it('search_transcripts: the kind filter', async () => {
+    await db.insertEmbeddings([
+      { workspaceId: WS_A, sessionId: 'sa', kind: 'summary', refEventId: null, ts: 1000, text: 'A summary', modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec: encodeVector(unit(0)), dedupKey: 'es' },
+    ]);
+    setQueryEmbedder(async (texts) => texts.map(() => unit(0)));
+    const texts = async (kind?: string) => (await run('search_transcripts', { query: 'q', kind }) as Array<{ text: string }>).map((h) => h.text).sort();
+    expect(await texts('summary')).toEqual(['A summary']);
+    expect(await texts('turn')).toEqual(['A content']);
+    expect(await texts()).toEqual(['A content', 'A summary']);
+  });
+
+  it('query: the SQLite snapshot, or unavailable on Postgres without isolation', async () => {
+    if (isPg) {
+      expect(rs.queryFlavor).toBeNull();
+      await expect(run('query', { sql: 'SELECT 1 AS one' })).rejects.toThrow('query is unavailable on this Postgres store');
+    } else {
+      expect(rs.queryFlavor).toBe('sqlite');
+      expect(await run('query', { sql: 'SELECT COUNT(*) AS n FROM sessions' })).toEqual([{ n: 2 }]);
+    }
+  });
+
+  it('the source itself refuses another workspace\'s session', async () => {
+    expect(await rs.getSession(scopeA, 'sb')).toBeNull();
+    expect(await rs.sessionWorkspace(scopeA, 'sb')).toBeNull();
+    expect(await rs.sessionWorkspace(scopeA, 'sa')).toBe(WS_A);
+    await expect(rs.tokenGroups(scopeA, 'sb')).rejects.toThrow(/not authorized/);
+    await expect(rs.summaryParts(scopeA, 'sb')).rejects.toThrow(/not authorized/);
+    await expect(rs.listEvents(scopeA, 'sb', { limit: 10, columns: ['id'] })).rejects.toThrow(/not authorized/);
+    await expect(rs.listEvents(new Set(), 'sa', { limit: 10, columns: ['id'] })).rejects.toThrow(/not authorized/);
+  });
+
+  it('the source itself refuses a column outside the allowlist', async () => {
+    for (const bad of ['raw_jsonl', 'dedup_key', 'id; DROP TABLE events', 'id, raw_jsonl']) {
+      await expect(rs.listEvents(scopeA, 'sa', { limit: 10, columns: [bad] })).rejects.toThrow(/unknown column/);
+    }
+    expect(await rs.listEvents(scopeA, 'sa', { limit: 1, columns: ['id', 'uuid'] })).toEqual([{ id: 1, uuid: null }]);
+  });
+});
+
+describe('setReadSource', () => {
+  it('closes the source it replaces, never the one it keeps', async () => {
+    const closed: string[] = [];
+    const fake = (name: string) => ({ forgetCaller: async () => {}, close: async () => { closed.push(name); } }) as unknown as ReadSource & ReadSourceAdmin;
+    const a = fake('a');
+    const b = fake('b');
+    setReadSource(a);
+    setReadSource(a);
+    setReadSource(b);
+    setReadSource(null);
+    await Promise.resolve();
+    expect(closed).toEqual(['a', 'b']);
   });
 });

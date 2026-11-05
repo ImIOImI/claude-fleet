@@ -119,6 +119,8 @@ export function searchVectorsSqlite(
   });
 }
 
+/** Embed `query`, then searchVectorsSqlite. Kept for the state bench and
+ *  transcriptSearch.test.ts; the MCP tool embeds and calls its ReadSource. */
 export async function searchTranscripts(
   query: string,
   allowedWorkspaces: Set<string>,

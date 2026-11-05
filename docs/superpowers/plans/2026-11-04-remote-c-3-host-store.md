@@ -3530,6 +3530,9 @@ gh pr merge --auto --squash
 - **Scheduler and runner on the holder** (outline F7): `automationService` with `spawnFresh`/`freshState`/`closeFresh` through c1's `BrokerOps` (CREATE with the bot as owner), `runIn: host` and cross-workspace targets refused at definition validation on the host, `execScript` in the container. Started after the stores open, stopped before they close; their writes are fenced like every other.
 - **Events:** `automations:changed` and `proposals:changed` to the `EventHub` (already allowlisted).
 - **Tests:** a run fires once across two hosts on one schema (the fence plus the lease); a timer-started run on a host that loses the lease records nothing after the takeover.
+- **`ReadSource` gaps that (d)'s `FederatedReader` must close** (found in the 4a review):
+  - *No origin identity.* Rows carry no field naming the store or host they came from. Merged results can't be attributed or deduplicated across sources.
+  - *No stable cursor.* `list_sessions`/`list_events` page by `since` on a timestamp, and that isn't tie-safe: rows sharing a `ts` at a page boundary are skipped or repeated. (d) needs a total-order cursor, e.g. `(ts, origin, id)`.
 
 ## Questions for Troy
 

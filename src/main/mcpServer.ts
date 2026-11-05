@@ -35,7 +35,7 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { sqliteReadSource } from './sqliteReadSource.js';
-import type { ReadSource, TokenGroup } from './store/readSource.js';
+import { LIST_EVENT_COLS, LIST_EVENT_COL_ALLOWLIST, type OwnedReadSource, type ReadSource, type TokenGroup } from './store/readSource.js';
 import { costFor } from './pricing.js';
 import { logError } from './errorLog.js';
 import { ensureContainerBridgeScript } from './mcpContainerBridge.js';
@@ -353,7 +353,7 @@ function reportListenerError(where: ListenerScope, err: unknown): void {
 }
 
 let userDataDir: string | null = null;
-let readSource: ReadSource | null = null;
+let readSource: OwnedReadSource | null = null;
 /** Started with no history store yet: STATE_DB_TOOLS report unavailable. */
 let storeless = false;
 /** Tools that read the history store through the ReadSource. */
@@ -403,7 +403,7 @@ function setMcpHealth(ok: boolean, detail?: string): void {
  *  lazily via {@link ensureWorkspaceSocket}. No-op if already started. On
  *  Windows this also binds the single loopback-TCP listener that fronts every
  *  workspace (identity comes from the per-connection token, not the socket). */
-export function startMcpServer(dir: string, opts: { readSource?: ReadSource | null } = {}): void {
+export function startMcpServer(dir: string, opts: { readSource?: OwnedReadSource | null } = {}): void {
   if (userDataDir) return;
   if (opts.readSource === null) {
     storeless = true;
@@ -430,7 +430,8 @@ export function startMcpServer(dir: string, opts: { readSource?: ReadSource | nu
 }
 
 /** Attach the history store once it opens after startup (null detaches it). */
-export function setReadSource(rs: ReadSource | null): void {
+export function setReadSource(rs: OwnedReadSource | null): void {
+  if (readSource && readSource !== rs) void readSource.close().catch(() => undefined);
   readSource = rs;
   storeless = rs === null;
 }
@@ -858,7 +859,7 @@ interface Tool {
 }
 
 function describe(t: Tool): string {
-  return readSource?.dialect === 'postgres' && t.pgDescription ? t.pgDescription : t.description;
+  return readSource?.queryFlavor === 'postgres' && t.pgDescription ? t.pgDescription : t.description;
 }
 
 function source(rs: ReadSource | null): ReadSource {
@@ -866,23 +867,11 @@ function source(rs: ReadSource | null): ReadSource {
   return rs;
 }
 
-// Curated event columns (omit raw_jsonl by default — it's large/sensitive and
-// the extract columns below cover the common needs). tool_input/tool_use_id/
-// tool_result_is_error carry the parsed which-file/which-command detail (#174).
-const EVENT_COLS =
-  'id, session_id, workspace_id, ts, type, subtype, model, tool_name, tool_use_id, tool_input, tool_result_is_error, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, service_tier';
-
-// Columns a caller may request via list_events `columns` projection. Excludes
-// raw_jsonl by design (#146) — use the `query` tool with include_raw for that.
-const EVENT_COL_ALLOWLIST = new Set(
-  EVENT_COLS.split(',').map((c) => c.trim()).concat(['uuid', 'parent_uuid'])
-);
-
 const MAX_QUERY_BYTES = 50_000;
 
 /** Whether a session's workspace is within the caller's allowed read set (#122). */
 async function sessionAllowed(rs: ReadSource, sessionId: string, allowed: Set<string>): Promise<boolean> {
-  const ws = await rs.sessionWorkspace(sessionId);
+  const ws = await rs.sessionWorkspace(allowed, sessionId);
   return ws !== null && allowed.has(ws);
 }
 
@@ -923,7 +912,7 @@ export const TOOLS: Tool[] = [
     },
     run: async (rs, a, ctx) => {
       if (typeof a.id !== 'string') throw new Error('id is required');
-      const row = await source(rs).getSession(a.id);
+      const row = await source(rs).getSession(ctx.allowedWorkspaces, a.id);
       if (!row) return null;
       // Hide a session outside the caller's allowed set (#146).
       if (!(typeof row.workspace_id === 'string' && ctx.allowedWorkspaces.has(row.workspace_id))) {
@@ -950,7 +939,7 @@ export const TOOLS: Tool[] = [
       }
       // Record clickthrough if this session was recently returned by a search (#207).
       noteRead(ctx.callerId, a.session_id);
-      return { session_id: a.session_id, ...aggregateSessionCost(await source(rs).tokenGroups(a.session_id)) };
+      return { session_id: a.session_id, ...aggregateSessionCost(await source(rs).tokenGroups(ctx.allowedWorkspaces, a.session_id)) };
     }
   },
   {
@@ -978,15 +967,15 @@ export const TOOLS: Tool[] = [
       }
       // Record clickthrough if this session was recently returned by a search (#207).
       noteRead(ctx.callerId, a.session_id);
-      let cols = EVENT_COLS;
+      let cols = LIST_EVENT_COLS;
       if (Array.isArray(a.columns)) {
         const names = a.columns.map((c) => String(c));
         for (const n of names) {
-          if (!EVENT_COL_ALLOWLIST.has(n)) throw new Error(`unknown column: ${n}`);
+          if (!LIST_EVENT_COL_ALLOWLIST.has(n)) throw new Error(`unknown column: ${n}`);
         }
-        if (names.length > 0) cols = names.join(', ');
+        if (names.length > 0) cols = names;
       }
-      const rows = await source(rs).listEvents(a.session_id, {
+      const rows = await source(rs).listEvents(ctx.allowedWorkspaces, a.session_id, {
         type: typeof a.type === 'string' ? a.type : undefined,
         toolName: typeof a.tool_name === 'string' ? a.tool_name : undefined,
         since: typeof a.since === 'number' ? a.since : undefined,
@@ -1046,7 +1035,7 @@ export const TOOLS: Tool[] = [
       // Record clickthrough if this session was recently returned by a search (#207).
       noteRead(ctx.callerId, a.id);
       const MAX_SUMMARY_ITEMS = 100;
-      const parts = await source(rs).summaryParts(a.id);
+      const parts = await source(rs).summaryParts(ctx.allowedWorkspaces, a.id);
       return withIso(
         {
           session_id: a.id,

@@ -18,9 +18,26 @@ export const SNAPSHOT_EVENT_COLS =
   'input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, ' +
   'service_tier, tool_name, tool_use_id, tool_input, tool_result_is_error';
 
+/** list_events' default projection. */
+export const LIST_EVENT_COLS: readonly string[] = [
+  'id', 'session_id', 'workspace_id', 'ts', 'type', 'subtype', 'model', 'tool_name', 'tool_use_id', 'tool_input',
+  'tool_result_is_error', 'input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens', 'service_tier',
+];
+
+/** Columns list_events may project; never raw_jsonl or dedup_key. */
+export const LIST_EVENT_COL_ALLOWLIST: ReadonlySet<string> = new Set([...LIST_EVENT_COLS, 'uuid', 'parent_uuid']);
+
+/** Throws on any column outside LIST_EVENT_COL_ALLOWLIST. */
+export function checkEventColumns(cols: readonly string[]): void {
+  if (cols.length === 0) throw new Error('no columns');
+  for (const c of cols) if (!LIST_EVENT_COL_ALLOWLIST.has(c)) throw new Error(`unknown column: ${c}`);
+}
+
+export const NOT_AUTHORIZED = 'not authorized to read this session';
+
 export interface SessionListFilter { workspaceId?: string; since?: number; until?: number; limit: number }
-/** `columns` is a comma list already checked against the tool's allowlist. */
-export interface EventListFilter { type?: string; toolName?: string; since?: number; limit: number; columns: string }
+/** `columns`: each source rejects any outside LIST_EVENT_COL_ALLOWLIST. */
+export interface EventListFilter { type?: string; toolName?: string; since?: number; limit: number; columns: readonly string[] }
 export interface ErrorListFilter { workspaceId?: string; sessionId?: string; level?: string; type?: string; since?: number; limit: number }
 
 export interface TokenGroup {
@@ -49,21 +66,30 @@ export interface QueryRunner {
   end(): Promise<void>;
 }
 
+/** Every read takes the caller's scope and enforces it itself; session-keyed
+ *  reads throw NOT_AUTHORIZED (getSession/sessionWorkspace: null) outside it. */
 export interface ReadSource {
-  readonly dialect: 'sqlite' | 'postgres';
+  /** Which engine serves `query`; null when `query` is unavailable. */
+  readonly queryFlavor: 'sqlite' | 'postgres' | null;
   listSessions(scope: Scope, f: SessionListFilter): Promise<Row[]>;
-  /** Unscoped: the tool checks the row's workspace against the caller's scope. */
-  getSession(id: string): Promise<Row | null>;
-  sessionWorkspace(id: string): Promise<string | null>;
-  /** Assistant-event token sums per (model, service_tier), NULLs first. */
-  tokenGroups(sessionId: string): Promise<TokenGroup[]>;
-  listEvents(sessionId: string, f: EventListFilter): Promise<Row[]>;
-  summaryParts(sessionId: string): Promise<SummaryParts>;
+  getSession(scope: Scope, id: string): Promise<Row | null>;
+  sessionWorkspace(scope: Scope, id: string): Promise<string | null>;
+  /** Assistant-event token sums per (model, service_tier), NULLs first, then byte order. */
+  tokenGroups(scope: Scope, sessionId: string): Promise<TokenGroup[]>;
+  listEvents(scope: Scope, sessionId: string, f: EventListFilter): Promise<Row[]>;
+  summaryParts(scope: Scope, sessionId: string): Promise<SummaryParts>;
   listErrors(scope: Scope, f: ErrorListFilter): Promise<Row[]>;
+  /** An all-zero `qvec` scores 0 everywhere on SQLite and returns [] on Postgres. */
   searchEmbeddings(qvec: Float32Array, scope: Scope, o: { limit: number; kind?: 'turn' | 'summary' }): Promise<EmbeddingHit[]>;
   /** One read-only statement, isolated to `caller.scope` by the dialect's own mechanism. At most maxRows rows. */
   query(caller: QueryCaller, q: QueryArgs): Promise<unknown[]>;
+}
+
+/** Lifecycle, for the source's owner; the tools see only ReadSource. */
+export interface ReadSourceAdmin {
   /** A removed workspace: drop anything held for it as a caller. */
   forgetCaller(callerId: string): Promise<void>;
   close(): Promise<void>;
 }
+
+export type OwnedReadSource = ReadSource & ReadSourceAdmin;

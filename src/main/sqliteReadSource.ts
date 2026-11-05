@@ -3,7 +3,9 @@
 import Database from 'better-sqlite3';
 import { randomBytes } from 'node:crypto';
 import { searchVectorsSqlite } from './transcriptIndex.js';
-import { SNAPSHOT_EVENT_COLS, type ReadSource, type Row, type Scope, type TokenGroup } from './store/readSource.js';
+import {
+  NOT_AUTHORIZED, SNAPSHOT_EVENT_COLS, checkEventColumns, type OwnedReadSource, type Row, type Scope, type TokenGroup,
+} from './store/readSource.js';
 
 /** SQL `IN (?,…)` fragment + params for an allowed-workspace set (#122). */
 function inClause(col: string, allowed: Scope): { sql: string; params: string[] } {
@@ -106,10 +108,19 @@ function distinctInputs(db: Database.Database, sessionId: string, names: string[
   return rows.map((r) => r.tool_input);
 }
 
+function sessionWorkspace(db: Database.Database, scope: Scope, id: string): string | null {
+  const row = db.prepare('SELECT workspace_id FROM sessions WHERE id = ?').get(id) as { workspace_id?: unknown } | undefined;
+  return typeof row?.workspace_id === 'string' && scope.has(row.workspace_id) ? row.workspace_id : null;
+}
+
+function assertInScope(db: Database.Database, scope: Scope, id: string): void {
+  if (sessionWorkspace(db, scope, id) === null) throw new Error(NOT_AUTHORIZED);
+}
+
 /** `db` is the MCP server's `{ readonly: true }` connection to state.db. */
-export function sqliteReadSource(db: Database.Database): ReadSource {
+export function sqliteReadSource(db: Database.Database): OwnedReadSource {
   return {
-    dialect: 'sqlite',
+    queryFlavor: 'sqlite',
     async listSessions(scope, f) {
       const where: string[] = [];
       const p: unknown[] = [];
@@ -122,26 +133,30 @@ export function sqliteReadSource(db: Database.Database): ReadSource {
       const sql = `SELECT * FROM sessions WHERE ${where.join(' AND ')} ORDER BY last_active_at DESC LIMIT ?`;
       return db.prepare(sql).all(...p, f.limit) as Row[];
     },
-    async getSession(id) {
-      return (db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as Row | undefined) ?? null;
+    async getSession(scope, id) {
+      const row = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as Row | undefined;
+      return row && typeof row.workspace_id === 'string' && scope.has(row.workspace_id) ? row : null;
     },
-    async sessionWorkspace(id) {
-      const row = db.prepare('SELECT workspace_id FROM sessions WHERE id = ?').get(id) as { workspace_id?: unknown } | undefined;
-      return typeof row?.workspace_id === 'string' ? row.workspace_id : null;
+    async sessionWorkspace(scope, id) {
+      return sessionWorkspace(db, scope, id);
     },
-    async tokenGroups(sessionId) {
+    async tokenGroups(scope, sessionId) {
+      assertInScope(db, scope, sessionId);
       return tokenGroups(db, sessionId);
     },
-    async listEvents(sessionId, f) {
+    async listEvents(scope, sessionId, f) {
+      checkEventColumns(f.columns);
+      assertInScope(db, scope, sessionId);
       const where = ['session_id = ?'];
       const p: unknown[] = [sessionId];
       if (f.type !== undefined) { where.push('type = ?'); p.push(f.type); }
       if (f.toolName !== undefined) { where.push('tool_name = ?'); p.push(f.toolName); }
       if (f.since !== undefined) { where.push('ts >= ?'); p.push(f.since); }
-      const sql = `SELECT ${f.columns} FROM events WHERE ${where.join(' AND ')} ORDER BY id ASC LIMIT ?`;
+      const sql = `SELECT ${f.columns.join(', ')} FROM events WHERE ${where.join(' AND ')} ORDER BY id ASC LIMIT ?`;
       return db.prepare(sql).all(...p, f.limit) as Row[];
     },
-    async summaryParts(sessionId) {
+    async summaryParts(scope, sessionId) {
+      assertInScope(db, scope, sessionId);
       const span = db
         .prepare(`SELECT MIN(ts) AS started_at, MAX(ts) AS last_active_at FROM events WHERE session_id = ?`)
         .get(sessionId) as { started_at: number | null; last_active_at: number | null };
