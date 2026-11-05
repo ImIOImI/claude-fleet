@@ -148,7 +148,21 @@ export interface ServingPort {
    *  null when the broker couldn't attribute one (orphan, old image). */
   sessionId: string | null;
   firstSeenAt: number;
+  /** expose_port label when the port was declared. */
+  label?: string | null;
 }
+
+/** Preview popup cue: a declared port began serving, or the undeclared fallback fired. */
+export interface PortDetected {
+  workspaceId: string;
+  port: number;
+  label: string | null;
+  reason: string | null;
+  cmdline: string | null;
+  declared: boolean;
+}
+
+export type PortOpenVia = 'popup' | 'rail' | 'fallback';
 
 export interface ObservabilityCost {
   inputTokens: number;
@@ -770,20 +784,20 @@ const api = {
     }
   },
   ports: {
-    /** Subscribe to "dev server detected on port N" events (toast cue).
-     *  Returns an unsubscribe function. */
-    onDetected: (cb: (workspaceId: string, port: number) => void): (() => void) => {
+    /** Subscribe to preview popup cues. Returns an unsubscribe function. */
+    onDetected: (cb: (p: PortDetected) => void): (() => void) => {
       const channel = 'ports:detected';
-      const handler = (_e: IpcRendererEvent, payload: { workspaceId: string; port: number }): void =>
-        cb(payload.workspaceId, payload.port);
+      const handler = (_e: IpcRendererEvent, payload: PortDetected): void => cb(payload);
       ipcRenderer.on(channel, handler);
       return () => ipcRenderer.removeListener(channel, handler);
     },
-    /** Open a loopback forward to a container port and the system browser;
-     *  returns the bound host port, or null when nothing answers on the
-     *  container port anymore (stale toast). */
-    open: (workspaceId: string, containerPort: number): Promise<{ hostPort: number | null }> =>
-      ipcRenderer.invoke('ports:open', workspaceId, containerPort),
+    /** Open the preview in the system browser; null when nothing answers on the
+     *  port anymore. `via` is recorded for exposure tracking. */
+    open: (workspaceId: string, containerPort: number, via: PortOpenVia = 'rail'): Promise<{ hostPort: number | null }> =>
+      ipcRenderer.invoke('ports:open', workspaceId, containerPort, via),
+    /** The user closed a preview popup with ✕. */
+    dismiss: (workspaceId: string, port: number): Promise<void> =>
+      ipcRenderer.invoke('ports:dismiss', workspaceId, port),
     /** Subscribe to per-workspace Serving snapshots (full replace per event;
      *  an empty array clears the workspace). Returns an unsubscribe fn. */
     onChanged: (cb: (workspaceId: string, ports: ServingPort[]) => void): (() => void) => {

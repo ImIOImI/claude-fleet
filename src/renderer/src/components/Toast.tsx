@@ -45,7 +45,14 @@ export function ToastView({
         </button>
       )}
       {toast.dismissible && (
-        <button className="toast-dismiss" aria-label="Dismiss" onClick={() => onDismiss(toast.id)}>
+        <button
+          className="toast-dismiss"
+          aria-label="Dismiss"
+          onClick={() => {
+            toast.onClose?.();
+            onDismiss(toast.id);
+          }}
+        >
           ×
         </button>
       )}
