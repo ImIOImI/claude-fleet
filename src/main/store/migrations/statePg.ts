@@ -90,7 +90,6 @@ CREATE TABLE embeddings (
 CREATE INDEX idx_emb_workspace ON embeddings (workspace_id);
 CREATE INDEX idx_emb_session ON embeddings (session_id);
 CREATE INDEX idx_emb_ref_event ON embeddings (ref_event_id);
-CREATE INDEX idx_emb_vec ON embeddings USING hnsw (vec vector_cosine_ops) WHERE text <> '';
 
 CREATE TABLE session_summaries (
   id ${ID},

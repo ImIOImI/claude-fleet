@@ -71,19 +71,19 @@ async function pgShapes(schema: string, k: ReturnType<typeof postgresKysely>): P
     else out[r.t].uniques.push(r.cols);
   }
   for (const s of Object.values(out)) s.uniques.sort();
-  // btree only (excludes pgvector's HNSW index, which has no SQLite
-  // counterpart); excludes a PK/UNIQUE constraint's auto-named backing index.
+  // Excludes a PK/UNIQUE constraint's auto-named backing index. No non-btree
+  // index exists in this schema (D30: exact search, no HNSW); if one is added
+  // later it belongs in a separate, dialect-specific assertion, not here.
   const idx = (await sql<{ t: string; name: string; cols: string }>`
     SELECT tc.relname AS t, ic.relname AS name,
            string_agg(COALESCE(att.attname, '<expr>'), ',' ORDER BY k.ord) AS cols
     FROM pg_index ix
     JOIN pg_class ic ON ic.oid = ix.indexrelid
     JOIN pg_class tc ON tc.oid = ix.indrelid
-    JOIN pg_am am ON am.oid = ic.relam
     JOIN pg_namespace ns ON ns.oid = tc.relnamespace
     CROSS JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord)
     LEFT JOIN pg_attribute att ON att.attrelid = ix.indrelid AND att.attnum = k.attnum AND k.attnum <> 0
-    WHERE ns.nspname = ${schema} AND tc.relname <> 'schema_migrations' AND am.amname = 'btree'
+    WHERE ns.nspname = ${schema} AND tc.relname <> 'schema_migrations'
       AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = ix.indexrelid)
     GROUP BY tc.relname, ic.relname`.execute(k)).rows;
   for (const r of idx) out[r.t].indexes[r.name] = r.cols.split(',');

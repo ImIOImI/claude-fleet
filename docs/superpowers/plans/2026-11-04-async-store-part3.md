@@ -127,14 +127,24 @@ D1–D19 from parts 2a and 2b still bind. The ones part 3 leans on: **D1** (the 
     - It is PG 17/18, not 16.
   - **Rejected, pg-mem:** no pgvector, partial SQL.
   - **CI:** a `pgvector/pgvector:0.8.7-pg16` service container. This corrects c3's outline, which said `pg17`; Aurora is PG16.
-- **D30 — Embeddings on Postgres:**
-  - **Column and index:** `vec vector(384)` with an HNSW `vector_cosine_ops` index, partial `WHERE text <> ''`. Placeholder zero vectors have empty text and a NaN cosine.
+- **D30 — Embeddings on Postgres: exact search, no HNSW.**
+  - **Decision (revised after batch-C review):** no ANN index. `vec vector(384)`, no `idx_emb_vec`. Placeholder zero vectors have empty text and are excluded by `WHERE text <> ''`.
+  - **Why not HNSW:** the query needs an `id` tiebreak for parity with SQLite (every list read gets a total order, D26). `ORDER BY vec <=> q, id` isn't satisfiable by an ANN index scan, so pgvector falls back to an exact sequential scan — the index is built but never read. Forcing real HNSW use (dropping the tiebreak, tuning `ef_search`) was measured at 0.32–0.78 recall against the filtered exact result at default settings: not worth the correctness cost for the row counts this ships at. See the latency table below for the ceiling.
   - **Search:**
-    - `searchEmbeddings(qvec, scope, { limit, kind })` is the per-dialect search: brute-force dot product on SQLite, HNSW on Postgres. The query is taken as a vector so the embedder stays out of `db.ts`.
-    - `SET LOCAL hnsw.iterative_scan = strict_order` keeps the `workspace_id`/`model_id`/`kind` filters from truncating results.
-    - The score is `1 − cosine distance`, which equals the dot product for the unit vectors the embedder produces. Ties break by `id`.
+    - `searchEmbeddings(qvec, scope, { limit, kind })` is exact on both dialects: brute-force dot product on SQLite (`ORDER BY id` before scoring, so a tie keeps the pre-sort order), `ORDER BY vec <=> q, id` (sequential scan) on Postgres. The query is taken as a vector so the embedder stays out of `db.ts`.
+    - Returns `[]` for an empty `scope`, `limit <= 0`, or a zero-norm query vector, on both dialects.
+    - The score is `1 − cosine distance`, which equals the dot product for the unit vectors the embedder produces. Ties break by `id` on both dialects.
+  - **Measured (this container, PG 16.15, single sequential-scan connection, `limit: 10`, one workspace in scope):**
+
+    | rows | p50 | p95 |
+    |---|---|---|
+    | 20,000 | 18.2 ms | 22.8 ms |
+    | 100,000 | 115.5 ms | 155.0 ms |
+    | 250,000 | 291.1 ms | 341.9 ms |
+
+    Scales roughly linearly with row count, as expected for a sequential scan. This is the ceiling that would trigger approximate search (part 4 outline).
   - **MCP:** `search_transcripts` keeps `searchTranscripts(…, db)` on the SQLite read-only connection (D14). On Postgres it is unavailable until part 4 points it at `searchEmbeddings`.
-  - **Tests:** test vectors are full-width, because `vector(384)` rejects other dimensions.
+  - **Tests:** test vectors are full-width, because `vector(384)` rejects other dimensions. `dbSearchEmbeddings.test.ts` also pins the `id` tiebreak and the two empty-result cases.
 - **D31 — Store config:**
   - **Where:** `config.json` `store`, hand-edited only. There is no IPC channel or UI (part 4).
   - **Shapes:**
@@ -3608,11 +3618,11 @@ edit('docs/SPEC.md', [
     ("""- `config:get()` → `{ fleetRoot, sharedDir,""", """- **store** — hand-edited only (no setter channel, not in `config:get`). Absent or `{ kind: 'sqlite' }` ⇒ the SQLite files. `{ kind: 'postgres', … }` puts `state.db`'s and the inbox's tables in one Postgres schema: a connection as `connectionString`, `env` (a variable holding one, e.g. `DATABASE_URL`) or `host`/`port`/`database`/`user` + `password: { kind: 'env', name } | { kind: 'aws-rds-iam', region? }` + `ssl: 'disable' | 'require' | 'verify-full'` (default; needs `caFile`), plus `schema` (default `fleet`; must already exist) and `poolMax` (default 4). Validated by `store/storeConfig.ts:parseStoreConfig`. The desktop refuses plaintext secrets here (a `static` password, or a password inside `connectionString`) because `config.json` is not secret storage. An invalid block is a startup error, never a silent SQLite fallback. `aws-rds-iam` requires `verify-full`.
 - `config:get()` → `{ fleetRoot, sharedDir,""", 1),
     ("""**Schema (v13, current):**""", """**Postgres store.** With `store: { kind: 'postgres' }` (§6 *Settings*) the same queries run on Postgres (`openDbPostgres(pool)`; `store/pgStores.ts:openPgStores` opens both stores on one pool):
-- **Schema:** a baseline equal to the final SQLite schema (`store/migrations/statePg.ts`, state v14). Types: `BIGINT` for every integer, `DOUBLE PRECISION` for real, `TEXT COLLATE "C"` for every text column (byte order, as SQLite compares), identity ids, and `embeddings.vec vector(384)` with an HNSW `vector_cosine_ops` index on rows with non-empty text.
+- **Schema:** a baseline equal to the final SQLite schema (`store/migrations/statePg.ts`, state v14). Types: `BIGINT` for every integer, `DOUBLE PRECISION` for real, `TEXT COLLATE "C"` for every text column (byte order, as SQLite compares), identity ids, and `embeddings.vec vector(384)` (no ANN index; see *Search* below).
 - **Migrations:** recorded in `schema_migrations(track, version)`, one transaction per run under an advisory lock (`store/pgMigrate.ts`). A later schema change ships a `{ version, postgres }` step beside its SQLite `migrate()` step. `schemaParity.test.ts` pins each baseline to the SQLite schema.
 - **Ownership:** the store never creates its schema. The schema must exist, and pgvector ≥ 0.8.0 must be installed (created when the role may).
 - **Order:** every list read has a total `ORDER BY` with NULLs first, so results match SQLite. The 2a/2b characterization snapshots run unchanged on both dialects.
-- **Search:** `searchEmbeddings(qvec, scope, { limit, kind })` searches per dialect: brute-force dot product on SQLite, pgvector HNSW cosine (iterative `strict_order` scan) on Postgres.
+- **Search:** `searchEmbeddings(qvec, scope, { limit, kind })` searches per dialect: brute-force dot product on SQLite, exact pgvector cosine (`ORDER BY vec <=> q, id`, a sequential scan) on Postgres. No HNSW index: a total `id` tiebreak isn't satisfiable by an ANN scan, and approximate search measured poor recall under the filters this query needs. Scales roughly linearly with row count (~290ms p50 at 250k rows in one workspace); approximate search is part-4 work if usage approaches that ceiling.
 
 **Schema (v13, current):**""", 1),
     ("""```sql
@@ -3671,7 +3681,7 @@ BODY=$(cat <<'EOF2'
 Part 3 of the async store layer (plan: docs/superpowers/plans/2026-11-04-async-store-part3.md).
 
 - Postgres dialect for the existing async stores: one pg pool for state.db's and the inbox's tables; int8/numeric as numbers; per-store in-process write lock, concurrent reads; REPEATABLE READ snapshot reads.
-- Per-dialect migrations: Postgres baselines equal to state v14 / inbox v5 (BIGINT, TEXT COLLATE "C", identity ids, vector(384) + HNSW), schema_migrations tracks; SQLite migrate()/MIGRATIONS untouched.
+- Per-dialect migrations: Postgres baselines equal to state v14 / inbox v5 (BIGINT, TEXT COLLATE "C", identity ids, vector(384), exact search), schema_migrations tracks; SQLite migrate()/MIGRATIONS untouched.
 - config.json `store` (hand-edited): connection string / env / fields with static|env|aws-rds-iam passwords and verify-full TLS; RDS CA bundle script pinned in docker/versions.yaml.
 - #491: canonical cost-row order (read snapshot 0.7534357500000001 → 0.75343575, the only snapshot change), latest-session id tiebreak, latest-wins summary pushes, searchEmbeddings on pgvector, Postgres-backed invalidate-during-recompute test.
 - The store test suite (29 files) runs on SQLite and on PG16+pgvector; CI adds a pgvector/pgvector:0.8.7-pg16 service to the unit job.
@@ -3741,6 +3751,7 @@ gh pr merge --auto --squash "$(gh pr view feat/async-store-p3 --repo ImIOImI/cla
   - **Each call:** `BEGIN READ ONLY; SET LOCAL ROLE …; SET LOCAL statement_timeout …`. The single-statement, row-cap and result-cap guards stay.
   - **Contract tests:** `mcpServer.test.ts` and `tests/mcp-*.spec.ts` (memory: MCP contract tests) run on both dialects.
   - **Host:** this is the same isolation (d) needs on the host.
+- **Approximate search (HNSW), if the measured ceiling is reached** (D30 revised part 3 to exact search; this is the follow-up, not committed to): a subquery form — compute the ANN candidate set in an inner query (`ORDER BY vec <=> q LIMIT n`, no `id` tiebreak, so the HNSW index is actually read), then re-rank/tiebreak in an outer query — plus `SET LOCAL hnsw.ef_search = max(200, 4 × limit)` and `hnsw.iterative_scan = relaxed_order`. Needs a recall test at the row counts the ceiling was measured at (20k/100k/250k; see D30's latency table) before shipping, since relaxed/approximate ordering trades correctness for speed.
 - **Perf:** a Postgres bench, the 2b metrics on the managed container over loopback, gated against SQLite with stated tolerances (ingest is expected to be slower per line; reads must stay within one IPC frame).
 - **SPEC:** §4 (the managed image), §6 (*Settings* channels and the Storage section), §8 *Startup* (managed start and the degraded state), §9 (DB credentials in the vault), §11 (role + RLS isolation).
 

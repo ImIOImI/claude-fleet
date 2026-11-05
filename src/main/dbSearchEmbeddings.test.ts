@@ -27,3 +27,27 @@ it('ranks the allowed workspaces by similarity, recorded across dialects', async
   const kinds = await db.searchEmbeddings(unit(10), ['W-A', 'W-OTHER'], { limit: 3, kind: 'summary' });
   expect(kinds.map((h) => h.text)).toMatchSnapshot();
 });
+
+it('ties break by id, identically on both dialects', async () => {
+  const vec = encodeVector(unit(1));
+  const rows = [
+    { workspaceId: 'W-A', sessionId: 's1', kind: 'turn' as const, refEventId: 1, ts: 1, text: 'first', modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec, dedupKey: 'tie1' },
+    { workspaceId: 'W-B', sessionId: 's2', kind: 'turn' as const, refEventId: 2, ts: 2, text: 'second', modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec, dedupKey: 'tie2' },
+    { workspaceId: 'W-A', sessionId: 's3', kind: 'turn' as const, refEventId: 3, ts: 3, text: 'third', modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec, dedupKey: 'tie3' },
+    { workspaceId: 'W-B', sessionId: 's4', kind: 'turn' as const, refEventId: 4, ts: 4, text: 'fourth', modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec, dedupKey: 'tie4' },
+  ];
+  await db.insertEmbeddings(rows);
+  const hits = await db.searchEmbeddings(unit(1), ['W-A', 'W-B'], { limit: 10 });
+  expect(hits.map((h) => h.text)).toEqual(['first', 'second', 'third', 'fourth']);
+});
+
+it('returns [] for a non-positive limit, on both dialects', async () => {
+  await db.insertEmbeddings([{ workspaceId: 'W-A', sessionId: 's1', kind: 'turn', refEventId: 1, ts: 1, text: 'x', modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec: encodeVector(unit(1)), dedupKey: 'lim1' }]);
+  expect(await db.searchEmbeddings(unit(1), ['W-A'], { limit: 0 })).toEqual([]);
+  expect(await db.searchEmbeddings(unit(1), ['W-A'], { limit: -1 })).toEqual([]);
+});
+
+it('returns [] for a zero-norm query vector, on both dialects', async () => {
+  await db.insertEmbeddings([{ workspaceId: 'W-A', sessionId: 's1', kind: 'turn', refEventId: 1, ts: 1, text: 'x', modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec: encodeVector(unit(1)), dedupKey: 'zero1' }]);
+  expect(await db.searchEmbeddings(new Float32Array(EMBED_DIM), ['W-A'], { limit: 5 })).toEqual([]);
+});

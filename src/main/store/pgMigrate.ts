@@ -41,9 +41,9 @@ export async function migratePostgres<DB>(k: Kysely<DB>, schema: string, t: PgTr
   });
 }
 
-/** pgvector ≥ 0.8.0 (iterative index scans) must be installed in the database.
- *  Creates it in `public` (on every store schema's search_path) when this role
- *  may; otherwise names the admin step. */
+/** pgvector ≥ 0.8.0 must be installed in the database. Creates it in `public`
+ *  (on every store schema's search_path) when this role may; otherwise names
+ *  the admin step. */
 export async function ensureVector<DB>(k: Kysely<DB>): Promise<void> {
   const installed = async () =>
     (await sql<{ v: string }>`SELECT extversion AS v FROM pg_extension WHERE extname = 'vector'`.execute(k)).rows[0]?.v;

@@ -32,20 +32,6 @@ export interface BroadcastTarget {
  * for a closing window is harmless — App.tsx's 30s safety poll catches
  * any fresh window up.
  */
-/** Per-key push ordering: `begin(key)` returns a check that is true only while
- *  no later push for that key has begun, so an older push that resolves late
- *  is dropped instead of overwriting a newer one. */
-export function latestWins(): { begin(key: string): () => boolean } {
-  const seq = new Map<string, number>();
-  return {
-    begin(key) {
-      const n = (seq.get(key) ?? 0) + 1;
-      seq.set(key, n);
-      return () => seq.get(key) === n;
-    },
-  };
-}
-
 export function broadcastObservabilitySummary(
   payload: { workspaceId: string; summary: unknown },
   targets: readonly BroadcastTarget[]
@@ -58,4 +44,18 @@ export function broadcastObservabilitySummary(
       // swallow — see top-of-file comment.
     }
   }
+}
+
+/** Per-key push ordering: `begin(key)` returns a check that is true only while
+ *  no later push for that key has begun, so an older push that resolves late
+ *  is dropped instead of overwriting a newer one. */
+export function latestWins(): { begin(key: string): () => boolean } {
+  const seq = new Map<string, number>();
+  return {
+    begin(key) {
+      const n = (seq.get(key) ?? 0) + 1;
+      seq.set(key, n);
+      return () => seq.get(key) === n;
+    },
+  };
 }
