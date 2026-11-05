@@ -5,6 +5,15 @@ on:
     paths:
       - 'docker/**'
       - 'broker/**'
+      - 'src/host/**'
+      - 'src/main/identity/**'
+      - 'src/main/broker.ts'
+      - 'src/main/claudeArgs.ts'
+      - 'src/main/vaultScopes.ts'
+      - 'src/preload/identityTypes.ts'
+      - 'package-lock.json'
+      - 'tsconfig.host.json'
+      - 'vite.host.config.ts'
       - '.github/workflows/test-runner-images.yml'
 
 permissions:
@@ -86,3 +95,21 @@ jobs:
 
       - name: Smoke dev image
         run: bash docker/dev/smoke.test.sh claude-fleet/runner-dev:test
+
+      - name: Build host (amd64) FROM local base
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/host/Dockerfile
+          platforms: linux/amd64
+          load: true
+          build-args: |
+            BASE_IMAGE=${{ env.BASE_REF }}
+          tags: claude-fleet/runner-host:test
+          cache-from: type=gha,scope=host-amd64
+
+      - name: Test fleet-host-entry
+        run: bash docker/host/fleet-host-entry.test.sh
+
+      - name: Smoke host image
+        run: bash docker/host/smoke.test.sh claude-fleet/runner-host:test

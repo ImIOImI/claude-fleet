@@ -13,9 +13,24 @@
 # hooks.settings.json) — loaded via `claude --settings` for the waiting-chip.
 # Without this opt-in those COPYs fail with "not found" and the publish breaks.
 !docker/runner/**
+# runner-host: the fleet-host bundle's inputs (docker/host/Dockerfile).
+!docker/host/**
+!package.json
+!package-lock.json
+!tsconfig.host.json
+!vite.host.config.ts
+!src/host/**
+!src/main/identity/**
+!src/main/broker.ts
+!src/main/claudeArgs.ts
+!src/main/vaultScopes.ts
+!src/preload/identityTypes.ts
 
 # Even within broker/, drop things the binary doesn't need:
 broker/**/*_test.go
 broker/cmd/**/testdata/**
 # …and the runner hook test harness — not COPYd into any image.
 docker/runner/*.test.sh
+src/**/*.test.ts
+src/host/testFakes.ts
+docker/host/*.test.sh

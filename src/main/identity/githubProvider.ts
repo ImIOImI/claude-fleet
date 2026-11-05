@@ -137,7 +137,11 @@ async function assertInstallationInOrg(token: string, org: string, slug: string)
     const res = await ghFetch(url, { headers: headers(token) });
     if (res.status === 401) throw new IdentityError('unauthorized', 'GitHub rejected the token', 401);
     if (!res.ok) throw new IdentityError('upstream', `GitHub GET /installation/repositories answered HTTP ${res.status}`, res.status);
-    const body = (await readJson(res)) as { repositories?: unknown } | null;
+    const body = (await readJson(res)) as { repositories?: unknown; total_count?: unknown } | null;
+    const total = body?.total_count;
+    if (page === 0 && typeof total === 'number' && total > MAX_REPO_PAGES * 100) {
+      throw refuse(`it reaches ${total} repositories; the org check covers at most ${MAX_REPO_PAGES * 100}`);
+    }
     const list = body?.repositories;
     if (!Array.isArray(list)) throw new IdentityError('upstream', 'GitHub GET /installation/repositories returned an unexpected body');
     for (const r of list as Array<{ owner?: { login?: unknown } } | null>) {

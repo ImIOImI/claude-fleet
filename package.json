@@ -17,7 +17,9 @@
     "start": "electron-vite preview",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
-    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "typecheck:host": "tsc -p tsconfig.host.json",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web && npm run typecheck:host",
+    "build:host": "vite build --config vite.host.config.ts",
     "test": "npm run test:unit && npm run build && playwright test",
     "test:unit": "vitest run",
     "test:e2e": "playwright test",
@@ -51,6 +53,7 @@
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
     "ulid": "^3.0.2",
+    "ws": "^8.22.1",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
@@ -60,6 +63,7 @@
     "@types/node": "^20.14.0",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
+    "@types/ws": "^8.18.2",
     "@vitejs/plugin-react": "^5.2.0",
     "electron": "^43.2.0",
     "electron-builder": "^26.15.3",

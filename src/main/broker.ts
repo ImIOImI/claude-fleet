@@ -49,7 +49,7 @@ export enum FrameType {
   KILLED = 0x19
 }
 
-const MAX_FRAME_PAYLOAD = 1 << 20; // mirror proto.MaxFramePayload
+export const MAX_FRAME_PAYLOAD = 1 << 20; // mirror proto.MaxFramePayload
 
 /** Timeout for control-RPC responses. See `rpc()` for the rationale. */
 export const RPC_TIMEOUT_MS = 30_000;
@@ -58,7 +58,7 @@ export const RPC_TIMEOUT_MS = 30_000;
  * Splits a stream of socket bytes into discrete frames. Push raw
  * chunks; pull complete frames via the iterator returned by `consume`.
  */
-class FrameReader {
+export class FrameReader {
   // Buffer<ArrayBufferLike> is the broader type that's compatible with
   // both Buffer.alloc() and Buffer.concat()/subarray() return shapes in
   // @types/node 22+. Without the explicit annotation the field gets
@@ -96,7 +96,7 @@ class FrameReader {
   }
 }
 
-function encodeFrame(type: FrameType, payload: Buffer): Buffer {
+export function encodeFrame(type: FrameType, payload: Buffer): Buffer {
   const totalLen = payload.length + 1;
   const out = Buffer.allocUnsafe(4 + totalLen);
   out.writeUInt32BE(totalLen, 0);
@@ -105,23 +105,23 @@ function encodeFrame(type: FrameType, payload: Buffer): Buffer {
   return out;
 }
 
-function encodeJSONFrame(type: FrameType, value: unknown): Buffer {
+export function encodeJSONFrame(type: FrameType, value: unknown): Buffer {
   return encodeFrame(type, Buffer.from(JSON.stringify(value), 'utf8'));
 }
 
-function encodeChannelData(channel: number, body: Buffer): Buffer {
+export function encodeChannelData(channel: number, body: Buffer): Buffer {
   const out = Buffer.allocUnsafe(4 + body.length);
   out.writeUInt32BE(channel, 0);
   body.copy(out, 4);
   return out;
 }
 
-function decodeChannelData(payload: Buffer): { channel: number; body: Buffer } {
+export function decodeChannelData(payload: Buffer): { channel: number; body: Buffer } {
   if (payload.length < 4) throw new Error('broker: channel-data frame too short');
   return { channel: payload.readUInt32BE(0), body: payload.subarray(4) };
 }
 
-function encodeResize(channel: number, cols: number, rows: number): Buffer {
+export function encodeResize(channel: number, cols: number, rows: number): Buffer {
   const out = Buffer.allocUnsafe(8);
   out.writeUInt32BE(channel, 0);
   out.writeUInt16BE(cols, 4);
