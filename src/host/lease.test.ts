@@ -227,6 +227,19 @@ describe('LeaseManager', () => {
     expect(acquired).not.toHaveBeenCalled();
     expect(release).toHaveBeenCalledWith('a', 1);
   });
+
+  it('markLost gives up a held lease and emits lost once', async () => {
+    const m = new LeaseManager({ holder: 'h', store: memoryLeaseStore() });
+    const lost = vi.fn();
+    m.on('lost', lost);
+    await m.tick();
+    expect(m.state).toBe('holder');
+    m.markLost();
+    m.markLost();
+    expect(m.state).toBe('standby');
+    expect(lost).toHaveBeenCalledTimes(1);
+    await m.stop();
+  });
 });
 
 describe('LeaseManager edge cases', () => {

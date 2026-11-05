@@ -169,6 +169,11 @@ export class LeaseManager extends EventEmitter {
     this.deadlineTimer.unref();
   }
 
+  /** A fenced write found the lease row moved on: give up now, as a failed renew would. */
+  markLost(): void {
+    this.lose();
+  }
+
   private lose(): void {
     if (this._state !== 'holder') return;
     this._state = 'standby';

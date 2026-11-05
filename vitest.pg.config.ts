@@ -6,6 +6,8 @@ export default defineConfig({
   test: {
     include: [
       'src/host/hostDb.test.ts',
+      'src/host/main.pg.test.ts',
+      'src/host/pgLease.test.ts',
       'src/main/automations/automationService.test.ts',
       'src/main/automations/automationStore.test.ts',
       'src/main/automations/loadoutInstaller.test.ts',

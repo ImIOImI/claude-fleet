@@ -11,7 +11,9 @@ import { startCredHelper, type CredServer } from './credServer.js';
 import { brokerWatch, EventHub, pruneDeadOwners } from './events.js';
 import { openHostDbRetrying, startDbHealth, type DbHealth, type HostDbHandle } from './hostDb.js';
 import { resolveWorkspaceId } from './hostState.js';
+import { startHolder, type Holder } from './holder.js';
 import { LeaseManager, memoryLeaseStore, type LeaseStore } from './lease.js';
+import { postgresLeaseStore } from './pgLease.js';
 import { createLogger, type LogSink } from './log.js';
 import { brokerRpcChannels } from './rpc.js';
 import { createHostServer, installCrashGuards, type HostServer } from './server.js';
@@ -23,8 +25,10 @@ export const FATAL_STOP_MS = 2_000;
 
 export interface RunHostOptions {
   env?: NodeJS.ProcessEnv;
-  /** Defaults to memoryLeaseStore(), which is correct only for a single replica. */
+  /** Defaults to the host DB's lease, or memoryLeaseStore() (single replica only) without db. */
   leaseStore?: LeaseStore;
+  leaseRenewMs?: number;
+  leaseTtlMs?: number;
   exit?: (code: number) => void;
   /** Signal and crash-event source. */
   proc?: NodeJS.EventEmitter;
@@ -116,9 +120,12 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   const ops = opts.brokerOps ?? realBrokerOps(env.brokerSocket);
   const hub = new AttachHub(ops, { hostPort: env.port, log });
   const events = new EventHub();
+  const holderId = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
   const leaseMgr = new LeaseManager({
-    holder: `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`,
-    store: opts.leaseStore ?? memoryLeaseStore(),
+    holder: holderId,
+    store: opts.leaseStore ?? (hostDb ? postgresLeaseStore(hostDb.k, workspaceId) : memoryLeaseStore()),
+    renewMs: opts.leaseRenewMs,
+    ttlMs: opts.leaseTtlMs,
     onError: (err) => log.log('warn', 'lease store error', { error: err.message })
   });
   lease = leaseMgr;
@@ -171,6 +178,9 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
       proc.off('SIGINT', onTerm);
       // Frames stop before the lease is released, so no viewer acts during the handover.
       server.halt(1001, 'host shutting down');
+      // Holder resources close while the lease still fences their last writes.
+      const holder = await holderP;
+      await holder?.stop().catch((err: Error) => log.log('warn', 'holder stop failed', { error: err.message }));
       await leaseMgr.stop();
       await server.close();
       await cred?.close();
@@ -183,7 +193,25 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   }
   const onTerm = (): void => void shutdown(0);
 
-  leaseMgr.on('acquired', (epoch: number) => log.log('info', 'lease acquired', { epoch, workspaceId }));
+  let holderP: Promise<Holder | null> | null = null;
+  leaseMgr.on('acquired', (epoch: number) => {
+    log.log('info', 'lease acquired', { epoch, workspaceId });
+    const db = config.db;
+    if (!db) return;
+    holderP = startHolder({
+      db,
+      env: opts.env ?? process.env,
+      workspaceId,
+      holder: holderId,
+      epoch: () => (leaseMgr.state === 'holder' ? leaseMgr.epoch : null),
+      onLost: () => leaseMgr.markLost(),
+      log
+    }).catch((err: Error) => {
+      log.log('error', 'holder start failed; giving up the lease', { error: err.message });
+      leaseMgr.markLost();
+      return null;
+    });
+  });
   leaseMgr.on('lost', () => {
     log.log('error', 'lease lost; exiting');
     void shutdown(1);
