@@ -1530,12 +1530,14 @@ Settings has an **Account** tab (`AccountSettings.tsx`). Each action applies at 
   - **Roles:**
     - Each caller workspace reads as its own LOGIN NOINHERIT role, `<schema>_mcp_<sha256(id)[:16]>`.
     - That role is a member of `<schema>_mcp_reader`. The reader has schema `USAGE`, `EXECUTE` on `mcp_scope()` and `mcp_row_too_large()`, and `SELECT` on the eight `query` tables. On `events` it gets only the snapshot columns: no `raw_jsonl`, no `dedup_key`.
-    - The role's NOLOGIN `_raw` sibling adds `raw_jsonl` (via `<schema>_mcp_raw`). It is granted `WITH INHERIT FALSE, SET TRUE`, so it is reached only by `SET LOCAL ROLE` when `include_raw`.
+    - The role's NOLOGIN `_raw` sibling adds `raw_jsonl` (via `<schema>_mcp_raw`). It is granted `WITH INHERIT FALSE, SET TRUE`; the call does `SET LOCAL ROLE` to it when `include_raw`.
+    - `include_raw` sets the default projection; it is not a privilege boundary. A caller can `set_config('role', '<caller>_raw', true)` itself and read `raw_jsonl`, and RLS still limits it to its own scope's rows.
     - `ensureIsolation` revokes every table privilege from the reader and raw roles before granting, so a stale grant can't survive a restart.
+    - `ensureIsolation` stores a fingerprint (a hash of its DDL plus a digest of the RLS flags, table and column ACLs, policies, functions and shared roles) as the comment on `mcp_grants`. When the catalog still matches, it runs no DDL, so a normal start takes no ACCESS EXCLUSIVE lock. Otherwise the DDL runs with `lock_timeout` 3 s and `statement_timeout` 30 s; a lock timeout leaves `query` unavailable with the reason, and boot continues.
     - A process mints each role's password at first use and sets it as a SCRAM-SHA-256 verifier. Nothing stores it.
   - **Rows:**
     - RLS on the eight tables admits `workspace_id IN mcp_scope()`; `perf_events` also admits NULL.
-    - Policies target only the reader role, so any other non-owner role sees no rows.
+    - Policies target only the reader role, so any other non-owner role sees no rows. RLS stays enabled on these eight tables, so this includes any role an operator adds for reporting or a BI tool: it needs the store role, a BYPASSRLS role, or its own policy.
     - `mcp_scope()` is `SECURITY DEFINER` with `search_path = pg_catalog`, so a function shadowed on the caller's path can't hijack it. It returns the `mcp_grants` rows for `session_user`.
     - The caller's SQL can reach only its own roles with `SET ROLE` or `set_config('role')`, and can't change `session_user`.
     - `mcp_grants` is rewritten from the caller's allowed set before every call, under a per-caller lock, so a revocation applies to the next call.
@@ -1543,7 +1545,7 @@ Settings has an **Account** tab (`AccountSettings.tsx`). Each action applies at 
   - **Statement:**
     - The caller's SQL becomes the inner subquery of one `DECLARE … CURSOR` that returns each row as size-checked `row_to_json` text (§11 *`query` on the Postgres store: limits*).
     - The cursor accepts only SELECT, VALUES or WITH (no data-modifying WITH), sent over the extended protocol, which refuses a second statement.
-    - It runs in a REPEATABLE READ transaction set READ ONLY, with `statement_timeout` 5 s, `lock_timeout` 2 s and `TimeZone` UTC. Eight temp views shadow the tables first, so `SELECT * FROM events` has no `raw_jsonl`.
+    - It runs in a REPEATABLE READ transaction set READ ONLY, with `statement_timeout` 5 s, `lock_timeout` 2 s (each re-set before every FETCH, §11 *`query` on the Postgres store: limits*) and `TimeZone` UTC. Eight temp views shadow the tables first, so `SELECT * FROM events` has no `raw_jsonl`.
     - Every call ends with `ROLLBACK` and `DISCARD ALL`, because advisory locks and `LISTEN` survive a rollback.
     - Tested and refused:
       - reading another workspace's rows by join, subquery, `query_to_xml` or a schema-qualified table;
@@ -1965,7 +1967,10 @@ Read-only MCP server exposed by claude-fleet that lets the agent inside each con
 - **Runaway protection**: the read-only connection is the hard write-guard; results are row-capped (1000).
 - **Request framing**: a request line over 1 MiB gets a JSON-RPC `-32600` error and is dropped; the connection stays usable (`mcpLines.ts`). Before a TCP token is accepted, an oversized line closes the connection.
 - **`query` on the Postgres store: limits** (`store/pgQueryIsolation.ts`):
-  - **Concurrency and time:** at most 2 calls run at once across all callers, and 8 more wait. Past that a call gets `query is busy`. Each call has `statement_timeout` 5 s, `lock_timeout` 2 s and an overall deadline, after which its connection is destroyed.
+  - **Concurrency and time:** at most 2 calls run at once across all callers, and 8 more wait. Past that a call gets `query is busy`. Each call has `statement_timeout` 5 s, `lock_timeout` 2 s and an overall deadline (default 2 × statement timeout + 10 s).
+  - **Per-FETCH timeouts:** `SET LOCAL statement_timeout` and `lock_timeout` are re-issued before the DECLARE and before every FETCH, each capped at the time left to the deadline plus 1 s. A caller's `set_config('statement_timeout', '0', true)` therefore lasts at most until its next FETCH. The 1 s is a server-side backstop for a lost cancel.
+  - **Cancel on deadline:** on the deadline or a client-level error, the call sends a protocol CancelRequest for its backend over a fresh connection (no privilege needed), then destroys the connection. If the request can't be delivered it tries `pg_terminate_backend` from the store pool, which works only where the store role may signal the caller's backend.
+  - **Store-pool steps:** provisioning a caller role and writing its scope run with the call's `lock_timeout` and `statement_timeout`.
   - **Result size:** each row comes back as one `row_to_json` text. A row over 50 KB (or a row datum over 200 KB) is refused on the server by `mcp_row_too_large()`, so an oversized value never reaches the client.
   - **Fetching:** the cursor is fetched 50 rows at a time, and fetching stops once the result passes 50 KB.
   - **Message guard:** a backend message over 1 MiB, such as an error that echoes a huge value, destroys the connection before pg-protocol decodes it.
@@ -1980,7 +1985,7 @@ Read-only MCP server exposed by claude-fleet that lets the agent inside each con
     - timestamptz comes back as ISO text in UTC, because the call sets `TimeZone = 'UTC'`.
     - bigint and numeric past 2^53 lose precision, as they did through the pg driver.
   - **Wrapper:** the caller's SQL sits inside a subquery with random aliases, so it can't close the subquery and select around the checks.
-  - **Policies:** they target only the reader role, so any other non-owner role sees no rows.
+  - **Policies:** they target only the reader role, so any other non-owner role sees no rows (§9).
   - **One process per schema:** this is the supported mode. Caller-role passwords are minted per process, and a login refused with 28P01 re-provisions the role once.
   - **Accepted residual risks:**
     - A caller can raise `work_mem` or `hash_mem_multiplier` with `set_config`, and Postgres can't block that in-database. The concurrency cap and the 5 s timeout bound the damage.

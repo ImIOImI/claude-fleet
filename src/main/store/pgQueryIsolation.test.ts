@@ -8,7 +8,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import pg from 'pg';
 import { sql } from 'kysely';
 import * as db from '../db.js';
-import { callerRole, isolationRoles, PgQueryIsolation, QueryUnavailableError, rolePoolConfig } from './pgQueryIsolation.js';
+import { parse as parseConnectionString } from 'pg-connection-string';
+import { callerRole, ensureIsolation, isolationRoles, PgQueryIsolation, QueryUnavailableError, rolePoolConfig } from './pgQueryIsolation.js';
 import { MCP_QUERY_TABLES } from './readSource.js';
 import { openPgMcpReadSource } from './pgReadSource.js';
 import { callTool, handleMcpRequestForTests, startMcpServer, stopMcpServer } from '../mcpServer.js';
@@ -22,6 +23,16 @@ const q = (sqlText: string, o: { params?: unknown[]; includeRaw?: boolean; maxRo
 
 let t: TestPgApp;
 let iso: PgQueryIsolation;
+
+/** Active backends of `role` once they settle, polled for up to `ms`. */
+async function activeWithin(role: string, ms: number): Promise<number> {
+  const until = Date.now() + ms;
+  for (;;) {
+    const r = await t.pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE usename = $1 AND state = 'active'`, [role]);
+    if (r.rows[0].n === 0 || Date.now() >= until) return r.rows[0].n;
+    await new Promise((res) => setTimeout(res, 50));
+  }
+}
 
 async function seed(): Promise<void> {
   for (const [ws, s] of [[A, 'sa'], [B, 'sb']] as const) {
@@ -166,8 +177,9 @@ describe.skipIf(!isPg)('query isolation on Postgres (role + RLS)', () => {
     await q('SELECT 1');
     const c = new pg.Client(rolePoolConfig(t.appConfig, callerRole(t.schema, A), 'wrong'));
     const login = c.connect().then(() => 'connected', (e: { code?: string }) => e.code);
-    // The local socket server trusts every login; CI's TCP service checks SCRAM.
-    expect(['28P01', 'connected']).toContain(await login);
+    // Only a Unix-socket server (scripts/pg-test-server.sh, trust auth) skips the password check.
+    const unixSocket = parseConnectionString(process.env.PG_TEST_URL ?? '').host?.startsWith('/') ?? false;
+    expect(unixSocket ? ['28P01', 'connected'] : ['28P01']).toContain(await login);
     await c.end().catch(() => undefined);
   });
 
@@ -321,14 +333,65 @@ describe.skipIf(!isPg)('query isolation on Postgres (role + RLS)', () => {
     expect(await q('SELECT 1 AS x')).toEqual([{ x: 1 }]);
   });
 
-  it('a call past its overall deadline is abandoned and the caller stays usable', async () => {
+  it('a call past its overall deadline is abandoned, its backend cancelled, and the caller stays usable', async () => {
     await iso.end();
     iso = await PgQueryIsolation.open(db.stateKysely(), t.schema, t.appConfig, { statementTimeoutMs: 20_000, callTimeoutMs: 300 });
     const started = Date.now();
-    await expect(q('SELECT pg_sleep(3)')).rejects.toThrow(/did not finish/);
+    await expect(q('SELECT pg_sleep(30)')).rejects.toThrow(/did not finish/);
     expect(Date.now() - started).toBeLessThan(2_000);
+    // Well inside the server-side backstop (deadline + 1 s): only the cancel ends it this soon.
+    expect(await activeWithin(callerRole(t.schema, A), 500)).toBe(0);
     expect(await q('SELECT 1 AS x')).toEqual([{ x: 1 }]);
   });
+
+  it('a caller that turns off statement_timeout in one FETCH is still bounded in the next', async () => {
+    await iso.end();
+    iso = await PgQueryIsolation.open(db.stateKysely(), t.schema, t.appConfig, { statementTimeoutMs: 1_000, callTimeoutMs: 3_000 });
+    const started = Date.now();
+    await expect(q(`SELECT g, set_config('statement_timeout', '0', true), set_config('lock_timeout', '0', true),
+      CASE WHEN g > 50 THEN pg_sleep(1000) END FROM generate_series(1, 60) g`)).rejects.toThrow(/statement timeout/);
+    expect(Date.now() - started).toBeLessThan(2_500);
+    expect(await activeWithin(callerRole(t.schema, A), 2_000)).toBe(0);
+    expect(await q('SELECT 1 AS x')).toEqual([{ x: 1 }]);
+  });
+
+  it('include_raw is a projection default, not a privilege boundary: switching to the raw role still sees only the caller\'s rows', async () => {
+    const raw = `${callerRole(t.schema, A)}_raw`;
+    const [r] = (await q(`SELECT set_config('role', '${raw}', true) AS r,
+      query_to_xml('select distinct raw_jsonl from ${t.schema}.events', true, true, '') AS x`)) as Array<{ r: string; x: string }>;
+    expect(r.r).toBe(raw);
+    expect(r.x).toContain(`raw-${A}`);
+    expect(r.x).not.toContain(`raw-${B}`);
+  });
+
+  it('opening on an already-isolated schema takes no table lock that a reader would block', async () => {
+    const reader = await t.appPool.connect();
+    try {
+      await reader.query('BEGIN');
+      await reader.query('SELECT 1 FROM events LIMIT 1');
+      const started = Date.now();
+      await ensureIsolation(db.stateKysely(), t.schema);
+      expect(Date.now() - started).toBeLessThan(2_000);
+    } finally {
+      await reader.query('ROLLBACK');
+      reader.release();
+    }
+  });
+
+  it('a lock held across open leaves query unavailable instead of hanging', async () => {
+    // A stale grant forces the DDL path, which then waits on the caller's lock.
+    await t.appPool.query(`GRANT SELECT ON ${t.schema}.errors TO ${isolationRoles(t.schema).reader}`);
+    await q('SELECT 1');
+    const holding = q('SELECT count(*), pg_sleep(4.5) FROM events').catch(() => undefined);
+    await new Promise((r) => setTimeout(r, 300));
+    const started = Date.now();
+    const src = await openPgMcpReadSource(t.schema, t.appConfig, () => undefined);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    await expect(src.query({ callerId: A, scope: scopeA }, { sql: 'SELECT 1', params: [], includeRaw: false, maxRows: 1 }))
+      .rejects.toThrow(/query is unavailable on this Postgres store: .*lock/);
+    await src.close();
+    await holding;
+  }, 20_000);
 
   it('runs at most maxConcurrent queries at once and refuses past the queue limit', async () => {
     await iso.end();

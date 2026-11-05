@@ -3,6 +3,7 @@
 // the workspaces in `mcp_grants` for session_user, which the caller's SQL can't
 // change (SET ROLE / set_config('role') reach only the caller's own roles).
 import { createHash, randomBytes } from 'node:crypto';
+import { connect as netConnect } from 'node:net';
 import pg from 'pg';
 import { sql, type Kysely } from 'kysely';
 import { parse as parseConnectionString } from 'pg-connection-string';
@@ -14,6 +15,12 @@ import { MAX_QUERY_BYTES, MCP_QUERY_TABLES, SNAPSHOT_EVENT_COLS, type QueryArgs,
 const MAX_SCHEMA_LEN = 32;
 const DEFAULT_STATEMENT_TIMEOUT_MS = 5_000;
 const DEFAULT_LOCK_TIMEOUT_MS = 2_000;
+const DEFAULT_SETUP_LOCK_TIMEOUT_MS = 3_000;
+const SETUP_STATEMENT_TIMEOUT_MS = 30_000;
+/** How long past the call deadline the server-side timeouts still allow, as a backstop for a lost cancel. */
+const CANCEL_GRACE_MS = 1_000;
+const CANCEL_TIMEOUT_MS = 1_000;
+const LOCK_NOT_AVAILABLE = '55P03';
 // set_config can raise work_mem per statement, so concurrency is the memory bound.
 const DEFAULT_MAX_CONCURRENT = 2;
 const DEFAULT_MAX_QUEUED = 8;
@@ -59,38 +66,90 @@ const POLICY = (schema: string, table: string): string =>
     ? `workspace_id IS NULL OR workspace_id IN (SELECT unnest(${schema}.mcp_scope()))`
     : `workspace_id IN (SELECT unnest(${schema}.mcp_scope()))`;
 
-/** Idempotent; runs as the store role, which owns the tables and has CREATEROLE. */
-export async function ensureIsolation<DB>(k: Kysely<DB>, schema: string): Promise<void> {
+/** The isolation DDL, in order; it also versions the stored fingerprint. */
+function isolationDdl(schema: string): string[] {
   const r = isolationRoles(schema);
-  await k.transaction().execute(async (trx) => {
-    const run = (text: string) => sql.raw(text).execute(trx);
-    await run(`DO $$ BEGIN
+  return [
+    `DO $$ BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${r.reader}') THEN CREATE ROLE ${r.reader} NOLOGIN; END IF;
       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${r.raw}') THEN CREATE ROLE ${r.raw} NOLOGIN; END IF;
-    END $$`);
-    await run(`CREATE TABLE IF NOT EXISTS mcp_grants (
-      role_name TEXT COLLATE "C" NOT NULL, workspace_id TEXT COLLATE "C" NOT NULL, PRIMARY KEY (role_name, workspace_id))`);
-    await run(`CREATE OR REPLACE FUNCTION mcp_scope() RETURNS text[] LANGUAGE sql STABLE SECURITY DEFINER
+    END $$`,
+    `CREATE TABLE IF NOT EXISTS mcp_grants (
+      role_name TEXT COLLATE "C" NOT NULL, workspace_id TEXT COLLATE "C" NOT NULL, PRIMARY KEY (role_name, workspace_id))`,
+    `CREATE OR REPLACE FUNCTION mcp_scope() RETURNS text[] LANGUAGE sql STABLE SECURITY DEFINER
       SET search_path = pg_catalog
-      AS $f$ SELECT coalesce(array_agg(workspace_id), '{}') FROM ${schema}.mcp_grants WHERE role_name = session_user $f$`);
-    await run(`REVOKE ALL ON FUNCTION mcp_scope() FROM PUBLIC`);
-    await run(`CREATE OR REPLACE FUNCTION mcp_row_too_large(n bigint, cap bigint) RETURNS text LANGUAGE plpgsql VOLATILE
+      AS $f$ SELECT coalesce(array_agg(workspace_id), '{}') FROM ${schema}.mcp_grants WHERE role_name = session_user $f$`,
+    `REVOKE ALL ON FUNCTION mcp_scope() FROM PUBLIC`,
+    `CREATE OR REPLACE FUNCTION mcp_row_too_large(n bigint, cap bigint) RETURNS text LANGUAGE plpgsql VOLATILE
       SET search_path = pg_catalog
       AS $f$ BEGIN RAISE EXCEPTION 'result too large: a row is % bytes (max %); select fewer or narrower columns', n, cap
-        USING ERRCODE = 'program_limit_exceeded'; END $f$`);
-    await run(`REVOKE ALL ON FUNCTION mcp_row_too_large(bigint, bigint) FROM PUBLIC`);
-    await run(`REVOKE ALL ON ALL TABLES IN SCHEMA ${schema} FROM ${r.reader}, ${r.raw}`);
-    await run(`GRANT USAGE ON SCHEMA ${schema} TO ${r.reader}`);
-    await run(`GRANT EXECUTE ON FUNCTION mcp_scope(), mcp_row_too_large(bigint, bigint) TO ${r.reader}`);
-    await run(`GRANT SELECT (${SNAPSHOT_EVENT_COLS}) ON events TO ${r.reader}`);
-    await run(`GRANT SELECT (raw_jsonl) ON events TO ${r.raw}`);
-    await run(`GRANT SELECT ON ${MCP_QUERY_TABLES.filter((t) => t !== 'events').join(', ')} TO ${r.reader}`);
-    for (const t of MCP_QUERY_TABLES) {
-      await run(`ALTER TABLE ${t} ENABLE ROW LEVEL SECURITY`);
-      await run(`DROP POLICY IF EXISTS mcp_read ON ${t}`);
-      await run(`CREATE POLICY mcp_read ON ${t} FOR SELECT TO ${r.reader} USING (${POLICY(schema, t)})`);
-    }
-  });
+        USING ERRCODE = 'program_limit_exceeded'; END $f$`,
+    `REVOKE ALL ON FUNCTION mcp_row_too_large(bigint, bigint) FROM PUBLIC`,
+    `REVOKE ALL ON ALL TABLES IN SCHEMA ${schema} FROM ${r.reader}, ${r.raw}`,
+    `GRANT USAGE ON SCHEMA ${schema} TO ${r.reader}`,
+    `GRANT EXECUTE ON FUNCTION mcp_scope(), mcp_row_too_large(bigint, bigint) TO ${r.reader}`,
+    `GRANT SELECT (${SNAPSHOT_EVENT_COLS}) ON events TO ${r.reader}`,
+    `GRANT SELECT (raw_jsonl) ON events TO ${r.raw}`,
+    `GRANT SELECT ON ${MCP_QUERY_TABLES.filter((t) => t !== 'events').join(', ')} TO ${r.reader}`,
+    ...MCP_QUERY_TABLES.flatMap((t) => [
+      `ALTER TABLE ${t} ENABLE ROW LEVEL SECURITY`,
+      `DROP POLICY IF EXISTS mcp_read ON ${t}`,
+      `CREATE POLICY mcp_read ON ${t} FOR SELECT TO ${r.reader} USING (${POLICY(schema, t)})`,
+    ]),
+  ];
+}
+
+/** The DDL's version plus a digest of the catalog state it produces: RLS flags,
+ *  table and column ACLs, policies, the two functions and the shared roles. */
+async function isolationFingerprint<DB>(k: Kysely<DB>, schema: string, ddl: string[]): Promise<string> {
+  const r = isolationRoles(schema);
+  const state = await sql<{ d: string | null }>`
+    SELECT md5(string_agg(x, E'\n' ORDER BY x)) AS d FROM (
+      SELECT 'rel:' || c.relname || ':' || c.relkind::text || ':' || c.relrowsecurity || ':' || c.relforcerowsecurity || ':' || coalesce(c.relacl::text, '')
+        FROM pg_class c WHERE c.relnamespace = ${schema}::regnamespace AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+      UNION ALL
+      SELECT 'col:' || c.relname || '.' || a.attname || ':' || a.attacl::text
+        FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+        WHERE c.relnamespace = ${schema}::regnamespace AND a.attacl IS NOT NULL
+      UNION ALL
+      SELECT 'pol:' || tablename || ':' || policyname || ':' || permissive || ':' || roles::text || ':' || cmd || ':' || coalesce(qual, '') || ':' || coalesce(with_check, '')
+        FROM pg_policies WHERE schemaname = ${schema}
+      UNION ALL
+      SELECT 'fn:' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || '):' || md5(p.prosrc) || ':' || p.prosecdef || ':'
+          || p.provolatile::text || ':' || coalesce(array_to_string(p.proconfig, ','), '') || ':' || coalesce(p.proacl::text, '')
+        FROM pg_proc p WHERE p.pronamespace = ${schema}::regnamespace
+      UNION ALL
+      SELECT 'ns:' || coalesce(n.nspacl::text, '') FROM pg_namespace n WHERE n.nspname = ${schema}
+      UNION ALL
+      SELECT 'role:' || rolname || ':' || rolcanlogin FROM pg_roles WHERE rolname IN (${r.reader}, ${r.raw})
+    ) s(x)`.execute(k);
+  const version = createHash('sha256').update(ddl.join('\n;\n')).digest('hex').slice(0, 16);
+  return `${version}:${state.rows[0]?.d ?? ''}`;
+}
+
+/** Idempotent; runs as the store role, which owns the tables and has CREATEROLE.
+ *  When the catalog already matches the stored fingerprint it runs no DDL, so a
+ *  normal start takes no ACCESS EXCLUSIVE lock. A lock wait past `lockTimeoutMs`
+ *  throws QueryUnavailableError. */
+export async function ensureIsolation<DB>(k: Kysely<DB>, schema: string, lockTimeoutMs = DEFAULT_SETUP_LOCK_TIMEOUT_MS): Promise<void> {
+  const ddl = isolationDdl(schema);
+  const stored = await sql<{ c: string | null }>`
+    SELECT obj_description(to_regclass(${schema + '.mcp_grants'}), 'pg_class') AS c`.execute(k);
+  if (stored.rows[0]?.c && stored.rows[0].c === await isolationFingerprint(k, schema, ddl)) return;
+  try {
+    await k.transaction().execute(async (trx) => {
+      const run = (text: string) => sql.raw(text).execute(trx);
+      await run(`SET LOCAL lock_timeout = ${lockTimeoutMs}`);
+      await run(`SET LOCAL statement_timeout = ${SETUP_STATEMENT_TIMEOUT_MS}`);
+      for (const stmt of ddl) await run(stmt);
+      await run(`COMMENT ON TABLE mcp_grants IS '${await isolationFingerprint(trx, schema, ddl)}'`);
+    });
+  } catch (e) {
+    if ((e as { code?: string }).code !== LOCK_NOT_AVAILABLE) throw e;
+    throw new QueryUnavailableError(
+      `query is unavailable on this Postgres store: another session held a lock on the store tables for over ${lockTimeoutMs} ms while row-level security was being set up; restart the app to retry`,
+    );
+  }
 }
 
 /** Why `query` can't be isolated on this server, or null when it can. */
@@ -107,8 +166,10 @@ export async function isolationBlocker<DB>(k: Kysely<DB>, schema: string): Promi
 export interface QueryIsolationOptions {
   statementTimeoutMs?: number;
   lockTimeoutMs?: number;
-  /** Whole-call deadline; past it the connection is destroyed. */
+  /** Whole-call deadline; past it the backend is cancelled and the connection destroyed. */
   callTimeoutMs?: number;
+  /** lock_timeout for the isolation DDL at open. */
+  setupLockTimeoutMs?: number;
   maxConcurrent?: number;
   maxQueued?: number;
   maxMessageBytes?: number;
@@ -183,7 +244,7 @@ export class PgQueryIsolation implements QueryRunner {
   static async open<DB>(app: Kysely<DB>, schema: string, base: PgPoolConfig, opts: QueryIsolationOptions = {}): Promise<PgQueryIsolation> {
     const blocker = await isolationBlocker(app, schema);
     if (blocker) throw new QueryUnavailableError(`query is unavailable on this Postgres store: ${blocker}`);
-    await ensureIsolation(app, schema);
+    await ensureIsolation(app, schema, opts.setupLockTimeoutMs);
     return new PgQueryIsolation(app as Kysely<unknown>, schema, base, opts);
   }
 
@@ -208,7 +269,7 @@ export class PgQueryIsolation implements QueryRunner {
         this.checkGeneration(role, gen);
         const free = await this.slot();
         try {
-          work = this.call(role, gen, caller.scope, q);
+          work = this.call(role, gen, caller.scope, q, Date.now() + this.callMs());
           return await this.deadline(work, () => { abandoned = true; });
         } finally {
           free();
@@ -224,17 +285,17 @@ export class PgQueryIsolation implements QueryRunner {
     }
   }
 
-  private async call(role: string, gen: number, scope: ReadonlySet<string>, q: QueryArgs): Promise<unknown[]> {
+  private async call(role: string, gen: number, scope: ReadonlySet<string>, q: QueryArgs, deadlineAt: number): Promise<unknown[]> {
     await this.ensureRole(role, gen);
     await this.writeScope(role, gen, scope);
     try {
-      return await this.runAs(role, q);
+      return await this.runAs(role, q, deadlineAt);
     } catch (e) {
       // Another process re-provisioned the role (one process per schema is the supported mode).
       if ((e as { code?: string }).code !== INVALID_PASSWORD) throw e;
       this.ensured.delete(role);
       await this.ensureRole(role, gen);
-      return await this.runAs(role, q);
+      return await this.runAs(role, q, deadlineAt);
     }
   }
 
@@ -322,6 +383,7 @@ export class PgQueryIsolation implements QueryRunner {
     const password = randomBytes(32).toString('base64url');
     await this.app.transaction().execute(async (trx) => {
       const run = (text: string) => sql.raw(text).execute(trx);
+      await this.boundStorePool(trx);
       await run(`DO $$ BEGIN
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN CREATE ROLE ${role} LOGIN NOINHERIT; END IF;
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}_raw') THEN CREATE ROLE ${role}_raw NOLOGIN; END IF;
@@ -337,10 +399,16 @@ export class PgQueryIsolation implements QueryRunner {
     this.pools.set(role, pool);
   }
 
+  private async boundStorePool(trx: Kysely<unknown>): Promise<void> {
+    await sql.raw(`SET LOCAL lock_timeout = ${this.opts.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS}`).execute(trx);
+    await sql.raw(`SET LOCAL statement_timeout = ${this.opts.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS}`).execute(trx);
+  }
+
   /** Rewritten on every call, so a revoked grant stops applying at once. */
   private async writeScope(role: string, gen: number, scope: ReadonlySet<string>): Promise<void> {
     this.checkGeneration(role, gen);
     await this.app.transaction().execute(async (trx) => {
+      await this.boundStorePool(trx);
       await sql`DELETE FROM mcp_grants WHERE role_name = ${role}`.execute(trx);
       const ids = [...scope];
       if (ids.length > 0) {
@@ -349,9 +417,9 @@ export class PgQueryIsolation implements QueryRunner {
     });
   }
 
-  /** Runs `exec` on one pooled connection. A client-level error or the call
-   *  deadline destroys the connection and rejects, so the role lock is always released. */
-  private async runAs(role: string, q: QueryArgs): Promise<unknown[]> {
+  /** Runs `exec` on one pooled connection. On a client-level error or the call
+   *  deadline it rejects, cancels the backend and destroys the connection. */
+  private async runAs(role: string, q: QueryArgs, deadlineAt: number): Promise<unknown[]> {
     if (!Number.isSafeInteger(q.maxRows) || q.maxRows < 1) throw new Error('maxRows must be a positive integer');
     const pool = this.pools.get(role);
     if (!pool) throw new Error('caller role pool missing');
@@ -361,7 +429,6 @@ export class PgQueryIsolation implements QueryRunner {
       guardMessageSize(stream, this.opts.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES);
       this.guarded.add(c);
     }
-    const statementMs = this.opts.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS;
     const callMs = this.callMs();
     let failure: Error | undefined;
     let fail!: (e: Error) => void;
@@ -370,9 +437,9 @@ export class PgQueryIsolation implements QueryRunner {
     });
     failed.catch(() => undefined);
     c.on('error', fail);
-    const timer = setTimeout(() => fail(new Error(`query did not finish within ${callMs} ms`)), callMs);
+    const timer = setTimeout(() => fail(new Error(`query did not finish within ${callMs} ms`)), Math.max(0, deadlineAt - Date.now()));
     try {
-      return await Promise.race([this.exec(c, role, q, statementMs), failed]);
+      return await Promise.race([this.exec(c, role, q, deadlineAt), failed]);
     } catch (e) {
       throw clipError(e);
     } finally {
@@ -382,17 +449,41 @@ export class PgQueryIsolation implements QueryRunner {
         try { await Promise.race([c.query('DISCARD ALL'), failed]); } catch (e) { failure ??= e as Error; }
       }
       c.removeListener('error', fail);
-      if (failure) c.on('error', () => undefined);
+      if (failure) {
+        c.on('error', () => undefined);
+        await this.stopBackend(c);
+      }
       c.release(failure);
     }
   }
 
-  private async exec(c: pg.PoolClient, role: string, q: QueryArgs, statementMs: number): Promise<unknown[]> {
+  /** Cancels the backend over a fresh connection (the protocol CancelRequest
+   *  needs no privilege); if that can't be sent, tries pg_terminate_backend as the store role. */
+  private async stopBackend(c: pg.PoolClient): Promise<void> {
+    const { host, port, processID, secretKey } = c as unknown as { host: string; port: number; processID: number | null; secretKey: number | null };
+    if (processID == null || secretKey == null) return;
+    if (await sendCancel(host, port, processID, secretKey)) return;
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      sql`SELECT pg_terminate_backend(${processID})`.execute(this.app),
+      new Promise((r) => { timer = setTimeout(r, CANCEL_TIMEOUT_MS); }),
+    ]).catch(() => undefined).finally(() => clearTimeout(timer));
+  }
+
+  /** Re-applied before every statement that runs the caller's SQL: set_config
+   *  in one FETCH would otherwise lift the limits for the next. */
+  private async bound(c: pg.PoolClient, deadlineAt: number): Promise<void> {
+    const left = Math.max(1, deadlineAt - Date.now() + CANCEL_GRACE_MS);
+    const statementMs = Math.min(this.opts.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS, left);
+    const lockMs = Math.min(this.opts.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS, left);
+    await c.query(`SET LOCAL statement_timeout = ${statementMs}; SET LOCAL lock_timeout = ${lockMs}`);
+  }
+
+  private async exec(c: pg.PoolClient, role: string, q: QueryArgs, deadlineAt: number): Promise<unknown[]> {
     await c.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
     try {
       if (q.includeRaw) await c.query(`SET LOCAL ROLE ${role}_raw`);
-      await c.query(`SET LOCAL statement_timeout = ${statementMs}`);
-      await c.query(`SET LOCAL lock_timeout = ${this.opts.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS}`);
+      await this.bound(c, deadlineAt);
       await c.query(`SET LOCAL search_path = ${this.schema}, public`);
       await c.query(`SET LOCAL TimeZone = 'UTC'`);
       // Temp views shadow the tables, so `SELECT * FROM events` works without raw_jsonl.
@@ -422,6 +513,7 @@ export class PgQueryIsolation implements QueryRunner {
       let bytes = 2;
       while (rows.length < q.maxRows) {
         const n = Math.min(FETCH_BATCH, q.maxRows - rows.length);
+        await this.bound(c, deadlineAt);
         const batch = (await c.query<{ j: string }>(`FETCH FORWARD ${n} FROM mcp_q`)).rows;
         for (const { j } of batch) {
           bytes += Buffer.byteLength(j) + 1;
@@ -437,4 +529,32 @@ export class PgQueryIsolation implements QueryRunner {
       await c.query('ROLLBACK');
     }
   }
+}
+
+/** Sends a protocol CancelRequest for backend `pid`; resolves false when it couldn't be delivered. */
+function sendCancel(host: string, port: number, pid: number, secret: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let sent = false;
+    let settled = false;
+    const s = host.startsWith('/') ? netConnect(`${host}/.s.PGSQL.${port}`) : netConnect(port, host);
+    const done = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      s.destroy();
+      resolve(ok);
+    };
+    const timer = setTimeout(() => done(sent), CANCEL_TIMEOUT_MS);
+    s.on('error', () => done(false));
+    s.on('connect', () => {
+      const msg = Buffer.alloc(16);
+      msg.writeInt32BE(16, 0);
+      msg.writeInt32BE(80877102, 4);
+      msg.writeInt32BE(pid, 8);
+      msg.writeInt32BE(secret, 12);
+      s.end(msg, () => { sent = true; });
+    });
+    // The server closes the connection once it has acted on the request.
+    s.on('close', () => done(sent));
+  });
 }
