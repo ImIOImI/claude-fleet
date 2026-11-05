@@ -37,6 +37,9 @@ export class ClaimService {
       const run = await this.d.runs.runningFor(input.captureRun, callerId);
       if (!run) throw new Error('capture_run is not an active capture run for this workspace');
       source = { workspaceId: callerId, sessionId: run.session_id, via: 'capture', captureRun: run.id };
+      // The fork is only *asked* to use private visibility; enforce it here
+      // from the workspace's effective captureVisibility stored at admit.
+      if (run.visibility === 'private') input.visibility = 'private';
     }
     const vec = await this.embedOne(input.text);
     const visible = await this.d.claims.visible(callerId, EMBED_MODEL_ID, false);

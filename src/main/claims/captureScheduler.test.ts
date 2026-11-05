@@ -76,6 +76,8 @@ describe('CaptureScheduler — ingest triggers', () => {
     await a.s.drain();
     expect(argsOf(a.exec)).toEqual(expect.arrayContaining(['--model', 'claude-haiku-5']));
     expect(promptOf(a.exec)).toContain('visibility "private"');
+    // The effective visibility is booked on the run so record_claim can enforce it.
+    expect(a.runs.start).toHaveBeenCalledWith(expect.objectContaining({ visibility: 'private', compactions: 0 }));
     const b = setup();
     b.s.onIngest({ workspaceId: 'w', sessionId: 's1' });
     await b.s.drain();

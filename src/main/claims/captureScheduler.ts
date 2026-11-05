@@ -3,7 +3,7 @@
 // search hits (sessions referenced by search_transcripts / search_claims /
 // query results). Queues per session (newest trigger wins), caps concurrency
 // at 2 and the day at the global daily cap, and books every run.
-import type { CaptureSettings } from '../../preload/captureSettings.js';
+import type { CaptureSettings, CaptureVisibility } from '../../preload/captureSettings.js';
 import type { CaptureSignals } from '../db.js';
 import { captureArgs, capturePrompt, parseCaptureOutput } from './captureCommand.js';
 import type { CaptureTarget, ExecOutcome } from './captureExec.js';
@@ -37,7 +37,7 @@ export interface SchedulerDeps {
 
 interface Pending {
   workspaceId: string; sessionId: string; model: string | null; userTurns: number;
-  trigger: CaptureTrigger; query: string | null; queuedAt: number;
+  trigger: CaptureTrigger; query: string | null; queuedAt: number; compactions: number;
 }
 
 export class CaptureScheduler {
@@ -108,7 +108,7 @@ export class CaptureScheduler {
     // priorRun (and the fork id, in run()/admit()) is marked only once the run
     // is actually admitted — a cap-dropped or TTL-expired trigger never ran,
     // so it must not count as this session's prior run.
-    this.enqueue({ workspaceId: e.workspaceId, sessionId: e.sessionId, model: this.modelFor(settings, sig), userTurns: sig.userTurns, trigger, query: null, queuedAt: now });
+    this.enqueue({ workspaceId: e.workspaceId, sessionId: e.sessionId, model: this.modelFor(settings, sig), userTurns: sig.userTurns, compactions: sig.compactions, trigger, query: null, queuedAt: now });
   }
 
   private async considerSearch(e: SearchHitEvent): Promise<void> {
@@ -135,7 +135,7 @@ export class CaptureScheduler {
         if (now - last.started_at < CAPTURE_MIN_INTERVAL_MS) continue;
         if (sig.userTurns - (last.user_turns ?? 0) < own.recaptureAfterTurns) continue;
       }
-      this.enqueue({ workspaceId: sig.workspaceId, sessionId, model: this.modelFor(own, sig), userTurns: sig.userTurns, trigger: 'search', query, queuedAt: now });
+      this.enqueue({ workspaceId: sig.workspaceId, sessionId, model: this.modelFor(own, sig), userTurns: sig.userTurns, compactions: sig.compactions, trigger: 'search', query, queuedAt: now });
     }
   }
 
@@ -178,7 +178,7 @@ export class CaptureScheduler {
    *  back-to-back. Only a run that actually gets admitted here marks the
    *  fork id and this session's priorRun — a cap- or interval-dropped
    *  trigger never ran, so it must not count as one. */
-  private admit(p: Pending, forkSessionId: string): Promise<string | null> {
+  private admit(p: Pending, forkSessionId: string, visibility: CaptureVisibility): Promise<string | null> {
     const next = this.admitting.then(async () => {
       const now = this.d.now();
       if (this.recentlyStarted(p.sessionId, now)) {
@@ -199,7 +199,10 @@ export class CaptureScheduler {
       this.lastStartedAt.set(p.sessionId, now);
       markCaptureFork(forkSessionId);
       this.priorRun.set(p.sessionId, true);
-      return this.d.runs.start({ workspaceId: p.workspaceId, sessionId: p.sessionId, forkSessionId, trigger: p.trigger, userTurns: p.userTurns, now });
+      return this.d.runs.start({
+        workspaceId: p.workspaceId, sessionId: p.sessionId, forkSessionId, trigger: p.trigger, userTurns: p.userTurns,
+        visibility, compactions: p.compactions, now
+      });
     });
     this.admitting = next.catch(() => undefined);
     return next;
@@ -212,7 +215,7 @@ export class CaptureScheduler {
     const target = await this.d.target(p.workspaceId);
     if (!target) return;
     const forkSessionId = this.d.newUuid();
-    const runId = await this.admit(p, forkSessionId);
+    const runId = await this.admit(p, forkSessionId, settings.captureVisibility);
     if (!runId) return;
     try {
       // A topics lookup failure (e.g. the embedder is unavailable) shouldn't

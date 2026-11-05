@@ -72,6 +72,10 @@ export interface CaptureRunsTable {
   id: string; workspace_id: string; session_id: string; fork_session_id: string | null; trigger: string;
   status: string; claims_recorded: Generated<number>; usage: string | null; error: string | null;
   started_at: number; ended_at: number | null; user_turns: number | null;
+  /** v8: effective captureVisibility at admit (record forces private claims when private). */
+  visibility: string | null;
+  /** v8: the session's compaction count at admit (restart-safe ctx-band bookkeeping). */
+  compactions: number | null;
 }
 export interface CaptureSettingsLogTable {
   id: string; workspace_id: string; ts: number; actor: string; before: string; after: string;

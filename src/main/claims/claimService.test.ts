@@ -62,6 +62,17 @@ describe('ClaimService.record', () => {
     expect((await runs.lastFor('live-1'))?.claims_recorded).toBe(1);
     await expect(svc.record('wsB', { ...base, text: 'forged', capture_run: run })).rejects.toThrow(/capture_run/);
   });
+  it('forces private visibility on a capture run admitted under captureVisibility=private', async () => {
+    const run = await runs.start({ workspaceId: 'wsA', sessionId: 'live-1', forkSessionId: 'f1', trigger: 'ctx-85', visibility: 'private', now: 1 });
+    const r = await svc.record('wsA', { ...base, text: 'captured private fact', visibility: 'fleet', capture_run: run });
+    expect((await svc.search('wsA', { query: 'captured' })).results.find((h) => h.id === r.id)?.visibility).toBe('private');
+    expect((await svc.search('wsB', { query: 'captured' })).results).toEqual([]);
+  });
+  it('leaves visibility alone for a fleet capture run and for agent records', async () => {
+    const run = await runs.start({ workspaceId: 'wsA', sessionId: 'live-1', forkSessionId: 'f1', trigger: 'ctx-85', visibility: 'fleet', now: 1 });
+    const r = await svc.record('wsA', { ...base, text: 'captured fleet fact', capture_run: run });
+    expect((await svc.search('wsB', { query: 'captured' })).results.map((h) => h.id)).toEqual([r.id]);
+  });
   it('still records (FTS-only) when the embedder throws, and backfills later', async () => {
     const failing = new ClaimService({ claims: new ClaimStore(inbox.kysely), runs, embed: async () => { throw new Error('model down'); },
       workspaceName: async () => null, now: () => ++t });

@@ -161,7 +161,7 @@ describe('InboxStore.open', () => {
     expect((await store.list()).map((t) => t.title)).toEqual(['persist me']);
     const raw = new Database(path.join(dir, 'inbox.db'), { readonly: true });
     expect(raw.pragma('user_version', { simple: true })).toBe(INBOX_SCHEMA_VERSION);
-    expect(INBOX_SCHEMA_VERSION).toBe(7);
+    expect(INBOX_SCHEMA_VERSION).toBe(8);
     expect(raw.pragma('journal_mode', { simple: true })).toBe('wal');
     raw.close();
   });
@@ -220,7 +220,7 @@ describe('InboxStore.open', () => {
     store = InboxStore.open(dir);
     const rawHandle = (store as unknown as { raw: import('better-sqlite3').Database }).raw;
 
-    expect(rawHandle.pragma('user_version', { simple: true })).toBe(7);
+    expect(rawHandle.pragma('user_version', { simple: true })).toBe(INBOX_SCHEMA_VERSION);
     expect(rawHandle.pragma('integrity_check', { simple: true })).toBe('ok');
 
     const after = rawHandle.prepare(
@@ -239,7 +239,7 @@ describe('InboxStore.open', () => {
     const run = rawHandle.prepare(`SELECT * FROM capture_runs WHERE id = 'R1'`).get() as Record<string, unknown>;
     expect(run).toMatchObject({
       id: 'R1', workspace_id: 'W1', session_id: 'S1', fork_session_id: 'F1', trigger: 'ctx-85',
-      status: 'done', started_at: 500, ended_at: 600, user_turns: null
+      status: 'done', started_at: 500, ended_at: 600, user_turns: null, visibility: null, compactions: null
     });
 
     expect(rawHandle.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'capture_settings_log'`).get()).toBeTruthy();

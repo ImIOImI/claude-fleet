@@ -33,6 +33,12 @@ describe('CaptureRunStore', () => {
     expect(await r.countSince(150)).toBe(1);
     expect(await r.countSince(0)).toBe(2);
   });
+  it('stores the effective capture visibility and compaction count at admit', async () => {
+    await r.start({ workspaceId: 'wsA', sessionId: 's1', forkSessionId: 'f1', trigger: 'ctx-85', visibility: 'private', compactions: 3, now: 1 });
+    await r.start({ workspaceId: 'wsA', sessionId: 's2', forkSessionId: 'f2', trigger: 'search', now: 2 });
+    expect(await r.lastFor('s1')).toMatchObject({ visibility: 'private', compactions: 3 });
+    expect(await r.lastFor('s2')).toMatchObject({ visibility: null, compactions: null });
+  });
   it('startOfLocalDay is local midnight', () => {
     expect(startOfLocalDay(new Date(2026, 10, 4, 15, 30).getTime())).toBe(new Date(2026, 10, 4).getTime());
   });

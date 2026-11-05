@@ -12,7 +12,7 @@ import { isPriority, maxPriority, normalizeTag, normalizeTags, MAX_TAGS } from '
 import { chunked, num, sqliteKysely } from '../store/kysely.js';
 import type { InboxDb, TodoRow } from '../store/inboxSchema.js';
 
-export const INBOX_SCHEMA_VERSION = 7;
+export const INBOX_SCHEMA_VERSION = 8;
 
 /** @internal for tests — lets a migration test build a real file DB at an
  *  older schema version (running a prefix of these) without duplicating the
@@ -238,6 +238,13 @@ export const MIGRATIONS: Record<number, string> = {
     CREATE INDEX proposals_status ON proposals (status, created_at);
     ALTER TABLE capture_runs ADD COLUMN user_turns INTEGER;
     CREATE INDEX idx_capture_runs_started ON capture_runs (started_at);
+  `,
+  // #483 final review: the workspace's effective captureVisibility at admit
+  // (record_claim forces private claims for a private run), and the session's
+  // compaction count at admit (ctx bands don't re-fire after an app restart).
+  8: `
+    ALTER TABLE capture_runs ADD COLUMN visibility TEXT;
+    ALTER TABLE capture_runs ADD COLUMN compactions INTEGER;
   `
 };
 
