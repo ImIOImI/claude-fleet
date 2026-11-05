@@ -1938,7 +1938,17 @@ Read-only MCP server exposed by claude-fleet that lets the agent inside each con
   - **Concurrency and time:** at most 2 calls run at once across all callers, and 8 more wait. Past that a call gets `query is busy`. Each call has `statement_timeout` 5 s, `lock_timeout` 2 s and an overall deadline, after which its connection is destroyed.
   - **Result size:** each row comes back as one `row_to_json` text. A row over 50 KB (or a row datum over 200 KB) is refused on the server by `mcp_row_too_large()`, so an oversized value never reaches the client.
   - **Fetching:** the cursor is fetched 50 rows at a time, and fetching stops once the result passes 50 KB.
-  - **Message guard:** a backend message over 64 MiB, such as an error that echoes a huge value, destroys the connection before pg-protocol decodes it.
+  - **Message guard:** a backend message over 1 MiB, such as an error that echoes a huge value, destroys the connection before pg-protocol decodes it.
+  - **Error text:** a driver error's message is cut to 2 KB with its `code` kept. Every tool's error text is cut to 4 KB in `callTool`, and `logError` caps `message` and `stack` at 8 KB each.
+  - **Backlog:** a caller may have `maxQueued` calls waiting on its own role lock; past that it gets `query is busy`. Each MCP connection may have 16 requests in flight; past that it gets a JSON-RPC `-32000` busy error.
+  - **Deadline:** the whole call (provisioning, the scope write, connect, run) is under one deadline. A call abandoned at the deadline frees its global slot at once, and keeps its role lock until it settles so that role's calls stay ordered.
+  - **Row shapes vs SQLite:** rows are `JSON.parse(row_to_json)`. Ints, floats, booleans, NULL, arrays and text match. These differ:
+    - NaN and ±Infinity come back as strings.
+    - Intervals come back as text.
+    - Records and composites come back as objects.
+    - bytea comes back as `\x…` text.
+    - timestamptz comes back as ISO text in UTC, because the call sets `TimeZone = 'UTC'`.
+    - bigint and numeric past 2^53 lose precision, as they did through the pg driver.
   - **Wrapper:** the caller's SQL sits inside a subquery with random aliases, so it can't close the subquery and select around the checks.
   - **Policies:** they target only the reader role, so any other non-owner role sees no rows.
   - **One process per schema:** this is the supported mode. Caller-role passwords are minted per process, and a login refused with 28P01 re-provisions the role once.

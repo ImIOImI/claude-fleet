@@ -531,7 +531,7 @@ describe('mark_useful + get_config (#207)', () => {
 // ---------------------------------------------------------------------------
 import { vi } from 'vitest';
 import { setErrorSink } from './errorLog.js';
-import { callTool, _setDbForTests, setReadScopeResolver } from './mcpServer.js';
+import { callTool, _setDbForTests, setReadScopeResolver, dispatchLineForTests, MAX_IN_FLIGHT_PER_CONNECTION } from './mcpServer.js';
 import type { ErrorRow } from './db.js';
 
 describe('callTool diagnostics', () => {
@@ -565,6 +565,42 @@ describe('callTool diagnostics', () => {
     expect(row!.workspaceId).toBe(WS_A);
     expect(row!.extra?.tool).toBe('query');
     expect(row!.stack).toBeTruthy();
+  });
+
+  it('caps the error text a tool returns', async () => {
+    harness = makeFileDb();
+    _setDbForTests(harness.db);
+    const res = (await callTool(
+      { name: 'query', arguments: { sql: `SELECT ${'x'.repeat(100_000)} FROM sessions` } },
+      WS_A
+    )) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text.length).toBeLessThanOrEqual(4_200);
+    const row = rows.find((r) => r.type === 'mcp-tool-error');
+    expect(row!.message.length).toBeLessThanOrEqual(8_300);
+  });
+
+  it('refuses requests past the per-connection in-flight cap with a busy error', async () => {
+    harness = makeFileDb();
+    _setDbForTests(harness.db);
+    let open!: () => void;
+    const gate = new Promise<void>((r) => { open = r; });
+    setReadScopeResolver(async (id) => { await gate; return [id]; });
+    const out: Array<{ id: number; error?: { message: string } }> = [];
+    const sock = { write: (s: string) => { out.push(JSON.parse(s)); return true; } };
+    for (let i = 1; i <= MAX_IN_FLIGHT_PER_CONNECTION + 2; i++) {
+      dispatchLineForTests(JSON.stringify({ jsonrpc: '2.0', id: i, method: 'tools/call', params: { name: 'list_sessions', arguments: {} } }), sock, WS_A);
+    }
+    await new Promise((r) => setTimeout(r, 10));
+    expect(out.map((m) => m.id)).toEqual([MAX_IN_FLIGHT_PER_CONNECTION + 1, MAX_IN_FLIGHT_PER_CONNECTION + 2]);
+    expect(out[0].error?.message).toMatch(/busy/);
+    open();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(out).toHaveLength(MAX_IN_FLIGHT_PER_CONNECTION + 2);
+    dispatchLineForTests(JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'tools/call', params: { name: 'list_sessions', arguments: {} } }), sock, WS_A);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(out.at(-1)?.id).toBe(99);
+    expect(out.at(-1)?.error).toBeUndefined();
   });
 
   it('watchdog logs mcp-call-stalled with the stuck stage when a call hangs', async () => {

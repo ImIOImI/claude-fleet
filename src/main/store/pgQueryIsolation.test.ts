@@ -401,4 +401,53 @@ describe.skipIf(!isPg)('query isolation on Postgres (role + RLS)', () => {
       listener.release();
     }
   });
+
+  it('an error that echoes a huge value comes back short, quickly, with its code', async () => {
+    const started = Date.now();
+    const err = (await q(`SELECT repeat('x', 60000000)::int`).catch((e: unknown) => e)) as Error & { code?: string };
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(err.message.length).toBeLessThanOrEqual(2_100);
+    expect(err.message).toMatch(/exceeds 1048576/);
+    // Under the 1 MiB message guard: only the truncation keeps it short.
+    const mid = (await q(`SELECT repeat('x', 500000)::int`).catch((e: unknown) => e)) as Error & { code?: string };
+    expect(mid.message.length).toBeLessThanOrEqual(2_100);
+    expect(mid.message).toMatch(/^invalid input syntax for type integer/);
+    expect(mid.code).toBe('22P02');
+    expect(await q('SELECT 1 AS x')).toEqual([{ x: 1 }]);
+  });
+
+  it('refuses a caller\'s calls past maxQueued waiting on its own lock', async () => {
+    await iso.end();
+    iso = await PgQueryIsolation.open(db.stateKysely(), t.schema, t.appConfig, { maxQueued: 1 });
+    await q('SELECT 1');
+    const runs = await Promise.allSettled([1, 2, 3].map(() => q('SELECT pg_sleep(0.3)')));
+    const busy = runs.filter((r) => r.status === 'rejected');
+    expect(busy).toHaveLength(1);
+    expect(String((busy[0] as PromiseRejectedResult).reason)).toMatch(/busy/);
+    expect(await q('SELECT 1 AS x')).toEqual([{ x: 1 }]);
+  });
+
+  it('the call deadline covers provisioning and scope writes, so a wedged store pool frees the slot', async () => {
+    await iso.end();
+    iso = await PgQueryIsolation.open(db.stateKysely(), t.schema, t.appConfig, { callTimeoutMs: 300, maxConcurrent: 1 });
+    await q('SELECT 1');
+    const blocker = await t.appPool.connect();
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query('LOCK TABLE mcp_grants IN ACCESS EXCLUSIVE MODE');
+      const started = Date.now();
+      await expect(q('SELECT 1 AS x')).rejects.toThrow(/did not finish/);
+      expect(Date.now() - started).toBeLessThan(2_000);
+    } finally {
+      await blocker.query('ROLLBACK');
+      blocker.release();
+    }
+    expect(await q('SELECT 1 AS x')).toEqual([{ x: 1 }]);
+  });
+
+  it('timestamps render in UTC whatever the server TimeZone', async () => {
+    expect(await q(`SELECT '2026-01-02 03:04:05+00'::timestamptz AS t, current_setting('TimeZone') AS tz`))
+      .toEqual([{ t: '2026-01-02T03:04:05+00:00', tz: 'UTC' }]);
+  });
 });
+

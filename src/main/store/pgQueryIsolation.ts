@@ -18,9 +18,11 @@ const DEFAULT_LOCK_TIMEOUT_MS = 2_000;
 const DEFAULT_MAX_CONCURRENT = 2;
 const DEFAULT_MAX_QUEUED = 8;
 // pg-protocol throws outside any promise when it decodes a string past V8's limit.
-const DEFAULT_MAX_MESSAGE_BYTES = 64 << 20;
+const DEFAULT_MAX_MESSAGE_BYTES = 1 << 20;
+const MAX_ERROR_CHARS = 2_048;
 const FETCH_BATCH = 50;
 const INVALID_PASSWORD = '28P01';
+const BUSY = 'query is busy: too many queries are running; retry shortly';
 
 export class QueryUnavailableError extends Error {}
 
@@ -142,6 +144,15 @@ export function guardMessageSize(stream: NodeJS.ReadableStream & { destroy(e?: E
   });
 }
 
+/** A driver error whose message (which can echo a value) is cut to MAX_ERROR_CHARS; `code` is kept. */
+function clipError(e: unknown): unknown {
+  if (!(e instanceof Error) || e.message.length <= MAX_ERROR_CHARS) return e;
+  const short = new Error(`${e.message.slice(0, MAX_ERROR_CHARS)}… [truncated]`) as Error & { code?: string };
+  const code = (e as { code?: unknown }).code;
+  if (typeof code === 'string') short.code = code;
+  return short;
+}
+
 /** Trailing whitespace and semicolons, in linear time: the caller's SQL sits inside a subquery. */
 function trimTail(text: string): string {
   let end = text.length;
@@ -155,6 +166,8 @@ export class PgQueryIsolation implements QueryRunner {
   private readonly ensured = new Map<string, Promise<void>>();
   /** Bumped by forgetCaller; a call that began under an older value is refused. */
   private readonly generations = new Map<string, number>();
+  /** Calls per role holding or waiting for its lock. */
+  private readonly pending = new Map<string, number>();
   private readonly guarded = new WeakSet<pg.PoolClient>();
   private active = 0;
   private readonly waiting: Array<() => void> = [];
@@ -177,28 +190,65 @@ export class PgQueryIsolation implements QueryRunner {
   async query(caller: QueryCaller, q: QueryArgs): Promise<unknown[]> {
     const role = callerRole(this.schema, caller.callerId);
     const gen = this.generation(role);
-    const release = await this.lockFor(role)();
+    const n = this.pending.get(role) ?? 0;
+    if (n > (this.opts.maxQueued ?? DEFAULT_MAX_QUEUED)) throw new Error(BUSY);
+    this.pending.set(role, n + 1);
+    let work: Promise<unknown[]> | undefined;
+    let abandoned = false;
+    let counted = true;
+    const done = () => {
+      if (!counted) return;
+      counted = false;
+      const left = (this.pending.get(role) ?? 1) - 1;
+      if (left > 0) this.pending.set(role, left); else this.pending.delete(role);
+    };
     try {
-      this.checkGeneration(role, gen);
-      const free = await this.slot();
+      const release = await this.lockFor(role)();
       try {
-        await this.ensureRole(role, gen);
-        await this.writeScope(role, gen, caller.scope);
+        this.checkGeneration(role, gen);
+        const free = await this.slot();
         try {
-          return await this.runAs(role, q);
-        } catch (e) {
-          // Another process re-provisioned the role (one process per schema is the supported mode).
-          if ((e as { code?: string }).code !== INVALID_PASSWORD) throw e;
-          this.ensured.delete(role);
-          await this.ensureRole(role, gen);
-          return await this.runAs(role, q);
+          work = this.call(role, gen, caller.scope, q);
+          return await this.deadline(work, () => { abandoned = true; });
+        } finally {
+          free();
         }
       } finally {
-        free();
+        // An abandoned call keeps the role lock until it settles, so the role's calls stay ordered.
+        if (work && abandoned) void work.catch(() => undefined).finally(() => { release(); done(); });
+        else { release(); done(); }
       }
-    } finally {
-      release();
+    } catch (e) {
+      if (!abandoned) done();
+      throw e;
     }
+  }
+
+  private async call(role: string, gen: number, scope: ReadonlySet<string>, q: QueryArgs): Promise<unknown[]> {
+    await this.ensureRole(role, gen);
+    await this.writeScope(role, gen, scope);
+    try {
+      return await this.runAs(role, q);
+    } catch (e) {
+      // Another process re-provisioned the role (one process per schema is the supported mode).
+      if ((e as { code?: string }).code !== INVALID_PASSWORD) throw e;
+      this.ensured.delete(role);
+      await this.ensureRole(role, gen);
+      return await this.runAs(role, q);
+    }
+  }
+
+  private callMs(): number {
+    return this.opts.callTimeoutMs ?? 2 * (this.opts.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS) + 10_000;
+  }
+
+  private deadline<T>(work: Promise<T>, onLate: () => void): Promise<T> {
+    const ms = this.callMs();
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => { onLate(); reject(new Error(`query did not finish within ${ms} ms`)); }, ms);
+    });
+    return Promise.race([work, late]).finally(() => clearTimeout(timer));
   }
 
   async forgetCaller(callerId: string): Promise<void> {
@@ -249,7 +299,7 @@ export class PgQueryIsolation implements QueryRunner {
       return free;
     }
     if (this.waiting.length >= (this.opts.maxQueued ?? DEFAULT_MAX_QUEUED)) {
-      throw new Error('query is busy: too many queries are running; retry shortly');
+      throw new Error(BUSY);
     }
     await new Promise<void>((r) => this.waiting.push(r));
     return free;
@@ -312,7 +362,7 @@ export class PgQueryIsolation implements QueryRunner {
       this.guarded.add(c);
     }
     const statementMs = this.opts.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS;
-    const callMs = this.opts.callTimeoutMs ?? 2 * statementMs + 10_000;
+    const callMs = this.callMs();
     let failure: Error | undefined;
     let fail!: (e: Error) => void;
     const failed = new Promise<never>((_, reject) => {
@@ -323,6 +373,8 @@ export class PgQueryIsolation implements QueryRunner {
     const timer = setTimeout(() => fail(new Error(`query did not finish within ${callMs} ms`)), callMs);
     try {
       return await Promise.race([this.exec(c, role, q, statementMs), failed]);
+    } catch (e) {
+      throw clipError(e);
     } finally {
       clearTimeout(timer);
       if (!failure) {
@@ -342,6 +394,7 @@ export class PgQueryIsolation implements QueryRunner {
       await c.query(`SET LOCAL statement_timeout = ${statementMs}`);
       await c.query(`SET LOCAL lock_timeout = ${this.opts.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS}`);
       await c.query(`SET LOCAL search_path = ${this.schema}, public`);
+      await c.query(`SET LOCAL TimeZone = 'UTC'`);
       // Temp views shadow the tables, so `SELECT * FROM events` works without raw_jsonl.
       await c.query(`CREATE TEMP VIEW events AS SELECT ${SNAPSHOT_EVENT_COLS}${q.includeRaw ? ', raw_jsonl' : ''} FROM ${this.schema}.events`);
       for (const t of MCP_QUERY_TABLES) {

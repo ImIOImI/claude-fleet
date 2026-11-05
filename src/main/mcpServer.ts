@@ -38,7 +38,7 @@ import { sqliteReadSource } from './sqliteReadSource.js';
 import { lineSplitter, MAX_LINE_BYTES } from './mcpLines.js';
 import { LIST_EVENT_COLS, LIST_EVENT_COL_ALLOWLIST, MAX_QUERY_BYTES, type OwnedReadSource, type ReadSource, type TokenGroup } from './store/readSource.js';
 import { costFor } from './pricing.js';
-import { logError } from './errorLog.js';
+import { clipText, logError } from './errorLog.js';
 import { ensureContainerBridgeScript } from './mcpContainerBridge.js';
 import { type EmbedFn } from './transcriptIndex.js';
 import { sessionIdsFromClaimResults, sessionIdsFromQueryRows, sessionIdsFromTranscriptHits, type SearchHitEvent } from './claims/searchHits.js';
@@ -652,7 +652,16 @@ function handleTcpConnection(sock: Socket): void {
   }));
 }
 
-function dispatchLine(line: string, sock: Socket, callerId: string): void {
+const MAX_TOOL_ERROR_CHARS = 4_096;
+export const MAX_IN_FLIGHT_PER_CONNECTION = 16;
+const inFlight = new WeakMap<Out, number>();
+
+/** Test-only: dispatch one request line as `callerId` on a fake connection. */
+export function dispatchLineForTests(line: string, sock: Out, callerId: string): void {
+  dispatchLine(line, sock, callerId);
+}
+
+function dispatchLine(line: string, sock: Out, callerId: string): void {
   let msg: { id?: unknown; method?: string; params?: Record<string, unknown> };
   try {
     msg = JSON.parse(line);
@@ -663,6 +672,14 @@ function dispatchLine(line: string, sock: Socket, callerId: string): void {
   const { id, method, params } = msg;
   // Notifications (no id) get no reply — e.g. notifications/initialized.
   const isNotification = id === undefined || id === null;
+  const busy = inFlight.get(sock) ?? 0;
+  if (busy >= MAX_IN_FLIGHT_PER_CONNECTION) {
+    if (!isNotification) {
+      send(sock, { jsonrpc: '2.0', id, error: { code: -32000, message: `busy: ${busy} requests already in flight on this connection` } });
+    }
+    return;
+  }
+  inFlight.set(sock, busy + 1);
 
   // handleMethod may return a Promise (the committee_* tools call async backend
   // effects); Promise.resolve() funnels both sync throws and async rejections
@@ -676,11 +693,12 @@ function dispatchLine(line: string, sock: Socket, callerId: string): void {
     })
     .catch((err) => {
       if (!isNotification) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = clipText(err instanceof Error ? err.message : String(err), MAX_TOOL_ERROR_CHARS);
         const code = err instanceof RpcError ? err.code : -32603;
         send(sock, { jsonrpc: '2.0', id, error: { code, message } });
       }
-    });
+    })
+    .finally(() => inFlight.set(sock, (inFlight.get(sock) ?? 1) - 1));
 }
 
 const NO_REPLY = Symbol('no-reply');
@@ -771,7 +789,7 @@ export async function callTool(params: Record<string, unknown>, callerId: string
     // The full stack goes to the error log — the caller-facing message alone
     // proved undebuggable when the packaged app's embedder failed to load
     // (#194: a bare ERR_MODULE_NOT_FOUND one-liner with no trace anywhere).
-    const message = err instanceof Error ? err.message : String(err);
+    const message = clipText(err instanceof Error ? err.message : String(err), MAX_TOOL_ERROR_CHARS);
     logError({
       source: 'main',
       type: 'mcp-tool-error',
@@ -787,7 +805,9 @@ export async function callTool(params: Record<string, unknown>, callerId: string
   }
 }
 
-function send(sock: Socket, obj: unknown): void {
+type Out = Pick<Socket, 'write'>;
+
+function send(sock: Out, obj: unknown): void {
   try {
     sock.write(JSON.stringify(obj) + '\n');
   } catch {
