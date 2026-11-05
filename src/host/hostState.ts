@@ -1,10 +1,13 @@
 // The hosted workspace's ULID, minted once (or taken from config) and kept on
 // shared storage so every pod reports the same id.
-import { link, mkdir, open, readdir, readFile, stat, unlink } from 'node:fs/promises';
+import { link, mkdir, open, readdir, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { ulid } from 'ulid';
+import type { Kysely } from 'kysely';
 import { ULID_RE } from './config.js';
+import type { HostDb } from './hostSchema.js';
+import type { Logger } from './log.js';
 
 export const WORKSPACE_ID_FILE = 'workspace-id.json';
 const TMP_PREFIX = `.${WORKSPACE_ID_FILE}.`;
@@ -93,6 +96,63 @@ export async function resolveWorkspaceId(stateDir: string, configuredId: string 
   const id = await loadOrMintWorkspaceId(stateDir, () => configuredId);
   if (id !== configuredId) {
     throw new Error(`${join(stateDir, WORKSPACE_ID_FILE)} holds workspace id ${id} but config workspace.id is ${configuredId}; refusing to start`);
+  }
+  return id;
+}
+
+export function readWorkspaceIdFile(stateDir: string): Promise<string | null> {
+  return readId(join(stateDir, WORKSPACE_ID_FILE));
+}
+
+/** Replaces the file atomically (temp file, fsync, rename). */
+export async function writeWorkspaceIdFile(stateDir: string, id: string): Promise<void> {
+  await mkdir(stateDir, { recursive: true });
+  const tmp = join(stateDir, `${TMP_PREFIX}${randomUUID()}`);
+  await writeDurably(tmp, JSON.stringify({ id, createdAt: Date.now() }) + '\n');
+  try {
+    await rename(tmp, join(stateDir, WORKSPACE_ID_FILE));
+    await syncDir(stateDir);
+  } finally {
+    await unlink(tmp).catch(() => undefined);
+  }
+}
+
+/**
+ * With a host DB, host_meta is authoritative. An empty table is seeded from
+ * config workspace.id, else the c1 file, else a new ULID, under c1's rules
+ * (a config/file mismatch or an unreadable file refuses start). The file is
+ * then rewritten from the row.
+ */
+export async function resolveHostWorkspaceId(
+  k: Kysely<HostDb>,
+  stateDir: string,
+  configuredId: string | null,
+  log: Logger,
+  mint: () => string = ulid
+): Promise<string> {
+  const read = async () => (await k.selectFrom('host_meta').select('workspace_id').executeTakeFirst())?.workspace_id ?? null;
+  let id = await read();
+  if (!id) {
+    const fromFile = await readWorkspaceIdFile(stateDir);
+    if (configuredId && fromFile && fromFile !== configuredId) {
+      throw new Error(`${join(stateDir, WORKSPACE_ID_FILE)} holds workspace id ${fromFile} but config workspace.id is ${configuredId}; refusing to start`);
+    }
+    await k
+      .insertInto('host_meta')
+      .values({ singleton: true, workspace_id: configuredId ?? fromFile ?? mint(), created_at: Date.now() })
+      .onConflict((oc) => oc.column('singleton').doNothing())
+      .execute();
+    id = await read();
+    if (!id) throw new Error('host_meta is empty after seeding');
+    log.log('info', 'workspace id seeded', { workspaceId: id, from: configuredId ? 'config' : fromFile ? 'file' : 'minted' });
+  }
+  if (configuredId && id !== configuredId) {
+    throw new Error(`host_meta holds workspace id ${id} but config workspace.id is ${configuredId}; refusing to start`);
+  }
+  const file = await readWorkspaceIdFile(stateDir).catch(() => undefined);
+  if (file !== id) {
+    if (file !== null) log.log('warn', 'workspace-id.json differs from host_meta; rewriting it', { file: file ?? 'unreadable', workspaceId: id });
+    await writeWorkspaceIdFile(stateDir, id);
   }
   return id;
 }

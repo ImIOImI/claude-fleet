@@ -2,7 +2,7 @@
 // singleton, so only one holder may have its stores open at a time.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { connect, createServer, type AddressInfo, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,11 +11,16 @@ import pg from 'pg';
 import * as db from '../main/db.js';
 import { IdentityError, type IdentityProvider } from '../main/identity/types.js';
 import { isPg, testPgSchema, type TestPg } from '../main/store/testStore.js';
+import { migratePostgres } from '../main/store/pgMigrate.js';
+import { postgresKysely } from '../main/store/postgres.js';
 import { HOST_PG_SESSION } from './hostDb.js';
+import { HOST_TRACK } from './hostSchema.js';
+import { WORKSPACE_ID_FILE } from './hostState.js';
 import { EXIT_DB_UNAVAILABLE, runHost, type RunHostOptions } from './main.js';
 import { fakeBroker, person, TOKEN } from './testFakes.js';
 
 const ID = '01JC0000000000000000000000';
+const OTHER = '01JC0000000000000000000009';
 const verify: IdentityProvider['verify'] = async (t) => {
   if (t !== TOKEN) throw new IdentityError('unauthorized', 'bad credentials', 401);
   return person('owner', 1, ['acme/platform']);
@@ -54,7 +59,7 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
       ...opts
     });
     hosts.push(host);
-    return { url: `http://127.0.0.1:${port}`, host, exit, logs };
+    return { url: `http://127.0.0.1:${port}`, host, exit, logs, dir };
   }
   const leader = async (url: string) => (await fetch(`${url}/leader`)).status;
   const storesOpen = () => vi.waitFor(() => expect(() => db.stateKysely()).not.toThrow(), { timeout: 10_000 });
@@ -72,6 +77,23 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     const row = await t!.pool.query(`SELECT holder, epoch FROM ${t!.schema}.host_lease`);
     expect(row.rows[0].epoch).toBe(2);
     await db.recordUsageEvent({ workspaceId: ID, sessionId: null, kind: 'resumed' });
+  }, 30_000);
+
+  it('serves the id from host_meta and keeps the state file in step', async () => {
+    const a = await start();
+    await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+    const meta = await t!.pool.query(`SELECT workspace_id FROM ${t!.schema}.host_meta`);
+    expect(meta.rows).toEqual([{ workspace_id: ID }]);
+    expect(JSON.parse(readFileSync(join(a.dir, 'state', WORKSPACE_ID_FILE), 'utf8')).id).toBe(ID);
+  }, 30_000);
+
+  it('refuses to start when config workspace.id differs from host_meta', async () => {
+    t ??= await testPgSchema();
+    await migratePostgres(postgresKysely(t.pool), t.schema, HOST_TRACK);
+    await t.pool.query(`INSERT INTO ${t.schema}.host_meta VALUES (TRUE, $1, 0)`, [OTHER]);
+    const a = await start();
+    await vi.waitFor(() => expect(a.exit).toHaveBeenCalledWith(1), { timeout: 10_000 });
+    expect(a.logs.join('\n')).toMatch(new RegExp(`host start failed.*${OTHER}.*${ID}`));
   }, 30_000);
 
   it('a store migration longer than TTL − renew runs unfenced: the holder keeps its lease', async () => {

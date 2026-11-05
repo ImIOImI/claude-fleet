@@ -12,7 +12,7 @@ import { brokerWatch, EventHub, pruneDeadOwners } from './events.js';
 import type { PgTrack } from '../main/store/pgMigrate.js';
 import { pgPoolConfig } from '../main/store/storeConfig.js';
 import { openHostDbRetrying, startDbHealth, type DbHealth, type HostDbHandle } from './hostDb.js';
-import { resolveWorkspaceId } from './hostState.js';
+import { resolveHostWorkspaceId, resolveWorkspaceId } from './hostState.js';
 import { startHolder, type Holder } from './holder.js';
 import { LEASE_RENEW_MS, LEASE_TTL_MS, LeaseManager, memoryLeaseStore, type LeaseStore, type LostReason } from './lease.js';
 import { postgresLeaseStore } from './pgLease.js';
@@ -226,12 +226,15 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   proc.once('SIGINT', onTerm);
 
   async function bringUp(): Promise<void> {
+    let id: string;
     if (config.db) {
       const h = await openHostDbRetrying(config.db, { env: procEnv, log, signal: startAbort.signal });
       hostDb = h;
       dbHealth = startDbHealth(h.ping, { log });
+      id = await resolveHostWorkspaceId(h.k, env.stateDir, config.workspace.id, log);
+    } else {
+      id = await resolveWorkspaceId(env.stateDir, config.workspace.id);
     }
-    const id = await resolveWorkspaceId(env.stateDir, config.workspace.id);
     if (startAbort.signal.aborted) return;
     const renewMs = opts.leaseRenewMs ?? LEASE_RENEW_MS;
     const ttlMs = opts.leaseTtlMs ?? LEASE_TTL_MS;
