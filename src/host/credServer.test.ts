@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { chmodSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createTokenMinter, loadAppCredentials } from './appToken.js';
+import { createTokenMinter, DEFAULT_PERMISSIONS, loadAppCredentials } from './appToken.js';
 import { listenCredSocket, startCredHelper, type CredServer } from './credServer.js';
 import { requestToken } from './credCli.js';
 import { createLogger } from './log.js';
@@ -41,7 +41,7 @@ describe('credential socket', () => {
     expect(statSync(join(sock, '..')).mode & 0o777).toBe(0o700);
     const token = await requestToken(sock, { owner: 'acme', repositories: ['a'] });
     expect(token).toMatch(/^ghs_fake/);
-    expect(gh.requests.at(-1)!.body).toEqual({ repositories: ['a'] });
+    expect(gh.requests.at(-1)!.body).toEqual({ repositories: ['a'], permissions: DEFAULT_PERMISSIONS });
   });
 
   it('relays refusals with their status, and never logs a token or the key', async () => {

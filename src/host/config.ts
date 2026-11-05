@@ -29,7 +29,7 @@ export interface HostGithubConfig {
   app: GithubAppConfig | null;
   /** Repository names in the installation's account; null = any. */
   repositories: string[] | null;
-  /** Default `permissions` for every token; null = the installation's. */
+  /** Default and ceiling for every token's `permissions`; null = DEFAULT_PERMISSIONS in appToken.ts. */
   permissions: Record<string, 'read' | 'write'> | null;
 }
 

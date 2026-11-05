@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { appJwt, createTokenMinter, loadAppCredentials, REFRESH_BEFORE_MS } from './appToken.js';
+import { appJwt, createTokenMinter, DEFAULT_PERMISSIONS, loadAppCredentials, REFRESH_BEFORE_MS } from './appToken.js';
 import { startFakeGithubApp, type FakeGithubApp } from './testGithubApp.js';
 
 const APP = '5612251';
@@ -40,16 +40,80 @@ describe('createTokenMinter', () => {
     const m = createTokenMinter({ creds, apiBase: gh.url });
     const t = await m.mint({ repositories: ['Fleet-Reviews'] });
     expect(t.repositories).toEqual(['fleet-reviews']);
-    expect(gh.requests.at(-1)!.body).toEqual({ repositories: ['fleet-reviews'] });
+    expect(gh.requests.at(-1)!.body).toEqual({ repositories: ['fleet-reviews'], permissions: DEFAULT_PERMISSIONS });
   });
 
-  it('passes config permissions unless the request names its own', async () => {
+  it('without config, every token carries the built-in permission set and nothing beyond it', async () => {
     const { gh, creds } = await rig();
-    const m = createTokenMinter({ creds, apiBase: gh.url, defaultPermissions: () => ({ contents: 'write' }) });
+    const m = createTokenMinter({ creds, apiBase: gh.url });
+    expect(DEFAULT_PERMISSIONS).toEqual({
+      contents: 'write', pull_requests: 'write', issues: 'write', checks: 'read', actions: 'read', statuses: 'read', metadata: 'read'
+    });
     await m.mint({ repositories: ['fleet-reviews'] });
-    expect(gh.requests.at(-1)!.body).toEqual({ repositories: ['fleet-reviews'], permissions: { contents: 'write' } });
+    expect(gh.requests.at(-1)!.body).toEqual({ repositories: ['fleet-reviews'], permissions: DEFAULT_PERMISSIONS });
+    await expect(m.mint({ repositories: ['fleet-reviews'], permissions: { administration: 'write' } })).rejects.toMatchObject({ status: 403 });
+    await expect(m.mint({ repositories: ['fleet-reviews'], permissions: { checks: 'write' } })).rejects.toMatchObject({ status: 403 });
+    expect(posts(gh)).toBe(1);
+  });
+
+  it('github.permissions is the default and the ceiling; write implies read', async () => {
+    const { gh, creds } = await rig();
+    const m = createTokenMinter({ creds, apiBase: gh.url, permissions: () => ({ contents: 'write', pull_requests: 'read' }) });
+    await m.mint({ repositories: ['fleet-reviews'] });
+    expect(gh.requests.at(-1)!.body).toEqual({ repositories: ['fleet-reviews'], permissions: { contents: 'write', pull_requests: 'read' } });
     await m.mint({ repositories: ['fleet-reviews'], permissions: { contents: 'read' } });
     expect(gh.requests.at(-1)!.body).toEqual({ repositories: ['fleet-reviews'], permissions: { contents: 'read' } });
+    await expect(m.mint({ repositories: ['fleet-reviews'], permissions: { pull_requests: 'write' } })).rejects.toMatchObject({ status: 403 });
+    await expect(m.mint({ repositories: ['fleet-reviews'], permissions: { issues: 'read' } })).rejects.toMatchObject({ status: 403 });
+    expect(posts(gh)).toBe(2);
+  });
+
+  it('refuses, and does not cache, a token GitHub granted wider permissions than asked', async () => {
+    const { gh, creds } = await rig();
+    const m = createTokenMinter({ creds, apiBase: gh.url });
+    gh.grantPermissions = { ...DEFAULT_PERMISSIONS, administration: 'write' };
+    await expect(m.mint({ repositories: ['fleet-reviews'] })).rejects.toThrow(/wider permissions/);
+    gh.grantPermissions = { contents: 'write' };
+    await expect(m.mint({ repositories: ['fleet-reviews'], permissions: { contents: 'read' } })).rejects.toThrow(/wider permissions/);
+    gh.grantPermissions = null;
+    await m.mint({ repositories: ['fleet-reviews'] });
+    expect(posts(gh)).toBe(3);
+  });
+
+  it('a missing installation is a 502 naming github.installationId', async () => {
+    const { gh, creds } = await rig();
+    const m = createTokenMinter({ creds: { ...creds, installationId: '999' }, apiBase: gh.url });
+    await expect(m.account()).rejects.toMatchObject({ status: 502, message: expect.stringMatching(/check github.installationId/) });
+    await expect(m.mint({ repositories: ['fleet-reviews'] })).rejects.toMatchObject({ status: 502, message: expect.stringMatching(/check github.installationId/) });
+  });
+
+  it.each([
+    ['retry-after', { 'retry-after': '30' }, 30_000],
+    ['x-ratelimit-reset', { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': 'RESET' }, 20_000],
+    ['an over-long retry-after (capped at 60 s)', { 'retry-after': '3600' }, 60_000]
+  ])('a rate limit (%s) refuses mints for a short window without calling GitHub', async (_l, headers, windowMs) => {
+    const { gh, creds } = await rig();
+    let now = Date.now();
+    const h = Object.fromEntries(Object.entries(headers).map(([k, v]) => [k, v === 'RESET' ? String(Math.ceil((now + windowMs) / 1000)) : v]));
+    const m = createTokenMinter({ creds, apiBase: gh.url, now: () => now });
+    gh.rateLimitOnce = { status: 'retry-after' in h ? 429 : 403, headers: h };
+    await expect(m.mint({ repositories: ['fleet-reviews'] })).rejects.toMatchObject({ status: 503, message: expect.stringMatching(/rate limit/) });
+    const before = gh.requests.length;
+    now += windowMs - 2_000;
+    await expect(m.mint({ repositories: ['claude-fleet'] })).rejects.toMatchObject({ status: 503 });
+    expect(gh.requests.length).toBe(before);
+    now += 3_000;
+    expect((await m.mint({ repositories: ['claude-fleet'] })).repositories).toEqual(['claude-fleet']);
+  });
+
+  it('runs at most 4 distinct GitHub mints at once and queues the rest', async () => {
+    const { gh, creds } = await rig();
+    const m = createTokenMinter({ creds, apiBase: gh.url });
+    gh.delayMs = 40;
+    const sets = [['fleet-reviews'], ['fleet-expertise'], ['claude-fleet'], ['fleet-reviews', 'claude-fleet'], ['fleet-expertise', 'claude-fleet'], ['fleet-reviews', 'fleet-expertise']];
+    const toks = await Promise.all(sets.map((repositories) => m.mint({ repositories })));
+    expect(new Set(toks.map((t) => t.token)).size).toBe(6);
+    expect(gh.maxConcurrent).toBe(4);
   });
 
   it('refuses a token GitHub scoped wider than asked', async () => {

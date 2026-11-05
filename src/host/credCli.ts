@@ -1,5 +1,5 @@
 // fleet-host-cred: the session side of the App credential helper (git's
-// credential protocol, the gh shim, scripts) plus `serve` for a standalone server.
+// credential protocol and the gh shim) plus `serve` for a standalone server.
 import { request } from 'node:http';
 import { DEFAULT_CRED_SOCKET } from './credServer.js';
 
@@ -29,6 +29,22 @@ export function repoFromCredentialInput(text: string): OwnerRepo | null {
 }
 
 const GITHUB_HOSTS = new Set(['github.com', 'api.github.com']);
+// gh flags whose value is free text, so a URL in it says nothing about the target.
+const TEXT_FLAGS = ['--body', '-b', '--body-file', '--title', '-t', '--notes', '-n', '--message', '-m', '--subject', '--field', '-f', '--raw-field', '-F', '--header', '-H', '--jq', '-q', '--template'];
+const REMOTE_ORDER = ['upstream', 'github', 'origin'];
+
+export interface GitRemote { name: string; url: string }
+
+function withoutTextValues(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (TEXT_FLAGS.includes(a)) i++;
+    else if (TEXT_FLAGS.some((f) => (f.startsWith('--') ? a.startsWith(`${f}=`) : a.startsWith(f) && a.length > 2))) continue;
+    else out.push(a);
+  }
+  return out;
+}
 
 /** gh pointed at any other host must not carry a github.com token. */
 function ghOtherHost(args: string[], env: NodeJS.ProcessEnv): boolean {
@@ -43,7 +59,16 @@ function ghOtherHost(args: string[], env: NodeJS.ProcessEnv): boolean {
   return false;
 }
 
-export function repoFromGhArgs(args: string[], env: NodeJS.ProcessEnv, cwdOrigin: () => string | null): OwnerRepo | null {
+/** gh's default-repo order; any remote off github.com means no token. */
+function repoFromRemotes(remotes: GitRemote[]): OwnerRepo | null {
+  if (remotes.length === 0 || remotes.some((r) => !repoFromGitUrl(r.url))) return null;
+  const rank = (r: GitRemote) => (REMOTE_ORDER.includes(r.name) ? REMOTE_ORDER.indexOf(r.name) : REMOTE_ORDER.length);
+  const best = remotes.reduce((a, b) => (rank(b) < rank(a) ? b : a));
+  return repoFromGitUrl(best.url);
+}
+
+export function repoFromGhArgs(all: string[], env: NodeJS.ProcessEnv, cwdRemotes: () => GitRemote[]): OwnerRepo | null {
+  const args = withoutTextValues(all);
   if (ghOtherHost(args, env)) return null;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -53,11 +78,14 @@ export function repoFromGhArgs(args: string[], env: NodeJS.ProcessEnv, cwdOrigin
   }
   if (env.GH_REPO) return ownerRepo(env.GH_REPO);
   if (args[0] === 'api' && args[1]) {
-    const m = /^\/?repos\/([^/]+)\/([^/?#]+)/.exec(args[1]);
+    const m = /^(?:https:\/\/api\.github\.com)?\/?repos\/([^/]+)\/([^/?#]+)/i.exec(args[1]);
     if (m) return ownerRepo(`${m[1]}/${m[2]}`);
   }
-  const origin = cwdOrigin();
-  return origin ? repoFromGitUrl(origin) : null;
+  for (const a of args) {
+    const m = /^https:\/\/(?:www\.)?github\.com\/([^/?#]+)\/([^/?#]+)/i.exec(a);
+    if (m) return ownerRepo(`${m[1]}/${m[2]}`);
+  }
+  return repoFromRemotes(cwdRemotes());
 }
 
 export function requestToken(socketPath: string, body: unknown): Promise<string> {
@@ -88,15 +116,22 @@ export interface CredIo {
   stdin(): Promise<string>;
   out(s: string): void;
   err(s: string): void;
-  /** `git remote get-url origin` in the cwd, or null. */
-  cwdOrigin(): string | null;
+  /** Tokens are never written to a terminal: anything printed in a session reaches its viewers. */
+  stdoutIsTty: boolean;
+  /** The cwd repo's `remote.<name>.url` entries. */
+  cwdRemotes(): GitRemote[];
 }
 
-const USAGE = 'usage: fleet-host-cred token --repo <name|owner/name>... | git-credential <get|store|erase> | gh-token -- <gh args> | serve';
+const USAGE = 'usage: fleet-host-cred git-credential <get|store|erase> | gh-token -- <gh args> | serve';
 
 export async function runCredCli(argv: string[], io: CredIo): Promise<number> {
   const sock = io.env.FLEET_HOST_CRED_SOCKET || DEFAULT_CRED_SOCKET;
   const say = (e: unknown) => io.err(`fleet-host-cred: ${(e as Error).message}\n`);
+  const isGet = argv[0] === 'gh-token' || (argv[0] === 'git-credential' && argv[1] === 'get');
+  if (isGet && io.stdoutIsTty) {
+    io.err('fleet-host-cred: refusing to print a token to a terminal\n');
+    return 1;
+  }
   switch (argv[0]) {
     case 'git-credential': {
       const input = await io.stdin();
@@ -112,7 +147,7 @@ export async function runCredCli(argv: string[], io: CredIo): Promise<number> {
       return 0;
     }
     case 'gh-token': {
-      const r = repoFromGhArgs(argv.slice(argv[1] === '--' ? 2 : 1), io.env, io.cwdOrigin);
+      const r = repoFromGhArgs(argv.slice(argv[1] === '--' ? 2 : 1), io.env, io.cwdRemotes);
       if (!r) return 0;
       try {
         io.out(`${await requestToken(sock, { owner: r.owner, repositories: [r.repo] })}\n`);
@@ -120,26 +155,6 @@ export async function runCredCli(argv: string[], io: CredIo): Promise<number> {
         say(e);
       }
       return 0;
-    }
-    case 'token': {
-      const repos: string[] = [];
-      let owner: string | undefined;
-      for (let i = 1; i < argv.length; i++) {
-        if (argv[i] !== '--repo' || !argv[i + 1]) return (io.err(`${USAGE}\n`), 2);
-        const v = argv[++i];
-        const r = v.includes('/') ? ownerRepo(v) : { owner: undefined, repo: v };
-        if (!r) return (io.err(`${USAGE}\n`), 2);
-        if (r.owner) owner = r.owner;
-        repos.push(r.repo);
-      }
-      if (repos.length === 0) return (io.err(`${USAGE}\n`), 2);
-      try {
-        io.out(`${await requestToken(sock, { ...(owner ? { owner } : {}), repositories: repos })}\n`);
-        return 0;
-      } catch (e) {
-        say(e);
-        return 1;
-      }
     }
     default:
       io.err(`${USAGE}\n`);

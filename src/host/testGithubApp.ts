@@ -15,6 +15,12 @@ export interface FakeGithubApp {
   ttlMs: number;
   /** Answer with every installation repo, whatever was asked. */
   widen: boolean;
+  /** Permissions to answer with instead of the requested ones (plus metadata: read). */
+  grantPermissions: Record<string, string> | null;
+  /** The next token POST fails with this status and headers. */
+  rateLimitOnce: { status: number; headers: Record<string, string> } | null;
+  /** Peak concurrent token POSTs. */
+  maxConcurrent: number;
   close(): Promise<void>;
 }
 
@@ -35,9 +41,13 @@ export async function startFakeGithubApp(o: { appId: string; installationId: str
     repos: new Set(o.repos),
     delayMs: 0,
     ttlMs: 60 * 60_000,
-    widen: false
+    widen: false,
+    grantPermissions: null,
+    rateLimitOnce: null,
+    maxConcurrent: 0
   } as FakeGithubApp;
   let n = 0;
+  let active = 0;
   const server: Server = createServer((req, res) => {
     let raw = '';
     req.on('data', (c) => (raw += c));
@@ -58,12 +68,21 @@ export async function startFakeGithubApp(o: { appId: string; installationId: str
         if (want.some((r) => !fake.repos.has(r))) {
           return send(422, { message: 'There is at least one repository that does not exist or is not accessible to the parent installation.' });
         }
+        if (fake.rateLimitOnce) {
+          const { status, headers } = fake.rateLimitOnce;
+          fake.rateLimitOnce = null;
+          res.writeHead(status, { 'content-type': 'application/json', ...headers });
+          return res.end(JSON.stringify({ message: 'API rate limit exceeded' }));
+        }
+        active++;
+        fake.maxConcurrent = Math.max(fake.maxConcurrent, active);
         if (fake.delayMs) await new Promise((r) => setTimeout(r, fake.delayMs));
+        active--;
         n++;
         return send(201, {
           token: `ghs_fake${String(n).padStart(4, '0')}${'x'.repeat(28)}`,
           expires_at: new Date(Date.now() + fake.ttlMs).toISOString(),
-          permissions: body?.permissions ?? { contents: 'write' },
+          permissions: { ...(fake.grantPermissions ?? body?.permissions ?? { contents: 'write' }), metadata: 'read' },
           repositories: (want.length && !fake.widen ? want : [...fake.repos]).map((name) => ({ name, full_name: `${o.account}/${name}` }))
         });
       }

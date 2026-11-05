@@ -6,13 +6,8 @@ import { createLogger, redactSecrets } from './log.js';
 
 async function main(argv: string[]): Promise<number> {
   if (argv[0] === 'serve') {
-    const { loadHostConfig, readHostEnv } = await import('./config.js');
-    const { startCredHelper } = await import('./credServer.js');
-    const env = readHostEnv(process.env);
-    const config = await loadHostConfig(env.configPath);
-    const app = config.github?.app;
-    if (!app) throw new Error('serve needs github.appId, github.installationId and github.keyFile in the host config');
-    await startCredHelper({ app, socketPath: env.credSocket, github: () => config.github, log: createLogger() });
+    const { serveCred } = await import('./credServe.js');
+    await serveCred({ env: process.env, log: createLogger(), proc: process });
     return new Promise<number>(() => undefined);
   }
   return runCredCli(argv, {
@@ -25,12 +20,18 @@ async function main(argv: string[]): Promise<number> {
     },
     out: (s) => process.stdout.write(s),
     err: (s) => process.stderr.write(s),
-    cwdOrigin: () => {
+    stdoutIsTty: process.stdout.isTTY === true,
+    cwdRemotes: () => {
+      let text: string;
       try {
-        return execFileSync('git', ['remote', 'get-url', 'origin'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000 }).trim();
+        text = execFileSync('git', ['config', '--get-regexp', '^remote\\..*\\.url$'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000 });
       } catch {
-        return null;
+        return [];
       }
+      return text.split('\n').flatMap((l) => {
+        const m = /^remote\.(.+)\.url (.+)$/.exec(l.trim());
+        return m ? [{ name: m[1], url: m[2] }] : [];
+      });
     }
   });
 }

@@ -11,6 +11,19 @@ const REPO_NAME = /^[A-Za-z0-9_.-]{1,100}$/;
 const OWNER = /^[A-Za-z0-9-]{1,39}$/;
 const PERMISSION = /^[a-z_]{1,64}$/;
 const MAX_CACHED = 64;
+const MAX_INFLIGHT = 4;
+const MAX_BACKOFF_MS = 60_000;
+
+/** Default and ceiling when config `github.permissions` is unset. */
+export const DEFAULT_PERMISSIONS: Readonly<Permissions> = Object.freeze({
+  contents: 'write',
+  pull_requests: 'write',
+  issues: 'write',
+  checks: 'read',
+  actions: 'read',
+  statuses: 'read',
+  metadata: 'read'
+});
 
 export type Permissions = Record<string, 'read' | 'write'>;
 export interface AppCredentials { appId: string; installationId: string; key: KeyObject }
@@ -76,6 +89,17 @@ export function validateTokenRequest(raw: unknown): TokenRequest {
   };
 }
 
+const LEVEL = { read: 1, write: 2 } as const;
+
+/** Every entry of `p` is in `ceiling` at the same or a lower level. */
+function within(p: unknown, ceiling: Readonly<Permissions>): boolean {
+  if (!p || typeof p !== 'object' || Array.isArray(p)) return false;
+  return Object.entries(p as Record<string, unknown>).every(([k, v]) => {
+    const max = Object.hasOwn(ceiling, k) ? ceiling[k] : undefined;
+    return max !== undefined && (v === 'read' || v === 'write') && LEVEL[v] <= LEVEL[max];
+  });
+}
+
 export interface MinterOptions {
   creds: AppCredentials;
   apiBase?: string;
@@ -83,8 +107,8 @@ export interface MinterOptions {
   now?: () => number;
   /** Host config `github.repositories`: when set, nothing outside it is minted. */
   allow?: () => readonly string[] | null;
-  /** Host config `github.permissions`: used when a request names none. */
-  defaultPermissions?: () => Permissions | null;
+  /** Host config `github.permissions`: the default and the ceiling; null = DEFAULT_PERMISSIONS. */
+  permissions?: () => Permissions | null;
 }
 
 export interface TokenMinter {
@@ -100,8 +124,32 @@ export function createTokenMinter(o: MinterOptions): TokenMinter {
   const cache = new Map<string, ScopedToken>();
   const inflight = new Map<string, Promise<ScopedToken>>();
   let accountP: Promise<string> | null = null;
+  let blockedUntil = 0;
+  let running = 0;
+  const queue: (() => void)[] = [];
+
+  async function slot<T>(fn: () => Promise<T>): Promise<T> {
+    if (running >= MAX_INFLIGHT) await new Promise<void>((r) => queue.push(r));
+    running++;
+    try {
+      return await fn();
+    } finally {
+      running--;
+      queue.shift()?.();
+    }
+  }
+
+  function rateLimitMs(res: Response): number | null {
+    const retry = res.headers.get('retry-after');
+    const remaining = res.headers.get('x-ratelimit-remaining');
+    if (res.status !== 429 && !(res.status === 403 && (retry || remaining === '0'))) return null;
+    const reset = Number(res.headers.get('x-ratelimit-reset'));
+    const ms = retry && Number.isFinite(Number(retry)) ? Number(retry) * 1000 : Number.isFinite(reset) && reset > 0 ? reset * 1000 - now() : MAX_BACKOFF_MS;
+    return Math.min(Math.max(ms, 1_000), MAX_BACKOFF_MS);
+  }
 
   async function call(method: string, path: string, body?: unknown): Promise<unknown> {
+    if (now() < blockedUntil) throw new AppTokenError('GitHub rate limit; retry shortly', 503);
     let res: Response;
     try {
       res = await f(`${api}${path}`, {
@@ -120,6 +168,12 @@ export function createTokenMinter(o: MinterOptions): TokenMinter {
       throw new AppTokenError('GitHub is unreachable', 503);
     }
     if (!res.ok) {
+      const limited = rateLimitMs(res);
+      if (limited !== null) {
+        blockedUntil = now() + limited;
+        throw new AppTokenError(`GitHub rate limit; retry in ${Math.ceil(limited / 1000)} s`, 503);
+      }
+      if (res.status === 404) throw new AppTokenError(`GitHub ${method} installation → 404; check github.installationId`, 502);
       const msg = await res.json().then(
         (j: unknown) => {
           const m = (j as { message?: unknown } | null)?.message;
@@ -128,7 +182,7 @@ export function createTokenMinter(o: MinterOptions): TokenMinter {
         () => ''
       );
       const where = `${method} ${path.replace(/\d+/g, ':id')}`;
-      throw new AppTokenError(`GitHub ${where} → ${res.status}${msg ? `: ${msg}` : ''}`, res.status === 422 || res.status === 404 ? 400 : 502);
+      throw new AppTokenError(`GitHub ${where} → ${res.status}${msg ? `: ${msg}` : ''}`, res.status === 422 ? 400 : 502);
     }
     return res.json();
   }
@@ -143,15 +197,16 @@ export function createTokenMinter(o: MinterOptions): TokenMinter {
     return accountP;
   }
 
-  async function fetchToken(req: TokenRequest): Promise<ScopedToken> {
-    const j = (await call('POST', `/app/installations/${o.creds.installationId}/access_tokens`, {
-      repositories: req.repositories,
-      ...(req.permissions ? { permissions: req.permissions } : {})
-    })) as { token?: unknown; expires_at?: unknown; repositories?: { name?: unknown }[] };
+  async function fetchToken(req: { repositories: string[]; permissions: Permissions }): Promise<ScopedToken> {
+    const j = (await slot(() =>
+      call('POST', `/app/installations/${o.creds.installationId}/access_tokens`, { repositories: req.repositories, permissions: req.permissions })
+    )) as { token?: unknown; expires_at?: unknown; repositories?: { name?: unknown }[]; permissions?: unknown };
     const expiresAt = typeof j.expires_at === 'string' ? Date.parse(j.expires_at) : NaN;
     if (typeof j.token !== 'string' || !Number.isFinite(expiresAt)) throw new AppTokenError('GitHub returned no token');
     const granted = (j.repositories ?? []).map((r) => String(r.name).toLowerCase()).sort();
     if (granted.join(',') !== req.repositories.join(',')) throw new AppTokenError('GitHub scoped the token to other repositories');
+    // GitHub adds metadata: read to every token.
+    if (!within(j.permissions, { metadata: 'read', ...req.permissions })) throw new AppTokenError('GitHub granted the token wider permissions than asked');
     return { token: j.token, expiresAt, repositories: granted };
   }
 
@@ -168,7 +223,10 @@ export function createTokenMinter(o: MinterOptions): TokenMinter {
       if (v.owner && v.owner.toLowerCase() !== (await account()).toLowerCase()) {
         throw new AppTokenError(`owner ${v.owner} is not this installation's account`, 403);
       }
-      const req: TokenRequest = { repositories: v.repositories, permissions: v.permissions ?? o.defaultPermissions?.() ?? undefined };
+      const ceiling = o.permissions?.() ?? DEFAULT_PERMISSIONS;
+      if (v.permissions && !within(v.permissions, ceiling)) throw new AppTokenError('permissions exceed github.permissions', 403);
+      const permissions = Object.fromEntries(Object.entries(v.permissions ?? ceiling).sort(([a], [b]) => a.localeCompare(b))) as Permissions;
+      const req = { repositories: v.repositories, permissions };
       const key = JSON.stringify(req);
       const hit = cache.get(key);
       if (hit && hit.expiresAt - now() > REFRESH_BEFORE_MS) return hit;
