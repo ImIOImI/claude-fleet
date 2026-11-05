@@ -19,7 +19,7 @@ c3 has five parts, each with its own gate:
 | Part | Needs |
 |---|---|
 | C3-1 (App credential helper) | **Nothing.** Do it first; it can ship on its own. |
-| C3-2 (DB connection) | Async-store **part 3** (`pg`, `src/main/store/postgres.ts`, per-dialect migrations, the CI `pgvector/pgvector:pg17` service with `PG_TEST_URL`). Also part 4's `src/main/store/passwordProvider.ts`: if part 4 hasn't merged, C3-2 creates that file at that path with that name, and part 4 adopts it. |
+| C3-2 (DB connection) | Async-store **part 3** (`docs/superpowers/plans/2026-11-04-async-store-part3.md`, D36). That covers `pg`; `src/main/store/postgres.ts` with the `afterBeginWrite` hook; `storeConfig.ts`, `passwordProvider.ts`, `pgSsl.ts` and `pgStores.ts`; per-dialect migrations with a `migratePostgres` track per store; `docker/scripts/rds-ca-bundle.sh`; and the CI `pgvector/pgvector:0.8.7-pg16` service with `PG_TEST_URL`. |
 | C3-3 (schema, lease, fencing) | C3-2. |
 | C3-4 – C3-7 | C3-3. Also async-store part 2b, because ingest and RPC read through the async read API. |
 
@@ -85,8 +85,8 @@ c3 has five parts, each with its own gate:
     - the socket is 0600;
     - git-credential output is the `username=x-access-token\npassword=…` protocol.
 - **C3-2 — The DB connection.**
-  - Files: `src/host/hostDb.ts` (+ test) and `src/main/store/passwordProvider.ts` (if part 4 hasn't made it).
-  - Pin `@aws-sdk/rds-signer` and `@aws-sdk/credential-providers` at a release whose default chain includes the container (Pod Identity) provider, and record the minimum version in SPEC §4.
+  - Files: `src/host/hostDb.ts` (+ test), on part 3's `parseStoreConfig(…, { allowStaticSecrets: true })` and `openPgStores(…, { afterBeginWrite })`.
+  - The SDK pins and the Pod Identity test are in part 3 (`3.1162.0`, SPEC §4). The host image runs `docker/scripts/rds-ca-bundle.sh /etc/ssl/certs/rds-global-bundle.pem`, which `verify-full` uses by default when `caFile` is unset.
   - Tests:
     - against a fake container-credentials endpoint (`AWS_CONTAINER_CREDENTIALS_FULL_URI` + `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`), the token is signed for the configured hostname and port, and the provider runs per new connection;
     - `ssl` carries the bundle's CA with `rejectUnauthorized: true` (verify-full);

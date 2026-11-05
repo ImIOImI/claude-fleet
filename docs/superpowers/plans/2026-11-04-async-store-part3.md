@@ -157,13 +157,20 @@ D1–D19 from parts 2a and 2b still bind. The ones part 3 leans on: **D1** (the 
   - **Rules:**
     - `aws-rds-iam` needs `verify-full`.
     - An invalid `store` is an error at startup, never a silent SQLite fallback, which would split the data.
+    - Validation is strict: unknown keys are rejected, exactly one connection form is allowed, `caFile` is an absolute path, and errors name keys, never values.
+    - A `config.json` that isn't valid JSON is never overwritten (writes throw). Startup offers Quit (default) or Continue without settings: SQLite on in-memory defaults, plus a sticky toast naming the file.
 - **D32 — Credentials and TLS:**
   - **Providers:** `passwordProvider(source, { host, port, user })` returns pg's async `password` function, called per new connection.
   - **`aws-rds-iam`:**
     - It uses `@aws-sdk/rds-signer`'s `Signer` with `fromNodeProviderChain()`, which includes the container provider: Pod Identity via `AWS_CONTAINER_CREDENTIALS_FULL_URI` + `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`.
     - The token is signed for the configured host and port as given, with no alias resolution.
     - Both SDK packages are pinned exactly at `3.1162.0`. A unit test against a fake container-credentials endpoint is the proof that the pinned chain supports Pod Identity.
-  - **TLS:** `verify-full` means the CA from `caFile` plus Node's hostname check.
+  - **TLS:**
+    - The modes are `disable` and `verify-full` only, with no `require`. `verify-full` means the CA from `caFile` (default `/etc/ssl/certs/rds-global-bundle.pem` when present) plus Node's hostname check.
+    - A connection string's `sslmode` must be one of those two; other `ssl*` params and `uselibpqcompat` are refused. `ssl` is always set explicitly, so `PGSSLMODE` is never consulted.
+    - With no `sslmode`, a connection string is `verify-full` unless its effective host (`pg-connection-string`, honouring `?host=`) is a Unix socket or loopback. `caFile` forces `verify-full`, and `caFile` with `disable` is refused.
+  - **Clock:** IAM tokens are SigV4-signed with a 900 s window, so the host clock must be synced. Auth failures (28P01/28000) carry a secret-free hint.
+  - **Local workspaces:** their spawn env and the `claude` PATH probe drop `storeSecretEnvNames(cfg)`: the store's env vars and the libpq credential vars.
   - **The RDS CA bundle:** `docker/scripts/rds-ca-bundle.sh <dest>` fetches `global-bundle.pem` and checks it against the sha256 pinned in `docker/versions.yaml`. c3's host image runs it (F4). A desktop user points `caFile` at their own copy.
 - **D33 — Startup on Postgres:**
   - **One pool, one schema:** both stores share one pool and one schema. The table names don't collide.
