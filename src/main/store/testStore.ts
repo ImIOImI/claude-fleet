@@ -7,7 +7,9 @@ import { onTestFinished } from 'vitest';
 import type pg from 'pg';
 import type Database from 'better-sqlite3';
 import { CompiledQuery, type Kysely } from 'kysely';
-import { createPgPool } from './postgres.js';
+import { createPgPool, type PgPoolConfig } from './postgres.js';
+import { rolePoolConfig } from './pgQueryIsolation.js';
+import { scramVerifier } from './scram.js';
 import * as db from '../db.js';
 import { InboxStore } from '../inbox/inboxDb.js';
 
@@ -147,4 +149,41 @@ export async function settle(s: InboxStore): Promise<void> {
     quiet = pool.waitingCount === 0 && pool.idleCount === pool.totalCount ? quiet + 1 : 0;
     await turn();
   }
+}
+
+export interface TestPgApp extends TestPg {
+  /** The store role: owns the schema, has CREATEROLE, is not a superuser. */
+  appRole: string;
+  /** Pool options for appRole (what the store's own pool would use). */
+  appConfig: PgPoolConfig;
+  appPool: pg.Pool;
+}
+
+/** A fresh schema owned by a non-superuser store role, as on a real server:
+ *  RLS doesn't apply to superusers, so isolation is only testable this way.
+ *  drop() also removes every role named after the schema. */
+export async function testPgAppSchema(): Promise<TestPgApp> {
+  const t = await testPgSchema();
+  const appRole = `${t.schema}_app`;
+  const password = randomBytes(24).toString('base64url');
+  await t.pool.query(`CREATE ROLE ${appRole} LOGIN CREATEROLE PASSWORD '${scramVerifier(password)}'`);
+  await t.pool.query(`ALTER SCHEMA ${t.schema} OWNER TO ${appRole}`);
+  const { types: _types, max: _max, idleTimeoutMillis: _idle, ...conn } = rolePoolConfig(
+    { connectionString: process.env.PG_TEST_URL, schema: t.schema }, appRole, password,
+  );
+  const appConfig: PgPoolConfig = { ...conn, schema: t.schema, max: POOL_MAX };
+  const appPool = createPgPool(appConfig);
+  return {
+    ...t, appRole, appConfig, appPool,
+    async drop() {
+      await appPool.end();
+      await t.pool.query(`DROP SCHEMA ${t.schema} CASCADE`);
+      const roles = await t.pool.query<{ r: string }>(`SELECT rolname AS r FROM pg_roles WHERE rolname LIKE $1 ORDER BY length(rolname) DESC`, [`${t.schema}\\_%`]);
+      for (const { r } of roles.rows) {
+        await t.pool.query(`DROP OWNED BY ${r}`);
+        await t.pool.query(`DROP ROLE ${r}`);
+      }
+      await t.pool.end();
+    },
+  };
 }

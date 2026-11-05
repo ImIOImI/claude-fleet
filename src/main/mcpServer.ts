@@ -707,7 +707,7 @@ function handleMethod(method: string, params: Record<string, unknown>, callerId:
     case 'ping':
       return {};
     case 'tools/list':
-      return { tools: TOOLS.map((t) => ({ name: t.name, description: describe(t), inputSchema: t.inputSchema })) };
+      return { tools: TOOLS.map((t) => ({ name: t.name, description: toolDescription(t), inputSchema: t.inputSchema })) };
     case 'tools/call':
       return callTool(params, callerId); // may be a Promise (committee_* tools)
     default:
@@ -847,7 +847,7 @@ function aggregateSessionCost(rows: TokenGroup[]): {
   return { usd, ...totals };
 }
 
-interface Tool {
+export interface Tool {
   name: string;
   description: string;
   /** Replaces `description` in tools/list when the history store is Postgres. */
@@ -858,7 +858,8 @@ interface Tool {
   run: (rs: ReadSource | null, args: Record<string, unknown>, ctx: ToolCtx) => unknown;
 }
 
-function describe(t: Tool): string {
+/** Exported for tests. */
+export function toolDescription(t: Tool): string {
   return readSource?.queryFlavor === 'postgres' && t.pgDescription ? t.pgDescription : t.description;
 }
 
@@ -1115,6 +1116,13 @@ export const TOOLS: Tool[] = [
       'raw_jsonl is excluded unless include_raw=true. ' +
       'Args: sql (required), params (array of bound ? values), include_raw (bool), max_rows (default ' +
       `${DEFAULT_LIMIT}, max ${MAX_LIMIT}). Writes/DDL/multi-statement are rejected.`,
+    pgDescription:
+      'Run a single read-only Postgres SELECT against your workspace data. Tables: events, sessions, ' +
+      'broker_sessions, session_summaries, session_tags, usage_events, perf_events — row-level security limits ' +
+      'them to the rows you may read, so SELECT freely (joins, aggregates, GROUP BY, to_timestamp(ts / 1000.0) for UTC). ' +
+      'raw_jsonl is excluded unless include_raw=true. ' +
+      'Args: sql (required), params (array of values bound to $1, $2, …), include_raw (bool), max_rows (default ' +
+      `${DEFAULT_LIMIT}, max ${MAX_LIMIT}). Only SELECT/VALUES/WITH (no data-modifying WITH); one statement; 10 s limit.`,
     inputSchema: {
       type: 'object',
       properties: {

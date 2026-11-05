@@ -5,7 +5,7 @@ import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as db from './db.js';
-import { TOOLS, setQueryEmbedder, setReadSource, setUsageRecorder, type ToolCtx } from './mcpServer.js';
+import { TOOLS, setQueryEmbedder, setReadSource, setUsageRecorder, toolDescription, type ToolCtx } from './mcpServer.js';
 import { costFor } from './pricing.js';
 import { sqliteReadSource } from './sqliteReadSource.js';
 import { pgReadSource } from './store/pgReadSource.js';
@@ -223,5 +223,21 @@ describe('setReadSource', () => {
     setReadSource(null);
     await Promise.resolve();
     expect(closed).toEqual(['a', 'b']);
+  });
+});
+
+describe('query description', () => {
+  it('names the Postgres dialect only when Postgres serves query', () => {
+    const fake = (queryFlavor: ReadSource['queryFlavor']) =>
+      ({ queryFlavor, forgetCaller: async () => {}, close: async () => {} }) as unknown as ReadSource & ReadSourceAdmin;
+    const t = tool('query');
+    setReadSource(fake('postgres'));
+    expect(toolDescription(t)).toBe(t.pgDescription);
+    expect(t.pgDescription).toMatch(/\$1/);
+    setReadSource(fake(null));
+    expect(toolDescription(t)).toBe(t.description);
+    setReadSource(fake('sqlite'));
+    expect(toolDescription(t)).toBe(t.description);
+    setReadSource(null);
   });
 });

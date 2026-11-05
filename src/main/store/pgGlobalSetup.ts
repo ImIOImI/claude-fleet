@@ -21,6 +21,14 @@ export default async function setup(): Promise<void> {
     const all = await c.query<{ s: string }>(`SELECT nspname AS s FROM pg_namespace WHERE nspname LIKE 't\\_%'`);
     const now = Math.floor(Date.now() / 1000);
     for (const { s } of all.rows) if (isStaleTestSchema(s, now)) await c.query(`DROP SCHEMA ${s} CASCADE`);
+    // testPgAppSchema's roles (<schema>_app, <schema>_mcp_*) are cluster-wide and outlive a crashed run.
+    const roles = await c.query<{ r: string }>(`SELECT rolname AS r FROM pg_roles WHERE rolname ~ '^t_[0-9]+_[0-9a-f]+_' ORDER BY length(rolname) DESC`);
+    for (const { r } of roles.rows) {
+      const schema = /^(t_\d+_[0-9a-f]+)_/.exec(r)?.[1];
+      if (!schema || !isStaleTestSchema(schema, now)) continue;
+      await c.query(`DROP OWNED BY ${r}`);
+      await c.query(`DROP ROLE ${r}`);
+    }
   } finally {
     await c.end();
   }
