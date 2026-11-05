@@ -146,6 +146,11 @@ export class RemoteClient {
     return t;
   }
 
+  /** Host-supplied text made safe to show: one short line, token removed. */
+  async redact(text: string): Promise<string> {
+    return scrub(text, await this.token().catch(() => null));
+  }
+
   private async request(path: string, init: { method: string; body?: string; auth: boolean; timeoutMs?: number }): Promise<Response> {
     const headers: Record<string, string> = { Accept: 'application/json' };
     const token = init.auth ? await this.bearer() : null;
