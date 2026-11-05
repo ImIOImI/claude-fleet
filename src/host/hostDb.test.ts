@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
 import { randomBytes } from 'node:crypto';
+import { createServer, type AddressInfo } from 'node:net';
 import type { PostgresStoreConfig } from '../main/store/storeConfig.js';
 import { isPg } from '../main/store/testStore.js';
 import { openHostDb, openHostDbRetrying, startDbHealth, type HostDbHandle } from './hostDb.js';
@@ -34,6 +35,25 @@ describe('startDbHealth', () => {
     expect(h.ok()).toBe(false);
     expect(logs.join('\n')).toMatch(/host db ping failed.*timed out/);
     h.stop();
+  });
+});
+
+describe('openHostDbRetrying abort', () => {
+  it('stops retrying, mid-backoff, once its signal aborts', async () => {
+    const s = createServer((c) => c.destroy());
+    await new Promise<void>((r) => s.listen(0, '127.0.0.1', () => r()));
+    const { port } = s.address() as AddressInfo;
+    const ac = new AbortController();
+    const logs: string[] = [];
+    const p = openHostDbRetrying(
+      { kind: 'postgres', schema: 'fleet', poolMax: 2, connection: { connectionString: `postgres://u@127.0.0.1:${port}/fleet` } },
+      { log: createLogger((l) => { logs.push(l); if (l.includes('retrying')) setTimeout(() => ac.abort(), 50); }), signal: ac.signal, maxDelayMs: 60_000 }
+    );
+    const t0 = Date.now();
+    await expect(p).rejects.toThrow(/aborted/);
+    expect(Date.now() - t0).toBeLessThan(900);
+    expect(logs.filter((l) => l.includes('retrying'))).toHaveLength(1);
+    await new Promise<void>((r) => s.close(() => r()));
   });
 });
 

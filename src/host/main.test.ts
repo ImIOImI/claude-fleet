@@ -300,3 +300,45 @@ describe('broker polling', () => {
     ws.close();
   });
 });
+
+describe('runHost with db: listen first', () => {
+  it('accepts at once while the db is unreachable: /healthz 503 connecting, routes 503 host starting; SIGTERM still exits promptly', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fh-main-'));
+    const cfgPath = join(dir, 'config.yaml');
+    const dead = await freePort();
+    writeFileSync(cfgPath, `${CONFIG}db: { connectionString: "postgres://u@127.0.0.1:${dead}/fleet" }\n`);
+    const port = await freePort();
+    const proc = new EventEmitter();
+    const exit = vi.fn();
+    const logs: string[] = [];
+    const host = await runHost({
+      env: { FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock') },
+      exit, proc, logSink: (l) => logs.push(l), authFactory: () => ({ id: 'github', verify }), brokerOps: fakeBroker([]).ops
+    });
+    const url = `http://127.0.0.1:${port}`;
+    const h = await fetch(`${url}/healthz`);
+    expect(h.status).toBe(503);
+    expect(await h.json()).toEqual({ status: 'starting', lease: 'standby', db: 'connecting' });
+    const w = await fetch(`${url}/whoami`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    expect(w.status).toBe(503);
+    expect(w.headers.get('retry-after')).toBe('5');
+    expect(await w.json()).toEqual({ error: 'host starting' });
+    await vi.waitFor(() => expect(logs.join('\n')).toMatch(/host db unavailable; retrying/));
+    const t0 = Date.now();
+    proc.emit('SIGTERM');
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
+    expect(Date.now() - t0).toBeLessThan(3_000);
+    expect(host.server.listening).toBe(false);
+    expect(logs.join('\n')).not.toMatch(/lease acquired/);
+  });
+
+  it('an invalid db block still fails at start, before listening', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fh-main-'));
+    const cfgPath = join(dir, 'config.yaml');
+    writeFileSync(cfgPath, `${CONFIG}db: { env: FLEET_DB_UNSET }\n`);
+    await expect(runHost({
+      env: { FLEET_HOST_PORT: String(await freePort()), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock') },
+      exit: vi.fn(), proc: new EventEmitter(), logSink: () => undefined, authFactory: () => ({ id: 'github', verify }), brokerOps: fakeBroker([]).ops
+    })).rejects.toThrow(/FLEET_DB_UNSET is not set/);
+  });
+});

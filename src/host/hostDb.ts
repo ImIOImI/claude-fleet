@@ -41,17 +41,37 @@ export async function openHostDb(cfg: PostgresStoreConfig, o: { env?: NodeJS.Pro
   };
 }
 
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve();
+    const t = setTimeout(done, ms);
+    function done() {
+      clearTimeout(t);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
 /** Retries anything but a config error, so a DB blip at start doesn't crash-loop the container. */
 export async function openHostDbRetrying(
   cfg: PostgresStoreConfig,
-  o: { env?: NodeJS.ProcessEnv; log: Logger; sleep?: (ms: number) => Promise<void>; maxDelayMs?: number }
+  o: { env?: NodeJS.ProcessEnv; log: Logger; sleep?: (ms: number) => Promise<void>; maxDelayMs?: number; signal?: AbortSignal }
 ): Promise<HostDbHandle> {
-  const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const sleep = o.sleep ?? ((ms: number) => abortableSleep(ms, o.signal));
+  const aborted = () => new Error('host db open aborted');
   for (let delay = 1_000; ; delay = Math.min(delay * 2, o.maxDelayMs ?? 30_000)) {
+    if (o.signal?.aborted) throw aborted();
     try {
-      return await openHostDb(cfg, o);
+      const h = await openHostDb(cfg, o);
+      if (o.signal?.aborted) {
+        await h.end().catch(() => undefined);
+        throw aborted();
+      }
+      return h;
     } catch (err) {
-      if (err instanceof StoreConfigError) throw err;
+      if (err instanceof StoreConfigError || o.signal?.aborted) throw err;
       o.log.log('warn', 'host db unavailable; retrying', { error: (err as Error).message, delayMs: delay });
       await sleep(delay);
     }

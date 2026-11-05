@@ -149,6 +149,28 @@ describe('unauthenticated routes', () => {
     expect(await res.json()).toEqual({ status: 'unhealthy', lease: 'holder', db: 'down' });
   });
 
+  it('while starting, /healthz is 503 and every authenticated route and upgrade is 503 host starting with Retry-After', async () => {
+    let starting = true;
+    const r = await start([], { starting: () => starting, db: () => (starting ? 'connecting' : 'ok') });
+    r.setLease('standby');
+    const h = await fetch(`${r.url}/healthz`);
+    expect(h.status).toBe(503);
+    expect(await h.json()).toEqual({ status: 'starting', lease: 'standby', db: 'connecting' });
+    for (const res of [
+      await fetch(`${r.url}/whoami`, { headers: bearer(`${TOKEN}x`) }),
+      await fetch(`${r.url}/rpc/sessions:list`, { method: 'POST', headers: bearer(`${TOKEN}x`), body: '[]' })
+    ]) {
+      expect(res.status).toBe(503);
+      expect(res.headers.get('retry-after')).toBe('5');
+      expect(await res.json()).toEqual({ error: 'host starting' });
+    }
+    await expect(openWs(r, '/events', `${TOKEN}x`)).rejects.toThrow(/HTTP 503/);
+    expect(r.verify).not.toHaveBeenCalled();
+    starting = false;
+    r.setLease('holder');
+    expect((await fetch(`${r.url}/whoami`, { headers: bearer(`${TOKEN}x`) })).status).toBe(200);
+  });
+
   it('/leader is 200 only on the holder', async () => {
     const r = await start();
     expect((await fetch(`${r.url}/leader`)).status).toBe(200);

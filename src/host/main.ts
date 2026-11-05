@@ -9,6 +9,7 @@ import { loadHostConfig, readHostEnv, type HostConfig } from './config.js';
 import { createReloader, watchConfigDir } from './configReload.js';
 import { startCredHelper, type CredServer } from './credServer.js';
 import { brokerWatch, EventHub, pruneDeadOwners } from './events.js';
+import { pgPoolConfig } from '../main/store/storeConfig.js';
 import { openHostDbRetrying, startDbHealth, type DbHealth, type HostDbHandle } from './hostDb.js';
 import { resolveWorkspaceId } from './hostState.js';
 import { startHolder, type Holder } from './holder.js';
@@ -22,6 +23,8 @@ export const BROKER_POLL_MS = 2_000;
 export const OWNER_PRUNE_MS = 60_000;
 /** Bound on releasing the lease after a crash; the process then exits regardless. */
 export const FATAL_STOP_MS = 2_000;
+/** Bound on each of closing the holder's stores and the host pool on shutdown, inside the 30 s grace period. */
+export const STORE_CLOSE_MS = 5_000;
 
 export interface RunHostOptions {
   env?: NodeJS.ProcessEnv;
@@ -38,6 +41,7 @@ export interface RunHostOptions {
   ownerPruneMs?: number;
   brokerPollMs?: number;
   fatalStopMs?: number;
+  storeCloseMs?: number;
   /** GitHub API base for the App credential helper (tests). */
   githubApiBase?: string;
 }
@@ -93,20 +97,15 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     uninstallGuards();
     throw new Error(`host config rejected: ${env.configPath}`);
   }
-  let hostDb: HostDbHandle | null = null;
-  let dbHealth: DbHealth | null = null;
+  const procEnv = opts.env ?? process.env;
   try {
-    if (config.db) {
-      hostDb = await openHostDbRetrying(config.db, { env: opts.env ?? process.env, log });
-      dbHealth = startDbHealth(hostDb.ping, { log });
-    } else {
-      log.log('warn', 'no db configured: process-local lease and no ingest; run exactly one replica');
-    }
+    // An invalid db block fails here, before listening; only connecting is retried.
+    if (config.db) pgPoolConfig(config.db, procEnv);
+    else log.log('warn', 'no db configured: process-local lease and no ingest; run exactly one replica');
   } catch (err) {
     uninstallGuards();
     throw err;
   }
-  const workspaceId = await resolveWorkspaceId(env.stateDir, config.workspace.id);
   let cred: CredServer | null = null;
   try {
     const app = config.github?.app;
@@ -121,20 +120,20 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   const hub = new AttachHub(ops, { hostPort: env.port, log });
   const events = new EventHub();
   const holderId = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
-  const leaseMgr = new LeaseManager({
-    holder: holderId,
-    store: opts.leaseStore ?? (hostDb ? postgresLeaseStore(hostDb.k, workspaceId) : memoryLeaseStore()),
-    renewMs: opts.leaseRenewMs,
-    ttlMs: opts.leaseTtlMs,
-    onError: (err) => log.log('warn', 'lease store error', { error: err.message })
-  });
-  lease = leaseMgr;
+  // Set by bringUp(); with db the server listens before they exist.
+  let hostDb: HostDbHandle | null = null;
+  let dbHealth: DbHealth | null = null;
+  let workspaceId: string | null = null;
+  let leaseMgr: LeaseManager | null = null;
+  let started = false;
+  const startAbort = new AbortController();
   const server = createHostServer({
-    workspace: () => ({ ...config.workspace, id: workspaceId }),
+    workspace: () => ({ ...config.workspace, id: workspaceId as string }),
     auth: () => auth,
-    lease: () => leaseMgr.state,
-    healthy: () => leaseMgr.running && (dbHealth?.ok() ?? true),
-    db: () => (dbHealth ? (dbHealth.ok() ? 'ok' : 'down') : 'none'),
+    lease: () => leaseMgr?.state ?? 'standby',
+    healthy: () => !!leaseMgr?.running && (dbHealth?.ok() ?? true),
+    db: () => (!config.db ? 'none' : !dbHealth ? 'connecting' : dbHealth.ok() ? 'ok' : 'down'),
+    starting: () => !started,
     hub,
     events,
     rpc: brokerRpcChannels(ops, hub.owners, env.port),
@@ -154,7 +153,7 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   const watch = brokerWatch(ops, events, hub);
   let polling = false;
   const poller = setInterval(() => {
-    if (polling || leaseMgr.state !== 'holder' || events.size === 0) return;
+    if (polling || leaseMgr?.state !== 'holder' || events.size === 0) return;
     polling = true;
     watch
       .poll()
@@ -162,14 +161,31 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
       .finally(() => (polling = false));
   }, opts.brokerPollMs ?? BROKER_POLL_MS);
   const pruner = setInterval(() => {
-    if (leaseMgr.state !== 'holder') return;
+    if (leaseMgr?.state !== 'holder') return;
     pruneDeadOwners(ops, hub).catch((err: Error) => log.log('warn', 'owner prune failed', { error: err.message }));
   }, opts.ownerPruneMs ?? OWNER_PRUNE_MS);
 
+  const storeCloseMs = opts.storeCloseMs ?? STORE_CLOSE_MS;
+  async function closeWithin(what: string, close: () => Promise<unknown>): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    const closed = close().then(
+      () => true,
+      (err: Error) => {
+        log.log('warn', 'store close failed', { what, error: err.message });
+        return true;
+      }
+    );
+    const timedOut = new Promise<false>((r) => (timer = setTimeout(() => r(false), storeCloseMs)));
+    if (!(await Promise.race([closed, timedOut]))) log.log('warn', 'store close timed out', { what, ms: storeCloseMs });
+    clearTimeout(timer);
+  }
+
+  let holderP: Promise<Holder | null> | null = null;
   let stopping: Promise<void> | null = null;
   function shutdown(code: number): Promise<void> {
     stopping ??= (async () => {
-      log.log('info', 'shutting down', { code, lease: leaseMgr.state });
+      log.log('info', 'shutting down', { code, lease: leaseMgr?.state ?? 'standby' });
+      startAbort.abort();
       clearInterval(poller);
       clearInterval(pruner);
       stopWatch();
@@ -179,47 +195,76 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
       // Frames stop before the lease is released, so no viewer acts during the handover.
       server.halt(1001, 'host shutting down');
       // Holder resources close while the lease still fences their last writes.
-      const holder = await holderP;
-      await holder?.stop().catch((err: Error) => log.log('warn', 'holder stop failed', { error: err.message }));
-      await leaseMgr.stop();
+      if (holderP) await closeWithin('holder stores', async () => (await holderP)?.stop());
+      await leaseMgr?.stop();
       await server.close();
       await cred?.close();
       dbHealth?.stop();
-      await hostDb?.end().catch(() => undefined);
+      const pool = hostDb;
+      if (pool) await closeWithin('host pool', () => pool.end());
       uninstallGuards();
       if (!fatal) exit(code);
     })();
     return stopping;
   }
   const onTerm = (): void => void shutdown(0);
-
-  let holderP: Promise<Holder | null> | null = null;
-  leaseMgr.on('acquired', (epoch: number) => {
-    log.log('info', 'lease acquired', { epoch, workspaceId });
-    const db = config.db;
-    if (!db) return;
-    holderP = startHolder({
-      db,
-      env: opts.env ?? process.env,
-      workspaceId,
-      holder: holderId,
-      epoch: () => (leaseMgr.state === 'holder' ? leaseMgr.epoch : null),
-      onLost: () => leaseMgr.markLost(),
-      log
-    }).catch((err: Error) => {
-      log.log('error', 'holder start failed; giving up the lease', { error: err.message });
-      leaseMgr.markLost();
-      return null;
-    });
-  });
-  leaseMgr.on('lost', () => {
-    log.log('error', 'lease lost; exiting');
-    void shutdown(1);
-  });
   proc.once('SIGTERM', onTerm);
   proc.once('SIGINT', onTerm);
 
-  leaseMgr.start();
+  async function bringUp(): Promise<void> {
+    if (config.db) {
+      const h = await openHostDbRetrying(config.db, { env: procEnv, log, signal: startAbort.signal });
+      hostDb = h;
+      dbHealth = startDbHealth(h.ping, { log });
+    }
+    const id = await resolveWorkspaceId(env.stateDir, config.workspace.id);
+    if (startAbort.signal.aborted) return;
+    workspaceId = id;
+    const m = new LeaseManager({
+      holder: holderId,
+      store: opts.leaseStore ?? (hostDb ? postgresLeaseStore(hostDb.k, id) : memoryLeaseStore()),
+      renewMs: opts.leaseRenewMs,
+      ttlMs: opts.leaseTtlMs,
+      onError: (err) => log.log('warn', 'lease store error', { error: err.message })
+    });
+    leaseMgr = m;
+    lease = m;
+    m.on('acquired', (epoch: number) => {
+      log.log('info', 'lease acquired', { epoch, workspaceId: id });
+      const db = config.db;
+      if (!db) return;
+      holderP = startHolder({
+        db,
+        env: procEnv,
+        workspaceId: id,
+        holder: holderId,
+        epoch: () => (m.state === 'holder' ? m.epoch : null),
+        onLost: () => m.markLost(),
+        log
+      }).catch((err: Error) => {
+        log.log('error', 'holder start failed; giving up the lease', { error: err.message });
+        m.markLost();
+        return null;
+      });
+    });
+    m.on('lost', () => {
+      log.log('error', 'lease lost; exiting');
+      void shutdown(1);
+    });
+    m.start();
+    if (config.db) await m.tick();
+    started = true;
+  }
+
+  if (!config.db) {
+    try {
+      await bringUp();
+    } catch (err) {
+      await cred?.close();
+      uninstallGuards();
+      throw err;
+    }
+  }
   await new Promise<void>((resolve, reject) => {
     server.server.once('error', reject);
     server.server.listen(env.port, '0.0.0.0', () => {
@@ -228,5 +273,15 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     });
   });
   log.log('info', 'fleet-host listening', { port: env.port, workspaceId, workspace: config.workspace.name });
+  if (config.db) {
+    void bringUp().then(
+      () => started && log.log('info', 'fleet-host ready', { workspaceId, lease: leaseMgr?.state }),
+      (err: Error) => {
+        if (startAbort.signal.aborted) return;
+        log.log('error', 'host start failed; exiting', { error: err.message });
+        void shutdown(1);
+      }
+    );
+  }
   return { server: server.server, shutdown };
 }
