@@ -850,3 +850,33 @@ describe('inbox tools (#407)', () => {
     expect(() => tool('list_workspace_skills').run(null as never, {}, ctx)).toThrow(/skills are unavailable/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Postgres store: the server starts without the state.db connection
+// ---------------------------------------------------------------------------
+
+import { startMcpServer, stopMcpServer } from './mcpServer.js';
+
+describe('startMcpServer({ stateDb: false })', () => {
+  afterEach(() => stopMcpServer());
+
+  it('history tools return an unavailable error; tools that do not read state.db still run', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cf-mcp-pg-'));
+    try {
+      startMcpServer(dir, { stateDb: false });
+      const hist = (await callTool({ name: 'list_sessions', arguments: {} }, WS_A)) as { isError?: boolean; content: Array<{ text: string }> };
+      expect(hist.isError).toBe(true);
+      expect(hist.content[0].text).toBe('Error: list_sessions is unavailable on the Postgres store');
+      for (const name of ['get_session', 'get_cost', 'list_events', 'search_transcripts', 'session_summary', 'list_errors', 'query', 'mark_useful']) {
+        const r = (await callTool({ name, arguments: {} }, WS_A)) as { isError?: boolean; content: Array<{ text: string }> };
+        expect(r.content[0].text).toBe(`Error: ${name} is unavailable on the Postgres store`);
+      }
+      setConfigResolver(() => ({ probe: true }));
+      const cfg = (await callTool({ name: 'get_config', arguments: {} }, WS_A)) as { isError?: boolean; content: Array<{ text: string }> };
+      expect(cfg.isError).toBeUndefined();
+      expect(JSON.parse(cfg.content[0].text)).toEqual({ probe: true });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

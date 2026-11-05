@@ -612,6 +612,9 @@ const api = {
       perfTelemetry: boolean;
       perfOtlp: { enabled: boolean; endpoint: string };
     }> => ipcRenderer.invoke('config:get'),
+    /** config.json's path when it isn't valid JSON (settings run on defaults
+     *  and can't be saved), else null. */
+    unreadablePath: (): Promise<string | null> => ipcRenderer.invoke('config:unreadablePath'),
     setFleetRoot: (path: string): Promise<{ fleetRoot: string; sharedDir: string }> =>
       ipcRenderer.invoke('config:setFleetRoot', path),
     setHardwareAccelDisabled: (

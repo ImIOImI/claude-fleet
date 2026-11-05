@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { sql } from 'kysely';
-import { sqliteKysely, num, chunked } from './kysely.js';
+import { sqliteKysely, num, chunked, readTransaction } from './kysely.js';
 
 interface T { t: { v: number } }
 
@@ -138,6 +138,15 @@ describe('sqliteKysely statementCache', () => {
     await k.selectFrom('t').select('v').execute();
     expect(prepares()).toBe(3); // short statement: prepared once, reused
 
+    await k.destroy();
+  });
+});
+
+describe('readTransaction', () => {
+  it('runs the callback in one transaction on SQLite and returns its value', async () => {
+    const { k } = fresh();
+    await k.insertInto('t').values({ v: 1 }).execute();
+    expect(await readTransaction(k, (trx) => trx.selectFrom('t').select('v').execute())).toEqual([{ v: 1 }]);
     await k.destroy();
   });
 });

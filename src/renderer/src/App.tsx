@@ -563,6 +563,28 @@ export function App() {
     void window.api.app.getMcpStatus().then(apply).catch(() => {});
     return window.api.app.onMcpStatus(apply);
   }, []);
+  // Started via "Continue without settings": config.json is unreadable, so
+  // settings run on defaults and every save is refused until it's fixed.
+  useEffect(() => {
+    void window.api.config
+      .unreadablePath()
+      .then((path) => {
+        if (!path) return;
+        dispatchToast({
+          type: 'push',
+          toast: makeToast(++toastIdRef.current, {
+            kind: 'error',
+            eyebrow: "Settings can't be saved",
+            message: `${path} is not valid JSON. Running on default settings; fix the file and restart.`,
+            placement: 'global',
+            sticky: true,
+            dismissible: false,
+            key: 'config-unreadable'
+          })
+        });
+      })
+      .catch(() => {});
+  }, []);
   // Open the loopback preview for a serving port — shared by the detection
   // toast and the rail's Serving section. Errors surface as toasts.
   const openPreview = useCallback((workspaceId: string, port: number) => {

@@ -10,10 +10,6 @@
 // self-register"). The expected local outcome is a fast import failure — CI
 // runs the real assertions. Gate locally with `npm run typecheck:node`.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import Database from 'better-sqlite3';
 import {
   openDb,
   closeDb,
@@ -29,6 +25,7 @@ import {
   listSessionCostsQuery,
 } from './db.js';
 import { explainPlan } from './state/explainPlan.js';
+import { openTestState, queryRows, isPg, type TestState } from './store/testStore.js';
 
 let dir: string;
 
@@ -100,17 +97,17 @@ const ROLLUP_SQL = `
   FROM session_costs
   ORDER BY session_id, workspace_id, model, service_tier`;
 
-function expectRollupMatchesEvents(d: Database.Database): void {
-  expect(d.prepare(ROLLUP_SQL).all()).toEqual(d.prepare(GROUND_TRUTH_SQL).all());
+async function expectRollupMatchesEvents(): Promise<void> {
+  expect((await queryRows(ROLLUP_SQL))).toEqual((await queryRows(GROUND_TRUTH_SQL)));
 }
 
+let st: TestState;
 beforeEach(async () => {
-  dir = mkdtempSync(join(tmpdir(), 'cf-costs-'));
-  openDb(dir);
+  st = await openTestState('cf-costs-');
+  dir = st.dir;
 });
 afterEach(async () => {
-  await closeDb();
-  rmSync(dir, { recursive: true, force: true });
+  await st.close();
 });
 
 describe('session_costs invariant', () => {
@@ -131,25 +128,23 @@ describe('session_costs invariant', () => {
     await ingestLine(WS2, SES_B, assistantLine('b2', 'claude-sonnet', 50, 20));
     await ingestLine(WS2, SES_B, userLine('u3', 'ping'));
 
-    const d = openDb(dir);
-    expectRollupMatchesEvents(d);
+    await expectRollupMatchesEvents();
   });
 
   it('duplicate replay is a no-op: same uuid re-ingested does not double-count', async () => {
     await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
     await ingestLine(WS1, SES_A, userLine('u1', 'first'));
 
-    const d = openDb(dir);
     // Snapshot the rollup before replay.
-    const before = d.prepare(ROLLUP_SQL).all();
+    const before = (await queryRows(ROLLUP_SQL));
 
     // Re-ingest the exact same assistant line (same uuid = same dedup_key).
     const result = await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
     expect(result.inserted).toBe(false);
 
     // Rollup must be unchanged AND still match ground truth.
-    expect(d.prepare(ROLLUP_SQL).all()).toEqual(before);
-    expectRollupMatchesEvents(d);
+    expect((await queryRows(ROLLUP_SQL))).toEqual(before);
+    await expectRollupMatchesEvents();
   });
 
   it('deleteSession removes its rollup rows; peer session remains intact', async () => {
@@ -159,10 +154,9 @@ describe('session_costs invariant', () => {
     await ingestLine(WS1, SES_B, assistantLine('b1', 'claude-3-haiku', 200, 80));
     await ingestLine(WS1, SES_B, userLine('u2', 'world'));
 
-    const d = openDb(dir);
 
     // Verify both sessions have rollup rows before deletion.
-    const rowsBefore = d.prepare(ROLLUP_SQL).all() as Array<{ session_id: string }>;
+    const rowsBefore = (await queryRows(ROLLUP_SQL)) as Array<{ session_id: string }>;
     expect(rowsBefore.some((r) => r.session_id === SES_A)).toBe(true);
     expect(rowsBefore.some((r) => r.session_id === SES_B)).toBe(true);
 
@@ -170,10 +164,10 @@ describe('session_costs invariant', () => {
     await deleteSession(SES_A);
 
     // SES_A gone from session_costs; SES_B intact; ground truth still matches.
-    const rowsAfter = d.prepare(ROLLUP_SQL).all() as Array<{ session_id: string }>;
+    const rowsAfter = (await queryRows(ROLLUP_SQL)) as Array<{ session_id: string }>;
     expect(rowsAfter.some((r) => r.session_id === SES_A)).toBe(false);
     expect(rowsAfter.some((r) => r.session_id === SES_B)).toBe(true);
-    expectRollupMatchesEvents(d);
+    await expectRollupMatchesEvents();
   });
 
   it('cost readers return identical results from the rollup as from events', async () => {
@@ -196,7 +190,6 @@ describe('session_costs invariant', () => {
     await ingestLine(WS2, SES_B, assistantLine('b2', 'claude-sonnet', 50, 20));
     await ingestLine(WS2, SES_B, userLine('u3', 'ping'));
 
-    const d = openDb(dir);
 
     // --- costForSession ---
     // Ground truth from events for SES_A:
@@ -235,8 +228,8 @@ describe('session_costs invariant', () => {
 
     // --- listSessions ---
     // Insert session rows so listSessions can find them.
-    d.prepare(`INSERT OR IGNORE INTO sessions (id, workspace_id) VALUES (?,?)`).run(SES_A, WS1);
-    d.prepare(`INSERT OR IGNORE INTO sessions (id, workspace_id) VALUES (?,?)`).run(SES_B, WS2);
+    await queryRows(`INSERT INTO sessions (id, workspace_id) VALUES (?,?) ON CONFLICT DO NOTHING`, [SES_A, WS1]);
+    await queryRows(`INSERT INTO sessions (id, workspace_id) VALUES (?,?) ON CONFLICT DO NOTHING`, [SES_B, WS2]);
 
     const allRows = await listSessions();
     const rowA = allRows.find((r) => r.id === SES_A);
@@ -272,7 +265,7 @@ describe('session_costs invariant', () => {
     expect(summary!.usd).toBeGreaterThan(0);
   });
 
-  it('listSessions cost query never scans events (EXPLAIN QUERY PLAN pin)', async () => {
+  it.skipIf(isPg)('listSessions cost query never scans events (EXPLAIN QUERY PLAN pin)', async () => {
     const d = openDb(dir);
     for (const ws of [undefined, 'explain-dummy']) {
       const details = explainPlan(d, listSessionCostsQuery(stateKysely(), ws));
@@ -281,7 +274,7 @@ describe('session_costs invariant', () => {
     }
   });
 
-  it('migration backfill rebuilds from events (drift self-heal)', async () => {
+  it.skipIf(isPg)('migration backfill rebuilds from events (drift self-heal)', async () => {
     // Ingest data at version 13 (the normal path).
     await ingestLine(WS1, SES_A, assistantLine('a1', 'claude-3-opus', 100, 50));
     await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
@@ -295,8 +288,7 @@ describe('session_costs invariant', () => {
 
     // Re-open: migrate() sees current < 13, drops and rebuilds session_costs.
     openDb(dir);
-    const d2 = openDb(dir);
-    expectRollupMatchesEvents(d2);
+    await expectRollupMatchesEvents();
   });
 
   it('ingest burst with interleaved summary reads recomputes at most twice (debounce end-to-end)', async () => {
@@ -339,19 +331,17 @@ describe('session_costs invariant', () => {
 
 describe('rename/delete are awaited writes', () => {
   it('deleteSession removes every per-session row in one transaction', async () => {
-    const raw = openDb(dir);
     await ingestLine('w', 's-del', JSON.stringify({ type: 'assistant', uuid: 'd1', message: { model: 'claude-opus-4-1', usage: { output_tokens: 3 }, content: [{ type: 'tool_use', id: 't', name: 'Bash', input: {} }] } }));
     await deleteSession('s-del');
     for (const t of ['events', 'session_costs', 'session_stats', 'session_tool_counts', 'sessions']) {
       const col = t === 'sessions' ? 'id' : 'session_id';
-      expect(raw.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE ${col} = 's-del'`).get()).toEqual({ n: 0 });
+      expect((await queryRows(`SELECT COUNT(*) AS n FROM ${t} WHERE ${col} = 's-del'`))[0]).toEqual({ n: 0 });
     }
   });
 
   it('renameSession resolves after the row is updated', async () => {
-    const raw = openDb(dir);
     await ingestLine('w', 's-ren', JSON.stringify({ type: 'user', uuid: 'r1', message: { content: 'hi' } }));
     await renameSession('s-ren', '  Named  ');
-    expect(raw.prepare('SELECT user_set_name FROM sessions WHERE id = ?').get('s-ren')).toEqual({ user_set_name: 'Named' });
+    expect((await queryRows('SELECT user_set_name FROM sessions WHERE id = ?', ['s-ren']))[0]).toEqual({ user_set_name: 'Named' });
   });
 });

@@ -72,6 +72,8 @@ import { logError } from './errorLog.js';
 import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
 import { workspaceStateDir, assertValidWorkspaceId } from './paths.js';
 import { resolveEnv } from './vault.js';
+import { getStoreConfig } from './config.js';
+import { storeSecretEnvNames, type StoreConfig } from './store/storeConfig.js';
 import { endpointEnv } from './endpoints.js';
 import {
   attachLocalSession,
@@ -284,7 +286,7 @@ const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
  *  which remains under investigation. Null re-probes after 5 min; a spawn
  *  failure invalidates so a moved binary is re-resolved. */
 const claudeResolver = cachedNullableResolver(
-  () => findClaude((file, args) => execFileAsync(file, args), homedir()),
+  () => findClaude(async (file, args) => execFileAsync(file, args, { env: await hostEnvForWorkspaces() }), homedir()),
   { nullTtlMs: 5 * 60_000 }
 );
 function resolveClaude(): Promise<string | null> {
@@ -323,6 +325,19 @@ async function signalWslSessions(
 // scrubbed from the inherited host env before spawn (see buildEnv, #285).
 const CLAUDE_CHILD_SESSION_MARKERS = ['CLAUDE_CODE_CHILD_SESSION', 'CLAUDECODE'] as const;
 
+/** The host env minus host-only secrets: loadout-source tokens (#444) and the
+ *  store's DB credentials, which would bypass MCP read isolation. */
+async function hostEnvForWorkspaces(): Promise<NodeJS.ProcessEnv> {
+  const base: NodeJS.ProcessEnv = { ...process.env };
+  const store = await getStoreConfig().catch((): StoreConfig | null => null);
+  const storeSecrets = new Set(storeSecretEnvNames(store).map((n) => n.toUpperCase()));
+  for (const k of Object.keys(base)) {
+    const u = k.toUpperCase();
+    if (u === 'FLEET_LOADOUT_TOKEN' || u.startsWith('FLEET_LOADOUT_TOKEN_') || storeSecrets.has(u)) delete base[k];
+  }
+  return base;
+}
+
 /**
  * Build the spawn env. A *local* workspace IS the user's host claude, so it
  * inherits the real host environment — crucially `HOME`, so claude uses the
@@ -341,7 +356,7 @@ export async function buildEnv(
 ): Promise<NodeJS.ProcessEnv> {
   const backendVars = ws.authMode === 'endpoint' ? await endpointEnv(ws.endpointId) : {};
   const resolved = await resolveEnv(id, ws.env.plain, ws.env.secretKeys);
-  const base: NodeJS.ProcessEnv = { ...process.env };
+  const base = await hostEnvForWorkspaces();
   // Endpoint workspaces must not inherit the host's real Anthropic key (dev
   // fallback mode) into a process whose base URL is a third-party endpoint.
   if (ws.authMode === 'endpoint') delete base.ANTHROPIC_API_KEY;
@@ -354,12 +369,6 @@ export async function buildEnv(
   // no busy attribution (#285). Scrub the markers so it saves its transcript.
   // (An explicit workspace env override re-appears below via `resolved`.)
   for (const marker of CLAUDE_CHILD_SESSION_MARKERS) delete base[marker];
-  // Loadout-source tokens are host-only (#444): the main process reads them to
-  // pull loadouts, but a workspace's claude must never inherit them.
-  for (const k of Object.keys(base)) {
-    const u = k.toUpperCase();
-    if (u === 'FLEET_LOADOUT_TOKEN' || u.startsWith('FLEET_LOADOUT_TOKEN_')) delete base[k];
-  }
   return { ...base, ...backendVars, ...resolved, TERM: 'xterm-256color' };
 }
 

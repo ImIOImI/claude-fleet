@@ -1,20 +1,18 @@
 // listSessions() tags enrichment: each row carries the tags of its LATEST
 // tagged summary chapter (ordered as emitted), [] when none exists.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { openDb, closeDb, ingestLine, listSessions, listSessionIds, latestActivityByWorkspace, latestSessionId } from './db.js';
+import { ingestLine, listSessions, listSessionIds, latestActivityByWorkspace, latestSessionId } from './db.js';
+import { openTestState, type TestState } from './store/testStore.js';
 
-let dir: string;
 const WS = '01WS';
 const userLine = (uuid: string, content: string) =>
   JSON.stringify({ type: 'user', uuid, timestamp: '2026-07-01T00:00:00Z', message: { content } });
 const summaryLine = (summary: string, tags?: string[]) =>
   JSON.stringify({ type: 'session-summary', summary, tags, model: 'haiku' });
 
-beforeEach(async () => { dir = mkdtempSync(join(tmpdir(), 'cf-sesslist-')); openDb(dir); });
-afterEach(async () => { await closeDb(); rmSync(dir, { recursive: true, force: true }); });
+let st: TestState;
+beforeEach(async () => { st = await openTestState('cf-sesslist-'); });
+afterEach(async () => { await st.close(); });
 
 describe('listSessions tags', () => {
   it('returns [] for a session with no summary', async () => {
@@ -103,5 +101,14 @@ describe('latestSessionId', () => {
     expect(await latestSessionId('ws-d')).toBe((await listSessions('ws-d'))[0]?.id ?? null);
 
     expect(await latestSessionId('ws-none')).toBeNull();
+  });
+
+  it('orders sessions tied on last_active_at by id', async () => {
+    for (const id of ['s-b', 's-a', 's-c']) {
+      await ingestLine('ws-tie', id, JSON.stringify({ type: 'ai-title', aiTitle: id, sessionId: id }));
+    }
+    expect((await listSessions('ws-tie')).map((s) => s.id)).toEqual(['s-a', 's-b', 's-c']);
+    expect((await listSessionIds()).filter((id) => id.startsWith('s-'))).toEqual(['s-a', 's-b', 's-c']);
+    expect(await latestSessionId('ws-tie')).toBe('s-a');
   });
 });

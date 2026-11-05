@@ -278,6 +278,13 @@ function reportListenerError(where: ListenerScope, err: unknown): void {
 
 let userDataDir: string | null = null;
 let rodb: Database.Database | null = null;
+/** Started without state.db (the Postgres store): STATE_DB_TOOLS report unavailable. */
+let storeless = false;
+/** Tools that read the read-only state.db connection. */
+const STATE_DB_TOOLS = new Set([
+  'list_sessions', 'get_session', 'get_cost', 'list_events', 'search_transcripts', 'session_summary',
+  'list_errors', 'query', 'mark_useful',
+]);
 // One listening socket per workspace, keyed by workspace id. The id is captured
 // in each listener's accept callback and becomes the connection's caller id.
 // (Unix transport — Linux/macOS.)
@@ -320,10 +327,13 @@ function setMcpHealth(ok: boolean, detail?: string): void {
  *  lazily via {@link ensureWorkspaceSocket}. No-op if already started. On
  *  Windows this also binds the single loopback-TCP listener that fronts every
  *  workspace (identity comes from the per-connection token, not the socket). */
-export function startMcpServer(dir: string): void {
-  if (rodb) return;
-  const dbPath = join(dir, 'state.db');
-  rodb = new Database(dbPath, { readonly: true, fileMustExist: true });
+export function startMcpServer(dir: string, opts: { stateDb?: boolean } = {}): void {
+  if (userDataDir) return;
+  if (opts.stateDb === false) {
+    storeless = true;
+  } else {
+    rodb = new Database(join(dir, 'state.db'), { readonly: true, fileMustExist: true });
+  }
   userDataDir = dir;
 
   if (isWindows && !tcpListener) {
@@ -353,7 +363,7 @@ export function startMcpServer(dir: string): void {
  *  leaf dir, bind-mounted into only that container) and is registered, so the
  *  shared TCP listener can map an incoming token to this id. */
 export function ensureWorkspaceSocket(id: string): void {
-  if (!rodb || !userDataDir) return;
+  if (!userDataDir) return;
   // Refresh the container-side bridge script in the per-id dir (bind-mounted
   // into exactly that container) so an app upgrade updates every workspace's
   // bridge without a runner-image rebuild. Best-effort: a failed write leaves
@@ -467,6 +477,7 @@ export function stopMcpServer(): void {
     /* ignore */
   }
   rodb = null;
+  storeless = false;
   userDataDir = null;
 }
 
@@ -647,7 +658,7 @@ export async function callTool(params: Record<string, unknown>, callerId: string
   const args = (params.arguments as Record<string, unknown>) ?? {};
   const tool = TOOLS.find((t) => t.name === name);
   if (!tool) throw new RpcError(-32602, `Unknown tool: ${name}`);
-  if (!rodb) throw new RpcError(-32603, 'Database not open');
+  if (!rodb && !storeless) throw new RpcError(-32603, 'Database not open');
   const startedAt = Date.now();
   let stage: 'resolve-allowed' | 'run-tool' = 'resolve-allowed';
   const watchdog = setTimeout(() => {
@@ -669,7 +680,8 @@ export async function callTool(params: Record<string, unknown>, callerId: string
     const allowedWorkspaces = await resolveAllowedWorkspaces(callerId);
     const resolveMs = Date.now() - startedAt;
     stage = 'run-tool';
-    const result = await tool.run(rodb, args, { callerId, allowedWorkspaces });
+    if (!rodb && STATE_DB_TOOLS.has(name)) throw new Error(`${name} is unavailable on the Postgres store`);
+    const result = await tool.run(rodb as Database.Database, args, { callerId, allowedWorkspaces });
     const totalMs = Date.now() - startedAt;
     if (resolveMs >= SLOW_RESOLVE_MS || totalMs >= SLOW_TOTAL_MS) {
       logError({

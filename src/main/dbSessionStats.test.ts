@@ -15,10 +15,6 @@
 // self-register"). The expected local outcome is a fast import failure — CI
 // runs the real assertions. Gate locally with `npm run typecheck:node`.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import Database from 'better-sqlite3';
 import {
   openDb,
   closeDb,
@@ -31,6 +27,7 @@ import {
   latestAssistantQuery,
 } from './db.js';
 import { explainPlan } from './state/explainPlan.js';
+import { openTestState, queryRows, isPg, type TestState } from './store/testStore.js';
 
 let dir: string;
 
@@ -149,18 +146,18 @@ const TOOLS_ROLLUP_SQL = `
   SELECT session_id, tool_name, count FROM session_tool_counts
   ORDER BY session_id, tool_name`;
 
-function expectRollupsMatchEvents(d: Database.Database): void {
-  expect(d.prepare(STATS_ROLLUP_SQL).all()).toEqual(d.prepare(STATS_GROUND_TRUTH_SQL).all());
-  expect(d.prepare(TOOLS_ROLLUP_SQL).all()).toEqual(d.prepare(TOOLS_GROUND_TRUTH_SQL).all());
+async function expectRollupsMatchEvents(): Promise<void> {
+  expect((await queryRows(STATS_ROLLUP_SQL))).toEqual((await queryRows(STATS_GROUND_TRUTH_SQL)));
+  expect((await queryRows(TOOLS_ROLLUP_SQL))).toEqual((await queryRows(TOOLS_GROUND_TRUTH_SQL)));
 }
 
+let st: TestState;
 beforeEach(async () => {
-  dir = mkdtempSync(join(tmpdir(), 'cf-stats-'));
-  openDb(dir);
+  st = await openTestState('cf-stats-');
+  dir = st.dir;
 });
 afterEach(async () => {
-  await closeDb();
-  rmSync(dir, { recursive: true, force: true });
+  await st.close();
 });
 
 describe('session_stats + session_tool_counts invariant', () => {
@@ -192,25 +189,21 @@ describe('session_stats + session_tool_counts invariant', () => {
     // One tool call for SES_B.
     await ingestLine(WS2, SES_B, toolUseLine('t4', 'Bash'));
 
-    const d = openDb(dir);
-    expectRollupsMatchEvents(d);
+    await expectRollupsMatchEvents();
 
     // Spot-check: SES_A max_context_tokens must be 500 (the a2 candidate, not lowered by a4's zeros).
-    expect(d.prepare(`SELECT max_context_tokens FROM session_stats WHERE session_id = ?`).get(SES_A))
+    expect((await queryRows(`SELECT max_context_tokens FROM session_stats WHERE session_id = ?`, [SES_A]))[0])
       .toEqual({ max_context_tokens: 500 });
     // Spot-check: SES_A tool counts are exactly 'Read'=2 and 'Edit'=1.
-    expect(d.prepare(`SELECT count FROM session_tool_counts WHERE session_id = ? AND tool_name = ?`)
-      .get(SES_A, 'Read'))
+    expect((await queryRows(`SELECT count FROM session_tool_counts WHERE session_id = ? AND tool_name = ?`, [SES_A, 'Read']))[0])
       .toEqual({ count: 2 });
-    expect(d.prepare(`SELECT count FROM session_tool_counts WHERE session_id = ? AND tool_name = ?`)
-      .get(SES_A, 'Edit'))
+    expect((await queryRows(`SELECT count FROM session_tool_counts WHERE session_id = ? AND tool_name = ?`, [SES_A, 'Edit']))[0])
       .toEqual({ count: 1 });
     // Spot-check: SES_B max_context_tokens is 0 (b1 and b2 both yield candidate 0).
-    expect(d.prepare(`SELECT max_context_tokens FROM session_stats WHERE session_id = ?`).get(SES_B))
+    expect((await queryRows(`SELECT max_context_tokens FROM session_stats WHERE session_id = ?`, [SES_B]))[0])
       .toEqual({ max_context_tokens: 0 });
     // Spot-check: SES_B tool count is exactly 'Bash'=1.
-    expect(d.prepare(`SELECT count FROM session_tool_counts WHERE session_id = ? AND tool_name = ?`)
-      .get(SES_B, 'Bash'))
+    expect((await queryRows(`SELECT count FROM session_tool_counts WHERE session_id = ? AND tool_name = ?`, [SES_B, 'Bash']))[0])
       .toEqual({ count: 1 });
   });
 
@@ -219,32 +212,29 @@ describe('session_stats + session_tool_counts invariant', () => {
     await ingestLine(WS1, SES_A, userLine('u1', 'hello'));
     await ingestLine(WS1, SES_A, userLine('u2', 'world'));
 
-    const d = openDb(dir);
-    const statsRows = d.prepare(STATS_ROLLUP_SQL).all() as Array<{ session_id: string }>;
+    const statsRows = (await queryRows(STATS_ROLLUP_SQL)) as Array<{ session_id: string }>;
     expect(statsRows.some((r) => r.session_id === SES_A)).toBe(false);
 
     // Ground-truth query also returns no rows for this session.
-    expectRollupsMatchEvents(d);
+    await expectRollupsMatchEvents();
   });
 
   it('sessions with no tool calls have no session_tool_counts rows', async () => {
     // Only pure assistant lines (no tool_use content) → no tool rows.
     await ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
 
-    const d = openDb(dir);
-    const toolRows = d.prepare(TOOLS_ROLLUP_SQL).all() as Array<{ session_id: string }>;
+    const toolRows = (await queryRows(TOOLS_ROLLUP_SQL)) as Array<{ session_id: string }>;
     expect(toolRows.some((r) => r.session_id === SES_A)).toBe(false);
 
-    expectRollupsMatchEvents(d);
+    await expectRollupsMatchEvents();
   });
 
   it('duplicate replay is a no-op: same uuid does not inflate max or counts', async () => {
     await ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
     await ingestLine(WS1, SES_A, toolUseLine('t1', 'Read'));
 
-    const d = openDb(dir);
-    const statsBefore = d.prepare(STATS_ROLLUP_SQL).all();
-    const toolsBefore = d.prepare(TOOLS_ROLLUP_SQL).all();
+    const statsBefore = (await queryRows(STATS_ROLLUP_SQL));
+    const toolsBefore = (await queryRows(TOOLS_ROLLUP_SQL));
 
     // Re-ingest the exact same lines (same uuid = same dedup_key).
     const r1 = await ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
@@ -253,9 +243,9 @@ describe('session_stats + session_tool_counts invariant', () => {
     expect(r2.inserted).toBe(false);
 
     // Both rollups must be unchanged AND still match ground truth.
-    expect(d.prepare(STATS_ROLLUP_SQL).all()).toEqual(statsBefore);
-    expect(d.prepare(TOOLS_ROLLUP_SQL).all()).toEqual(toolsBefore);
-    expectRollupsMatchEvents(d);
+    expect((await queryRows(STATS_ROLLUP_SQL))).toEqual(statsBefore);
+    expect((await queryRows(TOOLS_ROLLUP_SQL))).toEqual(toolsBefore);
+    await expectRollupsMatchEvents();
   });
 
   it('deleteSession removes only that session from both rollup tables', async () => {
@@ -265,15 +255,10 @@ describe('session_stats + session_tool_counts invariant', () => {
     await ingestLine(WS1, SES_B, assistantLine('b1', { inputTokens: 200 }));
     await ingestLine(WS1, SES_B, toolUseLine('t2', 'Edit'));
 
-    const d = openDb(dir);
 
     // Verify both sessions have rollup rows before deletion.
-    const statsA = d
-      .prepare(`SELECT session_id FROM session_stats WHERE session_id = ?`)
-      .get(SES_A);
-    const statsB = d
-      .prepare(`SELECT session_id FROM session_stats WHERE session_id = ?`)
-      .get(SES_B);
+    const statsA = (await queryRows(`SELECT session_id FROM session_stats WHERE session_id = ?`, [SES_A]))[0];
+    const statsB = (await queryRows(`SELECT session_id FROM session_stats WHERE session_id = ?`, [SES_B]))[0];
     expect(statsA).toBeTruthy();
     expect(statsB).toBeTruthy();
 
@@ -282,23 +267,23 @@ describe('session_stats + session_tool_counts invariant', () => {
 
     // SES_A gone from both tables; SES_B intact.
     expect(
-      d.prepare(`SELECT session_id FROM session_stats WHERE session_id = ?`).get(SES_A),
+      (await queryRows(`SELECT session_id FROM session_stats WHERE session_id = ?`, [SES_A]))[0],
     ).toBeUndefined();
     expect(
-      d.prepare(`SELECT session_id FROM session_tool_counts WHERE session_id = ?`).get(SES_A),
+      (await queryRows(`SELECT session_id FROM session_tool_counts WHERE session_id = ?`, [SES_A]))[0],
     ).toBeUndefined();
     expect(
-      d.prepare(`SELECT session_id FROM session_stats WHERE session_id = ?`).get(SES_B),
+      (await queryRows(`SELECT session_id FROM session_stats WHERE session_id = ?`, [SES_B]))[0],
     ).toBeTruthy();
     expect(
-      d.prepare(`SELECT session_id FROM session_tool_counts WHERE session_id = ?`).get(SES_B),
+      (await queryRows(`SELECT session_id FROM session_tool_counts WHERE session_id = ?`, [SES_B]))[0],
     ).toBeTruthy();
 
     // Ground truth (events now only has SES_B rows) must still match rollup.
-    expectRollupsMatchEvents(d);
+    await expectRollupsMatchEvents();
   });
 
-  it('migration rebuild reconstructs both tables and index from events', async () => {
+  it.skipIf(isPg)('migration rebuild reconstructs both tables and index from events', async () => {
     // Ingest data at v14 (normal path).
     await ingestLine(WS1, SES_A, assistantLine('a1', { inputTokens: 100 }));
     await ingestLine(WS1, SES_A, toolUseLine('t1', 'Read'));
@@ -313,16 +298,13 @@ describe('session_stats + session_tool_counts invariant', () => {
 
     // Re-open: migrate() sees current < 14, drops and rebuilds both tables.
     openDb(dir);
-    const d2 = openDb(dir);
 
-    expectRollupsMatchEvents(d2);
+    await expectRollupsMatchEvents();
 
     // The composite index must exist after migration.
-    const idx = d2
-      .prepare(
+    const idx = (await queryRows(
         `SELECT name FROM sqlite_master WHERE type='index' AND name='idx_events_session_type'`,
-      )
-      .get();
+      ))[0];
     expect(idx).toBeTruthy();
   });
 });
@@ -383,7 +365,7 @@ describe('summary reader equivalence + EXPLAIN pins (Task 2)', () => {
     expect(summary!.lastTurnContextTokens).toBeNull();
   });
 
-  it('observedMax/topTools EXPLAIN plans never touch events', async () => {
+  it.skipIf(isPg)('observedMax/topTools EXPLAIN plans never touch events', async () => {
     // Pin: both rollup queries must be served from their tables, not events.
     // If either plan mentions 'events', a future schema drift broke the query.
     const d = openDb(dir);
@@ -392,7 +374,7 @@ describe('summary reader equivalence + EXPLAIN pins (Task 2)', () => {
     expect(explainPlan(d, topToolsQuery(k, 'x', 5))).not.toMatch(/\bevents\b/);
   });
 
-  it('latestAssistantQuery EXPLAIN plan uses a session-prefixed index', async () => {
+  it.skipIf(isPg)('latestAssistantQuery EXPLAIN plan uses a session-prefixed index', async () => {
     // Pin: the query must use idx_events_session_type (or idx_events_session_ts)
     // and must NOT use the bare idx_events_type index (which scans the entire
     // table for assistant events across all sessions).

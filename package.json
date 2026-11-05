@@ -24,9 +24,12 @@
     "test:unit": "vitest run",
     "test:e2e": "playwright test",
     "pack": "electron-vite build && electron-builder --dir",
-    "dist": "electron-vite build && electron-builder"
+    "dist": "electron-vite build && electron-builder",
+    "test:unit:pg": "vitest run -c vitest.pg.config.ts"
   },
   "dependencies": {
+    "@aws-sdk/credential-providers": "3.1162.0",
+    "@aws-sdk/rds-signer": "3.1162.0",
     "@huggingface/transformers": "^3",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/context-async-hooks": "^2.10.0",
@@ -47,6 +50,8 @@
     "keytar": "^7.9.0",
     "kysely": "^0.28.19",
     "node-pty": "^1.1.0",
+    "pg": "^8.23.1",
+    "pg-connection-string": "^2.14.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
@@ -61,6 +66,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/dockerode": "^3.3.29",
     "@types/node": "^20.14.0",
+    "@types/pg": "^8.23.1",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@types/ws": "^8.18.2",

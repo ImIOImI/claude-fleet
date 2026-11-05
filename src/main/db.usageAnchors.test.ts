@@ -1,12 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { openDb, closeDb, insertUsageAnchor, latestAnchorCovering, latestLimitHitAnchor } from './db.js';
+import { insertUsageAnchor, latestAnchorCovering, latestLimitHitAnchor } from './db.js';
+import { openTestState, type TestState } from './store/testStore.js';
 
-let dir: string;
-beforeEach(async () => { dir = mkdtempSync(join(tmpdir(), 'cf-anchor-')); openDb(dir); });
-afterEach(async () => { await closeDb(); rmSync(dir, { recursive: true, force: true }); });
+let st: TestState;
+beforeEach(async () => { st = await openTestState('cf-anchor-'); });
+afterEach(async () => { await st.close(); });
 
 const RESET = Date.parse('2026-07-12T18:00:00Z');
 const WSTART = Date.parse('2026-07-12T13:00:00Z');

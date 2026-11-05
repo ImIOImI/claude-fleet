@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
 import { registerIpc, stopRemoteBackend } from './ipc.js';
 import { openDb, closeDb, deleteEmbeddingsForOtherModels, listSessionIds, recordError, stateKysely } from './db.js';
@@ -27,7 +27,9 @@ import { registerInboxIpc } from './inbox/inboxIpc.js';
 import { registerNotifyIpc } from './inbox/notifyIpc.js';
 import { registerAutomationIpc } from './automations/automationIpc.js';
 import { startPresence, attachKeepRunning, markQuitting, presenceDir, registerPresenceIpc } from './inbox/presence.js';
-import { getKeepRunningInTray, setKeepRunningInTray } from './config.js';
+import { getKeepRunningInTray, setKeepRunningInTray, getStoreConfig } from './config.js';
+import { openPgStores, type PgStores } from './store/pgStores.js';
+import { storeStartupOutcome, storeStartupPrompt } from './store/startupPrompt.js';
 import { ensureWorkspaceClaudeJson } from './docker.js';
 import { hardwareAccelDisabledAtStartup } from './config.js';
 import { setWorkspaceDefault } from './mirrorPolicy.js';
@@ -42,6 +44,8 @@ const jsonlWatcher = isMock ? null : new JsonlWatcher();
 const peerStatusWatcher = isMock ? null : new PeerStatusWatcher();
 // Authoritative inbox store (#407); opened at ready, closed on quit.
 let inboxStore: InboxStore | null = null;
+// The Postgres store's shared pool when config.json chooses it.
+let pgStores: PgStores | null = null;
 let presence: ReturnType<typeof startPresence> | null = null;
 // Notification + automation timers (#457): stopped in before-quit, ahead of inboxStore.close().
 let notifySvc: ReturnType<typeof registerNotifyIpc> | null = null;
@@ -158,16 +162,36 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   // (#16-followup). Idempotent; non-fatal — a seeding hiccup must not block launch.
   await ensureBuiltinLoadouts().catch((e) => console.warn('[loadouts] seed failed:', e));
 
+  // A configured Postgres store that cannot open stops the launch: silently
+  // using SQLite instead would split the history and inbox in two.
+  try {
+    const storeCfg = await getStoreConfig();
+    if (storeCfg.kind === 'postgres') {
+      pgStores = await openPgStores(storeCfg, {
+        state: jsonlWatcher !== null,
+        onPoolError: (e) => logError({ source: 'main', type: 'store-pool-error', level: 'warn', message: String(e) }),
+      });
+    }
+  } catch (e) {
+    logError({ source: 'main', type: 'store-open-failed', level: 'error', message: String(e) });
+    const prompt = storeStartupPrompt(e, join(app.getPath('userData'), 'config.json'));
+    const { response } = await dialog.showMessageBox({ type: 'error', noLink: true, ...prompt });
+    if (storeStartupOutcome(prompt, response) === 'quit') {
+      app.exit(1);
+      return;
+    }
+  }
+
   // Authoritative inbox (#407): opens in mock AND real mode. state.db is a
   // droppable cache gated on the JSONL watcher; the inbox is neither.
   try {
-    inboxStore = InboxStore.open(app.getPath('userData'));
+    inboxStore = pgStores ? pgStores.inbox : InboxStore.open(app.getPath('userData'));
   } catch (e) {
     logError({ source: 'main', type: 'inbox-open-failed', level: 'error', message: String(e) });
   }
 
   if (jsonlWatcher) {
-    openDb(app.getPath('userData'));
+    if (!pgStores) openDb(app.getPath('userData'));
     // Wire the crash-safe DB sink so every logError call is also persisted to
     // the errors table.
     // best-effort; a wedged DB must never break crash logging, so the async
@@ -195,7 +219,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     );
     // Read-only MCP server over <userData>/mcp.sock so in-container claude can
     // query the state DB (sessions/events/cost). Opens its own readonly conn.
-    perfSpan('claude_fleet.boot.mcp_server', () => startMcpServer(app.getPath('userData')));
+    perfSpan('claude_fleet.boot.mcp_server', () => startMcpServer(app.getPath('userData'), { stateDb: !pgStores }));
     // Local embedder for semantic transcript search (native onnxruntime-node, on-host).
     const embed = makeEmbedder(join(app.getPath('userData'), 'models'));
     setQueryEmbedder(embed);
@@ -355,6 +379,8 @@ app.on('before-quit', async () => {
   inboxStore = null;
   await shutdownPerf();
   await closeDb();
+  await pgStores?.end();
+  pgStores = null;
 });
 
 app.on('window-all-closed', () => {

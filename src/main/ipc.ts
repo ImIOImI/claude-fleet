@@ -44,7 +44,8 @@ import {
   setPerfTelemetry,
   getPerfOtlp,
   setPerfOtlp,
-  getGithubClientIdConfig
+  getGithubClientIdConfig,
+  configUnreadablePath
 } from './config.js';
 import { getPerfStatus, getEffectivePerf, reconfigurePerf, recordPtyChunk, perfSetSpanContext, recordLatencySample, setPerfStateListener, perfNotePowerEvent, perfSpanAsync, setPerfMemorySource } from './perf.js';
 import { resolvePerfConfig } from './perfConfig.js';
@@ -141,7 +142,7 @@ import {
 } from './db.js';
 import { foldPlanUsage, type PlanUsageFold } from './planUsage.js';
 import { logError, getLogPath } from './errorLog.js';
-import { broadcastObservabilitySummary } from './observabilityBroadcast.js';
+import { broadcastObservabilitySummary, latestWins } from './observabilityBroadcast.js';
 import { broadcastInputWait } from './inputWaitBroadcast.js';
 import { makeTrailingRebroadcast } from './trailingBroadcast.js';
 import { consumeForWorkspace, pendingSnapshotForWorkspace, recordPendingAttach } from './pendingAttaches.js';
@@ -1000,6 +1001,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // grace+250ms after quiescence, by which time the cache has expired and
   // recomputes fresh. One extra recompute per burst maximum (same storm bound).
   // Timers are unref'd (matching widthSweep above) so they don't hold the app.
+  // Both pushes share one ordering: on pooled Postgres reads two summaries for
+  // one workspace can resolve out of order.
+  const summaryPushes = latestWins();
   const trailingRebroadcast = makeTrailingRebroadcast(
     SUMMARY_STALE_GRACE_MS + 250,
     (workspaceId) => {
@@ -1009,7 +1013,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       void perfSpanAsync(
         'claude_fleet.observability.trailing_rebroadcast',
         async () => {
+          const isLatest = summaryPushes.begin(workspaceId);
           const summary = await summaryForWorkspace(workspaceId);
+          if (!isLatest()) return;
           broadcastObservabilitySummary(
             { workspaceId, summary },
             BrowserWindow.getAllWindows()
@@ -1031,7 +1037,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       void perfSpanAsync(
         'claude_fleet.observability.ingest_broadcast',
         async () => {
+          const isLatest = summaryPushes.begin(workspaceId);
           const summary = await summaryForWorkspace(workspaceId);
+          if (!isLatest()) return;
           broadcastObservabilitySummary(
             { workspaceId, summary },
             BrowserWindow.getAllWindows()
@@ -1721,6 +1729,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // workspace's private folder (<root>/<id>) plus the shared folder
   // (<root>/shared). `sharedDir` is returned alongside so the renderer can
   // surface a "Shared" link without recomputing the join.
+  ipcMain.handle('config:unreadablePath', () => configUnreadablePath());
   ipcMain.handle('config:get', async () => ({
     fleetRoot: await getFleetRoot(),
     sharedDir: await fleetSharedDir(),

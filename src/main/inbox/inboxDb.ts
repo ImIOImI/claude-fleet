@@ -10,6 +10,10 @@ import type {
 } from '../../preload/inboxTypes.js';
 import { isPriority, maxPriority, normalizeTag, normalizeTags, MAX_TAGS } from './inboxCore.js';
 import { chunked, num, sqliteKysely } from '../store/kysely.js';
+import type pg from 'pg';
+import { postgresKysely, schemaOf, type PostgresKyselyOptions } from '../store/postgres.js';
+import { migratePostgres } from '../store/pgMigrate.js';
+import { INBOX_PG_BASELINE, INBOX_PG_BASELINE_VERSION } from '../store/migrations/inboxPg.js';
 import type { InboxDb, TodoRow } from '../store/inboxSchema.js';
 
 export const INBOX_SCHEMA_VERSION = 5;
@@ -202,7 +206,17 @@ type Q = Kysely<InboxDb> | Transaction<InboxDb>;
 const PRIORITY_ORDER = sql<number>`CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END`;
 
 export class InboxStore {
-  private constructor(private readonly raw: Database.Database, readonly kysely: Kysely<InboxDb>) {}
+  private constructor(private readonly raw: Database.Database | null, readonly kysely: Kysely<InboxDb>) {}
+
+  /** The inbox tables on a Postgres store pool. No file
+   *  backup: the migration is one transaction, and the database is the operator's. */
+  static async openPostgres(pool: pg.Pool, opts: PostgresKyselyOptions = {}): Promise<InboxStore> {
+    const k = postgresKysely<InboxDb>(pool, opts);
+    await migratePostgres(k, schemaOf(pool), {
+      track: 'inbox', baselineVersion: INBOX_PG_BASELINE_VERSION, baseline: INBOX_PG_BASELINE, steps: [],
+    });
+    return new InboxStore(null, k);
+  }
 
   static open(dir: string): InboxStore {
     const file = path.join(dir, 'inbox.db');
@@ -237,7 +251,7 @@ export class InboxStore {
   async close(): Promise<void> {
     // destroy() only closes the connection if Kysely ever ran a query, so close the raw handle too.
     await this.kysely.destroy();
-    if (this.raw.open) this.raw.close();
+    if (this.raw?.open) this.raw.close();
   }
 
   // --- reads --------------------------------------------------------------

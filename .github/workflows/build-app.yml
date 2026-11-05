@@ -54,7 +54,7 @@ jobs:
           changed=$(git diff --name-only "$base" "$head")
           echo "changed files:"; echo "$changed" | sed 's/^/  /'
           # Mirrors the old on.pull_request.paths list.
-          if echo "$changed" | grep -qE '^(src/|tests/|playwright\.config\.ts$|package\.json$|package-lock\.json$|electron-builder\.yml$|electron\.vite\.config\.ts$|tsconfig\.host\.json$|vite\.host\.config\.ts$|broker/|\.github/workflows/build-app\.yml$)'; then
+          if echo "$changed" | grep -qE '^(src/|tests/|playwright\.config\.ts$|package\.json$|package-lock\.json$|electron-builder\.yml$|electron\.vite\.config\.ts$|tsconfig\.host\.json$|vite\.host\.config\.ts$|vitest(\.pg)?\.config\.ts$|scripts/pg-test-server\.sh$|broker/|\.github/workflows/build-app\.yml$)'; then
             echo "→ code paths touched; running the full pipeline"
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
@@ -71,6 +71,17 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    # The store suite on Postgres: PG 16 as on Aurora,
+    # pgvector at the version scripts/pg-test-server.sh installs.
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.7-pg16
+        env:
+          POSTGRES_PASSWORD: fleet
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 12
     steps:
       - uses: actions/checkout@v4
 
@@ -118,6 +129,11 @@ jobs:
         env:
           FLEET_BROKER_BIN: ${{ runner.temp }}/broker
         run: npm run test:unit
+
+      - name: Unit tests (store suite on Postgres)
+        env:
+          PG_TEST_URL: postgres://postgres:fleet@localhost:5432/postgres
+        run: npm run test:unit:pg
 
       - name: Bundle fleet-host
         run: npm run build:host

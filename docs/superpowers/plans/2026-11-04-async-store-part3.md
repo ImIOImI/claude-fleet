@@ -93,14 +93,14 @@ D1–D19 from parts 2a and 2b still bind. The ones part 3 leans on: **D1** (the 
 - **D23 — The store never creates its schema or extension:**
   - The schema (default `fleet`) must exist, as with `fleet_agent`. `migratePostgres` checks `current_schema()` equals it.
   - Why the check: with `search_path = fleet, public`, a missing `fleet` makes unqualified DDL land in `public`. The prototype did exactly that.
-  - pgvector ≥ 0.8.0 (iterative index scans) must be installed. `ensureVector` creates it when the role may. Otherwise it fails, naming the admin step.
+  - pgvector ≥ 0.8.0 must be installed. `ensureVector` creates it when the role may. Otherwise it fails, naming the admin step.
 - **D24 — `search_path`** is set by an explicit `SET search_path TO <schema>, public` once per physical connection, in the pool adapter.
   - Why not a startup `options` parameter: poolers and some servers drop it. PGlite ignored it in the prototype.
   - Why `public`: so extension types resolve.
 - **D25 — Type parsing per pool.** `int8` and `numeric` parse as `number`, as SQLite returns them. The values are epoch ms and token counts, all below 2^53. The parsers go on the pool's `types`, never pg's global registry.
 - **D26 — Result-order parity.** Every list read has a total `ORDER BY`, and nullable keys sort `NULLS FIRST`, SQLite's default. This found and fixes:
   - **#491 canonical cost-row order:**
-    - `listSessionCostsQuery` orders by `(session_id, workspace_id, model, service_tier)`.
+    - The per-session USD sum is ordered in JS by `(session_id, workspace_id, model, service_tier)`, with no SQL `ORDER BY`.
     - `listSessions`' per-session USD float sum becomes order-independent of storage.
     - This is the one deliberate snapshot change: `0.7534357500000001` → `0.75343575`.
   - **#491 latest-session tiebreak:**
@@ -127,14 +127,24 @@ D1–D19 from parts 2a and 2b still bind. The ones part 3 leans on: **D1** (the 
     - It is PG 17/18, not 16.
   - **Rejected, pg-mem:** no pgvector, partial SQL.
   - **CI:** a `pgvector/pgvector:0.8.7-pg16` service container. This corrects c3's outline, which said `pg17`; Aurora is PG16.
-- **D30 — Embeddings on Postgres:**
-  - **Column and index:** `vec vector(384)` with an HNSW `vector_cosine_ops` index, partial `WHERE text <> ''`. Placeholder zero vectors have empty text and a NaN cosine.
+- **D30 — Embeddings on Postgres: exact search, no HNSW.**
+  - **Decision (revised after batch-C review):** no ANN index. `vec vector(384)`, no `idx_emb_vec`. Placeholder zero vectors have empty text and are excluded by `WHERE text <> ''`.
+  - **Why not HNSW:** the query needs an `id` tiebreak for parity with SQLite (every list read gets a total order, D26). `ORDER BY vec <=> q, id` isn't satisfiable by an ANN index scan, so pgvector falls back to an exact sequential scan — the index is built but never read. Forcing real HNSW use (dropping the tiebreak, tuning `ef_search`) was measured at 0.32–0.78 recall against the filtered exact result at default settings: not worth the correctness cost for the row counts this ships at. See the latency table below for the ceiling.
   - **Search:**
-    - `searchEmbeddings(qvec, scope, { limit, kind })` is the per-dialect search: brute-force dot product on SQLite, HNSW on Postgres. The query is taken as a vector so the embedder stays out of `db.ts`.
-    - `SET LOCAL hnsw.iterative_scan = strict_order` keeps the `workspace_id`/`model_id`/`kind` filters from truncating results.
-    - The score is `1 − cosine distance`, which equals the dot product for the unit vectors the embedder produces. Ties break by `id`.
+    - `searchEmbeddings(qvec, scope, { limit, kind })` is exact on both dialects: brute-force dot product on SQLite (`ORDER BY id` before scoring, so a tie keeps the pre-sort order), `ORDER BY vec <=> q, id` (sequential scan) on Postgres. The query is taken as a vector so the embedder stays out of `db.ts`.
+    - Returns `[]` for an empty `scope`, `limit <= 0`, or a zero-norm query vector, on both dialects.
+    - The score is `1 − cosine distance`, which equals the dot product for the unit vectors the embedder produces. Ties break by `id` on both dialects.
+  - **Measured (this container, PG 16.15, single sequential-scan connection, `limit: 10`, one workspace in scope):**
+
+    | rows | p50 | p95 |
+    |---|---|---|
+    | 20,000 | 18.2 ms | 22.8 ms |
+    | 100,000 | 115.5 ms | 155.0 ms |
+    | 250,000 | 291.1 ms | 341.9 ms |
+
+    Scales roughly linearly with row count, as expected for a sequential scan. This is the ceiling that would trigger approximate search (part 4 outline).
   - **MCP:** `search_transcripts` keeps `searchTranscripts(…, db)` on the SQLite read-only connection (D14). On Postgres it is unavailable until part 4 points it at `searchEmbeddings`.
-  - **Tests:** test vectors are full-width, because `vector(384)` rejects other dimensions.
+  - **Tests:** test vectors are full-width, because `vector(384)` rejects other dimensions. `dbSearchEmbeddings.test.ts` also pins the `id` tiebreak and the two empty-result cases.
 - **D31 — Store config:**
   - **Where:** `config.json` `store`, hand-edited only. There is no IPC channel or UI (part 4).
   - **Shapes:**
@@ -147,13 +157,20 @@ D1–D19 from parts 2a and 2b still bind. The ones part 3 leans on: **D1** (the 
   - **Rules:**
     - `aws-rds-iam` needs `verify-full`.
     - An invalid `store` is an error at startup, never a silent SQLite fallback, which would split the data.
+    - Validation is strict: unknown keys are rejected, exactly one connection form is allowed, `caFile` is an absolute path, and errors name keys, never values.
+    - A `config.json` that isn't valid JSON is never overwritten (writes throw). Startup offers Quit (default) or Continue without settings: SQLite on in-memory defaults, plus a sticky toast naming the file.
 - **D32 — Credentials and TLS:**
   - **Providers:** `passwordProvider(source, { host, port, user })` returns pg's async `password` function, called per new connection.
   - **`aws-rds-iam`:**
     - It uses `@aws-sdk/rds-signer`'s `Signer` with `fromNodeProviderChain()`, which includes the container provider: Pod Identity via `AWS_CONTAINER_CREDENTIALS_FULL_URI` + `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`.
     - The token is signed for the configured host and port as given, with no alias resolution.
     - Both SDK packages are pinned exactly at `3.1162.0`. A unit test against a fake container-credentials endpoint is the proof that the pinned chain supports Pod Identity.
-  - **TLS:** `verify-full` means the CA from `caFile` plus Node's hostname check.
+  - **TLS:**
+    - The modes are `disable` and `verify-full` only, with no `require`. `verify-full` means the CA from `caFile` (default `/etc/ssl/certs/rds-global-bundle.pem` when present) plus Node's hostname check.
+    - A connection string's `sslmode` must be one of those two; other `ssl*` params and `uselibpqcompat` are refused. `ssl` is always set explicitly, so `PGSSLMODE` is never consulted.
+    - With no `sslmode`, a connection string is `verify-full` unless its effective host (`pg-connection-string`, honouring `?host=`) is a Unix socket or loopback. `caFile` forces `verify-full`, and `caFile` with `disable` is refused.
+  - **Clock:** IAM tokens are SigV4-signed with a 900 s window, so the host clock must be synced. Auth failures (28P01/28000) carry a secret-free hint.
+  - **Local workspaces:** their spawn env and the `claude` PATH probe drop `storeSecretEnvNames(cfg)`: the store's env vars and the libpq credential vars.
   - **The RDS CA bundle:** `docker/scripts/rds-ca-bundle.sh <dest>` fetches `global-bundle.pem` and checks it against the sha256 pinned in `docker/versions.yaml`. c3's host image runs it (F4). A desktop user points `caFile` at their own copy.
 - **D33 — Startup on Postgres:**
   - **One pool, one schema:** both stores share one pool and one schema. The table names don't collide.
@@ -174,6 +191,7 @@ D1–D19 from parts 2a and 2b still bind. The ones part 3 leans on: **D1** (the 
   - The prototype's gate passed (Task 10 lists the numbers).
 - **D38 — Dependencies:**
   - `pg` `^8.23.1` and `@types/pg` `^8` (dev).
+  - `pg-connection-string` `^2.14.1`, direct (parses connection strings for the sslmode/host validation in D32, rather than relying on it only as `pg`'s transitive dependency).
   - `@aws-sdk/rds-signer` and `@aws-sdk/credential-providers` pinned at `3.1162.0`. They add about 8 MB of JS (`@aws-sdk` + `@smithy`) to the package, externalized like every main dependency.
   - Nothing native.
 
@@ -857,6 +875,8 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
   - `openDbPostgres(pool, opts?): Promise<void>`;
   - `InboxStore.openPostgres(pool, opts?): Promise<InboxStore>`.
   - Test support: `openTestState(prefix?): Promise<TestState>` (`{ dir, pg, open(), reopen(), close() }`), `openTestInbox()`, `queryRows(sql, params?, k?)`.
+
+> Note: the `idx_emb_vec` HNSW index in the embeddings baseline below was superseded by D30 (exact search, no ANN index); the shipped baseline omits it.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2393,6 +2413,8 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
   - `EmbeddingHit = { sessionId, workspaceId, kind, ts, text, score }`, the same shape as `SearchHit`.
   - Part 4 and c3 call `searchEmbeddings`; `searchTranscripts` (MCP, SQLite) is unchanged (D30).
 
+> Note: the "partial HNSW index" referenced above was superseded by D30 (exact search, no ANN index); `searchEmbeddings` does a sequential `ORDER BY vec <=> q, id` scan instead.
+
 - [ ] **Step 1: Write the failing test**
 
 `src/main/dbSearchEmbeddings.test.ts`:
@@ -3608,11 +3630,11 @@ edit('docs/SPEC.md', [
     ("""- `config:get()` → `{ fleetRoot, sharedDir,""", """- **store** — hand-edited only (no setter channel, not in `config:get`). Absent or `{ kind: 'sqlite' }` ⇒ the SQLite files. `{ kind: 'postgres', … }` puts `state.db`'s and the inbox's tables in one Postgres schema: a connection as `connectionString`, `env` (a variable holding one, e.g. `DATABASE_URL`) or `host`/`port`/`database`/`user` + `password: { kind: 'env', name } | { kind: 'aws-rds-iam', region? }` + `ssl: 'disable' | 'require' | 'verify-full'` (default; needs `caFile`), plus `schema` (default `fleet`; must already exist) and `poolMax` (default 4). Validated by `store/storeConfig.ts:parseStoreConfig`. The desktop refuses plaintext secrets here (a `static` password, or a password inside `connectionString`) because `config.json` is not secret storage. An invalid block is a startup error, never a silent SQLite fallback. `aws-rds-iam` requires `verify-full`.
 - `config:get()` → `{ fleetRoot, sharedDir,""", 1),
     ("""**Schema (v13, current):**""", """**Postgres store.** With `store: { kind: 'postgres' }` (§6 *Settings*) the same queries run on Postgres (`openDbPostgres(pool)`; `store/pgStores.ts:openPgStores` opens both stores on one pool):
-- **Schema:** a baseline equal to the final SQLite schema (`store/migrations/statePg.ts`, state v14). Types: `BIGINT` for every integer, `DOUBLE PRECISION` for real, `TEXT COLLATE "C"` for every text column (byte order, as SQLite compares), identity ids, and `embeddings.vec vector(384)` with an HNSW `vector_cosine_ops` index on rows with non-empty text.
+- **Schema:** a baseline equal to the final SQLite schema (`store/migrations/statePg.ts`, state v14). Types: `BIGINT` for every integer, `DOUBLE PRECISION` for real, `TEXT COLLATE "C"` for every text column (byte order, as SQLite compares), identity ids, and `embeddings.vec vector(384)` (no ANN index; see *Search* below).
 - **Migrations:** recorded in `schema_migrations(track, version)`, one transaction per run under an advisory lock (`store/pgMigrate.ts`). A later schema change ships a `{ version, postgres }` step beside its SQLite `migrate()` step. `schemaParity.test.ts` pins each baseline to the SQLite schema.
 - **Ownership:** the store never creates its schema. The schema must exist, and pgvector ≥ 0.8.0 must be installed (created when the role may).
 - **Order:** every list read has a total `ORDER BY` with NULLs first, so results match SQLite. The 2a/2b characterization snapshots run unchanged on both dialects.
-- **Search:** `searchEmbeddings(qvec, scope, { limit, kind })` searches per dialect: brute-force dot product on SQLite, pgvector HNSW cosine (iterative `strict_order` scan) on Postgres.
+- **Search:** `searchEmbeddings(qvec, scope, { limit, kind })` searches per dialect: brute-force dot product on SQLite, exact pgvector cosine (`ORDER BY vec <=> q, id`, a sequential scan) on Postgres. No HNSW index: a total `id` tiebreak isn't satisfiable by an ANN scan, and approximate search measured poor recall under the filters this query needs. Scales roughly linearly with row count (~290ms p50 at 250k rows in one workspace); approximate search is part-4 work if usage approaches that ceiling.
 
 **Schema (v13, current):**""", 1),
     ("""```sql
@@ -3671,7 +3693,7 @@ BODY=$(cat <<'EOF2'
 Part 3 of the async store layer (plan: docs/superpowers/plans/2026-11-04-async-store-part3.md).
 
 - Postgres dialect for the existing async stores: one pg pool for state.db's and the inbox's tables; int8/numeric as numbers; per-store in-process write lock, concurrent reads; REPEATABLE READ snapshot reads.
-- Per-dialect migrations: Postgres baselines equal to state v14 / inbox v5 (BIGINT, TEXT COLLATE "C", identity ids, vector(384) + HNSW), schema_migrations tracks; SQLite migrate()/MIGRATIONS untouched.
+- Per-dialect migrations: Postgres baselines equal to state v14 / inbox v5 (BIGINT, TEXT COLLATE "C", identity ids, vector(384), exact search), schema_migrations tracks; SQLite migrate()/MIGRATIONS untouched.
 - config.json `store` (hand-edited): connection string / env / fields with static|env|aws-rds-iam passwords and verify-full TLS; RDS CA bundle script pinned in docker/versions.yaml.
 - #491: canonical cost-row order (read snapshot 0.7534357500000001 → 0.75343575, the only snapshot change), latest-session id tiebreak, latest-wins summary pushes, searchEmbeddings on pgvector, Postgres-backed invalidate-during-recompute test.
 - The store test suite (29 files) runs on SQLite and on PG16+pgvector; CI adds a pgvector/pgvector:0.8.7-pg16 service to the unit job.
@@ -3729,6 +3751,7 @@ gh pr merge --auto --squash "$(gh pr view feat/async-store-p3 --repo ImIOImI/cla
   - Settings → *Storage* (SQLite | local Postgres | external Postgres), with `config:getStore` / `config:setStore` IPC. Restart to apply.
   - The external option edits the same shapes as D31, with secrets in the vault: a new `password: { kind: 'vault', key }` source.
   - A one-shot copy of `inbox.db` into Postgres on the first switch, verified by row counts before `inbox.db` is renamed `inbox.db.migrated-<epochMs>`. `state.db` isn't copied: it is re-ingested from JSONL (the watcher's normal cold start).
+  - The copy inserts explicit ids into identity columns (`todo_events`, `step_runs`), so it must `setval(pg_get_serial_sequence(table, 'id'), max(id))` on each afterwards, or the next insert collides.
 - **Docker-down / unreachable degraded state:**
   - It replaces part 3's startup dialog (D33). History and inbox are unavailable, with a banner reusing #380's `unreachable` pattern.
   - IPC handlers return the empty or degraded shapes the renderer already handles. The watcher retries the store open on a backoff, and ingest resumes from JSONL offsets.
@@ -3740,6 +3763,7 @@ gh pr merge --auto --squash "$(gh pr view feat/async-store-p3 --repo ImIOImI/cla
   - **Each call:** `BEGIN READ ONLY; SET LOCAL ROLE …; SET LOCAL statement_timeout …`. The single-statement, row-cap and result-cap guards stay.
   - **Contract tests:** `mcpServer.test.ts` and `tests/mcp-*.spec.ts` (memory: MCP contract tests) run on both dialects.
   - **Host:** this is the same isolation (d) needs on the host.
+- **Approximate search (HNSW), if the measured ceiling is reached** (D30 revised part 3 to exact search; this is the follow-up, not committed to): a subquery form — compute the ANN candidate set in an inner query (`ORDER BY vec <=> q LIMIT n`, no `id` tiebreak, so the HNSW index is actually read), then re-rank/tiebreak in an outer query — plus `SET LOCAL hnsw.ef_search = max(200, 4 × limit)` and `hnsw.iterative_scan = relaxed_order`. Needs a recall test at the row counts the ceiling was measured at (20k/100k/250k; see D30's latency table) before shipping, since relaxed/approximate ordering trades correctness for speed.
 - **Perf:** a Postgres bench, the 2b metrics on the managed container over loopback, gated against SQLite with stated tolerances (ingest is expected to be slower per line; reads must stay within one IPC frame).
 - **SPEC:** §4 (the managed image), §6 (*Settings* channels and the Storage section), §8 *Startup* (managed start and the degraded state), §9 (DB credentials in the vault), §11 (role + RLS isolation).
 
