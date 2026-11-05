@@ -5,7 +5,9 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'src/main/store/pgMigrate.test.ts',
       'src/main/store/postgres.test.ts',
+      'src/main/store/schemaParity.test.ts',
     ],
     env: { STORE_TEST_DIALECT: 'postgres' },
     globalSetup: ['src/main/store/pgGlobalSetup.ts'],
