@@ -228,7 +228,8 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         search: (c, a) => claimService!.search(c, a),
         retract: (c, a) => claimService!.retract(c, a)
       });
-      void captureRuns.failRunning(Date.now(), 'interrupted by app restart');
+      void captureRuns.failRunning(Date.now(), 'interrupted by app restart').catch((e) =>
+        logError({ source: 'main', level: 'warn', type: 'capture-fail-running', message: String(e) }));
       void claimService.backfillVectors().catch((e) =>
         logError({ source: 'main', level: 'warn', type: 'claims-backfill', message: String(e) }));
     }
@@ -293,7 +294,13 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     if (inboxStore && captureRuns && claimService) {
       const runs = captureRuns;
       const claimsSvc = claimService;
-      loadCaptureForks(await runs.forkSessionIds());
+      // Never let a store failure block registerIpc/createWindow: without the
+      // seed, old fork transcripts merely aren't recognised as forks.
+      try {
+        loadCaptureForks(await runs.forkSessionIds());
+      } catch (e) {
+        logError({ source: 'main', level: 'warn', type: 'capture-fork-seed', message: String(e) });
+      }
       const scheduler = new CaptureScheduler({
         runs,
         signals: (id) => sessionCaptureSignals(id),
