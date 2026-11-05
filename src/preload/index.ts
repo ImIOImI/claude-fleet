@@ -80,6 +80,8 @@ export interface SessionListItem {
   tags: string[];
   /** Started by an automation fresh step, not a terminal tab. */
   headless: boolean;
+  /** A background knowledge-capture fork (#483), not a terminal tab. */
+  capture: boolean;
 }
 
 /**
@@ -625,6 +627,8 @@ const api = {
       uiPrefs: UiPrefs;
       perfTelemetry: boolean;
       perfOtlp: { enabled: boolean; endpoint: string };
+      knowledgeCapture: boolean;
+      knowledgeCaptureDailyCap: number;
     }> => ipcRenderer.invoke('config:get'),
     /** config.json's path when it isn't valid JSON (settings run on defaults
      *  and can't be saved), else null. */
@@ -664,7 +668,14 @@ const api = {
     setPerfTelemetry: (enabled: boolean): Promise<PerfStatusPayload> =>
       ipcRenderer.invoke('config:setPerfTelemetry', enabled),
     setPerfOtlp: (enabled: boolean, endpoint: string): Promise<PerfStatusPayload> =>
-      ipcRenderer.invoke('config:setPerfOtlp', enabled, endpoint)
+      ipcRenderer.invoke('config:setPerfOtlp', enabled, endpoint),
+    /** Global knowledge-capture switch (#483); default on. A per-workspace
+     *  manifest flag can still disable capture for one workspace. */
+    setKnowledgeCapture: (enabled: boolean): Promise<void> =>
+      ipcRenderer.invoke('config:setKnowledgeCapture', enabled),
+    /** App-wide daily cap on knowledge-capture runs (#483 §5a); clamped 0–500 in main. */
+    setKnowledgeCaptureDailyCap: (n: number): Promise<void> =>
+      ipcRenderer.invoke('config:setKnowledgeCaptureDailyCap', n)
   },
   usage: {
     /** Total tokens spent across the fleet in the trailing rolling window —

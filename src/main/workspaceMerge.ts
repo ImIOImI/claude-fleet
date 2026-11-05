@@ -73,6 +73,7 @@ export async function mergeWorkspaces(opts: MergeOptions): Promise<Workspace[]> 
       accessibility: m?.accessibility,
       inbox: m?.inbox,
       role: m?.role,
+      knowledgeCapture: m?.knowledgeCapture,
       remote: w.kind === 'remote' ? m?.remote ?? w.remote : undefined,
       // Manifest-only (#268). This projection is field-by-field, so an omitted
       // field is dropped for every LIVE workspace while the deleted branch

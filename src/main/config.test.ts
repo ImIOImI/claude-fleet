@@ -47,6 +47,10 @@ const {
   setPerfTelemetry,
   getPerfOtlp,
   setPerfOtlp,
+  getKnowledgeCapture,
+  setKnowledgeCapture,
+  getKnowledgeCaptureDailyCap,
+  setKnowledgeCaptureDailyCap,
   _resetConfigCacheForTests,
   getKeepRunningInTray,
   setKeepRunningInTray,
@@ -384,6 +388,27 @@ describe('perf telemetry config', () => {
     await expect(setPerfOtlp(true, 'ftp://nope')).rejects.toThrow(/http/i);
     await expect(setPerfOtlp(true, '')).rejects.toThrow(/endpoint/i);
     await expect(setPerfOtlp(false, '')).resolves.toBeUndefined(); // disabling never validates
+  });
+});
+
+describe('knowledge capture config (#483)', () => {
+  it('knowledgeCapture defaults on and persists an explicit false', async () => {
+    _resetConfigCacheForTests();
+    expect(await getKnowledgeCapture()).toBe(true);
+    await setKnowledgeCapture(false);
+    _resetConfigCacheForTests();
+    expect(await getKnowledgeCapture()).toBe(false);
+  });
+
+  it('knowledgeCaptureDailyCap defaults to 40 and clamps to 0-500', async () => {
+    _resetConfigCacheForTests();
+    expect(await getKnowledgeCaptureDailyCap()).toBe(40);
+    await setKnowledgeCaptureDailyCap(9999);
+    _resetConfigCacheForTests();
+    expect(await getKnowledgeCaptureDailyCap()).toBe(500);
+    await setKnowledgeCaptureDailyCap(0);
+    _resetConfigCacheForTests();
+    expect(await getKnowledgeCaptureDailyCap()).toBe(0);
   });
 });
 

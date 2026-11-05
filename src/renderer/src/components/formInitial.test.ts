@@ -8,6 +8,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { workspaceToFormInitial } from './formInitial';
+import { defaultCaptureSettings } from '../../../preload/captureSettings';
 
 const base = {
   id: 'ws1',
@@ -38,5 +39,13 @@ describe('workspaceToFormInitial — terminalRenderer (#268)', () => {
       base as unknown as Parameters<typeof workspaceToFormInitial>[0]
     );
     expect(initial.terminalRenderer).toBeUndefined();
+  });
+});
+
+describe('workspaceToFormInitial — knowledgeCapture (#483)', () => {
+  it('carries saved capture settings into the form (an omission resets them on the next save)', () => {
+    const kc = { ...defaultCaptureSettings(), enabled: false, searchTopSessions: 2 };
+    const initial = workspaceToFormInitial({ ...base, knowledgeCapture: kc } as unknown as Parameters<typeof workspaceToFormInitial>[0]);
+    expect(initial.knowledgeCapture).toEqual(kc);
   });
 });

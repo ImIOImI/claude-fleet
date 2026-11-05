@@ -15,7 +15,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setSessionMappingHandler, setSummaryStatusHandler, setQueryEmbedder, setUsageRecorder, setConfigResolver, _resetTelemetryForTests, type ToolCtx } from './mcpServer.js';
+import { TOOLS, resolveAllowedWorkspaces, setInputWaitHandler, setSessionMappingHandler, setSummaryStatusHandler, setQueryEmbedder, setUsageRecorder, setConfigResolver, setClaimHandlers, setCaptureSettingsHandlers, setSearchHitHook, STANDING_RULE, _resetTelemetryForTests, type ToolCtx } from './mcpServer.js';
+import type { SearchHitEvent } from './claims/searchHits.js';
+import { CAPTURE_TOOL_NAMES, captureArgs } from './claims/captureCommand.js';
 import { initializeResult, setPortExposureHandlers } from './mcpServer.js';
 import { EMBED_DIM, EMBED_MODEL_ID } from './vectors.js';
 import { closeDb, openDb, stateKysely } from './db.js';
@@ -852,6 +854,118 @@ describe('inbox tools (#407)', () => {
       setSkillHandlers(null);
     }
     expect(() => tool('list_workspace_skills').run(null as never, {}, ctx)).toThrow(/skills are unavailable/);
+  });
+});
+
+describe('knowledge claims tools (#483)', () => {
+  afterEach(() => setClaimHandlers(null));
+  it('registers record_claim, search_claims, retract_claim', () => {
+    expect(TOOLS.map((t) => t.name)).toEqual(expect.arrayContaining(['record_claim', 'search_claims', 'retract_claim']));
+  });
+  it('capture forks get the capture tools allowed and every other TOOLS name denied', () => {
+    const names = TOOLS.map((t) => t.name);
+    expect(names).toEqual(expect.arrayContaining([...CAPTURE_TOOL_NAMES]));
+    const args = captureArgs({ prompt: 'P', sessionId: 's', forkSessionId: 'f', model: null, fleetToolNames: names });
+    const denied = args[args.indexOf('--disallowedTools') + 1].split(',');
+    expect(denied).toHaveLength(names.length - CAPTURE_TOOL_NAMES.length);
+    expect(denied).toContain('mcp__claude-fleet-state__get_config');
+    expect(denied).toContain('mcp__claude-fleet-state__set_capture_settings');
+    expect(denied.some((d) => /record_claim|search_claims/.test(d))).toBe(false);
+  });
+  it('passes the host caller id, never a wire-supplied one', async () => {
+    const seen: string[] = [];
+    setClaimHandlers({
+      record: async (c) => { seen.push(c); return { id: 'x' }; },
+      search: async (c) => { seen.push(c); return { results: [] }; },
+      retract: async (c) => { seen.push(c); return { id: 'x', status: 'retracted' }; }
+    });
+    await tool('record_claim').run(makeDb(), { text: 't', kind: 'fact', topics: ['a1'], callerId: 'evil' }, ctxA);
+    await tool('search_claims').run(makeDb(), { query: 'q' }, ctxA);
+    await tool('retract_claim').run(makeDb(), { id: 'x', reason: 'r' }, ctxA);
+    expect(seen).toEqual([WS_A, WS_A, WS_A]);
+  });
+  it('fails clearly when claims are unavailable', () => {
+    expect(() => tool('search_claims').run(makeDb(), { query: 'q' }, ctxA)).toThrow(/claims are unavailable/);
+  });
+  it('search_transcripts no longer instructs agents to call mark_useful', () => {
+    expect(tool('search_transcripts').description).not.toMatch(/mark_useful/);
+  });
+  it('the standing rule fits the 2048-char MCP instructions budget and names the tools', () => {
+    expect(STANDING_RULE.length).toBeLessThan(1200);
+    expect(STANDING_RULE).toMatch(/record_claim/);
+    expect(STANDING_RULE).toMatch(/search_claims/);
+    // Delivered alongside the expose_port line, together under the 2,048-char cap.
+    const instructions = String(initializeResult().instructions);
+    expect(instructions.startsWith(STANDING_RULE)).toBe(true);
+    expect(instructions).toMatch(/expose_port/);
+    expect(instructions.length).toBeLessThan(2048);
+  });
+});
+
+describe('capture settings tools (#483 §5a)', () => {
+  afterEach(() => setCaptureSettingsHandlers(null));
+  it('registers get_capture_settings and set_capture_settings', () => {
+    expect(TOOLS.map((t) => t.name)).toEqual(expect.arrayContaining(['get_capture_settings', 'set_capture_settings']));
+    expect(tool('set_capture_settings').inputSchema.required).toEqual(['reason']);
+  });
+  it('targets only the caller workspace, whatever the args say', async () => {
+    const seen: string[] = [];
+    setCaptureSettingsHandlers({
+      get: async (c) => { seen.push(c); return {}; },
+      set: async (c) => { seen.push(c); return {}; }
+    });
+    await tool('get_capture_settings').run(makeDb(), { workspace_id: WS_B }, ctxA);
+    await tool('set_capture_settings').run(makeDb(), { searchTopSessions: 1, reason: 'r', callerId: WS_B }, ctxA);
+    expect(seen).toEqual([WS_A, WS_A]);
+  });
+  it('fails clearly when unavailable', () => {
+    expect(() => tool('get_capture_settings').run(makeDb(), {}, ctxA)).toThrow(/knowledge capture settings are unavailable/);
+  });
+});
+
+describe('search-hit capture hook (#483 §5)', () => {
+  afterEach(() => { setSearchHitHook(null); setClaimHandlers(null); });
+  const unitEmbed = async (texts: string[]) => texts.map(() => { const v = new Float32Array(EMBED_DIM); v[0] = 1; return v; });
+
+  it('search_transcripts reports result sessions with the query and the caller scope', async () => {
+    const seen: SearchHitEvent[] = [];
+    setSearchHitHook((e) => seen.push(e));
+    setQueryEmbedder(unitEmbed);
+    seedEmbedding(db, WS_A, 'sa');
+    await tool('search_transcripts').run(db, { query: 'broker hang' }, ctxA);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ callerWorkspaceId: WS_A, tool: 'search_transcripts', query: 'broker hang', sessionIds: ['sa'] });
+    expect([...seen[0].allowedWorkspaces]).toEqual([WS_A]);
+  });
+  it('search_claims reports the sessions behind the returned claims', async () => {
+    const seen: SearchHitEvent[] = [];
+    setSearchHitHook((e) => seen.push(e));
+    setClaimHandlers({
+      record: async () => ({}), retract: async () => ({}),
+      search: async () => ({ results: [{ sources: [{ sessionId: 's1' }] }] })
+    });
+    await tool('search_claims').run(makeDb(), { query: 'q' }, ctxA);
+    expect(seen[0]).toMatchObject({ tool: 'search_claims', query: 'q', sessionIds: ['s1'] });
+  });
+  it('query reports session ids from the result rows', () => {
+    const { db: fdb, cleanup } = makeFileDb();
+    try {
+      const seen: SearchHitEvent[] = [];
+      setSearchHitHook((e) => seen.push(e));
+      tool('query').run(fdb, { sql: 'SELECT id AS session_id FROM sessions' }, ctxA);
+      expect(seen[0]).toMatchObject({ tool: 'query', query: 'SELECT id AS session_id FROM sessions' });
+      expect(seen[0].sessionIds.length).toBeGreaterThan(0);
+    } finally { fdb.close(); cleanup(); }
+  });
+  it('a throwing hook never fails the search, and no results means no event', async () => {
+    setSearchHitHook(() => { throw new Error('boom'); });
+    setClaimHandlers({ record: async () => ({}), retract: async () => ({}), search: async () => ({ results: [{ sources: [{ sessionId: 's1' }] }] }) });
+    await expect(tool('search_claims').run(makeDb(), { query: 'q' }, ctxA)).resolves.toBeTruthy();
+    const seen: SearchHitEvent[] = [];
+    setSearchHitHook((e) => seen.push(e));
+    setClaimHandlers({ record: async () => ({}), retract: async () => ({}), search: async () => ({ results: [] }) });
+    await tool('search_claims').run(makeDb(), { query: 'q' }, ctxA);
+    expect(seen).toHaveLength(0);
   });
 });
 

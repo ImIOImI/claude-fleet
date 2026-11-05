@@ -3,7 +3,7 @@ import { mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { InboxStore, INBOX_SCHEMA_VERSION } from './inboxDb.js';
+import { InboxStore, INBOX_SCHEMA_VERSION, MIGRATIONS } from './inboxDb.js';
 import { openTestInbox, countQueries, isPg } from '../store/testStore.js';
 
 const WS = { kind: 'workspace', id: 'W1' } as const;
@@ -152,10 +152,91 @@ describe.skipIf(isPg)('InboxStore.open', () => {
     expect((await store.list()).map((t) => t.title)).toEqual(['persist me']);
     const raw = new Database(path.join(dir, 'inbox.db'), { readonly: true });
     expect(raw.pragma('user_version', { simple: true })).toBe(INBOX_SCHEMA_VERSION);
-    expect(INBOX_SCHEMA_VERSION).toBe(5);
+    expect(INBOX_SCHEMA_VERSION).toBe(8);
     expect(raw.pragma('journal_mode', { simple: true })).toBe('wal');
     raw.close();
   });
+  it('v6 creates the claims tables and an FTS5 index', async () => {
+    store = InboxStore.memory();
+    const raw = (store as unknown as { raw: import('better-sqlite3').Database }).raw;
+    const names = (raw.prepare(`SELECT name FROM sqlite_master WHERE type IN ('table') ORDER BY name`).all() as { name: string }[]).map((r) => r.name);
+    expect(names).toEqual(expect.arrayContaining(['claims', 'claim_sources', 'claim_vectors', 'claims_fts', 'capture_runs']));
+    raw.prepare(`INSERT INTO claims_fts (claim_id, text, topics) VALUES ('c1', 'query snapshot froze the app', 'mcp-query')`).run();
+    const hit = raw.prepare(`SELECT claim_id FROM claims_fts WHERE claims_fts MATCH '"snapshot"'`).get() as { claim_id: string };
+    expect(hit.claim_id).toBe('c1');
+    await store.close();
+  });
+  it('v7 adds capture_settings_log, proposals.payload and capture_runs.user_turns', async () => {
+    store = InboxStore.memory();
+    const raw = (store as unknown as { raw: import('better-sqlite3').Database }).raw;
+    const cols = (t: string) => (raw.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
+    expect(cols('capture_settings_log')).toEqual(['id', 'workspace_id', 'ts', 'actor', 'before', 'after', 'reason', 'applied', 'proposal_id']);
+    expect(cols('proposals')).toContain('payload');
+    expect(cols('capture_runs')).toContain('user_turns');
+    // The rebuilt proposals table admits the new kind and still rejects junk.
+    const ins = (kind: string) => raw.prepare(`INSERT INTO proposals (id, kind, proposer_kind, status, items, created_at) VALUES (?, ?, 'workspace', 'pending', '[]', 1)`).run(`p-${kind}`, kind);
+    expect(() => ins('capture-settings')).not.toThrow();
+    expect(() => ins('bogus')).toThrow(/CHECK constraint/);
+    expect(raw.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'proposals_status'`).get()).toBeTruthy();
+    await store.close();
+  });
+  it('v6 → v7 rebuilds proposals without losing a row, and adds the new v7 objects', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'inbox-v6v7-'));
+    const file = path.join(dir, 'inbox.db');
+    const raw = new Database(file);
+    for (let v = 1; v <= 6; v++) {
+      raw.transaction(() => {
+        raw.exec(MIGRATIONS[v]);
+        raw.pragma(`user_version = ${v}`);
+      })();
+    }
+    const insProposal = raw.prepare(
+      `INSERT INTO proposals (id, kind, proposer_kind, proposer_id, rationale, status, items, note, created_at, decided_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    // All optional columns NULL.
+    insProposal.run('P-new', 'new', 'workspace', null, null, 'pending', '[]', null, 1000, null);
+    // All optional columns non-NULL, including a unicode rationale.
+    insProposal.run('P-change', 'change', 'user', 'U1', 'café ☕ 更新 — widen the kind CHECK', 'approved', '[{"a":1}]', 'noted', 2000, 2500);
+    insProposal.run('P-batch', 'batch', 'workspace', 'W9', null, 'rejected', '[{"b":2},{"c":3}]', 'no thanks', 3000, 3100);
+    raw.prepare(
+      `INSERT INTO capture_runs (id, workspace_id, session_id, fork_session_id, trigger, status, claims_recorded, usage, error, started_at, ended_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run('R1', 'W1', 'S1', 'F1', 'ctx-85', 'done', 2, JSON.stringify({ in: 1, out: 2 }), null, 500, 600);
+    const before = raw.prepare(
+      `SELECT id, kind, proposer_kind, proposer_id, rationale, status, items, note, created_at, decided_at FROM proposals ORDER BY id`
+    ).all() as Array<Record<string, unknown>>;
+    raw.close();
+
+    store = InboxStore.open(dir);
+    const rawHandle = (store as unknown as { raw: import('better-sqlite3').Database }).raw;
+
+    expect(rawHandle.pragma('user_version', { simple: true })).toBe(INBOX_SCHEMA_VERSION);
+    expect(rawHandle.pragma('integrity_check', { simple: true })).toBe('ok');
+
+    const after = rawHandle.prepare(
+      `SELECT id, kind, proposer_kind, proposer_id, rationale, status, items, note, created_at, decided_at, payload FROM proposals ORDER BY id`
+    ).all() as Array<Record<string, unknown>>;
+    expect(after.map(({ payload: _payload, ...rest }) => rest)).toEqual(before);
+    expect(after.every((r) => r.payload === null)).toBe(true);
+
+    expect(rawHandle.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'proposals_status'`).get()).toBeTruthy();
+    const insKind = (kind: string) => rawHandle.prepare(
+      `INSERT INTO proposals (id, kind, proposer_kind, status, items, created_at) VALUES (?, ?, 'workspace', 'pending', '[]', 1)`
+    ).run(`chk-${kind}`, kind);
+    expect(() => insKind('capture-settings')).not.toThrow();
+    expect(() => insKind('bogus')).toThrow(/CHECK constraint/);
+
+    const run = rawHandle.prepare(`SELECT * FROM capture_runs WHERE id = 'R1'`).get() as Record<string, unknown>;
+    expect(run).toMatchObject({
+      id: 'R1', workspace_id: 'W1', session_id: 'S1', fork_session_id: 'F1', trigger: 'ctx-85',
+      status: 'done', started_at: 500, ended_at: 600, user_turns: null, visibility: null, compactions: null
+    });
+
+    expect(rawHandle.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'capture_settings_log'`).get()).toBeTruthy();
+    expect(readdirSync(dir).some((f) => /^inbox\.db\.bak-v6-\d+$/.test(f))).toBe(true);
+  });
+
   it('backs up an existing older database before migrating', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'inbox-'));
     const old = new Database(path.join(dir, 'inbox.db'));

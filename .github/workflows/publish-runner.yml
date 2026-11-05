@@ -35,6 +35,7 @@ on:
       - 'src/main/inbox/inboxDb.ts'
       - 'src/main/inbox/inboxCore.ts'
       - 'src/preload/inboxTypes.ts'
+      - 'src/preload/captureSettings.ts'
       - 'package-lock.json'
       - 'tsconfig.host.json'
       - 'vite.host.config.ts'

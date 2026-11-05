@@ -75,6 +75,8 @@ import { resolveEnv } from './vault.js';
 import { getStoreConfig } from './config.js';
 import { storeSecretEnvNames, type StoreConfig } from './store/storeConfig.js';
 import { endpointEnv } from './endpoints.js';
+import { effectiveCaptureSettings } from '../preload/captureSettings.js';
+import { ensureLocalRetentionSettings } from './claims/retention.js';
 import {
   attachLocalSession,
   hasLiveSession,
@@ -289,7 +291,7 @@ const claudeResolver = cachedNullableResolver(
   () => findClaude(async (file, args) => execFileAsync(file, args, { env: await hostEnvForWorkspaces() }), homedir()),
   { nullTtlMs: 5 * 60_000 }
 );
-function resolveClaude(): Promise<string | null> {
+export function resolveClaude(): Promise<string | null> {
   return claudeResolver.get();
 }
 
@@ -586,6 +588,16 @@ export async function attachPty(
     mcpConfigPath && launcher.mode === 'wsl'
       ? (windowsPathToWslPath(mcpConfigPath) ?? undefined)
       : mcpConfigPath;
+  // #483 §5a: transcriptRetentionDays → cleanupPeriodDays on this launch.
+  // Only ever raises the user's own retention: undefined (no --settings) when
+  // their effective cleanupPeriodDays is already at least the workspace's.
+  const retentionHost = await ensureLocalRetentionSettings(id, effectiveCaptureSettings(m).transcriptRetentionDays, launcher)
+    .catch((e) => {
+      logError({ source: 'main', type: 'claude-retention', level: 'warn', message: String(e), workspaceId: id });
+      return undefined;
+    });
+  const settingsArg =
+    retentionHost && launcher.mode === 'wsl' ? (windowsPathToWslPath(retentionHost) ?? undefined) : retentionHost;
   // Attaching implies the workspace is up.
   started.add(id);
   // If the workspace was paused, resume it now. For wsl-launcher workspaces
@@ -667,6 +679,7 @@ export async function attachPty(
     },
     extraArgs,
     mcpConfigPath: mcpConfigArg,
+    settingsPath: settingsArg,
     spawn: wrapSpawnForLauncher(launcher, defaultSpawn, {
       workspaceId: id,
       platform: process.platform,

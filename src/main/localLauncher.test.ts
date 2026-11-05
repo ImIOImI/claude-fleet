@@ -10,6 +10,7 @@ import {
   wrapSpawnForLauncher,
   wslLocalProjectsDir,
   wslInDistroPath,
+  wslPassKeys,
   agentDropboxPath,
   applyClaudeUpdateDecision,
   type WorkspaceLauncher
@@ -143,6 +144,22 @@ describe('buildWslSpawnEnv', () => {
   it('creates WSLENV when absent', () => {
     const env = buildWslSpawnEnv({}, ['A', 'B']);
     expect(env.WSLENV).toBe('A/u:B/u');
+  });
+});
+
+describe('wslPassKeys', () => {
+  it('includes the base fleet keys, auto-detected ANTHROPIC_/CLAUDE_ env keys, and extraKeys, de-duplicated', () => {
+    const keys = wslPassKeys(
+      { PATH: '/usr/bin', ANTHROPIC_API_KEY: 'k', CLAUDE_FLEET_BROKER_SESSION_ID: 'sess1', CLAUDE_CODE_FOO: 'x' },
+      ['CLAUDE_FLEET_BROKER_SESSION_ID', 'MY_CUSTOM_TOKEN']
+    );
+    expect(keys).toContain('CLAUDE_FLEET_BROKER_SESSION_ID');
+    expect(keys).toContain('TERM');
+    expect(keys).toContain('ANTHROPIC_API_KEY');
+    expect(keys).toContain('CLAUDE_CODE_FOO');
+    expect(keys).toContain('MY_CUSTOM_TOKEN');
+    expect(keys).not.toContain('PATH');
+    expect(keys.filter((k) => k === 'CLAUDE_FLEET_BROKER_SESSION_ID')).toHaveLength(1);
   });
 });
 

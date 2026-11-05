@@ -16,9 +16,12 @@ import { migratePostgres } from '../store/pgMigrate.js';
 import { INBOX_PG_TRACK } from '../store/migrations/inboxPg.js';
 import type { InboxDb, TodoRow } from '../store/inboxSchema.js';
 
-export const INBOX_SCHEMA_VERSION = 5;
+export const INBOX_SCHEMA_VERSION = 8;
 
-const MIGRATIONS: Record<number, string> = {
+/** @internal for tests — lets a migration test build a real file DB at an
+ *  older schema version (running a prefix of these) without duplicating the
+ *  SQL here. Not part of the module's public contract. */
+export const MIGRATIONS: Record<number, string> = {
   1: `
     CREATE TABLE todos (
       id TEXT PRIMARY KEY,
@@ -184,6 +187,68 @@ const MIGRATIONS: Record<number, string> = {
     ALTER TABLE automations ADD COLUMN next_run_at INTEGER;
     ALTER TABLE automations ADD COLUMN next_run_by TEXT;
     ALTER TABLE runs ADD COLUMN reschedule TEXT;
+  `,
+  // #483: knowledge claims (phase 1) + background capture runs.
+  6: `
+    CREATE TABLE claims (
+      id TEXT PRIMARY KEY, text TEXT NOT NULL, kind TEXT NOT NULL, topics TEXT NOT NULL,
+      refs TEXT, visibility TEXT NOT NULL DEFAULT 'fleet', status TEXT NOT NULL DEFAULT 'current',
+      superseded_by TEXT, retract_reason TEXT, workspace_id TEXT NOT NULL,
+      confirmations INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX idx_claims_status_vis ON claims (status, visibility, workspace_id);
+    CREATE TABLE claim_sources (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, claim_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+      session_id TEXT, via TEXT NOT NULL, capture_run TEXT, ts INTEGER NOT NULL
+    );
+    CREATE INDEX idx_claim_sources_claim ON claim_sources (claim_id);
+    CREATE TABLE claim_vectors (claim_id TEXT PRIMARY KEY, model_id TEXT NOT NULL, vec BLOB NOT NULL);
+    CREATE VIRTUAL TABLE claims_fts USING fts5(claim_id UNINDEXED, text, topics);
+    CREATE TABLE capture_runs (
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, session_id TEXT NOT NULL, fork_session_id TEXT,
+      trigger TEXT NOT NULL, status TEXT NOT NULL, claims_recorded INTEGER NOT NULL DEFAULT 0,
+      usage TEXT, error TEXT, started_at INTEGER NOT NULL, ended_at INTEGER
+    );
+    CREATE INDEX idx_capture_runs_session ON capture_runs (session_id, started_at);
+    CREATE INDEX idx_capture_runs_status ON capture_runs (status);
+  `,
+  // #483 §5a: capture-settings change log, capture-settings proposals (payload),
+  // and the user-turn baseline that recaptureAfterTurns is measured from.
+  7: `
+    CREATE TABLE capture_settings_log (
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, ts INTEGER NOT NULL, actor TEXT NOT NULL,
+      "before" TEXT NOT NULL, "after" TEXT NOT NULL, reason TEXT, applied INTEGER NOT NULL, proposal_id TEXT
+    );
+    CREATE INDEX idx_capture_settings_log_ws ON capture_settings_log (workspace_id, ts);
+    -- proposals.kind has a CHECK (v4) that SQLite can't alter: rebuild the
+    -- table to admit 'capture-settings' and add the payload column.
+    CREATE TABLE proposals_v7 (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind IN ('new','change','batch','capture-settings')),
+      proposer_kind TEXT NOT NULL,
+      proposer_id TEXT,
+      rationale TEXT,
+      status TEXT NOT NULL,
+      items TEXT NOT NULL,
+      note TEXT,
+      created_at INTEGER NOT NULL,
+      decided_at INTEGER,
+      payload TEXT
+    );
+    INSERT INTO proposals_v7 (id, kind, proposer_kind, proposer_id, rationale, status, items, note, created_at, decided_at)
+      SELECT id, kind, proposer_kind, proposer_id, rationale, status, items, note, created_at, decided_at FROM proposals;
+    DROP TABLE proposals;
+    ALTER TABLE proposals_v7 RENAME TO proposals;
+    CREATE INDEX proposals_status ON proposals (status, created_at);
+    ALTER TABLE capture_runs ADD COLUMN user_turns INTEGER;
+    CREATE INDEX idx_capture_runs_started ON capture_runs (started_at);
+  `,
+  // #483 final review: the workspace's effective captureVisibility at admit
+  // (record_claim forces private claims for a private run), and the session's
+  // compaction count at admit (ctx bands don't re-fire after an app restart).
+  8: `
+    ALTER TABLE capture_runs ADD COLUMN visibility TEXT;
+    ALTER TABLE capture_runs ADD COLUMN compactions INTEGER;
   `
 };
 
@@ -207,6 +272,12 @@ const PRIORITY_ORDER = sql<number>`CASE priority WHEN 'urgent' THEN 0 WHEN 'high
 
 export class InboxStore {
   private constructor(private readonly raw: Database.Database | null, readonly kysely: Kysely<InboxDb>) {}
+
+  /** Which store this is on: openPostgres has no raw SQLite handle. Stores whose
+   *  SQL differs by dialect (claims full-text search) branch on it. */
+  get dialect(): 'sqlite' | 'postgres' {
+    return this.raw ? 'sqlite' : 'postgres';
+  }
 
   /** The inbox tables on a Postgres store pool. No file
    *  backup: the migration is one transaction, and the database is the operator's.

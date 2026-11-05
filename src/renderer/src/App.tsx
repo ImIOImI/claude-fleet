@@ -44,6 +44,7 @@ import type {
   QuietState,
   PortOpenVia
 } from '../../preload';
+import type { CaptureSettings } from '../../preload/captureSettings';
 import { portPopupCopy } from './portToast';
 import { InboxChip } from './components/InboxChip';
 import { InboxView, type InboxSection } from './components/InboxView';
@@ -153,6 +154,8 @@ export interface WorkspaceSummary {
   accessibility?: AccessibilityConfig;
   /** Host-private inbox permissions (#407). */
   inbox?: InboxConfig;
+  /** Knowledge capture settings (#483 §5a); absent = all defaults. */
+  knowledgeCapture?: CaptureSettings;
   /** kind 'remote' only: the fleet-host bookmark (tier is display only). */
   remote?: { url: string; tier: RemoteTier | null; login: string | null; checkedAt: number };
   createdAt: number;
@@ -1319,6 +1322,7 @@ export function App() {
       mirror: submit.mirror,
       accessibility: submit.accessibility,
       inbox: submit.inbox,
+      knowledgeCapture: submit.knowledgeCapture,
       createdAt: before.createdAt,
       lastUsedAt: Date.now()
     });

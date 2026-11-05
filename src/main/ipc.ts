@@ -14,6 +14,9 @@ import {
   learnMapping as learnMirrorMapping
 } from './mirrorPolicy.js';
 import { openHostPath } from './openHostPath.js';
+import { captureSettingsEqual, effectiveCaptureSettings, normalizeCaptureSettings } from '../preload/captureSettings.js';
+import { emitCaptureSettingsChanged } from './claims/captureSettingsEvents.js';
+import { isCaptureFork } from './claims/captureForks.js';
 import {
   getFleetRoot,
   setFleetRoot,
@@ -44,6 +47,10 @@ import {
   setPerfTelemetry,
   getPerfOtlp,
   setPerfOtlp,
+  getKnowledgeCapture,
+  setKnowledgeCapture,
+  getKnowledgeCaptureDailyCap,
+  setKnowledgeCaptureDailyCap,
   getGithubClientIdConfig,
   configUnreadablePath,
   getUndeclaredToastAfterSec
@@ -472,6 +479,8 @@ interface WorkspaceCreatePayload {
   env: WorkspaceEnv;
   resources?: WorkspaceResources;
   mirror?: WorkspaceMirror;
+  /** Knowledge-capture settings (#483 §5a); normalized server-side, absent ⇒ defaults. */
+  knowledgeCapture?: unknown;
 }
 
 // Last-known container states for daemon-down synthesis (#380). In-memory
@@ -527,7 +536,11 @@ async function listAllWorkspaces(): Promise<Workspace[]> {
   return workspaceListCache.get();
 }
 
-function invalidateWorkspaceList(): void {
+// Exported so callers outside ipc.ts's own handlers (currently just the
+// capture-settings service, injected via index.ts) can invalidate the cache
+// after a manifest write of their own, without importing ipc.ts into an
+// otherwise Electron-free module.
+export function invalidateWorkspaceList(): void {
   workspaceListCache.invalidate();
 }
 
@@ -1252,6 +1265,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // the socket present as soon as it starts.
       ensureWorkspaceSocket(input.id);
 
+      const knowledgeCapture = input.knowledgeCapture === undefined ? undefined : normalizeCaptureSettings(input.knowledgeCapture);
       const ws = await backendForKind(kind).createWorkspace({
         id: input.id,
         name: input.name,
@@ -1262,7 +1276,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         authMode: input.authMode,
         endpointId: input.endpointId,
         kind,
-        workspaceRoot: input.workspaceRoot
+        workspaceRoot: input.workspaceRoot,
+        knowledgeCapture
       });
 
       const spec: WorkspaceSpec = {
@@ -1291,6 +1306,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         env: input.env,
         resources: input.resources,
         mirror: input.mirror ?? FACTORY_MIRROR,
+        knowledgeCapture,
         createdAt: ws.createdAt,
         lastUsedAt: ws.lastUsedAt
       };
@@ -1384,6 +1400,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
           workspaceName: w.name,
           workspaceColorHue: w.color?.hue ?? null,
           workspaceState: w.state,
+          capture: isCaptureFork(r.id),
         }
       ];
     });
@@ -1517,6 +1534,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // this merge a plain edit would silently wipe both. A key present in the
       // incoming spec — even set to undefined, e.g. clearing `accessibility` by
       // toggling reachability off — is authoritative and overrides existing.
+      const beforeCapture = effectiveCaptureSettings(existing);
       await writeWorkspaceManifest({
         ...(existing ?? {}),
         ...spec,
@@ -1524,6 +1542,12 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         launcher: incomingLauncher,
         remote: undefined
       });
+      // #483 §5a: a form edit of the capture settings is logged (actor 'user')
+      // and re-applies transcript retention — both listen for this event.
+      const afterCapture = effectiveCaptureSettings(await readWorkspaceManifest(spec.id));
+      if (!captureSettingsEqual(beforeCapture, afterCapture)) {
+        emitCaptureSettingsChanged({ workspaceId: spec.id, before: beforeCapture, after: afterCapture, actor: 'user', source: 'form' });
+      }
     invalidateWorkspaceList();
     // Reflect a mirror-default edit in the watcher immediately (don't wait for
     // the next list poll).
@@ -1812,7 +1836,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     usageBudget: await getUsageBudget(),
     uiPrefs: await getUiPrefs(),
     perfTelemetry: await getPerfTelemetry(),
-    perfOtlp: await getPerfOtlp()
+    perfOtlp: await getPerfOtlp(),
+    knowledgeCapture: await getKnowledgeCapture(),
+    knowledgeCaptureDailyCap: await getKnowledgeCaptureDailyCap()
   }));
   ipcMain.handle('config:setAutoReloadLoadouts', async (_e, enabled: boolean) => {
     await setAutoReloadLoadouts(!!enabled);
@@ -1886,6 +1912,16 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     await setPerfOtlp(enabled === true, String(endpoint ?? ''));
     await reapplyPerfConfig();
     return getEffectivePerf() ? getPerfStatus() : PERF_STATUS_UNINITIALIZED;
+  });
+
+  ipcMain.handle('config:setKnowledgeCapture', (_e, enabled: unknown) => {
+    if (typeof enabled !== 'boolean') throw new Error('config:setKnowledgeCapture expects a boolean');
+    return setKnowledgeCapture(enabled);
+  });
+
+  ipcMain.handle('config:setKnowledgeCaptureDailyCap', (_e, n: unknown) => {
+    if (typeof n !== 'number' || !Number.isFinite(n)) throw new Error('config:setKnowledgeCaptureDailyCap expects a number');
+    return setKnowledgeCaptureDailyCap(n);
   });
 
   ipcMain.handle('perf:status', async () => getEffectivePerf() ? getPerfStatus() : PERF_STATUS_UNINITIALIZED);

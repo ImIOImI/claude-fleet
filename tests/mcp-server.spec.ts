@@ -100,6 +100,7 @@ test('MCP server: initialize, tools, typed reads, committee control', async () =
     // initialize
     const init = await client.call('initialize', { protocolVersion: '2024-11-05' });
     expect((init.result as { serverInfo?: { name?: string } }).serverInfo?.name).toBe('claude-fleet-state');
+    expect(typeof (init.result as { instructions?: unknown }).instructions).toBe('string');
 
     // tools/list exposes the typed tools, the session_summary aggregator, and
     // the snapshot-scoped `query` tool (#174).
@@ -121,6 +122,11 @@ test('MCP server: initialize, tools, typed reads, committee control', async () =
         'signal_input_wait',
         'report_session_mapping',
         'mark_useful',
+        'record_claim',
+        'search_claims',
+        'retract_claim',
+        'get_capture_settings',
+        'set_capture_settings',
         'get_config',
         'perf_status',
         'perf_set',

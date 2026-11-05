@@ -38,6 +38,7 @@ import { costFor } from './pricing.js';
 import { logError } from './errorLog.js';
 import { ensureContainerBridgeScript } from './mcpContainerBridge.js';
 import { searchTranscripts, type EmbedFn } from './transcriptIndex.js';
+import { sessionIdsFromClaimResults, sessionIdsFromQueryRows, sessionIdsFromTranscriptHits, type SearchHitEvent } from './claims/searchHits.js';
 import { describeListenerError, type ListenerScope } from './mcpListenerError.js';
 import { type McpStatus } from './mcpStatusBroadcast.js';
 import {
@@ -69,7 +70,9 @@ export function initializeResult(): Record<string, unknown> {
     protocolVersion: PROTOCOL_VERSION,
     capabilities: { tools: {} },
     serverInfo: SERVER_INFO,
-    instructions: SERVER_INSTRUCTIONS
+    // The knowledge-claims standing rule (#483) and the port line, together
+    // under Claude Code's 2,048-char instructions cap (pinned in the tests).
+    instructions: `${STANDING_RULE}\n\n${SERVER_INSTRUCTIONS}`
   };
 }
 const DEFAULT_LIMIT = 200;
@@ -170,6 +173,57 @@ export function setAutomationHandlers(h: AutomationHandlers | null): void {
 export function setInboxHandlers(h: InboxHandlers | null): void {
   inboxHandlers = h;
 }
+
+/** Knowledge claims (#483) — injected by index.ts so mcpServer stays store-free. */
+export interface ClaimHandlers {
+  record(callerId: string, args: Record<string, unknown>): Promise<unknown>;
+  search(callerId: string, args: Record<string, unknown>): Promise<unknown>;
+  retract(callerId: string, args: Record<string, unknown>): Promise<unknown>;
+}
+let claimHandlers: ClaimHandlers | null = null;
+export function setClaimHandlers(h: ClaimHandlers | null): void { claimHandlers = h; }
+function claims(): ClaimHandlers {
+  if (!claimHandlers) throw new Error('claims are unavailable');
+  return claimHandlers;
+}
+
+/** Knowledge capture settings (#483 §5a) — injected by index.ts. Always the
+ *  caller's own workspace: ctx.callerId is the only target, never a wire value. */
+export interface CaptureSettingsHandlers {
+  get(callerId: string): Promise<unknown>;
+  set(callerId: string, args: Record<string, unknown>): Promise<unknown>;
+}
+let captureSettingsHandlers: CaptureSettingsHandlers | null = null;
+export function setCaptureSettingsHandlers(h: CaptureSettingsHandlers | null): void { captureSettingsHandlers = h; }
+function captureSettingsApi(): CaptureSettingsHandlers {
+  if (!captureSettingsHandlers) throw new Error('knowledge capture settings are unavailable');
+  return captureSettingsHandlers;
+}
+
+/** Knowledge capture (#483 §5): told which sessions search_transcripts /
+ *  search_claims / query results referenced, so the scheduler can capture
+ *  them. Injected by index.ts. Synchronous and fire-and-forget: it must never
+ *  delay or fail the search response. */
+export type SearchHitHook = (e: SearchHitEvent) => void;
+let searchHitHook: SearchHitHook | null = null;
+export function setSearchHitHook(fn: SearchHitHook | null): void { searchHitHook = fn; }
+function emitSearchHits(ctx: ToolCtx, tool: SearchHitEvent['tool'], query: string, sessionIds: string[]): void {
+  if (!searchHitHook || sessionIds.length === 0) return;
+  try {
+    searchHitHook({ callerWorkspaceId: ctx.callerId, allowedWorkspaces: new Set(ctx.allowedWorkspaces), tool, query: query.slice(0, 1000), sessionIds });
+  } catch (err) {
+    logError({ source: 'main', type: 'search-hit-hook', level: 'warn', message: String(err), workspaceId: ctx.callerId });
+  }
+}
+
+/** Fleet-wide standing rule, delivered as the MCP initialize `instructions`
+ *  (Claude Code injects it as a first-turn system reminder; 2,048-char cap). */
+export const STANDING_RULE =
+  'Fleet knowledge: when you settle a decision, find a root cause, learn a non-obvious fact or gotcha, ' +
+  'or rule something out (and why), call record_claim with one short self-contained sentence or two, ' +
+  '1-3 topic slugs, and refs (issue/PR/file). Before re-investigating something, call search_claims — ' +
+  'another session may already know. Never put secrets in claims; use visibility "private" for ' +
+  'workspace-specific details.';
 
 /** Injected by ipc.ts: list / read workspace skills (workspaceSkills.ts). Scope
  *  (automations role → every exposed workspace; else the allowed read set) and
@@ -1062,7 +1116,7 @@ export const TOOLS: Tool[] = [
   {
     name: 'search_transcripts',
     description:
-      'Semantic search over past transcript content in your allowed workspaces. Embeds the query and returns the most similar turns (and session summaries) by meaning. Args: query (required), limit (default 10, max 50), workspace_id (narrows), kind ("turn"|"summary"). If a result leads you to the information you needed, call mark_useful with its sessionId.',
+      'Semantic search over past transcript content in your allowed workspaces. Embeds the query and returns the most similar turns (and session summaries) by meaning. Args: query (required), limit (default 10, max 50), workspace_id (narrows), kind ("turn"|"summary"). For settled knowledge (decisions, root causes, gotchas), prefer search_claims.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1086,6 +1140,7 @@ export const TOOLS: Tool[] = [
       const hits = await searchTranscripts(a.query, allowed, queryEmbedder, { limit, kind }, _db);
       // Record one search-impression per distinct result session (#207).
       noteSearchResults(ctx.callerId, a.query, (hits as Array<{ sessionId?: string }>).map((h) => h.sessionId ?? '').filter(Boolean));
+      emitSearchHits(ctx, 'search_transcripts', a.query, sessionIdsFromTranscriptHits(hits));
       return hits;
     },
   },
@@ -1235,6 +1290,7 @@ export const TOOLS: Tool[] = [
             `result too large (${json.length} bytes > ${MAX_QUERY_BYTES}); add LIMIT or aggregate server-side`
           );
         }
+        emitSearchHits(ctx, 'query', a.sql, sessionIdsFromQueryRows(capped));
         return capped;
       } finally {
         snap.close();
@@ -1745,6 +1801,85 @@ export const TOOLS: Tool[] = [
       if (!inboxHandlers) throw new Error('the inbox is unavailable');
       return inboxHandlers.list(ctx.callerId, a);
     }
+  },
+  {
+    name: 'record_claim',
+    description:
+      'Record one durable piece of fleet knowledge: a decision, root cause, non-obvious fact, gotcha, or a rejected option with its reason. ' +
+      'Args: text (required, <=600 chars, self-contained), kind (required: decision|fact|gotcha|root-cause|rejected), ' +
+      'topics (required, 1-3 slugs like "mcp-query"), refs (optional issue/PR/file strings), visibility ("fleet" default | "private"), ' +
+      'supersedes (optional claim id this replaces; a fleet claim can only be superseded by a fleet claim), capture_run (only when a capture prompt gives you one). ' +
+      'Near-duplicates of the same kind and visibility are merged. Never include secrets. Returns { id, deduped, suggestedTopics }.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string' }, kind: { type: 'string', enum: ['decision', 'fact', 'gotcha', 'root-cause', 'rejected'] },
+        topics: { type: 'array', items: { type: 'string' } }, refs: { type: 'array', items: { type: 'string' } },
+        visibility: { type: 'string', enum: ['fleet', 'private'] }, supersedes: { type: 'string' }, capture_run: { type: 'string' }
+      },
+      required: ['text', 'kind', 'topics']
+    },
+    run: (_db, a, ctx) => claims().record(ctx.callerId, a)
+  },
+  {
+    name: 'search_claims',
+    description:
+      'Search fleet knowledge claims (decisions, root causes, gotchas, rejected options) by keyword and meaning. ' +
+      'Args: query (required), topics (optional slugs), kind (optional), include_superseded (default false), limit (default 10, max 50). ' +
+      'Returns claims with provenance (workspace, session when known, date) and supersededBy links.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string' }, topics: { type: 'array', items: { type: 'string' } },
+        kind: { type: 'string', enum: ['decision', 'fact', 'gotcha', 'root-cause', 'rejected'] },
+        include_superseded: { type: 'boolean' }, limit: { type: 'number' }
+      },
+      required: ['query']
+    },
+    run: (_db, a, ctx) => {
+      const api = claims(); // throws synchronously when unwired (contract test)
+      return api.search(ctx.callerId, a).then((r) => {
+        emitSearchHits(ctx, 'search_claims', typeof a.query === 'string' ? a.query : '', sessionIdsFromClaimResults(r));
+        return r;
+      });
+    }
+  },
+  {
+    name: 'retract_claim',
+    description: 'Retract a claim your workspace recorded that turned out to be wrong. Args: id (required), reason (required). To replace a claim with a corrected one, use record_claim with supersedes instead.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' }, reason: { type: 'string' } }, required: ['id', 'reason'] },
+    run: (_db, a, ctx) => claims().retract(ctx.callerId, a)
+  },
+  {
+    name: 'get_capture_settings',
+    description:
+      "Your workspace's background knowledge-capture settings with defaults filled in, plus the app-wide switch, the daily capture cap and how many captures ran today. " +
+      'Fields: enabled, onSearchHit, searchTopSessions (1-5), recaptureAfterTurns (10-500), contextBands (0-4 fractions, 0.5-0.95), ' +
+      'turnsEvery (0 = off, or 10-500), model ("session" or a claude model id), transcriptRetentionDays (30-3650), captureVisibility (fleet|private). No args.',
+    inputSchema: { type: 'object', properties: {} },
+    run: (_db, _a, ctx) => captureSettingsApi().get(ctx.callerId)
+  },
+  {
+    name: 'set_capture_settings',
+    description:
+      "Change your own workspace's knowledge-capture settings. Pass only the fields to change, plus reason (required). Values are clamped to their ranges; unknown fields are rejected. " +
+      'Changes that lower cost or are cost-neutral (including longer transcriptRetentionDays and captureVisibility fleet → private) apply immediately and the user is notified. ' +
+      'Changes that raise cost (turning capture or search-hit capture on, more sessions per search, recapturing sooner, adding or lowering a context band, ' +
+      'turning turnsEvery on or lowering it, a model other than "session"), captureVisibility private → fleet, or a shorter transcriptRetentionDays ' +
+      'become a proposal the user approves, unless this workspace is trusted. ' +
+      'Returns { status: applied|proposed|unchanged, settings?, needsApproval?, proposalId?, changes, reasons }.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        enabled: { type: 'boolean' }, onSearchHit: { type: 'boolean' },
+        searchTopSessions: { type: 'number' }, recaptureAfterTurns: { type: 'number' },
+        contextBands: { type: 'array', items: { type: 'number' } }, turnsEvery: { type: 'number' },
+        model: { type: 'string' }, transcriptRetentionDays: { type: 'number' },
+        captureVisibility: { type: 'string', enum: ['fleet', 'private'] }, reason: { type: 'string' }
+      },
+      required: ['reason']
+    },
+    run: (_db, a, ctx) => captureSettingsApi().set(ctx.callerId, a)
   },
   {
     name: 'get_config',

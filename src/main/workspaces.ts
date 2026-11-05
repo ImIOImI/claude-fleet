@@ -23,6 +23,7 @@ import type { WorkspaceLauncher } from './localLauncher.js';
 import type { TerminalRenderer } from './config.js';
 import type { InboxConfig } from '../preload/inboxTypes.js';
 import { sanitizeInboxConfig } from './inbox/inboxPolicy.js';
+import { normalizeCaptureSettings, type CaptureSettings } from '../preload/captureSettings.js';
 import { normalizeHostUrl, safeLogin } from './remoteUrl.js';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted' | 'unreachable';
@@ -219,6 +220,10 @@ export interface WorkspaceSpec {
   inbox?: InboxConfig;
   /** 'automations' = the one workspace behind the Inbox chip (#407 Phase 5b): fleet-wide automation read + trusted. */
   role?: 'automations';
+  /** Knowledge capture settings (#483 §5a). Absent ⇒ all defaults
+   *  (preload/captureSettings.ts). Clamped on read and write; a legacy
+   *  boolean `false` reads as `{ ...defaults, enabled: false }`. */
+  knowledgeCapture?: CaptureSettings;
   /** kind 'remote' only. */
   remote?: RemoteBookmark;
   createdAt: number;
@@ -384,6 +389,10 @@ export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec |
       accessibility: sanitizeAccessibility(parsed.accessibility),
       inbox: sanitizeInboxConfig(parsed.inbox),
       role: parsed.role === 'automations' ? 'automations' : undefined,
+      ...(() => {
+        const kc = (parsed as { knowledgeCapture?: unknown }).knowledgeCapture;
+        return kc === undefined || kc === null || kc === true ? {} : { knowledgeCapture: normalizeCaptureSettings(kc) };
+      })(),
       createdAt: parsed.createdAt ?? Date.now(),
       lastUsedAt: parsed.lastUsedAt ?? parsed.createdAt ?? Date.now()
     };
@@ -469,7 +478,13 @@ export async function writeWorkspaceManifest(spec: WorkspaceSpec): Promise<void>
   await mkdir(dirname(manifestPath), { recursive: true });
   // Atomic replace: readers (e.g. the 30 s automations-role refresh) must never
   // see a truncated manifest, which would drop the workspace from the list.
-  await writeFileAtomic(manifestPath, JSON.stringify(spec, null, 2) + '\n');
+  // #483 §5a: clamp capture settings on write too (an MCP or IPC caller can
+  // hand us anything). `true` (legacy) and undefined both mean "defaults".
+  const kc = (spec as { knowledgeCapture?: unknown }).knowledgeCapture;
+  const toWrite: WorkspaceSpec = kc === undefined || kc === null || kc === true
+    ? { ...spec, knowledgeCapture: undefined }
+    : { ...spec, knowledgeCapture: normalizeCaptureSettings(kc) };
+  await writeFileAtomic(manifestPath, JSON.stringify(toWrite, null, 2) + '\n');
 }
 
 export async function touchWorkspaceUsed(id: string): Promise<void> {

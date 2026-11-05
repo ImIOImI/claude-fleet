@@ -23,7 +23,12 @@ interface Shape {
 
 function sqliteShapes(raw: Database.Database): Record<string, Shape> {
   const out: Record<string, Shape> = {};
-  const tables = raw.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`).all() as { name: string }[];
+  const all = raw.prepare(`SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`).all() as { name: string; sql: string | null }[];
+  // An FTS5 virtual table (inbox claims_fts) is compared by its declared
+  // columns; its shadow tables are SQLite internals with no Postgres twin.
+  const fts5 = all.filter((t) => /^CREATE VIRTUAL TABLE .* USING fts5/i.test(t.sql ?? '')).map((t) => t.name);
+  const shadow = new Set(fts5.flatMap((v) => ['data', 'idx', 'content', 'docsize', 'config'].map((x) => `${v}_${x}`)));
+  const tables = all.filter((t) => !shadow.has(t.name));
   for (const { name } of tables) {
     const cols = raw.prepare(`PRAGMA table_info(${name})`).all() as { name: string; notnull: number; pk: number }[];
     const pk = cols.filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name);

@@ -48,6 +48,7 @@
 !src/main/inbox/inboxDb.ts
 !src/main/inbox/inboxCore.ts
 !src/preload/inboxTypes.ts
+!src/preload/captureSettings.ts
 
 # Even within broker/, drop things the binary doesn't need:
 broker/**/*_test.go

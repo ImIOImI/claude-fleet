@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import { defaultCaptureSettings } from '../../preload/captureSettings.js';
 import { InboxStore } from '../inbox/inboxDb.js';
 import { AutomationStore } from './automationStore.js';
 import { ProposalStore } from './proposalStore.js';
@@ -138,6 +139,44 @@ describe('decision guard', () => {
     expect(String((results.find((r) => r.status === 'rejected') as PromiseRejectedResult).reason)).toMatch(/changed/);
     expect((await automations.byName('log-watch'))!.version).toBe(2);
     expect((await automations.versions((await automations.byName('log-watch'))!.id)).map((v) => v.version)).toEqual([2, 1]);
+  });
+});
+
+describe('capture-settings proposals (#483 §5a)', () => {
+  const d = defaultCaptureSettings();
+  const change = {
+    workspaceId: 'W2', before: d, after: { ...d, turnsEvery: 30 },
+    changes: ['turnsEvery: off → 30'], reasons: ['turns periodic capture on (every 30 turns)']
+  };
+  it('creates a pending proposal carrying the change, notifies, and counts as one pending', async () => {
+    const { svc, notes } = await setup();
+    const p = await svc.proposeCaptureSettings('W2', change, 'long sessions');
+    expect(p).toMatchObject({ kind: 'capture-settings', status: 'pending', items: [], captureSettings: change, rationale: 'long sessions' });
+    expect(notes[0]).toMatchObject({ kind: 'proposal', title: 'webex-triage proposes knowledge-capture changes: turnsEvery: off → 30' });
+    expect(await svc.pendingCount()).toBe(1);
+    expect(await svc.mcp.get('W2', { id: p.id })).toMatchObject({ status: 'pending', captureSettings: change });
+  });
+  it('a newer one supersedes the older pending one from the same workspace', async () => {
+    const { svc } = await setup();
+    await svc.proposeCaptureSettings('W2', change, null);
+    await svc.proposeCaptureSettings('W2', change, null);
+    expect((await svc.list()).map((p) => p.status).sort()).toEqual(['pending', 'superseded']);
+  });
+  it('approve applies through the injected applier; reject declines without applying', async () => {
+    const { svc } = await setup();
+    const applied: unknown[] = [];
+    svc.setCaptureSettingsApplier(async (ws, c, id) => { applied.push([ws, c, id]); });
+    const p = await svc.proposeCaptureSettings('W2', change, null);
+    expect((await svc.approve(p.id)).status).toBe('approved');
+    expect(applied).toEqual([['W2', change, p.id]]);
+    const q = await svc.proposeCaptureSettings('W2', change, null);
+    expect((await svc.reject(q.id, 'no')).status).toBe('rejected');
+    expect(applied).toHaveLength(1);
+  });
+  it('approve fails clearly when no applier is wired', async () => {
+    const { svc } = await setup();
+    const p = await svc.proposeCaptureSettings('W2', change, null);
+    await expect(svc.approve(p.id)).rejects.toThrow(/knowledge capture settings are unavailable/);
   });
 });
 

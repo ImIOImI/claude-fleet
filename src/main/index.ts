@@ -1,20 +1,20 @@
 import { app, BrowserWindow, dialog, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
-import { registerIpc, stopRemoteBackend } from './ipc.js';
-import { openDb, closeDb, deleteEmbeddingsForOtherModels, listSessionIds, recordError, stateKysely } from './db.js';
+import { registerIpc, invalidateWorkspaceList, stopRemoteBackend } from './ipc.js';
+import { openDb, closeDb, deleteEmbeddingsForOtherModels, listSessionIds, recordError, stateKysely, sessionCaptureSignals, isAutomationSession } from './db.js';
 import { initPerf, shutdownPerf, perfSpan, perfSpanAsync } from './perf.js';
 import { PerfStore } from './perfStore.js';
 import { resolvePerfConfig } from './perfConfig.js';
-import { getPerfTelemetry, getPerfOtlp } from './config.js';
+import { getPerfTelemetry, getPerfOtlp, getKnowledgeCapture, getKnowledgeCaptureDailyCap } from './config.js';
 import { instrumentIpcHandle } from './perfIpc.js';
 import { EMBED_MODEL_ID } from './vectors.js';
-import { startMcpServer, stopMcpServer, ensureWorkspaceSocket, setMcpStatusListener, setQueryEmbedder } from './mcpServer.js';
+import { startMcpServer, stopMcpServer, ensureWorkspaceSocket, setMcpStatusListener, setQueryEmbedder, setClaimHandlers, setCaptureSettingsHandlers, setSearchHitHook, TOOLS } from './mcpServer.js';
 import { broadcastMcpStatus } from './mcpStatusBroadcast.js';
 import { ensureBuiltinLoadouts } from './loadouts.js';
 import { JsonlWatcher } from './jsonlWatcher.js';
 import { PeerStatusWatcher } from './peerStatusWatcher.js';
 import { broadcastSessionStatus } from './sessionStatusBroadcast.js';
-import { listWorkspaceManifests, manifestInvariant } from './workspaces.js';
+import { listWorkspaceManifests, manifestInvariant, readWorkspaceManifest, writeWorkspaceManifest } from './workspaces.js';
 import { wslLocalProjectsDir, wslLocalSessionsDir } from './localLauncher.js';
 import { encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir } from './paths.js';
 import { installMainProcessHandlers, getLogPath, setErrorSink, logError } from './errorLog.js';
@@ -35,6 +35,18 @@ import { hardwareAccelDisabledAtStartup } from './config.js';
 import { setWorkspaceDefault } from './mirrorPolicy.js';
 import { makeEmbedder } from './embeddings.js';
 import { indexSessionTurns, indexSessionSummaries } from './transcriptIndex.js';
+import { ClaimStore } from './claims/claimStore.js';
+import { CaptureRunStore, startOfLocalDay } from './claims/captureRunStore.js';
+import { CaptureSettingsLogStore } from './claims/captureSettingsLog.js';
+import { createCaptureSettingsService } from './claims/captureSettingsService.js';
+import { onCaptureSettingsChanged } from './claims/captureSettingsEvents.js';
+import { ClaimService } from './claims/claimService.js';
+import { CaptureScheduler } from './claims/captureScheduler.js';
+import { loadCaptureForks } from './claims/captureForks.js';
+import { killLocalCaptures, resolveCaptureTarget, runCapture } from './claims/captureExec.js';
+import { ensureContainerRetention } from './claims/retention.js';
+import { effectiveCaptureSettings } from '../preload/captureSettings.js';
+import { randomUUID } from 'node:crypto';
 
 // Mock mode is for UI iteration without Docker; no real JSONLs exist, so the
 // watcher and DB stay dormant.
@@ -44,6 +56,11 @@ const jsonlWatcher = isMock ? null : new JsonlWatcher();
 const peerStatusWatcher = isMock ? null : new PeerStatusWatcher();
 // Authoritative inbox store (#407); opened at ready, closed on quit.
 let inboxStore: InboxStore | null = null;
+// Knowledge claims (#483); assigned once the inbox (and its Kysely handle) is
+// open. Reused by the background capture scheduler (Task 9).
+let captureRuns: CaptureRunStore | null = null;
+let claimService: ClaimService | null = null;
+let captureScheduler: CaptureScheduler | null = null;
 // The Postgres store's shared pool when config.json chooses it.
 let pgStores: PgStores | null = null;
 let presence: ReturnType<typeof startPresence> | null = null;
@@ -224,6 +241,27 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     const embed = makeEmbedder(join(app.getPath('userData'), 'models'));
     setQueryEmbedder(embed);
 
+    // Knowledge claims (#483): record_claim/search_claims/retract_claim MCP
+    // tools, backed by the inbox's Kysely handle. captureRuns/claimService are
+    // module-scoped so the background capture scheduler (Task 9) can reuse them.
+    if (inboxStore) {
+      const claimStore = new ClaimStore(inboxStore.kysely, inboxStore.dialect);
+      captureRuns = new CaptureRunStore(inboxStore.kysely);
+      claimService = new ClaimService({
+        claims: claimStore, runs: captureRuns, embed,
+        workspaceName: async (id) => (await readWorkspaceManifest(id))?.name ?? null
+      });
+      setClaimHandlers({
+        record: (c, a) => claimService!.record(c, a),
+        search: (c, a) => claimService!.search(c, a),
+        retract: (c, a) => claimService!.retract(c, a)
+      });
+      void captureRuns.failRunning(Date.now(), 'interrupted by app restart').catch((e) =>
+        logError({ source: 'main', level: 'warn', type: 'capture-fail-running', message: String(e) }));
+      void claimService.backfillVectors().catch((e) =>
+        logError({ source: 'main', level: 'warn', type: 'claims-backfill', message: String(e) }));
+    }
+
     // Index new turns/summaries as they land. Fire-and-forget: indexing must
     // never block ingest, and a failure degrades search silently (logged).
     jsonlWatcher.on('ingest', ({ sessionId }) => {
@@ -263,12 +301,59 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
           workspaceId: m.id
         })
       );
+      ensureContainerRetention(m.id, effectiveCaptureSettings(m).transcriptRetentionDays).catch((e) =>
+        logError({ source: 'main', type: 'claude-retention', level: 'warn', message: String(e), workspaceId: m.id }));
     }
+    // #483 §5a: re-apply container retention when a workspace's setting changes
+    // (form save, MCP set_capture_settings, or an approved proposal). Local
+    // workspaces pick it up on their next launch.
+    onCaptureSettingsChanged((e) => {
+      if (e.before.transcriptRetentionDays === e.after.transcriptRetentionDays) return;
+      void readWorkspaceManifest(e.workspaceId)
+        .then((m) => (m?.kind === 'container' ? ensureContainerRetention(m.id, e.after.transcriptRetentionDays) : false))
+        .catch((err) => logError({ source: 'main', type: 'claude-retention', level: 'warn', message: String(err), workspaceId: e.workspaceId }));
+    });
     // Seed each workspace's durable-mirror default from its manifest before the
     // watcher starts ingesting, so the very first lines are mirrored per the
     // saved setting — not dependent on the renderer's later workspace:list poll.
     for (const m of manifests) setWorkspaceDefault(m.id, m.mirror.default);
     await perfSpanAsync('claude_fleet.boot.jsonl_watcher_start', () => jsonlWatcher.start(manifests.map((m) => m.id)));
+    // Knowledge capture (#483 §5): background capture forks, triggered by
+    // context bands on ingest and by search hits from the MCP search tools.
+    if (inboxStore && captureRuns && claimService) {
+      const runs = captureRuns;
+      const claimsSvc = claimService;
+      // Never let a store failure block registerIpc/createWindow: without the
+      // seed, old fork transcripts merely aren't recognised as forks.
+      try {
+        loadCaptureForks(await runs.forkSessionIds());
+      } catch (e) {
+        logError({ source: 'main', level: 'warn', type: 'capture-fork-seed', message: String(e) });
+      }
+      const scheduler = new CaptureScheduler({
+        runs,
+        signals: (id) => sessionCaptureSignals(id),
+        isAutomation: (id) => isAutomationSession(id),
+        globalEnabled: () => getKnowledgeCapture(),
+        settings: async (ws) => {
+          const m = await readWorkspaceManifest(ws);
+          return m ? effectiveCaptureSettings(m) : null;
+        },
+        dailyCap: () => getKnowledgeCaptureDailyCap(),
+        // Null for a container that isn't running, before admit: no daily-cap slot.
+        target: (ws) => resolveCaptureTarget(ws),
+        topTopics: async (ws) => [...new Set((await claimsSvc.search(ws, { query: 'fleet', limit: 20 })).results.flatMap((r) => r.topics))].slice(0, 15),
+        exec: (t, args, timeoutMs) => runCapture(t, args, timeoutMs),
+        fleetToolNames: TOOLS.map((t) => t.name),
+        killInFlight: () => { killLocalCaptures(); },
+        newUuid: () => randomUUID(),
+        now: () => Date.now(),
+        log: (message, extra) => logError({ source: 'main', level: 'info', type: 'knowledge-capture', message, extra })
+      });
+      captureScheduler = scheduler;
+      jsonlWatcher.on('ingest', (e: { workspaceId: string; sessionId: string }) => scheduler.onIngest(e));
+      setSearchHitHook((e) => scheduler.onSearchHit(e));
+    }
     // Local-backend workspaces write to the host's real ~/.claude, not the
     // per-workspace state dir — register those host project dirs so their
     // (and their subagents') token spend is ingested (#plan-usage).
@@ -345,6 +430,41 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     const inboxHost = registerInboxIpc(inboxStore, notifySvc ?? undefined, auto ? (r, c) => auto!.automations.attribution(r, c) : undefined);
     auto?.setInboxSink(inboxHost);
   }
+  // Knowledge capture settings (#483 §5a): get/set_capture_settings MCP tools,
+  // capture-settings proposals, and the change log for form edits.
+  if (inboxStore && auto) {
+    const settingsLog = new CaptureSettingsLogStore(inboxStore.kysely);
+    const runsForCount = captureRuns ?? new CaptureRunStore(inboxStore.kysely);
+    const proposals = auto.proposals;
+    const captureSettings = createCaptureSettingsService({
+      readManifest: (id) => readWorkspaceManifest(id),
+      writeManifest: (spec) => writeWorkspaceManifest(spec),
+      trusted: async (id) => {
+        const m = await readWorkspaceManifest(id);
+        return m?.kind === 'container' && (m.inbox?.trusted === true || m.role === 'automations');
+      },
+      log: settingsLog,
+      propose: (callerId, change, reason) => proposals.proposeCaptureSettings(callerId, change, reason),
+      notify: (n) => {
+        if (!notifySvc) return;
+        void notifySvc.request(n).catch((e) => logError({ source: 'main', type: 'notify-request', level: 'warn', message: String(e) }));
+      },
+      globalEnabled: () => getKnowledgeCapture(),
+      dailyCap: () => getKnowledgeCaptureDailyCap(),
+      capturesToday: () => runsForCount.countSince(startOfLocalDay(Date.now())),
+      workspaceName: async (id) => (await readWorkspaceManifest(id))?.name ?? id,
+      now: () => Date.now(),
+      invalidateWorkspaceList
+    });
+    proposals.setCaptureSettingsApplier((ws, change, proposalId) => captureSettings.applyApproved(ws, change, proposalId));
+    setCaptureSettingsHandlers({ get: (c) => captureSettings.get(c), set: (c, a) => captureSettings.set(c, a) });
+    onCaptureSettingsChanged((e) => {
+      if (e.source !== 'form') return; // MCP/proposal writes log themselves (with their reason)
+      void settingsLog.append({
+        workspaceId: e.workspaceId, actor: 'user', before: e.before, after: e.after, reason: null, applied: true, proposalId: null, now: Date.now()
+      }).catch((err) => logError({ source: 'main', type: 'capture-settings-log', level: 'warn', message: String(err), workspaceId: e.workspaceId }));
+    });
+  }
   registerPresenceIpc(ipcMain, { get: getKeepRunningInTray, set: setKeepRunningInTray });
   mainWindow = createWindow();
   // Desktop presence (#407 Phase 2b): tray, taskbar overlay, badge, attention.
@@ -369,6 +489,10 @@ app.on('before-quit', async () => {
   // inbox.db (#457), so nothing fires against a destroyed driver.
   notifySvc?.stop();
   notifySvc = null;
+  setCaptureSettingsHandlers(null);
+  setSearchHitHook(null);
+  captureScheduler?.stop();
+  captureScheduler = null;
   auto?.stop();
   auto = null;
   stopRemoteBackend();

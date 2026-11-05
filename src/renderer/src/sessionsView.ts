@@ -74,6 +74,15 @@ export function splitHeadless<T extends { headless?: boolean }>(
   return { headless, rest };
 }
 
+/** Pull knowledge-capture forks (#483) out of the Recent rows into their own
+ *  collapsed group, like automation runs. */
+export function splitCapture<T extends { capture?: boolean }>(rows: readonly T[]): { capture: T[]; rest: T[] } {
+  const capture: T[] = [];
+  const rest: T[] = [];
+  for (const s of rows) (s.capture ? capture : rest).push(s);
+  return { capture, rest };
+}
+
 /** Order the Open group by tab-strip position (workspace order, then tab index
  *  within it) instead of last-active. Activity then never moves a row — only
  *  opening, closing or dragging a tab does — so the current session stays put

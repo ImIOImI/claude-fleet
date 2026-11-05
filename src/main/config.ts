@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { assertValidWorkspaceId } from './paths.js';
 import { toggleFavorite } from './ociCore.js';
+import { clampDailyCap } from '../preload/captureSettings.js';
 import { ConfigJsonError, parseStoreConfig, type StoreConfig } from './store/storeConfig.js';
 
 /** Which plan the usage bar measures spend against. `custom` uses the
@@ -108,6 +109,13 @@ interface AppConfig {
   /** Hand-edited only: an org's own GitHub OAuth app. Env
    *  CLAUDE_FLEET_GITHUB_CLIENT_ID wins (identity/clientId.ts). */
   identity?: { github?: { clientId?: string } };
+  /** Background knowledge capture, global switch (#483). Absent ⇒ default ON;
+   *  a per-workspace `WorkspaceSpec.knowledgeCapture` flag can still disable
+   *  capture for one workspace even while this stays on. */
+  knowledgeCapture?: boolean;
+  /** Knowledge capture (#483 §5a): app-wide cap on capture runs started per
+   *  local calendar day. Absent ⇒ 40; clamped to 0–500; 0 ⇒ no captures. */
+  knowledgeCaptureDailyCap?: number;
   /** Hand-edited only: the store choice, kept verbatim and validated by
    *  getStoreConfig (store/storeConfig.ts). Absent ⇒ SQLite. */
   store?: unknown;
@@ -228,6 +236,9 @@ async function read(): Promise<AppConfig> {
       perfOtlp: parsePerfOtlp(parsed.perfOtlp),
       keepRunningInTray: typeof parsed.keepRunningInTray === 'boolean' ? parsed.keepRunningInTray : undefined,
       identity: parseIdentityConfig(parsed.identity),
+      knowledgeCapture: typeof parsed.knowledgeCapture === 'boolean' ? parsed.knowledgeCapture : undefined,
+      knowledgeCaptureDailyCap:
+        typeof parsed.knowledgeCaptureDailyCap === 'number' ? clampDailyCap(parsed.knowledgeCaptureDailyCap) : undefined,
       store: parsed.store,
       ports: parsePortsConfig(parsed.ports)
     };
@@ -424,6 +435,22 @@ export async function getPerfTelemetry(): Promise<boolean> {
 export async function setPerfTelemetry(enabled: boolean): Promise<void> {
   const cfg = await read();
   await write({ ...cfg, perfTelemetry: enabled });
+}
+
+/** Background knowledge capture (#483) — default on; only an explicit false disables it. */
+export async function getKnowledgeCapture(): Promise<boolean> {
+  return (await read()).knowledgeCapture !== false;
+}
+export async function setKnowledgeCapture(enabled: boolean): Promise<void> {
+  const cfg = await read(); await write({ ...cfg, knowledgeCapture: enabled });
+}
+
+/** App-wide daily cap on capture runs (#483 §5a). Default 40; 0 disables capture. */
+export async function getKnowledgeCaptureDailyCap(): Promise<number> {
+  return clampDailyCap((await read()).knowledgeCaptureDailyCap);
+}
+export async function setKnowledgeCaptureDailyCap(n: number): Promise<void> {
+  const cfg = await read(); await write({ ...cfg, knowledgeCaptureDailyCap: clampDailyCap(n) });
 }
 
 /** OTLP export setting (endpoint kept even while disabled — the Settings UI

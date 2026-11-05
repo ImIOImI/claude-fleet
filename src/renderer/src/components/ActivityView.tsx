@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { Downtime, NotificationRow, NotifyRule, Proposal } from '../../../preload';
 import { ProposalCard } from './ProposalCard';
+import { CaptureSettingsProposalCard } from './CaptureSettingsProposalCard';
 import { heldReasonLabel, hhmm } from '../notifyView';
 import { relativeAgo, sourceLabel } from '../inboxView';
 import { BellPopover } from './BellPopover';
@@ -42,6 +43,9 @@ export function ActivityView({ names, onOpenTodo, onOpenWorkspace, canDiscuss = 
   const pendingProposals = proposals.filter((p) => p.status === 'pending');
   const decided = proposals.filter((p) => p.status !== 'pending' && p.status !== 'superseded').slice(0, 10);
   const FILTERS: Array<[Filter, string]> = [['all', 'Everything'], ['approvals', `Needs approval${pendingProposals.length ? ` · ${pendingProposals.length}` : ''}`], ['delivered', 'Notifications'], ['held', 'Held back']];
+  const card = (p: Proposal) => p.kind === 'capture-settings'
+    ? <CaptureSettingsProposalCard key={p.id} proposal={p} names={names} />
+    : <ProposalCard key={p.id} proposal={p} names={names} canDiscuss={canDiscuss} onDiscussed={onDiscussed} onWatch={onWatch} automationsWsId={automationsWsId} />;
 
   return (
     <div className="ib-single">
@@ -56,14 +60,14 @@ export function ActivityView({ names, onOpenTodo, onOpenWorkspace, canDiscuss = 
         {(filter === 'all' || filter === 'approvals') && pendingProposals.length > 0 && (
           <>
             <div className="session-group-label">Needs approval<span className="session-group-line" /></div>
-            {pendingProposals.map((p) => <ProposalCard key={p.id} proposal={p} names={names} canDiscuss={canDiscuss} onDiscussed={onDiscussed} onWatch={onWatch} automationsWsId={automationsWsId} />)}
+            {pendingProposals.map(card)}
           </>
         )}
         {filter === 'approvals' && (
           <>
             {pendingProposals.length === 0 && <div className="ib-empty">Nothing waiting for approval. Workspaces can propose automations; they land here.</div>}
             {decided.length > 0 && <div className="session-group-label">Decided<span className="session-group-line" /></div>}
-            {decided.map((p) => <ProposalCard key={p.id} proposal={p} names={names} canDiscuss={canDiscuss} onDiscussed={onDiscussed} onWatch={onWatch} automationsWsId={automationsWsId} />)}
+            {decided.map(card)}
           </>
         )}
         {filter === 'all' && pendingProposals.length > 0 && <div className="session-group-label">Notifications<span className="session-group-line" /></div>}
