@@ -20,6 +20,10 @@ test "$(docker exec "$cid" id -u)" = 1000
 docker exec "$cid" sh -c 'test -s /etc/ssl/certs/rds-global-bundle.pem && grep -q "BEGIN CERTIFICATE" /etc/ssl/certs/rds-global-bundle.pem'
 docker exec "$cid" sh -c 'test -s /usr/local/lib/fleet-host/mcp-bridge.cjs && grep -q CLAUDE_FLEET_MCP_UNIX /usr/local/lib/fleet-host/mcp-bridge.cjs'
 test "$(docker exec "$cid" stat -c '%a %U' /run/fleet)" = '700 fleet'
+# fleet-host's fresh-step argv shape parses on the image's pinned claude: `--mcp-config=` takes one value and
+# `--` keeps a dash-led prompt from being read as an option. A missing config file fails before any API call.
+docker exec "$cid" sh -c 'claude -p --allowedTools a,b --mcp-config=/nonexistent/mcp.json --session-id 0b7e6c1e-1f6a-4c55-9c39-6f1f8d6c2a11 -- -x </dev/null 2>&1; true' \
+  | grep -q 'MCP config file not found: /nonexistent/mcp.json$'
 docker exec "$cid" fleet-host init | grep -q '"workspaceId"'
 test "$(docker exec "$cid" sh -c 'fleet-host bootstrap >/dev/null; echo rc=$?')" = rc=2
 docker exec "$cid" sh -c 'fleet-host migrate; true' | grep -q 'has no db: block'

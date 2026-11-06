@@ -14,6 +14,7 @@ import { pgPoolConfig } from '../main/store/storeConfig.js';
 import { openHostDbRetrying, startDbHealth, type DbHealth, type HostDbHandle } from './hostDb.js';
 import { resolveHostWorkspaceId, resolveWorkspaceId } from './hostState.js';
 import { startHolder, type Holder } from './holder.js';
+import { hostMcpArgs } from './hostMcp.js';
 import { LEASE_RENEW_MS, LEASE_TTL_MS, LeaseManager, memoryLeaseStore, type LeaseStore, type LostReason } from './lease.js';
 import { postgresLeaseStore } from './pgLease.js';
 import { createLogger, type LogSink } from './log.js';
@@ -58,6 +59,8 @@ export interface RunHostOptions {
   extraStoreTracks?: readonly PgTrack[];
   /** GitHub API base for the App credential helper (tests). */
   githubApiBase?: string;
+  /** First retry delay after a failed MCP socket start (tests). */
+  mcpRetryMs?: number;
 }
 
 export interface RunningHost {
@@ -91,6 +94,7 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   let config!: HostConfig;
   let auth!: AuthContext;
   let host: HostServer | undefined;
+  let holderP: Promise<Holder | null> | null = null;
 
   const reloader = createReloader({
     path: env.configPath,
@@ -104,6 +108,8 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
         });
       }
       await host?.reverifyAll();
+      const h = holderP ? await holderP : null;
+      await h?.automations.reconcile(next.automations).catch((err: Error) => log.log('error', 'automation reconcile failed', { error: err.message }));
     },
     log
   });
@@ -131,7 +137,8 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   }
 
   const ops = opts.brokerOps ?? realBrokerOps(env.brokerSocket);
-  const hub = new AttachHub(ops, { hostPort: env.port, log });
+  const mcpArgs = hostMcpArgs(env.mcpSocket);
+  const hub = new AttachHub(ops, { hostPort: env.port, log, createArgs: config.db ? (a) => [...a, ...mcpArgs] : undefined });
   const events = new EventHub();
   const holderId = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
   // Set by bringUp(); with db the server listens before they exist.
@@ -194,7 +201,6 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     clearTimeout(timer);
   }
 
-  let holderP: Promise<Holder | null> | null = null;
   let stopping: Promise<void> | null = null;
   function shutdown(code: number): Promise<void> {
     stopping ??= (async () => {
@@ -261,7 +267,13 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
         onLost: () => m.markLost('superseded'),
         log,
         projectsDir: env.projectsDir,
-        extraTracks: opts.extraStoreTracks
+        extraTracks: opts.extraStoreTracks,
+        ops,
+        events,
+        workspace: () => ({ id, name: config.workspace.name }),
+        automations: () => config.automations,
+        mcp: { socketPath: env.mcpSocket, socketGroup: env.mcpSocketGroup },
+        mcpRetryMs: opts.mcpRetryMs
       }).catch((err: Error) => {
         log.log('error', 'holder start failed; giving up the lease', { error: err.message });
         m.markLost(isDbUnavailable(err) ? 'unreachable' : 'superseded');
