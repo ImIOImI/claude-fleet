@@ -41,6 +41,7 @@ export default defineConfig({
       'src/main/inbox/notifyStore.test.ts',
       'src/main/mcpReadSource.test.ts',
       'src/main/perfStore.test.ts',
+      'src/main/store/managedPostgres.pg.test.ts',
       'src/main/store/pgMigrate.test.ts',
       'src/main/store/pgQueryIsolation.test.ts',
       'src/main/store/pgStores.test.ts',
