@@ -75,6 +75,26 @@ jobs:
           rm -rf node_modules/cpu-features
           npx --no-install electron-builder install-app-deps --platform win32 --arch x64
 
+      # fleet-embedder sidecar (embedder/README.md). The toolchain comes from
+      # embedder/rust-toolchain.toml; on Linux, ort's build-time onnxruntime
+      # download needs OpenSSL headers. The binary lands in embedder/bin/,
+      # which electron-builder ships as resources/embedder/.
+      - name: Install OpenSSL headers (fleet-embedder build)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: embedder
+
+      - name: Build fleet-embedder
+        shell: bash
+        run: |
+          cd embedder
+          cargo build --release --locked
+          exe=fleet-embedder; [ "$RUNNER_OS" = Windows ] && exe=fleet-embedder.exe
+          cp "target/release/$exe" bin/
+
       - name: Build installer
         # --publish never: the release job (below) owns publishing.
         # CSC_IDENTITY_AUTO_DISCOVERY=false: don't try to sign on macOS — these

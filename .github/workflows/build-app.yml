@@ -54,7 +54,7 @@ jobs:
           changed=$(git diff --name-only "$base" "$head")
           echo "changed files:"; echo "$changed" | sed 's/^/  /'
           # Mirrors the old on.pull_request.paths list.
-          if echo "$changed" | grep -qE '^(src/|tests/|playwright\.config\.ts$|package\.json$|package-lock\.json$|electron-builder\.yml$|electron\.vite\.config\.ts$|tsconfig\.host\.json$|vite\.host\.config\.ts$|vitest(\.pg)?\.config\.ts$|scripts/pg-test-server\.sh$|broker/|\.github/workflows/build-app\.yml$)'; then
+          if echo "$changed" | grep -qE '^(src/|tests/|playwright\.config\.ts$|package\.json$|package-lock\.json$|electron-builder\.yml$|electron\.vite\.config\.ts$|tsconfig\.host\.json$|vite\.host\.config\.ts$|vitest(\.pg)?\.config\.ts$|scripts/pg-test-server\.sh$|broker/|embedder/|\.github/workflows/build-app\.yml$)'; then
             echo "→ code paths touched; running the full pipeline"
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
@@ -118,6 +118,22 @@ jobs:
       - name: Build broker (fleet-host integration test)
         run: cd broker && CGO_ENABLED=0 go build -o "$RUNNER_TEMP/broker" ./cmd/broker
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: embedder
+
+      - name: fleet-embedder tests + build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+          cd embedder && cargo test --locked && cargo build --release --locked
+
+      # Model weights for the parity test (~35 MB); keyed by model + dtype.
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/hf-cache
+          key: hf-bge-small-en-v1.5-q8
+
       # Not strictly part of #311, but this workflow never typechecked either —
       # `npm run dist` builds without running tsc. One line, same job.
       - name: Typecheck
@@ -130,6 +146,14 @@ jobs:
         env:
           FLEET_BROKER_BIN: ${{ runner.temp }}/broker
         run: npm run test:unit
+
+      # Sidecar vs transformers.js on a fixed corpus (cosine >= 0.999).
+      - name: fleet-embedder parity
+        env:
+          CF_EMBED_PARITY: '1'
+          CF_HF_CACHE: ${{ runner.temp }}/hf-cache
+          FLEET_EMBEDDER_BIN: ${{ github.workspace }}/embedder/target/release/fleet-embedder
+        run: npx vitest run src/main/embedderParity.test.ts
 
       # pgQueryIsolation tests raise errors that echo a 60 MB value; the runner
       # dumps the service log at teardown, which took ~30 min.
@@ -210,6 +234,36 @@ jobs:
           npm ci --ignore-scripts
           rm -rf node_modules/cpu-features
           npx --no-install electron-builder install-app-deps --platform win32 --arch x64
+
+      # fleet-embedder sidecar (embedder/README.md). The toolchain comes from
+      # embedder/rust-toolchain.toml; on Linux, ort's build-time onnxruntime
+      # download needs OpenSSL headers. The binary lands in embedder/bin/,
+      # which electron-builder ships as resources/embedder/.
+      - name: Install OpenSSL headers (fleet-embedder build)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: embedder
+
+      - name: Build fleet-embedder
+        shell: bash
+        run: |
+          cd embedder
+          cargo build --release --locked
+          exe=fleet-embedder; [ "$RUNNER_OS" = Windows ] && exe=fleet-embedder.exe
+          cp "target/release/$exe" bin/
+
+      # `make embedder-win` fetches this to package Windows builds from WSL.
+      - name: Upload fleet-embedder (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleet-embedder-windows
+          path: embedder/bin/fleet-embedder.exe
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Build installer
         # --publish never: the release job (below) owns publishing.

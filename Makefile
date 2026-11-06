@@ -8,6 +8,7 @@
 # Other targets:
 #   make windows     # (re)build the installer (assumes deps already installed)
 #   make portable    # build a no-installer ZIP-able dir — does NOT need Wine
+#   make embedder-win  # fetch the CI-built fleet-embedder.exe (windows/portable run it)
 #   make help        # list all targets
 #
 # Why Wine is required: electron-builder packages the Windows app fine on Linux,
@@ -66,12 +67,29 @@ natives-win: ## Cross-prepare native modules (better-sqlite3, keytar, node-pty) 
 	npx --no-install electron-builder install-app-deps \
 		--platform win32 --arch $(WIN_ARCH)
 
+.PHONY: embedder-win
+embedder-win: ## Fetch the CI-built fleet-embedder.exe into embedder/bin (EMBEDDER_WIN=<path> to use a local file)
+	# Built natively on windows-latest by build-app.yml; cross-compiling with
+	# cargo-xwin needs the MSVC SDK. Missing binary = the app embeds in process.
+	@mkdir -p embedder/bin
+	@if [ -n "$(EMBEDDER_WIN)" ]; then \
+		cp "$(EMBEDDER_WIN)" embedder/bin/fleet-embedder.exe; \
+	else \
+		rm -rf embedder/bin/.download && \
+		run=$$(gh run list --workflow build-app.yml --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null) && \
+		[ -n "$$run" ] && \
+		gh run download "$$run" --name fleet-embedder-windows --dir embedder/bin/.download && \
+		mv embedder/bin/.download/fleet-embedder.exe embedder/bin/ && rm -rf embedder/bin/.download \
+		|| echo "⚠ fleet-embedder.exe not fetched (gh auth? no green main run?) — the installer will embed in process"; \
+	fi
+	@ls -l embedder/bin/fleet-embedder.exe 2>/dev/null || true
+
 .PHONY: build
 build: ## Compile main/preload/renderer bundles (electron-vite)
 	npm run build
 
 .PHONY: windows
-windows: build natives-win ## Build the unsigned Windows NSIS installer (needs Wine)
+windows: build natives-win embedder-win ## Build the unsigned Windows NSIS installer (needs Wine)
 	npx --no-install electron-builder --win --$(WIN_ARCH) \
 		--config electron-builder.yml \
 		--publish never
@@ -79,7 +97,7 @@ windows: build natives-win ## Build the unsigned Windows NSIS installer (needs W
 	@ls -lh $(DIST_DIR)/*.exe 2>/dev/null || echo "(no .exe — check log above)"
 
 .PHONY: portable
-portable: build natives-win ## Build the app dir WITHOUT an installer (no Wine needed)
+portable: build natives-win embedder-win ## Build the app dir WITHOUT an installer (no Wine needed)
 	npx --no-install electron-builder --win --$(WIN_ARCH) --dir \
 		--config electron-builder.yml \
 		-c.win.signAndEditExecutable=false \

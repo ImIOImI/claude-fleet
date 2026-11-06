@@ -27,6 +27,6 @@ cargo build --release      # target/release/fleet-embedder[.exe]
 cargo test
 ```
 
-`ort` statically links a prebuilt onnxruntime downloaded at build time, so the binary has no runtime library dependencies. On Linux that download needs OpenSSL headers (`libssl-dev`); without them, fetch the `none x86_64-unknown-linux-gnu` tarball listed in ort-sys's `dist.txt`, set `ORT_LIB_LOCATION=<dir with libonnxruntime.a>`, and build with `--no-default-features`-style `ort` features `["std"]`. `glibc_compat.c` lets the Linux build link and run on glibc < 2.38. The toolchain is pinned in `rust-toolchain.toml`.
+`ort` statically links a prebuilt onnxruntime downloaded at build time, so the binary has no runtime library dependencies. On Linux that download needs OpenSSL headers (`libssl-dev`). Without them, download the `none x86_64-unknown-linux-gnu` tarball listed in ort-sys's `dist.txt`, drop `download-binaries` from the `ort` features, and build with `ORT_LIB_LOCATION=<dir containing libonnxruntime.a>`. `glibc_compat.c` lets the Linux build link and run on glibc < 2.38. The toolchain is pinned in `rust-toolchain.toml`.
 
 Packaging: CI copies the binary to `embedder/bin/`, and electron-builder ships that as `resources/embedder/`. Local Windows `make dist` fetches the CI-built binary with `make embedder-win`.

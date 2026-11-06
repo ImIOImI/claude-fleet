@@ -20,6 +20,11 @@ files:
 extraResources:
   - from: resources/presence
     to: presence
+  # fleet-embedder sidecar (embedder/README.md), copied here by CI or
+  # `make embedder-win`. When absent the app embeds in process.
+  - from: embedder/bin
+    to: embedder
+    filter: ["fleet-embedder*"]
 asarUnpack:
   - "**/*.node"
   - "**/node_modules/@huggingface/transformers/**"
