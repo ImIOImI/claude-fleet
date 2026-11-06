@@ -131,6 +131,15 @@ jobs:
           FLEET_BROKER_BIN: ${{ runner.temp }}/broker
         run: npm run test:unit
 
+      # pgQueryIsolation tests raise errors that echo a 60 MB value; the runner
+      # dumps the service log at teardown, which took ~30 min.
+      - name: Silence Postgres server error logging
+        run: |
+          docker exec ${{ job.services.postgres.id }} psql -U postgres -v ON_ERROR_STOP=1 \
+            -c "ALTER SYSTEM SET log_min_messages = 'fatal'" \
+            -c "ALTER SYSTEM SET log_min_error_statement = 'panic'" \
+            -c "SELECT pg_reload_conf()"
+
       - name: Unit tests (store suite on Postgres)
         env:
           PG_TEST_URL: postgres://postgres:fleet@localhost:5432/postgres
