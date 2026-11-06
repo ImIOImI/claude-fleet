@@ -29,7 +29,7 @@ One pod, two containers, one image (`runner-host` / `runner-devops-host`), plus 
 
 No `shareProcessNamespace`: a session can't see, signal or ptrace fleet-host. A host container restart doesn't touch PTYs, because the broker lives in the workspace container. Kubernetes restarts each container on its own.
 
-The shared directory (`/run/fleet` in both containers) holds exactly two sockets:
+The shared directory (`/run/fleet` in both containers) holds three sockets: `broker.sock`, `cred.sock` and `mcp/mcp.sock` (see the c3b amendment below):
 - `broker.sock`: the broker listens (uid 1000), fleet-host dials in. Mode 0660, group 1500.
 - `cred.sock`: fleet-host listens (uid 1001), sessions dial in through `fleet-host-cred`. Mode 0660, group 1500.
 

@@ -24,7 +24,7 @@ const OPERATOR: TodoSource = { kind: 'user', id: null };
 const TICK_MS = 30_000;
 const SETTLE_MS = 2_000;
 const CONFIG_ONLY = 'on a remote host, automations come from the host config (automations: in config.yaml)';
-/** Well under ARG_MAX; the broker passes argv to claude unchanged. */
+/** Under Linux's 128 KiB per-argument limit (MAX_ARG_STRLEN); the broker passes argv to claude unchanged. */
 export const MAX_FRESH_PROMPT_BYTES = 120 * 1024;
 const fromConfig = (a: { origin: Record<string, unknown> | null }): boolean => a.origin?.source === HOST_CONFIG_ORIGIN.source;
 
