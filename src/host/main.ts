@@ -14,6 +14,7 @@ import { pgPoolConfig } from '../main/store/storeConfig.js';
 import { openHostDbRetrying, startDbHealth, type DbHealth, type HostDbHandle } from './hostDb.js';
 import { resolveHostWorkspaceId, resolveWorkspaceId } from './hostState.js';
 import { startHolder, type Holder } from './holder.js';
+import { historyRpcChannels } from './historyRpc.js';
 import { hostMcpArgs } from './hostMcp.js';
 import { LEASE_RENEW_MS, LEASE_TTL_MS, LeaseManager, memoryLeaseStore, type LeaseStore, type LostReason } from './lease.js';
 import { postgresLeaseStore } from './pgLease.js';
@@ -95,6 +96,7 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   let auth!: AuthContext;
   let host: HostServer | undefined;
   let holderP: Promise<Holder | null> | null = null;
+  let holderNow: Holder | null = null;
 
   const reloader = createReloader({
     path: env.configPath,
@@ -157,7 +159,7 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     starting: () => !started,
     hub,
     events,
-    rpc: brokerRpcChannels(ops, hub.owners, env.port),
+    rpc: new Map([...brokerRpcChannels(ops, hub.owners, env.port), ...historyRpcChannels(() => holderNow?.history ?? null)]),
     log,
     trustedProxyHops: () => config.trustedProxyHops
   });
@@ -214,6 +216,7 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
       proc.off('SIGINT', onTerm);
       // Frames stop before the lease is released, so no viewer acts during the handover.
       server.halt(1001, 'host shutting down');
+      holderNow = null;
       // Holder resources close while the lease still fences their last writes.
       if (holderP) await closeWithin('holder stores', async () => (await holderP)?.stop());
       await leaseMgr?.stop();
@@ -274,11 +277,17 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
         automations: () => config.automations,
         mcp: { socketPath: env.mcpSocket, socketGroup: env.mcpSocketGroup },
         mcpRetryMs: opts.mcpRetryMs
-      }).catch((err: Error) => {
-        log.log('error', 'holder start failed; giving up the lease', { error: err.message });
-        m.markLost(isDbUnavailable(err) ? 'unreachable' : 'superseded');
-        return null;
-      });
+      })
+        .catch((err: Error) => {
+          log.log('error', 'holder start failed; giving up the lease', { error: err.message });
+          m.markLost(isDbUnavailable(err) ? 'unreachable' : 'superseded');
+          return null;
+        })
+        .then((h) => {
+          // A holder that finishes starting after shutdown began is only stopped, never served.
+          if (!startAbort.signal.aborted) holderNow = h;
+          return h;
+        });
     });
     m.on('lost', (reason: LostReason) => {
       log.log('error', 'lease lost; exiting', { reason });

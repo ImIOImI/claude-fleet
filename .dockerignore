@@ -80,6 +80,7 @@
 !src/main/automations/classify.ts
 !src/preload/inboxTypes.ts
 !src/preload/captureSettings.ts
+!src/preload/federation.ts
 
 # Even within broker/, drop things the binary doesn't need:
 broker/**/*_test.go

@@ -169,6 +169,27 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     await db.recordUsageEvent({ workspaceId: ID, sessionId: null, kind: 'resumed' });
   }, 30_000);
 
+  it('history RPC reads only the hosted workspace, whatever the arguments say', async () => {
+    const a = await start();
+    await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+    await storesOpen();
+    await t!.pool.query(`INSERT INTO ${t!.schema}.sessions (id, workspace_id, last_active_at) VALUES ('h1', $1, 5), ('h2', $1, NULL), ('o1', $2, 9)`, [ID, OTHER]);
+    const call = async (channel: string, args: unknown[]) => {
+      const res = await fetch(`${a.url}/rpc/${channel}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` }, body: JSON.stringify({ args })
+      });
+      return { status: res.status, body: (await res.json()) as Record<string, any> };
+    };
+    const page = await call('history:sessions', [{ after: { lastActiveAt: 99, id: 'o1', workspaceId: OTHER }, limit: 1, workspaceId: OTHER }, OTHER]);
+    expect(page.status).toBe(200);
+    expect(page.body.result.rows.map((r: { id: string; workspaceId: string }) => [r.id, r.workspaceId])).toEqual([['h1', ID]]);
+    const rest = await call('history:sessions', [{ after: page.body.result.next, limit: 1 }]);
+    expect(rest.body.result).toMatchObject({ rows: [{ id: 'h2', workspaceId: ID }], next: null });
+    expect((await call('history:summary', [])).body.result.sessionId).toBe('h1');
+    expect(await call('history:summary', ['o1'])).toEqual({ status: 200, body: { ok: true, result: null } });
+    expect((await call('history:sessions', [{ limit: 500 }])).status).toBe(400);
+  }, 30_000);
+
   it('serves the id from host_meta and keeps the state file in step', async () => {
     const a = await start();
     await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });

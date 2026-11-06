@@ -7,6 +7,7 @@ import type { PgTrack } from '../main/store/pgMigrate.js';
 import { migratePgStores, openPgStores, type PgStores } from '../main/store/pgStores.js';
 import type { PostgresStoreConfig } from '../main/store/storeConfig.js';
 import { HOST_PG_POOL } from './hostDb.js';
+import { historyReader, type HistoryReader } from './historyRead.js';
 import { HostIngest } from './hostIngest.js';
 import type { HostDb } from './hostSchema.js';
 import type { BrokerOps } from './brokerOps.js';
@@ -40,6 +41,7 @@ export interface HolderOptions {
 export interface Holder {
   stores: PgStores;
   automations: HostAutomations;
+  history: HistoryReader;
   stop(): Promise<void>;
 }
 
@@ -104,6 +106,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
   return {
     stores,
     automations,
+    history: historyReader(stateKysely, o.workspaceId),
     stop() {
       stopping ??= stopAll();
       return stopping;
