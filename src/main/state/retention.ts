@@ -3,7 +3,7 @@
 // on the async store handle in bounded slices behind a Throttle, so the main
 // thread is never held for more than one small transaction at a time.
 import {
-  compactEmbeddingSlice, maintenanceGet, maintenanceSet, maxEmbeddingId, retentionCandidates, retentionRows,
+  compactEmbeddingSlice, maintenanceGet, purgeWorkspace, workspaceIdsInState, maintenanceSet, maxEmbeddingId, retentionCandidates, retentionRows,
   rewriteEventRaw, setRetentionWatermarks, stateDialect, type RetentionRow,
 } from '../db.js';
 import { COMPRESS_MIN_BYTES, deflateLine, rawLine, stripLine } from './rawCodec.js';
@@ -108,4 +108,30 @@ export async function compactEmbeddings(t: Throttle, opts: { sliceRows?: number 
     await maintenanceSet(EMBEDDINGS_CURSOR, String(cursor));
   }
   return acc;
+}
+
+const ULID = /^[0-9A-HJKMNP-TV-Z]{26}$/;
+
+export interface OrphanDeps {
+  /** Ids of every workspace manifest on disk (all kinds). */
+  listManifestIds(): Promise<string[]>;
+  /** Whether `<userData>/state/<id>` exists. */
+  stateDirExists(id: string): boolean;
+}
+
+/** Purge state.db rows of workspaces that are gone. Guarded so a transient
+ *  manifest-listing failure can never wipe history: the listing must be
+ *  non-empty, and an id is purged only if it is ULID-shaped, unlisted and has
+ *  no state dir. */
+export async function sweepOrphans(deps: OrphanDeps, t: Throttle): Promise<string[]> {
+  const manifests = new Set(await deps.listManifestIds());
+  if (manifests.size === 0) return [];
+  const purged: string[] = [];
+  for (const id of await workspaceIdsInState()) {
+    if (t.stopped()) break;
+    if (manifests.has(id) || !ULID.test(id) || deps.stateDirExists(id)) continue;
+    await purgeWorkspace(id, (fn) => t.slice(fn));
+    purged.push(id);
+  }
+  return purged;
 }
