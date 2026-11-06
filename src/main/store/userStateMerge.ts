@@ -1,4 +1,4 @@
-// User-authored state.db rows follow every store switch (part 4b D54). The
+// User-authored state.db rows follow every store switch (SPEC §7 *User-state merge*). The
 // rest of state.db is cache: events and rollups re-ingest from transcripts,
 // summaries and embeddings regenerate through backfill. The outgoing store
 // was the live one, so it wins every collision.

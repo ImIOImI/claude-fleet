@@ -1,4 +1,4 @@
-// The switch back from Postgres to SQLite (part 4b D53): the authoritative
+// The switch back from Postgres to SQLite (SPEC §7 *Switch back to SQLite*): the authoritative
 // inbox tables into a fresh SQLite file, ids kept. One attempt reads one
 // REPEATABLE READ snapshot; chunks commit with their progress row inside the
 // file, so a failed attempt resumes while the store's content is unchanged and

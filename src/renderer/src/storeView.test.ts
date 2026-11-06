@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { StoreSettings, StoreStatus } from '../../preload/storeTypes';
-import { STORE_CHOICES, storeBannerText, storeErrorText, storeNotices, storeSwitchConfirm, storeSwitchNote } from './storeView';
+import { STORE_CHOICES, storeBannerText, storeErrorText, storeNotices, storeSwitchConfirm, storeSwitchNote, switchBackProgressText } from './storeView';
 
 const st = (p: Partial<StoreStatus>): StoreStatus => ({ choice: 'managed', phase: 'ready', detail: null, progress: null, notice: null, ...p });
 const settings = (p: Partial<StoreSettings>): StoreSettings => ({
@@ -74,6 +74,7 @@ describe('storeSwitchConfirm', () => {
     expect(all).toMatch(/stays on Postgres/);
     expect(all).toMatch(/move inbox\.db \(with any inbox\.db-wal and inbox\.db-shm\) out of/);
     expect(all).toMatch(/claude-fleet-postgres-data/);
+    expect(all).toMatch(/pruned transcripts or deleted workspaces .* stays in the Postgres volume/);
     expect(c.confirmLabel).toBe('Copy and relaunch');
   });
   it('undoing a choice that has not applied yet only rewrites config.json', () => {
@@ -106,5 +107,14 @@ describe('storeErrorText', () => {
   it('drops the IPC wrapper', () => {
     expect(storeErrorText(new Error("Error invoking remote method 'store:setChoice': Error: config.json is unreadable"))).toBe('config.json is unreadable');
     expect(storeErrorText('plain')).toBe('plain');
+  });
+});
+
+describe('switchBackProgressText', () => {
+  it('says the switch back waits while the store is still starting or copying forward', () => {
+    expect(switchBackProgressText(st({ phase: 'importing' }))).toBe('Waiting for the current copy to Postgres to finish…');
+    expect(switchBackProgressText(st({ phase: 'starting' }))).toBe('Waiting for the Postgres store to finish starting…');
+    expect(switchBackProgressText(st({ phase: 'ready' }))).toBe('Copying the inbox back. The app relaunches when it is done.');
+    expect(switchBackProgressText(st({ phase: 'down' }))).toBe('Copying the inbox back. The app relaunches when it is done.');
   });
 });

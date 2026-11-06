@@ -1,12 +1,11 @@
 // Settings → Storage's switch from a running Postgres store back to SQLite
-// (part 4b D53). Inbox and history writers stop before the copy (and before the
-// D54 merge reads Postgres); a committed switch then relaunches the app, so
+// (SPEC §7 *Switch back to SQLite*). Inbox and history writers stop before the
+// copy (and before the user-state merge reads Postgres); a committed switch then relaunches the app, so
 // nothing writes the store it left. A failure restarts the writers on Postgres.
-import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { StoreChoice } from '../../preload/storeTypes.js';
 import type { SwitchBackOutcome, SwitchBackPlan } from './firstSwitch.js';
-import { INBOX_PG_MARKER } from './sqliteFiles.js';
+import { INBOX_PG_MARKER, inboxOnPostgres } from './sqliteFiles.js';
 
 export interface SwitchResult {
   switched: boolean;
@@ -25,7 +24,7 @@ export interface SwitchBackDeps<S> {
   close(stores: S): Promise<void>;
   /** Refuse new inbox and history writes, stop the timers, wait for writes in flight. */
   quiesce(stores: S): Promise<void>;
-  /** Checked once quiesced: a run in progress would lose its result. */
+  /** Checked before and after quiesce: a run in progress would lose its result. */
   automationRunning(): boolean;
   /** switchBackToSqlite; `commit` runs only once inbox.db is in place. */
   copy(stores: S, commit: () => Promise<void>): Promise<SwitchBackOutcome>;
@@ -73,6 +72,8 @@ export async function switchBackLive<S>(d: SwitchBackDeps<S>): Promise<SwitchRes
 
 async function copyBack<S>(d: SwitchBackDeps<S>, stores: S, writersLive: boolean): Promise<SwitchResult> {
   if (writersLive) {
+    // Before quiesce: a refusal must leave a run in progress untouched.
+    if (d.automationRunning()) return { switched: false, notice: AUTOMATION_RUNNING };
     try {
       await d.quiesce(stores);
     } catch (e) {
@@ -101,7 +102,7 @@ async function copyBack<S>(d: SwitchBackDeps<S>, stores: S, writersLive: boolean
 
 /** A SQLite start whose inbox lives in Postgres: the inbox stays closed rather than starting empty. */
 export function inboxOnPostgresNotice(userData: string): string | null {
-  if (!existsSync(join(userData, INBOX_PG_MARKER))) return null;
+  if (!inboxOnPostgres(userData)) return null;
   return `The inbox lives in the Postgres store (${join(userData, INBOX_PG_MARKER)} says so), so it is unavailable on SQLite. `
     + 'Choose Postgres in Settings → Storage and restart to use it, or switch back to SQLite from a Postgres start to copy it here.';
 }

@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sql } from 'kysely';
@@ -11,6 +11,7 @@ import { firstSwitchCopy, switchBackPlan, switchBackToSqlite, verifyPlacedInbox 
 import { migratePgStores } from './pgStores.js';
 import { createPgPool, postgresKysely } from './postgres.js';
 import { EXPORTED_PREFIX, IMPORT_PG_TRACK, IMPORT_TABLES } from './storeImport.js';
+import { inboxOnPostgresNotice } from './storeSwitch.js';
 import { isPg, testPgSchema, type TestPg } from './testStore.js';
 
 const ME = { kind: 'user', id: 'me' } as const;
@@ -70,6 +71,23 @@ describe.skipIf(!isPg)('firstSwitchCopy', () => {
     expect(await firstSwitchCopy({ pool: t.pool, userData: dir, state: false, onProgress: () => undefined, now: () => 2 })).toBeNull();
     expect(existsSync(join(dir, 'inbox.db'))).toBe(false);
     expect(existsSync(join(dir, 'inbox.db.migrated-2'))).toBe(true);
+  });
+
+  it('a crash while inbox.db is retired leaves the inbox on Postgres, not an empty SQLite inbox', async () => {
+    // A non-empty destination fails the retire's last rename, after inbox.db has moved out.
+    mkdirSync(join(dir, 'inbox.db.migrated-9'));
+    writeFileSync(join(dir, 'inbox.db.migrated-9', 'x'), '');
+    await expect(firstSwitchCopy({ pool: t.pool, userData: dir, state: false, onProgress: () => undefined, now: () => 9 })).rejects.toThrow();
+    expect(existsSync(join(dir, 'inbox.db'))).toBe(false);
+    rmSync(join(dir, 'inbox.db.migrated-9'), { recursive: true });
+    expect(inboxOnPostgresNotice(dir)).not.toBeNull();
+    expect(switchBackPlan(dir, 10)).toEqual({ kind: 'copy' });
+  });
+
+  it('a crash before inbox.db is retired leaves inbox.db the inbox', async () => {
+    writeFileSync(join(dir, 'inbox.db.on-postgres'), JSON.stringify({ status: 'pending', at: 1 }));
+    expect(inboxOnPostgresNotice(dir)).toBeNull();
+    expect(switchBackPlan(dir, 10)).toEqual({ kind: 'keep-inbox-db', notice: null });
   });
 
   it('says so when the store already had inbox data, and leaves inbox.db in place', async () => {

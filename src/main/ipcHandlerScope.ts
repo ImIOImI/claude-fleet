@@ -1,5 +1,5 @@
 // The ipcMain handlers a service registers, so they can be removed and the
-// service registered again on another store (the inbox's switch back, D53).
+// service registered again on another store.
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Handle = (channel: string, listener: (...args: any[]) => unknown) => void;

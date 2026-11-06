@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { AutomationStore } from '../automations/automationStore.js';
+import { createAutomationService, type AutomationDeps } from '../automations/automationService.js';
+import { openTestInbox } from './testStore.js';
 import type { SwitchBackOutcome, SwitchBackPlan } from './firstSwitch.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -73,10 +76,59 @@ describe('switchBackLive', () => {
     expect(calls).toEqual(['exclusive', 'quiesce', 'resume']);
   });
 
-  it('a running automation refuses the switch and resumes the writers', async () => {
+  it('a running automation refuses the switch before anything is stopped', async () => {
     const { deps, calls } = harness({ automation: true });
     expect(await switchBackLive(deps)).toEqual({ switched: false, notice: AUTOMATION_RUNNING });
+    expect(calls).toEqual(['exclusive']);
+  });
+
+  it('a run that starts while the writers drain refuses the switch and resumes them', async () => {
+    const { deps, calls } = harness();
+    let quiesced = false;
+    deps.quiesce = async (s) => { calls.push(`quiesce ${s.pool}`); quiesced = true; };
+    deps.automationRunning = () => quiesced;
+    expect(await switchBackLive(deps)).toEqual({ switched: false, notice: AUTOMATION_RUNNING });
     expect(calls).toEqual(['exclusive', 'quiesce live', 'resume']);
+  });
+
+  it('a refused switch leaves an active run running: no interruption, no notification', async () => {
+    const inbox = await openTestInbox();
+    const store = new AutomationStore(inbox.kysely);
+    let release!: () => void;
+    const postGate = new Promise<void>((r) => { release = r; });
+    const notes: unknown[] = [];
+    const serviceDeps: AutomationDeps = {
+      store, now: Date.now, sleep: async () => undefined,
+      workspaceState: async () => 'running', workspaceName: (id) => id,
+      ensureRunning: async () => undefined, busy: () => false,
+      spawnFresh: async () => undefined, freshState: async () => 'ended', closeFresh: async () => undefined,
+      post: async () => { await postGate; return { via: 'attached' }; },
+      resolveWorkspace: (v) => (v === 'ops' ? 'W1' : null),
+      notify: (n) => { notes.push(n); return null; },
+      changed: () => undefined,
+      automationsWorkspace: () => 'W1',
+    };
+    const svc = createAutomationService(serviceDeps);
+    const a = await svc.create(`name: watch
+triggers:
+  - manual: {}
+steps:
+  - id: check
+    prompt: { workspace: ops, mode: live, message: "check" }
+`, { kind: 'user', id: null });
+    const run = await svc.run(a.id, { kind: 'manual', by: { kind: 'user', id: null } });
+    const { deps } = harness();
+    deps.automationRunning = () => svc.hasActiveRuns();
+    deps.quiesce = async () => { svc.cancelPending(); };
+    // Writers restarted by registering the service again: its recover() cuts live runs short.
+    deps.resume = async () => { await createAutomationService(serviceDeps).recover(); };
+
+    expect(await switchBackLive(deps)).toEqual({ switched: false, notice: AUTOMATION_RUNNING });
+    expect((await svc.get(a.id))?.runs.find((r) => r.id === run.id)?.status).toBe('running');
+    expect(notes).toEqual([]);
+    expect(svc.hasActiveRuns()).toBe(true);
+    release();
+    await svc.settle();
   });
 
   it('kept inbox.db (the copy to Postgres never finished) passes the hot-journal notice on', async () => {

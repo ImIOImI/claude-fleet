@@ -1,4 +1,4 @@
-// Switching the store between SQLite and Postgres (part 4b D49, D53, D54).
+// Switching the store between SQLite and Postgres (SPEC §7 *First-switch copy*, *Switch back to SQLite*).
 // To Postgres: inbox.db first (authoritative, small), then state.db. inbox.db
 // is retired once copied so it can't be copied twice or mistaken for the live
 // inbox; state.db stays, as the cache a switch back to SQLite resumes from.
@@ -13,7 +13,7 @@ import { INBOX_SCHEMA_VERSION } from '../inbox/inboxDb.js';
 import { STATE_PG_TRACK } from './migrations/statePg.js';
 import { migratePostgres } from './pgMigrate.js';
 import { postgresKysely, schemaOf } from './postgres.js';
-import { hasHotJournal, INBOX_PG_MARKER, removeSqliteFile, retireSqliteFile, sweepSqliteSidecars } from './sqliteFiles.js';
+import { hasHotJournal, INBOX_PG_MARKER, INBOX_PG_PENDING, inboxOnPostgres, removeSqliteFile, retireSqliteFile, sweepSqliteSidecars } from './sqliteFiles.js';
 import { exportInboxToSqlite, pgInboxFingerprint, type ExportOutcome } from './storeExport.js';
 import {
   EXPORTED_PREFIX, IMPORT_PG_TRACK, IMPORT_TABLES, ImportError, importSqlite, sourceFingerprint, trackVersion, type ImportProgress,
@@ -22,7 +22,7 @@ import { mergePgStateIntoSqlite, mergeSqliteStateIntoPg } from './userStateMerge
 
 export { retireSqliteFile };
 
-type LiveStatus = 'live' | 'skipped-nonempty' | 'skipped-conflict';
+type LiveStatus = typeof INBOX_PG_PENDING | 'live' | 'skipped-nonempty' | 'skipped-conflict';
 
 const markerPath = (userData: string): string => join(userData, INBOX_PG_MARKER);
 
@@ -52,6 +52,8 @@ export async function firstSwitchCopy(o: FirstSwitchOptions): Promise<string | n
     sweepSqliteSidecars(inboxFile, now());
     const inbox = await importSqlite({ k, file: inboxFile, source: 'inbox', expectedVersion: INBOX_SCHEMA_VERSION, onProgress: o.onProgress, now });
     if (inbox.status === 'copied' || inbox.status === 'already' || inbox.status === 'absent') {
+      // A crash mid-retire must not leave inbox.db gone with no marker: a SQLite start would open an empty inbox.
+      writeMarker(o.userData, INBOX_PG_PENDING, now());
       retireSqliteFile(inboxFile, now());
       writeMarker(o.userData, 'live', now());
     } else {
@@ -139,7 +141,7 @@ export function switchBackPlan(userData: string, now = Date.now()): SwitchBackPl
   const inboxFile = join(userData, 'inbox.db');
   sweepSqliteSidecars(inboxFile, now);
   if (!existsSync(inboxFile)) return { kind: 'copy' };
-  if (readMarker(userData) === null) {
+  if (!inboxOnPostgres(userData)) {
     return {
       kind: 'keep-inbox-db',
       notice: hasHotJournal(inboxFile) ? 'inbox.db has an unfinished transaction; SQLite rolls it back when it opens the file.' : null,
@@ -230,7 +232,7 @@ export async function switchBackToSqlite(o: SwitchBackOptions): Promise<SwitchBa
   }
 }
 
-/** User-authored state rows into state.db, when Postgres history came from it (D54). */
+/** User-authored state rows into state.db, when Postgres history came from it (SPEC §7 *User-state merge*). */
 async function mergeStateBack(k: Kysely<unknown>, stateFile: string): Promise<void> {
   if (!existsSync(stateFile)) return;
   const run = (await sql<{ finished_at: number | null }>`SELECT finished_at FROM store_import_run WHERE source = 'state'`.execute(k)).rows[0];

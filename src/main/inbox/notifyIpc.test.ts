@@ -12,8 +12,8 @@ const src = readFileSync(new URL('./notifyIpc.ts', import.meta.url), 'utf8');
 
 describe('registerNotifyIpc stop() wiring (#457 quit)', () => {
   it('guards the 30s tick and the daily prune interval with a stopped flag', () => {
-    expect(src).toMatch(/const tick = setInterval\(\(\) => \{ if \(!stopped\) svc\.tick\(\)\.catch\(warn\('notify-tick'\)\); \}, 30_000\);/);
-    expect(src).toMatch(/const daily = setInterval\(\(\) => \{ if \(!stopped\) svc\.prune\(\)\.catch\(\(\) => \{[^}]*\}\); \}, 86_400_000\);/);
+    expect(src).toMatch(/tick = setInterval\(\(\) => \{ if \(!stopped\) svc\.tick\(\)\.catch\(warn\('notify-tick'\)\); \}, 30_000\);/);
+    expect(src).toMatch(/daily = setInterval\(\(\) => \{ if \(!stopped\) svc\.prune\(\)\.catch\(\(\) => \{[^}]*\}\); \}, 86_400_000\);/);
   });
 
   it('stop() is idempotent: clears both intervals and cancels pending timers before returning', () => {
@@ -28,7 +28,16 @@ describe('registerNotifyIpc stop() wiring (#457 quit)', () => {
     expect(body).toMatch(/svc\.cancelPending\(\);/);
   });
 
-  it('returns the notify service augmented with stop', () => {
-    expect(src).toMatch(/return Object\.assign\(svc, \{ stop \}\);/);
+  it('returns the notify service augmented with stop and resume', () => {
+    expect(src).toMatch(/return Object\.assign\(svc, \{ stop, resume \}\);/);
+  });
+
+  it('resume() restarts both intervals on the same service', () => {
+    const start = src.indexOf('function resume(): void {');
+    expect(start).toBeGreaterThan(-1);
+    const body = src.slice(start, src.indexOf('\n  }', start));
+    expect(body).toMatch(/if \(!stopped\) return;/);
+    expect(body).toMatch(/stopped = false;/);
+    expect(body).toMatch(/startTimers\(\);/);
   });
 });

@@ -1,5 +1,5 @@
-// Refuses a store's writes while the switch back to SQLite copies it (part 4b
-// D53): a write the copy can't carry over must fail loudly, not land in the
+// Refuses a store's writes while the switch back to SQLite copies it (SPEC §7
+// *Switch back to SQLite*): a write the copy can't carry over must fail loudly, not land in the
 // store being left behind. One gate guards the inbox, another history.
 import { sql, type Kysely } from 'kysely';
 import type { WriteHook } from './postgres.js';

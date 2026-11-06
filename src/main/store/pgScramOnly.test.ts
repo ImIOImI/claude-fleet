@@ -1,6 +1,7 @@
 import { createServer, type AddressInfo, type Server } from 'node:net';
 import pg from 'pg';
 import { afterEach, describe, expect, it } from 'vitest';
+import { bootstrap } from '../../host/bootstrap.js';
 import { rolePoolConfig } from './pgQueryIsolation.js';
 import { plaintextAuthGuard, ScramOnlyClient } from './pgScramOnly.js';
 import { createPgPool } from './postgres.js';
@@ -92,6 +93,18 @@ describe('the plaintext guard on store pools', () => {
       await pool.end();
     }
   });
+
+  for (const [code, label] of [[3, 'cleartext'], [5, 'MD5']] as const) {
+    it(`fleet-host bootstrap's admin login without TLS refuses a ${label} request and sends nothing`, async () => {
+      const s = await squatter(code);
+      servers.push(s.server);
+      const target = { host: '127.0.0.1', port: s.port, database: 'fleet', user: 'fleet_app', schema: 'fleet', ssl: false as const, iam: false, appPassword: null };
+      const admin = { user: 'postgres', password: SECRET, secrets: [SECRET] };
+      await expect(bootstrap(target, admin, { log: { log: () => undefined }, connectTimeoutMs: 2_000 })).rejects.toThrow(/refusing/);
+      await settle();
+      expect(s.afterStartup().length).toBe(0);
+    });
+  }
 
   it("4a's isolation role pools get the guard without TLS only", () => {
     expect(rolePoolConfig({ schema: 'fleet', host: '127.0.0.1', ssl: false }, 'r', 'p').Client).toBe(ScramOnlyClient);

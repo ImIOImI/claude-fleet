@@ -1,4 +1,4 @@
-// The first-switch copy (remote-workspaces spec §7, part 4b D49): inbox.db and
+// The first-switch copy (SPEC §7 *First-switch copy*): inbox.db and
 // state.db rows into an empty Postgres store, ids kept. Chunks commit with
 // their progress row, so a failed or interrupted copy resumes; a source file
 // that changed since restarts it. The SQLite files are only read.
@@ -126,7 +126,7 @@ export async function importSqlite(o: ImportOptions): Promise<ImportOutcome> {
     const run = (await sql<{ fingerprint: string; finished_at: number | null }>`
       SELECT fingerprint, finished_at FROM store_import_run WHERE source = ${o.source}`.execute(o.k)).rows[0];
     if (run?.finished_at != null) {
-      // state.db stays as the cache and its user-authored rows merge on the next switch (D54);
+      // state.db stays as the cache and its user-authored rows merge on the next switch (SPEC §7 *User-state merge*);
       // a different inbox.db is a second authoritative inbox.
       if (o.source === 'state' || run.fingerprint === fingerprint) return { source: o.source, status: 'already', counts: {} };
       return { source: o.source, status: 'skipped-conflict', counts: {} };

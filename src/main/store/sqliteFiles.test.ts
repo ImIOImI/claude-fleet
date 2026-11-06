@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { InboxStore } from '../inbox/inboxDb.js';
-import { hasHotJournal, retireSqliteFile, sweepSqliteSidecars } from './sqliteFiles.js';
+import { hasHotJournal, INBOX_PG_MARKER, inboxOnPostgres, retireSqliteFile, sweepSqliteSidecars } from './sqliteFiles.js';
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cf-sqlfiles-')); });
@@ -93,4 +93,17 @@ it('InboxStore.open removes a stale on-postgres marker: SQLite is the inbox now'
   const inbox = InboxStore.open(dir);
   await inbox.close();
   expect(readdirSync(dir).includes('inbox.db.on-postgres')).toBe(false);
+});
+
+it('inboxOnPostgres: a pending marker counts only once inbox.db is gone', () => {
+  const marker = (status: string) => writeFileSync(join(dir, INBOX_PG_MARKER), JSON.stringify({ status, at: 1 }));
+  expect(inboxOnPostgres(dir)).toBe(false);
+  marker('pending');
+  expect(inboxOnPostgres(dir)).toBe(true);
+  writeFileSync(join(dir, 'inbox.db'), '');
+  expect(inboxOnPostgres(dir)).toBe(false);
+  marker('live');
+  expect(inboxOnPostgres(dir)).toBe(true);
+  marker('skipped-conflict');
+  expect(inboxOnPostgres(dir)).toBe(true);
 });

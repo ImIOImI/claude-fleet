@@ -1,11 +1,25 @@
 // SQLite files with their sidecars. A -wal/-shm/-journal left beside a missing
 // or different database is replayed into whatever file next takes that name,
 // so sidecars only ever move together with their database.
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
 /** Beside inbox.db while the Postgres inbox is the live one; stale once SQLite opens the inbox. */
 export const INBOX_PG_MARKER = 'inbox.db.on-postgres';
+/** The marker's status while inbox.db is being retired: inbox.db is still the inbox until it is gone. */
+export const INBOX_PG_PENDING = 'pending';
+
+/** The Postgres inbox is the live one. */
+export function inboxOnPostgres(userData: string): boolean {
+  const marker = join(userData, INBOX_PG_MARKER);
+  if (!existsSync(marker)) return false;
+  if (!existsSync(join(userData, 'inbox.db'))) return true;
+  try {
+    return (JSON.parse(readFileSync(marker, 'utf8')) as { status?: unknown }).status !== INBOX_PG_PENDING;
+  } catch {
+    return true;
+  }
+}
 
 export const SQLITE_SIDECARS = ['-wal', '-shm', '-journal'] as const;
 

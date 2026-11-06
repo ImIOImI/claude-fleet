@@ -1,4 +1,4 @@
-// The store-backed services as idempotent steps (part 4b D50): a failed step
+// The store-backed services as idempotent steps (SPEC §8 *Startup*): a failed step
 // is retried on the next call, and a step never runs twice once it succeeded.
 export interface ServiceStep<S> {
   name: string;

@@ -7,6 +7,7 @@ import {
   STORE_CHOICES,
   storeErrorText,
   storeNotices,
+  switchBackProgressText,
   storeSwitchConfirm,
   storeSwitchNote,
   type SettableChoice,
@@ -92,7 +93,7 @@ export function StorageSettings() {
             <h2>{confirm.title}</h2>
             {confirm.steps.map((step) => <p key={step} className="store-confirm-step">{step}</p>)}
             {busy && confirm.relaunches && (
-              <div className="form-status">Copying the inbox back. The app relaunches when it is done.</div>
+              <div className="form-status">{switchBackProgressText(s.status)}</div>
             )}
             {error && <div className="form-hint error-text">{error}</div>}
             <div className="modal-footer">

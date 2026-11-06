@@ -47,7 +47,7 @@ type InboxSink = {
 };
 
 export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService | null): {
-  automations: AutomationService; proposals: ProposalService; setInboxSink(s: InboxSink): void; stop(): void;
+  automations: AutomationService; proposals: ProposalService; setInboxSink(s: InboxSink): void; stop(): void; resume(): void;
 } {
   let sink: InboxSink | null = null;
   const store = new AutomationStore(inbox.kysely);
@@ -188,13 +188,17 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
   // already queued when stop() runs is a no-op, and cancels pending
   // event-debounce timers — all before the main process closes inbox.db.
   let stopped = false;
-  const tick = setInterval(() => {
-    if (stopped) return;
-    void refresh()
-      .then(() => svc.tick())
-      .catch((e) => logError({ source: 'main', type: 'automation-tick', level: 'warn', message: String(e) }));
-  }, 30_000);
-  tick.unref?.();
+  let tick: NodeJS.Timeout;
+  const startTick = (): void => {
+    tick = setInterval(() => {
+      if (stopped) return;
+      void refresh()
+        .then(() => svc.tick())
+        .catch((e) => logError({ source: 'main', type: 'automation-tick', level: 'warn', message: String(e) }));
+    }, 30_000);
+    tick.unref?.();
+  };
+  startTick();
 
   // Event triggers (#407 Phase 4).
   setFleetEventObserver((e) => { svc.onEvent(e).catch((err) => logError({ source: 'main', type: 'automation-event', level: 'warn', message: String(err) })); });
@@ -310,5 +314,13 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     inboxEvents.off('todo', onTodo);
   }
 
-  return { automations: svc, proposals, setInboxSink: (s) => { sink = s; }, stop };
+  /** After a refused or failed switch back: the same service ticks again, its runs untouched (no recover()). */
+  function resume(): void {
+    if (!stopped) return;
+    stopped = false;
+    startTick();
+    inboxEvents.on('todo', onTodo);
+  }
+
+  return { automations: svc, proposals, setInboxSink: (s) => { sink = s; }, stop, resume };
 }

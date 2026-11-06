@@ -252,4 +252,5 @@ export class CaptureScheduler {
   /** Stop scheduling and kill in-flight local/WSL forks (app quit). Their runs
    *  are failed at the next startup (failRunning) if not finished by then. */
   stop(): void { this.stopped = true; this.queue.clear(); this.d.killInFlight?.(); }
+  resume(): void { this.stopped = false; }
 }

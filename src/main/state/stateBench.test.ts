@@ -70,7 +70,7 @@ export const GATE: Record<string, { tol: number; slack: number }> = {
   perf_flush_ms: { tol: 0.25, slack: 0 },
 };
 
-/** Postgres budgets (part 4b D51), in each metric's own unit. Reads stay
+/** Postgres budgets (SPEC §7 *Performance budgets*), in each metric's own unit. Reads stay
  *  within one 16 ms frame; ingest and writes pay a round trip and a commit per
  *  statement, so they get absolute budgets rather than a ratio to SQLite. */
 export const PG_GATE: Record<string, number> = {

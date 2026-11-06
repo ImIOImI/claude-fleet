@@ -1,4 +1,4 @@
-// index.ts's store boot (part 4b D50, D52, D53), checked by source text as
+// index.ts's store boot (SPEC §8 *Startup*, §7 *Switch back to SQLite*), checked by source text as
 // indexQuitTimers.test.ts does: standing up the real main process needs
 // Electron, Docker and a display.
 import { readFileSync } from 'node:fs';
@@ -114,11 +114,12 @@ describe('index.ts store boot', () => {
   });
 
   it('a refused or failed switch back restarts the writers on Postgres; a committed one relaunches', () => {
-    inOrder(closure('resumeWriters'), ['teardownInboxServices();', 'inboxGate.open();', 'historyGate.open();', "services.reset('inbox');", 'await supervisor?.restartServices();', 'replayInputWait();', 'jsonlWatcher?.requeueAll();']);
+    inOrder(closure('resumeWriters'), ['if (shuttingDown) return;', 'inboxGate.open();', 'historyGate.open();', 'notifySvc?.resume();', 'auto?.resume();', 'captureScheduler?.resume();', 'await supervisor?.restartServices();', 'replayInputWait();', 'jsonlWatcher?.requeueAll();']);
+    expect(closure('resumeWriters')).not.toMatch(/teardownInboxServices|services\.reset|registerAutomationIpc|registerNotifyIpc/);
     const wiring = boot.slice(boot.indexOf('() => switchBackLive<PgStores>({'));
     expect(wiring).toMatch(/quiesce: quiesceStores,/);
     expect(wiring).toMatch(/resume: resumeWriters,/);
-    expect(wiring).toMatch(/relaunch: \(\) => \{\s*app\.relaunch\(\);\s*app\.quit\(\);\s*\}/);
+    expect(wiring).toMatch(/relaunch: \(\) => \{\s*if \(shuttingDown\) return;\s*app\.relaunch\(\);\s*app\.quit\(\);\s*\}/);
     expect(wiring).toMatch(/automationRunning: \(\) => auto\?\.automations\.hasActiveRuns\(\) \?\? false,/);
     expect(wiring).toMatch(/commit: \(\) => setStoreChoice\('sqlite'\),/);
     expect(wiring).toMatch(/copy: \(stores, commit\) => switchBackToSqlite\(\{ pool: stores\.pool, userData, commit,/);

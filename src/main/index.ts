@@ -1,5 +1,4 @@
 import { app, BrowserWindow, dialog, shell, ipcMain } from 'electron';
-import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { registerIpc, invalidateWorkspaceList, replayInputWait, stopRemoteBackend } from './ipc.js';
 import { openDb, openDbPostgres, closeDb, deleteEmbeddingsForOtherModels, listSessionIds, recordError, stateKysely, sessionCaptureSignals, isAutomationSession } from './db.js';
@@ -39,7 +38,7 @@ import { inboxOnPostgresNotice, switchBackLive } from './store/storeSwitch.js';
 import { ServiceSteps } from './store/serviceSteps.js';
 import { withinMs } from './withinMs.js';
 import { InboxWriteGate } from './store/inboxWriteGate.js';
-import { INBOX_PG_MARKER } from './store/sqliteFiles.js';
+import { inboxOnPostgres } from './store/sqliteFiles.js';
 import { IMPORT_PG_TRACK } from './store/storeImport.js';
 import { ensureManagedPostgres, stopManagedPostgres, type ManagedDocker } from './store/managedPostgres.js';
 import { dockerodeManagedDocker } from './store/managedDocker.js';
@@ -128,11 +127,6 @@ function stopInboxWriters(): void {
   notifySvc?.stop();
   auto?.stop();
   captureScheduler?.stop();
-}
-
-function teardownInboxServices(): void {
-  stopInboxWriters();
-  for (const undo of inboxTeardown.splice(0).reverse()) undo();
 }
 
 function portOf(cfg: PostgresStoreConfig): number | null {
@@ -652,12 +646,15 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       }
       if (state) await historyGate.drain(state);
     };
-    /** A refused or failed switch back: the writers start again on Postgres. */
+    /** A failed switch back: the same writers start again on Postgres. Not
+     *  re-registered: that would recover() and cut short the runs in progress. */
     const resumeWriters = async (): Promise<void> => {
-      teardownInboxServices();
+      if (shuttingDown) return;
       inboxGate.open();
       historyGate.open();
-      services.reset('inbox');
+      notifySvc?.resume();
+      auto?.resume();
+      captureScheduler?.resume();
       await supervisor?.restartServices();
       replayInputWait();
       jsonlWatcher?.requeueAll();
@@ -689,7 +686,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     setActiveStore(storeChoiceOf(storeCfg), () => sup.status(), pgCfg.kind !== 'managed' ? undefined : () => switchBackLive<PgStores>({
       exclusive: (fn) => sup.exclusive(fn),
       plan: () => switchBackPlan(userData),
-      postgresInboxLive: () => existsSync(join(userData, INBOX_PG_MARKER)),
+      postgresInboxLive: () => inboxOnPostgres(userData),
       open: () => openStores(),
       close: closeStores,
       quiesce: quiesceStores,
@@ -698,8 +695,9 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       commit: () => setStoreChoice('sqlite'),
       resume: resumeWriters,
       stopBringUp: () => sup.stop(),
-      // History must not reach Postgres after the D54 merge: restart on SQLite now.
+      // History must not reach Postgres after the user-state merge back: restart on SQLite now.
       relaunch: () => {
+        if (shuttingDown) return;
         app.relaunch();
         app.quit();
       },

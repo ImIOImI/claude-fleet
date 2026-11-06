@@ -76,7 +76,7 @@ export function storeSwitchConfirm(active: StoreChoice, configured: StoreChoice,
       steps: [
         'Now: inbox and history writes pause, and the app copies the Postgres inbox (todos, automations, proposals, notifications) into a new inbox.db. ' +
           'Renames, tags, tab links, port exposures and usage merge into state.db. Then the app relaunches on SQLite.',
-        `History resumes from state.db and the transcripts. ${REGENERATE}`,
+        `History resumes from state.db and the transcripts. History for pruned transcripts or deleted workspaces isn't copied back: it stays in the Postgres volume. ${REGENERATE}`,
         'If the copy fails or an automation is running, nothing changes and the app stays on Postgres. ' +
           'If inbox.db in the app data folder already holds a separate inbox, the switch is refused: quit the app and move inbox.db ' +
           '(with any inbox.db-wal and inbox.db-shm) out of the app data folder first.',
@@ -92,6 +92,13 @@ export function storeSwitchConfirm(active: StoreChoice, configured: StoreChoice,
     confirmLabel: 'Switch at next start',
     relaunches: false,
   };
+}
+
+/** The switch back confirm's progress line: it runs once a bring-up in flight finishes. */
+export function switchBackProgressText(s: StoreStatus): string {
+  if (s.phase === 'importing') return 'Waiting for the current copy to Postgres to finish…';
+  if (s.phase === 'starting') return 'Waiting for the Postgres store to finish starting…';
+  return 'Copying the inbox back. The app relaunches when it is done.';
 }
 
 /** The banner under the strip, or null when there is nothing to say. */

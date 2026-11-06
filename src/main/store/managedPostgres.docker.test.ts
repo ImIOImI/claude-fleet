@@ -29,6 +29,19 @@ async function opensAsApp(cfg: PostgresStoreConfig): Promise<void> {
 describe.skipIf(process.env.MANAGED_PG_DOCKER !== '1')('the managed container on Docker', () => {
   it('creates, reuses, survives a restart, locks the superuser, and moves off a taken port', async () => {
     const docker = new Docker();
+    // Docker drops an exec from the container's ExecIDs once it exits; the exec itself stays inspectable.
+    const execIds: string[] = [];
+    const getContainer = docker.getContainer.bind(docker);
+    docker.getContainer = (id: string) => {
+      const c = getContainer(id);
+      const exec = c.exec.bind(c) as (o: Docker.ExecCreateOptions) => Promise<Docker.Exec>;
+      c.exec = (async (o: Docker.ExecCreateOptions) => {
+        const e = await exec(o);
+        execIds.push(e.id);
+        return e;
+      }) as typeof c.exec;
+      return c;
+    };
     const md = dockerodeManagedDocker(docker);
     const sfx = randomBytes(4).toString('hex');
     const names = { container: `claude-fleet-postgres-test-${sfx}`, volume: `claude-fleet-postgres-data-test-${sfx}` };
@@ -47,8 +60,8 @@ describe.skipIf(process.env.MANAGED_PG_DOCKER !== '1')('the managed container on
       expect(info.HostConfig.PortBindings['5432/tcp']).toEqual([{ HostIp: '127.0.0.1', HostPort: String(port) }]);
       expect(info.Config.Env.some((e) => e.startsWith('POSTGRES_PASSWORD='))).toBe(false);
       expect(JSON.stringify(info)).not.toContain(secret);
-      expect((info.ExecIDs ?? []).length).toBeGreaterThan(0);
-      for (const id of info.ExecIDs ?? []) expect(JSON.stringify(await docker.getExec(id).inspect())).not.toContain(secret);
+      expect(execIds.length).toBeGreaterThan(1);
+      for (const id of execIds) expect(JSON.stringify(await docker.getExec(id).inspect())).not.toContain(secret);
 
       await opensAsApp(cfg);
       const su = new pg.Client({ host: '127.0.0.1', port, user: 'postgres', password: 'x', database: 'fleet', ssl: false, connectionTimeoutMillis: 5_000 });

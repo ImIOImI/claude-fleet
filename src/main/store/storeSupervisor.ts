@@ -1,4 +1,4 @@
-// Brings a Postgres store up and keeps watching it (part 4b D50): the app
+// Brings a Postgres store up and keeps watching it (SPEC §8 *Startup*): the app
 // boots without waiting, store-backed services start once it is ready, and a
 // later outage shows as `down` until a ping succeeds again.
 import { EventEmitter } from 'node:events';
