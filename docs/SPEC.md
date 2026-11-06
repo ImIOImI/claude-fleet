@@ -658,7 +658,7 @@ Today the primary workspace backend is a Docker container. The container name is
 Each workspace's Claude transcripts (`<userData>/state/<id>/.claude/projects/-workspace/<session-uuid>.jsonl`) are tailed by a single SQLite cache at `<userData>/state.db` (WAL mode). JSONL stays authoritative — the DB can be dropped at any time and the watcher rebuilds it from the JSONLs on next start.
 
 **Postgres store.** With `store: { kind: 'postgres' }` (§6 *Settings*) the same queries run on Postgres (`openDbPostgres(pool)`; `store/pgStores.ts:openPgStores` opens both stores on one pool).
-- **Schema:** a baseline equal to the final SQLite schema (`store/migrations/statePg.ts`, state baseline = state v14; v15 `port_exposures` is step 15). Types: `BIGINT` for every integer, `DOUBLE PRECISION` for real, `TEXT COLLATE "C"` for every text column (byte order, as SQLite compares), identity ids, and `embeddings.vec vector(384)`. There is no vector index; search is exact.
+- **Schema:** a baseline equal to the final SQLite schema (`store/migrations/statePg.ts`, state baseline = state v14; v15 `port_exposures` is step 15; v16 retention is step 16). Types: `BIGINT` for every integer, `DOUBLE PRECISION` for real, `TEXT COLLATE "C"` for every text column (byte order, as SQLite compares), `BYTEA` for `events.raw_z`, identity ids, and `embeddings.vec vector(384)`, nullable (the one NOT NULL difference from SQLite: a placeholder has no vector). There is no vector index; search is exact.
 - **Performance budgets** (`state/stateBench.test.ts` `PG_GATE`; `STATE_BENCH=1 STORE_TEST_DIALECT=postgres` measures, `STATE_BENCH_PG_GATE=<files>` gates). Postgres is gated on absolute budgets, not a ratio to SQLite: ingest and writes pay a loopback round trip and a commit per statement (plus the write gate's `begin`/`commit`, which the bench opens the store with, as the app does). Reads ≤ 16 ms (summary uncached, events page, list sessions, read-round stall), cached summary and mapping lookup ≤ 1 ms, search ≤ 50 ms, stall max ≤ 50 ms, ingest ≤ 3 ms/line fresh and 1.5 ms/line replay, record mapping and record error ≤ 10 ms. The SQLite bench is unchanged and keeps its A/B gate against the base.
 - **Managed Postgres** (`store/managedPostgres.ts`, Docker via `store/managedDocker.ts`): `ensureManagedPostgres` runs at every start and on recovery, and is idempotent.
   - **Container:** `claude-fleet-postgres` from the pinned image (§4), labels `com.claude-fleet.store=postgres` and `com.claude-fleet.store.pg-major=16`, never `com.claude-fleet.managed` (which marks workspace containers). `RestartPolicy: no`. Data in the named volume `claude-fleet-postgres-data` (same labels) at `/var/lib/postgresql/data`; `initdb --locale=C.UTF-8 --encoding=UTF8`, database `fleet`. The env has `POSTGRES_PASSWORD_FILE=/proc/sys/kernel/random/uuid` and no `POSTGRES_PASSWORD`, so initdb's superuser password is random and never stored. A container is recreated (same port and volume) unless it has the pinned image, the store label and a `127.0.0.1` host-port binding.
@@ -702,7 +702,7 @@ Each workspace's Claude transcripts (`<userData>/state/<id>/.claude/projects/-wo
     | 100,000 | 116 ms | 155 ms |
     | 250,000 | 291 ms | 342 ms |
 
-**Schema (v13, current):**
+**Schema (v16, current):**
 
 ```sql
 CREATE TABLE events (
@@ -725,8 +725,9 @@ CREATE TABLE events (
   tool_use_id TEXT,                    -- tool_use.id (assistant) / tool_result.tool_use_id (user) — links a call to its result
   tool_input TEXT,                     -- short summary of tool_use.input (command/path/pattern/…)
   tool_result_is_error INTEGER,        -- 1/0 on the tool_result event; NULL otherwise
-  raw_jsonl TEXT NOT NULL,             -- original line, preserves fidelity
+  raw_jsonl TEXT NOT NULL,             -- original line ('' when raw_z holds it); a retention stub once stripped
   dedup_key TEXT NOT NULL,             -- uuid when present, else sha256(raw_jsonl)
+  raw_z BLOB,                          -- v16: zlib-deflated line (SQLite only; BYTEA, always NULL, on Postgres)
   UNIQUE(session_id, dedup_key)
 );
 CREATE INDEX idx_events_session_ts ON events(session_id, ts);
@@ -788,7 +789,8 @@ CREATE TABLE embeddings (
   text         TEXT NOT NULL,          -- the text that was embedded
   model_id     TEXT NOT NULL,          -- e.g. 'Xenova/bge-small-en-v1.5'
   dim          INTEGER NOT NULL,       -- 384
-  vec          BLOB NOT NULL,          -- Float32Array serialized as raw bytes
+  vec          BLOB NOT NULL,          -- int8 [f32 scale][384 × int8] (388 B) or legacy float32 (1536 B);
+                                       -- empty for a placeholder (text = ''). Postgres: vector(384), NULL for a placeholder
   dedup_key    TEXT NOT NULL,
   UNIQUE(session_id, kind, dedup_key)
 );
@@ -956,13 +958,31 @@ CREATE TABLE session_tool_counts (
   count       INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (session_id, tool_name)
 );
+
+-- v16: retention bookkeeping (see *Retention* below). Per-session watermarks:
+-- rows with ts < compressed_before have been considered for compression,
+-- rows with ts < stripped_before for stripping.
+CREATE TABLE event_retention (
+  session_id        TEXT PRIMARY KEY,
+  workspace_id      TEXT NOT NULL,
+  compressed_before INTEGER NOT NULL DEFAULT 0,
+  stripped_before   INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_event_retention_workspace ON event_retention(workspace_id);
+
+-- v16: key/value bookkeeping: retention.first_pass_at, retention.last_pass_at,
+-- embeddings.compacted_through_id, vacuum.last_attempt_at.
+CREATE TABLE maintenance (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 ```
 
 `ERRORS_RETENTION = 2000`: every `recordError` call prunes to the most recent 2000 rows (DELETE by id rank). The table is an append-only ring buffer — no explicit expiry, no separate job.
 
 `logError` is the single write path. File append to `<userData>/error.log` (one JSON line per call) remains the primary, crash-safe output; `recordError` is a best-effort DB sink registered via `setErrorSink` — a wedged DB never breaks crash logging. The sink is async: it inserts the row and prunes to the newest `ERRORS_RETENTION` (2000) in one transaction. The prune is `DELETE … WHERE id <= (SELECT id … ORDER BY id DESC LIMIT 1 OFFSET 2000)`, a PK seek. A rejection is swallowed by the sink. `LogPayload` carries optional `workspaceId`, `sessionId`, and `level` fields (absent ⇒ `null` / `'error'`), enabling operational diagnostics to be attributed to a workspace or session alongside crash rows. Beyond crash rows, the main process emits **operational diagnostics** through the same path (all queryable from a workspace via the `list_errors` MCP tool): `app-start` (info, once per app run right after the DB sink is wired — the version string plus `extra.sha`, i.e. the build identity (#298), so historical error/telemetry rows can be partitioned by build when two builds share a semver), `mcp-tool-error` (every MCP tool-call exception, with stack + tool + truncated args — #194), `mcp-call-stalled` (watchdog: a tools/call still running after 10s, tagged with the stage stuck in, `resolve-allowed` vs `run-tool`), `mcp-slow-call` (completed call over 10s total or 2s scope-resolve), `grant-check-slow` (a single `assertControl` over 1s during scope resolution), and the broker→claude mapping lifecycle (#195): `mapping-learned` (info, unambiguous pairing), `mapping-ambiguous-consume` (warn, FIFO consume with >1 tab pending — pairing is a guess; includes the queue snapshot), `mapping-remapped` (warn, a broker session's claude id overwritten with a different one — the cross-wired-tab event), `mapping-learn-failed` (warn, the fire-and-forget mapping write rejected), `usage-record-failed` (warn, the fire-and-forget resume `recordUsageEvent` call rejected). MCP connection lifecycle rows make request loss attributable end-to-end: `mcp-conn` / `mcp-conn-closed` (info; transport, lifetime, rpc-line count per connection) and `mcp-auth-failed` (warn; a TCP connection presented an unknown token).
 
-This `sessions` table is the index behind the Sessions table feature (§6 *Sessions*, §8 *Browse & resume a past session*): `listSessions` reads it joined to `session_costs` (not a grouped `events` pass — the rollup makes this an index seek rather than a full scan), `renameSession` sets `user_set_name`, and `deleteSession` removes the session's rows here + in `events`/`session_costs`/`session_stats`/`session_tool_counts`/`broker_sessions` before the IPC layer unlinks the JSONL.
+This `sessions` table is the index behind the Sessions table feature (§6 *Sessions*, §8 *Browse & resume a past session*): `listSessions` reads it joined to `session_costs` (not a grouped `events` pass — the rollup makes this an index seek rather than a full scan), `renameSession` sets `user_set_name`, and `deleteSession` removes the session's rows here + in `events`/`session_costs`/`session_stats`/`session_tool_counts`/`broker_sessions`/`embeddings`/`event_retention` before the IPC layer unlinks the JSONL.
 
 **Title derivation.** The display title is `user_set_name ?? ai_title ?? first_user_message`. `ai_title` is **populated, not dormant**, from **two** last-write-wins sources folded into `sessions.ai_title` by `ingestBatch`: (1) Claude Code (≥2.1.x) writes `{"type":"ai-title","aiTitle":…,"sessionId":…}` lines into its own transcript natively (no hook, no statusline) — but only **once, early** (a stale one-shot); (2) the `summarize.sh` Stop hook emits a **rolling** `ai-title` line from each chapter summarization (§4 *Title refresh*), so a long session's title keeps up with what it's actually about instead of freezing on the first prompt (#170). Claude's native line rides on an **undocumented native transcript line type**, so it is the kind of thing a `claude` pin bump can silently break (§4 — bumping the pin is deliberate; re-verify the `ai-title` line still appears); the summarizer's rolling line does not depend on that and continues regardless. `first_user_message` is the COALESCE'd first value, but **synthetic command-wrapper messages are skipped** when deriving it (`src/main/userPromptText.ts`): a session started with a slash command (e.g. `/clear`) or a `!` local command emits a wrapper-only first `user` message (`<local-command-caveat>`/`<command-name>`/`<bash-input>`/…) that would otherwise lock in as a junk fallback title; the first *real* prompt wins instead. Also skipped: the **bare** local-command caveat (`Caveat: The messages below were generated by the user…` — older claude CLIs omit the wrapper tag, and the local/WSL launcher runs whatever claude the host has) and any `user` event with `isMeta: true`. Rows poisoned before these filters existed cannot heal through ingest (COALESCE + event dedup), so migration 12 repairs them once — recompute from stored events, NULL when the session has no real prompt. `tests/ai-title.spec.ts` pins both behaviors against the real watcher + DB.
 

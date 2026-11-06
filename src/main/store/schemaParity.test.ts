@@ -96,10 +96,13 @@ async function pgShapes(schema: string, k: ReturnType<typeof postgresKysely>): P
 }
 
 describe.skipIf(!isPg)('Postgres baseline schema parity', () => {
-  it('state schema mirrors state.db at user_version 15', async () => {
+  it('state schema mirrors state.db at user_version 16', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cf-parity-'));
     const raw = db.openDb(dir);
     const want = sqliteShapes(raw);
+    // A placeholder's vec is NULL on Postgres (vector(384) has no empty value);
+    // SQLite keeps NOT NULL and stores an empty BLOB.
+    want.embeddings.columns.vec = { notNull: false };
     await db.closeDb();
     rmSync(dir, { recursive: true, force: true });
     const t = await testPgSchema();
