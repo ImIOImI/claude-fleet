@@ -1,9 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
-  costForSession, eventsForSession, ingestLine, recentToolCallsForSession, recordUsageEvent,
+  costForSession, eventsForSession, ingestLine, insertEmbedding, maintenanceGet, maxEmbeddingId, recentToolCallsForSession,
+  recordUsageEvent, searchEmbeddings,
 } from '../db.js';
+import { encodeVector, EMBED_DIM, EMBED_MODEL_ID } from '../vectors.js';
+import { indexSessionTurns } from '../transcriptIndex.js';
 import { openTestState, queryRows, isPg } from '../store/testStore.js';
-import { DAY_MS, retainEvents, type Throttle } from './retention.js';
+import { compactEmbeddings, DAY_MS, retainEvents, type Throttle } from './retention.js';
 
 const WS = '01WS';
 const SES = 'ses-old';
@@ -119,5 +122,49 @@ describe('retainEvents', () => {
     expect(await queryRows('SELECT session_id FROM event_retention')).toEqual([]);
     await retainEvents(NOW, unthrottled, { sliceRows: 10 });
     expect((await eventsForSession(SES)).filter((e) => JSON.parse(e.rawJsonl).fleetStripped).length).toBe(30);
+  });
+});
+
+describe('compactEmbeddings', () => {
+  const vecOf = (seed: number): Float32Array => {
+    const v = new Float32Array(EMBED_DIM);
+    for (let i = 0; i < EMBED_DIM; i++) v[i] = Math.sin(seed * 31 + i);
+    const n = Math.hypot(...v);
+    return v.map((x) => x / n);
+  };
+
+  async function seed(): Promise<void> {
+    for (let i = 0; i < 5; i++) {
+      await insertEmbedding({
+        workspaceId: WS, sessionId: SES, kind: 'turn', refEventId: i + 1, ts: NOW, text: i % 2 ? '' : `turn ${i}`,
+        modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec: encodeVector(i % 2 ? new Float32Array(EMBED_DIM) : vecOf(i)), dedupKey: `t${i + 1}`,
+      });
+    }
+  }
+
+  it('drops placeholder vectors, int8-encodes the rest (SQLite), and keeps ranking', async () => {
+    await seed();
+    const q = vecOf(2);
+    const before = (await searchEmbeddings(q, [WS], { limit: 3 })).map((h) => h.text);
+    const r = await compactEmbeddings(unthrottled, { sliceRows: 2 });
+    expect(r.rows).toBe(isPg ? 2 : 5);
+    const rows = await queryRows<{ text: string; n: unknown }>(
+      isPg ? 'SELECT text, CASE WHEN vec IS NULL THEN 0 ELSE 1 END AS n FROM embeddings ORDER BY id'
+           : 'SELECT text, length(vec) AS n FROM embeddings ORDER BY id');
+    for (const row of rows) {
+      if (row.text === '') expect(Number(row.n)).toBe(0);
+      else expect(Number(row.n)).toBe(isPg ? 1 : EMBED_DIM + 4);
+    }
+    expect((await searchEmbeddings(q, [WS], { limit: 3 })).map((h) => h.text)).toEqual(before);
+    expect(await maintenanceGet('embeddings.compacted_through_id')).toBe(String(await maxEmbeddingId()));
+    expect((await compactEmbeddings(unthrottled)).rows).toBe(0);
+  });
+
+  it('stores new placeholders without a vector', async () => {
+    await ingestLine(WS, SES, toolResult('p1', 1));
+    await indexSessionTurns(SES, async (texts) => texts.map(() => vecOf(9)));
+    const [row] = await queryRows<{ n: unknown }>(
+      isPg ? 'SELECT CASE WHEN vec IS NULL THEN 0 ELSE 1 END AS n FROM embeddings' : 'SELECT length(vec) AS n FROM embeddings');
+    expect(Number(row.n)).toBe(0);
   });
 });

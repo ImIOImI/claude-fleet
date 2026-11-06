@@ -3,8 +3,8 @@
 // on the async store handle in bounded slices behind a Throttle, so the main
 // thread is never held for more than one small transaction at a time.
 import {
-  retentionCandidates, retentionRows, rewriteEventRaw, setRetentionWatermarks, stateDialect,
-  type RetentionRow,
+  compactEmbeddingSlice, maintenanceGet, maintenanceSet, maxEmbeddingId, retentionCandidates, retentionRows,
+  rewriteEventRaw, setRetentionWatermarks, stateDialect, type RetentionRow,
 } from '../db.js';
 import { COMPRESS_MIN_BYTES, deflateLine, rawLine, stripLine } from './rawCodec.js';
 
@@ -87,6 +87,25 @@ export async function retainEvents(now: number, t: Throttle, opts: { sliceRows?:
     const ageingOut = Math.min(sCut, c.compressedBefore);
     if (!(await walkRange(c.sessionId, c.strippedBefore, ageingOut, true, t, sliceRows, apply, acc))) break;
     await setRetentionWatermarks(c.sessionId, c.workspaceId, Math.max(c.compressedBefore, cCut), Math.max(c.strippedBefore, sCut));
+  }
+  return acc;
+}
+
+const EMBEDDINGS_CURSOR = 'embeddings.compacted_through_id';
+
+/** The embeddings step: drop placeholder vectors and (SQLite) re-encode
+ *  float32 vectors to int8, up to the max id seen at the start. */
+export async function compactEmbeddings(t: Throttle, opts: { sliceRows?: number } = {}): Promise<{ rows: number; bytesSaved: number }> {
+  const maxId = await maxEmbeddingId();
+  let cursor = Number((await maintenanceGet(EMBEDDINGS_CURSOR)) ?? 0);
+  const acc = { rows: 0, bytesSaved: 0 };
+  while (cursor < maxId && !t.stopped()) {
+    const r = await t.slice(() => compactEmbeddingSlice(cursor, maxId, opts.sliceRows ?? SLICE_ROWS));
+    if (r.lastId === null) break;
+    cursor = r.lastId;
+    acc.rows += r.rewritten;
+    acc.bytesSaved += r.bytesSaved;
+    await maintenanceSet(EMBEDDINGS_CURSOR, String(cursor));
   }
   return acc;
 }

@@ -769,7 +769,7 @@ CREATE INDEX idx_errors_workspace_ts ON errors(workspace_id, ts);
 CREATE INDEX idx_errors_session ON errors(session_id);
 
 -- v6: semantic transcript search (rebuildable from JSONL — additive).
--- vec is a Float32 BLOB (384 floats, L2-normalized) produced by bge-small-en-v1.5
+-- vec holds a 384-d L2-normalized vector (int8 since v16, see vec below) produced by bge-small-en-v1.5
 -- via the local onnxruntime-node backend (bge-small-en-v1.5 at dtype q8; the DB
 -- model key carries the dtype -- 'Xenova/bge-small-en-v1.5@q8' -- because q8 and
 -- fp32 vectors are not comparable: a dtype change re-keys and re-embeds, and the

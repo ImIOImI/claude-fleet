@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { encodeVector, decodeVector, dot, topK, EMBED_DIM } from './vectors.js';
+import { encodeVector, encodeVectorInt8, decodeVector, dot, topK, EMBED_DIM, EMPTY_VECTOR } from './vectors.js';
 
 describe('vectors', () => {
   it('round-trips a Float32 vector through BLOB encode/decode', () => {
@@ -38,5 +38,30 @@ describe('vectors', () => {
 
   it('exposes the model identity constants', () => {
     expect(EMBED_DIM).toBe(384);
+  });
+
+  it('int8 encoding is 388 bytes and decodes within half a quantization step', () => {
+    const v = new Float32Array(EMBED_DIM);
+    for (let i = 0; i < EMBED_DIM; i++) v[i] = Math.sin(i * 1.7) / 10;
+    const buf = encodeVectorInt8(v);
+    expect(buf.length).toBe(EMBED_DIM + 4);
+    const scale = buf.readFloatLE(0);
+    const back = decodeVector(buf);
+    expect(back.length).toBe(EMBED_DIM);
+    for (let i = 0; i < EMBED_DIM; i++) expect(Math.abs(back[i] - v[i])).toBeLessThanOrEqual(scale / 2 + 1e-7);
+  });
+
+  it('int8 of a zero vector decodes to zeros', () => {
+    expect(Array.from(decodeVector(encodeVectorInt8(new Float32Array(EMBED_DIM)))).every((x) => x === 0)).toBe(true);
+  });
+
+  it('an empty or null vector decodes to an empty array', () => {
+    expect(decodeVector(EMPTY_VECTOR).length).toBe(0);
+    expect(decodeVector(null).length).toBe(0);
+  });
+
+  it('still decodes a legacy float32 vector of full width', () => {
+    const v = new Float32Array(EMBED_DIM); v[3] = 0.5;
+    expect(decodeVector(encodeVector(v))[3]).toBe(0.5);
   });
 });
