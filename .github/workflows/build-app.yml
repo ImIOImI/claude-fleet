@@ -279,8 +279,16 @@ jobs:
 
       # apt-installs the Chromium/Electron shared libs (libgtk-3, libnss3,
       # libgbm, libasound, …) — the set Electron needs to start.
+      # The runner image already ships these; install-deps would otherwise only
+      # add ~16 MB of fonts, which stalled for 10+ min on a slow mirror.
       - name: Install Electron/Chromium system libraries
-        run: npx playwright install-deps chromium
+        run: |
+          bin=node_modules/electron/dist/electron
+          if [ ! -x "$bin" ] || ldd "$bin" | grep -q 'not found'; then
+            npx playwright install-deps chromium
+          else
+            echo "all Electron shared libs present; skipping install-deps"
+          fi
 
       - name: Build app
         run: npm run build
