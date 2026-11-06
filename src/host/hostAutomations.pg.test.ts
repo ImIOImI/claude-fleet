@@ -54,10 +54,9 @@ describe.skipIf(!isPg)('host automations under the lease', () => {
     const a = await host('a', () => ea, clock);
     await a.h.reconcile([daily]);
     clock.now = Date.parse('2026-11-06T03:00:30Z');
-    const [ra, rb] = await Promise.allSettled([a.h.tick(), b.h.tick()]);
-    expect(ra.status).toBe('fulfilled');
-    expect(rb.status).toBe('rejected');
-    expect((rb as PromiseRejectedResult).reason.message).toMatch(/lease|holder/);
+    // b first: after a's claim commits, b's unfenced list no longer sees the slot due and never writes.
+    await expect(b.h.tick()).rejects.toThrow(/lease|holder/);
+    await a.h.tick();
     await expect.poll(() => a.broker.created.length + b.broker.created.length).toBe(1);
     expect(a.broker.created).toHaveLength(1);
     const runs = await t!.pool.query(`SELECT count(*)::int AS n FROM ${t!.schema}.runs`);

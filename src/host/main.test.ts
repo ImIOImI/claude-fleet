@@ -346,10 +346,10 @@ describe('runHost with db: listen first', () => {
 describe('isDbUnavailable', () => {
   it('is true for connection-level failures only', () => {
     const e = (code: string, message = 'x') => Object.assign(new Error(message), { code });
-    for (const err of [e('ECONNREFUSED'), e('ETIMEDOUT'), e('08006'), e('57P01'), new Error('Connection terminated unexpectedly'), new Error('timeout exceeded when trying to connect')]) {
+    for (const err of [e('ECONNREFUSED'), e('ETIMEDOUT'), e('08006'), e('57P01'), new Error('Connection terminated unexpectedly'), new Error('timeout exceeded when trying to connect'), new Error('Client has encountered a connection error and is not queryable')]) {
       expect(isDbUnavailable(err)).toBe(true);
     }
-    for (const err of [e('42P01'), e('28P01'), new Error('pgvector is not installed'), new TypeError('x is undefined'), null]) {
+    for (const err of [e('42P01'), e('28P01'), new Error('pgvector is not installed'), new TypeError('x is undefined'), new Error('Client was closed and is not queryable'), null]) {
       expect(isDbUnavailable(err)).toBe(false);
     }
   });
