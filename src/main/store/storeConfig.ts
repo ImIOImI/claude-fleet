@@ -27,7 +27,13 @@ export interface PostgresStoreConfig {
   poolMax: number;
 }
 
-export type StoreConfig = { kind: 'sqlite' } | PostgresStoreConfig;
+/** config.json `{ kind: 'postgres', managed: true }`: the app-managed container (managedPostgres.ts). */
+export interface ManagedStoreConfig {
+  kind: 'managed';
+  poolMax: number;
+}
+
+export type StoreConfig = { kind: 'sqlite' } | PostgresStoreConfig | ManagedStoreConfig;
 
 export class StoreConfigError extends Error {}
 
@@ -37,6 +43,8 @@ export class ConfigJsonError extends StoreConfigError {}
 export interface ParseOptions {
   /** fleet-host only: a desktop config.json is not a secret store. */
   allowStaticSecrets: boolean;
+  /** The desktop only: fleet-host has no Docker to manage a container with. */
+  allowManaged?: boolean;
   fileExists?: (path: string) => boolean;
 }
 
@@ -173,11 +181,21 @@ export function parseStoreConfig(v: unknown, opts: ParseOptions): StoreConfig {
     return { kind: 'sqlite' };
   }
   if (v.kind !== 'postgres') return fail('kind must be "sqlite" or "postgres"');
+  if (v.managed !== undefined) {
+    if (v.managed !== true) fail('managed must be true');
+    if (!opts.allowManaged) fail('managed is not allowed here');
+    onlyKeys(v, ['kind', 'managed', 'poolMax']);
+    return { kind: 'managed', poolMax: parsePoolMax(v) };
+  }
   const schema = v.schema === undefined ? 'fleet' : str(v, 'schema');
   if (!/^[a-z_][a-z0-9_]*$/.test(schema)) fail('schema must match [a-z_][a-z0-9_]*');
+  return { kind: 'postgres', connection: parseConnection(v, opts), schema, poolMax: parsePoolMax(v) };
+}
+
+function parsePoolMax(v: Obj): number {
   const poolMax = v.poolMax === undefined ? 4 : v.poolMax;
   if (typeof poolMax !== 'number' || !Number.isInteger(poolMax) || poolMax < 1 || poolMax > 32) fail('poolMax must be an integer 1-32');
-  return { kind: 'postgres', connection: parseConnection(v, opts), schema, poolMax: poolMax as number };
+  return poolMax as number;
 }
 
 /** pg pool options for a parsed Postgres store. `ssl` is always explicit, so
@@ -222,7 +240,7 @@ const LIBPQ_SECRET_ENV = ['PGPASSWORD', 'PGPASSFILE', 'PGSERVICE', 'PGSERVICEFIL
  *  workspace process. `null` (config unreadable) assumes Postgres. */
 export function storeSecretEnvNames(cfg: StoreConfig | null): string[] {
   if (cfg?.kind === 'sqlite') return [];
-  const c = cfg?.connection;
+  const c = cfg?.kind === 'postgres' ? cfg.connection : undefined;
   const own = !c ? [] : 'env' in c ? [c.env] : 'password' in c && c.password.kind === 'env' ? [c.password.name] : [];
   return [...own, ...LIBPQ_SECRET_ENV];
 }

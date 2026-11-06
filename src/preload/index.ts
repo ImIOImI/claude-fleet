@@ -14,6 +14,8 @@ export type {
 import type { AccountStatus, SignInStart, SignInPoll } from './identityTypes';
 export type { AccountStatus, AccountIdentity, AccountSso, SignInStart, SignInPoll } from './identityTypes';
 import type { RemoteAddOptions, RemoteLiveSession, RemoteProbe } from './remoteTypes';
+import type { StoreChoice, StoreSettings, StoreStatus } from './storeTypes';
+export type { ImportProgress, StoreChoice, StorePhase, StoreSettings, StoreStatus } from './storeTypes';
 export type { RemoteAddOptions, RemoteLiveSession, RemoteProbe, RemoteProbeOk, RemoteProbeErr, RemoteProbeErrorKind, RemoteTier } from './remoteTypes';
 
 /** Outcome of a `pty:resize`. Lives here because preload is the IPC contract
@@ -246,6 +248,8 @@ const api = {
     errorLogPath: (): Promise<string> => ipcRenderer.invoke('app:errorLogPath'),
     /** Open error.log in the OS default app — the MCP-unreachable toast's action. */
     openErrorLog: (): Promise<string> => ipcRenderer.invoke('app:openErrorLog'),
+    /** Quit and start again (Settings → Storage applies at restart). */
+    relaunch: (): Promise<void> => ipcRenderer.invoke('app:relaunch'),
     /** Current host MCP listener health, for a window mounting mid-outage. */
     getMcpStatus: (): Promise<{ ok: boolean; detail?: string }> =>
       ipcRenderer.invoke('mcp:status:get'),
@@ -730,6 +734,19 @@ const api = {
     signInCancel: (): Promise<void> => ipcRenderer.invoke('identity:signInCancel'),
     /** Delete the token from this computer's vault. */
     signOut: (): Promise<void> => ipcRenderer.invoke('identity:signOut')
+  },
+  store: {
+    getSettings: (): Promise<StoreSettings> => ipcRenderer.invoke('store:getSettings'),
+    /** Writes config.json (applies at the next start). Leaving a running managed
+     *  store first copies the inbox back into inbox.db; the result's notice says
+     *  when that was refused or failed. */
+    setChoice: (choice: Exclude<StoreChoice, 'external'>): Promise<StoreSettings> => ipcRenderer.invoke('store:setChoice', choice),
+    /** Postgres store status changes (starting, importing, down, ready). Returns an unsubscribe function. */
+    onStatus: (cb: (s: StoreStatus) => void): (() => void) => {
+      const handler = (_e: IpcRendererEvent, s: StoreStatus): void => cb(s);
+      ipcRenderer.on('store:status', handler);
+      return () => ipcRenderer.removeListener('store:status', handler);
+    }
   },
   remote: {
     /** /whoami a host URL with the signed-in token; never returns the token. */

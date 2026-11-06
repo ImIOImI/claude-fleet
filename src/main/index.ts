@@ -1,20 +1,20 @@
 import { app, BrowserWindow, dialog, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
-import { registerIpc, invalidateWorkspaceList, stopRemoteBackend } from './ipc.js';
-import { openDb, closeDb, deleteEmbeddingsForOtherModels, listSessionIds, recordError, stateKysely, sessionCaptureSignals, isAutomationSession } from './db.js';
+import { registerIpc, invalidateWorkspaceList, replayInputWait, stopRemoteBackend } from './ipc.js';
+import { openDb, openDbPostgres, closeDb, deleteEmbeddingsForOtherModels, listSessionIds, recordError, stateKysely, sessionCaptureSignals, isAutomationSession } from './db.js';
 import { initPerf, shutdownPerf, perfSpan, perfSpanAsync } from './perf.js';
 import { PerfStore } from './perfStore.js';
 import { resolvePerfConfig } from './perfConfig.js';
 import { getPerfTelemetry, getPerfOtlp, getKnowledgeCapture, getKnowledgeCaptureDailyCap } from './config.js';
 import { instrumentIpcHandle } from './perfIpc.js';
 import { EMBED_MODEL_ID } from './vectors.js';
-import { startMcpServer, stopMcpServer, ensureWorkspaceSocket, setMcpStatusListener, setQueryEmbedder, setClaimHandlers, setCaptureSettingsHandlers, setSearchHitHook, TOOLS } from './mcpServer.js';
+import { startMcpServer, stopMcpServer, ensureWorkspaceSocket, setMcpStatusListener, setQueryEmbedder, setClaimHandlers, setCaptureSettingsHandlers, setSearchHitHook, setReadSource, TOOLS } from './mcpServer.js';
 import { broadcastMcpStatus } from './mcpStatusBroadcast.js';
 import { ensureBuiltinLoadouts } from './loadouts.js';
 import { JsonlWatcher } from './jsonlWatcher.js';
 import { PeerStatusWatcher } from './peerStatusWatcher.js';
 import { broadcastSessionStatus } from './sessionStatusBroadcast.js';
-import { listWorkspaceManifests, manifestInvariant, readWorkspaceManifest, writeWorkspaceManifest } from './workspaces.js';
+import { listWorkspaceManifests, manifestInvariant, readWorkspaceManifest, writeWorkspaceManifest, type WorkspaceSpec } from './workspaces.js';
 import { wslLocalProjectsDir, wslLocalSessionsDir } from './localLauncher.js';
 import { encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir } from './paths.js';
 import { installMainProcessHandlers, getLogPath, setErrorSink, logError } from './errorLog.js';
@@ -27,8 +27,26 @@ import { registerInboxIpc } from './inbox/inboxIpc.js';
 import { registerNotifyIpc } from './inbox/notifyIpc.js';
 import { registerAutomationIpc } from './automations/automationIpc.js';
 import { startPresence, attachKeepRunning, markQuitting, presenceDir, registerPresenceIpc } from './inbox/presence.js';
-import { getKeepRunningInTray, setKeepRunningInTray, getStoreConfig } from './config.js';
-import { openPgStores, type PgStores } from './store/pgStores.js';
+import { getKeepRunningInTray, setKeepRunningInTray, getStoreConfig, setStoreChoice } from './config.js';
+import { migratePgStores, openPgStores, pingStore, type PgStores } from './store/pgStores.js';
+import type { ManagedStoreConfig, PostgresStoreConfig, StoreConfig } from './store/storeConfig.js';
+import { StoreSupervisor } from './store/storeSupervisor.js';
+import { broadcastStoreStatus, registerStoreIpc, setActiveStore, storeChoiceOf } from './store/storeIpc.js';
+import { setActiveStoreConfig } from './store/activeStore.js';
+import { firstSwitchCopy, switchBackPlan, switchBackToSqlite } from './store/firstSwitch.js';
+import { inboxOnPostgresNotice, switchBackLive } from './store/storeSwitch.js';
+import { ServiceSteps } from './store/serviceSteps.js';
+import { withinMs } from './withinMs.js';
+import { InboxWriteGate } from './store/inboxWriteGate.js';
+import { inboxOnPostgres } from './store/sqliteFiles.js';
+import { IMPORT_PG_TRACK } from './store/storeImport.js';
+import { ensureManagedPostgres, stopManagedPostgres, type ManagedDocker } from './store/managedPostgres.js';
+import { dockerodeManagedDocker } from './store/managedDocker.js';
+import { recordHandlers } from './ipcHandlerScope.js';
+import { broadcastInboxChanged } from './inbox/inboxBroadcast.js';
+import { getSecret, setSecret } from './vault.js';
+import { MANAGED_STORE_PASSWORD_KEY, MANAGED_STORE_SCOPE } from './vaultScopes.js';
+import type { StoreStatus } from '../preload/storeTypes.js';
 import { openPgMcpReadSource } from './store/pgReadSource.js';
 import { schemaOf } from './store/postgres.js';
 import { storeStartupOutcome, storeStartupPrompt } from './store/startupPrompt.js';
@@ -36,7 +54,7 @@ import { ensureWorkspaceClaudeJson } from './docker.js';
 import { hardwareAccelDisabledAtStartup } from './config.js';
 import { setWorkspaceDefault } from './mirrorPolicy.js';
 import { makeEmbedder } from './embeddings.js';
-import { indexSessionTurns, indexSessionSummaries } from './transcriptIndex.js';
+import { indexSessionTurns, indexSessionSummaries, type EmbedFn } from './transcriptIndex.js';
 import { ClaimStore } from './claims/claimStore.js';
 import { CaptureRunStore, startOfLocalDay } from './claims/captureRunStore.js';
 import { CaptureSettingsLogStore } from './claims/captureSettingsLog.js';
@@ -65,6 +83,18 @@ let claimService: ClaimService | null = null;
 let captureScheduler: CaptureScheduler | null = null;
 // The Postgres store's shared pool when config.json chooses it.
 let pgStores: PgStores | null = null;
+let supervisor: StoreSupervisor<PgStores> | null = null;
+// Set when the store is the managed container: stopped at quit.
+let managedDocker: ManagedDocker | null = null;
+// The Postgres inbox's and history's afterBeginWrite: closed while the switch back copies.
+const inboxGate = new InboxWriteGate();
+const historyGate = new InboxWriteGate();
+// before-quit holds the quit at most this long (#485).
+const QUIT_BOUND_MS = 10_000;
+let shuttingDown = false;
+// Undoes what the inbox-backed services registered, so they can start again on the other store.
+const inboxTeardown: Array<() => void> = [];
+let keepRunningAttached = false;
 let presence: ReturnType<typeof startPresence> | null = null;
 // Notification + automation timers (#457): stopped in before-quit, ahead of inboxStore.close().
 let notifySvc: ReturnType<typeof registerNotifyIpc> | null = null;
@@ -90,6 +120,18 @@ function registerPeerStatusDirs(
       watcher.registerDir(workspaceClaudeSessionsDir(m.id));
     }
   }
+}
+
+/** The inbox's timers and background writers. */
+function stopInboxWriters(): void {
+  notifySvc?.stop();
+  auto?.stop();
+  captureScheduler?.stop();
+}
+
+function portOf(cfg: PostgresStoreConfig): number | null {
+  const c = cfg.connection;
+  return 'port' in c ? c.port : null;
 }
 
 const isDev = process.env.NODE_ENV === 'development' || !!process.env.ELECTRON_RENDERER_URL;
@@ -181,36 +223,43 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   // (#16-followup). Idempotent; non-fatal — a seeding hiccup must not block launch.
   await ensureBuiltinLoadouts().catch((e) => console.warn('[loadouts] seed failed:', e));
 
-  // A configured Postgres store that cannot open stops the launch: silently
-  // using SQLite instead would split the history and inbox in two.
+  // The store (§8 Startup). SQLite opens inline. A Postgres store (managed or
+  // external) comes up under the supervisor without holding the launch, and the
+  // services that read or write it start once it is ready. A config error stops
+  // the launch: silently using SQLite would split the history and inbox in two.
+  // Mock mode has no Docker and no transcripts, so it always uses SQLite.
+  const userData = app.getPath('userData');
+  let storeCfg: StoreConfig = { kind: 'sqlite' };
   try {
-    const storeCfg = await getStoreConfig();
-    if (storeCfg.kind === 'postgres') {
-      pgStores = await openPgStores(storeCfg, {
-        state: jsonlWatcher !== null,
-        onPoolError: (e) => logError({ source: 'main', type: 'store-pool-error', level: 'warn', message: String(e) }),
-      });
-    }
+    storeCfg = await getStoreConfig();
   } catch (e) {
     logError({ source: 'main', type: 'store-open-failed', level: 'error', message: String(e) });
-    const prompt = storeStartupPrompt(e, join(app.getPath('userData'), 'config.json'));
+    const prompt = storeStartupPrompt(e, join(userData, 'config.json'));
     const { response } = await dialog.showMessageBox({ type: 'error', noLink: true, ...prompt });
     if (storeStartupOutcome(prompt, response) === 'quit') {
       app.exit(1);
       return;
     }
   }
+  if (isMock) storeCfg = { kind: 'sqlite' };
+  setActiveStoreConfig(storeCfg);
+  const sqlite = storeCfg.kind === 'sqlite';
 
-  // Authoritative inbox (#407): opens in mock AND real mode. state.db is a
-  // droppable cache gated on the JSONL watcher; the inbox is neither.
-  try {
-    inboxStore = pgStores ? pgStores.inbox : InboxStore.open(app.getPath('userData'));
-  } catch (e) {
-    logError({ source: 'main', type: 'inbox-open-failed', level: 'error', message: String(e) });
+  // A SQLite start whose inbox lives in Postgres ("Continue without settings",
+  // a hand-edited config.json) keeps the inbox closed rather than starting an empty one.
+  const inboxElsewhere = sqlite ? inboxOnPostgresNotice(userData) : null;
+  if (sqlite && !inboxElsewhere) {
+    // Authoritative inbox (#407): opens in mock AND real mode. state.db is a
+    // droppable cache gated on the JSONL watcher; the inbox is neither.
+    try {
+      inboxStore = InboxStore.open(userData);
+    } catch (e) {
+      logError({ source: 'main', type: 'inbox-open-failed', level: 'error', message: String(e) });
+    }
   }
 
-  if (jsonlWatcher) {
-    if (!pgStores) openDb(app.getPath('userData'));
+  /** The error sink, the app-start row and perf telemetry: all write state.db. */
+  const startStateWrites = async (): Promise<void> => {
     // Wire the crash-safe DB sink so every logError call is also persisted to
     // the errors table.
     // best-effort; a wedged DB must never break crash logging, so the async
@@ -236,47 +285,233 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         process.env
       )
     );
+  };
+
+  /** Knowledge claims (#483): record_claim/search_claims/retract_claim MCP
+   *  tools, backed by the inbox's Kysely handle. captureRuns/claimService are
+   *  module-scoped so the background capture scheduler (Task 9) can reuse them. */
+  const startClaims = (inbox: InboxStore, embedFn: EmbedFn): void => {
+    const claimStore = new ClaimStore(inbox.kysely, inbox.dialect);
+    captureRuns = new CaptureRunStore(inbox.kysely);
+    claimService = new ClaimService({
+      claims: claimStore, runs: captureRuns, embed: embedFn,
+      workspaceName: async (id) => (await readWorkspaceManifest(id))?.name ?? null
+    });
+    setClaimHandlers({
+      record: (c, a) => claimService!.record(c, a),
+      search: (c, a) => claimService!.search(c, a),
+      retract: (c, a) => claimService!.retract(c, a)
+    });
+    inboxTeardown.push(() => setClaimHandlers(null));
+    void captureRuns.failRunning(Date.now(), 'interrupted by app restart').catch((e) =>
+      logError({ source: 'main', level: 'warn', type: 'capture-fail-running', message: String(e) }));
+    void claimService.backfillVectors().catch((e) =>
+      logError({ source: 'main', level: 'warn', type: 'claims-backfill', message: String(e) }));
+  };
+
+  /** Seed each workspace's durable-mirror default from its manifest before the
+   *  watcher starts ingesting, so the very first lines are mirrored per the
+   *  saved setting — not dependent on the renderer's later workspace:list poll. */
+  const startWatcher = async (watcher: JsonlWatcher, manifests: WorkspaceSpec[]): Promise<void> => {
+    for (const m of manifests) setWorkspaceDefault(m.id, m.mirror.default);
+    await perfSpanAsync('claude_fleet.boot.jsonl_watcher_start', () => watcher.start(manifests.map((m) => m.id)));
+  };
+
+  /** Knowledge capture (#483 §5): background capture forks, triggered by
+   *  context bands on ingest and by search hits from the MCP search tools. */
+  const startCaptureScheduler = async (watcher: JsonlWatcher): Promise<void> => {
+    if (inboxStore && captureRuns && claimService) {
+      const runs = captureRuns;
+      const claimsSvc = claimService;
+      // Never let a store failure block registerIpc/createWindow: without the
+      // seed, old fork transcripts merely aren't recognised as forks.
+      try {
+        loadCaptureForks(await runs.forkSessionIds());
+      } catch (e) {
+        logError({ source: 'main', level: 'warn', type: 'capture-fork-seed', message: String(e) });
+      }
+      const scheduler = new CaptureScheduler({
+        runs,
+        signals: (id) => sessionCaptureSignals(id),
+        isAutomation: (id) => isAutomationSession(id),
+        globalEnabled: () => getKnowledgeCapture(),
+        settings: async (ws) => {
+          const m = await readWorkspaceManifest(ws);
+          return m ? effectiveCaptureSettings(m) : null;
+        },
+        dailyCap: () => getKnowledgeCaptureDailyCap(),
+        // Null for a container that isn't running, before admit: no daily-cap slot.
+        target: (ws) => resolveCaptureTarget(ws),
+        topTopics: async (ws) => [...new Set((await claimsSvc.search(ws, { query: 'fleet', limit: 20 })).results.flatMap((r) => r.topics))].slice(0, 15),
+        exec: (t, args, timeoutMs) => runCapture(t, args, timeoutMs),
+        fleetToolNames: TOOLS.map((t) => t.name),
+        killInFlight: () => { killLocalCaptures(); },
+        newUuid: () => randomUUID(),
+        now: () => Date.now(),
+        log: (message, extra) => logError({ source: 'main', level: 'info', type: 'knowledge-capture', message, extra })
+      });
+      captureScheduler = scheduler;
+      const onIngest = (e: { workspaceId: string; sessionId: string }): void => scheduler.onIngest(e);
+      watcher.on('ingest', onIngest);
+      setSearchHitHook((e) => scheduler.onSearchHit(e));
+      inboxTeardown.push(() => {
+        watcher.off('ingest', onIngest);
+        setSearchHitHook(null);
+      });
+    }
+  };
+
+  /** Local-backend workspaces write to the host's real ~/.claude, not the
+   *  per-workspace state dir — register those host project dirs so their
+   *  (and their subagents') token spend is ingested (#plan-usage). */
+  const registerLocalDirs = (watcher: JsonlWatcher, manifests: WorkspaceSpec[]): void => {
+    for (const m of manifests) {
+      // Sweep for states that should be impossible (#323). writeWorkspaceManifest
+      // catches these as they're written, but a manifest already on disk in a bad
+      // state is never re-written, so it would otherwise stay silent forever —
+      // which is exactly what happened for ~6 days in #313.
+      const violation = manifestInvariant(m);
+      if (violation) {
+        logError({
+          source: 'main',
+          type: 'manifest-invariant',
+          level: 'error',
+          message: `${violation} (found at startup)`,
+          workspaceId: m.id,
+          extra: { workspaceRoot: m.workspaceRoot, launcher: m.launcher, kind: m.kind }
+        });
+      }
+      if (m.kind === 'local' && m.workspaceRoot) {
+        if (m.launcher?.mode === 'wsl') {
+          watcher.registerPolledLocalDir(
+            m.id,
+            wslLocalProjectsDir(
+              m.launcher.distro, m.launcher.home, m.workspaceRoot, encodeClaudeProjectDir
+            )
+          );
+        } else {
+          watcher.registerLocalWorkspace(m.id, m.workspaceRoot);
+        }
+      }
+    }
+  };
+
+  /** Backfill embeddings for sessions ingested before this feature / after a
+   *  model change. Non-blocking; walks every known session once. */
+  const startEmbedBackfill = (embedFn: EmbedFn): void => {
+    void (async () => {
+      try {
+        // A model/dtype change re-keys EMBED_MODEL_ID; drop vectors under
+        // retired keys so they don't accumulate as dead weight.
+        // Spanned (#perf boot attribution): the post-launch stall storm overlaps
+        // this backfill; boot.embed_backfill is wall time, the index.* / embed.*
+        // child spans carry the synchronous parts that can block the loop.
+        await perfSpanAsync('claude_fleet.boot.embed_backfill', async () => {
+          await perfSpanAsync('claude_fleet.index.delete_stale_models', () => deleteEmbeddingsForOtherModels(EMBED_MODEL_ID));
+          const sessionIds = await perfSpanAsync('claude_fleet.index.list_sessions', () => listSessionIds());
+          for (const id of sessionIds) await indexSessionTurns(id, embedFn);
+          await indexSessionSummaries(embedFn);
+        });
+      } catch (e) {
+        logError({ source: 'main', level: 'warn', type: 'index-backfill', message: String(e) });
+      }
+    })();
+  };
+
+  /** Inbox, notification and automation IPC plus their timers, and the
+   *  knowledge-capture settings that log to the inbox. */
+  const startInboxServices = (inbox: InboxStore): void => {
+    const scope = recordHandlers(ipcMain, () => {
+      notifySvc = registerNotifyIpc(inbox);
+      auto = registerAutomationIpc(inbox, notifySvc);
+      const inboxHost = registerInboxIpc(inbox, notifySvc ?? undefined, auto ? (r, c) => auto!.automations.attribution(r, c) : undefined);
+      auto?.setInboxSink(inboxHost);
+    });
+    inboxTeardown.push(() => scope.dispose());
+    // Knowledge capture settings (#483 §5a): get/set_capture_settings MCP tools,
+    // capture-settings proposals, and the change log for form edits.
+    if (auto) {
+      const settingsLog = new CaptureSettingsLogStore(inbox.kysely);
+      const runsForCount = captureRuns ?? new CaptureRunStore(inbox.kysely);
+      const proposals = auto.proposals;
+      const captureSettings = createCaptureSettingsService({
+        readManifest: (id) => readWorkspaceManifest(id),
+        writeManifest: (spec) => writeWorkspaceManifest(spec),
+        trusted: async (id) => {
+          const m = await readWorkspaceManifest(id);
+          return m?.kind === 'container' && (m.inbox?.trusted === true || m.role === 'automations');
+        },
+        log: settingsLog,
+        propose: (callerId, change, reason) => proposals.proposeCaptureSettings(callerId, change, reason),
+        notify: (n) => {
+          if (!notifySvc) return;
+          void notifySvc.request(n).catch((e) => logError({ source: 'main', type: 'notify-request', level: 'warn', message: String(e) }));
+        },
+        globalEnabled: () => getKnowledgeCapture(),
+        dailyCap: () => getKnowledgeCaptureDailyCap(),
+        capturesToday: () => runsForCount.countSince(startOfLocalDay(Date.now())),
+        workspaceName: async (id) => (await readWorkspaceManifest(id))?.name ?? id,
+        now: () => Date.now(),
+        invalidateWorkspaceList
+      });
+      proposals.setCaptureSettingsApplier((ws, change, proposalId) => captureSettings.applyApproved(ws, change, proposalId));
+      setCaptureSettingsHandlers({ get: (c) => captureSettings.get(c), set: (c, a) => captureSettings.set(c, a) });
+      const offSettingsLog = onCaptureSettingsChanged((e) => {
+        if (e.source !== 'form') return; // MCP/proposal writes log themselves (with their reason)
+        void settingsLog.append({
+          workspaceId: e.workspaceId, actor: 'user', before: e.before, after: e.after, reason: null, applied: true, proposalId: null, now: Date.now()
+        }).catch((err) => logError({ source: 'main', type: 'capture-settings-log', level: 'warn', message: String(err), workspaceId: e.workspaceId }));
+      });
+      inboxTeardown.push(() => {
+        offSettingsLog();
+        setCaptureSettingsHandlers(null);
+      });
+    }
+  };
+
+  /** Desktop presence (#407 Phase 2b): tray, taskbar overlay, badge, attention. */
+  const startPresenceServices = (win: BrowserWindow): void => {
+    if (!inboxStore || !notifySvc) return;
+    presence = startPresence(inboxStore, notifySvc, () => auto?.proposals.pendingCount() ?? 0);
+    if (!keepRunningAttached) {
+      keepRunningAttached = true;
+      attachKeepRunning(win, () => presence?.hasTray() ?? false);
+    }
+    inboxTeardown.push(() => {
+      presence?.stop();
+      presence = null;
+    });
+  };
+
+  const broadcastCounts = (inbox: InboxStore): void => {
+    void inbox.counts().then((c) => broadcastInboxChanged(c, BrowserWindow.getAllWindows())).catch(() => undefined);
+  };
+
+  let embed: EmbedFn | null = null;
+  if (jsonlWatcher) {
+    if (sqlite) {
+      openDb(userData);
+      await startStateWrites();
+    }
     // Read-only MCP server over <userData>/mcp.sock so in-container claude can
     // read history (sessions/events/cost): its own read-only state.db
-    // connection on SQLite, the store pool on Postgres.
-    const pgMcp = pgStores
-      ? await openPgMcpReadSource(schemaOf(pgStores.pool), pgStores.poolConfig, (message) =>
-          logError({ source: 'main', type: 'mcp-query-isolation', level: 'warn', message }))
-      : null;
-    perfSpan('claude_fleet.boot.mcp_server', () => startMcpServer(app.getPath('userData'), pgMcp ? { readSource: pgMcp } : {}));
+    // connection on SQLite; on Postgres the history tools wait for setReadSource.
+    perfSpan('claude_fleet.boot.mcp_server', () => startMcpServer(userData, sqlite ? {} : { readSource: null }));
     // Local embedder for semantic transcript search (native onnxruntime-node, on-host).
-    const embed = makeEmbedder(join(app.getPath('userData'), 'models'));
-    setQueryEmbedder(embed);
+    const embedFn = makeEmbedder(join(userData, 'models'));
+    embed = embedFn;
+    setQueryEmbedder(embedFn);
 
-    // Knowledge claims (#483): record_claim/search_claims/retract_claim MCP
-    // tools, backed by the inbox's Kysely handle. captureRuns/claimService are
-    // module-scoped so the background capture scheduler (Task 9) can reuse them.
-    if (inboxStore) {
-      const claimStore = new ClaimStore(inboxStore.kysely, inboxStore.dialect);
-      captureRuns = new CaptureRunStore(inboxStore.kysely);
-      claimService = new ClaimService({
-        claims: claimStore, runs: captureRuns, embed,
-        workspaceName: async (id) => (await readWorkspaceManifest(id))?.name ?? null
-      });
-      setClaimHandlers({
-        record: (c, a) => claimService!.record(c, a),
-        search: (c, a) => claimService!.search(c, a),
-        retract: (c, a) => claimService!.retract(c, a)
-      });
-      void captureRuns.failRunning(Date.now(), 'interrupted by app restart').catch((e) =>
-        logError({ source: 'main', level: 'warn', type: 'capture-fail-running', message: String(e) }));
-      void claimService.backfillVectors().catch((e) =>
-        logError({ source: 'main', level: 'warn', type: 'claims-backfill', message: String(e) }));
-    }
+    if (sqlite && inboxStore) startClaims(inboxStore, embedFn);
 
     // Index new turns/summaries as they land. Fire-and-forget: indexing must
     // never block ingest, and a failure degrades search silently (logged).
     jsonlWatcher.on('ingest', ({ sessionId }) => {
-      indexSessionTurns(sessionId, embed).catch((e) =>
+      indexSessionTurns(sessionId, embedFn).catch((e) =>
         logError({ source: 'main', level: 'warn', type: 'transcript-index', message: String(e) }));
     });
     jsonlWatcher.on('ingest', () => {
-      indexSessionSummaries(embed).catch((e) =>
+      indexSessionSummaries(embedFn).catch((e) =>
         logError({ source: 'main', level: 'warn', type: 'summary-index', message: String(e) }));
     });
     // Surface host MCP listener health to renderers as the "MCP unreachable"
@@ -320,78 +555,10 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         .then((m) => (m?.kind === 'container' ? ensureContainerRetention(m.id, e.after.transcriptRetentionDays) : false))
         .catch((err) => logError({ source: 'main', type: 'claude-retention', level: 'warn', message: String(err), workspaceId: e.workspaceId }));
     });
-    // Seed each workspace's durable-mirror default from its manifest before the
-    // watcher starts ingesting, so the very first lines are mirrored per the
-    // saved setting — not dependent on the renderer's later workspace:list poll.
-    for (const m of manifests) setWorkspaceDefault(m.id, m.mirror.default);
-    await perfSpanAsync('claude_fleet.boot.jsonl_watcher_start', () => jsonlWatcher.start(manifests.map((m) => m.id)));
-    // Knowledge capture (#483 §5): background capture forks, triggered by
-    // context bands on ingest and by search hits from the MCP search tools.
-    if (inboxStore && captureRuns && claimService) {
-      const runs = captureRuns;
-      const claimsSvc = claimService;
-      // Never let a store failure block registerIpc/createWindow: without the
-      // seed, old fork transcripts merely aren't recognised as forks.
-      try {
-        loadCaptureForks(await runs.forkSessionIds());
-      } catch (e) {
-        logError({ source: 'main', level: 'warn', type: 'capture-fork-seed', message: String(e) });
-      }
-      const scheduler = new CaptureScheduler({
-        runs,
-        signals: (id) => sessionCaptureSignals(id),
-        isAutomation: (id) => isAutomationSession(id),
-        globalEnabled: () => getKnowledgeCapture(),
-        settings: async (ws) => {
-          const m = await readWorkspaceManifest(ws);
-          return m ? effectiveCaptureSettings(m) : null;
-        },
-        dailyCap: () => getKnowledgeCaptureDailyCap(),
-        // Null for a container that isn't running, before admit: no daily-cap slot.
-        target: (ws) => resolveCaptureTarget(ws),
-        topTopics: async (ws) => [...new Set((await claimsSvc.search(ws, { query: 'fleet', limit: 20 })).results.flatMap((r) => r.topics))].slice(0, 15),
-        exec: (t, args, timeoutMs) => runCapture(t, args, timeoutMs),
-        fleetToolNames: TOOLS.map((t) => t.name),
-        killInFlight: () => { killLocalCaptures(); },
-        newUuid: () => randomUUID(),
-        now: () => Date.now(),
-        log: (message, extra) => logError({ source: 'main', level: 'info', type: 'knowledge-capture', message, extra })
-      });
-      captureScheduler = scheduler;
-      jsonlWatcher.on('ingest', (e: { workspaceId: string; sessionId: string }) => scheduler.onIngest(e));
-      setSearchHitHook((e) => scheduler.onSearchHit(e));
-    }
-    // Local-backend workspaces write to the host's real ~/.claude, not the
-    // per-workspace state dir — register those host project dirs so their
-    // (and their subagents') token spend is ingested (#plan-usage).
-    for (const m of manifests) {
-      // Sweep for states that should be impossible (#323). writeWorkspaceManifest
-      // catches these as they're written, but a manifest already on disk in a bad
-      // state is never re-written, so it would otherwise stay silent forever —
-      // which is exactly what happened for ~6 days in #313.
-      const violation = manifestInvariant(m);
-      if (violation) {
-        logError({
-          source: 'main',
-          type: 'manifest-invariant',
-          level: 'error',
-          message: `${violation} (found at startup)`,
-          workspaceId: m.id,
-          extra: { workspaceRoot: m.workspaceRoot, launcher: m.launcher, kind: m.kind }
-        });
-      }
-      if (m.kind === 'local' && m.workspaceRoot) {
-        if (m.launcher?.mode === 'wsl') {
-          jsonlWatcher.registerPolledLocalDir(
-            m.id,
-            wslLocalProjectsDir(
-              m.launcher.distro, m.launcher.home, m.workspaceRoot, encodeClaudeProjectDir
-            )
-          );
-        } else {
-          jsonlWatcher.registerLocalWorkspace(m.id, m.workspaceRoot);
-        }
-      }
+    if (sqlite) {
+      await startWatcher(jsonlWatcher, manifests);
+      await startCaptureScheduler(jsonlWatcher);
+      registerLocalDirs(jsonlWatcher, manifests);
     }
     // Peer-status reconciler (#286): watch each workspace's claude
     // `sessions/<pid>.json` files and push an authoritative busy/idle/waiting
@@ -406,79 +573,153 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         );
       });
     }
-    // Backfill embeddings for sessions ingested before this feature / after a
-    // model change. Non-blocking; walks every known session once.
-    void (async () => {
+    if (sqlite) startEmbedBackfill(embedFn);
+  }
+
+  if (!sqlite) {
+    const pgCfg = storeCfg as PostgresStoreConfig | ManagedStoreConfig;
+    const docker = pgCfg.kind === 'managed' ? dockerodeManagedDocker() : null;
+    managedDocker = docker;
+    const resolveCfg = (progress?: (message: string) => void): Promise<PostgresStoreConfig> =>
+      pgCfg.kind === 'managed'
+        ? ensureManagedPostgres({
+          docker: docker!,
+          password: {
+            get: () => getSecret(MANAGED_STORE_SCOPE, MANAGED_STORE_PASSWORD_KEY),
+            set: (v) => setSecret(MANAGED_STORE_SCOPE, MANAGED_STORE_PASSWORD_KEY, v),
+          },
+          onProgress: progress,
+        }, pgCfg.poolMax)
+        : Promise.resolve(pgCfg);
+    let openedPort: number | null = null;
+    const openStores = async (progress?: (message: string) => void): Promise<PgStores> => {
+      const cfg = await resolveCfg(progress);
+      const stores = await openPgStores(cfg, {
+        state: false,
+        afterBeginWrite: inboxGate.hook,
+        onPoolError: (e) => logError({ source: 'main', type: 'store-pool-error', level: 'warn', message: String(e) }),
+        migrate: (pool) => migratePgStores(pool, { state: true, extraTracks: [IMPORT_PG_TRACK] }),
+      });
+      openedPort = portOf(cfg);
+      return stores;
+    };
+    const closeStores = async (stores: PgStores): Promise<void> => {
+      await stores.inbox.close();
+      await stores.end();
+    };
+    let manifests: WorkspaceSpec[] = [];
+    // Inbox steps first, so a history failure leaves the inbox up; each is retried until it succeeds.
+    const services = new ServiceSteps<PgStores>([
+      { name: 'claims', group: 'inbox', run: (s) => { if (embed) startClaims(s.inbox, embed); } },
+      { name: 'inbox-services', group: 'inbox', run: (s) => startInboxServices(s.inbox) },
+      { name: 'presence', group: 'inbox', run: () => { if (mainWindow) startPresenceServices(mainWindow); } },
+      { name: 'inbox-counts', group: 'inbox', run: (s) => broadcastCounts(s.inbox) },
+      // After the copy: openDbPostgres rehydrates pendingClaudeIds from the copied rows.
+      { name: 'state-db', group: 'history', run: (s) => openDbPostgres(s.pool, { migrate: false, afterBeginWrite: historyGate.hook }) },
+      { name: 'state-writes', group: 'history', run: () => startStateWrites() },
+      {
+        name: 'read-source', group: 'history', run: async (s) => setReadSource(await openPgMcpReadSource(schemaOf(s.pool), s.poolConfig, (message) =>
+          logError({ source: 'main', type: 'mcp-query-isolation', level: 'warn', message }))),
+      },
+      {
+        name: 'watcher', group: 'history', run: async () => {
+          if (!jsonlWatcher) return;
+          manifests = (await listWorkspaceManifests()).filter((m) => m.kind !== 'remote');
+          await startWatcher(jsonlWatcher, manifests);
+        },
+      },
+      { name: 'local-dirs', group: 'history', run: () => { if (jsonlWatcher) registerLocalDirs(jsonlWatcher, manifests); } },
+      { name: 'embed-backfill', group: 'history', run: () => { if (embed) startEmbedBackfill(embed); } },
+      { name: 'capture-scheduler', group: 'inbox', after: ['claims', 'watcher'], run: () => (jsonlWatcher ? startCaptureScheduler(jsonlWatcher) : undefined) },
+    ]);
+    /** Refuse new inbox and history writes, stop the timers that write, and wait for writes in flight. */
+    const quiesceStores = async (stores: PgStores): Promise<void> => {
+      inboxGate.close('The inbox is moving to SQLite; try again in a moment.');
+      historyGate.close('History is moving to SQLite; try again in a moment.');
+      stopInboxWriters();
+      await inboxGate.drain(stores.inbox.kysely);
+      let state: ReturnType<typeof stateKysely> | null = null;
       try {
-        // A model/dtype change re-keys EMBED_MODEL_ID; drop vectors under
-        // retired keys so they don't accumulate as dead weight.
-        // Spanned (#perf boot attribution): the post-launch stall storm overlaps
-        // this backfill; boot.embed_backfill is wall time, the index.* / embed.*
-        // child spans carry the synchronous parts that can block the loop.
-        await perfSpanAsync('claude_fleet.boot.embed_backfill', async () => {
-          await perfSpanAsync('claude_fleet.index.delete_stale_models', () => deleteEmbeddingsForOtherModels(EMBED_MODEL_ID));
-          const sessionIds = await perfSpanAsync('claude_fleet.index.list_sessions', () => listSessionIds());
-          for (const id of sessionIds) await indexSessionTurns(id, embed);
-          await indexSessionSummaries(embed);
-        });
-      } catch (e) {
-        logError({ source: 'main', level: 'warn', type: 'index-backfill', message: String(e) });
+        state = stateKysely();
+      } catch {
+        // history never opened: nothing to drain
       }
-    })();
+      if (state) await historyGate.drain(state);
+    };
+    /** A failed switch back: the same writers start again on Postgres. Not
+     *  re-registered: that would recover() and cut short the runs in progress. */
+    const resumeWriters = async (): Promise<void> => {
+      if (shuttingDown) return;
+      inboxGate.open();
+      historyGate.open();
+      notifySvc?.resume();
+      auto?.resume();
+      captureScheduler?.resume();
+      await supervisor?.restartServices();
+      replayInputWait();
+      jsonlWatcher?.requeueAll();
+    };
+    const sup = new StoreSupervisor<PgStores>({
+      choice: storeChoiceOf(storeCfg) as 'managed' | 'external',
+      open: openStores,
+      prepare: (stores, onProgress) => firstSwitchCopy({ pool: stores.pool, userData, state: true, onProgress }),
+      ready: async (stores) => {
+        pgStores = stores;
+        inboxStore = stores.inbox;
+        await services.run(stores);
+      },
+      ping: (stores) => pingStore(stores.pool),
+      repair: docker ? async () => {
+        const cfg = await resolveCfg();
+        if (openedPort !== null && portOf(cfg) !== openedPort) {
+          throw new Error('the managed Postgres moved to another port; restart the app to reconnect');
+        }
+      } : undefined,
+      recovered: () => {
+        jsonlWatcher?.requeueAll();
+        if (inboxStore) broadcastCounts(inboxStore);
+      },
+      close: closeStores,
+      log: (type, message) => logError({ source: 'main', type, level: 'warn', message }),
+    });
+    supervisor = sup;
+    setActiveStore(storeChoiceOf(storeCfg), () => sup.status(), pgCfg.kind !== 'managed' ? undefined : () => switchBackLive<PgStores>({
+      exclusive: (fn) => sup.exclusive(fn),
+      plan: () => switchBackPlan(userData),
+      postgresInboxLive: () => inboxOnPostgres(userData),
+      open: () => openStores(),
+      close: closeStores,
+      quiesce: quiesceStores,
+      automationRunning: () => auto?.automations.hasActiveRuns() ?? false,
+      copy: (stores, commit) => switchBackToSqlite({ pool: stores.pool, userData, commit, onProgress: () => undefined }),
+      commit: () => setStoreChoice('sqlite'),
+      resume: resumeWriters,
+      stopBringUp: () => sup.stop(),
+      // History must not reach Postgres after the user-state merge back: restart on SQLite now.
+      relaunch: () => {
+        if (shuttingDown) return;
+        app.relaunch();
+        app.quit();
+      },
+    }));
+    sup.on('status', (s: StoreStatus) => broadcastStoreStatus(s, BrowserWindow.getAllWindows()));
+  } else {
+    if (inboxElsewhere) logError({ source: 'main', type: 'inbox-on-postgres', level: 'warn', message: inboxElsewhere });
+    setActiveStore('sqlite', inboxElsewhere
+      ? () => ({ choice: 'sqlite', phase: 'ready', detail: inboxElsewhere, progress: null, notice: inboxElsewhere })
+      : undefined);
   }
   // Patch ipcMain.handle before ipc.ts registers anything, so every later-
   // registered handler runs inside a claude_fleet.ipc.<channel> span.
   // With recording off the tracer is a no-op — cost is one async frame/invoke.
   instrumentIpcHandle(ipcMain);
   perfSpan('claude_fleet.boot.register_ipc', () => registerIpc({ jsonlWatcher, peerStatusWatcher }));
-  notifySvc = inboxStore ? registerNotifyIpc(inboxStore) : null;
-  auto = inboxStore ? registerAutomationIpc(inboxStore, notifySvc) : null;
-  if (inboxStore) {
-    const inboxHost = registerInboxIpc(inboxStore, notifySvc ?? undefined, auto ? (r, c) => auto!.automations.attribution(r, c) : undefined);
-    auto?.setInboxSink(inboxHost);
-  }
-  // Knowledge capture settings (#483 §5a): get/set_capture_settings MCP tools,
-  // capture-settings proposals, and the change log for form edits.
-  if (inboxStore && auto) {
-    const settingsLog = new CaptureSettingsLogStore(inboxStore.kysely);
-    const runsForCount = captureRuns ?? new CaptureRunStore(inboxStore.kysely);
-    const proposals = auto.proposals;
-    const captureSettings = createCaptureSettingsService({
-      readManifest: (id) => readWorkspaceManifest(id),
-      writeManifest: (spec) => writeWorkspaceManifest(spec),
-      trusted: async (id) => {
-        const m = await readWorkspaceManifest(id);
-        return m?.kind === 'container' && (m.inbox?.trusted === true || m.role === 'automations');
-      },
-      log: settingsLog,
-      propose: (callerId, change, reason) => proposals.proposeCaptureSettings(callerId, change, reason),
-      notify: (n) => {
-        if (!notifySvc) return;
-        void notifySvc.request(n).catch((e) => logError({ source: 'main', type: 'notify-request', level: 'warn', message: String(e) }));
-      },
-      globalEnabled: () => getKnowledgeCapture(),
-      dailyCap: () => getKnowledgeCaptureDailyCap(),
-      capturesToday: () => runsForCount.countSince(startOfLocalDay(Date.now())),
-      workspaceName: async (id) => (await readWorkspaceManifest(id))?.name ?? id,
-      now: () => Date.now(),
-      invalidateWorkspaceList
-    });
-    proposals.setCaptureSettingsApplier((ws, change, proposalId) => captureSettings.applyApproved(ws, change, proposalId));
-    setCaptureSettingsHandlers({ get: (c) => captureSettings.get(c), set: (c, a) => captureSettings.set(c, a) });
-    onCaptureSettingsChanged((e) => {
-      if (e.source !== 'form') return; // MCP/proposal writes log themselves (with their reason)
-      void settingsLog.append({
-        workspaceId: e.workspaceId, actor: 'user', before: e.before, after: e.after, reason: null, applied: true, proposalId: null, now: Date.now()
-      }).catch((err) => logError({ source: 'main', type: 'capture-settings-log', level: 'warn', message: String(err), workspaceId: e.workspaceId }));
-    });
-  }
+  registerStoreIpc();
+  if (sqlite && inboxStore) startInboxServices(inboxStore);
   registerPresenceIpc(ipcMain, { get: getKeepRunningInTray, set: setKeepRunningInTray });
   mainWindow = createWindow();
-  // Desktop presence (#407 Phase 2b): tray, taskbar overlay, badge, attention.
-  if (inboxStore && notifySvc) {
-    presence = startPresence(inboxStore, notifySvc, () => auto?.proposals.pendingCount() ?? 0);
-    attachKeepRunning(mainWindow, () => presence?.hasTray() ?? false);
-  }
+  startPresenceServices(mainWindow);
+  void supervisor?.run();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -488,30 +729,42 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   });
 });
 
-app.on('before-quit', async () => {
+// Electron doesn't await before-quit (#485): hold the quit, shut down within
+// QUIT_BOUND_MS, then exit. A second quit while that runs passes through.
+app.on('before-quit', (e) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  e.preventDefault();
   markQuitting();
-  presence?.stop();
-  presence = null;
-  // Stop the notify/automation tick + debounce/input-wait timers before closing
-  // inbox.db (#457), so nothing fires against a destroyed driver.
-  notifySvc?.stop();
-  notifySvc = null;
-  setCaptureSettingsHandlers(null);
-  setSearchHitHook(null);
-  captureScheduler?.stop();
-  captureScheduler = null;
-  auto?.stop();
-  auto = null;
-  stopRemoteBackend();
-  await jsonlWatcher?.stop();
-  await peerStatusWatcher?.stop();
-  stopMcpServer();
-  await inboxStore?.close();
-  inboxStore = null;
-  await shutdownPerf();
-  await closeDb();
-  await pgStores?.end();
-  pgStores = null;
+  supervisor?.stop();
+  void withinMs((async () => {
+    // Let a bring-up step or a switch back in flight finish first.
+    if (supervisor) await withinMs(supervisor.exclusive(async () => undefined), QUIT_BOUND_MS / 2);
+    presence?.stop();
+    presence = null;
+    // Stop the notify/automation tick + debounce/input-wait timers before closing
+    // inbox.db (#457), so nothing fires against a destroyed driver.
+    notifySvc?.stop();
+    notifySvc = null;
+    setCaptureSettingsHandlers(null);
+    setSearchHitHook(null);
+    captureScheduler?.stop();
+    captureScheduler = null;
+    auto?.stop();
+    auto = null;
+    stopRemoteBackend();
+    await jsonlWatcher?.stop();
+    await peerStatusWatcher?.stop();
+    stopMcpServer();
+    await inboxStore?.close();
+    inboxStore = null;
+    await shutdownPerf();
+    await closeDb();
+    await pgStores?.end();
+    pgStores = null;
+    if (managedDocker) await stopManagedPostgres(managedDocker);
+  })().catch((err) => logError({ source: 'main', type: 'quit-shutdown', level: 'warn', message: String(err) })), QUIT_BOUND_MS)
+    .then(() => app.exit(0));
 });
 
 app.on('window-all-closed', () => {

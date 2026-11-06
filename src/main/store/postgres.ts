@@ -6,6 +6,7 @@ import {
   CompiledQuery, Kysely, PostgresDialect,
   type DatabaseConnection, type Driver, type OperationNode, type QueryResult, type TransactionSettings, type WithNode,
 } from 'kysely';
+import { plaintextAuthGuard } from './pgScramOnly.js';
 
 const INT8 = 20;
 const NUMERIC = 1700;
@@ -39,7 +40,7 @@ const inSchema = new WeakSet<pg.PoolClient>();
 export function createPgPool(cfg: PgPoolConfig): pg.Pool {
   const { schema, session, ...rest } = cfg;
   if (!SCHEMA_NAME.test(schema)) throw new Error(`invalid store schema name: ${schema}`);
-  const pool = new pg.Pool({ ...rest, types: pgTypes });
+  const pool = new pg.Pool({ ...plaintextAuthGuard(rest.ssl), ...rest, types: pgTypes });
   poolSchema.set(pool, schema);
   poolSession.set(pool, sessionSql(session));
   return pool;

@@ -326,6 +326,13 @@ export class JsonlWatcher extends EventEmitter {
     }
   }
 
+  /** Re-read every known transcript from its offset. A batch that failed
+   *  (store down) left its offset behind, and nothing else re-reads it until
+   *  the file changes again. */
+  requeueAll(): void {
+    for (const path of this.files.keys()) this.enqueue(path);
+  }
+
   private enqueue(path: string): void {
     if (extname(path) !== '.jsonl') return;
     void this.queue.enqueue(path, () => this.process(path));

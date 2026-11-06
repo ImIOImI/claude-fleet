@@ -68,3 +68,16 @@ export async function openPgStores(cfg: PostgresStoreConfig, o: OpenPgStoresOpti
     throw e;
   }
 }
+
+/** Throws when the store doesn't answer within `timeoutMs`. */
+export async function pingStore(pool: pg.Pool, timeoutMs = 3000): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      pool.query('SELECT 1'),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer within ${timeoutMs} ms`)), timeoutMs); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}

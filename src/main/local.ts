@@ -74,6 +74,7 @@ import { workspaceStateDir, assertValidWorkspaceId } from './paths.js';
 import { resolveEnv } from './vault.js';
 import { getStoreConfig } from './config.js';
 import { storeSecretEnvNames, type StoreConfig } from './store/storeConfig.js';
+import { activeStoreConfig } from './store/activeStore.js';
 import { endpointEnv } from './endpoints.js';
 import { effectiveCaptureSettings } from '../preload/captureSettings.js';
 import { ensureLocalRetentionSettings } from './claims/retention.js';
@@ -328,11 +329,13 @@ async function signalWslSessions(
 const CLAUDE_CHILD_SESSION_MARKERS = ['CLAUDE_CODE_CHILD_SESSION', 'CLAUDECODE'] as const;
 
 /** The host env minus host-only secrets: loadout-source tokens (#444) and the
- *  store's DB credentials, which would bypass MCP read isolation. */
+ *  DB credentials of the configured and the running store, which would bypass
+ *  MCP read isolation. */
 async function hostEnvForWorkspaces(): Promise<NodeJS.ProcessEnv> {
   const base: NodeJS.ProcessEnv = { ...process.env };
   const store = await getStoreConfig().catch((): StoreConfig | null => null);
-  const storeSecrets = new Set(storeSecretEnvNames(store).map((n) => n.toUpperCase()));
+  const running = activeStoreConfig();
+  const storeSecrets = new Set([...storeSecretEnvNames(store), ...(running ? storeSecretEnvNames(running) : [])].map((n) => n.toUpperCase()));
   for (const k of Object.keys(base)) {
     const u = k.toUpperCase();
     if (u === 'FLEET_LOADOUT_TOKEN' || u.startsWith('FLEET_LOADOUT_TOKEN_') || storeSecrets.has(u)) delete base[k];

@@ -403,7 +403,18 @@ export async function configUnreadablePath(): Promise<string | null> {
 export async function getStoreConfig(): Promise<StoreConfig> {
   const cfg = await read();
   if (unreadable) throw new ConfigJsonError('config.json is not valid JSON');
-  return parseStoreConfig(cfg.store, { allowStaticSecrets: false });
+  return parseStoreConfig(cfg.store, { allowStaticSecrets: false, allowManaged: true });
+}
+
+/** Settings → Storage. An external Postgres stays hand-edited: its block
+ *  names connections and credentials the UI doesn't. */
+export async function setStoreChoice(choice: 'sqlite' | 'managed'): Promise<void> {
+  const current = await getStoreConfig();
+  if (current.kind === 'postgres') {
+    throw new Error('config.json names an external Postgres store; edit its "store" key to change it');
+  }
+  const cfg = await read();
+  await write({ ...cfg, store: choice === 'managed' ? { kind: 'postgres', managed: true } : undefined });
 }
 
 /** config.json identity.github.clientId, or null. Validation and precedence: identity/clientId.ts. */

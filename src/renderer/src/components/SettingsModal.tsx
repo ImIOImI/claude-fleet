@@ -10,6 +10,7 @@ import { clampDailyCap, DAILY_CAP_DEFAULT } from '../../../preload/captureSettin
 import { ModalBackdrop } from './ModalBackdrop';
 import { NotificationsSettings } from './NotificationsSettings';
 import { AccountSettings } from './AccountSettings';
+import { StorageSettings } from './StorageSettings';
 
 /** Compact token formatter for preset labels (e.g. 19_000_000 → "19M"). */
 function fmtTokens(n: number): string {
@@ -431,6 +432,7 @@ export function SettingsModal({ onClose, onSaved, initialTab, names = {} }: Prop
                 <code>/shared</code> in every container. Applies to new containers and on next
                 restart.
               </p>
+              <StorageSettings />
             </div>
 
             <div className="settings-section">

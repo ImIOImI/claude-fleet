@@ -33,6 +33,8 @@ install() {
   [ -x "$NATIVE/bin/postgres" ] && [ -f "$NATIVE/lib/postgresql/vector.so" ] && return
   (cd "$ROOT" || exit 1; [ -f package.json ] || npm init -y >/dev/null)
   (cd "$ROOT" || exit 1; npm i --ignore-scripts --no-audit --no-fund "@embedded-postgres/linux-$NPM_ARCH@$PG_PKG_VERSION" >/dev/null)
+  # --ignore-scripts skips the package's libpq.so.5 etc. symlinks.
+  (cd "$ROOT/node_modules/@embedded-postgres/linux-$NPM_ARCH" || exit 1; node scripts/hydrate-symlinks.js)
   chmod +x "$NATIVE"/bin/*
   local deb="postgresql-16-pgvector_${PGVECTOR_DEB_VERSION}_${DEB_ARCH}.deb"
   curl -sfL -o "$ROOT/$deb" "https://apt.postgresql.org/pub/repos/apt/pool/main/p/pgvector/${deb//+/%2B}"

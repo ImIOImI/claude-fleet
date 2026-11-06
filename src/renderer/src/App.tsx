@@ -42,8 +42,10 @@ import type {
   InboxCounts,
   InboxConfig,
   QuietState,
-  PortOpenVia
+  PortOpenVia,
+  StoreStatus
 } from '../../preload';
+import { storeBannerText } from './storeView';
 import type { CaptureSettings } from '../../preload/captureSettings';
 import { portPopupCopy } from './portToast';
 import { InboxChip } from './components/InboxChip';
@@ -245,6 +247,17 @@ export function App() {
   useEffect(() => {
     void window.api.inbox.counts().then(setInboxCounts);
     return window.api.inbox.onChanged(setInboxCounts);
+  }, []);
+  // A pushed status is newer than the fetched one. main broadcasts
+  // inbox:changed when the Postgres store becomes ready.
+  const [storeStatus, setStoreStatus] = useState<StoreStatus | null>(null);
+  useEffect(() => {
+    let live = true;
+    window.api.store.getSettings()
+      .then((s) => { if (live) setStoreStatus((cur) => cur ?? s.status); })
+      .catch(() => undefined);
+    const off = window.api.store.onStatus(setStoreStatus);
+    return () => { live = false; off(); };
   }, []);
   // Notifications (#407 Phase 2): quiet state for the inbox header, and the
   // todo to focus when a toast / OS notification is opened.
@@ -1444,13 +1457,15 @@ export function App() {
   );
 
   const remoteBanner = unreachableBanner(unreachableRemoteNames(workspaces));
+  const storeBanner = storeBannerText(storeStatus);
+  const hasBanners = backendReady === false || !!remoteBanner || !!storeBanner;
   const selectedRemotePane = selected ? remotePane(selected) : null;
 
   return (
     <div
       className={`app${dragging ? ' dragging' : ''}${
         backendReady === false ? ' daemon-down' : ''
-      }${remoteBanner ? ' remote-down' : ''}`}
+      }${remoteBanner ? ' remote-down' : ''}${hasBanners ? ' has-banners' : ''}`}
     >
       <WorkspaceTabStrip
         workspaces={roleWsId ? workspaces.filter((w) => w.id !== roleWsId) : workspaces}
@@ -1476,17 +1491,27 @@ export function App() {
         waitingByWorkspace={waitingByWorkspaceFlag}
       />
 
-      {backendReady === false && (
-        <div className="daemon-banner" role="status">
-          <span className="dot" aria-hidden="true" />
-          Docker daemon unreachable — container workspaces are shown from last-known state and
-          can&apos;t be started or attached until it&apos;s back.
-        </div>
-      )}
-      {remoteBanner && (
-        <div className="daemon-banner remote-banner" role="status">
-          <span className="dot" aria-hidden="true" />
-          {remoteBanner}
+      {hasBanners && (
+        <div className="app-banners">
+          {backendReady === false && (
+            <div className="daemon-banner" role="status">
+              <span className="dot" aria-hidden="true" />
+              Docker daemon unreachable — container workspaces are shown from last-known state and
+              can&apos;t be started or attached until it&apos;s back.
+            </div>
+          )}
+          {remoteBanner && (
+            <div className="daemon-banner remote-banner" role="status">
+              <span className="dot" aria-hidden="true" />
+              {remoteBanner}
+            </div>
+          )}
+          {storeBanner && (
+            <div className="daemon-banner store-banner" role="status">
+              <span className="dot" aria-hidden="true" />
+              {storeBanner}
+            </div>
+          )}
         </div>
       )}
 

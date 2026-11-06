@@ -75,7 +75,8 @@ jobs:
     # pgvector at the version scripts/pg-test-server.sh installs.
     services:
       postgres:
-        image: pgvector/pgvector:0.8.7-pg16
+        # Same digest as MANAGED_PG_IMAGE (managedPostgres.test.ts checks).
+        image: pgvector/pgvector:0.8.7-pg16@sha256:0dd3149a06e4579a0d70d8fef9945636cd514005e7237deb27f9b67886f8dc4f
         env:
           POSTGRES_PASSWORD: fleet
         ports: ['5432:5432']
@@ -134,6 +135,11 @@ jobs:
         env:
           PG_TEST_URL: postgres://postgres:fleet@localhost:5432/postgres
         run: npm run test:unit:pg
+
+      - name: Managed Postgres container (real Docker)
+        env:
+          MANAGED_PG_DOCKER: '1'
+        run: npx vitest run src/main/store/managedPostgres.docker.test.ts
 
       - name: Bundle fleet-host
         run: npm run build:host
