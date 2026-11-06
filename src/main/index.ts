@@ -2,7 +2,8 @@ import { app, BrowserWindow, dialog, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
 import { registerIpc, invalidateWorkspaceList, replayInputWait, stopRemoteBackend } from './ipc.js';
 import { openDb, openDbPostgres, closeDb, deleteEmbeddingsForOtherModels, listSessionIds, recordError, stateKysely, sessionCaptureSignals, isAutomationSession } from './db.js';
-import { initPerf, shutdownPerf, perfSpan, perfSpanAsync } from './perf.js';
+import { initPerf, shutdownPerf, perfSpan, perfSpanAsync, getEffectivePerf, recordBootProfile } from './perf.js';
+import { startBootProfile } from './bootProfile.js';
 import { PerfStore } from './perfStore.js';
 import { resolvePerfConfig } from './perfConfig.js';
 import { getPerfTelemetry, getPerfOtlp, getKnowledgeCapture, getKnowledgeCaptureDailyCap } from './config.js';
@@ -258,6 +259,8 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     }
   }
 
+  // startStateWrites re-runs on a store restart; the boot profile is per launch.
+  let bootProfileStarted = false;
   /** The error sink, the app-start row and perf telemetry: all write state.db. */
   const startStateWrites = async (): Promise<void> => {
     // Wire the crash-safe DB sink so every logError call is also persisted to
@@ -285,6 +288,14 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         process.env
       )
     );
+    if (!bootProfileStarted && getEffectivePerf()?.recording) {
+      bootProfileStarted = true;
+      startBootProfile({
+        outDir: join(userData, 'perf'),
+        onResult: recordBootProfile,
+        onError: (e) => logError({ source: 'main', level: 'warn', type: 'boot-profile', message: String(e) })
+      });
+    }
   };
 
   /** Knowledge claims (#483): record_claim/search_claims/retract_claim MCP
@@ -303,9 +314,11 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       retract: (c, a) => claimService!.retract(c, a)
     });
     inboxTeardown.push(() => setClaimHandlers(null));
-    void captureRuns.failRunning(Date.now(), 'interrupted by app restart').catch((e) =>
+    const runs = captureRuns;
+    const claims = claimService;
+    void perfSpanAsync('claude_fleet.boot.capture_fail_running', () => runs.failRunning(Date.now(), 'interrupted by app restart')).catch((e) =>
       logError({ source: 'main', level: 'warn', type: 'capture-fail-running', message: String(e) }));
-    void claimService.backfillVectors().catch((e) =>
+    void perfSpanAsync('claude_fleet.boot.claims_backfill', () => claims.backfillVectors()).catch((e) =>
       logError({ source: 'main', level: 'warn', type: 'claims-backfill', message: String(e) }));
   };
 
@@ -326,7 +339,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       // Never let a store failure block registerIpc/createWindow: without the
       // seed, old fork transcripts merely aren't recognised as forks.
       try {
-        loadCaptureForks(await runs.forkSessionIds());
+        loadCaptureForks(await perfSpanAsync('claude_fleet.boot.capture_fork_seed', () => runs.forkSessionIds()));
       } catch (e) {
         logError({ source: 'main', level: 'warn', type: 'capture-fork-seed', message: String(e) });
       }
@@ -558,14 +571,14 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     if (sqlite) {
       await startWatcher(jsonlWatcher, manifests);
       await startCaptureScheduler(jsonlWatcher);
-      registerLocalDirs(jsonlWatcher, manifests);
+      perfSpan('claude_fleet.boot.register_local_dirs', () => registerLocalDirs(jsonlWatcher, manifests));
     }
     // Peer-status reconciler (#286): watch each workspace's claude
     // `sessions/<pid>.json` files and push an authoritative busy/idle/waiting
     // snapshot to every renderer, which merges it over the title glyph.
     if (peerStatusWatcher) {
       await perfSpanAsync('claude_fleet.boot.peer_status_start', () => peerStatusWatcher.start());
-      registerPeerStatusDirs(peerStatusWatcher, manifests);
+      perfSpan('claude_fleet.boot.register_peer_status_dirs', () => registerPeerStatusDirs(peerStatusWatcher, manifests));
       peerStatusWatcher.on('change', (snapshot) => {
         broadcastSessionStatus(
           snapshot.map((s) => ({ claudeSessionId: s.sessionId, status: s.status, waitingFor: s.waitingFor })),
@@ -715,10 +728,10 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   instrumentIpcHandle(ipcMain);
   perfSpan('claude_fleet.boot.register_ipc', () => registerIpc({ jsonlWatcher, peerStatusWatcher }));
   registerStoreIpc();
-  if (sqlite && inboxStore) startInboxServices(inboxStore);
+  if (sqlite && inboxStore) perfSpan('claude_fleet.boot.inbox_services', () => startInboxServices(inboxStore!));
   registerPresenceIpc(ipcMain, { get: getKeepRunningInTray, set: setKeepRunningInTray });
-  mainWindow = createWindow();
-  startPresenceServices(mainWindow);
+  mainWindow = perfSpan('claude_fleet.boot.create_window', () => createWindow());
+  perfSpan('claude_fleet.boot.presence', () => startPresenceServices(mainWindow!));
   void supervisor?.run();
 
   app.on('activate', () => {

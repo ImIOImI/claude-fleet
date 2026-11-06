@@ -27,7 +27,7 @@ import type { FSWatcher } from 'chokidar';
 import { workspaceClaudeDir, workspaceHistoryDir, workspaceHistoryFile, hostLocalProjectsDir } from './paths.js';
 import { ingestBatch } from './db.js';
 import { effectiveForClaudeSession } from './mirrorPolicy.js';
-import { perfSpanAsync } from './perf.js';
+import { perfSpan, perfSpanAsync } from './perf.js';
 import { keyedSerialQueue } from './state/serialQueue.js';
 import { parseSubagentPath, parseTranscriptFilename } from './state/transcriptPaths.js';
 
@@ -445,15 +445,18 @@ async function readAndIngest(path: string, state: FileState): Promise<ReadResult
       }
     }
     if (lastNl === -1) return { newOffset: state.offset, insertedCount: 0 };
-
-    const text = buf.slice(0, lastNl + 1).toString('utf8');
     // The mirror decision is locked per session, so resolve it once per batch.
     // Sidecars (<uuid>.fleet.jsonl) are DB data (Stop-hook chapter summaries,
     // #207) — they ingest into SQLite normally but are never mirrored: the
     // mirror is a conversation-history backup, not a DB replica.
     const mirrorOn =
       !state.sidecar && effectiveForClaudeSession(state.workspaceId, state.sessionId);
-    const batch = text.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+    // Synchronous: decode + split of the whole unread tail.
+    const batch = perfSpan(
+      'claude_fleet.ingest.read',
+      () => buf.slice(0, lastNl + 1).toString('utf8').split('\n').map((l) => l.trim()).filter((l) => l.length > 0),
+      { workspace_id: state.workspaceId, session_id: state.sessionId, bytes: lastNl + 1 }
+    );
     const results = await perfSpanAsync(
       'claude_fleet.ingest',
       () => ingestBatch(state.workspaceId, state.sessionId, batch),
