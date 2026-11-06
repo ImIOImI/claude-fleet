@@ -18,6 +18,8 @@ import { applyFloor, parseNextRequest } from './reschedule.js';
 export interface AutomationDeps extends Omit<RunnerDeps, 'store'> {
   /** Shells this computer offers for host steps (#407); validation checks `shell` against them. */
   hostShells?(): string[] | undefined;
+  /** Refusals for this runtime (fleet-host's remoteHostRefusals). */
+  checkDefinition?(def: AutomationDef): string[];
   store: AutomationStore;
   /** Resolve a workspace id or name to an id. */
   resolveWorkspace(idOrName: string): string | null;
@@ -77,7 +79,7 @@ export function createAutomationService(deps: AutomationDeps) {
   const setTimer = deps.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
   const clearTimer = deps.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>));
 
-  const ctx = { workspace: (v: string) => deps.resolveWorkspace(v), get hostShells() { return deps.hostShells?.(); } };
+  const ctx = { workspace: (v: string) => deps.resolveWorkspace(v), get hostShells() { return deps.hostShells?.(); }, check: deps.checkDefinition };
 
   /** Registers a background run for settle(); a failure goes to onError, never an unhandled rejection. */
   function track(p: Promise<unknown>): void {
