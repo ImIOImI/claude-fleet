@@ -1,5 +1,5 @@
 // Pure detection + parsing for Anthropic rate-limit "anchor" events (#plan-usage).
-// No DB / fs — db.ts:ingestLine calls extractAnchor and persists the result.
+// No DB / fs — db.ts:ingestOne calls extractAnchor and persists the result.
 
 export type AnchorScope = 'session' | 'weekly' | 'opus-weekly';
 

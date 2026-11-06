@@ -54,7 +54,7 @@ jobs:
           changed=$(git diff --name-only "$base" "$head")
           echo "changed files:"; echo "$changed" | sed 's/^/  /'
           # Mirrors the old on.pull_request.paths list.
-          if echo "$changed" | grep -qE '^(src/|tests/|playwright\.config\.ts$|package\.json$|package-lock\.json$|electron-builder\.yml$|electron\.vite\.config\.ts$|\.github/workflows/build-app\.yml$)'; then
+          if echo "$changed" | grep -qE '^(src/|tests/|playwright\.config\.ts$|package\.json$|package-lock\.json$|electron-builder\.yml$|electron\.vite\.config\.ts$|tsconfig\.host\.json$|vite\.host\.config\.ts$|vitest(\.pg)?\.config\.ts$|scripts/pg-test-server\.sh$|broker/|\.github/workflows/build-app\.yml$)'; then
             echo "→ code paths touched; running the full pipeline"
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
@@ -71,6 +71,18 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    # The store suite on Postgres: PG 16 as on Aurora,
+    # pgvector at the version scripts/pg-test-server.sh installs.
+    services:
+      postgres:
+        # Same digest as MANAGED_PG_IMAGE (managedPostgres.test.ts checks).
+        image: pgvector/pgvector:0.8.7-pg16@sha256:0dd3149a06e4579a0d70d8fef9945636cd514005e7237deb27f9b67886f8dc4f
+        env:
+          POSTGRES_PASSWORD: fleet
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 12
     steps:
       - uses: actions/checkout@v4
 
@@ -99,6 +111,13 @@ jobs:
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: broker/go.mod
+
+      - name: Build broker (fleet-host integration test)
+        run: cd broker && CGO_ENABLED=0 go build -o "$RUNNER_TEMP/broker" ./cmd/broker
+
       # Not strictly part of #311, but this workflow never typechecked either —
       # `npm run dist` builds without running tsc. One line, same job.
       - name: Typecheck
@@ -108,7 +127,22 @@ jobs:
       # ~90 MB of weights onto an ephemeral runner every run (see the comment in
       # embeddings.test.ts).
       - name: Unit tests
+        env:
+          FLEET_BROKER_BIN: ${{ runner.temp }}/broker
         run: npm run test:unit
+
+      - name: Unit tests (store suite on Postgres)
+        env:
+          PG_TEST_URL: postgres://postgres:fleet@localhost:5432/postgres
+        run: npm run test:unit:pg
+
+      - name: Managed Postgres container (real Docker)
+        env:
+          MANAGED_PG_DOCKER: '1'
+        run: npx vitest run src/main/store/managedPostgres.docker.test.ts
+
+      - name: Bundle fleet-host
+        run: npm run build:host
 
   build:
     name: build (${{ matrix.os }})

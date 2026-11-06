@@ -9,6 +9,7 @@
 
 import type { ReactNode } from 'react';
 import { useEffect, useMemo, useState } from 'react';
+import { RemoteWorkspaceForm } from './RemoteWorkspaceForm';
 import type {
   AuthMode,
   WorkspaceColor,
@@ -25,6 +26,8 @@ import { eligibleAcceptFromManagers, ManagerGlyph } from './committee';
 import { ModelCombobox, type EndpointEntry } from './ModelCombobox';
 import { createSecretRevealer, REVEAL_SECONDS, type RevealState } from './secretReveal';
 import type { InboxConfig } from '../../../preload';
+import type { CaptureSettings } from '../../../preload/captureSettings';
+import { captureSubmitValue, captureSummary, fromCaptureForm, toCaptureForm, type CaptureFormState } from '../captureSettingsView';
 import {
   claudeAuthFromInitial,
   deriveAuthFields,
@@ -96,6 +99,10 @@ export interface WorkspaceFormSubmit {
   accessibility?: AccessibilityConfig;
   /** Inbox permissions (#407); undefined when everything is at its default. */
   inbox?: InboxConfig;
+  /** Knowledge capture settings (#483 §5a); absent = all defaults. Always
+   *  submitted (undefined clears back to defaults — writeManifest treats a
+   *  present key as authoritative). */
+  knowledgeCapture?: CaptureSettings;
 }
 
 interface ImageEntry {
@@ -176,6 +183,8 @@ interface Props {
   /** Opens the app Settings modal on a tab — used by "＋ Add endpoint…" and
    *  the endpoint auth note's "edit" link. Threaded from App.tsx. */
   onOpenSettings?: (tab: 'endpoints') => void;
+  /** Create mode: offers the Remote kind; called with the bookmarked workspace id. */
+  onRemoteAdded?: (id: string) => void;
 }
 
 export function WorkspaceForm({
@@ -191,8 +200,10 @@ export function WorkspaceForm({
   deleteDisabledReason,
   primaryLabel: primaryLabelOverride,
   extraFooterLeft,
-  onOpenSettings
+  onOpenSettings,
+  onRemoteAdded
 }: Props) {
+  const [remoteMode, setRemoteMode] = useState(false);
   const [name, setName] = useState(initial?.name ?? '');
   const [description, setDescription] = useState(initial?.description ?? '');
   const [labelInput, setLabelInput] = useState('');
@@ -271,6 +282,11 @@ export function WorkspaceForm({
   const [inboxOpen, setInboxOpen] = useState(initial?.inbox !== undefined);
   const [trustedEdits, setTrustedEdits] = useState(initial?.inbox?.trusted === true);
   const [exposeSkills, setExposeSkills] = useState(initial?.inbox?.exposeSkills !== false);
+  // Knowledge capture settings (#483 §5a) — edit-mode only; new workspaces start on defaults.
+  const [capture, setCapture] = useState<CaptureFormState>(() => toCaptureForm(initial?.knowledgeCapture));
+  const [captureOpen, setCaptureOpen] = useState(false);
+  const setCap = <K extends keyof CaptureFormState>(k: K, v: CaptureFormState[K]): void =>
+    setCapture((c) => ({ ...c, [k]: v }));
   // Manager workspaces eligible for the acceptFrom list (other container managers).
   const managerOptions = useMemo(
     () => eligibleAcceptFromManagers(workspaces, initial?.id ?? ''),
@@ -537,6 +553,12 @@ export function WorkspaceForm({
     };
     const inbox = mode === 'edit' && Object.keys(inboxCfg).length ? inboxCfg : undefined;
 
+    const cap = fromCaptureForm(capture);
+    if (cap.error) {
+      setError(cap.error);
+      return null;
+    }
+
     return {
       id: initial?.id,
       name: effectiveName,
@@ -570,7 +592,8 @@ export function WorkspaceForm({
       resources,
       mirror: { default: mirrorDefault, cleanup: cleanupDefault },
       accessibility,
-      inbox
+      inbox,
+      knowledgeCapture: captureSubmitValue(cap.settings)
     };
   };
 
@@ -632,38 +655,72 @@ export function WorkspaceForm({
   const swatchStyle = hue !== null ? { background: `oklch(72% 0.14 ${hue})` } : undefined;
   const primaryLabel = primaryLabelOverride ?? (mode === 'create' ? 'Create & start' : 'Resume');
 
-  return (
-    <div className="workspace-form">
-      <div className="form-row" aria-label="Workspace kind">
-        <label>Type</label>
-        <div className="kind-radios" role="radiogroup">
-          <label className={`kind-radio ${kind === 'container' ? 'active' : ''}`}>
+  const remoteOffered = mode === 'create' && !!onRemoteAdded;
+  const kindRow = (
+    <div className="form-row" aria-label="Workspace kind">
+      <label>Type</label>
+      <div className="kind-radios" role="radiogroup">
+        <label className={`kind-radio ${!remoteMode && kind === 'container' ? 'active' : ''}`}>
+          <input
+            type="radio"
+            name="workspace-kind"
+            value="container"
+            checked={!remoteMode && kind === 'container'}
+            onChange={() => {
+              setRemoteMode(false);
+              setKind('container');
+            }}
+            disabled={busy || dockerUp === false}
+          />
+          <span>Container</span>
+          <span className="kind-help">isolated Docker runner</span>
+          {dockerUp === false && <span className="kind-hint">needs Docker — daemon unreachable</span>}
+        </label>
+        <label className={`kind-radio ${!remoteMode && kind === 'local' ? 'active' : ''}`}>
+          <input
+            type="radio"
+            name="workspace-kind"
+            value="local"
+            checked={!remoteMode && kind === 'local'}
+            onChange={() => {
+              setRemoteMode(false);
+              setKind('local');
+            }}
+            disabled={busy}
+          />
+          <span>Local</span>
+          <span className="kind-help">runs claude on this host</span>
+        </label>
+        {remoteOffered && (
+          <label className={`kind-radio ${remoteMode ? 'active' : ''}`}>
             <input
               type="radio"
               name="workspace-kind"
-              value="container"
-              checked={kind === 'container'}
-              onChange={() => setKind('container')}
-              disabled={busy || dockerUp === false}
-            />
-            <span>Container</span>
-            <span className="kind-help">isolated Docker runner</span>
-            {dockerUp === false && <span className="kind-hint">needs Docker — daemon unreachable</span>}
-          </label>
-          <label className={`kind-radio ${kind === 'local' ? 'active' : ''}`}>
-            <input
-              type="radio"
-              name="workspace-kind"
-              value="local"
-              checked={kind === 'local'}
-              onChange={() => setKind('local')}
+              value="remote"
+              checked={remoteMode}
+              onChange={() => setRemoteMode(true)}
               disabled={busy}
             />
-            <span>Local</span>
-            <span className="kind-help">runs claude on this host</span>
+            <span>Remote</span>
+            <span className="kind-help">a fleet-host someone deployed</span>
           </label>
-        </div>
+        )}
       </div>
+    </div>
+  );
+
+  if (remoteMode && remoteOffered) {
+    return (
+      <div className="workspace-form">
+        {kindRow}
+        <RemoteWorkspaceForm onAdded={onRemoteAdded!} onCancel={onCancel} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="workspace-form">
+      {kindRow}
 
       {kind === 'local' && (
         <>
@@ -1403,6 +1460,74 @@ export function WorkspaceForm({
           ) : (
             <p className="form-hint">Local workspaces can't be trusted: their identity can't be verified the way a container's can.</p>
           )}
+        </details>
+      )}
+
+      {mode === 'edit' && (
+        <details
+          className="form-disclosure"
+          open={captureOpen}
+          onToggle={(e) => setCaptureOpen((e.target as HTMLDetailsElement).open)}
+        >
+          <summary>
+            Knowledge capture <span className="form-hint">{captureSummary(fromCaptureForm(capture).settings)}</span>
+          </summary>
+          <label className="committee-reachable-row">
+            <input type="checkbox" checked={capture.enabled} onChange={(e) => setCap('enabled', e.target.checked)} disabled={busy} />
+            <span>Background knowledge capture</span>
+          </label>
+          <p className="form-hint">
+            Runs a hidden fork of a session, limited to the claims tools, that records durable decisions, root causes and gotchas.
+            A run costs about one more turn of that session.
+          </p>
+          <label className="committee-reachable-row">
+            <input type="checkbox" checked={capture.onSearchHit} onChange={(e) => setCap('onSearchHit', e.target.checked)} disabled={busy || !capture.enabled} />
+            <span>Capture sessions this workspace's searches find</span>
+          </label>
+          <div className="form-row ib-rate">
+            <label htmlFor="ws-cap-top">Sessions per search</label>
+            <input id="ws-cap-top" type="number" min={1} max={5} value={capture.searchTopSessions}
+              onChange={(e) => setCap('searchTopSessions', e.target.value)} disabled={busy || !capture.enabled || !capture.onSearchHit} />
+          </div>
+          <div className="form-row ib-rate">
+            <label htmlFor="ws-cap-recap">Recapture after (new turns)</label>
+            <input id="ws-cap-recap" type="number" min={10} max={500} value={capture.recaptureAfterTurns}
+              onChange={(e) => setCap('recaptureAfterTurns', e.target.value)} disabled={busy || !capture.enabled} />
+          </div>
+          <div className="form-row ib-rate">
+            <label htmlFor="ws-cap-bands">Context bands (%)</label>
+            <input id="ws-cap-bands" type="text" placeholder="85" value={capture.contextBands}
+              onChange={(e) => setCap('contextBands', e.target.value)} disabled={busy || !capture.enabled} />
+          </div>
+          <p className="form-hint">Capture when the context first fills past each band: 50–95, up to 4, comma-separated. Blank = never on context fill.</p>
+          <div className="form-row ib-rate">
+            <label htmlFor="ws-cap-turns">Every N turns (0 = off)</label>
+            <input id="ws-cap-turns" type="number" min={0} max={500} value={capture.turnsEvery}
+              onChange={(e) => setCap('turnsEvery', e.target.value)} disabled={busy || !capture.enabled} />
+          </div>
+          <div className="form-row ib-rate">
+            <label htmlFor="ws-cap-model">Model</label>
+            <input id="ws-cap-model" type="text" placeholder="session" value={capture.model}
+              onChange={(e) => setCap('model', e.target.value)} disabled={busy || !capture.enabled} />
+          </div>
+          <p className="form-hint">"session" reuses the session's own model and its prompt cache. Any other model re-reads the whole conversation at full price.</p>
+          <div className="form-row ib-rate">
+            <label htmlFor="ws-cap-vis">Claims visibility</label>
+            <select id="ws-cap-vis" value={capture.captureVisibility}
+              onChange={(e) => setCap('captureVisibility', e.target.value === 'private' ? 'private' : 'fleet')} disabled={busy || !capture.enabled}>
+              <option value="fleet">Fleet</option>
+              <option value="private">This workspace only</option>
+            </select>
+          </div>
+          <div className="form-row ib-rate">
+            <label htmlFor="ws-cap-keep">Keep transcripts (days)</label>
+            <input id="ws-cap-keep" type="number" min={30} max={3650} value={capture.transcriptRetentionDays}
+              onChange={(e) => setCap('transcriptRetentionDays', e.target.value)} disabled={busy} />
+          </div>
+          <p className="form-hint">
+            Raises Claude Code's cleanupPeriodDays for the sessions the app runs here, so older sessions can still be captured. It never lowers a longer retention you already set.
+            Claude runs you start yourself outside the app keep their own setting.
+          </p>
         </details>
       )}
 

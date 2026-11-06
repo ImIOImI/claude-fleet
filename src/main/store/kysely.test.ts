@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
-import { sqliteKysely, num } from './kysely.js';
+import { sql } from 'kysely';
+import { sqliteKysely, num, chunked, readTransaction } from './kysely.js';
 
 interface T { t: { v: number } }
 
@@ -57,6 +58,95 @@ describe('sqliteKysely', () => {
       throw new Error('boom');
     })).rejects.toThrow('boom');
     expect(await k.selectFrom('t').selectAll().execute()).toEqual([]);
+    await k.destroy();
+  });
+});
+
+describe('chunked', () => {
+  it('splits items into chunks at the 500-item boundary', () => {
+    expect(chunked([])).toEqual([]);
+    expect(chunked([1])).toEqual([[1]]);
+    expect(chunked(Array.from({ length: 500 }, (_, i) => i))).toHaveLength(1);
+    expect(chunked(Array.from({ length: 501 }, (_, i) => i))).toHaveLength(2);
+    expect(chunked(Array.from({ length: 1001 }, (_, i) => i))).toHaveLength(3);
+  });
+
+  it('preserves order and content when reassembling chunks', () => {
+    const items = Array.from({ length: 1001 }, (_, i) => `item-${i}`);
+    const chunks = chunked(items);
+    const reassembled = chunks.flat();
+    expect(reassembled).toEqual(items);
+  });
+});
+
+describe('sqliteKysely statementCache', () => {
+  function counting() {
+    const raw = new Database(':memory:');
+    raw.exec('CREATE TABLE t (v INTEGER NOT NULL)');
+    let prepares = 0;
+    const orig = raw.prepare.bind(raw);
+    raw.prepare = ((sqlText: string) => { prepares++; return orig(sqlText); }) as typeof raw.prepare;
+    return { raw, prepares: () => prepares };
+  }
+
+  it('reuses one prepared statement per distinct SQL text', async () => {
+    const { raw, prepares } = counting();
+    const k = sqliteKysely<T>(raw, { statementCache: 8 });
+    for (let i = 0; i < 5; i++) await k.insertInto('t').values({ v: i }).execute();
+    expect(prepares()).toBe(1);
+    expect(await k.selectFrom('t').select('v').orderBy('v').execute()).toEqual([0, 1, 2, 3, 4].map((v) => ({ v })));
+    expect(prepares()).toBe(2);
+    await k.destroy();
+  });
+
+  it('is off by default (inbox.db keeps preparing per query)', async () => {
+    const { raw, prepares } = counting();
+    const k = sqliteKysely<T>(raw);
+    for (let i = 0; i < 3; i++) await k.insertInto('t').values({ v: i }).execute();
+    expect(prepares()).toBe(3);
+    await k.destroy();
+  });
+
+  it('clears when full instead of growing', async () => {
+    const { raw, prepares } = counting();
+    const k = sqliteKysely<T>(raw, { statementCache: 2 });
+    await k.selectFrom('t').select('v').where('v', '=', 1).execute();
+    await k.selectFrom('t').select('v').where('v', '>', 1).execute();
+    await k.selectFrom('t').select('v').where('v', '<', 1).execute(); // evicts all
+    await k.selectFrom('t').select('v').where('v', '=', 1).execute(); // re-prepared
+    expect(prepares()).toBe(4);
+    await k.destroy();
+  });
+
+  it('destroy() closes the wrapped connection', async () => {
+    const { raw } = counting();
+    const k = sqliteKysely<T>(raw, { statementCache: 8 });
+    await k.selectFrom('t').selectAll().execute();
+    await k.destroy();
+    expect(raw.open).toBe(false);
+  });
+
+  it('skips the cache for SQL text over 2048 chars but still caches short statements', async () => {
+    const { raw, prepares } = counting();
+    const k = sqliteKysely<T>(raw, { statementCache: 8 });
+    const longComment = '/* ' + 'x'.repeat(2050) + ' */';
+    await sql`SELECT 1 ${sql.raw(longComment)}`.execute(k);
+    await sql`SELECT 1 ${sql.raw(longComment)}`.execute(k);
+    expect(prepares()).toBe(2); // not cached: re-prepared every call
+
+    await k.selectFrom('t').select('v').execute();
+    await k.selectFrom('t').select('v').execute();
+    expect(prepares()).toBe(3); // short statement: prepared once, reused
+
+    await k.destroy();
+  });
+});
+
+describe('readTransaction', () => {
+  it('runs the callback in one transaction on SQLite and returns its value', async () => {
+    const { k } = fresh();
+    await k.insertInto('t').values({ v: 1 }).execute();
+    expect(await readTransaction(k, (trx) => trx.selectFrom('t').select('v').execute())).toEqual([{ v: 1 }]);
     await k.destroy();
   });
 });

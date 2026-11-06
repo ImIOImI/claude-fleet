@@ -132,6 +132,20 @@ describe('attachLocalSession', () => {
     ]);
   });
 
+  it('passes --settings after --mcp-config when a settings path is given (#483)', () => {
+    const t = tracker();
+    attachLocalSession({
+      ...base, workspaceId: 'ws1', sessionId: 's1',
+      mcpConfigPath: '/state/ws1/mcp-config.json', settingsPath: '/state/ws1/claude-retention.settings.json',
+      resumeOf: 'uuid-9', spawn: t.spawn
+    });
+    expect(t.calls[0].args).toEqual([
+      '--mcp-config', '/state/ws1/mcp-config.json',
+      '--settings', '/state/ws1/claude-retention.settings.json',
+      '--resume', 'uuid-9'
+    ]);
+  });
+
   it('forwards stream writes to the pty and resize to the proc', async () => {
     const t = tracker();
     const h = attachLocalSession({ ...base, workspaceId: 'ws1', sessionId: 's1', spawn: t.spawn });

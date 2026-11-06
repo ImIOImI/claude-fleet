@@ -23,6 +23,8 @@ import type { WorkspaceLauncher } from './localLauncher.js';
 import type { TerminalRenderer } from './config.js';
 import type { InboxConfig } from '../preload/inboxTypes.js';
 import { sanitizeInboxConfig } from './inbox/inboxPolicy.js';
+import { normalizeCaptureSettings, type CaptureSettings } from '../preload/captureSettings.js';
+import { normalizeHostUrl, safeLogin } from './remoteUrl.js';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted' | 'unreachable';
 
@@ -31,7 +33,42 @@ export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted' | 'unr
  * host-process backend (no isolation, just spawn `claude` directly).
  * The selector exists in the UI; the 'local' implementation is deferred.
  */
-export type WorkspaceKind = 'container' | 'local';
+export type WorkspaceKind = 'container' | 'local' | 'remote';
+
+/** kind 'remote' only: a bookmark of a fleet-host. The id is the host's workspace id. */
+export interface RemoteBookmark {
+  /** Canonical host URL (remoteUrl.normalizeHostUrl). */
+  url: string;
+  /** Last tier /whoami reported; display only, the host enforces. */
+  tier: 'read' | 'steer' | 'session' | null;
+  /** Login the tier was reported for. */
+  login: string | null;
+  checkedAt: number;
+}
+
+/** Same rule RemoteClient applies to /whoami: the host's id is a ULID. */
+export const REMOTE_ID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
+
+function canonicalUrl(raw: string): string | null {
+  try {
+    return normalizeHostUrl(raw) === raw ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+export function sanitizeRemote(r: unknown): RemoteBookmark | undefined {
+  if (!r || typeof r !== 'object') return undefined;
+  const o = r as Record<string, unknown>;
+  if (typeof o.url !== 'string' || !canonicalUrl(o.url)) return undefined;
+  const tier = o.tier === 'read' || o.tier === 'steer' || o.tier === 'session' ? o.tier : null;
+  return {
+    url: o.url,
+    tier,
+    login: safeLogin(o.login),
+    checkedAt: typeof o.checkedAt === 'number' && Number.isFinite(o.checkedAt) ? o.checkedAt : 0
+  };
+}
 
 /** Authentication mode for the workspace's `claude` invocation. */
 export type AuthMode = 'oauth' | 'apikey' | 'endpoint';
@@ -183,6 +220,12 @@ export interface WorkspaceSpec {
   inbox?: InboxConfig;
   /** 'automations' = the one workspace behind the Inbox chip (#407 Phase 5b): fleet-wide automation read + trusted. */
   role?: 'automations';
+  /** Knowledge capture settings (#483 §5a). Absent ⇒ all defaults
+   *  (preload/captureSettings.ts). Clamped on read and write; a legacy
+   *  boolean `false` reads as `{ ...defaults, enabled: false }`. */
+  knowledgeCapture?: CaptureSettings;
+  /** kind 'remote' only. */
+  remote?: RemoteBookmark;
   createdAt: number;
   lastUsedAt: number;
 }
@@ -306,6 +349,12 @@ export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec |
     ) {
       return null;
     }
+    const rawKind: unknown = parsed.kind ?? 'container';
+    if (rawKind !== 'container' && rawKind !== 'local' && rawKind !== 'remote') return null;
+    const kind: WorkspaceKind = rawKind;
+    const remote = kind === 'remote' ? sanitizeRemote(parsed.remote) : undefined;
+    // A bookmark's id is the host's; removeWorkspace deletes state/<id>, so it must be this dir.
+    if (kind === 'remote' && (!remote || parsed.id !== id || !REMOTE_ID_RE.test(id))) return null;
     return {
       id: parsed.id,
       name: parsed.name,
@@ -314,7 +363,8 @@ export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec |
       color: parsed.color && typeof parsed.color.hue === 'number' ? { hue: parsed.color.hue } : undefined,
       workspaceRoot: parsed.workspaceRoot,
       workspaceSubdir: parsed.workspaceSubdir ?? '',
-      kind: parsed.kind ?? 'container',
+      kind,
+      ...(remote ? { remote } : {}),
       image: parsed.image,
       authMode:
         parsed.authMode === 'apikey' ? 'apikey'
@@ -339,6 +389,10 @@ export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec |
       accessibility: sanitizeAccessibility(parsed.accessibility),
       inbox: sanitizeInboxConfig(parsed.inbox),
       role: parsed.role === 'automations' ? 'automations' : undefined,
+      ...(() => {
+        const kc = (parsed as { knowledgeCapture?: unknown }).knowledgeCapture;
+        return kc === undefined || kc === null || kc === true ? {} : { knowledgeCapture: normalizeCaptureSettings(kc) };
+      })(),
       createdAt: parsed.createdAt ?? Date.now(),
       lastUsedAt: parsed.lastUsedAt ?? parsed.createdAt ?? Date.now()
     };
@@ -424,7 +478,13 @@ export async function writeWorkspaceManifest(spec: WorkspaceSpec): Promise<void>
   await mkdir(dirname(manifestPath), { recursive: true });
   // Atomic replace: readers (e.g. the 30 s automations-role refresh) must never
   // see a truncated manifest, which would drop the workspace from the list.
-  await writeFileAtomic(manifestPath, JSON.stringify(spec, null, 2) + '\n');
+  // #483 §5a: clamp capture settings on write too (an MCP or IPC caller can
+  // hand us anything). `true` (legacy) and undefined both mean "defaults".
+  const kc = (spec as { knowledgeCapture?: unknown }).knowledgeCapture;
+  const toWrite: WorkspaceSpec = kc === undefined || kc === null || kc === true
+    ? { ...spec, knowledgeCapture: undefined }
+    : { ...spec, knowledgeCapture: normalizeCaptureSettings(kc) };
+  await writeFileAtomic(manifestPath, JSON.stringify(toWrite, null, 2) + '\n');
 }
 
 export async function touchWorkspaceUsed(id: string): Promise<void> {

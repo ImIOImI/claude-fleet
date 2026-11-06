@@ -11,9 +11,17 @@ export const COMMITTEE_VERBS: CommitteeVerb[] = ['read', 'post', 'pause'];
 /** Minimal shape the helpers need (a WorkspaceSummary structurally satisfies it). */
 export interface CommitteeFields {
   id: string;
-  kind: 'container' | 'local';
+  kind: 'container' | 'local' | 'remote';
   control?: ControlConfig;
   accessibility?: AccessibilityConfig;
+}
+
+/** Why `kind` can't manage a committee, or null for a container. */
+export function managerUnavailableText(kind: string): string | null {
+  if (kind === 'container') return null;
+  if (kind === 'local') return "Local workspaces can't act as a committee manager — control is container-only.";
+  if (kind === 'remote') return "Remote workspaces can't act as a committee manager — their host runs them, and control is container-only.";
+  return "Only container workspaces can act as a committee manager.";
 }
 
 /** A workspace is a manager iff it holds at least one outbound grant. Mirrors

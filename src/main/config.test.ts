@@ -47,10 +47,20 @@ const {
   setPerfTelemetry,
   getPerfOtlp,
   setPerfOtlp,
+  getKnowledgeCapture,
+  setKnowledgeCapture,
+  getKnowledgeCaptureDailyCap,
+  setKnowledgeCaptureDailyCap,
   _resetConfigCacheForTests,
   getKeepRunningInTray,
-  setKeepRunningInTray
+  setKeepRunningInTray,
+  getGithubClientIdConfig,
+  getStoreConfig,
+  setStoreChoice,
+  configUnreadablePath,
+  getUndeclaredToastAfterSec
 } = await import('./config.js');
+const { ConfigJsonError } = await import('./store/storeConfig.js');
 
 const configPath = () => join(userDataDir, 'config.json');
 
@@ -382,6 +392,27 @@ describe('perf telemetry config', () => {
   });
 });
 
+describe('knowledge capture config (#483)', () => {
+  it('knowledgeCapture defaults on and persists an explicit false', async () => {
+    _resetConfigCacheForTests();
+    expect(await getKnowledgeCapture()).toBe(true);
+    await setKnowledgeCapture(false);
+    _resetConfigCacheForTests();
+    expect(await getKnowledgeCapture()).toBe(false);
+  });
+
+  it('knowledgeCaptureDailyCap defaults to 40 and clamps to 0-500', async () => {
+    _resetConfigCacheForTests();
+    expect(await getKnowledgeCaptureDailyCap()).toBe(40);
+    await setKnowledgeCaptureDailyCap(9999);
+    _resetConfigCacheForTests();
+    expect(await getKnowledgeCaptureDailyCap()).toBe(500);
+    await setKnowledgeCaptureDailyCap(0);
+    _resetConfigCacheForTests();
+    expect(await getKnowledgeCaptureDailyCap()).toBe(0);
+  });
+});
+
 // #268: the terminal renderer choice. `dom` is the safe default — it is the
 // only renderer with native per-glyph CSS font fallback — so anything
 // unrecognised must resolve to it rather than leaving a pane unable to paint.
@@ -576,5 +607,107 @@ describe('keepRunningInTray (#407 Phase 2b)', () => {
     await setHardwareAccelDisabled(true);
     _resetConfigCacheForTests();
     expect(await getKeepRunningInTray()).toBe(true);
+  });
+});
+
+describe('identity.github.clientId', () => {
+  it('is null when unset or malformed', async () => {
+    expect(await getGithubClientIdConfig()).toBeNull();
+    for (const identity of [{ github: { clientId: 42 } }, { github: { clientId: '   ' } }, { github: 'x' }, 'x']) {
+      await writeFile(configPath(), JSON.stringify({ identity }), 'utf8');
+      _resetConfigCacheForTests();
+      expect(await getGithubClientIdConfig()).toBeNull();
+    }
+  });
+
+  it('reads a configured client id', async () => {
+    await writeFile(configPath(), JSON.stringify({ identity: { github: { clientId: '  Iv1.orgowned1 ' } } }), 'utf8');
+    _resetConfigCacheForTests();
+    expect(await getGithubClientIdConfig()).toBe('Iv1.orgowned1');
+  });
+
+  it('survives saving an unrelated setting', async () => {
+    await writeFile(configPath(), JSON.stringify({ identity: { github: { clientId: 'Iv1.orgowned1' } } }), 'utf8');
+    _resetConfigCacheForTests();
+    await setKeepRunningInTray(true);
+    const disk = JSON.parse(await readFile(configPath(), 'utf8'));
+    expect(disk.identity).toEqual({ github: { clientId: 'Iv1.orgowned1' } });
+  });
+});
+
+describe('getStoreConfig', () => {
+  it('defaults to SQLite and keeps a hand-edited store block across unrelated writes', async () => {
+    expect(await getStoreConfig()).toEqual({ kind: 'sqlite' });
+    expect(await configUnreadablePath()).toBeNull();
+    const store = { kind: 'postgres', env: 'DATABASE_URL' };
+    await writeFile(configPath(), JSON.stringify({ store }));
+    _resetConfigCacheForTests();
+    expect(await getStoreConfig()).toEqual({ kind: 'postgres', schema: 'fleet', poolMax: 4, connection: { env: 'DATABASE_URL' } });
+    await setKeepRunningInTray(true);
+    expect(JSON.parse(await readFile(configPath(), 'utf8')).store).toEqual(store);
+  });
+
+  it('a config.json that does not parse stops the store choice and is never overwritten', async () => {
+    const broken = '{ "store": { "kind": "postgres", "env": "DATABASE_URL" }, ';
+    await writeFile(configPath(), broken);
+    _resetConfigCacheForTests();
+    await expect(getStoreConfig()).rejects.toThrow(ConfigJsonError);
+    await expect(getStoreConfig()).rejects.toThrow(/config.json is not valid JSON/);
+    expect(await configUnreadablePath()).toBe(configPath());
+    await expect(setKeepRunningInTray(true)).rejects.toThrow(/not valid JSON/);
+    expect(await readFile(configPath(), 'utf8')).toBe(broken);
+    expect(await getKeepRunningInTray()).toBe(false);
+  });
+
+  it('throws on an invalid store block instead of falling back to SQLite', async () => {
+    await writeFile(configPath(), JSON.stringify({ store: { kind: 'postgres', connectionString: 'postgres://u:pw@h/d' } }));
+    _resetConfigCacheForTests();
+    await expect(getStoreConfig()).rejects.toThrow(/must not embed a password/);
+  });
+  it('setStoreChoice writes the managed block or removes the key, keeping other settings', async () => {
+    await setKeepRunningInTray(true);
+    await setStoreChoice('managed');
+    expect(JSON.parse(await readFile(configPath(), 'utf8'))).toMatchObject({ keepRunningInTray: true, store: { kind: 'postgres', managed: true } });
+    expect(await getStoreConfig()).toEqual({ kind: 'managed', poolMax: 4 });
+    await setStoreChoice('sqlite');
+    const disk = JSON.parse(await readFile(configPath(), 'utf8'));
+    expect('store' in disk).toBe(false);
+    expect(disk.keepRunningInTray).toBe(true);
+    expect(await getStoreConfig()).toEqual({ kind: 'sqlite' });
+  });
+
+  it('setStoreChoice leaves a hand-edited external Postgres block alone', async () => {
+    const store = { kind: 'postgres', env: 'DATABASE_URL' };
+    await writeFile(configPath(), JSON.stringify({ store }));
+    _resetConfigCacheForTests();
+    await expect(setStoreChoice('sqlite')).rejects.toThrow(/external Postgres/);
+    expect(JSON.parse(await readFile(configPath(), 'utf8')).store).toEqual(store);
+  });
+});
+
+describe('ports.undeclaredToastAfterSec', () => {
+  it('defaults to 0 (fallback off)', async () => {
+    expect(await getUndeclaredToastAfterSec()).toBe(0);
+  });
+
+  it('reads a hand-edited value, floored to whole seconds', async () => {
+    await writeFile(configPath(), JSON.stringify({ ports: { undeclaredToastAfterSec: 60.7 } }));
+    _resetConfigCacheForTests();
+    expect(await getUndeclaredToastAfterSec()).toBe(60);
+  });
+
+  it.each([-5, 'soon', null])('treats %j as off', async (v) => {
+    await writeFile(configPath(), JSON.stringify({ ports: { undeclaredToastAfterSec: v } }));
+    _resetConfigCacheForTests();
+    expect(await getUndeclaredToastAfterSec()).toBe(0);
+  });
+
+  it('survives saving an unrelated setting', async () => {
+    await writeFile(configPath(), JSON.stringify({ ports: { undeclaredToastAfterSec: 30 } }));
+    _resetConfigCacheForTests();
+    await setAutoReloadLoadouts(false);
+    _resetConfigCacheForTests();
+    expect(await getUndeclaredToastAfterSec()).toBe(30);
+    expect(JSON.parse(await readFile(configPath(), 'utf8')).ports).toEqual({ undeclaredToastAfterSec: 30 });
   });
 });

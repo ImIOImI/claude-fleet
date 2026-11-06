@@ -28,6 +28,8 @@ import {
 } from './paths.js';
 import type { AuthMode, Workspace, WorkspaceEnv, WorkspaceResources, WorkspaceKind } from './workspaces.js';
 import { FACTORY_MIRROR } from './workspaces.js';
+import { effectiveCaptureSettings, type CaptureSettings } from '../preload/captureSettings.js';
+import { ensureContainerRetention } from './claims/retention.js';
 import { fleetPrivateDir, fleetSharedDir } from './config.js';
 import {
   mcpWorkspaceSocketDir,
@@ -160,6 +162,9 @@ export interface CreateWorkspaceInput {
    * fleet root.
    */
   workspaceRoot?: string;
+  /** The workspace's knowledge-capture settings (#483 §5a); absent ⇒ defaults.
+   *  The container's transcript retention is written from this at create. */
+  knowledgeCapture?: CaptureSettings;
 }
 
 export interface ImageInspectResult {
@@ -342,6 +347,11 @@ async function findContainerById(
   return raw[0];
 }
 
+/** Whether the workspace's container exists and is running (not paused/stopped). */
+export async function isContainerRunning(id: string): Promise<boolean> {
+  return (await findContainerById(id))?.State === 'running';
+}
+
 /**
  * Live workspaces — those whose Docker container currently exists
  * (running or stopped). Does not include "deleted" workspaces (manifest
@@ -472,6 +482,13 @@ function managedMcpServerEntry(): {
   };
 }
 
+/** The fleet-state server alone, as an inline `--mcp-config` JSON string —
+ *  what a knowledge-capture fork passes with `--strict-mcp-config` (#483 §5)
+ *  so no other MCP server in the container's ~/.claude.json is loaded. */
+export function managedMcpConfigJson(): string {
+  return JSON.stringify({ mcpServers: { 'claude-fleet-state': managedMcpServerEntry() } });
+}
+
 /**
  * Ensure the per-workspace `~/.claude.json` seed exists, bind-mounted at
  * `/home/fleet/.claude.json`. claude-code stores its onboarding/account
@@ -543,6 +560,10 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
 
   const claudeDir = workspaceClaudeDir(spec.id);
   await mkdir(claudeDir, { recursive: true });
+  // #483 §5a: transcriptRetentionDays → ~/.claude/settings.json cleanupPeriodDays,
+  // from the spec being created (its manifest isn't written until after create).
+  await ensureContainerRetention(spec.id, effectiveCaptureSettings(spec).transcriptRetentionDays)
+    .catch((e) => logError({ source: 'main', type: 'claude-retention', level: 'warn', message: String(e), workspaceId: spec.id }));
   const brokerDir = workspaceBrokerDir(spec.id);
   await mkdir(brokerDir, { recursive: true });
 
@@ -964,6 +985,15 @@ export async function closeHeadless(workspaceId: string, sessionId: string): Pro
   }
 }
 
+/** Fire-and-forget the resume usage signal (#207) off the attach path: the
+ *  write must never delay or fail a CREATE/attach, so a rejection is logged,
+ *  not thrown. */
+export function recordResumeUsageQuietly(workspaceId: string, sessionId: string): void {
+  void recordUsageEvent({ workspaceId, sessionId, kind: 'resumed' }).catch((e: unknown) =>
+    logError({ source: 'main', level: 'warn', type: 'usage-record-failed', message: String(e), workspaceId })
+  );
+}
+
 /**
  * Open a terminal session against the in-container broker.
  *
@@ -1046,7 +1076,7 @@ async function attachPtyInner(
     // conversation). Learning is deliberately NOT done on the plain-ATTACH
     // path above: an already-live claude keeps whatever id it already has.
     const claudeSessionId = resumeOf ?? randomUUID();
-    const { mode, previous } = recordBrokerSessionMapping(workspaceId, sessionId, claudeSessionId);
+    const { mode, previous } = await recordBrokerSessionMapping(workspaceId, sessionId, claudeSessionId);
     if (mode === 'deferred') {
       // Re-CREATE of a tab that still holds a real conversation, onto a fresh
       // (not-yet-written) session id. Parked until it produces a transcript so
@@ -1079,7 +1109,7 @@ async function attachPtyInner(
       });
     }
     learnMirrorMapping(workspaceId, sessionId, claudeSessionId);
-    if (resumeOf) recordUsageEvent({ workspaceId, sessionId: resumeOf, kind: 'resumed' });
+    if (resumeOf) recordResumeUsageQuietly(workspaceId, resumeOf);
     const createResp = await client.createSession(
       sessionId,
       cols,

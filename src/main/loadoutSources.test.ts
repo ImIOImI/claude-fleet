@@ -185,6 +185,16 @@ describe('loadoutSources.credentialFor (#444)', () => {
     expect(await sources.credentialFor(PRIV)).toBeNull();
   });
 
+  it('never offers the GitHub token to a public default source', async () => {
+    const provider = vi.fn(async () => 'gh-tok');
+    sources.setGithubTokenProvider(provider);
+    const d = sources.DEFAULT_SOURCES[0];
+    for (const spelling of [d, `${d}/`, `oci://${d}`, ` ${d.toUpperCase()} `]) {
+      expect(await sources.credentialFor(spelling)).toBeNull();
+    }
+    expect(provider).not.toHaveBeenCalled();
+  });
+
   it('uses FLEET_LOADOUT_TOKEN for a non-default source, never for the public default', async () => {
     vi.stubEnv('FLEET_LOADOUT_TOKEN', 'generic-tok');
     expect(await sources.credentialFor(PRIV)).toEqual({ token: 'generic-tok' });

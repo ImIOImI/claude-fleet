@@ -3,7 +3,7 @@
 // keys + a secret value on explicit getSecret; deleteAllForWorkspace runs at
 // workspace delete time.
 //
-// Every scope-taking handler refuses host-only scopes (loadout-source:*, #444)
+// Every scope-taking handler refuses host-only scopes (loadout-source:* and identity:*)
 // — those are written via loadouts:* and never read back — and fails closed on
 // any non-string scope, key or value: an array or String object survives
 // structured clone and would be coerced to the real string inside vault.ts.

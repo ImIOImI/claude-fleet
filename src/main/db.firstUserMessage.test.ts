@@ -45,24 +45,24 @@ function userLine(
 afterEach(() => closeDb());
 
 describe('ingestLine first_user_message derivation', () => {
-  it('skips the bare local-command caveat (older claude CLIs omit the wrapper tag)', () => {
+  it('skips the bare local-command caveat (older claude CLIs omit the wrapper tag)', async () => {
     const dir = freshDb();
     try {
-      ingestLine('ws-a', 's1', userLine('u1', BARE_CAVEAT, { isMeta: true }));
-      ingestLine('ws-a', 's1', userLine('u2', '<bash-input>ls</bash-input>'));
-      ingestLine('ws-a', 's1', userLine('u3', 'fix the login bug'));
+      await ingestLine('ws-a', 's1', userLine('u1', BARE_CAVEAT, { isMeta: true }));
+      await ingestLine('ws-a', 's1', userLine('u2', '<bash-input>ls</bash-input>'));
+      await ingestLine('ws-a', 's1', userLine('u3', 'fix the login bug'));
       expect(fum(dir, 's1')).toBe('fix the login bug');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it('skips isMeta user events even when their text matches no known wrapper', () => {
+  it('skips isMeta user events even when their text matches no known wrapper', async () => {
     const dir = freshDb();
     try {
-      ingestLine('ws-a', 's2', userLine('u1', '[Image: original 2080x184]', { isMeta: true }));
+      await ingestLine('ws-a', 's2', userLine('u1', '[Image: original 2080x184]', { isMeta: true }));
       expect(fum(dir, 's2')).toBeNull();
-      ingestLine('ws-a', 's2', userLine('u2', 'what does this screenshot show?'));
+      await ingestLine('ws-a', 's2', userLine('u2', 'what does this screenshot show?'));
       expect(fum(dir, 's2')).toBe('what does this screenshot show?');
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -74,45 +74,45 @@ describe('migration 12: repair poisoned first_user_message', () => {
   // Simulates a DB written before the synthetic-prompt filters: events are
   // already ingested (so re-ingest dedupes and cannot heal the row), and the
   // sessions row holds a synthetic blob as its permanent title.
-  function poison(dir: string, sessionId: string, value: string): void {
+  async function poison(dir: string, sessionId: string, value: string): Promise<void> {
     const d = openDb(dir);
     d.prepare('UPDATE sessions SET first_user_message = ? WHERE id = ?').run(value, sessionId);
     d.pragma('user_version = 11');
-    closeDb();
+    await closeDb();
   }
 
-  it('recomputes the title from the first real user prompt in events', () => {
+  it('recomputes the title from the first real user prompt in events', async () => {
     const dir = freshDb();
     try {
-      ingestLine('ws-a', 's3', userLine('u1', BARE_CAVEAT, { isMeta: true }));
-      ingestLine('ws-a', 's3', userLine('u2', '<bash-input>npm test</bash-input>'));
-      ingestLine('ws-a', 's3', userLine('u3', 'why is CI red?'));
-      poison(dir, 's3', BARE_CAVEAT);
+      await ingestLine('ws-a', 's3', userLine('u1', BARE_CAVEAT, { isMeta: true }));
+      await ingestLine('ws-a', 's3', userLine('u2', '<bash-input>npm test</bash-input>'));
+      await ingestLine('ws-a', 's3', userLine('u3', 'why is CI red?'));
+      await poison(dir, 's3', BARE_CAVEAT);
       expect(fum(dir, 's3')).toBe('why is CI red?'); // reopen runs migration 12
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it('clears the title to NULL when the session has no real prompt', () => {
+  it('clears the title to NULL when the session has no real prompt', async () => {
     const dir = freshDb();
     try {
-      ingestLine('ws-a', 's4', userLine('u1', BARE_CAVEAT, { isMeta: true }));
-      ingestLine('ws-a', 's4', userLine('u2', '<bash-input>ls</bash-input>'));
-      poison(dir, 's4', BARE_CAVEAT);
+      await ingestLine('ws-a', 's4', userLine('u1', BARE_CAVEAT, { isMeta: true }));
+      await ingestLine('ws-a', 's4', userLine('u2', '<bash-input>ls</bash-input>'));
+      await poison(dir, 's4', BARE_CAVEAT);
       expect(fum(dir, 's4')).toBeNull();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it('leaves healthy titles untouched', () => {
+  it('leaves healthy titles untouched', async () => {
     const dir = freshDb();
     try {
-      ingestLine('ws-a', 's5', userLine('u1', 'ship the release'));
+      await ingestLine('ws-a', 's5', userLine('u1', 'ship the release'));
       const d = openDb(dir);
       d.pragma('user_version = 11');
-      closeDb();
+      await closeDb();
       expect(fum(dir, 's5')).toBe('ship the release');
     } finally {
       rmSync(dir, { recursive: true, force: true });

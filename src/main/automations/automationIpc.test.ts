@@ -13,7 +13,7 @@ const src = readFileSync(new URL('./automationIpc.ts', import.meta.url), 'utf8')
 
 describe('registerAutomationIpc stop() wiring (#457 quit)', () => {
   it('guards the 30s scheduler tick with a stopped flag', () => {
-    const start = src.indexOf('const tick = setInterval(() => {');
+    const start = src.indexOf('tick = setInterval(() => {');
     expect(start).toBeGreaterThan(-1);
     const body = src.slice(start, src.indexOf('}, 30_000);', start));
     expect(body).toMatch(/if \(stopped\) return;/);
@@ -31,6 +31,16 @@ describe('registerAutomationIpc stop() wiring (#457 quit)', () => {
   });
 
   it('returns stop alongside automations/proposals/setInboxSink', () => {
-    expect(src).toMatch(/return \{ automations: svc, proposals, setInboxSink: \(s\) => \{ sink = s; \}, stop \};/);
+    expect(src).toMatch(/return \{ automations: svc, proposals, setInboxSink: \(s\) => \{ sink = s; \}, stop, resume \};/);
+  });
+
+  it('resume() restarts the tick and the todo listener on the same service, without recover()', () => {
+    const start = src.indexOf('function resume(): void {');
+    expect(start).toBeGreaterThan(-1);
+    const body = src.slice(start, src.indexOf('\n  }', start));
+    expect(body).toMatch(/stopped = false;/);
+    expect(body).toMatch(/startTick\(\);/);
+    expect(body).toMatch(/inboxEvents\.on\('todo', onTodo\);/);
+    expect(body).not.toMatch(/recover/);
   });
 });

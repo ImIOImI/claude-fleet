@@ -2,19 +2,27 @@
 // is NOT a rebuildable cache — so migrations are versioned and every migration
 // of an existing file is preceded by a timestamped backup copy.
 import Database from 'better-sqlite3';
-import { copyFileSync, existsSync } from 'node:fs';
+import { copyFileSync, existsSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { sql, type Kysely, type Transaction } from 'kysely';
 import type {
   InboxCounts, PostTodoInput, Todo, TodoEvent, TodoFilter, TodoSource, UpdateTodoPatch
 } from '../../preload/inboxTypes.js';
 import { isPriority, maxPriority, normalizeTag, normalizeTags, MAX_TAGS } from './inboxCore.js';
-import { num, sqliteKysely } from '../store/kysely.js';
+import { chunked, num, sqliteKysely } from '../store/kysely.js';
+import type pg from 'pg';
+import { postgresKysely, schemaOf, type PostgresKyselyOptions } from '../store/postgres.js';
+import { migratePostgres } from '../store/pgMigrate.js';
+import { INBOX_PG_TRACK } from '../store/migrations/inboxPg.js';
 import type { InboxDb, TodoRow } from '../store/inboxSchema.js';
+import { INBOX_PG_MARKER, sweepSqliteSidecars } from '../store/sqliteFiles.js';
 
-export const INBOX_SCHEMA_VERSION = 5;
+export const INBOX_SCHEMA_VERSION = 8;
 
-const MIGRATIONS: Record<number, string> = {
+/** @internal for tests — lets a migration test build a real file DB at an
+ *  older schema version (running a prefix of these) without duplicating the
+ *  SQL here. Not part of the module's public contract. */
+export const MIGRATIONS: Record<number, string> = {
   1: `
     CREATE TABLE todos (
       id TEXT PRIMARY KEY,
@@ -180,8 +188,81 @@ const MIGRATIONS: Record<number, string> = {
     ALTER TABLE automations ADD COLUMN next_run_at INTEGER;
     ALTER TABLE automations ADD COLUMN next_run_by TEXT;
     ALTER TABLE runs ADD COLUMN reschedule TEXT;
+  `,
+  // #483: knowledge claims (phase 1) + background capture runs.
+  6: `
+    CREATE TABLE claims (
+      id TEXT PRIMARY KEY, text TEXT NOT NULL, kind TEXT NOT NULL, topics TEXT NOT NULL,
+      refs TEXT, visibility TEXT NOT NULL DEFAULT 'fleet', status TEXT NOT NULL DEFAULT 'current',
+      superseded_by TEXT, retract_reason TEXT, workspace_id TEXT NOT NULL,
+      confirmations INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX idx_claims_status_vis ON claims (status, visibility, workspace_id);
+    CREATE TABLE claim_sources (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, claim_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+      session_id TEXT, via TEXT NOT NULL, capture_run TEXT, ts INTEGER NOT NULL
+    );
+    CREATE INDEX idx_claim_sources_claim ON claim_sources (claim_id);
+    CREATE TABLE claim_vectors (claim_id TEXT PRIMARY KEY, model_id TEXT NOT NULL, vec BLOB NOT NULL);
+    CREATE VIRTUAL TABLE claims_fts USING fts5(claim_id UNINDEXED, text, topics);
+    CREATE TABLE capture_runs (
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, session_id TEXT NOT NULL, fork_session_id TEXT,
+      trigger TEXT NOT NULL, status TEXT NOT NULL, claims_recorded INTEGER NOT NULL DEFAULT 0,
+      usage TEXT, error TEXT, started_at INTEGER NOT NULL, ended_at INTEGER
+    );
+    CREATE INDEX idx_capture_runs_session ON capture_runs (session_id, started_at);
+    CREATE INDEX idx_capture_runs_status ON capture_runs (status);
+  `,
+  // #483 §5a: capture-settings change log, capture-settings proposals (payload),
+  // and the user-turn baseline that recaptureAfterTurns is measured from.
+  7: `
+    CREATE TABLE capture_settings_log (
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, ts INTEGER NOT NULL, actor TEXT NOT NULL,
+      "before" TEXT NOT NULL, "after" TEXT NOT NULL, reason TEXT, applied INTEGER NOT NULL, proposal_id TEXT
+    );
+    CREATE INDEX idx_capture_settings_log_ws ON capture_settings_log (workspace_id, ts);
+    -- proposals.kind has a CHECK (v4) that SQLite can't alter: rebuild the
+    -- table to admit 'capture-settings' and add the payload column.
+    CREATE TABLE proposals_v7 (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind IN ('new','change','batch','capture-settings')),
+      proposer_kind TEXT NOT NULL,
+      proposer_id TEXT,
+      rationale TEXT,
+      status TEXT NOT NULL,
+      items TEXT NOT NULL,
+      note TEXT,
+      created_at INTEGER NOT NULL,
+      decided_at INTEGER,
+      payload TEXT
+    );
+    INSERT INTO proposals_v7 (id, kind, proposer_kind, proposer_id, rationale, status, items, note, created_at, decided_at)
+      SELECT id, kind, proposer_kind, proposer_id, rationale, status, items, note, created_at, decided_at FROM proposals;
+    DROP TABLE proposals;
+    ALTER TABLE proposals_v7 RENAME TO proposals;
+    CREATE INDEX proposals_status ON proposals (status, created_at);
+    ALTER TABLE capture_runs ADD COLUMN user_turns INTEGER;
+    CREATE INDEX idx_capture_runs_started ON capture_runs (started_at);
+  `,
+  // #483 final review: the workspace's effective captureVisibility at admit
+  // (record_claim forces private claims for a private run), and the session's
+  // compaction count at admit (ctx bands don't re-fire after an app restart).
+  8: `
+    ALTER TABLE capture_runs ADD COLUMN visibility TEXT;
+    ALTER TABLE capture_runs ADD COLUMN compactions INTEGER;
   `
 };
+
+/** Brings an inbox SQLite file to INBOX_SCHEMA_VERSION, one transaction per version. */
+export function migrateInboxSqlite(db: Database.Database): void {
+  const current = db.pragma('user_version', { simple: true }) as number;
+  for (let v = current + 1; v <= INBOX_SCHEMA_VERSION; v++) {
+    db.transaction(() => {
+      db.exec(MIGRATIONS[v]);
+      db.pragma(`user_version = ${v}`);
+    })();
+  }
+}
 
 // Crockford base32 ULID: 10 chars time + 16 chars randomness.
 const B32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
@@ -202,11 +283,28 @@ type Q = Kysely<InboxDb> | Transaction<InboxDb>;
 const PRIORITY_ORDER = sql<number>`CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END`;
 
 export class InboxStore {
-  private constructor(private readonly raw: Database.Database, readonly kysely: Kysely<InboxDb>) {}
+  private constructor(private readonly raw: Database.Database | null, readonly kysely: Kysely<InboxDb>) {}
+
+  /** Which store this is on: openPostgres has no raw SQLite handle. Stores whose
+   *  SQL differs by dialect (claims full-text search) branch on it. */
+  get dialect(): 'sqlite' | 'postgres' {
+    return this.raw ? 'sqlite' : 'postgres';
+  }
+
+  /** The inbox tables on a Postgres store pool. No file
+   *  backup: the migration is one transaction, and the database is the operator's.
+   *  `migrate: false`: the caller already ran migratePgStores (fleet-host migrates unfenced). */
+  static async openPostgres(pool: pg.Pool, opts: PostgresKyselyOptions & { migrate?: boolean } = {}): Promise<InboxStore> {
+    const k = postgresKysely<InboxDb>(pool, opts);
+    if (opts.migrate !== false) await migratePostgres(k, schemaOf(pool), INBOX_PG_TRACK);
+    return new InboxStore(null, k);
+  }
 
   static open(dir: string): InboxStore {
     const file = path.join(dir, 'inbox.db');
     const existed = existsSync(file);
+    if (!existed) sweepSqliteSidecars(file, Date.now());
+    rmSync(path.join(dir, INBOX_PG_MARKER), { force: true });
     if (existed) {
       const probe = new Database(file);
       const v = probe.pragma('user_version', { simple: true }) as number;
@@ -224,20 +322,14 @@ export class InboxStore {
 
   private static init(db: Database.Database): InboxStore {
     db.pragma('foreign_keys = ON');
-    const current = db.pragma('user_version', { simple: true }) as number;
-    for (let v = current + 1; v <= INBOX_SCHEMA_VERSION; v++) {
-      db.transaction(() => {
-        db.exec(MIGRATIONS[v]);
-        db.pragma(`user_version = ${v}`);
-      })();
-    }
+    migrateInboxSqlite(db);
     return new InboxStore(db, sqliteKysely<InboxDb>(db));
   }
 
   async close(): Promise<void> {
     // destroy() only closes the connection if Kysely ever ran a query, so close the raw handle too.
     await this.kysely.destroy();
-    if (this.raw.open) this.raw.close();
+    if (this.raw?.open) this.raw.close();
   }
 
   // --- reads --------------------------------------------------------------
@@ -247,15 +339,34 @@ export class InboxStore {
     return rows.map((r) => r.tag);
   }
 
-  private async toTodo(q: Q, r: TodoRow): Promise<Todo> {
+  /** Batched tagsFor for N todos: one `entity_id IN (...)` query per ≤500-id chunk instead of one per todo. */
+  private async tagsForIds(q: Q, ids: string[]): Promise<Map<string, string[]>> {
+    const out = new Map<string, string[]>();
+    if (ids.length === 0) return out;
+    for (const chunk of chunked(ids)) {
+      const rows = await q.selectFrom('tags').select(['entity_id', 'tag']).where('entity_kind', '=', 'todo')
+        .where('entity_id', 'in', chunk).orderBy('entity_id').orderBy('tag').execute();
+      for (const r of rows) {
+        const list = out.get(r.entity_id);
+        if (list) list.push(r.tag); else out.set(r.entity_id, [r.tag]);
+      }
+    }
+    return out;
+  }
+
+  private rowToTodo(r: TodoRow, tags: string[]): Todo {
     return {
       id: r.id, title: r.title, body: r.body, status: r.status, priority: r.priority,
       source: { kind: r.source_kind, id: r.source_id }, sourceRunId: r.source_run_id,
       viaWorkspace: r.via_workspace, dedupeKey: r.dedupe_key, seenCount: r.seen_count,
       recurred: r.recurred === 1, workspaceId: r.workspace_id, sessionId: r.session_id,
-      tags: await this.tagsFor(q, r.id), createdAt: r.created_at, updatedAt: r.updated_at,
+      tags, createdAt: r.created_at, updatedAt: r.updated_at,
       firstSeenAt: r.first_seen_at, lastSeenAt: r.last_seen_at, closedAt: r.closed_at
     };
+  }
+
+  private async toTodo(q: Q, r: TodoRow): Promise<Todo> {
+    return this.rowToTodo(r, await this.tagsFor(q, r.id));
   }
 
   private async getWith(q: Q, id: string): Promise<Todo | null> {
@@ -297,7 +408,8 @@ export class InboxStore {
       ));
     }
     const rows = await q.orderBy(PRIORITY_ORDER).orderBy('last_seen_at', 'desc').orderBy('id', 'desc').limit(limit).execute();
-    return Promise.all(rows.map((r) => this.toTodo(this.kysely, r)));
+    const tagsById = await this.tagsForIds(this.kysely, rows.map((r) => r.id));
+    return rows.map((r) => this.rowToTodo(r, tagsById.get(r.id) ?? []));
   }
 
   async counts(): Promise<InboxCounts> {

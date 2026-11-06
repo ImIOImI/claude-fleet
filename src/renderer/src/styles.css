@@ -101,12 +101,11 @@ body {
   grid-template-columns: 1fr;
   height: 100vh;
 }
-/* Daemon-down banner (#380) sits between the top strip and the body as an
-   extra in-flow row. Without a track for it, grid auto-placement would push
-   the body out of the 1fr row into `auto`, so the banner would swallow all the
-   spare height (worse the larger the window). Add a second `auto` row for the
-   banner while the body keeps 1fr. */
-.app.daemon-down {
+/* The banners (#380 daemon-down, remote, store) share one wrapper row between
+   the top strip and the body. Without a track for it, grid auto-placement would
+   push the body out of the 1fr row into `auto`, so the banner would swallow all
+   the spare height (worse the larger the window). */
+.app.has-banners {
   grid-template-rows: auto auto 1fr auto;
 }
 
@@ -403,6 +402,11 @@ body {
   color: #f0b8b3;
   background: #2b1d1c;
   border-bottom: 1px solid #4a2a27;
+}
+.daemon-banner.store-banner {
+  color: var(--warn);
+  background: color-mix(in oklab, var(--warn) 10%, var(--bg));
+  border-bottom-color: color-mix(in oklab, var(--warn) 30%, transparent);
 }
 .daemon-banner .dot {
   width: 8px;
@@ -3771,3 +3775,68 @@ button.switch { padding: 0; cursor: pointer; }
 .host-shell-pick { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
 .proposal .host-shell-pick { margin-top: 8px; }
 .host-shell-pick select { font: inherit; font-size: 12px; padding: 2px 6px; border: 1px solid var(--rule); border-radius: var(--r-md); background: var(--bg-1); color: var(--ink); }
+
+/* Settings › Account */
+.account-card { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--rule); border-radius: var(--r-md); margin-bottom: 8px; }
+.account-avatar { border-radius: 50%; flex-shrink: 0; }
+.account-who { flex: 1; min-width: 0; }
+.account-name { color: var(--ink); font-weight: 600; }
+.account-login { color: var(--ink-1); font-size: 12px; }
+.device-code { font-family: var(--font-mono); font-size: 22px; letter-spacing: 0.18em; color: var(--ink); padding: 8px 0; user-select: all; }
+.device-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.device-actions a.btn { text-decoration: none; display: inline-flex; align-items: center; }
+.account-notice { color: var(--warn); }
+
+/* Remote workspaces. */
+.remote-form { display: flex; flex-direction: column; gap: 10px; }
+.remote-form .form-row { margin-bottom: 0; }
+.remote-form .form-hint { font-size: 11px; color: var(--ink-2); margin: 0; }
+.remote-form .form-hint.error-text { color: var(--danger); }
+.remote-probe { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border: 1px solid var(--rule); border-radius: var(--r-md); font-size: 12px; color: var(--ink-1); }
+.remote-probe-name { color: var(--ink); font-weight: 600; }
+.remote-probe-desc { color: var(--ink-2); }
+.remote-warning { color: var(--warn); font-size: 11px; }
+.tier-badge {
+  font-size: 9px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--rule-strong);
+  color: var(--ink-1);
+  text-transform: lowercase;
+}
+.remote-glyph { flex: 0 0 auto; color: var(--ink-1); }
+/* Remote dots don't pulse. */
+.ws-chip .dot.remote.unreachable { animation: none; }
+.ws-chip .dot.remote.checking { background: var(--ink-3); animation: none; }
+.session-tab-watching {
+  margin-left: 6px;
+  font-size: 9px;
+  color: var(--ink-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.session-tab-join {
+  background: transparent;
+  border: none;
+  color: var(--ink-2);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.session-tab-join:hover:not(:disabled) { color: var(--ink); background: var(--bg-card); }
+.session-join-menu { max-height: 320px; max-width: 360px; overflow-y: auto; }
+.session-join-item span { min-width: 0; font-family: var(--font-mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-join-empty { padding: 6px 8px; font-size: 11px; color: var(--ink-2); }
+.remote-banner .dot { animation: none; }
+.store-banner .dot { animation: none; background: var(--warn); }
+
+/* Settings › Storage › History and inbox. */
+.store-choice { margin-top: 12px; }
+.store-choice-row { cursor: pointer; justify-content: flex-start; }
+.store-choice-row input[type='radio'] { margin: 3px 0 0; accent-color: var(--ok); flex-shrink: 0; }
+.store-choice-row .setting-desc { display: block; }
+.store-choice-notice { color: var(--warn); }
+.store-choice-restart { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.store-confirm .store-confirm-step { margin: 8px 0; font-size: 12.5px; line-height: 1.5; color: var(--ink-1); }

@@ -1,4 +1,4 @@
-// Kysely table types for inbox.db (#407). Mirrors MIGRATIONS 1–5 in
+// Kysely table types for inbox.db (#407). Mirrors MIGRATIONS 1–7 in
 // inbox/inboxDb.ts exactly; a migration that changes a table changes it here too.
 import type { Generated, Selectable } from 'kysely';
 import type {
@@ -56,6 +56,30 @@ export interface StepRunsTable {
 export interface ProposalsTable {
   id: string; kind: ProposalKind; proposer_kind: SourceKind; proposer_id: string | null; rationale: string | null;
   status: ProposalStatus; items: string; note: string | null; created_at: number; decided_at: number | null;
+  payload: string | null;
+}
+export interface ClaimsTable {
+  id: string; text: string; kind: string; topics: string; refs: string | null;
+  visibility: Generated<string>; status: Generated<string>; superseded_by: string | null; retract_reason: string | null;
+  workspace_id: string; confirmations: Generated<number>; created_at: number; updated_at: number;
+}
+export interface ClaimSourcesTable {
+  id: Generated<number>; claim_id: string; workspace_id: string; session_id: string | null;
+  via: string; capture_run: string | null; ts: number;
+}
+export interface ClaimVectorsTable { claim_id: string; model_id: string; vec: Buffer }
+export interface CaptureRunsTable {
+  id: string; workspace_id: string; session_id: string; fork_session_id: string | null; trigger: string;
+  status: string; claims_recorded: Generated<number>; usage: string | null; error: string | null;
+  started_at: number; ended_at: number | null; user_turns: number | null;
+  /** v8: effective captureVisibility at admit (record forces private claims when private). */
+  visibility: string | null;
+  /** v8: the session's compaction count at admit (restart-safe ctx-band bookkeeping). */
+  compactions: number | null;
+}
+export interface CaptureSettingsLogTable {
+  id: string; workspace_id: string; ts: number; actor: string; before: string; after: string;
+  reason: string | null; applied: number; proposal_id: string | null;
 }
 
 export interface InboxDb {
@@ -72,6 +96,11 @@ export interface InboxDb {
   runs: RunsTable;
   step_runs: StepRunsTable;
   proposals: ProposalsTable;
+  claims: ClaimsTable;
+  claim_sources: ClaimSourcesTable;
+  claim_vectors: ClaimVectorsTable;
+  capture_runs: CaptureRunsTable;
+  capture_settings_log: CaptureSettingsLogTable;
 }
 
 export type TodoRow = Selectable<TodosTable>;
@@ -81,3 +110,7 @@ export type AutomationRow = Selectable<AutomationsTable>;
 export type RunRowSql = Selectable<RunsTable>;
 export type StepRunRowSql = Selectable<StepRunsTable>;
 export type ProposalRow = Selectable<ProposalsTable>;
+export type ClaimRow = Selectable<ClaimsTable>;
+export type ClaimSourceRow = Selectable<ClaimSourcesTable>;
+export type CaptureRunRow = Selectable<CaptureRunsTable>;
+export type CaptureSettingsLogRow = Selectable<CaptureSettingsLogTable>;

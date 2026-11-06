@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { closeDb, openDb } from './db.js';
+import { closeDb, openDb, stateKysely } from './db.js';
 import { PerfStore } from './perfStore.js';
 import { initPerf, shutdownPerf } from './perf.js';
 import { channelAttrs, instrumentIpcHandle } from './perfIpc.js';
@@ -31,7 +31,7 @@ describe('instrumentIpcHandle', () => {
 });
 
 describe('channelAttrs', () => {
-  it('maps workspace/session args for mapped channels', () => {
+  it('maps workspace/session args for mapped channels', async () => {
     expect(channelAttrs('sessions:write', ['ws-1', { sessions: [] }]))
       .toEqual({ workspace_id: 'ws-1' });
     expect(channelAttrs('observability:summaryForBrokerSession', ['ws-1', 'bs-2']))
@@ -40,12 +40,12 @@ describe('channelAttrs', () => {
       .toEqual({ workspace_id: 'ws-caller' });
   });
 
-  it('deliberately excludes session-only channels (globally visible rows would leak cross-workspace)', () => {
+  it('deliberately excludes session-only channels (globally visible rows would leak cross-workspace)', async () => {
     // id-bearing but unmapped: session-only rows would be globally visible in the MCP snapshot
     expect(channelAttrs('observability:eventsForSession', ['sess-uuid', 0, 500])).toBeUndefined();
   });
 
-  it('returns undefined for unmapped channels and non-string args', () => {
+  it('returns undefined for unmapped channels and non-string args', async () => {
     expect(channelAttrs('workspace:list', [])).toBeUndefined();
     expect(channelAttrs('sessions:write', [undefined, {}])).toBeUndefined();
     expect(channelAttrs('sessions:list', [undefined])).toBeUndefined(); // optional arg omitted
@@ -56,7 +56,7 @@ describe('instrumentIpcHandle + channelAttrs integration', () => {
   it('a mapped channel invoke produces an attributed slow_op row', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'perfipc-'));
     const db = openDb(dir);
-    const store = new PerfStore(db);
+    const store = new PerfStore(stateKysely());
     initPerf(store, {
       recording: true, recordingSource: 'settings',
       otlp: { enabled: false, endpoint: null, source: 'settings' }
@@ -76,7 +76,7 @@ describe('instrumentIpcHandle + channelAttrs integration', () => {
       `SELECT workspace_id FROM perf_events WHERE kind = 'slow_op' AND name = 'claude_fleet.ipc.sessions:write'`
     ).get() as { workspace_id: string };
     expect(row).toEqual({ workspace_id: 'ws-int' });
-    closeDb();
+    await closeDb();
     rmSync(dir, { recursive: true, force: true });
   });
 });

@@ -81,7 +81,7 @@ export class NotifyStore {
     const rows = await this.db.selectFrom('notifications').selectAll()
       .where('delivered', '=', 0).where('digested', '=', 0).where('ts', '>=', since)
       .where((eb) => eb.or([eb('held_reason', '=', 'pause'), eb('held_reason', 'like', 'downtime:%')]))
-      .orderBy('ts').execute();
+      .orderBy('ts').orderBy('id').execute();
     return rows.map(toRow);
   }
 

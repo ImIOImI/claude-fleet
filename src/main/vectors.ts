@@ -44,3 +44,5 @@ export function topK(
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, Math.max(0, k));
 }
+
+export type EmbedFn = (texts: string[]) => Promise<Float32Array[]>;

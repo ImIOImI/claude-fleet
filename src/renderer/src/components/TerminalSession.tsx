@@ -19,7 +19,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { isBusyTitle, isUnknownTitleGlyph } from '../activityDetector';
 import { busyFlagIsStale } from '../staleBusy';
 import { decideTerminalKeyAction } from '../terminalKeymap';
-import { decodeOsc52 } from '../osc52';
+import { osc52ClipboardText } from '../osc52';
 import { EchoRttTracker } from '../echoRtt';
 import { initPerfState, perfRecording } from '../perfState';
 import { buildTerminalOptions } from './terminalOptions';
@@ -112,6 +112,10 @@ interface Props {
    * replays its ring buffer) when it flips back to false on resume. (#18)
    */
   paused?: boolean;
+  /** Remote viewer below `steer`: no input is sent (the host would drop it). */
+  readOnly?: boolean;
+  /** A remote workspace's tab: its OSC 52 clipboard writes are ignored. */
+  remote?: boolean;
   /**
    * Called when the PTY signals end-of-life (user `/exit`, claude
    * crash, docker stop, etc.). The parent TerminalPane uses this to
@@ -151,6 +155,8 @@ export function TerminalSession({
   resumeOf,
   visible,
   paused = false,
+  readOnly = false,
+  remote = false,
   onLifecycleChange,
   onActivityChange,
   reloadToken,
@@ -160,6 +166,10 @@ export function TerminalSession({
   // The live xterm, so effects outside the attach effect can force a repaint
   // without reaching into its closure (#268).
   const termRef = useRef<Terminal | null>(null);
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
+  const remoteRef = useRef(remote);
+  remoteRef.current = remote;
   // Bumped when the user clicks "Start new session" / "Retry" after a
   // session ends. The effect deps on containerId+sessionEpoch, so a new
   // attach happens with a fresh xterm instance (no stale state from the
@@ -215,9 +225,10 @@ export function TerminalSession({
     // OSC 52 → host clipboard. claude's own copy (fullscreen selection,
     // `/copy`) lands here inside the container, where it has no native
     // clipboard tool; unhandled, the copy silently vanishes. Write-only —
-    // see osc52.ts. Returning true marks the sequence handled.
+    // see osc52.ts. Returning true marks the sequence handled, so a remote
+    // tab's ignored write is still swallowed.
     term.parser.registerOscHandler(52, (payload) => {
-      const text = decodeOsc52(payload);
+      const text = osc52ClipboardText(payload, remoteRef.current);
       if (text) void window.api.clipboard.write(text);
       return true;
     });
@@ -447,7 +458,7 @@ export function TerminalSession({
           return;
         }
         return window.api.clipboard.read().then((text) => {
-          if (text && ptyHandleId) window.api.pty.input(ptyHandleId, text);
+          if (text && ptyHandleId && !readOnlyRef.current) window.api.pty.input(ptyHandleId, text);
         });
       });
     };
@@ -529,7 +540,8 @@ export function TerminalSession({
         ptyHandleRef.current = sid;
         resizePusher = createResizePusher({
           getSize: () => ({ cols: term.cols, rows: term.rows }),
-          push: (cols, rows) => window.api.pty.resize(sid, cols, rows),
+          // Watch-only: the local fit still runs, but the viewer never resizes a shared PTY.
+          push: (cols, rows) => (readOnlyRef.current ? Promise.resolve({ ok: true, cols, rows }) : window.api.pty.resize(sid, cols, rows)),
           onGiveUp: (cols, rows, attempts) => {
             // Worth a line: from here on xterm and the pty disagree, and the
             // transcript will accumulate overflow fragments in its first
@@ -632,6 +644,7 @@ export function TerminalSession({
           }
         });
         term.onData((data) => {
+          if (readOnlyRef.current) return;
           // First user keystroke ⇒ they're interacting; cancel any pending
           // repaint nudge so we never inject Ctrl+L into an active session.
           disarmNudge();
@@ -725,7 +738,7 @@ export function TerminalSession({
             nudgeTimer = null;
             const handle = ptyHandleId;
             disarmNudge();
-            if (handle) {
+            if (handle && !readOnlyRef.current) {
               try {
                 window.api.pty.input(handle, '\x0c');
               } catch {

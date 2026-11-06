@@ -42,8 +42,18 @@ vi.mock('./endpoints.js', () => ({
 // Mock node-pty (lazy-required by local.ts but not needed for buildEnv tests).
 vi.mock('node-pty', () => ({}));
 
+const storeConfig = vi.hoisted(() => ({ current: { kind: 'sqlite' } as unknown }));
+vi.mock('./config.js', async (orig) => ({
+  ...(await orig<typeof import('./config.js')>()),
+  getStoreConfig: async () => {
+    if (storeConfig.current instanceof Error) throw storeConfig.current;
+    return storeConfig.current;
+  }
+}));
+
 // Dynamic import AFTER mocks are registered.
 const { buildEnv, localMcpTransport } = await import('./local.js');
+const { setActiveStoreConfig } = await import('./store/activeStore.js');
 
 const fakeEnv = (plain: Record<string, string> = {}) => ({
   env: { plain, secretKeys: [] as string[] }
@@ -168,5 +178,68 @@ describe('buildEnv — loadout-source tokens never reach a workspace (#444)', ()
     expect(env.FLEET_LOADOUT_TOKEN_GHCR_IO_ACME_PRIVATE).toBeUndefined();
     // Boolean assertion: a failure must not print the (real host) env.
     expect(Object.values(env).some((v) => typeof v === 'string' && v.startsWith('sentinel-'))).toBe(false);
+  });
+});
+
+describe('buildEnv — store credentials stay host-only', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    storeConfig.current = { kind: 'sqlite' };
+  });
+
+  it('drops the store connection-string env var and libpq credential vars, keeping the rest', async () => {
+    storeConfig.current = { kind: 'postgres', schema: 'fleet', poolMax: 4, connection: { env: 'FLEET_DB_URL' } };
+    vi.stubEnv('FLEET_DB_URL', 'postgres://u:pw@db/fleet');
+    vi.stubEnv('PGPASSWORD', 'pw');
+    vi.stubEnv('PGSERVICE', 'fleet');
+    vi.stubEnv('UNRELATED_VAR', 'kept');
+    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+    expect(env.FLEET_DB_URL).toBeUndefined();
+    expect(env.PGPASSWORD).toBeUndefined();
+    expect(env.PGSERVICE).toBeUndefined();
+    expect(env.UNRELATED_VAR).toBe('kept');
+  });
+
+  it('drops a password env var named by the store, matching case-insensitively', async () => {
+    storeConfig.current = {
+      kind: 'postgres', schema: 'fleet', poolMax: 4,
+      connection: { host: 'h', port: 5432, database: 'd', user: 'u', password: { kind: 'env', name: 'FLEET_DB_PW' }, ssl: 'disable' }
+    };
+    vi.stubEnv('fleet_db_pw', 'pw');
+    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+    expect(env.fleet_db_pw).toBeUndefined();
+  });
+
+  it('still drops libpq credential vars when the store config cannot be read', async () => {
+    storeConfig.current = new Error('config.json is not valid JSON');
+    vi.stubEnv('PGPASSWORD', 'pw');
+    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+    expect(env.PGPASSWORD).toBeUndefined();
+  });
+
+  it('leaves libpq vars alone on the SQLite store', async () => {
+    vi.stubEnv('PGPASSWORD', 'users-own');
+    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+    expect(env.PGPASSWORD).toBe('users-own');
+  });
+
+  it('drops libpq vars on the managed store', async () => {
+    storeConfig.current = { kind: 'managed', poolMax: 4 };
+    vi.stubEnv('PGPASSWORD', 'pw');
+    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+    expect(env.PGPASSWORD).toBeUndefined();
+  });
+
+  it('keeps scrubbing the running store after config.json switched to SQLite (applies at restart)', async () => {
+    setActiveStoreConfig({ kind: 'postgres', schema: 'fleet', poolMax: 4, connection: { env: 'FLEET_DB_URL' } });
+    try {
+      vi.stubEnv('FLEET_DB_URL', 'postgres://u:pw@db/fleet');
+      vi.stubEnv('PGPASSWORD', 'pw');
+      const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+      expect(env.FLEET_DB_URL).toBeUndefined();
+      expect(env.PGPASSWORD).toBeUndefined();
+    } finally {
+      setActiveStoreConfig(null);
+    }
   });
 });

@@ -9,6 +9,7 @@ test('preload exposes window.api with all expected surfaces', async () => {
       workspace: typeof (window as unknown as { api?: { workspace?: unknown } }).api?.workspace,
       images: typeof (window as unknown as { api?: { images?: unknown } }).api?.images,
       vault: typeof (window as unknown as { api?: { vault?: unknown } }).api?.vault,
+      identity: typeof (window as unknown as { api?: { identity?: unknown } }).api?.identity,
       pty: typeof (window as unknown as { api?: { pty?: unknown } }).api?.pty,
       fs: typeof (window as unknown as { api?: { fs?: unknown } }).api?.fs,
       dialog: typeof (window as unknown as { api?: { dialog?: unknown } }).api?.dialog
@@ -18,6 +19,7 @@ test('preload exposes window.api with all expected surfaces', async () => {
       workspace: 'object',
       images: 'object',
       vault: 'object',
+      identity: 'object',
       pty: 'object',
       fs: 'object',
       dialog: 'object'

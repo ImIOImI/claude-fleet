@@ -37,7 +37,7 @@ function focusMain(): BrowserWindow | null {
 }
 
 /** Wire notifications. Returns the service so inboxIpc can route post side-effects. */
-export function registerNotifyIpc(inbox: InboxStore): NotifyService & { stop(): void } {
+export function registerNotifyIpc(inbox: InboxStore): NotifyService & { stop(): void; resume(): void } {
   const store = new NotifyStore(inbox.kysely);
   const names = new Map<string, string>();
   const refreshNames = () =>
@@ -94,11 +94,16 @@ export function registerNotifyIpc(inbox: InboxStore): NotifyService & { stop(): 
   // already queued when stop() runs is a no-op, and cancels the input-wait
   // timers — all before the main process closes inbox.db.
   let stopped = false;
-  const tick = setInterval(() => { if (!stopped) svc.tick().catch(warn('notify-tick')); }, 30_000);
-  tick.unref?.();
+  let tick: NodeJS.Timeout;
+  let daily: NodeJS.Timeout;
+  const startTimers = (): void => {
+    tick = setInterval(() => { if (!stopped) svc.tick().catch(warn('notify-tick')); }, 30_000);
+    tick.unref?.();
+    daily = setInterval(() => { if (!stopped) svc.prune().catch(() => { /* next day */ }); }, 86_400_000);
+    daily.unref?.();
+  };
+  startTimers();
   svc.prune().catch(warn('notify-prune'));
-  const daily = setInterval(() => { if (!stopped) svc.prune().catch(() => { /* next day */ }); }, 86_400_000);
-  daily.unref?.();
 
   const settings = async () => {
     const [defaultLevel, q, downtimes, rules] = await Promise.all([store.getDefaultLevel(), svc.quietState(), store.downtimes(), store.rules()]);
@@ -116,8 +121,8 @@ export function registerNotifyIpc(inbox: InboxStore): NotifyService & { stop(): 
   ipcMain.handle('notifications:quietState', () => svc.quietState());
   ipcMain.handle('notifications:scopesFor', (_e, item: { source: TodoSource; dedupeKey: string | null; tags: string[] }) => svc.scopesFor(item));
   ipcMain.handle('notifications:effective', (_e, item: { priority: TodoPriority; source: TodoSource; dedupeKey: string | null; tags: string[] }) => svc.effectiveFor(item));
-  ipcMain.handle('notifications:effectiveMany', async (_e, items: Array<{ id: string; priority: TodoPriority; source: TodoSource; dedupeKey: string | null; tags: string[] }>) =>
-    Object.fromEntries(await Promise.all((items ?? []).map(async (i) => [i.id, await svc.effectiveFor(i)] as const))));
+  ipcMain.handle('notifications:effectiveMany', (_e, items: Array<{ id: string; priority: TodoPriority; source: TodoSource; dedupeKey: string | null; tags: string[] }>) =>
+    svc.effectiveForMany(items ?? []));
   ipcMain.handle('notifications:setRule', (_e, r: { scopeKind: RuleScopeKind; scopeValue: string; level: NotifyLevel; snoozeUntil?: number | null }) => {
     if (!SCOPES.has(r?.scopeKind) || typeof r.scopeValue !== 'string' || !LEVELS.has(r.level)) throw new Error('invalid rule');
     return after(store.setRule({ scopeKind: r.scopeKind, scopeValue: r.scopeValue, level: r.level, snoozeUntil: r.snoozeUntil ?? null }));
@@ -158,5 +163,12 @@ export function registerNotifyIpc(inbox: InboxStore): NotifyService & { stop(): 
     svc.cancelPending();
   }
 
-  return Object.assign(svc, { stop });
+  /** After a refused or failed switch back: the timers again (input waits come back through replayInputWait). */
+  function resume(): void {
+    if (!stopped) return;
+    stopped = false;
+    startTimers();
+  }
+
+  return Object.assign(svc, { stop, resume });
 }

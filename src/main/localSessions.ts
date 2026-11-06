@@ -138,6 +138,8 @@ export interface AttachOpts {
   onFreshSpawn?: (claudeSessionId: string) => void;
   /** Path to a `--mcp-config` file wiring the fleet MCP server (#16, optional). */
   mcpConfigPath?: string;
+  /** Path to a `--settings` file (#483 §5a: carries cleanupPeriodDays). */
+  settingsPath?: string;
   /** Extra args prepended before claude's own flags. Used by e2e tests to
    *  inject a stub script path when CLAUDE_FLEET_LOCAL_CLAUDE_BIN is an
    *  interpreter (e.g. `node`) rather than a self-contained binary. */
@@ -159,6 +161,7 @@ export function attachLocalSession(opts: AttachOpts): PtyHandle {
     const args = [
       ...(opts.extraArgs ?? []),
       ...(opts.mcpConfigPath ? ['--mcp-config', opts.mcpConfigPath] : []),
+      ...(opts.settingsPath ? ['--settings', opts.settingsPath] : []),
       ...(opts.resumeOf
         ? ['--resume', opts.resumeOf]
         : opts.claudeSessionId

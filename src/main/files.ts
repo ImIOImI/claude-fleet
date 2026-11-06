@@ -70,6 +70,12 @@ async function agentPath(workspaceId: string, hostFile: string, name: string): P
 
 // ── Filesystem-backed helpers ───────────────────────────────────────────
 
+async function assertDropTarget(workspaceId: string): Promise<void> {
+  if ((await readWorkspaceManifest(workspaceId))?.kind === 'remote') {
+    throw new Error('Files cannot be dropped into a remote workspace: its files live on the host.');
+  }
+}
+
 async function ensureDropbox(workspaceId: string): Promise<string> {
   const dir = join(await fleetPrivateDir(workspaceId), DROPBOX_DIRNAME);
   await mkdir(dir, { recursive: true });
@@ -142,6 +148,7 @@ async function saveBytes(
 /** OS file drag (Explorer/Finder/Nautilus). Caps validated across the whole
  *  drop before any copy, so a partial over-limit batch writes nothing. */
 export async function dropOsFiles(workspaceId: string, sourcePaths: string[]): Promise<string[]> {
+  await assertDropTarget(workspaceId);
   if (sourcePaths.length === 0) return [];
   const dir = await ensureDropbox(workspaceId);
   const stats = await Promise.all(sourcePaths.map((p) => stat(p)));
@@ -165,6 +172,7 @@ export async function dropOsFiles(workspaceId: string, sourcePaths: string[]): P
 
 /** Clipboard image paste / inline web bytes. */
 export async function dropBytes(workspaceId: string, payload: DropBytesPayload): Promise<string> {
+  await assertDropTarget(workspaceId);
   const bytes = payload.bytes instanceof Uint8Array ? payload.bytes : new Uint8Array(payload.bytes);
   let name = payload.suggestedName?.trim();
   if (!name || !extname(name)) {
@@ -176,12 +184,14 @@ export async function dropBytes(workspaceId: string, payload: DropBytesPayload):
 
 /** Dragged-in selected text / HTML. */
 export async function dropText(workspaceId: string, payload: DropTextPayload): Promise<string> {
+  await assertDropTarget(workspaceId);
   const ext = payload.mime === 'text/html' ? '.html' : '.txt';
   return saveBytes(workspaceId, `dropped-${fileStamp(new Date())}${ext}`, Buffer.from(payload.text, 'utf8'));
 }
 
 /** Web-content drag: fetch the URL in main and save the body. */
 export async function dropUrl(workspaceId: string, url: string): Promise<string> {
+  await assertDropTarget(workspaceId);
   const { bytes, filename, contentType } = await fetchUrl(url);
   let name = filename?.trim();
   if (!name || !extname(name)) {

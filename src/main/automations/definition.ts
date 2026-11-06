@@ -55,6 +55,8 @@ export interface ResolveCtx {
   workspace(idOrName: string): string | null;
   /** Shells this computer offers for `runIn: host` steps (detected); undefined = don't check. */
   hostShells?: string[];
+  /** Extra refusals for where this definition will run (fleet-host); runs only on an otherwise valid definition. */
+  check?(def: AutomationDef): string[];
 }
 
 export function parseDefinitionText(text: string): Validation<unknown> {
@@ -324,7 +326,8 @@ export function validateDefinition(raw: unknown, ctx: ResolveCtx): Validation<Au
     ...(reschedule ? { reschedule } : {}),
     steps
   };
-  return { ok: true, value: def };
+  const refused = ctx.check?.(def) ?? [];
+  return refused.length ? { ok: false, errors: refused } : { ok: true, value: def };
 }
 
 /** Validate run arguments: types, enums, required, unknown names; fills defaults.

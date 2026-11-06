@@ -26,7 +26,7 @@ beforeAll(() => {
     CREATE TABLE session_summaries (session_id TEXT, workspace_id TEXT NOT NULL, summary TEXT);
     CREATE TABLE session_tags (workspace_id TEXT NOT NULL, session_id TEXT, tag TEXT);
     CREATE TABLE usage_events (ts INTEGER, workspace_id TEXT NOT NULL, kind TEXT);
-  `); // no perf_events: exercises the pre-v11 fallback
+  `); // no perf_events / port_exposures: exercises the pre-v11 / pre-v15 fallbacks
   db.prepare(`INSERT INTO sessions VALUES ('sa', ?, 1), ('sb', ?, 2)`).run(WS_A, WS_B);
   const ev = db.prepare(`INSERT INTO events (session_id, workspace_id, ts, type, raw_jsonl, dedup_key) VALUES (?,?,?,?,?,?)`);
   ev.run('sa', WS_A, 1, 'user', '{"a":1}', 'k1');
@@ -49,7 +49,7 @@ describe('runQueryInWorker', { timeout: 30_000 }, () => {
   it('cannot reach the source DB via sqlite_master or the attach alias', async () => {
     const names = (await runQueryInWorker(job("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name"))) as Array<{ name: string }>;
     expect(names.map((r) => r.name)).toEqual(
-      ['broker_sessions', 'events', 'perf_events', 'session_summaries', 'session_tags', 'sessions', 'usage_events']
+      ['broker_sessions', 'events', 'perf_events', 'port_exposures', 'session_summaries', 'session_tags', 'sessions', 'usage_events']
     );
     const dbs = (await runQueryInWorker(job('SELECT name FROM pragma_database_list ORDER BY name'))) as Array<{ name: string }>;
     expect(dbs.map((r) => r.name)).toEqual(['main']);

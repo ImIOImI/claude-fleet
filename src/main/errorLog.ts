@@ -13,6 +13,7 @@ import { app } from 'electron';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { ErrorRow } from './db.js';
+import { clipText } from './clipText.js';
 
 type Source = 'main' | 'renderer';
 
@@ -43,9 +44,19 @@ function ensureLogPath(): string {
   return p;
 }
 
-/** Append one JSON line to the log. Best-effort — never throws. */
-export function logError(payload: LogPayload): void {
+const MAX_FIELD_CHARS = 8_192;
+
+export { clipText };
+
+/** Append one JSON line to the log. Best-effort — never throws. Message and
+ *  stack are capped: an error can echo an arbitrarily large value. */
+export function logError(raw: LogPayload): void {
   const tsMs = Date.now();
+  const payload: LogPayload = {
+    ...raw,
+    message: clipText(String(raw.message), MAX_FIELD_CHARS),
+    ...(raw.stack !== undefined ? { stack: clipText(String(raw.stack), MAX_FIELD_CHARS) } : {}),
+  };
   try {
     const row = { ts: new Date(tsMs).toISOString(), ...payload };
     appendFileSync(ensureLogPath(), JSON.stringify(row) + '\n', 'utf8');

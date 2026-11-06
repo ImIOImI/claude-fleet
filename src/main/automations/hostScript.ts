@@ -30,7 +30,8 @@ export function cleanEnv(stepEnv: Record<string, string>, base: NodeJS.ProcessEn
   return { ...env, ...stepEnv };
 }
 
-function killTree(pid: number): void {
+/** SIGKILL a detached process group (POSIX) or `taskkill /T /F` the tree (Windows). */
+export function killTree(pid: number): void {
   try {
     if (process.platform === 'win32') spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
     else process.kill(-pid, 'SIGKILL');

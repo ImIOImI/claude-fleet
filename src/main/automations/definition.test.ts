@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { validateDefinition, validateArgs, parseDefinitionText, parseDuration, definitionToYaml, STARTER_YAML } from './definition.js';
 import { renderPrompt } from './template.js';
 
@@ -212,5 +212,19 @@ describe('reschedule (#437)', () => {
     expect(errs({ reschedule: { min: '1m' } })[0]).toMatch(/^reschedule\.min:/);
     expect(errs({ reschedule: { min: '31d' } })[0]).toMatch(/^reschedule\.min:/);
     expect(errs({ reschedule: '30m' })[0]).toMatch(/^reschedule:/);
+  });
+});
+
+describe('ResolveCtx.check', () => {
+  const base = { name: 'nightly', triggers: [{ manual: {} }], steps: [{ id: 'go', prompt: { workspace: 'ws', mode: 'fresh', message: 'hi' } }] };
+  it('runs after validation and its errors fail the definition', () => {
+    const r = validateDefinition(base, { workspace: (v) => (v === 'ws' ? 'W1' : null), check: (d) => (d.steps.length ? ['nope'] : []) });
+    expect(r).toEqual({ ok: false, errors: ['nope'] });
+  });
+  it('is skipped when validation already failed', () => {
+    const check = vi.fn(() => ['never']);
+    const r = validateDefinition({ ...base, name: 'Bad Name' }, { workspace: () => 'W1', check });
+    expect(r.ok).toBe(false);
+    expect(check).not.toHaveBeenCalled();
   });
 });

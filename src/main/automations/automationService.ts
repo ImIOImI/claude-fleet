@@ -18,6 +18,10 @@ import { applyFloor, parseNextRequest } from './reschedule.js';
 export interface AutomationDeps extends Omit<RunnerDeps, 'store'> {
   /** Shells this computer offers for host steps (#407); validation checks `shell` against them. */
   hostShells?(): string[] | undefined;
+  /** Refusals for this runtime (fleet-host's remoteHostRefusals). */
+  checkDefinition?(def: AutomationDef): string[];
+  /** Why this runtime won't run a stored automation (fleet-host: rows not from its config); null runs it. */
+  mayRun?(a: AutomationRecord): string | null;
   store: AutomationStore;
   /** Resolve a workspace id or name to an id. */
   resolveWorkspace(idOrName: string): string | null;
@@ -60,6 +64,11 @@ class DisabledError extends Error {
   constructor(name: string) { super(`${name} is disabled`); }
 }
 
+/** This runtime refuses the automation; timer callers skip it without recording a run. */
+class RefusedError extends Error {
+  constructor(name: string, reasons: string[]) { super(`${name} can't run here: ${reasons.join('; ')}`); }
+}
+
 export function createAutomationService(deps: AutomationDeps) {
   const { store } = deps;
   /** runId → automation + the workspaces its steps target (attribution). */
@@ -77,7 +86,7 @@ export function createAutomationService(deps: AutomationDeps) {
   const setTimer = deps.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
   const clearTimer = deps.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>));
 
-  const ctx = { workspace: (v: string) => deps.resolveWorkspace(v), get hostShells() { return deps.hostShells?.(); } };
+  const ctx = { workspace: (v: string) => deps.resolveWorkspace(v), get hostShells() { return deps.hostShells?.(); }, check: deps.checkDefinition };
 
   /** Registers a background run for settle(); a failure goes to onError, never an unhandled rejection. */
   function track(p: Promise<unknown>): void {
@@ -208,6 +217,9 @@ export function createAutomationService(deps: AutomationDeps) {
     if (!a) throw new Error(`automation ${id} not found`);
     const args = validateArgs(a.definition.params, req.args, req.coerce);
     if (!args.ok) throw new Error(`invalid arguments: ${args.errors.join('; ')}`);
+    const gate = deps.mayRun?.(a);
+    const refused = [...(deps.checkDefinition?.(a.definition) ?? []), ...(gate ? [gate] : [])];
+    if (refused.length) throw new RefusedError(a.name, refused);
     const trigger = { kind: req.kind, ...(req.by ? { by: req.by } : {}), ...(req.cron ? { cron: req.cron } : {}), ...(req.event ? { event: req.event } : {}) };
     const now = deps.now();
     // --- synchronous from here to each store call: read + claim atomically ---
@@ -262,6 +274,10 @@ export function createAutomationService(deps: AutomationDeps) {
         started.push(await start(a.id, { kind: due.kind, ...(due.cron ? { cron: due.cron } : {}), args: due.args }));
       } catch (e) {
         if (e instanceof DisabledError) continue;
+        if (e instanceof RefusedError) {
+          deps.onError?.(e);
+          continue;
+        }
         started.push(await failedStart(a, { kind: due.kind, ...(due.cron ? { cron: due.cron } : {}) }, (e as Error).message));
       }
     }
@@ -354,6 +370,7 @@ export function createAutomationService(deps: AutomationDeps) {
                 await start(a.id, { kind: 'event', event: fired.event });
               } catch (err) {
                 if (err instanceof DisabledError) return;
+                if (err instanceof RefusedError) throw err;
                 const cur = await store.get(a.id);
                 if (cur) await failedStart(cur, { kind: 'event', event: fired.event }, (err as Error).message);
               }
@@ -385,6 +402,11 @@ export function createAutomationService(deps: AutomationDeps) {
       }
       await store.pruneRuns(deps.now() - RUN_RETENTION_MS);
       return cut;
+    },
+
+    /** A run is starting, running, finishing or queued (the store switch waits for none). */
+    hasActiveRuns(): boolean {
+      return claimed.size > 0 || queued.size > 0;
     },
 
     /** Attribution: a post that names run_id belongs to the automation only if the run is live and targets the caller. */

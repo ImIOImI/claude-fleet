@@ -23,3 +23,10 @@ describe('fleet temperature', () => {
     expect(isCold(w('running'))).toBe(false);
   });
 });
+
+describe('fleet temperature: remote', () => {
+  it('a remote bookmark is always warm, reachable or not', () => {
+    expect(isWarm({ state: 'unreachable', kind: 'remote' })).toBe(true);
+    expect(isCold({ state: 'unreachable', kind: 'remote' })).toBe(false);
+  });
+});

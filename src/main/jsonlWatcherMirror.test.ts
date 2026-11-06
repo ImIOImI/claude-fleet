@@ -22,18 +22,19 @@ vi.mock('electron', () => ({
   }
 }));
 
-// Stub the DB layer: ingestLine reports a genuinely-new insert the first time
+// Stub the DB layer: ingestBatch reports a genuinely-new insert the first time
 // it sees a uuid (mirroring the real dedup_key behaviour) and a duplicate
 // thereafter — so a compaction re-read of an already-seen line yields
 // inserted:false and the mirror must not re-append it.
 const h = vi.hoisted(() => ({ seen: new Set<string>() }));
 vi.mock('./db.js', () => ({
-  ingestLine: (_workspaceId: string, sessionId: string, raw: string) => {
-    const uuid = (JSON.parse(raw) as { uuid: string }).uuid;
-    const inserted = !h.seen.has(uuid);
-    h.seen.add(uuid);
-    return { inserted, sessionId, type: 'user' };
-  }
+  ingestBatch: async (_workspaceId: string, sessionId: string, raws: string[]) =>
+    raws.map((raw) => {
+      const uuid = (JSON.parse(raw) as { uuid: string }).uuid;
+      const inserted = !h.seen.has(uuid);
+      h.seen.add(uuid);
+      return { inserted, sessionId, type: 'user' };
+    })
 }));
 
 const { JsonlWatcher } = await import('./jsonlWatcher.js');

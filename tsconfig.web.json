@@ -13,5 +13,5 @@
     "allowSyntheticDefaultImports": true,
     "types": ["vite/client"]
   },
-  "include": ["src/renderer/src/**/*.ts", "src/renderer/src/**/*.tsx", "src/preload/inboxTypes.ts"]
+  "include": ["src/renderer/src/**/*.ts", "src/renderer/src/**/*.tsx", "src/preload/inboxTypes.ts", "src/preload/identityTypes.ts", "src/preload/remoteTypes.ts", "src/preload/storeTypes.ts", "src/preload/index.ts", "src/preload/captureSettings.ts"]
 }

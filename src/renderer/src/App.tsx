@@ -1,4 +1,7 @@
 import { useEffect, useState, useCallback, useRef, useReducer, useMemo } from 'react';
+import type { RemoteTier } from '../../preload/remoteTypes';
+import { RenameRemoteModal } from './components/RenameRemoteModal';
+import { remotePane, unreachableBanner, unreachableRemoteNames } from './remoteView';
 import { usePorts } from './usePorts';
 import { useServingSessionNames } from './useServingSessionNames';
 import { WorkspaceTabStrip } from './components/WorkspaceTabStrip';
@@ -31,7 +34,20 @@ import {
   resolveWaitingByWorkspace,
   type PeerKind
 } from './sessionStatusMerge';
-import type { WorkspaceObservabilitySummary, SessionListItem, UsageBudget, UiPrefs, InboxCounts, InboxConfig, QuietState } from '../../preload';
+import type {
+  WorkspaceObservabilitySummary,
+  SessionListItem,
+  UsageBudget,
+  UiPrefs,
+  InboxCounts,
+  InboxConfig,
+  QuietState,
+  PortOpenVia,
+  StoreStatus
+} from '../../preload';
+import { storeBannerText } from './storeView';
+import type { CaptureSettings } from '../../preload/captureSettings';
+import { portPopupCopy } from './portToast';
 import { InboxChip } from './components/InboxChip';
 import { InboxView, type InboxSection } from './components/InboxView';
 import { isWarm } from './fleetTemperature';
@@ -51,7 +67,7 @@ function makeLifecycleApi(): WorkspaceLifecycleApi {
 }
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted' | 'unreachable';
-export type WorkspaceKind = 'container' | 'local';
+export type WorkspaceKind = 'container' | 'local' | 'remote';
 export type AuthMode = 'oauth' | 'apikey' | 'endpoint';
 
 export interface WorkspaceColor {
@@ -140,6 +156,10 @@ export interface WorkspaceSummary {
   accessibility?: AccessibilityConfig;
   /** Host-private inbox permissions (#407). */
   inbox?: InboxConfig;
+  /** Knowledge capture settings (#483 §5a); absent = all defaults. */
+  knowledgeCapture?: CaptureSettings;
+  /** kind 'remote' only: the fleet-host bookmark (tier is display only). */
+  remote?: { url: string; tier: RemoteTier | null; login: string | null; checkedAt: number };
   createdAt: number;
   lastUsedAt: number;
 }
@@ -228,6 +248,17 @@ export function App() {
     void window.api.inbox.counts().then(setInboxCounts);
     return window.api.inbox.onChanged(setInboxCounts);
   }, []);
+  // A pushed status is newer than the fetched one. main broadcasts
+  // inbox:changed when the Postgres store becomes ready.
+  const [storeStatus, setStoreStatus] = useState<StoreStatus | null>(null);
+  useEffect(() => {
+    let live = true;
+    window.api.store.getSettings()
+      .then((s) => { if (live) setStoreStatus((cur) => cur ?? s.status); })
+      .catch(() => undefined);
+    const off = window.api.store.onStatus(setStoreStatus);
+    return () => { live = false; off(); };
+  }, []);
   // Notifications (#407 Phase 2): quiet state for the inbox header, and the
   // todo to focus when a toast / OS notification is opened.
   const [quiet, setQuiet] = useState<QuietState | null>(null);
@@ -301,6 +332,7 @@ export function App() {
   const [closeTargetId, setCloseTargetId] = useState<string | null>(null);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const [editTargetId, setEditTargetId] = useState<string | null>(null);
+  const [renameRemoteId, setRenameRemoteId] = useState<string | null>(null);
   // When the user clicks Clone (Saved-row footer, chip menu, or
   // EditWorkspaceModal), the source spec lands here and the modal
   // reopens on the New tab pre-filled. Cleared when modal closes.
@@ -557,12 +589,34 @@ export function App() {
     void window.api.app.getMcpStatus().then(apply).catch(() => {});
     return window.api.app.onMcpStatus(apply);
   }, []);
+  // Started via "Continue without settings": config.json is unreadable, so
+  // settings run on defaults and every save is refused until it's fixed.
+  useEffect(() => {
+    void window.api.config
+      .unreadablePath()
+      .then((path) => {
+        if (!path) return;
+        dispatchToast({
+          type: 'push',
+          toast: makeToast(++toastIdRef.current, {
+            kind: 'error',
+            eyebrow: "Settings can't be saved",
+            message: `${path} is not valid JSON. Running on default settings; fix the file and restart.`,
+            placement: 'global',
+            sticky: true,
+            dismissible: false,
+            key: 'config-unreadable'
+          })
+        });
+      })
+      .catch(() => {});
+  }, []);
   // Open the loopback preview for a serving port — shared by the detection
   // toast and the rail's Serving section. Errors surface as toasts.
-  const openPreview = useCallback((workspaceId: string, port: number) => {
+  const openPreview = useCallback((workspaceId: string, port: number, via: PortOpenVia = 'rail') => {
     const name = workspacesRef.current.find((w) => w.id === workspaceId)?.name ?? 'workspace';
     void window.api.ports
-      .open(workspaceId, port)
+      .open(workspaceId, port, via)
       .then(({ hostPort }) => {
         if (hostPort === null) {
           pushToast(
@@ -602,42 +656,36 @@ export function App() {
     setActivateRequest({ workspaceId, brokerSessionId, token: ++activateTokenRef.current });
   }, []);
 
-  // Dev-server detection (#port-forward): the broker spotted a new listening
-  // port inside a workspace container. Offer a one-click preview that opens
-  // the system browser via a loopback forward over the broker socket.
+  // Preview popup: a declared port began serving (or the undeclared fallback
+  // fired). Sticky — the toast or the rail are the only ways to reach the
+  // preview (bridge IPs aren't routable from the host on Windows). Keyed per
+  // workspace+port so a re-fire replaces rather than stacks.
   useEffect(() => {
-    return window.api.ports.onDetected((workspaceId, port) => {
-      const name = workspacesRef.current.find((w) => w.id === workspaceId)?.name ?? 'workspace';
-      // Sticky: this toast is the only way to reach the preview (bridge IPs
-      // aren't routable from the host on Windows), so it must never expire —
-      // missing it means restarting the dev server to re-trigger detection.
-      // It clears on click or ✕. Keyed per workspace+port so a server that
-      // restarts (port disappears and returns) replaces its toast instead of
-      // stacking a duplicate; distinct ports still stack.
+    return window.api.ports.onDetected((p) => {
+      const name = workspacesRef.current.find((w) => w.id === p.workspaceId)?.name ?? 'workspace';
+      const { eyebrow, message } = portPopupCopy(p, name);
       const id = ++toastIdRef.current;
       dispatchToast({
         type: 'push',
         toast: makeToast(id, {
           kind: 'info',
-          eyebrow: 'Preview',
-          key: `port:${workspaceId}:${port}`,
-          message: `Dev server detected on port ${port} in ${name}`,
+          eyebrow,
+          key: `port:${p.workspaceId}:${p.port}`,
+          message,
           placement: 'global',
           sticky: true,
           dismissible: true,
+          onClose: () => void window.api.ports.dismiss(p.workspaceId, p.port),
           action: {
             label: 'Open preview',
             onClick: () => {
               dispatchToast({ type: 'dismiss', id });
-              openPreview(workspaceId, port);
+              openPreview(p.workspaceId, p.port, p.declared ? 'popup' : 'fallback');
             }
           }
         })
       });
     });
-    // pushToast/dispatchToast are stable (useCallback []/useReducer).
-    // openPreview is a stable useCallback([]) — adding it to the dep array
-    // keeps the linter happy while the effect still runs once.
   }, [openPreview]);
 
   // Newer-claude cue (#336): a wsl-launcher workspace started and its distro
@@ -1287,6 +1335,7 @@ export function App() {
       mirror: submit.mirror,
       accessibility: submit.accessibility,
       inbox: submit.inbox,
+      knowledgeCapture: submit.knowledgeCapture,
       createdAt: before.createdAt,
       lastUsedAt: Date.now()
     });
@@ -1321,7 +1370,7 @@ export function App() {
       labels: source.labels,
       color: undefined, // fresh hue
       workspaceSubdir: source.workspaceSubdir,
-      kind: source.kind,
+      kind: source.kind === 'remote' ? 'container' : source.kind,
       workspaceRoot: source.workspaceRoot,
       launcher: source.launcher,
       image: source.image,
@@ -1407,11 +1456,16 @@ export function App() {
     [busyBrokerByWorkspace, claudeMappings, peerStatus]
   );
 
+  const remoteBanner = unreachableBanner(unreachableRemoteNames(workspaces));
+  const storeBanner = storeBannerText(storeStatus);
+  const hasBanners = backendReady === false || !!remoteBanner || !!storeBanner;
+  const selectedRemotePane = selected ? remotePane(selected) : null;
+
   return (
     <div
       className={`app${dragging ? ' dragging' : ''}${
         backendReady === false ? ' daemon-down' : ''
-      }`}
+      }${remoteBanner ? ' remote-down' : ''}${hasBanners ? ' has-banners' : ''}`}
     >
       <WorkspaceTabStrip
         workspaces={roleWsId ? workspaces.filter((w) => w.id !== roleWsId) : workspaces}
@@ -1433,14 +1487,31 @@ export function App() {
         onDeleteWorkspace={(w) => setDeleteTargetId(w.id)}
         onRefresh={refresh}
         onReorderWorkspace={handleReorderWorkspaces}
+        onRenameRemote={(w) => setRenameRemoteId(w.id)}
         waitingByWorkspace={waitingByWorkspaceFlag}
       />
 
-      {backendReady === false && (
-        <div className="daemon-banner" role="status">
-          <span className="dot" aria-hidden="true" />
-          Docker daemon unreachable — container workspaces are shown from last-known state and
-          can&apos;t be started or attached until it&apos;s back.
+      {hasBanners && (
+        <div className="app-banners">
+          {backendReady === false && (
+            <div className="daemon-banner" role="status">
+              <span className="dot" aria-hidden="true" />
+              Docker daemon unreachable — container workspaces are shown from last-known state and
+              can&apos;t be started or attached until it&apos;s back.
+            </div>
+          )}
+          {remoteBanner && (
+            <div className="daemon-banner remote-banner" role="status">
+              <span className="dot" aria-hidden="true" />
+              {remoteBanner}
+            </div>
+          )}
+          {storeBanner && (
+            <div className="daemon-banner store-banner" role="status">
+              <span className="dot" aria-hidden="true" />
+              {storeBanner}
+            </div>
+          )}
         </div>
       )}
 
@@ -1509,6 +1580,12 @@ export function App() {
               />
             ) : liveCount === 0 ? (
               <FirstRun onNewWorkspace={() => setCreateOpen(true)} />
+            ) : selectedRemotePane ? (
+              <div className="empty">
+                {selectedRemotePane.tone === 'error' && <div className="icon-card error">!</div>}
+                <h2>{selectedRemotePane.title}</h2>
+                <p>{selectedRemotePane.body}</p>
+              </div>
             ) : selected?.state === 'unreachable' ? (
               <div className="empty">
                 <div className="icon-card error">!</div>
@@ -1529,6 +1606,7 @@ export function App() {
               .map((w) => (
                 <TerminalPane
                   key={w.id}
+                  remoteTier={w.kind === 'remote' ? w.remote?.tier ?? null : undefined}
                   visible={(!inboxOpen && selectedId === w.id) || (inboxOpen && inboxSection === 'sessions' && w.id === roleWsId)}
                   workspaceId={w.id}
                   mirrorDefault={w.mirror.default}
@@ -1623,7 +1701,26 @@ export function App() {
         onDelete={(w) => setDeleteTargetId(w.id)}
         initialNewTabValues={cloneSource}
         onOpenSettings={(tab) => setSettingsTab(tab)}
+        onRemoteAdded={(id) => {
+          setCreateOpen(false);
+          focusWorkspaceWhenWarm(id);
+          refresh();
+        }}
       />
+      {(() => {
+        const target = renameRemoteId ? workspaces.find((w) => w.id === renameRemoteId && w.kind === 'remote') : undefined;
+        if (!target) return null;
+        return (
+          <RenameRemoteModal
+            id={target.id}
+            name={target.name}
+            onClose={() => {
+              setRenameRemoteId(null);
+              refresh();
+            }}
+          />
+        );
+      })()}
       {(() => {
         if (!editTargetId) return null;
         const target = workspaces.find((w) => w.id === editTargetId);

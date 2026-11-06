@@ -72,4 +72,15 @@ describe('MockServingPorts', () => {
     mock.dispose();
     vi.useRealTimers();
   });
+
+  it('declares its labeled fake (port 3000) after emitting it', () => {
+    vi.useFakeTimers();
+    const declared: Array<[string, number, string]> = [];
+    const mock = new MockServingPorts(() => undefined, () => 0, undefined, (id, port, label) => declared.push([id, port, label]));
+    mock.reconcile(['ws1']);
+    vi.advanceTimersByTime(25_000);
+    expect(declared).toEqual([['ws1', 3000, 'Vite dev server']]);
+    mock.dispose();
+    vi.useRealTimers();
+  });
 });

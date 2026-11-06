@@ -100,6 +100,7 @@ test('MCP server: initialize, tools, typed reads, committee control', async () =
     // initialize
     const init = await client.call('initialize', { protocolVersion: '2024-11-05' });
     expect((init.result as { serverInfo?: { name?: string } }).serverInfo?.name).toBe('claude-fleet-state');
+    expect(typeof (init.result as { instructions?: unknown }).instructions).toBe('string');
 
     // tools/list exposes the typed tools, the session_summary aggregator, and
     // the snapshot-scoped `query` tool (#174).
@@ -121,12 +122,29 @@ test('MCP server: initialize, tools, typed reads, committee control', async () =
         'signal_input_wait',
         'report_session_mapping',
         'mark_useful',
+        'record_claim',
+        'search_claims',
+        'retract_claim',
+        'get_capture_settings',
+        'set_capture_settings',
         'get_config',
         'perf_status',
         'perf_set',
         'perf_sentinel_set'
       ])
     );
+
+    // expose_port: listed, advertised in the server instructions, validated host-side.
+    expect(names).toContain('expose_port');
+    expect((init.result as { instructions?: string }).instructions ?? '').toContain('expose_port');
+    const eph = (await client.call('tools/call', { name: 'expose_port', arguments: { port: 45000, label: 'x' } }))
+      .result as { isError?: boolean; content?: Array<{ text?: string }> };
+    expect(eph.isError).toBe(true);
+    expect(eph.content?.[0]?.text ?? '').toContain('ephemeral range');
+    const stopped = (await client.call('tools/call', { name: 'expose_port', arguments: { port: 5173, label: 'Vite' } }))
+      .result as { isError?: boolean; content?: Array<{ text?: string }> };
+    expect(stopped.isError).toBe(true);
+    expect(stopped.content?.[0]?.text ?? '').toMatch(/not running|unknown workspace/);
 
     // get_config surfaces the live host app version (#219) and build sha
     // (#298) so a workspace can tell exactly what claude-fleet it's talking

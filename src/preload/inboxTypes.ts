@@ -1,5 +1,6 @@
 // Inbox types shared by main (type-only import) and the renderer (via preload).
 // Pure declarations — no runtime code — so either side can import them.
+import type { CaptureSettings } from './captureSettings.js';
 
 export type TodoStatus = 'open' | 'done' | 'dismissed';
 export type TodoPriority = 'low' | 'normal' | 'high' | 'urgent';
@@ -113,7 +114,7 @@ export interface InboxConfig {
 
 /** Rule / default level: all · high and up · urgent only · off. */
 export type NotifyLevel = 'all' | 'high' | 'urgent' | 'off';
-export type NotificationKind = 'post' | 'todo' | 'input-wait' | 'post-rejected' | 'digest' | 'test' | 'run-failed' | 'proposal';
+export type NotificationKind = 'post' | 'todo' | 'input-wait' | 'post-rejected' | 'digest' | 'test' | 'run-failed' | 'proposal' | 'capture-settings';
 export type RuleScopeKind = 'key' | 'source' | 'tag' | 'global';
 export type DowntimeBypass = 'none' | 'urgent' | 'urgent+input';
 
@@ -328,7 +329,7 @@ export interface Automation {
 
 // --- Proposals (#407 Phase 5) ------------------------------------------------
 
-export type ProposalKind = 'new' | 'change' | 'batch';
+export type ProposalKind = 'new' | 'change' | 'batch' | 'capture-settings';
 export type ProposalStatus = 'pending' | 'approved' | 'partial' | 'rejected' | 'superseded' | 'auto-approved';
 export type ItemDecision = 'pending' | 'accepted' | 'declined' | 'auto-applied' | 'reverted';
 
@@ -347,6 +348,19 @@ export interface ProposalItem {
   decision: ItemDecision;
 }
 
+/** A workspace's proposed knowledge-capture settings change (#483 §5a). Full
+ *  before/after snapshots; approval applies only the fields that differ onto
+ *  the then-current settings. */
+export interface CaptureSettingsChange {
+  workspaceId: string;
+  before: CaptureSettings;
+  after: CaptureSettings;
+  /** "field: before → after" lines (describeCaptureChange). */
+  changes: string[];
+  /** Why it needs approval (classifyNeedsApproval). */
+  reasons: string[];
+}
+
 export interface Proposal {
   id: string;
   kind: ProposalKind;
@@ -357,6 +371,8 @@ export interface Proposal {
   note: string | null;
   createdAt: number;
   decidedAt: number | null;
+  /** kind 'capture-settings' only (its `items` is empty). */
+  captureSettings?: CaptureSettingsChange;
 }
 
 // --- Loadout automations (#407 Phase 8) --------------------------------------

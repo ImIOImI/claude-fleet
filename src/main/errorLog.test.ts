@@ -21,3 +21,15 @@ describe('error sink', () => {
     expect(() => logError({ source: 'main', type: 't', message: 'm' })).not.toThrow();
   });
 });
+
+describe('entry size', () => {
+  it('caps message and stack so a huge error never reaches the log whole', () => {
+    const seen: Array<{ message: string; stack?: string }> = [];
+    setErrorSink((row) => seen.push(row as unknown as { message: string; stack?: string }));
+    logError({ source: 'main', type: 't', message: 'm'.repeat(1_000_000), stack: 's'.repeat(1_000_000) });
+    expect(seen[0].message.length).toBeLessThanOrEqual(8_300);
+    expect(seen[0].stack!.length).toBeLessThanOrEqual(8_300);
+    expect(seen[0].message).toMatch(/truncated/);
+  });
+});
+

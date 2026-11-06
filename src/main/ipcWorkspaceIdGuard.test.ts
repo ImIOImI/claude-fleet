@@ -43,3 +43,61 @@ describe('workspace id guard wiring (#444 security review)', () => {
     expect(handlerSource('workspace:writeManifest')).toMatch(/assertRendererWorkspaceId\(spec\?\.id\)/);
   });
 });
+
+describe('remote bookmark wiring', () => {
+  it('workspace:create and workspace:writeManifest refuse remote specs before writing anything', () => {
+    expect(handlerSource('workspace:create')).toMatch(/assertNotRemoteSpec\(input\.kind, await readWorkspaceManifest\(input\.id\)\)\s*;\s*const kind/);
+    const write = handlerSource('workspace:writeManifest');
+    expect(write).toMatch(/const existing = await readWorkspaceManifest\(spec\.id\);\s*assertNotRemoteSpec\(spec\.kind, existing\);/);
+    expect(write).toMatch(/remote: undefined/);
+  });
+
+  it('workspace:remove routes through resolveRemoveKind', () => {
+    expect(handlerSource('workspace:remove')).toMatch(/backendForKind\(await resolveRemoveKind\(containerId, opts\?\.id\)\)/);
+  });
+
+  it('remote token consent is a main-process dialog, and the refresher stops on quit', () => {
+    expect(src).toMatch(/async function confirmRemote[\s\S]*?dialog\.showMessageBox[\s\S]*?response === 1/);
+    expect(src).toMatch(/confirm: confirmRemote,/);
+    const index = readFileSync(new URL('./index.ts', import.meta.url), 'utf8');
+    expect(index).toMatch(/app\.on\('before-quit'[\s\S]*?stopRemoteBackend\(\);/);
+  });
+
+  it('tab-close detaches remote sessions; only endSessionByBroker CLOSEs them', () => {
+    expect(handlerSource('pty:closeSessionByBroker')).toMatch(/tabCloseVerb\(await resolveKind\(workspaceId\)\) === 'detach'[\s\S]*?detachHandle\(ptyHandleId\)[\s\S]*?reapHandle\(/);
+    expect(handlerSource('pty:endSessionByBroker')).toMatch(/reapHandle\(ptyHandleId, 'pty:endSessionByBroker'\)/);
+    expect(handlerSource('pty:detach')).toMatch(/detachHandle\(sessionId\)/);
+  });
+
+  it('desktop automations refuse remote targets before any live-handle shortcut', () => {
+    const fn = (name: string): string => {
+      const start = src.indexOf(`export async function ${name}(`);
+      if (start < 0) throw new Error(`ipc.ts: no ${name}`);
+      return src.slice(start, src.indexOf('\n}\n', start));
+    };
+    expect(fn('hostPostToWorkspace')).toMatch(/> \{\s*const kind = await resolveAutomationKind\(targetId\);\s*const live = liveHandleForWorkspace/);
+    expect(fn('hostSpawnFresh')).toMatch(/> \{\s*const kind = await resolveAutomationKind\(workspaceId\);/);
+    expect(fn('hostEnsureRunning')).toMatch(/> \{\s*const kind = await resolveAutomationKind\(targetId\);/);
+  });
+
+  it('a remote owner feeds neither committee busy nor session.idle', () => {
+    const attach = handlerSource('pty:attach');
+    expect(attach).toMatch(/const signalOwner = owner && hostRunsSignals\(owner\.kind\) \? owner : null;/);
+    expect(attach).toMatch(/if \(signalOwner && detector\.push\([\s\S]*?committeeBusy\.set\(signalOwner\.id[\s\S]*?emitFleetEvent\(\{ on: 'session\.idle', workspaceId: signalOwner\.id \}\)/);
+    expect(attach).not.toMatch(/committeeBusy\.set\(owner\.id/);
+  });
+
+  it('port forwarding is reconciled for containers only', () => {
+    expect(handlerSource('workspace:list')).toMatch(/w\.state === 'running' && w\.kind === 'container'/);
+  });
+
+  it('the bearer token is bound only in main and exposed by no preload or renderer code', () => {
+    expect(src).toMatch(/remoteToken = \(\) => identity\.bearerToken\(\);/);
+    expect(src).toMatch(/remoteLogin = \(\) => identity\.currentLogin\(\);/);
+    expect(src).toMatch(/login: \(\) => remoteLogin\(\),/);
+    const preload = readFileSync(new URL('../preload/index.ts', import.meta.url), 'utf8');
+    expect(preload).not.toMatch(/bearerToken|remoteToken|packagesToken/);
+    expect(readFileSync(new URL('./identityIpc.ts', import.meta.url), 'utf8')).not.toMatch(/bearerToken/);
+    expect(readFileSync(new URL('./remoteIpc.ts', import.meta.url), 'utf8')).not.toMatch(/bearerToken|token\(\)/);
+  });
+});

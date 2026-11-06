@@ -10,6 +10,8 @@ import { readFileSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { assertValidWorkspaceId } from './paths.js';
 import { toggleFavorite } from './ociCore.js';
+import { clampDailyCap } from '../preload/captureSettings.js';
+import { ConfigJsonError, parseStoreConfig, type StoreConfig } from './store/storeConfig.js';
 
 /** Which plan the usage bar measures spend against. `custom` uses the
  *  user-entered token amount; the rest resolve to USAGE_BUDGET_PRESETS. */
@@ -104,6 +106,22 @@ interface AppConfig {
   perfOtlp?: { enabled: boolean; endpoint: string };
   /** Closing the window keeps the app running in the tray (#407 Phase 2b). Default off. */
   keepRunningInTray?: boolean;
+  /** Hand-edited only: an org's own GitHub OAuth app. Env
+   *  CLAUDE_FLEET_GITHUB_CLIENT_ID wins (identity/clientId.ts). */
+  identity?: { github?: { clientId?: string } };
+  /** Background knowledge capture, global switch (#483). Absent ⇒ default ON;
+   *  a per-workspace `WorkspaceSpec.knowledgeCapture` flag can still disable
+   *  capture for one workspace even while this stays on. */
+  knowledgeCapture?: boolean;
+  /** Knowledge capture (#483 §5a): app-wide cap on capture runs started per
+   *  local calendar day. Absent ⇒ 40; clamped to 0–500; 0 ⇒ no captures. */
+  knowledgeCaptureDailyCap?: number;
+  /** Hand-edited only: the store choice, kept verbatim and validated by
+   *  getStoreConfig (store/storeConfig.ts). Absent ⇒ SQLite. */
+  store?: unknown;
+  /** Hand-edited only. Seconds an undeclared scanned port must keep serving
+   *  before the fallback preview toast; absent/invalid ⇒ 0 (never). */
+  ports?: { undeclaredToastAfterSec?: number };
 }
 
 /** Defensively parse the persisted usageBudget (untrusted JSON on disk). */
@@ -148,6 +166,22 @@ function parsePerfOtlp(v: unknown): { enabled: boolean; endpoint: string } | und
   };
 }
 
+/** Defensively parse identity overrides (untrusted JSON on disk). */
+function parseIdentityConfig(v: unknown): AppConfig['identity'] {
+  if (!v || typeof v !== 'object') return undefined;
+  const gh = (v as { github?: unknown }).github;
+  if (!gh || typeof gh !== 'object') return undefined;
+  const clientId = (gh as { clientId?: unknown }).clientId;
+  return typeof clientId === 'string' && clientId.trim() ? { github: { clientId: clientId.trim() } } : undefined;
+}
+
+/** Defensively parse the persisted ports config (untrusted JSON on disk). */
+function parsePortsConfig(v: unknown): AppConfig['ports'] {
+  if (!v || typeof v !== 'object') return undefined;
+  const s = (v as Record<string, unknown>).undeclaredToastAfterSec;
+  return typeof s === 'number' && Number.isFinite(s) && s >= 0 ? { undeclaredToastAfterSec: Math.floor(s) } : undefined;
+}
+
 function configPath(): string {
   return join(app.getPath('userData'), 'config.json');
 }
@@ -158,9 +192,13 @@ export function defaultFleetRoot(): string {
 }
 
 let cached: AppConfig | null = null;
+/** config.json exists but could not be read or parsed: defaults are served,
+ *  and write() refuses to replace the file (it may hold a `store` choice). */
+let unreadable = false;
 
 async function read(): Promise<AppConfig> {
   if (cached) return cached;
+  unreadable = false;
   try {
     const raw = await readFile(configPath(), 'utf8');
     const parsed = JSON.parse(raw) as AppConfig;
@@ -196,15 +234,24 @@ async function read(): Promise<AppConfig> {
         : undefined,
       perfTelemetry: typeof parsed.perfTelemetry === 'boolean' ? parsed.perfTelemetry : undefined,
       perfOtlp: parsePerfOtlp(parsed.perfOtlp),
-      keepRunningInTray: typeof parsed.keepRunningInTray === 'boolean' ? parsed.keepRunningInTray : undefined
+      keepRunningInTray: typeof parsed.keepRunningInTray === 'boolean' ? parsed.keepRunningInTray : undefined,
+      identity: parseIdentityConfig(parsed.identity),
+      knowledgeCapture: typeof parsed.knowledgeCapture === 'boolean' ? parsed.knowledgeCapture : undefined,
+      knowledgeCaptureDailyCap:
+        typeof parsed.knowledgeCaptureDailyCap === 'number' ? clampDailyCap(parsed.knowledgeCaptureDailyCap) : undefined,
+      store: parsed.store,
+      ports: parsePortsConfig(parsed.ports)
     };
-  } catch {
+  } catch (e) {
+    unreadable = (e as NodeJS.ErrnoException).code !== 'ENOENT';
     cached = {};
   }
   return cached;
 }
 
 async function write(next: AppConfig): Promise<void> {
+  await read();
+  if (unreadable) throw new Error(`${configPath()} is not valid JSON; fix or remove it before changing settings`);
   cached = next;
   await writeFile(configPath(), JSON.stringify(next, null, 2) + '\n', 'utf8');
 }
@@ -344,6 +391,42 @@ export async function setKeepRunningInTray(enabled: boolean): Promise<void> {
   await write({ ...cfg, keepRunningInTray: enabled });
 }
 
+/** config.json's path when it exists but can't be read or parsed (settings
+ *  then run on defaults and can't be saved), else null. */
+export async function configUnreadablePath(): Promise<string | null> {
+  await read();
+  return unreadable ? configPath() : null;
+}
+
+/** The validated store choice. Throws StoreConfigError on an invalid `store`
+ *  rather than falling back to SQLite, which would split the data. */
+export async function getStoreConfig(): Promise<StoreConfig> {
+  const cfg = await read();
+  if (unreadable) throw new ConfigJsonError('config.json is not valid JSON');
+  return parseStoreConfig(cfg.store, { allowStaticSecrets: false, allowManaged: true });
+}
+
+/** Settings → Storage. An external Postgres stays hand-edited: its block
+ *  names connections and credentials the UI doesn't. */
+export async function setStoreChoice(choice: 'sqlite' | 'managed'): Promise<void> {
+  const current = await getStoreConfig();
+  if (current.kind === 'postgres') {
+    throw new Error('config.json names an external Postgres store; edit its "store" key to change it');
+  }
+  const cfg = await read();
+  await write({ ...cfg, store: choice === 'managed' ? { kind: 'postgres', managed: true } : undefined });
+}
+
+/** config.json identity.github.clientId, or null. Validation and precedence: identity/clientId.ts. */
+export async function getGithubClientIdConfig(): Promise<string | null> {
+  return (await read()).identity?.github?.clientId ?? null;
+}
+
+/** Seconds an undeclared scanned port must keep serving before fallback preview; 0 when absent/invalid. */
+export async function getUndeclaredToastAfterSec(): Promise<number> {
+  return (await read()).ports?.undeclaredToastAfterSec ?? 0;
+}
+
 export async function getAutoReloadLoadouts(): Promise<boolean> {
   const cfg = await read();
   return cfg.autoReloadLoadouts !== false; // default true
@@ -363,6 +446,22 @@ export async function getPerfTelemetry(): Promise<boolean> {
 export async function setPerfTelemetry(enabled: boolean): Promise<void> {
   const cfg = await read();
   await write({ ...cfg, perfTelemetry: enabled });
+}
+
+/** Background knowledge capture (#483) — default on; only an explicit false disables it. */
+export async function getKnowledgeCapture(): Promise<boolean> {
+  return (await read()).knowledgeCapture !== false;
+}
+export async function setKnowledgeCapture(enabled: boolean): Promise<void> {
+  const cfg = await read(); await write({ ...cfg, knowledgeCapture: enabled });
+}
+
+/** App-wide daily cap on capture runs (#483 §5a). Default 40; 0 disables capture. */
+export async function getKnowledgeCaptureDailyCap(): Promise<number> {
+  return clampDailyCap((await read()).knowledgeCaptureDailyCap);
+}
+export async function setKnowledgeCaptureDailyCap(n: number): Promise<void> {
+  const cfg = await read(); await write({ ...cfg, knowledgeCaptureDailyCap: clampDailyCap(n) });
 }
 
 /** OTLP export setting (endpoint kept even while disabled — the Settings UI

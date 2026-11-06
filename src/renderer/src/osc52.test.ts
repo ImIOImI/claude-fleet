@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { decodeOsc52, OSC52_MAX_BASE64 } from './osc52';
+import { decodeOsc52, OSC52_MAX_BASE64, osc52ClipboardText } from './osc52';
 
 const b64 = (s: string): string => Buffer.from(s, 'utf-8').toString('base64');
 
@@ -31,5 +31,26 @@ describe('decodeOsc52', () => {
 
   it('ignores an oversized payload', () => {
     expect(decodeOsc52(`c;${'A'.repeat(OSC52_MAX_BASE64 + 4)}`)).toBeNull();
+  });
+});
+
+describe('osc52ClipboardText', () => {
+  it('honours a set-clipboard on a local or container tab', () => {
+    expect(osc52ClipboardText(`c;${b64('hi')}`, false)).toBe('hi');
+  });
+
+  it('ignores every set-clipboard on a remote tab', () => {
+    expect(osc52ClipboardText(`c;${b64('hi')}`, true)).toBeNull();
+  });
+});
+
+describe('OSC 52 wiring', () => {
+  it('TerminalSession decides per tab, and TerminalPane marks remote tabs', async () => {
+    const { readFileSync } = await import('node:fs');
+    const session = readFileSync(new URL('./components/TerminalSession.tsx', import.meta.url), 'utf8');
+    expect(session).toMatch(/registerOscHandler\(52, \(payload\) => \{\s*const text = osc52ClipboardText\(payload, remoteRef\.current\);[\s\S]*?return true;/);
+    expect(session).not.toMatch(/decodeOsc52\(/);
+    const pane = readFileSync(new URL('./components/TerminalPane.tsx', import.meta.url), 'utf8');
+    expect(pane).toMatch(/<TerminalSession[\s\S]*?remote=\{rules\.remote\}/);
   });
 });

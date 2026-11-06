@@ -28,7 +28,7 @@ export function workspaceToFormInitial(
     labels: w.labels,
     color: w.color,
     workspaceSubdir: w.workspaceSubdir,
-    kind: w.kind,
+    kind: w.kind === 'remote' ? 'container' : w.kind,
     workspaceRoot: w.workspaceRoot,
     launcher: w.launcher,
     terminalRenderer: w.terminalRenderer,
@@ -40,6 +40,7 @@ export function workspaceToFormInitial(
     resources: w.resources,
     mirror: w.mirror,
     accessibility: w.accessibility,
-    inbox: w.inbox
+    inbox: w.inbox,
+    knowledgeCapture: w.knowledgeCapture
   };
 }

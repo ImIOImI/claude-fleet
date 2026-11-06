@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   SOURCE_VAULT_KEY,
   SOURCE_VAULT_PREFIX,
+  IDENTITY_VAULT_PREFIX,
+  GITHUB_IDENTITY_SCOPE,
   RESERVED_VAULT_PREFIXES,
   sourceVaultScope,
   assertRendererVaultScope,
@@ -42,7 +44,7 @@ describe('assertRendererVaultScope fails closed (#444 security review)', () => {
 
 describe('assertRendererWorkspaceId (#444 security review)', () => {
   it('exports the reserved vault prefixes', () => {
-    expect(RESERVED_VAULT_PREFIXES).toEqual(['loadout-source:', 'endpoint:']);
+    expect(RESERVED_VAULT_PREFIXES).toEqual(['loadout-source:', 'endpoint:', 'identity:', 'store:']);
   });
   it.each([
     ['a loadout-source scope', 'loadout-source:ghcr.io/acme/private'],
@@ -68,5 +70,23 @@ describe('assertNotReservedVaultScope (#444 final review M6)', () => {
   });
   it.each(['01HZXYWORKSPACEULID0000000', 'ws-1', ''])('allows %s', (scope) => {
     expect(() => assertNotReservedVaultScope(scope)).not.toThrow();
+  });
+});
+
+describe('identity scope', () => {
+  it('names the GitHub identity scope', () => {
+    expect(IDENTITY_VAULT_PREFIX).toBe('identity:');
+    expect(GITHUB_IDENTITY_SCOPE).toBe('identity:github');
+  });
+  it('is host-only on the renderer vault surface', () => {
+    expect(() => assertRendererVaultScope('identity:github')).toThrow(/host-only/);
+    expect(() => assertRendererVaultScope('identity:other')).toThrow(/host-only/);
+  });
+  it('is reserved as a workspace id and refused by resolveEnv', () => {
+    expect(() => assertRendererWorkspaceId('identity:github')).toThrow(/workspace id/);
+    expect(() => assertNotReservedVaultScope('identity:github')).toThrow(/reserved/);
+  });
+  it('leaves endpoint scopes renderer-readable', () => {
+    expect(() => assertRendererVaultScope('endpoint:3f0c')).not.toThrow();
   });
 });

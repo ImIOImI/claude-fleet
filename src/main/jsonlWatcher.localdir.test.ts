@@ -7,8 +7,8 @@ import { openDb, closeDb, costForWorkspace } from './db.js';
 
 let dir: string;
 const UUID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cf-localdir-')); openDb(dir); });
-afterEach(async () => { closeDb(); rmSync(dir, { recursive: true, force: true }); });
+beforeEach(async () => { dir = mkdtempSync(join(tmpdir(), 'cf-localdir-')); openDb(dir); });
+afterEach(async () => { await closeDb(); rmSync(dir, { recursive: true, force: true }); });
 
 const line = JSON.stringify({
   type: 'assistant', uuid: 'e1', timestamp: '2026-07-12T13:10:00Z',
@@ -30,6 +30,6 @@ describe('local-workspace host-dir ingestion', () => {
     await new Promise((r) => setTimeout(r, 300));
     await w.stop();
 
-    expect(costForWorkspace('ws-local').outputTokens).toBe(1000);
+    expect((await costForWorkspace('ws-local')).outputTokens).toBe(1000);
   });
 });

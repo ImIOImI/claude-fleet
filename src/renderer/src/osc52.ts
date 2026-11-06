@@ -36,3 +36,8 @@ export function decodeOsc52(payload: string): string | null {
     return null;
   }
 }
+
+/** On a remote tab another viewer or the host could write it, so OSC 52 is swallowed and never reaches the clipboard. */
+export function osc52ClipboardText(payload: string, remote: boolean): string | null {
+  return remote ? null : decodeOsc52(payload);
+}

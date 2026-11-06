@@ -2,6 +2,8 @@
 // authMode) to a *live* workspace, extracted from App so it can be unit-tested
 // with an injected api. Kept dependency-free (no window.api, no React).
 
+import type { CaptureSettings } from '../../preload/captureSettings';
+
 /** Saved workspace manifest — the subset needed to recreate a container. */
 export interface WorkspaceManifest {
   id: string;
@@ -17,6 +19,8 @@ export interface WorkspaceManifest {
   env: unknown;
   resources?: unknown;
   mirror: unknown;
+  /** Knowledge capture settings (#483 §5a); absent = defaults. */
+  knowledgeCapture?: CaptureSettings;
 }
 
 /** The workspace lifecycle calls this orchestration needs (injected for tests). */

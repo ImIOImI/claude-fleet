@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { InboxStore } from '../inbox/inboxDb.js';
 import { AutomationStore } from './automationStore.js';
 import type { AutomationDef } from '../../preload/inboxTypes.js';
+import { openTestInbox, countQueries } from '../store/testStore.js';
 
 let inbox: InboxStore;
 afterEach(() => inbox?.close());
@@ -13,7 +14,7 @@ const def = (over: Partial<AutomationDef> = {}): AutomationDef => ({
 
 describe('AutomationStore definitions', () => {
   it('creates v1 with tags and history, versions on update, enforces unique names', async () => {
-    inbox = InboxStore.memory();
+    inbox = (await openTestInbox());
     const s = new AutomationStore(inbox.kysely);
     const a = await s.create(def(), USER, 1000);
     expect(a).toMatchObject({ name: 'log-watch', enabled: true, version: 1, createdBy: USER, lastScheduledAt: 1000 });
@@ -27,7 +28,7 @@ describe('AutomationStore definitions', () => {
     await expect(s.update(a.id, def({ name: 'other' }), USER)).rejects.toThrow(/already exists/);
   });
   it('re-enabling resets the schedule clock; remove keeps run history', async () => {
-    inbox = InboxStore.memory();
+    inbox = (await openTestInbox());
     const s = new AutomationStore(inbox.kysely);
     const a = await s.create(def(), USER, 1000);
     await s.setEnabled(a.id, false, 2000);
@@ -43,7 +44,7 @@ describe('AutomationStore definitions', () => {
 
 describe('AutomationStore runs', () => {
   it('records runs and steps, stats the week, marks interrupted, prunes', async () => {
-    inbox = InboxStore.memory();
+    inbox = (await openTestInbox());
     const s = new AutomationStore(inbox.kysely);
     const a = await s.create(def(), USER, 1000);
     const now = 10 * 86_400_000;
@@ -69,9 +70,46 @@ describe('AutomationStore runs', () => {
   });
 });
 
+describe('AutomationStore.runs batches steps (#456)', () => {
+  it('attaches identical per-run steps in a constant number of queries, regardless of run count', async () => {
+    inbox = (await openTestInbox());
+    const s = new AutomationStore(inbox.kysely);
+    const a = await s.create(def(), USER, 1000);
+    const now = 10 * 86_400_000;
+    const runCount = 30;
+    const runs = [];
+    for (let i = 0; i < runCount; i++) {
+      const r = await s.startRun(a, { kind: 'manual' }, {}, 'running', now + i);
+      // Vary step counts (including zero) across runs.
+      for (let j = 0; j < i % 4; j++) {
+        const st = await s.startStep(r.id, `step-${j}`, 'prompt', 'W1', now + i);
+        await s.finishStep(st, 'succeeded', { detail: { i, j } }, now + i + 1);
+      }
+      await s.setRunStatus(r.id, 'succeeded', now + i + 1);
+      runs.push(r);
+    }
+    const counter = countQueries(inbox);
+    const got = await s.runs(a.id, 100);
+    const queriesForRuns = counter.count();
+    expect(got).toHaveLength(runCount);
+    // Cross-check every run's steps against the single-run path (getRun), which still queries per id.
+    for (const r of got) {
+      const solo = await s.getRun(r.id);
+      expect(r.steps).toEqual(solo!.steps);
+    }
+    expect(queriesForRuns).toBeLessThanOrEqual(3);
+
+    // runsWithStatus takes the same batched path.
+    const counter2 = countQueries(inbox);
+    const running = await s.runsWithStatus('succeeded');
+    expect(running).toHaveLength(runCount);
+    expect(counter2.count()).toBeLessThanOrEqual(3);
+  });
+});
+
 describe('optimistic version check', () => {
   it('update with a stale expectedVersion rejects and writes nothing', async () => {
-    inbox = InboxStore.memory();
+    inbox = (await openTestInbox());
     const s = new AutomationStore(inbox.kysely);
     const def = { name: 'a', triggers: [{ manual: {} }], steps: [{ id: 's', prompt: { workspace: 'W1', mode: 'live', message: 'hi' } }] } as never;
     const a = await s.create(def, { kind: 'user', id: null }, 1);

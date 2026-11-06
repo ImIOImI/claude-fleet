@@ -24,6 +24,8 @@ function setup() {
 
 const BAD_SCOPES: Array<[string, unknown]> = [
   ['host-only string', PRIV],
+  ['identity scope', 'identity:github'],
+  ['managed store scope', 'store:managed'],
   ['array', [PRIV]],
   ['String object', new String(PRIV)],
   ['number', 7],

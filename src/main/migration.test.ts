@@ -5,7 +5,7 @@
 // the test can drive it directly against a populated state-dir tree.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { lstat, mkdir, mkdtemp, readFile, readlink, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, stat, readFile, readlink, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -220,6 +220,16 @@ describe('migrateFleetFolders — workspaceRoot canonicalization', () => {
     await writeWorkspaceManifest(seedSpec({ id, kind: 'local', workspaceRoot: 'C:\\Users\\troy\\proj' }));
     await migrateFleetFolders();
     expect(await rootOf(id)).toBe('C:\\Users\\troy\\proj');
+  });
+
+  it('never gives a remote bookmark a private folder', async () => {
+    const id = '01TESTREMQTE00000000000000';
+    await writeWorkspaceManifest(
+      seedSpec({ id, kind: 'remote', workspaceRoot: '', remote: { url: 'https://h', tier: null, login: null, checkedAt: 0 } })
+    );
+    await migrateFleetFolders();
+    expect(await rootOf(id)).toBe('');
+    await expect(stat(await fleetPrivateDir(id))).rejects.toThrow();
   });
 
   it('canonicalizes a container workspaceRoot to <fleetRoot>/<id>', async () => {

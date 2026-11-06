@@ -11,6 +11,12 @@ export type {
   Automation, AutomationDef, ParamDef, ParamType, ParamValue, RunRow, RunStatus, StepRunRow, TriggerDef, StepDef,
   Proposal, ProposalItem, ProposalKind, ProposalStatus, ItemDecision, LoadoutAutomationPreview, ScriptStepDef, PromptStepDef, HostShell, ScriptShell
 } from './inboxTypes';
+import type { AccountStatus, SignInStart, SignInPoll } from './identityTypes';
+export type { AccountStatus, AccountIdentity, AccountSso, SignInStart, SignInPoll } from './identityTypes';
+import type { RemoteAddOptions, RemoteLiveSession, RemoteProbe } from './remoteTypes';
+import type { StoreChoice, StoreSettings, StoreStatus } from './storeTypes';
+export type { ImportProgress, StoreChoice, StorePhase, StoreSettings, StoreStatus } from './storeTypes';
+export type { RemoteAddOptions, RemoteLiveSession, RemoteProbe, RemoteProbeOk, RemoteProbeErr, RemoteProbeErrorKind, RemoteTier } from './remoteTypes';
 
 /** Outcome of a `pty:resize`. Lives here because preload is the IPC contract
  *  surface: main imports it type-only, and the renderer picks it up through
@@ -76,6 +82,8 @@ export interface SessionListItem {
   tags: string[];
   /** Started by an automation fresh step, not a terminal tab. */
   headless: boolean;
+  /** A background knowledge-capture fork (#483), not a terminal tab. */
+  capture: boolean;
 }
 
 /**
@@ -144,7 +152,21 @@ export interface ServingPort {
    *  null when the broker couldn't attribute one (orphan, old image). */
   sessionId: string | null;
   firstSeenAt: number;
+  /** expose_port label when the port was declared. */
+  label?: string | null;
 }
+
+/** Preview popup cue: a declared port began serving, or the undeclared fallback fired. */
+export interface PortDetected {
+  workspaceId: string;
+  port: number;
+  label: string | null;
+  reason: string | null;
+  cmdline: string | null;
+  declared: boolean;
+}
+
+export type PortOpenVia = 'popup' | 'rail' | 'fallback';
 
 export interface ObservabilityCost {
   inputTokens: number;
@@ -226,6 +248,8 @@ const api = {
     errorLogPath: (): Promise<string> => ipcRenderer.invoke('app:errorLogPath'),
     /** Open error.log in the OS default app — the MCP-unreachable toast's action. */
     openErrorLog: (): Promise<string> => ipcRenderer.invoke('app:openErrorLog'),
+    /** Quit and start again (Settings → Storage applies at restart). */
+    relaunch: (): Promise<void> => ipcRenderer.invoke('app:relaunch'),
     /** Current host MCP listener health, for a window mounting mid-outage. */
     getMcpStatus: (): Promise<{ ok: boolean; detail?: string }> =>
       ipcRenderer.invoke('mcp:status:get'),
@@ -607,7 +631,12 @@ const api = {
       uiPrefs: UiPrefs;
       perfTelemetry: boolean;
       perfOtlp: { enabled: boolean; endpoint: string };
+      knowledgeCapture: boolean;
+      knowledgeCaptureDailyCap: number;
     }> => ipcRenderer.invoke('config:get'),
+    /** config.json's path when it isn't valid JSON (settings run on defaults
+     *  and can't be saved), else null. */
+    unreadablePath: (): Promise<string | null> => ipcRenderer.invoke('config:unreadablePath'),
     setFleetRoot: (path: string): Promise<{ fleetRoot: string; sharedDir: string }> =>
       ipcRenderer.invoke('config:setFleetRoot', path),
     setHardwareAccelDisabled: (
@@ -643,7 +672,14 @@ const api = {
     setPerfTelemetry: (enabled: boolean): Promise<PerfStatusPayload> =>
       ipcRenderer.invoke('config:setPerfTelemetry', enabled),
     setPerfOtlp: (enabled: boolean, endpoint: string): Promise<PerfStatusPayload> =>
-      ipcRenderer.invoke('config:setPerfOtlp', enabled, endpoint)
+      ipcRenderer.invoke('config:setPerfOtlp', enabled, endpoint),
+    /** Global knowledge-capture switch (#483); default on. A per-workspace
+     *  manifest flag can still disable capture for one workspace. */
+    setKnowledgeCapture: (enabled: boolean): Promise<void> =>
+      ipcRenderer.invoke('config:setKnowledgeCapture', enabled),
+    /** App-wide daily cap on knowledge-capture runs (#483 §5a); clamped 0–500 in main. */
+    setKnowledgeCaptureDailyCap: (n: number): Promise<void> =>
+      ipcRenderer.invoke('config:setKnowledgeCaptureDailyCap', n)
   },
   usage: {
     /** Total tokens spent across the fleet in the trailing rolling window —
@@ -687,6 +723,41 @@ const api = {
     deleteAllForWorkspace: (workspaceId: string): Promise<void> =>
       ipcRenderer.invoke('vault:deleteAllForWorkspace', workspaceId)
   },
+  identity: {
+    /** Signed-in GitHub account (never the token). `refresh` re-verifies with GitHub. */
+    status: (opts?: { refresh?: boolean }): Promise<AccountStatus> =>
+      ipcRenderer.invoke('identity:status', { refresh: opts?.refresh === true }),
+    /** Start the device flow. Rejects with `not-configured: …` when no client id resolves. */
+    signInStart: (): Promise<SignInStart> => ipcRenderer.invoke('identity:signInStart'),
+    /** One poll step; await it, then call again after `intervalMs` while `pending`. */
+    signInPoll: (): Promise<SignInPoll> => ipcRenderer.invoke('identity:signInPoll'),
+    signInCancel: (): Promise<void> => ipcRenderer.invoke('identity:signInCancel'),
+    /** Delete the token from this computer's vault. */
+    signOut: (): Promise<void> => ipcRenderer.invoke('identity:signOut')
+  },
+  store: {
+    getSettings: (): Promise<StoreSettings> => ipcRenderer.invoke('store:getSettings'),
+    /** Writes config.json (applies at the next start). Leaving a running managed
+     *  store first copies the inbox back into inbox.db; the result's notice says
+     *  when that was refused or failed. */
+    setChoice: (choice: Exclude<StoreChoice, 'external'>): Promise<StoreSettings> => ipcRenderer.invoke('store:setChoice', choice),
+    /** Postgres store status changes (starting, importing, down, ready). Returns an unsubscribe function. */
+    onStatus: (cb: (s: StoreStatus) => void): (() => void) => {
+      const handler = (_e: IpcRendererEvent, s: StoreStatus): void => cb(s);
+      ipcRenderer.on('store:status', handler);
+      return () => ipcRenderer.removeListener('store:status', handler);
+    }
+  },
+  remote: {
+    /** /whoami a host URL with the signed-in token; never returns the token. */
+    probe: (url: string): Promise<RemoteProbe> => ipcRenderer.invoke('remote:probe', url),
+    /** Probe, then write the bookmark under the host's workspace id. A bookmark at another URL needs `sameHostNewAddress`. */
+    add: (url: string, opts?: RemoteAddOptions): Promise<RemoteProbe> => ipcRenderer.invoke('remote:add', url, opts),
+    /** Rename the local bookmark; the host's name is unchanged. */
+    rename: (id: string, name: string): Promise<void> => ipcRenderer.invoke('remote:rename', id, name),
+    /** Broker sessions live on the host (any tier may watch them). */
+    liveSessions: (id: string): Promise<RemoteLiveSession[]> => ipcRenderer.invoke('remote:liveSessions', id)
+  },
   endpoints: {
     list: (): Promise<unknown[]> => ipcRenderer.invoke('endpoints:list'),
     save: (input: unknown): Promise<unknown> => ipcRenderer.invoke('endpoints:save', input),
@@ -721,9 +792,12 @@ const api = {
       ipcRenderer.invoke('pty:closeSession', sessionId),
     /** Terminate a session by (workspace, broker session id) — used by tab-close,
      *  which knows the stable broker session id but not the per-attach handle.
-     *  Kills claude via the same broker CLOSE the refresh path uses. */
+     *  Kills claude via the same broker CLOSE the refresh path uses; a remote tab only detaches. */
     closeSessionByBroker: (workspaceId: string, brokerSessionId: string): Promise<boolean> =>
       ipcRenderer.invoke('pty:closeSessionByBroker', workspaceId, brokerSessionId),
+    /** Remote only: CLOSE the host session behind a tab (tab-close merely detaches there). */
+    endSessionByBroker: (workspaceId: string, brokerSessionId: string): Promise<boolean> =>
+      ipcRenderer.invoke('pty:endSessionByBroker', workspaceId, brokerSessionId),
     onData: (sessionId: string, cb: (chunk: Uint8Array, ts?: number) => void) => {
       const channel = `pty:data:${sessionId}`;
       const handler = (_e: IpcRendererEvent, chunk: Buffer, ts?: number) => cb(new Uint8Array(chunk), ts);
@@ -738,20 +812,20 @@ const api = {
     }
   },
   ports: {
-    /** Subscribe to "dev server detected on port N" events (toast cue).
-     *  Returns an unsubscribe function. */
-    onDetected: (cb: (workspaceId: string, port: number) => void): (() => void) => {
+    /** Subscribe to preview popup cues. Returns an unsubscribe function. */
+    onDetected: (cb: (p: PortDetected) => void): (() => void) => {
       const channel = 'ports:detected';
-      const handler = (_e: IpcRendererEvent, payload: { workspaceId: string; port: number }): void =>
-        cb(payload.workspaceId, payload.port);
+      const handler = (_e: IpcRendererEvent, payload: PortDetected): void => cb(payload);
       ipcRenderer.on(channel, handler);
       return () => ipcRenderer.removeListener(channel, handler);
     },
-    /** Open a loopback forward to a container port and the system browser;
-     *  returns the bound host port, or null when nothing answers on the
-     *  container port anymore (stale toast). */
-    open: (workspaceId: string, containerPort: number): Promise<{ hostPort: number | null }> =>
-      ipcRenderer.invoke('ports:open', workspaceId, containerPort),
+    /** Open the preview in the system browser; null when nothing answers on the
+     *  port anymore. `via` is recorded for exposure tracking. */
+    open: (workspaceId: string, containerPort: number, via: PortOpenVia = 'rail'): Promise<{ hostPort: number | null }> =>
+      ipcRenderer.invoke('ports:open', workspaceId, containerPort, via),
+    /** The user closed a preview popup with ✕. */
+    dismiss: (workspaceId: string, port: number): Promise<void> =>
+      ipcRenderer.invoke('ports:dismiss', workspaceId, port),
     /** Subscribe to per-workspace Serving snapshots (full replace per event;
      *  an empty array clears the workspace). Returns an unsubscribe fn. */
     onChanged: (cb: (workspaceId: string, ports: ServingPort[]) => void): (() => void) => {
