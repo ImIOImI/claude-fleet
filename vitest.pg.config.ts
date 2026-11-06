@@ -50,6 +50,7 @@ export default defineConfig({
       'src/main/store/schemaParity.test.ts',
       'src/main/store/storeExport.test.ts',
       'src/main/store/storeImport.test.ts',
+      'src/main/store/userStateMerge.test.ts',
       'src/main/transcriptIndex.test.ts',
     ],
     env: { STORE_TEST_DIALECT: 'postgres' },

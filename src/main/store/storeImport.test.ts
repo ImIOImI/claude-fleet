@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sql, type Kysely } from 'kysely';
@@ -217,5 +217,79 @@ describe.skipIf(!isPg)('importSqlite into Postgres', () => {
   it('reports a missing file and refuses another schema version', async () => {
     expect(await importSqlite({ ...opts('inbox'), file: join(dir, 'nope.db') })).toMatchObject({ status: 'absent' });
     await expect(importSqlite({ ...opts('inbox'), expectedVersion: INBOX_SCHEMA_VERSION + 1 })).rejects.toThrow(ImportError);
+  });
+
+  it('a row changed after its chunk was copied restarts the copy, so the change lands', async () => {
+    let edited = false;
+    const out = await importSqlite(opts('inbox', {
+      onProgress: (p) => {
+        if (edited || p.table !== 'todos') return;
+        edited = true;
+        const w = new Database(join(dir, 'inbox.db'));
+        w.prepare(`UPDATE todos SET title = 'EDITED' WHERE rowid = 1`).run();
+        w.close();
+      },
+    }));
+    expect(out.status).toBe('copied');
+    expect((await sql<{ n: number }>`SELECT count(*) AS n FROM todos WHERE title = 'EDITED'`.execute(k)).rows[0].n).toBe(1);
+    expect(await pgCount('todos')).toBe(25);
+  });
+
+  it('keeps integers past 2^53 exact', async () => {
+    const s = new Database(join(dir, 'state.db'));
+    s.prepare(`INSERT INTO sessions (id, workspace_id, started_at) VALUES ('big', 'w', 9007199254740993)`).run();
+    s.close();
+    await importSqlite(opts('state'));
+    expect((await sql<{ v: string }>`SELECT started_at::text AS v FROM sessions WHERE id = 'big'`.execute(k)).rows[0].v).toBe('9007199254740993');
+  });
+
+  it('a value Postgres stores differently from the source fails the chunk', async () => {
+    await sql.raw(`
+      CREATE FUNCTION mangle() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.title := NEW.title || '!'; RETURN NEW; END $$;
+      CREATE TRIGGER mangle BEFORE INSERT ON todos FOR EACH ROW EXECUTE FUNCTION mangle();`).execute(k);
+    await expect(importSqlite(opts('inbox'))).rejects.toThrow(/copying todos: .*differs/);
+    expect(await pgCount('todos')).toBe(0);
+  });
+
+  it('advances each sequence past SQLite\'s AUTOINCREMENT high-water mark, not just the max id', async () => {
+    const w = new Database(join(dir, 'inbox.db'));
+    const top = (w.prepare(`SELECT max(id) AS m FROM todo_events`).get() as { m: number }).m;
+    w.prepare(`DELETE FROM todo_events WHERE id > ?`).run(top - 5);
+    w.close();
+    await importSqlite(opts('inbox'));
+    const next = (await sql<{ n: number }>`SELECT nextval(pg_get_serial_sequence('todo_events', 'id')) AS n`.execute(k)).rows[0].n;
+    expect(next).toBeGreaterThan(top);
+  });
+
+  it('a key that collides once NUL becomes U+FFFD fails with the table and key named', async () => {
+    const w = new Database(join(dir, 'inbox.db'));
+    w.prepare(`INSERT INTO tags (entity_kind, entity_id, tag) VALUES ('todo', 'x', ?), ('todo', 'x', ?)`).run('a\u0000', 'a�');
+    w.close();
+    await expect(importSqlite(opts('inbox'))).rejects.toThrow(/copying tags: .*Key \(entity_kind, entity_id, tag\)/);
+  });
+
+  it('refuses a file with a hot rollback journal, naming the way out', async () => {
+    writeFileSync(join(dir, 'inbox.db-journal'), 'unfinished');
+    await expect(importSqlite(opts('inbox'))).rejects.toThrow(/inbox\.db-journal.*switch back to SQLite/i);
+    expect(await pgCount('todos')).toBe(0);
+  });
+
+  it('copies uncheckpointed WAL rows, and a resume does not restart', async () => {
+    const live = new Database(join(dir, 'inbox.db'));
+    live.pragma('wal_autocheckpoint = 0');
+    for (let i = 0; i < 20; i++) live.prepare(`UPDATE todos SET title = 'walrow' WHERE rowid = ?`).run(i + 1);
+    const crashed = mkdtempSync(join(tmpdir(), 'cf-crash-'));
+    for (const f of ['inbox.db', 'inbox.db-wal']) copyFileSync(join(dir, f), join(crashed, f));
+    live.close();
+    for (const f of ['inbox.db-wal', 'inbox.db-shm']) rmSync(join(dir, f), { force: true });
+    for (const f of ['inbox.db', 'inbox.db-wal']) copyFileSync(join(crashed, f), join(dir, f));
+    rmSync(crashed, { recursive: true, force: true });
+    let n = 0;
+    await expect(importSqlite(opts('inbox', { onProgress: () => { if (++n === 1) throw new Error('injected'); } }))).rejects.toThrow('injected');
+    const seen: ImportProgress[] = [];
+    expect((await importSqlite(opts('inbox', { onProgress: (p) => seen.push(p) }))).status).toBe('copied');
+    expect(seen[0]).toMatchObject({ table: 'todos' });
+    expect(seen[0].copied).toBeGreaterThan(Math.ceil(140 / 19));
+    expect((await sql<{ n: number }>`SELECT count(*) AS n FROM todos WHERE title = 'walrow'`.execute(k)).rows[0].n).toBe(20);
   });
 });

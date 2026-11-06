@@ -32,6 +32,7 @@
 !src/main/store/passwordProvider.ts
 !src/main/store/pgSsl.ts
 !src/main/store/pgScramOnly.ts
+!src/main/store/sqliteFiles.ts
 !src/main/store/pgStores.ts
 !src/main/store/pgVectorSearch.ts
 !src/main/store/stateSchema.ts

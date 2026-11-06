@@ -1,28 +1,33 @@
 import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sql } from 'kysely';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as db from '../db.js';
 import { InboxStore } from '../inbox/inboxDb.js';
-import { firstSwitchCopy, retireSqliteFile, switchBackToSqlite } from './firstSwitch.js';
+import { firstSwitchCopy, switchBackPlan, switchBackToSqlite, verifyPlacedInbox } from './firstSwitch.js';
 import { migratePgStores } from './pgStores.js';
-import { postgresKysely } from './postgres.js';
-import { EXPORTED_FINGERPRINT, IMPORT_PG_TRACK } from './storeImport.js';
+import { createPgPool, postgresKysely } from './postgres.js';
+import { EXPORTED_PREFIX, IMPORT_PG_TRACK, IMPORT_TABLES } from './storeImport.js';
 import { isPg, testPgSchema, type TestPg } from './testStore.js';
 
 const ME = { kind: 'user', id: 'me' } as const;
 const sha = (f: string): string => createHash('sha256').update(readFileSync(f)).digest('hex');
 
-it('retireSqliteFile renames the file with its WAL and shm', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'cf-retire-'));
+it('verifyPlacedInbox names a table whose count differs from the copy', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cf-verify-'));
   try {
-    for (const f of ['inbox.db', 'inbox.db-wal', 'inbox.db-shm']) writeFileSync(join(dir, f), 'x');
-    expect(retireSqliteFile(join(dir, 'inbox.db'), 7)).toBe(join(dir, 'inbox.db.migrated-7'));
-    expect(readdirSync(dir).sort()).toEqual(['inbox.db.migrated-7', 'inbox.db.migrated-7-shm', 'inbox.db.migrated-7-wal']);
-    expect(retireSqliteFile(join(dir, 'inbox.db'), 8)).toBeNull();
+    const inbox = InboxStore.open(dir);
+    await inbox.post(ME, { title: 'one' });
+    await inbox.close();
+    const f = join(dir, 'inbox.db');
+    const counts = Object.fromEntries(IMPORT_TABLES.inbox.map((t) => [t, 0]));
+    expect(verifyPlacedInbox(f, { ...counts, todos: 1, todo_events: 1 })).toBeNull();
+    expect(verifyPlacedInbox(f, { ...counts, todos: 2, todo_events: 1 })).toMatch(/todos: 1 rows, the copy had 2/);
+    writeFileSync(join(dir, 'junk.db'), 'not a database');
+    expect(verifyPlacedInbox(join(dir, 'junk.db'), counts)).toMatch(/unreadable/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -73,6 +78,34 @@ describe.skipIf(!isPg)('firstSwitchCopy', () => {
     expect(note).toMatch(/inbox.db was not copied/);
     expect(existsSync(join(dir, 'inbox.db'))).toBe(true);
   });
+  it('a hot rollback journal stops the copy with a notice, and switching back keeps inbox.db as is', async () => {
+    writeFileSync(join(dir, 'inbox.db-journal'), 'unfinished');
+    const before = sha(join(dir, 'inbox.db'));
+    await expect(firstSwitchCopy({ pool: t.pool, userData: dir, state: false, onProgress: () => undefined })).rejects.toThrow(/switch back to SQLite/i);
+    expect(switchBackPlan(dir, 1)).toMatchObject({ kind: 'keep-inbox-db', notice: expect.stringMatching(/unfinished transaction/) });
+    const commit = vi.fn(async () => undefined);
+    expect(await switchBackToSqlite({ pool: t.pool, userData: dir, onProgress: () => undefined, commit })).toMatchObject({ status: 'switched', kept: true });
+    expect(commit).toHaveBeenCalledOnce();
+    expect(sha(join(dir, 'inbox.db'))).toBe(before);
+    expect(readFileSync(join(dir, 'inbox.db-journal'), 'utf8')).toBe('unfinished');
+  });
+
+  it('switching back while the copy is stuck is a plain commit, with no Postgres needed', async () => {
+    let n = 0;
+    await expect(firstSwitchCopy({ pool: t.pool, userData: dir, state: false, onProgress: () => { if (++n === 1) throw new Error('stuck'); } }))
+      .rejects.toThrow('stuck');
+    const before = sha(join(dir, 'inbox.db'));
+    const dead = createPgPool({ connectionString: 'postgres://nobody@127.0.0.1:1/none', schema: 'none', connectionTimeoutMillis: 500 });
+    dead.on('error', () => undefined);
+    try {
+      const commit = vi.fn(async () => undefined);
+      expect(await switchBackToSqlite({ pool: dead, userData: dir, onProgress: () => undefined, commit })).toMatchObject({ status: 'switched', kept: true });
+      expect(commit).toHaveBeenCalledOnce();
+    } finally {
+      await dead.end();
+    }
+    expect(sha(join(dir, 'inbox.db'))).toBe(before);
+  });
 });
 
 describe.skipIf(!isPg)('switchBackToSqlite', () => {
@@ -117,7 +150,7 @@ describe.skipIf(!isPg)('switchBackToSqlite', () => {
     const state = sha(join(dir, 'state.db'));
     const commit = vi.fn(async () => {
       expect(existsSync(inboxFile())).toBe(true);
-      expect(await runRow()).toMatchObject({ fingerprint: EXPORTED_FINGERPRINT, finished_at: null });
+      expect(await runRow()).toMatchObject({ fingerprint: expect.stringMatching(new RegExp(`^${EXPORTED_PREFIX}[0-9a-f]{64}$`)), finished_at: null });
     });
     const out = await switchBackToSqlite({ pool: t.pool, userData: dir, onProgress: () => undefined, commit });
     expect(out).toMatchObject({ status: 'switched', counts: { todos: 2 } });
@@ -205,9 +238,53 @@ describe.skipIf(!isPg)('switchBackToSqlite', () => {
     } finally {
       await pgInbox.close();
     }
-    const d = new Database(join(dir, 'inbox.db.migrated-99'), { readonly: true });
+    const d = new Database(join(dir, 'inbox.db.migrated-99', 'inbox.db'), { readonly: true });
     const n = (d.prepare('SELECT count(*) AS n FROM todos').get() as { n: number }).n;
     d.close();
     expect((await t.pool.query(`SELECT count(*)::int AS n FROM ${t.schema}.todos`)).rows[0].n).toBe(n);
+  });
+
+  it('a Postgres write after the export is not erased by the next switch to Postgres', async () => {
+    await switchBackToSqlite({ pool: t.pool, userData: dir, onProgress: () => undefined, commit: async () => { await pgPost('posted after the export'); } });
+    const before = sha(inboxFile());
+    const note = await firstSwitchCopy({ pool: t.pool, userData: dir, state: true, onProgress: () => undefined });
+    expect(note).toMatch(/Postgres inbox changed after the switch back/);
+    expect((await t.pool.query(`SELECT title FROM ${t.schema}.todos WHERE dedupe_key = 'posted after the export'`)).rows).toHaveLength(1);
+    expect(sha(inboxFile())).toBe(before);
+    expect(switchBackPlan(dir, 1)).toMatchObject({ kind: 'refuse' });
+  });
+
+  it('a foreign WAL left at inbox.db-wal cannot change the switched-back inbox', async () => {
+    const o = join(dir, 'other.db');
+    const x = new Database(o);
+    x.pragma('journal_mode = WAL');
+    x.pragma('wal_autocheckpoint = 0');
+    x.exec('CREATE TABLE z (a)');
+    for (let i = 0; i < 200; i++) x.prepare('INSERT INTO z VALUES (?)').run('x'.repeat(500));
+    copyFileSync(`${o}-wal`, `${inboxFile()}-wal`);
+    x.close();
+    const out = await switchBackToSqlite({ pool: t.pool, userData: dir, onProgress: () => undefined, commit: async () => undefined });
+    expect(out.status).toBe('switched');
+    expect(await titlesIn()).toEqual(['from sqlite', 'made on postgres']);
+    expect(await firstSwitchCopy({ pool: t.pool, userData: dir, state: true, onProgress: () => undefined })).toBeNull();
+    expect((await t.pool.query(`SELECT count(*)::int AS n FROM ${t.schema}.todos`)).rows[0].n).toBe(2);
+  });
+
+  it('a row lost from the copy after its table was verified is caught before anything is committed', async () => {
+    const commit = vi.fn(async () => undefined);
+    let hit = false;
+    await expect(switchBackToSqlite({
+      pool: t.pool, userData: dir, commit,
+      onProgress: (p) => {
+        if (hit || p.table !== 'todo_events') return;
+        hit = true;
+        const w = new Database(join(dir, 'inbox.db.from-postgres'));
+        w.prepare('DELETE FROM todos WHERE rowid = (SELECT min(rowid) FROM todos)').run();
+        w.close();
+      },
+    })).rejects.toThrow(/todos: 1 rows, the copy had 2/);
+    expect(commit).not.toHaveBeenCalled();
+    expect(existsSync(inboxFile())).toBe(false);
+    expect((await runRow()).finished_at).not.toBeNull();
   });
 });

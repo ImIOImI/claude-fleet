@@ -139,4 +139,35 @@ describe.skipIf(!isPg)('exportInboxToSqlite (the switch back from Postgres)', ()
     const out = await exportInboxToSqlite({ k, file });
     expect(out.counts.todos).toBe(25);
   });
+
+  it('pages a keyless table without losing identical rows', async () => {
+    await sql`INSERT INTO claims_fts (claim_id, text, topics) VALUES ('c2', 'twin', 't'), ('c2', 'twin', 't'), ('c3', 'z', 'z')`.execute(k);
+    let chunks = 0;
+    await expect(exportInboxToSqlite({ k, file, maxRowsPerChunk: 1, onProgress: (p) => { if (p.table === 'claims_fts' && ++chunks === 2) throw new Error('injected'); } }))
+      .rejects.toThrow('injected');
+    const out = await exportInboxToSqlite({ k, file, maxRowsPerChunk: 1 });
+    expect(out.counts.claims_fts).toBe(4);
+    const d = new Database(file, { readonly: true });
+    expect(d.prepare(`SELECT count(*) AS n FROM claims_fts WHERE claim_id = 'c2'`).get()).toEqual({ n: 2 });
+    d.close();
+  });
+
+  it('keeps integers past 2^53 exact', async () => {
+    await sql`INSERT INTO notify_state (k, v) VALUES ('x', 'y')`.execute(k);
+    await sql`UPDATE todos SET created_at = 9007199254740993 WHERE id = ${todoIds[0]}`.execute(k);
+    await exportInboxToSqlite({ k, file });
+    const d = new Database(file, { readonly: true });
+    d.defaultSafeIntegers(true);
+    expect(d.prepare(`SELECT created_at AS v FROM todos WHERE id = ?`).get(todoIds[0])).toEqual({ v: 9007199254740993n });
+    d.close();
+  });
+
+  it('seeds sqlite_sequence from the Postgres sequence, so ids freed by deletes are not reused', async () => {
+    await sql`DELETE FROM todo_events WHERE id > (SELECT max(id) - 5 FROM todo_events)`.execute(k);
+    const last = (await sql<{ v: number }>`SELECT last_value AS v FROM pg_sequences WHERE schemaname = current_schema() AND sequencename = 'todo_events_id_seq'`.execute(k)).rows[0].v;
+    await exportInboxToSqlite({ k, file });
+    const d = new Database(file, { readonly: true });
+    expect((d.prepare(`SELECT seq FROM sqlite_sequence WHERE name = 'todo_events'`).get() as { seq: number }).seq).toBe(last);
+    d.close();
+  });
 });
