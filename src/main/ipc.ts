@@ -175,6 +175,12 @@ let inputWaitObserver: ((workspaceId: string, waitingSessionIds: string[]) => vo
 export function setInputWaitObserver(fn: typeof inputWaitObserver): void {
   inputWaitObserver = fn;
 }
+let inputWaitSnapshot: () => Array<[string, string[]]> = () => [];
+/** Re-sends every workspace still waiting on input to the observer: a restarted
+ *  notify service lost its input-wait timers. */
+export function replayInputWait(): void {
+  for (const [workspaceId, ids] of inputWaitSnapshot()) inputWaitObserver?.(workspaceId, ids);
+}
 
 /** Fleet events for automation event triggers (#407 Phase 4): a workspace's
  *  attached session went busy → idle, or a workspace was started. */
@@ -1558,6 +1564,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // AskUserQuestion prompt (driven by the runner hook via the signal_input_wait
   // MCP tool). Pushed to renderers on every change; chips render it as "needs input".
   const inputWaitByWorkspace = new Map<string, Set<string>>();
+  inputWaitSnapshot = () => [...inputWaitByWorkspace].filter(([, ids]) => ids.size > 0).map(([w, ids]) => [w, [...ids]]);
   function pushInputWait(workspaceId: string): void {
     const set = inputWaitByWorkspace.get(workspaceId) ?? new Set<string>();
     broadcastInputWait(

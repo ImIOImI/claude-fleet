@@ -6,11 +6,12 @@ import type { ImportProgress, StoreChoice, StoreStatus } from '../../preload/sto
 
 export interface SupervisorDeps<S> {
   choice: Exclude<StoreChoice, 'sqlite'>;
-  /** Start (managed) and open the store; a throw is retried with backoff. */
-  open(): Promise<S>;
+  /** Start (managed) and open the store; a throw is retried with backoff. `progress` becomes the status detail. */
+  open(progress: (message: string) => void): Promise<S>;
   /** The first-switch copy; returns a notice for Settings, or null. A throw closes the stores and retries. */
   prepare(stores: S, onProgress: (p: ImportProgress) => void): Promise<string | null>;
-  /** Start the store-backed services. Runs once. */
+  /** Start the store-backed services. Must be idempotent: a throw (its message
+   *  is the status detail) is retried after each good ping until it succeeds. */
   ready(stores: S): Promise<void>;
   /** Throws when the store is unreachable. */
   ping(stores: S): Promise<void>;
@@ -31,6 +32,7 @@ export class StoreSupervisor<S> extends EventEmitter {
   private st: StoreStatus;
   private stopped = false;
   private stores: S | null = null;
+  private servicesFailed: string | null = null;
   private tail: Promise<unknown> = Promise.resolve();
   private readonly readyP: Promise<S>;
   private resolveReady!: (s: S) => void;
@@ -79,20 +81,26 @@ export class StoreSupervisor<S> extends EventEmitter {
     this.stopped = true;
   }
 
+  /** Runs `ready` again after some of its services were torn down; a failure
+   *  is shown and retried like the first start's. */
+  async restartServices(): Promise<void> {
+    if (this.stores) this.set({ detail: await this.startServices(this.stores) });
+  }
+
   /** One attempt; true when it failed and the caller should back off. */
   private async bringUp(): Promise<boolean> {
     if (this.stopped) return false;
     let opened: S | null = null;
     try {
-      opened = await this.d.open();
+      opened = await this.d.open((m) => this.set({ phase: 'starting', detail: m }));
       const notice = await this.d.prepare(opened, (p) => this.set({ phase: 'importing', progress: p, detail: null }));
       if (this.stopped) {
         await this.d.close(opened).catch(() => undefined);
         return false;
       }
       this.stores = opened;
-      await this.d.ready(opened).catch((e: unknown) => this.d.log('store-ready-failed', message(e)));
-      this.set({ phase: 'ready', detail: null, progress: null, notice });
+      const failed = await this.startServices(opened);
+      this.set({ phase: 'ready', detail: failed, progress: null, notice });
       this.resolveReady(opened);
       return false;
     } catch (e) {
@@ -109,9 +117,10 @@ export class StoreSupervisor<S> extends EventEmitter {
     try {
       await this.d.ping(this.stores);
       if (down) {
-        this.set({ phase: 'ready', detail: null });
+        this.set({ phase: 'ready', detail: this.servicesFailed });
         this.d.recovered(this.stores);
       }
+      if (this.servicesFailed !== null) this.set({ detail: await this.startServices(this.stores) });
       return false;
     } catch (e) {
       if (!down) this.d.log('store-unreachable', message(e));
@@ -119,6 +128,18 @@ export class StoreSupervisor<S> extends EventEmitter {
       await this.d.repair?.().catch((r: unknown) => this.set({ detail: message(r) }));
       return true;
     }
+  }
+
+  /** The services' failure, or null once they all started. */
+  private async startServices(stores: S): Promise<string | null> {
+    try {
+      await this.d.ready(stores);
+      this.servicesFailed = null;
+    } catch (e) {
+      if (message(e) !== this.servicesFailed) this.d.log('store-ready-failed', message(e));
+      this.servicesFailed = message(e);
+    }
+    return this.servicesFailed;
   }
 
   private set(p: Partial<StoreStatus>): void {

@@ -387,6 +387,11 @@ export function createAutomationService(deps: AutomationDeps) {
       return cut;
     },
 
+    /** A run is starting, running, finishing or queued (the store switch waits for none). */
+    hasActiveRuns(): boolean {
+      return claimed.size > 0 || queued.size > 0;
+    },
+
     /** Attribution: a post that names run_id belongs to the automation only if the run is live and targets the caller. */
     attribution(runId: string, callerId: string): { automationId: string } | null {
       const r = active.get(runId);

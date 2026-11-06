@@ -1,11 +1,13 @@
-// The inbox write gate on a real Postgres inbox, and the live switch back to
-// SQLite built on it: a write attempted during the switch is refused, a write
-// already in flight lands in the copy, and nothing succeeds unseen.
+// The write gates on a real Postgres inbox and history, and the live switch
+// back to SQLite built on them: a write attempted during the switch is refused,
+// a write already in flight lands in the copy, nothing succeeds unseen, and no
+// history write reaches Postgres once the switch has begun.
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type pg from 'pg';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import * as db from '../db.js';
 import { InboxStore } from '../inbox/inboxDb.js';
 import { firstSwitchCopy, switchBackPlan, switchBackToSqlite } from './firstSwitch.js';
 import { InboxWriteGate, InboxWriteRefused } from './inboxWriteGate.js';
@@ -34,17 +36,21 @@ describe.skipIf(!isPg)('InboxWriteGate on Postgres', () => {
   let dir: string;
   let t: TestPg;
   let gate: InboxWriteGate;
+  let historyGate: InboxWriteGate;
   let inbox: InboxStore;
   beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), 'cf-gate-'));
     t = await testPgSchema();
-    await migratePgStores(t.pool, { state: false, extraTracks: [IMPORT_PG_TRACK] });
+    await migratePgStores(t.pool, { state: true, extraTracks: [IMPORT_PG_TRACK] });
     // No inbox.db: the copy is `absent` and writes the marker, as a real first start does.
     await firstSwitchCopy({ pool: t.pool, userData: dir, state: false, onProgress: () => undefined });
     gate = new InboxWriteGate();
     inbox = await InboxStore.openPostgres(t.pool, { afterBeginWrite: gate.hook, migrate: false });
+    historyGate = new InboxWriteGate();
+    await db.openDbPostgres(t.pool, { afterBeginWrite: historyGate.hook, migrate: false });
   });
   afterEach(async () => {
+    await db.closeDb();
     await inbox.close();
     await t.drop();
     rmSync(dir, { recursive: true, force: true });
@@ -85,7 +91,7 @@ describe.skipIf(!isPg)('InboxWriteGate on Postgres', () => {
     expect((await inbox.list({ status: 'all' })).map((x) => x.title).sort()).toEqual(['after', 'edited in flight']);
   });
 
-  it('a live switch back carries every write that succeeded and refuses the rest', async () => {
+  it('a live switch back carries every write that succeeded, refuses the rest, and relaunches with history writes refused', async () => {
     const { todo } = await inbox.post(ME, { title: 'before' });
     const edit = heldEdit(todo.id, 'edited in flight');
     await edit.inside;
@@ -95,9 +101,16 @@ describe.skipIf(!isPg)('InboxWriteGate on Postgres', () => {
       p.catch(() => undefined);
       attempts.push(p);
     };
+    const usage = (detail: string): Promise<void> => db.recordUsageEvent({ workspaceId: 'ws', kind: 'resumed', detail: { at: detail } });
+    await usage('before');
+    const historyAttempts: Array<Promise<unknown>> = [];
+    const historyAttempt = (detail: string): void => {
+      const p = usage(detail);
+      p.catch(() => undefined);
+      historyAttempts.push(p);
+    };
     const calls: string[] = [];
     const switching = switchBackLive<{ pool: pg.Pool }>({
-      inboxOn: () => 'postgres',
       exclusive: (fn) => fn({ pool: t.pool }),
       plan: () => switchBackPlan(dir),
       postgresInboxLive: () => true,
@@ -105,25 +118,35 @@ describe.skipIf(!isPg)('InboxWriteGate on Postgres', () => {
       close: async () => undefined,
       quiesce: async () => {
         gate.close('the inbox is moving to SQLite');
+        historyGate.close('history is moving to SQLite');
         attempt('while draining');
+        historyAttempt('while draining');
         await gate.drain(inbox.kysely);
+        await historyGate.drain(db.stateKysely());
         calls.push('quiesced');
       },
+      automationRunning: () => false,
       copy: (s, commit) => switchBackToSqlite({
         pool: s.pool, userData: dir, commit,
         onProgress: () => attempt('during the copy'),
       }),
-      commit: async () => { attempt('during the commit'); calls.push('commit'); },
-      resume: async (on) => { calls.push(`resume ${on}`); },
+      commit: async () => { attempt('during the commit'); historyAttempt('during the commit'); calls.push('commit'); },
+      resume: async () => { calls.push('resume'); },
       stopBringUp: () => undefined,
+      relaunch: () => { calls.push('relaunch'); historyAttempt('after the switch'); attempt('after the switch'); },
     });
     await new Promise((r) => setTimeout(r, 30));
     edit.release();
     expect(await switching).toEqual({ switched: true, notice: null });
-    expect(calls).toEqual(['quiesced', 'commit', 'resume sqlite']);
+    expect(calls).toEqual(['quiesced', 'commit', 'relaunch']);
+    for (const r of await Promise.allSettled(historyAttempts)) {
+      expect(r.status).toBe('rejected');
+      expect((r as PromiseRejectedResult).reason).toBeInstanceOf(InboxWriteRefused);
+    }
+    expect((await t.pool.query(`SELECT detail FROM usage_events`)).rows.map((r) => r.detail)).toEqual([JSON.stringify({ at: 'before' })]);
 
     const results = await Promise.allSettled(attempts);
-    expect(results.length).toBeGreaterThanOrEqual(3);
+    expect(results.length).toBeGreaterThanOrEqual(4);
     const local = InboxStore.open(dir);
     try {
       const titles = (await local.list({ status: 'all' })).map((x) => x.title);

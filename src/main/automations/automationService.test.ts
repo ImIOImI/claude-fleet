@@ -122,6 +122,17 @@ describe('runs', () => {
 });
 
 describe('attribution + MCP', () => {
+  it('hasActiveRuns is true from the start of a run until it ends', async () => {
+    let release!: () => void;
+    const { svc } = await setup({ postGate: new Promise<void>((r) => { release = r; }) });
+    const a = await svc.create(YAML(), USER);
+    expect(svc.hasActiveRuns()).toBe(false);
+    await svc.run(a.id, { kind: 'manual', by: USER });
+    expect(svc.hasActiveRuns()).toBe(true);
+    release();
+    await svc.settle();
+    expect(svc.hasActiveRuns()).toBe(false);
+  });
   it('attributes a run_id only while the run is live and the caller is a target', async () => {
     let release!: () => void;
     const { svc } = await setup({ postGate: new Promise<void>((r) => { release = r; }) });

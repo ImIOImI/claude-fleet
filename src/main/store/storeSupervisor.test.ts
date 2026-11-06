@@ -206,6 +206,46 @@ describe('StoreSupervisor', () => {
     expect(calls.filter((x) => x === 'open').length).toBe(1);
   });
 
+  it('a failed service start is ready with its reason; later ticks retry it until it succeeds', async () => {
+    let fails = 2;
+    const { sup, c, calls } = harness({
+      ready: async (s) => { calls.push(`ready ${s.id}`); if (fails-- > 0) throw new Error('History unavailable: connect ECONNRESET'); },
+    });
+    void sup.run();
+    expect(await sup.whenReady()).toEqual({ id: 1 });
+    expect(sup.status()).toMatchObject({ phase: 'ready', detail: 'History unavailable: connect ECONNRESET' });
+    await c.tick();
+    expect(sup.status()).toMatchObject({ phase: 'ready', detail: 'History unavailable: connect ECONNRESET' });
+    await c.tick();
+    expect(sup.status()).toMatchObject({ phase: 'ready', detail: null });
+    await c.tick();
+    expect(calls.filter((x) => x === 'ready 1').length).toBe(3);
+    expect(calls.filter((x) => x === 'log store-ready-failed').length).toBe(1);
+    sup.stop();
+  });
+
+  it('restartServices runs ready again and a failure is retried on the next tick', async () => {
+    let fail = false;
+    const { sup, c, calls } = harness({ ready: async (s) => { calls.push(`ready ${s.id}`); if (fail) { fail = false; throw new Error('Inbox unavailable: x'); } } });
+    void sup.run();
+    await sup.whenReady();
+    fail = true;
+    await sup.restartServices();
+    expect(sup.status()).toMatchObject({ phase: 'ready', detail: 'Inbox unavailable: x' });
+    await c.tick();
+    expect(sup.status()).toMatchObject({ phase: 'ready', detail: null });
+    expect(calls.filter((x) => x === 'ready 1').length).toBe(3);
+    sup.stop();
+  });
+
+  it('open progress shows as the starting detail', async () => {
+    const { sup, seen } = harness({ open: async (progress) => { progress('Pulling the Postgres image…'); return { id: 1 }; } });
+    void sup.run();
+    await sup.whenReady();
+    expect(seen[0]).toMatchObject({ phase: 'starting', detail: 'Pulling the Postgres image…' });
+    sup.stop();
+  });
+
   it('stop() during a bring-up closes what opened instead of running ready', async () => {
     let finishCopy!: () => void;
     const { sup, calls } = harness({ prepare: () => new Promise<string | null>((r) => { finishCopy = () => r(null); }) });

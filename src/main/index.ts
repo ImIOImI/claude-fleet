@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, shell, ipcMain } from 'electron';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { registerIpc, invalidateWorkspaceList, stopRemoteBackend } from './ipc.js';
+import { registerIpc, invalidateWorkspaceList, replayInputWait, stopRemoteBackend } from './ipc.js';
 import { openDb, openDbPostgres, closeDb, deleteEmbeddingsForOtherModels, listSessionIds, recordError, stateKysely, sessionCaptureSignals, isAutomationSession } from './db.js';
 import { initPerf, shutdownPerf, perfSpan, perfSpanAsync } from './perf.js';
 import { PerfStore } from './perfStore.js';
@@ -35,7 +35,9 @@ import { StoreSupervisor } from './store/storeSupervisor.js';
 import { broadcastStoreStatus, registerStoreIpc, setActiveStore, storeChoiceOf } from './store/storeIpc.js';
 import { setActiveStoreConfig } from './store/activeStore.js';
 import { firstSwitchCopy, switchBackPlan, switchBackToSqlite } from './store/firstSwitch.js';
-import { switchBackLive } from './store/storeSwitch.js';
+import { inboxOnPostgresNotice, switchBackLive } from './store/storeSwitch.js';
+import { ServiceSteps } from './store/serviceSteps.js';
+import { withinMs } from './withinMs.js';
 import { InboxWriteGate } from './store/inboxWriteGate.js';
 import { INBOX_PG_MARKER } from './store/sqliteFiles.js';
 import { IMPORT_PG_TRACK } from './store/storeImport.js';
@@ -85,10 +87,12 @@ let pgStores: PgStores | null = null;
 let supervisor: StoreSupervisor<PgStores> | null = null;
 // Set when the store is the managed container: stopped at quit.
 let managedDocker: ManagedDocker | null = null;
-// Where the inbox lives this run; the switch back to SQLite moves it.
-let inboxOn: 'sqlite' | 'postgres' | null = null;
-// The Postgres inbox's afterBeginWrite: closed while the switch back copies it.
+// The Postgres inbox's and history's afterBeginWrite: closed while the switch back copies.
 const inboxGate = new InboxWriteGate();
+const historyGate = new InboxWriteGate();
+// before-quit holds the quit at most this long (#485).
+const QUIT_BOUND_MS = 10_000;
+let shuttingDown = false;
 // Undoes what the inbox-backed services registered, so they can start again on the other store.
 const inboxTeardown: Array<() => void> = [];
 let keepRunningAttached = false;
@@ -247,12 +251,14 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   setActiveStoreConfig(storeCfg);
   const sqlite = storeCfg.kind === 'sqlite';
 
-  if (sqlite) {
+  // A SQLite start whose inbox lives in Postgres ("Continue without settings",
+  // a hand-edited config.json) keeps the inbox closed rather than starting an empty one.
+  const inboxElsewhere = sqlite ? inboxOnPostgresNotice(userData) : null;
+  if (sqlite && !inboxElsewhere) {
     // Authoritative inbox (#407): opens in mock AND real mode. state.db is a
     // droppable cache gated on the JSONL watcher; the inbox is neither.
     try {
       inboxStore = InboxStore.open(userData);
-      inboxOn = 'sqlite';
     } catch (e) {
       logError({ source: 'main', type: 'inbox-open-failed', level: 'error', message: String(e) });
     }
@@ -580,7 +586,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     const pgCfg = storeCfg as PostgresStoreConfig | ManagedStoreConfig;
     const docker = pgCfg.kind === 'managed' ? dockerodeManagedDocker() : null;
     managedDocker = docker;
-    const resolveCfg = (): Promise<PostgresStoreConfig> =>
+    const resolveCfg = (progress?: (message: string) => void): Promise<PostgresStoreConfig> =>
       pgCfg.kind === 'managed'
         ? ensureManagedPostgres({
           docker: docker!,
@@ -588,11 +594,12 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
             get: () => getSecret(MANAGED_STORE_SCOPE, MANAGED_STORE_PASSWORD_KEY),
             set: (v) => setSecret(MANAGED_STORE_SCOPE, MANAGED_STORE_PASSWORD_KEY, v),
           },
+          onProgress: progress,
         }, pgCfg.poolMax)
         : Promise.resolve(pgCfg);
     let openedPort: number | null = null;
-    const openStores = async (): Promise<PgStores> => {
-      const cfg = await resolveCfg();
+    const openStores = async (progress?: (message: string) => void): Promise<PgStores> => {
+      const cfg = await resolveCfg(progress);
       const stores = await openPgStores(cfg, {
         state: false,
         afterBeginWrite: inboxGate.hook,
@@ -606,36 +613,54 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       await stores.inbox.close();
       await stores.end();
     };
-    /** Refuse new inbox writes, stop the timers that write, and wait for writes in flight. */
-    const quiesceInbox = async (stores: PgStores): Promise<void> => {
+    let manifests: WorkspaceSpec[] = [];
+    // Inbox steps first, so a history failure leaves the inbox up; each is retried until it succeeds.
+    const services = new ServiceSteps<PgStores>([
+      { name: 'claims', group: 'inbox', run: (s) => { if (embed) startClaims(s.inbox, embed); } },
+      { name: 'inbox-services', group: 'inbox', run: (s) => startInboxServices(s.inbox) },
+      { name: 'presence', group: 'inbox', run: () => { if (mainWindow) startPresenceServices(mainWindow); } },
+      { name: 'inbox-counts', group: 'inbox', run: (s) => broadcastCounts(s.inbox) },
+      // After the copy: openDbPostgres rehydrates pendingClaudeIds from the copied rows.
+      { name: 'state-db', group: 'history', run: (s) => openDbPostgres(s.pool, { migrate: false, afterBeginWrite: historyGate.hook }) },
+      { name: 'state-writes', group: 'history', run: () => startStateWrites() },
+      {
+        name: 'read-source', group: 'history', run: async (s) => setReadSource(await openPgMcpReadSource(schemaOf(s.pool), s.poolConfig, (message) =>
+          logError({ source: 'main', type: 'mcp-query-isolation', level: 'warn', message }))),
+      },
+      {
+        name: 'watcher', group: 'history', run: async () => {
+          if (!jsonlWatcher) return;
+          manifests = (await listWorkspaceManifests()).filter((m) => m.kind !== 'remote');
+          await startWatcher(jsonlWatcher, manifests);
+        },
+      },
+      { name: 'local-dirs', group: 'history', run: () => { if (jsonlWatcher) registerLocalDirs(jsonlWatcher, manifests); } },
+      { name: 'embed-backfill', group: 'history', run: () => { if (embed) startEmbedBackfill(embed); } },
+      { name: 'capture-scheduler', group: 'inbox', after: ['claims', 'watcher'], run: () => (jsonlWatcher ? startCaptureScheduler(jsonlWatcher) : undefined) },
+    ]);
+    /** Refuse new inbox and history writes, stop the timers that write, and wait for writes in flight. */
+    const quiesceStores = async (stores: PgStores): Promise<void> => {
       inboxGate.close('The inbox is moving to SQLite; try again in a moment.');
+      historyGate.close('History is moving to SQLite; try again in a moment.');
       stopInboxWriters();
       await inboxGate.drain(stores.inbox.kysely);
-    };
-    /** Start the inbox-backed services again, on the store the inbox now lives in. */
-    const resumeInbox = async (on: 'postgres' | 'sqlite'): Promise<void> => {
-      teardownInboxServices();
-      if (on === 'sqlite') {
-        const left = inboxStore;
-        inboxStore = null;
-        inboxOn = null;
-        try {
-          inboxStore = InboxStore.open(userData);
-          inboxOn = 'sqlite';
-        } catch (e) {
-          logError({ source: 'main', type: 'inbox-open-failed', level: 'error', message: String(e) });
-        }
-        // The gate stays closed: a late write through the old services is refused.
-        void left?.close().catch(() => undefined);
-      } else {
-        inboxGate.open();
+      let state: ReturnType<typeof stateKysely> | null = null;
+      try {
+        state = stateKysely();
+      } catch {
+        // history never opened: nothing to drain
       }
-      if (!inboxStore) return;
-      if (embed) startClaims(inboxStore, embed);
-      if (jsonlWatcher) await startCaptureScheduler(jsonlWatcher);
-      startInboxServices(inboxStore);
-      if (mainWindow) startPresenceServices(mainWindow);
-      broadcastCounts(inboxStore);
+      if (state) await historyGate.drain(state);
+    };
+    /** A refused or failed switch back: the writers start again on Postgres. */
+    const resumeWriters = async (): Promise<void> => {
+      teardownInboxServices();
+      inboxGate.open();
+      historyGate.open();
+      services.reset('inbox');
+      await supervisor?.restartServices();
+      replayInputWait();
+      jsonlWatcher?.requeueAll();
     };
     const sup = new StoreSupervisor<PgStores>({
       choice: storeChoiceOf(storeCfg) as 'managed' | 'external',
@@ -644,30 +669,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       ready: async (stores) => {
         pgStores = stores;
         inboxStore = stores.inbox;
-        inboxOn = 'postgres';
-        if (embed) startClaims(stores.inbox, embed);
-        // A history failure must not keep the inbox down: it is rethrown (logged) after.
-        let historyFailed: unknown = null;
-        if (jsonlWatcher && embed) {
-          try {
-            // After the copy: openDbPostgres rehydrates pendingClaudeIds from the copied rows.
-            await openDbPostgres(stores.pool, { migrate: false });
-            await startStateWrites();
-            setReadSource(await openPgMcpReadSource(schemaOf(stores.pool), stores.poolConfig, (message) =>
-              logError({ source: 'main', type: 'mcp-query-isolation', level: 'warn', message })));
-            const manifests = (await listWorkspaceManifests()).filter((m) => m.kind !== 'remote');
-            await startWatcher(jsonlWatcher, manifests);
-            await startCaptureScheduler(jsonlWatcher);
-            registerLocalDirs(jsonlWatcher, manifests);
-            startEmbedBackfill(embed);
-          } catch (e) {
-            historyFailed = e;
-          }
-        }
-        startInboxServices(stores.inbox);
-        if (mainWindow) startPresenceServices(mainWindow);
-        broadcastCounts(stores.inbox);
-        if (historyFailed) throw historyFailed;
+        await services.run(stores);
       },
       ping: (stores) => pingStore(stores.pool),
       repair: docker ? async () => {
@@ -685,21 +687,29 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     });
     supervisor = sup;
     setActiveStore(storeChoiceOf(storeCfg), () => sup.status(), pgCfg.kind !== 'managed' ? undefined : () => switchBackLive<PgStores>({
-      inboxOn: () => inboxOn,
       exclusive: (fn) => sup.exclusive(fn),
       plan: () => switchBackPlan(userData),
       postgresInboxLive: () => existsSync(join(userData, INBOX_PG_MARKER)),
-      open: openStores,
+      open: () => openStores(),
       close: closeStores,
-      quiesce: quiesceInbox,
+      quiesce: quiesceStores,
+      automationRunning: () => auto?.automations.hasActiveRuns() ?? false,
       copy: (stores, commit) => switchBackToSqlite({ pool: stores.pool, userData, commit, onProgress: () => undefined }),
       commit: () => setStoreChoice('sqlite'),
-      resume: resumeInbox,
+      resume: resumeWriters,
       stopBringUp: () => sup.stop(),
+      // History must not reach Postgres after the D54 merge: restart on SQLite now.
+      relaunch: () => {
+        app.relaunch();
+        app.quit();
+      },
     }));
     sup.on('status', (s: StoreStatus) => broadcastStoreStatus(s, BrowserWindow.getAllWindows()));
   } else {
-    setActiveStore('sqlite');
+    if (inboxElsewhere) logError({ source: 'main', type: 'inbox-on-postgres', level: 'warn', message: inboxElsewhere });
+    setActiveStore('sqlite', inboxElsewhere
+      ? () => ({ choice: 'sqlite', phase: 'ready', detail: inboxElsewhere, progress: null, notice: inboxElsewhere })
+      : undefined);
   }
   // Patch ipcMain.handle before ipc.ts registers anything, so every later-
   // registered handler runs inside a claude_fleet.ipc.<channel> span.
@@ -721,32 +731,42 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   });
 });
 
-app.on('before-quit', async () => {
+// Electron doesn't await before-quit (#485): hold the quit, shut down within
+// QUIT_BOUND_MS, then exit. A second quit while that runs passes through.
+app.on('before-quit', (e) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  e.preventDefault();
   markQuitting();
   supervisor?.stop();
-  presence?.stop();
-  presence = null;
-  // Stop the notify/automation tick + debounce/input-wait timers before closing
-  // inbox.db (#457), so nothing fires against a destroyed driver.
-  notifySvc?.stop();
-  notifySvc = null;
-  setCaptureSettingsHandlers(null);
-  setSearchHitHook(null);
-  captureScheduler?.stop();
-  captureScheduler = null;
-  auto?.stop();
-  auto = null;
-  stopRemoteBackend();
-  await jsonlWatcher?.stop();
-  await peerStatusWatcher?.stop();
-  stopMcpServer();
-  await inboxStore?.close();
-  inboxStore = null;
-  await shutdownPerf();
-  await closeDb();
-  await pgStores?.end();
-  pgStores = null;
-  if (managedDocker) await stopManagedPostgres(managedDocker).catch(() => undefined);
+  void withinMs((async () => {
+    // Let a bring-up step or a switch back in flight finish first.
+    if (supervisor) await withinMs(supervisor.exclusive(async () => undefined), QUIT_BOUND_MS / 2);
+    presence?.stop();
+    presence = null;
+    // Stop the notify/automation tick + debounce/input-wait timers before closing
+    // inbox.db (#457), so nothing fires against a destroyed driver.
+    notifySvc?.stop();
+    notifySvc = null;
+    setCaptureSettingsHandlers(null);
+    setSearchHitHook(null);
+    captureScheduler?.stop();
+    captureScheduler = null;
+    auto?.stop();
+    auto = null;
+    stopRemoteBackend();
+    await jsonlWatcher?.stop();
+    await peerStatusWatcher?.stop();
+    stopMcpServer();
+    await inboxStore?.close();
+    inboxStore = null;
+    await shutdownPerf();
+    await closeDb();
+    await pgStores?.end();
+    pgStores = null;
+    if (managedDocker) await stopManagedPostgres(managedDocker);
+  })().catch((err) => logError({ source: 'main', type: 'quit-shutdown', level: 'warn', message: String(err) })), QUIT_BOUND_MS)
+    .then(() => app.exit(0));
 });
 
 app.on('window-all-closed', () => {
