@@ -2,7 +2,7 @@
 // on every reload; grants are validated by the shared identity layer.
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { parse } from 'yaml';
 import { ORG_RE, parseGrantConfig, type GrantConfig } from '../main/identity/grants.js';
 import { parseStoreConfig, StoreConfigError, type PostgresStoreConfig } from '../main/store/storeConfig.js';
@@ -215,6 +215,10 @@ export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new HostConfigError(`FLEET_HOST_PORT ${portText} is not a port`);
   const groupText = env.FLEET_HOST_MCP_SOCKET_GROUP;
   if (groupText !== undefined && groupText !== '' && !/^\d{1,9}$/.test(groupText)) throw new HostConfigError('FLEET_HOST_MCP_SOCKET_GROUP must be a numeric gid');
+  const mcpSocket = env.FLEET_HOST_MCP_SOCKET || '/run/fleet/mcp.sock';
+  if (!isAbsolute(mcpSocket)) throw new HostConfigError('FLEET_HOST_MCP_SOCKET must be an absolute path');
+  // sun_path holds 108 bytes with the terminating NUL on Linux.
+  if (Buffer.byteLength(mcpSocket) > 107) throw new HostConfigError('FLEET_HOST_MCP_SOCKET is longer than 107 bytes');
   return {
     port,
     configPath: env.FLEET_HOST_CONFIG || DEFAULT_CONFIG_PATH,
@@ -222,7 +226,7 @@ export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
     brokerSocket: env.CLAUDE_FLEET_BROKER_SOCKET || '/run/broker/broker.sock',
     credSocket: env.FLEET_HOST_CRED_SOCKET || '/run/fleet-host/cred.sock',
     projectsDir: env.FLEET_HOST_PROJECTS || join(homedir(), '.claude', 'projects'),
-    mcpSocket: env.FLEET_HOST_MCP_SOCKET || '/run/fleet/mcp.sock',
+    mcpSocket,
     mcpSocketGroup: groupText ? Number(groupText) : null
   };
 }

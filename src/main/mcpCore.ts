@@ -44,7 +44,7 @@ export function initializeResult(): Record<string, unknown> {
   // under Claude Code's 2,048-char instructions cap (pinned in the tests);
   // each only when its tool is served.
   const served = new Set(servedTools().map((t) => t.name));
-  const instructions = [served.has('record_claim') ? STANDING_RULE : '', served.has('expose_port') ? SERVER_INSTRUCTIONS : '']
+  const instructions = [served.has('record_claim') && served.has('search_claims') ? STANDING_RULE : '', served.has('expose_port') ? SERVER_INSTRUCTIONS : '']
     .filter(Boolean)
     .join('\n\n');
   return {

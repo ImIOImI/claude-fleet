@@ -42,6 +42,8 @@ describe('mcpCore', () => {
     setExposedTools(new Set(['list_sessions', 'expose_port']));
     expect(instructions()).toBe(SERVER_INSTRUCTIONS);
     setExposedTools(new Set(['list_sessions', 'record_claim']));
+    expect(handleMcpRequestForTests('initialize')).not.toHaveProperty('instructions');
+    setExposedTools(new Set(['list_sessions', 'record_claim', 'search_claims']));
     expect(instructions()).toBe(STANDING_RULE);
     setExposedTools(new Set(['list_sessions']));
     expect(handleMcpRequestForTests('initialize')).not.toHaveProperty('instructions');

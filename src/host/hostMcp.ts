@@ -17,8 +17,14 @@ export const MAX_HOST_MCP_CONNECTIONS = 64;
 /** A session's bridge reconnects in a loop; these stay off stdout at the default level. */
 const QUIET = new Set(['mcp-conn', 'mcp-conn-closed']);
 
+const REFUSAL_LOG_MS = 60_000;
+
 export interface HostMcp { close(): Promise<void> }
 
+/** The core's handler state is per process, so one instance at a time. */
+let active = false;
+
+/** Takes ownership of `readSource`: close() and a failed start both close it. */
 export async function startHostMcp(o: {
   socketPath: string;
   socketGroup: number | null;
@@ -26,8 +32,14 @@ export async function startHostMcp(o: {
   readSource: OwnedReadSource;
   log: Logger;
   maxConnections?: number;
+  now?: () => number;
 }): Promise<HostMcp> {
+  if (active) throw new Error('the host MCP is already serving in this process');
+  active = true;
   const max = o.maxConnections ?? MAX_HOST_MCP_CONNECTIONS;
+  const now = o.now ?? Date.now;
+  let refused = 0;
+  let refusalLoggedAt = -Infinity;
   setMcpLogSink((e: McpLogEntry) =>
     o.log.log(QUIET.has(e.type) ? 'debug' : e.level ?? 'error', e.type, {
       message: e.message,
@@ -42,8 +54,13 @@ export async function startHostMcp(o: {
   const socks = new Set<Socket>();
   const server: Server = createServer((sock) => {
     if (socks.size >= max) {
-      o.log.log('warn', 'mcp connection refused: too many open', { max });
       sock.destroy();
+      refused++;
+      if (now() - refusalLoggedAt >= REFUSAL_LOG_MS) {
+        o.log.log('warn', 'mcp connections refused: too many open', { max, refused });
+        refused = 0;
+        refusalLoggedAt = now();
+      }
       return;
     }
     socks.add(sock);
@@ -54,6 +71,7 @@ export async function startHostMcp(o: {
     releaseReadSource();
     setExposedTools(null);
     setMcpLogSink(null);
+    active = false;
   }
   try {
     await prepareSocketPath(o.socketPath, o.socketGroup);
@@ -92,6 +110,6 @@ export const HOST_MCP_BRIDGE = '/usr/local/lib/fleet-host/mcp-bridge.cjs';
 
 /** Appended to every claude fleet-host creates; the name is the prefix INBOX_TOOLS uses. `--mcp-config` is variadic, so these go last. */
 export function hostMcpArgs(socketPath: string, bridge: string = HOST_MCP_BRIDGE): string[] {
-  const entry = { type: 'stdio', command: 'node', args: [bridge], env: { CLAUDE_FLEET_MCP_UNIX: socketPath } };
+  const entry = { type: 'stdio', command: 'node', args: [bridge], env: { CLAUDE_FLEET_MCP_UNIX: socketPath, CLAUDE_FLEET_MCP_TCP: '' } };
   return ['--mcp-config', JSON.stringify({ mcpServers: { 'claude-fleet-state': entry } })];
 }

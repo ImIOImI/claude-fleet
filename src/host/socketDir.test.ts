@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -43,7 +43,7 @@ describe('prepareSocketPath / finishSocket', () => {
     const gid = process.getgid!();
     const d = join(tmp(), 'run');
     mkdirSync(d);
-    chmodSync(d, 0o770);
+    chmodSync(d, 0o1770);
     const p = join(d, 'mcp.sock');
     await prepareSocketPath(p, gid);
     const close = await listen(p);
@@ -51,15 +51,58 @@ describe('prepareSocketPath / finishSocket', () => {
     const st = statSync(p);
     expect([st.mode & 0o777, st.gid]).toEqual([0o660, gid]);
     close();
-    chmodSync(d, 0o777);
+    chmodSync(d, 0o1777);
     await expect(prepareSocketPath(p, gid)).rejects.toThrow(/fleet-host-entry prep/);
-    chmodSync(d, 0o750);
+    chmodSync(d, 0o1750);
     await expect(prepareSocketPath(p, gid)).rejects.toThrow(/group rwx/);
     chmodSync(d, 0o770);
+    await expect(prepareSocketPath(p, gid)).rejects.toThrow(/sticky/);
+    chmodSync(d, 0o1770);
     await expect(prepareSocketPath(p, gid + 1)).rejects.toThrow(new RegExp(`must be group ${gid + 1}`));
     const link = join(tmp(), 'link');
     symlinkSync(d, link);
     await expect(prepareSocketPath(join(link, 'mcp.sock'), gid)).rejects.toThrow(/not a directory/);
     await expect(prepareSocketPath(join(tmp(), 'missing', 'mcp.sock'), gid)).rejects.toThrow(/not a directory/);
+  });
+
+  const groupDir = (): string => {
+    const d = join(tmp(), 'run');
+    mkdirSync(d);
+    chmodSync(d, 0o1770);
+    return d;
+  };
+  it('group mode: replaces a planted regular file or symlink, never touching the target', async () => {
+    const gid = process.getgid!();
+    const d = groupDir();
+    const p = join(d, 'mcp.sock');
+    writeFileSync(p, 'planted');
+    await prepareSocketPath(p, gid);
+    expect(existsSync(p)).toBe(false);
+    const target = join(tmp(), 'target');
+    writeFileSync(target, 'keep');
+    symlinkSync(target, p);
+    await prepareSocketPath(p, gid);
+    expect(existsSync(p)).toBe(false);
+    expect(readFileSync(target, 'utf8')).toBe('keep');
+  });
+  it('private mode: refuses a symlink at the socket path', async () => {
+    const d = tmp();
+    const p = join(d, 'mcp.sock');
+    symlinkSync(join(d, 'elsewhere'), p);
+    await expect(prepareSocketPath(p, null)).rejects.toThrow(/exists and is not a socket/);
+  });
+  it('finishSocket refuses anything but a socket this process owns', async () => {
+    const d = tmp();
+    const file = join(d, 'file');
+    writeFileSync(file, 'x');
+    await expect(finishSocket(file, null)).rejects.toThrow(/not a socket owned by/);
+    const sock = join(d, 'real.sock');
+    const close = await listen(sock);
+    chmodSync(sock, 0o640);
+    const link = join(d, 'link.sock');
+    symlinkSync(sock, link);
+    await expect(finishSocket(link, null)).rejects.toThrow(/not a socket owned by/);
+    expect(statSync(sock).mode & 0o777).toBe(0o640);
+    close();
   });
 });

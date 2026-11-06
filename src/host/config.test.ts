@@ -180,5 +180,8 @@ describe('readHostEnv', () => {
     expect(readHostEnv({}).mcpSocketGroup).toBeNull();
     expect(readHostEnv({ FLEET_HOST_MCP_SOCKET: '/x/m.sock', FLEET_HOST_MCP_SOCKET_GROUP: '1500' })).toMatchObject({ mcpSocket: '/x/m.sock', mcpSocketGroup: 1500 });
     expect(() => readHostEnv({ FLEET_HOST_MCP_SOCKET_GROUP: 'staff' })).toThrow(/FLEET_HOST_MCP_SOCKET_GROUP/);
+    expect(() => readHostEnv({ FLEET_HOST_MCP_SOCKET: 'run/mcp.sock' })).toThrow(/FLEET_HOST_MCP_SOCKET must be an absolute path/);
+    expect(readHostEnv({ FLEET_HOST_MCP_SOCKET: '/' + 'a'.repeat(106) }).mcpSocket).toHaveLength(107);
+    expect(() => readHostEnv({ FLEET_HOST_MCP_SOCKET: '/' + 'a'.repeat(107) })).toThrow(/FLEET_HOST_MCP_SOCKET is longer than 107 bytes/);
   });
 });
