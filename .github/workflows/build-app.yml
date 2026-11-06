@@ -283,6 +283,7 @@ jobs:
       # add ~16 MB of fonts, which stalled for 10+ min on a slow mirror.
       - name: Install Electron/Chromium system libraries
         run: |
+          node node_modules/electron/install.js
           bin=node_modules/electron/dist/electron
           if [ -x "$bin" ]; then missing=$(ldd "$bin" | grep 'not found' || true); else missing="no $bin"; fi
           if [ -n "$missing" ]; then
