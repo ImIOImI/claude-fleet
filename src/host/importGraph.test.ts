@@ -21,7 +21,7 @@ const MAIN_ALLOWED = [/^main\/identity\/[^/]+\.ts$/, /^main\/broker\.ts$/, /^mai
   /^main\/state\/(ingestParse|rawCodec|serialQueue|transcriptPaths)\.ts$/,
   /^main\/inbox\/(inboxDb|inboxCore|inboxService|inboxPolicy|notifyService|notifyStore|notifyPolicy)\.ts$/,
   /^main\/automations\/(automationService|automationStore|proposalService|proposalStore|definition|freshArgv|cron|scheduler|runner|reschedule|template|scriptProtocol|classify)\.ts$/,
-  /^preload\/(inboxTypes|captureSettings)\.ts$/];
+  /^preload\/(inboxTypes|captureSettings|federation)\.ts$/];
 const SPEC_RE = /\b(?:import|export)\s+(?:type\s+)?(?:[^'"`;]*?\bfrom\s*)?['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]|\brequire\s*\(\s*['"]([^'"]+)['"]/g;
 
 function walk(): { files: string[]; bare: Set<string> } {
