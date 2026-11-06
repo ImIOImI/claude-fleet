@@ -106,4 +106,20 @@ describe('deleteEmbeddingsForOtherModels', () => {
     expect((await unembeddedTurnEvents(SES, EMBED_MODEL_ID)).length).toBe(0);
     expect(await deleteEmbeddingsForOtherModels(EMBED_MODEL_ID)).toBe(0);
   });
+
+  it('deletes in chunks and yields between them', async () => {
+    await ingestLine(WS, SES, userLine('u1', 'hello there'));
+    const [ev] = await unembeddedTurnEvents(SES, EMBED_MODEL_ID);
+    const row = (i: number, modelId: string) => ({
+      workspaceId: WS, sessionId: SES, kind: 'turn' as const, refEventId: ev.id, ts: ev.ts, text: 'x',
+      modelId, dim: EMBED_DIM, vec: encodeVector(new Float32Array(EMBED_DIM)), dedupKey: `k${i}`,
+    });
+    await insertEmbeddings(Array.from({ length: 12 }, (_, i) => row(i, 'retired@fp32')));
+    await insertEmbeddings([row(99, EMBED_MODEL_ID)]);
+    let yields = 0;
+    expect(await deleteEmbeddingsForOtherModels(EMBED_MODEL_ID, 5, async () => { yields++; })).toBe(12);
+    expect(yields).toBe(2);
+    expect(await deleteEmbeddingsForOtherModels(EMBED_MODEL_ID, 5, async () => { yields++; })).toBe(0);
+    expect(yields).toBe(2);
+  });
 });

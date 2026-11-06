@@ -58,6 +58,7 @@ import { ensureWorkspaceClaudeJson } from './docker.js';
 import { hardwareAccelDisabledAtStartup } from './config.js';
 import { setWorkspaceDefault } from './mirrorPolicy.js';
 import { makeEmbedder } from './embeddings.js';
+import { runEmbedBackfill, EMBED_BACKFILL_DELAY_MS } from './embedBackfill.js';
 import { indexSessionTurns, indexSessionSummaries, type EmbedFn } from './transcriptIndex.js';
 import { ClaimStore } from './claims/claimStore.js';
 import { CaptureRunStore, startOfLocalDay } from './claims/captureRunStore.js';
@@ -414,25 +415,20 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   };
 
   /** Backfill embeddings for sessions ingested before this feature / after a
-   *  model change. Non-blocking; walks every known session once. */
+   *  model change. Starts after boot settles and yields between sessions so it
+   *  never holds the main loop (#464); embedding runs in the sidecar. */
   const startEmbedBackfill = (embedFn: EmbedFn): void => {
-    void (async () => {
-      try {
-        // A model/dtype change re-keys EMBED_MODEL_ID; drop vectors under
-        // retired keys so they don't accumulate as dead weight.
-        // Spanned (#perf boot attribution): the post-launch stall storm overlaps
-        // this backfill; boot.embed_backfill is wall time, the index.* / embed.*
-        // child spans carry the synchronous parts that can block the loop.
-        await perfSpanAsync('claude_fleet.boot.embed_backfill', async () => {
-          await perfSpanAsync('claude_fleet.index.delete_stale_models', () => deleteEmbeddingsForOtherModels(EMBED_MODEL_ID));
-          const sessionIds = await perfSpanAsync('claude_fleet.index.list_sessions', () => listSessionIds());
-          for (const id of sessionIds) await indexSessionTurns(id, embedFn);
-          await indexSessionSummaries(embedFn);
-        });
-      } catch (e) {
-        logError({ source: 'main', level: 'warn', type: 'index-backfill', message: String(e) });
-      }
-    })();
+    const timer = setTimeout(() => {
+      void perfSpanAsync('claude_fleet.boot.embed_backfill', () => runEmbedBackfill({
+        markerPath: join(userData, 'models', '.embed-model-id'),
+        modelId: EMBED_MODEL_ID,
+        deleteStale: () => deleteEmbeddingsForOtherModels(EMBED_MODEL_ID),
+        listSessionIds,
+        indexTurns: (id) => indexSessionTurns(id, embedFn),
+        indexSummaries: () => indexSessionSummaries(embedFn),
+      })).catch((e) => logError({ source: 'main', level: 'warn', type: 'index-backfill', message: String(e) }));
+    }, EMBED_BACKFILL_DELAY_MS);
+    timer.unref?.();
   };
 
   /** Inbox, notification and automation IPC plus their timers, and the

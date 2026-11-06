@@ -2418,10 +2418,25 @@ export interface EmbeddingInsert {
 
 /** Drop embedding rows keyed to any OTHER model id. Run before backfill so a
  *  model/dtype change (which re-keys EMBED_MODEL_ID) doesn't leave dead
- *  vectors accumulating under retired keys. Returns rows deleted. */
-export async function deleteEmbeddingsForOtherModels(modelId: string): Promise<number> {
-  const r = await kyselyOrThrow().deleteFrom('embeddings').where('model_id', '!=', modelId).executeTakeFirst();
-  return num(r.numDeletedRows);
+ *  vectors accumulating under retired keys. Deletes `chunk` rows per statement
+ *  and yields between them: on SQLite each statement runs synchronously on
+ *  the main loop. Returns rows deleted. */
+export async function deleteEmbeddingsForOtherModels(
+  modelId: string,
+  chunk = 500,
+  yieldFn: () => Promise<void> = yieldMacrotask,
+): Promise<number> {
+  const k = kyselyOrThrow();
+  let total = 0;
+  for (;;) {
+    const r = await k.deleteFrom('embeddings')
+      .where('id', 'in', (qb) => qb.selectFrom('embeddings').select('id').where('model_id', '!=', modelId).limit(chunk))
+      .executeTakeFirst();
+    const n = num(r.numDeletedRows);
+    total += n;
+    if (n < chunk) return total;
+    await yieldFn();
+  }
 }
 
 /** embeddings has 10 bound columns: 500 rows = 5,000 parameters per INSERT —
