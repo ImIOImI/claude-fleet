@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { InboxStore } from '../inbox/inboxDb.js';
-import { AutomationStore } from './automationStore.js';
+import { AutomationStore, type AutomationRecord } from './automationStore.js';
 import { createAutomationService } from './automationService.js';
 import type { WorkspaceState } from './runner.js';
 import type { AutomationDef } from '../../preload/inboxTypes.js';
@@ -13,7 +13,7 @@ afterEach(() => inbox?.close());
 const USER = { kind: 'user' as const, id: null };
 const WSS: Record<string, string> = { 'ops-oncall': 'W1', 'webex-triage': 'W2' };
 
-async function setup(opts: { state?: WorkspaceState; postGate?: Promise<void>; exec?: (script: string) => { exitCode: number; stdout: string }; checkDefinition?: (def: AutomationDef) => string[] } = {}) {
+async function setup(opts: { state?: WorkspaceState; postGate?: Promise<void>; exec?: (script: string) => { exitCode: number; stdout: string }; checkDefinition?: (def: AutomationDef) => string[]; mayRun?: (a: AutomationRecord) => string | null; onError?: (e: unknown) => void } = {}) {
   inbox = (await openTestInbox());
   const store = new AutomationStore(inbox.kysely);
   let t = new Date(2026, 9, 19, 10, 0).getTime();
@@ -34,6 +34,8 @@ async function setup(opts: { state?: WorkspaceState; postGate?: Promise<void>; e
     changed: () => {},
     automationsWorkspace: () => 'W1',
     checkDefinition: opts.checkDefinition,
+    mayRun: opts.mayRun,
+    onError: opts.onError,
     execScript: async (_target, o) => ({ ...(opts.exec ?? (() => ({ exitCode: 0, stdout: '' })))(o.script), stderr: '', timedOut: false })
   });
   const fire = async (ms: number) => { t += ms; for (const h of timers) if (!h.dead && h.at <= t) { h.dead = true; h.fn(); } await flush(); };
@@ -64,6 +66,16 @@ describe('CRUD + validation', () => {
     expect(u.version).toBe(2);
     expect((await svc.get(a.id))?.yaml).toContain('*/30 * * * *');
     await expect(svc.create('name: x', USER)).rejects.toThrow(/triggers/);
+  });
+  it('mayRun refuses a run at start; a due schedule it refuses is skipped without a run row', async () => {
+    const errors: unknown[] = [];
+    const { svc, store, advance, at } = await setup({ mayRun: (a) => (a.name === 'stored' ? 'not here' : null), onError: (e) => errors.push(e) });
+    const a = await store.create({ name: 'stored', triggers: [{ schedule: { cron: '*/15 * * * *' } }], concurrency: 'skip', steps: [{ id: 'go', prompt: { workspace: 'W1', mode: 'fresh', message: 'x' } }] }, USER, at());
+    await expect(svc.run(a.id, { kind: 'manual', by: USER, args: {} })).rejects.toThrow("stored can't run here: not here");
+    advance(16 * 60_000);
+    expect(await svc.tick()).toEqual([]);
+    expect(await store.runs(a.id, 10)).toEqual([]);
+    expect(String(errors[0])).toMatch(/not here/);
   });
   it('checkDefinition also refuses a stored definition at run time, before any step', async () => {
     const { svc, store } = await setup({ checkDefinition: (d) => (d.name === 'stored' ? ['refused here'] : []) });

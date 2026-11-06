@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AutomationStore } from '../main/automations/automationStore.js';
 import { definitionToYaml } from '../main/automations/definition.js';
 import { INBOX_TOOLS } from '../main/automations/runner.js';
@@ -9,6 +9,7 @@ import type { AutomationDef } from '../preload/inboxTypes.js';
 import { createLogger } from './log.js';
 import { fakeBroker } from './testFakes.js';
 import { hostMcpArgs } from './hostMcp.js';
+import { LeaseLostError } from './pgLease.js';
 import { HOST_CONFIG_ORIGIN, startHostAutomations, type HostAutomations } from './hostAutomations.js';
 
 const WS = { id: '01JC0000000000000000000000', name: 'review-bot' };
@@ -29,6 +30,9 @@ afterEach(async () => {
 });
 
 const names = async () => (await h!.automations.list()).map((a) => [a.name, a.enabled, a.version]).sort();
+const def = (name: string, cron?: string): AutomationDef => ({
+  name, triggers: [cron ? { schedule: { cron } } : { manual: {} }], concurrency: 'skip', steps: [{ id: 'go', prompt: { workspace: WS.id, mode: 'fresh', message: 'x' } }]
+});
 const text = (r: unknown) => (r as { content: Array<{ text: string }> }).content[0].text;
 
 async function start(inbox?: InboxStore) {
@@ -66,15 +70,70 @@ describe('startHostAutomations', () => {
     expect(logs.join('\n')).toMatch(/mode: live is not available on a remote host/);
   });
 
-  it('never touches an automation it did not create', async () => {
+  it('adopts a same-name row with no origin, and disables every enabled row it does not own', async () => {
     const { store, logs } = await start();
-    const other = await new AutomationStore(store.kysely).create(
-      { name: 'a', triggers: [{ manual: {} }], concurrency: 'skip', steps: [{ id: 'go', prompt: { workspace: WS.id, mode: 'fresh', message: 'x' } }] }, USER, Date.now()
-    );
-    await h!.reconcile([fresh('a', { description: 'mine' })]);
-    await h!.reconcile([]);
-    expect((await new AutomationStore(store.kysely).get(other.id))!.version).toBe(1);
+    const s = new AutomationStore(store.kysely);
+    const orphan = await s.create(def('a'), USER, Date.now());
+    const loadout = await s.create(def('b'), USER, Date.now(), true, { loadoutId: 'x' });
+    const stray = await s.create(def('stray', '* * * * *'), USER, Date.now());
+    await h!.reconcile([fresh('a', { description: 'mine' }), fresh('b')]);
+    const got = async (id: string) => { const r = (await s.get(id))!; return [r.name, r.enabled, r.version, r.origin]; };
+    expect(await got(orphan.id)).toEqual(['a', true, 2, HOST_CONFIG_ORIGIN]);
+    expect(await got(loadout.id)).toEqual(['b', false, 1, { loadoutId: 'x' }]);
+    expect(await got(stray.id)).toEqual(['stray', false, 1, null]);
     expect(logs.join('\n')).toMatch(/name is taken/);
+    expect(logs.filter((l) => /disabled an automation not from the host config/.test(l))).toHaveLength(2);
+  });
+
+  it('never runs a row whose origin is not the host config, by tick or by run_automation', async () => {
+    const { store, broker } = await start();
+    initReadSource(null);
+    const s = new AutomationStore(store.kysely);
+    const stray = await s.create(def('stray', '* * * * *'), USER, Date.now() - 10 * 60_000);
+    await h!.tick();
+    const r = await callTool({ name: 'run_automation', arguments: { id: 'stray' } }, WS.id) as { isError?: boolean; content: Array<{ text: string }> };
+    expect([r.isError, text(r)]).toEqual([true, expect.stringMatching(/stray can't run here: .*not from the host config/)]);
+    await expect(h!.automations.run(stray.id, { kind: 'manual', by: USER, args: {} })).rejects.toThrow(/not from the host config/);
+    await h!.automations.settle();
+    expect([broker.created, await s.runs(stray.id, 10)]).toEqual([[], []]);
+    await h!.reconcile([]);
+    expect((await s.get(stray.id))!.enabled).toBe(false);
+  });
+
+  it('creates a config row with its origin and enabled state in one write', async () => {
+    const { store } = await start();
+    const setOrigin = vi.spyOn(AutomationStore.prototype, 'setOrigin');
+    const setEnabled = vi.spyOn(AutomationStore.prototype, 'setEnabled');
+    await h!.reconcile([{ ...fresh('off'), enabled: false }]);
+    expect([setOrigin.mock.calls, setEnabled.mock.calls]).toEqual([[], []]);
+    vi.restoreAllMocks();
+    const [r] = await new AutomationStore(store.kysely).list();
+    expect([r.enabled, r.version, r.origin]).toEqual([false, 1, HOST_CONFIG_ORIGIN]);
+  });
+
+  it('serializes reconciles, and one failing entry does not skip the rest', async () => {
+    const { logs } = await start();
+    const list = AutomationStore.prototype.list;
+    const slow = vi.spyOn(AutomationStore.prototype, 'list').mockImplementation(async function (this: AutomationStore) {
+      const rows = await list.call(this);
+      await new Promise((r) => setTimeout(r, 20));
+      return rows;
+    });
+    await Promise.all([h!.reconcile([fresh('a')]), h!.reconcile([fresh('a'), fresh('b')]), h!.reconcile([fresh('a'), fresh('b')])]);
+    slow.mockRestore();
+    expect(await names()).toEqual([['a', true, 1], ['b', true, 1]]);
+    expect(logs.filter((l) => /host-config automation failed/.test(l))).toEqual([]);
+    const spy = vi.spyOn(AutomationStore.prototype, 'create').mockImplementationOnce(async () => { throw new Error('disk on fire'); });
+    try {
+      await h!.reconcile([fresh('a'), fresh('b'), fresh('c'), fresh('d')]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await names()).toEqual([['a', true, 1], ['b', true, 1], ['d', true, 1]]);
+    expect(logs.join('\n')).toMatch(/host-config automation failed.*"name":"c".*disk on fire/);
+    vi.spyOn(AutomationStore.prototype, 'create').mockImplementationOnce(async () => { throw new LeaseLostError('epoch moved'); });
+    await expect(h!.reconcile([fresh('e'), fresh('f')])).rejects.toThrow(LeaseLostError);
+    vi.restoreAllMocks();
   });
 
   it('runs a fresh step through the broker: the exact argv, a pinned session id, the MCP config as one argument', async () => {
@@ -87,18 +146,51 @@ describe('startHostAutomations', () => {
     expect(c.id).toBe(`auto-${run.id}-go`);
     const sid = c.args[c.args.indexOf('--session-id') + 1];
     expect(sid).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
-    expect(c.args).toEqual(['-p', expect.stringMatching(/^review\n\n\(claude-fleet automation "a", run /), '--allowedTools', INBOX_TOOLS.join(','), '--session-id', sid, ...MCP_ARGS]);
+    expect(c.args).toEqual(['-p', '--allowedTools', INBOX_TOOLS.join(','), ...MCP_ARGS, '--session-id', sid, '--', expect.stringMatching(/^review\n\n\(claude-fleet automation "a", run /)]);
     expect(MCP_ARGS).toHaveLength(1);
     expect(MCP_ARGS[0]).toMatch(/^--mcp-config=\{/);
+  });
+
+  it('re-checks the lease with a fenced write right before starting a session', async () => {
+    const { broker, store } = await start();
+    await h!.reconcile([fresh('a')]);
+    const order: string[] = [];
+    const create = broker.ops.create.bind(broker.ops);
+    broker.ops.create = async (...a) => { order.push('create'); return create(...a); };
+    const tx = store.kysely.transaction.bind(store.kysely);
+    vi.spyOn(store.kysely, 'transaction').mockImplementation(() => { order.push('tx'); return tx(); });
+    const [a] = await h!.automations.list();
+    await h!.automations.run(a.id, { kind: 'manual', by: USER, args: {} });
+    await expect.poll(() => order.includes('create')).toBe(true);
+    expect(order.slice(order.indexOf('create') - 1, order.indexOf('create') + 1)).toEqual(['tx', 'create']);
+    vi.restoreAllMocks();
+  });
+
+  it('passes a prompt that starts with - after --, and refuses one over 120 KiB', async () => {
+    const { broker, store } = await start();
+    await h!.reconcile([
+      fresh('dash', { steps: [{ id: 'go', prompt: { workspace: '$self', mode: 'fresh', message: '--model=x review' } }] }),
+      fresh('big', { params: [{ name: 'x', type: 'string' }], steps: [{ id: 'go', prompt: { workspace: '$self', mode: 'fresh', message: '{{args.x}}' } }] })
+    ]);
+    const s = new AutomationStore(store.kysely);
+    const big = (await s.byName('big'))!;
+    const run = await h!.automations.run(big.id, { kind: 'manual', by: USER, args: { x: 'y'.repeat(121 * 1024) } });
+    await h!.automations.settle();
+    expect(broker.created).toHaveLength(0);
+    expect((await s.getRun(run.id))!).toMatchObject({ status: 'failed', error: expect.stringMatching(/longer than 120 KiB/) });
+    const dash = (await s.byName('dash'))!;
+    await h!.automations.run(dash.id, { kind: 'manual', by: USER, args: {} });
+    await expect.poll(() => broker.created.length).toBe(1);
+    expect(broker.created[0].args.slice(-2)).toEqual(['--', expect.stringMatching(/^--model=x review/)]);
   });
 
   it('refuses script and live steps at run time, before any step runs', async () => {
     const { broker, store } = await start();
     const s = new AutomationStore(store.kysely);
-    const def = (name: string, steps: AutomationDef['steps']): AutomationDef => ({ name, triggers: [{ manual: {} }], concurrency: 'skip', steps });
+    const defOf = (name: string, steps: AutomationDef['steps']): AutomationDef => ({ name, triggers: [{ manual: {} }], concurrency: 'skip', steps });
     const ok = { id: 'first', prompt: { workspace: WS.id, mode: 'fresh' as const, message: 'x' } };
-    const live = await s.create(def('live', [ok, { id: 'go', prompt: { workspace: WS.id, mode: 'live', message: 'x' } }]), USER, Date.now());
-    const script = await s.create(def('script', [ok, { id: 'sh', script: { run: 'echo hi', runIn: WS.id } }]), USER, Date.now());
+    const live = await s.create(defOf('live', [ok, { id: 'go', prompt: { workspace: WS.id, mode: 'live', message: 'x' } }]), USER, Date.now(), true, { ...HOST_CONFIG_ORIGIN });
+    const script = await s.create(defOf('script', [ok, { id: 'sh', script: { run: 'echo hi', runIn: WS.id } }]), USER, Date.now(), true, { ...HOST_CONFIG_ORIGIN });
     await expect(h!.automations.run(live.id, { kind: 'manual', by: USER, args: {} })).rejects.toThrow(/mode: live is not available on a remote host/);
     await expect(h!.automations.run(script.id, { kind: 'manual', by: USER, args: {} })).rejects.toThrow(/script steps are not available on a remote host/);
     await h!.automations.settle();
@@ -121,7 +213,7 @@ describe('startHostAutomations', () => {
     const { store } = await start();
     initReadSource(null);
     const yaml = 'name: sneaky\ntriggers:\n  - schedule: { cron: "* * * * *" }\nsteps:\n  - id: go\n    prompt: { workspace: review-bot, mode: fresh, message: x }\n';
-    for (const name of ['propose_automation', 'propose_automation_change']) {
+    for (const name of ['propose_automation', 'propose_automation_change', 'get_proposal']) {
       const r = await callTool({ name, arguments: { definition: yaml, name: 'sneaky' } }, WS.id) as { isError?: boolean; content: Array<{ text: string }> };
       expect([r.isError, text(r)]).toEqual([true, expect.stringMatching(/from the host config/)]);
     }
@@ -163,7 +255,7 @@ describe.skipIf(!isPg)('startHostAutomations on a fenced store', () => {
       migrate: false,
       afterBeginWrite: async () => {
         fenced++;
-        if (lost) throw new Error('lease lost');
+        if (lost) throw new LeaseLostError('lease lost');
       }
     });
     const { broker } = await start(inbox);

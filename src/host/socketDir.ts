@@ -1,5 +1,6 @@
 // Socket files the holder serves to sessions: a private directory when sessions
-// share fleet-host's uid, else the split's prepped group directory (SPEC §9).
+// share fleet-host's uid, else a directory prep made for fleet-host alone to
+// write, which the session group may only traverse (SPEC §9).
 import { chmod, chown, lstat, mkdir, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
@@ -19,11 +20,9 @@ export async function prepareSocketPath(path: string, group: number | null): Pro
   }
   const st = await lstat(dir).catch(() => null);
   if (!st?.isDirectory()) throw new Error(`${dir} is not a directory; ${PREP}`);
-  if (st.gid !== group || (st.mode & 0o070) !== 0o070 || (st.mode & 0o007) !== 0) {
-    throw new Error(`${dir} must be group ${group} with group rwx and no access for others; ${PREP}`);
-  }
-  // Sticky: sessions in the group can't replace our socket, and we (the owner) can remove what they plant.
-  if ((st.mode & 0o1000) === 0) throw new Error(`${dir} must have the sticky bit set; ${PREP}`);
+  if (st.uid !== process.getuid!() || st.gid !== group) throw new Error(`${dir} must be owned by this user and group ${group}; ${PREP}`);
+  // Group r-x only: sessions can connect but can't create anything beside the socket.
+  if ((st.mode & 0o077) !== 0o050) throw new Error(`${dir} must be group r-x, no group write and no access for others; ${PREP}`);
   await unlink(path).catch((e: NodeJS.ErrnoException) => {
     if (e.code !== 'ENOENT') throw e;
   });

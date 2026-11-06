@@ -17,12 +17,16 @@ import type { HostAutomationEntry } from './config.js';
 import type { EventHub } from './events.js';
 import { hostResolver, remoteHostRefusals, substituteSelf } from './hostDefinition.js';
 import type { Logger } from './log.js';
+import { LeaseLostError } from './pgLease.js';
 
 export const HOST_CONFIG_ORIGIN = { source: 'host-config' } as const;
 const OPERATOR: TodoSource = { kind: 'user', id: null };
 const TICK_MS = 30_000;
 const SETTLE_MS = 2_000;
 const CONFIG_ONLY = 'on a remote host, automations come from the host config (automations: in config.yaml)';
+/** Well under ARG_MAX; the broker passes argv to claude unchanged. */
+export const MAX_FRESH_PROMPT_BYTES = 120 * 1024;
+const fromConfig = (a: { origin: Record<string, unknown> | null }): boolean => a.origin?.source === HOST_CONFIG_ORIGIN.source;
 
 export interface HostAutomationsOptions {
   /** The holder's fenced store: every write here checks the lease. */
@@ -51,6 +55,10 @@ export async function startHostAutomations(o: HostAutomationsOptions) {
   const publishCounts = (): void => {
     void o.inbox.counts().then((c) => o.events.publish('inbox:changed', c)).catch(warn('inbox counts failed'));
   };
+  const automationsChanged = (): void => {
+    o.events.publish('automations:changed', null);
+    publishCounts();
+  };
   let automations: ReturnType<typeof createAutomationService> | null = null;
   const inbox = createInboxService(o.inbox, {
     manifest: async (id) => (id === o.workspace().id ? {} : null),
@@ -76,7 +84,10 @@ export async function startHostAutomations(o: HostAutomationsOptions) {
     execScript: async () => { throw new Error('script steps are not available on a remote host'); },
     busy: () => false,
     spawnFresh: async (_ws, sessionId, args) => {
-      const r = await o.ops.create(sessionId, 120, 40, [...args, '--session-id', randomUUID(), ...o.mcpArgs]);
+      const argv = freshArgv(args, o.mcpArgs);
+      // A write transaction runs the lease fence. A takeover after it still starts this one session; its run's next write fails.
+      await o.inbox.kysely.transaction().execute(async () => undefined);
+      const r = await o.ops.create(sessionId, 120, 40, argv);
       if (!r.ok) throw new Error(`could not start a fresh session: ${r.error ?? 'unknown broker error'}`);
     },
     freshState: async (_ws, sessionId) => {
@@ -91,10 +102,8 @@ export async function startHostAutomations(o: HostAutomationsOptions) {
     emitTodo: async (id, runId, input) => inbox.host.todoFromAutomation(id, runId, input),
     resolveWorkspace: resolve,
     checkDefinition: remoteHostRefusals,
-    changed: () => {
-      o.events.publish('automations:changed', null);
-      publishCounts();
-    },
+    mayRun: (a) => (fromConfig(a) ? null : 'it is not from the host config'),
+    changed: automationsChanged,
     onError: warn('automation run failed to record'),
     notify: (n) => o.log.log(n.priority === 'high' || n.priority === 'urgent' ? 'warn' : 'info', 'automation notice', { kind: n.kind, title: n.title })
   });
@@ -125,41 +134,69 @@ export async function startHostAutomations(o: HostAutomationsOptions) {
     scheduleNext: (c, a) => svc.mcp.scheduleNext(c, a),
     propose: async () => { throw new Error(CONFIG_ONLY); },
     proposeChange: async () => { throw new Error(CONFIG_ONLY); },
-    getProposal: (c, a) => proposals.mcp.get(c, a)
+    getProposal: async () => { throw new Error(CONFIG_ONLY); }
   });
 
-  /** Make the host-config automations match `entries`, by name. Others are never touched. */
-  async function reconcile(entries: HostAutomationEntry[]): Promise<void> {
+  /** Make the DB match the config: host-config rows follow `entries` by name, a same-name row with no origin
+   *  is adopted, and any other enabled row is disabled. A lost lease ends it; other failures skip one entry. */
+  async function reconcileOnce(entries: HostAutomationEntry[]): Promise<void> {
     const ws = o.workspace();
     const ctx = { workspace: resolve, check: remoteHostRefusals };
     const records = await store.list();
     const wanted = new Set<string>();
+    const each = async (name: string, fn: () => Promise<void>): Promise<void> => {
+      try {
+        await fn();
+      } catch (err) {
+        if (err instanceof LeaseLostError) throw err;
+        o.log.log('error', 'host-config automation failed', { name, error: errText(err) });
+      }
+    };
     for (const e of entries) {
-      const n = String(e.definition.name);
-      wanted.add(n);
-      const v = validateDefinition(substituteSelf(e.definition, ws.id), ctx);
-      if (!v.ok) {
-        o.log.log('error', 'host-config automation skipped', { name: n, errors: v.errors });
-        continue;
-      }
-      const yaml = definitionToYaml(v.value);
-      const existing = records.find((r) => r.name === n);
-      if (existing && existing.origin?.source !== HOST_CONFIG_ORIGIN.source) {
-        o.log.log('error', 'host-config automation skipped: the name is taken by an automation not from the host config', { name: n });
-        continue;
-      }
-      if (!existing) {
-        const a = await svc.create(yaml, OPERATOR);
-        await store.setOrigin(a.id, { ...HOST_CONFIG_ORIGIN });
-        if (!e.enabled) await svc.setEnabled(a.id, false);
-        continue;
-      }
-      if (definitionToYaml(existing.definition) !== yaml) await svc.update(existing.id, yaml, OPERATOR);
-      if (existing.enabled !== e.enabled) await svc.setEnabled(existing.id, e.enabled);
+      wanted.add(String(e.definition.name));
+      await each(String(e.definition.name), async () => {
+        const v = validateDefinition(substituteSelf(e.definition, ws.id), ctx);
+        if (!v.ok) {
+          o.log.log('error', 'host-config automation skipped', { name: String(e.definition.name), errors: v.errors });
+          return;
+        }
+        const def = v.value;
+        wanted.add(def.name);
+        const existing = records.find((r) => r.name === def.name);
+        if (!existing) {
+          await store.create(def, OPERATOR, now(), e.enabled, { ...HOST_CONFIG_ORIGIN });
+          automationsChanged();
+          return;
+        }
+        if (!fromConfig(existing)) {
+          if (existing.origin !== null) {
+            o.log.log('error', 'host-config automation skipped: the name is taken by an automation not from the host config', { name: def.name });
+            return;
+          }
+          await store.setOrigin(existing.id, { ...HOST_CONFIG_ORIGIN });
+          existing.origin = { ...HOST_CONFIG_ORIGIN };
+          o.log.log('info', 'adopted an automation with no origin into the host config', { name: def.name });
+        }
+        if (definitionToYaml(existing.definition) !== definitionToYaml(def)) await svc.update(existing.id, definitionToYaml(def), OPERATOR);
+        if (existing.enabled !== e.enabled) await svc.setEnabled(existing.id, e.enabled);
+      });
     }
     for (const r of records) {
-      if (r.origin?.source === HOST_CONFIG_ORIGIN.source && !wanted.has(r.name)) await svc.remove(r.id);
+      await each(r.name, async () => {
+        if (fromConfig(r)) {
+          if (!wanted.has(r.name)) await svc.remove(r.id);
+        } else if (r.enabled) {
+          await svc.setEnabled(r.id, false);
+          o.log.log('warn', 'disabled an automation not from the host config', { name: r.name });
+        }
+      });
     }
+  }
+  let reconciling: Promise<unknown> = Promise.resolve();
+  function reconcile(entries: HostAutomationEntry[]): Promise<void> {
+    const run = reconciling.then(() => reconcileOnce(entries));
+    reconciling = run.catch(() => undefined);
+    return run;
   }
 
   await svc.recover();
@@ -190,4 +227,12 @@ export async function startHostAutomations(o: HostAutomationsOptions) {
       clearTimeout(t);
     }
   };
+}
+
+/** The runner's `['-p', prompt, ...options]` as claude argv: the prompt after `--`, so a leading `-` stays text. */
+export function freshArgv(args: string[], mcpArgs: string[]): string[] {
+  const [flag, prompt, ...options] = args;
+  if (flag !== '-p' || typeof prompt !== 'string') throw new Error('a fresh step needs a prompt');
+  if (Buffer.byteLength(prompt) > MAX_FRESH_PROMPT_BYTES) throw new Error(`the prompt is longer than ${MAX_FRESH_PROMPT_BYTES / 1024} KiB`);
+  return ['-p', ...options, ...mcpArgs, '--session-id', randomUUID(), '--', prompt];
 }

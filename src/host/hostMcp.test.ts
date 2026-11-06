@@ -158,12 +158,12 @@ describe('hostMcpArgs', () => {
 });
 
 describe('startHostMcp, more', () => {
-  it('group mode: serves a 0660 socket in the group from a prepped sticky directory', async () => {
+  it('group mode: serves a 0660 socket in the group from a prepped directory', async () => {
     dir = mkdtempSync(join(tmpdir(), 'hm-'));
     const gid = process.getgid!();
-    const d = join(dir, 'run');
+    const d = join(dir, 'mcp');
     mkdirSync(d);
-    chmodSync(d, 0o1770);
+    chmodSync(d, 0o2750);
     const socketPath = join(d, 'mcp.sock');
     writeFileSync(socketPath, 'planted');
     mcp = await startHostMcp({ socketPath, socketGroup: gid, workspaceId: WS, readSource: rs, log: createLogger(() => undefined) });

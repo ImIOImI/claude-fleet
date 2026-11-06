@@ -14,6 +14,7 @@
 
 - uids/gids: `fleet` 1000:1000 (workspace), `fleet-host` 1001:1001 (host, prep), shared group `fleet-run` 1500.
 - Shared dir `/run/fleet` (`FLEET_RUN_DIR`), mode 3770, group 1500 (`FLEET_RUN_GID`); sockets `/run/fleet/broker.sock` and `/run/fleet/cred.sock`, 0660, group 1500.
+- **Amendment (c3b):** `prep` also makes `/run/fleet/mcp/` (uid 1001, group 1500, mode 2750) for the fleet-state MCP socket `/run/fleet/mcp/mcp.sock` (0660, group 1500). The prep test (case 22) asserts `stat -c '%a %u %g' "$p/run/sock/mcp"` = `2750 $(id -u) $(id -g)`, and reruns leave it unchanged. fleet-host checks the directory itself (`src/host/socketDir.ts`).
 - New env: `CLAUDE_FLEET_BROKER_SOCKET_GROUP` (broker), `FLEET_HOST_CRED_SOCKET_GROUP` (fleet-host and `fleet-host-cred serve`), `FLEET_WORKSPACE_UID` (default 1000), `FLEET_PREP_RUN`, `FLEET_PREP_KEY_SRC`, `FLEET_PREP_KEY_DST`.
 - Unset, every new env leaves today's behaviour (broker socket 0666; cred socket 0600 in a 0700 dir).
 - No mode → `fleet-host-entry` exits 2. `single` is today's script plus a warning.

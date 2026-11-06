@@ -39,11 +39,11 @@ describe('prepareSocketPath / finishSocket', () => {
     writeFileSync(p, 'x');
     await expect(prepareSocketPath(p, null)).rejects.toThrow(/exists and is not a socket/);
   });
-  it('group mode: needs a real directory in the group with no access for others, and makes the socket 0660', async () => {
+  it('group mode: needs our own directory in the group, group r-x only, and makes the socket 0660', async () => {
     const gid = process.getgid!();
-    const d = join(tmp(), 'run');
+    const d = join(tmp(), 'mcp');
     mkdirSync(d);
-    chmodSync(d, 0o1770);
+    chmodSync(d, 0o2750);
     const p = join(d, 'mcp.sock');
     await prepareSocketPath(p, gid);
     const close = await listen(p);
@@ -51,14 +51,13 @@ describe('prepareSocketPath / finishSocket', () => {
     const st = statSync(p);
     expect([st.mode & 0o777, st.gid]).toEqual([0o660, gid]);
     close();
-    chmodSync(d, 0o1777);
-    await expect(prepareSocketPath(p, gid)).rejects.toThrow(/fleet-host-entry prep/);
-    chmodSync(d, 0o1750);
-    await expect(prepareSocketPath(p, gid)).rejects.toThrow(/group rwx/);
-    chmodSync(d, 0o770);
-    await expect(prepareSocketPath(p, gid)).rejects.toThrow(/sticky/);
-    chmodSync(d, 0o1770);
-    await expect(prepareSocketPath(p, gid + 1)).rejects.toThrow(new RegExp(`must be group ${gid + 1}`));
+    for (const mode of [0o2770, 0o2730, 0o2755, 0o2751, 0o2740, 0o2700]) {
+      chmodSync(d, mode);
+      await expect(prepareSocketPath(p, gid), mode.toString(8)).rejects.toThrow(/group r-x, no group write and no access for others; run fleet-host-entry prep first/);
+    }
+    chmodSync(d, 0o750);
+    await expect(prepareSocketPath(p, gid)).resolves.toBeUndefined();
+    await expect(prepareSocketPath(p, gid + 1)).rejects.toThrow(new RegExp(`must be owned by this user and group ${gid + 1}`));
     const link = join(tmp(), 'link');
     symlinkSync(d, link);
     await expect(prepareSocketPath(join(link, 'mcp.sock'), gid)).rejects.toThrow(/not a directory/);
@@ -66,9 +65,9 @@ describe('prepareSocketPath / finishSocket', () => {
   });
 
   const groupDir = (): string => {
-    const d = join(tmp(), 'run');
+    const d = join(tmp(), 'mcp');
     mkdirSync(d);
-    chmodSync(d, 0o1770);
+    chmodSync(d, 0o2750);
     return d;
   };
   it('group mode: replaces a planted regular file or symlink, never touching the target', async () => {
