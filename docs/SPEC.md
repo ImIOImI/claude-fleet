@@ -1795,6 +1795,9 @@ claude-fleet/
     │   ├── broker.ts                  # host-side BrokerClient + frame codec
     │   ├── mock.ts                    # mock backend behind CLAUDE_FLEET_MOCK=1
     │   ├── workspaces.ts              # WorkspaceSpec types + manifest read/write/list
+    │   ├── state/retention.ts         # state.db retention pass: strip/compress events, embeddings compaction, orphan purge, incremental vacuum (§7)
+    │   ├── state/rawCodec.ts          # events.raw_jsonl strip stub + zlib raw_z codec
+    │   ├── state/vacuumHelper.ts      # one-time VACUUM in a detached helper after quit
     │   ├── sessions.ts                # per-workspace sessions.json read/write
     │   ├── imageLibrary.ts            # imageLibrary.json read/write + auto-record
     │   ├── db.ts                      # SQLite cache: events/sessions tables, ingest, summary, cost queries
