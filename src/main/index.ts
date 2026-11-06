@@ -571,14 +571,14 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     if (sqlite) {
       await startWatcher(jsonlWatcher, manifests);
       await startCaptureScheduler(jsonlWatcher);
-      perfSpan('claude_fleet.boot.register_local_dirs', () => registerLocalDirs(jsonlWatcher, manifests));
+      registerLocalDirs(jsonlWatcher, manifests);
     }
     // Peer-status reconciler (#286): watch each workspace's claude
     // `sessions/<pid>.json` files and push an authoritative busy/idle/waiting
     // snapshot to every renderer, which merges it over the title glyph.
     if (peerStatusWatcher) {
       await perfSpanAsync('claude_fleet.boot.peer_status_start', () => peerStatusWatcher.start());
-      perfSpan('claude_fleet.boot.register_peer_status_dirs', () => registerPeerStatusDirs(peerStatusWatcher, manifests));
+      registerPeerStatusDirs(peerStatusWatcher, manifests);
       peerStatusWatcher.on('change', (snapshot) => {
         broadcastSessionStatus(
           snapshot.map((s) => ({ claudeSessionId: s.sessionId, status: s.status, waitingFor: s.waitingFor })),
@@ -728,10 +728,10 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   instrumentIpcHandle(ipcMain);
   perfSpan('claude_fleet.boot.register_ipc', () => registerIpc({ jsonlWatcher, peerStatusWatcher }));
   registerStoreIpc();
-  if (sqlite && inboxStore) perfSpan('claude_fleet.boot.inbox_services', () => startInboxServices(inboxStore!));
+  if (sqlite && inboxStore) startInboxServices(inboxStore);
   registerPresenceIpc(ipcMain, { get: getKeepRunningInTray, set: setKeepRunningInTray });
-  mainWindow = perfSpan('claude_fleet.boot.create_window', () => createWindow());
-  perfSpan('claude_fleet.boot.presence', () => startPresenceServices(mainWindow!));
+  mainWindow = createWindow();
+  startPresenceServices(mainWindow);
   void supervisor?.run();
 
   app.on('activate', () => {

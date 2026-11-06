@@ -6,6 +6,7 @@
 import { Session } from 'node:inspector';
 import { mkdir, readdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { perfSpan } from './perf.js';
 
 export const BOOT_PROFILE_MS = 30_000;
 const SAMPLING_INTERVAL_US = 1000;
@@ -54,19 +55,25 @@ export function analyzeProfile(
 
   // Per node: busy class, self label, attributed label (deepest frame outside
   // node internals, i.e. the app/library caller of a native), and its stack.
-  const info = new Map<number, { cls: 'js' | 'gc' | 'other'; self: string; attr: string | null; stack: string[] }>();
-  for (const n of p.nodes) {
-    const name = n.callFrame.functionName;
+  // Parents first, so each node extends its parent's entry.
+  type Info = { cls: 'js' | 'gc' | 'other'; self: string; attr: string | null; stack: string[] };
+  const info = new Map<number, Info>();
+  const order = p.nodes.filter((n) => !parent.has(n.id)).map((n) => n.id);
+  for (let i = 0; i < order.length; i++) {
+    const n = byId.get(order[i])!;
+    for (const c of n.children ?? []) order.push(c);
+    const f = n.callFrame;
+    const name = f.functionName;
     const cls = name === '(garbage collector)' ? 'gc' : /^\(.*\)$/.test(name) ? 'other' : 'js';
-    const stack: string[] = [];
-    let attr: string | null = null;
-    for (let id: number | undefined = n.id; id !== undefined; id = parent.get(id)) {
-      const f = byId.get(id)!.callFrame;
-      if (f.functionName === '(root)') break;
-      stack.unshift(frameLabel(f));
-      if (attr === null && f.url && !f.url.startsWith('node:')) attr = frameLabel(f);
-    }
-    info.set(n.id, { cls, self: frameLabel(n.callFrame), attr, stack });
+    const self = frameLabel(f);
+    const up = parent.has(n.id) ? info.get(parent.get(n.id)!) : undefined;
+    const isRoot = name === '(root)';
+    info.set(n.id, {
+      cls,
+      self,
+      attr: f.url && !f.url.startsWith('node:') ? self : (up?.attr ?? null),
+      stack: isRoot ? [] : [...(up?.stack ?? []), self].slice(-15)
+    });
   }
 
   const seconds = new Map<number, { js: number; gc: number; top: Map<string, number> }>();
@@ -123,7 +130,7 @@ export function analyzeProfile(
           gcMs: Math.round(b.gc),
           self: top(b.self),
           attr,
-          stack: attr.length > 0 ? b.stackOf.get(attr[0][0])!.slice(-15) : []
+          stack: attr.length > 0 ? b.stackOf.get(attr[0][0])! : []
         };
       })
   };
@@ -157,22 +164,24 @@ export function startBootProfile(o: {
       if (err) return o.onError(err);
       const profile = res.profile as unknown as CpuProfile;
       let summary: BootProfileSummary;
+      let json: string;
       try {
-        summary = analyzeProfile(profile);
+        // Sync on main after the window closes: spanned so its own stall self-attributes.
+        [summary, json] = perfSpan('claude_fleet.boot.cpu_profile_analyze', () => [analyzeProfile(profile), JSON.stringify(profile)] as const);
       } catch (e) {
         return o.onError(e);
       }
       const file = join(o.outDir, `boot-${new Date(startedAt).toISOString().replace(/[:.]/g, '-')}.cpuprofile`);
-      void writeProfile(o.outDir, file, profile)
+      void writeProfile(o.outDir, file, json)
         .then(() => file, (e: unknown) => { o.onError(e); return null; })
         .then((written) => o.onResult({ ...summary, startedAt, file: written }));
     });
   }, o.durationMs ?? BOOT_PROFILE_MS).unref();
 }
 
-async function writeProfile(dir: string, file: string, profile: CpuProfile): Promise<void> {
+async function writeProfile(dir: string, file: string, json: string): Promise<void> {
   await mkdir(dir, { recursive: true });
-  await writeFile(file, JSON.stringify(profile));
+  await writeFile(file, json);
   const old = (await readdir(dir)).filter((f) => /^boot-.*\.cpuprofile$/.test(f)).sort().slice(0, -KEEP_FILES);
   await Promise.all(old.map((f) => unlink(join(dir, f)).catch(() => undefined)));
 }
