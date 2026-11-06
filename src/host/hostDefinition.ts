@@ -6,11 +6,11 @@ const NO_EVENTS = new Set(['session.idle', 'workspace.started']);
 export function remoteHostRefusals(def: AutomationDef): string[] {
   const errors: string[] = [];
   def.triggers.forEach((t, i) => {
-    if ('event' in t && NO_EVENTS.has(t.event.on)) errors.push(`triggers[${i}]: ${t.event.on} events are not available on a remote host`);
+    if ('event' in t && NO_EVENTS.has(t.event.on)) errors.push(`triggers[${i}].event.on: ${t.event.on} events are not available on a remote host`);
   });
   def.steps.forEach((s, i) => {
-    if ('script' in s) errors.push(`steps[${i}] (${s.id}): script steps are not available on a remote host yet`);
-    else if ((s.prompt.mode ?? 'live') === 'live') errors.push(`steps[${i}] (${s.id}): mode: live is not available on a remote host; use mode: fresh`);
+    if ('script' in s) errors.push(`steps[${i}].script: script steps are not available on a remote host yet`);
+    else if ((s.prompt.mode ?? 'live') === 'live') errors.push(`steps[${i}].prompt.mode: live is not available on a remote host; use mode: fresh`);
   });
   return errors;
 }

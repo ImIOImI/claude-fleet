@@ -365,4 +365,6 @@ const PERF_TOOLS: Tool[] = [
     }
   },
 ];
-TOOLS.splice(TOOLS.findIndex((t) => t.name === 'query') + 1, 0, ...PERF_TOOLS);
+const queryAt = TOOLS.findIndex((t) => t.name === 'query');
+if (queryAt < 0) throw new Error('mcpCore TOOLS has no query tool to list the perf tools after');
+TOOLS.splice(queryAt + 1, 0, ...PERF_TOOLS);

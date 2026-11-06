@@ -2,9 +2,14 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { PassThrough } from 'node:stream';
 import type { Socket } from 'node:net';
-import { callTool, handleMcpRequestForTests, serveMcpConnection, setExposedTools, setMcpLogSink, TOOLS, type McpLogEntry } from './mcpCore.js';
+import type { OwnedReadSource } from './store/readSource.js';
+import {
+  callTool, currentReadSource, handleMcpRequestForTests, initReadSource, releaseReadSource, serveMcpConnection, SERVER_INSTRUCTIONS, setExposedTools,
+  setMcpLogSink, STANDING_RULE, TOOLS, type McpLogEntry
+} from './mcpCore.js';
 
 afterEach(() => {
+  releaseReadSource();
   setExposedTools(null);
   setMcpLogSink(null);
 });
@@ -29,5 +34,28 @@ describe('mcpCore', () => {
     sock.emit('close');
     expect(rows.map((r) => r.type)).toEqual(['mcp-conn', 'mcp-conn-closed']);
     expect(rows[0].workspaceId).toBe('W1');
+  });
+
+  it('advertises instructions only for tools it serves', () => {
+    const instructions = () => (handleMcpRequestForTests('initialize') as { instructions?: string }).instructions;
+    expect(instructions()).toBe(`${STANDING_RULE}\n\n${SERVER_INSTRUCTIONS}`);
+    setExposedTools(new Set(['list_sessions', 'expose_port']));
+    expect(instructions()).toBe(SERVER_INSTRUCTIONS);
+    setExposedTools(new Set(['list_sessions', 'record_claim']));
+    expect(instructions()).toBe(STANDING_RULE);
+    setExposedTools(new Set(['list_sessions']));
+    expect(handleMcpRequestForTests('initialize')).not.toHaveProperty('instructions');
+  });
+
+  it('initReadSource closes the source it replaces', () => {
+    const closed: string[] = [];
+    const fake = (n: string) => ({ close: async () => { closed.push(n); } }) as unknown as OwnedReadSource;
+    const a = fake('a');
+    initReadSource(a);
+    initReadSource(a);
+    expect(closed).toEqual([]);
+    initReadSource(null);
+    expect(closed).toEqual(['a']);
+    expect(currentReadSource()).toBeNull();
   });
 });

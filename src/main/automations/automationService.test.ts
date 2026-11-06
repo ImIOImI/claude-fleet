@@ -13,7 +13,7 @@ afterEach(() => inbox?.close());
 const USER = { kind: 'user' as const, id: null };
 const WSS: Record<string, string> = { 'ops-oncall': 'W1', 'webex-triage': 'W2' };
 
-async function setup(opts: { state?: WorkspaceState; postGate?: Promise<void>; exec?: (script: string) => { exitCode: number; stdout: string } } = {}) {
+async function setup(opts: { state?: WorkspaceState; postGate?: Promise<void>; exec?: (script: string) => { exitCode: number; stdout: string }; checkDefinition?: (def: AutomationDef) => string[] } = {}) {
   inbox = (await openTestInbox());
   const store = new AutomationStore(inbox.kysely);
   let t = new Date(2026, 9, 19, 10, 0).getTime();
@@ -33,6 +33,7 @@ async function setup(opts: { state?: WorkspaceState; postGate?: Promise<void>; e
     notify: (n) => { notes.push(n as never); return null; },
     changed: () => {},
     automationsWorkspace: () => 'W1',
+    checkDefinition: opts.checkDefinition,
     execScript: async (_target, o) => ({ ...(opts.exec ?? (() => ({ exitCode: 0, stdout: '' })))(o.script), stderr: '', timedOut: false })
   });
   const fire = async (ms: number) => { t += ms; for (const h of timers) if (!h.dead && h.at <= t) { h.dead = true; h.fn(); } await flush(); };
@@ -63,6 +64,16 @@ describe('CRUD + validation', () => {
     expect(u.version).toBe(2);
     expect((await svc.get(a.id))?.yaml).toContain('*/30 * * * *');
     await expect(svc.create('name: x', USER)).rejects.toThrow(/triggers/);
+  });
+  it('checkDefinition refuses an otherwise valid definition on create, update and validate', async () => {
+    const seen: string[] = [];
+    const { svc } = await setup({ checkDefinition: (d) => { seen.push(d.name); return d.triggers.length > 1 ? ['refused here'] : []; } });
+    expect(svc.validate(YAML())).toEqual({ ok: false, errors: ['refused here'] });
+    await expect(svc.create(YAML(), USER)).rejects.toThrow(/refused here/);
+    const one = YAML().replace('  - manual: { allowFrom: [webex-triage] }\n', '');
+    const a = await svc.create(one, USER);
+    await expect(svc.update(a.id, YAML(), USER)).rejects.toThrow(/refused here/);
+    expect(seen.every((n) => n === 'log-watch')).toBe(true);
   });
 });
 

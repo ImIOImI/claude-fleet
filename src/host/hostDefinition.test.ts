@@ -17,11 +17,11 @@ describe('remote host definitions', () => {
   });
   it('refuses live steps, script steps and the idle/started events', () => {
     const live = validateDefinition({ name: 'a', triggers: [{ manual: {} }], steps: [{ ...fresh, prompt: { ...fresh.prompt, mode: 'live' } }] }, ctx);
-    expect(live).toEqual({ ok: false, errors: ['steps[0] (go): mode: live is not available on a remote host; use mode: fresh'] });
+    expect(live).toEqual({ ok: false, errors: ['steps[0].prompt.mode: live is not available on a remote host; use mode: fresh'] });
     const script = validateDefinition({ name: 'a', triggers: [{ manual: {} }], steps: [{ id: 's', script: { run: 'echo hi' } }] }, { ...ctx, hostShells: ['bash'] });
-    expect(script).toEqual({ ok: false, errors: ['steps[0] (s): script steps are not available on a remote host yet'] });
+    expect(script).toEqual({ ok: false, errors: ['steps[0].script: script steps are not available on a remote host yet'] });
     const idle = validateDefinition({ name: 'a', triggers: [{ event: { on: 'session.idle' } }], steps: [fresh] }, ctx);
-    expect(idle).toEqual({ ok: false, errors: ['triggers[0]: session.idle events are not available on a remote host'] });
+    expect(idle).toEqual({ ok: false, errors: ['triggers[0].event.on: session.idle events are not available on a remote host'] });
   });
   it('substitutes $self in prompt workspaces, event workspaces and allowFrom', () => {
     const d = substituteSelf({ name: 'a', triggers: [{ manual: { allowFrom: ['$self'] } }, { event: { on: 'todo.created', workspace: '$self' } }], steps: [{ ...fresh, prompt: { ...fresh.prompt, workspace: '$self' } }] }, WS.id) as {
@@ -36,5 +36,36 @@ describe('remote host definitions', () => {
     const d = substituteSelf(raw, WS.id) as { steps: Array<{ prompt: { workspace: string; message: string } }> };
     expect(d.steps[0].prompt).toMatchObject({ workspace: WS.id, message: '$self' });
     expect(raw.steps[0].prompt.workspace).toBe('$self');
+  });
+  it('refuses workspace.started events', () => {
+    const r = validateDefinition({ name: 'a', triggers: [{ event: { on: 'workspace.started' } }], steps: [fresh] }, ctx);
+    expect(r).toEqual({ ok: false, errors: ['triggers[0].event.on: workspace.started events are not available on a remote host'] });
+  });
+  it('refuses other workspaces in allowFrom and event.workspace', () => {
+    const allow = validateDefinition({ name: 'a', triggers: [{ manual: { allowFrom: ['review-bot', 'other'] } }], steps: [fresh] }, ctx);
+    expect(allow).toEqual({ ok: false, errors: ['triggers[0].manual.allowFrom: unknown workspace "other"'] });
+    const ev = validateDefinition({ name: 'a', triggers: [{ event: { on: 'todo.created', workspace: 'other' } }], steps: [fresh] }, ctx);
+    expect(ev).toEqual({ ok: false, errors: ['triggers[0].event.workspace: unknown workspace "other"'] });
+  });
+  it('binds $self in script.runIn', () => {
+    const d = substituteSelf({ steps: [{ id: 's', script: { run: 'echo', runIn: '$self' } }] }, WS.id) as { steps: Array<{ script: { runIn: string } }> };
+    expect(d.steps[0].script.runIn).toBe(WS.id);
+  });
+  it('accumulates every refusal', () => {
+    const r = validateDefinition({
+      name: 'a',
+      triggers: [{ event: { on: 'session.idle' } }, { event: { on: 'workspace.started' } }],
+      steps: [{ ...fresh, prompt: { ...fresh.prompt, mode: 'live' } }, { id: 's', script: { run: 'echo hi', runIn: 'review-bot' } }]
+    }, ctx);
+    expect(r).toEqual({ ok: false, errors: [
+      'triggers[0].event.on: session.idle events are not available on a remote host',
+      'triggers[1].event.on: workspace.started events are not available on a remote host',
+      'steps[0].prompt.mode: live is not available on a remote host; use mode: fresh',
+      'steps[1].script: script steps are not available on a remote host yet'
+    ] });
+  });
+  it('treats a step with both script and prompt as a script step, and refuses it', () => {
+    const r = validateDefinition({ name: 'a', triggers: [{ manual: {} }], steps: [{ id: 's', script: { run: 'echo hi', runIn: 'review-bot' }, prompt: fresh.prompt }] }, ctx);
+    expect(r).toEqual({ ok: false, errors: ['steps[0].script: script steps are not available on a remote host yet'] });
   });
 });

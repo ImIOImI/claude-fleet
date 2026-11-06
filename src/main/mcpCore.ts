@@ -40,13 +40,18 @@ export const SERVER_INSTRUCTIONS =
   'When you start a server for the user to view (dev server, docs preview, report), call expose_port with its port and a short label.';
 
 export function initializeResult(): Record<string, unknown> {
+  // The knowledge-claims standing rule (#483) and the port line, together
+  // under Claude Code's 2,048-char instructions cap (pinned in the tests);
+  // each only when its tool is served.
+  const served = new Set(servedTools().map((t) => t.name));
+  const instructions = [served.has('record_claim') ? STANDING_RULE : '', served.has('expose_port') ? SERVER_INSTRUCTIONS : '']
+    .filter(Boolean)
+    .join('\n\n');
   return {
     protocolVersion: PROTOCOL_VERSION,
     capabilities: { tools: {} },
     serverInfo: SERVER_INFO,
-    // The knowledge-claims standing rule (#483) and the port line, together
-    // under Claude Code's 2,048-char instructions cap (pinned in the tests).
-    instructions: `${STANDING_RULE}\n\n${SERVER_INSTRUCTIONS}`
+    ...(instructions ? { instructions } : {})
   };
 }
 const DEFAULT_LIMIT = 200;
@@ -358,6 +363,7 @@ export function setReadSource(rs: OwnedReadSource | null): void {
 
 /** Attach a read source at startup; null starts storeless (STATE_DB_TOOLS report unavailable). */
 export function initReadSource(rs: OwnedReadSource | null): void {
+  if (readSource && readSource !== rs) void readSource.close().catch(() => undefined);
   readSource = rs;
   storeless = rs === null;
 }
@@ -664,6 +670,7 @@ async function sessionAllowed(rs: ReadSource, sessionId: string, allowed: Set<st
 }
 
 // Exported for the cross-workspace isolation regression test (mcpServer.test.ts).
+// Desktop code imports TOOLS via mcpServer.js, which splices in the perf tools.
 export const TOOLS: Tool[] = [
   {
     name: 'list_sessions',
