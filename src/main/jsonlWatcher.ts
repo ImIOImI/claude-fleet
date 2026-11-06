@@ -24,6 +24,7 @@ import { join, extname, sep as pathSep } from 'node:path';
 // electron.vite.config.ts), so `require('chokidar')` would throw
 // ERR_REQUIRE_ESM. Load it via dynamic import inside `start()`.
 import type { FSWatcher } from 'chokidar';
+import { RecursiveDirWatcher } from './recursiveDirWatcher.js';
 import { workspaceClaudeDir, workspaceHistoryDir, workspaceHistoryFile, hostLocalProjectsDir } from './paths.js';
 import { ingestBatch } from './db.js';
 import { effectiveForClaudeSession } from './mirrorPolicy.js';
@@ -100,8 +101,25 @@ export interface JsonlWatcher {
   emit(event: 'new-session', e: NewSessionEvent): boolean;
 }
 
+/** The add/change/unlink/error surface shared by chokidar and RecursiveDirWatcher. */
+interface DirWatcher {
+  add(path: string): unknown;
+  unwatch(path: string): unknown;
+  close(): Promise<void>;
+  on(event: 'add' | 'change' | 'unlink', listener: (path: string) => void): this;
+  on(event: 'error', listener: (err: unknown) => void): this;
+}
+
 export class JsonlWatcher extends EventEmitter {
-  private watcher: FSWatcher | null = null;
+  private watcher: DirWatcher | null = null;
+  // win32/darwin: one recursive fs.watch per dir. chokidar opens a native
+  // handle per file there, synchronously (#464). Linux keeps chokidar (inotify).
+  private readonly nativeRecursive: boolean;
+
+  constructor(opts: { nativeRecursive?: boolean } = {}) {
+    super();
+    this.nativeRecursive = opts.nativeRecursive ?? (process.platform === 'win32' || process.platform === 'darwin');
+  }
   // Second chokidar instance for dirs where inotify can't reach — the
   // \\wsl.localhost 9P share delivers no change events (#253). Created
   // lazily on the first polled registration; same handlers as `watcher`.
@@ -240,7 +258,7 @@ export class JsonlWatcher extends EventEmitter {
     return this.pollWatcherPromise;
   }
 
-  private wireHandlers(w: FSWatcher): void {
+  private wireHandlers(w: DirWatcher): void {
     w.on('add', (p) => this.enqueue(p))
       .on('change', (p) => this.enqueue(p))
       .on('unlink', (p) => {
@@ -251,15 +269,13 @@ export class JsonlWatcher extends EventEmitter {
 
   async start(workspaceIds: string[]): Promise<void> {
     if (this.watcher) return;
-    const chokidar = await import('chokidar');
-    this.watcher = chokidar.watch([], {
-      depth: 2, // reach <projectdir>/<session>/subagents/agent-*.jsonl (#plan-usage)
-      ignoreInitial: false,
-      persistent: true,
-      // No awaitWriteFinish: we tolerate partial-line reads by tracking the
-      // last newline byte and rolling the offset forward only past complete
-      // lines. Lower latency this way.
-    });
+    // depth 2 reaches <projectdir>/<session>/subagents/agent-*.jsonl (#plan-usage).
+    // No awaitWriteFinish: we tolerate partial-line reads by tracking the
+    // last newline byte and rolling the offset forward only past complete
+    // lines. Lower latency this way.
+    this.watcher = this.nativeRecursive
+      ? new RecursiveDirWatcher({ depth: 2 })
+      : (await import('chokidar')).watch([], { depth: 2, ignoreInitial: false, persistent: true });
     this.wireHandlers(this.watcher);
     for (const name of workspaceIds) {
       this.registerWorkspace(name);
