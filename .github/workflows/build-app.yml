@@ -284,7 +284,9 @@ jobs:
       - name: Install Electron/Chromium system libraries
         run: |
           bin=node_modules/electron/dist/electron
-          if [ ! -x "$bin" ] || ldd "$bin" | grep -q 'not found'; then
+          if [ -x "$bin" ]; then missing=$(ldd "$bin" | grep 'not found' || true); else missing="no $bin"; fi
+          if [ -n "$missing" ]; then
+            echo "$missing"
             npx playwright install-deps chromium
           else
             echo "all Electron shared libs present; skipping install-deps"
