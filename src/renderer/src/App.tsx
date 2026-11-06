@@ -1527,7 +1527,6 @@ export function App() {
           busySessionIds={effectiveBusySessionIds}
           waitingSessionIds={waitingSessionIds}
           openSessions={openSessions}
-          liveTabOrder={liveBrokerByWorkspace}
           currentSessionId={currentSessionId}
           collapsed={leftCollapsed}
           onToggleCollapse={toggleLeftCollapsed}

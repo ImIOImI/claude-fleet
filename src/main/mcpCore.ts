@@ -17,7 +17,8 @@
 // transcripts. The typed tools enforce this server-side by filtering all queries
 // through the caller's `allowedWorkspaces` set. The `query` tool (#174) runs
 // arbitrary READ-ONLY SQL against a per-call in-memory SNAPSHOT seeded only with
-// the caller's allowed-workspace rows (buildSnapshot); the real DB is DETACHed
+// the caller's allowed-workspace rows (SQLite: queryWorker.ts, in a worker thread with
+// a hard timeout, #476); the real DB is DETACHed
 // before the caller's SQL runs, so isolation is structural — no join/UNION/
 // subquery/sqlite_master trick can reach another workspace's rows. On the
 // Postgres store `query` runs under the caller's own role with row-level
@@ -896,7 +897,9 @@ export const TOOLS: Tool[] = [
     },
   },
   // `query` runs arbitrary READ-ONLY SQL against a per-call in-memory SNAPSHOT
-  // seeded only with the caller's allowed-workspace rows (buildSnapshot). The
+  // seeded only with the caller's allowed-workspace rows (SQLite: queryWorker.ts, off
+  // the main thread with a 30 s timeout, #476; emitSearchHits runs here on the main
+  // thread once rows are back). The
   // real DB is DETACHed before the caller's SQL runs, so isolation is structural
   // — no join/UNION/subquery/sqlite_master trick can reach another workspace's
   // rows (#146/§9). raw_jsonl is excluded unless include_raw, and even then only

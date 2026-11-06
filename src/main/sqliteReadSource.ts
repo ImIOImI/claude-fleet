@@ -1,10 +1,11 @@
 // The MCP read path on SQLite (SPEC §11): the server's own read-only
-// connection, and the per-call in-memory snapshot that isolates `query`.
+// connection; `query`'s per-call isolation snapshot runs off the main thread
+// in queryWorker.ts (#476).
 import Database from 'better-sqlite3';
-import { randomBytes } from 'node:crypto';
 import { searchVectorsSqlite } from './transcriptIndex.js';
+import { runQueryInWorker } from './queryWorker.js';
 import {
-  NOT_AUTHORIZED, SNAPSHOT_EVENT_COLS, checkEventColumns, type OwnedReadSource, type Row, type Scope, type TokenGroup,
+  NOT_AUTHORIZED, checkEventColumns, type OwnedReadSource, type Row, type Scope, type TokenGroup,
 } from './store/readSource.js';
 
 /** SQL `IN (?,…)` fragment + params for an allowed-workspace set (#122). */
@@ -12,74 +13,6 @@ function inClause(col: string, allowed: Scope): { sql: string; params: string[] 
   const ids = [...allowed];
   if (ids.length === 0) return { sql: '0 = 1', params: [] }; // match nothing (self is always present, so unreachable)
   return { sql: `${col} IN (${ids.map(() => '?').join(',')})`, params: ids };
-}
-
-/** Build a throwaway in-memory DB containing ONLY the caller's allowed-workspace
- *  rows, copied from the source DB at `srcPath` (the live state.db). The source
- *  is DETACHed before the caller's SQL ever runs, so isolation is structural:
- *  no subquery/UNION/sqlite_master trick can reach unfiltered rows (#146). The
- *  caller owns the returned DB and must close it. */
-function buildSnapshot(srcPath: string, allowed: Scope, includeRaw: boolean): Database.Database {
-  const mem = new Database(':memory:');
-  try {
-    const alias = 'src_' + randomBytes(6).toString('hex');
-    const { sql: scope, params } = inClause('workspace_id', allowed);
-    // ATTACH filename is not reliably bindable; double any single quote.
-    const attached = srcPath.replace(/'/g, "''");
-    mem.exec(`ATTACH DATABASE '${attached}' AS ${alias}`);
-    try {
-      const eventCols = includeRaw ? `${SNAPSHOT_EVENT_COLS}, raw_jsonl` : SNAPSHOT_EVENT_COLS;
-      mem.prepare(
-        `CREATE TABLE events AS SELECT ${eventCols} FROM ${alias}.events WHERE ${scope}`
-      ).run(...params);
-      mem.prepare(`CREATE TABLE sessions AS SELECT * FROM ${alias}.sessions WHERE ${scope}`).run(...params);
-      mem.prepare(
-        `CREATE TABLE broker_sessions AS SELECT * FROM ${alias}.broker_sessions WHERE ${scope}`
-      ).run(...params);
-      mem.prepare(
-        `CREATE TABLE session_summaries AS SELECT * FROM ${alias}.session_summaries WHERE ${scope}`
-      ).run(...params);
-      mem.prepare(
-        `CREATE TABLE session_tags AS SELECT * FROM ${alias}.session_tags WHERE ${scope}`
-      ).run(...params);
-      mem.prepare(
-        `CREATE TABLE usage_events AS SELECT * FROM ${alias}.usage_events WHERE ${scope}`
-      ).run(...params);
-      // perf_events: app-global rows (workspace_id NULL — stalls, slow ops)
-      // are host-process facts visible to every caller; workspace-tagged rows
-      // (pty windows, terminal latency) are scoped like everything else.
-      try {
-        mem.prepare(
-          `CREATE TABLE perf_events AS SELECT * FROM ${alias}.perf_events WHERE workspace_id IS NULL OR ${scope}`
-        ).run(...params);
-      } catch (e) {
-        // Pre-v11 DB (no perf_events yet): an empty, correctly-shaped table.
-        // Anything else is a real failure and must surface.
-        if (!(e instanceof Error && /no such table/i.test(e.message))) throw e;
-        mem.exec(`CREATE TABLE perf_events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, kind TEXT NOT NULL, workspace_id TEXT, session_id TEXT, name TEXT, dur_ms REAL, trace_id TEXT, span_id TEXT, meta TEXT)`);
-      }
-      try {
-        mem.prepare(
-          `CREATE TABLE port_exposures AS SELECT * FROM ${alias}.port_exposures WHERE ${scope}`
-        ).run(...params);
-      } catch (e) {
-        // Pre-v15 DB: an empty, correctly-shaped table instead of an error.
-        if (!(e instanceof Error && /no such table/i.test(e.message))) throw e;
-        mem.exec(
-          `CREATE TABLE port_exposures (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, session_id TEXT, ` +
-            `port INTEGER NOT NULL, cmdline TEXT, label TEXT, reason TEXT, source TEXT NOT NULL, ` +
-            `first_scanned_at INTEGER, declared_at INTEGER, popup_shown_at INTEGER, outcome TEXT, ` +
-            `opened_via TEXT, open_count INTEGER NOT NULL DEFAULT 0, ended_at INTEGER)`
-        );
-      }
-    } finally {
-      mem.exec(`DETACH ${alias}`);
-    }
-    return mem;
-  } catch (e) {
-    mem.close();
-    throw e;
-  }
 }
 
 function tokenGroups(db: Database.Database, sessionId: string): TokenGroup[] {
@@ -185,15 +118,19 @@ export function sqliteReadSource(db: Database.Database): OwnedReadSource {
     async searchEmbeddings(qvec, scope, o) {
       return searchVectorsSqlite(db, qvec, [...scope], o);
     },
+    // Snapshot build + caller SQL run in a worker thread with a hard timeout
+    // (#476): on a multi-GB state.db the copy took minutes and froze the main
+    // process. The worker ATTACHes the live state.db, copies only the caller's
+    // allowed-workspace rows, DETACHes it, then runs the caller's SQL (#146).
     async query(caller, q) {
-      const snap = buildSnapshot(db.name, caller.scope, q.includeRaw);
-      try {
-        const stmt = snap.prepare(q.sql);
-        if (!stmt.reader) throw new Error('read-only SELECT statements only');
-        return (stmt.all(...q.params) as unknown[]).slice(0, q.maxRows);
-      } finally {
-        snap.close();
-      }
+      return runQueryInWorker({
+        srcPath: db.name,
+        allowed: [...caller.scope],
+        includeRaw: q.includeRaw,
+        sql: q.sql,
+        params: q.params,
+        maxRows: q.maxRows,
+      });
     },
     async forgetCaller() {},
     async close() {

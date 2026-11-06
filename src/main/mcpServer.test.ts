@@ -239,7 +239,7 @@ describe('typed read tools are workspace-scoped (#146)', () => {
   });
 });
 
-describe('scoped query tool (#174)', () => {
+describe('scoped query tool (#174)', { timeout: 30_000 }, () => {
   let fdb: Database.Database;
   let cleanup: () => void;
   beforeEach(async () => {
@@ -298,7 +298,7 @@ describe('scoped query tool (#174)', () => {
   });
 });
 
-describe('query snapshot exposes phase-2 tables, workspace-scoped (#207)', () => {
+describe('query snapshot exposes phase-2 tables, workspace-scoped (#207)', { timeout: 30_000 }, () => {
   let fdb: Database.Database;
   let cleanup: () => void;
   beforeEach(async () => {
@@ -755,7 +755,7 @@ describe('perf tools', () => {
     });
   });
 
-  describe('perf_events in query snapshot', () => {
+  describe('perf_events in query snapshot', { timeout: 30_000 }, () => {
     let fdb: Database.Database;
     let cleanup: () => void;
     beforeEach(async () => {

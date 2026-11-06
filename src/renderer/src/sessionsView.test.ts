@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sessionsForScope, filterSessions, partitionByOpen, orderOpenByTabs, splitHeadless, splitCapture, tagCounts, limitSessions } from './sessionsView';
+import { sessionsForScope, filterSessions, partitionByOpen, orderByRecencyBucket, splitHeadless, splitCapture, tagCounts, limitSessions } from './sessionsView';
 
 // Minimal session shape — only what the scope logic touches.
 const S = (id: string, workspaceId: string): { id: string; workspaceId: string } => ({
@@ -102,29 +102,34 @@ describe('splitCapture', () => {
   });
 });
 
-describe('orderOpenByTabs', () => {
-  const ref = (workspaceId: string, brokerSessionId: string) => ({ workspaceId, brokerSessionId });
-  const open = new Map([
-    ['x', ref('wsA', 'b2')],
-    ['y', ref('wsA', 'b1')],
-    ['z', ref('wsB', 'b9')]
-  ]);
-  const live = { wsA: ['b1', 'b2'], wsB: ['b9'] };
+describe('orderByRecencyBucket', () => {
+  const B = 30 * 60_000;
+  const row = (id: string, lastActiveAt: number | null, startedAt: number | null = 0) => ({ id, lastActiveAt, startedAt });
 
-  it('follows tab-strip order, not activity order', () => {
-    const rows = [{ id: 'x' }, { id: 'z' }, { id: 'y' }];
-    expect(orderOpenByTabs(rows, open, live).map((s) => s.id)).toEqual(['y', 'x', 'z']);
+  it('puts newer buckets first', () => {
+    const rows = [row('old', 1 * B), row('new', 3 * B + 5), row('mid', 2 * B)];
+    expect(orderByRecencyBucket(rows, B).map((s) => s.id)).toEqual(['new', 'mid', 'old']);
   });
 
-  it('is stable when activity reorders the input', () => {
-    const a = orderOpenByTabs([{ id: 'x' }, { id: 'y' }, { id: 'z' }], open, live);
-    const b = orderOpenByTabs([{ id: 'z' }, { id: 'y' }, { id: 'x' }], open, live);
-    expect(a.map((s) => s.id)).toEqual(b.map((s) => s.id));
+  it('ignores activity within a bucket — orders by start time instead', () => {
+    const a = row('a', 4 * B + 10, 100);
+    const b = row('b', 4 * B + 20, 200);
+    expect(orderByRecencyBucket([a, b], B).map((s) => s.id)).toEqual(['b', 'a']);
+    const aBusier = { ...a, lastActiveAt: 4 * B + 999 };
+    expect(orderByRecencyBucket([aBusier, b], B).map((s) => s.id)).toEqual(['b', 'a']);
   });
 
-  it('keeps unmapped rows after mapped ones, in input order', () => {
-    const rows = [{ id: 'q' }, { id: 'x' }, { id: 'r' }];
-    expect(orderOpenByTabs(rows, open, live).map((s) => s.id)).toEqual(['x', 'q', 'r']);
+  it('is independent of input order', () => {
+    const rows = [row('x', B, 1), row('y', B, 1), row('z', 2 * B, 1)];
+    const a = orderByRecencyBucket(rows, B).map((s) => s.id);
+    const b = orderByRecencyBucket([...rows].reverse(), B).map((s) => s.id);
+    expect(a).toEqual(['z', 'x', 'y']);
+    expect(b).toEqual(a);
+  });
+
+  it('sinks rows with no activity', () => {
+    const rows = [row('none', null), row('some', B)];
+    expect(orderByRecencyBucket(rows, B).map((s) => s.id)).toEqual(['some', 'none']);
   });
 });
 
