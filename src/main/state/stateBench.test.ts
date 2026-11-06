@@ -17,6 +17,11 @@
 //
 // embed_insert_us_per_row needs db.insertEmbeddings (the batched insert),
 // which exists at the pre-port baseline.
+//
+// On Postgres (STORE_TEST_DIALECT=postgres + PG_TEST_URL) the same metrics run
+// on a fresh schema behind the history write gate, as the app opens it;
+// search_ms is db.searchEmbeddings. Gate saved Postgres runs against PG_GATE:
+//   STATE_BENCH=1 STATE_BENCH_PG_GATE=/tmp/p1.json,/tmp/p2.json npx vitest run src/main/state/stateBench.test.ts
 import { describe, it, expect } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -24,9 +29,11 @@ import { join } from 'node:path';
 import * as db from '../db.js';
 import { searchTranscripts } from '../transcriptIndex.js';
 import { PerfStore } from '../perfStore.js';
+import { isPg, testPgSchema } from '../store/testStore.js';
+import { InboxWriteGate } from '../store/inboxWriteGate.js';
 import { EMBED_DIM, EMBED_MODEL_ID, encodeVector } from '../vectors.js';
 
-const RUNS = 5;
+const RUNS = Number(process.env.STATE_BENCH_RUNS ?? 5);
 const N_LINES = 6000;
 const WATCHER_BATCH = 200;
 const N_LIST_SESSIONS = 300;
@@ -62,6 +69,28 @@ export const GATE: Record<string, { tol: number; slack: number }> = {
   record_error_us: { tol: 0.25, slack: 0 },
   perf_flush_ms: { tol: 0.25, slack: 0 },
 };
+
+/** Postgres budgets (part 4b D51), in each metric's own unit. Reads stay
+ *  within one 16 ms frame; ingest and writes pay a round trip and a commit per
+ *  statement, so they get absolute budgets rather than a ratio to SQLite. */
+export const PG_GATE: Record<string, number> = {
+  ingest_fresh_us_per_line: 3000,
+  ingest_replay_us_per_line: 1500,
+  summary_uncached_ms: 16,
+  summary_cached_us: 1000,
+  lookup_mapping_us: 1000,
+  events_page_ms: 16,
+  list_sessions_ms: 16,
+  read_round_stall_ms: 16,
+  stall_max_ms: 50,
+  search_ms: 50,
+  record_mapping_us: 10_000,
+  record_error_us: 10_000,
+};
+
+export function pgGateRows(pg: Metrics) {
+  return Object.entries(PG_GATE).map(([metric, max]) => ({ metric, postgres: pg[metric], max, ok: pg[metric] <= max }));
+}
 
 function medianOfFiles(list: string): Metrics {
   const all = list.split(',').map((p) => JSON.parse(readFileSync(p.trim(), 'utf8')) as Metrics);
@@ -128,8 +157,10 @@ const median = (xs: number[]): number => [...xs].sort((a, b) => a - b)[Math.floo
 async function oneRun(): Promise<Metrics> {
   const dir = mkdtempSync(join(tmpdir(), 'cf-state-bench-'));
   const m: Metrics = {};
+  const pg = isPg ? await testPgSchema() : null;
   try {
-    const raw = db.openDb(dir);
+    const raw = pg ? null : db.openDb(dir);
+    if (pg) await db.openDbPostgres(pg.pool, { afterBeginWrite: new InboxWriteGate().hook });
     const big = lines(N_LINES, 'big');
     m.ingest_fresh_us_per_line = ((await time(() => ingestLikeWatcher('ws', 'big', big))) * 1000) / N_LINES;
     m.ingest_replay_us_per_line = ((await time(() => ingestLikeWatcher('ws', 'big', big))) * 1000) / N_LINES;
@@ -201,7 +232,11 @@ async function oneRun(): Promise<Metrics> {
     const embed = async (texts: string[]) => texts.map(() => { const v = new Float32Array(EMBED_DIM); v[3] = 1; return v; });
     const allowed = new Set(Array.from({ length: 7 }, (_, i) => `ws${i}`));
     const searches: number[] = [];
-    for (let i = 0; i < 10; i++) searches.push(await time(() => searchTranscripts('q', allowed, embed, { limit: 10 }, raw)));
+    for (let i = 0; i < 10; i++) {
+      searches.push(await time(async () => raw
+        ? searchTranscripts('q', allowed, embed, { limit: 10 }, raw)
+        : db.searchEmbeddings((await embed(['q']))[0], [...allowed], { limit: 10 })));
+    }
     m.search_ms = median(searches);
 
     m.record_mapping_us = ((await time(async () => {
@@ -213,8 +248,8 @@ async function oneRun(): Promise<Metrics> {
 
     // Pre-port PerfStore takes the raw handle; the ported one (it has a
     // flushChain field) takes the Kysely handle.
-    const probe = new PerfStore(raw as never);
-    const store = 'flushChain' in probe
+    const probe = new PerfStore((raw ?? db.stateKysely()) as never);
+    const store = !raw ? probe : 'flushChain' in probe
       ? new PerfStore((db as unknown as { stateKysely: () => unknown }).stateKysely() as never)
       : probe;
     for (let i = 0; i < N_PERF_ROWS; i++) store.enqueue({ ts: i, kind: 'stall', durMs: 60, meta: { p50: 1 } });
@@ -222,12 +257,19 @@ async function oneRun(): Promise<Metrics> {
     return m;
   } finally {
     await db.closeDb();
+    await pg?.drop();
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
 describe.skipIf(process.env.STATE_BENCH !== '1')('state.db hot-path benchmark', () => {
   it('measures every hot path (median of RUNS), or compares saved runs', async () => {
+    if (process.env.STATE_BENCH_PG_GATE) {
+      const rows = pgGateRows(medianOfFiles(process.env.STATE_BENCH_PG_GATE));
+      console.log('STATE_BENCH_PG_GATE ' + JSON.stringify(rows, null, 2));
+      expect(rows.filter((r) => !r.ok).map((r) => r.metric)).toEqual([]);
+      return;
+    }
     if (process.env.STATE_BENCH_BASELINE && process.env.STATE_BENCH_CANDIDATE) {
       const base = medianOfFiles(process.env.STATE_BENCH_BASELINE);
       const cand = medianOfFiles(process.env.STATE_BENCH_CANDIDATE);
