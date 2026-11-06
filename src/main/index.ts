@@ -20,6 +20,7 @@ import { wslLocalProjectsDir, wslLocalSessionsDir } from './localLauncher.js';
 import { encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir, workspaceStateDir } from './paths.js';
 import { existsSync } from 'node:fs';
 import { startRetention } from './state/retention.js';
+import { prepareVacuum, spawnVacuumHelper, waitForVacuumHelper } from './state/vacuumHelper.js';
 import { installMainProcessHandlers, getLogPath, setErrorSink, logError } from './errorLog.js';
 import { installAppMenu } from './appMenu.js';
 import { isOpenableExternalUrl } from './externalUrl.js';
@@ -514,6 +515,9 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   let embed: EmbedFn | null = null;
   if (jsonlWatcher) {
     if (sqlite) {
+      // A one-time VACUUM from the last quit may still hold state.db.
+      const waited = await waitForVacuumHelper(userData);
+      if (waited !== 'none') logError({ source: 'main', level: 'info', type: 'vacuum-wait', message: `vacuum helper: ${waited}` });
       openDb(userData);
       await startStateWrites();
       startStateRetention();
@@ -766,6 +770,8 @@ app.on('before-quit', (e) => {
   e.preventDefault();
   markQuitting();
   supervisor?.stop();
+  let vacuumAfterQuit = false;
+  let stateClosed = false;
   void withinMs((async () => {
     // Let a bring-up step or a switch back in flight finish first.
     if (supervisor) await withinMs(supervisor.exclusive(async () => undefined), QUIT_BOUND_MS / 2);
@@ -790,12 +796,17 @@ app.on('before-quit', (e) => {
     await inboxStore?.close();
     inboxStore = null;
     await shutdownPerf();
+    vacuumAfterQuit = await prepareVacuum(app.getPath('userData')).catch(() => false);
     await closeDb();
+    stateClosed = true;
     await pgStores?.end();
     pgStores = null;
     if (managedDocker) await stopManagedPostgres(managedDocker);
   })().catch((err) => logError({ source: 'main', type: 'quit-shutdown', level: 'warn', message: String(err) })), QUIT_BOUND_MS)
-    .then(() => app.exit(0));
+    .then(() => {
+      if (vacuumAfterQuit && stateClosed) spawnVacuumHelper(app.getPath('userData'));
+      app.exit(0);
+    });
 });
 
 app.on('window-all-closed', () => {

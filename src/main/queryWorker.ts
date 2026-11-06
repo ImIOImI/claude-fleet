@@ -129,7 +129,7 @@ try {
 `;
 
 /** Absolute path the worker can require better-sqlite3 from (asar-unpacked in packaged builds). */
-function betterSqlitePath(): string {
+export function betterSqlitePath(): string {
   const p = createRequire(import.meta.url).resolve('better-sqlite3');
   const unpacked = p.replace(/app\.asar([\\/])/, 'app.asar.unpacked$1');
   return unpacked !== p && existsSync(unpacked) ? unpacked : p;
