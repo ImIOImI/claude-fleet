@@ -164,12 +164,21 @@ describe('readHostEnv', () => {
       stateDir: '/home/fleet/.claude/fleet-host',
       credSocket: '/run/fleet-host/cred.sock',
       projectsDir: join(homedir(), '.claude', 'projects'),
-      brokerSocket: '/run/broker/broker.sock'
+      brokerSocket: '/run/broker/broker.sock',
+      mcpSocket: '/run/fleet/mcp.sock',
+      mcpSocketGroup: null
     });
   });
 
   it('honours FLEET_HOST_PORT and FLEET_HOST_CONFIG', () => {
     expect(readHostEnv({ FLEET_HOST_PORT: '9000', FLEET_HOST_CONFIG: '/c.yaml' })).toMatchObject({ port: 9000, configPath: '/c.yaml' });
     expect(() => readHostEnv({ FLEET_HOST_PORT: 'x' })).toThrow(/FLEET_HOST_PORT/);
+  });
+
+  it('reads the MCP socket and its group', () => {
+    expect(readHostEnv({}).mcpSocket).toBe('/run/fleet/mcp.sock');
+    expect(readHostEnv({}).mcpSocketGroup).toBeNull();
+    expect(readHostEnv({ FLEET_HOST_MCP_SOCKET: '/x/m.sock', FLEET_HOST_MCP_SOCKET_GROUP: '1500' })).toMatchObject({ mcpSocket: '/x/m.sock', mcpSocketGroup: 1500 });
+    expect(() => readHostEnv({ FLEET_HOST_MCP_SOCKET_GROUP: 'staff' })).toThrow(/FLEET_HOST_MCP_SOCKET_GROUP/);
   });
 });

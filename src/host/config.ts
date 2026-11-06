@@ -203,18 +203,26 @@ export interface HostEnv {
   credSocket: string;
   /** Claude's transcripts in this container, ingested by the holder. */
   projectsDir: string;
+  /** The fleet-state MCP socket the holder serves to sessions. */
+  mcpSocket: string;
+  /** Shared-group mode (container split): the directory is prepped and checked, the socket is 0660 in this group. */
+  mcpSocketGroup: number | null;
 }
 
 export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
   const portText = env.FLEET_HOST_PORT ?? String(DEFAULT_PORT);
   const port = Number(portText);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new HostConfigError(`FLEET_HOST_PORT ${portText} is not a port`);
+  const groupText = env.FLEET_HOST_MCP_SOCKET_GROUP;
+  if (groupText !== undefined && groupText !== '' && !/^\d{1,9}$/.test(groupText)) throw new HostConfigError('FLEET_HOST_MCP_SOCKET_GROUP must be a numeric gid');
   return {
     port,
     configPath: env.FLEET_HOST_CONFIG || DEFAULT_CONFIG_PATH,
     stateDir: env.FLEET_HOST_STATE || '/home/fleet/.claude/fleet-host',
     brokerSocket: env.CLAUDE_FLEET_BROKER_SOCKET || '/run/broker/broker.sock',
     credSocket: env.FLEET_HOST_CRED_SOCKET || '/run/fleet-host/cred.sock',
-    projectsDir: env.FLEET_HOST_PROJECTS || join(homedir(), '.claude', 'projects')
+    projectsDir: env.FLEET_HOST_PROJECTS || join(homedir(), '.claude', 'projects'),
+    mcpSocket: env.FLEET_HOST_MCP_SOCKET || '/run/fleet/mcp.sock',
+    mcpSocketGroup: groupText ? Number(groupText) : null
   };
 }
