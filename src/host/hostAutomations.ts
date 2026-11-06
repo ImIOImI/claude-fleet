@@ -2,13 +2,13 @@
 // fenced store (SPEC §7 *Host automations*). Definitions come only from the
 // host config; script steps, live steps, notifications and other workspaces
 // are refused.
-import { randomUUID } from 'node:crypto';
 import type { TodoSource } from '../preload/inboxTypes.js';
 import { AutomationStore } from '../main/automations/automationStore.js';
 import { createAutomationService } from '../main/automations/automationService.js';
 import { createProposalService } from '../main/automations/proposalService.js';
 import { ProposalStore } from '../main/automations/proposalStore.js';
 import { definitionToYaml, validateDefinition } from '../main/automations/definition.js';
+import { freshArgv } from '../main/automations/freshArgv.js';
 import { createInboxService } from '../main/inbox/inboxService.js';
 import type { InboxStore } from '../main/inbox/inboxDb.js';
 import { setAutomationHandlers, setInboxHandlers } from '../main/mcpCore.js';
@@ -24,8 +24,6 @@ const OPERATOR: TodoSource = { kind: 'user', id: null };
 const TICK_MS = 30_000;
 const SETTLE_MS = 2_000;
 const CONFIG_ONLY = 'on a remote host, automations come from the host config (automations: in config.yaml)';
-/** Under Linux's 128 KiB per-argument limit (MAX_ARG_STRLEN); the broker passes argv to claude unchanged. */
-export const MAX_FRESH_PROMPT_BYTES = 120 * 1024;
 const fromConfig = (a: { origin: Record<string, unknown> | null }): boolean => a.origin?.source === HOST_CONFIG_ORIGIN.source;
 
 export interface HostAutomationsOptions {
@@ -227,12 +225,4 @@ export async function startHostAutomations(o: HostAutomationsOptions) {
       clearTimeout(t);
     }
   };
-}
-
-/** The runner's `['-p', prompt, ...options]` as claude argv: the prompt after `--`, so a leading `-` stays text. */
-export function freshArgv(args: string[], mcpArgs: string[]): string[] {
-  const [flag, prompt, ...options] = args;
-  if (flag !== '-p' || typeof prompt !== 'string') throw new Error('a fresh step needs a prompt');
-  if (Buffer.byteLength(prompt) > MAX_FRESH_PROMPT_BYTES) throw new Error(`the prompt is longer than ${MAX_FRESH_PROMPT_BYTES / 1024} KiB`);
-  return ['-p', ...options, ...mcpArgs, '--session-id', randomUUID(), '--', prompt];
 }
