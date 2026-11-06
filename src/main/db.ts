@@ -167,13 +167,13 @@ export function stateKysely(): Kysely<StateDb> {
 }
 
 // Claude session ids that some tab is waiting on before promoting a deferred
-// remap (#170), keyed `${workspaceId} ${claudeSessionId}`. An in-memory
+// remap (#170), keyed `${workspaceId}\u0000${claudeSessionId}`. An in-memory
 // fast-path so `ingestLine` can skip the promotion UPDATE on the common line
 // (no pending remap). Rehydrated from the persisted rows on open so a restart
 // doesn't strand a pending mapping.
 const pendingClaudeIds = new Set<string>();
 const pendingKey = (workspaceId: string, claudeSessionId: string): string =>
-  `${workspaceId} ${claudeSessionId}`;
+  `${workspaceId}\u0000${claudeSessionId}`;
 
 /** Test-only view of the pending-remap guard set (keys from `pendingKey`). */
 export function __pendingClaudeIdsForTest(): ReadonlySet<string> {
