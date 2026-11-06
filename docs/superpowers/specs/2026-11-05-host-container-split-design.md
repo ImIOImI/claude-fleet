@@ -217,11 +217,13 @@ spec:
   rules:
     - from: [{ source: { principals: ["cluster.local/ns/platform-ops/sa/fleet-agent-workspace"] } }]
       to: [{ operation: { ports: ["8081", "8082"] } }]
-    - from: [{ source: { principals: ["<ingress-gateway-principal>"] } }]
+    - from: [{ source: { principals: ["cluster.local/ns/platform-ops/sa/platform-ops-infra-gateway-*"] } }]
       to: [{ operation: { ports: ["8080"] } }]
 ```
 
 - A selector-scoped ALLOW policy denies everything it doesn't match, so the host policy must list :8080 for the gateway. Kubelet probes still pass: Istio rewrites them through the sidecar's agent.
+- The gateway SA is the upstream Istio `gateway` chart's default, named after the Argo Application `platform-ops-infra-gateway-<color>-controller`; the prefix matches every hub color.
+- The EFS transcripts/session volume mounts with `actimeo=1`; NFS defaults would hide new transcript files for up to 60 s.
 - Don't set `traffic.sidecar.istio.io/excludeInboundPorts` (or `excludeOutboundPorts`) to any of these ports; that bypasses the sidecar.
 - A DestinationRule on `<workspace-svc>` with `connectionPool.tcp.idleTimeout: 0s` (disabled). Envoy's TCP proxy otherwise cuts a connection idle for 1 h, which would drop a quiet viewer's attach.
 
