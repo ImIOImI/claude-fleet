@@ -1,4 +1,5 @@
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync, type FSWatcher } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -71,5 +72,51 @@ describe('RecursiveDirWatcher', () => {
     w.on('error', (e) => errors.push(e));
     w.add(join(root, 'missing'));
     await waitFor(() => errors.length > 0);
+  });
+});
+
+describe('RecursiveDirWatcher recovery', () => {
+  it('rescans the root as change events when an event has no filename (buffer overflow)', async () => {
+    let listener: ((ev: string, f: string | null) => void) | null = null;
+    const fake = Object.assign(new EventEmitter(), { close: () => undefined }) as unknown as FSWatcher;
+    const rw = new RecursiveDirWatcher({ depth: 2, watchFn: (_root, l) => { listener = l; return fake; } });
+    const got: string[] = [];
+    rw.on('change', (p: string) => got.push(p));
+    writeFileSync(join(root, 'd.jsonl'), '1\n');
+    rw.add(root);
+    await new Promise((r) => setTimeout(r, 50));
+    listener!('rename', null);
+    await waitFor(() => got.includes(join(root, 'd.jsonl')));
+    await rw.close();
+  });
+
+  it('retries a root that was missing at add() and watches it once it exists', async () => {
+    const missing = join(root, 'later');
+    const rw = new RecursiveDirWatcher({ depth: 2, retryMs: 50 });
+    const got: Array<[string, string]> = [];
+    rw.on('error', () => undefined);
+    for (const ev of ['add', 'change'] as const) rw.on(ev, (p: string) => got.push([ev, p]));
+    rw.add(missing);
+    await new Promise((r) => setTimeout(r, 120));
+    mkdirSync(missing);
+    writeFileSync(join(missing, 'e.jsonl'), '1\n');
+    await waitFor(() => got.some(([, p]) => p === join(missing, 'e.jsonl')));
+    await rw.close();
+  });
+
+  it('re-watches a root after a watcher error', async () => {
+    const fakes: EventEmitter[] = [];
+    const rw = new RecursiveDirWatcher({
+      depth: 2, retryMs: 50,
+      watchFn: () => { const f = Object.assign(new EventEmitter(), { close: () => undefined }); fakes.push(f); return f as unknown as FSWatcher; }
+    });
+    rw.on('error', () => undefined);
+    rw.add(root);
+    fakes[0].emit('error', new Error('EPERM'));
+    await waitFor(() => fakes.length === 2);
+    rw.unwatch(root);
+    fakes[1].emit('error', new Error('EPERM'));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(fakes).toHaveLength(2);
   });
 });

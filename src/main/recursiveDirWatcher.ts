@@ -8,41 +8,61 @@ import { EventEmitter } from 'node:events';
 import { watch, promises as fsp, type FSWatcher } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 
+const RETRY_MS = 5000;
+
+type WatchFn = (root: string, listener: (event: string, filename: string | Buffer | null) => void) => FSWatcher;
+const nativeWatch: WatchFn = (root, listener) => watch(root, { recursive: true, persistent: true }, listener);
+
 export class RecursiveDirWatcher extends EventEmitter {
   private readonly roots = new Map<string, FSWatcher>();
+  /** Roots added and not unwatched; a failed one is retried until it watches. */
+  private readonly wanted = new Set<string>();
 
-  constructor(private readonly opts: { depth: number }) {
+  constructor(private readonly opts: { depth: number; retryMs?: number; watchFn?: WatchFn }) {
     super();
   }
 
   add(root: string): this {
+    this.wanted.add(root);
     if (this.roots.has(root)) return this;
     let fsw: FSWatcher;
     try {
-      fsw = watch(root, { recursive: true, persistent: true }, (_ev, filename) => {
+      fsw = (this.opts.watchFn ?? nativeWatch)(root, (_ev, filename) => {
+        // No filename: the OS change buffer overflowed (Windows), so any file may have changed.
         if (filename) void this.onEvent(root, join(root, filename.toString()));
+        else void this.scan(root, root, this.opts.depth, 'change');
       });
     } catch (err) {
       queueMicrotask(() => this.emit('error', err));
+      this.retry(root);
       return this;
     }
     fsw.on('error', (err) => {
-      this.unwatch(root);
+      fsw.close();
+      this.roots.delete(root);
       this.emit('error', err);
+      this.retry(root);
     });
     this.roots.set(root, fsw);
-    void this.scan(root, root, this.opts.depth);
+    void this.scan(root, root, this.opts.depth, 'add');
     return this;
   }
 
   unwatch(root: string): this {
+    this.wanted.delete(root);
     this.roots.get(root)?.close();
     this.roots.delete(root);
     return this;
   }
 
   async close(): Promise<void> {
-    for (const root of [...this.roots.keys()]) this.unwatch(root);
+    for (const root of [...this.wanted]) this.unwatch(root);
+  }
+
+  private retry(root: string): void {
+    setTimeout(() => {
+      if (this.wanted.has(root) && !this.roots.has(root)) this.add(root);
+    }, this.opts.retryMs ?? RETRY_MS).unref();
   }
 
   /** Subdirectory levels between root and p's parent dir. */
@@ -66,7 +86,7 @@ export class RecursiveDirWatcher extends EventEmitter {
     else if (st.isDirectory() && depth < this.opts.depth) await this.scan(root, p, this.opts.depth - depth - 1);
   }
 
-  private async scan(root: string, dir: string, depth: number): Promise<void> {
+  private async scan(root: string, dir: string, depth: number, ev: 'add' | 'change' = 'add'): Promise<void> {
     let entries;
     try {
       entries = await fsp.readdir(dir, { withFileTypes: true });
@@ -76,8 +96,8 @@ export class RecursiveDirWatcher extends EventEmitter {
     for (const e of entries) {
       if (!this.roots.has(root)) return;
       const p = join(dir, e.name);
-      if (e.isFile()) this.emit('add', p);
-      else if (e.isDirectory() && depth > 0) await this.scan(root, p, depth - 1);
+      if (e.isFile()) this.emit(ev, p);
+      else if (e.isDirectory() && depth > 0) await this.scan(root, p, depth - 1, ev);
     }
   }
 }
