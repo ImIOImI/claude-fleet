@@ -16,7 +16,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { createPortal } from 'react-dom';
 import { colorFor } from '../App';
 import type { SessionListItem } from '../../../preload';
-import { sessionsForScope, filterSessions, partitionByOpen, orderOpenByTabs, splitHeadless, splitCapture, tagCounts, limitSessions } from '../sessionsView';
+import { sessionsForScope, filterSessions, partitionByOpen, orderByRecencyBucket, splitHeadless, splitCapture, tagCounts, limitSessions } from '../sessionsView';
 import { useBlinkSync } from '../blinkSync';
 import type { OpenTabRef } from '../busySessions';
 import { usePortalMenu } from './portalMenu';
@@ -46,7 +46,6 @@ interface Props {
   openSessions?: Map<string, OpenTabRef>;
   /** Workspace id → live broker ids in tab-strip order. The Open group follows
    *  it so activity never reshuffles rows (only tab open/close/drag does). */
-  liveTabOrder?: Record<string, string[]>;
   /** Claude session UUID of the tab the user is in — rendered as the current row. */
   currentSessionId?: string | null;
   /** Resume a session — App brings the container up, then opens a resume tab. */
@@ -88,7 +87,6 @@ export function SessionsPane({
   busySessionIds,
   waitingSessionIds,
   openSessions,
-  liveTabOrder,
   currentSessionId = null,
   onResume,
   showSessionCost = true,
@@ -174,8 +172,8 @@ export function SessionsPane({
   const q = query.trim().toLowerCase();
   const filtered = filterSessions(scoped, query, activeTags);
   const openIds = new Set(openSessions?.keys() ?? []);
-  const parts = partitionByOpen(filtered, openIds);
-  const openRows = orderOpenByTabs(parts.open, openSessions ?? new Map(), liveTabOrder ?? {});
+  const parts = partitionByOpen(orderByRecencyBucket(filtered), openIds);
+  const openRows = parts.open;
   // Automation runs leave Recent for their own collapsed group at the bottom,
   // so a new run never pushes the user's own sessions down.
   const { headless: headlessRows, rest: recentRows } = splitHeadless(parts.recent);
@@ -198,7 +196,7 @@ export function SessionsPane({
   // open rows + the limited recent rows over the FULL list, search ignored
   // (searching never changed the badge before either). Capture forks never
   // count toward the badge.
-  const allParts = partitionByOpen(items, openIds);
+  const allParts = partitionByOpen(orderByRecencyBucket(items), openIds);
   const allSplit = splitHeadless(allParts.recent);
   const allSessionsCount =
     allParts.open.length +
@@ -207,8 +205,7 @@ export function SessionsPane({
   const allTags = tagCounts(scoped);
 
   // FLIP: rows animate to their new slot when they move between the Open and
-  // Recent groups (or the Open group reorders on a tab open/close/drag —
-  // activity alone never moves a row, see orderOpenByTabs). Positions are captured after every render;
+  // Recent groups, or cross a recency bucket (see orderByRecencyBucket). Positions are captured after every render;
   // deltas against the previous render animate via the Web Animations API.
   const rowEls = useRef(new Map<string, HTMLLIElement>());
   const rowRef = (id: string) => (el: HTMLLIElement | null): void => {
