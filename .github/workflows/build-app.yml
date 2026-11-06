@@ -178,11 +178,13 @@ jobs:
 
       # keytar's prebuilt binary dynamically links libsecret at runtime;
       # node-pty compiles from source on Linux (no bundled linux prebuild).
+      # Runtime lib only: -dev drags ~20 packages from a sometimes-slow mirror.
+      # The index refresh runs only when the image's lists are stale.
       - name: Install Linux build/runtime deps
         if: matrix.os == 'ubuntu-latest'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libsecret-1-dev
+          sudo apt-get install -y --no-install-recommends libsecret-1-0 ||
+            { sudo apt-get update && sudo apt-get install -y --no-install-recommends libsecret-1-0; }
 
       # macOS/Linux: install without scripts, drop the optional cpu-features
       # dep, then rebuild the required natives for the Electron ABI. We must
@@ -203,8 +205,19 @@ jobs:
       #   drop cpu-features (optional ssh2 dep, no win prebuild → needs MSVC)
       #   install-app-deps fetches better-sqlite3/keytar Electron prebuilts;
       #   node-pty uses its bundled win32 prebuild.
-      - name: Install dependencies (Windows — prebuilt natives, no MSVC)
+      # install-app-deps still spends ~90 s on node-pty here, so the finished
+      # tree is cached; shared with e2e-windows-run (same install, same key).
+      # Bump v1 when either job's install recipe changes.
+      - name: Restore installed node_modules (Windows)
         if: matrix.os == 'windows-latest'
+        id: nm
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: nm-electron-${{ runner.os }}-v1-${{ hashFiles('package-lock.json') }}
+
+      - name: Install dependencies (Windows — prebuilt natives, no MSVC)
+        if: matrix.os == 'windows-latest' && steps.nm.outputs.cache-hit != 'true'
         shell: bash
         run: |
           npm ci --ignore-scripts
@@ -249,10 +262,11 @@ jobs:
 
       # libsecret for keytar (links it at runtime); build-essential/python3 are
       # preinstalled on the runner and let node-pty compile its Electron-ABI build.
+      # Runtime lib only, index refresh only on a stale list (see build job).
       - name: Install Linux runtime deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libsecret-1-dev
+          sudo apt-get install -y --no-install-recommends libsecret-1-0 ||
+            { sudo apt-get update && sudo apt-get install -y --no-install-recommends libsecret-1-0; }
 
       # Install without scripts, drop the optional cpu-features dep (its old
       # `nan` build fails against Electron 43's V8), then rebuild the required
@@ -317,16 +331,29 @@ jobs:
       # Same Windows install dance as the build job: skip node-ABI native builds,
       # then re-run only the electron binary download (skipped by --ignore-scripts),
       # then fetch Electron-ABI prebuilts (better-sqlite3, keytar, node-pty).
+      # Same cache as the Windows build job.
+      - name: Restore installed node_modules
+        id: nm
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: nm-electron-${{ runner.os }}-v1-${{ hashFiles('package-lock.json') }}
+
       - name: Install dependencies (prebuilt natives, no MSVC)
+        if: steps.nm.outputs.cache-hit != 'true'
         shell: bash
         run: |
           npm ci --ignore-scripts
           rm -rf node_modules/cpu-features
-          node node_modules/electron/install.js
           npx --no-install electron-builder install-app-deps --platform win32 --arch x64
 
-      - name: Install Electron/Chromium system libraries
-        run: npx playwright install-deps chromium
+      # Outside the cache gate: a tree saved by the build job has no electron/dist.
+      # No-op when the binary is already present.
+      - name: Download the Electron binary
+        run: node node_modules/electron/install.js
+
+      # No `playwright install-deps` here: on win32 it only enables the Media
+      # Foundation feature, which no spec uses.
 
       - name: Build app
         run: npm run build
