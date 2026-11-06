@@ -176,6 +176,17 @@ describe('CREATE args', () => {
     expect(broker.created).toEqual([]);
     expect(last(rec).json).toMatchObject({ ok: false, error: 'forbidden: unsupported create args' });
   });
+
+  it('appends createArgs after the gate', async () => {
+    const broker = fakeBroker([]);
+    const v = new AttachHub(broker.ops, { createArgs: (a) => [...a, '--mcp-config', '{}'] }).viewer({ identity: alice, tier: 'session' }, sinkRecorder().sink);
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'n' }));
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'm', args: ['--resume', UUID] }));
+    expect(broker.created.map((c) => c.args)).toEqual([
+      ['--settings', RUNNER_HOOK_SETTINGS, '--mcp-config', '{}'],
+      ['--settings', RUNNER_HOOK_SETTINGS, '--resume', UUID, '--mcp-config', '{}']
+    ]);
+  });
 });
 
 describe('fan-out', () => {

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { handleMcpRequestForTests, setInboxHandlers, setReadScopeResolver } from '../main/mcpCore.js';
 import type { OwnedReadSource } from '../main/store/readSource.js';
 import { createLogger } from './log.js';
-import { HOST_MCP_TOOLS, startHostMcp, type HostMcp } from './hostMcp.js';
+import { HOST_MCP_BRIDGE, HOST_MCP_TOOLS, hostMcpArgs, startHostMcp, type HostMcp } from './hostMcp.js';
 
 const WS = '01JC0000000000000000000000';
 const scopes: string[][] = [];
@@ -135,5 +135,15 @@ describe('startHostMcp', () => {
     await expect(startHostMcp({ socketPath, socketGroup: null, workspaceId: WS, readSource: rs, log: createLogger(() => undefined) })).rejects.toThrow(/not a socket/);
     const list = handleMcpRequestForTests('tools/list') as { tools: unknown[] };
     expect(list.tools.length).toBeGreaterThan(HOST_MCP_TOOLS.size);
+  });
+});
+
+describe('hostMcpArgs', () => {
+  it('names claude-fleet-state and points the bridge at the socket', () => {
+    const [flag, json] = hostMcpArgs('/run/fleet/mcp.sock');
+    expect(flag).toBe('--mcp-config');
+    expect(JSON.parse(json)).toEqual({
+      mcpServers: { 'claude-fleet-state': { type: 'stdio', command: 'node', args: [HOST_MCP_BRIDGE], env: { CLAUDE_FLEET_MCP_UNIX: '/run/fleet/mcp.sock' } } }
+    });
   });
 });

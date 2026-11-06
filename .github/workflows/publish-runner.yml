@@ -37,6 +37,7 @@ on:
       - 'src/main/clipText.ts'
       - 'src/main/claims/searchHits.ts'
       - 'src/main/store/readSource.ts'
+      - 'src/main/mcpContainerBridge.ts'
       - 'src/main/state/ingestParse.ts'
       - 'src/main/state/serialQueue.ts'
       - 'src/main/state/transcriptPaths.ts'

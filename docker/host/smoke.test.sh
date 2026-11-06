@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Smoke-test a runner-host image: probes on 8080, auth required, uid 1000,
-# `fleet-host init`, the bootstrap/migrate subcommands, and a clean SIGTERM that reaches fleet-host.
+# `fleet-host init`, the bootstrap/migrate subcommands, the MCP bridge file and /run/fleet,
+# and a clean SIGTERM that reaches fleet-host.
 set -euo pipefail
 image=$1
 cfg=$(mktemp -d)
@@ -17,6 +18,8 @@ curl -fsS "http://127.0.0.1:$port/healthz" | grep -q '"lease":"holder"'
 test "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/whoami")" = 401
 test "$(docker exec "$cid" id -u)" = 1000
 docker exec "$cid" sh -c 'test -s /etc/ssl/certs/rds-global-bundle.pem && grep -q "BEGIN CERTIFICATE" /etc/ssl/certs/rds-global-bundle.pem'
+docker exec "$cid" sh -c 'test -s /usr/local/lib/fleet-host/mcp-bridge.cjs && grep -q CLAUDE_FLEET_MCP_UNIX /usr/local/lib/fleet-host/mcp-bridge.cjs'
+test "$(docker exec "$cid" stat -c '%a %U' /run/fleet)" = '700 fleet'
 docker exec "$cid" fleet-host init | grep -q '"workspaceId"'
 test "$(docker exec "$cid" sh -c 'fleet-host bootstrap >/dev/null; echo rc=$?')" = rc=2
 docker exec "$cid" sh -c 'fleet-host migrate; true' | grep -q 'has no db: block'

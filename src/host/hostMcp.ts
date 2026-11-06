@@ -86,3 +86,12 @@ export async function startHostMcp(o: {
     }
   };
 }
+
+/** Written into the image at build (`fleet-host write-mcp-bridge`). */
+export const HOST_MCP_BRIDGE = '/usr/local/lib/fleet-host/mcp-bridge.cjs';
+
+/** Appended to every claude fleet-host creates; the name is the prefix INBOX_TOOLS uses. `--mcp-config` is variadic, so these go last. */
+export function hostMcpArgs(socketPath: string, bridge: string = HOST_MCP_BRIDGE): string[] {
+  const entry = { type: 'stdio', command: 'node', args: [bridge], env: { CLAUDE_FLEET_MCP_UNIX: socketPath } };
+  return ['--mcp-config', JSON.stringify({ mcpServers: { 'claude-fleet-state': entry } })];
+}

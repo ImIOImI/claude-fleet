@@ -3,6 +3,7 @@
 // src/main modules listed here.
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
+import { isBuiltin } from 'node:module';
 import { dirname, join, relative, resolve } from 'node:path';
 import { parse } from 'yaml';
 
@@ -16,6 +17,7 @@ const MAIN_ALLOWED = [/^main\/identity\/[^/]+\.ts$/, /^main\/broker\.ts$/, /^mai
   /^main\/store\/migrations\/(statePg|inboxPg)\.ts$/,
   /^main\/(db|asyncCache|contextWindow|pricing|usageAnchors|userPromptText|vectors|mcpCore|mcpLines|clipText)\.ts$/,
   /^main\/claims\/searchHits\.ts$/,
+  /^main\/mcpContainerBridge\.ts$/,
   /^main\/state\/(ingestParse|serialQueue|transcriptPaths)\.ts$/,
   /^main\/inbox\/(inboxDb|inboxCore)\.ts$/,
   /^preload\/(inboxTypes|captureSettings)\.ts$/];
@@ -32,7 +34,8 @@ function walk(): { files: string[]; bare: Set<string> } {
     const text = readFileSync(file, 'utf8');
     for (const m of text.matchAll(SPEC_RE)) {
       const spec = m[1] ?? m[2] ?? m[3];
-      if (spec.startsWith('node:')) continue;
+      // Bare builtins also match inside script text (the container bridge's `require('net')`).
+      if (spec.startsWith('node:') || isBuiltin(spec)) continue;
       if (!spec.startsWith('.')) {
         bare.add(spec.split('/')[0]);
         continue;
