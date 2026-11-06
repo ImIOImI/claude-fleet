@@ -45,6 +45,16 @@ export interface HostConfig {
   grants: GrantConfig;
   /** Proxies in front of the pod that append to X-Forwarded-For; 0 means key on the socket address. */
   trustedProxyHops: number;
+  /** The only source of this workspace's automations; the holder validates each definition. */
+  automations: HostAutomationEntry[];
+}
+
+export const MAX_HOST_AUTOMATIONS = 100;
+
+/** A definition the holder reconciles into the store (SPEC §7 *Host automations*). */
+export interface HostAutomationEntry {
+  definition: Record<string, unknown>;
+  enabled: boolean;
 }
 
 export class HostConfigError extends Error {
@@ -62,6 +72,23 @@ function record(v: unknown, path: string): Record<string, unknown> {
 // Unknown keys are refused so a typo (e.g. `Id`) can't silently fall back to minting.
 function onlyKeys(o: Record<string, unknown>, path: string, allowed: readonly string[]): void {
   for (const k of Object.keys(o)) if (!allowed.includes(k)) throw new HostConfigError(`${path} has unknown key ${k}`);
+}
+
+function parseAutomations(v: unknown): HostAutomationEntry[] {
+  if (v === undefined) return [];
+  if (!Array.isArray(v)) throw new HostConfigError('automations must be a list');
+  if (v.length > MAX_HOST_AUTOMATIONS) throw new HostConfigError(`automations: at most ${MAX_HOST_AUTOMATIONS}`);
+  const names = new Set<string>();
+  return v.map((raw, i) => {
+    const e = record(raw, `automations[${i}]`);
+    onlyKeys(e, `automations[${i}]`, ['definition', 'enabled']);
+    const definition = record(e.definition, `automations[${i}].definition`);
+    if (typeof definition.name !== 'string' || !definition.name) throw new HostConfigError(`automations[${i}].definition.name must be a string`);
+    if (names.has(definition.name)) throw new HostConfigError(`duplicate automation name ${definition.name}`);
+    names.add(definition.name);
+    if (e.enabled !== undefined && typeof e.enabled !== 'boolean') throw new HostConfigError(`automations[${i}].enabled must be true or false`);
+    return { definition, enabled: e.enabled !== false };
+  });
 }
 
 function parseWorkspace(v: unknown): HostWorkspaceInfo {
@@ -150,7 +177,7 @@ function parseDb(v: unknown): PostgresStoreConfig {
 
 export function parseHostConfig(raw: unknown): HostConfig {
   const o = record(raw, 'host config');
-  onlyKeys(o, 'host config', ['workspace', 'identity', 'grants', 'machines', 'trustedProxyHops', 'github', 'db']);
+  onlyKeys(o, 'host config', ['workspace', 'identity', 'grants', 'machines', 'trustedProxyHops', 'github', 'db', 'automations']);
   const id = o.identity === undefined ? {} : record(o.identity, 'identity');
   onlyKeys(id, 'identity', ['provider', 'org']);
   if (id.provider !== undefined && id.provider !== 'github') {
@@ -175,7 +202,8 @@ export function parseHostConfig(raw: unknown): HostConfig {
     db: o.db === undefined ? null : parseDb(o.db),
     identity: { provider: 'github', org: typeof id.org === 'string' ? id.org : null },
     grants,
-    trustedProxyHops: hops
+    trustedProxyHops: hops,
+    automations: parseAutomations(o.automations)
   };
 }
 

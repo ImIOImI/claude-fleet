@@ -185,3 +185,23 @@ describe('readHostEnv', () => {
     expect(() => readHostEnv({ FLEET_HOST_MCP_SOCKET: '/' + 'a'.repeat(107) })).toThrow(/FLEET_HOST_MCP_SOCKET is longer than 107 bytes/);
   });
 });
+
+describe('automations', () => {
+  const base = { workspace: { name: 'w' }, grants: [{ team: 'acme/platform', tier: 'read' }] };
+  const def = (name: string) => ({ name, triggers: [{ manual: {} }], steps: [{ id: 'go', prompt: { workspace: '$self', mode: 'fresh', message: 'hi' } }] });
+  it('defaults to none and keeps entries with enabled defaulting to true', () => {
+    expect(parseHostConfig(base).automations).toEqual([]);
+    expect(parseHostConfig({ ...base, automations: [{ definition: def('a') }, { definition: def('b'), enabled: false }] }).automations)
+      .toEqual([{ definition: def('a'), enabled: true }, { definition: def('b'), enabled: false }]);
+  });
+  it('refuses bad shapes, duplicate names and unknown keys', () => {
+    expect(() => parseHostConfig({ ...base, automations: {} })).toThrow(/automations must be a list/);
+    expect(() => parseHostConfig({ ...base, automations: [{ definition: def('a') }, { definition: def('a') }] })).toThrow(/duplicate automation name a/);
+    expect(() => parseHostConfig({ ...base, automations: [{ definition: {} }] })).toThrow(/automations\[0\]\.definition\.name/);
+    expect(() => parseHostConfig({ ...base, automations: [{ definition: def('a'), on: true }] })).toThrow(/automations\[0\] has unknown key on/);
+    expect(() => parseHostConfig({ ...base, automations: [{ definition: def('a'), enabled: 'yes' }] })).toThrow(/automations\[0\]\.enabled must be true or false/);
+    expect(() => parseHostConfig({ ...base, automations: ['x'] })).toThrow(/automations\[0\] must be an object/);
+    expect(() => parseHostConfig({ ...base, automations: Array.from({ length: 101 }, (_, i) => ({ definition: def(`a${i}`) })) })).toThrow(/at most 100/);
+    expect(parseHostConfig({ ...base, automations: Array.from({ length: 100 }, (_, i) => ({ definition: def(`a${i}`) })) }).automations).toHaveLength(100);
+  });
+});
