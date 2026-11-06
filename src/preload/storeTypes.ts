@@ -28,4 +28,6 @@ export interface StoreSettings {
   active: StoreChoice;
   restartRequired: boolean;
   status: StoreStatus;
+  /** The last change's outcome when it needs saying (a refused or failed switch, or what was kept), else null. */
+  notice: string | null;
 }

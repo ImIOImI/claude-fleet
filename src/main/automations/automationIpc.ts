@@ -198,10 +198,11 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
 
   // Event triggers (#407 Phase 4).
   setFleetEventObserver((e) => { svc.onEvent(e).catch((err) => logError({ source: 'main', type: 'automation-event', level: 'warn', message: String(err) })); });
-  inboxEvents.on('todo', (t: Todo) => {
+  const onTodo = (t: Todo): void => {
     svc.onEvent({ on: 'todo.created', workspaceId: t.source.kind === 'workspace' ? t.source.id ?? undefined : undefined, todo: { id: t.id, title: t.title, tags: t.tags, source: t.source } })
       .catch((err) => logError({ source: 'main', type: 'automation-event', level: 'warn', message: String(err) }));
-  });
+  };
+  inboxEvents.on('todo', onTodo);
 
   setAutomationHandlers({
     list: async (callerId) => { await refresh(); return svc.mcp.list(callerId, privileged(callerId)); },
@@ -300,12 +301,13 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
   ipcMain.handle('proposals:reject', (_e, id: string, note: string | null) => proposals.reject(id, note ?? null));
   ipcMain.handle('proposals:revert', (_e, id: string, index: number) => proposals.revert(id, index));
 
-  /** Quit (#457): idempotent — clears the tick interval and cancels pending event debounces. */
+  /** Quit (#457) and the inbox's switch back: idempotent — clears the tick interval, cancels pending event debounces, and drops the todo listener. */
   function stop(): void {
     if (stopped) return;
     stopped = true;
     clearInterval(tick);
     svc.cancelPending();
+    inboxEvents.off('todo', onTodo);
   }
 
   return { automations: svc, proposals, setInboxSink: (s) => { sink = s; }, stop };

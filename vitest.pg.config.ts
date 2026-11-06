@@ -42,6 +42,7 @@ export default defineConfig({
       'src/main/mcpReadSource.test.ts',
       'src/main/perfStore.test.ts',
       'src/main/store/firstSwitch.test.ts',
+      'src/main/store/inboxWriteGate.test.ts',
       'src/main/store/managedPostgres.pg.test.ts',
       'src/main/store/pgMigrate.test.ts',
       'src/main/store/pgQueryIsolation.test.ts',

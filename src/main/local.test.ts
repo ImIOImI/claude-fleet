@@ -53,6 +53,7 @@ vi.mock('./config.js', async (orig) => ({
 
 // Dynamic import AFTER mocks are registered.
 const { buildEnv, localMcpTransport } = await import('./local.js');
+const { setActiveStoreConfig } = await import('./store/activeStore.js');
 
 const fakeEnv = (plain: Record<string, string> = {}) => ({
   env: { plain, secretKeys: [] as string[] }
@@ -220,5 +221,25 @@ describe('buildEnv — store credentials stay host-only', () => {
     vi.stubEnv('PGPASSWORD', 'users-own');
     const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
     expect(env.PGPASSWORD).toBe('users-own');
+  });
+
+  it('drops libpq vars on the managed store', async () => {
+    storeConfig.current = { kind: 'managed', poolMax: 4 };
+    vi.stubEnv('PGPASSWORD', 'pw');
+    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+    expect(env.PGPASSWORD).toBeUndefined();
+  });
+
+  it('keeps scrubbing the running store after config.json switched to SQLite (applies at restart)', async () => {
+    setActiveStoreConfig({ kind: 'postgres', schema: 'fleet', poolMax: 4, connection: { env: 'FLEET_DB_URL' } });
+    try {
+      vi.stubEnv('FLEET_DB_URL', 'postgres://u:pw@db/fleet');
+      vi.stubEnv('PGPASSWORD', 'pw');
+      const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+      expect(env.FLEET_DB_URL).toBeUndefined();
+      expect(env.PGPASSWORD).toBeUndefined();
+    } finally {
+      setActiveStoreConfig(null);
+    }
   });
 });

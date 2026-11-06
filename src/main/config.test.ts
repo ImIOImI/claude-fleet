@@ -56,6 +56,7 @@ const {
   setKeepRunningInTray,
   getGithubClientIdConfig,
   getStoreConfig,
+  setStoreChoice,
   configUnreadablePath,
   getUndeclaredToastAfterSec
 } = await import('./config.js');
@@ -662,6 +663,25 @@ describe('getStoreConfig', () => {
     await writeFile(configPath(), JSON.stringify({ store: { kind: 'postgres', connectionString: 'postgres://u:pw@h/d' } }));
     _resetConfigCacheForTests();
     await expect(getStoreConfig()).rejects.toThrow(/must not embed a password/);
+  });
+  it('setStoreChoice writes the managed block or removes the key, keeping other settings', async () => {
+    await setKeepRunningInTray(true);
+    await setStoreChoice('managed');
+    expect(JSON.parse(await readFile(configPath(), 'utf8'))).toMatchObject({ keepRunningInTray: true, store: { kind: 'postgres', managed: true } });
+    expect(await getStoreConfig()).toEqual({ kind: 'managed', poolMax: 4 });
+    await setStoreChoice('sqlite');
+    const disk = JSON.parse(await readFile(configPath(), 'utf8'));
+    expect('store' in disk).toBe(false);
+    expect(disk.keepRunningInTray).toBe(true);
+    expect(await getStoreConfig()).toEqual({ kind: 'sqlite' });
+  });
+
+  it('setStoreChoice leaves a hand-edited external Postgres block alone', async () => {
+    const store = { kind: 'postgres', env: 'DATABASE_URL' };
+    await writeFile(configPath(), JSON.stringify({ store }));
+    _resetConfigCacheForTests();
+    await expect(setStoreChoice('sqlite')).rejects.toThrow(/external Postgres/);
+    expect(JSON.parse(await readFile(configPath(), 'utf8')).store).toEqual(store);
   });
 });
 
