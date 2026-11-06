@@ -74,7 +74,7 @@ export type ImportStatus =
   | 'already'           // a previous run finished it
   | 'absent'            // no SQLite file
   | 'skipped-nonempty'  // Postgres already held data no import wrote
-  | 'skipped-conflict'; // Postgres changed after the switch back wrote it out: both copies kept
+  | 'skipped-conflict'; // Postgres and the file both changed since they were last in step: both copies kept
 
 export interface ImportOutcome { source: ImportSource; status: ImportStatus; counts: Record<string, number> }
 
@@ -125,7 +125,12 @@ export async function importSqlite(o: ImportOptions): Promise<ImportOutcome> {
     src.defaultSafeIntegers(true);
     const run = (await sql<{ fingerprint: string; finished_at: number | null }>`
       SELECT fingerprint, finished_at FROM store_import_run WHERE source = ${o.source}`.execute(o.k)).rows[0];
-    if (run?.finished_at != null) return { source: o.source, status: 'already', counts: {} };
+    if (run?.finished_at != null) {
+      // state.db stays as the cache and its user-authored rows merge on the next switch (D54);
+      // a different inbox.db is a second authoritative inbox.
+      if (o.source === 'state' || run.fingerprint === fingerprint) return { source: o.source, status: 'already', counts: {} };
+      return { source: o.source, status: 'skipped-conflict', counts: {} };
+    }
     if (run && run.fingerprint !== fingerprint) {
       if (run.fingerprint.startsWith(EXPORTED_PREFIX)
         && await pgTablesFingerprint(o.k, tables) !== run.fingerprint.slice(EXPORTED_PREFIX.length)) {
@@ -181,7 +186,7 @@ export function canonicalValue(udt: string, v: unknown): string | null {
     case 'vector':
       return Array.from(Float32Array.from(parseVector(v))).join(',');
     default:
-      if (Buffer.isBuffer(v)) return hex(v);
+      if (Buffer.isBuffer(v)) return udt === 'bytea' ? hex(v) : v.toString('utf8').replace(/\u0000/g, '�');
       return typeof v === 'string' ? v.replace(/\u0000/g, '�') : String(v);
   }
 }
@@ -208,7 +213,12 @@ async function copyTable(o: ImportOptions, src: Database.Database, table: string
       const rows = select.all(last, chunk) as Array<Record<string, unknown>>;
       if (rows.length === 0) break;
       const values = rows.map(({ __rowid: _r, ...row }) => {
-        for (const v of vectors) row[v] = `[${Array.from(decodeVector(row[v] as Buffer)).join(',')}]`;
+        for (const c of cols) {
+          const v = row[c.c];
+          if (vectors.has(c.c)) row[c.c] = `[${Array.from(decodeVector(v as Buffer)).join(',')}]`;
+          // SQLite keeps a BLOB in any column; Postgres text takes its UTF-8 reading.
+          else if (Buffer.isBuffer(v) && c.u !== 'bytea') row[c.c] = v.toString('utf8');
+        }
         return row;
       });
       const chunkLast = rows[rows.length - 1].__rowid as bigint;
@@ -216,6 +226,8 @@ async function copyTable(o: ImportOptions, src: Database.Database, table: string
       const want = values.map((r) => JSON.stringify(cols.map((c) => canonicalValue(c.u, r[c.c])))).sort();
       try {
         await o.k.transaction().execute(async (trx) => {
+          // Round-trip float text whatever the server's setting (0 would print 15 digits).
+          await sql`SET LOCAL extra_float_digits = 3`.execute(trx);
           const stored = (await sql<Record<string, string | null>>`
             INSERT INTO ${sql.table(table)} (${sql.join(cols.map((c) => sql.ref(c.c)))})
             VALUES ${sql.join(values.map((r) => sql`(${sql.join(cols.map((c) => r[c.c]))})`))}

@@ -2,7 +2,7 @@
 // is NOT a rebuildable cache — so migrations are versioned and every migration
 // of an existing file is preceded by a timestamped backup copy.
 import Database from 'better-sqlite3';
-import { copyFileSync, existsSync } from 'node:fs';
+import { copyFileSync, existsSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { sql, type Kysely, type Transaction } from 'kysely';
 import type {
@@ -15,7 +15,7 @@ import { postgresKysely, schemaOf, type PostgresKyselyOptions } from '../store/p
 import { migratePostgres } from '../store/pgMigrate.js';
 import { INBOX_PG_TRACK } from '../store/migrations/inboxPg.js';
 import type { InboxDb, TodoRow } from '../store/inboxSchema.js';
-import { sweepSqliteSidecars } from '../store/sqliteFiles.js';
+import { INBOX_PG_MARKER, sweepSqliteSidecars } from '../store/sqliteFiles.js';
 
 export const INBOX_SCHEMA_VERSION = 8;
 
@@ -304,6 +304,7 @@ export class InboxStore {
     const file = path.join(dir, 'inbox.db');
     const existed = existsSync(file);
     if (!existed) sweepSqliteSidecars(file, Date.now());
+    rmSync(path.join(dir, INBOX_PG_MARKER), { force: true });
     if (existed) {
       const probe = new Database(file);
       const v = probe.pragma('user_version', { simple: true }) as number;

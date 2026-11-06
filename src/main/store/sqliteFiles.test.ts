@@ -87,3 +87,10 @@ it('hasHotJournal is true only for a non-empty -journal', () => {
   writeFileSync(`${f}-journal`, 'x');
   expect(hasHotJournal(f)).toBe(true);
 });
+
+it('InboxStore.open removes a stale on-postgres marker: SQLite is the inbox now', async () => {
+  writeFileSync(join(dir, 'inbox.db.on-postgres'), '{"status":"live"}');
+  const inbox = InboxStore.open(dir);
+  await inbox.close();
+  expect(readdirSync(dir).includes('inbox.db.on-postgres')).toBe(false);
+});

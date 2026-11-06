@@ -13,7 +13,7 @@ import { INBOX_SCHEMA_VERSION } from '../inbox/inboxDb.js';
 import { STATE_PG_TRACK } from './migrations/statePg.js';
 import { migratePostgres } from './pgMigrate.js';
 import { postgresKysely, schemaOf } from './postgres.js';
-import { hasHotJournal, removeSqliteFile, retireSqliteFile, sweepSqliteSidecars } from './sqliteFiles.js';
+import { hasHotJournal, INBOX_PG_MARKER, removeSqliteFile, retireSqliteFile, sweepSqliteSidecars } from './sqliteFiles.js';
 import { exportInboxToSqlite, pgInboxFingerprint, type ExportOutcome } from './storeExport.js';
 import {
   EXPORTED_PREFIX, IMPORT_PG_TRACK, IMPORT_TABLES, ImportError, importSqlite, sourceFingerprint, trackVersion, type ImportProgress,
@@ -22,11 +22,13 @@ import { mergePgStateIntoSqlite, mergeSqliteStateIntoPg } from './userStateMerge
 
 export { retireSqliteFile };
 
-/** Beside inbox.db while the Postgres inbox is the live one (copied, or kept apart by a skip). */
-const LIVE_MARKER = 'inbox.db.on-postgres';
 type LiveStatus = 'live' | 'skipped-nonempty' | 'skipped-conflict';
 
-const markerPath = (userData: string): string => join(userData, LIVE_MARKER);
+const markerPath = (userData: string): string => join(userData, INBOX_PG_MARKER);
+
+/** How to resolve two inboxes by hand (both skip notices and the refused switch back say it). */
+const moveAside = (inboxFile: string, dir: string): string =>
+  `Switching back to SQLite is refused while it is there. To keep only the Postgres inbox, quit the app and move ${inboxFile} (with any inbox.db-wal and inbox.db-shm) out of ${dir}.`;
 const readMarker = (userData: string): string | null => (existsSync(markerPath(userData)) ? readFileSync(markerPath(userData), 'utf8') : null);
 const writeMarker = (userData: string, status: LiveStatus, at: number): void =>
   writeFileSync(markerPath(userData), JSON.stringify({ status, at }));
@@ -54,9 +56,10 @@ export async function firstSwitchCopy(o: FirstSwitchOptions): Promise<string | n
       writeMarker(o.userData, 'live', now());
     } else {
       writeMarker(o.userData, inbox.status, now());
-      notes.push(inbox.status === 'skipped-nonempty'
-        ? `inbox.db was not copied: the Postgres store already had inbox data. The file is unchanged at ${inboxFile}.`
-        : `inbox.db was not copied: the Postgres inbox changed after the switch back to SQLite. Both are kept: Postgres is in use, and the SQLite inbox is unchanged at ${inboxFile}.`);
+      notes.push(`${inbox.status === 'skipped-nonempty'
+        ? 'inbox.db was not copied: the Postgres store already had inbox data.'
+        : 'inbox.db was not copied: it and the Postgres inbox both changed since they were last in step.'} `
+        + `Both are kept: Postgres is in use, and inbox.db is unchanged at ${inboxFile}. ${moveAside(inboxFile, o.userData)}`);
     }
     if (o.state) {
       const stateFile = join(o.userData, 'state.db');
@@ -143,7 +146,7 @@ export function switchBackPlan(userData: string, now = Date.now()): SwitchBackPl
     };
   }
   if (sqliteInboxHasRows(inboxFile)) {
-    return { kind: 'refuse', notice: `Not switched: ${inboxFile} already holds inbox data. Move it away to switch back; the app stays on Postgres.` };
+    return { kind: 'refuse', notice: `Not switched; the app stays on Postgres: ${inboxFile} holds a separate inbox. ${moveAside(inboxFile, userData)}` };
   }
   return { kind: 'copy' };
 }

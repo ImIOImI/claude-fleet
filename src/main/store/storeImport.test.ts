@@ -13,7 +13,7 @@ import { INBOX_PG_TRACK } from './migrations/inboxPg.js';
 import { STATE_PG_TRACK } from './migrations/statePg.js';
 import type { PgTrack } from './pgMigrate.js';
 import { migratePostgres } from './pgMigrate.js';
-import { postgresKysely, schemaOf } from './postgres.js';
+import { createPgPool, postgresKysely, schemaOf } from './postgres.js';
 import {
   IMPORT_PG_TRACK, IMPORT_TABLES, importSqlite, ImportError, sourceFingerprint, trackVersion, type ImportProgress,
 } from './storeImport.js';
@@ -291,5 +291,39 @@ describe.skipIf(!isPg)('importSqlite into Postgres', () => {
     expect(seen[0]).toMatchObject({ table: 'todos' });
     expect(seen[0].copied).toBeGreaterThan(Math.ceil(140 / 19));
     expect((await sql<{ n: number }>`SELECT count(*) AS n FROM todos WHERE title = 'walrow'`.execute(k)).rows[0].n).toBe(20);
+  });
+
+  it('verifies floats on a server whose extra_float_digits is not the default', async () => {
+    const s = new Database(join(dir, 'state.db'));
+    const ins = s.prepare(`INSERT INTO perf_events (ts, kind, dur_ms) VALUES (1, 'k', ?)`);
+    for (const v of [0.1 + 0.2, 1 / 3, 123456789.123456789, 5e-324]) ins.run(v);
+    s.close();
+    const pool = createPgPool({ connectionString: process.env.PG_TEST_URL, schema: t.schema, max: 2, options: '-c extra_float_digits=0' });
+    const k0 = postgresKysely<unknown>(pool);
+    try {
+      expect((await importSqlite(opts('state', { k: k0 }))).status).toBe('copied');
+      expect((await sql<{ v: number }>`SELECT dur_ms AS v FROM perf_events ORDER BY id LIMIT 1`.execute(k)).rows[0].v).toBe(0.1 + 0.2);
+    } finally {
+      await k0.destroy();
+      await pool.end();
+    }
+  });
+
+  it('copies a BLOB stored in a text column as its UTF-8 text', async () => {
+    const s = new Database(join(dir, 'state.db'));
+    s.prepare(`INSERT INTO errors (ts, source, level, type, message) VALUES (1, 's', 'l', 't', ?)`).run(Buffer.from('hello\u0000blob'));
+    s.close();
+    expect((await importSqlite(opts('state'))).status).toBe('copied');
+    expect((await sql<{ m: string }>`SELECT message AS m FROM errors WHERE source = 's'`.execute(k)).rows[0].m).toBe('hello�blob');
+  });
+
+  it('a finished inbox copy reports a different inbox.db as a conflict, not as already copied', async () => {
+    expect((await importSqlite(opts('inbox'))).status).toBe('copied');
+    expect((await importSqlite(opts('inbox'))).status).toBe('already');
+    const inbox = InboxStore.open(dir);
+    await inbox.post(ME, { title: 'newer', key: 'newer' });
+    await inbox.close();
+    expect((await importSqlite(opts('inbox'))).status).toBe('skipped-conflict');
+    expect((await sql<{ n: number }>`SELECT count(*) AS n FROM todos WHERE title = 'newer'`.execute(k)).rows[0].n).toBe(0);
   });
 });

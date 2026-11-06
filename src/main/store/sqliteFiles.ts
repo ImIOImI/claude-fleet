@@ -4,6 +4,9 @@
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
+/** Beside inbox.db while the Postgres inbox is the live one; stale once SQLite opens the inbox. */
+export const INBOX_PG_MARKER = 'inbox.db.on-postgres';
+
 export const SQLITE_SIDECARS = ['-wal', '-shm', '-journal'] as const;
 
 const MOVING = '.moving';

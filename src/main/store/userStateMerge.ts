@@ -11,9 +11,8 @@ export interface MergeSpec {
   /**
    * upsert: insert, or on a key collision overwrite `update` (default: every non-key column).
    * missing: an append-only log with no unique key; insert the outgoing rows the incoming store lacks (as a multiset).
-   * replace-by-session: the incoming rows of every session the outgoing store knows are replaced by the outgoing ones.
    */
-  mode: 'upsert' | 'missing' | 'replace-by-session';
+  mode: 'upsert' | 'missing';
   update?: readonly string[];
   /** A local surrogate id: not copied, the incoming store assigns its own (each store's sequence runs independently). */
   localId?: string;
@@ -23,8 +22,8 @@ export const USER_STATE_MERGE: readonly MergeSpec[] = [
   // Only the rename is user-authored; the rest of the row is re-ingested.
   { table: 'sessions', key: ['id'], mode: 'upsert', update: ['user_set_name'] },
   { table: 'broker_sessions', key: ['workspace_id', 'broker_session_id'], mode: 'upsert' },
-  // A tag removed on the outgoing store must not survive in the incoming one.
-  { table: 'session_tags', key: ['session_id', 'tag'], mode: 'replace-by-session' },
+  // Derived from transcripts as a union, never removed: union the two stores.
+  { table: 'session_tags', key: ['session_id', 'tag'], mode: 'upsert', update: [] },
   { table: 'port_exposures', key: ['id'], mode: 'upsert' },
   { table: 'usage_events', key: ['ts', 'workspace_id', 'session_id', 'kind', 'detail'], mode: 'missing', localId: 'id' },
   { table: 'usage_anchors', key: ['dedup_key'], mode: 'upsert', localId: 'id' },
@@ -97,10 +96,6 @@ async function insertRows(s: Side, table: string, cols: readonly string[], rows:
 }
 
 async function applyUserState(s: Side, out: UserState): Promise<void> {
-  const sessionIds = new Set<string>([
-    ...out.tables.sessions.rows.map((r) => r.id as string),
-    ...out.tables.session_tags.rows.map((r) => r.session_id as string),
-  ]);
   for (const m of USER_STATE_MERGE) {
     const have = new Set((await s.columns(m.table)).map((c) => c.c));
     const src = out.tables[m.table];
@@ -111,7 +106,7 @@ async function applyUserState(s: Side, out: UserState): Promise<void> {
         ? `ON CONFLICT (${m.key.map(q).join(', ')}) DO UPDATE SET ${update.map((c) => `${q(c)} = excluded.${q(c)}`).join(', ')}`
         : `ON CONFLICT (${m.key.map(q).join(', ')}) DO NOTHING`;
       await insertRows(s, m.table, cols, src.rows, conflict);
-    } else if (m.mode === 'missing') {
+    } else {
       const seen = new Map<string, number>();
       for (const r of await s.all(`SELECT ${m.key.map(q).join(', ')} FROM ${q(m.table)}`)) {
         const k = keyString(r, m.key);
@@ -124,13 +119,6 @@ async function applyUserState(s: Side, out: UserState): Promise<void> {
         return n === 0;
       });
       await insertRows(s, m.table, cols, add, '');
-    } else {
-      const ids = [...sessionIds];
-      for (let i = 0; i < ids.length; i += 500) {
-        const part = ids.slice(i, i + 500);
-        await s.run(`DELETE FROM ${q(m.table)} WHERE session_id IN (${part.map(() => '?').join(', ')})`, part);
-      }
-      await insertRows(s, m.table, cols, src.rows, `ON CONFLICT (${m.key.map(q).join(', ')}) DO NOTHING`);
     }
   }
 }

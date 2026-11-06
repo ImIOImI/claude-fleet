@@ -95,9 +95,9 @@ describe.skipIf(!isPg)('user-authored state follows every switch', () => {
     await author('pg', 'pg');
     await switchBackToSqlite({ pool: t.pool, userData: dir, onProgress: noop, commit: async () => undefined });
     await author('sqlite', 'lite');
-    lite(`DELETE FROM session_tags WHERE tag = 'pg-tag'`);
     const want = await snapshot('sqlite');
     expect(want.name).toBe('lite name');
+    expect(want.tags).toEqual(['before-tag', 'lite-tag', 'pg-tag']);
     expect(await firstSwitchCopy({ pool: t.pool, userData: dir, state: true, onProgress: noop })).toBeNull();
     expect(await snapshot('pg')).toEqual(want);
     expect(want.usage).toEqual(['before-kind', 'lite-kind', 'pg-kind']);
@@ -126,5 +126,14 @@ describe.skipIf(!isPg)('user-authored state follows every switch', () => {
     await pg(`UPDATE $S.sessions SET user_set_name = 'after the failed switch' WHERE id = $1`, [S]);
     expect(await firstSwitchCopy({ pool: t.pool, userData: dir, state: true, onProgress: noop })).toBeNull();
     expect((await snapshot('pg')).name).toBe('after the failed switch');
+  });
+
+  it('session tags are a union: a tag only one store has is never dropped', async () => {
+    await author('pg', 'pg');
+    await switchBackToSqlite({ pool: t.pool, userData: dir, onProgress: noop, commit: async () => undefined });
+    lite(`DELETE FROM session_tags WHERE tag = 'pg-tag'`);
+    lite(`INSERT INTO session_tags (workspace_id, session_id, tag) VALUES (?, ?, 'lite-tag')`, [WS, S]);
+    await firstSwitchCopy({ pool: t.pool, userData: dir, state: true, onProgress: noop });
+    expect((await snapshot('pg')).tags).toEqual(['before-tag', 'lite-tag', 'pg-tag']);
   });
 });

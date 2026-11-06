@@ -186,11 +186,13 @@ describe.skipIf(!isPg)('switchBackToSqlite', () => {
     const inbox = InboxStore.open(dir);
     await inbox.post(ME, { title: 'someone else' });
     await inbox.close();
+    // A Postgres start beside it keeps both copies and marks the conflict.
+    await firstSwitchCopy({ pool: t.pool, userData: dir, state: false, onProgress: () => undefined });
     const before = sha(inboxFile());
     const commit = vi.fn(async () => undefined);
     const out = await switchBackToSqlite({ pool: t.pool, userData: dir, onProgress: () => undefined, commit });
     expect(out.status).toBe('skipped-nonempty');
-    expect(out.status === 'skipped-nonempty' && out.notice).toMatch(/inbox\.db/);
+    expect(out.status === 'skipped-nonempty' && out.notice).toMatch(/move .*inbox\.db.* out of/i);
     expect(commit).not.toHaveBeenCalled();
     expect(sha(inboxFile())).toBe(before);
   });
@@ -198,6 +200,7 @@ describe.skipIf(!isPg)('switchBackToSqlite', () => {
   it('an inbox.db with no rows is set aside, not overwritten', async () => {
     const empty = InboxStore.open(dir);
     await empty.close();
+    await firstSwitchCopy({ pool: t.pool, userData: dir, state: false, onProgress: () => undefined });
     const out = await switchBackToSqlite({ pool: t.pool, userData: dir, onProgress: () => undefined, commit: async () => undefined, now: () => 77 });
     expect(out.status).toBe('switched');
     expect(existsSync(join(dir, 'inbox.db.replaced-77'))).toBe(true);
@@ -248,7 +251,7 @@ describe.skipIf(!isPg)('switchBackToSqlite', () => {
     await switchBackToSqlite({ pool: t.pool, userData: dir, onProgress: () => undefined, commit: async () => { await pgPost('posted after the export'); } });
     const before = sha(inboxFile());
     const note = await firstSwitchCopy({ pool: t.pool, userData: dir, state: true, onProgress: () => undefined });
-    expect(note).toMatch(/Postgres inbox changed after the switch back/);
+    expect(note).toMatch(/inbox\.db was not copied: .*both changed.*move .*inbox\.db.* out of/i);
     expect((await t.pool.query(`SELECT title FROM ${t.schema}.todos WHERE dedupe_key = 'posted after the export'`)).rows).toHaveLength(1);
     expect(sha(inboxFile())).toBe(before);
     expect(switchBackPlan(dir, 1)).toMatchObject({ kind: 'refuse' });
@@ -286,5 +289,20 @@ describe.skipIf(!isPg)('switchBackToSqlite', () => {
     expect(commit).not.toHaveBeenCalled();
     expect(existsSync(inboxFile())).toBe(false);
     expect((await runRow()).finished_at).not.toBeNull();
+  });
+
+  it('a new inbox.db beside a finished copy (config.json edited back to SQLite by hand) is kept, not retired', async () => {
+    // The hand edit: the app opens inbox.db on SQLite, and the stale marker goes with it.
+    const inbox = InboxStore.open(dir);
+    await inbox.post(ME, { title: 'made on sqlite after the hand edit', key: 'hand' });
+    await inbox.close();
+    expect(existsSync(join(dir, 'inbox.db.on-postgres'))).toBe(false);
+    expect(switchBackPlan(dir, 1)).toMatchObject({ kind: 'keep-inbox-db' });
+    const before = sha(inboxFile());
+    const note = await firstSwitchCopy({ pool: t.pool, userData: dir, state: true, onProgress: () => undefined });
+    expect(note).toMatch(/inbox\.db was not copied/);
+    expect(sha(inboxFile())).toBe(before);
+    expect(switchBackPlan(dir, 1)).toMatchObject({ kind: 'refuse' });
+    expect(await titlesIn()).toContain('made on sqlite after the hand edit');
   });
 });
