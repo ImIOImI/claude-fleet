@@ -8,13 +8,14 @@ import { parse } from 'yaml';
 
 const SRC = resolve(__dirname, '..');
 const ROOT = resolve(SRC, '..');
-const ENTRIES = [join(SRC, 'host', 'cli.ts'), join(SRC, 'host', 'credMain.ts')];
+const ENTRIES = [join(SRC, 'host', 'cli.ts'), join(SRC, 'host', 'credMain.ts'), join(SRC, 'main', 'mcpCore.ts')];
 // better-sqlite3 resolves to src/host/sqliteStub.ts in the bundle (vite.host.config.ts).
 const BARE_ALLOWED = new Set(['ws', 'yaml', 'ulid', 'kysely', 'pg', 'pg-connection-string', '@aws-sdk', 'better-sqlite3']);
 const MAIN_ALLOWED = [/^main\/identity\/[^/]+\.ts$/, /^main\/broker\.ts$/, /^main\/claudeArgs\.ts$/, /^main\/vaultScopes\.ts$/, /^preload\/identityTypes\.ts$/,
-  /^main\/store\/(kysely|postgres|pgMigrate|storeConfig|passwordProvider|pgSsl|pgScramOnly|sqliteFiles|pgStores|pgVectorSearch|stateSchema|inboxSchema)\.ts$/,
+  /^main\/store\/(kysely|postgres|pgMigrate|storeConfig|passwordProvider|pgSsl|pgScramOnly|sqliteFiles|pgStores|pgVectorSearch|stateSchema|inboxSchema|readSource)\.ts$/,
   /^main\/store\/migrations\/(statePg|inboxPg)\.ts$/,
-  /^main\/(db|asyncCache|contextWindow|pricing|usageAnchors|userPromptText|vectors)\.ts$/,
+  /^main\/(db|asyncCache|contextWindow|pricing|usageAnchors|userPromptText|vectors|mcpCore|mcpLines|clipText)\.ts$/,
+  /^main\/claims\/searchHits\.ts$/,
   /^main\/state\/(ingestParse|serialQueue|transcriptPaths)\.ts$/,
   /^main\/inbox\/(inboxDb|inboxCore)\.ts$/,
   /^preload\/(inboxTypes|captureSettings)\.ts$/];

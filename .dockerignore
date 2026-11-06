@@ -45,6 +45,11 @@
 !src/main/usageAnchors.ts
 !src/main/userPromptText.ts
 !src/main/vectors.ts
+!src/main/mcpCore.ts
+!src/main/mcpLines.ts
+!src/main/clipText.ts
+!src/main/claims/searchHits.ts
+!src/main/store/readSource.ts
 !src/main/state/ingestParse.ts
 !src/main/state/serialQueue.ts
 !src/main/state/transcriptPaths.ts
