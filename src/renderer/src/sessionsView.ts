@@ -83,27 +83,22 @@ export function splitCapture<T extends { capture?: boolean }>(rows: readonly T[]
   return { capture, rest };
 }
 
-/** Order the Open group by tab-strip position (workspace order, then tab index
- *  within it) instead of last-active. Activity then never moves a row — only
- *  opening, closing or dragging a tab does — so the current session stays put
- *  while busy siblings write transcripts. Rows whose tab isn't resolved yet
- *  trail in input order. */
-export function orderOpenByTabs<T extends { id: string }>(
-  open: readonly T[],
-  openSessions: ReadonlyMap<string, { workspaceId: string; brokerSessionId: string }>,
-  liveTabOrder: Readonly<Record<string, readonly string[]>>
-): T[] {
-  const wsIndex = new Map(Object.keys(liveTabOrder).map((ws, i) => [ws, i]));
-  const rank = (id: string): [number, number] => {
-    const ref = openSessions.get(id);
-    const tab = ref ? liveTabOrder[ref.workspaceId]?.indexOf(ref.brokerSessionId) ?? -1 : -1;
-    if (!ref || tab < 0) return [Infinity, 0];
-    return [wsIndex.get(ref.workspaceId) ?? Infinity, tab];
-  };
-  return open
-    .map((s, i) => ({ s, i, r: rank(s.id) }))
-    .sort((a, b) => a.r[0] - b.r[0] || a.r[1] - b.r[1] || a.i - b.i)
-    .map((x) => x.s);
+export const RECENCY_BUCKET_MS = 30 * 60_000;
+
+/** Newest-first at coarse resolution: last-active is floored to `bucketMs`,
+ *  ties broken by start time (newest first) then id. A busy session moves up
+ *  at most once per bucket boundary instead of on every transcript write. */
+export function orderByRecencyBucket<
+  T extends { id: string; startedAt: number | null; lastActiveAt: number | null }
+>(rows: readonly T[], bucketMs = RECENCY_BUCKET_MS): T[] {
+  const bucket = (s: T): number =>
+    s.lastActiveAt == null ? -Infinity : Math.floor(s.lastActiveAt / bucketMs);
+  return [...rows].sort(
+    (a, b) =>
+      bucket(b) - bucket(a) ||
+      (b.startedAt ?? -Infinity) - (a.startedAt ?? -Infinity) ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+  );
 }
 
 /** Distinct tags with session counts for the Tags ▾ menu, most-used first,
