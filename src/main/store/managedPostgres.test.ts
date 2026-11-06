@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   bootstrapSql, ensureManagedPostgres, ManagedPgError, MANAGED_PG_CONTAINER, MANAGED_PG_IMAGE, MANAGED_PG_VOLUME,
@@ -11,31 +12,48 @@ class FakeDocker implements ManagedDocker {
   container: (ManagedContainer & { spec?: ManagedContainerSpec }) | null = null;
   calls: string[] = [];
   readyAfter = 0;
-  execs: Array<{ cmd: string[]; env?: string[] }> = [];
+  execs: Array<{ cmd: string[]; env?: string[]; timeoutMs?: number }> = [];
   bootstrapExit = 0;
+  startFailures: Error[] = [];
   async ping() { return this.up; }
   async hasImage(ref: string) { return this.images.has(ref); }
   async pull(ref: string) { this.calls.push(`pull ${ref}`); this.images.add(ref); }
   async inspectVolume(name: string) { const l = this.volumes.get(name); return l ? { labels: l } : null; }
   async createVolume(name: string, labels: Record<string, string>) { this.calls.push(`volume ${name}`); this.volumes.set(name, labels); }
-  async inspectContainer() { return this.container ? { running: this.container.running, image: this.container.image, hostPort: this.container.hostPort } : null; }
-  async createContainer(spec: ManagedContainerSpec) { this.calls.push(`create ${spec.hostPort}`); this.container = { running: false, image: spec.image, hostPort: spec.hostPort, spec }; }
-  async start() { this.calls.push('start'); this.container!.running = true; }
+  async inspectContainer() {
+    if (!this.container) return null;
+    const { running, image, hostPort, hostIp, labels } = this.container;
+    return { running, image, hostPort, hostIp, labels };
+  }
+  async createContainer(spec: ManagedContainerSpec) {
+    this.calls.push(`create ${spec.hostPort}`);
+    this.container = { running: false, image: spec.image, hostPort: spec.hostPort, hostIp: '127.0.0.1', labels: spec.labels, spec };
+  }
+  async start() {
+    this.calls.push('start');
+    const e = this.startFailures.shift();
+    if (e) throw e;
+    this.container!.running = true;
+  }
   async stop() { this.calls.push('stop'); this.container!.running = false; }
   async remove() { this.calls.push('remove'); this.container = null; }
-  async exec(_name: string, cmd: string[], env?: string[]) {
-    this.execs.push({ cmd, env });
+  async exec(_name: string, cmd: string[], env?: string[], timeoutMs?: number) {
+    this.execs.push({ cmd, env, timeoutMs });
     if (cmd[0] === 'pg_isready') return { exitCode: this.readyAfter-- > 0 ? 2 : 0, output: '' };
     return { exitCode: this.bootstrapExit, output: this.bootstrapExit ? `ERROR: at ALTER ROLE fleet_app PASSWORD '${(env?.[0] ?? '').match(/SCRAM-SHA-256\$[^']+/)?.[0]}'` : '' };
   }
 }
 
-function deps(docker: FakeDocker, stored: { v: string | null } = { v: null }) {
+const OURS = { [STORE_LABEL]: 'postgres', [STORE_MAJOR_LABEL]: '16' };
+const existing = (o: Partial<ManagedContainer> = {}): ManagedContainer =>
+  ({ running: false, image: MANAGED_PG_IMAGE, hostPort: 40000, hostIp: '127.0.0.1', labels: OURS, ...o });
+
+function deps(docker: FakeDocker, stored: { v: string | null } = { v: null }, ports: number[] = [54321, 54322]) {
   return {
     docker,
     password: { get: async () => stored.v, set: async (v: string) => { stored.v = v; } },
     sleep: async () => undefined,
-    freePort: async () => 54321,
+    freePort: async () => ports.shift()!,
     readyTimeoutMs: 1_000,
   };
 }
@@ -70,11 +88,72 @@ describe('ensureManagedPostgres', () => {
     expect(boot.env![0]).toContain('ALTER ROLE postgres PASSWORD NULL;');
   });
 
+  it('locks the superuser first, rejects it over TCP, and never puts its password in the container env', async () => {
+    const docker = new FakeDocker();
+    await ensureManagedPostgres(deps(docker), 4);
+    const env = docker.container!.spec!.env;
+    expect(env).toContain('POSTGRES_PASSWORD_FILE=/proc/sys/kernel/random/uuid');
+    expect(env.some((e) => e.startsWith('POSTGRES_PASSWORD='))).toBe(false);
+    const boot = docker.execs.find((e) => e.cmd[0] === 'sh')!;
+    const sqlText = boot.env![0].slice('FLEET_PG_SQL='.length);
+    expect(sqlText.startsWith('ALTER ROLE postgres PASSWORD NULL;')).toBe(true);
+    expect(sqlText.trimEnd().endsWith('SELECT pg_reload_conf();')).toBe(true);
+    const script = boot.cmd[2];
+    expect(script).toContain('"$PGDATA/pg_hba.conf"');
+    const hba = script.slice(0, script.indexOf('psql'));
+    expect(hba.indexOf("'local all all trust'")).toBeGreaterThan(-1);
+    expect(hba.indexOf("'host all postgres all reject'")).toBeGreaterThan(hba.indexOf("'local all all trust'"));
+    expect(hba.indexOf("'host all all all scram-sha-256'")).toBeGreaterThan(hba.indexOf("'host all postgres all reject'"));
+  });
+
+  it('bounds every readiness probe', async () => {
+    const docker = new FakeDocker();
+    docker.readyAfter = 1;
+    await ensureManagedPostgres(deps(docker), 4);
+    for (const e of docker.execs.filter((x) => x.cmd[0] === 'pg_isready')) {
+      expect(e.cmd).toEqual(expect.arrayContaining(['-t', '3']));
+      expect(e.timeoutMs).toBeGreaterThan(0);
+    }
+  });
+
+  it('a host port taken by something else: recreates on a fresh loopback port, keeping the volume', async () => {
+    const docker = new FakeDocker();
+    docker.images.add(MANAGED_PG_IMAGE);
+    docker.volumes.set(MANAGED_PG_VOLUME, OURS);
+    docker.container = existing();
+    docker.startFailures.push(Object.assign(new Error('driver failed programming external connectivity on endpoint claude-fleet-postgres: Bind for 127.0.0.1:40000 failed: port is already allocated'), { statusCode: 500 }));
+    const cfg = await ensureManagedPostgres(deps(docker), 4);
+    expect(docker.calls).toEqual(['start', 'remove', 'create 54321', 'start']);
+    expect(docker.container!.spec!.volume).toBe(MANAGED_PG_VOLUME);
+    expect(cfg.connection).toMatchObject({ port: 54321 });
+  });
+
+  it('any other start failure is a start error', async () => {
+    const docker = new FakeDocker();
+    docker.startFailures.push(Object.assign(new Error('OCI runtime create failed'), { statusCode: 500 }));
+    const e = await ensureManagedPostgres(deps(docker), 4).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ManagedPgError);
+    expect((e as ManagedPgError).reason).toBe('start');
+    expect(docker.calls).not.toContain('remove');
+  });
+
+  it('a container that is not ours or not on loopback is recreated on the same port', async () => {
+    for (const bad of [existing({ labels: {} }), existing({ hostIp: '0.0.0.0' })]) {
+      const docker = new FakeDocker();
+      docker.images.add(MANAGED_PG_IMAGE);
+      docker.volumes.set(MANAGED_PG_VOLUME, OURS);
+      docker.container = bad;
+      await ensureManagedPostgres(deps(docker), 4);
+      expect(docker.calls).toEqual(['remove', 'create 40000', 'start']);
+      expect(docker.container!.hostIp).toBe('127.0.0.1');
+    }
+  });
+
   it('a later start reuses the container, its port and the stored password', async () => {
     const docker = new FakeDocker();
     docker.images.add(MANAGED_PG_IMAGE);
     docker.volumes.set(MANAGED_PG_VOLUME, { [STORE_LABEL]: 'postgres', [STORE_MAJOR_LABEL]: '16' });
-    docker.container = { running: false, image: MANAGED_PG_IMAGE, hostPort: 40000 };
+    docker.container = existing();
     const cfg = await ensureManagedPostgres(deps(docker, { v: 'kept' }), 4);
     expect(docker.calls).toEqual(['start']);
     expect(cfg.connection).toMatchObject({ port: 40000, password: { kind: 'static', value: 'kept' } });
@@ -84,7 +163,7 @@ describe('ensureManagedPostgres', () => {
     const docker = new FakeDocker();
     docker.images.add(MANAGED_PG_IMAGE);
     docker.volumes.set(MANAGED_PG_VOLUME, { [STORE_LABEL]: 'postgres', [STORE_MAJOR_LABEL]: '16' });
-    docker.container = { running: true, image: 'pgvector/pgvector:0.8.0-pg16@sha256:old', hostPort: 40000 };
+    docker.container = existing({ running: true, image: 'pgvector/pgvector:0.8.0-pg16@sha256:old' });
     await ensureManagedPostgres(deps(docker), 4);
     expect(docker.calls).toEqual(['stop', 'remove', 'create 40000', 'start']);
     expect(docker.container!.spec!.volume).toBe(MANAGED_PG_VOLUME);
@@ -119,7 +198,7 @@ describe('ensureManagedPostgres', () => {
   it('stopManagedPostgres stops a running container only', async () => {
     const docker = new FakeDocker();
     await stopManagedPostgres(docker);
-    docker.container = { running: true, image: MANAGED_PG_IMAGE, hostPort: 1 };
+    docker.container = existing({ running: true, hostPort: 1 });
     await stopManagedPostgres(docker);
     expect(docker.calls).toEqual(['stop']);
     expect(MANAGED_PG_CONTAINER).toBe('claude-fleet-postgres');
@@ -129,6 +208,13 @@ describe('ensureManagedPostgres', () => {
 describe('MANAGED_PG_IMAGE', () => {
   it('is pinned by digest', () => {
     expect(MANAGED_PG_IMAGE).toMatch(/^pgvector\/pgvector:[^@]+@sha256:[0-9a-f]{64}$/);
+  });
+
+  it("is CI's Postgres service image", () => {
+    const wf = readFileSync('.github/workflows/build-app.yml', 'utf8');
+    const images = [...wf.matchAll(/image: (pgvector\/pgvector\S*)/g)].map((m) => m[1]);
+    expect(images.length).toBeGreaterThan(0);
+    for (const i of images) expect(i).toBe(MANAGED_PG_IMAGE);
   });
 });
 

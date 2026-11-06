@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import pg from 'pg';
 import {
   DEFAULT_CA_FILE, iamAuthHint, parseStoreConfig, pgPoolConfig, storeSecretEnvNames, StoreConfigError, type PostgresStoreConfig,
 } from './storeConfig.js';
@@ -220,7 +221,8 @@ describe('pgPoolConfig', () => {
     const cfg = parseStoreConfig({
       kind: 'postgres', host: '127.0.0.1', port: fake.port, database: 'd', user: 'u', password: { kind: 'env', name: 'PGPW' }, ssl: 'disable',
     }, DESKTOP) as PostgresStoreConfig;
-    const pool = createPgPool(pgPoolConfig(cfg, env));
+    // The fake asks for cleartext, which store pools refuse without TLS (pgScramOnly.ts).
+    const pool = createPgPool({ ...pgPoolConfig(cfg, env), Client: pg.Client });
     try {
       const a = await pool.connect();
       env.PGPW = 'two';

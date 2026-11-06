@@ -47,8 +47,14 @@ export function dockerodeManagedDocker(docker: Docker = new Docker()): ManagedDo
     async inspectContainer(name): Promise<ManagedContainer | null> {
       try {
         const info = await docker.getContainer(name).inspect();
-        const binding = info.HostConfig?.PortBindings?.[PG_PORT]?.[0]?.HostPort;
-        return { running: info.State.Running, image: info.Config.Image, hostPort: binding ? Number(binding) : null };
+        const binding = info.HostConfig?.PortBindings?.[PG_PORT]?.[0];
+        return {
+          running: info.State.Running,
+          image: info.Config.Image,
+          hostPort: binding?.HostPort ? Number(binding.HostPort) : null,
+          hostIp: binding?.HostIp ?? null,
+          labels: (info.Config.Labels ?? {}) as Record<string, string>,
+        };
       } catch (e) {
         if (notFound(e)) return null;
         throw e;
@@ -86,20 +92,28 @@ export function dockerodeManagedDocker(docker: Docker = new Docker()): ManagedDo
     async remove(name) {
       await docker.getContainer(name).remove();
     },
-    async exec(name, cmd, env) {
+    async exec(name, cmd, env, timeoutMs) {
       const container = docker.getContainer(name);
       const exec = await container.exec({ Cmd: cmd, Env: env, AttachStdout: true, AttachStderr: true });
       const stream = await exec.start({ hijack: true, stdin: false });
       let output = '';
-      await new Promise<void>((resolve, reject) => {
+      const ended = await new Promise<boolean>((resolve) => {
         const sink = new Writable({ write(chunk, _enc, cb) { if (output.length < 100_000) output += chunk.toString('utf8'); cb(); } });
+        const t = timeoutMs === undefined ? null : setTimeout(() => { stream.destroy(); resolve(false); }, timeoutMs);
+        const done = () => { if (t) clearTimeout(t); resolve(true); };
         container.modem.demuxStream(stream, sink, sink);
-        stream.on('end', resolve);
-        stream.on('close', resolve);
-        stream.on('error', reject);
+        stream.on('end', done);
+        stream.on('close', done);
+        stream.on('error', done);
       });
-      const info = await exec.inspect();
-      return { exitCode: info.ExitCode ?? -1, output };
+      if (!ended) return { exitCode: -1, output };
+      // The stream can end before the daemon records the exit code.
+      for (let i = 0; i < 50; i++) {
+        const info = await exec.inspect();
+        if (!info.Running) return { exitCode: info.ExitCode ?? -1, output };
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return { exitCode: -1, output };
     },
   };
 }
