@@ -148,9 +148,10 @@ describe('startHostMcp', () => {
 
 describe('hostMcpArgs', () => {
   it('names claude-fleet-state and points the bridge at the socket', () => {
-    const [flag, json] = hostMcpArgs('/run/fleet/mcp.sock');
-    expect(flag).toBe('--mcp-config');
-    expect(JSON.parse(json)).toEqual({
+    const args = hostMcpArgs('/run/fleet/mcp.sock');
+    expect(args).toHaveLength(1);
+    expect(args[0].startsWith('--mcp-config=')).toBe(true);
+    expect(JSON.parse(args[0].slice('--mcp-config='.length))).toEqual({
       mcpServers: { 'claude-fleet-state': { type: 'stdio', command: 'node', args: [HOST_MCP_BRIDGE], env: { CLAUDE_FLEET_MCP_UNIX: '/run/fleet/mcp.sock', CLAUDE_FLEET_MCP_TCP: '' } } }
     });
   });

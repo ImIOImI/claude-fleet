@@ -9,7 +9,7 @@ import { parse } from 'yaml';
 
 const SRC = resolve(__dirname, '..');
 const ROOT = resolve(SRC, '..');
-const ENTRIES = [join(SRC, 'host', 'cli.ts'), join(SRC, 'host', 'credMain.ts'), join(SRC, 'main', 'mcpCore.ts')];
+const ENTRIES = [join(SRC, 'host', 'cli.ts'), join(SRC, 'host', 'credMain.ts'), join(SRC, 'main', 'mcpCore.ts'), join(SRC, 'host', 'hostAutomations.ts')];
 // better-sqlite3 resolves to src/host/sqliteStub.ts in the bundle (vite.host.config.ts).
 const BARE_ALLOWED = new Set(['ws', 'yaml', 'ulid', 'kysely', 'pg', 'pg-connection-string', '@aws-sdk', 'better-sqlite3']);
 const MAIN_ALLOWED = [/^main\/identity\/[^/]+\.ts$/, /^main\/broker\.ts$/, /^main\/claudeArgs\.ts$/, /^main\/vaultScopes\.ts$/, /^preload\/identityTypes\.ts$/,
@@ -19,7 +19,8 @@ const MAIN_ALLOWED = [/^main\/identity\/[^/]+\.ts$/, /^main\/broker\.ts$/, /^mai
   /^main\/claims\/searchHits\.ts$/,
   /^main\/mcpContainerBridge\.ts$/,
   /^main\/state\/(ingestParse|serialQueue|transcriptPaths)\.ts$/,
-  /^main\/inbox\/(inboxDb|inboxCore)\.ts$/,
+  /^main\/inbox\/(inboxDb|inboxCore|inboxService|inboxPolicy|notifyService|notifyStore|notifyPolicy)\.ts$/,
+  /^main\/automations\/(automationService|automationStore|proposalService|proposalStore|definition|cron|scheduler|runner|reschedule|template|scriptProtocol|classify)\.ts$/,
   /^preload\/(inboxTypes|captureSettings)\.ts$/];
 const SPEC_RE = /\b(?:import|export)\s+(?:type\s+)?(?:[^'"`;]*?\bfrom\s*)?['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]|\brequire\s*\(\s*['"]([^'"]+)['"]/g;
 

@@ -10,8 +10,7 @@ import { finishSocket, prepareSocketPath } from './socketDir.js';
 export const HOST_MCP_TOOLS: ReadonlySet<string> = new Set([
   'list_sessions', 'get_session', 'get_cost', 'list_events', 'session_summary',
   'post_todo', 'update_todo', 'list_todos',
-  'list_automations', 'get_automation', 'list_runs', 'run_automation', 'schedule_next',
-  'propose_automation', 'propose_automation_change', 'get_proposal'
+  'list_automations', 'get_automation', 'list_runs', 'run_automation', 'schedule_next'
 ]);
 export const MAX_HOST_MCP_CONNECTIONS = 64;
 /** A session's bridge reconnects in a loop; these stay off stdout at the default level. */
@@ -108,8 +107,9 @@ export async function startHostMcp(o: {
 /** Written into the image at build (`fleet-host write-mcp-bridge`). */
 export const HOST_MCP_BRIDGE = '/usr/local/lib/fleet-host/mcp-bridge.cjs';
 
-/** Appended to every claude fleet-host creates; the name is the prefix INBOX_TOOLS uses. `--mcp-config` is variadic, so these go last. */
+/** Appended to every claude fleet-host creates; the name is the prefix INBOX_TOOLS uses.
+ *  `--mcp-config` is variadic: the `=` form keeps a later positional from being read as a config. */
 export function hostMcpArgs(socketPath: string, bridge: string = HOST_MCP_BRIDGE): string[] {
   const entry = { type: 'stdio', command: 'node', args: [bridge], env: { CLAUDE_FLEET_MCP_UNIX: socketPath, CLAUDE_FLEET_MCP_TCP: '' } };
-  return ['--mcp-config', JSON.stringify({ mcpServers: { 'claude-fleet-state': entry } })];
+  return [`--mcp-config=${JSON.stringify({ mcpServers: { 'claude-fleet-state': entry } })}`];
 }

@@ -65,6 +65,12 @@ describe('CRUD + validation', () => {
     expect((await svc.get(a.id))?.yaml).toContain('*/30 * * * *');
     await expect(svc.create('name: x', USER)).rejects.toThrow(/triggers/);
   });
+  it('checkDefinition also refuses a stored definition at run time, before any step', async () => {
+    const { svc, store } = await setup({ checkDefinition: (d) => (d.name === 'stored' ? ['refused here'] : []) });
+    const a = await store.create({ name: 'stored', triggers: [{ manual: {} }], concurrency: 'skip', steps: [{ id: 'go', prompt: { workspace: 'W1', mode: 'fresh', message: 'x' } }] }, USER, Date.now());
+    await expect(svc.run(a.id, { kind: 'manual', by: USER, args: {} })).rejects.toThrow(/refused here/);
+    expect(await store.runs(a.id, 10)).toEqual([]);
+  });
   it('checkDefinition refuses an otherwise valid definition on create, update and validate', async () => {
     const seen: string[] = [];
     const { svc } = await setup({ checkDefinition: (d) => { seen.push(d.name); return d.triggers.length > 1 ? ['refused here'] : []; } });

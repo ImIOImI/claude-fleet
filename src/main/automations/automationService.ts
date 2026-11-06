@@ -210,6 +210,8 @@ export function createAutomationService(deps: AutomationDeps) {
     if (!a) throw new Error(`automation ${id} not found`);
     const args = validateArgs(a.definition.params, req.args, req.coerce);
     if (!args.ok) throw new Error(`invalid arguments: ${args.errors.join('; ')}`);
+    const refused = deps.checkDefinition?.(a.definition) ?? [];
+    if (refused.length) throw new Error(`${a.name} can't run here: ${refused.join('; ')}`);
     const trigger = { kind: req.kind, ...(req.by ? { by: req.by } : {}), ...(req.cron ? { cron: req.cron } : {}), ...(req.event ? { event: req.event } : {}) };
     const now = deps.now();
     // --- synchronous from here to each store call: read + claim atomically ---
