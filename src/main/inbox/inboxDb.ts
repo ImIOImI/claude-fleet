@@ -252,6 +252,17 @@ export const MIGRATIONS: Record<number, string> = {
   `
 };
 
+/** Brings an inbox SQLite file to INBOX_SCHEMA_VERSION, one transaction per version. */
+export function migrateInboxSqlite(db: Database.Database): void {
+  const current = db.pragma('user_version', { simple: true }) as number;
+  for (let v = current + 1; v <= INBOX_SCHEMA_VERSION; v++) {
+    db.transaction(() => {
+      db.exec(MIGRATIONS[v]);
+      db.pragma(`user_version = ${v}`);
+    })();
+  }
+}
+
 // Crockford base32 ULID: 10 chars time + 16 chars randomness.
 const B32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 export function newId(now = Date.now()): string {
@@ -308,13 +319,7 @@ export class InboxStore {
 
   private static init(db: Database.Database): InboxStore {
     db.pragma('foreign_keys = ON');
-    const current = db.pragma('user_version', { simple: true }) as number;
-    for (let v = current + 1; v <= INBOX_SCHEMA_VERSION; v++) {
-      db.transaction(() => {
-        db.exec(MIGRATIONS[v]);
-        db.pragma(`user_version = ${v}`);
-      })();
-    }
+    migrateInboxSqlite(db);
     return new InboxStore(db, sqliteKysely<InboxDb>(db));
   }
 
