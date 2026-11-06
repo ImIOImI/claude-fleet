@@ -14,6 +14,7 @@ import {
   learnMapping as learnMirrorMapping
 } from './mirrorPolicy.js';
 import { openHostPath } from './openHostPath.js';
+import { freshArgv } from './automations/freshArgv.js';
 import { captureSettingsEqual, effectiveCaptureSettings, normalizeCaptureSettings } from '../preload/captureSettings.js';
 import { emitCaptureSettingsChanged } from './claims/captureSettingsEvents.js';
 import { isCaptureFork } from './claims/captureForks.js';
@@ -653,9 +654,13 @@ export async function hostSpawnFresh(workspaceId: string, sessionId: string, arg
   // Pin the claude UUID up front (as tab CREATE does, #195) and record the
   // broker→claude mapping, so the Sessions list can tell this transcript came
   // from an automation (`auto-*` broker id) and file it out of Recent.
+  const claudeSessionId = randomUUID();
+  // The prompt goes after `--` (#516): a leading `-` must stay text, never a
+  // claude CLI option. Validated before recording the mapping below, so an
+  // oversize/malformed prompt leaves no orphan mapping.
+  const argv = freshArgv(args, [], claudeSessionId);
   // Best-effort: the mapping only drives the Sessions-list grouping, so a
   // closed DB (mock mode) must not fail the run.
-  const claudeSessionId = randomUUID();
   try {
     await recordBrokerSessionMapping(workspaceId, sessionId, claudeSessionId);
   } catch (e) {
@@ -667,7 +672,7 @@ export async function hostSpawnFresh(workspaceId: string, sessionId: string, arg
       workspaceId
     });
   }
-  await backendForKind(kind).spawnHeadless(workspaceId, sessionId, [...args, '--session-id', claudeSessionId]);
+  await backendForKind(kind).spawnHeadless(workspaceId, sessionId, argv);
 }
 
 export async function hostFreshState(workspaceId: string, sessionId: string): Promise<'alive' | 'ended' | 'missing'> {

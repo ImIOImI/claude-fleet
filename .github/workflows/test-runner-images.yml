@@ -55,6 +55,7 @@ on:
       - 'src/main/automations/proposalService.ts'
       - 'src/main/automations/proposalStore.ts'
       - 'src/main/automations/definition.ts'
+      - 'src/main/automations/freshArgv.ts'
       - 'src/main/automations/cron.ts'
       - 'src/main/automations/scheduler.ts'
       - 'src/main/automations/runner.ts'
