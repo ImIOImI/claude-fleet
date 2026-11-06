@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
+import { deflateSync } from 'node:zlib';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { queryWorkerStats, runQueryInWorker } from './queryWorker.js';
 
@@ -106,5 +107,47 @@ describe('runQueryInWorker', { timeout: 30_000 }, () => {
     const results = await Promise.allSettled(calls);
     expect(results.every((r) => r.status === 'rejected')).toBe(true);
     for (let i = 0; i < 100 && queryWorkerStats().zombies > 0; i++) await new Promise((r) => setTimeout(r, 20));
+  });
+});
+
+describe('compressed rows (state v16)', () => {
+  let v16: string;
+  const line = JSON.stringify({ type: 'user', message: { content: 'compressed '.repeat(100) } });
+  beforeAll(() => {
+    v16 = join(dir, 'state16.db');
+    const db = new Database(v16);
+    db.exec(`
+      CREATE TABLE events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, workspace_id TEXT NOT NULL, ts INTEGER,
+        type TEXT NOT NULL, subtype TEXT, uuid TEXT, parent_uuid TEXT, model TEXT, input_tokens INTEGER,
+        output_tokens INTEGER, cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER,
+        service_tier TEXT, tool_name TEXT, tool_use_id TEXT, tool_input TEXT, tool_result_is_error INTEGER,
+        raw_jsonl TEXT NOT NULL, dedup_key TEXT NOT NULL, raw_z BLOB);
+      CREATE TABLE sessions (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL);
+      CREATE TABLE broker_sessions (workspace_id TEXT NOT NULL);
+      CREATE TABLE session_summaries (workspace_id TEXT NOT NULL);
+      CREATE TABLE session_tags (workspace_id TEXT NOT NULL);
+      CREATE TABLE usage_events (workspace_id TEXT NOT NULL);
+    `);
+    const ev = db.prepare(`INSERT INTO events (session_id, workspace_id, ts, type, raw_jsonl, dedup_key, raw_z) VALUES (?,?,?,?,?,?,?)`);
+    ev.run('sa', WS_A, 1, 'user', '', 'k1', deflateSync(Buffer.from(line)));
+    ev.run('sa', WS_A, 2, 'user', '{"plain":1}', 'k2', null);
+    db.close();
+  });
+  const job16 = (sql: string, includeRaw: boolean) => ({ ...job(sql, { includeRaw }), srcPath: v16 });
+
+  it('include_raw returns the decompressed line', async () => {
+    expect(await runQueryInWorker(job16('SELECT raw_jsonl FROM events ORDER BY id', true)))
+      .toEqual([{ raw_jsonl: line }, { raw_jsonl: '{"plain":1}' }]);
+  });
+
+  it('json functions work on decompressed text', async () => {
+    expect(await runQueryInWorker(job16(`SELECT json_extract(raw_jsonl, '$.type') AS t FROM events WHERE id = 1`, true)))
+      .toEqual([{ t: 'user' }]);
+  });
+
+  it('fleet_raw is callable directly, and raw_jsonl stays absent without include_raw', async () => {
+    expect(await runQueryInWorker(job16(`SELECT fleet_raw('x', NULL) AS r`, false))).toEqual([{ r: 'x' }]);
+    await expect(runQueryInWorker(job16('SELECT raw_jsonl FROM events', false))).rejects.toThrow(/raw_jsonl/);
   });
 });

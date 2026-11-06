@@ -8,7 +8,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as db from '../db.js';
 import { InboxStore, INBOX_SCHEMA_VERSION } from '../inbox/inboxDb.js';
 import { FIXTURE, S, WS } from '../state/ingestFixture.js';
-import { EMBED_DIM, EMBED_MODEL_ID, encodeVector } from '../vectors.js';
+import { EMBED_DIM, EMBED_MODEL_ID, EMPTY_VECTOR, encodeVector } from '../vectors.js';
+import { deflateLine } from '../state/rawCodec.js';
 import { INBOX_PG_TRACK } from './migrations/inboxPg.js';
 import { STATE_PG_TRACK } from './migrations/statePg.js';
 import type { PgTrack } from './pgMigrate.js';
@@ -130,6 +131,21 @@ describe.skipIf(!isPg)('importSqlite into Postgres', () => {
     } finally {
       await inbox.close();
     }
+  });
+
+  it('inflates compressed event lines and stores placeholder vectors as NULL', async () => {
+    await db.closeDb();
+    db.openDb(dir);
+    const [ev] = await db.eventsForSession(S, 0, 1);
+    await db.stateKysely().updateTable('events').set({ raw_jsonl: '', raw_z: deflateLine(ev.rawJsonl) }).where('id', '=', ev.id).execute();
+    await db.insertEmbeddings([{ workspaceId: WS, sessionId: S, kind: 'turn', refEventId: 500, ts: 1, text: '',
+      modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec: EMPTY_VECTOR, dedupKey: 'ph' }]);
+    await db.closeDb();
+    expect((await importSqlite(opts('state'))).status).toBe('copied');
+    const [row] = (await sql<{ raw_jsonl: string; raw_z: unknown }>`SELECT raw_jsonl, raw_z FROM events WHERE id = ${ev.id}`.execute(k)).rows;
+    expect(row).toEqual({ raw_jsonl: ev.rawJsonl, raw_z: null });
+    const [ph] = (await sql<{ vec: unknown }>`SELECT vec FROM embeddings WHERE dedup_key = 'ph'`.execute(k)).rows;
+    expect(ph.vec).toBeNull();
   });
 
   it('leaves every identity sequence at or past its column max', async () => {

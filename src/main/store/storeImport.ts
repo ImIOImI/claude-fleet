@@ -8,6 +8,7 @@ import { existsSync, statSync } from 'node:fs';
 import { basename } from 'node:path';
 import { sql, type Kysely, type Transaction } from 'kysely';
 import { decodeVector } from '../vectors.js';
+import { rawLine } from '../state/rawCodec.js';
 import type { PgTrack } from './pgMigrate.js';
 import { hasHotJournal } from './sqliteFiles.js';
 import type { ImportProgress } from '../../preload/storeTypes.js';
@@ -44,7 +45,7 @@ export const IMPORT_TABLES: Record<ImportSource, readonly string[]> = {
     'claims', 'claim_sources', 'claim_vectors', 'claims_fts', 'capture_runs', 'capture_settings_log'],
   state: ['sessions', 'events', 'broker_sessions', 'errors', 'embeddings', 'session_summaries', 'session_tags',
     'usage_events', 'usage_anchors', 'perf_events', 'session_costs', 'session_stats', 'session_tool_counts',
-    'port_exposures'],
+    'port_exposures', 'event_retention', 'maintenance'],
 };
 
 /** The SQLite user_version a track's latest step mirrors. */
@@ -213,9 +214,14 @@ async function copyTable(o: ImportOptions, src: Database.Database, table: string
       const rows = select.all(last, chunk) as Array<Record<string, unknown>>;
       if (rows.length === 0) break;
       const values = rows.map(({ __rowid: _r, ...row }) => {
+        // Postgres never holds a deflated line: its TOAST compresses, and its query view reads raw_jsonl.
+        if (table === 'events' && Buffer.isBuffer(row.raw_z) && row.raw_z.length > 0) {
+          row.raw_jsonl = rawLine({ raw_jsonl: row.raw_jsonl as string, raw_z: row.raw_z });
+          row.raw_z = null;
+        }
         for (const c of cols) {
           const v = row[c.c];
-          if (vectors.has(c.c)) row[c.c] = `[${Array.from(decodeVector(v as Buffer)).join(',')}]`;
+          if (vectors.has(c.c)) row[c.c] = v === null || (v as Buffer).length === 0 ? null : `[${Array.from(decodeVector(v as Buffer)).join(',')}]`;
           // SQLite keeps a BLOB in any column; Postgres text takes its UTF-8 reading.
           else if (Buffer.isBuffer(v) && c.u !== 'bytea') row[c.c] = v.toString('utf8');
         }

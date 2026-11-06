@@ -58,7 +58,9 @@ export interface SnapshotQueryJob {
  *  structural: the source is detached before the caller's SQL runs, so no
  *  subquery/UNION/sqlite_master trick can reach unfiltered rows (#146).
  *  SELF-CONTAINED — serialized into the worker via toString(). */
-export function runSnapshotQuery(DatabaseCtor: typeof BetterSqlite3, job: SnapshotQueryJob): unknown[] {
+export function runSnapshotQuery(
+  DatabaseCtor: typeof BetterSqlite3, job: SnapshotQueryJob, zlib: { inflateSync(b: Uint8Array): Buffer },
+): unknown[] {
   const ids = job.allowed;
   // Empty set matches nothing (self is always present, so unreachable in practice).
   const scope = ids.length === 0 ? '0 = 1' : `workspace_id IN (${ids.map(() => '?').join(',')})`;
@@ -67,11 +69,21 @@ export function runSnapshotQuery(DatabaseCtor: typeof BetterSqlite3, job: Snapsh
 
   const mem = new DatabaseCtor(':memory:');
   try {
+    // Retention stores old lines deflated in raw_z with raw_jsonl ''.
+    mem.function('fleet_raw', { deterministic: true }, (raw: unknown, z: unknown) =>
+      z instanceof Uint8Array && z.length > 0 ? zlib.inflateSync(z).toString('utf8') : raw);
     // ATTACH filename is not reliably bindable; double any single quotes.
     mem.exec(`ATTACH DATABASE '${job.srcPath.replace(/'/g, "''")}' AS ${alias}`);
     try {
-      const eventCols = job.includeRaw ? `${job.eventCols}, raw_jsonl` : job.eventCols;
-      mem.prepare(`CREATE TABLE events AS SELECT ${eventCols} FROM ${alias}.events WHERE ${scope}`).run(...ids);
+      if (job.includeRaw) {
+        // A view inflates only the rows a query reads; the snapshot keeps the compressed bytes.
+        const srcCols = mem.prepare(`PRAGMA ${alias}.table_info(events)`).all() as { name: string }[];
+        const rawZ = srcCols.some((c) => c.name === 'raw_z') ? 'raw_z' : 'NULL AS raw_z';
+        mem.prepare(`CREATE TABLE events_store AS SELECT ${job.eventCols}, raw_jsonl, ${rawZ} FROM ${alias}.events WHERE ${scope}`).run(...ids);
+        mem.exec(`CREATE VIEW events AS SELECT ${job.eventCols}, fleet_raw(raw_jsonl, raw_z) AS raw_jsonl FROM events_store`);
+      } else {
+        mem.prepare(`CREATE TABLE events AS SELECT ${job.eventCols} FROM ${alias}.events WHERE ${scope}`).run(...ids);
+      }
       for (const t of ['sessions', 'broker_sessions', 'session_summaries', 'session_tags', 'usage_events']) {
         mem.prepare(`CREATE TABLE ${t} AS SELECT * FROM ${alias}.${t} WHERE ${scope}`).run(...ids);
       }
@@ -122,7 +134,7 @@ const { parentPort, workerData } = require('node:worker_threads');
 const run = (${runSnapshotQuery.toString()});
 try {
   const Database = require(workerData.bs3Path);
-  parentPort.postMessage({ ok: true, rows: run(Database, workerData.job) });
+  parentPort.postMessage({ ok: true, rows: run(Database, workerData.job, require('node:zlib')) });
 } catch (e) {
   parentPort.postMessage({ ok: false, message: e && e.message ? e.message : String(e) });
 }
