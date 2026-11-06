@@ -1,12 +1,14 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   costForSession, eventsForSession, ingestLine, insertEmbedding, maintenanceGet, maxEmbeddingId, recentToolCallsForSession,
-  recordUsageEvent, searchEmbeddings,
+  recordUsageEvent, searchEmbeddings, stateKysely, withRawSqlite,
 } from '../db.js';
 import { encodeVector, EMBED_DIM, EMBED_MODEL_ID } from '../vectors.js';
 import { indexSessionTurns } from '../transcriptIndex.js';
 import { openTestState, queryRows, isPg } from '../store/testStore.js';
-import { compactEmbeddings, DAY_MS, retainEvents, type Throttle } from './retention.js';
+import {
+  compactEmbeddings, createThrottle, DAY_MS, incrementalVacuum, retainEvents, startRetention, type PassResult, type Throttle,
+} from './retention.js';
 
 const WS = '01WS';
 const SES = 'ses-old';
@@ -166,5 +168,64 @@ describe('compactEmbeddings', () => {
     const [row] = await queryRows<{ n: unknown }>(
       isPg ? 'SELECT CASE WHEN vec IS NULL THEN 0 ELSE 1 END AS n FROM embeddings' : 'SELECT length(vec) AS n FROM embeddings');
     expect(Number(row.n)).toBe(0);
+  });
+});
+
+describe('createThrottle', () => {
+  it('sleeps max(250, 9 × slice time) after each slice', async () => {
+    let clock = 0;
+    const sleeps: number[] = [];
+    const t = createThrottle({ now: () => clock, sleep: async (ms) => { sleeps.push(ms); } });
+    await t.slice(async () => { clock += 10; });
+    await t.slice(async () => { clock += 100; });
+    expect(sleeps).toEqual([250, 900]);
+  });
+
+  it('stop() cuts a sleep short and marks the throttle stopped', async () => {
+    const t = createThrottle({ minSleepMs: 60_000 });
+    const p = t.slice(async () => 1);
+    await new Promise((r) => setTimeout(r, 10));
+    t.stop();
+    await expect(p).resolves.toBe(1);
+    expect(t.stopped()).toBe(true);
+  });
+});
+
+describe('incrementalVacuum', () => {
+  it('frees pages down to the threshold on an incremental-mode SQLite db', async () => {
+    if (isPg) {
+      expect(await incrementalVacuum(unthrottled)).toBe(0);
+      return;
+    }
+    await withRawSqlite((d) => { d.pragma('auto_vacuum = INCREMENTAL'); d.exec('VACUUM'); });
+    const big = 'x'.repeat(8000);
+    await stateKysely().insertInto('maintenance')
+      .values(Array.from({ length: 3000 }, (_, i) => ({ key: `k${i}`, value: big }))).execute();
+    await stateKysely().deleteFrom('maintenance').execute();
+    const free = (await withRawSqlite((d) => d.pragma('freelist_count', { simple: true }) as number))!;
+    expect(free).toBeGreaterThan(4096);
+    const freed = await incrementalVacuum(unthrottled);
+    expect(freed).toBeGreaterThan(1024);
+    expect((await withRawSqlite((d) => d.pragma('freelist_count', { simple: true }) as number))!).toBeLessThanOrEqual(4096);
+  });
+
+  it('does nothing when auto_vacuum is not incremental', async () => {
+    expect(await incrementalVacuum(unthrottled)).toBe(0);
+  });
+});
+
+describe('startRetention', () => {
+  it('runs a pass after the first delay and records first_pass_at', async () => {
+    await ingestAll();
+    const done = new Promise<PassResult>((resolve) => {
+      const r = startRetention({
+        listManifestIds: async () => [WS], stateDirExists: () => true,
+        firstDelayMs: 0, now: () => NOW, throttle: { minSleepMs: 0, idleRatio: 0 },
+        onPass: (p) => { resolve(p); void r.stop(); },
+      });
+    });
+    const p = await done;
+    expect(p.events.rows).toBeGreaterThan(0);
+    expect(await maintenanceGet('retention.first_pass_at')).toBe(String(NOW));
   });
 });

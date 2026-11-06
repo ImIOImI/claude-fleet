@@ -17,7 +17,9 @@ import { PeerStatusWatcher } from './peerStatusWatcher.js';
 import { broadcastSessionStatus } from './sessionStatusBroadcast.js';
 import { listWorkspaceManifests, manifestInvariant, readWorkspaceManifest, writeWorkspaceManifest, type WorkspaceSpec } from './workspaces.js';
 import { wslLocalProjectsDir, wslLocalSessionsDir } from './localLauncher.js';
-import { encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir } from './paths.js';
+import { encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir, workspaceStateDir } from './paths.js';
+import { existsSync } from 'node:fs';
+import { startRetention } from './state/retention.js';
 import { installMainProcessHandlers, getLogPath, setErrorSink, logError } from './errorLog.js';
 import { installAppMenu } from './appMenu.js';
 import { isOpenableExternalUrl } from './externalUrl.js';
@@ -93,6 +95,7 @@ const historyGate = new InboxWriteGate();
 // before-quit holds the quit at most this long (#485).
 const QUIT_BOUND_MS = 10_000;
 let shuttingDown = false;
+let retention: ReturnType<typeof startRetention> | null = null;
 // Undoes what the inbox-backed services registered, so they can start again on the other store.
 const inboxTeardown: Array<() => void> = [];
 let keepRunningAttached = false;
@@ -500,11 +503,20 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     void inbox.counts().then((c) => broadcastInboxChanged(c, BrowserWindow.getAllWindows())).catch(() => undefined);
   };
 
+  /** Retention pass over state.db (SPEC §7 *Retention*); once per process. */
+  const startStateRetention = (): void => {
+    retention ??= startRetention({
+      listManifestIds: async () => (await listWorkspaceManifests()).map((m) => m.id),
+      stateDirExists: (id) => existsSync(workspaceStateDir(id)),
+    });
+  };
+
   let embed: EmbedFn | null = null;
   if (jsonlWatcher) {
     if (sqlite) {
       openDb(userData);
       await startStateWrites();
+      startStateRetention();
     }
     // Read-only MCP server over <userData>/mcp.sock so in-container claude can
     // read history (sessions/events/cost): its own read-only state.db
@@ -643,6 +655,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       },
       { name: 'local-dirs', group: 'history', run: () => { if (jsonlWatcher) registerLocalDirs(jsonlWatcher, manifests); } },
       { name: 'embed-backfill', group: 'history', run: () => { if (embed) startEmbedBackfill(embed); } },
+      { name: 'retention', group: 'history', after: ['watcher'], run: () => startStateRetention() },
       { name: 'capture-scheduler', group: 'inbox', after: ['claims', 'watcher'], run: () => (jsonlWatcher ? startCaptureScheduler(jsonlWatcher) : undefined) },
     ]);
     /** Refuse new inbox and history writes, stop the timers that write, and wait for writes in flight. */
@@ -650,6 +663,8 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       inboxGate.close('The inbox is moving to SQLite; try again in a moment.');
       historyGate.close('History is moving to SQLite; try again in a moment.');
       stopInboxWriters();
+      await retention?.stop();
+      retention = null;
       await inboxGate.drain(stores.inbox.kysely);
       let state: ReturnType<typeof stateKysely> | null = null;
       try {
@@ -665,6 +680,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       if (shuttingDown) return;
       inboxGate.open();
       historyGate.open();
+      startStateRetention();
       notifySvc?.resume();
       auto?.resume();
       captureScheduler?.resume();
@@ -766,6 +782,8 @@ app.on('before-quit', (e) => {
     auto?.stop();
     auto = null;
     stopRemoteBackend();
+    await retention?.stop();
+    retention = null;
     await jsonlWatcher?.stop();
     await peerStatusWatcher?.stop();
     stopMcpServer();

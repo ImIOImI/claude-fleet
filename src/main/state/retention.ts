@@ -4,8 +4,10 @@
 // thread is never held for more than one small transaction at a time.
 import {
   compactEmbeddingSlice, maintenanceGet, purgeWorkspace, workspaceIdsInState, maintenanceSet, maxEmbeddingId, retentionCandidates, retentionRows,
-  rewriteEventRaw, setRetentionWatermarks, stateDialect, type RetentionRow,
+  rewriteEventRaw, setRetentionWatermarks, stateDialect, withRawSqlite, type RetentionRow,
 } from '../db.js';
+import { logError } from '../errorLog.js';
+import { perfSpanAsync } from '../perf.js';
 import { COMPRESS_MIN_BYTES, deflateLine, rawLine, stripLine } from './rawCodec.js';
 
 export const DAY_MS = 86_400_000;
@@ -134,4 +136,133 @@ export async function sweepOrphans(deps: OrphanDeps, t: Throttle): Promise<strin
     purged.push(id);
   }
   return purged;
+}
+
+export interface ThrottleOptions {
+  minSleepMs?: number;
+  /** Sleep this many times a slice's duration after it (9 → ≤10% duty cycle). */
+  idleRatio?: number;
+  now?: () => number;
+  sleep?: (ms: number, wake: (fn: () => void) => void) => Promise<void>;
+}
+
+/** Paces slices at a low duty cycle; stop() ends the pass at the next slice
+ *  boundary and cuts a sleep in progress short. */
+export function createThrottle(opts: ThrottleOptions = {}): Throttle & { stop(): void } {
+  const minSleep = opts.minSleepMs ?? 250;
+  const ratio = opts.idleRatio ?? 9;
+  const now = opts.now ?? (() => performance.now());
+  let stopped = false;
+  let wakeSleeper: (() => void) | null = null;
+  const sleep = opts.sleep ?? ((ms: number, wake: (fn: () => void) => void) => new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+    wake(() => { clearTimeout(timer); resolve(); });
+  }));
+  return {
+    async slice(fn) {
+      const t0 = now();
+      try {
+        return await perfSpanAsync('claude_fleet.retention.slice', fn);
+      } finally {
+        if (!stopped) await sleep(Math.max(minSleep, ratio * (now() - t0)), (w) => { wakeSleeper = w; });
+        wakeSleeper = null;
+      }
+    },
+    stopped: () => stopped,
+    stop() {
+      stopped = true;
+      wakeSleeper?.();
+    },
+  };
+}
+
+const VACUUM_FREE_PAGES = 4096;
+const VACUUM_SLICE_PAGES = 1024;
+const VACUUM_MAX_SLICES = 64;
+
+/** Return free pages to the OS in small slices (SQLite with
+ *  auto_vacuum = INCREMENTAL only; Postgres relies on autovacuum). */
+export async function incrementalVacuum(t: Throttle): Promise<number> {
+  const state = await withRawSqlite((d) => ({
+    mode: d.pragma('auto_vacuum', { simple: true }) as number,
+    free: d.pragma('freelist_count', { simple: true }) as number,
+  }));
+  if (!state || state.mode !== 2) return 0;
+  let free = state.free;
+  const start = free;
+  for (let i = 0; i < VACUUM_MAX_SLICES && free > VACUUM_FREE_PAGES && !t.stopped(); i++) {
+    free = (await t.slice(() => withRawSqlite((d) => {
+      d.pragma(`incremental_vacuum(${VACUUM_SLICE_PAGES})`);
+      return d.pragma('freelist_count', { simple: true }) as number;
+    }))) ?? free;
+  }
+  return start - free;
+}
+
+export interface RetentionDeps extends OrphanDeps {
+  firstDelayMs?: number;
+  intervalMs?: number;
+  vacuumEveryMs?: number;
+  now?: () => number;
+  throttle?: ThrottleOptions;
+  /** Test hook: called after each full pass. */
+  onPass?: (r: PassResult) => void;
+}
+
+export interface PassResult {
+  orphans: string[];
+  events: RetainEventsResult;
+  embeddings: { rows: number; bytesSaved: number };
+  vacuumPages: number;
+}
+
+/** Schedule retention: a pass 5 min after start, then daily; an incremental
+ *  vacuum check every 30 min. One unit of work runs at a time. */
+export function startRetention(deps: RetentionDeps): { stop(): Promise<void> } {
+  const throttle = createThrottle(deps.throttle);
+  const now = deps.now ?? Date.now;
+  let running: Promise<unknown> | null = null;
+  const step = async <T>(name: string, fn: () => Promise<T>, fallback: T): Promise<T> => {
+    try {
+      return await fn();
+    } catch (e) {
+      logError({ source: 'main', level: 'warn', type: 'retention-step', message: String(e), extra: { step: name } });
+      return fallback;
+    }
+  };
+  const pass = async (): Promise<void> => {
+    const at = now();
+    const r: PassResult = {
+      orphans: await step('orphans', () => sweepOrphans(deps, throttle), []),
+      events: await step('events', () => retainEvents(at, throttle), { rows: 0, bytesBefore: 0, bytesAfter: 0 }),
+      embeddings: await step('embeddings', () => compactEmbeddings(throttle), { rows: 0, bytesSaved: 0 }),
+      vacuumPages: await step('vacuum', () => incrementalVacuum(throttle), 0),
+    };
+    if (throttle.stopped()) return;
+    await step('bookkeeping', async () => {
+      if (!(await maintenanceGet('retention.first_pass_at'))) await maintenanceSet('retention.first_pass_at', String(at));
+      await maintenanceSet('retention.last_pass_at', String(at));
+    }, undefined);
+    logError({ source: 'main', level: 'info', type: 'retention-pass', message: `retention pass: ${r.events.rows} events, ${r.embeddings.rows} embeddings, ${r.orphans.length} orphaned workspaces`,
+      extra: { ...r, ms: now() - at } });
+    deps.onPass?.(r);
+  };
+  const run = (fn: () => Promise<unknown>) => {
+    if (running || throttle.stopped()) return;
+    running = fn().finally(() => { running = null; });
+  };
+  const timers = [
+    setTimeout(() => run(pass), deps.firstDelayMs ?? 5 * 60_000),
+    setInterval(() => run(pass), deps.intervalMs ?? DAY_MS),
+    setInterval(() => run(() => step('vacuum', () => incrementalVacuum(throttle), 0)), deps.vacuumEveryMs ?? 30 * 60_000),
+  ];
+  for (const t of timers) t.unref?.();
+  return {
+    async stop() {
+      for (const t of timers) clearTimeout(t);
+      throttle.stop();
+      await running?.catch(() => undefined);
+    },
+  };
 }
