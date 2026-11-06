@@ -5,8 +5,11 @@ edition = "2021"
 publish = false
 
 [dependencies]
-# Static onnxruntime (download-binaries); rustls so the build needs no OpenSSL headers.
-ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "tls-rustls", "api-22"] }
+# rc.10 = onnxruntime 1.22, statically linked. Newer ORT (1.24, rc.12) drifts
+# from transformers.js's onnxruntime-node 1.21 on this q8 model (min cosine
+# 0.996); 1.22 matches it exactly. Its build-time download needs OpenSSL
+# headers on Linux, or set ORT_LIB_LOCATION and drop download-binaries.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "download-binaries"] }
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

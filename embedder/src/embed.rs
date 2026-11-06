@@ -1,5 +1,10 @@
-//! Mirrors transformers.js `pipeline('feature-extraction')(texts, { pooling: 'mean', normalize: true })`
+//! Mirrors transformers.js `pipeline('feature-extraction')([text], { pooling: 'mean', normalize: true })`
 //! so vectors stay comparable with ones already stored.
+//!
+//! Each text runs unpadded, one per session run. The q8 model quantizes
+//! activations with one dynamic scale per tensor, padded positions included,
+//! so a padded batch makes a text's vector depend on its batch neighbours
+//! (transformers.js batched vs alone: cosine as low as 0.967).
 
 use std::path::Path;
 
@@ -35,11 +40,19 @@ impl Embedder {
             .with_intra_threads(threads)
             .map_err(|e| e.to_string())?
             .commit_from_file(model_dir.join("onnx").join("model_quantized.onnx"))?;
-        let wants_token_type_ids = session.inputs().iter().any(|i| i.name() == "token_type_ids");
+        let wants_token_type_ids = session.inputs.iter().any(|i| i.name == "token_type_ids");
         Ok(Self { tokenizer, session, wants_token_type_ids, pad_id })
     }
 
     pub fn embed(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>, BoxErr> {
+        let mut out = Vec::with_capacity(texts.len());
+        for t in texts {
+            out.extend(self.run_batch(std::slice::from_ref(t))?);
+        }
+        Ok(out)
+    }
+
+    fn run_batch(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>, BoxErr> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }

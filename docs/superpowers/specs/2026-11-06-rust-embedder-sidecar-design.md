@@ -71,12 +71,17 @@ Base64 float32 keeps the payload exact (no float→decimal→float round trip) a
 ### Inference (must match transformers.js)
 
 transformers.js `pipeline('feature-extraction', …)(texts, { pooling: 'mean', normalize: true })` does:
-1. Tokenize with `tokenizer.json`, `padding: true`, `truncation: true` (max 512 tokens), with special tokens.
+1. Tokenize with `tokenizer.json`, add special tokens, then truncate the ids to 512 (`model_max_length`). It truncates *after* adding specials, so a long text loses its trailing `[SEP]`. Then pad to the batch's longest.
 2. Run the model with `input_ids`, `attention_mask`, and `token_type_ids` (zeros).
 3. Mean-pool `last_hidden_state` over tokens weighted by `attention_mask`.
 4. L2-normalize.
 
-The Rust side does exactly this: `tokenizers` with `TruncationParams { max_length: 512 }` and `PaddingParams { strategy: BatchLongest }`, `ort` session (default graph optimization, intra-op threads = min(4, cores)), masked mean, L2 normalize. Dedupe and search rely on `dot == cosine`, so normalization is asserted in tests.
+The sidecar does the same, with two deliberate differences, both measured on the parity corpus:
+
+- **Each text runs alone, unpadded.** The q8 model quantizes activations with one dynamic scale per tensor, padded positions included, so in transformers.js a text's vector depends on its batch neighbours: the same text embedded alone vs in a padded batch of 8 scores cosine as low as 0.967 (mean 0.995). Stored vectors already carry that noise. Per-text inference makes a vector a function of its text only, and it is the only batch-independent oracle for parity.
+- **onnxruntime 1.22 (`ort` 2.0.0-rc.10), not the newest.** transformers.js ships onnxruntime-node 1.21. Against it, per text: ORT 1.22 gives cosine 1.000000 on all 40 texts; ORT 1.24 (`ort` rc.12) gives min 0.9963 (4 texts below 0.999). Token ids were identical in both cases, so the drift is in the newer q8 kernels. Bump ORT only with a passing parity run.
+
+`tokenizers` runs with its own truncation and padding disabled; the sidecar truncates and pads by hand as above. Graph optimization level 3 and intra-op threads = min(4, cores). Dedupe and search rely on `dot == cosine`, so normalization is asserted in tests.
 
 ### Model files
 
@@ -88,7 +93,7 @@ transformers.js caches at `<cacheDir>/Xenova/bge-small-en-v1.5/{tokenizer.json,c
 - Dev: `embedder/target/release/fleet-embedder[.exe]`.
 - `FLEET_EMBEDDER_BIN` overrides both (tests, debugging).
 
-CI (`build-app.yml` build job + `release.yml`, all three OSes): `dtolnay/rust-toolchain@stable`, `cargo build --release --locked` in `embedder/`, copy the binary into `embedder/bin/`, then `npm run dist`. The Windows job also uploads `fleet-embedder-windows` (the binary alone) for `make embedder-win`. `embedder/` joins the `changes` path filter. The `unit-run` job runs `cargo test` and the parity test (below), with the model cached under `actions/cache`.
+CI (`build-app.yml` build job + `release.yml`, all three OSes): the toolchain pinned in `embedder/rust-toolchain.toml`, `libssl-dev` on Linux (ort rc.10's build-time ORT download uses native-tls), `cargo build --release --locked` in `embedder/`, copy the binary into `embedder/bin/`, then `npm run dist`. The Windows job also uploads `fleet-embedder-windows` (the binary alone) for `make embedder-win`. `embedder/` joins the `changes` path filter. The `unit-run` job runs `cargo test` and the parity test (below), with the model cached under `actions/cache`.
 
 macOS builds for the runner's arch (arm64), the same as the rest of the app. onnxruntime is statically linked, so no `.dylib`/`.dll`/`.so` ships beside it.
 
@@ -106,7 +111,7 @@ The current `makeEmbedder` body moves verbatim to `embeddingsInProcess.ts`. `mak
 
 - **Rust (`cargo test`):** framing round-trip; oversized-length rejection; EOF exits cleanly; masked mean pooling and L2 norm on a tiny hand-made tensor; padding does not change a text's vector (batch vs single).
 - **TS unit (`embedderClient.test.ts`):** against a fake child (a Node script speaking the protocol): request/response matching, timeout kill and restart, resend once, backoff timing (fake timers), 3-in-5-min crash loop → fallback, missing binary → fallback, stdin close on dispose.
-- **Parity (`embedderParity.test.ts`, gated on `CF_EMBED_PARITY=1` + a built binary):** a fixed 40-text corpus in `src/main/__fixtures__/embed-parity-corpus.json` (short, long >512 tokens, code, unicode, whitespace-heavy, near-duplicates). Embeds with transformers.js (in-process) and with the sidecar; asserts per-text cosine ≥ 0.999 and every norm within 1e-4 of 1. The min/mean cosine is printed and recorded in the PR.
+- **Parity (`embedderParity.test.ts`, gated on `CF_EMBED_PARITY=1` + a built binary):** a fixed 40-text corpus in `src/main/__fixtures__/embed-parity-corpus.json` (short, long >512 tokens, code, unicode, whitespace-heavy, near-duplicates). Embeds each text alone with transformers.js (in-process) and in batches of 8 with the sidecar; asserts per-text cosine ≥ 0.999 and every norm within 1e-4 of 1. Result: min cosine 1.000000, mean 1.000000.
 - Existing `transcriptIndex`, claims, and search tests stay unchanged: `EmbedFn` is stubbed there.
 
 ## SPEC.md changes

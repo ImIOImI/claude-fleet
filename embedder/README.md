@@ -4,7 +4,9 @@ Text embedding sidecar for claude-fleet. The Electron main process spawns it (`s
 
 ## Model
 
-`bge-small-en-v1.5`, q8 ONNX, read from the transformers.js cache: `<userData>/models/Xenova/bge-small-en-v1.5/{tokenizer.json,onnx/model_quantized.onnx}`. The sidecar never downloads; main fetches missing files first (`embedderModelFiles.ts`). Output matches transformers.js `feature-extraction` with `pooling: 'mean', normalize: true` (cosine ≥ 0.999, `embedderParity.test.ts`), so stored vectors stay valid.
+`bge-small-en-v1.5`, q8 ONNX, read from the transformers.js cache: `<userData>/models/Xenova/bge-small-en-v1.5/{tokenizer.json,onnx/model_quantized.onnx}`. The sidecar never downloads; main fetches missing files first (`embedderModelFiles.ts`). Output matches transformers.js `feature-extraction` with `pooling: 'mean', normalize: true` on one text at a time (cosine 1.000000 on the parity corpus, `embedderParity.test.ts`), so stored vectors stay valid. Each text runs unpadded: the q8 model's dynamic activation quantization makes padded-batch vectors depend on their batch neighbours.
+
+onnxruntime is pinned to 1.22 (`ort` 2.0.0-rc.10) because it matches transformers.js's onnxruntime-node 1.21 exactly; 1.24 drifted to cosine 0.996. Re-run the parity test before bumping `ort`.
 
 ## Protocol (stdio)
 
@@ -25,6 +27,6 @@ cargo build --release      # target/release/fleet-embedder[.exe]
 cargo test
 ```
 
-`ort` statically links a prebuilt onnxruntime downloaded at build time, so the binary has no runtime library dependencies. `glibc_compat.c` lets the Linux build link and run on glibc < 2.38. The toolchain is pinned in `rust-toolchain.toml`.
+`ort` statically links a prebuilt onnxruntime downloaded at build time, so the binary has no runtime library dependencies. On Linux that download needs OpenSSL headers (`libssl-dev`); without them, fetch the `none x86_64-unknown-linux-gnu` tarball listed in ort-sys's `dist.txt`, set `ORT_LIB_LOCATION=<dir with libonnxruntime.a>`, and build with `--no-default-features`-style `ort` features `["std"]`. `glibc_compat.c` lets the Linux build link and run on glibc < 2.38. The toolchain is pinned in `rust-toolchain.toml`.
 
 Packaging: CI copies the binary to `embedder/bin/`, and electron-builder ships that as `resources/embedder/`. Local Windows `make dist` fetches the CI-built binary with `make embedder-win`.
