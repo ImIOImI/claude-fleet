@@ -12,6 +12,8 @@ import { definitionToYaml, parseDefinitionText, validateDefinition } from './def
 export interface ProposalDeps {
   /** Shells this computer offers for host steps (#407); validation checks `shell` against them. */
   hostShells?(): string[] | undefined;
+  /** Refusals for this runtime (fleet-host's remoteHostRefusals). */
+  checkDefinition?(def: AutomationDef): string[];
   proposals: ProposalStore;
   automations: AutomationStore;
   now(): number;
@@ -34,7 +36,7 @@ function statusOf(items: ProposalItem[]): ProposalStatus {
 }
 
 export function createProposalService(deps: ProposalDeps) {
-  const ctx = { workspace: (v: string) => deps.resolveWorkspace(v), get hostShells() { return deps.hostShells?.(); } };
+  const ctx = { workspace: (v: string) => deps.resolveWorkspace(v), get hostShells() { return deps.hostShells?.(); }, check: deps.checkDefinition };
   /** Proposal ids with a decision in progress (approve/reject/revert). Claimed before the first await. */
   const deciding = new Set<string>();
   /** Applies an approved capture-settings change (#483 §5a). Late-bound: the

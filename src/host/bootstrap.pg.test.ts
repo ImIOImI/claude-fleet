@@ -279,7 +279,7 @@ describe.skipIf(!isPg)('fleet-host bootstrap / migrate (CLI)', () => {
     const port = await freePort();
     const dir = mkdtempSync(join(tmpdir(), 'fh-boot-host-'));
     const host = await runHost({
-      env: { ...env, FLEET_HOST_PORT: String(port), FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'), FLEET_HOST_PROJECTS: join(dir, 'projects') },
+      env: { ...env, FLEET_HOST_PORT: String(port), FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'), FLEET_HOST_PROJECTS: join(dir, 'projects'), FLEET_HOST_MCP_SOCKET: join(dir, 'run', 'mcp.sock') },
       exit: vi.fn(), proc: new EventEmitter(), logSink: () => undefined,
       authFactory: () => ({ id: 'github', verify: async (t) => { if (t !== TOKEN) throw new IdentityError('unauthorized', 'bad', 401); return person('owner', 1, ['acme/platform']); } }),
       brokerOps: fakeBroker([]).ops, leaseRenewMs: 200, leaseTtlMs: 1_000

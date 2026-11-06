@@ -2,7 +2,7 @@
 // on every reload; grants are validated by the shared identity layer.
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { parse } from 'yaml';
 import { ORG_RE, parseGrantConfig, type GrantConfig } from '../main/identity/grants.js';
 import { parseStoreConfig, StoreConfigError, type PostgresStoreConfig } from '../main/store/storeConfig.js';
@@ -45,6 +45,16 @@ export interface HostConfig {
   grants: GrantConfig;
   /** Proxies in front of the pod that append to X-Forwarded-For; 0 means key on the socket address. */
   trustedProxyHops: number;
+  /** The only source of this workspace's automations; the holder validates each definition. */
+  automations: HostAutomationEntry[];
+}
+
+export const MAX_HOST_AUTOMATIONS = 100;
+
+/** A definition the holder reconciles into the store (SPEC §7 *Host automations*). */
+export interface HostAutomationEntry {
+  definition: Record<string, unknown>;
+  enabled: boolean;
 }
 
 export class HostConfigError extends Error {
@@ -62,6 +72,23 @@ function record(v: unknown, path: string): Record<string, unknown> {
 // Unknown keys are refused so a typo (e.g. `Id`) can't silently fall back to minting.
 function onlyKeys(o: Record<string, unknown>, path: string, allowed: readonly string[]): void {
   for (const k of Object.keys(o)) if (!allowed.includes(k)) throw new HostConfigError(`${path} has unknown key ${k}`);
+}
+
+function parseAutomations(v: unknown): HostAutomationEntry[] {
+  if (v === undefined) return [];
+  if (!Array.isArray(v)) throw new HostConfigError('automations must be a list');
+  if (v.length > MAX_HOST_AUTOMATIONS) throw new HostConfigError(`automations: at most ${MAX_HOST_AUTOMATIONS}`);
+  const names = new Set<string>();
+  return v.map((raw, i) => {
+    const e = record(raw, `automations[${i}]`);
+    onlyKeys(e, `automations[${i}]`, ['definition', 'enabled']);
+    const definition = record(e.definition, `automations[${i}].definition`);
+    if (typeof definition.name !== 'string' || !definition.name) throw new HostConfigError(`automations[${i}].definition.name must be a string`);
+    if (names.has(definition.name)) throw new HostConfigError(`duplicate automation name ${definition.name}`);
+    names.add(definition.name);
+    if (e.enabled !== undefined && typeof e.enabled !== 'boolean') throw new HostConfigError(`automations[${i}].enabled must be true or false`);
+    return { definition, enabled: e.enabled !== false };
+  });
 }
 
 function parseWorkspace(v: unknown): HostWorkspaceInfo {
@@ -150,7 +177,7 @@ function parseDb(v: unknown): PostgresStoreConfig {
 
 export function parseHostConfig(raw: unknown): HostConfig {
   const o = record(raw, 'host config');
-  onlyKeys(o, 'host config', ['workspace', 'identity', 'grants', 'machines', 'trustedProxyHops', 'github', 'db']);
+  onlyKeys(o, 'host config', ['workspace', 'identity', 'grants', 'machines', 'trustedProxyHops', 'github', 'db', 'automations']);
   const id = o.identity === undefined ? {} : record(o.identity, 'identity');
   onlyKeys(id, 'identity', ['provider', 'org']);
   if (id.provider !== undefined && id.provider !== 'github') {
@@ -175,7 +202,8 @@ export function parseHostConfig(raw: unknown): HostConfig {
     db: o.db === undefined ? null : parseDb(o.db),
     identity: { provider: 'github', org: typeof id.org === 'string' ? id.org : null },
     grants,
-    trustedProxyHops: hops
+    trustedProxyHops: hops,
+    automations: parseAutomations(o.automations)
   };
 }
 
@@ -203,18 +231,30 @@ export interface HostEnv {
   credSocket: string;
   /** Claude's transcripts in this container, ingested by the holder. */
   projectsDir: string;
+  /** The fleet-state MCP socket the holder serves to sessions. */
+  mcpSocket: string;
+  /** Shared-group mode (container split): prep's `mcp/` directory is checked, the socket is 0660 in this group. */
+  mcpSocketGroup: number | null;
 }
 
 export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
   const portText = env.FLEET_HOST_PORT ?? String(DEFAULT_PORT);
   const port = Number(portText);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new HostConfigError(`FLEET_HOST_PORT ${portText} is not a port`);
+  const groupText = env.FLEET_HOST_MCP_SOCKET_GROUP;
+  if (groupText !== undefined && groupText !== '' && !/^\d{1,9}$/.test(groupText)) throw new HostConfigError('FLEET_HOST_MCP_SOCKET_GROUP must be a numeric gid');
+  const mcpSocket = env.FLEET_HOST_MCP_SOCKET || (groupText ? '/run/fleet/mcp/mcp.sock' : '/run/fleet/mcp.sock');
+  if (!isAbsolute(mcpSocket)) throw new HostConfigError('FLEET_HOST_MCP_SOCKET must be an absolute path');
+  // sun_path holds 108 bytes with the terminating NUL on Linux.
+  if (Buffer.byteLength(mcpSocket) > 107) throw new HostConfigError('FLEET_HOST_MCP_SOCKET is longer than 107 bytes');
   return {
     port,
     configPath: env.FLEET_HOST_CONFIG || DEFAULT_CONFIG_PATH,
     stateDir: env.FLEET_HOST_STATE || '/home/fleet/.claude/fleet-host',
     brokerSocket: env.CLAUDE_FLEET_BROKER_SOCKET || '/run/broker/broker.sock',
     credSocket: env.FLEET_HOST_CRED_SOCKET || '/run/fleet-host/cred.sock',
-    projectsDir: env.FLEET_HOST_PROJECTS || join(homedir(), '.claude', 'projects')
+    projectsDir: env.FLEET_HOST_PROJECTS || join(homedir(), '.claude', 'projects'),
+    mcpSocket,
+    mcpSocketGroup: groupText ? Number(groupText) : null
   };
 }

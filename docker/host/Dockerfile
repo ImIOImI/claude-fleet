@@ -28,7 +28,9 @@ RUN find /usr/local/lib/fleet-host -type f -exec chmod 0644 {} + \
  && printf '#!/bin/sh\nexec node /usr/local/lib/fleet-host/fleet-host-cred.mjs "$@"\n' > /usr/local/bin/fleet-host-cred \
  && chmod 0755 /usr/local/bin/fleet-host /usr/local/bin/fleet-host-cred \
  && mkdir -p /etc/fleet-host /run/fleet-host \
- && chown fleet:fleet /run/fleet-host && chmod 0700 /run/fleet-host
+ && chown fleet:fleet /run/fleet-host && chmod 0700 /run/fleet-host \
+ && node /usr/local/lib/fleet-host/fleet-host.mjs write-mcp-bridge /usr/local/lib/fleet-host/mcp-bridge.cjs \
+ && mkdir -p /run/fleet && chown fleet:fleet /run/fleet && chmod 0700 /run/fleet
 USER fleet
 ENV PATH=/usr/local/lib/fleet-host/bin:$PATH \
     FLEET_HOST_PORT=8080 \

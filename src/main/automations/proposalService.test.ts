@@ -5,12 +5,13 @@ import { AutomationStore } from './automationStore.js';
 import { ProposalStore } from './proposalStore.js';
 import { createProposalService } from './proposalService.js';
 import { openTestInbox } from '../store/testStore.js';
+import type { AutomationDef } from '../../preload/inboxTypes.js';
 
 let inbox: InboxStore;
 afterEach(() => inbox?.close());
 const WSS: Record<string, string> = { 'ops-oncall': 'W1', 'webex-triage': 'W2', automations: 'WA' };
 
-async function setup(trusted: string[] = []) {
+async function setup(trusted: string[] = [], checkDefinition?: (def: AutomationDef) => string[]) {
   inbox = (await openTestInbox());
   const automations = new AutomationStore(inbox.kysely);
   const notes: Array<Record<string, unknown>> = [];
@@ -21,7 +22,8 @@ async function setup(trusted: string[] = []) {
     workspaceName: (id) => Object.entries(WSS).find(([, v]) => v === id)?.[0] ?? id,
     trusted: async (id) => trusted.includes(id),
     notify: (n) => { notes.push(n as never); return null; },
-    changed: () => {}
+    changed: () => {},
+    checkDefinition
   });
   return { svc, automations, notes };
 }
@@ -50,6 +52,11 @@ describe('proposing', () => {
     await expect(svc.mcp.propose('W2', { definition: 'name: Bad' })).rejects.toThrow(/definition: name:/);
     await automations.create({ name: 'log-watch', triggers: [{ manual: {} }], steps: [{ id: 'a', prompt: { workspace: 'W1', mode: 'live', message: 'm' } }] }, { kind: 'user', id: null });
     await expect(svc.mcp.propose('W2', { definition: YAML() })).rejects.toThrow(/already exists; propose a change/);
+  });
+  it('checkDefinition refuses a proposal it would not run', async () => {
+    const { svc } = await setup([], (d) => (d.name === 'log-watch' ? ['refused here'] : []));
+    await expect(svc.mcp.propose('W2', { definition: YAML() })).rejects.toThrow(/refused here/);
+    expect((await svc.mcp.propose('W2', { definition: YAML('other') })).status).toBe('pending');
   });
   it('a newer proposal from the same workspace supersedes the older one', async () => {
     const { svc } = await setup();

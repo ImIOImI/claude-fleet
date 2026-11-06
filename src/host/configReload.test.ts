@@ -25,6 +25,15 @@ function rig(text: string) {
 }
 
 describe('createReloader', () => {
+  it('applies a change to automations', async () => {
+    const auto = (msg: string) => `workspace: { name: a }\nautomations:\n  - definition: { name: d, triggers: [{ manual: {} }], steps: [{ id: go, prompt: { workspace: $self, mode: fresh, message: ${msg} } }] }\n`;
+    const { path, applied, r } = rig(auto('one'));
+    expect(await r.reload('start')).toBe(true);
+    writeFileSync(path, auto('two'));
+    expect(await r.reload('SIGHUP')).toBe(true);
+    expect(applied.map((c) => (c.automations[0].definition.steps as Array<{ prompt: { message: string } }>)[0].prompt.message)).toEqual(['one', 'two']);
+  });
+
   it('applies a valid config and keeps the current one on an invalid file', async () => {
     const { path, applied, logs, r } = rig('workspace: { name: a }\n');
     expect(await r.reload('start')).toBe(true);

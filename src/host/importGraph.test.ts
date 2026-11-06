@@ -3,20 +3,24 @@
 // src/main modules listed here.
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
+import { isBuiltin } from 'node:module';
 import { dirname, join, relative, resolve } from 'node:path';
 import { parse } from 'yaml';
 
 const SRC = resolve(__dirname, '..');
 const ROOT = resolve(SRC, '..');
-const ENTRIES = [join(SRC, 'host', 'cli.ts'), join(SRC, 'host', 'credMain.ts')];
+const ENTRIES = [join(SRC, 'host', 'cli.ts'), join(SRC, 'host', 'credMain.ts'), join(SRC, 'main', 'mcpCore.ts'), join(SRC, 'host', 'hostAutomations.ts')];
 // better-sqlite3 resolves to src/host/sqliteStub.ts in the bundle (vite.host.config.ts).
 const BARE_ALLOWED = new Set(['ws', 'yaml', 'ulid', 'kysely', 'pg', 'pg-connection-string', '@aws-sdk', 'better-sqlite3']);
 const MAIN_ALLOWED = [/^main\/identity\/[^/]+\.ts$/, /^main\/broker\.ts$/, /^main\/claudeArgs\.ts$/, /^main\/vaultScopes\.ts$/, /^preload\/identityTypes\.ts$/,
-  /^main\/store\/(kysely|postgres|pgMigrate|storeConfig|passwordProvider|pgSsl|pgScramOnly|sqliteFiles|pgStores|pgVectorSearch|stateSchema|inboxSchema)\.ts$/,
+  /^main\/store\/(kysely|postgres|pgMigrate|storeConfig|passwordProvider|pgSsl|pgScramOnly|sqliteFiles|pgStores|pgVectorSearch|stateSchema|inboxSchema|readSource|pgReadSource|pgQueryIsolation|scram)\.ts$/,
   /^main\/store\/migrations\/(statePg|inboxPg)\.ts$/,
-  /^main\/(db|asyncCache|contextWindow|pricing|usageAnchors|userPromptText|vectors)\.ts$/,
+  /^main\/(db|asyncCache|contextWindow|pricing|usageAnchors|userPromptText|vectors|mcpCore|mcpLines|clipText)\.ts$/,
+  /^main\/claims\/searchHits\.ts$/,
+  /^main\/mcpContainerBridge\.ts$/,
   /^main\/state\/(ingestParse|serialQueue|transcriptPaths)\.ts$/,
-  /^main\/inbox\/(inboxDb|inboxCore)\.ts$/,
+  /^main\/inbox\/(inboxDb|inboxCore|inboxService|inboxPolicy|notifyService|notifyStore|notifyPolicy)\.ts$/,
+  /^main\/automations\/(automationService|automationStore|proposalService|proposalStore|definition|cron|scheduler|runner|reschedule|template|scriptProtocol|classify)\.ts$/,
   /^preload\/(inboxTypes|captureSettings)\.ts$/];
 const SPEC_RE = /\b(?:import|export)\s+(?:type\s+)?(?:[^'"`;]*?\bfrom\s*)?['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]|\brequire\s*\(\s*['"]([^'"]+)['"]/g;
 
@@ -31,7 +35,8 @@ function walk(): { files: string[]; bare: Set<string> } {
     const text = readFileSync(file, 'utf8');
     for (const m of text.matchAll(SPEC_RE)) {
       const spec = m[1] ?? m[2] ?? m[3];
-      if (spec.startsWith('node:')) continue;
+      // Bare builtins also match inside script text (the container bridge's `require('net')`).
+      if (spec.startsWith('node:') || isBuiltin(spec)) continue;
       if (!spec.startsWith('.')) {
         bare.add(spec.split('/')[0]);
         continue;

@@ -35,6 +35,8 @@ Every task implicitly includes these.
 
 ## Decisions (recorded in SPEC.md by Task 8)
 
+> As built, SPEC §7 *Host MCP* and *Host automations* supersede B2, B4 and B10 below: the split-mode socket is `/run/fleet/mcp/mcp.sock` in a fleet-host-owned 2750 `mcp/` dir, 13 tools are served (no propose tools), and definitions come only from the host config.
+
 - **B1 — `mcpServer.ts` splits into `mcpCore.ts` and the desktop shell.**
   - `mcpCore.ts` holds the protocol (`initialize`, `tools/list`, `tools/call`), dispatch and caps, every tool except the three perf tools, the handler seams (`set*Handlers`, `setReadScopeResolver`, …), the read-source state and `serveMcpConnection(sock, callerId)`. It imports only pure modules: `mcpLines`, `store/readSource`, `pricing`, `clipText` (new, moved out of `errorLog.ts`), `vectors` (`EmbedFn` moves there from `transcriptIndex.ts`), `claims/searchHits`.
   - It reaches no logger: `setMcpLogSink(fn)` receives the rows the desktop wrote with `logError`. The desktop shell calls `setMcpLogSink(logError)` at load.

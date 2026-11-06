@@ -4,10 +4,10 @@
 // (and tests can stub it).
 import type Database from 'better-sqlite3';
 import { insertEmbeddings, unembeddedTurnEvents, unembeddedSummaries } from './db.js';
-import { encodeVector, decodeVector, topK, EMBED_MODEL_ID, EMBED_DIM } from './vectors.js';
+import { encodeVector, decodeVector, topK, EMBED_MODEL_ID, EMBED_DIM, type EmbedFn } from './vectors.js';
 import { perfSpan, perfSpanAsync } from './perf.js';
 
-export type EmbedFn = (texts: string[]) => Promise<Float32Array[]>;
+export type { EmbedFn };
 
 // Truncation + batch size are MEMORY controls, not just throughput knobs:
 // activation memory scales with batch × sequence length, and onnxruntime's

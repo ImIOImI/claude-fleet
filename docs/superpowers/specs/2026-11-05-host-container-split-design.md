@@ -29,7 +29,7 @@ One pod, two containers, one image (`runner-host` / `runner-devops-host`), plus 
 
 No `shareProcessNamespace`: a session can't see, signal or ptrace fleet-host. A host container restart doesn't touch PTYs, because the broker lives in the workspace container. Kubernetes restarts each container on its own.
 
-The shared directory (`/run/fleet` in both containers) holds exactly two sockets:
+The shared directory (`/run/fleet` in both containers) holds three sockets: `broker.sock`, `cred.sock` and `mcp/mcp.sock` (see the c3b amendment below):
 - `broker.sock`: the broker listens (uid 1000), fleet-host dials in. Mode 0660, group 1500.
 - `cred.sock`: fleet-host listens (uid 1001), sessions dial in through `fleet-host-cred`. Mode 0660, group 1500.
 
@@ -47,7 +47,9 @@ The shared directory (`/run/fleet` in both containers) holds exactly two sockets
 - `host` and `workspace` modes refuse to start unless `/run/fleet` is a real directory (not a symlink) in group `FLEET_RUN_GID` (default 1500), group rwx, no access for others. The error names `fleet-host-entry prep`.
 - Broker: new env `CLAUDE_FLEET_BROKER_SOCKET_GROUP=<gid>`. When set, the broker doesn't create the directory, creates the socket 0660 and chowns it to that group. Unset keeps today's 0666 (the desktop's host is another uid).
 - Credential server: new env `FLEET_HOST_CRED_SOCKET_GROUP=<gid>` (`HostEnv.credSocketGroup`). When set, it leaves the directory alone, checks it as above, replaces whatever stale entry holds the socket name, and creates the socket 0660 in that group. Unset keeps 0600 in a 0700 directory.
-- What a session can still do through the shared dir: create files there and fill the 1 MiB tmpfs (the pod is evicted, which a session can already cause by killing the broker), and dial `broker.sock`, which it can already reach. A fake socket gains nothing: fleet-host sends the broker only what sessions can already see, and sessions are the only clients of `cred.sock`.
+- What a session can still do through the shared dir: create files there (not in `mcp/`) and fill the 1 MiB tmpfs (the pod is evicted, which a session can already cause by killing the broker), and dial `broker.sock` and `mcp.sock`, which it can already reach. A fake socket gains nothing: fleet-host sends the broker only what sessions can already see, and sessions are the only clients of `cred.sock` and `mcp.sock`. `/run/fleet` holds three sockets: `broker.sock`, `cred.sock` and `mcp/mcp.sock`.
+
+- **Amendment (c3b, fleet-state MCP socket):** `prep` also creates `sock/mcp/`, owned by uid 1001, group 1500, mode 2750. fleet-host serves `mcp.sock` there (`FLEET_HOST_MCP_SOCKET`, default `/run/fleet/mcp/mcp.sock` when `FLEET_HOST_MCP_SOCKET_GROUP` is set), 0660 in group 1500. fleet-host refuses to serve unless the directory is a real directory it owns, in that group, with group r-x and no group write or other access. Sessions can connect but can't create anything in it, so they can't plant a file, symlink or directory at the socket path.
 
 **D5. App key: copied by `prep` into a memory emptyDir, 0400 uid 1001. No pod `fsGroup`.**
 - A Secret volume is root-owned; with `fsGroup` its files get group read (kubelet ORs in 0440), so `defaultMode` alone can't make it 1001-only. A pod-level `fsGroup` would also apply to the emptyDirs and could chown the EFS volumes.

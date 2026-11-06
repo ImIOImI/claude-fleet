@@ -31,7 +31,7 @@ vi.mock('./db.js', () => ({
     const n = (h.inFlight.get(sessionId) ?? 0) + 1;
     h.inFlight.set(sessionId, n);
     h.maxInFlightPerSession = Math.max(h.maxInFlightPerSession, n);
-    await new Promise((r) => setTimeout(r, Math.random() * h.maxDelayMs));
+    await new Promise((r) => setTimeout(r, h.maxDelayMs / 2 + Math.random() * (h.maxDelayMs / 2)));
     const out = raws.map((raw) => {
       const uuid = (JSON.parse(raw) as { uuid: string }).uuid;
       const inserted = !h.seen.has(uuid);

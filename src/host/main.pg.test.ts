@@ -2,7 +2,7 @@
 // singleton, so only one holder may have its stores open at a time.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { connect, createServer, type AddressInfo, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,7 +17,11 @@ import { HOST_PG_SESSION } from './hostDb.js';
 import { HOST_TRACK } from './hostSchema.js';
 import { WORKSPACE_ID_FILE } from './hostState.js';
 import { EXIT_DB_UNAVAILABLE, runHost, type RunHostOptions } from './main.js';
-import { fakeBroker, person, TOKEN } from './testFakes.js';
+import { postgresLeaseStore } from './pgLease.js';
+import { fakeBroker, jsonFrame, person, TOKEN } from './testFakes.js';
+import { hostMcpArgs } from './hostMcp.js';
+import { FrameType } from '../main/broker.js';
+import WebSocket from 'ws';
 
 const ID = '01JC0000000000000000000000';
 const OTHER = '01JC0000000000000000000009';
@@ -28,7 +32,8 @@ const verify: IdentityProvider['verify'] = async (t) => {
 
 const hostEnv = (dir: string, port: number, cfgPath: string): NodeJS.ProcessEnv => ({
   FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'),
-  CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'), FLEET_HOST_PROJECTS: join(dir, 'projects')
+  CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'), FLEET_HOST_PROJECTS: join(dir, 'projects'),
+  FLEET_HOST_MCP_SOCKET: join(dir, 'run', 'mcp.sock')
 });
 
 async function freePort(): Promise<number> {
@@ -48,26 +53,106 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     t = null;
   });
 
-  async function start(opts: Partial<RunHostOptions> = {}) {
+  async function start(opts: Partial<RunHostOptions> = {}, prepare?: (dir: string) => void, extraConfig = '') {
     t ??= await testPgSchema();
     const dir = mkdtempSync(join(tmpdir(), 'fh-pg-'));
+    prepare?.(dir);
     const cfgPath = join(dir, 'config.yaml');
     const dbBlock = JSON.stringify({ env: 'FLEET_TEST_PG_URL', schema: t.schema, poolMax: 2 });
-    writeFileSync(cfgPath, `workspace: { id: ${ID}, name: smoke }\ngrants:\n  - { team: acme/platform, tier: session }\ndb: ${dbBlock}\n`);
+    writeFileSync(cfgPath, `workspace: { id: ${ID}, name: smoke }\ngrants:\n  - { team: acme/platform, tier: session }\ndb: ${dbBlock}\n${extraConfig}`);
     const port = await freePort();
     const exit = vi.fn();
     const logs: string[] = [];
+    const proc = new EventEmitter();
     const host = await runHost({
       env: { ...hostEnv(dir, port, cfgPath), FLEET_TEST_PG_URL: process.env.PG_TEST_URL },
-      exit, proc: new EventEmitter(), logSink: (l) => logs.push(l), authFactory: () => ({ id: 'github', verify }),
+      exit, proc, logSink: (l) => logs.push(l), authFactory: () => ({ id: 'github', verify }),
       brokerOps: fakeBroker([]).ops, leaseRenewMs: 200, leaseTtlMs: 1_000,
       ...opts
     });
     hosts.push(host);
-    return { url: `http://127.0.0.1:${port}`, host, exit, logs, dir };
+    return { url: `http://127.0.0.1:${port}`, host, exit, logs, dir, cfgPath, proc };
   }
   const leader = async (url: string) => (await fetch(`${url}/leader`)).status;
   const storesOpen = () => vi.waitFor(() => expect(() => db.stateKysely()).not.toThrow(), { timeout: 10_000 });
+
+  const mcpSock = (dir: string) => join(dir, 'run', 'mcp.sock');
+  const isSocket = (p: string) => existsSync(p) && lstatSync(p).isSocket();
+  function rpc(path: string, msgs: object[]): Promise<Array<Record<string, any>>> {
+    return new Promise((resolve, reject) => {
+      const c: Socket = connect(path);
+      let buf = '';
+      c.setEncoding('utf8');
+      c.on('data', (d) => {
+        buf += d;
+        const lines = buf.trim().split('\n').filter(Boolean);
+        if (lines.length >= msgs.length) { c.destroy(); resolve(lines.map((l) => JSON.parse(l))); }
+      });
+      c.on('error', reject);
+      for (const m of msgs) c.write(JSON.stringify(m) + '\n');
+    });
+  }
+
+  it('only the lease holder serves the MCP socket, as the hosted workspace, and it closes on shutdown', async () => {
+    t ??= await testPgSchema();
+    await migratePostgres(postgresKysely(t.pool), t.schema, HOST_TRACK);
+    expect(await postgresLeaseStore(postgresKysely(t.pool), ID).tryAcquire('elsewhere', 0, 60_000)).toBe(1);
+    const a = await start();
+    await vi.waitFor(async () => expect(await (await fetch(`${a.url}/healthz`)).json()).toMatchObject({ lease: 'standby', db: 'ok' }), { timeout: 10_000 });
+    await new Promise((r) => setTimeout(r, 1_000));
+    expect(existsSync(mcpSock(a.dir))).toBe(false);
+    await t.pool.query(`UPDATE ${t.schema}.host_lease SET expires_at = clock_timestamp() - interval '1 second'`);
+    await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+    await vi.waitFor(() => expect(isSocket(mcpSock(a.dir))).toBe(true), { timeout: 10_000 });
+    const [list, todo] = await rpc(mcpSock(a.dir), [
+      { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'post_todo', arguments: { title: 'from a session' } } }
+    ]);
+    const byId = new Map([list, todo].map((m) => [m.id, m]));
+    expect(byId.get(1)!.result.tools.map((x: { name: string }) => x.name)).toContain('list_sessions');
+    expect(byId.get(2)!.result.isError).toBeUndefined();
+    const rows = await t.pool.query(`SELECT title, source_kind, source_id FROM ${t.schema}.todos`);
+    expect(rows.rows).toEqual([{ title: 'from a session', source_kind: 'workspace', source_id: ID }]);
+    await a.host.shutdown(0);
+    expect(existsSync(mcpSock(a.dir))).toBe(false);
+  }, 40_000);
+
+  it('viewer CREATEs carry the MCP config when db is set', async () => {
+    const broker = fakeBroker([]);
+    const a = await start({ brokerOps: broker.ops });
+    await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+    const ws = new WebSocket(`${a.url.replace('http', 'ws')}/attach`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    await new Promise((r, j) => { ws.once('open', r); ws.once('error', j); });
+    ws.send(jsonFrame(FrameType.CREATE, { id: 'v1', cols: 80, rows: 24 }));
+    await vi.waitFor(() => expect(broker.created).toHaveLength(1), { timeout: 5_000 });
+    ws.close();
+    expect(broker.created[0].args.at(-1)).toBe(hostMcpArgs(mcpSock(a.dir))[0]);
+  }, 30_000);
+
+  it('a failed MCP start keeps the holder and retries until it serves', async () => {
+    const a = await start({ mcpRetryMs: 100 }, (dir) => {
+      mkdirSync(join(dir, 'run'), { recursive: true });
+      writeFileSync(mcpSock(dir), 'not a socket');
+    });
+    await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+    await vi.waitFor(() => expect(a.logs.filter((l) => l.includes('mcp start failed; retrying')).length).toBeGreaterThanOrEqual(2), { timeout: 10_000 });
+    expect(await leader(a.url)).toBe(200);
+    expect(a.exit).not.toHaveBeenCalled();
+    rmSync(mcpSock(a.dir));
+    await vi.waitFor(() => expect(isSocket(mcpSock(a.dir))).toBe(true), { timeout: 10_000 });
+    expect(await leader(a.url)).toBe(200);
+  }, 30_000);
+
+  it('reconciles config automations on start and on reload', async () => {
+    const auto = (msg: string) => `automations:\n  - definition: { name: nightly, triggers: [{ schedule: { cron: "0 3 * * *" } }], steps: [{ id: go, prompt: { workspace: $self, mode: fresh, message: ${msg} } }] }\n`;
+    const a = await start({}, undefined, auto('one'));
+    await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+    const versions = async () => (await t!.pool.query(`SELECT name, version, origin FROM ${t!.schema}.automations`)).rows;
+    await vi.waitFor(async () => expect(await versions()).toEqual([{ name: 'nightly', version: 1, origin: JSON.stringify({ source: 'host-config' }) }]), { timeout: 10_000 });
+    writeFileSync(a.cfgPath, readFileSync(a.cfgPath, 'utf8').replace(auto('one'), auto('two')));
+    a.proc.emit('SIGHUP');
+    await vi.waitFor(async () => expect((await versions())[0].version).toBe(2), { timeout: 10_000 });
+  }, 30_000);
 
   it('one holder and one ready standby; the standby takes over after the holder stops', async () => {
     const a = await start();

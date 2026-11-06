@@ -1,4 +1,5 @@
-// Bundle entry: the host, or a one-shot `init` (resolve or mint the workspace id), `bootstrap` or `migrate` (dbCli.ts).
+// Bundle entry: the host, or a one-shot `init` (resolve or mint the workspace id), `bootstrap` or `migrate` (dbCli.ts),
+// or `write-mcp-bridge <path>` (image build).
 import { existsSync } from 'node:fs';
 import { loadHostConfig, readHostEnv } from './config.js';
 import { openHostDb } from './hostDb.js';
@@ -6,6 +7,7 @@ import { resolveHostWorkspaceId, resolveWorkspaceId } from './hostState.js';
 import { runDbCommand } from './dbCli.js';
 import { createLogger, redactSecrets } from './log.js';
 import { runHost } from './main.js';
+import { writeMcpBridge } from './mcpBridgeFile.js';
 
 async function init(): Promise<string> {
   const env = readHostEnv(process.env);
@@ -25,6 +27,14 @@ async function init(): Promise<string> {
 async function cli(argv: string[]): Promise<void> {
   if (argv[0] === 'init') {
     process.stdout.write(JSON.stringify({ workspaceId: await init() }) + '\n');
+    return;
+  }
+  if (argv[0] === 'write-mcp-bridge') {
+    if (!argv[1]) {
+      process.stderr.write('usage: fleet-host write-mcp-bridge <path>\n');
+      process.exit(2);
+    }
+    writeMcpBridge(argv[1]);
     return;
   }
   // Anything else exits (2 if unknown) rather than starting a host inside a Job.

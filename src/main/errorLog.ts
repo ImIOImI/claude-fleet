@@ -13,6 +13,7 @@ import { app } from 'electron';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { ErrorRow } from './db.js';
+import { clipText } from './clipText.js';
 
 type Source = 'main' | 'renderer';
 
@@ -45,10 +46,7 @@ function ensureLogPath(): string {
 
 const MAX_FIELD_CHARS = 8_192;
 
-/** `text` cut to `max` chars, marked when cut. */
-export function clipText(text: string, max: number): string {
-  return text.length <= max ? text : `${text.slice(0, max)}… [truncated ${text.length - max} chars]`;
-}
+export { clipText };
 
 /** Append one JSON line to the log. Best-effort — never throws. Message and
  *  stack are capped: an error can echo an arbitrarily large value. */

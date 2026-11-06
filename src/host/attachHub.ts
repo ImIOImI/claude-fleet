@@ -34,6 +34,8 @@ export interface AttachHubOptions {
   now?: () => number;
   controlBurst?: number;
   controlPerSec?: number;
+  /** Extends a gated CREATE's args (the MCP config). */
+  createArgs?: (args: string[]) => string[];
 }
 
 export interface Principal {
@@ -194,6 +196,7 @@ export class AttachHub {
   readonly now: () => number;
   readonly controlBurst: number;
   readonly controlPerSec: number;
+  readonly createArgs: (args: string[]) => string[];
 
   constructor(
     readonly ops: BrokerOps,
@@ -204,6 +207,7 @@ export class AttachHub {
     this.now = opts.now ?? Date.now;
     this.controlBurst = opts.controlBurst ?? CONTROL_BURST;
     this.controlPerSec = opts.controlPerSec ?? CONTROL_PER_SEC;
+    this.createArgs = opts.createArgs ?? ((a) => a);
   }
 
   setOwner(id: string, key: string): void {
@@ -481,7 +485,7 @@ export class Viewer {
     if (!validSessionId(id)) return this.reply(FrameType.CREATED, { id, ok: false, error: 'bad session id' });
     const args = hostCreateArgs(req.args);
     if (!args) return this.reply(FrameType.CREATED, { id, ok: false, error: 'forbidden: unsupported create args' });
-    const r = await this.hub.ops.create(id, dim(req.cols, 80), dim(req.rows, 24), args);
+    const r = await this.hub.ops.create(id, dim(req.cols, 80), dim(req.rows, 24), this.hub.createArgs(args));
     if (r.ok) this.hub.setOwner(id, ownerKey(this.principal.identity));
     this.reply(FrameType.CREATED, { id, ok: r.ok, ...(r.error ? { error: r.error } : {}) });
   }
