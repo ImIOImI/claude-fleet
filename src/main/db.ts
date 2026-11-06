@@ -2248,6 +2248,7 @@ export interface RetentionCandidate {
   resumed: boolean;
   compressedBefore: number;
   strippedBefore: number;
+  lastActiveAt: number;
 }
 
 /** Sessions that started before `cut` and whose compress watermark is behind
@@ -2260,6 +2261,7 @@ export async function retentionCandidates(cut: number): Promise<RetentionCandida
     .select((eb) => [
       's.id as sessionId',
       's.workspace_id as workspaceId',
+      's.last_active_at as lastActiveAt',
       eb.fn.coalesce('r.compressed_before', eb.lit(0)).as('compressedBefore'),
       eb.fn.coalesce('r.stripped_before', eb.lit(0)).as('strippedBefore'),
       eb.exists(eb.selectFrom('usage_events as u').select('u.id')
@@ -2274,7 +2276,7 @@ export async function retentionCandidates(cut: number): Promise<RetentionCandida
     .execute();
   return rows.map((r) => ({
     sessionId: r.sessionId, workspaceId: r.workspaceId, resumed: Boolean(num(r.resumed)),
-    compressedBefore: num(r.compressedBefore), strippedBefore: num(r.strippedBefore),
+    compressedBefore: num(r.compressedBefore), strippedBefore: num(r.strippedBefore), lastActiveAt: num(r.lastActiveAt),
   }));
 }
 

@@ -11,9 +11,17 @@ const KEEP_INPUT = new Set(['file_path', 'path', 'notebook_path', 'command', 'pa
 const KEEP_MAX = 4096;
 const OTHER_MAX = 200;
 
-/** The stored line: raw_z inflated when present, else raw_jsonl. */
-export function rawLine(r: { raw_jsonl: string; raw_z: Uint8Array | null }): string {
-  return r.raw_z && r.raw_z.length > 0 ? inflateSync(r.raw_z).toString('utf8') : r.raw_jsonl;
+/** The stored line: raw_z inflated when present, else raw_jsonl. A corrupt
+ *  raw_z reads as raw_jsonl (''), so one bad row never fails a whole page;
+ *  `strict` throws instead. */
+export function rawLine(r: { raw_jsonl: string; raw_z: Uint8Array | null }, strict = false): string {
+  if (!r.raw_z || r.raw_z.length === 0) return r.raw_jsonl;
+  try {
+    return inflateSync(r.raw_z).toString('utf8');
+  } catch (e) {
+    if (strict) throw e;
+    return r.raw_jsonl;
+  }
 }
 
 export function deflateLine(line: string): Buffer {

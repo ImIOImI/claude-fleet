@@ -229,3 +229,24 @@ describe('startRetention', () => {
     expect(await maintenanceGet('retention.first_pass_at')).toBe(String(NOW));
   });
 });
+
+describe('retainEvents edge cases', () => {
+  it('skips an idle session already past its watermarks without a slice', async () => {
+    await ingestAll();
+    await retainEvents(NOW + 40 * DAY_MS, unthrottled);
+    let slices = 0;
+    const counting: Throttle = { slice: (fn) => { slices++; return fn(); }, stopped: () => false };
+    await retainEvents(NOW + 41 * DAY_MS, counting);
+    expect(slices).toBe(0);
+  });
+
+  it('leaves a corrupt compressed row alone, still finishes the pass, and reads it as empty', async () => {
+    await ingestAll();
+    await stateKysely().updateTable('events').set({ raw_jsonl: '', raw_z: Buffer.from('not zlib') }).where('uuid', '=', 'x1').execute();
+    await retainEvents(NOW, unthrottled);
+    const evs = await eventsForSession(SES);
+    expect(evs.find((e) => e.uuid === 'x1')!.rawJsonl).toBe('');
+    expect(JSON.parse(evs.find((e) => e.uuid === 'r-t1')!.rawJsonl).fleetStripped).toBeDefined();
+    expect((await stored()).get('x1')!.raw_z).toEqual(Buffer.from('not zlib'));
+  });
+});

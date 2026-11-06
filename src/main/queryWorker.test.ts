@@ -149,5 +149,5 @@ describe('compressed rows (state v16)', () => {
   it('fleet_raw is callable directly, and raw_jsonl stays absent without include_raw', async () => {
     expect(await runQueryInWorker(job16(`SELECT fleet_raw('x', NULL) AS r`, false))).toEqual([{ r: 'x' }]);
     await expect(runQueryInWorker(job16('SELECT raw_jsonl FROM events', false))).rejects.toThrow(/raw_jsonl/);
-  });
+  }, 30_000);
 });

@@ -32,7 +32,12 @@ const storedBytes = (r: { raw_jsonl: string; raw_z: Buffer | null }): number =>
 /** Strip (ts < stripCut) then compress (SQLite, ts < compressCut). Null when nothing changes. */
 function transform(row: RetentionRow, now: number, stripCut: number, compressCut: number, compress: boolean):
   { raw_jsonl: string; raw_z: Buffer | null } | null {
-  const line = rawLine(row);
+  let line: string;
+  try {
+    line = rawLine(row, true);
+  } catch {
+    return null; // a corrupt raw_z is left as it is rather than stalling every pass
+  }
   const out = row.ts < stripCut ? (stripLine(line, now) ?? line) : line;
   const isCompressed = row.raw_z !== null && row.raw_z.length > 0;
   const wantCompressed = compress && row.ts < compressCut && Buffer.byteLength(out, 'utf8') >= COMPRESS_MIN_BYTES;
@@ -84,6 +89,8 @@ export async function retainEvents(now: number, t: Throttle, opts: { sliceRows?:
     if (t.stopped()) break;
     const sCut = now - (c.resumed ? STRIP_AFTER_RESUMED_MS : STRIP_AFTER_MS);
     if (c.compressedBefore >= cCut && c.strippedBefore >= sCut) continue;
+    // No row at or past either watermark: nothing to read, nothing to write.
+    if (c.lastActiveAt < Math.min(c.compressedBefore, c.strippedBefore)) continue;
     const apply = (row: RetentionRow) => transform(row, now, sCut, cCut, compress);
     if (!(await walkRange(c.sessionId, c.compressedBefore, cCut, false, t, sliceRows, apply, acc))) break;
     const ageingOut = Math.min(sCut, c.compressedBefore);

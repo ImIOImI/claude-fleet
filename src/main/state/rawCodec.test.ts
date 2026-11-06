@@ -77,4 +77,9 @@ describe('rawLine', () => {
     const line = JSON.stringify({ t: 'héllo — 日本語 🚀'.repeat(100) });
     expect(rawLine({ raw_jsonl: '', raw_z: deflateLine(line) })).toBe(line);
   });
+
+  it('reads a corrupt raw_z as raw_jsonl, or throws when strict', () => {
+    expect(rawLine({ raw_jsonl: '', raw_z: Buffer.from('nope') })).toBe('');
+    expect(() => rawLine({ raw_jsonl: '', raw_z: Buffer.from('nope') }, true)).toThrow();
+  });
 });
