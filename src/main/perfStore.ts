@@ -7,7 +7,7 @@ import type { Kysely } from 'kysely';
 import { chunked, num } from './store/kysely.js';
 import type { StateDb } from './store/stateSchema.js';
 
-export type PerfKind = 'stall' | 'slow_op' | 'pty_window' | 'input_hop' | 'output_hop' | 'echo_rtt' | 'gc' | 'mem';
+export type PerfKind = 'stall' | 'slow_op' | 'pty_window' | 'input_hop' | 'output_hop' | 'echo_rtt' | 'gc' | 'mem' | 'boot_profile';
 
 export interface PerfRow {
   ts: number;

@@ -27,6 +27,7 @@ import {
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-http';
 import type { EffectivePerfConfig } from './perfConfig.js';
 import type { PerfStore } from './perfStore.js';
+import type { BootProfileResult } from './bootProfile.js';
 import { RETENTION_MS } from './perfStore.js';
 
 export const SLOW_OP_MS = 25;
@@ -476,6 +477,15 @@ export function recordGcEntries(
       meta: { gcKind: kindName, flags: detail.flags ?? 0 }
     });
   }
+}
+
+/** One app-global `boot_profile` row per launch (#464): ts = profile start,
+ *  dur_ms = profiled window, meta = the analyzeProfile summary + file path. */
+export function recordBootProfile(r: BootProfileResult): void {
+  const run = rt;
+  if (!run?.effective.recording) return;
+  const { startedAt, windowMs, ...meta } = r;
+  run.store.enqueue({ ts: startedAt, kind: 'boot_profile', name: 'claude_fleet.boot.cpu_profile', durMs: windowMs, meta });
 }
 
 /** One Electron process in a memory sample (app.getAppMetrics, MB). */

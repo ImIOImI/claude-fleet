@@ -7,7 +7,7 @@ import { PerfStore } from './perfStore.js';
 import {
   initPerf, shutdownPerf, reconfigurePerf, perfSpan, perfSpanAsync, perfSetSpanContext, getEffectivePerf,
   recordPtyChunk, getPerfStatus, recordLatencySample, setPerfStateListener, perfNotePowerEvent, recordGcEntries,
-  sampleMemory, setPerfMemorySource
+  sampleMemory, setPerfMemorySource, recordBootProfile
 } from './perf.js';
 import { armSentinel, disarmSentinel, sentinelStatus } from './perfSentinel.js';
 import type { EffectivePerfConfig } from './perfConfig.js';
@@ -306,6 +306,31 @@ describe('recordGcEntries (GC pause rows)', () => {
     recordGcEntries([entry(500, 2)]);
     await shutdownPerf();
     expect(db.prepare(`SELECT COUNT(*) AS n FROM perf_events WHERE kind='gc'`).get()).toEqual({ n: 0 });
+  });
+});
+
+describe('recordBootProfile', () => {
+  const result = {
+    startedAt: 1_700_000_000_000, windowMs: 30_000, sampleCount: 30_000, file: '/u/perf/boot-x.cpuprofile',
+    seconds: [{ t: 3, js: 990, gc: 0, top: [['f a.js:1', 990]] as Array<[string, number]> }],
+    blocks: [{ startMs: 3000, durMs: 9000, gcMs: 0, self: [], attr: [], stack: [] }]
+  };
+
+  it('writes one app-global boot_profile row with the summary as meta', async () => {
+    initPerf(store, ON);
+    recordBootProfile(result);
+    await shutdownPerf();
+    const row = db.prepare(`SELECT ts, name, dur_ms, workspace_id, meta FROM perf_events WHERE kind = 'boot_profile'`).get() as
+      { ts: number; name: string; dur_ms: number; workspace_id: string | null; meta: string };
+    expect(row).toMatchObject({ ts: result.startedAt, name: 'claude_fleet.boot.cpu_profile', dur_ms: 30_000, workspace_id: null });
+    expect(JSON.parse(row.meta)).toEqual({ sampleCount: 30_000, file: result.file, seconds: result.seconds, blocks: result.blocks });
+  });
+
+  it('is a no-op while disabled', async () => {
+    initPerf(store, OFF);
+    recordBootProfile(result);
+    await shutdownPerf();
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM perf_events WHERE kind='boot_profile'`).get()).toEqual({ n: 0 });
   });
 });
 
