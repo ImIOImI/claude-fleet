@@ -12,7 +12,9 @@ import { betterSqlitePath } from '../queryWorker.js';
 import { DAY_MS } from './retention.js';
 
 const ATTEMPT_EVERY_MS = DAY_MS;
-const FREE_SPACE_FACTOR = 1.2;
+/** VACUUM peaks at about db + 2 × (temp copy + WAL); temp files are pointed
+ *  at userData so one statfs covers them. */
+const FREE_SPACE_FACTOR = 2.2;
 /** A lock younger than this names a helper that may still be vacuuming. */
 const LOCK_FRESH_MS = 15 * 60_000;
 
@@ -78,12 +80,27 @@ export function spawnVacuumHelper(
   userData: string, opts: { execPath?: string; bs3Path?: string } = {},
 ): number | null {
   const lock = vacuumLockPath(userData);
+  const startedAt = Date.now();
+  // The lock exists before the helper does, so a relaunch can never miss it;
+  // no lock, no helper.
+  try {
+    writeFileSync(lock, JSON.stringify({ pid: null, startedAt }));
+  } catch (e) {
+    logError({ source: 'main', level: 'warn', type: 'vacuum-failed', message: `lock: ${String(e)}` });
+    return null;
+  }
   try {
     const child = spawn(opts.execPath ?? process.execPath,
       ['-e', VACUUM_SCRIPT, opts.bs3Path ?? betterSqlitePath(), join(userData, 'state.db'), lock, join(userData, 'error.log')],
-      { detached: true, stdio: 'ignore', windowsHide: true, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } });
-    if (child.pid === undefined) return null;
-    writeFileSync(lock, JSON.stringify({ pid: child.pid, startedAt: Date.now() }));
+      {
+        detached: true, stdio: 'ignore', windowsHide: true,
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SQLITE_TMPDIR: userData, TMP: userData, TEMP: userData },
+      });
+    if (child.pid === undefined) {
+      unlinkSync(lock);
+      return null;
+    }
+    writeFileSync(lock, JSON.stringify({ pid: child.pid, startedAt }));
     child.unref();
     return child.pid;
   } catch (e) {
@@ -101,31 +118,42 @@ const pidAlive = (pid: number): boolean => {
   }
 };
 
+function readLock(lock: string): { pid: number | null; startedAt: number } | null {
+  try {
+    return JSON.parse(readFileSync(lock, 'utf8')) as { pid: number | null; startedAt: number };
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a helper from the last quit may still be vacuuming (sync, cheap):
+ *  a fresh lock naming a live pid. */
+export function vacuumHelperActive(userData: string, isAlive: (pid: number) => boolean = pidAlive, now = Date.now()): boolean {
+  const info = readLock(vacuumLockPath(userData));
+  return !!info && Number.isInteger(info.pid) && now - info.startedAt <= LOCK_FRESH_MS && isAlive(info.pid as number);
+}
+
 /** Before openDb: wait (asynchronously) for a helper from the last quit. After
  *  `capMs` a fresh lock's helper is killed (its VACUUM rolls back); an old
  *  lock is treated as stale, never killed (its pid may be reused). */
 export async function waitForVacuumHelper(userData: string, opts: {
-  capMs?: number; pollMs?: number; isAlive?: (pid: number) => boolean; kill?: (pid: number) => void; now?: () => number;
+  capMs?: number; pollMs?: number; exitWaitMs?: number; isAlive?: (pid: number) => boolean; kill?: (pid: number) => void; now?: () => number;
 } = {}): Promise<'none' | 'done' | 'killed' | 'stale'> {
   const lock = vacuumLockPath(userData);
   if (!existsSync(lock)) return 'none';
   const isAlive = opts.isAlive ?? pidAlive;
   const now = opts.now ?? Date.now;
   const drop = (): void => { try { unlinkSync(lock); } catch { /* already gone */ } };
-  let info: { pid: number; startedAt: number };
-  try {
-    info = JSON.parse(readFileSync(lock, 'utf8')) as { pid: number; startedAt: number };
-  } catch {
+  const parsed = readLock(lock);
+  if (!parsed || !Number.isInteger(parsed.pid) || !isAlive(parsed.pid as number)) {
     drop();
     return 'stale';
   }
-  if (!Number.isInteger(info.pid) || !isAlive(info.pid)) {
-    drop();
-    return 'stale';
-  }
+  const info = { pid: parsed.pid as number, startedAt: parsed.startedAt };
+  const poll = (): Promise<void> => new Promise((r) => setTimeout(r, opts.pollMs ?? 250));
   const deadline = now() + (opts.capMs ?? 120_000);
   while (now() < deadline) {
-    await new Promise((r) => setTimeout(r, opts.pollMs ?? 250));
+    await poll();
     if (!existsSync(lock)) return 'done';
     if (!isAlive(info.pid)) {
       drop();
@@ -137,5 +165,8 @@ export async function waitForVacuumHelper(userData: string, opts: {
   try {
     (opts.kill ?? ((pid) => process.kill(pid)))(info.pid);
   } catch { /* exited meanwhile */ }
+  // Its file locks go only when it is gone (Windows releases them late).
+  const exitDeadline = now() + (opts.exitWaitMs ?? 10_000);
+  while (isAlive(info.pid) && now() < exitDeadline) await poll();
   return 'killed';
 }

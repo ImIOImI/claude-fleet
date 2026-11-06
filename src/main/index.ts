@@ -20,7 +20,7 @@ import { wslLocalProjectsDir, wslLocalSessionsDir } from './localLauncher.js';
 import { encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir, workspaceStateDir } from './paths.js';
 import { existsSync } from 'node:fs';
 import { startRetention } from './state/retention.js';
-import { prepareVacuum, spawnVacuumHelper, waitForVacuumHelper } from './state/vacuumHelper.js';
+import { prepareVacuum, spawnVacuumHelper, vacuumHelperActive, waitForVacuumHelper } from './state/vacuumHelper.js';
 import { installMainProcessHandlers, getLogPath, setErrorSink, logError } from './errorLog.js';
 import { installAppMenu } from './appMenu.js';
 import { isOpenableExternalUrl } from './externalUrl.js';
@@ -506,22 +506,33 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
 
   /** Retention pass over state.db (SPEC §7 *Retention*); once per process. */
   const startStateRetention = (): void => {
+    if (isMock) return;
     retention ??= startRetention({
+      orphanSweep: storeCfg.kind !== 'postgres',
       listManifestIds: async () => (await listWorkspaceManifests()).map((m) => m.id),
       stateDirExists: (id) => existsSync(workspaceStateDir(id)),
     });
   };
 
   let embed: EmbedFn | null = null;
+  // A one-time VACUUM from the last quit may still hold state.db's write lock:
+  // the window and IPC come up now, the SQLite history services once it ends
+  // (WAL readers, e.g. the MCP read source, aren't blocked by it).
+  const historyAfterVacuum = sqlite && !!jsonlWatcher && vacuumHelperActive(userData);
+  let sqliteManifests: WorkspaceSpec[] = [];
+  const startSqliteHistory = async (): Promise<void> => {
+    openDb(userData);
+    await startStateWrites();
+    startStateRetention();
+  };
+  const startSqliteIngest = async (watcher: JsonlWatcher, embedFn: EmbedFn): Promise<void> => {
+    await startWatcher(watcher, sqliteManifests);
+    await startCaptureScheduler(watcher);
+    registerLocalDirs(watcher, sqliteManifests);
+    startEmbedBackfill(embedFn);
+  };
   if (jsonlWatcher) {
-    if (sqlite) {
-      // A one-time VACUUM from the last quit may still hold state.db.
-      const waited = await waitForVacuumHelper(userData);
-      if (waited !== 'none') logError({ source: 'main', level: 'info', type: 'vacuum-wait', message: `vacuum helper: ${waited}` });
-      openDb(userData);
-      await startStateWrites();
-      startStateRetention();
-    }
+    if (sqlite && !historyAfterVacuum) await startSqliteHistory();
     // Read-only MCP server over <userData>/mcp.sock so in-container claude can
     // read history (sessions/events/cost): its own read-only state.db
     // connection on SQLite; on Postgres the history tools wait for setReadSource.
@@ -584,7 +595,8 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         .then((m) => (m?.kind === 'container' ? ensureContainerRetention(m.id, e.after.transcriptRetentionDays) : false))
         .catch((err) => logError({ source: 'main', type: 'claude-retention', level: 'warn', message: String(err), workspaceId: e.workspaceId }));
     });
-    if (sqlite) {
+    sqliteManifests = manifests;
+    if (sqlite && !historyAfterVacuum) {
       await startWatcher(jsonlWatcher, manifests);
       await startCaptureScheduler(jsonlWatcher);
       registerLocalDirs(jsonlWatcher, manifests);
@@ -602,7 +614,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         );
       });
     }
-    if (sqlite) startEmbedBackfill(embedFn);
+    if (sqlite && !historyAfterVacuum) startEmbedBackfill(embedFn);
   }
 
   if (!sqlite) {
@@ -753,6 +765,16 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   mainWindow = createWindow();
   startPresenceServices(mainWindow);
   void supervisor?.run();
+  if (historyAfterVacuum && jsonlWatcher && embed) {
+    const watcher = jsonlWatcher;
+    const embedFn = embed;
+    void (async () => {
+      const waited = await waitForVacuumHelper(userData);
+      logError({ source: 'main', level: 'info', type: 'vacuum-wait', message: `vacuum helper: ${waited}` });
+      await startSqliteHistory();
+      await startSqliteIngest(watcher, embedFn);
+    })().catch((e) => logError({ source: 'main', type: 'history-start', level: 'error', message: String(e) }));
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

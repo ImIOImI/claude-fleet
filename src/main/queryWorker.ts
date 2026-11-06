@@ -70,8 +70,14 @@ export function runSnapshotQuery(
   const mem = new DatabaseCtor(':memory:');
   try {
     // Retention stores old lines deflated in raw_z with raw_jsonl ''.
-    mem.function('fleet_raw', { deterministic: true }, (raw: unknown, z: unknown) =>
-      z instanceof Uint8Array && z.length > 0 ? zlib.inflateSync(z).toString('utf8') : raw);
+    mem.function('fleet_raw', { deterministic: true }, (raw: unknown, z: unknown) => {
+      if (!(z instanceof Uint8Array) || z.length === 0) return raw;
+      try {
+        return zlib.inflateSync(z).toString('utf8');
+      } catch {
+        return raw;
+      }
+    });
     // ATTACH filename is not reliably bindable; double any single quotes.
     mem.exec(`ATTACH DATABASE '${job.srcPath.replace(/'/g, "''")}' AS ${alias}`);
     try {

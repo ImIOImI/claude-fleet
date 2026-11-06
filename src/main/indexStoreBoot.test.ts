@@ -32,8 +32,7 @@ describe('index.ts store boot', () => {
     inOrder(boot, [
       'if (sqlite && !inboxElsewhere) {\n    // Authoritative inbox',
       'inboxStore = InboxStore.open(userData);',
-      'await waitForVacuumHelper(userData);',
-      'openDb(userData);\n      await startStateWrites();\n      startStateRetention();',
+      'if (sqlite && !historyAfterVacuum) await startSqliteHistory();',
       "perfSpan('claude_fleet.boot.mcp_server'",
       'setQueryEmbedder(embedFn);',
       'if (sqlite && inboxStore) startClaims(inboxStore, embedFn);',
@@ -45,7 +44,7 @@ describe('index.ts store boot', () => {
       'await startCaptureScheduler(jsonlWatcher);',
       'registerLocalDirs(jsonlWatcher, manifests);',
       "perfSpanAsync('claude_fleet.boot.peer_status_start'",
-      'if (sqlite) startEmbedBackfill(embedFn);',
+      'if (sqlite && !historyAfterVacuum) startEmbedBackfill(embedFn);',
       'instrumentIpcHandle(ipcMain);',
       "perfSpan('claude_fleet.boot.register_ipc'",
       'if (sqlite && inboxStore) startInboxServices(inboxStore);',

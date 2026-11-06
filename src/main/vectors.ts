@@ -35,9 +35,6 @@ export function encodeVectorInt8(v: Float32Array): Buffer {
   return out;
 }
 
-/** How a vector is stored: int8 (embeddings, SQLite). */
-export const encodeStoredVector = encodeVectorInt8;
-
 /** BLOB → Float32Array, dispatching on length: EMBED_DIM + 4 bytes is int8,
  *  otherwise float32; empty or null is no vector. Copies. */
 export function decodeVector(buf: Buffer | null): Float32Array {

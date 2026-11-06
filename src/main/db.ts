@@ -22,7 +22,7 @@ import type pg from 'pg';
 import { postgresKysely, schemaOf, type PostgresKyselyOptions } from './store/postgres.js';
 import { migratePostgres, ensureVector } from './store/pgMigrate.js';
 import { STATE_PG_TRACK } from './store/migrations/statePg.js';
-import { EMBED_MODEL_ID, EMBED_DIM, decodeVector, dot, encodeStoredVector, topK, EMPTY_VECTOR } from './vectors.js';
+import { EMBED_MODEL_ID, EMBED_DIM, decodeVector, dot, encodeVectorInt8, topK, EMPTY_VECTOR } from './vectors.js';
 import { pgSearchEmbeddings, pgVectorLiteral } from './store/pgVectorSearch.js';
 import type { StateDb, UsageAnchorsTable } from './store/stateSchema.js';
 import { parseIngestLine, foldSessionTouch, type ParsedLine } from './state/ingestParse.js';
@@ -70,6 +70,8 @@ export function openDb(userDataDir: string): Database.Database {
   mkdirSync(dirname(path), { recursive: true });
   db = new Database(path);
   db.pragma('journal_mode = WAL');
+  // A lock still being released (e.g. a just-killed VACUUM helper on Windows) waits, not throws.
+  db.pragma('busy_timeout = 5000');
   db.pragma('foreign_keys = ON');
   migrate(db);
   rehydratePendingClaudeIds(db);
@@ -2281,16 +2283,19 @@ export async function retentionCandidates(cut: number): Promise<RetentionCandida
 }
 
 export interface RetentionRow { id: number; ts: number; raw_jsonl: string; raw_z: Buffer | null }
+export interface RetentionKey { id: number; ts: number; bytes: number }
 
-/** One session's rows with `fromTs <= ts < toTs`, keyset after `after` on
- *  (ts, id) — served by idx_events_session_ts. `toolOnly` keeps rows with a
- *  tool_use_id (the only strippable ones). */
-export async function retentionRows(
+/** Keys of one session's rows with `fromTs <= ts < toTs`, keyset after
+ *  `after` on (ts, id) — served by idx_events_session_ts. `bytes` is the
+ *  stored size (octet_length reads no payload), so a caller can stop at a byte
+ *  budget before fetching bodies. `toolOnly` keeps rows with a tool_use_id
+ *  (the only strippable ones). */
+export async function retentionKeys(
   sessionId: string, fromTs: number, toTs: number, after: { ts: number; id: number } | null, limit: number, toolOnly: boolean,
-): Promise<RetentionRow[]> {
+): Promise<RetentionKey[]> {
   const rows = await kyselyOrThrow()
     .selectFrom('events')
-    .select(['id', 'ts', 'raw_jsonl', 'raw_z'])
+    .select(['id', 'ts', sql<number>`octet_length(raw_jsonl) + COALESCE(octet_length(raw_z), 0)`.as('bytes')])
     .where('session_id', '=', sessionId)
     .where('ts', '>=', fromTs)
     .where('ts', '<', toTs)
@@ -2302,6 +2307,14 @@ export async function retentionRows(
     .orderBy('ts').orderBy('id')
     .limit(limit)
     .execute();
+  return rows.map((r) => ({ id: num(r.id), ts: num(r.ts), bytes: num(r.bytes) }));
+}
+
+/** The stored lines of `ids`, in id order. */
+export async function retentionBodies(ids: readonly number[]): Promise<RetentionRow[]> {
+  if (ids.length === 0) return [];
+  const rows = await kyselyOrThrow().selectFrom('events').select(['id', 'ts', 'raw_jsonl', 'raw_z'])
+    .where('id', 'in', [...ids]).orderBy('id').execute();
   return rows.map((r) => ({ id: num(r.id), ts: num(r.ts), raw_jsonl: r.raw_jsonl, raw_z: r.raw_z ?? null }));
 }
 
@@ -2319,20 +2332,29 @@ export async function rewriteEventRaw(updates: readonly { id: number; raw_jsonl:
 export async function setRetentionWatermarks(
   sessionId: string, workspaceId: string, compressedBefore: number, strippedBefore: number,
 ): Promise<void> {
+  // Only for a session that still exists: a purge racing the pass leaves no row behind.
   await kyselyOrThrow().insertInto('event_retention')
-    .values({ session_id: sessionId, workspace_id: workspaceId, compressed_before: compressedBefore, stripped_before: strippedBefore })
+    .columns(['session_id', 'workspace_id', 'compressed_before', 'stripped_before'])
+    .expression((eb) => eb.selectFrom('sessions')
+      .select([eb.val(sessionId).as('session_id'), eb.val(workspaceId).as('workspace_id'),
+        eb.val(compressedBefore).as('compressed_before'), eb.val(strippedBefore).as('stripped_before')])
+      .where('id', '=', sessionId))
     .onConflict((oc) => oc.column('session_id').doUpdateSet({ compressed_before: compressedBefore, stripped_before: strippedBefore }))
     .execute();
 }
 
-const PURGE_CHUNK = 2000;
+/** Rows per purge statement: one chunk stays well inside a 50 ms slice. */
+const PURGE_CHUNK = 250;
+const macrotask = (): Promise<void> => new Promise((r) => setImmediate(r));
 
 /** Delete every state.db row of a removed workspace (SPEC §7 *Retention*).
  *  Large tables go in id-ranged chunks, one transaction each, each run through
  *  `slice` when given so the caller can pace it. errors, perf_events and
  *  usage_anchors keep their rows (bounded diagnostics / account-wide). */
 export async function purgeWorkspace(
-  workspaceId: string, slice: <T>(fn: () => Promise<T>) => Promise<T> = (fn) => fn(),
+  workspaceId: string,
+  // Default: yield a macrotask after each chunk, since the SQLite driver resolves only microtasks between statements.
+  slice: <T>(fn: () => Promise<T>) => Promise<T> = async (fn) => { const r = await fn(); await macrotask(); return r; },
 ): Promise<number> {
   const k = kyselyOrThrow();
   let deleted = 0;
@@ -2361,10 +2383,22 @@ export async function purgeWorkspace(
   return deleted;
 }
 
-/** Workspace ids that own sessions in state.db. */
+/** Workspace ids with rows in sessions, events or embeddings. A recursive
+ *  min() skip-scan per table: O(workspaces × log rows) on its workspace index,
+ *  where DISTINCT would walk the whole index. */
 export async function workspaceIdsInState(): Promise<string[]> {
-  const rows = await kyselyOrThrow().selectFrom('sessions').select('workspace_id').distinct().orderBy('workspace_id').execute();
-  return rows.map((r) => r.workspace_id);
+  const ids = new Set<string>();
+  for (const t of ['sessions', 'events', 'embeddings'] as const) {
+    const { rows } = await sql<{ id: string }>`
+      WITH RECURSIVE w(id) AS (
+        SELECT (SELECT min(workspace_id) FROM ${sql.table(t)})
+        UNION ALL
+        SELECT (SELECT min(workspace_id) FROM ${sql.table(t)} WHERE workspace_id > w.id) FROM w WHERE w.id IS NOT NULL
+      )
+      SELECT id FROM w WHERE id IS NOT NULL`.execute(kyselyOrThrow());
+    for (const r of rows) ids.add(r.id);
+  }
+  return [...ids].sort();
 }
 
 // ── Embeddings ────────────────────────────────────────────────────────────
@@ -2395,6 +2429,9 @@ export async function deleteEmbeddingsForOtherModels(modelId: string): Promise<n
  *  bundles) and Postgres's 65,535. */
 const EMBEDDINGS_ROWS_PER_INSERT = 500;
 
+/** SQLite stores int8 (388 B); callers hand float32. Postgres keeps float32 vector(384). */
+const sqliteVec = (vec: Buffer): Buffer => (vec.length === EMBED_DIM * 4 ? encodeVectorInt8(decodeVector(vec)) : vec);
+
 /** Insert a batch of embedding rows in one transaction (ON CONFLICT DO
  *  NOTHING, same as the single-row path). Returns rows actually inserted —
  *  a dedup hit doesn't count. */
@@ -2415,7 +2452,7 @@ export async function insertEmbeddings(rows: readonly EmbeddingInsert[]): Promis
             text: row.text,
             model_id: row.modelId,
             dim: row.dim,
-            vec: dialect !== 'postgres' ? row.vec
+            vec: dialect !== 'postgres' ? sqliteVec(row.vec)
               : row.vec.length === 0 ? null
               : sql<Buffer>`${pgVectorLiteral(decodeVector(row.vec))}::vector`,
             dedup_key: row.dedupKey,
@@ -2459,7 +2496,7 @@ export async function compactEmbeddingSlice(afterId: number, maxId: number, limi
     for (const r of rows) {
       const old = r.vec ?? EMPTY_VECTOR;
       if (old.length !== EMBED_DIM * 4) continue;
-      const vec = r.text === '' ? EMPTY_VECTOR : encodeStoredVector(decodeVector(old));
+      const vec = r.text === '' ? EMPTY_VECTOR : sqliteVec(old);
       await trx.updateTable('embeddings').set({ vec }).where('id', '=', num(r.id)).execute();
       rewritten++;
       bytesSaved += old.length - vec.length;

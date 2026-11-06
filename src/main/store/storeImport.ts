@@ -216,8 +216,12 @@ async function copyTable(o: ImportOptions, src: Database.Database, table: string
       const values = rows.map(({ __rowid: _r, ...row }) => {
         // Postgres never holds a deflated line: its TOAST compresses, and its query view reads raw_jsonl.
         if (table === 'events' && Buffer.isBuffer(row.raw_z) && row.raw_z.length > 0) {
-          row.raw_jsonl = rawLine({ raw_jsonl: row.raw_jsonl as string, raw_z: row.raw_z });
-          row.raw_z = null;
+          try {
+            row.raw_jsonl = rawLine({ raw_jsonl: row.raw_jsonl as string, raw_z: row.raw_z }, true);
+            row.raw_z = null;
+          } catch {
+            // Corrupt: keep the bytes as they are rather than lose them.
+          }
         }
         for (const c of cols) {
           const v = row[c.c];

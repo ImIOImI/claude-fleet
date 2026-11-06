@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import Database from 'better-sqlite3';
 import { closeDb, maintenanceGet, maintenanceSet, openDb } from '../db.js';
 import { isPg } from '../store/testStore.js';
-import { prepareVacuum, spawnVacuumHelper, vacuumLockPath, waitForVacuumHelper } from './vacuumHelper.js';
+import { prepareVacuum, spawnVacuumHelper, vacuumHelperActive, vacuumLockPath, waitForVacuumHelper } from './vacuumHelper.js';
 
 const dirs: string[] = [];
 const tmp = (): string => { const d = mkdtempSync(join(tmpdir(), 'cf-vac-')); dirs.push(d); return d; };
@@ -59,7 +59,10 @@ describe('waitForVacuumHelper', () => {
     const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
     const exited = new Promise((r) => child.on('exit', r));
     writeFileSync(vacuumLockPath(dir), JSON.stringify({ pid: child.pid, startedAt: Date.now() }));
+    expect(vacuumHelperActive(dir)).toBe(true);
     expect(await waitForVacuumHelper(dir, { capMs: 200, pollMs: 50 })).toBe('killed');
+    // It returns only once the process is gone.
+    expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
     await exited;
   });
 
@@ -91,5 +94,31 @@ describe.skipIf(isPg)('prepareVacuum', () => {
     openDb(dir);
     await maintenanceSet('retention.first_pass_at', '1');
     expect(await prepareVacuum(dir, { now: 2_000, statfs: () => ({ bavail: 0, bsize: 4096 }) })).toBe(false);
+  });
+});
+
+describe('vacuumHelperActive', () => {
+  it('is false with no lock, a pid-less lock, a dead pid or an old lock', () => {
+    const dir = tmp();
+    expect(vacuumHelperActive(dir)).toBe(false);
+    writeFileSync(vacuumLockPath(dir), JSON.stringify({ pid: null, startedAt: Date.now() }));
+    expect(vacuumHelperActive(dir, () => true)).toBe(false);
+    writeFileSync(vacuumLockPath(dir), JSON.stringify({ pid: 4242, startedAt: Date.now() }));
+    expect(vacuumHelperActive(dir, () => false)).toBe(false);
+    writeFileSync(vacuumLockPath(dir), JSON.stringify({ pid: 4242, startedAt: Date.now() - 60 * 60_000 }));
+    expect(vacuumHelperActive(dir, () => true)).toBe(false);
+  });
+
+  it('a pid-less lock (crash between lock and spawn) is stale', async () => {
+    const dir = tmp();
+    writeFileSync(vacuumLockPath(dir), JSON.stringify({ pid: null, startedAt: Date.now() }));
+    expect(await waitForVacuumHelper(dir)).toBe('stale');
+  });
+});
+
+describe.skipIf(isPg)('spawnVacuumHelper lock', () => {
+  it('does not spawn when the lock cannot be written', () => {
+    const dir = join(tmp(), 'missing', 'dir');
+    expect(spawnVacuumHelper(dir, { execPath: process.execPath, bs3Path: bs3 })).toBeNull();
   });
 });

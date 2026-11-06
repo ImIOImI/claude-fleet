@@ -4,7 +4,7 @@
 // (and tests can stub it).
 import type Database from 'better-sqlite3';
 import { insertEmbeddings, unembeddedTurnEvents, unembeddedSummaries } from './db.js';
-import { encodeStoredVector, decodeVector, topK, EMBED_MODEL_ID, EMBED_DIM, EMPTY_VECTOR, type EmbedFn } from './vectors.js';
+import { encodeVector, decodeVector, topK, EMBED_MODEL_ID, EMBED_DIM, EMPTY_VECTOR, type EmbedFn } from './vectors.js';
 import { perfSpan, perfSpanAsync } from './perf.js';
 
 export type { EmbedFn };
@@ -71,7 +71,7 @@ export async function indexSessionTurns(sessionId: string, embed: EmbedFn, batch
       prepared.map((p, i) => ({
         workspaceId: p.ev.workspaceId, sessionId, kind: 'turn' as const, refEventId: p.ev.id, ts: p.ev.ts,
         text: p.text, modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
-        vec: encodeStoredVector(vecs[i]), dedupKey: `t${p.ev.id}`,
+        vec: encodeVector(vecs[i]), dedupKey: `t${p.ev.id}`,
       }))
     );
     // Placeholder-insert the skipped (empty) rows in this batch too, so they
@@ -147,7 +147,7 @@ export async function indexSessionSummaries(embed: EmbedFn, batch = EMBED_BATCH)
       pending.map((p, i) => ({
         workspaceId: p.workspaceId, sessionId: p.sessionId, kind: 'summary' as const, refEventId: null, ts: p.ts,
         text: p.summary.slice(0, MAX_CHARS), modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
-        vec: encodeStoredVector(vecs[i]), dedupKey: String(p.sourceMaxEventId),
+        vec: encodeVector(vecs[i]), dedupKey: String(p.sourceMaxEventId),
       }))
     );
     if (pending.length < batch) break;

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   costForSession, eventsForSession, ingestLine, insertEmbedding, maintenanceGet, maxEmbeddingId, recentToolCallsForSession,
-  recordUsageEvent, searchEmbeddings, stateKysely, withRawSqlite,
+  recordUsageEvent, retentionKeys, searchEmbeddings, stateKysely, withRawSqlite,
 } from '../db.js';
 import { encodeVector, EMBED_DIM, EMBED_MODEL_ID } from '../vectors.js';
 import { indexSessionTurns } from '../transcriptIndex.js';
@@ -137,10 +137,16 @@ describe('compactEmbeddings', () => {
 
   async function seed(): Promise<void> {
     for (let i = 0; i < 5; i++) {
-      await insertEmbedding({
-        workspaceId: WS, sessionId: SES, kind: 'turn', refEventId: i + 1, ts: NOW, text: i % 2 ? '' : `turn ${i}`,
+      const row = {
+        workspaceId: WS, sessionId: SES, kind: 'turn' as const, refEventId: i + 1, ts: NOW, text: i % 2 ? '' : `turn ${i}`,
         modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec: encodeVector(i % 2 ? new Float32Array(EMBED_DIM) : vecOf(i)), dedupKey: `t${i + 1}`,
-      });
+      };
+      if (isPg) await insertEmbedding(row);
+      // Legacy rows: float32 vectors and zero-vector placeholders, as stored before v16.
+      else await stateKysely().insertInto('embeddings').values({
+        workspace_id: row.workspaceId, session_id: row.sessionId, kind: row.kind, ref_event_id: row.refEventId, ts: row.ts,
+        text: row.text, model_id: row.modelId, dim: row.dim, vec: row.vec, dedup_key: row.dedupKey,
+      }).execute();
     }
   }
 
@@ -219,7 +225,7 @@ describe('startRetention', () => {
     await ingestAll();
     const done = new Promise<PassResult>((resolve) => {
       const r = startRetention({
-        listManifestIds: async () => [WS], stateDirExists: () => true,
+        listManifestIds: async () => [WS], stateDirExists: () => true, orphanSweep: true,
         firstDelayMs: 0, now: () => NOW, throttle: { minSleepMs: 0, idleRatio: 0 },
         onPass: (p) => { resolve(p); void r.stop(); },
       });
@@ -248,5 +254,28 @@ describe('retainEvents edge cases', () => {
     expect(evs.find((e) => e.uuid === 'x1')!.rawJsonl).toBe('');
     expect(JSON.parse(evs.find((e) => e.uuid === 'r-t1')!.rawJsonl).fleetStripped).toBeDefined();
     expect((await stored()).get('x1')!.raw_z).toEqual(Buffer.from('not zlib'));
+  });
+});
+
+describe('retentionKeys', () => {
+  it('reports each row\'s stored size without reading it', async () => {
+    await ingestAll();
+    const keys = await retentionKeys(SES, 0, NOW, null, 100, false);
+    expect(keys.map((k) => k.bytes).sort((a, b) => a - b)).toEqual(lines.map((l) => Buffer.byteLength(l)).sort((a, b) => a - b));
+  });
+});
+
+describe('insertEmbeddings storage', () => {
+  it('stores int8 on SQLite and float32 on Postgres from a float32 input', async () => {
+    const v = new Float32Array(EMBED_DIM); v[0] = 0.6; v[1] = 0.8;
+    await insertEmbedding({ workspaceId: WS, sessionId: SES, kind: 'turn', refEventId: 1, ts: 1, text: 'x',
+      modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec: encodeVector(v), dedupKey: 't1' });
+    if (isPg) {
+      const [r] = await queryRows<{ v: string }>('SELECT vec::text AS v FROM embeddings');
+      expect(r.v.startsWith('[0.6,0.8,')).toBe(true);
+    } else {
+      const [r] = await queryRows<{ n: number }>('SELECT length(vec) AS n FROM embeddings');
+      expect(r.n).toBe(EMBED_DIM + 4);
+    }
   });
 });

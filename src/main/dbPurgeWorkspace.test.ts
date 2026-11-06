@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { ingestLine, insertEmbedding, purgeWorkspace, recordUsageEvent, stateKysely, workspaceIdsInState } from './db.js';
+import { ingestLine, insertEmbedding, purgeWorkspace, recordUsageEvent, setRetentionWatermarks, stateKysely, workspaceIdsInState } from './db.js';
 import { encodeVector, EMBED_DIM, EMBED_MODEL_ID } from './vectors.js';
 import { openTestState, queryRows } from './store/testStore.js';
 import { sweepOrphans, type Throttle } from './state/retention.js';
@@ -79,5 +79,22 @@ describe('sweepOrphans', () => {
     await seedWorkspace('01WS', 'sx');
     expect(await sweepOrphans(deps([B], [A]), unthrottled)).toEqual([]);
     expect(await workspaceIdsInState()).toEqual([A, '01WS']);
+  });
+});
+
+describe('purge vs a retention pass', () => {
+  it('a watermark written after the purge leaves no row behind', async () => {
+    await seedWorkspace(A, 'sa');
+    await purgeWorkspace(A);
+    await setRetentionWatermarks('sa', A, 10, 10);
+    expect(await queryRows('SELECT session_id FROM event_retention')).toEqual([]);
+  });
+
+  it('workspaceIdsInState finds a workspace that only has events or embeddings left', async () => {
+    await seedWorkspace(A, 'sa');
+    await stateKysely().deleteFrom('sessions').execute();
+    expect(await workspaceIdsInState()).toEqual([A]);
+    await stateKysely().deleteFrom('events').execute();
+    expect(await workspaceIdsInState()).toEqual([A]);
   });
 });

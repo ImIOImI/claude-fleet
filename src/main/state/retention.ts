@@ -3,8 +3,8 @@
 // on the async store handle in bounded slices behind a Throttle, so the main
 // thread is never held for more than one small transaction at a time.
 import {
-  compactEmbeddingSlice, maintenanceGet, purgeWorkspace, workspaceIdsInState, maintenanceSet, maxEmbeddingId, retentionCandidates, retentionRows,
-  rewriteEventRaw, setRetentionWatermarks, stateDialect, withRawSqlite, type RetentionRow,
+  compactEmbeddingSlice, maintenanceGet, maintenanceSet, maxEmbeddingId, purgeWorkspace, retentionBodies, retentionCandidates,
+  retentionKeys, rewriteEventRaw, setRetentionWatermarks, stateDialect, withRawSqlite, workspaceIdsInState, type RetentionRow,
 } from '../db.js';
 import { logError } from '../errorLog.js';
 import { perfSpanAsync } from '../perf.js';
@@ -15,7 +15,7 @@ export const COMPRESS_AFTER_MS = 30 * DAY_MS;
 export const STRIP_AFTER_MS = 30 * DAY_MS;
 export const STRIP_AFTER_RESUMED_MS = 90 * DAY_MS;
 const SLICE_ROWS = 200;
-const SLICE_BYTES = 2 * 1024 * 1024;
+export const SLICE_BYTES = 2 * 1024 * 1024;
 
 export interface Throttle {
   /** Run one bounded unit of work, then pace the next one. */
@@ -55,13 +55,14 @@ async function walkRange(
   for (;;) {
     if (t.stopped()) return false;
     const done = await t.slice(async () => {
-      const rows = await retentionRows(sessionId, fromTs, toTs, after, sliceRows, toolOnly);
-      if (rows.length === 0) return true;
+      const keys = await retentionKeys(sessionId, fromTs, toTs, after, sliceRows, toolOnly);
+      if (keys.length === 0) return true;
+      // Bodies only up to the byte budget (at least one row), so no row is read twice.
+      let take = 0;
+      for (let bytes = 0; take < keys.length && (take === 0 || bytes + keys[take].bytes <= SLICE_BYTES); take++) bytes += keys[take].bytes;
+      after = { ts: keys[take - 1].ts, id: keys[take - 1].id };
       const updates: { id: number; raw_jsonl: string; raw_z: Buffer | null }[] = [];
-      let bytes = 0;
-      for (const row of rows) {
-        after = { ts: row.ts, id: row.id };
-        bytes += storedBytes(row);
+      for (const row of await retentionBodies(keys.slice(0, take).map((k) => k.id))) {
         const next = apply(row);
         if (next) {
           updates.push({ id: row.id, ...next });
@@ -69,7 +70,6 @@ async function walkRange(
           acc.bytesBefore += storedBytes(row);
           acc.bytesAfter += storedBytes(next);
         }
-        if (bytes >= SLICE_BYTES) break;
       }
       await rewriteEventRaw(updates);
       return false;
@@ -85,7 +85,7 @@ export async function retainEvents(now: number, t: Throttle, opts: { sliceRows?:
   const compress = stateDialect() === 'sqlite';
   const cCut = now - COMPRESS_AFTER_MS;
   const acc: RetainEventsResult = { rows: 0, bytesBefore: 0, bytesAfter: 0 };
-  for (const c of await retentionCandidates(cCut)) {
+  for (const c of await perfSpanAsync('claude_fleet.retention.candidates', () => retentionCandidates(cCut))) {
     if (t.stopped()) break;
     const sCut = now - (c.resumed ? STRIP_AFTER_RESUMED_MS : STRIP_AFTER_MS);
     if (c.compressedBefore >= cCut && c.strippedBefore >= sCut) continue;
@@ -208,6 +208,9 @@ export async function incrementalVacuum(t: Throttle): Promise<number> {
 }
 
 export interface RetentionDeps extends OrphanDeps {
+  /** Only where this desktop owns every workspace in the store: SQLite or the
+   *  managed (local) Postgres, never a shared external one. */
+  orphanSweep: boolean;
   firstDelayMs?: number;
   intervalMs?: number;
   vacuumEveryMs?: number;
@@ -241,7 +244,7 @@ export function startRetention(deps: RetentionDeps): { stop(): Promise<void> } {
   const pass = async (): Promise<void> => {
     const at = now();
     const r: PassResult = {
-      orphans: await step('orphans', () => sweepOrphans(deps, throttle), []),
+      orphans: deps.orphanSweep ? await step('orphans', () => sweepOrphans(deps, throttle), []) : [],
       events: await step('events', () => retainEvents(at, throttle), { rows: 0, bytesBefore: 0, bytesAfter: 0 }),
       embeddings: await step('embeddings', () => compactEmbeddings(throttle), { rows: 0, bytesSaved: 0 }),
       vacuumPages: await step('vacuum', () => incrementalVacuum(throttle), 0),
