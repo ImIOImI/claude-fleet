@@ -115,6 +115,47 @@ describe.skipIf(!isPg)('sessionsPage', () => {
     expect(seen).toEqual([...ids].sort(compareBytes));
     await k.destroy();
   });
+
+  it('clips long text and caps tags to the desktop D59 limits before a row leaves the DB', async () => {
+    const k = await rig();
+    await k.insertInto('sessions').values({
+      id: 'big-1', workspace_id: HOSTED, cwd: null, started_at: 1, last_active_at: 9999,
+      ai_title: 'T'.repeat(1000), first_user_message: 'x'.repeat(1_000_000), user_set_name: 'N'.repeat(1000),
+    }).execute();
+    const tags = Array.from({ length: 30 }, (_, i) => `tag-${i}-`.padEnd(100, 'z'));
+    await k.insertInto('session_summaries').values({
+      session_id: 'big-1', workspace_id: HOSTED, summary: 's', tags: JSON.stringify(tags),
+      source_max_event_id: 1, from_ts: null, to_ts: null, model: null, generated_at: 1,
+    }).execute();
+    const page = await sessionsPage(k, HOSTED, { after: null, limit: 1 });
+    const row = page.rows.find((r) => r.id === 'big-1');
+    expect(row?.aiTitle).toHaveLength(500);
+    expect(row?.firstUserMessage).toHaveLength(500);
+    expect(row?.userSetName).toHaveLength(500);
+    expect(row?.tags).toHaveLength(20);
+    expect(row?.tags.every((t) => t.length <= 64)).toBe(true);
+    await k.destroy();
+  });
+
+  it('skips a row whose id fails the id charset; paging still advances past it', async () => {
+    const k = await rig();
+    await k.insertInto('sessions').values({
+      id: 'bad id!', workspace_id: HOSTED, cwd: null, started_at: 1, last_active_at: 1500,
+      ai_title: null, first_user_message: null, user_set_name: null,
+    }).execute();
+    const seen: string[] = [];
+    let after: SessionsPageReq['after'] = null;
+    for (let i = 0; i < 20; i++) {
+      const p = await sessionsPage(k, HOSTED, { after, limit: 4 });
+      seen.push(...p.rows.map((r) => r.id));
+      if (!p.next) break;
+      after = p.next;
+    }
+    expect(seen).not.toContain('bad id!');
+    expect(seen).toHaveLength(25);
+    expect(new Set(seen).size).toBe(25);
+    await k.destroy();
+  });
 });
 
 describe.skipIf(!isPg)('historyReader.summary', () => {

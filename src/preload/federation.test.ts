@@ -77,11 +77,21 @@ describe('mergeSessionPages', () => {
     expect(n.rows.map((x) => `${x.origin}:${x.id}`)).toEqual(['local:s', 'H:h']);
     expect(n.more).toEqual([]);
   });
+
+  it('replaceSessionPage without a row it shadowed lets the shadowed remote row reappear', () => {
+    const m = mergeSessionPages([
+      { origin: 'local', rows: [row('s', 5, 'W1')], next: null },
+      { origin: 'H', rows: [row('s', 5, 'W1'), row('t', 4, 'W1')], next: null },
+    ]);
+    expect(m.rows.map((r) => `${r.origin}:${r.id}`)).toEqual(['local:s', 'H:t']);
+    const r = replaceSessionPage(m, { origin: 'local', rows: [], next: null });
+    expect(r.rows.map((x) => `${x.origin}:${x.id}`)).toEqual(['H:s', 'H:t']);
+  });
 });
 
 describe('compareBytes', () => {
   it('orders by UTF-8 bytes, as COLLATE "C" and SQLite do', () => {
-    expect(compareBytes('￿', '\u{10000}')).toBeLessThan(0);
+    expect(compareBytes('\uFFFF', '\u{10000}')).toBeLessThan(0);
     expect(compareBytes('a', 'ab')).toBeLessThan(0);
     expect(compareBytes('B', 'a')).toBeLessThan(0);
     expect(compareBytes('x', 'x')).toBe(0);

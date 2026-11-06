@@ -58,6 +58,19 @@ function compareOrigins(a: Origin, b: Origin): number {
   return a === b ? 0 : a === LOCAL_ORIGIN ? -1 : b === LOCAL_ORIGIN ? 1 : compareBytes(a, b);
 }
 
+// Internal: the per-source pages a merge was built from, dedup-shadowed rows
+// included. A symbol key keeps it off `rows`/`more`, the public shape, and
+// out of JSON/Object.keys. pagesOf is the only reader.
+const SOURCE_PAGES = Symbol('federation.sourcePages');
+
+function withSourcePages<T extends Keyed>(
+  rows: WithOrigin<T>[], more: MergedSessions<T>['more'], pages: SourcePage<T>[]
+): MergedSessions<T> {
+  const merged = { rows, more } as MergedSessions<T> & { [SOURCE_PAGES]: SourcePage<T>[] };
+  Object.defineProperty(merged, SOURCE_PAGES, { value: pages.map((p) => ({ origin: p.origin, rows: [...p.rows], next: p.next })), enumerable: false });
+  return merged;
+}
+
 /** Merges pages from different sources. Each source's rows must be a prefix of
  *  that source's order. A (workspaceId, id) held by several origins keeps the
  *  local row, else the byte-smallest origin's. */
@@ -75,23 +88,14 @@ export function mergeSessionPages<T extends Keyed>(pages: SourcePage<T>[]): Merg
   }
   rows.sort((a, b) => compareSessionKey(a, b) || compareOrigins(a.origin, b.origin));
   const more = ordered.flatMap((p) => (p.next ? [{ origin: p.origin, after: p.next }] : []));
-  return { rows, more };
+  return withSourcePages(rows, more, pages);
 }
 
-/** The per-source pages a merged list was built from, less deduplicated rows. */
+/** The per-source pages a merge was built from, dedup-shadowed rows included
+ *  (a row a `replace` later drops can reappear from another source). */
 export function pagesOf<T extends Keyed>(m: MergedSessions<T>): SourcePage<T>[] {
-  const by = new Map<Origin, SourcePage<T>>();
-  const page = (o: Origin): SourcePage<T> => {
-    let p = by.get(o);
-    if (!p) by.set(o, (p = { origin: o, rows: [], next: null }));
-    return p;
-  };
-  for (const r of m.rows) {
-    const { origin, ...row } = r;
-    page(origin).rows.push(row as unknown as T);
-  }
-  for (const x of m.more) page(x.origin).next = x.after;
-  return [...by.values()];
+  const raw = (m as unknown as { [SOURCE_PAGES]: SourcePage<T>[] })[SOURCE_PAGES];
+  return raw.map((p) => ({ origin: p.origin, rows: [...p.rows], next: p.next }));
 }
 
 /** Adds a source's next page, fetched with that source's `more.after`. */

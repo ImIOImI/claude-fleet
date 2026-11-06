@@ -9,6 +9,11 @@ import type { SessionCursor } from '../preload/federation.js';
 
 export const SESSIONS_PAGE_MAX = 200;
 const ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
+// D59: match the desktop reply validator (remoteRows.ts) exactly, so a page
+// of long titles or many tags never approaches the 2 MB RPC reply cap.
+const MAX_TEXT = 500;
+const MAX_TAGS = 20;
+const MAX_TAG_LEN = 64;
 
 export interface RemoteSessionRow {
   id: string;
@@ -64,10 +69,11 @@ export async function sessionsPage(k: Kysely<StateDb>, workspaceId: string, req:
       id: string; workspace_id: string; ai_title: string | null; first_user_message: string | null; user_set_name: string | null;
       started_at: number | string | null; last_active_at: number | string | null; headless: boolean;
     }>`
-      SELECT id, workspace_id, ai_title, first_user_message, user_set_name, started_at, last_active_at,
+      SELECT id, workspace_id, LEFT(ai_title, ${MAX_TEXT}) AS ai_title, LEFT(first_user_message, ${MAX_TEXT}) AS first_user_message,
+             LEFT(user_set_name, ${MAX_TEXT}) AS user_set_name, started_at, last_active_at,
              EXISTS (SELECT 1 FROM broker_sessions b WHERE b.claude_session_id = sessions.id
                      AND b.broker_session_id LIKE ${`${HEADLESS_BROKER_PREFIX}%`}) AS headless
-      FROM sessions WHERE workspace_id = ${workspaceId} ${after}
+      FROM sessions WHERE workspace_id = ${workspaceId} AND id ~ ${ID_RE.source} ${after}
       ORDER BY ${la} DESC, id COLLATE "C" ASC
       LIMIT ${req.limit + 1}`.execute(trx)).rows;
     const page = sess.slice(0, req.limit);
@@ -102,7 +108,7 @@ export async function sessionsPage(k: Kysely<StateDb>, workspaceId: string, req:
       id: s.id, workspaceId: s.workspace_id, aiTitle: s.ai_title, firstUserMessage: s.first_user_message,
       userSetName: s.user_set_name, startedAt: num(s.started_at), lastActiveAt: num(s.last_active_at),
       eventCount: agg.get(s.id)?.eventCount ?? 0, usd: agg.get(s.id)?.usd ?? 0,
-      tags: tags.get(s.id) ?? [], headless: Boolean(s.headless),
+      tags: (tags.get(s.id) ?? []).slice(0, MAX_TAGS).map((t) => t.slice(0, MAX_TAG_LEN)), headless: Boolean(s.headless),
     }));
     const last = rows[rows.length - 1];
     return { rows, next: sess.length > req.limit && last ? { lastActiveAt: last.lastActiveAt ?? 0, id: last.id } : null };
@@ -116,6 +122,8 @@ export interface HistoryReader {
   summary(sessionId: string | null): Promise<WorkspaceSummary | null>;
 }
 
+/** `summary` goes through db.ts's global store (summaryForWorkspace/summaryForSession), the same
+ *  handle the holder passes as `k` here, not a store `k` could swap per call. */
 export function historyReader(k: () => Kysely<StateDb>, workspaceId: string): HistoryReader {
   return {
     workspaceId,
