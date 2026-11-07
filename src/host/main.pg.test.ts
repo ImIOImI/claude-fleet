@@ -180,6 +180,8 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
       });
       return { status: res.status, body: (await res.json()) as Record<string, any> };
     };
+    // The stores open before startHolder resolves; history answers 503 until it does.
+    await vi.waitFor(async () => expect((await call('history:summary', [])).status).toBe(200), { timeout: 10_000 });
     const page = await call('history:sessions', [{ after: { lastActiveAt: 99, id: 'o1', workspaceId: OTHER }, limit: 1, workspaceId: OTHER }, OTHER]);
     expect(page.status).toBe(200);
     expect(page.body.result.rows.map((r: { id: string; workspaceId: string }) => [r.id, r.workspaceId])).toEqual([['h1', ID]]);
