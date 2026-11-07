@@ -32,7 +32,7 @@ describe('index.ts store boot', () => {
     inOrder(boot, [
       'if (sqlite && !inboxElsewhere) {\n    // Authoritative inbox',
       'inboxStore = InboxStore.open(userData);',
-      'if (sqlite) {\n      openDb(userData);\n      await startStateWrites();',
+      'if (sqlite && !historyAfterVacuum) await startSqliteHistory();',
       "perfSpan('claude_fleet.boot.mcp_server'",
       'setQueryEmbedder(embedFn);',
       'if (sqlite && inboxStore) startClaims(inboxStore, embedFn);',
@@ -44,7 +44,7 @@ describe('index.ts store boot', () => {
       'await startCaptureScheduler(jsonlWatcher);',
       'registerLocalDirs(jsonlWatcher, manifests);',
       "perfSpanAsync('claude_fleet.boot.peer_status_start'",
-      'if (sqlite) startEmbedBackfill(embedFn);',
+      'if (sqlite && !historyAfterVacuum) startEmbedBackfill(embedFn);',
       'instrumentIpcHandle(ipcMain);',
       "perfSpan('claude_fleet.boot.register_ipc'",
       'if (sqlite && inboxStore) startInboxServices(inboxStore);',
@@ -141,8 +141,9 @@ describe('index.ts store boot', () => {
     inOrder(quit, [
       'if (shuttingDown) return;', 'shuttingDown = true;', 'e.preventDefault();', 'markQuitting();', 'supervisor?.stop();',
       'void withinMs((async () => {', 'await withinMs(supervisor.exclusive(async () => undefined)',
-      'notifySvc?.stop()', 'inboxStore?.close()', 'await closeDb();', 'await pgStores?.end();', 'await stopManagedPostgres(managedDocker)',
-      'QUIT_BOUND_MS)', '.then(() => app.exit(0));',
+      'notifySvc?.stop()', 'await retention?.stop();', 'inboxStore?.close()', 'prepareVacuum(', 'await closeDb();', 'stateClosed = true;',
+      'await pgStores?.end();', 'await stopManagedPostgres(managedDocker)',
+      'QUIT_BOUND_MS)', 'if (vacuumAfterQuit && stateClosed) spawnVacuumHelper(', 'app.exit(0);',
     ]);
     expect(src).toMatch(/const QUIT_BOUND_MS = 10_000;/);
   });

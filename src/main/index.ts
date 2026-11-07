@@ -17,7 +17,10 @@ import { PeerStatusWatcher } from './peerStatusWatcher.js';
 import { broadcastSessionStatus } from './sessionStatusBroadcast.js';
 import { listWorkspaceManifests, manifestInvariant, readWorkspaceManifest, writeWorkspaceManifest, type WorkspaceSpec } from './workspaces.js';
 import { wslLocalProjectsDir, wslLocalSessionsDir } from './localLauncher.js';
-import { encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir } from './paths.js';
+import { encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir, workspaceStateDir } from './paths.js';
+import { existsSync } from 'node:fs';
+import { startRetention } from './state/retention.js';
+import { prepareVacuum, spawnVacuumHelper, vacuumHelperActive, waitForVacuumHelper } from './state/vacuumHelper.js';
 import { installMainProcessHandlers, getLogPath, setErrorSink, logError } from './errorLog.js';
 import { installAppMenu } from './appMenu.js';
 import { isOpenableExternalUrl } from './externalUrl.js';
@@ -93,6 +96,7 @@ const historyGate = new InboxWriteGate();
 // before-quit holds the quit at most this long (#485).
 const QUIT_BOUND_MS = 10_000;
 let shuttingDown = false;
+let retention: ReturnType<typeof startRetention> | null = null;
 // Undoes what the inbox-backed services registered, so they can start again on the other store.
 const inboxTeardown: Array<() => void> = [];
 let keepRunningAttached = false;
@@ -500,12 +504,35 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     void inbox.counts().then((c) => broadcastInboxChanged(c, BrowserWindow.getAllWindows())).catch(() => undefined);
   };
 
+  /** Retention pass over state.db (SPEC §7 *Retention*); once per process. */
+  const startStateRetention = (): void => {
+    if (isMock) return;
+    retention ??= startRetention({
+      orphanSweep: storeCfg.kind !== 'postgres',
+      listManifestIds: async () => (await listWorkspaceManifests()).map((m) => m.id),
+      stateDirExists: (id) => existsSync(workspaceStateDir(id)),
+    });
+  };
+
   let embed: EmbedFn | null = null;
+  // A one-time VACUUM from the last quit may still hold state.db's write lock:
+  // the window and IPC come up now, the SQLite history services once it ends
+  // (WAL readers, e.g. the MCP read source, aren't blocked by it).
+  const historyAfterVacuum = sqlite && !!jsonlWatcher && vacuumHelperActive(userData);
+  let sqliteManifests: WorkspaceSpec[] = [];
+  const startSqliteHistory = async (): Promise<void> => {
+    openDb(userData);
+    await startStateWrites();
+    startStateRetention();
+  };
+  const startSqliteIngest = async (watcher: JsonlWatcher, embedFn: EmbedFn): Promise<void> => {
+    await startWatcher(watcher, sqliteManifests);
+    await startCaptureScheduler(watcher);
+    registerLocalDirs(watcher, sqliteManifests);
+    startEmbedBackfill(embedFn);
+  };
   if (jsonlWatcher) {
-    if (sqlite) {
-      openDb(userData);
-      await startStateWrites();
-    }
+    if (sqlite && !historyAfterVacuum) await startSqliteHistory();
     // Read-only MCP server over <userData>/mcp.sock so in-container claude can
     // read history (sessions/events/cost): its own read-only state.db
     // connection on SQLite; on Postgres the history tools wait for setReadSource.
@@ -568,7 +595,8 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         .then((m) => (m?.kind === 'container' ? ensureContainerRetention(m.id, e.after.transcriptRetentionDays) : false))
         .catch((err) => logError({ source: 'main', type: 'claude-retention', level: 'warn', message: String(err), workspaceId: e.workspaceId }));
     });
-    if (sqlite) {
+    sqliteManifests = manifests;
+    if (sqlite && !historyAfterVacuum) {
       await startWatcher(jsonlWatcher, manifests);
       await startCaptureScheduler(jsonlWatcher);
       registerLocalDirs(jsonlWatcher, manifests);
@@ -586,7 +614,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         );
       });
     }
-    if (sqlite) startEmbedBackfill(embedFn);
+    if (sqlite && !historyAfterVacuum) startEmbedBackfill(embedFn);
   }
 
   if (!sqlite) {
@@ -643,6 +671,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       },
       { name: 'local-dirs', group: 'history', run: () => { if (jsonlWatcher) registerLocalDirs(jsonlWatcher, manifests); } },
       { name: 'embed-backfill', group: 'history', run: () => { if (embed) startEmbedBackfill(embed); } },
+      { name: 'retention', group: 'history', after: ['watcher'], run: () => startStateRetention() },
       { name: 'capture-scheduler', group: 'inbox', after: ['claims', 'watcher'], run: () => (jsonlWatcher ? startCaptureScheduler(jsonlWatcher) : undefined) },
     ]);
     /** Refuse new inbox and history writes, stop the timers that write, and wait for writes in flight. */
@@ -650,6 +679,8 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       inboxGate.close('The inbox is moving to SQLite; try again in a moment.');
       historyGate.close('History is moving to SQLite; try again in a moment.');
       stopInboxWriters();
+      await retention?.stop();
+      retention = null;
       await inboxGate.drain(stores.inbox.kysely);
       let state: ReturnType<typeof stateKysely> | null = null;
       try {
@@ -665,6 +696,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       if (shuttingDown) return;
       inboxGate.open();
       historyGate.open();
+      startStateRetention();
       notifySvc?.resume();
       auto?.resume();
       captureScheduler?.resume();
@@ -733,6 +765,16 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   mainWindow = createWindow();
   startPresenceServices(mainWindow);
   void supervisor?.run();
+  if (historyAfterVacuum && jsonlWatcher && embed) {
+    const watcher = jsonlWatcher;
+    const embedFn = embed;
+    void (async () => {
+      const waited = await waitForVacuumHelper(userData);
+      logError({ source: 'main', level: 'info', type: 'vacuum-wait', message: `vacuum helper: ${waited}` });
+      await startSqliteHistory();
+      await startSqliteIngest(watcher, embedFn);
+    })().catch((e) => logError({ source: 'main', type: 'history-start', level: 'error', message: String(e) }));
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -750,6 +792,8 @@ app.on('before-quit', (e) => {
   e.preventDefault();
   markQuitting();
   supervisor?.stop();
+  let vacuumAfterQuit = false;
+  let stateClosed = false;
   void withinMs((async () => {
     // Let a bring-up step or a switch back in flight finish first.
     if (supervisor) await withinMs(supervisor.exclusive(async () => undefined), QUIT_BOUND_MS / 2);
@@ -766,18 +810,25 @@ app.on('before-quit', (e) => {
     auto?.stop();
     auto = null;
     stopRemoteBackend();
+    await retention?.stop();
+    retention = null;
     await jsonlWatcher?.stop();
     await peerStatusWatcher?.stop();
     stopMcpServer();
     await inboxStore?.close();
     inboxStore = null;
     await shutdownPerf();
+    vacuumAfterQuit = await prepareVacuum(app.getPath('userData')).catch(() => false);
     await closeDb();
+    stateClosed = true;
     await pgStores?.end();
     pgStores = null;
     if (managedDocker) await stopManagedPostgres(managedDocker);
   })().catch((err) => logError({ source: 'main', type: 'quit-shutdown', level: 'warn', message: String(err) })), QUIT_BOUND_MS)
-    .then(() => app.exit(0));
+    .then(() => {
+      if (vacuumAfterQuit && stateClosed) spawnVacuumHelper(app.getPath('userData'));
+      app.exit(0);
+    });
 });
 
 app.on('window-all-closed', () => {

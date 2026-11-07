@@ -1,5 +1,5 @@
 // Kysely table types for state.db (the JSONL→SQLite cache). Mirrors migrate()
-// v1–v15 in db.ts exactly; a migration that changes a table changes it here too.
+// v1–v16 in db.ts exactly; a migration that changes a table changes it here too.
 import type { Generated, Selectable } from 'kysely';
 
 export interface EventsTable {
@@ -23,6 +23,8 @@ export interface EventsTable {
   tool_use_id: string | null;
   tool_input: string | null;
   tool_result_is_error: number | null;
+  /** zlib-deflated line when compressed (raw_jsonl is then ''); SQLite only. */
+  raw_z: Buffer | null;
 }
 export interface SessionsTable {
   id: string;
@@ -64,7 +66,8 @@ export interface EmbeddingsTable {
   text: string;
   model_id: string;
   dim: number;
-  vec: Buffer;
+  /** int8 or float32 bytes (vectors.ts); empty (SQLite) or NULL (Postgres) for a placeholder. */
+  vec: Buffer | null;
   dedup_key: string;
 }
 export interface SessionSummariesTable {
@@ -147,6 +150,14 @@ export interface PortExposuresTable {
   ended_at: number | null;
 }
 
+export interface EventRetentionTable {
+  session_id: string;
+  workspace_id: string;
+  compressed_before: Generated<number>;
+  stripped_before: Generated<number>;
+}
+export interface MaintenanceTable { key: string; value: string }
+
 export interface StateDb {
   events: EventsTable;
   sessions: SessionsTable;
@@ -162,6 +173,8 @@ export interface StateDb {
   session_stats: SessionStatsTable;
   session_tool_counts: SessionToolCountsTable;
   port_exposures: PortExposuresTable;
+  event_retention: EventRetentionTable;
+  maintenance: MaintenanceTable;
 }
 
 export type EventRowSel = Selectable<EventsTable>;

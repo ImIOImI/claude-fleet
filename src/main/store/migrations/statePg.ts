@@ -208,9 +208,25 @@ CREATE INDEX idx_port_exposures_workspace ON port_exposures (workspace_id, port)
 CREATE INDEX idx_port_exposures_ended ON port_exposures (ended_at);
 `;
 
+const RETENTION_V16 = `
+ALTER TABLE events ADD COLUMN raw_z BYTEA;
+ALTER TABLE embeddings ALTER COLUMN vec DROP NOT NULL;
+CREATE TABLE event_retention (
+  session_id ${T} PRIMARY KEY,
+  workspace_id ${T} NOT NULL,
+  compressed_before BIGINT NOT NULL DEFAULT 0,
+  stripped_before BIGINT NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_event_retention_workspace ON event_retention (workspace_id);
+CREATE TABLE maintenance (
+  key ${T} PRIMARY KEY,
+  value ${T} NOT NULL
+);
+`;
+
 export const STATE_PG_TRACK: PgTrack = {
   track: 'state',
   baselineVersion: STATE_PG_BASELINE_VERSION,
   baseline: STATE_PG_BASELINE,
-  steps: [{ version: 15, postgres: PORT_EXPOSURES_V15 }]
+  steps: [{ version: 15, postgres: PORT_EXPOSURES_V15 }, { version: 16, postgres: RETENTION_V16 }]
 };

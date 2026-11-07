@@ -5,12 +5,11 @@
 // `<userData>/error.log` as a single line of JSON. Users hit a popup they
 // can't copy from? Have them cat the log and paste here.
 //
-// Intentionally a no-frills append-only log. No rotation, no level
-// filtering, no remote sink. The file is small in practice (one line per
-// crash) and the user can delete it whenever.
+// A no-frills append-only log: no level filtering, no remote sink. It rotates
+// to error.log.1 at ERROR_LOG_MAX_BYTES, so at most two files stay on disk.
 
 import { app } from 'electron';
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, mkdirSync, renameSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { ErrorRow } from './db.js';
 import { clipText } from './clipText.js';
@@ -29,6 +28,18 @@ interface LogPayload {
 }
 
 let logPath: string | null = null;
+/** Bytes in the current file: one stat at first use, then counted. */
+let logBytes: number | null = null;
+
+export const ERROR_LOG_MAX_BYTES = 5 * 1024 * 1024;
+let maxBytes = ERROR_LOG_MAX_BYTES;
+
+/** Test seam: log to `path` (null restores the userData default) and rotate at `max`. */
+export function _setErrorLogForTests(path: string | null, max = ERROR_LOG_MAX_BYTES): void {
+  logPath = path;
+  logBytes = null;
+  maxBytes = max;
+}
 let sink: ((row: ErrorRow) => void) | null = null;
 
 /** Register a best-effort DB sink for structured error rows. */
@@ -59,7 +70,26 @@ export function logError(raw: LogPayload): void {
   };
   try {
     const row = { ts: new Date(tsMs).toISOString(), ...payload };
-    appendFileSync(ensureLogPath(), JSON.stringify(row) + '\n', 'utf8');
+    const p = ensureLogPath();
+    const line = JSON.stringify(row) + '\n';
+    const lineBytes = Buffer.byteLength(line, 'utf8');
+    if (logBytes === null) {
+      try {
+        logBytes = statSync(p).size;
+      } catch {
+        logBytes = 0;
+      }
+    }
+    if (logBytes > 0 && logBytes + lineBytes > maxBytes) {
+      try {
+        renameSync(p, `${p}.1`);
+        logBytes = 0;
+      } catch {
+        // Keep appending to the current file; the next line retries.
+      }
+    }
+    appendFileSync(p, line, 'utf8');
+    logBytes += lineBytes;
   } catch {
     // If writing the log itself errors, there's nothing useful we can do —
     // any throw here would cascade into the very error-handling path the

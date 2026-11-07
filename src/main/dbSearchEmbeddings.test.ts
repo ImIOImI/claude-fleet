@@ -23,7 +23,8 @@ it('ranks the allowed workspaces by similarity, recorded across dialects', async
   }));
   await db.insertEmbeddings(rows);
   const hits = await db.searchEmbeddings(unit(4), ['W-A'], { limit: 5 });
-  expect(hits.map((h) => ({ ...h, score: Math.round(h.score * 1e5) / 1e5 }))).toMatchSnapshot();
+  // 1e-2: SQLite stores int8 (score error ~3e-4), Postgres float32; one snapshot serves both.
+  expect(hits.map((h) => ({ ...h, score: Math.round(h.score * 1e2) / 1e2 }))).toMatchSnapshot();
   const kinds = await db.searchEmbeddings(unit(10), ['W-A', 'W-OTHER'], { limit: 3, kind: 'summary' });
   expect(kinds.map((h) => h.text)).toMatchSnapshot();
 });

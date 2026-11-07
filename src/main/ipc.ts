@@ -143,6 +143,7 @@ import {
   latestActivityByWorkspace,
   renameSession,
   deleteSession,
+  purgeWorkspace,
   tokensSpentSince,
   recordUsageEvent,
   planUsageRows,
@@ -1703,6 +1704,12 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     const backend = MOCK_MODE ? mockDocker : backendForKind(await resolveRemoveKind(containerId, opts?.id));
     const result = await backend.removeWorkspace(containerId, opts);
     invalidateWorkspaceList();
+    // A remove that keeps state can come back; only a state delete drops history.
+    if (opts?.deleteState && opts.id && !MOCK_MODE) {
+      const id = opts.id;
+      void purgeWorkspace(id).catch((e) =>
+        logError({ source: 'main', level: 'warn', type: 'workspace-purge', workspaceId: id, message: String(e) }));
+    }
     // Tear down the per-id MCP listener + socket dir (#117). Keyed by workspace
     // id, which lives in opts.id (containerId is the Docker id). Best-effort.
     if (opts?.id) removeWorkspaceSocket(opts.id);

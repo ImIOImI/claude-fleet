@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { logError, setErrorSink } from './errorLog.js';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { _setErrorLogForTests, logError, setErrorSink } from './errorLog.js';
 
 afterEach(() => setErrorSink(null));
 
@@ -33,3 +36,24 @@ describe('entry size', () => {
   });
 });
 
+
+describe('rotation', () => {
+  afterEach(() => _setErrorLogForTests(null));
+
+  it('moves error.log to error.log.1 once the next line would pass the cap', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cf-errlog-'));
+    const p = join(dir, 'error.log');
+    writeFileSync(p, 'x'.repeat(700) + '\n');
+    _setErrorLogForTests(p, 1000);
+    logError({ source: 'main', type: 'first', message: 'm'.repeat(50) });
+    expect(existsSync(`${p}.1`)).toBe(false);
+    logError({ source: 'main', type: 'second', message: 'm'.repeat(200) });
+    expect(readFileSync(`${p}.1`, 'utf8')).toContain('"type":"first"');
+    const current = readFileSync(p, 'utf8');
+    expect(current).toContain('"type":"second"');
+    expect(current).not.toContain('"type":"first"');
+    logError({ source: 'main', type: 'third', message: 'm'.repeat(900) });
+    expect(readFileSync(`${p}.1`, 'utf8')).toContain('"type":"second"');
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
