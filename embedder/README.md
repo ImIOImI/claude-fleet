@@ -16,11 +16,11 @@ Each frame is a u32 little-endian length, then that many bytes of UTF-8 JSON (ma
 
 | Direction | Frame |
 |---|---|
-| out, once | `{"type":"ready","model":"Xenova/bge-small-en-v1.5","dim":384}`, or `{"type":"fatal","error":"…"}` then exit 1 |
+| out, once | `{"type":"ready","protocol":1,"model":"Xenova/bge-small-en-v1.5","dim":384}`, or `{"type":"fatal","error":"…"}` then exit 1 |
 | in | `{"id":1,"texts":["…"]}` |
 | out | `{"id":1,"n":1,"dim":384,"vectors":"<base64 of n×384 f32 LE>"}`, or `{"id":1,"error":"…"}` |
 
-Requests are answered in order. EOF on stdin → exit 0. stderr is free-form logging.
+Requests are answered in order. `protocol` is bumped on any incompatible change; the host refuses a mismatch and embeds in process. EOF on stdin → exit 0. stderr is free-form logging.
 
 ## Build
 
@@ -36,13 +36,13 @@ Runtime dependencies (onnxruntime itself is linked in):
 | OS | Needs |
 |---|---|
 | Linux | glibc ≥ 2.28 (`libc`, `libm`, `libpthread`, `libdl`); libstdc++ is linked statically |
-| Windows | `msvcp140{,_1}.dll`, `vcruntime140{,_1}.dll` (shipped beside the exe); system `DirectML.dll` (Windows 10 1903+), `d3d12.dll`, `dxgi.dll`, `dxcore.dll` |
+| Windows | `msvcp140{,_1}.dll`, `vcruntime140{,_1}.dll` (shipped beside the exe); system `DirectML.dll`, `d3d12.dll`, `dxgi.dll`, `dxcore.dll` (Windows 10 2004 / build 19041+) |
 | macOS | system libraries only; must keep its ad-hoc signature |
 
 ### glibc floor
 
-Release builds use `scripts/ci-build.sh`; on Linux CI runs it through `scripts/ci-build-linux.sh` in a `rust:1.91-bookworm` container (GCC 12, glibc 2.36), since a newer distro's `libstdc++.a` references glibc symbols 2.28 lacks. On Linux the script fetches and sha256-checks onnxruntime, then runs `cargo zigbuild --release --no-default-features --target x86_64-unknown-linux-gnu.2.28` (needs [zig](https://ziglang.org) 0.14 and `cargo install cargo-zigbuild`; zig can't compile ort-sys's download path, which links OpenSSL). zig links against glibc 2.28 symbol versions; `build.rs` links the host GCC's `libstdc++.a` statically (the script sets `ORT_CXX_STDLIB=` so ort-sys doesn't also link it dynamically); `glibc_compat.c` defines the newer-glibc symbols the prebuilt onnxruntime and libstdc++ reference (C23 `__isoc23_*` entry points, `__libc_single_threaded`, `gettid`); it must be compiled against pre-2.38 headers (zig's 2.28 ones), or its `strtol` calls would redirect back to the shims. `scripts/check-glibc.sh <bin> 2.28` fails if any symbol needs a newer glibc or the C++ runtime is linked dynamically. A plain `cargo build` binds to the build host's glibc and is only for local use.
+Release builds use `scripts/ci-build.sh`; on Linux CI runs it through `scripts/ci-build-linux.sh` in a digest-pinned `rust:1.91-bookworm` container (GCC 12, glibc 2.36), since a newer distro's `libstdc++.a` references glibc symbols 2.28 lacks. On Linux the script fetches and sha256-checks onnxruntime, then runs `cargo zigbuild --release --no-default-features --target x86_64-unknown-linux-gnu.2.28` (needs [zig](https://ziglang.org) 0.14 and `cargo install cargo-zigbuild`; zig can't compile ort-sys's download path, which links OpenSSL). zig links against glibc 2.28 symbol versions; `build.rs` links the host GCC's `libstdc++.a` statically (the script sets `ORT_CXX_STDLIB=` so ort-sys doesn't also link it dynamically); `glibc_compat.c` defines the newer-glibc symbols the prebuilt onnxruntime and libstdc++ reference (C23 `__isoc23_*` entry points, `__libc_single_threaded`, `gettid`); it is compiled only when `FLEET_GLIBC_COMPAT=1` (set by the script), together with the static libstdc++ link, because against glibc ≥ 2.38 headers its `strtol` calls would redirect back to the shims (an `#error` guards this). A plain `cargo build` links against the host glibc as usual. `scripts/check-glibc.sh <bin> 2.28` fails if any symbol needs a newer glibc or the C++ runtime is linked dynamically. A plain `cargo build` binds to the build host's glibc and is only for local use.
 
 ### Packaging
 
-`scripts/ci-build.sh` copies the binary (and on Windows the VC++ DLLs) to `embedder/bin/`, and electron-builder ships that as `resources/embedder/`. It also runs `codesign -v` on macOS and a smoke start on every OS. Windows CI publishes `fleet-embedder-windows-x64.zip` on each release; local WSL builds fetch it with `make embedder-win` (`EMBEDDER_TAG`, `EMBEDDER_WIN_ZIP`, `ALLOW_NO_EMBEDDER=1`).
+`scripts/ci-build.sh` copies the binary (and on Windows the VC++ DLLs) to `embedder/bin/`, and electron-builder ships that as `resources/embedder/`. It also runs `codesign -v` on macOS and a smoke start on every OS; CI then runs `scripts/smoke-embed.mjs` (a real embed with the cached model). Windows CI publishes `fleet-embedder-windows-x64.zip` on each release; local WSL builds fetch it with `make embedder-win` (default release `v<package.json version>`, else the newest, drafts included; `EMBEDDER_TAG`, `EMBEDDER_WIN_ZIP`, `ALLOW_NO_EMBEDDER=1`; needs `gh` and `unzip`).

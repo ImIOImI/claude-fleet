@@ -1,6 +1,6 @@
 // Protocol-speaking stand-in for fleet-embedder (embedderClient.test.ts).
 // FAKE_MODE: ok | crash-on-first | fatal | never-ready | hang | error-reply |
-// short-reply | stderr-split.
+// short-reply | stderr-split | old-protocol.
 // FAKE_STATE: a file whose existence marks "already crashed once".
 import { existsSync, writeFileSync } from 'node:fs';
 
@@ -20,7 +20,7 @@ if (mode === 'fatal') {
     process.stderr.write('first hal');
     setTimeout(() => process.stderr.write('f\nsecond\n'), 50);
   }
-  process.stdout.write(frame({ type: 'ready', model: 'fake', dim: DIM }));
+  process.stdout.write(frame({ type: 'ready', protocol: mode === 'old-protocol' ? 0 : 1, model: 'fake', dim: DIM }));
 }
 
 let buf = Buffer.alloc(0);

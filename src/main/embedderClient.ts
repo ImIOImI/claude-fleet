@@ -12,6 +12,8 @@ export class EmbedderUnavailable extends Error {
 }
 
 export const MAX_FRAME = 64 * 1024 * 1024;
+/** Must equal the sidecar's `ready.protocol` (embedder/src/main.rs). */
+export const EMBEDDER_PROTOCOL = 1;
 
 export function encodeFrame(obj: unknown): Buffer {
   const body = Buffer.from(JSON.stringify(obj), 'utf8');
@@ -165,6 +167,17 @@ export class EmbedderClient {
   private onMessage(child: ChildProcess, m: Record<string, unknown>, readyResolve: () => void): void {
     if (child !== this.child || this.killed.has(child)) return;
     if (m.type === 'ready') {
+      if (m.protocol !== EMBEDDER_PROTOCOL) {
+        // A stale or newer binary won't improve on restart: give up at once.
+        const why = `fleet-embedder speaks protocol ${String(m.protocol ?? 'none')}, host expects ${EMBEDDER_PROTOCOL}`;
+        this.opts.log(why);
+        this.killed.add(child);
+        child.kill();
+        this.lastFatal = why;
+        this.stop(why);
+        this.opts.onFatal(why);
+        return;
+      }
       this.clearTimer();
       this.state = 'ready';
       readyResolve();

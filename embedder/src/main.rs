@@ -12,6 +12,9 @@ use base64::Engine;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+/// Bumped on any incompatible frame change; the host rejects a mismatch.
+const PROTOCOL: u32 = 1;
+
 #[derive(Deserialize)]
 struct Request {
     id: u64,
@@ -47,7 +50,8 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    if send(&mut out, &json!({"type": "ready", "model": "Xenova/bge-small-en-v1.5", "dim": embed::DIM})).is_err() {
+    let ready = json!({"type": "ready", "protocol": PROTOCOL, "model": "Xenova/bge-small-en-v1.5", "dim": embed::DIM});
+    if send(&mut out, &ready).is_err() {
         return ExitCode::from(1);
     }
 

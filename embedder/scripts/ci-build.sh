@@ -18,7 +18,7 @@ case "$(uname -s)" in
     mkdir -p target/ort && curl -fsSL "$url" -o target/ort/ort.tgz
     echo "$(echo "$sha" | tr A-F a-f)  target/ort/ort.tgz" | sha256sum -c -
     tar -xzf target/ort/ort.tgz -C target/ort
-    ORT_LIB_LOCATION=$PWD/target/ort/onnxruntime/lib ORT_CXX_STDLIB= \
+    FLEET_GLIBC_COMPAT=1 ORT_LIB_LOCATION=$PWD/target/ort/onnxruntime/lib ORT_CXX_STDLIB= \
       cargo zigbuild --release --locked --no-default-features --target x86_64-unknown-linux-gnu.2.28
     cp target/x86_64-unknown-linux-gnu/release/fleet-embedder bin/
     scripts/check-glibc.sh bin/fleet-embedder 2.28

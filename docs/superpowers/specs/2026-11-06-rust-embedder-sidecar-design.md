@@ -24,7 +24,7 @@ Success, measured on the host after install:
 
 ### 1. Local WSL `make dist` for Windows: CI-built binary (chosen) vs cargo-xwin
 
-**Chosen: download the CI-built Windows binary from a GitHub release.** Windows CI zips the exe with its app-local VC++ runtime DLLs as `fleet-embedder-windows-x64.zip`, and the release job attaches it to the draft release. `make embedder-win` deletes any previous exe/DLLs, then fetches that zip with `gh release download` (`EMBEDDER_TAG`, default the latest published release) or takes `EMBEDDER_WIN_ZIP=<path>`. It fails loudly unless `ALLOW_NO_EMBEDDER=1`, in which case the installer embeds in process. `make windows` / `make portable` depend on it. (`build-app` never runs on pushes to `main`, and tag runs report the tag as their branch, so selecting a workflow run would never find one; releases also outlive artifact expiry.)
+**Chosen: download the CI-built Windows binary from a GitHub release.** Windows CI zips the exe with its app-local VC++ runtime DLLs as `fleet-embedder-windows-x64.zip`, and the release job attaches it to the draft release. `make embedder-win` deletes any previous exe/DLLs, then fetches that zip with `gh release download` (`EMBEDDER_TAG`; default `v<package.json version>`, else the newest release, drafts included) or takes `EMBEDDER_WIN_ZIP=<path>`. It fails loudly unless `ALLOW_NO_EMBEDDER=1`, in which case the installer embeds in process. `make windows` / `make portable` depend on it. (`build-app` never runs on pushes to `main`, and tag runs report the tag as their branch, so selecting a workflow run would never find one; releases also outlive artifact expiry.)
 
 Rejected: **cargo-xwin.** It downloads the MSVC CRT/SDK (license acceptance on every fresh machine), needs `clang`/`lld-link` in WSL, and `ort`'s prebuilt static onnxruntime for `x86_64-pc-windows-msvc` must match the CRT linkage xwin provides (`/MD` vs `/MT`). That is a new toolchain to keep working for a path Troy rarely uses, when CI already builds the same binary natively on `windows-latest`.
 
@@ -61,7 +61,7 @@ embeddings.ts: makeEmbedder(cacheDir)  ── EmbedFn ──▶
 
 Every frame is a 4-byte little-endian unsigned length followed by that many bytes of UTF-8 JSON. Max frame 64 MiB; a larger declared length is a protocol error and the child exits 2.
 
-- Child → main, once after the model loads: `{"type":"ready","model":"Xenova/bge-small-en-v1.5","dim":384}`. If the load fails, it sends `{"type":"fatal","error":"…"}` and exits 1.
+- Child → main, once after the model loads: `{"type":"ready","protocol":1,"model":"Xenova/bge-small-en-v1.5","dim":384}`. The host refuses a different `protocol` and falls back at once. If the load fails, it sends `{"type":"fatal","error":"…"}` and exits 1.
 - Main → child: `{"id":<u64>,"texts":["…", …]}`.
 - Child → main: `{"id":<u64>,"vectors":"<base64 of n×384 float32 LE>","n":<n>,"dim":384}`, or `{"id":<u64>,"error":"…"}`. The child processes requests in order; ids let main match responses and detect a desync.
 - EOF on stdin → exit 0. stderr is free-form logs; main forwards them to `logError` (warn, `embedder-stderr`), rate-limited.
@@ -134,3 +134,4 @@ The current `makeEmbedder` body moves verbatim to `embeddingsInProcess.ts`. `mak
 - **Existing rows are not bit-compatible.** Stored rows came from transformers.js padded batches of 8, up to ~0.03 cosine from the unbatched vector of the same text. New rows from either backend are unbatched and agree at 1.000000. The old rows are kept: the noise predates this change, and re-indexing is out of scope.
 - **The in-process fallback embeds one text at a time,** so a run that falls back writes the same vectors as the sidecar.
 - **Robustness:** model downloads time out (10 min total, 60 s stall) and retry after 5 minutes; a killed child's late output is ignored; replies are checked against the request's text count and the model's output shape; stderr is logged by line; one failed backfill session no longer aborts the rest; the purge marker records the store identity; watcher-triggered indexing waits out the first 30 s of boot.
+- **Second review:** `ready` carries `protocol: 1` and the host refuses a mismatch; `make embedder-win` defaults to the release matching `package.json` (drafts included); the glibc shims and static libstdc++ apply only under `FLEET_GLIBC_COMPAT=1` (release zigbuild), because against glibc ≥ 2.38 headers the shims would recurse; the Windows floor is 2004 (`dxcore.dll`); CI runs a real embed on all three OSes.

@@ -6,7 +6,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 docker run --rm -v "$root":/w -w /w \
   -e UID_GID="$(id -u):$(id -g)" -e GITHUB_ACTIONS \
-  rust:1.91-bookworm bash -euo pipefail -c '
+  rust:1.91-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33 bash -euo pipefail -c '
     trap "chown -R \$UID_GID embedder/target embedder/bin 2>/dev/null || true" EXIT
     cd /tmp
     curl -fsSL -o zig.tar.xz https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz

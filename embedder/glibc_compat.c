@@ -2,7 +2,12 @@
  * onnxruntime and libstdc++ are compiled against newer glibc headers and
  * reference symbols 2.28 lacks; defining them here binds those references
  * locally instead of to a versioned libc export. */
-#define _GNU_SOURCE
+#include <features.h>
+/* Against glibc >= 2.38 headers the C23 redirects would turn each shim into a
+ * call to itself. build.rs compiles this only for the zig 2.28 release build. */
+#if __GLIBC_PREREQ(2, 38)
+#error "glibc_compat.c must be compiled against glibc < 2.38 headers (FLEET_GLIBC_COMPAT=1 with cargo zigbuild)"
+#endif
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>

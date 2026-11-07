@@ -118,4 +118,12 @@ describe('EmbedderClient', () => {
     await new Promise((r) => setTimeout(r, 300));
     expect(logs).toEqual(['fleet-embedder stderr: first half', 'fleet-embedder stderr: second']);
   });
+
+  it('gives up at once on a protocol mismatch', async () => {
+    const { c, onFatal, logs } = client('old-protocol');
+    await expect(c.embed(['a'])).rejects.toBeInstanceOf(EmbedderUnavailable);
+    expect(onFatal).toHaveBeenCalledOnce();
+    expect(onFatal.mock.calls[0][0]).toBe('fleet-embedder speaks protocol 0, host expects 1');
+    expect(logs).toContain('fleet-embedder speaks protocol 0, host expects 1');
+  });
 });
