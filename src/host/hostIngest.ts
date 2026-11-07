@@ -33,6 +33,8 @@ export interface HostIngestOptions {
   maxReadBytes?: number;
   maxLineBytes?: number;
   maxChunkBytes?: number;
+  /** After a chunk's transaction commits. */
+  onIngested?: (sessionId: string) => void;
 }
 
 interface FileMark {
@@ -173,6 +175,7 @@ export class HostIngest {
           atStart: async (trx) => void (await sql`SET LOCAL statement_timeout = ${sql.lit(INGEST_STATEMENT_TIMEOUT)}`.execute(trx)),
           inTx: (trx) => this.saveOffset(trx, path, ino, end)
         });
+        this.o.onIngested?.(sessionId);
       }
       this.done.set(path, { offset: end, ino });
       at = end;

@@ -30,7 +30,7 @@ describe.skipIf(!isPg)('HostIngest', () => {
     const projects = mkdtempSync(join(tmpdir(), 'proj-'));
     mkdirSync(join(projects, '-workspace'));
     const logs: string[] = [];
-    const make = (o: Partial<Pick<HostIngestOptions, 'ingest' | 'maxReadBytes' | 'maxLineBytes' | 'maxChunkBytes'>> = {}) => {
+    const make = (o: Partial<Pick<HostIngestOptions, 'ingest' | 'maxReadBytes' | 'maxLineBytes' | 'maxChunkBytes' | 'onIngested'>> = {}) => {
       const h = new HostIngest({ projectsDir: projects, workspaceId: WS, offsetsRead, log: createLogger((l) => logs.push(l)), rescanMs: 3_600_000, ...o });
       running.push(h);
       return h;
@@ -44,6 +44,19 @@ describe.skipIf(!isPg)('HostIngest', () => {
       path: r.path,
       byte_offset: Number(r.byte_offset)
     }));
+
+  it('calls onIngested after a chunk commits, never for a scan with nothing new', async () => {
+    const { make, file } = await rig();
+    writeFileSync(file, line('a'));
+    const seen: string[] = [];
+    const h = make({ onIngested: (id) => seen.push(id) });
+    await h.start();
+    await h.scan();
+    expect(seen).toEqual([S1]);
+    expect(await events()).toBe(1);
+    await h.scan();
+    expect(seen).toEqual([S1]);
+  });
 
   it('ingests complete lines under the hosted workspace and keeps a partial line for later', async () => {
     const { make, file } = await rig();
