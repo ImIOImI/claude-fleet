@@ -71,6 +71,24 @@ describe('remote backend', () => {
     expect(r.manifests()[0].remote).toMatchObject({ tier: 'read', login: 'alice', url: r.url });
   });
 
+  it('sources and isRemote report known bookmarks with cached liveness, without I/O', async () => {
+    const r = await rig('read', { extra: [{ id: 'local1', name: 'local', kind: 'docker' } as unknown as WorkspaceSpec] });
+    r.setManifests(r.manifests().map((m) => (m.id === 'gone' ? { ...m, color: { hue: 200 } } : m)));
+    expect(r.backend.isRemote(ID)).toBe(false);
+    expect(r.backend.sources()).toEqual([]);
+    await r.backend.listLiveWorkspaces();
+    expect(r.backend.sources().map((s) => s.state)).toEqual([null, null]);
+    await r.backend.refresh();
+    await r.backend.listLiveWorkspaces();
+    expect(r.backend.isRemote(ID)).toBe(true);
+    expect(r.backend.isRemote('nope')).toBe(false);
+    expect(r.backend.isRemote('local1')).toBe(false);
+    expect(r.backend.sources()).toEqual([
+      { id: ID, url: r.url, name: 'review-bot', hue: null, tier: 'read', state: 'running' },
+      { id: 'gone', url: 'http://127.0.0.1:1', name: 'gone', hue: 200, tier: 'read', state: 'unreachable' }
+    ]);
+  });
+
   it('a standby host is shown unreachable', async () => {
     const r = await rig('read');
     r.setLease('standby');

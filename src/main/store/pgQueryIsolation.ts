@@ -1,5 +1,6 @@
 // MCP `query` isolation on Postgres (SPEC §11): each caller workspace reads
-// through its own LOGIN role. Row-level security limits every exposed table to
+// through its own LOGIN role, or all through one bootstrap-provisioned login
+// (`preprovisioned`, D71). Row-level security limits every exposed table to
 // the workspaces in `mcp_grants` for session_user, which the caller's SQL can't
 // change (SET ROLE / set_config('role') reach only the caller's own roles).
 import { createHash, randomBytes } from 'node:crypto';
@@ -7,13 +8,15 @@ import { connect as netConnect } from 'node:net';
 import pg from 'pg';
 import { sql, type Kysely } from 'kysely';
 import { parse as parseConnectionString } from 'pg-connection-string';
-import { plaintextAuthGuard } from './pgScramOnly.js';
+import type { PasswordProvider } from './passwordProvider.js';
+import { pgClientFor } from './pgScramOnly.js';
 import { pgTypes, writeLock, type PgPoolConfig } from './postgres.js';
 import { scramVerifier } from './scram.js';
+import { QUERY_USER } from './storeConfig.js';
 import { MAX_QUERY_BYTES, MCP_QUERY_TABLES, SNAPSHOT_EVENT_COLS, type QueryArgs, type QueryCaller, type QueryRunner } from './readSource.js';
 
 /** Role names are `<schema>_mcp_<16 hex>_raw` at most: within Postgres's 63. */
-const MAX_SCHEMA_LEN = 32;
+export const MAX_SCHEMA_LEN = 32;
 const DEFAULT_STATEMENT_TIMEOUT_MS = 5_000;
 const DEFAULT_LOCK_TIMEOUT_MS = 2_000;
 const DEFAULT_SETUP_LOCK_TIMEOUT_MS = 3_000;
@@ -47,11 +50,11 @@ export function callerRole(schema: string, callerId: string): string {
 
 /** pg options to log in as `user` where the store pool connects. A connection
  *  string's own user and password would win over explicit fields, so it is split. */
-export function rolePoolConfig(base: PgPoolConfig, user: string, password: string): pg.PoolConfig {
+export function rolePoolConfig(base: PgPoolConfig, user: string, password: string | PasswordProvider): pg.PoolConfig {
   const { connectionString, schema: _schema, session: _session, user: _u, password: _p, max: _max, ...rest } = base as PgPoolConfig & pg.PoolConfig;
   const cs = connectionString ? parseConnectionString(connectionString) : null;
   return {
-    ...plaintextAuthGuard(rest.ssl),
+    ...pgClientFor(rest.ssl),
     ...rest,
     host: cs?.host ?? rest.host,
     port: cs?.port ? Number(cs.port) : rest.port,
@@ -129,8 +132,8 @@ async function isolationFingerprint<DB>(k: Kysely<DB>, schema: string, ddl: stri
   return `${version}:${state.rows[0]?.d ?? ''}`;
 }
 
-/** Idempotent; runs as the store role, which owns the tables and has CREATEROLE.
- *  When the catalog already matches the stored fingerprint it runs no DDL, so a
+/** Idempotent; runs as the store role, which owns the tables. It needs
+ *  CREATEROLE only when the reader/raw roles don't exist yet. When the catalog already matches the stored fingerprint it runs no DDL, so a
  *  normal start takes no ACCESS EXCLUSIVE lock. A lock wait past `lockTimeoutMs`
  *  throws QueryUnavailableError. */
 export async function ensureIsolation<DB>(k: Kysely<DB>, schema: string, lockTimeoutMs = DEFAULT_SETUP_LOCK_TIMEOUT_MS): Promise<void> {
@@ -155,17 +158,23 @@ export async function ensureIsolation<DB>(k: Kysely<DB>, schema: string, lockTim
 }
 
 /** Why `query` can't be isolated on this server, or null when it can. */
-export async function isolationBlocker<DB>(k: Kysely<DB>, schema: string): Promise<string | null> {
+export async function isolationBlocker<DB>(k: Kysely<DB>, schema: string, needsCreateRole = true): Promise<string | null> {
   if (schema.length > MAX_SCHEMA_LEN) return `the store schema name is longer than ${MAX_SCHEMA_LEN} characters`;
   const r = await sql<{ v: number; cr: boolean }>`
     SELECT current_setting('server_version_num')::int AS v, rolcreaterole AS cr FROM pg_roles WHERE rolname = current_user`.execute(k);
   const row = r.rows[0];
   if (!row || row.v < 160000) return 'it needs Postgres 16 or later';
-  if (!row.cr) return 'the store role needs CREATEROLE (it creates one read-only role per workspace)';
+  if (needsCreateRole && !row.cr) return 'the store role needs CREATEROLE (it creates one read-only role per workspace)';
   return null;
 }
 
+/** A login `fleet-host bootstrap` made (D71): every caller reads as it, and nothing is created or altered at run time. */
+export interface PreprovisionedLogin { role: string; password: PasswordProvider }
+
 export interface QueryIsolationOptions {
+  preprovisioned?: PreprovisionedLogin;
+  /** Pre-provisioned only: why `query` isn't ready at open (each call retries). */
+  onUnavailable?: (message: string) => void;
   statementTimeoutMs?: number;
   lockTimeoutMs?: number;
   /** Whole-call deadline; past it the backend is cancelled and the connection destroyed. */
@@ -234,6 +243,7 @@ export class PgQueryIsolation implements QueryRunner {
   private readonly guarded = new WeakSet<pg.PoolClient>();
   private active = 0;
   private readonly waiting: Array<() => void> = [];
+  private prepared: Promise<void> | null = null;
 
   private constructor(
     private readonly app: Kysely<unknown>,
@@ -242,16 +252,41 @@ export class PgQueryIsolation implements QueryRunner {
     private readonly opts: QueryIsolationOptions,
   ) {}
 
-  /** Provisions the shared roles, grants and policies; throws QueryUnavailableError when the server can't. */
+  /** Provisions the shared roles, grants and policies (pre-provisioned: only the grants and policies, once the roles
+   *  exist); throws QueryUnavailableError when the server can't. */
   static async open<DB>(app: Kysely<DB>, schema: string, base: PgPoolConfig, opts: QueryIsolationOptions = {}): Promise<PgQueryIsolation> {
-    const blocker = await isolationBlocker(app, schema);
+    const blocker = await isolationBlocker(app, schema, !opts.preprovisioned);
     if (blocker) throw new QueryUnavailableError(`query is unavailable on this Postgres store: ${blocker}`);
-    await ensureIsolation(app, schema, opts.setupLockTimeoutMs);
-    return new PgQueryIsolation(app as Kysely<unknown>, schema, base, opts);
+    const iso = new PgQueryIsolation(app as Kysely<unknown>, schema, base, opts);
+    if (opts.preprovisioned) await iso.prepare().catch((e: Error) => opts.onUnavailable?.(e.message));
+    else await ensureIsolation(app, schema, opts.setupLockTimeoutMs);
+    return iso;
+  }
+
+  private roleFor(callerId: string): string {
+    return this.opts.preprovisioned?.role ?? callerRole(this.schema, callerId);
+  }
+
+  /** Pre-provisioned: the roles exist, then the isolation DDL (which then creates no role). Retried until it succeeds. */
+  private prepare(): Promise<void> {
+    this.prepared ??= (async () => {
+      const role = this.opts.preprovisioned!.role;
+      if (!QUERY_USER.test(role)) throw unavailable(`the query login "${role.slice(0, 64)}" is not a plain role name (db.queryUser)`);
+      const r = isolationRoles(this.schema);
+      const names = [r.reader, r.raw, role, `${role}_raw`];
+      const found = new Set((await sql<{ n: string }>`SELECT rolname AS n FROM pg_roles WHERE rolname IN (${sql.join(names)})`.execute(this.app)).rows.map((x) => x.n));
+      const missing = names.find((n) => !found.has(n));
+      if (missing) throw unavailable(`role ${missing} does not exist; re-run fleet-host bootstrap`);
+      await ensureIsolation(this.app, this.schema, this.opts.setupLockTimeoutMs);
+    })().catch((e) => {
+      this.prepared = null;
+      throw e;
+    });
+    return this.prepared;
   }
 
   async query(caller: QueryCaller, q: QueryArgs): Promise<unknown[]> {
-    const role = callerRole(this.schema, caller.callerId);
+    const role = this.roleFor(caller.callerId);
     const gen = this.generation(role);
     const n = this.pending.get(role) ?? 0;
     if (n > (this.opts.maxQueued ?? DEFAULT_MAX_QUEUED)) throw new Error(BUSY);
@@ -315,6 +350,8 @@ export class PgQueryIsolation implements QueryRunner {
   }
 
   async forgetCaller(callerId: string): Promise<void> {
+    // Bootstrap owns a pre-provisioned role, and every call rewrites its grants.
+    if (this.opts.preprovisioned) return;
     const role = callerRole(this.schema, callerId);
     this.generations.set(role, this.generation(role) + 1);
     const release = await this.lockFor(role)();
@@ -370,6 +407,15 @@ export class PgQueryIsolation implements QueryRunner {
 
   /** The role exists, with a password minted for this process and never stored. */
   private ensureRole(role: string, gen: number): Promise<void> {
+    const pre = this.opts.preprovisioned;
+    if (pre) {
+      return this.prepare().then(() => {
+        if (this.pools.has(role)) return;
+        const pool = new pg.Pool(rolePoolConfig(this.base, role, pre.password));
+        pool.on('error', (e) => this.opts.onPoolError?.(e));
+        this.pools.set(role, pool);
+      });
+    }
     let p = this.ensured.get(role);
     if (!p) {
       p = this.provision(role, gen);
@@ -411,6 +457,7 @@ export class PgQueryIsolation implements QueryRunner {
     this.checkGeneration(role, gen);
     await this.app.transaction().execute(async (trx) => {
       await this.boundStorePool(trx);
+      if (this.opts.preprovisioned) await assertConfined(trx, role, this.schema);
       await sql`DELETE FROM mcp_grants WHERE role_name = ${role}`.execute(trx);
       const ids = [...scope];
       if (ids.length > 0) {
@@ -425,7 +472,15 @@ export class PgQueryIsolation implements QueryRunner {
     if (!Number.isSafeInteger(q.maxRows) || q.maxRows < 1) throw new Error('maxRows must be a positive integer');
     const pool = this.pools.get(role);
     if (!pool) throw new Error('caller role pool missing');
-    const c = await pool.connect();
+    let c: pg.PoolClient;
+    try {
+      c = await pool.connect();
+    } catch (e) {
+      if (!this.opts.preprovisioned) throw e;
+      const code = (e as { code?: unknown }).code;
+      const hint = code === '28P01' || code === '28000' ? ' (fleet-host bootstrap creates it; IAM must allow rds-db:connect for it)' : '';
+      throw unavailable(`cannot log in as ${role}: ${String((e as Error).message).slice(0, MAX_ERROR_CHARS)}${hint}`);
+    }
     if (!this.guarded.has(c)) {
       const stream = (c as unknown as { connection: { stream: NodeJS.ReadableStream & { destroy(e?: Error): void } } }).connection.stream;
       guardMessageSize(stream, this.opts.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES);
@@ -531,6 +586,27 @@ export class PgQueryIsolation implements QueryRunner {
       await c.query('ROLLBACK');
     }
   }
+}
+
+function unavailable(why: string): QueryUnavailableError {
+  return new QueryUnavailableError(`query is unavailable on this Postgres store: ${why}`);
+}
+
+/** Every role a pre-provisioned login can reach (by INHERIT or SET) must be one bootstrap gave it, none elevated:
+ *  through any other, such as the store role, its SQL could read past row-level security. */
+async function assertConfined(k: Kysely<unknown>, role: string, schema: string): Promise<void> {
+  const r = isolationRoles(schema);
+  const ok = new Set([role, `${role}_raw`, r.reader, r.raw, 'rds_iam']);
+  const reached = (await sql<{ n: string; elevated: boolean }>`
+    WITH RECURSIVE up(oid) AS (
+      SELECT oid FROM pg_roles WHERE rolname = ${role}
+      UNION SELECT a.roleid FROM pg_auth_members a JOIN up ON a.member = up.oid)
+    SELECT r.rolname AS n, r.rolsuper OR r.rolbypassrls OR r.rolreplication OR r.rolcreaterole OR r.rolcreatedb AS elevated
+      FROM up JOIN pg_roles r ON r.oid = up.oid ORDER BY r.rolname COLLATE "C"`.execute(k)).rows;
+  const stray = reached.find((x) => !ok.has(x.n));
+  if (stray) throw unavailable(`role ${role} reaches role ${stray.n}; re-run fleet-host bootstrap to revoke it`);
+  const high = reached.find((x) => x.elevated);
+  if (high) throw unavailable(`role ${high.n} has SUPERUSER, BYPASSRLS, REPLICATION, CREATEROLE or CREATEDB`);
 }
 
 /** Sends a protocol CancelRequest for backend `pid`; resolves false when it couldn't be delivered. */

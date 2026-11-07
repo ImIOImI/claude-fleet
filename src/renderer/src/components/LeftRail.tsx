@@ -2,13 +2,14 @@
 // Loadout Library as independently-collapsible sections. Replaces the bare
 // SessionsPane in the left grid column; open/closed state persists.
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { SessionsPane } from './SessionsPane';
 import { LibraryPane } from './LibraryPane';
 import { CommitteePane } from './CommitteePane';
 import type { WorkspaceSummary } from '../App';
 import type { OpenTabRef } from '../busySessions';
 import type { SessionListItem } from '../../../preload';
+import { remoteResumeMap } from '../sessionsView';
 
 interface Props {
   workspaces: WorkspaceSummary[];
@@ -80,6 +81,7 @@ export function LeftRail({
   onBrowse
 }: Props) {
   const [open, setOpen] = useState<OpenState>(loadOpen);
+  const remoteResume = useMemo(() => remoteResumeMap(workspaces), [workspaces]);
   const toggle = (k: keyof OpenState): void =>
     setOpen((prev) => {
       const next = { ...prev, [k]: !prev[k] };
@@ -140,6 +142,7 @@ export function LeftRail({
             maxSessions={maxSessions}
             maxSessionAgeDays={maxSessionAgeDays}
             onResume={onResume}
+            remoteResume={remoteResume}
           />
         )}
       </section>

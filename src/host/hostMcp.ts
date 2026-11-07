@@ -8,7 +8,7 @@ import type { Logger } from './log.js';
 import { finishSocket, prepareSocketPath } from './socketDir.js';
 
 export const HOST_MCP_TOOLS: ReadonlySet<string> = new Set([
-  'list_sessions', 'get_session', 'get_cost', 'list_events', 'session_summary',
+  'list_sessions', 'get_session', 'get_cost', 'list_events', 'session_summary', 'query',
   'post_todo', 'update_todo', 'list_todos',
   'list_automations', 'get_automation', 'list_runs', 'run_automation', 'schedule_next'
 ]);

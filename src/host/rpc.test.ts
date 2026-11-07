@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Tier } from '../main/identity/grants.js';
-import { brokerRpcChannels, dispatchRpc, RpcArgError, type RpcChannel } from './rpc.js';
+import { brokerRpcChannels, dispatchRpc, RpcArgError, RpcUnavailableError, type RpcChannel } from './rpc.js';
 import { createLogger } from './log.js';
 import { fakeBroker, person } from './testFakes.js';
 
@@ -23,6 +23,11 @@ describe('dispatchRpc', () => {
   it('404s an unregistered channel, 400s a body without args', async () => {
     expect((await dispatchRpc(reg, 'config:get', { args: [] }, caller('session'))).status).toBe(404);
     expect((await dispatchRpc(reg, 'x:steer', { nope: 1 }, caller('session'))).status).toBe(400);
+  });
+
+  it('maps RpcUnavailableError to 503 with its message', async () => {
+    const r = new Map<string, RpcChannel>([['x:y', { tier: 'read', handle: async () => { throw new RpcUnavailableError('history unavailable'); } }]]);
+    expect(await dispatchRpc(r, 'x:y', { args: [] }, caller('read'))).toEqual({ status: 503, body: { ok: false, error: 'history unavailable' } });
   });
 
   it('maps RpcArgError to 400 and redacts other errors', async () => {

@@ -28,6 +28,15 @@ export interface RemoteBackendDeps {
   schedule?: (fn: () => void, ms: number) => () => void;
 }
 
+export interface RemoteSourceInfo {
+  id: string;
+  url: string;
+  name: string;
+  hue: number | null;
+  tier: 'read' | 'steer' | 'session' | null;
+  state: 'running' | 'unreachable' | null;
+}
+
 export interface RemoteBackend extends Backend {
   clientFor(url: string): RemoteClient;
   /** Re-read /whoami for a bookmark and persist a changed tier. */
@@ -36,6 +45,9 @@ export interface RemoteBackend extends Backend {
   refresh(id?: string): Promise<void>;
   /** Stop every background probe (app quit). */
   stop(): void;
+  /** Bookmarks the probe loop knows, with cached liveness; no I/O. */
+  sources(): RemoteSourceInfo[];
+  isRemote(id: string): boolean;
 }
 
 interface Watch {
@@ -187,6 +199,11 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
       stopped = true;
       for (const id of [...watches.keys()]) unwatch(id);
     },
+    sources: () =>
+      [...watches.values()].map((w) => ({
+        id: w.spec.id, url: w.spec.remote.url, name: w.spec.name, hue: w.spec.color?.hue ?? null, tier: w.spec.remote.tier, state: w.state
+      })),
+    isRemote: (id) => watches.has(id),
     createWorkspace: managed,
     inspectImage: managed,
     startWorkspace: managed,

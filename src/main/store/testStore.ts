@@ -30,8 +30,15 @@ export async function testPgSchema(): Promise<TestPg> {
   return {
     pool, schema,
     async drop() {
-      await pool.query(`DROP SCHEMA ${schema} CASCADE`);
-      await pool.end();
+      // The pool must close even if the drop itself fails, or it leaks a connection that can
+      // block a later drop (here or in another test's cleanup).
+      try {
+        await pool.query(`DROP SCHEMA ${schema} CASCADE`);
+      } catch (e) {
+        console.warn(`testPgSchema cleanup: DROP SCHEMA ${schema} failed: ${(e as Error).message}`);
+      } finally {
+        await pool.end();
+      }
     },
   };
 }
@@ -176,14 +183,28 @@ export async function testPgAppSchema(): Promise<TestPgApp> {
   return {
     ...t, appRole, appConfig, appPool,
     async drop() {
-      await appPool.end();
-      await t.pool.query(`DROP SCHEMA ${t.schema} CASCADE`);
-      const roles = await t.pool.query<{ r: string }>(`SELECT rolname AS r FROM pg_roles WHERE rolname LIKE $1 ORDER BY length(rolname) DESC`, [`${t.schema}\\_%`]);
-      for (const { r } of roles.rows) {
-        await t.pool.query(`DROP OWNED BY ${r}`);
-        await t.pool.query(`DROP ROLE ${r}`);
+      // Ordered and idempotent: close the app pool first, then the schema, then its roles
+      // (longest/leaf names first); each step runs even if an earlier one failed, and t.pool
+      // always ends, so one bad drop can't leak the pool or skip the rest.
+      await appPool.end().catch((e: Error) => console.warn(`testPgAppSchema cleanup: appPool.end failed: ${e.message}`));
+      try {
+        try {
+          await t.pool.query(`DROP SCHEMA ${t.schema} CASCADE`);
+        } catch (e) {
+          console.warn(`testPgAppSchema cleanup: DROP SCHEMA ${t.schema} failed: ${(e as Error).message}`);
+        }
+        const roles = await t.pool.query<{ r: string }>(`SELECT rolname AS r FROM pg_roles WHERE rolname LIKE $1 ORDER BY length(rolname) DESC`, [`${t.schema}\\_%`]);
+        for (const { r } of roles.rows) {
+          try {
+            await t.pool.query(`DROP OWNED BY ${r}`);
+            await t.pool.query(`DROP ROLE ${r}`);
+          } catch (e) {
+            console.warn(`testPgAppSchema cleanup: dropping role ${r} failed: ${(e as Error).message}`);
+          }
+        }
+      } finally {
+        await t.pool.end();
       }
-      await t.pool.end();
     },
   };
 }

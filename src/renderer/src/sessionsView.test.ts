@@ -1,5 +1,26 @@
 import { describe, it, expect } from 'vitest';
-import { sessionsForScope, filterSessions, partitionByOpen, orderByRecencyBucket, splitHeadless, splitCapture, tagCounts, limitSessions } from './sessionsView';
+import { mergeSessionPages, type RemoteSessionsResult } from '../../preload/federation';
+import type { SessionListItem } from '../../preload';
+import {
+  sessionsForScope,
+  filterSessions,
+  partitionByOpen,
+  orderByRecencyBucket,
+  splitHeadless,
+  splitCapture,
+  tagCounts,
+  limitSessions,
+  canResumeHere,
+  isRemoteRow,
+  loadedMoreRemote,
+  mergeUnavailable,
+  refreshedRemote,
+  reloadedRemote,
+  remoteForScope,
+  remoteResumeMap,
+  unavailableText,
+  withRemote
+} from './sessionsView';
 
 // Minimal session shape — only what the scope logic touches.
 const S = (id: string, workspaceId: string): { id: string; workspaceId: string } => ({
@@ -196,5 +217,162 @@ describe('limitSessions', () => {
   it('applies age first, then the cap', () => {
     const out = limitSessions(ROWS, { maxCount: 2, maxAgeDays: 30 }, NOW);
     expect(out.map((s) => s.id)).toEqual(['a', 'b']); // d(40d) already gone before capping
+  });
+});
+
+describe('withRemote', () => {
+  const item = (id: string, la: number, ws: string, origin?: string) =>
+    ({ id, workspaceId: ws, lastActiveAt: la, origin } as unknown as SessionListItem);
+  it('returns the local array untouched with no remote rows', () => {
+    const local = [item('a', 2, 'L')];
+    expect(withRemote(local, null)).toBe(local);
+    expect(withRemote(local, { rows: [], more: [] })).toBe(local);
+  });
+  it('interleaves by recency and tags local rows', () => {
+    const remote = mergeSessionPages([{ origin: 'R', rows: [item('r', 3, 'R')], next: null }]);
+    const out = withRemote([item('a', 4, 'L'), item('b', 2, 'L')], remote);
+    expect(out.map((s) => `${s.origin}:${s.id}`)).toEqual(['local:a', 'R:r', 'local:b']);
+    expect(out.map(isRemoteRow)).toEqual([false, true, false]);
+  });
+  it('names unavailable sources', () => {
+    expect(unavailableText([])).toBeNull();
+    expect(unavailableText([{ origin: 'R', name: 'review-bot', reason: 'unreachable' }])).toBe('1 source unavailable: review-bot');
+    expect(unavailableText([{ origin: 'R', name: 'a', reason: 'timeout' }, { origin: 'S', name: 'b', reason: 'forbidden' }])).toBe('2 sources unavailable: a, b');
+  });
+});
+
+describe('remote page state', () => {
+  const item = (id: string, la: number, ws: string) =>
+    ({ id, workspaceId: ws, lastActiveAt: la } as unknown as SessionListItem);
+  const res = (pages: RemoteSessionsResult<SessionListItem>['pages'], unavailable: RemoteSessionsResult<SessionListItem>['unavailable'] = []) =>
+    ({ pages, unavailable });
+  const keys = (m: { rows: SessionListItem[] } | null) => (m ? m.rows.map((s) => `${s.origin}:${s.id}`) : null);
+
+  it('load more then refresh keeps a dedup-shadowed row recoverable', () => {
+    // 'x' (workspace W) comes from both R and S; R wins the dedup, S's copy is shadowed.
+    let cur = mergeSessionPages([
+      { origin: 'R', rows: [item('r1', 9, 'W'), item('x', 5, 'W')], next: null },
+      { origin: 'S', rows: [item('s1', 8, 'W')], next: { lastActiveAt: 8, id: 's1' } }
+    ]);
+    cur = loadedMoreRemote(cur, res([{ origin: 'S', rows: [item('x', 5, 'W'), item('s2', 1, 'W')], next: null }]), 'S', { lastActiveAt: 8, id: 's1' })!;
+    expect(keys(cur)).toEqual(['R:r1', 'S:s1', 'R:x', 'S:s2']);
+    expect(cur.more).toEqual([]);
+    // R's fresh first page no longer holds 'x': S's shadowed copy must surface.
+    cur = refreshedRemote(cur, res([{ origin: 'R', rows: [item('r1', 9, 'W')], next: null }]), 'R')!;
+    expect(keys(cur)).toEqual(['R:r1', 'S:s1', 'S:x', 'S:s2']);
+  });
+
+  it('a local row shadows a remote one only while it exists', () => {
+    const remote = mergeSessionPages([{ origin: 'R', rows: [item('x', 5, 'W')], next: null }]);
+    expect(withRemote([item('x', 5, 'W')], remote).map((s) => s.origin)).toEqual(['local']);
+    expect(withRemote([], remote).map((s) => s.origin)).toEqual(['R']);
+  });
+
+  it('refresh drops an origin that is now unavailable or gone', () => {
+    const cur = mergeSessionPages([
+      { origin: 'R', rows: [item('r1', 9, 'R')], next: null },
+      { origin: 'S', rows: [item('s1', 8, 'S')], next: null }
+    ]);
+    expect(keys(refreshedRemote(cur, res([], [{ origin: 'R', name: 'r', reason: 'timeout' }]), 'R'))).toEqual(['S:s1']);
+    expect(refreshedRemote(mergeSessionPages([{ origin: 'R', rows: [item('r1', 9, 'R')], next: null }]), res([]), 'R')).toBeNull();
+    expect(keys(refreshedRemote(null, res([{ origin: 'R', rows: [item('r1', 9, 'R')], next: null }]), 'R'))).toEqual(['R:r1']);
+  });
+
+  it('dropping the winning origin surfaces the shadowed copy', () => {
+    const cur = mergeSessionPages([
+      { origin: 'R', rows: [item('x', 5, 'W')], next: null },
+      { origin: 'S', rows: [item('x', 5, 'W')], next: null }
+    ]);
+    expect(keys(cur)).toEqual(['R:x']);
+    expect(keys(refreshedRemote(cur, res([], [{ origin: 'R', name: 'r', reason: 'timeout' }]), 'R'))).toEqual(['S:x']);
+  });
+
+  it('load more ignores a stale cursor and drops a source that failed', () => {
+    const cur = mergeSessionPages([{ origin: 'R', rows: [item('r1', 9, 'R')], next: { lastActiveAt: 9, id: 'r1' } }]);
+    const page = res([{ origin: 'R', rows: [item('r2', 3, 'R')], next: null }]);
+    expect(loadedMoreRemote(cur, page, 'R', { lastActiveAt: 7, id: 'zz' })).toBe(cur);
+    expect(loadedMoreRemote(null, page, 'R', { lastActiveAt: 9, id: 'r1' })).toBeNull();
+    expect(loadedMoreRemote(cur, null, 'R', { lastActiveAt: 9, id: 'r1' })).toBe(cur);
+    expect(loadedMoreRemote(cur, res([], [{ origin: 'R', name: 'r', reason: 'timeout' }]), 'R', { lastActiveAt: 9, id: 'r1' })).toBeNull();
+  });
+
+  const olderLoaded = () => {
+    const cur = mergeSessionPages([
+      { origin: 'R', rows: [item('a', 9, 'R'), item('b', 8, 'R')], next: { lastActiveAt: 8, id: 'b' } },
+      { origin: 'S', rows: [item('s1', 7, 'S')], next: { lastActiveAt: 7, id: 's1' } }
+    ]);
+    return loadedMoreRemote(cur, res([{ origin: 'R', rows: [item('c', 6, 'R'), item('d', 5, 'R')], next: { lastActiveAt: 5, id: 'd' } }]), 'R', { lastActiveAt: 8, id: 'b' })!;
+  };
+
+  it('a refresh keeps the older pages loaded from its origin', () => {
+    const cur = refreshedRemote(olderLoaded(), res([{ origin: 'R', rows: [item('n', 10, 'R'), item('a', 9, 'R')], next: { lastActiveAt: 9, id: 'a' } }]), 'R')!;
+    expect(keys(cur)).toEqual(['R:n', 'R:a', 'R:b', 'S:s1', 'R:c', 'R:d']);
+    expect(cur.more).toEqual([
+      { origin: 'R', after: { lastActiveAt: 5, id: 'd' } },
+      { origin: 'S', after: { lastActiveAt: 7, id: 's1' } }
+    ]);
+  });
+
+  it('a refresh shows a row that moved up once, with fresh data', () => {
+    const moved = { ...item('c', 11, 'R'), aiTitle: 'fresh' } as SessionListItem;
+    const cur = refreshedRemote(olderLoaded(), res([{ origin: 'R', rows: [moved, item('a', 9, 'R')], next: { lastActiveAt: 9, id: 'a' } }]), 'R')!;
+    expect(keys(cur)).toEqual(['R:c', 'R:a', 'R:b', 'S:s1', 'R:d']);
+    expect(cur.rows[0].aiTitle).toBe('fresh');
+  });
+
+  it('a full reload keeps each origin\'s older pages and drops origins it no longer returns', () => {
+    const r = res([
+      { origin: 'R', rows: [item('n', 10, 'R'), item('a', 9, 'R')], next: { lastActiveAt: 9, id: 'a' } },
+      { origin: 'T', rows: [item('t1', 4, 'T')], next: null }
+    ], [{ origin: 'S', name: 's', reason: 'timeout' }]);
+    const cur = reloadedRemote(olderLoaded(), r)!;
+    expect(keys(cur)).toEqual(['R:n', 'R:a', 'R:b', 'R:c', 'R:d', 'T:t1']);
+    expect(cur.more).toEqual([{ origin: 'R', after: { lastActiveAt: 5, id: 'd' } }]);
+    expect(reloadedRemote(olderLoaded(), res([]))).toBeNull();
+    expect(keys(reloadedRemote(null, res([{ origin: 'T', rows: [item('t1', 4, 'T')], next: null }])))).toEqual(['T:t1']);
+  });
+
+  it('remoteForScope keeps only the selected workspace\'s origin under "This workspace"', () => {
+    const xs = [{ origin: 'R' }, { origin: 'S' }];
+    expect(remoteForScope(xs, 'all', 'R')).toEqual(xs);
+    expect(remoteForScope(xs, 'workspace', 'R')).toEqual([{ origin: 'R' }]);
+    expect(remoteForScope(xs, 'workspace', 'L')).toEqual([]);
+    expect(remoteForScope(xs, 'workspace', null)).toEqual([]);
+  });
+
+  it('mergeUnavailable replaces only the asked origin', () => {
+    const u = [{ origin: 'R', name: 'r', reason: 'timeout' as const }, { origin: 'S', name: 's', reason: 'timeout' as const }];
+    expect(mergeUnavailable(u, res([]), 'R')).toEqual([u[1]]);
+    expect(mergeUnavailable(u, res([], [{ origin: 'R', name: 'r', reason: 'forbidden' }]), 'R').map((x) => `${x.origin}:${x.reason}`)).toEqual(['S:timeout', 'R:forbidden']);
+    const both = res([], [{ origin: 'R', name: 'r', reason: 'forbidden' }, { origin: 'S', name: 's', reason: 'standby' }]);
+    expect(mergeUnavailable(u, both, 'R').map((x) => `${x.origin}:${x.reason}`)).toEqual(['S:timeout', 'R:forbidden']);
+  });
+});
+
+describe('remote resume gating', () => {
+  const ws = (id: string, kind: string, state: string, tier?: string | null) =>
+    ({ id, kind, state, ...(tier !== undefined ? { remote: { tier } } : {}) });
+  const row = (workspaceId: string, origin?: string) => ({ id: 's', workspaceId, origin } as unknown as SessionListItem);
+  const map = remoteResumeMap([
+    ws('L', 'container', 'stopped'),
+    ws('A', 'remote', 'running', 'session'),
+    ws('B', 'remote', 'running', 'steer'),
+    ws('C', 'remote', 'unreachable', 'session'),
+    ws('D', 'remote', 'running', null)
+  ]);
+
+  it('maps only remote bookmarks', () => {
+    expect(Object.keys(map).sort()).toEqual(['A', 'B', 'C', 'D']);
+  });
+
+  it('local rows always resume; remote rows need session tier and a running host', () => {
+    expect(canResumeHere(row('L', 'local'), map)).toBe(true);
+    expect(canResumeHere(row('L'), map)).toBe(true);
+    expect(canResumeHere(row('A', 'A'), map)).toBe(true);
+    expect(canResumeHere(row('B', 'B'), map)).toBe(false);
+    expect(canResumeHere(row('C', 'C'), map)).toBe(false);
+    expect(canResumeHere(row('D', 'D'), map)).toBe(false);
+    expect(canResumeHere(row('Z', 'Z'), map)).toBe(false);
+    expect(canResumeHere(row('A', 'A'), undefined)).toBe(false);
   });
 });

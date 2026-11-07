@@ -10,13 +10,25 @@ function refuse(c: AuthHooks, kind: string): void {
   c.connection.stream.destroy();
 }
 
+type ConnectHooks = { _handleErrorWhileConnecting(err: Error): void };
+const pgConnectError = (pg.Client.prototype as unknown as ConnectHooks)._handleErrorWhileConnecting;
+
+/** A failed login hangs up. pg leaves the socket open (e.g. after a password provider throws mid-SCRAM), so the
+ *  server backend waits in authentication until authentication_timeout and blocks every DROP DATABASE meanwhile. */
+export class ClosingClient extends pg.Client {
+  _handleErrorWhileConnecting(err: Error): void {
+    pgConnectError.call(this, err);
+    (this as unknown as AuthHooks).connection.stream.destroy();
+  }
+}
+
 /** Overrides pg private hooks (client.js `_attachListeners`); pgScramOnly.test.ts pins their names. */
-export class ScramOnlyClient extends pg.Client {
+export class ScramOnlyClient extends ClosingClient {
   _handleAuthCleartextPassword(): void { refuse(this as unknown as AuthHooks, 'cleartext'); }
   _handleAuthMD5Password(): void { refuse(this as unknown as AuthHooks, 'MD5'); }
 }
 
-/** Pool options for a connection's `ssl`: TLS keeps pg.Client (RDS IAM sends its token as cleartext over TLS). */
-export function plaintextAuthGuard(ssl: unknown): { Client?: typeof ScramOnlyClient } {
-  return ssl ? {} : { Client: ScramOnlyClient };
+/** Pool options for a connection's `ssl`: TLS allows cleartext (RDS IAM sends its token that way). */
+export function pgClientFor(ssl: unknown): { Client: typeof ClosingClient } {
+  return { Client: ssl ? ClosingClient : ScramOnlyClient };
 }

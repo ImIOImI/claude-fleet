@@ -4,7 +4,7 @@
 
 **Goal:** The desktop's Sessions list and Observability rail show a remote workspace's history next to local history, with origin badges and an "unavailable" note per unreachable host. The host's fleet-state MCP serves `query`, isolated by role and row-level security.
 
-**Architecture:** The host gains two `read`-tier RPC channels, `history:sessions` (a keyset page) and `history:summary`, served by a `HistoryReader` that the holder builds on its own state store. The reader always scopes to the hosted workspace. A `FederatedReader` in main fans these out to every bookmarked host. It skips hosts that c2's cached liveness already marks down, bounds each call at 3 s, validates and caps every reply, and reports failed hosts under `unavailable`. The local `sessions:list` path is unchanged. The renderer merges local rows with remote pages through one pure module (`src/preload/federation.ts`), shared with main, that gives every row an `origin`. The host pushes a data-free `observability:summary` hint after ingest. A main-side relay turns that hint into an RPC read and the existing renderer push. On the host, the holder opens the MCP read source with `PgQueryIsolation` (part 4a). `fleet-host bootstrap` grants the app role `CREATEROLE` on PG 16 or later, so `query` joins `HOST_MCP_TOOLS`.
+**Architecture:** The host gains two `read`-tier RPC channels, `history:sessions` (a keyset page) and `history:summary`, served by a `HistoryReader` that the holder builds on its own state store. The reader always scopes to the hosted workspace. A `FederatedReader` in main fans these out to every bookmarked host. It skips hosts that c2's cached liveness already marks down, bounds each call at 3 s, validates and caps every reply, and reports failed hosts under `unavailable`. The local `sessions:list` path is unchanged. The renderer merges local rows with remote pages through one pure module (`src/preload/federation.ts`), shared with main, that gives every row an `origin`. The host pushes a data-free `observability:summary` hint after ingest. A main-side relay turns that hint into an RPC read and the existing renderer push. On the host, the holder opens the MCP read source with `PgQueryIsolation` (part 4a) as a login `fleet-host bootstrap` pre-provisions (D71), so `query` joins `HOST_MCP_TOOLS`. The app role stays `NOCREATEROLE`.
 
 **Tech Stack:** TypeScript (NodeNext for `src/host`), Node 22, Electron main + React renderer, `pg` + Kysely, vitest on SQLite and PG 16 (`scripts/pg-test-server.sh`, `vitest.pg.config.ts`).
 
@@ -43,7 +43,7 @@ Every task implicitly includes these.
 
 ## Decisions
 
-D1–D52 (async-store parts 2–4b) still bind. (d) adds D53–D70. D53–D63 and D69–D70 are recorded in SPEC.md by Task 10 here. D64–D68 are recorded by (d2).
+D1–D52 (async-store parts 2–4b) still bind. (d) adds D53–D71. D53–D63, D69–D70 and D71 are recorded in SPEC.md by Task 10 here. D64–D68 are recorded by (d2).
 
 - **D53: (d) ships in two PRs.**
   - **(d1), this plan:** history federation (Sessions and Observability) and `query` on the host.
@@ -91,16 +91,14 @@ D1–D52 (async-store parts 2–4b) still bind. (d) adds D53–D70. D53–D63 an
     - A bad row is dropped. A bad envelope or cursor throws and marks the source unavailable (`protocol`).
   - **Rendering:** remote rows render through the existing row components as text. The cloud glyph and `title` attributes show the host name from the bookmark, not from the reply.
   - **Tiers:** every history channel is `read`, so any granted person can read history, as with `/attach` `HISTORY`. The desktop greys out actions but enforces nothing (D63).
-- **D60: `query` isolation on the host reuses `PgQueryIsolation` unchanged.**
+- **D60: `query` isolation on the host uses `PgQueryIsolation` (its `preprovisioned` mode, D71).**
   - The holder opens its MCP read source with `openPgMcpReadSource(stores.poolConfig.schema, stores.poolConfig, …)` on the fenced state handle. Provisioning (`ensureIsolation`) and each call's `mcp_grants` rewrite are fenced writes, so only the holder provisions. The caller is the hosted workspace id, and its scope is `{hosted}`. `query` joins `HOST_MCP_TOOLS` (14 tools).
-  - **CREATEROLE:** `fleet-host bootstrap` now makes the app role `LOGIN NOCREATEDB CREATEROLE` on PG ≥ 16. It was `NOCREATEROLE`. Under 16 it stays `NOCREATEROLE`, because pre-16 CREATEROLE can grant membership in any non-superuser role.
-    - On PG 16, CREATEROLE administers only roles the app role itself created, and it can't confer SUPERUSER, BYPASSRLS or REPLICATION.
-    - Existing hosts need the bootstrap Job re-run. Until then `query` answers `query is unavailable on this Postgres store: the store role needs CREATEROLE …`, and the other 13 tools work.
-  - **Caller role logins use a SCRAM password the process mints** (part 4a), not IAM. RDS accepts password logins for roles not in `rds_iam`. This goes on the host checklist (Task 10).
+  - **Roles and logins: superseded by D71.** The app role stays `NOCREATEROLE`; the CREATEROLE grant and the minted SCRAM caller logins described here before D71 were not built.
   - **What it protects, honestly:**
     - Until the container split, sessions share fleet-host's uid and pod identity, so a session can mint an IAM token as the app role. That role owns the tables, so it bypasses RLS.
     - Until (e), the host holds only its own workspace's rows, so RLS has nothing else to hide yet.
     - It becomes a boundary with the split (sessions get the read-only `llm-bot` role) and matters once (e) adds partitions.
+- **D71: Host `query` runs as a bootstrap-provisioned IAM login; the app role stays `NOCREATEROLE`** (decided by Troy, 2026-11-06; supersedes D60's role parts). `fleet-host bootstrap` (admin credentials) pre-provisions the isolation roles `<schema>_mcp_reader` and `<schema>_mcp_raw`, and one query login `<app>_query` (`db.queryUser`, default `<db.user>_query`): `LOGIN NOINHERIT CONNECTION LIMIT 4`, no password, `rds_iam` when that role exists, never a member of the app role, plus its `_raw` sibling and the edges `provision()` makes. Bootstrap revokes any other membership of those roles, and the app role gets no ADMIN on them. `PgQueryIsolation`'s `preprovisioned` mode skips the CREATEROLE check and all role DDL, signs in by an RDS IAM token for that login, and still rewrites `mcp_grants` (`{hosted}`) on every call. Each call first checks that the login reaches no role beyond its own four and `rds_iam`; otherwise `query` answers unavailable. A missing role or a refused login also answers unavailable, and the other 13 tools work. Non-IAM hosts get no `query`. All host `query` calls share the one login, so they run one at a time, and past the queue (8) answer busy. Host checklist: re-run bootstrap, and the infra grant `rds-db:connect` on `fleet_agent_query`.
 - **D61: Performance.** Lessons from #384/#391: no added work on hot local paths, no polling where a push exists, and bounded work per event.
   - `sessions:list` and local summaries are untouched. The remote check is a `Map` lookup.
   - Remote reads run only when a bookmark exists. The Sessions pane refreshes remote pages:
@@ -130,7 +128,7 @@ D1–D52 (async-store parts 2–4b) still bind. (d) adds D53–D70. D53–D63 an
 | `src/host/holder.ts` | `Holder.history`; summary hint; MCP read source with isolation. |
 | `src/host/hostIngest.ts` | `onIngested` option. |
 | `src/host/hostMcp.ts` | `query` in `HOST_MCP_TOOLS`. |
-| `src/host/bootstrap.ts` | App role `CREATEROLE` on PG ≥ 16. |
+| `src/host/bootstrap.ts` | Pre-provisions the isolation roles and the `<app>_query` login (D71). |
 | `src/host/main.ts` | Registers the history channels against the live holder. |
 | `src/main/remoteClient.ts` | `rpc(channel, args, { timeoutMs })`. |
 | `src/main/remote.ts` | `RemoteBackend.sources()`, `isRemote(id)`. |
@@ -872,6 +870,8 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ---
 
 ### Task 5: `query` on the host MCP (role + RLS)
+
+> Superseded by D71 where it conflicts: the CREATEROLE steps below were not built.
 
 **Files:**
 - Modify: `src/host/bootstrap.ts`, `src/host/holder.ts`, `src/host/hostMcp.ts`
@@ -1975,6 +1975,8 @@ Stage only the stylesheet you edited, not a glob, if `git status` shows other ch
 
 ### Task 10: SPEC.md and the full gate
 
+> Items 5–7 and 9 below follow D71 in the built SPEC, not the CREATEROLE text.
+
 **Files:**
 - Modify: `docs/SPEC.md`
 
@@ -2049,7 +2051,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ## Questions for Troy
 
-1. **`CREATEROLE` for `fleet_agent` on Aurora (D60).** Host `query` needs it, and the bootstrap Job must be re-run once. The alternative is to leave `query` off on the host until the container split, when it becomes a real boundary.
+1. **`CREATEROLE` for `fleet_agent` on Aurora (D60): decided, D71 (Troy, 2026-11-06).** No CREATEROLE. Bootstrap pre-provisions an IAM query login; host `query` needs the bootstrap re-run and `rds-db:connect` on `fleet_agent_query` (platform-ops#46).
 
 ## Self-review notes
 
