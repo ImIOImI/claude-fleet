@@ -146,6 +146,14 @@ describe('startHostMcp', () => {
   });
 });
 
+describe('HOST_MCP_TOOLS', () => {
+  it('serves query and still refuses search_transcripts', () => {
+    expect(HOST_MCP_TOOLS.has('query')).toBe(true);
+    expect(HOST_MCP_TOOLS.has('search_transcripts')).toBe(false);
+    expect(HOST_MCP_TOOLS.size).toBe(14);
+  });
+});
+
 describe('hostMcpArgs', () => {
   it('names claude-fleet-state and points the bridge at the socket', () => {
     const args = hostMcpArgs('/run/fleet/mcp.sock');

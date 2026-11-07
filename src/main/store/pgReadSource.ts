@@ -6,7 +6,7 @@ import { stateKysely } from '../db.js';
 import { readTransaction } from './kysely.js';
 import { pgSearchEmbeddings } from './pgVectorSearch.js';
 import type { StateDb } from './stateSchema.js';
-import { PgQueryIsolation } from './pgQueryIsolation.js';
+import { PgQueryIsolation, type PreprovisionedLogin } from './pgQueryIsolation.js';
 import type { PgPoolConfig } from './postgres.js';
 import {
   NOT_AUTHORIZED, checkEventColumns, type OwnedReadSource, type QueryRunner, type Row, type Scope, type SummaryParts, type TokenGroup,
@@ -127,10 +127,14 @@ export function pgReadSource(o: PgReadSourceOptions): OwnedReadSource {
 /** The read source for an open Postgres store. `query` degrades to an error
  *  naming the reason when isolation can't be provisioned; the rest still work. */
 export async function openPgMcpReadSource(
-  schema: string, base: PgPoolConfig, log: (message: string) => void,
+  schema: string, base: PgPoolConfig, log: (message: string) => void, o: { preprovisioned?: PreprovisionedLogin } = {},
 ): Promise<OwnedReadSource> {
   try {
-    return pgReadSource({ isolation: await PgQueryIsolation.open(stateKysely(), schema, base, { onPoolError: (e) => log(String(e)) }) });
+    return pgReadSource({
+      isolation: await PgQueryIsolation.open(stateKysely(), schema, base, {
+        onPoolError: (e) => log(String(e)), preprovisioned: o.preprovisioned, onUnavailable: log,
+      }),
+    });
   } catch (e) {
     log(String(e));
     const why = e instanceof Error ? e.message : String(e);

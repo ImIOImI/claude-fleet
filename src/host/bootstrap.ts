@@ -5,9 +5,10 @@ import type { ConnectionOptions } from 'node:tls';
 import pg from 'pg';
 import { parse as parseConnectionString } from 'pg-connection-string';
 import { passwordProvider } from '../main/store/passwordProvider.js';
+import { isolationRoles, MAX_SCHEMA_LEN } from '../main/store/pgQueryIsolation.js';
 import { plaintextAuthGuard } from '../main/store/pgScramOnly.js';
 import { pgSsl } from '../main/store/pgSsl.js';
-import { pgPoolConfig, type PostgresStoreConfig } from '../main/store/storeConfig.js';
+import { pgPoolConfig, QUERY_USER, type PostgresStoreConfig } from '../main/store/storeConfig.js';
 import type { AdminCredential } from './adminCreds.js';
 import type { Logger } from './log.js';
 import { scramVerifier } from './scram.js';
@@ -18,6 +19,8 @@ export interface BootstrapTarget {
   database: string;
   /** The app login role. */
   user: string;
+  /** MCP `query`'s login (D71): no password, never a member of `user`. */
+  queryUser: string;
   schema: string;
   ssl: false | ConnectionOptions;
   /** GRANT rds_iam; the role gets no password. */
@@ -40,7 +43,7 @@ interface Step {
   what: string;
   check(): Promise<boolean>;
   /** Returns what it changed. */
-  apply(): Promise<string>;
+  apply(): Promise<string | string[]>;
 }
 
 const id = pg.escapeIdentifier;
@@ -61,7 +64,8 @@ export function bootstrapTarget(cfg: PostgresStoreConfig, env: NodeJS.ProcessEnv
     const iam = c.password.kind === 'aws-rds-iam';
     if (iam && fromFile) throw new BootstrapError('--app-password-file conflicts with db.password kind aws-rds-iam');
     return {
-      host: c.host, port: c.port, database: c.database, user: c.user, schema: cfg.schema, ssl: pgSsl(c.ssl, c.caFile), iam,
+      host: c.host, port: c.port, database: c.database, user: c.user, queryUser: cfg.queryUser ?? `${c.user}_query`,
+      schema: cfg.schema, ssl: pgSsl(c.ssl, c.caFile), iam,
       appPassword: iam ? null : (fromFile ?? passwordProvider(c.password, c, env))
     };
   }
@@ -71,6 +75,7 @@ export function bootstrapTarget(cfg: PostgresStoreConfig, env: NodeJS.ProcessEnv
   const pw = u.password;
   return {
     host: u.host || env.PGHOST || 'localhost', port: u.port ? Number(u.port) : 5432, database: u.database, user: u.user,
+    queryUser: cfg.queryUser ?? `${u.user}_query`,
     schema: cfg.schema, ssl: p.ssl as false | ConnectionOptions, iam: false,
     appPassword: fromFile ?? (pw ? async () => pw : null)
   };
@@ -79,13 +84,17 @@ export function bootstrapTarget(cfg: PostgresStoreConfig, env: NodeJS.ProcessEnv
 export async function bootstrap(t: BootstrapTarget, admin: AdminCredential, o: BootstrapOptions): Promise<string[]> {
   const sameRole = () => new BootstrapError(`the admin user ${admin.user} is the app role (db.user); use the master credential`);
   if (admin.user === t.user) throw sameRole();
+  if (t.queryUser === t.user || t.queryUser === admin.user) {
+    throw new BootstrapError(`db.queryUser ${t.queryUser} is the app role or the admin; it must be a role of its own`);
+  }
   const changed: string[] = [];
   const run = async (steps: Step[]) => {
     for (const s of steps) {
       if (await s.check()) continue;
-      const done = await s.apply();
-      changed.push(done);
-      o.log.log('info', `bootstrap: ${done}`);
+      for (const done of [await s.apply()].flat()) {
+        changed.push(done);
+        o.log.log('info', `bootstrap: ${done}`);
+      }
     }
     for (const s of steps) if (!(await s.check())) throw new BootstrapError(`bootstrap: ${s.what} is still not in place after applying it`);
   };
@@ -97,7 +106,7 @@ export async function bootstrap(t: BootstrapTarget, admin: AdminCredential, o: B
     await run(databaseSteps(m, t));
     const c = await adminClient(t, admin, t.database, o);
     try {
-      await run(targetSteps(c, t, o));
+      await run(await targetSteps(c, t, o));
     } finally {
       await c.end().catch(() => undefined);
     }
@@ -144,7 +153,7 @@ function databaseSteps(c: pg.Client, t: BootstrapTarget): Step[] {
   ];
 }
 
-function targetSteps(c: pg.Client, t: BootstrapTarget, o: BootstrapOptions): Step[] {
+async function targetSteps(c: pg.Client, t: BootstrapTarget, o: BootstrapOptions): Promise<Step[]> {
   type Role = { login: boolean; super: boolean; createdb: boolean; createrole: boolean; privileged: boolean };
   const role = () =>
     one<Role>(
@@ -270,6 +279,141 @@ function targetSteps(c: pg.Client, t: BootstrapTarget, o: BootstrapOptions): Ste
       }
     }
   );
+  const skip = !(await admin.v16())
+    ? 'it needs Postgres 16 or later'
+    : t.schema.length > MAX_SCHEMA_LEN ? `the schema name is longer than ${MAX_SCHEMA_LEN} characters`
+      : !QUERY_USER.test(t.queryUser) ? `db.queryUser ${t.queryUser} must match [a-z_][a-z0-9_]* and be at most 59 characters`
+        : null;
+  if (skip) o.log.log('warn', `bootstrap: MCP query roles not provisioned: ${skip}`);
+  else steps.push(...queryRoleSteps(c, t, admin));
+  return steps;
+}
+
+/** What PgQueryIsolation's pre-provisioned mode logs in as and SETs ROLE to (D71). The app role administers none of it. */
+function queryRoleSteps(c: pg.Client, t: BootstrapTarget, admin: AdminRights): Step[] {
+  const r = isolationRoles(t.schema);
+  const q = t.queryUser;
+  const qRaw = `${q}_raw`;
+  type Attrs = { login: boolean; inherit: boolean; connlimit: number; createdb: boolean; createrole: boolean; privileged: boolean };
+  const attrs = (name: string) =>
+    one<Attrs>(
+      c,
+      `SELECT rolcanlogin AS login, rolinherit AS inherit, rolconnlimit AS connlimit, rolcreatedb AS createdb, rolcreaterole AS createrole,
+              rolsuper OR rolbypassrls OR rolreplication AS privileged FROM pg_roles WHERE rolname = $1`,
+      [name]
+    );
+  const refuse = (name: string, a: Attrs | undefined) => {
+    if (a?.privileged) throw new BootstrapError(`role ${name} is a superuser or has BYPASSRLS or REPLICATION; refusing it for MCP query`);
+  };
+  const nologin = (name: string): Step => ({
+    what: `NOLOGIN role ${name}`,
+    async check() {
+      const a = await attrs(name);
+      refuse(name, a);
+      return !!a && !a.login && !a.createdb && !a.createrole;
+    },
+    async apply() {
+      if (!(await attrs(name))) {
+        await c.query(`CREATE ROLE ${id(name)} NOLOGIN`);
+        return `created role ${name} (NOLOGIN)`;
+      }
+      await admin.need(name, 'alter it');
+      await c.query(`ALTER ROLE ${id(name)} NOLOGIN NOCREATEDB NOCREATEROLE`);
+      return `altered role ${name} to NOLOGIN`;
+    }
+  });
+  type Edge = { role: string; member: string; inherit: boolean };
+  // `set` is always TRUE: the raw edge is reached by SET ROLE; the others are as GRANT's default.
+  const allowed: Edge[] = [
+    { role: r.reader, member: q, inherit: true },
+    { role: r.reader, member: qRaw, inherit: true },
+    { role: r.raw, member: qRaw, inherit: true },
+    { role: qRaw, member: q, inherit: false }
+  ];
+  const opts = (inherit: boolean) => `INHERIT ${inherit ? 'TRUE' : 'FALSE'}, SET TRUE`;
+  const grant = (e: Edge): Step => ({
+    what: `membership of ${e.member} in ${e.role}`,
+    check: async () =>
+      !!(await one(
+        c,
+        `SELECT 1 FROM pg_auth_members a WHERE a.roleid = to_regrole($1) AND a.member = to_regrole($2)
+           GROUP BY a.roleid HAVING bool_or(a.inherit_option = $3 AND a.set_option)`,
+        [e.role, e.member, e.inherit]
+      )),
+    async apply() {
+      await admin.need(e.role, `grant it to ${e.member}`);
+      await c.query(`GRANT ${id(e.role)} TO ${id(e.member)} WITH ${opts(e.inherit)}`);
+      return `granted ${e.role} to ${e.member} (${opts(e.inherit)})`;
+    }
+  });
+  const ours = [q, qRaw, r.reader, r.raw];
+  // Any other direct membership of these roles could reach the app role's tables (or worse) from a query.
+  const extra = () =>
+    c.query<{ role: string; member: string; grantor: string }>(
+      `SELECT r.rolname AS role, m.rolname AS member, g.rolname AS grantor
+         FROM pg_auth_members a JOIN pg_roles r ON r.oid = a.roleid JOIN pg_roles m ON m.oid = a.member JOIN pg_roles g ON g.oid = a.grantor
+        WHERE m.rolname = ANY($1)
+          AND NOT (r.rolname = 'rds_iam' AND m.rolname = $2)
+          AND NOT (r.rolname, m.rolname) IN (SELECT * FROM unnest($3::text[], $4::text[]))
+        ORDER BY r.rolname COLLATE "C", m.rolname COLLATE "C"`,
+      [ours, q, allowed.map((e) => e.role), allowed.map((e) => e.member)]
+    ).then((x) => x.rows);
+  const steps: Step[] = [
+    nologin(r.reader),
+    nologin(r.raw),
+    {
+      what: `query login role ${q}`,
+      async check() {
+        const a = await attrs(q);
+        refuse(q, a);
+        return !!a && a.login && !a.inherit && a.connlimit === 4 && !a.createdb && !a.createrole;
+      },
+      async apply() {
+        if (!(await attrs(q))) {
+          await c.query(`CREATE ROLE ${id(q)} LOGIN NOINHERIT CONNECTION LIMIT 4`);
+          return `created role ${q} (LOGIN NOINHERIT CONNECTION LIMIT 4, no password)`;
+        }
+        await admin.need(q, 'alter it');
+        await c.query(`ALTER ROLE ${id(q)} LOGIN NOINHERIT NOCREATEDB NOCREATEROLE CONNECTION LIMIT 4`);
+        return `altered role ${q} to LOGIN NOINHERIT NOCREATEDB NOCREATEROLE CONNECTION LIMIT 4`;
+      }
+    },
+    nologin(qRaw),
+    {
+      what: `rds_iam membership of ${q}`,
+      // Only where the server has IAM auth (RDS, Aurora); elsewhere the login has no way in, and query degrades.
+      check: async () =>
+        !(await one(c, `SELECT 1 FROM pg_roles WHERE rolname = 'rds_iam'`)) ||
+        !!(await one<{ ok: boolean }>(c, `SELECT pg_has_role($1, 'rds_iam', 'MEMBER') AS ok`, [q]))?.ok,
+      async apply() {
+        await admin.need('rds_iam', `grant it to ${q}`);
+        await c.query(`GRANT rds_iam TO ${id(q)}`);
+        return `granted rds_iam to ${q}`;
+      }
+    },
+    ...allowed.map(grant),
+    {
+      what: `no other memberships of ${ours.join(', ')}`,
+      check: async () => (await extra()).length === 0,
+      async apply() {
+        const done: string[] = [];
+        for (const e of await extra()) {
+          await admin.need(e.role, `revoke it from ${e.member}`);
+          await c.query(`REVOKE ${id(e.role)} FROM ${id(e.member)} GRANTED BY ${id(e.grantor)}`);
+          done.push(`revoked ${e.role} from ${e.member}`);
+        }
+        return done;
+      }
+    },
+    {
+      what: `CONNECT on database ${t.database} for ${q}`,
+      check: async () => !!(await one<{ ok: boolean }>(c, `SELECT has_database_privilege($1, current_database(), 'CONNECT') AS ok`, [q]))?.ok,
+      async apply() {
+        await c.query(`GRANT CONNECT ON DATABASE ${id(t.database)} TO ${id(q)}`);
+        return `granted CONNECT on database ${t.database} to ${q}`;
+      }
+    }
+  ];
   return steps;
 }
 

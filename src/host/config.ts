@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { parse } from 'yaml';
 import { ORG_RE, parseGrantConfig, type GrantConfig } from '../main/identity/grants.js';
-import { parseStoreConfig, StoreConfigError, type PostgresStoreConfig } from '../main/store/storeConfig.js';
+import { parseStoreConfig, QUERY_USER, StoreConfigError, type PostgresStoreConfig } from '../main/store/storeConfig.js';
 
 export const DEFAULT_CONFIG_PATH = '/etc/fleet-host/config.yaml';
 export const DEFAULT_PORT = 8080;
@@ -167,8 +167,13 @@ function parseDb(v: unknown): PostgresStoreConfig {
     const u = new URL(d.connectionString);
     if (u.password || u.searchParams.has('password')) throw new HostConfigError(noStatic);
   }
+  const { queryUser, ...store } = d;
+  if (queryUser !== undefined && (typeof queryUser !== 'string' || !QUERY_USER.test(queryUser))) {
+    throw new HostConfigError('db: queryUser must match [a-z_][a-z0-9_]* and be at most 59 characters');
+  }
   try {
-    return parseStoreConfig({ ...d, kind: 'postgres' }, { allowStaticSecrets: false }) as PostgresStoreConfig;
+    const cfg = parseStoreConfig({ ...store, kind: 'postgres' }, { allowStaticSecrets: false }) as PostgresStoreConfig;
+    return queryUser === undefined ? cfg : { ...cfg, queryUser };
   } catch (err) {
     if (err instanceof StoreConfigError) throw new HostConfigError(`db: ${err.message.replace(/^store: /, '')}`);
     throw err;

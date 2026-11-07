@@ -117,6 +117,15 @@ describe('parseHostConfig', () => {
     }).db?.connection).toMatchObject({ password: { kind: 'env', name: 'FLEET_DB_PASSWORD' } });
   });
 
+  it('db.queryUser: optional, a plain role name with room for its _raw sibling', () => {
+    const db = { host: 'db.internal', database: 'fleet', user: 'fleet_agent', password: { kind: 'env', name: 'P' }, ssl: 'disable' };
+    expect(parseHostConfig({ ...base, db }).db).not.toHaveProperty('queryUser');
+    expect(parseHostConfig({ ...base, db: { ...db, queryUser: 'fleet_agent_query' } }).db?.queryUser).toBe('fleet_agent_query');
+    for (const bad of ['Fleet', 'a-b', '', 'x'.repeat(60), 7]) {
+      expect(() => parseHostConfig({ ...base, db: { ...db, queryUser: bad } })).toThrow(/db: queryUser must match/);
+    }
+  });
+
   it('refuses a static db password in any form: sessions can read the host config', () => {
     const cases = [
       { host: 'db.internal', database: 'fleet', user: 'fleet_agent', password: { kind: 'static', value: 'hunter2' }, ssl: 'disable' },

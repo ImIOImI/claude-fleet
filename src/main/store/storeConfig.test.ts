@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
 import {
-  DEFAULT_CA_FILE, iamAuthHint, parseStoreConfig, pgPoolConfig, storeSecretEnvNames, StoreConfigError, type PostgresStoreConfig,
+  DEFAULT_CA_FILE, iamAuthHint, parseStoreConfig, pgPoolConfig, storeSecretEnvNames, StoreConfigError, type PostgresStoreConfig, queryLogin,
 } from './storeConfig.js';
 import { fakePgAuth } from './fakePgAuth.js';
 import { createPgPool } from './postgres.js';
@@ -113,6 +113,23 @@ describe('parseStoreConfig', () => {
       expect(e).toBeInstanceOf(StoreConfigError);
       expect(`${String(e)} ${e.stack} ${JSON.stringify(e)}`).not.toContain(SECRET);
     }
+  });
+});
+
+describe('queryLogin', () => {
+  const iam = { kind: 'postgres' as const, schema: 'fleet', poolMax: 4, connection: {
+    host: 'db.example', port: 5432, database: 'fleet', user: 'fleet_agent', password: { kind: 'aws-rds-iam' as const, region: 'us-east-1' }, ssl: 'verify-full' as const, caFile: '/ca.pem',
+  } };
+  it('defaults the role to <user>_query; db.queryUser overrides it', () => {
+    expect(queryLogin(iam, { schema: 'fleet' }).role).toBe('fleet_agent_query');
+    expect(queryLogin({ ...iam, queryUser: 'q' }, { schema: 'fleet' }).role).toBe('q');
+    const cs = { kind: 'postgres' as const, schema: 'fleet', poolMax: 4, connection: { env: 'URL' } };
+    expect(queryLogin(cs, { schema: 'fleet', connectionString: 'postgres://app@h/db' }).role).toBe('app_query');
+  });
+  it('signs in by IAM only: any other password kind rejects without a secret', async () => {
+    const envPw = { ...iam, connection: { ...iam.connection, password: { kind: 'env' as const, name: 'APP_PW' }, ssl: 'disable' as const } };
+    await expect(queryLogin(envPw, { schema: 'fleet' }, { APP_PW: 'hunter2' }).password()).rejects.toThrow(/signs in only by IAM/);
+    expect(typeof queryLogin(iam, { schema: 'fleet' }, {}).password).toBe('function');
   });
 });
 

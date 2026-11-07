@@ -11,6 +11,7 @@ export default defineConfig({
       'src/host/hostAutomations.test.ts',
       'src/host/hostDb.test.ts',
       'src/host/hostIngest.test.ts',
+      'src/host/hostQuery.pg.test.ts',
       'src/host/hostState.pg.test.ts',
       'src/host/main.pg.test.ts',
       'src/host/pgLease.test.ts',

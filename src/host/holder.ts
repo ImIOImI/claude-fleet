@@ -1,11 +1,12 @@
 // What only the lease holder runs: the stores, fenced by the lease epoch,
 // ingest, the automation runtime and the fleet-state MCP socket.
 import { closeDb, stateKysely } from '../main/db.js';
-import { pgReadSource } from '../main/store/pgReadSource.js';
+import { openPgMcpReadSource } from '../main/store/pgReadSource.js';
 import { postgresKysely } from '../main/store/postgres.js';
 import type { PgTrack } from '../main/store/pgMigrate.js';
 import { migratePgStores, openPgStores, type PgStores } from '../main/store/pgStores.js';
-import type { PostgresStoreConfig } from '../main/store/storeConfig.js';
+import type { OwnedReadSource } from '../main/store/readSource.js';
+import { queryLogin, type PostgresStoreConfig } from '../main/store/storeConfig.js';
 import { HOST_PG_POOL } from './hostDb.js';
 import { historyReader, type HistoryReader } from './historyRead.js';
 import { HostIngest } from './hostIngest.js';
@@ -47,7 +48,6 @@ export interface Holder {
 
 export const MCP_RETRY_MS = 1_000;
 export const MCP_RETRY_MAX_MS = 60_000;
-const NO_QUERY = 'query is unavailable on fleet-host until its MCP isolation ships';
 export const SUMMARY_HINT_MS = 2_000;
 
 /** Calls `fn` once, `ms` after the first bump of a quiet period. */
@@ -104,7 +104,11 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
     projectsDir: o.projectsDir, workspaceId: o.workspaceId, offsetsRead, log: o.log, onIngested: () => hint.bump()
   });
   let automations: HostAutomations | null = null;
-  const mcp = mcpServer(o);
+  // Fenced: provisioning and each call's mcp_grants rewrite are writes on the state handle.
+  const mcp = mcpServer(o, () =>
+    openPgMcpReadSource(stores.poolConfig.schema, stores.poolConfig, (message) => o.log.log('warn', 'mcp query isolation', { error: message }), {
+      preprovisioned: queryLogin(o.db, stores.poolConfig, o.env)
+    }));
   const stopAll = async (): Promise<void> => {
     await mcp.stop();
     await automations?.stop();
@@ -140,7 +144,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
 }
 
 /** The MCP socket, retried with backoff. Each attempt gets its own read source (a failed start closes it). */
-function mcpServer(o: HolderOptions): { start(): void; stop(): Promise<void> } {
+function mcpServer(o: HolderOptions, readSource: () => Promise<OwnedReadSource>): { start(): void; stop(): Promise<void> } {
   let served: HostMcp | null = null;
   let attempt: Promise<void> | null = null;
   let timer: NodeJS.Timeout | null = null;
@@ -148,22 +152,21 @@ function mcpServer(o: HolderOptions): { start(): void; stop(): Promise<void> } {
   let delay = o.mcpRetryMs ?? MCP_RETRY_MS;
   const tryStart = (): void => {
     timer = null;
-    attempt = startHostMcp({
-      socketPath: o.mcp.socketPath, socketGroup: o.mcp.socketGroup, workspaceId: o.workspaceId, log: o.log,
-      readSource: pgReadSource({ isolation: null, unavailable: NO_QUERY, k: stateKysely })
-    }).then(
-      async (m) => {
-        if (stopped) await m.close();
-        else served = m;
-      },
-      (err: Error) => {
-        if (stopped) return;
-        o.log.log('error', 'mcp start failed; retrying', { error: err.message, inMs: delay });
-        timer = setTimeout(tryStart, delay);
-        timer.unref?.();
-        delay = Math.min(delay * 2, MCP_RETRY_MAX_MS);
-      }
-    );
+    attempt = readSource()
+      .then((rs) => startHostMcp({ socketPath: o.mcp.socketPath, socketGroup: o.mcp.socketGroup, workspaceId: o.workspaceId, log: o.log, readSource: rs }))
+      .then(
+        async (m) => {
+          if (stopped) await m.close();
+          else served = m;
+        },
+        (err: Error) => {
+          if (stopped) return;
+          o.log.log('error', 'mcp start failed; retrying', { error: err.message, inMs: delay });
+          timer = setTimeout(tryStart, delay);
+          timer.unref?.();
+          delay = Math.min(delay * 2, MCP_RETRY_MAX_MS);
+        }
+      );
   };
   return {
     start: tryStart,

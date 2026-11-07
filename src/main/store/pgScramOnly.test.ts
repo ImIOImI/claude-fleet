@@ -98,7 +98,7 @@ describe('the plaintext guard on store pools', () => {
     it(`fleet-host bootstrap's admin login without TLS refuses a ${label} request and sends nothing`, async () => {
       const s = await squatter(code);
       servers.push(s.server);
-      const target = { host: '127.0.0.1', port: s.port, database: 'fleet', user: 'fleet_app', schema: 'fleet', ssl: false as const, iam: false, appPassword: null };
+      const target = { host: '127.0.0.1', port: s.port, database: 'fleet', user: 'fleet_app', queryUser: 'fleet_app_query', schema: 'fleet', ssl: false as const, iam: false, appPassword: null };
       const admin = { user: 'postgres', password: SECRET, secrets: [SECRET] };
       await expect(bootstrap(target, admin, { log: { log: () => undefined }, connectTimeoutMs: 2_000 })).rejects.toThrow(/refusing/);
       await settle();

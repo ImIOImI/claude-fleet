@@ -6,7 +6,7 @@ import { isIP } from 'node:net';
 import { isAbsolute } from 'node:path';
 import { parse as parseConnectionString } from 'pg-connection-string';
 import type pg from 'pg';
-import { passwordProvider, type PasswordSource } from './passwordProvider.js';
+import { passwordProvider, type PasswordProvider, type PasswordSource } from './passwordProvider.js';
 import { pgSsl, type SslMode } from './pgSsl.js';
 import type { PgPoolConfig } from './postgres.js';
 
@@ -25,6 +25,8 @@ export interface PostgresStoreConfig {
   schema: string;
   /** Default 4. */
   poolMax: number;
+  /** fleet-host's `db.queryUser`: the pre-provisioned `query` login. Default `<user>_query`. */
+  queryUser?: string;
 }
 
 /** config.json `{ kind: 'postgres', managed: true }`: the app-managed container (managedPostgres.ts). */
@@ -231,6 +233,20 @@ export function pgPoolConfig(
     ssl: pgSsl(c.ssl, c.caFile),
   };
   return out;
+}
+
+/** The login role names `<user>_query` and `<user>_query_raw` must fit Postgres's 63. */
+export const QUERY_USER = /^[a-z_][a-z0-9_]{0,58}$/;
+
+/** fleet-host's `query` login (`base`: this store's pool options). It has no password: it signs in by IAM only. */
+export function queryLogin(cfg: PostgresStoreConfig, base: PgPoolConfig, env: NodeJS.ProcessEnv = process.env): { role: string; password: PasswordProvider } {
+  const c = cfg.connection;
+  const user = 'host' in c ? c.user : (base as pg.PoolConfig).user ?? parseConnectionString((base as pg.PoolConfig).connectionString ?? '').user ?? '';
+  const role = cfg.queryUser ?? `${user}_query`;
+  if ('password' in c && c.password.kind === 'aws-rds-iam') {
+    return { role, password: passwordProvider(c.password, { host: c.host, port: c.port, user: role }, env) };
+  }
+  return { role, password: async () => { throw new Error('the query login signs in only by IAM (db.password kind "aws-rds-iam")'); } };
 }
 
 /** libpq/pg env vars that carry or locate credentials. */
