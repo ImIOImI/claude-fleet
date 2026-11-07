@@ -110,10 +110,10 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
       preprovisioned: queryLogin(o.db, stores.poolConfig, o.env)
     }));
   const stopAll = async (): Promise<void> => {
+    hint.stop();
     await mcp.stop();
     await automations?.stop();
     await ingest.stop();
-    hint.stop();
     await offsetsRead.destroy();
     await stores.inbox.close();
     await closeDb();

@@ -1,5 +1,6 @@
 // MCP `query` isolation on Postgres (SPEC §11): each caller workspace reads
-// through its own LOGIN role. Row-level security limits every exposed table to
+// through its own LOGIN role, or all through one bootstrap-provisioned login
+// (`preprovisioned`, D71). Row-level security limits every exposed table to
 // the workspaces in `mcp_grants` for session_user, which the caller's SQL can't
 // change (SET ROLE / set_config('role') reach only the caller's own roles).
 import { createHash, randomBytes } from 'node:crypto';
@@ -131,8 +132,8 @@ async function isolationFingerprint<DB>(k: Kysely<DB>, schema: string, ddl: stri
   return `${version}:${state.rows[0]?.d ?? ''}`;
 }
 
-/** Idempotent; runs as the store role, which owns the tables and has CREATEROLE.
- *  When the catalog already matches the stored fingerprint it runs no DDL, so a
+/** Idempotent; runs as the store role, which owns the tables. It needs
+ *  CREATEROLE only when the reader/raw roles don't exist yet. When the catalog already matches the stored fingerprint it runs no DDL, so a
  *  normal start takes no ACCESS EXCLUSIVE lock. A lock wait past `lockTimeoutMs`
  *  throws QueryUnavailableError. */
 export async function ensureIsolation<DB>(k: Kysely<DB>, schema: string, lockTimeoutMs = DEFAULT_SETUP_LOCK_TIMEOUT_MS): Promise<void> {

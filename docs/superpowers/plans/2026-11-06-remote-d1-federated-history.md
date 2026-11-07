@@ -91,7 +91,7 @@ D1–D52 (async-store parts 2–4b) still bind. (d) adds D53–D71. D53–D63, D
     - A bad row is dropped. A bad envelope or cursor throws and marks the source unavailable (`protocol`).
   - **Rendering:** remote rows render through the existing row components as text. The cloud glyph and `title` attributes show the host name from the bookmark, not from the reply.
   - **Tiers:** every history channel is `read`, so any granted person can read history, as with `/attach` `HISTORY`. The desktop greys out actions but enforces nothing (D63).
-- **D60: `query` isolation on the host reuses `PgQueryIsolation` unchanged.**
+- **D60: `query` isolation on the host uses `PgQueryIsolation` (its `preprovisioned` mode, D71).**
   - The holder opens its MCP read source with `openPgMcpReadSource(stores.poolConfig.schema, stores.poolConfig, …)` on the fenced state handle. Provisioning (`ensureIsolation`) and each call's `mcp_grants` rewrite are fenced writes, so only the holder provisions. The caller is the hosted workspace id, and its scope is `{hosted}`. `query` joins `HOST_MCP_TOOLS` (14 tools).
   - **Roles and logins: superseded by D71.** The app role stays `NOCREATEROLE`; the CREATEROLE grant and the minted SCRAM caller logins described here before D71 were not built.
   - **What it protects, honestly:**
