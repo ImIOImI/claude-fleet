@@ -77,26 +77,16 @@ jobs:
 
       # fleet-embedder sidecar (embedder/README.md). embedder/scripts/ci-build.sh
       # builds into embedder/bin/ (shipped as resources/embedder/) and checks
-      # the result: Linux glibc <= 2.28 via zig, macOS signature, a smoke run.
-      - name: Install zig (fleet-embedder glibc floor)
-        if: matrix.os == 'ubuntu-latest'
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.14.1
-
-      - name: Install cargo-zigbuild
-        if: matrix.os == 'ubuntu-latest'
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild
-
+      # the result: Linux glibc <= 2.28, macOS signature, a smoke run.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: embedder
 
+      # Linux builds in Debian 12 (ci-build-linux.sh) for the glibc 2.28 floor.
       - name: Build fleet-embedder
         shell: bash
-        run: embedder/scripts/ci-build.sh
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then embedder/scripts/ci-build-linux.sh; else embedder/scripts/ci-build.sh; fi
 
       # Attached to the draft release; `make embedder-win` downloads it.
       - name: Package fleet-embedder (Windows)
