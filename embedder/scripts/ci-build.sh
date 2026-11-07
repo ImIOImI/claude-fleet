@@ -9,7 +9,17 @@ case "$(uname -s)" in
     # glibc 2.28 floor via zig's versioned glibc stubs. libstdc++ is linked
     # statically by build.rs; the empty ORT_CXX_STDLIB stops ort-sys also
     # linking it dynamically.
-    ORT_CXX_STDLIB= cargo zigbuild --release --locked --target x86_64-unknown-linux-gnu.2.28
+    # onnxruntime is fetched here, not by ort-sys: with host == target, zig
+    # would also compile ort-sys's build-time OpenSSL and fails to.
+    cargo fetch --locked
+    ver=$(awk '/^name = "ort-sys"/ {getline; gsub(/[" ]/, "", $0); sub(/version=/, ""); print}' Cargo.lock)
+    dist=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -path "*/ort-sys-$ver/dist.txt" | head -1)
+    read -r url sha < <(awk -F'\t' '$1 == "none" && $2 == "x86_64-unknown-linux-gnu" {print $3, $4}' "$dist")
+    mkdir -p target/ort && curl -fsSL "$url" -o target/ort/ort.tgz
+    echo "$(echo "$sha" | tr A-F a-f)  target/ort/ort.tgz" | sha256sum -c -
+    tar -xzf target/ort/ort.tgz -C target/ort
+    ORT_LIB_LOCATION=$PWD/target/ort/onnxruntime/lib ORT_CXX_STDLIB= \
+      cargo zigbuild --release --locked --no-default-features --target x86_64-unknown-linux-gnu.2.28
     cp target/x86_64-unknown-linux-gnu/release/fleet-embedder bin/
     scripts/check-glibc.sh bin/fleet-embedder 2.28
     exe=bin/fleet-embedder ;;

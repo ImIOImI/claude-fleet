@@ -29,7 +29,7 @@ cargo build --release      # target/release/fleet-embedder[.exe]
 cargo test
 ```
 
-`ort` links a prebuilt static onnxruntime downloaded at build time. On Linux that download needs OpenSSL headers (`libssl-dev`). Without them, download the `none x86_64-unknown-linux-gnu` tarball listed in ort-sys's `dist.txt`, drop `download-binaries` from the `ort` features, and build with `ORT_LIB_LOCATION=<dir containing libonnxruntime.a>`. The toolchain is pinned in `rust-toolchain.toml`.
+`ort` links a prebuilt static onnxruntime. With the default `download-binaries` feature, ort-sys downloads it at build time (on Linux this needs OpenSSL headers, `libssl-dev`). Otherwise build with `--no-default-features` and `ORT_LIB_LOCATION=<dir containing libonnxruntime.a>`, from the tarball ort-sys's `dist.txt` lists for the target; `scripts/ci-build.sh` does this on Linux. The toolchain is pinned in `rust-toolchain.toml`.
 
 Runtime dependencies (onnxruntime itself is linked in):
 
@@ -41,7 +41,7 @@ Runtime dependencies (onnxruntime itself is linked in):
 
 ### glibc floor
 
-Release builds use `scripts/ci-build.sh`, which on Linux runs `cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28` (needs [zig](https://ziglang.org) 0.14 and `cargo install cargo-zigbuild`). zig links against glibc 2.28 symbol versions; `build.rs` links the host GCC's `libstdc++.a` statically (the script sets `ORT_CXX_STDLIB=` so ort-sys doesn't also link it dynamically); `glibc_compat.c` defines the newer-glibc symbols the prebuilt onnxruntime and libstdc++ reference (`__isoc23_strto*`, `__libc_single_threaded`, `gettid`). `scripts/check-glibc.sh <bin> 2.28` fails if any symbol needs a newer glibc or the C++ runtime is linked dynamically. A plain `cargo build` binds to the build host's glibc and is only for local use.
+Release builds use `scripts/ci-build.sh`, which on Linux fetches and sha256-checks onnxruntime, then runs `cargo zigbuild --release --no-default-features --target x86_64-unknown-linux-gnu.2.28` (needs [zig](https://ziglang.org) 0.14 and `cargo install cargo-zigbuild`; zig can't compile ort-sys's download path, which links OpenSSL). zig links against glibc 2.28 symbol versions; `build.rs` links the host GCC's `libstdc++.a` statically (the script sets `ORT_CXX_STDLIB=` so ort-sys doesn't also link it dynamically); `glibc_compat.c` defines the newer-glibc symbols the prebuilt onnxruntime and libstdc++ reference (`__isoc23_strto*`, `__libc_single_threaded`, `gettid`). `scripts/check-glibc.sh <bin> 2.28` fails if any symbol needs a newer glibc or the C++ runtime is linked dynamically. A plain `cargo build` binds to the build host's glibc and is only for local use.
 
 ### Packaging
 

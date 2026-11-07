@@ -78,11 +78,6 @@ jobs:
       # fleet-embedder sidecar (embedder/README.md). embedder/scripts/ci-build.sh
       # builds into embedder/bin/ (shipped as resources/embedder/) and checks
       # the result: Linux glibc <= 2.28 via zig, macOS signature, a smoke run.
-      # On Linux, ort's build-time onnxruntime download needs OpenSSL headers.
-      - name: Install OpenSSL headers (fleet-embedder build)
-        if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
-
       - name: Install zig (fleet-embedder glibc floor)
         if: matrix.os == 'ubuntu-latest'
         uses: mlugg/setup-zig@v2
