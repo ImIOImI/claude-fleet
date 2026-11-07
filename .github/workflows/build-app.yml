@@ -118,15 +118,25 @@ jobs:
       - name: Build broker (fleet-host integration test)
         run: cd broker && CGO_ENABLED=0 go build -o "$RUNNER_TEMP/broker" ./cmd/broker
 
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: embedder
 
+      # Same build + glibc gate as the packaged binary, so parity tests it.
       - name: fleet-embedder tests + build
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
-          cd embedder && cargo test --locked && cargo build --release --locked
+          (cd embedder && cargo test --locked)
+          embedder/scripts/ci-build.sh
 
       # Model weights for the parity test (~35 MB); keyed by model + dtype.
       - uses: actions/cache@v4
@@ -152,7 +162,7 @@ jobs:
         env:
           CF_EMBED_PARITY: '1'
           CF_HF_CACHE: ${{ runner.temp }}/hf-cache
-          FLEET_EMBEDDER_BIN: ${{ github.workspace }}/embedder/target/release/fleet-embedder
+          FLEET_EMBEDDER_BIN: ${{ github.workspace }}/embedder/bin/fleet-embedder
         run: npx vitest run src/main/embedderParity.test.ts
 
       # pgQueryIsolation tests raise errors that echo a 60 MB value; the runner
@@ -235,13 +245,25 @@ jobs:
           rm -rf node_modules/cpu-features
           npx --no-install electron-builder install-app-deps --platform win32 --arch x64
 
-      # fleet-embedder sidecar (embedder/README.md). The toolchain comes from
-      # embedder/rust-toolchain.toml; on Linux, ort's build-time onnxruntime
-      # download needs OpenSSL headers. The binary lands in embedder/bin/,
-      # which electron-builder ships as resources/embedder/.
+      # fleet-embedder sidecar (embedder/README.md). embedder/scripts/ci-build.sh
+      # builds into embedder/bin/ (shipped as resources/embedder/) and checks
+      # the result: Linux glibc <= 2.28 via zig, macOS signature, a smoke run.
+      # On Linux, ort's build-time onnxruntime download needs OpenSSL headers.
       - name: Install OpenSSL headers (fleet-embedder build)
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+
+      - name: Install zig (fleet-embedder glibc floor)
+        if: matrix.os == 'ubuntu-latest'
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+
+      - name: Install cargo-zigbuild
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -249,21 +271,22 @@ jobs:
 
       - name: Build fleet-embedder
         shell: bash
-        run: |
-          cd embedder
-          cargo build --release --locked
-          exe=fleet-embedder; [ "$RUNNER_OS" = Windows ] && exe=fleet-embedder.exe
-          cp "target/release/$exe" bin/
+        run: embedder/scripts/ci-build.sh
 
-      # `make embedder-win` fetches this to package Windows builds from WSL.
+      # Attached to the draft release; `make embedder-win` downloads it.
+      - name: Package fleet-embedder (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: Compress-Archive -Path embedder/bin/fleet-embedder.exe, embedder/bin/*.dll -DestinationPath fleet-embedder-windows-x64.zip
+
       - name: Upload fleet-embedder (Windows)
         if: matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
           name: fleet-embedder-windows
-          path: embedder/bin/fleet-embedder.exe
+          path: fleet-embedder-windows-x64.zip
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
 
       - name: Build installer
         # --publish never: the release job (below) owns publishing.
@@ -272,6 +295,16 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npm run dist -- --publish never
+
+      # electron-builder may re-sign the bundle; the sidecar must stay validly
+      # signed (ad hoc) or arm64 macOS kills it on exec.
+      - name: Verify packaged fleet-embedder signature (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          bin=$(find dist -path '*.app/Contents/Resources/embedder/fleet-embedder' | head -1)
+          test -n "$bin"
+          codesign -dv "$bin"
+          codesign -v --strict "$bin"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

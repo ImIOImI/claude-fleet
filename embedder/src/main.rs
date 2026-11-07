@@ -23,7 +23,8 @@ fn send<W: Write>(w: &mut W, v: &Value) -> io::Result<()> {
 }
 
 fn model_dir_arg() -> Option<PathBuf> {
-    let mut args = std::env::args().skip(1);
+    // args_os: <userData> may not be valid UTF-8.
+    let mut args = std::env::args_os().skip(1);
     while let Some(a) = args.next() {
         if a == "--model-dir" {
             return args.next().map(PathBuf::from);

@@ -85,11 +85,11 @@ impl Embedder {
         }
         let outputs = self.session.run(inputs)?;
         let (out_shape, hidden) = outputs[0].try_extract_tensor::<f32>()?;
-        let dim = *out_shape.last().ok_or("model output has no dimensions")? as usize;
-        if dim != DIM {
-            return Err(format!("model output dim {dim}, expected {DIM}").into());
+        let expected = [batch as i64, seq as i64, DIM as i64];
+        if out_shape.as_ref() != expected.as_slice() {
+            return Err(format!("model output shape {:?}, expected {expected:?}", out_shape.as_ref()).into());
         }
-        Ok(pool_and_normalize(hidden, &mask, batch, seq, dim))
+        Ok(pool_and_normalize(hidden, &mask, batch, seq, DIM))
     }
 }
 

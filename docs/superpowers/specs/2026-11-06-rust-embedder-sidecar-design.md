@@ -16,7 +16,7 @@ Success, measured on the host after install:
 - Rust crate `claude-fleet/embedder/` (sibling of `broker/`). `ort` (onnxruntime, statically linked via `download-binaries`, single binary) and HF `tokenizers`.
 - Main spawns it lazily on the first `embed()` call. Messages are length-prefixed over stdio. Main restarts it with backoff. It exits when stdin closes.
 - Same model and files: `Xenova/bge-small-en-v1.5`, `onnx/model_quantized.onnx` (q8) plus `tokenizer.json`, read from the existing `<userData>/models` transformers.js cache. Nothing is re-downloaded when the cache is warm.
-- Parity: cosine ≥ 0.999 against the current transformers.js output on a fixed corpus, so existing embeddings stay valid and `EMBED_MODEL_ID` does not change (no re-index).
+- Parity: cosine ≥ 0.999 against the current transformers.js output on a fixed corpus; `EMBED_MODEL_ID` does not change (no re-index).
 - The transformers.js in-process embedder stays for one release, as the automatic fallback and as the parity oracle.
 - The startup backfill must never block the main thread, and `index.delete_stale_models` becomes async in fact (it is async in signature but ran a 991 ms synchronous full-table scan on SQLite).
 
@@ -24,7 +24,7 @@ Success, measured on the host after install:
 
 ### 1. Local WSL `make dist` for Windows: CI-built binary (chosen) vs cargo-xwin
 
-**Chosen: download the CI-built Windows binary.** A new `make embedder-win` target fetches the `fleet-embedder-windows` artifact from the latest successful `build-app` run on `main` with `gh run download`. `EMBEDDER_WIN=<path>` overrides it with a local file. `make windows` / `make portable` depend on it. If the download fails (no `gh` auth, no run yet), the target warns and continues: the installer ships without the binary and the app falls back to transformers.js. A local build never fails over the sidecar.
+**Chosen: download the CI-built Windows binary from a GitHub release.** Windows CI zips the exe with its app-local VC++ runtime DLLs as `fleet-embedder-windows-x64.zip`, and the release job attaches it to the draft release. `make embedder-win` deletes any previous exe/DLLs, then fetches that zip with `gh release download` (`EMBEDDER_TAG`, default the latest published release) or takes `EMBEDDER_WIN_ZIP=<path>`. It fails loudly unless `ALLOW_NO_EMBEDDER=1`, in which case the installer embeds in process. `make windows` / `make portable` depend on it. (`build-app` never runs on pushes to `main`, and tag runs report the tag as their branch, so selecting a workflow run would never find one; releases also outlive artifact expiry.)
 
 Rejected: **cargo-xwin.** It downloads the MSVC CRT/SDK (license acceptance on every fresh machine), needs `clang`/`lld-link` in WSL, and `ort`'s prebuilt static onnxruntime for `x86_64-pc-windows-msvc` must match the CRT linkage xwin provides (`/MD` vs `/MT`). That is a new toolchain to keep working for a path Troy rarely uses, when CI already builds the same binary natively on `windows-latest`.
 
@@ -36,7 +36,7 @@ The sidecar client (`embedderClient.ts`) picks a backend per process lifetime:
 |---|---|
 | Binary not found (packaged `resources/embedder/`, dev `embedder/target/release/`, or `FLEET_EMBEDDER_BIN`) | Fallback immediately; log `embedder-fallback` (warn) once with the reason. |
 | `CLAUDE_FLEET_EMBEDDER=inprocess` | Fallback (escape hatch for host debugging). |
-| Model files missing from the cache | Main downloads them first (see *Model files*); if that fails, fallback. |
+| Model files missing from the cache | Main downloads them first (see *Model files*); a failed or timed-out download rejects embeds for 5 minutes, then retries. It does not select the fallback. |
 | Child exits/crashes, or fails its `ready` handshake, or a request exceeds the 120 s timeout (child killed) | Count a failure; restart with backoff 1 s, 2 s, 4 s, 8 s … capped at 30 s. In-flight requests are re-sent once to the next child. |
 | **3 failures within 5 minutes** | Crash loop: stop restarting, switch to the in-process fallback for the rest of the app run, log `embedder-fallback` (error) once. The next app start tries the sidecar again. |
 
@@ -95,7 +95,7 @@ transformers.js caches at `<cacheDir>/Xenova/bge-small-en-v1.5/{tokenizer.json,c
 
 CI (`build-app.yml` build job + `release.yml`, all three OSes): the toolchain pinned in `embedder/rust-toolchain.toml`, `libssl-dev` on Linux (ort rc.10's build-time ORT download uses native-tls), `cargo build --release --locked` in `embedder/`, copy the binary into `embedder/bin/`, then `npm run dist`. The Windows job also uploads `fleet-embedder-windows` (the binary alone) for `make embedder-win`. `embedder/` joins the `changes` path filter. The `unit-run` job runs `cargo test` and the parity test (below), with the model cached under `actions/cache`.
 
-macOS builds for the runner's arch (arm64), the same as the rest of the app. onnxruntime is statically linked, so no `.dylib`/`.dll`/`.so` ships beside it.
+Runtime dependencies: Linux needs glibc ≥ 2.28 only (built with `cargo zigbuild --target x86_64-unknown-linux-gnu.2.28`, libstdc++ static, a CI gate on the max `GLIBC_` version); Windows needs the VC++ runtime (shipped app-local) and the system DirectML/D3D12/DXGI/DXCore DLLs the prebuilt onnxruntime imports; macOS builds for the runner's arch (arm64) and keeps the linker's ad-hoc signature (checked with `codesign -v`).
 
 ### transformers.js fallback
 
@@ -127,3 +127,10 @@ The current `makeEmbedder` body moves verbatim to `embeddingsInProcess.ts`. `mak
 - An embedder on the remote fleet-host (`search_transcripts` there stays `Unknown tool`).
 - Removing transformers.js (next release, follow-up issue).
 - Code-signing the binary (the app is unsigned today).
+
+## Review revisions (PR #531)
+
+- **Linux glibc floor 2.28.** The first CI build on `ubuntu-latest` bound math symbols to `GLIBC_2.43`, so the binary would not start on Debian 12, Ubuntu 24.04 or WSL Debian. CI now builds with cargo-zigbuild against glibc 2.28, links libstdc++ statically, shims `__libc_single_threaded`/`gettid`/`__isoc23_strto*`, and gates on `objdump -T`. Parity runs against that binary.
+- **Existing rows are not bit-compatible.** Stored rows came from transformers.js padded batches of 8, up to ~0.03 cosine from the unbatched vector of the same text. New rows from either backend are unbatched and agree at 1.000000. The old rows are kept: the noise predates this change, and re-indexing is out of scope.
+- **The in-process fallback embeds one text at a time,** so a run that falls back writes the same vectors as the sidecar.
+- **Robustness:** model downloads time out (10 min total, 60 s stall) and retry after 5 minutes; a killed child's late output is ignored; replies are checked against the request's text count and the model's output shape; stderr is logged by line; one failed backfill session no longer aborts the rest; the purge marker records the store identity; watcher-triggered indexing waits out the first 30 s of boot.

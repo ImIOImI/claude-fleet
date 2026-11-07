@@ -90,6 +90,9 @@ export class EmbedderClient {
   private timer: NodeJS.Timeout | null = null;
   private lastFatal = '';
   private stderrWindow = { start: 0, lines: 0 };
+  private stderrPartial = '';
+  /** Killed but not yet exited: its late output must not settle requests. */
+  private readonly killed = new WeakSet<ChildProcess>();
   private readonly timeoutMs: number;
   private readonly readyTimeoutMs: number;
   private readonly now: () => number;
@@ -128,6 +131,7 @@ export class EmbedderClient {
       return;
     }
     this.child = child;
+    this.stderrPartial = '';
     const decoder = new FrameDecoder();
     let readyResolve!: () => void;
     let readyReject!: (e: Error) => void;
@@ -159,7 +163,7 @@ export class EmbedderClient {
   }
 
   private onMessage(child: ChildProcess, m: Record<string, unknown>, readyResolve: () => void): void {
-    if (child !== this.child) return;
+    if (child !== this.child || this.killed.has(child)) return;
     if (m.type === 'ready') {
       this.clearTimer();
       this.state = 'ready';
@@ -180,14 +184,16 @@ export class EmbedderClient {
     this.inflight = null;
     if (typeof m.error === 'string') inf.p.reject(new Error(`embedder: ${m.error}`));
     else {
-      try { inf.p.resolve(decodeVectors(String(m.vectors), Number(m.n), Number(m.dim))); }
-      catch (e) { inf.p.reject(e as Error); }
+      try {
+        if (Number(m.n) !== inf.p.texts.length) throw new Error(`embedder returned ${String(m.n)} vectors for ${inf.p.texts.length} texts`);
+        inf.p.resolve(decodeVectors(String(m.vectors), Number(m.n), Number(m.dim)));
+      } catch (e) { inf.p.reject(e as Error); }
     }
     this.pump();
   }
 
   private pump(): void {
-    if (this.state !== 'ready' || this.inflight || this.queue.length === 0 || !this.child) return;
+    if (this.state !== 'ready' || this.inflight || this.queue.length === 0 || !this.child || this.killed.has(this.child)) return;
     const p = this.queue.shift()!;
     const id = this.nextId++;
     this.inflight = { p, id };
@@ -235,6 +241,7 @@ export class EmbedderClient {
 
   private kill(child: ChildProcess, why: string): void {
     this.lastFatal = why;
+    this.killed.add(child);
     child.kill();
   }
 
@@ -251,7 +258,9 @@ export class EmbedderClient {
   private logStderr(text: string): void {
     const t = this.now();
     if (t - this.stderrWindow.start > 60_000) this.stderrWindow = { start: t, lines: 0 };
-    for (const line of text.split('\n')) {
+    const lines = (this.stderrPartial + text).split('\n');
+    this.stderrPartial = (lines.pop() ?? '').slice(-4096);
+    for (const line of lines) {
       if (!line.trim() || this.stderrWindow.lines >= STDERR_LINES_PER_MIN) continue;
       this.stderrWindow.lines++;
       this.opts.log(`fleet-embedder stderr: ${line}`);

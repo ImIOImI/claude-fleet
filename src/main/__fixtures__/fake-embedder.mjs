@@ -1,5 +1,6 @@
 // Protocol-speaking stand-in for fleet-embedder (embedderClient.test.ts).
-// FAKE_MODE: ok | crash-on-first | fatal | never-ready | hang | error-reply.
+// FAKE_MODE: ok | crash-on-first | fatal | never-ready | hang | error-reply |
+// short-reply | stderr-split.
 // FAKE_STATE: a file whose existence marks "already crashed once".
 import { existsSync, writeFileSync } from 'node:fs';
 
@@ -15,6 +16,10 @@ const frame = (o) => {
 if (mode === 'fatal') {
   process.stdout.write(frame({ type: 'fatal', error: 'model missing' }), () => process.exit(1));
 } else if (mode !== 'never-ready') {
+  if (mode === 'stderr-split') {
+    process.stderr.write('first hal');
+    setTimeout(() => process.stderr.write('f\nsecond\n'), 50);
+  }
   process.stdout.write(frame({ type: 'ready', model: 'fake', dim: DIM }));
 }
 
@@ -31,6 +36,7 @@ process.stdin.on('data', (d) => {
       process.exit(3);
     }
     if (mode === 'error-reply') { process.stdout.write(frame({ id: req.id, error: 'boom' })); continue; }
+    if (mode === 'short-reply') req.texts = req.texts.slice(1);
     const out = Buffer.alloc(req.texts.length * DIM * 4);
     req.texts.forEach((t, i) => out.writeFloatLE(1, (i * DIM + (t.length % DIM)) * 4));
     process.stdout.write(frame({ id: req.id, n: req.texts.length, dim: DIM, vectors: out.toString('base64') }));

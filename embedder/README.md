@@ -4,9 +4,11 @@ Text embedding sidecar for claude-fleet. The Electron main process spawns it (`s
 
 ## Model
 
-`bge-small-en-v1.5`, q8 ONNX, read from the transformers.js cache: `<userData>/models/Xenova/bge-small-en-v1.5/{tokenizer.json,onnx/model_quantized.onnx}`. The sidecar never downloads; main fetches missing files first (`embedderModelFiles.ts`). Output matches transformers.js `feature-extraction` with `pooling: 'mean', normalize: true` on one text at a time (cosine 1.000000 on the parity corpus, `embedderParity.test.ts`), so stored vectors stay valid. Each text runs unpadded: the q8 model's dynamic activation quantization makes padded-batch vectors depend on their batch neighbours.
+`bge-small-en-v1.5`, q8 ONNX, read from the transformers.js cache: `<userData>/models/Xenova/bge-small-en-v1.5/{tokenizer.json,onnx/model_quantized.onnx}`. The sidecar never downloads; main fetches missing files first (`embedderModelFiles.ts`).
 
-onnxruntime is pinned to 1.22 (`ort` 2.0.0-rc.10) because it matches transformers.js's onnxruntime-node 1.21 exactly; 1.24 drifted to cosine 0.996. Re-run the parity test before bumping `ort`.
+Output equals transformers.js `feature-extraction` (`pooling: 'mean', normalize: true`) run on one text at a time: cosine 1.000000 on the parity corpus (`embedderParity.test.ts`), and the in-process fallback also embeds one text at a time. Each text runs unpadded because the q8 model's dynamic activation quantization makes a padded-batch vector depend on its batch neighbours. Rows written by earlier builds came from padded batches of 8 and differ from the unbatched vector by up to ~0.03 cosine; they are kept (no re-index).
+
+onnxruntime is pinned to 1.22 (`ort` 2.0.0-rc.10): it matches the in-process onnxruntime-node 1.21 exactly, while 1.24 drifted to cosine 0.996. Re-run the parity test before bumping `ort`.
 
 ## Protocol (stdio)
 
@@ -27,6 +29,20 @@ cargo build --release      # target/release/fleet-embedder[.exe]
 cargo test
 ```
 
-`ort` statically links a prebuilt onnxruntime downloaded at build time, so the binary has no runtime library dependencies. On Linux that download needs OpenSSL headers (`libssl-dev`). Without them, download the `none x86_64-unknown-linux-gnu` tarball listed in ort-sys's `dist.txt`, drop `download-binaries` from the `ort` features, and build with `ORT_LIB_LOCATION=<dir containing libonnxruntime.a>`. `glibc_compat.c` lets the Linux build link and run on glibc < 2.38. The toolchain is pinned in `rust-toolchain.toml`.
+`ort` links a prebuilt static onnxruntime downloaded at build time. On Linux that download needs OpenSSL headers (`libssl-dev`). Without them, download the `none x86_64-unknown-linux-gnu` tarball listed in ort-sys's `dist.txt`, drop `download-binaries` from the `ort` features, and build with `ORT_LIB_LOCATION=<dir containing libonnxruntime.a>`. The toolchain is pinned in `rust-toolchain.toml`.
 
-Packaging: CI copies the binary to `embedder/bin/`, and electron-builder ships that as `resources/embedder/`. Local Windows `make dist` fetches the CI-built binary with `make embedder-win`.
+Runtime dependencies (onnxruntime itself is linked in):
+
+| OS | Needs |
+|---|---|
+| Linux | glibc ≥ 2.28 (`libc`, `libm`, `libpthread`, `libdl`); libstdc++ is linked statically |
+| Windows | `msvcp140{,_1}.dll`, `vcruntime140{,_1}.dll` (shipped beside the exe); system `DirectML.dll` (Windows 10 1903+), `d3d12.dll`, `dxgi.dll`, `dxcore.dll` |
+| macOS | system libraries only; must keep its ad-hoc signature |
+
+### glibc floor
+
+Release builds use `scripts/ci-build.sh`, which on Linux runs `cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28` (needs [zig](https://ziglang.org) 0.14 and `cargo install cargo-zigbuild`). zig links against glibc 2.28 symbol versions; `build.rs` links the host GCC's `libstdc++.a` statically (the script sets `ORT_CXX_STDLIB=` so ort-sys doesn't also link it dynamically); `glibc_compat.c` defines the newer-glibc symbols the prebuilt onnxruntime and libstdc++ reference (`__isoc23_strto*`, `__libc_single_threaded`, `gettid`). `scripts/check-glibc.sh <bin> 2.28` fails if any symbol needs a newer glibc or the C++ runtime is linked dynamically. A plain `cargo build` binds to the build host's glibc and is only for local use.
+
+### Packaging
+
+`scripts/ci-build.sh` copies the binary (and on Windows the VC++ DLLs) to `embedder/bin/`, and electron-builder ships that as `resources/embedder/`. It also runs `codesign -v` on macOS and a smoke start on every OS. Windows CI publishes `fleet-embedder-windows-x64.zip` on each release; local WSL builds fetch it with `make embedder-win` (`EMBEDDER_TAG`, `EMBEDDER_WIN_ZIP`, `ALLOW_NO_EMBEDDER=1`).

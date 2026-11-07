@@ -8,7 +8,7 @@
 # Other targets:
 #   make windows     # (re)build the installer (assumes deps already installed)
 #   make portable    # build a no-installer ZIP-able dir — does NOT need Wine
-#   make embedder-win  # fetch the CI-built fleet-embedder.exe (windows/portable run it)
+#   make embedder-win  # fetch the released fleet-embedder.exe (windows/portable run it)
 #   make help        # list all targets
 #
 # Why Wine is required: electron-builder packages the Windows app fine on Linux,
@@ -68,21 +68,24 @@ natives-win: ## Cross-prepare native modules (better-sqlite3, keytar, node-pty) 
 		--platform win32 --arch $(WIN_ARCH)
 
 .PHONY: embedder-win
-embedder-win: ## Fetch the CI-built fleet-embedder.exe into embedder/bin (EMBEDDER_WIN=<path> to use a local file)
-	# Built natively on windows-latest by build-app.yml; cross-compiling with
-	# cargo-xwin needs the MSVC SDK. Missing binary = the app embeds in process.
-	@mkdir -p embedder/bin
-	@if [ -n "$(EMBEDDER_WIN)" ]; then \
-		cp "$(EMBEDDER_WIN)" embedder/bin/fleet-embedder.exe; \
+# fleet-embedder.exe + its VC++ runtime DLLs, built natively on windows-latest
+# and attached to each GitHub release as fleet-embedder-windows-x64.zip.
+# Cross-compiling from WSL (cargo-xwin) would need the MSVC SDK.
+#   EMBEDDER_TAG=v0.14.13   release to fetch from (default: latest published)
+#   EMBEDDER_WIN_ZIP=<path> use a local zip instead
+#   ALLOW_NO_EMBEDDER=1     build without it (the app then embeds in process)
+embedder-win: ## Fetch the Windows fleet-embedder from a GitHub release into embedder/bin
+	@rm -f embedder/bin/fleet-embedder.exe embedder/bin/*.dll
+	@rm -rf embedder/bin/.download && mkdir -p embedder/bin/.download
+	@if [ -n "$(EMBEDDER_WIN_ZIP)" ]; then \
+		cp "$(EMBEDDER_WIN_ZIP)" embedder/bin/.download/fleet-embedder-windows-x64.zip; \
 	else \
-		rm -rf embedder/bin/.download && \
-		run=$$(gh run list --workflow build-app.yml --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null) && \
-		[ -n "$$run" ] && \
-		gh run download "$$run" --name fleet-embedder-windows --dir embedder/bin/.download && \
-		mv embedder/bin/.download/fleet-embedder.exe embedder/bin/ && rm -rf embedder/bin/.download \
-		|| echo "⚠ fleet-embedder.exe not fetched (gh auth? no green main run?) — the installer will embed in process"; \
-	fi
-	@ls -l embedder/bin/fleet-embedder.exe 2>/dev/null || true
+		gh release download $(EMBEDDER_TAG) --pattern fleet-embedder-windows-x64.zip --dir embedder/bin/.download; \
+	fi && unzip -oq embedder/bin/.download/fleet-embedder-windows-x64.zip -d embedder/bin \
+	&& rm -rf embedder/bin/.download && ls -l embedder/bin/fleet-embedder.exe \
+	|| { rm -rf embedder/bin/.download; \
+		if [ -n "$(ALLOW_NO_EMBEDDER)" ]; then echo "⚠ no fleet-embedder.exe: the installer will embed in process"; \
+		else echo "✗ could not fetch fleet-embedder-windows-x64.zip (gh auth login? set EMBEDDER_TAG, EMBEDDER_WIN_ZIP, or ALLOW_NO_EMBEDDER=1)"; exit 1; fi; }
 
 .PHONY: build
 build: ## Compile main/preload/renderer bundles (electron-vite)

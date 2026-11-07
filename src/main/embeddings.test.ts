@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
-import { makeEmbedder, resolveEmbedderBin } from './embeddings.js';
+import { makeEmbedder, resolveEmbedderBin, MODEL_FILES_RETRY_MS } from './embeddings.js';
 import { makeInProcessEmbedder } from './embeddingsInProcess.js';
 import { EMBED_DIM, dot } from './vectors.js';
 
@@ -98,4 +98,18 @@ describe('makeEmbedder backend selection', () => {
     expect(out).toEqual([unit(7)]);
     expect(await embed(['b'])).toEqual([unit(7)]);
   }, 30_000);
+
+  it('retries model files after a cooldown instead of falling back for the run', async () => {
+    let t = 0;
+    const inProcess = vi.fn(async (x: string[]) => x.map(() => unit(0)));
+    const ensure = vi.fn(async () => { throw new Error('offline'); });
+    const embed = makeEmbedder(HF_CACHE, { bin: '/some/fleet-embedder', inProcess: () => inProcess, ensureFiles: ensure, now: () => t });
+    await expect(embed(['a'])).rejects.toThrow('offline');
+    await expect(embed(['a'])).rejects.toThrow('offline');
+    expect(ensure).toHaveBeenCalledTimes(1);
+    t += MODEL_FILES_RETRY_MS;
+    await expect(embed(['a'])).rejects.toThrow('offline');
+    expect(ensure).toHaveBeenCalledTimes(2);
+    expect(inProcess).not.toHaveBeenCalled();
+  });
 });

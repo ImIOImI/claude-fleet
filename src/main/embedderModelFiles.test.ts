@@ -29,6 +29,23 @@ describe('ensureModelFiles', () => {
     const cache = tmp();
     const fetchImpl = vi.fn(async () => new Response('nope', { status: 503 })) as unknown as typeof fetch;
     await expect(ensureModelFiles(cache, fetchImpl)).rejects.toThrow('HTTP 503');
-    expect(readdirSync(cache)).toEqual([]);
+    expect(readdirSync(modelDir(cache))).toEqual([]);
+  });
+
+  it('aborts a download that stops sending bytes', async () => {
+    const cache = tmp();
+    const fetchImpl = vi.fn(async () => new Response(new ReadableStream({
+      start(c) { c.enqueue(new TextEncoder().encode('partial')); },
+    }))) as unknown as typeof fetch;
+    await expect(ensureModelFiles(cache, fetchImpl, { stallMs: 100 })).rejects.toThrow('stalled');
+    expect(readdirSync(join(modelDir(cache)))).toEqual([]);
+  });
+
+  it('aborts a request that never answers', async () => {
+    const cache = tmp();
+    const fetchImpl = vi.fn((_u: string, init?: RequestInit) => new Promise<Response>((_, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+    })) as unknown as typeof fetch;
+    await expect(ensureModelFiles(cache, fetchImpl, { totalMs: 100, stallMs: 10_000 })).rejects.toThrow('timed out');
   });
 });

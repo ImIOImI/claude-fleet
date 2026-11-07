@@ -106,4 +106,16 @@ describe('EmbedderClient', () => {
     await expect(c.embed(['x'])).rejects.toBeInstanceOf(EmbedderUnavailable);
     expect(onFatal).toHaveBeenCalledTimes(1);
   }, 20_000);
+
+  it('rejects a reply with fewer vectors than texts', async () => {
+    const { c } = client('short-reply');
+    await expect(c.embed(['a', 'b'])).rejects.toThrow('returned 1 vectors for 2 texts');
+  });
+
+  it('logs stderr by whole line', async () => {
+    const { c, logs } = client('stderr-split');
+    await c.embed(['a']);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(logs).toEqual(['fleet-embedder stderr: first half', 'fleet-embedder stderr: second']);
+  });
 });

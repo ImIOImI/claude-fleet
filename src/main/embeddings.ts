@@ -48,12 +48,20 @@ export interface MakeEmbedderOptions {
   /** For tests. */
   inProcess?: () => EmbedFn;
   ensureFiles?: (cacheDir: string) => Promise<string>;
+  now?: () => number;
 }
+
+/** After a failed model download, embeds reject for this long before retrying. */
+export const MODEL_FILES_RETRY_MS = 5 * 60_000;
+
+export class EmbedderModelFilesUnavailable extends Error {}
 
 export function makeEmbedder(cacheDir: string, opts: MakeEmbedderOptions = {}): EmbedFn {
   let inProcess: EmbedFn | null = null;
   let clientP: Promise<EmbedderClient | null> | null = null;
   let fallbackReason: string | null = null;
+  let filesFailed: { at: number; reason: string } | null = null;
+  const now = opts.now ?? Date.now;
 
   const fallBack = (reason: string): EmbedFn => {
     if (fallbackReason === null) {
@@ -74,8 +82,10 @@ export function makeEmbedder(cacheDir: string, opts: MakeEmbedderOptions = {}): 
     try {
       dir = await (opts.ensureFiles ?? ensureModelFiles)(cacheDir);
     } catch (e) {
-      fallBack(`model files unavailable: ${String(e)}`);
-      return null;
+      // Transient (network): not a reason to give up on the sidecar for the run.
+      filesFailed = { at: now(), reason: String(e) };
+      logError({ source: 'main', level: 'warn', type: 'embedder-model-files', message: filesFailed.reason });
+      throw new EmbedderModelFilesUnavailable(`embedding model files unavailable: ${filesFailed.reason}`);
     }
     return new EmbedderClient({
       bin,
@@ -89,10 +99,21 @@ export function makeEmbedder(cacheDir: string, opts: MakeEmbedderOptions = {}): 
   return async function embed(texts: string[]): Promise<Float32Array[]> {
     if (texts.length === 0) return [];
     if (fallbackReason === null) {
-      const client = await (clientP ??= startClient());
+      if (filesFailed && now() - filesFailed.at < MODEL_FILES_RETRY_MS) {
+        throw new EmbedderModelFilesUnavailable(`embedding model files unavailable: ${filesFailed.reason}`);
+      }
+      const p = (clientP ??= startClient());
+      let client: EmbedderClient | null;
+      try {
+        client = await p;
+      } catch (e) {
+        if (clientP === p) clientP = null;
+        throw e;
+      }
       if (client && fallbackReason === null) {
+        const c = client;
         try {
-          return await perfSpanAsync('claude_fleet.embed.run', () => client.embed(texts), { texts: texts.length });
+          return await perfSpanAsync('claude_fleet.embed.run', () => c.embed(texts), { texts: texts.length });
         } catch (e) {
           if (!(e instanceof EmbedderUnavailable)) throw e;
           fallBack(e.message);

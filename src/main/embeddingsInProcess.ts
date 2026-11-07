@@ -33,14 +33,18 @@ export function makeInProcessEmbedder(cacheDir: string): (texts: string[]) => Pr
     if (texts.length === 0) return [];
     if (!extractorP) extractorP = load();
     const extractor = await extractorP;
-    // Async span = wall time incl. onnx threadpool; the sync tokenizer work
-    // inside it is what can block the loop. texts attr sizes the batch.
-    const out = await perfSpanAsync('claude_fleet.embed.run', () =>
-      extractor(texts, { pooling: 'mean', normalize: true }), { texts: texts.length });
-    return out.tolist().map((row) => {
-      const v = new Float32Array(EMBED_DIM);
-      for (let i = 0; i < EMBED_DIM; i++) v[i] = row[i] ?? 0;
-      return v;
-    });
+    // One text per call, unpadded, like the sidecar: q8 activations are
+    // quantized per tensor, so padding would make a vector depend on its
+    // batch neighbours. Async span = wall time incl. onnx threadpool.
+    return perfSpanAsync('claude_fleet.embed.run', async () => {
+      const out: Float32Array[] = [];
+      for (const text of texts) {
+        const [row] = (await extractor([text], { pooling: 'mean', normalize: true })).tolist();
+        const v = new Float32Array(EMBED_DIM);
+        for (let i = 0; i < EMBED_DIM; i++) v[i] = row[i] ?? 0;
+        out.push(v);
+      }
+      return out;
+    }, { texts: texts.length });
   };
 }

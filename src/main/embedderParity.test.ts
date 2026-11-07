@@ -1,9 +1,7 @@
-// Sidecar vs transformers.js on a fixed corpus: stored vectors stay valid only
-// if every text agrees to cosine >= 0.999. The oracle embeds each text alone:
-// transformers.js's padded batches are not batch-invariant (a text's vector
-// moves with its neighbours, cosine as low as 0.967), and the sidecar never
-// pads. Opt-in: needs the model cache and a built binary (CF_EMBED_PARITY=1,
-// FLEET_EMBEDDER_BIN).
+// Sidecar vs the in-process transformers.js fallback on a fixed corpus: rows
+// from either backend must agree to cosine >= 0.999. Both embed each text
+// alone (padded q8 batches are not batch-invariant). Opt-in: needs the model
+// cache and a built binary (CF_EMBED_PARITY=1, FLEET_EMBEDDER_BIN).
 import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,7 +26,7 @@ async function embedAll(embed: (t: string[]) => Promise<Float32Array[]>, batch: 
 
 describe('fleet-embedder parity with transformers.js', () => {
   it.skipIf(!ENABLED)('cosine >= 0.999 and unit norm for every corpus text', async () => {
-    const reference = await embedAll(makeInProcessEmbedder(HF_CACHE), 1);
+    const reference = await embedAll(makeInProcessEmbedder(HF_CACHE), BATCH);
     const client = new EmbedderClient({
       bin: BIN,
       args: ['--model-dir', await ensureModelFiles(HF_CACHE)],
