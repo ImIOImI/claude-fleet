@@ -43,18 +43,49 @@ async function su<T>(fn: (c: pg.Client) => Promise<T>, database = 'postgres'): P
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
-  for (const f of cleanups.splice(0).reverse()) await f();
+  // Each cleanup is independent: one failing (a role another test's crashed cleanup never got
+  // to drop, say) must not skip the rest, here or in a later test's afterEach.
+  for (const f of cleanups.splice(0).reverse()) {
+    try {
+      await f();
+    } catch (e) {
+      console.warn(`pg test cleanup failed: ${(e as Error).message}`);
+    }
+  }
 });
+
+/** A statement that can't throw: logs and moves on. A couple of retries absorb the ordinary
+ *  race where a just-`shutdown()` host's pool is still disconnecting server-side (DROP DATABASE
+ *  ... WITH (FORCE) forces it, but a role that still looks referenced can need a moment to clear);
+ *  anything left after that (e.g. a role orphaned by an earlier run's own failed cleanup, still
+ *  owning things in a database this run doesn't know about) is logged, never thrown, so it can't
+ *  cascade into the rest of this cleanup or the next test's. */
+async function dropStatement(c: pg.Client, sql: string, attempts = 5): Promise<void> {
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      await c.query(sql);
+      return;
+    } catch (e) {
+      if (i === attempts) {
+        console.warn(`pg test cleanup: ${sql} failed after ${attempts} attempts: ${(e as Error).message}`);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+}
 
 function names() {
   const s = randomBytes(4).toString('hex');
   const n = { db: `fb_${s}`, schema: `fs_${s}`, app: `fb_app_${s}`, query: `fb_app_${s}_query`, admin: `fb_admin_${s}`, appPw: `app-${randomBytes(9).toString('hex')}` };
   cleanups.push(() =>
     su(async (c) => {
-      await c.query(`DROP DATABASE IF EXISTS ${id(n.db)} WITH (FORCE)`);
-      for (const r of [`${n.query}_raw`, n.query, `${n.schema}_mcp_reader`, `${n.schema}_mcp_raw`, ...CLI_SHARED_ROLES]) await c.query(`DROP ROLE IF EXISTS ${id(r)}`);
-      await c.query(`DROP ROLE IF EXISTS ${id(n.app)}`);
-      await c.query(`DROP ROLE IF EXISTS ${id(n.admin)}`);
+      // Ordered: the database (FORCE'd) goes first so nothing below still owns anything in it;
+      // every role drop after that is independent of the others.
+      await dropStatement(c, `DROP DATABASE IF EXISTS ${id(n.db)} WITH (FORCE)`);
+      for (const r of [`${n.query}_raw`, n.query, `${n.schema}_mcp_reader`, `${n.schema}_mcp_raw`, ...CLI_SHARED_ROLES, n.app, n.admin]) {
+        await dropStatement(c, `DROP ROLE IF EXISTS ${id(r)}`);
+      }
     })
   );
   return n;

@@ -49,12 +49,23 @@ describe.skipIf(!isPg)('host MCP query', () => {
   let mcp: HostMcp | null = null;
   let su: pg.Client | null = null;
   afterEach(async () => {
-    await mcp?.close();
+    // Each step is independent: a failure closing the MCP server or the raw client must not
+    // skip t.drop(), which is what actually removes the test's roles.
+    const steps: (() => Promise<unknown>)[] = [
+      () => mcp?.close() ?? Promise.resolve(),
+      () => closeDb(),
+      () => su?.end() ?? Promise.resolve(),
+      () => t?.drop() ?? Promise.resolve()
+    ];
+    for (const step of steps) {
+      try {
+        await step();
+      } catch (e) {
+        console.warn(`pg test cleanup failed: ${(e as Error).message}`);
+      }
+    }
     mcp = null;
-    await closeDb();
-    await su?.end();
     su = null;
-    await t?.drop();
     t = null;
   });
 
