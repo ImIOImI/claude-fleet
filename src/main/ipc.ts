@@ -91,6 +91,9 @@ import { IdentityService } from './identity/identityService.js';
 import { pickGithubClientId, GITHUB_CLIENT_ID_ENV } from './identity/clientId.js';
 import { registerIdentityIpc } from './identityIpc.js';
 import { createRemoteBackend } from './remote.js';
+import { createFederatedReader } from './federation/federatedReader.js';
+import { createSummaryRelay } from './federation/summaryRelay.js';
+import { registerFederationIpc } from './federation/federationIpc.js';
 import { assertNotRemoteSpec, confirmText, registerRemoteIpc, type RemoteConfirm } from './remoteIpc.js';
 import { listEndpoints, saveEndpoint, deleteEndpoint, setEndpointApiKey, probeEndpoint, getEndpoint, type ModelEndpoint } from './endpoints.js';
 import * as fs from './fs.js';
@@ -373,8 +376,21 @@ const remoteBackend = createRemoteBackend({
   writeManifest: (spec) => writeWorkspaceManifest(spec),
   deleteState: (id) => rm(workspaceStateDir(id), { recursive: true, force: true })
 });
+const federated = createFederatedReader({
+  sources: () => (MOCK_MODE ? [] : remoteBackend.sources()),
+  rpc: (url, channel, args, timeoutMs) => remoteBackend.clientFor(url).rpc(channel, args, { timeoutMs })
+});
+const summaryRelay = createSummaryRelay({
+  sources: () => (MOCK_MODE ? [] : remoteBackend.sources()),
+  subscribe: (url, on) => remoteBackend.clientFor(url).subscribe(on),
+  fetchSummary: (id) => federated.summary(id, null),
+  broadcast: (workspaceId, summary) => broadcastObservabilitySummary({ workspaceId, summary }, BrowserWindow.getAllWindows())
+});
+let relayTimer: NodeJS.Timeout | null = null;
 
 export function stopRemoteBackend(): void {
+  summaryRelay.stop();
+  if (relayTimer) clearInterval(relayTimer);
   remoteBackend.stop();
 }
 
@@ -1454,6 +1470,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle(
     'sessions:resume',
     async (_e, workspaceId: string): Promise<{ containerId: string } | null> => {
+      if (remoteBackend.isRemote(workspaceId)) return { containerId: workspaceId };
       const containerId = await (await backendFor(workspaceId)).startWorkspace(workspaceId);
       if (!containerId) return null;
       await touchWorkspaceUsed(workspaceId);
@@ -2093,6 +2110,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     findByName: findWorkspaceByName,
     invalidate: invalidateWorkspaceList
   });
+  registerFederationIpc(ipcMain, federated);
+  relayTimer = setInterval(() => summaryRelay.sync(), 15_000);
+  relayTimer.unref?.();
   loadoutSources.setGithubTokenProvider(() => identity.packagesToken());
 
   ipcMain.handle(
@@ -2501,8 +2521,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
    * UUID) is a deferred follow-up; in practice the latest-active heuristic
    * matches the focused tab nearly always.
    */
-  ipcMain.handle('observability:summaryForWorkspace', (_e, workspaceId: string) =>
-    summaryForWorkspace(workspaceId)
+  ipcMain.handle('observability:summaryForWorkspace', async (_e, workspaceId: string) =>
+    remoteBackend.isRemote(workspaceId) ? ((await federated.summary(workspaceId, null)) ?? null) : summaryForWorkspace(workspaceId)
   );
 
   /**
@@ -2526,6 +2546,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle(
     'observability:summaryForBrokerSession',
     async (_e, workspaceId: string, brokerSessionId: string) => {
+      if (remoteBackend.isRemote(workspaceId)) return (await federated.summary(workspaceId, null)) ?? null;
       const summary = await summaryForBrokerSession(workspaceId, brokerSessionId);
       if (!summary) {
         // Blank-rail root signal: no-mapping = why the per-tab summary is null;

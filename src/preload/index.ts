@@ -15,6 +15,7 @@ import type { AccountStatus, SignInStart, SignInPoll } from './identityTypes';
 export type { AccountStatus, AccountIdentity, AccountSso, SignInStart, SignInPoll } from './identityTypes';
 import type { RemoteAddOptions, RemoteLiveSession, RemoteProbe } from './remoteTypes';
 import type { StoreChoice, StoreSettings, StoreStatus } from './storeTypes';
+import type { RemoteSessionsResult, SessionCursor } from './federation';
 export type { ImportProgress, StoreChoice, StorePhase, StoreSettings, StoreStatus } from './storeTypes';
 export type { RemoteAddOptions, RemoteLiveSession, RemoteProbe, RemoteProbeOk, RemoteProbeErr, RemoteProbeErrorKind, RemoteTier } from './remoteTypes';
 
@@ -84,6 +85,8 @@ export interface SessionListItem {
   headless: boolean;
   /** A background knowledge-capture fork (#483), not a terminal tab. */
   capture: boolean;
+  /** Absent or 'local' for this desktop's rows; a remote workspace id otherwise. */
+  origin?: string;
 }
 
 /**
@@ -503,6 +506,9 @@ const api = {
      */
     list: (workspaceId?: string): Promise<SessionListItem[]> =>
       ipcRenderer.invoke('sessions:list', workspaceId),
+    /** Remote pages for the Sessions list (remote-workspaces (d)); local rows stay in `list`. */
+    listRemote: (req?: { origin: string; after: SessionCursor }): Promise<RemoteSessionsResult<SessionListItem>> =>
+      ipcRenderer.invoke('sessions:listRemote', req),
     /** Set (empty string clears) the manual name override for a session. */
     rename: (sessionId: string, name: string): Promise<void> =>
       ipcRenderer.invoke('sessions:rename', sessionId, name),
