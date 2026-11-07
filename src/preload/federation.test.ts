@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { appendSessionPage, compareBytes, replaceSessionPage, compareSessionKey, cursorOf, mergeSessionPages, type SessionCursor, type SourcePage } from './federation';
+import { appendSessionPage, compareBytes, refreshSessionPage, replaceSessionPage, compareSessionKey, cursorOf, mergeSessionPages, type SessionCursor, type SourcePage } from './federation';
 
 type R = { id: string; workspaceId: string; lastActiveAt: number | null };
 const row = (id: string, la: number | null, ws = 'W'): R => ({ id, workspaceId: ws, lastActiveAt: la });
@@ -86,6 +86,50 @@ describe('mergeSessionPages', () => {
     expect(m.rows.map((r) => `${r.origin}:${r.id}`)).toEqual(['local:s', 'H:t']);
     const r = replaceSessionPage(m, { origin: 'local', rows: [], next: null });
     expect(r.rows.map((x) => `${x.origin}:${x.id}`)).toEqual(['H:s', 'H:t']);
+  });
+});
+
+describe('refreshSessionPage', () => {
+  type T = R & { title?: string };
+  const keys = (m: { rows: Array<R & { origin: string }> }) => m.rows.map((r) => `${r.origin}:${r.id}@${r.lastActiveAt}`);
+  const loaded = () => {
+    const m = mergeSessionPages<T>([{ origin: 'H', rows: [row('a', 9), row('b', 8)], next: { lastActiveAt: 8, id: 'b' } }]);
+    return appendSessionPage(m, { origin: 'H', rows: [row('c', 7), row('d', 6)], next: { lastActiveAt: 6, id: 'd' } });
+  };
+
+  it('keeps rows loaded past the fresh page and their cursor; new rows enter at the top', () => {
+    const r = refreshSessionPage(loaded(), { origin: 'H', rows: [row('n', 10), row('a', 9)], next: { lastActiveAt: 9, id: 'a' } });
+    expect(keys(r)).toEqual(['H:n@10', 'H:a@9', 'H:b@8', 'H:c@7', 'H:d@6']);
+    expect(r.more).toEqual([{ origin: 'H', after: { lastActiveAt: 6, id: 'd' } }]);
+  });
+
+  it('a row that moved up appears once, with the fresh copy', () => {
+    const fresh: T = { ...row('c', 11), title: 'fresh' };
+    const r = refreshSessionPage(loaded(), { origin: 'H', rows: [fresh, row('a', 9)], next: { lastActiveAt: 9, id: 'a' } });
+    expect(keys(r)).toEqual(['H:c@11', 'H:a@9', 'H:b@8', 'H:d@6']);
+    expect((r.rows[0] as T).title).toBe('fresh');
+  });
+
+  it('keeps a complete source complete', () => {
+    const m = mergeSessionPages<T>([{ origin: 'H', rows: [row('a', 9), row('b', 8)], next: null }]);
+    const r = refreshSessionPage(m, { origin: 'H', rows: [row('n', 10)], next: { lastActiveAt: 10, id: 'n' } });
+    expect(keys(r)).toEqual(['H:n@10', 'H:a@9', 'H:b@8']);
+    expect(r.more).toEqual([]);
+  });
+
+  it('replaces outright when the fresh page is complete or reaches past what was loaded', () => {
+    expect(keys(refreshSessionPage(loaded(), { origin: 'H', rows: [row('a', 9)], next: null }))).toEqual(['H:a@9']);
+    const m = mergeSessionPages<T>([{ origin: 'H', rows: [row('a', 9)], next: { lastActiveAt: 9, id: 'a' } }]);
+    const r = refreshSessionPage(m, { origin: 'H', rows: [row('a', 9), row('b', 8)], next: { lastActiveAt: 8, id: 'b' } });
+    expect(keys(r)).toEqual(['H:a@9', 'H:b@8']);
+    expect(r.more).toEqual([{ origin: 'H', after: { lastActiveAt: 8, id: 'b' } }]);
+  });
+
+  it('leaves other sources alone and adds an unknown source as its page', () => {
+    const m = mergeSessionPages<T>([{ origin: 'G', rows: [row('g', 5, 'G')], next: { lastActiveAt: 5, id: 'g' } }]);
+    const r = refreshSessionPage(m, { origin: 'H', rows: [row('h', 4)], next: null });
+    expect(keys(r)).toEqual(['G:g@5', 'H:h@4']);
+    expect(r.more).toEqual([{ origin: 'G', after: { lastActiveAt: 5, id: 'g' } }]);
   });
 });
 

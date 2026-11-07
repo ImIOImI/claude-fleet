@@ -507,7 +507,7 @@ const api = {
     list: (workspaceId?: string): Promise<SessionListItem[]> =>
       ipcRenderer.invoke('sessions:list', workspaceId),
     /** Remote pages for the Sessions list (remote-workspaces (d)); local rows stay in `list`. */
-    listRemote: (req?: { origin: string; after: SessionCursor }): Promise<RemoteSessionsResult<SessionListItem>> =>
+    listRemote: (req?: { origin: string; after?: SessionCursor }): Promise<RemoteSessionsResult<SessionListItem>> =>
       ipcRenderer.invoke('sessions:listRemote', req),
     /** Set (empty string clears) the manual name override for a session. */
     rename: (sessionId: string, name: string): Promise<void> =>

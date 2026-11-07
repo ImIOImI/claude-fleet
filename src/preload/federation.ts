@@ -110,3 +110,17 @@ export function appendSessionPage<T extends Keyed>(cur: MergedSessions<T>, page:
 export function replaceSessionPage<T extends Keyed>(cur: MergedSessions<T>, page: SourcePage<T>): MergedSessions<T> {
   return mergeSessionPages([...pagesOf(cur).filter((p) => p.origin !== page.origin), page]);
 }
+
+/** Puts a source's fresh first page on top of what is loaded from it. Rows
+ *  already loaded past the page's `next` stay, with their cursor, so a refresh
+ *  doesn't undo "load older"; a row the page also holds keeps the fresh copy. */
+export function refreshSessionPage<T extends Keyed>(cur: MergedSessions<T>, page: SourcePage<T>): MergedSessions<T> {
+  const pages = pagesOf(cur);
+  const prev = pages.find((p) => p.origin === page.origin);
+  const rest = pages.filter((p) => p.origin !== page.origin);
+  const edge = page.next;
+  if (!prev || !edge || (prev.next && compareSessionKey(prev.next, edge) <= 0)) return mergeSessionPages([...rest, page]);
+  const fresh = new Set(page.rows.map((r) => `${r.workspaceId}\u0000${r.id}`));
+  const older = prev.rows.filter((r) => compareSessionKey(r, edge) > 0 && !fresh.has(`${r.workspaceId}\u0000${r.id}`));
+  return mergeSessionPages([...rest, { origin: page.origin, rows: [...page.rows, ...older], next: prev.next }]);
+}

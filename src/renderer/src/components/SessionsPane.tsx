@@ -17,7 +17,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { createPortal } from 'react-dom';
 import { colorFor } from '../App';
 import type { SessionListItem } from '../../../preload';
-import { mergeSessionPages, type MergedSessions, type SessionCursor, type UnavailableSource } from '../../../preload/federation';
+import { type MergedSessions, type SessionCursor, type UnavailableSource } from '../../../preload/federation';
 import {
   sessionsForScope,
   filterSessions,
@@ -31,6 +31,8 @@ import {
   isRemoteRow,
   unavailableText,
   refreshedRemote,
+  reloadedRemote,
+  remoteForScope,
   loadedMoreRemote,
   mergeUnavailable,
   canResumeHere,
@@ -168,21 +170,23 @@ export function SessionsPane({
   }, [load]);
 
   const remoteOrigins = useRef(new Set<string>());
+  // A full reload that resolves after a newer one started is dropped.
+  const remoteSeq = useRef(0);
   const loadRemote = useCallback(async () => {
-    try {
-      const r = await window.api.sessions.listRemote();
-      remoteOrigins.current = new Set([...r.pages.map((p) => p.origin), ...r.unavailable.map((u) => u.origin)]);
-      setRemote(r.pages.length ? mergeSessionPages(r.pages) : null);
-      setUnavailable(r.unavailable);
-    } catch {
+    const seq = ++remoteSeq.current;
+    const r = await window.api.sessions.listRemote().catch(() => null);
+    if (seq !== remoteSeq.current) return;
+    if (!r) {
       setRemote(null);
       setUnavailable([]);
+      return;
     }
+    remoteOrigins.current = new Set([...r.pages.map((p) => p.origin), ...r.unavailable.map((u) => u.origin)]);
+    setRemote((cur) => reloadedRemote(cur, r));
+    setUnavailable(r.unavailable);
   }, []);
-  // listRemote with no origin is the only first-page read, so a one-origin
-  // refresh fans out and keeps just that origin's page and status.
   const refreshOrigin = useCallback(async (origin: string) => {
-    const r = await window.api.sessions.listRemote().catch(() => null);
+    const r = await window.api.sessions.listRemote({ origin }).catch(() => null);
     if (!r) return;
     setRemote((cur) => refreshedRemote(cur, r, origin));
     setUnavailable((u) => mergeUnavailable(u, r, origin));
@@ -283,6 +287,7 @@ export function SessionsPane({
     limitSessions(splitCapture(allSplit.rest).rest, limitOpts, Date.now()).length +
     limitSessions(allSplit.headless, limitOpts, Date.now()).length;
   const allTags = tagCounts(scoped);
+  const unavailableNote = unavailableText(remoteForScope(unavailable, scope, selectedWorkspaceId));
 
   // FLIP: rows animate to their new slot when they move between the Open and
   // Recent groups, or cross a recency bucket (see orderByRecencyBucket). Positions are captured after every render;
@@ -578,8 +583,8 @@ export function SessionsPane({
             {showCapture && captureShown.map(renderRow)}
           </ul>
         )}
-        {unavailableText(unavailable) && <div className="sessions-unavailable subdued">{unavailableText(unavailable)}</div>}
-        {remote?.more.map((m) => (
+        {unavailableNote && <div className="sessions-unavailable subdued">{unavailableNote}</div>}
+        {remote && remoteForScope(remote.more, scope, selectedWorkspaceId).map((m) => (
           <button key={m.origin} className="btn-mini sessions-more" onClick={() => void loadMore(m.origin, m.after)}>
             Load older sessions from {remote.rows.find((r) => r.origin === m.origin)?.workspaceName ?? 'remote'}
           </button>

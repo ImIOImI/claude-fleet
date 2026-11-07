@@ -15,6 +15,8 @@ import {
   loadedMoreRemote,
   mergeUnavailable,
   refreshedRemote,
+  reloadedRemote,
+  remoteForScope,
   remoteResumeMap,
   unavailableText,
   withRemote
@@ -292,6 +294,50 @@ describe('remote page state', () => {
     expect(loadedMoreRemote(null, page, 'R', { lastActiveAt: 9, id: 'r1' })).toBeNull();
     expect(loadedMoreRemote(cur, null, 'R', { lastActiveAt: 9, id: 'r1' })).toBe(cur);
     expect(loadedMoreRemote(cur, res([], [{ origin: 'R', name: 'r', reason: 'timeout' }]), 'R', { lastActiveAt: 9, id: 'r1' })).toBeNull();
+  });
+
+  const olderLoaded = () => {
+    const cur = mergeSessionPages([
+      { origin: 'R', rows: [item('a', 9, 'R'), item('b', 8, 'R')], next: { lastActiveAt: 8, id: 'b' } },
+      { origin: 'S', rows: [item('s1', 7, 'S')], next: { lastActiveAt: 7, id: 's1' } }
+    ]);
+    return loadedMoreRemote(cur, res([{ origin: 'R', rows: [item('c', 6, 'R'), item('d', 5, 'R')], next: { lastActiveAt: 5, id: 'd' } }]), 'R', { lastActiveAt: 8, id: 'b' })!;
+  };
+
+  it('a refresh keeps the older pages loaded from its origin', () => {
+    const cur = refreshedRemote(olderLoaded(), res([{ origin: 'R', rows: [item('n', 10, 'R'), item('a', 9, 'R')], next: { lastActiveAt: 9, id: 'a' } }]), 'R')!;
+    expect(keys(cur)).toEqual(['R:n', 'R:a', 'R:b', 'S:s1', 'R:c', 'R:d']);
+    expect(cur.more).toEqual([
+      { origin: 'R', after: { lastActiveAt: 5, id: 'd' } },
+      { origin: 'S', after: { lastActiveAt: 7, id: 's1' } }
+    ]);
+  });
+
+  it('a refresh shows a row that moved up once, with fresh data', () => {
+    const moved = { ...item('c', 11, 'R'), aiTitle: 'fresh' } as SessionListItem;
+    const cur = refreshedRemote(olderLoaded(), res([{ origin: 'R', rows: [moved, item('a', 9, 'R')], next: { lastActiveAt: 9, id: 'a' } }]), 'R')!;
+    expect(keys(cur)).toEqual(['R:c', 'R:a', 'R:b', 'S:s1', 'R:d']);
+    expect(cur.rows[0].aiTitle).toBe('fresh');
+  });
+
+  it('a full reload keeps each origin\'s older pages and drops origins it no longer returns', () => {
+    const r = res([
+      { origin: 'R', rows: [item('n', 10, 'R'), item('a', 9, 'R')], next: { lastActiveAt: 9, id: 'a' } },
+      { origin: 'T', rows: [item('t1', 4, 'T')], next: null }
+    ], [{ origin: 'S', name: 's', reason: 'timeout' }]);
+    const cur = reloadedRemote(olderLoaded(), r)!;
+    expect(keys(cur)).toEqual(['R:n', 'R:a', 'R:b', 'R:c', 'R:d', 'T:t1']);
+    expect(cur.more).toEqual([{ origin: 'R', after: { lastActiveAt: 5, id: 'd' } }]);
+    expect(reloadedRemote(olderLoaded(), res([]))).toBeNull();
+    expect(keys(reloadedRemote(null, res([{ origin: 'T', rows: [item('t1', 4, 'T')], next: null }])))).toEqual(['T:t1']);
+  });
+
+  it('remoteForScope keeps only the selected workspace\'s origin under "This workspace"', () => {
+    const xs = [{ origin: 'R' }, { origin: 'S' }];
+    expect(remoteForScope(xs, 'all', 'R')).toEqual(xs);
+    expect(remoteForScope(xs, 'workspace', 'R')).toEqual([{ origin: 'R' }]);
+    expect(remoteForScope(xs, 'workspace', 'L')).toEqual([]);
+    expect(remoteForScope(xs, 'workspace', null)).toEqual([]);
   });
 
   it('mergeUnavailable replaces only the asked origin', () => {

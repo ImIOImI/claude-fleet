@@ -10,10 +10,12 @@ function rig() {
 }
 
 describe('sessions:listRemote', () => {
-  it('first pages with no argument; one origin with a cursor', async () => {
+  it('first pages with no argument; one origin first page; one origin with a cursor', async () => {
     const { h, reader } = rig();
     await h({});
     expect(reader.listSessions).toHaveBeenLastCalledWith({});
+    await h({}, { origin: A });
+    expect(reader.listSessions).toHaveBeenLastCalledWith({ origin: A });
     await h({}, { origin: A, after: { lastActiveAt: 3, id: 's' } });
     expect(reader.listSessions).toHaveBeenLastCalledWith({ origin: A, after: { lastActiveAt: 3, id: 's' } });
   });
@@ -22,9 +24,9 @@ describe('sessions:listRemote', () => {
     await expect(h({}, { origin: 'x', after: { lastActiveAt: 3, id: 's' } })).rejects.toThrow();
     await expect(h({}, { origin: A, after: { lastActiveAt: -1, id: 's' } })).rejects.toThrow();
   });
-  it('refuses a cursor-less, cross-shaped or non-object request', async () => {
+  it('refuses a cross-shaped or non-object request', async () => {
     const { h, reader } = rig();
-    for (const bad of [{ origin: A }, { origin: A, after: { lastActiveAt: 1, id: 'a b' } }, { origin: A, after: { lastActiveAt: 1.5, id: 's' } }, 'x', 5, { after: { lastActiveAt: 1, id: 's' } }]) {
+    for (const bad of [{ origin: A, after: null }, { origin: A, after: { lastActiveAt: 1, id: 'a b' } }, { origin: A, after: { lastActiveAt: 1.5, id: 's' } }, 'x', 5, { after: { lastActiveAt: 1, id: 's' } }]) {
       await expect(h({}, bad), JSON.stringify(bad)).rejects.toThrow();
     }
     expect(reader.listSessions).not.toHaveBeenCalled();

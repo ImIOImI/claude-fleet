@@ -11,7 +11,7 @@ import {
   appendSessionPage,
   mergeSessionPages,
   pagesOf,
-  replaceSessionPage,
+  refreshSessionPage,
   type MergedSessions,
   type RemoteSessionsResult,
   type SessionCursor,
@@ -165,12 +165,27 @@ function withoutOrigin(cur: Remote, origin: string): Remote | null {
   return rest.length ? mergeSessionPages(rest) : null;
 }
 
-/** One origin's fresh first page from a full fan-out; an origin missing from
- *  `r.pages` (unavailable or unbookmarked) drops out, since remote data is live-only. */
+/** One origin's fresh first page, over the older pages loaded from it; an
+ *  origin missing from `r.pages` (unavailable or unbookmarked) drops out, since
+ *  remote data is live-only. */
 export function refreshedRemote(cur: Remote | null, r: RemoteResult, origin: string): Remote | null {
   const page = r.pages.find((p) => p.origin === origin);
-  if (page) return cur ? replaceSessionPage(cur, page) : mergeSessionPages([page]);
+  if (page) return cur ? refreshSessionPage(cur, page) : mergeSessionPages([page]);
   return cur ? withoutOrigin(cur, origin) : null;
+}
+
+/** refreshedRemote for every origin of a full fan-out. */
+export function reloadedRemote(cur: Remote | null, r: RemoteResult): Remote | null {
+  let m = cur;
+  const fresh = new Set(r.pages.map((p) => p.origin));
+  for (const p of cur ? pagesOf(cur) : []) if (m && !fresh.has(p.origin)) m = withoutOrigin(m, p.origin);
+  for (const page of r.pages) m = m ? refreshSessionPage(m, page) : mergeSessionPages([page]);
+  return m;
+}
+
+/** Remote origins are workspace ids, so "This workspace" shows only its own. */
+export function remoteForScope<T extends { origin: string }>(xs: readonly T[], scope: 'workspace' | 'all', selectedWorkspaceId: string | null): T[] {
+  return scope === 'all' ? [...xs] : xs.filter((x) => x.origin === selectedWorkspaceId);
 }
 
 /** Appends a load-more reply. A reply whose cursor is no longer the origin's

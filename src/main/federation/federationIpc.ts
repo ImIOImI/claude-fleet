@@ -12,6 +12,7 @@ function parseReq(v: unknown): { origin?: string; after?: SessionCursor } {
   if (v === undefined || v === null) return {};
   const o = v as { origin?: unknown; after?: { lastActiveAt?: unknown; id?: unknown } };
   if (typeof o.origin !== 'string' || !REMOTE_ID_RE.test(o.origin)) throw new Error('origin must be a remote workspace id');
+  if (!('after' in o) || o.after === undefined) return { origin: o.origin };
   const a = o.after;
   if (!a || typeof a.lastActiveAt !== 'number' || !Number.isSafeInteger(a.lastActiveAt) || a.lastActiveAt < 0 || typeof a.id !== 'string' || !ID_RE.test(a.id)) {
     throw new Error('after must be a session cursor');

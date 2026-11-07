@@ -32,15 +32,28 @@ describe('SessionsPane remote rows', () => {
   it('replaces the merged remote state only through federation helpers', () => {
     const sets = [...src.matchAll(/setRemote\(([^;]*)\);/g)].map((m) => m[1]);
     expect(sets).toEqual([
-      'r.pages.length ? mergeSessionPages(r.pages) : null',
       'null',
+      '(cur) => reloadedRemote(cur, r)',
       '(cur) => refreshedRemote(cur, r, origin)',
       '(cur) => loadedMoreRemote(cur, r, origin, after)'
     ]);
     expect(src).not.toMatch(/\.\.\.remote\b|structuredClone|JSON\.(parse|stringify)\(remote/);
   });
 
+  it('a full reload that a newer one overtook is dropped', () => {
+    const body = src.slice(src.indexOf('const loadRemote = useCallback'), src.indexOf('const refreshOrigin = useCallback'));
+    expect(body).toContain('const seq = ++remoteSeq.current;');
+    expect(body.indexOf('if (seq !== remoteSeq.current) return;')).toBeLessThan(body.indexOf('setRemote('));
+  });
+
+  it('scopes the unavailable note and Load older buttons like the rows', () => {
+    expect(src).toContain('unavailableText(remoteForScope(unavailable, scope, selectedWorkspaceId))');
+    expect(src).toContain('remoteForScope(remote.more, scope, selectedWorkspaceId).map(');
+    expect(src).not.toContain('remote?.more.map(');
+  });
+
   it('a remote push refreshes only its origin; a local push reloads local rows', () => {
+    expect(src).toContain('window.api.sessions.listRemote({ origin })');
     expect(src).toContain('if (remoteOrigins.current.has(workspaceId)) {');
     expect(src).toContain('void refreshOrigin(workspaceId);');
     expect(src).toContain('}, 5_000)');
