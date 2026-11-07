@@ -9,8 +9,8 @@ import type { SessionCursor } from '../preload/federation.js';
 
 export const SESSIONS_PAGE_MAX = 200;
 const ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
-// D59: match the desktop reply validator (remoteRows.ts) exactly, so a page
-// of long titles or many tags never approaches the 2 MB RPC reply cap.
+// D59: the caps of the desktop validator (src/main/federation/remoteRows.ts),
+// so a page of long titles or many tags stays far under the 2 MB reply cap.
 const MAX_TEXT = 500;
 const MAX_TAGS = 20;
 const MAX_TAG_LEN = 64;

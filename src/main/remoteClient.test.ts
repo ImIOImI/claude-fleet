@@ -230,6 +230,19 @@ describe('RemoteClient', () => {
     await expect(c.rpc('x', [])).rejects.toMatchObject({ message: expect.stringMatching(/too large/) });
   });
 
+  it('rpc honours a per-call timeout', async () => {
+    const { url } = await rawServer((_req, res) => {
+      setTimeout(() => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, result: 1 }));
+      }, 200);
+    });
+    const err = (await new RemoteClient({ url, token: async () => TOKEN }).rpc('x', [], { timeoutMs: 50 }).catch((e: unknown) => e)) as RemoteError;
+    expect(err).toBeInstanceOf(RemoteError);
+    expect(err.kind).toBe('unreachable');
+    expect(err.message).toContain('timed out');
+  });
+
   it('never follows a redirect with the token', async () => {
     const seen: Array<string | undefined> = [];
     const { url } = await rawServer((req, res) => {

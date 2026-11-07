@@ -268,12 +268,13 @@ export class RemoteClient {
     return sanitizeWhoAmI(this.url, body);
   }
 
-  async rpc<T>(channel: string, args: unknown[]): Promise<T> {
+  async rpc<T>(channel: string, args: unknown[], opts: { timeoutMs?: number } = {}): Promise<T> {
     const body = (await this.request(`/rpc/${encodeURIComponent(channel)}`, {
       method: 'POST',
       auth: true,
       body: JSON.stringify({ args }),
-      maxBody: MAX_RPC_BODY
+      maxBody: MAX_RPC_BODY,
+      timeoutMs: opts.timeoutMs
     })) as { ok?: unknown; result?: T } | null;
     if (body?.ok !== true) throw new RemoteError('protocol', `${this.url} rpc ${channel} failed`);
     return body.result as T;
