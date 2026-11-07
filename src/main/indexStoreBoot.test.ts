@@ -44,7 +44,7 @@ describe('index.ts store boot', () => {
       'await startCaptureScheduler(jsonlWatcher);',
       'registerLocalDirs(jsonlWatcher, manifests);',
       "perfSpanAsync('claude_fleet.boot.peer_status_start'",
-      'if (sqlite && !historyAfterVacuum) startEmbedBackfill(embedFn);',
+      'if (sqlite && !historyAfterVacuum) startEmbedBackfill(embedFn, sqliteStoreId);',
       'instrumentIpcHandle(ipcMain);',
       "perfSpan('claude_fleet.boot.register_ipc'",
       'if (sqlite && inboxStore) startInboxServices(inboxStore);',

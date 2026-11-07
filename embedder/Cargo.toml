@@ -1,0 +1,29 @@
+[package]
+name = "fleet-embedder"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# rc.10 = onnxruntime 1.22, statically linked. Newer ORT (1.24, rc.12) drifts
+# from transformers.js's onnxruntime-node 1.21 on this q8 model (min cosine
+# 0.996); 1.22 matches it exactly. Its build-time download needs OpenSSL
+# headers on Linux, or set ORT_LIB_LOCATION and drop download-binaries.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std"] }
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+[features]
+default = ["download-binaries"]
+# Off for the Linux release build, which fetches onnxruntime itself
+# (scripts/ci-build.sh) because zig can't compile ureq's OpenSSL.
+download-binaries = ["ort/download-binaries"]
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+lto = "thin"
+strip = true

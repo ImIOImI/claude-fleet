@@ -58,6 +58,7 @@ import { ensureWorkspaceClaudeJson } from './docker.js';
 import { hardwareAccelDisabledAtStartup } from './config.js';
 import { setWorkspaceDefault } from './mirrorPolicy.js';
 import { makeEmbedder } from './embeddings.js';
+import { runEmbedBackfill, storeIdentity, EMBED_BACKFILL_DELAY_MS } from './embedBackfill.js';
 import { indexSessionTurns, indexSessionSummaries, type EmbedFn } from './transcriptIndex.js';
 import { ClaimStore } from './claims/claimStore.js';
 import { CaptureRunStore, startOfLocalDay } from './claims/captureRunStore.js';
@@ -414,25 +415,22 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   };
 
   /** Backfill embeddings for sessions ingested before this feature / after a
-   *  model change. Non-blocking; walks every known session once. */
-  const startEmbedBackfill = (embedFn: EmbedFn): void => {
-    void (async () => {
-      try {
-        // A model/dtype change re-keys EMBED_MODEL_ID; drop vectors under
-        // retired keys so they don't accumulate as dead weight.
-        // Spanned (#perf boot attribution): the post-launch stall storm overlaps
-        // this backfill; boot.embed_backfill is wall time, the index.* / embed.*
-        // child spans carry the synchronous parts that can block the loop.
-        await perfSpanAsync('claude_fleet.boot.embed_backfill', async () => {
-          await perfSpanAsync('claude_fleet.index.delete_stale_models', () => deleteEmbeddingsForOtherModels(EMBED_MODEL_ID));
-          const sessionIds = await perfSpanAsync('claude_fleet.index.list_sessions', () => listSessionIds());
-          for (const id of sessionIds) await indexSessionTurns(id, embedFn);
-          await indexSessionSummaries(embedFn);
-        });
-      } catch (e) {
-        logError({ source: 'main', level: 'warn', type: 'index-backfill', message: String(e) });
-      }
-    })();
+   *  model change. Starts after boot settles and yields between sessions so it
+   *  never holds the main loop (#464); embedding runs in the sidecar. */
+  const startEmbedBackfill = (embedFn: EmbedFn, storeId: string): void => {
+    const timer = setTimeout(() => {
+      void perfSpanAsync('claude_fleet.boot.embed_backfill', () => runEmbedBackfill({
+        markerPath: join(userData, 'models', '.embed-model-id'),
+        storeId,
+        modelId: EMBED_MODEL_ID,
+        deleteStale: () => deleteEmbeddingsForOtherModels(EMBED_MODEL_ID),
+        listSessionIds,
+        indexTurns: (id) => indexSessionTurns(id, embedFn),
+        indexSummaries: () => indexSessionSummaries(embedFn),
+        onError: (step, e) => logError({ source: 'main', level: 'warn', type: 'index-backfill', message: `${step}: ${String(e)}` }),
+      })).catch((e) => logError({ source: 'main', level: 'warn', type: 'index-backfill', message: String(e) }));
+    }, EMBED_BACKFILL_DELAY_MS);
+    timer.unref?.();
   };
 
   /** Inbox, notification and automation IPC plus their timers, and the
@@ -520,16 +518,21 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   // (WAL readers, e.g. the MCP read source, aren't blocked by it).
   const historyAfterVacuum = sqlite && !!jsonlWatcher && vacuumHelperActive(userData);
   let sqliteManifests: WorkspaceSpec[] = [];
+  // Watcher-triggered indexing waits this long after ingest starts; the
+  // deferred backfill covers what lands before (#464).
+  let indexOpensAt = Date.now() + EMBED_BACKFILL_DELAY_MS;
+  const sqliteStoreId = storeIdentity({ kind: 'sqlite', path: join(userData, 'state.db') });
   const startSqliteHistory = async (): Promise<void> => {
     openDb(userData);
     await startStateWrites();
     startStateRetention();
   };
   const startSqliteIngest = async (watcher: JsonlWatcher, embedFn: EmbedFn): Promise<void> => {
+    indexOpensAt = Date.now() + EMBED_BACKFILL_DELAY_MS;
     await startWatcher(watcher, sqliteManifests);
     await startCaptureScheduler(watcher);
     registerLocalDirs(watcher, sqliteManifests);
-    startEmbedBackfill(embedFn);
+    startEmbedBackfill(embedFn, sqliteStoreId);
   };
   if (jsonlWatcher) {
     if (sqlite && !historyAfterVacuum) await startSqliteHistory();
@@ -546,11 +549,15 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
 
     // Index new turns/summaries as they land. Fire-and-forget: indexing must
     // never block ingest, and a failure degrades search silently (logged).
+    // Boot ingest is left to the deferred backfill, so the first embed (and on
+    // the fallback path, the in-process model load) stays out of startup.
     jsonlWatcher.on('ingest', ({ sessionId }) => {
+      if (Date.now() < indexOpensAt) return;
       indexSessionTurns(sessionId, embedFn).catch((e) =>
         logError({ source: 'main', level: 'warn', type: 'transcript-index', message: String(e) }));
     });
     jsonlWatcher.on('ingest', () => {
+      if (Date.now() < indexOpensAt) return;
       indexSessionSummaries(embedFn).catch((e) =>
         logError({ source: 'main', level: 'warn', type: 'summary-index', message: String(e) }));
     });
@@ -614,7 +621,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         );
       });
     }
-    if (sqlite && !historyAfterVacuum) startEmbedBackfill(embedFn);
+    if (sqlite && !historyAfterVacuum) startEmbedBackfill(embedFn, sqliteStoreId);
   }
 
   if (!sqlite) {
@@ -670,7 +677,12 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         },
       },
       { name: 'local-dirs', group: 'history', run: () => { if (jsonlWatcher) registerLocalDirs(jsonlWatcher, manifests); } },
-      { name: 'embed-backfill', group: 'history', run: () => { if (embed) startEmbedBackfill(embed); } },
+      {
+        name: 'embed-backfill', group: 'history', run: (s) => {
+          const c = s.poolConfig;
+          if (embed) startEmbedBackfill(embed, storeIdentity({ kind: 'postgres', host: c.host, port: c.port, database: c.database, connectionString: c.connectionString, schema: c.schema }));
+        },
+      },
       { name: 'retention', group: 'history', after: ['watcher'], run: () => startStateRetention() },
       { name: 'capture-scheduler', group: 'inbox', after: ['claims', 'watcher'], run: () => (jsonlWatcher ? startCaptureScheduler(jsonlWatcher) : undefined) },
     ]);

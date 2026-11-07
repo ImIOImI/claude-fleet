@@ -8,6 +8,7 @@
 # Other targets:
 #   make windows     # (re)build the installer (assumes deps already installed)
 #   make portable    # build a no-installer ZIP-able dir — does NOT need Wine
+#   make embedder-win  # fetch the released fleet-embedder.exe (windows/portable run it)
 #   make help        # list all targets
 #
 # Why Wine is required: electron-builder packages the Windows app fine on Linux,
@@ -66,12 +67,41 @@ natives-win: ## Cross-prepare native modules (better-sqlite3, keytar, node-pty) 
 	npx --no-install electron-builder install-app-deps \
 		--platform win32 --arch $(WIN_ARCH)
 
+.PHONY: embedder-win
+# fleet-embedder.exe + its VC++ runtime DLLs, built natively on windows-latest
+# and attached to each GitHub release (drafts too) as
+# fleet-embedder-windows-x64.zip. Cross-compiling from WSL (cargo-xwin) would
+# need the MSVC SDK.
+#   EMBEDDER_TAG=v0.14.13   release to fetch from (default: v<package.json
+#                           version>, else the newest release, drafts included)
+#   EMBEDDER_WIN_ZIP=<path> use a local zip instead
+#   ALLOW_NO_EMBEDDER=1     build without it (the app then embeds in process)
+embedder-win: ## Fetch the Windows fleet-embedder from a GitHub release into embedder/bin
+	@command -v unzip >/dev/null || { echo "✗ unzip not found (sudo apt-get install unzip)"; exit 1; }
+	@rm -f embedder/bin/fleet-embedder.exe embedder/bin/*.dll
+	@rm -rf embedder/bin/.download && mkdir -p embedder/bin/.download
+	@set -o pipefail; zip=embedder/bin/.download/fleet-embedder-windows-x64.zip; \
+	fetch() { echo "fleet-embedder: release $$1"; \
+		gh release download "$$1" --pattern fleet-embedder-windows-x64.zip --dir embedder/bin/.download; }; \
+	if [ -n "$(EMBEDDER_WIN_ZIP)" ]; then \
+		echo "fleet-embedder: $(EMBEDDER_WIN_ZIP)"; cp "$(EMBEDDER_WIN_ZIP)" "$$zip"; \
+	elif [ -n "$(EMBEDDER_TAG)" ]; then \
+		fetch "$(EMBEDDER_TAG)"; \
+	else \
+		fetch "v$$(node -p 'require("./package.json").version')" \
+		|| { newest=$$(gh release list --limit 1 --json tagName --jq '.[0].tagName') && [ -n "$$newest" ] && fetch "$$newest"; }; \
+	fi && unzip -oq "$$zip" -d embedder/bin \
+	&& rm -rf embedder/bin/.download && ls -l embedder/bin/fleet-embedder.exe \
+	|| { rm -rf embedder/bin/.download; \
+		if [ -n "$(ALLOW_NO_EMBEDDER)" ]; then echo "⚠ no fleet-embedder.exe: the installer will embed in process"; \
+		else echo "✗ could not fetch fleet-embedder-windows-x64.zip (gh auth login? set EMBEDDER_TAG, EMBEDDER_WIN_ZIP, or ALLOW_NO_EMBEDDER=1)"; exit 1; fi; }
+
 .PHONY: build
 build: ## Compile main/preload/renderer bundles (electron-vite)
 	npm run build
 
 .PHONY: windows
-windows: build natives-win ## Build the unsigned Windows NSIS installer (needs Wine)
+windows: build natives-win embedder-win ## Build the unsigned Windows NSIS installer (needs Wine)
 	npx --no-install electron-builder --win --$(WIN_ARCH) \
 		--config electron-builder.yml \
 		--publish never
@@ -79,7 +109,7 @@ windows: build natives-win ## Build the unsigned Windows NSIS installer (needs W
 	@ls -lh $(DIST_DIR)/*.exe 2>/dev/null || echo "(no .exe — check log above)"
 
 .PHONY: portable
-portable: build natives-win ## Build the app dir WITHOUT an installer (no Wine needed)
+portable: build natives-win embedder-win ## Build the app dir WITHOUT an installer (no Wine needed)
 	npx --no-install electron-builder --win --$(WIN_ARCH) --dir \
 		--config electron-builder.yml \
 		-c.win.signAndEditExecutable=false \

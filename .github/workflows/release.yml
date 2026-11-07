@@ -75,6 +75,47 @@ jobs:
           rm -rf node_modules/cpu-features
           npx --no-install electron-builder install-app-deps --platform win32 --arch x64
 
+      # fleet-embedder sidecar (embedder/README.md). embedder/scripts/ci-build.sh
+      # builds into embedder/bin/ (shipped as resources/embedder/) and checks
+      # the result: Linux glibc <= 2.28, macOS signature, a smoke run.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: embedder
+
+      # Linux builds in Debian 12 (ci-build-linux.sh) for the glibc 2.28 floor.
+      - name: Build fleet-embedder
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then embedder/scripts/ci-build-linux.sh; else embedder/scripts/ci-build.sh; fi
+
+      # Real embed with the model: catches a binary that starts but can't load
+      # onnxruntime's dependencies (e.g. Windows DLLs).
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/hf-cache
+          key: hf-bge-small-en-v1.5-q8
+
+      - name: Smoke-embed fleet-embedder
+        shell: bash
+        run: |
+          exe=embedder/bin/fleet-embedder; [ "$RUNNER_OS" = Windows ] && exe=$exe.exe
+          node embedder/scripts/smoke-embed.mjs "$exe" "${{ runner.temp }}/hf-cache"
+
+      # Attached to the draft release; `make embedder-win` downloads it.
+      - name: Package fleet-embedder (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: Compress-Archive -Path embedder/bin/fleet-embedder.exe, embedder/bin/*.dll -DestinationPath fleet-embedder-windows-x64.zip
+
+      - name: Upload fleet-embedder (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleet-embedder-windows
+          path: fleet-embedder-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Build installer
         # --publish never: the release job (below) owns publishing.
         # CSC_IDENTITY_AUTO_DISCOVERY=false: don't try to sign on macOS — these
@@ -82,6 +123,16 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npm run dist -- --publish never
+
+      # electron-builder may re-sign the bundle; the sidecar must stay validly
+      # signed (ad hoc) or arm64 macOS kills it on exec.
+      - name: Verify packaged fleet-embedder signature (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          bin=$(find dist -path '*.app/Contents/Resources/embedder/fleet-embedder' | head -1)
+          test -n "$bin"
+          codesign -dv "$bin"
+          codesign -v --strict "$bin"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

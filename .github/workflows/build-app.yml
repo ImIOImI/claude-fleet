@@ -54,7 +54,7 @@ jobs:
           changed=$(git diff --name-only "$base" "$head")
           echo "changed files:"; echo "$changed" | sed 's/^/  /'
           # Mirrors the old on.pull_request.paths list.
-          if echo "$changed" | grep -qE '^(src/|tests/|playwright\.config\.ts$|package\.json$|package-lock\.json$|electron-builder\.yml$|electron\.vite\.config\.ts$|tsconfig\.host\.json$|vite\.host\.config\.ts$|vitest(\.pg)?\.config\.ts$|scripts/pg-test-server\.sh$|broker/|\.github/workflows/build-app\.yml$)'; then
+          if echo "$changed" | grep -qE '^(src/|tests/|playwright\.config\.ts$|package\.json$|package-lock\.json$|electron-builder\.yml$|electron\.vite\.config\.ts$|tsconfig\.host\.json$|vite\.host\.config\.ts$|vitest(\.pg)?\.config\.ts$|scripts/pg-test-server\.sh$|broker/|embedder/|\.github/workflows/build-app\.yml$)'; then
             echo "→ code paths touched; running the full pipeline"
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
@@ -118,6 +118,25 @@ jobs:
       - name: Build broker (fleet-host integration test)
         run: cd broker && CGO_ENABLED=0 go build -o "$RUNNER_TEMP/broker" ./cmd/broker
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: embedder
+
+      # Same build + glibc gate as the packaged binary, so parity tests it.
+      # OpenSSL headers: the host `cargo test` build downloads onnxruntime.
+      - name: fleet-embedder tests + build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+          (cd embedder && cargo test --locked)
+          embedder/scripts/ci-build-linux.sh
+
+      # Model weights for the parity test (~35 MB); keyed by model + dtype.
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/hf-cache
+          key: hf-bge-small-en-v1.5-q8
+
       # Not strictly part of #311, but this workflow never typechecked either —
       # `npm run dist` builds without running tsc. One line, same job.
       - name: Typecheck
@@ -130,6 +149,14 @@ jobs:
         env:
           FLEET_BROKER_BIN: ${{ runner.temp }}/broker
         run: npm run test:unit
+
+      # Sidecar vs transformers.js on a fixed corpus (cosine >= 0.999).
+      - name: fleet-embedder parity
+        env:
+          CF_EMBED_PARITY: '1'
+          CF_HF_CACHE: ${{ runner.temp }}/hf-cache
+          FLEET_EMBEDDER_BIN: ${{ github.workspace }}/embedder/bin/fleet-embedder
+        run: npx vitest run src/main/embedderParity.test.ts
 
       # pgQueryIsolation tests raise errors that echo a 60 MB value; the runner
       # dumps the service log at teardown, which took ~30 min.
@@ -211,6 +238,47 @@ jobs:
           rm -rf node_modules/cpu-features
           npx --no-install electron-builder install-app-deps --platform win32 --arch x64
 
+      # fleet-embedder sidecar (embedder/README.md). embedder/scripts/ci-build.sh
+      # builds into embedder/bin/ (shipped as resources/embedder/) and checks
+      # the result: Linux glibc <= 2.28, macOS signature, a smoke run.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: embedder
+
+      # Linux builds in Debian 12 (ci-build-linux.sh) for the glibc 2.28 floor.
+      - name: Build fleet-embedder
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then embedder/scripts/ci-build-linux.sh; else embedder/scripts/ci-build.sh; fi
+
+      # Real embed with the model: catches a binary that starts but can't load
+      # onnxruntime's dependencies (e.g. Windows DLLs).
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/hf-cache
+          key: hf-bge-small-en-v1.5-q8
+
+      - name: Smoke-embed fleet-embedder
+        shell: bash
+        run: |
+          exe=embedder/bin/fleet-embedder; [ "$RUNNER_OS" = Windows ] && exe=$exe.exe
+          node embedder/scripts/smoke-embed.mjs "$exe" "${{ runner.temp }}/hf-cache"
+
+      # Attached to the draft release; `make embedder-win` downloads it.
+      - name: Package fleet-embedder (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: Compress-Archive -Path embedder/bin/fleet-embedder.exe, embedder/bin/*.dll -DestinationPath fleet-embedder-windows-x64.zip
+
+      - name: Upload fleet-embedder (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleet-embedder-windows
+          path: fleet-embedder-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Build installer
         # --publish never: the release job (below) owns publishing.
         # CSC_IDENTITY_AUTO_DISCOVERY=false: don't try to sign on macOS — these
@@ -218,6 +286,16 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npm run dist -- --publish never
+
+      # electron-builder may re-sign the bundle; the sidecar must stay validly
+      # signed (ad hoc) or arm64 macOS kills it on exec.
+      - name: Verify packaged fleet-embedder signature (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          bin=$(find dist -path '*.app/Contents/Resources/embedder/fleet-embedder' | head -1)
+          test -n "$bin"
+          codesign -dv "$bin"
+          codesign -v --strict "$bin"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
