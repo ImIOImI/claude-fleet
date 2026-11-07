@@ -9,7 +9,7 @@ import pg from 'pg';
 import { sql, type Kysely } from 'kysely';
 import { parse as parseConnectionString } from 'pg-connection-string';
 import type { PasswordProvider } from './passwordProvider.js';
-import { plaintextAuthGuard } from './pgScramOnly.js';
+import { pgClientFor } from './pgScramOnly.js';
 import { pgTypes, writeLock, type PgPoolConfig } from './postgres.js';
 import { scramVerifier } from './scram.js';
 import { QUERY_USER } from './storeConfig.js';
@@ -54,7 +54,7 @@ export function rolePoolConfig(base: PgPoolConfig, user: string, password: strin
   const { connectionString, schema: _schema, session: _session, user: _u, password: _p, max: _max, ...rest } = base as PgPoolConfig & pg.PoolConfig;
   const cs = connectionString ? parseConnectionString(connectionString) : null;
   return {
-    ...plaintextAuthGuard(rest.ssl),
+    ...pgClientFor(rest.ssl),
     ...rest,
     host: cs?.host ?? rest.host,
     port: cs?.port ? Number(cs.port) : rest.port,

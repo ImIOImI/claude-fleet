@@ -6,7 +6,7 @@ import pg from 'pg';
 import { parse as parseConnectionString } from 'pg-connection-string';
 import { passwordProvider } from '../main/store/passwordProvider.js';
 import { isolationRoles, MAX_SCHEMA_LEN } from '../main/store/pgQueryIsolation.js';
-import { plaintextAuthGuard } from '../main/store/pgScramOnly.js';
+import { pgClientFor } from '../main/store/pgScramOnly.js';
 import { pgSsl } from '../main/store/pgSsl.js';
 import { pgPoolConfig, QUERY_USER, type PostgresStoreConfig } from '../main/store/storeConfig.js';
 import type { AdminCredential } from './adminCreds.js';
@@ -117,7 +117,7 @@ export async function bootstrap(t: BootstrapTarget, admin: AdminCredential, o: B
 }
 
 async function adminClient(t: BootstrapTarget, admin: AdminCredential, database: string, o: BootstrapOptions): Promise<pg.Client> {
-  const Client = plaintextAuthGuard(t.ssl).Client ?? pg.Client;
+  const { Client } = pgClientFor(t.ssl);
   const c = new Client({
     host: t.host, port: t.port, database, user: admin.user, password: admin.password, ssl: t.ssl,
     connectionTimeoutMillis: o.connectTimeoutMs ?? 10_000, application_name: 'fleet-host bootstrap'

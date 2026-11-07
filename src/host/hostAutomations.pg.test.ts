@@ -54,7 +54,9 @@ describe.skipIf(!isPg)('host automations under the lease', () => {
     const a = await host('a', () => ea, clock);
     await a.h.reconcile([daily]);
     clock.now = Date.parse('2026-11-06T03:00:30Z');
-    const [ra, rb] = await Promise.allSettled([a.h.tick(), b.h.tick()]);
+    // b first: once a has claimed the slot, b's tick finds nothing due and never reaches a fenced write.
+    const [rb] = await Promise.allSettled([b.h.tick()]);
+    const [ra] = await Promise.allSettled([a.h.tick()]);
     expect(ra.status).toBe('fulfilled');
     expect(rb.status).toBe('rejected');
     expect((rb as PromiseRejectedResult).reason.message).toMatch(/lease|holder/);
