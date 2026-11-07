@@ -62,10 +62,20 @@ export function parseSessionsPage(v: unknown, workspaceId: string): { rows: Remo
 }
 
 const STATUSES = new Set(['ok', 'error', 'pending']);
-const finiteList = (v: unknown, max: number): number[] => {
+const nonNeg = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+const series = (v: unknown, max: number, ok: (n: unknown) => n is number): number[] => {
   if (!Array.isArray(v)) return fail('summary series');
-  return v.slice(-max).map((n) => (typeof n === 'number' && Number.isFinite(n) ? n : fail('summary series')));
+  return v.slice(-max).map((n) => (ok(n) ? n : fail('summary series')));
 };
+
+type ToolCall = WorkspaceSummary['recentToolCalls'][number];
+function parseToolCall(v: unknown): ToolCall | null {
+  const x = v as Record<string, unknown> | null;
+  if (!x || typeof x !== 'object') return null;
+  const input = text(x.input, 2000), durationMs = natOrNull(x.durationMs), ts = natOrNull(x.ts);
+  if (typeof x.name !== 'string' || input === undefined || durationMs === undefined || ts === undefined || !STATUSES.has(x.status as string)) return null;
+  return { name: oneLine(x.name, 64), input, durationMs, status: x.status as ToolCall['status'], ts };
+}
 
 export function parseSummary(v: unknown): WorkspaceSummary | null {
   if (v === null) return null;
@@ -78,23 +88,18 @@ export function parseSummary(v: unknown): WorkspaceSummary | null {
   for (const k of ['eventCount', 'inputTokens', 'outputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens', 'contextWindowTokens']) {
     if (!nat(s[k])) return fail('summary');
   }
-  if (typeof s.usd !== 'number' || !Number.isFinite(s.usd) || !Array.isArray(s.topTools) || !Array.isArray(s.recentToolCalls)) return fail('summary');
+  if (!nonNeg(s.usd) || !Array.isArray(s.topTools) || !Array.isArray(s.recentToolCalls)) return fail('summary');
   const topTools = s.topTools.slice(0, 20).map((t) => {
     const x = t as { name?: unknown; count?: unknown };
     if (typeof x?.name !== 'string' || !nat(x.count)) return fail('summary tool');
     return { name: oneLine(x.name, 64), count: x.count };
   });
-  const recentToolCalls = s.recentToolCalls.slice(0, 50).map((t) => {
-    const x = t as Record<string, unknown>;
-    const input = text(x?.input, 2000), durationMs = natOrNull(x?.durationMs), ts = natOrNull(x?.ts);
-    if (typeof x?.name !== 'string' || input === undefined || durationMs === undefined || ts === undefined || !STATUSES.has(x.status as string)) return fail('summary call');
-    return { name: oneLine(x.name, 64), input, durationMs, status: x.status as 'ok' | 'error' | 'pending', ts };
-  });
+  const recentToolCalls = s.recentToolCalls.slice(0, 50).map(parseToolCall).filter((c): c is ToolCall => c !== null);
   return {
     sessionId, title, model, startedAt, lastActiveAt,
     eventCount: s.eventCount as number, inputTokens: s.inputTokens as number, outputTokens: s.outputTokens as number,
     cacheReadInputTokens: s.cacheReadInputTokens as number, cacheCreationInputTokens: s.cacheCreationInputTokens as number,
     usd: s.usd, lastTurnContextTokens: lastTurn, contextWindowTokens: s.contextWindowTokens as number,
-    topTools, recentToolCalls, costSeries: finiteList(s.costSeries, 200), tokenSeries: finiteList(s.tokenSeries, 200),
+    topTools, recentToolCalls, costSeries: series(s.costSeries, 200, nonNeg), tokenSeries: series(s.tokenSeries, 200, nat),
   };
 }

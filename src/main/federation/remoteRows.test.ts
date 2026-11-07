@@ -36,7 +36,13 @@ describe('parseSummary', () => {
   it('null stays null; malformed throws', () => {
     expect(parseSummary(null)).toBeNull();
     expect(() => parseSummary({ ...s, contextWindowTokens: 'x' })).toThrow(RemoteShapeError);
-    expect(() => parseSummary({ ...s, recentToolCalls: [{ ...s.recentToolCalls[0], status: 'boom' }] })).toThrow(RemoteShapeError);
+    expect(() => parseSummary({ ...s, recentToolCalls: {} })).toThrow(RemoteShapeError);
+  });
+  it('drops a bad recent tool call and keeps the rest', () => {
+    const ok = s.recentToolCalls[0];
+    const calls = [{ ...ok, status: 'boom' }, { ...ok, durationMs: -1 }, { ...ok, ts: 1.5 }, { ...ok, name: 7 }, { ...ok, input: {} }, null, 'x', { ...ok, name: 'Read' }];
+    const out = parseSummary({ ...s, recentToolCalls: calls })!;
+    expect(out.recentToolCalls.map((c) => c.name)).toEqual(['Read']);
   });
 });
 
@@ -90,8 +96,8 @@ describe('remote reply caps', () => {
     expect(parseSummary(s)).toMatchObject({ sessionId: 's' });
     for (const bad of [
       { sessionId: 'a b' }, { title: 3 }, { usd: NaN }, { inputTokens: -1 }, { startedAt: 'x' }, { topTools: {} },
-      { topTools: [{ name: 'x', count: -1 }] }, { recentToolCalls: [{ name: 'x', input: null, durationMs: -1, status: 'ok', ts: 1 }] },
-      { costSeries: [Infinity] }, { tokenSeries: 'x' }
+      { topTools: [{ name: 'x', count: -1 }] }, { usd: -0.01 }, { usd: Infinity },
+      { costSeries: [Infinity] }, { costSeries: [-1] }, { tokenSeries: 'x' }, { tokenSeries: [1.5] }, { tokenSeries: [-1] }
     ]) {
       expect(() => parseSummary({ ...s, ...bad }), JSON.stringify(bad)).toThrow(RemoteShapeError);
     }

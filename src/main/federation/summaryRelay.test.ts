@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { RemoteSourceInfo } from '../remote';
 import { createSummaryRelay } from './summaryRelay';
 
 const A = '01JC0000000000000000000000';
@@ -47,19 +48,20 @@ describe('SummaryRelay', () => {
   });
 
   function rig(fetchSummary: () => Promise<unknown> = async () => null) {
-    const subs: Array<{ url: string; on: (e: { channel: string; payload: unknown }) => void; stopped: boolean }> = [];
+    type State = (connected: boolean, why?: { retryInMs: number | null }) => void;
+    const subs: Array<{ url: string; on: (e: { channel: string; payload: unknown }) => void; state: State; stopped: boolean }> = [];
     const timers: Array<{ fn: () => void; cancelled: boolean }> = [];
     const broadcast = vi.fn();
-    let sources = [{ id: A, url: 'http://a', name: 'a', hue: null, tier: 'read' as const, state: 'running' as const }];
+    let sources: RemoteSourceInfo[] = [{ id: A, url: 'http://a', name: 'a', hue: null, tier: 'read', state: 'running' }];
     const relay = createSummaryRelay({
       sources: () => sources,
-      subscribe: (url, on) => { const s = { url, on, stopped: false }; subs.push(s); return () => void (s.stopped = true); },
+      subscribe: (url, on, state) => { const s = { url, on, state, stopped: false }; subs.push(s); return () => void (s.stopped = true); },
       fetchSummary: fetchSummary as never,
       broadcast,
       schedule: (fn) => { const t = { fn, cancelled: false }; timers.push(t); return () => void (t.cancelled = true); },
     });
     const hint = (i = subs.length - 1) => subs[i].on({ channel: 'observability:summary', payload: { workspaceId: A } });
-    return { relay, subs, timers, broadcast, hint, setSources: (s: typeof sources) => void (sources = s) };
+    return { relay, subs, timers, broadcast, hint, setSources: (s: RemoteSourceInfo[]) => void (sources = s) };
   }
 
   it('pushes a null summary (no sessions yet); a rejected fetch pushes nothing', async () => {
@@ -97,6 +99,36 @@ describe('SummaryRelay', () => {
     expect(r.timers[0].cancelled).toBe(true);
     await r.timers[0].fn();
     expect(r.broadcast).not.toHaveBeenCalled();
+  });
+
+  it('a subscription that stops retrying is dropped, so the next sync resubscribes', () => {
+    const r = rig();
+    r.relay.sync();
+    r.subs[0].state(false, { retryInMs: 1_000 });
+    r.relay.sync();
+    expect(r.subs).toHaveLength(1);
+    r.subs[0].state(false, { retryInMs: null });
+    expect(r.subs[0].stopped).toBe(true);
+    r.relay.sync();
+    expect(r.subs.map((s) => s.stopped)).toEqual([true, false]);
+    r.subs[0].state(false, { retryInMs: null });
+    expect(r.subs[1].stopped).toBe(false);
+  });
+
+  it('subscribes only to a running source; an existing subscription rides out a down state', () => {
+    const r = rig();
+    const src = (state: RemoteSourceInfo['state']): RemoteSourceInfo[] => [{ id: A, url: 'http://a', name: 'a', hue: null, tier: 'read', state }];
+    r.setSources(src(null));
+    r.relay.sync();
+    r.setSources(src('unreachable'));
+    r.relay.sync();
+    expect(r.subs).toHaveLength(0);
+    r.setSources(src('running'));
+    r.relay.sync();
+    expect(r.subs).toHaveLength(1);
+    r.setSources(src('unreachable'));
+    r.relay.sync();
+    expect(r.subs.map((s) => s.stopped)).toEqual([false]);
   });
 
   it('a hint after a push schedules a new read', async () => {

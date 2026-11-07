@@ -21,6 +21,10 @@ describe('ipc.ts federation wiring', () => {
     expect(before(handlerSource('sessions:resume'), 'if (remoteBackend.isRemote(workspaceId)) return { containerId: workspaceId };', '.startWorkspace(workspaceId)')).toBe(true);
   });
 
+  it('refuses to delete a session under a remote workspace id', () => {
+    expect(before(handlerSource('sessions:delete'), 'if (remoteBackend.isRemote(workspaceId)) return;', 'await deleteSession(sessionId);')).toBe(true);
+  });
+
   it('registers sessions:listRemote, reads no sources in mock mode, and stops the relay on quit', () => {
     expect(src).toContain('registerFederationIpc(ipcMain, federated);');
     expect(src.match(/sources: \(\) => \(MOCK_MODE \? \[\] : remoteBackend\.sources\(\)\)/g)).toHaveLength(2);

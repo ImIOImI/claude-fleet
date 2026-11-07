@@ -8,7 +8,8 @@ export const RELAY_DEBOUNCE_MS = 2_000;
 
 export interface SummaryRelayDeps {
   sources(): RemoteSourceInfo[];
-  subscribe(url: string, onEvent: (e: RemoteEvent) => void): () => void;
+  /** `RemoteClient.subscribe`; `retryInMs` null: it has stopped for good. */
+  subscribe(url: string, onEvent: (e: RemoteEvent) => void, onState: (connected: boolean, why?: { retryInMs: number | null }) => void): () => void;
   /** undefined: unavailable; nothing is pushed. */
   fetchSummary(remoteId: string): Promise<WorkspaceSummary | null | undefined>;
   broadcast(workspaceId: string, summary: WorkspaceSummary | null): void;
@@ -38,12 +39,19 @@ export function createSummaryRelay(d: SummaryRelayDeps): { sync(): void; stop():
       const want = new Map(d.sources().map((s) => [s.id, s]));
       for (const [id, s] of subs) if (want.get(id)?.url !== s.url) drop(id);
       for (const [id, src] of want) {
-        if (subs.has(id)) continue;
+        // A live subscription rides out a down state on its own backoff.
+        if (subs.has(id) || src.state !== 'running') continue;
         const entry: { url: string; stop: () => void; cancel: (() => void) | null } = { url: src.url, stop: () => undefined, cancel: null };
         subs.set(id, entry);
-        entry.stop = d.subscribe(src.url, (e) => {
-          if (e.channel === 'observability:summary' && (e.payload as { workspaceId?: unknown } | null)?.workspaceId === id) hint(id);
-        });
+        entry.stop = d.subscribe(
+          src.url,
+          (e) => {
+            if (e.channel === 'observability:summary' && (e.payload as { workspaceId?: unknown } | null)?.workspaceId === id) hint(id);
+          },
+          (connected, why) => {
+            if (!connected && why?.retryInMs === null && subs.get(id) === entry) drop(id);
+          }
+        );
       }
     },
     stop() {

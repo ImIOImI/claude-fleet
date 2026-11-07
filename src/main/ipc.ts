@@ -382,7 +382,7 @@ const federated = createFederatedReader({
 });
 const summaryRelay = createSummaryRelay({
   sources: () => (MOCK_MODE ? [] : remoteBackend.sources()),
-  subscribe: (url, on) => remoteBackend.clientFor(url).subscribe(on),
+  subscribe: (url, on, state) => remoteBackend.clientFor(url).subscribe(on, state),
   fetchSummary: (id) => federated.summary(id, null),
   broadcast: (workspaceId, summary) => broadcastObservabilitySummary({ workspaceId, summary }, BrowserWindow.getAllWindows())
 });
@@ -1443,6 +1443,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // does NOT drop DB rows, so deleteSession() does that explicitly. Unlink
   // is best-effort: a missing file (already gone) is fine.
   ipcMain.handle('sessions:delete', async (_e, workspaceId: string, sessionId: string) => {
+    if (remoteBackend.isRemote(workspaceId)) return;
     await deleteSession(sessionId);
     try {
       await unlink(workspaceTranscriptPath(workspaceId, sessionId));
