@@ -25,13 +25,16 @@ describe('parseSubagentPath', () => {
   });
 });
 
-describe('subagent ingestion', () => {
+describe.each([
+  ['chokidar', false],
+  ['native recursive fs.watch', true]
+])('subagent ingestion (%s)', (_backend, nativeRecursive) => {
   it('rolls subagent tokens up into the parent session', async () => {
     const projectDir = join(dir, 'projects', '-workspace');
     const subDir = join(projectDir, PARENT, 'subagents');
     mkdirSync(subDir, { recursive: true });
 
-    const w = new JsonlWatcher();
+    const w = new JsonlWatcher({ nativeRecursive });
     await w.start([]);
     w.registerLocalDirForTest('ws1', projectDir); // reuse Task 4 seam for a watched dir
 
@@ -40,5 +43,26 @@ describe('subagent ingestion', () => {
     await w.stop();
 
     expect((await costForSession(PARENT)).outputTokens).toBe(500);
+  });
+});
+
+describe('native recursive backend', () => {
+  it('ingests transcripts that exist before start and ones written after', async () => {
+    const projectDir = join(dir, 'projects', '-workspace');
+    mkdirSync(projectDir, { recursive: true });
+    const before = 'bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const after = 'cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee';
+    writeFileSync(join(projectDir, `${before}.jsonl`), subLine.replace('sa1', 'b1') + '\n');
+
+    const w = new JsonlWatcher({ nativeRecursive: true });
+    await w.start([]);
+    w.registerLocalDirForTest('ws1', projectDir);
+    await new Promise((r) => setTimeout(r, 200));
+    writeFileSync(join(projectDir, `${after}.jsonl`), subLine.replace('sa1', 'c1') + '\n');
+    await new Promise((r) => setTimeout(r, 400));
+    await w.stop();
+
+    expect((await costForSession(before)).outputTokens).toBe(500);
+    expect((await costForSession(after)).outputTokens).toBe(500);
   });
 });
