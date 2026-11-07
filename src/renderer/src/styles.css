@@ -651,6 +651,9 @@ body {
   flex: none;
 }
 .session-row-cost { margin-left: auto; font-family: var(--font-mono); }
+.session-row-meta .remote-glyph { flex: none; opacity: 0.8; }
+.sessions-unavailable { font-size: 11px; padding: 4px 8px; }
+.sessions-more { margin: 4px 8px; }
 /* Busy: claude actively working in this session — a leading dot pulses, in
    lockstep with the workspace chip + session-tab indicators (wall-clock
    synced via blinkSync). Reuses the chip's `chipBusyPulse` keyframes. */

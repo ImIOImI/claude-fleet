@@ -11,6 +11,7 @@ import { IconCopy, IconEject, IconPause, IconPencil, IconPlay, IconStop, IconTra
 import { isWarm } from '../fleetTemperature';
 import { forgetText, remoteChip, tierTitle } from '../remoteView';
 import { ModalBackdrop } from './ModalBackdrop';
+import { CloudGlyph } from './CloudGlyph';
 
 /**
  * The chip's status dot. A separate component so the busy pulse can be
@@ -22,21 +23,6 @@ function ChipDot({ state, busy, waiting, remote }: { state: WorkspaceState; busy
   const blink = useBlinkSync(busy || waiting);
   const base = remote ? `dot ${state} remote ${remote}` : `dot ${state}`;
   return <span className={`${dotClass({ base, busy, waiting })}`} style={blink} />;
-}
-
-function CloudGlyph({ title }: { title: string }): JSX.Element {
-  return (
-    <svg className="remote-glyph" width={14} height={14} viewBox="0 0 16 16" aria-hidden={!title}>
-      <title>{title}</title>
-      <path
-        d="M4.5 12.5h7a3 3 0 00.4-5.97A4 4 0 004.3 7.1 2.7 2.7 0 004.5 12.5z"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        fill="none"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
 }
 
 /** Tooltip describing a reachable workspace's committee opt-in. */

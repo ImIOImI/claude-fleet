@@ -10,13 +10,33 @@
 // or "All" (every live workspace). Data is fetched from the main process
 // via `window.api.sessions.list`; we refetch on scope/selection change, on
 // every observability summary push (so new + just-active sessions surface
-// live), and after our own rename/delete actions.
+// live), and after our own rename/delete actions. Remote bookmarks' rows come
+// from `sessions.listRemote` and merge in by recency, tagged with a cloud glyph.
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { colorFor } from '../App';
 import type { SessionListItem } from '../../../preload';
-import { sessionsForScope, filterSessions, partitionByOpen, orderByRecencyBucket, splitHeadless, splitCapture, tagCounts, limitSessions } from '../sessionsView';
+import { mergeSessionPages, type MergedSessions, type SessionCursor, type UnavailableSource } from '../../../preload/federation';
+import {
+  sessionsForScope,
+  filterSessions,
+  partitionByOpen,
+  orderByRecencyBucket,
+  splitHeadless,
+  splitCapture,
+  tagCounts,
+  limitSessions,
+  withRemote,
+  isRemoteRow,
+  unavailableText,
+  refreshedRemote,
+  loadedMoreRemote,
+  mergeUnavailable,
+  canResumeHere,
+  type RemoteResumeInfo
+} from '../sessionsView';
+import { CloudGlyph } from './CloudGlyph';
 import { useBlinkSync } from '../blinkSync';
 import type { OpenTabRef } from '../busySessions';
 import { usePortalMenu } from './portalMenu';
@@ -50,6 +70,8 @@ interface Props {
   currentSessionId?: string | null;
   /** Resume a session — App brings the container up, then opens a resume tab. */
   onResume: (item: SessionListItem) => void;
+  /** Remote bookmark id → tier and liveness; gates Resume on remote rows. */
+  remoteResume?: Record<string, RemoteResumeInfo>;
   /** Display prefs (uiPrefs): hide the per-session USD badge. Default show. */
   showSessionCost?: boolean;
   /** Display prefs: trim the Recent list to the newest N (0 = unlimited). */
@@ -60,6 +82,11 @@ interface Props {
    *  caller (LeftRail accordion) provides the section header. (#16-followup) */
   embedded?: boolean;
 }
+
+const blockedTitle = (s: SessionListItem, remote: Record<string, RemoteResumeInfo> | undefined): string =>
+  remote?.[s.workspaceId]?.running === false
+    ? 'Host unavailable: resume once it is reachable'
+    : 'Resuming here needs the session tier on this host';
 
 function displayTitle(s: SessionListItem): string {
   return s.userSetName || s.aiTitle || s.firstUserMessage || '(untitled session)';
@@ -89,6 +116,7 @@ export function SessionsPane({
   openSessions,
   currentSessionId = null,
   onResume,
+  remoteResume,
   showSessionCost = true,
   maxSessions = 0,
   maxSessionAgeDays = 0,
@@ -98,7 +126,11 @@ export function SessionsPane({
   const [query, setQuery] = useState('');
   const [headlessExpanded, setHeadlessExpanded] = useState(false);
   const [captureExpanded, setCaptureExpanded] = useState(false);
-  const [items, setItems] = useState<SessionListItem[]>([]);
+  const [localItems, setLocalItems] = useState<SessionListItem[]>([]);
+  // Opaque: replace only with federation.ts results (see sessionsView.ts).
+  const [remote, setRemote] = useState<MergedSessions<SessionListItem> | null>(null);
+  const [unavailable, setUnavailable] = useState<UnavailableSource[]>([]);
+  const items = useMemo(() => withRemote(localItems, remote), [localItems, remote]);
   const [loaded, setLoaded] = useState(false);
   // Inline-edit + inline-delete-confirm state, keyed by session id.
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -121,9 +153,9 @@ export function SessionsPane({
   const load = useCallback(async () => {
     try {
       const rows = await window.api.sessions.list();
-      setItems(rows);
+      setLocalItems(rows);
     } catch {
-      setItems([]);
+      setLocalItems([]);
     } finally {
       setLoaded(true);
     }
@@ -135,11 +167,57 @@ export function SessionsPane({
     void load();
   }, [load]);
 
-  // Live refresh: every observability ingest may add/advance a session.
-  // Throttle so a burst of pushes triggers at most one reload per beat.
-  const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const remoteOrigins = useRef(new Set<string>());
+  const loadRemote = useCallback(async () => {
+    try {
+      const r = await window.api.sessions.listRemote();
+      remoteOrigins.current = new Set([...r.pages.map((p) => p.origin), ...r.unavailable.map((u) => u.origin)]);
+      setRemote(r.pages.length ? mergeSessionPages(r.pages) : null);
+      setUnavailable(r.unavailable);
+    } catch {
+      setRemote(null);
+      setUnavailable([]);
+    }
+  }, []);
+  // listRemote with no origin is the only first-page read, so a one-origin
+  // refresh fans out and keeps just that origin's page and status.
+  const refreshOrigin = useCallback(async (origin: string) => {
+    const r = await window.api.sessions.listRemote().catch(() => null);
+    if (!r) return;
+    setRemote((cur) => refreshedRemote(cur, r, origin));
+    setUnavailable((u) => mergeUnavailable(u, r, origin));
+  }, []);
+  const loadMore = useCallback(async (origin: string, after: SessionCursor) => {
+    const r = await window.api.sessions.listRemote({ origin, after }).catch(() => null);
+    if (!r) return;
+    setRemote((cur) => loadedMoreRemote(cur, r, origin, after));
+    setUnavailable((u) => mergeUnavailable(u, r, origin));
+  }, []);
   useEffect(() => {
-    const unsub = window.api.observability.onSummary(() => {
+    void loadRemote();
+    const t = setInterval(() => void loadRemote(), 60_000);
+    return () => clearInterval(t);
+  }, [loadRemote]);
+
+  // Live refresh: every observability ingest may add/advance a session.
+  // Throttle so a burst of pushes triggers at most one reload per beat; a
+  // remote push refreshes only that origin, at most every 5 s.
+  const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const remoteTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  useEffect(() => {
+    const timers = remoteTimers.current;
+    const unsub = window.api.observability.onSummary((workspaceId) => {
+      if (remoteOrigins.current.has(workspaceId)) {
+        if (timers.has(workspaceId)) return;
+        timers.set(
+          workspaceId,
+          setTimeout(() => {
+            timers.delete(workspaceId);
+            void refreshOrigin(workspaceId);
+          }, 5_000)
+        );
+        return;
+      }
       if (reloadTimer.current) return;
       reloadTimer.current = setTimeout(() => {
         reloadTimer.current = null;
@@ -149,8 +227,10 @@ export function SessionsPane({
     return () => {
       unsub();
       if (reloadTimer.current) clearTimeout(reloadTimer.current);
+      for (const t of timers.values()) clearTimeout(t);
+      timers.clear();
     };
-  }, [load]);
+  }, [load, refreshOrigin]);
 
   const commitRename = async (id: string): Promise<void> => {
     const name = draftName.trim();
@@ -243,9 +323,11 @@ export function SessionsPane({
     const waiting = waitingSessionIds?.has(s.id) ?? false;
     const isOpen = openSessions?.has(s.id) ?? false;
     const isCurrent = isOpen && s.id === currentSessionId;
+    const remoteRow = isRemoteRow(s);
+    const resumable = isOpen || canResumeHere(s, remoteResume);
     return (
       <li
-        key={s.id}
+        key={`${s.origin ?? 'local'}:${s.id}`}
         ref={rowRef(s.id)}
         data-sid={s.id}
         aria-current={isCurrent ? 'true' : undefined}
@@ -269,13 +351,23 @@ export function SessionsPane({
           ) : (
             <button
               className="session-row-title"
-              title={isOpen ? `Go to open tab — "${displayTitle(s)}"` : `Resume "${displayTitle(s)}"`}
-              onClick={() => onResume(s)}
+              title={
+                isOpen
+                  ? `Go to open tab — "${displayTitle(s)}"`
+                  : resumable
+                    ? `Resume "${displayTitle(s)}"`
+                    : blockedTitle(s, remoteResume)
+              }
+              aria-disabled={resumable ? undefined : true}
+              onClick={() => {
+                if (resumable) onResume(s);
+              }}
             >
               {displayTitle(s)}
             </button>
           )}
           <div className="session-row-meta">
+            {remoteRow && <CloudGlyph title={`Remote · ${s.workspaceName}`} />}
             {scope === 'all' && (
               <span className="session-row-ws" title={s.workspaceName}>
                 <span
@@ -370,6 +462,17 @@ export function SessionsPane({
           onChange={(e) => setQuery(e.target.value)}
           aria-label="Search sessions"
         />
+        <button
+          className="btn-mini"
+          aria-label="Refresh sessions"
+          title="Refresh sessions"
+          onClick={() => {
+            void load();
+            void loadRemote();
+          }}
+        >
+          <IconRefresh />
+        </button>
         {allTags.length > 0 && (
           <div className="library-filter sessions-tagfilter">
             <button
@@ -475,12 +578,19 @@ export function SessionsPane({
             {showCapture && captureShown.map(renderRow)}
           </ul>
         )}
+        {unavailableText(unavailable) && <div className="sessions-unavailable subdued">{unavailableText(unavailable)}</div>}
+        {remote?.more.map((m) => (
+          <button key={m.origin} className="btn-mini sessions-more" onClick={() => void loadMore(m.origin, m.after)}>
+            Load older sessions from {remote.rows.find((r) => r.origin === m.origin)?.workspaceName ?? 'remote'}
+          </button>
+        ))}
       </div>
       {rowMenu &&
         (() => {
           const s = items.find((x) => x.id === rowMenu.id);
           if (!s) return null;
           const isOpen = openSessions?.has(s.id) ?? false;
+          const resumable = isOpen || canResumeHere(s, remoteResume);
           return createPortal(
             <div
               className="ws-chip-menu"
@@ -490,7 +600,8 @@ export function SessionsPane({
             >
               <button
                 role="menuitem"
-                title={isOpen ? 'Jump to the open terminal tab' : 'Resume this session'}
+                disabled={!resumable}
+                title={isOpen ? 'Jump to the open terminal tab' : resumable ? 'Resume this session' : blockedTitle(s, remoteResume)}
                 onClick={() => {
                   closeRowMenu();
                   onResume(s);
@@ -499,30 +610,34 @@ export function SessionsPane({
                 <IconRefresh />
                 <span>{isOpen ? 'Go to tab' : 'Resume'}</span>
               </button>
-              <button
-                role="menuitem"
-                onClick={() => {
-                  closeRowMenu();
-                  setDraftName(s.userSetName ?? displayTitle(s));
-                  setEditingId(s.id);
-                }}
-              >
-                <IconPencil />
-                <span>Rename</span>
-              </button>
-              <div className="ws-chip-menu-divider" />
-              <button
-                role="menuitem"
-                className="danger"
-                title="Delete session + transcript"
-                onClick={() => {
-                  closeRowMenu();
-                  setConfirmDeleteId(s.id);
-                }}
-              >
-                <IconTrash />
-                <span>Delete</span>
-              </button>
+              {!isRemoteRow(s) && (
+                <>
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      closeRowMenu();
+                      setDraftName(s.userSetName ?? displayTitle(s));
+                      setEditingId(s.id);
+                    }}
+                  >
+                    <IconPencil />
+                    <span>Rename</span>
+                  </button>
+                  <div className="ws-chip-menu-divider" />
+                  <button
+                    role="menuitem"
+                    className="danger"
+                    title="Delete session + transcript"
+                    onClick={() => {
+                      closeRowMenu();
+                      setConfirmDeleteId(s.id);
+                    }}
+                  >
+                    <IconTrash />
+                    <span>Delete</span>
+                  </button>
+                </>
+              )}
             </div>,
             document.body
           );

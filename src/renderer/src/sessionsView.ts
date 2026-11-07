@@ -5,6 +5,19 @@
 // badge provably a *session* count (the rows the All view lists) rather than a
 // workspace count — the #149 regression.
 
+import type { SessionListItem } from '../../preload';
+import {
+  LOCAL_ORIGIN,
+  appendSessionPage,
+  mergeSessionPages,
+  pagesOf,
+  replaceSessionPage,
+  type MergedSessions,
+  type RemoteSessionsResult,
+  type SessionCursor,
+  type UnavailableSource
+} from '../../preload/federation';
+
 /** Sessions to display for a scope.
  *  - 'all'       → every session across every workspace (what the badge counts).
  *  - 'workspace' → only the selected workspace's sessions; none when nothing is selected. */
@@ -126,4 +139,68 @@ export function limitSessions<T extends { lastActiveAt: number | null }>(
   }
   if (opts.maxCount > 0) out = out.slice(0, opts.maxCount);
   return out;
+}
+
+// Remote rows (remote-workspaces (d)). A MergedSessions carries its source
+// pages on a non-enumerable symbol: never spread or clone it, only pass it to
+// the federation.ts helpers.
+
+type Remote = MergedSessions<SessionListItem>;
+type RemoteResult = RemoteSessionsResult<SessionListItem>;
+
+export function withRemote(local: SessionListItem[], remote: Remote | null): SessionListItem[] {
+  if (!remote || remote.rows.length === 0) return local;
+  return mergeSessionPages([{ origin: LOCAL_ORIGIN, rows: local, next: null }, ...pagesOf(remote)]).rows;
+}
+
+export const isRemoteRow = (s: SessionListItem): boolean => s.origin !== undefined && s.origin !== LOCAL_ORIGIN;
+
+export function unavailableText(u: UnavailableSource[]): string | null {
+  if (u.length === 0) return null;
+  return `${u.length} source${u.length === 1 ? '' : 's'} unavailable: ${u.map((x) => x.name).join(', ')}`;
+}
+
+function withoutOrigin(cur: Remote, origin: string): Remote | null {
+  const rest = pagesOf(cur).filter((p) => p.origin !== origin);
+  return rest.length ? mergeSessionPages(rest) : null;
+}
+
+/** One origin's fresh first page from a full fan-out; an origin missing from
+ *  `r.pages` (unavailable or unbookmarked) drops out, since remote data is live-only. */
+export function refreshedRemote(cur: Remote | null, r: RemoteResult, origin: string): Remote | null {
+  const page = r.pages.find((p) => p.origin === origin);
+  if (page) return cur ? replaceSessionPage(cur, page) : mergeSessionPages([page]);
+  return cur ? withoutOrigin(cur, origin) : null;
+}
+
+/** Appends a load-more reply. A reply whose cursor is no longer the origin's
+ *  horizon (a refresh landed first) is ignored; a failed source drops out. */
+export function loadedMoreRemote(cur: Remote | null, r: RemoteResult | null, origin: string, after: SessionCursor): Remote | null {
+  if (!cur || !r) return cur;
+  if (!cur.more.some((m) => m.origin === origin && m.after.id === after.id && m.after.lastActiveAt === after.lastActiveAt)) return cur;
+  const page = r.pages.find((p) => p.origin === origin);
+  return page ? appendSessionPage(cur, page) : withoutOrigin(cur, origin);
+}
+
+export function mergeUnavailable(u: UnavailableSource[], r: RemoteResult, origin: string): UnavailableSource[] {
+  return [...u.filter((x) => x.origin !== origin), ...r.unavailable.filter((x) => x.origin === origin)];
+}
+
+export interface RemoteResumeInfo { tier: string | null; running: boolean }
+
+export function remoteResumeMap(
+  workspaces: ReadonlyArray<{ id: string; kind: string; state: string; remote?: { tier: string | null } }>
+): Record<string, RemoteResumeInfo> {
+  const out: Record<string, RemoteResumeInfo> = {};
+  for (const w of workspaces) {
+    if (w.kind === 'remote') out[w.id] = { tier: w.remote?.tier ?? null, running: w.state === 'running' };
+  }
+  return out;
+}
+
+/** Display gate only; the host tier-checks the attach. */
+export function canResumeHere(s: SessionListItem, remote: Record<string, RemoteResumeInfo> | undefined): boolean {
+  if (!isRemoteRow(s)) return true;
+  const b = remote?.[s.workspaceId];
+  return b !== undefined && b.tier === 'session' && b.running;
 }
