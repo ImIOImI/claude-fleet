@@ -90,6 +90,21 @@ describe('RecursiveDirWatcher recovery', () => {
     await rw.close();
   });
 
+  it('rescans when an event filename does not resolve under the root', async () => {
+    let listener: ((ev: string, f: string | null) => void) | null = null;
+    const fake = Object.assign(new EventEmitter(), { close: () => undefined }) as unknown as FSWatcher;
+    const rw = new RecursiveDirWatcher({ depth: 2, watchFn: (_root, l) => { listener = l; return fake; } });
+    const got: Array<[string, string]> = [];
+    for (const ev of ['change', 'unlink'] as const) rw.on(ev, (p: string) => got.push([ev, p]));
+    rw.add(root);
+    await new Promise((r) => setTimeout(r, 50));
+    writeFileSync(join(root, 'f.jsonl'), '1\n');
+    listener!('rename', join('ce', 'f.jsonl'));
+    await waitFor(() => got.some(([e, p]) => e === 'change' && p === join(root, 'f.jsonl')));
+    expect(got.some(([e]) => e === 'unlink')).toBe(false);
+    await rw.close();
+  });
+
   it('retries a root that was missing at add() and watches it once it exists', async () => {
     const missing = join(root, 'later');
     const rw = new RecursiveDirWatcher({ depth: 2, retryMs: 50 });

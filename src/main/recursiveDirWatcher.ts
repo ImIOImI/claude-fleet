@@ -5,8 +5,8 @@
 // thousands of transcripts. Recursive fs.watch is one handle per root.
 
 import { EventEmitter } from 'node:events';
-import { watch, promises as fsp, type FSWatcher } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { realpathSync, watch, promises as fsp, type FSWatcher } from 'node:fs';
+import { dirname, join, relative, sep } from 'node:path';
 
 const RETRY_MS = 5000;
 
@@ -27,7 +27,10 @@ export class RecursiveDirWatcher extends EventEmitter {
     if (this.roots.has(root)) return this;
     let fsw: FSWatcher;
     try {
-      fsw = (this.opts.watchFn ?? nativeWatch)(root, (_ev, filename) => {
+      // Electron on Windows derives event filenames by stripping the watched
+      // path's length from the long-name event path: an 8.3 short name in
+      // root (RUNNER~1) yields garbage like `ce\a.jsonl`. Watch the long form.
+      fsw = (this.opts.watchFn ?? nativeWatch)(realpathSync.native(root), (_ev, filename) => {
         // No filename: the OS change buffer overflowed (Windows), so any file may have changed.
         if (filename) void this.onEvent(root, join(root, filename.toString()));
         else void this.scan(root, root, this.opts.depth, 'change');
@@ -77,7 +80,11 @@ export class RecursiveDirWatcher extends EventEmitter {
     try {
       st = await fsp.stat(p);
     } catch {
-      if (this.roots.has(root)) this.emit('unlink', p);
+      if (!this.roots.has(root)) return;
+      // A missing parent means the event filename is not a real path: rescan.
+      const parentExists = await fsp.stat(dirname(p)).then(() => true, () => false);
+      if (parentExists) this.emit('unlink', p);
+      else await this.scan(root, root, this.opts.depth, 'change');
       return;
     }
     if (!this.roots.has(root)) return;
