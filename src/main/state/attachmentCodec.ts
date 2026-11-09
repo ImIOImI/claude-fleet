@@ -16,17 +16,22 @@ function splice(s: string, at: number, len: number, insert: string): string {
   return s.slice(0, at) + insert + s.slice(at + len);
 }
 
-/** The line with each part marker replaced by its text; null when a marker is missing. */
-function rebuild(stored: string, ref: string, parts: readonly string[]): string | null {
+/** The line with each part marker replaced by its text; null when a marker
+ *  is missing. Self-contained: the MCP query worker runs its toString(). */
+export function spliceParts(stored: string, ref: string, parts: readonly unknown[]): string | null {
   let out = stored;
-  for (const [i, text] of parts.entries()) {
-    const m = partMarker(ref, i);
+  for (let i = 0; i < parts.length; i++) {
+    const text = parts[i];
+    if (typeof text !== 'string') return null;
+    const m = `{"fleetRef":"${ref}","part":${i}}`;
     const at = out.indexOf(m);
     if (at < 0) return null;
-    out = splice(out, at, m.length, text);
+    out = out.slice(0, at) + text + out.slice(at + m.length);
   }
   return out;
 }
+
+const rebuild = spliceParts;
 
 /** The stored form of an attachment line with a large payload, or null when
  *  the line is not one or would not rebuild exactly. `payload` is the blob
@@ -58,7 +63,20 @@ export function dedupeAttachment(line: string, parsed?: Record<string, unknown>)
   for (const i of parts.map((_, i) => i).sort((a, b) => parts[b].at - parts[a].at)) {
     stored = splice(stored, parts[i].at, parts[i].text.length, partMarker(ref, i));
   }
-  return rebuild(stored, ref, parts.map((p) => p.text)) === line ? { stored, ref, payload } : null;
+  if (rebuild(stored, ref, parts.map((p) => p.text)) !== line) return null;
+  // Each marker must have landed on its top-level key, not inside another value.
+  let check: Record<string, unknown>;
+  try {
+    check = JSON.parse(stored) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const keys = DEDUPE_KEYS.filter((k) => o[k] !== undefined);
+  const ok = keys.every((k, i) => {
+    const m = check[k] as { fleetRef?: unknown; part?: unknown } | null;
+    return m !== null && typeof m === 'object' && m.fleetRef === ref && m.part === i;
+  });
+  return ok ? { stored, ref, payload } : null;
 }
 
 export function deflatePayload(payload: string): Buffer {
@@ -72,8 +90,8 @@ export function expandLine(stored: string, ref: string | null, bodyZ: Uint8Array
   try {
     if (!bodyZ || bodyZ.length === 0) throw new Error(`attachment blob ${ref} missing`);
     const parts = JSON.parse(inflateSync(bodyZ).toString('utf8')) as unknown;
-    if (!Array.isArray(parts) || !parts.every((p) => typeof p === 'string')) throw new Error(`attachment blob ${ref} malformed`);
-    const out = rebuild(stored, ref, parts as string[]);
+    if (!Array.isArray(parts)) throw new Error(`attachment blob ${ref} malformed`);
+    const out = rebuild(stored, ref, parts);
     if (out === null) throw new Error(`attachment marker ${ref} not found`);
     return out;
   } catch (e) {

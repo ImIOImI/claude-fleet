@@ -910,7 +910,8 @@ export const TOOLS: Tool[] = [
       'Run a single read-only SQL statement against your workspace data. Tables: events, sessions, ' +
       'broker_sessions, session_summaries, session_tags, usage_events, perf_events, port_exposures — pre-filtered to the rows you may ' +
       'read, so SELECT freely (joins, aggregates, GROUP BY, datetime(ts/1000,"unixepoch") for UTC). ' +
-      'raw_jsonl is excluded unless include_raw=true. ' +
+      'raw_jsonl is excluded unless include_raw=true; with it, raw_jsonl is the full original line (compressed and ' +
+      'deduped lines are rebuilt) and event_blobs(hash, body_z) holds the deduped attachment bodies the rows reference. ' +
       'Args: sql (required), params (array of bound ? values), include_raw (bool), max_rows (default ' +
       `${DEFAULT_LIMIT}, max ${MAX_LIMIT}). Writes/DDL/multi-statement are rejected.`,
     pgDescription:

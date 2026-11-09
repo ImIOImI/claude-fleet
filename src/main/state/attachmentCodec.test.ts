@@ -32,6 +32,14 @@ describe('attachment codec', () => {
     expect(dedupeAttachment(JSON.stringify({ type: 'attachment', attachment: half, rendered: 'b'.repeat(ATTACHMENT_MIN_BYTES / 2) }))).not.toBeNull();
   });
 
+  it('skips a line whose only literal match is nested, not the top-level key', () => {
+    const canon = JSON.stringify(big);
+    // Top-level value written with a space (not what JSON.stringify produces); a nested copy is canonical.
+    const line = `{"type":"attachment","attachment": ${canon},"meta":{"attachment":${canon}}}`;
+    expect(JSON.parse(line).attachment).toEqual(big);
+    expect(dedupeAttachment(line)).toBeNull();
+  });
+
   it('gives the same payload the same ref', () => {
     expect(dedupeAttachment(att(big))!.ref).toBe(dedupeAttachment(att(big).replace('"u"', '"v"'))!.ref);
   });

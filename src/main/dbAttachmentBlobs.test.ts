@@ -29,6 +29,27 @@ describe('state v17 attachment blobs', () => {
     expect(await queryRows('SELECT refs FROM event_blobs')).toEqual([]);
   });
 
+  it('an att_ref change releases the old reference', async () => {
+    await ingestBatch(WS, 's1', [big('a'), big('b')]);
+    if (isPg) return;
+    await stateKysely().updateTable('events').set({ att_ref: null }).where('uuid', '=', 'a').execute();
+    expect(await refs()).toEqual([1]);
+    await stateKysely().updateTable('events').set({ att_ref: null }).where('uuid', '=', 'b').execute();
+    expect(await refs()).toEqual([]);
+  });
+
+  it('the Postgres triggers release references too', async () => {
+    if (!isPg) return;
+    await ingestLine(WS, 's1', line('a'));
+    await ingestLine(WS, 's2', line('b'));
+    await stateKysely().insertInto('event_blobs').values({ hash: 'h', body_z: Buffer.from('z'), bytes: 1, refs: 2 }).execute();
+    await stateKysely().updateTable('events').set({ att_ref: 'h' }).execute();
+    await stateKysely().updateTable('events').set({ att_ref: null }).where('session_id', '=', 's1').execute();
+    expect(await refs()).toEqual([1]);
+    await deleteSession('s2');
+    expect(await refs()).toEqual([]);
+  });
+
   it('dedupes identical payloads at ingest and reads the originals back', async () => {
     const lines = [big('a'), big('b'), big('c', 1)];
     await ingestBatch(WS, 's1', lines);

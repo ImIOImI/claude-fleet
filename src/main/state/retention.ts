@@ -116,7 +116,7 @@ export async function dedupeAttachments(t: Throttle, opts: { sliceRows?: number 
       if (keys.length === 0) return maxId;
       let take = 0;
       for (let bytes = 0; take < keys.length && (take === 0 || bytes + keys[take].bytes <= SLICE_BYTES); take++) bytes += keys[take].bytes;
-      const updates: { id: number; stored: string; ref: string; payload: string }[] = [];
+      const updates: { id: number; raw_jsonl: string; raw_z: Buffer | null; ref: string; payload: string }[] = [];
       for (const row of await retentionBodies(keys.slice(0, take).map((k) => k.id))) {
         let line: string;
         try {
@@ -126,8 +126,13 @@ export async function dedupeAttachments(t: Throttle, opts: { sliceRows?: number 
         }
         const d = dedupeAttachment(line);
         if (!d) continue;
-        updates.push({ id: row.id, ...d });
-        acc.bytesSaved += storedBytes(row) - Buffer.byteLength(d.stored, 'utf8');
+        // A row retention already compressed stays compressed: it sits behind its watermark.
+        const wasCompressed = row.raw_z !== null && row.raw_z.length > 0;
+        const next = wasCompressed && Buffer.byteLength(d.stored, 'utf8') >= COMPRESS_MIN_BYTES
+          ? { raw_jsonl: '', raw_z: deflateLine(d.stored) }
+          : { raw_jsonl: d.stored, raw_z: null };
+        updates.push({ id: row.id, ...next, ref: d.ref, payload: d.payload });
+        acc.bytesSaved += storedBytes(row) - storedBytes(next);
       }
       await applyAttachmentDedupe(updates);
       acc.rows += updates.length;

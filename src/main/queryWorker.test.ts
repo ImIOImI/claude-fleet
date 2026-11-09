@@ -206,3 +206,16 @@ describe('snapshot over a v17 state.db (deduped attachments)', () => {
   }, 30_000);
 });
 
+describe('fleet_raw matches expandLine', () => {
+  it('rebuilds the same line the app does, from real codec output', async () => {
+    const { dedupeAttachment, deflatePayload, expandLine } = await import('./state/attachmentCodec.js');
+    const line = JSON.stringify({ type: 'attachment', uuid: 'u', attachment: { type: 'instructions', content: '$&'.repeat(900) },
+      rendered: [{ content: 'r'.repeat(900) }] });
+    const d = dedupeAttachment(line)!;
+    const body = deflatePayload(d.payload);
+    const [{ r }] = await runQueryInWorker({ ...job(`SELECT fleet_raw(?, NULL, ?, ?) AS r`, { params: [d.stored, d.ref, body] }) }) as { r: string }[];
+    expect(r).toBe(expandLine(d.stored, d.ref, body));
+    expect(r).toBe(line);
+  }, 30_000);
+});
+

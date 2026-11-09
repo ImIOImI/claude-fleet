@@ -283,7 +283,7 @@ describe('insertEmbeddings storage', () => {
 
 describe('dedupeAttachments', () => {
   const att = (u: string) => JSON.stringify({ type: 'attachment', uuid: u, timestamp: iso(40), sessionId: SES,
-    attachment: { type: 'skill_listing', content: 'skill '.repeat(400) } });
+    attachment: { type: 'skill_listing', content: 'skill '.repeat(400) }, cwd: '/w/'.padEnd(600, 'x') });
 
   /** Rows as a pre-v17 app wrote them: full line, no att_ref, no blob. */
   async function legacyRows(): Promise<string[]> {
@@ -307,6 +307,10 @@ describe('dedupeAttachments', () => {
     const evs = await eventsForSession(SES);
     expect(evs.map((e) => e.rawJsonl)).toEqual(ls);
     expect(Number(await maintenanceGet('attachments.deduped_through_id'))).toBe(Math.max(...evs.map((e) => e.id)));
+    // The compressed source row's stub stays compressed; the plain ones stay plain.
+    const raw = await stored();
+    expect(isCompressed(raw.get('p2')!)).toBe(true);
+    expect(isCompressed(raw.get('p1')!)).toBe(false);
     expect((await dedupeAttachments(unthrottled)).rows).toBe(0);
   });
 
