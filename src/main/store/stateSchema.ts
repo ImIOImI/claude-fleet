@@ -168,6 +168,16 @@ export interface EventBlobsTable {
   refs: number;
 }
 
+/** Ingest resume point per transcript file (host path). */
+export interface TranscriptOffsetsTable {
+  path: string;
+  workspace_id: string;
+  session_id: string;
+  byte_offset: number;
+  /** File birth time (ms) when the offset was saved; null where the fs has none. */
+  birth_ms: number | null;
+}
+
 export interface StateDb {
   events: EventsTable;
   sessions: SessionsTable;
@@ -186,6 +196,7 @@ export interface StateDb {
   event_retention: EventRetentionTable;
   maintenance: MaintenanceTable;
   event_blobs: EventBlobsTable;
+  transcript_offsets: TranscriptOffsetsTable;
 }
 
 export type EventRowSel = Selectable<EventsTable>;

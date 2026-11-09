@@ -13,9 +13,9 @@
 // partial line for the next change event.
 //
 // Re-ingestion is idempotent: db.ingestBatch uses uuid (or a content hash for
-// light events) as a dedup key. The byte offset is an in-memory optimization
-// only — if we lose it (process restart, watch dropped), re-reading from
-// offset 0 produces the same end state.
+// light events) as a dedup key. Offsets are saved to transcript_offsets so a
+// restart resumes instead of re-reading every transcript (#539); a lost or
+// stale offset only costs a re-read from 0, which produces the same end state.
 
 import { EventEmitter } from 'node:events';
 import { mkdirSync, promises as fsp, type Stats } from 'node:fs';
@@ -26,7 +26,7 @@ import { join, extname, sep as pathSep } from 'node:path';
 import type { FSWatcher } from 'chokidar';
 import { NATIVE_RECURSIVE_DEFAULT, RecursiveDirWatcher, type DirWatcher } from './recursiveDirWatcher.js';
 import { workspaceClaudeDir, workspaceHistoryDir, workspaceHistoryFile, hostLocalProjectsDir } from './paths.js';
-import { ingestBatch } from './db.js';
+import { ingestBatch, loadTranscriptOffsets, saveTranscriptOffsets, type TranscriptOffset, type TranscriptOffsetRow } from './db.js';
 import { effectiveForClaudeSession } from './mirrorPolicy.js';
 import { perfSpan, perfSpanAsync } from './perf.js';
 import { keyedSerialQueue } from './state/serialQueue.js';
@@ -54,6 +54,7 @@ function logWatcherEvent(payload: {
 }
 
 const PROJECTS_SUBDIR = join('projects', '-workspace');
+const OFFSET_FLUSH_MS = 2000;
 // chokidar drops (not defers) a file's events within 5 ms of the last one, so
 // a write in that window has no event of its own. One re-check this
 // long after the last event in a burst reads it.
@@ -139,6 +140,12 @@ export class JsonlWatcher extends EventEmitter {
   // dropped events (#243). This set caps 'new-session' to once per session
   // per watcher lifetime. Cleared only on stop().
   private readonly announcedSessions = new Set<string>();
+  // Offsets saved by the last run, consumed on each file's first sighting.
+  private persisted = new Map<string, TranscriptOffset>();
+  // Offsets advanced since the last save, flushed every OFFSET_FLUSH_MS and on stop().
+  private readonly dirtyOffsets = new Map<string, TranscriptOffsetRow>();
+  private offsetFlushTimer: NodeJS.Timeout | null = null;
+  private offsetFlush: Promise<void> = Promise.resolve();
 
   // Registered host transcript dirs for local-backend workspaces:
   //   ~/.claude/projects/<encoded-root>/  →  real workspace id.
@@ -264,6 +271,10 @@ export class JsonlWatcher extends EventEmitter {
 
   async start(workspaceIds: string[]): Promise<void> {
     if (this.watcher) return;
+    this.persisted = await loadTranscriptOffsets().catch((err: unknown) => {
+      logWatcherEvent({ type: 'transcript-offsets-load-failed', level: 'warn', message: String(err) });
+      return new Map<string, TranscriptOffset>();
+    });
     // depth 2 reaches <projectdir>/<session>/subagents/agent-*.jsonl (#plan-usage).
     // No awaitWriteFinish: we tolerate partial-line reads by tracking the
     // last newline byte and rolling the offset forward only past complete
@@ -294,6 +305,10 @@ export class JsonlWatcher extends EventEmitter {
     // No new events can arrive now; let every queued batch finish before the
     // caller closes state.db.
     await this.queue.drain();
+    if (this.offsetFlushTimer) clearTimeout(this.offsetFlushTimer);
+    this.offsetFlushTimer = null;
+    await this.flushOffsets();
+    this.persisted.clear();
     this.polledDirs.clear();
     this.files.clear();
     this.watchedDirs.clear();
@@ -397,6 +412,13 @@ export class JsonlWatcher extends EventEmitter {
       this.files.delete(path);
       return;
     }
+    const birthMs = Math.round(stats.birthtimeMs) || null;
+    if (!existing) {
+      const saved = this.persisted.get(path);
+      this.persisted.delete(path);
+      // A different birth time means the path now names a new file.
+      if (saved && !(saved.birthMs && birthMs && saved.birthMs !== birthMs)) state.offset = saved.byteOffset;
+    }
     // Compaction: file shrank below our offset — reset and re-ingest.
     // dedup_key keeps existing rows; only genuinely new lines insert.
     if (stats.size < state.offset) state.offset = 0;
@@ -405,6 +427,7 @@ export class JsonlWatcher extends EventEmitter {
     const { newOffset, insertedCount } = await readAndIngest(path, state);
     state.offset = newOffset;
     this.files.set(path, state);
+    this.markOffset(path, state, birthMs);
 
     // Only emit when ≥1 line genuinely inserted (compaction re-reads return
     // duplicates whose dedup_key already exists; no consumer state change
@@ -415,6 +438,30 @@ export class JsonlWatcher extends EventEmitter {
         sessionId: state.sessionId,
       });
     }
+  }
+
+  private markOffset(path: string, state: FileState, birthMs: number | null): void {
+    this.dirtyOffsets.set(path, { path, workspaceId: state.workspaceId, sessionId: state.sessionId, byteOffset: state.offset, birthMs });
+    if (this.offsetFlushTimer) return;
+    this.offsetFlushTimer = setTimeout(() => {
+      this.offsetFlushTimer = null;
+      void this.flushOffsets();
+    }, OFFSET_FLUSH_MS);
+    this.offsetFlushTimer.unref();
+  }
+
+  /** Saves are chained so stop() can await the last one before state.db closes. */
+  private flushOffsets(): Promise<void> {
+    const rows = [...this.dirtyOffsets.values()];
+    this.dirtyOffsets.clear();
+    this.offsetFlush = this.offsetFlush.then(async () => {
+      if (rows.length === 0) return;
+      await saveTranscriptOffsets(rows).catch((err: unknown) => {
+        // Unsaved offsets only mean a re-read from an older point next launch.
+        logWatcherEvent({ type: 'transcript-offsets-save-failed', level: 'warn', message: String(err) });
+      });
+    });
+    return this.offsetFlush;
   }
 
   private initState(path: string): FileState | null {

@@ -244,9 +244,21 @@ CREATE TRIGGER events_att_ref_au AFTER UPDATE OF att_ref ON events
   FOR EACH ROW WHEN (OLD.att_ref IS NOT NULL AND OLD.att_ref IS DISTINCT FROM NEW.att_ref) EXECUTE FUNCTION events_att_ref_release();
 `;
 
+const TRANSCRIPT_OFFSETS_V18 = `
+CREATE TABLE transcript_offsets (
+  path ${T} PRIMARY KEY,
+  workspace_id ${T} NOT NULL,
+  session_id ${T} NOT NULL,
+  byte_offset BIGINT NOT NULL,
+  birth_ms BIGINT
+);
+CREATE INDEX idx_transcript_offsets_workspace ON transcript_offsets (workspace_id);
+CREATE INDEX idx_transcript_offsets_session ON transcript_offsets (session_id);
+`;
+
 export const STATE_PG_TRACK: PgTrack = {
   track: 'state',
   baselineVersion: STATE_PG_BASELINE_VERSION,
   baseline: STATE_PG_BASELINE,
-  steps: [{ version: 15, postgres: PORT_EXPOSURES_V15 }, { version: 16, postgres: RETENTION_V16 }, { version: 17, postgres: ATTACHMENTS_V17 }]
+  steps: [{ version: 15, postgres: PORT_EXPOSURES_V15 }, { version: 16, postgres: RETENTION_V16 }, { version: 17, postgres: ATTACHMENTS_V17 }, { version: 18, postgres: TRANSCRIPT_OFFSETS_V18 }]
 };

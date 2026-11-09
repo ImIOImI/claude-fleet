@@ -666,6 +666,22 @@ function migrate(d: Database.Database): void {
     `);
     d.pragma('user_version = 17');
   }
+
+  if ((d.pragma('user_version', { simple: true }) as number) < 18) {
+    // Ingest resume points (SPEC §7 *Transcript offsets*).
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS transcript_offsets (
+        path         TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        session_id   TEXT NOT NULL,
+        byte_offset  INTEGER NOT NULL,
+        birth_ms     INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_transcript_offsets_workspace ON transcript_offsets(workspace_id);
+      CREATE INDEX IF NOT EXISTS idx_transcript_offsets_session ON transcript_offsets(session_id);
+    `);
+    d.pragma('user_version = 18');
+  }
 }
 
 function repairSyntheticFirstUserMessages(d: Database.Database): void {
@@ -2290,10 +2306,41 @@ export async function deleteSession(id: string): Promise<void> {
     await trx.deleteFrom('broker_sessions').where('claude_session_id', '=', id).execute();
     await trx.deleteFrom('embeddings').where('session_id', '=', id).execute();
     await trx.deleteFrom('event_retention').where('session_id', '=', id).execute();
+    await trx.deleteFrom('transcript_offsets').where('session_id', '=', id).execute();
     await trx.deleteFrom('sessions').where('id', '=', id).execute();
   });
   summaryCache.invalidate(id);
   spendCache.clear();
+}
+
+// ── Transcript offsets (SPEC §7 *Transcript offsets*) ────────────────────
+
+export interface TranscriptOffset { byteOffset: number; birthMs: number | null }
+export interface TranscriptOffsetRow extends TranscriptOffset { path: string; workspaceId: string; sessionId: string }
+
+/** Every saved ingest resume point, by transcript path. */
+export async function loadTranscriptOffsets(): Promise<Map<string, TranscriptOffset>> {
+  const rows = await kyselyOrThrow().selectFrom('transcript_offsets').select(['path', 'byte_offset', 'birth_ms']).execute();
+  return new Map(rows.map((r) => [r.path, { byteOffset: num(r.byte_offset), birthMs: r.birth_ms === null ? null : num(r.birth_ms) }]));
+}
+
+/** transcript_offsets has 5 bound columns: 500 rows = 2,500 parameters per INSERT. */
+const OFFSETS_CHUNK = 500;
+
+export async function saveTranscriptOffsets(rows: readonly TranscriptOffsetRow[]): Promise<void> {
+  for (let i = 0; i < rows.length; i += OFFSETS_CHUNK) {
+    await kyselyOrThrow().insertInto('transcript_offsets')
+      .values(rows.slice(i, i + OFFSETS_CHUNK).map((r) => ({
+        path: r.path, workspace_id: r.workspaceId, session_id: r.sessionId, byte_offset: r.byteOffset, birth_ms: r.birthMs,
+      })))
+      .onConflict((oc) => oc.column('path').doUpdateSet((eb) => ({
+        workspace_id: eb.ref('excluded.workspace_id'),
+        session_id: eb.ref('excluded.session_id'),
+        byte_offset: eb.ref('excluded.byte_offset'),
+        birth_ms: eb.ref('excluded.birth_ms'),
+      })))
+      .execute();
+  }
 }
 
 // ── Retention (SPEC §7 *Retention*) ──────────────────────────────────────
@@ -2463,7 +2510,7 @@ export async function purgeWorkspace(
       if (n < PURGE_CHUNK) break;
     }
   }
-  for (const table of ['session_costs', 'session_tags', 'broker_sessions', 'port_exposures', 'event_retention', 'sessions'] as const) {
+  for (const table of ['session_costs', 'session_tags', 'broker_sessions', 'port_exposures', 'event_retention', 'transcript_offsets', 'sessions'] as const) {
     const r = await slice(() => k.deleteFrom(table).where('workspace_id', '=', workspaceId).executeTakeFirst());
     deleted += num(r.numDeletedRows);
   }
