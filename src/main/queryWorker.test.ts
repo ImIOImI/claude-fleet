@@ -155,3 +155,52 @@ describe('compressed rows (state v16)', () => {
     await expect(runQueryInWorker(job16('SELECT raw_jsonl FROM events', false))).rejects.toThrow(/raw_jsonl/);
   }, 30_000);
 });
+
+describe('snapshot over a v17 state.db (deduped attachments)', () => {
+  let v17: string;
+  const payload = JSON.stringify({ type: 'skill_listing', content: 'skill '.repeat(400) });
+  const ref = 'f'.repeat(64);
+  const full = (u: string) => `{"type":"attachment","uuid":"${u}","attachment":${payload}}`;
+  const stored = (u: string) => `{"type":"attachment","uuid":"${u}","attachment":{"fleetRef":"${ref}"}}`;
+  beforeAll(() => {
+    v17 = join(dir, 'state17.db');
+    const db = new Database(v17);
+    db.exec(`
+      CREATE TABLE events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, workspace_id TEXT NOT NULL, ts INTEGER,
+        type TEXT NOT NULL, subtype TEXT, uuid TEXT, parent_uuid TEXT, model TEXT, input_tokens INTEGER,
+        output_tokens INTEGER, cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER,
+        service_tier TEXT, tool_name TEXT, tool_use_id TEXT, tool_input TEXT, tool_result_is_error INTEGER,
+        raw_jsonl TEXT NOT NULL, dedup_key TEXT NOT NULL, raw_z BLOB, att_ref TEXT);
+      CREATE TABLE event_blobs (hash TEXT PRIMARY KEY, body_z BLOB NOT NULL, bytes INTEGER NOT NULL, refs INTEGER NOT NULL);
+      CREATE TABLE sessions (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL);
+      CREATE TABLE broker_sessions (workspace_id TEXT NOT NULL);
+      CREATE TABLE session_summaries (workspace_id TEXT NOT NULL);
+      CREATE TABLE session_tags (workspace_id TEXT NOT NULL);
+      CREATE TABLE usage_events (workspace_id TEXT NOT NULL);
+    `);
+    const ev = db.prepare(`INSERT INTO events (session_id, workspace_id, ts, type, raw_jsonl, dedup_key, raw_z, att_ref) VALUES (?,?,?,?,?,?,?,?)`);
+    ev.run('sa', WS_A, 1, 'attachment', stored('a'), 'k1', null, ref);
+    ev.run('sa', WS_A, 2, 'attachment', '', 'k2', deflateSync(Buffer.from(stored('b'))), ref);
+    ev.run('sb', WS_B, 3, 'attachment', stored('c'), 'k3', null, 'e'.repeat(64));
+    db.prepare(`INSERT INTO event_blobs VALUES (?,?,?,?)`).run(ref, deflateSync(Buffer.from(payload)), payload.length, 2);
+    db.prepare(`INSERT INTO event_blobs VALUES (?,?,?,?)`).run('e'.repeat(64), deflateSync(Buffer.from('{"secret":1}')), 12, 1);
+    db.close();
+  });
+  const job17 = (sql: string, includeRaw: boolean) => ({ ...job(sql, { includeRaw }), srcPath: v17 });
+
+  it('include_raw rebuilds plain and compressed deduped lines', async () => {
+    expect(await runQueryInWorker(job17('SELECT raw_jsonl FROM events ORDER BY id', true)))
+      .toEqual([{ raw_jsonl: full('a') }, { raw_jsonl: full('b') }]);
+  }, 30_000);
+
+  it('copies only the blobs of allowed rows', async () => {
+    expect(await runQueryInWorker(job17('SELECT hash FROM event_blobs', true))).toEqual([{ hash: ref }]);
+  }, 30_000);
+
+  it('fleet_raw with a missing body returns the stored line', async () => {
+    expect(await runQueryInWorker(job17(`SELECT fleet_raw('{"attachment":{"fleetRef":"x"}}', NULL, 'x', NULL) AS r`, false)))
+      .toEqual([{ r: '{"attachment":{"fleetRef":"x"}}' }]);
+  }, 30_000);
+});
+

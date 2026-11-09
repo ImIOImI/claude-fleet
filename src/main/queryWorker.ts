@@ -69,13 +69,26 @@ export function runSnapshotQuery(
 
   const mem = new DatabaseCtor(':memory:');
   try {
-    // Retention stores old lines deflated in raw_z with raw_jsonl ''.
-    mem.function('fleet_raw', { deterministic: true }, (raw: unknown, z: unknown) => {
-      if (!(z instanceof Uint8Array) || z.length === 0) return raw;
+    // Retention stores old lines deflated in raw_z with raw_jsonl ''; attachment
+    // dedupe swaps the payload for {"fleetRef":"<att_ref>"} with the body in
+    // event_blobs. A corrupt or missing part reads as what is stored.
+    mem.function('fleet_raw', { deterministic: true, varargs: true }, (raw: unknown, z: unknown, ref?: unknown, body?: unknown) => {
+      let line = raw;
+      if (z instanceof Uint8Array && z.length > 0) {
+        try {
+          line = zlib.inflateSync(z).toString('utf8');
+        } catch {
+          line = raw;
+        }
+      }
+      if (typeof ref !== 'string' || typeof line !== 'string' || !(body instanceof Uint8Array)) return line;
+      const marker = `{"fleetRef":"${ref}"}`;
+      const at = line.indexOf(marker);
+      if (at < 0) return line;
       try {
-        return zlib.inflateSync(z).toString('utf8');
+        return line.slice(0, at) + zlib.inflateSync(body).toString('utf8') + line.slice(at + marker.length);
       } catch {
-        return raw;
+        return line;
       }
     });
     // ATTACH filename is not reliably bindable; double any single quotes.
@@ -85,8 +98,16 @@ export function runSnapshotQuery(
         // A view inflates only the rows a query reads; the snapshot keeps the compressed bytes.
         const srcCols = mem.prepare(`PRAGMA ${alias}.table_info(events)`).all() as { name: string }[];
         const rawZ = srcCols.some((c) => c.name === 'raw_z') ? 'raw_z' : 'NULL AS raw_z';
-        mem.prepare(`CREATE TABLE events_store AS SELECT ${job.eventCols}, raw_jsonl, ${rawZ} FROM ${alias}.events WHERE ${scope}`).run(...ids);
-        mem.exec(`CREATE VIEW events AS SELECT ${job.eventCols}, fleet_raw(raw_jsonl, raw_z) AS raw_jsonl FROM events_store`);
+        const hasRef = srcCols.some((c) => c.name === 'att_ref');
+        mem.prepare(`CREATE TABLE events_store AS SELECT ${job.eventCols}, raw_jsonl, ${rawZ}, ${hasRef ? 'att_ref' : 'NULL AS att_ref'} FROM ${alias}.events WHERE ${scope}`).run(...ids);
+        // Only the blobs the snapshot's rows reference.
+        if (hasRef) {
+          mem.exec(`CREATE TABLE event_blobs AS SELECT hash, body_z FROM ${alias}.event_blobs WHERE hash IN (SELECT att_ref FROM events_store WHERE att_ref IS NOT NULL)`);
+        } else {
+          mem.exec(`CREATE TABLE event_blobs (hash TEXT, body_z BLOB)`);
+        }
+        const cols = job.eventCols.split(',').map((c) => `s.${c.trim()}`).join(', ');
+        mem.exec(`CREATE VIEW events AS SELECT ${cols}, fleet_raw(s.raw_jsonl, s.raw_z, s.att_ref, b.body_z) AS raw_jsonl FROM events_store s LEFT JOIN event_blobs b ON b.hash = s.att_ref`);
       } else {
         mem.prepare(`CREATE TABLE events AS SELECT ${job.eventCols} FROM ${alias}.events WHERE ${scope}`).run(...ids);
       }
