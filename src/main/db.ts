@@ -27,6 +27,7 @@ import { pgSearchEmbeddings, pgVectorLiteral } from './store/pgVectorSearch.js';
 import type { StateDb, UsageAnchorsTable } from './store/stateSchema.js';
 import { parseIngestLine, foldSessionTouch, type ParsedLine } from './state/ingestParse.js';
 import { rawLine } from './state/rawCodec.js';
+import { dedupeAttachment, deflatePayload, expandLine } from './state/attachmentCodec.js';
 
 let db: Database.Database | null = null;
 let kdb: Kysely<StateDb> | null = null;
@@ -802,6 +803,15 @@ export async function ingestLine(workspaceId: string, sessionId: string, rawLine
   return r;
 }
 
+/** One more reference to `ref`'s payload; the blob row on first use. */
+async function upsertBlob(q: Kysely<StateDb>, ref: string, payload: string): Promise<void> {
+  const hit = await q.updateTable('event_blobs').set((eb) => ({ refs: eb('refs', '+', 1) })).where('hash', '=', ref).executeTakeFirst();
+  if (num(hit.numUpdatedRows) > 0) return;
+  await q.insertInto('event_blobs')
+    .values({ hash: ref, body_z: deflatePayload(payload), bytes: Buffer.byteLength(payload, 'utf8'), refs: 1 })
+    .execute();
+}
+
 /** One parsed line's writes, on the chunk transaction: the event insert
  *  (deduped by ON CONFLICT DO NOTHING), rollups only when it landed, then
  *  per-type metadata — which runs for duplicates too. The sessions-row touch
@@ -817,12 +827,14 @@ async function ingestOne(
 
   // Always attempted, even for a replayed line: an ignored INSERT still
   // advances AUTOINCREMENT, which event ids depend on.
+  const dd = dialect === 'sqlite' && e.type === 'attachment' ? dedupeAttachment(rawLine, p.parsed) : null;
   const ins = await q
     .insertInto('events')
-    .values({ ...e, session_id: sessionId, workspace_id: workspaceId, raw_jsonl: rawLine })
+    .values({ ...e, session_id: sessionId, workspace_id: workspaceId, raw_jsonl: dd ? dd.stored : rawLine, att_ref: dd?.ref ?? null })
     .onConflict((oc) => oc.doNothing())
     .executeTakeFirst();
   const inserted = num(ins.numInsertedOrUpdatedRows) > 0;
+  if (inserted && dd) await upsertBlob(q, dd.ref, dd.payload);
 
   if (inserted) {
     // Rollups (#383/#390) ride the same transaction as the event insert and
@@ -1020,6 +1032,8 @@ interface EventRowSql {
   tool_name: string | null;
   raw_jsonl: string;
   raw_z: Buffer | null;
+  att_ref: string | null;
+  att_body_z: Buffer | null;
 }
 
 function rowFromSql(r: EventRowSql): EventRow {
@@ -1039,17 +1053,19 @@ function rowFromSql(r: EventRowSql): EventRow {
     cacheCreationInputTokens: r.cache_creation_input_tokens,
     serviceTier: r.service_tier,
     toolName: r.tool_name,
-    rawJsonl: rawLine(r),
+    rawJsonl: expandLine(rawLine(r), r.att_ref, r.att_body_z),
   };
 }
 
 export async function eventsForSession(sessionId: string, sinceEventId = 0, limit = 500): Promise<EventRow[]> {
   const rows = await kyselyOrThrow()
-    .selectFrom('events')
-    .selectAll()
-    .where('session_id', '=', sessionId)
-    .where('id', '>', sinceEventId)
-    .orderBy('id', 'asc')
+    .selectFrom('events as e')
+    .leftJoin('event_blobs as b', 'b.hash', 'e.att_ref')
+    .selectAll('e')
+    .select('b.body_z as att_body_z')
+    .where('e.session_id', '=', sessionId)
+    .where('e.id', '>', sinceEventId)
+    .orderBy('e.id', 'asc')
     .limit(limit)
     .execute();
   return rows.map(rowFromSql);
@@ -2560,14 +2576,16 @@ export async function unembeddedTurnEvents(sessionId: string, modelId: string, l
     .leftJoin('embeddings as em', (j) =>
       j.onRef('em.ref_event_id', '=', 'e.id').on('em.kind', '=', 'turn').on('em.model_id', '=', modelId),
     )
-    .select(['e.id as id', 'e.workspace_id as workspaceId', 'e.ts as ts', 'e.raw_jsonl as raw_jsonl', 'e.raw_z as raw_z'])
+    .leftJoin('event_blobs as b', 'b.hash', 'e.att_ref')
+    .select(['e.id as id', 'e.workspace_id as workspaceId', 'e.ts as ts', 'e.raw_jsonl as raw_jsonl', 'e.raw_z as raw_z',
+      'e.att_ref as att_ref', 'b.body_z as att_body_z'])
     .where('e.session_id', '=', sessionId)
     .where('e.type', 'in', ['user', 'assistant'])
     .where('em.id', 'is', null)
     .orderBy('e.id', 'asc')
     .limit(limit)
     .execute()
-    .then((rows) => rows.map((r) => ({ id: r.id, workspaceId: r.workspaceId, ts: r.ts, rawJsonl: rawLine(r) })));
+    .then((rows) => rows.map((r) => ({ id: r.id, workspaceId: r.workspaceId, ts: r.ts, rawJsonl: expandLine(rawLine(r), r.att_ref, r.att_body_z) })));
 }
 
 export async function maxEventId(sessionId: string): Promise<number> {
