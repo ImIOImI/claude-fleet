@@ -95,18 +95,18 @@ Postgres does not dedupe: TOAST already compresses large values, and the MCP que
 
 Real code (`dedupeAttachments`, after a retention pass) on a scratch copy of the host `state.db`, 2026-11-09:
 
-| Step | File after VACUUM | `events` | `event_blobs` |
-|---|---|---|---|
-| Before | 4,228 MB | 3,058 MB | — |
-| Retention (#532) | 3,107 MB | 2,638 MB | — |
-| + attachment dedupe | **2,415 MB** | 1,926 MB | 19 MB |
+| Step | File after VACUUM | `events` | `embeddings` | `event_blobs` |
+|---|---|---|---|---|
+| Before | 4,228 MB | 3,058 MB | 770 MB | — |
+| Retention (#532) | 3,107 MB | 2,638 MB | 105 MB | — |
+| + attachment dedupe | **2,033 MB** | 1,540 MB | 105 MB | 23 MB |
 
-- 46,779 of 101,929 attachment rows deduped (the rest are < 1 KB) into 5,997 blobs: 55 MB of distinct payload, 15 MB deflated. 692 MB of stored bytes saved.
+- **Coverage:** 52,012 of 101,929 attachment rows deduped into 6,962 blobs (79 MB of distinct bodies, 18 MB deflated), saving 1,056 MB of stored bytes. A deduped row averages 576 bytes (max 7.6 KB). The 49,917 rows left as they are hold 34 MB (each under the 1 KB threshold).
 - **Byte-exact check:** every attachment row rebuilt (`expandLine(rawLine(row))`) equals the original line from the untouched copy: 0 mismatches in 101,929. Every blob's `refs` equals its referencing row count.
-- Unthrottled run time: 31 s for the backfill (71 s for retention). At the pass's ≤ 10% duty cycle that is ~5 min of idle time once.
-- Growth: new attachment lines are deduped at ingest, so repeated boilerplate costs a ~150-byte stub per row instead of its payload.
+- **First-pass cost:** unthrottled, the backfill takes 44 s and retention 63 s. At the pass's ≤ 10% duty cycle that is ~7 min of idle time, once.
+- **Growth:** new attachment lines are deduped at ingest, so repeated boilerplate costs a ~0.6 KB row instead of its payload.
 
-## 5. Decisions
+## 6. Decisions
 
 1. **SQLite only** (§2.8).
 2. **Whole `attachment` + `rendered` values, ≥ 1 KB together, any type** (§2.1); one blob per distinct pair. Sub-payload dedupe (e.g. per tool in `deferred_tools_delta`) would save more on unique-but-similar payloads; not worth the rebuild complexity at 22 MB distinct.
