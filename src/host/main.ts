@@ -37,7 +37,7 @@ const PG_CONN_ERRNO = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EHOST
 export function isDbUnavailable(err: unknown): boolean {
   const code = (err as { code?: unknown } | null)?.code;
   if (typeof code === 'string' && (PG_CONN_ERRNO.has(code) || /^(08|57P0)/.test(code))) return true;
-  return /Connection terminated|timeout exceeded when trying to connect/i.test((err as Error | null)?.message ?? '');
+  return /Connection terminated|timeout exceeded when trying to connect|encountered a connection error and is not queryable/i.test((err as Error | null)?.message ?? '');
 }
 
 export interface RunHostOptions {
