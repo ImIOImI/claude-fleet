@@ -639,6 +639,27 @@ function migrate(d: Database.Database): void {
     `);
     d.pragma('user_version = 16');
   }
+
+  if ((d.pragma('user_version', { simple: true }) as number) < 17) {
+    // Attachment dedupe (SPEC §7 *Attachment dedupe*). refs is counted on
+    // write; the trigger releases it on every delete path, so no events
+    // (att_ref) index is needed.
+    const cols = d.prepare(`PRAGMA table_info(events)`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'att_ref')) d.exec(`ALTER TABLE events ADD COLUMN att_ref TEXT`);
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS event_blobs (
+        hash   TEXT PRIMARY KEY,
+        body_z BLOB NOT NULL,
+        bytes  INTEGER NOT NULL,
+        refs   INTEGER NOT NULL
+      );
+      CREATE TRIGGER IF NOT EXISTS events_att_ref_ad AFTER DELETE ON events WHEN old.att_ref IS NOT NULL BEGIN
+        UPDATE event_blobs SET refs = refs - 1 WHERE hash = old.att_ref;
+        DELETE FROM event_blobs WHERE hash = old.att_ref AND refs <= 0;
+      END;
+    `);
+    d.pragma('user_version = 17');
+  }
 }
 
 function repairSyntheticFirstUserMessages(d: Database.Database): void {

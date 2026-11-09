@@ -224,9 +224,19 @@ CREATE TABLE maintenance (
 );
 `;
 
+const ATTACHMENTS_V17 = `
+ALTER TABLE events ADD COLUMN att_ref ${T};
+CREATE TABLE event_blobs (
+  hash ${T} PRIMARY KEY,
+  body_z BYTEA NOT NULL,
+  bytes BIGINT NOT NULL,
+  refs BIGINT NOT NULL
+);
+`;
+
 export const STATE_PG_TRACK: PgTrack = {
   track: 'state',
   baselineVersion: STATE_PG_BASELINE_VERSION,
   baseline: STATE_PG_BASELINE,
-  steps: [{ version: 15, postgres: PORT_EXPOSURES_V15 }, { version: 16, postgres: RETENTION_V16 }]
+  steps: [{ version: 15, postgres: PORT_EXPOSURES_V15 }, { version: 16, postgres: RETENTION_V16 }, { version: 17, postgres: ATTACHMENTS_V17 }]
 };

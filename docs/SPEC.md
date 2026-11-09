@@ -663,7 +663,7 @@ Today the primary workspace backend is a Docker container. The container name is
 Each workspace's Claude transcripts (`<userData>/state/<id>/.claude/projects/-workspace/<session-uuid>.jsonl`) are tailed by a single SQLite cache at `<userData>/state.db` (WAL mode). JSONL stays authoritative — the DB can be dropped at any time and the watcher rebuilds it from the JSONLs on next start.
 
 **Postgres store.** With `store: { kind: 'postgres' }` (§6 *Settings*) the same queries run on Postgres (`openDbPostgres(pool)`; `store/pgStores.ts:openPgStores` opens both stores on one pool).
-- **Schema:** a baseline equal to the final SQLite schema (`store/migrations/statePg.ts`, state baseline = state v14; v15 `port_exposures` is step 15; v16 retention is step 16). Types: `BIGINT` for every integer, `DOUBLE PRECISION` for real, `TEXT COLLATE "C"` for every text column (byte order, as SQLite compares), `BYTEA` for `events.raw_z`, identity ids, and `embeddings.vec vector(384)`, nullable (the one NOT NULL difference from SQLite: a placeholder has no vector). There is no vector index; search is exact.
+- **Schema:** a baseline equal to the final SQLite schema (`store/migrations/statePg.ts`, state baseline = state v14; v15 `port_exposures` is step 15; v16 retention is step 16; v17 attachment dedupe is step 17). Types: `BIGINT` for every integer, `DOUBLE PRECISION` for real, `TEXT COLLATE "C"` for every text column (byte order, as SQLite compares), `BYTEA` for `events.raw_z` and `event_blobs.body_z`, identity ids, and `embeddings.vec vector(384)`, nullable (the one NOT NULL difference from SQLite: a placeholder has no vector). There is no vector index; search is exact.
 - **Performance budgets** (`state/stateBench.test.ts` `PG_GATE`; `STATE_BENCH=1 STORE_TEST_DIALECT=postgres` measures, `STATE_BENCH_PG_GATE=<files>` gates). Postgres is gated on absolute budgets, not a ratio to SQLite: ingest and writes pay a loopback round trip and a commit per statement (plus the write gate's `begin`/`commit`, which the bench opens the store with, as the app does). Reads ≤ 16 ms (summary uncached, events page, list sessions, read-round stall), cached summary and mapping lookup ≤ 1 ms, search ≤ 50 ms, stall max ≤ 50 ms, ingest ≤ 3 ms/line fresh and 1.5 ms/line replay, record mapping and record error ≤ 10 ms. The SQLite bench is unchanged and keeps its A/B gate against the base.
 - **Managed Postgres** (`store/managedPostgres.ts`, Docker via `store/managedDocker.ts`): `ensureManagedPostgres` runs at every start and on recovery, and is idempotent.
   - **Container:** `claude-fleet-postgres` from the pinned image (§4), labels `com.claude-fleet.store=postgres` and `com.claude-fleet.store.pg-major=16`, never `com.claude-fleet.managed` (which marks workspace containers). `RestartPolicy: no`. Data in the named volume `claude-fleet-postgres-data` (same labels) at `/var/lib/postgresql/data`; `initdb --locale=C.UTF-8 --encoding=UTF8`, database `fleet`. The env has `POSTGRES_PASSWORD_FILE=/proc/sys/kernel/random/uuid` and no `POSTGRES_PASSWORD`, so initdb's superuser password is random and never stored. A container is recreated (same port and volume) unless it has the pinned image, the store label and a `127.0.0.1` host-port binding.
@@ -708,7 +708,7 @@ Each workspace's Claude transcripts (`<userData>/state/<id>/.claude/projects/-wo
     | 100,000 | 116 ms | 155 ms |
     | 250,000 | 291 ms | 342 ms |
 
-**Schema (v16, current):**
+**Schema (v17, current):**
 
 ```sql
 CREATE TABLE events (
@@ -734,6 +734,7 @@ CREATE TABLE events (
   raw_jsonl TEXT NOT NULL,             -- original line ('' when raw_z holds it); a retention stub once stripped
   dedup_key TEXT NOT NULL,             -- uuid when present, else sha256(raw_jsonl)
   raw_z BLOB,                          -- v16: zlib-deflated line (SQLite only; BYTEA, always NULL, on Postgres)
+  att_ref TEXT,                        -- v17: event_blobs.hash when the attachment value is a fleetRef marker (SQLite only; NULL on Postgres)
   UNIQUE(session_id, dedup_key)
 );
 CREATE INDEX idx_events_session_ts ON events(session_id, ts);
@@ -977,11 +978,26 @@ CREATE TABLE event_retention (
 CREATE INDEX idx_event_retention_workspace ON event_retention(workspace_id);
 
 -- v16: key/value bookkeeping: retention.first_pass_at, retention.last_pass_at,
--- embeddings.compacted_through_id, vacuum.last_attempt_at.
+-- embeddings.compacted_through_id, vacuum.last_attempt_at,
+-- attachments.deduped_through_id (v17).
 CREATE TABLE maintenance (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- v17: deduped attachment payloads (see *Attachment dedupe* below). body_z is
+-- the payload's JSON, zlib-deflated; bytes its UTF-8 length; refs the number of
+-- events whose att_ref is hash. Empty on Postgres.
+CREATE TABLE event_blobs (
+  hash   TEXT PRIMARY KEY,               -- sha256 hex of the payload JSON
+  body_z BLOB NOT NULL,
+  bytes  INTEGER NOT NULL,
+  refs   INTEGER NOT NULL
+);
+CREATE TRIGGER events_att_ref_ad AFTER DELETE ON events WHEN old.att_ref IS NOT NULL BEGIN
+  UPDATE event_blobs SET refs = refs - 1 WHERE hash = old.att_ref;
+  DELETE FROM event_blobs WHERE hash = old.att_ref AND refs <= 0;
+END;
 ```
 
 `ERRORS_RETENTION = 2000`: every `recordError` call prunes to the most recent 2000 rows (DELETE by id rank). The table is an append-only ring buffer — no explicit expiry, no separate job.
@@ -1008,6 +1024,12 @@ This `sessions` table is the index behind the Sessions table feature (§6 *Sessi
   - **Helper:** after the bounded quit has closed the DB, main writes `state.db.vacuum.lock` (`{ pid: null, startedAt }`; no lock, no helper), spawns a detached helper (`process.execPath` with `ELECTRON_RUN_AS_NODE=1 -e`, better-sqlite3 from `app.asar.unpacked`) and rewrites the lock with its pid. The helper is the app's own executable, so an NSIS update started while it runs sees the app as running (and may close it); a killed VACUUM rolls back, so that is safe. The helper runs `PRAGMA auto_vacuum = INCREMENTAL; VACUUM; wal_checkpoint(TRUNCATE)`, appends `vacuum-done` / `vacuum-failed` to `error.log` and removes the lock.
   - **Next start:** a fresh lock naming a live pid (`vacuumHelperActive`) defers only the SQLite history services (open, state writes, retention, watcher, capture scheduler, embedding backfill); the window, IPC and the MCP server (a WAL reader) start as usual and history IPC rejects until then. `waitForVacuumHelper` polls the lock for up to 120 s without blocking the loop, then kills the helper and waits (≤ 10 s) for the pid to exit, since Windows releases its file locks late; a killed VACUUM rolls back. `openDb` sets `busy_timeout = 5000` so a lock still being released waits instead of throwing. A lock older than 15 min, or naming a dead pid, is removed and never acted on, since its pid may have been reused. The outcome is logged as `vacuum-wait`.
 - **Incremental vacuum:** every 30 min (and after a pass), if `auto_vacuum = INCREMENTAL` and the freelist exceeds 4,096 pages, `incremental_vacuum(1024)` runs in up to 64 throttled slices. It runs through `withRawSqlite`, holding the store mutex: through the driver's `run()` the pragma frees only one page. Postgres relies on autovacuum.
+
+**Attachment dedupe** (`state/attachmentCodec.ts`; spec `docs/superpowers/specs/2026-11-09-attachment-dedupe-design.md`). Claude Code re-records the same `attachment` payloads (tool lists, instructions, prompt snapshots, skill listings) on every session and turn: on the host copy measured 2026-11-09, 661 MB of such payload held ~22 MB of distinct content. On SQLite, a `type = 'attachment'` line whose `attachment` value serializes to ≥ 1,024 bytes is stored once per distinct payload:
+- **Stored form:** the line with its `attachment` value replaced by `{"fleetRef":"<sha256>"}` (still valid JSON), and `events.att_ref` = the hash. The payload goes to `event_blobs`, deflated. A line is deduped only when `"attachment":` + `JSON.stringify(value)` occurs in it exactly once, it has no `"fleetRef":"` already, and the rebuild equals the original; otherwise it is stored as it is.
+- **Writes:** ingest dedupes before the insert and adds a reference (`refs + 1`, or a new blob) only when the event landed. `dedup_key` comes from the original line, so a re-read line hits `ON CONFLICT DO NOTHING` and refs don't move. The trigger releases a reference on every delete path (`deleteSession`, `purgeWorkspace`, the orphan sweep); no `events(att_ref)` index exists.
+- **Reads:** `rawLine()` stays the stored-form codec (retention strips and compresses the stored form and never expands it); `expandLine(stored, att_ref, body_z)` splices the payload back. `eventsForSession` and `unembeddedTurnEvents` join `event_blobs` and return the original line. A missing or corrupt blob reads as the stored form.
+- **Postgres** does not dedupe (TOAST compresses large values, and the MCP query role reads `raw_jsonl` through a temp view): `att_ref` and `event_blobs` exist for schema parity and stay empty.
 
 **Title derivation.** The display title is `user_set_name ?? ai_title ?? first_user_message`. `ai_title` is **populated, not dormant**, from **two** last-write-wins sources folded into `sessions.ai_title` by `ingestBatch`: (1) Claude Code (≥2.1.x) writes `{"type":"ai-title","aiTitle":…,"sessionId":…}` lines into its own transcript natively (no hook, no statusline) — but only **once, early** (a stale one-shot); (2) the `summarize.sh` Stop hook emits a **rolling** `ai-title` line from each chapter summarization (§4 *Title refresh*), so a long session's title keeps up with what it's actually about instead of freezing on the first prompt (#170). Claude's native line rides on an **undocumented native transcript line type**, so it is the kind of thing a `claude` pin bump can silently break (§4 — bumping the pin is deliberate; re-verify the `ai-title` line still appears); the summarizer's rolling line does not depend on that and continues regardless. `first_user_message` is the COALESCE'd first value, but **synthetic command-wrapper messages are skipped** when deriving it (`src/main/userPromptText.ts`): a session started with a slash command (e.g. `/clear`) or a `!` local command emits a wrapper-only first `user` message (`<local-command-caveat>`/`<command-name>`/`<bash-input>`/…) that would otherwise lock in as a junk fallback title; the first *real* prompt wins instead. Also skipped: the **bare** local-command caveat (`Caveat: The messages below were generated by the user…` — older claude CLIs omit the wrapper tag, and the local/WSL launcher runs whatever claude the host has) and any `user` event with `isMeta: true`. Rows poisoned before these filters existed cannot heal through ingest (COALESCE + event dedup), so migration 12 repairs them once — recompute from stored events, NULL when the session has no real prompt. `tests/ai-title.spec.ts` pins both behaviors against the real watcher + DB.
 
