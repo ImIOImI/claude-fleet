@@ -54,6 +54,10 @@ function logWatcherEvent(payload: {
 }
 
 const PROJECTS_SUBDIR = join('projects', '-workspace');
+// chokidar drops (not defers) a file's events within 5 ms of the last one, so
+// a write in that window has no event of its own. One re-check this
+// long after the last event in a burst reads it.
+const SETTLE_RECHECK_MS = 100;
 export { parseSubagentPath, parseTranscriptFilename };
 
 interface FileState {
@@ -136,6 +140,7 @@ export class JsonlWatcher extends EventEmitter {
   private readonly queue = keyedSerialQueue((path, err) => {
     console.error(`[jsonlWatcher] process failed for ${path}:`, err);
   });
+  private readonly settleTimers = new Map<string, NodeJS.Timeout>();
   // Sessions already announced via 'new-session'. Keyed by session id (the
   // session's stable identity), and deliberately OUTLIVES the `files` map:
   // `files` entries are dropped on chokidar unlink, unregister, and stat
@@ -259,10 +264,11 @@ export class JsonlWatcher extends EventEmitter {
   }
 
   private wireHandlers(w: DirWatcher): void {
-    w.on('add', (p) => this.enqueue(p))
-      .on('change', (p) => this.enqueue(p))
+    w.on('add', (p) => this.onFsEvent(p))
+      .on('change', (p) => this.onFsEvent(p))
       .on('unlink', (p) => {
         this.files.delete(p);
+        this.cancelSettle(p);
       })
       .on('error', (err) => console.error('[jsonlWatcher] error:', err));
   }
@@ -286,6 +292,8 @@ export class JsonlWatcher extends EventEmitter {
     if (!this.watcher) return;
     await this.watcher.close();
     this.watcher = null;
+    for (const t of this.settleTimers.values()) clearTimeout(t);
+    this.settleTimers.clear();
     // Await the creation PROMISE, not the field: a stop() racing the lazy
     // chokidar import would otherwise miss (and leak) the poller the import
     // is about to create. this.watcher is already null here, so a still-
@@ -340,6 +348,9 @@ export class JsonlWatcher extends EventEmitter {
         this.files.delete(path);
       }
     }
+    for (const path of [...this.settleTimers.keys()]) {
+      if (path.startsWith(prefix)) this.cancelSettle(path);
+    }
   }
 
   /** Re-read every known transcript from its offset. A batch that failed
@@ -347,6 +358,21 @@ export class JsonlWatcher extends EventEmitter {
    *  the file changes again. */
   requeueAll(): void {
     for (const path of this.files.keys()) this.enqueue(path);
+  }
+
+  private onFsEvent(path: string): void {
+    this.enqueue(path);
+    if (extname(path) !== '.jsonl') return;
+    this.cancelSettle(path);
+    this.settleTimers.set(path, setTimeout(() => {
+      this.settleTimers.delete(path);
+      this.enqueue(path);
+    }, SETTLE_RECHECK_MS));
+  }
+
+  private cancelSettle(path: string): void {
+    clearTimeout(this.settleTimers.get(path));
+    this.settleTimers.delete(path);
   }
 
   private enqueue(path: string): void {
