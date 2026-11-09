@@ -1,14 +1,28 @@
 // One recursive fs.watch per root, emitting chokidar's add/change/unlink/error
 // events for files up to `depth` subdirectories down (#464). On Windows,
 // chokidar's non-polling mode opens a native watch handle per file and dir —
-// a synchronous syscall each, which froze main for ~19 s at launch with
-// thousands of transcripts. Recursive fs.watch is one handle per root.
+// a synchronous syscall each, which froze main for ~30 s at launch with
+// thousands of transcripts and session pid files. Recursive fs.watch is one
+// handle per root.
 
 import { EventEmitter } from 'node:events';
 import { realpathSync, watch, promises as fsp, type FSWatcher } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 
 const RETRY_MS = 5000;
+
+/** The add/change/unlink/error surface shared by chokidar and RecursiveDirWatcher. */
+export interface DirWatcher {
+  add(path: string): unknown;
+  unwatch(path: string): unknown;
+  close(): Promise<void>;
+  on(event: 'add' | 'change' | 'unlink', listener: (path: string) => void): this;
+  on(event: 'error', listener: (err: unknown) => void): this;
+}
+
+/** win32/darwin: recursive fs.watch is one native handle per dir. Linux keeps
+ *  chokidar, whose per-file inotify watches are cheap. */
+export const NATIVE_RECURSIVE_DEFAULT = process.platform === 'win32' || process.platform === 'darwin';
 
 type WatchFn = (root: string, listener: (event: string, filename: string | Buffer | null) => void) => FSWatcher;
 const nativeWatch: WatchFn = (root, listener) => watch(root, { recursive: true, persistent: true }, listener);

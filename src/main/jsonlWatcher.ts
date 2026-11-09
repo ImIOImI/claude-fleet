@@ -24,7 +24,7 @@ import { join, extname, sep as pathSep } from 'node:path';
 // electron.vite.config.ts), so `require('chokidar')` would throw
 // ERR_REQUIRE_ESM. Load it via dynamic import inside `start()`.
 import type { FSWatcher } from 'chokidar';
-import { RecursiveDirWatcher } from './recursiveDirWatcher.js';
+import { NATIVE_RECURSIVE_DEFAULT, RecursiveDirWatcher, type DirWatcher } from './recursiveDirWatcher.js';
 import { workspaceClaudeDir, workspaceHistoryDir, workspaceHistoryFile, hostLocalProjectsDir } from './paths.js';
 import { ingestBatch } from './db.js';
 import { effectiveForClaudeSession } from './mirrorPolicy.js';
@@ -101,24 +101,13 @@ export interface JsonlWatcher {
   emit(event: 'new-session', e: NewSessionEvent): boolean;
 }
 
-/** The add/change/unlink/error surface shared by chokidar and RecursiveDirWatcher. */
-interface DirWatcher {
-  add(path: string): unknown;
-  unwatch(path: string): unknown;
-  close(): Promise<void>;
-  on(event: 'add' | 'change' | 'unlink', listener: (path: string) => void): this;
-  on(event: 'error', listener: (err: unknown) => void): this;
-}
-
 export class JsonlWatcher extends EventEmitter {
   private watcher: DirWatcher | null = null;
-  // win32/darwin: one recursive fs.watch per dir. chokidar opens a native
-  // handle per file there, synchronously (#464). Linux keeps chokidar (inotify).
   private readonly nativeRecursive: boolean;
 
   constructor(opts: { nativeRecursive?: boolean } = {}) {
     super();
-    this.nativeRecursive = opts.nativeRecursive ?? (process.platform === 'win32' || process.platform === 'darwin');
+    this.nativeRecursive = opts.nativeRecursive ?? NATIVE_RECURSIVE_DEFAULT;
   }
   // Second chokidar instance for dirs where inotify can't reach — the
   // \\wsl.localhost 9P share delivers no change events (#253). Created

@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { PeerStatusWatcher } from './peerStatusWatcher.js';
 
@@ -46,5 +49,64 @@ describe('PeerStatusWatcher core (no fs)', () => {
     w.emitIfChanged(); // a:idle
 
     expect(seen).toEqual(['a:busy', 'a:idle']);
+  });
+});
+
+describe('PeerStatusWatcher overlapping reads', () => {
+  it('applies only the newest-started read of a path when reads finish out of order', async () => {
+    const fsMod = await import('node:fs');
+    const releases: Array<() => void> = [];
+    const contents = [file('a', 'busy'), file('a', 'idle')];
+    const spy = vi.spyOn(fsMod.promises, 'readFile').mockImplementation(() => {
+      const body = contents.shift()!;
+      return new Promise((resolve) => releases.push(() => resolve(body)));
+    });
+    try {
+      const w = new PeerStatusWatcher();
+      const touch = (w as unknown as { onTouch: (p: string) => Promise<void> }).onTouch.bind(w);
+      const first = touch('/s/1.json');   // reads 'busy'
+      const second = touch('/s/1.json');  // reads 'idle'
+      releases[1]();
+      await second;
+      releases[0]();                      // the stale 'busy' read lands last
+      await first;
+      expect(w.snapshot().map((x) => x.status)).toEqual(['idle']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe.each([
+  ['chokidar', false],
+  ['native recursive fs.watch', true]
+])('PeerStatusWatcher on disk (%s)', (_backend, nativeRecursive) => {
+  const until = async (cond: () => boolean) => {
+    const end = Date.now() + 3000;
+    while (!cond()) {
+      if (Date.now() > end) throw new Error('timed out');
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  };
+
+  it('picks up existing and new pid files, status flips and removals', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'peer-'));
+    const w = new PeerStatusWatcher({ nativeRecursive });
+    let last: Array<{ sessionId: string; status: string }> = [];
+    w.on('change', (s) => { last = s; });
+    try {
+      writeFileSync(join(dir, '1.json'), file('a', 'busy'));
+      await w.start();
+      w.registerDir(dir);
+      await until(() => last.some((x) => x.sessionId === 'a' && x.status === 'busy'));
+      writeFileSync(join(dir, '1.json'), file('a', 'idle'));
+      writeFileSync(join(dir, '2.json'), file('b', 'waiting'));
+      await until(() => last.some((x) => x.sessionId === 'a' && x.status === 'idle') && last.some((x) => x.sessionId === 'b'));
+      unlinkSync(join(dir, '2.json'));
+      await until(() => !last.some((x) => x.sessionId === 'b'));
+    } finally {
+      await w.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -15,7 +15,7 @@
 // claude session id (`reducePeerStatuses` picks the newest pid file per session),
 // so it joins against the broker→claude mapping identically for both backends.
 //
-// The stateful snapshot logic (`ingest`/`drop`) is separated from chokidar so it
+// The stateful snapshot logic (`ingest`/`drop`) is separated from the fs watcher so it
 // is unit-tested without fs timing; the parser and reducer are pure and tested
 // on their own.
 
@@ -23,6 +23,7 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync, promises as fsp } from 'node:fs';
 import { extname, sep as pathSep } from 'node:path';
 import type { FSWatcher } from 'chokidar';
+import { NATIVE_RECURSIVE_DEFAULT, RecursiveDirWatcher, type DirWatcher } from './recursiveDirWatcher.js';
 import { parsePeerStatus, type PeerStatus } from './peerStatus.js';
 import { reducePeerStatuses } from './peerStatusReconcile.js';
 
@@ -41,7 +42,7 @@ function snapshotKey(reduced: Map<string, PeerStatus>): string {
 }
 
 export class PeerStatusWatcher extends EventEmitter {
-  private watcher: FSWatcher | null = null;
+  private watcher: DirWatcher | null = null;
   private pollWatcher: FSWatcher | null = null;
   private pollWatcherPromise: Promise<FSWatcher | null> | null = null;
   private readonly watchedDirs = new Set<string>();
@@ -50,12 +51,22 @@ export class PeerStatusWatcher extends EventEmitter {
   // the prior entry intact rather than churning to nothing.
   private readonly byPath = new Map<string, PeerStatus>();
   private lastKey = '';
+  private readonly nativeRecursive: boolean;
+  // path → id of its newest read. Raw fs.watch fires several events per write
+  // and reads can finish out of order; only the newest-started read may apply.
+  private readonly readSeq = new Map<string, number>();
+
+  constructor(opts: { nativeRecursive?: boolean } = {}) {
+    super();
+    this.nativeRecursive = opts.nativeRecursive ?? NATIVE_RECURSIVE_DEFAULT;
+  }
 
   async start(): Promise<void> {
     if (this.watcher) return;
-    const chokidar = await import('chokidar');
-    // depth 0: <pid>.json sit directly in sessions/.
-    this.watcher = chokidar.watch([], { depth: 0, ignoreInitial: false, persistent: true });
+    // depth 0: <pid>.json sit directly in sessions/, which keeps every stale one.
+    this.watcher = this.nativeRecursive
+      ? new RecursiveDirWatcher({ depth: 0 })
+      : (await import('chokidar')).watch([], { depth: 0, ignoreInitial: false, persistent: true });
     this.wireHandlers(this.watcher);
   }
 
@@ -70,6 +81,7 @@ export class PeerStatusWatcher extends EventEmitter {
     this.polledDirs.clear();
     this.watchedDirs.clear();
     this.byPath.clear();
+    this.readSeq.clear();
     this.lastKey = '';
   }
 
@@ -132,22 +144,25 @@ export class PeerStatusWatcher extends EventEmitter {
     return this.pollWatcherPromise;
   }
 
-  private wireHandlers(w: FSWatcher): void {
+  private wireHandlers(w: DirWatcher): void {
     const onTouch = (p: string): void => { void this.onTouch(p); };
     w.on('add', onTouch)
       .on('change', onTouch)
-      .on('unlink', (p) => { if (this.drop(p)) this.emitIfChanged(); })
+      .on('unlink', (p) => { this.readSeq.delete(p); if (this.drop(p)) this.emitIfChanged(); })
       .on('error', (err) => console.error('[peerStatusWatcher] error:', err));
   }
 
   private async onTouch(path: string): Promise<void> {
     if (extname(path) !== '.json') return;
+    const seq = (this.readSeq.get(path) ?? 0) + 1;
+    this.readSeq.set(path, seq);
     let raw: string;
     try {
       raw = await fsp.readFile(path, 'utf8');
     } catch {
       return; // vanished between event and read — the unlink handler covers it
     }
+    if (this.readSeq.get(path) !== seq) return;
     if (this.ingest(path, raw)) this.emitIfChanged();
   }
 
