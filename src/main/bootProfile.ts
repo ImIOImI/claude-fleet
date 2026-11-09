@@ -8,7 +8,7 @@ import { mkdir, readdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { perfSpan } from './perf.js';
 
-export const BOOT_PROFILE_MS = 30_000;
+export const BOOT_PROFILE_MS = 60_000;
 const SAMPLING_INTERVAL_US = 1000;
 const BLOCK_MIN_MS = 500;
 /** A non-JS gap this short inside a block is sampler jitter, not a yield. */
