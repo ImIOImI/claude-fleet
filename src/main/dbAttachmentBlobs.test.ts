@@ -40,7 +40,7 @@ describe('state v17 attachment blobs', () => {
     expect(await refs()).toEqual([1, 2]);
     const [a] = await queryRows<{ raw_jsonl: string; att_ref: string }>(`SELECT raw_jsonl, att_ref FROM events WHERE uuid = 'a'`);
     expect(a.raw_jsonl.length).toBeLessThan(200);
-    expect(JSON.parse(a.raw_jsonl).attachment).toEqual({ fleetRef: a.att_ref });
+    expect(JSON.parse(a.raw_jsonl).attachment).toEqual({ fleetRef: a.att_ref, part: 0 });
   });
 
   it('a replayed line does not add a reference', async () => {

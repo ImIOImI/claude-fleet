@@ -160,8 +160,10 @@ describe('snapshot over a v17 state.db (deduped attachments)', () => {
   let v17: string;
   const payload = JSON.stringify({ type: 'skill_listing', content: 'skill '.repeat(400) });
   const ref = 'f'.repeat(64);
-  const full = (u: string) => `{"type":"attachment","uuid":"${u}","attachment":${payload}}`;
-  const stored = (u: string) => `{"type":"attachment","uuid":"${u}","attachment":{"fleetRef":"${ref}"}}`;
+  const rendered = JSON.stringify([{ content: 'rendered '.repeat(50) }]);
+  const full = (u: string) => `{"type":"attachment","uuid":"${u}","attachment":${payload},"rendered":${rendered}}`;
+  const stored = (u: string) => `{"type":"attachment","uuid":"${u}","attachment":{"fleetRef":"${ref}","part":0},"rendered":{"fleetRef":"${ref}","part":1}}`;
+  const body = JSON.stringify([payload, rendered]);
   beforeAll(() => {
     v17 = join(dir, 'state17.db');
     const db = new Database(v17);
@@ -183,8 +185,8 @@ describe('snapshot over a v17 state.db (deduped attachments)', () => {
     ev.run('sa', WS_A, 1, 'attachment', stored('a'), 'k1', null, ref);
     ev.run('sa', WS_A, 2, 'attachment', '', 'k2', deflateSync(Buffer.from(stored('b'))), ref);
     ev.run('sb', WS_B, 3, 'attachment', stored('c'), 'k3', null, 'e'.repeat(64));
-    db.prepare(`INSERT INTO event_blobs VALUES (?,?,?,?)`).run(ref, deflateSync(Buffer.from(payload)), payload.length, 2);
-    db.prepare(`INSERT INTO event_blobs VALUES (?,?,?,?)`).run('e'.repeat(64), deflateSync(Buffer.from('{"secret":1}')), 12, 1);
+    db.prepare(`INSERT INTO event_blobs VALUES (?,?,?,?)`).run(ref, deflateSync(Buffer.from(body)), body.length, 2);
+    db.prepare(`INSERT INTO event_blobs VALUES (?,?,?,?)`).run('e'.repeat(64), deflateSync(Buffer.from('["{\\"secret\\":1}"]')), 16, 1);
     db.close();
   });
   const job17 = (sql: string, includeRaw: boolean) => ({ ...job(sql, { includeRaw }), srcPath: v17 });
@@ -199,8 +201,8 @@ describe('snapshot over a v17 state.db (deduped attachments)', () => {
   }, 30_000);
 
   it('fleet_raw with a missing body returns the stored line', async () => {
-    expect(await runQueryInWorker(job17(`SELECT fleet_raw('{"attachment":{"fleetRef":"x"}}', NULL, 'x', NULL) AS r`, false)))
-      .toEqual([{ r: '{"attachment":{"fleetRef":"x"}}' }]);
+    expect(await runQueryInWorker(job17(`SELECT fleet_raw('{"attachment":{"fleetRef":"x","part":0}}', NULL, 'x', NULL) AS r`, false)))
+      .toEqual([{ r: '{"attachment":{"fleetRef":"x","part":0}}' }]);
   }, 30_000);
 });
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ATTACHMENT_MIN_BYTES, dedupeAttachment, deflatePayload, expandLine } from './attachmentCodec.js';
+import { ATTACHMENT_MIN_BYTES, dedupeAttachment, deflatePayload, expandLine, partMarker } from './attachmentCodec.js';
 
 const att = (payload: unknown) => JSON.stringify({ parentUuid: 'p', type: 'attachment', attachment: payload, uuid: 'u', timestamp: '2026-11-01T00:00:00Z' });
 const big = { type: 'instructions', content: 'x'.repeat(ATTACHMENT_MIN_BYTES) };
@@ -9,9 +9,27 @@ describe('attachment codec', () => {
     const line = att(big);
     const d = dedupeAttachment(line)!;
     expect(d.ref).toMatch(/^[0-9a-f]{64}$/);
-    expect(d.stored).toBe(line.replace(JSON.stringify(big), `{"fleetRef":"${d.ref}"}`));
-    expect(JSON.parse(d.stored).attachment).toEqual({ fleetRef: d.ref });
+    expect(d.stored).toBe(line.replace(JSON.stringify(big), partMarker(d.ref, 0)));
+    expect(JSON.parse(d.stored).attachment).toEqual({ fleetRef: d.ref, part: 0 });
     expect(expandLine(d.stored, d.ref, deflatePayload(d.payload))).toBe(line);
+  });
+
+  it('moves rendered with the attachment into one blob', () => {
+    const rendered = [{ content: `<system-reminder>${'r'.repeat(3000)}</system-reminder>` }];
+    const line = JSON.stringify({ parentUuid: 'p', attachment: big, type: 'attachment', uuid: 'u', rendered, cwd: '/w' });
+    const d = dedupeAttachment(line)!;
+    const o = JSON.parse(d.stored);
+    expect(o.attachment).toEqual({ fleetRef: d.ref, part: 0 });
+    expect(o.rendered).toEqual({ fleetRef: d.ref, part: 1 });
+    expect(d.stored.length).toBeLessThan(300);
+    expect(JSON.parse(d.payload)).toEqual([JSON.stringify(big), JSON.stringify(rendered)]);
+    expect(expandLine(d.stored, d.ref, deflatePayload(d.payload))).toBe(line);
+  });
+
+  it('counts both parts toward the size threshold', () => {
+    const half = { type: 'x', content: 'a'.repeat(ATTACHMENT_MIN_BYTES / 2) };
+    expect(dedupeAttachment(att(half))).toBeNull();
+    expect(dedupeAttachment(JSON.stringify({ type: 'attachment', attachment: half, rendered: 'b'.repeat(ATTACHMENT_MIN_BYTES / 2) }))).not.toBeNull();
   });
 
   it('gives the same payload the same ref', () => {

@@ -27,19 +27,19 @@ Store each distinct attachment payload once, keyed by its SHA-256. The event row
 
 ### 2.1 Which rows
 
-`type = 'attachment'` lines whose `attachment` value serializes (`JSON.stringify`) to ≥ 1,024 bytes. Every attachment type qualifies: a unique payload costs one blob row and still gets deflated, so there's no loss.
+`type = 'attachment'` lines whose top-level `attachment` and `rendered` values together serialize (`JSON.stringify`) to ≥ 1,024 bytes. `rendered` is the attachment's rendered text: on the host copy, after deduping `attachment` alone, deduped rows still held 382 MB, 355 MB of it `rendered` with 19 MB distinct, and the (attachment, rendered) pairs number only 3,227. Every attachment type qualifies: a unique payload costs one blob row and still gets deflated, so there's no loss.
 
 ### 2.2 Stored form
 
-Let `s = JSON.stringify(parsed.attachment)` and `h = sha256(s)` (hex). The line is deduped only when all of these hold; otherwise it is stored as-is:
+For each moved key present (`attachment` = part 0, `rendered` = part 1), let `s_i = JSON.stringify(parsed[key])`. The body is `JSON.stringify([s_0, s_1])` and `h = sha256(body)` (hex). The line is deduped only when all of these hold; otherwise it is stored as-is:
 
-- `"attachment":` + `s` occurs in the line exactly once (the payload is the literal substring the writer produced);
+- each `"<key>":` + `s_i` occurs in the line exactly once (the value is the literal substring the writer produced);
 - the line does not already contain `"fleetRef":"`;
 - the rebuild of the stored form equals the original line (checked at write time).
 
-Stored `raw_jsonl` = the line with `s` replaced by `{"fleetRef":"<h>"}`. It stays valid JSON, so a reader that skips the rebuild still parses it. `events.att_ref = h`.
+Stored `raw_jsonl` = the line with each `s_i` replaced by `{"fleetRef":"<h>","part":<i>}`. It stays valid JSON, so a reader that skips the rebuild still parses it. `events.att_ref = h`.
 
-On the real copy, all 46,731 attachment rows ≥ 1 KB passed the first two checks (0 misses, 0 multiple matches).
+On the real copy, every attachment and `rendered` value of the eligible rows passed the first two checks (0 misses, 0 multiple matches).
 
 ### 2.3 Blob table
 
@@ -47,7 +47,7 @@ On the real copy, all 46,731 attachment rows ≥ 1 KB passed the first two check
 event_blobs(hash TEXT PRIMARY KEY, body_z BLOB NOT NULL, bytes INTEGER NOT NULL, refs INTEGER NOT NULL)
 ```
 
-`body_z` is the payload deflated (zlib level 6). `bytes` is its UTF-8 length. `refs` counts events whose `att_ref` is `hash`.
+`body_z` is the body deflated (zlib level 6). `bytes` is its UTF-8 length. `refs` counts events whose `att_ref` is `hash`.
 
 ### 2.4 Reference counting
 
@@ -67,7 +67,7 @@ A new retention step, `attachments`, runs before the events step in each pass (S
 
 - `rawLine` stays the stored-form codec (retention keeps operating on the stored form, so stripping and compressing never expand a row). A new `expandLine(stored, attRef, bodyZ)` splices the payload back in.
 - `eventsForSession` and `unembeddedTurnEvents` left-join `event_blobs` and return the expanded line.
-- MCP `query` worker (`include_raw`): the snapshot copies the referenced blobs into `event_blobs`, and the `events` view's `raw_jsonl` is `fleet_raw(raw_jsonl, raw_z, att_ref, body_z)`. Without `include_raw` no blob is copied.
+- MCP `query` worker (`include_raw`): the snapshot copies the referenced blobs into `event_blobs`, and the `events` view's `raw_jsonl` is `fleet_raw(raw_jsonl, raw_z, att_ref, body_z)`, which splices each part back. Without `include_raw` no blob is copied.
 - SQLite → Postgres import expands lines and writes `att_ref` NULL. `event_blobs` is not imported.
 - A missing or corrupt blob reads as the stored form (valid JSON with the marker); strict mode throws (import keeps the stored form rather than lose it).
 
@@ -109,7 +109,7 @@ Real code (`dedupeAttachments`, after a retention pass) on a scratch copy of the
 ## 5. Decisions
 
 1. **SQLite only** (§2.8).
-2. **Whole `attachment` value, ≥ 1 KB, any type** (§2.1). Sub-payload dedupe (e.g. per tool in `deferred_tools_delta`) would save more on unique-but-similar payloads; not worth the rebuild complexity at 22 MB distinct.
+2. **Whole `attachment` + `rendered` values, ≥ 1 KB together, any type** (§2.1); one blob per distinct pair. Sub-payload dedupe (e.g. per tool in `deferred_tools_delta`) would save more on unique-but-similar payloads; not worth the rebuild complexity at 22 MB distinct.
 3. **Marker splice, verified at write time** instead of a JSON re-serializer: exact by construction, and any line that doesn't round-trip stays plain.
 4. **Refcount + delete trigger** instead of a sweep with an `events(att_ref)` index (§2.4).
 5. **Deflated blob bodies.**

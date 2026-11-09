@@ -70,8 +70,9 @@ export function runSnapshotQuery(
   const mem = new DatabaseCtor(':memory:');
   try {
     // Retention stores old lines deflated in raw_z with raw_jsonl ''; attachment
-    // dedupe swaps the payload for {"fleetRef":"<att_ref>"} with the body in
-    // event_blobs. A corrupt or missing part reads as what is stored.
+    // dedupe swaps each moved value for {"fleetRef":"<att_ref>","part":<i>} with
+    // the values (a JSON array of their text) in event_blobs. A corrupt or
+    // missing part reads as what is stored.
     mem.function('fleet_raw', { deterministic: true, varargs: true }, (raw: unknown, z: unknown, ref?: unknown, body?: unknown) => {
       let line = raw;
       if (z instanceof Uint8Array && z.length > 0) {
@@ -82,11 +83,17 @@ export function runSnapshotQuery(
         }
       }
       if (typeof ref !== 'string' || typeof line !== 'string' || !(body instanceof Uint8Array)) return line;
-      const marker = `{"fleetRef":"${ref}"}`;
-      const at = line.indexOf(marker);
-      if (at < 0) return line;
       try {
-        return line.slice(0, at) + zlib.inflateSync(body).toString('utf8') + line.slice(at + marker.length);
+        const parts = JSON.parse(zlib.inflateSync(body).toString('utf8')) as unknown;
+        if (!Array.isArray(parts)) return line;
+        let out = line;
+        for (let i = 0; i < parts.length; i++) {
+          const marker = `{"fleetRef":"${ref}","part":${i}}`;
+          const at = out.indexOf(marker);
+          if (at < 0 || typeof parts[i] !== 'string') return line;
+          out = out.slice(0, at) + (parts[i] as string) + out.slice(at + marker.length);
+        }
+        return out;
       } catch {
         return line;
       }

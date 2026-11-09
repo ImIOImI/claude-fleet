@@ -734,7 +734,7 @@ CREATE TABLE events (
   raw_jsonl TEXT NOT NULL,             -- original line ('' when raw_z holds it); a retention stub once stripped
   dedup_key TEXT NOT NULL,             -- uuid when present, else sha256(raw_jsonl)
   raw_z BLOB,                          -- v16: zlib-deflated line (SQLite only; BYTEA, always NULL, on Postgres)
-  att_ref TEXT,                        -- v17: event_blobs.hash when the attachment value is a fleetRef marker (SQLite only; NULL on Postgres)
+  att_ref TEXT,                        -- v17: event_blobs.hash when attachment/rendered are fleetRef markers (SQLite only; NULL on Postgres)
   UNIQUE(session_id, dedup_key)
 );
 CREATE INDEX idx_events_session_ts ON events(session_id, ts);
@@ -986,10 +986,10 @@ CREATE TABLE maintenance (
 );
 
 -- v17: deduped attachment payloads (see *Attachment dedupe* below). body_z is
--- the payload's JSON, zlib-deflated; bytes its UTF-8 length; refs the number of
+-- the body, zlib-deflated; bytes its UTF-8 length; refs the number of
 -- events whose att_ref is hash. Empty on Postgres.
 CREATE TABLE event_blobs (
-  hash   TEXT PRIMARY KEY,               -- sha256 hex of the payload JSON
+  hash   TEXT PRIMARY KEY,               -- sha256 hex of the body (JSON array of the moved values' text)
   body_z BLOB NOT NULL,
   bytes  INTEGER NOT NULL,
   refs   INTEGER NOT NULL
@@ -1025,10 +1025,10 @@ This `sessions` table is the index behind the Sessions table feature (§6 *Sessi
   - **Next start:** a fresh lock naming a live pid (`vacuumHelperActive`) defers only the SQLite history services (open, state writes, retention, watcher, capture scheduler, embedding backfill); the window, IPC and the MCP server (a WAL reader) start as usual and history IPC rejects until then. `waitForVacuumHelper` polls the lock for up to 120 s without blocking the loop, then kills the helper and waits (≤ 10 s) for the pid to exit, since Windows releases its file locks late; a killed VACUUM rolls back. `openDb` sets `busy_timeout = 5000` so a lock still being released waits instead of throwing. A lock older than 15 min, or naming a dead pid, is removed and never acted on, since its pid may have been reused. The outcome is logged as `vacuum-wait`.
 - **Incremental vacuum:** every 30 min (and after a pass), if `auto_vacuum = INCREMENTAL` and the freelist exceeds 4,096 pages, `incremental_vacuum(1024)` runs in up to 64 throttled slices. It runs through `withRawSqlite`, holding the store mutex: through the driver's `run()` the pragma frees only one page. Postgres relies on autovacuum.
 
-**Attachment dedupe** (`state/attachmentCodec.ts`; spec `docs/superpowers/specs/2026-11-09-attachment-dedupe-design.md`). Claude Code re-records the same `attachment` payloads (tool lists, instructions, prompt snapshots, skill listings) on every session and turn: on the host copy measured 2026-11-09, 661 MB of such payload held ~22 MB of distinct content. On SQLite, a `type = 'attachment'` line whose `attachment` value serializes to ≥ 1,024 bytes is stored once per distinct payload:
-- **Stored form:** the line with its `attachment` value replaced by `{"fleetRef":"<sha256>"}` (still valid JSON), and `events.att_ref` = the hash. The payload goes to `event_blobs`, deflated. A line is deduped only when `"attachment":` + `JSON.stringify(value)` occurs in it exactly once, it has no `"fleetRef":"` already, and the rebuild equals the original; otherwise it is stored as it is.
+**Attachment dedupe** (`state/attachmentCodec.ts`; spec `docs/superpowers/specs/2026-11-09-attachment-dedupe-design.md`). Claude Code re-records the same `attachment` payloads (tool lists, instructions, prompt snapshots, skill listings) on every session and turn: on the host copy measured 2026-11-09, 661 MB of such payload held ~22 MB of distinct content. Many of those lines also carry `rendered`, the attachment's rendered text, which repeats with it (355 MB, 19 MB distinct). On SQLite, a `type = 'attachment'` line whose top-level `attachment` and `rendered` values together serialize to ≥ 1,024 bytes is stored once per distinct pair:
+- **Stored form:** each moved value is replaced by `{"fleetRef":"<sha256>","part":<i>}` (part 0 `attachment`, part 1 `rendered`; still valid JSON), and `events.att_ref` = the hash. The blob body is the JSON array of the values' literal text, hashed and deflated into `event_blobs`. A line is deduped only when each `"<key>":` + `JSON.stringify(value)` occurs in it exactly once, it has no `"fleetRef":"` already, and the rebuild equals the original; otherwise it is stored as it is.
 - **Writes:** ingest dedupes before the insert and adds a reference (`refs + 1`, or a new blob) only when the event landed. `dedup_key` comes from the original line, so a re-read line hits `ON CONFLICT DO NOTHING` and refs don't move. The trigger releases a reference on every delete path (`deleteSession`, `purgeWorkspace`, the orphan sweep); no `events(att_ref)` index exists.
-- **Reads:** `rawLine()` stays the stored-form codec (retention strips and compresses the stored form and never expands it); `expandLine(stored, att_ref, body_z)` splices the payload back. `eventsForSession` and `unembeddedTurnEvents` join `event_blobs` and return the original line. A missing or corrupt blob reads as the stored form.
+- **Reads:** `rawLine()` stays the stored-form codec (retention strips and compresses the stored form and never expands it); `expandLine(stored, att_ref, body_z)` splices each part back. `eventsForSession` and `unembeddedTurnEvents` join `event_blobs` and return the original line. A missing or corrupt blob reads as the stored form.
 - **Backfill:** the retention pass's attachments step (SQLite only) walks `type = 'attachment' AND att_ref IS NULL` by id (via `idx_events_type`) up to the max attachment id at the step's start, in the same ≤ 200-row / 2 MB throttled slices, inflating a compressed row first and storing the deduped stub uncompressed. It resumes from `maintenance['attachments.deduped_through_id']`; a row that fails the checks is passed over. `retention-pass` logs the count.
 - **Postgres** does not dedupe (TOAST compresses large values, and the MCP query role reads `raw_jsonl` through a temp view): `att_ref` and `event_blobs` exist for schema parity and stay empty.
 
@@ -2179,7 +2179,7 @@ Read-only MCP server exposed by claude-fleet that lets the agent inside each con
     - `ReadSourceAdmin` (`forgetCaller`, `close`) is the owner's.
     - `setReadSource` closes the source it replaces.
   - **SQLite** (`sqliteReadSource.ts`):
-    - The server's own `{ readonly: true }` better-sqlite3 connection, plus the per-call in-memory `query` snapshot (ATTACH + copy), which is the isolation mechanism there. `query` hands the snapshot build and the caller's SQL to a worker thread (`queryWorker.ts`, 30 s timeout, #476); the worker opens its own handle on the same state.db path. With `include_raw`, `events` in the snapshot is a view over `events_store` whose `raw_jsonl` is `fleet_raw(raw_jsonl, raw_z, att_ref, body_z)`, a SQL function registered in the worker that inflates a retention-compressed line (§7 *Retention*) and splices a deduped attachment payload back in (§7 *Attachment dedupe*); the snapshot also gets an `event_blobs(hash, body_z)` table holding only the blobs its rows reference. A corrupt `raw_z` returns `raw_jsonl`, and a missing or corrupt blob returns the stored line. `fleet_raw` takes two or four arguments. Agents see text, inflation runs only for rows a query reads, and `fleet_raw` is also callable directly.
+    - The server's own `{ readonly: true }` better-sqlite3 connection, plus the per-call in-memory `query` snapshot (ATTACH + copy), which is the isolation mechanism there. `query` hands the snapshot build and the caller's SQL to a worker thread (`queryWorker.ts`, 30 s timeout, #476); the worker opens its own handle on the same state.db path. With `include_raw`, `events` in the snapshot is a view over `events_store` whose `raw_jsonl` is `fleet_raw(raw_jsonl, raw_z, att_ref, body_z)`, a SQL function registered in the worker that inflates a retention-compressed line (§7 *Retention*) and splices deduped attachment parts back in (§7 *Attachment dedupe*); the snapshot also gets an `event_blobs(hash, body_z)` table holding only the blobs its rows reference. A corrupt `raw_z` returns `raw_jsonl`, and a missing or corrupt blob returns the stored line. `fleet_raw` takes two or four arguments. Agents see text, inflation runs only for rows a query reads, and `fleet_raw` is also callable directly.
     - The connection is separate from the app's write connection and sees only committed WAL frames, so a snapshot never observes half an ingest chunk.
     - `search_transcripts` scans this connection (`searchVectorsSqlite`); `searchTranscripts` remains as its embed-then-scan wrapper for the state bench and tests.
   - **Postgres** (`store/pgReadSource.ts`):
