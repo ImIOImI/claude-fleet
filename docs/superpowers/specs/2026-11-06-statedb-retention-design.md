@@ -39,18 +39,27 @@ Once retention applies, a row costs **28%** of its raw bytes (strip + zlib). zli
 
 Embeddings: of 48,392 user/assistant lines, **86.9% have no embeddable text** (tool-only or empty). Each still stores a 1,536-byte zero vector as a placeholder. The rest average 354 bytes of text.
 
-### 2.2 Projected savings on Troy's host (provisional, from the ratios above)
+### 2.2 Measured on Troy's host (copy taken 2026-11-09)
 
-| Item | Now | After | Saved |
-|---|---|---|---|
-| `events` rows older than 30 days (~55%, from the #476 monthly counts) | ~1,200 MB | ~340 MB | ~860 MB |
-| `events` rows newer than 30 days | ~990 MB | ~990 MB | 0 (aged into retention later) |
-| `embeddings`: placeholder vectors dropped (~290k rows × 1,536 B) | | | ~445 MB |
-| `embeddings`: int8 vectors (~44k rows × 1,148 B) | | | ~50 MB |
-| Deleted-workspace rows | unknown | | measured on the copy |
-| **state.db file** | ~3.1 GB | **~1.7 GB** after the one-time VACUUM | **~1.4 GB** |
+`scripts/measure-statedb.mjs` on a copy of the host `state.db` (4.2 GB, schema v15, before retention):
 
-Steady state: rows older than 30 days stay at ~28% of their raw size, so growth drops by ~3.5× once a row ages past 30 days. Replace these figures with real per-type bytes when the host copy arrives. The measuring script is `scripts/measure-statedb.mjs` (§8). It runs read-only on a copy.
+| Object | Size | Retention |
+|---|---|---|
+| `events` | 3,058 MB | old rows stripped/compressed |
+| ↳ `attachment` (102k rows, avg 11.6 KB) | 1,187 MB | compressed after 30 days, never stripped |
+| ↳ `user` `tool_result` (113k rows) | 651 MB | stripped after 30 days (90 if resumed) |
+| ↳ `assistant` (text) | 326 MB | compressed after 30 days |
+| ↳ `assistant` `tool_use` | 255 MB | oversized inputs stripped after 30 days |
+| ↳ everything else | ~162 MB | compressed after 30 days |
+| `embeddings` | 770 MB | |
+| ↳ placeholder vectors (286k rows) | 439 MB | dropped |
+| ↳ real vectors (62k rows) | 95 MB | int8, ~24 MB |
+| `events` indexes, `perf_events`, other | ~0.4 GB | unchanged |
+
+- **Age:** only ~400 MB of event payload is past its strip/compress window today (52 MB attachment, 157 MB `tool_result`, 192 MB other); it shrinks to ~100 MB. The last two weeks added 1.66 GB of events (~800 MB/week, vs ~50 MB/week two months earlier); more than half of it is `attachment` rows.
+- **zlib** on a 2% row sample left 34% of the bytes.
+- **Retention alone** reclaims ~0.8 GB once (~0.5 GB embeddings, ~0.3 GB events): 4.2 → ~3.4 GB after the VACUUM. It doesn't touch rows under 30 days, so at the current growth rate the file keeps growing.
+- **Attachments** are mostly repeats: `deferred_tools_delta`, `prompt_snapshot`, `instructions` and `skill_listing` hold 661 MB of payload with ~22 MB distinct. That is addressed by attachment dedupe (`2026-11-09-attachment-dedupe-design.md`, #542), which works at ingest.
 
 ## 3. Constraints
 
