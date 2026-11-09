@@ -52,6 +52,9 @@ export class PeerStatusWatcher extends EventEmitter {
   private readonly byPath = new Map<string, PeerStatus>();
   private lastKey = '';
   private readonly nativeRecursive: boolean;
+  // path → id of its newest read. Raw fs.watch fires several events per write
+  // and reads can finish out of order; only the newest-started read may apply.
+  private readonly readSeq = new Map<string, number>();
 
   constructor(opts: { nativeRecursive?: boolean } = {}) {
     super();
@@ -78,6 +81,7 @@ export class PeerStatusWatcher extends EventEmitter {
     this.polledDirs.clear();
     this.watchedDirs.clear();
     this.byPath.clear();
+    this.readSeq.clear();
     this.lastKey = '';
   }
 
@@ -144,18 +148,21 @@ export class PeerStatusWatcher extends EventEmitter {
     const onTouch = (p: string): void => { void this.onTouch(p); };
     w.on('add', onTouch)
       .on('change', onTouch)
-      .on('unlink', (p) => { if (this.drop(p)) this.emitIfChanged(); })
+      .on('unlink', (p) => { this.readSeq.delete(p); if (this.drop(p)) this.emitIfChanged(); })
       .on('error', (err) => console.error('[peerStatusWatcher] error:', err));
   }
 
   private async onTouch(path: string): Promise<void> {
     if (extname(path) !== '.json') return;
+    const seq = (this.readSeq.get(path) ?? 0) + 1;
+    this.readSeq.set(path, seq);
     let raw: string;
     try {
       raw = await fsp.readFile(path, 'utf8');
     } catch {
       return; // vanished between event and read — the unlink handler covers it
     }
+    if (this.readSeq.get(path) !== seq) return;
     if (this.ingest(path, raw)) this.emitIfChanged();
   }
 

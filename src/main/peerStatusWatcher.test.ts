@@ -52,6 +52,31 @@ describe('PeerStatusWatcher core (no fs)', () => {
   });
 });
 
+describe('PeerStatusWatcher overlapping reads', () => {
+  it('applies only the newest-started read of a path when reads finish out of order', async () => {
+    const fsMod = await import('node:fs');
+    const releases: Array<() => void> = [];
+    const contents = [file('a', 'busy'), file('a', 'idle')];
+    const spy = vi.spyOn(fsMod.promises, 'readFile').mockImplementation(() => {
+      const body = contents.shift()!;
+      return new Promise((resolve) => releases.push(() => resolve(body)));
+    });
+    try {
+      const w = new PeerStatusWatcher();
+      const touch = (w as unknown as { onTouch: (p: string) => Promise<void> }).onTouch.bind(w);
+      const first = touch('/s/1.json');   // reads 'busy'
+      const second = touch('/s/1.json');  // reads 'idle'
+      releases[1]();
+      await second;
+      releases[0]();                      // the stale 'busy' read lands last
+      await first;
+      expect(w.snapshot().map((x) => x.status)).toEqual(['idle']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
 describe.each([
   ['chokidar', false],
   ['native recursive fs.watch', true]
