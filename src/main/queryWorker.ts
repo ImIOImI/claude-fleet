@@ -30,6 +30,7 @@ import { existsSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import type BetterSqlite3 from 'better-sqlite3';
 import { MAX_QUERY_BYTES, SNAPSHOT_EVENT_COLS } from './store/readSource.js';
+import { spliceParts } from './state/attachmentCodec.js';
 
 export const QUERY_TIMEOUT_MS = 30_000;
 /** Concurrently running query workers; further calls queue (queue time counts toward the timeout). */
@@ -60,6 +61,7 @@ export interface SnapshotQueryJob {
  *  SELF-CONTAINED — serialized into the worker via toString(). */
 export function runSnapshotQuery(
   DatabaseCtor: typeof BetterSqlite3, job: SnapshotQueryJob, zlib: { inflateSync(b: Uint8Array): Buffer },
+  splice: typeof spliceParts,
 ): unknown[] {
   const ids = job.allowed;
   // Empty set matches nothing (self is always present, so unreachable in practice).
@@ -69,13 +71,25 @@ export function runSnapshotQuery(
 
   const mem = new DatabaseCtor(':memory:');
   try {
-    // Retention stores old lines deflated in raw_z with raw_jsonl ''.
-    mem.function('fleet_raw', { deterministic: true }, (raw: unknown, z: unknown) => {
-      if (!(z instanceof Uint8Array) || z.length === 0) return raw;
+    // Retention stores old lines deflated in raw_z with raw_jsonl ''; attachment
+    // dedupe swaps each moved value for {"fleetRef":"<att_ref>","part":<i>} with
+    // the values (a JSON array of their text) in event_blobs. A corrupt or
+    // missing part reads as what is stored.
+    mem.function('fleet_raw', { deterministic: true, varargs: true }, (raw: unknown, z: unknown, ref?: unknown, body?: unknown) => {
+      let line = raw;
+      if (z instanceof Uint8Array && z.length > 0) {
+        try {
+          line = zlib.inflateSync(z).toString('utf8');
+        } catch {
+          line = raw;
+        }
+      }
+      if (typeof ref !== 'string' || typeof line !== 'string' || !(body instanceof Uint8Array)) return line;
       try {
-        return zlib.inflateSync(z).toString('utf8');
+        const parts = JSON.parse(zlib.inflateSync(body).toString('utf8')) as unknown;
+        return (Array.isArray(parts) ? splice(line, ref, parts) : null) ?? line;
       } catch {
-        return raw;
+        return line;
       }
     });
     // ATTACH filename is not reliably bindable; double any single quotes.
@@ -85,8 +99,15 @@ export function runSnapshotQuery(
         // A view inflates only the rows a query reads; the snapshot keeps the compressed bytes.
         const srcCols = mem.prepare(`PRAGMA ${alias}.table_info(events)`).all() as { name: string }[];
         const rawZ = srcCols.some((c) => c.name === 'raw_z') ? 'raw_z' : 'NULL AS raw_z';
-        mem.prepare(`CREATE TABLE events_store AS SELECT ${job.eventCols}, raw_jsonl, ${rawZ} FROM ${alias}.events WHERE ${scope}`).run(...ids);
-        mem.exec(`CREATE VIEW events AS SELECT ${job.eventCols}, fleet_raw(raw_jsonl, raw_z) AS raw_jsonl FROM events_store`);
+        const hasRef = srcCols.some((c) => c.name === 'att_ref');
+        mem.prepare(`CREATE TABLE events_store AS SELECT ${job.eventCols}, raw_jsonl, ${rawZ}, ${hasRef ? 'att_ref' : 'NULL AS att_ref'} FROM ${alias}.events WHERE ${scope}`).run(...ids);
+        // Only the blobs the snapshot's rows reference.
+        mem.exec(`CREATE TABLE event_blobs (hash TEXT PRIMARY KEY, body_z BLOB)`);
+        if (hasRef) {
+          mem.exec(`INSERT INTO event_blobs SELECT hash, body_z FROM ${alias}.event_blobs WHERE hash IN (SELECT att_ref FROM events_store WHERE att_ref IS NOT NULL)`);
+        }
+        const cols = job.eventCols.split(',').map((c) => `s.${c.trim()}`).join(', ');
+        mem.exec(`CREATE VIEW events AS SELECT ${cols}, fleet_raw(s.raw_jsonl, s.raw_z, s.att_ref, b.body_z) AS raw_jsonl FROM events_store s LEFT JOIN event_blobs b ON b.hash = s.att_ref`);
       } else {
         mem.prepare(`CREATE TABLE events AS SELECT ${job.eventCols} FROM ${alias}.events WHERE ${scope}`).run(...ids);
       }
@@ -138,9 +159,10 @@ export function runSnapshotQuery(
 const WORKER_SRC = `
 const { parentPort, workerData } = require('node:worker_threads');
 const run = (${runSnapshotQuery.toString()});
+const spliceParts = (${spliceParts.toString()});
 try {
   const Database = require(workerData.bs3Path);
-  parentPort.postMessage({ ok: true, rows: run(Database, workerData.job, require('node:zlib')) });
+  parentPort.postMessage({ ok: true, rows: run(Database, workerData.job, require('node:zlib'), spliceParts) });
 } catch (e) {
   parentPort.postMessage({ ok: false, message: e && e.message ? e.message : String(e) });
 }

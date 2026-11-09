@@ -663,7 +663,7 @@ Today the primary workspace backend is a Docker container. The container name is
 Each workspace's Claude transcripts (`<userData>/state/<id>/.claude/projects/-workspace/<session-uuid>.jsonl`) are tailed by a single SQLite cache at `<userData>/state.db` (WAL mode). JSONL stays authoritative — the DB can be dropped at any time and the watcher rebuilds it from the JSONLs on next start.
 
 **Postgres store.** With `store: { kind: 'postgres' }` (§6 *Settings*) the same queries run on Postgres (`openDbPostgres(pool)`; `store/pgStores.ts:openPgStores` opens both stores on one pool).
-- **Schema:** a baseline equal to the final SQLite schema (`store/migrations/statePg.ts`, state baseline = state v14; v15 `port_exposures` is step 15; v16 retention is step 16). Types: `BIGINT` for every integer, `DOUBLE PRECISION` for real, `TEXT COLLATE "C"` for every text column (byte order, as SQLite compares), `BYTEA` for `events.raw_z`, identity ids, and `embeddings.vec vector(384)`, nullable (the one NOT NULL difference from SQLite: a placeholder has no vector). There is no vector index; search is exact.
+- **Schema:** a baseline equal to the final SQLite schema (`store/migrations/statePg.ts`, state baseline = state v14; v15 `port_exposures` is step 15; v16 retention is step 16; v17 attachment dedupe is step 17). Types: `BIGINT` for every integer, `DOUBLE PRECISION` for real, `TEXT COLLATE "C"` for every text column (byte order, as SQLite compares), `BYTEA` for `events.raw_z` and `event_blobs.body_z`, identity ids, and `embeddings.vec vector(384)`, nullable (the one NOT NULL difference from SQLite: a placeholder has no vector). There is no vector index; search is exact.
 - **Performance budgets** (`state/stateBench.test.ts` `PG_GATE`; `STATE_BENCH=1 STORE_TEST_DIALECT=postgres` measures, `STATE_BENCH_PG_GATE=<files>` gates). Postgres is gated on absolute budgets, not a ratio to SQLite: ingest and writes pay a loopback round trip and a commit per statement (plus the write gate's `begin`/`commit`, which the bench opens the store with, as the app does). Reads ≤ 16 ms (summary uncached, events page, list sessions, read-round stall), cached summary and mapping lookup ≤ 1 ms, search ≤ 50 ms, stall max ≤ 50 ms, ingest ≤ 3 ms/line fresh and 1.5 ms/line replay, record mapping and record error ≤ 10 ms. The SQLite bench is unchanged and keeps its A/B gate against the base.
 - **Managed Postgres** (`store/managedPostgres.ts`, Docker via `store/managedDocker.ts`): `ensureManagedPostgres` runs at every start and on recovery, and is idempotent.
   - **Container:** `claude-fleet-postgres` from the pinned image (§4), labels `com.claude-fleet.store=postgres` and `com.claude-fleet.store.pg-major=16`, never `com.claude-fleet.managed` (which marks workspace containers). `RestartPolicy: no`. Data in the named volume `claude-fleet-postgres-data` (same labels) at `/var/lib/postgresql/data`; `initdb --locale=C.UTF-8 --encoding=UTF8`, database `fleet`. The env has `POSTGRES_PASSWORD_FILE=/proc/sys/kernel/random/uuid` and no `POSTGRES_PASSWORD`, so initdb's superuser password is random and never stored. A container is recreated (same port and volume) unless it has the pinned image, the store label and a `127.0.0.1` host-port binding.
@@ -675,7 +675,7 @@ Each workspace's Claude transcripts (`<userData>/state/<id>/.claude/projects/-wo
   - **Stop:** at quit, best effort (`docker stop -t 10`) inside the bounded quit (§8). Postgres's WAL makes an unclean stop safe.
   - **Not tested here:** the real container runs only in CI's `managedPostgres.docker.test.ts` (`MANAGED_PG_DOCKER=1`); the logic is unit-tested against a fake `ManagedDocker`.
 - **First-switch copy** (`store/firstSwitch.ts:firstSwitchCopy`, `store/storeImport.ts:importSqlite`): after the stores migrate and before anything uses them, `inbox.db` then `state.db` are copied into Postgres with their ids. state.db is copied, not re-ingested: renames, tab mappings, usage signals and embeddings aren't in the transcripts, and summaries reference event ids.
-  - **Retention data:** a compressed event line (`raw_z`) is inflated into `raw_jsonl` with `raw_z` NULL (a corrupt one is copied as it is, bytes kept), and an empty placeholder vector becomes NULL; `event_retention` and `maintenance` copy as they are.
+  - **Retention data:** a compressed event line (`raw_z`) is inflated into `raw_jsonl` with `raw_z` NULL (a corrupt one is copied as it is, bytes kept), a deduped attachment line is rebuilt from `event_blobs` with `att_ref` NULL (a missing blob keeps the stored form), `event_blobs` itself is not copied, and an empty placeholder vector becomes NULL; `event_retention` and `maintenance` copy as they are.
   - **Per table** (`IMPORT_TABLES`, every inbox and state table including FTS): keyset by SQLite `rowid` in chunks bounded by 30 000 bind parameters, read with safe integers. Each chunk is `INSERT … RETURNING col::text` (under `SET LOCAL extra_float_digits = 3`), and the returned values must equal the source values canonically (ints as decimal strings, floats round-tripped, vectors as float32, bytea as hex, a BLOB in a text column read as UTF-8, NUL → U+FFFD) or the chunk rolls back. Each chunk commits with its progress row in `store_import(source, tbl, last_rowid, copied, done)` (track `import`), so a failed or interrupted copy resumes. At a table's end its row count must equal SQLite's, and every identity sequence is `setval` to `GREATEST(max(id), sqlite_sequence.seq)`. A unique violation becomes an `ImportError` naming the table and key.
   - **Restart, not resume,** when the file's fingerprint (size and mtime of the file and of a non-empty WAL; a read-only open's empty WAL doesn't count) changed since the run began (`store_import_run`): the source's tables are truncated and copied again. The fingerprint is checked once more before `finished_at` is set, up to 3 attempts.
   - **Refused:** a SQLite file at another schema version; a non-empty `-journal` (the error says to switch back to SQLite, which rolls it back); a target that already holds rows the import didn't write (`skipped-nonempty`: nothing is written). A finished inbox run beside an `inbox.db` with another fingerprint is `skipped-conflict`: both copies are kept. After a skip, Postgres is in use, the notice says so, and a switch back is refused until the user quits and moves `inbox.db` (with any `-wal`/`-shm`) out of `<userData>`.
@@ -708,7 +708,7 @@ Each workspace's Claude transcripts (`<userData>/state/<id>/.claude/projects/-wo
     | 100,000 | 116 ms | 155 ms |
     | 250,000 | 291 ms | 342 ms |
 
-**Schema (v16, current):**
+**Schema (v17, current):**
 
 ```sql
 CREATE TABLE events (
@@ -734,6 +734,7 @@ CREATE TABLE events (
   raw_jsonl TEXT NOT NULL,             -- original line ('' when raw_z holds it); a retention stub once stripped
   dedup_key TEXT NOT NULL,             -- uuid when present, else sha256(raw_jsonl)
   raw_z BLOB,                          -- v16: zlib-deflated line (SQLite only; BYTEA, always NULL, on Postgres)
+  att_ref TEXT,                        -- v17: event_blobs.hash when attachment/rendered are fleetRef markers (SQLite only; NULL on Postgres)
   UNIQUE(session_id, dedup_key)
 );
 CREATE INDEX idx_events_session_ts ON events(session_id, ts);
@@ -977,11 +978,31 @@ CREATE TABLE event_retention (
 CREATE INDEX idx_event_retention_workspace ON event_retention(workspace_id);
 
 -- v16: key/value bookkeeping: retention.first_pass_at, retention.last_pass_at,
--- embeddings.compacted_through_id, vacuum.last_attempt_at.
+-- embeddings.compacted_through_id, vacuum.last_attempt_at,
+-- attachments.deduped_through_id (v17).
 CREATE TABLE maintenance (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- v17: deduped attachment payloads (see *Attachment dedupe* below). body_z is
+-- the body, zlib-deflated; bytes its UTF-8 length; refs the number of
+-- events whose att_ref is hash. Empty on Postgres.
+CREATE TABLE event_blobs (
+  hash   TEXT PRIMARY KEY,               -- sha256 hex of the body (JSON array of the moved values' text)
+  body_z BLOB NOT NULL,
+  bytes  INTEGER NOT NULL,
+  refs   INTEGER NOT NULL
+);
+CREATE TRIGGER events_att_ref_ad AFTER DELETE ON events WHEN old.att_ref IS NOT NULL BEGIN
+  UPDATE event_blobs SET refs = refs - 1 WHERE hash = old.att_ref;
+  DELETE FROM event_blobs WHERE hash = old.att_ref AND refs <= 0;
+END;
+CREATE TRIGGER events_att_ref_au AFTER UPDATE OF att_ref ON events
+  WHEN old.att_ref IS NOT NULL AND (new.att_ref IS NULL OR new.att_ref <> old.att_ref) BEGIN
+  UPDATE event_blobs SET refs = refs - 1 WHERE hash = old.att_ref;
+  DELETE FROM event_blobs WHERE hash = old.att_ref AND refs <= 0;
+END;
 ```
 
 `ERRORS_RETENTION = 2000`: every `recordError` call prunes to the most recent 2000 rows (DELETE by id rank). The table is an append-only ring buffer — no explicit expiry, no separate job.
@@ -996,7 +1017,7 @@ This `sessions` table is the index behind the Sessions table feature (§6 *Sessi
   - an assistant line with a `tool_use` input over 2,048 chars of JSON keeps `file_path`/`path`/`notebook_path`/`command`/`pattern`/`url`/`description`/`skill`/`subagent_type` (≤ 4,096 chars each) and cuts every other string field to 200 chars + `…`.
 - **Compress** (SQLite only): lines older than 30 days and ≥ 512 bytes are zlib-deflated into `raw_z`, with `raw_jsonl = ''`. Readers go through `rawLine()`. Postgres TOAST already compresses large text, so `raw_z` stays NULL there and the SQLite→Postgres import inflates it.
 - **Embeddings:** a placeholder turn (no text) stores no vector. Callers pass float32; `insertEmbeddings` stores int8 on SQLite (`vectors.ts`) and float32 `vector(384)` on Postgres (no size gain from quantizing there).
-- **The pass** runs 5 min after start, then daily: orphan sweep → events → embeddings compaction → incremental vacuum.
+- **The pass** runs 5 min after start, then daily: orphan sweep → attachment dedupe backfill (*Attachment dedupe* below) → events → embeddings compaction → incremental vacuum.
   - Events walk each old session through `idx_events_session_ts` between its `event_retention` watermarks. No per-row flag or new events index exists: building one would read the whole table at migration.
   - Embeddings resume from `maintenance['embeddings.compacted_through_id']`.
   - Work goes in slices of ≤ 200 rows / 2 MB: a slice reads keys and stored sizes first (`octet_length`, no payload read), then fetches bodies only up to the byte budget, so no row is read twice. One transaction each, spanned `claude_fleet.retention.slice`. After a slice of `t` ms the pass sleeps `max(250 ms, 9t)`, a ≤ 10% duty cycle on the main thread.
@@ -1008,6 +1029,14 @@ This `sessions` table is the index behind the Sessions table feature (§6 *Sessi
   - **Helper:** after the bounded quit has closed the DB, main writes `state.db.vacuum.lock` (`{ pid: null, startedAt }`; no lock, no helper), spawns a detached helper (`process.execPath` with `ELECTRON_RUN_AS_NODE=1 -e`, better-sqlite3 from `app.asar.unpacked`) and rewrites the lock with its pid. The helper is the app's own executable, so an NSIS update started while it runs sees the app as running (and may close it); a killed VACUUM rolls back, so that is safe. The helper runs `PRAGMA auto_vacuum = INCREMENTAL; VACUUM; wal_checkpoint(TRUNCATE)`, appends `vacuum-done` / `vacuum-failed` to `error.log` and removes the lock.
   - **Next start:** a fresh lock naming a live pid (`vacuumHelperActive`) defers only the SQLite history services (open, state writes, retention, watcher, capture scheduler, embedding backfill); the window, IPC and the MCP server (a WAL reader) start as usual and history IPC rejects until then. `waitForVacuumHelper` polls the lock for up to 120 s without blocking the loop, then kills the helper and waits (≤ 10 s) for the pid to exit, since Windows releases its file locks late; a killed VACUUM rolls back. `openDb` sets `busy_timeout = 5000` so a lock still being released waits instead of throwing. A lock older than 15 min, or naming a dead pid, is removed and never acted on, since its pid may have been reused. The outcome is logged as `vacuum-wait`.
 - **Incremental vacuum:** every 30 min (and after a pass), if `auto_vacuum = INCREMENTAL` and the freelist exceeds 4,096 pages, `incremental_vacuum(1024)` runs in up to 64 throttled slices. It runs through `withRawSqlite`, holding the store mutex: through the driver's `run()` the pragma frees only one page. Postgres relies on autovacuum.
+
+**Attachment dedupe** (`state/attachmentCodec.ts`; spec `docs/superpowers/specs/2026-11-09-attachment-dedupe-design.md`). Claude Code re-records the same `attachment` payloads (tool lists, instructions, prompt snapshots, skill listings) on every session and turn: on the host copy measured 2026-11-09, 661 MB of such payload held ~22 MB of distinct content. Many of those lines also carry `rendered`, the attachment's rendered text, which repeats with it (355 MB, 19 MB distinct). On SQLite, a `type = 'attachment'` line whose top-level `attachment` and `rendered` values together serialize to ≥ 1,024 bytes is stored once per distinct pair:
+- **Stored form:** each moved value is replaced by `{"fleetRef":"<sha256>","part":<i>}` (part 0 `attachment`, part 1 `rendered`; still valid JSON), and `events.att_ref` = the hash. The blob body is the JSON array of the values' literal text, hashed and deflated into `event_blobs`. A line is deduped only when each `"<key>":` + `JSON.stringify(value)` occurs in it exactly once, it has no `"fleetRef":"` already, and the rebuild equals the original; otherwise it is stored as it is.
+- **Writes:** ingest dedupes before the insert, and only a line not stored yet: the watcher replays every JSONL on each start, so an attachment line ≥ 1 KB first probes `(session_id, dedup_key)` and skips the dedupe on a hit (the INSERT still runs, for AUTOINCREMENT). It adds a reference only when the event landed: `UPDATE … SET refs = refs + 1`, and on a miss the deflate plus `INSERT … ON CONFLICT(hash) DO UPDATE` (a hit needs no deflate). `dedup_key` comes from the original line, so a re-read line hits `ON CONFLICT DO NOTHING` and refs don't move. The triggers release a reference on every delete and on any `att_ref` change; no `events(att_ref)` index exists. Postgres has the same triggers (`events_att_ref_release()`) for parity.
+- **Reads:** `rawLine()` stays the stored-form codec (retention strips and compresses the stored form and never expands it); `expandLine(stored, att_ref, body_z)` splices each part back (`spliceParts`, which the MCP query worker also runs). `eventsForSession` fetches each distinct blob of a page once and returns the original lines; `unembeddedTurnEvents` reads only user/assistant rows, which carry no `att_ref`. A missing or corrupt blob reads as the stored form.
+- **Downgrade:** a build older than v17 opening the database shows the markers in place of attachment payloads; nothing is lost.
+- **Backfill:** the retention pass's attachments step (SQLite only) walks `type = 'attachment' AND att_ref IS NULL` by id (via `idx_events_type`) up to the max attachment id at the step's start, in ≤ 200-row slices budgeted at ~2 MB of work (a deflated row counts 3× its stored size), inflating a compressed row first; when the source row was compressed and the stub is ≥ 512 bytes, the stub is deflated back into `raw_z`. It resumes from `maintenance['attachments.deduped_through_id']`; a row that fails the checks is passed over. `retention-pass` logs the count.
+- **Postgres** does not dedupe (TOAST compresses large values, and the MCP query role reads `raw_jsonl` through a temp view): `att_ref` and `event_blobs` exist for schema parity and stay empty.
 
 **Title derivation.** The display title is `user_set_name ?? ai_title ?? first_user_message`. `ai_title` is **populated, not dormant**, from **two** last-write-wins sources folded into `sessions.ai_title` by `ingestBatch`: (1) Claude Code (≥2.1.x) writes `{"type":"ai-title","aiTitle":…,"sessionId":…}` lines into its own transcript natively (no hook, no statusline) — but only **once, early** (a stale one-shot); (2) the `summarize.sh` Stop hook emits a **rolling** `ai-title` line from each chapter summarization (§4 *Title refresh*), so a long session's title keeps up with what it's actually about instead of freezing on the first prompt (#170). Claude's native line rides on an **undocumented native transcript line type**, so it is the kind of thing a `claude` pin bump can silently break (§4 — bumping the pin is deliberate; re-verify the `ai-title` line still appears); the summarizer's rolling line does not depend on that and continues regardless. `first_user_message` is the COALESCE'd first value, but **synthetic command-wrapper messages are skipped** when deriving it (`src/main/userPromptText.ts`): a session started with a slash command (e.g. `/clear`) or a `!` local command emits a wrapper-only first `user` message (`<local-command-caveat>`/`<command-name>`/`<bash-input>`/…) that would otherwise lock in as a junk fallback title; the first *real* prompt wins instead. Also skipped: the **bare** local-command caveat (`Caveat: The messages below were generated by the user…` — older claude CLIs omit the wrapper tag, and the local/WSL launcher runs whatever claude the host has) and any `user` event with `isMeta: true`. Rows poisoned before these filters existed cannot heal through ingest (COALESCE + event dedup), so migration 12 repairs them once — recompute from stored events, NULL when the session has no real prompt. `tests/ai-title.spec.ts` pins both behaviors against the real watcher + DB.
 
@@ -1815,6 +1844,7 @@ claude-fleet/
     │   ├── workspaces.ts              # WorkspaceSpec types + manifest read/write/list
     │   ├── state/retention.ts         # state.db retention pass: strip/compress events, embeddings compaction, orphan purge, incremental vacuum (§7)
     │   ├── state/rawCodec.ts          # events.raw_jsonl strip stub + zlib raw_z codec
+    │   ├── state/attachmentCodec.ts   # attachment payload fleetRef marker + rebuild (event_blobs)
     │   ├── state/vacuumHelper.ts      # one-time VACUUM in a detached helper after quit
     │   ├── sessions.ts                # per-workspace sessions.json read/write
     │   ├── imageLibrary.ts            # imageLibrary.json read/write + auto-record
@@ -2155,7 +2185,7 @@ Read-only MCP server exposed by claude-fleet that lets the agent inside each con
     - `ReadSourceAdmin` (`forgetCaller`, `close`) is the owner's.
     - `setReadSource` closes the source it replaces.
   - **SQLite** (`sqliteReadSource.ts`):
-    - The server's own `{ readonly: true }` better-sqlite3 connection, plus the per-call in-memory `query` snapshot (ATTACH + copy), which is the isolation mechanism there. `query` hands the snapshot build and the caller's SQL to a worker thread (`queryWorker.ts`, 30 s timeout, #476); the worker opens its own handle on the same state.db path. With `include_raw`, `events` in the snapshot is a view over `events_store` whose `raw_jsonl` is `fleet_raw(raw_jsonl, raw_z)`, a SQL function registered in the worker that inflates a retention-compressed line (§7 *Retention*; a corrupt `raw_z` returns `raw_jsonl`). Agents see text, inflation runs only for rows a query reads, and `fleet_raw` is also callable directly.
+    - The server's own `{ readonly: true }` better-sqlite3 connection, plus the per-call in-memory `query` snapshot (ATTACH + copy), which is the isolation mechanism there. `query` hands the snapshot build and the caller's SQL to a worker thread (`queryWorker.ts`, 30 s timeout, #476); the worker opens its own handle on the same state.db path. With `include_raw`, `events` in the snapshot is a view over `events_store` whose `raw_jsonl` is `fleet_raw(raw_jsonl, raw_z, att_ref, body_z)`, a SQL function registered in the worker that inflates a retention-compressed line (§7 *Retention*) and splices deduped attachment parts back in (§7 *Attachment dedupe*); the snapshot also gets an `event_blobs(hash, body_z)` table holding only the blobs its rows reference. A corrupt `raw_z` returns `raw_jsonl`, and a missing or corrupt blob returns the stored line. `fleet_raw` takes two or four arguments. Agents see text, inflation runs only for rows a query reads, and `fleet_raw` is also callable directly.
     - The connection is separate from the app's write connection and sees only committed WAL frames, so a snapshot never observes half an ingest chunk.
     - `search_transcripts` scans this connection (`searchVectorsSqlite`); `searchTranscripts` remains as its embed-then-scan wrapper for the state bench and tests.
   - **Postgres** (`store/pgReadSource.ts`):

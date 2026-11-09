@@ -35,6 +35,8 @@ import { EMBED_DIM, EMBED_MODEL_ID, encodeVector } from '../vectors.js';
 
 const RUNS = Number(process.env.STATE_BENCH_RUNS ?? 5);
 const N_LINES = 6000;
+/** Claude Code re-records ~10–100 KB attachment payloads (tool lists, instructions) every turn. */
+const N_ATTACHMENTS = 1000;
 const WATCHER_BATCH = 200;
 const N_LIST_SESSIONS = 300;
 const N_EMBEDDINGS = 5000;
@@ -55,6 +57,8 @@ type Metrics = Record<string, number>;
 export const GATE: Record<string, { tol: number; slack: number }> = {
   ingest_fresh_us_per_line: { tol: 0.25, slack: 0 },
   ingest_replay_us_per_line: { tol: 0.25, slack: 0 },
+  ingest_attachment_fresh_us_per_line: { tol: 0.25, slack: 0 },
+  ingest_attachment_replay_us_per_line: { tol: 0.25, slack: 0 },
   summary_uncached_ms: { tol: 0.25, slack: 0 },
   summary_cached_us: { tol: 0.25, slack: 15 },
   lookup_mapping_us: { tol: 0.25, slack: 15 },
@@ -96,6 +100,21 @@ function medianOfFiles(list: string): Metrics {
   const all = list.split(',').map((p) => JSON.parse(readFileSync(p.trim(), 'utf8')) as Metrics);
   const out: Metrics = {};
   for (const k of Object.keys(all[0])) out[k] = median(all.map((m) => m[k]));
+  return out;
+}
+
+/** Attachment lines with large repeated payloads (20 distinct), like a real transcript. */
+function attachmentLines(n: number, sid: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < n; i++) {
+    const v = i % 20;
+    out.push(JSON.stringify({
+      parentUuid: `${sid}-p${i}`, isSidechain: false, type: 'attachment', uuid: `${sid}-att${i}`,
+      timestamp: new Date(1_782_864_000_000 + i * 1000).toISOString(), sessionId: sid, cwd: '/workspace',
+      attachment: { type: 'deferred_tools_delta', added: Array.from({ length: 200 }, (_, t) => ({ name: `mcp__srv__tool_${v}_${t}`, description: 'd'.repeat(120) })) },
+      rendered: [{ content: `<system-reminder>${'r'.repeat(8000)}${v}</system-reminder>` }],
+    }));
+  }
   return out;
 }
 
@@ -164,6 +183,9 @@ async function oneRun(): Promise<Metrics> {
     const big = lines(N_LINES, 'big');
     m.ingest_fresh_us_per_line = ((await time(() => ingestLikeWatcher('ws', 'big', big))) * 1000) / N_LINES;
     m.ingest_replay_us_per_line = ((await time(() => ingestLikeWatcher('ws', 'big', big))) * 1000) / N_LINES;
+    const atts = attachmentLines(N_ATTACHMENTS, 'att');
+    m.ingest_attachment_fresh_us_per_line = ((await time(() => ingestLikeWatcher('ws', 'att', atts))) * 1000) / N_ATTACHMENTS;
+    m.ingest_attachment_replay_us_per_line = ((await time(() => ingestLikeWatcher('ws', 'att', atts))) * 1000) / N_ATTACHMENTS;
 
     // summaryForSession with a non-default topTools limit bypasses the cache: the recompute cost.
     const sums: number[] = [];

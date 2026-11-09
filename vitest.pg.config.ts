@@ -35,6 +35,7 @@ export default defineConfig({
       'src/main/dbPurgeWorkspace.test.ts',
       'src/main/dbReadCache.test.ts',
       'src/main/dbReadCharacterization.test.ts',
+      'src/main/dbAttachmentBlobs.test.ts',
       'src/main/dbRetentionSchema.test.ts',
       'src/main/dbSearchEmbeddings.test.ts',
       'src/main/dbSessionCosts.test.ts',

@@ -3,12 +3,13 @@
 // on the async store handle in bounded slices behind a Throttle, so the main
 // thread is never held for more than one small transaction at a time.
 import {
-  compactEmbeddingSlice, maintenanceGet, maintenanceSet, maxEmbeddingId, purgeWorkspace, retentionBodies, retentionCandidates,
+  applyAttachmentDedupe, attachmentBackfillKeys, compactEmbeddingSlice, maxAttachmentId, maintenanceGet, maintenanceSet, maxEmbeddingId, purgeWorkspace, retentionBodies, retentionCandidates,
   retentionKeys, rewriteEventRaw, setRetentionWatermarks, stateDialect, withRawSqlite, workspaceIdsInState, type RetentionRow,
 } from '../db.js';
 import { logError } from '../errorLog.js';
 import { perfSpanAsync } from '../perf.js';
 import { COMPRESS_MIN_BYTES, deflateLine, rawLine, stripLine } from './rawCodec.js';
+import { dedupeAttachment } from './attachmentCodec.js';
 
 export const DAY_MS = 86_400_000;
 export const COMPRESS_AFTER_MS = 30 * DAY_MS;
@@ -96,6 +97,49 @@ export async function retainEvents(now: number, t: Throttle, opts: { sliceRows?:
     const ageingOut = Math.min(sCut, c.compressedBefore);
     if (!(await walkRange(c.sessionId, c.strippedBefore, ageingOut, true, t, sliceRows, apply, acc))) break;
     await setRetentionWatermarks(c.sessionId, c.workspaceId, Math.max(c.compressedBefore, cCut), Math.max(c.strippedBefore, sCut));
+  }
+  return acc;
+}
+
+const ATTACHMENTS_CURSOR = 'attachments.deduped_through_id';
+
+/** The attachments step (SQLite): dedupe attachment rows written before v17,
+ *  up to the max id seen at the start. Ingest dedupes everything newer. */
+export async function dedupeAttachments(t: Throttle, opts: { sliceRows?: number } = {}): Promise<{ rows: number; bytesSaved: number }> {
+  const acc = { rows: 0, bytesSaved: 0 };
+  if (stateDialect() !== 'sqlite') return acc;
+  const maxId = await maxAttachmentId();
+  let cursor = Number((await maintenanceGet(ATTACHMENTS_CURSOR)) ?? 0);
+  while (cursor < maxId && !t.stopped()) {
+    const next = await t.slice(async () => {
+      const keys = await attachmentBackfillKeys(cursor, maxId, opts.sliceRows ?? SLICE_ROWS);
+      if (keys.length === 0) return maxId;
+      let take = 0;
+      for (let bytes = 0; take < keys.length && (take === 0 || bytes + keys[take].bytes <= SLICE_BYTES); take++) bytes += keys[take].bytes;
+      const updates: { id: number; raw_jsonl: string; raw_z: Buffer | null; ref: string; payload: string }[] = [];
+      for (const row of await retentionBodies(keys.slice(0, take).map((k) => k.id))) {
+        let line: string;
+        try {
+          line = rawLine(row, true);
+        } catch {
+          continue;
+        }
+        const d = dedupeAttachment(line);
+        if (!d) continue;
+        // A row retention already compressed stays compressed: it sits behind its watermark.
+        const wasCompressed = row.raw_z !== null && row.raw_z.length > 0;
+        const next = wasCompressed && Buffer.byteLength(d.stored, 'utf8') >= COMPRESS_MIN_BYTES
+          ? { raw_jsonl: '', raw_z: deflateLine(d.stored) }
+          : { raw_jsonl: d.stored, raw_z: null };
+        updates.push({ id: row.id, ...next, ref: d.ref, payload: d.payload });
+        acc.bytesSaved += storedBytes(row) - storedBytes(next);
+      }
+      await applyAttachmentDedupe(updates);
+      acc.rows += updates.length;
+      return keys[take - 1].id;
+    });
+    cursor = next;
+    await maintenanceSet(ATTACHMENTS_CURSOR, String(cursor));
   }
   return acc;
 }
@@ -222,6 +266,7 @@ export interface RetentionDeps extends OrphanDeps {
 
 export interface PassResult {
   orphans: string[];
+  attachments: { rows: number; bytesSaved: number };
   events: RetainEventsResult;
   embeddings: { rows: number; bytesSaved: number };
   vacuumPages: number;
@@ -245,6 +290,7 @@ export function startRetention(deps: RetentionDeps): { stop(): Promise<void> } {
     const at = now();
     const r: PassResult = {
       orphans: deps.orphanSweep ? await step('orphans', () => sweepOrphans(deps, throttle), []) : [],
+      attachments: await step('attachments', () => dedupeAttachments(throttle), { rows: 0, bytesSaved: 0 }),
       events: await step('events', () => retainEvents(at, throttle), { rows: 0, bytesBefore: 0, bytesAfter: 0 }),
       embeddings: await step('embeddings', () => compactEmbeddings(throttle), { rows: 0, bytesSaved: 0 }),
       vacuumPages: await step('vacuum', () => incrementalVacuum(throttle), 0),
@@ -254,7 +300,7 @@ export function startRetention(deps: RetentionDeps): { stop(): Promise<void> } {
       if (!(await maintenanceGet('retention.first_pass_at'))) await maintenanceSet('retention.first_pass_at', String(at));
       await maintenanceSet('retention.last_pass_at', String(at));
     }, undefined);
-    logError({ source: 'main', level: 'info', type: 'retention-pass', message: `retention pass: ${r.events.rows} events, ${r.embeddings.rows} embeddings, ${r.orphans.length} orphaned workspaces`,
+    logError({ source: 'main', level: 'info', type: 'retention-pass', message: `retention pass: ${r.attachments.rows} attachments deduped, ${r.events.rows} events, ${r.embeddings.rows} embeddings, ${r.orphans.length} orphaned workspaces`,
       extra: { ...r, ms: now() - at } });
     deps.onPass?.(r);
   };

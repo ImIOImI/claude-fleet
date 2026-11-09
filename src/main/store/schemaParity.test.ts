@@ -96,7 +96,7 @@ async function pgShapes(schema: string, k: ReturnType<typeof postgresKysely>): P
 }
 
 describe.skipIf(!isPg)('Postgres baseline schema parity', () => {
-  it('state schema mirrors state.db at user_version 16', async () => {
+  it('state schema mirrors state.db at user_version 17', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cf-parity-'));
     const raw = db.openDb(dir);
     const want = sqliteShapes(raw);

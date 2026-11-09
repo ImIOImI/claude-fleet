@@ -224,9 +224,29 @@ CREATE TABLE maintenance (
 );
 `;
 
+const ATTACHMENTS_V17 = `
+ALTER TABLE events ADD COLUMN att_ref ${T};
+CREATE TABLE event_blobs (
+  hash ${T} PRIMARY KEY,
+  body_z BYTEA NOT NULL,
+  bytes BIGINT NOT NULL,
+  refs BIGINT NOT NULL
+);
+CREATE FUNCTION events_att_ref_release() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  UPDATE event_blobs SET refs = refs - 1 WHERE hash = OLD.att_ref;
+  DELETE FROM event_blobs WHERE hash = OLD.att_ref AND refs <= 0;
+  RETURN NULL;
+END $$;
+CREATE TRIGGER events_att_ref_ad AFTER DELETE ON events
+  FOR EACH ROW WHEN (OLD.att_ref IS NOT NULL) EXECUTE FUNCTION events_att_ref_release();
+CREATE TRIGGER events_att_ref_au AFTER UPDATE OF att_ref ON events
+  FOR EACH ROW WHEN (OLD.att_ref IS NOT NULL AND OLD.att_ref IS DISTINCT FROM NEW.att_ref) EXECUTE FUNCTION events_att_ref_release();
+`;
+
 export const STATE_PG_TRACK: PgTrack = {
   track: 'state',
   baselineVersion: STATE_PG_BASELINE_VERSION,
   baseline: STATE_PG_BASELINE,
-  steps: [{ version: 15, postgres: PORT_EXPOSURES_V15 }, { version: 16, postgres: RETENTION_V16 }]
+  steps: [{ version: 15, postgres: PORT_EXPOSURES_V15 }, { version: 16, postgres: RETENTION_V16 }, { version: 17, postgres: ATTACHMENTS_V17 }]
 };

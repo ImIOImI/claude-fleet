@@ -27,6 +27,7 @@ import { pgSearchEmbeddings, pgVectorLiteral } from './store/pgVectorSearch.js';
 import type { StateDb, UsageAnchorsTable } from './store/stateSchema.js';
 import { parseIngestLine, foldSessionTouch, type ParsedLine } from './state/ingestParse.js';
 import { rawLine } from './state/rawCodec.js';
+import { ATTACHMENT_MIN_BYTES, dedupeAttachment, deflatePayload, expandLine } from './state/attachmentCodec.js';
 
 let db: Database.Database | null = null;
 let kdb: Kysely<StateDb> | null = null;
@@ -639,6 +640,32 @@ function migrate(d: Database.Database): void {
     `);
     d.pragma('user_version = 16');
   }
+
+  if ((d.pragma('user_version', { simple: true }) as number) < 17) {
+    // Attachment dedupe (SPEC §7 *Attachment dedupe*). refs is counted on
+    // write; the triggers release it on every delete and att_ref change, so
+    // no events(att_ref) index is needed.
+    const cols = d.prepare(`PRAGMA table_info(events)`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'att_ref')) d.exec(`ALTER TABLE events ADD COLUMN att_ref TEXT`);
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS event_blobs (
+        hash   TEXT PRIMARY KEY,
+        body_z BLOB NOT NULL,
+        bytes  INTEGER NOT NULL,
+        refs   INTEGER NOT NULL
+      );
+      CREATE TRIGGER IF NOT EXISTS events_att_ref_ad AFTER DELETE ON events WHEN old.att_ref IS NOT NULL BEGIN
+        UPDATE event_blobs SET refs = refs - 1 WHERE hash = old.att_ref;
+        DELETE FROM event_blobs WHERE hash = old.att_ref AND refs <= 0;
+      END;
+      CREATE TRIGGER IF NOT EXISTS events_att_ref_au AFTER UPDATE OF att_ref ON events
+        WHEN old.att_ref IS NOT NULL AND (new.att_ref IS NULL OR new.att_ref <> old.att_ref) BEGIN
+        UPDATE event_blobs SET refs = refs - 1 WHERE hash = old.att_ref;
+        DELETE FROM event_blobs WHERE hash = old.att_ref AND refs <= 0;
+      END;
+    `);
+    d.pragma('user_version = 17');
+  }
 }
 
 function repairSyntheticFirstUserMessages(d: Database.Database): void {
@@ -781,6 +808,17 @@ export async function ingestLine(workspaceId: string, sessionId: string, rawLine
   return r;
 }
 
+/** One more reference to `ref`'s payload; the blob row on first use. Update
+ *  first: deflating is the costly part, and nearly every call is a hit. */
+async function upsertBlob(q: Kysely<StateDb>, ref: string, payload: string): Promise<void> {
+  const hit = await q.updateTable('event_blobs').set((eb) => ({ refs: eb('refs', '+', 1) })).where('hash', '=', ref).executeTakeFirst();
+  if (num(hit.numUpdatedRows) > 0) return;
+  await q.insertInto('event_blobs')
+    .values({ hash: ref, body_z: deflatePayload(payload), bytes: Buffer.byteLength(payload, 'utf8'), refs: 1 })
+    .onConflict((oc) => oc.column('hash').doUpdateSet((eb) => ({ refs: eb('event_blobs.refs', '+', 1) })))
+    .execute();
+}
+
 /** One parsed line's writes, on the chunk transaction: the event insert
  *  (deduped by ON CONFLICT DO NOTHING), rollups only when it landed, then
  *  per-type metadata — which runs for duplicates too. The sessions-row touch
@@ -794,14 +832,23 @@ async function ingestOne(
 ): Promise<IngestResult> {
   const e = p.event;
 
+  // The watcher replays every line on each start; dedupe only a line that is
+  // not stored yet (one index probe), so a replay costs no stringify/hash.
+  let dd: ReturnType<typeof dedupeAttachment> = null;
+  if (dialect === 'sqlite' && e.type === 'attachment' && rawLine.length >= ATTACHMENT_MIN_BYTES) {
+    const seen = await q.selectFrom('events').select('id')
+      .where('session_id', '=', sessionId).where('dedup_key', '=', e.dedup_key).executeTakeFirst();
+    if (!seen) dd = dedupeAttachment(rawLine, p.parsed);
+  }
   // Always attempted, even for a replayed line: an ignored INSERT still
   // advances AUTOINCREMENT, which event ids depend on.
   const ins = await q
     .insertInto('events')
-    .values({ ...e, session_id: sessionId, workspace_id: workspaceId, raw_jsonl: rawLine })
+    .values({ ...e, session_id: sessionId, workspace_id: workspaceId, raw_jsonl: dd ? dd.stored : rawLine, att_ref: dd?.ref ?? null })
     .onConflict((oc) => oc.doNothing())
     .executeTakeFirst();
   const inserted = num(ins.numInsertedOrUpdatedRows) > 0;
+  if (inserted && dd) await upsertBlob(q, dd.ref, dd.payload);
 
   if (inserted) {
     // Rollups (#383/#390) ride the same transaction as the event insert and
@@ -999,9 +1046,10 @@ interface EventRowSql {
   tool_name: string | null;
   raw_jsonl: string;
   raw_z: Buffer | null;
+  att_ref: string | null;
 }
 
-function rowFromSql(r: EventRowSql): EventRow {
+function rowFromSql(r: EventRowSql, blobs: ReadonlyMap<string, Buffer>): EventRow {
   return {
     id: r.id,
     sessionId: r.session_id,
@@ -1018,12 +1066,13 @@ function rowFromSql(r: EventRowSql): EventRow {
     cacheCreationInputTokens: r.cache_creation_input_tokens,
     serviceTier: r.service_tier,
     toolName: r.tool_name,
-    rawJsonl: rawLine(r),
+    rawJsonl: expandLine(rawLine(r), r.att_ref, r.att_ref ? blobs.get(r.att_ref) ?? null : null),
   };
 }
 
 export async function eventsForSession(sessionId: string, sinceEventId = 0, limit = 500): Promise<EventRow[]> {
-  const rows = await kyselyOrThrow()
+  const k = kyselyOrThrow();
+  const rows = await k
     .selectFrom('events')
     .selectAll()
     .where('session_id', '=', sessionId)
@@ -1031,7 +1080,13 @@ export async function eventsForSession(sessionId: string, sinceEventId = 0, limi
     .orderBy('id', 'asc')
     .limit(limit)
     .execute();
-  return rows.map(rowFromSql);
+  // Each distinct blob once per page: a session repeats the same few payloads.
+  const refs = [...new Set(rows.flatMap((r) => (r.att_ref ? [r.att_ref] : [])))];
+  const blobs = new Map<string, Buffer>();
+  for (const part of chunked(refs, 500)) {
+    for (const b of await k.selectFrom('event_blobs').select(['hash', 'body_z']).where('hash', 'in', part).execute()) blobs.set(b.hash, b.body_z);
+  }
+  return rows.map((r) => rowFromSql(r, blobs));
 }
 
 export interface SessionRow {
@@ -2329,6 +2384,40 @@ export async function rewriteEventRaw(updates: readonly { id: number; raw_jsonl:
   });
 }
 
+/** Attachment rows not yet deduped, id order, with an estimate of the bytes
+ *  each costs to process (no payload read): a deflated line counts ×3, its
+ *  typical inflated size. */
+export async function attachmentBackfillKeys(afterId: number, maxId: number, limit: number): Promise<{ id: number; bytes: number }[]> {
+  const rows = await kyselyOrThrow().selectFrom('events')
+    .select(['id', sql<number>`octet_length(raw_jsonl) + 3 * COALESCE(octet_length(raw_z), 0)`.as('bytes')])
+    .where('type', '=', 'attachment').where('att_ref', 'is', null)
+    .where('id', '>', afterId).where('id', '<=', maxId)
+    .orderBy('id').limit(limit).execute();
+  return rows.map((r) => ({ id: num(r.id), bytes: num(r.bytes) }));
+}
+
+export async function maxAttachmentId(): Promise<number> {
+  const r = await kyselyOrThrow().selectFrom('events')
+    .select((eb) => eb.fn.coalesce(eb.fn.max('id'), eb.lit(0)).as('m'))
+    .where('type', '=', 'attachment').executeTakeFirst();
+  return num(r?.m ?? 0);
+}
+
+/** Store rows in their deduped form and add their blob references, in one transaction.
+ *  A row deleted or deduped since it was read is skipped. */
+export async function applyAttachmentDedupe(
+  updates: readonly { id: number; raw_jsonl: string; raw_z: Buffer | null; ref: string; payload: string }[],
+): Promise<void> {
+  if (updates.length === 0) return;
+  await kyselyOrThrow().transaction().execute(async (trx) => {
+    for (const u of updates) {
+      const r = await trx.updateTable('events').set({ raw_jsonl: u.raw_jsonl, raw_z: u.raw_z, att_ref: u.ref })
+        .where('id', '=', u.id).where('att_ref', 'is', null).executeTakeFirst();
+      if (num(r.numUpdatedRows) > 0) await upsertBlob(trx, u.ref, u.payload);
+    }
+  });
+}
+
 export async function setRetentionWatermarks(
   sessionId: string, workspaceId: string, compressedBefore: number, strippedBefore: number,
 ): Promise<void> {
@@ -2546,6 +2635,7 @@ export async function unembeddedTurnEvents(sessionId: string, modelId: string, l
     .orderBy('e.id', 'asc')
     .limit(limit)
     .execute()
+    // user/assistant rows never carry att_ref (attachment lines only).
     .then((rows) => rows.map((r) => ({ id: r.id, workspaceId: r.workspaceId, ts: r.ts, rawJsonl: rawLine(r) })));
 }
 

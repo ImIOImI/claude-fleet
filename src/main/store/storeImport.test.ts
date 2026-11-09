@@ -148,6 +148,23 @@ describe.skipIf(!isPg)('importSqlite into Postgres', () => {
     expect(ph.vec).toBeNull();
   });
 
+  it('expands deduped attachment lines and copies no blobs', async () => {
+    await db.closeDb();
+    db.openDb(dir);
+    const att = (u: string) => JSON.stringify({ type: 'attachment', uuid: u, timestamp: '2026-11-01T00:00:00Z', sessionId: S,
+      attachment: { type: 'skill_listing', content: 'skill '.repeat(400) } });
+    await db.ingestBatch(WS, S, [att('att-1'), att('att-2')]);
+    const [compressedId] = (await db.eventsForSession(S, 0, 1000)).filter((e) => e.uuid === 'att-2').map((e) => e.id);
+    const [{ raw_jsonl: stub }] = await db.stateKysely().selectFrom('events').select('raw_jsonl').where('id', '=', compressedId).execute();
+    await db.stateKysely().updateTable('events').set({ raw_jsonl: '', raw_z: deflateLine(stub) }).where('id', '=', compressedId).execute();
+    await db.closeDb();
+    expect((await importSqlite(opts('state'))).status).toBe('copied');
+    const rows = (await sql<{ raw_jsonl: string; att_ref: unknown; raw_z: unknown }>`
+      SELECT raw_jsonl, att_ref, raw_z FROM events WHERE uuid IN ('att-1', 'att-2') ORDER BY uuid`.execute(k)).rows;
+    expect(rows).toEqual([att('att-1'), att('att-2')].map((raw_jsonl) => ({ raw_jsonl, att_ref: null, raw_z: null })));
+    expect(await pgCount('event_blobs')).toBe(0);
+  });
+
   it('leaves every identity sequence at or past its column max', async () => {
     await importSqlite(opts('inbox'));
     await importSqlite(opts('state'));

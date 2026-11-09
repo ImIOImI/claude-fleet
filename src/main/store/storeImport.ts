@@ -9,6 +9,7 @@ import { basename } from 'node:path';
 import { sql, type Kysely, type Transaction } from 'kysely';
 import { decodeVector } from '../vectors.js';
 import { rawLine } from '../state/rawCodec.js';
+import { expandLine } from '../state/attachmentCodec.js';
 import type { PgTrack } from './pgMigrate.js';
 import { hasHotJournal } from './sqliteFiles.js';
 import type { ImportProgress } from '../../preload/storeTypes.js';
@@ -45,7 +46,7 @@ export const IMPORT_TABLES: Record<ImportSource, readonly string[]> = {
     'claims', 'claim_sources', 'claim_vectors', 'claims_fts', 'capture_runs', 'capture_settings_log'],
   state: ['sessions', 'events', 'broker_sessions', 'errors', 'embeddings', 'session_summaries', 'session_tags',
     'usage_events', 'usage_anchors', 'perf_events', 'session_costs', 'session_stats', 'session_tool_counts',
-    'port_exposures', 'event_retention', 'maintenance'],
+    'port_exposures', 'event_retention', 'maintenance', 'event_blobs'],
 };
 
 /** The SQLite user_version a track's latest step mirrors. */
@@ -193,7 +194,8 @@ export function canonicalValue(udt: string, v: unknown): string | null {
 }
 
 async function copyTable(o: ImportOptions, src: Database.Database, table: string): Promise<number> {
-  const exists = src.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(table);
+  // Postgres holds whole lines (events are expanded below), so it gets no blobs.
+  const exists = table !== 'event_blobs' && src.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(table);
   const total = exists ? Number((src.prepare(`SELECT count(*) AS n FROM "${table}"`).get() as { n: bigint }).n) : 0;
   const prog = (await sql<{ last_rowid: string; copied: number; done: boolean }>`
     SELECT last_rowid::text AS last_rowid, copied, done FROM store_import WHERE source = ${o.source} AND tbl = ${table}`.execute(o.k)).rows[0];
@@ -204,6 +206,9 @@ async function copyTable(o: ImportOptions, src: Database.Database, table: string
   const sqliteCols = exists ? new Set((src.prepare(`PRAGMA table_info("${table}")`).all() as Array<{ name: string }>).map((r) => r.name)) : new Set<string>();
   const cols = pgCols.filter((c) => sqliteCols.has(c.c));
   const vectors = new Set(cols.filter((c) => c.u === 'vector').map((c) => c.c));
+  const blobOf = table === 'events' && sqliteCols.has('att_ref')
+    ? src.prepare(`SELECT body_z FROM event_blobs WHERE hash = ?`).pluck()
+    : null;
   const chunk = Math.max(1, Math.min(1000, Math.floor((o.maxParamsPerChunk ?? 30_000) / Math.max(1, cols.length))));
   let last: bigint = BigInt(prog?.last_rowid ?? 0);
   let copied = prog?.copied ?? 0;
@@ -221,6 +226,16 @@ async function copyTable(o: ImportOptions, src: Database.Database, table: string
             row.raw_z = null;
           } catch {
             // Corrupt: keep the bytes as they are rather than lose them.
+          }
+        }
+        if (blobOf && typeof row.att_ref === 'string') {
+          try {
+            row.raw_jsonl = expandLine(rawLine({ raw_jsonl: row.raw_jsonl as string, raw_z: (row.raw_z as Buffer | null) ?? null }, true),
+              row.att_ref, (blobOf.get(row.att_ref) as Buffer | undefined) ?? null, true);
+            row.raw_z = null;
+            row.att_ref = null;
+          } catch {
+            // Missing blob or corrupt line: keep the stored form rather than lose it.
           }
         }
         for (const c of cols) {
