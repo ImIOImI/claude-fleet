@@ -23,6 +23,7 @@ import {
 import { getSecret, setSecret, deleteAllForWorkspace } from './vault.js';
 import { sourceVaultScope, SOURCE_VAULT_KEY } from './vaultScopes.js';
 import { logError } from './errorLog.js';
+import { parseLoadout } from './loadoutCore.js';
 
 export interface SourcesFile {
   sources: string[];
@@ -451,11 +452,13 @@ export async function download(source: string, id: string, version?: string): Pr
   const ref = loadoutRefFromSource(b, id, version);
   const cred = await credentialFor(b);
   await withSourceAuth(b, () => pullArtifact(ref, loadoutDir(id), { cred }));
+  // Record the version actually pulled (a `latest` pull reports its loadout.md version).
+  const pulled = await parseLoadout(loadoutDir(id)).then((m) => m.version).catch(() => undefined);
   await withSourcesLock(async () => {
     const cur = await read();
     await write({
       ...cur,
-      provenance: { ...cur.provenance, [id]: { source: b, version: version ?? 'latest', downloadedAt: Date.now() } }
+      provenance: { ...cur.provenance, [id]: { source: b, version: pulled ?? version ?? 'latest', downloadedAt: Date.now() } }
     });
   });
 }

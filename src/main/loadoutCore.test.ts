@@ -70,6 +70,16 @@ describe('parseLoadout', () => {
     expect(m.instructions).toContain('idiomatic-rust skill');
   });
 
+  it('reads version as a string, stringifying a bare YAML number', async () => {
+    const v = join(root, 'versioned');
+    await write(join(v, 'loadout.md'), '---\ntitle: V\nversion: 1.2.0\n---\n');
+    expect((await parseLoadout(v)).version).toBe('1.2.0');
+    await write(join(v, 'loadout.md'), '---\ntitle: V\nversion: 2.5\n---\n');
+    expect((await parseLoadout(v)).version).toBe('2.5');
+    await write(join(v, 'loadout.md'), '---\ntitle: V\nversion: "  "\n---\n');
+    expect((await parseLoadout(v)).version).toBeUndefined();
+  });
+
   it('falls back to defaults when frontmatter is missing', async () => {
     const bare = join(root, 'bare');
     await write(join(bare, 'loadout.md'), 'just a body, no frontmatter');

@@ -37,6 +37,8 @@ export async function ensureAndInstall(
     !!opts.source && (!present || opts.force || (prov?.version !== undefined && opts.version !== undefined && prov.version !== opts.version));
   if (needsPull && opts.source) {
     await download(opts.source, id, opts.version);
+  } else if (!present) {
+    throw new Error(`"${id}" isn't in the local library yet; install it from one of its sources`);
   }
 
   await installLoadout(workspaceId, id, { automations: opts.automations, allowHost: opts.allowHost });
