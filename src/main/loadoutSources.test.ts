@@ -569,6 +569,8 @@ describe('final review follow-ups (#444)', () => {
     // threw on a corrupt file and broke every install, even a purely local one
     // (no opts.source, so sources.json is otherwise irrelevant to it).
     await corrupt('{not json');
+    await mkdir(join(userDataDir, 'loadouts', 'local-only'), { recursive: true });
+    await writeFile(join(userDataDir, 'loadouts', 'local-only', 'loadout.md'), '---\ntitle: Local only\n---\n');
     const { ensureAndInstall } = await import('./loadoutInstall.js');
     await expect(ensureAndInstall('ws1', 'local-only')).resolves.toEqual({ status: 'installed' });
     expect(installed).toEqual(['local-only']);
