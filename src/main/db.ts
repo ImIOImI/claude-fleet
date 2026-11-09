@@ -2366,6 +2366,36 @@ export async function rewriteEventRaw(updates: readonly { id: number; raw_jsonl:
   });
 }
 
+/** Attachment rows not yet deduped, id order, with their stored sizes (no payload read). */
+export async function attachmentBackfillKeys(afterId: number, maxId: number, limit: number): Promise<{ id: number; bytes: number }[]> {
+  const rows = await kyselyOrThrow().selectFrom('events')
+    .select(['id', sql<number>`octet_length(raw_jsonl) + COALESCE(octet_length(raw_z), 0)`.as('bytes')])
+    .where('type', '=', 'attachment').where('att_ref', 'is', null)
+    .where('id', '>', afterId).where('id', '<=', maxId)
+    .orderBy('id').limit(limit).execute();
+  return rows.map((r) => ({ id: num(r.id), bytes: num(r.bytes) }));
+}
+
+export async function maxAttachmentId(): Promise<number> {
+  const r = await kyselyOrThrow().selectFrom('events')
+    .select((eb) => eb.fn.coalesce(eb.fn.max('id'), eb.lit(0)).as('m'))
+    .where('type', '=', 'attachment').executeTakeFirst();
+  return num(r?.m ?? 0);
+}
+
+/** Store rows in their deduped form and add their blob references, in one transaction.
+ *  A row deleted or deduped since it was read is skipped. */
+export async function applyAttachmentDedupe(updates: readonly { id: number; stored: string; ref: string; payload: string }[]): Promise<void> {
+  if (updates.length === 0) return;
+  await kyselyOrThrow().transaction().execute(async (trx) => {
+    for (const u of updates) {
+      const r = await trx.updateTable('events').set({ raw_jsonl: u.stored, raw_z: null, att_ref: u.ref })
+        .where('id', '=', u.id).where('att_ref', 'is', null).executeTakeFirst();
+      if (num(r.numUpdatedRows) > 0) await upsertBlob(trx, u.ref, u.payload);
+    }
+  });
+}
+
 export async function setRetentionWatermarks(
   sessionId: string, workspaceId: string, compressedBefore: number, strippedBefore: number,
 ): Promise<void> {

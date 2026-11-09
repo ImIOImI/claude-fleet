@@ -6,8 +6,9 @@ import {
 import { encodeVector, EMBED_DIM, EMBED_MODEL_ID } from '../vectors.js';
 import { indexSessionTurns } from '../transcriptIndex.js';
 import { openTestState, queryRows, isPg } from '../store/testStore.js';
+import { deflateLine } from './rawCodec.js';
 import {
-  compactEmbeddings, createThrottle, DAY_MS, incrementalVacuum, retainEvents, startRetention, type PassResult, type Throttle,
+  compactEmbeddings, createThrottle, DAY_MS, dedupeAttachments, incrementalVacuum, retainEvents, startRetention, type PassResult, type Throttle,
 } from './retention.js';
 
 const WS = '01WS';
@@ -279,3 +280,47 @@ describe('insertEmbeddings storage', () => {
     }
   });
 });
+
+describe('dedupeAttachments', () => {
+  const att = (u: string) => JSON.stringify({ type: 'attachment', uuid: u, timestamp: iso(40), sessionId: SES,
+    attachment: { type: 'skill_listing', content: 'skill '.repeat(400) } });
+
+  /** Rows as a pre-v17 app wrote them: full line, no att_ref, no blob. */
+  async function legacyRows(): Promise<string[]> {
+    const ls = [att('p1'), att('p2'), att('p3')];
+    for (const l of ls) await ingestLine(WS, SES, l);
+    const k = stateKysely();
+    for (const [i, l] of ls.entries()) {
+      await k.updateTable('events').set(i === 1 ? { raw_jsonl: '', raw_z: deflateLine(l), att_ref: null } : { raw_jsonl: l, raw_z: null, att_ref: null })
+        .where('uuid', '=', `p${i + 1}`).execute();
+    }
+    await k.deleteFrom('event_blobs').execute();
+    return ls;
+  }
+
+  it.skipIf(isPg)('dedupes plain and compressed legacy rows, then resumes from its cursor', async () => {
+    const ls = await legacyRows();
+    const r = await dedupeAttachments(unthrottled, { sliceRows: 2 });
+    expect(r.rows).toBe(3);
+    expect(r.bytesSaved).toBeGreaterThan(0);
+    expect(await queryRows('SELECT refs FROM event_blobs')).toEqual([{ refs: 3 }]);
+    const evs = await eventsForSession(SES);
+    expect(evs.map((e) => e.rawJsonl)).toEqual(ls);
+    expect(Number(await maintenanceGet('attachments.deduped_through_id'))).toBe(Math.max(...evs.map((e) => e.id)));
+    expect((await dedupeAttachments(unthrottled)).rows).toBe(0);
+  });
+
+  it.skipIf(isPg)('does nothing when stopped', async () => {
+    await legacyRows();
+    const stopped: Throttle = { slice: (fn) => fn(), stopped: () => true };
+    expect((await dedupeAttachments(stopped)).rows).toBe(0);
+    expect(await queryRows('SELECT hash FROM event_blobs')).toEqual([]);
+  });
+
+  it('is a no-op on Postgres', async () => {
+    if (!isPg) return;
+    await ingestLine(WS, SES, att('p1'));
+    expect((await dedupeAttachments(unthrottled)).rows).toBe(0);
+  });
+});
+
