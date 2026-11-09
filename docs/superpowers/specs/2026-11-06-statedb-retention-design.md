@@ -58,7 +58,7 @@ Embeddings: of 48,392 user/assistant lines, **86.9% have no embeddable text** (t
 
 - **Age:** only ~400 MB of event payload is past its strip/compress window today (52 MB attachment, 157 MB `tool_result`, 192 MB other); it shrinks to ~100 MB. The last two weeks added 1.66 GB of events (~800 MB/week, vs ~50 MB/week two months earlier); more than half of it is `attachment` rows.
 - **zlib** on a 2% row sample left 34% of the bytes.
-- **Retention alone** reclaims ~0.8 GB once (~0.5 GB embeddings, ~0.3 GB events): 4.2 → ~3.4 GB after the VACUUM. It doesn't touch rows under 30 days, so at the current growth rate the file keeps growing.
+- **Retention alone**, run with the real code on a scratch copy (2026-11-09): 166k event rows rewritten (595 → 227 MB stored), 348k embeddings compacted (511 MB saved); after the VACUUM the file went **4,228 → 3,107 MB** (`events` 3,058 → 2,638 MB, `embeddings` 770 → 105 MB). The estimate before that run was ~0.8 GB (4.2 → ~3.4 GB); the VACUUM also reclaims page fragmentation. Retention doesn't touch rows under 30 days, so at the current growth rate the file keeps growing.
 - **Attachments** are mostly repeats: `deferred_tools_delta`, `prompt_snapshot`, `instructions` and `skill_listing` hold 661 MB of payload with ~22 MB distinct. That is addressed by attachment dedupe (`2026-11-09-attachment-dedupe-design.md`, #542), which works at ingest.
 
 ## 3. Constraints

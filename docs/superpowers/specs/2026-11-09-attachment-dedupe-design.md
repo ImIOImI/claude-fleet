@@ -91,6 +91,21 @@ Postgres does not dedupe: TOAST already compresses large values, and the MCP que
 - Import: expanded lines on Postgres, `att_ref` NULL.
 - Measurement on a copy of the host DB: bytes before/after, and a byte-exact rebuild check over every attachment row.
 
+## 5. Measured result
+
+Real code (`dedupeAttachments`, after a retention pass) on a scratch copy of the host `state.db`, 2026-11-09:
+
+| Step | File after VACUUM | `events` | `event_blobs` |
+|---|---|---|---|
+| Before | 4,228 MB | 3,058 MB | — |
+| Retention (#532) | 3,107 MB | 2,638 MB | — |
+| + attachment dedupe | **2,415 MB** | 1,926 MB | 19 MB |
+
+- 46,779 of 101,929 attachment rows deduped (the rest are < 1 KB) into 5,997 blobs: 55 MB of distinct payload, 15 MB deflated. 692 MB of stored bytes saved.
+- **Byte-exact check:** every attachment row rebuilt (`expandLine(rawLine(row))`) equals the original line from the untouched copy: 0 mismatches in 101,929. Every blob's `refs` equals its referencing row count.
+- Unthrottled run time: 31 s for the backfill (71 s for retention). At the pass's ≤ 10% duty cycle that is ~5 min of idle time once.
+- Growth: new attachment lines are deduped at ingest, so repeated boilerplate costs a ~150-byte stub per row instead of its payload.
+
 ## 5. Decisions
 
 1. **SQLite only** (§2.8).
