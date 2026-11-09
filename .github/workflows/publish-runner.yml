@@ -43,6 +43,7 @@ on:
       - 'src/main/mcpContainerBridge.ts'
       - 'src/main/state/ingestParse.ts'
       - 'src/main/state/rawCodec.ts'
+      - 'src/main/state/attachmentCodec.ts'
       - 'src/main/state/serialQueue.ts'
       - 'src/main/state/transcriptPaths.ts'
       - 'src/main/inbox/inboxDb.ts'
