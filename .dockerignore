@@ -82,6 +82,7 @@
 !src/preload/inboxTypes.ts
 !src/preload/captureSettings.ts
 !src/preload/federation.ts
+!src/main/embedderClient.ts
 
 # Even within broker/, drop things the binary doesn't need:
 broker/**/*_test.go

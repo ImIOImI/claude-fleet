@@ -9,6 +9,7 @@ import { parseStoreConfig, QUERY_USER, StoreConfigError, type PostgresStoreConfi
 
 export const DEFAULT_CONFIG_PATH = '/etc/fleet-host/config.yaml';
 export const DEFAULT_PORT = 8080;
+export const DEFAULT_EMBED_DIR = '/usr/local/lib/fleet-host/embed';
 export const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 
 export interface HostWorkspaceInfo {

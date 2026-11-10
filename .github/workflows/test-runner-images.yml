@@ -68,6 +68,7 @@ on:
       - 'src/preload/inboxTypes.ts'
       - 'src/preload/captureSettings.ts'
       - 'src/preload/federation.ts'
+      - 'src/main/embedderClient.ts'
       - 'package-lock.json'
       - 'tsconfig.host.json'
       - 'vite.host.config.ts'

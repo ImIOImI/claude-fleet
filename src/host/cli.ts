@@ -1,5 +1,5 @@
 // Bundle entry: the host, or a one-shot `init` (resolve or mint the workspace id), `bootstrap` or `migrate` (dbCli.ts),
-// or `write-mcp-bridge <path>` (image build).
+// `write-mcp-bridge <path>` or `embed-check [reference]` (image build).
 import { existsSync } from 'node:fs';
 import { loadHostConfig, readHostEnv } from './config.js';
 import { openHostDb } from './hostDb.js';
@@ -36,6 +36,12 @@ async function cli(argv: string[]): Promise<void> {
     }
     writeMcpBridge(argv[1]);
     return;
+  }
+  if (argv[0] === 'embed-check') {
+    const { embedCheckCli } = await import('./embedCheck.js');
+    const code = await embedCheckCli(argv.slice(1), process.env, (l) => process.stdout.write(l + '\n'));
+    await new Promise<void>((r) => process.stdout.write('', () => r()));
+    process.exit(code);
   }
   // Anything else exits (2 if unknown) rather than starting a host inside a Job.
   if (argv.length > 0) {

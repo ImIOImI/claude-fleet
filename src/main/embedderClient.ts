@@ -71,6 +71,8 @@ export interface EmbedderClientOptions {
   log: (msg: string) => void;
   /** Receives each spawn's ready promise (perf span hook). */
   onSpawn?: (ready: Promise<void>) => void;
+  /** Replaces the inherited environment when set. */
+  env?: NodeJS.ProcessEnv;
 }
 
 interface Pending {
@@ -115,6 +117,10 @@ export class EmbedderClient {
     });
   }
 
+  get pid(): number | undefined {
+    return this.child?.pid;
+  }
+
   /** Closes stdin; the sidecar exits on EOF. */
   dispose(): void {
     const child = this.child;
@@ -127,7 +133,7 @@ export class EmbedderClient {
     this.lastFatal = '';
     let child: ChildProcess;
     try {
-      child = spawn(this.opts.bin, this.opts.args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+      child = spawn(this.opts.bin, this.opts.args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: this.opts.env });
     } catch (e) {
       this.onChildGone(null, `spawn failed: ${String(e)}`);
       return;
