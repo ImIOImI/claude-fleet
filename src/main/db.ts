@@ -2805,6 +2805,40 @@ export async function unembeddedTurnEvents(sessionId: string, modelId: string, l
     .then((rows) => rows.map((r) => ({ id: r.id, workspaceId: r.workspaceId, ts: r.ts, rawJsonl: rawLine(r) })));
 }
 
+/** Sessions with at least one user/assistant event lacking a `modelId` turn
+ *  embedding, in `listSessionIds` order. Turns are embedded oldest-first per
+ *  session (`unembeddedTurnEvents` order), so a session has pending turns iff
+ *  its newest user/assistant event has none: one index probe per session
+ *  instead of an anti-join over all its turns. */
+export async function sessionsWithPendingTurns(modelId: string): Promise<string[]> {
+  const rows = await kyselyOrThrow()
+    .selectFrom((qb) => qb
+      .selectFrom('sessions as s')
+      .select((eb) => [
+        's.id as id',
+        's.last_active_at as last_active_at',
+        eb.selectFrom('events as e')
+          .select((e) => e.fn.max('e.id').as('m'))
+          .whereRef('e.session_id', '=', 's.id')
+          .where('e.type', 'in', ['user', 'assistant'])
+          .as('last_turn'),
+      ])
+      .as('x'))
+    .select('x.id')
+    .where('x.last_turn', 'is not', null)
+    .where(({ not, exists, selectFrom }) => not(exists(
+      selectFrom('embeddings as em')
+        .select('em.id')
+        .whereRef('em.ref_event_id', '=', 'x.last_turn')
+        .where('em.kind', '=', 'turn')
+        .where('em.model_id', '=', modelId),
+    )))
+    .orderBy((eb) => eb.fn.coalesce('x.last_active_at', eb.lit(0)), 'desc')
+    .orderBy('x.id', 'asc')
+    .execute();
+  return rows.map((r) => r.id);
+}
+
 export async function maxEventId(sessionId: string): Promise<number> {
   const row = await kyselyOrThrow()
     .selectFrom('events')

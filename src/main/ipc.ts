@@ -1411,7 +1411,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('sessions:list', async (_e, workspaceId?: string) => {
     const all = await listAllWorkspaces();
     const byId = new Map(all.map((w) => [w.id, w]));
-    const rows = await listSessions(workspaceId);
+    const rows = await perfSpanAsync('claude_fleet.sessions.list_db', () => listSessions(workspaceId));
     return rows.flatMap((r) => {
       const w = byId.get(r.workspaceId);
       // Eligibility: show a session iff its workspace still exists (manifest
@@ -1899,7 +1899,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle('usage:rollingSpend', async () => {
     const windowMs = USAGE_BUDGET_WINDOW_HOURS * 60 * 60 * 1000;
     return {
-      spentTokens: await tokensSpentSince(Date.now() - windowMs),
+      spentTokens: await perfSpanAsync('claude_fleet.usage.tokens_spent', () => tokensSpentSince(Date.now() - windowMs)),
       windowHours: USAGE_BUDGET_WINDOW_HOURS
     };
   });

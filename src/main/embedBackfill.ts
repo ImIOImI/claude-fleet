@@ -15,7 +15,8 @@ export interface EmbedBackfillDeps {
   storeId: string;
   modelId: string;
   deleteStale: () => Promise<number>;
-  listSessionIds: () => Promise<string[]>;
+  /** Sessions that may have turns without an embedding for `modelId`. */
+  listPendingSessionIds: () => Promise<string[]>;
   indexTurns: (sessionId: string) => Promise<unknown>;
   indexSummaries: () => Promise<unknown>;
   onError: (step: string, e: unknown) => void;
@@ -41,7 +42,7 @@ export async function runEmbedBackfill(d: EmbedBackfillDeps): Promise<void> {
     await mkdir(dirname(d.markerPath), { recursive: true });
     await writeFile(d.markerPath, want);
   }
-  const sessionIds = await perfSpanAsync('claude_fleet.index.list_sessions', d.listSessionIds);
+  const sessionIds = await perfSpanAsync('claude_fleet.index.pending_sessions', d.listPendingSessionIds);
   for (const id of sessionIds) {
     await yieldFn();
     try { await d.indexTurns(id); } catch (e) { d.onError(`turns ${id}`, e); }

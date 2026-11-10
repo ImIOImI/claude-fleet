@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
 import { registerIpc, invalidateWorkspaceList, replayInputWait, stopRemoteBackend } from './ipc.js';
-import { openDb, openDbPostgres, closeDb, deleteEmbeddingsForOtherModels, listSessionIds, recordError, stateKysely, stateOpenStats, sessionCaptureSignals, isAutomationSession } from './db.js';
+import { openDb, openDbPostgres, closeDb, deleteEmbeddingsForOtherModels, sessionsWithPendingTurns, recordError, stateKysely, stateOpenStats, sessionCaptureSignals, isAutomationSession } from './db.js';
 import { initPerf, shutdownPerf, perfSpan, perfSpanAsync, perfRecordSpan, perfNoteSqlSync, getEffectivePerf, recordBootProfile } from './perf.js';
 import { setSqliteQueryObserver } from './store/kysely.js';
 import { drainLeftoverWal } from './state/walCheckpointer.js';
@@ -427,7 +427,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         storeId,
         modelId: EMBED_MODEL_ID,
         deleteStale: () => deleteEmbeddingsForOtherModels(EMBED_MODEL_ID),
-        listSessionIds,
+        listPendingSessionIds: () => sessionsWithPendingTurns(EMBED_MODEL_ID),
         indexTurns: (id) => indexSessionTurns(id, embedFn),
         indexSummaries: () => indexSessionSummaries(embedFn),
         onError: (step, e) => logError({ source: 'main', level: 'warn', type: 'index-backfill', message: `${step}: ${String(e)}` }),
