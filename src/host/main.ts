@@ -161,7 +161,7 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     starting: () => !started,
     hub,
     events,
-    rpc: new Map([...brokerRpcChannels(ops, hub.owners, env.port), ...historyRpcChannels(() => holderNow?.history ?? null)]),
+    rpc: new Map([...brokerRpcChannels(ops, hub.owners, env.port), ...historyRpcChannels(() => holderNow?.history ?? null, { search: () => config.search.embedder })]),
     log,
     trustedProxyHops: () => config.trustedProxyHops
   });

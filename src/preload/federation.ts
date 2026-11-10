@@ -124,3 +124,6 @@ export function refreshSessionPage<T extends Keyed>(cur: MergedSessions<T>, page
   const older = prev.rows.filter((r) => compareSessionKey(r, edge) > 0 && !fresh.has(`${r.workspaceId}\u0000${r.id}`));
   return mergeSessionPages([...rest, { origin: page.origin, rows: [...page.rows, ...older], next: prev.next }]);
 }
+
+/** history:search's 503 body when the host's embedder is off (D79). */
+export const SEARCH_UNAVAILABLE = 'search unavailable';
