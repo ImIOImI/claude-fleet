@@ -48,7 +48,9 @@ export interface Backend {
     sessionId: string,
     cols: number,
     rows: number,
-    resumeOf?: string
+    resumeOf?: string,
+    /** `foreground`: the attaching tab is visible; local spawns it first. */
+    opts?: { foreground?: boolean }
   ): Promise<PtyHandle>;
   getBrokerLogs(containerId: string, tailLines?: number): Promise<string>;
   /**

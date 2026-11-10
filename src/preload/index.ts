@@ -781,9 +781,11 @@ const api = {
       rows: number,
       // claude session UUID to resume — spawns `claude --resume <uuid>` on
       // the first CREATE for this tab. Omitted for ordinary new sessions.
-      resumeOf?: string
+      resumeOf?: string,
+      // The tab is visible; local workspaces spawn it ahead of hidden tabs.
+      foreground?: boolean
     ): Promise<string> =>
-      ipcRenderer.invoke('pty:attach', containerId, brokerSessionId, cols, rows, resumeOf),
+      ipcRenderer.invoke('pty:attach', containerId, brokerSessionId, cols, rows, resumeOf, foreground),
     input: (sessionId: string, data: string, ts?: number) =>
       ipcRenderer.invoke('pty:input', sessionId, data, ts),
     /** Push a new terminal size to the PTY. Resolves the *outcome* — a resize

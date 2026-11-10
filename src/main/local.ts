@@ -84,7 +84,8 @@ import {
   killWorkspaceSessions,
   type SpawnPty
 } from './localSessions.js';
-import { createConptySettler } from './conptySettle.js';
+import { createConptySettler, conptySettleLogLevel } from './conptySettle.js';
+import { createSpawnQueue } from './spawnQueue.js';
 
 // Lazy require so the native node-pty addon only loads when a local session is
 // actually spawned (and never under vitest, which can't load the Electron ABI).
@@ -209,7 +210,7 @@ const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
   // condition, so the original one-shot post-spawn jitter (#269) did not hold
   // in the field, and its closure-captured spawn cols could clobber a
   // renderer fit landing inside the 250 ms window, pinning ConPTY at a stale
-  // width. Now every resize (and the spawn itself) schedules a debounced
+  // width. Now every size-changing resize schedules a debounced
   // settle that jitters the winsize at the pty's CURRENT size, forcing
   // ConPTY to re-emit a clean frame — the programmatic equivalent of the
   // manual window resize that heals the corruption. POSIX PTYs (macOS/Linux,
@@ -217,22 +218,34 @@ const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
   // Last size pushed to the pty, seeded from the spawn size (#268).
   let lastCols = cols;
   let lastRows = rows;
+  let firstSettle = true;
   const settler =
     process.platform === 'win32'
       ? createConptySettler({
           resize: safeResize,
           getSize: () => ({ cols: p.cols, rows: p.rows }),
           onSettle: ({ cols: c, rows: r }) => {
-            // One line per settle: the field-visible record of what size
-            // ConPTY was reconciled to. A settle size that differs from the
-            // spawn size means a post-spawn resize landed — the case the
-            // one-shot fix silently reverted.
+            const level = conptySettleLogLevel({
+              firstSettle,
+              settled: { cols: c, rows: r },
+              requested: { cols: lastCols, rows: lastRows }
+            });
+            firstSettle = false;
+            if (!level) return;
             logError({
               source: 'main',
               type: 'conpty-settle',
-              level: 'info',
-              message: `conpty settled at ${c}x${r} (pid ${p.pid}, spawned ${cols}x${rows})`,
-              extra: { pid: p.pid, cols: c, rows: r, spawnCols: cols, spawnRows: rows }
+              level,
+              message: `conpty settled at ${c}x${r} (pid ${p.pid}, requested ${lastCols}x${lastRows}, spawned ${cols}x${rows})`,
+              extra: {
+                pid: p.pid,
+                cols: c,
+                rows: r,
+                requestedCols: lastCols,
+                requestedRows: lastRows,
+                spawnCols: cols,
+                spawnRows: rows
+              }
             });
           }
         })
@@ -241,7 +254,8 @@ const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
     exited = true;
     settler?.dispose();
   });
-  settler?.schedule();
+  // No settle at spawn: ConPTY has nothing to reflow until the size changes,
+  // and the first real resize arms it.
 
   return {
     get pid() {
@@ -560,12 +574,15 @@ export function recordResumeUsageQuietly(workspaceId: string, sessionId: string)
   );
 }
 
+const spawnQueue = createSpawnQueue();
+
 export async function attachPty(
   containerId: string,
   sessionId: string,
   cols: number,
   rows: number,
-  resumeOf?: string
+  resumeOf?: string,
+  opts?: { foreground?: boolean }
 ): Promise<PtyHandle> {
   const id = containerId;
   const m = await readWorkspaceManifest(id);
@@ -613,10 +630,12 @@ export async function attachPty(
   // Cross-restart continuity: a restored tab whose process died with the
   // previous app run resumes its mapped conversation instead of spawning a
   // fresh one.
-  const resume = await effectiveResumeOf(resumeOf, hasLiveSession(id, sessionId), () =>
+  const live = hasLiveSession(id, sessionId);
+  const resume = await effectiveResumeOf(resumeOf, live, () =>
     lookupResumableBrokerSession(id, sessionId)
   );
-  return attachLocalSession({
+  // A re-attach to a live process spawns nothing, so it skips the queue.
+  const attach = (): PtyHandle => attachLocalSession({
     workspaceId: id,
     sessionId,
     cols,
@@ -694,6 +713,7 @@ export async function attachPty(
       passEnvKeys: [...Object.keys(m.env.plain), ...m.env.secretKeys]
     })
   });
+  return live ? attach() : spawnQueue.run(attach, { foreground: opts?.foreground });
 }
 
 /**

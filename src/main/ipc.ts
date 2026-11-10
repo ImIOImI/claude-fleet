@@ -2124,7 +2124,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       brokerSessionId: string,
       cols: number,
       rows: number,
-      resumeOf?: string
+      resumeOf?: string,
+      foreground?: boolean
     ) => {
       // Internal handle id, used by the renderer to address subsequent
       // input/resize/detach calls. Distinct from brokerSessionId (which
@@ -2134,7 +2135,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       const b = await backendFor(containerId);
       let handle: PtyHandle;
       try {
-        handle = await b.attachPty(containerId, brokerSessionId, cols, rows, resumeOf);
+        handle = await b.attachPty(containerId, brokerSessionId, cols, rows, resumeOf, {
+          foreground: foreground === true
+        });
       } catch (err) {
         // Capture the broker's recent stdout/stderr so the user has
         // something to diagnose with. The classic symptom we're chasing

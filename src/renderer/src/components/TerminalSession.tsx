@@ -170,6 +170,8 @@ export function TerminalSession({
   readOnlyRef.current = readOnly;
   const remoteRef = useRef(remote);
   remoteRef.current = remote;
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
   // Bumped when the user clicks "Start new session" / "Retry" after a
   // session ends. The effect deps on containerId+sessionEpoch, so a new
   // attach happens with a fresh xterm instance (no stale state from the
@@ -525,12 +527,15 @@ export function TerminalSession({
         // over the resumeOf prop for this one attach, then is cleared.
         const resumeTarget = resumeOverrideRef.current ?? resumeOf;
         resumeOverrideRef.current = null;
+        const spawnCols = term.cols;
+        const spawnRows = term.rows;
         const sid = await window.api.pty.attach(
           containerId,
           sessionId,
-          term.cols,
-          term.rows,
-          resumeTarget
+          spawnCols,
+          spawnRows,
+          resumeTarget,
+          visibleRef.current
         );
         if (disposed) {
           window.api.pty.detach(sid);
@@ -553,7 +558,10 @@ export function TerminalSession({
             });
           }
         });
-        resizePusher.seed(term.cols, term.rows);
+        // Seed with the size actually sent: the pane can re-fit while attach
+        // is in flight (local spawns queue), and that change must still be pushed.
+        resizePusher.seed(spawnCols, spawnRows);
+        resizePusher.request();
         lastObservedCols = term.cols;
         lastObservedRows = term.rows;
         // Busy/idle (#283): read the title from xterm's own OSC parser —
