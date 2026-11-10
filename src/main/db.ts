@@ -2748,7 +2748,7 @@ export async function purgeWorkspace(
   for (const table of ['events', 'embeddings', 'usage_events', 'session_summaries'] as const) {
     for (;;) {
       const size = chunk;
-      // Timed once the connection is held, so waiting on the store mutex doesn't shrink chunks.
+      // Timed once the connection is held, so SQLite mutex waits don't shrink chunks (Postgres still counts its write-lock wait).
       const r = await slice(() => k.connection().execute(async (c) => {
         const t0 = now();
         const out = await c.deleteFrom(table)

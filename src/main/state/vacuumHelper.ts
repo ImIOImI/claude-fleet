@@ -18,6 +18,7 @@ const ATTEMPT_EVERY_MS = DAY_MS;
 const FREE_SPACE_FACTOR = 2.2;
 /** A lock younger than this names a helper that may still be vacuuming. */
 const LOCK_FRESH_MS = 15 * 60_000;
+export const VACUUM_EXIT_WAIT_MS = 60_000;
 
 export const vacuumLockPath = (userData: string): string => join(userData, 'state.db.vacuum.lock');
 
@@ -126,12 +127,27 @@ export function vacuumHelperActive(userData: string, isAlive: (pid: number) => b
   return !!info && Number.isInteger(info.pid) && now - info.startedAt <= LOCK_FRESH_MS && isAlive(info.pid as number);
 }
 
+/** Removes a lock no live helper holds (pid-less, dead pid or old), so it can't
+ *  outlive its helper when no wait runs at startup. Never kills. */
+export function clearStaleVacuumLock(userData: string, isAlive: (pid: number) => boolean = pidAlive, now = Date.now()): boolean {
+  const lock = vacuumLockPath(userData);
+  if (!existsSync(lock) || vacuumHelperActive(userData, isAlive, now)) return false;
+  try {
+    unlinkSync(lock);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Before openDb: wait (asynchronously) for a helper from the last quit. After
  *  `capMs` a fresh lock's helper is killed (its VACUUM rolls back); an old
- *  lock is treated as stale, never killed (its pid may be reused). */
+ *  lock is treated as stale, never killed (its pid may be reused). A killed
+ *  helper still alive after `exitWaitMs` is 'lingering': it may still hold the
+ *  file locks, so openDb's busy_timeout can block main on its first write. */
 export async function waitForVacuumHelper(userData: string, opts: {
   capMs?: number; pollMs?: number; exitWaitMs?: number; isAlive?: (pid: number) => boolean; kill?: (pid: number) => void; now?: () => number;
-} = {}): Promise<'none' | 'done' | 'killed' | 'stale'> {
+} = {}): Promise<'none' | 'done' | 'killed' | 'stale' | 'lingering'> {
   const lock = vacuumLockPath(userData);
   if (!existsSync(lock)) return 'none';
   const isAlive = opts.isAlive ?? pidAlive;
@@ -159,7 +175,7 @@ export async function waitForVacuumHelper(userData: string, opts: {
     (opts.kill ?? ((pid) => process.kill(pid)))(info.pid);
   } catch { /* exited meanwhile */ }
   // Its file locks go only when it is gone (Windows releases them late).
-  const exitDeadline = now() + (opts.exitWaitMs ?? 10_000);
+  const exitDeadline = now() + (opts.exitWaitMs ?? VACUUM_EXIT_WAIT_MS);
   while (isAlive(info.pid) && now() < exitDeadline) await poll();
-  return 'killed';
+  return isAlive(info.pid) ? 'lingering' : 'killed';
 }

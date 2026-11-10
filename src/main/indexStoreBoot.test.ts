@@ -147,4 +147,26 @@ describe('index.ts store boot', () => {
     ]);
     expect(src).toMatch(/const QUIT_BOUND_MS = 10_000;/);
   });
+
+  it('a quit during the VACUUM-helper wait never opens state.db (#547)', () => {
+    inOrder(boot, [
+      'const waited = await waitForVacuumHelper(userData);',
+      'if (shuttingDown) return;',
+      'await startSqliteHistory();',
+      'if (shuttingDown) return;',
+      'await startSqliteIngest(watcher, embedFn);',
+    ]);
+  });
+
+  it('clears a stale VACUUM lock when no helper is waited for (#547)', () => {
+    inOrder(boot, [
+      'const historyAfterVacuum = sqlite && !!jsonlWatcher && vacuumHelperActive(userData);',
+      'if (sqlite && !historyAfterVacuum) clearStaleVacuumLock(userData);',
+    ]);
+  });
+
+  it('starts the claims vector backfill after the embed-backfill delay, not at boot (#547)', () => {
+    const c = closure('startClaims');
+    inOrder(c, ['setTimeout(() => {', 'if (shuttingDown) return;', "perfSpanAsync('claude_fleet.boot.claims_backfill'", '}, EMBED_BACKFILL_DELAY_MS);']);
+  });
 });

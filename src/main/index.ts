@@ -22,7 +22,7 @@ import { wslLocalProjectsDir, wslLocalSessionsDir } from './localLauncher.js';
 import { encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDir, workspaceStateDir } from './paths.js';
 import { existsSync } from 'node:fs';
 import { startRetention } from './state/retention.js';
-import { prepareVacuum, spawnVacuumHelper, vacuumHelperActive, waitForVacuumHelper } from './state/vacuumHelper.js';
+import { clearStaleVacuumLock, prepareVacuum, spawnVacuumHelper, vacuumHelperActive, waitForVacuumHelper } from './state/vacuumHelper.js';
 import { installMainProcessHandlers, getLogPath, setErrorSink, logError, batchedErrorSink, flushErrorLogSync } from './errorLog.js';
 import { installAppMenu } from './appMenu.js';
 import { isOpenableExternalUrl } from './externalUrl.js';
@@ -330,8 +330,13 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     const claims = claimService;
     void perfSpanAsync('claude_fleet.boot.capture_fail_running', () => runs.failRunning(Date.now(), 'interrupted by app restart')).catch((e) =>
       logError({ source: 'main', level: 'warn', type: 'capture-fail-running', message: String(e) }));
-    void perfSpanAsync('claude_fleet.boot.claims_backfill', () => claims.backfillVectors()).catch((e) =>
-      logError({ source: 'main', level: 'warn', type: 'claims-backfill', message: String(e) }));
+    // After boot settles, like the embed backfill: on the in-process fallback, embedding loads the model on main.
+    const claimsTimer = setTimeout(() => {
+      if (shuttingDown) return;
+      void perfSpanAsync('claude_fleet.boot.claims_backfill', () => claims.backfillVectors()).catch((e) =>
+        logError({ source: 'main', level: 'warn', type: 'claims-backfill', message: String(e) }));
+    }, EMBED_BACKFILL_DELAY_MS);
+    claimsTimer.unref?.();
   };
 
   /** Seed each workspace's durable-mirror default from its manifest before the
@@ -525,6 +530,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   // the window and IPC come up now, the SQLite history services once it ends
   // (WAL readers, e.g. the MCP read source, aren't blocked by it).
   const historyAfterVacuum = sqlite && !!jsonlWatcher && vacuumHelperActive(userData);
+  if (sqlite && !historyAfterVacuum) clearStaleVacuumLock(userData);
   let sqliteManifests: WorkspaceSpec[] = [];
   // Watcher-triggered indexing waits this long after ingest starts; the
   // deferred backfill covers what lands before (#464).
@@ -799,8 +805,11 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     const embedFn = embed;
     void (async () => {
       const waited = await waitForVacuumHelper(userData);
-      logError({ source: 'main', level: 'info', type: 'vacuum-wait', message: `vacuum helper: ${waited}` });
+      logError({ source: 'main', level: waited === 'lingering' ? 'warn' : 'info', type: 'vacuum-wait', message: `vacuum helper: ${waited}` });
+      // A quit during the wait has closed (or is closing) the store.
+      if (shuttingDown) return;
       await startSqliteHistory();
+      if (shuttingDown) return;
       await startSqliteIngest(watcher, embedFn);
     })().catch((e) => logError({ source: 'main', type: 'history-start', level: 'error', message: String(e) }));
   }

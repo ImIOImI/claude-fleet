@@ -99,6 +99,16 @@ interface Generation {
   timeoutMs: number;
 }
 
+/** Settles when `p` does or after `ms`, whichever is first; the timer never outlives it. */
+export async function raceTimeout(p: Promise<unknown>, ms: number): Promise<void> {
+  let t: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([p, new Promise<void>((r) => { t = setTimeout(r, ms); t.unref?.(); })]);
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 export class WalCheckpointer implements StoreCheckpointer {
   private gen: Generation | null = null;
   private draining = 0;
@@ -272,7 +282,7 @@ export class WalCheckpointer implements StoreCheckpointer {
         if (!api.active() || (g.last?.log ?? 0) <= WAL_REWIND_FRAMES) return;
         // Each wait is bounded by the watchdog, which hands back and settles; the race is a second bound.
         const bound = this.timeoutFor(g) + 100;
-        const bounded = (p: Promise<unknown> | null) => p && Promise.race([p, new Promise<void>((r) => setTimeout(r, bound).unref?.())]);
+        const bounded = (p: Promise<unknown> | null) => p && raceTimeout(p, bound);
         await bounded(g.pending);
         if (!api.active()) return;
         api.request();

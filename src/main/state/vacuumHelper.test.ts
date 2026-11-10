@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import Database from 'better-sqlite3';
 import { closeDb, maintenanceGet, maintenanceSet, openDb } from '../db.js';
 import { isPg } from '../store/testStore.js';
-import { prepareVacuum, spawnVacuumHelper, vacuumHelperActive, vacuumLockPath, waitForVacuumHelper } from './vacuumHelper.js';
+import { clearStaleVacuumLock, prepareVacuum, spawnVacuumHelper, vacuumHelperActive, vacuumLockPath, waitForVacuumHelper } from './vacuumHelper.js';
 
 const dirs: string[] = [];
 const tmp = (): string => { const d = mkdtempSync(join(tmpdir(), 'cf-vac-')); dirs.push(d); return d; };
@@ -66,6 +66,15 @@ describe('waitForVacuumHelper', () => {
     await exited;
   });
 
+  it('reports lingering when a killed helper outlives the exit wait', async () => {
+    const dir = tmp();
+    const killed: number[] = [];
+    writeFileSync(vacuumLockPath(dir), JSON.stringify({ pid: 4242, startedAt: Date.now() }));
+    const r = await waitForVacuumHelper(dir, { capMs: 40, pollMs: 10, exitWaitMs: 40, isAlive: () => true, kill: (p) => killed.push(p) });
+    expect(r).toBe('lingering');
+    expect(killed).toEqual([4242]);
+  });
+
   it('never kills the pid of an old lock', async () => {
     const dir = tmp();
     const killed: number[] = [];
@@ -120,5 +129,32 @@ describe.skipIf(isPg)('spawnVacuumHelper lock', () => {
   it('does not spawn when the lock cannot be written', () => {
     const dir = join(tmp(), 'missing', 'dir');
     expect(spawnVacuumHelper(dir, { execPath: process.execPath, bs3Path: bs3 })).toBeNull();
+  });
+});
+
+describe('clearStaleVacuumLock', () => {
+  it('removes a pid-less, dead-pid or old lock and keeps a live helper\'s', () => {
+    const dir = tmp();
+    const lock = vacuumLockPath(dir);
+    expect(clearStaleVacuumLock(dir)).toBe(false);
+    for (const [info, alive] of [
+      [{ pid: null, startedAt: Date.now() }, true],
+      [{ pid: 4242, startedAt: Date.now() }, false],
+      [{ pid: 4242, startedAt: Date.now() - 60 * 60_000 }, true],
+    ] as const) {
+      writeFileSync(lock, JSON.stringify(info));
+      expect(clearStaleVacuumLock(dir, () => alive)).toBe(true);
+      expect(existsSync(lock)).toBe(false);
+    }
+    writeFileSync(lock, JSON.stringify({ pid: 4242, startedAt: Date.now() }));
+    expect(clearStaleVacuumLock(dir, () => true)).toBe(false);
+    expect(existsSync(lock)).toBe(true);
+  });
+
+  it('removes an unreadable lock', () => {
+    const dir = tmp();
+    writeFileSync(vacuumLockPath(dir), 'not json');
+    expect(clearStaleVacuumLock(dir, () => true)).toBe(true);
+    expect(existsSync(vacuumLockPath(dir))).toBe(false);
   });
 });
