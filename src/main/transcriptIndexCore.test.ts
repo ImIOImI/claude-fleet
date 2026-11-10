@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ingestLine } from './db.js';
-import { extractText, indexSessionTurnsWith, type SpanAsync } from './transcriptIndexCore';
+import { extractText, indexSessionTurnsWith, type SpanAsync } from './transcriptIndexCore.js';
 import { EMBED_DIM } from './vectors.js';
 import { openTestState, type TestState } from './store/testStore.js';
 

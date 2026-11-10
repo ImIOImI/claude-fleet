@@ -1,4 +1,4 @@
-// Transcript search (remote-workspaces d2): one query, embedded once in main,
+// Transcript search: one query, embedded once in main,
 // sent as a vector to the hosts in scope only (D67). Results live in this
 // component's state only; remote text renders as React text nodes.
 
