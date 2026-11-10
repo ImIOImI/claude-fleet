@@ -2,7 +2,7 @@
 // re-check state when they run (tab closed, workspace stopped, newer attach).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { PtyProc, SpawnPty } from './localSessions.js';
@@ -35,20 +35,40 @@ vi.mock('./claudeResolve.js', async (orig) => ({
   ...(await orig<typeof import('./claudeResolve.js')>()),
   findClaude: async () => '/usr/bin/claude'
 }));
-// One-shot gate on the next manifest read, to hold stopWorkspace mid-flight.
-const manifestGate: { next: Promise<void> | null } = { next: null };
+// Gates consumed one per manifest read, to hold stopWorkspace mid-flight.
+const manifestGates: Array<Promise<void>> = [];
 vi.mock('./workspaces.js', async (orig) => {
   const actual = await orig<typeof import('./workspaces.js')>();
   return {
     ...actual,
     readWorkspaceManifest: async (id: string) => {
-      const gate = manifestGate.next;
-      manifestGate.next = null;
+      const gate = manifestGates.shift();
       if (gate) await gate;
       return actual.readWorkspaceManifest(id);
     }
   };
 });
+// One-shot gate on the next mkdir of a workspace state dir (the live-state write).
+const mkdirGate: { next: Promise<void> | null; hit: boolean } = { next: null, hit: false };
+vi.mock('node:fs/promises', async (orig) => {
+  const actual = await orig<typeof import('node:fs/promises')>();
+  const mkdirGated = async (...args: Parameters<typeof actual.mkdir>) => {
+    const gate = mkdirGate.next;
+    if (gate && String(args[0]).includes(join('state', '01ARZ3NDEKTSV4RRFFQ69G5FAV'))) {
+      mkdirGate.next = null;
+      mkdirGate.hit = true;
+      await gate;
+    }
+    return actual.mkdir(...args);
+  };
+  return { ...actual, mkdir: mkdirGated, default: { ...actual, mkdir: mkdirGated } };
+});
+
+function gate(): { promise: Promise<void>; release: () => void } {
+  let release!: () => void;
+  const promise = new Promise<void>((r) => (release = r));
+  return { promise, release };
+}
 
 const local = await import('./local.js');
 const { SpawnCancelledError } = await import('./spawnQueue.js');
@@ -88,7 +108,9 @@ beforeEach(async () => {
   resetSessions();
   local._setSpawnForTest(fakeSpawn);
   local._setResumeLookupTimeoutForTest(3000);
-  manifestGate.next = null;
+  manifestGates.length = 0;
+  mkdirGate.next = null;
+  mkdirGate.hit = false;
   spawned.length = 0;
   lookup.mockReset();
   lookup.mockImplementation(async () => null);
@@ -146,15 +168,53 @@ describe('local attachPty spawn queue', () => {
 
   it('refuses an attach that arrives while a stop is still in flight', async () => {
     await local.attachPty(WS_ID, 'tab', 120, 40);
-    let releaseStop!: () => void;
-    manifestGate.next = new Promise<void>((r) => (releaseStop = r));
+    const g = gate();
+    manifestGates.push(g.promise);
     const stop = local.stopWorkspace(WS_ID);
     const late = local.attachPty(WS_ID, 'late', 120, 40);
     await expect(late).rejects.toThrow(/is not running/);
-    releaseStop();
+    g.release();
     await stop;
     expect(spawned.map((s) => s.sid)).toEqual(['tab']);
     expect((await local.listLiveWorkspaces()).find((w) => w.id === WS_ID)?.state).toBe('stopped');
+  });
+
+  it('overlapping stops keep the guard up until the last one finishes', async () => {
+    await local.attachPty(WS_ID, 'tab', 120, 40);
+    const g1 = gate();
+    const g2 = gate();
+    manifestGates.push(g1.promise, g2.promise);
+    const stop1 = local.stopWorkspace(WS_ID);
+    const stop2 = local.stopWorkspace(WS_ID);
+    g2.release();
+    await stop2;
+    // stop1 is still in flight.
+    await expect(local.attachPty(WS_ID, 'late', 120, 40)).rejects.toThrow(/is not running/);
+    g1.release();
+    await stop1;
+    expect(spawned.map((s) => s.sid)).toEqual(['tab']);
+    // Guard is down once both finished: attaching restarts the workspace.
+    await local.attachPty(WS_ID, 'after', 120, 40);
+    expect(spawned.map((s) => s.sid)).toEqual(['tab', 'after']);
+  });
+
+  it("an attach's live-state write cannot land after a concurrent stop's removal", async () => {
+    const g = gate();
+    mkdirGate.next = g.promise;
+    const attach = local.attachPty(WS_ID, 'tab', 120, 40);
+    const attachErr = attach.catch((e: unknown) => e);
+    await until(() => mkdirGate.hit); // attach is mid-write, having seen started=true
+    const stop = local.stopWorkspace(WS_ID);
+    // Let the stop reach its own live-state removal before the attach's write resumes.
+    await new Promise((r) => setTimeout(r, 50));
+    g.release();
+    await stop;
+    expect(await attachErr).toBeInstanceOf(Error);
+    const file = join(USER_DATA, 'state', WS_ID, 'local-live.json');
+    expect(await stat(file).catch(() => null)).toBeNull();
+    local._resetForTest(); // app restart
+    expect((await local.listLiveWorkspaces()).find((w) => w.id === WS_ID)?.state).toBe('stopped');
+    expect(spawned).toEqual([]);
   });
 
   it('a newer attach for the same tab wins and its resume target is used', async () => {

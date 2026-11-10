@@ -101,9 +101,24 @@ const started = new Set<string>();
 // native/custom local ones still can't. In-memory like `started`.
 const paused = new Set<string>();
 
-// Workspaces mid stop/remove/pause. Attaches are refused while set: attach
-// prep re-adds `started`, so clearing it alone doesn't close the window.
-const transitioning = new Set<string>();
+// Workspaces mid stop/remove/pause, counted so overlapping transitions keep
+// the guard up. Attaches are refused while > 0: attach prep re-adds
+// `started`, so clearing it alone does not close the window.
+const transitioning = new Map<string, number>();
+
+function enterTransition(id: string): void {
+  transitioning.set(id, (transitioning.get(id) ?? 0) + 1);
+}
+
+function exitTransition(id: string): void {
+  const n = (transitioning.get(id) ?? 1) - 1;
+  if (n > 0) transitioning.set(id, n);
+  else transitioning.delete(id);
+}
+
+function isTransitioning(id: string): boolean {
+  return (transitioning.get(id) ?? 0) > 0;
+}
 
 // ── Warm-state persistence ─────────────────────────────────────────────────
 //
@@ -117,8 +132,22 @@ function liveStatePath(id: string): string {
   return join(workspaceStateDir(id), 'local-live.json');
 }
 
+// Per-id write chain: each write reads the state when it runs, so the last
+// one always reflects the latest transition (an attach's write can't land
+// after a concurrent stop's removal).
+const persistChains = new Map<string, Promise<void>>();
+
+function persistLiveState(id: string): Promise<void> {
+  const next = (persistChains.get(id) ?? Promise.resolve()).then(() => writeLiveState(id));
+  persistChains.set(id, next);
+  void next.then(() => {
+    if (persistChains.get(id) === next) persistChains.delete(id);
+  });
+  return next;
+}
+
 /** Best-effort: chip warmth is a nicety, never worth failing a transition. */
-async function persistLiveState(id: string): Promise<void> {
+async function writeLiveState(id: string): Promise<void> {
   try {
     if (!started.has(id)) {
       await rm(liveStatePath(id), { force: true });
@@ -499,14 +528,14 @@ export async function checkClaudeFreshness(
 export async function pauseWorkspace(containerId: string): Promise<void> {
   const m = await readWorkspaceManifest(containerId);
   if (m?.launcher?.mode === 'wsl') {
-    transitioning.add(containerId);
+    enterTransition(containerId);
     try {
       cancelWorkspaceAttaches(containerId, 'workspace paused');
       await signalWslSessions(m.launcher, containerId, 'STOP');
       if (started.has(containerId)) paused.add(containerId);
       await persistLiveState(containerId);
     } finally {
-      transitioning.delete(containerId);
+      exitTransition(containerId);
     }
     return;
   }
@@ -514,7 +543,7 @@ export async function pauseWorkspace(containerId: string): Promise<void> {
 }
 
 export async function stopWorkspace(containerId: string): Promise<void> {
-  transitioning.add(containerId);
+  enterTransition(containerId);
   try {
     cancelWorkspaceAttaches(containerId, 'workspace stopped');
     killWorkspaceSessions(containerId);
@@ -533,7 +562,7 @@ export async function stopWorkspace(containerId: string): Promise<void> {
     }
     await persistLiveState(containerId);
   } finally {
-    transitioning.delete(containerId);
+    exitTransition(containerId);
   }
 }
 
@@ -542,7 +571,7 @@ export async function removeWorkspace(
   opts: RemoveWorkspaceOpts = {}
 ): Promise<void> {
   const id = opts.id ?? containerId;
-  transitioning.add(id);
+  enterTransition(id);
   try {
     cancelWorkspaceAttaches(id, 'workspace removed');
     killWorkspaceSessions(id);
@@ -553,7 +582,7 @@ export async function removeWorkspace(
       await rm(workspaceStateDir(id), { recursive: true, force: true });
     }
   } finally {
-    transitioning.delete(id);
+    exitTransition(id);
   }
 }
 
@@ -667,11 +696,11 @@ export async function attachPty(
   latestAttach.set(key, seq);
   const assertCurrent = (): void => {
     if (latestAttach.get(key) !== seq) throw new SpawnCancelledError('superseded by a newer attach');
-    if (transitioning.has(id) || !started.has(id) || paused.has(id)) {
+    if (isTransitioning(id) || !started.has(id) || paused.has(id)) {
       throw new Error(`local workspace ${id} is not running`);
     }
   };
-  if (transitioning.has(id)) throw new Error(`local workspace ${id} is not running`);
+  if (isTransitioning(id)) throw new Error(`local workspace ${id} is not running`);
   const m = await readWorkspaceManifest(id);
   if (!m) throw new Error(`no manifest for local workspace ${id}`);
   const launcher: WorkspaceLauncher = m.launcher ?? { mode: 'native' };
@@ -705,7 +734,7 @@ export async function attachPty(
     });
   const settingsArg =
     retentionHost && launcher.mode === 'wsl' ? (windowsPathToWslPath(retentionHost) ?? undefined) : retentionHost;
-  if (transitioning.has(id)) throw new Error(`local workspace ${id} is not running`);
+  if (isTransitioning(id)) throw new Error(`local workspace ${id} is not running`);
   // Attaching implies the workspace is up.
   started.add(id);
   // If the workspace was paused, resume it now. For wsl-launcher workspaces
