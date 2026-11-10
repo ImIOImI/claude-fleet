@@ -404,12 +404,7 @@ export function serveMcpConnection(sock: Socket, callerId: string): void {
 /** A connection open this long gets its accept row; shorter ones only log an abnormal close. */
 export const MCP_CONN_LOG_AFTER_MS = 10_000;
 
-/** Connection-lifecycle breadcrumbs (errors DB via list_errors). A short
- *  connection that answered everything writes nothing: each `claude -p` or
- *  hook opens one, and two rows apiece flooded the log. Logged: `mcp-conn`
- *  once a connection has stayed open MCP_CONN_LOG_AFTER_MS, and
- *  `mcp-conn-closed` for that connection, for one that closed with requests
- *  still in flight (request loss), or for one that carried no rpc lines. */
+/** Connection-lifecycle breadcrumbs (errors DB via list_errors). Logged: `mcp-conn` once open MCP_CONN_LOG_AFTER_MS, and `mcp-conn-closed` for that connection, for one closed with requests in flight, or for one that carried no rpc lines. */
 export function trackConnection(
   transport: 'unix' | 'tcp',
   callerId: string,

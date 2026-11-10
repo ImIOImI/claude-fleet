@@ -108,6 +108,34 @@ describe('recordError', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
+  it('recordErrors falls back to one row at a time so one bad row keeps the rest', async () => {
+    const dir = await freshDb();
+    try {
+      const bad = { ts: 2, source: 'main', type: 'bad', message: 'm', workspaceId: 'ws-a', extra: {} as Record<string, unknown> };
+      Object.defineProperty(bad.extra, 'brokerSessionId', { get: () => { throw new Error('boom'); }, enumerable: false });
+      await recordErrors([
+        { ts: 1, source: 'main', type: 'a', message: 'm' },
+        bad,
+        { ts: 3, source: 'main', type: 'c', message: 'm' },
+      ]);
+      const types = (await queryRows('SELECT type FROM errors ORDER BY id')).map((r) => (r as { type: string }).type);
+      expect(types).toEqual(['a', 'c']);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('strips NUL and serializes BigInt and circular extra', async () => {
+    const dir = await freshDb();
+    try {
+      const extra: Record<string, unknown> = { n: 10n };
+      extra.self = extra;
+      await recordErrors([{ ts: 1, source: 'main', type: 't', message: 'a\0b', stack: 's\0', extra }]);
+      const row = (await queryRows('SELECT message, stack, extra FROM errors'))[0] as { message: string; stack: string; extra: string };
+      expect(row.message).toBe('ab');
+      expect(row.stack).toBe('s');
+      expect(JSON.parse(row.extra)).toEqual({ n: '10', self: '[Circular]' });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it('rejects (never throws synchronously) when the DB is closed — the sink swallows it', async () => {
     await closeDb();
     const p = recordError({ ts: 1, source: 'main', type: 't', message: 'm' });

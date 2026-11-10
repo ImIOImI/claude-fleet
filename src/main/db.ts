@@ -2781,43 +2781,89 @@ export async function recordError(row: ErrorRow): Promise<void> {
   await recordErrors([row]);
 }
 
-/** Insert `rows` and prune to the newest ERRORS_RETENTION in one transaction. */
+/** Postgres text refuses NUL. */
+const noNul = (v: string): string => v.replace(/\0/g, '');
+const noNulOrNull = (v: string | undefined | null): string | null => (v == null ? null : noNul(String(v)));
+
+/** JSON for `extra` that never throws: BigInt as a string, cycles cut. */
+export function safeExtraJson(extra: Record<string, unknown>): string {
+  const seen = new WeakSet<object>();
+  try {
+    return noNul(JSON.stringify(extra, (_k, v: unknown) => {
+      if (typeof v === 'bigint') return v.toString();
+      if (v && typeof v === 'object') {
+        if (seen.has(v)) return '[Circular]';
+        seen.add(v);
+      }
+      return v;
+    }));
+  } catch (e) {
+    return JSON.stringify({ unserializable: noNul(String(e)) });
+  }
+}
+
+async function insertErrorRow(trx: Transaction<StateDb>, row: ErrorRow): Promise<void> {
+  // Resolve the claude session UUID: prefer an explicit sessionId; else, if
+  // the caller only knew the broker id, best-effort resolve it via the
+  // mapping (NULL when unmapped — itself an honest signal).
+  let sessionId = row.sessionId ?? null;
+  if (!sessionId && row.workspaceId && typeof row.extra?.brokerSessionId === 'string') {
+    const m = await existingMappingQ(trx, row.workspaceId, row.extra.brokerSessionId as string);
+    sessionId = m?.claude_session_id ?? null;
+  }
+  await trx
+    .insertInto('errors')
+    .values({
+      ts: row.ts,
+      workspace_id: noNulOrNull(row.workspaceId),
+      session_id: noNulOrNull(sessionId),
+      source: noNul(String(row.source)),
+      level: noNul(String(row.level ?? 'error')),
+      type: noNul(String(row.type)),
+      message: noNul(String(row.message)),
+      stack: noNulOrNull(row.stack),
+      extra: row.extra ? safeExtraJson(row.extra) : null,
+    })
+    .execute();
+}
+
+// Keep the newest ERRORS_RETENTION rows: delete every id at or below the
+// (ERRORS_RETENTION+1)-th newest (a PK seek, not a table scan).
+async function pruneErrors(trx: Transaction<StateDb>): Promise<void> {
+  await trx
+    .deleteFrom('errors')
+    .where('id', '<=', (eb) =>
+      eb.selectFrom('errors').select('id').orderBy('id', 'desc').limit(1).offset(ERRORS_RETENTION)
+    )
+    .execute();
+}
+
+/** Insert `rows` and prune once, in one transaction. If that fails, each row
+ *  gets its own transaction so one bad row can't drop the rest; rejects only
+ *  when no row could be written. */
 export async function recordErrors(rows: ErrorRow[]): Promise<void> {
   if (!rows.length) return;
-  await kyselyOrThrow().transaction().execute(async (trx) => {
+  const db = kyselyOrThrow();
+  try {
+    await db.transaction().execute(async (trx) => {
+      for (const row of rows) await insertErrorRow(trx, row);
+      await pruneErrors(trx);
+    });
+    return;
+  } catch (batchErr) {
+    if (rows.length === 1) throw batchErr;
+    let written = 0;
     for (const row of rows) {
-      // Resolve the claude session UUID: prefer an explicit sessionId; else, if
-      // the caller only knew the broker id, best-effort resolve it via the
-      // mapping (NULL when unmapped — itself an honest signal).
-      let sessionId = row.sessionId ?? null;
-      if (!sessionId && row.workspaceId && typeof row.extra?.brokerSessionId === 'string') {
-        const m = await existingMappingQ(trx, row.workspaceId, row.extra.brokerSessionId as string);
-        sessionId = m?.claude_session_id ?? null;
+      try {
+        await db.transaction().execute((trx) => insertErrorRow(trx, row));
+        written++;
+      } catch {
+        // Drop just this row.
       }
-      await trx
-        .insertInto('errors')
-        .values({
-          ts: row.ts,
-          workspace_id: row.workspaceId ?? null,
-          session_id: sessionId,
-          source: row.source,
-          level: row.level ?? 'error',
-          type: row.type,
-          message: row.message,
-          stack: row.stack ?? null,
-          extra: row.extra ? JSON.stringify(row.extra) : null,
-        })
-        .execute();
     }
-    // Keep the newest ERRORS_RETENTION rows: delete every id at or below the
-    // (ERRORS_RETENTION+1)-th newest (a PK seek, not a table scan).
-    await trx
-      .deleteFrom('errors')
-      .where('id', '<=', (eb) =>
-        eb.selectFrom('errors').select('id').orderBy('id', 'desc').limit(1).offset(ERRORS_RETENTION)
-      )
-      .execute();
-  });
+    if (!written) throw batchErr;
+    await db.transaction().execute(pruneErrors);
+  }
 }
 
 export interface EmbeddingHit {

@@ -1,11 +1,15 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { _setErrorLogForTests, batchedErrorSink, flushErrorLog, flushErrorLogSync, installMainProcessHandlers, logError, setErrorSink } from './errorLog.js';
+import { _setErrorLogForTests, batchedErrorSink, flushErrorLogSync, installMainProcessHandlers, logError, MAX_PENDING_LINES, setErrorSink } from './errorLog.js';
 import type { ErrorRow } from './db.js';
 
+// Without electron the default path throws and lines would carry into the next test's file.
+const scratch = mkdtempSync(join(tmpdir(), 'cf-errlog-scratch-'));
+beforeEach(() => _setErrorLogForTests(join(scratch, 'error.log')));
 afterEach(() => setErrorSink(null));
+afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 describe('error sink', () => {
   it('forwards each logError to the registered sink with an epoch-ms ts', () => {
@@ -61,18 +65,18 @@ describe('rotation', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('rotates inside one async batch at the line that passes the cap', async () => {
+  it('renames before a batch write that would pass the cap', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cf-errlog-'));
     const p = join(dir, 'error.log');
     writeFileSync(p, 'x'.repeat(700) + '\n');
     _setErrorLogForTests(p, 1000);
-    logError({ source: 'main', type: 'first', message: 'm'.repeat(50) });
-    logError({ source: 'main', type: 'second', message: 'm'.repeat(200) });
-    await flushErrorLog();
-    expect(readFileSync(`${p}.1`, 'utf8')).toContain('"type":"first"');
+    logError({ source: 'main', type: 'first', message: 'm'.repeat(150) });
+    logError({ source: 'main', type: 'second', message: 'm'.repeat(150) });
+    flushErrorLogSync();
+    expect(readFileSync(`${p}.1`, 'utf8')).toBe('x'.repeat(700) + '\n');
     const current = readFileSync(p, 'utf8');
+    expect(current).toContain('"type":"first"');
     expect(current).toContain('"type":"second"');
-    expect(current).not.toContain('"type":"first"');
     rmSync(dir, { recursive: true, force: true });
   });
 });
@@ -101,30 +105,39 @@ describe('buffered writes', () => {
     expect(lines(p)[49]).toBe('t49');
   });
 
-  it('keeps order across lines logged while an append is running', async () => {
-    const p = setup();
-    logError({ source: 'main', type: 'a', message: 'm' });
-    const first = flushErrorLog();
-    logError({ source: 'main', type: 'b', message: 'm' });
-    await first;
-    await flushErrorLog();
-    expect(lines(p)).toEqual(['a', 'b']);
-  });
-
   it('flushErrorLogSync writes buffered lines before returning', () => {
     const p = setup();
     logError({ source: 'main', type: 'crash', message: 'm' });
     flushErrorLogSync();
     expect(lines(p)).toEqual(['crash']);
+    flushErrorLogSync();
+    expect(lines(p)).toEqual(['crash']);
   });
 
-  it('flushErrorLogSync also writes the lines of an append still running', async () => {
+  it('keeps lines across a failed write and writes them, in order, once the path works', () => {
     const p = setup();
-    logError({ source: 'main', type: 'mid', message: 'm' });
-    const running = flushErrorLog();
+    mkdirSync(p);
+    logError({ source: 'main', type: 'a', message: 'm' });
     flushErrorLogSync();
-    expect(lines(p)).toContain('mid');
-    await running;
+    logError({ source: 'main', type: 'b', message: 'm' });
+    flushErrorLogSync();
+    rmSync(p, { recursive: true });
+    _setErrorLogForTests(p);
+    flushErrorLogSync();
+    expect(lines(p)).toEqual(['a', 'b']);
+  });
+
+  it('bounds the buffer while writes fail and marks how many lines were dropped', () => {
+    const p = setup();
+    mkdirSync(p);
+    for (let i = 0; i < MAX_PENDING_LINES + 3; i++) logError({ source: 'main', type: `t${i}`, message: 'm' });
+    flushErrorLogSync();
+    rmSync(p, { recursive: true });
+    flushErrorLogSync();
+    const written = readFileSync(p, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    expect(written).toHaveLength(MAX_PENDING_LINES + 1);
+    expect(written[0]).toMatchObject({ type: 'error-log-dropped', message: 'dropped 3 lines' });
+    expect(written[1].type).toBe('t3');
   });
 
   it('flushes synchronously on process exit', () => {

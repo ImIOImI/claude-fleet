@@ -96,6 +96,8 @@ const inboxGate = new InboxWriteGate();
 const historyGate = new InboxWriteGate();
 // before-quit holds the quit at most this long (#485).
 const QUIT_BOUND_MS = 10_000;
+// A wedged store must not hold back closeDb and the Postgres shutdown.
+const ERROR_ROWS_QUIT_MS = 500;
 let shuttingDown = false;
 let retention: ReturnType<typeof startRetention> | null = null;
 // Undoes what the inbox-backed services registered, so they can start again on the other store.
@@ -829,7 +831,7 @@ app.on('before-quit', (e) => {
     await inboxStore?.close();
     inboxStore = null;
     await shutdownPerf();
-    await errorRows.flush();
+    await withinMs(errorRows.flush(), ERROR_ROWS_QUIT_MS);
     vacuumAfterQuit = await prepareVacuum(app.getPath('userData')).catch(() => false);
     await closeDb();
     stateClosed = true;

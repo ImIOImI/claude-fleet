@@ -125,21 +125,21 @@ describe('pendingSnapshotForWorkspace', () => {
 });
 
 describe('pairNewSession', () => {
-  it('pairs a genuinely new transcript and logs its miss', () => {
-    recordPendingAttach('ws-a', 'broker-1');
-    expect(pairNewSession('ws-a', false)).toMatchObject({ brokerSessionId: 'broker-1', logDrop: false });
-    expect(pairNewSession('ws-a', false)).toMatchObject({ brokerSessionId: null, logDrop: true });
+  it('writes no drop row when nothing is queued', () => {
+    expect(pairNewSession('ws-a')).toEqual({ brokerSessionId: null, queued: [], logDrop: false });
   });
 
-  it('still pairs a resumed transcript, so a session claude resumes into an existing file keeps its mapping', () => {
+  it('pairs a new transcript with a queued attach', () => {
     recordPendingAttach('ws-a', 'broker-1');
-    const r = pairNewSession('ws-a', true);
-    expect(r.brokerSessionId).toBe('broker-1');
+    const r = pairNewSession('ws-a');
+    expect(r).toMatchObject({ brokerSessionId: 'broker-1', logDrop: false });
     expect(r.queued).toEqual([{ brokerSessionId: 'broker-1', recordedAt: expect.any(Number) }]);
     expect(pendingSnapshotForWorkspace('ws-a')).toEqual([]);
   });
 
-  it('does not log the miss for a resumed transcript', () => {
-    expect(pairNewSession('ws-a', true)).toEqual({ brokerSessionId: null, queued: [], logDrop: false });
+  it('logs the drop when attaches are queued but none matches the workspace', () => {
+    recordPendingAttach('ws-b', 'broker-2');
+    expect(pairNewSession('ws-a')).toEqual({ brokerSessionId: null, queued: [], logDrop: true });
+    expect(pendingSnapshotForWorkspace('ws-b')).toHaveLength(1);
   });
 });

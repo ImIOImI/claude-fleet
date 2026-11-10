@@ -156,7 +156,7 @@ import {
   stateKysely,
 } from './db.js';
 import { foldPlanUsage, type PlanUsageFold } from './planUsage.js';
-import { logError, getLogPath, flushErrorLog } from './errorLog.js';
+import { logError, getLogPath, flushErrorLogSync } from './errorLog.js';
 import { broadcastObservabilitySummary, latestWins } from './observabilityBroadcast.js';
 import { broadcastInputWait } from './inputWaitBroadcast.js';
 import { makeTrailingRebroadcast } from './trailingBroadcast.js';
@@ -1149,8 +1149,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     // in pendingAttaches.ts; concurrent attaches fall back to the
     // workspace summary (v1 behavior) until the user re-mounts a tab
     // alone and we can disambiguate.
-    jsonlWatcher.on('new-session', ({ workspaceId, sessionId: claudeSessionId, resumed }) => {
-      const { brokerSessionId, queued, logDrop } = pairNewSession(workspaceId, resumed);
+    jsonlWatcher.on('new-session', ({ workspaceId, sessionId: claudeSessionId }) => {
+      const { brokerSessionId, queued, logDrop } = pairNewSession(workspaceId);
       if (!brokerSessionId) {
         if (!logDrop) return;
         logError({
@@ -2611,8 +2611,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // Open error.log in the OS default app — the MCP-unreachable toast's "Open
   // log" action (#159 follow-up). WSL can't reach a Windows shell.openPath, so
   // route through the same explorer.exe fallback the folder-open handlers use.
-  ipcMain.handle('app:openErrorLog', async () => {
-    await flushErrorLog();
+  ipcMain.handle('app:openErrorLog', () => {
+    flushErrorLogSync();
     return openHostPath(getLogPath());
   });
   // Current host MCP listener health — a window mounting mid-outage reads this

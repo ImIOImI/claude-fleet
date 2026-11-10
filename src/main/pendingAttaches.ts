@@ -87,22 +87,19 @@ export function pendingSnapshotForWorkspace(
 }
 
 /**
- * Pair a `new-session` with the oldest pending attach for its workspace.
- * Pairing ignores `resumed`; it only decides whether a miss is logged. A
- * transcript an earlier run already read is re-announced on every launch and
- * can't be the session a pending attach waits for, so its miss is noise.
+ * Pair a `new-session` with the oldest pending attach for its workspace. A
+ * miss is worth logging only when attaches are queued elsewhere: with an
+ * empty queue (production never fills it) every transcript sighted at launch
+ * would log one.
  */
-export function pairNewSession(
-  workspaceId: string,
-  resumed: boolean,
-): {
+export function pairNewSession(workspaceId: string): {
   brokerSessionId: string | null;
   queued: Array<{ brokerSessionId: string; recordedAt: number }>;
   logDrop: boolean;
 } {
   const queued = pendingSnapshotForWorkspace(workspaceId);
   const brokerSessionId = consumeForWorkspace(workspaceId);
-  return { brokerSessionId, queued, logDrop: brokerSessionId === null && !resumed };
+  return { brokerSessionId, queued, logDrop: brokerSessionId === null && pending.length > 0 };
 }
 
 /**
