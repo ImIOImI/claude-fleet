@@ -16,8 +16,8 @@ import {
 import { openHostPath } from './openHostPath.js';
 import { freshArgv } from './automations/freshArgv.js';
 import { captureSettingsEqual, effectiveCaptureSettings, normalizeCaptureSettings } from '../preload/captureSettings.js';
-import { dockerSocketDirs, validateExtraMounts } from './extraMountsHost.js';
-import { sanitizeMounts } from '../preload/extraMounts.js';
+import { dockerSocketDirs, mountsForWrite } from './extraMountsHost.js';
+import { sanitizeMounts, type ExtraMount } from '../preload/extraMounts.js';
 import { emitCaptureSettingsChanged } from './claims/captureSettingsEvents.js';
 import { isCaptureFork } from './claims/captureForks.js';
 import {
@@ -1082,9 +1082,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
 
   const { jsonlWatcher, peerStatusWatcher } = opts;
 
-  const mountsFor = async (kind: WorkspaceKind, id: string, raw: unknown) =>
+  const mountsFor = async (kind: WorkspaceKind, id: string, raw: unknown, existing?: ExtraMount[]) =>
     kind === 'container'
-      ? validateExtraMounts(sanitizeMounts(raw), {
+      ? mountsForWrite(sanitizeMounts(raw), existing, {
           ownId: id,
           userData: app.getPath('userData'),
           fleetRoot: await getFleetRoot(),
@@ -1575,7 +1575,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         workspaceRoot = await normalizeAndValidateWslRoot(incomingLauncher, workspaceRoot);
       }
       // Authoritative: an edit that removes all mounts writes undefined, clearing them.
-      const mounts = await mountsFor(spec.kind, spec.id, (spec as { mounts?: unknown }).mounts);
+      const mounts = await mountsFor(spec.kind, spec.id, (spec as { mounts?: unknown }).mounts, existing?.mounts);
       // Merge OVER the existing manifest so fields the renderer doesn't manage
       // survive an edit. The edit form sends every form field (those win) but
       // omits `control` (committee grants, edited in the Committee rail #118)

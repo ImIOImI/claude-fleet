@@ -137,6 +137,27 @@ export async function validateExtraMounts(
   return out;
 }
 
+function sameMounts(a: ExtraMount[] | undefined, b: ExtraMount[] | undefined): boolean {
+  if (!a?.length || !b?.length) return !a?.length && !b?.length;
+  return (
+    a.length === b.length &&
+    a.every(
+      (m, i) => m.hostPath === b[i]!.hostPath && m.containerPath === b[i]!.containerPath && m.readOnly === b[i]!.readOnly
+    )
+  );
+}
+
+// Unchanged mounts skip host checks (toDockerMounts re-checks at create), so an
+// unrelated edit doesn't fail while a mount's folder is temporarily missing.
+export async function mountsForWrite(
+  incoming: ExtraMount[] | undefined,
+  existing: ExtraMount[] | undefined,
+  ctx: MountCtx
+): Promise<ExtraMount[] | undefined> {
+  if (sameMounts(incoming, existing)) return existing?.length ? existing : undefined;
+  return validateExtraMounts(incoming, ctx);
+}
+
 export async function toDockerMounts(
   mounts: ExtraMount[] | undefined,
   ctx: MountCtx

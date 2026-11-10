@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, symlink, unlink, writeFile, realpath } from 'node:fs/pr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { dockerSocketDirs, toDockerMounts, validateExtraMounts, type MountCtx } from './extraMountsHost';
+import { dockerSocketDirs, mountsForWrite, toDockerMounts, validateExtraMounts, type MountCtx } from './extraMountsHost';
 
 const OWN = '01JAAAAAAAAAAAAAAAAAAAAAAA';
 const OTHER = '01JBBBBBBBBBBBBBBBBBBBBBBB';
@@ -287,5 +287,28 @@ describe('toDockerMounts', () => {
     await expect(toDockerMounts([{ hostPath: link, containerPath: '/mnt/x', readOnly: false }], ctx)).rejects.toThrow(
       `extra mount ${link} now points somewhere that can't be mounted`
     );
+  });
+});
+
+describe('mountsForWrite', () => {
+  it('keeps unchanged mounts without re-checking a temporarily missing folder', async () => {
+    const gone = join(root, 'unplugged');
+    const existing = [{ hostPath: gone, containerPath: '/mnt/u', readOnly: true }];
+    expect(await mountsForWrite([{ ...existing[0]! }], existing, ctx)).toEqual(existing);
+  });
+
+  it('validates when the mounts changed', async () => {
+    const gone = join(root, 'unplugged');
+    await expect(
+      mountsForWrite([{ hostPath: gone, containerPath: '/mnt/u', readOnly: false }], [{ hostPath: gone, containerPath: '/mnt/u', readOnly: true }], ctx)
+    ).rejects.toThrow("doesn't exist or isn't a folder");
+    expect(
+      await mountsForWrite([{ hostPath: data, containerPath: '/mnt//d', readOnly: false }], undefined, ctx)
+    ).toEqual([{ hostPath: data, containerPath: '/mnt/d', readOnly: false }]);
+  });
+
+  it('clears mounts when none come in', async () => {
+    expect(await mountsForWrite(undefined, [{ hostPath: data, containerPath: '/mnt/d', readOnly: false }], ctx)).toBeUndefined();
+    expect(await mountsForWrite(undefined, undefined, ctx)).toBeUndefined();
   });
 });
