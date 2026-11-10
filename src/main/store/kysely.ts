@@ -20,7 +20,7 @@ export interface SqliteKyselyOptions {
    *  query without this. When the cache is full it is cleared, not LRU'd. */
   statementCache?: number;
   /** Called after each statement with its synchronous execution time. */
-  onQuery?: (sqlText: string, ms: number) => void;
+  onQuery?: (sqlText: string, ms: number, reader: boolean) => void;
 }
 
 type QueryObserver = (sqlText: string, ms: number) => void;
@@ -38,10 +38,10 @@ export function sqliteKysely<DB>(raw: Database.Database, opts: SqliteKyselyOptio
   return new Kysely<DB>({ dialect: new SqliteDialect({ database: timedDatabase(base, opts.onQuery) }) });
 }
 
-function timedDatabase(base: SqliteDatabase, onQuery: QueryObserver | undefined): SqliteDatabase {
-  const note = (sqlText: string, t0: number): void => {
+function timedDatabase(base: SqliteDatabase, onQuery: SqliteKyselyOptions['onQuery']): SqliteDatabase {
+  const note = (sqlText: string, t0: number, reader: boolean): void => {
     const ms = performance.now() - t0;
-    onQuery?.(sqlText, ms);
+    onQuery?.(sqlText, ms, reader);
     queryObserver?.(sqlText, ms);
   };
   return {
@@ -51,11 +51,11 @@ function timedDatabase(base: SqliteDatabase, onQuery: QueryObserver | undefined)
         reader: stmt.reader,
         all(parameters: ReadonlyArray<unknown>) {
           const t0 = performance.now();
-          try { return stmt.all(parameters); } finally { note(sqlText, t0); }
+          try { return stmt.all(parameters); } finally { note(sqlText, t0, true); }
         },
         run(parameters: ReadonlyArray<unknown>) {
           const t0 = performance.now();
-          try { return stmt.run(parameters); } finally { note(sqlText, t0); }
+          try { return stmt.run(parameters); } finally { note(sqlText, t0, false); }
         },
         iterate: (parameters: ReadonlyArray<unknown>) => stmt.iterate(parameters),
       };

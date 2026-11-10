@@ -12,7 +12,7 @@ import { disarmSentinel, sentinelStatus, sentinelWindowFor, type SentinelStatus 
 import { hrTimeToMilliseconds } from '@opentelemetry/core';
 import type { ExportResult } from '@opentelemetry/core';
 import { ExportResultCode } from '@opentelemetry/core';
-import { context, metrics, trace, type Attributes } from '@opentelemetry/api';
+import { context, createContextKey, metrics, trace, type Attributes, type Context, type Span } from '@opentelemetry/api';
 import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import type { Counter, Histogram } from '@opentelemetry/api';
 import {
@@ -424,10 +424,20 @@ export function otlpSignalUrl(endpoint: string, signal: 'traces' | 'metrics'): s
   return `${endpoint.replace(/\/+$/, '')}/v1/${signal}`;
 }
 
+/** The spans enclosing the active context, innermost last: SQLite time rolls up to all of them. */
+const SPAN_CHAIN = createContextKey('claude_fleet.span_chain');
+
+function startChained(name: string, attrs?: Attributes): { span: Span; ctx: Context } {
+  const active = context.active();
+  const span = trace.getTracer(TRACER_NAME).startSpan(name, { attributes: attrs }, active);
+  const chain = [...((active.getValue(SPAN_CHAIN) as Span[] | undefined) ?? []), span];
+  return { span, ctx: trace.setSpan(active, span).setValue(SPAN_CHAIN, chain) };
+}
+
 export function perfSpan<T>(name: string, fn: () => T, attrs?: Attributes): T {
-  const span = trace.getTracer(TRACER_NAME).startSpan(name, { attributes: attrs });
+  const { span, ctx } = startChained(name, attrs);
   try {
-    return context.with(trace.setSpan(context.active(), span), fn);
+    return context.with(ctx, fn);
   } catch (err) {
     if (err instanceof Error) span.recordException(err);
     throw err;
@@ -441,9 +451,9 @@ export async function perfSpanAsync<T>(
   fn: () => Promise<T> | T,
   attrs?: Attributes
 ): Promise<T> {
-  const span = trace.getTracer(TRACER_NAME).startSpan(name, { attributes: attrs });
+  const { span, ctx } = startChained(name, attrs);
   try {
-    return await context.with(trace.setSpan(context.active(), span), fn);
+    return await context.with(ctx, fn);
   } catch (err) {
     if (err instanceof Error) span.recordException(err);
     throw err;
@@ -457,20 +467,23 @@ export function perfRecordSpan(name: string, startMs: number, endMs: number, att
   trace.getTracer(TRACER_NAME).startSpan(name, { attributes: attrs, startTime: startMs }).end(endMs);
 }
 
-const sqlSync = new WeakMap<object, { ms: number; n: number }>();
+const sqlSync = new WeakMap<Span, { ms: number; n: number }>();
 
-/** Add one statement's synchronous SQLite time to the active span as
- *  `sql_sync_ms` / `sql_queries`, so a span's own DB cost is separable from
- *  time spent queued on the connection mutex. */
+/** Add one statement's synchronous SQLite time to every enclosing perfSpan*
+ *  span as `sql_sync_ms` / `sql_queries`, so each span's own DB cost is
+ *  separable from time spent queued on the connection mutex. */
 export function perfNoteSqlSync(ms: number): void {
-  const span = trace.getActiveSpan();
-  if (!span?.isRecording()) return;
-  const acc = sqlSync.get(span) ?? { ms: 0, n: 0 };
-  acc.ms += ms;
-  acc.n++;
-  sqlSync.set(span, acc);
-  span.setAttribute('sql_sync_ms', Math.round(acc.ms * 10) / 10);
-  span.setAttribute('sql_queries', acc.n);
+  const chain = context.active().getValue(SPAN_CHAIN) as Span[] | undefined;
+  if (!chain) return;
+  for (const span of chain) {
+    if (!span.isRecording()) continue;
+    const acc = sqlSync.get(span) ?? { ms: 0, n: 0 };
+    acc.ms += ms;
+    acc.n++;
+    sqlSync.set(span, acc);
+    span.setAttribute('sql_sync_ms', Math.round(acc.ms * 10) / 10);
+    span.setAttribute('sql_queries', acc.n);
+  }
 }
 
 /** perfSpanAsync that hands `fn` a setter for the span's attributes (they land in its slow_op row's meta). */
@@ -479,9 +492,9 @@ export async function perfSpanAsyncAttrs<T>(
   fn: (set: (attrs: Attributes) => void) => Promise<T> | T,
   attrs?: Attributes
 ): Promise<T> {
-  const span = trace.getTracer(TRACER_NAME).startSpan(name, { attributes: attrs });
+  const { span, ctx } = startChained(name, attrs);
   try {
-    return await context.with(trace.setSpan(context.active(), span), () => fn((a) => span.setAttributes(a)));
+    return await context.with(ctx, () => fn((a) => span.setAttributes(a)));
   } catch (err) {
     if (err instanceof Error) span.recordException(err);
     throw err;

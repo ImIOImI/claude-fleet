@@ -8,7 +8,8 @@
 // constraint — `dedup_key` is the event's uuid when present, otherwise a
 // hash of the raw line so light events without uuids also dedupe cleanly.
 
-import { mkdirSync, statSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
+import { fileSize } from './store/sqliteFiles.js';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import { costFor } from './pricing.js';
@@ -61,7 +62,7 @@ export function _summaryRecomputesForTests(): number {
 
 const DEFAULT_TOP_TOOLS = 5;
 
-/** What openDb found and did, plus the first commit after it (perf telemetry). */
+/** What openDb found and did, plus the first write after it (perf telemetry). */
 export interface StateOpenStats {
   openedAt: number;
   openMs: number;
@@ -71,44 +72,98 @@ export interface StateOpenStats {
   walFrames: number;
   /** The leftover WAL went to the drain worker instead of the first commit. */
   handedOff: boolean;
-  firstCommitAt: number | null;
-  firstCommitMs: number | null;
+  /** The first statement that committed a write: a COMMIT or an autocommit write. */
+  firstWriteAt: number | null;
+  firstWriteMs: number | null;
 }
 
 let openStats: StateOpenStats | null = null;
 let openStatsReady: Promise<StateOpenStats> | null = null;
-let settleOpenStats: (() => void) | null = null;
 
-/** Resolves once the first commit after openDb has run (or the db closed first). */
+/** Resolves at the first write after openDb; never if the db closes first. */
 export function stateOpenStats(): Promise<StateOpenStats> | null {
   return openStatsReady;
 }
 
-/** How long a leftover WAL may wait for takeLeftoverWal before openDb's own fallback restores auto-checkpoint. */
-const LEFTOVER_CLAIM_MS = 5_000;
-let leftoverWal: { restoreTo: number; fallback: ReturnType<typeof setTimeout> } | null = null;
+/** The open db's stats so far; null once it closes. */
+export function stateOpenSnapshot(): StateOpenStats | null {
+  return openStats ? { ...openStats } : null;
+}
 
-/** The connection's auto-checkpoint was turned off at open because a leftover
- *  WAL would make the first commit checkpoint it on the main thread. The
- *  caller checkpoints it elsewhere, then calls the returned restore. Once per open. */
+/** journal_size_limit while a worker checkpoints for the main connection: the WAL file shrinks back to this after a rewind. */
+export const WAL_HOLD_SIZE_LIMIT = 16 * 1024 * 1024;
+
+interface CheckpointHold { conn: Database.Database; count: number; autocheckpoint: number; sizeLimit: number }
+let checkpointHold: CheckpointHold | null = null;
+
+function holdCheckpointsOn(conn: Database.Database): () => void {
+  if (checkpointHold?.conn !== conn) {
+    checkpointHold = {
+      conn, count: 0,
+      autocheckpoint: conn.pragma('wal_autocheckpoint', { simple: true }) as number,
+      sizeLimit: conn.pragma('journal_size_limit', { simple: true }) as number,
+    };
+    conn.pragma('wal_autocheckpoint = 0');
+    conn.pragma(`journal_size_limit = ${WAL_HOLD_SIZE_LIMIT}`);
+  }
+  const h = checkpointHold;
+  h.count++;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (checkpointHold !== h || --h.count > 0) return;
+    checkpointHold = null;
+    if (!h.conn.open) return;
+    h.conn.pragma(`wal_autocheckpoint = ${h.autocheckpoint}`);
+    h.conn.pragma(`journal_size_limit = ${h.sizeLimit}`);
+  };
+}
+
+/** Take checkpoints off the main connection while a worker does them: it runs
+ *  with `wal_autocheckpoint = 0` and WAL_HOLD_SIZE_LIMIT until every hold is
+ *  released, then gets back the values it had before the first hold. Null on
+ *  Postgres or when the store closes first. */
+export async function holdWalCheckpoints(): Promise<(() => Promise<void>) | null> {
+  const release = await withRawSqlite((d) => holdCheckpointsOn(d));
+  return release && queuedRelease(release);
+}
+
+/** Releases behind statements already queued on the store, like the hold. */
+function queuedRelease(release: () => void): () => Promise<void> {
+  return async () => {
+    if (!kdb) return release();
+    await withRawSqlite(release).catch(() => release());
+  };
+}
+
+/** How long a leftover WAL may wait for takeLeftoverWal before openDb releases its hold itself. */
+const LEFTOVER_CLAIM_MS = 5_000;
+let leftoverWal: { release: () => Promise<void>; fallback: ReturnType<typeof setTimeout> } | null = null;
+
+/** openDb found a leftover WAL that the first commit would checkpoint on the
+ *  main thread, and holds checkpoints off the connection. The caller drains
+ *  it from a worker, then calls the returned release. Once per open. */
 export function takeLeftoverWal(): (() => Promise<void>) | null {
   const l = leftoverWal;
   if (!l) return null;
   leftoverWal = null;
   clearTimeout(l.fallback);
-  const conn = db;
-  return async () => {
-    if (!conn || db !== conn) return;
-    await withRawSqlite((d) => { if (d === conn && d.open) d.pragma(`wal_autocheckpoint = ${l.restoreTo}`); }).catch(() => undefined);
-  };
+  return l.release;
 }
 
-function fileSize(p: string): number {
-  try {
-    return statSync(p).size;
-  } catch {
-    return 0;
-  }
+const stateWorkers = new Set<() => Promise<void>>();
+let closing = false;
+let stoppingWorkers: Promise<void> | null = null;
+
+/** Register a worker that holds its own state.db connection. closeDb stops
+ *  every one before closing main's, so main's close is the last one and
+ *  checkpoints and removes the WAL. Returns the unregister, or null when the
+ *  store is closed or closing (the caller ends the worker itself). */
+export function trackStateWorker(stop: () => Promise<void>): (() => void) | null {
+  if (!kdb || closing) return null;
+  stateWorkers.add(stop);
+  return () => { stateWorkers.delete(stop); };
 }
 
 export function openDb(userDataDir: string): Database.Database {
@@ -130,7 +185,7 @@ export function openDb(userDataDir: string): Database.Database {
   conn.pragma('foreign_keys = ON');
   // Recovery counts every valid frame of a leftover WAL as not checkpointed,
   // so the first commit past wal_autocheckpoint would copy all of them, with
-  // fsyncs, on the main thread. Defer it before anything (migrate included) writes.
+  // fsyncs, on the main thread. Hold before anything (migrate included) writes.
   const [ck] = conn.pragma('wal_checkpoint(NOOP)') as Array<{ log: number }>;
   const walFrames = Math.max(0, ck?.log ?? 0);
   const autockpt = conn.pragma('wal_autocheckpoint', { simple: true }) as number;
@@ -138,29 +193,31 @@ export function openDb(userDataDir: string): Database.Database {
   if (leftoverWal) clearTimeout(leftoverWal.fallback);
   leftoverWal = null;
   if (handedOff) {
-    conn.pragma('wal_autocheckpoint = 0');
     const fallback = setTimeout(() => { void takeLeftoverWal()?.(); }, LEFTOVER_CLAIM_MS);
     fallback.unref?.();
-    leftoverWal = { restoreTo: autockpt, fallback };
+    leftoverWal = { release: queuedRelease(holdCheckpointsOn(conn)), fallback };
   }
   migrate(conn);
   rehydratePendingClaudeIds(conn);
   const stats: StateOpenStats = {
-    openedAt, openMs: performance.now() - t0, walBytes, walFrames, handedOff, firstCommitAt: null, firstCommitMs: null,
+    openedAt, openMs: performance.now() - t0, walBytes, walFrames, handedOff, firstWriteAt: null, firstWriteMs: null,
   };
+  let settle: (s: StateOpenStats) => void = () => undefined;
   openStats = stats;
-  openStatsReady = new Promise<StateOpenStats>((resolve) => { settleOpenStats = () => { settleOpenStats = null; resolve(stats); }; });
+  openStatsReady = new Promise<StateOpenStats>((resolve) => { settle = resolve; });
   // Every state.db read and write goes through this one Kysely handle (its
   // mutex serializes them); the raw handle serves only migrate() and the
   // rehydrate above.
   dialect = 'sqlite';
   kdb = sqliteKysely<StateDb>(conn, {
     statementCache: STATE_STATEMENT_CACHE,
-    onQuery: (sqlText, ms) => {
-      if (sqlText !== 'commit' || openStats !== stats || stats.firstCommitMs !== null) return;
-      stats.firstCommitMs = ms;
-      stats.firstCommitAt = Date.now() - ms;
-      settleOpenStats?.();
+    onQuery: (sqlText, ms, reader) => {
+      if (openStats !== stats || stats.firstWriteMs !== null) return;
+      // A writer that leaves no transaction open has committed (COMMIT, or autocommit).
+      if (reader || conn.inTransaction || sqlText === 'rollback') return;
+      stats.firstWriteMs = ms;
+      stats.firstWriteAt = Date.now() - ms;
+      settle(stats);
     },
   });
   return conn;
@@ -196,13 +253,21 @@ export async function openDbPostgres(pool: pg.Pool, opts: PostgresKyselyOptions 
  *  connection mutex (an ingest chunk, a mapping write) before closing. */
 export async function closeDb(): Promise<void> {
   if (!kdb) return;
+  if (stateWorkers.size > 0) {
+    closing = true;
+    stoppingWorkers ??= (async () => {
+      for (const stop of [...stateWorkers]) await stop().catch(() => undefined);
+    })().finally(() => { stoppingWorkers = null; });
+    await stoppingWorkers;
+    if (!kdb) return;
+  }
+  closing = false;
   const raw = db;
   const k = kdb;
   db = null;
   kdb = null;
   if (leftoverWal) clearTimeout(leftoverWal.fallback);
   leftoverWal = null;
-  settleOpenStats?.();
   openStats = null;
   // Queues behind whatever holds the mutex; also forces driver init so
   // destroy() really closes the connection.
@@ -2272,19 +2337,6 @@ export async function listSessions(workspaceId?: string): Promise<SessionListRow
   });
 }
 
-/** Every session id, newest-active first (same ordering as `listSessions`).
- *  For callers that only need ids and would otherwise pay for the full
- *  `listSessions` rollup (cost rows + tags). */
-export async function listSessionIds(): Promise<string[]> {
-  const rows = await kyselyOrThrow()
-    .selectFrom('sessions')
-    .select('id')
-    .orderBy((eb) => eb.fn.coalesce('last_active_at', eb.lit(0)), 'desc')
-    .orderBy('id', 'asc')
-    .execute();
-  return rows.map((r) => r.id);
-}
-
 /** Each workspace's most recent session activity (the max `last_active_at`,
  *  null when it has none) — what `listSessions(ws)[0]?.lastActiveAt` gives,
  *  for many workspaces in one grouped query per 500 ids. */
@@ -2806,13 +2858,15 @@ export async function unembeddedTurnEvents(sessionId: string, modelId: string, l
 }
 
 /** Sessions with at least one user/assistant event lacking a `modelId` turn
- *  embedding, in `listSessionIds` order. Turns are embedded oldest-first per
+ *  embedding, in `listSessions` order. Turns are embedded oldest-first per
  *  session (`unembeddedTurnEvents` order), so a session has pending turns iff
  *  its newest user/assistant event has none: one index probe per session
  *  instead of an anti-join over all its turns. */
-export async function sessionsWithPendingTurns(modelId: string): Promise<string[]> {
-  const rows = await kyselyOrThrow()
-    .selectFrom((qb) => qb
+// Exported for the EXPLAIN QUERY PLAN test. The CTE is materialized so the
+// correlated max runs once per session though the outer query reads it twice.
+export function sessionsWithPendingTurnsQuery(q: Kysely<StateDb>, modelId: string) {
+  return q
+    .with((w) => w('x').materialized(), (qb) => qb
       .selectFrom('sessions as s')
       .select((eb) => [
         's.id as id',
@@ -2822,8 +2876,8 @@ export async function sessionsWithPendingTurns(modelId: string): Promise<string[
           .whereRef('e.session_id', '=', 's.id')
           .where('e.type', 'in', ['user', 'assistant'])
           .as('last_turn'),
-      ])
-      .as('x'))
+      ]))
+    .selectFrom('x')
     .select('x.id')
     .where('x.last_turn', 'is not', null)
     .where(({ not, exists, selectFrom }) => not(exists(
@@ -2834,8 +2888,11 @@ export async function sessionsWithPendingTurns(modelId: string): Promise<string[
         .where('em.model_id', '=', modelId),
     )))
     .orderBy((eb) => eb.fn.coalesce('x.last_active_at', eb.lit(0)), 'desc')
-    .orderBy('x.id', 'asc')
-    .execute();
+    .orderBy('x.id', 'asc');
+}
+
+export async function sessionsWithPendingTurns(modelId: string): Promise<string[]> {
+  const rows = await sessionsWithPendingTurnsQuery(kyselyOrThrow(), modelId).execute();
   return rows.map((r) => r.id);
 }
 

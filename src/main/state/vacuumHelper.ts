@@ -4,7 +4,8 @@
 // (Electron as node, like the MCP bridge), never in the app. A VACUUM that is
 // killed rolls back, leaving the DB unchanged.
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, statSync, statfsSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statfsSync, unlinkSync, writeFileSync } from 'node:fs';
+import { fileSize } from '../store/sqliteFiles.js';
 import { join } from 'node:path';
 import { maintenanceGet, maintenanceSet, stateDialect, withRawSqlite } from '../db.js';
 import { logError } from '../errorLog.js';
@@ -43,14 +44,6 @@ try {
   try { fs.unlinkSync(lockPath); } catch {}
 }
 `;
-
-const fileSize = (p: string): number => {
-  try {
-    return statSync(p).size;
-  } catch {
-    return 0;
-  }
-};
 
 /** Decide, while state.db is still open, whether this quit should run the
  *  conversion; records the attempt so it is tried at most once a day. */
