@@ -10,6 +10,7 @@ export default defineConfig({
       'src/host/hostAutomations.pg.test.ts',
       'src/host/hostAutomations.test.ts',
       'src/host/hostDb.test.ts',
+      'src/host/hostIndexer.pg.test.ts',
       'src/host/hostIngest.test.ts',
       'src/host/hostQuery.pg.test.ts',
       'src/host/hostState.pg.test.ts',

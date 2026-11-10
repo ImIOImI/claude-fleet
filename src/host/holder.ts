@@ -1,5 +1,5 @@
 // What only the lease holder runs: the stores, fenced by the lease epoch,
-// ingest, the automation runtime and the fleet-state MCP socket.
+// ingest, the transcript indexer, the automation runtime and the fleet-state MCP socket.
 import { closeDb, stateKysely } from '../main/db.js';
 import { openPgMcpReadSource } from '../main/store/pgReadSource.js';
 import { postgresKysely } from '../main/store/postgres.js';
@@ -13,8 +13,10 @@ import { HostIngest } from './hostIngest.js';
 import type { HostDb } from './hostSchema.js';
 import type { BrokerOps } from './brokerOps.js';
 import type { HostAutomationEntry } from './config.js';
+import { startHostEmbedder, type HostEmbedder, type HostEmbedderOptions } from './embedder.js';
 import type { EventHub } from './events.js';
 import { startHostAutomations, type HostAutomations } from './hostAutomations.js';
+import { startHostIndexer } from './hostIndexer.js';
 import { hostMcpArgs, startHostMcp, type HostMcp } from './hostMcp.js';
 import type { Logger } from './log.js';
 import { leaseFence, LeaseLostError } from './pgLease.js';
@@ -37,6 +39,11 @@ export interface HolderOptions {
   mcp: { socketPath: string; socketGroup: number | null };
   /** First retry delay after a failed MCP start; doubles up to MCP_RETRY_MAX_MS. */
   mcpRetryMs?: number;
+  /** D79: false = no sidecar, indexer or search_transcripts. */
+  search: { embedder: boolean };
+  embedDir: string;
+  /** Tests: a stand-in sidecar. */
+  embedder?: Pick<HostEmbedderOptions, 'launch' | 'env'>;
 }
 
 export interface Holder {
@@ -99,9 +106,14 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
   });
   // Fenced although only read: offsets are written inside ingest's chunk transaction.
   const offsetsRead = postgresKysely<HostDb>(stores.pool, { afterBeginWrite: fence });
+  const embedder: HostEmbedder | null = o.search.embedder ? startHostEmbedder({ dir: o.embedDir, log: o.log, ...o.embedder }) : null;
+  const indexer = embedder?.state() === 'ready'
+    ? startHostIndexer({ embed: embedder.embed, log: o.log, paused: () => embedder.state() !== 'ready' })
+    : null;
   const hint = trailingHint(() => o.events.publish('observability:summary', { workspaceId: o.workspaceId }), SUMMARY_HINT_MS);
   const ingest = new HostIngest({
-    projectsDir: o.projectsDir, workspaceId: o.workspaceId, offsetsRead, log: o.log, onIngested: () => hint.bump()
+    projectsDir: o.projectsDir, workspaceId: o.workspaceId, offsetsRead, log: o.log,
+    onIngested: (id) => { hint.bump(); indexer?.bump(id); }
   });
   let automations: HostAutomations | null = null;
   // Fenced: provisioning and each call's mcp_grants rewrite are writes on the state handle.
@@ -113,6 +125,8 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
     hint.stop();
     await mcp.stop();
     await automations?.stop();
+    await indexer?.stop();
+    embedder?.close();
     await ingest.stop();
     await offsetsRead.destroy();
     await stores.inbox.close();
@@ -121,6 +135,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
   };
   try {
     await ingest.start();
+    if (indexer) void indexer.backfill().catch((err: Error) => o.log.log('warn', 'index backfill failed', { error: err.message }));
     automations = await startHostAutomations({
       inbox: stores.inbox, workspace: o.workspace, ops: o.ops, mcpArgs: hostMcpArgs(o.mcp.socketPath), events: o.events, log: o.log
     });

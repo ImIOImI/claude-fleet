@@ -15,7 +15,7 @@ const BARE_ALLOWED = new Set(['ws', 'yaml', 'ulid', 'kysely', 'pg', 'pg-connecti
 const MAIN_ALLOWED = [/^main\/identity\/[^/]+\.ts$/, /^main\/broker\.ts$/, /^main\/claudeArgs\.ts$/, /^main\/vaultScopes\.ts$/, /^preload\/identityTypes\.ts$/,
   /^main\/store\/(kysely|postgres|pgMigrate|storeConfig|passwordProvider|pgSsl|pgScramOnly|sqliteFiles|pgStores|pgVectorSearch|stateSchema|inboxSchema|readSource|pgReadSource|pgQueryIsolation|scram)\.ts$/,
   /^main\/store\/migrations\/(statePg|inboxPg)\.ts$/,
-  /^main\/(db|embedderClient|asyncCache|contextWindow|pricing|usageAnchors|userPromptText|vectors|mcpCore|mcpLines|clipText)\.ts$/,
+  /^main\/(db|embedderClient|transcriptIndexCore|asyncCache|contextWindow|pricing|usageAnchors|userPromptText|vectors|mcpCore|mcpLines|clipText)\.ts$/,
   /^main\/claims\/searchHits\.ts$/,
   /^main\/mcpContainerBridge\.ts$/,
   /^main\/state\/(attachmentCodec|ingestParse|rawCodec|serialQueue|transcriptPaths)\.ts$/,

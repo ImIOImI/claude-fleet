@@ -31,6 +31,14 @@ describe('host embedder (D75)', () => {
     e.close();
   });
 
+  it('is no longer ready after close', async () => {
+    const e = startHostEmbedder({ dir: embedDir(), log: createLogger(() => undefined), launch: { bin: process.execPath, args: [FAKE] }, env: fakeEnv('ok') });
+    await e.embed(['abc']);
+    e.close();
+    expect(e.state()).toBe('closed');
+    await expect(e.embed(['abc'])).rejects.toThrow();
+  });
+
   it('gives the sidecar an empty environment by default (D80)', async () => {
     // Inherited, FAKE_MODE=old-protocol would make the child refuse.
     const saved = process.env.FAKE_MODE;

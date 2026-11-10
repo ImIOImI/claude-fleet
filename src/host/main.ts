@@ -62,6 +62,8 @@ export interface RunHostOptions {
   githubApiBase?: string;
   /** First retry delay after a failed MCP socket start (tests). */
   mcpRetryMs?: number;
+  /** Tests: a stand-in fleet-embedder. */
+  embedder?: { launch?: { bin: string; args: string[] }; env?: NodeJS.ProcessEnv };
 }
 
 export interface RunningHost {
@@ -276,7 +278,10 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
         workspace: () => ({ id, name: config.workspace.name }),
         automations: () => config.automations,
         mcp: { socketPath: env.mcpSocket, socketGroup: env.mcpSocketGroup },
-        mcpRetryMs: opts.mcpRetryMs
+        mcpRetryMs: opts.mcpRetryMs,
+        search: config.search,
+        embedDir: env.embedDir,
+        embedder: opts.embedder
       })
         .catch((err: Error) => {
           log.log('error', 'holder start failed; giving up the lease', { error: err.message });

@@ -2,10 +2,11 @@
 // singleton, so only one holder may have its stores open at a time.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { connect, createServer, type AddressInfo, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { sql } from 'kysely';
 import pg from 'pg';
 import * as db from '../main/db.js';
@@ -23,6 +24,7 @@ import { hostMcpArgs } from './hostMcp.js';
 import { FrameType } from '../main/broker.js';
 import WebSocket from 'ws';
 
+const FAKE = fileURLToPath(new URL('../main/__fixtures__/fake-embedder.mjs', import.meta.url));
 const ID = '01JC0000000000000000000000';
 const OTHER = '01JC0000000000000000000009';
 const verify: IdentityProvider['verify'] = async (t) => {
@@ -53,7 +55,7 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     t = null;
   });
 
-  async function start(opts: Partial<RunHostOptions> = {}, prepare?: (dir: string) => void, extraConfig = '') {
+  async function start(opts: Partial<RunHostOptions> = {}, prepare?: (dir: string) => void, extraConfig = '', extraEnv?: (dir: string) => NodeJS.ProcessEnv) {
     t ??= await testPgSchema();
     const dir = mkdtempSync(join(tmpdir(), 'fh-pg-'));
     prepare?.(dir);
@@ -65,7 +67,7 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     const logs: string[] = [];
     const proc = new EventEmitter();
     const host = await runHost({
-      env: { ...hostEnv(dir, port, cfgPath), FLEET_TEST_PG_URL: process.env.PG_TEST_URL },
+      env: { ...hostEnv(dir, port, cfgPath), FLEET_TEST_PG_URL: process.env.PG_TEST_URL, ...extraEnv?.(dir) },
       exit, proc, logSink: (l) => logs.push(l), authFactory: () => ({ id: 'github', verify }),
       brokerOps: fakeBroker([]).ops, leaseRenewMs: 200, leaseTtlMs: 1_000,
       ...opts
@@ -225,6 +227,77 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     const off = await t!.pool.query(`SELECT byte_offset FROM ${t!.schema}.host_ingest_offsets`);
     expect(off.rows.map((r) => Number(r.byte_offset))).toEqual([Buffer.byteLength(text)]);
   }, 30_000);
+
+  describe('search.embedder (D79)', () => {
+    const SID = '33333333-3333-4333-8333-333333333333';
+    const embedFiles = (dir: string) => {
+      mkdirSync(join(dir, 'embed', 'model', 'onnx'), { recursive: true });
+      writeFileSync(join(dir, 'embed', 'model', 'tokenizer.json'), '{}');
+      writeFileSync(join(dir, 'embed', 'model', 'onnx', 'model_quantized.onnx'), '');
+    };
+    /** Live processes started with this host's --model-dir. */
+    const sidecars = (dir: string): number => {
+      const needle = join(dir, 'embed', 'model');
+      let n = 0;
+      for (const pid of readdirSync('/proc').filter((p) => /^\d+$/.test(p))) {
+        try { if (readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').includes(needle)) n++; } catch { /* exited */ }
+      }
+      return n;
+    };
+    async function boot(extraConfig: string, fakeEnv: NodeJS.ProcessEnv = { FAKE_MODE: 'ok' }) {
+      const a = await start({ embedder: { launch: { bin: process.execPath, args: [FAKE] }, env: fakeEnv } },
+        embedFiles, extraConfig, (dir) => ({ FLEET_HOST_EMBED_DIR: join(dir, 'embed') }));
+      await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+      await storesOpen();
+      const proj = join(a.dir, 'projects', '-workspace');
+      mkdirSync(proj, { recursive: true });
+      writeFileSync(join(proj, `${SID}.jsonl`),
+        JSON.stringify({ type: 'user', uuid: 'u1', sessionId: SID, timestamp: '2026-11-05T00:00:00Z', message: { role: 'user', content: 'index me' } }) + '\n');
+      await vi.waitFor(async () => {
+        const r = await t!.pool.query(`SELECT COUNT(*)::int AS n FROM ${t!.schema}.events WHERE session_id = $1`, [SID]);
+        expect(r.rows[0].n).toBe(1);
+      }, { timeout: 10_000 });
+      return a;
+    }
+    const embedded = async () => (await t!.pool.query(`SELECT COUNT(*)::int AS n FROM ${t!.schema}.embeddings WHERE text <> ''`)).rows[0].n as number;
+
+    it('on: the holder indexes ingested turns through the sidecar', async () => {
+      const a = await boot('');
+      await vi.waitFor(async () => expect(await embedded()).toBe(1), { timeout: 10_000 });
+      expect(a.logs.join('\n')).not.toMatch(/embedder unavailable/);
+      expect(sidecars(a.dir)).toBe(1);
+      await a.host.shutdown(0);
+      await vi.waitFor(() => expect(sidecars(a.dir)).toBe(0), { timeout: 5_000 });
+    }, 30_000);
+
+    it('on: stop lets the in-flight batch land before the sidecar and the stores close', async () => {
+      const marker = join(mkdtempSync(join(tmpdir(), 'fh-emb-')), 'asked');
+      const a = await boot('', { FAKE_MODE: 'slow', FAKE_DELAY_MS: '700', FAKE_STATE: marker });
+      await vi.waitFor(() => expect(existsSync(marker)).toBe(true), { timeout: 10_000 });
+      await a.host.shutdown(0);
+      expect(await embedded()).toBe(1);
+      expect(a.logs.join('\n')).not.toMatch(/transcript index failed|index backfill failed/);
+      await vi.waitFor(() => expect(sidecars(a.dir)).toBe(0), { timeout: 5_000 });
+    }, 30_000);
+
+    it('on: a superseded holder’s index insert is fenced off and the process exits 1', async () => {
+      const marker = join(mkdtempSync(join(tmpdir(), 'fh-emb-')), 'asked');
+      const a = await boot('', { FAKE_MODE: 'slow', FAKE_DELAY_MS: '700', FAKE_STATE: marker });
+      await vi.waitFor(() => expect(existsSync(marker)).toBe(true), { timeout: 10_000 });
+      await t!.pool.query(`UPDATE ${t!.schema}.host_lease SET holder = 'intruder', epoch = epoch + 1, expires_at = clock_timestamp() + interval '1 minute'`);
+      await vi.waitFor(() => expect(a.exit).toHaveBeenCalledWith(1), { timeout: 10_000 });
+      expect(a.logs.join('\n')).toMatch(/write fenced off/);
+      expect(await embedded()).toBe(0);
+    }, 30_000);
+
+    it('off: no sidecar, no indexing, and nothing logged about an embedder', async () => {
+      const a = await boot('search: { embedder: false }\n');
+      await new Promise((r) => setTimeout(r, 2_000));
+      expect(await embedded()).toBe(0);
+      expect(sidecars(a.dir)).toBe(0);
+      expect(a.logs.join('\n')).not.toMatch(/embedder/);
+    }, 30_000);
+  });
 
   it('a store migration longer than TTL − renew runs unfenced: the holder keeps its lease', async () => {
     const slow = { track: 'slow_test', baselineVersion: 1, baseline: 'SELECT pg_sleep(2)', steps: [] };

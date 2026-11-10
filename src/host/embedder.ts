@@ -8,13 +8,13 @@ import type { Logger } from './log.js';
 
 export const EMBED_MODEL_FILES = ['tokenizer.json', 'onnx/model_quantized.onnx'] as const;
 
-export type HostEmbedderState = 'ready' | 'missing' | 'failed';
+export type HostEmbedderState = 'ready' | 'missing' | 'failed' | 'closed';
 
 export interface HostEmbedder {
   embed: EmbedFn;
   state(): HostEmbedderState;
   pid(): number | undefined;
-  /** Closes the sidecar's stdin; it exits on EOF. */
+  /** Closes the sidecar's stdin; it exits on EOF. State turns `closed`. */
   close(): void;
 }
 
@@ -55,5 +55,13 @@ export function startHostEmbedder(o: HostEmbedderOptions): HostEmbedder {
     },
     log: (message) => o.log.log('warn', 'embedder', { message })
   });
-  return { embed: (texts) => client.embed(texts), state: () => state, pid: () => client.pid, close: () => client.dispose() };
+  return {
+    embed: (texts) => client.embed(texts),
+    state: () => state,
+    pid: () => client.pid,
+    close: () => {
+      state = 'closed';
+      client.dispose();
+    }
+  };
 }
