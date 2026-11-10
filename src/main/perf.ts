@@ -35,6 +35,9 @@ export const SLOW_OP_MS = 25;
 export const SLOW_OP_MS_BY_NAME: Readonly<Record<string, number>> = {
   // Retention slices aim for ~35 ms; only overshoots are worth a row.
   'claude_fleet.retention.slice': 50,
+  // One row per launch each, whatever the duration: they carry the WAL state.
+  'claude_fleet.db.open': 0,
+  'claude_fleet.db.wal_drain': 0,
 };
 export const FLUSH_INTERVAL_MS = 5000;
 export const STALL_THRESHOLD_MS = 50;
@@ -447,6 +450,27 @@ export async function perfSpanAsync<T>(
   } finally {
     span.end();
   }
+}
+
+/** A span with explicit epoch-ms bounds, for work timed before perf was initialized. */
+export function perfRecordSpan(name: string, startMs: number, endMs: number, attrs?: Attributes): void {
+  trace.getTracer(TRACER_NAME).startSpan(name, { attributes: attrs, startTime: startMs }).end(endMs);
+}
+
+const sqlSync = new WeakMap<object, { ms: number; n: number }>();
+
+/** Add one statement's synchronous SQLite time to the active span as
+ *  `sql_sync_ms` / `sql_queries`, so a span's own DB cost is separable from
+ *  time spent queued on the connection mutex. */
+export function perfNoteSqlSync(ms: number): void {
+  const span = trace.getActiveSpan();
+  if (!span?.isRecording()) return;
+  const acc = sqlSync.get(span) ?? { ms: 0, n: 0 };
+  acc.ms += ms;
+  acc.n++;
+  sqlSync.set(span, acc);
+  span.setAttribute('sql_sync_ms', Math.round(acc.ms * 10) / 10);
+  span.setAttribute('sql_queries', acc.n);
 }
 
 /** perfSpanAsync that hands `fn` a setter for the span's attributes (they land in its slow_op row's meta). */

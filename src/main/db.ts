@@ -8,7 +8,7 @@
 // constraint — `dedup_key` is the event's uuid when present, otherwise a
 // hash of the raw line so light events without uuids also dedupe cleanly.
 
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import { costFor } from './pricing.js';
@@ -61,6 +61,56 @@ export function _summaryRecomputesForTests(): number {
 
 const DEFAULT_TOP_TOOLS = 5;
 
+/** What openDb found and did, plus the first commit after it (perf telemetry). */
+export interface StateOpenStats {
+  openedAt: number;
+  openMs: number;
+  /** `state.db-wal` size before the open: a WAL left by the previous run. */
+  walBytes: number;
+  /** Valid WAL frames after recovery, none of them counted as checkpointed. */
+  walFrames: number;
+  /** The leftover WAL went to the drain worker instead of the first commit. */
+  handedOff: boolean;
+  firstCommitAt: number | null;
+  firstCommitMs: number | null;
+}
+
+let openStats: StateOpenStats | null = null;
+let openStatsReady: Promise<StateOpenStats> | null = null;
+let settleOpenStats: (() => void) | null = null;
+
+/** Resolves once the first commit after openDb has run (or the db closed first). */
+export function stateOpenStats(): Promise<StateOpenStats> | null {
+  return openStatsReady;
+}
+
+/** How long a leftover WAL may wait for takeLeftoverWal before openDb's own fallback restores auto-checkpoint. */
+const LEFTOVER_CLAIM_MS = 5_000;
+let leftoverWal: { restoreTo: number; fallback: ReturnType<typeof setTimeout> } | null = null;
+
+/** The connection's auto-checkpoint was turned off at open because a leftover
+ *  WAL would make the first commit checkpoint it on the main thread. The
+ *  caller checkpoints it elsewhere, then calls the returned restore. Once per open. */
+export function takeLeftoverWal(): (() => Promise<void>) | null {
+  const l = leftoverWal;
+  if (!l) return null;
+  leftoverWal = null;
+  clearTimeout(l.fallback);
+  const conn = db;
+  return async () => {
+    if (!conn || db !== conn) return;
+    await withRawSqlite((d) => { if (d === conn && d.open) d.pragma(`wal_autocheckpoint = ${l.restoreTo}`); }).catch(() => undefined);
+  };
+}
+
+function fileSize(p: string): number {
+  try {
+    return statSync(p).size;
+  } catch {
+    return 0;
+  }
+}
+
 export function openDb(userDataDir: string): Database.Database {
   if (db) return db;
   if (kdb) throw new Error('state.db is open on Postgres: closeDb() first');
@@ -69,19 +119,51 @@ export function openDb(userDataDir: string): Database.Database {
   spendCache.clear();
   const path = join(userDataDir, 'state.db');
   mkdirSync(dirname(path), { recursive: true });
-  db = new Database(path);
-  db.pragma('journal_mode = WAL');
+  const openedAt = Date.now();
+  const t0 = performance.now();
+  const walBytes = fileSize(`${path}-wal`);
+  const conn = new Database(path);
+  db = conn;
+  conn.pragma('journal_mode = WAL');
   // A lock still being released (e.g. a just-killed VACUUM helper on Windows) waits, not throws.
-  db.pragma('busy_timeout = 5000');
-  db.pragma('foreign_keys = ON');
-  migrate(db);
-  rehydratePendingClaudeIds(db);
+  conn.pragma('busy_timeout = 5000');
+  conn.pragma('foreign_keys = ON');
+  // Recovery counts every valid frame of a leftover WAL as not checkpointed,
+  // so the first commit past wal_autocheckpoint would copy all of them, with
+  // fsyncs, on the main thread. Defer it before anything (migrate included) writes.
+  const [ck] = conn.pragma('wal_checkpoint(NOOP)') as Array<{ log: number }>;
+  const walFrames = Math.max(0, ck?.log ?? 0);
+  const autockpt = conn.pragma('wal_autocheckpoint', { simple: true }) as number;
+  const handedOff = autockpt > 0 && walFrames >= autockpt;
+  if (leftoverWal) clearTimeout(leftoverWal.fallback);
+  leftoverWal = null;
+  if (handedOff) {
+    conn.pragma('wal_autocheckpoint = 0');
+    const fallback = setTimeout(() => { void takeLeftoverWal()?.(); }, LEFTOVER_CLAIM_MS);
+    fallback.unref?.();
+    leftoverWal = { restoreTo: autockpt, fallback };
+  }
+  migrate(conn);
+  rehydratePendingClaudeIds(conn);
+  const stats: StateOpenStats = {
+    openedAt, openMs: performance.now() - t0, walBytes, walFrames, handedOff, firstCommitAt: null, firstCommitMs: null,
+  };
+  openStats = stats;
+  openStatsReady = new Promise<StateOpenStats>((resolve) => { settleOpenStats = () => { settleOpenStats = null; resolve(stats); }; });
   // Every state.db read and write goes through this one Kysely handle (its
   // mutex serializes them); the raw handle serves only migrate() and the
   // rehydrate above.
   dialect = 'sqlite';
-  kdb = sqliteKysely<StateDb>(db, { statementCache: STATE_STATEMENT_CACHE });
-  return db;
+  kdb = sqliteKysely<StateDb>(conn, {
+    statementCache: STATE_STATEMENT_CACHE,
+    onQuery: (sqlText, ms) => {
+      if (sqlText !== 'commit' || openStats !== stats || stats.firstCommitMs !== null) return;
+      stats.firstCommitMs = ms;
+      stats.firstCommitAt = Date.now() - ms;
+      settleOpenStats?.();
+    },
+  });
+  return conn;
 }
 
 /** The dialect of the open (or draining) handle; each opener sets it. */
@@ -118,6 +200,10 @@ export async function closeDb(): Promise<void> {
   const k = kdb;
   db = null;
   kdb = null;
+  if (leftoverWal) clearTimeout(leftoverWal.fallback);
+  leftoverWal = null;
+  settleOpenStats?.();
+  openStats = null;
   // Queues behind whatever holds the mutex; also forces driver init so
   // destroy() really closes the connection.
   await sql`select 1`.execute(k).catch(() => undefined);

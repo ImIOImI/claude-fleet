@@ -1,8 +1,10 @@
 import { app, BrowserWindow, dialog, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
 import { registerIpc, invalidateWorkspaceList, replayInputWait, stopRemoteBackend } from './ipc.js';
-import { openDb, openDbPostgres, closeDb, deleteEmbeddingsForOtherModels, listSessionIds, recordError, stateKysely, sessionCaptureSignals, isAutomationSession } from './db.js';
-import { initPerf, shutdownPerf, perfSpan, perfSpanAsync, getEffectivePerf, recordBootProfile } from './perf.js';
+import { openDb, openDbPostgres, closeDb, deleteEmbeddingsForOtherModels, listSessionIds, recordError, stateKysely, stateOpenStats, sessionCaptureSignals, isAutomationSession } from './db.js';
+import { initPerf, shutdownPerf, perfSpan, perfSpanAsync, perfRecordSpan, perfNoteSqlSync, getEffectivePerf, recordBootProfile } from './perf.js';
+import { setSqliteQueryObserver } from './store/kysely.js';
+import { drainLeftoverWal } from './state/walCheckpointer.js';
 import { startBootProfile } from './bootProfile.js';
 import { PerfStore } from './perfStore.js';
 import { resolvePerfConfig } from './perfConfig.js';
@@ -286,6 +288,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       extra: { sha: appBuildSha() ?? null }
     });
     const perfStore = new PerfStore(stateKysely());
+    setSqliteQueryObserver((_sql, ms) => perfNoteSqlSync(ms));
     initPerf(
       perfStore,
       resolvePerfConfig(
@@ -525,7 +528,18 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   const sqliteStoreId = storeIdentity({ kind: 'sqlite', path: join(userData, 'state.db') });
   const startSqliteHistory = async (): Promise<void> => {
     openDb(userData);
+    const drain = drainLeftoverWal(join(userData, 'state.db'));
     await startStateWrites();
+    // Both finish after openDb, possibly before initPerf: recorded with their own times.
+    void stateOpenStats()?.then((s) => perfRecordSpan('claude_fleet.db.open', s.openedAt, s.openedAt + s.openMs, {
+      wal_bytes: s.walBytes, wal_frames: s.walFrames, handed_off: s.handedOff,
+      first_commit_ms: s.firstCommitMs ?? -1, first_commit_after_ms: s.firstCommitAt === null ? -1 : s.firstCommitAt - s.openedAt,
+    }));
+    void drain.then((r) => {
+      if (r) perfRecordSpan('claude_fleet.db.wal_drain', r.startedAt, r.startedAt + r.ms, {
+        ok: r.ok, wal_log: r.log ?? -1, wal_ckpt: r.checkpointed ?? -1, wal_busy: r.busy ?? -1, ...(r.error ? { error: r.error } : {}),
+      });
+    });
     startStateRetention();
   };
   const startSqliteIngest = async (watcher: JsonlWatcher, embedFn: EmbedFn): Promise<void> => {

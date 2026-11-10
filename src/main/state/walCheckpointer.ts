@@ -1,9 +1,9 @@
-// Off-main-thread WAL checkpoints for state.db while retention runs (SPEC §7
-// *Retention*). SQLite's auto-checkpoint runs inside whichever commit crosses
+// Off-main-thread WAL checkpoints for state.db while retention runs, and for a
+// WAL left by the previous run (SPEC §7 *Retention*). SQLite's auto-checkpoint runs inside whichever commit crosses
 // the threshold, so on the main connection it lands, with its page copy and
 // fsync, inside a retention slice.
 import { Worker } from 'node:worker_threads';
-import { withRawSqlite } from '../db.js';
+import { takeLeftoverWal, withRawSqlite } from '../db.js';
 import { logError } from '../errorLog.js';
 import { betterSqlitePath } from '../queryWorker.js';
 
@@ -66,9 +66,78 @@ export interface WalCheckpointerOptions {
   checkpointTimeoutMs?: number;
 }
 
+/** A leftover-WAL drain gets longer than a retention checkpoint: it copies the whole previous run's WAL. */
+export const DRAIN_TIMEOUT_MS = 60_000;
+
+export interface WalDrainResult {
+  startedAt: number;
+  ms: number;
+  ok: boolean;
+  busy?: number;
+  log?: number;
+  checkpointed?: number;
+  error?: string;
+}
+
+let draining: Promise<unknown> | null = null;
+
+/** When openDb deferred a leftover WAL (takeLeftoverWal), checkpoint it from a
+ *  worker, then restore the main connection's auto-checkpoint, also on failure
+ *  or timeout. Null when there was nothing to drain. */
+export function drainLeftoverWal(dbPath: string, opts: { workerSource?: string; timeoutMs?: number } = {}): Promise<WalDrainResult | null> {
+  const restore = takeLeftoverWal();
+  if (!restore) return Promise.resolve(null);
+  const startedAt = Date.now();
+  const t0 = performance.now();
+  const p = checkpointOnce(dbPath, opts.workerSource ?? WORKER_SRC, opts.timeoutMs ?? DRAIN_TIMEOUT_MS)
+    .then(async (r) => {
+      await restore();
+      if (!r.ok) logError({ source: 'main', level: 'warn', type: 'wal-checkpointer', message: `leftover WAL drain failed: ${r.error ?? 'unknown'}` });
+      return { startedAt, ms: performance.now() - t0, ...r };
+    });
+  const tracked = p.finally(() => { if (draining === tracked) draining = null; });
+  draining = tracked;
+  return p;
+}
+
+type OnceResult = Omit<WalDrainResult, 'startedAt' | 'ms'>;
+
+function checkpointOnce(dbPath: string, source: string, timeoutMs: number): Promise<OnceResult> {
+  let worker: Worker;
+  try {
+    worker = new Worker(source, { eval: true, workerData: { bs3Path: betterSqlitePath(), dbPath } });
+  } catch (e) {
+    return Promise.resolve({ ok: false, error: `worker failed to start: ${String(e)}` });
+  }
+  worker.unref();
+  return new Promise<OnceResult>((resolve) => {
+    let done = false;
+    const finish = (r: OnceResult, terminate: boolean): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      worker.postMessage('close');
+      // A checkpoint still in native I/O can't be interrupted; never wait on it.
+      if (terminate) void worker.terminate();
+      resolve(r);
+    };
+    const timer = setTimeout(() => finish({ ok: false, error: `no result in ${timeoutMs} ms` }, true), timeoutMs);
+    timer.unref?.();
+    worker.on('message', (m: { ready?: boolean; ok?: boolean; busy?: number; log?: number; checkpointed?: number; error?: string }) => {
+      if (m.ready) { worker.postMessage(0); return; }
+      if (m.ok) finish({ ok: true, busy: m.busy, log: m.log, checkpointed: m.checkpointed }, false);
+      else finish({ ok: false, error: m.error ?? 'checkpoint failed' }, true);
+    });
+    worker.once('error', (e) => finish({ ok: false, error: `worker failed: ${String(e)}` }, true));
+    worker.once('exit', () => finish({ ok: false, error: 'worker exited' }, false));
+  });
+}
+
 /** Turn the main connection's auto-checkpoint off and checkpoint from a worker
  *  instead. Null (main connection untouched) when the worker or the pragmas fail. */
 export async function startWalCheckpointer(dbPath: string, opts: WalCheckpointerOptions = {}): Promise<WalCheckpointer | null> {
+  // A drain in flight holds auto-checkpoint at 0; reading it now would make this run restore 0.
+  await draining;
   let worker: Worker;
   try {
     worker = new Worker(opts.workerSource ?? WORKER_SRC, { eval: true, workerData: { bs3Path: betterSqlitePath(), dbPath } });

@@ -19,11 +19,49 @@ export interface SqliteKyselyOptions {
    *  better-sqlite3 does not cache, so a hot path pays a full SQL compile per
    *  query without this. When the cache is full it is cleared, not LRU'd. */
   statementCache?: number;
+  /** Called after each statement with its synchronous execution time. */
+  onQuery?: (sqlText: string, ms: number) => void;
+}
+
+type QueryObserver = (sqlText: string, ms: number) => void;
+let queryObserver: QueryObserver | null = null;
+
+/** Observe every statement's synchronous execution time on all SQLite Kysely
+ *  handles. It runs in the caller's async context, so it can attribute the
+ *  time to the caller's active span; mutex queueing is not included. */
+export function setSqliteQueryObserver(fn: QueryObserver | null): void {
+  queryObserver = fn;
 }
 
 export function sqliteKysely<DB>(raw: Database.Database, opts: SqliteKyselyOptions = {}): Kysely<DB> {
-  const database: SqliteDatabase = opts.statementCache ? cachingDatabase(raw, opts.statementCache) : raw;
-  return new Kysely<DB>({ dialect: new SqliteDialect({ database }) });
+  const base: SqliteDatabase = opts.statementCache ? cachingDatabase(raw, opts.statementCache) : raw;
+  return new Kysely<DB>({ dialect: new SqliteDialect({ database: timedDatabase(base, opts.onQuery) }) });
+}
+
+function timedDatabase(base: SqliteDatabase, onQuery: QueryObserver | undefined): SqliteDatabase {
+  const note = (sqlText: string, t0: number): void => {
+    const ms = performance.now() - t0;
+    onQuery?.(sqlText, ms);
+    queryObserver?.(sqlText, ms);
+  };
+  return {
+    prepare(sqlText: string) {
+      const stmt = base.prepare(sqlText);
+      return {
+        reader: stmt.reader,
+        all(parameters: ReadonlyArray<unknown>) {
+          const t0 = performance.now();
+          try { return stmt.all(parameters); } finally { note(sqlText, t0); }
+        },
+        run(parameters: ReadonlyArray<unknown>) {
+          const t0 = performance.now();
+          try { return stmt.run(parameters); } finally { note(sqlText, t0); }
+        },
+        iterate: (parameters: ReadonlyArray<unknown>) => stmt.iterate(parameters),
+      };
+    },
+    close: () => base.close(),
+  };
 }
 
 function cachingDatabase(raw: Database.Database, max: number): SqliteDatabase {
