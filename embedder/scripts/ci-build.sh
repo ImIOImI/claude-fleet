@@ -6,6 +6,7 @@ cd "$(dirname "$0")/.."
 mkdir -p bin
 case "$(uname -s)" in
   Linux)
+    triple=$(uname -m)-unknown-linux-gnu
     # glibc 2.28 floor via zig's versioned glibc stubs. libstdc++ is linked
     # statically by build.rs; the empty ORT_CXX_STDLIB stops ort-sys also
     # linking it dynamically.
@@ -14,13 +15,14 @@ case "$(uname -s)" in
     cargo fetch --locked
     ver=$(awk '/^name = "ort-sys"/ {getline; gsub(/[" ]/, "", $0); sub(/version=/, ""); print}' Cargo.lock)
     dist=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -path "*/ort-sys-$ver/dist.txt" | head -1)
-    read -r url sha < <(awk -F'\t' '$1 == "none" && $2 == "x86_64-unknown-linux-gnu" {print $3, $4}' "$dist")
+    read -r url sha < <(awk -F'\t' -v t="$triple" '$1 == "none" && $2 == t {print $3, $4}' "$dist") || true
+    [ -n "$url" ] || { echo "::error::no prebuilt onnxruntime for $triple"; exit 1; }
     mkdir -p target/ort && curl -fsSL "$url" -o target/ort/ort.tgz
     echo "$(echo "$sha" | tr A-F a-f)  target/ort/ort.tgz" | sha256sum -c -
     tar -xzf target/ort/ort.tgz -C target/ort
     FLEET_GLIBC_COMPAT=1 ORT_LIB_LOCATION=$PWD/target/ort/onnxruntime/lib ORT_CXX_STDLIB= \
-      cargo zigbuild --release --locked --no-default-features --target x86_64-unknown-linux-gnu.2.28
-    cp target/x86_64-unknown-linux-gnu/release/fleet-embedder bin/
+      cargo zigbuild --release --locked --no-default-features --target "$triple.2.28"
+    cp "target/$triple/release/fleet-embedder" bin/
     scripts/check-glibc.sh bin/fleet-embedder 2.28
     exe=bin/fleet-embedder ;;
   Darwin)
