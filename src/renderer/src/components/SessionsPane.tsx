@@ -36,9 +36,12 @@ import {
   loadedMoreRemote,
   mergeUnavailable,
   canResumeHere,
+  relativeTime,
+  searchTargets,
   type RemoteResumeInfo
 } from '../sessionsView';
 import { CloudGlyph } from './CloudGlyph';
+import { TranscriptSearch } from './TranscriptSearch';
 import { useBlinkSync } from '../blinkSync';
 import type { OpenTabRef } from '../busySessions';
 import { usePortalMenu } from './portalMenu';
@@ -74,6 +77,8 @@ interface Props {
   onResume: (item: SessionListItem) => void;
   /** Remote bookmark id → tier and liveness; gates Resume on remote rows. */
   remoteResume?: Record<string, RemoteResumeInfo>;
+  /** Remote bookmark id → name; names the hosts a transcript search reaches. */
+  remoteNames?: Record<string, string>;
   /** Display prefs (uiPrefs): hide the per-session USD badge. Default show. */
   showSessionCost?: boolean;
   /** Display prefs: trim the Recent list to the newest N (0 = unlimited). */
@@ -94,15 +99,6 @@ function displayTitle(s: SessionListItem): string {
   return s.userSetName || s.aiTitle || s.firstUserMessage || '(untitled session)';
 }
 
-function relativeTime(ms: number): string {
-  const delta = Date.now() - ms;
-  if (delta < 5_000) return 'just now';
-  if (delta < 60_000) return `${Math.round(delta / 1000)}s ago`;
-  if (delta < 3_600_000) return `${Math.round(delta / 60_000)}m ago`;
-  if (delta < 86_400_000) return `${Math.round(delta / 3_600_000)}h ago`;
-  return `${Math.round(delta / 86_400_000)}d ago`;
-}
-
 function formatUsd(usd: number): string {
   if (usd === 0) return '$0.00';
   if (usd < 0.01) return '<$0.01';
@@ -119,6 +115,7 @@ export function SessionsPane({
   currentSessionId = null,
   onResume,
   remoteResume,
+  remoteNames,
   showSessionCost = true,
   maxSessions = 0,
   maxSessionAgeDays = 0,
@@ -140,6 +137,8 @@ export function SessionsPane({
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [activeTags, setActiveTags] = useState<string[]>([]);
   const [tagMenu, setTagMenu] = useState(false);
+  const [transcripts, setTranscripts] = useState(false);
+  const [pickedId, setPickedId] = useState<string | null>(null);
 
   // Row ⋮ menu: resume / rename / delete — shared portaled-menu mechanics.
   const { menu: rowMenu, toggle: toggleRowMenu, close: closeRowMenu } = usePortalMenu();
@@ -288,6 +287,15 @@ export function SessionsPane({
     limitSessions(allSplit.headless, limitOpts, Date.now()).length;
   const allTags = tagCounts(scoped);
   const unavailableNote = unavailableText(remoteForScope(unavailable, scope, selectedWorkspaceId));
+  const names = remoteNames ?? {};
+  const searchTarget = searchTargets(scope, selectedWorkspaceId, names, (id) => !(id in names) && !(id in (remoteResume ?? {})));
+
+  // A picked hit filters the list to its session; scroll once the row renders.
+  useEffect(() => {
+    if (!pickedId) return;
+    document.querySelector<HTMLElement>(`li[data-sid="${CSS.escape(pickedId)}"]`)?.scrollIntoView({ block: 'nearest' });
+    setPickedId(null);
+  }, [pickedId]);
 
   // FLIP: rows animate to their new slot when they move between the Open and
   // Recent groups, or cross a recency bucket (see orderByRecencyBucket). Positions are captured after every render;
@@ -468,6 +476,14 @@ export function SessionsPane({
           aria-label="Search sessions"
         />
         <button
+          className={`btn-mini sessions-transcripts-toggle${transcripts ? ' on' : ''}`}
+          aria-pressed={transcripts}
+          title="Search inside transcripts"
+          onClick={() => setTranscripts((v) => !v)}
+        >
+          Transcripts
+        </button>
+        <button
           className="btn-mini"
           aria-label="Refresh sessions"
           title="Refresh sessions"
@@ -514,6 +530,15 @@ export function SessionsPane({
         )}
       </div>
       <div className="pane-body sessions-body">
+        {transcripts && (
+          <TranscriptSearch
+            target={searchTarget}
+            onPick={(hit) => {
+              setQuery(hit.sessionId);
+              setPickedId(hit.sessionId);
+            }}
+          />
+        )}
         {!loaded ? null : scope === 'workspace' && !selectedWorkspaceId ? (
           <div className="pane-placeholder subdued">
             <strong>No workspace selected</strong>

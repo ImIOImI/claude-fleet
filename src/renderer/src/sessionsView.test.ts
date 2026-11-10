@@ -17,7 +17,10 @@ import {
   refreshedRemote,
   reloadedRemote,
   remoteForScope,
+  remoteNamesMap,
   remoteResumeMap,
+  searchTargets,
+  searchUnavailableText,
   unavailableText,
   withRemote
 } from './sessionsView';
@@ -66,6 +69,12 @@ const sess = (over: Partial<{
 });
 
 describe('filterSessions', () => {
+  it('matches a session id exactly (a picked search hit)', () => {
+    const items = [sess({ id: '0f3c-a', firstUserMessage: 'x' }), sess({ id: 'b', firstUserMessage: 'y' })];
+    expect(filterSessions(items, items[0].id, [])).toEqual([items[0]]);
+    expect(filterSessions(items, `  ${items[0].id} `, [])).toEqual([items[0]]);
+    expect(filterSessions(items, '0F3C-A', [])).toEqual([]);
+  });
   it('empty query + no tags returns everything', () => {
     const items = [sess({ id: 'a' }), sess({ id: 'b' })];
     expect(filterSessions(items, '', [])).toEqual(items);
@@ -374,5 +383,34 @@ describe('remote resume gating', () => {
     expect(canResumeHere(row('D', 'D'), map)).toBe(false);
     expect(canResumeHere(row('Z', 'Z'), map)).toBe(false);
     expect(canResumeHere(row('A', 'A'), undefined)).toBe(false);
+  });
+});
+
+describe('searchTargets', () => {
+  const names = { R1: 'review-bot', R2: 'triage' };
+  it('names who receives the query', () => {
+    expect(searchTargets('all', null, names, () => false)).toEqual({ scope: 'all', label: 'Searching this desktop + review-bot, triage' });
+    expect(searchTargets('workspace', 'R1', names, () => false)).toEqual({ scope: 'R1', label: 'Searching review-bot' });
+    expect(searchTargets('workspace', 'L1', names, (id) => id === 'L1')).toEqual({ scope: 'L1', label: 'Searching this desktop' });
+    expect(searchTargets('workspace', null, names, () => false)).toBeNull();
+  });
+  it('with no remotes, All searches only this desktop', () => {
+    expect(searchTargets('all', 'R1', {}, () => true)).toEqual({ scope: 'all', label: 'Searching this desktop' });
+  });
+});
+
+describe('searchUnavailableText', () => {
+  it('says why a host left the search', () => {
+    expect(searchUnavailableText([])).toBeNull();
+    expect(searchUnavailableText([{ origin: 'R', name: 'review-bot', reason: 'disabled' }, { origin: 'S', name: 'triage', reason: 'model' }, { origin: 'T', name: 'x', reason: 'timeout' }]))
+      .toBe('3 sources unavailable: review-bot (search off), triage (different model), x');
+    expect(searchUnavailableText([{ origin: 'R', name: 'review-bot', reason: 'unreachable' }])).toBe('1 source unavailable: review-bot');
+  });
+});
+
+describe('remoteNamesMap', () => {
+  it('names remote bookmarks only', () => {
+    expect(remoteNamesMap([{ id: 'R1', kind: 'remote', name: 'review-bot' }, { id: 'L1', kind: 'local', name: 'mine' }, { id: 'D1', kind: 'docker', name: 'c' }]))
+      .toEqual({ R1: 'review-bot' });
   });
 });
