@@ -13,11 +13,14 @@ export interface MountCtx {
   fleetRoot: string;
 }
 
-const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
+const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/i;
 
 function inside(child: string, parent: string): boolean {
   const rel = relative(parent, child);
-  return rel === '' || (!!rel && !rel.startsWith('..') && !isAbsolute(rel));
+  if (rel === '') return true;
+  if (isAbsolute(rel)) return false;
+  // Only '..' or a '..'+sep prefix means outside; a name like '..x' is a real child.
+  return rel !== '..' && !rel.startsWith(`..${sep}`);
 }
 
 async function realDir(p: string): Promise<string | null> {
@@ -33,6 +36,44 @@ async function realOrSelf(p: string): Promise<string> {
   return realpath(p).catch(() => p);
 }
 
+type HostPathIssue = 'not-absolute' | 'not-found' | 'blocked';
+
+class HostPathProblem extends Error {
+  issue: HostPathIssue;
+  constructor(issue: HostPathIssue, message: string) {
+    super(message);
+    this.issue = issue;
+  }
+}
+
+function containmentMessage(real: string, ctx: MountCtx, userData: string, fleetRoot: string): string | null {
+  if (inside(real, userData) || inside(userData, real)) {
+    return "that folder holds the app's private data and can't be mounted.";
+  }
+  if (inside(real, fleetRoot)) {
+    const first = relative(fleetRoot, real).split(sep)[0] ?? '';
+    if (first.toLowerCase() === 'shared' || first.toLowerCase() === ctx.ownId.toLowerCase()) return null;
+    if (ULID_RE.test(first)) return "that folder is another workspace's private folder.";
+    return "that folder is inside the fleet folder; only the shared folder and this workspace's own folder can be mounted.";
+  }
+  if (inside(fleetRoot, real)) {
+    // Mounting an ancestor of the fleet root would expose every workspace's private folder.
+    return "that folder contains other workspaces' private folders.";
+  }
+  return null;
+}
+
+// Shared by validateExtraMounts (save-time) and toDockerMounts (create-time
+// revalidation, closing a symlink-retarget TOCTOU gap). Returns the resolved realpath.
+async function checkHostPath(hostPath: string, ctx: MountCtx, userData: string, fleetRoot: string): Promise<string> {
+  if (!isAbsolute(hostPath)) throw new HostPathProblem('not-absolute', `${hostPath} must be a full path.`);
+  const real = await realDir(hostPath);
+  if (!real) throw new HostPathProblem('not-found', `${hostPath} doesn't exist or isn't a folder.`);
+  const blocked = containmentMessage(real, ctx, userData, fleetRoot);
+  if (blocked) throw new HostPathProblem('blocked', blocked);
+  return real;
+}
+
 export async function validateExtraMounts(
   mounts: ExtraMount[] | undefined,
   ctx: MountCtx
@@ -43,19 +84,11 @@ export async function validateExtraMounts(
   const out: ExtraMount[] = [];
   for (const [i, m] of mounts.entries()) {
     const label = `Mount ${i + 1}`;
-    const real = await realDir(m.hostPath);
-    if (!real) throw new Error(`${label}: ${m.hostPath} doesn't exist or isn't a folder.`);
-    if (inside(real, userData) || inside(userData, real)) {
-      throw new Error(`${label}: that folder holds the app's private data and can't be mounted.`);
-    }
-    if (inside(real, fleetRoot)) {
-      const first = relative(fleetRoot, real).split(sep)[0] ?? '';
-      if (ULID_RE.test(first) && first !== ctx.ownId) {
-        throw new Error(`${label}: that folder is another workspace's private folder.`);
-      }
-    } else if (inside(fleetRoot, real)) {
-      // Mounting an ancestor of the fleet root would expose every workspace's private folder.
-      throw new Error(`${label}: that folder contains other workspaces' private folders.`);
+    try {
+      await checkHostPath(m.hostPath, ctx, userData, fleetRoot);
+    } catch (e) {
+      if (e instanceof HostPathProblem) throw new Error(`${label}: ${e.message}`);
+      throw e;
     }
     const containerPath = normalizeContainerPath(m.containerPath.trim() || defaultContainerPath(m.hostPath));
     const err = containerPathError(containerPath, m.hostPath);
@@ -71,12 +104,28 @@ export async function validateExtraMounts(
 }
 
 export async function toDockerMounts(
-  mounts: ExtraMount[] | undefined
+  mounts: ExtraMount[] | undefined,
+  ctx: MountCtx
 ): Promise<Array<{ Type: 'bind'; Source: string; Target: string; ReadOnly: boolean }>> {
   const out: Array<{ Type: 'bind'; Source: string; Target: string; ReadOnly: boolean }> = [];
-  for (const m of mounts ?? []) {
-    if (!(await realDir(m.hostPath))) throw new Error(`extra mount ${m.hostPath} no longer exists`);
-    out.push({ Type: 'bind', Source: m.hostPath, Target: m.containerPath, ReadOnly: m.readOnly });
+  if (!mounts?.length) return out;
+  const userData = await realOrSelf(ctx.userData);
+  const fleetRoot = await realOrSelf(ctx.fleetRoot);
+  for (const m of mounts) {
+    let real: string;
+    try {
+      real = await checkHostPath(m.hostPath, ctx, userData, fleetRoot);
+    } catch (e) {
+      if (e instanceof HostPathProblem) {
+        throw new Error(
+          e.issue === 'blocked'
+            ? `extra mount ${m.hostPath} now points somewhere that can't be mounted`
+            : `extra mount ${m.hostPath} no longer exists`
+        );
+      }
+      throw e;
+    }
+    out.push({ Type: 'bind', Source: real, Target: m.containerPath, ReadOnly: m.readOnly === true });
   }
   return out;
 }
