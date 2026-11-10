@@ -28,6 +28,7 @@ const h = vi.hoisted(() => ({ seen: new Set<string>() }));
 vi.mock('./db.js', () => ({
   loadTranscriptOffsets: async () => new Map(),
   saveTranscriptOffsets: async () => undefined,
+  deleteTranscriptOffsets: async () => undefined,
   ingestBatch: async (_workspaceId: string, sessionId: string, raws: string[]) =>
     raws.map((raw) => {
       const parsed = JSON.parse(raw) as { uuid?: string };
