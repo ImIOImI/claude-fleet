@@ -178,6 +178,16 @@ describe('RemoteClient', () => {
     await expect(c.rpc('history:sessions', [])).rejects.toMatchObject({ kind: 'unreachable', status: 503 });
   });
 
+  it('maps a 400 model mismatch to model; any other 400 stays protocol', async () => {
+    const { url } = await rawServer((req, res) => {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: req.url === '/rpc/history%3Asearch' ? 'model mismatch: host uses other@q8' : 'bad args' }));
+    });
+    const c = new RemoteClient({ url, token: async () => TOKEN });
+    await expect(c.rpc('history:search', [])).rejects.toMatchObject({ kind: 'model', status: 400 });
+    await expect(c.rpc('history:sessions', [])).rejects.toMatchObject({ kind: 'protocol', status: 400 });
+  });
+
   it('a 400 search unavailable is not disabled', async () => {
     const { url } = await rawServer((_req, res) => {
       res.writeHead(400, { 'Content-Type': 'application/json' });

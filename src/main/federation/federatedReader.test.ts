@@ -143,6 +143,17 @@ describe('FederatedReader', () => {
       expect(out.remote.map((x) => x.origin)).toEqual([B]);
     });
 
+    it('a host refusing the query model (400 model mismatch) is unavailable (model)', async () => {
+      const rpc = vi.fn(async (url: string) => {
+        if (url.endsWith(A)) throw new RemoteError('model', 'x', 400);
+        return { modelId: EMBED_MODEL_ID, hits: [hit(url.slice(7))] };
+      });
+      const r = createFederatedReader({ sources: () => [src(A, 'running'), src(B, 'running')], rpc });
+      const out = await r.search({ vector, limit: 5, origins: [A, B] });
+      expect(out.unavailable).toEqual([{ origin: A, name: 'n0', reason: 'model' }]);
+      expect(out.remote.map((x) => x.origin)).toEqual([B]);
+    });
+
     it('maps search-off, timeout and a malformed reply to their reasons', async () => {
       vi.useFakeTimers();
       const rpc = vi.fn((url: string): Promise<unknown> => {
