@@ -3,6 +3,7 @@
 // with an injected api. Kept dependency-free (no window.api, no React).
 
 import type { CaptureSettings } from '../../preload/captureSettings';
+import type { ExtraMount } from '../../preload/extraMounts';
 
 /** Saved workspace manifest — the subset needed to recreate a container. */
 export interface WorkspaceManifest {
@@ -16,8 +17,10 @@ export interface WorkspaceManifest {
   workspaceRoot: string;
   image?: string;
   authMode: string;
+  endpointId?: string;
   env: unknown;
   resources?: unknown;
+  mounts?: ExtraMount[];
   mirror: unknown;
   /** Knowledge capture settings (#483 §5a); absent = defaults. */
   knowledgeCapture?: CaptureSettings;
@@ -71,8 +74,10 @@ export async function applyContainerEdit(
     workspaceRoot: spec.workspaceRoot,
     image: spec.image,
     authMode: spec.authMode,
+    endpointId: spec.endpointId,
     env: spec.env,
     resources: spec.resources,
+    mounts: spec.mounts,
     mirror: spec.mirror
   });
 }

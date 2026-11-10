@@ -38,6 +38,7 @@ export function workspaceToFormInitial(
     plainEnv: w.env.plain,
     secretKeys: w.env.secretKeys,
     resources: w.resources,
+    mounts: w.mounts,
     mirror: w.mirror,
     accessibility: w.accessibility,
     inbox: w.inbox,

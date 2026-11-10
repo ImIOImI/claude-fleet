@@ -16,6 +16,8 @@ import {
 import { openHostPath } from './openHostPath.js';
 import { freshArgv } from './automations/freshArgv.js';
 import { captureSettingsEqual, effectiveCaptureSettings, normalizeCaptureSettings } from '../preload/captureSettings.js';
+import { validateExtraMounts } from './extraMountsHost.js';
+import { sanitizeMounts } from '../preload/extraMounts.js';
 import { emitCaptureSettingsChanged } from './claims/captureSettingsEvents.js';
 import { isCaptureFork } from './claims/captureForks.js';
 import {
@@ -502,6 +504,8 @@ interface WorkspaceCreatePayload {
   terminalRenderer?: unknown;
   env: WorkspaceEnv;
   resources?: WorkspaceResources;
+  /** kind 'container' only; validated server-side. */
+  mounts?: unknown;
   mirror?: WorkspaceMirror;
   /** Knowledge-capture settings (#483 §5a); normalized server-side, absent ⇒ defaults. */
   knowledgeCapture?: unknown;
@@ -1077,6 +1081,15 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   widthSweep.unref?.();
 
   const { jsonlWatcher, peerStatusWatcher } = opts;
+
+  const mountsFor = async (kind: WorkspaceKind, id: string, raw: unknown) =>
+    kind === 'container'
+      ? validateExtraMounts(sanitizeMounts(raw), {
+          ownId: id,
+          userData: app.getPath('userData'),
+          fleetRoot: await getFleetRoot()
+        })
+      : undefined;
   // No watcher means no state.db: release the gate so writes fail via onWriteError instead of queueing forever.
   releaseExposureWrites(jsonlWatcher && !MOCK_MODE ? exposureStore.sweep() : Promise.resolve());
 
@@ -1279,6 +1292,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       if (input.authMode === 'endpoint' && !input.endpointId) {
         throw new Error('Pick a model endpoint for this workspace.');
       }
+      const mounts = await mountsFor(kind, input.id, input.mounts);
 
       // Name-uniqueness is checked here (and not in the renderer alone) so
       // a stale list doesn't allow duplicates through.
@@ -1301,6 +1315,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         env: input.env,
         image: input.image,
         resources: input.resources,
+        mounts,
         authMode: input.authMode,
         endpointId: input.endpointId,
         kind,
@@ -1333,6 +1348,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
             : undefined,
         env: input.env,
         resources: input.resources,
+        mounts,
         mirror: input.mirror ?? FACTORY_MIRROR,
         knowledgeCapture,
         createdAt: ws.createdAt,
@@ -1557,6 +1573,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       if (spec.kind === 'local' && incomingLauncher?.mode === 'wsl' && workspaceRoot) {
         workspaceRoot = await normalizeAndValidateWslRoot(incomingLauncher, workspaceRoot);
       }
+      // Authoritative: an edit that removes all mounts writes undefined, clearing them.
+      const mounts = await mountsFor(spec.kind, spec.id, (spec as { mounts?: unknown }).mounts);
       // Merge OVER the existing manifest so fields the renderer doesn't manage
       // survive an edit. The edit form sends every form field (those win) but
       // omits `control` (committee grants, edited in the Committee rail #118)
@@ -1570,6 +1588,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         ...spec,
         workspaceRoot,
         launcher: incomingLauncher,
+        mounts,
         remote: undefined
       });
       // #483 §5a: a form edit of the capture settings is logged (actor 'user')

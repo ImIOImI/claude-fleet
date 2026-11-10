@@ -27,6 +27,7 @@ import { ModelCombobox, type EndpointEntry } from './ModelCombobox';
 import { createSecretRevealer, REVEAL_SECONDS, type RevealState } from './secretReveal';
 import type { InboxConfig } from '../../../preload';
 import type { CaptureSettings } from '../../../preload/captureSettings';
+import type { ExtraMount } from '../../../preload/extraMounts';
 import { captureSubmitValue, captureSummary, fromCaptureForm, toCaptureForm, type CaptureFormState } from '../captureSettingsView';
 import {
   claudeAuthFromInitial,
@@ -87,6 +88,8 @@ export interface WorkspaceFormSubmit {
    */
   secrets: Record<string, string>;
   resources?: WorkspaceResources;
+  /** Container kind only: extra host folders bound into the container. */
+  mounts?: ExtraMount[];
   /** Durable-transcript-mirror defaults for this workspace. */
   mirror: WorkspaceMirror;
   /**

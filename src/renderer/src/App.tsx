@@ -1193,6 +1193,7 @@ export function App() {
       endpointId: submit.endpointId,
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources,
+      mounts: submit.mounts,
       mirror: submit.mirror
     });
     focusWorkspaceWhenWarm(id);
@@ -1246,6 +1247,7 @@ export function App() {
       endpointId: submit.endpointId,
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources,
+      mounts: submit.mounts,
       mirror: submit.mirror,
       accessibility: submit.accessibility,
       createdAt: Date.now(),
@@ -1302,6 +1304,7 @@ export function App() {
       endpointId: submit.endpointId,
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources,
+      mounts: submit.mounts,
       mirror: submit.mirror
     });
     focusWorkspaceWhenWarm(id);
@@ -1335,6 +1338,7 @@ export function App() {
       endpointId: submit.endpointId,
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources,
+      mounts: submit.mounts,
       mirror: submit.mirror,
       accessibility: submit.accessibility,
       inbox: submit.inbox,
@@ -1387,6 +1391,7 @@ export function App() {
       secretKeys: [...secretKeys],
       secrets: {},
       resources: source.resources,
+      mounts: source.mounts,
       mirror: source.mirror
     };
     setCloneSource(clone);
