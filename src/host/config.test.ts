@@ -175,7 +175,8 @@ describe('readHostEnv', () => {
       projectsDir: join(homedir(), '.claude', 'projects'),
       brokerSocket: '/run/broker/broker.sock',
       mcpSocket: '/run/fleet/mcp.sock',
-      mcpSocketGroup: null
+      mcpSocketGroup: null,
+      embedDir: '/usr/local/lib/fleet-host/embed'
     });
   });
 
@@ -214,4 +215,22 @@ describe('automations', () => {
     expect(() => parseHostConfig({ ...base, automations: Array.from({ length: 101 }, (_, i) => ({ definition: def(`a${i}`) })) })).toThrow(/at most 100/);
     expect(parseHostConfig({ ...base, automations: Array.from({ length: 100 }, (_, i) => ({ definition: def(`a${i}`) })) }).automations).toHaveLength(100);
   });
+});
+
+describe('search', () => {
+  it('defaults to the embedder on and accepts false', () => {
+    expect(parseHostConfig(base).search).toEqual({ embedder: true });
+    expect(parseHostConfig({ ...base, search: {} }).search).toEqual({ embedder: true });
+    expect(parseHostConfig({ ...base, search: { embedder: false } }).search).toEqual({ embedder: false });
+  });
+  it('refuses unknown keys and non-booleans', () => {
+    expect(() => parseHostConfig({ ...base, search: { embeder: false } })).toThrow('search has unknown key embeder');
+    expect(() => parseHostConfig({ ...base, search: { embedder: 'no' } })).toThrow('search.embedder must be true or false');
+    expect(() => parseHostConfig({ ...base, search: true })).toThrow('search must be an object');
+  });
+});
+
+it('readHostEnv: embedDir defaults and is overridable', () => {
+  expect(readHostEnv({}).embedDir).toBe('/usr/local/lib/fleet-host/embed');
+  expect(readHostEnv({ FLEET_HOST_EMBED_DIR: '/x' }).embedDir).toBe('/x');
 });

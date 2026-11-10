@@ -48,6 +48,8 @@ export interface HostConfig {
   trustedProxyHops: number;
   /** The only source of this workspace's automations; the holder validates each definition. */
   automations: HostAutomationEntry[];
+  /** D79: fixed for the process lifetime (configReload.ts). */
+  search: { embedder: boolean };
 }
 
 export const MAX_HOST_AUTOMATIONS = 100;
@@ -73,6 +75,14 @@ function record(v: unknown, path: string): Record<string, unknown> {
 // Unknown keys are refused so a typo (e.g. `Id`) can't silently fall back to minting.
 function onlyKeys(o: Record<string, unknown>, path: string, allowed: readonly string[]): void {
   for (const k of Object.keys(o)) if (!allowed.includes(k)) throw new HostConfigError(`${path} has unknown key ${k}`);
+}
+
+function parseSearch(v: unknown): { embedder: boolean } {
+  if (v === undefined) return { embedder: true };
+  const s = record(v, 'search');
+  onlyKeys(s, 'search', ['embedder']);
+  if (s.embedder !== undefined && typeof s.embedder !== 'boolean') throw new HostConfigError('search.embedder must be true or false');
+  return { embedder: s.embedder !== false };
 }
 
 function parseAutomations(v: unknown): HostAutomationEntry[] {
@@ -183,7 +193,7 @@ function parseDb(v: unknown): PostgresStoreConfig {
 
 export function parseHostConfig(raw: unknown): HostConfig {
   const o = record(raw, 'host config');
-  onlyKeys(o, 'host config', ['workspace', 'identity', 'grants', 'machines', 'trustedProxyHops', 'github', 'db', 'automations']);
+  onlyKeys(o, 'host config', ['workspace', 'identity', 'grants', 'machines', 'trustedProxyHops', 'github', 'db', 'automations', 'search']);
   const id = o.identity === undefined ? {} : record(o.identity, 'identity');
   onlyKeys(id, 'identity', ['provider', 'org']);
   if (id.provider !== undefined && id.provider !== 'github') {
@@ -209,7 +219,8 @@ export function parseHostConfig(raw: unknown): HostConfig {
     identity: { provider: 'github', org: typeof id.org === 'string' ? id.org : null },
     grants,
     trustedProxyHops: hops,
-    automations: parseAutomations(o.automations)
+    automations: parseAutomations(o.automations),
+    search: parseSearch(o.search)
   };
 }
 
@@ -241,6 +252,8 @@ export interface HostEnv {
   mcpSocket: string;
   /** Shared-group mode (container split): prep's `mcp/` directory is checked, the socket is 0660 in this group. */
   mcpSocketGroup: number | null;
+  /** The sidecar and its weights (D65). */
+  embedDir: string;
 }
 
 export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
@@ -261,6 +274,7 @@ export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
     credSocket: env.FLEET_HOST_CRED_SOCKET || '/run/fleet-host/cred.sock',
     projectsDir: env.FLEET_HOST_PROJECTS || join(homedir(), '.claude', 'projects'),
     mcpSocket,
-    mcpSocketGroup: groupText ? Number(groupText) : null
+    mcpSocketGroup: groupText ? Number(groupText) : null,
+    embedDir: env.FLEET_HOST_EMBED_DIR || DEFAULT_EMBED_DIR
   };
 }
