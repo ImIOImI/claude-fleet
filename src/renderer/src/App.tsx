@@ -846,8 +846,9 @@ export function App() {
   // Poll fleet-wide rolling-window token spend for the plan-usage bar. Separate
   // (slower) cadence from the per-workspace summary refresh — it's a single
   // cheap aggregate and the rolling window moves on the order of minutes.
+  // Null uiPrefs (not loaded yet) must not poll: the bar may be off.
   useEffect(() => {
-    if (!apiReady || uiPrefs?.showBudgetBar === false) return;
+    if (!apiReady || !uiPrefs?.showBudgetBar) return;
     const poll = () =>
       window.api.usage.rollingSpend().then((r) => setBudgetSpentTokens(r.spentTokens));
     poll();
