@@ -1,10 +1,15 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { _setErrorLogForTests, logError, setErrorSink } from './errorLog.js';
+import { _setErrorLogForTests, batchedErrorSink, errorLogRetryDelay, FLUSH_MS, flushErrorLogSync, installMainProcessHandlers, logError, MAX_PENDING_BYTES, MAX_PENDING_LINES, MAX_RETRY_MS, setErrorSink } from './errorLog.js';
+import type { ErrorRow } from './db.js';
 
+// Without electron the default path throws and lines would carry into the next test's file.
+const scratch = mkdtempSync(join(tmpdir(), 'cf-errlog-scratch-'));
+beforeEach(() => _setErrorLogForTests(join(scratch, 'error.log')));
 afterEach(() => setErrorSink(null));
+afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 describe('error sink', () => {
   it('forwards each logError to the registered sink with an epoch-ms ts', () => {
@@ -46,14 +51,216 @@ describe('rotation', () => {
     writeFileSync(p, 'x'.repeat(700) + '\n');
     _setErrorLogForTests(p, 1000);
     logError({ source: 'main', type: 'first', message: 'm'.repeat(50) });
+    flushErrorLogSync();
     expect(existsSync(`${p}.1`)).toBe(false);
     logError({ source: 'main', type: 'second', message: 'm'.repeat(200) });
+    flushErrorLogSync();
     expect(readFileSync(`${p}.1`, 'utf8')).toContain('"type":"first"');
     const current = readFileSync(p, 'utf8');
     expect(current).toContain('"type":"second"');
     expect(current).not.toContain('"type":"first"');
     logError({ source: 'main', type: 'third', message: 'm'.repeat(900) });
+    flushErrorLogSync();
     expect(readFileSync(`${p}.1`, 'utf8')).toContain('"type":"second"');
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('renames before a batch write that would pass the cap', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cf-errlog-'));
+    const p = join(dir, 'error.log');
+    writeFileSync(p, 'x'.repeat(700) + '\n');
+    _setErrorLogForTests(p, 1000);
+    logError({ source: 'main', type: 'first', message: 'm'.repeat(150), level: 'info' });
+    logError({ source: 'main', type: 'second', message: 'm'.repeat(150), level: 'info' });
+    flushErrorLogSync();
+    expect(readFileSync(`${p}.1`, 'utf8')).toBe('x'.repeat(700) + '\n');
+    const current = readFileSync(p, 'utf8');
+    expect(current).toContain('"type":"first"');
+    expect(current).toContain('"type":"second"');
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('buffered writes', () => {
+  let dir: string;
+  const lines = (p: string) => (existsSync(p) ? readFileSync(p, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l).type) : []);
+  afterEach(() => {
+    _setErrorLogForTests(null);
+    vi.useRealTimers();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const setup = () => {
+    dir = mkdtempSync(join(tmpdir(), 'cf-errlog-'));
+    const p = join(dir, 'error.log');
+    _setErrorLogForTests(p);
+    return p;
+  };
+
+  const info = (type: string, message = 'm') => logError({ source: 'main', type, message, level: 'info' });
+
+  it('buffers info/warn lines and appends the burst together on the timer', async () => {
+    const p = setup();
+    for (let i = 0; i < 50; i++) info(`t${i}`);
+    logError({ source: 'main', type: 'w', message: 'm', level: 'warn' });
+    expect(lines(p)).toEqual([]);
+    await vi.waitFor(() => expect(lines(p)).toHaveLength(51), { timeout: 2000 });
+    expect(lines(p)[0]).toBe('t0');
+    expect(lines(p)[50]).toBe('w');
+  });
+
+  it('writes an error-level line, and everything buffered before it, in the logError call', () => {
+    const p = setup();
+    info('before');
+    logError({ source: 'main', type: 'boom', message: 'm', level: 'error' });
+    expect(lines(p)).toEqual(['before', 'boom']);
+    logError({ source: 'main', type: 'uncaught', message: 'm' });
+    expect(lines(p)).toEqual(['before', 'boom', 'uncaught']);
+  });
+
+  it('flushErrorLogSync writes buffered lines before returning', () => {
+    const p = setup();
+    info('crash');
+    flushErrorLogSync();
+    expect(lines(p)).toEqual(['crash']);
+    flushErrorLogSync();
+    expect(lines(p)).toEqual(['crash']);
+  });
+
+  it('keeps lines across a failed write and writes them, in order, once the path works', () => {
+    const p = setup();
+    mkdirSync(p);
+    info('a');
+    flushErrorLogSync();
+    info('b');
+    flushErrorLogSync();
+    rmSync(p, { recursive: true });
+    _setErrorLogForTests(p);
+    flushErrorLogSync();
+    expect(lines(p)).toEqual(['a', 'b']);
+  });
+
+  it('bounds the buffer by lines while writes fail and marks how many were dropped', () => {
+    const p = setup();
+    mkdirSync(p);
+    for (let i = 0; i < MAX_PENDING_LINES + 3; i++) info(`t${i}`);
+    flushErrorLogSync();
+    rmSync(p, { recursive: true });
+    flushErrorLogSync();
+    const written = readFileSync(p, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    expect(written).toHaveLength(MAX_PENDING_LINES + 1);
+    expect(written[0]).toMatchObject({ type: 'error-log-dropped', message: 'dropped 3 lines' });
+    expect(written[1].type).toBe('t3');
+  });
+
+  it('bounds the buffer by bytes', () => {
+    const p = setup();
+    mkdirSync(p);
+    const big = 'm'.repeat(8_000);
+    for (let i = 0; i < 300; i++) info(`t${i}`, big);
+    rmSync(p, { recursive: true });
+    flushErrorLogSync();
+    const size = readFileSync(p, 'utf8').length;
+    expect(size).toBeLessThanOrEqual(MAX_PENDING_BYTES + 200);
+    const written = readFileSync(p, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    expect(written[0].type).toBe('error-log-dropped');
+    expect(written.at(-1).type).toBe('t299');
+  });
+
+  it('backs off exponentially while writes fail and resets after a success', () => {
+    const p = setup();
+    mkdirSync(p);
+    info('a');
+    const delays: number[] = [];
+    for (let i = 0; i < 8; i++) {
+      flushErrorLogSync();
+      delays.push(errorLogRetryDelay());
+    }
+    expect(delays).toEqual([400, 800, 1600, 3200, 6400, MAX_RETRY_MS, MAX_RETRY_MS, MAX_RETRY_MS]);
+    rmSync(p, { recursive: true });
+    flushErrorLogSync();
+    expect(errorLogRetryDelay()).toBe(FLUSH_MS);
+    expect(lines(p)).toEqual(['a']);
+  });
+
+  it('retries a failed write on the backed-off timer', async () => {
+    vi.useFakeTimers();
+    const p = setup();
+    mkdirSync(p);
+    info('a');
+    vi.advanceTimersByTime(FLUSH_MS);
+    expect(errorLogRetryDelay()).toBe(2 * FLUSH_MS);
+    rmSync(p, { recursive: true });
+    vi.advanceTimersByTime(FLUSH_MS);
+    expect(lines(p)).toEqual([]);
+    vi.advanceTimersByTime(FLUSH_MS);
+    expect(lines(p)).toEqual(['a']);
+  });
+
+  it('flushes synchronously on process exit', () => {
+    const p = setup();
+    const exit = process.listeners('exit');
+    const uncaught = process.listeners('uncaughtException');
+    const rejection = process.listeners('unhandledRejection');
+    installMainProcessHandlers();
+    try {
+      info('last');
+      expect(lines(p)).toEqual([]);
+      for (const l of process.listeners('exit')) if (!exit.includes(l)) l(0);
+      expect(lines(p)).toEqual(['last']);
+    } finally {
+      for (const l of process.listeners('exit')) if (!exit.includes(l)) process.off('exit', l);
+      for (const l of process.listeners('uncaughtException')) if (!uncaught.includes(l)) process.off('uncaughtException', l);
+      for (const l of process.listeners('unhandledRejection')) if (!rejection.includes(l)) process.off('unhandledRejection', l);
+    }
+  });
+});
+
+describe('batchedErrorSink', () => {
+  const row = (type: string): ErrorRow => ({ ts: 1, source: 'main', type, message: 'm' });
+
+  it('hands a burst to one write call', async () => {
+    const calls: string[][] = [];
+    const b = batchedErrorSink(async (rows) => { calls.push(rows.map((r) => r.type)); }, 20);
+    b.sink(row('a'));
+    b.sink(row('b'));
+    b.sink(row('c'));
+    expect(calls).toEqual([]);
+    await vi.waitFor(() => expect(calls).toEqual([['a', 'b', 'c']]));
+  });
+
+  it('flush writes at once, runs writes one at a time, and survives a rejected write', async () => {
+    const calls: string[][] = [];
+    let active = 0;
+    const b = batchedErrorSink(async (rows) => {
+      active++;
+      expect(active).toBe(1);
+      await new Promise((r) => setTimeout(r, 5));
+      active--;
+      calls.push(rows.map((r) => r.type));
+      if (rows[0].type === 'bad') throw new Error('db wedged');
+    }, 10_000);
+    b.sink(row('bad'));
+    void b.flush();
+    b.sink(row('good'));
+    await b.flush();
+    expect(calls).toEqual([['bad'], ['good']]);
+  });
+
+  it('holds at most one write in flight and caps the rows waiting behind it', async () => {
+    const calls: string[][] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const b = batchedErrorSink(async (rows) => {
+      calls.push(rows.map((r) => r.type));
+      if (calls.length === 1) await gate;
+    }, 1, 3);
+    b.sink(row('first'));
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    for (let i = 0; i < 5; i++) b.sink(row(`r${i}`));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls).toHaveLength(1);
+    release();
+    await b.flush();
+    expect(calls).toEqual([['first'], ['error-rows-dropped', 'r2', 'r3', 'r4']]);
   });
 });

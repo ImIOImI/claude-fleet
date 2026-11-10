@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { rmSync } from 'node:fs';
 import { PostgresDriver, SqliteDriver } from 'kysely';
-import { closeDb, recordError, learnBrokerSessionMapping, recordBrokerSessionMapping, lookupBrokerSession, lookupVerifiedBrokerSession, lookupResumableBrokerSession, listSessions, summaryForBrokerSession, ingestLine, ERRORS_RETENTION, recordUsageEvent, __pendingClaudeIdsForTest } from './db.js';
+import { closeDb, stateKysely, recordError, recordErrors, isConnectionLevelError, learnBrokerSessionMapping, recordBrokerSessionMapping, lookupBrokerSession, lookupVerifiedBrokerSession, lookupResumableBrokerSession, listSessions, summaryForBrokerSession, ingestLine, ERRORS_RETENTION, recordUsageEvent, __pendingClaudeIdsForTest } from './db.js';
 import { openTestState, queryRows, isPg, type TestState } from './store/testStore.js';
 
 /** The driver whose commitTransaction the store's transactions end in. */
@@ -94,6 +94,80 @@ describe('recordError', () => {
       }
       const r = (await queryRows('SELECT COUNT(*) AS n, MIN(ts) AS lo, MAX(ts) AS hi FROM errors'))[0];
       expect(r).toEqual({ n: ERRORS_RETENTION, lo: 25, hi: ERRORS_RETENTION + 24 });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('recordErrors writes a batch in one call and prunes once to the newest ERRORS_RETENTION', async () => {
+    const dir = await freshDb();
+    try {
+      const rows = Array.from({ length: ERRORS_RETENTION + 7 }, (_, i) => ({ ts: i, source: 'main', type: 't', message: `m${i}` }));
+      await recordErrors(rows);
+      const r = (await queryRows('SELECT COUNT(*) AS n, MIN(ts) AS lo, MAX(ts) AS hi FROM errors'))[0];
+      expect(r).toEqual({ n: ERRORS_RETENTION, lo: 7, hi: ERRORS_RETENTION + 6 });
+      await recordErrors([]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('recordErrors falls back to one row at a time so one bad row keeps the rest', async () => {
+    const dir = await freshDb();
+    try {
+      const bad = { ts: 2, source: 'main', type: 'bad', message: 'm', workspaceId: 'ws-a', extra: {} as Record<string, unknown> };
+      Object.defineProperty(bad.extra, 'brokerSessionId', { get: () => { throw new Error('boom'); }, enumerable: false });
+      await recordErrors([
+        { ts: 1, source: 'main', type: 'a', message: 'm' },
+        bad,
+        { ts: 3, source: 'main', type: 'c', message: 'm' },
+      ]);
+      const types = (await queryRows('SELECT type FROM errors ORDER BY id')).map((r) => (r as { type: string }).type);
+      expect(types).toEqual(['a', 'c']);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('recordErrors does not retry row by row when the store is unreachable', async () => {
+    const dir = await freshDb();
+    try {
+      const outage = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:5432'), { code: 'ECONNREFUSED' });
+      const kysely = stateKysely();
+      const spy = vi.spyOn(kysely, 'transaction').mockImplementation(() => ({ execute: async () => { throw outage; } }) as never);
+      try {
+        const rows = Array.from({ length: 50 }, (_, i) => ({ ts: i, source: 'main', type: 't', message: `m${i}` }));
+        await expect(recordErrors(rows)).rejects.toBe(outage);
+        expect(spy).toHaveBeenCalledTimes(1);
+      } finally { spy.mockRestore(); }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('recordErrors stops after two retried rows fail the same way as the batch', async () => {
+    const dir = await freshDb();
+    try {
+      const err = new Error('relation "errors" does not exist');
+      const kysely = stateKysely();
+      const spy = vi.spyOn(kysely, 'transaction').mockImplementation(() => ({ execute: async () => { throw err; } }) as never);
+      try {
+        const rows = Array.from({ length: 50 }, (_, i) => ({ ts: i, source: 'main', type: 't', message: `m${i}` }));
+        await expect(recordErrors(rows)).rejects.toBe(err);
+        expect(spy).toHaveBeenCalledTimes(3);
+      } finally { spy.mockRestore(); }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('classifies connection-level errors', () => {
+    expect(isConnectionLevelError(Object.assign(new Error('x'), { code: '08006' }))).toBe(true);
+    expect(isConnectionLevelError(new Error('timeout exceeded when trying to connect'))).toBe(true);
+    expect(isConnectionLevelError(new Error('db not opened'))).toBe(true);
+    expect(isConnectionLevelError(Object.assign(new Error('invalid byte sequence for encoding "UTF8": 0x00'), { code: '22021' }))).toBe(false);
+  });
+
+  it('strips NUL and serializes BigInt and circular extra', async () => {
+    const dir = await freshDb();
+    try {
+      const extra: Record<string, unknown> = { n: 10n };
+      extra.self = extra;
+      await recordErrors([{ ts: 1, source: 'main', type: 't', message: 'a\0b', stack: 's\0', extra }]);
+      const row = (await queryRows('SELECT message, stack, extra FROM errors'))[0] as { message: string; stack: string; extra: string };
+      expect(row.message).toBe('ab');
+      expect(row.stack).toBe('s');
+      expect(JSON.parse(row.extra)).toEqual({ n: '10', self: '[Circular]' });
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 

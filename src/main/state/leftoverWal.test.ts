@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { sql } from 'kysely';
 import { readTransaction } from '../store/kysely.js';
 import {
-  _setWalCheckpointerOptionsForTests, acquireWalCheckpointer, closeDb, onStateOpenStats, openDb, recordError, stateKysely,
+  _setWalCheckpointerOptionsForTests, acquireWalCheckpointer, closeDb, onStateOpenStats, openDb, recordError, recordErrors, stateKysely,
   stateLeftoverDrain, withRawSqlite, type StateOpenStats,
 } from '../db.js';
 import { isPg } from '../store/testStore.js';
@@ -290,6 +290,13 @@ describe.skipIf(isPg)('first write is a change', () => {
     await stateKysely().insertInto('maintenance').values({ key: 'k2', value: 'v' }).execute();
     await new Promise((r) => setTimeout(r, 0));
     expect(counted!.firstWriteMs).not.toBeNull();
+  });
+
+  it("counts a recordErrors batch (the errors sink's write) as the first write", async () => {
+    await fresh();
+    const seen = firstWrite();
+    await recordErrors([{ ts: 1, source: 'main', type: 'a', message: 'm' }, { ts: 2, source: 'main', type: 'b', message: 'm' }]);
+    expect((await seen).firstWriteMs).not.toBeNull();
   });
 
   it('the fallback window starts at the open', async () => {

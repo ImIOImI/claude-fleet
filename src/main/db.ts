@@ -3034,39 +3034,111 @@ export interface ErrorRow {
 }
 
 export async function recordError(row: ErrorRow): Promise<void> {
-  // Insert + retention prune are one transaction: one commit per error row.
-  await kyselyOrThrow().transaction().execute(async (trx) => {
-    // Resolve the claude session UUID: prefer an explicit sessionId; else, if
-    // the caller only knew the broker id, best-effort resolve it via the
-    // mapping (NULL when unmapped — itself an honest signal).
-    let sessionId = row.sessionId ?? null;
-    if (!sessionId && row.workspaceId && typeof row.extra?.brokerSessionId === 'string') {
-      const m = await existingMappingQ(trx, row.workspaceId, row.extra.brokerSessionId as string);
-      sessionId = m?.claude_session_id ?? null;
+  await recordErrors([row]);
+}
+
+/** Postgres text refuses NUL. */
+const noNul = (v: string): string => v.replace(/\0/g, '');
+const noNulOrNull = (v: string | undefined | null): string | null => (v == null ? null : noNul(String(v)));
+
+/** JSON for `extra` that never throws: BigInt as a string, cycles cut. */
+export function safeExtraJson(extra: Record<string, unknown>): string {
+  const seen = new WeakSet<object>();
+  try {
+    return noNul(JSON.stringify(extra, (_k, v: unknown) => {
+      if (typeof v === 'bigint') return v.toString();
+      if (v && typeof v === 'object') {
+        if (seen.has(v)) return '[Circular]';
+        seen.add(v);
+      }
+      return v;
+    }));
+  } catch (e) {
+    return JSON.stringify({ unserializable: noNul(String(e)) });
+  }
+}
+
+async function insertErrorRow(trx: Transaction<StateDb>, row: ErrorRow): Promise<void> {
+  // Resolve the claude session UUID: prefer an explicit sessionId; else, if
+  // the caller only knew the broker id, best-effort resolve it via the
+  // mapping (NULL when unmapped — itself an honest signal).
+  let sessionId = row.sessionId ?? null;
+  if (!sessionId && row.workspaceId && typeof row.extra?.brokerSessionId === 'string') {
+    const m = await existingMappingQ(trx, row.workspaceId, row.extra.brokerSessionId as string);
+    sessionId = m?.claude_session_id ?? null;
+  }
+  await trx
+    .insertInto('errors')
+    .values({
+      ts: row.ts,
+      workspace_id: noNulOrNull(row.workspaceId),
+      session_id: noNulOrNull(sessionId),
+      source: noNul(String(row.source)),
+      level: noNul(String(row.level ?? 'error')),
+      type: noNul(String(row.type)),
+      message: noNul(String(row.message)),
+      stack: noNulOrNull(row.stack),
+      extra: row.extra ? safeExtraJson(row.extra) : null,
+    })
+    .execute();
+}
+
+// Keep the newest ERRORS_RETENTION rows: delete every id at or below the
+// (ERRORS_RETENTION+1)-th newest (a PK seek, not a table scan).
+async function pruneErrors(trx: Transaction<StateDb>): Promise<void> {
+  await trx
+    .deleteFrom('errors')
+    .where('id', '<=', (eb) =>
+      eb.selectFrom('errors').select('id').orderBy('id', 'desc').limit(1).offset(ERRORS_RETENTION)
+    )
+    .execute();
+}
+
+const CONNECTION_ERROR_CODES = new Set([
+  'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE',
+  '57P01', '57P02', '57P03', '53300',
+]);
+
+/** A store that can't be reached, as opposed to one row it refused. */
+export function isConnectionLevelError(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (typeof code === 'string' && (CONNECTION_ERROR_CODES.has(code) || code.startsWith('08'))) return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /timeout|timed out|connect|pool|terminat|not open/i.test(msg);
+}
+
+const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+/** Insert `rows` and prune once, in one transaction. If that fails with a
+ *  row-level error, each row gets its own transaction so one bad row can't drop
+ *  the rest. Stops at once on a connection-level error, and when the first two
+ *  retried rows both fail like the batch did (the cause isn't one row).
+ *  Rejects when no row was written. */
+export async function recordErrors(rows: ErrorRow[]): Promise<void> {
+  if (!rows.length) return;
+  const db = kyselyOrThrow();
+  try {
+    await db.transaction().execute(async (trx) => {
+      for (const row of rows) await insertErrorRow(trx, row);
+      await pruneErrors(trx);
+    });
+    return;
+  } catch (batchErr) {
+    if (rows.length === 1 || isConnectionLevelError(batchErr)) throw batchErr;
+    let written = 0;
+    let sameAsBatch = 0;
+    for (const [i, row] of rows.entries()) {
+      try {
+        await db.transaction().execute((trx) => insertErrorRow(trx, row));
+        written++;
+      } catch (err) {
+        if (isConnectionLevelError(err)) break;
+        if (i < 2 && errText(err) === errText(batchErr) && ++sameAsBatch === 2) break;
+      }
     }
-    await trx
-      .insertInto('errors')
-      .values({
-        ts: row.ts,
-        workspace_id: row.workspaceId ?? null,
-        session_id: sessionId,
-        source: row.source,
-        level: row.level ?? 'error',
-        type: row.type,
-        message: row.message,
-        stack: row.stack ?? null,
-        extra: row.extra ? JSON.stringify(row.extra) : null,
-      })
-      .execute();
-    // Keep the newest ERRORS_RETENTION rows: delete every id at or below the
-    // (ERRORS_RETENTION+1)-th newest (a PK seek, not a table scan).
-    await trx
-      .deleteFrom('errors')
-      .where('id', '<=', (eb) =>
-        eb.selectFrom('errors').select('id').orderBy('id', 'desc').limit(1).offset(ERRORS_RETENTION)
-      )
-      .execute();
-  });
+    if (!written) throw batchErr;
+    await db.transaction().execute(pruneErrors);
+  }
 }
 
 export interface EmbeddingHit {

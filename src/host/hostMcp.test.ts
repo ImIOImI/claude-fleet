@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { connect, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -126,7 +126,8 @@ describe('startHostMcp', () => {
     const p = await start(lines);
     const [over] = await rpc(p, [{ jsonrpc: '2.0', id: 1, method: 'ping', params: { pad: 'x'.repeat(1 << 20) } }]);
     expect(over.error.code).toBe(-32600);
-    expect(lines.some((l) => /"level":"debug".*"msg":"mcp-conn"/.test(l))).toBe(true);
+    // The oversize line never counts as an rpc line, so the close is logged.
+    await vi.waitFor(() => expect(lines.some((l) => /"level":"debug".*"msg":"mcp-conn-closed"/.test(l))).toBe(true));
   });
 
   it('removes the socket on close', async () => {

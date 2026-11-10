@@ -87,6 +87,22 @@ export function pendingSnapshotForWorkspace(
 }
 
 /**
+ * Pair a `new-session` with the oldest pending attach for its workspace. A
+ * miss is worth logging only when attaches are queued elsewhere: with an
+ * empty queue (production never fills it) every transcript sighted at launch
+ * would log one.
+ */
+export function pairNewSession(workspaceId: string): {
+  brokerSessionId: string | null;
+  queued: Array<{ brokerSessionId: string; recordedAt: number }>;
+  logDrop: boolean;
+} {
+  const queued = pendingSnapshotForWorkspace(workspaceId);
+  const brokerSessionId = consumeForWorkspace(workspaceId);
+  return { brokerSessionId, queued, logDrop: brokerSessionId === null && pending.length > 0 };
+}
+
+/**
  * Drop a specific pending entry without learning a mapping. Called
  * when the user closes a tab before claude ever wrote anything — the
  * entry would otherwise sit in the queue forever and incorrectly pair
