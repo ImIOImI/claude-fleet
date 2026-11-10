@@ -28,6 +28,9 @@ parentPort.postMessage({ ready: true });
 `;
 
 const READY_TIMEOUT_MS = 5000;
+/** Past this many frames, the next slice waits for a complete checkpoint so
+ *  its write rewinds the WAL (each rewind costs a header sync, so not every slice). */
+export const WAL_REWIND_FRAMES = 4000;
 /** A WAL past this many frames means checkpoints aren't keeping up. */
 export const WAL_MAX_FRAMES = 10_000;
 /** This many checkpoints in a row that leave frames behind (a reader pins them) also give up. */
@@ -43,6 +46,9 @@ export interface WalCheckpointer {
   request(): void;
   /** Resolves when no checkpoint is running. */
   idle(): Promise<void>;
+  /** Once the WAL has passed WAL_REWIND_FRAMES: run a checkpoint and wait for it,
+   *  so the caller's next write rewinds the WAL. Otherwise resolves at once. */
+  drain(): Promise<void>;
   last(): CheckpointResult | null;
   /** False once it has handed checkpoints back to the main connection. */
   active(): boolean;
@@ -160,6 +166,12 @@ export async function startWalCheckpointer(dbPath: string, opts: WalCheckpointer
       });
     },
     idle: () => pending ?? Promise.resolve(),
+    async drain() {
+      if (closed || (last?.log ?? 0) <= WAL_REWIND_FRAMES) return;
+      await (pending ?? Promise.resolve());
+      api.request();
+      await (pending ?? Promise.resolve());
+    },
     last: () => last,
     active: () => !closed,
     close: () => shutdown(null),

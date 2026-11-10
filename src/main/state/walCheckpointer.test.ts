@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
 import { closeDb, stateKysely, withRawSqlite } from '../db.js';
 import { isPg, openTestState } from '../store/testStore.js';
-import { startWalCheckpointer, WAL_MAX_FRAMES, WAL_MAX_INCOMPLETE } from './walCheckpointer.js';
+import { startWalCheckpointer, WAL_MAX_FRAMES, WAL_MAX_INCOMPLETE, WAL_REWIND_FRAMES } from './walCheckpointer.js';
 
 const pragma = (name: string) => withRawSqlite((d) => d.pragma(name, { simple: true }) as number);
 const settle = (ms = 50) => new Promise((r) => setTimeout(r, ms));
@@ -41,6 +41,40 @@ describe.skipIf(isPg)('startWalCheckpointer', () => {
     expect(c!.active()).toBe(false);
     expect(await pragma('wal_autocheckpoint')).toBe(700);
     expect(await pragma('journal_size_limit')).toBe(1234);
+  });
+
+  it(`drain() runs and waits for a checkpoint only once the WAL is past ${WAL_REWIND_FRAMES} frames`, async () => {
+    const s = await openTestState('cf-walckpt-');
+    // Each checkpoint reports one more frame than the last, starting from `start`.
+    const counting = (start: number) => fakeWorker(`globalThis.n = (globalThis.n ?? ${start}) + 1; parentPort.postMessage({ ok: true, busy: 0, log: globalThis.n, checkpointed: globalThis.n });`);
+    const small = await startWalCheckpointer(join(s.dir, 'state.db'), { requestEveryMs: 0, workerSource: counting(10) });
+    small!.request();
+    await small!.idle();
+    await small!.drain();
+    expect(small!.last()!.log).toBe(11); // under the threshold: no extra checkpoint
+    await small!.close();
+
+    const big = await startWalCheckpointer(join(s.dir, 'state.db'), { requestEveryMs: 0, workerSource: counting(WAL_REWIND_FRAMES) });
+    big!.request();
+    await big!.idle();
+    await big!.drain();
+    expect(big!.last()!.log).toBe(WAL_REWIND_FRAMES + 2);
+    await big!.close();
+  });
+
+  it('drain() rewinds a real WAL: the next write starts it from the beginning', async () => {
+    const s = await openTestState('cf-walckpt-');
+    const c = await startWalCheckpointer(join(s.dir, 'state.db'), { requestEveryMs: 0 });
+    await writeRows(Math.ceil(WAL_REWIND_FRAMES / 2) + 100); // two 4 KB pages per 8 KB row
+    c!.request();
+    await c!.idle();
+    expect(c!.last()!.log).toBeGreaterThan(WAL_REWIND_FRAMES);
+    await c!.drain();
+    await writeRows(1);
+    c!.request();
+    await c!.idle();
+    expect(c!.last()!.log).toBeLessThan(100);
+    await c!.close();
   });
 
   it('checkpoints on its own timer between requests', async () => {

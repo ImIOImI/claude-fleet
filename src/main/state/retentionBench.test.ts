@@ -114,23 +114,28 @@ describe.skipIf(!ON || isPg)('retention slice bench', () => {
     const durations: Record<string, number[]> = {};
     let step = '';
     // RETENTION_BENCH_TARGET_MS lowers the slice target to emulate a slower host
-// (9 ms here ≈ 35 ms on a machine 4× slower); builds without budgets ignore it.
+    // (9 ms here ≈ 35 ms on a machine 4× slower); builds without budgets ignore it.
     const targetMs = Number(process.env.RETENTION_BENCH_TARGET_MS ?? 35);
     // Builds with walCheckpointer checkpoint from a worker, as startRetention does.
     const ck = await import('./walCheckpointer.js' as string)
-      .then((m: { startWalCheckpointer(p: string): Promise<{ request(): void; close(): Promise<void> } | null> }) => m.startWalCheckpointer(join(state.dir, 'state.db')))
+      .then((m: { startWalCheckpointer(p: string): Promise<{ request(): void; drain(): Promise<void>; close(): Promise<void> } | null> }) => m.startWalCheckpointer(join(state.dir, 'state.db')))
       .catch(() => null);
-    const base = createThrottle({ minSleepMs: 0, idleRatio: 0, targetMs, afterSlice: () => ck?.request() } as Parameters<typeof createThrottle>[0]);
+    // A slice's main-thread time runs from after its wait for a checkpoint in flight.
+    let sliceStart = 0;
+    const base = createThrottle({
+      minSleepMs: 0, idleRatio: 0, targetMs, afterSlice: () => ck?.request(),
+      beforeSlice: async () => { await ck?.drain(); sliceStart = performance.now(); },
+    } as Parameters<typeof createThrottle>[0]);
     // Pass-through either slice signature, so the same file measures before and after.
     const baseSlice = base.slice as (...args: unknown[]) => Promise<unknown>;
     const t: Throttle = {
       stopped: () => base.stopped(),
       slice: (async (...args: unknown[]) => {
-        const t0 = performance.now();
+        sliceStart = performance.now(); // builds without beforeSlice
         try {
           return await baseSlice(...args);
         } finally {
-          (durations[step] ??= []).push(performance.now() - t0);
+          (durations[step] ??= []).push(performance.now() - sliceStart);
         }
       }) as Throttle['slice'],
     };

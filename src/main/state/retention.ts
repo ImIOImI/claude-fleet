@@ -266,6 +266,8 @@ export interface ThrottleOptions {
   targetMs?: number;
   /** Called after each slice, before its sleep. */
   afterSlice?: () => void;
+  /** Awaited before each slice starts, outside its timing. */
+  beforeSlice?: () => Promise<void>;
   /** Extra attributes for every slice span (e.g. WAL state). */
   sliceMeta?: () => Attributes;
   /** Sleep this many times a slice's duration after it (9 → ≤10% duty cycle). */
@@ -290,6 +292,7 @@ export function createThrottle(opts: ThrottleOptions = {}): Throttle & { stop():
   }));
   return {
     async slice(step, fn) {
+      await opts.beforeSlice?.();
       let t0 = now();
       try {
         return await perfSpanAsyncAttrs('claude_fleet.retention.slice', (set) => {
@@ -394,6 +397,9 @@ export function startRetention(deps: RetentionDeps): { stop(): Promise<void> } {
       }
       ck?.request();
     },
+    // SQLite rewinds the WAL only when a write starts after a complete
+    // checkpoint; once it has grown, the next slice waits for one.
+    beforeSlice: async () => { await deps.throttle?.beforeSlice?.(); await ck?.drain(); },
     sliceMeta: () => {
       const l = ck?.last();
       return { ...deps.throttle?.sliceMeta?.(), ...(l ? { wal_log: l.log, wal_ckpt: l.checkpointed, wal_busy: l.busy, wal_worker: ck!.active() } : {}) };
