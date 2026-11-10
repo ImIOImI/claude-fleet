@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   workspaceHostPath,
   workspacePathLabel,
-  formatResourceLimits
+  formatResourceLimits,
+  mountRowTitle
 } from './observabilityWorkspace';
 
 describe('workspaceHostPath', () => {
@@ -52,5 +53,14 @@ describe('formatResourceLimits', () => {
   it('returns null when no limits are set', () => {
     expect(formatResourceLimits(undefined)).toBeNull();
     expect(formatResourceLimits({})).toBeNull();
+  });
+});
+
+describe('mountRowTitle', () => {
+  it('names the host folder and read-only state', () => {
+    expect(mountRowTitle({ hostPath: 'D:\\datasets\\nfl', containerPath: '/mnt/nfl', readOnly: true })).toBe(
+      'Open D:\\datasets\\nfl (read-only)'
+    );
+    expect(mountRowTitle({ hostPath: '/srv/a', containerPath: '/mnt/a', readOnly: false })).toBe('Open /srv/a');
   });
 });

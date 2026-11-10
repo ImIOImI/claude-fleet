@@ -2,6 +2,8 @@
 // React component so they can be unit-tested without pulling in the renderer
 // (App.tsx, window globals, etc.).
 
+import type { ExtraMount } from '../../preload/extraMounts';
+
 /** Minimal shape the Workspace block reads — a subset of WorkspaceSummary. */
 export interface WorkspacePathInfo {
   workspaceRoot: string;
@@ -44,3 +46,5 @@ export function formatResourceLimits(
   if (resources.memoryMb != null) parts.push(`${resources.memoryMb} MB`);
   return parts.length > 0 ? parts.join(' · ') : null;
 }
+
+export const mountRowTitle = (m: ExtraMount): string => `Open ${m.hostPath}${m.readOnly ? ' (read-only)' : ''}`;

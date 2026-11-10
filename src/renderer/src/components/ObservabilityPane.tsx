@@ -5,7 +5,8 @@ import { PortsSection } from './PortsSection';
 import {
   workspaceHostPath,
   workspacePathLabel,
-  formatResourceLimits
+  formatResourceLimits,
+  mountRowTitle
 } from '../observabilityWorkspace';
 
 interface Props {
@@ -526,6 +527,23 @@ function WorkspaceBlock({
             </span>
           </button>
         )}
+        {workspace.kind === 'container' &&
+          workspace.mounts?.map((m) => (
+            <button
+              key={m.containerPath}
+              type="button"
+              className="obs-ws-row obs-ws-action"
+              onClick={() => openPath(m.hostPath)}
+              title={mountRowTitle(m)}
+            >
+              <span className="obs-ws-key">mount</span>
+              <span className="obs-ws-val mono">{m.containerPath}</span>
+              <span className="obs-ws-icon" aria-hidden="true">
+                {m.readOnly && <span className="obs-ws-ro">ro</span>}
+                <FolderIcon />
+              </span>
+            </button>
+          ))}
         {workspace.image && (
           <div className="obs-ws-row">
             <span className="obs-ws-key">image</span>
