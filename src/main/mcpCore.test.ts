@@ -1,11 +1,11 @@
 // The core alone: no perf tools, an exposed-tool filter, and a pluggable log sink.
-import { afterEach, describe, expect, it } from 'vitest';
-import { PassThrough } from 'node:stream';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
 import type { Socket } from 'node:net';
 import type { OwnedReadSource } from './store/readSource.js';
 import {
   callTool, currentReadSource, handleMcpRequestForTests, initReadSource, releaseReadSource, serveMcpConnection, SERVER_INSTRUCTIONS, setExposedTools,
-  setMcpLogSink, STANDING_RULE, TOOLS, type McpLogEntry
+  setMcpLogSink, setReadScopeResolver, MCP_CONN_LOG_AFTER_MS, STANDING_RULE, TOOLS, type McpLogEntry
 } from './mcpCore.js';
 
 afterEach(() => {
@@ -26,14 +26,57 @@ describe('mcpCore', () => {
     await expect(callTool({ name: 'query', arguments: { sql: 'select 1' } }, 'W1')).rejects.toThrow('Unknown tool: query');
   });
 
-  it('sends connection rows to the log sink', () => {
-    const rows: McpLogEntry[] = [];
-    setMcpLogSink((e) => rows.push(e));
-    const sock = new PassThrough() as unknown as Socket;
-    serveMcpConnection(sock, 'W1');
-    sock.emit('close');
-    expect(rows.map((r) => r.type)).toEqual(['mcp-conn', 'mcp-conn-closed']);
-    expect(rows[0].workspaceId).toBe('W1');
+  describe('connection rows', () => {
+    afterEach(() => vi.useRealTimers());
+    const rpcLine = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }) + '\n';
+    const open = (rows: McpLogEntry[]) => {
+      setMcpLogSink((e) => rows.push(e));
+      // Not a PassThrough: it would echo each reply back in as a request.
+      const sock = Object.assign(new EventEmitter(), { setEncoding: () => undefined, write: () => true, destroy: () => undefined }) as unknown as Socket;
+      serveMcpConnection(sock, 'W1');
+      return sock;
+    };
+
+    it('writes nothing for a short connection that answered every request', async () => {
+      const rows: McpLogEntry[] = [];
+      const sock = open(rows);
+      sock.emit('data', rpcLine);
+      await new Promise((r) => setTimeout(r, 10));
+      sock.emit('close');
+      expect(rows).toEqual([]);
+    });
+
+    it('logs the close of a connection that carried no rpc lines', () => {
+      const rows: McpLogEntry[] = [];
+      const sock = open(rows);
+      sock.emit('close');
+      expect(rows.map((r) => [r.type, r.level, r.workspaceId])).toEqual([['mcp-conn-closed', 'info', 'W1']]);
+    });
+
+    it('logs a close with requests still in flight at warn', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      initReadSource(null);
+      setReadScopeResolver(async (id) => { await gate; return [id]; });
+      const rows: McpLogEntry[] = [];
+      const sock = open(rows);
+      sock.emit('data', JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_sessions', arguments: {} } }) + '\n');
+      await new Promise((r) => setTimeout(r, 10));
+      sock.emit('close');
+      release();
+      setReadScopeResolver(async (id) => [id]);
+      expect(rows.find((r) => r.type === 'mcp-conn-closed')).toMatchObject({ level: 'warn', extra: { inFlight: 1, rpcCount: 1 } });
+    });
+
+    it('logs the accept and close of a long-lived connection', () => {
+      vi.useFakeTimers();
+      const rows: McpLogEntry[] = [];
+      const sock = open(rows);
+      sock.emit('data', rpcLine);
+      vi.advanceTimersByTime(MCP_CONN_LOG_AFTER_MS);
+      sock.emit('close');
+      expect(rows.map((r) => r.type)).toEqual(['mcp-conn', 'mcp-conn-closed']);
+    });
   });
 
   it('advertises instructions only for tools it serves', () => {

@@ -4,6 +4,7 @@ import {
   recordPendingAttach,
   removePendingAttach,
   pendingSnapshotForWorkspace,
+  pairNewSession,
   _resetForTests,
 } from './pendingAttaches.js';
 
@@ -120,5 +121,25 @@ describe('pendingSnapshotForWorkspace', () => {
 
   it('returns [] when nothing is pending', () => {
     expect(pendingSnapshotForWorkspace('ws-a')).toEqual([]);
+  });
+});
+
+describe('pairNewSession', () => {
+  it('writes no drop row when nothing is queued', () => {
+    expect(pairNewSession('ws-a')).toEqual({ brokerSessionId: null, queued: [], logDrop: false });
+  });
+
+  it('pairs a new transcript with a queued attach', () => {
+    recordPendingAttach('ws-a', 'broker-1');
+    const r = pairNewSession('ws-a');
+    expect(r).toMatchObject({ brokerSessionId: 'broker-1', logDrop: false });
+    expect(r.queued).toEqual([{ brokerSessionId: 'broker-1', recordedAt: expect.any(Number) }]);
+    expect(pendingSnapshotForWorkspace('ws-a')).toEqual([]);
+  });
+
+  it('logs the drop when attaches are queued but none matches the workspace', () => {
+    recordPendingAttach('ws-b', 'broker-2');
+    expect(pairNewSession('ws-a')).toEqual({ brokerSessionId: null, queued: [], logDrop: true });
+    expect(pendingSnapshotForWorkspace('ws-b')).toHaveLength(1);
   });
 });

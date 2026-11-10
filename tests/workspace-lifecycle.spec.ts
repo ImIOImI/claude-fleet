@@ -239,6 +239,7 @@ test('Pause gates the broker attach; Resume re-attaches (#18)', async () => {
       readLogEntries(userDataDir).filter(
         (e) => e.type === 'pty-attach' && (e.extra?.containerId as string) === ALPHA
       ).length;
+    await window.waitForTimeout(500);
     const baseline = attachCount();
     expect(baseline).toBeGreaterThanOrEqual(1);
 
@@ -248,7 +249,8 @@ test('Pause gates the broker attach; Resume re-attaches (#18)', async () => {
     await group.locator('.ws-chip-menu-trigger').click();
     await window.locator('.ws-chip-menu').getByRole('menuitem', { name: 'Pause' }).click();
     await expect(window.locator('.paused-overlay')).toBeVisible();
-    // No attach may fire while paused.
+    // No attach may fire while paused. error.log is appended in 200 ms batches.
+    await window.waitForTimeout(500);
     expect(attachCount()).toBe(baseline);
 
     // Resume from the overlay → the effect re-runs with paused=false and
