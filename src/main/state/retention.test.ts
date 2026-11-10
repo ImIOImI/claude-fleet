@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import { join } from 'node:path';
 import {
   costForSession, eventsForSession, ingestLine, insertEmbedding, maintenanceGet, maxEmbeddingId, recentToolCallsForSession,
   recordUsageEvent, retentionKeys, searchEmbeddings, stateKysely, withRawSqlite,
@@ -44,8 +45,9 @@ async function stored(): Promise<Map<string, { raw_jsonl: string; raw_z: unknown
 }
 const isCompressed = (r: { raw_z: unknown }) => r.raw_z != null && (r.raw_z as Buffer).length > 0;
 
+let state: Awaited<ReturnType<typeof openTestState>>;
 beforeEach(async () => {
-  await openTestState('cf-retention-');
+  state = await openTestState('cf-retention-');
 });
 
 async function ingestAll(ls = lines): Promise<void> {
@@ -324,6 +326,24 @@ describe('startRetention', () => {
     const p = await done;
     expect(p.events.rows).toBeGreaterThan(0);
     expect(await maintenanceGet('retention.first_pass_at')).toBe(String(NOW));
+  });
+
+  it.skipIf(isPg)('checkpoints from a worker during a pass and restores auto-checkpoint after it', async () => {
+    await ingestAll();
+    const autocheckpoints: number[] = [];
+    let r: { stop(): Promise<void> } | null = null;
+    await new Promise<void>((resolve) => {
+      r = startRetention({
+        listManifestIds: async () => [WS], stateDirExists: () => true, orphanSweep: true, walDbPath: join(state.dir, 'state.db'),
+        firstDelayMs: 0, now: () => NOW,
+        throttle: { minSleepMs: 0, idleRatio: 0, afterSlice: () => { void withRawSqlite((d) => d.pragma('wal_autocheckpoint', { simple: true }) as number).then((n) => { if (n !== null) autocheckpoints.push(n); }); } },
+        onPass: () => resolve(),
+      });
+    });
+    await r!.stop();
+    expect(autocheckpoints.length).toBeGreaterThan(0);
+    expect(autocheckpoints.every((n) => n === 0)).toBe(true);
+    expect(await withRawSqlite((d) => d.pragma('wal_autocheckpoint', { simple: true }))).toBe(1000);
   });
 });
 

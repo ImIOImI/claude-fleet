@@ -6,6 +6,7 @@
 //   RETENTION_BENCH=1 RETENTION_BENCH_OUT=/tmp/r.json npx vitest run src/main/state/retentionBench.test.ts
 import { describe, it } from 'vitest';
 import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { ingestLine, stateKysely, withRawSqlite } from '../db.js';
 import { EMBED_DIM, EMBED_MODEL_ID, encodeVector } from '../vectors.js';
 import { isPg, openTestState } from '../store/testStore.js';
@@ -80,7 +81,7 @@ const stats = (xs: number[]): StepStats => {
 
 describe.skipIf(!ON || isPg)('retention slice bench', () => {
   it('records per-step slice durations', { timeout: 30 * 60_000 }, async () => {
-    await openTestState('cf-retention-bench-');
+    const state = await openTestState('cf-retention-bench-');
     await withRawSqlite((d) => { d.pragma('auto_vacuum = INCREMENTAL'); d.exec('VACUUM'); });
 
     // History: SESSIONS old sessions in the live workspace plus one orphaned workspace.
@@ -115,7 +116,11 @@ describe.skipIf(!ON || isPg)('retention slice bench', () => {
     // RETENTION_BENCH_TARGET_MS lowers the slice target to emulate a slower host
 // (9 ms here ≈ 35 ms on a machine 4× slower); builds without budgets ignore it.
     const targetMs = Number(process.env.RETENTION_BENCH_TARGET_MS ?? 35);
-    const base = createThrottle({ minSleepMs: 0, idleRatio: 0, targetMs } as Parameters<typeof createThrottle>[0]);
+    // Builds with walCheckpointer checkpoint from a worker, as startRetention does.
+    const ck = await import('./walCheckpointer.js' as string)
+      .then((m: { startWalCheckpointer(p: string): Promise<{ request(): void; close(): Promise<void> } | null> }) => m.startWalCheckpointer(join(state.dir, 'state.db')))
+      .catch(() => null);
+    const base = createThrottle({ minSleepMs: 0, idleRatio: 0, targetMs, afterSlice: () => ck?.request() } as Parameters<typeof createThrottle>[0]);
     // Pass-through either slice signature, so the same file measures before and after.
     const baseSlice = base.slice as (...args: unknown[]) => Promise<unknown>;
     const t: Throttle = {
@@ -136,8 +141,9 @@ describe.skipIf(!ON || isPg)('retention slice bench', () => {
     await run('embeddings', () => compactEmbeddings(t));
     await run('vacuum', () => incrementalVacuum(t));
 
+    await ck?.close();
     const out = Object.fromEntries(Object.entries(durations).map(([s, xs]) => [s, stats(xs)]));
     console.table(out);
-    if (process.env.RETENTION_BENCH_OUT) writeFileSync(process.env.RETENTION_BENCH_OUT, JSON.stringify(out, null, 2));
+    if (process.env.RETENTION_BENCH_OUT) writeFileSync(process.env.RETENTION_BENCH_OUT, JSON.stringify({ ...out, walWorker: ck !== null }, null, 2));
   });
 });

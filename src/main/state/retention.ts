@@ -11,6 +11,7 @@ import { perfSetSpanAttributes, perfSpanAsync } from '../perf.js';
 import type { Attributes } from '@opentelemetry/api';
 import { COMPRESS_MIN_BYTES, deflateLine, rawLine, stripLine } from './rawCodec.js';
 import { dedupeAttachment } from './attachmentCodec.js';
+import { startWalCheckpointer, type WalCheckpointer } from './walCheckpointer.js';
 
 export const DAY_MS = 86_400_000;
 export const COMPRESS_AFTER_MS = 30 * DAY_MS;
@@ -253,6 +254,8 @@ export interface ThrottleOptions {
   minSleepMs?: number;
   /** A slice's budget expires after this long (default SLICE_TARGET_MS). */
   targetMs?: number;
+  /** Called after each slice, before its sleep. */
+  afterSlice?: () => void;
   /** Sleep this many times a slice's duration after it (9 → ≤10% duty cycle). */
   idleRatio?: number;
   now?: () => number;
@@ -283,6 +286,7 @@ export function createThrottle(opts: ThrottleOptions = {}): Throttle & { stop():
           note: perfSetSpanAttributes,
         }), { step });
       } finally {
+        opts.afterSlice?.();
         if (!stopped) await sleep(Math.max(minSleep, ratio * (now() - t0)), (w) => { wakeSleeper = w; });
         wakeSleeper = null;
       }
@@ -333,6 +337,8 @@ export interface RetentionDeps extends OrphanDeps {
   /** Only where this desktop owns every workspace in the store: SQLite or the
    *  managed (local) Postgres, never a shared external one. */
   orphanSweep: boolean;
+  /** SQLite: state.db's path, so WAL checkpoints run in a worker while retention works. */
+  walDbPath?: string;
   firstDelayMs?: number;
   intervalMs?: number;
   vacuumEveryMs?: number;
@@ -353,7 +359,8 @@ export interface PassResult {
 /** Schedule retention: a pass 5 min after start, then daily; an incremental
  *  vacuum check every 30 min. One unit of work runs at a time. */
 export function startRetention(deps: RetentionDeps): { stop(): Promise<void> } {
-  const throttle = createThrottle(deps.throttle);
+  let checkpointer: WalCheckpointer | null = null;
+  const throttle = createThrottle({ ...deps.throttle, afterSlice: () => { deps.throttle?.afterSlice?.(); checkpointer?.request(); } });
   const now = deps.now ?? Date.now;
   let running: Promise<unknown> | null = null;
   const step = async <T>(name: string, fn: () => Promise<T>, fallback: T): Promise<T> => {
@@ -384,7 +391,16 @@ export function startRetention(deps: RetentionDeps): { stop(): Promise<void> } {
   };
   const run = (fn: () => Promise<unknown>) => {
     if (running || throttle.stopped()) return;
-    running = fn().finally(() => { running = null; });
+    running = (async () => {
+      if (deps.walDbPath) checkpointer = await startWalCheckpointer(deps.walDbPath);
+      try {
+        await fn();
+      } finally {
+        const c = checkpointer;
+        checkpointer = null;
+        await c?.close();
+      }
+    })().finally(() => { running = null; });
   };
   const timers = [
     setTimeout(() => run(pass), deps.firstDelayMs ?? 5 * 60_000),
