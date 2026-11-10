@@ -1,5 +1,6 @@
 import { realpath, stat } from 'node:fs/promises';
-import { isAbsolute, relative, sep } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import {
   containerPathError,
   defaultContainerPath,
@@ -11,6 +12,8 @@ export interface MountCtx {
   ownId: string;
   userData: string;
   fleetRoot: string;
+  /** Realpaths; see dockerSocketDirs. */
+  dockerSocketDirs: string[];
 }
 
 const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/i;
@@ -30,6 +33,28 @@ async function realDir(p: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+// Mirrors docker-modem's socket resolution (dockerode is built with no options).
+export async function dockerSocketDirs(
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+  platform: NodeJS.Platform = process.platform
+): Promise<string[]> {
+  const candidates: string[] = [];
+  if (platform !== 'win32') {
+    const host = env.DOCKER_HOST;
+    if (!host || host === 'unix://') candidates.push('/var/run');
+    else if (host.startsWith('unix://')) candidates.push(dirname(host.slice('unix://'.length)));
+  }
+  // Docker Desktop's per-user socket lives in ~/.docker/run.
+  candidates.push(join(home, '.docker'));
+  const out: string[] = [];
+  for (const c of candidates) {
+    const real = await realpath(c).catch(() => null);
+    if (real && !out.includes(real)) out.push(real);
+  }
+  return out;
 }
 
 async function realOrSelf(p: string): Promise<string> {
@@ -60,15 +85,24 @@ function containmentMessage(real: string, ctx: MountCtx, userData: string, fleet
     // Mounting an ancestor of the fleet root would expose every workspace's private folder.
     return "that folder contains other workspaces' private folders.";
   }
+  if (ctx.dockerSocketDirs.some((d) => inside(real, d) || inside(d, real))) {
+    return "that folder holds Docker's control socket and can't be mounted.";
+  }
   return null;
 }
 
 // Shared by validateExtraMounts (save-time) and toDockerMounts (create-time
 // revalidation, closing a symlink-retarget TOCTOU gap). Returns the resolved realpath.
+const UNC_MESSAGE =
+  "network and WSL paths (\\\\server\\… or \\\\wsl.localhost\\…) can't be mounted. Use a local drive path.";
+const isUnc = (p: string): boolean => p.startsWith('\\\\') || p.startsWith('//');
+
 async function checkHostPath(hostPath: string, ctx: MountCtx, userData: string, fleetRoot: string): Promise<string> {
+  if (isUnc(hostPath)) throw new HostPathProblem('blocked', UNC_MESSAGE);
   if (!isAbsolute(hostPath)) throw new HostPathProblem('not-absolute', `${hostPath} must be a full path.`);
   const real = await realDir(hostPath);
   if (!real) throw new HostPathProblem('not-found', `${hostPath} doesn't exist or isn't a folder.`);
+  if (isUnc(real)) throw new HostPathProblem('blocked', UNC_MESSAGE);
   const blocked = containmentMessage(real, ctx, userData, fleetRoot);
   if (blocked) throw new HostPathProblem('blocked', blocked);
   return real;

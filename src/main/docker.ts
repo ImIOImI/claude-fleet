@@ -32,7 +32,7 @@ import { effectiveCaptureSettings, type CaptureSettings } from '../preload/captu
 import { ensureContainerRetention } from './claims/retention.js';
 import { fleetPrivateDir, fleetSharedDir, getFleetRoot } from './config.js';
 import type { ExtraMount } from '../preload/extraMounts.js';
-import { toDockerMounts } from './extraMountsHost.js';
+import { dockerSocketDirs, toDockerMounts } from './extraMountsHost.js';
 import {
   mcpWorkspaceSocketDir,
   mcpWorkspaceBind,
@@ -659,7 +659,12 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
     binds.push(`${sharedRemoteSettings}:/home/fleet/.claude/remote-settings.json:rw`);
   }
 
-  const mountCtx = { ownId: spec.id, userData: app.getPath('userData'), fleetRoot: await getFleetRoot() };
+  const mountCtx = {
+    ownId: spec.id,
+    userData: app.getPath('userData'),
+    fleetRoot: await getFleetRoot(),
+    dockerSocketDirs: await dockerSocketDirs()
+  };
   const hostCfg: Docker.HostConfig = {
     Binds: binds,
     // Mounts, not Binds strings: Windows drive letters make host:ctr:ro ambiguous,

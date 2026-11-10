@@ -16,7 +16,7 @@ import {
 import { openHostPath } from './openHostPath.js';
 import { freshArgv } from './automations/freshArgv.js';
 import { captureSettingsEqual, effectiveCaptureSettings, normalizeCaptureSettings } from '../preload/captureSettings.js';
-import { validateExtraMounts } from './extraMountsHost.js';
+import { dockerSocketDirs, validateExtraMounts } from './extraMountsHost.js';
 import { sanitizeMounts } from '../preload/extraMounts.js';
 import { emitCaptureSettingsChanged } from './claims/captureSettingsEvents.js';
 import { isCaptureFork } from './claims/captureForks.js';
@@ -1087,7 +1087,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       ? validateExtraMounts(sanitizeMounts(raw), {
           ownId: id,
           userData: app.getPath('userData'),
-          fleetRoot: await getFleetRoot()
+          fleetRoot: await getFleetRoot(),
+          dockerSocketDirs: await dockerSocketDirs()
         })
       : undefined;
   // No watcher means no state.db: release the gate so writes fail via onWriteError instead of queueing forever.
