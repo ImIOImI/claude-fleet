@@ -2838,9 +2838,26 @@ async function pruneErrors(trx: Transaction<StateDb>): Promise<void> {
     .execute();
 }
 
-/** Insert `rows` and prune once, in one transaction. If that fails, each row
- *  gets its own transaction so one bad row can't drop the rest; rejects only
- *  when no row could be written. */
+const CONNECTION_ERROR_CODES = new Set([
+  'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE',
+  '57P01', '57P02', '57P03', '53300',
+]);
+
+/** A store that can't be reached, as opposed to one row it refused. */
+export function isConnectionLevelError(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (typeof code === 'string' && (CONNECTION_ERROR_CODES.has(code) || code.startsWith('08'))) return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /timeout|timed out|connect|pool|terminat|not open/i.test(msg);
+}
+
+const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+/** Insert `rows` and prune once, in one transaction. If that fails with a
+ *  row-level error, each row gets its own transaction so one bad row can't drop
+ *  the rest. Stops at once on a connection-level error, and when the first two
+ *  retried rows both fail like the batch did (the cause isn't one row).
+ *  Rejects when no row was written. */
 export async function recordErrors(rows: ErrorRow[]): Promise<void> {
   if (!rows.length) return;
   const db = kyselyOrThrow();
@@ -2851,14 +2868,16 @@ export async function recordErrors(rows: ErrorRow[]): Promise<void> {
     });
     return;
   } catch (batchErr) {
-    if (rows.length === 1) throw batchErr;
+    if (rows.length === 1 || isConnectionLevelError(batchErr)) throw batchErr;
     let written = 0;
-    for (const row of rows) {
+    let sameAsBatch = 0;
+    for (const [i, row] of rows.entries()) {
       try {
         await db.transaction().execute((trx) => insertErrorRow(trx, row));
         written++;
-      } catch {
-        // Drop just this row.
+      } catch (err) {
+        if (isConnectionLevelError(err)) break;
+        if (i < 2 && errText(err) === errText(batchErr) && ++sameAsBatch === 2) break;
       }
     }
     if (!written) throw batchErr;

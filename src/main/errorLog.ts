@@ -7,8 +7,8 @@
 //
 // A no-frills append-only log: no level filtering, no remote sink. It rotates
 // to error.log.1 at ERROR_LOG_MAX_BYTES, so at most two files stay on disk.
-// Lines are buffered and written with one append every FLUSH_MS; process exit,
-// quit and an uncaught exception flush at once.
+// Error-level lines are written in the logError call, so they survive a crash;
+// info/warn lines are buffered and written with one append every FLUSH_MS.
 
 import { app } from 'electron';
 import { appendFileSync, mkdirSync, renameSync, statSync } from 'node:fs';
@@ -37,10 +37,15 @@ export const ERROR_LOG_MAX_BYTES = 5 * 1024 * 1024;
 let maxBytes = ERROR_LOG_MAX_BYTES;
 
 export const FLUSH_MS = 200;
-/** Buffered lines kept across failed writes; older ones are dropped. */
+/** Retry delay cap while writes keep failing. */
+export const MAX_RETRY_MS = 10_000;
+/** Buffer bounds while writes fail; the oldest lines are dropped past either. */
 export const MAX_PENDING_LINES = 5_000;
+export const MAX_PENDING_BYTES = 1024 * 1024;
 let pending: string[] = [];
+let pendingBytes = 0;
 let droppedLines = 0;
+let failedWrites = 0;
 let flushTimer: NodeJS.Timeout | null = null;
 
 /** Test seam: log to `path` (null restores the userData default) and rotate at `max`. */
@@ -49,6 +54,7 @@ export function _setErrorLogForTests(path: string | null, max = ERROR_LOG_MAX_BY
   logPath = path;
   logBytes = null;
   maxBytes = max;
+  failedWrites = 0;
 }
 let sink: ((row: ErrorRow) => void) | null = null;
 
@@ -69,9 +75,14 @@ const MAX_FIELD_CHARS = 8_192;
 
 export { clipText };
 
+/** Next timer delay: FLUSH_MS, doubling per consecutive failed write up to MAX_RETRY_MS. */
+export function errorLogRetryDelay(): number {
+  return Math.min(FLUSH_MS * 2 ** failedWrites, MAX_RETRY_MS);
+}
+
 function scheduleFlush(): void {
   if (flushTimer) return;
-  flushTimer = setTimeout(flushErrorLogSync, FLUSH_MS);
+  flushTimer = setTimeout(flushErrorLogSync, errorLogRetryDelay());
   flushTimer.unref?.();
 }
 
@@ -107,8 +118,11 @@ export function flushErrorLogSync(): void {
     appendFileSync(p, data, 'utf8');
     logBytes += bytes;
     pending = [];
+    pendingBytes = 0;
     droppedLines = 0;
+    failedWrites = 0;
   } catch {
+    failedWrites++;
     scheduleFlush();
   }
 }
@@ -123,12 +137,15 @@ export function logError(raw: LogPayload): void {
     ...(raw.stack !== undefined ? { stack: clipText(String(raw.stack), MAX_FIELD_CHARS) } : {}),
   };
   try {
-    pending.push(JSON.stringify({ ts: new Date(tsMs).toISOString(), ...payload }) + '\n');
-    if (pending.length > MAX_PENDING_LINES) {
-      pending.shift();
+    const line = JSON.stringify({ ts: new Date(tsMs).toISOString(), ...payload }) + '\n';
+    pending.push(line);
+    pendingBytes += line.length;
+    while (pending.length > 1 && (pending.length > MAX_PENDING_LINES || pendingBytes > MAX_PENDING_BYTES)) {
+      pendingBytes -= pending.shift()!.length;
       droppedLines++;
     }
-    scheduleFlush();
+    if ((payload.level ?? 'error') === 'error') flushErrorLogSync();
+    else scheduleFlush();
   } catch {
     // Any throw here would cascade into the very error-handling path the
     // user invoked. Drop it.
@@ -140,29 +157,57 @@ export function logError(raw: LogPayload): void {
   }
 }
 
+/** Rows the DB sink holds while a write is slow or failing; older ones are dropped. */
+export const MAX_PENDING_ROWS = 1_000;
+
 /** A sink that buffers rows and hands them to `write` together, at most once
- *  per `delayMs`, so a burst costs one transaction instead of one per row.
- *  Writes run one at a time; a rejected write drops its rows. */
+ *  per `delayMs`, so a burst costs one transaction instead of one per row. At
+ *  most one write runs; past `maxPending` buffered rows the oldest are dropped,
+ *  and the next batch starts with one `error-rows-dropped` row giving the
+ *  count. A rejected write drops its rows. */
 export function batchedErrorSink(
   write: (rows: ErrorRow[]) => Promise<void>,
   delayMs = FLUSH_MS,
+  maxPending = MAX_PENDING_ROWS,
 ): { sink: (row: ErrorRow) => void; flush: () => Promise<void> } {
   let rows: ErrorRow[] = [];
+  let dropped = 0;
   let timer: NodeJS.Timeout | null = null;
-  let running: Promise<void> = Promise.resolve();
-  const flush = (): Promise<void> => {
+  let running: Promise<void> | null = null;
+  const schedule = (): void => {
+    if (timer || running) return;
+    timer = setTimeout(start, delayMs);
+    timer.unref?.();
+  };
+  function start(): void {
     if (timer) clearTimeout(timer);
     timer = null;
-    const batch = rows;
+    if (running || !rows.length) return;
+    const batch: ErrorRow[] = dropped
+      ? [{ ts: Date.now(), source: 'main', type: 'error-rows-dropped', level: 'warn', message: `dropped ${dropped} error rows` }, ...rows]
+      : rows;
     rows = [];
-    if (batch.length) running = running.then(() => write(batch)).catch(() => undefined);
-    return running;
+    dropped = 0;
+    running = write(batch)
+      .catch(() => undefined)
+      .finally(() => {
+        running = null;
+        if (rows.length) schedule();
+      });
+  }
+  const flush = async (): Promise<void> => {
+    while (running || rows.length) {
+      start();
+      await running;
+    }
   };
   const sink = (row: ErrorRow): void => {
     rows.push(row);
-    if (timer) return;
-    timer = setTimeout(() => void flush(), delayMs);
-    timer.unref?.();
+    if (rows.length > maxPending) {
+      rows.shift();
+      dropped++;
+    }
+    schedule();
   };
   return { sink, flush };
 }

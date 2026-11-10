@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { rmSync } from 'node:fs';
 import { PostgresDriver, SqliteDriver } from 'kysely';
-import { closeDb, recordError, recordErrors, learnBrokerSessionMapping, recordBrokerSessionMapping, lookupBrokerSession, lookupVerifiedBrokerSession, lookupResumableBrokerSession, listSessions, summaryForBrokerSession, ingestLine, ERRORS_RETENTION, recordUsageEvent, __pendingClaudeIdsForTest } from './db.js';
+import { closeDb, stateKysely, recordError, recordErrors, isConnectionLevelError, learnBrokerSessionMapping, recordBrokerSessionMapping, lookupBrokerSession, lookupVerifiedBrokerSession, lookupResumableBrokerSession, listSessions, summaryForBrokerSession, ingestLine, ERRORS_RETENTION, recordUsageEvent, __pendingClaudeIdsForTest } from './db.js';
 import { openTestState, queryRows, isPg, type TestState } from './store/testStore.js';
 
 /** The driver whose commitTransaction the store's transactions end in. */
@@ -121,6 +121,41 @@ describe('recordError', () => {
       const types = (await queryRows('SELECT type FROM errors ORDER BY id')).map((r) => (r as { type: string }).type);
       expect(types).toEqual(['a', 'c']);
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('recordErrors does not retry row by row when the store is unreachable', async () => {
+    const dir = await freshDb();
+    try {
+      const outage = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:5432'), { code: 'ECONNREFUSED' });
+      const kysely = stateKysely();
+      const spy = vi.spyOn(kysely, 'transaction').mockImplementation(() => ({ execute: async () => { throw outage; } }) as never);
+      try {
+        const rows = Array.from({ length: 50 }, (_, i) => ({ ts: i, source: 'main', type: 't', message: `m${i}` }));
+        await expect(recordErrors(rows)).rejects.toBe(outage);
+        expect(spy).toHaveBeenCalledTimes(1);
+      } finally { spy.mockRestore(); }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('recordErrors stops after two retried rows fail the same way as the batch', async () => {
+    const dir = await freshDb();
+    try {
+      const err = new Error('relation "errors" does not exist');
+      const kysely = stateKysely();
+      const spy = vi.spyOn(kysely, 'transaction').mockImplementation(() => ({ execute: async () => { throw err; } }) as never);
+      try {
+        const rows = Array.from({ length: 50 }, (_, i) => ({ ts: i, source: 'main', type: 't', message: `m${i}` }));
+        await expect(recordErrors(rows)).rejects.toBe(err);
+        expect(spy).toHaveBeenCalledTimes(3);
+      } finally { spy.mockRestore(); }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('classifies connection-level errors', () => {
+    expect(isConnectionLevelError(Object.assign(new Error('x'), { code: '08006' }))).toBe(true);
+    expect(isConnectionLevelError(new Error('timeout exceeded when trying to connect'))).toBe(true);
+    expect(isConnectionLevelError(new Error('db not opened'))).toBe(true);
+    expect(isConnectionLevelError(Object.assign(new Error('invalid byte sequence for encoding "UTF8": 0x00'), { code: '22021' }))).toBe(false);
   });
 
   it('strips NUL and serializes BigInt and circular extra', async () => {
