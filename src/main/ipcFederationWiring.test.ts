@@ -26,10 +26,20 @@ describe('ipc.ts federation wiring', () => {
   });
 
   it('registers sessions:listRemote, reads no sources in mock mode, and stops the relay on quit', () => {
-    expect(src).toContain('registerFederationIpc(ipcMain, federated);');
+    expect(src).toContain('registerFederationIpc(ipcMain, federated, localSearch);');
     expect(src.match(/sources: \(\) => \(MOCK_MODE \? \[\] : remoteBackend\.sources\(\)\)/g)).toHaveLength(2);
     const stop = src.slice(src.indexOf('export function stopRemoteBackend'), src.indexOf('remoteBackend.stop();'));
     expect(stop).toContain('summaryRelay.stop();');
     expect(stop).toContain('clearInterval(relayTimer)');
+  });
+
+  it('history:search embeds with the indexer\'s embedder and searches local manifests only', () => {
+    const local = src.slice(src.indexOf('const localSearch: LocalSearch'), src.indexOf('registerFederationIpc(ipcMain'));
+    expect(src).toContain("const localManifests = async () => (await listWorkspaceManifests()).filter((m) => m.kind !== 'remote');");
+    expect(local).toContain('embed: async (q) => (fedEmbed ? ((await fedEmbed([q]))[0] ?? null) : null)');
+    expect(local).toContain('localIds: async () => new Set((await localManifests()).map((m) => m.id))');
+    expect(local).toContain("const ids = scope === 'all' ? [...names.keys()] : [scope];");
+    const index = readFileSync(new URL('./index.ts', import.meta.url), 'utf8');
+    expect(before(index, 'setQueryEmbedder(embedFn);', 'setFederatedEmbedder(embedFn);')).toBe(true);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseSessionsPage, parseSummary, RemoteShapeError } from './remoteRows';
+import { MAX_SEARCH_HITS, parseSearchReply, parseSessionsPage, parseSummary, RemoteShapeError } from './remoteRows';
 
 const W = '01JC0000000000000000000000';
 const good = { id: 's1', workspaceId: W, aiTitle: 'T\u202eitle', firstUserMessage: 'x'.repeat(900), userSetName: null, startedAt: 1, lastActiveAt: 2, eventCount: 3, usd: 0.5, tags: ['a', 7], headless: false };
@@ -102,5 +102,53 @@ describe('remote reply caps', () => {
       expect(() => parseSummary({ ...s, ...bad }), JSON.stringify(bad)).toThrow(RemoteShapeError);
     }
     expect(() => parseSummary('x')).toThrow(RemoteShapeError);
+  });
+});
+
+describe('parseSearchReply', () => {
+  const hit = { sessionId: 's', workspaceId: W, kind: 'turn', ts: 1, text: 'x', score: 0.4 };
+  it('keeps valid hits, caps text at 1000, drops a non-finite score', () => {
+    const r = parseSearchReply({ modelId: 'm', hits: [{ ...hit, text: 'x'.repeat(5000) }, { ...hit, sessionId: 't', text: 'y', score: NaN }] }, W);
+    expect(r.modelId).toBe('m');
+    expect(r.hits).toHaveLength(1);
+    expect(r.hits[0].text).toHaveLength(1000);
+  });
+
+  it('drops foreign, malformed or out-of-range hits', () => {
+    const bad = [
+      { ...hit, workspaceId: 'OTHER' }, { ...hit, sessionId: 'a b' }, { ...hit, sessionId: 7 }, { ...hit, kind: 'tool' },
+      { ...hit, ts: -1 }, { ...hit, ts: 1.5 }, { ...hit, ts: '1' }, { ...hit, text: 5 }, { ...hit, score: Infinity },
+      { ...hit, score: 1.01 }, { ...hit, score: -1.01 }, { ...hit, score: '0.5' }, null, 'x', 3,
+    ];
+    expect(parseSearchReply({ modelId: 'm', hits: bad }, W).hits).toEqual([]);
+  });
+
+  it('keeps summary hits, a null ts, scores at the cosine bounds, and only the known fields', () => {
+    const r = parseSearchReply({ modelId: 'm', hits: [
+      { ...hit, kind: 'summary', ts: null, score: 1, extra: 'leak' }, { ...hit, sessionId: 'u', score: -1 },
+    ] }, W);
+    expect(r.hits).toEqual([
+      { sessionId: 's', workspaceId: W, kind: 'summary', ts: null, text: 'x', score: 1 },
+      { sessionId: 'u', workspaceId: W, kind: 'turn', ts: 1, text: 'x', score: -1 },
+    ]);
+  });
+
+  it('keeps newlines and tabs, blanks other control and format characters', () => {
+    const r = parseSearchReply({ modelId: 'm', hits: [{ ...hit, text: 'a\nb\tc\u0007d\u202ee\r' }] }, W);
+    expect(r.hits[0].text).toBe('a\nb\tc d e ');
+  });
+
+  it('one-lines and caps the reported model id', () => {
+    expect(parseSearchReply({ modelId: 'm\nx' + 'y'.repeat(500), hits: [] }, W).modelId.length).toBeLessThanOrEqual(128);
+    expect(parseSearchReply({ modelId: 'm\nx', hits: [] }, W).modelId).not.toContain('\n');
+  });
+
+  it('throws on a bad envelope', () => {
+    expect(() => parseSearchReply({ hits: [] }, W)).toThrow(RemoteShapeError);
+    expect(() => parseSearchReply({ modelId: 5, hits: [] }, W)).toThrow(RemoteShapeError);
+    expect(() => parseSearchReply({ modelId: 'm', hits: {} }, W)).toThrow(RemoteShapeError);
+    expect(() => parseSearchReply(null, W)).toThrow(RemoteShapeError);
+    expect(() => parseSearchReply({ modelId: 'm', hits: Array(MAX_SEARCH_HITS + 1).fill(hit) }, W)).toThrow(RemoteShapeError);
+    expect(parseSearchReply({ modelId: 'm', hits: Array(MAX_SEARCH_HITS).fill(hit) }, W).hits).toHaveLength(MAX_SEARCH_HITS);
   });
 });

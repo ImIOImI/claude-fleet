@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
-import { registerIpc, invalidateWorkspaceList, replayInputWait, stopRemoteBackend } from './ipc.js';
+import { registerIpc, invalidateWorkspaceList, replayInputWait, setFederatedEmbedder, stopRemoteBackend } from './ipc.js';
 import { openDb, openDbPostgres, closeDb, deleteEmbeddingsForOtherModels, sessionsWithPendingTurns, recordErrors, stateKysely, onStateOpenStats, stateLeftoverDrain, setStateWarnSink, sessionCaptureSignals, isAutomationSession } from './db.js';
 import { initPerf, shutdownPerf, perfSpan, perfSpanAsync, perfRecordSpan, perfNoteSqlSync, getEffectivePerf, recordBootProfile } from './perf.js';
 import { setSqliteQueryObserver } from './store/kysely.js';
@@ -560,6 +560,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     const embedFn = makeEmbedder(join(userData, 'models'));
     embed = embedFn;
     setQueryEmbedder(embedFn);
+    setFederatedEmbedder(embedFn);
 
     if (sqlite && inboxStore) startClaims(inboxStore, embedFn);
 

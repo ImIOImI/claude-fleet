@@ -119,6 +119,16 @@ describe('EmbedderClient', () => {
     expect(logs).toEqual(['fleet-embedder stderr: first half', 'fleet-embedder stderr: second']);
   });
 
+  it('spawns with the given env instead of inheriting, and exposes the pid', async () => {
+    // process.env says ok; the child sees only FAKE_MODE=old-protocol and refuses at once.
+    const { c, onFatal } = client('ok', { env: { FAKE_MODE: 'old-protocol' } });
+    await expect(c.embed(['a'])).rejects.toBeInstanceOf(EmbedderUnavailable);
+    expect(onFatal).toHaveBeenCalledOnce();
+    const ok = client('ok').c;
+    await ok.embed(['a']);
+    expect(ok.pid).toBeGreaterThan(0);
+  });
+
   it('gives up at once on a protocol mismatch', async () => {
     const { c, onFatal, logs } = client('old-protocol');
     await expect(c.embed(['a'])).rejects.toBeInstanceOf(EmbedderUnavailable);

@@ -158,7 +158,7 @@ export function registerRemoteIpc(ipc: IpcHandleLike, deps: RemoteIpcDeps): void
       }
       return { ok: false, kind: 'forbidden', message: `${message}. Ask the host's admins to add you to a team with access.` };
     }
-    return { ok: false, kind: err.kind, message };
+    return { ok: false, kind: err.kind === 'disabled' || err.kind === 'model' ? 'protocol' : err.kind, message };
   }
 
   async function uniqueName(base: string, id: string): Promise<string> {

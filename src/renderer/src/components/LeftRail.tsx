@@ -9,7 +9,7 @@ import { CommitteePane } from './CommitteePane';
 import type { WorkspaceSummary } from '../App';
 import type { OpenTabRef } from '../busySessions';
 import type { SessionListItem } from '../../../preload';
-import { remoteResumeMap } from '../sessionsView';
+import { remoteNamesMap, remoteResumeMap } from '../sessionsView';
 
 interface Props {
   workspaces: WorkspaceSummary[];
@@ -82,6 +82,7 @@ export function LeftRail({
 }: Props) {
   const [open, setOpen] = useState<OpenState>(loadOpen);
   const remoteResume = useMemo(() => remoteResumeMap(workspaces), [workspaces]);
+  const remoteNames = useMemo(() => remoteNamesMap(workspaces), [workspaces]);
   const toggle = (k: keyof OpenState): void =>
     setOpen((prev) => {
       const next = { ...prev, [k]: !prev[k] };
@@ -143,6 +144,7 @@ export function LeftRail({
             maxSessionAgeDays={maxSessionAgeDays}
             onResume={onResume}
             remoteResume={remoteResume}
+            remoteNames={remoteNames}
           />
         )}
       </section>

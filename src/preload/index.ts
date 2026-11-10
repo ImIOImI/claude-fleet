@@ -15,7 +15,7 @@ import type { AccountStatus, SignInStart, SignInPoll } from './identityTypes';
 export type { AccountStatus, AccountIdentity, AccountSso, SignInStart, SignInPoll } from './identityTypes';
 import type { RemoteAddOptions, RemoteLiveSession, RemoteProbe } from './remoteTypes';
 import type { StoreChoice, StoreSettings, StoreStatus } from './storeTypes';
-import type { RemoteSessionsResult, SessionCursor } from './federation';
+import type { FederatedSearchResult, RemoteSessionsResult, SessionCursor } from './federation';
 export type { ImportProgress, StoreChoice, StorePhase, StoreSettings, StoreStatus } from './storeTypes';
 export type { RemoteAddOptions, RemoteLiveSession, RemoteProbe, RemoteProbeOk, RemoteProbeErr, RemoteProbeErrorKind, RemoteTier } from './remoteTypes';
 
@@ -522,6 +522,11 @@ const api = {
      */
     resume: (workspaceId: string): Promise<{ containerId: string } | null> =>
       ipcRenderer.invoke('sessions:resume', workspaceId)
+  },
+  history: {
+    /** Transcript search, local plus the remotes in scope, merged by score. */
+    search: (query: string, opts: { scope: 'all' | string; limit?: number }): Promise<FederatedSearchResult> =>
+      ipcRenderer.invoke('history:search', query, opts)
   },
   fs: {
     isDirectory: (path: string): Promise<boolean> => ipcRenderer.invoke('fs:isDirectory', path),

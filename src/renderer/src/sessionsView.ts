@@ -15,6 +15,7 @@ import {
   type MergedSessions,
   type RemoteSessionsResult,
   type SessionCursor,
+  type UnavailableReason,
   type UnavailableSource
 } from '../../preload/federation';
 
@@ -34,6 +35,7 @@ export function sessionsForScope<T extends { workspaceId: string }>(
 /** The fields the pane's text search + tag filter read. Matches the
  *  SessionListItem subset so the helpers stay IPC-shape-agnostic. */
 export interface SessionFilterable {
+  id: string;
   workspaceName: string;
   tags: string[];
   userSetName: string | null;
@@ -55,6 +57,7 @@ export function filterSessions<T extends SessionFilterable>(
     if (!q) return true;
     const title = s.userSetName || s.aiTitle || s.firstUserMessage || '';
     return (
+      s.id === query.trim() ||
       title.toLowerCase().includes(q) ||
       s.workspaceName.toLowerCase().includes(q) ||
       s.tags.some((t) => t.toLowerCase().includes(q))
@@ -218,4 +221,40 @@ export function canResumeHere(s: SessionListItem, remote: Record<string, RemoteR
   if (!isRemoteRow(s)) return true;
   const b = remote?.[s.workspaceId];
   return b !== undefined && b.tier === 'session' && b.running;
+}
+
+/** The transcript-search scope and the line naming who receives the query (D67). */
+export function searchTargets(
+  scope: 'workspace' | 'all', selected: string | null, remoteNames: Record<string, string>, isLocal: (id: string) => boolean,
+): { scope: 'all' | string; label: string } | null {
+  if (scope === 'all') {
+    const r = Object.values(remoteNames);
+    return { scope: 'all', label: `Searching this desktop${r.length ? ` + ${r.join(', ')}` : ''}` };
+  }
+  if (!selected) return null;
+  return { scope: selected, label: isLocal(selected) || !remoteNames[selected] ? 'Searching this desktop' : `Searching ${remoteNames[selected]}` };
+}
+
+const SEARCH_REASON: Partial<Record<UnavailableReason, string>> = { disabled: 'search off', model: 'different model' };
+
+export function searchUnavailableText(u: UnavailableSource[]): string | null {
+  if (u.length === 0) return null;
+  const names = u.map((x) => (SEARCH_REASON[x.reason] ? `${x.name} (${SEARCH_REASON[x.reason]})` : x.name));
+  return `${u.length} source${u.length === 1 ? '' : 's'} unavailable: ${names.join(', ')}`;
+}
+
+/** Remote bookmark id → display name. */
+export function remoteNamesMap(workspaces: ReadonlyArray<{ id: string; kind: string; name: string }>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const w of workspaces) if (w.kind === 'remote') out[w.id] = w.name;
+  return out;
+}
+
+export function relativeTime(ms: number, now = Date.now()): string {
+  const delta = now - ms;
+  if (delta < 5_000) return 'just now';
+  if (delta < 60_000) return `${Math.round(delta / 1000)}s ago`;
+  if (delta < 3_600_000) return `${Math.round(delta / 60_000)}m ago`;
+  if (delta < 86_400_000) return `${Math.round(delta / 3_600_000)}h ago`;
+  return `${Math.round(delta / 86_400_000)}d ago`;
 }

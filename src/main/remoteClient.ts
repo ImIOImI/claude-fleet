@@ -7,10 +7,11 @@ import { MAX_FRAME_PAYLOAD } from './broker.js';
 import type { Tier } from './identity/grants.js';
 import { redactSecrets } from './identity/redact.js';
 import { normalizeHostUrl, oneLine, safeLogin, wsUrl } from './remoteUrl.js';
+import { SEARCH_UNAVAILABLE } from '../preload/federation.js';
 
 export { CONTROL_RE, oneLine, safeLogin } from './remoteUrl.js';
 
-export type RemoteErrorKind = 'not-signed-in' | 'unreachable' | 'unauthorized' | 'forbidden' | 'standby' | 'protocol';
+export type RemoteErrorKind = 'not-signed-in' | 'unreachable' | 'unauthorized' | 'forbidden' | 'standby' | 'protocol' | 'disabled' | 'model';
 
 export class RemoteError extends Error {
   constructor(
@@ -150,6 +151,8 @@ function statusError(url: string, status: number, text: string, retryAfterMs?: n
   if (status === 401) return new RemoteError('unauthorized', 'GitHub sign-in was rejected by the host; sign in again', 401);
   if (status === 403) return new RemoteError('forbidden', text || 'You have no grant on this host', 403);
   if (status === 503 && text === 'standby') return new RemoteError('standby', 'The host is starting up (standby); try again shortly', 503, retryAfterMs);
+  if (status === 503 && text === SEARCH_UNAVAILABLE) return new RemoteError('disabled', `${url} has transcript search turned off`, 503);
+  if (status === 400 && text.startsWith('model mismatch:')) return new RemoteError('model', `${url} refused the query's model: ${text}`, 400);
   if (status === 429) return new RemoteError('unreachable', `${url} is busy; try again shortly`, 429, retryAfterMs);
   const detail = `${url} answered ${status}${text ? `: ${text}` : ''}`;
   return new RemoteError(status >= 500 ? 'unreachable' : 'protocol', detail, status, retryAfterMs);

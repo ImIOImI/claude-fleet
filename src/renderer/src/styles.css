@@ -654,6 +654,20 @@ body {
 .session-row-meta .remote-glyph { flex: none; opacity: 0.8; }
 .sessions-unavailable { font-size: 11px; padding: 4px 8px; }
 .sessions-more { margin: 4px 8px; }
+.sessions-transcripts-toggle.on { color: var(--ink); border-color: var(--rule-strong); }
+.transcript-search { display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid var(--rule); }
+.transcript-search-form { display: flex; gap: 4px; }
+.transcript-search-form .sessions-search { flex: 1; min-width: 0; }
+.transcript-search-target, .transcript-search-status { font-size: 11px; }
+.transcript-search-error { font-size: 11px; color: var(--danger); }
+.transcript-hits { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.transcript-hit { display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; padding: 4px 6px; background: none; border: 1px solid transparent; border-radius: var(--r-sm); color: var(--ink); font: inherit; font-size: 12px; cursor: pointer; }
+.transcript-hit:hover { border-color: var(--rule); }
+.transcript-hit-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-2); min-width: 0; }
+.transcript-hit-meta .remote-glyph { flex: none; opacity: 0.8; }
+.transcript-hit-ws { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transcript-hit-score { margin-left: auto; font-family: var(--font-mono); }
+.hit-text { white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; }
 /* Busy: claude actively working in this session — a leading dot pulses, in
    lockstep with the workspace chip + session-tab indicators (wall-clock
    synced via blinkSync). Reuses the chip's `chipBusyPulse` keyframes. */

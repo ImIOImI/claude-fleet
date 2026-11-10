@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createFederatedReader } from './federatedReader';
 import { RemoteError } from '../remoteClient';
 import type { RemoteSourceInfo } from '../remote';
+import { EMBED_DIM, EMBED_MODEL_ID } from '../vectors';
 
 const A = '01JC0000000000000000000000';
 const B = '01JC0000000000000000000001';
@@ -108,5 +109,89 @@ describe('FederatedReader', () => {
     const r = createFederatedReader({ sources: () => [src(A, 'running')], rpc: async () => ({ rows: [], next: null }) });
     await r.listSessions({});
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  describe('search', () => {
+    const vector = (() => { const v = new Float32Array(EMBED_DIM); v[0] = 1; return v; })();
+    const hit = (ws: string, sessionId = 's1', score = 0.5) => ({ sessionId, workspaceId: ws, kind: 'turn', ts: 1, text: 't', score });
+
+    it('sends only the vector, model id and limit, and only to the origins given', async () => {
+      const rpc = vi.fn(async (url: string) => ({ modelId: EMBED_MODEL_ID, hits: [hit(url.slice(7))] }));
+      const r = createFederatedReader({ sources: () => [src(A, 'running'), src(B, 'running')], rpc });
+      const out = await r.search({ vector, limit: 7, origins: [B] });
+      expect(rpc).toHaveBeenCalledTimes(1);
+      expect(rpc).toHaveBeenCalledWith(`http://${B}`, 'history:search', [{ vector: Array.from(vector), modelId: EMBED_MODEL_ID, limit: 7 }], 3000);
+      const arg = (rpc.mock.calls[0] as unknown[])[2] as [Record<string, unknown>];
+      expect(Object.keys(arg[0]).sort()).toEqual(['limit', 'modelId', 'vector']);
+      expect(Array.isArray(arg[0].vector)).toBe(true);
+      expect(out).toEqual({ remote: [{ origin: B, hits: [{ ...hit(B), workspaceName: 'n1' }] }], unavailable: [] });
+    });
+
+    it('an origin list naming no bookmark reads nothing', async () => {
+      const rpc = vi.fn();
+      const r = createFederatedReader({ sources: () => [src(A, 'running')], rpc });
+      expect(await r.search({ vector, limit: 5, origins: [] })).toEqual({ remote: [], unavailable: [] });
+      expect(await r.search({ vector, limit: 5, origins: ['local', B] })).toEqual({ remote: [], unavailable: [] });
+      expect(rpc).not.toHaveBeenCalled();
+    });
+
+    it('a host answering with another model id is unavailable (model) and its hits are dropped', async () => {
+      const rpc = vi.fn(async (url: string) => ({ modelId: url.endsWith(A) ? 'other@fp32' : EMBED_MODEL_ID, hits: [hit(url.slice(7))] }));
+      const r = createFederatedReader({ sources: () => [src(A, 'running'), src(B, 'running')], rpc });
+      const out = await r.search({ vector, limit: 5, origins: [A, B] });
+      expect(out.unavailable).toEqual([{ origin: A, name: 'n0', reason: 'model' }]);
+      expect(out.remote.map((x) => x.origin)).toEqual([B]);
+    });
+
+    it('a host refusing the query model (400 model mismatch) is unavailable (model)', async () => {
+      const rpc = vi.fn(async (url: string) => {
+        if (url.endsWith(A)) throw new RemoteError('model', 'x', 400);
+        return { modelId: EMBED_MODEL_ID, hits: [hit(url.slice(7))] };
+      });
+      const r = createFederatedReader({ sources: () => [src(A, 'running'), src(B, 'running')], rpc });
+      const out = await r.search({ vector, limit: 5, origins: [A, B] });
+      expect(out.unavailable).toEqual([{ origin: A, name: 'n0', reason: 'model' }]);
+      expect(out.remote.map((x) => x.origin)).toEqual([B]);
+    });
+
+    it('maps search-off, timeout and a malformed reply to their reasons', async () => {
+      vi.useFakeTimers();
+      const rpc = vi.fn((url: string): Promise<unknown> => {
+        if (url.endsWith(A)) return Promise.reject(new RemoteError('disabled', 'x', 503));
+        if (url.endsWith(B)) return new Promise(() => undefined);
+        return Promise.resolve({ hits: [] });
+      });
+      const r = createFederatedReader({ sources: () => [src(A, 'running'), src(B, 'running'), src(C, 'running')], rpc, timeoutMs: 3000 });
+      const p = r.search({ vector, limit: 5, origins: [A, B, C] });
+      await vi.advanceTimersByTimeAsync(3000);
+      expect((await p).unavailable).toEqual([
+        { origin: A, name: 'n0', reason: 'disabled' }, { origin: B, name: 'n1', reason: 'timeout' }, { origin: C, name: 'n2', reason: 'protocol' },
+      ]);
+    });
+
+    it('a down or unprobed host is listed without a call (liveness gate)', async () => {
+      const rpc = vi.fn();
+      const r = createFederatedReader({ sources: () => [src(A, 'unreachable'), src(B, null)], rpc });
+      expect((await r.search({ vector, limit: 5, origins: [A, B] })).unavailable).toEqual([
+        { origin: A, name: 'n0', reason: 'unreachable' }, { origin: B, name: 'n1', reason: 'checking' },
+      ]);
+      expect(rpc).not.toHaveBeenCalled();
+    });
+
+    it('drops hits filed under another workspace and keeps nothing between calls', async () => {
+      const rpc = vi.fn(async () => ({ modelId: EMBED_MODEL_ID, hits: [hit(A, 's1'), hit(B, 's2')] }));
+      const r = createFederatedReader({ sources: () => [src(A, 'running')], rpc });
+      expect((await r.search({ vector, limit: 5, origins: [A] })).remote[0].hits.map((h) => h.sessionId)).toEqual(['s1']);
+      await r.search({ vector, limit: 5, origins: [A] });
+      expect(rpc).toHaveBeenCalledTimes(2);
+    });
+
+    it('sources() is the live bookmark list', () => {
+      let list = [src(A, 'running')];
+      const r = createFederatedReader({ sources: () => list, rpc: vi.fn() });
+      expect(r.sources().map((s) => s.id)).toEqual([A]);
+      list = [src(B, null)];
+      expect(r.sources().map((s) => s.id)).toEqual([B]);
+    });
   });
 });

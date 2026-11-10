@@ -83,7 +83,9 @@ describe('remote:* IPC', () => {
   it.each([
     [new RemoteError('unreachable', 'x is not reachable'), 'unreachable'],
     [new RemoteError('forbidden', 'no grant for @alice'), 'forbidden'],
-    [new RemoteError('not-signed-in', 'sign in'), 'not-signed-in']
+    [new RemoteError('not-signed-in', 'sign in'), 'not-signed-in'],
+    [new RemoteError('disabled', 'search off', 503), 'protocol'],
+    [new RemoteError('model', 'model mismatch', 400), 'protocol']
   ])('probe maps %s to %s', async (err, kind) => {
     expect(await harness(async () => { throw err; }).call('remote:probe', 'https://h')).toMatchObject({ ok: false, kind });
   });
