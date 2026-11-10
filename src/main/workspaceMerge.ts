@@ -67,6 +67,7 @@ export async function mergeWorkspaces(opts: MergeOptions): Promise<Workspace[]> 
       endpointId: m?.endpointId,
       env: m?.env ?? w.env,
       resources: m?.resources,
+      mounts: m?.mounts,
       mirror: m?.mirror ?? factoryMirror,
       installedLoadouts: m?.installedLoadouts ?? [],
       control: m?.control,

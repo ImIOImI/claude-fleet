@@ -47,6 +47,7 @@ import type {
 } from '../../preload';
 import { storeBannerText } from './storeView';
 import type { CaptureSettings } from '../../preload/captureSettings';
+import type { ExtraMount } from '../../preload/extraMounts';
 import { portPopupCopy } from './portToast';
 import { InboxChip } from './components/InboxChip';
 import { InboxView, type InboxSection } from './components/InboxView';
@@ -147,6 +148,8 @@ export interface WorkspaceSummary {
   endpointId?: string;
   env: WorkspaceEnv;
   resources?: WorkspaceResources;
+  /** kind 'container' only: extra host folders bound into the container. */
+  mounts?: ExtraMount[];
   mirror: WorkspaceMirror;
   /** Loadouts installed into this workspace (#16-followup); absent ⇒ none. */
   installedLoadouts?: { id: string; title: string; version?: string }[];
