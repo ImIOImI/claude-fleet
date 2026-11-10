@@ -26,7 +26,7 @@ describe.skipIf(isPg)('startWalCheckpointer', () => {
     const c = await startWalCheckpointer(join(s.dir, 'state.db'), { requestEveryMs: 0 });
     expect(c).not.toBeNull();
     expect(await pragma('wal_autocheckpoint')).toBe(0);
-    expect(await pragma('journal_size_limit')).toBe(64 * 1024 * 1024);
+    expect(await pragma('journal_size_limit')).toBe(16 * 1024 * 1024);
 
     await writeRows(1500); // ~12 MB: past the default threshold, so only the worker checkpoints it
     c!.request();
@@ -75,6 +75,41 @@ describe.skipIf(isPg)('startWalCheckpointer', () => {
     await c!.idle();
     expect(c!.last()!.log).toBeLessThan(100);
     await c!.close();
+  });
+
+  it('a checkpoint that answers once past the rewind threshold, then hangs: drain() returns within the bound and hands back', async () => {
+    const s = await openTestState('cf-walckpt-');
+    await withRawSqlite((d) => { d.pragma('wal_autocheckpoint = 700'); d.pragma('journal_size_limit = 1234'); });
+    const c = await startWalCheckpointer(join(s.dir, 'state.db'), {
+      requestEveryMs: 0, checkpointTimeoutMs: 200,
+      workerSource: fakeWorker(`if (!globalThis.once) { globalThis.once = 1; parentPort.postMessage({ ok: true, busy: 0, log: ${WAL_REWIND_FRAMES + 1000}, checkpointed: ${WAL_REWIND_FRAMES + 1000} }); }`),
+    });
+    c!.request();
+    await c!.idle();
+    expect(c!.last()!.log).toBeGreaterThan(WAL_REWIND_FRAMES);
+    const t0 = Date.now();
+    await c!.drain(); // its checkpoint never answers
+    expect(Date.now() - t0).toBeLessThan(1000);
+    await settle();
+    expect(c!.active()).toBe(false);
+    expect(await pragma('wal_autocheckpoint')).toBe(700);
+    expect(await pragma('journal_size_limit')).toBe(1234);
+    await c!.idle(); // settled by the hand-back, not by the worker's exit
+    await c!.drain(); // a no-op once handed back
+  });
+
+  it(`hands back after ${WAL_MAX_INCOMPLETE} failed checkpoints in a row`, async () => {
+    const s = await openTestState('cf-walckpt-');
+    const c = await startWalCheckpointer(join(s.dir, 'state.db'), {
+      requestEveryMs: 0, workerSource: fakeWorker(`parentPort.postMessage({ ok: false, error: 'SQLITE_IOERR' });`),
+    });
+    for (let i = 0; i < WAL_MAX_INCOMPLETE - 1; i++) { c!.request(); await c!.idle(); }
+    expect(c!.active()).toBe(true);
+    c!.request();
+    await c!.idle();
+    await settle();
+    expect(c!.active()).toBe(false);
+    expect(await pragma('wal_autocheckpoint')).toBe(1000);
   });
 
   it('checkpoints on its own timer between requests', async () => {

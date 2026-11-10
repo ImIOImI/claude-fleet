@@ -2470,14 +2470,15 @@ export async function purgeWorkspace(
   for (const table of ['events', 'embeddings', 'usage_events', 'session_summaries'] as const) {
     for (;;) {
       const size = chunk;
-      const r = await slice(async () => {
+      // Timed once the connection is held, so waiting on the store mutex doesn't shrink chunks.
+      const r = await slice(() => k.connection().execute(async (c) => {
         const t0 = now();
-        const out = await k.deleteFrom(table)
+        const out = await c.deleteFrom(table)
           .where('id', 'in', (eb) => eb.selectFrom(table).select('id').where('workspace_id', '=', workspaceId).limit(size))
           .executeTakeFirst();
         chunk = nextPurgeChunk(size, now() - t0);
         return out;
-      });
+      }));
       const n = num(r.numDeletedRows);
       deleted += n;
       if (n < size) break;

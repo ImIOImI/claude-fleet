@@ -33,10 +33,12 @@ const READY_TIMEOUT_MS = 5000;
 export const WAL_REWIND_FRAMES = 4000;
 /** A WAL past this many frames means checkpoints aren't keeping up. */
 export const WAL_MAX_FRAMES = 10_000;
-/** This many checkpoints in a row that leave frames behind (a reader pins them) also give up. */
+/** This many checkpoints in a row that leave frames behind (a reader pins them) or fail also give up. */
 export const WAL_MAX_INCOMPLETE = 5;
-/** The main connection truncates the WAL file to this after a checkpoint resets it. */
-const JOURNAL_SIZE_LIMIT = 64 * 1024 * 1024;
+/** A checkpoint outstanding this long is hung (e.g. stuck I/O): hand back. */
+export const CHECKPOINT_TIMEOUT_MS = 5000;
+/** The main connection truncates the WAL file to this after a rewind: about WAL_REWIND_FRAMES pages. */
+const JOURNAL_SIZE_LIMIT = 16 * 1024 * 1024;
 const REQUEST_EVERY_MS = 1000;
 
 export interface CheckpointResult { busy: number; log: number; checkpointed: number }
@@ -60,6 +62,8 @@ export interface WalCheckpointerOptions {
   workerSource?: string;
   /** How often to request a checkpoint between slices (0 = only on request()). */
   requestEveryMs?: number;
+  /** Default CHECKPOINT_TIMEOUT_MS. */
+  checkpointTimeoutMs?: number;
 }
 
 /** Turn the main connection's auto-checkpoint off and checkpoint from a worker
@@ -106,8 +110,10 @@ export async function startWalCheckpointer(dbPath: string, opts: WalCheckpointer
   }
   const saved = prior;
 
+  const hungAfter = opts.checkpointTimeoutMs ?? CHECKPOINT_TIMEOUT_MS;
   let pending: Promise<void> | null = null;
   let settle: (() => void) | null = null;
+  let watchdog: ReturnType<typeof setTimeout> | null = null;
   let last: CheckpointResult | null = null;
   let incomplete = 0;
   let closed = false;
@@ -131,10 +137,13 @@ export async function startWalCheckpointer(dbPath: string, opts: WalCheckpointer
     if (closed) return;
     closed = true;
     if (timer) clearInterval(timer);
+    // Release waiters now: terminate() can't interrupt native I/O, so the
+    // worker's exit may come much later or never.
+    settle?.();
     if (reason) logError({ source: 'main', level: 'warn', type: 'wal-checkpointer', message: reason, extra: { ...last, incomplete } });
     await restore();
     // A checkpoint in flight can't be interrupted; terminate() is not awaited
-    // so a hung one can't hold up the caller, and exit settles `pending`.
+    // so a hung one can't hold up the caller.
     worker.postMessage('close');
     void worker.terminate();
   };
@@ -145,8 +154,11 @@ export async function startWalCheckpointer(dbPath: string, opts: WalCheckpointer
       incomplete = last.checkpointed < last.log ? incomplete + 1 : 0;
       if (last.log > WAL_MAX_FRAMES) void shutdown(`WAL at ${last.log} frames; auto-checkpoint restored for this run`);
       else if (incomplete >= WAL_MAX_INCOMPLETE) void shutdown(`${incomplete} checkpoints in a row left frames behind; auto-checkpoint restored for this run`);
-    } else if (m.error) {
-      logError({ source: 'main', level: 'warn', type: 'wal-checkpointer', message: m.error });
+    } else {
+      // A failed checkpoint leaves `last` stale; it counts as incomplete.
+      incomplete++;
+      logError({ source: 'main', level: 'warn', type: 'wal-checkpointer', message: m.error ?? 'checkpoint failed' });
+      if (incomplete >= WAL_MAX_INCOMPLETE) void shutdown(`${incomplete} checkpoints in a row failed or left frames behind; auto-checkpoint restored for this run`);
     }
     settle?.();
   });
@@ -161,16 +173,27 @@ export async function startWalCheckpointer(dbPath: string, opts: WalCheckpointer
     request() {
       if (pending || closed) return;
       pending = new Promise<void>((resolve) => {
-        settle = () => { settle = null; pending = null; resolve(); };
+        watchdog = setTimeout(() => { void shutdown(`checkpoint hung for ${hungAfter} ms; auto-checkpoint restored for this run`); }, hungAfter);
+        watchdog.unref?.();
+        settle = () => {
+          if (watchdog) clearTimeout(watchdog);
+          watchdog = null;
+          settle = null;
+          pending = null;
+          resolve();
+        };
         worker.postMessage(0);
       });
     },
     idle: () => pending ?? Promise.resolve(),
     async drain() {
       if (closed || (last?.log ?? 0) <= WAL_REWIND_FRAMES) return;
-      await (pending ?? Promise.resolve());
+      // Each wait is bounded by the watchdog, which hands back and settles; the race is a second bound.
+      const bounded = (p: Promise<void> | null) => p && Promise.race([p, new Promise<void>((r) => setTimeout(r, hungAfter + 100).unref?.())]);
+      await bounded(pending);
+      if (closed) return;
       api.request();
-      await (pending ?? Promise.resolve());
+      await bounded(pending);
     },
     last: () => last,
     active: () => !closed,
