@@ -56,6 +56,7 @@ export default defineConfig({
       'src/main/store/pgMigrate.test.ts',
       'src/main/store/pgQueryIsolation.test.ts',
       'src/main/store/pgStores.test.ts',
+      'src/main/store/pgVectorSearch.test.ts',
       'src/main/store/postgres.test.ts',
       'src/main/store/schemaParity.test.ts',
       'src/main/store/storeExport.test.ts',

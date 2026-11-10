@@ -4,8 +4,9 @@
 import { RemoteError } from '../remoteClient.js';
 import type { RemoteSourceInfo } from '../remote.js';
 import type { WorkspaceSummary } from '../db.js';
-import type { RemoteSessionsResult, SessionCursor, SourcePage, UnavailableReason, UnavailableSource } from '../../preload/federation.js';
-import { MAX_REMOTE_SESSIONS, parseSessionsPage, parseSummary, type RemoteSessionItem } from './remoteRows.js';
+import type { RemoteSessionsResult, SearchHitItem, SessionCursor, SourcePage, UnavailableReason, UnavailableSource } from '../../preload/federation.js';
+import { EMBED_MODEL_ID } from '../vectors.js';
+import { MAX_REMOTE_SESSIONS, parseSearchReply, parseSessionsPage, parseSummary, type RemoteSessionItem } from './remoteRows.js';
 
 export const SOURCE_TIMEOUT_MS = 3_000;
 
@@ -30,6 +31,12 @@ export interface FederatedReader {
   /** undefined: the host is unknown or unavailable. */
   summary(remoteId: string, sessionId: string | null): Promise<WorkspaceSummary | null | undefined>;
   call<T>(src: RemoteSourceInfo, channel: string, args: unknown[], parse: (v: unknown) => T): Promise<Outcome<T>>;
+  sources(): RemoteSourceInfo[];
+  /** Sends only the query vector, to `origins` only (D67). */
+  search(o: { vector: Float32Array; limit: number; origins: string[] }): Promise<{
+    remote: { origin: string; hits: Omit<SearchHitItem, 'origin'>[] }[];
+    unavailable: UnavailableSource[];
+  }>;
 }
 
 class SourceTimeout extends Error {}
@@ -75,6 +82,20 @@ export function createFederatedReader(d: FederatedReaderDeps): FederatedReader {
 
   return {
     call,
+    sources: () => d.sources(),
+    async search(o) {
+      const targets = d.sources().filter((s) => o.origins.includes(s.id));
+      const remote: { origin: string; hits: Omit<SearchHitItem, 'origin'>[] }[] = [];
+      const unavailable: UnavailableSource[] = [];
+      const vector = Array.from(o.vector);
+      await Promise.all(targets.map(async (s) => {
+        const r = await call(s, 'history:search', [{ vector, modelId: EMBED_MODEL_ID, limit: o.limit }], (v) => parseSearchReply(v, s.id));
+        if (!r.ok) return void unavailable.push({ origin: s.id, name: s.name, reason: r.reason });
+        if (r.value.modelId !== EMBED_MODEL_ID) return void unavailable.push({ origin: s.id, name: s.name, reason: 'model' });
+        remote.push({ origin: s.id, hits: r.value.hits.map((h) => ({ ...h, workspaceName: s.name })) });
+      }));
+      return { remote: byOrigin(remote), unavailable: byOrigin(unavailable) };
+    },
     async listSessions(req) {
       const all = d.sources();
       const targets = req.origin ? all.filter((s) => s.id === req.origin) : all;

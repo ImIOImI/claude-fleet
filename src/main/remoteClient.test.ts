@@ -168,6 +168,24 @@ describe('RemoteClient', () => {
     await expect(c.rpc('sessions:live', [])).rejects.toMatchObject({ status: 503, retryAfterMs: 2000 });
   });
 
+  it('maps 503 search unavailable to disabled; any other 503 stays unreachable', async () => {
+    const { url } = await rawServer((req, res) => {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(req.url === '/rpc/history%3Asearch' ? { ok: false, error: 'search unavailable' } : { error: 'history unavailable' }));
+    });
+    const c = new RemoteClient({ url, token: async () => TOKEN });
+    await expect(c.rpc('history:search', [])).rejects.toMatchObject({ kind: 'disabled', status: 503 });
+    await expect(c.rpc('history:sessions', [])).rejects.toMatchObject({ kind: 'unreachable', status: 503 });
+  });
+
+  it('a 400 search unavailable is not disabled', async () => {
+    const { url } = await rawServer((_req, res) => {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'search unavailable' }));
+    });
+    await expect(new RemoteClient({ url, token: async () => TOKEN }).rpc('history:search', [])).rejects.toMatchObject({ kind: 'protocol', status: 400 });
+  });
+
   /** Streams 64 KB chunks until the client goes away; resolves `aborted` when it does. */
   async function endless(status: number, headers: Record<string, string> = {}) {
     let aborted!: () => void;

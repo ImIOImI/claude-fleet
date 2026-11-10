@@ -94,7 +94,7 @@ import { registerIdentityIpc } from './identityIpc.js';
 import { createRemoteBackend } from './remote.js';
 import { createFederatedReader } from './federation/federatedReader.js';
 import { createSummaryRelay } from './federation/summaryRelay.js';
-import { registerFederationIpc } from './federation/federationIpc.js';
+import { registerFederationIpc, type LocalSearch } from './federation/federationIpc.js';
 import { assertNotRemoteSpec, confirmText, registerRemoteIpc, type RemoteConfirm } from './remoteIpc.js';
 import { listEndpoints, saveEndpoint, deleteEndpoint, setEndpointApiKey, probeEndpoint, getEndpoint, type ModelEndpoint } from './endpoints.js';
 import * as fs from './fs.js';
@@ -155,7 +155,9 @@ import {
   latestLimitHitAnchor,
   SUMMARY_STALE_GRACE_MS,
   stateKysely,
+  searchEmbeddings,
 } from './db.js';
+import type { EmbedFn } from './vectors.js';
 import { foldPlanUsage, type PlanUsageFold } from './planUsage.js';
 import { logError, getLogPath, flushErrorLogSync } from './errorLog.js';
 import { broadcastObservabilitySummary, latestWins } from './observabilityBroadcast.js';
@@ -388,6 +390,24 @@ const summaryRelay = createSummaryRelay({
   broadcast: (workspaceId, summary) => broadcastObservabilitySummary({ workspaceId, summary }, BrowserWindow.getAllWindows())
 });
 let relayTimer: NodeJS.Timeout | null = null;
+
+// Same makeEmbedder selector the indexer uses, so the query and stored rows share a model.
+let fedEmbed: EmbedFn | null = null;
+export function setFederatedEmbedder(fn: EmbedFn): void {
+  fedEmbed = fn;
+}
+const localManifests = async () => (await listWorkspaceManifests()).filter((m) => m.kind !== 'remote');
+const localSearch: LocalSearch = {
+  embed: async (q) => (fedEmbed ? ((await fedEmbed([q]))[0] ?? null) : null),
+  localIds: async () => new Set((await localManifests()).map((m) => m.id)),
+  async hits(vector, scope, limit) {
+    const manifests = await localManifests();
+    const names = new Map(manifests.map((m) => [m.id, m.name]));
+    const ids = scope === 'all' ? [...names.keys()] : [scope];
+    const rows = await searchEmbeddings(vector, ids, { limit });
+    return rows.map((h) => ({ ...h, workspaceName: names.get(h.workspaceId) ?? h.workspaceId }));
+  }
+};
 
 export function stopRemoteBackend(): void {
   summaryRelay.stop();
@@ -2112,7 +2132,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     findByName: findWorkspaceByName,
     invalidate: invalidateWorkspaceList
   });
-  registerFederationIpc(ipcMain, federated);
+  registerFederationIpc(ipcMain, federated, localSearch);
   relayTimer = setInterval(() => summaryRelay.sync(), 15_000);
   relayTimer.unref?.();
   loadoutSources.setGithubTokenProvider(() => identity.packagesToken());
