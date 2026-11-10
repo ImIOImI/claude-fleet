@@ -260,12 +260,20 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
       return a;
     }
     const embedded = async () => (await t!.pool.query(`SELECT COUNT(*)::int AS n FROM ${t!.schema}.embeddings WHERE text <> ''`)).rows[0].n as number;
+    const mcpTools = async (dir: string): Promise<string[]> => {
+      await vi.waitFor(() => expect(isSocket(mcpSock(dir))).toBe(true), { timeout: 10_000 });
+      const [list] = await rpc(mcpSock(dir), [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }]);
+      return list.result.tools.map((x: { name: string }) => x.name);
+    };
 
     it('on: the holder indexes ingested turns through the sidecar', async () => {
       const a = await boot('');
       await vi.waitFor(async () => expect(await embedded()).toBe(1), { timeout: 10_000 });
       expect(a.logs.join('\n')).not.toMatch(/embedder unavailable/);
       expect(sidecars(a.dir)).toBe(1);
+      expect(await mcpTools(a.dir)).toContain('search_transcripts');
+      const [found] = await rpc(mcpSock(a.dir), [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'search_transcripts', arguments: { query: 'index me' } } }]);
+      expect(JSON.parse(found.result.content[0].text)).toEqual([expect.objectContaining({ sessionId: SID, workspaceId: ID, text: 'index me' })]);
       await a.host.shutdown(0);
       await vi.waitFor(() => expect(sidecars(a.dir)).toBe(0), { timeout: 5_000 });
     }, 30_000);
@@ -295,6 +303,9 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
       await new Promise((r) => setTimeout(r, 2_000));
       expect(await embedded()).toBe(0);
       expect(sidecars(a.dir)).toBe(0);
+      const tools = await mcpTools(a.dir);
+      expect(tools).toContain('list_sessions');
+      expect(tools).not.toContain('search_transcripts');
       expect(a.logs.join('\n')).not.toMatch(/embedder/);
     }, 30_000);
   });

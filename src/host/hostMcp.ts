@@ -1,9 +1,10 @@
 // The fleet-state MCP tools for this workspace's sessions, on the holder (SPEC §7 *Host MCP*).
 import { createServer, type Server, type Socket } from 'node:net';
 import {
-  initReadSource, releaseReadSource, serveMcpConnection, setExposedTools, setMcpLogSink, setReadScopeResolver, type McpLogEntry
+  initReadSource, releaseReadSource, serveMcpConnection, setExposedTools, setMcpLogSink, setQueryEmbedder, setReadScopeResolver, type McpLogEntry
 } from '../main/mcpCore.js';
 import type { OwnedReadSource } from '../main/store/readSource.js';
+import type { EmbedFn } from '../main/vectors.js';
 import type { Logger } from './log.js';
 import { finishSocket, prepareSocketPath } from './socketDir.js';
 
@@ -12,6 +13,12 @@ export const HOST_MCP_TOOLS: ReadonlySet<string> = new Set([
   'post_todo', 'update_todo', 'list_todos',
   'list_automations', 'get_automation', 'list_runs', 'run_automation', 'schedule_next'
 ]);
+export const HOST_SEARCH_TOOL = 'search_transcripts';
+const HOST_TOOLS_WITH_SEARCH: ReadonlySet<string> = new Set([...HOST_MCP_TOOLS, HOST_SEARCH_TOOL]);
+/** D79: search_transcripts exists only where the holder runs an embedder. */
+export function hostMcpTools(search: boolean): ReadonlySet<string> {
+  return search ? HOST_TOOLS_WITH_SEARCH : HOST_MCP_TOOLS;
+}
 export const MAX_HOST_MCP_CONNECTIONS = 64;
 /** A session's bridge reconnects in a loop; these stay off stdout at the default level. */
 const QUIET = new Set(['mcp-conn', 'mcp-conn-closed']);
@@ -32,6 +39,8 @@ export async function startHostMcp(o: {
   log: Logger;
   maxConnections?: number;
   now?: () => number;
+  /** The holder's sidecar; without it search_transcripts isn't served. */
+  embed?: EmbedFn;
 }): Promise<HostMcp> {
   if (active) throw new Error('the host MCP is already serving in this process');
   active = true;
@@ -48,8 +57,9 @@ export async function startHostMcp(o: {
     })
   );
   setReadScopeResolver(async () => [o.workspaceId]);
-  setExposedTools(HOST_MCP_TOOLS);
+  setExposedTools(hostMcpTools(!!o.embed));
   initReadSource(o.readSource);
+  setQueryEmbedder(o.embed ?? null);
   const socks = new Set<Socket>();
   const server: Server = createServer((sock) => {
     if (socks.size >= max) {
@@ -68,6 +78,7 @@ export async function startHostMcp(o: {
   });
   function reset(): void {
     releaseReadSource();
+    setQueryEmbedder(null);
     setExposedTools(null);
     setMcpLogSink(null);
     active = false;

@@ -3,10 +3,12 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, statS
 import { connect, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { handleMcpRequestForTests, MAX_IN_FLIGHT_PER_CONNECTION, setInboxHandlers, setReadScopeResolver } from '../main/mcpCore.js';
+import { handleMcpRequestForTests, initReadSource, MAX_IN_FLIGHT_PER_CONNECTION, releaseReadSource, setInboxHandlers, setReadScopeResolver } from '../main/mcpCore.js';
+import { EmbedderUnavailable } from '../main/embedderClient.js';
 import type { OwnedReadSource } from '../main/store/readSource.js';
+import type { EmbedFn } from '../main/vectors.js';
 import { createLogger } from './log.js';
-import { HOST_MCP_BRIDGE, HOST_MCP_TOOLS, hostMcpArgs, startHostMcp, type HostMcp } from './hostMcp.js';
+import { HOST_MCP_BRIDGE, HOST_MCP_TOOLS, HOST_SEARCH_TOOL, hostMcpArgs, hostMcpTools, startHostMcp, type HostMcp } from './hostMcp.js';
 
 const WS = '01JC0000000000000000000000';
 const scopes: string[][] = [];
@@ -14,7 +16,11 @@ const rs = {
   queryFlavor: null,
   close: async () => undefined,
   forgetCaller: async () => undefined,
-  listSessions: async (scope: ReadonlySet<string>) => { scopes.push([...scope]); return []; }
+  listSessions: async (scope: ReadonlySet<string>) => { scopes.push([...scope]); return []; },
+  searchEmbeddings: async (_q: Float32Array, scope: ReadonlySet<string>) => {
+    scopes.push([...scope]);
+    return [{ sessionId: 's1', workspaceId: WS, kind: 'turn', ts: 1, text: 'hit', score: 0.9 }];
+  }
 } as unknown as OwnedReadSource;
 
 let mcp: HostMcp | null = null;
@@ -27,10 +33,10 @@ afterEach(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-async function start(lines: string[], maxConnections?: number, now?: () => number) {
+async function start(lines: string[], maxConnections?: number, now?: () => number, embed?: EmbedFn) {
   dir = mkdtempSync(join(tmpdir(), 'hm-'));
   const socketPath = join(dir, 'run', 'mcp.sock');
-  mcp = await startHostMcp({ socketPath, socketGroup: null, workspaceId: WS, readSource: rs, log: createLogger((l) => lines.push(l)), maxConnections, now });
+  mcp = await startHostMcp({ socketPath, socketGroup: null, workspaceId: WS, readSource: rs, log: createLogger((l) => lines.push(l)), maxConnections, now, embed });
   return socketPath;
 }
 
@@ -148,10 +154,60 @@ describe('startHostMcp', () => {
 });
 
 describe('HOST_MCP_TOOLS', () => {
-  it('serves query and still refuses search_transcripts', () => {
+  it('serves query; search_transcripts only with an embedder', () => {
     expect(HOST_MCP_TOOLS.has('query')).toBe(true);
     expect(HOST_MCP_TOOLS.has('search_transcripts')).toBe(false);
     expect(HOST_MCP_TOOLS.size).toBe(14);
+    expect(HOST_SEARCH_TOOL).toBe('search_transcripts');
+    expect(hostMcpTools(true).size).toBe(15);
+    expect(hostMcpTools(true).has('search_transcripts')).toBe(true);
+    expect(hostMcpTools(false)).toBe(HOST_MCP_TOOLS);
+  });
+});
+
+describe('search_transcripts on the host', () => {
+  const unitEmbed: EmbedFn = async (t) => t.map(() => new Float32Array(384).fill(1 / Math.sqrt(384)));
+  const search = (id: number, args: object) => ({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'search_transcripts', arguments: args } });
+  const names = (m: Record<string, any>) => m.result.tools.map((t: { name: string }) => t.name) as string[];
+
+  it('embeds in the sidecar and searches only the hosted workspace', async () => {
+    const p = await start([], undefined, undefined, unitEmbed);
+    const [list, hit, other] = await rpc(p, [
+      { jsonrpc: '2.0', id: 1, method: 'tools/list' }, search(2, { query: 'x' }), search(3, { query: 'x', workspace_id: 'other' })
+    ]).then((ms) => [1, 2, 3].map((id) => ms.find((m) => m.id === id)!));
+    expect(new Set(names(list))).toEqual(hostMcpTools(true));
+    expect(JSON.parse(hit.result.content[0].text)).toEqual([expect.objectContaining({ sessionId: 's1', text: 'hit' })]);
+    expect(JSON.parse(other.result.content[0].text)).toEqual([]);
+    expect(scopes).toEqual([[WS]]);
+  });
+
+  it('is not served without an embedder', async () => {
+    const p = await start([]);
+    const [list, call] = await rpc(p, [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }, search(2, { query: 'x' })])
+      .then((ms) => [1, 2].map((id) => ms.find((m) => m.id === id)!));
+    expect(names(list)).toHaveLength(14);
+    expect(call.error.message).toBe('Unknown tool: search_transcripts');
+    expect(scopes).toEqual([]);
+  });
+
+  it('answers embedder sidecar unavailable when the sidecar can’t run', async () => {
+    const p = await start([], undefined, undefined, async () => { throw new EmbedderUnavailable('not installed: /x'); });
+    const [call] = await rpc(p, [search(1, { query: 'x' })]);
+    expect(call.result.isError).toBe(true);
+    expect(call.result.content[0].text).toContain('embedder sidecar unavailable');
+  });
+
+  it('drops the embedder when the MCP closes', async () => {
+    await start([], undefined, undefined, unitEmbed);
+    await mcp!.close();
+    mcp = null;
+    initReadSource(rs);
+    try {
+      const res = await handleMcpRequestForTests('tools/call', { name: 'search_transcripts', arguments: { query: 'x' } }) as { content: Array<{ text: string }> };
+      expect(res.content[0].text).toContain('transcript search index is unavailable');
+    } finally {
+      releaseReadSource();
+    }
   });
 });
 
