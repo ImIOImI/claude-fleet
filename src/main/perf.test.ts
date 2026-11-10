@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { closeDb, openDb, stateKysely } from './db.js';
 import { PerfStore } from './perfStore.js';
 import {
-  initPerf, shutdownPerf, reconfigurePerf, perfSpan, perfSpanAsync, perfSetSpanContext, getEffectivePerf,
+  initPerf, shutdownPerf, reconfigurePerf, perfSpan, perfSpanAsync, perfSpanAsyncAttrs, perfSetSpanContext, getEffectivePerf,
   recordPtyChunk, getPerfStatus, recordLatencySample, setPerfStateListener, perfNotePowerEvent, recordGcEntries,
   sampleMemory, setPerfMemorySource, recordBootProfile
 } from './perf.js';
@@ -52,6 +52,16 @@ describe('perf tracer pipeline', () => {
     expect(slow.dur_ms).toBeGreaterThanOrEqual(25);
     expect(slow.trace_id).toMatch(/^[0-9a-f]{32}$/);
     expect(slow.span_id).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it('keeps retention slices only from 50 ms, with the attributes the slice set', async () => {
+    initPerf(store, ON);
+    const busy = (ms: number) => { const end = Date.now() + ms; while (Date.now() < end) { /* busy */ } };
+    await perfSpanAsyncAttrs('claude_fleet.retention.slice', (set) => { set({ rows: 1 }); busy(35); }, { step: 'events' });
+    await perfSpanAsyncAttrs('claude_fleet.retention.slice', (set) => { set({ rows: 2 }); busy(60); }, { step: 'vacuum' });
+    await shutdownPerf();
+    const rows = db.prepare(`SELECT meta FROM perf_events WHERE name = 'claude_fleet.retention.slice'`).all() as Array<{ meta: string }>;
+    expect(rows.map((r) => JSON.parse(r.meta))).toEqual([{ step: 'vacuum', rows: 2 }]);
   });
 
   it('perfSpanAsync covers awaited work and rethrows', async () => {

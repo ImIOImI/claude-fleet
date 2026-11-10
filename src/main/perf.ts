@@ -31,6 +31,11 @@ import type { BootProfileResult } from './bootProfile.js';
 import { RETENTION_MS } from './perfStore.js';
 
 export const SLOW_OP_MS = 25;
+/** Higher slow_op floors for spans that run near SLOW_OP_MS by design. */
+export const SLOW_OP_MS_BY_NAME: Readonly<Record<string, number>> = {
+  // Retention slices aim for ~35 ms; only overshoots are worth a row.
+  'claude_fleet.retention.slice': 50,
+};
 export const FLUSH_INTERVAL_MS = 5000;
 export const STALL_THRESHOLD_MS = 50;
 export const SAMPLE_INTERVAL_MS = 5000;
@@ -49,7 +54,7 @@ export class SqliteSpanExporter implements SpanExporter {
   export(spans: ReadableSpan[], done: (result: ExportResult) => void): void {
     for (const s of spans) {
       const durMs = hrTimeToMilliseconds(s.duration);
-      if (durMs < SLOW_OP_MS) continue;
+      if (durMs < (SLOW_OP_MS_BY_NAME[s.name] ?? SLOW_OP_MS)) continue;
       const attrs = s.attributes as Record<string, unknown>;
       this.store.enqueue({
         ts: hrTimeToMilliseconds(s.startTime),
@@ -444,10 +449,21 @@ export async function perfSpanAsync<T>(
   }
 }
 
-/** Add attributes to the active span (they land in its slow_op row's meta).
- *  No-op outside a span or while recording is off. */
-export function perfSetSpanAttributes(attrs: Attributes): void {
-  trace.getActiveSpan()?.setAttributes(attrs);
+/** perfSpanAsync that hands `fn` a setter for the span's attributes (they land in its slow_op row's meta). */
+export async function perfSpanAsyncAttrs<T>(
+  name: string,
+  fn: (set: (attrs: Attributes) => void) => Promise<T> | T,
+  attrs?: Attributes
+): Promise<T> {
+  const span = trace.getTracer(TRACER_NAME).startSpan(name, { attributes: attrs });
+  try {
+    return await context.with(trace.setSpan(context.active(), span), () => fn((a) => span.setAttributes(a)));
+  } catch (err) {
+    if (err instanceof Error) span.recordException(err);
+    throw err;
+  } finally {
+    span.end();
+  }
 }
 
 /** Stamp workspace/session attribution onto the active span, for handlers

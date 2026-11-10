@@ -9,15 +9,20 @@ import { indexSessionTurns } from '../transcriptIndex.js';
 import { openTestState, queryRows, isPg } from '../store/testStore.js';
 import { deflateLine } from './rawCodec.js';
 import {
-  AdaptiveBatch, compactEmbeddings, createThrottle, DAY_MS, dedupeAttachments, incrementalVacuum, retainEvents, startRetention, type PassResult, type SliceBudget, type Throttle,
+  AdaptiveBatch, compactEmbeddings, createThrottle, DAY_MS, SLICE_BYTES, dedupeAttachments, incrementalVacuum, retainEvents, startRetention, type PassResult, type SliceBudget, type Throttle,
 } from './retention.js';
+import type { WalCheckpointer } from './walCheckpointer.js';
 
 const WS = '01WS';
 const SES = 'ses-old';
 const NOW = Date.parse('2026-11-06T00:00:00Z');
 const iso = (daysAgo: number, plusMs = 0) => new Date(NOW - daysAgo * DAY_MS + plusMs).toISOString();
 
-const unthrottled: Throttle = { slice: (_step, fn) => fn({ targetMs: 35, expired: () => false, note: () => undefined }), stopped: () => false };
+/** A budget on a fixed clock: `elapsedMs` is what every elapsed() reports. */
+const budget = (expired: () => boolean = () => false, elapsedMs = 0, note: (a: Record<string, unknown>) => void = () => undefined): SliceBudget => ({
+  targetMs: 35, now: () => 0, begin: () => undefined, elapsed: () => elapsedMs, expired, note,
+});
+const unthrottled: Throttle = { slice: (_step, fn) => fn(budget()), stopped: () => false };
 
 const toolUse = (id: string, daysAgo: number) => JSON.stringify({
   type: 'assistant', uuid: `a-${id}`, timestamp: iso(daysAgo), sessionId: SES,
@@ -120,7 +125,7 @@ describe('retainEvents', () => {
     const many = Array.from({ length: 30 }, (_, i) => toolResult(`m${i}`, 40));
     await ingestAll(many);
     let n = 0;
-    const stopAfterOne: Throttle = { slice: (_step, fn) => { n++; return fn({ targetMs: 35, expired: () => false, note: () => undefined }); }, stopped: () => n >= 1 };
+    const stopAfterOne: Throttle = { slice: (_step, fn) => { n++; return fn(budget()); }, stopped: () => n >= 1 };
     await retainEvents(NOW, stopAfterOne, { sliceRows: 10 });
     const strippedNow = (await eventsForSession(SES)).filter((e) => JSON.parse(e.rawJsonl).fleetStripped).length;
     expect(strippedNow).toBe(10);
@@ -206,6 +211,22 @@ describe('createThrottle', () => {
     expect(seen).toEqual([false, false, true, false]);
   });
 
+  it('starts the budget and the pacing at begin(), not while waiting for the store', async () => {
+    let clock = 0;
+    const sleeps: number[] = [];
+    const t = createThrottle({ now: () => clock, sleep: async (ms) => { sleeps.push(ms); }, targetMs: 35, minSleepMs: 0 });
+    const seen: [boolean, number][] = [];
+    await t.slice('x', async (b) => {
+      clock += 500; // waiting for the store mutex
+      b.begin();
+      seen.push([b.expired(), b.elapsed()]);
+      clock += 20;
+      seen.push([b.expired(), b.elapsed()]);
+    });
+    expect(seen).toEqual([[false, 0], [false, 20]]);
+    expect(sleeps).toEqual([180]); // 9 × 20 ms of work, not 9 × 520
+  });
+
   it('stop() cuts a sleep short and marks the throttle stopped', async () => {
     const t = createThrottle({ minSleepMs: 60_000 });
     const p = t.slice('x', async () => 1);
@@ -240,7 +261,7 @@ function spentThrottle(): Throttle & { slices: number; steps: string[] } {
     slice: <T>(step: string, fn: (b: SliceBudget) => Promise<T>) => {
       t.slices++;
       t.steps.push(step);
-      return fn({ targetMs: 35, expired: () => true, note: () => undefined });
+      return fn(budget(() => true));
     },
     stopped: () => false,
   };
@@ -266,13 +287,35 @@ describe('slice budgets', () => {
     let calls = 0;
     // Expires after every third row check.
     const t: Throttle = {
-      slice: (_s, fn) => { let k = 0; calls++; return fn({ targetMs: 35, expired: () => ++k > 2, note: () => undefined }); },
+      slice: (_s, fn) => { let k = 0; calls++; return fn(budget(() => ++k > 2)); },
       stopped: () => false,
     };
     const r = await retainEvents(NOW, t);
     expect(r.rows).toBe(9);
     expect(calls).toBeGreaterThan(3);
     expect((await eventsForSession(SES)).filter((e) => JSON.parse(e.rawJsonl).fleetStripped).length).toBe(9);
+  });
+
+  it('events: batch size follows the slice clock down to its floor, then back up', async () => {
+    const many = Array.from({ length: 40 }, (_, i) => toolResult(`d${i}`, 40));
+    await ingestAll(many);
+    const sizes: number[] = [];
+    let elapsedMs = 350; // 10× the target: shrink
+    const t: Throttle = {
+      slice: (_s, fn) => fn(budget(() => false, elapsedMs, (a) => { if (typeof a.batch_bytes === 'number') sizes.push(a.batch_bytes); })),
+      stopped: () => false,
+    };
+    const first = retainEvents(NOW, t, { sliceRows: 5 });
+    await first;
+    expect(sizes[0]).toBeLessThan(SLICE_BYTES);
+    expect(Math.min(...sizes)).toBe(16 * 1024);
+    // Every row is still done exactly once.
+    expect((await eventsForSession(SES)).filter((e) => JSON.parse(e.rawJsonl).fleetStripped).length).toBe(40);
+    // Fast slices grow it back by 25% each.
+    const b = new AdaptiveBatch(16 * 1024, 16 * 1024, SLICE_BYTES);
+    elapsedMs = 1;
+    b.observe(elapsedMs, 35);
+    expect(b.size).toBe(20 * 1024);
   });
 
   it.skipIf(isPg)('embeddings: a spent budget compacts one row per slice and finishes', async () => {
@@ -328,22 +371,39 @@ describe('startRetention', () => {
     expect(await maintenanceGet('retention.first_pass_at')).toBe(String(NOW));
   });
 
-  it.skipIf(isPg)('checkpoints from a worker during a pass and restores auto-checkpoint after it', async () => {
+  it.skipIf(isPg)('starts the checkpointer on the first slice, checkpoints from it, and restores the prior setting', async () => {
     await ingestAll();
-    const autocheckpoints: number[] = [];
+    await withRawSqlite((d) => d.pragma('wal_autocheckpoint = 500'));
+    const samples: number[] = [];
+    let started: WalCheckpointer | null | undefined;
     let r: { stop(): Promise<void> } | null = null;
     await new Promise<void>((resolve) => {
       r = startRetention({
         listManifestIds: async () => [WS], stateDirExists: () => true, orphanSweep: true, walDbPath: join(state.dir, 'state.db'),
         firstDelayMs: 0, now: () => NOW,
-        throttle: { minSleepMs: 0, idleRatio: 0, afterSlice: () => { void withRawSqlite((d) => d.pragma('wal_autocheckpoint', { simple: true }) as number).then((n) => { if (n !== null) autocheckpoints.push(n); }); } },
+        throttle: { minSleepMs: 5, idleRatio: 0 },
+        // Sampled as it starts: the run's teardown restores the setting only after this.
+        onCheckpointer: (c) => { started = c; void withRawSqlite((d) => d.pragma('wal_autocheckpoint', { simple: true }) as number).then((n) => { if (n !== null) samples.push(n); }); },
         onPass: () => resolve(),
       });
     });
     await r!.stop();
-    expect(autocheckpoints.length).toBeGreaterThan(0);
-    expect(autocheckpoints.every((n) => n === 0)).toBe(true);
-    expect(await withRawSqlite((d) => d.pragma('wal_autocheckpoint', { simple: true }))).toBe(1000);
+    expect(started).not.toBeNull();
+    expect(started).toBeDefined();
+    expect(samples).toEqual([0]);
+    expect(await withRawSqlite((d) => d.pragma('wal_autocheckpoint', { simple: true }))).toBe(500);
+  });
+
+  it.skipIf(isPg)('a run with no slices starts no checkpointer', async () => {
+    let started = false;
+    const r = startRetention({
+      listManifestIds: async () => [WS], stateDirExists: () => true, orphanSweep: false, walDbPath: join(state.dir, 'state.db'),
+      firstDelayMs: 60 * 60_000, vacuumEveryMs: 10, now: () => NOW, throttle: { minSleepMs: 0, idleRatio: 0 },
+      onCheckpointer: () => { started = true; },
+    });
+    await new Promise((res) => setTimeout(res, 100)); // several vacuum checks on a db that isn't in incremental mode
+    await r.stop();
+    expect(started).toBe(false);
   });
 });
 
@@ -352,7 +412,7 @@ describe('retainEvents edge cases', () => {
     await ingestAll();
     await retainEvents(NOW + 40 * DAY_MS, unthrottled);
     let slices = 0;
-    const counting: Throttle = { slice: (_s, fn) => { slices++; return fn({ targetMs: 35, expired: () => false, note: () => undefined }); }, stopped: () => false };
+    const counting: Throttle = { slice: (_s, fn) => { slices++; return fn(budget()); }, stopped: () => false };
     await retainEvents(NOW + 41 * DAY_MS, counting);
     expect(slices).toBe(0);
   });
@@ -435,7 +495,7 @@ describe('dedupeAttachments', () => {
 
   it.skipIf(isPg)('does nothing when stopped', async () => {
     await legacyRows();
-    const stopped: Throttle = { slice: (_s, fn) => fn({ targetMs: 35, expired: () => false, note: () => undefined }), stopped: () => true };
+    const stopped: Throttle = { slice: (_s, fn) => fn(budget()), stopped: () => true };
     expect((await dedupeAttachments(stopped)).rows).toBe(0);
     expect(await queryRows('SELECT hash FROM event_blobs')).toEqual([]);
   });

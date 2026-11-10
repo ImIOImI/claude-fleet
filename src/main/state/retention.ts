@@ -7,7 +7,7 @@ import {
   retentionKeys, rewriteEventRaw, setRetentionWatermarks, stateDialect, withRawSqlite, workspaceIdsInState, type RetentionRow,
 } from '../db.js';
 import { logError } from '../errorLog.js';
-import { perfSetSpanAttributes, perfSpanAsync } from '../perf.js';
+import { perfSpanAsync, perfSpanAsyncAttrs } from '../perf.js';
 import type { Attributes } from '@opentelemetry/api';
 import { COMPRESS_MIN_BYTES, deflateLine, rawLine, stripLine } from './rawCodec.js';
 import { dedupeAttachment } from './attachmentCodec.js';
@@ -25,7 +25,14 @@ export const SLICE_TARGET_MS = 35;
 export interface SliceBudget {
   /** This slice's time target. */
   readonly targetMs: number;
-  /** True once the slice has run for its target: stop at the next row boundary. */
+  /** The throttle's clock (ms). */
+  now(): number;
+  /** Mark where the slice's own work starts, once its first query holds the
+   *  store: waiting for the store mutex isn't the slice's cost. Defaults to the slice start. */
+  begin(): void;
+  /** Milliseconds since begin(). */
+  elapsed(): number;
+  /** True once the slice has worked for its target: stop at the next row boundary. */
   expired(): boolean;
   /** Attributes for the slice's span (its slow_op row's meta). */
   note(attrs: Attributes): void;
@@ -93,12 +100,13 @@ async function walkRange(
   for (;;) {
     if (t.stopped()) return false;
     const done = await t.slice('events', async (b) => {
-      const t0 = performance.now();
       const keys = await retentionKeys(sessionId, fromTs, toTs, after, sliceRows, toolOnly);
+      b.begin();
       if (keys.length === 0) return true;
       // Bodies only up to the byte budget, so no row is read twice.
       const taken = takeWithin(keys, batch.size);
       const bodies = inKeyOrder(taken, await retentionBodies(taken.map((k) => k.id)));
+      const readMs = b.elapsed();
       const updates: { id: number; raw_jsonl: string; raw_z: Buffer | null }[] = [];
       let n = 0;
       let bytes = 0;
@@ -114,9 +122,10 @@ async function walkRange(
         }
       }
       after = { ts: taken[n - 1].ts, id: taken[n - 1].id };
+      const w0 = b.elapsed();
       await rewriteEventRaw(updates);
-      batch.observe(performance.now() - t0, b.targetMs);
-      b.note({ rows: n, rewritten: updates.length, bytes, batch_bytes: batch.size });
+      batch.observe(b.elapsed(), b.targetMs);
+      b.note({ rows: n, rewritten: updates.length, bytes, batch_bytes: batch.size, read_ms: readMs, write_ms: b.elapsed() - w0 });
       return false;
     });
     if (done) return true;
@@ -158,11 +167,12 @@ export async function dedupeAttachments(t: Throttle, opts: { sliceRows?: number 
   const batch = new AdaptiveBatch(SLICE_BYTES, 16 * 1024, SLICE_BYTES);
   while (cursor < maxId && !t.stopped()) {
     const next = await t.slice('attachments', async (b) => {
-      const t0 = performance.now();
       const keys = await attachmentBackfillKeys(cursor, maxId, opts.sliceRows ?? SLICE_ROWS);
+      b.begin();
       if (keys.length === 0) return maxId;
       const taken = takeWithin(keys, batch.size);
       const bodies = inKeyOrder(taken, await retentionBodies(taken.map((k) => k.id)));
+      const readMs = b.elapsed();
       const updates: { id: number; raw_jsonl: string; raw_z: Buffer | null; ref: string; payload: string }[] = [];
       let n = 0;
       let bytes = 0;
@@ -186,10 +196,11 @@ export async function dedupeAttachments(t: Throttle, opts: { sliceRows?: number 
         updates.push({ id: row.id, ...out, ref: d.ref, payload: d.payload });
         acc.bytesSaved += storedBytes(row) - storedBytes(out);
       }
+      const w0 = b.elapsed();
       await applyAttachmentDedupe(updates);
       acc.rows += updates.length;
-      batch.observe(performance.now() - t0, b.targetMs);
-      b.note({ rows: n, rewritten: updates.length, bytes, batch_bytes: batch.size });
+      batch.observe(b.elapsed(), b.targetMs);
+      b.note({ rows: n, rewritten: updates.length, bytes, batch_bytes: batch.size, read_ms: readMs, write_ms: b.elapsed() - w0 });
       return taken[n - 1].id;
     });
     cursor = next;
@@ -209,9 +220,8 @@ export async function compactEmbeddings(t: Throttle, opts: { sliceRows?: number 
   const batch = new AdaptiveBatch(opts.sliceRows ?? SLICE_ROWS, 1, opts.sliceRows ?? SLICE_ROWS);
   while (cursor < maxId && !t.stopped()) {
     const r = await t.slice('embeddings', async (b) => {
-      const t0 = performance.now();
-      const out = await compactEmbeddingSlice(cursor, maxId, batch.size, () => b.expired());
-      batch.observe(performance.now() - t0, b.targetMs);
+      const out = await compactEmbeddingSlice(cursor, maxId, batch.size, () => b.expired(), () => b.begin());
+      batch.observe(b.elapsed(), b.targetMs);
       b.note({ rows: out.scanned, rewritten: out.rewritten, bytes: out.bytesSaved, batch_rows: batch.size });
       return out;
     });
@@ -256,6 +266,8 @@ export interface ThrottleOptions {
   targetMs?: number;
   /** Called after each slice, before its sleep. */
   afterSlice?: () => void;
+  /** Extra attributes for every slice span (e.g. WAL state). */
+  sliceMeta?: () => Attributes;
   /** Sleep this many times a slice's duration after it (9 → ≤10% duty cycle). */
   idleRatio?: number;
   now?: () => number;
@@ -278,15 +290,23 @@ export function createThrottle(opts: ThrottleOptions = {}): Throttle & { stop():
   }));
   return {
     async slice(step, fn) {
-      const t0 = now();
+      let t0 = now();
       try {
-        return await perfSpanAsync('claude_fleet.retention.slice', () => fn({
-          targetMs: target,
-          expired: () => now() - t0 >= target,
-          note: perfSetSpanAttributes,
-        }), { step });
+        return await perfSpanAsyncAttrs('claude_fleet.retention.slice', (set) => {
+          const meta = opts.sliceMeta?.();
+          if (meta) set(meta);
+          return fn({
+            targetMs: target,
+            now,
+            begin: () => { t0 = now(); },
+            elapsed: () => now() - t0,
+            expired: () => now() - t0 >= target,
+            note: set,
+          });
+        }, { step });
       } finally {
         opts.afterSlice?.();
+        // Paced on the slice's own work, not on time spent waiting for the store.
         if (!stopped) await sleep(Math.max(minSleep, ratio * (now() - t0)), (w) => { wakeSleeper = w; });
         wakeSleeper = null;
       }
@@ -318,13 +338,13 @@ export async function incrementalVacuum(t: Throttle): Promise<number> {
   while (free > VACUUM_FREE_PAGES && start - free < VACUUM_MAX_PAGES && !t.stopped()) {
     const before = free;
     free = (await t.slice('vacuum', async (b) => {
-      const t0 = performance.now();
       const pages = batch.size;
       const left = await withRawSqlite((d) => {
+        b.begin();
         d.pragma(`incremental_vacuum(${pages})`);
         return d.pragma('freelist_count', { simple: true }) as number;
       });
-      batch.observe(performance.now() - t0, b.targetMs);
+      batch.observe(b.elapsed(), b.targetMs);
       b.note({ pages, batch_pages: batch.size });
       return left;
     })) ?? free;
@@ -346,6 +366,8 @@ export interface RetentionDeps extends OrphanDeps {
   throttle?: ThrottleOptions;
   /** Test hook: called after each full pass. */
   onPass?: (r: PassResult) => void;
+  /** Test hook: called when a run starts its WAL checkpointer. */
+  onCheckpointer?: (c: WalCheckpointer | null) => void;
 }
 
 export interface PassResult {
@@ -359,8 +381,24 @@ export interface PassResult {
 /** Schedule retention: a pass 5 min after start, then daily; an incremental
  *  vacuum check every 30 min. One unit of work runs at a time. */
 export function startRetention(deps: RetentionDeps): { stop(): Promise<void> } {
-  let checkpointer: WalCheckpointer | null = null;
-  const throttle = createThrottle({ ...deps.throttle, afterSlice: () => { deps.throttle?.afterSlice?.(); checkpointer?.request(); } });
+  // Started on a run's first slice, so a run with nothing to do spawns no worker.
+  let wantCheckpointer = false;
+  let checkpointer: Promise<WalCheckpointer | null> | null = null;
+  let ck: WalCheckpointer | null = null;
+  const throttle = createThrottle({
+    ...deps.throttle,
+    afterSlice: () => {
+      deps.throttle?.afterSlice?.();
+      if (wantCheckpointer && !checkpointer && deps.walDbPath) {
+        checkpointer = startWalCheckpointer(deps.walDbPath).then((c) => { deps.onCheckpointer?.(c); return (ck = c); }).catch(() => null);
+      }
+      ck?.request();
+    },
+    sliceMeta: () => {
+      const l = ck?.last();
+      return { ...deps.throttle?.sliceMeta?.(), ...(l ? { wal_log: l.log, wal_ckpt: l.checkpointed, wal_busy: l.busy, wal_worker: ck!.active() } : {}) };
+    },
+  });
   const now = deps.now ?? Date.now;
   let running: Promise<unknown> | null = null;
   const step = async <T>(name: string, fn: () => Promise<T>, fallback: T): Promise<T> => {
@@ -392,12 +430,14 @@ export function startRetention(deps: RetentionDeps): { stop(): Promise<void> } {
   const run = (fn: () => Promise<unknown>) => {
     if (running || throttle.stopped()) return;
     running = (async () => {
-      if (deps.walDbPath) checkpointer = await startWalCheckpointer(deps.walDbPath);
+      wantCheckpointer = true;
       try {
         await fn();
       } finally {
-        const c = checkpointer;
+        wantCheckpointer = false;
+        const c = await checkpointer;
         checkpointer = null;
+        ck = null;
         await c?.close();
       }
     })().finally(() => { running = null; });

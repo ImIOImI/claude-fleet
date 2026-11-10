@@ -2434,8 +2434,16 @@ export async function setRetentionWatermarks(
 
 /** Rows per purge statement to start with; the size then tracks PURGE_TARGET_MS. */
 const PURGE_CHUNK = 250;
-const PURGE_MIN_CHUNK = 10;
+const PURGE_MIN_CHUNK = 50;
 const PURGE_TARGET_MS = 35;
+
+/** The next purge chunk after one of `size` rows took `ms`: cut in proportion
+ *  on overshoot, grown back by 25% while under half the target. */
+export function nextPurgeChunk(size: number, ms: number): number {
+  if (ms > PURGE_TARGET_MS) return Math.max(PURGE_MIN_CHUNK, Math.floor(size * (PURGE_TARGET_MS / ms) * 0.8));
+  if (ms < PURGE_TARGET_MS / 2) return Math.min(PURGE_CHUNK, Math.ceil(size * 1.25));
+  return size;
+}
 const macrotask = (): Promise<void> => new Promise((r) => setImmediate(r));
 
 /** Delete every state.db row of a removed workspace (SPEC §7 *Retention*).
@@ -2446,6 +2454,7 @@ export async function purgeWorkspace(
   workspaceId: string,
   // Default: yield a macrotask after each chunk, since the SQLite driver resolves only microtasks between statements.
   slice: <T>(fn: () => Promise<T>) => Promise<T> = async (fn) => { const r = await fn(); await macrotask(); return r; },
+  now: () => number = () => performance.now(),
 ): Promise<number> {
   const k = kyselyOrThrow();
   let deleted = 0;
@@ -2462,13 +2471,11 @@ export async function purgeWorkspace(
     for (;;) {
       const size = chunk;
       const r = await slice(async () => {
-        const t0 = performance.now();
+        const t0 = now();
         const out = await k.deleteFrom(table)
           .where('id', 'in', (eb) => eb.selectFrom(table).select('id').where('workspace_id', '=', workspaceId).limit(size))
           .executeTakeFirst();
-        const ms = performance.now() - t0;
-        if (ms > PURGE_TARGET_MS) chunk = Math.max(PURGE_MIN_CHUNK, Math.floor(size * (PURGE_TARGET_MS / ms) * 0.8));
-        else if (ms < PURGE_TARGET_MS / 2) chunk = Math.min(PURGE_CHUNK, Math.ceil(size * 1.25));
+        chunk = nextPurgeChunk(size, now() - t0);
         return out;
       });
       const n = num(r.numDeletedRows);
@@ -2592,11 +2599,13 @@ export async function maxEmbeddingId(): Promise<number> {
 /** Compact up to `limit` embedding rows with `afterId < id <= maxId`: a
  *  placeholder (text '') loses its vector; on SQLite a float32 vector is
  *  re-encoded to int8. `expired` stops the SQLite row loop early (after at
- *  least one row). `lastId` is the cursor to resume from (null when the range
- *  is exhausted). */
-export async function compactEmbeddingSlice(afterId: number, maxId: number, limit: number, expired: () => boolean = () => false):
-  Promise<{ lastId: number | null; scanned: number; rewritten: number; bytesSaved: number }> {
+ *  least one row); `started` runs once the transaction holds the store.
+ *  `lastId` is the cursor to resume from (null when the range is exhausted). */
+export async function compactEmbeddingSlice(
+  afterId: number, maxId: number, limit: number, expired: () => boolean = () => false, started: () => void = () => undefined,
+): Promise<{ lastId: number | null; scanned: number; rewritten: number; bytesSaved: number }> {
   return kyselyOrThrow().transaction().execute(async (trx) => {
+    started();
     if (dialect === 'postgres') {
       const ids = (await trx.selectFrom('embeddings').select('id')
         .where('id', '>', afterId).where('id', '<=', maxId).orderBy('id').limit(limit).execute()).map((r) => num(r.id));
