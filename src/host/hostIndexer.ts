@@ -1,6 +1,6 @@
 // Embeds the hosted workspace's turns: a backfill at holder start, then one
 // pass per ingested session, serially. Inserts are fenced store writes.
-import { deleteEmbeddingsForOtherModels, listSessionIds } from '../main/db.js';
+import { deleteEmbeddingsForOtherModels, sessionsWithPendingTurns } from '../main/db.js';
 import { indexSessionTurnsWith } from '../main/transcriptIndexCore.js';
 import { EMBED_MODEL_ID, type EmbedFn } from '../main/vectors.js';
 import type { Logger } from './log.js';
@@ -46,17 +46,17 @@ export function startHostIndexer(o: {
     bump,
     async backfill() {
       await deleteEmbeddingsForOtherModels(EMBED_MODEL_ID);
-      for (const id of await listSessionIds()) bump(id);
+      for (const id of await sessionsWithPendingTurns(EMBED_MODEL_ID)) bump(id);
     },
     async stop(graceMs = INDEXER_STOP_GRACE_MS) {
+      stopped = true;
+      queued.clear();
       const inflight = running;
       if (inflight) {
         let timer: NodeJS.Timeout | undefined;
         await Promise.race([inflight, new Promise<void>((r) => (timer = setTimeout(r, graceMs)))]);
         clearTimeout(timer);
       }
-      stopped = true;
-      queued.clear();
     }
   };
 }

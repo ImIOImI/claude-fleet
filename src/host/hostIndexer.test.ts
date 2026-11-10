@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { startHostIndexer } from './hostIndexer.js';
 import { createLogger } from './log.js';
 
@@ -13,11 +13,39 @@ describe('host indexer', () => {
     await new Promise((r) => setImmediate(r));
     expect(calls).toEqual(['a']);
     release();
+    await vi.waitFor(() => expect(calls).toEqual(['a', 'b', 'a']));
     await ix.stop(1000);
-    expect(calls).toEqual(['a', 'b', 'a']);
+  });
+
+  it('drains the whole queue when not stopped', async () => {
+    const calls: string[] = [];
+    const ix = startHostIndexer({ embed: async () => [], log: createLogger(() => undefined),
+      index: async (id) => { calls.push(id); await new Promise((r) => setTimeout(r, 2)); return 0; } });
+    for (const id of ['a', 'b', 'c', 'd']) ix.bump(id);
+    await vi.waitFor(() => expect(calls).toEqual(['a', 'b', 'c', 'd']));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls).toEqual(['a', 'b', 'c', 'd']);
+    await ix.stop(1000);
+  });
+
+  it('stop finishes only the in-flight pass and drops the queue', async () => {
+    const calls: string[] = [];
+    const done: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const ix = startHostIndexer({ embed: async () => [], log: createLogger(() => undefined),
+      index: async (id) => { calls.push(id); await gate; done.push(id); return 0; } });
+    ix.bump('a'); ix.bump('b'); ix.bump('c');
+    await new Promise((r) => setImmediate(r));
+    const stopping = ix.stop(1000);
+    release();
+    await stopping;
+    expect(done).toEqual(['a']);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(calls).toEqual(['a']);
     ix.bump('z');
     await new Promise((r) => setImmediate(r));
-    expect(calls).toEqual(['a', 'b', 'a']);
+    expect(calls).toEqual(['a']);
   });
 
   it('never runs two passes at once', async () => {
@@ -28,6 +56,8 @@ describe('host indexer', () => {
     for (const id of ['a', 'b', 'c']) ix.bump(id);
     await new Promise((r) => setTimeout(r, 1));
     ix.bump('d');
+    await vi.waitFor(() => expect(live).toBe(0), { timeout: 1000 });
+    await new Promise((r) => setTimeout(r, 20));
     await ix.stop(1000);
     expect(peak).toBe(1);
   });
@@ -38,6 +68,7 @@ describe('host indexer', () => {
     const ix = startHostIndexer({ embed: async () => [], log: createLogger((l) => logs.push(l)),
       index: async (id) => { calls.push(id); if (id === 'x') throw new Error('boom'); return 1; } });
     ix.bump('x'); ix.bump('y');
+    await vi.waitFor(() => expect(calls).toEqual(['x', 'y']));
     await ix.stop(1000);
     expect(logs.some((l) => l.includes('transcript index failed'))).toBe(true);
     expect(calls).toEqual(['x', 'y']);
