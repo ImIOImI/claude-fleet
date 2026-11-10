@@ -20,6 +20,7 @@ import { WorkspaceForm, type WorkspaceFormSubmit } from './WorkspaceForm';
 import { DeleteWorkspaceModal } from './DeleteWorkspaceModal';
 import { workspaceToFormInitial } from './formInitial';
 import { ModalBackdrop } from './ModalBackdrop';
+import { mountsEqual } from './mountRows';
 import type { WorkspaceSummary } from '../App';
 
 interface Props {
@@ -143,5 +144,6 @@ export function containerLevelChanged(
   const afterRes = after.resources;
   if ((beforeRes?.cpus ?? null) !== (afterRes?.cpus ?? null)) return true;
   if ((beforeRes?.memoryMb ?? null) !== (afterRes?.memoryMb ?? null)) return true;
+  if (!mountsEqual(before.mounts, after.mounts)) return true;
   return false;
 }
