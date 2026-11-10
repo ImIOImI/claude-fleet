@@ -1463,18 +1463,25 @@ export async function summaryForWorkspace(workspaceId: string, topToolsLimit = 5
  * age past it they drop out of the sum, mirroring the real rolling reset.
  */
 async function tokensSpentSinceUncached(sinceMs: number): Promise<number> {
-  const row = await kyselyOrThrow()
-    .selectFrom('events')
-    .select(
-      sql<number>`COALESCE(SUM(
-        COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) +
-        COALESCE(cache_read_input_tokens, 0) + COALESCE(cache_creation_input_tokens, 0)
-      ), 0)`.as('total'),
+  const { rows } = await tokensSpentSinceQuery(sinceMs).execute(kyselyOrThrow());
+  return num(rows[0]?.total ?? 0);
+}
+
+/** events has no ts index, and `ts >= ?` alone scans the whole table. Skip-scan
+ *  the session ids out of idx_events_session_ts, then range-read each session's
+ *  window through the same index. Exported for the plan test. */
+export function tokensSpentSinceQuery(sinceMs: number) {
+  return sql<{ total: number }>`
+    WITH RECURSIVE s(id) AS (
+      SELECT (SELECT min(session_id) FROM events)
+      UNION ALL
+      SELECT (SELECT min(session_id) FROM events WHERE session_id > s.id) FROM s WHERE s.id IS NOT NULL
     )
-    .where('ts', 'is not', null)
-    .where('ts', '>=', sinceMs)
-    .executeTakeFirstOrThrow();
-  return num(row.total);
+    SELECT COALESCE(SUM(
+      COALESCE(e.input_tokens, 0) + COALESCE(e.output_tokens, 0) +
+      COALESCE(e.cache_read_input_tokens, 0) + COALESCE(e.cache_creation_input_tokens, 0)
+    ), 0) AS total
+    FROM s JOIN events e ON e.session_id = s.id AND e.ts >= ${sinceMs}`;
 }
 
 export async function summaryForSession(
