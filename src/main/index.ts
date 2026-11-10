@@ -1,8 +1,10 @@
 import { app, BrowserWindow, dialog, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
 import { registerIpc, invalidateWorkspaceList, replayInputWait, stopRemoteBackend } from './ipc.js';
-import { openDb, openDbPostgres, closeDb, deleteEmbeddingsForOtherModels, listSessionIds, recordErrors, stateKysely, sessionCaptureSignals, isAutomationSession } from './db.js';
-import { initPerf, shutdownPerf, perfSpan, perfSpanAsync, getEffectivePerf, recordBootProfile } from './perf.js';
+import { openDb, openDbPostgres, closeDb, deleteEmbeddingsForOtherModels, sessionsWithPendingTurns, recordErrors, stateKysely, onStateOpenStats, stateLeftoverDrain, setStateWarnSink, sessionCaptureSignals, isAutomationSession } from './db.js';
+import { initPerf, shutdownPerf, perfSpan, perfSpanAsync, perfRecordSpan, perfNoteSqlSync, getEffectivePerf, recordBootProfile } from './perf.js';
+import { setSqliteQueryObserver } from './store/kysely.js';
+import { installWalCheckpointer } from './state/walCheckpointer.js';
 import { startBootProfile } from './bootProfile.js';
 import { PerfStore } from './perfStore.js';
 import { resolvePerfConfig } from './perfConfig.js';
@@ -94,8 +96,12 @@ let managedDocker: ManagedDocker | null = null;
 // The Postgres inbox's and history's afterBeginWrite: closed while the switch back copies.
 const inboxGate = new InboxWriteGate();
 const historyGate = new InboxWriteGate();
+installWalCheckpointer();
+setStateWarnSink((message, extra) => logError({ source: 'main', level: 'warn', type: 'wal-checkpointer', message, extra }));
 // before-quit holds the quit at most this long (#485).
 const QUIT_BOUND_MS = 10_000;
+/** The db.open row is recorded at the first write, or this long after the open without one. */
+const DB_OPEN_ROW_FALLBACK_MS = 10_000;
 // A wedged store must not hold back closeDb and the Postgres shutdown.
 const ERROR_ROWS_QUIT_MS = 500;
 let shuttingDown = false;
@@ -286,6 +292,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       extra: { sha: appBuildSha() ?? null }
     });
     const perfStore = new PerfStore(stateKysely());
+    setSqliteQueryObserver((_sql, ms) => perfNoteSqlSync(ms));
     initPerf(
       perfStore,
       resolvePerfConfig(
@@ -424,7 +431,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
         storeId,
         modelId: EMBED_MODEL_ID,
         deleteStale: () => deleteEmbeddingsForOtherModels(EMBED_MODEL_ID),
-        listSessionIds,
+        listPendingSessionIds: () => sessionsWithPendingTurns(EMBED_MODEL_ID),
         indexTurns: (id) => indexSessionTurns(id, embedFn),
         indexSummaries: () => indexSessionSummaries(embedFn),
         onError: (step, e) => logError({ source: 'main', level: 'warn', type: 'index-backfill', message: `${step}: ${String(e)}` }),
@@ -507,7 +514,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     if (isMock) return;
     retention ??= startRetention({
       orphanSweep: storeCfg.kind !== 'postgres',
-      walDbPath: storeCfg.kind === 'sqlite' ? join(userData, 'state.db') : undefined,
+      walCheckpoints: storeCfg.kind === 'sqlite',
       listManifestIds: async () => (await listWorkspaceManifests()).map((m) => m.id),
       stateDirExists: (id) => existsSync(workspaceStateDir(id)),
     });
@@ -526,6 +533,14 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   const startSqliteHistory = async (): Promise<void> => {
     openDb(userData);
     await startStateWrites();
+    // Recorded only now that perf is up, each with its own measured times.
+    onStateOpenStats((s) => perfRecordSpan('claude_fleet.db.open', s.openedAt, s.openedAt + s.openMs, {
+      wal_bytes: s.walBytes, wal_frames: s.walFrames, handed_off: s.handedOff, worker_ready: s.workerReady ?? -1,
+      first_write_ms: s.firstWriteMs ?? -1, first_write_after_ms: s.firstWriteAt === null ? -1 : s.firstWriteAt - s.openedAt,
+    }), DB_OPEN_ROW_FALLBACK_MS);
+    void stateLeftoverDrain()?.then((r) => perfRecordSpan('claude_fleet.db.wal_drain', r.startedAt, r.startedAt + r.ms, {
+      ok: r.ok, rounds: r.rounds, wal_log: r.log ?? -1, wal_ckpt: r.checkpointed ?? -1, wal_busy: r.busy ?? -1, ...(r.error ? { error: r.error } : {}),
+    }));
     startStateRetention();
   };
   const startSqliteIngest = async (watcher: JsonlWatcher, embedFn: EmbedFn): Promise<void> => {

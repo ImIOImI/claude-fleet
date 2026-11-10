@@ -14,7 +14,7 @@ function deps(markerPath: string) {
       modelId: 'm@q8',
       onError: vi.fn(),
       deleteStale: vi.fn(async () => { order.push('delete'); return 0; }),
-      listSessionIds: vi.fn(async () => ['s1', 's2']),
+      listPendingSessionIds: vi.fn(async () => ['s1', 's2']),
       indexTurns: vi.fn(async (id: string) => { order.push(id); }),
       indexSummaries: vi.fn(async () => { order.push('summaries'); }),
       yieldFn: vi.fn(async () => { order.push('yield'); }),

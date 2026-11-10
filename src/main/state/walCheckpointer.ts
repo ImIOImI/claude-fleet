@@ -1,10 +1,15 @@
-// Off-main-thread WAL checkpoints for state.db while retention runs (SPEC §7
-// *Retention*). SQLite's auto-checkpoint runs inside whichever commit crosses
-// the threshold, so on the main connection it lands, with its page copy and
-// fsync, inside a retention slice.
+// Off-main-thread WAL checkpoints for state.db (SPEC §7 *Retention* → *WAL
+// checkpoints*). SQLite's auto-checkpoint runs inside whichever commit crosses
+// the threshold, so on the main connection its page copy and fsync land
+// inside that commit. db.ts owns one per open SQLite store (installed from here
+// so fleet-host's import graph stays free of worker code); the leftover-WAL
+// drain and retention runs take leases on it.
 import { Worker } from 'node:worker_threads';
-import { withRawSqlite } from '../db.js';
-import { logError } from '../errorLog.js';
+import type Database from 'better-sqlite3';
+import {
+  setWalCheckpointerFactory, type CheckpointHost, type CheckpointResult, type CheckpointerOptions, type StoreCheckpointer,
+  type WalCheckpointLease, type WalDrainResult,
+} from '../db.js';
 import { betterSqlitePath } from '../queryWorker.js';
 
 const WORKER_SRC = `
@@ -31,173 +36,307 @@ const READY_TIMEOUT_MS = 5000;
 /** Past this many frames, the next slice waits for a complete checkpoint so
  *  its write rewinds the WAL (each rewind costs a header sync, so not every slice). */
 export const WAL_REWIND_FRAMES = 4000;
-/** A WAL past this many frames means checkpoints aren't keeping up. */
+/** A WAL past this many frames means checkpoints aren't keeping up (not applied while a drain runs). */
 export const WAL_MAX_FRAMES = 10_000;
-/** This many checkpoints in a row that leave frames behind (a reader pins them) or fail also give up. */
+/** This many checkpoints in a row that leave frames behind (a reader or the lock) or fail also give up. */
 export const WAL_MAX_INCOMPLETE = 5;
 /** A checkpoint outstanding this long is hung (e.g. stuck I/O): hand back. */
 export const CHECKPOINT_TIMEOUT_MS = 5000;
-/** The main connection truncates the WAL file to this after a rewind: about WAL_REWIND_FRAMES pages. */
-const JOURNAL_SIZE_LIMIT = 16 * 1024 * 1024;
+/** A leftover-WAL checkpoint copies the whole previous run's WAL, so it gets longer while a drain runs. */
+export const DRAIN_TIMEOUT_MS = 60_000;
+/** The main connection's journal_size_limit while the worker checkpoints: about WAL_REWIND_FRAMES pages. */
+export const WAL_HOLD_SIZE_LIMIT = 16 * 1024 * 1024;
+/** stop() waits this long for the worker thread (and its connection) to end. */
+const EXIT_WAIT_MS = 2000;
 const REQUEST_EVERY_MS = 1000;
 
-export interface CheckpointResult { busy: number; log: number; checkpointed: number }
+/** A lock held elsewhere reports busy = 1 or -1 counts: such a checkpoint did nothing it can vouch for. */
+export const complete = (r: CheckpointResult): boolean =>
+  r.busy === 0 && r.log >= 0 && r.checkpointed >= 0 && r.checkpointed >= r.log;
 
-export interface WalCheckpointer {
-  /** Start a PASSIVE checkpoint in the worker unless one is already running. */
-  request(): void;
-  /** Resolves when no checkpoint is running. */
-  idle(): Promise<void>;
-  /** Once the WAL has passed WAL_REWIND_FRAMES: run a checkpoint and wait for it,
-   *  so the caller's next write rewinds the WAL. Otherwise resolves at once. */
-  drain(): Promise<void>;
-  last(): CheckpointResult | null;
-  /** False once it has handed checkpoints back to the main connection. */
-  active(): boolean;
-  /** Restore the main connection's settings and end the worker. Never waits on a checkpoint. */
-  close(): Promise<void>;
-}
+interface Saved { autocheckpoint: number; sizeLimit: number }
 
-export interface WalCheckpointerOptions {
-  workerSource?: string;
-  /** How often to request a checkpoint between slices (0 = only on request()). */
-  requestEveryMs?: number;
-  /** Default CHECKPOINT_TIMEOUT_MS. */
-  checkpointTimeoutMs?: number;
-}
-
-/** Turn the main connection's auto-checkpoint off and checkpoint from a worker
- *  instead. Null (main connection untouched) when the worker or the pragmas fail. */
-export async function startWalCheckpointer(dbPath: string, opts: WalCheckpointerOptions = {}): Promise<WalCheckpointer | null> {
-  let worker: Worker;
-  try {
-    worker = new Worker(opts.workerSource ?? WORKER_SRC, { eval: true, workerData: { bs3Path: betterSqlitePath(), dbPath } });
-  } catch (e) {
-    logError({ source: 'main', level: 'warn', type: 'wal-checkpointer', message: `worker failed to start: ${String(e)}` });
-    return null;
-  }
-  worker.unref();
-  const ready = await new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => resolve(false), READY_TIMEOUT_MS);
-    worker.once('message', (m: { ready?: boolean }) => { clearTimeout(timer); resolve(m.ready === true); });
-    worker.once('error', () => { clearTimeout(timer); resolve(false); });
-    worker.once('exit', () => { clearTimeout(timer); resolve(false); });
-  });
-  if (!ready) {
-    logError({ source: 'main', level: 'warn', type: 'wal-checkpointer', message: 'worker did not open state.db; auto-checkpoint stays on' });
-    void worker.terminate();
-    return null;
-  }
-
-  // The store can be closed or switched under us; then leave it alone.
-  let prior: { autocheckpoint: number; sizeLimit: number } | null = null;
-  try {
-    prior = await withRawSqlite((d) => {
-      const p = {
-        autocheckpoint: d.pragma('wal_autocheckpoint', { simple: true }) as number,
-        sizeLimit: d.pragma('journal_size_limit', { simple: true }) as number,
-      };
-      d.pragma('wal_autocheckpoint = 0');
-      d.pragma(`journal_size_limit = ${JOURNAL_SIZE_LIMIT}`);
-      return p;
-    });
-  } catch {
-    prior = null;
-  }
-  if (!prior) {
-    void worker.terminate();
-    return null;
-  }
-  const saved = prior;
-
-  const hungAfter = opts.checkpointTimeoutMs ?? CHECKPOINT_TIMEOUT_MS;
-  let pending: Promise<void> | null = null;
-  let settle: (() => void) | null = null;
-  let watchdog: ReturnType<typeof setTimeout> | null = null;
-  let last: CheckpointResult | null = null;
-  let incomplete = 0;
-  let closed = false;
-  const timer = (opts.requestEveryMs ?? REQUEST_EVERY_MS) > 0
-    ? setInterval(() => api.request(), opts.requestEveryMs ?? REQUEST_EVERY_MS)
-    : null;
-  timer?.unref?.();
-
-  const restore = async (): Promise<void> => {
-    try {
-      await withRawSqlite((d) => {
-        d.pragma(`wal_autocheckpoint = ${saved.autocheckpoint}`);
-        d.pragma(`journal_size_limit = ${saved.sizeLimit}`);
-      });
-    } catch {
-      // Closed or switched store: nothing to restore on.
-    }
+/** Switch `d` over to the worker. All or nothing: a pragma that throws puts back what was read. */
+export function hold(d: Database.Database): Saved {
+  const saved = {
+    autocheckpoint: d.pragma('wal_autocheckpoint', { simple: true }) as number,
+    sizeLimit: d.pragma('journal_size_limit', { simple: true }) as number,
   };
-  /** Hand checkpoints back to the main connection and end the worker. */
-  const shutdown = async (reason: string | null): Promise<void> => {
-    if (closed) return;
-    closed = true;
-    if (timer) clearInterval(timer);
+  try {
+    d.pragma('wal_autocheckpoint = 0');
+    d.pragma(`journal_size_limit = ${WAL_HOLD_SIZE_LIMIT}`);
+  } catch (e) {
+    restore(d, saved);
+    throw e;
+  }
+  return saved;
+}
+
+function restore(d: Database.Database, saved: Saved): void {
+  try {
+    d.pragma(`wal_autocheckpoint = ${saved.autocheckpoint}`);
+  } finally {
+    d.pragma(`journal_size_limit = ${saved.sizeLimit}`);
+  }
+}
+
+/** One worker generation: spawned, holding the main connection's checkpoints until handed back. */
+interface Generation {
+  worker: Worker;
+  exited: Promise<void>;
+  ready: Promise<boolean>;
+  saved: Saved | null;
+  restored: Promise<void> | null;
+  /** The checkpoint in flight; resolves with its result, null when it failed or was cut off. */
+  pending: Promise<CheckpointResult | null> | null;
+  settle: ((r: CheckpointResult | null) => void) | null;
+  watchdog: ReturnType<typeof setTimeout> | null;
+  timer: ReturnType<typeof setInterval> | null;
+  last: CheckpointResult | null;
+  incomplete: number;
+  closed: boolean;
+  leases: number;
+  timeoutMs: number;
+}
+
+export class WalCheckpointer implements StoreCheckpointer {
+  private gen: Generation | null = null;
+  private draining = 0;
+  private stopped = false;
+  /** Exits of every worker not yet gone, an ended generation's included. */
+  private readonly live = new Set<Promise<void>>();
+
+  constructor(private readonly host: CheckpointHost) {}
+
+  /** At openDb, before anything writes: hold checkpoints synchronously, then
+   *  spawn the worker. The returned lease belongs to the leftover drain. */
+  holdAtOpen(conn: Database.Database, opts: CheckpointerOptions = {}): WalCheckpointLease {
+    const saved = hold(conn);
+    let g: Generation;
+    try {
+      g = this.spawn(opts);
+    } catch (e) {
+      restore(conn, saved);
+      throw e;
+    }
+    g.saved = saved;
+    this.draining++;
+    return this.lease(g, () => { this.draining--; });
+  }
+
+  /** A lease on the running worker, starting a fresh one when none runs or the
+   *  last one handed back. Null when the worker can't open the database, the
+   *  hold fails or the store closes first. */
+  async acquire(opts: CheckpointerOptions = {}): Promise<WalCheckpointLease | null> {
+    if (this.stopped) return null;
+    const g = this.gen && !this.gen.closed ? this.gen : this.spawn(opts);
+    // Counted while it starts, so another lease closing can't end it under us.
+    g.leases++;
+    const fail = (): null => {
+      if (--g.leases === 0) void this.end(g, null);
+      return null;
+    };
+    if (!(await g.ready) || g.closed) return fail();
+    if (!g.saved) {
+      try {
+        await this.host.withMain((d) => { if (!g.closed && !g.saved) g.saved = hold(d); });
+      } catch (e) {
+        this.host.warn(`checkpoint hold failed: ${String(e)}`);
+        return fail();
+      }
+      if (!g.saved) return fail();
+    }
+    g.leases--; // lease() counts it
+    return this.lease(g, () => undefined);
+  }
+
+  hasWorkers(): boolean {
+    return this.live.size > 0;
+  }
+
+  /** closeDb: hand back, end the worker and wait (bounded) for every worker
+   *  thread to exit, so main's connection closes last. Later acquires return null. */
+  async stop(): Promise<void> {
+    this.stopped = true;
+    if (this.gen) await this.end(this.gen, null);
+    await Promise.race([Promise.all(this.live), new Promise<void>((r) => setTimeout(r, EXIT_WAIT_MS).unref?.())]);
+  }
+
+  private spawn(opts: CheckpointerOptions): Generation {
+    const worker = new Worker(opts.workerSource ?? WORKER_SRC, {
+      eval: true, workerData: { bs3Path: betterSqlitePath(), dbPath: opts.dbPath ?? this.host.dbPath },
+    });
+    worker.unref();
+    const g: Generation = {
+      worker, exited: new Promise<void>((r) => worker.once('exit', () => r())), ready: Promise.resolve(false),
+      saved: null, restored: null, pending: null, settle: null, watchdog: null, timer: null,
+      last: null, incomplete: 0, closed: false, leases: 0, timeoutMs: opts.checkpointTimeoutMs ?? 0,
+    };
+    this.gen = g;
+    this.live.add(g.exited);
+    void g.exited.then(() => this.live.delete(g.exited));
+    g.ready = new Promise<boolean>((resolve) => {
+      const t = setTimeout(() => resolve(false), READY_TIMEOUT_MS);
+      worker.once('message', (m: { ready?: boolean }) => { clearTimeout(t); resolve(m.ready === true); });
+      worker.once('error', () => { clearTimeout(t); resolve(false); });
+      worker.once('exit', () => { clearTimeout(t); resolve(false); });
+    }).then((ok) => {
+      if (!ok && !g.closed) void this.end(g, 'worker did not open state.db; auto-checkpoint stays on');
+      return ok;
+    });
+    const every = opts.requestEveryMs ?? REQUEST_EVERY_MS;
+    if (every > 0) {
+      g.timer = setInterval(() => this.request(g), every);
+      g.timer.unref?.();
+    }
+    worker.on('message', (m: { ready?: boolean; ok?: boolean; busy?: number; log?: number; checkpointed?: number; error?: string }) => {
+      if (m.ready) return;
+      let result: CheckpointResult | null = null;
+      if (m.ok) {
+        result = { busy: m.busy ?? 0, log: m.log ?? 0, checkpointed: m.checkpointed ?? 0 };
+        g.last = result;
+        g.incomplete = complete(result) ? 0 : g.incomplete + 1;
+      } else {
+        // A failed checkpoint leaves `last` stale; it counts as incomplete.
+        g.incomplete++;
+        this.host.warn(m.error ?? 'checkpoint failed');
+      }
+      // Settled first: the answered checkpoint is no longer in flight when end() looks.
+      g.settle?.(result);
+      if (result && this.draining === 0 && result.log > WAL_MAX_FRAMES) void this.end(g, `WAL at ${result.log} frames; auto-checkpoint restored for this run`);
+      else if (g.incomplete >= WAL_MAX_INCOMPLETE) void this.end(g, `${g.incomplete} checkpoints in a row failed or left frames behind; auto-checkpoint restored for this run`);
+    });
+    // A worker that dies, with or without an `error` event, hands checkpoints back.
+    worker.on('error', (e) => { void this.end(g, `worker failed: ${String(e)}`); });
+    worker.on('exit', () => {
+      g.settle?.(null);
+      void this.end(g, g.closed ? null : 'worker exited');
+    });
+    return g;
+  }
+
+  private timeoutFor(g: Generation): number {
+    return g.timeoutMs || (this.draining > 0 ? DRAIN_TIMEOUT_MS : CHECKPOINT_TIMEOUT_MS);
+  }
+
+  private request(g: Generation): void {
+    if (g.pending || g.closed || !g.saved) return;
+    const timeoutMs = this.timeoutFor(g);
+    g.pending = new Promise<CheckpointResult | null>((resolve) => {
+      g.watchdog = setTimeout(() => { void this.end(g, `checkpoint hung for ${timeoutMs} ms; auto-checkpoint restored for this run`); }, timeoutMs);
+      g.watchdog.unref?.();
+      g.settle = (r) => {
+        if (g.watchdog) clearTimeout(g.watchdog);
+        g.watchdog = null;
+        g.settle = null;
+        g.pending = null;
+        resolve(r);
+      };
+      g.worker.postMessage(0);
+    });
+  }
+
+  /** Hand checkpoints back to the main connection and end the worker. Resolves once restored. */
+  private end(g: Generation, reason: string | null): Promise<void> {
+    if (g.closed) return g.restored ?? Promise.resolve();
+    g.closed = true;
+    if (g.timer) clearInterval(g.timer);
+    const hung = g.pending !== null;
     // Release waiters now: terminate() can't interrupt native I/O, so the
     // worker's exit may come much later or never.
-    settle?.();
-    if (reason) logError({ source: 'main', level: 'warn', type: 'wal-checkpointer', message: reason, extra: { ...last, incomplete } });
-    await restore();
-    // A checkpoint in flight can't be interrupted; terminate() is not awaited
-    // so a hung one can't hold up the caller.
-    worker.postMessage('close');
-    void worker.terminate();
-  };
+    g.settle?.(null);
+    if (reason) this.host.warn(reason, { ...g.last, incomplete: g.incomplete });
+    g.worker.postMessage('close');
+    if (hung) void g.worker.terminate();
+    const saved = g.saved;
+    g.restored = saved
+      ? this.host.withMain((d) => restore(d, saved)).catch((e) => this.host.warn(`checkpoint restore failed: ${String(e)}`))
+      : Promise.resolve();
+    return g.restored;
+  }
 
-  worker.on('message', (m: { ok?: boolean; busy?: number; log?: number; checkpointed?: number; error?: string }) => {
-    if (m.ok) {
-      last = { busy: m.busy ?? 0, log: m.log ?? 0, checkpointed: m.checkpointed ?? 0 };
-      incomplete = last.checkpointed < last.log ? incomplete + 1 : 0;
-      if (last.log > WAL_MAX_FRAMES) void shutdown(`WAL at ${last.log} frames; auto-checkpoint restored for this run`);
-      else if (incomplete >= WAL_MAX_INCOMPLETE) void shutdown(`${incomplete} checkpoints in a row left frames behind; auto-checkpoint restored for this run`);
-    } else {
-      // A failed checkpoint leaves `last` stale; it counts as incomplete.
-      incomplete++;
-      logError({ source: 'main', level: 'warn', type: 'wal-checkpointer', message: m.error ?? 'checkpoint failed' });
-      if (incomplete >= WAL_MAX_INCOMPLETE) void shutdown(`${incomplete} checkpoints in a row failed or left frames behind; auto-checkpoint restored for this run`);
+  private lease(g: Generation, onClose: () => void): WalCheckpointLease {
+    g.leases++;
+    let closed = false;
+    const api: WalCheckpointLease = {
+      request: () => { if (!closed) this.request(g); },
+      idle: () => (g.pending ?? Promise.resolve()).then(() => undefined),
+      checkpoint: async () => {
+        await g.pending;
+        if (!api.active()) return null;
+        this.request(g);
+        return (await g.pending) ?? null;
+      },
+      ready: () => g.ready,
+      drain: async () => {
+        if (!api.active() || (g.last?.log ?? 0) <= WAL_REWIND_FRAMES) return;
+        // Each wait is bounded by the watchdog, which hands back and settles; the race is a second bound.
+        const bound = this.timeoutFor(g) + 100;
+        const bounded = (p: Promise<unknown> | null) => p && Promise.race([p, new Promise<void>((r) => setTimeout(r, bound).unref?.())]);
+        await bounded(g.pending);
+        if (!api.active()) return;
+        api.request();
+        await bounded(g.pending);
+      },
+      last: () => g.last,
+      active: () => !closed && !g.closed,
+      close: async () => {
+        if (closed) return;
+        closed = true;
+        onClose();
+        if (--g.leases === 0) {
+          await this.end(g, null);
+          if (this.gen === g) this.gen = null;
+        } else if (g.closed) {
+          await g.restored;
+        }
+      },
+    };
+    return api;
+  }
+}
+
+/** The drain ends after a complete checkpoint that found at most this many frames written since the drain's previous one. */
+export const DRAIN_SETTLED_FRAMES = 256;
+const DRAIN_MAX_ROUNDS = 20;
+const DRAIN_RETRY_MS = 100;
+
+/** Checkpoint a leftover WAL through `lease` until caught up: frames main wrote
+ *  meanwhile are copied too. Only each round's own result counts. Then the lease is closed. */
+export async function drainLeftover(lease: WalCheckpointLease, warn: CheckpointHost['warn']): Promise<WalDrainResult> {
+  const startedAt = Date.now();
+  const t0 = performance.now();
+  let rounds = 0;
+  let prevLog: number | null = null;
+  let ok = false;
+  let l: CheckpointResult | null = null;
+  while (lease.active() && rounds < DRAIN_MAX_ROUNDS) {
+    const r = await lease.checkpoint();
+    rounds++;
+    if (r) l = r;
+    if (!lease.active()) break;
+    if (!r || !complete(r)) {
+      prevLog = null;
+      await new Promise((res) => setTimeout(res, DRAIN_RETRY_MS));
+      continue;
     }
-    settle?.();
-  });
-  // A worker that dies, with or without an `error` event, hands checkpoints back.
-  worker.on('error', (e) => { void shutdown(`worker failed: ${String(e)}`); });
-  worker.on('exit', () => {
-    settle?.();
-    void shutdown(closed ? null : 'worker exited');
-  });
+    // A rewind restarts the frame count, so a smaller log is all new frames.
+    const fresh = prevLog === null ? Infinity : r.log >= prevLog ? r.log - prevLog : r.log;
+    prevLog = r.log;
+    if (fresh <= DRAIN_SETTLED_FRAMES) {
+      ok = true;
+      break;
+    }
+  }
+  const error = ok ? undefined : lease.active() ? `not settled after ${rounds} checkpoints` : 'checkpointer handed back';
+  await lease.close();
+  if (error) warn(`leftover WAL drain: ${error}`, { ...l, rounds });
+  return { startedAt, ms: performance.now() - t0, ok, rounds, busy: l?.busy, log: l?.log, checkpointed: l?.checkpointed, error };
+}
 
-  const api: WalCheckpointer = {
-    request() {
-      if (pending || closed) return;
-      pending = new Promise<void>((resolve) => {
-        watchdog = setTimeout(() => { void shutdown(`checkpoint hung for ${hungAfter} ms; auto-checkpoint restored for this run`); }, hungAfter);
-        watchdog.unref?.();
-        settle = () => {
-          if (watchdog) clearTimeout(watchdog);
-          watchdog = null;
-          settle = null;
-          pending = null;
-          resolve();
-        };
-        worker.postMessage(0);
-      });
-    },
-    idle: () => pending ?? Promise.resolve(),
-    async drain() {
-      if (closed || (last?.log ?? 0) <= WAL_REWIND_FRAMES) return;
-      // Each wait is bounded by the watchdog, which hands back and settles; the race is a second bound.
-      const bounded = (p: Promise<void> | null) => p && Promise.race([p, new Promise<void>((r) => setTimeout(r, hungAfter + 100).unref?.())]);
-      await bounded(pending);
-      if (closed) return;
-      api.request();
-      await bounded(pending);
-    },
-    last: () => last,
-    active: () => !closed,
-    close: () => shutdown(null),
-  };
-  return api;
+export type { CheckpointResult, CheckpointerOptions, WalCheckpointLease, WalDrainResult };
+
+/** Let openDb create the store's checkpointer. The desktop calls this at boot. */
+export function installWalCheckpointer(): void {
+  setWalCheckpointerFactory({ create: (host) => new WalCheckpointer(host), drain: drainLeftover });
 }

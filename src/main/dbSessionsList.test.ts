@@ -1,7 +1,8 @@
 // listSessions() tags enrichment: each row carries the tags of its LATEST
 // tagged summary chapter (ordered as emitted), [] when none exists.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { ingestLine, listSessions, listSessionIds, latestActivityByWorkspace, latestSessionId } from './db.js';
+import { ingestLine, listSessions, sessionsWithPendingTurns, latestActivityByWorkspace, latestSessionId } from './db.js';
+import { EMBED_MODEL_ID } from './vectors.js';
 import { openTestState, type TestState } from './store/testStore.js';
 
 const WS = '01WS';
@@ -69,22 +70,19 @@ describe('latestActivityByWorkspace', () => {
   });
 });
 
-describe('listSessionIds', () => {
-  const at = (uuid: string, ts: string) =>
-    JSON.stringify({ type: 'user', uuid, timestamp: ts, message: { content: 'x' } });
+describe('sessionsWithPendingTurns order', () => {
+  const at = (uuid: string, ts: string | null) =>
+    JSON.stringify({ type: 'user', uuid, ...(ts ? { timestamp: ts } : {}), message: { content: 'x' } });
 
-  it('matches listSessions() ids in order, including a NULL last_active_at session', async () => {
+  it('matches listSessions() order, including NULL last_active_at sessions tied by id', async () => {
     await ingestLine('ws-e', 'e1', at('u1', '2026-07-01T00:00:00Z'));
     await ingestLine('ws-f', 'f1', at('u2', '2026-07-01T00:05:00Z'));
-    // A light session (only a timestamp-less line) never gets a real
-    // last_active_at and must still sort in (as COALESCE(..., 0) DESC puts it last).
-    await ingestLine('ws-g', 'g1', JSON.stringify({ type: 'ai-title', aiTitle: 't', sessionId: 'g1' }));
+    // A timestamp-less line leaves last_active_at NULL: COALESCE(..., 0) DESC sorts it last, ties by id.
+    for (const id of ['s-b', 's-a', 's-c']) await ingestLine('ws-g', id, at(`u-${id}`, null));
 
-    const ids = await listSessionIds();
-    const wantIds = (await listSessions()).map((s) => s.id);
-    expect(ids).toEqual(wantIds);
-    expect(ids.indexOf('f1')).toBeLessThan(ids.indexOf('e1'));
-    expect(ids.at(-1)).toBe('g1');
+    const ids = await sessionsWithPendingTurns(EMBED_MODEL_ID);
+    expect(ids).toEqual((await listSessions()).map((s) => s.id));
+    expect(ids).toEqual(['f1', 'e1', 's-a', 's-b', 's-c']);
   });
 });
 
@@ -108,7 +106,6 @@ describe('latestSessionId', () => {
       await ingestLine('ws-tie', id, JSON.stringify({ type: 'ai-title', aiTitle: id, sessionId: id }));
     }
     expect((await listSessions('ws-tie')).map((s) => s.id)).toEqual(['s-a', 's-b', 's-c']);
-    expect((await listSessionIds()).filter((id) => id.startsWith('s-'))).toEqual(['s-a', 's-b', 's-c']);
     expect(await latestSessionId('ws-tie')).toBe('s-a');
   });
 });

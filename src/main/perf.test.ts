@@ -7,8 +7,9 @@ import { PerfStore } from './perfStore.js';
 import {
   initPerf, shutdownPerf, reconfigurePerf, perfSpan, perfSpanAsync, perfSpanAsyncAttrs, perfSetSpanContext, getEffectivePerf,
   recordPtyChunk, getPerfStatus, recordLatencySample, setPerfStateListener, perfNotePowerEvent, recordGcEntries,
-  sampleMemory, setPerfMemorySource, recordBootProfile
+  sampleMemory, setPerfMemorySource, recordBootProfile, perfNoteSqlSync, perfRecordSpan
 } from './perf.js';
+import { setSqliteQueryObserver } from './store/kysely.js';
 import { armSentinel, disarmSentinel, sentinelStatus } from './perfSentinel.js';
 import type { EffectivePerfConfig } from './perfConfig.js';
 import type Database from 'better-sqlite3';
@@ -62,6 +63,56 @@ describe('perf tracer pipeline', () => {
     await shutdownPerf();
     const rows = db.prepare(`SELECT meta FROM perf_events WHERE name = 'claude_fleet.retention.slice'`).all() as Array<{ meta: string }>;
     expect(rows.map((r) => JSON.parse(r.meta))).toEqual([{ step: 'vacuum', rows: 2 }]);
+  });
+
+  it('adds SQLite sync time to the active span, not to time queued on the mutex', async () => {
+    initPerf(store, ON);
+    setSqliteQueryObserver((_sql, ms) => perfNoteSqlSync(ms));
+    try {
+      await perfSpanAsync('claude_fleet.test.sql', async () => {
+        await sleep(40);
+        await stateKysely().selectFrom('maintenance').select('key').execute();
+        await stateKysely().selectFrom('maintenance').select('value').execute();
+      });
+    } finally {
+      setSqliteQueryObserver(null);
+    }
+    await shutdownPerf();
+    const row = db.prepare(`SELECT dur_ms, meta FROM perf_events WHERE name = 'claude_fleet.test.sql'`).get() as { dur_ms: number; meta: string };
+    const meta = JSON.parse(row.meta) as { sql_sync_ms: number; sql_queries: number };
+    expect(meta.sql_queries).toBe(2);
+    expect(meta.sql_sync_ms).toBeLessThan(row.dur_ms);
+  });
+
+  it('rolls SQLite sync time up to every enclosing span', async () => {
+    initPerf(store, ON);
+    setSqliteQueryObserver((_sql, ms) => perfNoteSqlSync(ms));
+    try {
+      await perfSpanAsync('claude_fleet.test.outer', async () => {
+        await stateKysely().selectFrom('maintenance').select('key').execute();
+        await perfSpanAsync('claude_fleet.test.inner', async () => {
+          await sleep(30);
+          await stateKysely().selectFrom('maintenance').select('value').execute();
+        });
+      });
+    } finally {
+      setSqliteQueryObserver(null);
+    }
+    await shutdownPerf();
+    const meta = (name: string) => JSON.parse((db.prepare(`SELECT meta FROM perf_events WHERE name = ?`).get(name) as { meta: string }).meta) as { sql_queries: number; sql_sync_ms: number };
+    expect(meta('claude_fleet.test.inner').sql_queries).toBe(1);
+    expect(meta('claude_fleet.test.outer').sql_queries).toBe(2);
+    expect(meta('claude_fleet.test.outer').sql_sync_ms).toBeGreaterThanOrEqual(meta('claude_fleet.test.inner').sql_sync_ms);
+  });
+
+  it('perfRecordSpan keeps the given bounds, and db.open rows at any duration', async () => {
+    initPerf(store, ON);
+    perfRecordSpan('claude_fleet.db.open', 1_000_000, 1_000_003, { wal_frames: 5 });
+    await shutdownPerf();
+    const row = db.prepare(`SELECT ts, dur_ms, meta FROM perf_events WHERE name = 'claude_fleet.db.open'`).get() as { ts: number; dur_ms: number; meta: string };
+    expect(row.ts).toBe(1_000_000);
+    expect(row.dur_ms).toBeCloseTo(3);
+    expect(JSON.parse(row.meta)).toEqual({ wal_frames: 5 });
   });
 
   it('perfSpanAsync covers awaited work and rethrows', async () => {

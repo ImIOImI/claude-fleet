@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { deleteEmbeddingsForOtherModels, ingestLine, insertEmbedding, insertEmbeddings, unembeddedTurnEvents, maxEventId } from './db.js';
+import { deleteEmbeddingsForOtherModels, ingestLine, insertEmbedding, insertEmbeddings, unembeddedTurnEvents, maxEventId, sessionsWithPendingTurns, sessionsWithPendingTurnsQuery, stateKysely, withRawSqlite } from './db.js';
 import { encodeVector, EMBED_MODEL_ID, EMBED_DIM } from './vectors.js';
-import { openTestState, type TestState } from './store/testStore.js';
+import { isPg, openTestState, type TestState } from './store/testStore.js';
 
 const WS = '01WS';
 const SES = 'ses-1';
@@ -121,5 +121,58 @@ describe('deleteEmbeddingsForOtherModels', () => {
     expect(yields).toBe(2);
     expect(await deleteEmbeddingsForOtherModels(EMBED_MODEL_ID, 5, async () => { yields++; })).toBe(0);
     expect(yields).toBe(2);
+  });
+});
+
+describe('sessionsWithPendingTurns', () => {
+  const embed = async (sessionId: string, modelId = EMBED_MODEL_ID, upTo = Infinity) => {
+    const pending = await unembeddedTurnEvents(sessionId, EMBED_MODEL_ID, 1000);
+    await insertEmbeddings(pending.filter((_, i) => i < upTo).map((ev) => ({
+      workspaceId: WS, sessionId, kind: 'turn' as const, refEventId: ev.id, ts: ev.ts, text: 'x', modelId, dim: EMBED_DIM,
+      vec: encodeVector(unitVec()), dedupKey: modelId === EMBED_MODEL_ID ? `t${ev.id}` : `old${ev.id}`,
+    })));
+  };
+  const perSession = async (ids: string[]) => {
+    const out: string[] = [];
+    for (const id of ids) if ((await unembeddedTurnEvents(id, EMBED_MODEL_ID)).length > 0) out.push(id);
+    return out;
+  };
+  const ts = (n: number) => `2026-07-0${n}T00:00:00Z`;
+  const line = (type: string, id: string, n: number) => JSON.stringify({ type, uuid: id, timestamp: ts(n), message: { content: `m ${id}` } });
+
+  it('matches a per-session pending-turns read, in listSessions order', async () => {
+    // fresh: nothing embedded; done: all; partial: the oldest turn only;
+    // stale: only another model's; quiet: no user/assistant events.
+    for (const [ses, n] of [['fresh', 1], ['done', 2], ['partial', 3], ['stale', 4], ['quiet', 5]] as const) {
+      if (ses === 'quiet') {
+        await ingestLine(WS, ses, JSON.stringify({ type: 'system', uuid: `${ses}-s`, timestamp: ts(n) }));
+        continue;
+      }
+      await ingestLine(WS, ses, line('user', `${ses}-1`, n));
+      await ingestLine(WS, ses, line('assistant', `${ses}-2`, n));
+    }
+    await embed('done');
+    await embed('partial', EMBED_MODEL_ID, 1);
+    await embed('stale', 'old-model');
+
+    const newestFirst = ['quiet', 'stale', 'partial', 'done', 'fresh'];
+    expect(await sessionsWithPendingTurns(EMBED_MODEL_ID)).toEqual(await perSession(newestFirst));
+    expect(await sessionsWithPendingTurns(EMBED_MODEL_ID)).toEqual(['stale', 'partial', 'fresh']);
+
+    await ingestLine(WS, 'done', line('user', 'done-3', 2));
+    expect(await sessionsWithPendingTurns(EMBED_MODEL_ID)).toContain('done');
+    for (const ses of ['done', 'partial', 'stale', 'fresh']) await embed(ses);
+    expect(await sessionsWithPendingTurns(EMBED_MODEL_ID)).toEqual([]);
+  });
+});
+
+describe.skipIf(isPg)('sessionsWithPendingTurns plan', () => {
+  it("computes each session's newest turn once, through the session/type index", async () => {
+    const c = sessionsWithPendingTurnsQuery(stateKysely(), EMBED_MODEL_ID).compile();
+    const plan = (await withRawSqlite((d) => d.prepare(`EXPLAIN QUERY PLAN ${c.sql}`).all(...(c.parameters as unknown[])) as Array<{ detail: string }>))!
+      .map((r) => r.detail);
+    expect(plan).toContain('MATERIALIZE x');
+    expect(plan.filter((d) => d.includes('idx_events_session_type'))).toHaveLength(1);
+    expect(plan.some((d) => d.includes('idx_emb_ref_event'))).toBe(true);
   });
 });

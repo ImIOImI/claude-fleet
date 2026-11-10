@@ -12,7 +12,7 @@ import { disarmSentinel, sentinelStatus, sentinelWindowFor, type SentinelStatus 
 import { hrTimeToMilliseconds } from '@opentelemetry/core';
 import type { ExportResult } from '@opentelemetry/core';
 import { ExportResultCode } from '@opentelemetry/core';
-import { context, metrics, trace, type Attributes } from '@opentelemetry/api';
+import { context, createContextKey, metrics, trace, type Attributes, type Context, type Span } from '@opentelemetry/api';
 import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import type { Counter, Histogram } from '@opentelemetry/api';
 import {
@@ -35,6 +35,9 @@ export const SLOW_OP_MS = 25;
 export const SLOW_OP_MS_BY_NAME: Readonly<Record<string, number>> = {
   // Retention slices aim for ~35 ms; only overshoots are worth a row.
   'claude_fleet.retention.slice': 50,
+  // One row per launch each, whatever the duration: they carry the WAL state.
+  'claude_fleet.db.open': 0,
+  'claude_fleet.db.wal_drain': 0,
 };
 export const FLUSH_INTERVAL_MS = 5000;
 export const STALL_THRESHOLD_MS = 50;
@@ -421,15 +424,37 @@ export function otlpSignalUrl(endpoint: string, signal: 'traces' | 'metrics'): s
   return `${endpoint.replace(/\/+$/, '')}/v1/${signal}`;
 }
 
+/** The perfSpan* spans enclosing the active context, innermost last: SQLite time rolls up to all of them. */
+const SPAN_CHAIN = createContextKey('claude_fleet.span_chain');
+
+interface ChainEntry { span: Span; sqlMs: number; sqlN: number }
+
+function startChained(name: string, attrs?: Attributes): { entry: ChainEntry; ctx: Context } {
+  const active = context.active();
+  const span = trace.getTracer(TRACER_NAME).startSpan(name, { attributes: attrs }, active);
+  const entry: ChainEntry = { span, sqlMs: 0, sqlN: 0 };
+  if (!span.isRecording()) return { entry, ctx: trace.setSpan(active, span) };
+  const chain = [...((active.getValue(SPAN_CHAIN) as ChainEntry[] | undefined) ?? []), entry];
+  return { entry, ctx: trace.setSpan(active, span).setValue(SPAN_CHAIN, chain) };
+}
+
+function endChained(entry: ChainEntry): void {
+  if (entry.sqlN > 0) {
+    entry.span.setAttribute('sql_sync_ms', Math.round(entry.sqlMs * 10) / 10);
+    entry.span.setAttribute('sql_queries', entry.sqlN);
+  }
+  entry.span.end();
+}
+
 export function perfSpan<T>(name: string, fn: () => T, attrs?: Attributes): T {
-  const span = trace.getTracer(TRACER_NAME).startSpan(name, { attributes: attrs });
+  const { entry, ctx } = startChained(name, attrs);
   try {
-    return context.with(trace.setSpan(context.active(), span), fn);
+    return context.with(ctx, fn);
   } catch (err) {
-    if (err instanceof Error) span.recordException(err);
+    if (err instanceof Error) entry.span.recordException(err);
     throw err;
   } finally {
-    span.end();
+    endChained(entry);
   }
 }
 
@@ -438,14 +463,31 @@ export async function perfSpanAsync<T>(
   fn: () => Promise<T> | T,
   attrs?: Attributes
 ): Promise<T> {
-  const span = trace.getTracer(TRACER_NAME).startSpan(name, { attributes: attrs });
+  const { entry, ctx } = startChained(name, attrs);
   try {
-    return await context.with(trace.setSpan(context.active(), span), fn);
+    return await context.with(ctx, fn);
   } catch (err) {
-    if (err instanceof Error) span.recordException(err);
+    if (err instanceof Error) entry.span.recordException(err);
     throw err;
   } finally {
-    span.end();
+    endChained(entry);
+  }
+}
+
+/** A span with explicit epoch-ms bounds, for work timed before perf was initialized. */
+export function perfRecordSpan(name: string, startMs: number, endMs: number, attrs?: Attributes): void {
+  trace.getTracer(TRACER_NAME).startSpan(name, { attributes: attrs, startTime: startMs }).end(endMs);
+}
+
+/** Add one statement's synchronous SQLite time to every enclosing perfSpan*
+ *  span; each reports `sql_sync_ms` / `sql_queries` when it ends, so its own
+ *  DB cost (its children's included) is separable from mutex queueing. */
+export function perfNoteSqlSync(ms: number): void {
+  const chain = context.active().getValue(SPAN_CHAIN) as ChainEntry[] | undefined;
+  if (!chain) return;
+  for (const e of chain) {
+    e.sqlMs += ms;
+    e.sqlN++;
   }
 }
 
@@ -455,14 +497,14 @@ export async function perfSpanAsyncAttrs<T>(
   fn: (set: (attrs: Attributes) => void) => Promise<T> | T,
   attrs?: Attributes
 ): Promise<T> {
-  const span = trace.getTracer(TRACER_NAME).startSpan(name, { attributes: attrs });
+  const { entry, ctx } = startChained(name, attrs);
   try {
-    return await context.with(trace.setSpan(context.active(), span), () => fn((a) => span.setAttributes(a)));
+    return await context.with(ctx, () => fn((a) => entry.span.setAttributes(a)));
   } catch (err) {
-    if (err instanceof Error) span.recordException(err);
+    if (err instanceof Error) entry.span.recordException(err);
     throw err;
   } finally {
-    span.end();
+    endChained(entry);
   }
 }
 

@@ -20,6 +20,7 @@ import { inboxEvents } from '../inbox/inboxEvents.js';
 import type { Todo } from '../../preload/inboxTypes.js';
 import { setAutomationHandlers } from '../mcpServer.js';
 import { logError } from '../errorLog.js';
+import { perfSpanAsync } from '../perf.js';
 import type { InboxStore } from '../inbox/inboxDb.js';
 import type { NotifyService } from '../inbox/notifyService.js';
 import { emitInboxChanged } from '../inbox/inboxEvents.js';
@@ -55,7 +56,7 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
   let names: Array<{ id: string; name: string }> = [];
   /** The workspace behind the Inbox chip (manifest role 'automations'), if any. */
   let roleWs: string | null = null;
-  const refresh = async () => {
+  const refreshUnspanned = async () => {
     names = await hostWorkspaceNames().catch(() => names);
     const prev = roleWs;
     let manifests = -1;
@@ -75,6 +76,7 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
       });
     }
   };
+  const refresh = () => perfSpanAsync('claude_fleet.automations.refresh', refreshUnspanned);
   const privileged = (id: string) => id === roleWs;
   // Host shells (#407): PATH for native shells, the local-workspace WSL probe for distros. Refreshed every 5 min.
   let shells: HostShell[] = [];
@@ -220,9 +222,12 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
   });
 
   const USER = { kind: 'user' as const, id: null };
-  const withNames = async <T>(fn: () => T | Promise<T>): Promise<T> => { await Promise.all([refresh(), refreshShells()]); return await fn(); };
+  const withNames = async <T>(fn: () => T | Promise<T>): Promise<T> => {
+    await Promise.all([refresh(), perfSpanAsync('claude_fleet.automations.host_shells', refreshShells)]);
+    return await fn();
+  };
   ipcMain.handle('automations:hostShells', () => refreshShells());
-  ipcMain.handle('automations:list', () => withNames(() => svc.list()));
+  ipcMain.handle('automations:list', () => withNames(() => perfSpanAsync('claude_fleet.automations.list_db', () => svc.list())));
   ipcMain.handle('automations:get', (_e, id: string) => withNames(() => svc.get(id)));
   ipcMain.handle('automations:validate', (_e, text: string) => withNames(() => svc.validate(String(text ?? ''))));
   ipcMain.handle('automations:create', (_e, text: string) => withNames(() => svc.create(String(text ?? ''), USER)));

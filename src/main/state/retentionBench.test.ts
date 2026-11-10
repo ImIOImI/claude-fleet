@@ -13,6 +13,9 @@ import { isPg, openTestState } from '../store/testStore.js';
 import {
   compactEmbeddings, createThrottle, DAY_MS, dedupeAttachments, incrementalVacuum, retainEvents, sweepOrphans, type Throttle,
 } from './retention.js';
+import { installWalCheckpointer } from './walCheckpointer.js';
+
+installWalCheckpointer();
 
 const ON = process.env.RETENTION_BENCH === '1';
 const WS = '01KW00000000000000000000WS';
@@ -117,8 +120,8 @@ describe.skipIf(!ON || isPg)('retention slice bench', () => {
     // (9 ms here ≈ 35 ms on a machine 4× slower); builds without budgets ignore it.
     const targetMs = Number(process.env.RETENTION_BENCH_TARGET_MS ?? 35);
     // Builds with walCheckpointer checkpoint from a worker, as startRetention does.
-    const ck = await import('./walCheckpointer.js' as string)
-      .then((m: { startWalCheckpointer(p: string): Promise<{ request(): void; drain(): Promise<void>; close(): Promise<void> } | null> }) => m.startWalCheckpointer(join(state.dir, 'state.db')))
+    const ck = await import('../db.js' as string)
+      .then((m: { acquireWalCheckpointer(): Promise<{ request(): void; drain(): Promise<void>; close(): Promise<void> } | null> }) => m.acquireWalCheckpointer())
       .catch(() => null);
     // A slice's main-thread time runs from after its wait for a checkpoint in flight.
     let sliceStart = 0;

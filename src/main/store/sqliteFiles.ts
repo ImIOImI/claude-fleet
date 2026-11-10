@@ -21,6 +21,15 @@ export function inboxOnPostgres(userData: string): boolean {
   }
 }
 
+/** 0 when the file is missing. */
+export function fileSize(p: string): number {
+  try {
+    return statSync(p).size;
+  } catch {
+    return 0;
+  }
+}
+
 export const SQLITE_SIDECARS = ['-wal', '-shm', '-journal'] as const;
 
 const MOVING = '.moving';

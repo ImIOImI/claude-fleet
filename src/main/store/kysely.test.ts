@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { sql } from 'kysely';
-import { sqliteKysely, num, chunked, readTransaction } from './kysely.js';
+import { sqliteKysely, num, chunked, readTransaction, setSqliteQueryObserver } from './kysely.js';
 
 interface T { t: { v: number } }
 
@@ -148,5 +148,27 @@ describe('readTransaction', () => {
     await k.insertInto('t').values({ v: 1 }).execute();
     expect(await readTransaction(k, (trx) => trx.selectFrom('t').select('v').execute())).toEqual([{ v: 1 }]);
     await k.destroy();
+  });
+});
+
+describe('sqliteKysely query timing', () => {
+  it('reports each statement with its synchronous time to onQuery and the global observer', async () => {
+    const raw = new Database(':memory:');
+    raw.exec('CREATE TABLE t (v INTEGER NOT NULL)');
+    const own: string[] = [];
+    const global: Array<[string, number]> = [];
+    const k = sqliteKysely<T>(raw, { statementCache: 8, onQuery: (s) => own.push(s) });
+    setSqliteQueryObserver((s, ms) => global.push([s, ms]));
+    try {
+      await k.transaction().execute(async (trx) => { await trx.insertInto('t').values({ v: 1 }).execute(); });
+      expect(await k.selectFrom('t').select('v').execute()).toEqual([{ v: 1 }]);
+    } finally {
+      setSqliteQueryObserver(null);
+    }
+    expect(own).toEqual(['begin', 'insert into "t" ("v") values (?)', 'commit', 'select "v" from "t"']);
+    expect(global.map(([s]) => s)).toEqual(own);
+    expect(global.every(([, ms]) => ms >= 0)).toBe(true);
+    await k.destroy();
+    expect(raw.open).toBe(false);
   });
 });
