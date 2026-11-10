@@ -35,6 +35,20 @@ vi.mock('./claudeResolve.js', async (orig) => ({
   ...(await orig<typeof import('./claudeResolve.js')>()),
   findClaude: async () => '/usr/bin/claude'
 }));
+// One-shot gate on the next manifest read, to hold stopWorkspace mid-flight.
+const manifestGate: { next: Promise<void> | null } = { next: null };
+vi.mock('./workspaces.js', async (orig) => {
+  const actual = await orig<typeof import('./workspaces.js')>();
+  return {
+    ...actual,
+    readWorkspaceManifest: async (id: string) => {
+      const gate = manifestGate.next;
+      manifestGate.next = null;
+      if (gate) await gate;
+      return actual.readWorkspaceManifest(id);
+    }
+  };
+});
 
 const local = await import('./local.js');
 const { SpawnCancelledError } = await import('./spawnQueue.js');
@@ -62,21 +76,19 @@ async function until(cond: () => boolean): Promise<void> {
   if (!cond()) throw new Error('timed out waiting for condition');
 }
 
-/** Occupy the queue: the blocker's task parks in the resume lookup. */
-async function startBlocker(): Promise<{ attach: Promise<unknown>; release: () => void }> {
-  let release!: () => void;
-  const gate = new Promise<null>((r) => (release = () => r(null)));
-  lookup.mockImplementation(async (_ws, sid) => (sid === 'blocker' ? gate : null));
-  const attach = local.attachPty(WS_ID, 'blocker', 120, 40);
-  attach.catch(() => {});
-  await until(() => lookup.mock.calls.some(([, sid]) => sid === 'blocker'));
-  return { attach, release };
+/** Occupy the queue and wait until it is actually running the hold. */
+async function holdQueue(): Promise<() => void> {
+  const release = local._holdSpawnQueueForTest();
+  await until(() => local._pendingSpawnsForTest() === 0);
+  return release;
 }
 
 beforeEach(async () => {
   local._resetForTest();
   resetSessions();
   local._setSpawnForTest(fakeSpawn);
+  local._setResumeLookupTimeoutForTest(3000);
+  manifestGate.next = null;
   spawned.length = 0;
   lookup.mockReset();
   lookup.mockImplementation(async () => null);
@@ -109,49 +121,75 @@ describe('local attachPty spawn queue', () => {
   });
 
   it('cancels a queued spawn when the tab is closed', async () => {
-    const b = await startBlocker();
+    const release = await holdQueue();
     const tab = local.attachPty(WS_ID, 'tab', 120, 40);
+    const tabErr = tab.catch((e: unknown) => e);
     await until(() => local._pendingSpawnsForTest() === 1);
     expect(local.cancelPendingAttach(WS_ID, 'tab')).toBe(true);
-    await expect(tab).rejects.toBeInstanceOf(SpawnCancelledError);
-    b.release();
-    await b.attach;
-    expect(spawned.map((s) => s.sid)).toEqual(['blocker']);
+    expect(await tabErr).toBeInstanceOf(SpawnCancelledError);
+    release();
+    await local.attachPty(WS_ID, 'other', 120, 40);
+    expect(spawned.map((s) => s.sid)).toEqual(['other']);
   });
 
-  it('does not spawn queued or in-flight attaches once the workspace is stopped', async () => {
-    const b = await startBlocker();
+  it('does not spawn queued attaches once the workspace is stopped', async () => {
+    const release = await holdQueue();
     const tab = local.attachPty(WS_ID, 'tab', 120, 40);
     const tabErr = tab.catch((e: unknown) => e);
     await until(() => local._pendingSpawnsForTest() === 1);
     await local.stopWorkspace(WS_ID);
     expect(await tabErr).toBeInstanceOf(SpawnCancelledError);
-    b.release();
-    await expect(b.attach).rejects.toThrow(/is not running/);
+    release();
+    await new Promise((r) => setTimeout(r, 10));
     expect(spawned).toEqual([]);
   });
 
+  it('refuses an attach that arrives while a stop is still in flight', async () => {
+    await local.attachPty(WS_ID, 'tab', 120, 40);
+    let releaseStop!: () => void;
+    manifestGate.next = new Promise<void>((r) => (releaseStop = r));
+    const stop = local.stopWorkspace(WS_ID);
+    const late = local.attachPty(WS_ID, 'late', 120, 40);
+    await expect(late).rejects.toThrow(/is not running/);
+    releaseStop();
+    await stop;
+    expect(spawned.map((s) => s.sid)).toEqual(['tab']);
+    expect((await local.listLiveWorkspaces()).find((w) => w.id === WS_ID)?.state).toBe('stopped');
+  });
+
   it('a newer attach for the same tab wins and its resume target is used', async () => {
-    const b = await startBlocker();
+    const release = await holdQueue();
     const older = local.attachPty(WS_ID, 'tab', 120, 40, 'claude-old');
+    const olderErr = older.catch((e: unknown) => e);
     const newer = local.attachPty(WS_ID, 'tab', 120, 40, 'claude-new');
-    await expect(older).rejects.toBeInstanceOf(SpawnCancelledError);
+    expect(await olderErr).toBeInstanceOf(SpawnCancelledError);
     await until(() => local._pendingSpawnsForTest() === 1);
-    b.release();
-    await b.attach;
+    release();
     await newer;
-    const tabSpawns = spawned.filter((s) => s.sid === 'tab');
-    expect(tabSpawns).toHaveLength(1);
-    expect(tabSpawns[0].args).toEqual(expect.arrayContaining(['--resume', 'claude-new']));
-    expect(tabSpawns[0].args).not.toContain('claude-old');
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0].args).toEqual(expect.arrayContaining(['--resume', 'claude-new']));
+    expect(spawned[0].args).not.toContain('claude-old');
+  });
+
+  it('a stalled resume lookup does not hold up other spawns, and times out to a fresh spawn', async () => {
+    local._setResumeLookupTimeoutForTest(100);
+    lookup.mockImplementation((_ws, sid) => (sid === 'stalled' ? new Promise<string | null>(() => {}) : Promise.resolve(null)));
+    const stalled = local.attachPty(WS_ID, 'stalled', 120, 40);
+    await until(() => lookup.mock.calls.some(([, sid]) => sid === 'stalled'));
+    await local.attachPty(WS_ID, 'tab', 120, 40);
+    expect(spawned.map((s) => s.sid)).toEqual(['tab']);
+    await stalled;
+    expect(spawned.map((s) => s.sid)).toEqual(['tab', 'stalled']);
+    const s = spawned[1];
+    expect(s.args).not.toContain('--resume');
+    expect(s.args).toContain('--session-id');
   });
 
   it('re-attaching a live tab skips the queue and spawns nothing', async () => {
     await local.attachPty(WS_ID, 'tab', 120, 40);
-    const b = await startBlocker();
+    const release = await holdQueue();
     await local.attachPty(WS_ID, 'tab', 120, 40);
     expect(spawned.map((s) => s.sid)).toEqual(['tab']);
-    b.release();
-    await b.attach;
+    release();
   });
 });

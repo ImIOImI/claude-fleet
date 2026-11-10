@@ -101,6 +101,10 @@ const started = new Set<string>();
 // native/custom local ones still can't. In-memory like `started`.
 const paused = new Set<string>();
 
+// Workspaces mid stop/remove/pause. Attaches are refused while set: attach
+// prep re-adds `started`, so clearing it alone doesn't close the window.
+const transitioning = new Set<string>();
+
 // ── Warm-state persistence ─────────────────────────────────────────────────
 //
 // `<stateDir>/<id>/local-live.json` = `{ "state": "running" | "paused" }`;
@@ -160,6 +164,7 @@ async function rehydrateLiveState(manifests: WorkspaceSpec[]): Promise<void> {
 export function _resetForTest(): void {
   started.clear();
   paused.clear();
+  transitioning.clear();
   rehydrated = false;
 }
 
@@ -494,32 +499,42 @@ export async function checkClaudeFreshness(
 export async function pauseWorkspace(containerId: string): Promise<void> {
   const m = await readWorkspaceManifest(containerId);
   if (m?.launcher?.mode === 'wsl') {
-    await signalWslSessions(m.launcher, containerId, 'STOP');
-    if (started.has(containerId)) paused.add(containerId);
-    cancelWorkspaceAttaches(containerId, 'workspace paused');
-    await persistLiveState(containerId);
+    transitioning.add(containerId);
+    try {
+      cancelWorkspaceAttaches(containerId, 'workspace paused');
+      await signalWslSessions(m.launcher, containerId, 'STOP');
+      if (started.has(containerId)) paused.add(containerId);
+      await persistLiveState(containerId);
+    } finally {
+      transitioning.delete(containerId);
+    }
     return;
   }
   throw new Error('pause is not supported for local workspaces');
 }
 
 export async function stopWorkspace(containerId: string): Promise<void> {
-  const m = await readWorkspaceManifest(containerId);
-  cancelWorkspaceAttaches(containerId, 'workspace stopped');
-  killWorkspaceSessions(containerId);
-  // conpty teardown isn't guaranteed to reap the Linux-side process (#253).
-  if (m?.launcher?.mode === 'wsl') {
-    await signalWslSessions(m.launcher, containerId, 'TERM');
-    // Clean up stale pidfiles after TERM: a pid recycled by the OS before the
-    // next launch could be signaled incorrectly (pid-reuse hazard). Best-effort;
-    // the /tmp location is ephemeral and vanishes with the WSL VM anyway.
-    const glob = wslPidFile(containerId, '*');
-    const cleanScript = `rm -f ${glob}; true`;
-    await execFileAsync('wsl.exe', ['-d', m.launcher.distro, '--exec', 'sh', '-c', cleanScript]).catch(() => {});
+  transitioning.add(containerId);
+  try {
+    cancelWorkspaceAttaches(containerId, 'workspace stopped');
+    killWorkspaceSessions(containerId);
+    started.delete(containerId);
+    paused.delete(containerId);
+    const m = await readWorkspaceManifest(containerId);
+    // conpty teardown isn't guaranteed to reap the Linux-side process (#253).
+    if (m?.launcher?.mode === 'wsl') {
+      await signalWslSessions(m.launcher, containerId, 'TERM');
+      // Clean up stale pidfiles after TERM: a pid recycled by the OS before the
+      // next launch could be signaled incorrectly (pid-reuse hazard). Best-effort;
+      // the /tmp location is ephemeral and vanishes with the WSL VM anyway.
+      const glob = wslPidFile(containerId, '*');
+      const cleanScript = `rm -f ${glob}; true`;
+      await execFileAsync('wsl.exe', ['-d', m.launcher.distro, '--exec', 'sh', '-c', cleanScript]).catch(() => {});
+    }
+    await persistLiveState(containerId);
+  } finally {
+    transitioning.delete(containerId);
   }
-  started.delete(containerId);
-  paused.delete(containerId);
-  await persistLiveState(containerId);
 }
 
 export async function removeWorkspace(
@@ -527,13 +542,18 @@ export async function removeWorkspace(
   opts: RemoveWorkspaceOpts = {}
 ): Promise<void> {
   const id = opts.id ?? containerId;
-  cancelWorkspaceAttaches(id, 'workspace removed');
-  killWorkspaceSessions(id);
-  started.delete(id);
-  paused.delete(id);
-  await persistLiveState(id);
-  if (opts.deleteState && id) {
-    await rm(workspaceStateDir(id), { recursive: true, force: true });
+  transitioning.add(id);
+  try {
+    cancelWorkspaceAttaches(id, 'workspace removed');
+    killWorkspaceSessions(id);
+    started.delete(id);
+    paused.delete(id);
+    await persistLiveState(id);
+    if (opts.deleteState && id) {
+      await rm(workspaceStateDir(id), { recursive: true, force: true });
+    }
+  } finally {
+    transitioning.delete(id);
   }
 }
 
@@ -573,6 +593,33 @@ export function recordResumeUsageQuietly(workspaceId: string, sessionId: string)
 }
 
 const spawnQueue = createSpawnQueue();
+let resumeLookupTimeoutMs = 3000;
+let resumeTimeoutLogged = false;
+
+/** Test-only. */
+export function _setResumeLookupTimeoutForTest(ms: number): void {
+  resumeLookupTimeoutMs = ms;
+}
+
+/** Resolves null (and calls onTimeout) if `p` hasn't settled within `ms`. */
+function withTimeout<T>(p: Promise<T | null>, ms: number, onTimeout: () => void): Promise<T | null> {
+  return new Promise<T | null>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      onTimeout();
+      resolve(null);
+    }, ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e: unknown) => {
+        clearTimeout(timer);
+        reject(e);
+      }
+    );
+  });
+}
 // Latest attach per tab, stamped on arrival: attach prep is async, so an
 // older request can reach the queue after a newer one and must not replace it.
 const latestAttach = new Map<string, number>();
@@ -591,6 +638,14 @@ export function cancelPendingAttach(workspaceId: string, sessionId: string): boo
 /** Test-only: attaches waiting in the spawn queue. */
 export function _pendingSpawnsForTest(): number {
   return spawnQueue.pending;
+}
+
+/** Test-only: occupy the spawn queue until the returned release is called. */
+export function _holdSpawnQueueForTest(): () => void {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  void spawnQueue.run('\u0000test-hold', () => gate);
+  return release;
 }
 
 function cancelWorkspaceAttaches(workspaceId: string, reason: string): void {
@@ -612,8 +667,11 @@ export async function attachPty(
   latestAttach.set(key, seq);
   const assertCurrent = (): void => {
     if (latestAttach.get(key) !== seq) throw new SpawnCancelledError('superseded by a newer attach');
-    if (!started.has(id) || paused.has(id)) throw new Error(`local workspace ${id} is not running`);
+    if (transitioning.has(id) || !started.has(id) || paused.has(id)) {
+      throw new Error(`local workspace ${id} is not running`);
+    }
   };
+  if (transitioning.has(id)) throw new Error(`local workspace ${id} is not running`);
   const m = await readWorkspaceManifest(id);
   if (!m) throw new Error(`no manifest for local workspace ${id}`);
   const launcher: WorkspaceLauncher = m.launcher ?? { mode: 'native' };
@@ -647,6 +705,7 @@ export async function attachPty(
     });
   const settingsArg =
     retentionHost && launcher.mode === 'wsl' ? (windowsPathToWslPath(retentionHost) ?? undefined) : retentionHost;
+  if (transitioning.has(id)) throw new Error(`local workspace ${id} is not running`);
   // Attaching implies the workspace is up.
   started.add(id);
   // If the workspace was paused, resume it now. For wsl-launcher workspaces
@@ -658,13 +717,25 @@ export async function attachPty(
   await persistLiveState(id);
   // Cross-restart continuity: a restored tab whose process died with the
   // previous app run resumes its mapped conversation instead of spawning a
-  // fresh one. Live state and resume target are read when the task runs:
-  // the tab may have spawned, closed or been stopped while queued.
+  // fresh one. Looked up before queueing: the queue is serial, so a slow DB
+  // must not hold up other tabs' spawns. A live process ignores resume args.
+  const resume = await effectiveResumeOf(resumeOf, hasLiveSession(id, sessionId), () =>
+    withTimeout(lookupResumableBrokerSession(id, sessionId), resumeLookupTimeoutMs, () => {
+      if (resumeTimeoutLogged) return;
+      resumeTimeoutLogged = true;
+      logError({
+        source: 'main',
+        type: 'resume-lookup-timeout',
+        level: 'warn',
+        message: `resume lookup exceeded ${resumeLookupTimeoutMs} ms; spawning without --resume`,
+        workspaceId: id,
+        extra: { brokerSessionId: sessionId }
+      });
+    })
+  );
+  // Only cheap synchronous checks run inside the task: the tab may have
+  // spawned, closed or been stopped while queued.
   const attach = async (): Promise<PtyHandle> => {
-    assertCurrent();
-    const resume = await effectiveResumeOf(resumeOf, hasLiveSession(id, sessionId), () =>
-      lookupResumableBrokerSession(id, sessionId)
-    );
     assertCurrent();
     return attachLocalSession({
       workspaceId: id,
