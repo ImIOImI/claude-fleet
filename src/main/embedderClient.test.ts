@@ -1,10 +1,11 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EmbedderClient, EmbedderUnavailable, FrameDecoder, directSpawner, encodeFrame, type SidecarSpawner } from './embedderClient.js';
 import { makeWorkerSpawner } from './embedderSpawnWorker.js';
+import { waitForState } from './__fixtures__/procState.js';
 
 const FAKE = fileURLToPath(new URL('./__fixtures__/fake-embedder.mjs', import.meta.url));
 const clients: EmbedderClient[] = [];
@@ -124,6 +125,24 @@ describe.each([
     await c.embed(['a']);
     await new Promise((r) => setTimeout(r, 300));
     expect(logs).toEqual(['fleet-embedder stderr: first half', 'fleet-embedder stderr: second']);
+  });
+
+  it.each([
+    ['closing stdin', 'ok'],
+    ['SIGTERM after the grace period', 'ignore-eof'],
+    ['SIGKILL after twice the grace period', 'ignore-term'],
+  ])('dispose stops the child by %s', async (_how, mode) => {
+    const pidFile = join(mkdtempSync(join(tmpdir(), 'fake-emb-')), 'pid');
+    process.env.FAKE_PID_FILE = pidFile;
+    try {
+      const { c } = client(mode, { disposeGraceMs: 150 });
+      await c.embed(['a']);
+      const pid = Number(readFileSync(pidFile, 'utf8'));
+      c.dispose();
+      expect(await waitForState(pid, 'gone', 2_000)).toBe('gone');
+    } finally {
+      delete process.env.FAKE_PID_FILE;
+    }
   });
 
   it('gives up at once on a protocol mismatch', async () => {

@@ -58,17 +58,28 @@ export const CRASH_LOOP_WINDOW_MS = 5 * 60_000;
 export const MAX_BACKOFF_MS = 30_000;
 export const REQUEST_TIMEOUT_MS = 120_000;
 const STDERR_LINES_PER_MIN = 20;
+/** dispose(): SIGTERM this long after closing stdin, SIGKILL after twice this. */
+export const DISPOSE_GRACE_MS = 2_000;
 
-/** The sidecar's stdio and lifecycle, however it was spawned. */
+/** spawn: the child never existed. child: a runtime error (the child is killed). relay: the owning worker died. */
+export type SidecarErrorKind = 'spawn' | 'child' | 'relay';
+
+const ERROR_LABEL: Record<SidecarErrorKind, string> = {
+  spawn: 'spawn failed',
+  child: 'child error',
+  relay: 'relay worker crashed',
+};
+
+/** The sidecar's stdio and lifecycle, however it was spawned. An error is always followed by one exit. */
 export interface SidecarProcess {
   onStdout(cb: (chunk: Buffer) => void): void;
   onStderr(cb: (chunk: Buffer) => void): void;
-  onError(cb: (e: Error) => void): void;
+  onError(cb: (kind: SidecarErrorKind, message: string) => void): void;
   onExit(cb: (code: number | null, signal: string | null) => void): void;
   write(chunk: Buffer): void;
   /** Closes stdin; the sidecar exits on EOF. */
   end(): void;
-  kill(): void;
+  kill(force?: boolean): void;
 }
 
 export type SidecarSpawner = (bin: string, args: string[]) => SidecarProcess;
@@ -81,11 +92,17 @@ export const directSpawner: SidecarSpawner = (bin, args) => {
   return {
     onStdout: (cb) => { c.stdout!.on('data', cb); },
     onStderr: (cb) => { c.stderr!.on('data', cb); },
-    onError: (cb) => { c.on('error', cb); },
+    onError: (cb) => {
+      c.on('error', (e) => {
+        const spawned = c.pid !== undefined;
+        if (spawned) c.kill('SIGKILL');
+        cb(spawned ? 'child' : 'spawn', e.message);
+      });
+    },
     onExit: (cb) => { c.on('exit', cb); },
     write: (chunk) => { c.stdin!.write(chunk); },
     end: () => { c.stdin!.end(); },
-    kill: () => { c.kill(); },
+    kill: (force) => { c.kill(force ? 'SIGKILL' : 'SIGTERM'); },
   };
 };
 
@@ -103,6 +120,7 @@ export interface EmbedderClientOptions {
   onSpawn?: (ready: Promise<void>) => void;
   /** Defaults to directSpawner. */
   spawner?: SidecarSpawner;
+  disposeGraceMs?: number;
 }
 
 interface Pending {
@@ -147,11 +165,18 @@ export class EmbedderClient {
     });
   }
 
-  /** Closes stdin; the sidecar exits on EOF. */
+  /** Closes stdin (the sidecar exits on EOF), then escalates to SIGTERM and SIGKILL. */
   dispose(): void {
     const child = this.child;
     this.stop('disposed');
-    child?.end();
+    if (!child) return;
+    const grace = this.opts.disposeGraceMs ?? DISPOSE_GRACE_MS;
+    const term = setTimeout(() => child.kill(), grace);
+    const kill = setTimeout(() => child.kill(true), 2 * grace);
+    term.unref?.();
+    kill.unref?.();
+    child.onExit(() => { clearTimeout(term); clearTimeout(kill); });
+    child.end();
   }
 
   private start(): void {
@@ -190,7 +215,7 @@ export class EmbedderClient {
       readyReject(new Error(why));
       this.onChildGone(child, why);
     };
-    child.onError((e) => onGone(`spawn error: ${e.message}`));
+    child.onError((kind, message) => onGone(`${ERROR_LABEL[kind]}: ${message}`));
     child.onExit((code, signal) => onGone(this.lastFatal || `exited code=${code} signal=${signal}`));
   }
 
