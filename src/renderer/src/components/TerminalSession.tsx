@@ -170,6 +170,8 @@ export function TerminalSession({
   readOnlyRef.current = readOnly;
   const remoteRef = useRef(remote);
   remoteRef.current = remote;
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
   // Bumped when the user clicks "Start new session" / "Retry" after a
   // session ends. The effect deps on containerId+sessionEpoch, so a new
   // attach happens with a fresh xterm instance (no stale state from the
@@ -525,12 +527,15 @@ export function TerminalSession({
         // over the resumeOf prop for this one attach, then is cleared.
         const resumeTarget = resumeOverrideRef.current ?? resumeOf;
         resumeOverrideRef.current = null;
+        const spawnCols = term.cols;
+        const spawnRows = term.rows;
         const sid = await window.api.pty.attach(
           containerId,
           sessionId,
-          term.cols,
-          term.rows,
-          resumeTarget
+          spawnCols,
+          spawnRows,
+          resumeTarget,
+          visibleRef.current
         );
         if (disposed) {
           window.api.pty.detach(sid);
@@ -553,9 +558,12 @@ export function TerminalSession({
             });
           }
         });
-        resizePusher.seed(term.cols, term.rows);
-        lastObservedCols = term.cols;
-        lastObservedRows = term.rows;
+        // Baselines are the size actually sent: the pane can re-fit while
+        // attach is in flight (local spawns queue); reconcileSize() below
+        // pushes and nudges for that change.
+        resizePusher.seed(spawnCols, spawnRows);
+        lastObservedCols = spawnCols;
+        lastObservedRows = spawnRows;
         // Busy/idle (#283): read the title from xterm's own OSC parser —
         // onTitleChange fires once per complete title no matter how the PTY
         // stream was chunked, which is the framing dependence that used to
@@ -666,10 +674,11 @@ export function TerminalSession({
         // Arm the scoped repaint nudge (consumed by the ResizeObserver
         // below). attachCols/Rows is the size claude is laying out at right
         // now; a later resize that changes it is the trigger.
-        attachCols = term.cols;
-        attachRows = term.rows;
+        attachCols = spawnCols;
+        attachRows = spawnRows;
         nudgeArmed = true;
         armTimer = setTimeout(disarmNudge, REPAINT_NUDGE_WINDOW_MS);
+        reconcileSize();
       } catch (err) {
         // Attach failure most commonly means the in-container broker
         // isn't reachable — older runner images without it, or the
@@ -694,8 +703,7 @@ export function TerminalSession({
       }
     });
 
-    const ro = new ResizeObserver(() => {
-      safeFit();
+    function reconcileSize(): void {
       if (ptyHandleId) {
         // Only push a size the pty doesn't already have (#268). The observer
         // fires on any host layout change — a scrollbar appearing as claude's
@@ -748,6 +756,11 @@ export function TerminalSession({
           }, REPAINT_NUDGE_DEBOUNCE_MS);
         }
       }
+    }
+
+    const ro = new ResizeObserver(() => {
+      safeFit();
+      reconcileSize();
     });
     ro.observe(host);
 

@@ -62,6 +62,7 @@ import { sanitizePerfSamples } from './perfSamples.js';
 import { buildLoadoutCatalog } from './loadoutCatalog.js';
 import * as realDocker from './docker.js';
 import * as realLocal from './local.js';
+import { SpawnCancelledError } from './spawnQueue.js';
 import * as mockDocker from './mock.js';
 import type { Backend } from './backend.js';
 import { hostRunsSignals, resolveAutomationKind, resolveKind, resolveRemoveKind } from './backendRouter.js';
@@ -2124,7 +2125,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       brokerSessionId: string,
       cols: number,
       rows: number,
-      resumeOf?: string
+      resumeOf?: string,
+      foreground?: boolean
     ) => {
       // Internal handle id, used by the renderer to address subsequent
       // input/resize/detach calls. Distinct from brokerSessionId (which
@@ -2134,8 +2136,11 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       const b = await backendFor(containerId);
       let handle: PtyHandle;
       try {
-        handle = await b.attachPty(containerId, brokerSessionId, cols, rows, resumeOf);
+        handle = await b.attachPty(containerId, brokerSessionId, cols, rows, resumeOf, {
+          foreground: foreground === true
+        });
       } catch (err) {
+        if (err instanceof SpawnCancelledError) throw err;
         // Capture the broker's recent stdout/stderr so the user has
         // something to diagnose with. The classic symptom we're chasing
         // is "broker: ATTACHED timed out" after a pause/resume — the
@@ -2425,13 +2430,15 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle(
     'pty:closeSessionByBroker',
     async (_e, workspaceId: string, brokerSessionId: string) => {
+      const cancelled =
+        (await backendFor(workspaceId)).cancelPendingAttach?.(workspaceId, brokerSessionId) ?? false;
       const ptyHandleId = findLiveHandleId(
         handleWorkspaceId,
         handleBrokerSessionId,
         workspaceId,
         brokerSessionId
       );
-      if (!ptyHandleId) return false;
+      if (!ptyHandleId) return cancelled;
       if (tabCloseVerb(await resolveKind(workspaceId)) === 'detach') {
         detachHandle(ptyHandleId);
         return true;

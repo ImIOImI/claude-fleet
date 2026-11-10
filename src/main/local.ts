@@ -85,6 +85,7 @@ import {
   type SpawnPty
 } from './localSessions.js';
 import { createConptySettler } from './conptySettle.js';
+import { createSpawnQueue, SpawnCancelledError } from './spawnQueue.js';
 
 // Lazy require so the native node-pty addon only loads when a local session is
 // actually spawned (and never under vitest, which can't load the Electron ABI).
@@ -100,6 +101,25 @@ const started = new Set<string>();
 // native/custom local ones still can't. In-memory like `started`.
 const paused = new Set<string>();
 
+// Workspaces mid stop/remove/pause, counted so overlapping transitions keep
+// the guard up. Attaches are refused while > 0: attach prep re-adds
+// `started`, so clearing it alone does not close the window.
+const transitioning = new Map<string, number>();
+
+function enterTransition(id: string): void {
+  transitioning.set(id, (transitioning.get(id) ?? 0) + 1);
+}
+
+function exitTransition(id: string): void {
+  const n = (transitioning.get(id) ?? 1) - 1;
+  if (n > 0) transitioning.set(id, n);
+  else transitioning.delete(id);
+}
+
+function isTransitioning(id: string): boolean {
+  return (transitioning.get(id) ?? 0) > 0;
+}
+
 // ── Warm-state persistence ─────────────────────────────────────────────────
 //
 // `<stateDir>/<id>/local-live.json` = `{ "state": "running" | "paused" }`;
@@ -112,8 +132,22 @@ function liveStatePath(id: string): string {
   return join(workspaceStateDir(id), 'local-live.json');
 }
 
+// Per-id write chain: each write reads the state when it runs, so the last
+// one always reflects the latest transition (an attach's write can't land
+// after a concurrent stop's removal).
+const persistChains = new Map<string, Promise<void>>();
+
+function persistLiveState(id: string): Promise<void> {
+  const next = (persistChains.get(id) ?? Promise.resolve()).then(() => writeLiveState(id));
+  persistChains.set(id, next);
+  void next.then(() => {
+    if (persistChains.get(id) === next) persistChains.delete(id);
+  });
+  return next;
+}
+
 /** Best-effort: chip warmth is a nicety, never worth failing a transition. */
-async function persistLiveState(id: string): Promise<void> {
+async function writeLiveState(id: string): Promise<void> {
   try {
     if (!started.has(id)) {
       await rm(liveStatePath(id), { force: true });
@@ -159,6 +193,7 @@ async function rehydrateLiveState(manifests: WorkspaceSpec[]): Promise<void> {
 export function _resetForTest(): void {
   started.clear();
   paused.clear();
+  transitioning.clear();
   rehydrated = false;
 }
 
@@ -217,16 +252,16 @@ const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
   // Last size pushed to the pty, seeded from the spawn size (#268).
   let lastCols = cols;
   let lastRows = rows;
+  let settleLogged = false;
   const settler =
     process.platform === 'win32'
       ? createConptySettler({
           resize: safeResize,
           getSize: () => ({ cols: p.cols, rows: p.rows }),
           onSettle: ({ cols: c, rows: r }) => {
-            // One line per settle: the field-visible record of what size
-            // ConPTY was reconciled to. A settle size that differs from the
-            // spawn size means a post-spawn resize landed — the case the
-            // one-shot fix silently reverted.
+            // One row per pty: each logError is a synchronous write on main.
+            if (settleLogged) return;
+            settleLogged = true;
             logError({
               source: 'main',
               type: 'conpty-settle',
@@ -241,6 +276,8 @@ const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
     exited = true;
     settler?.dispose();
   });
+  // ConPTY only reliably applies its size once the child has attached, so the
+  // spawn size can be stale even when no resize follows.
   settler?.schedule();
 
   return {
@@ -280,6 +317,12 @@ const defaultSpawn: SpawnPty = ({ file, args, cwd, cols, rows, env }) => {
     }
   };
 };
+
+let spawnImpl: SpawnPty = defaultSpawn;
+/** Test-only: swap the node-pty factory (undefined restores it). */
+export function _setSpawnForTest(fn?: SpawnPty): void {
+  spawnImpl = fn ?? defaultSpawn;
+}
 
 /** Resolve the host `claude` binary (see claudeResolve.ts for the strategy).
  *  Cached: the lookup spawns where.exe/login-shell probes, so it should run
@@ -485,30 +528,42 @@ export async function checkClaudeFreshness(
 export async function pauseWorkspace(containerId: string): Promise<void> {
   const m = await readWorkspaceManifest(containerId);
   if (m?.launcher?.mode === 'wsl') {
-    await signalWslSessions(m.launcher, containerId, 'STOP');
-    if (started.has(containerId)) paused.add(containerId);
-    await persistLiveState(containerId);
+    enterTransition(containerId);
+    try {
+      cancelWorkspaceAttaches(containerId, 'workspace paused');
+      await signalWslSessions(m.launcher, containerId, 'STOP');
+      if (started.has(containerId)) paused.add(containerId);
+      await persistLiveState(containerId);
+    } finally {
+      exitTransition(containerId);
+    }
     return;
   }
   throw new Error('pause is not supported for local workspaces');
 }
 
 export async function stopWorkspace(containerId: string): Promise<void> {
-  const m = await readWorkspaceManifest(containerId);
-  killWorkspaceSessions(containerId);
-  // conpty teardown isn't guaranteed to reap the Linux-side process (#253).
-  if (m?.launcher?.mode === 'wsl') {
-    await signalWslSessions(m.launcher, containerId, 'TERM');
-    // Clean up stale pidfiles after TERM: a pid recycled by the OS before the
-    // next launch could be signaled incorrectly (pid-reuse hazard). Best-effort;
-    // the /tmp location is ephemeral and vanishes with the WSL VM anyway.
-    const glob = wslPidFile(containerId, '*');
-    const cleanScript = `rm -f ${glob}; true`;
-    await execFileAsync('wsl.exe', ['-d', m.launcher.distro, '--exec', 'sh', '-c', cleanScript]).catch(() => {});
+  enterTransition(containerId);
+  try {
+    cancelWorkspaceAttaches(containerId, 'workspace stopped');
+    killWorkspaceSessions(containerId);
+    started.delete(containerId);
+    paused.delete(containerId);
+    const m = await readWorkspaceManifest(containerId);
+    // conpty teardown isn't guaranteed to reap the Linux-side process (#253).
+    if (m?.launcher?.mode === 'wsl') {
+      await signalWslSessions(m.launcher, containerId, 'TERM');
+      // Clean up stale pidfiles after TERM: a pid recycled by the OS before the
+      // next launch could be signaled incorrectly (pid-reuse hazard). Best-effort;
+      // the /tmp location is ephemeral and vanishes with the WSL VM anyway.
+      const glob = wslPidFile(containerId, '*');
+      const cleanScript = `rm -f ${glob}; true`;
+      await execFileAsync('wsl.exe', ['-d', m.launcher.distro, '--exec', 'sh', '-c', cleanScript]).catch(() => {});
+    }
+    await persistLiveState(containerId);
+  } finally {
+    exitTransition(containerId);
   }
-  started.delete(containerId);
-  paused.delete(containerId);
-  await persistLiveState(containerId);
 }
 
 export async function removeWorkspace(
@@ -516,12 +571,18 @@ export async function removeWorkspace(
   opts: RemoveWorkspaceOpts = {}
 ): Promise<void> {
   const id = opts.id ?? containerId;
-  killWorkspaceSessions(id);
-  started.delete(id);
-  paused.delete(id);
-  await persistLiveState(id);
-  if (opts.deleteState && id) {
-    await rm(workspaceStateDir(id), { recursive: true, force: true });
+  enterTransition(id);
+  try {
+    cancelWorkspaceAttaches(id, 'workspace removed');
+    killWorkspaceSessions(id);
+    started.delete(id);
+    paused.delete(id);
+    await persistLiveState(id);
+    if (opts.deleteState && id) {
+      await rm(workspaceStateDir(id), { recursive: true, force: true });
+    }
+  } finally {
+    exitTransition(id);
   }
 }
 
@@ -560,14 +621,86 @@ export function recordResumeUsageQuietly(workspaceId: string, sessionId: string)
   );
 }
 
+const spawnQueue = createSpawnQueue();
+let resumeLookupTimeoutMs = 3000;
+let resumeTimeoutLogged = false;
+
+/** Test-only. */
+export function _setResumeLookupTimeoutForTest(ms: number): void {
+  resumeLookupTimeoutMs = ms;
+}
+
+/** Resolves null (and calls onTimeout) if `p` hasn't settled within `ms`. */
+function withTimeout<T>(p: Promise<T | null>, ms: number, onTimeout: () => void): Promise<T | null> {
+  return new Promise<T | null>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      onTimeout();
+      resolve(null);
+    }, ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e: unknown) => {
+        clearTimeout(timer);
+        reject(e);
+      }
+    );
+  });
+}
+// Latest attach per tab, stamped on arrival: attach prep is async, so an
+// older request can reach the queue after a newer one and must not replace it.
+const latestAttach = new Map<string, number>();
+let attachSeq = 0;
+
+function spawnKey(workspaceId: string, sessionId: string): string {
+  return `${workspaceId}\u0000${sessionId}`;
+}
+
+/** Cancel a tab's queued (not yet spawned) attach. True if one was pending. */
+export function cancelPendingAttach(workspaceId: string, sessionId: string): boolean {
+  latestAttach.delete(spawnKey(workspaceId, sessionId));
+  return spawnQueue.cancel(spawnKey(workspaceId, sessionId), 'tab closed before its session spawned');
+}
+
+/** Test-only: attaches waiting in the spawn queue. */
+export function _pendingSpawnsForTest(): number {
+  return spawnQueue.pending;
+}
+
+/** Test-only: occupy the spawn queue until the returned release is called. */
+export function _holdSpawnQueueForTest(): () => void {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  void spawnQueue.run('\u0000test-hold', () => gate);
+  return release;
+}
+
+function cancelWorkspaceAttaches(workspaceId: string, reason: string): void {
+  const prefix = spawnKey(workspaceId, '');
+  spawnQueue.cancelMatching((k) => k.startsWith(prefix), reason);
+}
+
 export async function attachPty(
   containerId: string,
   sessionId: string,
   cols: number,
   rows: number,
-  resumeOf?: string
+  resumeOf?: string,
+  opts?: { foreground?: boolean }
 ): Promise<PtyHandle> {
   const id = containerId;
+  const key = spawnKey(id, sessionId);
+  const seq = ++attachSeq;
+  latestAttach.set(key, seq);
+  const assertCurrent = (): void => {
+    if (latestAttach.get(key) !== seq) throw new SpawnCancelledError('superseded by a newer attach');
+    if (isTransitioning(id) || !started.has(id) || paused.has(id)) {
+      throw new Error(`local workspace ${id} is not running`);
+    }
+  };
+  if (isTransitioning(id)) throw new Error(`local workspace ${id} is not running`);
   const m = await readWorkspaceManifest(id);
   if (!m) throw new Error(`no manifest for local workspace ${id}`);
   const launcher: WorkspaceLauncher = m.launcher ?? { mode: 'native' };
@@ -601,6 +734,7 @@ export async function attachPty(
     });
   const settingsArg =
     retentionHost && launcher.mode === 'wsl' ? (windowsPathToWslPath(retentionHost) ?? undefined) : retentionHost;
+  if (isTransitioning(id)) throw new Error(`local workspace ${id} is not running`);
   // Attaching implies the workspace is up.
   started.add(id);
   // If the workspace was paused, resume it now. For wsl-launcher workspaces
@@ -612,88 +746,109 @@ export async function attachPty(
   await persistLiveState(id);
   // Cross-restart continuity: a restored tab whose process died with the
   // previous app run resumes its mapped conversation instead of spawning a
-  // fresh one.
+  // fresh one. Looked up before queueing: the queue is serial, so a slow DB
+  // must not hold up other tabs' spawns. A live process ignores resume args.
   const resume = await effectiveResumeOf(resumeOf, hasLiveSession(id, sessionId), () =>
-    lookupResumableBrokerSession(id, sessionId)
-  );
-  return attachLocalSession({
-    workspaceId: id,
-    sessionId,
-    cols,
-    rows,
-    cwd: m.workspaceRoot,
-    env,
-    file: claudeBin,
-    resumeOf: resume,
-    // Host-assigned claude session id (#195): only consumed on a fresh spawn;
-    // onFreshSpawn then records the tab→claude mapping deterministically.
-    // Local workspaces previously never learned mappings at all (no broker,
-    // no pending-attach path), so per-tab observability and Refresh-resume
-    // silently degraded to workspace-level guesses.
-    claudeSessionId: randomUUID(),
-    onFreshSpawn: (claudeSessionId) => {
-      // The spawn callback is synchronous; the mapping write is async. The
-      // mirror mapping is in-memory and set first, before any transcript line
-      // can be read.
-      learnMirrorMapping(id, sessionId, claudeSessionId);
-      if (resume) recordResumeUsageQuietly(id, resume);
-      void (async () => {
-        const { mode, previous } = await recordBrokerSessionMapping(id, sessionId, claudeSessionId);
-        if (mode === 'deferred') {
-          // Re-spawn of a tab that still holds a real conversation onto a fresh
-          // (not-yet-written) id — parked until it produces a transcript so an
-          // unused session can't black-hole the tab (#170).
-          logError({
-            source: 'main',
-            type: 'mapping-deferred',
-            level: 'info',
-            message: `broker ${sessionId} parked → ${claudeSessionId} at local spawn (awaiting transcript; keeping ${previous})`,
-            workspaceId: id,
-            extra: { brokerSessionId: sessionId, pending: claudeSessionId, keeping: previous }
-          });
-        } else if (previous && previous !== claudeSessionId) {
-          logError({
-            source: 'main',
-            type: 'mapping-remapped',
-            level: 'warn',
-            message: `broker ${sessionId} remapped ${previous} → ${claudeSessionId} at local spawn`,
-            workspaceId: id,
-            extra: { brokerSessionId: sessionId, from: previous, to: claudeSessionId }
-          });
-        } else if (!previous) {
-          logError({
-            source: 'main',
-            type: 'mapping-learned',
-            level: 'info',
-            message: `paired ${claudeSessionId} with broker ${sessionId} at local spawn (${resume ? 'resume' : 'session-id'})`,
-            workspaceId: id,
-            extra: { claudeSessionId, brokerSessionId: sessionId, how: resume ? 'resume' : 'session-id' }
-          });
-        }
-      })().catch((e: unknown) =>
-        logError({
-          source: 'main',
-          type: 'mapping-learn-failed',
-          level: 'warn',
-          message: `could not record ${sessionId} → ${claudeSessionId}: ${e instanceof Error ? e.message : String(e)}`,
-          workspaceId: id
-        })
-      );
-    },
-    extraArgs,
-    mcpConfigPath: mcpConfigArg,
-    settingsPath: settingsArg,
-    spawn: wrapSpawnForLauncher(launcher, defaultSpawn, {
-      workspaceId: id,
-      platform: process.platform,
-      // wsl.exe needs a valid WINDOWS cwd; the Linux cwd goes via --cd.
-      windowsCwd: homedir(),
-      // All per-workspace env keys (plain + secret) must cross the WSL boundary
-      // so that keys not matching ANTHROPIC_*/CLAUDE_* prefixes (e.g. a
-      // per-workspace MYAPP_TOKEN) still reach the in-distro claude.
-      passEnvKeys: [...Object.keys(m.env.plain), ...m.env.secretKeys]
+    withTimeout(lookupResumableBrokerSession(id, sessionId), resumeLookupTimeoutMs, () => {
+      if (resumeTimeoutLogged) return;
+      resumeTimeoutLogged = true;
+      logError({
+        source: 'main',
+        type: 'resume-lookup-timeout',
+        level: 'warn',
+        message: `resume lookup exceeded ${resumeLookupTimeoutMs} ms; spawning without --resume`,
+        workspaceId: id,
+        extra: { brokerSessionId: sessionId }
+      });
     })
-  });
+  );
+  // Only cheap synchronous checks run inside the task: the tab may have
+  // spawned, closed or been stopped while queued.
+  const attach = async (): Promise<PtyHandle> => {
+    assertCurrent();
+    return attachLocalSession({
+      workspaceId: id,
+      sessionId,
+      cols,
+      rows,
+      cwd: m.workspaceRoot,
+      env,
+      file: claudeBin,
+      resumeOf: resume,
+      // Host-assigned claude session id (#195): only consumed on a fresh spawn;
+      // onFreshSpawn then records the tab→claude mapping deterministically.
+      // Local workspaces previously never learned mappings at all (no broker,
+      // no pending-attach path), so per-tab observability and Refresh-resume
+      // silently degraded to workspace-level guesses.
+      claudeSessionId: randomUUID(),
+      onFreshSpawn: (claudeSessionId) => {
+        // The spawn callback is synchronous; the mapping write is async. The
+        // mirror mapping is in-memory and set first, before any transcript line
+        // can be read.
+        learnMirrorMapping(id, sessionId, claudeSessionId);
+        if (resume) recordResumeUsageQuietly(id, resume);
+        void (async () => {
+          const { mode, previous } = await recordBrokerSessionMapping(id, sessionId, claudeSessionId);
+          if (mode === 'deferred') {
+            // Re-spawn of a tab that still holds a real conversation onto a fresh
+            // (not-yet-written) id — parked until it produces a transcript so an
+            // unused session can't black-hole the tab (#170).
+            logError({
+              source: 'main',
+              type: 'mapping-deferred',
+              level: 'info',
+              message: `broker ${sessionId} parked → ${claudeSessionId} at local spawn (awaiting transcript; keeping ${previous})`,
+              workspaceId: id,
+              extra: { brokerSessionId: sessionId, pending: claudeSessionId, keeping: previous }
+            });
+          } else if (previous && previous !== claudeSessionId) {
+            logError({
+              source: 'main',
+              type: 'mapping-remapped',
+              level: 'warn',
+              message: `broker ${sessionId} remapped ${previous} → ${claudeSessionId} at local spawn`,
+              workspaceId: id,
+              extra: { brokerSessionId: sessionId, from: previous, to: claudeSessionId }
+            });
+          } else if (!previous) {
+            logError({
+              source: 'main',
+              type: 'mapping-learned',
+              level: 'info',
+              message: `paired ${claudeSessionId} with broker ${sessionId} at local spawn (${resume ? 'resume' : 'session-id'})`,
+              workspaceId: id,
+              extra: { claudeSessionId, brokerSessionId: sessionId, how: resume ? 'resume' : 'session-id' }
+            });
+          }
+        })().catch((e: unknown) =>
+          logError({
+            source: 'main',
+            type: 'mapping-learn-failed',
+            level: 'warn',
+            message: `could not record ${sessionId} → ${claudeSessionId}: ${e instanceof Error ? e.message : String(e)}`,
+            workspaceId: id
+          })
+        );
+      },
+      extraArgs,
+      mcpConfigPath: mcpConfigArg,
+      settingsPath: settingsArg,
+      spawn: wrapSpawnForLauncher(launcher, spawnImpl, {
+        workspaceId: id,
+        platform: process.platform,
+        // wsl.exe needs a valid WINDOWS cwd; the Linux cwd goes via --cd.
+        windowsCwd: homedir(),
+        // All per-workspace env keys (plain + secret) must cross the WSL boundary
+        // so that keys not matching ANTHROPIC_*/CLAUDE_* prefixes (e.g. a
+        // per-workspace MYAPP_TOKEN) still reach the in-distro claude.
+        passEnvKeys: [...Object.keys(m.env.plain), ...m.env.secretKeys]
+      })
+    });
+  };
+  assertCurrent();
+  // A re-attach to a live process spawns nothing, so it skips the queue.
+  if (!spawnQueue.has(key) && hasLiveSession(id, sessionId)) return attach();
+  return spawnQueue.run(key, attach, { foreground: opts?.foreground });
 }
 
 /**
