@@ -115,18 +115,24 @@ export async function validateExtraMounts(
   if (!mounts?.length) return undefined;
   const userData = await realOrSelf(ctx.userData);
   const fleetRoot = await realOrSelf(ctx.fleetRoot);
-  const out: ExtraMount[] = [];
   for (const [i, m] of mounts.entries()) {
-    const label = `Mount ${i + 1}`;
     try {
       await checkHostPath(m.hostPath, ctx, userData, fleetRoot);
     } catch (e) {
-      if (e instanceof HostPathProblem) throw new Error(`${label}: ${e.message}`);
+      if (e instanceof HostPathProblem) throw new Error(`Mount ${i + 1}: ${e.message}`);
       throw e;
     }
+  }
+  return checkContainerPaths(mounts);
+}
+
+// Pure rules only; returns mounts with normalized/defaulted container paths.
+function checkContainerPaths(mounts: ExtraMount[]): ExtraMount[] {
+  const out: ExtraMount[] = [];
+  for (const [i, m] of mounts.entries()) {
     const containerPath = normalizeContainerPath(m.containerPath.trim() || defaultContainerPath(m.hostPath));
     const err = containerPathError(containerPath, m.hostPath);
-    if (err) throw new Error(`${label}: ${err}`);
+    if (err) throw new Error(`Mount ${i + 1}: ${err}`);
     out.push({ hostPath: m.hostPath, containerPath, readOnly: m.readOnly === true });
   }
   const seen = new Set<string>();
@@ -147,14 +153,14 @@ function sameMounts(a: ExtraMount[] | undefined, b: ExtraMount[] | undefined): b
   );
 }
 
-// Unchanged mounts skip host checks (toDockerMounts re-checks at create), so an
-// unrelated edit doesn't fail while a mount's folder is temporarily missing.
+// Unchanged mounts skip host (filesystem) checks — toDockerMounts re-checks at create —
+// so an unrelated edit doesn't fail while a mount's folder is temporarily missing.
 export async function mountsForWrite(
   incoming: ExtraMount[] | undefined,
   existing: ExtraMount[] | undefined,
   ctx: MountCtx
 ): Promise<ExtraMount[] | undefined> {
-  if (sameMounts(incoming, existing)) return existing?.length ? existing : undefined;
+  if (sameMounts(incoming, existing)) return existing?.length ? checkContainerPaths(existing) : undefined;
   return validateExtraMounts(incoming, ctx);
 }
 

@@ -297,6 +297,20 @@ describe('mountsForWrite', () => {
     expect(await mountsForWrite([{ ...existing[0]! }], existing, ctx)).toEqual(existing);
   });
 
+  it('still applies container-path rules to unchanged mounts', async () => {
+    const stale = [{ hostPath: data, containerPath: '/home/fleet', readOnly: false }];
+    await expect(mountsForWrite([{ ...stale[0]! }], stale, ctx)).rejects.toThrow(
+      "Mount 1: /home/fleet contains the app's own folders (/home/fleet/.claude). Use a path outside it, like /mnt/data."
+    );
+    const dupes = [
+      { hostPath: data, containerPath: '/mnt/a', readOnly: false },
+      { hostPath: data, containerPath: '/mnt/a', readOnly: false }
+    ];
+    await expect(mountsForWrite(dupes.map((m) => ({ ...m })), dupes, ctx)).rejects.toThrow(
+      'Mount 2: /mnt/a is already used by another mount.'
+    );
+  });
+
   it('validates when the mounts changed', async () => {
     const gone = join(root, 'unplugged');
     await expect(
