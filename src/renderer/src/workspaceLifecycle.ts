@@ -1,5 +1,5 @@
 // Orchestration for applying a container-level edit (image/env/resources/
-// authMode) to a *live* workspace, extracted from App so it can be unit-tested
+// authMode/mounts) to a *live* workspace, extracted from App so it can be unit-tested
 // with an injected api. Kept dependency-free (no window.api, no React).
 
 import type { CaptureSettings } from '../../preload/captureSettings';
@@ -37,7 +37,7 @@ export interface WorkspaceLifecycleApi {
 }
 
 /**
- * Apply a container-level edit (image/env/resources/authMode) to a live
+ * Apply a container-level edit (image/env/resources/authMode/mounts) to a live
  * workspace after the restart-to-apply banner's "Restart now".
  *
  * These fields are fixed at container-**create** time, so a stop→start would

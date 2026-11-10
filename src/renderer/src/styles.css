@@ -1181,12 +1181,12 @@ button.obs-ws-row:hover .obs-ws-val { text-decoration: underline; text-underline
 .obs-ws-icon {
   display: inline-flex;
   align-items: center;
+  gap: 6px;
   color: var(--ink-2);
   opacity: 0.55;
   transition: opacity 120ms ease, color 120ms ease;
 }
 button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
-.obs-ws-icon { gap: 6px; }
 .obs-ws-ro {
   font-family: var(--font-mono);
   font-size: 9.5px;

@@ -1210,7 +1210,7 @@ export function App() {
    * state:
    *   - **stopped / paused**: write the updated manifest, then
    *     `workspace:start(id)` resumes the existing container by id-label
-   *     lookup. Container-level edits (env, image, resources, authMode)
+   *     lookup. Container-level edits (env, image, resources, authMode, mounts)
    *     don't take effect until the container is recreated — Phase 2's
    *     restart-to-apply banner surfaces this.
    *   - **deleted** (manifest exists, no container): the create flow runs
@@ -1400,7 +1400,7 @@ export function App() {
   };
 
   const restartFromBanner = async (workspaceId: string, containerId: string): Promise<void> => {
-    // Container-level edits (image/env/resources/authMode) are fixed at
+    // Container-level edits (image/env/resources/authMode/mounts) are fixed at
     // create time, so applying them means RECREATING the container from the
     // saved manifest — not a stop→start, which would reuse the old spec.
     // One keyed toast per recreate: image-pull progress fires many times a
