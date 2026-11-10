@@ -20,8 +20,13 @@ const RESERVED: ReadonlyArray<readonly [prefix: string, what: string]> = [
   ['/bin', 'a system folder'],
   ['/sbin', 'a system folder'],
   ['/lib64', 'a system folder'],
-  ['/lib', 'a system folder']
+  ['/lib', 'a system folder'],
+  // Debian links these into /run.
+  ['/var/run', 'a system folder'],
+  ['/var/lock', 'a system folder']
 ];
+
+const INTERNAL_TARGETS = ['/home/fleet/.claude', '/home/fleet/.claude.json', '/run/broker', '/fleet/mcp', '/shared'];
 
 function basename(hostPath: string): string {
   const parts = hostPath.split(/[\\/]+/).filter(Boolean);
@@ -61,6 +66,9 @@ export function containerPathError(containerPath: string, hostPath: string): str
   for (const [prefix, what] of RESERVED) {
     if (under(p, prefix)) return `${prefix} is ${what}. Use a path outside it, like ${suggestion}.`;
   }
+  // Mounting over an ancestor would hide the app's own mounts beneath it.
+  const hidden = INTERNAL_TARGETS.find((t) => t.startsWith(p + '/'));
+  if (hidden) return `${p} contains the app's own folders (${hidden}). Use a path outside it, like ${suggestion}.`;
   return null;
 }
 

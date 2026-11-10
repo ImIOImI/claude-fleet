@@ -58,6 +58,34 @@ describe('containerPathError', () => {
       '/etc is a system folder. Use a path outside it, like /mnt/notes.'
     );
   });
+  it("refuses ancestors of the app's own mount targets", () => {
+    expect(containerPathError('/home/fleet', host)).toBe(
+      "/home/fleet contains the app's own folders (/home/fleet/.claude). Use a path outside it, like /mnt/notes."
+    );
+    expect(containerPathError('/home', host)).toBe(
+      "/home contains the app's own folders (/home/fleet/.claude). Use a path outside it, like /mnt/notes."
+    );
+    expect(containerPathError('/run', host)).toBe(
+      "/run contains the app's own folders (/run/broker). Use a path outside it, like /mnt/notes."
+    );
+    expect(containerPathError('/fleet/', host)).toBe(
+      "/fleet contains the app's own folders (/fleet/mcp). Use a path outside it, like /mnt/notes."
+    );
+  });
+  it('refuses /var/run and /var/lock as system folders', () => {
+    expect(containerPathError('/var/run/broker', host)).toBe(
+      '/var/run is a system folder. Use a path outside it, like /mnt/notes.'
+    );
+    expect(containerPathError('/var/lock', host)).toBe(
+      '/var/lock is a system folder. Use a path outside it, like /mnt/notes.'
+    );
+  });
+  it('allows siblings that only share a name prefix with internal targets', () => {
+    expect(containerPathError('/home/fleetx', host)).toBeNull();
+    expect(containerPathError('/runner', host)).toBeNull();
+    expect(containerPathError('/home/fleet/projects', host)).toBeNull();
+    expect(containerPathError('/var/data', host)).toBeNull();
+  });
   it('does not treat a shared name prefix as a match', () => {
     expect(containerPathError('/shared-data', host)).toBeNull();
     expect(containerPathError('/libs', host)).toBeNull();
