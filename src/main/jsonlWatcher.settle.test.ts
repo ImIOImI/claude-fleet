@@ -25,6 +25,8 @@ const h = vi.hoisted(() => ({
   fake: null as (import('node:events').EventEmitter & Record<string, unknown>) | null,
 }));
 vi.mock('./db.js', () => ({
+  loadTranscriptOffsets: async () => new Map(),
+  saveTranscriptOffsets: async () => undefined,
   ingestBatch: async (_ws: string, _session: string, raws: string[]) => {
     h.entered = true;
     await h.gate;

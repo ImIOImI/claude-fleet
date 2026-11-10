@@ -46,7 +46,7 @@ export const IMPORT_TABLES: Record<ImportSource, readonly string[]> = {
     'claims', 'claim_sources', 'claim_vectors', 'claims_fts', 'capture_runs', 'capture_settings_log'],
   state: ['sessions', 'events', 'broker_sessions', 'errors', 'embeddings', 'session_summaries', 'session_tags',
     'usage_events', 'usage_anchors', 'perf_events', 'session_costs', 'session_stats', 'session_tool_counts',
-    'port_exposures', 'event_retention', 'maintenance', 'event_blobs'],
+    'port_exposures', 'event_retention', 'maintenance', 'event_blobs', 'transcript_offsets'],
 };
 
 /** The SQLite user_version a track's latest step mirrors. */

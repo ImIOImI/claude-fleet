@@ -18,6 +18,8 @@ vi.mock('electron', () => ({
 
 const h = vi.hoisted(() => ({ down: false, attempts: 0, ingested: [] as string[] }));
 vi.mock('./db.js', () => ({
+  loadTranscriptOffsets: async () => new Map(),
+  saveTranscriptOffsets: async () => undefined,
   ingestBatch: async (_ws: string, _session: string, raws: string[]) => {
     h.attempts++;
     if (h.down) throw new Error('connect ECONNREFUSED');
