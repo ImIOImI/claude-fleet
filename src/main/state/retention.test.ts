@@ -11,7 +11,10 @@ import { deflateLine } from './rawCodec.js';
 import {
   AdaptiveBatch, compactEmbeddings, createThrottle, DAY_MS, SLICE_BYTES, dedupeAttachments, incrementalVacuum, retainEvents, startRetention, type PassResult, type SliceBudget, type Throttle,
 } from './retention.js';
-import type { WalCheckpointer } from './walCheckpointer.js';
+import type { WalCheckpointLease as WalCheckpointer } from './walCheckpointer.js';
+import { installWalCheckpointer } from './walCheckpointer.js';
+
+installWalCheckpointer();
 
 const WS = '01WS';
 const SES = 'ses-old';
@@ -379,7 +382,7 @@ describe('startRetention', () => {
     let r: { stop(): Promise<void> } | null = null;
     await new Promise<void>((resolve) => {
       r = startRetention({
-        listManifestIds: async () => [WS], stateDirExists: () => true, orphanSweep: true, walDbPath: join(state.dir, 'state.db'),
+        listManifestIds: async () => [WS], stateDirExists: () => true, orphanSweep: true, walCheckpoints: true,
         firstDelayMs: 0, now: () => NOW,
         throttle: { minSleepMs: 5, idleRatio: 0 },
         // Sampled as it starts: the run's teardown restores the setting only after this.
@@ -397,7 +400,7 @@ describe('startRetention', () => {
   it.skipIf(isPg)('a run with no slices starts no checkpointer', async () => {
     let started = false;
     const r = startRetention({
-      listManifestIds: async () => [WS], stateDirExists: () => true, orphanSweep: false, walDbPath: join(state.dir, 'state.db'),
+      listManifestIds: async () => [WS], stateDirExists: () => true, orphanSweep: false, walCheckpoints: true,
       firstDelayMs: 60 * 60_000, vacuumEveryMs: 10, now: () => NOW, throttle: { minSleepMs: 0, idleRatio: 0 },
       onCheckpointer: () => { started = true; },
     });

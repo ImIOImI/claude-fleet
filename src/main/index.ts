@@ -1,10 +1,10 @@
 import { app, BrowserWindow, dialog, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
 import { registerIpc, invalidateWorkspaceList, replayInputWait, stopRemoteBackend } from './ipc.js';
-import { openDb, openDbPostgres, closeDb, deleteEmbeddingsForOtherModels, sessionsWithPendingTurns, recordError, stateKysely, stateOpenStats, stateOpenSnapshot, type StateOpenStats, sessionCaptureSignals, isAutomationSession } from './db.js';
+import { openDb, openDbPostgres, closeDb, deleteEmbeddingsForOtherModels, sessionsWithPendingTurns, recordError, stateKysely, onStateOpenStats, stateLeftoverDrain, setStateWarnSink, sessionCaptureSignals, isAutomationSession } from './db.js';
 import { initPerf, shutdownPerf, perfSpan, perfSpanAsync, perfRecordSpan, perfNoteSqlSync, getEffectivePerf, recordBootProfile } from './perf.js';
 import { setSqliteQueryObserver } from './store/kysely.js';
-import { drainLeftoverWal } from './state/walCheckpointer.js';
+import { installWalCheckpointer } from './state/walCheckpointer.js';
 import { startBootProfile } from './bootProfile.js';
 import { PerfStore } from './perfStore.js';
 import { resolvePerfConfig } from './perfConfig.js';
@@ -97,6 +97,8 @@ let managedDocker: ManagedDocker | null = null;
 const inboxGate = new InboxWriteGate();
 const historyGate = new InboxWriteGate();
 // before-quit holds the quit at most this long (#485).
+installWalCheckpointer();
+
 const QUIT_BOUND_MS = 10_000;
 /** The db.open row is recorded at the first write, or this long after the open without one. */
 const DB_OPEN_ROW_FALLBACK_MS = 10_000;
@@ -289,6 +291,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       message: `claude-fleet ${appVersionString()} starting`,
       extra: { sha: appBuildSha() ?? null }
     });
+    setStateWarnSink((message, extra) => logError({ source: 'main', level: 'warn', type: 'wal-checkpointer', message, extra }));
     const perfStore = new PerfStore(stateKysely());
     setSqliteQueryObserver((_sql, ms) => perfNoteSqlSync(ms));
     initPerf(
@@ -512,7 +515,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     if (isMock) return;
     retention ??= startRetention({
       orphanSweep: storeCfg.kind !== 'postgres',
-      walDbPath: storeCfg.kind === 'sqlite' ? join(userData, 'state.db') : undefined,
+      walCheckpoints: storeCfg.kind === 'sqlite',
       listManifestIds: async () => (await listWorkspaceManifests()).map((m) => m.id),
       stateDirExists: (id) => existsSync(workspaceStateDir(id)),
     });
@@ -530,26 +533,15 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   const sqliteStoreId = storeIdentity({ kind: 'sqlite', path: join(userData, 'state.db') });
   const startSqliteHistory = async (): Promise<void> => {
     openDb(userData);
-    const drain = drainLeftoverWal(join(userData, 'state.db'));
     await startStateWrites();
     // Recorded only now that perf is up, each with its own measured times.
-    const openRow = (s: StateOpenStats | null): void => {
-      if (s) perfRecordSpan('claude_fleet.db.open', s.openedAt, s.openedAt + s.openMs, {
-        wal_bytes: s.walBytes, wal_frames: s.walFrames, handed_off: s.handedOff,
-        first_write_ms: s.firstWriteMs ?? -1, first_write_after_ms: s.firstWriteAt === null ? -1 : s.firstWriteAt - s.openedAt,
-      });
-    };
-    const firstWrite = stateOpenStats();
-    if (firstWrite) {
-      const fallback = setTimeout(() => openRow(stateOpenSnapshot()), DB_OPEN_ROW_FALLBACK_MS);
-      fallback.unref?.();
-      void firstWrite.then((s) => { clearTimeout(fallback); openRow(s); });
-    }
-    void drain.then((r) => {
-      if (r) perfRecordSpan('claude_fleet.db.wal_drain', r.startedAt, r.startedAt + r.ms, {
-        ok: r.ok, rounds: r.rounds, wal_log: r.log ?? -1, wal_ckpt: r.checkpointed ?? -1, wal_busy: r.busy ?? -1, ...(r.error ? { error: r.error } : {}),
-      });
-    });
+    onStateOpenStats((s) => perfRecordSpan('claude_fleet.db.open', s.openedAt, s.openedAt + s.openMs, {
+      wal_bytes: s.walBytes, wal_frames: s.walFrames, handed_off: s.handedOff,
+      first_write_ms: s.firstWriteMs ?? -1, first_write_after_ms: s.firstWriteAt === null ? -1 : s.firstWriteAt - s.openedAt,
+    }), DB_OPEN_ROW_FALLBACK_MS);
+    void stateLeftoverDrain()?.then((r) => perfRecordSpan('claude_fleet.db.wal_drain', r.startedAt, r.startedAt + r.ms, {
+      ok: r.ok, rounds: r.rounds, wal_log: r.log ?? -1, wal_ckpt: r.checkpointed ?? -1, wal_busy: r.busy ?? -1, ...(r.error ? { error: r.error } : {}),
+    }));
     startStateRetention();
   };
   const startSqliteIngest = async (watcher: JsonlWatcher, embedFn: EmbedFn): Promise<void> => {

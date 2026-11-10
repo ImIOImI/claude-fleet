@@ -85,86 +85,124 @@ export function stateOpenStats(): Promise<StateOpenStats> | null {
   return openStatsReady;
 }
 
-/** The open db's stats so far; null once it closes. */
-export function stateOpenSnapshot(): StateOpenStats | null {
-  return openStats ? { ...openStats } : null;
-}
-
-/** journal_size_limit while a worker checkpoints for the main connection: the WAL file shrinks back to this after a rewind. */
-export const WAL_HOLD_SIZE_LIMIT = 16 * 1024 * 1024;
-
-interface CheckpointHold { conn: Database.Database; count: number; autocheckpoint: number; sizeLimit: number }
-let checkpointHold: CheckpointHold | null = null;
-
-function holdCheckpointsOn(conn: Database.Database): () => void {
-  if (checkpointHold?.conn !== conn) {
-    checkpointHold = {
-      conn, count: 0,
-      autocheckpoint: conn.pragma('wal_autocheckpoint', { simple: true }) as number,
-      sizeLimit: conn.pragma('journal_size_limit', { simple: true }) as number,
-    };
-    conn.pragma('wal_autocheckpoint = 0');
-    conn.pragma(`journal_size_limit = ${WAL_HOLD_SIZE_LIMIT}`);
-  }
-  const h = checkpointHold;
-  h.count++;
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    if (checkpointHold !== h || --h.count > 0) return;
-    checkpointHold = null;
-    if (!h.conn.open) return;
-    h.conn.pragma(`wal_autocheckpoint = ${h.autocheckpoint}`);
-    h.conn.pragma(`journal_size_limit = ${h.sizeLimit}`);
+/** Call `cb` once with the open db's stats: at its first write, or after
+ *  `fallbackMs` without one (firstWrite* still null). Never after it closes. */
+export function onStateOpenStats(cb: (s: StateOpenStats) => void, fallbackMs: number): void {
+  const stats = openStats;
+  const ready = openStatsReady;
+  if (!stats || !ready) return;
+  let done = false;
+  const fire = (): void => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    if (openStats === stats) cb({ ...stats });
   };
+  const timer = setTimeout(fire, fallbackMs);
+  timer.unref?.();
+  void ready.then(fire);
 }
 
-/** Take checkpoints off the main connection while a worker does them: it runs
- *  with `wal_autocheckpoint = 0` and WAL_HOLD_SIZE_LIMIT until every hold is
- *  released, then gets back the values it had before the first hold. Null on
- *  Postgres or when the store closes first. */
-export async function holdWalCheckpoints(): Promise<(() => Promise<void>) | null> {
-  const release = await withRawSqlite((d) => holdCheckpointsOn(d));
-  return release && queuedRelease(release);
+// The WAL checkpointer's contract (state/walCheckpointer.ts implements it).
+export interface CheckpointResult { busy: number; log: number; checkpointed: number }
+
+/** One user's interest in the store's checkpointer. */
+export interface WalCheckpointLease {
+  /** Start a PASSIVE checkpoint in the worker unless one is already running. */
+  request(): void;
+  /** Resolves when no checkpoint is running. */
+  idle(): Promise<void>;
+  /** Once the WAL has passed WAL_REWIND_FRAMES: run a checkpoint and wait for it,
+   *  so the caller's next write rewinds the WAL. Otherwise resolves at once. */
+  drain(): Promise<void>;
+  last(): CheckpointResult | null;
+  /** False once checkpoints are handed back to the main connection, or this lease is closed. */
+  active(): boolean;
+  /** Drop this lease; the last one restores the main connection and ends the worker. Never waits on a checkpoint. */
+  close(): Promise<void>;
 }
 
-/** Releases behind statements already queued on the store, like the hold. */
-function queuedRelease(release: () => void): () => Promise<void> {
-  return async () => {
-    if (!kdb) return release();
-    await withRawSqlite(release).catch(() => release());
-  };
+export interface CheckpointerOptions {
+  workerSource?: string;
+  /** How often to request a checkpoint while running (0 = only on request()). */
+  requestEveryMs?: number;
+  /** Default CHECKPOINT_TIMEOUT_MS (DRAIN_TIMEOUT_MS while a drain runs). */
+  checkpointTimeoutMs?: number;
+  /** The database the worker opens; db.ts passes state.db. */
+  dbPath?: string;
 }
 
-/** How long a leftover WAL may wait for takeLeftoverWal before openDb releases its hold itself. */
-const LEFTOVER_CLAIM_MS = 5_000;
-let leftoverWal: { release: () => Promise<void>; fallback: ReturnType<typeof setTimeout> } | null = null;
-
-/** openDb found a leftover WAL that the first commit would checkpoint on the
- *  main thread, and holds checkpoints off the connection. The caller drains
- *  it from a worker, then calls the returned release. Once per open. */
-export function takeLeftoverWal(): (() => Promise<void>) | null {
-  const l = leftoverWal;
-  if (!l) return null;
-  leftoverWal = null;
-  clearTimeout(l.fallback);
-  return l.release;
+export interface CheckpointHost {
+  dbPath: string;
+  /** Run `fn` on the main connection behind the store mutex; no-op once it closed. */
+  withMain(fn: (d: Database.Database) => void): Promise<void>;
+  warn(message: string, extra?: Record<string, unknown>): void;
 }
 
-const stateWorkers = new Set<() => Promise<void>>();
-let closing = false;
-let stoppingWorkers: Promise<void> | null = null;
-
-/** Register a worker that holds its own state.db connection. closeDb stops
- *  every one before closing main's, so main's close is the last one and
- *  checkpoints and removes the WAL. Returns the unregister, or null when the
- *  store is closed or closing (the caller ends the worker itself). */
-export function trackStateWorker(stop: () => Promise<void>): (() => void) | null {
-  if (!kdb || closing) return null;
-  stateWorkers.add(stop);
-  return () => { stateWorkers.delete(stop); };
+export interface WalDrainResult {
+  startedAt: number;
+  ms: number;
+  ok: boolean;
+  rounds: number;
+  busy?: number;
+  log?: number;
+  checkpointed?: number;
+  error?: string;
 }
+
+export interface StoreCheckpointer {
+  /** At openDb, before anything writes: hold checkpoints and spawn the worker; the lease is the drain's. */
+  holdAtOpen(conn: Database.Database, opts?: CheckpointerOptions): WalCheckpointLease;
+  acquire(opts?: CheckpointerOptions): Promise<WalCheckpointLease | null>;
+  /** True while a worker thread may still hold a connection. */
+  hasWorkers(): boolean;
+  /** Hand back, end the worker and wait (bounded) for every worker thread to exit. */
+  stop(): Promise<void>;
+}
+
+interface CheckpointerFactory {
+  create(host: CheckpointHost): StoreCheckpointer;
+  drain(lease: WalCheckpointLease, warn: CheckpointHost['warn']): Promise<WalDrainResult>;
+}
+let checkpointerFactory: CheckpointerFactory | null = null;
+
+/** Without one (fleet-host, tests that don't install it) SQLite keeps its own auto-checkpoint. */
+export function setWalCheckpointerFactory(f: CheckpointerFactory | null): void {
+  checkpointerFactory = f;
+}
+
+let warnSink: ((message: string, extra?: Record<string, unknown>) => void) | null = null;
+
+/** Where the WAL checkpointer's warnings go (db.ts stays free of the Electron-bound error log). */
+export function setStateWarnSink(fn: ((message: string, extra?: Record<string, unknown>) => void) | null): void {
+  warnSink = fn;
+}
+
+/** The open SQLite store's single WAL checkpointer; null on Postgres or closed. */
+let checkpointer: StoreCheckpointer | null = null;
+let leftoverDrain: Promise<WalDrainResult> | null = null;
+let stoppingCheckpointer: Promise<void> | null = null;
+let checkpointerTestOpts: CheckpointerOptions = {};
+
+/** Test seam: worker source / timing for checkpointer workers started from now on. */
+export function _setWalCheckpointerOptionsForTests(opts: CheckpointerOptions): void {
+  checkpointerTestOpts = opts;
+}
+
+/** A lease on the store's WAL checkpointer, starting its worker if none runs
+ *  (retention). Null on Postgres, when closed, or when the worker can't start. */
+export async function acquireWalCheckpointer(opts: CheckpointerOptions = {}): Promise<WalCheckpointLease | null> {
+  const c = checkpointer;
+  if (!c || dialect !== 'sqlite') return null;
+  return c.acquire({ ...checkpointerTestOpts, ...opts }).catch(() => null);
+}
+
+/** The leftover-WAL drain openDb started, if any. */
+export function stateLeftoverDrain(): Promise<WalDrainResult> | null {
+  return leftoverDrain;
+}
+
+const WRITE_SQL = /^\s*(insert|update|delete|replace|commit|end)\b/i;
 
 export function openDb(userDataDir: string): Database.Database {
   if (db) return db;
@@ -183,19 +221,35 @@ export function openDb(userDataDir: string): Database.Database {
   // A lock still being released (e.g. a just-killed VACUUM helper on Windows) waits, not throws.
   conn.pragma('busy_timeout = 5000');
   conn.pragma('foreign_keys = ON');
+  const factory = checkpointerFactory;
+  const ck = factory?.create({
+    dbPath: path,
+    withMain: async (fn) => {
+      if (db !== conn) {
+        if (conn.open) fn(conn);
+        return;
+      }
+      await withRawSqlite((d) => { if (d === conn) fn(d); }).catch(() => { if (conn.open) fn(conn); });
+    },
+    warn: (message, extra) => warnSink?.(message, extra),
+  });
+  checkpointer = ck ?? null;
+  leftoverDrain = null;
   // Recovery counts every valid frame of a leftover WAL as not checkpointed,
   // so the first commit past wal_autocheckpoint would copy all of them, with
   // fsyncs, on the main thread. Hold before anything (migrate included) writes.
-  const [ck] = conn.pragma('wal_checkpoint(NOOP)') as Array<{ log: number }>;
-  const walFrames = Math.max(0, ck?.log ?? 0);
+  const [noop] = conn.pragma('wal_checkpoint(NOOP)') as Array<{ log: number }>;
+  const walFrames = Math.max(0, noop?.log ?? 0);
   const autockpt = conn.pragma('wal_autocheckpoint', { simple: true }) as number;
-  const handedOff = autockpt > 0 && walFrames >= autockpt;
-  if (leftoverWal) clearTimeout(leftoverWal.fallback);
-  leftoverWal = null;
-  if (handedOff) {
-    const fallback = setTimeout(() => { void takeLeftoverWal()?.(); }, LEFTOVER_CLAIM_MS);
-    fallback.unref?.();
-    leftoverWal = { release: queuedRelease(holdCheckpointsOn(conn)), fallback };
+  let handedOff = false;
+  if (ck && factory && autockpt > 0 && walFrames >= autockpt) {
+    try {
+      const lease = ck.holdAtOpen(conn, checkpointerTestOpts);
+      handedOff = true;
+      leftoverDrain = factory.drain(lease, (m, e) => warnSink?.(m, e));
+    } catch (e) {
+      warnSink?.(`leftover WAL drain did not start: ${String(e)}`);
+    }
   }
   migrate(conn);
   rehydratePendingClaudeIds(conn);
@@ -211,10 +265,10 @@ export function openDb(userDataDir: string): Database.Database {
   dialect = 'sqlite';
   kdb = sqliteKysely<StateDb>(conn, {
     statementCache: STATE_STATEMENT_CACHE,
-    onQuery: (sqlText, ms, reader) => {
+    onQuery: (sqlText, ms) => {
       if (openStats !== stats || stats.firstWriteMs !== null) return;
-      // A writer that leaves no transaction open has committed (COMMIT, or autocommit).
-      if (reader || conn.inTransaction || sqlText === 'rollback') return;
+      // A write that leaves no transaction open has committed (COMMIT, or autocommit).
+      if (conn.inTransaction || !WRITE_SQL.test(sqlText)) return;
       stats.firstWriteMs = ms;
       stats.firstWriteAt = Date.now() - ms;
       settle(stats);
@@ -252,22 +306,25 @@ export async function openDbPostgres(pool: pg.Pool, opts: PostgresKyselyOptions 
 /** Close state.db. Waits for any in-flight query or transaction on the
  *  connection mutex (an ingest chunk, a mapping write) before closing. */
 export async function closeDb(): Promise<void> {
-  if (!kdb) return;
-  if (stateWorkers.size > 0) {
-    closing = true;
-    stoppingWorkers ??= (async () => {
-      for (const stop of [...stateWorkers]) await stop().catch(() => undefined);
-    })().finally(() => { stoppingWorkers = null; });
-    await stoppingWorkers;
-    if (!kdb) return;
-  }
-  closing = false;
-  const raw = db;
   const k = kdb;
+  if (!k) return;
+  const ck = checkpointer;
+  checkpointer = null;
+  if (ck?.hasWorkers()) {
+    // Its worker's connection must close first, so main's close is the last one
+    // and checkpoints and removes the WAL.
+    stoppingCheckpointer = ck.stop().finally(() => { stoppingCheckpointer = null; });
+  } else {
+    void ck?.stop();
+  }
+  if (stoppingCheckpointer) {
+    await stoppingCheckpointer;
+    if (kdb !== k) return;
+  }
+  const raw = db;
   db = null;
   kdb = null;
-  if (leftoverWal) clearTimeout(leftoverWal.fallback);
-  leftoverWal = null;
+  leftoverDrain = null;
   openStats = null;
   // Queues behind whatever holds the mutex; also forces driver init so
   // destroy() really closes the connection.

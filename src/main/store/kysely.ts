@@ -11,7 +11,7 @@
 // transaction would queue behind the mutex the transaction already holds and
 // deadlock.
 import type Database from 'better-sqlite3';
-import { Kysely, SqliteDialect, type SqliteDatabase, type Transaction } from 'kysely';
+import { Kysely, SqliteDialect, type SqliteDatabase, type SqliteStatement, type Transaction } from 'kysely';
 
 export interface SqliteKyselyOptions {
   /** Reuse up to this many prepared statements, keyed by SQL text (0 = off,
@@ -19,16 +19,16 @@ export interface SqliteKyselyOptions {
    *  better-sqlite3 does not cache, so a hot path pays a full SQL compile per
    *  query without this. When the cache is full it is cleared, not LRU'd. */
   statementCache?: number;
-  /** Called after each statement with its synchronous execution time. */
-  onQuery?: (sqlText: string, ms: number, reader: boolean) => void;
+  /** Called after each statement that succeeded, with its synchronous execution time. */
+  onQuery?: (sqlText: string, ms: number) => void;
 }
 
 type QueryObserver = (sqlText: string, ms: number) => void;
 let queryObserver: QueryObserver | null = null;
 
-/** Observe every statement's synchronous execution time on all SQLite Kysely
- *  handles. It runs in the caller's async context, so it can attribute the
- *  time to the caller's active span; mutex queueing is not included. */
+/** Observe every statement's synchronous execution time (failed ones too) on
+ *  all SQLite Kysely handles. It runs in the caller's async context, so it can
+ *  attribute the time to the caller's spans; mutex queueing is not included. */
 export function setSqliteQueryObserver(fn: QueryObserver | null): void {
   queryObserver = fn;
 }
@@ -39,26 +39,35 @@ export function sqliteKysely<DB>(raw: Database.Database, opts: SqliteKyselyOptio
 }
 
 function timedDatabase(base: SqliteDatabase, onQuery: SqliteKyselyOptions['onQuery']): SqliteDatabase {
-  const note = (sqlText: string, t0: number, reader: boolean): void => {
-    const ms = performance.now() - t0;
-    onQuery?.(sqlText, ms, reader);
-    queryObserver?.(sqlText, ms);
+  // One wrapper per statement object: cached statements reuse theirs.
+  const wrappers = new WeakMap<SqliteStatement, SqliteStatement>();
+  const timed = <T>(sqlText: string, call: () => T): T => {
+    const t0 = performance.now();
+    let ok = false;
+    try {
+      const r = call();
+      ok = true;
+      return r;
+    } finally {
+      const ms = performance.now() - t0;
+      if (ok) onQuery?.(sqlText, ms);
+      queryObserver?.(sqlText, ms);
+    }
   };
   return {
     prepare(sqlText: string) {
       const stmt = base.prepare(sqlText);
-      return {
-        reader: stmt.reader,
-        all(parameters: ReadonlyArray<unknown>) {
-          const t0 = performance.now();
-          try { return stmt.all(parameters); } finally { note(sqlText, t0, true); }
-        },
-        run(parameters: ReadonlyArray<unknown>) {
-          const t0 = performance.now();
-          try { return stmt.run(parameters); } finally { note(sqlText, t0, false); }
-        },
-        iterate: (parameters: ReadonlyArray<unknown>) => stmt.iterate(parameters),
-      };
+      let w = wrappers.get(stmt);
+      if (!w) {
+        w = {
+          reader: stmt.reader,
+          all: (parameters) => timed(sqlText, () => stmt.all(parameters)),
+          run: (parameters) => timed(sqlText, () => stmt.run(parameters)),
+          iterate: (parameters) => stmt.iterate(parameters),
+        };
+        wrappers.set(stmt, w);
+      }
+      return w;
     },
     close: () => base.close(),
   };

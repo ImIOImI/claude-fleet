@@ -3,6 +3,7 @@
 // on the async store handle in bounded slices behind a Throttle, so the main
 // thread is never held for more than one small transaction at a time.
 import {
+  acquireWalCheckpointer,
   applyAttachmentDedupe, attachmentBackfillKeys, compactEmbeddingSlice, maxAttachmentId, maintenanceGet, maintenanceSet, maxEmbeddingId, purgeWorkspace, retentionBodies, retentionCandidates,
   retentionKeys, rewriteEventRaw, setRetentionWatermarks, stateDialect, withRawSqlite, workspaceIdsInState, type RetentionRow,
 } from '../db.js';
@@ -11,7 +12,7 @@ import { perfSpanAsync, perfSpanAsyncAttrs } from '../perf.js';
 import type { Attributes } from '@opentelemetry/api';
 import { COMPRESS_MIN_BYTES, deflateLine, rawLine, stripLine } from './rawCodec.js';
 import { dedupeAttachment } from './attachmentCodec.js';
-import { startWalCheckpointer, type WalCheckpointer } from './walCheckpointer.js';
+import type { WalCheckpointLease } from './walCheckpointer.js';
 
 export const DAY_MS = 86_400_000;
 export const COMPRESS_AFTER_MS = 30 * DAY_MS;
@@ -360,8 +361,8 @@ export interface RetentionDeps extends OrphanDeps {
   /** Only where this desktop owns every workspace in the store: SQLite or the
    *  managed (local) Postgres, never a shared external one. */
   orphanSweep: boolean;
-  /** SQLite: state.db's path, so WAL checkpoints run in a worker while retention works. */
-  walDbPath?: string;
+  /** SQLite: lease the store's WAL checkpointer while a run works. */
+  walCheckpoints?: boolean;
   firstDelayMs?: number;
   intervalMs?: number;
   vacuumEveryMs?: number;
@@ -370,7 +371,7 @@ export interface RetentionDeps extends OrphanDeps {
   /** Test hook: called after each full pass. */
   onPass?: (r: PassResult) => void;
   /** Test hook: called when a run starts its WAL checkpointer. */
-  onCheckpointer?: (c: WalCheckpointer | null) => void;
+  onCheckpointer?: (c: WalCheckpointLease | null) => void;
 }
 
 export interface PassResult {
@@ -386,14 +387,14 @@ export interface PassResult {
 export function startRetention(deps: RetentionDeps): { stop(): Promise<void> } {
   // Started on a run's first slice, so a run with nothing to do spawns no worker.
   let wantCheckpointer = false;
-  let checkpointer: Promise<WalCheckpointer | null> | null = null;
-  let ck: WalCheckpointer | null = null;
+  let checkpointer: Promise<WalCheckpointLease | null> | null = null;
+  let ck: WalCheckpointLease | null = null;
   const throttle = createThrottle({
     ...deps.throttle,
     afterSlice: () => {
       deps.throttle?.afterSlice?.();
-      if (wantCheckpointer && !checkpointer && deps.walDbPath) {
-        checkpointer = startWalCheckpointer(deps.walDbPath).then((c) => { deps.onCheckpointer?.(c); return (ck = c); }).catch(() => null);
+      if (wantCheckpointer && !checkpointer && deps.walCheckpoints) {
+        checkpointer = acquireWalCheckpointer().then((c) => { deps.onCheckpointer?.(c); return (ck = c); }).catch(() => null);
       }
       ck?.request();
     },

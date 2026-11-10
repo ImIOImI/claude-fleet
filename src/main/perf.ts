@@ -424,25 +424,37 @@ export function otlpSignalUrl(endpoint: string, signal: 'traces' | 'metrics'): s
   return `${endpoint.replace(/\/+$/, '')}/v1/${signal}`;
 }
 
-/** The spans enclosing the active context, innermost last: SQLite time rolls up to all of them. */
+/** The perfSpan* spans enclosing the active context, innermost last: SQLite time rolls up to all of them. */
 const SPAN_CHAIN = createContextKey('claude_fleet.span_chain');
 
-function startChained(name: string, attrs?: Attributes): { span: Span; ctx: Context } {
+interface ChainEntry { span: Span; sqlMs: number; sqlN: number }
+
+function startChained(name: string, attrs?: Attributes): { entry: ChainEntry; ctx: Context } {
   const active = context.active();
   const span = trace.getTracer(TRACER_NAME).startSpan(name, { attributes: attrs }, active);
-  const chain = [...((active.getValue(SPAN_CHAIN) as Span[] | undefined) ?? []), span];
-  return { span, ctx: trace.setSpan(active, span).setValue(SPAN_CHAIN, chain) };
+  const entry: ChainEntry = { span, sqlMs: 0, sqlN: 0 };
+  if (!span.isRecording()) return { entry, ctx: trace.setSpan(active, span) };
+  const chain = [...((active.getValue(SPAN_CHAIN) as ChainEntry[] | undefined) ?? []), entry];
+  return { entry, ctx: trace.setSpan(active, span).setValue(SPAN_CHAIN, chain) };
+}
+
+function endChained(entry: ChainEntry): void {
+  if (entry.sqlN > 0) {
+    entry.span.setAttribute('sql_sync_ms', Math.round(entry.sqlMs * 10) / 10);
+    entry.span.setAttribute('sql_queries', entry.sqlN);
+  }
+  entry.span.end();
 }
 
 export function perfSpan<T>(name: string, fn: () => T, attrs?: Attributes): T {
-  const { span, ctx } = startChained(name, attrs);
+  const { entry, ctx } = startChained(name, attrs);
   try {
     return context.with(ctx, fn);
   } catch (err) {
-    if (err instanceof Error) span.recordException(err);
+    if (err instanceof Error) entry.span.recordException(err);
     throw err;
   } finally {
-    span.end();
+    endChained(entry);
   }
 }
 
@@ -451,14 +463,14 @@ export async function perfSpanAsync<T>(
   fn: () => Promise<T> | T,
   attrs?: Attributes
 ): Promise<T> {
-  const { span, ctx } = startChained(name, attrs);
+  const { entry, ctx } = startChained(name, attrs);
   try {
     return await context.with(ctx, fn);
   } catch (err) {
-    if (err instanceof Error) span.recordException(err);
+    if (err instanceof Error) entry.span.recordException(err);
     throw err;
   } finally {
-    span.end();
+    endChained(entry);
   }
 }
 
@@ -467,22 +479,15 @@ export function perfRecordSpan(name: string, startMs: number, endMs: number, att
   trace.getTracer(TRACER_NAME).startSpan(name, { attributes: attrs, startTime: startMs }).end(endMs);
 }
 
-const sqlSync = new WeakMap<Span, { ms: number; n: number }>();
-
 /** Add one statement's synchronous SQLite time to every enclosing perfSpan*
- *  span as `sql_sync_ms` / `sql_queries`, so each span's own DB cost is
- *  separable from time spent queued on the connection mutex. */
+ *  span; each reports `sql_sync_ms` / `sql_queries` when it ends, so its own
+ *  DB cost (its children's included) is separable from mutex queueing. */
 export function perfNoteSqlSync(ms: number): void {
-  const chain = context.active().getValue(SPAN_CHAIN) as Span[] | undefined;
+  const chain = context.active().getValue(SPAN_CHAIN) as ChainEntry[] | undefined;
   if (!chain) return;
-  for (const span of chain) {
-    if (!span.isRecording()) continue;
-    const acc = sqlSync.get(span) ?? { ms: 0, n: 0 };
-    acc.ms += ms;
-    acc.n++;
-    sqlSync.set(span, acc);
-    span.setAttribute('sql_sync_ms', Math.round(acc.ms * 10) / 10);
-    span.setAttribute('sql_queries', acc.n);
+  for (const e of chain) {
+    e.sqlMs += ms;
+    e.sqlN++;
   }
 }
 
@@ -492,14 +497,14 @@ export async function perfSpanAsyncAttrs<T>(
   fn: (set: (attrs: Attributes) => void) => Promise<T> | T,
   attrs?: Attributes
 ): Promise<T> {
-  const { span, ctx } = startChained(name, attrs);
+  const { entry, ctx } = startChained(name, attrs);
   try {
-    return await context.with(ctx, () => fn((a) => span.setAttributes(a)));
+    return await context.with(ctx, () => fn((a) => entry.span.setAttributes(a)));
   } catch (err) {
-    if (err instanceof Error) span.recordException(err);
+    if (err instanceof Error) entry.span.recordException(err);
     throw err;
   } finally {
-    span.end();
+    endChained(entry);
   }
 }
 
