@@ -1088,7 +1088,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
           ownId: id,
           userData: app.getPath('userData'),
           fleetRoot: await getFleetRoot(),
-          dockerSocketDirs: await dockerSocketDirs()
+          docker: await dockerSocketDirs()
         })
       : undefined;
   // No watcher means no state.db: release the gate so writes fail via onWriteError instead of queueing forever.

@@ -663,7 +663,7 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
     ownId: spec.id,
     userData: app.getPath('userData'),
     fleetRoot: await getFleetRoot(),
-    dockerSocketDirs: await dockerSocketDirs()
+    docker: await dockerSocketDirs()
   };
   const hostCfg: Docker.HostConfig = {
     Binds: binds,

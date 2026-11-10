@@ -10,6 +10,7 @@ let root: string;
 let ctx: MountCtx;
 let data: string;
 let sockDir: string;
+let cfgDir: string;
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'mounts-'));
@@ -22,7 +23,14 @@ beforeEach(async () => {
   await mkdir(data);
   sockDir = join(root, 'dockerd', 'run');
   await mkdir(sockDir, { recursive: true });
-  ctx = { ownId: OWN, userData, fleetRoot, dockerSocketDirs: [await realpath(sockDir)] };
+  cfgDir = join(root, 'home', '.docker');
+  await mkdir(cfgDir, { recursive: true });
+  ctx = {
+    ownId: OWN,
+    userData,
+    fleetRoot,
+    docker: { socketDirs: [await realpath(sockDir)], dockerConfigDirs: [await realpath(cfgDir)] }
+  };
 });
 
 describe('validateExtraMounts', () => {
@@ -136,7 +144,7 @@ describe('validateExtraMounts', () => {
 
   it('rejects an ancestor of the fleet root even when userData lives elsewhere', async () => {
     const otherRoot = await mkdtemp(join(tmpdir(), 'userdata-'));
-    const isolatedCtx: MountCtx = { ownId: OWN, userData: otherRoot, fleetRoot: ctx.fleetRoot, dockerSocketDirs: [] };
+    const isolatedCtx: MountCtx = { ownId: OWN, userData: otherRoot, fleetRoot: ctx.fleetRoot, docker: { socketDirs: [], dockerConfigDirs: [] } };
     await expect(
       validateExtraMounts([{ hostPath: root, containerPath: '/mnt/x', readOnly: false }], isolatedCtx)
     ).rejects.toThrow("Mount 1: that folder contains other workspaces' private folders.");
@@ -144,14 +152,54 @@ describe('validateExtraMounts', () => {
 });
 
 describe('host path guards', () => {
-  it("rejects the Docker socket's folder, anything inside it, and its ancestors", async () => {
+  it("rejects the Docker socket's folder and its ancestors", async () => {
     const msg = "Mount 1: that folder holds Docker's control socket and can't be mounted.";
-    await mkdir(join(sockDir, 'inner'));
-    for (const hostPath of [sockDir, join(sockDir, 'inner'), join(root, 'dockerd')]) {
+    for (const hostPath of [sockDir, join(root, 'dockerd')]) {
       await expect(
         validateExtraMounts([{ hostPath, containerPath: '/mnt/x', readOnly: false }], ctx)
       ).rejects.toThrow(msg);
     }
+  });
+
+  it('allows folders inside the socket folder (like /run/media/<user>/<drive>)', async () => {
+    const drive = join(sockDir, 'media', 'troy', 'usb');
+    await mkdir(drive, { recursive: true });
+    await expect(
+      validateExtraMounts([{ hostPath: drive, containerPath: '/mnt/x', readOnly: false }], ctx)
+    ).resolves.toHaveLength(1);
+  });
+
+  it('rejects ~/.docker, anything inside it, and its ancestors', async () => {
+    await mkdir(join(cfgDir, 'sub'));
+    for (const hostPath of [cfgDir, join(cfgDir, 'sub'), join(root, 'home')]) {
+      await expect(
+        validateExtraMounts([{ hostPath, containerPath: '/mnt/x', readOnly: false }], ctx)
+      ).rejects.toThrow("Mount 1: that folder holds Docker's control socket and can't be mounted.");
+    }
+  });
+
+  it('protects the real folder of a symlinked socket (WSL Docker Desktop)', async () => {
+    const realSockDir = join(root, 'wsl', 'docker-desktop', 'shared-sockets');
+    await mkdir(realSockDir, { recursive: true });
+    await writeFile(join(realSockDir, 'docker.sock'), '');
+    const literal = join(root, 'varrun');
+    await mkdir(literal);
+    await symlink(join(realSockDir, 'docker.sock'), join(literal, 'docker.sock'));
+    const docker = await dockerSocketDirs({ DOCKER_HOST: `unix://${join(literal, 'docker.sock')}` }, join(root, 'nohome'), 'linux');
+    expect(docker.socketDirs).toEqual([await realpath(literal), await realpath(realSockDir)]);
+    for (const hostPath of [literal, join(root, 'wsl')]) {
+      await expect(
+        validateExtraMounts([{ hostPath, containerPath: '/mnt/x', readOnly: false }], { ...ctx, docker })
+      ).rejects.toThrow("Docker's control socket");
+    }
+  });
+
+  it('refuses /run with the default socket on unix', async () => {
+    const docker = await dockerSocketDirs({}, join(root, 'nohome'), 'linux');
+    if (!docker.socketDirs.includes(await realpath('/run').catch(() => ''))) return;
+    await expect(
+      validateExtraMounts([{ hostPath: '/run', containerPath: '/mnt/x', readOnly: false }], { ...ctx, docker })
+    ).rejects.toThrow("Docker's control socket");
   });
 
   it('rejects a symlink into the Docker socket folder', async () => {
@@ -195,35 +243,35 @@ describe('host path guards', () => {
 
 describe('dockerSocketDirs', () => {
   it('uses the DOCKER_HOST unix socket folder and ~/.docker, realpathed', async () => {
-    const home = join(root, 'home');
-    await mkdir(join(home, '.docker'), { recursive: true });
-    const dirs = await dockerSocketDirs({ DOCKER_HOST: `unix://${join(sockDir, 'docker.sock')}` }, home, 'linux');
-    expect(dirs).toEqual([await realpath(sockDir), await realpath(join(home, '.docker'))]);
+    const dirs = await dockerSocketDirs({ DOCKER_HOST: `unix://${join(sockDir, 'docker.sock')}` }, join(root, 'home'), 'linux');
+    expect(dirs).toEqual({ socketDirs: [await realpath(sockDir)], dockerConfigDirs: [await realpath(cfgDir)] });
   });
 
   it('skips folders that do not exist', async () => {
-    const home = join(root, 'nohome');
-    expect(await dockerSocketDirs({ DOCKER_HOST: `unix://${join(root, 'missing', 'd.sock')}` }, home, 'linux')).toEqual([]);
+    expect(
+      await dockerSocketDirs({ DOCKER_HOST: `unix://${join(root, 'missing', 'd.sock')}` }, join(root, 'nohome'), 'linux')
+    ).toEqual({ socketDirs: [], dockerConfigDirs: [] });
   });
 
   it('has no socket folder for a tcp DOCKER_HOST', async () => {
-    const home = join(root, 'home2');
-    await mkdir(join(home, '.docker'), { recursive: true });
-    expect(await dockerSocketDirs({ DOCKER_HOST: 'tcp://127.0.0.1:2375' }, home, 'linux')).toEqual([
-      await realpath(join(home, '.docker'))
-    ]);
+    expect(await dockerSocketDirs({ DOCKER_HOST: 'tcp://127.0.0.1:2375' }, join(root, 'home'), 'linux')).toEqual({
+      socketDirs: [],
+      dockerConfigDirs: [await realpath(cfgDir)]
+    });
   });
 
-  it('defaults to /var/run on unix', async () => {
+  it('defaults to /var/run/docker.sock on unix', async () => {
     const dirs = await dockerSocketDirs({}, join(root, 'nohome'), 'linux');
-    const expected = await realpath('/var/run').then((r) => [r], () => []);
-    expect(dirs).toEqual(expected);
+    const literal = await realpath('/var/run').catch(() => null);
+    if (literal) expect(dirs.socketDirs[0]).toBe(literal);
+    else expect(dirs.socketDirs).toEqual([]);
   });
 
   it('only checks ~/.docker on Windows (the socket is a named pipe)', async () => {
-    const home = join(root, 'home3');
-    await mkdir(join(home, '.docker'), { recursive: true });
-    expect(await dockerSocketDirs({}, home, 'win32')).toEqual([await realpath(join(home, '.docker'))]);
+    expect(await dockerSocketDirs({}, join(root, 'home'), 'win32')).toEqual({
+      socketDirs: [],
+      dockerConfigDirs: [await realpath(cfgDir)]
+    });
   });
 });
 

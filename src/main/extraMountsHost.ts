@@ -12,8 +12,15 @@ export interface MountCtx {
   ownId: string;
   userData: string;
   fleetRoot: string;
-  /** Realpaths; see dockerSocketDirs. */
-  dockerSocketDirs: string[];
+  docker: DockerDirs;
+}
+
+/** Realpaths; see dockerSocketDirs. */
+export interface DockerDirs {
+  /** Refused when equal to or containing a host folder; folders inside stay mountable. */
+  socketDirs: string[];
+  /** ~/.docker: refused when equal, inside, or containing. */
+  dockerConfigDirs: string[];
 }
 
 const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/i;
@@ -40,21 +47,26 @@ export async function dockerSocketDirs(
   env: NodeJS.ProcessEnv = process.env,
   home: string = homedir(),
   platform: NodeJS.Platform = process.platform
-): Promise<string[]> {
-  const candidates: string[] = [];
+): Promise<DockerDirs> {
+  const socketDirs: string[] = [];
+  const add = (list: string[], p: string | null): void => {
+    if (p && !list.includes(p)) list.push(p);
+  };
   if (platform !== 'win32') {
     const host = env.DOCKER_HOST;
-    if (!host || host === 'unix://') candidates.push('/var/run');
-    else if (host.startsWith('unix://')) candidates.push(dirname(host.slice('unix://'.length)));
+    let sock: string | null = null;
+    if (!host || host === 'unix://') sock = '/var/run/docker.sock';
+    else if (host.startsWith('unix://')) sock = host.slice('unix://'.length);
+    if (sock) {
+      add(socketDirs, await realpath(dirname(sock)).catch(() => null));
+      // The socket may be a symlink elsewhere (WSL Docker Desktop: /mnt/wsl/docker-desktop/…).
+      add(socketDirs, await realpath(sock).then((r) => dirname(r), () => null));
+    }
   }
   // Docker Desktop's per-user socket lives in ~/.docker/run.
-  candidates.push(join(home, '.docker'));
-  const out: string[] = [];
-  for (const c of candidates) {
-    const real = await realpath(c).catch(() => null);
-    if (real && !out.includes(real)) out.push(real);
-  }
-  return out;
+  const dockerConfigDirs: string[] = [];
+  add(dockerConfigDirs, await realpath(join(home, '.docker')).catch(() => null));
+  return { socketDirs, dockerConfigDirs };
 }
 
 async function realOrSelf(p: string): Promise<string> {
@@ -85,18 +97,21 @@ function containmentMessage(real: string, ctx: MountCtx, userData: string, fleet
     // Mounting an ancestor of the fleet root would expose every workspace's private folder.
     return "that folder contains other workspaces' private folders.";
   }
-  if (ctx.dockerSocketDirs.some((d) => inside(real, d) || inside(d, real))) {
+  if (
+    ctx.docker.socketDirs.some((d) => inside(d, real)) ||
+    ctx.docker.dockerConfigDirs.some((d) => inside(real, d) || inside(d, real))
+  ) {
     return "that folder holds Docker's control socket and can't be mounted.";
   }
   return null;
 }
 
-// Shared by validateExtraMounts (save-time) and toDockerMounts (create-time
-// revalidation, closing a symlink-retarget TOCTOU gap). Returns the resolved realpath.
 const UNC_MESSAGE =
   "network and WSL paths (\\\\server\\… or \\\\wsl.localhost\\…) can't be mounted. Use a local drive path.";
 const isUnc = (p: string): boolean => p.startsWith('\\\\') || p.startsWith('//');
 
+// Shared by validateExtraMounts (save-time) and toDockerMounts (create-time
+// revalidation, closing a symlink-retarget TOCTOU gap). Returns the resolved realpath.
 async function checkHostPath(hostPath: string, ctx: MountCtx, userData: string, fleetRoot: string): Promise<string> {
   if (isUnc(hostPath)) throw new HostPathProblem('blocked', UNC_MESSAGE);
   if (!isAbsolute(hostPath)) throw new HostPathProblem('not-absolute', `${hostPath} must be a full path.`);
