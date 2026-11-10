@@ -29,6 +29,7 @@ const h = vi.hoisted(() => ({
 vi.mock('./db.js', () => ({
   loadTranscriptOffsets: async () => new Map(),
   saveTranscriptOffsets: async () => undefined,
+  deleteTranscriptOffsets: async () => undefined,
   ingestBatch: async (_ws: string, sessionId: string, raws: string[]) => {
     const n = (h.inFlight.get(sessionId) ?? 0) + 1;
     h.inFlight.set(sessionId, n);

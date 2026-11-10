@@ -27,6 +27,7 @@ const h = vi.hoisted(() => ({
 vi.mock('./db.js', () => ({
   loadTranscriptOffsets: async () => new Map(),
   saveTranscriptOffsets: async () => undefined,
+  deleteTranscriptOffsets: async () => undefined,
   ingestBatch: async (_ws: string, _session: string, raws: string[]) => {
     h.entered = true;
     await h.gate;
