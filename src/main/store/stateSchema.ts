@@ -174,8 +174,9 @@ export interface TranscriptOffsetsTable {
   workspace_id: string;
   session_id: string;
   byte_offset: number;
-  /** File birth time (ms) when the offset was saved; null where the fs has none. */
-  birth_ms: number | null;
+  /** The bytes just before byte_offset (length + sha1), re-checked before resuming. */
+  tail_len: number;
+  tail_hash: string;
 }
 
 export interface StateDb {

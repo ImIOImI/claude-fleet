@@ -14,9 +14,10 @@
 //
 // Re-ingestion is idempotent: db.ingestBatch uses uuid (or a content hash for
 // light events) as a dedup key. Offsets are saved to transcript_offsets so a
-// restart resumes instead of re-reading every transcript (#539); a lost or
+// restart resumes instead of re-reading every transcript; a lost or
 // stale offset only costs a re-read from 0, which produces the same end state.
 
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { mkdirSync, promises as fsp, type Stats } from 'node:fs';
 import { join, extname, sep as pathSep } from 'node:path';
@@ -26,7 +27,7 @@ import { join, extname, sep as pathSep } from 'node:path';
 import type { FSWatcher } from 'chokidar';
 import { NATIVE_RECURSIVE_DEFAULT, RecursiveDirWatcher, type DirWatcher } from './recursiveDirWatcher.js';
 import { workspaceClaudeDir, workspaceHistoryDir, workspaceHistoryFile, hostLocalProjectsDir } from './paths.js';
-import { ingestBatch, loadTranscriptOffsets, saveTranscriptOffsets, type TranscriptOffset, type TranscriptOffsetRow } from './db.js';
+import { deleteTranscriptOffsets, ingestBatch, loadTranscriptOffsets, saveTranscriptOffsets, type TranscriptOffset, type TranscriptOffsetRow } from './db.js';
 import { effectiveForClaudeSession } from './mirrorPolicy.js';
 import { perfSpan, perfSpanAsync } from './perf.js';
 import { keyedSerialQueue } from './state/serialQueue.js';
@@ -55,6 +56,40 @@ function logWatcherEvent(payload: {
 
 const PROJECTS_SUBDIR = join('projects', '-workspace');
 const OFFSET_FLUSH_MS = 2000;
+const OFFSET_SWEEP_MS = 5 * 60_000;
+/** Bytes before a saved offset that must still match before resuming from it. */
+const TAIL_BYTES = 4096;
+const OFFSET_LOAD_ATTEMPTS = 3;
+
+const sha1 = (b: Buffer): string => createHash('sha1').update(b).digest('hex');
+
+/** A transient store error retries; giving up only costs a full re-read. */
+async function loadOffsetsWithRetry(): Promise<Map<string, TranscriptOffset>> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await loadTranscriptOffsets();
+    } catch (err) {
+      if (attempt >= OFFSET_LOAD_ATTEMPTS) {
+        logWatcherEvent({ type: 'transcript-offsets-load-failed', level: 'warn', message: String(err) });
+        return new Map();
+      }
+      await new Promise((r) => setTimeout(r, 1000 * attempt));
+    }
+  }
+}
+
+/** Whether the bytes before a saved offset are still the ones it was saved after. */
+async function tailMatches(path: string, saved: TranscriptOffset): Promise<boolean> {
+  if (saved.tailLen === 0 || saved.tailLen > saved.byteOffset) return false;
+  const fh = await fsp.open(path, 'r');
+  try {
+    const buf = Buffer.alloc(saved.tailLen);
+    const { bytesRead } = await fh.read(buf, 0, saved.tailLen, saved.byteOffset - saved.tailLen);
+    return bytesRead === saved.tailLen && sha1(buf) === saved.tailHash;
+  } finally {
+    await fh.close();
+  }
+}
 // chokidar drops (not defers) a file's events within 5 ms of the last one, so
 // a write in that window has no event of its own. One re-check this
 // long after the last event in a burst reads it.
@@ -110,8 +145,9 @@ export class JsonlWatcher extends EventEmitter {
   private watcher: DirWatcher | null = null;
   private readonly nativeRecursive: boolean;
 
-  constructor(opts: { nativeRecursive?: boolean } = {}) {
+  constructor(opts: { nativeRecursive?: boolean; offsetSweepMs?: number } = {}) {
     super();
+    this.offsetSweepMs = opts.offsetSweepMs ?? OFFSET_SWEEP_MS;
     this.nativeRecursive = opts.nativeRecursive ?? NATIVE_RECURSIVE_DEFAULT;
   }
   // Second chokidar instance for dirs where inotify can't reach — the
@@ -141,11 +177,15 @@ export class JsonlWatcher extends EventEmitter {
   // per watcher lifetime. Cleared only on stop().
   private readonly announcedSessions = new Set<string>();
   // Offsets saved by the last run, consumed on each file's first sighting.
-  private persisted = new Map<string, TranscriptOffset>();
-  // Offsets advanced since the last save, flushed every OFFSET_FLUSH_MS and on stop().
+  private persisted: Promise<Map<string, TranscriptOffset>> = Promise.resolve(new Map());
+  // Offsets advanced (dirty) or rows to drop (dead) since the last flush,
+  // flushed every OFFSET_FLUSH_MS and on stop().
   private readonly dirtyOffsets = new Map<string, TranscriptOffsetRow>();
+  private readonly deadOffsets = new Set<string>();
   private offsetFlushTimer: NodeJS.Timeout | null = null;
+  private offsetSweepTimer: NodeJS.Timeout | null = null;
   private offsetFlush: Promise<void> = Promise.resolve();
+  private readonly offsetSweepMs: number;
 
   // Registered host transcript dirs for local-backend workspaces:
   //   ~/.claude/projects/<encoded-root>/  →  real workspace id.
@@ -190,6 +230,7 @@ export class JsonlWatcher extends EventEmitter {
         this.watcher.unwatch(dir);
       }
       const prefix = dir + pathSep;
+      this.forgetOffsetsUnder(prefix);
       for (const path of [...this.files.keys()]) {
         if (path === dir || path.startsWith(prefix)) this.files.delete(path);
       }
@@ -265,16 +306,20 @@ export class JsonlWatcher extends EventEmitter {
       .on('unlink', (p) => {
         this.files.delete(p);
         this.cancelSettle(p);
+        this.forgetOffsets([p]);
       })
       .on('error', (err) => console.error('[jsonlWatcher] error:', err));
   }
 
   async start(workspaceIds: string[]): Promise<void> {
     if (this.watcher) return;
-    this.persisted = await loadTranscriptOffsets().catch((err: unknown) => {
-      logWatcherEvent({ type: 'transcript-offsets-load-failed', level: 'warn', message: String(err) });
-      return new Map<string, TranscriptOffset>();
-    });
+    // Not awaited: register* must work as soon as the watcher exists; process() awaits it.
+    this.persisted = loadOffsetsWithRetry();
+    this.offsetSweepTimer = setTimeout(() => {
+      this.offsetSweepTimer = null;
+      void this.sweepOffsets();
+    }, this.offsetSweepMs);
+    this.offsetSweepTimer.unref();
     // depth 2 reaches <projectdir>/<session>/subagents/agent-*.jsonl (#plan-usage).
     // No awaitWriteFinish: we tolerate partial-line reads by tracking the
     // last newline byte and rolling the offset forward only past complete
@@ -306,9 +351,11 @@ export class JsonlWatcher extends EventEmitter {
     // caller closes state.db.
     await this.queue.drain();
     if (this.offsetFlushTimer) clearTimeout(this.offsetFlushTimer);
+    if (this.offsetSweepTimer) clearTimeout(this.offsetSweepTimer);
     this.offsetFlushTimer = null;
+    this.offsetSweepTimer = null;
     await this.flushOffsets();
-    this.persisted.clear();
+    this.persisted = Promise.resolve(new Map());
     this.polledDirs.clear();
     this.files.clear();
     this.watchedDirs.clear();
@@ -347,6 +394,7 @@ export class JsonlWatcher extends EventEmitter {
     if (!this.watchedDirs.delete(dir)) return;
     this.watcher.unwatch(dir);
     const prefix = dir + pathSep;
+    this.forgetOffsetsUnder(prefix);
     for (const path of [...this.files.keys()]) {
       if (path === dir || path.startsWith(prefix)) {
         this.files.delete(path);
@@ -412,22 +460,25 @@ export class JsonlWatcher extends EventEmitter {
       this.files.delete(path);
       return;
     }
-    const birthMs = Math.round(stats.birthtimeMs) || null;
     if (!existing) {
-      const saved = this.persisted.get(path);
-      this.persisted.delete(path);
-      // A different birth time means the path now names a new file.
-      if (saved && !(saved.birthMs && birthMs && saved.birthMs !== birthMs)) state.offset = saved.byteOffset;
+      const persisted = await this.persisted;
+      const saved = persisted.get(path);
+      persisted.delete(path);
+      // A rewrite while the app was closed changes the bytes before the offset.
+      if (saved && saved.byteOffset <= stats.size && await tailMatches(path, saved).catch(() => false)) {
+        state.offset = saved.byteOffset;
+      }
     }
     // Compaction: file shrank below our offset — reset and re-ingest.
     // dedup_key keeps existing rows; only genuinely new lines insert.
     if (stats.size < state.offset) state.offset = 0;
     if (stats.size === state.offset) return;
 
-    const { newOffset, insertedCount } = await readAndIngest(path, state);
+    const { newOffset, insertedCount, tail } = await readAndIngest(path, state);
+    const moved = newOffset !== state.offset;
     state.offset = newOffset;
     this.files.set(path, state);
-    this.markOffset(path, state, birthMs);
+    if (moved && tail) this.markOffset(path, state, tail);
 
     // Only emit when ≥1 line genuinely inserted (compaction re-reads return
     // duplicates whose dedup_key already exists; no consumer state change
@@ -440,8 +491,50 @@ export class JsonlWatcher extends EventEmitter {
     }
   }
 
-  private markOffset(path: string, state: FileState, birthMs: number | null): void {
-    this.dirtyOffsets.set(path, { path, workspaceId: state.workspaceId, sessionId: state.sessionId, byteOffset: state.offset, birthMs });
+  private markOffset(path: string, state: FileState, tail: Buffer): void {
+    this.dirtyOffsets.set(path, {
+      path, workspaceId: state.workspaceId, sessionId: state.sessionId,
+      byteOffset: state.offset, tailLen: tail.length, tailHash: sha1(tail),
+    });
+    this.deadOffsets.delete(path);
+    this.scheduleOffsetFlush();
+  }
+
+  private forgetOffsets(paths: Iterable<string>): void {
+    for (const p of paths) {
+      this.dirtyOffsets.delete(p);
+      this.deadOffsets.add(p);
+    }
+    this.scheduleOffsetFlush();
+  }
+
+  /** Drop the saved rows of every transcript under `prefix`, sighted or not,
+   *  so a flush can't re-save a workspace whose history is being purged. */
+  private forgetOffsetsUnder(prefix: string): void {
+    const sighted = [...this.files.keys()].filter((p) => p.startsWith(prefix));
+    this.forgetOffsets(sighted);
+    void this.persisted.then((m) => {
+      const unsighted = [...m.keys()].filter((p) => p.startsWith(prefix));
+      for (const p of unsighted) m.delete(p);
+      this.forgetOffsets(unsighted);
+    });
+  }
+
+  /** Drop saved rows for transcripts deleted while the app was closed. */
+  private async sweepOffsets(): Promise<void> {
+    const m = await this.persisted;
+    const gone: string[] = [];
+    for (const p of [...m.keys()]) {
+      if (!this.watcher) return;
+      if (await fsp.access(p).then(() => false, () => true)) {
+        m.delete(p);
+        gone.push(p);
+      }
+    }
+    this.forgetOffsets(gone);
+  }
+
+  private scheduleOffsetFlush(): void {
     if (this.offsetFlushTimer) return;
     this.offsetFlushTimer = setTimeout(() => {
       this.offsetFlushTimer = null;
@@ -453,13 +546,17 @@ export class JsonlWatcher extends EventEmitter {
   /** Saves are chained so stop() can await the last one before state.db closes. */
   private flushOffsets(): Promise<void> {
     const rows = [...this.dirtyOffsets.values()];
+    const dead = [...this.deadOffsets];
     this.dirtyOffsets.clear();
+    this.deadOffsets.clear();
     this.offsetFlush = this.offsetFlush.then(async () => {
-      if (rows.length === 0) return;
-      await saveTranscriptOffsets(rows).catch((err: unknown) => {
-        // Unsaved offsets only mean a re-read from an older point next launch.
+      try {
+        if (dead.length > 0) await deleteTranscriptOffsets(dead);
+        if (rows.length > 0) await saveTranscriptOffsets(rows);
+      } catch (err) {
+        // A missed save only means a re-read from an older point next launch.
         logWatcherEvent({ type: 'transcript-offsets-save-failed', level: 'warn', message: String(err) });
-      });
+      }
     });
     return this.offsetFlush;
   }
@@ -496,6 +593,8 @@ export class JsonlWatcher extends EventEmitter {
 interface ReadResult {
   newOffset: number;
   insertedCount: number;
+  /** Up to TAIL_BYTES ending at newOffset, when any complete line was read. */
+  tail?: Buffer;
 }
 
 /**
@@ -562,7 +661,7 @@ async function readAndIngest(path: string, state: FileState): Promise<ReadResult
       );
     }
 
-    return { newOffset: state.offset + lastNl + 1, insertedCount };
+    return { newOffset: state.offset + lastNl + 1, insertedCount, tail: buf.subarray(Math.max(0, lastNl + 1 - TAIL_BYTES), lastNl + 1) };
   } finally {
     await fh.close();
   }

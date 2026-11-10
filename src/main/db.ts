@@ -675,7 +675,8 @@ function migrate(d: Database.Database): void {
         workspace_id TEXT NOT NULL,
         session_id   TEXT NOT NULL,
         byte_offset  INTEGER NOT NULL,
-        birth_ms     INTEGER
+        tail_len     INTEGER NOT NULL,
+        tail_hash    TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_transcript_offsets_workspace ON transcript_offsets(workspace_id);
       CREATE INDEX IF NOT EXISTS idx_transcript_offsets_session ON transcript_offsets(session_id);
@@ -2315,31 +2316,37 @@ export async function deleteSession(id: string): Promise<void> {
 
 // ── Transcript offsets (SPEC §7 *Transcript offsets*) ────────────────────
 
-export interface TranscriptOffset { byteOffset: number; birthMs: number | null }
+export interface TranscriptOffset { byteOffset: number; tailLen: number; tailHash: string }
 export interface TranscriptOffsetRow extends TranscriptOffset { path: string; workspaceId: string; sessionId: string }
 
 /** Every saved ingest resume point, by transcript path. */
 export async function loadTranscriptOffsets(): Promise<Map<string, TranscriptOffset>> {
-  const rows = await kyselyOrThrow().selectFrom('transcript_offsets').select(['path', 'byte_offset', 'birth_ms']).execute();
-  return new Map(rows.map((r) => [r.path, { byteOffset: num(r.byte_offset), birthMs: r.birth_ms === null ? null : num(r.birth_ms) }]));
+  const rows = await kyselyOrThrow().selectFrom('transcript_offsets').select(['path', 'byte_offset', 'tail_len', 'tail_hash']).execute();
+  return new Map(rows.map((r) => [r.path, { byteOffset: num(r.byte_offset), tailLen: num(r.tail_len), tailHash: r.tail_hash }]));
 }
 
-/** transcript_offsets has 5 bound columns: 500 rows = 2,500 parameters per INSERT. */
-const OFFSETS_CHUNK = 500;
-
+/** transcript_offsets has 6 bound columns: 500 rows = 3,000 parameters per INSERT. */
 export async function saveTranscriptOffsets(rows: readonly TranscriptOffsetRow[]): Promise<void> {
-  for (let i = 0; i < rows.length; i += OFFSETS_CHUNK) {
+  for (const part of chunked(rows, 500)) {
     await kyselyOrThrow().insertInto('transcript_offsets')
-      .values(rows.slice(i, i + OFFSETS_CHUNK).map((r) => ({
-        path: r.path, workspace_id: r.workspaceId, session_id: r.sessionId, byte_offset: r.byteOffset, birth_ms: r.birthMs,
+      .values(part.map((r) => ({
+        path: r.path, workspace_id: r.workspaceId, session_id: r.sessionId,
+        byte_offset: r.byteOffset, tail_len: r.tailLen, tail_hash: r.tailHash,
       })))
       .onConflict((oc) => oc.column('path').doUpdateSet((eb) => ({
         workspace_id: eb.ref('excluded.workspace_id'),
         session_id: eb.ref('excluded.session_id'),
         byte_offset: eb.ref('excluded.byte_offset'),
-        birth_ms: eb.ref('excluded.birth_ms'),
+        tail_len: eb.ref('excluded.tail_len'),
+        tail_hash: eb.ref('excluded.tail_hash'),
       })))
       .execute();
+  }
+}
+
+export async function deleteTranscriptOffsets(paths: readonly string[]): Promise<void> {
+  for (const part of chunked(paths, 500)) {
+    await kyselyOrThrow().deleteFrom('transcript_offsets').where('path', 'in', part).execute();
   }
 }
 

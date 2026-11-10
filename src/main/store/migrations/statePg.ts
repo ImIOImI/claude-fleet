@@ -250,7 +250,8 @@ CREATE TABLE transcript_offsets (
   workspace_id ${T} NOT NULL,
   session_id ${T} NOT NULL,
   byte_offset BIGINT NOT NULL,
-  birth_ms BIGINT
+  tail_len BIGINT NOT NULL,
+  tail_hash ${T} NOT NULL
 );
 CREATE INDEX idx_transcript_offsets_workspace ON transcript_offsets (workspace_id);
 CREATE INDEX idx_transcript_offsets_session ON transcript_offsets (session_id);
