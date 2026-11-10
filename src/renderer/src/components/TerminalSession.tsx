@@ -558,12 +558,12 @@ export function TerminalSession({
             });
           }
         });
-        // Seed with the size actually sent: the pane can re-fit while attach
-        // is in flight (local spawns queue), and that change must still be pushed.
+        // Baselines are the size actually sent: the pane can re-fit while
+        // attach is in flight (local spawns queue); reconcileSize() below
+        // pushes and nudges for that change.
         resizePusher.seed(spawnCols, spawnRows);
-        resizePusher.request();
-        lastObservedCols = term.cols;
-        lastObservedRows = term.rows;
+        lastObservedCols = spawnCols;
+        lastObservedRows = spawnRows;
         // Busy/idle (#283): read the title from xterm's own OSC parser —
         // onTitleChange fires once per complete title no matter how the PTY
         // stream was chunked, which is the framing dependence that used to
@@ -674,10 +674,11 @@ export function TerminalSession({
         // Arm the scoped repaint nudge (consumed by the ResizeObserver
         // below). attachCols/Rows is the size claude is laying out at right
         // now; a later resize that changes it is the trigger.
-        attachCols = term.cols;
-        attachRows = term.rows;
+        attachCols = spawnCols;
+        attachRows = spawnRows;
         nudgeArmed = true;
         armTimer = setTimeout(disarmNudge, REPAINT_NUDGE_WINDOW_MS);
+        reconcileSize();
       } catch (err) {
         // Attach failure most commonly means the in-container broker
         // isn't reachable — older runner images without it, or the
@@ -702,8 +703,7 @@ export function TerminalSession({
       }
     });
 
-    const ro = new ResizeObserver(() => {
-      safeFit();
+    function reconcileSize(): void {
       if (ptyHandleId) {
         // Only push a size the pty doesn't already have (#268). The observer
         // fires on any host layout change — a scrollbar appearing as claude's
@@ -756,6 +756,11 @@ export function TerminalSession({
           }, REPAINT_NUDGE_DEBOUNCE_MS);
         }
       }
+    }
+
+    const ro = new ResizeObserver(() => {
+      safeFit();
+      reconcileSize();
     });
     ro.observe(host);
 

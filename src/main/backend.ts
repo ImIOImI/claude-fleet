@@ -52,6 +52,8 @@ export interface Backend {
     /** `foreground`: the attaching tab is visible; local spawns it first. */
     opts?: { foreground?: boolean }
   ): Promise<PtyHandle>;
+  /** Drop a tab's attach that is queued but has not spawned yet. Local only. */
+  cancelPendingAttach?(workspaceId: string, sessionId: string): boolean;
   getBrokerLogs(containerId: string, tailLines?: number): Promise<string>;
   /**
    * Inject a line of input into the workspace's single live session, as if a

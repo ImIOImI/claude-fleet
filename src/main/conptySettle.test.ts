@@ -7,7 +7,7 @@
 // width divergence it was meant to fix.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createConptySettler, conptySettleLogLevel, CONPTY_SETTLE_DEBOUNCE_MS } from './conptySettle.js';
+import { createConptySettler, CONPTY_SETTLE_DEBOUNCE_MS } from './conptySettle.js';
 
 describe('createConptySettler', () => {
   beforeEach(() => {
@@ -107,24 +107,5 @@ describe('createConptySettler', () => {
     vi.advanceTimersByTime(CONPTY_SETTLE_DEBOUNCE_MS * 2);
     expect(h.resizes).toEqual([]);
     expect(h.settled).toEqual([]);
-  });
-});
-
-describe('conptySettleLogLevel', () => {
-  const size = { cols: 120, rows: 40 };
-
-  it('logs the first agreeing settle as info', () => {
-    expect(conptySettleLogLevel({ firstSettle: true, settled: size, requested: size })).toBe('info');
-  });
-
-  it('drops later settles that agree with the requested size', () => {
-    expect(conptySettleLogLevel({ firstSettle: false, settled: size, requested: size })).toBeNull();
-  });
-
-  it('logs any settle that disagrees with the requested size as warn', () => {
-    const settled = { cols: 107, rows: 40 };
-    expect(conptySettleLogLevel({ firstSettle: false, settled, requested: size })).toBe('warn');
-    expect(conptySettleLogLevel({ firstSettle: true, settled, requested: size })).toBe('warn');
-    expect(conptySettleLogLevel({ firstSettle: false, settled: { cols: 120, rows: 39 }, requested: size })).toBe('warn');
   });
 });

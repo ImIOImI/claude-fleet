@@ -65,16 +65,3 @@ export function createConptySettler(opts: ConptySettlerOpts): ConptySettler {
     }
   };
 }
-
-/** Which settles get an error-log row: the first per pty (what ConPTY was
- *  reconciled to), then only settles where the pty disagrees with the size
- *  last requested. Each row is a synchronous write on main. */
-export function conptySettleLogLevel(info: {
-  firstSettle: boolean;
-  settled: { cols: number; rows: number };
-  requested: { cols: number; rows: number };
-}): 'info' | 'warn' | null {
-  const diverged = info.settled.cols !== info.requested.cols || info.settled.rows !== info.requested.rows;
-  if (diverged) return 'warn';
-  return info.firstSettle ? 'info' : null;
-}
