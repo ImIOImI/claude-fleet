@@ -83,6 +83,9 @@
 !src/preload/captureSettings.ts
 !src/preload/federation.ts
 !src/main/embedderClient.ts
+!src/main/transcriptIndexCore.ts
+# fleet-embedder for the host image (docker/host/Dockerfile embedder-build stage).
+!embedder/**
 
 # Even within broker/, drop things the binary doesn't need:
 broker/**/*_test.go
@@ -94,3 +97,5 @@ src/host/testFakes.ts
 src/host/testHost.ts
 src/host/testGithubApp.ts
 docker/host/*.test.sh
+embedder/target/**
+embedder/bin/**

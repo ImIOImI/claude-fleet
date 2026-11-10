@@ -21,7 +21,7 @@ describe('embed reference (D78)', () => {
     expect(read('docker/host/embed-weights.sha256').trim().split('\n').map((l) => l.split(/\s+/)[1])).toEqual([...EMBED_MODEL_FILES]);
   });
 
-  it.todo('pins the same revision as the Dockerfile', () => {
+  it('pins the same revision as the Dockerfile', () => {
     expect(read('docker/host/Dockerfile')).toContain(`ARG EMBED_HF_REVISION=${EMBED_HF_REVISION}`);
   });
 

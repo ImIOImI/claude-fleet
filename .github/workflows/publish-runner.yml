@@ -70,6 +70,8 @@ on:
       - 'src/preload/captureSettings.ts'
       - 'src/preload/federation.ts'
       - 'src/main/embedderClient.ts'
+      - 'embedder/**'
+      - 'src/main/transcriptIndexCore.ts'
       - 'package-lock.json'
       - 'tsconfig.host.json'
       - 'vite.host.config.ts'
@@ -86,9 +88,11 @@ permissions:
 # `docker buildx imagetools create`. Images fan out in parallel; a variant only
 # waits on the base manifest it is FROM.
 #
-#   base-build (amd64 ‖ arm64) ─▶ base-merge ─▶ variant-build ({devops,dev,host}×{amd64,arm64})
+#   base-build (amd64 ‖ arm64) ─▶ base-merge ─▶ variant-build ({devops,dev}×{amd64,arm64}, host×amd64)
 #                                                          └─▶ variant-merge ({devops,dev,host})
-#                                                                 └─▶ devops-host-build ─▶ devops-host-merge
+#                                                                 └─▶ devops-host-build (amd64) ─▶ devops-host-merge
+#
+# The host images are amd64 only (D82): fleet-embedder's zigbuild install pins x86_64 alone.
 
 env:
   REGISTRY: ghcr.io
@@ -216,6 +220,9 @@ jobs:
       matrix:
         variant: [devops, dev, host]
         arch: [amd64, arm64]
+        exclude:
+          - variant: host
+            arch: arm64
         include:
           - arch: amd64
             runner: ubuntu-24.04
@@ -360,8 +367,6 @@ jobs:
         include:
           - arch: amd64
             runner: ubuntu-24.04
-          - arch: arm64
-            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v4

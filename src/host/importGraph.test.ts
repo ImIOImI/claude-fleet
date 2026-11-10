@@ -96,6 +96,32 @@ describe('fleet-host build inputs', () => {
     expect(dockerIncluded(rules, 'src/host/server.test.ts')).toBe(false);
   });
 
+  const pathGlobs = (file: string, pick: (y: any) => string[]): RegExp[] =>
+    pick(parse(read(file))).map((g) => new RegExp('^' + g.replace(/\./g, '\\.').replace(/\*\*/g, '.*').replace(/(?<!\.)\*/g, '[^/]*') + '$'));
+
+  it('the embedder crate, reference and weight manifest are in the build context and trigger the image workflows', () => {
+    const rules = read('.dockerignore');
+    const inputs = [
+      'embedder/Cargo.toml', 'embedder/Cargo.lock', 'embedder/build.rs', 'embedder/glibc_compat.c', 'embedder/rust-toolchain.toml',
+      'embedder/src/main.rs', 'embedder/scripts/ci-build.sh', 'embedder/scripts/install-zigbuild.sh', 'embedder/scripts/check-glibc.sh',
+      'embedder/reference/bge-small-q8.json', 'docker/host/embed-weights.sha256'
+    ];
+    expect(inputs.filter((f) => !dockerIncluded(rules, f))).toEqual([]);
+    expect(dockerIncluded(rules, 'embedder/target/release/fleet-embedder')).toBe(false);
+    expect(dockerIncluded(rules, 'embedder/bin/fleet-embedder')).toBe(false);
+    const push = pathGlobs('.github/workflows/publish-runner.yml', (y) => y.on.push.paths);
+    const pr = pathGlobs('.github/workflows/test-runner-images.yml', (y) => y.on.pull_request.paths);
+    expect(inputs.filter((f) => !push.some((re) => re.test(f)) || !pr.some((re) => re.test(f)))).toEqual([]);
+  });
+
+  it('publishes the host images for amd64 only (D82)', () => {
+    const jobs = (parse(read('.github/workflows/publish-runner.yml')) as { jobs: Record<string, { strategy: { matrix: { arch?: string[]; exclude?: Record<string, string>[]; include: Record<string, string>[] } } }> }).jobs;
+    const variant = jobs['variant-build'].strategy.matrix;
+    const hostArchs = variant.arch!.filter((arch) => !variant.exclude?.some((x) => x.variant === 'host' && x.arch === arch));
+    expect(hostArchs).toEqual(['amd64']);
+    expect(jobs['devops-host-build'].strategy.matrix.include.map((x) => x.arch)).toEqual(['amd64']);
+  });
+
   it('every import-graph file triggers publish-runner, build-app and test-runner-images', () => {
     const paths = (parse(read('.github/workflows/publish-runner.yml')) as { on: { push: { paths: string[] } } }).on.push.paths;
     const globs = paths.map((g) => new RegExp('^' + g.replace(/\./g, '\\.').replace(/\*\*/g, '.*').replace(/(?<!\.)\*/g, '[^/]*') + '$'));
