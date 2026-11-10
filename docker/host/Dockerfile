@@ -11,7 +11,7 @@ COPY tsconfig.host.json vite.host.config.ts ./
 COPY src ./src
 RUN npx vite build --config vite.host.config.ts
 
-# fleet-embedder (remote-workspaces d2, D76). Same digest as embedder/scripts/ci-build-linux.sh; bump both together.
+# fleet-embedder (D76). Same digest as embedder/scripts/ci-build-linux.sh; bump both together.
 FROM rust:1.91-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33 AS embedder-build
 WORKDIR /w
 COPY embedder ./embedder

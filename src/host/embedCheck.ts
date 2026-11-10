@@ -24,10 +24,12 @@ export function parseReference(v: unknown): { revision: string; texts: string[];
   return { revision: r.revision, texts: r.texts, vectors: decodeVectors(r.vectors, r.texts.length, EMBED_DIM) };
 }
 
-export const EMBED_CHECK_MIN_COSINE = 0.999;
+// Runner CPUs' int8 kernels differ by up to ~2e-3 per text; broken weights or tokenization score <= 0.967.
+export const EMBED_CHECK_MIN_COSINE = 0.995;
+export const EMBED_CHECK_MIN_MEAN_COSINE = 0.9995;
 const CHECK_BATCH = 8;
 
-export async function runEmbedCheck(embed: EmbedFn, ref: { texts: string[]; vectors: Float32Array[] }): Promise<{ ok: boolean; n: number; minCosine: number; meanCosine: number }> {
+export async function runEmbedCheck(embed: EmbedFn, ref: { texts: string[]; vectors: Float32Array[] }): Promise<{ ok: boolean; n: number; minCosine: number; minIndex: number; meanCosine: number }> {
   const cos: number[] = [];
   let unit = true;
   for (let i = 0; i < ref.texts.length; i += CHECK_BATCH) {
@@ -38,7 +40,10 @@ export async function runEmbedCheck(embed: EmbedFn, ref: { texts: string[]; vect
     });
   }
   const minCosine = Math.min(...cos);
-  return { ok: unit && cos.length === ref.texts.length && minCosine >= EMBED_CHECK_MIN_COSINE, n: cos.length, minCosine, meanCosine: cos.reduce((a, b) => a + b, 0) / cos.length };
+  const minIndex = cos.indexOf(minCosine);
+  const meanCosine = cos.reduce((a, b) => a + b, 0) / cos.length;
+  const ok = unit && cos.length === ref.texts.length && minCosine >= EMBED_CHECK_MIN_COSINE && meanCosine >= EMBED_CHECK_MIN_MEAN_COSINE;
+  return { ok, n: cos.length, minCosine, minIndex, meanCosine };
 }
 
 async function peakRssKiB(pid: number | undefined): Promise<number | null> {

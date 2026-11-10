@@ -145,7 +145,7 @@ Every task implicitly includes these.
   - Bumping the model or revision means changing `EMBED_HF_REVISION`, the manifest, `EMBED_HF_REVISION` in `embedCheck.ts` and the reference vectors (D78) together. `embedCheck.test.ts` fails if they diverge.
 - **D78: A real embed at image build, checked against committed reference vectors.** This replaces `embed-selftest` printing 384.
   - `embedder/reference/bge-small-q8.json` holds the 40 parity-corpus texts and their vectors from the parity oracle (transformers.js, one text at a time). It is written by the opt-in parity suite on a machine with the model cache, after checking that the cached files match the manifest.
-  - `fleet-host embed-check` starts the host embedder exactly as the holder does, embeds those texts in batches of 8, and requires per-text cosine ≥ 0.999 against the reference and every norm within 1e-4 of 1. It prints `{ ok, n, minCosine, meanCosine, peakRssKiB }`.
+  - `fleet-host embed-check` starts the host embedder exactly as the holder does, embeds those texts in batches of 8, and requires per-text cosine ≥ 0.995, a mean cosine ≥ 0.9995 against the reference and every norm within 1e-4 of 1. It prints `{ ok, n, minCosine, minIndex, meanCosine, peakRssKiB }`. The bound sits above the int8-kernel spread across runner CPUs (up to about 2e-3; CI measured a minimum of 0.99932) and far below real failures (≤ 0.967).
   - The final image stage runs it as `fleet` (uid 1000), so the build fails on a broken binary, wrong weights, an unreadable file, or arm64 kernel drift that `modelId` can't detect.
   - The image keeps the reference (82 KB) as `embed/reference.json`, so the check can be re-run in a pod.
 - **D79: The `search.embedder` off-switch (D72 safeguard 2).**

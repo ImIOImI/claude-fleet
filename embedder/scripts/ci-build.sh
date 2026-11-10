@@ -15,6 +15,7 @@ case "$(uname -s)" in
     cargo fetch --locked
     ver=$(awk '/^name = "ort-sys"/ {getline; gsub(/[" ]/, "", $0); sub(/version=/, ""); print}' Cargo.lock)
     dist=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -path "*/ort-sys-$ver/dist.txt" | head -1)
+    [ -n "$dist" ] || { echo "::error::ort-sys $ver dist.txt not found"; exit 1; }
     read -r url sha < <(awk -F'\t' -v t="$triple" '$1 == "none" && $2 == t {print $3, $4}' "$dist") || true
     [ -n "$url" ] || { echo "::error::no prebuilt onnxruntime for $triple"; exit 1; }
     mkdir -p target/ort && curl -fsSL "$url" -o target/ort/ort.tgz

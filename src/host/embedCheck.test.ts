@@ -32,6 +32,13 @@ describe('embed reference (D78)', () => {
     const oneShort = Buffer.from(raw.vectors, 'base64').subarray(384 * 4).toString('base64');
     expect(() => parseReference({ ...raw, vectors: oneShort })).toThrow();
   });
+
+  it('refuses a vector blob longer than texts × dim', () => {
+    const raw = JSON.parse(read('embedder/reference/bge-small-q8.json'));
+    const oneLong = Buffer.concat([Buffer.from(raw.vectors, 'base64'), Buffer.alloc(384 * 4)]).toString('base64');
+    expect(() => parseReference({ ...raw, vectors: oneLong })).toThrow(/bytes/);
+    expect(() => parseReference({ ...raw, vectors: raw.vectors + 'AAAA' })).toThrow(/bytes/);
+  });
 });
 
 describe('runEmbedCheck', () => {
@@ -43,23 +50,31 @@ describe('runEmbedCheck', () => {
     expect((await runEmbedCheck(flipped, ref)).ok).toBe(false);
   });
 
-  it('draws the line at cosine 0.999, unit norm within 1e-4 and one vector per text', async () => {
-    // Rotates the first text's vector by acos(c) toward another reference vector, keeping it unit.
-    const rotated = (c: number) => async (t: string[]) => t.map((x) => {
-      const v = ref.vectors[ref.texts.indexOf(x)];
-      if (x !== ref.texts[0]) return v;
-      const w = ref.vectors[1];
-      const d = dot(w, v);
-      const u = w.map((y, k) => y - d * v[k]);
-      const n = Math.sqrt(dot(u, u));
-      return v.map((y, k) => c * y + Math.sqrt(1 - c * c) * (u[k] / n));
-    });
-    const above = await runEmbedCheck(rotated(0.9992), ref);
-    expect(above).toMatchObject({ ok: true, minCosine: expect.closeTo(0.9992, 5) });
-    expect((await runEmbedCheck(rotated(0.9988), ref)).ok).toBe(false);
+  // Rotates the vectors of texts with index in `which` by acos(c) toward the next reference vector, keeping them unit.
+  const rotated = (c: number, which: (i: number) => boolean) => async (t: string[]) => t.map((x) => {
+    const i = ref.texts.indexOf(x);
+    const v = ref.vectors[i];
+    if (!which(i)) return v;
+    const w = ref.vectors[(i + 1) % ref.vectors.length];
+    const d = dot(w, v);
+    const u = w.map((y, k) => y - d * v[k]);
+    const n = Math.sqrt(dot(u, u));
+    return v.map((y, k) => c * y + Math.sqrt(1 - c * c) * (u[k] / n));
+  });
+
+  it('draws the line at cosine 0.995, unit norm within 1e-4 and one vector per text', async () => {
+    const above = await runEmbedCheck(rotated(0.9952, (i) => i === 3), ref);
+    expect(above).toMatchObject({ ok: true, minCosine: expect.closeTo(0.9952, 5), minIndex: 3 });
+    expect(await runEmbedCheck(rotated(0.9948, (i) => i === 3), ref)).toMatchObject({ ok: false, minIndex: 3 });
     const scaled = async (t: string[]) => t.map((x) => ref.vectors[ref.texts.indexOf(x)].map((y) => y * 1.0002));
     expect((await runEmbedCheck(scaled, ref)).ok).toBe(false);
     const short = async (t: string[]) => t.slice(0, -1).map((x) => ref.vectors[ref.texts.indexOf(x)]);
     expect((await runEmbedCheck(short, ref)).ok).toBe(false);
+  });
+
+  it('requires mean cosine 0.9995 even when every text clears the minimum', async () => {
+    const all = () => true;
+    expect(await runEmbedCheck(rotated(0.9996, all), ref)).toMatchObject({ ok: true, meanCosine: expect.closeTo(0.9996, 5) });
+    expect(await runEmbedCheck(rotated(0.9994, all), ref)).toMatchObject({ ok: false, minCosine: expect.closeTo(0.9994, 5), meanCosine: expect.closeTo(0.9994, 5) });
   });
 });

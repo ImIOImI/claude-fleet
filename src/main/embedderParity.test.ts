@@ -56,6 +56,7 @@ describe('fleet-embedder parity with transformers.js', () => {
       const [sha, file] = line.split(/\s+/);
       expect(createHash('sha256').update(readFileSync(join(dir, ...file.split('/')))).digest('hex'), file).toBe(sha);
     }
+    // The oracle also reads config.json and tokenizer_config.json, which the manifest doesn't pin; the sidecar reads only the two pinned files.
     const vecs = await embedAll(makeInProcessEmbedder(HF_CACHE), BATCH);
     const buf = Buffer.alloc(vecs.length * EMBED_DIM * 4);
     vecs.forEach((v, i) => v.forEach((x, k) => buf.writeFloatLE(x, (i * EMBED_DIM + k) * 4)));
