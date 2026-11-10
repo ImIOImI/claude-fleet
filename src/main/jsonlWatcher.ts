@@ -492,6 +492,8 @@ export class JsonlWatcher extends EventEmitter {
   }
 
   private markOffset(path: string, state: FileState, tail: Buffer): void {
+    // A batch still in flight when its dir was unregistered must not re-save it.
+    if (![...this.watchedDirs].some((d) => path.startsWith(d + pathSep))) return;
     this.dirtyOffsets.set(path, {
       path, workspaceId: state.workspaceId, sessionId: state.sessionId,
       byteOffset: state.offset, tailLen: tail.length, tailHash: sha1(tail),

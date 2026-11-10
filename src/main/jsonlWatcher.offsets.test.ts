@@ -87,4 +87,14 @@ describe('persisted transcript offsets', () => {
     await run(async (w) => { w.unregisterLocalWorkspace('ws1'); await settle(100); });
     expect((await loadTranscriptOffsets()).has(file)).toBe(false);
   });
+
+  it('a batch in flight when its dir is unregistered does not re-save the row', async () => {
+    writeFileSync(file, line('u1'));
+    await run(async (w) => {
+      appendFileSync(file, line('u2'));
+      w.unregisterLocalWorkspace('ws1'); // races the append's batch
+      await settle(2500);
+    });
+    expect((await loadTranscriptOffsets()).has(file)).toBe(false);
+  });
 });

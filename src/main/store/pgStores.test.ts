@@ -33,7 +33,7 @@ describe.skipIf(!isPg)('openPgStores', () => {
     const { todo } = await stores.inbox.post({ kind: 'user', id: null }, { title: 'pg' }, 1);
     expect(await stores.inbox.get(todo.id)).toMatchObject({ title: 'pg' });
     const tracks = await stores.pool.query(`SELECT track, version FROM ${schema}.schema_migrations ORDER BY track`);
-    expect(tracks.rows).toEqual([{ track: 'inbox', version: INBOX_SCHEMA_VERSION }, { track: 'state', version: 17 }]);
+    expect(tracks.rows).toEqual([{ track: 'inbox', version: INBOX_SCHEMA_VERSION }, { track: 'state', version: 18 }]);
     const idle = new Error('idle client terminated');
     stores.pool.emit('error', idle);
     expect(poolErrors).toEqual([idle]);
