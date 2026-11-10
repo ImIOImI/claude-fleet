@@ -2,6 +2,14 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+## Revisions (2026-11-10): owner decisions
+
+- **D82: the host images are amd64 only.** No node group runs arm64 (Troy, 2026-11-10). This supersedes the arm64 half of D76 and Questions 1:
+  - `publish-runner.yml` and `test-runner-images.yml` build `runner-host` and `runner-devops-host` for `linux/amd64` only; other runner variants keep their platforms.
+  - The `embedder-build` stage and `ci-build.sh` still read `uname -m`, but `install-zigbuild.sh` supports only `x86_64` and exits non-zero with `unsupported arch` otherwise. Drop the aarch64 pins and tests from Task 2.
+  - D78's reference check runs on amd64 only.
+- **D83: the size and memory budget is approved** (Troy, 2026-11-10): about +61 MB per host image, and +256 Mi on the host pod's memory request. This settles Questions 2.
+
 ## Revisions (2026-11-09)
 
 The plan was written before #531 (Rust `fleet-embedder` sidecar) and #537 ((d1), `c3d6ebe`) merged, and before D71–D73 were settled. Changes:
@@ -1763,15 +1771,7 @@ Also stage the stylesheet you edited.
 
 ## Questions for Troy
 
-1. **arm64 host images (D76).**
-   - `publish-runner.yml` builds `runner-host` and `runner-devops-host` for arm64, but `fleet-embedder` has never been built or checked on aarch64.
-   - The plan builds it there with ort-sys's aarch64 prebuilt onnxruntime and gates it on the reference check. If either fails, the arm64 host images don't publish.
-   - Does any target node group run arm64?
-   - **Recommendation:** keep arm64 in the gate. If it fails and nothing runs arm64, drop arm64 from the two host variants rather than ship an arm64 image whose search silently differs.
-2. **Image size and memory budget (D65).**
-   - The host image grows by about 61 MB per arch: the binary is about 26 MB stripped and the weights 35 MB.
-   - Peak sidecar RSS is 102 MiB measured. The plan raises the host pod's memory request by 256 Mi.
-   - **Recommendation:** accept both. They are well under the 150–250 MB on disk and ~300 MB RSS budgeted for transformers.js.
+None open. Both were answered on 2026-11-10 (D82, D83).
 
 ## Self-review notes
 
