@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { app } from 'electron';
 import { EmbedderClient, EmbedderUnavailable } from './embedderClient.js';
 import { ensureModelFiles } from './embedderModelFiles.js';
+import { makeWorkerSpawner } from './embedderSpawnWorker.js';
 import { makeInProcessEmbedder } from './embeddingsInProcess.js';
 import { logError } from './errorLog.js';
 import { perfSpanAsync } from './perf.js';
@@ -93,6 +94,9 @@ export function makeEmbedder(cacheDir: string, opts: MakeEmbedderOptions = {}): 
       onFatal: (why) => fallBack(`fleet-embedder crash loop: ${why}`),
       log: (message) => logError({ source: 'main', level: 'warn', type: 'embedder-stderr', message }),
       onSpawn: (ready) => { void perfSpanAsync('claude_fleet.embed.spawn', () => ready).catch(() => {}); },
+      spawner: makeWorkerSpawner({
+        onCreating: (created) => { void perfSpanAsync('claude_fleet.embed.create_process', () => created).catch(() => {}); },
+      }),
     });
   };
 

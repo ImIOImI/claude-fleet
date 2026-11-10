@@ -1,6 +1,6 @@
 // Protocol-speaking stand-in for fleet-embedder (embedderClient.test.ts).
 // FAKE_MODE: ok | crash-on-first | fatal | never-ready | hang | error-reply |
-// short-reply | stderr-split | old-protocol.
+// short-reply | stderr-split | old-protocol | ignore-eof.
 // FAKE_STATE: a file whose existence marks "already crashed once".
 import { existsSync, writeFileSync } from 'node:fs';
 
@@ -42,4 +42,5 @@ process.stdin.on('data', (d) => {
     process.stdout.write(frame({ id: req.id, n: req.texts.length, dim: DIM, vectors: out.toString('base64') }));
   }
 });
-process.stdin.on('end', () => process.exit(0));
+process.stdin.on('end', () => { if (mode !== 'ignore-eof') process.exit(0); });
+if (mode === 'ignore-eof') setInterval(() => {}, 1000);
