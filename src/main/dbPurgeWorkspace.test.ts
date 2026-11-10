@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { ingestLine, insertEmbedding, purgeWorkspace, recordUsageEvent, setRetentionWatermarks, stateKysely, workspaceIdsInState } from './db.js';
+import { ingestLine, insertEmbedding, nextPurgeChunk, purgeWorkspace, recordUsageEvent, setRetentionWatermarks, stateKysely, workspaceIdsInState } from './db.js';
 import { encodeVector, EMBED_DIM, EMBED_MODEL_ID } from './vectors.js';
 import { openTestState, queryRows } from './store/testStore.js';
 import { sweepOrphans, type Throttle } from './state/retention.js';
 
 const A = '01KW2JNC0K9JDYS8WAZBNT33X1';
 const B = '01KW2MR8MZ7RXZ7171RYT6JKFA';
-const unthrottled: Throttle = { slice: (fn) => fn(), stopped: () => false };
+const unthrottled: Throttle = { slice: (_step, fn) => fn({ targetMs: 35, now: () => 0, begin: () => undefined, elapsed: () => 0, expired: () => false, note: () => undefined }), stopped: () => false };
 
 const TABLES = ['events', 'sessions', 'embeddings', 'usage_events', 'session_costs', 'session_stats',
   'session_tool_counts', 'event_retention', 'session_summaries', 'session_tags'];
@@ -52,6 +52,33 @@ describe('purgeWorkspace', () => {
     expect(await purgeWorkspace(A)).toBeGreaterThan(0);
     expect(Object.values(await countFor(A, 'sa')).every((n) => n === 0)).toBe(true);
     expect(await countFor(B, 'sb')).toEqual(before);
+  });
+
+  it('sizes chunks to the clock: shrinks to the 50-row floor on slow deletes, regrows when fast', () => {
+    expect(nextPurgeChunk(250, 350)).toBe(50); // 250 × 35/350 × 0.8 = 20 → floor
+    expect(nextPurgeChunk(250, 70)).toBe(100);
+    expect(nextPurgeChunk(100, 25)).toBe(100);
+    expect(nextPurgeChunk(100, 10)).toBe(125);
+    expect(nextPurgeChunk(240, 1)).toBe(250);
+  });
+
+  it('with slow deletes, purges in floor-sized chunks and still removes everything', async () => {
+    for (let i = 0; i < 300; i++) {
+      await ingestLine(A, 'sa', JSON.stringify({ type: 'system', uuid: `e${i}`, timestamp: '2026-09-01T00:00:00Z', subtype: 'x' }));
+    }
+    let clock = 0;
+    const sizes: number[] = [];
+    // Every delete appears to take 350 ms.
+    const slice = async <T>(fn: () => Promise<T>): Promise<T> => {
+      const r = await fn();
+      const n = Number((r as { numDeletedRows?: bigint }).numDeletedRows ?? -1);
+      if (n > 0) sizes.push(n);
+      return r;
+    };
+    await purgeWorkspace(A, slice, () => (clock += 175));
+    expect(sizes[0]).toBe(250);
+    expect(sizes.slice(1).every((n) => n <= 50)).toBe(true);
+    expect((await countFor(A, 'sa')).events).toBe(0);
   });
 });
 

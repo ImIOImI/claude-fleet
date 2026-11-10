@@ -507,6 +507,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     if (isMock) return;
     retention ??= startRetention({
       orphanSweep: storeCfg.kind !== 'postgres',
+      walDbPath: storeCfg.kind === 'sqlite' ? join(userData, 'state.db') : undefined,
       listManifestIds: async () => (await listWorkspaceManifests()).map((m) => m.id),
       stateDirExists: (id) => existsSync(workspaceStateDir(id)),
     });

@@ -7,9 +7,11 @@ import {
   retentionKeys, rewriteEventRaw, setRetentionWatermarks, stateDialect, withRawSqlite, workspaceIdsInState, type RetentionRow,
 } from '../db.js';
 import { logError } from '../errorLog.js';
-import { perfSpanAsync } from '../perf.js';
+import { perfSpanAsync, perfSpanAsyncAttrs } from '../perf.js';
+import type { Attributes } from '@opentelemetry/api';
 import { COMPRESS_MIN_BYTES, deflateLine, rawLine, stripLine } from './rawCodec.js';
 import { dedupeAttachment } from './attachmentCodec.js';
+import { startWalCheckpointer, type WalCheckpointer } from './walCheckpointer.js';
 
 export const DAY_MS = 86_400_000;
 export const COMPRESS_AFTER_MS = 30 * DAY_MS;
@@ -17,12 +19,54 @@ export const STRIP_AFTER_MS = 30 * DAY_MS;
 export const STRIP_AFTER_RESUMED_MS = 90 * DAY_MS;
 const SLICE_ROWS = 200;
 export const SLICE_BYTES = 2 * 1024 * 1024;
+/** Main-thread time one slice aims to stay under (SPEC §7 *Retention*). */
+export const SLICE_TARGET_MS = 35;
+
+export interface SliceBudget {
+  /** This slice's time target. */
+  readonly targetMs: number;
+  /** The throttle's clock (ms). */
+  now(): number;
+  /** Mark where the slice's own work starts, once its first query holds the
+   *  store: waiting for the store mutex isn't the slice's cost. Defaults to the slice start. */
+  begin(): void;
+  /** Milliseconds since begin(). */
+  elapsed(): number;
+  /** True once the slice has worked for its target: stop at the next row boundary. */
+  expired(): boolean;
+  /** Attributes for the slice's span (its slow_op row's meta). */
+  note(attrs: Attributes): void;
+}
 
 export interface Throttle {
   /** Run one bounded unit of work, then pace the next one. */
-  slice<T>(fn: () => Promise<T>): Promise<T>;
+  slice<T>(step: string, fn: (budget: SliceBudget) => Promise<T>): Promise<T>;
   /** True once the pass should stop at the next slice boundary. */
   stopped(): boolean;
+}
+
+/** Batch size for a statement that can't be interrupted part-way: cut in
+ *  proportion when a run overshoots the target, grown slowly while well under it. */
+export class AdaptiveBatch {
+  constructor(public size: number, private readonly min: number, private readonly max: number) {}
+
+  observe(ms: number, targetMs: number): void {
+    if (ms > targetMs) this.size = Math.max(this.min, Math.floor(this.size * (targetMs / ms) * 0.8));
+    else if (ms < targetMs / 2) this.size = Math.min(this.max, Math.ceil(this.size * 1.25));
+  }
+}
+
+/** Keys whose summed bytes fit `budget`, always at least one. */
+function takeWithin<K extends { bytes: number }>(keys: readonly K[], budget: number): K[] {
+  let take = 0;
+  for (let bytes = 0; take < keys.length && (take === 0 || bytes + keys[take].bytes <= budget); take++) bytes += keys[take].bytes;
+  return keys.slice(0, take);
+}
+
+/** `rows` in `keys` order; a row deleted since its key was read is absent. */
+function inKeyOrder<R extends { id: number }>(keys: readonly { id: number }[], rows: readonly R[]): (R | undefined)[] {
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  return keys.map((k) => byId.get(k.id));
 }
 
 export interface RetainEventsResult { rows: number; bytesBefore: number; bytesAfter: number }
@@ -48,31 +92,40 @@ function transform(row: RetentionRow, now: number, stripCut: number, compressCut
 
 /** Walk one session range in slices; false when the throttle stopped it early. */
 async function walkRange(
-  sessionId: string, fromTs: number, toTs: number, toolOnly: boolean, t: Throttle, sliceRows: number,
+  sessionId: string, fromTs: number, toTs: number, toolOnly: boolean, t: Throttle, sliceRows: number, batch: AdaptiveBatch,
   apply: (row: RetentionRow) => { raw_jsonl: string; raw_z: Buffer | null } | null, acc: RetainEventsResult,
 ): Promise<boolean> {
   if (fromTs >= toTs) return true;
   let after: { ts: number; id: number } | null = null;
   for (;;) {
     if (t.stopped()) return false;
-    const done = await t.slice(async () => {
+    const done = await t.slice('events', async (b) => {
       const keys = await retentionKeys(sessionId, fromTs, toTs, after, sliceRows, toolOnly);
+      b.begin();
       if (keys.length === 0) return true;
-      // Bodies only up to the byte budget (at least one row), so no row is read twice.
-      let take = 0;
-      for (let bytes = 0; take < keys.length && (take === 0 || bytes + keys[take].bytes <= SLICE_BYTES); take++) bytes += keys[take].bytes;
-      after = { ts: keys[take - 1].ts, id: keys[take - 1].id };
+      // Bodies only up to the byte budget, so no row is read twice.
+      const taken = takeWithin(keys, batch.size);
+      const bodies = inKeyOrder(taken, await retentionBodies(taken.map((k) => k.id)));
+      const readMs = b.elapsed();
       const updates: { id: number; raw_jsonl: string; raw_z: Buffer | null }[] = [];
-      for (const row of await retentionBodies(keys.slice(0, take).map((k) => k.id))) {
-        const next = apply(row);
-        if (next) {
+      let n = 0;
+      let bytes = 0;
+      for (; n < taken.length && (n === 0 || !b.expired()); n++) {
+        const row = bodies[n];
+        bytes += taken[n].bytes;
+        const next = row && apply(row);
+        if (row && next) {
           updates.push({ id: row.id, ...next });
           acc.rows++;
           acc.bytesBefore += storedBytes(row);
           acc.bytesAfter += storedBytes(next);
         }
       }
+      after = { ts: taken[n - 1].ts, id: taken[n - 1].id };
+      const w0 = b.elapsed();
       await rewriteEventRaw(updates);
+      batch.observe(b.elapsed(), b.targetMs);
+      b.note({ rows: n, rewritten: updates.length, bytes, batch_bytes: batch.size, read_ms: readMs, write_ms: b.elapsed() - w0 });
       return false;
     });
     if (done) return true;
@@ -86,6 +139,7 @@ export async function retainEvents(now: number, t: Throttle, opts: { sliceRows?:
   const compress = stateDialect() === 'sqlite';
   const cCut = now - COMPRESS_AFTER_MS;
   const acc: RetainEventsResult = { rows: 0, bytesBefore: 0, bytesAfter: 0 };
+  const batch = new AdaptiveBatch(SLICE_BYTES, 16 * 1024, SLICE_BYTES);
   for (const c of await perfSpanAsync('claude_fleet.retention.candidates', () => retentionCandidates(cCut))) {
     if (t.stopped()) break;
     const sCut = now - (c.resumed ? STRIP_AFTER_RESUMED_MS : STRIP_AFTER_MS);
@@ -93,9 +147,9 @@ export async function retainEvents(now: number, t: Throttle, opts: { sliceRows?:
     // No row at or past either watermark: nothing to read, nothing to write.
     if (c.lastActiveAt < Math.min(c.compressedBefore, c.strippedBefore)) continue;
     const apply = (row: RetentionRow) => transform(row, now, sCut, cCut, compress);
-    if (!(await walkRange(c.sessionId, c.compressedBefore, cCut, false, t, sliceRows, apply, acc))) break;
+    if (!(await walkRange(c.sessionId, c.compressedBefore, cCut, false, t, sliceRows, batch, apply, acc))) break;
     const ageingOut = Math.min(sCut, c.compressedBefore);
-    if (!(await walkRange(c.sessionId, c.strippedBefore, ageingOut, true, t, sliceRows, apply, acc))) break;
+    if (!(await walkRange(c.sessionId, c.strippedBefore, ageingOut, true, t, sliceRows, batch, apply, acc))) break;
     await setRetentionWatermarks(c.sessionId, c.workspaceId, Math.max(c.compressedBefore, cCut), Math.max(c.strippedBefore, sCut));
   }
   return acc;
@@ -110,14 +164,22 @@ export async function dedupeAttachments(t: Throttle, opts: { sliceRows?: number 
   if (stateDialect() !== 'sqlite') return acc;
   const maxId = await maxAttachmentId();
   let cursor = Number((await maintenanceGet(ATTACHMENTS_CURSOR)) ?? 0);
+  const batch = new AdaptiveBatch(SLICE_BYTES, 16 * 1024, SLICE_BYTES);
   while (cursor < maxId && !t.stopped()) {
-    const next = await t.slice(async () => {
+    const next = await t.slice('attachments', async (b) => {
       const keys = await attachmentBackfillKeys(cursor, maxId, opts.sliceRows ?? SLICE_ROWS);
+      b.begin();
       if (keys.length === 0) return maxId;
-      let take = 0;
-      for (let bytes = 0; take < keys.length && (take === 0 || bytes + keys[take].bytes <= SLICE_BYTES); take++) bytes += keys[take].bytes;
+      const taken = takeWithin(keys, batch.size);
+      const bodies = inKeyOrder(taken, await retentionBodies(taken.map((k) => k.id)));
+      const readMs = b.elapsed();
       const updates: { id: number; raw_jsonl: string; raw_z: Buffer | null; ref: string; payload: string }[] = [];
-      for (const row of await retentionBodies(keys.slice(0, take).map((k) => k.id))) {
+      let n = 0;
+      let bytes = 0;
+      for (; n < taken.length && (n === 0 || !b.expired()); n++) {
+        const row = bodies[n];
+        bytes += taken[n].bytes;
+        if (!row) continue;
         let line: string;
         try {
           line = rawLine(row, true);
@@ -128,15 +190,18 @@ export async function dedupeAttachments(t: Throttle, opts: { sliceRows?: number 
         if (!d) continue;
         // A row retention already compressed stays compressed: it sits behind its watermark.
         const wasCompressed = row.raw_z !== null && row.raw_z.length > 0;
-        const next = wasCompressed && Buffer.byteLength(d.stored, 'utf8') >= COMPRESS_MIN_BYTES
+        const out = wasCompressed && Buffer.byteLength(d.stored, 'utf8') >= COMPRESS_MIN_BYTES
           ? { raw_jsonl: '', raw_z: deflateLine(d.stored) }
           : { raw_jsonl: d.stored, raw_z: null };
-        updates.push({ id: row.id, ...next, ref: d.ref, payload: d.payload });
-        acc.bytesSaved += storedBytes(row) - storedBytes(next);
+        updates.push({ id: row.id, ...out, ref: d.ref, payload: d.payload });
+        acc.bytesSaved += storedBytes(row) - storedBytes(out);
       }
+      const w0 = b.elapsed();
       await applyAttachmentDedupe(updates);
       acc.rows += updates.length;
-      return keys[take - 1].id;
+      batch.observe(b.elapsed(), b.targetMs);
+      b.note({ rows: n, rewritten: updates.length, bytes, batch_bytes: batch.size, read_ms: readMs, write_ms: b.elapsed() - w0 });
+      return taken[n - 1].id;
     });
     cursor = next;
     await maintenanceSet(ATTACHMENTS_CURSOR, String(cursor));
@@ -152,8 +217,14 @@ export async function compactEmbeddings(t: Throttle, opts: { sliceRows?: number 
   const maxId = await maxEmbeddingId();
   let cursor = Number((await maintenanceGet(EMBEDDINGS_CURSOR)) ?? 0);
   const acc = { rows: 0, bytesSaved: 0 };
+  const batch = new AdaptiveBatch(opts.sliceRows ?? SLICE_ROWS, 1, opts.sliceRows ?? SLICE_ROWS);
   while (cursor < maxId && !t.stopped()) {
-    const r = await t.slice(() => compactEmbeddingSlice(cursor, maxId, opts.sliceRows ?? SLICE_ROWS));
+    const r = await t.slice('embeddings', async (b) => {
+      const out = await compactEmbeddingSlice(cursor, maxId, batch.size, () => b.expired(), () => b.begin());
+      batch.observe(b.elapsed(), b.targetMs);
+      b.note({ rows: out.scanned, rewritten: out.rewritten, bytes: out.bytesSaved, batch_rows: batch.size });
+      return out;
+    });
     if (r.lastId === null) break;
     cursor = r.lastId;
     acc.rows += r.rewritten;
@@ -183,7 +254,7 @@ export async function sweepOrphans(deps: OrphanDeps, t: Throttle): Promise<strin
   for (const id of await workspaceIdsInState()) {
     if (t.stopped()) break;
     if (manifests.has(id) || !ULID.test(id) || deps.stateDirExists(id)) continue;
-    await purgeWorkspace(id, (fn) => t.slice(fn));
+    await purgeWorkspace(id, (fn) => t.slice('orphans', fn));
     purged.push(id);
   }
   return purged;
@@ -191,6 +262,14 @@ export async function sweepOrphans(deps: OrphanDeps, t: Throttle): Promise<strin
 
 export interface ThrottleOptions {
   minSleepMs?: number;
+  /** A slice's budget expires after this long (default SLICE_TARGET_MS). */
+  targetMs?: number;
+  /** Called after each slice, before its sleep. */
+  afterSlice?: () => void;
+  /** Awaited before each slice starts, outside its timing. */
+  beforeSlice?: () => Promise<void>;
+  /** Extra attributes for every slice span (e.g. WAL state). */
+  sliceMeta?: () => Attributes;
   /** Sleep this many times a slice's duration after it (9 → ≤10% duty cycle). */
   idleRatio?: number;
   now?: () => number;
@@ -202,6 +281,7 @@ export interface ThrottleOptions {
 export function createThrottle(opts: ThrottleOptions = {}): Throttle & { stop(): void } {
   const minSleep = opts.minSleepMs ?? 250;
   const ratio = opts.idleRatio ?? 9;
+  const target = opts.targetMs ?? SLICE_TARGET_MS;
   const now = opts.now ?? (() => performance.now());
   let stopped = false;
   let wakeSleeper: (() => void) | null = null;
@@ -211,11 +291,25 @@ export function createThrottle(opts: ThrottleOptions = {}): Throttle & { stop():
     wake(() => { clearTimeout(timer); resolve(); });
   }));
   return {
-    async slice(fn) {
-      const t0 = now();
+    async slice(step, fn) {
+      await opts.beforeSlice?.();
+      let t0 = now();
       try {
-        return await perfSpanAsync('claude_fleet.retention.slice', fn);
+        return await perfSpanAsyncAttrs('claude_fleet.retention.slice', (set) => {
+          const meta = opts.sliceMeta?.();
+          if (meta) set(meta);
+          return fn({
+            targetMs: target,
+            now,
+            begin: () => { t0 = now(); },
+            elapsed: () => now() - t0,
+            expired: () => now() - t0 >= target,
+            note: set,
+          });
+        }, { step });
       } finally {
+        opts.afterSlice?.();
+        // Paced on the slice's own work, not on time spent waiting for the store.
         if (!stopped) await sleep(Math.max(minSleep, ratio * (now() - t0)), (w) => { wakeSleeper = w; });
         wakeSleeper = null;
       }
@@ -230,7 +324,8 @@ export function createThrottle(opts: ThrottleOptions = {}): Throttle & { stop():
 
 const VACUUM_FREE_PAGES = 4096;
 const VACUUM_SLICE_PAGES = 1024;
-const VACUUM_MAX_SLICES = 64;
+/** Pages one check may return, so a large backlog spreads over several checks. */
+const VACUUM_MAX_PAGES = 64 * VACUUM_SLICE_PAGES;
 
 /** Return free pages to the OS in small slices (SQLite with
  *  auto_vacuum = INCREMENTAL only; Postgres relies on autovacuum). */
@@ -242,11 +337,21 @@ export async function incrementalVacuum(t: Throttle): Promise<number> {
   if (!state || state.mode !== 2) return 0;
   let free = state.free;
   const start = free;
-  for (let i = 0; i < VACUUM_MAX_SLICES && free > VACUUM_FREE_PAGES && !t.stopped(); i++) {
-    free = (await t.slice(() => withRawSqlite((d) => {
-      d.pragma(`incremental_vacuum(${VACUUM_SLICE_PAGES})`);
-      return d.pragma('freelist_count', { simple: true }) as number;
-    }))) ?? free;
+  const batch = new AdaptiveBatch(256, 8, VACUUM_SLICE_PAGES);
+  while (free > VACUUM_FREE_PAGES && start - free < VACUUM_MAX_PAGES && !t.stopped()) {
+    const before = free;
+    free = (await t.slice('vacuum', async (b) => {
+      const pages = batch.size;
+      const left = await withRawSqlite((d) => {
+        b.begin();
+        d.pragma(`incremental_vacuum(${pages})`);
+        return d.pragma('freelist_count', { simple: true }) as number;
+      });
+      batch.observe(b.elapsed(), b.targetMs);
+      b.note({ pages, batch_pages: batch.size });
+      return left;
+    })) ?? free;
+    if (free >= before) break;
   }
   return start - free;
 }
@@ -255,6 +360,8 @@ export interface RetentionDeps extends OrphanDeps {
   /** Only where this desktop owns every workspace in the store: SQLite or the
    *  managed (local) Postgres, never a shared external one. */
   orphanSweep: boolean;
+  /** SQLite: state.db's path, so WAL checkpoints run in a worker while retention works. */
+  walDbPath?: string;
   firstDelayMs?: number;
   intervalMs?: number;
   vacuumEveryMs?: number;
@@ -262,6 +369,8 @@ export interface RetentionDeps extends OrphanDeps {
   throttle?: ThrottleOptions;
   /** Test hook: called after each full pass. */
   onPass?: (r: PassResult) => void;
+  /** Test hook: called when a run starts its WAL checkpointer. */
+  onCheckpointer?: (c: WalCheckpointer | null) => void;
 }
 
 export interface PassResult {
@@ -275,7 +384,27 @@ export interface PassResult {
 /** Schedule retention: a pass 5 min after start, then daily; an incremental
  *  vacuum check every 30 min. One unit of work runs at a time. */
 export function startRetention(deps: RetentionDeps): { stop(): Promise<void> } {
-  const throttle = createThrottle(deps.throttle);
+  // Started on a run's first slice, so a run with nothing to do spawns no worker.
+  let wantCheckpointer = false;
+  let checkpointer: Promise<WalCheckpointer | null> | null = null;
+  let ck: WalCheckpointer | null = null;
+  const throttle = createThrottle({
+    ...deps.throttle,
+    afterSlice: () => {
+      deps.throttle?.afterSlice?.();
+      if (wantCheckpointer && !checkpointer && deps.walDbPath) {
+        checkpointer = startWalCheckpointer(deps.walDbPath).then((c) => { deps.onCheckpointer?.(c); return (ck = c); }).catch(() => null);
+      }
+      ck?.request();
+    },
+    // SQLite rewinds the WAL only when a write starts after a complete
+    // checkpoint; once it has grown, the next slice waits for one.
+    beforeSlice: async () => { await deps.throttle?.beforeSlice?.(); await ck?.drain(); },
+    sliceMeta: () => {
+      const l = ck?.last();
+      return { ...deps.throttle?.sliceMeta?.(), ...(l ? { wal_log: l.log, wal_ckpt: l.checkpointed, wal_busy: l.busy, wal_worker: ck!.active() } : {}) };
+    },
+  });
   const now = deps.now ?? Date.now;
   let running: Promise<unknown> | null = null;
   const step = async <T>(name: string, fn: () => Promise<T>, fallback: T): Promise<T> => {
@@ -306,7 +435,18 @@ export function startRetention(deps: RetentionDeps): { stop(): Promise<void> } {
   };
   const run = (fn: () => Promise<unknown>) => {
     if (running || throttle.stopped()) return;
-    running = fn().finally(() => { running = null; });
+    running = (async () => {
+      wantCheckpointer = true;
+      try {
+        await fn();
+      } finally {
+        wantCheckpointer = false;
+        const c = await checkpointer;
+        checkpointer = null;
+        ck = null;
+        await c?.close();
+      }
+    })().finally(() => { running = null; });
   };
   const timers = [
     setTimeout(() => run(pass), deps.firstDelayMs ?? 5 * 60_000),
