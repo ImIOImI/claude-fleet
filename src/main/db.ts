@@ -72,7 +72,9 @@ export interface StateOpenStats {
   walFrames: number;
   /** The leftover WAL went to the drain worker instead of the first commit. */
   handedOff: boolean;
-  /** The first statement that committed a write: a COMMIT or an autocommit write. */
+  /** Whether that worker came up (null: no hand-off, or not known yet). */
+  workerReady: boolean | null;
+  /** The first statement that committed a change: a COMMIT of a transaction that changed rows, or an autocommit write that did. */
   firstWriteAt: number | null;
   firstWriteMs: number | null;
 }
@@ -80,13 +82,8 @@ export interface StateOpenStats {
 let openStats: StateOpenStats | null = null;
 let openStatsReady: Promise<StateOpenStats> | null = null;
 
-/** Resolves at the first write after openDb; never if the db closes first. */
-export function stateOpenStats(): Promise<StateOpenStats> | null {
-  return openStatsReady;
-}
-
-/** Call `cb` once with the open db's stats: at its first write, or after
- *  `fallbackMs` without one (firstWrite* still null). Never after it closes. */
+/** Call `cb` once with the open db's stats: at its first write, or `fallbackMs`
+ *  after the open without one (firstWrite* still null). Never after it closes. */
 export function onStateOpenStats(cb: (s: StateOpenStats) => void, fallbackMs: number): void {
   const stats = openStats;
   const ready = openStatsReady;
@@ -98,7 +95,7 @@ export function onStateOpenStats(cb: (s: StateOpenStats) => void, fallbackMs: nu
     clearTimeout(timer);
     if (openStats === stats) cb({ ...stats });
   };
-  const timer = setTimeout(fire, fallbackMs);
+  const timer = setTimeout(fire, Math.max(0, stats.openedAt + fallbackMs - Date.now()));
   timer.unref?.();
   void ready.then(fire);
 }
@@ -112,6 +109,11 @@ export interface WalCheckpointLease {
   request(): void;
   /** Resolves when no checkpoint is running. */
   idle(): Promise<void>;
+  /** Run a checkpoint of its own (after any in flight) and resolve with its
+   *  result: null when it failed, hung or the worker handed back. */
+  checkpoint(): Promise<CheckpointResult | null>;
+  /** Whether the worker came up. */
+  ready(): Promise<boolean>;
   /** Once the WAL has passed WAL_REWIND_FRAMES: run a checkpoint and wait for it,
    *  so the caller's next write rewinds the WAL. Otherwise resolves at once. */
   drain(): Promise<void>;
@@ -224,12 +226,14 @@ export function openDb(userDataDir: string): Database.Database {
   const factory = checkpointerFactory;
   const ck = factory?.create({
     dbPath: path,
+    // Behind the store mutex while this connection is the store's; directly
+    // once closeDb has detached it. Errors from fn propagate, never rerun.
     withMain: async (fn) => {
-      if (db !== conn) {
+      if (db !== conn || !kdb) {
         if (conn.open) fn(conn);
         return;
       }
-      await withRawSqlite((d) => { if (d === conn) fn(d); }).catch(() => { if (conn.open) fn(conn); });
+      await withRawSqlite((d) => { if (d === conn) fn(d); });
     },
     warn: (message, extra) => warnSink?.(message, extra),
   });
@@ -241,11 +245,10 @@ export function openDb(userDataDir: string): Database.Database {
   const [noop] = conn.pragma('wal_checkpoint(NOOP)') as Array<{ log: number }>;
   const walFrames = Math.max(0, noop?.log ?? 0);
   const autockpt = conn.pragma('wal_autocheckpoint', { simple: true }) as number;
-  let handedOff = false;
+  let lease: WalCheckpointLease | null = null;
   if (ck && factory && autockpt > 0 && walFrames >= autockpt) {
     try {
-      const lease = ck.holdAtOpen(conn, checkpointerTestOpts);
-      handedOff = true;
+      lease = ck.holdAtOpen(conn, checkpointerTestOpts);
       leftoverDrain = factory.drain(lease, (m, e) => warnSink?.(m, e));
     } catch (e) {
       warnSink?.(`leftover WAL drain did not start: ${String(e)}`);
@@ -254,9 +257,12 @@ export function openDb(userDataDir: string): Database.Database {
   migrate(conn);
   rehydratePendingClaudeIds(conn);
   const stats: StateOpenStats = {
-    openedAt, openMs: performance.now() - t0, walBytes, walFrames, handedOff, firstWriteAt: null, firstWriteMs: null,
+    openedAt, openMs: performance.now() - t0, walBytes, walFrames, handedOff: lease !== null, workerReady: null, firstWriteAt: null, firstWriteMs: null,
   };
+  void lease?.ready().then((ok) => { stats.workerReady = ok; });
   let settle: (s: StateOpenStats) => void = () => undefined;
+  // Whether the open transaction has changed rows so far.
+  let txChanged = false;
   openStats = stats;
   openStatsReady = new Promise<StateOpenStats>((resolve) => { settle = resolve; });
   // Every state.db read and write goes through this one Kysely handle (its
@@ -265,10 +271,26 @@ export function openDb(userDataDir: string): Database.Database {
   dialect = 'sqlite';
   kdb = sqliteKysely<StateDb>(conn, {
     statementCache: STATE_STATEMENT_CACHE,
-    onQuery: (sqlText, ms) => {
+    onQuery: (sqlText, ms, changes) => {
       if (openStats !== stats || stats.firstWriteMs !== null) return;
-      // A write that leaves no transaction open has committed (COMMIT, or autocommit).
-      if (conn.inTransaction || !WRITE_SQL.test(sqlText)) return;
+      const kind = WRITE_SQL.exec(sqlText)?.[1].toLowerCase();
+      if (kind === undefined) {
+        if (/^\s*(begin|rollback)\b/i.test(sqlText)) txChanged = false;
+        return;
+      }
+      let committed: boolean;
+      if (kind === 'commit' || kind === 'end') {
+        committed = txChanged;
+        txChanged = false;
+      } else if (changes === 0) {
+        return;
+      } else if (conn.inTransaction) {
+        txChanged = true;
+        return;
+      } else {
+        committed = true;
+      }
+      if (!committed) return;
       stats.firstWriteMs = ms;
       stats.firstWriteAt = Date.now() - ms;
       settle(stats);

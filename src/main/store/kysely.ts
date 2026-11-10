@@ -19,8 +19,8 @@ export interface SqliteKyselyOptions {
    *  better-sqlite3 does not cache, so a hot path pays a full SQL compile per
    *  query without this. When the cache is full it is cleared, not LRU'd. */
   statementCache?: number;
-  /** Called after each statement that succeeded, with its synchronous execution time. */
-  onQuery?: (sqlText: string, ms: number) => void;
+  /** Called after each statement that succeeded, with its synchronous execution time and the rows it changed or returned. */
+  onQuery?: (sqlText: string, ms: number, changes: number) => void;
 }
 
 type QueryObserver = (sqlText: string, ms: number) => void;
@@ -34,53 +34,56 @@ export function setSqliteQueryObserver(fn: QueryObserver | null): void {
 }
 
 export function sqliteKysely<DB>(raw: Database.Database, opts: SqliteKyselyOptions = {}): Kysely<DB> {
-  const base: SqliteDatabase = opts.statementCache ? cachingDatabase(raw, opts.statementCache) : raw;
-  return new Kysely<DB>({ dialect: new SqliteDialect({ database: timedDatabase(base, opts.onQuery) }) });
+  const onQuery = opts.onQuery;
+  const wrap = (stmt: Database.Statement, sqlText: string): SqliteStatement => timedStatement(stmt, sqlText, onQuery);
+  const database: SqliteDatabase = opts.statementCache
+    ? cachingDatabase(raw, opts.statementCache, wrap)
+    : { prepare: (sqlText) => wrap(raw.prepare(sqlText), sqlText), close: () => { if (raw.open) raw.close(); } };
+  return new Kysely<DB>({ dialect: new SqliteDialect({ database }) });
 }
 
-function timedDatabase(base: SqliteDatabase, onQuery: SqliteKyselyOptions['onQuery']): SqliteDatabase {
-  // One wrapper per statement object: cached statements reuse theirs.
-  const wrappers = new WeakMap<SqliteStatement, SqliteStatement>();
-  const timed = <T>(sqlText: string, call: () => T): T => {
-    const t0 = performance.now();
-    let ok = false;
-    try {
-      const r = call();
-      ok = true;
-      return r;
-    } finally {
-      const ms = performance.now() - t0;
-      if (ok) onQuery?.(sqlText, ms);
-      queryObserver?.(sqlText, ms);
-    }
-  };
+/** Times the synchronous `all` / `run` call. `onQuery` hears only statements
+ *  that succeeded, with the rows they changed (`all`: rows returned, which a
+ *  RETURNING write returns per changed row); the observer hears every one. */
+function timedStatement(stmt: Database.Statement, sqlText: string, onQuery: SqliteKyselyOptions['onQuery']): SqliteStatement {
   return {
-    prepare(sqlText: string) {
-      const stmt = base.prepare(sqlText);
-      let w = wrappers.get(stmt);
-      if (!w) {
-        w = {
-          reader: stmt.reader,
-          all: (parameters) => timed(sqlText, () => stmt.all(parameters)),
-          run: (parameters) => timed(sqlText, () => stmt.run(parameters)),
-          iterate: (parameters) => stmt.iterate(parameters),
-        };
-        wrappers.set(stmt, w);
+    reader: stmt.reader,
+    all(parameters) {
+      const t0 = performance.now();
+      let rows: unknown[] | null = null;
+      try {
+        rows = stmt.all(parameters);
+        return rows;
+      } finally {
+        const ms = performance.now() - t0;
+        if (rows) onQuery?.(sqlText, ms, rows.length);
+        queryObserver?.(sqlText, ms);
       }
-      return w;
     },
-    close: () => base.close(),
+    run(parameters) {
+      const t0 = performance.now();
+      let r: Database.RunResult | null = null;
+      try {
+        r = stmt.run(parameters);
+        return r;
+      } finally {
+        const ms = performance.now() - t0;
+        if (r) onQuery?.(sqlText, ms, Number(r.changes));
+        queryObserver?.(sqlText, ms);
+      }
+    },
+    iterate: (parameters) => stmt.iterate(parameters),
   };
 }
 
-function cachingDatabase(raw: Database.Database, max: number): SqliteDatabase {
-  const cache = new Map<string, Database.Statement>();
+function cachingDatabase(raw: Database.Database, max: number, wrap: (stmt: Database.Statement, sqlText: string) => SqliteStatement): SqliteDatabase {
+  const cache = new Map<string, SqliteStatement>();
   return {
     prepare(sqlText: string) {
-      if (sqlText.length > 2048) return raw.prepare(sqlText);
+      if (sqlText.length > 2048) return wrap(raw.prepare(sqlText), sqlText);
       let stmt = cache.get(sqlText);
       if (!stmt) {
-        stmt = raw.prepare(sqlText);
+        stmt = wrap(raw.prepare(sqlText), sqlText);
         if (cache.size >= max) cache.clear();
         cache.set(sqlText, stmt);
       }

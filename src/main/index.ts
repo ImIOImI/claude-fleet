@@ -96,9 +96,9 @@ let managedDocker: ManagedDocker | null = null;
 // The Postgres inbox's and history's afterBeginWrite: closed while the switch back copies.
 const inboxGate = new InboxWriteGate();
 const historyGate = new InboxWriteGate();
-// before-quit holds the quit at most this long (#485).
 installWalCheckpointer();
-
+setStateWarnSink((message, extra) => logError({ source: 'main', level: 'warn', type: 'wal-checkpointer', message, extra }));
+// before-quit holds the quit at most this long (#485).
 const QUIT_BOUND_MS = 10_000;
 /** The db.open row is recorded at the first write, or this long after the open without one. */
 const DB_OPEN_ROW_FALLBACK_MS = 10_000;
@@ -291,7 +291,6 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       message: `claude-fleet ${appVersionString()} starting`,
       extra: { sha: appBuildSha() ?? null }
     });
-    setStateWarnSink((message, extra) => logError({ source: 'main', level: 'warn', type: 'wal-checkpointer', message, extra }));
     const perfStore = new PerfStore(stateKysely());
     setSqliteQueryObserver((_sql, ms) => perfNoteSqlSync(ms));
     initPerf(
@@ -536,7 +535,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     await startStateWrites();
     // Recorded only now that perf is up, each with its own measured times.
     onStateOpenStats((s) => perfRecordSpan('claude_fleet.db.open', s.openedAt, s.openedAt + s.openMs, {
-      wal_bytes: s.walBytes, wal_frames: s.walFrames, handed_off: s.handedOff,
+      wal_bytes: s.walBytes, wal_frames: s.walFrames, handed_off: s.handedOff, worker_ready: s.workerReady ?? -1,
       first_write_ms: s.firstWriteMs ?? -1, first_write_after_ms: s.firstWriteAt === null ? -1 : s.firstWriteAt - s.openedAt,
     }), DB_OPEN_ROW_FALLBACK_MS);
     void stateLeftoverDrain()?.then((r) => perfRecordSpan('claude_fleet.db.wal_drain', r.startedAt, r.startedAt + r.ms, {

@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
 import { acquireWalCheckpointer, closeDb, stateKysely, withRawSqlite } from '../db.js';
 import { isPg, openTestState } from '../store/testStore.js';
-import { installWalCheckpointer, WAL_MAX_FRAMES, WAL_MAX_INCOMPLETE, WAL_REWIND_FRAMES } from './walCheckpointer.js';
+import { installWalCheckpointer, WalCheckpointer, WAL_MAX_FRAMES, WAL_MAX_INCOMPLETE, WAL_REWIND_FRAMES } from './walCheckpointer.js';
+import type Database from 'better-sqlite3';
 
 installWalCheckpointer();
 
@@ -222,5 +223,45 @@ describe.skipIf(isPg)('the store checkpointer', () => {
     expect(await pragma('wal_autocheckpoint')).toBe(0);
     await b!.close();
     expect(await pragma('wal_autocheckpoint')).toBe(700);
+  });
+});
+
+describe('WalCheckpointer holds', () => {
+  /** A main connection whose `journal_size_limit = …` write throws while `failSizeLimit` is set. */
+  function fakeMain() {
+    const state = { wal_autocheckpoint: 1000, journal_size_limit: -1, failSizeLimit: true };
+    const d = {
+      open: true,
+      pragma(p: string, o?: { simple: boolean }) {
+        const m = /^(\w+)\s*=\s*(-?\d+)$/.exec(p);
+        if (!m) return o?.simple ? state[p as 'wal_autocheckpoint'] : [];
+        if (m[1] === 'journal_size_limit' && Number(m[2]) > 0 && state.failSizeLimit) throw new Error('disk I/O error');
+        state[m[1] as 'wal_autocheckpoint'] = Number(m[2]);
+        return [];
+      },
+    } as unknown as Database.Database;
+    return { d, state };
+  }
+
+  it('a hold that throws partway leaves the connection as it was and never saves 0', async () => {
+    const { d, state } = fakeMain();
+    const c = new WalCheckpointer({ dbPath: ':memory:', withMain: async (fn) => fn(d), warn: () => undefined });
+    const ok = fakeWorker(`parentPort.postMessage({ ok: true, busy: 0, log: 1, checkpointed: 1 });`);
+    expect(await c.acquire({ requestEveryMs: 0, workerSource: ok })).toBeNull();
+    expect(state.wal_autocheckpoint).toBe(1000);
+    state.failSizeLimit = false;
+    const lease = await c.acquire({ requestEveryMs: 0, workerSource: ok });
+    expect(state.wal_autocheckpoint).toBe(0);
+    await lease!.close();
+    expect(state.wal_autocheckpoint).toBe(1000);
+    await c.stop();
+  });
+
+  it('holdAtOpen holds before spawning: a failed hold starts no worker', () => {
+    const { d, state } = fakeMain();
+    const c = new WalCheckpointer({ dbPath: ':memory:', withMain: async (fn) => fn(d), warn: () => undefined });
+    expect(() => c.holdAtOpen(d, { requestEveryMs: 0, workerSource: fakeWorker('') })).toThrow('disk I/O error');
+    expect(c.hasWorkers()).toBe(false);
+    expect(state.wal_autocheckpoint).toBe(1000);
   });
 });

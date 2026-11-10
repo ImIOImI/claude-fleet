@@ -5,9 +5,10 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sql } from 'kysely';
+import { readTransaction } from '../store/kysely.js';
 import {
   _setWalCheckpointerOptionsForTests, acquireWalCheckpointer, closeDb, onStateOpenStats, openDb, recordError, stateKysely,
-  stateLeftoverDrain, stateOpenStats, withRawSqlite, type StateOpenStats,
+  stateLeftoverDrain, withRawSqlite, type StateOpenStats,
 } from '../db.js';
 import { isPg } from '../store/testStore.js';
 import { installWalCheckpointer } from './walCheckpointer.js';
@@ -62,6 +63,9 @@ async function connected(dir: string): Promise<void> {
   expect(existsSync(join(dir, 'state.db.holder-open'))).toBe(true);
 }
 
+/** The open db's stats at its first write (the fallback is far off). */
+const firstWrite = () => new Promise<StateOpenStats>((r) => onStateOpenStats(r, 600_000));
+
 const pragma = (name: string) => withRawSqlite((d) => d.pragma(name, { simple: true }) as number);
 const frames = () => withRawSqlite((d) => (d.pragma('wal_checkpoint(NOOP)') as Array<{ log: number; checkpointed: number }>)[0]);
 const walSize = (dir: string) => (existsSync(join(dir, 'state.db-wal')) ? statSync(join(dir, 'state.db-wal')).size : 0);
@@ -98,7 +102,7 @@ describe.skipIf(isPg)('leftover WAL at open', () => {
     expect(await pragma('wal_autocheckpoint')).toBe(0);
 
     await recordError({ ts: Date.now(), source: 'main', level: 'info', type: 'app-start', message: 'x' });
-    const stats = await stateOpenStats()!;
+    const stats = await firstWrite();
     expect(stats).toMatchObject({ handedOff: true });
     expect(stats.walFrames).toBeGreaterThan(1000);
     expect(stats.firstWriteMs).not.toBeNull();
@@ -224,13 +228,13 @@ describe.skipIf(isPg)('first write after open', () => {
     await fresh();
     await stateKysely().selectFrom('maintenance').select('key').execute();
     await stateKysely().insertInto('maintenance').values({ key: 'k', value: 'v' }).returning('key').execute();
-    expect((await stateOpenStats()!).firstWriteMs).not.toBeNull();
+    expect((await firstWrite()).firstWriteMs).not.toBeNull();
   });
 
   it('skips a failed write and a pragma, then counts the next commit', async () => {
     await fresh();
     let counted: StateOpenStats | null = null;
-    void stateOpenStats()!.then((s) => { counted = s; });
+    onStateOpenStats((s) => { counted = s; }, 600_000);
     // The raw handle isn't observed; the Kysely insert then fails in run() on the unique key.
     await withRawSqlite((d) => d.prepare(`insert into maintenance (key, value) values ('dup', 'v')`).run());
     await expect(stateKysely().insertInto('maintenance').values({ key: 'dup', value: 'v' }).execute()).rejects.toThrow();
@@ -238,7 +242,7 @@ describe.skipIf(isPg)('first write after open', () => {
     await new Promise((r) => setTimeout(r, 10));
     expect(counted).toBeNull();
     await stateKysely().transaction().execute((t) => t.insertInto('maintenance').values({ key: 'k', value: 'v' }).execute());
-    expect((await stateOpenStats()!).firstWriteMs).not.toBeNull();
+    expect((await firstWrite()).firstWriteMs).not.toBeNull();
   });
 
   it('onStateOpenStats reports once: at the first write, never again at the fallback', async () => {
@@ -261,4 +265,77 @@ describe.skipIf(isPg)('first write after open', () => {
     expect(seen).toHaveLength(1);
     expect(seen[0].firstWriteMs).toBeNull();
   });
+});
+
+describe.skipIf(isPg)('first write is a change', () => {
+  const fresh = async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cf-first-write-'));
+    dirs.push(dir);
+    openDb(dir);
+  };
+
+  it('a read-only transaction and an INSERT OR IGNORE that changes nothing are not writes', async () => {
+    await fresh();
+    let counted: StateOpenStats | null = null;
+    onStateOpenStats((s) => { counted = s; }, 600_000);
+    await stateKysely().insertInto('maintenance').values({ key: 'k', value: 'v' }).execute();
+    counted = null;
+    await closeDb();
+    openDb(dirs[dirs.length - 1]);
+    onStateOpenStats((s) => { counted = s; }, 600_000);
+    await readTransaction(stateKysely(), async (t) => { await t.selectFrom('maintenance').select('key').execute(); });
+    await stateKysely().insertInto('maintenance').values({ key: 'k', value: 'v' }).onConflict((oc) => oc.doNothing()).execute();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(counted).toBeNull();
+    await stateKysely().insertInto('maintenance').values({ key: 'k2', value: 'v' }).execute();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(counted!.firstWriteMs).not.toBeNull();
+  });
+
+  it('the fallback window starts at the open', async () => {
+    await fresh();
+    await new Promise((r) => setTimeout(r, 80));
+    let counted: StateOpenStats | null = null;
+    onStateOpenStats((s) => { counted = s; }, 50);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(counted).not.toBeNull();
+    expect(counted!.firstWriteMs).toBeNull();
+  });
+});
+
+describe.skipIf(isPg)('leftover WAL hand-off outcomes', () => {
+  it('records workerReady false when the worker never comes up', async () => {
+    const dir = await leaveWal(20_000);
+    _setWalCheckpointerOptionsForTests({ workerSource: `require('node:worker_threads').parentPort.on('message', () => {});` });
+    openDb(dir);
+    const r = await stateLeftoverDrain()!;
+    expect(r.ok).toBe(false);
+    const s = await new Promise<StateOpenStats>((res) => onStateOpenStats(res, 0));
+    expect(s).toMatchObject({ handedOff: true, workerReady: false });
+    expect(await pragma('wal_autocheckpoint')).toBe(1000);
+  }, 60_000);
+
+  it('a stale failed round never counts as caught up', async () => {
+    const dir = await leaveWal(20_000);
+    // One complete answer, then only failures: the old result must not end the drain as ok.
+    _setWalCheckpointerOptionsForTests({ requestEveryMs: 0, workerSource: fakeWorker(
+      `if (!globalThis.once) { globalThis.once = 1; parentPort.postMessage({ ok: true, busy: 0, log: 5000, checkpointed: 5000 }); } else parentPort.postMessage({ ok: false, error: 'disk' });`) });
+    openDb(dir);
+    const r = await stateLeftoverDrain()!;
+    expect(r.ok).toBe(false);
+    expect(await pragma('wal_autocheckpoint')).toBe(1000);
+  }, 60_000);
+
+  it('retention gets a fresh worker once the drain\'s worker handed back', async () => {
+    const dir = await leaveWal(20_000);
+    _setWalCheckpointerOptionsForTests({ requestEveryMs: 0, workerSource: fakeWorker(`parentPort.postMessage({ ok: true, busy: 1, log: 10, checkpointed: 0 });`) });
+    openDb(dir);
+    await stateLeftoverDrain();
+    _setWalCheckpointerOptionsForTests({});
+    const lease = await acquireWalCheckpointer({ requestEveryMs: 0 });
+    expect(lease?.active()).toBe(true);
+    expect(await pragma('wal_autocheckpoint')).toBe(0);
+    await lease!.close();
+    expect(await pragma('wal_autocheckpoint')).toBe(1000);
+  }, 60_000);
 });
