@@ -6,7 +6,7 @@ import { sweepOrphans, type Throttle } from './state/retention.js';
 
 const A = '01KW2JNC0K9JDYS8WAZBNT33X1';
 const B = '01KW2MR8MZ7RXZ7171RYT6JKFA';
-const unthrottled: Throttle = { slice: (fn) => fn(), stopped: () => false };
+const unthrottled: Throttle = { slice: (_step, fn) => fn({ targetMs: 35, expired: () => false, note: () => undefined }), stopped: () => false };
 
 const TABLES = ['events', 'sessions', 'embeddings', 'usage_events', 'session_costs', 'session_stats',
   'session_tool_counts', 'event_retention', 'session_summaries', 'session_tags'];

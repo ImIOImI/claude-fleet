@@ -444,6 +444,12 @@ export async function perfSpanAsync<T>(
   }
 }
 
+/** Add attributes to the active span (they land in its slow_op row's meta).
+ *  No-op outside a span or while recording is off. */
+export function perfSetSpanAttributes(attrs: Attributes): void {
+  trace.getActiveSpan()?.setAttributes(attrs);
+}
+
 /** Stamp workspace/session attribution onto the active span, for handlers
  *  that only learn the ids after work starts (pty:attach owner lookup,
  *  pty:input handle map). No-op outside a span or while recording is off. */

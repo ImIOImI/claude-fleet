@@ -2432,8 +2432,10 @@ export async function setRetentionWatermarks(
     .execute();
 }
 
-/** Rows per purge statement: one chunk stays well inside a 50 ms slice. */
+/** Rows per purge statement to start with; the size then tracks PURGE_TARGET_MS. */
 const PURGE_CHUNK = 250;
+const PURGE_MIN_CHUNK = 10;
+const PURGE_TARGET_MS = 35;
 const macrotask = (): Promise<void> => new Promise((r) => setImmediate(r));
 
 /** Delete every state.db row of a removed workspace (SPEC §7 *Retention*).
@@ -2453,14 +2455,25 @@ export async function purgeWorkspace(
       .executeTakeFirst());
     deleted += num(r.numDeletedRows);
   }
+  // One delete can't be interrupted, so its size adapts: cut in proportion
+  // when a chunk overshoots the target, grown back slowly while well under it.
+  let chunk = PURGE_CHUNK;
   for (const table of ['events', 'embeddings', 'usage_events', 'session_summaries'] as const) {
     for (;;) {
-      const r = await slice(() => k.deleteFrom(table)
-        .where('id', 'in', (eb) => eb.selectFrom(table).select('id').where('workspace_id', '=', workspaceId).limit(PURGE_CHUNK))
-        .executeTakeFirst());
+      const size = chunk;
+      const r = await slice(async () => {
+        const t0 = performance.now();
+        const out = await k.deleteFrom(table)
+          .where('id', 'in', (eb) => eb.selectFrom(table).select('id').where('workspace_id', '=', workspaceId).limit(size))
+          .executeTakeFirst();
+        const ms = performance.now() - t0;
+        if (ms > PURGE_TARGET_MS) chunk = Math.max(PURGE_MIN_CHUNK, Math.floor(size * (PURGE_TARGET_MS / ms) * 0.8));
+        else if (ms < PURGE_TARGET_MS / 2) chunk = Math.min(PURGE_CHUNK, Math.ceil(size * 1.25));
+        return out;
+      });
       const n = num(r.numDeletedRows);
       deleted += n;
-      if (n < PURGE_CHUNK) break;
+      if (n < size) break;
     }
   }
   for (const table of ['session_costs', 'session_tags', 'broker_sessions', 'port_exposures', 'event_retention', 'sessions'] as const) {
@@ -2578,26 +2591,29 @@ export async function maxEmbeddingId(): Promise<number> {
 
 /** Compact up to `limit` embedding rows with `afterId < id <= maxId`: a
  *  placeholder (text '') loses its vector; on SQLite a float32 vector is
- *  re-encoded to int8. `lastId` is the cursor to resume from (null when the
- *  range is exhausted). */
-export async function compactEmbeddingSlice(afterId: number, maxId: number, limit: number):
-  Promise<{ lastId: number | null; rewritten: number; bytesSaved: number }> {
+ *  re-encoded to int8. `expired` stops the SQLite row loop early (after at
+ *  least one row). `lastId` is the cursor to resume from (null when the range
+ *  is exhausted). */
+export async function compactEmbeddingSlice(afterId: number, maxId: number, limit: number, expired: () => boolean = () => false):
+  Promise<{ lastId: number | null; scanned: number; rewritten: number; bytesSaved: number }> {
   return kyselyOrThrow().transaction().execute(async (trx) => {
     if (dialect === 'postgres') {
       const ids = (await trx.selectFrom('embeddings').select('id')
         .where('id', '>', afterId).where('id', '<=', maxId).orderBy('id').limit(limit).execute()).map((r) => num(r.id));
-      if (ids.length === 0) return { lastId: null, rewritten: 0, bytesSaved: 0 };
+      if (ids.length === 0) return { lastId: null, scanned: 0, rewritten: 0, bytesSaved: 0 };
       const r = await trx.updateTable('embeddings').set({ vec: null })
         .where('id', 'in', ids).where('text', '=', '').where('vec', 'is not', null).executeTakeFirst();
       const n = num(r.numUpdatedRows);
-      return { lastId: ids[ids.length - 1], rewritten: n, bytesSaved: n * EMBED_DIM * 4 };
+      return { lastId: ids[ids.length - 1], scanned: ids.length, rewritten: n, bytesSaved: n * EMBED_DIM * 4 };
     }
     const rows = await trx.selectFrom('embeddings').select(['id', 'text', 'vec'])
       .where('id', '>', afterId).where('id', '<=', maxId).orderBy('id').limit(limit).execute();
-    if (rows.length === 0) return { lastId: null, rewritten: 0, bytesSaved: 0 };
+    if (rows.length === 0) return { lastId: null, scanned: 0, rewritten: 0, bytesSaved: 0 };
+    let scanned = 0;
     let rewritten = 0;
     let bytesSaved = 0;
-    for (const r of rows) {
+    for (; scanned < rows.length && (scanned === 0 || !expired()); scanned++) {
+      const r = rows[scanned];
       const old = r.vec ?? EMPTY_VECTOR;
       if (old.length !== EMBED_DIM * 4) continue;
       const vec = r.text === '' ? EMPTY_VECTOR : sqliteVec(old);
@@ -2605,7 +2621,7 @@ export async function compactEmbeddingSlice(afterId: number, maxId: number, limi
       rewritten++;
       bytesSaved += old.length - vec.length;
     }
-    return { lastId: num(rows[rows.length - 1].id), rewritten, bytesSaved };
+    return { lastId: num(rows[scanned - 1].id), scanned, rewritten, bytesSaved };
   });
 }
 
