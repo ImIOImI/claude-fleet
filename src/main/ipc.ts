@@ -156,11 +156,11 @@ import {
   stateKysely,
 } from './db.js';
 import { foldPlanUsage, type PlanUsageFold } from './planUsage.js';
-import { logError, getLogPath } from './errorLog.js';
+import { logError, getLogPath, flushErrorLog } from './errorLog.js';
 import { broadcastObservabilitySummary, latestWins } from './observabilityBroadcast.js';
 import { broadcastInputWait } from './inputWaitBroadcast.js';
 import { makeTrailingRebroadcast } from './trailingBroadcast.js';
-import { consumeForWorkspace, pendingSnapshotForWorkspace, recordPendingAttach } from './pendingAttaches.js';
+import { pairNewSession, recordPendingAttach } from './pendingAttaches.js';
 import { PortForwardManager, type ServingPort } from './portforward.js';
 import { MockServingPorts } from './mockPorts.js';
 import { PortExposureService, type PortPopup } from './portExposure.js';
@@ -1149,10 +1149,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     // in pendingAttaches.ts; concurrent attaches fall back to the
     // workspace summary (v1 behavior) until the user re-mounts a tab
     // alone and we can disambiguate.
-    jsonlWatcher.on('new-session', ({ workspaceId, sessionId: claudeSessionId }) => {
-      const queued = pendingSnapshotForWorkspace(workspaceId);
-      const brokerSessionId = consumeForWorkspace(workspaceId);
+    jsonlWatcher.on('new-session', ({ workspaceId, sessionId: claudeSessionId, resumed }) => {
+      const { brokerSessionId, queued, logDrop } = pairNewSession(workspaceId, resumed);
       if (!brokerSessionId) {
+        if (!logDrop) return;
         logError({
           source: 'main',
           type: 'new-session-dropped',
@@ -2611,9 +2611,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   // Open error.log in the OS default app — the MCP-unreachable toast's "Open
   // log" action (#159 follow-up). WSL can't reach a Windows shell.openPath, so
   // route through the same explorer.exe fallback the folder-open handlers use.
-  ipcMain.handle('app:openErrorLog', () => {
-    const p = getLogPath();
-    return openHostPath(p);
+  ipcMain.handle('app:openErrorLog', async () => {
+    await flushErrorLog();
+    return openHostPath(getLogPath());
   });
   // Current host MCP listener health — a window mounting mid-outage reads this
   // to render the sticky "MCP unreachable" toast (live changes arrive on the

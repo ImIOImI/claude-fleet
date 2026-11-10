@@ -2778,30 +2778,37 @@ export interface ErrorRow {
 }
 
 export async function recordError(row: ErrorRow): Promise<void> {
-  // Insert + retention prune are one transaction: one commit per error row.
+  await recordErrors([row]);
+}
+
+/** Insert `rows` and prune to the newest ERRORS_RETENTION in one transaction. */
+export async function recordErrors(rows: ErrorRow[]): Promise<void> {
+  if (!rows.length) return;
   await kyselyOrThrow().transaction().execute(async (trx) => {
-    // Resolve the claude session UUID: prefer an explicit sessionId; else, if
-    // the caller only knew the broker id, best-effort resolve it via the
-    // mapping (NULL when unmapped — itself an honest signal).
-    let sessionId = row.sessionId ?? null;
-    if (!sessionId && row.workspaceId && typeof row.extra?.brokerSessionId === 'string') {
-      const m = await existingMappingQ(trx, row.workspaceId, row.extra.brokerSessionId as string);
-      sessionId = m?.claude_session_id ?? null;
+    for (const row of rows) {
+      // Resolve the claude session UUID: prefer an explicit sessionId; else, if
+      // the caller only knew the broker id, best-effort resolve it via the
+      // mapping (NULL when unmapped — itself an honest signal).
+      let sessionId = row.sessionId ?? null;
+      if (!sessionId && row.workspaceId && typeof row.extra?.brokerSessionId === 'string') {
+        const m = await existingMappingQ(trx, row.workspaceId, row.extra.brokerSessionId as string);
+        sessionId = m?.claude_session_id ?? null;
+      }
+      await trx
+        .insertInto('errors')
+        .values({
+          ts: row.ts,
+          workspace_id: row.workspaceId ?? null,
+          session_id: sessionId,
+          source: row.source,
+          level: row.level ?? 'error',
+          type: row.type,
+          message: row.message,
+          stack: row.stack ?? null,
+          extra: row.extra ? JSON.stringify(row.extra) : null,
+        })
+        .execute();
     }
-    await trx
-      .insertInto('errors')
-      .values({
-        ts: row.ts,
-        workspace_id: row.workspaceId ?? null,
-        session_id: sessionId,
-        source: row.source,
-        level: row.level ?? 'error',
-        type: row.type,
-        message: row.message,
-        stack: row.stack ?? null,
-        extra: row.extra ? JSON.stringify(row.extra) : null,
-      })
-      .execute();
     // Keep the newest ERRORS_RETENTION rows: delete every id at or below the
     // (ERRORS_RETENTION+1)-th newest (a PK seek, not a table scan).
     await trx

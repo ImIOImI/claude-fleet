@@ -4,6 +4,7 @@ import {
   recordPendingAttach,
   removePendingAttach,
   pendingSnapshotForWorkspace,
+  pairNewSession,
   _resetForTests,
 } from './pendingAttaches.js';
 
@@ -120,5 +121,25 @@ describe('pendingSnapshotForWorkspace', () => {
 
   it('returns [] when nothing is pending', () => {
     expect(pendingSnapshotForWorkspace('ws-a')).toEqual([]);
+  });
+});
+
+describe('pairNewSession', () => {
+  it('pairs a genuinely new transcript and logs its miss', () => {
+    recordPendingAttach('ws-a', 'broker-1');
+    expect(pairNewSession('ws-a', false)).toMatchObject({ brokerSessionId: 'broker-1', logDrop: false });
+    expect(pairNewSession('ws-a', false)).toMatchObject({ brokerSessionId: null, logDrop: true });
+  });
+
+  it('still pairs a resumed transcript, so a session claude resumes into an existing file keeps its mapping', () => {
+    recordPendingAttach('ws-a', 'broker-1');
+    const r = pairNewSession('ws-a', true);
+    expect(r.brokerSessionId).toBe('broker-1');
+    expect(r.queued).toEqual([{ brokerSessionId: 'broker-1', recordedAt: expect.any(Number) }]);
+    expect(pendingSnapshotForWorkspace('ws-a')).toEqual([]);
+  });
+
+  it('does not log the miss for a resumed transcript', () => {
+    expect(pairNewSession('ws-a', true)).toEqual({ brokerSessionId: null, queued: [], logDrop: false });
   });
 });

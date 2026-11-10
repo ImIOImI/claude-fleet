@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { rmSync } from 'node:fs';
 import { PostgresDriver, SqliteDriver } from 'kysely';
-import { closeDb, recordError, learnBrokerSessionMapping, recordBrokerSessionMapping, lookupBrokerSession, lookupVerifiedBrokerSession, lookupResumableBrokerSession, listSessions, summaryForBrokerSession, ingestLine, ERRORS_RETENTION, recordUsageEvent, __pendingClaudeIdsForTest } from './db.js';
+import { closeDb, recordError, recordErrors, learnBrokerSessionMapping, recordBrokerSessionMapping, lookupBrokerSession, lookupVerifiedBrokerSession, lookupResumableBrokerSession, listSessions, summaryForBrokerSession, ingestLine, ERRORS_RETENTION, recordUsageEvent, __pendingClaudeIdsForTest } from './db.js';
 import { openTestState, queryRows, isPg, type TestState } from './store/testStore.js';
 
 /** The driver whose commitTransaction the store's transactions end in. */
@@ -94,6 +94,17 @@ describe('recordError', () => {
       }
       const r = (await queryRows('SELECT COUNT(*) AS n, MIN(ts) AS lo, MAX(ts) AS hi FROM errors'))[0];
       expect(r).toEqual({ n: ERRORS_RETENTION, lo: 25, hi: ERRORS_RETENTION + 24 });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('recordErrors writes a batch in one call and prunes once to the newest ERRORS_RETENTION', async () => {
+    const dir = await freshDb();
+    try {
+      const rows = Array.from({ length: ERRORS_RETENTION + 7 }, (_, i) => ({ ts: i, source: 'main', type: 't', message: `m${i}` }));
+      await recordErrors(rows);
+      const r = (await queryRows('SELECT COUNT(*) AS n, MIN(ts) AS lo, MAX(ts) AS hi FROM errors'))[0];
+      expect(r).toEqual({ n: ERRORS_RETENTION, lo: 7, hi: ERRORS_RETENTION + 6 });
+      await recordErrors([]);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 

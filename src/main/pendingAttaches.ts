@@ -87,6 +87,25 @@ export function pendingSnapshotForWorkspace(
 }
 
 /**
+ * Pair a `new-session` with the oldest pending attach for its workspace.
+ * Pairing ignores `resumed`; it only decides whether a miss is logged. A
+ * transcript an earlier run already read is re-announced on every launch and
+ * can't be the session a pending attach waits for, so its miss is noise.
+ */
+export function pairNewSession(
+  workspaceId: string,
+  resumed: boolean,
+): {
+  brokerSessionId: string | null;
+  queued: Array<{ brokerSessionId: string; recordedAt: number }>;
+  logDrop: boolean;
+} {
+  const queued = pendingSnapshotForWorkspace(workspaceId);
+  const brokerSessionId = consumeForWorkspace(workspaceId);
+  return { brokerSessionId, queued, logDrop: brokerSessionId === null && !resumed };
+}
+
+/**
  * Drop a specific pending entry without learning a mapping. Called
  * when the user closes a tab before claude ever wrote anything — the
  * entry would otherwise sit in the queue forever and incorrectly pair

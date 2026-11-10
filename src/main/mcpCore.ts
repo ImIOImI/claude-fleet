@@ -401,11 +401,15 @@ export function serveMcpConnection(sock: Socket, callerId: string): void {
   sock.on('error', () => sock.destroy());
 }
 
-/** Durable connection-lifecycle breadcrumbs (errors DB via list_errors). The
- *  first-call-hang investigation burned days on "did the request ever reach
- *  the host?" — these rows answer that question for every future incident:
- *  a connection accept, its close (with lifetime + how many RPC lines it
- *  carried), and TCP auth failures, which previously went to console only. */
+/** A connection open this long gets its accept row; shorter ones only log an abnormal close. */
+export const MCP_CONN_LOG_AFTER_MS = 10_000;
+
+/** Connection-lifecycle breadcrumbs (errors DB via list_errors). A short
+ *  connection that answered everything writes nothing: each `claude -p` or
+ *  hook opens one, and two rows apiece flooded the log. Logged: `mcp-conn`
+ *  once a connection has stayed open MCP_CONN_LOG_AFTER_MS, and
+ *  `mcp-conn-closed` for that connection, for one that closed with requests
+ *  still in flight (request loss), or for one that carried no rpc lines. */
 export function trackConnection(
   transport: 'unix' | 'tcp',
   callerId: string,
@@ -413,22 +417,31 @@ export function trackConnection(
 ): { rpcCount: number } {
   const openedAt = Date.now();
   const conn = { rpcCount: 0 };
-  logError({
-    source: 'main',
-    type: 'mcp-conn',
-    level: 'info',
-    message: `mcp ${transport} connection accepted for ${callerId}`,
-    workspaceId: callerId,
-    extra: { transport }
-  });
+  let longLived = false;
+  const timer = setTimeout(() => {
+    longLived = true;
+    logError({
+      source: 'main',
+      type: 'mcp-conn',
+      level: 'info',
+      message: `mcp ${transport} connection for ${callerId} open for ${MCP_CONN_LOG_AFTER_MS}ms (${conn.rpcCount} rpc lines)`,
+      workspaceId: callerId,
+      extra: { transport, openedAt, rpcCount: conn.rpcCount }
+    });
+  }, MCP_CONN_LOG_AFTER_MS);
+  timer.unref?.();
   sock.on('close', () => {
+    clearTimeout(timer);
+    const pending = inFlight.get(sock) ?? 0;
+    if (!longLived && pending === 0 && conn.rpcCount > 0) return;
+    const durationMs = Date.now() - openedAt;
     logError({
       source: 'main',
       type: 'mcp-conn-closed',
-      level: 'info',
-      message: `mcp ${transport} connection for ${callerId} closed after ${Date.now() - openedAt}ms (${conn.rpcCount} rpc lines)`,
+      level: pending > 0 ? 'warn' : 'info',
+      message: `mcp ${transport} connection for ${callerId} closed after ${durationMs}ms (${conn.rpcCount} rpc lines, ${pending} in flight)`,
       workspaceId: callerId,
-      extra: { transport, durationMs: Date.now() - openedAt, rpcCount: conn.rpcCount }
+      extra: { transport, durationMs, rpcCount: conn.rpcCount, inFlight: pending }
     });
   });
   return conn;

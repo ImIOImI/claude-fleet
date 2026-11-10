@@ -13,7 +13,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JsonlWatcher } from './jsonlWatcher.js';
-import { openDb, closeDb } from './db.js';
+import { openDb, closeDb, saveTranscriptOffsets } from './db.js';
 
 const SID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 let dir: string;
@@ -60,5 +60,34 @@ describe("jsonlWatcher 'new-session' dedup (#243)", () => {
 
     await w.stop();
     expect(seen).toEqual([SID]); // NOT re-announced despite the re-sight
+  });
+});
+
+describe("jsonlWatcher 'new-session' resumed flag", () => {
+  async function firstSighting(seed: (file: string) => Promise<void>): Promise<Array<{ sessionId: string; resumed: boolean }>> {
+    const projectDir = join(dir, 'projects', '-workspace');
+    mkdirSync(projectDir, { recursive: true });
+    const file = join(projectDir, `${SID}.jsonl`);
+    writeFileSync(file, line + '\n');
+    await seed(file);
+    const w = new JsonlWatcher();
+    const seen: Array<{ sessionId: string; resumed: boolean }> = [];
+    w.on('new-session', (e) => seen.push({ sessionId: e.sessionId, resumed: e.resumed }));
+    await w.start([]);
+    w.registerLocalDirForTest('ws1', projectDir);
+    await new Promise((r) => setTimeout(r, 400));
+    await w.stop();
+    return seen;
+  }
+
+  it('announces a transcript with no saved offset as not resumed', async () => {
+    expect(await firstSighting(async () => undefined)).toEqual([{ sessionId: SID, resumed: false }]);
+  });
+
+  it('still announces a transcript an earlier run saved an offset for, flagged resumed', async () => {
+    const seen = await firstSighting((file) =>
+      saveTranscriptOffsets([{ path: file, workspaceId: 'ws1', sessionId: SID, byteOffset: 5, tailLen: 1, tailHash: 'x' }]),
+    );
+    expect(seen).toEqual([{ sessionId: SID, resumed: true }]);
   });
 });

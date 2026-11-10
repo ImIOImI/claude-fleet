@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
 import { registerIpc, invalidateWorkspaceList, replayInputWait, stopRemoteBackend } from './ipc.js';
-import { openDb, openDbPostgres, closeDb, deleteEmbeddingsForOtherModels, listSessionIds, recordError, stateKysely, sessionCaptureSignals, isAutomationSession } from './db.js';
+import { openDb, openDbPostgres, closeDb, deleteEmbeddingsForOtherModels, listSessionIds, recordErrors, stateKysely, sessionCaptureSignals, isAutomationSession } from './db.js';
 import { initPerf, shutdownPerf, perfSpan, perfSpanAsync, getEffectivePerf, recordBootProfile } from './perf.js';
 import { startBootProfile } from './bootProfile.js';
 import { PerfStore } from './perfStore.js';
@@ -21,7 +21,7 @@ import { encodeClaudeProjectDir, workspaceClaudeSessionsDir, hostLocalSessionsDi
 import { existsSync } from 'node:fs';
 import { startRetention } from './state/retention.js';
 import { prepareVacuum, spawnVacuumHelper, vacuumHelperActive, waitForVacuumHelper } from './state/vacuumHelper.js';
-import { installMainProcessHandlers, getLogPath, setErrorSink, logError } from './errorLog.js';
+import { installMainProcessHandlers, getLogPath, setErrorSink, logError, batchedErrorSink, flushErrorLogSync } from './errorLog.js';
 import { installAppMenu } from './appMenu.js';
 import { isOpenableExternalUrl } from './externalUrl.js';
 import { appBuildSha, appVersionString } from './appVersion.js';
@@ -105,6 +105,7 @@ let presence: ReturnType<typeof startPresence> | null = null;
 // Notification + automation timers (#457): stopped in before-quit, ahead of inboxStore.close().
 let notifySvc: ReturnType<typeof registerNotifyIpc> | null = null;
 let auto: ReturnType<typeof registerAutomationIpc> | null = null;
+const errorRows = batchedErrorSink(recordErrors);
 
 /** Register each workspace's peer-status `sessions/` dir with the watcher.
  *  Container: the bind-mounted host dir. Local native/custom: the shared host
@@ -243,6 +244,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     const prompt = storeStartupPrompt(e, join(userData, 'config.json'));
     const { response } = await dialog.showMessageBox({ type: 'error', noLink: true, ...prompt });
     if (storeStartupOutcome(prompt, response) === 'quit') {
+      flushErrorLogSync();
       app.exit(1);
       return;
     }
@@ -268,13 +270,9 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
   let bootProfileStarted = false;
   /** The error sink, the app-start row and perf telemetry: all write state.db. */
   const startStateWrites = async (): Promise<void> => {
-    // Wire the crash-safe DB sink so every logError call is also persisted to
-    // the errors table.
-    // best-effort; a wedged DB must never break crash logging, so the async
-    // write's rejection is swallowed here.
-    setErrorSink((row) => {
-      void recordError(row).catch(() => undefined);
-    });
+    // Every logError row also lands in the errors table, batched; a rejected
+    // write is swallowed so a wedged DB never breaks crash logging.
+    setErrorSink(errorRows.sink);
     // One line per app run identifying the build (#298): the error.log header
     // and an errors-table row that lets historical telemetry be partitioned by
     // build sha when two builds share a semver.
@@ -831,6 +829,7 @@ app.on('before-quit', (e) => {
     await inboxStore?.close();
     inboxStore = null;
     await shutdownPerf();
+    await errorRows.flush();
     vacuumAfterQuit = await prepareVacuum(app.getPath('userData')).catch(() => false);
     await closeDb();
     stateClosed = true;
@@ -840,6 +839,7 @@ app.on('before-quit', (e) => {
   })().catch((err) => logError({ source: 'main', type: 'quit-shutdown', level: 'warn', message: String(err) })), QUIT_BOUND_MS)
     .then(() => {
       if (vacuumAfterQuit && stateClosed) spawnVacuumHelper(app.getPath('userData'));
+      flushErrorLogSync();
       app.exit(0);
     });
 });

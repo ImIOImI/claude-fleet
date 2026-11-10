@@ -127,6 +127,8 @@ export interface IngestEvent {
 export interface NewSessionEvent {
   workspaceId: string;
   sessionId: string;
+  /** An earlier run saved an offset for this transcript (`transcript_offsets`). */
+  resumed: boolean;
 }
 
 // Typed event surface — TS doesn't get to constrain EventEmitter's own
@@ -436,6 +438,7 @@ export class JsonlWatcher extends EventEmitter {
     const existing = this.files.get(path);
     const state = existing ?? this.initState(path);
     if (!state) return;
+    const saved = existing ? undefined : (await this.persisted).get(path);
     // First sighting of a primary transcript → fire 'new-session' so the
     // mapping layer can pair this claude UUID with a pending attach.
     // Sidecars (<uuid>.fleet.jsonl) are host-written summary data and must
@@ -450,6 +453,7 @@ export class JsonlWatcher extends EventEmitter {
       this.emit('new-session', {
         workspaceId: state.workspaceId,
         sessionId: state.sessionId,
+        resumed: saved !== undefined,
       });
     }
 
@@ -461,9 +465,7 @@ export class JsonlWatcher extends EventEmitter {
       return;
     }
     if (!existing) {
-      const persisted = await this.persisted;
-      const saved = persisted.get(path);
-      persisted.delete(path);
+      (await this.persisted).delete(path);
       // A rewrite while the app was closed changes the bytes before the offset.
       if (saved && saved.byteOffset <= stats.size && await tailMatches(path, saved).catch(() => false)) {
         state.offset = saved.byteOffset;
