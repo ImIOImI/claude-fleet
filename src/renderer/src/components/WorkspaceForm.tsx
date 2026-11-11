@@ -27,7 +27,16 @@ import { ModelCombobox, type EndpointEntry } from './ModelCombobox';
 import { createSecretRevealer, REVEAL_SECONDS, type RevealState } from './secretReveal';
 import type { InboxConfig } from '../../../preload';
 import type { CaptureSettings } from '../../../preload/captureSettings';
+import { defaultContainerPath, type ExtraMount } from '../../../preload/extraMounts';
 import { captureSubmitValue, captureSummary, fromCaptureForm, toCaptureForm, type CaptureFormState } from '../captureSettingsView';
+import {
+  hostPlaceholder,
+  mountRowErrors,
+  mountsFromRows,
+  mountsSummary,
+  rowsFromMounts,
+  type MountRow
+} from './mountRows';
 import {
   claudeAuthFromInitial,
   deriveAuthFields,
@@ -87,6 +96,8 @@ export interface WorkspaceFormSubmit {
    */
   secrets: Record<string, string>;
   resources?: WorkspaceResources;
+  /** Container kind only: extra host folders bound into the container. */
+  mounts?: ExtraMount[];
   /** Durable-transcript-mirror defaults for this workspace. */
   mirror: WorkspaceMirror;
   /**
@@ -261,6 +272,12 @@ export function WorkspaceForm({
     initial?.resources?.memoryMb != null ? String(initial.resources.memoryMb) : ''
   );
   const [resourcesOpen, setResourcesOpen] = useState(false);
+
+  const [mountRows, setMountRows] = useState<MountRow[]>(() => rowsFromMounts(initial?.mounts));
+  const [mountsOpen, setMountsOpen] = useState(false);
+  const mountErrors = mountRowErrors(mountRows);
+  const updateMountRow = (i: number, patch: Partial<MountRow>) =>
+    setMountRows((rows) => rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
 
   const [mirrorDefault, setMirrorDefault] = useState<MirrorSetting>(
     initial?.mirror?.default ?? 'on'
@@ -473,6 +490,10 @@ export function WorkspaceForm({
       setError('Image reference is required for a container workspace.');
       return null;
     }
+    if (kind === 'container' && mountErrors.some(Boolean)) {
+      setMountsOpen(true);
+      return null;
+    }
     const { authMode, endpointId } = deriveAuthFields(model, claudeAuth);
     if (
       model.kind === 'endpoint' &&
@@ -590,6 +611,7 @@ export function WorkspaceForm({
       secretKeys,
       secrets,
       resources,
+      mounts: kind === 'container' ? mountsFromRows(mountRows) : undefined,
       mirror: { default: mirrorDefault, cleanup: cleanupDefault },
       accessibility,
       inbox,
@@ -1243,6 +1265,92 @@ export function WorkspaceForm({
           </button>
         </div>
       </details>
+
+      {kind === 'container' && (
+        <details
+          className="form-disclosure"
+          open={mountsOpen}
+          onToggle={(e) => setMountsOpen((e.target as HTMLDetailsElement).open)}
+        >
+          <summary>
+            Extra mounts{' '}
+            <span className="form-hint">{mountsSummary(mountsFromRows(mountRows))}</span>
+          </summary>
+          <div className="env-editor">
+            {mountRows.length > 0 && (
+              <div className="mount-colhead" aria-hidden="true">
+                <span>Host folder</span>
+                <span>In the container</span>
+              </div>
+            )}
+            {mountRows.map((row, i) => (
+              <div className="mount-row" key={i}>
+                <input
+                  aria-label={`Host folder ${i + 1}`}
+                  value={row.hostPath}
+                  onChange={(e) => updateMountRow(i, { hostPath: e.target.value })}
+                  placeholder={hostPlaceholder(platform)}
+                  spellCheck={false}
+                  disabled={busy}
+                />
+                <button
+                  type="button"
+                  className="btn mount-browse"
+                  onClick={async () => {
+                    const picked = await window.api.dialog.pickDirectory(row.hostPath || undefined);
+                    if (picked) updateMountRow(i, { hostPath: picked });
+                  }}
+                  disabled={busy}
+                >
+                  Browse…
+                </button>
+                <span className="mount-arrow" aria-hidden="true">→</span>
+                <input
+                  aria-label={`Container path ${i + 1}`}
+                  className={mountErrors[i] ? 'invalid' : undefined}
+                  value={row.containerPath}
+                  onChange={(e) => updateMountRow(i, { containerPath: e.target.value })}
+                  placeholder={row.hostPath.trim() ? defaultContainerPath(row.hostPath) : '/mnt/folder'}
+                  spellCheck={false}
+                  disabled={busy}
+                />
+                <label className="env-secret-toggle">
+                  <input
+                    type="checkbox"
+                    checked={row.readOnly}
+                    onChange={(e) => updateMountRow(i, { readOnly: e.target.checked })}
+                    disabled={busy}
+                  />
+                  <span>read-only</span>
+                </label>
+                <button
+                  type="button"
+                  className="env-row-remove"
+                  aria-label={`Remove mount ${i + 1}`}
+                  onClick={() => setMountRows((rows) => rows.filter((_, j) => j !== i))}
+                  disabled={busy}
+                >
+                  ×
+                </button>
+                {mountErrors[i] && (
+                  <div className="mount-row-note" role="alert">{mountErrors[i]}</div>
+                )}
+              </div>
+            ))}
+            <button
+              type="button"
+              className="btn"
+              onClick={() => setMountRows((rows) => [...rows, { hostPath: '', containerPath: '', readOnly: false }])}
+              disabled={busy}
+            >
+              + Add mount
+            </button>
+            <p className="form-hint mount-hint">
+              Leave the container path empty to use the suggested one. Mounts can&apos;t go under /shared, ~/.claude or system folders.
+            </p>
+          </div>
+        </details>
+      )}
 
       {kind === 'container' && (
         <details

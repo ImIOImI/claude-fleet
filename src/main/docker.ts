@@ -30,7 +30,9 @@ import type { AuthMode, Workspace, WorkspaceEnv, WorkspaceResources, WorkspaceKi
 import { FACTORY_MIRROR } from './workspaces.js';
 import { effectiveCaptureSettings, type CaptureSettings } from '../preload/captureSettings.js';
 import { ensureContainerRetention } from './claims/retention.js';
-import { fleetPrivateDir, fleetSharedDir } from './config.js';
+import { fleetPrivateDir, fleetSharedDir, getFleetRoot } from './config.js';
+import type { ExtraMount } from '../preload/extraMounts.js';
+import { dockerSocketDirs, toDockerMounts } from './extraMountsHost.js';
 import {
   mcpWorkspaceSocketDir,
   mcpWorkspaceBind,
@@ -136,6 +138,8 @@ export interface CreateWorkspaceInput {
   /** Image reference to launch. Defaults to the bundled runner image. */
   image?: string;
   resources?: WorkspaceResources;
+  /** Extra host folders; already validated by the IPC layer. */
+  mounts?: ExtraMount[];
   /**
    * Auth mode. When 'oauth', `createWorkspace` adds a bind-mount of the
    * shared credentials file (`paths.sharedClaudeCredentialsPath()`) over
@@ -655,8 +659,17 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
     binds.push(`${sharedRemoteSettings}:/home/fleet/.claude/remote-settings.json:rw`);
   }
 
+  const mountCtx = {
+    ownId: spec.id,
+    userData: app.getPath('userData'),
+    fleetRoot: await getFleetRoot(),
+    docker: await dockerSocketDirs()
+  };
   const hostCfg: Docker.HostConfig = {
     Binds: binds,
+    // Mounts, not Binds strings: Windows drive letters make host:ctr:ro ambiguous,
+    // and Binds silently creates a missing host dir as root.
+    Mounts: await toDockerMounts(spec.mounts, mountCtx),
     AutoRemove: false,
     // Survive a host reboot / docker daemon restart: bring the container
     // back automatically so its broker re-launches and the user can resume

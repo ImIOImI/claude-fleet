@@ -20,13 +20,18 @@ vi.mock('electron', () => ({
 const logged: Array<{ type: string; level: string; workspaceId?: string }> = [];
 vi.mock('./errorLog.js', () => ({ logError: (p: { type: string; level: string; workspaceId?: string }) => { logged.push(p); } }));
 
-const { listWorkspaceManifests, writeWorkspaceManifest } = await import('./workspaces.js');
+const { listWorkspaceManifests, readWorkspaceManifest, writeWorkspaceManifest } = await import('./workspaces.js');
 const { stateRoot, workspaceManifestPath } = await import('./paths.js');
 
 const spec = (id: string) => ({
   id, name: id, labels: [], workspaceRoot: '/w', workspaceSubdir: '', kind: 'container' as const, authMode: 'oauth' as const,
   env: { plain: {}, secretKeys: [] }, mirror: { default: 'on' as const, cleanup: 'delete' as const }, createdAt: 1, lastUsedAt: 1
 });
+
+async function writeRaw(id: string, body: object): Promise<void> {
+  await mkdir(join(stateRoot(), id), { recursive: true });
+  await writeFile(workspaceManifestPath(id), JSON.stringify(body), 'utf8');
+}
 
 beforeEach(async () => {
   userDataDir = await mkdtemp(join(tmpdir(), 'cf-manifest-read-'));
@@ -50,4 +55,21 @@ it('stays quiet for a state dir without a manifest and a stray file in the state
   await writeFile(join(stateRoot(), 'stray.txt'), 'x', 'utf8');
   expect((await listWorkspaceManifests()).map((s) => s.id)).toEqual(['A']);
   expect(logged).toEqual([]);
+});
+
+it('keeps well-formed mounts on a container manifest', async () => {
+  await writeRaw('C', { ...spec('C'), mounts: [
+    { hostPath: '/data', containerPath: '/mnt/data', readOnly: true },
+    { hostPath: 7 }
+  ] });
+  expect((await readWorkspaceManifest('C'))?.mounts).toEqual([
+    { hostPath: '/data', containerPath: '/mnt/data', readOnly: true }
+  ]);
+});
+
+it('drops mounts on a local manifest', async () => {
+  await writeRaw('D', { ...spec('D'), kind: 'local', mounts: [
+    { hostPath: '/data', containerPath: '/mnt/data', readOnly: false }
+  ] });
+  expect((await readWorkspaceManifest('D'))?.mounts).toBeUndefined();
 });

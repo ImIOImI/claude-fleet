@@ -25,6 +25,7 @@ import type { InboxConfig } from '../preload/inboxTypes.js';
 import { sanitizeInboxConfig } from './inbox/inboxPolicy.js';
 import { normalizeCaptureSettings, type CaptureSettings } from '../preload/captureSettings.js';
 import { normalizeHostUrl, safeLogin } from './remoteUrl.js';
+import { sanitizeMounts, type ExtraMount } from '../preload/extraMounts.js';
 
 export type WorkspaceState = 'running' | 'paused' | 'stopped' | 'deleted' | 'unreachable';
 
@@ -210,6 +211,8 @@ export interface WorkspaceSpec {
   terminalRenderer?: TerminalRenderer;
   env: WorkspaceEnv;
   resources?: WorkspaceResources;
+  /** kind 'container' only: extra host folders bound into the container. */
+  mounts?: ExtraMount[];
   /** Durable-transcript-mirror defaults. Factory `on`/`delete` when absent. */
   mirror: WorkspaceMirror;
   /** Loadouts installed into this workspace (#16-followup). Absent ⇒ none. */
@@ -382,6 +385,7 @@ export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec |
           : []
       },
       resources: parsed.resources,
+      mounts: kind === 'container' ? sanitizeMounts((parsed as { mounts?: unknown }).mounts) : undefined,
       mirror: {
         default: parsed.mirror?.default === 'off' ? 'off' : FACTORY_MIRROR.default,
         cleanup: parsed.mirror?.cleanup === 'preserve' ? 'preserve' : FACTORY_MIRROR.cleanup

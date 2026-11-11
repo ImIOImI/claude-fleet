@@ -72,6 +72,22 @@ describe('applyContainerEdit', () => {
     });
   });
 
+  it('passes mounts and endpointId through to create', async () => {
+    const { api, createInput } = makeFakeApi({
+      ...manifest,
+      authMode: 'endpoint',
+      endpointId: 'ep-1',
+      mounts: [{ hostPath: '/data', containerPath: '/mnt/data', readOnly: true }]
+    });
+
+    await applyContainerEdit(api, { id: 'ws-1', containerId: 'c-1' });
+
+    expect(createInput()).toMatchObject({
+      endpointId: 'ep-1',
+      mounts: [{ hostPath: '/data', containerPath: '/mnt/data', readOnly: true }]
+    });
+  });
+
   it('skips the image pull for local workspaces (no image to fetch)', async () => {
     const { api, calls } = makeFakeApi({ ...manifest, kind: 'local', image: undefined });
 

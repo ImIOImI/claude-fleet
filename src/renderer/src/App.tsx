@@ -47,6 +47,7 @@ import type {
 } from '../../preload';
 import { storeBannerText } from './storeView';
 import type { CaptureSettings } from '../../preload/captureSettings';
+import type { ExtraMount } from '../../preload/extraMounts';
 import { portPopupCopy } from './portToast';
 import { InboxChip } from './components/InboxChip';
 import { InboxView, type InboxSection } from './components/InboxView';
@@ -147,6 +148,8 @@ export interface WorkspaceSummary {
   endpointId?: string;
   env: WorkspaceEnv;
   resources?: WorkspaceResources;
+  /** kind 'container' only: extra host folders bound into the container. */
+  mounts?: ExtraMount[];
   mirror: WorkspaceMirror;
   /** Loadouts installed into this workspace (#16-followup); absent ⇒ none. */
   installedLoadouts?: { id: string; title: string; version?: string }[];
@@ -1191,6 +1194,7 @@ export function App() {
       endpointId: submit.endpointId,
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources,
+      mounts: submit.mounts,
       mirror: submit.mirror
     });
     focusWorkspaceWhenWarm(id);
@@ -1207,7 +1211,7 @@ export function App() {
    * state:
    *   - **stopped / paused**: write the updated manifest, then
    *     `workspace:start(id)` resumes the existing container by id-label
-   *     lookup. Container-level edits (env, image, resources, authMode)
+   *     lookup. Container-level edits (env, image, resources, authMode, mounts)
    *     don't take effect until the container is recreated — Phase 2's
    *     restart-to-apply banner surfaces this.
    *   - **deleted** (manifest exists, no container): the create flow runs
@@ -1244,6 +1248,7 @@ export function App() {
       endpointId: submit.endpointId,
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources,
+      mounts: submit.mounts,
       mirror: submit.mirror,
       accessibility: submit.accessibility,
       createdAt: Date.now(),
@@ -1300,6 +1305,7 @@ export function App() {
       endpointId: submit.endpointId,
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources,
+      mounts: submit.mounts,
       mirror: submit.mirror
     });
     focusWorkspaceWhenWarm(id);
@@ -1333,6 +1339,7 @@ export function App() {
       endpointId: submit.endpointId,
       env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
       resources: submit.resources,
+      mounts: submit.mounts,
       mirror: submit.mirror,
       accessibility: submit.accessibility,
       inbox: submit.inbox,
@@ -1385,6 +1392,7 @@ export function App() {
       secretKeys: [...secretKeys],
       secrets: {},
       resources: source.resources,
+      mounts: source.mounts,
       mirror: source.mirror
     };
     setCloneSource(clone);
@@ -1393,7 +1401,7 @@ export function App() {
   };
 
   const restartFromBanner = async (workspaceId: string, containerId: string): Promise<void> => {
-    // Container-level edits (image/env/resources/authMode) are fixed at
+    // Container-level edits (image/env/resources/authMode/mounts) are fixed at
     // create time, so applying them means RECREATING the container from the
     // saved manifest — not a stop→start, which would reuse the old spec.
     // One keyed toast per recreate: image-pull progress fires many times a
