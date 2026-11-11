@@ -2,6 +2,7 @@
 // fenced store (SPEC §7 *Host automations*). Definitions come only from the
 // host config; script steps, live steps, notifications and other workspaces
 // are refused.
+import { randomUUID } from 'node:crypto';
 import type { TodoSource } from '../preload/inboxTypes.js';
 import { AutomationStore } from '../main/automations/automationStore.js';
 import { createAutomationService } from '../main/automations/automationService.js';
@@ -18,6 +19,7 @@ import type { EventHub } from './events.js';
 import { hostResolver, remoteHostRefusals, substituteSelf } from './hostDefinition.js';
 import type { Logger } from './log.js';
 import { LeaseLostError } from './pgLease.js';
+import { automationOwner, type SessionOwnerStore } from './sessionOwners.js';
 
 export const HOST_CONFIG_ORIGIN = { source: 'host-config' } as const;
 const OPERATOR: TodoSource = { kind: 'user', id: null };
@@ -35,6 +37,8 @@ export interface HostAutomationsOptions {
   mcpArgs: string[];
   events: Pick<EventHub, 'publish'>;
   log: Logger;
+  /** The holder's owner store: each fresh step's session is recorded as the workspace's (D118). */
+  owners?: Pick<SessionOwnerStore, 'record'> & Partial<Pick<SessionOwnerStore, 'release'>>;
   now?: () => number;
   tickMs?: number;
   settleMs?: number;
@@ -82,11 +86,16 @@ export async function startHostAutomations(o: HostAutomationsOptions) {
     execScript: async () => { throw new Error('script steps are not available on a remote host'); },
     busy: () => false,
     spawnFresh: async (_ws, sessionId, args) => {
-      const argv = freshArgv(args, o.mcpArgs);
+      const claudeId = randomUUID();
+      const argv = freshArgv(args, o.mcpArgs, claudeId);
       // A write transaction runs the lease fence. A takeover after it still starts this one session; its run's next write fails.
       await o.inbox.kysely.transaction().execute(async () => undefined);
+      const recorded = (await o.owners?.record({ brokerSessionId: sessionId, sessionId: claudeId, owner: automationOwner(o.workspace().id), startedAt: now() })) ?? false;
       const r = await o.ops.create(sessionId, 120, 40, argv);
-      if (!r.ok) throw new Error(`could not start a fresh session: ${r.error ?? 'unknown broker error'}`);
+      if (!r.ok) {
+        if (recorded) await o.owners?.release?.(sessionId, claudeId).catch(warn('session owner release failed'));
+        throw new Error(`could not start a fresh session: ${r.error ?? 'unknown broker error'}`);
+      }
     },
     freshState: async (_ws, sessionId) => {
       const s = (await o.ops.list()).find((x) => x.id === sessionId);

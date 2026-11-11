@@ -24,6 +24,7 @@ import { brokerRpcChannels } from './rpc.js';
 import { MESH_WAIT_MS, waitForMesh, type MeshState } from './mesh.js';
 import { createPublishRoute, hostSecretValues } from './publishRoute.js';
 import { createHostServer, installCrashGuards, type HostServer } from './server.js';
+import type { OwnerClaim } from './sessionOwners.js';
 
 export const BROKER_POLL_MS = 2_000;
 export const OWNER_PRUNE_MS = 60_000;
@@ -113,6 +114,12 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   let host: HostServer | undefined;
   let holderP: Promise<Holder | null> | null = null;
   let holderNow: Holder | null = null;
+  /** A CREATE that lands while the holder is still starting waits for it rather than run unowned. */
+  async function readyHolder(): Promise<Holder> {
+    const h = holderNow ?? (holderP ? await holderP : null);
+    if (!h || startAbort.signal.aborted) throw new Error('the host store is not open');
+    return h;
+  }
 
   const reloader = createReloader({
     path: env.configPath,
@@ -186,7 +193,18 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   const ops = opts.brokerOps ?? realBrokerOps(env.brokerAddr ?? env.brokerSocket);
   const mcpListen: ListenTarget = env.mcpPort !== null ? { port: env.mcpPort } : { path: env.mcpSocket };
   const mcpArgs = hostMcpArgs(env.mcpAddr ? { tcp: `${env.mcpAddr.host}:${env.mcpAddr.port}` } : { unix: env.mcpSocket });
-  const hub = new AttachHub(ops, { hostPort: env.port, log, createArgs: config.db ? (a) => [...a, ...mcpArgs] : undefined });
+  const hub = new AttachHub(ops, {
+    hostPort: env.port,
+    log,
+    createArgs: config.db ? (a) => [...a, ...mcpArgs] : undefined,
+    ...(config.db
+      ? {
+          recordOwner: async (c: OwnerClaim) => (await readyHolder()).owners.record(c),
+          releaseOwner: async (c: OwnerClaim) => (await readyHolder()).owners.release(c.brokerSessionId, c.sessionId),
+          pinState: async (sessionId: string) => (await readyHolder()).owners.pinState(sessionId)
+        }
+      : {})
+  });
   const events = new EventHub();
   const holderId = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
   // Set by bringUp(); with db the server listens before they exist.

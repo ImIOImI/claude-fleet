@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { FrameType, MAX_FRAME_PAYLOAD, encodeChannelData, encodeFrame } from '../main/broker.js';
 import type { Tier } from '../main/identity/grants.js';
-import { AttachHub, MAX_PENDING_BYTES, MAX_PENDING_FRAMES, ReplayBuffer, trimToSafeStart } from './attachHub.js';
+import { AttachHub, MAX_PENDING_BYTES, MAX_PENDING_FRAMES, ReplayBuffer, trimToSafeStart, type AttachHubOptions } from './attachHub.js';
+import type { OwnerClaim } from './sessionOwners.js';
 import { createLogger } from './log.js';
 import { RUNNER_HOOK_SETTINGS } from '../main/claudeArgs.js';
 import { fakeBroker, inputFrame, jsonFrame, person, resizeFrame, sinkRecorder } from './testFakes.js';
@@ -9,6 +10,12 @@ import { fakeBroker, inputFrame, jsonFrame, person, resizeFrame, sinkRecorder } 
 const alice = person('alice', 1);
 const bob = person('bob', 2);
 const UUID = '0b7e6c1e-1f6a-4c55-9c39-6f1f8d6c2a11';
+const UUID2 = '1c8e7d2f-2a7b-4d66-8d4a-7a2a9e7d3b22';
+/** A v1 UUID: a viewer may pin it only as a session this host already owns. */
+const V1 = 'a8098c1a-f86e-11da-bd1a-00112444be1e';
+const PINNED = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+/** The `--settings` value a CREATE by alice carries. */
+const SETTINGS_ARG = RUNNER_HOOK_SETTINGS;
 
 function setup(tier: Tier, sessions = ['s1'], who = alice) {
   const broker = fakeBroker(sessions);
@@ -156,13 +163,23 @@ describe('CLOSE ownership', () => {
 
 describe('CREATE args', () => {
   it.each([
-    [undefined, ['--settings', RUNNER_HOOK_SETTINGS]],
-    [['--settings', RUNNER_HOOK_SETTINGS, '--session-id', UUID], ['--settings', RUNNER_HOOK_SETTINGS, '--session-id', UUID]],
-    [['--resume', UUID], ['--settings', RUNNER_HOOK_SETTINGS, '--resume', UUID]]
+    [['--settings', RUNNER_HOOK_SETTINGS, '--session-id', UUID], ['--settings', SETTINGS_ARG, '--session-id', UUID]],
+    [['--resume', UUID], ['--settings', SETTINGS_ARG, '--resume', UUID]],
+    [['--resume', UUID.toUpperCase()], ['--settings', SETTINGS_ARG, '--resume', UUID]],
+    [['--session-id', UUID2.toUpperCase()], ['--settings', SETTINGS_ARG, '--session-id', UUID2]]
   ])('accepts %j', async (args, want) => {
     const { broker, v } = setup('session', []);
     await v.receive(jsonFrame(FrameType.CREATE, { id: 'n', args }));
     expect(broker.created).toEqual([{ id: 'n', args: want }]);
+  });
+
+  it.each([[undefined], [[]], [['--settings', RUNNER_HOOK_SETTINGS]]])('pins a fresh claude session id for %j', async (args) => {
+    const { broker, v } = setup('session', []);
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'n', args }));
+    const got = broker.created[0].args;
+    expect(got).toHaveLength(4);
+    expect(got.slice(0, 3)).toEqual(['--settings', SETTINGS_ARG, '--session-id']);
+    expect(got[3]).toMatch(PINNED);
   });
 
   it.each([
@@ -183,9 +200,145 @@ describe('CREATE args', () => {
     await v.receive(jsonFrame(FrameType.CREATE, { id: 'n' }));
     await v.receive(jsonFrame(FrameType.CREATE, { id: 'm', args: ['--resume', UUID] }));
     expect(broker.created.map((c) => c.args)).toEqual([
-      ['--settings', RUNNER_HOOK_SETTINGS, '--mcp-config', '{}'],
-      ['--settings', RUNNER_HOOK_SETTINGS, '--resume', UUID, '--mcp-config', '{}']
+      ['--settings', SETTINGS_ARG, '--session-id', expect.stringMatching(PINNED), '--mcp-config', '{}'],
+      ['--settings', SETTINGS_ARG, '--resume', UUID, '--mcp-config', '{}']
     ]);
+  });
+});
+
+describe('a viewer-supplied claude id', () => {
+  function rig(pinState?: AttachHubOptions['pinState']) {
+    const broker = fakeBroker([]);
+    const claims: OwnerClaim[] = [];
+    const asked: string[] = [];
+    const hub = new AttachHub(broker.ops, {
+      recordOwner: async (c) => { claims.push(c); return true; },
+      ...(pinState ? { pinState: async (id: string) => { asked.push(id); return pinState(id); } } : {})
+    });
+    const rec = sinkRecorder();
+    return { broker, claims, asked, rec, v: hub.viewer({ identity: alice, tier: 'session' }, rec.sink) };
+  }
+
+  it.each([['--session-id'], ['--resume']])('%s: a non-v4 UUID is refused unless this host already owns it', async (flag) => {
+    const fresh = rig();
+    await fresh.v.receive(jsonFrame(FrameType.CREATE, { id: 'n', args: [flag, V1] }));
+    expect([fresh.broker.created, fresh.claims]).toEqual([[], []]);
+    expect(last(fresh.rec).json).toMatchObject({ id: 'n', ok: false, error: 'forbidden: unsupported session id' });
+
+    const unknown = rig(async () => ({ owned: false, published: false }));
+    await unknown.v.receive(jsonFrame(FrameType.CREATE, { id: 'n', args: [flag, V1.toUpperCase()] }));
+    expect(unknown.asked).toEqual([V1]);
+    expect(unknown.broker.created).toEqual([]);
+
+    const owned = rig(async () => ({ owned: true, published: false }));
+    await owned.v.receive(jsonFrame(FrameType.CREATE, { id: 'n', args: [flag, V1.toUpperCase()] }));
+    expect(owned.broker.created).toEqual([{ id: 'n', args: ['--settings', SETTINGS_ARG, flag, V1] }]);
+    expect(owned.claims[0].sessionId).toBe(V1);
+  });
+
+  it.each([['--session-id'], ['--resume']])('%s: a published session id is refused, even a v4 one this host owns', async (flag) => {
+    const { broker, claims, rec, v } = rig(async () => ({ owned: true, published: true }));
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'n', args: [flag, UUID] }));
+    expect([broker.created, claims]).toEqual([[], []]);
+    expect(last(rec).json).toMatchObject({ id: 'n', ok: false, error: 'forbidden: unsupported session id' });
+  });
+
+  it('a failed id lookup refuses the CREATE', async () => {
+    const { broker, claims, rec, v } = rig(async () => { throw new Error('db down'); });
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'n', args: ['--resume', UUID] }));
+    expect([broker.created, claims]).toEqual([[], []]);
+    expect(last(rec).json).toMatchObject({ id: 'n', ok: false, error: 'could not record the session owner' });
+  });
+
+  it('an id the host mints is never looked up', async () => {
+    const { asked, broker, v } = rig(async () => ({ owned: false, published: false }));
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'n' }));
+    expect(asked).toEqual([]);
+    expect(broker.created).toHaveLength(1);
+  });
+});
+
+describe('CREATE records the owner from the principal', () => {
+  function rig(who = alice, tier: Tier = 'session', o: Partial<AttachHubOptions> = {}) {
+    const broker = fakeBroker([]);
+    const claims: OwnerClaim[] = [];
+    const released: OwnerClaim[] = [];
+    const order: string[] = [];
+    const create = broker.ops.create.bind(broker.ops);
+    broker.ops.create = async (...a) => { order.push('create'); return create(...a); };
+    const hub = new AttachHub(broker.ops, {
+      recordOwner: async (c) => {
+        order.push('record');
+        const fresh = !claims.some((x) => x.brokerSessionId === c.brokerSessionId && x.sessionId === c.sessionId);
+        claims.push(c);
+        return fresh;
+      },
+      releaseOwner: async (c) => { released.push(c); },
+      now: () => 42,
+      ...o
+    });
+    const rec = sinkRecorder();
+    return { broker, hub, claims, released, order, rec, v: hub.viewer({ identity: who, tier }, rec.sink) };
+  }
+
+  it('records the verified caller before the broker starts claude; body fields never name the owner', async () => {
+    const { broker, claims, order, v } = rig();
+    await v.receive(jsonFrame(FrameType.CREATE, {
+      id: 'n', args: ['--session-id', UUID], owner: { login: 'mallory', id: 666 }, login: 'mallory', identity: { provider: 'github', id: 666 }
+    }));
+    expect(order).toEqual(['record', 'create']);
+    expect(claims).toEqual([{
+      brokerSessionId: 'n', sessionId: UUID, startedAt: 42,
+      owner: { kind: 'user', provider: 'github', id: '1', login: 'alice', name: null, avatarUrl: null }
+    }]);
+    expect(broker.created).toHaveLength(1);
+  });
+
+  it('records the claude id it pinned when the viewer sent none', async () => {
+    const { broker, claims, v } = rig();
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'n' }));
+    const args = broker.created[0].args;
+    expect(claims[0].sessionId).toBe(args[args.indexOf('--session-id') + 1]);
+  });
+
+  it('refuses the CREATE when the owner row cannot be written', async () => {
+    const { broker, rec, v } = rig(alice, 'session', { recordOwner: async () => { throw new Error('fenced off'); } });
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'n' }));
+    expect(broker.created).toEqual([]);
+    expect(last(rec).json).toMatchObject({ id: 'n', ok: false, error: 'could not record the session owner' });
+  });
+
+  it('refuses an identity that cannot be recorded as an owner', async () => {
+    const { broker, claims, rec, v } = rig(person('-odd', 3));
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'n' }));
+    expect([claims, broker.created]).toEqual([[], []]);
+    expect(last(rec).json).toMatchObject({ ok: false, error: 'could not record the session owner' });
+  });
+
+  it('a broker refusal releases only a row this CREATE wrote; ownership never moves', async () => {
+    const { hub, released } = rig();
+    const vb = hub.viewer({ identity: bob, tier: 'session' }, sinkRecorder().sink);
+    await hub.viewer({ identity: alice, tier: 'session' }, sinkRecorder().sink).receive(jsonFrame(FrameType.CREATE, { id: 'x', args: ['--session-id', UUID] }));
+    await vb.receive(jsonFrame(FrameType.CREATE, { id: 'x', args: ['--session-id', UUID] }));
+    expect(released).toEqual([]);
+    await vb.receive(jsonFrame(FrameType.CREATE, { id: 'x', args: ['--session-id', UUID2] }));
+    expect(released.map((c) => [c.brokerSessionId, c.sessionId, c.owner.login])).toEqual([['x', UUID2, 'bob']]);
+    expect(hub.owners.get('x')).toBe('github:1');
+  });
+
+  it('a failed release still answers the CREATE with the broker error', async () => {
+    const { rec, v, hub } = rig(alice, 'session', { releaseOwner: async () => { throw new Error('fenced off'); } });
+    await hub.viewer({ identity: bob, tier: 'session' }, sinkRecorder().sink).receive(jsonFrame(FrameType.CREATE, { id: 'x' }));
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'x' }));
+    expect(last(rec).json).toMatchObject({ id: 'x', ok: false, error: 'session id in use' });
+  });
+
+  it('a steer or read viewer never reaches the owner hook', async () => {
+    for (const tier of ['read', 'steer'] as const) {
+      const { claims, v } = rig(alice, tier);
+      await v.receive(jsonFrame(FrameType.CREATE, { id: 'n' }));
+      expect(claims).toEqual([]);
+    }
   });
 });
 

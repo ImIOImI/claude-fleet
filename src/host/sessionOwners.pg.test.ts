@@ -80,6 +80,20 @@ describe.skipIf(!isPg)('sessionOwnerStore', () => {
       .toEqual([['tab-a', 50], ['tab-b', 20], ['tab-c', 5]]);
   });
 
+  it('pinState: owned only by a row in this workspace; published by any publish_sessions row', async () => {
+    const s = await rig();
+    expect(await s.pinState(S1)).toEqual({ owned: false, published: false });
+    await s.record(claim('tab-1', S1, ann, 10));
+    expect(await s.pinState(S1)).toEqual({ owned: true, published: false });
+    expect(await sessionOwnerStore(db.stateKysely, OTHER).pinState(S1)).toEqual({ owned: false, published: false });
+    const schema = st!.pg!.schema;
+    await st!.pg!.pool.query(`INSERT INTO ${schema}.publish_partitions (partition_id, owner_provider, owner_id, owner_login, source_workspace_id, created_at)
+      VALUES ('pub_a', 'github', '9', 'cat', $1, 1)`, [OTHER]);
+    await st!.pg!.pool.query(`INSERT INTO ${schema}.publish_sessions (session_id, partition_id, source_session_id, first_published_at, last_published_at)
+      VALUES ($1, 'pub_a', 'src', 1, 1)`, [S3]);
+    expect(await s.pinState(S3)).toEqual({ owned: false, published: true });
+  });
+
   it('release drops only the row it names', async () => {
     const s = await rig();
     await s.record(claim('tab-1', S1, ann, 10));

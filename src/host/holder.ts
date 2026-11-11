@@ -23,6 +23,7 @@ import { hostUsageRecorder, startHostMcp, type HostMcp } from './hostMcp.js';
 import type { Logger } from './log.js';
 import { leaseFence, LeaseLostError } from './pgLease.js';
 import { publishStore, type PublishStore } from './publishStore.js';
+import { sessionOwnerStore, type SessionOwnerStore } from './sessionOwners.js';
 
 export interface HolderOptions {
   db: PostgresStoreConfig;
@@ -57,6 +58,7 @@ export interface Holder {
   automations: HostAutomations;
   history: HistoryReader;
   publish: PublishStore;
+  owners: SessionOwnerStore;
   stop(): Promise<void>;
 }
 
@@ -119,6 +121,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
     : null;
   const hint = trailingHint(() => o.events.publish('observability:summary', { workspaceId: o.workspaceId }), SUMMARY_HINT_MS);
   const publish = publishStore(stateKysely, { onIngested: (id) => indexer?.bump(id) });
+  const owners = sessionOwnerStore(stateKysely, o.workspaceId);
   const ingest = new HostIngest({
     projectsDir: o.projectsDir, workspaceId: o.workspaceId, offsetsRead, log: o.log, rescanMs: o.rescanMs,
     onIngested: (id) => { hint.bump(); indexer?.bump(id); }
@@ -145,7 +148,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
     await ingest.start();
     if (indexer) void indexer.backfill().catch((err: Error) => o.log.log('warn', 'index backfill failed', { error: err.message }));
     automations = await startHostAutomations({
-      inbox: stores.inbox, workspace: o.workspace, ops: o.ops, mcpArgs: o.mcp.args, events: o.events, log: o.log
+      inbox: stores.inbox, workspace: o.workspace, ops: o.ops, owners, mcpArgs: o.mcp.args, events: o.events, log: o.log
     });
     await automations.reconcile(o.automations());
   } catch (err) {
@@ -160,6 +163,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
     automations,
     history: historyReader(stateKysely, o.workspaceId),
     publish,
+    owners,
     stop() {
       stopping ??= stopAll();
       return stopping;
