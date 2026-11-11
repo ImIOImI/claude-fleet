@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { makeScrubber, MIN_SECRET_LEN, type ScrubbedLine } from './scrub.js';
+import { describe, expect, it, vi } from 'vitest';
+import { makeScrubber, MAX_SCRUB_DEPTH, MIN_SECRET_LEN, UnpublishableLineError, type ScrubbedLine } from './scrub.js';
 
 const line = (o: unknown): string => JSON.stringify(o);
 const text = (out: string): string => JSON.parse(out).t as string;
@@ -72,13 +72,71 @@ describe('makeScrubber', () => {
     expect(text(s(line({ t: 'MY_TOKEN=tok-123456789' })))).toBe('MY_TOKEN=[redacted:MY_TOKEN]');
   });
 
-  it('leaves a clean line byte-identical and keeps a tricky line valid JSON', () => {
+  it('leaves a canonical clean line byte-identical and keeps a tricky line valid JSON', () => {
     const clean = '{"type":"user","a":"b c"}';
     expect(makeScrubber([])(clean)).toBe(clean);
-    const spaced = '{ "type": "user",  "n": 1.50 }';
-    expect(makeScrubber([])(spaced)).toBe(spaced);
     const out = makeScrubber([])(line({ a: 'X_TOKEN=', b: 'c' }));
     expect(JSON.parse(out)).toEqual({ a: 'X_TOKEN=', b: 'c' });
+  });
+
+  it('emits a non-canonical clean line in canonical form', () => {
+    expect(makeScrubber([])('{ "type": "user",  "n": 1.50 }')).toBe('{"type":"user","n":1.5}');
+  });
+
+  it('does not leak a secret held by a duplicate key that JSON.parse drops', () => {
+    const s = makeScrubber([{ key: 'K', value: 'supersecret1' }]);
+    expect(s('{"a":"supersecret1","a":"x"}')).toBe('{"a":"x"}');
+    // The escape hides the token from the text backstop; only the dropped value held it.
+    const pattern = s(`{"t":"${'ghp_' + 'A'.repeat(36)}","t":"x"}`.replace('ghp_', 'gh\\u0070_'));
+    expect(pattern).toBe('{"t":"x"}');
+  });
+
+  it('scrubs a secret inside a \\u-escaped object key', () => {
+    const esc = (v: string): string => [...v].map((c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`).join('');
+    const out = makeScrubber([{ key: 'K', value: 'supersecret1' }])(`{"${esc('supersecret1')}":1}`);
+    expect(out).toBe('{"[redacted:K]":1}');
+    const aws = 'AKIA' + 'ABCDEFGHIJKLMNOP';
+    expect(makeScrubber([])(`{"${esc(aws)}":1}`)).toBe('{"[redacted]":1}');
+    // A quoted assignment is only recognised decoded; the serialized backstop sees `\\"`.
+    expect(makeScrubber([])(line({ ['MY_TOKEN="q w"']: 1 }))).toBe(line({ ['MY_TOKEN=[redacted]']: 1 }));
+  });
+
+  it('wraps an unexpected failure in UnpublishableLineError', () => {
+    const spy = vi.spyOn(JSON, 'stringify').mockImplementationOnce(() => {
+      throw new RangeError('boom');
+    });
+    try {
+      expect(() => makeScrubber([])('{"a":1}')).toThrow(UnpublishableLineError);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('is deterministic, so a re-sent line keeps its dedup key', () => {
+    const s = makeScrubber([{ key: 'K', value: 'supersecret1' }]);
+    for (const l of ['{ "a" : "supersecret1",\t"a":"y" }', line({ t: `x supersecret1 ${slack('b')}` }), 'not json supersecret1']) {
+      expect(s(l)).toBe(s(l));
+      expect(s(s(l))).toBe(s(l));
+    }
+  });
+
+  it(`refuses a line nested deeper than ${MAX_SCRUB_DEPTH} with UnpublishableLineError`, () => {
+    const nest = (n: number): string => '['.repeat(n) + '"x"' + ']'.repeat(n);
+    expect(makeScrubber([])(nest(MAX_SCRUB_DEPTH))).toBe(nest(MAX_SCRUB_DEPTH));
+    expect(() => makeScrubber([])(nest(MAX_SCRUB_DEPTH + 1))).toThrow(UnpublishableLineError);
+    const objs = (n: number): string => '{"a":'.repeat(n) + '1' + '}'.repeat(n);
+    expect(() => makeScrubber([])(objs(5000))).toThrow(UnpublishableLineError);
+    expect(() => makeScrubber([])(nest(100_000))).toThrow(UnpublishableLineError);
+  });
+
+  it('replaces secret values in one pass, never rewriting a label', () => {
+    const s = makeScrubber([{ key: 'A', value: 'aaaaaaaaaaaa' }, { key: 'B', value: 'redacted' }]);
+    expect(text(s(line({ t: 'aaaaaaaaaaaa redacted' })))).toBe('[redacted:A] [redacted:B]');
+    expect(s(line({ ['aaaaaaaaaaaa']: 'redacted' }))).toBe(line({ ['[redacted:A]']: '[redacted:B]' }));
+  });
+
+  it('redacts a Slack token after a hyphen', () => {
+    expect(text(makeScrubber([])(line({ t: `token-${slack('b')}` })))).toBe('token-[redacted]');
   });
 
   it('scrubs a non-JSON line as text', () => {

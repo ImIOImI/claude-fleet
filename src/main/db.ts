@@ -1211,13 +1211,17 @@ async function ingestOne(
   // Derive per-event metadata into the sessions row.
   const parsed = p.parsed;
   const message = p.message;
+  // A re-sent published line (no insert) must not roll back a title or prompt set by a newer one.
+  const published = workspaceId.startsWith('pub_'); // partitionIdFor's prefix; publish/protocol.ts stays out of fleet-host's db graph
+  const titleOk = inserted || !published;
   if (p.type === 'system' && typeof parsed.cwd === 'string') {
     await q.updateTable('sessions').set({ cwd: parsed.cwd }).where('id', '=', sessionId).where('cwd', 'is', null).execute();
-  } else if (p.type === 'ai-title' && typeof parsed.aiTitle === 'string') {
+  } else if (titleOk && p.type === 'ai-title' && typeof parsed.aiTitle === 'string') {
     await q.updateTable('sessions').set({ ai_title: parsed.aiTitle }).where('id', '=', sessionId).execute();
-  } else if (p.type === 'last-prompt' && typeof parsed.lastPrompt === 'string' && !isSyntheticPromptText(parsed.lastPrompt)) {
+  } else if (titleOk && p.type === 'last-prompt' && typeof parsed.lastPrompt === 'string' && !isSyntheticPromptText(parsed.lastPrompt)) {
     await setFirstUserMessage(q, sessionId, parsed.lastPrompt);
   } else if (
+    titleOk &&
     p.type === 'user' &&
     parsed.isMeta !== true &&
     typeof message?.content === 'string' &&
@@ -1259,7 +1263,8 @@ async function ingestOne(
 
   // Rate-limit anchors (#plan-usage): the account-wide-true checkpoints.
   // Only on a genuinely-new insert so re-reads after compaction don't re-fire.
-  if (inserted) {
+  // Published lines are other people's limits, not this account's.
+  if (inserted && !published) {
     const at = p.ts ?? Date.now();
     const anchor = extractAnchor(parsed, at, p.dedupKey);
     if (anchor) await insertUsageAnchorQ(q, workspaceId, sessionId, at, anchor);
