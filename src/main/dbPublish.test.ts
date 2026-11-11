@@ -3,7 +3,7 @@ import * as db from './db.js';
 import { partitionIdFor } from './publish/protocol.js';
 import { openTestState } from './store/testStore.js';
 
-describe('state v19: publish tables', () => {
+describe('state v20: publish tables', () => {
   it('creates publish_cursors, publish_withheld and usage_events.origin', async () => {
     await openTestState('pub-schema-');
     const k = db.stateKysely();

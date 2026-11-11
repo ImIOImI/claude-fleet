@@ -2149,7 +2149,7 @@ The holder runs its workspace's automations and serves the fleet-state MCP (§7 
   - unpublishing from a host that is no longer a target.
 - **Host checklist for (e):**
   - a 1 MiB `POST /publish` passes the ALB, the gateway and the sidecar (body limit ≥ 1.1 MiB);
-  - `fleet-host migrate` reports `host` 2 and `state` 19;
+  - `fleet-host migrate` reports `host` 2 and `state` 20;
   - a publish round-trip: a desktop publishes, the host's `events` gains `pub_…` rows and their embeddings;
   - a planted host secret env value is stored as `[redacted:<NAME>]`;
   - a session's `list_sessions` and `search_transcripts` show a published session, and the desktop's federated history doesn't;
