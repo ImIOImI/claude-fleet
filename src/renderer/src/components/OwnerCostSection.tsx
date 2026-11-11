@@ -22,15 +22,25 @@ export function OwnerCostList({ rows }: { rows: OwnerCostRow[] | null | undefine
   );
 }
 
+interface Fetched {
+  workspaceId: string;
+  rows: OwnerCostRow[] | null;
+}
+
+/** Undefined (loading) until rows for this workspace arrive, so a switch never shows the previous one's. */
+export function rowsFor(got: Fetched | undefined, workspaceId: string): OwnerCostRow[] | null | undefined {
+  return got?.workspaceId === workspaceId ? got.rows : undefined;
+}
+
 export function OwnerCostSection({ workspaceId, refreshKey }: { workspaceId: string; refreshKey: number | null }) {
   const [open, setOpen] = useState(false);
-  const [rows, setRows] = useState<OwnerCostRow[] | null | undefined>(undefined);
+  const [got, setGot] = useState<Fetched | undefined>(undefined);
   useEffect(() => {
     if (!open) return;
     let live = true;
     window.api.observability.ownerCosts(workspaceId).then(
-      (r) => live && setRows(r),
-      () => live && setRows(null)
+      (r) => live && setGot({ workspaceId, rows: r }),
+      () => live && setGot({ workspaceId, rows: null })
     );
     return () => {
       live = false;
@@ -41,7 +51,7 @@ export function OwnerCostSection({ workspaceId, refreshKey }: { workspaceId: str
       <button type="button" className="btn-mini obs-owner-toggle" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
         Cost by owner
       </button>
-      {open && <OwnerCostList rows={rows} />}
+      {open && <OwnerCostList rows={rowsFor(got, workspaceId)} />}
     </section>
   );
 }

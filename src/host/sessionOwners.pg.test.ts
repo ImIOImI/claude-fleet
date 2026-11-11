@@ -8,7 +8,9 @@ import { MAX_OWNER_COST_ROWS, type SessionOwner } from '../preload/sessionOwner.
 import { HOST_TRACK } from './hostSchema.js';
 import { leaseFence, LeaseLostError } from './pgLease.js';
 import { automationOwner, ownerOfIdentity, sessionOwnerStore, type OwnerClaim } from './sessionOwners.js';
-import { person } from './testFakes.js';
+import { FrameType } from '../main/broker.js';
+import { AttachHub } from './attachHub.js';
+import { fakeBroker, jsonFrame, person, sinkRecorder } from './testFakes.js';
 
 const HOSTED = '01JC0000000000000000000000';
 const OTHER = '01JC0000000000000000000001';
@@ -80,18 +82,35 @@ describe.skipIf(!isPg)('sessionOwnerStore', () => {
       .toEqual([['tab-a', 50], ['tab-b', 20], ['tab-c', 5]]);
   });
 
-  it('pinState: owned only by a row in this workspace; published by any publish_sessions row', async () => {
+  it('pinState: owned only by a row in this workspace; known by a sessions row here; published by any publish_sessions row', async () => {
     const s = await rig();
-    expect(await s.pinState(S1)).toEqual({ owned: false, published: false });
+    expect(await s.pinState(S1)).toEqual({ owned: false, published: false, known: false });
     await s.record(claim('tab-1', S1, ann, 10));
-    expect(await s.pinState(S1)).toEqual({ owned: true, published: false });
-    expect(await sessionOwnerStore(db.stateKysely, OTHER).pinState(S1)).toEqual({ owned: false, published: false });
+    expect(await s.pinState(S1)).toEqual({ owned: true, published: false, known: false });
+    expect(await sessionOwnerStore(db.stateKysely, OTHER).pinState(S1)).toEqual({ owned: false, published: false, known: false });
+    await db.stateKysely().insertInto('sessions').values(sess(S2, 1)).execute();
+    expect(await s.pinState(S2)).toEqual({ owned: false, published: false, known: true });
+    expect(await sessionOwnerStore(db.stateKysely, OTHER).pinState(S2)).toEqual({ owned: false, published: false, known: false });
     const schema = st!.pg!.schema;
     await st!.pg!.pool.query(`INSERT INTO ${schema}.publish_partitions (partition_id, owner_provider, owner_id, owner_login, source_workspace_id, created_at)
       VALUES ('pub_a', 'github', '9', 'cat', $1, 1)`, [OTHER]);
     await st!.pg!.pool.query(`INSERT INTO ${schema}.publish_sessions (session_id, partition_id, source_session_id, first_published_at, last_published_at)
       VALUES ($1, 'pub_a', 'src', 1, 1)`, [S3]);
-    expect(await s.pinState(S3)).toEqual({ owned: false, published: true });
+    expect(await s.pinState(S3)).toEqual({ owned: false, published: true, known: false });
+  });
+
+  it('a session that predates owner rows is not taken over by its first resumer', async () => {
+    const s = await rig();
+    await db.stateKysely().insertInto('sessions').values(sess(S1, 1)).execute();
+    const broker = fakeBroker([]);
+    const hub = new AttachHub(broker.ops, { recordOwner: (c) => s.record(c), pinState: (id) => s.pinState(id) });
+    const v = hub.viewer({ identity: person('bob', 8), tier: 'session' }, sinkRecorder().sink);
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'tab-b', args: ['--resume', S1] }));
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'tab-c', args: ['--resume', S2] }));
+    expect(broker.created.map((c) => c.id)).toEqual(['tab-b', 'tab-c']);
+    const m = await s.ownersOf([S1, S2], [HOSTED]);
+    expect(m.get(S1) ?? null).toBeNull();
+    expect(m.get(S2)).toEqual(bob);
   });
 
   it('release drops only the row it names', async () => {

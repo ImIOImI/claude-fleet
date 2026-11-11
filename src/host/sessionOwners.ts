@@ -34,8 +34,8 @@ export interface SessionOwnerStore {
   /** False: that (broker session, claude session) already had an owner, which is unchanged. */
   record(c: OwnerClaim): Promise<boolean>;
   release(brokerSessionId: string, sessionId: string): Promise<void>;
-  /** For a viewer-named claude id: an owner row in this workspace, and whether it is a published session. */
-  pinState(sessionId: string): Promise<{ owned: boolean; published: boolean }>;
+  /** For a viewer-named claude id: an owner row in this workspace, whether it is a published session, and a sessions row in this workspace. */
+  pinState(sessionId: string): Promise<{ owned: boolean; published: boolean; known: boolean }>;
   /** Within `workspaceIds` only: a session's earliest row, or its publish partition's owner (D119). */
   ownersOf(sessionIds: readonly string[], workspaceIds: readonly string[]): Promise<Map<string, SessionOwner>>;
   /** Most expensive first, at most MAX_OWNER_COST_ROWS; `since` filters on last_active_at. */
@@ -99,11 +99,12 @@ export function sessionOwnerStore(k: () => Kysely<StateDb>, workspaceId: string)
       });
     },
     async pinState(sessionId) {
-      const r = await sql<{ owned: boolean; published: boolean }>`
+      const r = await sql<{ owned: boolean; published: boolean; known: boolean }>`
         SELECT EXISTS (SELECT 1 FROM session_owners WHERE session_id = ${sessionId} AND workspace_id = ${workspaceId}) AS owned,
-               EXISTS (SELECT 1 FROM publish_sessions WHERE session_id = ${sessionId}) AS published`.execute(k());
+               EXISTS (SELECT 1 FROM publish_sessions WHERE session_id = ${sessionId}) AS published,
+               EXISTS (SELECT 1 FROM sessions WHERE id = ${sessionId} AND workspace_id = ${workspaceId}) AS known`.execute(k());
       const row = r.rows[0];
-      return { owned: row?.owned === true, published: row?.published === true };
+      return { owned: row?.owned === true, published: row?.published === true, known: row?.known === true };
     },
     ownersOf,
     async ownerCosts(workspaceIds, o = {}) {

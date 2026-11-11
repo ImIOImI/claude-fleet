@@ -42,13 +42,15 @@ export interface AttachHubOptions {
   recordOwner?: (c: OwnerClaim) => Promise<boolean>;
   /** Removes the row recordOwner wrote when the broker then refuses the CREATE. */
   releaseOwner?: (c: OwnerClaim) => Promise<void>;
-  /** Whether a viewer-named claude id already has an owner row on this host, or is a published session. */
+  /** Whether a viewer-named claude id already has an owner row or a sessions row on this host, or is a published session. */
   pinState?: (sessionId: string) => Promise<PinState>;
 }
 
 export interface PinState {
   owned: boolean;
   published: boolean;
+  /** A sessions row exists for it in the hosted workspace. */
+  known: boolean;
 }
 
 export interface Principal {
@@ -509,10 +511,13 @@ export class Viewer {
     }
   }
 
-  /** A viewer-named id must look minted or already be this host's, and never a published session's. */
-  private async pinAllowed(sessionId: string): Promise<boolean> {
-    const st = (await this.hub.pinState?.(sessionId)) ?? { owned: false, published: false };
-    return !st.published && (V4_UUID_RE.test(sessionId) || st.owned);
+  /**
+   * A viewer-named id must look minted or already be this host's, and never a published session's.
+   * `record` is false for a session that predates owner rows, so its first resumer doesn't become its owner.
+   */
+  private async pinCheck(sessionId: string): Promise<{ ok: boolean; record: boolean }> {
+    const st = (await this.hub.pinState?.(sessionId)) ?? { owned: false, published: false, known: false };
+    return { ok: !st.published && (V4_UUID_RE.test(sessionId) || st.owned), record: st.owned || !st.known };
   }
 
   private async create(req: Json): Promise<void> {
@@ -521,21 +526,23 @@ export class Viewer {
     const gated = hostCreateArgs(req.args);
     if (!gated) return this.reply(FrameType.CREATED, { id, ok: false, error: 'forbidden: unsupported create args' });
     const refused = (): void => this.reply(FrameType.CREATED, { id, ok: false, error: 'could not record the session owner' });
+    let record = true;
     if (gated.fromViewer) {
-      let ok: boolean;
+      let pin: { ok: boolean; record: boolean };
       try {
-        ok = await this.pinAllowed(gated.sessionId);
+        pin = await this.pinCheck(gated.sessionId);
       } catch (err) {
         this.hub.log?.log('error', 'session id lookup failed', { id, error: err });
         return refused();
       }
-      if (!ok) return this.reply(FrameType.CREATED, { id, ok: false, error: 'forbidden: unsupported session id' });
+      if (!pin.ok) return this.reply(FrameType.CREATED, { id, ok: false, error: 'forbidden: unsupported session id' });
+      record = pin.record;
     }
     const claim = this.ownerClaim(id, gated.sessionId);
     if (!claim) return refused();
     let recorded = false;
     try {
-      recorded = (await this.hub.recordOwner?.(claim)) ?? false;
+      recorded = record ? ((await this.hub.recordOwner?.(claim)) ?? false) : false;
     } catch (err) {
       this.hub.log?.log('error', 'session owner not recorded', { id, error: err });
       return refused();

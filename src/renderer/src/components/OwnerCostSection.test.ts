@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { OwnerCostList, OwnerCostSection } from './OwnerCostSection';
+import { OwnerCostList, OwnerCostSection, rowsFor } from './OwnerCostSection';
 
 describe('OwnerCostSection', () => {
   it('starts collapsed', () => {
@@ -9,6 +9,16 @@ describe('OwnerCostSection', () => {
     expect(h).toContain('Cost by owner');
     expect(h).toContain('aria-expanded="false"');
     expect(h).not.toContain('obs-owner-list');
+  });
+});
+
+describe('rowsFor', () => {
+  const rows = [{ owner: null, sessions: 1, usd: 1 }];
+  it('shows only rows fetched for the workspace on screen', () => {
+    expect(rowsFor({ workspaceId: 'a', rows }, 'a')).toBe(rows);
+    expect(rowsFor({ workspaceId: 'a', rows: null }, 'a')).toBeNull();
+    expect(rowsFor({ workspaceId: 'a', rows }, 'b')).toBeUndefined();
+    expect(rowsFor(undefined, 'a')).toBeUndefined();
   });
 });
 
