@@ -29,6 +29,7 @@ import type { StateDb, UsageAnchorsTable } from './store/stateSchema.js';
 import { parseIngestLine, foldSessionTouch, type ParsedLine } from './state/ingestParse.js';
 import { rawLine } from './state/rawCodec.js';
 import { ATTACHMENT_MIN_BYTES, dedupeAttachment, deflatePayload, expandLine } from './state/attachmentCodec.js';
+import { PARTITION_PREFIX } from './publish/protocol.js';
 
 let db: Database.Database | null = null;
 let kdb: Kysely<StateDb> | null = null;
@@ -1212,7 +1213,7 @@ async function ingestOne(
   const parsed = p.parsed;
   const message = p.message;
   // A re-sent published line (no insert) must not roll back a title or prompt set by a newer one.
-  const published = workspaceId.startsWith('pub_'); // partitionIdFor's prefix; publish/protocol.ts stays out of fleet-host's db graph
+  const published = workspaceId.startsWith(PARTITION_PREFIX);
   const titleOk = inserted || !published;
   if (p.type === 'system' && typeof parsed.cwd === 'string') {
     await q.updateTable('sessions').set({ cwd: parsed.cwd }).where('id', '=', sessionId).where('cwd', 'is', null).execute();

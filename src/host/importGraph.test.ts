@@ -17,6 +17,7 @@ const MAIN_ALLOWED = [/^main\/identity\/[^/]+\.ts$/, /^main\/broker\.ts$/, /^mai
   /^main\/store\/migrations\/(statePg|inboxPg)\.ts$/,
   /^main\/(db|embedderClient|transcriptIndexCore|asyncCache|contextWindow|pricing|usageAnchors|userPromptText|vectors|mcpCore|mcpLines|clipText)\.ts$/,
   /^main\/claims\/searchHits\.ts$/,
+  /^main\/publish\/(protocol|scrub)\.ts$/,
   /^main\/mcpContainerBridge\.ts$/,
   /^main\/state\/(attachmentCodec|ingestParse|rawCodec|serialQueue|transcriptPaths)\.ts$/,
   /^main\/inbox\/(inboxDb|inboxCore|inboxService|inboxPolicy|notifyService|notifyStore|notifyPolicy)\.ts$/,

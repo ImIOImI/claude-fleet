@@ -7,6 +7,7 @@ import type { Duplex } from 'node:stream';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { MAX_FRAME_PAYLOAD } from '../main/broker.js';
 import { VERIFY_TTL_MS } from '../main/identity/verifyCache.js';
+import { PUBLISH_MAX_BODY } from '../main/publish/protocol.js';
 import { ownerKey, type AttachHub, type Principal } from './attachHub.js';
 import { authenticate, bearerToken, type AuthContext, type AuthResult } from './auth.js';
 import type { HostWorkspaceInfo } from './config.js';
@@ -14,11 +15,13 @@ import type { EventHub } from './events.js';
 import type { LeaseState } from './lease.js';
 import type { Logger } from './log.js';
 import type { MeshState } from './mesh.js';
+import type { PublishRoute } from './publishRoute.js';
 import { clientAddress, RejectionBudget, UNAUTH_LIMIT, UnauthLimiter, type UnauthLimitOptions } from './rateLimit.js';
 import { dispatchRpc, type RpcRegistry } from './rpc.js';
 
 export const MAX_RPC_BODY = 64 * 1024;
 export const MAX_RPC_PER_IDENTITY = 8;
+export const MAX_PUBLISH_BODY = PUBLISH_MAX_BODY;
 export const REVERIFY_MS = 60_000;
 /** A viewer this far behind is dropped rather than buffered without bound. */
 export const MAX_VIEWER_BUFFER = 8 << 20;
@@ -64,6 +67,8 @@ export interface HostServerDeps {
   hub: AttachHub;
   events: EventHub;
   rpc: RpcRegistry;
+  /** Absent: no host store, so `/publish` doesn't exist. */
+  publish?: PublishRoute;
   log: Logger;
   reverifyMs?: number;
   /**
@@ -136,13 +141,13 @@ function pathOf(req: IncomingMessage): string | null {
 }
 
 // Pauses at the limit: breaking a for-await would destroy the socket before the 413 is sent.
-function readBody(req: IncomingMessage): Promise<Buffer | null> {
+function readBody(req: IncomingMessage, limit: number): Promise<Buffer | null> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     req.on('data', (c: Buffer) => {
       size += c.length;
-      if (size > MAX_RPC_BODY) {
+      if (size > limit) {
         req.pause();
         resolve(null);
       } else chunks.push(c);
@@ -300,11 +305,12 @@ export function createHostServer(deps: HostServerDeps): HostServer {
       return null;
     }
     const isRpc = path.startsWith('/rpc/');
-    if (path !== '/whoami' && !isRpc && path !== '/attach' && path !== '/events') {
+    const isPublish = !!deps.publish && path === '/publish';
+    if (path !== '/whoami' && !isRpc && !isPublish && path !== '/attach' && path !== '/events') {
       sendJson(res, 404, { error: 'not found' });
       return null;
     }
-    if (req.method !== (isRpc ? 'POST' : 'GET')) {
+    if (req.method !== (isRpc || isPublish ? 'POST' : 'GET')) {
       sendJson(res, 405, { error: 'method not allowed' });
       return null;
     }
@@ -316,6 +322,8 @@ export function createHostServer(deps: HostServerDeps): HostServer {
     const login = auth.identity.login;
     if (path === '/attach' || path === '/events') {
       sendJson(res, 426, { error: 'WebSocket upgrade required' });
+    } else if (isPublish) {
+      await handlePublish(req, res, auth);
     } else if (path === '/whoami') {
       const { id, name, description, color } = deps.workspace();
       const i = auth.identity;
@@ -347,7 +355,7 @@ export function createHostServer(deps: HostServerDeps): HostServer {
     if (!/^application\/json\b/.test(req.headers['content-type'] ?? '')) {
       return sendJson(res, 415, { ok: false, error: 'content-type must be application/json' });
     }
-    const raw = await readBody(req);
+    const raw = await readBody(req, MAX_RPC_BODY);
     if (!raw) {
       res.setHeader('Connection', 'close');
       return sendJson(res, 413, { ok: false, error: 'body too large' });
@@ -366,6 +374,37 @@ export function createHostServer(deps: HostServerDeps): HostServer {
     }
     const r = await dispatchRpc(deps.rpc, channel, body, caller, deps.log);
     sendJson(res, r.status, r.body);
+  }
+
+  async function handlePublish(req: IncomingMessage, res: ServerResponse, caller: Principal): Promise<void> {
+    const route = deps.publish as PublishRoute;
+    const adm = route.admit(caller);
+    if (!adm.ok) {
+      // The body wasn't read: don't let it be parsed as the next request on this connection.
+      res.setHeader('Connection', 'close');
+      return sendJson(res, adm.status, { ok: false, error: adm.error }, adm.retryAfterSec !== undefined ? { 'Retry-After': String(adm.retryAfterSec) } : {});
+    }
+    try {
+      if (!/^application\/json\b/.test(req.headers['content-type'] ?? '')) {
+        res.setHeader('Connection', 'close');
+        return sendJson(res, 415, { ok: false, error: 'content-type must be application/json' });
+      }
+      const raw = await readBody(req, MAX_PUBLISH_BODY);
+      if (!raw) {
+        res.setHeader('Connection', 'close');
+        return sendJson(res, 413, { ok: false, error: 'body too large' });
+      }
+      let body: unknown;
+      try {
+        body = JSON.parse(raw.toString('utf8'));
+      } catch {
+        return sendJson(res, 400, { ok: false, error: 'body is not JSON' });
+      }
+      const r = await route.post(caller, body);
+      sendJson(res, r.status, r.body, r.headers);
+    } finally {
+      adm.release();
+    }
   }
 
   const server = createServer((req, res) => {

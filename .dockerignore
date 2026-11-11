@@ -84,6 +84,8 @@
 !src/preload/federation.ts
 !src/main/embedderClient.ts
 !src/main/transcriptIndexCore.ts
+!src/main/publish/protocol.ts
+!src/main/publish/scrub.ts
 # fleet-embedder for the host image (docker/host/Dockerfile embedder-build stage).
 !embedder/**
 

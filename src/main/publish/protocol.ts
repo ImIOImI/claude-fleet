@@ -5,6 +5,7 @@ export const PUBLISH_MAX_BODY = 1024 * 1024;
 /** INGEST_TX_LINES: one request is one fenced ingest transaction on the host. */
 export const PUBLISH_MAX_LINES = 500;
 export const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
+export const PARTITION_PREFIX = 'pub_';
 export const SESSION_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export interface PublishBatch<L extends string = string> {
@@ -58,7 +59,7 @@ const sha = (s: string): string => createHash('sha256').update(s).digest('hex');
 
 /** Keyed on the account id, not the login: logins can be renamed and reused. */
 export function partitionIdFor(owner: Pick<PublishOwner, 'provider' | 'id'>, sourceWorkspaceId: string): string {
-  return `pub_${sha(`${owner.provider}:${owner.id}\0${sourceWorkspaceId}`).slice(0, 32)}`;
+  return `${PARTITION_PREFIX}${sha(`${owner.provider}:${owner.id}\0${sourceWorkspaceId}`).slice(0, 32)}`;
 }
 
 /** Derived per partition, so no caller can name a session outside its own partition. */
