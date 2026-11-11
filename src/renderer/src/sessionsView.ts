@@ -6,6 +6,7 @@
 // workspace count — the #149 regression.
 
 import type { SessionListItem } from '../../preload';
+import type { WorkspacePublish } from '../../preload/publish';
 import {
   LOCAL_ORIGIN,
   appendSessionPage,
@@ -247,6 +248,19 @@ export function searchUnavailableText(u: UnavailableSource[]): string | null {
 export function remoteNamesMap(workspaces: ReadonlyArray<{ id: string; kind: string; name: string }>): Record<string, string> {
   const out: Record<string, string> = {};
   for (const w of workspaces) if (w.kind === 'remote') out[w.id] = w.name;
+  return out;
+}
+
+/** Local or container workspace id → names of the remote workspaces it publishes to. */
+export function publishTargetsMap(
+  workspaces: ReadonlyArray<{ id: string; kind: string; name: string; publish?: WorkspacePublish }>
+): Record<string, string[]> {
+  const names = remoteNamesMap(workspaces);
+  const out: Record<string, string[]> = {};
+  for (const w of workspaces) {
+    if (w.kind === 'remote' || !w.publish?.to.length) continue;
+    out[w.id] = w.publish.to.map((id) => names[id] ?? id);
+  }
   return out;
 }
 

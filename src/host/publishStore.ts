@@ -1,7 +1,7 @@
 // Published transcripts on the holder's fenced state store (remote-workspaces §7). Rows go into the
 // ordinary state tables under a partition derived from the verified caller (D97, D98).
 import { sql, type Kysely, type Transaction } from 'kysely';
-import { ingestBatch } from '../main/db.js';
+import { deleteSessionRows, ingestBatch } from '../main/db.js';
 import { partitionIdFor, publishedSessionId, type PublishOwner } from '../main/publish/protocol.js';
 import type { ScrubbedLine } from '../main/publish/scrub.js';
 import type { StateDb } from '../main/store/stateSchema.js';
@@ -20,6 +20,8 @@ export interface PublishStore {
   ingest(owner: PublishOwner, sourceWorkspaceId: string, sourceSessionId: string, lines: readonly ScrubbedLine[]): Promise<PublishIngestResult>;
   /** The host MCP's read scope beyond the hosted workspace. */
   partitionIds(): Promise<string[]>;
+  /** The caller's own copies of `sourceSessionId`, in every partition they own; returns how many were removed. */
+  unpublish(owner: PublishOwner, sourceSessionId: string): Promise<number>;
 }
 
 interface Claim {
@@ -73,6 +75,23 @@ export function publishStore(
     async partitionIds() {
       const r = await sql<{ partition_id: string }>`SELECT partition_id FROM publish_partitions ORDER BY partition_id`.execute(k());
       return r.rows.map((x) => x.partition_id);
+    },
+    async unpublish(owner, sourceSessionId) {
+      const r = await sql<{ session_id: string }>`
+        SELECT s.session_id FROM publish_sessions s JOIN publish_partitions p ON p.partition_id = s.partition_id
+        WHERE p.owner_provider = ${owner.provider} AND p.owner_id = ${String(owner.id)} AND s.source_session_id = ${sourceSessionId}
+        ORDER BY s.session_id`.execute(k());
+      for (const { session_id: id } of r.rows) {
+        await k().transaction().execute(async (trx) => {
+          await deleteSessionRows(trx, id);
+          await trx.deleteFrom('session_summaries').where('session_id', '=', id).execute();
+          await trx.deleteFrom('session_tags').where('session_id', '=', id).execute();
+          await trx.deleteFrom('usage_anchors').where('session_id', '=', id).execute();
+          await trx.deleteFrom('usage_events').where('session_id', '=', id).execute();
+          await sql`DELETE FROM publish_sessions WHERE session_id = ${id}`.execute(trx);
+        });
+      }
+      return r.rows.length;
     }
   };
 }

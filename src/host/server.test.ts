@@ -930,6 +930,7 @@ describe('POST /publish', () => {
         posted.push([c.identity.login, b]);
         return { status: 200, body: { ok: true, accepted: 1, inserted: 1 } };
       },
+      remove: async () => ({ status: 200, body: { ok: true, removed: 1 } }),
       ...over
     };
   }
@@ -954,6 +955,31 @@ describe('POST /publish', () => {
       if (body.length) sock.write(body);
     });
   }
+
+  it('DELETE /publish/<id> reaches remove with the caller; other methods are refused', async () => {
+    const seen: unknown[] = [];
+    const r = await start([], { publish: route({ remove: async (c, id) => { seen.push([c.identity.login, id]); return { status: 200, body: { ok: true, removed: 1 } }; } }) });
+    const del = (path: string, token?: string) => fetch(`${r.url}${path}`, { method: 'DELETE', headers: token ? bearer(token) : {} });
+    expect((await del('/publish/abc')).status).toBe(401);
+    expect((await del('/publish/abc', `${TOKEN}r`)).status).toBe(200);
+    expect((await del('/publish/%E0%A4%A', `${TOKEN}r`)).status).toBe(400);
+    expect((await fetch(`${r.url}/publish/abc`, { headers: bearer(`${TOKEN}r`) })).status).toBe(405);
+    expect((await del('/publish', `${TOKEN}r`)).status).toBe(405);
+    expect(seen).toEqual([['reader', 'abc']]);
+  });
+
+  it('DELETE /publish/<id> is admitted like POST, released afterwards, and absent without a publish route', async () => {
+    let released = 0;
+    const refused = await start([], { publish: route({ admit: () => ({ ok: false, status: 429, error: 'slow down', retryAfterSec: 3 }), remove: async () => { throw new Error('not reached'); } }) });
+    const res = await fetch(`${refused.url}/publish/abc`, { method: 'DELETE', headers: bearer(`${TOKEN}r`) });
+    expect(res.status).toBe(429);
+    expect(res.headers.get('retry-after')).toBe('3');
+    const ok = await start([], { publish: route({ admit: () => ({ ok: true, release: () => void released++ }) }) });
+    expect((await fetch(`${ok.url}/publish/abc`, { method: 'DELETE', headers: bearer(`${TOKEN}r`) })).status).toBe(200);
+    expect(released).toBe(1);
+    const none = await start();
+    expect((await fetch(`${none.url}/publish/abc`, { method: 'DELETE', headers: bearer(`${TOKEN}r`) })).status).toBe(404);
+  });
 
   it('does not exist without a publish route', async () => {
     const r = await start();

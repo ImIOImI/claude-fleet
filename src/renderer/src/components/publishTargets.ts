@@ -1,4 +1,5 @@
-// Copy and pure helpers for the Edit form's "Publish transcripts to…" control.
+// Copy and pure helpers for the Edit form's "Publish transcripts to…" control and the Unpublish note.
+import type { UnpublishResult } from '../../../preload/publish';
 
 export const PUBLISH_HINT =
   "Sessions that start after you turn a host on are sent to it as they're recorded. Before anything leaves this computer, this workspace's secrets and your GitHub sign-in are replaced and common token shapes are removed. Earlier sessions are never sent.";
@@ -26,4 +27,12 @@ export function withoutPublish<T extends object>(spec: T): Omit<T, 'publish'> {
 /** `{ publish }` only when the form sent targets (edit mode); otherwise no key at all. */
 export function publishPayload(publishTo: readonly string[] | undefined): { publish?: { to: string[] } } {
   return publishTo === undefined ? {} : { publish: { to: [...publishTo] } };
+}
+
+export function unpublishNote(r: UnpublishResult): string {
+  if (r.failed.length) {
+    const names = r.failed.map((f) => f.name).join(', ');
+    return `Not yet removed from ${names} (${r.failed[0].error}). It won’t be published again; try Unpublish once the host is reachable.`;
+  }
+  return r.removed ? 'Unpublished. This session won’t be published again.' : 'Nothing of this session was published. It won’t be published.';
 }

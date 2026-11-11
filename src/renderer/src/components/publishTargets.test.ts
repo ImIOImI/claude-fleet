@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { publishPayload, publishSummary, publishVisibility, togglePublishTarget, withoutPublish } from './publishTargets';
+import { publishPayload, publishSummary, publishVisibility, togglePublishTarget, unpublishNote, withoutPublish } from './publishTargets';
 
 describe('publish targets', () => {
   it('toggles a target without duplicates', () => {
@@ -29,5 +29,14 @@ describe('publish targets', () => {
     expect('publish' in publishPayload(undefined)).toBe(false);
     expect(publishPayload([])).toEqual({ publish: { to: [] } });
     expect(publishPayload(['R'])).toEqual({ publish: { to: ['R'] } });
+  });
+});
+
+describe('unpublishNote', () => {
+  it('says what happened', () => {
+    expect(unpublishNote({ removed: 1, failed: [] })).toBe('Unpublished. This session won’t be published again.');
+    expect(unpublishNote({ removed: 0, failed: [] })).toBe('Nothing of this session was published. It won’t be published.');
+    expect(unpublishNote({ removed: 0, failed: [{ remoteId: 'r', name: 'ops', error: 'ops is not reachable' }] }))
+      .toBe('Not yet removed from ops (ops is not reachable). It won’t be published again; try Unpublish once the host is reachable.');
   });
 });

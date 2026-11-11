@@ -45,6 +45,7 @@ import { TranscriptSearch } from './TranscriptSearch';
 import { useBlinkSync } from '../blinkSync';
 import type { OpenTabRef } from '../busySessions';
 import { usePortalMenu } from './portalMenu';
+import { unpublishNote } from './publishTargets';
 import { IconPencil, IconRefresh, IconTrash } from './menuIcons';
 
 type Scope = 'workspace' | 'all';
@@ -79,6 +80,8 @@ interface Props {
   remoteResume?: Record<string, RemoteResumeInfo>;
   /** Remote bookmark id → name; names the hosts a transcript search reaches. */
   remoteNames?: Record<string, string>;
+  /** Workspace id → names of the hosts it publishes to; its rows offer Unpublish. */
+  publishTargets?: Record<string, string[]>;
   /** Display prefs (uiPrefs): hide the per-session USD badge. Default show. */
   showSessionCost?: boolean;
   /** Display prefs: trim the Recent list to the newest N (0 = unlimited). */
@@ -116,6 +119,7 @@ export function SessionsPane({
   onResume,
   remoteResume,
   remoteNames,
+  publishTargets,
   showSessionCost = true,
   maxSessions = 0,
   maxSessionAgeDays = 0,
@@ -139,6 +143,7 @@ export function SessionsPane({
   const [tagMenu, setTagMenu] = useState(false);
   const [transcripts, setTranscripts] = useState(false);
   const [pickedId, setPickedId] = useState<string | null>(null);
+  const [publishNote, setPublishNote] = useState<string | null>(null);
 
   // Row ⋮ menu: resume / rename / delete — shared portaled-menu mechanics.
   const { menu: rowMenu, toggle: toggleRowMenu, close: closeRowMenu } = usePortalMenu();
@@ -234,6 +239,14 @@ export function SessionsPane({
       timers.clear();
     };
   }, [load, refreshOrigin]);
+
+  const unpublish = async (s: SessionListItem): Promise<void> => {
+    try {
+      setPublishNote(unpublishNote(await window.api.publish.unpublish(s.workspaceId, s.id)));
+    } catch (err) {
+      setPublishNote(`Unpublish failed: ${String(err)}`);
+    }
+  };
 
   const commitRename = async (id: string): Promise<void> => {
     const name = draftName.trim();
@@ -609,6 +622,7 @@ export function SessionsPane({
           </ul>
         )}
         {unavailableNote && <div className="sessions-unavailable subdued">{unavailableNote}</div>}
+        {publishNote && <div className="sessions-unavailable subdued" role="status">{publishNote}</div>}
         {remote && remoteForScope(remote.more, scope, selectedWorkspaceId).map((m) => (
           <button key={m.origin} className="btn-mini sessions-more" onClick={() => void loadMore(m.origin, m.after)}>
             Load older sessions from {remote.rows.find((r) => r.origin === m.origin)?.workspaceName ?? 'remote'}
@@ -653,6 +667,19 @@ export function SessionsPane({
                     <IconPencil />
                     <span>Rename</span>
                   </button>
+                  {(publishTargets?.[s.workspaceId]?.length ?? 0) > 0 && (
+                    <button
+                      role="menuitem"
+                      title={`Remove from ${publishTargets![s.workspaceId].join(', ')} and never publish it again`}
+                      onClick={() => {
+                        closeRowMenu();
+                        void unpublish(s);
+                      }}
+                    >
+                      <IconTrash />
+                      <span>Unpublish</span>
+                    </button>
+                  )}
                   <div className="ws-chip-menu-divider" />
                   <button
                     role="menuitem"

@@ -8,7 +8,7 @@ import type { Tier } from './identity/grants.js';
 import { redactSecrets } from './identity/redact.js';
 import { normalizeHostUrl, oneLine, safeLogin, wsUrl } from './remoteUrl.js';
 import { SEARCH_UNAVAILABLE } from '../preload/federation.js';
-import { PUBLISH_MAX_BODY, type PublishAck, type PublishBatch } from './publish/protocol.js';
+import { PUBLISH_MAX_BODY, SESSION_UUID_RE, type PublishAck, type PublishBatch } from './publish/protocol.js';
 import type { ScrubbedLine } from './publish/scrub.js';
 
 export { CONTROL_RE, oneLine, safeLogin } from './remoteUrl.js';
@@ -294,6 +294,13 @@ export class RemoteClient {
       { ok?: unknown; accepted?: unknown; inserted?: unknown } | null;
     if (r?.ok !== true || typeof r.accepted !== 'number' || typeof r.inserted !== 'number') throw new RemoteError('protocol', `${this.url} publish failed`);
     return { ok: true, accepted: r.accepted, inserted: r.inserted };
+  }
+
+  async unpublish(sessionId: string): Promise<number> {
+    if (!SESSION_UUID_RE.test(sessionId)) throw new RemoteError('protocol', 'not a session id');
+    const r = (await this.request(`/publish/${sessionId}`, { method: 'DELETE', auth: true, maxBody: MAX_SMALL_BODY })) as { ok?: unknown; removed?: unknown } | null;
+    if (r?.ok !== true || typeof r.removed !== 'number') throw new RemoteError('protocol', `${this.url} unpublish failed`);
+    return r.removed;
   }
 
   /** An authenticated WebSocket to `path`, resolved once open. */

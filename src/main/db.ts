@@ -2677,23 +2677,26 @@ export async function renameSession(id: string, name: string): Promise<void> {
   summaryCache.invalidate(id);
 }
 
+/** A session's rows in every per-session cache table; the caller owns the transaction. */
+export async function deleteSessionRows(q: Kysely<StateDb>, id: string): Promise<void> {
+  await q.deleteFrom('events').where('session_id', '=', id).execute();
+  await q.deleteFrom('session_costs').where('session_id', '=', id).execute();
+  await q.deleteFrom('session_stats').where('session_id', '=', id).execute();
+  await q.deleteFrom('session_tool_counts').where('session_id', '=', id).execute();
+  await q.deleteFrom('broker_sessions').where('claude_session_id', '=', id).execute();
+  await q.deleteFrom('embeddings').where('session_id', '=', id).execute();
+  await q.deleteFrom('event_retention').where('session_id', '=', id).execute();
+  await q.deleteFrom('transcript_offsets').where('session_id', '=', id).execute();
+  await q.deleteFrom('sessions').where('id', '=', id).execute();
+}
+
 /**
  * Drop a session from the cache entirely: its events, rollups, embeddings,
  * retention watermarks, broker mapping and the session row. The on-disk JSONL is removed by the caller (IPC
  * layer), which knows the host path. Idempotent.
  */
 export async function deleteSession(id: string): Promise<void> {
-  await kyselyOrThrow().transaction().execute(async (trx) => {
-    await trx.deleteFrom('events').where('session_id', '=', id).execute();
-    await trx.deleteFrom('session_costs').where('session_id', '=', id).execute();
-    await trx.deleteFrom('session_stats').where('session_id', '=', id).execute();
-    await trx.deleteFrom('session_tool_counts').where('session_id', '=', id).execute();
-    await trx.deleteFrom('broker_sessions').where('claude_session_id', '=', id).execute();
-    await trx.deleteFrom('embeddings').where('session_id', '=', id).execute();
-    await trx.deleteFrom('event_retention').where('session_id', '=', id).execute();
-    await trx.deleteFrom('transcript_offsets').where('session_id', '=', id).execute();
-    await trx.deleteFrom('sessions').where('id', '=', id).execute();
-  });
+  await kyselyOrThrow().transaction().execute((trx) => deleteSessionRows(trx, id));
   summaryCache.invalidate(id);
   spendCache.clear();
 }

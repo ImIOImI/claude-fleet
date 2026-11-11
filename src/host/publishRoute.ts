@@ -1,7 +1,7 @@
-// POST /publish (remote-workspaces §6, §7): admission before the body is read, the server-side
+// POST /publish and DELETE /publish/<id> (remote-workspaces §6, §7): admission before the body is read, the server-side
 // scrub, then the holder's publish store. The owner comes only from the verified identity.
 import type { OutgoingHttpHeaders } from 'node:http';
-import { parsePublishBody, PublishArgError, type PublishBatch, type PublishOwner } from '../main/publish/protocol.js';
+import { parsePublishBody, PublishArgError, SESSION_UUID_RE, type PublishBatch, type PublishOwner } from '../main/publish/protocol.js';
 import { makeScrubber, UnpublishableLineError, type ScrubbedLine, type ScrubValue } from '../main/publish/scrub.js';
 import { ownerKey, type Principal } from './attachHub.js';
 import type { Logger } from './log.js';
@@ -26,6 +26,8 @@ export interface RouteReply {
 export interface PublishRoute {
   admit(caller: Principal): Admission;
   post(caller: Principal, body: unknown): Promise<RouteReply>;
+  /** DELETE /publish/<sessionId>: only the caller's own copies. */
+  remove(caller: Principal, sessionId: string): Promise<RouteReply>;
 }
 
 /** Per identity: one in flight and a token bucket; host-wide: a cap on in-flight publishes. */
@@ -137,6 +139,18 @@ export function createPublishRoute(o: { store: () => PublishStore | null; hostSe
           login: caller.identity.login, sourceWorkspaceId: req.sourceWorkspaceId, sessionId: req.sessionId, lines: lines.length, inserted: r.inserted
         });
         return { status: 200, body: { ok: true, accepted: lines.length, inserted: r.inserted } };
+      } catch (err) {
+        return failureReply(err);
+      }
+    },
+    async remove(caller, sessionId) {
+      if (!SESSION_UUID_RE.test(sessionId)) return refuse('not a session id');
+      const store = o.store();
+      if (!store) return { status: 503, body: { ok: false, error: 'publish unavailable' }, headers: { 'Retry-After': '5' } };
+      try {
+        const removed = await store.unpublish(ownerOf(caller), sessionId);
+        o.log.log('info', 'unpublish', { login: caller.identity.login, sessionId, removed });
+        return removed ? { status: 200, body: { ok: true, removed } } : { status: 404, body: { ok: false, error: 'not published' } };
       } catch (err) {
         return failureReply(err);
       }

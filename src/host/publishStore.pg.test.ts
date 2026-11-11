@@ -164,4 +164,59 @@ describe.skipIf(!isPg)('publishStore', () => {
     ]);
     expect(await db.usefulMarkCounts([pub.sessionId, 'own-1', 'gone'])).toEqual(new Map([[pub.sessionId, 1]]));
   });
+
+  it('unpublish removes only the caller’s copy: events, embeddings, usage rows and the session claim', async () => {
+    const s = await rig();
+    const mine = await s.ingest(ANN, SRC, SID, [turn('u1', 'user', 'ann words')]);
+    const theirs = await s.ingest(BOB, SRC, SID, [turn('u1', 'user', 'bob words')]);
+    await db.insertEmbeddings([{ workspaceId: mine.partitionId, sessionId: mine.sessionId, kind: 'turn', refEventId: null, ts: 1, text: 'ann words', modelId: 'm', dim: EMBED_DIM, vec: Buffer.from(new Float32Array(EMBED_DIM).fill(1 / Math.sqrt(EMBED_DIM)).buffer), dedupKey: 'd1' }]);
+    await hostUsageRecorder({ workspaceId: HOSTED, sessionId: mine.sessionId, kind: 'marked-useful' });
+    expect(await s.unpublish(ANN, SID)).toBe(1);
+    expect(await db.eventsForSession(mine.sessionId)).toEqual([]);
+    expect(await db.getSession(mine.sessionId)).toBeNull();
+    const k = db.stateKysely();
+    expect(await k.selectFrom('embeddings').select('id').where('session_id', '=', mine.sessionId).execute()).toEqual([]);
+    expect(await k.selectFrom('usage_events').select('id').where('session_id', '=', mine.sessionId).execute()).toEqual([]);
+    expect((await st!.pg!.pool.query(`SELECT session_id FROM ${st!.pg!.schema}.publish_sessions`)).rows).toEqual([{ session_id: theirs.sessionId }]);
+    expect(await db.eventsForSession(theirs.sessionId)).toHaveLength(1);
+    expect(await s.unpublish(ANN, SID)).toBe(0);
+  });
+
+  it('unpublish reaches every partition the caller owns and nothing keyed by another id', async () => {
+    const s = await rig();
+    const SRC2 = '01JC0000000000000000000006';
+    const OTHER = '99999999-2222-4333-8444-555555555555';
+    const a = await s.ingest(ANN, SRC, SID, [turn('u1', 'user', 'a')]);
+    const b = await s.ingest(ANN, SRC2, SID, [turn('u1', 'user', 'b')]);
+    const keep = await s.ingest(ANN, SRC, OTHER, [turn('u1', 'user', 'keep')]);
+    const bob = await s.ingest(BOB, SRC, SID, [turn('u1', 'user', 'bob')]);
+    await db.stateKysely().insertInto('sessions').values({
+      id: SID, workspace_id: HOSTED, cwd: null, started_at: 1, last_active_at: 1, ai_title: null, first_user_message: null, user_set_name: null
+    }).execute();
+    // Stored (derived) ids are not source ids: naming Bob's stored id reaches nothing.
+    expect(await s.unpublish(ANN, bob.sessionId)).toBe(0);
+    expect(await s.unpublish(ANN, a.sessionId)).toBe(0);
+    expect(await s.unpublish(ANN, SID)).toBe(2);
+    expect(await db.getSession(a.sessionId)).toBeNull();
+    expect(await db.getSession(b.sessionId)).toBeNull();
+    expect(await db.eventsForSession(keep.sessionId)).toHaveLength(1);
+    expect(await db.eventsForSession(bob.sessionId)).toHaveLength(1);
+    expect((await db.getSession(SID))?.workspaceId).toBe(HOSTED);
+    expect(await count('publish_sessions')).toBe(2);
+  });
+
+  it('unpublish deletes nothing once the lease is lost', async () => {
+    const s = await rig();
+    const pub = await s.ingest(ANN, SRC, SID, [turn('u1', 'user', 'x')]);
+    const schema = st!.pg!.schema;
+    await st!.pg!.pool.query(`INSERT INTO ${schema}.host_lease VALUES ($1, 'me', 2, clock_timestamp() + interval '1 minute')`, [HOSTED]);
+    await db.closeDb();
+    await db.openDbPostgres(st!.pg!.pool, {
+      migrate: false,
+      afterBeginWrite: leaseFence({ workspaceId: HOSTED, holder: 'me', epoch: () => 1, onLost: () => undefined })
+    });
+    await expect(s.unpublish(ANN, SID)).rejects.toThrow(LeaseLostError);
+    expect(await db.eventsForSession(pub.sessionId)).toHaveLength(1);
+    expect(await count('publish_sessions')).toBe(1);
+  });
 });

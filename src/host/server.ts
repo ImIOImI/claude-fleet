@@ -15,7 +15,7 @@ import type { EventHub } from './events.js';
 import type { LeaseState } from './lease.js';
 import type { Logger } from './log.js';
 import type { MeshState } from './mesh.js';
-import type { PublishRoute } from './publishRoute.js';
+import type { PublishRoute, RouteReply } from './publishRoute.js';
 import { clientAddress, RejectionBudget, UNAUTH_LIMIT, UnauthLimiter, type UnauthLimitOptions } from './rateLimit.js';
 import { dispatchRpc, type RpcRegistry } from './rpc.js';
 
@@ -305,12 +305,13 @@ export function createHostServer(deps: HostServerDeps): HostServer {
       return null;
     }
     const isRpc = path.startsWith('/rpc/');
-    const isPublish = !!deps.publish && path === '/publish';
+    const isPublish = !!deps.publish && (path === '/publish' || path.startsWith('/publish/'));
     if (path !== '/whoami' && !isRpc && !isPublish && path !== '/attach' && path !== '/events') {
       sendJson(res, 404, { error: 'not found' });
       return null;
     }
-    if (req.method !== (isRpc || isPublish ? 'POST' : 'GET')) {
+    const method = isRpc || path === '/publish' ? 'POST' : isPublish ? 'DELETE' : 'GET';
+    if (req.method !== method) {
       sendJson(res, 405, { error: 'method not allowed' });
       return null;
     }
@@ -323,7 +324,7 @@ export function createHostServer(deps: HostServerDeps): HostServer {
     if (path === '/attach' || path === '/events') {
       sendJson(res, 426, { error: 'WebSocket upgrade required' });
     } else if (isPublish) {
-      await handlePublish(req, res, auth);
+      await handlePublish(req, res, path, auth);
     } else if (path === '/whoami') {
       const { id, name, description, color } = deps.workspace();
       const i = auth.identity;
@@ -376,7 +377,7 @@ export function createHostServer(deps: HostServerDeps): HostServer {
     sendJson(res, r.status, r.body);
   }
 
-  async function handlePublish(req: IncomingMessage, res: ServerResponse, caller: Principal): Promise<void> {
+  async function handlePublish(req: IncomingMessage, res: ServerResponse, path: string, caller: Principal): Promise<void> {
     const route = deps.publish as PublishRoute;
     const adm = route.admit(caller);
     if (!adm.ok) {
@@ -385,22 +386,37 @@ export function createHostServer(deps: HostServerDeps): HostServer {
       return sendJson(res, adm.status, { ok: false, error: adm.error }, adm.retryAfterSec !== undefined ? { 'Retry-After': String(adm.retryAfterSec) } : {});
     }
     try {
-      if (!/^application\/json\b/.test(req.headers['content-type'] ?? '')) {
-        res.setHeader('Connection', 'close');
-        return sendJson(res, 415, { ok: false, error: 'content-type must be application/json' });
+      let r: RouteReply;
+      if (path === '/publish') {
+        if (!/^application\/json\b/.test(req.headers['content-type'] ?? '')) {
+          res.setHeader('Connection', 'close');
+          return sendJson(res, 415, { ok: false, error: 'content-type must be application/json' });
+        }
+        const raw = await readBody(req, MAX_PUBLISH_BODY);
+        if (!raw) {
+          res.setHeader('Connection', 'close');
+          return sendJson(res, 413, { ok: false, error: 'body too large' });
+        }
+        let body: unknown;
+        try {
+          body = JSON.parse(raw.toString('utf8'));
+        } catch {
+          return sendJson(res, 400, { ok: false, error: 'body is not JSON' });
+        }
+        r = await route.post(caller, body);
+      } else {
+        // A DELETE body is never read.
+        if ((req.headers['content-length'] ?? '0') !== '0' || req.headers['transfer-encoding'] !== undefined) {
+          res.setHeader('Connection', 'close');
+        }
+        let id: string;
+        try {
+          id = decodeURIComponent(path.slice('/publish/'.length));
+        } catch {
+          return sendJson(res, 400, { ok: false, error: 'not a session id' });
+        }
+        r = await route.remove(caller, id);
       }
-      const raw = await readBody(req, MAX_PUBLISH_BODY);
-      if (!raw) {
-        res.setHeader('Connection', 'close');
-        return sendJson(res, 413, { ok: false, error: 'body too large' });
-      }
-      let body: unknown;
-      try {
-        body = JSON.parse(raw.toString('utf8'));
-      } catch {
-        return sendJson(res, 400, { ok: false, error: 'body is not JSON' });
-      }
-      const r = await route.post(caller, body);
       sendJson(res, r.status, r.body, r.headers);
     } finally {
       adm.release();

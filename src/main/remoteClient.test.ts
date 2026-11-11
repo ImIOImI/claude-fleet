@@ -417,6 +417,7 @@ describe('RemoteClient.publish', () => {
       publish: {
         admit: () => ({ ok: true, release: () => undefined }),
         post: async (c, b) => { seen.push([c.identity.login, b]); return { status: 200, body: { ok: true, accepted: 1, inserted: 1 } }; },
+        remove: async (_c, id) => (id === SID ? { status: 200, body: { ok: true, removed: 2 } } : { status: 404, body: { ok: false, error: 'not published' } }),
         ...route
       }
     });
@@ -438,6 +439,21 @@ describe('RemoteClient.publish', () => {
     await expect(client.publish({ sourceWorkspaceId: SRC, sessionId: SID, events: [big] })).rejects.toMatchObject({ kind: 'protocol', status: 413 });
     expect(seen).toEqual([]);
     expect(calls.token).toBe(0);
+  });
+
+  it('unpublish returns the removed count and maps 404 to a protocol error', async () => {
+    const { client } = await publishHost({});
+    expect(await client.unpublish(SID)).toBe(2);
+    await expect(client.unpublish('99999999-2222-4333-8444-555555555555')).rejects.toMatchObject({ kind: 'protocol', status: 404 });
+    await expect(client.unpublish('../x')).rejects.toMatchObject({ kind: 'protocol' });
+  });
+
+  it('unpublish refuses a bad id before asking for a token, and a malformed reply', async () => {
+    const { client, calls } = await publishHost({});
+    await expect(client.unpublish('../x')).rejects.toMatchObject({ kind: 'protocol' });
+    expect(calls.token).toBe(0);
+    const odd = await publishHost({ remove: async () => ({ status: 200, body: { ok: true } }) });
+    await expect(odd.client.unpublish(SID)).rejects.toMatchObject({ kind: 'protocol' });
   });
 
   it('maps a 429 to unreachable with its Retry-After', async () => {

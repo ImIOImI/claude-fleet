@@ -165,9 +165,11 @@ import {
   deletePublishCursor,
   deletePublishCursorsTo,
   workspaceMaxEventId,
+  withholdSession,
 } from './db.js';
 import { publishOnWrite } from '../preload/publish.js';
 import { startPublisher, type Publisher } from './publish/publisher.js';
+import { registerPublishIpc } from './publish/publishIpc.js';
 import { publishSecretValues } from './publish/secretValues.js';
 import { revokePublishTarget } from './publish/revoke.js';
 import type { EmbedFn } from './vectors.js';
@@ -2193,6 +2195,12 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     });
     jsonlWatcher.on('ingest', ({ workspaceId }) => publisher?.bump(workspaceId));
   }
+  registerPublishIpc(ipcMain, {
+    readManifest: readWorkspaceManifest,
+    unpublish: (url, sessionId) => remoteBackend.clientFor(url).unpublish(sessionId),
+    withhold: withholdSession,
+    idle: (ws) => publisher?.idle(ws) ?? Promise.resolve()
+  });
   relayTimer = setInterval(() => summaryRelay.sync(), 15_000);
   relayTimer.unref?.();
   loadoutSources.setGithubTokenProvider(() => identity.packagesToken());

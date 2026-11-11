@@ -18,15 +18,21 @@ const quiet = createLogger(() => undefined);
 
 function fakeStore(fail?: unknown) {
   const calls: Array<{ owner: unknown; src: string; sid: string; lines: string[] }> = [];
+  const removed: Array<{ owner: unknown; sid: string }> = [];
   const store: PublishStore = {
     ingest: async (owner, src, sid, lines) => {
       if (fail) throw fail;
       calls.push({ owner, src, sid, lines: [...lines] });
       return { sessionId: 'stored', partitionId: 'pub_x', inserted: lines.length };
     },
-    partitionIds: async () => []
+    partitionIds: async () => [],
+    unpublish: async (owner, sid) => {
+      if (fail) throw fail;
+      removed.push({ owner, sid });
+      return sid === SID ? 1 : 0;
+    }
   };
-  return { store, calls };
+  return { store, calls, removed };
 }
 
 describe('createPublishRoute', () => {
@@ -188,5 +194,31 @@ describe('hostSecretValues', () => {
     const names = ['GH_TOKEN', 'TOKEN', 'X_SECRET', 'DB_PASSWORD', 'DB_PASSWD', 'AWS_CREDENTIAL', 'GCP_CREDENTIALS', 'api_key', 'MONKEY', 'TOKENS', 'SECRET_NAME'];
     const env = Object.fromEntries(names.map((n) => [n, 'v'.repeat(10)]));
     expect(hostSecretValues(env).map((v) => v.key)).toEqual(['GH_TOKEN', 'TOKEN', 'X_SECRET', 'DB_PASSWORD', 'DB_PASSWD', 'AWS_CREDENTIAL', 'GCP_CREDENTIALS', 'api_key']);
+  });
+});
+
+describe('remove', () => {
+  it('validates the id, answers 404 when nothing was published, 200 with the count otherwise', async () => {
+    const r = createPublishRoute({ store: () => fakeStore().store, hostSecrets: [], log: quiet });
+    expect((await r.remove(ann, 'nope')).status).toBe(400);
+    expect(await r.remove(ann, '99999999-2222-4333-8444-555555555555')).toEqual({ status: 404, body: { ok: false, error: 'not published' } });
+    expect(await r.remove(ann, SID)).toEqual({ status: 200, body: { ok: true, removed: 1 } });
+    expect((await createPublishRoute({ store: () => null, hostSecrets: [], log: quiet }).remove(ann, SID)).status).toBe(503);
+  });
+
+  it('removes only the verified caller’s copies and never reaches the store with a bad id', async () => {
+    const f = fakeStore();
+    const r = createPublishRoute({ store: () => f.store, hostSecrets: [], log: quiet });
+    await r.remove(ann, SID.toUpperCase().replace(/^1/, 'A'));
+    await r.remove(ann, '../x');
+    await r.remove(ann, SID);
+    expect(f.removed).toEqual([{ owner: { provider: 'github', id: 7, login: 'ann' }, sid: SID }]);
+  });
+
+  it('maps a lost lease to 503 standby and rethrows anything else', async () => {
+    const lost = createPublishRoute({ store: () => fakeStore(new LeaseLostError('gone')).store, hostSecrets: [], log: quiet });
+    expect(await lost.remove(ann, SID)).toEqual({ status: 503, body: { ok: false, error: 'standby' }, headers: { 'Retry-After': '5' } });
+    const boom = createPublishRoute({ store: () => fakeStore(new Error('boom')).store, hostSecrets: [], log: quiet });
+    await expect(boom.remove(ann, SID)).rejects.toThrow('boom');
   });
 });

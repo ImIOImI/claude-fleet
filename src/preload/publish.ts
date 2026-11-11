@@ -33,3 +33,9 @@ export function publishForWrite(incoming: unknown, existing: WorkspacePublish | 
 export function publishOnWrite(spec: object, existing: WorkspacePublish | undefined, remoteIds: ReadonlySet<string>, now: number): WorkspacePublish | undefined {
   return 'publish' in spec ? publishForWrite((spec as { publish?: unknown }).publish, existing, remoteIds, now) : existing;
 }
+
+export interface UnpublishResult {
+  removed: number;
+  /** Hosts that couldn't be reached or refused; the session is withheld from publishing regardless. */
+  failed: { remoteId: string; name: string; error: string }[];
+}
