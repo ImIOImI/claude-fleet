@@ -27,6 +27,8 @@ const WORKSPACES = 6;
 const T0 = 1_780_000_000_000;
 const ROUNDS = Number(process.env.INGEST_STALL_ROUNDS ?? 30);
 const BATCH = 12;
+/** ~64% of the line mix is user/assistant: 12,500 lines ≈ 8k turns. */
+const DRAIN_LINES = 12_500;
 
 const pad = (n: number, c = 'x') => c.repeat(n);
 const ATT = Array.from({ length: 8 }, (_, v) => ({
@@ -144,13 +146,18 @@ describe.skipIf(!ON)('ingest stall bench (#583)', () => {
         note('list_ws', await phase(() => db.listSessions(ws)));
         note('list_all', await phase(() => db.listSessions()));
       }
+      // Backlog drain: a session with ~8k unembedded turns indexed in EMBED_BATCH reads.
+      await ingestSession('ws0', 'drain', 0, DRAIN_LINES, T0 + 2 * 10 ** 9);
+      const drain = await phase(() => indexSessionTurnsWith(span, 'drain', embed));
+      const drainReads = drain.stmts.filter((x) => /left join "embeddings"|"embeddings" as "em" where "em"."ref_event_id"/.test(x.sql));
+      console.log(`drain: ${drainReads.length} pending-turn reads, ${drain.ms.toFixed(1)} ms sync total, reads ${drainReads.reduce((a, x) => a + x.ms, 0).toFixed(1)} ms`);
       const out: Record<string, { p50: number; p95: number }> = {};
       for (const [k, xs] of Object.entries(phases)) out[k] = { p50: +pct(xs, 0.5).toFixed(2), p95: +pct(xs, 0.95).toFixed(2) };
       console.table(out);
       const rows = [...top.entries()].map(([k, xs]) => ({ stmt: k, n: xs.length, p50: +pct(xs, 0.5).toFixed(2), p95: +pct(xs, 0.95).toFixed(2) }))
         .sort((a, b) => b.p50 - a.p50).slice(0, 15);
       console.table(rows);
-      if (process.env.INGEST_STALL_OUT) writeFileSync(process.env.INGEST_STALL_OUT, JSON.stringify({ phases: out, top: rows }, null, 2));
+      if (process.env.INGEST_STALL_OUT) writeFileSync(process.env.INGEST_STALL_OUT, JSON.stringify({ phases: out, top: rows, drain: { reads: drainReads.length, sync_ms: drain.ms, read_ms: drainReads.reduce((a, x) => a + x.ms, 0) } }, null, 2));
     } finally {
       await db.closeDb();
       rmSync(dir, { recursive: true, force: true });

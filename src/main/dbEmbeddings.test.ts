@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { deleteEmbeddingsForOtherModels, ingestLine, insertEmbedding, insertEmbeddings, unembeddedTurnEvents, maxEventId, sessionsWithPendingTurns, sessionsWithPendingTurnsQuery, stateKysely, withRawSqlite } from './db.js';
+import { deleteEmbeddingsForOtherModels, ingestBatch, ingestLine, pendingTurnsQuery, turnBoundaryQuery, insertEmbedding, insertEmbeddings, unembeddedTurnEvents, maxEventId, sessionsWithPendingTurns, sessionsWithPendingTurnsQuery, stateKysely, withRawSqlite } from './db.js';
 import { encodeVector, EMBED_MODEL_ID, EMBED_DIM } from './vectors.js';
 import { isPg, openTestState, type TestState } from './store/testStore.js';
+import { explainPlan } from './state/explainPlan.js';
 
 const WS = '01WS';
 const SES = 'ses-1';
@@ -66,14 +67,40 @@ describe('embeddings schema + helpers', () => {
     expect(await unembeddedTurnEvents(SES, 'other-model')).toHaveLength(4);
   });
 
-  it.skipIf(isPg)('the pending-turns boundary walks idx_events_session_type newest-first with no sort (#583)', async () => {
-    const plan = await withRawSqlite((d) => (d.prepare(`EXPLAIN QUERY PLAN
-      SELECT e.id FROM events e WHERE e.session_id = ? AND e.type = ?
-        AND EXISTS (SELECT em.id FROM embeddings em WHERE em.ref_event_id = e.id AND em.kind = 'turn' AND em.model_id = ?)
-      ORDER BY e.id DESC LIMIT 1`).all(SES, 'user', EMBED_MODEL_ID) as { detail: string }[]).map((r) => r.detail).join('\n'));
-    expect(plan).toMatch(/idx_events_session_type/);
-    expect(plan).toMatch(/idx_emb_ref_event/);
-    expect(plan).not.toMatch(/TEMP B-TREE/);
+  it('a pending turn below an embedded one is not re-read (the ordering SPEC §7 relies on)', async () => {
+    await ingestLine(WS, SES, userLine('u1', 'one'));
+    await ingestLine(WS, SES, userLine('u2', 'two'));
+    const [first, second] = await unembeddedTurnEvents(SES, EMBED_MODEL_ID);
+    await insertEmbeddings([{ workspaceId: WS, sessionId: SES, kind: 'turn', refEventId: second.id, ts: second.ts, text: 'two',
+      modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec: encodeVector(unitVec()), dedupKey: `t${second.id}` }]);
+    expect(first.id).toBeLessThan(second.id);
+    expect(await unembeddedTurnEvents(SES, EMBED_MODEL_ID)).toEqual([]);
+    // A caller-supplied lower bound reads from there instead.
+    expect((await unembeddedTurnEvents(SES, EMBED_MODEL_ID, 10, 0)).map((e) => e.id)).toEqual([first.id]);
+  });
+
+  it('concurrent batches for one session commit their ids in order (#583)', async () => {
+    const n = 40;
+    const batch = (tag: string) => Array.from({ length: n }, (_, i) => userLine(`${tag}${i}`, `${tag} ${i}`));
+    await Promise.all([ingestBatch(WS, SES, batch('a')), ingestBatch(WS, SES, batch('b')), ingestBatch(WS, SES, batch('c'))]);
+    const rows = await unembeddedTurnEvents(SES, EMBED_MODEL_ID, 1000);
+    expect(rows).toHaveLength(3 * n);
+    // Each batch's ids are one contiguous run: no transaction's ids interleave with another's.
+    const tags = rows.map((r) => (JSON.parse(r.rawJsonl) as { uuid: string }).uuid[0]);
+    const runs = tags.filter((t, i) => i === 0 || t !== tags[i - 1]);
+    expect(runs).toHaveLength(3);
+  });
+
+  it.skipIf(isPg)('the pending-turn reads walk idx_events_session_type with no sort (#583)', async () => {
+    const d = (await withRawSqlite((raw) => raw))!;
+    const boundary = explainPlan(d, turnBoundaryQuery(stateKysely(), SES, 'user', EMBED_MODEL_ID));
+    expect(boundary).toMatch(/SEARCH e USING (COVERING )?INDEX idx_events_session_type \(session_id=\? AND type=\?\)/);
+    expect(boundary).toMatch(/idx_emb_ref_event/);
+    expect(boundary).not.toMatch(/TEMP B-TREE/);
+    const tail = explainPlan(d, pendingTurnsQuery(stateKysely(), SES, 'assistant', EMBED_MODEL_ID, 0, 8));
+    expect(tail).toMatch(/SEARCH e USING INDEX idx_events_session_type \(session_id=\? AND type=\? AND rowid>\?\)/);
+    expect(tail).toMatch(/SEARCH em USING INDEX idx_emb_ref_event \(ref_event_id=\?\)/);
+    expect(tail).not.toMatch(/TEMP B-TREE/);
   });
 
   it('maxEventId returns the largest event id for a session', async () => {

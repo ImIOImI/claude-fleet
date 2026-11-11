@@ -103,6 +103,8 @@ describe.skipIf(!isPg)('Postgres baseline schema parity', () => {
     // A placeholder's vec is NULL on Postgres (vector(384) has no empty value);
     // SQLite keeps NOT NULL and stores an empty BLOB.
     want.embeddings.columns.vec = { notNull: false };
+    // SQLite's index ends in the rowid implicitly; Postgres names id (step 19).
+    want.events.indexes.idx_events_session_type = [...want.events.indexes.idx_events_session_type, 'id'];
     await db.closeDb();
     rmSync(dir, { recursive: true, force: true });
     const t = await testPgSchema();
