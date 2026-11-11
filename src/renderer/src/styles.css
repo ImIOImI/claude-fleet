@@ -3898,3 +3898,10 @@ button.switch { padding: 0; cursor: pointer; }
 .store-choice-notice { color: var(--warn); }
 .store-choice-restart { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
 .store-confirm .store-confirm-step { margin: 8px 0; font-size: 12.5px; line-height: 1.5; color: var(--ink-1); }
+
+.publish-target {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 4px 0;
+}

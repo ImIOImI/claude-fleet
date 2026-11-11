@@ -162,7 +162,9 @@ import {
   publishableEvents,
   setPublishCursor,
   withheldSessions,
+  deletePublishCursor,
 } from './db.js';
+import { publishOnWrite } from '../preload/publish.js';
 import { startPublisher, type Publisher } from './publish/publisher.js';
 import { publishSecretValues } from './publish/secretValues.js';
 import type { EmbedFn } from './vectors.js';
@@ -1302,7 +1304,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // The id becomes this workspace's vault scope (resolveEnv injects that
       // bag into its env), so it may never name a host-only scope (#444).
       assertRendererWorkspaceId(input?.id);
-      assertNotRemoteSpec(input.kind, await readWorkspaceManifest(input.id));
+      const prior = await readWorkspaceManifest(input.id);
+      assertNotRemoteSpec(input.kind, prior);
       const kind: WorkspaceKind = input.kind ?? 'container';
       const launcher = kind === 'local' ? sanitizeLauncher(input.launcher) : undefined;
       // Local workspaces run `claude` in a user-chosen host directory; validate
@@ -1382,6 +1385,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         mounts,
         mirror: input.mirror ?? FACTORY_MIRROR,
         knowledgeCapture,
+        // Recreating a deleted workspace keeps its opt-in; the renderer can't set it here.
+        publish: prior?.publish,
         createdAt: ws.createdAt,
         lastUsedAt: ws.lastUsedAt
       };
@@ -1606,6 +1611,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       }
       // Authoritative: an edit that removes all mounts writes undefined, clearing them.
       const mounts = await mountsFor(spec.kind, spec.id, (spec as { mounts?: unknown }).mounts, existing?.mounts);
+      const remoteIds = new Set((await listWorkspaceManifests()).filter((m) => m.kind === 'remote').map((m) => m.id));
+      const publish = publishOnWrite(spec, existing?.publish, remoteIds, Date.now());
       // Merge OVER the existing manifest so fields the renderer doesn't manage
       // survive an edit. The edit form sends every form field (those win) but
       // omits `control` (committee grants, edited in the Committee rail #118)
@@ -1620,8 +1627,11 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         workspaceRoot,
         launcher: incomingLauncher,
         mounts,
+        publish,
         remote: undefined
       });
+      for (const id of existing?.publish?.to ?? []) if (!publish?.to.includes(id)) await deletePublishCursor(spec.id, id);
+      publisher?.bump(spec.id);
       // #483 §5a: a form edit of the capture settings is logged (actor 'user')
       // and re-applies transcript retention — both listen for this event.
       const afterCapture = effectiveCaptureSettings(await readWorkspaceManifest(spec.id));

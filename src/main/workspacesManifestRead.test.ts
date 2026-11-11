@@ -73,3 +73,9 @@ it('drops mounts on a local manifest', async () => {
   ] });
   expect((await readWorkspaceManifest('D'))?.mounts).toBeUndefined();
 });
+
+it('keeps a sanitized publish block on a local manifest', async () => {
+  const R = '01JC00000000000000000000R1';
+  await writeRaw('E', { ...spec('E'), kind: 'local', publish: { to: [R, 'junk'], since: { [R]: 5 } } });
+  expect((await readWorkspaceManifest('E'))?.publish).toEqual({ to: [R], since: { [R]: 5 } });
+});

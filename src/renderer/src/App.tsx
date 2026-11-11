@@ -48,6 +48,7 @@ import type {
 import { storeBannerText } from './storeView';
 import type { CaptureSettings } from '../../preload/captureSettings';
 import type { ExtraMount } from '../../preload/extraMounts';
+import type { WorkspacePublish } from '../../preload/publish';
 import { portPopupCopy } from './portToast';
 import { InboxChip } from './components/InboxChip';
 import { InboxView, type InboxSection } from './components/InboxView';
@@ -150,6 +151,8 @@ export interface WorkspaceSummary {
   resources?: WorkspaceResources;
   /** kind 'container' only: extra host folders bound into the container. */
   mounts?: ExtraMount[];
+  /** Local and container only: remote workspaces this one publishes to (main sets `since`). */
+  publish?: WorkspacePublish;
   mirror: WorkspaceMirror;
   /** Loadouts installed into this workspace (#16-followup); absent ⇒ none. */
   installedLoadouts?: { id: string; title: string; version?: string }[];
@@ -1344,6 +1347,7 @@ export function App() {
       accessibility: submit.accessibility,
       inbox: submit.inbox,
       knowledgeCapture: submit.knowledgeCapture,
+      publish: { to: submit.publishTo ?? [] },
       createdAt: before.createdAt,
       lastUsedAt: Date.now()
     });

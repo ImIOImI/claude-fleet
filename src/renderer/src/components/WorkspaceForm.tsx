@@ -28,6 +28,7 @@ import { createSecretRevealer, REVEAL_SECONDS, type RevealState } from './secret
 import type { InboxConfig } from '../../../preload';
 import type { CaptureSettings } from '../../../preload/captureSettings';
 import { defaultContainerPath, type ExtraMount } from '../../../preload/extraMounts';
+import { PUBLISH_HINT, publishSummary, publishVisibility, togglePublishTarget } from './publishTargets';
 import { captureSubmitValue, captureSummary, fromCaptureForm, toCaptureForm, type CaptureFormState } from '../captureSettingsView';
 import {
   hostPlaceholder,
@@ -114,6 +115,8 @@ export interface WorkspaceFormSubmit {
    *  submitted (undefined clears back to defaults — writeManifest treats a
    *  present key as authoritative). */
   knowledgeCapture?: CaptureSettings;
+  /** Edit mode only: remote workspace ids to publish transcripts to (empty = off). */
+  publishTo?: string[];
 }
 
 interface ImageEntry {
@@ -302,6 +305,8 @@ export function WorkspaceForm({
   // Knowledge capture settings (#483 §5a) — edit-mode only; new workspaces start on defaults.
   const [capture, setCapture] = useState<CaptureFormState>(() => toCaptureForm(initial?.knowledgeCapture));
   const [captureOpen, setCaptureOpen] = useState(false);
+  const [publishTo, setPublishTo] = useState<string[]>(() => initial?.publishTo ?? []);
+  const remotes = useMemo(() => workspaces.filter((w) => w.kind === 'remote').map((w) => ({ id: w.id, name: w.name })), [workspaces]);
   const setCap = <K extends keyof CaptureFormState>(k: K, v: CaptureFormState[K]): void =>
     setCapture((c) => ({ ...c, [k]: v }));
   // Manager workspaces eligible for the acceptFrom list (other container managers).
@@ -615,7 +620,8 @@ export function WorkspaceForm({
       mirror: { default: mirrorDefault, cleanup: cleanupDefault },
       accessibility,
       inbox,
-      knowledgeCapture: captureSubmitValue(cap.settings)
+      knowledgeCapture: captureSubmitValue(cap.settings),
+      publishTo: mode === 'edit' ? publishTo : undefined
     };
   };
 
@@ -1432,6 +1438,34 @@ export function WorkspaceForm({
           </label>
         </div>
       </details>
+
+      {mode === 'edit' && (
+        <details className="form-disclosure">
+          <summary>
+            Publish transcripts to…{' '}
+            <span className="form-hint">{publishSummary(publishTo, remotes)}</span>
+          </summary>
+          {remotes.length === 0 ? (
+            <p className="form-hint">Add a remote workspace first (+ → Remote).</p>
+          ) : (
+            <>
+              <p className="form-hint">{PUBLISH_HINT}</p>
+              {remotes.map((r) => (
+                <label key={r.id} className="publish-target">
+                  <input
+                    type="checkbox"
+                    checked={publishTo.includes(r.id)}
+                    onChange={(e) => setPublishTo((to) => togglePublishTarget(to, r.id, e.target.checked))}
+                    disabled={busy}
+                  />
+                  <span>{r.name}</span>
+                  <span className="form-hint">{publishVisibility(r.name)}</span>
+                </label>
+              ))}
+            </>
+          )}
+        </details>
+      )}
 
       {mode === 'edit' && (
         <details

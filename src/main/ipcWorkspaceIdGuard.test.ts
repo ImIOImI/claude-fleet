@@ -46,10 +46,18 @@ describe('workspace id guard wiring (#444 security review)', () => {
 
 describe('remote bookmark wiring', () => {
   it('workspace:create and workspace:writeManifest refuse remote specs before writing anything', () => {
-    expect(handlerSource('workspace:create')).toMatch(/assertNotRemoteSpec\(input\.kind, await readWorkspaceManifest\(input\.id\)\)\s*;\s*const kind/);
+    expect(handlerSource('workspace:create')).toMatch(/const prior = await readWorkspaceManifest\(input\.id\);\s*assertNotRemoteSpec\(input\.kind, prior\)\s*;\s*const kind/);
     const write = handlerSource('workspace:writeManifest');
     expect(write).toMatch(/const existing = await readWorkspaceManifest\(spec\.id\);\s*assertNotRemoteSpec\(spec\.kind, existing\);/);
     expect(write).toMatch(/remote: undefined/);
+  });
+
+  it('workspace:writeManifest derives publish in main and drops cursors of removed targets', () => {
+    const write = handlerSource('workspace:writeManifest');
+    expect(write).toMatch(/const publish = publishOnWrite\(spec, existing\?\.publish, remoteIds, Date\.now\(\)\)/);
+    expect(write).toMatch(/\.\.\.spec,\s*workspaceRoot,\s*launcher: incomingLauncher,\s*mounts,\s*publish,/);
+    expect(write).toMatch(/deletePublishCursor\(spec\.id, id\)/);
+    expect(handlerSource('workspace:create')).toMatch(/publish: prior\?\.publish,/);
   });
 
   it('workspace:remove routes through resolveRemoveKind', () => {
