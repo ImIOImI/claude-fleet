@@ -15,7 +15,9 @@ import type { Identity } from '../main/identity/types.js';
 import { DEFAULT_PORT } from './config.js';
 import { portKillRefusal, type BrokerOps, type Upstream } from './brokerOps.js';
 import type { Logger } from './log.js';
-import { CLIENT_FRAME_TIER, RESPONSE_OF, decodeResize, hostCreateArgs, validSessionId } from './frameGate.js';
+import { CLIENT_FRAME_TIER, RESPONSE_OF, V4_UUID_RE, decodeResize, hostCreateArgs, validSessionId } from './frameGate.js';
+import { ownerOfIdentity, type OwnerClaim } from './sessionOwners.js';
+import { withAttribution } from './attribution.js';
 
 /** Matches the broker's per-session ring. */
 export const REPLAY_BYTES = 64 * 1024;
@@ -36,6 +38,17 @@ export interface AttachHubOptions {
   controlPerSec?: number;
   /** Extends a gated CREATE's args (the MCP config). */
   createArgs?: (args: string[]) => string[];
+  /** Writes a CREATE's owner row before the broker starts claude (D116); throwing refuses the CREATE. False: the row already existed. */
+  recordOwner?: (c: OwnerClaim) => Promise<boolean>;
+  /** Removes the row recordOwner wrote when the broker then refuses the CREATE. */
+  releaseOwner?: (c: OwnerClaim) => Promise<void>;
+  /** Whether a viewer-named claude id already has an owner row on this host, or is a published session. */
+  pinState?: (sessionId: string) => Promise<PinState>;
+}
+
+export interface PinState {
+  owned: boolean;
+  published: boolean;
 }
 
 export interface Principal {
@@ -197,6 +210,9 @@ export class AttachHub {
   readonly controlBurst: number;
   readonly controlPerSec: number;
   readonly createArgs: (args: string[]) => string[];
+  readonly recordOwner: ((c: OwnerClaim) => Promise<boolean>) | undefined;
+  readonly releaseOwner: ((c: OwnerClaim) => Promise<void>) | undefined;
+  readonly pinState: ((sessionId: string) => Promise<PinState>) | undefined;
 
   constructor(
     readonly ops: BrokerOps,
@@ -208,6 +224,9 @@ export class AttachHub {
     this.controlBurst = opts.controlBurst ?? CONTROL_BURST;
     this.controlPerSec = opts.controlPerSec ?? CONTROL_PER_SEC;
     this.createArgs = opts.createArgs ?? ((a) => a);
+    this.recordOwner = opts.recordOwner;
+    this.releaseOwner = opts.releaseOwner;
+    this.pinState = opts.pinState;
   }
 
   setOwner(id: string, key: string): void {
@@ -480,13 +499,54 @@ export class Viewer {
     this.reply(FrameType.CLOSED, { channel: req.channel, ok: true });
   }
 
+  /** Only the verified principal names the owner; nothing in the frame does. */
+  private ownerClaim(brokerSessionId: string, sessionId: string): OwnerClaim | null {
+    try {
+      return { brokerSessionId, sessionId, owner: ownerOfIdentity(this.principal.identity), startedAt: this.hub.now() };
+    } catch (err) {
+      this.hub.log?.log('error', 'session owner unusable', { id: brokerSessionId, error: err });
+      return null;
+    }
+  }
+
+  /** A viewer-named id must look minted or already be this host's, and never a published session's. */
+  private async pinAllowed(sessionId: string): Promise<boolean> {
+    const st = (await this.hub.pinState?.(sessionId)) ?? { owned: false, published: false };
+    return !st.published && (V4_UUID_RE.test(sessionId) || st.owned);
+  }
+
   private async create(req: Json): Promise<void> {
     const { id } = req;
     if (!validSessionId(id)) return this.reply(FrameType.CREATED, { id, ok: false, error: 'bad session id' });
-    const args = hostCreateArgs(req.args);
-    if (!args) return this.reply(FrameType.CREATED, { id, ok: false, error: 'forbidden: unsupported create args' });
-    const r = await this.hub.ops.create(id, dim(req.cols, 80), dim(req.rows, 24), this.hub.createArgs(args));
+    const gated = hostCreateArgs(req.args);
+    if (!gated) return this.reply(FrameType.CREATED, { id, ok: false, error: 'forbidden: unsupported create args' });
+    const refused = (): void => this.reply(FrameType.CREATED, { id, ok: false, error: 'could not record the session owner' });
+    if (gated.fromViewer) {
+      let ok: boolean;
+      try {
+        ok = await this.pinAllowed(gated.sessionId);
+      } catch (err) {
+        this.hub.log?.log('error', 'session id lookup failed', { id, error: err });
+        return refused();
+      }
+      if (!ok) return this.reply(FrameType.CREATED, { id, ok: false, error: 'forbidden: unsupported session id' });
+    }
+    const claim = this.ownerClaim(id, gated.sessionId);
+    if (!claim) return refused();
+    let recorded = false;
+    try {
+      recorded = (await this.hub.recordOwner?.(claim)) ?? false;
+    } catch (err) {
+      this.hub.log?.log('error', 'session owner not recorded', { id, error: err });
+      return refused();
+    }
+    const args = this.hub.createArgs(withAttribution(gated.args, claim.owner));
+    const r = await this.hub.ops.create(id, dim(req.cols, 80), dim(req.rows, 24), args);
     if (r.ok) this.hub.setOwner(id, ownerKey(this.principal.identity));
+    else if (recorded) {
+      await this.hub.releaseOwner?.(claim).catch((err: Error) => this.hub.log?.log('warn', 'session owner release failed', { id, error: err.message }));
+    }
     this.reply(FrameType.CREATED, { id, ok: r.ok, ...(r.error ? { error: r.error } : {}) });
   }
+
 }

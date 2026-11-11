@@ -3,6 +3,9 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HostConfigError, loadHostConfig, parseHostConfig, readHostEnv } from './config.js';
+import { BOT_LOGIN_RE } from '../main/identity/grants.js';
+import { BOT_LOGIN_RE as OWNER_BOT_LOGIN_RE } from '../preload/sessionOwner.js';
+import { ownerOfIdentity } from './sessionOwners.js';
 
 const base = {
   workspace: { name: 'review-bot', description: 'PR reviewer', color: { hue: 210 } },
@@ -19,6 +22,18 @@ describe('parseHostConfig', () => {
     expect(parseHostConfig({ ...base, github: { repositories: ['a'] } }).grants.machines).toHaveLength(1);
     const machines = [{ appId: 7, login: 'other[bot]', tier: 'read' }, ...base.machines];
     expect(() => parseHostConfig({ ...base, machines, github })).toThrow("machines[1].appId is this host's credential App; sessions hold its tokens");
+  });
+
+  it('refuses a machine login a session owner could not carry, so ownerOfIdentity never throws for a configured bot', () => {
+    for (const login of ['-acme[bot]', `${'a'.repeat(40)}[bot]`, 'acme--x[bot]x', 'acme']) {
+      expect(() => parseHostConfig({ ...base, machines: [{ appId: 7, login, tier: 'read' }] }), login).toThrow(/machines\[0\]\.login/);
+    }
+    expect(BOT_LOGIN_RE.source).toBe(OWNER_BOT_LOGIN_RE.source);
+    for (const login of ['acme-reviewer[bot]', `${'a'.repeat(39)}[bot]`]) {
+      const [m] = parseHostConfig({ ...base, machines: [{ appId: 7, login, tier: 'read' }] }).grants.machines;
+      const who = { provider: 'github', kind: 'machine' as const, appId: m.appId, login: m.login, id: 9001, name: null, avatarUrl: null, teams: [] };
+      expect(ownerOfIdentity(who).login).toBe(login);
+    }
   });
 
   it('refuses the same machines grant when github.appId is the quoted YAML string', () => {

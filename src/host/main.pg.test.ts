@@ -134,6 +134,51 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     expect(broker.created[0].args.at(-1)).toBe(hostMcpArgs({ unix: mcpSock(a.dir) })[0]);
   }, 30_000);
 
+  it('a viewer CREATE records its verified owner, fenced on the holder, before the broker starts claude', async () => {
+    const broker = fakeBroker([]);
+    const a = await start({ brokerOps: broker.ops });
+    await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+    const ws = new WebSocket(`${a.url.replace('http', 'ws')}/attach`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    await new Promise((r, j) => { ws.once('open', r); ws.once('error', j); });
+    ws.send(jsonFrame(FrameType.CREATE, { id: 'v2', cols: 80, rows: 24, owner: { login: 'mallory', id: 666 } }));
+    await vi.waitFor(() => expect(broker.created).toHaveLength(1), { timeout: 10_000 });
+    ws.close();
+    const args = broker.created[0].args;
+    const sid = args[args.indexOf('--session-id') + 1];
+    const rows = await t!.pool.query(`SELECT broker_session_id, session_id, workspace_id, kind, provider, account_id, login FROM ${t!.schema}.session_owners`);
+    expect(rows.rows).toEqual([{ broker_session_id: 'v2', session_id: sid, workspace_id: ID, kind: 'user', provider: 'github', account_id: '1', login: 'owner' }]);
+  }, 30_000);
+
+  it('a viewer may pin a published id never, and a non-v4 id only when this host already owns it', async () => {
+    const broker = fakeBroker([]);
+    const a = await start({ brokerOps: broker.ops });
+    await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+    const PUB = '0b7e6c1e-1f6a-4c55-9c39-6f1f8d6c2a11';
+    const V1 = 'a8098c1a-f86e-11da-bd1a-00112444be1e';
+    await t!.pool.query(`INSERT INTO ${t!.schema}.publish_partitions (partition_id, owner_provider, owner_id, owner_login, source_workspace_id, created_at)
+      VALUES ('pub_a', 'github', '9', 'cat', $1, 1)`, [OTHER]);
+    await t!.pool.query(`INSERT INTO ${t!.schema}.publish_sessions (session_id, partition_id, source_session_id, first_published_at, last_published_at)
+      VALUES ($1, 'pub_a', 'src', 1, 1)`, [PUB]);
+    const ws = new WebSocket(`${a.url.replace('http', 'ws')}/attach`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    await new Promise((r, j) => { ws.once('open', r); ws.once('error', j); });
+    const replies: Array<Record<string, unknown>> = [];
+    ws.on('message', (d: Buffer) => { if (d[4] === FrameType.CREATED) replies.push(JSON.parse(d.subarray(5).toString('utf8'))); });
+    ws.send(jsonFrame(FrameType.CREATE, { id: 'p1', args: ['--session-id', PUB] }));
+    ws.send(jsonFrame(FrameType.CREATE, { id: 'p2', args: ['--resume', V1] }));
+    await vi.waitFor(() => expect(replies).toHaveLength(2), { timeout: 10_000 });
+    await t!.pool.query(`INSERT INTO ${t!.schema}.session_owners (broker_session_id, session_id, workspace_id, kind, provider, account_id, login, name, avatar_url, started_at)
+      VALUES ('old', $1, $2, 'user', 'github', '1', 'owner', NULL, NULL, 1)`, [V1, ID]);
+    ws.send(jsonFrame(FrameType.CREATE, { id: 'p3', args: ['--resume', V1] }));
+    await vi.waitFor(() => expect(replies).toHaveLength(3), { timeout: 10_000 });
+    ws.close();
+    expect(replies).toEqual([
+      { id: 'p1', ok: false, error: 'forbidden: unsupported session id' },
+      { id: 'p2', ok: false, error: 'forbidden: unsupported session id' },
+      { id: 'p3', ok: true }
+    ]);
+    expect(broker.created.map((c) => c.id)).toEqual(['p3']);
+  }, 30_000);
+
   it('viewer CREATEs dial FLEET_HOST_MCP_ADDR when the MCP is on TCP', async () => {
     const broker = fakeBroker([]);
     const port = await freePort();
@@ -218,6 +263,35 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     expect((await call('history:summary', [])).body.result.sessionId).toBe('h1');
     expect(await call('history:summary', ['o1'])).toEqual({ status: 200, body: { ok: true, result: null } });
     expect((await call('history:sessions', [{ limit: 500 }])).status).toBe(400);
+  }, 30_000);
+
+  it('history RPC shows each session’s owner and groups cost by owner', async () => {
+    const SID = '22222222-3333-4444-8555-666666666666';
+    const broker = fakeBroker([]);
+    const a = await start({ brokerOps: broker.ops });
+    await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+    await storesOpen();
+    const ws = new WebSocket(`${a.url.replace('http', 'ws')}/attach`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    await new Promise((r, j) => { ws.once('open', r); ws.once('error', j); });
+    ws.send(jsonFrame(FrameType.CREATE, { id: 'v3', args: ['--session-id', SID] }));
+    await vi.waitFor(() => expect(broker.created).toHaveLength(1), { timeout: 10_000 });
+    ws.close();
+    await t!.pool.query(`INSERT INTO ${t!.schema}.sessions (id, workspace_id, last_active_at) VALUES ($1, $2, 5), ('u1', $2, 4)`, [SID, ID]);
+    await t!.pool.query(`INSERT INTO ${t!.schema}.session_costs (session_id, workspace_id, model, service_tier, input_tokens, output_tokens,
+      cache_read_input_tokens, cache_creation_input_tokens, event_count) VALUES ($1, $2, 'claude-opus-4-1', '', 1000, 0, 0, 0, 1)`, [SID, ID]);
+    const call = async (channel: string, args: unknown[]) => {
+      const res = await fetch(`${a.url}/rpc/${channel}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` }, body: JSON.stringify({ args })
+      });
+      return (await res.json()) as Record<string, any>;
+    };
+    await vi.waitFor(async () => expect((await call('history:sessions', [{}])).ok).toBe(true), { timeout: 10_000 });
+    const page = await call('history:sessions', [{}]);
+    expect(page.result.rows.map((r: { id: string; owner: { login: string } | null }) => [r.id, r.owner?.login ?? null])).toEqual([[SID, 'owner'], ['u1', null]]);
+    const owners = await call('history:owners', []);
+    expect(owners.result.rows).toEqual([
+      { owner: { kind: 'user', provider: 'github', id: '1', login: 'owner', name: null, avatarUrl: null }, sessions: 1, usd: expect.any(Number) }
+    ]);
   }, 30_000);
 
   it('POST /publish lands under the caller’s partition, scrubbed, idempotent, and stays out of history', async () => {

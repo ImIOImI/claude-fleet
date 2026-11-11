@@ -2,7 +2,7 @@
 // applies at once (no batch Save). This panel only ever sees AccountStatus.
 import { useEffect, useRef, useState } from 'react';
 import type { AccountStatus, SignInStart } from '../../../preload';
-import { accountControls, countdown, driveSignIn, loadAccount, packagesNote, parseIdentityError, ssoPrompt, type SignInRun } from '../accountView';
+import { accountAvatar, accountControls, countdown, driveSignIn, loadAccount, packagesNote, parseIdentityError, ssoPrompt, type SignInRun } from '../accountView';
 
 interface ActiveRun extends SignInRun {
   wake: () => void;
@@ -162,6 +162,7 @@ export function AccountSettings({ onStatus }: { onStatus?: (s: AccountStatus) =>
   const sso = status.signedIn ? ssoPrompt(status.sso) : null;
   const pkg = packagesNote(status.signedIn, status.packagesAccess);
   const who = status.identity;
+  const avatar = who ? accountAvatar(who) : null;
 
   return (
     <div className="new-tab account-tab" role="tabpanel">
@@ -177,7 +178,7 @@ export function AccountSettings({ onStatus }: { onStatus?: (s: AccountStatus) =>
 
         {status.signedIn && who && (
           <div className="account-card">
-            {who.avatarUrl && <img className="account-avatar" src={who.avatarUrl} alt="" width={40} height={40} />}
+            {avatar && <img className="account-avatar" src={avatar} alt="" width={40} height={40} referrerPolicy="no-referrer" />}
             <div className="account-who">
               <div className="account-name">{who.displayName}</div>
               <div className="account-login">@{who.login}</div>

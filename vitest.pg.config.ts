@@ -18,6 +18,7 @@ export default defineConfig({
       'src/host/main.pg.test.ts',
       'src/host/pgLease.test.ts',
       'src/host/publishStore.pg.test.ts',
+      'src/host/sessionOwners.pg.test.ts',
       'src/main/automations/automationService.test.ts',
       'src/main/automations/automationStore.test.ts',
       'src/main/automations/loadoutInstaller.test.ts',

@@ -33,6 +33,7 @@ import { LIST_EVENT_COLS, LIST_EVENT_COL_ALLOWLIST, MAX_QUERY_BYTES, type OwnedR
 import { costFor } from './pricing.js';
 import { clipText } from './clipText.js';
 import { type EmbedFn } from './vectors.js';
+import type { OwnerCostRow, SessionOwner } from '../preload/sessionOwner.js';
 import { sessionIdsFromClaimResults, sessionIdsFromQueryRows, sessionIdsFromTranscriptHits, type SearchHitEvent } from './claims/searchHits.js';
 
 const PROTOCOL_VERSION = '2024-11-05';
@@ -344,7 +345,21 @@ export function setExposedTools(names: ReadonlySet<string> | null): void {
   exposedTools = names;
 }
 function servedTools(): Tool[] {
-  return exposedTools ? TOOLS.filter((t) => exposedTools!.has(t.name)) : TOOLS;
+  return exposedTools ? [...TOOLS, ...HOST_ONLY_TOOLS].filter((t) => exposedTools!.has(t.name)) : TOOLS;
+}
+
+/** Host only: owners for the `owner` fields and cost_by_owner. */
+export interface OwnerHandlers {
+  ownersOf(sessionIds: readonly string[], allowed: ReadonlySet<string>): Promise<Map<string, SessionOwner>>;
+  ownerCosts(allowed: ReadonlySet<string>, o: { since?: number }): Promise<OwnerCostRow[]>;
+}
+let ownerHandlers: OwnerHandlers | null = null;
+export function setOwnerHandlers(h: OwnerHandlers | null): void {
+  ownerHandlers = h;
+}
+async function ownerField(sessionId: string, allowed: ReadonlySet<string>): Promise<{ owner?: SessionOwner | null }> {
+  if (!ownerHandlers) return {};
+  return { owner: (await ownerHandlers.ownersOf([sessionId], allowed)).get(sessionId) ?? null };
 }
 
 let readSource: OwnedReadSource | null = null;
@@ -353,7 +368,7 @@ let storeless = false;
 /** Tools that read the history store through the ReadSource. */
 const STATE_DB_TOOLS = new Set([
   'list_sessions', 'get_session', 'get_cost', 'list_events', 'search_transcripts', 'session_summary',
-  'list_errors', 'query', 'mark_useful',
+  'list_errors', 'query', 'mark_useful', 'cost_by_owner',
 ]);
 /** Attach the history store once it opens after startup (null detaches it). */
 export function setReadSource(rs: OwnedReadSource | null): void {
@@ -743,7 +758,11 @@ export const TOOLS: Tool[] = [
       }
       // Record clickthrough if this session was recently returned by a search (#207).
       noteRead(ctx.callerId, a.session_id);
-      return { session_id: a.session_id, ...aggregateSessionCost(await source(rs).tokenGroups(ctx.allowedWorkspaces, a.session_id)) };
+      return {
+        session_id: a.session_id,
+        ...aggregateSessionCost(await source(rs).tokenGroups(ctx.allowedWorkspaces, a.session_id)),
+        ...(await ownerField(a.session_id, ctx.allowedWorkspaces))
+      };
     }
   },
   {
@@ -848,6 +867,7 @@ export const TOOLS: Tool[] = [
           commands: parts.commands.slice(0, MAX_SUMMARY_ITEMS),
           commandsCount: parts.commands.length,
           ...aggregateSessionCost(parts.tokens),
+          ...(await ownerField(a.id, ctx.allowedWorkspaces)),
           started_at: parts.span.started_at,
           last_active_at: parts.span.last_active_at
         },
@@ -1475,6 +1495,21 @@ export const TOOLS: Tool[] = [
     run: (_db, _a, ctx) => {
       if (!configResolver) throw new Error('config resolution is unavailable');
       return configResolver(ctx.callerId);
+    }
+  }
+];
+
+/** Served only when a process exposes them by name (fleet-host); the desktop's full list never includes them. */
+export const HOST_ONLY_TOOLS: Tool[] = [
+  {
+    name: 'cost_by_owner',
+    description:
+      'USD per session owner (the person who started each session; automation runs and published sessions count ' +
+      'as their own owners), most expensive first, at most 100 owners. Optional since (epoch ms on last_active_at).',
+    inputSchema: { type: 'object', properties: { since: { type: 'number', description: 'epoch ms, last_active_at >= since' } } },
+    run: async (_rs, a, ctx) => {
+      if (!ownerHandlers) throw new Error('cost_by_owner is unavailable');
+      return ownerHandlers.ownerCosts(ctx.allowedWorkspaces, { since: typeof a.since === 'number' && Number.isFinite(a.since) ? a.since : undefined });
     }
   }
 ];

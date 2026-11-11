@@ -12,9 +12,19 @@ const reader = (): HistoryReader => ({
   sessions: vi.fn(async () => ({ rows: [], next: null })),
   summary: vi.fn(async () => null),
   search: vi.fn(async () => ({ modelId: EMBED_MODEL_ID, hits: [] })),
+  ownerCosts: vi.fn(async () => ({ rows: [] })),
 });
 
 describe('history RPC', () => {
+  it('history:owners reads the hosted workspace only, ignores arguments, and 503s without a holder', async () => {
+    const r = reader();
+    const reg = historyRpcChannels(() => r);
+    expect(await dispatchRpc(reg, 'history:owners', { args: ['X', { workspaceId: 'X' }] }, caller))
+      .toEqual({ status: 200, body: { ok: true, result: { rows: [] } } });
+    expect(r.ownerCosts).toHaveBeenCalledWith();
+    expect((await dispatchRpc(historyRpcChannels(() => null), 'history:owners', { args: [] }, caller)).status).toBe(503);
+  });
+
   it('passes only the parsed request and the session id through', async () => {
     const r = reader();
     const reg = historyRpcChannels(() => r);
@@ -98,9 +108,10 @@ describe('history RPC', () => {
 
   it('every channel needs read, and a caller without a tier is refused', async () => {
     const reg = historyRpcChannels(() => reader());
-    expect([...reg.keys()].sort()).toEqual(['history:search', 'history:sessions', 'history:summary']);
+    expect([...reg.keys()].sort()).toEqual(['history:owners', 'history:search', 'history:sessions', 'history:summary']);
     for (const ch of reg.values()) expect(ch.tier).toBe('read');
     const none = { ...caller, tier: null } as unknown as Principal;
     expect((await dispatchRpc(reg, 'history:summary', { args: [] }, none)).status).toBe(403);
+    expect((await dispatchRpc(reg, 'history:owners', { args: [] }, none)).status).toBe(403);
   });
 });

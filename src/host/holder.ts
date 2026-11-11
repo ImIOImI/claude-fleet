@@ -23,6 +23,7 @@ import { hostUsageRecorder, startHostMcp, type HostMcp } from './hostMcp.js';
 import type { Logger } from './log.js';
 import { leaseFence, LeaseLostError } from './pgLease.js';
 import { publishStore, type PublishStore } from './publishStore.js';
+import { sessionOwnerStore, type SessionOwnerStore } from './sessionOwners.js';
 
 export interface HolderOptions {
   db: PostgresStoreConfig;
@@ -57,6 +58,7 @@ export interface Holder {
   automations: HostAutomations;
   history: HistoryReader;
   publish: PublishStore;
+  owners: SessionOwnerStore;
   stop(): Promise<void>;
 }
 
@@ -119,13 +121,14 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
     : null;
   const hint = trailingHint(() => o.events.publish('observability:summary', { workspaceId: o.workspaceId }), SUMMARY_HINT_MS);
   const publish = publishStore(stateKysely, { onIngested: (id) => indexer?.bump(id) });
+  const owners = sessionOwnerStore(stateKysely, o.workspaceId);
   const ingest = new HostIngest({
     projectsDir: o.projectsDir, workspaceId: o.workspaceId, offsetsRead, log: o.log, rescanMs: o.rescanMs,
     onIngested: (id) => { hint.bump(); indexer?.bump(id); }
   });
   let automations: HostAutomations | null = null;
   // Fenced: provisioning and each call's mcp_grants rewrite are writes on the state handle.
-  const mcp = mcpServer(o, embedder?.embed, publish, () =>
+  const mcp = mcpServer(o, embedder?.embed, publish, owners, () =>
     openPgMcpReadSource(stores.poolConfig.schema, stores.poolConfig, (message) => o.log.log('warn', 'mcp query isolation', { error: message }), {
       preprovisioned: queryLogin(o.db, stores.poolConfig, o.env)
     }));
@@ -145,7 +148,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
     await ingest.start();
     if (indexer) void indexer.backfill().catch((err: Error) => o.log.log('warn', 'index backfill failed', { error: err.message }));
     automations = await startHostAutomations({
-      inbox: stores.inbox, workspace: o.workspace, ops: o.ops, mcpArgs: o.mcp.args, events: o.events, log: o.log
+      inbox: stores.inbox, workspace: o.workspace, ops: o.ops, owners, mcpArgs: o.mcp.args, events: o.events, log: o.log
     });
     await automations.reconcile(o.automations());
   } catch (err) {
@@ -158,8 +161,9 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
   return {
     stores,
     automations,
-    history: historyReader(stateKysely, o.workspaceId),
+    history: historyReader(stateKysely, o.workspaceId, owners),
     publish,
+    owners,
     stop() {
       stopping ??= stopAll();
       return stopping;
@@ -168,7 +172,9 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
 }
 
 /** The MCP socket, retried with backoff. Each attempt gets its own read source (a failed start closes it). */
-function mcpServer(o: HolderOptions, embed: EmbedFn | undefined, publish: PublishStore, readSource: () => Promise<OwnedReadSource>): { start(): void; stop(): Promise<void> } {
+function mcpServer(
+  o: HolderOptions, embed: EmbedFn | undefined, publish: PublishStore, owners: SessionOwnerStore, readSource: () => Promise<OwnedReadSource>
+): { start(): void; stop(): Promise<void> } {
   let served: HostMcp | null = null;
   let attempt: Promise<void> | null = null;
   let timer: NodeJS.Timeout | null = null;
@@ -179,7 +185,7 @@ function mcpServer(o: HolderOptions, embed: EmbedFn | undefined, publish: Publis
     attempt = readSource()
       .then((rs) => startHostMcp({
         listen: o.mcp.listen, workspaceId: o.workspaceId, log: o.log, readSource: rs, embed,
-        scope: () => publish.partitionIds(), recordUsage: hostUsageRecorder
+        scope: () => publish.partitionIds(), recordUsage: hostUsageRecorder, owners
       }))
       .then(
         async (m) => {

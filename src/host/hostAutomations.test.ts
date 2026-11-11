@@ -11,6 +11,7 @@ import { fakeBroker } from './testFakes.js';
 import { hostMcpArgs } from './hostMcp.js';
 import { LeaseLostError } from './pgLease.js';
 import { HOST_CONFIG_ORIGIN, startHostAutomations, type HostAutomations } from './hostAutomations.js';
+import { automationOwner, type OwnerClaim } from './sessionOwners.js';
 
 const WS = { id: '01JC0000000000000000000000', name: 'review-bot' };
 const USER = { kind: 'user' as const, id: null };
@@ -48,6 +49,65 @@ async function start(inbox?: InboxStore) {
 }
 
 describe('startHostAutomations', () => {
+  it('records the run’s session as an automation owner before the broker starts it', async () => {
+    const store = await openTestInbox();
+    const broker = fakeBroker([]);
+    const order: string[] = [];
+    const claims: OwnerClaim[] = [];
+    const create = broker.ops.create.bind(broker.ops);
+    broker.ops.create = async (...a) => { order.push('create'); return create(...a); };
+    h = await startHostAutomations({
+      inbox: store, workspace: () => WS, ops: broker.ops, mcpArgs: MCP_ARGS, events: { publish: () => undefined },
+      log: createLogger(() => undefined), tickMs: 60_000, settleMs: 50,
+      owners: { record: async (c) => { order.push('record'); claims.push(c); return true; } }
+    });
+    await h.reconcile([fresh('a')]);
+    const [a] = await h.automations.list();
+    const run = await h.automations.run(a.id, { kind: 'manual', by: USER, args: {} });
+    await expect.poll(() => broker.created.length).toBe(1);
+    const c = broker.created[0];
+    expect(order).toEqual(['record', 'create']);
+    expect(claims).toEqual([{
+      brokerSessionId: `auto-${run.id}-go`, sessionId: c.args[c.args.indexOf('--session-id') + 1],
+      owner: automationOwner(WS.id), startedAt: expect.any(Number)
+    }]);
+  });
+
+  it('a broker refusal releases the automation’s owner row', async () => {
+    const store = await openTestInbox();
+    const broker = fakeBroker([]);
+    broker.ops.create = async () => ({ ok: false, error: 'no capacity' });
+    const claims: OwnerClaim[] = [];
+    const released: Array<[string, string]> = [];
+    h = await startHostAutomations({
+      inbox: store, workspace: () => WS, ops: broker.ops, mcpArgs: MCP_ARGS, events: { publish: () => undefined },
+      log: createLogger(() => undefined), tickMs: 60_000, settleMs: 50,
+      owners: { record: async (c) => { claims.push(c); return true; }, release: async (b, sid) => { released.push([b, sid]); } }
+    });
+    await h.reconcile([fresh('a')]);
+    const [a] = await h.automations.list();
+    const run = await h.automations.run(a.id, { kind: 'manual', by: USER, args: {} });
+    await h.automations.settle();
+    expect(released).toEqual([[`auto-${run.id}-go`, claims[0].sessionId]]);
+    expect((await new AutomationStore(store.kysely).getRun(run.id))!).toMatchObject({ status: 'failed', error: expect.stringMatching(/no capacity/) });
+  });
+
+  it('a failed owner write fails the step and starts nothing', async () => {
+    const store = await openTestInbox();
+    const broker = fakeBroker([]);
+    h = await startHostAutomations({
+      inbox: store, workspace: () => WS, ops: broker.ops, mcpArgs: MCP_ARGS, events: { publish: () => undefined },
+      log: createLogger(() => undefined), tickMs: 60_000, settleMs: 50,
+      owners: { record: async () => { throw new Error('fenced off'); } }
+    });
+    await h.reconcile([fresh('a')]);
+    const [a] = await h.automations.list();
+    const run = await h.automations.run(a.id, { kind: 'manual', by: USER, args: {} });
+    await h.automations.settle();
+    expect(broker.created).toEqual([]);
+    expect((await new AutomationStore(store.kysely).getRun(run.id))!).toMatchObject({ status: 'failed', error: expect.stringMatching(/fenced off/) });
+  });
+
   it('reconciles config definitions: create, update on change only, disable, remove', async () => {
     const { published, store } = await start();
     await h!.reconcile([fresh('a'), fresh('b')]);

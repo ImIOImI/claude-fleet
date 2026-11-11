@@ -71,7 +71,8 @@ export class GrantConfigError extends Error {
 
 const TEAM_RE = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 const LOGIN_RE = /^[A-Za-z0-9-]+$/;
-const BOT_RE = /^[A-Za-z0-9-]+\[bot\]$/;
+/** Equal to the session-owner rule, so a configured bot is always recordable as an owner. */
+export const BOT_LOGIN_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\[bot\]$/;
 export const ORG_RE = LOGIN_RE;
 /** GitHub-operated Apps whose tokens any repo's workflow (incl. fork PRs) can mint. */
 export const GITHUB_SHARED_APPS = new Map<number, string>([
@@ -139,7 +140,7 @@ export function parseGrantConfig(raw: unknown): GrantConfig {
     if (typeof r.appId !== 'number' || !Number.isInteger(r.appId) || r.appId <= 0) {
       throw new GrantConfigError(`${p}.appId must be a positive integer`);
     }
-    if (typeof r.login !== 'string' || !BOT_RE.test(r.login)) {
+    if (typeof r.login !== 'string' || !BOT_LOGIN_RE.test(r.login)) {
       throw new GrantConfigError(`${p}.login must be a bot login ending in [bot]`);
     }
     const tier = parseTier(r.tier, p);

@@ -1,5 +1,6 @@
 // Pure copy, control state and the poll loop for Settings → Account.
 import type { AccountSso, AccountStatus, SignInPoll, SignInStart } from '../../preload/identityTypes';
+import { githubAvatarUrl } from '../../preload/sessionOwner';
 
 const IPC_PREFIX = /^Error invoking remote method '[^']+': (?:[A-Za-z]*Error: )?/;
 
@@ -106,4 +107,9 @@ export async function loadAccount(
   } catch (err) {
     return parseIdentityError(err).message;
   }
+}
+
+/** The signed-in avatar passes the same allowlist as owner avatars (D120). */
+export function accountAvatar(identity: { avatarUrl: string | null }): string | null {
+  return githubAvatarUrl(identity.avatarUrl);
 }

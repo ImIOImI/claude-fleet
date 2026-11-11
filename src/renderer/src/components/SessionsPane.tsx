@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { colorFor } from '../App';
+import { formatUsd } from '../ownerView';
 import type { SessionListItem } from '../../../preload';
 import { type MergedSessions, type SessionCursor, type UnavailableSource } from '../../../preload/federation';
 import {
@@ -38,9 +39,14 @@ import {
   canResumeHere,
   relativeTime,
   searchTargets,
+  filterByOwner,
+  hasRemoteRows,
+  type OwnerFilter,
   type RemoteResumeInfo
 } from '../sessionsView';
 import { CloudGlyph } from './CloudGlyph';
+import { OwnerBadge } from './OwnerBadge';
+import type { Me } from '../../../preload/sessionOwner';
 import { TranscriptSearch } from './TranscriptSearch';
 import { useBlinkSync } from '../blinkSync';
 import type { OpenTabRef } from '../busySessions';
@@ -102,14 +108,6 @@ function displayTitle(s: SessionListItem): string {
   return s.userSetName || s.aiTitle || s.firstUserMessage || '(untitled session)';
 }
 
-function formatUsd(usd: number): string {
-  if (usd === 0) return '$0.00';
-  if (usd < 0.01) return '<$0.01';
-  if (usd < 100) return `$${usd.toFixed(2)}`;
-  if (usd < 1000) return `$${usd.toFixed(1)}`;
-  return `$${Math.round(usd).toLocaleString('en-US')}`;
-}
-
 export function SessionsPane({
   selectedWorkspaceId,
   busySessionIds,
@@ -144,6 +142,20 @@ export function SessionsPane({
   const [transcripts, setTranscripts] = useState(false);
   const [pickedId, setPickedId] = useState<string | null>(null);
   const [publishNote, setPublishNote] = useState<string | null>(null);
+  const [ownerFilter, setOwnerFilter] = useState<OwnerFilter>('everyone');
+  const [me, setMe] = useState<Me | null>(null);
+  const refreshMe = useCallback((): void => {
+    window.api.identity.status().then(
+      (s) => setMe(s.identity ? { provider: s.identity.provider, id: s.identity.id } : null),
+      () => setMe(null)
+    );
+  }, []);
+  // No identity-change event exists; re-read on focus and with each remote reload so a sign-out drops Mine.
+  useEffect(() => {
+    refreshMe();
+    window.addEventListener('focus', refreshMe);
+    return () => window.removeEventListener('focus', refreshMe);
+  }, [refreshMe]);
 
   // Row ⋮ menu: resume / rename / delete — shared portaled-menu mechanics.
   const { menu: rowMenu, toggle: toggleRowMenu, close: closeRowMenu } = usePortalMenu();
@@ -203,9 +215,12 @@ export function SessionsPane({
   }, []);
   useEffect(() => {
     void loadRemote();
-    const t = setInterval(() => void loadRemote(), 60_000);
+    const t = setInterval(() => {
+      void loadRemote();
+      refreshMe();
+    }, 60_000);
     return () => clearInterval(t);
-  }, [loadRemote]);
+  }, [loadRemote, refreshMe]);
 
   // Live refresh: every observability ingest may add/advance a session.
   // Throttle so a burst of pushes triggers at most one reload per beat; a
@@ -265,7 +280,10 @@ export function SessionsPane({
   // Sessions shown for the active scope. Display-prefs limits (uiPrefs) trim
   // the Recent group only — open-tab rows always render — and are bypassed
   // while a search/tag filter is active so old sessions stay findable.
-  const scoped = sessionsForScope(items, scope, selectedWorkspaceId);
+  const scopedAll = sessionsForScope(items, scope, selectedWorkspaceId);
+  const showOwnerFilter = hasRemoteRows(scopedAll);
+  const ownerShown: OwnerFilter = me && showOwnerFilter ? ownerFilter : 'everyone';
+  const scoped = filterByOwner(scopedAll, ownerShown, me);
   const q = query.trim().toLowerCase();
   const filtered = filterSessions(scoped, query, activeTags);
   const openIds = new Set(openSessions?.keys() ?? []);
@@ -395,6 +413,7 @@ export function SessionsPane({
           )}
           <div className="session-row-meta">
             {remoteRow && <CloudGlyph title={`Remote · ${s.workspaceName}`} />}
+            {remoteRow && s.owner && <OwnerBadge owner={s.owner} />}
             {scope === 'all' && (
               <span className="session-row-ws" title={s.workspaceName}>
                 <span
@@ -491,6 +510,32 @@ export function SessionsPane({
             All · {allSessionsCount}
           </button>
         </div>
+        {showOwnerFilter && (
+          <div className="obs-scope-toggle sessions-owner-toggle" role="tablist" aria-label="Session owners">
+            <button
+              role="tab"
+              aria-selected={ownerShown === 'everyone'}
+              className={`obs-scope-btn ${ownerShown === 'everyone' ? 'active' : ''}`}
+              onClick={() => setOwnerFilter('everyone')}
+              title="Every session on the hosts you can read"
+            >
+              Everyone
+            </button>
+            <button
+              role="tab"
+              aria-selected={ownerShown === 'mine'}
+              className={`obs-scope-btn ${ownerShown === 'mine' ? 'active' : ''}`}
+              disabled={!me}
+              onClick={() => {
+                setOwnerFilter('mine');
+                refreshMe();
+              }}
+              title={me ? 'This desktop’s sessions and the remote sessions you started' : 'Sign in (Settings → Account) to see only your sessions'}
+            >
+              Mine
+            </button>
+          </div>
+        )}
         <input
           type="search"
           className="sessions-search"

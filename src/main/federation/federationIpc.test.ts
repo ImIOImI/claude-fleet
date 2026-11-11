@@ -5,10 +5,11 @@ import type { FederatedReader } from './federatedReader';
 const A = '01JC0000000000000000000000';
 function rig() {
   const handlers = new Map<string, (e: unknown, ...a: unknown[]) => unknown>();
-  const reader = { listSessions: vi.fn(async () => ({ pages: [], unavailable: [] })), summary: vi.fn(), call: vi.fn(), sources: vi.fn(() => []), search: vi.fn() };
+  const reader = { listSessions: vi.fn(async () => ({ pages: [], unavailable: [] })), summary: vi.fn(), call: vi.fn(), sources: vi.fn(() => []), search: vi.fn(),
+    ownerCosts: vi.fn(async (id: string) => (id === A ? [{ owner: null, sessions: 1, usd: 1 }] : undefined)) };
   const search = { embed: vi.fn(), hits: vi.fn(), localIds: vi.fn() };
   registerFederationIpc({ handle: (c: string, f: never) => handlers.set(c, f) } as never, reader as never, search as never);
-  return { h: handlers.get('sessions:listRemote')!, reader };
+  return { h: handlers.get('sessions:listRemote')!, reader, handlers };
 }
 
 describe('sessions:listRemote', () => {
@@ -113,5 +114,17 @@ describe('history:search', () => {
     expect(reader.search).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 20 }));
     await h({}, 'q', { scope: 'all' });
     expect(reader.search).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 20 }));
+  });
+});
+
+describe('observability:ownerCosts', () => {
+  it('answers a remote workspace’s rows, null for anything else, and refuses a non-id', async () => {
+    const { handlers, reader } = rig();
+    const h = handlers.get('observability:ownerCosts')!;
+    expect(await h({}, A)).toEqual([{ owner: null, sessions: 1, usd: 1 }]);
+    expect(await h({}, '01JC0000000000000000000009')).toBeNull();
+    await expect(h({}, '../x')).rejects.toThrow();
+    await expect(h({}, 5)).rejects.toThrow();
+    expect(reader.ownerCosts).toHaveBeenCalledTimes(2);
   });
 });

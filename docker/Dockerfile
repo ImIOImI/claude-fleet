@@ -44,6 +44,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # in this code path — bump deliberately, after re-verifying the prompt
 # navigates over a PTY against a built image (see issue #65 for the
 # test recipe).
+# Remote session attribution relies on this version's `attribution` setting and inline
+# --settings; src/host/attributionClaude.test.ts re-checks both against the installed claude.
 RUN npm install -g @anthropic-ai/claude-code@2.1.281
 
 # claude's fullscreen TUI (`/tui fullscreen`, or an org's managed

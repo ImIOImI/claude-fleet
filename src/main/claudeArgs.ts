@@ -6,6 +6,27 @@
 // from JSONL appearance order — the guess is what cross-wired tabs.
 export const RUNNER_HOOK_SETTINGS = '/usr/local/lib/claude-fleet/hooks.settings.json';
 
+/** The content of RUNNER_HOOK_SETTINGS, for fleet-host, which passes settings inline (D113). */
+export const RUNNER_HOOKS = {
+  hooks: {
+    PreToolUse: [{ matcher: 'AskUserQuestion', hooks: [{ type: 'command', command: '/usr/local/lib/claude-fleet/input-wait-report.sh' }] }],
+    PostToolUse: [{ matcher: 'AskUserQuestion', hooks: [{ type: 'command', command: '/usr/local/lib/claude-fleet/input-wait-report.sh' }] }],
+    SessionStart: [{
+      hooks: [
+        { type: 'command', command: '/usr/local/lib/claude-fleet/session-report.sh' },
+        { type: 'command', command: '/usr/local/lib/claude-fleet/backfill-summaries.sh' }
+      ]
+    }],
+    Stop: [{
+      hooks: [
+        { type: 'command', command: '/usr/local/lib/claude-fleet/input-wait-report.sh' },
+        { type: 'command', command: '/usr/local/lib/claude-fleet/summarize.sh' }
+      ]
+    }],
+    UserPromptSubmit: [{ hooks: [{ type: 'command', command: '/usr/local/lib/claude-fleet/input-wait-report.sh' }] }]
+  }
+} as const;
+
 export function claudeCreateArgs(resumeOf?: string, sessionId?: string): string[] {
   const args = ['--settings', RUNNER_HOOK_SETTINGS];
   if (resumeOf) args.push('--resume', resumeOf);

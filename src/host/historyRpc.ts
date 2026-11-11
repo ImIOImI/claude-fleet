@@ -23,6 +23,7 @@ export function historyRpcChannels(reader: () => HistoryReader | null, o: { sear
   return new Map<string, RpcChannel>([
     ['history:sessions', { tier: 'read', handle: ([req]) => guarded(() => need().sessions(parseSessionsReq(req ?? {}))) }],
     ['history:summary', { tier: 'read', handle: ([id]) => guarded(() => need().summary(parseSessionId(id))) }],
+    ['history:owners', { tier: 'read', handle: () => guarded(() => need().ownerCosts()) }],
     ['history:search', {
       tier: 'read',
       handle: ([req]) => guarded(async () => {
