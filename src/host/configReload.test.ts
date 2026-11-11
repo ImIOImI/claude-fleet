@@ -119,6 +119,19 @@ describe('createReloader', () => {
     expect(applied.at(-1)!.github!.repositories).toEqual(['a', 'b']);
   });
 
+  it('refuses a search change on reload', async () => {
+    const { path, applied, logs, r } = rig('workspace: { name: a }\nsearch: { embedder: true }\n');
+    expect(await r.reload('start')).toBe(true);
+    writeFileSync(path, 'workspace: { name: a }\nsearch: { embedder: false }\n');
+    expect(await r.reload('file change')).toBe(false);
+    expect(logs.some((l) => l.includes('search cannot change on reload; restart to apply'))).toBe(true);
+    expect(r.current()!.search).toEqual({ embedder: true });
+    // Omitting the block is the default, not a change.
+    writeFileSync(path, 'workspace: { name: a }\n');
+    expect(await r.reload('file change')).toBe(true);
+    expect(applied).toHaveLength(1);
+  });
+
   it('keeps accepting reloads after apply throws, and keeps the old config', async () => {
     const { path } = fixture('workspace: { name: a }\n');
     const logs: string[] = [];

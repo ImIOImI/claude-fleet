@@ -26,7 +26,7 @@ const finish = (code, signal) => {
 const t0 = Date.now();
 let child = null;
 try {
-  child = spawn(workerData.bin, workerData.args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  child = spawn(workerData.bin, workerData.args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: workerData.env });
 } catch (e) {
   fail('spawn', String((e && e.message) || e));
   finish(null, null);
@@ -49,6 +49,8 @@ if (child) {
     fail('child', e.message);
     child.kill('SIGKILL');
   });
+  // Tells main the pid is no longer ours to kill.
+  child.on('exit', () => parentPort.postMessage({ t: 'reaped' }));
   // 'close' follows the reap and the last stdout chunk.
   child.on('close', (code, signal) => finish(code, signal));
   parentPort.on('message', (m) => {
@@ -69,18 +71,19 @@ export interface WorkerSpawnerOptions {
 
 type WorkerMsg =
   | { t: 'spawned'; pid: number; ms: number }
+  | { t: 'reaped' }
   | { t: 'out' | 'err'; b: Uint8Array }
   | { t: 'error'; kind: SidecarErrorKind; message: string }
   | { t: 'exit'; code: number | null; signal: string | null };
 
 export function makeWorkerSpawner(opts: WorkerSpawnerOptions = {}): SidecarSpawner {
-  return (bin, args) => spawnViaWorker(bin, args, opts);
+  return (bin, args, env) => spawnViaWorker(bin, args, opts, env);
 }
 
-export function spawnViaWorker(bin: string, args: string[], opts: WorkerSpawnerOptions = {}): SidecarProcess {
+export function spawnViaWorker(bin: string, args: string[], opts: WorkerSpawnerOptions = {}, env?: NodeJS.ProcessEnv): SidecarProcess {
   const worker = new Worker(opts.workerSource ?? SPAWN_WORKER_SRC, {
     eval: true,
-    workerData: { bin, args },
+    workerData: { bin, args, env },
     resourceLimits: { maxOldGenerationSizeMb: 16 },
   });
   // Never holds the event loop (or quit) open.
@@ -97,6 +100,7 @@ export function spawnViaWorker(bin: string, args: string[], opts: WorkerSpawnerO
   opts.onCreating?.(created);
 
   let pid: number | undefined;
+  let reaped = false;
   let errored = false;
   let exited = false;
   const emitError = (kind: SidecarErrorKind, message: string): void => {
@@ -114,7 +118,7 @@ export function spawnViaWorker(bin: string, args: string[], opts: WorkerSpawnerO
   const buf = (b: Uint8Array): Buffer => Buffer.from(b.buffer, b.byteOffset, b.byteLength);
   const relayDied = (message: string): void => {
     if (exited) return;
-    if (pid !== undefined) {
+    if (pid !== undefined && !reaped) {
       try { process.kill(pid, 'SIGKILL'); } catch { /* ESRCH: already gone */ }
     }
     emitError('relay', message);
@@ -124,6 +128,7 @@ export function spawnViaWorker(bin: string, args: string[], opts: WorkerSpawnerO
   worker.on('message', (m: WorkerMsg) => {
     switch (m.t) {
       case 'spawned': pid = m.pid; createdResolve(m.pid); break;
+      case 'reaped': reaped = true; break;
       case 'out': for (const cb of out) cb(buf(m.b)); break;
       case 'err': for (const cb of err) cb(buf(m.b)); break;
       case 'error': emitError(m.kind, m.message); break;
@@ -140,6 +145,7 @@ export function spawnViaWorker(bin: string, args: string[], opts: WorkerSpawnerO
     if (!exited) worker.postMessage(m);
   };
   return {
+    get pid() { return pid; },
     onStdout: (cb) => { out.push(cb); },
     onStderr: (cb) => { err.push(cb); },
     onError: (cb) => { errors.push(cb); },

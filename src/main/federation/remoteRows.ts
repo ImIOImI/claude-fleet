@@ -103,3 +103,24 @@ export function parseSummary(v: unknown): WorkspaceSummary | null {
     topTools, recentToolCalls, costSeries: series(s.costSeries, 200, nonNeg), tokenSeries: series(s.tokenSeries, 200, nat),
   };
 }
+
+export const MAX_SEARCH_HITS = 50;
+const MAX_HIT_TEXT = 1000;
+
+export type RemoteSearchHit = { sessionId: string; workspaceId: string; kind: 'turn' | 'summary'; ts: number | null; text: string; score: number };
+
+/** Hit text keeps newlines and tabs; the renderer shows it as a text node. */
+export function parseSearchReply(v: unknown, workspaceId: string): { modelId: string; hits: RemoteSearchHit[] } {
+  const o = v as { modelId?: unknown; hits?: unknown } | null;
+  if (!o || typeof o !== 'object' || typeof o.modelId !== 'string' || !Array.isArray(o.hits) || o.hits.length > MAX_SEARCH_HITS) return fail('search reply');
+  const hits: RemoteSearchHit[] = [];
+  for (const raw of o.hits) {
+    const h = raw as Record<string, unknown> | null;
+    if (!h || typeof h !== 'object' || typeof h.sessionId !== 'string' || !ID_RE.test(h.sessionId) || h.workspaceId !== workspaceId) continue;
+    const ts = natOrNull(h.ts);
+    if ((h.kind !== 'turn' && h.kind !== 'summary') || ts === undefined || typeof h.text !== 'string') continue;
+    if (typeof h.score !== 'number' || !Number.isFinite(h.score) || h.score < -1.0001 || h.score > 1.0001) continue;
+    hits.push({ sessionId: h.sessionId, workspaceId, kind: h.kind, ts, text: h.text.replace(/[\x00-\x08\x0b-\x1f\x7f\p{Cf}]/gu, ' ').slice(0, MAX_HIT_TEXT), score: h.score });
+  }
+  return { modelId: oneLine(o.modelId, 128), hits };
+}

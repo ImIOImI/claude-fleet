@@ -72,6 +72,8 @@ const ERROR_LABEL: Record<SidecarErrorKind, string> = {
 
 /** The sidecar's stdio and lifecycle, however it was spawned. An error is always followed by one exit. */
 export interface SidecarProcess {
+  /** Undefined until the child exists. */
+  readonly pid: number | undefined;
   onStdout(cb: (chunk: Buffer) => void): void;
   onStderr(cb: (chunk: Buffer) => void): void;
   onError(cb: (kind: SidecarErrorKind, message: string) => void): void;
@@ -82,14 +84,16 @@ export interface SidecarProcess {
   kill(force?: boolean): void;
 }
 
-export type SidecarSpawner = (bin: string, args: string[]) => SidecarProcess;
+/** env, when set, replaces the inherited environment. */
+export type SidecarSpawner = (bin: string, args: string[], env?: NodeJS.ProcessEnv) => SidecarProcess;
 
 /** Spawns on the calling thread (CreateProcess blocks it until the child exists). */
-export const directSpawner: SidecarSpawner = (bin, args) => {
-  const c = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+export const directSpawner: SidecarSpawner = (bin, args, env) => {
+  const c = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env });
   // stdin EPIPE after a crash surfaces here; 'exit' does the bookkeeping.
   c.stdin!.on('error', () => {});
   return {
+    get pid() { return c.pid; },
     onStdout: (cb) => { c.stdout!.on('data', cb); },
     onStderr: (cb) => { c.stderr!.on('data', cb); },
     onError: (cb) => {
@@ -121,6 +125,8 @@ export interface EmbedderClientOptions {
   /** Defaults to directSpawner. */
   spawner?: SidecarSpawner;
   disposeGraceMs?: number;
+  /** Replaces the inherited environment when set. */
+  env?: NodeJS.ProcessEnv;
 }
 
 interface Pending {
@@ -165,6 +171,10 @@ export class EmbedderClient {
     });
   }
 
+  get pid(): number | undefined {
+    return this.child?.pid;
+  }
+
   /** Closes stdin (the sidecar exits on EOF), then escalates to SIGTERM and SIGKILL. */
   dispose(): void {
     const child = this.child;
@@ -184,7 +194,7 @@ export class EmbedderClient {
     this.lastFatal = '';
     let child: SidecarProcess;
     try {
-      child = (this.opts.spawner ?? directSpawner)(this.opts.bin, this.opts.args);
+      child = (this.opts.spawner ?? directSpawner)(this.opts.bin, this.opts.args, this.opts.env);
     } catch (e) {
       this.onChildGone(null, `spawn failed: ${String(e)}`);
       return;

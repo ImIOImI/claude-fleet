@@ -46,7 +46,7 @@ export interface MergedSessions<T> {
 }
 
 export type UnavailableReason =
-  | 'unreachable' | 'checking' | 'timeout' | 'unauthorized' | 'forbidden' | 'standby' | 'not-signed-in' | 'protocol' | 'model';
+  | 'unreachable' | 'checking' | 'timeout' | 'unauthorized' | 'forbidden' | 'standby' | 'not-signed-in' | 'protocol' | 'model' | 'disabled';
 
 export interface UnavailableSource { origin: Origin; name: string; reason: UnavailableReason }
 
@@ -124,3 +124,18 @@ export function refreshSessionPage<T extends Keyed>(cur: MergedSessions<T>, page
   const older = prev.rows.filter((r) => compareSessionKey(r, edge) > 0 && !fresh.has(`${r.workspaceId}\u0000${r.id}`));
   return mergeSessionPages([...rest, { origin: page.origin, rows: [...page.rows, ...older], next: prev.next }]);
 }
+
+/** history:search's 503 body when the host's embedder is off (D79). */
+export const SEARCH_UNAVAILABLE = 'search unavailable';
+
+export interface SearchHitItem {
+  origin: Origin;
+  sessionId: string;
+  workspaceId: string;
+  workspaceName: string;
+  kind: 'turn' | 'summary';
+  ts: number | null;
+  text: string;
+  score: number;
+}
+export interface FederatedSearchResult { hits: SearchHitItem[]; unavailable: UnavailableSource[] }

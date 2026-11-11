@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { sql, type Kysely } from 'kysely';
-import { stateKysely } from '../main/db.js';
+import { insertEmbeddings, stateKysely } from '../main/db.js';
+import { EMBED_DIM, EMBED_MODEL_ID, encodeVector } from '../main/vectors.js';
 import { migratePostgres } from '../main/store/pgMigrate.js';
 import { postgresKysely } from '../main/store/postgres.js';
 import { STATE_PG_TRACK } from '../main/store/migrations/statePg.js';
 import type { StateDb } from '../main/store/stateSchema.js';
 import { isPg, openTestState, testPgSchema, type TestPg } from '../main/store/testStore.js';
 import { compareBytes } from '../preload/federation.js';
-import { HistoryArgError, historyReader, parseSessionId, parseSessionsReq, sessionsPage, type SessionsPageReq } from './historyRead.js';
+import { HistoryArgError, historyReader, parseSessionId, parseSessionsReq, SEARCH_TEXT_MAX, sessionsPage, type SessionsPageReq } from './historyRead.js';
 
 const HOSTED = '01JC0000000000000000000000';
 const OTHER = '01JC0000000000000000000001';
@@ -169,5 +170,38 @@ describe.skipIf(!isPg)('historyReader.summary', () => {
     expect(await r.summary('o-0')).toBeNull();
     expect(await r.summary('missing')).toBeNull();
     expect((await historyReader(stateKysely, OTHER).summary(null))?.sessionId).toBe('o-0');
+  });
+});
+
+describe.skipIf(!isPg)('historyReader.search', () => {
+  it('scans only the hosted workspace and caps hit text', async () => {
+    const st = await openTestState();
+    try {
+      const q = new Float32Array(EMBED_DIM).fill(1 / Math.sqrt(EMBED_DIM));
+      const near = new Float32Array(EMBED_DIM);
+      near[0] = 1;
+      const row = (workspaceId: string, sessionId: string, kind: 'turn' | 'summary', text: string, vec: Float32Array, n: number) => ({
+        workspaceId, sessionId, kind, refEventId: null, ts: 100 + n, text, modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec: encodeVector(vec), dedupKey: `k${n}`
+      });
+      await insertEmbeddings([
+        row(HOSTED, 's-1', 'turn', 'hosted turn', near, 1),
+        row(HOSTED, 's-2', 'summary', 'S'.repeat(3000), q, 2),
+        row(OTHER, 'o-1', 'turn', 'other secret', q, 3),
+      ]);
+      const r = historyReader(stateKysely, HOSTED);
+      const res = await r.search({ vector: q, limit: 10 });
+      expect(res.modelId).toBe(EMBED_MODEL_ID);
+      expect(res.hits.map((h) => [h.sessionId, h.workspaceId])).toEqual([['s-2', HOSTED], ['s-1', HOSTED]]);
+      expect(res.hits.every((h) => h.text.length <= SEARCH_TEXT_MAX)).toBe(true);
+      expect(res.hits[0].text).toHaveLength(SEARCH_TEXT_MAX);
+      expect(typeof res.hits[0].score).toBe('number');
+      expect(res.hits[0].score).toBeCloseTo(1, 5);
+      expect(res.hits[1].ts).toBe(101);
+      expect((await r.search({ vector: q, limit: 1 })).hits).toHaveLength(1);
+      expect((await r.search({ vector: q, limit: 10, kind: 'turn' })).hits.map((h) => h.sessionId)).toEqual(['s-1']);
+      expect((await historyReader(stateKysely, OTHER).search({ vector: q, limit: 10 })).hits.map((h) => h.sessionId)).toEqual(['o-1']);
+    } finally {
+      await st.close();
+    }
   });
 });

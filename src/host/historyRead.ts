@@ -1,9 +1,11 @@
 // Store-backed reads the desktop federates. Every query is limited to the
 // hosted workspace, whatever the caller sends.
 import { sql, type Kysely } from 'kysely';
-import { HEADLESS_BROKER_PREFIX, listSessionCostsQuery, summaryForSession, summaryForWorkspace, type WorkspaceSummary } from '../main/db.js';
+import { HEADLESS_BROKER_PREFIX, listSessionCostsQuery, summaryForSession, summaryForWorkspace, type EmbeddingHit, type WorkspaceSummary } from '../main/db.js';
 import { costFor } from '../main/pricing.js';
 import { readTransaction } from '../main/store/kysely.js';
+import { pgSearchEmbeddings } from '../main/store/pgVectorSearch.js';
+import { EMBED_DIM, EMBED_MODEL_ID } from '../main/vectors.js';
 import type { StateDb } from '../main/store/stateSchema.js';
 import type { SessionCursor } from '../preload/federation.js';
 
@@ -53,6 +55,32 @@ export function parseSessionId(v: unknown): string | null {
   if (v === undefined || v === null) return null;
   if (typeof v !== 'string' || !ID_RE.test(v)) throw new HistoryArgError('sessionId must be a session id');
   return v;
+}
+
+export const SEARCH_LIMIT_MAX = 50;
+export const SEARCH_TEXT_MAX = 1000;
+const SEARCH_LIMIT_DEFAULT = 10;
+const UNIT_TOLERANCE = 1e-3;
+export interface SearchReq { vector: Float32Array; limit: number; kind?: 'turn' | 'summary' }
+
+/** D66: a query vector for the host's own model, never text, so a viewer can't spend the host's model CPU. */
+export function parseSearchReq(v: unknown): SearchReq {
+  if (!isObject(v)) throw new HistoryArgError('expected {vector, modelId, limit}');
+  if (v.modelId !== EMBED_MODEL_ID) throw new HistoryArgError(`model mismatch: host uses ${EMBED_MODEL_ID}`);
+  if (!Array.isArray(v.vector) || v.vector.length !== EMBED_DIM) throw new HistoryArgError(`vector must have ${EMBED_DIM} numbers`);
+  const vec = new Float32Array(EMBED_DIM);
+  let norm = 0;
+  for (let i = 0; i < EMBED_DIM; i++) {
+    const x: unknown = v.vector[i];
+    if (typeof x !== 'number' || !Number.isFinite(x)) throw new HistoryArgError('vector must be finite numbers');
+    vec[i] = x;
+    norm += x * x;
+  }
+  if (Math.abs(Math.sqrt(norm) - 1) > UNIT_TOLERANCE) throw new HistoryArgError('vector must be unit length');
+  const limit = v.limit === undefined ? SEARCH_LIMIT_DEFAULT : v.limit;
+  if (!int(limit) || limit < 1 || limit > SEARCH_LIMIT_MAX) throw new HistoryArgError(`limit must be 1-${SEARCH_LIMIT_MAX}`);
+  if (v.kind !== undefined && v.kind !== 'turn' && v.kind !== 'summary') throw new HistoryArgError('kind must be turn or summary');
+  return { vector: vec, limit, kind: v.kind };
 }
 
 const num = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
@@ -120,6 +148,8 @@ export interface HistoryReader {
   sessions(req: SessionsPageReq): Promise<SessionsPage>;
   /** null: the workspace's latest session. A session outside the workspace answers null. */
   summary(sessionId: string | null): Promise<WorkspaceSummary | null>;
+  /** The exact pgvector scan over the hosted workspace (D66). */
+  search(req: SearchReq): Promise<{ modelId: string; hits: EmbeddingHit[] }>;
 }
 
 /** `summary` goes through db.ts's global store (summaryForWorkspace/summaryForSession), the same
@@ -132,6 +162,13 @@ export function historyReader(k: () => Kysely<StateDb>, workspaceId: string): Hi
       if (sessionId === null) return summaryForWorkspace(workspaceId);
       const row = await k().selectFrom('sessions').select('workspace_id').where('id', '=', sessionId).executeTakeFirst();
       return row?.workspace_id === workspaceId ? summaryForSession(sessionId) : null;
+    },
+    async search(req) {
+      const hits = await readTransaction(k(), (q) => pgSearchEmbeddings(q, req.vector, [workspaceId], { limit: req.limit, kind: req.kind }));
+      return {
+        modelId: EMBED_MODEL_ID,
+        hits: hits.map((h) => ({ ...h, text: h.text.slice(0, SEARCH_TEXT_MAX), score: Number(h.score), ts: num(h.ts) }))
+      };
     },
   };
 }

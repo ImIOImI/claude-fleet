@@ -124,6 +124,20 @@ describe('spawnViaWorker', () => {
     expect(procState(pid)).not.toBe('alive');
   });
 
+  it('does not kill a reaped pid when the worker dies before close', async () => {
+    const src = `${SPAWN_WORKER_SRC}\nchild.on('exit', () => process.exit(5));\n`;
+    const s = start('ok', process.execPath, src);
+    const pid = await s.pid;
+    const kill = vi.spyOn(process, 'kill');
+    try {
+      s.p.end();
+      await s.exited;
+      expect(kill.mock.calls.filter(([p]) => p === pid)).toEqual([]);
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
   it('relays frames larger than the worker heap limit', async () => {
     process.env.FAKE_MODE = 'ok';
     const c = new EmbedderClient({ bin: process.execPath, args: [FAKE], onFatal: () => {}, log: () => {}, spawner: makeWorkerSpawner() });

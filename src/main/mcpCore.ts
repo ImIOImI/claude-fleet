@@ -246,7 +246,7 @@ export function setSummaryStatusHandler(fn: SummaryStatusHandler): void {
  *  the `search_transcripts` tool returns an "index is unavailable" error rather
  *  than a silent empty result, so callers know to retry later. */
 let queryEmbedder: EmbedFn | null = null;
-export function setQueryEmbedder(fn: EmbedFn): void {
+export function setQueryEmbedder(fn: EmbedFn | null): void {
   queryEmbedder = fn;
 }
 

@@ -1,8 +1,9 @@
 // Protocol-speaking stand-in for fleet-embedder (embedderClient.test.ts).
 // FAKE_MODE: ok | crash-on-first | fatal | never-ready | hang | error-reply |
-// short-reply | stderr-split | old-protocol | ignore-eof | ignore-term.
+// short-reply | stderr-split | old-protocol | slow | ignore-eof | ignore-term.
 // FAKE_PID_FILE: if set, the child writes its pid there.
-// FAKE_STATE: a file whose existence marks "already crashed once".
+// FAKE_STATE: a file whose existence marks "already crashed once"; in slow mode,
+// written when a request arrives, which is answered FAKE_DELAY_MS later.
 import { existsSync, writeFileSync } from 'node:fs';
 
 const mode = process.env.FAKE_MODE ?? 'ok';
@@ -43,7 +44,11 @@ process.stdin.on('data', (d) => {
     if (mode === 'short-reply') req.texts = req.texts.slice(1);
     const out = Buffer.alloc(req.texts.length * DIM * 4);
     req.texts.forEach((t, i) => out.writeFloatLE(1, (i * DIM + (t.length % DIM)) * 4));
-    process.stdout.write(frame({ id: req.id, n: req.texts.length, dim: DIM, vectors: out.toString('base64') }));
+    const reply = frame({ id: req.id, n: req.texts.length, dim: DIM, vectors: out.toString('base64') });
+    if (mode === 'slow') {
+      if (process.env.FAKE_STATE) writeFileSync(process.env.FAKE_STATE, '1');
+      setTimeout(() => process.stdout.write(reply), Number(process.env.FAKE_DELAY_MS ?? 500));
+    } else process.stdout.write(reply);
   }
 });
 process.stdin.on('end', () => { if (!ignoreEof) process.exit(0); });

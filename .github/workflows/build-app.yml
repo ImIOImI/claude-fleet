@@ -131,6 +131,9 @@ jobs:
           (cd embedder && cargo test --locked)
           embedder/scripts/ci-build-linux.sh
 
+      - name: install-zigbuild arch selection
+        run: bash embedder/scripts/install-zigbuild.test.sh
+
       # Model weights for the parity test (~35 MB); keyed by model + dtype.
       - uses: actions/cache@v4
         with:
