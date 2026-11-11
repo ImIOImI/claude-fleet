@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { WorkspaceObservabilitySummary, UsageBudget, ServingPort } from '../../../preload';
 import { colorFor, type WorkspaceSummary } from '../App';
 import { PortsSection } from './PortsSection';
+import { OwnerCostSection } from './OwnerCostSection';
 import {
   workspaceHostPath,
   workspacePathLabel,
@@ -152,6 +153,9 @@ export function ObservabilityPane({
                 graphMetric={graphMetric}
                 onGraphMetric={onGraphMetric}
               />
+            )}
+            {workspace?.kind === 'remote' && (
+              <OwnerCostSection workspaceId={workspace.id} refreshKey={summary?.lastActiveAt ?? null} />
             )}
             {workspace && (
               <PortsSection

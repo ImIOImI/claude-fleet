@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { colorFor } from '../App';
+import { formatUsd } from '../ownerView';
 import type { SessionListItem } from '../../../preload';
 import { type MergedSessions, type SessionCursor, type UnavailableSource } from '../../../preload/federation';
 import {
@@ -105,14 +106,6 @@ const blockedTitle = (s: SessionListItem, remote: Record<string, RemoteResumeInf
 
 function displayTitle(s: SessionListItem): string {
   return s.userSetName || s.aiTitle || s.firstUserMessage || '(untitled session)';
-}
-
-function formatUsd(usd: number): string {
-  if (usd === 0) return '$0.00';
-  if (usd < 0.01) return '<$0.01';
-  if (usd < 100) return `$${usd.toFixed(2)}`;
-  if (usd < 1000) return `$${usd.toFixed(1)}`;
-  return `$${Math.round(usd).toLocaleString('en-US')}`;
 }
 
 export function SessionsPane({
