@@ -296,7 +296,7 @@ export type UsageRecorder = (e: {
   detail?: Record<string, unknown>;
 }) => void | Promise<void>;
 let usageRecorder: UsageRecorder | null = null;
-export function setUsageRecorder(fn: UsageRecorder): void {
+export function setUsageRecorder(fn: UsageRecorder | null): void {
   usageRecorder = fn;
 }
 

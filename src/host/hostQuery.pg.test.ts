@@ -9,12 +9,15 @@ import { join } from 'node:path';
 import pg from 'pg';
 import { parse as parseConnectionString } from 'pg-connection-string';
 import { openDbPostgres, closeDb, stateKysely } from '../main/db.js';
+import { migratePostgres } from '../main/store/pgMigrate.js';
 import { migratePgStores } from '../main/store/pgStores.js';
+import { postgresKysely } from '../main/store/postgres.js';
 import { openPgMcpReadSource } from '../main/store/pgReadSource.js';
 import { scramVerifier } from '../main/store/scram.js';
 import { isPg, testPgAppSchema, type TestPgApp } from '../main/store/testStore.js';
 import { bootstrap } from './bootstrap.js';
 import { startHostMcp, type HostMcp } from './hostMcp.js';
+import { HOST_TRACK } from './hostSchema.js';
 import { createLogger } from './log.js';
 
 const HOSTED = '01JC0000000000000000000000';
@@ -94,11 +97,11 @@ describe.skipIf(!isPg)('host MCP query', () => {
     return { queryUser, pw };
   }
 
-  async function serve(role: string, password: () => Promise<string>, logs: string[] = []): Promise<string> {
+  async function serve(role: string, password: () => Promise<string>, logs: string[] = [], scope?: () => Promise<readonly string[]>): Promise<string> {
     const rs = await openPgMcpReadSource(t!.schema, t!.appConfig, (m) => logs.push(m), { preprovisioned: { role, password } });
     expect(rs.queryFlavor).toBe('postgres');
     const socketPath = join(mkdtempSync(join(tmpdir(), 'hq-')), 'mcp', 'mcp.sock');
-    mcp = await startHostMcp({ listen: { path: socketPath }, workspaceId: HOSTED, readSource: rs, log: createLogger(() => undefined) });
+    mcp = await startHostMcp({ listen: { path: socketPath }, workspaceId: HOSTED, readSource: rs, log: createLogger(() => undefined), scope });
     return socketPath;
   }
 
@@ -110,6 +113,27 @@ describe.skipIf(!isPg)('host MCP query', () => {
     expect(rowsOf(await query(sock, 'SELECT session_user AS s'))).toEqual([{ s: queryUser }]);
     const mine = await su!.query(`SELECT workspace_id FROM ${t!.schema}.mcp_grants WHERE role_name = $1`, [queryUser]);
     expect(mine.rows).toEqual([{ workspace_id: HOSTED }]);
+  });
+
+  it('query sees published partitions too, and never the publish bookkeeping tables', async () => {
+    const { queryUser, pw } = await rig();
+    await migratePostgres(postgresKysely(t!.appPool), t!.schema, HOST_TRACK);
+    await stateKysely().insertInto('sessions').values([
+      { id: 'p1', workspace_id: 'pub_aaaa', cwd: null, started_at: 1, last_active_at: 2, ai_title: null, first_user_message: 'published', user_set_name: null },
+      { id: 'p2', workspace_id: 'pub_bbbb', cwd: null, started_at: 1, last_active_at: 2, ai_title: null, first_user_message: 'not in scope', user_set_name: null }
+    ]).execute();
+    await su!.query(`INSERT INTO ${t!.schema}.publish_partitions (partition_id, owner_provider, owner_id, owner_login, source_workspace_id, created_at)
+      VALUES ('pub_aaaa', 'github', '7', 'ann', '01JC0000000000000000000005', 1)`);
+    const sock = await serve(queryUser, async () => pw, [], async () => ['pub_aaaa']);
+    expect(rowsOf(await query(sock, 'SELECT id FROM sessions ORDER BY id'))).toEqual([{ id: 'h1' }, { id: 'p1' }]);
+    expect(rowsOf(await query(sock, `SELECT count(*)::int AS n FROM sessions WHERE workspace_id = '${OTHER}'`))).toEqual([{ n: 0 }]);
+    const grants = await su!.query(`SELECT workspace_id FROM ${t!.schema}.mcp_grants WHERE role_name = $1 ORDER BY workspace_id`, [queryUser]);
+    expect(grants.rows).toEqual([{ workspace_id: HOSTED }, { workspace_id: 'pub_aaaa' }]);
+    for (const table of ['publish_partitions', 'publish_sessions']) {
+      const r = await query(sock, `SELECT * FROM ${table}`);
+      expect(r.isError).toBe(true);
+      expect(r.content[0].text).toMatch(/permission denied/);
+    }
   });
 
   it('cannot reach the app role from the query login', async () => {

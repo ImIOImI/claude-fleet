@@ -23,6 +23,8 @@ export interface RemoteBackendDeps {
   writeManifest(spec: WorkspaceSpec): Promise<void>;
   /** Delete the bookmark's local state dir (manifest + local tab list). */
   deleteState(id: string): Promise<void>;
+  /** Withdraw every local workspace's publish opt-in towards this bookmark. */
+  revokePublish?: (id: string) => Promise<void>;
   now?: () => number;
   /** Timer seam; returns a cancel. Default: an unref'd setTimeout. */
   schedule?: (fn: () => void, ms: number) => () => void;
@@ -212,6 +214,7 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
     stopWorkspace: managed,
     async removeWorkspace(containerId) {
       const spec = await bookmark(containerId);
+      await deps.revokePublish?.(spec.id);
       await deps.deleteState(spec.id);
       lastWhoami.delete(spec.id);
       unwatch(spec.id);

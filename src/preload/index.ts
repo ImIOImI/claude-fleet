@@ -16,6 +16,8 @@ export type { AccountStatus, AccountIdentity, AccountSso, SignInStart, SignInPol
 import type { RemoteAddOptions, RemoteLiveSession, RemoteProbe } from './remoteTypes';
 import type { StoreChoice, StoreSettings, StoreStatus } from './storeTypes';
 import type { FederatedSearchResult, RemoteSessionsResult, SessionCursor } from './federation';
+import type { UnpublishResult } from './publish';
+export type { UnpublishResult, WorkspacePublish } from './publish';
 export type { ImportProgress, StoreChoice, StorePhase, StoreSettings, StoreStatus } from './storeTypes';
 export type { RemoteAddOptions, RemoteLiveSession, RemoteProbe, RemoteProbeOk, RemoteProbeErr, RemoteProbeErrorKind, RemoteTier } from './remoteTypes';
 export type { ExtraMount } from './extraMounts';
@@ -769,6 +771,11 @@ const api = {
     rename: (id: string, name: string): Promise<void> => ipcRenderer.invoke('remote:rename', id, name),
     /** Broker sessions live on the host (any tier may watch them). */
     liveSessions: (id: string): Promise<RemoteLiveSession[]> => ipcRenderer.invoke('remote:liveSessions', id)
+  },
+  publish: {
+    /** Withdraw a session from every host its workspace publishes to; it is never published again. */
+    unpublish: (workspaceId: string, sessionId: string): Promise<UnpublishResult> =>
+      ipcRenderer.invoke('publish:unpublish', workspaceId, sessionId)
   },
   endpoints: {
     list: (): Promise<unknown[]> => ipcRenderer.invoke('endpoints:list'),

@@ -15,6 +15,7 @@
 // Sensitive material (env-var secrets) is NOT persisted here — only the
 // list of secret keys; values live in keytar.
 
+import { sanitizePublish, type WorkspacePublish } from '../preload/publish.js';
 import { readFile, readdir, mkdir } from 'node:fs/promises';
 import { writeFileAtomic } from './atomicWrite.js';
 import { dirname } from 'node:path';
@@ -213,6 +214,8 @@ export interface WorkspaceSpec {
   resources?: WorkspaceResources;
   /** kind 'container' only: extra host folders bound into the container. */
   mounts?: ExtraMount[];
+  /** Local and container only: remote workspaces this one publishes transcripts to. */
+  publish?: WorkspacePublish;
   /** Durable-transcript-mirror defaults. Factory `on`/`delete` when absent. */
   mirror: WorkspaceMirror;
   /** Loadouts installed into this workspace (#16-followup). Absent ⇒ none. */
@@ -386,6 +389,7 @@ export async function readWorkspaceManifest(id: string): Promise<WorkspaceSpec |
       },
       resources: parsed.resources,
       mounts: kind === 'container' ? sanitizeMounts((parsed as { mounts?: unknown }).mounts) : undefined,
+      publish: kind === 'remote' ? undefined : sanitizePublish((parsed as { publish?: unknown }).publish),
       mirror: {
         default: parsed.mirror?.default === 'off' ? 'off' : FACTORY_MIRROR.default,
         cleanup: parsed.mirror?.cleanup === 'preserve' ? 'preserve' : FACTORY_MIRROR.cleanup

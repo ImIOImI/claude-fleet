@@ -26,6 +26,7 @@ async function rig(tier: 'read' | 'session', o: { cached?: RemoteBookmark['tier'
     ...(o.extra ?? [])
   ];
   const deleted: string[] = [];
+  const revoked: string[] = [];
   let t = 1_000_000;
   let whoamiCalls = 0;
   let login: string | null = 'alice';
@@ -41,6 +42,7 @@ async function rig(tier: 'read' | 'session', o: { cached?: RemoteBookmark['tier'
     listManifests: async () => manifests,
     writeManifest: async (s) => void (manifests = manifests.map((m) => (m.id === s.id ? s : m))),
     deleteState: async (id) => void deleted.push(id),
+    revokePublish: async (id) => void revoked.push(id),
     now: () => t
   });
   vi.spyOn(RemoteClient.prototype, 'whoami').mockImplementation(function (this: RemoteClient) {
@@ -55,6 +57,7 @@ async function rig(tier: 'read' | 'session', o: { cached?: RemoteBookmark['tier'
     manifests: () => manifests,
     setManifests: (m: WorkspaceSpec[]) => void (manifests = m),
     deleted,
+    revoked,
     advance: (ms: number) => void (t += ms),
     setLogin: (l: string | null) => void (login = l),
     whoamiCalls: () => whoamiCalls
@@ -242,6 +245,7 @@ describe('remote backend', () => {
     await expect(r.backend.createWorkspace({} as never)).rejects.toThrow(MANAGED_MSG);
     await r.backend.removeWorkspace(ID);
     expect(r.deleted).toEqual([ID]);
+    expect(r.revoked).toEqual([ID]);
   });
 
   it('forget refuses anything that is not a remote bookmark', async () => {
@@ -250,6 +254,7 @@ describe('remote backend', () => {
     await expect(r.backend.removeWorkspace(local.id)).rejects.toThrow(/no remote workspace/);
     await expect(r.backend.removeWorkspace('../../x')).rejects.toThrow(/no remote workspace/);
     expect(r.deleted).toEqual([]);
+    expect(r.revoked).toEqual([]);
   });
 
   it('attach refuses a non-remote id without contacting any host', async () => {

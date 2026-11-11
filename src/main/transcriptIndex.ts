@@ -34,7 +34,8 @@ export function searchVectorsSqlite(
   opts: { limit: number; kind?: 'turn' | 'summary' },
 ): SearchHit[] {
   if (ids.length === 0) return [];
-  const where = [`workspace_id IN (${ids.map(() => '?').join(',')})`, `model_id = ?`, `text <> ''`];
+  const where = [`workspace_id IN (${ids.map(() => '?').join(',')})`, `model_id = ?`, `text <> ''`,
+    'EXISTS (SELECT 1 FROM sessions s WHERE s.id = embeddings.session_id)'];
   const params: unknown[] = [...ids, EMBED_MODEL_ID];
   if (opts.kind) { where.push('kind = ?'); params.push(opts.kind); }
 

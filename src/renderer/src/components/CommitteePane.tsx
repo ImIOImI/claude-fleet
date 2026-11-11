@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { WorkspaceSummary, CommitteeVerb, ControlConfig, ControlGrant } from '../App';
 import { COMMITTEE_VERBS, isManager, isReachable, ManagerGlyph, managerUnavailableText, WifiGlyph } from './committee';
+import { withoutPublish } from './publishTargets';
 
 interface Props {
   /** The workspace acting as manager (the currently-selected one). */
@@ -70,7 +71,7 @@ export function CommitteePane({ selectedWorkspace, workspaces, onChanged }: Prop
         const spec = (await window.api.workspace.getManifest(manager.id)) as Manifest | null;
         if (!spec) return;
         const control: ControlConfig | undefined = next.length ? { canControl: next } : undefined;
-        await window.api.workspace.writeManifest({ ...spec, control });
+        await window.api.workspace.writeManifest({ ...withoutPublish(spec), control });
         onChanged();
       } catch {
         setGrants(prev); // revert on failure

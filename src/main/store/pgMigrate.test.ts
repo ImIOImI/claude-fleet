@@ -96,6 +96,8 @@ describe.skipIf(!isPg)('ensureVector', () => {
     try {
       for (const schema of ['fleet_a', 'fleet_b']) {
         const pool = createPgPool({ connectionString: u.toString(), schema, max: 1 });
+        // pool.end() resolves before the server sees Terminate; DROP DATABASE WITH (FORCE) can then send this ending client a 57P01.
+        pool.on('error', () => undefined);
         const kk = postgresKysely(pool);
         try {
           await ensureVector(kk);

@@ -10,7 +10,7 @@ export function pgVectorLiteral(v: Float32Array): string {
   return `[${Array.from(v).join(',')}]`;
 }
 
-/** Exact `ORDER BY vec <=> q, id` scan; an ANN index can't serve the `id` tiebreak. */
+/** Exact `ORDER BY vec <=> q, id` scan; an ANN index can't serve the `id` tiebreak. Rows of a deleted session never surface. */
 export async function pgSearchEmbeddings(
   k: Kysely<StateDb>, qvec: Float32Array, scope: readonly string[], opts: { limit: number; kind?: 'turn' | 'summary' },
 ): Promise<EmbeddingHit[]> {
@@ -20,6 +20,8 @@ export async function pgSearchEmbeddings(
     .select(['session_id as sessionId', 'workspace_id as workspaceId', 'kind', 'ts', 'text',
       sql<number>`1 - (vec <=> ${q}::vector)`.as('score')])
     .where('workspace_id', 'in', [...scope]).where('model_id', '=', EMBED_MODEL_ID).where('text', '<>', '')
+    // Explicit collation: a database default (e.g. RDS en_US ICU) on one column makes `=` ambiguous.
+    .where(sql<boolean>`EXISTS (SELECT 1 FROM sessions s WHERE s.id = embeddings.session_id COLLATE "C")`)
     .$if(opts.kind !== undefined, (qb) => qb.where('kind', '=', opts.kind as 'turn' | 'summary'))
     .orderBy(sql`vec <=> ${q}::vector`).orderBy('id')
     .limit(opts.limit)

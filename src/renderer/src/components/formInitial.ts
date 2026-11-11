@@ -42,6 +42,7 @@ export function workspaceToFormInitial(
     mirror: w.mirror,
     accessibility: w.accessibility,
     inbox: w.inbox,
-    knowledgeCapture: w.knowledgeCapture
+    knowledgeCapture: w.knowledgeCapture,
+    publishTo: w.publish?.to
   };
 }

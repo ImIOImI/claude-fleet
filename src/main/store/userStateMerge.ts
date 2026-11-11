@@ -27,6 +27,8 @@ export const USER_STATE_MERGE: readonly MergeSpec[] = [
   { table: 'port_exposures', key: ['id'], mode: 'upsert' },
   { table: 'usage_events', key: ['ts', 'workspace_id', 'session_id', 'kind', 'detail'], mode: 'missing', localId: 'id' },
   { table: 'usage_anchors', key: ['dedup_key'], mode: 'upsert', localId: 'id' },
+  // Unpublished on purpose: must survive a store switch.
+  { table: 'publish_withheld', key: ['session_id'], mode: 'upsert' },
 ];
 
 type Row = Record<string, unknown>;

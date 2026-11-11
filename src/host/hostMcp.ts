@@ -1,7 +1,9 @@
 // The fleet-state MCP tools for this workspace's sessions, on the holder (SPEC §7 *Host MCP*).
 import { createServer, type Server, type Socket } from 'node:net';
+import { getSession, recordUsageEvent } from '../main/db.js';
 import {
-  initReadSource, releaseReadSource, serveMcpConnection, setExposedTools, setMcpLogSink, setQueryEmbedder, setReadScopeResolver, type McpLogEntry
+  initReadSource, releaseReadSource, serveMcpConnection, setExposedTools, setMcpLogSink, setQueryEmbedder, setReadScopeResolver,
+  setUsageRecorder, type McpLogEntry, type UsageRecorder
 } from '../main/mcpCore.js';
 import type { OwnedReadSource } from '../main/store/readSource.js';
 import type { EmbedFn } from '../main/vectors.js';
@@ -10,7 +12,7 @@ import type { Logger } from './log.js';
 import { finishSocket, prepareSocketPath } from './socketDir.js';
 
 export const HOST_MCP_TOOLS: ReadonlySet<string> = new Set([
-  'list_sessions', 'get_session', 'get_cost', 'list_events', 'session_summary', 'query',
+  'list_sessions', 'get_session', 'get_cost', 'list_events', 'session_summary', 'query', 'mark_useful',
   'post_todo', 'update_todo', 'list_todos',
   'list_automations', 'get_automation', 'list_runs', 'run_automation', 'schedule_next'
 ]);
@@ -20,6 +22,12 @@ const HOST_TOOLS_WITH_SEARCH: ReadonlySet<string> = new Set([...HOST_MCP_TOOLS, 
 export function hostMcpTools(search: boolean): ReadonlySet<string> {
   return search ? HOST_TOOLS_WITH_SEARCH : HOST_MCP_TOOLS;
 }
+
+/** The workspace of the session a signal is about is its origin: the hosted id or a publish partition. */
+export const hostUsageRecorder: UsageRecorder = async (e) => {
+  const origin = e.sessionId ? (await getSession(e.sessionId))?.workspaceId ?? null : null;
+  await recordUsageEvent({ ...e, origin });
+};
 export const MAX_HOST_MCP_CONNECTIONS = 64;
 /** A session's bridge reconnects in a loop; these stay off stdout at the default level. */
 const QUIET = new Set(['mcp-conn', 'mcp-conn-closed']);
@@ -42,6 +50,10 @@ export async function startHostMcp(o: {
   now?: () => number;
   /** The holder's sidecar; without it search_transcripts isn't served. */
   embed?: EmbedFn;
+  /** Read scope beyond the hosted workspace (publish partitions), read on every call. */
+  scope?: () => Promise<readonly string[]>;
+  /** Writes usage_events; without it mark_useful answers unavailable. */
+  recordUsage?: UsageRecorder;
 }): Promise<HostMcp> {
   if (active) throw new Error('the host MCP is already serving in this process');
   active = true;
@@ -57,7 +69,8 @@ export async function startHostMcp(o: {
       ...(e.stack ? { stack: e.stack } : {})
     })
   );
-  setReadScopeResolver(async () => [o.workspaceId]);
+  setReadScopeResolver(async () => [o.workspaceId, ...((await o.scope?.()) ?? [])]);
+  setUsageRecorder(o.recordUsage ?? null);
   setExposedTools(hostMcpTools(!!o.embed));
   initReadSource(o.readSource);
   setQueryEmbedder(o.embed ?? null);
@@ -80,6 +93,7 @@ export async function startHostMcp(o: {
   function reset(): void {
     releaseReadSource();
     setQueryEmbedder(null);
+    setUsageRecorder(null);
     setExposedTools(null);
     setMcpLogSink(null);
     active = false;

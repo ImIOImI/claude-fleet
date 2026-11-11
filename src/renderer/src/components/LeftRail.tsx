@@ -9,7 +9,7 @@ import { CommitteePane } from './CommitteePane';
 import type { WorkspaceSummary } from '../App';
 import type { OpenTabRef } from '../busySessions';
 import type { SessionListItem } from '../../../preload';
-import { remoteNamesMap, remoteResumeMap } from '../sessionsView';
+import { publishTargetsMap, remoteNamesMap, remoteResumeMap } from '../sessionsView';
 
 interface Props {
   workspaces: WorkspaceSummary[];
@@ -83,6 +83,7 @@ export function LeftRail({
   const [open, setOpen] = useState<OpenState>(loadOpen);
   const remoteResume = useMemo(() => remoteResumeMap(workspaces), [workspaces]);
   const remoteNames = useMemo(() => remoteNamesMap(workspaces), [workspaces]);
+  const publishTargets = useMemo(() => publishTargetsMap(workspaces), [workspaces]);
   const toggle = (k: keyof OpenState): void =>
     setOpen((prev) => {
       const next = { ...prev, [k]: !prev[k] };
@@ -145,6 +146,7 @@ export function LeftRail({
             onResume={onResume}
             remoteResume={remoteResume}
             remoteNames={remoteNames}
+            publishTargets={publishTargets}
           />
         )}
       </section>

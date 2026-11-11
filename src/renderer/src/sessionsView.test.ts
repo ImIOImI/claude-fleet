@@ -22,7 +22,8 @@ import {
   searchTargets,
   searchUnavailableText,
   unavailableText,
-  withRemote
+  withRemote,
+  publishTargetsMap
 } from './sessionsView';
 
 // Minimal session shape — only what the scope logic touches.
@@ -412,5 +413,15 @@ describe('remoteNamesMap', () => {
   it('names remote bookmarks only', () => {
     expect(remoteNamesMap([{ id: 'R1', kind: 'remote', name: 'review-bot' }, { id: 'L1', kind: 'local', name: 'mine' }, { id: 'D1', kind: 'docker', name: 'c' }]))
       .toEqual({ R1: 'review-bot' });
+  });
+});
+
+describe('publishTargetsMap', () => {
+  it('maps publishing workspaces to their hosts’ names', () => {
+    expect(publishTargetsMap([
+      { id: 'R', kind: 'remote', name: 'review-bot' },
+      { id: 'L', kind: 'local', name: 'mine', publish: { to: ['R', 'gone'], since: { R: 1, gone: 1 } } },
+      { id: 'C', kind: 'container', name: 'quiet' }
+    ])).toEqual({ L: ['review-bot', 'gone'] });
   });
 });

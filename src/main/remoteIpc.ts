@@ -22,7 +22,7 @@ export const DIALOG_GAP_MS = 10_000;
 
 export type RemoteConfirm =
   | { kind: 'send-token'; origin: string; warning?: string }
-  | { kind: 're-point'; from: string; to: string };
+  | { kind: 're-point'; from: string; to: string; publishers?: readonly string[] };
 
 /** Text for main's native confirm; origins are punycode (URL.origin), so look-alike hosts show as xn--. */
 export function confirmText(r: RemoteConfirm): { message: string; detail: string; button: string } {
@@ -35,7 +35,8 @@ export function confirmText(r: RemoteConfirm): { message: string; detail: string
   }
   return {
     message: 'Move this remote workspace to a new address?',
-    detail: `From: ${r.from}\nTo: ${r.to}\nYour GitHub sign-in will be sent to the new address from now on.`,
+    detail: `From: ${r.from}\nTo: ${r.to}\nYour GitHub sign-in will be sent to the new address from now on.${
+      r.publishers?.length ? `\n\n${r.publishers.join(', ')} ${r.publishers.length === 1 ? 'publishes its' : 'publish their'} transcripts here; they will go to the new address.` : ''}`,
     button: 'Move'
   };
 }
@@ -227,8 +228,11 @@ export function registerRemoteIpc(ipc: IpcHandleLike, deps: RemoteIpcDeps): void
       const move = `${prior.remote.url} ${p.url}`;
       if (declinedMoves.has(move)) return MOVE_DECLINED_EARLIER;
       if (!dialogAllowed(new URL(p.url).origin)) return DIALOG_BUSY;
+      const publishers = (await deps.listManifests())
+        .filter((m) => m.kind !== 'remote' && m.publish?.to.includes(id))
+        .map((m) => m.name);
       repointing = true;
-      const moved = await deps.confirm({ kind: 're-point', from: prior.remote.url, to: p.url }).then((v) => v === true, () => null);
+      const moved = await deps.confirm({ kind: 're-point', from: prior.remote.url, to: p.url, publishers }).then((v) => v === true, () => null);
       repointing = false;
       lastDialog = { at: now(), approvedOrigin: null };
       if (moved === false) declinedMoves.add(move);

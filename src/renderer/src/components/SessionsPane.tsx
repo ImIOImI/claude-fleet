@@ -45,6 +45,7 @@ import { TranscriptSearch } from './TranscriptSearch';
 import { useBlinkSync } from '../blinkSync';
 import type { OpenTabRef } from '../busySessions';
 import { usePortalMenu } from './portalMenu';
+import { unpublishConfirmText, unpublishNote } from './publishTargets';
 import { IconPencil, IconRefresh, IconTrash } from './menuIcons';
 
 type Scope = 'workspace' | 'all';
@@ -79,6 +80,8 @@ interface Props {
   remoteResume?: Record<string, RemoteResumeInfo>;
   /** Remote bookmark id → name; names the hosts a transcript search reaches. */
   remoteNames?: Record<string, string>;
+  /** Workspace id → names of the hosts it publishes to; its rows offer Unpublish. */
+  publishTargets?: Record<string, string[]>;
   /** Display prefs (uiPrefs): hide the per-session USD badge. Default show. */
   showSessionCost?: boolean;
   /** Display prefs: trim the Recent list to the newest N (0 = unlimited). */
@@ -116,6 +119,7 @@ export function SessionsPane({
   onResume,
   remoteResume,
   remoteNames,
+  publishTargets,
   showSessionCost = true,
   maxSessions = 0,
   maxSessionAgeDays = 0,
@@ -131,14 +135,15 @@ export function SessionsPane({
   const [unavailable, setUnavailable] = useState<UnavailableSource[]>([]);
   const items = useMemo(() => withRemote(localItems, remote), [localItems, remote]);
   const [loaded, setLoaded] = useState(false);
-  // Inline-edit + inline-delete-confirm state, keyed by session id.
+  // Inline-edit + inline delete/unpublish confirm state, keyed by session id.
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState('');
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [confirmAction, setConfirmAction] = useState<{ id: string; action: 'delete' | 'unpublish' } | null>(null);
   const [activeTags, setActiveTags] = useState<string[]>([]);
   const [tagMenu, setTagMenu] = useState(false);
   const [transcripts, setTranscripts] = useState(false);
   const [pickedId, setPickedId] = useState<string | null>(null);
+  const [publishNote, setPublishNote] = useState<string | null>(null);
 
   // Row ⋮ menu: resume / rename / delete — shared portaled-menu mechanics.
   const { menu: rowMenu, toggle: toggleRowMenu, close: closeRowMenu } = usePortalMenu();
@@ -235,6 +240,15 @@ export function SessionsPane({
     };
   }, [load, refreshOrigin]);
 
+  const unpublish = async (s: SessionListItem): Promise<void> => {
+    setConfirmAction(null);
+    try {
+      setPublishNote(unpublishNote(await window.api.publish.unpublish(s.workspaceId, s.id)));
+    } catch (err) {
+      setPublishNote(`Unpublish failed: ${String(err)}`);
+    }
+  };
+
   const commitRename = async (id: string): Promise<void> => {
     const name = draftName.trim();
     setEditingId(null);
@@ -243,7 +257,7 @@ export function SessionsPane({
   };
 
   const doDelete = async (item: SessionListItem): Promise<void> => {
-    setConfirmDeleteId(null);
+    setConfirmAction(null);
     await window.api.sessions.delete(item.workspaceId, item.id);
     await load();
   };
@@ -327,7 +341,7 @@ export function SessionsPane({
 
   const renderRow = (s: SessionListItem): JSX.Element => {
     const editing = editingId === s.id;
-    const confirming = confirmDeleteId === s.id;
+    const confirming = confirmAction?.id === s.id ? confirmAction.action : null;
     const color = colorFor({
       name: s.workspaceName,
       color: s.workspaceColorHue != null ? { hue: s.workspaceColorHue } : undefined
@@ -411,14 +425,24 @@ export function SessionsPane({
             {showSessionCost && <span className="session-row-cost">{formatUsd(s.usd)}</span>}
           </div>
         </div>
-        {confirming ? (
+        {confirming === 'delete' ? (
           <div className="session-row-confirm">
             <span>Delete?</span>
-            <button className="btn-mini" onClick={() => setConfirmDeleteId(null)}>
+            <button className="btn-mini" onClick={() => setConfirmAction(null)}>
               Cancel
             </button>
             <button className="btn-mini danger" onClick={() => void doDelete(s)}>
               Delete
+            </button>
+          </div>
+        ) : confirming === 'unpublish' ? (
+          <div className="session-row-confirm">
+            <span>{unpublishConfirmText(publishTargets?.[s.workspaceId] ?? [])}</span>
+            <button className="btn-mini" onClick={() => setConfirmAction(null)}>
+              Cancel
+            </button>
+            <button className="btn-mini danger" onClick={() => void unpublish(s)}>
+              Unpublish
             </button>
           </div>
         ) : (
@@ -609,6 +633,7 @@ export function SessionsPane({
           </ul>
         )}
         {unavailableNote && <div className="sessions-unavailable subdued">{unavailableNote}</div>}
+        {publishNote && <div className="sessions-unavailable subdued" role="status">{publishNote}</div>}
         {remote && remoteForScope(remote.more, scope, selectedWorkspaceId).map((m) => (
           <button key={m.origin} className="btn-mini sessions-more" onClick={() => void loadMore(m.origin, m.after)}>
             Load older sessions from {remote.rows.find((r) => r.origin === m.origin)?.workspaceName ?? 'remote'}
@@ -653,6 +678,19 @@ export function SessionsPane({
                     <IconPencil />
                     <span>Rename</span>
                   </button>
+                  {(publishTargets?.[s.workspaceId]?.length ?? 0) > 0 && (
+                    <button
+                      role="menuitem"
+                      title={`Remove from ${publishTargets![s.workspaceId].join(', ')} and never publish it again`}
+                      onClick={() => {
+                        closeRowMenu();
+                        setConfirmAction({ id: s.id, action: 'unpublish' });
+                      }}
+                    >
+                      <IconTrash />
+                      <span>Unpublish</span>
+                    </button>
+                  )}
                   <div className="ws-chip-menu-divider" />
                   <button
                     role="menuitem"
@@ -660,7 +698,7 @@ export function SessionsPane({
                     title="Delete session + transcript"
                     onClick={() => {
                       closeRowMenu();
-                      setConfirmDeleteId(s.id);
+                      setConfirmAction({ id: s.id, action: 'delete' });
                     }}
                   >
                     <IconTrash />

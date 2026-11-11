@@ -157,9 +157,10 @@ describe('HOST_MCP_TOOLS', () => {
   it('serves query; search_transcripts only with an embedder', () => {
     expect(HOST_MCP_TOOLS.has('query')).toBe(true);
     expect(HOST_MCP_TOOLS.has('search_transcripts')).toBe(false);
-    expect(HOST_MCP_TOOLS.size).toBe(14);
+    expect(HOST_MCP_TOOLS.size).toBe(15);
+    expect(HOST_MCP_TOOLS.has('mark_useful')).toBe(true);
     expect(HOST_SEARCH_TOOL).toBe('search_transcripts');
-    expect(hostMcpTools(true).size).toBe(15);
+    expect(hostMcpTools(true).size).toBe(16);
     expect(hostMcpTools(true).has('search_transcripts')).toBe(true);
     expect(hostMcpTools(false)).toBe(HOST_MCP_TOOLS);
   });
@@ -185,7 +186,7 @@ describe('search_transcripts on the host', () => {
     const p = await start([]);
     const [list, call] = await rpc(p, [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }, search(2, { query: 'x' })])
       .then((ms) => [1, 2].map((id) => ms.find((m) => m.id === id)!));
-    expect(names(list)).toHaveLength(14);
+    expect(names(list)).toHaveLength(15);
     expect(call.error.message).toBe('Unknown tool: search_transcripts');
     expect(scopes).toEqual([]);
   });
@@ -321,5 +322,64 @@ describe('hostMcpArgs on TCP', () => {
     expect(JSON.parse(arg.slice('--mcp-config='.length))).toEqual({
       mcpServers: { 'claude-fleet-state': { type: 'stdio', command: 'node', args: [HOST_MCP_BRIDGE], env: { CLAUDE_FLEET_MCP_TCP: 'fleet-agent-host.platform-ops.svc:8082', CLAUDE_FLEET_MCP_UNIX: '' } } }
     });
+  });
+});
+
+describe('published partitions on the host MCP', () => {
+  it('reads the hosted workspace plus every partition, resolved on each call', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'hm-'));
+    const socketPath = join(dir, 'run', 'mcp.sock');
+    let parts = ['pub_a'];
+    mcp = await startHostMcp({ listen: { path: socketPath }, workspaceId: WS, readSource: rs, log: createLogger(() => undefined), scope: async () => parts });
+    const call = (id: number) => ({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'list_sessions', arguments: {} } });
+    await rpc(socketPath, [call(1)]);
+    parts = ['pub_a', 'pub_b'];
+    await rpc(socketPath, [call(2)]);
+    expect(scopes).toEqual([[WS, 'pub_a'], [WS, 'pub_a', 'pub_b']]);
+  });
+
+  it('search_transcripts searches the partitions too', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'hm-'));
+    const socketPath = join(dir, 'run', 'mcp.sock');
+    const unitEmbed: EmbedFn = async (t) => t.map(() => new Float32Array(384).fill(1 / Math.sqrt(384)));
+    mcp = await startHostMcp({
+      listen: { path: socketPath }, workspaceId: WS, readSource: rs, log: createLogger(() => undefined), embed: unitEmbed, scope: async () => ['pub_a']
+    });
+    await rpc(socketPath, [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'search_transcripts', arguments: { query: 'x' } } }]);
+    expect(scopes).toEqual([[WS, 'pub_a']]);
+  });
+
+  it('without a scope, reads only the hosted workspace', async () => {
+    const p = await start([]);
+    await rpc(p, [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_sessions', arguments: {} } }]);
+    expect(scopes).toEqual([[WS]]);
+  });
+
+  it('serves mark_useful through the holder’s recorder, for a session in scope only', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'hm-'));
+    const socketPath = join(dir, 'run', 'mcp.sock');
+    const recorded: unknown[] = [];
+    const withSession = { ...rs, sessionWorkspace: async (_scope: ReadonlySet<string>, id: string) => (id === 'p1' ? 'pub_a' : null) } as unknown as OwnedReadSource;
+    mcp = await startHostMcp({
+      listen: { path: socketPath }, workspaceId: WS, readSource: withSession, log: createLogger(() => undefined),
+      scope: async () => ['pub_a'], recordUsage: async (e) => void recorded.push(e)
+    });
+    const mark = (id: number, sessionId: string) => ({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'mark_useful', arguments: { sessionId } } });
+    const [ok, missing] = await rpc(socketPath, [mark(1, 'p1'), mark(2, 'nope')]).then((ms) => [1, 2].map((id) => ms.find((m) => m.id === id)!));
+    expect(JSON.parse(ok.result.content[0].text)).toEqual({ ok: true });
+    expect(missing.result.isError).toBe(true);
+    expect(recorded).toEqual([{ workspaceId: WS, sessionId: 'p1', kind: 'marked-useful', detail: undefined }]);
+  });
+
+  it('drops the recorder on close: mark_useful answers unavailable on the next start', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'hm-'));
+    const socketPath = join(dir, 'run', 'mcp.sock');
+    const withSession = { ...rs, sessionWorkspace: async () => WS } as unknown as OwnedReadSource;
+    const first = await startHostMcp({ listen: { path: socketPath }, workspaceId: WS, readSource: withSession, log: createLogger(() => undefined), recordUsage: async () => undefined });
+    await first.close();
+    mcp = await startHostMcp({ listen: { path: socketPath }, workspaceId: WS, readSource: withSession, log: createLogger(() => undefined) });
+    const [r] = await rpc(socketPath, [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'mark_useful', arguments: { sessionId: 's1' } } }]);
+    expect(r.result.isError).toBe(true);
+    expect(r.result.content[0].text).toMatch(/usage recording is unavailable/);
   });
 });

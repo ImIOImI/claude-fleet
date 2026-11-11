@@ -120,6 +120,18 @@ describe('mergeWorkspaces', () => {
     });
     expect(out[0]).toMatchObject({ id: 'a', terminalRenderer: 'webgl' });
   });
+
+  it('manifest-only publish overlay: a live workspace keeps its publish block', async () => {
+    const publish = { to: ['01JC00000000000000000000R1'], since: { '01JC00000000000000000000R1': 5 } };
+    const out = await mergeWorkspaces({
+      dockerResult: up([live('a', 'container', 'running')]),
+      localLive: [],
+      manifests: [{ ...spec('a', 'container'), publish }],
+      lastKnown: new Map(),
+      privateDir, factoryMirror: MIRROR
+    });
+    expect(out[0].publish).toEqual(publish);
+  });
 });
 
 describe('mergeWorkspaces: remote bookmarks', () => {

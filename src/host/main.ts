@@ -11,7 +11,7 @@ import type { ListenTarget } from './endpoint.js';
 import { startCredHelper, type CredServer } from './credServer.js';
 import { brokerWatch, EventHub, pruneDeadOwners } from './events.js';
 import type { PgTrack } from '../main/store/pgMigrate.js';
-import { pgPoolConfig } from '../main/store/storeConfig.js';
+import { pgPoolConfig, storeSecretEnvNames } from '../main/store/storeConfig.js';
 import { openHostDbRetrying, startDbHealth, type DbHealth, type HostDbHandle } from './hostDb.js';
 import { resolveHostWorkspaceId, resolveWorkspaceId } from './hostState.js';
 import { startHolder, type Holder } from './holder.js';
@@ -22,6 +22,7 @@ import { postgresLeaseStore } from './pgLease.js';
 import { createLogger, type LogSink } from './log.js';
 import { brokerRpcChannels } from './rpc.js';
 import { MESH_WAIT_MS, waitForMesh, type MeshState } from './mesh.js';
+import { createPublishRoute, hostSecretValues } from './publishRoute.js';
 import { createHostServer, installCrashGuards, type HostServer } from './server.js';
 
 export const BROKER_POLL_MS = 2_000;
@@ -205,6 +206,10 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     hub,
     events,
     rpc: new Map([...brokerRpcChannels(ops, hub.owners, env.port), ...historyRpcChannels(() => holderNow?.history ?? null, { search: () => config.search.embedder })]),
+    // db can't change on reload, so the host's secret values are read once.
+    publish: config.db
+      ? createPublishRoute({ store: () => holderNow?.publish ?? null, hostSecrets: hostSecretValues(procEnv, storeSecretEnvNames(config.db)), log })
+      : undefined,
     log,
     trustedProxyHops: () => config.trustedProxyHops
   });

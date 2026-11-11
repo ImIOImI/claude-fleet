@@ -46,10 +46,26 @@ describe('workspace id guard wiring (#444 security review)', () => {
 
 describe('remote bookmark wiring', () => {
   it('workspace:create and workspace:writeManifest refuse remote specs before writing anything', () => {
-    expect(handlerSource('workspace:create')).toMatch(/assertNotRemoteSpec\(input\.kind, await readWorkspaceManifest\(input\.id\)\)\s*;\s*const kind/);
+    expect(handlerSource('workspace:create')).toMatch(/const prior = await readWorkspaceManifest\(input\.id\);\s*assertNotRemoteSpec\(input\.kind, prior\)\s*;\s*const kind/);
     const write = handlerSource('workspace:writeManifest');
     expect(write).toMatch(/const existing = await readWorkspaceManifest\(spec\.id\);\s*assertNotRemoteSpec\(spec\.kind, existing\);/);
     expect(write).toMatch(/remote: undefined/);
+  });
+
+  it('workspace:writeManifest derives publish in main, seeds new targets past existing history, and drops cursors of removed targets', () => {
+    const write = handlerSource('workspace:writeManifest');
+    expect(write).toMatch(/const publish = publishOnWrite\(spec, existing\?\.publish, remoteIds, Date\.now\(\)\)/);
+    expect(write).toMatch(/\.\.\.spec,\s*workspaceRoot,\s*launcher: incomingLauncher,\s*mounts,\s*publish,/);
+    expect(write).toMatch(/deletePublishCursor\(spec\.id, id\)/);
+    // The seed is read before `since` is stamped, only when a target is added (a plain edit never touches the history store).
+    expect(write).toMatch(/const added = \(publishOnWrite\(spec, existing\?\.publish, remoteIds, 0\)\?\.to \?\? \[\]\)\.filter\(\(id\) => !existing\?\.publish\?\.to\.includes\(id\)\);/);
+    expect(write).toMatch(/const seed = added\.length \? await workspaceMaxEventId\(spec\.id\)\.catch\(\(\) => null\) : null;\s*const publish = publishOnWrite\(/);
+    expect(write).toMatch(/if \(seed !== null\) for \(const id of added\) await setPublishCursor\(spec\.id, id, seed\)/);
+    expect(handlerSource('workspace:create')).toMatch(/publish: prior\?\.publish,/);
+  });
+
+  it('forgetting a remote bookmark revokes publishing to it', () => {
+    expect(src).toMatch(/revokePublish: \(id\) =>\s*revokePublishTarget\(id, \{ listManifests: listWorkspaceManifests, writeManifest: writeWorkspaceManifest, deleteCursorsTo: deletePublishCursorsTo \}\)/);
   });
 
   it('workspace:remove routes through resolveRemoveKind', () => {

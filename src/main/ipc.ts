@@ -158,7 +158,20 @@ import {
   SUMMARY_STALE_GRACE_MS,
   stateKysely,
   searchEmbeddings,
+  getPublishCursor,
+  publishableEvents,
+  setPublishCursor,
+  withheldSessions,
+  deletePublishCursor,
+  deletePublishCursorsTo,
+  workspaceMaxEventId,
+  withholdSession,
 } from './db.js';
+import { publishOnWrite } from '../preload/publish.js';
+import { startPublisher, type Publisher } from './publish/publisher.js';
+import { registerPublishIpc } from './publish/publishIpc.js';
+import { publishSecretValues } from './publish/secretValues.js';
+import { revokePublishTarget } from './publish/revoke.js';
 import type { EmbedFn } from './vectors.js';
 import { foldPlanUsage, type PlanUsageFold } from './planUsage.js';
 import { logError, getLogPath, flushErrorLogSync } from './errorLog.js';
@@ -379,7 +392,9 @@ const remoteBackend = createRemoteBackend({
   login: () => remoteLogin(),
   listManifests: () => listWorkspaceManifests(),
   writeManifest: (spec) => writeWorkspaceManifest(spec),
-  deleteState: (id) => rm(workspaceStateDir(id), { recursive: true, force: true })
+  deleteState: (id) => rm(workspaceStateDir(id), { recursive: true, force: true }),
+  revokePublish: (id) =>
+    revokePublishTarget(id, { listManifests: listWorkspaceManifests, writeManifest: writeWorkspaceManifest, deleteCursorsTo: deletePublishCursorsTo })
 });
 const federated = createFederatedReader({
   sources: () => (MOCK_MODE ? [] : remoteBackend.sources()),
@@ -392,6 +407,8 @@ const summaryRelay = createSummaryRelay({
   broadcast: (workspaceId, summary) => broadcastObservabilitySummary({ workspaceId, summary }, BrowserWindow.getAllWindows())
 });
 let relayTimer: NodeJS.Timeout | null = null;
+// Started by registerIpc once the identity service exists; writeManifest bumps it.
+let publisher: Publisher | null = null;
 
 // Same makeEmbedder selector the indexer uses, so the query and stored rows share a model.
 let fedEmbed: EmbedFn | null = null;
@@ -414,6 +431,7 @@ const localSearch: LocalSearch = {
 export function stopRemoteBackend(): void {
   summaryRelay.stop();
   if (relayTimer) clearInterval(relayTimer);
+  publisher?.stop();
   remoteBackend.stop();
 }
 
@@ -1293,7 +1311,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // The id becomes this workspace's vault scope (resolveEnv injects that
       // bag into its env), so it may never name a host-only scope (#444).
       assertRendererWorkspaceId(input?.id);
-      assertNotRemoteSpec(input.kind, await readWorkspaceManifest(input.id));
+      const prior = await readWorkspaceManifest(input.id);
+      assertNotRemoteSpec(input.kind, prior);
       const kind: WorkspaceKind = input.kind ?? 'container';
       const launcher = kind === 'local' ? sanitizeLauncher(input.launcher) : undefined;
       // Local workspaces run `claude` in a user-chosen host directory; validate
@@ -1373,6 +1392,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         mounts,
         mirror: input.mirror ?? FACTORY_MIRROR,
         knowledgeCapture,
+        // Recreating a deleted workspace keeps its opt-in; the renderer can't set it here.
+        publish: prior?.publish,
         createdAt: ws.createdAt,
         lastUsedAt: ws.lastUsedAt
       };
@@ -1597,6 +1618,13 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       }
       // Authoritative: an edit that removes all mounts writes undefined, clearing them.
       const mounts = await mountsFor(spec.kind, spec.id, (spec as { mounts?: unknown }).mounts, existing?.mounts);
+      const remoteIds = new Set((await listWorkspaceManifests()).filter((m) => m.kind === 'remote').map((m) => m.id));
+      const added = (publishOnWrite(spec, existing?.publish, remoteIds, 0)?.to ?? []).filter((id) => !existing?.publish?.to.includes(id));
+      // Read before `since` is stamped: a row below it was read from disk before then, so its session started earlier.
+      // Only a save that adds a target touches the history store; without a seed the publisher skips that history by `since`.
+      const seed = added.length ? await workspaceMaxEventId(spec.id).catch(() => null) : null;
+      const publish = publishOnWrite(spec, existing?.publish, remoteIds, Date.now());
+      if (seed !== null) for (const id of added) await setPublishCursor(spec.id, id, seed);
       // Merge OVER the existing manifest so fields the renderer doesn't manage
       // survive an edit. The edit form sends every form field (those win) but
       // omits `control` (committee grants, edited in the Committee rail #118)
@@ -1611,8 +1639,11 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         workspaceRoot,
         launcher: incomingLauncher,
         mounts,
+        publish,
         remote: undefined
       });
+      for (const id of existing?.publish?.to ?? []) if (!publish?.to.includes(id)) await deletePublishCursor(spec.id, id);
+      publisher?.bump(spec.id);
       // #483 §5a: a form edit of the capture settings is logged (actor 'user')
       // and re-applies transcript retention — both listen for this event.
       const afterCapture = effectiveCaptureSettings(await readWorkspaceManifest(spec.id));
@@ -2153,6 +2184,25 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     invalidate: invalidateWorkspaceList
   });
   registerFederationIpc(ipcMain, federated, localSearch);
+  if (jsonlWatcher && !MOCK_MODE) {
+    publisher = startPublisher({
+      manifests: () => listWorkspaceManifests(),
+      publish: (url, batch) => remoteBackend.clientFor(url).publish(batch),
+      secretValues: (spec) => publishSecretValues(spec, vault, () => identity.bearerToken(), getEndpoint),
+      events: publishableEvents,
+      getCursor: getPublishCursor,
+      setCursor: setPublishCursor,
+      withheld: withheldSessions,
+      log: (e) => logError({ source: 'main', ...e })
+    });
+    jsonlWatcher.on('ingest', ({ workspaceId }) => publisher?.bump(workspaceId));
+  }
+  registerPublishIpc(ipcMain, {
+    readManifest: readWorkspaceManifest,
+    unpublish: (url, sessionId) => remoteBackend.clientFor(url).unpublish(sessionId),
+    withhold: withholdSession,
+    idle: (ws) => publisher?.idle(ws) ?? Promise.resolve()
+  });
   relayTimer = setInterval(() => summaryRelay.sync(), 15_000);
   relayTimer.unref?.();
   loadoutSources.setGithubTokenProvider(() => identity.packagesToken());

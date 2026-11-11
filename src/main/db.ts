@@ -29,6 +29,7 @@ import type { StateDb, UsageAnchorsTable } from './store/stateSchema.js';
 import { parseIngestLine, foldSessionTouch, type ParsedLine } from './state/ingestParse.js';
 import { rawLine } from './state/rawCodec.js';
 import { ATTACHMENT_MIN_BYTES, dedupeAttachment, deflatePayload, expandLine } from './state/attachmentCodec.js';
+import { PARTITION_PREFIX } from './publish/protocol.js';
 
 let db: Database.Database | null = null;
 let kdb: Kysely<StateDb> | null = null;
@@ -937,6 +938,28 @@ function migrate(d: Database.Database): void {
     // already ends in the rowid (= id). Version-only, so imports stay in step.
     d.pragma('user_version = 19');
   }
+
+  if ((d.pragma('user_version', { simple: true }) as number) < 20) {
+    // Transcript publish (SPEC §7 *Transcript publish*).
+    const cols = d.prepare(`PRAGMA table_info(usage_events)`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'origin')) d.exec(`ALTER TABLE usage_events ADD COLUMN origin TEXT`);
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS publish_cursors (
+        source_workspace_id TEXT NOT NULL,
+        target_workspace_id TEXT NOT NULL,
+        last_event_id       INTEGER NOT NULL,
+        updated_at          INTEGER NOT NULL,
+        PRIMARY KEY (source_workspace_id, target_workspace_id)
+      );
+      CREATE TABLE IF NOT EXISTS publish_withheld (
+        session_id   TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        withheld_at  INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_publish_withheld_workspace ON publish_withheld(workspace_id);
+    `);
+    d.pragma('user_version = 20');
+  }
 }
 
 function repairSyntheticFirstUserMessages(d: Database.Database): void {
@@ -1189,13 +1212,17 @@ async function ingestOne(
   // Derive per-event metadata into the sessions row.
   const parsed = p.parsed;
   const message = p.message;
+  // A re-sent published line (no insert) must not roll back a title or prompt set by a newer one.
+  const published = workspaceId.startsWith(PARTITION_PREFIX);
+  const titleOk = inserted || !published;
   if (p.type === 'system' && typeof parsed.cwd === 'string') {
     await q.updateTable('sessions').set({ cwd: parsed.cwd }).where('id', '=', sessionId).where('cwd', 'is', null).execute();
-  } else if (p.type === 'ai-title' && typeof parsed.aiTitle === 'string') {
+  } else if (titleOk && p.type === 'ai-title' && typeof parsed.aiTitle === 'string') {
     await q.updateTable('sessions').set({ ai_title: parsed.aiTitle }).where('id', '=', sessionId).execute();
-  } else if (p.type === 'last-prompt' && typeof parsed.lastPrompt === 'string' && !isSyntheticPromptText(parsed.lastPrompt)) {
+  } else if (titleOk && p.type === 'last-prompt' && typeof parsed.lastPrompt === 'string' && !isSyntheticPromptText(parsed.lastPrompt)) {
     await setFirstUserMessage(q, sessionId, parsed.lastPrompt);
   } else if (
+    titleOk &&
     p.type === 'user' &&
     parsed.isMeta !== true &&
     typeof message?.content === 'string' &&
@@ -1237,7 +1264,8 @@ async function ingestOne(
 
   // Rate-limit anchors (#plan-usage): the account-wide-true checkpoints.
   // Only on a genuinely-new insert so re-reads after compaction don't re-fire.
-  if (inserted) {
+  // Published lines are other people's limits, not this account's.
+  if (inserted && !published) {
     const at = p.ts ?? Date.now();
     const anchor = extractAnchor(parsed, at, p.dedupKey);
     if (anchor) await insertUsageAnchorQ(q, workspaceId, sessionId, at, anchor);
@@ -1348,6 +1376,16 @@ function rowFromSql(r: EventRowSql, blobs: ReadonlyMap<string, Buffer>): EventRo
   };
 }
 
+/** Each distinct blob once per page: a session repeats the same few payloads. */
+async function blobsFor(k: Kysely<StateDb>, rows: readonly { att_ref: string | null }[]): Promise<Map<string, Buffer>> {
+  const refs = [...new Set(rows.flatMap((r) => (r.att_ref ? [r.att_ref] : [])))];
+  const blobs = new Map<string, Buffer>();
+  for (const part of chunked(refs, 500)) {
+    for (const b of await k.selectFrom('event_blobs').select(['hash', 'body_z']).where('hash', 'in', part).execute()) blobs.set(b.hash, b.body_z);
+  }
+  return blobs;
+}
+
 export async function eventsForSession(sessionId: string, sinceEventId = 0, limit = 500): Promise<EventRow[]> {
   const k = kyselyOrThrow();
   const rows = await k
@@ -1358,12 +1396,7 @@ export async function eventsForSession(sessionId: string, sinceEventId = 0, limi
     .orderBy('id', 'asc')
     .limit(limit)
     .execute();
-  // Each distinct blob once per page: a session repeats the same few payloads.
-  const refs = [...new Set(rows.flatMap((r) => (r.att_ref ? [r.att_ref] : [])))];
-  const blobs = new Map<string, Buffer>();
-  for (const part of chunked(refs, 500)) {
-    for (const b of await k.selectFrom('event_blobs').select(['hash', 'body_z']).where('hash', 'in', part).execute()) blobs.set(b.hash, b.body_z);
-  }
+  const blobs = await blobsFor(k, rows);
   return rows.map((r) => rowFromSql(r, blobs));
 }
 
@@ -1772,6 +1805,7 @@ export async function recordUsageEvent(e: {
   sessionId?: string | null;
   kind: 'search-impression' | 'clickthrough' | 'marked-useful' | 'resumed';
   detail?: Record<string, unknown>;
+  origin?: string | null;
 }): Promise<void> {
   await kyselyOrThrow()
     .insertInto('usage_events')
@@ -1781,8 +1815,96 @@ export async function recordUsageEvent(e: {
       session_id: e.sessionId ?? null,
       kind: e.kind,
       detail: e.detail ? JSON.stringify(e.detail) : null,
+      origin: e.origin ?? null,
     })
     .execute();
+}
+
+/** marked-useful marks that count (SPEC §7 *Usefulness signals*): not a workspace marking its own session, and not one of unknown origin. */
+export async function usefulMarkCounts(sessionIds: readonly string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  for (const part of chunked([...sessionIds], 500)) {
+    const rows = await kyselyOrThrow()
+      .selectFrom('usage_events')
+      .select((eb) => ['session_id', eb.fn.countAll().as('n')])
+      .where('kind', '=', 'marked-useful')
+      .where('session_id', 'in', part)
+      .where('origin', 'is not', null)
+      .whereRef('origin', '<>', 'workspace_id')
+      .groupBy('session_id')
+      .execute();
+    for (const r of rows) if (r.session_id) out.set(r.session_id, num(r.n));
+  }
+  return out;
+}
+
+// ── Transcript publish (SPEC §7 *Transcript publish*) ─────────────────────
+
+export interface PublishableEvent {
+  id: number;
+  sessionId: string;
+  rawJsonl: string;
+  /** The session's `started_at`; null when it has no timestamped line yet. */
+  startedAt: number | null;
+}
+
+/** `workspaceId`'s events after `afterId`, in id order. The caller filters on `startedAt`, so old rows are passed over once. */
+export async function publishableEvents(workspaceId: string, afterId: number, limit: number): Promise<PublishableEvent[]> {
+  const k = kyselyOrThrow();
+  const rows = await k
+    .selectFrom('events as e')
+    .leftJoin('sessions as s', 's.id', 'e.session_id')
+    .selectAll('e')
+    .select('s.started_at as session_started_at')
+    .where('e.workspace_id', '=', workspaceId)
+    .where('e.id', '>', afterId)
+    .orderBy('e.id', 'asc')
+    .limit(limit)
+    .execute();
+  const blobs = await blobsFor(k, rows);
+  return rows.map((r) => {
+    const e = rowFromSql(r, blobs);
+    return { id: num(e.id), sessionId: e.sessionId, rawJsonl: e.rawJsonl, startedAt: r.session_started_at == null ? null : num(r.session_started_at) };
+  });
+}
+
+/** Highest event id `workspaceId` holds, 0 when none: a new publish target starts after it. */
+export async function workspaceMaxEventId(workspaceId: string): Promise<number> {
+  const r = await kyselyOrThrow().selectFrom('events').select((eb) => eb.fn.max('id').as('m')).where('workspace_id', '=', workspaceId).executeTakeFirst();
+  return r?.m == null ? 0 : num(r.m);
+}
+
+export async function getPublishCursor(source: string, target: string): Promise<number> {
+  const r = await kyselyOrThrow().selectFrom('publish_cursors').select('last_event_id')
+    .where('source_workspace_id', '=', source).where('target_workspace_id', '=', target).executeTakeFirst();
+  return r ? num(r.last_event_id) : 0;
+}
+
+export async function setPublishCursor(source: string, target: string, lastEventId: number): Promise<void> {
+  const at = Date.now();
+  await kyselyOrThrow().insertInto('publish_cursors')
+    .values({ source_workspace_id: source, target_workspace_id: target, last_event_id: lastEventId, updated_at: at })
+    .onConflict((oc) => oc.columns(['source_workspace_id', 'target_workspace_id']).doUpdateSet({ last_event_id: lastEventId, updated_at: at }))
+    .execute();
+}
+
+export async function deletePublishCursor(source: string, target: string): Promise<void> {
+  await kyselyOrThrow().deleteFrom('publish_cursors').where('source_workspace_id', '=', source).where('target_workspace_id', '=', target).execute();
+}
+
+/** A forgotten remote bookmark: no workspace keeps a cursor towards it. */
+export async function deletePublishCursorsTo(target: string): Promise<void> {
+  await kyselyOrThrow().deleteFrom('publish_cursors').where('target_workspace_id', '=', target).execute();
+}
+
+export async function withholdSession(workspaceId: string, sessionId: string): Promise<void> {
+  await kyselyOrThrow().insertInto('publish_withheld').values({ session_id: sessionId, workspace_id: workspaceId, withheld_at: Date.now() })
+    .onConflict((oc) => oc.column('session_id').doNothing()).execute();
+}
+
+export async function withheldSessions(workspaceId: string): Promise<Set<string>> {
+  const rows = await kyselyOrThrow().selectFrom('publish_withheld').select('session_id').where('workspace_id', '=', workspaceId).execute();
+  return new Set(rows.map((r) => r.session_id));
 }
 
 /** True once `claudeSessionId` has ingested ≥1 transcript line (a sessions
@@ -2555,23 +2677,28 @@ export async function renameSession(id: string, name: string): Promise<void> {
   summaryCache.invalidate(id);
 }
 
+/** A session's rows in every per-session cache table; the caller owns the transaction and must
+ *  call this first in it: the session row lock waits out an in-flight `insertSessionEmbeddings`. */
+export async function deleteSessionRows(q: Kysely<StateDb>, id: string): Promise<void> {
+  if (dialect === 'postgres') await sql`SELECT 1 FROM sessions WHERE id = ${id} FOR UPDATE`.execute(q);
+  await q.deleteFrom('events').where('session_id', '=', id).execute();
+  await q.deleteFrom('session_costs').where('session_id', '=', id).execute();
+  await q.deleteFrom('session_stats').where('session_id', '=', id).execute();
+  await q.deleteFrom('session_tool_counts').where('session_id', '=', id).execute();
+  await q.deleteFrom('broker_sessions').where('claude_session_id', '=', id).execute();
+  await q.deleteFrom('embeddings').where('session_id', '=', id).execute();
+  await q.deleteFrom('event_retention').where('session_id', '=', id).execute();
+  await q.deleteFrom('transcript_offsets').where('session_id', '=', id).execute();
+  await q.deleteFrom('sessions').where('id', '=', id).execute();
+}
+
 /**
  * Drop a session from the cache entirely: its events, rollups, embeddings,
  * retention watermarks, broker mapping and the session row. The on-disk JSONL is removed by the caller (IPC
  * layer), which knows the host path. Idempotent.
  */
 export async function deleteSession(id: string): Promise<void> {
-  await kyselyOrThrow().transaction().execute(async (trx) => {
-    await trx.deleteFrom('events').where('session_id', '=', id).execute();
-    await trx.deleteFrom('session_costs').where('session_id', '=', id).execute();
-    await trx.deleteFrom('session_stats').where('session_id', '=', id).execute();
-    await trx.deleteFrom('session_tool_counts').where('session_id', '=', id).execute();
-    await trx.deleteFrom('broker_sessions').where('claude_session_id', '=', id).execute();
-    await trx.deleteFrom('embeddings').where('session_id', '=', id).execute();
-    await trx.deleteFrom('event_retention').where('session_id', '=', id).execute();
-    await trx.deleteFrom('transcript_offsets').where('session_id', '=', id).execute();
-    await trx.deleteFrom('sessions').where('id', '=', id).execute();
-  });
+  await kyselyOrThrow().transaction().execute((trx) => deleteSessionRows(trx, id));
   summaryCache.invalidate(id);
   spendCache.clear();
 }
@@ -2800,10 +2927,14 @@ export async function purgeWorkspace(
       if (n < size) break;
     }
   }
-  for (const table of ['session_costs', 'session_tags', 'broker_sessions', 'port_exposures', 'event_retention', 'transcript_offsets', 'sessions'] as const) {
+  for (const table of ['session_costs', 'session_tags', 'broker_sessions', 'port_exposures', 'event_retention', 'transcript_offsets', 'publish_withheld', 'sessions'] as const) {
     const r = await slice(() => k.deleteFrom(table).where('workspace_id', '=', workspaceId).executeTakeFirst());
     deleted += num(r.numDeletedRows);
   }
+  const cursors = await slice(() => k.deleteFrom('publish_cursors')
+    .where((eb) => eb.or([eb('source_workspace_id', '=', workspaceId), eb('target_workspace_id', '=', workspaceId)]))
+    .executeTakeFirst());
+  deleted += num(cursors.numDeletedRows);
   summaryCache.clear();
   spendCache.clear();
   return deleted;
@@ -2878,32 +3009,47 @@ const sqliteVec = (vec: Buffer): Buffer => (vec.length === EMBED_DIM * 4 ? encod
  *  a dedup hit doesn't count. */
 export async function insertEmbeddings(rows: readonly EmbeddingInsert[]): Promise<number> {
   if (rows.length === 0) return 0;
-  let inserted = 0;
-  await kyselyOrThrow().transaction().execute(async (trx) => {
-    for (const part of chunked(rows, EMBEDDINGS_ROWS_PER_INSERT)) {
-      const r = await trx
-        .insertInto('embeddings')
-        .values(
-          part.map((row) => ({
-            workspace_id: row.workspaceId,
-            session_id: row.sessionId,
-            kind: row.kind,
-            ref_event_id: row.refEventId,
-            ts: row.ts,
-            text: row.text,
-            model_id: row.modelId,
-            dim: row.dim,
-            vec: dialect !== 'postgres' ? sqliteVec(row.vec)
-              : row.vec.length === 0 ? null
-              : sql<Buffer>`${pgVectorLiteral(decodeVector(row.vec))}::vector`,
-            dedup_key: row.dedupKey,
-          }))
-        )
-        .onConflict((oc) => oc.doNothing())
-        .executeTakeFirst();
-      inserted += num(r.numInsertedOrUpdatedRows);
-    }
+  return kyselyOrThrow().transaction().execute((trx) => insertEmbeddingRows(trx, rows));
+}
+
+/** `insertEmbeddings` for one session's rows, or null (nothing written) once the session row is gone.
+ *  The row lock orders this against a delete that takes `FOR UPDATE` first; SQLite serializes
+ *  writers, so the check inside the write transaction suffices there. */
+export async function insertSessionEmbeddings(sessionId: string, rows: readonly EmbeddingInsert[]): Promise<number | null> {
+  if (rows.some((r) => r.sessionId !== sessionId)) throw new Error('insertSessionEmbeddings: rows of another session');
+  return kyselyOrThrow().transaction().execute(async (trx) => {
+    const lock = dialect === 'postgres' ? sql`FOR SHARE` : sql``;
+    const held = await sql`SELECT 1 FROM sessions WHERE id = ${sessionId} ${lock}`.execute(trx);
+    if (held.rows.length === 0) return null;
+    return rows.length === 0 ? 0 : insertEmbeddingRows(trx, rows);
   });
+}
+
+async function insertEmbeddingRows(trx: Kysely<StateDb>, rows: readonly EmbeddingInsert[]): Promise<number> {
+  let inserted = 0;
+  for (const part of chunked(rows, EMBEDDINGS_ROWS_PER_INSERT)) {
+    const r = await trx
+      .insertInto('embeddings')
+      .values(
+        part.map((row) => ({
+          workspace_id: row.workspaceId,
+          session_id: row.sessionId,
+          kind: row.kind,
+          ref_event_id: row.refEventId,
+          ts: row.ts,
+          text: row.text,
+          model_id: row.modelId,
+          dim: row.dim,
+          vec: dialect !== 'postgres' ? sqliteVec(row.vec)
+            : row.vec.length === 0 ? null
+            : sql<Buffer>`${pgVectorLiteral(decodeVector(row.vec))}::vector`,
+          dedup_key: row.dedupKey,
+        }))
+      )
+      .onConflict((oc) => oc.doNothing())
+      .executeTakeFirst();
+    inserted += num(r.numInsertedOrUpdatedRows);
+  }
   return inserted;
 }
 
@@ -3240,7 +3386,7 @@ export interface EmbeddingHit {
 }
 
 /** Top `limit` embeddings in `scope` by similarity to the unit-length `qvec`,
- *  current model only, placeholders excluded. Exact on both dialects: a
+ *  current model only, placeholders and rows of a deleted session excluded. Exact on both dialects: a
  *  brute-force dot product on SQLite, `ORDER BY vec <=> q, id` (an exact
  *  sequential scan) on Postgres; an ANN index can't serve the `id` tiebreak.
  *  Ties break by `id` on both. */
@@ -3253,6 +3399,7 @@ export async function searchEmbeddings(
     const rows = await k.selectFrom('embeddings')
       .select(['session_id as sessionId', 'workspace_id as workspaceId', 'kind', 'ts', 'text', 'vec'])
       .where('workspace_id', 'in', [...scope]).where('model_id', '=', EMBED_MODEL_ID).where('text', '<>', '')
+      .where(sql<boolean>`EXISTS (SELECT 1 FROM sessions s WHERE s.id = embeddings.session_id)`)
       .$if(opts.kind !== undefined, (qb) => qb.where('kind', '=', opts.kind as 'turn' | 'summary'))
       .orderBy('id')
       .execute();

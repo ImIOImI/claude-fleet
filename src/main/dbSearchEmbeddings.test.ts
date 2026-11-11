@@ -7,6 +7,13 @@ let st: TestState;
 beforeEach(async () => { st = await openTestState('cf-search-emb-'); });
 afterEach(() => st.close());
 
+async function withSessions(rows: readonly db.EmbeddingInsert[]): Promise<void> {
+  await db.stateKysely().insertInto('sessions').values([...new Set(rows.map((r) => r.sessionId))].map((id) => ({
+    id, workspace_id: 'W-A', cwd: null, started_at: 1, last_active_at: 1, ai_title: null, first_user_message: null, user_set_name: null,
+  }))).execute();
+  await db.insertEmbeddings(rows);
+}
+
 function unit(seed: number): Float32Array {
   const v = new Float32Array(EMBED_DIM);
   let x = seed * 9301 + 49297;
@@ -21,7 +28,7 @@ it('ranks the allowed workspaces by similarity, recorded across dialects', async
     refEventId: i, ts: 1000 + i, text: i % 11 === 0 ? '' : `text ${i}`, modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
     vec: encodeVector(unit(i)), dedupKey: `t${i}`,
   }));
-  await db.insertEmbeddings(rows);
+  await withSessions(rows);
   const hits = await db.searchEmbeddings(unit(4), ['W-A'], { limit: 5 });
   // 1e-2: SQLite stores int8 (score error ~3e-4), Postgres float32; one snapshot serves both.
   expect(hits.map((h) => ({ ...h, score: Math.round(h.score * 1e2) / 1e2 }))).toMatchSnapshot();
@@ -37,9 +44,18 @@ it('ties break by id, identically on both dialects', async () => {
     { workspaceId: 'W-A', sessionId: 's3', kind: 'turn' as const, refEventId: 3, ts: 3, text: 'third', modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec, dedupKey: 'tie3' },
     { workspaceId: 'W-B', sessionId: 's4', kind: 'turn' as const, refEventId: 4, ts: 4, text: 'fourth', modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec, dedupKey: 'tie4' },
   ];
-  await db.insertEmbeddings(rows);
+  await withSessions(rows);
   const hits = await db.searchEmbeddings(unit(1), ['W-A', 'W-B'], { limit: 10 });
   expect(hits.map((h) => h.text)).toEqual(['first', 'second', 'third', 'fourth']);
+});
+
+it('never returns rows of a session that no longer exists, on both dialects', async () => {
+  const vec = encodeVector(unit(1));
+  const row = (sessionId: string, text: string) =>
+    ({ workspaceId: 'W-A', sessionId, kind: 'turn' as const, refEventId: null, ts: 1, text, modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec, dedupKey: text });
+  await withSessions([row('live', 'kept')]);
+  await db.insertEmbeddings([row('gone', 'orphan')]);
+  expect((await db.searchEmbeddings(unit(1), ['W-A'], { limit: 10 })).map((h) => h.text)).toEqual(['kept']);
 });
 
 it('returns [] for a non-positive limit, on both dialects', async () => {

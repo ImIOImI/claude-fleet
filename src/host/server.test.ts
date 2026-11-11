@@ -12,12 +12,14 @@ import { parseHostConfig } from './config.js';
 import { EventHub } from './events.js';
 import type { LeaseState } from './lease.js';
 import { createLogger } from './log.js';
+import type { PublishRoute } from './publishRoute.js';
 import { brokerRpcChannels, type RpcChannel } from './rpc.js';
 import {
   createHostServer,
   HUB_SHUTDOWN_MS,
   installCrashGuards,
   KNOWN_GOOD_TTL_MS,
+  MAX_PUBLISH_BODY,
   MAX_RPC_BODY,
   MAX_RPC_PER_IDENTITY,
   MAX_SOCKETS_PER_IDENTITY,
@@ -915,5 +917,160 @@ describe('rpc limits', () => {
     release();
     expect((await Promise.all(pending)).map((p) => p.status)).toEqual(Array(MAX_RPC_PER_IDENTITY).fill(200));
     expect((await rpc(r, 'ports:list', [], `${TOKEN}r`)).status).toBe(200);
+  });
+});
+
+describe('POST /publish', () => {
+  function route(over: Partial<PublishRoute> = {}): PublishRoute & { posted: unknown[] } {
+    const posted: unknown[] = [];
+    return {
+      posted,
+      admit: () => ({ ok: true, release: () => undefined }),
+      post: async (c, b) => {
+        posted.push([c.identity.login, b]);
+        return { status: 200, body: { ok: true, accepted: 1, inserted: 1 } };
+      },
+      remove: async () => ({ status: 200, body: { ok: true, removed: 1 } }),
+      ...over
+    };
+  }
+  const post = (r: Rig, body: string, token?: string, type = 'application/json') =>
+    fetch(`${r.url}/publish`, { method: 'POST', headers: { 'Content-Type': type, ...(token ? bearer(token) : {}) }, body });
+
+  /** Sends the head and `body` but never ends the request; resolves with the first response line. */
+  function partialPost(r: Rig, contentLength: number, body: Buffer): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const sock = connect(Number(new URL(r.url).port), '127.0.0.1');
+      let got = '';
+      sock.on('error', () => undefined);
+      sock.on('data', (d) => {
+        got += d.toString('latin1');
+        if (got.includes('\r\n')) {
+          resolve(got.split('\r\n')[0]);
+          sock.destroy();
+        }
+      });
+      sock.on('close', () => reject(new Error(`closed before a response: ${got}`)));
+      sock.write(`POST /publish HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer ${TOKEN}r\r\nContent-Type: application/json\r\nContent-Length: ${contentLength}\r\n\r\n`);
+      if (body.length) sock.write(body);
+    });
+  }
+
+  it('DELETE /publish/<id> reaches remove with the caller; other methods are refused', async () => {
+    const seen: unknown[] = [];
+    const r = await start([], { publish: route({ remove: async (c, id) => { seen.push([c.identity.login, id]); return { status: 200, body: { ok: true, removed: 1 } }; } }) });
+    const del = (path: string, token?: string) => fetch(`${r.url}${path}`, { method: 'DELETE', headers: token ? bearer(token) : {} });
+    expect((await del('/publish/abc')).status).toBe(401);
+    expect((await del('/publish/abc', `${TOKEN}r`)).status).toBe(200);
+    expect((await del('/publish/%E0%A4%A', `${TOKEN}r`)).status).toBe(400);
+    expect((await fetch(`${r.url}/publish/abc`, { headers: bearer(`${TOKEN}r`) })).status).toBe(405);
+    expect((await del('/publish', `${TOKEN}r`)).status).toBe(405);
+    expect(seen).toEqual([['reader', 'abc']]);
+  });
+
+  it('DELETE /publish/<id> is admitted like POST, released afterwards, and absent without a publish route', async () => {
+    let released = 0;
+    const refused = await start([], { publish: route({ admit: () => ({ ok: false, status: 429, error: 'slow down', retryAfterSec: 3 }), remove: async () => { throw new Error('not reached'); } }) });
+    const res = await fetch(`${refused.url}/publish/abc`, { method: 'DELETE', headers: bearer(`${TOKEN}r`) });
+    expect(res.status).toBe(429);
+    expect(res.headers.get('retry-after')).toBe('3');
+    const ok = await start([], { publish: route({ admit: () => ({ ok: true, release: () => void released++ }) }) });
+    expect((await fetch(`${ok.url}/publish/abc`, { method: 'DELETE', headers: bearer(`${TOKEN}r`) })).status).toBe(200);
+    expect(released).toBe(1);
+    const none = await start();
+    expect((await fetch(`${none.url}/publish/abc`, { method: 'DELETE', headers: bearer(`${TOKEN}r`) })).status).toBe(404);
+  });
+
+  it('does not exist without a publish route', async () => {
+    const r = await start();
+    expect((await post(r, '{}', `${TOKEN}r`)).status).toBe(404);
+  });
+
+  it('needs a bearer token and any grant; read is enough', async () => {
+    const p = route();
+    const r = await start([], { publish: p });
+    expect((await post(r, '{}')).status).toBe(401);
+    expect((await post(r, '{}', `${TOKEN}n`)).status).toBe(403);
+    expect((await post(r, '{"a":1}', `${TOKEN}r`)).status).toBe(200);
+    expect(p.posted).toEqual([['reader', { a: 1 }]]);
+  });
+
+  it('takes only POST with a JSON body of at most 1 MiB', async () => {
+    const r = await start([], { publish: route() });
+    expect(MAX_PUBLISH_BODY).toBe(1024 * 1024);
+    expect((await fetch(`${r.url}/publish`, { headers: bearer(`${TOKEN}r`) })).status).toBe(405);
+    expect((await post(r, '{}', `${TOKEN}r`, 'text/plain')).status).toBe(415);
+    expect((await post(r, JSON.stringify({ a: 'x'.repeat(MAX_PUBLISH_BODY) }), `${TOKEN}r`)).status).toBe(413);
+    expect((await post(r, '{', `${TOKEN}r`)).status).toBe(400);
+  });
+
+  it('accepts a body of exactly 1 MiB', async () => {
+    const p = route();
+    const r = await start([], { publish: p });
+    const text = JSON.stringify({ a: '' });
+    const exact = JSON.stringify({ a: 'x'.repeat(MAX_PUBLISH_BODY - text.length) });
+    expect(Buffer.byteLength(exact)).toBe(MAX_PUBLISH_BODY);
+    expect((await post(r, exact, `${TOKEN}r`)).status).toBe(200);
+    expect(p.posted).toHaveLength(1);
+  });
+
+  it('answers 413 as soon as the body passes 1 MiB, without waiting for the rest', async () => {
+    const release = vi.fn();
+    const handler = vi.fn();
+    const r = await start([], { publish: route({ admit: () => ({ ok: true, release }), post: handler }) });
+    expect(await partialPost(r, 4 * MAX_PUBLISH_BODY, Buffer.alloc(MAX_PUBLISH_BODY + 1, 0x20))).toMatch(/^HTTP\/1.1 413/);
+    expect(handler).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(1));
+  });
+
+  it('admits before reading any of the body', async () => {
+    const admit = vi.fn(() => ({ ok: false as const, status: 429 as const, error: 'a publish from you is already in flight', retryAfterSec: 1 }));
+    const r = await start([], { publish: route({ admit }) });
+    expect(await partialPost(r, 1000, Buffer.alloc(0))).toMatch(/^HTTP\/1.1 429/);
+    expect(admit).toHaveBeenCalledTimes(1);
+  });
+
+  it('answers an admission refusal with its status and Retry-After, without calling the handler', async () => {
+    const handler = vi.fn();
+    const r = await start([], { publish: route({ admit: () => ({ ok: false, status: 429, error: 'publishing too fast', retryAfterSec: 3 }), post: handler }) });
+    const res = await post(r, '{}', `${TOKEN}r`);
+    expect(res.status).toBe(429);
+    expect(res.headers.get('retry-after')).toBe('3');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('does not admit an unauthenticated caller', async () => {
+    const admit = vi.fn(() => ({ ok: true as const, release: () => undefined }));
+    const r = await start([], { publish: route({ admit }) });
+    expect((await post(r, '{}')).status).toBe(401);
+    expect((await post(r, '{}', `${TOKEN}n`)).status).toBe(403);
+    expect(admit).not.toHaveBeenCalled();
+  });
+
+  it('releases the admission when the handler throws', async () => {
+    const release = vi.fn();
+    const r = await start([], { publish: route({ admit: () => ({ ok: true, release }), post: async () => { throw new Error('boom'); } }) });
+    expect((await post(r, '{}', `${TOKEN}r`)).status).toBe(500);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases the admission after a refused body', async () => {
+    const release = vi.fn();
+    const r = await start([], { publish: route({ admit: () => ({ ok: true, release }) }) });
+    expect((await post(r, '{}', `${TOKEN}r`, 'text/plain')).status).toBe(415);
+    expect((await post(r, '{', `${TOKEN}r`)).status).toBe(400);
+    expect(release).toHaveBeenCalledTimes(2);
+  });
+
+  it('passes the route’s reply headers through', async () => {
+    const r = await start([], { publish: route({ post: async () => ({ status: 503, body: { ok: false, error: 'standby' }, headers: { 'Retry-After': '5' } }) }) });
+    const res = await post(r, '{}', `${TOKEN}r`);
+    expect([res.status, res.headers.get('retry-after'), await res.json()]).toEqual([503, '5', { ok: false, error: 'standby' }]);
+  });
+
+  it('a standby refuses publish like every authenticated route', async () => {
+    const r = await start([], { publish: route() });
+    r.setLease('standby');
+    expect((await post(r, '{}', `${TOKEN}x`)).status).toBe(503);
   });
 });

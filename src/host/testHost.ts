@@ -8,13 +8,14 @@ import { parseHostConfig } from './config.js';
 import { EventHub } from './events.js';
 import type { LeaseState } from './lease.js';
 import { createLogger } from './log.js';
+import type { PublishRoute } from './publishRoute.js';
 import { brokerRpcChannels } from './rpc.js';
 import { createHostServer } from './server.js';
 import { fakeBroker } from './testFakes.js';
 
 export const TEST_WORKSPACE_ID = '01JC0000000000000000000000';
 
-export async function startTestHost(opts: { tokens: Record<string, Identity>; grants: GrantRule[]; sessions?: string[]; pingMs?: number }) {
+export async function startTestHost(opts: { tokens: Record<string, Identity>; grants: GrantRule[]; sessions?: string[]; pingMs?: number; publish?: PublishRoute }) {
   const broker = fakeBroker(opts.sessions ?? []);
   const events = new EventHub();
   let lease: LeaseState = 'holder';
@@ -36,6 +37,7 @@ export async function startTestHost(opts: { tokens: Record<string, Identity>; gr
     hub,
     events,
     rpc: brokerRpcChannels(broker.ops, hub.owners),
+    publish: opts.publish,
     log: createLogger(() => undefined),
     pingMs: opts.pingMs
   });
