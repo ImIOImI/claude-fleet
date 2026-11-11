@@ -161,7 +161,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
   return {
     stores,
     automations,
-    history: historyReader(stateKysely, o.workspaceId),
+    history: historyReader(stateKysely, o.workspaceId, owners),
     publish,
     owners,
     stop() {

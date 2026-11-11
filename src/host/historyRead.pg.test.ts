@@ -157,6 +157,22 @@ describe.skipIf(!isPg)('sessionsPage', () => {
     expect(new Set(seen).size).toBe(25);
     await k.destroy();
   });
+
+  it('the reader adds each row’s owner, asking only about the hosted workspace', async () => {
+    const k = await rig();
+    const ann = { kind: 'user', provider: 'github', id: '7', login: 'ann', name: null, avatarUrl: null } as const;
+    const asked: Array<[readonly string[], readonly string[]]> = [];
+    const r = historyReader(() => k, HOSTED, {
+      ownersOf: async (ids, ws) => { asked.push([ids, ws]); return new Map([['s-01', ann]]); },
+      ownerCosts: async (ws) => (ws.length === 1 && ws[0] === HOSTED ? [{ owner: ann, sessions: 1, usd: 1 }] : [])
+    });
+    const page = await r.sessions({ after: null, limit: 200 });
+    expect(page.rows.find((x) => x.id === 's-01')?.owner).toEqual(ann);
+    expect(page.rows.filter((x) => x.id !== 's-01').every((x) => x.owner === null)).toBe(true);
+    expect(asked).toEqual([[page.rows.map((x) => x.id), [HOSTED]]]);
+    expect(await r.ownerCosts()).toEqual({ rows: [{ owner: ann, sessions: 1, usd: 1 }] });
+    expect(await historyReader(() => k, HOSTED).ownerCosts()).toEqual({ rows: [] });
+  });
 });
 
 describe.skipIf(!isPg)('historyReader.summary', () => {

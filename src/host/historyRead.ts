@@ -8,6 +8,8 @@ import { pgSearchEmbeddings } from '../main/store/pgVectorSearch.js';
 import { EMBED_DIM, EMBED_MODEL_ID } from '../main/vectors.js';
 import type { StateDb } from '../main/store/stateSchema.js';
 import type { SessionCursor } from '../preload/federation.js';
+import type { OwnerCostRow, SessionOwner } from '../preload/sessionOwner.js';
+import type { SessionOwnerStore } from './sessionOwners.js';
 
 export const SESSIONS_PAGE_MAX = 200;
 const ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -30,6 +32,8 @@ export interface RemoteSessionRow {
   tags: string[];
   headless: boolean;
 }
+
+export type OwnedSessionRow = RemoteSessionRow & { owner: SessionOwner | null };
 
 export interface SessionsPageReq { after: SessionCursor | null; limit: number }
 export interface SessionsPage { rows: RemoteSessionRow[]; next: SessionCursor | null }
@@ -145,19 +149,27 @@ export async function sessionsPage(k: Kysely<StateDb>, workspaceId: string, req:
 
 export interface HistoryReader {
   workspaceId: string;
-  sessions(req: SessionsPageReq): Promise<SessionsPage>;
+  sessions(req: SessionsPageReq): Promise<{ rows: OwnedSessionRow[]; next: SessionCursor | null }>;
   /** null: the workspace's latest session. A session outside the workspace answers null. */
   summary(sessionId: string | null): Promise<WorkspaceSummary | null>;
   /** The exact pgvector scan over the hosted workspace (D66). */
   search(req: SearchReq): Promise<{ modelId: string; hits: EmbeddingHit[] }>;
+  /** Cost per owner over the hosted workspace (D121). */
+  ownerCosts(): Promise<{ rows: OwnerCostRow[] }>;
 }
 
 /** `summary` goes through db.ts's global store (summaryForWorkspace/summaryForSession), the same
  *  handle the holder passes as `k` here, not a store `k` could swap per call. */
-export function historyReader(k: () => Kysely<StateDb>, workspaceId: string): HistoryReader {
+export function historyReader(
+  k: () => Kysely<StateDb>, workspaceId: string, owners?: Pick<SessionOwnerStore, 'ownersOf' | 'ownerCosts'>
+): HistoryReader {
   return {
     workspaceId,
-    sessions: (req) => sessionsPage(k(), workspaceId, req),
+    async sessions(req) {
+      const page = await sessionsPage(k(), workspaceId, req);
+      const m = owners && page.rows.length > 0 ? await owners.ownersOf(page.rows.map((r) => r.id), [workspaceId]) : new Map<string, SessionOwner>();
+      return { rows: page.rows.map((r) => ({ ...r, owner: m.get(r.id) ?? null })), next: page.next };
+    },
     async summary(sessionId) {
       if (sessionId === null) return summaryForWorkspace(workspaceId);
       const row = await k().selectFrom('sessions').select('workspace_id').where('id', '=', sessionId).executeTakeFirst();
@@ -170,5 +182,7 @@ export function historyReader(k: () => Kysely<StateDb>, workspaceId: string): Hi
         hits: hits.map((h) => ({ ...h, text: h.text.slice(0, SEARCH_TEXT_MAX), score: Number(h.score), ts: num(h.ts) }))
       };
     },
+    // Hosted only, never partitions (D107, D119).
+    ownerCosts: async () => ({ rows: owners ? await owners.ownerCosts([workspaceId]) : [] }),
   };
 }
