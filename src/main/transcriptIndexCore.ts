@@ -29,15 +29,17 @@ export function extractText(message: unknown): string {
 /** Embed every pending turn for a session. Returns rows inserted. */
 export async function indexSessionTurnsWith(span: SpanAsync, sessionId: string, embed: EmbedFn, batch = EMBED_BATCH): Promise<number> {
   let total = 0;
-  // Loop so a session with a large backlog drains across batches.
-  // unembeddedTurnEvents only returns rows still lacking an embedding, so the
-  // cursor advances naturally as rows are inserted.
+  // Loop so a session with a large backlog drains across batches. Every
+  // returned row gets a vector or a placeholder before the next read, so the
+  // next read starts after the last id (no boundary re-walk per batch).
+  let after: number | undefined;
   for (;;) {
     // Once per session in the startup backfill — spanned so stalls it causes
     // self-attribute.
     const pending = await span('claude_fleet.index.pending_turns',
-      () => unembeddedTurnEvents(sessionId, EMBED_MODEL_ID, batch), { session_id: sessionId });
+      () => unembeddedTurnEvents(sessionId, EMBED_MODEL_ID, batch, after), { session_id: sessionId });
     if (pending.length === 0) break;
+    after = pending[pending.length - 1].id;
 
     const prepared = pending
       .map((ev) => {

@@ -257,9 +257,20 @@ CREATE INDEX idx_transcript_offsets_workspace ON transcript_offsets (workspace_i
 CREATE INDEX idx_transcript_offsets_session ON transcript_offsets (session_id);
 `;
 
+// SQLite's (session_id, type) index ends in the rowid (= id), so a per-type
+// walk in id order needs no sort; Postgres needs the id spelled out (#583).
+// Build first, swap last: the build holds SHARE (reads continue); only the
+// drop and rename need ACCESS EXCLUSIVE, briefly.
+const EVENTS_SESSION_TYPE_ID_V19 = `
+DROP INDEX IF EXISTS idx_events_session_type_v19;
+CREATE INDEX idx_events_session_type_v19 ON events (session_id, type, id);
+DROP INDEX IF EXISTS idx_events_session_type;
+ALTER INDEX idx_events_session_type_v19 RENAME TO idx_events_session_type;
+`;
+
 export const STATE_PG_TRACK: PgTrack = {
   track: 'state',
   baselineVersion: STATE_PG_BASELINE_VERSION,
   baseline: STATE_PG_BASELINE,
-  steps: [{ version: 15, postgres: PORT_EXPOSURES_V15 }, { version: 16, postgres: RETENTION_V16 }, { version: 17, postgres: ATTACHMENTS_V17 }, { version: 18, postgres: TRANSCRIPT_OFFSETS_V18 }]
+  steps: [{ version: 15, postgres: PORT_EXPOSURES_V15 }, { version: 16, postgres: RETENTION_V16 }, { version: 17, postgres: ATTACHMENTS_V17 }, { version: 18, postgres: TRANSCRIPT_OFFSETS_V18 }, { version: 19, postgres: EVENTS_SESSION_TYPE_ID_V19 }]
 };

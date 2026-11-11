@@ -931,6 +931,12 @@ function migrate(d: Database.Database): void {
     `);
     d.pragma('user_version = 18');
   }
+
+  if ((d.pragma('user_version', { simple: true }) as number) < 19) {
+    // Postgres step 19 adds id to idx_events_session_type; here the index
+    // already ends in the rowid (= id). Version-only, so imports stay in step.
+    d.pragma('user_version = 19');
+  }
 }
 
 function repairSyntheticFirstUserMessages(d: Database.Database): void {
@@ -998,6 +1004,9 @@ const yieldMacrotask = (): Promise<void> => new Promise<void>((r) => setImmediat
  * the chunk transaction's last statement, so its writes commit or roll back
  * with the rows; it needs at most one chunk of lines.
  */
+/** Two-int advisory keyspace class for per-session ingest (pgMigrate/bootstrap use the one-bigint keyspace). */
+const INGEST_SESSION_LOCK = 7_340_213;
+
 export async function ingestBatch(
   workspaceId: string,
   sessionId: string,
@@ -1018,6 +1027,10 @@ export async function ingestBatch(
     let chunkResults: IngestResult[];
     try {
       chunkResults = await k.transaction().execute(async (trx) => {
+        // Event ids must commit in id order per session (unembeddedTurnEvents reads
+        // past the newest embedded turn). In process the write lock already does
+        // this; the advisory lock covers a second writer process on one database.
+        if (dialect === 'postgres') await sql`SELECT pg_advisory_xact_lock(${INGEST_SESSION_LOCK}::int, hashtext(${sessionId}))`.execute(trx);
         await opts.atStart?.(trx);
         const lines = chunk.map((rawLine) => ({ rawLine, p: parseIngestLine(rawLine) }));
         anyParsed = lines.some((l) => l.p);
@@ -1642,8 +1655,9 @@ export async function recentToolCallsForSession(sessionId: string, limit = 10): 
   return recentToolCallsQ(kyselyOrThrow(), sessionId, limit);
 }
 
-async function recentToolCallsQ(q: Kysely<StateDb>, sessionId: string, limit: number): Promise<ToolCall[]> {
-  const rows = await q
+// Exported for the EXPLAIN QUERY PLAN pin in dbSessionStats.test.ts.
+export function recentToolCallsQuery(q: Kysely<StateDb>, sessionId: string, limit: number) {
+  return q
     .selectFrom('events as u')
     .leftJoin('events as r', (j) =>
       j
@@ -1659,11 +1673,17 @@ async function recentToolCallsQ(q: Kysely<StateDb>, sessionId: string, limit: nu
       'r.tool_result_is_error as is_error',
     ])
     .where('u.session_id', '=', sessionId)
+    // tool_use blocks only come on assistant lines; the type term lets the
+    // (session_id, type) index walk newest-first and stop at `limit` (#583).
+    .where('u.type', '=', 'assistant')
     .where('u.tool_name', 'is not', null)
     .where('u.tool_use_id', 'is not', null)
     .orderBy('u.id', 'desc')
-    .limit(limit)
-    .execute();
+    .limit(limit);
+}
+
+async function recentToolCallsQ(q: Kysely<StateDb>, sessionId: string, limit: number): Promise<ToolCall[]> {
+  const rows = await recentToolCallsQuery(q, sessionId, limit).execute();
   return rows.map((r) => ({
     name: r.name as string,
     input: r.input,
@@ -2943,22 +2963,66 @@ export interface UnembeddedTurn {
   rawJsonl: string;
 }
 
-/** user/assistant events in a session with no 'turn' embedding for `modelId`. */
-export async function unembeddedTurnEvents(sessionId: string, modelId: string, limit = 200): Promise<UnembeddedTurn[]> {
-  return kyselyOrThrow()
+/** The newest `type` turn of a session that has a `modelId` turn embedding.
+ *  Exported for the EXPLAIN QUERY PLAN pin. */
+export function turnBoundaryQuery(q: Kysely<StateDb>, sessionId: string, type: 'user' | 'assistant', modelId: string) {
+  return q
+    .selectFrom('events as e')
+    .select('e.id')
+    .where('e.session_id', '=', sessionId)
+    .where('e.type', '=', type)
+    .where(({ exists, selectFrom }) => exists(
+      selectFrom('embeddings as em')
+        .select('em.id')
+        .whereRef('em.ref_event_id', '=', 'e.id')
+        .where('em.kind', '=', 'turn')
+        .where('em.model_id', '=', modelId),
+    ))
+    .orderBy('e.id', 'desc')
+    .limit(1);
+}
+
+/** Unembedded `type` turns of a session with id > `after`, oldest first. One
+ *  type per query so the index walk is already in id order and stops at
+ *  `limit` (an IN list would read every later row and sort). Exported for the
+ *  EXPLAIN QUERY PLAN pin. */
+export function pendingTurnsQuery(q: Kysely<StateDb>, sessionId: string, type: 'user' | 'assistant', modelId: string, after: number, limit: number) {
+  return q
     .selectFrom('events as e')
     .leftJoin('embeddings as em', (j) =>
       j.onRef('em.ref_event_id', '=', 'e.id').on('em.kind', '=', 'turn').on('em.model_id', '=', modelId),
     )
     .select(['e.id as id', 'e.workspace_id as workspaceId', 'e.ts as ts', 'e.raw_jsonl as raw_jsonl', 'e.raw_z as raw_z'])
     .where('e.session_id', '=', sessionId)
-    .where('e.type', 'in', ['user', 'assistant'])
+    .where('e.type', '=', type)
+    .where('e.id', '>', after)
     .where('em.id', 'is', null)
     .orderBy('e.id', 'asc')
-    .limit(limit)
-    .execute()
-    // user/assistant rows never carry att_ref (attachment lines only).
-    .then((rows) => rows.map((r) => ({ id: r.id, workspaceId: r.workspaceId, ts: r.ts, rawJsonl: rawLine(r) })));
+    .limit(limit);
+}
+
+/** user/assistant events in a session with no 'turn' embedding for `modelId`,
+ *  oldest first, after the newest embedded turn. Turns are embedded oldest-first
+ *  and a session's event ids commit in id order (SPEC §7 *Startup indexing*), so
+ *  that boundary is where pending turns start: each read walks the pending tail,
+ *  not the session (#583). `after` skips the boundary lookup: a caller draining
+ *  a backlog passes the last id it handled. */
+export async function unembeddedTurnEvents(
+  sessionId: string, modelId: string, limit = 200, after?: number,
+): Promise<UnembeddedTurn[]> {
+  const k = kyselyOrThrow();
+  let from = after ?? 0;
+  if (after === undefined) {
+    for (const type of ['user', 'assistant'] as const) {
+      const row = await turnBoundaryQuery(k, sessionId, type, modelId).executeTakeFirst();
+      if (row && row.id > from) from = row.id;
+    }
+  }
+  const users = await pendingTurnsQuery(k, sessionId, 'user', modelId, from, limit).execute();
+  const assistants = await pendingTurnsQuery(k, sessionId, 'assistant', modelId, from, limit).execute();
+  const rows = [...users, ...assistants].sort((a, b) => a.id - b.id).slice(0, limit);
+  // user/assistant rows never carry att_ref (attachment lines only).
+  return rows.map((r) => ({ id: r.id, workspaceId: r.workspaceId, ts: r.ts, rawJsonl: rawLine(r) }));
 }
 
 /** Sessions with at least one user/assistant event lacking a `modelId` turn

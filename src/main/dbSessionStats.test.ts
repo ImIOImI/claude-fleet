@@ -25,6 +25,7 @@ import {
   observedMaxQuery,
   topToolsQuery,
   latestAssistantQuery,
+  recentToolCallsQuery,
 } from './db.js';
 import { explainPlan } from './state/explainPlan.js';
 import { openTestState, queryRows, isPg, type TestState } from './store/testStore.js';
@@ -382,5 +383,13 @@ describe('summary reader equivalence + EXPLAIN pins (Task 2)', () => {
     const details = explainPlan(d, latestAssistantQuery(stateKysely(), 'x'));
     expect(details).toMatch(/idx_events_session_type|idx_events_session_ts/);
     expect(details).not.toMatch(/\bidx_events_type\b/);
+  });
+
+  it.skipIf(isPg)('recentToolCallsQuery walks the session\'s assistant rows newest-first with no sort (#583)', async () => {
+    // Pin: a sort here means reading every tool row of the session per summary recompute.
+    const d = openDb(dir);
+    const details = explainPlan(d, recentToolCallsQuery(stateKysely(), 'x', 10));
+    expect(details).toMatch(/SEARCH u USING (COVERING )?INDEX idx_events_session_type/);
+    expect(details).not.toMatch(/TEMP B-TREE/);
   });
 });
