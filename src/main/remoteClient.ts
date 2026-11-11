@@ -8,6 +8,8 @@ import type { Tier } from './identity/grants.js';
 import { redactSecrets } from './identity/redact.js';
 import { normalizeHostUrl, oneLine, safeLogin, wsUrl } from './remoteUrl.js';
 import { SEARCH_UNAVAILABLE } from '../preload/federation.js';
+import { PUBLISH_MAX_BODY, type PublishAck, type PublishBatch } from './publish/protocol.js';
+import type { ScrubbedLine } from './publish/scrub.js';
 
 export { CONTROL_RE, oneLine, safeLogin } from './remoteUrl.js';
 
@@ -71,6 +73,7 @@ const WORKSPACE_ID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 /** Reply caps: a hostile host could otherwise stream until main runs out of memory. */
 export const MAX_SMALL_BODY = 64 * 1024;
 export const MAX_RPC_BODY = 2 * 1024 * 1024;
+export const PUBLISH_TIMEOUT_MS = 30_000;
 
 function isWhoAmI(v: unknown): v is WhoAmI {
   const o = v as WhoAmI | null;
@@ -281,6 +284,16 @@ export class RemoteClient {
     })) as { ok?: unknown; result?: T } | null;
     if (body?.ok !== true) throw new RemoteError('protocol', `${this.url} rpc ${channel} failed`);
     return body.result as T;
+  }
+
+  /** Only scrubbed lines type-check here (remote-workspaces §9). */
+  async publish(batch: PublishBatch<ScrubbedLine>): Promise<PublishAck> {
+    const body = JSON.stringify(batch);
+    if (Buffer.byteLength(body) > PUBLISH_MAX_BODY) throw new RemoteError('protocol', 'publish batch is over 1 MiB', 413);
+    const r = (await this.request('/publish', { method: 'POST', auth: true, body, maxBody: MAX_SMALL_BODY, timeoutMs: PUBLISH_TIMEOUT_MS })) as
+      { ok?: unknown; accepted?: unknown; inserted?: unknown } | null;
+    if (r?.ok !== true || typeof r.accepted !== 'number' || typeof r.inserted !== 'number') throw new RemoteError('protocol', `${this.url} publish failed`);
+    return { ok: true, accepted: r.accepted, inserted: r.inserted };
   }
 
   /** An authenticated WebSocket to `path`, resolved once open. */

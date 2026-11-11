@@ -12,7 +12,7 @@ const files = (dir: string): string[] =>
 describe('ScrubbedLine brand', () => {
   it('is cast only inside scrub.ts', () => {
     const casts = files(SRC)
-      .filter((f) => !ALLOWED.has(relative(SRC, f)) && /\bas\s+(unknown\s+as\s+)?ScrubbedLine\b|<ScrubbedLine>/.test(readFileSync(f, 'utf8')))
+      .filter((f) => !ALLOWED.has(relative(SRC, f)) && /\bas\s+(unknown\s+as\s+)?ScrubbedLine\b|(?<![\w$])<ScrubbedLine>/.test(readFileSync(f, 'utf8')))
       .map((f) => relative(SRC, f));
     expect(casts).toEqual([]);
   }, 30_000);

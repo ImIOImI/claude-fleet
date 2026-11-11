@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { WebSocketServer } from 'ws';
 import { person, TOKEN } from '../host/testFakes.js';
 import { startTestHost, TEST_WORKSPACE_ID } from '../host/testHost.js';
+import { makeScrubber } from './publish/scrub.js';
+import type { PublishRoute } from '../host/publishRoute.js';
 import { MAX_RPC_BODY, MAX_SMALL_BODY, oneLine, reconnectDelay, RemoteClient, RemoteError, type RemoteDisconnect, type RemoteEvent } from './remoteClient.js';
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -402,5 +404,53 @@ describe('reconnectDelay', () => {
     expect(reconnectDelay(0, { kind: 'forbidden' })).toBeNull();
     expect(reconnectDelay(0, { kind: 'unauthorized' })).toBe(30_000);
     for (let a = 0; a < 20; a++) expect(reconnectDelay(a, { kind: 'dropped' })).toBeGreaterThanOrEqual(1000);
+  });
+});
+
+describe('RemoteClient.publish', () => {
+  const SRC = '01JC0000000000000000000005';
+  const SID = '11111111-2222-4333-8444-555555555555';
+  async function publishHost(route: Partial<PublishRoute>) {
+    const seen: unknown[] = [];
+    const h = await startTestHost({
+      tokens: { [TOKEN]: person('alice', 1, ['acme/eng']) }, grants: [{ team: 'acme/eng', tier: 'read' }],
+      publish: {
+        admit: () => ({ ok: true, release: () => undefined }),
+        post: async (c, b) => { seen.push([c.identity.login, b]); return { status: 200, body: { ok: true, accepted: 1, inserted: 1 } }; },
+        ...route
+      }
+    });
+    cleanups.push(h.close);
+    const calls = { token: 0 };
+    return { client: new RemoteClient({ url: h.url, token: async () => (calls.token++, TOKEN) }), seen, calls };
+  }
+
+  it('posts a scrubbed batch and returns the ack', async () => {
+    const { client, seen } = await publishHost({});
+    const line = makeScrubber([])('{"type":"user"}');
+    expect(await client.publish({ sourceWorkspaceId: SRC, sessionId: SID, events: [line] })).toEqual({ ok: true, accepted: 1, inserted: 1 });
+    expect(seen).toEqual([['alice', { sourceWorkspaceId: SRC, sessionId: SID, events: ['{"type":"user"}'] }]]);
+  });
+
+  it('refuses a batch over 1 MiB without sending it', async () => {
+    const { client, seen, calls } = await publishHost({});
+    const big = makeScrubber([])(JSON.stringify({ t: 'x'.repeat(1024 * 1024) }));
+    await expect(client.publish({ sourceWorkspaceId: SRC, sessionId: SID, events: [big] })).rejects.toMatchObject({ kind: 'protocol', status: 413 });
+    expect(seen).toEqual([]);
+    expect(calls.token).toBe(0);
+  });
+
+  it('maps a 429 to unreachable with its Retry-After', async () => {
+    const { client } = await publishHost({ admit: () => ({ ok: false, status: 429, error: 'publishing too fast', retryAfterSec: 3 }) });
+    const line = makeScrubber([])('{"type":"user"}');
+    await expect(client.publish({ sourceWorkspaceId: SRC, sessionId: SID, events: [line] })).rejects.toMatchObject({ kind: 'unreachable', status: 429, retryAfterMs: 3000 });
+  });
+
+  it('maps a 400 to a protocol error carrying the status, and a malformed ack to protocol', async () => {
+    const bad = await publishHost({ post: async () => ({ status: 400, body: { error: 'events[0]: too deep' } }) });
+    const line = makeScrubber([])('{"type":"user"}');
+    await expect(bad.client.publish({ sourceWorkspaceId: SRC, sessionId: SID, events: [line] })).rejects.toMatchObject({ kind: 'protocol', status: 400 });
+    const odd = await publishHost({ post: async () => ({ status: 200, body: { ok: true } }) });
+    await expect(odd.client.publish({ sourceWorkspaceId: SRC, sessionId: SID, events: [line] })).rejects.toMatchObject({ kind: 'protocol' });
   });
 });

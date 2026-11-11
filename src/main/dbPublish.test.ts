@@ -66,3 +66,51 @@ describe('ingest into a published partition', () => {
     expect((await db.latestLimitHitAnchor())?.kind).toBe('limit-hit');
   });
 });
+
+const W = '01JC0000000000000000000005';
+const turn = (sessionId: string, uuid: string, ts: string, content: string) =>
+  JSON.stringify({ type: 'user', uuid, sessionId, timestamp: ts, message: { role: 'user', content } });
+
+describe('publish helpers', () => {
+  it('lists a workspace’s events after the cursor, from sessions started since, with attachments expanded', async () => {
+    await openTestState('pub-ev-');
+    await db.ingestBatch(W, 'old', [turn('old', 'o1', '2026-11-01T00:00:00Z', 'before opt-in')]);
+    await db.ingestBatch(W, 'new', [turn('new', 'n1', '2026-11-05T00:00:00Z', 'first'), turn('new', 'n2', '2026-11-05T00:01:00Z', 'second')]);
+    await db.ingestBatch('01JC0000000000000000000006', 'x', [turn('x', 'x1', '2026-11-05T00:00:00Z', 'other workspace')]);
+    const since = Date.parse('2026-11-04T00:00:00Z');
+    const all = await db.publishableEvents(W, 0, since, 10);
+    expect(all.map((e) => [e.sessionId, JSON.parse(e.rawJsonl).message.content])).toEqual([['new', 'first'], ['new', 'second']]);
+    expect(await db.publishableEvents(W, all[0].id, since, 10)).toEqual([all[1]]);
+    expect(await db.publishableEvents(W, 0, since, 1)).toEqual([all[0]]);
+  });
+
+  it('keeps cursors and withheld sessions per workspace, and purges them with it', async () => {
+    await openTestState('pub-cur-');
+    expect(await db.getPublishCursor(W, 'R')).toBe(0);
+    await db.setPublishCursor(W, 'R', 7);
+    await db.setPublishCursor(W, 'R', 9);
+    expect(await db.getPublishCursor(W, 'R')).toBe(9);
+    await db.withholdSession(W, 's1');
+    await db.withholdSession(W, 's1');
+    expect(await db.withheldSessions(W)).toEqual(new Set(['s1']));
+    await db.deletePublishCursor(W, 'R');
+    expect(await db.getPublishCursor(W, 'R')).toBe(0);
+    await db.setPublishCursor(W, 'R', 3);
+    await db.purgeWorkspace(W);
+    expect(await db.getPublishCursor(W, 'R')).toBe(0);
+    expect(await db.withheldSessions(W)).toEqual(new Set());
+  });
+
+  it('purging a workspace leaves other workspaces’ cursors and withheld rows, and drops cursors that target it', async () => {
+    await openTestState('pub-cur2-');
+    const O = '01JC0000000000000000000006';
+    await db.setPublishCursor(W, 'R', 3);
+    await db.setPublishCursor(O, 'R', 4);
+    await db.setPublishCursor(O, W, 5);
+    await db.withholdSession(O, 's2');
+    await db.purgeWorkspace(W);
+    expect(await db.getPublishCursor(O, 'R')).toBe(4);
+    expect(await db.getPublishCursor(O, W)).toBe(0);
+    expect(await db.withheldSessions(O)).toEqual(new Set(['s2']));
+  });
+});

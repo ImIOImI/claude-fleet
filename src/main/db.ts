@@ -1376,6 +1376,16 @@ function rowFromSql(r: EventRowSql, blobs: ReadonlyMap<string, Buffer>): EventRo
   };
 }
 
+/** Each distinct blob once per page: a session repeats the same few payloads. */
+async function blobsFor(k: Kysely<StateDb>, rows: readonly { att_ref: string | null }[]): Promise<Map<string, Buffer>> {
+  const refs = [...new Set(rows.flatMap((r) => (r.att_ref ? [r.att_ref] : [])))];
+  const blobs = new Map<string, Buffer>();
+  for (const part of chunked(refs, 500)) {
+    for (const b of await k.selectFrom('event_blobs').select(['hash', 'body_z']).where('hash', 'in', part).execute()) blobs.set(b.hash, b.body_z);
+  }
+  return blobs;
+}
+
 export async function eventsForSession(sessionId: string, sinceEventId = 0, limit = 500): Promise<EventRow[]> {
   const k = kyselyOrThrow();
   const rows = await k
@@ -1386,12 +1396,7 @@ export async function eventsForSession(sessionId: string, sinceEventId = 0, limi
     .orderBy('id', 'asc')
     .limit(limit)
     .execute();
-  // Each distinct blob once per page: a session repeats the same few payloads.
-  const refs = [...new Set(rows.flatMap((r) => (r.att_ref ? [r.att_ref] : [])))];
-  const blobs = new Map<string, Buffer>();
-  for (const part of chunked(refs, 500)) {
-    for (const b of await k.selectFrom('event_blobs').select(['hash', 'body_z']).where('hash', 'in', part).execute()) blobs.set(b.hash, b.body_z);
-  }
+  const blobs = await blobsFor(k, rows);
   return rows.map((r) => rowFromSql(r, blobs));
 }
 
@@ -1831,6 +1836,62 @@ export async function usefulMarkCounts(sessionIds: readonly string[]): Promise<M
     for (const r of rows) if (r.session_id) out.set(r.session_id, num(r.n));
   }
   return out;
+}
+
+// ── Transcript publish (SPEC §7 *Transcript publish*) ─────────────────────
+
+export interface PublishableEvent {
+  id: number;
+  sessionId: string;
+  rawJsonl: string;
+}
+
+/** `workspaceId`'s events after `afterId`, in id order, from sessions that started at or after `startedSince`. */
+export async function publishableEvents(workspaceId: string, afterId: number, startedSince: number, limit: number): Promise<PublishableEvent[]> {
+  const k = kyselyOrThrow();
+  const rows = await k
+    .selectFrom('events as e')
+    .innerJoin('sessions as s', 's.id', 'e.session_id')
+    .selectAll('e')
+    .where('e.workspace_id', '=', workspaceId)
+    .where('e.id', '>', afterId)
+    .where('s.started_at', '>=', startedSince)
+    .orderBy('e.id', 'asc')
+    .limit(limit)
+    .execute();
+  const blobs = await blobsFor(k, rows);
+  return rows.map((r) => {
+    const e = rowFromSql(r, blobs);
+    return { id: num(e.id), sessionId: e.sessionId, rawJsonl: e.rawJsonl };
+  });
+}
+
+export async function getPublishCursor(source: string, target: string): Promise<number> {
+  const r = await kyselyOrThrow().selectFrom('publish_cursors').select('last_event_id')
+    .where('source_workspace_id', '=', source).where('target_workspace_id', '=', target).executeTakeFirst();
+  return r ? num(r.last_event_id) : 0;
+}
+
+export async function setPublishCursor(source: string, target: string, lastEventId: number): Promise<void> {
+  const at = Date.now();
+  await kyselyOrThrow().insertInto('publish_cursors')
+    .values({ source_workspace_id: source, target_workspace_id: target, last_event_id: lastEventId, updated_at: at })
+    .onConflict((oc) => oc.columns(['source_workspace_id', 'target_workspace_id']).doUpdateSet({ last_event_id: lastEventId, updated_at: at }))
+    .execute();
+}
+
+export async function deletePublishCursor(source: string, target: string): Promise<void> {
+  await kyselyOrThrow().deleteFrom('publish_cursors').where('source_workspace_id', '=', source).where('target_workspace_id', '=', target).execute();
+}
+
+export async function withholdSession(workspaceId: string, sessionId: string): Promise<void> {
+  await kyselyOrThrow().insertInto('publish_withheld').values({ session_id: sessionId, workspace_id: workspaceId, withheld_at: Date.now() })
+    .onConflict((oc) => oc.column('session_id').doNothing()).execute();
+}
+
+export async function withheldSessions(workspaceId: string): Promise<Set<string>> {
+  const rows = await kyselyOrThrow().selectFrom('publish_withheld').select('session_id').where('workspace_id', '=', workspaceId).execute();
+  return new Set(rows.map((r) => r.session_id));
 }
 
 /** True once `claudeSessionId` has ingested ≥1 transcript line (a sessions
@@ -2848,10 +2909,14 @@ export async function purgeWorkspace(
       if (n < size) break;
     }
   }
-  for (const table of ['session_costs', 'session_tags', 'broker_sessions', 'port_exposures', 'event_retention', 'transcript_offsets', 'sessions'] as const) {
+  for (const table of ['session_costs', 'session_tags', 'broker_sessions', 'port_exposures', 'event_retention', 'transcript_offsets', 'publish_withheld', 'sessions'] as const) {
     const r = await slice(() => k.deleteFrom(table).where('workspace_id', '=', workspaceId).executeTakeFirst());
     deleted += num(r.numDeletedRows);
   }
+  const cursors = await slice(() => k.deleteFrom('publish_cursors')
+    .where((eb) => eb.or([eb('source_workspace_id', '=', workspaceId), eb('target_workspace_id', '=', workspaceId)]))
+    .executeTakeFirst());
+  deleted += num(cursors.numDeletedRows);
   summaryCache.clear();
   spendCache.clear();
   return deleted;
