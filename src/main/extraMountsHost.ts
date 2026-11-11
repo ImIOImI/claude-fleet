@@ -190,6 +190,7 @@ const posixInside = (child: string, parent: string): boolean =>
 const WSL_SYSTEM = ['/proc', '/sys', '/dev', '/run', '/var/run'];
 const WSL_GUARDED = [...WSL_SYSTEM, '/mnt', '/home', '/root'];
 const WINDOWS_FS = new Set(['9p', 'drvfs', 'v9fs', 'virtiofs']);
+const isNetworkFs = (fstype: string): boolean => ['cifs', 'smb3', 'smbfs'].includes(fstype) || fstype.startsWith('nfs');
 const WINDOWS_FS_MESSAGE = "that's a Windows drive or Docker Desktop folder inside WSL. Use the C:\\… path instead.";
 // Windows re-parses the \\wsl$ Source: '\' splits segments, trailing dots/spaces are stripped.
 const SAFE_SEGMENT = /^[A-Za-z0-9._@+ -]+$/;
@@ -208,6 +209,9 @@ function wslContainmentMessage(real: string, mounts: WslMount[]): string | null 
   // wsl.conf automount root or fstab can put Windows filesystems anywhere.
   if (mounts.some((m) => WINDOWS_FS.has(m.fstype) && (posixInside(real, m.dir) || posixInside(m.dir, real)))) {
     return WINDOWS_FS_MESSAGE;
+  }
+  if (mounts.some((m) => isNetworkFs(m.fstype) && (posixInside(real, m.dir) || posixInside(m.dir, real)))) {
+    return "that folder is on a network share inside WSL and can't be mounted.";
   }
   if (WSL_SYSTEM.some((d) => posixInside(real, d))) return "that's a system folder and can't be mounted.";
   if (real === '/root' || /^\/home\/[^/]+$/.test(real)) {

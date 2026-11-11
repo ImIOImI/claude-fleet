@@ -531,6 +531,20 @@ describe('WSL sources (Windows)', () => {
     }
   });
 
+  it('refuses folders at, under, or containing a network-filesystem mount', async () => {
+    for (const fstype of ['cifs', 'smb3', 'smbfs', 'nfs', 'nfs4']) {
+      const mounts: WslMount[] = [{ dir: '/srv/share', fstype }];
+      for (const real of ['/srv/share', '/srv/share/x', '/srv']) {
+        await expect(validateExtraMounts(one('\\\\wsl$\\Ubuntu\\x'), winCtx(async () => real, mounts))).rejects.toThrow(
+          "Mount 1: that folder is on a network share inside WSL and can't be mounted."
+        );
+      }
+      await expect(
+        validateExtraMounts(one('\\\\wsl$\\Ubuntu\\x'), winCtx(async () => '/srv/sharex', mounts))
+      ).resolves.toHaveLength(1);
+    }
+  });
+
   describe('fleet root and userData inside the same distro', () => {
     const wslCtx = (fleetRoot: string, userData: string): MountCtx => ({
       ...winCtx(async (_d, p) => p),
