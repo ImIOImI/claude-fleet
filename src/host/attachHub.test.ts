@@ -246,22 +246,36 @@ describe('a viewer-supplied claude id', () => {
     expect([fresh.broker.created, fresh.claims]).toEqual([[], []]);
     expect(last(fresh.rec).json).toMatchObject({ id: 'n', ok: false, error: 'forbidden: unsupported session id' });
 
-    const unknown = rig(async () => ({ owned: false, published: false }));
+    const unknown = rig(async () => ({ owned: false, published: false, known: false }));
     await unknown.v.receive(jsonFrame(FrameType.CREATE, { id: 'n', args: [flag, V1.toUpperCase()] }));
     expect(unknown.asked).toEqual([V1]);
     expect(unknown.broker.created).toEqual([]);
 
-    const owned = rig(async () => ({ owned: true, published: false }));
+    const owned = rig(async () => ({ owned: true, published: false, known: true }));
     await owned.v.receive(jsonFrame(FrameType.CREATE, { id: 'n', args: [flag, V1.toUpperCase()] }));
     expect(owned.broker.created).toEqual([{ id: 'n', args: ['--settings', SETTINGS_ARG, flag, V1] }]);
     expect(owned.claims[0].sessionId).toBe(V1);
   });
 
   it.each([['--session-id'], ['--resume']])('%s: a published session id is refused, even a v4 one this host owns', async (flag) => {
-    const { broker, claims, rec, v } = rig(async () => ({ owned: true, published: true }));
+    const { broker, claims, rec, v } = rig(async () => ({ owned: true, published: true, known: true }));
     await v.receive(jsonFrame(FrameType.CREATE, { id: 'n', args: [flag, UUID] }));
     expect([broker.created, claims]).toEqual([[], []]);
     expect(last(rec).json).toMatchObject({ id: 'n', ok: false, error: 'forbidden: unsupported session id' });
+  });
+
+  it.each([['--resume'], ['--session-id']])('%s: a known session with no owner row starts with attribution but records no owner', async (flag) => {
+    const { broker, claims, rec, v } = rig(async () => ({ owned: false, published: false, known: true }));
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'n', args: [flag, UUID] }));
+    expect(broker.created).toEqual([{ id: 'n', args: ['--settings', SETTINGS_ARG, flag, UUID] }]);
+    expect(claims).toEqual([]);
+    expect(last(rec).json).toMatchObject({ id: 'n', ok: true });
+  });
+
+  it('a v4 id with no session row still records the owner', async () => {
+    const { claims, v } = rig(async () => ({ owned: false, published: false, known: false }));
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'n', args: ['--resume', UUID] }));
+    expect(claims.map((c) => c.sessionId)).toEqual([UUID]);
   });
 
   it('a failed id lookup refuses the CREATE', async () => {
@@ -272,7 +286,7 @@ describe('a viewer-supplied claude id', () => {
   });
 
   it('an id the host mints is never looked up', async () => {
-    const { asked, broker, v } = rig(async () => ({ owned: false, published: false }));
+    const { asked, broker, v } = rig(async () => ({ owned: false, published: false, known: false }));
     await v.receive(jsonFrame(FrameType.CREATE, { id: 'n' }));
     expect(asked).toEqual([]);
     expect(broker.created).toHaveLength(1);
