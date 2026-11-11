@@ -72,16 +72,36 @@ const turn = (sessionId: string, uuid: string, ts: string, content: string) =>
   JSON.stringify({ type: 'user', uuid, sessionId, timestamp: ts, message: { role: 'user', content } });
 
 describe('publish helpers', () => {
-  it('lists a workspace’s events after the cursor, from sessions started since, with attachments expanded', async () => {
+  it('lists a workspace’s events after the cursor in id order, with each session’s start and attachments expanded', async () => {
     await openTestState('pub-ev-');
     await db.ingestBatch(W, 'old', [turn('old', 'o1', '2026-11-01T00:00:00Z', 'before opt-in')]);
     await db.ingestBatch(W, 'new', [turn('new', 'n1', '2026-11-05T00:00:00Z', 'first'), turn('new', 'n2', '2026-11-05T00:01:00Z', 'second')]);
+    await db.ingestBatch(W, 'bare', [JSON.stringify({ type: 'user', uuid: 'b1', sessionId: 'bare', message: { role: 'user', content: 'no timestamp' } })]);
     await db.ingestBatch('01JC0000000000000000000006', 'x', [turn('x', 'x1', '2026-11-05T00:00:00Z', 'other workspace')]);
-    const since = Date.parse('2026-11-04T00:00:00Z');
-    const all = await db.publishableEvents(W, 0, since, 10);
-    expect(all.map((e) => [e.sessionId, JSON.parse(e.rawJsonl).message.content])).toEqual([['new', 'first'], ['new', 'second']]);
-    expect(await db.publishableEvents(W, all[0].id, since, 10)).toEqual([all[1]]);
-    expect(await db.publishableEvents(W, 0, since, 1)).toEqual([all[0]]);
+    const all = await db.publishableEvents(W, 0, 10);
+    expect(all.map((e) => [e.sessionId, JSON.parse(e.rawJsonl).message.content, e.startedAt])).toEqual([
+      ['old', 'before opt-in', Date.parse('2026-11-01T00:00:00Z')],
+      ['new', 'first', Date.parse('2026-11-05T00:00:00Z')],
+      ['new', 'second', Date.parse('2026-11-05T00:00:00Z')],
+      ['bare', 'no timestamp', null]
+    ]);
+    expect(await db.publishableEvents(W, all[1].id, 10)).toEqual(all.slice(2));
+    expect(await db.publishableEvents(W, 0, 1)).toEqual([all[0]]);
+    expect(await db.workspaceMaxEventId(W)).toBe(all[3].id);
+    expect(await db.workspaceMaxEventId('01JC0000000000000000000009')).toBe(0);
+    // An event without a sessions row still comes back, so the cursor can move past it.
+    await db.stateKysely().deleteFrom('sessions').where('id', '=', 'bare').execute();
+    expect((await db.publishableEvents(W, all[2].id, 10)).map((e) => [e.id, e.startedAt])).toEqual([[all[3].id, null]]);
+  });
+
+  it('drops every cursor towards a forgotten target', async () => {
+    await openTestState('pub-cur-to-');
+    const O = '01JC0000000000000000000006';
+    await db.setPublishCursor(W, 'R', 3);
+    await db.setPublishCursor(O, 'R', 4);
+    await db.setPublishCursor(W, 'R2', 5);
+    await db.deletePublishCursorsTo('R');
+    expect([await db.getPublishCursor(W, 'R'), await db.getPublishCursor(O, 'R'), await db.getPublishCursor(W, 'R2')]).toEqual([0, 0, 5]);
   });
 
   it('keeps cursors and withheld sessions per workspace, and purges them with it', async () => {

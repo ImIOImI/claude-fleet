@@ -163,10 +163,13 @@ import {
   setPublishCursor,
   withheldSessions,
   deletePublishCursor,
+  deletePublishCursorsTo,
+  workspaceMaxEventId,
 } from './db.js';
 import { publishOnWrite } from '../preload/publish.js';
 import { startPublisher, type Publisher } from './publish/publisher.js';
 import { publishSecretValues } from './publish/secretValues.js';
+import { revokePublishTarget } from './publish/revoke.js';
 import type { EmbedFn } from './vectors.js';
 import { foldPlanUsage, type PlanUsageFold } from './planUsage.js';
 import { logError, getLogPath, flushErrorLogSync } from './errorLog.js';
@@ -387,7 +390,9 @@ const remoteBackend = createRemoteBackend({
   login: () => remoteLogin(),
   listManifests: () => listWorkspaceManifests(),
   writeManifest: (spec) => writeWorkspaceManifest(spec),
-  deleteState: (id) => rm(workspaceStateDir(id), { recursive: true, force: true })
+  deleteState: (id) => rm(workspaceStateDir(id), { recursive: true, force: true }),
+  revokePublish: (id) =>
+    revokePublishTarget(id, { listManifests: listWorkspaceManifests, writeManifest: writeWorkspaceManifest, deleteCursorsTo: deletePublishCursorsTo })
 });
 const federated = createFederatedReader({
   sources: () => (MOCK_MODE ? [] : remoteBackend.sources()),
@@ -1612,7 +1617,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // Authoritative: an edit that removes all mounts writes undefined, clearing them.
       const mounts = await mountsFor(spec.kind, spec.id, (spec as { mounts?: unknown }).mounts, existing?.mounts);
       const remoteIds = new Set((await listWorkspaceManifests()).filter((m) => m.kind === 'remote').map((m) => m.id));
+      // Read before `since` is stamped: a row below it was read from disk before then, so its session started earlier.
+      const seed = await workspaceMaxEventId(spec.id);
       const publish = publishOnWrite(spec, existing?.publish, remoteIds, Date.now());
+      for (const id of publish?.to ?? []) if (!existing?.publish?.to.includes(id)) await setPublishCursor(spec.id, id, seed);
       // Merge OVER the existing manifest so fields the renderer doesn't manage
       // survive an edit. The edit form sends every form field (those win) but
       // omits `control` (committee grants, edited in the Committee rail #118)
@@ -2176,7 +2184,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     publisher = startPublisher({
       manifests: () => listWorkspaceManifests(),
       publish: (url, batch) => remoteBackend.clientFor(url).publish(batch),
-      secretValues: (spec) => publishSecretValues(spec, vault, () => identity.bearerToken()),
+      secretValues: (spec) => publishSecretValues(spec, vault, () => identity.bearerToken(), getEndpoint),
       events: publishableEvents,
       getCursor: getPublishCursor,
       setCursor: setPublishCursor,

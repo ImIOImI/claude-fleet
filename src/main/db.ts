@@ -1844,26 +1844,34 @@ export interface PublishableEvent {
   id: number;
   sessionId: string;
   rawJsonl: string;
+  /** The session's `started_at`; null when it has no timestamped line yet. */
+  startedAt: number | null;
 }
 
-/** `workspaceId`'s events after `afterId`, in id order, from sessions that started at or after `startedSince`. */
-export async function publishableEvents(workspaceId: string, afterId: number, startedSince: number, limit: number): Promise<PublishableEvent[]> {
+/** `workspaceId`'s events after `afterId`, in id order. The caller filters on `startedAt`, so old rows are passed over once. */
+export async function publishableEvents(workspaceId: string, afterId: number, limit: number): Promise<PublishableEvent[]> {
   const k = kyselyOrThrow();
   const rows = await k
     .selectFrom('events as e')
-    .innerJoin('sessions as s', 's.id', 'e.session_id')
+    .leftJoin('sessions as s', 's.id', 'e.session_id')
     .selectAll('e')
+    .select('s.started_at as session_started_at')
     .where('e.workspace_id', '=', workspaceId)
     .where('e.id', '>', afterId)
-    .where('s.started_at', '>=', startedSince)
     .orderBy('e.id', 'asc')
     .limit(limit)
     .execute();
   const blobs = await blobsFor(k, rows);
   return rows.map((r) => {
     const e = rowFromSql(r, blobs);
-    return { id: num(e.id), sessionId: e.sessionId, rawJsonl: e.rawJsonl };
+    return { id: num(e.id), sessionId: e.sessionId, rawJsonl: e.rawJsonl, startedAt: r.session_started_at == null ? null : num(r.session_started_at) };
   });
+}
+
+/** Highest event id `workspaceId` holds, 0 when none: a new publish target starts after it. */
+export async function workspaceMaxEventId(workspaceId: string): Promise<number> {
+  const r = await kyselyOrThrow().selectFrom('events').select((eb) => eb.fn.max('id').as('m')).where('workspace_id', '=', workspaceId).executeTakeFirst();
+  return r?.m == null ? 0 : num(r.m);
 }
 
 export async function getPublishCursor(source: string, target: string): Promise<number> {
@@ -1882,6 +1890,11 @@ export async function setPublishCursor(source: string, target: string, lastEvent
 
 export async function deletePublishCursor(source: string, target: string): Promise<void> {
   await kyselyOrThrow().deleteFrom('publish_cursors').where('source_workspace_id', '=', source).where('target_workspace_id', '=', target).execute();
+}
+
+/** A forgotten remote bookmark: no workspace keeps a cursor towards it. */
+export async function deletePublishCursorsTo(target: string): Promise<void> {
+  await kyselyOrThrow().deleteFrom('publish_cursors').where('target_workspace_id', '=', target).execute();
 }
 
 export async function withholdSession(workspaceId: string, sessionId: string): Promise<void> {

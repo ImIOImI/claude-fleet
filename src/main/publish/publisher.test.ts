@@ -13,10 +13,10 @@ const S1 = '11111111-2222-4333-8444-555555555555';
 const S2 = '22222222-2222-4333-8444-555555555555';
 const msg = (c: string) => JSON.stringify({ type: 'user', message: { content: c } });
 const local = (id: string, to: string[]): PublisherManifest =>
-  ({ id, kind: 'local', env: { plain: {}, secretKeys: [] }, publish: to.length ? { to, since: Object.fromEntries(to.map((t) => [t, 5_000])) } : undefined });
-const remote = (id: string): PublisherManifest =>
-  ({ id, kind: 'remote', env: { plain: {}, secretKeys: [] }, remote: { url: 'http://host', tier: 'read', login: 'ann', checkedAt: 1 } });
-interface Row { ws: string; id: number; sessionId: string; rawJsonl: string; started: number }
+  ({ id, kind: 'local', createdAt: 1, env: { plain: {}, secretKeys: [] }, publish: to.length ? { to, since: Object.fromEntries(to.map((t) => [t, 5_000])) } : undefined });
+const remote = (id: string, createdAt = 1, url = 'http://host'): PublisherManifest =>
+  ({ id, kind: 'remote', createdAt, env: { plain: {}, secretKeys: [] }, remote: { url, tier: 'read', login: 'ann', checkedAt: 1 } });
+interface Row { ws: string; id: number; sessionId: string; rawJsonl: string; started: number | null }
 const BASE_ROWS: Row[] = [
   { ws: SRC, id: 1, sessionId: S1, rawJsonl: msg('before opt-in'), started: 4_000 },
   { ws: SRC, id: 2, sessionId: S2, rawJsonl: msg(`uses vault-secret-1 and ghp_${'A'.repeat(36)}`), started: 6_000 },
@@ -26,48 +26,72 @@ const BASE_ROWS: Row[] = [
 
 function rig(o: {
   manifests?: PublisherManifest[]; publish?: PublisherDeps['publish']; secrets?: PublisherDeps['secretValues'];
-  withheld?: string[]; schedule?: PublisherDeps['schedule']; rows?: Row[];
+  withheld?: string[]; schedule?: PublisherDeps['schedule']; rows?: Row[]; page?: number; cursors?: Map<string, number>;
+  setCursor?: PublisherDeps['setCursor']; eventsError?: () => Error | null;
 } = {}) {
   const sent: Array<{ url: string; batch: PublishBatch<ScrubbedLine> }> = [];
-  const cursors = new Map<string, number>();
+  const cursors = o.cursors ?? new Map<string, number>();
+  let manifests = o.manifests ?? [local(SRC, [R1]), local(OFF, []), remote(R1)];
+  const withheld = new Set(o.withheld ?? []);
+  const reads: Array<{ after: number; n: number }> = [];
+  const timers: Array<() => void> = [];
   const logs: PublisherLog[] = [];
   const eventsFor: string[] = [];
   const rows = o.rows ?? [...BASE_ROWS];
   let t = 10_000;
-  const publish = vi.fn(o.publish ?? (async (url: string, batch: PublishBatch<ScrubbedLine>) => {
+  const publish = vi.fn(async (url: string, batch: PublishBatch<ScrubbedLine>) => {
+    const ack = o.publish ? await o.publish(url, batch) : { ok: true as const, accepted: batch.events.length, inserted: batch.events.length };
     sent.push({ url, batch });
-    return { ok: true as const, accepted: batch.events.length, inserted: batch.events.length };
-  }));
+    return ack;
+  });
   const p = startPublisher({
-    manifests: async () => o.manifests ?? [local(SRC, [R1]), local(OFF, []), remote(R1)],
+    manifests: async () => manifests,
     publish,
     secretValues: o.secrets ?? (async () => [{ key: 'API_TOKEN', value: 'vault-secret-1' }]),
-    events: async (ws, after, since, limit) => {
+    events: async (ws, after, limit) => {
       eventsFor.push(ws);
-      return rows.filter((r) => r.ws === ws && r.id > after && r.started >= since).slice(0, limit).map(({ id, sessionId, rawJsonl }) => ({ id, sessionId, rawJsonl }));
+      const err = o.eventsError?.();
+      if (err) throw err;
+      const out = rows.filter((r) => r.ws === ws && r.id > after).sort((a, b) => a.id - b.id).slice(0, limit)
+        .map(({ id, sessionId, rawJsonl, started }) => ({ id, sessionId, rawJsonl, startedAt: started }));
+      reads.push({ after, n: out.length });
+      return out;
     },
     getCursor: async (s, tg) => cursors.get(`${s}>${tg}`) ?? 0,
-    setCursor: async (s, tg, id) => void cursors.set(`${s}>${tg}`, id),
-    withheld: async () => new Set(o.withheld ?? []),
+    setCursor: o.setCursor ?? (async (s, tg, id) => void cursors.set(`${s}>${tg}`, id)),
+    withheld: async () => new Set(withheld),
     log: (e) => void logs.push(e),
     now: () => t,
-    schedule: o.schedule ?? (() => () => undefined)
-  });
-  return { p, sent, publish, cursors, logs, eventsFor, rows, advance: (ms: number) => void (t += ms) };
+    schedule: o.schedule ?? ((fn) => { timers.push(fn); return () => undefined; })
+  }, { page: o.page });
+  const texts = () => sent.flatMap((x) => x.batch.events.map((l) => JSON.parse(l).message.content as string));
+  return {
+    texts, p, sent, publish, cursors, logs, eventsFor, rows, reads, withheld,
+    setManifests: (m: PublisherManifest[]) => void (manifests = m),
+    advance: (ms: number) => void (t += ms),
+    /** One bump-triggered pass, run to completion. */
+    bumpNow: async (ws = SRC) => {
+      p.bump(ws);
+      timers.pop()!();
+      await new Promise((ok) => setTimeout(ok, 0));
+      await p.idle(ws);
+    }
+  };
 }
 
 describe('startPublisher', () => {
-  it('publishes only opted-in workspaces, only sessions started since, scrubbed, and advances the cursor', async () => {
+  it('publishes only opted-in workspaces, only sessions started since, scrubbed, and moves past what it read', async () => {
     const r = rig();
     await r.p.sweep();
     expect(r.eventsFor).toEqual([SRC]);
     expect(r.sent).toHaveLength(1);
     expect(r.sent[0].url).toBe('http://host');
     expect(r.sent[0].batch.sessionId).toBe(S2);
-    expect(r.sent[0].batch.events.map((l) => JSON.parse(l).message.content)).toEqual(['uses [redacted:API_TOKEN] and [redacted]', 'second']);
+    expect(r.texts()).toEqual(['uses [redacted:API_TOKEN] and [redacted]', 'second']);
     expect(JSON.stringify(r.sent)).not.toContain('vault-secret-1');
     expect(JSON.stringify(r.sent)).not.toContain('ghp_');
-    expect(r.cursors.get(`${SRC}>${R1}`)).toBe(3);
+    await r.bumpNow();
+    expect(r.reads.at(-1)).toEqual({ after: 3, n: 0 });
     await r.p.sweep();
     expect(r.sent).toHaveLength(1);
   });
@@ -87,18 +111,152 @@ describe('startPublisher', () => {
     expect(r.sent).toEqual([]);
   });
 
+  it('a bookmark forgotten and added again, or another host now claiming the id, gets nothing until the box is ticked again', async () => {
+    for (const url of ['http://host', 'http://other']) {
+      const r = rig({ manifests: [local(SRC, [R1]), remote(R1, 8_000, url)] });
+      await r.p.sweep();
+      await r.bumpNow();
+      expect(r.eventsFor).toEqual([]);
+      expect(r.sent).toEqual([]);
+      r.setManifests([{ ...local(SRC, [R1]), publish: { to: [R1], since: { [R1]: 9_000 } } }, remote(R1, 8_000, url)]);
+      r.rows.push({ ws: SRC, id: 7, sessionId: S1, rawJsonl: msg('after re-tick'), started: 9_500 });
+      await r.p.sweep();
+      expect(r.texts()).toEqual(['after re-tick']);
+      expect(r.sent[0].url).toBe(url);
+    }
+  });
+
+  it('a bookmark re-pointed to a new address keeps publishing there', async () => {
+    const r = rig({ manifests: [local(SRC, [R1]), remote(R1, 1, 'http://moved')] });
+    await r.p.sweep();
+    expect(r.sent.map((x) => x.url)).toEqual(['http://moved']);
+  });
+
+  it('passes over history from before the opt-in once, then reads only new rows', async () => {
+    const old = Array.from({ length: 1000 }, (_, i): Row => ({ ws: SRC, id: i + 1, sessionId: S1, rawJsonl: msg(`old ${i}`), started: 4_000 }));
+    const r = rig({ rows: old });
+    await r.bumpNow();
+    expect(r.reads).toEqual([{ after: 0, n: 500 }, { after: 500, n: 500 }, { after: 1000, n: 0 }]);
+    await r.bumpNow();
+    expect(r.reads.slice(3)).toEqual([{ after: 1000, n: 0 }]);
+    expect(r.sent).toEqual([]);
+  });
+
+  it('never sends the session in progress at opt-in, and doesn’t re-read it', async () => {
+    const r = rig({ rows: [BASE_ROWS[0]] });
+    for (let id = 2; id <= 4; id++) {
+      r.rows.push({ ws: SRC, id, sessionId: S1, rawJsonl: msg(`still going ${id}`), started: 4_000 });
+      await r.bumpNow();
+    }
+    expect(r.reads).toEqual([{ after: 0, n: 2 }, { after: 2, n: 1 }, { after: 3, n: 1 }]);
+    expect(r.sent).toEqual([]);
+  });
+
   it('never sends a withheld session but moves past it', async () => {
     const r = rig({ withheld: [S2] });
     await r.p.sweep();
     expect(r.sent).toEqual([]);
-    expect(r.cursors.get(`${SRC}>${R1}`)).toBe(3);
+    await r.bumpNow();
+    expect(r.reads.at(-1)).toEqual({ after: 3, n: 0 });
   });
 
-  it('skips a batch the host refuses as malformed or conflicting', async () => {
+  it('re-checks withheld before every batch, so a session withheld mid-page is not sent', async () => {
+    const S3 = '33333333-2222-4333-8444-555555555555';
+    const rows: Row[] = [...BASE_ROWS, { ws: SRC, id: 5, sessionId: S3, rawJsonl: msg('third'), started: 6_000 }];
+    let calls = 0;
+    const r = rig({ rows, publish: async (_u, b) => { if (calls++ === 0) r.withheld.add(S3); return { ok: true, accepted: b.events.length, inserted: 0 }; } });
+    await r.p.sweep();
+    expect(r.sent.map((x) => x.batch.sessionId)).toEqual([S2]);
+  });
+
+  it('idle waits for a running pass', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((ok) => (release = ok));
+    const r = rig({ publish: async (_u, b) => { await gate; return { ok: true, accepted: b.events.length, inserted: 0 }; } });
+    const swept = r.p.sweep();
+    await vi.waitFor(() => expect(r.publish).toHaveBeenCalledTimes(1));
+    let idle = false;
+    const waiting = r.p.idle(SRC).then(() => void (idle = true));
+    await new Promise((ok) => setTimeout(ok, 5));
+    expect(idle).toBe(false);
+    await r.p.idle(OFF);
+    release();
+    await Promise.all([swept, waiting]);
+    expect(r.sent).toHaveLength(1);
+  });
+
+  it('opting out mid-backlog stops the pass and leaves the cursor deleted', async () => {
+    const rows = Array.from({ length: 5 }, (_, i): Row => ({ ws: SRC, id: i + 1, sessionId: S2, rawJsonl: msg(`n${i}`), started: 6_000 }));
+    let r!: ReturnType<typeof rig>;
+    r = rig({ rows, page: 1, publish: async (_u, b) => { r.setManifests([local(SRC, []), remote(R1)]); r.cursors.delete(`${SRC}>${R1}`); return { ok: true, accepted: b.events.length, inserted: 0 }; } });
+    await r.p.sweep();
+    expect(r.publish).toHaveBeenCalledTimes(1);
+    expect(r.cursors.has(`${SRC}>${R1}`)).toBe(false);
+  });
+
+  it('a pass whose target was turned off during its last page does not write the cursor back', async () => {
+    let r!: ReturnType<typeof rig>;
+    r = rig({ publish: async (_u, b) => { r.setManifests([local(SRC, []), remote(R1)]); r.cursors.delete(`${SRC}>${R1}`); return { ok: true, accepted: b.events.length, inserted: 0 }; } });
+    await r.p.sweep();
+    expect(r.publish).toHaveBeenCalledTimes(1);
+    expect(r.cursors.has(`${SRC}>${R1}`)).toBe(false);
+  });
+
+  it('a sweep re-reads its window and publishes a row that committed late with a lower id', async () => {
+    const r = rig({ rows: [{ ws: SRC, id: 2, sessionId: S2, rawJsonl: msg('two'), started: 6_000 }, { ws: SRC, id: 4, sessionId: S2, rawJsonl: msg('four'), started: 6_000 }] });
+    await r.p.sweep();
+    expect(r.texts()).toEqual(['two', 'four']);
+    r.rows.push({ ws: SRC, id: 3, sessionId: S2, rawJsonl: msg('three, late'), started: 6_000 });
+    await r.bumpNow();
+    expect(r.texts()).toEqual(['two', 'four']);
+    await r.p.sweep();
+    expect(r.texts()).toEqual(['two', 'four', 'three, late']);
+    await r.p.sweep();
+    expect(r.sent).toHaveLength(2);
+  });
+
+  it('the window slides: a sweep re-reads from the live position two sweeps back, which is also the durable floor', async () => {
+    const r = rig({ rows: [] });
+    const add = (id: number) => r.rows.push({ ws: SRC, id, sessionId: S2, rawJsonl: msg(`r${id}`), started: 6_000 });
+    const floors: number[] = [];
+    for (const id of [1, 2, 3, 4]) {
+      add(id);
+      await r.bumpNow();
+      await r.p.sweep();
+      floors.push(r.cursors.get(`${SRC}>${R1}`)!);
+    }
+    expect(floors).toEqual([0, 1, 2, 3]);
+    expect(r.reads.filter((_, i) => i % 2 === 1).map((x) => x.after)).toEqual([0, 0, 1, 2]);
+    expect(r.texts()).toEqual(['r1', 'r2', 'r3', 'r4']);
+  });
+
+  it('after a restart re-sends from the durable floor; the re-sends move nothing backwards and a late row still lands', async () => {
+    const cursors = new Map<string, number>();
+    const first = rig({ cursors, rows: [] });
+    const add = (rows: Row[], id: number, text = `r${id}`) => rows.push({ ws: SRC, id, sessionId: S2, rawJsonl: msg(text), started: 6_000 });
+    for (const id of [1, 2, 3]) { add(first.rows, id); await first.p.sweep(); }
+    first.p.stop();
+    expect(cursors.get(`${SRC}>${R1}`)).toBe(1);
+    const again = rig({ cursors, rows: [...first.rows], publish: async (_u, b) => ({ ok: true, accepted: b.events.length, inserted: 0 }) });
+    add(again.rows, 6);
+    await again.bumpNow();
+    expect(again.texts()).toEqual(['r2', 'r3', 'r6']);
+    expect(cursors.get(`${SRC}>${R1}`)).toBe(1);
+    add(again.rows, 5, 'late');
+    await again.bumpNow();
+    expect(again.reads.at(-1)).toEqual({ after: 6, n: 0 });
+    await again.p.sweep();
+    expect(again.texts()).toEqual(['r2', 'r3', 'r6', 'late']);
+  });
+
+  it('skips a batch the host refuses as malformed or conflicting, once', async () => {
     for (const status of [400, 409, 413]) {
       const r = rig({ publish: async () => { throw new RemoteError('protocol', 'conflict', status); } });
       await r.p.sweep();
-      expect(r.cursors.get(`${SRC}>${R1}`)).toBe(3);
+      await r.bumpNow();
+      expect(r.reads.at(-1)).toEqual({ after: 3, n: 0 });
+      await r.p.sweep();
+      expect(r.publish).toHaveBeenCalledTimes(1);
       expect(r.logs.map((l) => l.type)).toEqual(['publish-batch-refused']);
     }
   });
@@ -110,17 +268,17 @@ describe('startPublisher', () => {
       { ws: SRC, id: 5, sessionId: S2, rawJsonl: msg('after'), started: 6_000 }];
     const r = rig({ rows });
     await r.p.sweep();
-    expect(r.sent.flatMap((s) => s.batch.events.map((l) => JSON.parse(l).message.content))).toEqual(['uses [redacted:API_TOKEN] and [redacted]', 'after']);
-    expect(r.cursors.get(`${SRC}>${R1}`)).toBe(5);
+    expect(r.texts()).toEqual(['uses [redacted:API_TOKEN] and [redacted]', 'after']);
     expect(r.logs.map((l) => l.type)).toEqual(['publish-line-skipped']);
     await r.p.sweep();
+    await r.bumpNow();
+    expect(r.reads.at(-1)).toEqual({ after: 5, n: 0 });
     expect(r.logs).toHaveLength(1);
   });
 
-  it('backs off on an unreachable host, honouring Retry-After, and keeps the cursor', async () => {
+  it('backs off on an unreachable host, honouring Retry-After, and keeps its place', async () => {
     const r = rig({ publish: async () => { throw new RemoteError('unreachable', 'busy', 429, 20_000); } });
     await r.p.sweep();
-    expect(r.cursors.get(`${SRC}>${R1}`)).toBeUndefined();
     expect(r.logs.map((l) => l.type)).toEqual(['publish-failed']);
     await r.p.sweep();
     expect(r.publish).toHaveBeenCalledTimes(1);
@@ -130,6 +288,7 @@ describe('startPublisher', () => {
     r.advance(1);
     await r.p.sweep();
     expect(r.publish).toHaveBeenCalledTimes(2);
+    expect(r.publish.mock.calls[1][1].events).toEqual(r.publish.mock.calls[0][1].events);
     expect(r.logs.map((l) => l.type)).toEqual(['publish-failed']);
   });
 
@@ -152,7 +311,24 @@ describe('startPublisher', () => {
     }
     failing = false;
     await r.p.sweep();
-    expect(r.cursors.get(`${SRC}>${R1}`)).toBe(3);
+    expect(r.texts()).toEqual(['uses [redacted:API_TOKEN] and [redacted]', 'second']);
+    expect(r.logs.map((l) => l.type)).toEqual(['publish-failed', 'publish-recovered']);
+  });
+
+  it('a store error climbs the same backoff ladder', async () => {
+    let failing = true;
+    const r = rig({ eventsError: () => (failing ? new Error('database is locked') : null) });
+    for (const ms of PUBLISH_BACKOFF_MS) {
+      const reads = r.eventsFor.length;
+      await r.p.sweep();
+      r.advance(ms - 1);
+      await r.p.sweep();
+      expect(r.eventsFor.length).toBe(reads + 1);
+      r.advance(1);
+    }
+    failing = false;
+    await r.p.sweep();
+    expect(r.sent).toHaveLength(1);
     expect(r.logs.map((l) => l.type)).toEqual(['publish-failed', 'publish-recovered']);
   });
 
@@ -166,8 +342,22 @@ describe('startPublisher', () => {
       r.advance(1);
       await r.p.sweep();
       expect(r.publish).toHaveBeenCalledTimes(2);
-      expect(r.cursors.get(`${SRC}>${R1}`)).toBeUndefined();
+      expect(r.sent).toEqual([]);
     }
+  });
+
+  it('a signed-out wait does not climb the backoff ladder', async () => {
+    const errors = [new RemoteError('not-signed-in', 'sign in'), new RemoteError('not-signed-in', 'sign in'), new RemoteError('unreachable', 'down', 503)];
+    const r = rig({ publish: async () => { throw errors.shift() ?? new Error('unexpected'); } });
+    await r.p.sweep();
+    r.advance(PUBLISH_SIGNED_OUT_MS);
+    await r.p.sweep();
+    r.advance(PUBLISH_SIGNED_OUT_MS);
+    await r.p.sweep();
+    expect(r.publish).toHaveBeenCalledTimes(3);
+    r.advance(PUBLISH_BACKOFF_MS[0]);
+    await r.p.sweep();
+    expect(r.publish).toHaveBeenCalledTimes(4);
   });
 
   it('sends nothing when the workspace’s secrets can’t be read, and retries in five minutes', async () => {
@@ -219,7 +409,7 @@ describe('startPublisher', () => {
     timers.at(-1)!();
     release();
     await first;
-    await vi.waitFor(() => expect(r.cursors.get(`${SRC}>${R1}`)).toBe(9));
+    await vi.waitFor(() => expect(r.texts()).toContain('late'));
     expect(r.publish).toHaveBeenCalledTimes(2);
   });
 

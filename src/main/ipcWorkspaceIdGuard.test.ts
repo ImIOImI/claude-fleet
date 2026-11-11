@@ -52,12 +52,19 @@ describe('remote bookmark wiring', () => {
     expect(write).toMatch(/remote: undefined/);
   });
 
-  it('workspace:writeManifest derives publish in main and drops cursors of removed targets', () => {
+  it('workspace:writeManifest derives publish in main, seeds new targets past existing history, and drops cursors of removed targets', () => {
     const write = handlerSource('workspace:writeManifest');
     expect(write).toMatch(/const publish = publishOnWrite\(spec, existing\?\.publish, remoteIds, Date\.now\(\)\)/);
     expect(write).toMatch(/\.\.\.spec,\s*workspaceRoot,\s*launcher: incomingLauncher,\s*mounts,\s*publish,/);
     expect(write).toMatch(/deletePublishCursor\(spec\.id, id\)/);
+    // The seed is read before `since` is stamped, and written for newly added targets only.
+    expect(write).toMatch(/const seed = await workspaceMaxEventId\(spec\.id\);\s*const publish = publishOnWrite\(/);
+    expect(write).toMatch(/if \(!existing\?\.publish\?\.to\.includes\(id\)\) await setPublishCursor\(spec\.id, id, seed\)/);
     expect(handlerSource('workspace:create')).toMatch(/publish: prior\?\.publish,/);
+  });
+
+  it('forgetting a remote bookmark revokes publishing to it', () => {
+    expect(src).toMatch(/revokePublish: \(id\) =>\s*revokePublishTarget\(id, \{ listManifests: listWorkspaceManifests, writeManifest: writeWorkspaceManifest, deleteCursorsTo: deletePublishCursorsTo \}\)/);
   });
 
   it('workspace:remove routes through resolveRemoveKind', () => {

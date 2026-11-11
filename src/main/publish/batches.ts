@@ -6,6 +6,7 @@ export interface PublishRow {
   id: number;
   sessionId: string;
   rawJsonl: string;
+  startedAt: number | null;
 }
 
 /** `batch` null: nothing to send, only move the cursor to `lastId`. */
@@ -20,6 +21,8 @@ export function planBatches(
   o: {
     scrub: (line: string) => ScrubbedLine;
     withheld: ReadonlySet<string>;
+    /** Sessions that started earlier, or have no start yet, aren't published (D104). */
+    since: number;
     maxBody?: number;
     maxLines?: number;
     onOversize?: (row: PublishRow) => void;
@@ -41,7 +44,7 @@ export function planBatches(
     else out.push({ batch: null, lastId: id });
   };
   for (const row of rows) {
-    if (o.withheld.has(row.sessionId) || !SESSION_UUID_RE.test(row.sessionId)) {
+    if (o.withheld.has(row.sessionId) || !SESSION_UUID_RE.test(row.sessionId) || row.startedAt === null || row.startedAt < o.since) {
       skip(row.id);
       continue;
     }
