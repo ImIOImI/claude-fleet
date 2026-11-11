@@ -2,7 +2,6 @@ import { execFile } from 'node:child_process';
 import { realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, posix, relative, sep } from 'node:path';
-import { promisify } from 'node:util';
 import {
   containerPathError,
   defaultContainerPath,
@@ -17,8 +16,19 @@ export interface MountCtx {
   fleetRoot: string;
   docker: DockerDirs;
   platform?: NodeJS.Platform;
-  /** Canonical in-distro path of an existing directory, else null. Defaults to wslRealDir. */
-  wslRealDir?: (distro: string, linuxPath: string) => Promise<string | null>;
+  /** Defaults to wslRealDir. */
+  wslRealDir?: (distro: string, linuxPath: string) => Promise<WslResolved | null>;
+}
+
+export interface WslMount {
+  dir: string;
+  fstype: string;
+}
+
+/** Canonical in-distro path of an existing directory plus the distro's mount table. */
+export interface WslResolved {
+  real: string;
+  mounts: WslMount[];
 }
 
 /** Realpaths; see dockerSocketDirs. */
@@ -31,12 +41,15 @@ export interface DockerDirs {
 
 const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/i;
 
-function inside(child: string, parent: string): boolean {
-  const rel = relative(parent, child);
+type PathOps = Pick<typeof posix, 'relative' | 'isAbsolute' | 'sep'>;
+const hostOps: PathOps = { relative, isAbsolute, sep };
+
+function inside(child: string, parent: string, ops: PathOps = hostOps): boolean {
+  const rel = ops.relative(parent, child);
   if (rel === '') return true;
-  if (isAbsolute(rel)) return false;
+  if (ops.isAbsolute(rel)) return false;
   // Only '..' or a '..'+sep prefix means outside; a name like '..x' is a real child.
-  return rel !== '..' && !rel.startsWith(`..${sep}`);
+  return rel !== '..' && !rel.startsWith(`..${ops.sep}`);
 }
 
 async function realDir(p: string): Promise<string | null> {
@@ -89,20 +102,34 @@ class HostPathProblem extends Error {
   }
 }
 
-function containmentMessage(real: string, ctx: MountCtx, userData: string, fleetRoot: string): string | null {
-  if (inside(real, userData) || inside(userData, real)) {
+// A null userData/fleetRoot lives where `real` can't reach (e.g. a different WSL distro).
+function appDataMessage(
+  real: string,
+  ownId: string,
+  userData: string | null,
+  fleetRoot: string | null,
+  ops: PathOps = hostOps
+): string | null {
+  if (userData !== null && (inside(real, userData, ops) || inside(userData, real, ops))) {
     return "that folder holds the app's private data and can't be mounted.";
   }
-  if (inside(real, fleetRoot)) {
-    const first = relative(fleetRoot, real).split(sep)[0] ?? '';
-    if (first.toLowerCase() === 'shared' || first.toLowerCase() === ctx.ownId.toLowerCase()) return null;
+  if (fleetRoot === null) return null;
+  if (inside(real, fleetRoot, ops)) {
+    const first = ops.relative(fleetRoot, real).split(ops.sep)[0] ?? '';
+    if (first.toLowerCase() === 'shared' || first.toLowerCase() === ownId.toLowerCase()) return null;
     if (ULID_RE.test(first)) return "that folder is another workspace's private folder.";
     return "that folder is inside the fleet folder; only the shared folder and this workspace's own folder can be mounted.";
   }
-  if (inside(fleetRoot, real)) {
+  if (inside(fleetRoot, real, ops)) {
     // Mounting an ancestor of the fleet root would expose every workspace's private folder.
     return "that folder contains other workspaces' private folders.";
   }
+  return null;
+}
+
+function containmentMessage(real: string, ctx: MountCtx, userData: string, fleetRoot: string): string | null {
+  const app = appDataMessage(real, ctx.ownId, userData, fleetRoot);
+  if (app) return app;
   if (
     ctx.docker.socketDirs.some((d) => inside(d, real)) ||
     ctx.docker.dockerConfigDirs.some((d) => inside(real, d) || inside(d, real))
@@ -116,32 +143,71 @@ const UNC_MESSAGE =
   "network paths (\\\\server\\share) can't be mounted. Use a local drive or a WSL path (\\\\wsl$\\<distro>\\…).";
 const isUnc = (p: string): boolean => p.startsWith('\\\\') || p.startsWith('//');
 
-const WSL_DISTRO_RE = /^[A-Za-z0-9._-]+$/;
-const run = promisify(execFile);
+const WSL_DISTRO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const MOUNTS_MARKER = '\n--MOUNTS--\n';
+// Fixed script; the path only ever arrives as $1. test -d follows symlinks like realpath does.
+// No $(…) capture: it would strip trailing newlines from the printed path.
+const WSL_RESOLVE_SCRIPT = [
+  'test -d "$1" || exit 1',
+  'realpath -e -- "$1" 2>/dev/null || { test -e "$1" && readlink -f -- "$1"; } || exit 1',
+  "printf '%s\\n' '--MOUNTS--'",
+  'cat /proc/self/mounts'
+].join('\n');
+
+export type ExecRunner = (file: string, args: string[]) => Promise<string>;
+
+const runWsl: ExecRunner = (file, args) =>
+  new Promise((resolve, reject) => {
+    execFile(file, args, { windowsHide: true, timeout: 15_000 }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+  });
+
+const decodeMountField = (f: string): string => f.replace(/\\([0-7]{3})/g, (_, o: string) => String.fromCharCode(parseInt(o, 8)));
 
 // Resolved inside the distro: Windows realpath over 9P doesn't follow Linux symlinks.
-export async function wslRealDir(distro: string, linuxPath: string): Promise<string | null> {
-  const opts = { windowsHide: true, timeout: 15_000 };
+export async function wslRealDir(distro: string, linuxPath: string, exec: ExecRunner = runWsl): Promise<WslResolved | null> {
+  let out: string;
   try {
-    const { stdout } = await run('wsl.exe', ['-d', distro, '--exec', 'realpath', '-e', '--', linuxPath], opts);
-    const real = stdout.trim();
-    if (!real.startsWith('/')) return null;
-    await run('wsl.exe', ['-d', distro, '--exec', 'test', '-d', real], opts);
-    return real;
+    out = await exec('wsl.exe', ['-d', distro, '--exec', 'sh', '-c', WSL_RESOLVE_SCRIPT, 'sh', linuxPath]);
   } catch {
     return null;
   }
+  // Last marker: /proc/self/mounts escapes newlines, so it can't contain one; the path can.
+  const at = out.lastIndexOf(MOUNTS_MARKER);
+  if (at < 0) return null;
+  const real = out.slice(0, at);
+  if (!real.startsWith('/')) return null;
+  const mounts: WslMount[] = [];
+  for (const line of out.slice(at + MOUNTS_MARKER.length).split('\n')) {
+    const [, dir, fstype] = line.split(' ');
+    if (dir && fstype) mounts.push({ dir: decodeMountField(dir), fstype });
+  }
+  return { real, mounts };
 }
 
+const posixOps: PathOps = posix;
 const posixInside = (child: string, parent: string): boolean =>
   child === parent || child.startsWith(parent === '/' ? '/' : `${parent}/`);
 const WSL_SYSTEM = ['/proc', '/sys', '/dev', '/run', '/var/run'];
 const WSL_GUARDED = [...WSL_SYSTEM, '/mnt', '/home', '/root'];
+const WINDOWS_FS = new Set(['9p', 'drvfs', 'v9fs', 'virtiofs']);
+const WINDOWS_FS_MESSAGE = "that's a Windows drive or Docker Desktop folder inside WSL. Use the C:\\… path instead.";
+// Windows re-parses the \\wsl$ Source: '\' splits segments, trailing dots/spaces are stripped.
+const SAFE_SEGMENT = /^[A-Za-z0-9._@+ -]+$/;
 
-function wslContainmentMessage(real: string): string | null {
-  // drvfs Windows drives and Docker Desktop's /mnt/wsl integration.
-  if (posixInside(real, '/mnt')) {
-    return "that's a Windows drive or Docker Desktop folder inside WSL. Use the C:\\… path instead.";
+function windowsSafeLinuxPath(real: string): boolean {
+  if (real === '/') return true;
+  return real
+    .slice(1)
+    .split('/')
+    .every((seg) => SAFE_SEGMENT.test(seg) && seg !== '.' && seg !== '..' && !/[. ]$/.test(seg));
+}
+
+function wslContainmentMessage(real: string, mounts: WslMount[]): string | null {
+  // Default drvfs automount root and Docker Desktop's /mnt/wsl integration.
+  if (posixInside(real, '/mnt')) return WINDOWS_FS_MESSAGE;
+  // wsl.conf automount root or fstab can put Windows filesystems anywhere.
+  if (mounts.some((m) => WINDOWS_FS.has(m.fstype) && (posixInside(real, m.dir) || posixInside(m.dir, real)))) {
+    return WINDOWS_FS_MESSAGE;
   }
   if (WSL_SYSTEM.some((d) => posixInside(real, d))) return "that's a system folder and can't be mounted.";
   if (real === '/root' || /^\/home\/[^/]+$/.test(real)) {
@@ -152,15 +218,49 @@ function wslContainmentMessage(real: string): string | null {
   return null;
 }
 
+type Resolver = NonNullable<MountCtx['wslRealDir']>;
+
+// In-distro path of an app folder in the same distro; null when it lives elsewhere.
+async function sameDistroPath(appPath: string, distro: string, resolve: Resolver): Promise<string | null> {
+  const wsl = uncToLinuxPath(appPath);
+  if (!wsl || wsl.distro.toLowerCase() !== distro.toLowerCase()) return null;
+  const linux = posix.normalize(wsl.path);
+  return (await resolve(wsl.distro, linux))?.real ?? linux;
+}
+
 // Returns the Docker bind Source: \\wsl$\<distro>\… (the only form verified with Docker Desktop).
-async function checkWslPath(hostPath: string, wsl: { distro: string; path: string }, ctx: MountCtx): Promise<string> {
+async function checkWslPath(
+  hostPath: string,
+  wsl: { distro: string; path: string },
+  ctx: MountCtx,
+  userData: string,
+  fleetRoot: string
+): Promise<string> {
   if (!WSL_DISTRO_RE.test(wsl.distro)) {
     throw new HostPathProblem('blocked', `"${wsl.distro}" isn't a WSL distro name that can be mounted.`);
   }
-  const resolved = await (ctx.wslRealDir ?? wslRealDir)(wsl.distro, posix.normalize(wsl.path));
+  if (/^docker-desktop/i.test(wsl.distro)) {
+    throw new HostPathProblem('blocked', "that's Docker Desktop's own WSL distro and can't be mounted.");
+  }
+  const resolve: Resolver = ctx.wslRealDir ?? ((d, p) => wslRealDir(d, p));
+  const resolved = await resolve(wsl.distro, posix.normalize(wsl.path));
   if (!resolved) throw new HostPathProblem('not-found', `${hostPath} doesn't exist or isn't a folder.`);
-  const real = posix.normalize(resolved);
-  const blocked = wslContainmentMessage(real);
+  const { real, mounts } = resolved;
+  if (!real.startsWith('/') || !windowsSafeLinuxPath(real)) {
+    throw new HostPathProblem(
+      'blocked',
+      "that folder's path has characters Windows can't pass to Docker safely. Rename it or pick another folder."
+    );
+  }
+  const blocked =
+    wslContainmentMessage(real, mounts) ??
+    appDataMessage(
+      real,
+      ctx.ownId,
+      await sameDistroPath(userData, wsl.distro, resolve),
+      await sameDistroPath(fleetRoot, wsl.distro, resolve),
+      posixOps
+    );
   if (blocked) throw new HostPathProblem('blocked', blocked);
   return `\\\\wsl$\\${wsl.distro}${real.replace(/\//g, '\\')}`;
 }
@@ -171,7 +271,7 @@ async function checkHostPath(hostPath: string, ctx: MountCtx, userData: string, 
   if (isUnc(hostPath)) {
     const wsl = (ctx.platform ?? process.platform) === 'win32' ? uncToLinuxPath(hostPath) : null;
     if (!wsl) throw new HostPathProblem('blocked', UNC_MESSAGE);
-    return checkWslPath(hostPath, wsl, ctx);
+    return checkWslPath(hostPath, wsl, ctx, userData, fleetRoot);
   }
   if (!isAbsolute(hostPath)) throw new HostPathProblem('not-absolute', `${hostPath} must be a full path.`);
   const real = await realDir(hostPath);
