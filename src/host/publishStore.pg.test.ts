@@ -9,6 +9,7 @@ import { makeScrubber, type ScrubbedLine } from '../main/publish/scrub.js';
 import { EMBED_DIM } from '../main/vectors.js';
 import { HOST_TRACK } from './hostSchema.js';
 import { startHostIndexer } from './hostIndexer.js';
+import { hostUsageRecorder } from './hostMcp.js';
 import { createLogger } from './log.js';
 import { leaseFence, LeaseLostError } from './pgLease.js';
 import { PublishConflictError, publishStore } from './publishStore.js';
@@ -146,5 +147,21 @@ describe.skipIf(!isPg)('publishStore', () => {
     await again.backfill();
     await vi.waitFor(async () => expect(await embedded(later.sessionId)).toEqual([{ workspace_id: later.partitionId, text: 'backfilled words' }]));
     await again.stop(5_000);
+  });
+
+  it('hostUsageRecorder stamps the session’s workspace as origin; only marks on published sessions count', async () => {
+    const s = await rig();
+    const pub = await s.ingest(ANN, SRC, SID, [turn('u1', 'user', 'x')]);
+    await db.stateKysely().insertInto('sessions').values({
+      id: 'own-1', workspace_id: HOSTED, cwd: null, started_at: 1, last_active_at: 1, ai_title: null, first_user_message: null, user_set_name: null
+    }).execute();
+    await hostUsageRecorder({ workspaceId: HOSTED, sessionId: pub.sessionId, kind: 'marked-useful' });
+    await hostUsageRecorder({ workspaceId: HOSTED, sessionId: 'own-1', kind: 'marked-useful' });
+    await hostUsageRecorder({ workspaceId: HOSTED, sessionId: 'gone', kind: 'marked-useful' });
+    const origins = await db.stateKysely().selectFrom('usage_events').select(['session_id', 'origin']).orderBy('id').execute();
+    expect(origins).toEqual([
+      { session_id: pub.sessionId, origin: pub.partitionId }, { session_id: 'own-1', origin: HOSTED }, { session_id: 'gone', origin: null }
+    ]);
+    expect(await db.usefulMarkCounts([pub.sessionId, 'own-1', 'gone'])).toEqual(new Map([[pub.sessionId, 1]]));
   });
 });

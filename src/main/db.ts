@@ -1800,6 +1800,7 @@ export async function recordUsageEvent(e: {
   sessionId?: string | null;
   kind: 'search-impression' | 'clickthrough' | 'marked-useful' | 'resumed';
   detail?: Record<string, unknown>;
+  origin?: string | null;
 }): Promise<void> {
   await kyselyOrThrow()
     .insertInto('usage_events')
@@ -1809,8 +1810,27 @@ export async function recordUsageEvent(e: {
       session_id: e.sessionId ?? null,
       kind: e.kind,
       detail: e.detail ? JSON.stringify(e.detail) : null,
+      origin: e.origin ?? null,
     })
     .execute();
+}
+
+/** marked-useful marks that count (SPEC §7 *Usefulness signals*): not a workspace marking its own session, and not one of unknown origin. */
+export async function usefulMarkCounts(sessionIds: readonly string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  for (const part of chunked([...sessionIds], 500)) {
+    const rows = await kyselyOrThrow()
+      .selectFrom('usage_events')
+      .select((eb) => ['session_id', eb.fn.countAll().as('n')])
+      .where('kind', '=', 'marked-useful')
+      .where('session_id', 'in', part)
+      .where('origin', 'is not', null)
+      .whereRef('origin', '<>', 'workspace_id')
+      .groupBy('session_id')
+      .execute();
+    for (const r of rows) if (r.session_id) out.set(r.session_id, num(r.n));
+  }
+  return out;
 }
 
 /** True once `claudeSessionId` has ingested ≥1 transcript line (a sessions

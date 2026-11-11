@@ -36,6 +36,7 @@ export default defineConfig({
       'src/main/dbIngestBatch.test.ts',
       'src/main/dbPgConcurrency.test.ts',
       'src/main/dbPublish.test.ts',
+      'src/main/dbUsefulMarks.test.ts',
       'src/main/dbPurgeWorkspace.test.ts',
       'src/main/dbReadCache.test.ts',
       'src/main/dbReadCharacterization.test.ts',

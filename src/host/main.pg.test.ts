@@ -372,6 +372,21 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
         const r = await t!.pool.query(`SELECT workspace_id, text FROM ${t!.schema}.embeddings WHERE session_id = $1`, [publishedSessionId(part, SID)]);
         expect(r.rows).toEqual([{ workspace_id: part, text: 'published phrase' }]);
       }, { timeout: 10_000 });
+      const pubSid = publishedSessionId(part, SID);
+      await mcpTools(a.dir);
+      const call = (id: number, name: string, args: object) => ({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } });
+      const [sessions, found, marked] = await rpc(mcpSock(a.dir), [
+        call(1, 'list_sessions', {}), call(2, 'search_transcripts', { query: 'published phrase' }), call(3, 'mark_useful', { sessionId: pubSid })
+      ]).then((ms) => [1, 2, 3].map((id) => ms.find((m) => m.id === id)!));
+      expect(JSON.parse(sessions.result.content[0].text).map((x: { id: string; workspace_id: string }) => [x.id, x.workspace_id]).sort())
+        .toEqual([[SID, ID], [pubSid, part]].sort());
+      expect(JSON.parse(found.result.content[0].text)).toEqual(expect.arrayContaining([expect.objectContaining({ sessionId: pubSid, workspaceId: part })]));
+      expect(JSON.parse(marked.result.content[0].text)).toEqual({ ok: true });
+      const marks = await t!.pool.query(`SELECT workspace_id, session_id, origin FROM ${t!.schema}.usage_events WHERE kind = 'marked-useful'`);
+      expect(marks.rows).toEqual([{ workspace_id: ID, session_id: pubSid, origin: part }]);
+      await vi.waitFor(async () => expect((await searchRpc(a.url)).status).toBe(200), { timeout: 10_000 });
+      const viewer = (await searchRpc(a.url)).body.result.hits as Array<{ sessionId: string; workspaceId: string }>;
+      expect(viewer.map((h) => [h.sessionId, h.workspaceId])).toEqual([[SID, ID]]);
     }, 30_000);
 
     it('on: stop lets the in-flight batch land before the sidecar and the stores close', async () => {

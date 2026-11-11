@@ -19,7 +19,7 @@ import type { EventHub } from './events.js';
 import { startHostAutomations, type HostAutomations } from './hostAutomations.js';
 import { startHostIndexer } from './hostIndexer.js';
 import type { ListenTarget } from './endpoint.js';
-import { startHostMcp, type HostMcp } from './hostMcp.js';
+import { hostUsageRecorder, startHostMcp, type HostMcp } from './hostMcp.js';
 import type { Logger } from './log.js';
 import { leaseFence, LeaseLostError } from './pgLease.js';
 import { publishStore, type PublishStore } from './publishStore.js';
@@ -125,7 +125,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
   });
   let automations: HostAutomations | null = null;
   // Fenced: provisioning and each call's mcp_grants rewrite are writes on the state handle.
-  const mcp = mcpServer(o, embedder?.embed, () =>
+  const mcp = mcpServer(o, embedder?.embed, publish, () =>
     openPgMcpReadSource(stores.poolConfig.schema, stores.poolConfig, (message) => o.log.log('warn', 'mcp query isolation', { error: message }), {
       preprovisioned: queryLogin(o.db, stores.poolConfig, o.env)
     }));
@@ -168,7 +168,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
 }
 
 /** The MCP socket, retried with backoff. Each attempt gets its own read source (a failed start closes it). */
-function mcpServer(o: HolderOptions, embed: EmbedFn | undefined, readSource: () => Promise<OwnedReadSource>): { start(): void; stop(): Promise<void> } {
+function mcpServer(o: HolderOptions, embed: EmbedFn | undefined, publish: PublishStore, readSource: () => Promise<OwnedReadSource>): { start(): void; stop(): Promise<void> } {
   let served: HostMcp | null = null;
   let attempt: Promise<void> | null = null;
   let timer: NodeJS.Timeout | null = null;
@@ -177,7 +177,10 @@ function mcpServer(o: HolderOptions, embed: EmbedFn | undefined, readSource: () 
   const tryStart = (): void => {
     timer = null;
     attempt = readSource()
-      .then((rs) => startHostMcp({ listen: o.mcp.listen, workspaceId: o.workspaceId, log: o.log, readSource: rs, embed }))
+      .then((rs) => startHostMcp({
+        listen: o.mcp.listen, workspaceId: o.workspaceId, log: o.log, readSource: rs, embed,
+        scope: () => publish.partitionIds(), recordUsage: hostUsageRecorder
+      }))
       .then(
         async (m) => {
           if (stopped) await m.close();
