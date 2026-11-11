@@ -116,7 +116,7 @@ bctl list | grep -q '{"id":"split1","alive":true}' || fail "LIST over :7070"
 cred_js="const [h,p]=process.env.FLEET_HOST_CRED_ADDR.split(':');const r=require('http').request({host:h,port:Number(p),method:'POST',path:'/token',headers:{'content-type':'application/json'}},(s)=>{console.log(s.statusCode);s.resume()});r.on('error',(e)=>console.log(e.code));r.end('{\"repositories\":[]}')"
 until_eq 400 docker exec "$n-ws" node -e "$cred_js" || fail "unscoped POST /token from the workspace pod"
 mcp_js="const s=require('net').connect(8082,'host-svc',()=>s.write(JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list'})+'\n'));let b='';s.setEncoding('utf8');s.on('data',(d)=>{b+=d;if(b.includes('\n')){console.log(JSON.parse(b).result.tools.length);s.destroy()}});s.on('error',(e)=>console.log(e.code))"
-until_eq 14 docker exec "$n-ws" node -e "$mcp_js" || fail "tools/list on :8082 from the workspace pod"
+until_eq 15 docker exec "$n-ws" node -e "$mcp_js" || fail "tools/list on :8082 from the workspace pod"
 
 # The MCP caller is the hosted workspace, whatever the wire says.
 ws_id=$(docker exec -e PGPASSWORD=app-pw "$n-pg" psql -h 127.0.0.1 -U fleet_agent -d fleet -Atc 'SELECT workspace_id FROM host_meta')
