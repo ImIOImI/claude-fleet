@@ -1031,6 +1031,10 @@ CREATE TABLE transcript_offsets (
 );
 CREATE INDEX idx_transcript_offsets_workspace ON transcript_offsets(workspace_id);
 CREATE INDEX idx_transcript_offsets_session ON transcript_offsets(session_id);
+
+-- v19: no SQLite change (version bump only). Postgres state step 19 declares
+-- idx_events_session_type as (session_id, type, id); here the index already
+-- ends in the rowid (= id), so id-ordered walks per (session, type) need no sort.
 ```
 
 `ERRORS_RETENTION = 2000`: every `recordErrors` batch prunes once to the most recent 2000 rows (DELETE by id rank). The table is an append-only ring buffer — no explicit expiry, no separate job.

@@ -931,6 +931,12 @@ function migrate(d: Database.Database): void {
     `);
     d.pragma('user_version = 18');
   }
+
+  if ((d.pragma('user_version', { simple: true }) as number) < 19) {
+    // Postgres step 19 adds id to idx_events_session_type; here the index
+    // already ends in the rowid (= id). Version-only, so imports stay in step.
+    d.pragma('user_version = 19');
+  }
 }
 
 function repairSyntheticFirstUserMessages(d: Database.Database): void {
