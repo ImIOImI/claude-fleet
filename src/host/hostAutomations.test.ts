@@ -14,7 +14,7 @@ import { HOST_CONFIG_ORIGIN, startHostAutomations, type HostAutomations } from '
 
 const WS = { id: '01JC0000000000000000000000', name: 'review-bot' };
 const USER = { kind: 'user' as const, id: null };
-const MCP_ARGS = hostMcpArgs('/run/fleet/mcp.sock');
+const MCP_ARGS = hostMcpArgs({ unix: '/run/fleet/mcp.sock' });
 const fresh = (name: string, extra: Record<string, unknown> = {}) => ({
   definition: { name, triggers: [{ manual: {} }], steps: [{ id: 'go', prompt: { workspace: '$self', mode: 'fresh', message: 'review' } }], ...extra },
   enabled: true

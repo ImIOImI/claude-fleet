@@ -50,6 +50,10 @@ RUN find /usr/local/lib/fleet-host -type f -exec chmod 0644 {} + \
  && printf '#!/bin/sh\nexec node /usr/local/lib/fleet-host/fleet-host.mjs "$@"\n' > /usr/local/bin/fleet-host \
  && printf '#!/bin/sh\nexec node /usr/local/lib/fleet-host/fleet-host-cred.mjs "$@"\n' > /usr/local/bin/fleet-host-cred \
  && chmod 0755 /usr/local/bin/fleet-host /usr/local/bin/fleet-host-cred \
+ && groupadd --gid 1001 fleet-host \
+ && useradd --uid 1001 --gid 1001 --home-dir /var/lib/fleet-host/state --no-create-home --shell /usr/sbin/nologin fleet-host \
+ && mkdir -p /var/lib/fleet-host/state /var/lib/fleet-host/projects \
+ && chown fleet-host:fleet-host /var/lib/fleet-host/state && chmod 0700 /var/lib/fleet-host/state \
  && mkdir -p /etc/fleet-host /run/fleet-host \
  && chown fleet:fleet /run/fleet-host && chmod 0700 /run/fleet-host \
  && node /usr/local/lib/fleet-host/fleet-host.mjs write-mcp-bridge /usr/local/lib/fleet-host/mcp-bridge.cjs \

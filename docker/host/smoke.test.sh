@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke-test a runner-host image: probes on 8080, auth required, uid 1000,
+# Smoke-test a runner-host image: probes on 8080, auth required, uid 1000 under `single`, the no-mode refusal, the `fleet-host` user,
 # `fleet-host init`, the bootstrap/migrate subcommands, the MCP bridge file and /run/fleet,
 # the embedder files and embed-check, and a clean SIGTERM that reaches fleet-host.
 set -euo pipefail
@@ -7,8 +7,12 @@ image=$1
 cfg=$(mktemp -d)
 printf 'workspace: { name: smoke }\ngrants:\n  - { team: acme/platform, tier: session }\n' > "$cfg/config.yaml"
 chmod -R a+rX "$cfg"
-cid=$(docker run -d -p 127.0.0.1::8080 -v "$cfg:/etc/fleet-host:ro" "$image")
+cid=$(docker run -d -p 127.0.0.1::8080 -v "$cfg:/etc/fleet-host:ro" "$image" fleet-host-entry single)
 trap 'docker logs "$cid" 2>&1 | tail -20 || true; docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+rc=0; docker run --rm "$image" >/dev/null 2>&1 || rc=$?
+test "$rc" = 2
+test "$(docker run --rm --entrypoint id "$image" -u fleet-host)" = 1001
+test "$(docker run --rm --entrypoint stat "$image" -c '%a %u' /var/lib/fleet-host/state)" = '700 1001'
 port=$(docker port "$cid" 8080/tcp | head -1 | sed 's/.*://')
 for _ in $(seq 1 30); do
   curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null 2>&1 && break

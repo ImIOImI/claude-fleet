@@ -5,8 +5,9 @@ import { hostname } from 'node:os';
 import { AttachHub } from './attachHub.js';
 import { buildAuthContext, githubProviderFactory, type AuthContext, type ProviderFactory } from './auth.js';
 import { brokerOps as realBrokerOps, type BrokerOps } from './brokerOps.js';
-import { loadHostConfig, readHostEnv, type HostConfig } from './config.js';
+import { HostConfigError, loadHostConfig, readHostEnv, type HostConfig } from './config.js';
 import { createReloader, watchConfigDir } from './configReload.js';
+import type { ListenTarget } from './endpoint.js';
 import { startCredHelper, type CredServer } from './credServer.js';
 import { brokerWatch, EventHub, pruneDeadOwners } from './events.js';
 import type { PgTrack } from '../main/store/pgMigrate.js';
@@ -20,6 +21,7 @@ import { LEASE_RENEW_MS, LEASE_TTL_MS, LeaseManager, memoryLeaseStore, type Leas
 import { postgresLeaseStore } from './pgLease.js';
 import { createLogger, type LogSink } from './log.js';
 import { brokerRpcChannels } from './rpc.js';
+import { MESH_WAIT_MS, waitForMesh, type MeshState } from './mesh.js';
 import { createHostServer, installCrashGuards, type HostServer } from './server.js';
 
 export const BROKER_POLL_MS = 2_000;
@@ -32,6 +34,7 @@ export const STORE_CLOSE_MS = 5_000;
 export const EXIT_DB_UNAVAILABLE = 75;
 
 const PG_CONN_ERRNO = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE']);
+const NO_MESH = 'no Istio sidecar: credential and MCP ports stay closed; broker connections are plaintext and a STRICT peer will refuse them';
 
 /** Connection-level failures (network, server shutdown, pool connect timeout), not SQL or code errors. */
 export function isDbUnavailable(err: unknown): boolean {
@@ -64,6 +67,8 @@ export interface RunHostOptions {
   mcpRetryMs?: number;
   /** Tests: a stand-in fleet-embedder. */
   embedder?: { launch?: { bin: string; args: string[] }; env?: NodeJS.ProcessEnv };
+  /** Tests: how long to wait for the sidecar. */
+  meshWaitMs?: number;
 }
 
 export interface RunningHost {
@@ -93,6 +98,14 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   );
 
   const env = readHostEnv(opts.env ?? process.env);
+  if ((env.mcpPort !== null) !== (env.mcpAddr !== null)) {
+    uninstallGuards();
+    throw new HostConfigError('FLEET_HOST_MCP_TCP_PORT and FLEET_HOST_MCP_ADDR are set together');
+  }
+  if (!env.requireMesh && (env.credPort !== null || env.mcpPort !== null)) {
+    uninstallGuards();
+    throw new HostConfigError('FLEET_HOST_CRED_TCP_PORT and FLEET_HOST_MCP_TCP_PORT need FLEET_HOST_REQUIRE_MESH=1');
+  }
   const factory = opts.authFactory ?? githubProviderFactory;
   let config!: HostConfig;
   let auth!: AuthContext;
@@ -130,18 +143,48 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     uninstallGuards();
     throw err;
   }
-  let cred: CredServer | null = null;
-  try {
+  const startAbort = new AbortController();
+  let mesh: MeshState | null = env.requireMesh ? 'checking' : null;
+  // Without a sidecar :8081/:8082 would serve tokens and the MCP to the whole cluster in plaintext.
+  const meshReady: Promise<boolean> = env.requireMesh
+    ? waitForMesh({ url: env.meshReadyUrl, timeoutMs: opts.meshWaitMs ?? MESH_WAIT_MS, signal: startAbort.signal }).then((ok) => {
+        mesh = ok ? 'ready' : 'missing';
+        if (ok) log.log('info', 'istio sidecar ready');
+        else if (!startAbort.signal.aborted) log.log('error', NO_MESH);
+        return ok;
+      })
+    : Promise.resolve(true);
+  let cred = null as CredServer | null;
+  const credListen: ListenTarget = env.credPort !== null ? { port: env.credPort } : { path: env.credSocket };
+  async function startCred(): Promise<void> {
     const app = config.github?.app;
-    if (app) cred = await startCredHelper({ app, socketPath: env.credSocket, github: () => config.github, log, apiBase: opts.githubApiBase });
-    else log.log('info', 'github app credential helper off (github.appId unset)');
-  } catch (err) {
-    uninstallGuards();
-    throw err;
+    if (!app) {
+      log.log('info', 'github app credential helper off (github.appId unset)');
+      return;
+    }
+    const c = await startCredHelper({ app, listen: credListen, github: () => config.github, log, apiBase: opts.githubApiBase });
+    if (startAbort.signal.aborted) await c.close();
+    else cred = c;
+  }
+  if (!env.requireMesh) {
+    try {
+      await startCred();
+    } catch (err) {
+      uninstallGuards();
+      throw err;
+    }
+  } else {
+    void meshReady
+      .then((ok) => (ok && !startAbort.signal.aborted ? startCred() : undefined))
+      .catch((err: Error) => {
+        log.log('error', 'credential server start failed; exiting', { error: err.message });
+        void shutdown(1);
+      });
   }
 
-  const ops = opts.brokerOps ?? realBrokerOps(env.brokerSocket);
-  const mcpArgs = hostMcpArgs(env.mcpSocket);
+  const ops = opts.brokerOps ?? realBrokerOps(env.brokerAddr ?? env.brokerSocket);
+  const mcpListen: ListenTarget = env.mcpPort !== null ? { port: env.mcpPort } : { path: env.mcpSocket };
+  const mcpArgs = hostMcpArgs(env.mcpAddr ? { tcp: `${env.mcpAddr.host}:${env.mcpAddr.port}` } : { unix: env.mcpSocket });
   const hub = new AttachHub(ops, { hostPort: env.port, log, createArgs: config.db ? (a) => [...a, ...mcpArgs] : undefined });
   const events = new EventHub();
   const holderId = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
@@ -151,12 +194,12 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   let workspaceId: string | null = null;
   let leaseMgr: LeaseManager | null = null;
   let started = false;
-  const startAbort = new AbortController();
   const server = createHostServer({
     workspace: () => ({ ...config.workspace, id: workspaceId as string }),
     auth: () => auth,
     lease: () => leaseMgr?.state ?? 'standby',
-    healthy: () => !!leaseMgr?.running && (dbHealth?.ok() ?? true),
+    healthy: () => !!leaseMgr?.running && (dbHealth?.ok() ?? true) && (mesh === null || mesh === 'ready'),
+    mesh: () => mesh,
     db: () => (!config.db ? 'none' : !dbHealth ? 'connecting' : dbHealth.ok() ? 'ok' : 'down'),
     starting: () => !started,
     hub,
@@ -272,12 +315,13 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
         onLost: () => m.markLost('superseded'),
         log,
         projectsDir: env.projectsDir,
+        rescanMs: env.rescanMs,
         extraTracks: opts.extraStoreTracks,
         ops,
         events,
         workspace: () => ({ id, name: config.workspace.name }),
         automations: () => config.automations,
-        mcp: { socketPath: env.mcpSocket, socketGroup: env.mcpSocketGroup },
+        mcp: { listen: mcpListen, args: mcpArgs, ready: meshReady },
         mcpRetryMs: opts.mcpRetryMs,
         search: config.search,
         embedDir: env.embedDir,
@@ -307,18 +351,26 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     try {
       await bringUp();
     } catch (err) {
+      startAbort.abort();
       await cred?.close();
       uninstallGuards();
       throw err;
     }
   }
-  await new Promise<void>((resolve, reject) => {
-    server.server.once('error', reject);
-    server.server.listen(env.port, '0.0.0.0', () => {
-      server.server.off('error', reject);
-      resolve();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.server.once('error', reject);
+      server.server.listen(env.port, '0.0.0.0', () => {
+        server.server.off('error', reject);
+        resolve();
+      });
     });
-  });
+  } catch (err) {
+    startAbort.abort();
+    await cred?.close();
+    uninstallGuards();
+    throw err;
+  }
   log.log('info', 'fleet-host listening', { port: env.port, workspaceId, workspace: config.workspace.name });
   if (config.db) {
     void bringUp().then(

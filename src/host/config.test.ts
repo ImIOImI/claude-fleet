@@ -12,6 +12,20 @@ const base = {
 };
 
 describe('parseHostConfig', () => {
+  it('refuses a machines grant for the credential App, whose tokens sessions hold', () => {
+    const github = { appId: 123456, installationId: 2, keyFile: '/k.pem' };
+    expect(() => parseHostConfig({ ...base, github })).toThrow("machines[0].appId is this host's credential App; sessions hold its tokens");
+    expect(parseHostConfig({ ...base, github: { ...github, appId: 7 } }).grants.machines).toHaveLength(1);
+    expect(parseHostConfig({ ...base, github: { repositories: ['a'] } }).grants.machines).toHaveLength(1);
+    const machines = [{ appId: 7, login: 'other[bot]', tier: 'read' }, ...base.machines];
+    expect(() => parseHostConfig({ ...base, machines, github })).toThrow("machines[1].appId is this host's credential App; sessions hold its tokens");
+  });
+
+  it('refuses the same machines grant when github.appId is the quoted YAML string', () => {
+    const github = { appId: '123456', installationId: 2, keyFile: '/k.pem' };
+    expect(() => parseHostConfig({ ...base, github })).toThrow("machines[0].appId is this host's credential App; sessions hold its tokens");
+  });
+
   it('parses workspace, identity and grants', () => {
     const c = parseHostConfig(base);
     expect(c.workspace).toEqual({ id: null, name: 'review-bot', description: 'PR reviewer', color: { hue: 210 } });
@@ -172,12 +186,28 @@ describe('readHostEnv', () => {
       configPath: '/etc/fleet-host/config.yaml',
       stateDir: '/home/fleet/.claude/fleet-host',
       credSocket: '/run/fleet-host/cred.sock',
+      credPort: null,
       projectsDir: join(homedir(), '.claude', 'projects'),
       brokerSocket: '/run/broker/broker.sock',
+      brokerAddr: null,
       mcpSocket: '/run/fleet/mcp.sock',
-      mcpSocketGroup: null,
+      mcpPort: null,
+      mcpAddr: null,
+      requireMesh: false,
+      meshReadyUrl: 'http://127.0.0.1:15021/healthz/ready',
+      rescanMs: 60000,
       embedDir: '/usr/local/lib/fleet-host/embed'
     });
+  });
+
+  it('reads CLAUDE_FLEET_BROKER_ADDR as host:port', () => {
+    expect(readHostEnv({ CLAUDE_FLEET_BROKER_ADDR: 'ws.platform-ops.svc:7070' }).brokerAddr).toEqual({ host: 'ws.platform-ops.svc', port: 7070 });
+    expect(() => readHostEnv({ CLAUDE_FLEET_BROKER_ADDR: 'ws:x' })).toThrow('CLAUDE_FLEET_BROKER_ADDR ws:x is not host:port');
+  });
+
+  it('reads FLEET_HOST_CRED_TCP_PORT', () => {
+    expect(readHostEnv({ FLEET_HOST_CRED_TCP_PORT: '8081' }).credPort).toBe(8081);
+    expect(() => readHostEnv({ FLEET_HOST_CRED_TCP_PORT: '99999' })).toThrow('FLEET_HOST_CRED_TCP_PORT 99999 is not a port');
   });
 
   it('honours FLEET_HOST_PORT and FLEET_HOST_CONFIG', () => {
@@ -185,15 +215,32 @@ describe('readHostEnv', () => {
     expect(() => readHostEnv({ FLEET_HOST_PORT: 'x' })).toThrow(/FLEET_HOST_PORT/);
   });
 
-  it('reads the MCP socket and its group', () => {
+  it('reads FLEET_HOST_RESCAN_MS in [1000, 3600000]', () => {
+    expect(readHostEnv({ FLEET_HOST_RESCAN_MS: '5000' }).rescanMs).toBe(5000);
+    expect(readHostEnv({ FLEET_HOST_RESCAN_MS: '1000' }).rescanMs).toBe(1000);
+    expect(readHostEnv({ FLEET_HOST_RESCAN_MS: '3600000' }).rescanMs).toBe(3600000);
+    for (const bad of ['999', '3600001', '5s', '-1', '1e4', ' 5000']) expect(() => readHostEnv({ FLEET_HOST_RESCAN_MS: bad }), bad).toThrow('FLEET_HOST_RESCAN_MS must be an integer from 1000 to 3600000');
+  });
+
+  it('reads FLEET_HOST_REQUIRE_MESH and FLEET_MESH_READY_URL', () => {
+    expect(readHostEnv({ FLEET_HOST_REQUIRE_MESH: '1', FLEET_MESH_READY_URL: 'http://127.0.0.1:9/r' })).toMatchObject({ requireMesh: true, meshReadyUrl: 'http://127.0.0.1:9/r' });
+    expect(readHostEnv({ FLEET_HOST_REQUIRE_MESH: '0' }).requireMesh).toBe(false);
+    expect(() => readHostEnv({ FLEET_HOST_REQUIRE_MESH: 'yes' })).toThrow('FLEET_HOST_REQUIRE_MESH must be 0 or 1');
+  });
+
+  it('reads the MCP socket, or its TCP port with the address sessions dial', () => {
     expect(readHostEnv({}).mcpSocket).toBe('/run/fleet/mcp.sock');
-    expect(readHostEnv({}).mcpSocketGroup).toBeNull();
-    expect(readHostEnv({ FLEET_HOST_MCP_SOCKET: '/x/m.sock', FLEET_HOST_MCP_SOCKET_GROUP: '1500' })).toMatchObject({ mcpSocket: '/x/m.sock', mcpSocketGroup: 1500 });
-    expect(readHostEnv({ FLEET_HOST_MCP_SOCKET_GROUP: '1500' })).toMatchObject({ mcpSocket: '/run/fleet/mcp/mcp.sock', mcpSocketGroup: 1500 });
-    expect(() => readHostEnv({ FLEET_HOST_MCP_SOCKET_GROUP: 'staff' })).toThrow(/FLEET_HOST_MCP_SOCKET_GROUP/);
     expect(() => readHostEnv({ FLEET_HOST_MCP_SOCKET: 'run/mcp.sock' })).toThrow(/FLEET_HOST_MCP_SOCKET must be an absolute path/);
     expect(readHostEnv({ FLEET_HOST_MCP_SOCKET: '/' + 'a'.repeat(106) }).mcpSocket).toHaveLength(107);
     expect(() => readHostEnv({ FLEET_HOST_MCP_SOCKET: '/' + 'a'.repeat(107) })).toThrow(/FLEET_HOST_MCP_SOCKET is longer than 107 bytes/);
+    expect(readHostEnv({ FLEET_HOST_MCP_TCP_PORT: '8082', FLEET_HOST_MCP_ADDR: 'fleet-agent-host.platform-ops.svc:8082' })).toMatchObject({
+      mcpPort: 8082, mcpAddr: { host: 'fleet-agent-host.platform-ops.svc', port: 8082 }
+    });
+    // The "set together" refusal moved to runHost (D86): readHostEnv alone just parses each.
+    expect(readHostEnv({ FLEET_HOST_MCP_ADDR: 'h:8082' })).toMatchObject({ mcpPort: null, mcpAddr: { host: 'h', port: 8082 } });
+    expect(readHostEnv({ FLEET_HOST_MCP_TCP_PORT: '8082' })).toMatchObject({ mcpPort: 8082, mcpAddr: null });
+    expect(() => readHostEnv({ FLEET_HOST_MCP_TCP_PORT: '0', FLEET_HOST_MCP_ADDR: 'h:1' })).toThrow('FLEET_HOST_MCP_TCP_PORT 0 is not a port');
+    expect(readHostEnv({ FLEET_HOST_MCP_SOCKET_GROUP: '1500' })).not.toHaveProperty('mcpSocketGroup');
   });
 });
 

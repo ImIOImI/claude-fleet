@@ -173,3 +173,6 @@ jobs:
 
       - name: Smoke host image
         run: bash docker/host/smoke.test.sh claude-fleet/runner-host:test
+
+      - name: Two-pod split test
+        run: bash docker/host/split.test.sh claude-fleet/runner-host:test

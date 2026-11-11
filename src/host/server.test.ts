@@ -129,6 +129,18 @@ const nextMessage = (ws: WebSocket) => new Promise<Buffer>((r) => ws.once('messa
 const closed = (ws: WebSocket) => new Promise<[number, string]>((r) => ws.once('close', (c, why) => r([c, String(why)])));
 
 describe('unauthenticated routes', () => {
+  it('/healthz carries mesh only when the host requires it, and only ready is healthy', async () => {
+    let mesh: 'checking' | 'ready' | 'missing' = 'checking';
+    const r = await start([], { mesh: () => mesh, healthy: () => mesh === 'ready' });
+    let res = await fetch(`${r.url}/healthz`);
+    expect([res.status, await res.json()]).toEqual([503, { status: 'unhealthy', lease: 'holder', db: 'none', mesh: 'checking' }]);
+    mesh = 'missing';
+    res = await fetch(`${r.url}/healthz`);
+    expect([res.status, await res.json()]).toEqual([503, { status: 'unhealthy', lease: 'holder', db: 'none', mesh: 'missing' }]);
+    mesh = 'ready';
+    expect(await (await fetch(`${r.url}/healthz`)).json()).toEqual({ status: 'ok', lease: 'holder', db: 'none', mesh: 'ready' });
+  });
+
   it('/healthz reports lease state without a token, holder or standby', async () => {
     const r = await start();
     expect(await (await fetch(`${r.url}/healthz`)).json()).toEqual({ status: 'ok', lease: 'holder', db: 'none' });

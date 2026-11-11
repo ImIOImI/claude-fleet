@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
 import { createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -117,6 +118,144 @@ describe('runHost', () => {
       await host.shutdown(0);
       await gh.close();
     }
+  });
+
+  async function firstPruneFailure(env: Record<string, string>, dir: string): Promise<string | undefined> {
+    const cfgPath = join(dir, 'config.yaml');
+    writeFileSync(cfgPath, CONFIG);
+    const logs: string[] = [];
+    const host = await runHost({
+      env: { FLEET_HOST_PORT: String(await freePort()), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), ...env },
+      leaseStore: memoryLeaseStore(), exit: vi.fn(), proc: new EventEmitter(), logSink: (l) => logs.push(l),
+      authFactory: () => ({ id: 'github', verify }), ownerPruneMs: 20
+    });
+    try {
+      const failures = () => logs.map((l) => JSON.parse(l) as { msg: string; error?: string }).filter((m) => m.msg === 'owner prune failed');
+      await vi.waitFor(() => expect(failures().length).toBeGreaterThan(0), { timeout: 5000 });
+      return failures()[0].error;
+    } finally {
+      await host.shutdown(0);
+      await new Promise<void>((r) => (host.server.listening ? host.server.close(() => r()) : r()));
+    }
+  }
+
+  it('dials the broker at CLAUDE_FLEET_BROKER_ADDR instead of the socket', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fh-broker-addr-'));
+    const brokerPort = await freePort();
+    const err = await firstPruneFailure({ CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'), CLAUDE_FLEET_BROKER_ADDR: `127.0.0.1:${brokerPort}` }, dir);
+    expect(err).toContain(`127.0.0.1:${brokerPort}`);
+  });
+
+  it('dials the broker socket when CLAUDE_FLEET_BROKER_ADDR is unset', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fh-broker-sock-'));
+    expect(await firstPruneFailure({ CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock') }, dir)).toContain(join(dir, 'b.sock'));
+  });
+
+  it('serves App tokens on FLEET_HOST_CRED_TCP_PORT instead of the socket', async () => {
+    const { startFakeGithubApp } = await import('./testGithubApp.js');
+    const { requestToken } = await import('./credCli.js');
+    const gh = await startFakeGithubApp({ appId: '9', installationId: '8', account: 'acme', repos: ['a'] });
+    const dir = mkdtempSync(join(tmpdir(), 'fh-cred-tcp-'));
+    writeFileSync(join(dir, 'key.pem'), gh.privatePem, { mode: 0o400 });
+    const cfgPath = join(dir, 'config.yaml');
+    writeFileSync(cfgPath, CONFIG + `github: { appId: 9, installationId: 8, keyFile: ${join(dir, 'key.pem')} }\n`);
+    const probe = createHttpServer((_q, r) => r.end('ok'));
+    await new Promise<void>((r) => probe.listen(0, '127.0.0.1', () => r()));
+    const probeUrl = `http://127.0.0.1:${(probe.address() as AddressInfo).port}/healthz/ready`;
+    const [port, credPort] = [await freePort(), await freePort()];
+    const host = await runHost({
+      env: {
+        FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'),
+        FLEET_HOST_CRED_SOCKET: join(dir, 'run', 'cred.sock'), FLEET_HOST_CRED_TCP_PORT: String(credPort),
+        FLEET_HOST_REQUIRE_MESH: '1', FLEET_MESH_READY_URL: probeUrl
+      },
+      exit: vi.fn(), proc: new EventEmitter(), logSink: () => undefined, authFactory: () => ({ id: 'github', verify }),
+      brokerOps: fakeBroker([]).ops, githubApiBase: gh.url
+    });
+    try {
+      expect(await requestToken({ host: '127.0.0.1', port: credPort }, { repositories: ['a'] })).toMatch(/^ghs_fake/);
+      expect(existsSync(join(dir, 'run', 'cred.sock'))).toBe(false);
+    } finally {
+      await host.shutdown(0);
+      await gh.close();
+      probe.close();
+    }
+  });
+
+  it('aborts startup when the :8080 listen fails; a pending credential server never opens afterwards', async () => {
+    const { startFakeGithubApp } = await import('./testGithubApp.js');
+    const { requestToken } = await import('./credCli.js');
+    const gh = await startFakeGithubApp({ appId: '9', installationId: '8', account: 'acme', repos: ['a'] });
+    const dir = mkdtempSync(join(tmpdir(), 'fh-listen-fail-'));
+    writeFileSync(join(dir, 'key.pem'), gh.privatePem, { mode: 0o400 });
+    const cfgPath = join(dir, 'config.yaml');
+    writeFileSync(cfgPath, CONFIG + `github: { appId: 9, installationId: 8, keyFile: ${join(dir, 'key.pem')} }\n`);
+    // Slow to answer: the :8080 failure (near-instant) and its abort must land first.
+    const probe = createHttpServer((_q, r) => void setTimeout(() => r.end('ok'), 300));
+    await new Promise<void>((r) => probe.listen(0, '127.0.0.1', () => r()));
+    const probeUrl = `http://127.0.0.1:${(probe.address() as AddressInfo).port}/healthz/ready`;
+    const port = await freePort();
+    const credPort = await freePort();
+    const blocker = createServer();
+    await new Promise<void>((r) => blocker.listen(port, '0.0.0.0', () => r()));
+    try {
+      await expect(runHost({
+        env: {
+          FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'),
+          FLEET_HOST_CRED_TCP_PORT: String(credPort), FLEET_HOST_REQUIRE_MESH: '1', FLEET_MESH_READY_URL: probeUrl
+        },
+        exit: vi.fn(), proc: new EventEmitter(), logSink: () => undefined, authFactory: () => ({ id: 'github', verify }),
+        brokerOps: fakeBroker([]).ops, githubApiBase: gh.url
+      })).rejects.toThrow(/EADDRINUSE/);
+      await new Promise((r) => setTimeout(r, 500));
+      await expect(requestToken({ host: '127.0.0.1', port: credPort }, { repositories: ['a'] })).rejects.toMatchObject({ code: 'ECONNREFUSED' });
+    } finally {
+      blocker.close();
+      probe.close();
+      await gh.close();
+    }
+  });
+
+  it('refuses FLEET_HOST_CRED_TCP_PORT without FLEET_HOST_REQUIRE_MESH=1', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fh-cred-tcp-refuse-'));
+    const cfgPath = join(dir, 'config.yaml');
+    writeFileSync(cfgPath, CONFIG);
+    const [port, credPort] = [await freePort(), await freePort()];
+    await expect(runHost({
+      env: {
+        FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'),
+        FLEET_HOST_CRED_TCP_PORT: String(credPort)
+      },
+      exit: vi.fn(), proc: new EventEmitter(), logSink: () => undefined, authFactory: () => ({ id: 'github', verify }), brokerOps: fakeBroker([]).ops
+    })).rejects.toThrow('FLEET_HOST_CRED_TCP_PORT and FLEET_HOST_MCP_TCP_PORT need FLEET_HOST_REQUIRE_MESH=1');
+  });
+
+  it('refuses FLEET_HOST_MCP_TCP_PORT without FLEET_HOST_REQUIRE_MESH=1', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fh-mcp-tcp-refuse-'));
+    const cfgPath = join(dir, 'config.yaml');
+    writeFileSync(cfgPath, CONFIG);
+    const [port, mcpPort] = [await freePort(), await freePort()];
+    await expect(runHost({
+      env: {
+        FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'),
+        FLEET_HOST_MCP_TCP_PORT: String(mcpPort), FLEET_HOST_MCP_ADDR: `127.0.0.1:${mcpPort}`
+      },
+      exit: vi.fn(), proc: new EventEmitter(), logSink: () => undefined, authFactory: () => ({ id: 'github', verify }), brokerOps: fakeBroker([]).ops
+    })).rejects.toThrow('FLEET_HOST_CRED_TCP_PORT and FLEET_HOST_MCP_TCP_PORT need FLEET_HOST_REQUIRE_MESH=1');
+  });
+
+  it('refuses FLEET_HOST_MCP_TCP_PORT and FLEET_HOST_MCP_ADDR set alone (D86, moved from readHostEnv)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fh-mcp-together-'));
+    const cfgPath = join(dir, 'config.yaml');
+    writeFileSync(cfgPath, CONFIG);
+    const [port, mcpPort] = [await freePort(), await freePort()];
+    await expect(runHost({
+      env: {
+        FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'),
+        FLEET_HOST_MCP_TCP_PORT: String(mcpPort), FLEET_HOST_REQUIRE_MESH: '1'
+      },
+      exit: vi.fn(), proc: new EventEmitter(), logSink: () => undefined, authFactory: () => ({ id: 'github', verify }), brokerOps: fakeBroker([]).ops
+    })).rejects.toThrow('FLEET_HOST_MCP_TCP_PORT and FLEET_HOST_MCP_ADDR are set together');
   });
 
   it('serves the configured workspace id after one start load', async () => {
@@ -353,4 +492,85 @@ describe('isDbUnavailable', () => {
       expect(isDbUnavailable(err)).toBe(false);
     }
   });
+});
+
+describe('runHost behind the mesh check', () => {
+  const open: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    for (const c of open.splice(0)) await c();
+  });
+
+  async function meshRig(status: number | null | (() => number), keyFile?: string, meshWaitMs = 300) {
+    const { startFakeGithubApp } = await import('./testGithubApp.js');
+    const gh = await startFakeGithubApp({ appId: '9', installationId: '8', account: 'acme', repos: ['a'] });
+    let probe: HttpServer | null = null;
+    let probeUrl = `http://127.0.0.1:${await freePort()}/healthz/ready`;
+    if (status !== null) {
+      probe = createHttpServer((_q, r) => { r.statusCode = typeof status === 'number' ? status : status(); r.end(); });
+      await new Promise<void>((r) => probe!.listen(0, '127.0.0.1', () => r()));
+      probeUrl = `http://127.0.0.1:${(probe.address() as AddressInfo).port}/healthz/ready`;
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'fh-mesh-'));
+    writeFileSync(join(dir, 'key.pem'), gh.privatePem, { mode: 0o400 });
+    const cfgPath = join(dir, 'config.yaml');
+    writeFileSync(cfgPath, CONFIG + `github: { appId: 9, installationId: 8, keyFile: ${keyFile ?? join(dir, 'key.pem')} }\n`);
+    const [port, credPort] = [await freePort(), await freePort()];
+    const logs: string[] = [];
+    const exit = vi.fn();
+    const host = await runHost({
+      env: {
+        FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'),
+        FLEET_HOST_CRED_TCP_PORT: String(credPort), FLEET_HOST_REQUIRE_MESH: '1', FLEET_MESH_READY_URL: probeUrl
+      },
+      exit, proc: new EventEmitter(), logSink: (l) => logs.push(l), authFactory: () => ({ id: 'github', verify }),
+      brokerOps: fakeBroker([]).ops, githubApiBase: gh.url, meshWaitMs
+    });
+    open.push(async () => {
+      await host.shutdown(0);
+      probe?.close();
+      await gh.close();
+    });
+    return { url: `http://127.0.0.1:${port}`, cred: { host: '127.0.0.1', port: credPort }, logs, exit };
+  }
+
+  it('opens the credential port once the sidecar is ready, and /healthz says mesh ready', async () => {
+    const { requestToken } = await import('./credCli.js');
+    const r = await meshRig(200);
+    await vi.waitFor(async () => expect(await (await fetch(`${r.url}/healthz`)).json()).toEqual({ status: 'ok', lease: 'holder', db: 'none', mesh: 'ready' }));
+    await vi.waitFor(async () => expect(await requestToken(r.cred, { repositories: ['a'] })).toMatch(/^ghs_fake/));
+  });
+
+  it('keeps the credential port closed while checking', async () => {
+    const { requestToken } = await import('./credCli.js');
+    let ready = false;
+    const r = await meshRig(() => (ready ? 200 : 503), undefined, 10_000);
+    const res = await fetch(`${r.url}/healthz`);
+    expect([res.status, await res.json()]).toEqual([503, { status: 'unhealthy', lease: 'holder', db: 'none', mesh: 'checking' }]);
+    await expect(requestToken(r.cred, { repositories: ['a'] })).rejects.toMatchObject({ code: 'ECONNREFUSED' });
+    ready = true;
+    await vi.waitFor(async () => expect(await requestToken(r.cred, { repositories: ['a'] })).toMatch(/^ghs_fake/), { timeout: 5_000 });
+  });
+
+  it('exits 1 when the credential server fails to start after the check', async () => {
+    const r = await meshRig(200, join(tmpdir(), 'fh-mesh-no-such-key.pem'));
+    await vi.waitFor(() => expect(r.exit).toHaveBeenCalledWith(1));
+    expect(r.logs.map((l) => JSON.parse(l) as { level: string; msg: string })).toContainEqual(expect.objectContaining({
+      level: 'error', msg: 'credential server start failed; exiting'
+    }));
+  });
+
+  for (const [what, status] of [['answers 503', 503], ['is absent', null]] as const) {
+    it(`keeps the credential port closed and is unready with mesh missing when the sidecar ${what}`, async () => {
+      const { requestToken } = await import('./credCli.js');
+      const r = await meshRig(status);
+      await vi.waitFor(async () => {
+        const res = await fetch(`${r.url}/healthz`);
+        expect([res.status, await res.json()]).toEqual([503, { status: 'unhealthy', lease: 'holder', db: 'none', mesh: 'missing' }]);
+      });
+      await expect(requestToken(r.cred, { repositories: ['a'] })).rejects.toMatchObject({ code: 'ECONNREFUSED' });
+      expect(r.logs.map((l) => JSON.parse(l) as { level: string; msg: string })).toContainEqual(expect.objectContaining({
+        level: 'error', msg: 'no Istio sidecar: credential and MCP ports stay closed; broker connections are plaintext and a STRICT peer will refuse them'
+      }));
+    });
+  }
 });

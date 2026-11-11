@@ -18,15 +18,16 @@
 //
 //	CLAUDE_FLEET_BROKER_SOCKET    path of the unix socket to listen on
 //	                              (default: /run/broker/broker.sock)
-//	CLAUDE_FLEET_BROKER_TCP_PORT  if set (e.g. 7070), listen on loopback
-//	                              TCP 0.0.0.0:<port> instead of a unix
-//	                              socket. Used on Windows hosts, which
-//	                              cannot connect() to an AF_UNIX socket
-//	                              that only exists inside the Linux VM.
-//	                              Docker publishes the container port to
-//	                              the host's 127.0.0.1. When set, the
-//	                              unix-only socket dir/cleanup/chmod steps
-//	                              are skipped. (default: unset → unix)
+//	CLAUDE_FLEET_BROKER_TCP_PORT  if set (e.g. 7070), listen on TCP
+//	                              0.0.0.0:<port> instead of a unix socket:
+//	                              the Windows desktop (Docker publishes it to
+//	                              127.0.0.1) and the remote workspace pod
+//	                              (behind the Istio sidecar).
+//	                              (default: unset → unix)
+//	CLAUDE_FLEET_BROKER_REQUIRE_MESH  "1": wait up to 60 s for the Istio
+//	                              sidecar (FLEET_MESH_READY_URL, default
+//	                              http://127.0.0.1:15021/healthz/ready) and
+//	                              exit 1 without listening if it never answers.
 //	CLAUDE_FLEET_BROKER_RING      ring-buffer bytes per session
 //	                              (default: 65536 = 64 KiB)
 //	CLAUDE_FLEET_BROKER_CLAUDE    command run for each session
@@ -41,78 +42,40 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/ImIOImI/claude-fleet/broker/internal/server"
 	"github.com/ImIOImI/claude-fleet/broker/internal/session"
 )
 
 const (
-	defaultSocketPath  = "/run/broker/broker.sock"
-	defaultRingBytes   = 64 * 1024
-	defaultClaudeExec  = "claude"
-	defaultLogPrefix   = "claude-fleet-broker: "
+	defaultSocketPath = "/run/broker/broker.sock"
+	defaultRingBytes  = 64 * 1024
+	defaultClaudeExec = "claude"
+	defaultLogPrefix  = "claude-fleet-broker: "
+	meshWait          = 60 * time.Second
 )
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	log.SetPrefix(defaultLogPrefix)
 
-	tcpPort := os.Getenv("CLAUDE_FLEET_BROKER_TCP_PORT")
-	socketPath := envDefault("CLAUDE_FLEET_BROKER_SOCKET", defaultSocketPath)
 	ringBytes := envInt("CLAUDE_FLEET_BROKER_RING", defaultRingBytes)
 	claudeExec := envDefault("CLAUDE_FLEET_BROKER_CLAUDE", defaultClaudeExec)
 
-	lc := net.ListenConfig{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// listenAddr is purely for logging; it names whichever transport we bound.
-	var (
-		ln         net.Listener
-		err        error
-		listenAddr string
-	)
-	if tcpPort != "" {
-		// TCP mode (Windows hosts): bind loopback inside the container.
-		// 0.0.0.0 is safe here because only Docker's port proxy can reach
-		// the container's network namespace, and the host side is published
-		// to 127.0.0.1 only. No unix socket dir/cleanup/chmod is needed.
-		listenAddr = net.JoinHostPort("0.0.0.0", tcpPort)
-		ln, err = lc.Listen(ctx, "tcp", listenAddr)
-		if err != nil {
-			log.Fatalf("listen tcp %s: %v", listenAddr, err)
-		}
-	} else {
-		// Unix-socket mode (Linux/macOS hosts): the default.
-		listenAddr = socketPath
-		if err := os.MkdirAll(filepath.Dir(socketPath), 0o755); err != nil {
-			log.Fatalf("mkdir socket dir: %v", err)
-		}
-		// Stale socket from a prior run blocks Listen; remove it first.
-		// (Container restarts re-mkdir the bind-mounted dir empty in most cases,
-		// but be defensive — if the dir is host-bind-mounted, files can persist.)
-		if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			log.Fatalf("remove stale socket: %v", err)
-		}
-		ln, err = lc.Listen(ctx, "unix", socketPath)
-		if err != nil {
-			log.Fatalf("listen %s: %v", socketPath, err)
-		}
-		// Make the socket world-rw so the host (a different UID) can connect.
-		// The bind-mount + container User flag means the host user already owns
-		// the dir; this is belt-and-suspenders in case future changes use a
-		// different UID inside the container.
-		if err := os.Chmod(socketPath, 0o666); err != nil {
-			log.Printf("chmod socket: %v (continuing)", err)
-		}
+	ln, listenAddr, err := listen(ctx, os.Getenv, meshWait, log.Printf)
+	if err != nil {
+		log.Fatalf("%v", err)
 	}
 
 	mgr := session.NewManager(session.ManagerConfig{
-		ClaudeExec:    claudeExec,
-		RingBufBytes:  ringBytes,
+		ClaudeExec:   claudeExec,
+		RingBufBytes: ringBytes,
 	})
 	srv := server.New(mgr)
 

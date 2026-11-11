@@ -6,10 +6,13 @@ import { isAbsolute, join } from 'node:path';
 import { parse } from 'yaml';
 import { ORG_RE, parseGrantConfig, type GrantConfig } from '../main/identity/grants.js';
 import { parseStoreConfig, QUERY_USER, StoreConfigError, type PostgresStoreConfig } from '../main/store/storeConfig.js';
+import { parseHostPort, parsePort, type HostPort } from './endpoint.js';
+import { MESH_READY_URL } from './mesh.js';
 
 export const DEFAULT_CONFIG_PATH = '/etc/fleet-host/config.yaml';
 export const DEFAULT_PORT = 8080;
 export const DEFAULT_EMBED_DIR = '/usr/local/lib/fleet-host/embed';
+export const DEFAULT_RESCAN_MS = 60_000;
 export const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 
 export interface HostWorkspaceInfo {
@@ -212,9 +215,17 @@ export function parseHostConfig(raw: unknown): HostConfig {
   } catch (err) {
     throw new HostConfigError((err as Error).message);
   }
+  const github = o.github === undefined ? null : parseGithub(o.github);
+  const credApp = github?.app?.appId;
+  // Otherwise a session could take a token from the credential server and present it as a Bearer on :8080.
+  grants.machines.forEach((m, i) => {
+    if (credApp !== undefined && String(m.appId) === credApp) {
+      throw new HostConfigError(`machines[${i}].appId is this host's credential App; sessions hold its tokens`);
+    }
+  });
   return {
     workspace: parseWorkspace(o.workspace),
-    github: o.github === undefined ? null : parseGithub(o.github),
+    github,
     db: o.db === undefined ? null : parseDb(o.db),
     identity: { provider: 'github', org: typeof id.org === 'string' ? id.org : null },
     grants,
@@ -245,36 +256,77 @@ export interface HostEnv {
   configPath: string;
   stateDir: string;
   brokerSocket: string;
+  /** The workspace pod's broker; replaces brokerSocket when set. */
+  brokerAddr: HostPort | null;
   credSocket: string;
+  /** Serve credentials on 0.0.0.0:<port> instead of credSocket. */
+  credPort: number | null;
   /** Claude's transcripts in this container, ingested by the holder. */
   projectsDir: string;
   /** The fleet-state MCP socket the holder serves to sessions. */
   mcpSocket: string;
-  /** Shared-group mode (container split): prep's `mcp/` directory is checked, the socket is 0660 in this group. */
-  mcpSocketGroup: number | null;
+  /** Serve the MCP on 0.0.0.0:<port> instead of mcpSocket; set with mcpAddr. */
+  mcpPort: number | null;
+  /** What sessions' bridges dial when mcpPort is set. */
+  mcpAddr: HostPort | null;
+  /** Host pod: open the credential and MCP ports only behind a ready Istio sidecar. */
+  requireMesh: boolean;
+  /** The sidecar's readiness URL; tests override it. */
+  meshReadyUrl: string;
+  /** Full transcript rescans; the only change signal when the writers are in another pod. */
+  rescanMs: number;
   /** The sidecar and its weights (D65). */
   embedDir: string;
+}
+
+function envHostPort(env: NodeJS.ProcessEnv, name: string): HostPort | null {
+  const text = env[name];
+  if (!text) return null;
+  const v = parseHostPort(text);
+  if (!v) throw new HostConfigError(`${name} ${text} is not host:port`);
+  return v;
+}
+
+function envPort(env: NodeJS.ProcessEnv, name: string): number | null {
+  const text = env[name];
+  if (!text) return null;
+  const v = parsePort(text);
+  if (v === null) throw new HostConfigError(`${name} ${text} is not a port`);
+  return v;
 }
 
 export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
   const portText = env.FLEET_HOST_PORT ?? String(DEFAULT_PORT);
   const port = Number(portText);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new HostConfigError(`FLEET_HOST_PORT ${portText} is not a port`);
-  const groupText = env.FLEET_HOST_MCP_SOCKET_GROUP;
-  if (groupText !== undefined && groupText !== '' && !/^\d{1,9}$/.test(groupText)) throw new HostConfigError('FLEET_HOST_MCP_SOCKET_GROUP must be a numeric gid');
-  const mcpSocket = env.FLEET_HOST_MCP_SOCKET || (groupText ? '/run/fleet/mcp/mcp.sock' : '/run/fleet/mcp.sock');
+  const mcpPort = envPort(env, 'FLEET_HOST_MCP_TCP_PORT');
+  const mcpAddr = envHostPort(env, 'FLEET_HOST_MCP_ADDR');
+  const mcpSocket = env.FLEET_HOST_MCP_SOCKET || '/run/fleet/mcp.sock';
   if (!isAbsolute(mcpSocket)) throw new HostConfigError('FLEET_HOST_MCP_SOCKET must be an absolute path');
   // sun_path holds 108 bytes with the terminating NUL on Linux.
   if (Buffer.byteLength(mcpSocket) > 107) throw new HostConfigError('FLEET_HOST_MCP_SOCKET is longer than 107 bytes');
+  const meshText = env.FLEET_HOST_REQUIRE_MESH ?? '';
+  if (!['', '0', '1'].includes(meshText)) throw new HostConfigError('FLEET_HOST_REQUIRE_MESH must be 0 or 1');
+  const rescanText = env.FLEET_HOST_RESCAN_MS || String(DEFAULT_RESCAN_MS);
+  const rescanMs = Number(rescanText);
+  if (!/^\d+$/.test(rescanText) || rescanMs < 1000 || rescanMs > 3_600_000) {
+    throw new HostConfigError('FLEET_HOST_RESCAN_MS must be an integer from 1000 to 3600000');
+  }
   return {
     port,
     configPath: env.FLEET_HOST_CONFIG || DEFAULT_CONFIG_PATH,
     stateDir: env.FLEET_HOST_STATE || '/home/fleet/.claude/fleet-host',
     brokerSocket: env.CLAUDE_FLEET_BROKER_SOCKET || '/run/broker/broker.sock',
+    brokerAddr: envHostPort(env, 'CLAUDE_FLEET_BROKER_ADDR'),
     credSocket: env.FLEET_HOST_CRED_SOCKET || '/run/fleet-host/cred.sock',
+    credPort: envPort(env, 'FLEET_HOST_CRED_TCP_PORT'),
     projectsDir: env.FLEET_HOST_PROJECTS || join(homedir(), '.claude', 'projects'),
     mcpSocket,
-    mcpSocketGroup: groupText ? Number(groupText) : null,
+    mcpPort,
+    mcpAddr,
+    requireMesh: meshText === '1',
+    meshReadyUrl: env.FLEET_MESH_READY_URL || MESH_READY_URL,
+    rescanMs,
     embedDir: env.FLEET_HOST_EMBED_DIR || DEFAULT_EMBED_DIR
   };
 }

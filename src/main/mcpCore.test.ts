@@ -29,11 +29,11 @@ describe('mcpCore', () => {
   describe('connection rows', () => {
     afterEach(() => vi.useRealTimers());
     const rpcLine = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }) + '\n';
-    const open = (rows: McpLogEntry[]) => {
+    const open = (rows: McpLogEntry[], transport: 'unix' | 'tcp' = 'unix') => {
       setMcpLogSink((e) => rows.push(e));
       // Not a PassThrough: it would echo each reply back in as a request.
       const sock = Object.assign(new EventEmitter(), { setEncoding: () => undefined, write: () => true, destroy: () => undefined }) as unknown as Socket;
-      serveMcpConnection(sock, 'W1');
+      serveMcpConnection(sock, 'W1', transport);
       return sock;
     };
 
@@ -76,6 +76,15 @@ describe('mcpCore', () => {
       vi.advanceTimersByTime(MCP_CONN_LOG_AFTER_MS);
       sock.emit('close');
       expect(rows.map((r) => r.type)).toEqual(['mcp-conn', 'mcp-conn-closed']);
+    });
+
+    it('defaults to unix but logs tcp when passed', () => {
+      const unixRows: McpLogEntry[] = [];
+      open(unixRows).emit('close');
+      expect(unixRows[0]).toMatchObject({ type: 'mcp-conn-closed', message: expect.stringContaining('mcp unix connection') });
+      const tcpRows: McpLogEntry[] = [];
+      open(tcpRows, 'tcp').emit('close');
+      expect(tcpRows[0]).toMatchObject({ type: 'mcp-conn-closed', message: expect.stringContaining('mcp tcp connection') });
     });
   });
 

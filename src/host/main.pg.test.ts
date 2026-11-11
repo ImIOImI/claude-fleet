@@ -6,6 +6,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { connect, createServer, type AddressInfo, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer as createHttpServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { sql } from 'kysely';
 import pg from 'pg';
@@ -81,9 +82,9 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
 
   const mcpSock = (dir: string) => join(dir, 'run', 'mcp.sock');
   const isSocket = (p: string) => existsSync(p) && lstatSync(p).isSocket();
-  function rpc(path: string, msgs: object[]): Promise<Array<Record<string, any>>> {
+  function rpc(at: string | { host: string; port: number }, msgs: object[]): Promise<Array<Record<string, any>>> {
     return new Promise((resolve, reject) => {
-      const c: Socket = connect(path);
+      const c: Socket = connect(typeof at === 'string' ? { path: at } : at);
       let buf = '';
       c.setEncoding('utf8');
       c.on('data', (d) => {
@@ -129,7 +130,30 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     ws.send(jsonFrame(FrameType.CREATE, { id: 'v1', cols: 80, rows: 24 }));
     await vi.waitFor(() => expect(broker.created).toHaveLength(1), { timeout: 5_000 });
     ws.close();
-    expect(broker.created[0].args.at(-1)).toBe(hostMcpArgs(mcpSock(a.dir))[0]);
+    expect(broker.created[0].args.at(-1)).toBe(hostMcpArgs({ unix: mcpSock(a.dir) })[0]);
+  }, 30_000);
+
+  it('viewer CREATEs dial FLEET_HOST_MCP_ADDR when the MCP is on TCP', async () => {
+    const broker = fakeBroker([]);
+    const port = await freePort();
+    const probe = createHttpServer((_q, r) => r.end('ok'));
+    await new Promise<void>((r) => probe.listen(0, '127.0.0.1', () => r()));
+    try {
+      const readyUrl = `http://127.0.0.1:${(probe.address() as AddressInfo).port}/healthz/ready`;
+      const a = await start({ brokerOps: broker.ops }, undefined, '', () => ({
+        FLEET_HOST_MCP_TCP_PORT: String(port), FLEET_HOST_MCP_ADDR: 'fleet-agent-host.platform-ops.svc:8082',
+        FLEET_HOST_REQUIRE_MESH: '1', FLEET_MESH_READY_URL: readyUrl
+      }));
+      await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+      const ws = new WebSocket(`${a.url.replace('http', 'ws')}/attach`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+      await new Promise((r, j) => { ws.once('open', r); ws.once('error', j); });
+      ws.send(jsonFrame(FrameType.CREATE, { id: 'v1', cols: 80, rows: 24 }));
+      await vi.waitFor(() => expect(broker.created).toHaveLength(1), { timeout: 5_000 });
+      ws.close();
+      expect(broker.created[0].args.at(-1)).toBe(hostMcpArgs({ tcp: 'fleet-agent-host.platform-ops.svc:8082' })[0]);
+    } finally {
+      probe.close();
+    }
   }, 30_000);
 
   it('a failed MCP start keeps the holder and retries until it serves', async () => {
@@ -227,6 +251,18 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     }, { timeout: 10_000 });
     const off = await t!.pool.query(`SELECT byte_offset FROM ${t!.schema}.host_ingest_offsets`);
     expect(off.rows.map((r) => Number(r.byte_offset))).toEqual([Buffer.byteLength(text)]);
+  }, 30_000);
+
+  it('the holder rescans transcripts every FLEET_HOST_RESCAN_MS', async () => {
+    const every = vi.spyOn(globalThis, 'setInterval');
+    try {
+      const a = await start({}, undefined, '', () => ({ FLEET_HOST_RESCAN_MS: '4321' }));
+      await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+      await storesOpen();
+      await vi.waitFor(() => expect(every.mock.calls.some((c) => c[1] === 4321)).toBe(true), { timeout: 10_000 });
+    } finally {
+      every.mockRestore();
+    }
   }, 30_000);
 
   describe('search.embedder (D79)', () => {
@@ -370,6 +406,35 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     await vi.waitFor(() => expect(a.exit).toHaveBeenCalledWith(1));
     expect(a.logs.join('\n')).toMatch(/write fenced off/);
   }, 30_000);
+
+  it('serves the MCP on its TCP port once the sidecar is ready, never without one', async () => {
+    const probe = createHttpServer((_q, r) => r.end('ok'));
+    await new Promise<void>((r) => probe.listen(0, '127.0.0.1', () => r()));
+    try {
+      const readyUrl = `http://127.0.0.1:${(probe.address() as AddressInfo).port}/healthz/ready`;
+      const tcpEnv = (port: number, url: string) => () => ({
+        FLEET_HOST_MCP_TCP_PORT: String(port), FLEET_HOST_MCP_ADDR: `127.0.0.1:${port}`, FLEET_HOST_REQUIRE_MESH: '1', FLEET_MESH_READY_URL: url
+      });
+      const p1 = await freePort();
+      const a = await start({}, undefined, '', tcpEnv(p1, readyUrl));
+      await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+      await vi.waitFor(async () => {
+        const [list] = await rpc({ host: '127.0.0.1', port: p1 }, [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }]);
+        expect(list.result.tools.map((x: { name: string }) => x.name)).toContain('list_sessions');
+      }, { timeout: 10_000 });
+      expect(existsSync(mcpSock(a.dir))).toBe(false);
+      await a.host.shutdown(0);
+
+      const p2 = await freePort();
+      const b = await start({ meshWaitMs: 300 }, undefined, '', tcpEnv(p2, `http://127.0.0.1:${await freePort()}/healthz/ready`));
+      await vi.waitFor(async () => expect(await leader(b.url)).toBe(200), { timeout: 10_000 });
+      await vi.waitFor(async () => expect(await (await fetch(`${b.url}/healthz`)).json()).toMatchObject({ status: 'unhealthy', mesh: 'missing' }), { timeout: 10_000 });
+      await new Promise((r) => setTimeout(r, 500));
+      await expect(rpc({ host: '127.0.0.1', port: p2 }, [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }])).rejects.toMatchObject({ code: 'ECONNREFUSED' });
+    } finally {
+      probe.close();
+    }
+  }, 40_000);
 });
 
 /** A TCP front for the test server (Unix socket or TCP) that refuses connections until opened. */

@@ -12,7 +12,7 @@ export async function serveCred(o: { env: NodeJS.ProcessEnv; log: Logger; proc: 
   if (!(await reloader.reload('start')) || !config) throw new Error(`host config rejected: ${env.configPath}`);
   const app = (config as HostConfig).github?.app;
   if (!app) throw new Error('serve needs github.appId, github.installationId and github.keyFile in the host config');
-  const server = await startCredHelper({ app, socketPath: env.credSocket, github: () => config!.github, log: o.log, apiBase: o.apiBase });
+  const server = await startCredHelper({ app, listen: { path: env.credSocket }, github: () => config!.github, log: o.log, apiBase: o.apiBase });
   const stopWatch = watchConfigDir(
     env.configPath,
     () => void reloader.reload('file change'),
@@ -22,6 +22,7 @@ export async function serveCred(o: { env: NodeJS.ProcessEnv; log: Logger; proc: 
   const onHup = (): void => void reloader.reload('SIGHUP');
   o.proc.on('SIGHUP', onHup);
   return {
+    port: server.port,
     close: async () => {
       stopWatch();
       o.proc.off('SIGHUP', onHup);
