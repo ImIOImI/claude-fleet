@@ -7,6 +7,7 @@
 
 import type { SessionListItem } from '../../preload';
 import type { WorkspacePublish } from '../../preload/publish';
+import { isMine, type Me, type SessionOwner } from '../../preload/sessionOwner';
 import {
   LOCAL_ORIGIN,
   appendSessionPage,
@@ -158,6 +159,18 @@ export function withRemote(local: SessionListItem[], remote: Remote | null): Ses
 }
 
 export const isRemoteRow = (s: SessionListItem): boolean => s.origin !== undefined && s.origin !== LOCAL_ORIGIN;
+
+export type OwnerFilter = 'everyone' | 'mine';
+
+/** A view filter only (D122): hosts serve every row to a read viewer either way. */
+export function filterByOwner<T extends { origin?: string; owner?: SessionOwner | null }>(rows: readonly T[], f: OwnerFilter, me: Me | null): T[] {
+  if (f === 'everyone') return [...rows];
+  return rows.filter((r) => r.origin === undefined || r.origin === LOCAL_ORIGIN || isMine(r.owner, me));
+}
+
+export function hasRemoteRows(rows: readonly SessionListItem[]): boolean {
+  return rows.some(isRemoteRow);
+}
 
 export function unavailableText(u: UnavailableSource[]): string | null {
   if (u.length === 0) return null;

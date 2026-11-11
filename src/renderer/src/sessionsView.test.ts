@@ -23,8 +23,11 @@ import {
   searchUnavailableText,
   unavailableText,
   withRemote,
-  publishTargetsMap
+  publishTargetsMap,
+  filterByOwner,
+  hasRemoteRows
 } from './sessionsView';
+import type { SessionOwner } from '../../preload/sessionOwner';
 
 // Minimal session shape — only what the scope logic touches.
 const S = (id: string, workspaceId: string): { id: string; workspaceId: string } => ({
@@ -423,5 +426,39 @@ describe('publishTargetsMap', () => {
       { id: 'L', kind: 'local', name: 'mine', publish: { to: ['R', 'gone'], since: { R: 1, gone: 1 } } },
       { id: 'C', kind: 'container', name: 'quiet' }
     ])).toEqual({ L: ['review-bot', 'gone'] });
+  });
+});
+
+describe('filterByOwner / hasRemoteRows', () => {
+  const R = '01JC0000000000000000000000';
+  const me = { provider: 'github', id: 7 };
+  const owner = (id: string, kind: SessionOwner['kind'] = 'user'): SessionOwner => ({ kind, provider: 'github', id, login: `u${id}`, name: null, avatarUrl: null });
+  const rows: Array<{ id: string; origin?: string; owner?: SessionOwner | null }> = [
+    { id: 'l' },
+    { id: 'L', origin: 'local' },
+    { id: 'm', origin: R, owner: owner('7') },
+    { id: 'o', origin: R, owner: owner('8') },
+    { id: 'n', origin: R, owner: null },
+    { id: 'b', origin: R, owner: owner('7', 'machine') }
+  ];
+  const ids = (xs: Array<{ id: string }>) => xs.map((x) => x.id);
+
+  it('Everyone keeps every row', () => {
+    expect(ids(filterByOwner(rows, 'everyone', me))).toEqual(['l', 'L', 'm', 'o', 'n', 'b']);
+  });
+  it('Mine keeps local rows and the remote rows the signed-in person started', () => {
+    expect(ids(filterByOwner(rows, 'mine', me))).toEqual(['l', 'L', 'm']);
+  });
+  it('Mine with nobody signed in keeps only local rows', () => {
+    expect(ids(filterByOwner(rows, 'mine', null))).toEqual(['l', 'L']);
+  });
+  it('Mine matches the account id, not the login text', () => {
+    const spoof: SessionOwner = { kind: 'user', provider: 'github', id: '8', login: 'u7', name: 'u7', avatarUrl: null };
+    expect(ids(filterByOwner([{ id: 's', origin: R, owner: spoof }], 'mine', me))).toEqual([]);
+  });
+  it('hasRemoteRows', () => {
+    expect(hasRemoteRows([])).toBe(false);
+    expect(hasRemoteRows([{ origin: 'local' } as never, { origin: undefined } as never])).toBe(false);
+    expect(hasRemoteRows([{ origin: R } as never])).toBe(true);
   });
 });
