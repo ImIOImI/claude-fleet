@@ -75,7 +75,7 @@ export async function startHostMcp(o: {
     }
     socks.add(sock);
     sock.on('close', () => socks.delete(sock));
-    serveMcpConnection(sock, o.workspaceId);
+    serveMcpConnection(sock, o.workspaceId, 'path' in o.listen ? 'unix' : 'tcp');
   });
   function reset(): void {
     releaseReadSource();

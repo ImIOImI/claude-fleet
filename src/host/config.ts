@@ -298,7 +298,6 @@ export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new HostConfigError(`FLEET_HOST_PORT ${portText} is not a port`);
   const mcpPort = envPort(env, 'FLEET_HOST_MCP_TCP_PORT');
   const mcpAddr = envHostPort(env, 'FLEET_HOST_MCP_ADDR');
-  if ((mcpPort === null) !== (mcpAddr === null)) throw new HostConfigError('FLEET_HOST_MCP_TCP_PORT and FLEET_HOST_MCP_ADDR are set together');
   const mcpSocket = env.FLEET_HOST_MCP_SOCKET || '/run/fleet/mcp.sock';
   if (!isAbsolute(mcpSocket)) throw new HostConfigError('FLEET_HOST_MCP_SOCKET must be an absolute path');
   // sun_path holds 108 bytes with the terminating NUL on Linux.

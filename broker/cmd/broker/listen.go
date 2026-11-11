@@ -15,10 +15,20 @@ import (
 
 // listen binds TCP when CLAUDE_FLEET_BROKER_TCP_PORT is set, else the Unix
 // socket. With CLAUDE_FLEET_BROKER_REQUIRE_MESH=1 it first needs the sidecar.
+// TCP is refused without the flag: it would serve the broker unauthenticated
+// on the pod IP (D96 also applies here).
 func listen(ctx context.Context, getenv func(string) string, meshWait time.Duration, logf func(string, ...any)) (net.Listener, string, error) {
-	switch v := getenv("CLAUDE_FLEET_BROKER_REQUIRE_MESH"); v {
-	case "", "0":
-	case "1":
+	requireMesh := getenv("CLAUDE_FLEET_BROKER_REQUIRE_MESH")
+	switch requireMesh {
+	case "", "0", "1":
+	default:
+		return nil, "", fmt.Errorf("CLAUDE_FLEET_BROKER_REQUIRE_MESH must be '', 0 or 1, got %q", requireMesh)
+	}
+	tcpPort := getenv("CLAUDE_FLEET_BROKER_TCP_PORT")
+	if tcpPort != "" && requireMesh != "1" {
+		return nil, "", fmt.Errorf("CLAUDE_FLEET_BROKER_TCP_PORT needs CLAUDE_FLEET_BROKER_REQUIRE_MESH=1")
+	}
+	if requireMesh == "1" {
 		url := getenv("FLEET_MESH_READY_URL")
 		if url == "" {
 			url = mesh.DefaultURL
@@ -26,11 +36,9 @@ func listen(ctx context.Context, getenv func(string) string, meshWait time.Durat
 		if err := mesh.WaitReady(ctx, url, meshWait, time.Second); err != nil {
 			return nil, "", fmt.Errorf("refusing to listen: %w", err)
 		}
-	default:
-		return nil, "", fmt.Errorf("CLAUDE_FLEET_BROKER_REQUIRE_MESH must be '', 0 or 1, got %q", v)
 	}
 	var lc net.ListenConfig
-	if port := getenv("CLAUDE_FLEET_BROKER_TCP_PORT"); port != "" {
+	if port := tcpPort; port != "" {
 		n, err := strconv.Atoi(port)
 		if err != nil || n < 1 || n > 65535 {
 			return nil, "", fmt.Errorf("CLAUDE_FLEET_BROKER_TCP_PORT must be an integer from 1 to 65535, got %q", port)

@@ -5,7 +5,7 @@ import { hostname } from 'node:os';
 import { AttachHub } from './attachHub.js';
 import { buildAuthContext, githubProviderFactory, type AuthContext, type ProviderFactory } from './auth.js';
 import { brokerOps as realBrokerOps, type BrokerOps } from './brokerOps.js';
-import { loadHostConfig, readHostEnv, type HostConfig } from './config.js';
+import { HostConfigError, loadHostConfig, readHostEnv, type HostConfig } from './config.js';
 import { createReloader, watchConfigDir } from './configReload.js';
 import type { ListenTarget } from './endpoint.js';
 import { startCredHelper, type CredServer } from './credServer.js';
@@ -98,6 +98,14 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   );
 
   const env = readHostEnv(opts.env ?? process.env);
+  if ((env.mcpPort !== null) !== (env.mcpAddr !== null)) {
+    uninstallGuards();
+    throw new HostConfigError('FLEET_HOST_MCP_TCP_PORT and FLEET_HOST_MCP_ADDR are set together');
+  }
+  if (!env.requireMesh && (env.credPort !== null || env.mcpPort !== null)) {
+    uninstallGuards();
+    throw new HostConfigError('FLEET_HOST_CRED_TCP_PORT and FLEET_HOST_MCP_TCP_PORT need FLEET_HOST_REQUIRE_MESH=1');
+  }
   const factory = opts.authFactory ?? githubProviderFactory;
   let config!: HostConfig;
   let auth!: AuthContext;
@@ -348,13 +356,20 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
       throw err;
     }
   }
-  await new Promise<void>((resolve, reject) => {
-    server.server.once('error', reject);
-    server.server.listen(env.port, '0.0.0.0', () => {
-      server.server.off('error', reject);
-      resolve();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.server.once('error', reject);
+      server.server.listen(env.port, '0.0.0.0', () => {
+        server.server.off('error', reject);
+        resolve();
+      });
     });
-  });
+  } catch (err) {
+    startAbort.abort();
+    await cred?.close();
+    uninstallGuards();
+    throw err;
+  }
   log.log('info', 'fleet-host listening', { port: env.port, workspaceId, workspace: config.workspace.name });
   if (config.db) {
     void bringUp().then(

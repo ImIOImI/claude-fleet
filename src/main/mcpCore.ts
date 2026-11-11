@@ -388,8 +388,8 @@ export function _setReadSourceForTests(rs: OwnedReadSource | null): void {
 export const OVERSIZE_ERROR = { jsonrpc: '2.0', id: null, error: { code: -32600, message: `request line exceeds ${MAX_LINE_BYTES} bytes` } };
 
 /** Serve one connection whose caller id the transport established. */
-export function serveMcpConnection(sock: Socket, callerId: string): void {
-  const conn = trackConnection('unix', callerId, sock);
+export function serveMcpConnection(sock: Socket, callerId: string, transport: 'unix' | 'tcp' = 'unix'): void {
+  const conn = trackConnection(transport, callerId, sock);
   sock.setEncoding('utf8');
   sock.on('data', lineSplitter((raw) => {
     const line = raw.trim();

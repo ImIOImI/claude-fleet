@@ -21,6 +21,11 @@ describe('parseHostConfig', () => {
     expect(() => parseHostConfig({ ...base, machines, github })).toThrow("machines[1].appId is this host's credential App; sessions hold its tokens");
   });
 
+  it('refuses the same machines grant when github.appId is the quoted YAML string', () => {
+    const github = { appId: '123456', installationId: 2, keyFile: '/k.pem' };
+    expect(() => parseHostConfig({ ...base, github })).toThrow("machines[0].appId is this host's credential App; sessions hold its tokens");
+  });
+
   it('parses workspace, identity and grants', () => {
     const c = parseHostConfig(base);
     expect(c.workspace).toEqual({ id: null, name: 'review-bot', description: 'PR reviewer', color: { hue: 210 } });
@@ -223,8 +228,9 @@ describe('readHostEnv', () => {
     expect(readHostEnv({ FLEET_HOST_MCP_TCP_PORT: '8082', FLEET_HOST_MCP_ADDR: 'fleet-agent-host.platform-ops.svc:8082' })).toMatchObject({
       mcpPort: 8082, mcpAddr: { host: 'fleet-agent-host.platform-ops.svc', port: 8082 }
     });
-    expect(() => readHostEnv({ FLEET_HOST_MCP_TCP_PORT: '8082' })).toThrow('FLEET_HOST_MCP_TCP_PORT and FLEET_HOST_MCP_ADDR are set together');
-    expect(() => readHostEnv({ FLEET_HOST_MCP_ADDR: 'h:8082' })).toThrow('FLEET_HOST_MCP_TCP_PORT and FLEET_HOST_MCP_ADDR are set together');
+    // The "set together" refusal moved to runHost (D86): readHostEnv alone just parses each.
+    expect(readHostEnv({ FLEET_HOST_MCP_ADDR: 'h:8082' })).toMatchObject({ mcpPort: null, mcpAddr: { host: 'h', port: 8082 } });
+    expect(readHostEnv({ FLEET_HOST_MCP_TCP_PORT: '8082' })).toMatchObject({ mcpPort: 8082, mcpAddr: null });
     expect(() => readHostEnv({ FLEET_HOST_MCP_TCP_PORT: '0', FLEET_HOST_MCP_ADDR: 'h:1' })).toThrow('FLEET_HOST_MCP_TCP_PORT 0 is not a port');
     expect(readHostEnv({ FLEET_HOST_MCP_SOCKET_GROUP: '1500' })).not.toHaveProperty('mcpSocketGroup');
   });

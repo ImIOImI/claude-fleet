@@ -159,11 +159,15 @@ describe('runHost', () => {
     writeFileSync(join(dir, 'key.pem'), gh.privatePem, { mode: 0o400 });
     const cfgPath = join(dir, 'config.yaml');
     writeFileSync(cfgPath, CONFIG + `github: { appId: 9, installationId: 8, keyFile: ${join(dir, 'key.pem')} }\n`);
+    const probe = createHttpServer((_q, r) => r.end('ok'));
+    await new Promise<void>((r) => probe.listen(0, '127.0.0.1', () => r()));
+    const probeUrl = `http://127.0.0.1:${(probe.address() as AddressInfo).port}/healthz/ready`;
     const [port, credPort] = [await freePort(), await freePort()];
     const host = await runHost({
       env: {
         FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'),
-        FLEET_HOST_CRED_SOCKET: join(dir, 'run', 'cred.sock'), FLEET_HOST_CRED_TCP_PORT: String(credPort)
+        FLEET_HOST_CRED_SOCKET: join(dir, 'run', 'cred.sock'), FLEET_HOST_CRED_TCP_PORT: String(credPort),
+        FLEET_HOST_REQUIRE_MESH: '1', FLEET_MESH_READY_URL: probeUrl
       },
       exit: vi.fn(), proc: new EventEmitter(), logSink: () => undefined, authFactory: () => ({ id: 'github', verify }),
       brokerOps: fakeBroker([]).ops, githubApiBase: gh.url
@@ -174,7 +178,84 @@ describe('runHost', () => {
     } finally {
       await host.shutdown(0);
       await gh.close();
+      probe.close();
     }
+  });
+
+  it('aborts startup when the :8080 listen fails; a pending credential server never opens afterwards', async () => {
+    const { startFakeGithubApp } = await import('./testGithubApp.js');
+    const { requestToken } = await import('./credCli.js');
+    const gh = await startFakeGithubApp({ appId: '9', installationId: '8', account: 'acme', repos: ['a'] });
+    const dir = mkdtempSync(join(tmpdir(), 'fh-listen-fail-'));
+    writeFileSync(join(dir, 'key.pem'), gh.privatePem, { mode: 0o400 });
+    const cfgPath = join(dir, 'config.yaml');
+    writeFileSync(cfgPath, CONFIG + `github: { appId: 9, installationId: 8, keyFile: ${join(dir, 'key.pem')} }\n`);
+    // Slow to answer: the :8080 failure (near-instant) and its abort must land first.
+    const probe = createHttpServer((_q, r) => void setTimeout(() => r.end('ok'), 300));
+    await new Promise<void>((r) => probe.listen(0, '127.0.0.1', () => r()));
+    const probeUrl = `http://127.0.0.1:${(probe.address() as AddressInfo).port}/healthz/ready`;
+    const port = await freePort();
+    const credPort = await freePort();
+    const blocker = createServer();
+    await new Promise<void>((r) => blocker.listen(port, '0.0.0.0', () => r()));
+    try {
+      await expect(runHost({
+        env: {
+          FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'),
+          FLEET_HOST_CRED_TCP_PORT: String(credPort), FLEET_HOST_REQUIRE_MESH: '1', FLEET_MESH_READY_URL: probeUrl
+        },
+        exit: vi.fn(), proc: new EventEmitter(), logSink: () => undefined, authFactory: () => ({ id: 'github', verify }),
+        brokerOps: fakeBroker([]).ops, githubApiBase: gh.url
+      })).rejects.toThrow(/EADDRINUSE/);
+      await new Promise((r) => setTimeout(r, 500));
+      await expect(requestToken({ host: '127.0.0.1', port: credPort }, { repositories: ['a'] })).rejects.toMatchObject({ code: 'ECONNREFUSED' });
+    } finally {
+      blocker.close();
+      probe.close();
+      await gh.close();
+    }
+  });
+
+  it('refuses FLEET_HOST_CRED_TCP_PORT without FLEET_HOST_REQUIRE_MESH=1', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fh-cred-tcp-refuse-'));
+    const cfgPath = join(dir, 'config.yaml');
+    writeFileSync(cfgPath, CONFIG);
+    const [port, credPort] = [await freePort(), await freePort()];
+    await expect(runHost({
+      env: {
+        FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'),
+        FLEET_HOST_CRED_TCP_PORT: String(credPort)
+      },
+      exit: vi.fn(), proc: new EventEmitter(), logSink: () => undefined, authFactory: () => ({ id: 'github', verify }), brokerOps: fakeBroker([]).ops
+    })).rejects.toThrow('FLEET_HOST_CRED_TCP_PORT and FLEET_HOST_MCP_TCP_PORT need FLEET_HOST_REQUIRE_MESH=1');
+  });
+
+  it('refuses FLEET_HOST_MCP_TCP_PORT without FLEET_HOST_REQUIRE_MESH=1', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fh-mcp-tcp-refuse-'));
+    const cfgPath = join(dir, 'config.yaml');
+    writeFileSync(cfgPath, CONFIG);
+    const [port, mcpPort] = [await freePort(), await freePort()];
+    await expect(runHost({
+      env: {
+        FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'),
+        FLEET_HOST_MCP_TCP_PORT: String(mcpPort), FLEET_HOST_MCP_ADDR: `127.0.0.1:${mcpPort}`
+      },
+      exit: vi.fn(), proc: new EventEmitter(), logSink: () => undefined, authFactory: () => ({ id: 'github', verify }), brokerOps: fakeBroker([]).ops
+    })).rejects.toThrow('FLEET_HOST_CRED_TCP_PORT and FLEET_HOST_MCP_TCP_PORT need FLEET_HOST_REQUIRE_MESH=1');
+  });
+
+  it('refuses FLEET_HOST_MCP_TCP_PORT and FLEET_HOST_MCP_ADDR set alone (D86, moved from readHostEnv)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fh-mcp-together-'));
+    const cfgPath = join(dir, 'config.yaml');
+    writeFileSync(cfgPath, CONFIG);
+    const [port, mcpPort] = [await freePort(), await freePort()];
+    await expect(runHost({
+      env: {
+        FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'),
+        FLEET_HOST_MCP_TCP_PORT: String(mcpPort), FLEET_HOST_REQUIRE_MESH: '1'
+      },
+      exit: vi.fn(), proc: new EventEmitter(), logSink: () => undefined, authFactory: () => ({ id: 'github', verify }), brokerOps: fakeBroker([]).ops
+    })).rejects.toThrow('FLEET_HOST_MCP_TCP_PORT and FLEET_HOST_MCP_ADDR are set together');
   });
 
   it('serves the configured workspace id after one start load', async () => {

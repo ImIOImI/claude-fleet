@@ -275,6 +275,16 @@ describe('startHostMcp on TCP', () => {
     expect(sessions.result.isError).toBeUndefined();
     expect(scopes).toEqual([[WS]]);
   });
+  it('logs the connection as tcp, not unix', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'hm-'));
+    const lines: string[] = [];
+    mcp = await startHostMcp({ listen: { port: 0, host: '127.0.0.1' }, workspaceId: WS, readSource: rs, log: createLogger((l) => lines.push(l)) });
+    const at = { host: '127.0.0.1', port: mcp.port! };
+    // An oversize line never counts as an rpc line, so the close is logged (as in the unix case above).
+    const [over] = await rpc(at, [{ jsonrpc: '2.0', id: 1, method: 'ping', params: { pad: 'x'.repeat(1 << 20) } }]);
+    expect(over.error.code).toBe(-32600);
+    await vi.waitFor(() => expect(lines.some((l) => /"msg":"mcp-conn-closed"/.test(l) && l.includes('mcp tcp connection'))).toBe(true));
+  });
   it('keeps the connection cap and 1 MiB line cap, and treats a token-shaped first line as a bad request', async () => {
     dir = mkdtempSync(join(tmpdir(), 'hm-'));
     mcp = await startHostMcp({ listen: { port: 0, host: '127.0.0.1' }, workspaceId: WS, readSource: rs, log: createLogger(() => undefined), maxConnections: 1 });

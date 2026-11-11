@@ -71,20 +71,37 @@ func TestRequireMeshListensOnTCPWhenReady(t *testing.T) {
 	c.Close()
 }
 
-func TestTCPWithoutTheGuardNeverProbes(t *testing.T) {
-	env := envOf(map[string]string{"CLAUDE_FLEET_BROKER_TCP_PORT": freeTCPPort(t), "FLEET_MESH_READY_URL": "http://127.0.0.1:1/never"})
-	ln, _, err := listen(context.Background(), env, time.Millisecond, t.Logf)
-	if err != nil {
-		t.Fatal(err)
+// TCP without the mesh flag on is refused before any probe (D96): a
+// plaintext pod-IP listener is never opened, no matter what
+// FLEET_MESH_READY_URL says.
+func TestTCPWithoutMeshFlagRefusedBeforeProbing(t *testing.T) {
+	for _, v := range []string{"", "0"} {
+		env := envOf(map[string]string{
+			"CLAUDE_FLEET_BROKER_TCP_PORT":     freeTCPPort(t),
+			"CLAUDE_FLEET_BROKER_REQUIRE_MESH": v,
+			"FLEET_MESH_READY_URL":             "http://127.0.0.1:1/never",
+		})
+		ln, _, err := listen(context.Background(), env, time.Millisecond, t.Logf)
+		if err == nil {
+			ln.Close()
+			t.Fatalf("%q: listened without the mesh flag", v)
+		}
+		if !strings.Contains(err.Error(), "CLAUDE_FLEET_BROKER_TCP_PORT") || !strings.Contains(err.Error(), "CLAUDE_FLEET_BROKER_REQUIRE_MESH=1") {
+			t.Fatalf("%q: err = %v", v, err)
+		}
 	}
-	ln.Close()
 }
 
-// Anything outside 1-65535 refuses to start.
+// Anything outside 1-65535 refuses to start, once the mesh flag itself clears.
 func TestInvalidTCPPortRefuses(t *testing.T) {
+	url := readiness(t, 200)
 	for _, p := range []string{"0", "-1", "65536", "99999", "abc", " 7070"} {
-		env := envOf(map[string]string{"CLAUDE_FLEET_BROKER_TCP_PORT": p})
-		ln, _, err := listen(context.Background(), env, time.Millisecond, t.Logf)
+		env := envOf(map[string]string{
+			"CLAUDE_FLEET_BROKER_TCP_PORT":     p,
+			"CLAUDE_FLEET_BROKER_REQUIRE_MESH": "1",
+			"FLEET_MESH_READY_URL":             url,
+		})
+		ln, _, err := listen(context.Background(), env, time.Second, t.Logf)
 		if err == nil {
 			ln.Close()
 			t.Fatalf("port %q: listened", p)
@@ -131,14 +148,16 @@ func TestRequireMeshRefusesBeforeBindingUnixSocket(t *testing.T) {
 	}
 }
 
-// Unset or "0" leaves the guard off; anything else refuses to start (D95
-// also applies to the broker's CLAUDE_FLEET_BROKER_REQUIRE_MESH).
+// Unset or "0" leaves the guard off (exercised on the Unix socket, since TCP
+// now requires the flag on regardless (D96)); anything else refuses to start
+// (D95 also applies to the broker's CLAUDE_FLEET_BROKER_REQUIRE_MESH).
 func TestRequireMeshOnlyOnOne(t *testing.T) {
-	for _, v := range []string{"", "0"} {
+	d := t.TempDir()
+	for i, v := range []string{"", "0"} {
 		env := envOf(map[string]string{
 			"CLAUDE_FLEET_BROKER_REQUIRE_MESH": v,
 			"FLEET_MESH_READY_URL":             readiness(t, 503),
-			"CLAUDE_FLEET_BROKER_TCP_PORT":     freeTCPPort(t),
+			"CLAUDE_FLEET_BROKER_SOCKET":       filepath.Join(d, strconv.Itoa(i)+".sock"),
 		})
 		ln, _, err := listen(context.Background(), env, 50*time.Millisecond, t.Logf)
 		if err != nil {

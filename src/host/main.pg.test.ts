@@ -136,14 +136,24 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
   it('viewer CREATEs dial FLEET_HOST_MCP_ADDR when the MCP is on TCP', async () => {
     const broker = fakeBroker([]);
     const port = await freePort();
-    const a = await start({ brokerOps: broker.ops }, undefined, '', () => ({ FLEET_HOST_MCP_TCP_PORT: String(port), FLEET_HOST_MCP_ADDR: 'fleet-agent-host.platform-ops.svc:8082' }));
-    await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
-    const ws = new WebSocket(`${a.url.replace('http', 'ws')}/attach`, { headers: { Authorization: `Bearer ${TOKEN}` } });
-    await new Promise((r, j) => { ws.once('open', r); ws.once('error', j); });
-    ws.send(jsonFrame(FrameType.CREATE, { id: 'v1', cols: 80, rows: 24 }));
-    await vi.waitFor(() => expect(broker.created).toHaveLength(1), { timeout: 5_000 });
-    ws.close();
-    expect(broker.created[0].args.at(-1)).toBe(hostMcpArgs({ tcp: 'fleet-agent-host.platform-ops.svc:8082' })[0]);
+    const probe = createHttpServer((_q, r) => r.end('ok'));
+    await new Promise<void>((r) => probe.listen(0, '127.0.0.1', () => r()));
+    try {
+      const readyUrl = `http://127.0.0.1:${(probe.address() as AddressInfo).port}/healthz/ready`;
+      const a = await start({ brokerOps: broker.ops }, undefined, '', () => ({
+        FLEET_HOST_MCP_TCP_PORT: String(port), FLEET_HOST_MCP_ADDR: 'fleet-agent-host.platform-ops.svc:8082',
+        FLEET_HOST_REQUIRE_MESH: '1', FLEET_MESH_READY_URL: readyUrl
+      }));
+      await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+      const ws = new WebSocket(`${a.url.replace('http', 'ws')}/attach`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+      await new Promise((r, j) => { ws.once('open', r); ws.once('error', j); });
+      ws.send(jsonFrame(FrameType.CREATE, { id: 'v1', cols: 80, rows: 24 }));
+      await vi.waitFor(() => expect(broker.created).toHaveLength(1), { timeout: 5_000 });
+      ws.close();
+      expect(broker.created[0].args.at(-1)).toBe(hostMcpArgs({ tcp: 'fleet-agent-host.platform-ops.svc:8082' })[0]);
+    } finally {
+      probe.close();
+    }
   }, 30_000);
 
   it('a failed MCP start keeps the holder and retries until it serves', async () => {
