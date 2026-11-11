@@ -12,7 +12,7 @@ export interface VaultReader {
 
 /** The vault bag, the model endpoint's API key and the GitHub sign-in. Throws (so nothing is sent) when a declared or in-use secret can't be read. */
 export async function publishSecretValues(
-  spec: { id: string; env: { secretKeys: string[] }; endpointId?: string },
+  spec: { id: string; env: { secretKeys: string[] }; authMode?: string; endpointId?: string },
   vault: VaultReader,
   githubToken: () => Promise<string | null>,
   endpoint: (id: string) => Promise<{ hasApiKey: boolean } | null> = async () => null
@@ -26,8 +26,9 @@ export async function publishSecretValues(
   }
   if (spec.endpointId && (await endpoint(spec.endpointId))?.hasApiKey) {
     const value = await vault.getSecret(`${ENDPOINT_VAULT_PREFIX}${spec.endpointId}`, ENDPOINT_KEY);
-    if (!value) throw new Error('the model endpoint’s API key can’t be read from the vault');
-    out.push({ key: ENDPOINT_KEY, value });
+    // Only an endpoint in use is required; a leftover endpointId (authMode switched away) is scrubbed when readable.
+    if (value) out.push({ key: ENDPOINT_KEY, value });
+    else if (spec.authMode === 'endpoint') throw new Error('the model endpoint’s API key can’t be read from the vault');
   }
   const token = await githubToken();
   if (token) out.push({ key: 'GITHUB_TOKEN', value: token });

@@ -27,7 +27,7 @@ const BASE_ROWS: Row[] = [
 function rig(o: {
   manifests?: PublisherManifest[]; publish?: PublisherDeps['publish']; secrets?: PublisherDeps['secretValues'];
   withheld?: string[]; schedule?: PublisherDeps['schedule']; rows?: Row[]; page?: number; cursors?: Map<string, number>;
-  setCursor?: PublisherDeps['setCursor']; eventsError?: () => Error | null;
+  setCursor?: PublisherDeps['setCursor']; eventsError?: () => Error | null; beforeWithheld?: () => Promise<void>;
 } = {}) {
   const sent: Array<{ url: string; batch: PublishBatch<ScrubbedLine> }> = [];
   const cursors = o.cursors ?? new Map<string, number>();
@@ -59,14 +59,18 @@ function rig(o: {
     },
     getCursor: async (s, tg) => cursors.get(`${s}>${tg}`) ?? 0,
     setCursor: o.setCursor ?? (async (s, tg, id) => void cursors.set(`${s}>${tg}`, id)),
-    withheld: async () => new Set(withheld),
+    withheld: async () => {
+      const snapshot = new Set(withheld);
+      await o.beforeWithheld?.();
+      return snapshot;
+    },
     log: (e) => void logs.push(e),
     now: () => t,
     schedule: o.schedule ?? ((fn) => { timers.push(fn); return () => undefined; })
   }, { page: o.page });
   const texts = () => sent.flatMap((x) => x.batch.events.map((l) => JSON.parse(l).message.content as string));
   return {
-    texts, p, sent, publish, cursors, logs, eventsFor, rows, reads, withheld,
+    texts, p, sent, publish, cursors, logs, eventsFor, rows, reads, withheld, timers,
     setManifests: (m: PublisherManifest[]) => void (manifests = m),
     advance: (ms: number) => void (t += ms),
     /** One bump-triggered pass, run to completion. */
@@ -74,7 +78,7 @@ function rig(o: {
       p.bump(ws);
       timers.pop()!();
       await new Promise((ok) => setTimeout(ok, 0));
-      await p.idle(ws);
+      await p.drain(ws);
     }
   };
 }
@@ -183,6 +187,59 @@ describe('startPublisher', () => {
     release();
     await Promise.all([swept, waiting]);
     expect(r.sent).toHaveLength(1);
+  });
+
+  it('idle resolves once the send in flight finishes, even while bumps keep re-running slow passes', async () => {
+    const gates: Array<() => void> = [];
+    const r = rig({ publish: (_u, b) => new Promise((ok) => gates.push(() => ok({ ok: true, accepted: b.events.length, inserted: 0 }))) });
+    const swept = r.p.sweep();
+    await vi.waitFor(() => expect(gates).toHaveLength(1));
+    r.rows.push({ ws: SRC, id: 5, sessionId: S2, rawJsonl: msg('more'), started: 6_000 });
+    r.p.bump(SRC);
+    r.timers.pop()!();
+    await new Promise((ok) => setTimeout(ok, 0));
+    let idle = false;
+    const waiting = r.p.idle(SRC).then(() => void (idle = true));
+    await new Promise((ok) => setTimeout(ok, 5));
+    expect(idle).toBe(false);
+    gates[0]();
+    await vi.waitFor(() => expect(gates).toHaveLength(2));
+    await Promise.race([waiting, new Promise((_, no) => setTimeout(() => no(new Error('idle did not resolve')), 500))]);
+    expect(idle).toBe(true);
+    gates[1]();
+    await swept;
+    await r.p.drain(SRC);
+    expect(r.texts()).toEqual(['uses [redacted:API_TOKEN] and [redacted]', 'second', 'more']);
+  });
+
+  it('idle waits for a withheld re-check already under way, so a withhold that lands during it is never outrun', async () => {
+    let releaseRead!: () => void;
+    let reads = 0;
+    const read = new Promise<void>((ok) => (releaseRead = ok));
+    const order: string[] = [];
+    const r = rig({
+      beforeWithheld: async () => { if (++reads === 2) await read; },
+      publish: async (_u, b) => { order.push('send'); return { ok: true, accepted: b.events.length, inserted: 0 }; }
+    });
+    const swept = r.p.sweep();
+    await vi.waitFor(() => expect(reads).toBe(2));
+    r.withheld.add(S2);
+    const waiting = r.p.idle(SRC).then(() => void order.push('idle'));
+    await new Promise((ok) => setTimeout(ok, 5));
+    expect(order).toEqual([]);
+    releaseRead();
+    await Promise.all([swept, waiting]);
+    expect(order).toEqual(['send', 'idle']);
+  });
+
+  it('opting out mid-page sends no further batch', async () => {
+    const rows = Array.from({ length: 6 }, (_, i): Row => ({ ws: SRC, id: i + 1, sessionId: i % 2 ? S1 : S2, rawJsonl: msg(`n${i}`), started: 6_000 }));
+    let r!: ReturnType<typeof rig>;
+    r = rig({ rows, publish: async (_u, b) => { r.setManifests([local(SRC, []), remote(R1)]); r.cursors.delete(`${SRC}>${R1}`); return { ok: true, accepted: b.events.length, inserted: 0 }; } });
+    await r.p.sweep();
+    expect(r.reads).toHaveLength(1);
+    expect(r.publish).toHaveBeenCalledTimes(1);
+    expect(r.cursors.has(`${SRC}>${R1}`)).toBe(false);
   });
 
   it('opting out mid-backlog stops the pass and leaves the cursor deleted', async () => {

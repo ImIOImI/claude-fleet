@@ -15,6 +15,7 @@ export const PUBLISH_SIGNED_OUT_MS = 300_000;
 const SKIP_STATUSES = new Set([400, 409, 413]);
 
 export type PublisherManifest = Pick<WorkspaceSpec, 'id' | 'kind' | 'env' | 'remote' | 'createdAt' | 'endpointId'> & {
+  authMode?: WorkspaceSpec['authMode'];
   publish?: { to: string[]; since: Record<string, number> };
 };
 
@@ -42,10 +43,18 @@ export interface PublisherDeps {
 export interface Publisher {
   /** A workspace ingested events: publish after a short quiet period. */
   bump(workspaceId: string): void;
-  /** Every opted-in (workspace, target) pair now; also runs on a timer. */
+  /**
+   * Every opted-in (workspace, target) pair now. Only the timer calls it outside tests: it re-arms after each sweep
+   * finishes, and the re-scan window in `pass` relies on sweeps being at least `sweepMs` apart.
+   */
   sweep(): Promise<void>;
-  /** Resolves once no pass for any of the workspace's targets is running. Unpublish: withhold, await this, then DELETE. */
+  /**
+   * Resolves once the workspace's sends in flight now have finished. A send re-checks withheld first, so after
+   * withhold + idle no send of that session is pending or can start. Unpublish: withhold, await this, then DELETE.
+   */
   idle(workspaceId: string): Promise<void>;
+  /** Resolves once no pass of the workspace is running, re-runs included; may not settle under steady ingest (tests). */
+  drain(workspaceId: string): Promise<void>;
   stop(): void;
 }
 
@@ -54,6 +63,8 @@ interface Pair { spec: PublisherManifest; target: string; url: string; since: nu
 interface PairState {
   since: number;
   running: Promise<void> | null;
+  /** The span from the per-batch withheld/pair re-check through the host's reply; never rejects. */
+  sending: Promise<void> | null;
   again: Kind | null;
   retryAt: number;
   attempt: number;
@@ -159,10 +170,20 @@ export function startPublisher(d: PublisherDeps, o: { debounceMs?: number; sweep
         if (stopped) return;
         const covered = i;
         while (i < fresh.length && fresh[i].id <= b.lastId) i++;
-        // Re-read per batch: an unpublish withholds, waits for idle(), then deletes on the host.
-        if (b.batch && !(await d.withheld(ws)).has(b.batch.sessionId)) {
+        if (b.batch) {
+          const batch = b.batch;
+          const pair = p;
+          // One span for idle(): a withhold or opt-out that lands before idle() snapshots it is either seen here or awaited.
+          const step = (async (): Promise<'gone' | 'withheld' | 'sent'> => {
+            if (!(await current(pair))) return 'gone';
+            if ((await d.withheld(ws)).has(batch.sessionId)) return 'withheld';
+            await d.publish(pair.url, batch);
+            return 'sent';
+          })();
+          st.sending = step.then(() => undefined, () => undefined);
+          let outcome: 'gone' | 'withheld' | 'sent' | 'refused';
           try {
-            await d.publish(p.url, b.batch);
+            outcome = await step;
           } catch (err) {
             const e = err instanceof RemoteError ? err : null;
             if (e?.status === undefined || !SKIP_STATUSES.has(e.status)) {
@@ -170,8 +191,12 @@ export function startPublisher(d: PublisherDeps, o: { debounceMs?: number; sweep
               return fail(st, ws, 'publish-failed', (err as Error).message, signedOut ? PUBLISH_SIGNED_OUT_MS : Math.max(backoff(st), e?.retryAfterMs ?? 0));
             }
             d.log({ level: 'warn', type: 'publish-batch-refused', message: `the host refused a batch (${e.status}); skipped: ${e.message}`, workspaceId: ws });
+            outcome = 'refused';
+          } finally {
+            st.sending = null;
           }
-          for (const r of fresh.slice(covered, i)) st.seen.add(r.id);
+          if (outcome === 'gone') return reset(st, st.since);
+          if (outcome !== 'withheld') for (const r of fresh.slice(covered, i)) st.seen.add(r.id);
         }
         st.pos = Math.max(st.pos, b.lastId);
       }
@@ -194,7 +219,7 @@ export function startPublisher(d: PublisherDeps, o: { debounceMs?: number; sweep
   function run(p: Pair, kind: Kind): Promise<void> {
     const key = `${p.spec.id}>${p.target}`;
     let st = states.get(key);
-    if (!st) states.set(key, (st = { since: p.since, running: null, again: null, retryAt: 0, attempt: 0, failing: null, pos: null, marks: [0, 0], seen: new Set() }));
+    if (!st) states.set(key, (st = { since: p.since, running: null, sending: null, again: null, retryAt: 0, attempt: 0, failing: null, pos: null, marks: [0, 0], seen: new Set() }));
     if (st.running) {
       // Rows ingested after the running pass read its last page would otherwise wait for the next sweep.
       if (kind === 'sweep' || !st.again) st.again = kind;
@@ -246,6 +271,9 @@ export function startPublisher(d: PublisherDeps, o: { debounceMs?: number; sweep
     },
     sweep,
     async idle(ws) {
+      await Promise.all([...states].flatMap(([key, st]) => (key.startsWith(`${ws}>`) && st.sending ? [st.sending] : [])));
+    },
+    async drain(ws) {
       for (;;) {
         const running = [...states].flatMap(([key, st]) => (key.startsWith(`${ws}>`) && st.running ? [st.running] : []));
         if (!running.length) return;
