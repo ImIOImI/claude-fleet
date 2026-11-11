@@ -259,9 +259,13 @@ CREATE INDEX idx_transcript_offsets_session ON transcript_offsets (session_id);
 
 // SQLite's (session_id, type) index ends in the rowid (= id), so a per-type
 // walk in id order needs no sort; Postgres needs the id spelled out (#583).
+// Build first, swap last: the build holds SHARE (reads continue); only the
+// drop and rename need ACCESS EXCLUSIVE, briefly.
 const EVENTS_SESSION_TYPE_ID_V19 = `
+DROP INDEX IF EXISTS idx_events_session_type_v19;
+CREATE INDEX idx_events_session_type_v19 ON events (session_id, type, id);
 DROP INDEX IF EXISTS idx_events_session_type;
-CREATE INDEX idx_events_session_type ON events (session_id, type, id);
+ALTER INDEX idx_events_session_type_v19 RENAME TO idx_events_session_type;
 `;
 
 export const STATE_PG_TRACK: PgTrack = {

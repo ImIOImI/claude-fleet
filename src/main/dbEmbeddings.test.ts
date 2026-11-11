@@ -91,6 +91,27 @@ describe('embeddings schema + helpers', () => {
     expect(runs).toHaveLength(3);
   });
 
+  it.skipIf(!isPg)('ingestBatch waits for another connection holding the session\'s ingest lock (#583)', async () => {
+    // Advisory locks are database-wide, so the session id is unique to this run.
+    const sid = `ses-lock-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const other = await st.pg!.pool.connect();
+    try {
+      await other.query('BEGIN');
+      await other.query('SELECT pg_advisory_xact_lock(7340213, hashtext($1))', [sid]);
+      let done = false;
+      const ingest = ingestBatch(WS, sid, [userLine('l1', 'locked')]).then(() => { done = true; });
+      await new Promise((r) => setTimeout(r, 500));
+      expect(done).toBe(false);
+      await other.query('COMMIT');
+      await ingest;
+      expect(done).toBe(true);
+      expect(await unembeddedTurnEvents(sid, EMBED_MODEL_ID)).toHaveLength(1);
+    } finally {
+      await other.query('ROLLBACK').catch(() => undefined);
+      other.release();
+    }
+  });
+
   it.skipIf(isPg)('the pending-turn reads walk idx_events_session_type with no sort (#583)', async () => {
     const d = (await withRawSqlite((raw) => raw))!;
     const boundary = explainPlan(d, turnBoundaryQuery(stateKysely(), SES, 'user', EMBED_MODEL_ID));
