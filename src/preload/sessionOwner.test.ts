@@ -35,6 +35,27 @@ describe('ownerName', () => {
     expect(ownerName(7)).toBeNull();
     expect(ownerName(null)).toBeNull();
   });
+
+  it('C1 and line/paragraph separators become a space; format characters vanish', () => {
+    expect(ownerName('A\u0085B')).toBe('A B');
+    expect(ownerName('A\u009bB')).toBe('A B');
+    expect(ownerName('A\u2028B\u2029C')).toBe('A B C');
+    expect(ownerName('a\u200db')).toBe('ab');
+    expect(ownerName('a\u00adb\u2066c')).toBe('abc');
+    for (const s of ['A\u0085B', 'A\u009bB', 'x\u0080\u009fy']) expect(ownerName(s)).not.toMatch(/[\u0080-\u009f]/);
+  });
+
+  it('NFC, capped by code point: an emoji at the boundary stays whole', () => {
+    expect(ownerName('Zoe\u0301')).toBe('Zo\u00e9');
+    const s = ownerName(`${'x'.repeat(63)}\u{1F600}tail`)!;
+    expect(s).toBe(`${'x'.repeat(63)}\u{1F600}`);
+    expect(s).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+    expect(Array.from(ownerName('a\u{1F600}'.repeat(50))!)).toHaveLength(64);
+  });
+
+  it('a name with no letter or digit is null', () => {
+    for (const s of ['\u3164', '\u3164\u3164', '\u2800', '   ', '\u115f\u1160\uffa0', '\u0301', '-.-']) expect(ownerName(s), JSON.stringify(s)).toBeNull();
+  });
 });
 
 describe('parseSessionOwner', () => {

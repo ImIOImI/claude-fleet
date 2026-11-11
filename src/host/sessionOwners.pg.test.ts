@@ -59,11 +59,25 @@ describe.skipIf(!isPg)('sessionOwnerStore', () => {
     expect(m.get(S2)).toEqual(bob);
   });
 
-  it('the earliest row owns a claude session: a resume by someone else does not take it over', async () => {
+  it('the first row owns a claude session: a later insert with an earlier clock or a smaller broker id never takes it over', async () => {
     const s = await rig();
     await s.record(claim('tab-b', S1, bob, 20));
     await s.record(claim('tab-a', S1, ann, 10));
-    expect((await s.ownersOf([S1], [HOSTED])).get(S1)).toEqual(ann);
+    await s.record(claim('tab-0', S1, ann, 20));
+    expect((await s.ownersOf([S1], [HOSTED])).get(S1)).toEqual(bob);
+    const rows = await st!.pg!.pool.query(`SELECT broker_session_id, started_at FROM ${st!.pg!.schema}.session_owners ORDER BY started_at, broker_session_id`);
+    expect(rows.rows.map((r: { broker_session_id: string; started_at: string }) => [r.broker_session_id, Number(r.started_at)]))
+      .toEqual([['tab-b', 20], ['tab-a', 21], ['tab-0', 22]]);
+  });
+
+  it('a later insert keeps its own clock when that is already later', async () => {
+    const s = await rig();
+    await s.record(claim('tab-b', S1, bob, 20));
+    await s.record(claim('tab-a', S1, ann, 50));
+    await s.record(claim('tab-c', S2, ann, 5));
+    const rows = await st!.pg!.pool.query(`SELECT broker_session_id, started_at FROM ${st!.pg!.schema}.session_owners ORDER BY broker_session_id`);
+    expect(rows.rows.map((r: { broker_session_id: string; started_at: string }) => [r.broker_session_id, Number(r.started_at)]))
+      .toEqual([['tab-a', 50], ['tab-b', 20], ['tab-c', 5]]);
   });
 
   it('release drops only the row it names', async () => {

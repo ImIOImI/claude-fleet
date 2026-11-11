@@ -79,9 +79,11 @@ export function sessionOwnerStore(k: () => Kysely<StateDb>, workspaceId: string)
       const o = parseSessionOwner(c.owner);
       if (!o) throw new Error("session owner can't be recorded");
       return k().transaction().execute(async (trx) => {
+        // Strictly after every existing row, so a skewed clock (failover) or a smaller broker id never takes ownership.
         const r = await sql<{ broker_session_id: string }>`
           INSERT INTO session_owners (broker_session_id, session_id, workspace_id, kind, provider, account_id, login, name, avatar_url, started_at)
-          VALUES (${c.brokerSessionId}, ${c.sessionId}, ${workspaceId}, ${o.kind}, ${o.provider}, ${o.id}, ${o.login}, ${o.name}, ${o.avatarUrl}, ${c.startedAt})
+          VALUES (${c.brokerSessionId}, ${c.sessionId}, ${workspaceId}, ${o.kind}, ${o.provider}, ${o.id}, ${o.login}, ${o.name}, ${o.avatarUrl},
+            GREATEST(${c.startedAt}::bigint, (SELECT COALESCE(max(started_at) + 1, 0) FROM session_owners WHERE session_id = ${c.sessionId} AND workspace_id = ${workspaceId})))
           ON CONFLICT (broker_session_id, session_id) DO NOTHING
           RETURNING broker_session_id`.execute(trx);
         return r.rows.length > 0;

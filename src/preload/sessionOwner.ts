@@ -30,12 +30,15 @@ export const AUTOMATION_LOGIN = 'automation';
 
 /** No leading hyphen, so a login is never read as an option. */
 export const OWNER_LOGIN_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
-const BOT_LOGIN_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\[bot\]$/;
+export const BOT_LOGIN_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\[bot\]$/;
 const ACCOUNT_ID_RE = /^[1-9][0-9]{0,19}$/;
 const WORKSPACE_ID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 // An exact match, not URL parsing: no userinfo, port, other path or extra query can pass.
 const AVATAR_RE = /^https:\/\/avatars\.githubusercontent\.com\/u\/[1-9][0-9]{0,19}(?:\?v=[0-9]{1,4})?$/;
-const CONTROL_RE = /[\x00-\x1f\x7f\p{Cf}]+/gu;
+const CONTROL_RE = /[\p{Cc}\p{Zl}\p{Zp}]+/gu;
+// Default_Ignorable also covers the Hangul fillers, which are letters that render as nothing.
+const INVISIBLE_RE = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
+const VISIBLE_RE = /[\p{L}\p{N}]/u;
 const KINDS: ReadonlySet<string> = new Set(['user', 'machine', 'automation', 'publisher']);
 
 export function githubAvatarUrl(raw: unknown): string | null {
@@ -44,8 +47,9 @@ export function githubAvatarUrl(raw: unknown): string | null {
 
 export function ownerName(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;
-  const s = raw.replace(CONTROL_RE, ' ').replace(/\s+/g, ' ').trim().slice(0, MAX_OWNER_NAME).trim();
-  return s || null;
+  const s = raw.normalize('NFC').replace(INVISIBLE_RE, '').replace(CONTROL_RE, ' ').replace(/\s+/gu, ' ').trim();
+  const capped = Array.from(s).slice(0, MAX_OWNER_NAME).join('').trim();
+  return VISIBLE_RE.test(capped) ? capped : null;
 }
 
 export function parseSessionOwner(v: unknown): SessionOwner | null {
