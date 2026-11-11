@@ -11,6 +11,7 @@ import {
 } from './perf.js';
 import { setSqliteQueryObserver } from './store/kysely.js';
 import { armSentinel, disarmSentinel, sentinelStatus } from './perfSentinel.js';
+import { recordScanSpans } from './recursiveDirWatcher.js';
 import type { EffectivePerfConfig } from './perfConfig.js';
 import type Database from 'better-sqlite3';
 
@@ -515,5 +516,21 @@ describe('memory sampling (mem rows)', () => {
     sampleMemory();
     await shutdownPerf();
     expect(memRows()).toEqual([]);
+  });
+});
+
+describe('watcher scan spans', () => {
+  it('records every scan as an app-global claude_fleet.watcher.scan row, however short', async () => {
+    initPerf(store, ON);
+    const t = Date.now();
+    recordScanSpans('jsonl')({ root: '/state/ws/.claude/projects/-workspace', reason: 'overflow', files: 812, dirs: 40, startMs: t, endMs: t + 3 });
+    await shutdownPerf();
+    const row = db.prepare(`SELECT name, dur_ms, workspace_id, meta FROM perf_events WHERE name = 'claude_fleet.watcher.scan'`).get() as
+      { name: string; dur_ms: number; workspace_id: string | null; meta: string };
+    expect(row.workspace_id).toBeNull();
+    expect(row.dur_ms).toBeCloseTo(3, 0);
+    const meta = JSON.parse(row.meta);
+    expect(meta).toMatchObject({ watcher: 'jsonl', reason: 'overflow', files: 812, dirs: 40 });
+    expect(meta.root_id).toMatch(/^[0-9a-f]{8}$/);
   });
 });

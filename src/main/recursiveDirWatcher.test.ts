@@ -135,3 +135,55 @@ describe('RecursiveDirWatcher recovery', () => {
     expect(fakes).toHaveLength(2);
   });
 });
+
+describe('RecursiveDirWatcher scan reporting', () => {
+  type Scan = { root: string; reason: string; files: number; dirs: number; startMs: number; endMs: number };
+  const fakeWatch = () => {
+    let listener: ((ev: string, f: string | null) => void) | null = null;
+    const fake = Object.assign(new EventEmitter(), { close: () => undefined }) as unknown as FSWatcher;
+    return { fire: (f: string | null) => listener!('rename', f), watchFn: (_r: string, l: (ev: string, f: string | null) => void) => { listener = l; return fake; } };
+  };
+
+  it('reports initial, overflow, unresolvable and new-dir scans with file and dir counts', async () => {
+    mkdirSync(join(root, 's', 'subagents'), { recursive: true });
+    writeFileSync(join(root, 'a.jsonl'), '1\n');
+    writeFileSync(join(root, 's', 'subagents', 'b.jsonl'), '1\n');
+    const scans: Scan[] = [];
+    const fw = fakeWatch();
+    const rw = new RecursiveDirWatcher({ depth: 2, watchFn: fw.watchFn, onScan: (s) => scans.push(s) });
+    rw.add(root);
+    await waitFor(() => scans.length === 1);
+    expect(scans[0]).toMatchObject({ root, reason: 'initial', files: 2, dirs: 3 });
+    expect(scans[0].endMs).toBeGreaterThanOrEqual(scans[0].startMs);
+
+    fw.fire(null);
+    await waitFor(() => scans.length === 2);
+    expect(scans[1]).toMatchObject({ reason: 'overflow', files: 2 });
+
+    fw.fire(join('ce', 'gone.jsonl'));
+    await waitFor(() => scans.length === 3);
+    expect(scans[2]).toMatchObject({ reason: 'unresolvable', files: 2 });
+
+    mkdirSync(join(root, 'n'));
+    writeFileSync(join(root, 'n', 'c.jsonl'), '1\n');
+    fw.fire('n');
+    await waitFor(() => scans.length === 4);
+    expect(scans[3]).toMatchObject({ reason: 'new-dir', files: 1, dirs: 1 });
+    await rw.close();
+  });
+
+  it('a plain file event or a delete reports no scan', async () => {
+    writeFileSync(join(root, 'a.jsonl'), '1\n');
+    const scans: Scan[] = [];
+    const fw = fakeWatch();
+    const rw = new RecursiveDirWatcher({ depth: 2, watchFn: fw.watchFn, onScan: (s) => scans.push(s) });
+    rw.add(root);
+    await waitFor(() => scans.length === 1);
+    fw.fire('a.jsonl');
+    unlinkSync(join(root, 'a.jsonl'));
+    fw.fire('a.jsonl');
+    await new Promise((r) => setTimeout(r, 100));
+    expect(scans.map((s) => s.reason)).toEqual(['initial']);
+    await rw.close();
+  });
+});

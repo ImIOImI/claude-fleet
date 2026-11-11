@@ -23,7 +23,7 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync, promises as fsp } from 'node:fs';
 import { extname, sep as pathSep } from 'node:path';
 import type { FSWatcher } from 'chokidar';
-import { NATIVE_RECURSIVE_DEFAULT, RecursiveDirWatcher, type DirWatcher } from './recursiveDirWatcher.js';
+import { NATIVE_RECURSIVE_DEFAULT, RecursiveDirWatcher, type DirWatcher, recordScanSpans } from './recursiveDirWatcher.js';
 import { parsePeerStatus, type PeerStatus } from './peerStatus.js';
 import { reducePeerStatuses } from './peerStatusReconcile.js';
 
@@ -65,7 +65,7 @@ export class PeerStatusWatcher extends EventEmitter {
     if (this.watcher) return;
     // depth 0: <pid>.json sit directly in sessions/, which keeps every stale one.
     this.watcher = this.nativeRecursive
-      ? new RecursiveDirWatcher({ depth: 0 })
+      ? new RecursiveDirWatcher({ depth: 0, onScan: recordScanSpans('peer') })
       : (await import('chokidar')).watch([], { depth: 0, ignoreInitial: false, persistent: true });
     this.wireHandlers(this.watcher);
   }
