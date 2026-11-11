@@ -328,7 +328,7 @@ grep -q '"delayMs":40' "$dir/log"; assert "$?" "1" "host backoff reset after a r
 assert "$(grep -c '"delayMs":20' "$dir/log")" "$(grep -c 'db unavailable' "$dir/log")" "every restart uses the starting delay"
 kill -TERM "$pid"; finish
 
-# 29. uid guards: host never runs as root or 1000; workspace never as 1001.
+# 29. uid guards: host never runs as root or 1000; workspace never as root or 1001.
 for u in 0 1000; do
   run "hostuid$u" host "${HOSTENV[@]}" FAKE_UID="$u"
   finish
@@ -338,10 +338,12 @@ done
 run hostuid1000ws host "${HOSTENV[@]}" FAKE_UID=1000 FLEET_WORKSPACE_UID=4242
 finish
 assert "$st" "1" "host refuses uid 1000 whatever FLEET_WORKSPACE_UID says"
-run wsuid workspace FAKE_UID=1001 FLEET_HOST_CRED_ADDR=h:1
-finish
-assert "$st" "1" "workspace refuses uid 1001"
-assert "$(count broker-start)" "0" "no broker as uid 1001"
-grep -q 'workspace mode refuses to run as the host uid 1001' "$dir/log"; assert "$?" "0" "workspace uid refusal logged"
+for u in 0 1001; do
+  run "wsuid$u" workspace FAKE_UID="$u" FLEET_HOST_CRED_ADDR=h:1
+  finish
+  assert "$st" "1" "workspace refuses uid $u"
+  assert "$(count broker-start)" "0" "no broker as uid $u"
+  grep -q "workspace mode refuses to run as uid $u" "$dir/log"; assert "$?" "0" "workspace uid $u refusal logged"
+done
 
 [ "$fails" -eq 0 ] && echo "ALL PASS" || exit 1

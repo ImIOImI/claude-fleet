@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, mkdirSync, mkdtempSync, renameSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, renameSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sql } from 'kysely';
@@ -17,6 +17,34 @@ const WS = '01JC0000000000000000000000';
 const S1 = '11111111-1111-4111-8111-111111111111';
 const line = (uuid: string, content = `hi ${uuid}`) =>
   JSON.stringify({ type: 'user', uuid, sessionId: S1, timestamp: '2026-11-05T00:00:00Z', message: { role: 'user', content } }) + '\n';
+
+describe.skipIf(process.getuid?.() === 0)('HostIngest unreadable transcript', () => {
+  it('warns once per path on EACCES, without the content', async () => {
+    const projects = mkdtempSync(join(tmpdir(), 'proj-'));
+    mkdirSync(join(projects, '-workspace'));
+    const file = join(projects, '-workspace', `${S1}.jsonl`);
+    writeFileSync(file, line('secret-body'));
+    chmodSync(file, 0o000);
+    const logs: string[] = [];
+    const ingest = vi.fn();
+    const h = new HostIngest({
+      projectsDir: projects,
+      workspaceId: WS,
+      offsetsRead: {} as HostIngestOptions['offsetsRead'],
+      log: createLogger((l) => logs.push(l)),
+      ingest
+    });
+    await h.scan();
+    await h.scan();
+    const warns = logs.filter((l) => l.includes('cannot read transcript'));
+    expect(warns).toHaveLength(1);
+    expect(JSON.parse(warns[0])).toMatchObject({ level: 'warn', path: file, code: 'EACCES' });
+    expect(warns[0]).toContain('access point');
+    expect(warns[0]).not.toContain('secret-body');
+    expect(ingest).not.toHaveBeenCalled();
+    await h.stop();
+  });
+});
 
 describe.skipIf(!isPg)('HostIngest', () => {
   const running: HostIngest[] = [];

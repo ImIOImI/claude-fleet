@@ -66,8 +66,10 @@ refuse_mesh_url() {
 }
 
 run_workspace() {
-  if [ "$(id -u)" = 1001 ]; then
-    log error "workspace mode refuses to run as the host uid 1001"
+  local uid
+  uid=$(id -u)
+  if [ "$uid" = 0 ] || [ "$uid" = 1001 ]; then
+    log error "workspace mode refuses to run as uid $uid (root or the host uid)"
     exit 1
   fi
   refuse_mesh_url

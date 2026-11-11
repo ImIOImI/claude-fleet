@@ -81,7 +81,9 @@ ids+=("$(docker run -d --name "$n-ws" --network "container:$n-wsnet" -u 1000:100
   "$image" fleet-host-entry workspace)")
 ids+=("$(docker run -d --name "$n-hostnet" --network "$n" --network-alias host-svc -p 127.0.0.1::8080 --entrypoint node "$image" -e "$ready_js")")
 # No state, projects or HOME overrides: host mode must find the image's own directories (D94).
+# Read-only root as in the host pod; the state tmpfs mirrors its emptyDir (0777).
 ids+=("$(docker run -d --name "$n-host" --network "container:$n-hostnet" -u 1001:1001 \
+  --read-only --tmpfs /tmp --tmpfs /var/lib/fleet-host/state:mode=0777 \
   -e CLAUDE_FLEET_BROKER_ADDR=workspace-svc:7070 -e FLEET_HOST_MCP_ADDR=host-svc:8082 -e FLEET_DB_PASSWORD=app-pw \
   -v "$tmp/cfg:/etc/fleet-host:ro" -v "$tmp/key:/var/run/secrets/github-app:ro" \
   "$image" fleet-host-entry host)")

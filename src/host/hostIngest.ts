@@ -51,6 +51,7 @@ export class HostIngest {
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
   private projectsReal: string | null = null;
+  private readonly unreadable = new Set<string>();
 
   constructor(private readonly o: HostIngestOptions) {
     this.ingest = o.ingest ?? ingestBatch;
@@ -131,7 +132,12 @@ export class HostIngest {
       // Sessions control these names. O_NONBLOCK: opening a FIFO would otherwise block until a writer appears.
       if (!(await this.inProjects(path))) return;
       fh = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    } catch {
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if ((code === 'EACCES' || code === 'EPERM') && !this.unreadable.has(path)) {
+        this.unreadable.add(path);
+        this.o.log.log('warn', 'host cannot read transcript; the host pod needs the claude EFS access point (posixUser 1000:1000)', { path, code });
+      }
       return;
     }
     try {
