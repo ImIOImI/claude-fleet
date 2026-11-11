@@ -1,9 +1,9 @@
 // Ingest of this container's own transcripts into the host store (holder only).
 // Offsets persist in host_ingest_offsets, so a restart resumes instead of
 // re-reading every transcript on shared storage.
-import { watch, type FSWatcher } from 'node:fs';
-import { mkdir, open, readdir, type FileHandle } from 'node:fs/promises';
-import { join } from 'node:path';
+import { constants, watch, type FSWatcher } from 'node:fs';
+import { mkdir, open, readdir, realpath, type FileHandle } from 'node:fs/promises';
+import { dirname, join, sep } from 'node:path';
 import { sql, type Kysely, type Transaction } from 'kysely';
 import { ingestBatch, INGEST_TX_LINES } from '../main/db.js';
 import type { StateDb } from '../main/store/stateSchema.js';
@@ -50,6 +50,7 @@ export class HostIngest {
   private watcher: FSWatcher | null = null;
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
+  private projectsReal: string | null = null;
 
   constructor(private readonly o: HostIngestOptions) {
     this.ingest = o.ingest ?? ingestBatch;
@@ -62,7 +63,7 @@ export class HostIngest {
     for (const r of rows) this.done.set(r.path, { offset: Number(r.byte_offset), ino: r.ino });
     await mkdir(this.o.projectsDir, { recursive: true });
     try {
-      // Writers are local processes, so inotify fires even on an NFS mount.
+      // Fires only for writers in this pod; in the two-pod layout the rescan carries ingest.
       this.watcher = watch(this.o.projectsDir, { recursive: true }, (_event, name) => {
         if (name?.endsWith('.jsonl')) void this.enqueue(join(this.o.projectsDir, name));
       });
@@ -99,6 +100,12 @@ export class HostIngest {
     await this.queue.drain();
   }
 
+  private async inProjects(path: string): Promise<boolean> {
+    this.projectsReal ??= await realpath(this.o.projectsDir);
+    const dir = await realpath(dirname(path));
+    return dir === this.projectsReal || dir.startsWith(this.projectsReal + sep);
+  }
+
   private enqueue(path: string): Promise<void> {
     if (this.stopped) return Promise.resolve();
     return this.queue.enqueue(path, () => this.process(path));
@@ -110,12 +117,15 @@ export class HostIngest {
     if (!sessionId) return;
     let fh: FileHandle;
     try {
-      fh = await open(path, 'r');
+      // Sessions control these names. O_NONBLOCK: opening a FIFO would otherwise block until a writer appears.
+      if (!(await this.inProjects(path))) return;
+      fh = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     } catch {
       return;
     }
     try {
       const st = await fh.stat({ bigint: true });
+      if (!st.isFile()) return;
       const ino = String(st.ino);
       const size = Number(st.size);
       const prev = this.done.get(path);

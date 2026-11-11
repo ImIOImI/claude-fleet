@@ -12,6 +12,7 @@ import { MESH_READY_URL } from './mesh.js';
 export const DEFAULT_CONFIG_PATH = '/etc/fleet-host/config.yaml';
 export const DEFAULT_PORT = 8080;
 export const DEFAULT_EMBED_DIR = '/usr/local/lib/fleet-host/embed';
+export const DEFAULT_RESCAN_MS = 60_000;
 export const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 
 export interface HostWorkspaceInfo {
@@ -272,6 +273,8 @@ export interface HostEnv {
   requireMesh: boolean;
   /** The sidecar's readiness URL; tests override it. */
   meshReadyUrl: string;
+  /** Full transcript rescans; the only change signal when the writers are in another pod. */
+  rescanMs: number;
   /** The sidecar and its weights (D65). */
   embedDir: string;
 }
@@ -304,6 +307,11 @@ export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
   if (Buffer.byteLength(mcpSocket) > 107) throw new HostConfigError('FLEET_HOST_MCP_SOCKET is longer than 107 bytes');
   const meshText = env.FLEET_HOST_REQUIRE_MESH ?? '';
   if (!['', '0', '1'].includes(meshText)) throw new HostConfigError('FLEET_HOST_REQUIRE_MESH must be 0 or 1');
+  const rescanText = env.FLEET_HOST_RESCAN_MS || String(DEFAULT_RESCAN_MS);
+  const rescanMs = Number(rescanText);
+  if (!/^\d+$/.test(rescanText) || rescanMs < 1000 || rescanMs > 3_600_000) {
+    throw new HostConfigError('FLEET_HOST_RESCAN_MS must be an integer from 1000 to 3600000');
+  }
   return {
     port,
     configPath: env.FLEET_HOST_CONFIG || DEFAULT_CONFIG_PATH,
@@ -318,6 +326,7 @@ export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
     mcpAddr,
     requireMesh: meshText === '1',
     meshReadyUrl: env.FLEET_MESH_READY_URL || MESH_READY_URL,
+    rescanMs,
     embedDir: env.FLEET_HOST_EMBED_DIR || DEFAULT_EMBED_DIR
   };
 }

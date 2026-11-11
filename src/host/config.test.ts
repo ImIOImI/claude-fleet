@@ -195,6 +195,7 @@ describe('readHostEnv', () => {
       mcpAddr: null,
       requireMesh: false,
       meshReadyUrl: 'http://127.0.0.1:15021/healthz/ready',
+      rescanMs: 60000,
       embedDir: '/usr/local/lib/fleet-host/embed'
     });
   });
@@ -212,6 +213,13 @@ describe('readHostEnv', () => {
   it('honours FLEET_HOST_PORT and FLEET_HOST_CONFIG', () => {
     expect(readHostEnv({ FLEET_HOST_PORT: '9000', FLEET_HOST_CONFIG: '/c.yaml' })).toMatchObject({ port: 9000, configPath: '/c.yaml' });
     expect(() => readHostEnv({ FLEET_HOST_PORT: 'x' })).toThrow(/FLEET_HOST_PORT/);
+  });
+
+  it('reads FLEET_HOST_RESCAN_MS in [1000, 3600000]', () => {
+    expect(readHostEnv({ FLEET_HOST_RESCAN_MS: '5000' }).rescanMs).toBe(5000);
+    expect(readHostEnv({ FLEET_HOST_RESCAN_MS: '1000' }).rescanMs).toBe(1000);
+    expect(readHostEnv({ FLEET_HOST_RESCAN_MS: '3600000' }).rescanMs).toBe(3600000);
+    for (const bad of ['999', '3600001', '5s', '-1', '1e4', ' 5000']) expect(() => readHostEnv({ FLEET_HOST_RESCAN_MS: bad }), bad).toThrow('FLEET_HOST_RESCAN_MS must be an integer from 1000 to 3600000');
   });
 
   it('reads FLEET_HOST_REQUIRE_MESH and FLEET_MESH_READY_URL', () => {

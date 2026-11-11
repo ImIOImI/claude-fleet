@@ -32,6 +32,8 @@ export interface HolderOptions {
   onLost(): void;
   log: Logger;
   projectsDir: string;
+  /** Full rescan interval for ingest. */
+  rescanMs?: number;
   /** Tests: more store migrations, run like the real ones. */
   extraTracks?: readonly PgTrack[];
   ops: BrokerOps;
@@ -115,7 +117,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
     : null;
   const hint = trailingHint(() => o.events.publish('observability:summary', { workspaceId: o.workspaceId }), SUMMARY_HINT_MS);
   const ingest = new HostIngest({
-    projectsDir: o.projectsDir, workspaceId: o.workspaceId, offsetsRead, log: o.log,
+    projectsDir: o.projectsDir, workspaceId: o.workspaceId, offsetsRead, log: o.log, rescanMs: o.rescanMs,
     onIngested: (id) => { hint.bump(); indexer?.bump(id); }
   });
   let automations: HostAutomations | null = null;

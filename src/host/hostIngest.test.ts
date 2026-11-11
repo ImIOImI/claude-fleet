@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { appendFileSync, mkdirSync, mkdtempSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { appendFileSync, mkdirSync, mkdtempSync, renameSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sql } from 'kysely';
@@ -112,6 +113,42 @@ describe.skipIf(!isPg)('HostIngest', () => {
     await h.scan();
     expect(await events('session_id = ?', [S1])).toBe(1);
   });
+
+  it('never follows a symlink out of the projects directory', async () => {
+    const { make, projects } = await rig();
+    const S2 = '22222222-2222-4222-8222-222222222222';
+    const outside = mkdtempSync(join(tmpdir(), 'out-'));
+    writeFileSync(join(outside, 'agent-x.jsonl'), line('o'));
+    writeFileSync(join(outside, 'top.jsonl'), line('t'));
+    mkdirSync(join(projects, '-workspace', S1));
+    symlinkSync(outside, join(projects, '-workspace', S1, 'subagents'));
+    mkdirSync(join(projects, '-workspace', S2, 'subagents'), { recursive: true });
+    symlinkSync(join(outside, 'agent-x.jsonl'), join(projects, '-workspace', S2, 'subagents', 'agent-y.jsonl'));
+    symlinkSync(join(outside, 'top.jsonl'), join(projects, '-workspace', `${S2}.jsonl`));
+    // A sibling whose path extends the projects directory's.
+    const S3 = '33333333-3333-4333-8333-333333333333';
+    mkdirSync(`${projects}-sib`);
+    writeFileSync(join(`${projects}-sib`, 'agent-z.jsonl'), line('z'));
+    mkdirSync(join(projects, '-workspace', S3));
+    symlinkSync(`${projects}-sib`, join(projects, '-workspace', S3, 'subagents'));
+    const h = make();
+    await h.start();
+    await h.scan();
+    expect(await events()).toBe(0);
+  });
+
+  it('skips a non-regular transcript without blocking on it', async () => {
+    const { make, projects, file, logs } = await rig();
+    const sub = join(projects, '-workspace', S1, 'subagents');
+    mkdirSync(join(sub, 'agent-d.jsonl'), { recursive: true });
+    execFileSync('mkfifo', [join(sub, 'agent-f.jsonl')]);
+    writeFileSync(file, line('a'));
+    const h = make();
+    await h.start();
+    await h.scan();
+    expect(await events()).toBe(1);
+    expect(logs.join('\n')).not.toContain('transcript ingest failed');
+  }, 10_000);
 
   it('picks up an append from the directory watch, without a scan call', async () => {
     const { make, file } = await rig();

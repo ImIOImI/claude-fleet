@@ -315,6 +315,7 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
         onLost: () => m.markLost('superseded'),
         log,
         projectsDir: env.projectsDir,
+        rescanMs: env.rescanMs,
         extraTracks: opts.extraStoreTracks,
         ops,
         events,

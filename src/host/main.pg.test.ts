@@ -253,6 +253,18 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     expect(off.rows.map((r) => Number(r.byte_offset))).toEqual([Buffer.byteLength(text)]);
   }, 30_000);
 
+  it('the holder rescans transcripts every FLEET_HOST_RESCAN_MS', async () => {
+    const every = vi.spyOn(globalThis, 'setInterval');
+    try {
+      const a = await start({}, undefined, '', () => ({ FLEET_HOST_RESCAN_MS: '4321' }));
+      await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+      await storesOpen();
+      await vi.waitFor(() => expect(every.mock.calls.some((c) => c[1] === 4321)).toBe(true), { timeout: 10_000 });
+    } finally {
+      every.mockRestore();
+    }
+  }, 30_000);
+
   describe('search.embedder (D79)', () => {
     const SID = '33333333-3333-4333-8333-333333333333';
     const embedFiles = (dir: string) => {
