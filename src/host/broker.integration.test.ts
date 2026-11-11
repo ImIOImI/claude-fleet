@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
 import { createServer as createNetServer, type AddressInfo } from 'node:net';
-import { chmodSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FrameType } from '../main/broker.js';
@@ -69,12 +69,13 @@ describe.runIf(BIN)('fleet-host against the real broker on TCP behind the mesh g
   let proc: ChildProcess;
   let ready: HttpServer;
   let port = 0;
+  let dir: string;
 
   beforeAll(async () => {
     ready = createHttpServer((_q, r) => r.end('ok'));
     await new Promise<void>((r) => ready.listen(0, '127.0.0.1', () => r()));
     port = await freePort();
-    const dir = mkdtempSync(join(tmpdir(), 'fh-broker-tcp-'));
+    dir = mkdtempSync(join(tmpdir(), 'fh-broker-tcp-'));
     const fake = join(dir, 'fake-claude');
     writeFileSync(fake, '#!/bin/sh\nexec cat\n');
     chmodSync(fake, 0o755);
@@ -95,11 +96,13 @@ describe.runIf(BIN)('fleet-host against the real broker on TCP behind the mesh g
         await new Promise((r) => setTimeout(r, 100));
       }
     }
+    throw new Error(`broker did not come up on :${port}`);
   });
 
   afterAll(() => {
     proc?.kill();
     ready?.close();
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it('creates and lists a session over TCP', async () => {

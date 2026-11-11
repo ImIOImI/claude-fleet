@@ -153,4 +153,12 @@ grep -q '"delayMs":80' "$dir/log"; assert "$?" "0" "exit 75 restarts back off"
 kill -TERM "$pid"; finish
 assert "$st" "0" "SIGTERM exits 0 after exit-75 restarts"
 
+# 11. A credential TCP port is refused too: not yet wired up (Task 8 adds the mesh gate).
+run credtcp FLEET_HOST_CRED_TCP_PORT=8081
+finish
+assert "$st" "1" "refuses to start with FLEET_HOST_CRED_TCP_PORT set"
+assert "$(count broker-start)" "0" "broker never started"
+assert "$(count host-start)" "0" "fleet-host never started"
+grep -q 'FLEET_HOST_CRED_TCP_PORT is set' "$dir/log"; assert "$?" "0" "refusal logged"
+
 [ "$fails" -eq 0 ] && echo "ALL PASS" || exit 1

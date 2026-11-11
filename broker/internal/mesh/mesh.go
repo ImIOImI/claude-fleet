@@ -15,7 +15,11 @@ const DefaultURL = "http://127.0.0.1:15021/healthz/ready"
 // WaitReady polls url every interval until it answers 200, or fails once
 // timeout has passed or ctx ends.
 func WaitReady(ctx context.Context, url string, timeout, interval time.Duration) error {
-	client := &http.Client{Timeout: 2 * time.Second}
+	// A 3xx must not count as ready: CheckRedirect stops the client from following it.
+	client := &http.Client{
+		Timeout:       2 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	deadline := time.Now().Add(timeout)
 	for {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

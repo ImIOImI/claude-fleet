@@ -67,6 +67,20 @@ func TestCancelled(t *testing.T) {
 	}
 }
 
+// A redirect to a 200 must not count as ready: Istio's readiness endpoint never redirects,
+// and following one would let an unrelated 200 elsewhere pass the check.
+func TestRedirectIsNotReady(t *testing.T) {
+	target, _ := server(t, func(int32) int { return 200 })
+	redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	t.Cleanup(redirecting.Close)
+	err := WaitReady(context.Background(), redirecting.URL, 100*time.Millisecond, 10*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "no Istio sidecar") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestDefaultURL(t *testing.T) {
 	if DefaultURL != "http://127.0.0.1:15021/healthz/ready" {
 		t.Fatal(DefaultURL)

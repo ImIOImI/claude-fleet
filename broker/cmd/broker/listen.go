@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/ImIOImI/claude-fleet/broker/internal/mesh"
@@ -15,7 +16,9 @@ import (
 // listen binds TCP when CLAUDE_FLEET_BROKER_TCP_PORT is set, else the Unix
 // socket. With CLAUDE_FLEET_BROKER_REQUIRE_MESH=1 it first needs the sidecar.
 func listen(ctx context.Context, getenv func(string) string, meshWait time.Duration, logf func(string, ...any)) (net.Listener, string, error) {
-	if getenv("CLAUDE_FLEET_BROKER_REQUIRE_MESH") == "1" {
+	switch v := getenv("CLAUDE_FLEET_BROKER_REQUIRE_MESH"); v {
+	case "", "0":
+	case "1":
 		url := getenv("FLEET_MESH_READY_URL")
 		if url == "" {
 			url = mesh.DefaultURL
@@ -23,9 +26,15 @@ func listen(ctx context.Context, getenv func(string) string, meshWait time.Durat
 		if err := mesh.WaitReady(ctx, url, meshWait, time.Second); err != nil {
 			return nil, "", fmt.Errorf("refusing to listen: %w", err)
 		}
+	default:
+		return nil, "", fmt.Errorf("CLAUDE_FLEET_BROKER_REQUIRE_MESH must be '', 0 or 1, got %q", v)
 	}
 	var lc net.ListenConfig
 	if port := getenv("CLAUDE_FLEET_BROKER_TCP_PORT"); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return nil, "", fmt.Errorf("CLAUDE_FLEET_BROKER_TCP_PORT must be an integer from 1 to 65535, got %q", port)
+		}
 		// Not loopback: Istio forwards inbound traffic to the pod IP, and Docker's port proxy needs it too.
 		addr := net.JoinHostPort("0.0.0.0", port)
 		ln, err := lc.Listen(ctx, "tcp", addr)

@@ -25,6 +25,9 @@ if [ -n "${CLAUDE_FLEET_BROKER_TCP_PORT:-}" ]; then
   exit 1
 fi
 
+# Not yet wired up (Task 8 adds the mesh-gated credential server and sets this).
+[ -n "${FLEET_HOST_CRED_TCP_PORT:-}" ] && { log error "FLEET_HOST_CRED_TCP_PORT is set; refusing to start"; exit 1; }
+
 # True if any socket in this network namespace listens on $host_port (IPv4 or IPv6, any address).
 port_bound() {
   local hex sl local_addr rem st rest
