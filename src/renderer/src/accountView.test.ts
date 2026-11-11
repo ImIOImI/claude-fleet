@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AccountStatus, SignInPoll } from '../../preload/identityTypes';
-import { SIGN_IN_EXPIRED, accountControls, countdown, driveSignIn, loadAccount, packagesNote, parseIdentityError, ssoPrompt, type SignInRun } from './accountView';
+import { SIGN_IN_EXPIRED, accountAvatar, accountControls, countdown, driveSignIn, loadAccount, packagesNote, parseIdentityError, ssoPrompt, type SignInRun } from './accountView';
 
 describe('parseIdentityError', () => {
   it('unwraps the IPC prefix and recognises not-configured', () => {
@@ -245,5 +245,14 @@ describe('loadAccount', () => {
     );
     expect(err).toBe('offline');
     expect(shown).toEqual([CACHED]);
+  });
+});
+
+describe('accountAvatar', () => {
+  it('loads only a GitHub avatar URL', () => {
+    expect(accountAvatar({ avatarUrl: 'https://avatars.githubusercontent.com/u/7?v=4' })).toBe('https://avatars.githubusercontent.com/u/7?v=4');
+    expect(accountAvatar({ avatarUrl: 'https://evil.io/a.png' })).toBeNull();
+    expect(accountAvatar({ avatarUrl: 'http://avatars.githubusercontent.com/u/7' })).toBeNull();
+    expect(accountAvatar({ avatarUrl: null })).toBeNull();
   });
 });

@@ -64,3 +64,41 @@ describe('SessionsPane remote rows', () => {
     expect(src).not.toMatch(/Markdown/);
   });
 });
+
+function callArgs(text: string, callee: RegExp): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(callee)) {
+    let i = text.indexOf('(', m.index + m[0].length - 1);
+    if (i < 0) continue;
+    const start = i;
+    for (let depth = 0; i < text.length; i++) {
+      if (text[i] === '(') depth++;
+      else if (text[i] === ')' && --depth === 0) break;
+    }
+    out.push(text.slice(start, i + 1));
+  }
+  return out;
+}
+
+describe('SessionsPane Mine / Everyone wiring (D122)', () => {
+  it('defaults to Everyone', () => {
+    expect(src).toContain("useState<OwnerFilter>('everyone')");
+  });
+
+  it('keeps the choice in component state: no storage, no prefs, never an IPC argument', () => {
+    expect(src).not.toMatch(/localStorage|sessionStorage/);
+    const ipc = callArgs(src, /window\.api\.[\w.]+\(/g);
+    expect(ipc.length).toBeGreaterThan(5);
+    for (const a of ipc) expect(a).not.toMatch(/ownerFilter|ownerShown|filterByOwner/);
+  });
+
+  it('the filter value only selects rows and styles the toggle', () => {
+    const uses = [...src.matchAll(/\bownerFilter\b|\bownerShown\b/g)].map((m) => src.slice(m.index, src.indexOf('\n', m.index)));
+    expect(uses.length).toBeGreaterThan(0);
+    for (const u of uses) {
+      expect(u).toMatch(
+        /^ownerFilter, setOwnerFilter\] = useState|^ownerFilter : 'everyone';|^ownerShown: OwnerFilter = |^ownerShown, me\);|^ownerShown === '(everyone|mine)'/
+      );
+    }
+  });
+});

@@ -9,10 +9,9 @@ import { EMBED_DIM, EMBED_MODEL_ID } from '../main/vectors.js';
 import type { StateDb } from '../main/store/stateSchema.js';
 import type { SessionCursor } from '../preload/federation.js';
 import type { OwnerCostRow, SessionOwner } from '../preload/sessionOwner.js';
-import type { SessionOwnerStore } from './sessionOwners.js';
+import { SESSION_ID_RE as ID_RE, type SessionOwnerStore } from './sessionOwners.js';
 
 export const SESSIONS_PAGE_MAX = 200;
-const ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 // D59: the caps of the desktop validator (src/main/federation/remoteRows.ts),
 // so a page of long titles or many tags stays far under the 2 MB reply cap.
 const MAX_TEXT = 500;

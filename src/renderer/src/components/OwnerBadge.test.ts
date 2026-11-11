@@ -1,8 +1,7 @@
-import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { OwnerBadge } from './OwnerBadge';
+import { OwnerBadge, ownerInitial } from './OwnerBadge';
 import type { SessionOwner } from '../../../preload/sessionOwner';
 
 const ann: SessionOwner = { kind: 'user', provider: 'github', id: '7', login: 'ann', name: 'Ann Example', avatarUrl: 'https://avatars.githubusercontent.com/u/7?v=4' };
@@ -30,15 +29,13 @@ describe('OwnerBadge', () => {
     expect(h).toContain('>automation<');
     expect(h).not.toContain('@automation');
   });
-});
 
-// SessionsPane needs a DOM to mount, so D122's wiring is asserted by source text.
-describe('SessionsPane Mine / Everyone wiring', () => {
-  const pane = readFileSync(new URL('./SessionsPane.tsx', import.meta.url), 'utf8');
-  it('defaults to Everyone, keeps the choice in component state only, and never sends it anywhere', () => {
-    expect(pane).toContain("useState<OwnerFilter>('everyone')");
-    const uses = pane.split('\n').filter((l) => /ownerFilter|ownerShown/.test(l));
-    expect(uses.length).toBeGreaterThan(0);
-    for (const l of uses) expect(l).not.toMatch(/window\.api|localStorage|sessionStorage|uiPrefs/);
+  it('takes the initial by code point, skipping marks', () => {
+    expect(ownerInitial('@ann')).toBe('A');
+    expect(ownerInitial('\u0301émile')).toBe('É');
+    expect(ownerInitial('\u{1D49C}nn')).toBe('\u{1D49C}');
+    expect(ownerInitial('-.-')).toBe('?');
+    const h = html({ ...ann, name: '\u{1D49C}nn', avatarUrl: null });
+    expect(h).toContain('aria-hidden="true">\u{1D49C}</span>');
   });
 });

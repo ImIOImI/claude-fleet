@@ -49,7 +49,7 @@ function parseSessionRow(v: unknown, workspaceId: string): RemoteSessionItem | n
   if (aiTitle === undefined || firstUserMessage === undefined || userSetName === undefined || startedAt === undefined || lastActiveAt === undefined) return null;
   if (!nat(r.eventCount) || typeof r.usd !== 'number' || !Number.isFinite(r.usd) || r.usd < 0 || typeof r.headless !== 'boolean' || !Array.isArray(r.tags)) return null;
   const tags = r.tags.filter((t): t is string => typeof t === 'string').slice(0, 20).map((t) => oneLine(t, 64)).filter(Boolean);
-  const owner = r.owner === undefined || r.owner === null ? null : parseSessionOwner(r.owner);
+  const owner = r.owner === undefined || r.owner === null ? null : desktopOwner(r.owner);
   return { id: r.id, workspaceId, aiTitle, firstUserMessage, userSetName, startedAt, lastActiveAt, eventCount: r.eventCount, usd: r.usd, tags, headless: r.headless, owner };
 }
 
@@ -128,6 +128,12 @@ export function parseSearchReply(v: unknown, workspaceId: string): { modelId: st
   return { modelId: oneLine(o.modelId, 128), hits };
 }
 
+/** Publisher owners belong to partitions, which the desktop never shows (D107, D119). */
+function desktopOwner(v: unknown): SessionOwner | null {
+  const o = parseSessionOwner(v);
+  return o && o.kind !== 'publisher' ? o : null;
+}
+
 /** `history:owners`. A row with a malformed owner is dropped rather than shown as unattributed. */
 export function parseOwnerCosts(v: unknown): OwnerCostRow[] {
   const o = v as { rows?: unknown } | null;
@@ -136,7 +142,7 @@ export function parseOwnerCosts(v: unknown): OwnerCostRow[] {
   for (const raw of o.rows) {
     const r = raw as Record<string, unknown> | null;
     if (!r || typeof r !== 'object' || !nat(r.sessions) || !nonNeg(r.usd)) continue;
-    const owner = r.owner === null ? null : parseSessionOwner(r.owner);
+    const owner = r.owner === null ? null : desktopOwner(r.owner);
     if (r.owner !== null && !owner) continue;
     out.push({ owner, sessions: r.sessions, usd: r.usd });
   }

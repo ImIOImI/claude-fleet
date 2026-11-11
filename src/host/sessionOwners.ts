@@ -8,6 +8,8 @@ import {
   AUTOMATION_LOGIN, AUTOMATION_PROVIDER, MAX_OWNER_COST_ROWS, parseSessionOwner, type OwnerCostRow, type SessionOwner
 } from '../preload/sessionOwner.js';
 
+/** The ids `history:sessions` serves; owner costs count the same sessions. */
+export const SESSION_ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 export const OWNER_LOOKUP_CHUNK = 500;
 
 export interface OwnerClaim {
@@ -111,7 +113,7 @@ export function sessionOwnerStore(k: () => Kysely<StateDb>, workspaceId: string)
         SELECT c.session_id, NULLIF(c.model, '') AS model, NULLIF(c.service_tier, '') AS service_tier,
                c.input_tokens, c.output_tokens, c.cache_read_input_tokens, c.cache_creation_input_tokens
         FROM session_costs c JOIN sessions s ON s.id = c.session_id AND s.workspace_id = c.workspace_id
-        WHERE c.workspace_id IN (${sql.join([...workspaceIds])}) ${since}
+        WHERE c.workspace_id IN (${sql.join([...workspaceIds])}) AND c.session_id ~ ${SESSION_ID_RE.source} ${since}
         ORDER BY c.session_id, c.model, c.service_tier`.execute(k())).rows;
       const owners = await ownersOf([...new Set(costs.map((c) => c.session_id))], workspaceIds);
       const groups = new Map<string, { owner: SessionOwner | null; sessions: Set<string>; usd: number }>();

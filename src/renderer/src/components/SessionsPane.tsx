@@ -150,8 +150,11 @@ export function SessionsPane({
       () => setMe(null)
     );
   }, []);
+  // No identity-change event exists; re-read on focus and with each remote reload so a sign-out drops Mine.
   useEffect(() => {
     refreshMe();
+    window.addEventListener('focus', refreshMe);
+    return () => window.removeEventListener('focus', refreshMe);
   }, [refreshMe]);
 
   // Row ⋮ menu: resume / rename / delete — shared portaled-menu mechanics.
@@ -212,9 +215,12 @@ export function SessionsPane({
   }, []);
   useEffect(() => {
     void loadRemote();
-    const t = setInterval(() => void loadRemote(), 60_000);
+    const t = setInterval(() => {
+      void loadRemote();
+      refreshMe();
+    }, 60_000);
     return () => clearInterval(t);
-  }, [loadRemote]);
+  }, [loadRemote, refreshMe]);
 
   // Live refresh: every observability ingest may add/advance a session.
   // Throttle so a burst of pushes triggers at most one reload per beat; a

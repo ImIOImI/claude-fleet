@@ -162,6 +162,15 @@ describe.skipIf(!isPg)('sessionOwnerStore', () => {
     expect(await s.ownerCosts([])).toEqual([]);
   });
 
+  it('counts only the session ids history:sessions serves', async () => {
+    const s = await rig();
+    const k = db.stateKysely();
+    const odd = 'bad id/with space';
+    await k.insertInto('sessions').values([sess(S1, 100), sess(odd, 100)]).execute();
+    await k.insertInto('session_costs').values([cost(S1, 1000), cost(odd, 9000)]).execute();
+    expect(await s.ownerCosts([HOSTED])).toEqual([{ owner: null, sessions: 1, usd: usd(1000) }]);
+  });
+
   it(`returns at most ${MAX_OWNER_COST_ROWS} owners`, async () => {
     const s = await rig();
     const k = db.stateKysely();

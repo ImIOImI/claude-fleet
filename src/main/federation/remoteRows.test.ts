@@ -162,7 +162,8 @@ describe('owners on remote rows', () => {
         { ...good, id: 'a', owner: ann },
         { ...good, id: 'b' },
         { ...good, id: 'c', owner: { ...ann, login: '-x' } },
-        { ...good, id: 'd', owner: { ...ann, name: '<img src=x onerror=alert(1)>\u202e', avatarUrl: 'https://evil.io/a.png', extra: 1 } }
+        { ...good, id: 'd', owner: { ...ann, name: '<img src=x onerror=alert(1)>\u202e', avatarUrl: 'https://evil.io/a.png', extra: 1 } },
+        { ...good, id: 'e', owner: { ...ann, kind: 'publisher', name: null, avatarUrl: null } }
       ],
       next: null
     }, W);
@@ -170,7 +171,8 @@ describe('owners on remote rows', () => {
       ['a', ann],
       ['b', null],
       ['c', null],
-      ['d', { ...ann, name: '<img src=x onerror=alert(1)>', avatarUrl: null }]
+      ['d', { ...ann, name: '<img src=x onerror=alert(1)>', avatarUrl: null }],
+      ['e', null]
     ]);
   });
 });
@@ -182,6 +184,7 @@ describe('parseOwnerCosts', () => {
         { owner: ann, sessions: 2, usd: 1.5 },
         { owner: null, sessions: 1, usd: 0 },
         { owner: { ...ann, id: 'x' }, sessions: 1, usd: 1 },
+        { owner: { ...ann, kind: 'publisher', name: null, avatarUrl: null }, sessions: 1, usd: 1 },
         { owner: null, sessions: -1, usd: 1 },
         { owner: null, sessions: 1, usd: Infinity },
         'junk'
