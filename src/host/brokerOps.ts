@@ -2,6 +2,10 @@
 // session (the broker allows one writer); control ops use a fresh connection
 // each, because BrokerClient allows one in-flight request per response type.
 import { BrokerClient, type BrokerPortInfo, type SessionInfo } from '../main/broker.js';
+import type { HostPort } from './endpoint.js';
+
+/** A Unix socket path, or the workspace pod's broker on TCP. */
+export type BrokerEndpoint = string | HostPort;
 
 export const UPSTREAM_CHANNEL = 1;
 
@@ -40,8 +44,8 @@ export async function portKillRefusal(ops: BrokerOps, port: number, hostPort: nu
   return info?.session ? null : 'forbidden: that port is not owned by a session';
 }
 
-async function withClient<T>(socket: string, fn: (c: BrokerClient) => Promise<T>): Promise<T> {
-  const c = new BrokerClient(socket);
+async function withClient<T>(endpoint: BrokerEndpoint, fn: (c: BrokerClient) => Promise<T>): Promise<T> {
+  const c = new BrokerClient(endpoint);
   try {
     await c.ready();
     return await fn(c);
@@ -50,10 +54,10 @@ async function withClient<T>(socket: string, fn: (c: BrokerClient) => Promise<T>
   }
 }
 
-export function brokerOps(socket: string): BrokerOps {
+export function brokerOps(endpoint: BrokerEndpoint): BrokerOps {
   return {
     async attach(id, h) {
-      const c = new BrokerClient(socket);
+      const c = new BrokerClient(endpoint);
       try {
         await c.ready();
       } catch (err) {
@@ -87,9 +91,9 @@ export function brokerOps(socket: string): BrokerOps {
         }
       };
     },
-    create: (id, cols, rows, args) => withClient(socket, (c) => c.createSession(id, cols, rows, args)),
-    list: () => withClient(socket, (c) => c.listSessions()),
-    listPorts: () => withClient(socket, (c) => c.listPorts()),
-    killPort: (port) => withClient(socket, (c) => c.killPort(port))
+    create: (id, cols, rows, args) => withClient(endpoint, (c) => c.createSession(id, cols, rows, args)),
+    list: () => withClient(endpoint, (c) => c.listSessions()),
+    listPorts: () => withClient(endpoint, (c) => c.listPorts()),
+    killPort: (port) => withClient(endpoint, (c) => c.killPort(port))
   };
 }

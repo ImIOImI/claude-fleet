@@ -119,6 +119,37 @@ describe('runHost', () => {
     }
   });
 
+  async function firstPruneFailure(env: Record<string, string>, dir: string): Promise<string | undefined> {
+    const cfgPath = join(dir, 'config.yaml');
+    writeFileSync(cfgPath, CONFIG);
+    const logs: string[] = [];
+    const host = await runHost({
+      env: { FLEET_HOST_PORT: String(await freePort()), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), ...env },
+      leaseStore: memoryLeaseStore(), exit: vi.fn(), proc: new EventEmitter(), logSink: (l) => logs.push(l),
+      authFactory: () => ({ id: 'github', verify }), ownerPruneMs: 20
+    });
+    try {
+      const failures = () => logs.map((l) => JSON.parse(l) as { msg: string; error?: string }).filter((m) => m.msg === 'owner prune failed');
+      await vi.waitFor(() => expect(failures().length).toBeGreaterThan(0), { timeout: 5000 });
+      return failures()[0].error;
+    } finally {
+      await host.shutdown(0);
+      await new Promise<void>((r) => (host.server.listening ? host.server.close(() => r()) : r()));
+    }
+  }
+
+  it('dials the broker at CLAUDE_FLEET_BROKER_ADDR instead of the socket', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fh-broker-addr-'));
+    const brokerPort = await freePort();
+    const err = await firstPruneFailure({ CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'), CLAUDE_FLEET_BROKER_ADDR: `127.0.0.1:${brokerPort}` }, dir);
+    expect(err).toContain(`127.0.0.1:${brokerPort}`);
+  });
+
+  it('dials the broker socket when CLAUDE_FLEET_BROKER_ADDR is unset', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fh-broker-sock-'));
+    expect(await firstPruneFailure({ CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock') }, dir)).toContain(join(dir, 'b.sock'));
+  });
+
   it('serves the configured workspace id after one start load', async () => {
     const r = await start();
     expect(await whoami(r)).toMatchObject({ status: 200, body: { workspace: { id: ID_A, name: 'smoke' } } });

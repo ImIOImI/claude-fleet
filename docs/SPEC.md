@@ -1326,6 +1326,7 @@ The renderer parses them in `sourceErrors.ts`.
 | `FLEET_HOST_CONFIG` | `/etc/fleet-host/config.yaml` | read-only ConfigMap mount |
 | `FLEET_HOST_STATE` | `/home/fleet/.claude/fleet-host` | shared volume; holds `workspace-id.json` |
 | `CLAUDE_FLEET_BROKER_SOCKET` | `/run/broker/broker.sock` | the in-pod broker |
+| `CLAUDE_FLEET_BROKER_ADDR` | unset | host pod: the workspace pod's broker as `host:port` (DNS name or IPv4); replaces `CLAUDE_FLEET_BROKER_SOCKET`. Dialed per operation, so pod start order doesn't matter: `/healthz` doesn't depend on the broker, and broker operations fail until it is up |
 | `FLEET_HOST_PROJECTS` | `~/.claude/projects` | transcripts the holder ingests |
 | `FLEET_HOST_CRED_SOCKET` | `/run/fleet-host/cred.sock` | App credential socket |
 | `FLEET_HOST_MCP_SOCKET` | `/run/fleet/mcp.sock`; `/run/fleet/mcp/mcp.sock` when the group below is set | the fleet-state MCP socket the holder serves (absolute, ≤ 107 bytes) |

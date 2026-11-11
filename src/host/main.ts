@@ -140,7 +140,7 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     throw err;
   }
 
-  const ops = opts.brokerOps ?? realBrokerOps(env.brokerSocket);
+  const ops = opts.brokerOps ?? realBrokerOps(env.brokerAddr ?? env.brokerSocket);
   const mcpArgs = hostMcpArgs(env.mcpSocket);
   const hub = new AttachHub(ops, { hostPort: env.port, log, createArgs: config.db ? (a) => [...a, ...mcpArgs] : undefined });
   const events = new EventHub();

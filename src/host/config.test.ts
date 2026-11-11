@@ -174,10 +174,16 @@ describe('readHostEnv', () => {
       credSocket: '/run/fleet-host/cred.sock',
       projectsDir: join(homedir(), '.claude', 'projects'),
       brokerSocket: '/run/broker/broker.sock',
+      brokerAddr: null,
       mcpSocket: '/run/fleet/mcp.sock',
       mcpSocketGroup: null,
       embedDir: '/usr/local/lib/fleet-host/embed'
     });
+  });
+
+  it('reads CLAUDE_FLEET_BROKER_ADDR as host:port', () => {
+    expect(readHostEnv({ CLAUDE_FLEET_BROKER_ADDR: 'ws.platform-ops.svc:7070' }).brokerAddr).toEqual({ host: 'ws.platform-ops.svc', port: 7070 });
+    expect(() => readHostEnv({ CLAUDE_FLEET_BROKER_ADDR: 'ws:x' })).toThrow('CLAUDE_FLEET_BROKER_ADDR ws:x is not host:port');
   });
 
   it('honours FLEET_HOST_PORT and FLEET_HOST_CONFIG', () => {
