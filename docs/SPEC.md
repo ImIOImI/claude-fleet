@@ -1355,7 +1355,7 @@ A person's local or container workspace can publish its transcripts to remote wo
   - `workspace:writeManifest` derives `publish` (`publishOnWrite`), placed after the renderer's spec:
     - targets must be remote bookmarks, at most 16;
     - a target already on keeps its `since`, and a new one gets the current time; a `since` sent by the renderer is ignored;
-    - a new target's cursor is seeded to `MAX(events.id)`, read before `since` is stamped, so history before the opt-in is never scanned;
+    - a new target's cursor is seeded to `MAX(events.id)`, read before `since` is stamped, so history before the opt-in is never scanned (only a save that adds a target reads it; if the read fails the cursor stays unseeded and that history is read once and skipped by `since`);
     - removing a target drops its cursor.
   - **Forgetting a bookmark revokes publishing to it** (`revokePublishTarget`): it is stripped from every manifest's `publish` and its cursors are deleted before the bookmark is. The publisher also requires the target bookmark's `createdAt` ≤ `since`, so a bookmark re-added later (or another host claiming the id) gets nothing until the box is ticked again; a re-pointed bookmark keeps its `createdAt` and keeps publishing.
 - **What is sent.**
