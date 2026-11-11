@@ -143,7 +143,8 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   }
 
   const ops = opts.brokerOps ?? realBrokerOps(env.brokerAddr ?? env.brokerSocket);
-  const mcpArgs = hostMcpArgs(env.mcpSocket);
+  const mcpListen: ListenTarget = env.mcpPort !== null ? { port: env.mcpPort } : { path: env.mcpSocket };
+  const mcpArgs = hostMcpArgs(env.mcpAddr ? { tcp: `${env.mcpAddr.host}:${env.mcpAddr.port}` } : { unix: env.mcpSocket });
   const hub = new AttachHub(ops, { hostPort: env.port, log, createArgs: config.db ? (a) => [...a, ...mcpArgs] : undefined });
   const events = new EventHub();
   const holderId = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
@@ -279,7 +280,7 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
         events,
         workspace: () => ({ id, name: config.workspace.name }),
         automations: () => config.automations,
-        mcp: { socketPath: env.mcpSocket, socketGroup: env.mcpSocketGroup },
+        mcp: { listen: mcpListen, args: mcpArgs },
         mcpRetryMs: opts.mcpRetryMs,
         search: config.search,
         embedDir: env.embedDir,

@@ -98,7 +98,7 @@ describe.skipIf(!isPg)('host MCP query', () => {
     const rs = await openPgMcpReadSource(t!.schema, t!.appConfig, (m) => logs.push(m), { preprovisioned: { role, password } });
     expect(rs.queryFlavor).toBe('postgres');
     const socketPath = join(mkdtempSync(join(tmpdir(), 'hq-')), 'mcp', 'mcp.sock');
-    mcp = await startHostMcp({ socketPath, socketGroup: null, workspaceId: HOSTED, readSource: rs, log: createLogger(() => undefined) });
+    mcp = await startHostMcp({ listen: { path: socketPath }, workspaceId: HOSTED, readSource: rs, log: createLogger(() => undefined) });
     return socketPath;
   }
 

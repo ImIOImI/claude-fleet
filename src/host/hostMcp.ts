@@ -5,6 +5,7 @@ import {
 } from '../main/mcpCore.js';
 import type { OwnedReadSource } from '../main/store/readSource.js';
 import type { EmbedFn } from '../main/vectors.js';
+import { listenOn, type ListenTarget } from './endpoint.js';
 import type { Logger } from './log.js';
 import { finishSocket, prepareSocketPath } from './socketDir.js';
 
@@ -25,15 +26,15 @@ const QUIET = new Set(['mcp-conn', 'mcp-conn-closed']);
 
 const REFUSAL_LOG_MS = 60_000;
 
-export interface HostMcp { close(): Promise<void> }
+export interface HostMcp { close(): Promise<void>; port: number | null }
 
 /** The core's handler state is per process, so one instance at a time. */
 let active = false;
 
 /** Takes ownership of `readSource`: close() and a failed start both close it. */
 export async function startHostMcp(o: {
-  socketPath: string;
-  socketGroup: number | null;
+  /** A Unix socket (single) or a TCP port (host pod; the mesh admits only the workspace pod). */
+  listen: ListenTarget;
   workspaceId: string;
   readSource: OwnedReadSource;
   log: Logger;
@@ -83,25 +84,21 @@ export async function startHostMcp(o: {
     setMcpLogSink(null);
     active = false;
   }
+  let port: number | null = null;
   try {
-    await prepareSocketPath(o.socketPath, o.socketGroup);
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(o.socketPath, () => {
-        server.off('error', reject);
-        resolve();
-      });
-    });
-    await finishSocket(o.socketPath, o.socketGroup);
+    if ('path' in o.listen) await prepareSocketPath(o.listen.path);
+    port = await listenOn(server, o.listen);
+    if ('path' in o.listen) await finishSocket(o.listen.path);
   } catch (err) {
     server.close();
     reset();
     throw err;
   }
   server.on('error', (err) => o.log.log('warn', 'mcp listener error', { error: err.message }));
-  o.log.log('info', 'mcp serving', { socket: o.socketPath });
+  o.log.log('info', 'mcp serving', 'path' in o.listen ? { socket: o.listen.path } : { port });
   let closing: Promise<void> | null = null;
   return {
+    port,
     close() {
       closing ??= new Promise<void>((resolve) => {
         for (const s of socks) s.destroy();
@@ -118,9 +115,16 @@ export async function startHostMcp(o: {
 /** Written into the image at build (`fleet-host write-mcp-bridge`). */
 export const HOST_MCP_BRIDGE = '/usr/local/lib/fleet-host/mcp-bridge.cjs';
 
+/** Where a session's bridge dials: the private socket (single) or the host pod's MCP port. */
+export type McpDial = { unix: string } | { tcp: string };
+
 /** Appended to every claude fleet-host creates; the name is the prefix INBOX_TOOLS uses.
  *  `--mcp-config` is variadic: the `=` form keeps a later positional from being read as a config. */
-export function hostMcpArgs(socketPath: string, bridge: string = HOST_MCP_BRIDGE): string[] {
-  const entry = { type: 'stdio', command: 'node', args: [bridge], env: { CLAUDE_FLEET_MCP_UNIX: socketPath, CLAUDE_FLEET_MCP_TCP: '' } };
+export function hostMcpArgs(dial: McpDial, bridge: string = HOST_MCP_BRIDGE): string[] {
+  // No CLAUDE_FLEET_MCP_TOKEN_FILE: on TCP the mesh establishes the caller (D73).
+  const env = 'tcp' in dial
+    ? { CLAUDE_FLEET_MCP_TCP: dial.tcp, CLAUDE_FLEET_MCP_UNIX: '' }
+    : { CLAUDE_FLEET_MCP_UNIX: dial.unix, CLAUDE_FLEET_MCP_TCP: '' };
+  const entry = { type: 'stdio', command: 'node', args: [bridge], env };
   return [`--mcp-config=${JSON.stringify({ mcpServers: { 'claude-fleet-state': entry } })}`];
 }

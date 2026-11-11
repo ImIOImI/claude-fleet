@@ -18,7 +18,8 @@ import { startHostEmbedder, type HostEmbedder, type HostEmbedderOptions } from '
 import type { EventHub } from './events.js';
 import { startHostAutomations, type HostAutomations } from './hostAutomations.js';
 import { startHostIndexer } from './hostIndexer.js';
-import { hostMcpArgs, startHostMcp, type HostMcp } from './hostMcp.js';
+import type { ListenTarget } from './endpoint.js';
+import { startHostMcp, type HostMcp } from './hostMcp.js';
 import type { Logger } from './log.js';
 import { leaseFence, LeaseLostError } from './pgLease.js';
 
@@ -37,7 +38,8 @@ export interface HolderOptions {
   events: Pick<EventHub, 'publish'>;
   workspace: () => { id: string; name: string };
   automations: () => HostAutomationEntry[];
-  mcp: { socketPath: string; socketGroup: number | null };
+  /** The MCP's listener, and the `--mcp-config` argument fresh steps get. */
+  mcp: { listen: ListenTarget; args: string[] };
   /** First retry delay after a failed MCP start; doubles up to MCP_RETRY_MAX_MS. */
   mcpRetryMs?: number;
   /** D79: false = no sidecar, indexer or search_transcripts. */
@@ -138,7 +140,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
     await ingest.start();
     if (indexer) void indexer.backfill().catch((err: Error) => o.log.log('warn', 'index backfill failed', { error: err.message }));
     automations = await startHostAutomations({
-      inbox: stores.inbox, workspace: o.workspace, ops: o.ops, mcpArgs: hostMcpArgs(o.mcp.socketPath), events: o.events, log: o.log
+      inbox: stores.inbox, workspace: o.workspace, ops: o.ops, mcpArgs: o.mcp.args, events: o.events, log: o.log
     });
     await automations.reconcile(o.automations());
   } catch (err) {
@@ -169,7 +171,7 @@ function mcpServer(o: HolderOptions, embed: EmbedFn | undefined, readSource: () 
   const tryStart = (): void => {
     timer = null;
     attempt = readSource()
-      .then((rs) => startHostMcp({ socketPath: o.mcp.socketPath, socketGroup: o.mcp.socketGroup, workspaceId: o.workspaceId, log: o.log, readSource: rs, embed }))
+      .then((rs) => startHostMcp({ listen: o.mcp.listen, workspaceId: o.workspaceId, log: o.log, readSource: rs, embed }))
       .then(
         async (m) => {
           if (stopped) await m.close();

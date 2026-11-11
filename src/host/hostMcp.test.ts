@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { connect, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -36,13 +36,13 @@ afterEach(async () => {
 async function start(lines: string[], maxConnections?: number, now?: () => number, embed?: EmbedFn) {
   dir = mkdtempSync(join(tmpdir(), 'hm-'));
   const socketPath = join(dir, 'run', 'mcp.sock');
-  mcp = await startHostMcp({ socketPath, socketGroup: null, workspaceId: WS, readSource: rs, log: createLogger((l) => lines.push(l)), maxConnections, now, embed });
+  mcp = await startHostMcp({ listen: { path: socketPath }, workspaceId: WS, readSource: rs, log: createLogger((l) => lines.push(l)), maxConnections, now, embed });
   return socketPath;
 }
 
-function rpc(path: string, msgs: object[]): Promise<Array<Record<string, any>>> {
+function rpc(at: string | { host: string; port: number }, msgs: object[]): Promise<Array<Record<string, any>>> {
   return new Promise((resolve, reject) => {
-    const c: Socket = connect(path);
+    const c: Socket = connect(typeof at === 'string' ? { path: at } : at);
     let buf = '';
     c.setEncoding('utf8');
     c.on('data', (d) => {
@@ -147,7 +147,7 @@ describe('startHostMcp', () => {
     dir = mkdtempSync(join(tmpdir(), 'hm-'));
     const socketPath = join(dir, 'mcp.sock');
     writeFileSync(socketPath, 'x');
-    await expect(startHostMcp({ socketPath, socketGroup: null, workspaceId: WS, readSource: rs, log: createLogger(() => undefined) })).rejects.toThrow(/not a socket/);
+    await expect(startHostMcp({ listen: { path: socketPath }, workspaceId: WS, readSource: rs, log: createLogger(() => undefined) })).rejects.toThrow(/not a socket/);
     const list = handleMcpRequestForTests('tools/list') as { tools: unknown[] };
     expect(list.tools.length).toBeGreaterThan(HOST_MCP_TOOLS.size);
   });
@@ -213,7 +213,7 @@ describe('search_transcripts on the host', () => {
 
 describe('hostMcpArgs', () => {
   it('names claude-fleet-state and points the bridge at the socket', () => {
-    const args = hostMcpArgs('/run/fleet/mcp.sock');
+    const args = hostMcpArgs({ unix: '/run/fleet/mcp.sock' });
     expect(args).toHaveLength(1);
     expect(args[0].startsWith('--mcp-config=')).toBe(true);
     expect(JSON.parse(args[0].slice('--mcp-config='.length))).toEqual({
@@ -223,32 +223,17 @@ describe('hostMcpArgs', () => {
 });
 
 describe('startHostMcp, more', () => {
-  it('group mode: serves a 0660 socket in the group from a prepped directory', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'hm-'));
-    const gid = process.getgid!();
-    const d = join(dir, 'mcp');
-    mkdirSync(d);
-    chmodSync(d, 0o2750);
-    const socketPath = join(d, 'mcp.sock');
-    writeFileSync(socketPath, 'planted');
-    mcp = await startHostMcp({ socketPath, socketGroup: gid, workspaceId: WS, readSource: rs, log: createLogger(() => undefined) });
-    const st = lstatSync(socketPath);
-    expect([st.isSocket(), st.mode & 0o777, st.gid]).toEqual([true, 0o660, gid]);
-    const [pong] = await rpc(socketPath, [{ jsonrpc: '2.0', id: 1, method: 'ping' }]);
-    expect(pong.result).toEqual({});
-  });
-
   it('private mode: refuses a symlink at the socket path', async () => {
     dir = mkdtempSync(join(tmpdir(), 'hm-'));
     mkdirSync(join(dir, 'run'));
     const socketPath = join(dir, 'run', 'mcp.sock');
     symlinkSync(join(dir, 'elsewhere'), socketPath);
-    await expect(startHostMcp({ socketPath, socketGroup: null, workspaceId: WS, readSource: rs, log: createLogger(() => undefined) })).rejects.toThrow(/not a socket/);
+    await expect(startHostMcp({ listen: { path: socketPath }, workspaceId: WS, readSource: rs, log: createLogger(() => undefined) })).rejects.toThrow(/not a socket/);
   });
 
   it('allows one instance per process', async () => {
     const p = await start([]);
-    await expect(startHostMcp({ socketPath: p + '2', socketGroup: null, workspaceId: WS, readSource: rs, log: createLogger(() => undefined) }))
+    await expect(startHostMcp({ listen: { path: p + '2' }, workspaceId: WS, readSource: rs, log: createLogger(() => undefined) }))
       .rejects.toThrow(/already serving/);
     await mcp!.close();
     mcp = null;
@@ -274,5 +259,57 @@ describe('startHostMcp, more', () => {
     expect(hold.length).toBe(MAX_IN_FLIGHT_PER_CONNECTION);
     for (const r of hold) r();
     c.destroy();
+  });
+});
+
+describe('startHostMcp on TCP', () => {
+  it('serves the tools on a port, caller fixed to the hosted workspace, and leaves no socket file', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'hm-'));
+    mcp = await startHostMcp({ listen: { port: 0, host: '127.0.0.1' }, workspaceId: WS, readSource: rs, log: createLogger(() => undefined) });
+    expect(mcp.port).toBeGreaterThan(0);
+    const [list, sessions] = await rpc({ host: '127.0.0.1', port: mcp.port! }, [
+      { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_sessions', arguments: {} } }
+    ]).then((ms) => [1, 2].map((id) => ms.find((m) => m.id === id)!));
+    expect(list.result.tools).toHaveLength(HOST_MCP_TOOLS.size);
+    expect(sessions.result.isError).toBeUndefined();
+    expect(scopes).toEqual([[WS]]);
+  });
+  it('keeps the connection cap and 1 MiB line cap, and treats a token-shaped first line as a bad request', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'hm-'));
+    mcp = await startHostMcp({ listen: { port: 0, host: '127.0.0.1' }, workspaceId: WS, readSource: rs, log: createLogger(() => undefined), maxConnections: 1 });
+    const at = { host: '127.0.0.1', port: mcp.port! };
+    const first = connect(at);
+    await new Promise((r) => first.once('connect', r));
+    const extra = connect(at);
+    extra.write(PING);
+    expect(await closedWith(extra)).toBe('');
+    first.destroy();
+    await new Promise((r) => setTimeout(r, 50));
+    const [over] = await rpc(at, [{ jsonrpc: '2.0', id: 1, method: 'ping', params: { pad: 'x'.repeat(1 << 20) } }]);
+    expect(over.error.code).toBe(-32600);
+    await new Promise((r) => setTimeout(r, 50));
+    const c = connect(at);
+    c.on('error', () => undefined);
+    c.write('0123456789abcdef0123456789abcdef\n');
+    c.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_sessions', arguments: { workspace_id: 'OTHER' } } }) + '\n');
+    let buf = '';
+    c.setEncoding('utf8');
+    c.on('data', (d) => { buf += d; });
+    await vi.waitFor(() => expect(buf.trim().split('\n')).toHaveLength(2));
+    c.destroy();
+    const [bad, call] = buf.trim().split('\n').map((l) => JSON.parse(l));
+    expect(bad.error.code).toBe(-32700);
+    expect(call.result.isError).toBeUndefined();
+    expect(scopes).toEqual([[WS]]);
+  });
+});
+
+describe('hostMcpArgs on TCP', () => {
+  it('points the bridge at the address with no token file', () => {
+    const [arg] = hostMcpArgs({ tcp: 'fleet-agent-host.platform-ops.svc:8082' });
+    expect(JSON.parse(arg.slice('--mcp-config='.length))).toEqual({
+      mcpServers: { 'claude-fleet-state': { type: 'stdio', command: 'node', args: [HOST_MCP_BRIDGE], env: { CLAUDE_FLEET_MCP_TCP: 'fleet-agent-host.platform-ops.svc:8082', CLAUDE_FLEET_MCP_UNIX: '' } } }
+    });
   });
 });

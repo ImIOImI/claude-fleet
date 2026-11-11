@@ -129,7 +129,7 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     ws.send(jsonFrame(FrameType.CREATE, { id: 'v1', cols: 80, rows: 24 }));
     await vi.waitFor(() => expect(broker.created).toHaveLength(1), { timeout: 5_000 });
     ws.close();
-    expect(broker.created[0].args.at(-1)).toBe(hostMcpArgs(mcpSock(a.dir))[0]);
+    expect(broker.created[0].args.at(-1)).toBe(hostMcpArgs({ unix: mcpSock(a.dir) })[0]);
   }, 30_000);
 
   it('a failed MCP start keeps the holder and retries until it serves', async () => {

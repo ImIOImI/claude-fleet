@@ -255,8 +255,10 @@ export interface HostEnv {
   projectsDir: string;
   /** The fleet-state MCP socket the holder serves to sessions. */
   mcpSocket: string;
-  /** Shared-group mode (container split): prep's `mcp/` directory is checked, the socket is 0660 in this group. */
-  mcpSocketGroup: number | null;
+  /** Serve the MCP on 0.0.0.0:<port> instead of mcpSocket; set with mcpAddr. */
+  mcpPort: number | null;
+  /** What sessions' bridges dial when mcpPort is set. */
+  mcpAddr: HostPort | null;
   /** The sidecar and its weights (D65). */
   embedDir: string;
 }
@@ -281,9 +283,10 @@ export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
   const portText = env.FLEET_HOST_PORT ?? String(DEFAULT_PORT);
   const port = Number(portText);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new HostConfigError(`FLEET_HOST_PORT ${portText} is not a port`);
-  const groupText = env.FLEET_HOST_MCP_SOCKET_GROUP;
-  if (groupText !== undefined && groupText !== '' && !/^\d{1,9}$/.test(groupText)) throw new HostConfigError('FLEET_HOST_MCP_SOCKET_GROUP must be a numeric gid');
-  const mcpSocket = env.FLEET_HOST_MCP_SOCKET || (groupText ? '/run/fleet/mcp/mcp.sock' : '/run/fleet/mcp.sock');
+  const mcpPort = envPort(env, 'FLEET_HOST_MCP_TCP_PORT');
+  const mcpAddr = envHostPort(env, 'FLEET_HOST_MCP_ADDR');
+  if ((mcpPort === null) !== (mcpAddr === null)) throw new HostConfigError('FLEET_HOST_MCP_TCP_PORT and FLEET_HOST_MCP_ADDR are set together');
+  const mcpSocket = env.FLEET_HOST_MCP_SOCKET || '/run/fleet/mcp.sock';
   if (!isAbsolute(mcpSocket)) throw new HostConfigError('FLEET_HOST_MCP_SOCKET must be an absolute path');
   // sun_path holds 108 bytes with the terminating NUL on Linux.
   if (Buffer.byteLength(mcpSocket) > 107) throw new HostConfigError('FLEET_HOST_MCP_SOCKET is longer than 107 bytes');
@@ -297,7 +300,8 @@ export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
     credPort: envPort(env, 'FLEET_HOST_CRED_TCP_PORT'),
     projectsDir: env.FLEET_HOST_PROJECTS || join(homedir(), '.claude', 'projects'),
     mcpSocket,
-    mcpSocketGroup: groupText ? Number(groupText) : null,
+    mcpPort,
+    mcpAddr,
     embedDir: env.FLEET_HOST_EMBED_DIR || DEFAULT_EMBED_DIR
   };
 }
