@@ -12,6 +12,15 @@ const base = {
 };
 
 describe('parseHostConfig', () => {
+  it('refuses a machines grant for the credential App, whose tokens sessions hold', () => {
+    const github = { appId: 123456, installationId: 2, keyFile: '/k.pem' };
+    expect(() => parseHostConfig({ ...base, github })).toThrow("machines[0].appId is this host's credential App; sessions hold its tokens");
+    expect(parseHostConfig({ ...base, github: { ...github, appId: 7 } }).grants.machines).toHaveLength(1);
+    expect(parseHostConfig({ ...base, github: { repositories: ['a'] } }).grants.machines).toHaveLength(1);
+    const machines = [{ appId: 7, login: 'other[bot]', tier: 'read' }, ...base.machines];
+    expect(() => parseHostConfig({ ...base, machines, github })).toThrow("machines[1].appId is this host's credential App; sessions hold its tokens");
+  });
+
   it('parses workspace, identity and grants', () => {
     const c = parseHostConfig(base);
     expect(c.workspace).toEqual({ id: null, name: 'review-bot', description: 'PR reviewer', color: { hue: 210 } });

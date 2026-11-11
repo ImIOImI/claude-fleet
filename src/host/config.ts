@@ -214,9 +214,17 @@ export function parseHostConfig(raw: unknown): HostConfig {
   } catch (err) {
     throw new HostConfigError((err as Error).message);
   }
+  const github = o.github === undefined ? null : parseGithub(o.github);
+  const credApp = github?.app?.appId;
+  // Otherwise a session could take a token from the credential server and present it as a Bearer on :8080.
+  grants.machines.forEach((m, i) => {
+    if (credApp !== undefined && String(m.appId) === credApp) {
+      throw new HostConfigError(`machines[${i}].appId is this host's credential App; sessions hold its tokens`);
+    }
+  });
   return {
     workspace: parseWorkspace(o.workspace),
-    github: o.github === undefined ? null : parseGithub(o.github),
+    github,
     db: o.db === undefined ? null : parseDb(o.db),
     identity: { provider: 'github', org: typeof id.org === 'string' ? id.org : null },
     grants,
