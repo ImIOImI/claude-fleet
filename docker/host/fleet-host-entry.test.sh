@@ -28,6 +28,7 @@ import { appendFileSync, readFileSync } from 'node:fs';
 const ev = `${process.env.FAKE_DIR}/events`;
 const note = (s) => appendFileSync(ev, s + '\n');
 note('host-start');
+note(`dirs ${process.env.FLEET_HOST_STATE ?? ''} ${process.env.FLEET_HOST_PROJECTS ?? ''} ${process.env.HOME ?? ''}`);
 note(`env ${process.env.FLEET_HOST_CRED_TCP_PORT ?? ''} ${process.env.FLEET_HOST_MCP_TCP_PORT ?? ''} ${process.env.FLEET_HOST_REQUIRE_MESH ?? ''} ${process.env.FLEET_HOST_RESCAN_MS ?? ''}`);
 appendFileSync(`${process.env.FAKE_DIR}/pids`, `${process.pid}\n`);
 const starts = readFileSync(ev, 'utf8').split('\n').filter((l) => l === 'host-start').length;
@@ -38,6 +39,14 @@ process.on('SIGHUP', () => note('host-hup'));
 setInterval(() => undefined, 1000);
 JS
 
+# id -u reports FAKE_UID, so the uid guards are testable under any runner uid.
+mkdir -p "$tmp/bin"
+cat > "$tmp/bin/id" <<'SH'
+#!/usr/bin/env bash
+if [ "$*" = -u ]; then echo "$FAKE_UID"; else exec /usr/bin/id "$@"; fi
+SH
+chmod +x "$tmp/bin/id"
+
 free_port() { node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})"; }
 
 # run <case> <mode|none> [env...]: starts the entry script in the background; sets $pid and $dir.
@@ -47,7 +56,8 @@ run() {
   local args=("$mode"); [ "$mode" = none ] && args=()
   env -u CLAUDE_FLEET_BROKER_TCP_PORT -u CLAUDE_FLEET_BROKER_REQUIRE_MESH -u FLEET_HOST_CRED_ADDR -u CLAUDE_FLEET_BROKER_ADDR \
     -u FLEET_HOST_MCP_ADDR -u FLEET_HOST_CRED_TCP_PORT -u FLEET_HOST_MCP_TCP_PORT -u FLEET_HOST_REQUIRE_MESH -u FLEET_HOST_RESCAN_MS \
-    FAKE_DIR="$dir" FLEET_BROKER_BIN="$tmp/broker" FLEET_HOST_JS="$tmp/host.mjs" FLEET_HOST_PORT="$(free_port)" \
+    -u FLEET_MESH_READY_URL -u FLEET_HOST_STATE -u FLEET_HOST_PROJECTS \
+    PATH="$tmp/bin:$PATH" FAKE_UID=1001 HOME=/home/fleet FAKE_DIR="$dir" FLEET_BROKER_BIN="$tmp/broker" FLEET_HOST_JS="$tmp/host.mjs" FLEET_HOST_PORT="$(free_port)" \
     FLEET_HOST_BACKOFF_START_MS=20 FLEET_HOST_BACKOFF_MAX_MS=80 FLEET_WORKSPACE_UID=99999 "$@" \
     bash "$here/fleet-host-entry" "${args[@]}" 2> "$dir/log" &
   pid=$!
@@ -193,7 +203,7 @@ assert "$(grep '^env ' "$dir/events" | sort | tr '\n' '|')" "env   |env    |" "s
 kill -TERM "$pid"; finish
 
 # 15. workspace execs the broker on TCP behind the mesh guard and exports the credential address.
-run ws workspace FLEET_HOST_CRED_ADDR=host-svc:8081
+run ws workspace FAKE_UID=1000 FLEET_HOST_CRED_ADDR=host-svc:8081
 until_count broker-start 1
 assert "$(grep '^env ' "$dir/events")" "env 7070 1 host-svc:8081" "workspace exports broker and credential env"
 assert "$(head -1 "$dir/pids")" "$pid" "workspace execs the broker"
@@ -202,13 +212,13 @@ kill -TERM "$pid"; finish
 assert "$st" "0" "workspace exits with the broker"
 
 # 16. workspace keeps an explicit port, forces the mesh flag on, and propagates the broker's exit status.
-run wsexit workspace FLEET_HOST_CRED_ADDR=h:1 CLAUDE_FLEET_BROKER_TCP_PORT=7171 CLAUDE_FLEET_BROKER_REQUIRE_MESH=0 FAKE_BROKER_EXIT=4
+run wsexit workspace FAKE_UID=1000 FLEET_HOST_CRED_ADDR=h:1 CLAUDE_FLEET_BROKER_TCP_PORT=7171 CLAUDE_FLEET_BROKER_REQUIRE_MESH=0 FAKE_BROKER_EXIT=4
 finish
 assert "$st" "4" "workspace exit status is the broker's"
 assert "$(grep '^env ' "$dir/events")" "env 7171 1 h:1" "workspace keeps an explicit broker port and overrides REQUIRE_MESH=0"
 
 # 17. workspace refuses to start without FLEET_HOST_CRED_ADDR.
-run wsnocred workspace
+run wsnocred workspace FAKE_UID=1000
 finish
 assert "$st" "1" "workspace refuses a missing FLEET_HOST_CRED_ADDR"
 assert "$(count broker-start)" "0" "no broker without FLEET_HOST_CRED_ADDR"
@@ -270,15 +280,68 @@ assert "$st" "1" "host refuses a taken port"
 assert "$(count host-start)" "0" "host never starts onto a taken port"
 
 # 24. host refuses to run as the workspace uid.
-run hostuid host "${HOSTENV[@]}" FLEET_WORKSPACE_UID="$(id -u)"
+run hostuid host "${HOSTENV[@]}" FLEET_WORKSPACE_UID=1001
 finish
 assert "$st" "1" "host refuses the workspace uid"
 assert "$(count host-start)" "0" "fleet-host never started as the workspace uid"
-grep -q 'refuses to run as the workspace uid' "$dir/log"; assert "$?" "0" "uid refusal logged"
+grep -q 'host mode refuses to run as uid 1001' "$dir/log"; assert "$?" "0" "uid refusal logged"
 
 # 25. host keeps an explicit rescan interval.
 run hostrescan host "${HOSTENV[@]}" FLEET_HOST_RESCAN_MS=2000 FAKE_HOST_CRASHES=all FAKE_HOST_EXIT=0
 finish
 assert "$(grep -m1 '^env ' "$dir/events")" "env 8081 8082 1 2000" "host keeps FLEET_HOST_RESCAN_MS"
+
+# 26. Production modes refuse a caller-chosen sidecar readiness URL.
+run wsmeshurl workspace FAKE_UID=1000 FLEET_HOST_CRED_ADDR=h:1 FLEET_MESH_READY_URL=http://127.0.0.1:1/ready
+finish
+assert "$st" "1" "workspace refuses FLEET_MESH_READY_URL"
+assert "$(count broker-start)" "0" "no broker with FLEET_MESH_READY_URL"
+grep -q 'FLEET_MESH_READY_URL is set' "$dir/log"; assert "$?" "0" "workspace mesh URL refusal logged"
+run hostmeshurl host "${HOSTENV[@]}" FLEET_MESH_READY_URL=http://127.0.0.1:1/ready
+finish
+assert "$st" "1" "host refuses FLEET_MESH_READY_URL"
+assert "$(count host-start)" "0" "fleet-host never started with FLEET_MESH_READY_URL"
+grep -q 'FLEET_MESH_READY_URL is set' "$dir/log"; assert "$?" "0" "host mesh URL refusal logged"
+
+# 27. host moves state, projects and HOME off /home/fleet (D94).
+run hostdirs host "${HOSTENV[@]}" FAKE_HOST_CRASHES=all FAKE_HOST_EXIT=0
+finish
+assert "$(grep -m1 '^dirs ' "$dir/events")" "dirs /var/lib/fleet-host/state /var/lib/fleet-host/projects /var/lib/fleet-host/state" "host defaults state, projects and HOME"
+run hostdirsimg host "${HOSTENV[@]}" FLEET_HOST_STATE=/home/fleet/.claude/fleet-host HOME=/ FAKE_HOST_CRASHES=all FAKE_HOST_EXIT=0
+finish
+assert "$(grep -m1 '^dirs ' "$dir/events")" "dirs /var/lib/fleet-host/state /var/lib/fleet-host/projects /var/lib/fleet-host/state" "host replaces the image's FLEET_HOST_STATE"
+run hostdirsset host "${HOSTENV[@]}" FLEET_HOST_STATE=/st FLEET_HOST_PROJECTS=/pr HOME=/h FAKE_HOST_CRASHES=all FAKE_HOST_EXIT=0
+finish
+assert "$(grep -m1 '^dirs ' "$dir/events")" "dirs /st /pr /h" "host keeps explicit state, projects and HOME"
+run hostdirshome host "${HOSTENV[@]}" FLEET_HOST_STATE=/st FAKE_HOST_CRASHES=all FAKE_HOST_EXIT=0
+finish
+assert "$(grep -m1 '^dirs ' "$dir/events")" "dirs /st /var/lib/fleet-host/projects /st" "host points a /home/fleet HOME at the state dir"
+run singledirs single
+until_count host-start 1
+assert "$(grep -m1 '^dirs ' "$dir/events")" "dirs   /home/fleet" "single leaves state, projects and HOME alone"
+kill -TERM "$pid"; finish
+
+# 28. host resets the backoff after a run that outlasted the window.
+run hostreset host "${HOSTENV[@]}" FAKE_HOST_CRASHES=all FAKE_HOST_EXIT=75 FLEET_HOST_RESTART_WINDOW_S=0
+until_count host-start 4
+grep -q '"delayMs":40' "$dir/log"; assert "$?" "1" "host backoff reset after a run as long as the window"
+assert "$(grep -c '"delayMs":20' "$dir/log")" "$(grep -c 'db unavailable' "$dir/log")" "every restart uses the starting delay"
+kill -TERM "$pid"; finish
+
+# 29. uid guards: host never runs as root or 1000; workspace never as 1001.
+for u in 0 1000; do
+  run "hostuid$u" host "${HOSTENV[@]}" FAKE_UID="$u"
+  finish
+  assert "$st" "1" "host refuses uid $u"
+  assert "$(count host-start)" "0" "fleet-host never started as uid $u"
+done
+run hostuid1000ws host "${HOSTENV[@]}" FAKE_UID=1000 FLEET_WORKSPACE_UID=4242
+finish
+assert "$st" "1" "host refuses uid 1000 whatever FLEET_WORKSPACE_UID says"
+run wsuid workspace FAKE_UID=1001 FLEET_HOST_CRED_ADDR=h:1
+finish
+assert "$st" "1" "workspace refuses uid 1001"
+assert "$(count broker-start)" "0" "no broker as uid 1001"
+grep -q 'workspace mode refuses to run as the host uid 1001' "$dir/log"; assert "$?" "0" "workspace uid refusal logged"
 
 [ "$fails" -eq 0 ] && echo "ALL PASS" || exit 1

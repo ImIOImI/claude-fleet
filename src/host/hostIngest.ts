@@ -106,6 +106,17 @@ export class HostIngest {
     return dir === this.projectsReal || dir.startsWith(this.projectsReal + sep);
   }
 
+  /** A directory swapped for a symlink between the pre-check and open: O_NOFOLLOW guards only the last component. */
+  private async openedInProjects(fh: FileHandle): Promise<boolean> {
+    try {
+      this.projectsReal ??= await realpath(this.o.projectsDir);
+      const real = await realpath(`/proc/self/fd/${fh.fd}`);
+      return real.startsWith(this.projectsReal + sep);
+    } catch {
+      return false;
+    }
+  }
+
   private enqueue(path: string): Promise<void> {
     if (this.stopped) return Promise.resolve();
     return this.queue.enqueue(path, () => this.process(path));
@@ -124,6 +135,7 @@ export class HostIngest {
       return;
     }
     try {
+      if (!(await this.openedInProjects(fh))) return;
       const st = await fh.stat({ bigint: true });
       if (!st.isFile()) return;
       const ino = String(st.ino);

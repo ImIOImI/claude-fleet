@@ -137,6 +137,36 @@ describe.skipIf(!isPg)('HostIngest', () => {
     expect(await events()).toBe(0);
   });
 
+  it('re-checks containment after open: a directory swapped for a symlink after the pre-check is skipped', async () => {
+    const { make, projects } = await rig();
+    const outside = mkdtempSync(join(tmpdir(), 'out-'));
+    writeFileSync(join(outside, 'agent-x.jsonl'), line('o'));
+    const sub = join(projects, '-workspace', S1, 'subagents');
+    mkdirSync(sub, { recursive: true });
+    writeFileSync(join(sub, 'agent-x.jsonl'), line('i'));
+    const h = make();
+    const proto = HostIngest.prototype as unknown as { inProjects(p: string): Promise<boolean> };
+    const real = proto.inProjects;
+    let swapped = false;
+    const spy = vi.spyOn(proto, 'inProjects').mockImplementation(async function (this: HostIngest, p: string) {
+      const ok = await real.call(this, p);
+      if (!swapped) {
+        swapped = true;
+        renameSync(sub, `${sub}.old`);
+        symlinkSync(outside, sub);
+      }
+      return ok;
+    });
+    try {
+      await h.start();
+      await h.scan();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(swapped).toBe(true);
+    expect(await events()).toBe(0);
+  });
+
   it('skips a non-regular transcript without blocking on it', async () => {
     const { make, projects, file, logs } = await rig();
     const sub = join(projects, '-workspace', S1, 'subagents');

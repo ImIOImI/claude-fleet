@@ -57,7 +57,20 @@ stop_host() {
   fi
 }
 
+# The mesh guard's only input; a production pod probes the sidecar, never a caller-chosen URL.
+refuse_mesh_url() {
+  if [ -n "${FLEET_MESH_READY_URL+x}" ]; then
+    log error "FLEET_MESH_READY_URL is set; refusing to start ($mode mode probes the default sidecar URL)"
+    exit 1
+  fi
+}
+
 run_workspace() {
+  if [ "$(id -u)" = 1001 ]; then
+    log error "workspace mode refuses to run as the host uid 1001"
+    exit 1
+  fi
+  refuse_mesh_url
   need FLEET_HOST_CRED_ADDR
   # Sessions inherit the broker's env, so fleet-host-cred finds the host pod.
   export FLEET_HOST_CRED_ADDR
@@ -67,10 +80,13 @@ run_workspace() {
 }
 
 run_host() {
-  if [ "$(id -u)" = "$workspace_uid" ]; then
-    log error "host mode refuses to run as the workspace uid $workspace_uid"
+  local uid
+  uid=$(id -u)
+  if [ "$uid" = 0 ] || [ "$uid" = 1000 ] || [ "$uid" = "$workspace_uid" ]; then
+    log error "host mode refuses to run as uid $uid (root or a workspace uid)"
     exit 1
   fi
+  refuse_mesh_url
   need CLAUDE_FLEET_BROKER_ADDR
   need FLEET_HOST_MCP_ADDR
   export FLEET_HOST_CRED_TCP_PORT=${FLEET_HOST_CRED_TCP_PORT:-8081}
@@ -78,14 +94,19 @@ run_host() {
   export FLEET_HOST_REQUIRE_MESH=1
   # The transcript writers are in the workspace pod: inotify sees nothing.
   export FLEET_HOST_RESCAN_MS=${FLEET_HOST_RESCAN_MS:-5000}
+  # The image defaults point into /home/fleet, which uid 1001 can't write (D94).
+  case "${FLEET_HOST_STATE:-}" in ''|/home/fleet/.claude/fleet-host) export FLEET_HOST_STATE=/var/lib/fleet-host/state ;; esac
+  export FLEET_HOST_PROJECTS=${FLEET_HOST_PROJECTS:-/var/lib/fleet-host/projects}
+  case "${HOME:-}" in ''|/|/home/fleet|/home/fleet/*) export HOME=$FLEET_HOST_STATE ;; esac
   trap 'stop_host; exit 0' TERM INT
   trap '[ -n "$host" ] && kill -HUP "$host" 2>/dev/null' HUP
-  local status
+  local status started
   while :; do
     if port_bound; then
       log error "port $host_port is already bound; refusing to start fleet-host" ",\"port\":$host_port"
       exit 1
     fi
+    started=$SECONDS
     node "$host_js" &
     host=$!
     while :; do
@@ -98,6 +119,8 @@ run_host() {
       log error "fleet-host exited" ",\"status\":$status"
       exit "$status"
     fi
+    # A run that outlasted the window was a recovery, not part of an outage.
+    (( SECONDS - started >= window_s )) && delay_ms=$backoff_start_ms
     log warn "fleet-host exited (db unavailable); restarting" ",\"status\":$status,\"delayMs\":$delay_ms"
     backoff_sleep
   done

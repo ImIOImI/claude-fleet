@@ -10,6 +10,9 @@ tmp=$(mktemp -d)
 ids=()
 cleanup() {
   for c in "${ids[@]}"; do echo "--- $c"; docker logs "$c" 2>&1 | tail -20 || true; docker rm -f "$c" >/dev/null 2>&1 || true; done
+  local left
+  left=$(docker ps -aq --filter "name=^$n-")
+  [ -n "$left" ] && docker rm -f $left >/dev/null 2>&1
   docker network rm "$n" >/dev/null 2>&1 || true
   rm -rf "$tmp"
 }
@@ -77,11 +80,9 @@ ids+=("$(docker run -d --name "$n-ws" --network "container:$n-wsnet" -u 1000:100
   -e FLEET_HOST_CRED_ADDR=host-svc:8081 -e CLAUDE_FLEET_BROKER_CLAUDE=/bin/cat \
   "$image" fleet-host-entry workspace)")
 ids+=("$(docker run -d --name "$n-hostnet" --network "$n" --network-alias host-svc -p 127.0.0.1::8080 --entrypoint node "$image" -e "$ready_js")")
-ids+=("$(docker run -d --name "$n-host" --network "container:$n-hostnet" -u 1001:1001 --read-only \
-  --tmpfs /tmp --tmpfs /var/lib/fleet-host/state:mode=1777 \
-  -e CLAUDE_FLEET_BROKER_ADDR=workspace-svc:7070 -e FLEET_HOST_MCP_ADDR=host-svc:8082 \
-  -e FLEET_HOST_STATE=/var/lib/fleet-host/state -e FLEET_HOST_PROJECTS=/var/lib/fleet-host/projects \
-  -e HOME=/var/lib/fleet-host/state -e FLEET_DB_PASSWORD=app-pw \
+# No state, projects or HOME overrides: host mode must find the image's own directories (D94).
+ids+=("$(docker run -d --name "$n-host" --network "container:$n-hostnet" -u 1001:1001 \
+  -e CLAUDE_FLEET_BROKER_ADDR=workspace-svc:7070 -e FLEET_HOST_MCP_ADDR=host-svc:8082 -e FLEET_DB_PASSWORD=app-pw \
   -v "$tmp/cfg:/etc/fleet-host:ro" -v "$tmp/key:/var/run/secrets/github-app:ro" \
   "$image" fleet-host-entry host)")
 port=$(docker port "$n-hostnet" 8080/tcp | head -1 | sed 's/.*://')
@@ -114,6 +115,20 @@ cred_js="const [h,p]=process.env.FLEET_HOST_CRED_ADDR.split(':');const r=require
 until_eq 400 docker exec "$n-ws" node -e "$cred_js" || fail "unscoped POST /token from the workspace pod"
 mcp_js="const s=require('net').connect(8082,'host-svc',()=>s.write(JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list'})+'\n'));let b='';s.setEncoding('utf8');s.on('data',(d)=>{b+=d;if(b.includes('\n')){console.log(JSON.parse(b).result.tools.length);s.destroy()}});s.on('error',(e)=>console.log(e.code))"
 until_eq 14 docker exec "$n-ws" node -e "$mcp_js" || fail "tools/list on :8082 from the workspace pod"
+
+# The MCP caller is the hosted workspace, whatever the wire says.
+ws_id=$(docker exec -e PGPASSWORD=app-pw "$n-pg" psql -h 127.0.0.1 -U fleet_agent -d fleet -Atc 'SELECT workspace_id FROM host_meta')
+[ -n "$ws_id" ] || fail "no hosted workspace id in host_meta"
+docker exec "$n-host" test -s /var/lib/fleet-host/state/workspace-id.json || fail "host mode did not use the image's state dir"
+caller_js="const s=require('net').connect(8082,'host-svc');let b='',n=0;s.setEncoding('utf8');
+const call=(id,name,args)=>s.write(JSON.stringify({jsonrpc:'2.0',id,method:'tools/call',params:{name,arguments:args}})+'\\n');
+s.on('connect',()=>call(1,'post_todo',{title:'split caller',key:'split-caller'}));
+s.on('data',(d)=>{b+=d;let i;while((i=b.indexOf('\\n'))!==-1){const m=JSON.parse(b.slice(0,i));b=b.slice(i+1);
+if(m.error||m.result.isError){console.log('error: '+JSON.stringify(m.error||m.result.content));s.destroy();return}
+if(m.id===1)call(2,'list_todos',{});else{console.log(JSON.parse(m.result.content[0].text).map((t)=>t.source.id).join(','));s.destroy()}}});
+s.on('error',(e)=>console.log(e.code))"
+got=$(docker exec "$n-ws" node -e "$caller_js")
+[ "$got" = "$ws_id" ] || fail "MCP caller over :8082 is '$got', want the hosted workspace $ws_id"
 
 # What each pod holds.
 test "$(docker exec "$n-host" id -u)" = 1001 || fail "host pod uid"
