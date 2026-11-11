@@ -14,7 +14,7 @@ import { USER_STATE_MERGE } from './userStateMerge.js';
 
 it('merges exactly the user-authored state tables', () => {
   expect(USER_STATE_MERGE.map((m) => m.table).sort()).toEqual(
-    ['broker_sessions', 'port_exposures', 'session_tags', 'sessions', 'usage_anchors', 'usage_events'],
+    ['broker_sessions', 'port_exposures', 'publish_withheld', 'session_tags', 'sessions', 'usage_anchors', 'usage_events'],
   );
 });
 
@@ -47,6 +47,7 @@ describe.skipIf(!isPg)('user-authored state follows every switch', () => {
       [`INSERT INTO $S.usage_events (ts, workspace_id, session_id, kind) VALUES (${on === 'pg' ? '5, $1, $2, $3' : '5, ?, ?, ?'})`, [WS, S, `${tag}-kind`]],
       [`INSERT INTO $S.usage_anchors (ts, kind, dedup_key) VALUES (${on === 'pg' ? '1, $1, $2' : '1, ?, ?'})`, ['limit-hit', `${tag}-anchor`]],
       [`INSERT INTO $S.port_exposures (id, workspace_id, port, source) VALUES (${on === 'pg' ? '$1, $2, 3000, $3' : '?, ?, 3000, ?'})`, [`pe-${tag}`, WS, 'scan']],
+      [`INSERT INTO $S.publish_withheld (session_id, workspace_id, withheld_at) VALUES (${on === 'pg' ? '$1, $2, 1' : '?, ?, 1'})`, [`wh-${tag}`, WS]],
     ];
     for (const [text, params] of stmts) {
       if (on === 'pg') await pg(text, params);
@@ -63,6 +64,7 @@ describe.skipIf(!isPg)('user-authored state follows every switch', () => {
       usage: (await q(`SELECT kind FROM $S.usage_events ORDER BY kind`)).map((r) => r.kind),
       anchors: (await q(`SELECT dedup_key AS d FROM $S.usage_anchors ORDER BY 1`)).map((r) => r.d),
       ports: (await q(`SELECT id FROM $S.port_exposures ORDER BY 1`)).map((r) => r.id),
+      withheld: (await q(`SELECT session_id AS s FROM $S.publish_withheld ORDER BY 1`)).map((r) => r.s),
     };
   };
 
@@ -101,6 +103,7 @@ describe.skipIf(!isPg)('user-authored state follows every switch', () => {
     expect(await firstSwitchCopy({ pool: t.pool, userData: dir, state: true, onProgress: noop })).toBeNull();
     expect(await snapshot('pg')).toEqual(want);
     expect(want.usage).toEqual(['before-kind', 'lite-kind', 'pg-kind']);
+    expect(want.withheld).toEqual(['wh-before', 'wh-lite', 'wh-pg']);
   });
 
   it('a Postgres start with no switch in between does not replay state.db over newer Postgres rows', async () => {

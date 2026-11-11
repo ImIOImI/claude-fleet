@@ -92,6 +92,8 @@ export interface UsageEventsTable {
   session_id: string | null;
   kind: string;
   detail: string | null;
+  /** Host only: the workspace of the session the signal is about (hosted id or a publish partition). */
+  origin: string | null;
 }
 export interface UsageAnchorsTable {
   id: Generated<number>;
@@ -179,6 +181,18 @@ export interface TranscriptOffsetsTable {
   tail_hash: string;
 }
 
+export interface PublishCursorsTable {
+  source_workspace_id: string;
+  target_workspace_id: string;
+  last_event_id: number;
+  updated_at: number;
+}
+export interface PublishWithheldTable {
+  session_id: string;
+  workspace_id: string;
+  withheld_at: number;
+}
+
 export interface StateDb {
   events: EventsTable;
   sessions: SessionsTable;
@@ -198,6 +212,8 @@ export interface StateDb {
   maintenance: MaintenanceTable;
   event_blobs: EventBlobsTable;
   transcript_offsets: TranscriptOffsetsTable;
+  publish_cursors: PublishCursorsTable;
+  publish_withheld: PublishWithheldTable;
 }
 
 export type EventRowSel = Selectable<EventsTable>;

@@ -937,6 +937,28 @@ function migrate(d: Database.Database): void {
     // already ends in the rowid (= id). Version-only, so imports stay in step.
     d.pragma('user_version = 19');
   }
+
+  if ((d.pragma('user_version', { simple: true }) as number) < 20) {
+    // Transcript publish (SPEC §7 *Transcript publish*).
+    const cols = d.prepare(`PRAGMA table_info(usage_events)`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'origin')) d.exec(`ALTER TABLE usage_events ADD COLUMN origin TEXT`);
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS publish_cursors (
+        source_workspace_id TEXT NOT NULL,
+        target_workspace_id TEXT NOT NULL,
+        last_event_id       INTEGER NOT NULL,
+        updated_at          INTEGER NOT NULL,
+        PRIMARY KEY (source_workspace_id, target_workspace_id)
+      );
+      CREATE TABLE IF NOT EXISTS publish_withheld (
+        session_id   TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        withheld_at  INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_publish_withheld_workspace ON publish_withheld(workspace_id);
+    `);
+    d.pragma('user_version = 20');
+  }
 }
 
 function repairSyntheticFirstUserMessages(d: Database.Database): void {

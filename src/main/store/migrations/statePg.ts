@@ -268,9 +268,26 @@ DROP INDEX IF EXISTS idx_events_session_type;
 ALTER INDEX idx_events_session_type_v19 RENAME TO idx_events_session_type;
 `;
 
+const PUBLISH_V20 = `
+ALTER TABLE usage_events ADD COLUMN origin ${T};
+CREATE TABLE publish_cursors (
+  source_workspace_id ${T} NOT NULL,
+  target_workspace_id ${T} NOT NULL,
+  last_event_id BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  PRIMARY KEY (source_workspace_id, target_workspace_id)
+);
+CREATE TABLE publish_withheld (
+  session_id ${T} PRIMARY KEY,
+  workspace_id ${T} NOT NULL,
+  withheld_at BIGINT NOT NULL
+);
+CREATE INDEX idx_publish_withheld_workspace ON publish_withheld (workspace_id);
+`;
+
 export const STATE_PG_TRACK: PgTrack = {
   track: 'state',
   baselineVersion: STATE_PG_BASELINE_VERSION,
   baseline: STATE_PG_BASELINE,
-  steps: [{ version: 15, postgres: PORT_EXPOSURES_V15 }, { version: 16, postgres: RETENTION_V16 }, { version: 17, postgres: ATTACHMENTS_V17 }, { version: 18, postgres: TRANSCRIPT_OFFSETS_V18 }, { version: 19, postgres: EVENTS_SESSION_TYPE_ID_V19 }]
+  steps: [{ version: 15, postgres: PORT_EXPOSURES_V15 }, { version: 16, postgres: RETENTION_V16 }, { version: 17, postgres: ATTACHMENTS_V17 }, { version: 18, postgres: TRANSCRIPT_OFFSETS_V18 }, { version: 19, postgres: EVENTS_SESSION_TYPE_ID_V19 }, { version: 20, postgres: PUBLISH_V20 }]
 };
