@@ -15,8 +15,8 @@ import (
 
 // listen binds TCP when CLAUDE_FLEET_BROKER_TCP_PORT is set, else the Unix
 // socket. With CLAUDE_FLEET_BROKER_REQUIRE_MESH=1 it first needs the sidecar.
-// TCP is refused without the flag: it would serve the broker unauthenticated
-// on the pod IP (D96 also applies here).
+// TCP without the flag stays allowed for the Windows desktop's loopback-published
+// port; `fleet-host-entry workspace` always sets the flag.
 func listen(ctx context.Context, getenv func(string) string, meshWait time.Duration, logf func(string, ...any)) (net.Listener, string, error) {
 	requireMesh := getenv("CLAUDE_FLEET_BROKER_REQUIRE_MESH")
 	switch requireMesh {
@@ -25,9 +25,6 @@ func listen(ctx context.Context, getenv func(string) string, meshWait time.Durat
 		return nil, "", fmt.Errorf("CLAUDE_FLEET_BROKER_REQUIRE_MESH must be '', 0 or 1, got %q", requireMesh)
 	}
 	tcpPort := getenv("CLAUDE_FLEET_BROKER_TCP_PORT")
-	if tcpPort != "" && requireMesh != "1" {
-		return nil, "", fmt.Errorf("CLAUDE_FLEET_BROKER_TCP_PORT needs CLAUDE_FLEET_BROKER_REQUIRE_MESH=1")
-	}
 	if requireMesh == "1" {
 		url := getenv("FLEET_MESH_READY_URL")
 		if url == "" {

@@ -74,7 +74,7 @@ func TestRequireMeshListensOnTCPWhenReady(t *testing.T) {
 // TCP without the mesh flag on is refused before any probe (D96): a
 // plaintext pod-IP listener is never opened, no matter what
 // FLEET_MESH_READY_URL says.
-func TestTCPWithoutMeshFlagRefusedBeforeProbing(t *testing.T) {
+func TestTCPWithoutTheGuardNeverProbes(t *testing.T) {
 	for _, v := range []string{"", "0"} {
 		env := envOf(map[string]string{
 			"CLAUDE_FLEET_BROKER_TCP_PORT":     freeTCPPort(t),
@@ -82,32 +82,49 @@ func TestTCPWithoutMeshFlagRefusedBeforeProbing(t *testing.T) {
 			"FLEET_MESH_READY_URL":             "http://127.0.0.1:1/never",
 		})
 		ln, _, err := listen(context.Background(), env, time.Millisecond, t.Logf)
-		if err == nil {
-			ln.Close()
-			t.Fatalf("%q: listened without the mesh flag", v)
+		if err != nil {
+			t.Fatalf("%q: %v", v, err)
 		}
-		if !strings.Contains(err.Error(), "CLAUDE_FLEET_BROKER_TCP_PORT") || !strings.Contains(err.Error(), "CLAUDE_FLEET_BROKER_REQUIRE_MESH=1") {
-			t.Fatalf("%q: err = %v", v, err)
-		}
+		ln.Close()
 	}
 }
 
-// Anything outside 1-65535 refuses to start, once the mesh flag itself clears.
+// src/main/docker.ts sets only CLAUDE_FLEET_BROKER_TCP_PORT for Windows Docker Desktop workspaces.
+func TestWindowsLoopbackTCPListensWithoutMeshFlag(t *testing.T) {
+	port := freeTCPPort(t)
+	ln, addr, err := listen(context.Background(), envOf(map[string]string{"CLAUDE_FLEET_BROKER_TCP_PORT": port}), time.Millisecond, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if addr != "0.0.0.0:"+port {
+		t.Fatalf("addr = %q", addr)
+	}
+	c, err := net.Dial("tcp", "127.0.0.1:"+port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+}
+
+// Anything outside 1-65535 refuses to start, with or without the mesh flag.
 func TestInvalidTCPPortRefuses(t *testing.T) {
 	url := readiness(t, 200)
-	for _, p := range []string{"0", "-1", "65536", "99999", "abc", " 7070"} {
-		env := envOf(map[string]string{
-			"CLAUDE_FLEET_BROKER_TCP_PORT":     p,
-			"CLAUDE_FLEET_BROKER_REQUIRE_MESH": "1",
-			"FLEET_MESH_READY_URL":             url,
-		})
-		ln, _, err := listen(context.Background(), env, time.Second, t.Logf)
-		if err == nil {
-			ln.Close()
-			t.Fatalf("port %q: listened", p)
-		}
-		if !strings.Contains(err.Error(), "CLAUDE_FLEET_BROKER_TCP_PORT must be") {
-			t.Fatalf("port %q: err = %v", p, err)
+	for _, flag := range []string{"", "1"} {
+		for _, p := range []string{"0", "-1", "65536", "99999", "abc", " 7070"} {
+			env := envOf(map[string]string{
+				"CLAUDE_FLEET_BROKER_TCP_PORT":     p,
+				"CLAUDE_FLEET_BROKER_REQUIRE_MESH": flag,
+				"FLEET_MESH_READY_URL":             url,
+			})
+			ln, _, err := listen(context.Background(), env, time.Second, t.Logf)
+			if err == nil {
+				ln.Close()
+				t.Fatalf("flag %q port %q: listened", flag, p)
+			}
+			if !strings.Contains(err.Error(), "CLAUDE_FLEET_BROKER_TCP_PORT must be") {
+				t.Fatalf("flag %q port %q: err = %v", flag, p, err)
+			}
 		}
 	}
 }
@@ -148,22 +165,27 @@ func TestRequireMeshRefusesBeforeBindingUnixSocket(t *testing.T) {
 	}
 }
 
-// Unset or "0" leaves the guard off (exercised on the Unix socket, since TCP
-// now requires the flag on regardless (D96)); anything else refuses to start
-// (D95 also applies to the broker's CLAUDE_FLEET_BROKER_REQUIRE_MESH).
+// Unset or "0" leaves the guard off on TCP and the Unix socket; anything else
+// refuses to start (D95 also applies to the broker's CLAUDE_FLEET_BROKER_REQUIRE_MESH).
 func TestRequireMeshOnlyOnOne(t *testing.T) {
 	d := t.TempDir()
 	for i, v := range []string{"", "0"} {
-		env := envOf(map[string]string{
-			"CLAUDE_FLEET_BROKER_REQUIRE_MESH": v,
-			"FLEET_MESH_READY_URL":             readiness(t, 503),
-			"CLAUDE_FLEET_BROKER_SOCKET":       filepath.Join(d, strconv.Itoa(i)+".sock"),
-		})
-		ln, _, err := listen(context.Background(), env, 50*time.Millisecond, t.Logf)
-		if err != nil {
-			t.Fatalf("%q: %v", v, err)
+		for _, transport := range []string{"tcp", "unix"} {
+			env := map[string]string{
+				"CLAUDE_FLEET_BROKER_REQUIRE_MESH": v,
+				"FLEET_MESH_READY_URL":             readiness(t, 503),
+			}
+			if transport == "tcp" {
+				env["CLAUDE_FLEET_BROKER_TCP_PORT"] = freeTCPPort(t)
+			} else {
+				env["CLAUDE_FLEET_BROKER_SOCKET"] = filepath.Join(d, strconv.Itoa(i)+".sock")
+			}
+			ln, _, err := listen(context.Background(), envOf(env), 50*time.Millisecond, t.Logf)
+			if err != nil {
+				t.Fatalf("%q %s: %v", v, transport, err)
+			}
+			ln.Close()
 		}
-		ln.Close()
 	}
 	for _, v := range []string{"true", "yes", " 1"} {
 		env := envOf(map[string]string{
