@@ -87,7 +87,7 @@ describe('runCredCli', () => {
     writeFileSync(join(dir, 'key.pem'), gh.privatePem, { mode: 0o400 });
     const sock = join(dir, 'run', 'cred.sock');
     srv = await startCredHelper({
-      app: { appId: '1', installationId: '2', keyFile: join(dir, 'key.pem') }, socketPath: sock,
+      app: { appId: '1', installationId: '2', keyFile: join(dir, 'key.pem') }, listen: { path: sock },
       github: () => null, log: createLogger(() => undefined), apiBase: gh.url
     });
     return sock;
@@ -174,5 +174,33 @@ describe('runCredCli', () => {
     expect(tok.out).toEqual([]);
     expect(tok.err.join('')).not.toMatch(/token --repo/);
     expect(posts()).toBe(before);
+  });
+
+  it('posts to FLEET_HOST_CRED_ADDR over TCP when it is set', async () => {
+    gh = await startFakeGithubApp({ appId: '1', installationId: '2', account: 'acme', repos: ['a'] });
+    const dir = mkdtempSync(join(tmpdir(), 'credcli-tcp-'));
+    writeFileSync(join(dir, 'key.pem'), gh.privatePem, { mode: 0o400 });
+    srv = await startCredHelper({
+      app: { appId: '1', installationId: '2', keyFile: join(dir, 'key.pem') }, listen: { port: 0, host: '127.0.0.1' },
+      github: () => null, log: createLogger(() => undefined), apiBase: gh.url
+    });
+    const out: string[] = [];
+    const o: CredIo = {
+      env: { FLEET_HOST_CRED_ADDR: `127.0.0.1:${srv.port}`, FLEET_HOST_CRED_SOCKET: '/nonexistent/cred.sock' },
+      stdin: async () => 'protocol=https\nhost=github.com\npath=acme/a.git\n\n', out: (s) => out.push(s), err: () => undefined,
+      stdoutIsTty: false, cwdRemotes: () => []
+    };
+    expect(await runCredCli(['git-credential', 'get'], o)).toBe(0);
+    expect(out.join('')).toMatch(/^username=x-access-token\npassword=ghs_fake\w+\n$/);
+  });
+
+  it('exits 1 on a malformed FLEET_HOST_CRED_ADDR', async () => {
+    const err: string[] = [];
+    const o: CredIo = {
+      env: { FLEET_HOST_CRED_ADDR: 'http://h:1' }, stdin: async () => '', out: () => undefined, err: (s) => err.push(s),
+      stdoutIsTty: false, cwdRemotes: () => []
+    };
+    expect(await runCredCli(['git-credential', 'get'], o)).toBe(1);
+    expect(err.join('')).toBe('fleet-host-cred: FLEET_HOST_CRED_ADDR http://h:1 is not host:port\n');
   });
 });

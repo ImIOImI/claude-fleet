@@ -6,7 +6,7 @@ import { isAbsolute, join } from 'node:path';
 import { parse } from 'yaml';
 import { ORG_RE, parseGrantConfig, type GrantConfig } from '../main/identity/grants.js';
 import { parseStoreConfig, QUERY_USER, StoreConfigError, type PostgresStoreConfig } from '../main/store/storeConfig.js';
-import { parseHostPort, type HostPort } from './endpoint.js';
+import { parseHostPort, parsePort, type HostPort } from './endpoint.js';
 
 export const DEFAULT_CONFIG_PATH = '/etc/fleet-host/config.yaml';
 export const DEFAULT_PORT = 8080;
@@ -249,6 +249,8 @@ export interface HostEnv {
   /** The workspace pod's broker; replaces brokerSocket when set. */
   brokerAddr: HostPort | null;
   credSocket: string;
+  /** Serve credentials on 0.0.0.0:<port> instead of credSocket. */
+  credPort: number | null;
   /** Claude's transcripts in this container, ingested by the holder. */
   projectsDir: string;
   /** The fleet-state MCP socket the holder serves to sessions. */
@@ -264,6 +266,14 @@ function envHostPort(env: NodeJS.ProcessEnv, name: string): HostPort | null {
   if (!text) return null;
   const v = parseHostPort(text);
   if (!v) throw new HostConfigError(`${name} ${text} is not host:port`);
+  return v;
+}
+
+function envPort(env: NodeJS.ProcessEnv, name: string): number | null {
+  const text = env[name];
+  if (!text) return null;
+  const v = parsePort(text);
+  if (v === null) throw new HostConfigError(`${name} ${text} is not a port`);
   return v;
 }
 
@@ -284,6 +294,7 @@ export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
     brokerSocket: env.CLAUDE_FLEET_BROKER_SOCKET || '/run/broker/broker.sock',
     brokerAddr: envHostPort(env, 'CLAUDE_FLEET_BROKER_ADDR'),
     credSocket: env.FLEET_HOST_CRED_SOCKET || '/run/fleet-host/cred.sock',
+    credPort: envPort(env, 'FLEET_HOST_CRED_TCP_PORT'),
     projectsDir: env.FLEET_HOST_PROJECTS || join(homedir(), '.claude', 'projects'),
     mcpSocket,
     mcpSocketGroup: groupText ? Number(groupText) : null,

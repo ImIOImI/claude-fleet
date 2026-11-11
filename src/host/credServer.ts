@@ -5,6 +5,7 @@ import { createServer, type Server } from 'node:http';
 import { dirname } from 'node:path';
 import { AppTokenError, createTokenMinter, loadAppCredentials, type TokenMinter } from './appToken.js';
 import type { GithubAppConfig, HostGithubConfig } from './config.js';
+import { listenOn, type ListenTarget } from './endpoint.js';
 import type { Logger } from './log.js';
 
 export const DEFAULT_CRED_SOCKET = '/run/fleet-host/cred.sock';
@@ -12,9 +13,13 @@ const MAX_BODY = 8 * 1024;
 /** After close(), in-flight requests get this long before their connections are cut. */
 export const CRED_CLOSE_GRACE_MS = 2_000;
 
-export interface CredServer { close(): Promise<void> }
+export interface CredServer {
+  close(): Promise<void>;
+  /** The bound TCP port; null on a Unix socket. */
+  port: number | null;
+}
 
-export async function listenCredSocket(socketPath: string, minter: TokenMinter, log: Logger): Promise<CredServer> {
+async function prepareCredSocket(socketPath: string): Promise<void> {
   const dir = dirname(socketPath);
   await mkdir(dir, { recursive: true, mode: 0o700 });
   await chmod(dir, 0o700);
@@ -23,6 +28,10 @@ export async function listenCredSocket(socketPath: string, minter: TokenMinter, 
     if (!st.isSocket()) throw new Error(`${socketPath} exists and is not a socket`);
     await unlink(socketPath);
   }
+}
+
+export async function listenCred(listen: ListenTarget, minter: TokenMinter, log: Logger): Promise<CredServer> {
+  if ('path' in listen) await prepareCredSocket(listen.path);
   const server: Server = createServer((req, res) => {
     const send = (status: number, body: unknown) => {
       if (res.headersSent) return;
@@ -60,15 +69,10 @@ export async function listenCredSocket(socketPath: string, minter: TokenMinter, 
   });
   // A session that stalls mid-request mustn't hold a socket slot (or shutdown) open.
   server.requestTimeout = 20_000;
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(socketPath, () => {
-      server.off('error', reject);
-      resolve();
-    });
-  });
-  await chmod(socketPath, 0o600);
+  const port = await listenOn(server, listen);
+  if ('path' in listen) await chmod(listen.path, 0o600);
   return {
+    port,
     close: () =>
       new Promise<void>((r) => {
         const cut = setTimeout(() => server.closeAllConnections(), CRED_CLOSE_GRACE_MS);
@@ -83,7 +87,7 @@ export async function listenCredSocket(socketPath: string, minter: TokenMinter, 
 
 export interface CredHelperOptions {
   app: GithubAppConfig;
-  socketPath: string;
+  listen: ListenTarget;
   /** Read per request, so a config reload applies. */
   github(): HostGithubConfig | null;
   log: Logger;
@@ -103,5 +107,5 @@ export async function startCredHelper(o: CredHelperOptions): Promise<CredServer>
     (account) => o.log.log('info', 'github app ready', { appId: o.app.appId, account }),
     (err: Error) => o.log.log('warn', 'github app check failed; tokens are minted on demand', { error: err.message })
   );
-  return listenCredSocket(o.socketPath, minter, o.log);
+  return listenCred(o.listen, minter, o.log);
 }

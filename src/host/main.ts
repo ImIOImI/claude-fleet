@@ -7,6 +7,7 @@ import { buildAuthContext, githubProviderFactory, type AuthContext, type Provide
 import { brokerOps as realBrokerOps, type BrokerOps } from './brokerOps.js';
 import { loadHostConfig, readHostEnv, type HostConfig } from './config.js';
 import { createReloader, watchConfigDir } from './configReload.js';
+import type { ListenTarget } from './endpoint.js';
 import { startCredHelper, type CredServer } from './credServer.js';
 import { brokerWatch, EventHub, pruneDeadOwners } from './events.js';
 import type { PgTrack } from '../main/store/pgMigrate.js';
@@ -133,7 +134,8 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   let cred: CredServer | null = null;
   try {
     const app = config.github?.app;
-    if (app) cred = await startCredHelper({ app, socketPath: env.credSocket, github: () => config.github, log, apiBase: opts.githubApiBase });
+    const credListen: ListenTarget = env.credPort !== null ? { port: env.credPort } : { path: env.credSocket };
+    if (app) cred = await startCredHelper({ app, listen: credListen, github: () => config.github, log, apiBase: opts.githubApiBase });
     else log.log('info', 'github app credential helper off (github.appId unset)');
   } catch (err) {
     uninstallGuards();

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -148,6 +148,32 @@ describe('runHost', () => {
   it('dials the broker socket when CLAUDE_FLEET_BROKER_ADDR is unset', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'fh-broker-sock-'));
     expect(await firstPruneFailure({ CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock') }, dir)).toContain(join(dir, 'b.sock'));
+  });
+
+  it('serves App tokens on FLEET_HOST_CRED_TCP_PORT instead of the socket', async () => {
+    const { startFakeGithubApp } = await import('./testGithubApp.js');
+    const { requestToken } = await import('./credCli.js');
+    const gh = await startFakeGithubApp({ appId: '9', installationId: '8', account: 'acme', repos: ['a'] });
+    const dir = mkdtempSync(join(tmpdir(), 'fh-cred-tcp-'));
+    writeFileSync(join(dir, 'key.pem'), gh.privatePem, { mode: 0o400 });
+    const cfgPath = join(dir, 'config.yaml');
+    writeFileSync(cfgPath, CONFIG + `github: { appId: 9, installationId: 8, keyFile: ${join(dir, 'key.pem')} }\n`);
+    const [port, credPort] = [await freePort(), await freePort()];
+    const host = await runHost({
+      env: {
+        FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'),
+        FLEET_HOST_CRED_SOCKET: join(dir, 'run', 'cred.sock'), FLEET_HOST_CRED_TCP_PORT: String(credPort)
+      },
+      exit: vi.fn(), proc: new EventEmitter(), logSink: () => undefined, authFactory: () => ({ id: 'github', verify }),
+      brokerOps: fakeBroker([]).ops, githubApiBase: gh.url
+    });
+    try {
+      expect(await requestToken({ host: '127.0.0.1', port: credPort }, { repositories: ['a'] })).toMatch(/^ghs_fake/);
+      expect(existsSync(join(dir, 'run', 'cred.sock'))).toBe(false);
+    } finally {
+      await host.shutdown(0);
+      await gh.close();
+    }
   });
 
   it('serves the configured workspace id after one start load', async () => {

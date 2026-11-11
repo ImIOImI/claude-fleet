@@ -2,6 +2,7 @@
 // credential protocol and the gh shim) plus `serve` for a standalone server.
 import { request } from 'node:http';
 import { DEFAULT_CRED_SOCKET } from './credServer.js';
+import { parseHostPort, type HostPort } from './endpoint.js';
 
 export interface OwnerRepo { owner: string; repo: string }
 
@@ -88,9 +89,13 @@ export function repoFromGhArgs(all: string[], env: NodeJS.ProcessEnv, cwdRemotes
   return repoFromRemotes(cwdRemotes());
 }
 
-export function requestToken(socketPath: string, body: unknown): Promise<string> {
+/** A Unix socket path, or the host pod's credential port. */
+export type CredEndpoint = string | HostPort;
+
+export function requestToken(endpoint: CredEndpoint, body: unknown): Promise<string> {
   return new Promise((resolve, reject) => {
-    const req = request({ socketPath, path: '/token', method: 'POST', headers: { 'content-type': 'application/json' }, timeout: 15_000 }, (res) => {
+    const where = typeof endpoint === 'string' ? { socketPath: endpoint } : { host: endpoint.host, port: endpoint.port };
+    const req = request({ ...where, path: '/token', method: 'POST', headers: { 'content-type': 'application/json' }, timeout: 15_000 }, (res) => {
       let raw = '';
       res.setEncoding('utf8');
       res.on('data', (c: string) => (raw += c));
@@ -125,7 +130,13 @@ export interface CredIo {
 const USAGE = 'usage: fleet-host-cred git-credential <get|store|erase> | gh-token -- <gh args> | serve';
 
 export async function runCredCli(argv: string[], io: CredIo): Promise<number> {
-  const sock = io.env.FLEET_HOST_CRED_SOCKET || DEFAULT_CRED_SOCKET;
+  const addrText = io.env.FLEET_HOST_CRED_ADDR;
+  const addr = addrText ? parseHostPort(addrText) : null;
+  if (addrText && !addr) {
+    io.err(`fleet-host-cred: FLEET_HOST_CRED_ADDR ${addrText} is not host:port\n`);
+    return 1;
+  }
+  const sock: CredEndpoint = addr ?? (io.env.FLEET_HOST_CRED_SOCKET || DEFAULT_CRED_SOCKET);
   // The helper is off by default, so a missing or unbound socket is not worth a line in every git call.
   const say = (e: unknown) => {
     const code = (e as NodeJS.ErrnoException).code;

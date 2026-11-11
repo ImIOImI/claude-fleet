@@ -4,7 +4,7 @@ import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTokenMinter, DEFAULT_PERMISSIONS, loadAppCredentials } from './appToken.js';
-import { CRED_CLOSE_GRACE_MS, listenCredSocket, startCredHelper, type CredServer } from './credServer.js';
+import { CRED_CLOSE_GRACE_MS, listenCred, startCredHelper, type CredServer } from './credServer.js';
 import { requestToken } from './credCli.js';
 import { createLogger } from './log.js';
 import { startFakeGithubApp, type FakeGithubApp } from './testGithubApp.js';
@@ -27,7 +27,7 @@ async function rig(allow: string[] | null = null) {
   const sock = join(dir, 'run', 'cred.sock');
   srv = await startCredHelper({
     app: { appId: '1', installationId: '2', keyFile },
-    socketPath: sock,
+    listen: { path: sock },
     github: () => (allow ? { app: null, repositories: allow, permissions: null } : null),
     log: createLogger((l) => logs.push(l)),
     apiBase: gh.url
@@ -75,11 +75,11 @@ describe('credential socket', () => {
     await srv!.close();
     srv = null;
     const minter = createTokenMinter({ creds: await loadAppCredentials({ appId: '1', installationId: '2', keyFile: join(sock, '..', '..', 'key.pem') }), apiBase: gh!.url });
-    srv = await listenCredSocket(sock, minter, createLogger(() => undefined));
+    srv = await listenCred({ path: sock }, minter, createLogger(() => undefined));
     expect(await requestToken(sock, { repositories: ['a'] })).toMatch(/^ghs_/);
     const file = join(sock, '..', 'not-a-socket');
     writeFileSync(file, 'x');
-    await expect(listenCredSocket(file, minter, createLogger(() => undefined))).rejects.toThrow(/not a socket/);
+    await expect(listenCred({ path: file }, minter, createLogger(() => undefined))).rejects.toThrow(/not a socket/);
   });
 
   it('tightens a pre-existing socket directory to 0700', async () => {
@@ -90,12 +90,52 @@ describe('credential socket', () => {
     mkdirSync(dir);
     chmodSync(dir, 0o755);
     const minter = createTokenMinter({ creds: await loadAppCredentials({ appId: '1', installationId: '2', keyFile: join(sock, '..', '..', 'key.pem') }), apiBase: gh!.url });
-    srv = await listenCredSocket(join(dir, 'cred.sock'), minter, createLogger(() => undefined));
+    srv = await listenCred({ path: join(dir, 'cred.sock') }, minter, createLogger(() => undefined));
     expect(statSync(dir).mode & 0o777).toBe(0o700);
   });
 
   it('answers an oversize body with 413', async () => {
     const { sock } = await rig();
     await expect(requestToken(sock, { repositories: ['a'], pad: 'x'.repeat(9000) })).rejects.toThrow(/413/);
+  });
+});
+
+describe('credential server over TCP', () => {
+  async function tcpRig(allow: string[] | null = null) {
+    gh = await startFakeGithubApp({ appId: '1', installationId: '2', account: 'acme', repos: ['a', 'b'] });
+    const dir = mkdtempSync(join(tmpdir(), 'cred-tcp-'));
+    const keyFile = join(dir, 'key.pem');
+    writeFileSync(keyFile, gh.privatePem, { mode: 0o400 });
+    const logs: string[] = [];
+    srv = await startCredHelper({
+      app: { appId: '1', installationId: '2', keyFile },
+      listen: { port: 0, host: '127.0.0.1' },
+      github: () => (allow ? { app: null, repositories: allow, permissions: null } : null),
+      log: createLogger((l) => logs.push(l)),
+      apiBase: gh.url
+    });
+    return { at: { host: '127.0.0.1', port: srv.port! }, logs };
+  }
+
+  it('answers, refuses and caps exactly as on the socket', async () => {
+    const { at, logs } = await tcpRig(['a']);
+    const token = await requestToken(at, { owner: 'acme', repositories: ['a'] });
+    expect(token).toMatch(/^ghs_fake/);
+    expect(gh!.requests.at(-1)!.body).toEqual({ repositories: ['a'], permissions: DEFAULT_PERMISSIONS });
+    await expect(requestToken(at, { repositories: ['b'] })).rejects.toThrow(/403.*not in github.repositories/);
+    await expect(requestToken(at, { repositories: [] })).rejects.toThrow(/400/);
+    await expect(requestToken(at, { repositories: ['a'], pad: 'x'.repeat(9000) })).rejects.toThrow(/413/);
+    expect(logs.join('\n')).not.toContain(token);
+  });
+
+  it('answers 404 off POST /token', async () => {
+    const { at } = await tcpRig();
+    expect((await fetch(`http://127.0.0.1:${at.port}/token`)).status).toBe(404);
+    expect((await fetch(`http://127.0.0.1:${at.port}/other`, { method: 'POST' })).status).toBe(404);
+  });
+
+  it('reports no port on a Unix socket', async () => {
+    await rig();
+    expect(srv!.port).toBeNull();
   });
 });

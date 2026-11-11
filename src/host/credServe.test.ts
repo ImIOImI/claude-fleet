@@ -39,4 +39,17 @@ describe('fleet-host-cred serve', () => {
     writeFileSync(join(dir, 'bare.yaml'), 'workspace: { name: w }\n');
     await expect(serveCred({ env: { FLEET_HOST_CONFIG: join(dir, 'bare.yaml'), FLEET_HOST_CRED_SOCKET: join(dir, 'x.sock') }, log: createLogger(() => undefined), proc })).rejects.toThrow(/github.appId/);
   });
+
+  it('stays on the socket when FLEET_HOST_CRED_TCP_PORT is set', async () => {
+    gh = await startFakeGithubApp({ appId: '1', installationId: '2', account: 'acme', repos: ['a'] });
+    const dir = mkdtempSync(join(tmpdir(), 'serve-tcp-'));
+    writeFileSync(join(dir, 'key.pem'), gh.privatePem, { mode: 0o400 });
+    const cfg = join(dir, 'config.yaml');
+    writeFileSync(cfg, `workspace: { name: w }\ngithub: { appId: 1, installationId: 2, keyFile: ${join(dir, 'key.pem')} }\n`);
+    const sock = join(dir, 'run', 'cred.sock');
+    const server = await serveCred({ env: { FLEET_HOST_CONFIG: cfg, FLEET_HOST_CRED_SOCKET: sock, FLEET_HOST_CRED_TCP_PORT: '1' }, log: createLogger(() => undefined), proc: new EventEmitter(), apiBase: gh.url });
+    stop = server.close;
+    expect(server.port).toBeNull();
+    expect(await requestToken(sock, { repositories: ['a'] })).toMatch(/^ghs_fake/);
+  });
 });

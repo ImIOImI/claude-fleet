@@ -172,6 +172,7 @@ describe('readHostEnv', () => {
       configPath: '/etc/fleet-host/config.yaml',
       stateDir: '/home/fleet/.claude/fleet-host',
       credSocket: '/run/fleet-host/cred.sock',
+      credPort: null,
       projectsDir: join(homedir(), '.claude', 'projects'),
       brokerSocket: '/run/broker/broker.sock',
       brokerAddr: null,
@@ -184,6 +185,11 @@ describe('readHostEnv', () => {
   it('reads CLAUDE_FLEET_BROKER_ADDR as host:port', () => {
     expect(readHostEnv({ CLAUDE_FLEET_BROKER_ADDR: 'ws.platform-ops.svc:7070' }).brokerAddr).toEqual({ host: 'ws.platform-ops.svc', port: 7070 });
     expect(() => readHostEnv({ CLAUDE_FLEET_BROKER_ADDR: 'ws:x' })).toThrow('CLAUDE_FLEET_BROKER_ADDR ws:x is not host:port');
+  });
+
+  it('reads FLEET_HOST_CRED_TCP_PORT', () => {
+    expect(readHostEnv({ FLEET_HOST_CRED_TCP_PORT: '8081' }).credPort).toBe(8081);
+    expect(() => readHostEnv({ FLEET_HOST_CRED_TCP_PORT: '99999' })).toThrow('FLEET_HOST_CRED_TCP_PORT 99999 is not a port');
   });
 
   it('honours FLEET_HOST_PORT and FLEET_HOST_CONFIG', () => {

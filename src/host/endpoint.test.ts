@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { parseHostPort, parsePort } from './endpoint.js';
+import { mkdtempSync, statSync } from 'node:fs';
+import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { listenOn, parseHostPort, parsePort } from './endpoint.js';
 
 describe('parsePort', () => {
   it('takes 1-65535 as plain digits only', () => {
@@ -18,5 +22,34 @@ describe('parseHostPort', () => {
   it('refuses schemes, paths, IPv6 literals and missing parts', () => {
     for (const bad of ['http://h:1', 'h:1/x', '[::1]:1', '::1:1', 'h', ':1', 'h:', 'h:0', 'h:65536', 'a b:1', ' h:1', 'h:1 ', 'h:1\n', 'u@h:1', 'h:1:2'])
       expect(parseHostPort(bad), bad).toBeNull();
+  });
+});
+
+describe('listenOn', () => {
+  it('returns the bound TCP port, or null for a Unix socket', async () => {
+    const tcp = createServer();
+    const port = await listenOn(tcp, { port: 0, host: '127.0.0.1' });
+    expect(port).toBeGreaterThan(0);
+    expect(tcp.address()).toMatchObject({ address: '127.0.0.1', port });
+    tcp.close();
+    const unix = createServer();
+    const path = join(mkdtempSync(join(tmpdir(), 'ep-')), 's.sock');
+    expect(await listenOn(unix, { path })).toBeNull();
+    expect(statSync(path).isSocket()).toBe(true);
+    unix.close();
+  });
+
+  it('binds 0.0.0.0 when no host is given', async () => {
+    const s = createServer();
+    await listenOn(s, { port: 0 });
+    expect(s.address()).toMatchObject({ address: '0.0.0.0' });
+    s.close();
+  });
+
+  it('rejects when the port is taken', async () => {
+    const a = createServer();
+    const port = (await listenOn(a, { port: 0, host: '127.0.0.1' }))!;
+    await expect(listenOn(createServer(), { port, host: '127.0.0.1' })).rejects.toMatchObject({ code: 'EADDRINUSE' });
+    a.close();
   });
 });
