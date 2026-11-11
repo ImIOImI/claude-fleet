@@ -2,7 +2,7 @@
 import { createServer, type Server, type Socket } from 'node:net';
 import { getSession, recordUsageEvent } from '../main/db.js';
 import {
-  initReadSource, releaseReadSource, serveMcpConnection, setExposedTools, setMcpLogSink, setQueryEmbedder, setReadScopeResolver,
+  initReadSource, releaseReadSource, serveMcpConnection, setExposedTools, setMcpLogSink, setOwnerHandlers, setQueryEmbedder, setReadScopeResolver,
   setUsageRecorder, type McpLogEntry, type UsageRecorder
 } from '../main/mcpCore.js';
 import type { OwnedReadSource } from '../main/store/readSource.js';
@@ -10,9 +10,10 @@ import type { EmbedFn } from '../main/vectors.js';
 import { listenOn, type ListenTarget } from './endpoint.js';
 import type { Logger } from './log.js';
 import { finishSocket, prepareSocketPath } from './socketDir.js';
+import type { SessionOwnerStore } from './sessionOwners.js';
 
 export const HOST_MCP_TOOLS: ReadonlySet<string> = new Set([
-  'list_sessions', 'get_session', 'get_cost', 'list_events', 'session_summary', 'query', 'mark_useful',
+  'list_sessions', 'get_session', 'get_cost', 'list_events', 'session_summary', 'query', 'mark_useful', 'cost_by_owner',
   'post_todo', 'update_todo', 'list_todos',
   'list_automations', 'get_automation', 'list_runs', 'run_automation', 'schedule_next'
 ]);
@@ -54,6 +55,8 @@ export async function startHostMcp(o: {
   scope?: () => Promise<readonly string[]>;
   /** Writes usage_events; without it mark_useful answers unavailable. */
   recordUsage?: UsageRecorder;
+  /** The holder's owner store: `owner` on get_cost/session_summary, and cost_by_owner. */
+  owners?: Pick<SessionOwnerStore, 'ownersOf' | 'ownerCosts'>;
 }): Promise<HostMcp> {
   if (active) throw new Error('the host MCP is already serving in this process');
   active = true;
@@ -71,6 +74,10 @@ export async function startHostMcp(o: {
   );
   setReadScopeResolver(async () => [o.workspaceId, ...((await o.scope?.()) ?? [])]);
   setUsageRecorder(o.recordUsage ?? null);
+  const owners = o.owners;
+  setOwnerHandlers(owners
+    ? { ownersOf: (ids, allowed) => owners.ownersOf(ids, [...allowed]), ownerCosts: (allowed, x) => owners.ownerCosts([...allowed], x) }
+    : null);
   setExposedTools(hostMcpTools(!!o.embed));
   initReadSource(o.readSource);
   setQueryEmbedder(o.embed ?? null);
@@ -94,6 +101,7 @@ export async function startHostMcp(o: {
     releaseReadSource();
     setQueryEmbedder(null);
     setUsageRecorder(null);
+    setOwnerHandlers(null);
     setExposedTools(null);
     setMcpLogSink(null);
     active = false;

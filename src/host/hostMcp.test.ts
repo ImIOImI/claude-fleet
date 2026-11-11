@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writ
 import { connect, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { handleMcpRequestForTests, initReadSource, MAX_IN_FLIGHT_PER_CONNECTION, releaseReadSource, setInboxHandlers, setReadScopeResolver } from '../main/mcpCore.js';
+import { callTool, handleMcpRequestForTests, initReadSource, MAX_IN_FLIGHT_PER_CONNECTION, releaseReadSource, setInboxHandlers, setReadScopeResolver } from '../main/mcpCore.js';
 import { EmbedderUnavailable } from '../main/embedderClient.js';
 import type { OwnedReadSource } from '../main/store/readSource.js';
 import type { EmbedFn } from '../main/vectors.js';
@@ -16,6 +16,8 @@ const rs = {
   queryFlavor: null,
   close: async () => undefined,
   forgetCaller: async () => undefined,
+  sessionWorkspace: async () => WS,
+  tokenGroups: async () => [],
   listSessions: async (scope: ReadonlySet<string>) => { scopes.push([...scope]); return []; },
   searchEmbeddings: async (_q: Float32Array, scope: ReadonlySet<string>) => {
     scopes.push([...scope]);
@@ -157,12 +159,47 @@ describe('HOST_MCP_TOOLS', () => {
   it('serves query; search_transcripts only with an embedder', () => {
     expect(HOST_MCP_TOOLS.has('query')).toBe(true);
     expect(HOST_MCP_TOOLS.has('search_transcripts')).toBe(false);
-    expect(HOST_MCP_TOOLS.size).toBe(15);
+    expect(HOST_MCP_TOOLS.size).toBe(16);
+    expect(HOST_MCP_TOOLS.has('cost_by_owner')).toBe(true);
     expect(HOST_MCP_TOOLS.has('mark_useful')).toBe(true);
     expect(HOST_SEARCH_TOOL).toBe('search_transcripts');
-    expect(hostMcpTools(true).size).toBe(16);
+    expect(hostMcpTools(true).size).toBe(17);
     expect(hostMcpTools(true).has('search_transcripts')).toBe(true);
     expect(hostMcpTools(false)).toBe(HOST_MCP_TOOLS);
+  });
+});
+
+describe('session owners on the host', () => {
+  it('get_cost carries the owner and cost_by_owner groups the whole scope, partitions included', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'hm-'));
+    const ann = { kind: 'user', provider: 'github', id: '7', login: 'ann', name: null, avatarUrl: null } as const;
+    const seen: unknown[] = [];
+    const owners = {
+      ownersOf: async (ids: readonly string[], ws: readonly string[]) => { seen.push(['ownersOf', ids, ws]); return new Map([['s1', ann]]); },
+      ownerCosts: async (ws: readonly string[], o?: { since?: number }) => { seen.push(['ownerCosts', ws, o]); return [{ owner: ann, sessions: 1, usd: 2 }]; }
+    };
+    const sock = join(dir, 'mcp.sock');
+    mcp = await startHostMcp({ listen: { path: sock }, workspaceId: WS, readSource: rs, log: createLogger(() => undefined), owners, scope: async () => ['pub_a'] });
+    const call = (id: number, name: string, args: object) => ({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } });
+    const out = await rpc(sock, [call(1, 'get_cost', { session_id: 's1' }), call(2, 'cost_by_owner', { since: 5 })]);
+    const by = new Map(out.map((m) => [m.id, JSON.parse(m.result.content[0].text)]));
+    expect(by.get(1)).toMatchObject({ session_id: 's1', owner: ann });
+    expect(by.get(2)).toEqual([{ owner: ann, sessions: 1, usd: 2 }]);
+    expect(seen).toHaveLength(2);
+    expect(seen).toEqual(expect.arrayContaining([['ownersOf', ['s1'], [WS, 'pub_a']], ['ownerCosts', [WS, 'pub_a'], { since: 5 }]]));
+  });
+
+  it('closing the host MCP drops the owner handlers', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'hm-'));
+    const owners = { ownersOf: async () => new Map([['s1', { kind: 'user', provider: 'github', id: '7', login: 'ann', name: null, avatarUrl: null } as const]]), ownerCosts: async () => [] };
+    mcp = await startHostMcp({ listen: { path: join(dir, 'mcp.sock') }, workspaceId: WS, readSource: rs, log: createLogger(() => undefined), owners });
+    await mcp.close();
+    mcp = null;
+    initReadSource(rs);
+    setReadScopeResolver(async () => [WS]);
+    const r = (await callTool({ name: 'get_cost', arguments: { session_id: 's1' } }, WS)) as { content: Array<{ text: string }> };
+    expect(JSON.parse(r.content[0].text)).not.toHaveProperty('owner');
+    releaseReadSource();
   });
 });
 
@@ -186,7 +223,7 @@ describe('search_transcripts on the host', () => {
     const p = await start([]);
     const [list, call] = await rpc(p, [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }, search(2, { query: 'x' })])
       .then((ms) => [1, 2].map((id) => ms.find((m) => m.id === id)!));
-    expect(names(list)).toHaveLength(15);
+    expect(names(list)).toHaveLength(16);
     expect(call.error.message).toBe('Unknown tool: search_transcripts');
     expect(scopes).toEqual([]);
   });

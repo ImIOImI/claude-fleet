@@ -134,6 +134,9 @@ test('MCP server: initialize, tools, typed reads, committee control', async () =
       ])
     );
 
+    // Host-only tools never reach the desktop surface.
+    expect(names).not.toContain('cost_by_owner');
+
     // expose_port: listed, advertised in the server instructions, validated host-side.
     expect(names).toContain('expose_port');
     expect((init.result as { instructions?: string }).instructions ?? '').toContain('expose_port');

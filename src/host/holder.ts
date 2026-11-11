@@ -128,7 +128,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
   });
   let automations: HostAutomations | null = null;
   // Fenced: provisioning and each call's mcp_grants rewrite are writes on the state handle.
-  const mcp = mcpServer(o, embedder?.embed, publish, () =>
+  const mcp = mcpServer(o, embedder?.embed, publish, owners, () =>
     openPgMcpReadSource(stores.poolConfig.schema, stores.poolConfig, (message) => o.log.log('warn', 'mcp query isolation', { error: message }), {
       preprovisioned: queryLogin(o.db, stores.poolConfig, o.env)
     }));
@@ -172,7 +172,9 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
 }
 
 /** The MCP socket, retried with backoff. Each attempt gets its own read source (a failed start closes it). */
-function mcpServer(o: HolderOptions, embed: EmbedFn | undefined, publish: PublishStore, readSource: () => Promise<OwnedReadSource>): { start(): void; stop(): Promise<void> } {
+function mcpServer(
+  o: HolderOptions, embed: EmbedFn | undefined, publish: PublishStore, owners: SessionOwnerStore, readSource: () => Promise<OwnedReadSource>
+): { start(): void; stop(): Promise<void> } {
   let served: HostMcp | null = null;
   let attempt: Promise<void> | null = null;
   let timer: NodeJS.Timeout | null = null;
@@ -183,7 +185,7 @@ function mcpServer(o: HolderOptions, embed: EmbedFn | undefined, publish: Publis
     attempt = readSource()
       .then((rs) => startHostMcp({
         listen: o.mcp.listen, workspaceId: o.workspaceId, log: o.log, readSource: rs, embed,
-        scope: () => publish.partitionIds(), recordUsage: hostUsageRecorder
+        scope: () => publish.partitionIds(), recordUsage: hostUsageRecorder, owners
       }))
       .then(
         async (m) => {
