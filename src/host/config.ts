@@ -7,6 +7,7 @@ import { parse } from 'yaml';
 import { ORG_RE, parseGrantConfig, type GrantConfig } from '../main/identity/grants.js';
 import { parseStoreConfig, QUERY_USER, StoreConfigError, type PostgresStoreConfig } from '../main/store/storeConfig.js';
 import { parseHostPort, parsePort, type HostPort } from './endpoint.js';
+import { MESH_READY_URL } from './mesh.js';
 
 export const DEFAULT_CONFIG_PATH = '/etc/fleet-host/config.yaml';
 export const DEFAULT_PORT = 8080;
@@ -259,6 +260,10 @@ export interface HostEnv {
   mcpPort: number | null;
   /** What sessions' bridges dial when mcpPort is set. */
   mcpAddr: HostPort | null;
+  /** Host pod: open the credential and MCP ports only behind a ready Istio sidecar. */
+  requireMesh: boolean;
+  /** The sidecar's readiness URL; tests override it. */
+  meshReadyUrl: string;
   /** The sidecar and its weights (D65). */
   embedDir: string;
 }
@@ -290,6 +295,8 @@ export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
   if (!isAbsolute(mcpSocket)) throw new HostConfigError('FLEET_HOST_MCP_SOCKET must be an absolute path');
   // sun_path holds 108 bytes with the terminating NUL on Linux.
   if (Buffer.byteLength(mcpSocket) > 107) throw new HostConfigError('FLEET_HOST_MCP_SOCKET is longer than 107 bytes');
+  const meshText = env.FLEET_HOST_REQUIRE_MESH ?? '';
+  if (!['', '0', '1'].includes(meshText)) throw new HostConfigError('FLEET_HOST_REQUIRE_MESH must be 0 or 1');
   return {
     port,
     configPath: env.FLEET_HOST_CONFIG || DEFAULT_CONFIG_PATH,
@@ -302,6 +309,8 @@ export function readHostEnv(env: NodeJS.ProcessEnv): HostEnv {
     mcpSocket,
     mcpPort,
     mcpAddr,
+    requireMesh: meshText === '1',
+    meshReadyUrl: env.FLEET_MESH_READY_URL || MESH_READY_URL,
     embedDir: env.FLEET_HOST_EMBED_DIR || DEFAULT_EMBED_DIR
   };
 }

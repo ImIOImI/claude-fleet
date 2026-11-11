@@ -179,6 +179,8 @@ describe('readHostEnv', () => {
       mcpSocket: '/run/fleet/mcp.sock',
       mcpPort: null,
       mcpAddr: null,
+      requireMesh: false,
+      meshReadyUrl: 'http://127.0.0.1:15021/healthz/ready',
       embedDir: '/usr/local/lib/fleet-host/embed'
     });
   });
@@ -196,6 +198,12 @@ describe('readHostEnv', () => {
   it('honours FLEET_HOST_PORT and FLEET_HOST_CONFIG', () => {
     expect(readHostEnv({ FLEET_HOST_PORT: '9000', FLEET_HOST_CONFIG: '/c.yaml' })).toMatchObject({ port: 9000, configPath: '/c.yaml' });
     expect(() => readHostEnv({ FLEET_HOST_PORT: 'x' })).toThrow(/FLEET_HOST_PORT/);
+  });
+
+  it('reads FLEET_HOST_REQUIRE_MESH and FLEET_MESH_READY_URL', () => {
+    expect(readHostEnv({ FLEET_HOST_REQUIRE_MESH: '1', FLEET_MESH_READY_URL: 'http://127.0.0.1:9/r' })).toMatchObject({ requireMesh: true, meshReadyUrl: 'http://127.0.0.1:9/r' });
+    expect(readHostEnv({ FLEET_HOST_REQUIRE_MESH: '0' }).requireMesh).toBe(false);
+    expect(() => readHostEnv({ FLEET_HOST_REQUIRE_MESH: 'yes' })).toThrow('FLEET_HOST_REQUIRE_MESH must be 0 or 1');
   });
 
   it('reads the MCP socket, or its TCP port with the address sessions dial', () => {

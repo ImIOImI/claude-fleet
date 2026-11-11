@@ -13,6 +13,7 @@ import type { HostWorkspaceInfo } from './config.js';
 import type { EventHub } from './events.js';
 import type { LeaseState } from './lease.js';
 import type { Logger } from './log.js';
+import type { MeshState } from './mesh.js';
 import { clientAddress, RejectionBudget, UNAUTH_LIMIT, UnauthLimiter, type UnauthLimitOptions } from './rateLimit.js';
 import { dispatchRpc, type RpcRegistry } from './rpc.js';
 
@@ -58,6 +59,8 @@ export interface HostServerDeps {
   db?(): 'ok' | 'down' | 'connecting' | 'none';
   /** True until the host store is open and the lease resolved: unready, and authenticated routes answer 503. */
   starting?(): boolean;
+  /** null or absent: the host doesn't require the mesh, and /healthz omits it. */
+  mesh?(): MeshState | null;
   hub: AttachHub;
   events: EventHub;
   rpc: RpcRegistry;
@@ -290,7 +293,8 @@ export function createHostServer(deps: HostServerDeps): HostServer {
       if (req.method !== 'GET') sendJson(res, 405, { error: 'method not allowed' });
       else if (path === '/healthz') {
         const status = deps.starting?.() ? 'starting' : deps.healthy() ? 'ok' : 'unhealthy';
-        sendJson(res, status === 'ok' ? 200 : 503, { status, lease: deps.lease(), db: deps.db?.() ?? 'none' });
+        const mesh = deps.mesh?.() ?? null;
+        sendJson(res, status === 'ok' ? 200 : 503, { status, lease: deps.lease(), db: deps.db?.() ?? 'none', ...(mesh ? { mesh } : {}) });
       }
       else sendJson(res, deps.lease() === 'holder' ? 200 : 503, { lease: deps.lease() });
       return null;

@@ -21,6 +21,7 @@ import { LEASE_RENEW_MS, LEASE_TTL_MS, LeaseManager, memoryLeaseStore, type Leas
 import { postgresLeaseStore } from './pgLease.js';
 import { createLogger, type LogSink } from './log.js';
 import { brokerRpcChannels } from './rpc.js';
+import { MESH_WAIT_MS, waitForMesh, type MeshState } from './mesh.js';
 import { createHostServer, installCrashGuards, type HostServer } from './server.js';
 
 export const BROKER_POLL_MS = 2_000;
@@ -33,6 +34,7 @@ export const STORE_CLOSE_MS = 5_000;
 export const EXIT_DB_UNAVAILABLE = 75;
 
 const PG_CONN_ERRNO = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE']);
+const NO_MESH = 'no Istio sidecar: credential and MCP ports stay closed; broker connections are plaintext and a STRICT peer will refuse them';
 
 /** Connection-level failures (network, server shutdown, pool connect timeout), not SQL or code errors. */
 export function isDbUnavailable(err: unknown): boolean {
@@ -65,6 +67,8 @@ export interface RunHostOptions {
   mcpRetryMs?: number;
   /** Tests: a stand-in fleet-embedder. */
   embedder?: { launch?: { bin: string; args: string[] }; env?: NodeJS.ProcessEnv };
+  /** Tests: how long to wait for the sidecar. */
+  meshWaitMs?: number;
 }
 
 export interface RunningHost {
@@ -131,15 +135,43 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     uninstallGuards();
     throw err;
   }
-  let cred: CredServer | null = null;
-  try {
+  const startAbort = new AbortController();
+  let mesh: MeshState | null = env.requireMesh ? 'checking' : null;
+  // Without a sidecar :8081/:8082 would serve tokens and the MCP to the whole cluster in plaintext.
+  const meshReady: Promise<boolean> = env.requireMesh
+    ? waitForMesh({ url: env.meshReadyUrl, timeoutMs: opts.meshWaitMs ?? MESH_WAIT_MS, signal: startAbort.signal }).then((ok) => {
+        mesh = ok ? 'ready' : 'missing';
+        if (ok) log.log('info', 'istio sidecar ready');
+        else if (!startAbort.signal.aborted) log.log('error', NO_MESH);
+        return ok;
+      })
+    : Promise.resolve(true);
+  let cred = null as CredServer | null;
+  const credListen: ListenTarget = env.credPort !== null ? { port: env.credPort } : { path: env.credSocket };
+  async function startCred(): Promise<void> {
     const app = config.github?.app;
-    const credListen: ListenTarget = env.credPort !== null ? { port: env.credPort } : { path: env.credSocket };
-    if (app) cred = await startCredHelper({ app, listen: credListen, github: () => config.github, log, apiBase: opts.githubApiBase });
-    else log.log('info', 'github app credential helper off (github.appId unset)');
-  } catch (err) {
-    uninstallGuards();
-    throw err;
+    if (!app) {
+      log.log('info', 'github app credential helper off (github.appId unset)');
+      return;
+    }
+    const c = await startCredHelper({ app, listen: credListen, github: () => config.github, log, apiBase: opts.githubApiBase });
+    if (startAbort.signal.aborted) await c.close();
+    else cred = c;
+  }
+  if (!env.requireMesh) {
+    try {
+      await startCred();
+    } catch (err) {
+      uninstallGuards();
+      throw err;
+    }
+  } else {
+    void meshReady
+      .then((ok) => (ok && !startAbort.signal.aborted ? startCred() : undefined))
+      .catch((err: Error) => {
+        log.log('error', 'credential server start failed; exiting', { error: err.message });
+        void shutdown(1);
+      });
   }
 
   const ops = opts.brokerOps ?? realBrokerOps(env.brokerAddr ?? env.brokerSocket);
@@ -154,12 +186,12 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   let workspaceId: string | null = null;
   let leaseMgr: LeaseManager | null = null;
   let started = false;
-  const startAbort = new AbortController();
   const server = createHostServer({
     workspace: () => ({ ...config.workspace, id: workspaceId as string }),
     auth: () => auth,
     lease: () => leaseMgr?.state ?? 'standby',
-    healthy: () => !!leaseMgr?.running && (dbHealth?.ok() ?? true),
+    healthy: () => !!leaseMgr?.running && (dbHealth?.ok() ?? true) && (mesh === null || mesh === 'ready'),
+    mesh: () => mesh,
     db: () => (!config.db ? 'none' : !dbHealth ? 'connecting' : dbHealth.ok() ? 'ok' : 'down'),
     starting: () => !started,
     hub,
@@ -280,7 +312,7 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
         events,
         workspace: () => ({ id, name: config.workspace.name }),
         automations: () => config.automations,
-        mcp: { listen: mcpListen, args: mcpArgs },
+        mcp: { listen: mcpListen, args: mcpArgs, ready: meshReady },
         mcpRetryMs: opts.mcpRetryMs,
         search: config.search,
         embedDir: env.embedDir,
@@ -310,6 +342,7 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     try {
       await bringUp();
     } catch (err) {
+      startAbort.abort();
       await cred?.close();
       uninstallGuards();
       throw err;

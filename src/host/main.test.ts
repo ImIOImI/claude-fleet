@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
 import { createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -410,4 +411,85 @@ describe('isDbUnavailable', () => {
       expect(isDbUnavailable(err)).toBe(false);
     }
   });
+});
+
+describe('runHost behind the mesh check', () => {
+  const open: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    for (const c of open.splice(0)) await c();
+  });
+
+  async function meshRig(status: number | null | (() => number), keyFile?: string, meshWaitMs = 300) {
+    const { startFakeGithubApp } = await import('./testGithubApp.js');
+    const gh = await startFakeGithubApp({ appId: '9', installationId: '8', account: 'acme', repos: ['a'] });
+    let probe: HttpServer | null = null;
+    let probeUrl = `http://127.0.0.1:${await freePort()}/healthz/ready`;
+    if (status !== null) {
+      probe = createHttpServer((_q, r) => { r.statusCode = typeof status === 'number' ? status : status(); r.end(); });
+      await new Promise<void>((r) => probe!.listen(0, '127.0.0.1', () => r()));
+      probeUrl = `http://127.0.0.1:${(probe.address() as AddressInfo).port}/healthz/ready`;
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'fh-mesh-'));
+    writeFileSync(join(dir, 'key.pem'), gh.privatePem, { mode: 0o400 });
+    const cfgPath = join(dir, 'config.yaml');
+    writeFileSync(cfgPath, CONFIG + `github: { appId: 9, installationId: 8, keyFile: ${keyFile ?? join(dir, 'key.pem')} }\n`);
+    const [port, credPort] = [await freePort(), await freePort()];
+    const logs: string[] = [];
+    const exit = vi.fn();
+    const host = await runHost({
+      env: {
+        FLEET_HOST_PORT: String(port), FLEET_HOST_CONFIG: cfgPath, FLEET_HOST_STATE: join(dir, 'state'), CLAUDE_FLEET_BROKER_SOCKET: join(dir, 'b.sock'),
+        FLEET_HOST_CRED_TCP_PORT: String(credPort), FLEET_HOST_REQUIRE_MESH: '1', FLEET_MESH_READY_URL: probeUrl
+      },
+      exit, proc: new EventEmitter(), logSink: (l) => logs.push(l), authFactory: () => ({ id: 'github', verify }),
+      brokerOps: fakeBroker([]).ops, githubApiBase: gh.url, meshWaitMs
+    });
+    open.push(async () => {
+      await host.shutdown(0);
+      probe?.close();
+      await gh.close();
+    });
+    return { url: `http://127.0.0.1:${port}`, cred: { host: '127.0.0.1', port: credPort }, logs, exit };
+  }
+
+  it('opens the credential port once the sidecar is ready, and /healthz says mesh ready', async () => {
+    const { requestToken } = await import('./credCli.js');
+    const r = await meshRig(200);
+    await vi.waitFor(async () => expect(await (await fetch(`${r.url}/healthz`)).json()).toEqual({ status: 'ok', lease: 'holder', db: 'none', mesh: 'ready' }));
+    await vi.waitFor(async () => expect(await requestToken(r.cred, { repositories: ['a'] })).toMatch(/^ghs_fake/));
+  });
+
+  it('keeps the credential port closed while checking', async () => {
+    const { requestToken } = await import('./credCli.js');
+    let ready = false;
+    const r = await meshRig(() => (ready ? 200 : 503), undefined, 10_000);
+    const res = await fetch(`${r.url}/healthz`);
+    expect([res.status, await res.json()]).toEqual([503, { status: 'unhealthy', lease: 'holder', db: 'none', mesh: 'checking' }]);
+    await expect(requestToken(r.cred, { repositories: ['a'] })).rejects.toMatchObject({ code: 'ECONNREFUSED' });
+    ready = true;
+    await vi.waitFor(async () => expect(await requestToken(r.cred, { repositories: ['a'] })).toMatch(/^ghs_fake/), { timeout: 5_000 });
+  });
+
+  it('exits 1 when the credential server fails to start after the check', async () => {
+    const r = await meshRig(200, join(tmpdir(), 'fh-mesh-no-such-key.pem'));
+    await vi.waitFor(() => expect(r.exit).toHaveBeenCalledWith(1));
+    expect(r.logs.map((l) => JSON.parse(l) as { level: string; msg: string })).toContainEqual(expect.objectContaining({
+      level: 'error', msg: 'credential server start failed; exiting'
+    }));
+  });
+
+  for (const [what, status] of [['answers 503', 503], ['is absent', null]] as const) {
+    it(`keeps the credential port closed and is unready with mesh missing when the sidecar ${what}`, async () => {
+      const { requestToken } = await import('./credCli.js');
+      const r = await meshRig(status);
+      await vi.waitFor(async () => {
+        const res = await fetch(`${r.url}/healthz`);
+        expect([res.status, await res.json()]).toEqual([503, { status: 'unhealthy', lease: 'holder', db: 'none', mesh: 'missing' }]);
+      });
+      await expect(requestToken(r.cred, { repositories: ['a'] })).rejects.toMatchObject({ code: 'ECONNREFUSED' });
+      expect(r.logs.map((l) => JSON.parse(l) as { level: string; msg: string })).toContainEqual(expect.objectContaining({
+        level: 'error', msg: 'no Istio sidecar: credential and MCP ports stay closed; broker connections are plaintext and a STRICT peer will refuse them'
+      }));
+    });
+  }
 });

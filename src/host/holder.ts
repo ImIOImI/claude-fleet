@@ -38,8 +38,8 @@ export interface HolderOptions {
   events: Pick<EventHub, 'publish'>;
   workspace: () => { id: string; name: string };
   automations: () => HostAutomationEntry[];
-  /** The MCP's listener, and the `--mcp-config` argument fresh steps get. */
-  mcp: { listen: ListenTarget; args: string[] };
+  /** The MCP's listener, the `--mcp-config` argument fresh steps get, and the mesh gate (false: never serve). */
+  mcp: { listen: ListenTarget; args: string[]; ready: Promise<boolean> };
   /** First retry delay after a failed MCP start; doubles up to MCP_RETRY_MAX_MS. */
   mcpRetryMs?: number;
   /** D79: false = no sidecar, indexer or search_transcripts. */
@@ -187,7 +187,9 @@ function mcpServer(o: HolderOptions, embed: EmbedFn | undefined, readSource: () 
       );
   };
   return {
-    start: tryStart,
+    start: () => void o.mcp.ready.then((ok) => {
+      if (ok && !stopped) tryStart();
+    }),
     async stop() {
       stopped = true;
       if (timer) clearTimeout(timer);
