@@ -69,6 +69,7 @@ on:
       - 'src/preload/inboxTypes.ts'
       - 'src/preload/captureSettings.ts'
       - 'src/preload/federation.ts'
+      - 'src/preload/sessionOwner.ts'
       - 'src/main/embedderClient.ts'
       - 'embedder/**'
       - 'src/main/transcriptIndexCore.ts'
