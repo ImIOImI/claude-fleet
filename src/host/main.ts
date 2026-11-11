@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { Server } from 'node:http';
 import { hostname } from 'node:os';
 import { AttachHub } from './attachHub.js';
+import { automationRpcChannels, runtimeOf } from './automationRpc.js';
 import { buildAuthContext, githubProviderFactory, type AuthContext, type ProviderFactory } from './auth.js';
 import { brokerOps as realBrokerOps, type BrokerOps } from './brokerOps.js';
 import { HostConfigError, loadHostConfig, readHostEnv, type HostConfig } from './config.js';
@@ -223,7 +224,11 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     starting: () => !started,
     hub,
     events,
-    rpc: new Map([...brokerRpcChannels(ops, hub.owners, env.port), ...historyRpcChannels(() => holderNow?.history ?? null, { search: () => config.search.embedder })]),
+    rpc: new Map([
+      ...brokerRpcChannels(ops, hub.owners, env.port),
+      ...historyRpcChannels(() => holderNow?.history ?? null, { search: () => config.search.embedder }),
+      ...automationRpcChannels(() => (holderNow ? runtimeOf(holderNow.automations, () => ({ id: workspaceId as string, name: config.workspace.name })) : null))
+    ]),
     // db can't change on reload, so the host's secret values are read once.
     publish: config.db
       ? createPublishRoute({ store: () => holderNow?.publish ?? null, hostSecrets: hostSecretValues(procEnv, storeSecretEnvNames(config.db)), log })

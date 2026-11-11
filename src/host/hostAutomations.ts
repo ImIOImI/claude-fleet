@@ -3,7 +3,7 @@
 // host config; script steps, live steps, notifications and other workspaces
 // are refused.
 import { randomUUID } from 'node:crypto';
-import type { TodoSource } from '../preload/inboxTypes.js';
+import type { NotificationRow, TodoSource } from '../preload/inboxTypes.js';
 import { AutomationStore } from '../main/automations/automationStore.js';
 import { createAutomationService } from '../main/automations/automationService.js';
 import { createProposalService } from '../main/automations/proposalService.js';
@@ -16,6 +16,7 @@ import { setAutomationHandlers, setInboxHandlers } from '../main/mcpCore.js';
 import type { BrokerOps } from './brokerOps.js';
 import type { HostAutomationEntry } from './config.js';
 import type { EventHub } from './events.js';
+import { memoryActionLedger, type ActionLedger } from './hostActions.js';
 import { hostResolver, remoteHostRefusals, substituteSelf } from './hostDefinition.js';
 import type { Logger } from './log.js';
 import { LeaseLostError } from './pgLease.js';
@@ -39,6 +40,8 @@ export interface HostAutomationsOptions {
   log: Logger;
   /** The holder's owner store: each fresh step's session is recorded as the workspace's (D118). */
   owners?: Pick<SessionOwnerStore, 'record'> & Partial<Pick<SessionOwnerStore, 'release'>>;
+  /** At-most-once ledger for the RPC actions; the holder passes its fenced one. */
+  ledger?: ActionLedger;
   now?: () => number;
   tickMs?: number;
   settleMs?: number;
@@ -217,6 +220,8 @@ export async function startHostAutomations(o: HostAutomationsOptions) {
     automations: svc,
     proposals,
     inbox,
+    ledger: o.ledger ?? memoryActionLedger(now),
+    notices: { feed: async (_q: { sinceTs: number | null; limit: number }): Promise<NotificationRow[]> => [] },
     reconcile,
     async tick(): Promise<void> {
       await svc.tick();

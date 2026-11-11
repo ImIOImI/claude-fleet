@@ -1,6 +1,6 @@
 // Inbox effects shared by the renderer IPC and the workspace MCP tools (#407).
 // The MCP caller id is host-stamped by mcpServer (ambient socket identity).
-import type { InboxConfig, Todo, TodoEvent, TodoFilter, UpdateTodoPatch, InboxCounts } from '../../preload/inboxTypes.js';
+import type { InboxConfig, Todo, TodoEvent, TodoFilter, TodoSource, UpdateTodoPatch, InboxCounts } from '../../preload/inboxTypes.js';
 import { InboxStore } from './inboxDb.js';
 import { validatePostInput, isPriority, InboxInputError, normalizeTags } from './inboxCore.js';
 import { canPost, postLimit, PostRateLimiter, canUpdate, canSee } from './inboxPolicy.js';
@@ -20,6 +20,8 @@ export interface InboxServiceDeps {
 }
 
 const STATUSES = new Set(['open', 'done', 'dismissed']);
+
+const USER: TodoSource = { kind: 'user', id: null };
 
 function toPatch(a: Record<string, unknown>): UpdateTodoPatch {
   const p: UpdateTodoPatch = {};
@@ -147,14 +149,14 @@ export function createInboxService(store: InboxStore, deps: InboxServiceDeps) {
       const todo = await store.get(id);
       return todo ? { todo, events: await store.events(id) } : null;
     },
-    async create(input: Record<string, unknown>): Promise<Todo> {
-      const { todo, action } = await store.post({ kind: 'user', id: null }, validatePostInput(input), now());
+    async create(input: Record<string, unknown>, by: TodoSource = USER): Promise<Todo> {
+      const { todo, action } = await store.post(by, validatePostInput(input), now());
       deps.notifyChanged();
       if (action === 'created') deps.onTodoCreated?.(todo);
       return todo;
     },
-    async update(id: string, patch: Record<string, unknown>): Promise<Todo> {
-      const todo = await store.update({ kind: 'user', id: null }, id, toPatch(patch), now());
+    async update(id: string, patch: Record<string, unknown>, by: TodoSource = USER): Promise<Todo> {
+      const todo = await store.update(by, id, toPatch(patch), now());
       deps.notifyChanged();
       return todo;
     },

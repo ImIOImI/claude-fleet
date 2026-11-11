@@ -101,6 +101,7 @@ src/**/*.test.ts
 src/host/testFakes.ts
 src/host/testHost.ts
 src/host/testGithubApp.ts
+src/host/testAutomationRuntime.ts
 docker/host/*.test.sh
 embedder/target/**
 embedder/bin/**
