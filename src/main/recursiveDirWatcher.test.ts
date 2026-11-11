@@ -294,4 +294,32 @@ describe('RecursiveDirWatcher rescan economy', () => {
     expect(scans.slice(1).reduce((n, x) => n + x.overflowRequests, 0)).toBe(2);
     await rw.close();
   });
+
+  it('a re-add while the previous initial listing is still running gets its own complete listing', async () => {
+    for (let i = 0; i < 20; i++) writeFileSync(join(root, `h${i}.jsonl`), '1\n');
+    const scans: Scan[] = [];
+    const afterReAdd = new Set<string>();
+    let reAdded = false;
+    const fw = fakeWatch();
+    let rw: RecursiveDirWatcher;
+    // Unregister + re-register lands mid-listing: files reported before it
+    // belong to the old registration and must be reported again.
+    const filter = (p: string): boolean => {
+      if (!reAdded) {
+        reAdded = true;
+        rw.unwatch(root);
+        rw.add(root);
+        return true;
+      }
+      return p.endsWith('.jsonl');
+    };
+    rw = new RecursiveDirWatcher({ depth: 2, watchFn: fw.watchFn, filter, onScan: (x) => scans.push(x) });
+    rw.on('add', (p: string) => { if (reAdded) afterReAdd.add(p); });
+    rw.add(root);
+    await waitFor(() => scans.filter((x) => x.reason === 'initial').length >= 2);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(afterReAdd.size).toBe(20);
+    await rw.close();
+  });
 });
+

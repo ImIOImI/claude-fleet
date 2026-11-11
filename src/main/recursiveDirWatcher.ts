@@ -55,7 +55,7 @@ export class RecursiveDirWatcher extends EventEmitter {
   private readonly wanted = new Set<string>();
   /** Per root, the in-flight full listing (initial or rescan); requests arriving
    *  meanwhile become one follow-up run, counted by cause. */
-  private readonly fullRescans = new Map<string, { overflow: number; unresolvable: number }>();
+  private readonly fullRescans = new Map<string, { initial: boolean; overflow: number; unresolvable: number }>();
 
   constructor(private readonly opts: {
     depth: number; retryMs?: number; watchFn?: WatchFn; onScan?: (s: ScanReport) => void;
@@ -150,11 +150,14 @@ export class RecursiveDirWatcher extends EventEmitter {
   private requestFullRescan(root: string, reason: ScanReason): void {
     const inFlight = this.fullRescans.get(root);
     if (inFlight) {
-      if (reason === 'overflow') inFlight.overflow++;
+      // A re-add (unwatch + add, or a retry) mid-listing: what the old listing
+      // already emitted belonged to the old registration, so list it all again.
+      if (reason === 'initial') inFlight.initial = true;
+      else if (reason === 'overflow') inFlight.overflow++;
       else if (reason === 'unresolvable') inFlight.unresolvable++;
       return;
     }
-    const pending = { overflow: 0, unresolvable: 0 };
+    const pending = { initial: false, overflow: 0, unresolvable: 0 };
     this.fullRescans.set(root, pending);
     void (async () => {
       let run = { reason, ev: (reason === 'initial' ? 'add' : 'change') as 'add' | 'change',
@@ -163,9 +166,13 @@ export class RecursiveDirWatcher extends EventEmitter {
         for (;;) {
           await this.runScan(root, root, this.opts.depth, run.ev, run.reason,
             { overflow: run.overflow, unresolvable: run.unresolvable });
-          if (pending.overflow + pending.unresolvable === 0 || !this.roots.has(root)) return;
-          run = { reason: pending.overflow > 0 ? 'overflow' : 'unresolvable', ev: 'change',
-            overflow: pending.overflow, unresolvable: pending.unresolvable };
+          if ((!pending.initial && pending.overflow + pending.unresolvable === 0) || !this.roots.has(root)) return;
+          run = {
+            reason: pending.initial ? 'initial' : pending.overflow > 0 ? 'overflow' : 'unresolvable',
+            ev: pending.initial ? 'add' : 'change',
+            overflow: pending.overflow, unresolvable: pending.unresolvable,
+          };
+          pending.initial = false;
           pending.overflow = 0;
           pending.unresolvable = 0;
         }
