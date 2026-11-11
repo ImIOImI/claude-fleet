@@ -57,9 +57,10 @@ describe('remote bookmark wiring', () => {
     expect(write).toMatch(/const publish = publishOnWrite\(spec, existing\?\.publish, remoteIds, Date\.now\(\)\)/);
     expect(write).toMatch(/\.\.\.spec,\s*workspaceRoot,\s*launcher: incomingLauncher,\s*mounts,\s*publish,/);
     expect(write).toMatch(/deletePublishCursor\(spec\.id, id\)/);
-    // The seed is read before `since` is stamped, and written for newly added targets only.
-    expect(write).toMatch(/const seed = await workspaceMaxEventId\(spec\.id\);\s*const publish = publishOnWrite\(/);
-    expect(write).toMatch(/if \(!existing\?\.publish\?\.to\.includes\(id\)\) await setPublishCursor\(spec\.id, id, seed\)/);
+    // The seed is read before `since` is stamped, only when a target is added (a plain edit never touches the history store).
+    expect(write).toMatch(/const added = \(publishOnWrite\(spec, existing\?\.publish, remoteIds, 0\)\?\.to \?\? \[\]\)\.filter\(\(id\) => !existing\?\.publish\?\.to\.includes\(id\)\);/);
+    expect(write).toMatch(/const seed = added\.length \? await workspaceMaxEventId\(spec\.id\)\.catch\(\(\) => null\) : null;\s*const publish = publishOnWrite\(/);
+    expect(write).toMatch(/if \(seed !== null\) for \(const id of added\) await setPublishCursor\(spec\.id, id, seed\)/);
     expect(handlerSource('workspace:create')).toMatch(/publish: prior\?\.publish,/);
   });
 

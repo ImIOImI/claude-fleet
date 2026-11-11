@@ -1619,10 +1619,12 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       // Authoritative: an edit that removes all mounts writes undefined, clearing them.
       const mounts = await mountsFor(spec.kind, spec.id, (spec as { mounts?: unknown }).mounts, existing?.mounts);
       const remoteIds = new Set((await listWorkspaceManifests()).filter((m) => m.kind === 'remote').map((m) => m.id));
+      const added = (publishOnWrite(spec, existing?.publish, remoteIds, 0)?.to ?? []).filter((id) => !existing?.publish?.to.includes(id));
       // Read before `since` is stamped: a row below it was read from disk before then, so its session started earlier.
-      const seed = await workspaceMaxEventId(spec.id);
+      // Only a save that adds a target touches the history store; without a seed the publisher skips that history by `since`.
+      const seed = added.length ? await workspaceMaxEventId(spec.id).catch(() => null) : null;
       const publish = publishOnWrite(spec, existing?.publish, remoteIds, Date.now());
-      for (const id of publish?.to ?? []) if (!existing?.publish?.to.includes(id)) await setPublishCursor(spec.id, id, seed);
+      if (seed !== null) for (const id of added) await setPublishCursor(spec.id, id, seed);
       // Merge OVER the existing manifest so fields the renderer doesn't manage
       // survive an edit. The edit form sends every form field (those win) but
       // omits `control` (committee grants, edited in the Committee rail #118)
