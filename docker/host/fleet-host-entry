@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
-# Runs the broker and fleet-host side by side under tini. The broker exiting
-# ends the container; fleet-host is restarted with backoff (PTYs live in the
-# broker) unless it crash-loops. Exit 75 (host DB unavailable) is restarted
-# with backoff but never counts toward the crash-loop give-up. SIGTERM stops
-# fleet-host first so it releases the lease, then the broker. SIGHUP is
-# forwarded to fleet-host (config reload).
-# fleet-host never starts onto a port someone else holds: sessions share its
-# uid, so a session could kill it and listen in its place to collect bearer
-# tokens. The container exits instead.
+# fleet-host-entry <mode> (SPEC §4 Host images):
+#   host       fleet-host alone (host pod, uid 1001): credentials :8081, MCP :8082
+#   workspace  the broker and its sessions (workspace pod, uid 1000): broker :7070
+#   single     broker and fleet-host in one container under one uid; local and dev only
 set -u
+mode=${1:-}
 broker_bin=${FLEET_BROKER_BIN:-/usr/local/bin/broker}
 host_js=${FLEET_HOST_JS:-/usr/local/lib/fleet-host/fleet-host.mjs}
 host_port=${FLEET_HOST_PORT:-8080}
@@ -16,17 +12,16 @@ max_restarts=${FLEET_HOST_MAX_RESTARTS:-5}
 window_s=${FLEET_HOST_RESTART_WINDOW_S:-60}
 backoff_start_ms=${FLEET_HOST_BACKOFF_START_MS:-1000}
 backoff_max_ms=${FLEET_HOST_BACKOFF_MAX_MS:-10000}
+workspace_uid=${FLEET_WORKSPACE_UID:-1000}
 
 log() { printf '{"level":"%s","msg":"fleet-host-entry: %s"%s}\n' "$1" "$2" "${3:-}" >&2; }
 
-# TCP mode would serve the broker, unauthenticated, on the pod IP.
-if [ -n "${CLAUDE_FLEET_BROKER_TCP_PORT:-}" ]; then
-  log error "CLAUDE_FLEET_BROKER_TCP_PORT is set; refusing to start (the broker must stay on its Unix socket)"
-  exit 1
-fi
-
-# Not yet wired up (Task 8 adds the mesh-gated credential server and sets this).
-[ -n "${FLEET_HOST_CRED_TCP_PORT:-}" ] && { log error "FLEET_HOST_CRED_TCP_PORT is set; refusing to start"; exit 1; }
+need() {
+  if [ -z "${!1:-}" ]; then
+    log error "$1 is not set; refusing to start ($mode mode)"
+    exit 1
+  fi
+}
 
 # True if any socket in this network namespace listens on $host_port (IPv4 or IPv6, any address).
 port_bound() {
@@ -43,80 +38,156 @@ port_bound() {
 
 host=
 pause=
-stop() {
-  [ -n "$pause" ] && kill "$pause" 2>/dev/null
-  if [ -n "$host" ]; then
-    kill -TERM "$host" 2>/dev/null
-    wait "$host" 2>/dev/null
-  fi
-  kill -TERM "$broker" 2>/dev/null
-  wait "$broker" 2>/dev/null
-}
-trap 'stop; exit 0' TERM INT
-trap '[ -n "$host" ] && kill -HUP "$host" 2>/dev/null' HUP
-
-"$broker_bin" &
-broker=$!
-
-starts=()
 delay_ms=$backoff_start_ms
-start_host() {
-  if port_bound; then
-    log error "port $host_port is already bound; refusing to start fleet-host" ",\"port\":$host_port"
-    stop
-    exit 1
-  fi
-  node "$host_js" &
-  host=$!
-  starts+=("$SECONDS")
-}
-start_host
 
-while :; do
-  done_pid=
-  wait -n -p done_pid "$broker" "$host"
-  status=$?
-  # A trapped signal (e.g. HUP) interrupts wait without any child exiting.
-  [ -z "${done_pid:-}" ] && continue
-  if [ "$done_pid" = "$broker" ]; then
-    log error "broker exited; stopping" ",\"status\":$status"
-    broker=
-    kill -TERM "$host" 2>/dev/null
-    wait "$host" 2>/dev/null
-    exit "$status"
-  fi
-  host=
-  # 75 = EXIT_DB_UNAVAILABLE in src/host/main.ts.
-  if (( status == 75 )); then
-    unset 'starts[-1]'
-    starts=("${starts[@]}")
-  fi
-  recent=()
-  for t in "${starts[@]}"; do (( SECONDS - t < window_s )) && recent+=("$t"); done
-  starts=("${recent[@]}")
-  # starts holds this run plus the restarts inside the window.
-  if (( ${#starts[@]} > max_restarts )); then
-    log error "fleet-host crash-looping; giving up" ",\"status\":$status,\"restarts\":$(( ${#starts[@]} - 1 ))"
-    stop
-    (( status == 0 )) && status=1
-    exit "$status"
-  fi
-  (( status != 75 && ${#starts[@]} == 1 )) && delay_ms=$backoff_start_ms
-  if (( status == 75 )); then
-    log warn "fleet-host exited (db unavailable); restarting" ",\"status\":$status,\"delayMs\":$delay_ms"
-  else
-    log warn "fleet-host exited; restarting" ",\"status\":$status,\"delayMs\":$delay_ms"
-  fi
+# Sleeps delay_ms (a trapped signal cuts it short), then doubles it up to the max.
+backoff_sleep() {
   sleep "$(( delay_ms / 1000 )).$(printf '%03d' $(( delay_ms % 1000 )))" &
   pause=$!
   while kill -0 "$pause" 2>/dev/null; do wait "$pause" 2>/dev/null; done
   pause=
   delay_ms=$(( delay_ms * 2 > backoff_max_ms ? backoff_max_ms : delay_ms * 2 ))
-  if ! kill -0 "$broker" 2>/dev/null; then
-    wait "$broker"
-    status=$?
-    log error "broker exited; stopping" ",\"status\":$status"
-    exit "$status"
+}
+
+stop_host() {
+  [ -n "$pause" ] && kill "$pause" 2>/dev/null
+  if [ -n "$host" ]; then
+    kill -TERM "$host" 2>/dev/null
+    wait "$host" 2>/dev/null
   fi
+}
+
+run_workspace() {
+  need FLEET_HOST_CRED_ADDR
+  # Sessions inherit the broker's env, so fleet-host-cred finds the host pod.
+  export FLEET_HOST_CRED_ADDR
+  export CLAUDE_FLEET_BROKER_TCP_PORT=${CLAUDE_FLEET_BROKER_TCP_PORT:-7070}
+  export CLAUDE_FLEET_BROKER_REQUIRE_MESH=1
+  exec "$broker_bin"
+}
+
+run_host() {
+  if [ "$(id -u)" = "$workspace_uid" ]; then
+    log error "host mode refuses to run as the workspace uid $workspace_uid"
+    exit 1
+  fi
+  need CLAUDE_FLEET_BROKER_ADDR
+  need FLEET_HOST_MCP_ADDR
+  export FLEET_HOST_CRED_TCP_PORT=${FLEET_HOST_CRED_TCP_PORT:-8081}
+  export FLEET_HOST_MCP_TCP_PORT=${FLEET_HOST_MCP_TCP_PORT:-8082}
+  export FLEET_HOST_REQUIRE_MESH=1
+  # The transcript writers are in the workspace pod: inotify sees nothing.
+  export FLEET_HOST_RESCAN_MS=${FLEET_HOST_RESCAN_MS:-5000}
+  trap 'stop_host; exit 0' TERM INT
+  trap '[ -n "$host" ] && kill -HUP "$host" 2>/dev/null' HUP
+  local status
+  while :; do
+    if port_bound; then
+      log error "port $host_port is already bound; refusing to start fleet-host" ",\"port\":$host_port"
+      exit 1
+    fi
+    node "$host_js" &
+    host=$!
+    while :; do
+      wait "$host"; status=$?
+      kill -0 "$host" 2>/dev/null || break
+    done
+    host=
+    # 75 = EXIT_DB_UNAVAILABLE in src/host/main.ts. Restarted here: CrashLoopBackOff would hold the host down for minutes after the DB recovers.
+    if (( status != 75 )); then
+      log error "fleet-host exited" ",\"status\":$status"
+      exit "$status"
+    fi
+    log warn "fleet-host exited (db unavailable); restarting" ",\"status\":$status,\"delayMs\":$delay_ms"
+    backoff_sleep
+  done
+}
+
+# fleet-host never starts onto a port someone else holds: sessions share its
+# uid, so a session could kill it and listen in its place to collect bearer
+# tokens. The container exits instead.
+run_single() {
+  # Each would serve, without a mesh, on the pod IP.
+  for v in CLAUDE_FLEET_BROKER_TCP_PORT FLEET_HOST_CRED_TCP_PORT FLEET_HOST_MCP_TCP_PORT; do
+    if [ -n "${!v:-}" ]; then
+      log error "$v is set; refusing to start (single mode keeps every listener on a Unix socket)"
+      exit 1
+    fi
+  done
+  log warn "single-container mode: sessions share fleet-host's uid (SPEC §9); local and dev only"
+  stop() {
+    stop_host
+    kill -TERM "$broker" 2>/dev/null
+    wait "$broker" 2>/dev/null
+  }
+  trap 'stop; exit 0' TERM INT
+  trap '[ -n "$host" ] && kill -HUP "$host" 2>/dev/null' HUP
+
+  "$broker_bin" &
+  broker=$!
+
+  starts=()
+  start_host() {
+    if port_bound; then
+      log error "port $host_port is already bound; refusing to start fleet-host" ",\"port\":$host_port"
+      stop
+      exit 1
+    fi
+    node "$host_js" &
+    host=$!
+    starts+=("$SECONDS")
+  }
   start_host
-done
+
+  while :; do
+    done_pid=
+    wait -n -p done_pid "$broker" "$host"
+    status=$?
+    # A trapped signal (e.g. HUP) interrupts wait without any child exiting.
+    [ -z "${done_pid:-}" ] && continue
+    if [ "$done_pid" = "$broker" ]; then
+      log error "broker exited; stopping" ",\"status\":$status"
+      broker=
+      kill -TERM "$host" 2>/dev/null
+      wait "$host" 2>/dev/null
+      exit "$status"
+    fi
+    host=
+    # 75 = EXIT_DB_UNAVAILABLE in src/host/main.ts.
+    if (( status == 75 )); then
+      unset 'starts[-1]'
+      starts=("${starts[@]}")
+    fi
+    recent=()
+    for t in "${starts[@]}"; do (( SECONDS - t < window_s )) && recent+=("$t"); done
+    starts=("${recent[@]}")
+    # starts holds this run plus the restarts inside the window.
+    if (( ${#starts[@]} > max_restarts )); then
+      log error "fleet-host crash-looping; giving up" ",\"status\":$status,\"restarts\":$(( ${#starts[@]} - 1 ))"
+      stop
+      (( status == 0 )) && status=1
+      exit "$status"
+    fi
+    (( status != 75 && ${#starts[@]} == 1 )) && delay_ms=$backoff_start_ms
+    if (( status == 75 )); then
+      log warn "fleet-host exited (db unavailable); restarting" ",\"status\":$status,\"delayMs\":$delay_ms"
+    else
+      log warn "fleet-host exited; restarting" ",\"status\":$status,\"delayMs\":$delay_ms"
+    fi
+    backoff_sleep
+    if ! kill -0 "$broker" 2>/dev/null; then
+      wait "$broker"
+      status=$?
+      log error "broker exited; stopping" ",\"status\":$status"
+      exit "$status"
+    fi
+    start_host
+  done
+}
+
+case "$mode" in
+  host) run_host ;;
+  workspace) run_workspace ;;
+  single) run_single ;;
+  *) log error "usage: fleet-host-entry host|workspace|single"; exit 2 ;;
+esac
