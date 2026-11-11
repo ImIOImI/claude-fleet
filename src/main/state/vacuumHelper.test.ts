@@ -66,6 +66,23 @@ describe('waitForVacuumHelper', () => {
     await exited;
   });
 
+  it('stops waiting when asked (a quit during the wait)', async () => {
+    const dir = tmp();
+    let stop = false;
+    writeFileSync(vacuumLockPath(dir), JSON.stringify({ pid: 4242, startedAt: Date.now() }));
+    setTimeout(() => { stop = true; }, 30);
+    const r = await waitForVacuumHelper(dir, { capMs: 60_000, pollMs: 10, isAlive: () => true, kill: () => undefined, shouldStop: () => stop });
+    expect(r).toBe('aborted');
+  });
+
+  it('keeps waiting through the exit wait for a killed helper that exits late', async () => {
+    const dir = tmp();
+    let alive = true;
+    writeFileSync(vacuumLockPath(dir), JSON.stringify({ pid: 4242, startedAt: Date.now() }));
+    const r = waitForVacuumHelper(dir, { capMs: 20, pollMs: 10, exitWaitMs: 5_000, isAlive: () => alive, kill: () => { setTimeout(() => { alive = false; }, 100); } });
+    expect(await r).toBe('killed');
+  });
+
   it('reports lingering when a killed helper outlives the exit wait', async () => {
     const dir = tmp();
     const killed: number[] = [];

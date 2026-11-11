@@ -18,7 +18,8 @@ const ATTEMPT_EVERY_MS = DAY_MS;
 const FREE_SPACE_FACTOR = 2.2;
 /** A lock younger than this names a helper that may still be vacuuming. */
 const LOCK_FRESH_MS = 15 * 60_000;
-export const VACUUM_EXIT_WAIT_MS = 60_000;
+/** How long a killed helper may take to exit before history stays down for the session. */
+export const VACUUM_EXIT_WAIT_MS = 5 * 60_000;
 
 export const vacuumLockPath = (userData: string): string => join(userData, 'state.db.vacuum.lock');
 
@@ -83,6 +84,7 @@ export function spawnVacuumHelper(
     logError({ source: 'main', level: 'warn', type: 'vacuum-failed', message: `lock: ${String(e)}` });
     return null;
   }
+  let spawned: number | null = null;
   try {
     const child = spawn(opts.execPath ?? process.execPath,
       ['-e', VACUUM_SCRIPT, opts.bs3Path ?? betterSqlitePath(), join(userData, 'state.db'), lock, join(userData, 'error.log')],
@@ -94,12 +96,15 @@ export function spawnVacuumHelper(
       unlinkSync(lock);
       return null;
     }
+    spawned = child.pid;
     writeFileSync(lock, JSON.stringify({ pid: child.pid, startedAt }));
     child.unref();
     return child.pid;
   } catch (e) {
     logError({ source: 'main', level: 'warn', type: 'vacuum-failed', message: String(e) });
-    return null;
+    // A running helper keeps its (pid-less) lock so the next start still waits.
+    if (spawned === null) try { unlinkSync(lock); } catch { /* already gone */ }
+    return spawned;
   }
 }
 
@@ -143,11 +148,13 @@ export function clearStaleVacuumLock(userData: string, isAlive: (pid: number) =>
 /** Before openDb: wait (asynchronously) for a helper from the last quit. After
  *  `capMs` a fresh lock's helper is killed (its VACUUM rolls back); an old
  *  lock is treated as stale, never killed (its pid may be reused). A killed
- *  helper still alive after `exitWaitMs` is 'lingering': it may still hold the
- *  file locks, so openDb's busy_timeout can block main on its first write. */
+ *  helper still alive after `exitWaitMs` is 'lingering' and may hold the write
+ *  lock, so the caller must not open state.db. `shouldStop` ends the wait early
+ *  ('aborted'). */
 export async function waitForVacuumHelper(userData: string, opts: {
   capMs?: number; pollMs?: number; exitWaitMs?: number; isAlive?: (pid: number) => boolean; kill?: (pid: number) => void; now?: () => number;
-} = {}): Promise<'none' | 'done' | 'killed' | 'stale' | 'lingering'> {
+  shouldStop?: () => boolean;
+} = {}): Promise<'none' | 'done' | 'killed' | 'stale' | 'lingering' | 'aborted'> {
   const lock = vacuumLockPath(userData);
   if (!existsSync(lock)) return 'none';
   const isAlive = opts.isAlive ?? pidAlive;
@@ -161,8 +168,10 @@ export async function waitForVacuumHelper(userData: string, opts: {
   const info = { pid: parsed.pid as number, startedAt: parsed.startedAt };
   const poll = (): Promise<void> => new Promise((r) => setTimeout(r, opts.pollMs ?? 250));
   const deadline = now() + (opts.capMs ?? 120_000);
+  const stop = opts.shouldStop ?? (() => false);
   while (now() < deadline) {
     await poll();
+    if (stop()) return 'aborted';
     if (!existsSync(lock)) return 'done';
     if (!isAlive(info.pid)) {
       drop();
@@ -176,6 +185,9 @@ export async function waitForVacuumHelper(userData: string, opts: {
   } catch { /* exited meanwhile */ }
   // Its file locks go only when it is gone (Windows releases them late).
   const exitDeadline = now() + (opts.exitWaitMs ?? VACUUM_EXIT_WAIT_MS);
-  while (isAlive(info.pid) && now() < exitDeadline) await poll();
+  while (isAlive(info.pid) && now() < exitDeadline) {
+    await poll();
+    if (stop()) return 'aborted';
+  }
   return isAlive(info.pid) ? 'lingering' : 'killed';
 }

@@ -330,13 +330,14 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     const claims = claimService;
     void perfSpanAsync('claude_fleet.boot.capture_fail_running', () => runs.failRunning(Date.now(), 'interrupted by app restart')).catch((e) =>
       logError({ source: 'main', level: 'warn', type: 'capture-fail-running', message: String(e) }));
-    // After boot settles, like the embed backfill: on the in-process fallback, embedding loads the model on main.
+    // Delayed: on the in-process fallback, embedding loads the model on main.
     const claimsTimer = setTimeout(() => {
       if (shuttingDown) return;
       void perfSpanAsync('claude_fleet.boot.claims_backfill', () => claims.backfillVectors()).catch((e) =>
         logError({ source: 'main', level: 'warn', type: 'claims-backfill', message: String(e) }));
     }, EMBED_BACKFILL_DELAY_MS);
     claimsTimer.unref?.();
+    inboxTeardown.push(() => clearTimeout(claimsTimer));
   };
 
   /** Seed each workspace's durable-mirror default from its manifest before the
@@ -804,10 +805,15 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     const watcher = jsonlWatcher;
     const embedFn = embed;
     void (async () => {
-      const waited = await waitForVacuumHelper(userData);
+      const waited = await waitForVacuumHelper(userData, { shouldStop: () => shuttingDown });
       logError({ source: 'main', level: waited === 'lingering' ? 'warn' : 'info', type: 'vacuum-wait', message: `vacuum helper: ${waited}` });
       // A quit during the wait has closed (or is closing) the store.
       if (shuttingDown) return;
+      // It may still hold the write lock: every write would block main for busy_timeout, then fail.
+      if (waited === 'lingering') {
+        logError({ source: 'main', level: 'warn', type: 'history-start', message: 'vacuum helper still running; history unavailable this session' });
+        return;
+      }
       await startSqliteHistory();
       if (shuttingDown) return;
       await startSqliteIngest(watcher, embedFn);

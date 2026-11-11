@@ -150,8 +150,11 @@ describe('index.ts store boot', () => {
 
   it('a quit during the VACUUM-helper wait never opens state.db (#547)', () => {
     inOrder(boot, [
-      'const waited = await waitForVacuumHelper(userData);',
+      'const waited = await waitForVacuumHelper(userData, { shouldStop: () => shuttingDown });',
       'if (shuttingDown) return;',
+      "if (waited === 'lingering') {",
+      "type: 'history-start', message: 'vacuum helper still running; history unavailable this session'",
+      'return;',
       'await startSqliteHistory();',
       'if (shuttingDown) return;',
       'await startSqliteIngest(watcher, embedFn);',
@@ -167,6 +170,6 @@ describe('index.ts store boot', () => {
 
   it('starts the claims vector backfill after the embed-backfill delay, not at boot (#547)', () => {
     const c = closure('startClaims');
-    inOrder(c, ['setTimeout(() => {', 'if (shuttingDown) return;', "perfSpanAsync('claude_fleet.boot.claims_backfill'", '}, EMBED_BACKFILL_DELAY_MS);']);
+    inOrder(c, ['setTimeout(() => {', 'if (shuttingDown) return;', "perfSpanAsync('claude_fleet.boot.claims_backfill'", '}, EMBED_BACKFILL_DELAY_MS);', 'inboxTeardown.push(() => clearTimeout(claimsTimer));']);
   });
 });
