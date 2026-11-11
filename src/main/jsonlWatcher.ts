@@ -25,7 +25,7 @@ import { join, extname, sep as pathSep } from 'node:path';
 // electron.vite.config.ts), so `require('chokidar')` would throw
 // ERR_REQUIRE_ESM. Load it via dynamic import inside `start()`.
 import type { FSWatcher } from 'chokidar';
-import { NATIVE_RECURSIVE_DEFAULT, RecursiveDirWatcher, type DirWatcher } from './recursiveDirWatcher.js';
+import { NATIVE_RECURSIVE_DEFAULT, RecursiveDirWatcher, type DirWatcher, recordScanSpans } from './recursiveDirWatcher.js';
 import { workspaceClaudeDir, workspaceHistoryDir, workspaceHistoryFile, hostLocalProjectsDir } from './paths.js';
 import { deleteTranscriptOffsets, ingestBatch, loadTranscriptOffsets, saveTranscriptOffsets, type TranscriptOffset, type TranscriptOffsetRow } from './db.js';
 import { effectiveForClaudeSession } from './mirrorPolicy.js';
@@ -325,7 +325,7 @@ export class JsonlWatcher extends EventEmitter {
     // last newline byte and rolling the offset forward only past complete
     // lines. Lower latency this way.
     this.watcher = this.nativeRecursive
-      ? new RecursiveDirWatcher({ depth: 2 })
+      ? new RecursiveDirWatcher({ depth: 2, onScan: recordScanSpans('jsonl') })
       : (await import('chokidar')).watch([], { depth: 2, ignoreInitial: false, persistent: true });
     this.wireHandlers(this.watcher);
     for (const name of workspaceIds) {

@@ -38,6 +38,8 @@ export const SLOW_OP_MS_BY_NAME: Readonly<Record<string, number>> = {
   // One row per launch each, whatever the duration: they carry the WAL state.
   'claude_fleet.db.open': 0,
   'claude_fleet.db.wal_drain': 0,
+  // Every directory listing (rare: watch start, overflow, unresolvable path, new dir).
+  'claude_fleet.watcher.scan': 0,
 };
 export const FLUSH_INTERVAL_MS = 5000;
 export const STALL_THRESHOLD_MS = 50;
