@@ -187,3 +187,89 @@ describe('RecursiveDirWatcher scan reporting', () => {
     await rw.close();
   });
 });
+
+describe('RecursiveDirWatcher rescan economy', () => {
+  type Scan = { reason: string; files: number; coalesced: number };
+  const fakeWatch = () => {
+    let listener: ((ev: string, f: string | null) => void) | null = null;
+    const fake = Object.assign(new EventEmitter(), { close: () => undefined }) as unknown as FSWatcher;
+    return { fire: (f: string | null) => listener!('change', f), watchFn: (_r: string, l: (ev: string, f: string | null) => void) => { listener = l; return fake; } };
+  };
+
+  it('an event for an already-listed directory does not rescan it; a new directory does', async () => {
+    mkdirSync(join(root, 's', 'subagents'), { recursive: true });
+    writeFileSync(join(root, 's', 'subagents', 'a.jsonl'), '1\n');
+    const scans: Scan[] = [];
+    const fw = fakeWatch();
+    const rw = new RecursiveDirWatcher({ depth: 2, watchFn: fw.watchFn, onScan: (x) => scans.push(x) });
+    rw.add(root);
+    await waitFor(() => scans.length === 1);
+    fw.fire('s');
+    fw.fire(join('s', 'subagents'));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(scans.map((x) => x.reason)).toEqual(['initial']);
+    mkdirSync(join(root, 't'));
+    writeFileSync(join(root, 't', 'b.jsonl'), '1\n');
+    fw.fire('t');
+    await waitFor(() => scans.length === 2);
+    expect(scans[1]).toMatchObject({ reason: 'new-dir', files: 1 });
+    fw.fire('t');
+    await new Promise((r) => setTimeout(r, 100));
+    expect(scans).toHaveLength(2);
+    await rw.close();
+  });
+
+  it('a deleted and re-created directory is rescanned when it reappears', async () => {
+    mkdirSync(join(root, 'd'));
+    const scans: Scan[] = [];
+    const fw = fakeWatch();
+    const rw = new RecursiveDirWatcher({ depth: 2, watchFn: fw.watchFn, onScan: (x) => scans.push(x) });
+    rw.add(root);
+    await waitFor(() => scans.length === 1);
+    rmSync(join(root, 'd'), { recursive: true });
+    fw.fire('d');
+    await new Promise((r) => setTimeout(r, 50));
+    mkdirSync(join(root, 'd'));
+    writeFileSync(join(root, 'd', 'x.jsonl'), '1\n');
+    fw.fire('d');
+    await waitFor(() => scans.length === 2);
+    expect(scans[1]).toMatchObject({ reason: 'new-dir', files: 1 });
+    await rw.close();
+  });
+
+  it('only files passing the filter are emitted and counted', async () => {
+    writeFileSync(join(root, 'a.jsonl'), '1\n');
+    writeFileSync(join(root, 'b.txt'), '1\n');
+    writeFileSync(join(root, 'c.json'), '1\n');
+    const scans: Scan[] = [];
+    const emitted: string[] = [];
+    const fw = fakeWatch();
+    const rw = new RecursiveDirWatcher({ depth: 2, watchFn: fw.watchFn, filter: (p) => p.endsWith('.jsonl'), onScan: (x) => scans.push(x) });
+    rw.on('add', (p: string) => emitted.push(p));
+    rw.on('change', (p: string) => emitted.push(p));
+    rw.add(root);
+    await waitFor(() => scans.length === 1);
+    fw.fire('b.txt');
+    await new Promise((r) => setTimeout(r, 100));
+    expect(emitted).toEqual([join(root, 'a.jsonl')]);
+    expect(scans[0].files).toBe(1);
+    await rw.close();
+  });
+
+  it('overflow storms coalesce: at most one full rescan runs per root, plus one follow-up', async () => {
+    for (let i = 0; i < 200; i++) writeFileSync(join(root, `f${i}.jsonl`), '1\n');
+    const scans: Scan[] = [];
+    const fw = fakeWatch();
+    const rw = new RecursiveDirWatcher({ depth: 2, watchFn: fw.watchFn, onScan: (x) => scans.push(x) });
+    rw.add(root);
+    await waitFor(() => scans.length === 1);
+    for (let i = 0; i < 10; i++) fw.fire(null);
+    await waitFor(() => scans.length >= 3);
+    await new Promise((r) => setTimeout(r, 150));
+    const overflows = scans.filter((x) => x.reason === 'overflow');
+    expect(overflows).toHaveLength(2);
+    expect(overflows[0].coalesced).toBe(1);
+    expect(overflows[1].coalesced).toBe(9);
+    await rw.close();
+  });
+});

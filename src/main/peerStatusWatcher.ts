@@ -65,7 +65,7 @@ export class PeerStatusWatcher extends EventEmitter {
     if (this.watcher) return;
     // depth 0: <pid>.json sit directly in sessions/, which keeps every stale one.
     this.watcher = this.nativeRecursive
-      ? new RecursiveDirWatcher({ depth: 0, onScan: recordScanSpans('peer') })
+      ? new RecursiveDirWatcher({ depth: 0, filter: (p) => extname(p) === '.json', onScan: recordScanSpans('peer') })
       : (await import('chokidar')).watch([], { depth: 0, ignoreInitial: false, persistent: true });
     this.wireHandlers(this.watcher);
   }

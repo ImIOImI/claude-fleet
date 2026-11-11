@@ -325,7 +325,7 @@ export class JsonlWatcher extends EventEmitter {
     // last newline byte and rolling the offset forward only past complete
     // lines. Lower latency this way.
     this.watcher = this.nativeRecursive
-      ? new RecursiveDirWatcher({ depth: 2, onScan: recordScanSpans('jsonl') })
+      ? new RecursiveDirWatcher({ depth: 2, filter: (p) => extname(p) === '.jsonl', onScan: recordScanSpans('jsonl') })
       : (await import('chokidar')).watch([], { depth: 2, ignoreInitial: false, persistent: true });
     this.wireHandlers(this.watcher);
     for (const name of workspaceIds) {
