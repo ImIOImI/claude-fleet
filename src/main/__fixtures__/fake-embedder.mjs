@@ -1,11 +1,15 @@
 // Protocol-speaking stand-in for fleet-embedder (embedderClient.test.ts).
 // FAKE_MODE: ok | crash-on-first | fatal | never-ready | hang | error-reply |
-// short-reply | stderr-split | old-protocol | slow.
+// short-reply | stderr-split | old-protocol | slow | ignore-eof | ignore-term.
+// FAKE_PID_FILE: if set, the child writes its pid there.
 // FAKE_STATE: a file whose existence marks "already crashed once"; in slow mode,
 // written when a request arrives, which is answered FAKE_DELAY_MS later.
 import { existsSync, writeFileSync } from 'node:fs';
 
 const mode = process.env.FAKE_MODE ?? 'ok';
+if (process.env.FAKE_PID_FILE) writeFileSync(process.env.FAKE_PID_FILE, String(process.pid));
+if (mode === 'ignore-term') process.on('SIGTERM', () => {});
+const ignoreEof = mode === 'ignore-eof' || mode === 'ignore-term';
 const DIM = 384;
 const frame = (o) => {
   const b = Buffer.from(JSON.stringify(o));
@@ -47,4 +51,5 @@ process.stdin.on('data', (d) => {
     } else process.stdout.write(reply);
   }
 });
-process.stdin.on('end', () => process.exit(0));
+process.stdin.on('end', () => { if (!ignoreEof) process.exit(0); });
+if (ignoreEof) setInterval(() => {}, 1000);

@@ -1,19 +1,22 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { EmbedderClient, EmbedderUnavailable, FrameDecoder, encodeFrame } from './embedderClient.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { EmbedderClient, EmbedderUnavailable, FrameDecoder, directSpawner, encodeFrame, type SidecarSpawner } from './embedderClient.js';
+import { makeWorkerSpawner } from './embedderSpawnWorker.js';
+import { waitForState } from './__fixtures__/procState.js';
 
 const FAKE = fileURLToPath(new URL('./__fixtures__/fake-embedder.mjs', import.meta.url));
 const clients: EmbedderClient[] = [];
+let spawner: SidecarSpawner = directSpawner;
 
 function client(mode: string, extra: Partial<ConstructorParameters<typeof EmbedderClient>[0]> = {}) {
   process.env.FAKE_MODE = mode;
   process.env.FAKE_STATE = join(mkdtempSync(join(tmpdir(), 'fake-emb-')), 'crashed');
   const onFatal = vi.fn();
   const logs: string[] = [];
-  const c = new EmbedderClient({ bin: process.execPath, args: [FAKE], onFatal, log: (m) => logs.push(m), ...extra });
+  const c = new EmbedderClient({ bin: process.execPath, args: [FAKE], onFatal, log: (m) => logs.push(m), spawner, ...extra });
   clients.push(c);
   return { c, onFatal, logs };
 }
@@ -30,7 +33,12 @@ describe('frames', () => {
   });
 });
 
-describe('EmbedderClient', () => {
+describe.each([
+  ['direct', directSpawner],
+  ['worker', makeWorkerSpawner()],
+] as const)('EmbedderClient (%s spawn)', (_name, s) => {
+  beforeEach(() => { spawner = s; });
+
   it('returns one 384-d Float32Array per text', async () => {
     const { c } = client('ok');
     const out = await c.embed(['a', 'abc']);
@@ -100,7 +108,7 @@ describe('EmbedderClient', () => {
 
   it('rejects a missing binary as a failure, then gives up', async () => {
     const onFatal = vi.fn();
-    const c = new EmbedderClient({ bin: '/nonexistent/fleet-embedder', args: [], onFatal, log: () => {} });
+    const c = new EmbedderClient({ bin: '/nonexistent/fleet-embedder', args: [], onFatal, log: () => {}, spawner });
     clients.push(c);
     await expect(c.embed(['x'])).rejects.toBeInstanceOf(Error);
     await expect(c.embed(['x'])).rejects.toBeInstanceOf(EmbedderUnavailable);
@@ -117,6 +125,24 @@ describe('EmbedderClient', () => {
     await c.embed(['a']);
     await new Promise((r) => setTimeout(r, 300));
     expect(logs).toEqual(['fleet-embedder stderr: first half', 'fleet-embedder stderr: second']);
+  });
+
+  it.each([
+    ['closing stdin', 'ok'],
+    ['SIGTERM after the grace period', 'ignore-eof'],
+    ['SIGKILL after twice the grace period', 'ignore-term'],
+  ])('dispose stops the child by %s', async (_how, mode) => {
+    const pidFile = join(mkdtempSync(join(tmpdir(), 'fake-emb-')), 'pid');
+    process.env.FAKE_PID_FILE = pidFile;
+    try {
+      const { c } = client(mode, { disposeGraceMs: 150 });
+      await c.embed(['a']);
+      const pid = Number(readFileSync(pidFile, 'utf8'));
+      c.dispose();
+      expect(await waitForState(pid, 'gone', 2_000)).toBe('gone');
+    } finally {
+      delete process.env.FAKE_PID_FILE;
+    }
   });
 
   it('spawns with the given env instead of inheriting, and exposes the pid', async () => {

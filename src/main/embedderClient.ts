@@ -1,6 +1,6 @@
 // Host side of the fleet-embedder sidecar (embedder/README.md): lazy spawn,
 // one request in flight, restart with backoff, crash-loop detection.
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { EMBED_DIM } from './vectors.js';
 
 /** Thrown once the sidecar is given up on; callers switch to the fallback. */
@@ -58,6 +58,57 @@ export const CRASH_LOOP_WINDOW_MS = 5 * 60_000;
 export const MAX_BACKOFF_MS = 30_000;
 export const REQUEST_TIMEOUT_MS = 120_000;
 const STDERR_LINES_PER_MIN = 20;
+/** dispose(): SIGTERM this long after closing stdin, SIGKILL after twice this. */
+export const DISPOSE_GRACE_MS = 2_000;
+
+/** spawn: the child never existed. child: a runtime error (the child is killed). relay: the owning worker died. */
+export type SidecarErrorKind = 'spawn' | 'child' | 'relay';
+
+const ERROR_LABEL: Record<SidecarErrorKind, string> = {
+  spawn: 'spawn failed',
+  child: 'child error',
+  relay: 'relay worker crashed',
+};
+
+/** The sidecar's stdio and lifecycle, however it was spawned. An error is always followed by one exit. */
+export interface SidecarProcess {
+  /** Undefined until the child exists. */
+  readonly pid: number | undefined;
+  onStdout(cb: (chunk: Buffer) => void): void;
+  onStderr(cb: (chunk: Buffer) => void): void;
+  onError(cb: (kind: SidecarErrorKind, message: string) => void): void;
+  onExit(cb: (code: number | null, signal: string | null) => void): void;
+  write(chunk: Buffer): void;
+  /** Closes stdin; the sidecar exits on EOF. */
+  end(): void;
+  kill(force?: boolean): void;
+}
+
+/** env, when set, replaces the inherited environment. */
+export type SidecarSpawner = (bin: string, args: string[], env?: NodeJS.ProcessEnv) => SidecarProcess;
+
+/** Spawns on the calling thread (CreateProcess blocks it until the child exists). */
+export const directSpawner: SidecarSpawner = (bin, args, env) => {
+  const c = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env });
+  // stdin EPIPE after a crash surfaces here; 'exit' does the bookkeeping.
+  c.stdin!.on('error', () => {});
+  return {
+    get pid() { return c.pid; },
+    onStdout: (cb) => { c.stdout!.on('data', cb); },
+    onStderr: (cb) => { c.stderr!.on('data', cb); },
+    onError: (cb) => {
+      c.on('error', (e) => {
+        const spawned = c.pid !== undefined;
+        if (spawned) c.kill('SIGKILL');
+        cb(spawned ? 'child' : 'spawn', e.message);
+      });
+    },
+    onExit: (cb) => { c.on('exit', cb); },
+    write: (chunk) => { c.stdin!.write(chunk); },
+    end: () => { c.stdin!.end(); },
+    kill: (force) => { c.kill(force ? 'SIGKILL' : 'SIGTERM'); },
+  };
+};
 
 export interface EmbedderClientOptions {
   bin: string;
@@ -71,6 +122,9 @@ export interface EmbedderClientOptions {
   log: (msg: string) => void;
   /** Receives each spawn's ready promise (perf span hook). */
   onSpawn?: (ready: Promise<void>) => void;
+  /** Defaults to directSpawner. */
+  spawner?: SidecarSpawner;
+  disposeGraceMs?: number;
   /** Replaces the inherited environment when set. */
   env?: NodeJS.ProcessEnv;
 }
@@ -86,7 +140,7 @@ type State = 'idle' | 'starting' | 'ready' | 'backoff' | 'dead';
 
 export class EmbedderClient {
   private state: State = 'idle';
-  private child: ChildProcess | null = null;
+  private child: SidecarProcess | null = null;
   private queue: Pending[] = [];
   private inflight: { p: Pending; id: number } | null = null;
   private nextId = 1;
@@ -96,7 +150,7 @@ export class EmbedderClient {
   private stderrWindow = { start: 0, lines: 0 };
   private stderrPartial = '';
   /** Killed but not yet exited: its late output must not settle requests. */
-  private readonly killed = new WeakSet<ChildProcess>();
+  private readonly killed = new WeakSet<SidecarProcess>();
   private readonly timeoutMs: number;
   private readonly readyTimeoutMs: number;
   private readonly now: () => number;
@@ -121,19 +175,26 @@ export class EmbedderClient {
     return this.child?.pid;
   }
 
-  /** Closes stdin; the sidecar exits on EOF. */
+  /** Closes stdin (the sidecar exits on EOF), then escalates to SIGTERM and SIGKILL. */
   dispose(): void {
     const child = this.child;
     this.stop('disposed');
-    child?.stdin?.end();
+    if (!child) return;
+    const grace = this.opts.disposeGraceMs ?? DISPOSE_GRACE_MS;
+    const term = setTimeout(() => child.kill(), grace);
+    const kill = setTimeout(() => child.kill(true), 2 * grace);
+    term.unref?.();
+    kill.unref?.();
+    child.onExit(() => { clearTimeout(term); clearTimeout(kill); });
+    child.end();
   }
 
   private start(): void {
     this.state = 'starting';
     this.lastFatal = '';
-    let child: ChildProcess;
+    let child: SidecarProcess;
     try {
-      child = spawn(this.opts.bin, this.opts.args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: this.opts.env });
+      child = (this.opts.spawner ?? directSpawner)(this.opts.bin, this.opts.args, this.opts.env);
     } catch (e) {
       this.onChildGone(null, `spawn failed: ${String(e)}`);
       return;
@@ -151,14 +212,12 @@ export class EmbedderClient {
       this.kill(child, 'no ready within timeout');
     }, this.readyTimeoutMs);
 
-    child.stdout!.on('data', (chunk: Buffer) => {
+    child.onStdout((chunk) => {
       let msgs: unknown[];
       try { msgs = decoder.push(chunk); } catch (e) { this.kill(child, `protocol error: ${String(e)}`); return; }
       for (const m of msgs) this.onMessage(child, m as Record<string, unknown>, readyResolve);
     });
-    child.stderr!.on('data', (chunk: Buffer) => this.logStderr(chunk.toString('utf8')));
-    // stdin EPIPE after a crash surfaces here; 'exit' does the bookkeeping.
-    child.stdin!.on('error', () => {});
+    child.onStderr((chunk) => this.logStderr(chunk.toString('utf8')));
     let gone = false;
     const onGone = (why: string): void => {
       if (gone) return;
@@ -166,11 +225,11 @@ export class EmbedderClient {
       readyReject(new Error(why));
       this.onChildGone(child, why);
     };
-    child.on('error', (e) => onGone(`spawn error: ${e.message}`));
-    child.on('exit', (code, signal) => onGone(this.lastFatal || `exited code=${code} signal=${signal}`));
+    child.onError((kind, message) => onGone(`${ERROR_LABEL[kind]}: ${message}`));
+    child.onExit((code, signal) => onGone(this.lastFatal || `exited code=${code} signal=${signal}`));
   }
 
-  private onMessage(child: ChildProcess, m: Record<string, unknown>, readyResolve: () => void): void {
+  private onMessage(child: SidecarProcess, m: Record<string, unknown>, readyResolve: () => void): void {
     if (child !== this.child || this.killed.has(child)) return;
     if (m.type === 'ready') {
       if (m.protocol !== EMBEDDER_PROTOCOL) {
@@ -218,10 +277,10 @@ export class EmbedderClient {
     this.inflight = { p, id };
     const child = this.child;
     this.arm(() => this.kill(child, 'request timeout'), this.timeoutMs);
-    child.stdin!.write(encodeFrame({ id, texts: p.texts }));
+    child.write(encodeFrame({ id, texts: p.texts }));
   }
 
-  private onChildGone(child: ChildProcess | null, why: string): void {
+  private onChildGone(child: SidecarProcess | null, why: string): void {
     if (child !== this.child || this.state === 'dead') return;
     this.child = null;
     this.clearTimer();
@@ -258,7 +317,7 @@ export class EmbedderClient {
     for (const p of this.queue.splice(0)) p.reject(err);
   }
 
-  private kill(child: ChildProcess, why: string): void {
+  private kill(child: SidecarProcess, why: string): void {
     this.lastFatal = why;
     this.killed.add(child);
     child.kill();
