@@ -13,7 +13,7 @@ import { EventHub } from './events.js';
 import type { LeaseState } from './lease.js';
 import { createLogger } from './log.js';
 import type { PublishRoute } from './publishRoute.js';
-import { brokerRpcChannels, type RpcChannel } from './rpc.js';
+import { brokerRpcChannels, RpcBusyError, type RpcChannel } from './rpc.js';
 import {
   createHostServer,
   HUB_SHUTDOWN_MS,
@@ -917,6 +917,16 @@ describe('rpc limits', () => {
     release();
     expect((await Promise.all(pending)).map((p) => p.status)).toEqual(Array(MAX_RPC_PER_IDENTITY).fill(200));
     expect((await rpc(r, 'ports:list', [], `${TOKEN}r`)).status).toBe(200);
+  });
+
+  it('a channel that is busy answers 429 with its Retry-After', async () => {
+    const r = await start([['busy:op', { tier: 'read', handle: async () => { throw new RpcBusyError('too many requests; try again shortly', 42); } }]]);
+    const res = await fetch(`${r.url}/rpc/busy:op`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...bearer(`${TOKEN}r`) }, body: '{"args":[]}' });
+    expect(res.status).toBe(429);
+    expect(res.headers.get('retry-after')).toBe('42');
+    expect(await res.json()).toEqual({ ok: false, error: 'too many requests; try again shortly' });
+    const ok = await fetch(`${r.url}/rpc/ports:list`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...bearer(`${TOKEN}r`) }, body: '{"args":[]}' });
+    expect(ok.headers.get('retry-after')).toBeNull();
   });
 });
 

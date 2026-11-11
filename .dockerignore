@@ -83,6 +83,8 @@
 !src/preload/captureSettings.ts
 !src/preload/federation.ts
 !src/preload/sessionOwner.ts
+!src/preload/remoteAutomations.ts
+!src/main/remoteUrl.ts
 !src/main/embedderClient.ts
 !src/main/transcriptIndexCore.ts
 !src/main/publish/protocol.ts

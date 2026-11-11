@@ -80,9 +80,9 @@ describe.skipIf(!isPg)('openHostDb', () => {
     await h.end();
     h = await openHostDb(cfg, { log: quiet });
     const v = await admin(`SELECT version FROM ${schema}.schema_migrations WHERE track = 'host'`);
-    expect(v.rows).toEqual([{ version: '3' }]);
+    expect(v.rows).toEqual([{ version: '4' }]);
     const t = await admin(`SELECT table_name FROM information_schema.tables WHERE table_schema = '${schema}' AND table_name LIKE 'host_%' ORDER BY 1`);
-    expect(t.rows.map((r) => r.table_name)).toEqual(['host_ingest_offsets', 'host_lease', 'host_meta']);
+    expect(t.rows.map((r) => r.table_name)).toEqual(['host_action_requests', 'host_ingest_offsets', 'host_lease', 'host_meta']);
   });
 
   it('sets keepAlive and the host session timeouts on its connections', async () => {
