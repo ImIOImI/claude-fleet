@@ -1642,8 +1642,9 @@ export async function recentToolCallsForSession(sessionId: string, limit = 10): 
   return recentToolCallsQ(kyselyOrThrow(), sessionId, limit);
 }
 
-async function recentToolCallsQ(q: Kysely<StateDb>, sessionId: string, limit: number): Promise<ToolCall[]> {
-  const rows = await q
+// Exported for the EXPLAIN QUERY PLAN pin in dbSessionStats.test.ts.
+export function recentToolCallsQuery(q: Kysely<StateDb>, sessionId: string, limit: number) {
+  return q
     .selectFrom('events as u')
     .leftJoin('events as r', (j) =>
       j
@@ -1659,11 +1660,17 @@ async function recentToolCallsQ(q: Kysely<StateDb>, sessionId: string, limit: nu
       'r.tool_result_is_error as is_error',
     ])
     .where('u.session_id', '=', sessionId)
+    // tool_use blocks only come on assistant lines; the type term lets the
+    // (session_id, type) index walk newest-first and stop at `limit` (#583).
+    .where('u.type', '=', 'assistant')
     .where('u.tool_name', 'is not', null)
     .where('u.tool_use_id', 'is not', null)
     .orderBy('u.id', 'desc')
-    .limit(limit)
-    .execute();
+    .limit(limit);
+}
+
+async function recentToolCallsQ(q: Kysely<StateDb>, sessionId: string, limit: number): Promise<ToolCall[]> {
+  const rows = await recentToolCallsQuery(q, sessionId, limit).execute();
   return rows.map((r) => ({
     name: r.name as string,
     input: r.input,
@@ -2943,9 +2950,32 @@ export interface UnembeddedTurn {
   rawJsonl: string;
 }
 
-/** user/assistant events in a session with no 'turn' embedding for `modelId`. */
+/** user/assistant events in a session with no 'turn' embedding for `modelId`,
+ *  oldest first. Turns are embedded oldest-first, so pending turns are the ones
+ *  after the newest embedded turn (as `sessionsWithPendingTurns` assumes): each
+ *  query walks only that tail instead of every turn in the session (#583). */
 export async function unembeddedTurnEvents(sessionId: string, modelId: string, limit = 200): Promise<UnembeddedTurn[]> {
-  return kyselyOrThrow()
+  const k = kyselyOrThrow();
+  let after = 0;
+  for (const type of ['user', 'assistant'] as const) {
+    const row = await k
+      .selectFrom('events as e')
+      .select('e.id')
+      .where('e.session_id', '=', sessionId)
+      .where('e.type', '=', type)
+      .where(({ exists, selectFrom }) => exists(
+        selectFrom('embeddings as em')
+          .select('em.id')
+          .whereRef('em.ref_event_id', '=', 'e.id')
+          .where('em.kind', '=', 'turn')
+          .where('em.model_id', '=', modelId),
+      ))
+      .orderBy('e.id', 'desc')
+      .limit(1)
+      .executeTakeFirst();
+    if (row && row.id > after) after = row.id;
+  }
+  return k
     .selectFrom('events as e')
     .leftJoin('embeddings as em', (j) =>
       j.onRef('em.ref_event_id', '=', 'e.id').on('em.kind', '=', 'turn').on('em.model_id', '=', modelId),
@@ -2953,6 +2983,7 @@ export async function unembeddedTurnEvents(sessionId: string, modelId: string, l
     .select(['e.id as id', 'e.workspace_id as workspaceId', 'e.ts as ts', 'e.raw_jsonl as raw_jsonl', 'e.raw_z as raw_z'])
     .where('e.session_id', '=', sessionId)
     .where('e.type', 'in', ['user', 'assistant'])
+    .where('e.id', '>', after)
     .where('em.id', 'is', null)
     .orderBy('e.id', 'asc')
     .limit(limit)

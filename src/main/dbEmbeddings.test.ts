@@ -42,6 +42,40 @@ describe('embeddings schema + helpers', () => {
     expect((await unembeddedTurnEvents(SES, EMBED_MODEL_ID)).length).toBe(0);
   });
 
+  it('reads only the turns after the newest embedded one, oldest first, across user and assistant (#583)', async () => {
+    const assistantLine = (id: string, text: string) => JSON.stringify({
+      type: 'assistant', uuid: id, timestamp: '2026-07-01T00:00:00Z', message: { model: 'm', content: [{ type: 'text', text }] },
+    });
+    await ingestLine(WS, SES, userLine('u1', 'one'));
+    await ingestLine(WS, SES, assistantLine('a2', 'two'));
+    await ingestLine(WS, SES, userLine('u3', 'three'));
+    const all = await unembeddedTurnEvents(SES, EMBED_MODEL_ID);
+    expect(all.map((e) => e.rawJsonl.includes('two'))).toEqual([false, true, false]);
+    const embed = (ev: (typeof all)[number]) => ({
+      workspaceId: WS, sessionId: SES, kind: 'turn' as const, refEventId: ev.id,
+      ts: ev.ts, text: 'x', modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec: encodeVector(unitVec()), dedupKey: `t${ev.id}`,
+    });
+    // The assistant turn is the newest embedded one: only the user turn after it is pending.
+    await insertEmbeddings([embed(all[0]), embed(all[1])]);
+    await ingestLine(WS, SES, assistantLine('a4', 'four'));
+    const tail = await unembeddedTurnEvents(SES, EMBED_MODEL_ID);
+    expect(tail.map((e) => e.id)).toEqual([all[2].id, tail[1].id]);
+    expect(tail[1].rawJsonl).toContain('four');
+    expect((await unembeddedTurnEvents(SES, EMBED_MODEL_ID, 1)).map((e) => e.id)).toEqual([all[2].id]);
+    // Another model's embeddings don't move the boundary.
+    expect(await unembeddedTurnEvents(SES, 'other-model')).toHaveLength(4);
+  });
+
+  it.skipIf(isPg)('the pending-turns boundary walks idx_events_session_type newest-first with no sort (#583)', async () => {
+    const plan = await withRawSqlite((d) => (d.prepare(`EXPLAIN QUERY PLAN
+      SELECT e.id FROM events e WHERE e.session_id = ? AND e.type = ?
+        AND EXISTS (SELECT em.id FROM embeddings em WHERE em.ref_event_id = e.id AND em.kind = 'turn' AND em.model_id = ?)
+      ORDER BY e.id DESC LIMIT 1`).all(SES, 'user', EMBED_MODEL_ID) as { detail: string }[]).map((r) => r.detail).join('\n'));
+    expect(plan).toMatch(/idx_events_session_type/);
+    expect(plan).toMatch(/idx_emb_ref_event/);
+    expect(plan).not.toMatch(/TEMP B-TREE/);
+  });
+
   it('maxEventId returns the largest event id for a session', async () => {
     await ingestLine(WS, SES, userLine('u1', 'a'));
     await ingestLine(WS, SES, userLine('u2', 'b'));
