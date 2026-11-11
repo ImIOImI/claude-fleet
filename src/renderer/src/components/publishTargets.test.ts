@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { publishSummary, publishVisibility, togglePublishTarget } from './publishTargets';
+import { publishPayload, publishSummary, publishVisibility, togglePublishTarget, withoutPublish } from './publishTargets';
 
 describe('publish targets', () => {
   it('toggles a target without duplicates', () => {
@@ -15,5 +15,19 @@ describe('publish targets', () => {
   });
   it('states who can see published transcripts', () => {
     expect(publishVisibility('review-bot')).toBe('Visible to everyone with read on review-bot and to its sessions.');
+  });
+
+  it('a manifest write that is not the Edit form carries no publish key', () => {
+    const spec = { id: 'W', name: 'w', publish: { to: ['R'], since: { R: 5 } } };
+    const out = withoutPublish(spec);
+    expect(out).toEqual({ id: 'W', name: 'w' });
+    expect('publish' in out).toBe(false);
+  });
+
+  it('sends publish only when the form has targets state', () => {
+    expect(publishPayload(undefined)).toEqual({});
+    expect('publish' in publishPayload(undefined)).toBe(false);
+    expect(publishPayload([])).toEqual({ publish: { to: [] } });
+    expect(publishPayload(['R'])).toEqual({ publish: { to: ['R'] } });
   });
 });

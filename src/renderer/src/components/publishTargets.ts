@@ -16,3 +16,14 @@ export function publishSummary(to: readonly string[], remotes: ReadonlyArray<{ i
   const names = to.flatMap((id) => remotes.filter((r) => r.id === id).map((r) => r.name));
   return names.length ? `on: ${names.join(', ')}` : 'off';
 }
+
+/** Only the Edit form owns `publish`: other manifest writes omit the key, so main keeps the stored block. */
+export function withoutPublish<T extends object>(spec: T): Omit<T, 'publish'> {
+  const { publish: _drop, ...rest } = spec as T & { publish?: unknown };
+  return rest;
+}
+
+/** `{ publish }` only when the form sent targets (edit mode); otherwise no key at all. */
+export function publishPayload(publishTo: readonly string[] | undefined): { publish?: { to: string[] } } {
+  return publishTo === undefined ? {} : { publish: { to: [...publishTo] } };
+}

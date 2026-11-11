@@ -52,6 +52,7 @@ import type { WorkspacePublish } from '../../preload/publish';
 import { portPopupCopy } from './portToast';
 import { InboxChip } from './components/InboxChip';
 import { InboxView, type InboxSection } from './components/InboxView';
+import { publishPayload } from './components/publishTargets';
 import { isWarm } from './fleetTemperature';
 
 /** The lifecycle IPC surface `applyContainerEdit` needs, bound to `window.api`.
@@ -1347,7 +1348,7 @@ export function App() {
       accessibility: submit.accessibility,
       inbox: submit.inbox,
       knowledgeCapture: submit.knowledgeCapture,
-      publish: { to: submit.publishTo ?? [] },
+      ...publishPayload(submit.publishTo),
       createdAt: before.createdAt,
       lastUsedAt: Date.now()
     });
