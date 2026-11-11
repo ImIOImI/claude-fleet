@@ -13,6 +13,8 @@ export type {
 } from './inboxTypes';
 import type { AccountStatus, SignInStart, SignInPoll } from './identityTypes';
 export type { AccountStatus, AccountIdentity, AccountSso, SignInStart, SignInPoll } from './identityTypes';
+import type { OwnerCostRow, SessionOwner } from './sessionOwner';
+export type { OwnerCostRow, SessionOwner } from './sessionOwner';
 import type { RemoteAddOptions, RemoteLiveSession, RemoteProbe } from './remoteTypes';
 import type { StoreChoice, StoreSettings, StoreStatus } from './storeTypes';
 import type { FederatedSearchResult, RemoteSessionsResult, SessionCursor } from './federation';
@@ -90,6 +92,8 @@ export interface SessionListItem {
   capture: boolean;
   /** Absent or 'local' for this desktop's rows; a remote workspace id otherwise. */
   origin?: string;
+  /** Remote rows: who started the session (remote-workspaces (f)); null when the host has no owner for it. */
+  owner?: SessionOwner | null;
 }
 
 /**
@@ -932,6 +936,9 @@ const api = {
       workspaceId: string
     ): Promise<WorkspaceObservabilitySummary | null> =>
       ipcRenderer.invoke('observability:summaryForWorkspace', workspaceId),
+    /** Cost per owner of a remote workspace (`history:owners`); null for a local workspace or an unavailable host. */
+    ownerCosts: (workspaceId: string): Promise<OwnerCostRow[] | null> =>
+      ipcRenderer.invoke('observability:ownerCosts', workspaceId),
     /**
      * Per-tab variant — looks up the claude session UUID mapped to
      * `brokerSessionId` and returns that session's summary. Falls back

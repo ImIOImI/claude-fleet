@@ -4,6 +4,7 @@
 import { oneLine } from '../remoteUrl.js';
 import type { WorkspaceSummary } from '../db.js';
 import type { SessionCursor } from '../../preload/federation.js';
+import { MAX_OWNER_COST_ROWS, parseSessionOwner, type OwnerCostRow, type SessionOwner } from '../../preload/sessionOwner.js';
 
 export class RemoteShapeError extends Error {}
 
@@ -23,6 +24,7 @@ export interface RemoteSessionItem {
   usd: number;
   tags: string[];
   headless: boolean;
+  owner: SessionOwner | null;
 }
 
 const nat = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
@@ -47,7 +49,8 @@ function parseSessionRow(v: unknown, workspaceId: string): RemoteSessionItem | n
   if (aiTitle === undefined || firstUserMessage === undefined || userSetName === undefined || startedAt === undefined || lastActiveAt === undefined) return null;
   if (!nat(r.eventCount) || typeof r.usd !== 'number' || !Number.isFinite(r.usd) || r.usd < 0 || typeof r.headless !== 'boolean' || !Array.isArray(r.tags)) return null;
   const tags = r.tags.filter((t): t is string => typeof t === 'string').slice(0, 20).map((t) => oneLine(t, 64)).filter(Boolean);
-  return { id: r.id, workspaceId, aiTitle, firstUserMessage, userSetName, startedAt, lastActiveAt, eventCount: r.eventCount, usd: r.usd, tags, headless: r.headless };
+  const owner = r.owner === undefined || r.owner === null ? null : parseSessionOwner(r.owner);
+  return { id: r.id, workspaceId, aiTitle, firstUserMessage, userSetName, startedAt, lastActiveAt, eventCount: r.eventCount, usd: r.usd, tags, headless: r.headless, owner };
 }
 
 export function parseSessionsPage(v: unknown, workspaceId: string): { rows: RemoteSessionItem[]; next: SessionCursor | null } {
@@ -123,4 +126,19 @@ export function parseSearchReply(v: unknown, workspaceId: string): { modelId: st
     hits.push({ sessionId: h.sessionId, workspaceId, kind: h.kind, ts, text: h.text.replace(/[\x00-\x08\x0b-\x1f\x7f\p{Cf}]/gu, ' ').slice(0, MAX_HIT_TEXT), score: h.score });
   }
   return { modelId: oneLine(o.modelId, 128), hits };
+}
+
+/** `history:owners`. A row with a malformed owner is dropped rather than shown as unattributed. */
+export function parseOwnerCosts(v: unknown): OwnerCostRow[] {
+  const o = v as { rows?: unknown } | null;
+  if (!o || typeof o !== 'object' || !Array.isArray(o.rows) || o.rows.length > MAX_OWNER_COST_ROWS) return fail('owner costs');
+  const out: OwnerCostRow[] = [];
+  for (const raw of o.rows) {
+    const r = raw as Record<string, unknown> | null;
+    if (!r || typeof r !== 'object' || !nat(r.sessions) || !nonNeg(r.usd)) continue;
+    const owner = r.owner === null ? null : parseSessionOwner(r.owner);
+    if (r.owner !== null && !owner) continue;
+    out.push({ owner, sessions: r.sessions, usd: r.usd });
+  }
+  return out;
 }

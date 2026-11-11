@@ -6,7 +6,8 @@ import type { RemoteSourceInfo } from '../remote.js';
 import type { WorkspaceSummary } from '../db.js';
 import type { RemoteSessionsResult, SearchHitItem, SessionCursor, SourcePage, UnavailableReason, UnavailableSource } from '../../preload/federation.js';
 import { EMBED_MODEL_ID } from '../vectors.js';
-import { MAX_REMOTE_SESSIONS, parseSearchReply, parseSessionsPage, parseSummary, type RemoteSessionItem } from './remoteRows.js';
+import { MAX_REMOTE_SESSIONS, parseOwnerCosts, parseSearchReply, parseSessionsPage, parseSummary, type RemoteSessionItem } from './remoteRows.js';
+import type { OwnerCostRow } from '../../preload/sessionOwner.js';
 
 export const SOURCE_TIMEOUT_MS = 3_000;
 
@@ -30,6 +31,8 @@ export interface FederatedReader {
   listSessions(req: { origin?: string; after?: SessionCursor }): Promise<RemoteSessionsResult<RemoteListItem>>;
   /** undefined: the host is unknown or unavailable. */
   summary(remoteId: string, sessionId: string | null): Promise<WorkspaceSummary | null | undefined>;
+  /** undefined: the host is unknown or unavailable. */
+  ownerCosts(remoteId: string): Promise<OwnerCostRow[] | undefined>;
   call<T>(src: RemoteSourceInfo, channel: string, args: unknown[], parse: (v: unknown) => T): Promise<Outcome<T>>;
   sources(): RemoteSourceInfo[];
   /** Sends only the query vector, to `origins` only (D67). */
@@ -124,6 +127,12 @@ export function createFederatedReader(d: FederatedReaderDeps): FederatedReader {
       const s = d.sources().find((x) => x.id === remoteId);
       if (!s) return undefined;
       const r = await call(s, 'history:summary', [sessionId], parseSummary);
+      return r.ok ? r.value : undefined;
+    },
+    async ownerCosts(remoteId) {
+      const s = d.sources().find((x) => x.id === remoteId);
+      if (!s) return undefined;
+      const r = await call(s, 'history:owners', [], parseOwnerCosts);
       return r.ok ? r.value : undefined;
     }
   };

@@ -3,6 +3,7 @@
 // history:search: local and remote transcript search merged by score (D64, D67).
 import type { IpcMain } from 'electron';
 import { LOCAL_ORIGIN, type FederatedSearchResult, type SearchHitItem, type SessionCursor } from '../../preload/federation.js';
+import type { OwnerCostRow } from '../../preload/sessionOwner.js';
 import type { FederatedReader } from './federatedReader.js';
 import { mergeHits } from './searchMerge.js';
 
@@ -31,6 +32,10 @@ export interface LocalSearch {
 
 export function registerFederationIpc(ipc: Pick<IpcMain, 'handle'>, reader: FederatedReader, search: LocalSearch): void {
   ipc.handle('sessions:listRemote', async (_e, req: unknown) => reader.listSessions(parseReq(req)));
+  ipc.handle('observability:ownerCosts', async (_e, id: unknown): Promise<OwnerCostRow[] | null> => {
+    if (typeof id !== 'string' || !REMOTE_ID_RE.test(id)) throw new Error('workspaceId must be a workspace id');
+    return (await reader.ownerCosts(id)) ?? null;
+  });
   ipc.handle('history:search', async (_e, query: unknown, opts: unknown): Promise<FederatedSearchResult> => {
     if (typeof query !== 'string' || !query.trim() || query.length > 2000) throw new Error('query must be 1-2000 characters');
     const o = (opts ?? {}) as { scope?: unknown; limit?: unknown };

@@ -20,9 +20,31 @@ describe('FederatedReader', () => {
     });
     const r = createFederatedReader({ sources: () => [src(A, 'running'), src(B, 'running'), src(C, 'unreachable')], rpc });
     const out = await r.listSessions({});
-    expect(out.pages).toEqual([{ origin: A, next: null, rows: [{ ...row('s1', A), workspaceName: 'n0', workspaceColorHue: 10, workspaceState: 'running', capture: false, origin: A }] }]);
+    expect(out.pages).toEqual([{ origin: A, next: null, rows: [{ ...row('s1', A), owner: null, workspaceName: 'n0', workspaceColorHue: 10, workspaceState: 'running', capture: false, origin: A }] }]);
     expect(out.unavailable).toEqual([{ origin: B, name: 'n1', reason: 'forbidden' }, { origin: C, name: 'n2', reason: 'unreachable' }]);
     expect(rpc).toHaveBeenCalledTimes(2);
+  });
+
+  it('ownerCosts asks only that host, validates, and answers undefined when it is unknown or down', async () => {
+    const rpc = vi.fn(async (url: string, channel: string, args: unknown[]) => {
+      if (url !== `http://${A}`) throw new RemoteError('forbidden', 'no grant', 403);
+      expect([channel, args]).toEqual(['history:owners', []]);
+      return { rows: [{ owner: null, sessions: 1, usd: 2 }] };
+    });
+    const r = createFederatedReader({ sources: () => [src(A, 'running'), src(B, 'running'), src(C, 'unreachable')], rpc });
+    expect(await r.ownerCosts(A)).toEqual([{ owner: null, sessions: 1, usd: 2 }]);
+    expect(await r.ownerCosts(B)).toBeUndefined();
+    expect(await r.ownerCosts(C)).toBeUndefined();
+    expect(await r.ownerCosts('01JC0000000000000000000009')).toBeUndefined();
+    expect(rpc).toHaveBeenCalledTimes(2);
+  });
+
+  it('ownerCosts re-validates the host reply: drops a bad row, and a bad envelope reads as unavailable', async () => {
+    let reply: unknown = { rows: [{ owner: null, sessions: 1, usd: 2 }, { owner: { kind: 'user', provider: 'github', id: 'x', login: 'a' }, sessions: 1, usd: 1 }] };
+    const r = createFederatedReader({ sources: () => [src(A, 'running')], rpc: async () => reply });
+    expect(await r.ownerCosts(A)).toEqual([{ owner: null, sessions: 1, usd: 2 }]);
+    reply = { rows: Array(101).fill({ owner: null, sessions: 1, usd: 1 }) };
+    expect(await r.ownerCosts(A)).toBeUndefined();
   });
 
   it('bounds a hanging host at the timeout', async () => {

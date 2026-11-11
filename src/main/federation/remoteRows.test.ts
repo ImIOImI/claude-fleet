@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_SEARCH_HITS, parseSearchReply, parseSessionsPage, parseSummary, RemoteShapeError } from './remoteRows';
+import { MAX_SEARCH_HITS, parseOwnerCosts, parseSearchReply, parseSessionsPage, parseSummary, RemoteShapeError } from './remoteRows';
 
 const W = '01JC0000000000000000000000';
 const good = { id: 's1', workspaceId: W, aiTitle: 'T\u202eitle', firstUserMessage: 'x'.repeat(900), userSetName: null, startedAt: 1, lastActiveAt: 2, eventCount: 3, usd: 0.5, tags: ['a', 7], headless: false };
@@ -150,5 +150,45 @@ describe('parseSearchReply', () => {
     expect(() => parseSearchReply(null, W)).toThrow(RemoteShapeError);
     expect(() => parseSearchReply({ modelId: 'm', hits: Array(MAX_SEARCH_HITS + 1).fill(hit) }, W)).toThrow(RemoteShapeError);
     expect(parseSearchReply({ modelId: 'm', hits: Array(MAX_SEARCH_HITS).fill(hit) }, W).hits).toHaveLength(MAX_SEARCH_HITS);
+  });
+});
+
+const ann = { kind: 'user', provider: 'github', id: '7', login: 'ann', name: 'Ann', avatarUrl: 'https://avatars.githubusercontent.com/u/7?v=4' };
+
+describe('owners on remote rows', () => {
+  it('keeps a valid owner; a missing, malformed or hostile one becomes null or is cleaned, and the row stays', () => {
+    const p = parseSessionsPage({
+      rows: [
+        { ...good, id: 'a', owner: ann },
+        { ...good, id: 'b' },
+        { ...good, id: 'c', owner: { ...ann, login: '-x' } },
+        { ...good, id: 'd', owner: { ...ann, name: '<img src=x onerror=alert(1)>\u202e', avatarUrl: 'https://evil.io/a.png', extra: 1 } }
+      ],
+      next: null
+    }, W);
+    expect(p.rows.map((r) => [r.id, r.owner])).toEqual([
+      ['a', ann],
+      ['b', null],
+      ['c', null],
+      ['d', { ...ann, name: '<img src=x onerror=alert(1)>', avatarUrl: null }]
+    ]);
+  });
+});
+
+describe('parseOwnerCosts', () => {
+  it('keeps valid rows, drops bad ones, and refuses a bad or oversized envelope', () => {
+    expect(parseOwnerCosts({
+      rows: [
+        { owner: ann, sessions: 2, usd: 1.5 },
+        { owner: null, sessions: 1, usd: 0 },
+        { owner: { ...ann, id: 'x' }, sessions: 1, usd: 1 },
+        { owner: null, sessions: -1, usd: 1 },
+        { owner: null, sessions: 1, usd: Infinity },
+        'junk'
+      ]
+    })).toEqual([{ owner: ann, sessions: 2, usd: 1.5 }, { owner: null, sessions: 1, usd: 0 }]);
+    expect(() => parseOwnerCosts({ rows: Array(101).fill({ owner: null, sessions: 1, usd: 1 }) })).toThrow(RemoteShapeError);
+    expect(() => parseOwnerCosts(null)).toThrow(RemoteShapeError);
+    expect(() => parseOwnerCosts({ rows: 'x' })).toThrow(RemoteShapeError);
   });
 });
