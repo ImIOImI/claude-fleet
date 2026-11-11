@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { FrameType, MAX_FRAME_PAYLOAD, encodeChannelData, encodeFrame } from '../main/broker.js';
 import type { Tier } from '../main/identity/grants.js';
 import { AttachHub, MAX_PENDING_BYTES, MAX_PENDING_FRAMES, ReplayBuffer, trimToSafeStart, type AttachHubOptions } from './attachHub.js';
-import type { OwnerClaim } from './sessionOwners.js';
+import { sessionSettings } from './attribution.js';
+import { ownerOfIdentity, type OwnerClaim } from './sessionOwners.js';
 import { createLogger } from './log.js';
 import { RUNNER_HOOK_SETTINGS } from '../main/claudeArgs.js';
 import { fakeBroker, inputFrame, jsonFrame, person, resizeFrame, sinkRecorder } from './testFakes.js';
@@ -15,7 +16,7 @@ const UUID2 = '1c8e7d2f-2a7b-4d66-8d4a-7a2a9e7d3b22';
 const V1 = 'a8098c1a-f86e-11da-bd1a-00112444be1e';
 const PINNED = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 /** The `--settings` value a CREATE by alice carries. */
-const SETTINGS_ARG = RUNNER_HOOK_SETTINGS;
+const SETTINGS_ARG = sessionSettings(ownerOfIdentity(alice))!;
 
 function setup(tier: Tier, sessions = ['s1'], who = alice) {
   const broker = fakeBroker(sessions);
@@ -192,6 +193,26 @@ describe('CREATE args', () => {
     await v.receive(jsonFrame(FrameType.CREATE, { id: 'n', args }));
     expect(broker.created).toEqual([]);
     expect(last(rec).json).toMatchObject({ ok: false, error: 'forbidden: unsupported create args' });
+  });
+
+  it('each CREATE carries its own caller’s attribution; machines keep the hooks file', async () => {
+    const broker = fakeBroker([]);
+    const hub = new AttachHub(broker.ops);
+    const robot = { ...person('acme-bot[bot]', 9), kind: 'machine' as const, appId: 5 };
+    await hub.viewer({ identity: bob, tier: 'session' }, sinkRecorder().sink).receive(jsonFrame(FrameType.CREATE, { id: 'b', args: ['--session-id', UUID] }));
+    await hub.viewer({ identity: robot, tier: 'session' }, sinkRecorder().sink).receive(jsonFrame(FrameType.CREATE, { id: 'm' }));
+    expect(broker.created[0].args.slice(0, 2)).toEqual(['--settings', sessionSettings(ownerOfIdentity(bob))]);
+    expect(JSON.parse(broker.created[0].args[1]).attribution.pr).toBe('🤖 Generated with [Claude Code](https://claude.com/claude-code) on behalf of @bob');
+    expect(broker.created[1].args.slice(0, 2)).toEqual(['--settings', RUNNER_HOOK_SETTINGS]);
+    for (const c of broker.created) expect(c.args.filter((a) => a === '--settings'), c.id).toHaveLength(1);
+  });
+
+  it('a body-supplied name or login never reaches the attribution', async () => {
+    const { broker, v } = setup('session', []);
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'n', name: 'Mallory', login: 'mallory', attribution: { commit: 'x', pr: 'y' } }));
+    const s = JSON.parse(broker.created[0].args[1]);
+    expect(s.attribution.pr).toMatch(/on behalf of @alice$/);
+    expect(JSON.stringify(s)).not.toMatch(/mallory|Mallory/);
   });
 
   it('appends createArgs after the gate', async () => {

@@ -17,6 +17,7 @@ import { portKillRefusal, type BrokerOps, type Upstream } from './brokerOps.js';
 import type { Logger } from './log.js';
 import { CLIENT_FRAME_TIER, RESPONSE_OF, V4_UUID_RE, decodeResize, hostCreateArgs, validSessionId } from './frameGate.js';
 import { ownerOfIdentity, type OwnerClaim } from './sessionOwners.js';
+import { withAttribution } from './attribution.js';
 
 /** Matches the broker's per-session ring. */
 export const REPLAY_BYTES = 64 * 1024;
@@ -539,7 +540,7 @@ export class Viewer {
       this.hub.log?.log('error', 'session owner not recorded', { id, error: err });
       return refused();
     }
-    const args = this.hub.createArgs(gated.args);
+    const args = this.hub.createArgs(withAttribution(gated.args, claim.owner));
     const r = await this.hub.ops.create(id, dim(req.cols, 80), dim(req.rows, 24), args);
     if (r.ok) this.hub.setOwner(id, ownerKey(this.principal.identity));
     else if (recorded) {
