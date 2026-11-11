@@ -218,12 +218,17 @@ describe('host path guards', () => {
     ).resolves.toHaveLength(1);
   });
 
-  it('rejects UNC and network paths without touching the filesystem', async () => {
+  it('rejects network paths, and every UNC path off Windows, without touching the filesystem', async () => {
     const msg =
-      'Mount 1: network and WSL paths (\\\\server\\… or \\\\wsl.localhost\\…) can\'t be mounted. Use a local drive path.';
+      "Mount 1: network paths (\\\\server\\share) can't be mounted. Use a local drive or a WSL path (\\\\wsl$\\<distro>\\…).";
     for (const hostPath of ['\\\\wsl.localhost\\Ubuntu\\home', '\\\\server\\share', '//server/share']) {
       await expect(
-        validateExtraMounts([{ hostPath, containerPath: '/mnt/x', readOnly: false }], ctx)
+        validateExtraMounts([{ hostPath, containerPath: '/mnt/x', readOnly: false }], { ...ctx, platform: 'linux' })
+      ).rejects.toThrow(msg);
+    }
+    for (const hostPath of ['\\\\server\\share\\x', '//server/share']) {
+      await expect(
+        validateExtraMounts([{ hostPath, containerPath: '/mnt/x', readOnly: false }], { ...ctx, platform: 'win32' })
       ).rejects.toThrow(msg);
     }
   });
@@ -372,5 +377,95 @@ describe('mountsForWrite', () => {
   it('clears mounts when none come in', async () => {
     expect(await mountsForWrite(undefined, [{ hostPath: data, containerPath: '/mnt/d', readOnly: false }], ctx)).toBeUndefined();
     expect(await mountsForWrite(undefined, undefined, ctx)).toBeUndefined();
+  });
+});
+
+describe('WSL sources (Windows)', () => {
+  const winCtx = (resolve: (distro: string, p: string) => Promise<string | null>): MountCtx => ({
+    ...ctx,
+    platform: 'win32',
+    wslRealDir: resolve
+  });
+  const one = (hostPath: string) => [{ hostPath, containerPath: '/mnt/x', readOnly: false }];
+
+  it('accepts a WSL folder and hands Docker the \\\\wsl$ form of its in-distro realpath', async () => {
+    const calls: Array<[string, string]> = [];
+    const c = winCtx(async (d, p) => {
+      calls.push([d, p]);
+      return '/home/troy/proj';
+    });
+    const host = '\\\\wsl.localhost\\Ubuntu\\home\\troy\\proj';
+    expect(await validateExtraMounts(one(host), c)).toEqual(one(host));
+    expect(await toDockerMounts(one(host), c)).toEqual([
+      { Type: 'bind', Source: '\\\\wsl$\\Ubuntu\\home\\troy\\proj', Target: '/mnt/x', ReadOnly: false }
+    ]);
+    expect(calls).toEqual([
+      ['Ubuntu', '/home/troy/proj'],
+      ['Ubuntu', '/home/troy/proj']
+    ]);
+  });
+
+  it('refuses a WSL symlink into a Windows drive', async () => {
+    await expect(
+      validateExtraMounts(one('\\\\wsl$\\Ubuntu\\home\\troy\\link'), winCtx(async () => '/mnt/c/Users/x/AppData'))
+    ).rejects.toThrow(
+      "Mount 1: that's a Windows drive or Docker Desktop folder inside WSL. Use the C:\\… path instead."
+    );
+  });
+
+  it.each([
+    ['/', 'that folder contains system or Docker folders and can\'t be mounted.'],
+    ['/home', 'that folder contains system or Docker folders and can\'t be mounted.'],
+    ['/var', 'that folder contains system or Docker folders and can\'t be mounted.'],
+    ['/mnt', "that's a Windows drive or Docker Desktop folder inside WSL. Use the C:\\… path instead."],
+    ['/mnt/wsl/docker-desktop', "that's a Windows drive or Docker Desktop folder inside WSL. Use the C:\\… path instead."],
+    ['/run/user/1000', "that's a system folder and can't be mounted."],
+    ['/proc', "that's a system folder and can't be mounted."],
+    ['/var/run/x', "that's a system folder and can't be mounted."],
+    ['/home/troy', "that's a whole home folder (it holds .claude and .docker). Mount a folder inside it."],
+    ['/root', "that's a whole home folder (it holds .claude and .docker). Mount a folder inside it."],
+    ['/home/troy/.docker/x', "that folder holds Docker's settings and can't be mounted."],
+    ['/srv/.docker', "that folder holds Docker's settings and can't be mounted."]
+  ])('refuses in-distro %s', async (real, msg) => {
+    await expect(validateExtraMounts(one('\\\\wsl$\\Ubuntu\\x'), winCtx(async () => real))).rejects.toThrow(
+      `Mount 1: ${msg}`
+    );
+  });
+
+  it('allows ordinary folders, including inside /root and /home/<user>', async () => {
+    for (const real of ['/root/proj', '/home/troy/proj/sub', '/srv/data', '/var/lib/x']) {
+      await expect(validateExtraMounts(one('\\\\wsl$\\Ubuntu\\x'), winCtx(async () => real))).resolves.toHaveLength(1);
+    }
+  });
+
+  it('reports a missing WSL folder', async () => {
+    const host = '\\\\wsl$\\Ubuntu\\gone';
+    await expect(validateExtraMounts(one(host), winCtx(async () => null))).rejects.toThrow(
+      `Mount 1: ${host} doesn't exist or isn't a folder.`
+    );
+    await expect(toDockerMounts(one(host), winCtx(async () => null))).rejects.toThrow(`extra mount ${host} no longer exists`);
+  });
+
+  it('revalidates at create time: a WSL folder re-pointed into /mnt is rejected', async () => {
+    const host = '\\\\wsl$\\Ubuntu\\home\\troy\\link';
+    let target = '/home/troy/proj';
+    const c = winCtx(async () => target);
+    await expect(validateExtraMounts(one(host), c)).resolves.toHaveLength(1);
+    target = '/mnt/c/Users/x/AppData';
+    await expect(toDockerMounts(one(host), c)).rejects.toThrow(`extra mount ${host} now points somewhere that can't be mounted`);
+  });
+
+  it('refuses an unsafe distro name without calling the resolver', async () => {
+    let called = false;
+    await expect(
+      validateExtraMounts(
+        one('\\\\wsl$\\Ub untu\\home\\troy\\proj'),
+        winCtx(async () => {
+          called = true;
+          return '/home/troy/proj';
+        })
+      )
+    ).rejects.toThrow('Mount 1: "Ub untu" isn\'t a WSL distro name that can be mounted.');
+    expect(called).toBe(false);
   });
 });

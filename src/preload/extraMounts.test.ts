@@ -11,6 +11,9 @@ describe('defaultContainerPath', () => {
   it('uses the basename of a Windows path', () => {
     expect(defaultContainerPath('C:\\Users\\troy\\src\\tofumate')).toBe('/mnt/tofumate');
   });
+  it('uses the basename of a WSL path', () => {
+    expect(defaultContainerPath('\\\\wsl$\\Ubuntu\\home\\troy\\proj')).toBe('/mnt/proj');
+  });
   it('uses the basename of a POSIX path and ignores a trailing slash', () => {
     expect(defaultContainerPath('/home/troy/data/')).toBe('/mnt/data');
   });
