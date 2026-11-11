@@ -3,10 +3,10 @@ import { sql } from 'kysely';
 import * as db from '../main/db.js';
 import { migratePostgres } from '../main/store/pgMigrate.js';
 import { postgresKysely } from '../main/store/postgres.js';
-import { isPg, openTestState, type TestState } from '../main/store/testStore.js';
+import { isPg, openTestState, pgMultiConnection, type TestState } from '../main/store/testStore.js';
 import { partitionIdFor, publishedSessionId, PUBLISH_MAX_LINES } from '../main/publish/protocol.js';
 import { makeScrubber, type ScrubbedLine } from '../main/publish/scrub.js';
-import { EMBED_DIM } from '../main/vectors.js';
+import { EMBED_DIM, EMBED_MODEL_ID } from '../main/vectors.js';
 import { HOST_TRACK } from './hostSchema.js';
 import { startHostIndexer } from './hostIndexer.js';
 import { hostUsageRecorder } from './hostMcp.js';
@@ -180,6 +180,48 @@ describe.skipIf(!isPg)('publishStore', () => {
     expect((await st!.pg!.pool.query(`SELECT session_id FROM ${st!.pg!.schema}.publish_sessions`)).rows).toEqual([{ session_id: theirs.sessionId }]);
     expect(await db.eventsForSession(theirs.sessionId)).toHaveLength(1);
     expect(await s.unpublish(ANN, SID)).toBe(0);
+  });
+
+  it('an unpublish committed while the indexer embeds leaves no embeddings and no search hits', async () => {
+    const unit = (): Float32Array => new Float32Array(EMBED_DIM).fill(1 / Math.sqrt(EMBED_DIM));
+    let entered!: () => void;
+    const embedding = new Promise<void>((r) => (entered = r));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const ix = startHostIndexer({
+      embed: async (t) => { entered(); await gate; return t.map(unit); },
+      log: createLogger(() => undefined)
+    });
+    const s = await rig({ onIngested: (id) => ix.bump(id) });
+    const pub = await s.ingest(ANN, SRC, SID, [turn('u1', 'user', 'secret words')]);
+    await embedding;
+    expect(await s.unpublish(ANN, SID)).toBe(1);
+    release();
+    await ix.stop(5_000);
+    expect(await count('embeddings')).toBe(0);
+    expect(await db.searchEmbeddings(unit(), [pub.partitionId], { limit: 10 })).toEqual([]);
+  });
+
+  it.skipIf(!pgMultiConnection)('unpublish waits out an embedding insert holding the session row, then removes its rows', async () => {
+    const s = await rig();
+    const pub = await s.ingest(ANN, SRC, SID, [turn('u1', 'user', 'secret words')]);
+    const schema = st!.pg!.schema;
+    const c = await st!.pg!.pool.connect();
+    try {
+      await c.query('BEGIN');
+      expect((await c.query(`SELECT 1 FROM ${schema}.sessions WHERE id = $1 FOR SHARE`, [pub.sessionId])).rowCount).toBe(1);
+      let done = false;
+      const removing = s.unpublish(ANN, SID).then((n) => { done = true; return n; });
+      await new Promise((r) => setTimeout(r, 300));
+      expect(done).toBe(false);
+      await c.query(`INSERT INTO ${schema}.embeddings (workspace_id, session_id, kind, ref_event_id, ts, text, model_id, dim, vec, dedup_key)
+        VALUES ($1, $2, 'turn', NULL, 1, 'secret words', $3, $4, NULL, 'late')`, [pub.partitionId, pub.sessionId, EMBED_MODEL_ID, EMBED_DIM]);
+      await c.query('COMMIT');
+      expect(await removing).toBe(1);
+    } finally {
+      c.release();
+    }
+    expect(await count('embeddings')).toBe(0);
   });
 
   it('unpublish reaches every partition the caller owns and nothing keyed by another id', async () => {

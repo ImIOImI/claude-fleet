@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { publishPayload, publishSummary, publishVisibility, togglePublishTarget, unpublishNote, withoutPublish } from './publishTargets';
+import { publishPayload, publishSummary, publishVisibility, togglePublishTarget, unpublishConfirmText, unpublishNote, withoutPublish } from './publishTargets';
 
 describe('publish targets', () => {
   it('toggles a target without duplicates', () => {
@@ -29,6 +29,13 @@ describe('publish targets', () => {
     expect('publish' in publishPayload(undefined)).toBe(false);
     expect(publishPayload([])).toEqual({ publish: { to: [] } });
     expect(publishPayload(['R'])).toEqual({ publish: { to: ['R'] } });
+  });
+});
+
+describe('unpublishConfirmText', () => {
+  it('names the hosts and says the session is never published again', () => {
+    expect(unpublishConfirmText(['review-bot', 'ops'])).toBe('Remove this session from review-bot, ops? It will never be published again.');
+    expect(unpublishConfirmText([])).toBe('Remove this session from the host? It will never be published again.');
   });
 });
 

@@ -1,5 +1,5 @@
 // Turn-indexing loop with the span injected, so fleet-host can run it without perf.ts.
-import { insertEmbeddings, unembeddedTurnEvents } from './db.js';
+import { insertSessionEmbeddings, unembeddedTurnEvents } from './db.js';
 import { encodeVector, EMBED_MODEL_ID, EMBED_DIM, EMPTY_VECTOR, type EmbedFn } from './vectors.js';
 
 export type SpanAsync = <T>(name: string, fn: () => Promise<T>, attrs?: Record<string, string | number>) => Promise<T>;
@@ -59,21 +59,24 @@ export async function indexSessionTurnsWith(span: SpanAsync, sessionId: string, 
       // Nothing embeddable in this batch (all tool-only/empty). Insert a
       // vectorless placeholder so these rows leave the pending set and the
       // loop terminates; search skips text ''.
-      await insertEmbeddings(pending.map(placeholder));
+      if ((await insertSessionEmbeddings(sessionId, pending.map(placeholder))) === null) break;
       continue;
     }
 
     const vecs = await embed(prepared.map((p) => p.text));
-    total += await insertEmbeddings(
+    // null: the session was deleted while embedding; its rows must not come back.
+    const n = await insertSessionEmbeddings(sessionId,
       prepared.map((p, i) => ({
         workspaceId: p.ev.workspaceId, sessionId, kind: 'turn' as const, refEventId: p.ev.id, ts: p.ev.ts,
         text: p.text, modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
         vec: encodeVector(vecs[i]), dedupKey: `t${p.ev.id}`,
       }))
     );
+    if (n === null) break;
+    total += n;
     // Placeholder-insert the skipped (empty) rows in this batch too, so they
     // don't reappear as pending forever.
-    await insertEmbeddings(pending.filter((ev) => !prepared.some((p) => p.ev.id === ev.id)).map(placeholder));
+    if ((await insertSessionEmbeddings(sessionId, pending.filter((ev) => !prepared.some((p) => p.ev.id === ev.id)).map(placeholder))) === null) break;
   }
   return total;
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { RemoteError } from '../remoteClient.js';
 import type { PublishBatch } from './protocol.js';
-import { PUBLISH_BACKOFF_MS, PUBLISH_SIGNED_OUT_MS, startPublisher, type PublisherDeps, type PublisherLog, type PublisherManifest } from './publisher.js';
+import { PUBLISH_BACKOFF_MS, PUBLISH_BUSY_RETRY_MS, PUBLISH_SIGNED_OUT_MS, startPublisher, type PublisherDeps, type PublisherLog, type PublisherManifest } from './publisher.js';
 import type { ScrubbedLine } from './scrub.js';
 
 vi.mock('electron', () => ({ app: { getPath: () => '/nonexistent' } }));
@@ -415,6 +415,30 @@ describe('startPublisher', () => {
     r.advance(PUBLISH_BACKOFF_MS[0]);
     await r.p.sweep();
     expect(r.publish).toHaveBeenCalledTimes(4);
+  });
+
+  it('a busy host (429) waits Retry-After or 1 s and does not climb the backoff ladder', async () => {
+    const errors = [
+      new RemoteError('unreachable', 'busy', 429, 2_000), new RemoteError('unreachable', 'busy', 429),
+      new RemoteError('unreachable', 'busy', 429), new RemoteError('unreachable', 'down', 503)
+    ];
+    const r = rig({ publish: async () => { throw errors.shift() ?? new Error('unexpected'); } });
+    await r.p.sweep();
+    r.advance(1_999);
+    await r.p.sweep();
+    expect(r.publish).toHaveBeenCalledTimes(1);
+    for (const n of [2, 3, 4]) {
+      r.advance(n === 2 ? 1 : PUBLISH_BUSY_RETRY_MS);
+      await r.p.sweep();
+      expect(r.publish).toHaveBeenCalledTimes(n);
+    }
+    // The 503 after three 429s takes the first ladder step.
+    r.advance(PUBLISH_BACKOFF_MS[0] - 1);
+    await r.p.sweep();
+    expect(r.publish).toHaveBeenCalledTimes(4);
+    r.advance(1);
+    await r.p.sweep();
+    expect(r.publish).toHaveBeenCalledTimes(5);
   });
 
   it('sends nothing when the workspace’s secrets can’t be read, and retries in five minutes', async () => {

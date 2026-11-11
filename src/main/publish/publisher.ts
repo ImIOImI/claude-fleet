@@ -11,6 +11,8 @@ export const PUBLISH_SWEEP_MS = 60_000;
 export const PUBLISH_PAGE = 500;
 export const PUBLISH_BACKOFF_MS = [5_000, 15_000, 60_000, 300_000] as const;
 export const PUBLISH_SIGNED_OUT_MS = 300_000;
+/** The wait after a 429 without Retry-After. */
+export const PUBLISH_BUSY_RETRY_MS = 1_000;
 /** The host will refuse this batch every time: skip it rather than block the cursor. */
 const SKIP_STATUSES = new Set([400, 409, 413]);
 
@@ -188,7 +190,11 @@ export function startPublisher(d: PublisherDeps, o: { debounceMs?: number; sweep
             const e = err instanceof RemoteError ? err : null;
             if (e?.status === undefined || !SKIP_STATUSES.has(e.status)) {
               const signedOut = e?.kind === 'not-signed-in' || e?.kind === 'unauthorized' || e?.kind === 'forbidden';
-              return fail(st, ws, 'publish-failed', (err as Error).message, signedOut ? PUBLISH_SIGNED_OUT_MS : Math.max(backoff(st), e?.retryAfterMs ?? 0));
+              // A busy host (shared by many publishers) is not a failing one: honour Retry-After, don't climb the ladder.
+              const wait = signedOut ? PUBLISH_SIGNED_OUT_MS
+                : e?.status === 429 ? Math.min(e.retryAfterMs ?? PUBLISH_BUSY_RETRY_MS, PUBLISH_SIGNED_OUT_MS)
+                : Math.max(backoff(st), e?.retryAfterMs ?? 0);
+              return fail(st, ws, 'publish-failed', (err as Error).message, wait);
             }
             d.log({ level: 'warn', type: 'publish-batch-refused', message: `the host refused a batch (${e.status}); skipped: ${e.message}`, workspaceId: ws });
             outcome = 'refused';

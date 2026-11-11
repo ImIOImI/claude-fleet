@@ -313,7 +313,7 @@ describe('remote:* token consent (main-process confirm)', () => {
     const answers: Record<string, boolean> = { 'send-token': true, 're-point': false };
     const h = harness(async () => WHO, { manifests: [prior], confirm: async (r) => answers[r.kind] });
     expect(await h.call('remote:add', 'https://new', { sameHostNewAddress: true })).toMatchObject({ ok: false, kind: 'declined' });
-    expect(h.deps.confirm).toHaveBeenCalledWith({ kind: 're-point', from: 'https://old', to: 'https://new' });
+    expect(h.deps.confirm).toHaveBeenCalledWith({ kind: 're-point', from: 'https://old', to: 'https://new', publishers: [] });
     expect(h.store.get(ID)).toBe(prior);
     expect(h.deps.writeManifest).not.toHaveBeenCalled();
   });
@@ -383,7 +383,7 @@ describe('remote:* token consent (main-process confirm)', () => {
     h.advance(DIALOG_GAP_MS);
     answers['re-point'] = true;
     expect(await h.call('remote:add', 'https://other', { sameHostNewAddress: true })).toMatchObject({ ok: true });
-    expect(h.deps.confirm).toHaveBeenLastCalledWith({ kind: 're-point', from: 'https://old', to: 'https://other' });
+    expect(h.deps.confirm).toHaveBeenLastCalledWith({ kind: 're-point', from: 'https://old', to: 'https://other', publishers: [] });
   });
 
   it('the re-point dialog shares the dialog gap, except right after approving its own destination', async () => {
@@ -411,6 +411,21 @@ describe('remote:* token consent (main-process confirm)', () => {
     expect(confirmText({ kind: 'send-token', origin: 'https://xn--e1afmkfd.example' }).message).toBe('Send your GitHub sign-in to https://xn--e1afmkfd.example?');
     const t = confirmText({ kind: 're-point', from: 'https://old', to: 'https://new' });
     expect(`${t.message} ${t.detail}`).toMatch(/https:\/\/old[\s\S]*https:\/\/new/);
+  });
+
+  it('the re-point dialog names the local workspaces that publish to the bookmark', async () => {
+    const pub = (id: string, name: string, kind: string, to: string[]) => ({ id, name, kind, publish: { to, since: {} } }) as unknown as WorkspaceSpec;
+    const manifests = [
+      bookmarkAt('https://old'),
+      pub('L1', 'notes', 'local', [ID]), pub('C1', 'infra', 'container', ['X', ID]), pub('C2', 'quiet', 'container', ['X'])
+    ];
+    const h = harness(async () => WHO, { manifests, confirm: async (r) => r.kind === 'send-token' });
+    await h.call('remote:add', 'https://new', { sameHostNewAddress: true });
+    expect(h.deps.confirm).toHaveBeenLastCalledWith({ kind: 're-point', from: 'https://old', to: 'https://new', publishers: ['notes', 'infra'] });
+    expect(confirmText({ kind: 're-point', from: 'https://old', to: 'https://new', publishers: ['notes', 'infra'] }).detail)
+      .toBe('From: https://old\nTo: https://new\nYour GitHub sign-in will be sent to the new address from now on.\n\nnotes, infra publish their transcripts here; they will go to the new address.');
+    expect(confirmText({ kind: 're-point', from: 'a', to: 'b', publishers: ['notes'] }).detail).toMatch(/\n\nnotes publishes its transcripts here; they will go to the new address\.$/);
+    expect(confirmText({ kind: 're-point', from: 'a', to: 'b', publishers: [] }).detail).not.toMatch(/transcripts/);
   });
 
   it('caps and strips host display text in the probe reply', async () => {

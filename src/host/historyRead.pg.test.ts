@@ -183,6 +183,9 @@ describe.skipIf(!isPg)('historyReader.search', () => {
       const row = (workspaceId: string, sessionId: string, kind: 'turn' | 'summary', text: string, vec: Float32Array, n: number) => ({
         workspaceId, sessionId, kind, refEventId: null, ts: 100 + n, text, modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec: encodeVector(vec), dedupKey: `k${n}`
       });
+      await stateKysely().insertInto('sessions').values([['s-1', HOSTED], ['s-2', HOSTED], ['o-1', OTHER]].map(([id, ws]) => ({
+        id, workspace_id: ws, cwd: null, started_at: 1, last_active_at: 1, ai_title: null, first_user_message: null, user_set_name: null
+      }))).execute();
       await insertEmbeddings([
         row(HOSTED, 's-1', 'turn', 'hosted turn', near, 1),
         row(HOSTED, 's-2', 'summary', 'S'.repeat(3000), q, 2),

@@ -29,6 +29,10 @@ export function publishPayload(publishTo: readonly string[] | undefined): { publ
   return publishTo === undefined ? {} : { publish: { to: [...publishTo] } };
 }
 
+export function unpublishConfirmText(hosts: readonly string[]): string {
+  return `Remove this session from ${hosts.length ? hosts.join(', ') : 'the host'}? It will never be published again.`;
+}
+
 export function unpublishNote(r: UnpublishResult): string {
   if (r.failed.length) {
     const names = r.failed.map((f) => f.name).join(', ');

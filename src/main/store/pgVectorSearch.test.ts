@@ -25,6 +25,9 @@ describe.skipIf(!isPg)('pgvector score parity (D64)', () => {
   it('scores equal the float32 dot product within 1e-5, ordered as topK', async () => {
     const next = rng(20261110);
     const vecs = Array.from({ length: 20 }, () => unitVec(next));
+    await db.stateKysely().insertInto('sessions').values(vecs.map((_, i) => ({
+      id: `s${i}`, workspace_id: 'W', cwd: null, started_at: 1, last_active_at: 1, ai_title: null, first_user_message: null, user_set_name: null,
+    }))).execute();
     await db.insertEmbeddings(vecs.map((v, i) => ({
       workspaceId: 'W', sessionId: `s${i}`, kind: 'turn' as const, refEventId: i, ts: i, text: `t${i}`,
       modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec: encodeVector(v), dedupKey: `p${i}`,

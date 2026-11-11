@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { RemoteError } from '../remoteClient.js';
+import type { UnpublishResult } from '../../preload/publish.js';
 import type { WorkspaceSpec } from '../workspaces.js';
-import { PUBLISH_CHANNELS, registerPublishIpc, type PublishIpcDeps } from './publishIpc.js';
+import { HOST_BUSY, PUBLISH_CHANNELS, registerPublishIpc, UNPUBLISH_RETRIES, UNPUBLISH_RETRY_MAX_MS, type PublishIpcDeps } from './publishIpc.js';
 
 vi.mock('electron', () => ({ app: { getPath: () => '/nonexistent' } }));
 
@@ -79,5 +80,31 @@ describe('publish:unpublish', () => {
     const h = harness(async () => 1);
     expect(await h.call(W2, SID)).toEqual({ removed: 0, failed: [] });
     expect(h.order).toEqual([`withhold ${W2} ${SID}`, `idle ${W2}`]);
+  });
+
+  it('retries a busy host (429/503) up to 3 times, honouring Retry-After, then reports it busy', async () => {
+    const waits: number[] = [];
+    let calls = 0;
+    const h = harness(async (url) => {
+      if (url === 'http://one') {
+        calls++;
+        if (calls === 1) throw new RemoteError('unreachable', 'http://one is busy', 429, 2_500);
+        if (calls === 2) throw new RemoteError('standby', 'standby', 503);
+        if (calls === 3) throw new RemoteError('unreachable', 'busy', 429, 60_000);
+        return 1;
+      }
+      throw new RemoteError('unreachable', 'http://two is busy', 429);
+    }, { sleep: async (ms) => void waits.push(ms) });
+    expect(await h.call(W, SID)).toEqual({ removed: 1, failed: [{ remoteId: R2, name: 'ops', error: HOST_BUSY }] });
+    expect(calls).toBe(4);
+    expect(waits).toEqual([2_500, 1_000, UNPUBLISH_RETRY_MAX_MS, 1_000, 1_000, 1_000]);
+    expect(h.order.filter((o) => o === 'unpublish http://two')).toHaveLength(UNPUBLISH_RETRIES + 1);
+  });
+
+  it('does not retry other failures', async () => {
+    const waits: number[] = [];
+    const h = harness(async () => { throw new RemoteError('unreachable', 'http://x answered 500', 500); }, { sleep: async (ms) => void waits.push(ms) });
+    expect(((await h.call(W, SID)) as UnpublishResult).failed.map((f) => f.error)).toEqual(['http://x answered 500', 'http://x answered 500']);
+    expect(waits).toEqual([]);
   });
 });

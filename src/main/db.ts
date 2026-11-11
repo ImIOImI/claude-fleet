@@ -2677,8 +2677,10 @@ export async function renameSession(id: string, name: string): Promise<void> {
   summaryCache.invalidate(id);
 }
 
-/** A session's rows in every per-session cache table; the caller owns the transaction. */
+/** A session's rows in every per-session cache table; the caller owns the transaction and must
+ *  call this first in it: the session row lock waits out an in-flight `insertSessionEmbeddings`. */
 export async function deleteSessionRows(q: Kysely<StateDb>, id: string): Promise<void> {
+  if (dialect === 'postgres') await sql`SELECT 1 FROM sessions WHERE id = ${id} FOR UPDATE`.execute(q);
   await q.deleteFrom('events').where('session_id', '=', id).execute();
   await q.deleteFrom('session_costs').where('session_id', '=', id).execute();
   await q.deleteFrom('session_stats').where('session_id', '=', id).execute();
@@ -3007,32 +3009,47 @@ const sqliteVec = (vec: Buffer): Buffer => (vec.length === EMBED_DIM * 4 ? encod
  *  a dedup hit doesn't count. */
 export async function insertEmbeddings(rows: readonly EmbeddingInsert[]): Promise<number> {
   if (rows.length === 0) return 0;
-  let inserted = 0;
-  await kyselyOrThrow().transaction().execute(async (trx) => {
-    for (const part of chunked(rows, EMBEDDINGS_ROWS_PER_INSERT)) {
-      const r = await trx
-        .insertInto('embeddings')
-        .values(
-          part.map((row) => ({
-            workspace_id: row.workspaceId,
-            session_id: row.sessionId,
-            kind: row.kind,
-            ref_event_id: row.refEventId,
-            ts: row.ts,
-            text: row.text,
-            model_id: row.modelId,
-            dim: row.dim,
-            vec: dialect !== 'postgres' ? sqliteVec(row.vec)
-              : row.vec.length === 0 ? null
-              : sql<Buffer>`${pgVectorLiteral(decodeVector(row.vec))}::vector`,
-            dedup_key: row.dedupKey,
-          }))
-        )
-        .onConflict((oc) => oc.doNothing())
-        .executeTakeFirst();
-      inserted += num(r.numInsertedOrUpdatedRows);
-    }
+  return kyselyOrThrow().transaction().execute((trx) => insertEmbeddingRows(trx, rows));
+}
+
+/** `insertEmbeddings` for one session's rows, or null (nothing written) once the session row is gone.
+ *  The row lock orders this against a delete that takes `FOR UPDATE` first; SQLite serializes
+ *  writers, so the check inside the write transaction suffices there. */
+export async function insertSessionEmbeddings(sessionId: string, rows: readonly EmbeddingInsert[]): Promise<number | null> {
+  if (rows.some((r) => r.sessionId !== sessionId)) throw new Error('insertSessionEmbeddings: rows of another session');
+  return kyselyOrThrow().transaction().execute(async (trx) => {
+    const lock = dialect === 'postgres' ? sql`FOR SHARE` : sql``;
+    const held = await sql`SELECT 1 FROM sessions WHERE id = ${sessionId} ${lock}`.execute(trx);
+    if (held.rows.length === 0) return null;
+    return rows.length === 0 ? 0 : insertEmbeddingRows(trx, rows);
   });
+}
+
+async function insertEmbeddingRows(trx: Kysely<StateDb>, rows: readonly EmbeddingInsert[]): Promise<number> {
+  let inserted = 0;
+  for (const part of chunked(rows, EMBEDDINGS_ROWS_PER_INSERT)) {
+    const r = await trx
+      .insertInto('embeddings')
+      .values(
+        part.map((row) => ({
+          workspace_id: row.workspaceId,
+          session_id: row.sessionId,
+          kind: row.kind,
+          ref_event_id: row.refEventId,
+          ts: row.ts,
+          text: row.text,
+          model_id: row.modelId,
+          dim: row.dim,
+          vec: dialect !== 'postgres' ? sqliteVec(row.vec)
+            : row.vec.length === 0 ? null
+            : sql<Buffer>`${pgVectorLiteral(decodeVector(row.vec))}::vector`,
+          dedup_key: row.dedupKey,
+        }))
+      )
+      .onConflict((oc) => oc.doNothing())
+      .executeTakeFirst();
+    inserted += num(r.numInsertedOrUpdatedRows);
+  }
   return inserted;
 }
 
@@ -3369,7 +3386,7 @@ export interface EmbeddingHit {
 }
 
 /** Top `limit` embeddings in `scope` by similarity to the unit-length `qvec`,
- *  current model only, placeholders excluded. Exact on both dialects: a
+ *  current model only, placeholders and rows of a deleted session excluded. Exact on both dialects: a
  *  brute-force dot product on SQLite, `ORDER BY vec <=> q, id` (an exact
  *  sequential scan) on Postgres; an ANN index can't serve the `id` tiebreak.
  *  Ties break by `id` on both. */
@@ -3382,6 +3399,7 @@ export async function searchEmbeddings(
     const rows = await k.selectFrom('embeddings')
       .select(['session_id as sessionId', 'workspace_id as workspaceId', 'kind', 'ts', 'text', 'vec'])
       .where('workspace_id', 'in', [...scope]).where('model_id', '=', EMBED_MODEL_ID).where('text', '<>', '')
+      .where(sql<boolean>`EXISTS (SELECT 1 FROM sessions s WHERE s.id = embeddings.session_id)`)
       .$if(opts.kind !== undefined, (qb) => qb.where('kind', '=', opts.kind as 'turn' | 'summary'))
       .orderBy('id')
       .execute();
