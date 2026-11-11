@@ -218,7 +218,25 @@ export function openDb(userDataDir: string): Database.Database {
   const t0 = performance.now();
   const walBytes = fileSize(`${path}-wal`);
   const conn = new Database(path);
+  const prevCheckpointer = checkpointer;
   db = conn;
+  try {
+    return openSqliteConn(conn, path, openedAt, t0, walBytes);
+  } catch (e) {
+    // Never leave a half-open handle: a later openDb would return it unmigrated.
+    const ck = checkpointer;
+    if (ck && ck !== prevCheckpointer) void ck.stop().catch(() => undefined);
+    checkpointer = prevCheckpointer;
+    db = null;
+    kdb = null;
+    leftoverDrain = null;
+    openStats = null;
+    if (conn.open) conn.close();
+    throw e;
+  }
+}
+
+function openSqliteConn(conn: Database.Database, path: string, openedAt: number, t0: number, walBytes: number): Database.Database {
   conn.pragma('journal_mode = WAL');
   // A lock still being released (e.g. a just-killed VACUUM helper on Windows) waits, not throws.
   conn.pragma('busy_timeout = 5000');
@@ -2748,7 +2766,7 @@ export async function purgeWorkspace(
   for (const table of ['events', 'embeddings', 'usage_events', 'session_summaries'] as const) {
     for (;;) {
       const size = chunk;
-      // Timed once the connection is held, so waiting on the store mutex doesn't shrink chunks.
+      // Timed once the connection is held, so SQLite mutex waits don't shrink chunks (Postgres still counts its write-lock wait).
       const r = await slice(() => k.connection().execute(async (c) => {
         const t0 = now();
         const out = await c.deleteFrom(table)

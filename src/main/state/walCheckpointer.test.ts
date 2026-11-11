@@ -1,8 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { join } from 'node:path';
 import { acquireWalCheckpointer, closeDb, stateKysely, withRawSqlite } from '../db.js';
 import { isPg, openTestState } from '../store/testStore.js';
-import { installWalCheckpointer, WalCheckpointer, WAL_MAX_FRAMES, WAL_MAX_INCOMPLETE, WAL_REWIND_FRAMES } from './walCheckpointer.js';
+import { installWalCheckpointer, raceTimeout, WalCheckpointer, WAL_MAX_FRAMES, WAL_MAX_INCOMPLETE, WAL_REWIND_FRAMES } from './walCheckpointer.js';
 import type Database from 'better-sqlite3';
 
 installWalCheckpointer();
@@ -263,5 +263,33 @@ describe('WalCheckpointer holds', () => {
     expect(() => c.holdAtOpen(d, { requestEveryMs: 0, workerSource: fakeWorker('') })).toThrow('disk I/O error');
     expect(c.hasWorkers()).toBe(false);
     expect(state.wal_autocheckpoint).toBe(1000);
+  });
+});
+
+describe('raceTimeout', () => {
+  it('clears its timer when the promise settles first', async () => {
+    vi.useFakeTimers();
+    try {
+      await raceTimeout(Promise.resolve(), 5000);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('settles after the bound when the promise never does', async () => {
+    vi.useFakeTimers();
+    try {
+      let done = false;
+      const r = raceTimeout(new Promise(() => {}), 5000).then(() => { done = true; });
+      await vi.advanceTimersByTimeAsync(4999);
+      expect(done).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await r;
+      expect(done).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
