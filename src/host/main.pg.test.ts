@@ -13,6 +13,7 @@ import pg from 'pg';
 import * as db from '../main/db.js';
 import { IdentityError, type IdentityProvider } from '../main/identity/types.js';
 import { isPg, testPgSchema, type TestPg } from '../main/store/testStore.js';
+import { partitionIdFor, publishedSessionId } from '../main/publish/protocol.js';
 import { migratePostgres } from '../main/store/pgMigrate.js';
 import { postgresKysely } from '../main/store/postgres.js';
 import { HOST_PG_SESSION } from './hostDb.js';
@@ -219,6 +220,35 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     expect((await call('history:sessions', [{ limit: 500 }])).status).toBe(400);
   }, 30_000);
 
+  it('POST /publish lands under the caller’s partition, scrubbed, idempotent, and stays out of history', async () => {
+    const hostSecret = `fake-host-${'q'.repeat(12)}`;
+    const a = await start({}, undefined, '', () => ({ FAKE_SERVICE_TOKEN: hostSecret }));
+    await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+    await storesOpen();
+    const SRC = '01JC0000000000000000000005';
+    const SID = '11111111-2222-4333-8444-555555555555';
+    const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` };
+    const publish = async (events: string[]) => {
+      const res = await fetch(`${a.url}/publish`, { method: 'POST', headers: auth, body: JSON.stringify({ sourceWorkspaceId: SRC, sessionId: SID, events }) });
+      return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+    };
+    const line = JSON.stringify({ type: 'user', uuid: 'u1', sessionId: SID, timestamp: '2026-11-05T00:00:00Z', message: { role: 'user', content: `token ghp_${'A'.repeat(36)} and ${hostSecret}` } });
+    // 503 until the holder's publish store is up.
+    await vi.waitFor(async () => expect((await publish([line])).status).toBe(200), { timeout: 10_000 });
+    const part = partitionIdFor({ provider: 'github', id: 1 }, SRC);
+    const sid = publishedSessionId(part, SID);
+    const rows = (await t!.pool.query(`SELECT workspace_id, raw_jsonl FROM ${t!.schema}.events WHERE session_id = $1`, [sid])).rows;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].workspace_id).toBe(part);
+    expect(rows[0].raw_jsonl).not.toContain('ghp_');
+    expect(rows[0].raw_jsonl).not.toContain(hostSecret);
+    expect(rows[0].raw_jsonl).toContain('[redacted:FAKE_SERVICE_TOKEN]');
+    expect(await publish([line])).toEqual({ status: 200, body: { ok: true, accepted: 1, inserted: 0 } });
+    const hist = await fetch(`${a.url}/rpc/history:sessions`, { method: 'POST', headers: auth, body: JSON.stringify({ args: [{}] }) });
+    expect(((await hist.json()) as { result: { rows: unknown[] } }).result.rows).toEqual([]);
+    expect(a.logs.join('\n')).not.toContain(hostSecret);
+  }, 30_000);
+
   it('serves the id from host_meta and keeps the state file in step', async () => {
     const a = await start();
     await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
@@ -325,6 +355,23 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
       expect(rpcHits.body.result.hits).toEqual([expect.objectContaining({ sessionId: SID, workspaceId: ID, text: 'index me' })]);
       await a.host.shutdown(0);
       await vi.waitFor(() => expect(sidecars(a.dir)).toBe(0), { timeout: 5_000 });
+    }, 30_000);
+
+    it('on: the holder indexes published turns as they arrive', async () => {
+      const a = await boot('');
+      await vi.waitFor(async () => expect(await embedded()).toBe(1), { timeout: 10_000 });
+      const SRC = '01JC0000000000000000000005';
+      const line = JSON.stringify({ type: 'user', uuid: 'p1', sessionId: SID, timestamp: '2026-11-05T00:00:00Z', message: { role: 'user', content: 'published phrase' } });
+      const res = await fetch(`${a.url}/publish`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ sourceWorkspaceId: SRC, sessionId: SID, events: [line] })
+      });
+      expect(res.status).toBe(200);
+      const part = partitionIdFor({ provider: 'github', id: 1 }, SRC);
+      await vi.waitFor(async () => {
+        const r = await t!.pool.query(`SELECT workspace_id, text FROM ${t!.schema}.embeddings WHERE session_id = $1`, [publishedSessionId(part, SID)]);
+        expect(r.rows).toEqual([{ workspace_id: part, text: 'published phrase' }]);
+      }, { timeout: 10_000 });
     }, 30_000);
 
     it('on: stop lets the in-flight batch land before the sidecar and the stores close', async () => {

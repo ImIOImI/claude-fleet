@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { sql } from 'kysely';
 import * as db from '../main/db.js';
 import { migratePostgres } from '../main/store/pgMigrate.js';
@@ -6,7 +6,10 @@ import { postgresKysely } from '../main/store/postgres.js';
 import { isPg, openTestState, type TestState } from '../main/store/testStore.js';
 import { partitionIdFor, publishedSessionId, PUBLISH_MAX_LINES } from '../main/publish/protocol.js';
 import { makeScrubber, type ScrubbedLine } from '../main/publish/scrub.js';
+import { EMBED_DIM } from '../main/vectors.js';
 import { HOST_TRACK } from './hostSchema.js';
+import { startHostIndexer } from './hostIndexer.js';
+import { createLogger } from './log.js';
 import { leaseFence, LeaseLostError } from './pgLease.js';
 import { PublishConflictError, publishStore } from './publishStore.js';
 
@@ -126,5 +129,22 @@ describe.skipIf(!isPg)('publishStore', () => {
     await s.ingest(ANN, SRC, SID, [turn('u1', 'user', 'x')]);
     expect(seen).toEqual(['5s']);
     expect(await s.partitionIds()).toEqual([partitionIdFor(ANN, SRC)]);
+  });
+
+  it('published turns are embedded under the partition, live and by backfill', async () => {
+    const unit = (): Float32Array => new Float32Array(EMBED_DIM).fill(1 / Math.sqrt(EMBED_DIM));
+    const log = createLogger(() => undefined);
+    const ix = startHostIndexer({ embed: async (t) => t.map(unit), log });
+    const s = await rig({ onIngested: (id) => ix.bump(id) });
+    const live = await s.ingest(ANN, SRC, SID, [turn('u1', 'user', 'published words')]);
+    const k = db.stateKysely();
+    const embedded = (id: string) => k.selectFrom('embeddings').select(['workspace_id', 'text']).where('session_id', '=', id).execute();
+    await vi.waitFor(async () => expect(await embedded(live.sessionId)).toEqual([{ workspace_id: live.partitionId, text: 'published words' }]));
+    await ix.stop(5_000);
+    const later = await publishStore(db.stateKysely).ingest(BOB, SRC, SID, [turn('u9', 'user', 'backfilled words')]);
+    const again = startHostIndexer({ embed: async (t) => t.map(unit), log });
+    await again.backfill();
+    await vi.waitFor(async () => expect(await embedded(later.sessionId)).toEqual([{ workspace_id: later.partitionId, text: 'backfilled words' }]));
+    await again.stop(5_000);
   });
 });

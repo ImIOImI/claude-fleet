@@ -22,6 +22,7 @@ import type { ListenTarget } from './endpoint.js';
 import { startHostMcp, type HostMcp } from './hostMcp.js';
 import type { Logger } from './log.js';
 import { leaseFence, LeaseLostError } from './pgLease.js';
+import { publishStore, type PublishStore } from './publishStore.js';
 
 export interface HolderOptions {
   db: PostgresStoreConfig;
@@ -55,6 +56,7 @@ export interface Holder {
   stores: PgStores;
   automations: HostAutomations;
   history: HistoryReader;
+  publish: PublishStore;
   stop(): Promise<void>;
 }
 
@@ -116,6 +118,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
     ? startHostIndexer({ embed: embedder.embed, log: o.log, paused: () => embedder.state() !== 'ready' })
     : null;
   const hint = trailingHint(() => o.events.publish('observability:summary', { workspaceId: o.workspaceId }), SUMMARY_HINT_MS);
+  const publish = publishStore(stateKysely, { onIngested: (id) => indexer?.bump(id) });
   const ingest = new HostIngest({
     projectsDir: o.projectsDir, workspaceId: o.workspaceId, offsetsRead, log: o.log, rescanMs: o.rescanMs,
     onIngested: (id) => { hint.bump(); indexer?.bump(id); }
@@ -156,6 +159,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
     stores,
     automations,
     history: historyReader(stateKysely, o.workspaceId),
+    publish,
     stop() {
       stopping ??= stopAll();
       return stopping;
