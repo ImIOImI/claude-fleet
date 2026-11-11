@@ -158,7 +158,13 @@ import {
   SUMMARY_STALE_GRACE_MS,
   stateKysely,
   searchEmbeddings,
+  getPublishCursor,
+  publishableEvents,
+  setPublishCursor,
+  withheldSessions,
 } from './db.js';
+import { startPublisher, type Publisher } from './publish/publisher.js';
+import { publishSecretValues } from './publish/secretValues.js';
 import type { EmbedFn } from './vectors.js';
 import { foldPlanUsage, type PlanUsageFold } from './planUsage.js';
 import { logError, getLogPath, flushErrorLogSync } from './errorLog.js';
@@ -392,6 +398,8 @@ const summaryRelay = createSummaryRelay({
   broadcast: (workspaceId, summary) => broadcastObservabilitySummary({ workspaceId, summary }, BrowserWindow.getAllWindows())
 });
 let relayTimer: NodeJS.Timeout | null = null;
+// Started by registerIpc once the identity service exists; writeManifest bumps it.
+let publisher: Publisher | null = null;
 
 // Same makeEmbedder selector the indexer uses, so the query and stored rows share a model.
 let fedEmbed: EmbedFn | null = null;
@@ -414,6 +422,7 @@ const localSearch: LocalSearch = {
 export function stopRemoteBackend(): void {
   summaryRelay.stop();
   if (relayTimer) clearInterval(relayTimer);
+  publisher?.stop();
   remoteBackend.stop();
 }
 
@@ -2153,6 +2162,19 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     invalidate: invalidateWorkspaceList
   });
   registerFederationIpc(ipcMain, federated, localSearch);
+  if (jsonlWatcher && !MOCK_MODE) {
+    publisher = startPublisher({
+      manifests: () => listWorkspaceManifests(),
+      publish: (url, batch) => remoteBackend.clientFor(url).publish(batch),
+      secretValues: (spec) => publishSecretValues(spec, vault, () => identity.bearerToken()),
+      events: publishableEvents,
+      getCursor: getPublishCursor,
+      setCursor: setPublishCursor,
+      withheld: withheldSessions,
+      log: (e) => logError({ source: 'main', ...e })
+    });
+    jsonlWatcher.on('ingest', ({ workspaceId }) => publisher?.bump(workspaceId));
+  }
   relayTimer = setInterval(() => summaryRelay.sync(), 15_000);
   relayTimer.unref?.();
   loadoutSources.setGithubTokenProvider(() => identity.packagesToken());
