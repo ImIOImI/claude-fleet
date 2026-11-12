@@ -26,6 +26,15 @@ describe('NotifyStore notifications', () => {
     expect(await s.list({ filter: 'held' })).toEqual([expect.objectContaining({ title: 'b', heldReason: 'pause', tags: ['ops'] })]);
     expect((await s.list({ filter: 'delivered' })).map((n) => n.title)).toEqual(['a']);
   });
+  it('since: oldest first from ts inclusive, capped, optionally one workspace', async () => {
+    inbox = (await openTestInbox());
+    const s = new NotifyStore(inbox.kysely);
+    for (const [ts, ws] of [[1, 'W1'], [2, 'W2'], [3, 'W1'], [3, 'W1'], [4, 'W1']] as const) await s.insert(req({ ts, workspaceId: ws, title: `${ts}${ws}` }));
+    expect((await s.since(2, 100)).map((n) => n.title)).toEqual(['2W2', '3W1', '3W1', '4W1']);
+    expect((await s.since(2, 2, 'W1')).map((n) => n.ts)).toEqual([3, 3]);
+    expect((await s.since(0, 100, 'W1')).every((n) => n.workspaceId === 'W1')).toBe(true);
+    expect((await s.list({ workspaceId: 'W2' })).map((n) => n.title)).toEqual(['2W2']);
+  });
   it('clears by dedupe key, tracks held-since and digested, prunes old rows', async () => {
     inbox = (await openTestInbox());
     const s = new NotifyStore(inbox.kysely);

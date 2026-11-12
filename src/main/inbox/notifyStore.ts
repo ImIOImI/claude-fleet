@@ -54,12 +54,21 @@ export class NotifyStore {
     return r ? toRow(r) : null;
   }
 
-  async list(opts: { filter?: 'all' | 'delivered' | 'held'; limit?: number } = {}): Promise<NotificationRow[]> {
+  async list(opts: { filter?: 'all' | 'delivered' | 'held'; limit?: number; workspaceId?: string } = {}): Promise<NotificationRow[]> {
     const limit = Math.min(Math.max(1, Math.floor(opts.limit ?? 200)), 1000);
     let q = this.db.selectFrom('notifications').selectAll();
     if (opts.filter === 'held') q = q.where('delivered', '=', 0);
     else if (opts.filter === 'delivered') q = q.where('delivered', '=', 1);
+    if (opts.workspaceId !== undefined) q = q.where('workspace_id', '=', opts.workspaceId);
     const rows = await q.orderBy('ts', 'desc').orderBy('id', 'desc').limit(limit).execute();
+    return rows.map(toRow);
+  }
+
+  /** Oldest first from `ts` (inclusive): the host's notices feed. */
+  async since(ts: number, limit: number, workspaceId?: string): Promise<NotificationRow[]> {
+    let q = this.db.selectFrom('notifications').selectAll().where('ts', '>=', ts);
+    if (workspaceId !== undefined) q = q.where('workspace_id', '=', workspaceId);
+    const rows = await q.orderBy('ts', 'asc').orderBy('id', 'asc').limit(Math.min(Math.max(1, Math.floor(limit)), 1000)).execute();
     return rows.map(toRow);
   }
 

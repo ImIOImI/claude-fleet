@@ -32,11 +32,26 @@ export interface NotifyInput {
   workspaceId?: string | null;
   dedupeKey?: string | null;
   tags?: string[];
+  /** Hold it with this reason without consulting the policy (remote notices over the rate or late, D132). */
+  forceHold?: string;
 }
 
 export const INPUT_WAIT_DELAY_MS = 20_000;
 export const RETENTION_MS = 30 * 86_400_000;
 const HOUR = 3_600_000;
+
+/** A todo post's notification (#407): only when asked, or when an urgent todo arrives. */
+export function todoNoticeInput(todo: Todo, action: 'created' | 'updated' | 'reopened', notifyRequested: boolean, sourceName: string): NotifyInput | null {
+  const urgentArrival = todo.priority === 'urgent' && action !== 'updated';
+  if (!notifyRequested && !urgentArrival) return null;
+  return {
+    kind: 'todo',
+    title: todo.priority === 'urgent' ? `Urgent · ${todo.title}` : todo.title,
+    body: [sourceName, todo.seenCount > 1 ? `seen ${todo.seenCount}×` : null, action === 'reopened' ? 'reopened' : null].filter(Boolean).join(' · '),
+    priority: todo.priority, source: todo.source, todoId: todo.id, workspaceId: todo.workspaceId,
+    dedupeKey: todo.dedupeKey, tags: todo.tags
+  };
+}
 
 export function createNotifyService(deps: NotifyDeps) {
   const { store } = deps;
@@ -49,10 +64,12 @@ export function createNotifyService(deps: NotifyDeps) {
     const now = deps.now();
     const tags = input.tags ?? [];
     const [rules, defaultLevel, pause, downtimes] = await Promise.all([store.rules(), store.getDefaultLevel(), store.getPause(), store.downtimes()]);
-    const res = resolve(
-      { kind: input.kind, priority: input.priority, source: input.source, dedupeKey: input.dedupeKey ?? null, tags },
-      { rules, defaultLevel, pause, downtimes, now }
-    );
+    const res = input.forceHold
+      ? { deliver: false as const, heldReason: input.forceHold }
+      : resolve(
+        { kind: input.kind, priority: input.priority, source: input.source, dedupeKey: input.dedupeKey ?? null, tags },
+        { rules, defaultLevel, pause, downtimes, now }
+      );
     const row = await store.insert({
       ts: now, kind: input.kind, title: input.title, body: input.body ?? null, priority: input.priority,
       source: input.source, todoId: input.todoId ?? null, workspaceId: input.workspaceId ?? null,
@@ -116,16 +133,8 @@ export function createNotifyService(deps: NotifyDeps) {
 
     /** A todo was posted/updated; notify when the poster asked, or when it arrives urgent. */
     async onTodoPosted(todo: Todo, action: 'created' | 'updated' | 'reopened', notifyRequested: boolean): Promise<NotificationRow | null> {
-      const urgentArrival = todo.priority === 'urgent' && action !== 'updated';
-      if (!notifyRequested && !urgentArrival) return null;
-      return request({
-        kind: 'todo',
-        title: todo.priority === 'urgent' ? `Urgent · ${todo.title}` : todo.title,
-        body: [sourceName(todo.source), todo.seenCount > 1 ? `seen ${todo.seenCount}×` : null, action === 'reopened' ? 'reopened' : null]
-          .filter(Boolean).join(' · '),
-        priority: todo.priority, source: todo.source, todoId: todo.id, workspaceId: todo.workspaceId,
-        dedupeKey: todo.dedupeKey, tags: todo.tags
-      });
+      const n = todoNoticeInput(todo, action, notifyRequested, sourceName(todo.source));
+      return n ? request(n) : null;
     },
 
     /** A workspace's post was refused. Tell the user once per workspace per hour. */

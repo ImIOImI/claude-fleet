@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { InboxStore } from './inboxDb.js';
 import { NotifyStore } from './notifyStore.js';
-import { createNotifyService, INPUT_WAIT_DELAY_MS } from './notifyService.js';
+import { createNotifyService, INPUT_WAIT_DELAY_MS, todoNoticeInput } from './notifyService.js';
 import type { NotificationRow } from '../../preload/inboxTypes.js';
 import { openTestInbox, countQueries, settle } from '../store/testStore.js';
 
@@ -51,6 +51,24 @@ describe('request + delivery', () => {
     const b = await svc.request({ kind: 'post', title: 'muted', priority: 'urgent', source: { kind: 'workspace', id: 'W1' } });
     expect(b).toMatchObject({ delivered: false, heldReason: `rule:${r.id}`, channel: null });
     expect(delivered.map((n) => n.title)).toEqual(['hi']);
+  });
+});
+
+describe('forceHold', () => {
+  it('forceHold records the notification held with that reason, whatever the rules say', async () => {
+    const { svc, delivered } = await setup();
+    const row = await svc.request({ kind: 'post', title: 'x', priority: 'urgent', source: { kind: 'workspace', id: 'W' }, forceHold: 'remote-rate' });
+    expect(row).toMatchObject({ delivered: false, heldReason: 'remote-rate' });
+    expect(delivered).toEqual([]);
+  });
+});
+
+describe('todoNoticeInput', () => {
+  it('is null unless asked or an urgent arrival; titles and bodies like the desktop', () => {
+    expect(todoNoticeInput(todo() as never, 'created', false, 'ops')).toBeNull();
+    expect(todoNoticeInput(todo({ priority: 'urgent' }) as never, 'updated', false, 'ops')).toBeNull();
+    expect(todoNoticeInput(todo({ seenCount: 3 }) as never, 'reopened', true, 'ops')).toMatchObject({ kind: 'todo', title: 'prod-api 5xx', body: 'ops · seen 3× · reopened', todoId: 'T1', dedupeKey: 'k' });
+    expect(todoNoticeInput(todo({ priority: 'urgent' }) as never, 'created', false, 'ops')).toMatchObject({ title: 'Urgent · prod-api 5xx', priority: 'urgent' });
   });
 });
 

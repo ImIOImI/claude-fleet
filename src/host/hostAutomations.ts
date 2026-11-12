@@ -1,9 +1,9 @@
 // The hosted workspace's automations, inbox and proposals, on the holder's
 // fenced store (SPEC §7 *Host automations*). Definitions come only from the
-// host config; script steps, live steps, notifications and other workspaces
-// are refused.
+// host config; script steps, live steps and other workspaces are refused.
+// Notices are recorded undelivered for desktops to fetch (D131).
 import { randomUUID } from 'node:crypto';
-import type { NotificationRow, TodoSource } from '../preload/inboxTypes.js';
+import type { TodoSource } from '../preload/inboxTypes.js';
 import { AutomationStore } from '../main/automations/automationStore.js';
 import { createAutomationService } from '../main/automations/automationService.js';
 import { createProposalService } from '../main/automations/proposalService.js';
@@ -11,6 +11,7 @@ import { ProposalStore } from '../main/automations/proposalStore.js';
 import { definitionToYaml, validateDefinition } from '../main/automations/definition.js';
 import { freshArgv } from '../main/automations/freshArgv.js';
 import { createInboxService } from '../main/inbox/inboxService.js';
+import { NotifyStore } from '../main/inbox/notifyStore.js';
 import type { InboxStore } from '../main/inbox/inboxDb.js';
 import { setAutomationHandlers, setInboxHandlers } from '../main/mcpCore.js';
 import type { BrokerOps } from './brokerOps.js';
@@ -18,6 +19,7 @@ import type { HostAutomationEntry } from './config.js';
 import type { EventHub } from './events.js';
 import { memoryActionLedger, type ActionLedger } from './hostActions.js';
 import { hostResolver, remoteHostRefusals, substituteSelf } from './hostDefinition.js';
+import { hostNotices } from './hostNotices.js';
 import type { Logger } from './log.js';
 import { LeaseLostError } from './pgLease.js';
 import { automationOwner, type SessionOwnerStore } from './sessionOwners.js';
@@ -26,6 +28,7 @@ export const HOST_CONFIG_ORIGIN = { source: 'host-config' } as const;
 const OPERATOR: TodoSource = { kind: 'user', id: null };
 const TICK_MS = 30_000;
 const SETTLE_MS = 2_000;
+const PRUNE_MS = 3_600_000;
 const CONFIG_ONLY = 'on a remote host, automations come from the host config (automations: in config.yaml)';
 const fromConfig = (a: { origin: Record<string, unknown> | null }): boolean => a.origin?.source === HOST_CONFIG_ORIGIN.source;
 
@@ -64,8 +67,19 @@ export async function startHostAutomations(o: HostAutomationsOptions) {
     o.events.publish('automations:changed', null);
     publishCounts();
   };
+  const notices = hostNotices({
+    store: new NotifyStore(o.inbox.kysely),
+    workspaceId: () => o.workspace().id,
+    now,
+    changed: () => o.events.publish('notices:changed', null),
+    sourceName: (s) => (s.kind === 'workspace' && s.id === o.workspace().id ? o.workspace().name : s.kind === 'user' ? (s.id ? `@${s.id}` : 'host operator') : 'automation')
+  });
+  const notice = (n: Parameters<typeof notices.request>[0]): void => {
+    void notices.request(n).catch(warn('notice failed'));
+  };
   let automations: ReturnType<typeof createAutomationService> | null = null;
   const inbox = createInboxService(o.inbox, {
+    notifications: notices,
     manifest: async (id) => (id === o.workspace().id ? {} : null),
     notifyChanged: publishCounts,
     onPostRejected: (_ws, reason) => o.log.log('warn', 'inbox post rejected', { reason }),
@@ -115,7 +129,10 @@ export async function startHostAutomations(o: HostAutomationsOptions) {
     mayRun: (a) => (fromConfig(a) ? null : 'it is not from the host config'),
     changed: automationsChanged,
     onError: warn('automation run failed to record'),
-    notify: (n) => o.log.log(n.priority === 'high' || n.priority === 'urgent' ? 'warn' : 'info', 'automation notice', { kind: n.kind, title: n.title })
+    notify: (n) => {
+      o.log.log(n.priority === 'high' || n.priority === 'urgent' ? 'warn' : 'info', 'automation notice', { kind: n.kind, title: n.title });
+      notice(n);
+    }
   });
   automations = svc;
 
@@ -127,6 +144,7 @@ export async function startHostAutomations(o: HostAutomationsOptions) {
     workspaceName: name,
     trusted: async () => false,
     checkDefinition: remoteHostRefusals,
+    notify: notice,
     changed: () => {
       o.events.publish('automations:changed', null);
       o.events.publish('proposals:changed', null);
@@ -215,13 +233,17 @@ export async function startHostAutomations(o: HostAutomationsOptions) {
     if (!stopped) svc.tick().catch(warn('automation tick failed'));
   }, o.tickMs ?? TICK_MS);
   timer.unref?.();
+  const pruneTimer = setInterval(() => {
+    if (!stopped) void notices.prune().catch(warn('notice prune failed'));
+  }, PRUNE_MS);
+  pruneTimer.unref?.();
 
   return {
     automations: svc,
     proposals,
     inbox,
     ledger: o.ledger ?? memoryActionLedger(now),
-    notices: { feed: async (_q: { sinceTs: number | null; limit: number }): Promise<NotificationRow[]> => [] },
+    notices,
     reconcile,
     async tick(): Promise<void> {
       await svc.tick();
@@ -231,6 +253,7 @@ export async function startHostAutomations(o: HostAutomationsOptions) {
       if (stopped) return;
       stopped = true;
       clearInterval(timer);
+      clearInterval(pruneTimer);
       svc.cancelPending();
       setAutomationHandlers(null);
       setInboxHandlers(null);

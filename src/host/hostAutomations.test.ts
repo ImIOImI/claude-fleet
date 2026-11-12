@@ -319,6 +319,39 @@ describe('startHostAutomations', () => {
     expect((await store.events(id)).at(-1)?.actor).toEqual({ kind: 'user', id: 'ann' });
   });
 
+  it('notify from a host session is a held notice the RPC feed serves; any other caller is refused (D131)', async () => {
+    const { published } = await start();
+    initReadSource(null);
+    const r = await callTool({ name: 'notify', arguments: { title: 'nightly ok\nsecond line', body: 'all green', key: 'nightly' } }, WS.id);
+    expect(JSON.parse(text(r))).toMatchObject({ delivered: false, heldReason: 'remote' });
+    const other = await callTool({ name: 'notify', arguments: { title: 'x' } }, 'SOMEONE-ELSE') as { isError?: boolean };
+    expect(other.isError).toBe(true);
+    expect(published.filter(([c]) => c === 'notices:changed')).toEqual([['notices:changed', null]]);
+    const feed = await dispatchRpc(automationRpcChannels(() => runtimeOf(h!, () => WS)), 'notices:feed', { args: [{ sinceTs: 0 }] }, { ...ann, tier: 'read' });
+    const rows = (feed.body as { result: { rows: Array<Record<string, unknown>> } }).result.rows;
+    expect(rows).toEqual([expect.objectContaining({
+      kind: 'post', title: 'nightly ok second line', body: 'all green', dedupeKey: 'nightly', workspaceId: WS.id,
+      source: { kind: 'workspace', id: WS.id }, delivered: false, heldReason: 'remote'
+    })]);
+  });
+
+  it('notify shares the hourly post limit', async () => {
+    await start();
+    initReadSource(null);
+    for (let i = 0; i < 60; i++) await callTool({ name: 'notify', arguments: { title: `n${i}` } }, WS.id);
+    const r = await callTool({ name: 'notify', arguments: { title: 'one more' } }, WS.id) as { isError?: boolean; content: Array<{ text: string }> };
+    expect([r.isError, text(r)]).toEqual([true, expect.stringMatching(/post limit \(60\/hour\)/)]);
+  });
+
+  it('a todo posted with notify becomes a notice; one without does not', async () => {
+    await start();
+    initReadSource(null);
+    await callTool({ name: 'post_todo', arguments: { title: 'look', notify: true } }, WS.id);
+    await callTool({ name: 'post_todo', arguments: { title: 'quiet' } }, WS.id);
+    const notes = await h!.notices.feed({ sinceTs: 0, limit: 100 });
+    expect(notes.map((n) => [n.kind, n.title])).toEqual([['todo', 'look']]);
+  });
+
   it('stop() unhooks the MCP handlers and is idempotent', async () => {
     await start();
     initReadSource(null);
