@@ -264,7 +264,7 @@ export function createProposalService(deps: ProposalDeps) {
         p.status = statusOf(p.items);
         p.note = note?.trim() ? note.trim().slice(0, 2000) : null;
         p.decidedAt = deps.now();
-        await deps.proposals.save(p);
+        if (!(await deps.proposals.saveIfPending(p))) throw new Error('this proposal was decided meanwhile');
         deps.changed();
         return p;
       });

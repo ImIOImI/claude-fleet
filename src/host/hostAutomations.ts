@@ -264,6 +264,7 @@ export async function startHostAutomations(o: HostAutomationsOptions) {
     if (!stopped) svc.tick().catch(warn('automation tick failed'));
   }, o.tickMs ?? TICK_MS);
   timer.unref?.();
+  await notices.prune().catch(warn('notice prune failed'));
   const pruneTimer = setInterval(() => {
     if (!stopped) void notices.prune().catch(warn('notice prune failed'));
   }, PRUNE_MS);

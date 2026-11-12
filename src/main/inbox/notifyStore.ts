@@ -104,6 +104,17 @@ export class NotifyStore {
     return Number(r.numDeletedRows);
   }
 
+  /** Deletes all but the newest `keep` rows (by ts, id) for one workspace. */
+  async keepNewest(workspaceId: string, keep: number): Promise<number> {
+    const edge = await this.db.selectFrom('notifications').select(['ts', 'id']).where('workspace_id', '=', workspaceId)
+      .orderBy('ts', 'desc').orderBy('id', 'desc').offset(keep).limit(1).executeTakeFirst();
+    if (!edge) return 0;
+    const r = await this.db.deleteFrom('notifications').where('workspace_id', '=', workspaceId)
+      .where((eb) => eb.or([eb('ts', '<', edge.ts), eb.and([eb('ts', '=', edge.ts), eb('id', '<=', edge.id)])]))
+      .executeTakeFirst();
+    return Number(r.numDeletedRows);
+  }
+
   // --- rules ---------------------------------------------------------------
 
   async rules(): Promise<NotifyRule[]> {

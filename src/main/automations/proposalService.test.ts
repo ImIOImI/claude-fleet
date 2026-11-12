@@ -84,6 +84,28 @@ describe('approving', () => {
     expect(await svc.mcp.get('W2', { id })).toMatchObject({ status: 'rejected', note: 'too noisy' });
     await expect(svc.mcp.get('W1', { id })).rejects.toThrow(/not found/);
   });
+  it('a reject whose read raced another decision refuses and leaves that decision', async () => {
+    inbox = await openTestInbox();
+    const store = new ProposalStore(inbox.kysely);
+    let armed = false;
+    const racing = Object.assign(Object.create(store) as ProposalStore, {
+      get: async (id: string) => {
+        const p = await store.get(id);
+        const other = await store.get(id);
+        if (armed && other?.status === 'pending') await store.save({ ...other, status: 'approved', note: 'applied elsewhere', decidedAt: 1 });
+        return p;
+      }
+    });
+    const svc = createProposalService({
+      proposals: racing, automations: new AutomationStore(inbox.kysely), now: () => 2,
+      resolveWorkspace: (v) => WSS[v] ?? null, workspaceName: (id) => id, trusted: async () => false,
+      notify: () => null, changed: () => {}
+    });
+    const { id } = await svc.mcp.propose('W2', { definition: YAML() });
+    armed = true;
+    await expect(svc.reject(id, 'no')).rejects.toThrow(/decided meanwhile/);
+    expect(await store.get(id)).toMatchObject({ status: 'approved', note: 'applied elsewhere' });
+  });
   it('a change whose automation moved on since it was proposed is refused', async () => {
     const { svc, automations } = await setup();
     const a = await automations.create({ name: 'log-watch', triggers: [{ schedule: { cron: '*/15 * * * *' } }], steps: [{ id: 'check', prompt: { workspace: 'W1', mode: 'live', message: 'check logs' } }] }, { kind: 'user', id: null });

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { InboxStore } from '../main/inbox/inboxDb.js';
 import { NotifyStore } from '../main/inbox/notifyStore.js';
 import { openTestInbox } from '../main/store/testStore.js';
-import { hostNotices, NOTICE_HELD, NOTICE_RETENTION_MS } from './hostNotices.js';
+import { hostNotices, MAX_NOTICES_KEPT, NOTICE_HELD, NOTICE_RETENTION_MS } from './hostNotices.js';
 
 const W = '01JC0000000000000000000000';
 
@@ -10,11 +10,11 @@ describe('host notices', () => {
   let inbox: InboxStore | null = null;
   afterEach(async () => { await inbox?.close(); inbox = null; });
 
-  async function setup(clock: { now: number }) {
+  async function setup(clock: { now: number }, keep?: number) {
     inbox = await openTestInbox();
     const hints: number[] = [];
     const store = new NotifyStore(inbox.kysely);
-    const n = hostNotices({ store, workspaceId: () => W, now: () => clock.now, changed: () => hints.push(clock.now), sourceName: () => 'review-bot' });
+    const n = hostNotices({ store, workspaceId: () => W, now: () => clock.now, changed: () => hints.push(clock.now), sourceName: () => 'review-bot', keep });
     return { n, hints, store };
   }
 
@@ -71,5 +71,21 @@ describe('host notices', () => {
     clock.now = 1_002 + NOTICE_RETENTION_MS;
     expect(await n.prune()).toBe(2);
     expect(NOTICE_RETENTION_MS).toBe(7 * 86_400_000);
+  });
+
+  it(`prune keeps only the newest ${MAX_NOTICES_KEPT} rows of the hosted workspace, same-ts rows by id`, async () => {
+    expect(MAX_NOTICES_KEPT).toBe(5000);
+    const clock = { now: 1_000 };
+    const { n, store } = await setup(clock, 3);
+    for (let i = 0; i < 6; i++) {
+      clock.now = 1_000 + Math.floor(i / 2);
+      await n.request({ kind: 'post', title: `n${i}`, priority: 'normal', source: { kind: 'workspace', id: W } });
+    }
+    await store.insert({ ts: 1, kind: 'post', title: 'stray', body: null, priority: 'normal', source: { kind: 'workspace', id: 'X' }, todoId: null, workspaceId: 'X', dedupeKey: null, tags: [], delivered: false, heldReason: 'remote', channel: null });
+    const newest = (await n.feed({ sinceTs: 0, limit: 100 })).slice(-3).map((r) => r.id);
+    expect(await n.prune()).toBe(3);
+    expect((await n.feed({ sinceTs: 0, limit: 100 })).map((r) => r.id)).toEqual(newest);
+    expect((await store.list({ workspaceId: 'X' })).map((r) => r.title)).toEqual(['stray']);
+    expect(await n.prune()).toBe(0);
   });
 });

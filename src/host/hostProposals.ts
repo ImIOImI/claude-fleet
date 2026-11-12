@@ -46,8 +46,7 @@ export async function markConfigApplied(o: {
       p.decidedAt = o.now();
       p.note = CONFIG_APPLIED_NOTE;
     }
-    await o.proposals.save(p);
-    changed++;
+    if (await o.proposals.saveIfPending(p)) changed++;
   }
   return changed;
 }

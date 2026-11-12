@@ -9,6 +9,7 @@ export const NOTICE_HELD = 'remote';
 export const NOTICE_RETENTION_MS = 7 * 86_400_000;
 export const MAX_NOTICE_TITLE = 200;
 export const MAX_NOTICE_BODY = 2000;
+export const MAX_NOTICES_KEPT = 5000;
 
 export interface HostNotices {
   request(n: NotifyInput): Promise<NotificationRow>;
@@ -26,6 +27,7 @@ export function hostNotices(o: {
   /** Publish the data-free notices:changed hint. */
   changed(): void;
   sourceName(s: TodoSource): string;
+  keep?: number;
 }): HostNotices {
   async function request(n: NotifyInput): Promise<NotificationRow> {
     const body = n.body ? oneLine(n.body, MAX_NOTICE_BODY) : '';
@@ -49,6 +51,9 @@ export function hostNotices(o: {
       if (sinceTs !== null) return o.store.since(sinceTs, limit, o.workspaceId());
       return (await o.store.list({ filter: 'all', limit, workspaceId: o.workspaceId() })).reverse();
     },
-    prune: () => o.store.prune(o.now() - NOTICE_RETENTION_MS)
+    async prune() {
+      const old = await o.store.prune(o.now() - NOTICE_RETENTION_MS);
+      return old + await o.store.keepNewest(o.workspaceId(), o.keep ?? MAX_NOTICES_KEPT);
+    }
   };
 }

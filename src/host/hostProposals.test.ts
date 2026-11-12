@@ -4,9 +4,10 @@ import type { InboxStore } from '../main/inbox/inboxDb.js';
 import { setAutomationHandlers, setInboxHandlers } from '../main/mcpCore.js';
 import { openTestInbox } from '../main/store/testStore.js';
 import type { Principal } from './attachHub.js';
-import { automationRpcChannels, runtimeOf } from './automationRpc.js';
+import { automationRpcChannels, rejectedNote, runtimeOf } from './automationRpc.js';
 import { startHostAutomations, type HostAutomations } from './hostAutomations.js';
-import { CONFIG_APPLIED_NOTE, MAX_PENDING_HOST_PROPOSALS, selfDefinition } from './hostProposals.js';
+import { ProposalStore } from '../main/automations/proposalStore.js';
+import { CONFIG_APPLIED_NOTE, MAX_PENDING_HOST_PROPOSALS, markConfigApplied, selfDefinition } from './hostProposals.js';
 import { createLogger } from './log.js';
 import { dispatchRpc } from './rpc.js';
 import { fakeBroker } from './testFakes.js';
@@ -140,6 +141,32 @@ describe('host proposals are config drafts (D126)', () => {
     expect((await h!.proposals.list()).find((p) => p.id === pending.id)).toMatchObject({ status: 'rejected', note: 'no' });
   });
 
+  it('a Reject landing between the applied mark\'s read and its save wins', async () => {
+    const { mcp } = await setup();
+    const r = await mcp().propose(WS.id, { definition: yaml('triage') }) as { id: string };
+    const store = new ProposalStore(inbox!.kysely);
+    const def = (await store.get(r.id))!.items[0].after;
+    const automations = new AutomationStore(inbox!.kysely);
+    await automations.create(def, { kind: 'user', id: null }, Date.now(), true, { source: 'loadout' });
+    const racing = Object.assign(Object.create(store) as ProposalStore, {
+      pending: async () => { const ps = await store.pending(); await h!.proposals.reject(r.id, 'no'); return ps; }
+    });
+    expect(await markConfigApplied({ proposals: racing, automations, now: Date.now, isConfig: () => true })).toBe(0);
+    expect(await store.get(r.id)).toMatchObject({ status: 'rejected', note: 'no' });
+  });
+
+  it('a Reject whose read precedes the applied mark refuses rather than overwrite it', async () => {
+    const { mcp } = await setup();
+    const r = await mcp().propose(WS.id, { definition: yaml('triage') }) as { id: string };
+    const stale = (await new ProposalStore(inbox!.kysely).get(r.id))!;
+    await h!.reconcile([cfg('triage')]);
+    stale.status = 'rejected';
+    stale.note = 'no';
+    expect(await new ProposalStore(inbox!.kysely).saveIfPending(stale)).toBe(false);
+    await expect(h!.proposals.reject(r.id, 'no')).rejects.toThrow(/already approved/);
+    expect((await h!.proposals.list())[0]).toMatchObject({ status: 'approved', note: CONFIG_APPLIED_NOTE });
+  });
+
   it('Reject over RPC is recorded under the person, and the session reads the note', async () => {
     const { mcp } = await setup();
     const r = await mcp().propose(WS.id, { definition: yaml('triage') }) as { id: string };
@@ -148,6 +175,20 @@ describe('host proposals are config drafts (D126)', () => {
     expect(res.body).toMatchObject({ ok: true, result: { replayed: false, result: { id: r.id, status: 'rejected' } } });
     expect(await mcp().getProposal(WS.id, { id: r.id })).toMatchObject({ status: 'rejected', note: 'Rejected by @ann: too often' });
     await expect(mcp().getProposal('SOMEONE-ELSE', { id: r.id })).rejects.toThrow(/not found/);
+  });
+
+  it('a maximal Reject note fits under the prefix whole, so the stored note ends with the user\'s own text', async () => {
+    const { mcp } = await setup();
+    const r = await mcp().propose(WS.id, { definition: yaml('triage') }) as { id: string };
+    const note = `${'a'.repeat(1990)}tail-words`;
+    const want = rejectedNote(note, { kind: 'user', id: 'ann' });
+    expect(want.length).toBe(2000);
+    expect(want.startsWith('Rejected by @ann: aaa')).toBe(true);
+    expect(rejectedNote('  short  ', { kind: 'user', id: null })).toBe('Rejected by host operator: short');
+    expect(rejectedNote(' ', { kind: 'user', id: 'ann' })).toBe('Rejected by @ann');
+    const reg = automationRpcChannels(() => runtimeOf(h!, () => WS));
+    await dispatchRpc(reg, 'proposals:reject', { args: [{ requestId: '0b6f8f0e-4b1c-4c2a-9a0e-1f2e3d4c5b6b', id: r.id, note }] }, ann);
+    expect((await mcp().getProposal(WS.id, { id: r.id }) as { note: string }).note).toBe(want);
   });
 
   it('selfDefinition binds $self in text and objects and passes unparseable text through', () => {

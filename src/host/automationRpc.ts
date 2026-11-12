@@ -69,9 +69,17 @@ const plainObject = (v: unknown, what: string): Record<string, unknown> => {
 };
 const clampLimit = (v: unknown, max: number): number => (typeof v === 'number' && Number.isSafeInteger(v) ? Math.min(Math.max(v, 1), max) : max);
 
+/** The proposal service's note cap. */
+const MAX_NOTE = 2000;
+
 /** Proposals carry no decider column: the note names the person, and the session reads it with get_proposal (D130). */
-export const rejectedNote = (note: string | null, by: TodoSource): string =>
-  `Rejected by ${by.id ? `@${by.id}` : 'host operator'}${note?.trim() ? `: ${note.trim()}` : ''}`;
+export function rejectedNote(note: string | null, by: TodoSource): string {
+  const head = `Rejected by ${by.id ? `@${by.id}` : 'host operator'}`;
+  const text = note?.trim();
+  if (!text) return head;
+  const prefix = `${head}: `;
+  return prefix + text.slice(0, MAX_NOTE - prefix.length).trimEnd();
+}
 
 /** The person behind an action, for todo sources, event actors and run triggers (D130). */
 export const personOf = (c: Principal): TodoSource => ({ kind: 'user', id: c.identity.login });

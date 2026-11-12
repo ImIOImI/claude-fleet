@@ -3,6 +3,8 @@ import { AutomationStore } from '../main/automations/automationStore.js';
 import { definitionToYaml } from '../main/automations/definition.js';
 import { INBOX_TOOLS } from '../main/automations/runner.js';
 import { InboxStore } from '../main/inbox/inboxDb.js';
+import { NotifyStore } from '../main/inbox/notifyStore.js';
+import { NOTICE_RETENTION_MS } from './hostNotices.js';
 import { callTool, initReadSource, releaseReadSource, setAutomationHandlers, setInboxHandlers } from '../main/mcpCore.js';
 import { isPg, openTestInbox, testPgSchema, type TestPg } from '../main/store/testStore.js';
 import type { AutomationDef } from '../preload/inboxTypes.js';
@@ -352,6 +354,15 @@ describe('startHostAutomations', () => {
     await callTool({ name: 'post_todo', arguments: { title: 'quiet' } }, WS.id);
     const notes = await h!.notices.feed({ sinceTs: 0, limit: 100 });
     expect(notes.map((n) => [n.kind, n.title])).toEqual([['todo', 'look']]);
+  });
+
+  it('prunes expired notices when the holder starts, not only hourly', async () => {
+    const inbox = await openTestInbox();
+    const ns = new NotifyStore(inbox.kysely);
+    await ns.insert({ ts: Date.now() - NOTICE_RETENTION_MS - 1, kind: 'post', title: 'old', body: null, priority: 'normal', source: { kind: 'workspace', id: WS.id }, todoId: null, workspaceId: WS.id, dedupeKey: null, tags: [], delivered: false, heldReason: 'remote', channel: null });
+    await ns.insert({ ts: Date.now(), kind: 'post', title: 'new', body: null, priority: 'normal', source: { kind: 'workspace', id: WS.id }, todoId: null, workspaceId: WS.id, dedupeKey: null, tags: [], delivered: false, heldReason: 'remote', channel: null });
+    await start(inbox);
+    expect((await h!.notices.feed({ sinceTs: 0, limit: 100 })).map((n) => n.title)).toEqual(['new']);
   });
 
   it('stop() unhooks the MCP handlers and is idempotent', async () => {
