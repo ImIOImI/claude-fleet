@@ -2,8 +2,10 @@
 // connection; `query`'s per-call isolation snapshot runs off the main thread
 // in queryWorker.ts (#476).
 import Database from 'better-sqlite3';
-import { searchVectorsSqlite } from './transcriptIndex.js';
+import { scanJob } from './transcriptIndex.js';
 import { runQueryInWorker } from './queryWorker.js';
+import { SearchWorkerClient, type SearchWorkerOptions } from './searchWorker.js';
+import { scanViaWorker } from './searchScan.js';
 import {
   NOT_AUTHORIZED, checkEventColumns, type OwnedReadSource, type Row, type Scope, type TokenGroup,
 } from './store/readSource.js';
@@ -50,8 +52,25 @@ function assertInScope(db: Database.Database, scope: Scope, id: string): void {
   if (sessionWorkspace(db, scope, id) === null) throw new Error(NOT_AUTHORIZED);
 }
 
+export interface SqliteReadSourceOptions {
+  /** Scan search_transcripts in a worker thread (default: when `db` is a file). */
+  searchWorker?: boolean | SearchWorkerOptions;
+}
+
 /** `db` is the MCP server's `{ readonly: true }` connection to state.db. */
-export function sqliteReadSource(db: Database.Database): OwnedReadSource {
+export function sqliteReadSource(db: Database.Database, o: SqliteReadSourceOptions = {}): OwnedReadSource {
+  let worker: SearchWorkerClient | null | undefined;
+  let closed = false;
+  const searchWorker = (): SearchWorkerClient | null => {
+    if (closed) return null;
+    if (worker === undefined) {
+      const onFile = db.name !== '' && db.name !== ':memory:' && !db.memory;
+      worker = o.searchWorker !== false && onFile
+        ? new SearchWorkerClient(db.name, typeof o.searchWorker === 'object' ? o.searchWorker : {})
+        : null;
+    }
+    return worker;
+  };
   return {
     queryFlavor: 'sqlite',
     async listSessions(scope, f) {
@@ -115,8 +134,9 @@ export function sqliteReadSource(db: Database.Database): OwnedReadSource {
       const sql = `SELECT * FROM errors WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ?`;
       return db.prepare(sql).all(...p, f.limit) as Row[];
     },
-    async searchEmbeddings(qvec, scope, o) {
-      return searchVectorsSqlite(db, qvec, [...scope], o);
+    async searchEmbeddings(qvec, scope, opts) {
+      if (closed) throw new Error('search worker closed');
+      return scanViaWorker(searchWorker(), () => db, qvec, scanJob([...scope], opts));
     },
     // Snapshot build + caller SQL run in a worker thread with a hard timeout
     // (#476): on a multi-GB state.db the copy took minutes and froze the main
@@ -134,7 +154,9 @@ export function sqliteReadSource(db: Database.Database): OwnedReadSource {
     },
     async forgetCaller() {},
     async close() {
+      closed = true;
       if (db.open) db.close();
+      await worker?.close();
     },
   };
 }

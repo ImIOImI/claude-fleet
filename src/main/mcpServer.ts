@@ -96,7 +96,10 @@ function setMcpHealth(ok: boolean, detail?: string): void {
  *  workspace (identity comes from the per-connection token, not the socket). */
 export function startMcpServer(dir: string, opts: { readSource?: OwnedReadSource | null } = {}): void {
   if (userDataDir) return;
-  initReadSource(opts.readSource === null ? null : opts.readSource ?? sqliteReadSource(new Database(join(dir, 'state.db'), { readonly: true, fileMustExist: true })));
+  initReadSource(opts.readSource === null ? null : opts.readSource ?? sqliteReadSource(
+    new Database(join(dir, 'state.db'), { readonly: true, fileMustExist: true }),
+    { searchWorker: { log: (message) => logError({ source: 'main', type: 'search-worker', level: 'warn', message }) } },
+  ));
   userDataDir = dir;
 
   if (isWindows && !tcpListener) {
@@ -217,7 +220,7 @@ export function removeWorkspaceSocket(id: string): void {
   }
 }
 
-export function stopMcpServer(): void {
+export async function stopMcpServer(): Promise<void> {
   for (const server of listeners.values()) {
     try {
       server.close();
@@ -236,8 +239,8 @@ export function stopMcpServer(): void {
   }
   tokenToId.clear();
   idToToken.clear();
-  releaseReadSource();
   userDataDir = null;
+  await releaseReadSource();
 }
 
 /** Windows TCP connection handler. The first non-empty line authenticates the

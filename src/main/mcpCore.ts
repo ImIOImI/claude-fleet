@@ -385,10 +385,11 @@ export function initReadSource(rs: OwnedReadSource | null): void {
 }
 
 /** Close and drop the read source (server stop). */
-export function releaseReadSource(): void {
-  void readSource?.close().catch(() => undefined);
+export async function releaseReadSource(): Promise<void> {
+  const rs = readSource;
   readSource = null;
   storeless = false;
+  await rs?.close().catch(() => undefined);
 }
 
 export function currentReadSource(): OwnedReadSource | null {

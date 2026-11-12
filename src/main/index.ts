@@ -5,6 +5,7 @@ import { openDb, openDbPostgres, closeDb, deleteEmbeddingsForOtherModels, sessio
 import { initPerf, shutdownPerf, perfSpan, perfSpanAsync, perfRecordSpan, perfNoteSqlSync, getEffectivePerf, recordBootProfile } from './perf.js';
 import { setSqliteQueryObserver } from './store/kysely.js';
 import { installWalCheckpointer } from './state/walCheckpointer.js';
+import { installSqliteSearchWorker } from './searchScan.js';
 import { startBootProfile } from './bootProfile.js';
 import { PerfStore } from './perfStore.js';
 import { resolvePerfConfig } from './perfConfig.js';
@@ -97,6 +98,7 @@ let managedDocker: ManagedDocker | null = null;
 const inboxGate = new InboxWriteGate();
 const historyGate = new InboxWriteGate();
 installWalCheckpointer();
+installSqliteSearchWorker((message) => logError({ source: 'main', type: 'search-worker', level: 'warn', message }));
 setStateWarnSink((message, extra) => logError({ source: 'main', level: 'warn', type: 'wal-checkpointer', message, extra }));
 // before-quit holds the quit at most this long (#485).
 const QUIT_BOUND_MS = 10_000;
@@ -859,7 +861,7 @@ app.on('before-quit', (e) => {
     retention = null;
     await jsonlWatcher?.stop();
     await peerStatusWatcher?.stop();
-    stopMcpServer();
+    await stopMcpServer();
     await inboxStore?.close();
     inboxStore = null;
     await shutdownPerf();
