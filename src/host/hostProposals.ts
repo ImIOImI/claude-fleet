@@ -4,6 +4,7 @@ import type { AutomationRecord, AutomationStore } from '../main/automations/auto
 import { definitionToYaml, parseDefinitionText } from '../main/automations/definition.js';
 import { statusOf } from '../main/automations/proposalService.js';
 import type { ProposalStore } from '../main/automations/proposalStore.js';
+import type { Proposal } from '../preload/inboxTypes.js';
 import { substituteSelf } from './hostDefinition.js';
 
 export const MAX_PENDING_HOST_PROPOSALS = 20;
@@ -29,24 +30,28 @@ export async function markConfigApplied(o: {
   proposals: ProposalStore; automations: AutomationStore; now(): number; isConfig(a: AutomationRecord): boolean;
 }): Promise<number> {
   let changed = 0;
-  for (const p of await o.proposals.pending()) {
-    if (p.kind === 'capture-settings') continue;
-    let touched = false;
-    for (const it of p.items) {
-      if (it.decision !== 'pending') continue;
-      const rec = await o.automations.byName(it.after.name);
-      if (!rec || !o.isConfig(rec) || definitionToYaml(rec.definition) !== definitionToYaml(it.after)) continue;
-      it.decision = 'accepted';
-      it.automationId = rec.id;
-      touched = true;
+  for (const first of await o.proposals.pending()) {
+    if (first.kind === 'capture-settings') continue;
+    // A lost compare-and-set re-reads: another mark or a Reject saved meanwhile.
+    for (let attempt = 0, p: Proposal | null = first; attempt < 3 && p?.status === 'pending'; attempt++, p = await o.proposals.get(first.id)) {
+      const read = structuredClone(p.items);
+      let touched = false;
+      for (const it of p.items) {
+        if (it.decision !== 'pending') continue;
+        const rec = await o.automations.byName(it.after.name);
+        if (!rec || !o.isConfig(rec) || definitionToYaml(rec.definition) !== definitionToYaml(it.after)) continue;
+        it.decision = 'accepted';
+        it.automationId = rec.id;
+        touched = true;
+      }
+      if (!touched) break;
+      p.status = statusOf(p.items);
+      if (p.status !== 'pending') {
+        p.decidedAt = o.now();
+        p.note = CONFIG_APPLIED_NOTE;
+      }
+      if (await o.proposals.saveIfPending(p, read)) { changed++; break; }
     }
-    if (!touched) continue;
-    p.status = statusOf(p.items);
-    if (p.status !== 'pending') {
-      p.decidedAt = o.now();
-      p.note = CONFIG_APPLIED_NOTE;
-    }
-    if (await o.proposals.saveIfPending(p)) changed++;
   }
   return changed;
 }

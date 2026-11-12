@@ -162,9 +162,50 @@ describe('host proposals are config drafts (D126)', () => {
     await h!.reconcile([cfg('triage')]);
     stale.status = 'rejected';
     stale.note = 'no';
-    expect(await new ProposalStore(inbox!.kysely).saveIfPending(stale)).toBe(false);
+    expect(await new ProposalStore(inbox!.kysely).saveIfPending(stale, structuredClone(stale.items))).toBe(false);
     await expect(h!.proposals.reject(r.id, 'no')).rejects.toThrow(/already approved/);
     expect((await h!.proposals.list())[0]).toMatchObject({ status: 'approved', note: CONFIG_APPLIED_NOTE });
+  });
+
+  async function batchDraft() {
+    const { mcp } = await setup();
+    await h!.reconcile([cfg('one'), cfg('two')]);
+    const r = await mcp().proposeChange(WS.id, { batch: [{ id: 'one', definition: yaml('one', '0 5 * * *') }, { id: 'two', definition: yaml('two', '0 5 * * *') }] }) as { id: string };
+    const store = new ProposalStore(inbox!.kysely);
+    const automations = new AutomationStore(inbox!.kysely);
+    for (const it of (await store.get(r.id))!.items) await automations.update(it.automationId!, it.after, { kind: 'user', id: null });
+    return { id: r.id, store, automations };
+  }
+
+  it('two applied marks interleaving on a multi-item draft both land', async () => {
+    const { id, store, automations } = await batchDraft();
+    const only = (n: string) => (a: { name: string }) => a.name === n;
+    const racing = Object.assign(Object.create(store) as ProposalStore, {
+      pending: async () => {
+        const ps = await store.pending();
+        expect(await markConfigApplied({ proposals: store, automations, now: Date.now, isConfig: only('one') })).toBe(1);
+        return ps;
+      }
+    });
+    expect(await markConfigApplied({ proposals: racing, automations, now: Date.now, isConfig: only('two') })).toBe(1);
+    const p = (await store.get(id))!;
+    expect(p.items.map((i) => i.decision)).toEqual(['accepted', 'accepted']);
+    expect(p).toMatchObject({ status: 'approved', note: CONFIG_APPLIED_NOTE });
+  });
+
+  it('a Reject read before a partial applied mark refuses rather than overwrite the accepted item', async () => {
+    const { id, store, automations } = await batchDraft();
+    const stale = (await store.get(id))!;
+    const read = structuredClone(stale.items);
+    expect(await markConfigApplied({ proposals: store, automations, now: Date.now, isConfig: (a) => a.name === 'one' })).toBe(1);
+    for (const it of stale.items) it.decision = 'declined';
+    stale.status = 'rejected';
+    expect(await store.saveIfPending(stale, read)).toBe(false);
+    const p = (await store.get(id))!;
+    expect(p.status).toBe('pending');
+    expect(p.items.map((i) => i.decision)).toEqual(['accepted', 'pending']);
+    await h!.proposals.reject(id, 'no');
+    expect((await store.get(id))!.items.map((i) => i.decision)).toEqual(['accepted', 'declined']);
   });
 
   it('Reject over RPC is recorded under the person, and the session reads the note', async () => {

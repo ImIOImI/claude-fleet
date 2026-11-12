@@ -23,6 +23,7 @@ export const CURSOR_IDS = 500;
 /** Overlap re-read cap: the remembered ids span at most this many pages. */
 export const OVERLAP_PAGES = CURSOR_IDS / FEED_LIMIT + 1;
 export const POLL_MS = 60_000;
+export const FORGET_AFTER_MISSES = 2;
 const DEBOUNCE_MS = 1_000;
 
 export interface Keyset { ts: number; id: string }
@@ -63,7 +64,7 @@ export interface RemoteNotifierDeps {
 export interface RemoteNotifier {
   /** The host said its notices changed (or reconnected): pull soon. */
   hint(origin: string): void;
-  /** The bookmarked remote origins: forgets the rest, polls those not pulled for POLL_MS. */
+  /** The bookmarked remote origins: forgets one missing from FORGET_AFTER_MISSES syncs in a row, polls those not pulled for POLL_MS. */
   sync(origins: string[]): void;
   stop(): void;
 }
@@ -77,6 +78,7 @@ export function createRemoteNotifier(d: RemoteNotifierDeps): RemoteNotifier {
   const chains = new Map<string, Promise<void>>();
   const sentAt = new Map<string, number[]>();
   const pulledAt = new Map<string, number>();
+  const misses = new Map<string, number>();
   let stopped = false;
 
   /** Runs one job at a time per origin, so a forget can't interleave with a pull. */
@@ -167,7 +169,11 @@ export function createRemoteNotifier(d: RemoteNotifierDeps): RemoteNotifier {
       const keep = new Set(origins);
       void d.cursorOrigins().then((known) => {
         for (const o of known) {
-          if (keep.has(o)) continue;
+          if (keep.has(o)) { misses.delete(o); continue; }
+          // An unreadable manifest is skipped by one listing; a real forget is missing every time.
+          const n = (misses.get(o) ?? 0) + 1;
+          if (n < FORGET_AFTER_MISSES) { misses.set(o, n); continue; }
+          misses.delete(o);
           pending.get(o)?.();
           pending.delete(o);
           sentAt.delete(o);

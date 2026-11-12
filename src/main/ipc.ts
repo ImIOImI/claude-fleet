@@ -799,9 +799,9 @@ export async function hostWorkspaceState(targetId: string): Promise<'running' | 
   return (w?.state as 'running' | 'paused' | 'stopped' | 'deleted' | 'unreachable' | undefined) ?? null;
 }
 
-/** id ↔ name for every known workspace (live and saved). */
-export async function hostWorkspaceNames(): Promise<Array<{ id: string; name: string }>> {
-  return (await listAllWorkspaces()).map((w) => ({ id: w.id, name: w.name }));
+/** id ↔ name for every known workspace (live and saved), remote bookmarks included. */
+export async function hostWorkspaceNames(): Promise<Array<{ id: string; name: string; kind: string }>> {
+  return (await listAllWorkspaces()).map((w) => ({ id: w.id, name: w.name, kind: w.kind }));
 }
 
 /** Find a live renderer PtyHandle for a workspace, if one is attached. */

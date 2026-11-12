@@ -107,7 +107,8 @@ describe('requestRemoteDraft: a local drafting session with read-tier host conte
     expect(await requestRemoteDraft(d, O, 'run at 4 instead', 'A1')).toBe('ROLE');
     expect(calls).toEqual(['automations:list', 'automations:get']);
     expect(requested).toEqual([O]);
-    expect(posted[0]).toMatch(/propose_automation_change \(id = "nightly"/);
+    expect(posted[0]).toMatch(/propose_automation_change \(id = that automation's name/);
+    expect(posted[0]).toMatch(/=== BEGIN HOST DATA [0-9a-f]{32} ===\nAutomations already on review-bot: nightly, triage\.\nAutomation to change: nightly\n/);
     expect(posted[0]).toMatch(/platform-ops PR/);
     expect(posted[0]).toMatch(/Automations already on review-bot: nightly, triage\./);
     expect(posted[0]).toContain('cron: 0 3 * * *');

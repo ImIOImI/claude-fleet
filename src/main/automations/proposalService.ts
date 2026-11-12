@@ -18,6 +18,8 @@ export interface ProposalDeps {
   automations: AutomationStore;
   now(): number;
   resolveWorkspace(idOrName: string): string | null;
+  /** Why an unresolved workspace can't be targeted here (a remote bookmark); null = unknown. */
+  refuseWorkspace?(idOrName: string): string | null;
   workspaceName(id: string): string;
   /** Trusted for low-risk edits: manifest inbox.trusted, container workspaces only. */
   trusted(workspaceId: string): Promise<boolean>;
@@ -36,7 +38,7 @@ export function statusOf(items: ProposalItem[]): ProposalStatus {
 }
 
 export function createProposalService(deps: ProposalDeps) {
-  const ctx = { workspace: (v: string) => deps.resolveWorkspace(v), get hostShells() { return deps.hostShells?.(); }, check: deps.checkDefinition };
+  const ctx = { workspace: (v: string) => deps.resolveWorkspace(v), refusal: (v: string) => deps.refuseWorkspace?.(v) ?? null, get hostShells() { return deps.hostShells?.(); }, check: deps.checkDefinition };
   /** Proposal ids with a decision in progress (approve/reject/revert). Claimed before the first await. */
   const deciding = new Set<string>();
   /** Applies an approved capture-settings change (#483 §5a). Late-bound: the
@@ -260,11 +262,12 @@ export function createProposalService(deps: ProposalDeps) {
         const p = await deps.proposals.get(id);
         if (!p) throw new Error('proposal not found');
         if (p.status !== 'pending') throw new Error(`this proposal is already ${p.status}`);
+        const read = structuredClone(p.items);
         for (const it of p.items) if (it.decision === 'pending') it.decision = 'declined';
         p.status = statusOf(p.items);
         p.note = note?.trim() ? note.trim().slice(0, 2000) : null;
         p.decidedAt = deps.now();
-        if (!(await deps.proposals.saveIfPending(p))) throw new Error('this proposal was decided meanwhile');
+        if (!(await deps.proposals.saveIfPending(p, read))) throw new Error('this proposal was decided meanwhile');
         deps.changed();
         return p;
       });

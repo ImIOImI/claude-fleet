@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  createRemoteNotifier, CURSOR_IDS, CURSOR_OVERLAP_MS, FEED_LIMIT, MAX_PAGES, OVERLAP_PAGES, POLL_MS, remoteNoticeInput, REMOTE_LATE_MS, REMOTE_NOTICE_RATE,
+  createRemoteNotifier, CURSOR_IDS, CURSOR_OVERLAP_MS, FEED_LIMIT, FORGET_AFTER_MISSES, MAX_PAGES, OVERLAP_PAGES, POLL_MS, remoteNoticeInput, REMOTE_LATE_MS, REMOTE_NOTICE_RATE,
   type FeedQuery, type NoticeCursor
 } from './remoteNotices.js';
 import type { RemoteNotice } from '../../preload/remoteAutomations.js';
@@ -159,6 +159,26 @@ describe('remote notices', () => {
     await flush();
     expect(sent).toEqual([]);
     expect(cursors.get(O)).toEqual({ ts: 5, id: '', ids: [], floor: null });
+    r.sync([]);
+    await flush();
+    expect(forgotten).toEqual([]);
+    r.sync([]);
+    await flush();
+    expect(forgotten).toEqual([O]);
+  });
+
+  it(`forgets an origin only after ${FORGET_AFTER_MISSES} syncs in a row without it (a skipped manifest is one miss)`, async () => {
+    const clock = { now: 10_000_000 };
+    const { r, cursors, forgotten } = setup(() => [], clock);
+    cursors.set(O, { ts: 5, id: '', ids: [], floor: null });
+    r.sync([]);
+    await flush();
+    r.sync([O]);
+    await flush();
+    r.sync([]);
+    await flush();
+    expect(forgotten).toEqual([]);
+    expect(cursors.has(O)).toBe(true);
     r.sync([]);
     await flush();
     expect(forgotten).toEqual([O]);
