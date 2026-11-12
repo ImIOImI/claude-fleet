@@ -53,19 +53,22 @@ describe('mcpCore', () => {
       expect(rows.map((r) => [r.type, r.level, r.workspaceId])).toEqual([['mcp-conn-closed', 'info', 'W1']]);
     });
 
-    it('logs a close with requests still in flight at warn', async () => {
+    it('a close with a request in flight logs nothing itself; the reply that finds it gone logs mcp-reply-dropped', async () => {
       let release!: () => void;
       const gate = new Promise<void>((r) => { release = r; });
       initReadSource(null);
       setReadScopeResolver(async (id) => { await gate; return [id]; });
       const rows: McpLogEntry[] = [];
-      const sock = open(rows);
+      const sock = open(rows) as Socket & { destroyed?: boolean };
       sock.emit('data', JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_sessions', arguments: {} } }) + '\n');
       await new Promise((r) => setTimeout(r, 10));
+      sock.destroyed = true;
       sock.emit('close');
+      expect(rows.find((r) => r.type === 'mcp-conn-closed')).toBeUndefined();
       release();
+      await new Promise((r) => setTimeout(r, 10));
       setReadScopeResolver(async (id) => [id]);
-      expect(rows.find((r) => r.type === 'mcp-conn-closed')).toMatchObject({ level: 'warn', extra: { inFlight: 1, rpcCount: 1 } });
+      expect(rows.find((r) => r.type === 'mcp-reply-dropped')).toMatchObject({ level: 'warn', extra: { method: 'tools/call', tool: 'list_sessions' } });
     });
 
     it('logs the accept and close of a long-lived connection', () => {
