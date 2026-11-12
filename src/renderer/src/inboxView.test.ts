@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { groupByPriority, matchesSearch, sourceLabel, chipSubline, chipDot, relativeAgo, eventLabel } from './inboxView';
+import { groupByPriority, matchesSearch, sourceLabel, chipSubline, chipDot, relativeAgo, eventLabel, withRemoteCounts } from './inboxView';
 import type { Todo, TodoEvent } from '../../preload/inboxTypes';
 
 const t = (over: Partial<Todo>): Todo => ({
@@ -53,5 +53,17 @@ describe('inboxView helpers', () => {
     expect(eventLabel(e('status', { to: 'done' }), {})).toBe('You marked it done');
     expect(eventLabel(e('tag_add', { tags: ['a', 'b'] }), {})).toBe('You added tags a, b');
     expect(eventLabel(e('priority', { to: 'high' }), {})).toBe('You set priority to high');
+  });
+  it('a remote todo names its actor instead of "You", and survives a detail without tags', () => {
+    const ev = { id: 1, todoId: 'T', ts: 0, kind: 'status' as const, actor: { kind: 'user' as const, id: 'ann' }, runId: null, detail: { to: 'done' } };
+    expect(eventLabel(ev, {}, '@ann')).toBe('@ann marked it done');
+    expect(eventLabel({ ...ev, kind: 'tag_add', detail: {} }, {}, '@ann')).toBe('@ann added tag ');
+  });
+});
+
+describe('withRemoteCounts (D137)', () => {
+  it('adds every host\'s counts to the local ones, approvals included', () => {
+    expect(withRemoteCounts({ open: 2, urgent: 1, high: 0 }, { open: 3, urgent: 4, high: 2, approvals: 1 })).toEqual({ open: 5, urgent: 5, high: 2, approvals: 1 });
+    expect(withRemoteCounts({ open: 1, urgent: 0, high: 0, approvals: 2 }, { open: 0, urgent: 0, high: 0, approvals: 0 })).toEqual({ open: 1, urgent: 0, high: 0, approvals: 2 });
   });
 });
