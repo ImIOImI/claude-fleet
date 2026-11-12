@@ -20,11 +20,11 @@ import type { StoreChoice, StoreSettings, StoreStatus } from './storeTypes';
 import type { FederatedSearchResult, RemoteSessionsResult, SessionCursor } from './federation';
 import type { UnpublishResult } from './publish';
 import type {
-  Federated, RemoteActionResult, RemoteAutomation, RemoteAutomationDetail, RemoteChange, RemoteCounts, RemoteProposal, RemoteTodo
+  Federated, RemoteActionResult, RemoteAutomation, RemoteAutomationDetail, RemoteChange, RemoteCounts, RemoteDraft, RemoteProposal, RemoteTodo
 } from './remoteAutomations';
 export type {
   Federated, RemoteActionErrorKind, RemoteActionResult, RemoteAutomation, RemoteAutomationDetail, RemoteChange, RemoteChangeChannel,
-  RemoteCounts, RemoteNotice, RemoteOriginInfo, RemoteProposal, RemoteTierName, RemoteTodo
+  RemoteCounts, RemoteDraft, RemoteNotice, RemoteOriginInfo, RemoteProposal, RemoteTierName, RemoteTodo
 } from './remoteAutomations';
 export type { UnpublishResult, WorkspacePublish } from './publish';
 export type { ImportProgress, StoreChoice, StorePhase, StoreSettings, StoreStatus } from './storeTypes';
@@ -417,6 +417,11 @@ const api = {
     discuss: (proposalId: string): Promise<string> => ipcRenderer.invoke('automations:discuss', proposalId),
     draft: (description: string): Promise<string> => ipcRenderer.invoke('automations:draft', description),
     askChange: (id: string, change: string): Promise<string> => ipcRenderer.invoke('automations:askChange', id, change),
+    /** Drafts locally for a remote workspace (D127); automationId asks for a change. Resolves to the local automations workspace id. */
+    draftRemote: (origin: string, text: string, automationId: string | null): Promise<string> =>
+      ipcRenderer.invoke('automations:draftRemote', origin, text, automationId),
+    remoteDrafts: (): Promise<RemoteDraft[]> => ipcRenderer.invoke('automations:remoteDrafts'),
+    dismissRemoteDraft: (id: string): Promise<void> => ipcRenderer.invoke('automations:dismissRemoteDraft', id),
     onChanged: (cb: () => void): (() => void) => {
       const h = (): void => cb();
       ipcRenderer.on('automations:changed', h);

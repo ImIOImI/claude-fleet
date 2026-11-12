@@ -11,8 +11,10 @@ import { createLoadoutInstaller } from './loadoutInstaller.js';
 import { runScript } from './hostScript.js';
 import {
   hostCloseFresh, hostEnsureRunning, hostExecScript, hostFreshState, hostPostToWorkspace, hostSpawnFresh, hostWorkspaceBusy, hostWorkspaceNames,
-  hostWorkspaceState, hostWslDistros, setFleetEventObserver
+  hostWorkspaceState, hostWslDistros, remoteFederation, setFleetEventObserver
 } from '../ipc.js';
+import { newId } from '../inbox/inboxDb.js';
+import { createRemoteDrafts, remoteDraftFor, requestRemoteDraft } from './remoteDrafts.js';
 import { existsSync } from 'node:fs';
 import type { HostShell } from '../../preload/inboxTypes.js';
 import { detectHostShells, onPath } from './hostShells.js';
@@ -210,14 +212,28 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
   };
   inboxEvents.on('todo', onTodo);
 
+  // Remote drafting runs here (D127): drafts are config text in memory; nothing is sent to the host.
+  const remoteDrafts = createRemoteDrafts({
+    now: Date.now,
+    sources: () => remoteFederation().sources(),
+    newId: () => newId(),
+    changed: () => send('proposals:changed')
+  });
+
   setAutomationHandlers({
     list: async (callerId) => { await refresh(); return svc.mcp.list(callerId, privileged(callerId)); },
     run: async (callerId, args) => { await refresh(); return svc.mcp.run(callerId, args, privileged(callerId)); },
     get: async (callerId, args) => { await refresh(); return svc.mcp.get(callerId, args, privileged(callerId)); },
     listRuns: async (callerId, args) => { await refresh(); return svc.mcp.listRuns(callerId, args, privileged(callerId)); },
     scheduleNext: async (callerId, args) => { await refresh(); return svc.mcp.scheduleNext(callerId, args); },
-    propose: async (callerId, args) => { await refresh(); return proposals.mcp.propose(callerId, args); },
-    proposeChange: async (callerId, args) => { await refresh(); return proposals.mcp.proposeChange(callerId, args); },
+    propose: async (callerId, args) => {
+      await refresh();
+      return remoteDraftFor(remoteDrafts, callerId, roleWs, args, 'new') ?? proposals.mcp.propose(callerId, args);
+    },
+    proposeChange: async (callerId, args) => {
+      await refresh();
+      return remoteDraftFor(remoteDrafts, callerId, roleWs, args, 'change') ?? proposals.mcp.proposeChange(callerId, args);
+    },
     getProposal: async (callerId, args) => proposals.mcp.get(callerId, args)
   });
 
@@ -294,6 +310,21 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     if (!a) throw new Error('automation not found');
     return toRole((ctx) => changePrompt(a.name, definitionToYaml(a.definition), d, ctx));
   });
+  ipcMain.handle('automations:draftRemote', async (_e, origin: unknown, text: unknown, automationId: unknown) => {
+    const ulid = (v: unknown, what: string): string => {
+      if (typeof v !== 'string' || !/^[0-9A-HJKMNP-TV-Z]{26}$/.test(v)) throw new Error(`${what} must be an id`);
+      return v;
+    };
+    const o = ulid(origin, 'origin');
+    const d = need(text, automationId == null ? 'the automation' : 'the change');
+    const a = automationId == null ? null : ulid(automationId, 'automation');
+    await refresh();
+    if (!roleWs) throw new Error('set up an automations workspace first');
+    const ws = roleWs;
+    return requestRemoteDraft({ reader: remoteFederation(), drafts: remoteDrafts, post: async (p) => { await hostPostToWorkspace(ws, p); return ws; } }, o, d, a);
+  });
+  ipcMain.handle('automations:remoteDrafts', () => remoteDrafts.list());
+  ipcMain.handle('automations:dismissRemoteDraft', (_e, id: unknown) => remoteDrafts.dismiss(String(id)));
   ipcMain.handle('proposals:refine', async (_e, id: string, index: number, text: string) => {
     const d = need(text, 'the changes');
     const p = (await proposals.list()).find((x) => x.id === id);

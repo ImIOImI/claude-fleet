@@ -1575,7 +1575,7 @@ export function App() {
                   const w = roleWsId ? workspaces.find((x) => x.id === roleWsId) : undefined;
                   return w ? { id: w.id, name: w.name, running: w.state === 'running' || w.state === 'paused' } : null;
                 })()}
-                workspaces={workspaces.filter((w) => w.state !== 'deleted').map((w) => ({ id: w.id, name: w.name, kind: w.kind }))}
+                workspaces={workspaces.filter((w) => w.state !== 'deleted').map((w) => ({ id: w.id, name: w.name, kind: w.kind, remoteTier: w.remote?.tier ?? null }))}
                 onCreateAutomationsWs={() => {
                   setCloneSource({ name: 'automations', kind: 'container', image: 'ghcr.io/imioimi/claude-fleet/runner-devops:latest' });
                   setAssignRoleOnCreate(true);

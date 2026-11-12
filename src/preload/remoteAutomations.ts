@@ -1,6 +1,6 @@
 // Remote automations (remote-workspaces (g)): types and constants shared by
 // fleet-host, main and the renderer. Pure.
-import type { Automation, InboxCounts, NotificationKind, Proposal, RunRow, Todo, TodoPriority } from './inboxTypes.js';
+import type { Automation, AutomationDef, InboxCounts, NotificationKind, Proposal, RunRow, Todo, TodoPriority } from './inboxTypes.js';
 import type { UnavailableSource } from './federation.js';
 
 /** A lowercase UUID v4: one per user intent; a retry reuses it (D128). */
@@ -49,4 +49,16 @@ export interface RemoteNotice {
   body: string | null;
   priority: TodoPriority;
   dedupeKey: string | null;
+}
+
+/** A config entry the local automations workspace drafted for a remote host (D127). Held in main's memory only. */
+export interface RemoteDraft {
+  id: string;
+  origin: string;
+  workspaceName: string;
+  kind: 'new' | 'change';
+  name: string;
+  rationale: string | null;
+  definition: AutomationDef;
+  createdAt: number;
 }

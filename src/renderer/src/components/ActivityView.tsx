@@ -1,8 +1,9 @@
 // Inbox › Activity (#407 Phase 2): the notification log — delivered and held
 // back, with the exact reason each held item was held. (Proposals join in Phase 5.)
 import { useCallback, useEffect, useState } from 'react';
-import type { Downtime, NotificationRow, NotifyRule, Proposal } from '../../../preload';
+import type { Downtime, NotificationRow, NotifyRule, Proposal, RemoteDraft } from '../../../preload';
 import { ProposalCard } from './ProposalCard';
+import { RemoteDraftCard } from './RemoteDraftCard';
 import { CaptureSettingsProposalCard } from './CaptureSettingsProposalCard';
 import { heldReasonLabel, hhmm } from '../notifyView';
 import { relativeAgo, sourceLabel } from '../inboxView';
@@ -29,9 +30,11 @@ export function ActivityView({ names, onOpenTodo, onOpenWorkspace, canDiscuss = 
   const [downtimes, setDowntimes] = useState<Downtime[]>([]);
   const [bellFor, setBellFor] = useState<{ id: string; rect: DOMRect; el: HTMLElement } | null>(null);
   const [proposals, setProposals] = useState<Proposal[]>([]);
+  const [drafts, setDrafts] = useState<RemoteDraft[]>([]);
 
   const reload = useCallback(() => {
     void window.api.proposals.list().then(setProposals);
+    void window.api.automations.remoteDrafts().then(setDrafts);
     if (filter !== 'approvals') void window.api.notifications.list(filter).then(setRows);
     void window.api.notifications.settings().then((s) => { setRules(s.rules); setDowntimes(s.downtimes); });
   }, [filter]);
@@ -41,8 +44,9 @@ export function ActivityView({ names, onOpenTodo, onOpenWorkspace, canDiscuss = 
 
   const sameDay = (ts: number) => new Date(ts).toDateString() === new Date().toDateString();
   const pendingProposals = proposals.filter((p) => p.status === 'pending');
+  const waiting = pendingProposals.length + drafts.length;
   const decided = proposals.filter((p) => p.status !== 'pending' && p.status !== 'superseded').slice(0, 10);
-  const FILTERS: Array<[Filter, string]> = [['all', 'Everything'], ['approvals', `Needs approval${pendingProposals.length ? ` · ${pendingProposals.length}` : ''}`], ['delivered', 'Notifications'], ['held', 'Held back']];
+  const FILTERS: Array<[Filter, string]> = [['all', 'Everything'], ['approvals', `Needs approval${waiting ? ` · ${waiting}` : ''}`], ['delivered', 'Notifications'], ['held', 'Held back']];
   const card = (p: Proposal) => p.kind === 'capture-settings'
     ? <CaptureSettingsProposalCard key={p.id} proposal={p} names={names} />
     : <ProposalCard key={p.id} proposal={p} names={names} canDiscuss={canDiscuss} onDiscussed={onDiscussed} onWatch={onWatch} automationsWsId={automationsWsId} />;
@@ -57,20 +61,21 @@ export function ActivityView({ names, onOpenTodo, onOpenWorkspace, canDiscuss = 
         </div>
       </div>
       <div className="ib-scroll">
-        {(filter === 'all' || filter === 'approvals') && pendingProposals.length > 0 && (
+        {(filter === 'all' || filter === 'approvals') && waiting > 0 && (
           <>
             <div className="session-group-label">Needs approval<span className="session-group-line" /></div>
             {pendingProposals.map(card)}
+            {drafts.map((d) => <RemoteDraftCard key={d.id} draft={d} />)}
           </>
         )}
         {filter === 'approvals' && (
           <>
-            {pendingProposals.length === 0 && <div className="ib-empty">Nothing waiting for approval. Workspaces can propose automations; they land here.</div>}
+            {waiting === 0 && <div className="ib-empty">Nothing waiting for approval. Workspaces can propose automations; they land here.</div>}
             {decided.length > 0 && <div className="session-group-label">Decided<span className="session-group-line" /></div>}
             {decided.map(card)}
           </>
         )}
-        {filter === 'all' && pendingProposals.length > 0 && <div className="session-group-label">Notifications<span className="session-group-line" /></div>}
+        {filter === 'all' && waiting > 0 && <div className="session-group-label">Notifications<span className="session-group-line" /></div>}
         {filter === 'approvals' ? null : rows.length === 0 ? (
           <div className="ib-empty">{filter === 'held' ? 'Nothing has been held back.' : 'No notifications yet.'}</div>
         ) : (

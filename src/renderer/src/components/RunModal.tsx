@@ -7,13 +7,15 @@ import { ModalBackdrop } from './ModalBackdrop';
 import { Markdown } from './Markdown';
 
 interface Props {
-  automation: Automation;
+  automation: Pick<Automation, 'id' | 'name' | 'version' | 'definition'>;
   running: boolean;
   onClose: () => void;
   onStarted: () => void;
+  /** A remote run: resolves to an error message, or null when it started. Remote parameter text renders as text only. */
+  runWith?: (values: Record<string, string>) => Promise<string | null>;
 }
 
-export function RunModal({ automation, running, onClose, onStarted }: Props) {
+export function RunModal({ automation, running, onClose, onStarted, runWith }: Props) {
   const params = automation.definition.params ?? [];
   const [values, setValues] = useState<Record<string, string>>(initialArgs(params));
   const [error, setError] = useState<string | null>(null);
@@ -24,7 +26,12 @@ export function RunModal({ automation, running, onClose, onStarted }: Props) {
     setBusy(true);
     setError(null);
     try {
-      await window.api.automations.run(automation.id, values);
+      if (runWith) {
+        const msg = await runWith(values);
+        if (msg) { setError(msg); return; }
+      } else {
+        await window.api.automations.run(automation.id, values);
+      }
       onStarted();
     } catch (e) {
       setError(String((e as Error).message ?? e).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''));
@@ -66,7 +73,7 @@ export function RunModal({ automation, running, onClose, onStarted }: Props) {
               ) : (
                 <input id={`rf-${p.name}`} type={p.type === 'number' ? 'number' : 'text'} value={values[p.name]} onChange={(e) => set(p.name, e.target.value)} />
               )}
-              {p.description && <p className="form-hint"><Markdown text={p.description} inline /></p>}
+              {p.description && <p className="form-hint">{runWith ? p.description : <Markdown text={p.description} inline />}</p>}
             </div>
           ))}
         </div>

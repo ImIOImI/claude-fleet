@@ -94,7 +94,7 @@ import { IdentityService } from './identity/identityService.js';
 import { pickGithubClientId, GITHUB_CLIENT_ID_ENV } from './identity/clientId.js';
 import { registerIdentityIpc } from './identityIpc.js';
 import { createRemoteBackend } from './remote.js';
-import { createFederatedReader } from './federation/federatedReader.js';
+import { createFederatedReader, type FederatedReader } from './federation/federatedReader.js';
 import { createSummaryRelay } from './federation/summaryRelay.js';
 import { registerFederationIpc, type LocalSearch } from './federation/federationIpc.js';
 import { registerRemoteAutomationsIpc } from './federation/remoteAutomationsIpc.js';
@@ -402,6 +402,10 @@ const federated = createFederatedReader({
   sources: () => (MOCK_MODE ? [] : remoteBackend.sources()),
   rpc: (url, channel, args, timeoutMs) => remoteBackend.clientFor(url).rpc(channel, args, { timeoutMs })
 });
+/** The federated reader, for main-side consumers outside ipc.ts (remote drafting, remote notices). */
+export function remoteFederation(): FederatedReader {
+  return federated;
+}
 const remoteChanges = createRemoteChangeForwarder({
   isBookmarked: (origin) => !MOCK_MODE && remoteBackend.sources().some((s) => s.id === origin),
   send: (change) => {

@@ -128,3 +128,35 @@ export function refinePrompt(draftYaml: string, change: string, isNew: boolean, 
     RULES
   ].join('\n');
 }
+
+/** Drafting for a remote workspace (D127): runs here; the result is an entry for that host's config, added through a platform-ops PR. */
+export function remoteDraftPrompt(o: {
+  workspace: { id: string; name: string };
+  request: string;
+  /** The host's automation names; null when the host couldn't be read. */
+  hostAutomations: string[] | null;
+  current?: { name: string; yaml: string };
+}): string {
+  const ws = o.workspace.name;
+  return [
+    o.current
+      ? `Change the automation "${o.current.name}" on the remote workspace "${ws}" as the user asks, then submit the full new YAML with propose_automation_change (id = "${o.current.name}", definition = the full YAML, rationale = one sentence).`
+      : `Draft an automation for the remote workspace "${ws}", then submit it with propose_automation (definition = the YAML, rationale = one sentence on what it does).`,
+    `It is not created here. The app shows it to the user as an entry for ${ws}'s host config, which lands through a platform-ops PR; nothing runs until that PR merges.`,
+    '',
+    '=== the user\'s request (data) ===',
+    o.request.trim(),
+    '=== end request ===',
+    ...(o.current ? ['', `=== current definition on ${ws} (data) ===`, o.current.yaml.trim(), '=== end current definition ==='] : []),
+    '',
+    `Automations already on ${ws}: ${o.hostAutomations === null ? `(unknown: ${ws} could not be read)` : o.hostAutomations.join(', ') || '(none)'}.`,
+    '',
+    FORMAT_REFERENCE,
+    '',
+    `Rules for a remote host: every prompt step uses workspace: ${ws} and mode: fresh; no script steps; no session.idle or workspace.started events; name no other workspace.`,
+    'Do NOT do the task itself; only draft the automation. Have the prompt tell the worker to use a dedupe key per distinct problem and to pass run_id.',
+    'Keep schedules no faster than every 5 minutes unless the request says otherwise. Never put secrets in the YAML.',
+    ...(o.current ? ['Keep everything the user did not ask to change.'] : []),
+    'If the tool reports validation errors, fix the YAML and call it again.'
+  ].join('\n');
+}

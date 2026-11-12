@@ -2,7 +2,7 @@
 // priority-grouped list, detail pane) and Activity (the notification log), with
 // the notify control in the header and a banner while notifications are paused.
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { EffectiveRule, QuietState, Todo, TodoPriority, TodoStatus } from '../../../preload';
+import type { EffectiveRule, QuietState, RemoteTierName, Todo, TodoPriority, TodoStatus } from '../../../preload';
 import { groupByPriority, matchesSearch, relativeAgo, sourceLabel } from '../inboxView';
 import { mutedHint, quietLabel } from '../notifyView';
 import { TodoDetail } from './TodoDetail';
@@ -29,7 +29,7 @@ interface Props {
   onSection: (s: InboxSection) => void;
   /** The automations workspace (Phase 5b), if set up; enables the Sessions tab. */
   automationsWs?: { id: string; name: string; running: boolean } | null;
-  workspaces?: Array<{ id: string; name: string; kind: string; isAutomations?: boolean }>;
+  workspaces?: Array<{ id: string; name: string; kind: string; isAutomations?: boolean; remoteTier?: RemoteTierName | null }>;
   onCreateAutomationsWs?: () => void;
   onEditAutomationsWs?: () => void;
   onStartAutomationsWs?: () => void;
@@ -51,6 +51,7 @@ export function InboxView({ names, openCount, quiet, focusTodoId, focusNonce, on
   const [version, setVersion] = useState(0);
   const [title, setTitle] = useState('');
   const [priority, setPriority] = useState<TodoPriority>('normal');
+  const remotes = useMemo(() => workspaces.filter((w) => w.kind === 'remote').map((w) => ({ id: w.id, name: w.name, tier: w.remoteTier ?? null })), [workspaces]);
 
   const reload = useCallback(() => {
     void window.api.inbox.list({ status }).then((list) => {
@@ -150,6 +151,7 @@ export function InboxView({ names, openCount, quiet, focusTodoId, focusNonce, on
           onCreateAutomationsWs={onCreateAutomationsWs}
           onEditAutomationsWs={onEditAutomationsWs}
           onWatch={() => setSection('sessions')}
+          remotes={remotes}
         />
       ) : section === 'activity' ? (
         <ActivityView

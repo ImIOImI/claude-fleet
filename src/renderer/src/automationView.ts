@@ -16,7 +16,7 @@ export function runTone(s: RunStatus): 'ok' | 'idle' | 'bad' | 'warn' {
   return 'idle';
 }
 
-export function nextLabel(a: Automation, now = Date.now()): string {
+export function nextLabel(a: Pick<Automation, 'enabled' | 'nextFireAt' | 'nextSetByRun' | 'definition'>, now = Date.now()): string {
   if (!a.enabled) return 'disabled';
   if (a.nextFireAt === null) return a.definition.reschedule ? 'not scheduled (until a run sets a time)' : 'by hand only';
   const when = clockLabel(a.nextFireAt, now);

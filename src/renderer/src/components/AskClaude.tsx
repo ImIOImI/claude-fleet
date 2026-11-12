@@ -12,11 +12,15 @@ interface Props {
   onWatch?: () => void;
   disabledReason?: string | null;
   multiline?: boolean;
+  /** Where to draft (remote g): the local automations workspace and remote workspaces. */
+  targets?: Array<{ id: string; label: string; disabledReason: string | null }>;
+  target?: string;
+  onTarget?: (id: string) => void;
 }
 
 const err = (e: unknown) => String((e as Error).message ?? e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
 
-export function AskClaude({ label, placeholder, button, send, sentNote, onWatch, disabledReason = null, multiline = false }: Props) {
+export function AskClaude({ label, placeholder, button, send, sentNote, onWatch, disabledReason = null, multiline = false, targets, target, onTarget }: Props) {
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [sent, setSent] = useState(false);
@@ -29,6 +33,11 @@ export function AskClaude({ label, placeholder, button, send, sentNote, onWatch,
   const Field = multiline ? 'textarea' : 'input';
   return (
     <div className={`ask-claude${multiline ? ' multi' : ''}`}>
+      {targets && targets.length > 1 && (
+        <select className="ib-select ask-target" aria-label="Draft in" value={target} onChange={(e) => { onTarget?.(e.target.value); setSent(false); setError(null); }}>
+          {targets.map((t) => <option key={t.id} value={t.id} disabled={!!t.disabledReason} title={t.disabledReason ?? undefined}>{t.label}</option>)}
+        </select>
+      )}
       <div className="ask-row">
         <Field
           aria-label={label}
