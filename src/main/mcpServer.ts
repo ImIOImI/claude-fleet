@@ -96,7 +96,10 @@ function setMcpHealth(ok: boolean, detail?: string): void {
  *  workspace (identity comes from the per-connection token, not the socket). */
 export function startMcpServer(dir: string, opts: { readSource?: OwnedReadSource | null } = {}): void {
   if (userDataDir) return;
-  initReadSource(opts.readSource === null ? null : opts.readSource ?? sqliteReadSource(new Database(join(dir, 'state.db'), { readonly: true, fileMustExist: true })));
+  initReadSource(opts.readSource === null ? null : opts.readSource ?? sqliteReadSource(
+    new Database(join(dir, 'state.db'), { readonly: true, fileMustExist: true }),
+    { searchWorker: { onDisabled: (reason) => logError({ source: 'main', type: 'search-worker', level: 'warn', message: `search scans run inline from now on: ${reason}` }) } },
+  ));
   userDataDir = dir;
 
   if (isWindows && !tcpListener) {

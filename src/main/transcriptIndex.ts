@@ -4,8 +4,9 @@
 // (and tests can stub it).
 import type Database from 'better-sqlite3';
 import { insertEmbeddings, unembeddedSummaries } from './db.js';
-import { encodeVector, decodeVector, topK, EMBED_MODEL_ID, EMBED_DIM, type EmbedFn } from './vectors.js';
-import { perfSpan, perfSpanAsync } from './perf.js';
+import { encodeVector, EMBED_MODEL_ID, EMBED_DIM, type EmbedFn } from './vectors.js';
+import { perfSpanAsync } from './perf.js';
+import { scanTopK, type ScanJob, type ScanHit } from './searchWorker.js';
 import { EMBED_BATCH, MAX_CHARS, extractText, indexSessionTurnsWith } from './transcriptIndexCore.js';
 
 export type { EmbedFn };
@@ -16,43 +17,22 @@ export async function indexSessionTurns(sessionId: string, embed: EmbedFn, batch
   return indexSessionTurnsWith(perfSpanAsync, sessionId, embed, batch);
 }
 
-export interface SearchHit {
-  sessionId: string;
-  workspaceId: string;
-  kind: 'turn' | 'summary';
-  ts: number | null;
-  text: string;
-  score: number;
-}
+export type SearchHit = ScanHit;
 
 /** Brute-force cosine scan of `ids`' current-model embeddings on a SQLite
- *  connection (the MCP server's read-only one). */
+ *  connection, inline on the calling thread. The MCP read source runs the same
+ *  scan in a worker (searchWorker.ts) and uses this only as the fallback. */
 export function searchVectorsSqlite(
   db: Database.Database,
   qvec: Float32Array,
   ids: readonly string[],
   opts: { limit: number; kind?: 'turn' | 'summary' },
 ): SearchHit[] {
-  if (ids.length === 0) return [];
-  const where = [`workspace_id IN (${ids.map(() => '?').join(',')})`, `model_id = ?`, `text <> ''`,
-    'EXISTS (SELECT 1 FROM sessions s WHERE s.id = embeddings.session_id)'];
-  const params: unknown[] = [...ids, EMBED_MODEL_ID];
-  if (opts.kind) { where.push('kind = ?'); params.push(opts.kind); }
+  return scanTopK(db, qvec, scanJob(ids, opts)).hits;
+}
 
-  // Brute-force scan: every allowed vector is read and scored synchronously.
-  // Spanned because its cost (and transient memory) grows with the corpus.
-  const { rows, ranked } = perfSpan('claude_fleet.search.scan', () => {
-    const rows = db
-      .prepare(`SELECT session_id AS sessionId, workspace_id AS workspaceId, kind, ts, text, vec
-                FROM embeddings WHERE ${where.join(' AND ')}`)
-      .all(...params) as Array<{ sessionId: string; workspaceId: string; kind: 'turn' | 'summary'; ts: number | null; text: string; vec: Buffer }>;
-    const cands = rows.map((r) => ({ vec: decodeVector(r.vec) }));
-    return { rows, ranked: topK(qvec, cands, opts.limit) };
-  });
-  return ranked.map(({ index, score }) => {
-    const r = rows[index];
-    return { sessionId: r.sessionId, workspaceId: r.workspaceId, kind: r.kind, ts: r.ts, text: r.text, score };
-  });
+export function scanJob(ids: readonly string[], opts: { limit: number; kind?: 'turn' | 'summary' }): ScanJob {
+  return { allowed: [...ids], modelId: EMBED_MODEL_ID, kind: opts.kind, limit: opts.limit, dim: EMBED_DIM };
 }
 
 /** Embed `query`, then searchVectorsSqlite. Kept for the state bench and
