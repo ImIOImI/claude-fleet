@@ -69,7 +69,7 @@ describe('automation action channels', () => {
     await Promise.all([dispatchRpc(reg, 'inbox:update', done, who('steer')), dispatchRpc(reg, 'inbox:update', done, who('steer'))]);
     await Promise.all([dispatchRpc(reg, 'proposals:reject', rej, who('steer')), dispatchRpc(reg, 'proposals:reject', rej, who('steer'))]);
     expect(rt.calls.filter((c) => c.startsWith('update:'))).toHaveLength(1);
-    expect(rt.calls.filter((c) => c.startsWith('reject:'))).toEqual([`reject:${P}:too often`]);
+    expect(rt.calls.filter((c) => c.startsWith('reject:'))).toEqual([`reject:${P}:too often:ann`]);
   });
 
   it('Run now is limited to 6 a minute per identity', async () => {

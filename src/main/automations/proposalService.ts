@@ -27,7 +27,7 @@ export interface ProposalDeps {
 
 const MAX_BATCH = 20;
 
-function statusOf(items: ProposalItem[]): ProposalStatus {
+export function statusOf(items: ProposalItem[]): ProposalStatus {
   if (items.some((i) => i.decision === 'pending')) return 'pending';
   if (items.every((i) => i.decision === 'declined')) return 'rejected';
   if (items.every((i) => i.decision === 'auto-applied' || i.decision === 'reverted')) return 'auto-approved';

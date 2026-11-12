@@ -276,15 +276,17 @@ describe('startHostAutomations', () => {
     expect(other.isError).toBe(true);
   });
 
-  it('takes definitions only from the config: session proposals are refused and never schedule', async () => {
+  it('takes definitions only from the config: a session proposal over MCP is a pending draft and never schedules', async () => {
     const { store } = await start();
     initReadSource(null);
-    const yaml = 'name: sneaky\ntriggers:\n  - schedule: { cron: "* * * * *" }\nsteps:\n  - id: go\n    prompt: { workspace: review-bot, mode: fresh, message: x }\n';
-    for (const name of ['propose_automation', 'propose_automation_change', 'get_proposal']) {
-      const r = await callTool({ name, arguments: { definition: yaml, name: 'sneaky' } }, WS.id) as { isError?: boolean; content: Array<{ text: string }> };
-      expect([r.isError, text(r)]).toEqual([true, expect.stringMatching(/from the host config/)]);
-    }
-    const p = await h!.proposals.mcp.propose(WS.id, { definition: yaml });
+    const yaml = 'name: sneaky\ntriggers:\n  - schedule: { cron: "* * * * *" }\nsteps:\n  - id: go\n    prompt: { workspace: $self, mode: fresh, message: x }\n';
+    const r = await callTool({ name: 'propose_automation', arguments: { definition: yaml } }, WS.id) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(r.isError).toBeUndefined();
+    const id = (JSON.parse(text(r)) as { id: string; status: string }).id;
+    expect(JSON.parse(text(await callTool({ name: 'get_proposal', arguments: { id } }, WS.id)))).toMatchObject({ status: 'pending' });
+    const other = await callTool({ name: 'propose_automation', arguments: { definition: yaml.replace('sneaky', 'other') } }, 'SOMEONE-ELSE') as { isError?: boolean; content: Array<{ text: string }> };
+    expect(other.isError).toBe(true);
+    const p = await h!.proposals.mcp.propose(WS.id, { definition: yaml.replace('sneaky', 'sneaky2').replace('$self', 'review-bot') });
     expect(p).toMatchObject({ status: 'pending' });
     await h!.tick();
     expect(await new AutomationStore(store.kysely).list()).toEqual([]);

@@ -19,7 +19,7 @@ export interface AutomationRuntime {
   };
   proposals: {
     list(): Promise<Proposal[]>;
-    reject(id: string, note: string | null): Promise<Proposal>;
+    reject(id: string, note: string | null, by: TodoSource): Promise<Proposal>;
   };
   inbox: {
     list(f: { status: 'open' | 'done' | 'dismissed' | 'all'; limit: number }): Promise<Todo[]>;
@@ -68,6 +68,10 @@ const plainObject = (v: unknown, what: string): Record<string, unknown> => {
   return v as Record<string, unknown>;
 };
 const clampLimit = (v: unknown, max: number): number => (typeof v === 'number' && Number.isSafeInteger(v) ? Math.min(Math.max(v, 1), max) : max);
+
+/** Proposals carry no decider column: the note names the person, and the session reads it with get_proposal (D130). */
+export const rejectedNote = (note: string | null, by: TodoSource): string =>
+  `Rejected by ${by.id ? `@${by.id}` : 'host operator'}${note?.trim() ? `: ${note.trim()}` : ''}`;
 
 /** The person behind an action, for todo sources, event actors and run triggers (D130). */
 export const personOf = (c: Principal): TodoSource => ({ kind: 'user', id: c.identity.login });
@@ -192,8 +196,8 @@ export function automationRpcChannels(rt: () => AutomationRuntime | null, o: { l
     ['proposals:reject', actionChannel({
       tier: 'steer', channel: 'proposals:reject', ledger, limit: { key: 'other', limiter: lim.other },
       parse: (x) => ({ id: ulid(x.id, 'id'), note: x.note === undefined || x.note === null ? null : str(x.note, 'note', 2000) }),
-      run: async ({ id, note }) => {
-        const p = await need().proposals.reject(id, note);
+      run: async ({ id, note }, caller) => {
+        const p = await need().proposals.reject(id, note, personOf(caller));
         return { id: p.id, status: p.status };
       }
     })]
@@ -206,7 +210,7 @@ export function runtimeOf(h: HostAutomations, workspace: () => { id: string; nam
     workspace,
     ledger: h.ledger,
     automations: { list: () => h.automations.list(), get: (id) => h.automations.get(id), run: (id, req) => h.automations.run(id, req) },
-    proposals: { list: () => h.proposals.list(), reject: (id, note) => h.proposals.reject(id, note) },
+    proposals: { list: () => h.proposals.list(), reject: (id, note, by) => h.proposals.reject(id, rejectedNote(note, by)) },
     inbox: {
       list: (f) => h.inbox.ipc.list(f),
       get: (id) => h.inbox.ipc.get(id),

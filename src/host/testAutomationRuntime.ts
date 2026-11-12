@@ -20,7 +20,7 @@ export function fakeRuntime(over: Partial<AutomationRuntime> = {}): AutomationRu
     },
     proposals: {
       list: async () => [],
-      reject: async (id: string, note: string | null) => { calls.push(`reject:${id}:${note}`); return { id, status: 'rejected' } as never; }
+      reject: async (id: string, note: string | null, by: { id: string | null }) => { calls.push(`reject:${id}:${note}:${by.id}`); return { id, status: 'rejected' } as never; }
     },
     inbox: {
       list: async (f) => { calls.push(`list:${JSON.stringify(f)}`); return []; },

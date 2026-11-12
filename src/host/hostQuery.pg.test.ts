@@ -129,7 +129,7 @@ describe.skipIf(!isPg)('host MCP query', () => {
     expect(rowsOf(await query(sock, `SELECT count(*)::int AS n FROM sessions WHERE workspace_id = '${OTHER}'`))).toEqual([{ n: 0 }]);
     const grants = await su!.query(`SELECT workspace_id FROM ${t!.schema}.mcp_grants WHERE role_name = $1 ORDER BY workspace_id`, [queryUser]);
     expect(grants.rows).toEqual([{ workspace_id: HOSTED }, { workspace_id: 'pub_aaaa' }]);
-    for (const table of ['publish_partitions', 'publish_sessions', 'session_owners', 'host_action_requests', 'notifications']) {
+    for (const table of ['publish_partitions', 'publish_sessions', 'session_owners', 'host_action_requests', 'notifications', 'proposals']) {
       const r = await query(sock, `SELECT * FROM ${table}`);
       expect(r.isError).toBe(true);
       expect(r.content[0].text).toMatch(/permission denied/);
