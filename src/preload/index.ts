@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer, IpcRendererEvent, webUtils } from 'electron
 import type {
   Todo, TodoEvent, TodoFilter, InboxCounts, PostTodoInput, UpdateTodoPatch, NotificationRow, NotifySettings, QuietState,
   RuleScope, EffectiveRule, NotifyRule, NotifyLevel, RuleScopeKind, PauseState, Downtime, TodoSource, TodoPriority,
-  Automation, RunRow, Proposal, LoadoutAutomationPreview, HostShell
+  Automation, RunRow, Proposal, LoadoutAutomationPreview, HostShell, TodoStatus
 } from './inboxTypes';
 export type {
   Todo, TodoEvent, TodoEventKind, TodoFilter, TodoSource, TodoStatus, TodoPriority, SourceKind,
@@ -19,6 +19,13 @@ import type { RemoteAddOptions, RemoteLiveSession, RemoteProbe } from './remoteT
 import type { StoreChoice, StoreSettings, StoreStatus } from './storeTypes';
 import type { FederatedSearchResult, RemoteSessionsResult, SessionCursor } from './federation';
 import type { UnpublishResult } from './publish';
+import type {
+  Federated, RemoteActionResult, RemoteAutomation, RemoteAutomationDetail, RemoteChange, RemoteCounts, RemoteProposal, RemoteTodo
+} from './remoteAutomations';
+export type {
+  Federated, RemoteActionErrorKind, RemoteActionResult, RemoteAutomation, RemoteAutomationDetail, RemoteChange, RemoteChangeChannel,
+  RemoteCounts, RemoteNotice, RemoteOriginInfo, RemoteProposal, RemoteTierName, RemoteTodo
+} from './remoteAutomations';
 export type { UnpublishResult, WorkspacePublish } from './publish';
 export type { ImportProgress, StoreChoice, StorePhase, StoreSettings, StoreStatus } from './storeTypes';
 export type { RemoteAddOptions, RemoteLiveSession, RemoteProbe, RemoteProbeOk, RemoteProbeErr, RemoteProbeErrorKind, RemoteTier } from './remoteTypes';
@@ -774,7 +781,37 @@ const api = {
     /** Rename the local bookmark; the host's name is unchanged. */
     rename: (id: string, name: string): Promise<void> => ipcRenderer.invoke('remote:rename', id, name),
     /** Broker sessions live on the host (any tier may watch them). */
-    liveSessions: (id: string): Promise<RemoteLiveSession[]> => ipcRenderer.invoke('remote:liveSessions', id)
+    liveSessions: (id: string): Promise<RemoteLiveSession[]> => ipcRenderer.invoke('remote:liveSessions', id),
+    /** A remote host's automations, proposals, todos or notices changed (debounced 1 s per host and channel); refetch. */
+    onChanged: (cb: (c: RemoteChange) => void): (() => void) => {
+      const h = (_e: IpcRendererEvent, c: RemoteChange) => cb(c);
+      ipcRenderer.on('remote:changed', h);
+      return () => ipcRenderer.removeListener('remote:changed', h);
+    }
+  },
+  remoteAutomations: {
+    list: (): Promise<Federated<RemoteAutomation>> => ipcRenderer.invoke('remoteAutomations:list'),
+    get: (origin: string, id: string): Promise<RemoteAutomationDetail | null> => ipcRenderer.invoke('remoteAutomations:get', origin, id),
+    run: (origin: string, id: string, args: Record<string, unknown>, requestId: string): Promise<RemoteActionResult<{ runId: string; status: string }>> =>
+      ipcRenderer.invoke('remoteAutomations:run', origin, id, args, requestId),
+    draft: (origin: string, text: string, requestId: string): Promise<RemoteActionResult<{ sessionId: string }>> =>
+      ipcRenderer.invoke('remoteAutomations:draft', origin, text, requestId),
+    askChange: (origin: string, id: string, text: string, requestId: string): Promise<RemoteActionResult<{ sessionId: string }>> =>
+      ipcRenderer.invoke('remoteAutomations:askChange', origin, id, text, requestId)
+  },
+  remoteInbox: {
+    list: (filter?: { status?: TodoStatus | 'all' }): Promise<Federated<RemoteTodo>> => ipcRenderer.invoke('remoteInbox:list', filter),
+    get: (origin: string, id: string): Promise<{ todo: RemoteTodo; events: TodoEvent[] } | null> => ipcRenderer.invoke('remoteInbox:get', origin, id),
+    counts: (): Promise<RemoteCounts> => ipcRenderer.invoke('remoteInbox:counts'),
+    create: (origin: string, input: { title: string; priority?: TodoPriority }, requestId: string): Promise<RemoteActionResult<{ id: string }>> =>
+      ipcRenderer.invoke('remoteInbox:create', origin, input, requestId),
+    update: (origin: string, id: string, patch: UpdateTodoPatch, requestId: string): Promise<RemoteActionResult<{ id: string; status: string }>> =>
+      ipcRenderer.invoke('remoteInbox:update', origin, id, patch, requestId)
+  },
+  remoteProposals: {
+    list: (): Promise<Federated<RemoteProposal>> => ipcRenderer.invoke('remoteProposals:list'),
+    reject: (origin: string, id: string, note: string | null, requestId: string): Promise<RemoteActionResult<{ id: string; status: string }>> =>
+      ipcRenderer.invoke('remoteProposals:reject', origin, id, note, requestId)
   },
   publish: {
     /** Withdraw a session from every host its workspace publishes to; it is never published again. */

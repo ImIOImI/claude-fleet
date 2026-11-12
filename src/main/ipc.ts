@@ -97,6 +97,8 @@ import { createRemoteBackend } from './remote.js';
 import { createFederatedReader } from './federation/federatedReader.js';
 import { createSummaryRelay } from './federation/summaryRelay.js';
 import { registerFederationIpc, type LocalSearch } from './federation/federationIpc.js';
+import { registerRemoteAutomationsIpc } from './federation/remoteAutomationsIpc.js';
+import { createRemoteChangeForwarder } from './federation/remoteChanges.js';
 import { assertNotRemoteSpec, confirmText, registerRemoteIpc, type RemoteConfirm } from './remoteIpc.js';
 import { listEndpoints, saveEndpoint, deleteEndpoint, setEndpointApiKey, probeEndpoint, getEndpoint, type ModelEndpoint } from './endpoints.js';
 import * as fs from './fs.js';
@@ -400,11 +402,22 @@ const federated = createFederatedReader({
   sources: () => (MOCK_MODE ? [] : remoteBackend.sources()),
   rpc: (url, channel, args, timeoutMs) => remoteBackend.clientFor(url).rpc(channel, args, { timeoutMs })
 });
+const remoteChanges = createRemoteChangeForwarder({
+  isBookmarked: (origin) => !MOCK_MODE && remoteBackend.sources().some((s) => s.id === origin),
+  send: (change) => {
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (w.isDestroyed() || w.webContents.isDestroyed()) continue;
+      try { w.webContents.send('remote:changed', change); } catch { /* mid-teardown */ }
+    }
+  }
+});
 const summaryRelay = createSummaryRelay({
   sources: () => (MOCK_MODE ? [] : remoteBackend.sources()),
   subscribe: (url, on, state) => remoteBackend.clientFor(url).subscribe(on, state),
   fetchSummary: (id) => federated.summary(id, null),
-  broadcast: (workspaceId, summary) => broadcastObservabilitySummary({ workspaceId, summary }, BrowserWindow.getAllWindows())
+  broadcast: (workspaceId, summary) => broadcastObservabilitySummary({ workspaceId, summary }, BrowserWindow.getAllWindows()),
+  onHostChange: (origin, channel) => remoteChanges.hint(origin, channel),
+  onConnected: (origin) => remoteChanges.connected(origin)
 });
 let relayTimer: NodeJS.Timeout | null = null;
 // Started by registerIpc once the identity service exists; writeManifest bumps it.
@@ -430,6 +443,7 @@ const localSearch: LocalSearch = {
 
 export function stopRemoteBackend(): void {
   summaryRelay.stop();
+  remoteChanges.stop();
   if (relayTimer) clearInterval(relayTimer);
   publisher?.stop();
   remoteBackend.stop();
@@ -2184,6 +2198,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     invalidate: invalidateWorkspaceList
   });
   registerFederationIpc(ipcMain, federated, localSearch);
+  registerRemoteAutomationsIpc(ipcMain, federated);
   if (jsonlWatcher && !MOCK_MODE) {
     publisher = startPublisher({
       manifests: () => listWorkspaceManifests(),

@@ -139,4 +139,45 @@ describe('SummaryRelay', () => {
     r.hint();
     expect(r.timers).toHaveLength(2);
   });
+  it('forwards automation, proposal, inbox and notice hints for the subscribed host, and reports connects', async () => {
+    const changes: Array<[string, string]> = [];
+    const connected: string[] = [];
+    let emit!: (e: { channel: string; payload: unknown }) => void;
+    let state!: (c: boolean) => void;
+    const relay = createSummaryRelay({
+      sources: () => [{ id: 'W', url: 'http://w', name: 'w', hue: null, tier: 'read', state: 'running' }],
+      subscribe: (_u, on, st) => { emit = on; state = st; return () => undefined; },
+      fetchSummary: async () => null, broadcast: () => undefined,
+      onHostChange: (o, ch) => changes.push([o, ch]), onConnected: (o) => connected.push(o)
+    });
+    relay.sync();
+    state(true);
+    emit({ channel: 'automations:changed', payload: null });
+    emit({ channel: 'notices:changed', payload: { workspaceId: 'W' } });
+    emit({ channel: 'sessions:changed', payload: {} });
+    expect(changes).toEqual([['W', 'automations:changed'], ['W', 'notices:changed']]);
+    expect(connected).toEqual(['W']);
+    relay.stop();
+  });
+
+  it('drops hints from a subscription that is no longer current', () => {
+    const changes: string[] = [];
+    let emit!: (e: { channel: string; payload: unknown }) => void;
+    let state!: (c: boolean, why?: { retryInMs: number | null }) => void;
+    let sources = [{ id: 'W', url: 'http://w', name: 'w', hue: null, tier: 'read' as const, state: 'running' as const }];
+    const relay = createSummaryRelay({
+      sources: () => sources,
+      subscribe: (_u, on, st) => { emit = on; state = st; return () => undefined; },
+      fetchSummary: async () => null, broadcast: () => undefined,
+      onHostChange: (o) => changes.push(o), onConnected: (o) => changes.push(`up:${o}`)
+    });
+    relay.sync();
+    const stale = emit, staleState = state;
+    sources = [];
+    relay.sync();
+    stale({ channel: 'inbox:changed', payload: null });
+    staleState(true);
+    expect(changes).toEqual([]);
+    relay.stop();
+  });
 });

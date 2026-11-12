@@ -216,4 +216,28 @@ describe('FederatedReader', () => {
       expect(r.sources().map((s) => s.id)).toEqual([B]);
     });
   });
+
+  it('each: one bounded read per running source, sorted by origin; a parse failure is protocol', async () => {
+    const rpc = vi.fn(async (url: string) => (url === `http://${B}` ? { bad: 1 } : 7));
+    const r = createFederatedReader({ sources: () => [src(B, 'running'), src(A, 'running'), src(C, null)], rpc });
+    const out = await r.each('x:list', [], (v, s) => {
+      if (typeof v !== 'number') throw new Error('shape');
+      return `${s.id}:${v}`;
+    });
+    expect(out.values.map((x) => x.value)).toEqual([`${A}:7`]);
+    expect(out.unavailable).toEqual([{ origin: B, name: 'n1', reason: 'protocol' }, { origin: C, name: 'n2', reason: 'checking' }]);
+    expect(rpc).toHaveBeenCalledTimes(2);
+  });
+
+  it('one: undefined for an unknown origin; act is never shared with a concurrent identical call and uses the action bound', async () => {
+    const rpc = vi.fn(async () => ({ replayed: false, result: { id: 'T' }, error: null }));
+    const r = createFederatedReader({ sources: () => [src(A, 'running')], rpc });
+    expect(await r.one(B, 'x', [], (v) => v)).toBeUndefined();
+    const [x, y] = await Promise.all([r.act(A, 'inbox:create', { k: 1 }), r.act(A, 'inbox:create', { k: 1 })]);
+    expect(x).toEqual({ ok: true, replayed: false, result: { id: 'T' } });
+    expect(y).toEqual(x);
+    expect(rpc).toHaveBeenCalledTimes(2);
+    expect(rpc).toHaveBeenLastCalledWith(`http://${A}`, 'inbox:create', [{ k: 1 }], 15_000);
+  });
 });
+
