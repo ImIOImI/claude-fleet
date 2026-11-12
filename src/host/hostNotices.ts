@@ -14,8 +14,8 @@ export const MAX_NOTICES_KEPT = 5000;
 export interface HostNotices {
   request(n: NotifyInput): Promise<NotificationRow>;
   onTodoPosted(todo: Todo, action: 'created' | 'updated' | 'reopened', notifyRequested: boolean): Promise<NotificationRow | null>;
-  /** sinceTs null: the newest `limit`, oldest first. */
-  feed(o: { sinceTs: number | null; limit: number }): Promise<NotificationRow[]>;
+  /** sinceTs null: the newest `limit`, oldest first. afterId (with sinceTs): strictly after (sinceTs, afterId). */
+  feed(o: { sinceTs: number | null; limit: number; afterId?: string }): Promise<NotificationRow[]>;
   prune(): Promise<number>;
 }
 
@@ -47,8 +47,8 @@ export function hostNotices(o: {
       const n = todoNoticeInput(todo, action, notifyRequested, o.sourceName(todo.source));
       return n ? request(n) : null;
     },
-    async feed({ sinceTs, limit }) {
-      if (sinceTs !== null) return o.store.since(sinceTs, limit, o.workspaceId());
+    async feed({ sinceTs, limit, afterId }) {
+      if (sinceTs !== null) return o.store.since(sinceTs, limit, o.workspaceId(), afterId);
       return (await o.store.list({ filter: 'all', limit, workspaceId: o.workspaceId() })).reverse();
     },
     async prune() {

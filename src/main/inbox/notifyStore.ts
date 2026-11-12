@@ -64,9 +64,12 @@ export class NotifyStore {
     return rows.map(toRow);
   }
 
-  /** Oldest first from `ts` (inclusive): the host's notices feed. */
-  async since(ts: number, limit: number, workspaceId?: string): Promise<NotificationRow[]> {
-    let q = this.db.selectFrom('notifications').selectAll().where('ts', '>=', ts);
+  /** Oldest first from `ts` (inclusive), or strictly after (ts, afterId): the host's notices feed. */
+  async since(ts: number, limit: number, workspaceId?: string, afterId?: string): Promise<NotificationRow[]> {
+    let q = this.db.selectFrom('notifications').selectAll();
+    q = afterId === undefined
+      ? q.where('ts', '>=', ts)
+      : q.where((eb) => eb.or([eb('ts', '>', ts), eb.and([eb('ts', '=', ts), eb('id', '>', afterId)])]));
     if (workspaceId !== undefined) q = q.where('workspace_id', '=', workspaceId);
     const rows = await q.orderBy('ts', 'asc').orderBy('id', 'asc').limit(Math.min(Math.max(1, Math.floor(limit)), 1000)).execute();
     return rows.map(toRow);
@@ -222,4 +225,43 @@ export class NotifyStore {
   async setQuietSince(ts: number | null): Promise<void> {
     await this.setState('quietSince', ts === null ? null : String(ts));
   }
+
+  // --- remote notice cursors (D132, D133) -----------------------------------
+
+  async getRemoteCursor(origin: string): Promise<RemoteNoticeCursor | null> {
+    const v = await this.getState(`${REMOTE_CURSOR}${origin}`);
+    if (!v) return null;
+    try {
+      const c = JSON.parse(v) as { ts?: unknown; id?: unknown; ids?: unknown; floor?: { ts?: unknown; id?: unknown } | null };
+      if (typeof c.ts !== 'number' || !Number.isSafeInteger(c.ts) || typeof c.id !== 'string' || !Array.isArray(c.ids)) return null;
+      const f = c.floor;
+      const floor = f && typeof f.ts === 'number' && Number.isSafeInteger(f.ts) && typeof f.id === 'string' ? { ts: f.ts, id: f.id } : null;
+      return { ts: c.ts, id: c.id, ids: c.ids.filter((x): x is string => typeof x === 'string').slice(-REMOTE_CURSOR_IDS), floor };
+    } catch {
+      return null;
+    }
+  }
+
+  async setRemoteCursor(origin: string, c: RemoteNoticeCursor): Promise<void> {
+    await this.setState(`${REMOTE_CURSOR}${origin}`, JSON.stringify({ ts: c.ts, id: c.id, ids: c.ids.slice(-REMOTE_CURSOR_IDS), floor: c.floor }));
+  }
+
+  async remoteCursorOrigins(): Promise<string[]> {
+    const rows = await this.db.selectFrom('notify_state').select('k').where('k', 'like', `${REMOTE_CURSOR}%`).execute();
+    return rows.map((r) => r.k.slice(REMOTE_CURSOR.length));
+  }
+
+  /** A forgotten remote bookmark: its notification rows and its cursor go (D133). */
+  async forgetOrigin(origin: string): Promise<void> {
+    await this.db.transaction().execute(async (trx) => {
+      await trx.deleteFrom('notifications').where('workspace_id', '=', origin).execute();
+      await trx.deleteFrom('notify_state').where('k', '=', `${REMOTE_CURSOR}${origin}`).execute();
+    });
+  }
 }
+
+const REMOTE_CURSOR = 'remote-notices:';
+/** A remote notices feed position (remoteNotices.ts NoticeCursor). */
+export interface RemoteNoticeCursor { ts: number; id: string; ids: string[]; floor: { ts: number; id: string } | null }
+/** Ids kept to dedupe the overlap window (remoteNotices.ts CURSOR_IDS). */
+export const REMOTE_CURSOR_IDS = 500;

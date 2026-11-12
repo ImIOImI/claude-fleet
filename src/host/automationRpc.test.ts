@@ -64,6 +64,14 @@ describe('automation read channels', () => {
     for (const q of [{ sinceTs: -1 }, { sinceTs: '5' }, { sinceTs: 1.5 }, 'x', [1]]) expect((await call(rt, 'notices:feed', [q])).status).toBe(400);
   });
 
+  it('notices:feed takes an afterId keyset only with sinceTs, and only a ULID', async () => {
+    const seen: unknown[] = [];
+    const rt = fakeRuntime({ notices: { feed: async (q) => { seen.push(q); return []; } } });
+    await call(rt, 'notices:feed', [{ sinceTs: 5, afterId: A }]);
+    expect(seen).toEqual([{ sinceTs: 5, limit: 100, afterId: A }]);
+    for (const q of [{ afterId: A }, { sinceTs: 5, afterId: 'x' }, { sinceTs: 5, afterId: 7 }]) expect((await call(rt, 'notices:feed', [q])).status).toBe(400);
+  });
+
   it('inbox:list refuses a non-object filter', async () => {
     for (const f of ['open', 3, [1]]) expect((await call(fakeRuntime(), 'inbox:list', [f])).status).toBe(400);
   });

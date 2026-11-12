@@ -59,6 +59,10 @@ describe('held reasons, scopes and hints', () => {
     expect(heldReasonLabel('rule:GONE', rules, [], names)).toBe('held by a rule you removed');
     expect(heldReasonLabel('default-level', [], [], names)).toBe('held by your default level');
   });
+  it('labels remote holds', () => {
+    expect(heldReasonLabel('remote-rate', [], [], {})).toBe('held: too many from this remote workspace this minute');
+    expect(heldReasonLabel('remote-late', [], [], {})).toBe('held: arrived while this desktop was away');
+  });
   it('labels rule scopes', () => {
     expect(ruleScopeLabel('key', 'workspace:W1:disk', names)).toBe('disk · ops-oncall');
     expect(ruleScopeLabel('key', 'user:water', names)).toBe('water · You');

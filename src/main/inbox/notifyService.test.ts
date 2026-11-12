@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { InboxStore } from './inboxDb.js';
 import { NotifyStore } from './notifyStore.js';
 import { createNotifyService, INPUT_WAIT_DELAY_MS, todoNoticeInput } from './notifyService.js';
+import { remoteNoticeInput } from '../federation/remoteNotices.js';
 import type { NotificationRow } from '../../preload/inboxTypes.js';
 import { openTestInbox, countQueries, settle } from '../store/testStore.js';
 
@@ -235,5 +236,32 @@ describe('tick serialization', () => {
     const [a, b] = await Promise.all([svc.tick(), svc.tick()]);
     expect([a, b].filter((n) => n?.kind === 'digest')).toHaveLength(1);
     expect(delivered.filter((n) => n.kind === 'digest')).toHaveLength(1);
+  });
+});
+
+describe('remote notices meet the local policy (D132)', () => {
+  const R = '01JC0000000000000000000000';
+  const notice = (over: Record<string, unknown> = {}) => remoteNoticeInput(
+    { id: '01JC0000000000000000000001', ts: 0, kind: 'post', title: 'deploy failed', body: null, priority: 'urgent', dedupeKey: 'deploy', ...over } as never,
+    R, 'review-bot', null
+  );
+
+  it('a muted remote workspace holds its notices, whatever key the host sends', async () => {
+    const { store, svc, delivered } = await setup();
+    await store.setRule({ scopeKind: 'source', scopeValue: `workspace:${R}`, level: 'off', snoozeUntil: null });
+    const row = await svc.request(notice());
+    expect(row).toMatchObject({ delivered: false, workspaceId: R, source: { kind: 'workspace', id: R }, tags: [] });
+    expect(row.heldReason).toMatch(/^rule:/);
+    expect(await svc.request(notice({ dedupeKey: 'something-else' }))).toMatchObject({ delivered: false });
+    expect(delivered).toEqual([]);
+  });
+
+  it('a pause holds them too, and an unmuted one is delivered under its name', async () => {
+    const { store, svc, delivered, at } = await setup();
+    await store.setPause({ until: at() + 60_000, letUrgent: false, setAt: at() } as never);
+    expect(await svc.request(notice({ priority: 'normal' }))).toMatchObject({ delivered: false, heldReason: 'pause' });
+    await store.clearPause();
+    expect(await svc.request(notice({ priority: 'normal' }))).toMatchObject({ delivered: true, title: 'review-bot · deploy failed' });
+    expect(delivered).toHaveLength(1);
   });
 });

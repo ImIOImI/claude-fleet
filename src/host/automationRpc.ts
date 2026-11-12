@@ -28,7 +28,7 @@ export interface AutomationRuntime {
     create(input: Record<string, unknown>, by: TodoSource): Promise<Todo>;
     update(id: string, patch: UpdateTodoPatch, by: TodoSource): Promise<Todo>;
   };
-  notices: { feed(o: { sinceTs: number | null; limit: number }): Promise<NotificationRow[]> };
+  notices: { feed(o: { sinceTs: number | null; limit: number; afterId?: string }): Promise<NotificationRow[]> };
 }
 
 export interface Limiters { run: UnauthLimiter; other: UnauthLimiter }
@@ -156,8 +156,13 @@ export function automationRpcChannels(rt: () => AutomationRuntime | null, o: { l
         if (typeof x.sinceTs !== 'number' || !Number.isSafeInteger(x.sinceTs) || x.sinceTs < 0) throw new RpcArgError('sinceTs must be epoch ms');
         sinceTs = x.sinceTs;
       }
+      let afterId: string | undefined;
+      if (x.afterId !== undefined && x.afterId !== null) {
+        if (sinceTs === null) throw new RpcArgError('afterId needs sinceTs');
+        afterId = ulid(x.afterId, 'afterId');
+      }
       const limit = clampLimit(x.limit, MAX_NOTICES);
-      return { rows: (await need().notices.feed({ sinceTs, limit })).slice(0, limit) };
+      return { rows: (await need().notices.feed({ sinceTs, limit, ...(afterId ? { afterId } : {}) })).slice(0, limit) };
     })],
 
     ['automations:run', actionChannel({

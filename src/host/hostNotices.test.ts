@@ -88,4 +88,24 @@ describe('host notices', () => {
     expect((await store.list({ workspaceId: 'X' })).map((r) => r.title)).toEqual(['stray']);
     expect(await n.prune()).toBe(0);
   });
+
+  it('the feed pages a run of same-ts rows by (ts, id), strictly after the keyset', async () => {
+    const clock = { now: 2_000 };
+    const { n } = await setup(clock);
+    for (let i = 0; i < 5; i++) await n.request({ kind: 'post', title: `s${i}`, priority: 'normal', source: { kind: 'workspace', id: W } });
+    clock.now = 2_001;
+    await n.request({ kind: 'post', title: 'later', priority: 'normal', source: { kind: 'workspace', id: W } });
+    const all = await n.feed({ sinceTs: 2_000, limit: 100 });
+    const first = await n.feed({ sinceTs: 2_000, limit: 2 });
+    expect(first.map((r) => r.id)).toEqual(all.slice(0, 2).map((r) => r.id));
+    const pages = [...first];
+    for (let last = first.at(-1)!; ;) {
+      const next = await n.feed({ sinceTs: last.ts, afterId: last.id, limit: 2 });
+      pages.push(...next);
+      if (next.length < 2) break;
+      last = next.at(-1)!;
+    }
+    expect(pages.map((r) => r.id)).toEqual(all.map((r) => r.id));
+    expect(pages.at(-1)!.title).toBe('later');
+  });
 });
