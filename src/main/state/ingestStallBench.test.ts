@@ -8,14 +8,18 @@
 // three 20k-event hot sessions) takes a few minutes to build; set
 // INGEST_STALL_DB=<dir> to build once and reuse it (the bench copies it per run).
 //   INGEST_STALL_BENCH=1 INGEST_STALL_DB=/tmp/isb npx vitest run src/main/state/ingestStallBench.test.ts
+// INGEST_STALL_CACHE_KIB / INGEST_STALL_MMAP override the page cache and mmap of
+// both connections; INGEST_STALL_EVICT=1 drops the OS page cache before each phase.
 import { describe, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Database from 'better-sqlite3';
 import * as db from '../db.js';
 import { setSqliteQueryObserver } from '../store/kysely.js';
 import { indexSessionTurnsWith } from '../transcriptIndexCore.js';
-import { indexSessionSummaries } from '../transcriptIndex.js';
+import { indexSessionSummaries, searchVectorsSqlite } from '../transcriptIndex.js';
 import { EMBED_DIM, EMBED_MODEL_ID, EMPTY_VECTOR, encodeVector } from '../vectors.js';
 
 const ON = process.env.INGEST_STALL_BENCH === '1';
@@ -119,11 +123,28 @@ describe.skipIf(!ON)('ingest stall bench (#583)', () => {
     }
     const dir = mkdtempSync(join(tmpdir(), 'cf-isb-run-'));
     copyFileSync(join(base, 'state.db'), join(dir, 'state.db'));
+    const rss0 = process.memoryUsage().rss;
     db.openDb(dir);
+    // With the OS cache dropped, every SQLite cache miss is a real read.
+    const cacheKib = process.env.INGEST_STALL_CACHE_KIB;
+    if (cacheKib) await db.withRawSqlite((d) => d.pragma(`cache_size = -${Number(cacheKib)}`));
+    const ro = new Database(join(dir, 'state.db'), { readonly: true, fileMustExist: true });
+    if (cacheKib) ro.pragma(`cache_size = -${Number(cacheKib)}`);
+    const mmap = process.env.INGEST_STALL_MMAP;
+    if (mmap) {
+      await db.withRawSqlite((d) => d.pragma(`mmap_size = ${Number(mmap)}`));
+      ro.pragma(`mmap_size = ${Number(mmap)}`);
+    }
+    const evict = process.env.INGEST_STALL_EVICT === '1'
+      ? () => execFileSync('python3', ['-c', 'import os,sys\nfor p in sys.argv[1:]:\n  try:\n    fd=os.open(p,os.O_RDONLY); os.posix_fadvise(fd,0,0,os.POSIX_FADV_DONTNEED); os.close(fd)\n  except FileNotFoundError: pass', ...['', '-wal'].map((s) => join(dir, `state.db${s}`))])
+      : () => undefined;
     try {
       const embed = async (texts: string[]) => texts.map(() => { const v = new Float32Array(EMBED_DIM); v[2] = 1; return v; });
       const span = <T,>(_n: string, fn: () => Promise<T>) => fn();
-      const phases: Record<string, number[]> = { ingest: [], broadcast: [], summary_uncached: [], index_turns: [], index_summaries: [], list_ws: [], list_all: [] };
+      const phases: Record<string, number[]> = { ingest: [], broadcast: [], summary_uncached: [], index_turns: [], index_summaries: [], list_ws: [], list_all: [], search_scan: [] };
+      const qvec = new Float32Array(EMBED_DIM);
+      qvec[1] = 1;
+      const wsIds = Array.from({ length: WORKSPACES }, (_, i) => `ws${i}`);
       const top = new Map<string, number[]>();
       const note = (name: string, r: { ms: number; stmts: Stmt[] }) => {
         phases[name].push(r.ms);
@@ -136,16 +157,29 @@ describe.skipIf(!ON)('ingest stall bench (#583)', () => {
       for (let r = 0; r < ROUNDS; r++) {
         const sid = HOT[r % HOT.length];
         const ws = `ws${HOT.indexOf(sid) % WORKSPACES}`;
+        evict();
         note('ingest', await phase(() => ingestSession(ws, sid, next, BATCH, T0 + 10 ** 9)));
         next += BATCH;
+        evict();
         note('broadcast', await phase(() => db.summaryForWorkspace(ws)));
+        evict();
         // A non-default topTools limit bypasses the cache: the recompute a broadcast pays once the grace expires.
         note('summary_uncached', await phase(() => db.summaryForSession(sid, 6)));
+        evict();
         note('index_turns', await phase(() => indexSessionTurnsWith(span, sid, embed)));
+        evict();
         note('index_summaries', await phase(() => indexSessionSummaries(embed)));
+        evict();
         note('list_ws', await phase(() => db.listSessions(ws)));
+        evict();
         note('list_all', await phase(() => db.listSessions()));
+        evict();
+        const t = performance.now();
+        searchVectorsSqlite(ro, qvec, wsIds, { limit: 10 });
+        phases.search_scan.push(performance.now() - t);
       }
+      const rssMb = (process.memoryUsage().rss - rss0) / 1e6;
+      console.log(`rss delta ${rssMb.toFixed(1)} MB (cache_kib ${cacheKib ?? 'default'}, mmap ${mmap ?? 0}, evict ${process.env.INGEST_STALL_EVICT === '1'})`);
       // Backlog drain: a session with ~8k unembedded turns indexed in EMBED_BATCH reads.
       await ingestSession('ws0', 'drain', 0, DRAIN_LINES, T0 + 2 * 10 ** 9);
       const drain = await phase(() => indexSessionTurnsWith(span, 'drain', embed));
@@ -157,8 +191,9 @@ describe.skipIf(!ON)('ingest stall bench (#583)', () => {
       const rows = [...top.entries()].map(([k, xs]) => ({ stmt: k, n: xs.length, p50: +pct(xs, 0.5).toFixed(2), p95: +pct(xs, 0.95).toFixed(2) }))
         .sort((a, b) => b.p50 - a.p50).slice(0, 15);
       console.table(rows);
-      if (process.env.INGEST_STALL_OUT) writeFileSync(process.env.INGEST_STALL_OUT, JSON.stringify({ phases: out, top: rows, drain: { reads: drainReads.length, sync_ms: drain.ms, read_ms: drainReads.reduce((a, x) => a + x.ms, 0) } }, null, 2));
+      if (process.env.INGEST_STALL_OUT) writeFileSync(process.env.INGEST_STALL_OUT, JSON.stringify({ phases: out, top: rows, rss_delta_mb: rssMb, drain: { reads: drainReads.length, sync_ms: drain.ms, read_ms: drainReads.reduce((a, x) => a + x.ms, 0) } }, null, 2));
     } finally {
+      ro.close();
       await db.closeDb();
       rmSync(dir, { recursive: true, force: true });
     }

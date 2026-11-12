@@ -78,6 +78,9 @@ export interface StateOpenStats {
   /** The first statement that committed a change: a COMMIT of a transaction that changed rows, or an autocommit write that did. */
   firstWriteAt: number | null;
   firstWriteMs: number | null;
+  /** Effective page cache in KiB, and mmap_size in bytes. */
+  cacheKib: number;
+  mmapBytes: number;
 }
 
 let openStats: StateOpenStats | null = null;
@@ -205,6 +208,12 @@ export function stateLeftoverDrain(): Promise<WalDrainResult> | null {
   return leftoverDrain;
 }
 
+/** cache_size in KiB: negative values are KiB, positive ones pages. */
+function cacheKib(conn: Database.Database): number {
+  const n = conn.pragma('cache_size', { simple: true }) as number;
+  return n < 0 ? -n : (n * (conn.pragma('page_size', { simple: true }) as number)) / 1024;
+}
+
 const WRITE_SQL = /^\s*(insert|update|delete|replace|commit|end)\b/i;
 
 export function openDb(userDataDir: string): Database.Database {
@@ -277,6 +286,7 @@ function openSqliteConn(conn: Database.Database, path: string, openedAt: number,
   rehydratePendingClaudeIds(conn);
   const stats: StateOpenStats = {
     openedAt, openMs: performance.now() - t0, walBytes, walFrames, handedOff: lease !== null, workerReady: null, firstWriteAt: null, firstWriteMs: null,
+    cacheKib: cacheKib(conn), mmapBytes: Number(conn.pragma('mmap_size', { simple: true }) ?? 0),
   };
   void lease?.ready().then((ok) => { stats.workerReady = ok; });
   let settle: (s: StateOpenStats) => void = () => undefined;

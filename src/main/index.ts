@@ -544,6 +544,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     onStateOpenStats((s) => perfRecordSpan('claude_fleet.db.open', s.openedAt, s.openedAt + s.openMs, {
       wal_bytes: s.walBytes, wal_frames: s.walFrames, handed_off: s.handedOff, worker_ready: s.workerReady ?? -1,
       first_write_ms: s.firstWriteMs ?? -1, first_write_after_ms: s.firstWriteAt === null ? -1 : s.firstWriteAt - s.openedAt,
+      cache_kib: s.cacheKib, mmap_size: s.mmapBytes,
     }), DB_OPEN_ROW_FALLBACK_MS);
     void stateLeftoverDrain()?.then((r) => perfRecordSpan('claude_fleet.db.wal_drain', r.startedAt, r.startedAt + r.ms, {
       ok: r.ok, rounds: r.rounds, wal_log: r.log ?? -1, wal_ckpt: r.checkpointed ?? -1, wal_busy: r.busy ?? -1, ...(r.error ? { error: r.error } : {}),
