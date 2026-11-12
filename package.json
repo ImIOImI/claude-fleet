@@ -1,6 +1,6 @@
 {
   "name": "claude-fleet",
-  "version": "0.14.24",
+  "version": "0.14.25",
   "engines": {
     "node": ">=22"
   },
