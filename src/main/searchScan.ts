@@ -6,12 +6,12 @@ import { perfSpanAsyncAttrs } from './perf.js';
 import { setSqliteSearchScannerFactory } from './db.js';
 import { EMBED_DIM, EMBED_MODEL_ID } from './vectors.js';
 
-/** Inline only when the worker can't run. `conn` is read at fallback time. */
+/** Inline only when the worker can't run (never when it is closed or timed out). `conn` is read at fallback time. */
 export async function scanViaWorker(
   w: SearchWorkerClient | null, conn: () => Database.Database | null, q: Float32Array, job: ScanJob,
 ): Promise<ScanHit[]> {
   return perfSpanAsyncAttrs('claude_fleet.search.scan', async (set) => {
-    if (w?.usable()) {
+    if (w) {
       try {
         const r = await w.search(q, job);
         set({ mode: 'worker', worker_ms: Math.round(r.ms), rows: r.scanned });

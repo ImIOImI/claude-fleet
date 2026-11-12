@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { scanTopK, SearchWorkerClient, SearchWorkerUnavailable, SEARCH_QUEUE_MAX, type ScanJob } from './searchWorker.js';
 import { sqliteReadSource } from './sqliteReadSource.js';
+import { scanViaWorker } from './searchScan.js';
 import { decodeVector, encodeVector, encodeVectorInt8, topK, EMBED_DIM, EMBED_MODEL_ID } from './vectors.js';
 
 const A = 'wsA';
@@ -172,20 +173,31 @@ describe('SearchWorkerClient', () => {
     }
   });
 
-  it('gives up after repeated timeouts', async () => {
+  it('after repeated timeouts, fails queued and later searches without any inline scan', async () => {
     seed(10);
     const hang = `
       const { parentPort } = require('node:worker_threads');
       parentPort.postMessage({ ready: true });
       parentPort.on('message', (m) => { if (m === 'close') parentPort.close(); });`;
-    const c = new SearchWorkerClient(path, { timeoutMs: 100, workerSource: hang });
-    for (let i = 0; i < 3; i++) await expect(c.search(unit(rand(1)), job())).rejects.toThrow(/timed out/);
-    expect(c.usable()).toBe(false);
-    await expect(c.search(unit(rand(1)), job())).rejects.toBeInstanceOf(SearchWorkerUnavailable);
-    await c.close();
+    const logs: string[] = [];
+    const c = new SearchWorkerClient(path, { timeoutMs: 100, workerSource: hang, log: (m) => logs.push(m) });
+    try {
+      const rs = await Promise.allSettled(Array.from({ length: 10 }, (_, i) => c.search(unit(rand(i + 1)), job())));
+      const reasons = rs.map((r) => (r.status === 'rejected' ? r.reason as Error : null));
+      expect(reasons.every((e) => e !== null && !(e instanceof SearchWorkerUnavailable))).toBe(true);
+      expect(reasons.filter((e) => /timed out/.test(String(e?.message)))).toHaveLength(3);
+      expect(reasons.filter((e) => /transcript search unavailable/.test(String(e?.message)))).toHaveLength(7);
+      expect(c.usable()).toBe(false);
+      const later = await c.search(unit(rand(1)), job()).catch((e: Error) => e);
+      expect(later).not.toBeInstanceOf(SearchWorkerUnavailable);
+      expect(String(later)).toMatch(/transcript search unavailable/);
+      expect(logs.filter((m) => /off for this session/.test(m))).toHaveLength(1);
+    } finally {
+      await c.close();
+    }
   });
 
-  it('disables after three crashes', async () => {
+  it('after repeated crashes, sends no queued search inline; a later single call may', async () => {
     seed(10);
     const crash = `
       const { parentPort } = require('node:worker_threads');
@@ -193,12 +205,14 @@ describe('SearchWorkerClient', () => {
       parentPort.on('message', () => { process.exit(3); });`;
     const c = new SearchWorkerClient(path, { workerSource: crash });
     try {
-      const rs = await Promise.allSettled([c.search(unit(rand(1)), job()), c.search(unit(rand(2)), job()), c.search(unit(rand(3)), job()), c.search(unit(rand(4)), job())]);
+      const rs = await Promise.allSettled(Array.from({ length: 8 }, (_, i) => c.search(unit(rand(i + 1)), job())));
       const inline = rs.filter((r) => r.status === 'rejected' && r.reason instanceof SearchWorkerUnavailable && r.reason.inline);
       expect(rs.every((r) => r.status === 'rejected')).toBe(true);
-      // 3 crashes disable the client, after which the remaining caller may scan inline too.
-      expect(inline.length).toBeLessThanOrEqual(4);
+      // One per crash (the scan in flight), none for the backlog.
+      expect(inline).toHaveLength(3);
       expect(c.usable()).toBe(false);
+      const later = await c.search(unit(rand(1)), job()).catch((e: unknown) => e);
+      expect(later instanceof SearchWorkerUnavailable && later.inline).toBe(true);
     } finally {
       await c.close();
     }
@@ -324,6 +338,18 @@ describe('sqliteReadSource search', () => {
     await rs.close();
     expect(String(await p)).toMatch(/closed/);
     await expect(rs.searchEmbeddings(unit(rand(1)), new Set([A]), { limit: 5 })).rejects.toThrow(/closed/);
+  });
+
+  it('scanViaWorker never scans inline through a closed client', async () => {
+    seed(10);
+    const c = new SearchWorkerClient(path);
+    await c.close();
+    const ro = new Database(path, { readonly: true });
+    try {
+      await expect(scanViaWorker(c, () => ro, unit(rand(1)), job())).rejects.toThrow(/closed/);
+    } finally {
+      ro.close();
+    }
   });
 
   it('surfaces a worker timeout instead of rescanning inline', async () => {

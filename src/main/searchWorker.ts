@@ -165,8 +165,9 @@ export class SearchWorkerClient {
   private ready: Promise<void> | null = null;
   private queue: Job[] = [];
   private running: { j: Job; timer: ReturnType<typeof setTimeout> } | null = null;
-  private failures: number[] = [];
-  private disabled = false;
+  private failures = { crash: [] as number[], timeout: [] as number[] };
+  /** Repeated timeouts mean slow scans: then nothing runs inline. Repeated crashes keep a one-call inline fallback. */
+  private disabled: 'crash' | 'timeout' | null = null;
   private closed = false;
   private lastLog = 0;
 
@@ -174,14 +175,15 @@ export class SearchWorkerClient {
 
   /** False once the client gave up (repeated failures) or was closed. */
   usable(): boolean {
-    return !this.disabled && !this.closed;
+    return this.disabled === null && !this.closed;
   }
 
   /** Rejects with SearchWorkerUnavailable when the worker can't serve it, or
    *  with a plain Error (timeout, full queue, closed) that callers surface. */
   search(q: Float32Array, job: ScanJob): Promise<ScanResult> {
     if (this.closed) return Promise.reject(new Error('search worker closed'));
-    if (this.disabled) return Promise.reject(new SearchWorkerUnavailable('search worker disabled', true));
+    if (this.disabled === 'timeout') return Promise.reject(new Error('transcript search unavailable'));
+    if (this.disabled === 'crash') return Promise.reject(new SearchWorkerUnavailable('search worker disabled', true));
     if (this.queue.length >= SEARCH_QUEUE_MAX) return Promise.reject(new Error('transcript search is busy; retry shortly'));
     return new Promise<ScanResult>((resolve, reject) => {
       this.queue.push({ q, job, resolve, reject });
@@ -217,7 +219,7 @@ export class SearchWorkerClient {
   private pump(): void {
     if (this.running || this.queue.length === 0 || this.closed) return;
     if (this.disabled) {
-      this.rejectAll(new SearchWorkerUnavailable('search worker disabled', true));
+      this.rejectAll(this.backlogError('search worker disabled'));
       return;
     }
     this.start().then(() => {
@@ -231,7 +233,7 @@ export class SearchWorkerClient {
         this.running = null;
         j.reject(new Error(`transcript search timed out after ${Math.round(timeoutMs / 1000)}s`));
         // A scan inside a native statement can't be interrupted: replace the worker.
-        this.failed(`search timed out after ${timeoutMs} ms`);
+        this.failed(`search timed out after ${timeoutMs} ms`, 'timeout');
         this.replace(w);
         this.pump();
       }, timeoutMs);
@@ -251,7 +253,7 @@ export class SearchWorkerClient {
         this.worker = null;
         this.ready = null;
         void w.terminate().catch(() => undefined);
-        this.failed(reason);
+        this.failed(reason, 'crash');
         // The scan in flight (or, before ready, the first queued one) may run inline once.
         const first = this.running?.j ?? this.queue.shift();
         if (this.running) {
@@ -259,7 +261,7 @@ export class SearchWorkerClient {
           this.running = null;
         }
         first?.reject(new SearchWorkerUnavailable(reason, true));
-        if (this.disabled) this.rejectAll(new SearchWorkerUnavailable(reason, true));
+        if (this.disabled) this.rejectAll(this.backlogError(reason));
         if (!settled) {
           settled = true;
           clearTimeout(t);
@@ -273,10 +275,10 @@ export class SearchWorkerClient {
           workerData: { bs3Path: betterSqlitePath(), dbPath: this.dbPath },
         });
       } catch (e) {
-        this.failed(String(e));
+        this.failed(String(e), 'crash');
         this.ready = null;
         this.queue.shift()?.reject(new SearchWorkerUnavailable(String(e), true));
-        if (this.disabled) this.rejectAll(new SearchWorkerUnavailable(String(e), true));
+        if (this.disabled) this.rejectAll(this.backlogError(String(e)));
         reject(new SearchWorkerUnavailable(String(e), false));
         queueMicrotask(() => this.pump());
         return;
@@ -327,13 +329,21 @@ export class SearchWorkerClient {
     for (const j of this.queue.splice(0)) j.reject(err);
   }
 
-  private failed(reason: string): void {
+  /** Queued scans never go inline when the client gives up: only a later single call may. */
+  private backlogError(reason: string): Error {
+    return this.disabled === 'timeout' ? new Error('transcript search unavailable') : new SearchWorkerUnavailable(reason, false);
+  }
+
+  private failed(reason: string, kind: 'crash' | 'timeout'): void {
     const now = Date.now();
-    this.failures = this.failures.filter((t) => now - t < FAILURE_WINDOW_MS);
-    this.failures.push(now);
-    if (this.failures.length >= MAX_FAILURES && !this.disabled) {
-      this.disabled = true;
-      this.opts.log?.(`search scans run inline from now on: ${reason}`);
+    const list = this.failures[kind].filter((t) => now - t < FAILURE_WINDOW_MS);
+    list.push(now);
+    this.failures[kind] = list;
+    if (list.length >= MAX_FAILURES && this.disabled === null) {
+      this.disabled = kind;
+      this.opts.log?.(kind === 'timeout'
+        ? `transcript search off for this session after repeated timeouts: ${reason}`
+        : `search scans run inline from now on: ${reason}`);
       return;
     }
     if (now - this.lastLog >= LOG_EVERY_MS) {

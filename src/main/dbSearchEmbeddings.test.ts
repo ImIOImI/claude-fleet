@@ -85,3 +85,26 @@ it.skipIf(isPg)('on SQLite, the installed worker scan returns what the inline sc
     db.setSqliteSearchScannerFactory(null);
   }
 });
+
+it.skipIf(isPg)('a search while closeDb closes the worker scanner fails and starts no new worker', async () => {
+  await withSessions([{ workspaceId: 'W-A', sessionId: 's1', kind: 'turn', refEventId: 1, ts: 1, text: 'a', modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec: encodeVector(unit(1)), dedupKey: 'c1' }]);
+  let created = 0;
+  let release!: () => void;
+  const closing = new Promise<void>((r) => { release = r; });
+  db.setSqliteSearchScannerFactory(() => {
+    created++;
+    return { scan: async () => [], close: () => closing };
+  });
+  try {
+    await db.searchEmbeddings(unit(1), ['W-A'], { limit: 1 });
+    expect(created).toBe(1);
+    const c1 = db.closeDb();
+    const c2 = db.closeDb();
+    await expect(db.searchEmbeddings(unit(1), ['W-A'], { limit: 1 })).rejects.toThrow(/closing/);
+    expect(created).toBe(1);
+    release();
+    await Promise.all([c1, c2]);
+  } finally {
+    db.setSqliteSearchScannerFactory(null);
+  }
+});
