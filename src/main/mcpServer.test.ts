@@ -531,7 +531,8 @@ describe('mark_useful + get_config (#207)', () => {
 // ---------------------------------------------------------------------------
 import { vi } from 'vitest';
 import { setErrorSink } from './errorLog.js';
-import { callTool, _setDbForTests, setReadScopeResolver, dispatchLineForTests, MAX_IN_FLIGHT_PER_CONNECTION } from './mcpServer.js';
+import { callTool, _setDbForTests, setReadScopeResolver, dispatchLineForTests, MAX_IN_FLIGHT_PER_CONNECTION, trackConnection } from './mcpServer.js';
+import { EventEmitter as CloseEmitter } from 'node:events';
 import type { ErrorRow } from './db.js';
 
 describe('callTool diagnostics', () => {
@@ -601,6 +602,79 @@ describe('callTool diagnostics', () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(out.at(-1)?.id).toBe(99);
     expect(out.at(-1)?.error).toBeUndefined();
+  });
+
+  it('a notification on a connection that closes at once writes no connection row', async () => {
+    const sock = Object.assign(new CloseEmitter(), { write: () => true, destroyed: false });
+    const conn = trackConnection('tcp', WS_A, sock as never);
+    conn.rpcCount++;
+    dispatchLineForTests(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }), sock, WS_A);
+    sock.destroyed = true;
+    sock.emit('close');
+    await new Promise((r) => setTimeout(r, 20));
+    expect(rows.filter((r) => r.type.startsWith('mcp-conn') || r.type === 'mcp-reply-dropped')).toEqual([]);
+  });
+
+  it('a reply ready after its connection closed is logged once as mcp-reply-dropped', async () => {
+    harness = makeFileDb();
+    _setDbForTests(harness.db);
+    let open!: () => void;
+    const gate = new Promise<void>((r) => { open = r; });
+    setReadScopeResolver(async (id) => { await gate; return [id]; });
+    const writes: string[] = [];
+    const sock = Object.assign(new CloseEmitter(), { write: (x: string) => { writes.push(x); return true; }, destroyed: false });
+    trackConnection('tcp', WS_A, sock as never).rpcCount++;
+    dispatchLineForTests(JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'list_sessions', arguments: {} } }), sock, WS_A);
+    sock.destroyed = true;
+    sock.emit('close');
+    open();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(writes).toEqual([]);
+    const dropped = rows.filter((r) => r.type === 'mcp-reply-dropped');
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]).toMatchObject({ level: 'warn', workspaceId: WS_A });
+    expect(dropped[0].extra).toMatchObject({ method: 'tools/call', tool: 'list_sessions' });
+    expect(rows.find((r) => r.type === 'mcp-conn-closed')?.level ?? 'info').toBe('info');
+  });
+
+  it('a reply after the client half-closed (ended, not yet destroyed) is also logged as dropped', async () => {
+    harness = makeFileDb();
+    _setDbForTests(harness.db);
+    const writes: string[] = [];
+    const sock = { write: (x: string) => { writes.push(x); return true; }, destroyed: false, writableEnded: true };
+    dispatchLineForTests(JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_sessions', arguments: {} } }), sock, WS_A);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(writes).toEqual([]);
+    expect(rows.filter((r) => r.type === 'mcp-reply-dropped')).toHaveLength(1);
+  });
+
+  it('notifications still count toward the per-connection in-flight cap', async () => {
+    harness = makeFileDb();
+    _setDbForTests(harness.db);
+    let open!: () => void;
+    const gate = new Promise<void>((r) => { open = r; });
+    let started = 0;
+    setReadScopeResolver(async (id) => { started++; await gate; return [id]; });
+    const sock = { write: () => true };
+    for (let i = 0; i < MAX_IN_FLIGHT_PER_CONNECTION + 5; i++) {
+      dispatchLineForTests(JSON.stringify({ jsonrpc: '2.0', method: 'tools/call', params: { name: 'list_sessions', arguments: {} } }), sock, WS_A);
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    expect(started).toBe(MAX_IN_FLIGHT_PER_CONNECTION);
+    open();
+    await new Promise((r) => setTimeout(r, 20));
+  });
+
+  it('a normal short call writes no connection rows', async () => {
+    harness = makeFileDb();
+    _setDbForTests(harness.db);
+    const sock = Object.assign(new CloseEmitter(), { write: () => true, destroyed: false });
+    trackConnection('tcp', WS_A, sock as never).rpcCount++;
+    dispatchLineForTests(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_sessions', arguments: {} } }), sock, WS_A);
+    await new Promise((r) => setTimeout(r, 50));
+    sock.destroyed = true;
+    sock.emit('close');
+    expect(rows.filter((r) => r.type.startsWith('mcp-conn') || r.type === 'mcp-reply-dropped')).toEqual([]);
   });
 
   it('watchdog logs mcp-call-stalled with the stuck stage when a call hangs', async () => {

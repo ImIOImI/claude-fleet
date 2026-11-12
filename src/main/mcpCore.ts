@@ -419,7 +419,7 @@ export function serveMcpConnection(sock: Socket, callerId: string, transport: 'u
 /** A connection open this long gets its accept row; shorter ones only log an abnormal close. */
 export const MCP_CONN_LOG_AFTER_MS = 10_000;
 
-/** Connection-lifecycle breadcrumbs (errors DB via list_errors). Logged: `mcp-conn` once open MCP_CONN_LOG_AFTER_MS, and `mcp-conn-closed` for that connection, for one closed with requests in flight, or for one that carried no rpc lines. */
+/** Connection-lifecycle breadcrumbs (errors DB via list_errors). Logged: `mcp-conn` once open MCP_CONN_LOG_AFTER_MS, and `mcp-conn-closed` (info) for that connection or for one that carried no rpc lines. A reply lost to a closed connection is `mcp-reply-dropped` (warn), logged where the reply is sent. */
 export function trackConnection(
   transport: 'unix' | 'tcp',
   callerId: string,
@@ -443,12 +443,12 @@ export function trackConnection(
   sock.on('close', () => {
     clearTimeout(timer);
     const pending = inFlight.get(sock) ?? 0;
-    if (!longLived && pending === 0 && conn.rpcCount > 0) return;
+    if (!longLived && conn.rpcCount > 0) return;
     const durationMs = Date.now() - openedAt;
     logError({
       source: 'main',
       type: 'mcp-conn-closed',
-      level: pending > 0 ? 'warn' : 'info',
+      level: 'info',
       message: `mcp ${transport} connection for ${callerId} closed after ${durationMs}ms (${conn.rpcCount} rpc lines, ${pending} in flight)`,
       workspaceId: callerId,
       extra: { transport, durationMs, rpcCount: conn.rpcCount, inFlight: pending }
@@ -485,6 +485,23 @@ export function dispatchLine(line: string, sock: Out, callerId: string): void {
     return;
   }
   inFlight.set(sock, busy + 1);
+  const tool = method === 'tools/call' && typeof params?.name === 'string' ? params.name : undefined;
+  const reply = (obj: unknown): void => {
+    // After the client's FIN the socket is ended (not yet destroyed): a write would be lost too.
+    const s = sock as Partial<Socket>;
+    if (s.destroyed || s.writableEnded || s.writable === false) {
+      logError({
+        source: 'main',
+        type: 'mcp-reply-dropped',
+        level: 'warn',
+        message: `mcp reply for ${method ?? '?'}${tool ? ` (${tool})` : ''} dropped: the connection closed first`,
+        workspaceId: callerId,
+        extra: { method: method ?? null, ...(tool ? { tool } : {}) }
+      });
+      return;
+    }
+    send(sock, obj);
+  };
 
   // handleMethod may return a Promise (the committee_* tools call async backend
   // effects); Promise.resolve() funnels both sync throws and async rejections
@@ -493,14 +510,14 @@ export function dispatchLine(line: string, sock: Out, callerId: string): void {
     .then(() => handleMethod(method ?? '', params ?? {}, callerId))
     .then((result) => {
       if (!isNotification && result !== NO_REPLY) {
-        send(sock, { jsonrpc: '2.0', id, result });
+        reply({ jsonrpc: '2.0', id, result });
       }
     })
     .catch((err) => {
       if (!isNotification) {
         const message = clipText(err instanceof Error ? err.message : String(err), MAX_TOOL_ERROR_CHARS);
         const code = err instanceof RpcError ? err.code : -32603;
-        send(sock, { jsonrpc: '2.0', id, error: { code, message } });
+        reply({ jsonrpc: '2.0', id, error: { code, message } });
       }
     })
     .finally(() => inFlight.set(sock, (inFlight.get(sock) ?? 1) - 1));
