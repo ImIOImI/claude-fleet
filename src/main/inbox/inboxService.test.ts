@@ -111,3 +111,16 @@ describe('automation attribution (#407 Phase 3)', () => {
     await expect(svc.mcp.post('W1', { title: 'x', run_id: 7 })).rejects.toThrow(/run_id must be a string/);
   });
 });
+
+describe('inbox IPC actor', () => {
+  it('ipc.create and ipc.update record the given actor (remote g, D130)', async () => {
+    const { svc, store } = await setup({});
+    const t = await svc.ipc.create({ title: 'look' }, { kind: 'user', id: 'ann' });
+    expect(t.source).toEqual({ kind: 'user', id: 'ann' });
+    await svc.ipc.update(t.id, { status: 'done' }, { kind: 'user', id: 'bob' });
+    const ev = await store.events(t.id);
+    expect(ev.at(-1)?.actor).toEqual({ kind: 'user', id: 'bob' });
+    const mine = await svc.ipc.create({ title: 'local' });
+    expect(mine.source).toEqual({ kind: 'user', id: null });
+  });
+});
