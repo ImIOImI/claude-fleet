@@ -98,7 +98,7 @@ export async function startHostMcp(o: {
     serveMcpConnection(sock, o.workspaceId, 'path' in o.listen ? 'unix' : 'tcp');
   });
   function reset(): void {
-    releaseReadSource();
+    void releaseReadSource();
     setQueryEmbedder(null);
     setUsageRecorder(null);
     setOwnerHandlers(null);

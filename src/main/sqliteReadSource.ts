@@ -4,8 +4,8 @@
 import Database from 'better-sqlite3';
 import { scanJob } from './transcriptIndex.js';
 import { runQueryInWorker } from './queryWorker.js';
-import { scanTopK, SearchWorkerClient, SearchWorkerUnavailable, type SearchWorkerOptions } from './searchWorker.js';
-import { perfSpanAsyncAttrs } from './perf.js';
+import { SearchWorkerClient, type SearchWorkerOptions } from './searchWorker.js';
+import { scanViaWorker } from './searchScan.js';
 import {
   NOT_AUTHORIZED, checkEventColumns, type OwnedReadSource, type Row, type Scope, type TokenGroup,
 } from './store/readSource.js';
@@ -60,7 +60,9 @@ export interface SqliteReadSourceOptions {
 /** `db` is the MCP server's `{ readonly: true }` connection to state.db. */
 export function sqliteReadSource(db: Database.Database, o: SqliteReadSourceOptions = {}): OwnedReadSource {
   let worker: SearchWorkerClient | null | undefined;
+  let closed = false;
   const searchWorker = (): SearchWorkerClient | null => {
+    if (closed) return null;
     if (worker === undefined) {
       const onFile = db.name !== '' && db.name !== ':memory:' && !db.memory;
       worker = o.searchWorker !== false && onFile
@@ -132,25 +134,9 @@ export function sqliteReadSource(db: Database.Database, o: SqliteReadSourceOptio
       const sql = `SELECT * FROM errors WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ?`;
       return db.prepare(sql).all(...p, f.limit) as Row[];
     },
-    // The scan reads and scores every allowed vector: off the main thread in
-    // the worker (#596); inline only when the worker can't run.
     async searchEmbeddings(qvec, scope, opts) {
-      const job = scanJob([...scope], opts);
-      return perfSpanAsyncAttrs('claude_fleet.search.scan', async (set) => {
-        const w = searchWorker();
-        if (w?.usable()) {
-          try {
-            const r = await w.search(qvec, job);
-            set({ mode: 'worker', worker_ms: Math.round(r.ms), rows: r.scanned });
-            return r.hits;
-          } catch (e) {
-            if (!(e instanceof SearchWorkerUnavailable)) throw e;
-          }
-        }
-        const r = scanTopK(db, qvec, job);
-        set({ mode: 'inline', main_ms: Math.round(r.ms), rows: r.scanned });
-        return r.hits;
-      });
+      if (closed) throw new Error('search worker closed');
+      return scanViaWorker(searchWorker(), () => db, qvec, scanJob([...scope], opts));
     },
     // Snapshot build + caller SQL run in a worker thread with a hard timeout
     // (#476): on a multi-GB state.db the copy took minutes and froze the main
@@ -168,8 +154,9 @@ export function sqliteReadSource(db: Database.Database, o: SqliteReadSourceOptio
     },
     async forgetCaller() {},
     async close() {
-      await worker?.close();
+      closed = true;
       if (db.open) db.close();
+      await worker?.close();
     },
   };
 }

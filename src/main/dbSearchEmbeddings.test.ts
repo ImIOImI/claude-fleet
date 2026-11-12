@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import * as db from './db.js';
 import { EMBED_DIM, EMBED_MODEL_ID, encodeVector } from './vectors.js';
-import { openTestState, type TestState } from './store/testStore.js';
+import { isPg, openTestState, type TestState } from './store/testStore.js';
+import { installSqliteSearchWorker } from './searchScan.js';
 
 let st: TestState;
 beforeEach(async () => { st = await openTestState('cf-search-emb-'); });
@@ -67,4 +68,20 @@ it('returns [] for a non-positive limit, on both dialects', async () => {
 it('returns [] for a zero-norm query vector, on both dialects', async () => {
   await db.insertEmbeddings([{ workspaceId: 'W-A', sessionId: 's1', kind: 'turn', refEventId: 1, ts: 1, text: 'x', modelId: EMBED_MODEL_ID, dim: EMBED_DIM, vec: encodeVector(unit(1)), dedupKey: 'zero1' }]);
   expect(await db.searchEmbeddings(new Float32Array(EMBED_DIM), ['W-A'], { limit: 5 })).toEqual([]);
+});
+
+it.skipIf(isPg)('on SQLite, the installed worker scan returns what the inline scan does', async () => {
+  const rows = Array.from({ length: 60 }, (_, i) => ({
+    workspaceId: i % 3 === 0 ? 'W-OTHER' : 'W-A', sessionId: `s${i % 7}`, kind: (i % 5 === 0 ? 'summary' : 'turn') as 'turn' | 'summary',
+    refEventId: i, ts: 1000 + i, text: i % 11 === 0 ? '' : `text ${i}`, modelId: EMBED_MODEL_ID, dim: EMBED_DIM,
+    vec: encodeVector(unit(i)), dedupKey: `w${i}`,
+  }));
+  await withSessions(rows);
+  const inline = await db.searchEmbeddings(unit(4), ['W-A', 'W-OTHER'], { limit: 8 });
+  installSqliteSearchWorker();
+  try {
+    expect(await db.searchEmbeddings(unit(4), ['W-A', 'W-OTHER'], { limit: 8 })).toEqual(inline);
+  } finally {
+    db.setSqliteSearchScannerFactory(null);
+  }
 });

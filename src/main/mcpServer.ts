@@ -98,7 +98,7 @@ export function startMcpServer(dir: string, opts: { readSource?: OwnedReadSource
   if (userDataDir) return;
   initReadSource(opts.readSource === null ? null : opts.readSource ?? sqliteReadSource(
     new Database(join(dir, 'state.db'), { readonly: true, fileMustExist: true }),
-    { searchWorker: { onDisabled: (reason) => logError({ source: 'main', type: 'search-worker', level: 'warn', message: `search scans run inline from now on: ${reason}` }) } },
+    { searchWorker: { log: (message) => logError({ source: 'main', type: 'search-worker', level: 'warn', message }) } },
   ));
   userDataDir = dir;
 
@@ -220,7 +220,7 @@ export function removeWorkspaceSocket(id: string): void {
   }
 }
 
-export function stopMcpServer(): void {
+export async function stopMcpServer(): Promise<void> {
   for (const server of listeners.values()) {
     try {
       server.close();
@@ -239,8 +239,8 @@ export function stopMcpServer(): void {
   }
   tokenToId.clear();
   idToToken.clear();
-  releaseReadSource();
   userDataDir = null;
+  await releaseReadSource();
 }
 
 /** Windows TCP connection handler. The first non-empty line authenticates the

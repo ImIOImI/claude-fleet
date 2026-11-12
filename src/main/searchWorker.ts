@@ -1,18 +1,12 @@
-// Off-main-thread semantic search scan for the SQLite MCP read path (#596).
+// Brute-force vector scans (search_transcripts and history:search's local
+// half), run in a worker thread with its own read-only connection so they
+// don't block main.
 //
-// search_transcripts scores every allowed embedding against the query vector.
-// On the host's corpus (~60k text vectors) that read + score took 400–600 ms,
-// synchronously on the main thread. A long-lived worker thread holding its own
-// read-only connection now does the scan and returns only the top-k hits.
+// scanTopK is serialized into the worker via toString(): it may use only its
+// parameters and globals. The inline fallback calls the same function.
 //
-// scanTopK is serialized into the worker via toString(), so it MUST stay
-// self-contained: it may use only its parameters and globals — no imports,
-// module-level constants or helpers. The inline fallback calls the same
-// function, so both modes return identical results.
-//
-// No vector cache: PRAGMA data_version changes on every ingest commit, and
-// retention rewrites vectors in place (float32 → int8), so a cache would be
-// invalidated on nearly every query.
+// No vector cache: every ingest commit changes PRAGMA data_version and
+// retention rewrites vectors in place.
 
 import { Worker } from 'node:worker_threads';
 import type BetterSqlite3 from 'better-sqlite3';
@@ -53,7 +47,7 @@ export interface ScanResult {
 
 /** Brute-force cosine top-k over `job.allowed`'s current-model, non-placeholder
  *  embeddings of live sessions. Scores match decodeVector + dot exactly (int8
- *  elements rounded to float32 first); ties keep the lower id first. Only the
+ *  elements rounded to float32 first); ties keep the lower id. Only the
  *  top-k rows' text is read. SELF-CONTAINED — serialized into the worker. */
 export function scanTopK(db: BetterSqlite3.Database, q: Float32Array, job: ScanJob): ScanResult {
   const t0 = performance.now();
@@ -71,7 +65,7 @@ export function scanTopK(db: BetterSqlite3.Database, q: Float32Array, job: ScanJ
   }
   const top: Array<{ id: number; score: number }> = [];
   let scanned = 0;
-  const stmt = db.prepare(`SELECT id, vec FROM embeddings WHERE ${where.join(' AND ')} ORDER BY id`).raw(true);
+  const stmt = db.prepare(`SELECT id, vec FROM embeddings WHERE ${where.join(' AND ')}`).raw(true);
   for (const row of stmt.iterate(...params) as Iterable<[number, Uint8Array | null]>) {
     const id = row[0];
     const v = row[1];
@@ -87,9 +81,10 @@ export function scanTopK(db: BetterSqlite3.Database, q: Float32Array, job: ScanJ
       for (let i = 0; i < n; i++) s += q[i] * dv.getFloat32(i * 4, true);
     }
     scanned++;
-    if (top.length < k || s > top[top.length - 1].score) {
+    const last = top[top.length - 1];
+    if (top.length < k || s > last.score || (s === last.score && id < last.id)) {
       let j = top.length;
-      while (j > 0 && top[j - 1].score < s) j--;
+      while (j > 0 && (top[j - 1].score < s || (top[j - 1].score === s && top[j - 1].id > id))) j--;
       top.splice(j, 0, { id, score: s });
       if (top.length > k) top.pop();
     }
@@ -98,8 +93,8 @@ export function scanTopK(db: BetterSqlite3.Database, q: Float32Array, job: ScanJ
   if (top.length > 0) {
     const rows = db
       .prepare(`SELECT id, session_id AS sessionId, workspace_id AS workspaceId, kind, ts, text FROM embeddings
-                WHERE id IN (${top.map(() => '?').join(',')})`)
-      .all(...top.map((t) => t.id)) as Array<{ id: number; sessionId: string; workspaceId: string; kind: 'turn' | 'summary'; ts: number | null; text: string }>;
+                WHERE id IN (${top.map(() => '?').join(',')}) AND workspace_id IN (${ids.map(() => '?').join(',')})`)
+      .all(...top.map((t) => t.id), ...ids) as Array<{ id: number; sessionId: string; workspaceId: string; kind: 'turn' | 'summary'; ts: number | null; text: string }>;
     const byId = new Map(rows.map((r) => [r.id, r]));
     for (const t of top) {
       const r = byId.get(t.id);
@@ -134,33 +129,46 @@ parentPort.on('message', (m) => {
 });
 `;
 
-/** The worker couldn't serve the call (didn't start, crashed, or the client gave up); callers scan inline. */
-export class SearchWorkerUnavailable extends Error {}
+/** The worker couldn't serve the call (didn't start or crashed). `inline` is
+ *  true for at most one caller per failure, or for every caller once the client
+ *  has given up, so a crash doesn't turn every queued search into a main-thread scan. */
+export class SearchWorkerUnavailable extends Error {
+  constructor(message: string, readonly inline: boolean) {
+    super(message);
+  }
+}
+
+export const SEARCH_QUEUE_MAX = 16;
+const LOG_EVERY_MS = 60_000;
 
 export interface SearchWorkerOptions {
   timeoutMs?: number;
   readyTimeoutMs?: number;
   /** Test seam: replaces the worker body. */
   workerSource?: string;
-  /** Called once when the client stops using the worker for the process. */
-  onDisabled?: (reason: string) => void;
+  /** Rate-limited warnings (start failures, crashes, timeouts, giving up). */
+  log?: (message: string) => void;
 }
 
-interface Pending {
+interface Job {
+  q: Float32Array;
+  job: ScanJob;
   resolve: (r: ScanResult) => void;
   reject: (e: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
 }
 
-/** One long-lived worker per state.db path; requests run in order. */
+/** One worker per state.db path, one scan in flight. The timeout starts when a
+ *  scan is sent; a scan past it is rejected and the worker replaced, and the
+ *  queue carries over to the fresh worker. */
 export class SearchWorkerClient {
   private worker: Worker | null = null;
   private ready: Promise<void> | null = null;
-  private pending = new Map<number, Pending>();
-  private nextId = 1;
+  private queue: Job[] = [];
+  private running: { j: Job; timer: ReturnType<typeof setTimeout> } | null = null;
   private failures: number[] = [];
   private disabled = false;
   private closed = false;
+  private lastLog = 0;
 
   constructor(private readonly dbPath: string, private readonly opts: SearchWorkerOptions = {}) {}
 
@@ -170,36 +178,25 @@ export class SearchWorkerClient {
   }
 
   /** Rejects with SearchWorkerUnavailable when the worker can't serve it, or
-   *  with a timeout Error (the worker is then replaced; don't rescan inline). */
-  async search(q: Float32Array, job: ScanJob): Promise<ScanResult> {
-    if (!this.usable()) throw new SearchWorkerUnavailable('search worker disabled');
-    await this.start();
-    const w = this.worker;
-    if (!w) throw new SearchWorkerUnavailable('search worker not running');
-    const id = this.nextId++;
-    const timeoutMs = this.opts.timeoutMs ?? SEARCH_TIMEOUT_MS;
+   *  with a plain Error (timeout, full queue, closed) that callers surface. */
+  search(q: Float32Array, job: ScanJob): Promise<ScanResult> {
+    if (this.closed) return Promise.reject(new Error('search worker closed'));
+    if (this.disabled) return Promise.reject(new SearchWorkerUnavailable('search worker disabled', true));
+    if (this.queue.length >= SEARCH_QUEUE_MAX) return Promise.reject(new Error('transcript search is busy; retry shortly'));
     return new Promise<ScanResult>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`transcript search timed out after ${Math.round(timeoutMs / 1000)}s`));
-        // A scan inside a native statement can't be interrupted: replace the worker.
-        this.drop(new Error('search worker restarted after a timeout'));
-      }, timeoutMs);
-      timer.unref?.();
-      this.pending.set(id, { resolve, reject, timer });
-      w.postMessage({ id, q, job });
+      this.queue.push({ q, job, resolve, reject });
+      this.pump();
     });
   }
 
-  /** Lets an idle worker close its connection (so it isn't open when the app's
-   *  connection closes), then terminates it. */
+  /** Lets the worker close its connection (terminated after 1 s); rejects queued searches. */
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
     const w = this.worker;
     this.worker = null;
     this.ready = null;
-    this.rejectAll(new SearchWorkerUnavailable('search worker closed'));
+    this.rejectAll(new Error('search worker closed'));
     if (!w) return;
     // Bounded: a worker that already exited never emits 'exit' again.
     await new Promise<void>((resolve) => {
@@ -217,6 +214,33 @@ export class SearchWorkerClient {
     });
   }
 
+  private pump(): void {
+    if (this.running || this.queue.length === 0 || this.closed) return;
+    if (this.disabled) {
+      this.rejectAll(new SearchWorkerUnavailable('search worker disabled', true));
+      return;
+    }
+    this.start().then(() => {
+      if (this.worker === null || this.running || this.closed) return;
+      const j = this.queue.shift();
+      if (!j) return;
+      const w = this.worker;
+      const timeoutMs = this.opts.timeoutMs ?? SEARCH_TIMEOUT_MS;
+      const timer = setTimeout(() => {
+        if (this.running?.j !== j) return;
+        this.running = null;
+        j.reject(new Error(`transcript search timed out after ${Math.round(timeoutMs / 1000)}s`));
+        // A scan inside a native statement can't be interrupted: replace the worker.
+        this.failed(`search timed out after ${timeoutMs} ms`);
+        this.replace(w);
+        this.pump();
+      }, timeoutMs);
+      timer.unref?.();
+      this.running = { j, timer };
+      w.postMessage({ q: j.q, job: j.job });
+    }, () => undefined);
+  }
+
   private start(): Promise<void> {
     if (this.ready) return this.ready;
     const ready = new Promise<void>((resolve, reject) => {
@@ -224,13 +248,24 @@ export class SearchWorkerClient {
       let w: Worker;
       const down = (reason: string) => {
         if (this.worker !== w) return;
+        this.worker = null;
+        this.ready = null;
+        void w.terminate().catch(() => undefined);
         this.failed(reason);
-        this.drop(new SearchWorkerUnavailable(reason));
+        // The scan in flight (or, before ready, the first queued one) may run inline once.
+        const first = this.running?.j ?? this.queue.shift();
+        if (this.running) {
+          clearTimeout(this.running.timer);
+          this.running = null;
+        }
+        first?.reject(new SearchWorkerUnavailable(reason, true));
+        if (this.disabled) this.rejectAll(new SearchWorkerUnavailable(reason, true));
         if (!settled) {
           settled = true;
           clearTimeout(t);
-          reject(new SearchWorkerUnavailable(reason));
+          reject(new SearchWorkerUnavailable(reason, false));
         }
+        this.pump();
       };
       try {
         w = new Worker(this.opts.workerSource ?? WORKER_SRC, {
@@ -240,14 +275,17 @@ export class SearchWorkerClient {
       } catch (e) {
         this.failed(String(e));
         this.ready = null;
-        reject(new SearchWorkerUnavailable(String(e)));
+        this.queue.shift()?.reject(new SearchWorkerUnavailable(String(e), true));
+        if (this.disabled) this.rejectAll(new SearchWorkerUnavailable(String(e), true));
+        reject(new SearchWorkerUnavailable(String(e), false));
+        queueMicrotask(() => this.pump());
         return;
       }
       w.unref();
       this.worker = w;
       const t = setTimeout(() => down('search worker did not start'), this.opts.readyTimeoutMs ?? READY_TIMEOUT_MS);
       t.unref?.();
-      w.on('message', (m: { ready?: boolean; id?: number; ok?: boolean; result?: ScanResult; message?: string }) => {
+      w.on('message', (m: { ready?: boolean; ok?: boolean; result?: ScanResult; message?: string }) => {
         if (m.ready !== undefined) {
           if (!m.ready) down(m.message ?? 'search worker failed to open state.db');
           else if (!settled) {
@@ -257,12 +295,13 @@ export class SearchWorkerClient {
           }
           return;
         }
-        const p = m.id === undefined ? undefined : this.pending.get(m.id);
-        if (!p || m.id === undefined) return;
-        this.pending.delete(m.id);
-        clearTimeout(p.timer);
-        if (m.ok && m.result) p.resolve(m.result);
-        else p.reject(new Error(m.message ?? 'search failed'));
+        if (this.worker !== w || !this.running) return;
+        const { j, timer } = this.running;
+        clearTimeout(timer);
+        this.running = null;
+        if (m.ok && m.result) j.resolve(m.result);
+        else j.reject(new Error(m.message ?? 'search failed'));
+        this.pump();
       });
       w.on('error', (e) => down(`search worker crashed: ${String(e)}`));
       w.on('exit', (code) => down(`search worker exited (code ${code})`));
@@ -271,21 +310,21 @@ export class SearchWorkerClient {
     return ready;
   }
 
-  /** Drop the worker and fail everything in flight; the next search starts a fresh one. */
-  private drop(err: Error): void {
-    const w = this.worker;
+  /** Terminate `w`; queued scans go to the next worker. */
+  private replace(w: Worker): void {
+    if (this.worker !== w) return;
     this.worker = null;
     this.ready = null;
-    this.rejectAll(err);
-    if (w) void w.terminate().catch(() => undefined);
+    void w.terminate().catch(() => undefined);
   }
 
   private rejectAll(err: Error): void {
-    for (const p of this.pending.values()) {
-      clearTimeout(p.timer);
-      p.reject(err);
+    if (this.running) {
+      clearTimeout(this.running.timer);
+      this.running.j.reject(err);
+      this.running = null;
     }
-    this.pending.clear();
+    for (const j of this.queue.splice(0)) j.reject(err);
   }
 
   private failed(reason: string): void {
@@ -294,7 +333,12 @@ export class SearchWorkerClient {
     this.failures.push(now);
     if (this.failures.length >= MAX_FAILURES && !this.disabled) {
       this.disabled = true;
-      this.opts.onDisabled?.(reason);
+      this.opts.log?.(`search scans run inline from now on: ${reason}`);
+      return;
+    }
+    if (now - this.lastLog >= LOG_EVERY_MS) {
+      this.lastLog = now;
+      this.opts.log?.(`search worker: ${reason}`);
     }
   }
 }

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { scanTopK, SearchWorkerClient, SearchWorkerUnavailable, type ScanJob } from './searchWorker.js';
+import { scanTopK, SearchWorkerClient, SearchWorkerUnavailable, SEARCH_QUEUE_MAX, type ScanJob } from './searchWorker.js';
 import { sqliteReadSource } from './sqliteReadSource.js';
 import { decodeVector, encodeVector, encodeVectorInt8, topK, EMBED_DIM, EMBED_MODEL_ID } from './vectors.js';
 
@@ -95,6 +95,17 @@ describe('scanTopK', () => {
     expect(r.scanned).toBe(r.hits.length);
   });
 
+  it('breaks score ties by lower id, like the sorted scan', () => {
+    w.prepare('INSERT INTO sessions (id, workspace_id) VALUES (?, ?)').run('sa', A);
+    const v = unit(rand(5));
+    const ins = w.prepare(`INSERT INTO embeddings (workspace_id, session_id, kind, ts, text, model_id, dim, vec, dedup_key)
+                           VALUES (?, 'sa', 'turn', ?, ?, ?, ?, ?, ?)`);
+    for (let i = 0; i < 12; i++) ins.run(A, i, `same ${i}`, EMBED_MODEL_ID, EMBED_DIM, encodeVector(v), `t${i}`);
+    const hits = scanTopK(w, v, job({ allowed: [A], limit: 5 })).hits;
+    expect(hits.map((h) => h.text)).toEqual(['same 0', 'same 1', 'same 2', 'same 3', 'same 4']);
+    expect(hits).toEqual(reference(w, v, job({ allowed: [A], limit: 5 })));
+  });
+
   it('returns nothing for an empty scope or limit 0', () => {
     seed();
     expect(scanTopK(w, unit(rand(1)), job({ allowed: [] })).hits).toEqual([]);
@@ -130,40 +141,145 @@ describe('SearchWorkerClient', () => {
     }
   });
 
-  it('times out, then serves the next search from a fresh worker', async () => {
+  it('times out the running scan only, terminates that worker, and serves the queue from a fresh one', async () => {
     seed(30);
+    // The first worker hangs on its first scan; later workers answer.
+    const flag = join(dir, 'hung');
+    const src = `
+      const { parentPort, workerData } = require('node:worker_threads');
+      const fs = require('node:fs');
+      const first = !fs.existsSync(${JSON.stringify(flag)});
+      if (first) fs.writeFileSync(${JSON.stringify(flag)}, String(process.pid));
+      parentPort.postMessage({ ready: true });
+      parentPort.on('message', (m) => {
+        if (m === 'close') return parentPort.close();
+        if (first) return;
+        parentPort.postMessage({ ok: true, result: { hits: [], scanned: 7, ms: 1 } });
+      });`;
+    const logs: string[] = [];
+    const c = new SearchWorkerClient(path, { timeoutMs: 300, workerSource: src, log: (m) => logs.push(m) });
+    try {
+      const a = c.search(unit(rand(1)), job());
+      const b = c.search(unit(rand(2)), job());
+      const d = c.search(unit(rand(3)), job());
+      await expect(a).rejects.toThrow(/timed out/);
+      expect((await b).scanned).toBe(7);
+      expect((await d).scanned).toBe(7);
+      expect(logs.some((m) => /timed out/.test(m))).toBe(true);
+      expect(c.usable()).toBe(true);
+    } finally {
+      await c.close();
+    }
+  });
+
+  it('gives up after repeated timeouts', async () => {
+    seed(10);
     const hang = `
       const { parentPort } = require('node:worker_threads');
       parentPort.postMessage({ ready: true });
-      parentPort.on('message', () => {});`;
-    const c = new SearchWorkerClient(path, { timeoutMs: 200, workerSource: hang });
+      parentPort.on('message', (m) => { if (m === 'close') parentPort.close(); });`;
+    const c = new SearchWorkerClient(path, { timeoutMs: 100, workerSource: hang });
+    for (let i = 0; i < 3; i++) await expect(c.search(unit(rand(1)), job())).rejects.toThrow(/timed out/);
+    expect(c.usable()).toBe(false);
+    await expect(c.search(unit(rand(1)), job())).rejects.toBeInstanceOf(SearchWorkerUnavailable);
+    await c.close();
+  });
+
+  it('disables after three crashes', async () => {
+    seed(10);
+    const crash = `
+      const { parentPort } = require('node:worker_threads');
+      parentPort.postMessage({ ready: true });
+      parentPort.on('message', () => { process.exit(3); });`;
+    const c = new SearchWorkerClient(path, { workerSource: crash });
     try {
-      await expect(c.search(unit(rand(1)), job())).rejects.toThrow(/timed out/);
-      expect(c.usable()).toBe(true);
-      await expect(c.search(unit(rand(1)), job())).rejects.toThrow(/timed out/);
+      const rs = await Promise.allSettled([c.search(unit(rand(1)), job()), c.search(unit(rand(2)), job()), c.search(unit(rand(3)), job()), c.search(unit(rand(4)), job())]);
+      const inline = rs.filter((r) => r.status === 'rejected' && r.reason instanceof SearchWorkerUnavailable && r.reason.inline);
+      expect(rs.every((r) => r.status === 'rejected')).toBe(true);
+      // 3 crashes disable the client, after which the remaining caller may scan inline too.
+      expect(inline.length).toBeLessThanOrEqual(4);
+      expect(c.usable()).toBe(false);
+    } finally {
+      await c.close();
+    }
+  });
+
+  it('marks a single crash inline for one caller only', async () => {
+    seed(10);
+    const flag = join(dir, 'crashed');
+    const src = `
+      const { parentPort } = require('node:worker_threads');
+      const fs = require('node:fs');
+      const first = !fs.existsSync(${JSON.stringify(flag)});
+      if (first) fs.writeFileSync(${JSON.stringify(flag)}, '1');
+      parentPort.postMessage({ ready: true });
+      parentPort.on('message', (m) => {
+        if (m === 'close') return parentPort.close();
+        if (first) process.exit(3);
+        parentPort.postMessage({ ok: true, result: { hits: [], scanned: 1, ms: 1 } });
+      });`;
+    const c = new SearchWorkerClient(path, { workerSource: src });
+    try {
+      const rs = await Promise.allSettled([c.search(unit(rand(1)), job()), c.search(unit(rand(2)), job()), c.search(unit(rand(3)), job())]);
+      expect(rs[0].status === 'rejected' && rs[0].reason instanceof SearchWorkerUnavailable && rs[0].reason.inline).toBe(true);
+      expect(rs[1].status).toBe('fulfilled');
+      expect(rs[2].status).toBe('fulfilled');
     } finally {
       await c.close();
     }
   });
 
   it('reports unavailable when the worker cannot open the DB, and gives up after 3 failures', async () => {
-    const reasons: string[] = [];
-    const c = new SearchWorkerClient(join(dir, 'missing.db'), { onDisabled: (r) => reasons.push(r) });
+    const logs: string[] = [];
+    const c = new SearchWorkerClient(join(dir, 'missing.db'), { log: (m) => logs.push(m) });
     for (let i = 0; i < 3; i++) {
       await expect(c.search(unit(rand(1)), job())).rejects.toBeInstanceOf(SearchWorkerUnavailable);
     }
     expect(c.usable()).toBe(false);
-    expect(reasons).toHaveLength(1);
-    await expect(c.search(unit(rand(1)), job())).rejects.toBeInstanceOf(SearchWorkerUnavailable);
+    expect(logs.some((m) => /inline from now on/.test(m))).toBe(true);
     await c.close();
   });
 
-  it('rejects searches after close', async () => {
+  it('rejects a search in flight at close, and later searches, with a plain error', async () => {
     seed(10);
-    const c = new SearchWorkerClient(path);
-    await c.search(unit(rand(1)), job());
+    const hang = `
+      const { parentPort } = require('node:worker_threads');
+      parentPort.postMessage({ ready: true });
+      parentPort.on('message', (m) => { if (m === 'close') parentPort.close(); });`;
+    const c = new SearchWorkerClient(path, { workerSource: hang });
+    const p = c.search(unit(rand(1)), job()).catch((x: unknown) => x);
+    await new Promise((r) => setTimeout(r, 100));
     await c.close();
-    await expect(c.search(unit(rand(1)), job())).rejects.toBeInstanceOf(SearchWorkerUnavailable);
+    const e = await p;
+    expect(e).toBeInstanceOf(Error);
+    expect(e).not.toBeInstanceOf(SearchWorkerUnavailable);
+    await expect(c.search(unit(rand(1)), job())).rejects.toThrow(/closed/);
+  });
+
+  it('serves concurrent searches in order with correct results', async () => {
+    seed();
+    const c = new SearchWorkerClient(path);
+    try {
+      const qs = [1, 2, 3, 4, 5].map((i) => unit(rand(200 + i)));
+      const rs = await Promise.all(qs.map((q) => c.search(q, job())));
+      rs.forEach((r, i) => expect(r.hits).toEqual(reference(w, qs[i], job())));
+    } finally {
+      await c.close();
+    }
+  });
+
+  it('caps the queue', async () => {
+    seed(10);
+    const hang = `
+      const { parentPort } = require('node:worker_threads');
+      parentPort.postMessage({ ready: true });
+      parentPort.on('message', (m) => { if (m === 'close') parentPort.close(); });`;
+    const c = new SearchWorkerClient(path, { workerSource: hang, timeoutMs: 60_000 });
+    const ps = Array.from({ length: SEARCH_QUEUE_MAX + 2 }, () => c.search(unit(rand(1)), job()).catch((e: Error) => e.message));
+    await new Promise((r) => setTimeout(r, 200));
+    await c.close();
+    const msgs = await Promise.all(ps);
+    expect(msgs.filter((m) => /busy/.test(String(m))).length).toBeGreaterThanOrEqual(1);
   });
 });
 
@@ -193,6 +309,21 @@ describe('sqliteReadSource search', () => {
     } finally {
       await rs.close();
     }
+  });
+
+  it('does not scan inline for a search in flight at close', async () => {
+    seed(30);
+    const ro = new Database(path, { readonly: true });
+    const hang = `
+      const { parentPort } = require('node:worker_threads');
+      parentPort.postMessage({ ready: true });
+      parentPort.on('message', (m) => { if (m === 'close') parentPort.close(); });`;
+    const rs = sqliteReadSource(ro, { searchWorker: { workerSource: hang } });
+    const p = rs.searchEmbeddings(unit(rand(1)), new Set([A]), { limit: 5 }).catch((x: Error) => x);
+    await new Promise((r) => setTimeout(r, 100));
+    await rs.close();
+    expect(String(await p)).toMatch(/closed/);
+    await expect(rs.searchEmbeddings(unit(rand(1)), new Set([A]), { limit: 5 })).rejects.toThrow(/closed/);
   });
 
   it('surfaces a worker timeout instead of rescanning inline', async () => {

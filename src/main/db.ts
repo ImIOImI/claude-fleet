@@ -170,6 +170,18 @@ interface CheckpointerFactory {
 let checkpointerFactory: CheckpointerFactory | null = null;
 
 /** Without one (fleet-host, tests that don't install it) SQLite keeps its own auto-checkpoint. */
+/** Off-main search for `searchEmbeddings` on SQLite (searchWorker.ts), installed
+ *  at boot like the checkpointer so fleet-host's import graph stays free of worker code. */
+export interface SqliteSearchScanner {
+  scan(conn: () => Database.Database | null, q: Float32Array, scope: string[], o: { limit: number; kind?: 'turn' | 'summary' }): Promise<EmbeddingHit[]>;
+  close(): Promise<void>;
+}
+let searchScannerFactory: ((dbPath: string) => SqliteSearchScanner) | null = null;
+let searchScanner: (SqliteSearchScanner & { path: string }) | null = null;
+export function setSqliteSearchScannerFactory(f: ((dbPath: string) => SqliteSearchScanner) | null): void {
+  searchScannerFactory = f;
+}
+
 export function setWalCheckpointerFactory(f: CheckpointerFactory | null): void {
   checkpointerFactory = f;
 }
@@ -349,6 +361,9 @@ export async function openDbPostgres(pool: pg.Pool, opts: PostgresKyselyOptions 
 export async function closeDb(): Promise<void> {
   const k = kdb;
   if (!k) return;
+  const ss = searchScanner;
+  searchScanner = null;
+  await ss?.close();
   const ck = checkpointer;
   checkpointer = null;
   if (ck?.hasWorkers()) {
@@ -3395,6 +3410,14 @@ export async function searchEmbeddings(
 ): Promise<EmbeddingHit[]> {
   if (scope.length === 0 || opts.limit <= 0 || dot(qvec, qvec) === 0) return [];
   const k = kyselyOrThrow();
+  if (dialect === 'sqlite' && searchScannerFactory && db) {
+    if (!searchScanner || searchScanner.path !== db.name) {
+      void searchScanner?.close();
+      searchScanner = { path: db.name, ...searchScannerFactory(db.name) };
+    }
+    const s = searchScanner;
+    return s.scan(() => db, qvec, [...scope], opts);
+  }
   if (dialect === 'sqlite') {
     const rows = await k.selectFrom('embeddings')
       .select(['session_id as sessionId', 'workspace_id as workspaceId', 'kind', 'ts', 'text', 'vec'])
