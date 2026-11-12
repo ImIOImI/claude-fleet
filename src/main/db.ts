@@ -363,7 +363,10 @@ export async function closeDb(): Promise<void> {
   if (!k) return;
   const ss = searchScanner;
   searchScanner = null;
-  await ss?.close();
+  if (ss) {
+    await ss.close();
+    if (kdb !== k) return;
+  }
   const ck = checkpointer;
   checkpointer = null;
   if (ck?.hasWorkers()) {
