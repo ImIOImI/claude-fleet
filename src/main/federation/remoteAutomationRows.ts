@@ -156,8 +156,10 @@ function automation(v: unknown, origin: string): AutomationCore | null {
   const t = tags(a.tags), summaries = lines(a.triggerSummaries, 10, 200);
   if (!createdBy || !nat(a.createdAt) || !nat(a.updatedAt) || lastScheduledAt === undefined || nextFireAt === undefined || nextSetByRun === undefined) return null;
   if (!w || typeof w !== 'object' || !nat(w.runs) || !nat(w.nothingToDo) || !nat(w.failed) || !t || !summaries) return null;
-  const lastRun = a.lastRun === null ? null : run(a.lastRun, origin);
-  if (a.lastRun !== null && !lastRun) return null;
+  const rawLastRun = a.lastRun === null ? null : run(a.lastRun, origin);
+  if (a.lastRun !== null && !rawLastRun) return null;
+  // A lastRun filed under another automation is a host bug, not a reason to drop the automation itself.
+  const lastRun = rawLastRun && rawLastRun.automationId === a.id ? rawLastRun : null;
   const managedBy = (a.origin as { source?: unknown } | null)?.source === 'host-config' ? 'host-config' as const : null;
   return {
     id: a.id, name: def.name, description: def.description ? oneLine(def.description, 500) : null, enabled: a.enabled, version: a.version,
@@ -178,7 +180,7 @@ export function parseAutomationDetail(v: unknown, origin: string): { automation:
   if (!a) return fail('automation');
   return {
     automation: a,
-    runs: d.runs.slice(0, MAX_REMOTE_RUNS).map((r) => run(r, origin)).filter((r): r is RunRow => r !== null),
+    runs: d.runs.slice(0, MAX_REMOTE_RUNS).map((r) => run(r, origin)).filter((r): r is RunRow => r !== null && r.automationId === a.id),
     yaml: block(d.yaml, 64 * 1024)
   };
 }

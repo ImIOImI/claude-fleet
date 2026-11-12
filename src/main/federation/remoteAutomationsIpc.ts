@@ -8,6 +8,7 @@ import type {
 } from '../../preload/remoteAutomations.js';
 import { REQUEST_ID_RE } from '../../preload/remoteAutomations.js';
 import type { RemoteSourceInfo } from '../remote.js';
+import { oneLine } from '../remoteUrl.js';
 import type { FederatedReader } from './federatedReader.js';
 import { parseAutomationDetail, parseAutomationRows, parseCounts, parseProposalRows, parseTodoDetail, parseTodoRows } from './remoteAutomationRows.js';
 
@@ -56,8 +57,11 @@ function runArgs(v: unknown): Record<string, string | number | boolean> {
   if (typeof v !== 'object' || Array.isArray(v)) throw new Error('args must be an object');
   const out: Record<string, string | number | boolean> = {};
   for (const [k, x] of Object.entries(v as Record<string, unknown>).slice(0, 32)) {
-    if (k.length > 64) continue;
-    if ((typeof x === 'string' && x.length <= 2000) || typeof x === 'boolean' || (typeof x === 'number' && Number.isFinite(x))) out[k] = x;
+    if (k.length > 64) throw new Error(`args key must be at most 64 characters: "${oneLine(k, 80)}"`);
+    if (!((typeof x === 'string' && x.length <= 2000) || typeof x === 'boolean' || (typeof x === 'number' && Number.isFinite(x)))) {
+      throw new Error(`args.${k} must be a string ≤2000, number or boolean`);
+    }
+    out[k] = x;
   }
   return out;
 }

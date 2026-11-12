@@ -91,9 +91,9 @@ describe('remote automations IPC', () => {
     expect(down.calls).toHaveLength(1);
   });
 
-  it('a malformed action reply is a failure, never a success', async () => {
+  it('a malformed action reply is never a success; the request went out, so the id is kept (unavailable)', async () => {
     const { invoke } = setup(() => ({ replayed: 'yes', result: { runId: 'R' }, error: null }));
-    expect(await invoke('remoteAutomations:run', O, '01JC0000000000000000000001', {}, RID)).toMatchObject({ ok: false, kind: 'failed' });
+    expect(await invoke('remoteAutomations:run', O, '01JC0000000000000000000001', {}, RID)).toMatchObject({ ok: false, kind: 'unavailable' });
   });
 
   it('an action to an origin that is not bookmarked is unavailable without a call', async () => {
@@ -106,7 +106,7 @@ describe('remote automations IPC', () => {
     const { invoke, calls } = setup(() => ({ replayed: false, result: { id: 'T' }, error: null }));
     await invoke('remoteInbox:create', O, { title: ' disk ', priority: 'high', workspaceId: 'x', source: { kind: 'workspace' } }, RID);
     await invoke('remoteInbox:update', O, '01JC0000000000000000000002', { status: 'done', tagsAdd: ['a'], title: ' t ' }, RID);
-    await invoke('remoteAutomations:run', O, '01JC0000000000000000000001', { a: 1, b: { deep: 1 }, c: 'x' }, RID);
+    await invoke('remoteAutomations:run', O, '01JC0000000000000000000001', { a: 1, c: 'x' }, RID);
     expect(calls.map((c) => c[2][0])).toEqual([
       { requestId: RID, input: { title: 'disk', priority: 'high' } },
       { requestId: RID, id: '01JC0000000000000000000002', patch: { status: 'done', tagsAdd: ['a'], title: 't' } },
@@ -119,6 +119,13 @@ describe('remote automations IPC', () => {
     await expect(invoke('remoteProposals:reject', O, '01JC0000000000000000000003', 5, RID)).rejects.toThrow(/note/);
     await expect(invoke('remoteInbox:list', { status: 'everything' })).rejects.toThrow(/status/);
     expect(calls).toHaveLength(3);
+  });
+
+  it('refuses a bad run arg value or an over-long key instead of silently dropping it', async () => {
+    const { invoke, calls } = setup(() => ({ replayed: false, result: null, error: null }));
+    await expect(invoke('remoteAutomations:run', O, '01JC0000000000000000000001', { b: { deep: 1 } }, RID)).rejects.toThrow(/args\.b must be a string/);
+    await expect(invoke('remoteAutomations:run', O, '01JC0000000000000000000001', { [`k${'x'.repeat(65)}`]: 1 }, RID)).rejects.toThrow(/args key must be at most 64/);
+    expect(calls).toEqual([]);
   });
 
   it('reads: rows get origin info; get answers null for an unknown or down host', async () => {

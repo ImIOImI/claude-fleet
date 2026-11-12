@@ -114,12 +114,17 @@ export function createFederatedReader(d: FederatedReaderDeps): FederatedReader {
     async act(origin, channel, payload) {
       const s = d.sources().find((x) => x.id === origin);
       if (!s) return { ok: false, kind: 'unavailable', message: 'that remote workspace is no longer bookmarked' };
-      if (s.state !== 'running') return { ok: false, kind: 'unavailable', message: `${s.name} is unreachable; try again when it's back` };
+      if (s.state !== 'running') {
+        return {
+          ok: false, kind: 'unavailable',
+          message: s.state === null ? `${s.name} is still being checked` : `${s.name} is unreachable; try again when it's back`
+        };
+      }
       try {
         const r = parseActionReply(await d.rpc(s.url, channel, [payload], ACTION_TIMEOUT_MS));
         return r.error !== null ? { ok: false, kind: 'failed', message: r.error } : { ok: true, replayed: r.replayed, result: r.result };
       } catch (err) {
-        return { ok: false, ...actionError(err) };
+        return { ok: false, ...actionError(err, s.name) };
       }
     },
     async search(o) {

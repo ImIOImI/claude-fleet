@@ -9,17 +9,33 @@ export function actionGate(tier: RemoteTierName | null | undefined, name: string
   return `Needs steer on ${name}; ${tier ? `you have ${tier}` : "your tier isn't known yet"}`;
 }
 
-/** One request id per user intent (D128): kept for a retry after unavailable/busy, dropped once the action settled. */
+/** Deterministic JSON for a payload: object keys sorted recursively, so two payloads that only differ in key order fingerprint the same. */
+export function stableFingerprint(payload: unknown): string {
+  const sorted = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(sorted);
+    if (v && typeof v === 'object') {
+      return Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0)).map(([k, x]) => [k, sorted(x)]));
+    }
+    return v;
+  };
+  return JSON.stringify(sorted(payload));
+}
+
+/**
+ * One request id per (intent key, payload fingerprint) (D128): kept for a retry after
+ * unavailable/busy, dropped once the action settles. A fingerprint change under the same key
+ * (the user edited the payload before a retry landed) mints a new id — the old request, if it
+ * lands late, must not be mistaken for this one.
+ */
 export function intentKeys(now: () => number = Date.now) {
-  const ids = new Map<string, string>();
+  const ids = new Map<string, { id: string; fingerprint: string }>();
   const notBefore = new Map<string, number>();
   return {
-    idFor(key: string): string {
-      let id = ids.get(key);
-      if (!id) {
-        id = crypto.randomUUID();
-        ids.set(key, id);
-      }
+    idFor(key: string, fingerprint: string): string {
+      const existing = ids.get(key);
+      if (existing && existing.fingerprint === fingerprint) return existing.id;
+      const id = crypto.randomUUID();
+      ids.set(key, { id, fingerprint });
       return id;
     },
     settle(key: string, r: RemoteActionResult<unknown>): void {
@@ -40,13 +56,13 @@ export function intentKeys(now: () => number = Date.now) {
 
 const IPC_PREFIX = /^Error invoking remote method '[^']+': (Error: )?/;
 
-/** Sends at most once per call; a second call for an in-flight key shares the first request. */
+/** Sends at most once per call; a second call for the same in-flight key AND fingerprint shares the first request. */
 export function intentRunner(keys = intentKeys()) {
-  const inflight = new Map<string, Promise<RemoteActionResult<unknown>>>();
+  const inflight = new Map<string, { fingerprint: string; promise: Promise<RemoteActionResult<unknown>> }>();
   return {
-    run<T>(key: string, send: (requestId: string) => Promise<RemoteActionResult<T>>): Promise<RemoteActionResult<T>> {
+    run<T>(key: string, fingerprint: string, send: (requestId: string) => Promise<RemoteActionResult<T>>): Promise<RemoteActionResult<T>> {
       const pending = inflight.get(key);
-      if (pending) return pending as Promise<RemoteActionResult<T>>;
+      if (pending && pending.fingerprint === fingerprint) return pending.promise as Promise<RemoteActionResult<T>>;
       const wait = keys.waitMs(key);
       if (wait > 0) {
         return Promise.resolve({ ok: false, kind: 'busy', message: `the host is busy; try again in ${Math.ceil(wait / 1000)} s`, retryAfterMs: wait });
@@ -54,14 +70,14 @@ export function intentRunner(keys = intentKeys()) {
       const p = (async (): Promise<RemoteActionResult<T>> => {
         let r: RemoteActionResult<T>;
         try {
-          r = await send(keys.idFor(key));
+          r = await send(keys.idFor(key, fingerprint));
         } catch (e) {
           r = { ok: false, kind: 'invalid', message: String(e instanceof Error ? e.message : e).replace(IPC_PREFIX, '') };
         }
         keys.settle(key, r);
         return r;
       })().finally(() => inflight.delete(key));
-      inflight.set(key, p);
+      inflight.set(key, { fingerprint, promise: p as Promise<RemoteActionResult<unknown>> });
       return p;
     },
     busy: (key: string): boolean => inflight.has(key)

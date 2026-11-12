@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import type { RemoteActionResult } from '../../preload/remoteAutomations';
 import {
-  actionGate, actionMessage, configEntryYaml, intentKeys, intentRunner, remoteSourceLabel, rowKey, sortRemoteAutomations, sortRemoteTodos
+  actionGate, actionMessage, configEntryYaml, intentKeys, intentRunner, remoteSourceLabel, rowKey, sortRemoteAutomations, sortRemoteTodos,
+  stableFingerprint
 } from './remoteAutomationsView';
 
 const O = '01JC0000000000000000000000';
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const FP = 'fp';
 
 describe('remote automations view helpers', () => {
   it('gates steer actions with a tooltip naming the tier (display only)', () => {
@@ -18,45 +20,66 @@ describe('remote automations view helpers', () => {
 
   it('keeps one request id per intent until it settles; unavailable and busy keep it for the retry', () => {
     const k = intentKeys();
-    const a = k.idFor('run:x');
-    expect(k.idFor('run:x')).toBe(a);
+    const a = k.idFor('run:x', FP);
+    expect(k.idFor('run:x', FP)).toBe(a);
     k.settle('run:x', { ok: false, kind: 'unavailable', message: 'down' });
-    expect(k.idFor('run:x')).toBe(a);
+    expect(k.idFor('run:x', FP)).toBe(a);
     k.settle('run:x', { ok: false, kind: 'busy', message: 'busy' });
-    expect(k.idFor('run:x')).toBe(a);
+    expect(k.idFor('run:x', FP)).toBe(a);
     k.settle('run:x', { ok: true, replayed: false, result: null });
     expect(k.has('run:x')).toBe(false);
-    expect(k.idFor('run:x')).not.toBe(a);
+    expect(k.idFor('run:x', FP)).not.toBe(a);
     expect(a).toMatch(UUID_V4);
   });
 
   it('an unsettled replay is terminal for the intent: the id is dropped and the next click mints a new one', () => {
     const k = intentKeys();
-    const a = k.idFor('run:x');
+    const a = k.idFor('run:x', FP);
     k.settle('run:x', { ok: true, replayed: true, result: null });
     expect(k.has('run:x')).toBe(false);
-    expect(k.idFor('run:x')).not.toBe(a);
+    expect(k.idFor('run:x', FP)).not.toBe(a);
   });
 
   it('forbidden, invalid and failed also settle the intent', () => {
     for (const kind of ['forbidden', 'invalid', 'failed'] as const) {
       const k = intentKeys();
-      const a = k.idFor('x');
+      const a = k.idFor('x', FP);
       k.settle('x', { ok: false, kind, message: 'm' });
-      expect(k.idFor('x')).not.toBe(a);
+      expect(k.idFor('x', FP)).not.toBe(a);
     }
   });
 
   it('busy with Retry-After holds the intent until then', () => {
     let now = 1_000;
     const k = intentKeys(() => now);
-    k.idFor('x');
+    k.idFor('x', FP);
     k.settle('x', { ok: false, kind: 'busy', message: 'busy', retryAfterMs: 5_000 });
     expect(k.waitMs('x')).toBe(5_000);
     now += 4_000;
     expect(k.waitMs('x')).toBe(1_000);
     now += 1_000;
     expect(k.waitMs('x')).toBe(0);
+  });
+
+  it('a different payload under the same key gets a new id, even while the old one is held for retry', () => {
+    const k = intentKeys();
+    const fp1 = stableFingerprint({ status: 'done' });
+    const a = k.idFor('todo:T', fp1);
+    // The write timed out; it may have committed on the host. The retry (same payload) must reuse the id.
+    k.settle('todo:T', { ok: false, kind: 'unavailable', message: 'No answer from review-bot in 15 s' });
+    expect(k.idFor('todo:T', fp1)).toBe(a);
+    // The user now sends a different patch under the same intent key: a fresh id, so the late first
+    // reply (if it lands) can never be mistaken for this one.
+    const fp2 = stableFingerprint({ status: 'dismissed' });
+    const b = k.idFor('todo:T', fp2);
+    expect(b).not.toBe(a);
+    expect(k.idFor('todo:T', fp2)).toBe(b);
+  });
+
+  it('stableFingerprint is insensitive to key order but sensitive to value changes', () => {
+    expect(stableFingerprint({ a: 1, b: 2 })).toBe(stableFingerprint({ b: 2, a: 1 }));
+    expect(stableFingerprint({ a: 1, b: 2 })).not.toBe(stableFingerprint({ a: 1, b: 3 }));
+    expect(stableFingerprint({ a: [1, { x: 1, y: 2 }] })).toBe(stableFingerprint({ a: [1, { y: 2, x: 1 }] }));
   });
 
   it('messages: an unsettled replay says to check; a settled replay says already sent; errors say why', () => {
@@ -101,8 +124,8 @@ describe('intentRunner', () => {
     const ids: string[] = [];
     let release!: () => void;
     const send = (id: string) => { ids.push(id); return new Promise<typeof ok>((res) => { release = () => res(ok); }); };
-    const p1 = r.run('k', send);
-    const p2 = r.run('k', send);
+    const p1 = r.run('k', FP, send);
+    const p2 = r.run('k', FP, send);
     expect(r.busy('k')).toBe(true);
     release();
     expect(await p1).toEqual(ok);
@@ -115,9 +138,9 @@ describe('intentRunner', () => {
   it('a retry after unavailable reuses the id; the next deliberate click after success mints a new one', async () => {
     const r = intentRunner();
     const ids: string[] = [];
-    await r.run('k', async (id) => { ids.push(id); return { ok: false, kind: 'unavailable', message: 'down' }; });
-    await r.run('k', async (id) => { ids.push(id); return ok; });
-    await r.run('k', async (id) => { ids.push(id); return ok; });
+    await r.run('k', FP, async (id) => { ids.push(id); return { ok: false, kind: 'unavailable', message: 'down' }; });
+    await r.run('k', FP, async (id) => { ids.push(id); return ok; });
+    await r.run('k', FP, async (id) => { ids.push(id); return ok; });
     expect(ids[0]).toBe(ids[1]);
     expect(ids[2]).not.toBe(ids[1]);
   });
@@ -129,7 +152,7 @@ describe('intentRunner', () => {
       { ok: true, replayed: true, result: null }
     ] as RemoteActionResult<unknown>[]) {
       let sends = 0;
-      await intentRunner().run('k', async () => { sends++; return reply; });
+      await intentRunner().run('k', FP, async () => { sends++; return reply; });
       expect(sends).toBe(1);
     }
   });
@@ -138,19 +161,51 @@ describe('intentRunner', () => {
     let now = 0;
     const r = intentRunner(intentKeys(() => now));
     let sends = 0;
-    await r.run('k', async () => { sends++; return { ok: false, kind: 'busy', message: 'busy', retryAfterMs: 3_000 }; });
-    const early = await r.run('k', async () => { sends++; return ok; });
+    await r.run('k', FP, async () => { sends++; return { ok: false, kind: 'busy', message: 'busy', retryAfterMs: 3_000 }; });
+    const early = await r.run('k', FP, async () => { sends++; return ok; });
     expect(early).toMatchObject({ ok: false, kind: 'busy', retryAfterMs: 3_000 });
     expect(sends).toBe(1);
     now = 3_000;
-    expect(await r.run('k', async () => { sends++; return ok; })).toEqual(ok);
+    expect(await r.run('k', FP, async () => { sends++; return ok; })).toEqual(ok);
     expect(sends).toBe(2);
   });
 
   it('a refusal thrown by main is an invalid result with the IPC prefix stripped', async () => {
     const r = intentRunner();
-    const out = await r.run('k', async () => { throw new Error("Error invoking remote method 'remoteInbox:update': Error: patch must be an object"); });
+    const out = await r.run('k', FP, async () => { throw new Error("Error invoking remote method 'remoteInbox:update': Error: patch must be an object"); });
     expect(out).toEqual({ ok: false, kind: 'invalid', message: 'patch must be an object' });
     expect(r.busy('k')).toBe(false);
+  });
+
+  it('an update that times out and may have committed, then a different patch under the same key, gets a new id and sends again', async () => {
+    const r = intentRunner();
+    const ids: string[] = [];
+    const fp1 = stableFingerprint({ status: 'done' });
+    const fp2 = stableFingerprint({ status: 'dismissed' });
+    const timedOut: RemoteActionResult<unknown> = { ok: false, kind: 'unavailable', message: 'No answer from review-bot in 15 s; it may have gone through.' };
+    await r.run('todo:T', fp1, async (id) => { ids.push(id); return timedOut; });
+    // A second click with the same payload while still unsettled would share the in-flight promise;
+    // here it already settled (unavailable keeps the id for a same-payload retry).
+    await r.run('todo:T', fp1, async (id) => { ids.push(id); return timedOut; });
+    expect(ids[0]).toBe(ids[1]);
+    await r.run('todo:T', fp2, async (id) => { ids.push(id); return ok; });
+    expect(ids[2]).not.toBe(ids[1]);
+    expect(ids[2]).toMatch(UUID_V4);
+  });
+
+  it('two different payloads under the same key never share an in-flight request, even concurrently', async () => {
+    const r = intentRunner();
+    const ids: string[] = [];
+    let releaseFirst!: () => void;
+    const first = r.run('todo:T', stableFingerprint({ status: 'done' }), (id) => {
+      ids.push(id);
+      return new Promise<RemoteActionResult<unknown>>((res) => { releaseFirst = () => res({ ok: false, kind: 'unavailable', message: 'timed out' }); });
+    });
+    const second = r.run('todo:T', stableFingerprint({ status: 'dismissed' }), async (id) => { ids.push(id); return ok; });
+    expect(await second).toEqual(ok);
+    releaseFirst();
+    await first;
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).not.toBe(ids[1]);
   });
 });

@@ -44,6 +44,19 @@ describe('remote automation rows', () => {
     expect(parseAutomationDetail(null, O)).toBeNull();
   });
 
+  it('detail runs filed under another automation are dropped; a mismatched lastRun is nulled, not rejected', () => {
+    const run = (id: string, automationId: string) => ({
+      id, automationId, version: 2, trigger: { kind: 'manual' }, args: {}, status: 'failed', startedAt: 1, endedAt: 2, error: null, steps: []
+    });
+    const OTHER = '01JC0000000000000000000009';
+    const d = parseAutomationDetail({ automation: auto, runs: [run('01JC00000000000000000000R1', A), run('01JC00000000000000000000R2', OTHER)], yaml: '' }, O)!;
+    expect(d.runs.map((r) => r.id)).toEqual(['01JC00000000000000000000R1']);
+    const [a] = parseAutomationRows({ rows: [{ ...auto, lastRun: run('01JC00000000000000000000R3', OTHER) }] }, O);
+    expect(a.lastRun).toBeNull();
+    const [a2] = parseAutomationRows({ rows: [{ ...auto, lastRun: run('01JC00000000000000000000R4', A) }] }, O);
+    expect(a2.lastRun?.id).toBe('01JC00000000000000000000R4');
+  });
+
   it('todos: strings stripped and capped, sources checked against the origin, user ids as logins', () => {
     const [t] = parseTodoRows({ rows: [todo] }, O);
     expect(t.title).toBe('disk  full');

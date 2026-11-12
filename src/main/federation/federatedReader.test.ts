@@ -239,5 +239,23 @@ describe('FederatedReader', () => {
     expect(rpc).toHaveBeenCalledTimes(2);
     expect(rpc).toHaveBeenLastCalledWith(`http://${A}`, 'inbox:create', [{ k: 1 }], 15_000);
   });
+
+  it('act on a not-yet-probed source says it is still being checked, not unreachable', async () => {
+    const r = createFederatedReader({ sources: () => [src(A, null)], rpc: vi.fn() });
+    expect(await r.act(A, 'inbox:create', { k: 1 })).toEqual({ ok: false, kind: 'unavailable', message: 'n0 is still being checked' });
+  });
+
+  it('act on a probed-down source keeps the "unreachable" wording', async () => {
+    const r = createFederatedReader({ sources: () => [src(A, 'unreachable')], rpc: vi.fn() });
+    expect(await r.act(A, 'inbox:create', { k: 1 })).toEqual({ ok: false, kind: 'unavailable', message: "n0 is unreachable; try again when it's back" });
+  });
+
+  it('act names the source in a write-timeout message, and keeps the request id (unavailable, not failed)', async () => {
+    const rpc = vi.fn(async () => { throw new RemoteError('unreachable', `http://${A} is not reachable (timed out); check your network or VPN`); });
+    const r = createFederatedReader({ sources: () => [src(A, 'running')], rpc });
+    expect(await r.act(A, 'inbox:create', { k: 1 })).toEqual({
+      ok: false, kind: 'unavailable', message: 'No answer from n0 in 15 s; it may have gone through. Retrying is safe (same request).'
+    });
+  });
 });
 
