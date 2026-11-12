@@ -34,10 +34,6 @@ function requestId(v: unknown): string {
   if (typeof v !== 'string' || !REQUEST_ID_RE.test(v)) throw new Error('requestId must be a lowercase UUID v4');
   return v;
 }
-function text(v: unknown): string {
-  if (typeof v !== 'string' || !v.trim() || v.length > 8000) throw new Error('text must be 1–8000 characters');
-  return v.trim();
-}
 function title(v: unknown, what: string): string {
   if (typeof v !== 'string' || !v.trim() || v.length > 200) throw new Error(`${what} must be 1–200 characters`);
   return v.trim();
@@ -100,10 +96,6 @@ export function registerRemoteAutomationsIpc(ipc: Pick<IpcMain, 'handle'>, reade
   });
   ipc.handle('remoteAutomations:run', async (_e, o: unknown, a: unknown, args: unknown, rid: unknown) =>
     reader.act(origin(o), 'automations:run', { requestId: requestId(rid), id: id(a), args: runArgs(args) }));
-  ipc.handle('remoteAutomations:draft', async (_e, o: unknown, t: unknown, rid: unknown) =>
-    reader.act(origin(o), 'automations:draft', { requestId: requestId(rid), text: text(t) }));
-  ipc.handle('remoteAutomations:askChange', async (_e, o: unknown, a: unknown, t: unknown, rid: unknown) =>
-    reader.act(origin(o), 'automations:askChange', { requestId: requestId(rid), id: id(a), text: text(t) }));
 
   ipc.handle('remoteInbox:list', async (_e, f: unknown): Promise<Federated<RemoteTodo>> => {
     if (f !== undefined && f !== null && (typeof f !== 'object' || Array.isArray(f))) throw new Error('filter must be an object');

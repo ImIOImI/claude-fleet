@@ -31,11 +31,11 @@ export interface AutomationRuntime {
   notices: { feed(o: { sinceTs: number | null; limit: number }): Promise<NotificationRow[]> };
 }
 
-export interface Limiters { run: UnauthLimiter; draft: UnauthLimiter; other: UnauthLimiter }
+export interface Limiters { run: UnauthLimiter; other: UnauthLimiter }
 
 export function defaultLimiters(): Limiters {
   const mk = (max: number) => new UnauthLimiter({ max, windowMs: 60_000, maxIps: 10_000 });
-  return { run: mk(ACTION_LIMITS.run), draft: mk(ACTION_LIMITS.draft), other: mk(ACTION_LIMITS.other) };
+  return { run: mk(ACTION_LIMITS.run), other: mk(ACTION_LIMITS.other) };
 }
 
 const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
@@ -117,8 +117,6 @@ export function automationRpcChannels(rt: () => AutomationRuntime | null, o: { l
   };
   const ledger = () => rt()?.ledger ?? null;
   const read = (handle: RpcChannel['handle']): RpcChannel => ({ tier: 'read', handle });
-  // D127 (pending): the channels exist so the tier table is complete; nothing runs or is claimed.
-  const drafting: RpcChannel = { tier: 'steer', handle: async () => { throw new RpcUnavailableError('drafting is not available on this host yet'); } };
 
   return new Map<string, RpcChannel>([
     ['automations:list', read(async () => ({ rows: (await need().automations.list()).slice(0, MAX_AUTOMATIONS) }))],
@@ -163,8 +161,6 @@ export function automationRpcChannels(rt: () => AutomationRuntime | null, o: { l
         return { runId: run.id, status: run.status };
       }
     })],
-    ['automations:draft', drafting],
-    ['automations:askChange', drafting],
     ['inbox:create', actionChannel({
       tier: 'steer', channel: 'inbox:create', ledger, limit: { key: 'other', limiter: lim.other },
       parse: (x) => {

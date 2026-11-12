@@ -68,11 +68,11 @@ describe('automation read channels', () => {
     for (const f of ['open', 3, [1]]) expect((await call(fakeRuntime(), 'inbox:list', [f])).status).toBe(400);
   });
 
-  it('drafting answers 503 for a steer caller until it is available on the host', async () => {
+  it('there is no host drafting (D127): draft and askChange are unknown channels, even to a session caller', async () => {
     const rt = fakeRuntime();
-    const steer: Principal = { ...reader, tier: 'steer' };
+    const session: Principal = { ...reader, tier: 'session' };
     for (const ch of ['automations:draft', 'automations:askChange']) {
-      expect((await call(rt, ch, [{ requestId: '0b6f8f0e-4b1c-4c2a-9a0e-1f2e3d4c5b6a', id: A, text: 'x' }], steer)).status).toBe(503);
+      expect(await call(rt, ch, [{ requestId: '0b6f8f0e-4b1c-4c2a-9a0e-1f2e3d4c5b6a', id: A, text: 'x' }], session)).toEqual({ status: 404, body: { ok: false, error: 'no such channel' } });
     }
     expect(rt.calls).toEqual([]);
   });
@@ -83,7 +83,7 @@ describe('automation read channels', () => {
     expect(tiers).toEqual({
       'automations:list': 'read', 'automations:get': 'read', 'inbox:list': 'read', 'inbox:get': 'read', 'inbox:counts': 'read',
       'proposals:list': 'read', 'notices:feed': 'read',
-      'automations:run': 'steer', 'automations:draft': 'steer', 'automations:askChange': 'steer',
+      'automations:run': 'steer',
       'inbox:create': 'steer', 'inbox:update': 'steer', 'proposals:reject': 'steer'
     });
   });

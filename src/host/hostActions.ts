@@ -14,7 +14,7 @@ import { RpcArgError, RpcBusyError, RpcUnavailableError, type RpcChannel } from 
 export const LEDGER_TTL_MS = 86_400_000;
 export const MAX_STORED_RESULT = 16 * 1024;
 /** Per identity per minute (D129). */
-export const ACTION_LIMITS = { run: 6, draft: 2, other: 60 } as const;
+export const ACTION_LIMITS = { run: 6, other: 60 } as const;
 
 export type Claim = { fresh: true } | { fresh: false; channel: string; result: unknown; error: string | null };
 

@@ -52,9 +52,15 @@ describe('remote automations IPC', () => {
     const { invoke, calls } = setup(() => null);
     await expect(invoke('remoteAutomations:run', 'nope', '01JC0000000000000000000001', {}, RID)).rejects.toThrow(/origin/);
     await expect(invoke('remoteAutomations:run', O, '01JC0000000000000000000001', {}, 'not-a-uuid')).rejects.toThrow(/requestId/);
-    await expect(invoke('remoteAutomations:draft', O, '', RID)).rejects.toThrow(/1–8000/);
     await expect(invoke('remoteInbox:update', O, '01JC0000000000000000000002', { source: 'x' }, RID)).rejects.toThrow(/patch/);
     expect(calls).toEqual([]);
+  });
+
+  it('registers no remote draft or askChange channel (D127)', () => {
+    const chans: string[] = [];
+    registerRemoteAutomationsIpc({ handle: (ch: string) => void chans.push(ch) } as never, createFederatedReader({ sources: () => [], rpc: async () => null }));
+    expect(chans.filter((c) => /draft|askChange/i.test(c))).toEqual([]);
+    expect(chans).toContain('remoteAutomations:run');
   });
 
   it('an action on an unreachable host is unavailable without a call', async () => {
@@ -82,12 +88,12 @@ describe('remote automations IPC', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it('a 429 is busy and carries Retry-After; a 503 on drafting is unavailable and is sent once', async () => {
+  it('a 429 is busy and carries Retry-After; a 503 is unavailable and is sent once', async () => {
     const busy = setup(() => { throw new RemoteError('unreachable', 'busy', 429, 7_000); });
     expect(await busy.invoke('remoteInbox:create', O, { title: 'x' }, RID)).toEqual({ ok: false, kind: 'busy', message: 'the host is busy; try again shortly', retryAfterMs: 7_000 });
     expect(busy.calls).toHaveLength(1);
     const down = setup(() => { throw new RemoteError('unreachable', 'automations unavailable', 503); });
-    expect(await down.invoke('remoteAutomations:draft', O, 'make a thing', RID)).toMatchObject({ ok: false, kind: 'unavailable' });
+    expect(await down.invoke('remoteAutomations:run', O, '01JC0000000000000000000001', {}, RID)).toMatchObject({ ok: false, kind: 'unavailable' });
     expect(down.calls).toHaveLength(1);
   });
 

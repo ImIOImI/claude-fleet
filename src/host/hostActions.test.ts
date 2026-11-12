@@ -141,7 +141,7 @@ describe('actionChannel', () => {
   });
 
   it('limits: run 6/min, draft 2/min, other actions 60/min', () => {
-    expect(ACTION_LIMITS).toEqual({ run: 6, draft: 2, other: 60 });
+    expect(ACTION_LIMITS).toEqual({ run: 6, other: 60 });
   });
 
   it('caps a stored result at 16 KiB', async () => {

@@ -15,7 +15,7 @@ describe('automation action channels', () => {
     const rt = fakeRuntime();
     const reg = automationRpcChannels(() => rt);
     const bodies: Array<[string, Record<string, unknown>]> = [
-      ['automations:run', { id: A }], ['automations:draft', { text: 'x' }], ['automations:askChange', { id: A, text: 'x' }],
+      ['automations:run', { id: A }],
       ['inbox:create', { input: { title: 't' } }], ['inbox:update', { id: T, patch: { status: 'done' } }], ['proposals:reject', { id: P, note: null }]
     ];
     for (const [ch, b] of bodies) {

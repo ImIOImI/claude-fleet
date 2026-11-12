@@ -793,11 +793,7 @@ const api = {
     list: (): Promise<Federated<RemoteAutomation>> => ipcRenderer.invoke('remoteAutomations:list'),
     get: (origin: string, id: string): Promise<RemoteAutomationDetail | null> => ipcRenderer.invoke('remoteAutomations:get', origin, id),
     run: (origin: string, id: string, args: Record<string, unknown>, requestId: string): Promise<RemoteActionResult<{ runId: string; status: string }>> =>
-      ipcRenderer.invoke('remoteAutomations:run', origin, id, args, requestId),
-    draft: (origin: string, text: string, requestId: string): Promise<RemoteActionResult<{ sessionId: string }>> =>
-      ipcRenderer.invoke('remoteAutomations:draft', origin, text, requestId),
-    askChange: (origin: string, id: string, text: string, requestId: string): Promise<RemoteActionResult<{ sessionId: string }>> =>
-      ipcRenderer.invoke('remoteAutomations:askChange', origin, id, text, requestId)
+      ipcRenderer.invoke('remoteAutomations:run', origin, id, args, requestId)
   },
   remoteInbox: {
     list: (filter?: { status?: TodoStatus | 'all' }): Promise<Federated<RemoteTodo>> => ipcRenderer.invoke('remoteInbox:list', filter),
