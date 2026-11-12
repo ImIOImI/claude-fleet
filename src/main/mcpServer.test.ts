@@ -637,6 +637,34 @@ describe('callTool diagnostics', () => {
     expect(rows.find((r) => r.type === 'mcp-conn-closed')?.level ?? 'info').toBe('info');
   });
 
+  it('a reply after the client half-closed (ended, not yet destroyed) is also logged as dropped', async () => {
+    harness = makeFileDb();
+    _setDbForTests(harness.db);
+    const writes: string[] = [];
+    const sock = { write: (x: string) => { writes.push(x); return true; }, destroyed: false, writableEnded: true };
+    dispatchLineForTests(JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_sessions', arguments: {} } }), sock, WS_A);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(writes).toEqual([]);
+    expect(rows.filter((r) => r.type === 'mcp-reply-dropped')).toHaveLength(1);
+  });
+
+  it('notifications still count toward the per-connection in-flight cap', async () => {
+    harness = makeFileDb();
+    _setDbForTests(harness.db);
+    let open!: () => void;
+    const gate = new Promise<void>((r) => { open = r; });
+    let started = 0;
+    setReadScopeResolver(async (id) => { started++; await gate; return [id]; });
+    const sock = { write: () => true };
+    for (let i = 0; i < MAX_IN_FLIGHT_PER_CONNECTION + 5; i++) {
+      dispatchLineForTests(JSON.stringify({ jsonrpc: '2.0', method: 'tools/call', params: { name: 'list_sessions', arguments: {} } }), sock, WS_A);
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    expect(started).toBe(MAX_IN_FLIGHT_PER_CONNECTION);
+    open();
+    await new Promise((r) => setTimeout(r, 20));
+  });
+
   it('a normal short call writes no connection rows', async () => {
     harness = makeFileDb();
     _setDbForTests(harness.db);

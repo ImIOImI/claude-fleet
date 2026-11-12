@@ -477,16 +477,19 @@ export function dispatchLine(line: string, sock: Out, callerId: string): void {
   const { id, method, params } = msg;
   // Notifications (no id) get no reply — e.g. notifications/initialized.
   const isNotification = id === undefined || id === null;
-  // Notifications get no reply, so they never count as in flight.
   const busy = inFlight.get(sock) ?? 0;
-  if (!isNotification && busy >= MAX_IN_FLIGHT_PER_CONNECTION) {
-    send(sock, { jsonrpc: '2.0', id, error: { code: -32000, message: `busy: ${busy} requests already in flight on this connection` } });
+  if (busy >= MAX_IN_FLIGHT_PER_CONNECTION) {
+    if (!isNotification) {
+      send(sock, { jsonrpc: '2.0', id, error: { code: -32000, message: `busy: ${busy} requests already in flight on this connection` } });
+    }
     return;
   }
-  if (!isNotification) inFlight.set(sock, busy + 1);
+  inFlight.set(sock, busy + 1);
   const tool = method === 'tools/call' && typeof params?.name === 'string' ? params.name : undefined;
   const reply = (obj: unknown): void => {
-    if ((sock as Partial<Socket>).destroyed) {
+    // After the client's FIN the socket is ended (not yet destroyed): a write would be lost too.
+    const s = sock as Partial<Socket>;
+    if (s.destroyed || s.writableEnded || s.writable === false) {
       logError({
         source: 'main',
         type: 'mcp-reply-dropped',
@@ -517,9 +520,7 @@ export function dispatchLine(line: string, sock: Out, callerId: string): void {
         reply({ jsonrpc: '2.0', id, error: { code, message } });
       }
     })
-    .finally(() => {
-      if (!isNotification) inFlight.set(sock, (inFlight.get(sock) ?? 1) - 1);
-    });
+    .finally(() => inFlight.set(sock, (inFlight.get(sock) ?? 1) - 1));
 }
 
 const NO_REPLY = Symbol('no-reply');
