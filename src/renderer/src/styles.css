@@ -3907,6 +3907,8 @@ button.switch { padding: 0; cursor: pointer; }
   gap: 6px;
   margin: 4px 0;
 }
+.publish-backfill { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; margin: 0 0 6px 22px; }
+.publish-backfill label { display: inline-flex; align-items: baseline; gap: 4px; }
 
 .owner-badge { display: inline-flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; white-space: nowrap; }
 .owner-avatar { width: 14px; height: 14px; border-radius: 50%; flex: none; }

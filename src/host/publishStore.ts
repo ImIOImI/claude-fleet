@@ -7,6 +7,10 @@ import type { ScrubbedLine } from '../main/publish/scrub.js';
 import type { StateDb } from '../main/store/stateSchema.js';
 
 export const PUBLISH_STATEMENT_TIMEOUT = '5s';
+/** D138: a published session is removed once its last activity is older than this. */
+export const PUBLISH_RETENTION_DAYS = 180;
+export const PUBLISH_RETENTION_MS = PUBLISH_RETENTION_DAYS * 86_400_000;
+export const PUBLISH_PRUNE_BATCH = 100;
 
 export class PublishConflictError extends Error {}
 
@@ -22,7 +26,22 @@ export interface PublishStore {
   partitionIds(): Promise<string[]>;
   /** The caller's own copies of `sourceSessionId`, in every partition they own; returns how many were removed. */
   unpublish(owner: PublishOwner, sourceSessionId: string): Promise<number>;
+  /** Removes up to `limit` published sessions last active before the retention cutoff, oldest first; returns how many. */
+  prune(now?: number, limit?: number): Promise<number>;
 }
+
+/** Everything a published session left on the host; the caller's transaction must not have touched the session yet. */
+async function removePublishedSession(trx: Transaction<StateDb>, id: string): Promise<void> {
+  await deleteSessionRows(trx, id);
+  await trx.deleteFrom('session_summaries').where('session_id', '=', id).execute();
+  await trx.deleteFrom('session_tags').where('session_id', '=', id).execute();
+  await trx.deleteFrom('usage_anchors').where('session_id', '=', id).execute();
+  await trx.deleteFrom('usage_events').where('session_id', '=', id).execute();
+  await sql`DELETE FROM publish_sessions WHERE session_id = ${id}`.execute(trx);
+}
+
+/** A session with no `sessions` row (or no activity yet) ages by its last publish. */
+const LAST_ACTIVE = sql`COALESCE(s.last_active_at, ps.last_published_at)`;
 
 interface Claim {
   owner: PublishOwner;
@@ -82,16 +101,29 @@ export function publishStore(
         WHERE p.owner_provider = ${owner.provider} AND p.owner_id = ${String(owner.id)} AND s.source_session_id = ${sourceSessionId}
         ORDER BY s.session_id`.execute(k());
       for (const { session_id: id } of r.rows) {
-        await k().transaction().execute(async (trx) => {
-          await deleteSessionRows(trx, id);
-          await trx.deleteFrom('session_summaries').where('session_id', '=', id).execute();
-          await trx.deleteFrom('session_tags').where('session_id', '=', id).execute();
-          await trx.deleteFrom('usage_anchors').where('session_id', '=', id).execute();
-          await trx.deleteFrom('usage_events').where('session_id', '=', id).execute();
-          await sql`DELETE FROM publish_sessions WHERE session_id = ${id}`.execute(trx);
-        });
+        await k().transaction().execute((trx) => removePublishedSession(trx, id));
       }
       return r.rows.length;
+    },
+    async prune(at = now(), limit = PUBLISH_PRUNE_BATCH) {
+      const cutoff = at - PUBLISH_RETENTION_MS;
+      const r = await sql<{ session_id: string }>`
+        SELECT ps.session_id FROM publish_sessions ps LEFT JOIN sessions s ON s.id = ps.session_id
+        WHERE ${LAST_ACTIVE} < ${cutoff} ORDER BY ${LAST_ACTIVE}, ps.session_id LIMIT ${limit}`.execute(k());
+      let removed = 0;
+      for (const { session_id: id } of r.rows) {
+        const gone = await k().transaction().execute(async (trx) => {
+          // Lock, then re-check: a re-send that committed after the scan may have made the session recent again.
+          await sql`SELECT 1 FROM sessions WHERE id = ${id} FOR UPDATE`.execute(trx);
+          const still = await sql`SELECT 1 FROM publish_sessions ps LEFT JOIN sessions s ON s.id = ps.session_id
+            WHERE ps.session_id = ${id} AND ${LAST_ACTIVE} < ${cutoff}`.execute(trx);
+          if (!still.rows.length) return false;
+          await removePublishedSession(trx, id);
+          return true;
+        });
+        if (gone) removed++;
+      }
+      return removed;
     }
   };
 }

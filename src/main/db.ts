@@ -29,7 +29,7 @@ import type { StateDb, UsageAnchorsTable } from './store/stateSchema.js';
 import { parseIngestLine, foldSessionTouch, type ParsedLine } from './state/ingestParse.js';
 import { rawLine } from './state/rawCodec.js';
 import { ATTACHMENT_MIN_BYTES, dedupeAttachment, deflatePayload, expandLine } from './state/attachmentCodec.js';
-import { PARTITION_PREFIX } from './publish/protocol.js';
+import { PARTITION_PREFIX, SESSION_UUID_RE } from './publish/protocol.js';
 
 let db: Database.Database | null = null;
 let kdb: Kysely<StateDb> | null = null;
@@ -1934,6 +1934,16 @@ export async function deletePublishCursor(source: string, target: string): Promi
 /** A forgotten remote bookmark: no workspace keeps a cursor towards it. */
 export async function deletePublishCursorsTo(target: string): Promise<void> {
   await kyselyOrThrow().deleteFrom('publish_cursors').where('target_workspace_id', '=', target).execute();
+}
+
+/** The backfill action's count (D140): publishable sessions of `workspaceId` that started in [from, below). */
+export async function backfillSessionCount(workspaceId: string, from: number, below: number): Promise<number> {
+  const k = kyselyOrThrow();
+  const rows = await k.selectFrom('sessions').select('id').where('workspace_id', '=', workspaceId)
+    .where('started_at', '>=', from).where('started_at', '<', below)
+    .where('id', 'not in', k.selectFrom('publish_withheld').select('session_id').where('workspace_id', '=', workspaceId))
+    .execute();
+  return rows.filter((r) => SESSION_UUID_RE.test(r.id)).length;
 }
 
 export async function withholdSession(workspaceId: string, sessionId: string): Promise<void> {

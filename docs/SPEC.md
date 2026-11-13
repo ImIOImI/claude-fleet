@@ -328,6 +328,10 @@ Withdraw published transcripts (`src/main/publish/publishIpc.ts`, types `src/pre
   - **Results:** a 404 counts as nothing to remove. Any other failure is listed, with its error as one line of at most 200 chars.
   - **Reach:** only hosts still in `publish.to`. A host turned off (or a forgotten bookmark) is not asked; its rows stay until the target is turned back on and Unpublish runs again (§8).
   - **UI:** the Sessions pane's row ⋮ menu offers **Unpublish** on the workspace's own (non-remote) rows when it publishes. It asks first, inline like Delete ("Remove this session from <hosts>? It will never be published again."); a status line shows `unpublishNote`.
+- `publish:backfillCount(workspaceId, targetId, from)` → `{ sessions, host }` and `publish:backfill(workspaceId, targetId, from)` → `{ sessions }` (D140, §7 *Transcript publish*, *Backfill*).
+  - **Arguments:** `workspaceId` renderer-valid, a local or container workspace; `targetId` a ULID in its stored `publish.to` that names a remote bookmark; `from` is `'all'` (= 0) or epoch ms, a safe integer ≥ 0 strictly below the target's current floor (`widenPublish`: the floor only ever moves earlier). Anything else is refused and nothing is written.
+  - **Count:** sessions of the workspace with `started_at` in [`from`, current floor), not withheld, with a session-UUID id (`backfillSessionCount`). It writes nothing.
+  - **Backfill:** inside `Publisher.exclusive(workspaceId)` (no pass of the workspace runs; running ones, with their cursor write-back, are waited out) main re-reads the manifest, re-validates, deletes that target's `publish_cursors` row, then writes `publish.from[targetId] = from`; afterwards it bumps the publisher.
 
 ### PTY
 - `pty:attach(containerId, brokerSessionId, cols, rows, resumeOf?, foreground?)` → `ptyHandleId: string` — opens a connection to the workspace's in-container broker (Unix socket at `<state>/<id>/broker/broker.sock`) and either re-attaches to an existing broker session or creates one. `brokerSessionId` is the stable id from `sessions.json` (so re-attach across an app restart finds the same live PTY). Main retains a `BrokerClient` plus the resulting Duplex, returns an opaque `ptyHandleId` the renderer uses for subsequent input/resize/detach calls. **`resumeOf`** (a Claude session UUID) makes this a *resume* attach: the broker `CREATE` spawns `claude --resume <resumeOf>` instead of a bare `claude`. **Session identity is host-assigned (#195):** when CREATE runs without `resumeOf`, the host generates a UUID and passes `--session-id <uuid>`, so the broker→claude mapping is learned **deterministically at CREATE time** for both paths — never guessed from JSONL appearance order (the legacy pending-attach FIFO could pair a new JSONL with the wrong tab; a wrong `broker_sessions` row makes a later tab Refresh silently resume a different conversation). Learning happens only when CREATE actually runs — a plain ATTACH to a live session never relearns, since the running claude keeps whatever id it already has. The pending-attach queue remains as a fallback pairing for sessions the host did not name (e.g. seeded in e2e); an ambiguous consume is logged as `mapping-ambiguous-consume`. `resumeOf` only takes effect at CREATE time; on a re-attach where the broker session is already alive, ATTACH succeeds first and the resume args are correctly ignored (no second claude spawned). **`foreground`** is true when the attaching tab is visible (active tab of the selected workspace); only the local backend reads it, to spawn that tab ahead of hidden ones (see *Local spawn queue*, §7). The renderer seeds its resize latch, its last-observed size and its repaint-nudge baseline with the cols/rows it sent, then runs its resize reconcile once, so a pane that re-fit while the attach was in flight still gets the resize push, the repaint and the Ctrl+L nudge. **On failure** the handler captures the last ~100 lines of broker stdout/stderr via `docker logs` and writes them to `error.log` under a `pty-attach-failed` entry alongside the thrown message — the broker is otherwise invisible to the host, and the worst-case "ATTACHED timed out" + "unsolicited frame type 4" pattern after a pause/resume is impossible to diagnose without seeing what the broker was actually doing.
@@ -569,7 +573,7 @@ interface WorkspaceSpec {
   };
   resources?: { cpus?: number; memoryMb?: number };
   mounts?: { hostPath: string; containerPath: string; readOnly: boolean }[]; // container only: extra host folders (HostConfig.Mounts binds); dropped on other kinds at read
-  publish?: { to: string[]; since: Record<string, number> }; // local/container only: remote workspace ids this workspace publishes transcripts to; since[id] = epoch ms that target was turned on (set by main, never the renderer)
+  publish?: { to: string[]; since: Record<string, number>; from?: Record<string, number> }; // local/container only: remote workspace ids this workspace publishes transcripts to; since[id] = epoch ms that target was turned on; from[id] = a lower session-start floor set by the backfill action (0 = all, always < since[id]; D140). Main sets both, never the renderer
   remote?: {                       // kind 'remote' only: the fleet-host bookmark
     url: string;                   // canonical host URL (normalizeHostUrl(url) === url)
     tier: 'read' | 'steer' | 'session' | null;  // last tier /whoami reported; display only
@@ -1375,17 +1379,18 @@ A person's local or container workspace can publish its transcripts to remote wo
   - Only the Edit form sends the `publish` key (`publishPayload`). The Saved-tab resume, the committee rail (`withoutPublish`) and `workspace:create` don't, and a spec without the key keeps the stored block; `workspaceMerge` carries it for running workspaces.
   - `workspace:writeManifest` derives `publish` (`publishOnWrite`), placed after the renderer's spec:
     - targets must be remote bookmarks, at most 16;
-    - a target already on keeps its `since`, and a new one gets the current time; a `since` sent by the renderer is ignored;
+    - a target already on keeps its `since` and `from`, and a new one gets the current time and no `from`; a `since` or `from` sent by the renderer is ignored;
     - a new target's cursor is seeded to `MAX(events.id)`, read before `since` is stamped, so history before the opt-in is never scanned (only a save that adds a target reads it; if the read fails the cursor stays unseeded and that history is read once and skipped by `since`);
     - removing a target drops its cursor.
   - **Forgetting a bookmark revokes publishing to it** (`revokePublishTarget`): it is stripped from every manifest's `publish` and its cursors are deleted before the bookmark is. The publisher also requires the target bookmark's `createdAt` ≤ `since`, so a bookmark re-added later (or another host claiming the id) gets nothing until the box is ticked again; a re-pointed bookmark keeps its `createdAt` and keeps publishing.
 - **What is sent.**
-  - Events after the pair's position, in event-id order, of sessions whose `started_at` ≥ `since[target]`.
+  - Events after the pair's position, in event-id order, of sessions whose `started_at` ≥ the target's floor: `from[target]` when the backfill action set it, else `since[target]` (`publishFloor`).
   - Skipped, with the position still advancing past them:
-    - sessions that started before `since`, and rows whose session has no `started_at` yet (once such a row falls below the re-scan window, about 2 min, it is skipped for good);
+    - sessions that started before the floor, and rows whose session has no `started_at` yet (once such a row falls below the re-scan window, about 2 min, it is skipped for good);
     - sessions in `publish_withheld`;
     - non-UUID session ids;
     - a line too large for a 1 MiB batch on its own, and a line the scrubber refuses (`UnpublishableLineError`) or that isn't a JSON object (logged `publish-line-skipped`).
+- **Backfill** (D140). Existing sessions are sent only through the Edit form's **Also publish existing sessions…**, shown under a target that is saved as on and still ticked (`canBackfill`; `PublishBackfill.tsx`). The user picks all existing sessions or a start date (local midnight); main counts what that adds (`publish:backfillCount`), the form asks "This will scrub and upload N existing sessions to <host>." (Upload / Cancel; with none: "No existing sessions to add for <host>."), and only Upload calls `publish:backfill` (§6 *Publish*). Main lowers `from[target]` and resets that pair's cursor, since the opt-in seeded it past the history. The next pass re-reads the workspace's events from the first id: older sessions now at or past the floor are sent; sessions already sent are re-sent and absorbed by host dedup; withheld sessions, the scrub and its fail-closed rule apply unchanged. `since` keeps the opt-in time, so the bookmark `createdAt` check is unaffected. Nothing lowers the floor automatically, and a target turned off and on again loses its `from`.
 - **Scrub before send** (`publish/scrub.ts`, shared with the host; `makeScrubber`).
   - **Values** (`publishSecretValues`) become `[redacted:<KEY>]`:
     - every vault secret of the workspace (declared `env.secretKeys` ∪ stored keys); a declared key that can't be read fails closed (nothing is sent; `publish-scrub-unavailable`, retry in 5 min);
@@ -1398,7 +1403,7 @@ A person's local or container workspace can publish its transcripts to remote wo
 - **Publisher** (`publish/publisher.ts`, main; real mode only).
   - **When:** 2 s after the first `ingest` event of a quiet period (not reset by later events), and a sweep every 60 s; the sweep timer re-arms only after a sweep finishes. One pass runs per (workspace, target) at a time; a trigger during a pass runs one more pass after it.
   - **Batches:** pages of 500 events. Each batch is consecutive same-session lines, at most 500 lines and 1 MiB, sent as `{ sourceWorkspaceId, sessionId, events }`.
-  - **Re-checks:** each page re-resolves the pair, and right before each send the pair is re-resolved and `publish_withheld` re-read. An opt-out, a revoke or a changed `since` stops the pass (no cursor is written back for a pair that is gone); a withheld session is never sent after the withhold commits. `Publisher.idle(ws)` awaits one snapshot of the workspace's in-flight send spans (re-check through the host's reply), so withhold + idle leaves no send of that session pending.
+  - **Re-checks:** each page re-resolves the pair, and right before each send the pair is re-resolved and `publish_withheld` re-read. An opt-out, a revoke or a changed `since` or `from` stops the pass (no cursor is written back for a pair that is gone); a withheld session is never sent after the withhold commits. `Publisher.idle(ws)` awaits one snapshot of the workspace's in-flight send spans (re-check through the host's reply), so withhold + idle leaves no send of that session pending. `Publisher.exclusive(ws, fn)` holds off new passes of the workspace, waits for running ones (a running pass stops at its next page or batch), then runs `fn`.
   - **Position and re-scan window:** a bump reads from the in-memory live position. On Postgres, concurrent ingest transactions can commit ids out of order, so each sweep re-reads from the live position captured at the start of the sweep two sweeps back (a 60–120 s window); ids already sent above that floor are remembered (at most 20 000) and not re-sent. The floor is what `publish_cursors.last_event_id` stores, written at the end of each sweep. The window assumes sweeps are ≥ 60 s apart (the tick re-arms after `sweep()` finishes) and ingest transactions take < 60 s. After a restart about 2 min of rows are re-sent; the host's dedup keys make that a no-op.
   - **Errors:**
 
@@ -1412,6 +1417,11 @@ A person's local or container workspace can publish its transcripts to remote wo
   - **Logs**, each once per state change: `publish-failed`, `publish-batch-refused`, `publish-line-skipped`, `publish-scrub-unavailable`, `publish-recovered`. They carry key names, event ids and the redacted `RemoteError` text, never line content or values.
 - **Store switches.** The SQLite → Postgres import copies `publish_cursors` and `publish_withheld` with their rows as-is (`IMPORT_TABLES`) and the app relaunches, so publishing continues from the same floor. The user-state merge carries `publish_withheld` only; each store otherwise keeps its own cursors, and any re-send is absorbed by host dedup. `purgeWorkspace` drops the workspace's withheld rows and every cursor where it is the source or the target.
 - **On the host:** see *Remote host*, *Publish*.
+- **Decisions** (follow-ups to remote-workspaces (e); D99–D111 are in `superpowers/plans/2026-11-11-remote-e-transcript-publish.md`):
+  - **D138 host retention (replaces D110):** a host removes a published session once its last activity (`sessions.last_active_at`, else its last publish) is more than 180 days old (`PUBLISH_RETENTION_DAYS`, a constant), whole sessions only, with everything Unpublish removes (*Remote host*, *Publish*).
+  - **D139 desktop visibility off by default:** a viewer's desktop doesn't show published rows (`history:*` stays hosted-only, D107); published transcripts reach people only through the host's sessions. There is no toggle; a possible opt-in is in §11.
+  - **D140 backfill (amends D104):** sessions that started before the opt-in are published only through the explicit, confirmed backfill action, which lowers that target's `from` (main-owned, only ever earlier) and resets its cursor; withheld sessions stay withheld.
+  - **D141 bots can't publish:** D100 (people only; a machine identity gets 403) is confirmed by the owner.
 
 ### Remote host (`fleet-host`)
 
@@ -1568,7 +1578,7 @@ RPC channels: `sessions:live` (`read`, broker `LIST` → `{ id, alive, mine }[]`
 **Publish** (`publishRoute.ts`, `publishStore.ts`). Present only with `db:`; without it `/publish` is 404. `/publish` is POST-only and `/publish/<id>` DELETE-only (else 405); bearer auth (`gate()`) runs first.
 
 - **Admission, before the body is read** (POST and DELETE alike):
-  - machine identities get 403 `publishing is for people, not machine identities`;
+  - machine identities get 403 `publishing is for people, not machine identities` (D100, confirmed by the owner, D141);
   - per identity: one request in flight (429, `Retry-After: 1`) and a token bucket of 20 burst refilling 2 per second (429 with `Retry-After`);
   - host-wide: 4 in flight (503, `Retry-After: 1`);
   - a refusal closes the connection; the slot is released in `finally`.
@@ -1605,11 +1615,12 @@ RPC channels: `sessions:live` (`read`, broker `LIST` → `{ id, alive, mine }[]`
   - its `session_summaries`, `session_tags`, `usage_anchors` and `usage_events`;
   - its `publish_sessions` row.
 
-  It answers 200 `{ ok: true, removed }` or 404 `not published`. Nothing else deletes or updates published rows.
-- **Unpublish vs. the indexer.** `deleteSessionRows` starts with `SELECT … FROM sessions WHERE id = $1 FOR UPDATE`. The indexer embeds outside any transaction, then writes through `insertSessionEmbeddings`, whose transaction starts with `SELECT … FOR SHARE` on the same row and writes nothing (and stops that session's pass) when the row is gone. So an insert either commits before the delete reads `embeddings`, or sees the session deleted; transcript text can't come back after an unpublish. SQLite serializes writers, so the plain existence check in the write transaction suffices there. As a backstop, `searchEmbeddings` (both dialects), `pgSearchEmbeddings` and `searchVectorsSqlite` return only rows whose `sessions` row exists (a hash semi-join; about 10% on a 20 000-row exact scan). The host keeps them until then; there is no retention yet.
+  It answers 200 `{ ok: true, removed }` or 404 `not published`. Apart from retention, nothing else deletes or updates published rows.
+- **Retention** (D138; `PublishStore.prune`, `publishRetention.ts`). On the holder only, once at holder start and then hourly (`PUBLISH_PRUNE_EVERY_MS`), the store removes published sessions whose last activity, `COALESCE(sessions.last_active_at, publish_sessions.last_published_at)`, is before now − 180 days (strictly; `PUBLISH_RETENTION_MS`). Candidates are read oldest first, 100 per batch (`PUBLISH_PRUNE_BATCH`), at most 5 batches per tick (`PUBLISH_PRUNE_MAX_BATCHES`); a larger backlog drains over later ticks. Each session goes in its own fenced transaction that locks the `sessions` row (`FOR UPDATE`), re-checks the cutoff (a re-send that committed meanwhile keeps it) and removes the same rows as `DELETE /publish` (`removePublishedSession`). The hosted workspace's own sessions are never touched; `publish_partitions` rows stay, as after Unpublish. A failed tick is logged (`publish retention failed`) and the next one runs on schedule. A pruned session that is sent again (a backfill, a re-scan window) is stored as new: its dedup keys went with its events. A backfilled session already past the cutoff is removed by the next tick.
+- **Unpublish vs. the indexer.** `deleteSessionRows` starts with `SELECT … FROM sessions WHERE id = $1 FOR UPDATE`. The indexer embeds outside any transaction, then writes through `insertSessionEmbeddings`, whose transaction starts with `SELECT … FOR SHARE` on the same row and writes nothing (and stops that session's pass) when the row is gone. So an insert either commits before the delete reads `embeddings`, or sees the session deleted; transcript text can't come back after an unpublish. SQLite serializes writers, so the plain existence check in the write transaction suffices there. As a backstop, `searchEmbeddings` (both dialects), `pgSearchEmbeddings` and `searchVectorsSqlite` return only rows whose `sessions` row exists (a hash semi-join; about 10% on a 20 000-row exact scan). Retention removes rows through the same lock (*Retention* above).
 - **Visibility.**
   - The host MCP's read scope is the hosted workspace plus every `publish_partitions` id, read on each call (*Host MCP*); `query` reaches the partitions through `mcp_grants` under RLS as the D71 login.
-  - `history:*` stays hosted-only (D107), so the desktop's federated views don't show published rows.
+  - `history:*` stays hosted-only (D107), so the desktop's federated views don't show published rows. This is the default by decision (D139), with no toggle.
   - `publish_partitions` and `publish_sessions` get no grant (`ensureIsolation` revokes all), so `query` can't read them.
 
 **Session owners** (`sessionOwners.ts`; remote-workspaces (f), D115–D119, D124). `session_owners(broker_session_id, session_id, workspace_id, kind, provider, account_id, login, name, avatar_url, started_at)`, host track v3 (expand-only; `kind` is `user`, `machine` or `automation`). The primary key is `(broker_session_id, session_id)`, because a tab reuses its broker id across claude sessions.
@@ -1753,7 +1764,13 @@ Each `pty:attach` runs `claude` fresh inside the container via `docker exec` —
 1. Edit a local or container workspace and open **Publish transcripts to…**.
 2. Tick one or more remote workspaces, then Save.
 
-From then on, sessions that start in this workspace are scrubbed and sent to those hosts as they are ingested. Earlier sessions, including one in progress at the opt-in, never are.
+From then on, sessions that start in this workspace are scrubbed and sent to those hosts as they are ingested. Earlier sessions, including one in progress at the opt-in, are not.
+
+To also send existing sessions to a host that is already on (saved), reopen Edit → **Publish transcripts to…** and choose **Also publish existing sessions…** under it.
+1. Pick **All existing sessions** or **Sessions since** a date, then **Continue…**.
+2. The form says "This will scrub and upload N existing sessions to <host>."; **Upload** sends them in the background, **Cancel** changes nothing.
+
+The start date can only move earlier. Withheld (unpublished) sessions are never sent. Hosts keep a published session for 180 days after its last activity.
 
 To withdraw one session, open its ⋮ menu in the Sessions pane and choose **Unpublish**.
 - The current target hosts drop it, and it is never published again.
@@ -2051,8 +2068,9 @@ Settings has an **Account** tab (`AccountSettings.tsx`). Each action applies at 
   - **Desktop:** it scrubs before sending (vault values, the model endpoint key in use, the GitHub token and token shapes). It fails closed when a declared or in-use secret can't be read. Only `ScrubbedLine` type-checks into `RemoteClient.publish`.
   - **Host:** it scrubs again, with its own secret values too, and admits before reading a body (people only, per-identity and host-wide limits, 1 MiB streaming cap).
   - **Ownership:** the partition comes only from the verified identity. A body or path can't name an owner, a partition or a stored session id.
-  - **Writes:** publish is append-only except the owner's `DELETE /publish/<sessionId>`, which reaches only the caller's partitions. The desktop withholds first and waits for in-flight sends before deleting, so a re-publish can't race the delete.
-  - **Readers:** published rows are readable by everyone with read on the host (through its sessions) and by the host sessions' MCP, `query` included; the publish bookkeeping tables are not.
+  - **Older history** leaves the desktop only through the confirmed backfill action, which main validates (the floor only moves earlier, for a target already on) (D140).
+  - **Writes:** publish is append-only except the owner's `DELETE /publish/<sessionId>`, which reaches only the caller's partitions, and the holder's 180-day retention (D138). The desktop withholds first and waits for in-flight sends before deleting, so a re-publish can't race the delete.
+  - **Readers:** published rows are readable by everyone with read on the host (through its sessions) and by the host sessions' MCP, `query` included; the publish bookkeeping tables are not. Viewers' desktops don't see them (D139).
   - **Limit:** scrubbing is by pattern and by value, so a secret that matches neither is published (Slack `xapp-`/`xoxe-` tokens, for example).
 - **The embedder sidecar parses session-written transcript text** as the holder's uid (§7 *Remote host*, *Embedder*). Its input to the model is token ids into a fixed ONNX graph; the residual risk (a tokenizer or onnxruntime bug reached through crafted text) is the same class as ingest's JSONL parser. In `single` a session can also kill the sidecar, which turns search off until the next holder.
 - **A printed token is visible.** A token a session prints (`gh auth token` inside a `gh` child, `git credential fill`) reaches every viewer of that session for the token's lifetime (≤ 1 h). Redaction (§7 *Remote host*, *Logging*) limits only the copies the host stores (ingest) and re-sends (`/events`). The desktop's own transcript ingest (`jsonlWatcher`) stores lines unredacted.
@@ -2232,8 +2250,9 @@ The holder runs its workspace's automations and serves the fleet-state MCP (§7 
 - **Script steps on the host:** refused until the broker can run a script in the workspace container (a broker exec op); only the host pod holds the DB role.
 - **Host checklist for the two-pod split:** the cluster checks in the plan's Appendix B (`superpowers/plans/2026-11-05-host-container-split.md`) before go-live.
 - **Publish follow-ups:**
-  - retention of published rows (there is none; they are kept until unpublished), and of the host's `usage_events`, which now grows with `mark_useful` and every search impression or clickthrough;
-  - `history:*` visibility of partitions to desktop viewers, deduplicated against the publisher's own rows;
+  - retention of the host's `usage_events`, which now grows with `mark_useful` and every search impression or clickthrough;
+  - a possible opt-in for viewer visibility: `history:*` showing partitions to desktop viewers, deduplicated against the publisher's own rows (off by default, D139);
+  - a backfill restarts the pair from the first event id, so its first three sweeps re-read the whole workspace history (the re-scan window starts at the reset floor) and re-send what was already sent, more than once past the 20 000-id `seen` cap; host dedup absorbs it, but a range-limited re-scan would save the bandwidth;
   - a publisher-facing, counts-only signals channel;
   - consumers of `usefulMarkCounts` (ranking, retention), which must count each marker session once;
   - Slack `xapp-`/`xoxe-` token shapes in the scrubber;
@@ -2246,6 +2265,9 @@ The holder runs its workspace's automations and serves the fleet-state MCP (§7 
   - a session's `list_sessions` and `search_transcripts` show a published session, and the desktop's federated history doesn't;
   - `query` can read `sessions` rows of a `pub_…` workspace but not `publish_partitions`;
   - Unpublish removes the session's `pub_…` rows and embeddings and leaves other owners' copies.
+- **Host checklist for publish follow-ups (D138, D140):**
+  - after a holder start, the log shows no `publish retention failed`; a published session aged past 180 days (`UPDATE sessions SET last_active_at = …`) is gone after the next hourly tick, with its embeddings and `publish_sessions` row;
+  - on a desktop, "Also publish existing sessions…" under a saved target shows the count, Upload sends older sessions (they appear in the host's `list_sessions`), and a withheld session stays absent.
 - **Host checklist for (f):**
   - `fleet-host migrate` reports `host` 3;
   - in a person's session, `ps -o args= -C claude` shows one inline `--settings` with `hooks` and `attribution`, and the waiting chip still works (hooks loaded);

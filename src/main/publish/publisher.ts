@@ -1,5 +1,6 @@
 // Pushes opted-in workspaces' newly ingested events to their remote targets (remote-workspaces §7).
 // The one cross-boundary write: only acks come back, nothing lands in the local DB (D62).
+import { publishFloor, type WorkspacePublish } from '../../preload/publish.js';
 import { RemoteError } from '../remoteClient.js';
 import type { WorkspaceSpec } from '../workspaces.js';
 import { planBatches, type PublishRow } from './batches.js';
@@ -18,7 +19,7 @@ const SKIP_STATUSES = new Set([400, 409, 413]);
 
 export type PublisherManifest = Pick<WorkspaceSpec, 'id' | 'kind' | 'env' | 'remote' | 'createdAt' | 'endpointId'> & {
   authMode?: WorkspaceSpec['authMode'];
-  publish?: { to: string[]; since: Record<string, number> };
+  publish?: WorkspacePublish;
 };
 
 export interface PublisherLog {
@@ -57,13 +58,20 @@ export interface Publisher {
   idle(workspaceId: string): Promise<void>;
   /** Resolves once no pass of the workspace is running, re-runs included; may not settle under steady ingest (tests). */
   drain(workspaceId: string): Promise<void>;
+  /**
+   * Runs `fn` with no pass of the workspace running or starting: waits out running passes (and their cursor
+   * write-back) first. The backfill action resets a cursor and lowers a floor inside it.
+   */
+  exclusive<T>(workspaceId: string, fn: () => Promise<T>): Promise<T>;
   stop(): void;
 }
 
 type Kind = 'bump' | 'sweep';
-interface Pair { spec: PublisherManifest; target: string; url: string; since: number }
+/** `since` is the opt-in time (the bookmark check); `from` the session-start floor (D140). */
+interface Pair { spec: PublisherManifest; target: string; url: string; since: number; from: number }
 interface PairState {
   since: number;
+  from: number;
   running: Promise<void> | null;
   /** The span from the per-batch withheld/pair re-check through the host's reply; never rejects. */
   sending: Promise<void> | null;
@@ -92,7 +100,9 @@ export function startPublisher(d: PublisherDeps, o: { debounceMs?: number; sweep
   const page = o.page ?? PUBLISH_PAGE;
   const states = new Map<string, PairState>();
   const pending = new Map<string, () => void>();
+  const held = new Map<string, number>();
   let stopped = false;
+  const halted = (ws: string): boolean => stopped || held.has(ws);
 
   async function pairs(only?: string): Promise<Pair[]> {
     const all = await d.manifests();
@@ -104,17 +114,21 @@ export function startPublisher(d: PublisherDeps, o: { debounceMs?: number; sweep
         const t = targets.get(target);
         const since = spec.publish.since[target];
         // A bookmark added after the opt-in (forgotten and re-added, or another host now claiming the id) never inherits it.
-        if (t?.remote && Number.isSafeInteger(since) && t.createdAt <= since) out.push({ spec, target, url: t.remote.url, since });
+        if (t?.remote && Number.isSafeInteger(since) && t.createdAt <= since) {
+          out.push({ spec, target, url: t.remote.url, since, from: publishFloor(spec.publish, target) });
+        }
       }
     }
     return out;
   }
 
   const current = async (p: Pair): Promise<Pair | undefined> =>
-    (await pairs(p.spec.id)).find((q) => q.target === p.target && q.since === p.since);
+    (await pairs(p.spec.id)).find((q) => q.target === p.target && q.since === p.since && q.from === p.from);
 
-  function reset(st: PairState, since: number): void {
-    Object.assign(st, { since, retryAt: 0, attempt: 0, failing: null, pos: null, marks: [0, 0] });
+  const same = (st: PairState, p: Pair): boolean => st.since === p.since && st.from === p.from;
+
+  function reset(st: PairState, p: Pick<Pair, 'since' | 'from'>): void {
+    Object.assign(st, { since: p.since, from: p.from, retryAt: 0, attempt: 0, failing: null, pos: null, marks: [0, 0] });
     st.seen.clear();
   }
 
@@ -134,7 +148,7 @@ export function startPublisher(d: PublisherDeps, o: { debounceMs?: number; sweep
   async function pass(p0: Pair, st: PairState, kind: Kind): Promise<void> {
     let p = p0;
     const ws = p.spec.id;
-    if (st.since !== p.since) reset(st, p.since);
+    if (!same(st, p)) reset(st, p);
     let scrub: (line: string) => ScrubbedLine;
     try {
       scrub = makeScrubber(await d.secretValues(p.spec));
@@ -153,23 +167,23 @@ export function startPublisher(d: PublisherDeps, o: { debounceMs?: number; sweep
       d.log({ level: 'warn', type: 'publish-line-skipped', message: `event ${r.id} not published: ${why}`, workspaceId: ws });
     };
     for (;;) {
-      if (stopped) return;
+      if (halted(ws)) return;
       const cur = await current(p);
-      if (!cur) return reset(st, st.since);
+      if (!cur) return reset(st, st);
       p = cur;
       const rows = await d.events(ws, after, page);
       if (rows.length === 0) break;
       const fresh = rows.filter((r) => !st.seen.has(r.id));
       const plan = planBatches(ws, fresh, {
         scrub,
-        since: p.since,
+        since: p.from,
         withheld: await d.withheld(ws),
         onOversize: (r) => report(r, 'over the 1 MiB publish limit'),
         onUnpublishable: report
       });
       let i = 0;
       for (const b of plan) {
-        if (stopped) return;
+        if (halted(ws)) return;
         const covered = i;
         while (i < fresh.length && fresh[i].id <= b.lastId) i++;
         if (b.batch) {
@@ -201,7 +215,7 @@ export function startPublisher(d: PublisherDeps, o: { debounceMs?: number; sweep
           } finally {
             st.sending = null;
           }
-          if (outcome === 'gone') return reset(st, st.since);
+          if (outcome === 'gone') return reset(st, st);
           if (outcome !== 'withheld') for (const r of fresh.slice(covered, i)) st.seen.add(r.id);
         }
         st.pos = Math.max(st.pos, b.lastId);
@@ -225,13 +239,13 @@ export function startPublisher(d: PublisherDeps, o: { debounceMs?: number; sweep
   function run(p: Pair, kind: Kind): Promise<void> {
     const key = `${p.spec.id}>${p.target}`;
     let st = states.get(key);
-    if (!st) states.set(key, (st = { since: p.since, running: null, sending: null, again: null, retryAt: 0, attempt: 0, failing: null, pos: null, marks: [0, 0], seen: new Set() }));
+    if (!st) states.set(key, (st = { since: p.since, from: p.from, running: null, sending: null, again: null, retryAt: 0, attempt: 0, failing: null, pos: null, marks: [0, 0], seen: new Set() }));
     if (st.running) {
       // Rows ingested after the running pass read its last page would otherwise wait for the next sweep.
       if (kind === 'sweep' || !st.again) st.again = kind;
       return st.running;
     }
-    if (stopped || (now() < st.retryAt && st.since === p.since)) return Promise.resolve();
+    if (halted(p.spec.id) || (now() < st.retryAt && same(st, p))) return Promise.resolve();
     const s = st;
     s.running = (async () => {
       let q: Pair | undefined = p;
@@ -240,7 +254,7 @@ export function startPublisher(d: PublisherDeps, o: { debounceMs?: number; sweep
         await pass(q, s, k).catch((err: Error) => fail(s, q!.spec.id, 'publish-failed', err.message, backoff(s)));
         const again = s.again;
         s.again = null;
-        if (!again || stopped || now() < s.retryAt) return;
+        if (!again || halted(p.spec.id) || now() < s.retryAt) return;
         k = again;
         q = (await pairs(p.spec.id)).find((r) => r.target === p.target);
       }
@@ -250,6 +264,14 @@ export function startPublisher(d: PublisherDeps, o: { debounceMs?: number; sweep
         s.running = null;
       });
     return s.running;
+  }
+
+  async function drain(ws: string): Promise<void> {
+    for (;;) {
+      const running = [...states].flatMap(([key, st]) => (key.startsWith(`${ws}>`) && st.running ? [st.running] : []));
+      if (!running.length) return;
+      await Promise.all(running);
+    }
   }
 
   async function sweep(): Promise<void> {
@@ -279,11 +301,16 @@ export function startPublisher(d: PublisherDeps, o: { debounceMs?: number; sweep
     async idle(ws) {
       await Promise.all([...states].flatMap(([key, st]) => (key.startsWith(`${ws}>`) && st.sending ? [st.sending] : [])));
     },
-    async drain(ws) {
-      for (;;) {
-        const running = [...states].flatMap(([key, st]) => (key.startsWith(`${ws}>`) && st.running ? [st.running] : []));
-        if (!running.length) return;
-        await Promise.all(running);
+    drain,
+    async exclusive(ws, fn) {
+      held.set(ws, (held.get(ws) ?? 0) + 1);
+      try {
+        await drain(ws);
+        return await fn();
+      } finally {
+        const n = (held.get(ws) ?? 1) - 1;
+        if (n) held.set(ws, n);
+        else held.delete(ws);
       }
     },
     stop() {

@@ -25,10 +25,19 @@ function harness(unpublish: PublishIpcDeps['unpublish'], over: Partial<PublishIp
     unpublish: async (url, sid) => { order.push(`unpublish ${url}`); return unpublish(url, sid); },
     withhold: async (ws, sid) => void order.push(`withhold ${ws} ${sid}`),
     idle: async (ws) => void order.push(`idle ${ws}`),
+    writeManifest: async (spec) => { order.push(`write ${spec.id} ${JSON.stringify(spec.publish)}`); store.set(spec.id, spec); },
+    resetCursor: async (ws, target) => void order.push(`reset ${ws}>${target}`),
+    exclusive: async (ws, fn) => { order.push(`exclusive ${ws}`); try { return await fn(); } finally { order.push(`released ${ws}`); } },
+    countBackfill: async (ws, from, below) => { order.push(`count ${ws} ${from}..${below}`); return 7; },
+    bump: (ws) => void order.push(`bump ${ws}`),
     ...over
   };
   registerPublishIpc({ handle: (ch, fn) => void handlers.set(ch, fn as (...a: unknown[]) => unknown) }, deps);
-  return { call: (...a: unknown[]) => Promise.resolve(handlers.get('publish:unpublish')!({}, ...a)), handlers, order };
+  return {
+    call: (...a: unknown[]) => Promise.resolve(handlers.get('publish:unpublish')!({}, ...a)),
+    on: (ch: string, ...a: unknown[]) => Promise.resolve(handlers.get(ch)!({}, ...a)),
+    handlers, order
+  };
 }
 
 describe('publish:unpublish', () => {
@@ -106,5 +115,61 @@ describe('publish:unpublish', () => {
     const h = harness(async () => { throw new RemoteError('unreachable', 'http://x answered 500', 500); }, { sleep: async (ms) => void waits.push(ms) });
     expect(((await h.call(W, SID)) as UnpublishResult).failed.map((f) => f.error)).toEqual(['http://x answered 500', 'http://x answered 500']);
     expect(waits).toEqual([]);
+  });
+});
+
+describe('publish:backfillCount / publish:backfill (D140)', () => {
+  const BW = '01JC000000000000000000000B';
+  const fresh = () => store.set(BW, m(BW, { kind: 'container', publish: { to: [R1, R2], since: { [R1]: 5_000, [R2]: 6_000 } } }));
+
+  it('counts the sessions a widen would add and names the host, without writing anything', async () => {
+    fresh();
+    const h = harness(async () => 0);
+    expect(await h.on('publish:backfillCount', BW, R1, 'all')).toEqual({ sessions: 7, host: 'review-bot' });
+    expect(await h.on('publish:backfillCount', BW, R2, 1_000)).toEqual({ sessions: 7, host: 'ops' });
+    expect(h.order).toEqual([`count ${BW} 0..5000`, `count ${BW} 1000..6000`]);
+  });
+
+  it('inside exclusive: resets the cursor first, then lowers only that target’s floor; then bumps', async () => {
+    fresh();
+    const h = harness(async () => 0);
+    expect(await h.on('publish:backfill', BW, R1, 2_000)).toEqual({ sessions: 7 });
+    expect(h.order).toEqual([
+      `exclusive ${BW}`, `count ${BW} 2000..5000`, `reset ${BW}>${R1}`,
+      `write ${BW} ${JSON.stringify({ to: [R1, R2], since: { [R1]: 5_000, [R2]: 6_000 }, from: { [R1]: 2_000 } })}`,
+      `released ${BW}`, `bump ${BW}`
+    ]);
+    expect(store.get(BW)?.publish?.from).toEqual({ [R1]: 2_000 });
+  });
+
+  it('only widens: a date at or after the floor, or a repeat of the same date, is refused and writes nothing', async () => {
+    fresh();
+    const h = harness(async () => 0);
+    await expect(h.on('publish:backfill', BW, R1, 5_000)).rejects.toThrow(/earlier/);
+    await expect(h.on('publish:backfill', BW, R1, 9_999_999)).rejects.toThrow(/earlier/);
+    await expect(h.on('publish:backfillCount', BW, R1, 5_000)).rejects.toThrow(/earlier/);
+    await h.on('publish:backfill', BW, R1, 'all');
+    h.order.length = 0;
+    await expect(h.on('publish:backfill', BW, R1, 'all')).rejects.toThrow(/earlier/);
+    await expect(h.on('publish:backfill', BW, R1, 1_000)).rejects.toThrow(/earlier/);
+    expect(h.order.filter((o) => o.startsWith('write') || o.startsWith('reset'))).toEqual([]);
+  });
+
+  it('refuses a bad workspace, a target that is not on, a non-remote target and a malformed date', async () => {
+    fresh();
+    const h = harness(async () => 0);
+    const OTHER = '01JC00000000000000000000R3';
+    store.set(OTHER, m(OTHER, { kind: 'remote', remote: { url: 'http://three', tier: 'read', login: 'a', checkedAt: 1 } }));
+    for (const ch of ['publish:backfillCount', 'publish:backfill']) {
+      await expect(h.on(ch, 'loadout-source:x', R1, 'all')).rejects.toThrow(/workspace id/);
+      await expect(h.on(ch, R1, R1, 'all')).rejects.toThrow(/local or container/);
+      await expect(h.on(ch, BW, OTHER, 'all')).rejects.toThrow(/not on/);
+      await expect(h.on(ch, BW, 'nope', 'all')).rejects.toThrow(/target/);
+      await expect(h.on(ch, BW, R1, '2026-01-01')).rejects.toThrow(/start date/);
+      await expect(h.on(ch, BW, R1, -5)).rejects.toThrow(/start date/);
+    }
+    store.set(BW, m(BW, { kind: 'container', publish: { to: [BW], since: { [BW]: 5 } } }));
+    await expect(h.on('publish:backfill', BW, BW, 'all')).rejects.toThrow(/remote/);
+    expect(h.order).toEqual([]);
   });
 });

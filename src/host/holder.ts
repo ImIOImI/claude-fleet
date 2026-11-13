@@ -24,6 +24,7 @@ import { hostUsageRecorder, startHostMcp, type HostMcp } from './hostMcp.js';
 import type { Logger } from './log.js';
 import { leaseFence, LeaseLostError } from './pgLease.js';
 import { publishStore, type PublishStore } from './publishStore.js';
+import { startPublishRetention } from './publishRetention.js';
 import { sessionOwnerStore, type SessionOwnerStore } from './sessionOwners.js';
 
 export interface HolderOptions {
@@ -129,12 +130,14 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
     onIngested: (id) => { hint.bump(); indexer?.bump(id); }
   });
   let automations: HostAutomations | null = null;
+  let retention: { stop(): void } | null = null;
   // Fenced: provisioning and each call's mcp_grants rewrite are writes on the state handle.
   const mcp = mcpServer(o, embedder?.embed, publish, owners, () =>
     openPgMcpReadSource(stores.poolConfig.schema, stores.poolConfig, (message) => o.log.log('warn', 'mcp query isolation', { error: message }), {
       preprovisioned: queryLogin(o.db, stores.poolConfig, o.env)
     }));
   const stopAll = async (): Promise<void> => {
+    retention?.stop();
     hint.stop();
     await mcp.stop();
     await automations?.stop();
@@ -149,6 +152,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
   };
   try {
     await ingest.start();
+    retention = startPublishRetention({ publish, log: o.log });
     if (indexer) void indexer.backfill().catch((err: Error) => o.log.log('warn', 'index backfill failed', { error: err.message }));
     automations = await startHostAutomations({
       inbox: stores.inbox, workspace: o.workspace, ops: o.ops, owners, mcpArgs: o.mcp.args, events: o.events, log: o.log,

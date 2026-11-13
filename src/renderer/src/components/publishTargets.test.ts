@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { publishPayload, publishSummary, publishVisibility, togglePublishTarget, unpublishConfirmText, unpublishNote, withoutPublish } from './publishTargets';
+import { ipcErrorText, backfillConfirmText, backfillFrom, backfillNote, canBackfill, publishPayload, publishSummary, publishVisibility, togglePublishTarget, unpublishConfirmText, unpublishNote, withoutPublish } from './publishTargets';
 
 describe('publish targets', () => {
   it('toggles a target without duplicates', () => {
@@ -45,5 +45,31 @@ describe('unpublishNote', () => {
     expect(unpublishNote({ removed: 0, failed: [] })).toBe('Nothing of this session was published. It won’t be published.');
     expect(unpublishNote({ removed: 0, failed: [{ remoteId: 'r', name: 'ops', error: 'ops is not reachable' }] }))
       .toBe('Not yet removed from ops (ops is not reachable). It won’t be published again; try Unpublish once the host is reachable.');
+  });
+});
+
+describe('backfill (Also publish existing sessions…)', () => {
+  it('names the count and the host in the confirm text', () => {
+    expect(backfillConfirmText(12, 'review-bot')).toBe('This will scrub and upload 12 existing sessions to review-bot.');
+    expect(backfillConfirmText(1, 'ops')).toBe('This will scrub and upload 1 existing session to ops.');
+    expect(backfillConfirmText(0, 'ops')).toBe('No existing sessions to add for ops.');
+  });
+  it('turns the choice into what main accepts: all, or local midnight of a valid date', () => {
+    expect(backfillFrom('all', '')).toBe('all');
+    expect(backfillFrom('date', '2026-03-04')).toBe(new Date(2026, 2, 4).getTime());
+    for (const bad of ['', '2026-13-01', '2026-02-30', 'yesterday', '1969-12-31']) expect(backfillFrom('date', bad)).toBeNull();
+  });
+  it('offers the action only for a target that is saved as on and still ticked', () => {
+    expect(canBackfill(['a'], ['a', 'b'], 'a')).toBe(true);
+    expect(canBackfill(['a'], ['a', 'b'], 'b')).toBe(false);
+    expect(canBackfill(['a'], ['b'], 'a')).toBe(false);
+    expect(canBackfill(undefined, ['a'], 'a')).toBe(false);
+  });
+  it('shows main’s refusal without the IPC prefix', () => {
+    expect(ipcErrorText(new Error("Error invoking remote method 'publish:backfill': Error: only earlier sessions can be added"))).toBe('only earlier sessions can be added');
+  });
+  it('reports what was queued', () => {
+    expect(backfillNote(3, 'ops')).toBe('Publishing 3 existing sessions to ops in the background.');
+    expect(backfillNote(0, 'ops')).toBe('No existing sessions to add for ops.');
   });
 });

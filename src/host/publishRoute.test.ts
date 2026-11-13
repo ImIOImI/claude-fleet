@@ -26,6 +26,7 @@ function fakeStore(fail?: unknown) {
       return { sessionId: 'stored', partitionId: 'pub_x', inserted: lines.length };
     },
     partitionIds: async () => [],
+    prune: async () => 0,
     unpublish: async (owner, sid) => {
       if (fail) throw fail;
       removed.push({ owner, sid });

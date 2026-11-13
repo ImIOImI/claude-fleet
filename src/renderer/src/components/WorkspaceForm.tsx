@@ -28,7 +28,8 @@ import { createSecretRevealer, REVEAL_SECONDS, type RevealState } from './secret
 import type { InboxConfig } from '../../../preload';
 import type { CaptureSettings } from '../../../preload/captureSettings';
 import { defaultContainerPath, type ExtraMount } from '../../../preload/extraMounts';
-import { PUBLISH_HINT, publishSummary, publishVisibility, togglePublishTarget } from './publishTargets';
+import { canBackfill, PUBLISH_HINT, publishSummary, publishVisibility, togglePublishTarget } from './publishTargets';
+import { PublishBackfill } from './PublishBackfill';
 import { captureSubmitValue, captureSummary, fromCaptureForm, toCaptureForm, type CaptureFormState } from '../captureSettingsView';
 import {
   hostPlaceholder,
@@ -1451,7 +1452,8 @@ export function WorkspaceForm({
             <>
               <p className="form-hint">{PUBLISH_HINT}</p>
               {remotes.map((r) => (
-                <label key={r.id} className="publish-target">
+                <div key={r.id}>
+                <label className="publish-target">
                   <input
                     type="checkbox"
                     checked={publishTo.includes(r.id)}
@@ -1461,6 +1463,10 @@ export function WorkspaceForm({
                   <span>{r.name}</span>
                   <span className="form-hint">{publishVisibility(r.name)}</span>
                 </label>
+                {initial?.id && canBackfill(initial.publishTo, publishTo, r.id) && (
+                  <PublishBackfill workspaceId={initial.id} target={r.id} host={r.name} disabled={busy} />
+                )}
+                </div>
               ))}
             </>
           )}
