@@ -505,3 +505,82 @@ describe('startPublisher', () => {
     expect(n).toBe(2);
   });
 });
+
+describe('backfill (D140)', () => {
+  const widened = (from: number): PublisherManifest => ({ ...local(SRC, [R1]), publish: { to: [R1], since: { [R1]: 5_000 }, from: { [R1]: from } } });
+  /** The opt-in seeded the cursor past existing history (I2). */
+  const seeded = () => new Map([[`${SRC}>${R1}`, 3]]);
+  const backfill = async (r: ReturnType<typeof rig>, from: number) =>
+    r.p.exclusive(SRC, async () => {
+      r.cursors.delete(`${SRC}>${R1}`);
+      r.setManifests([widened(from), local(OFF, []), remote(R1)]);
+    });
+
+  it('older sessions stay unsent until the action lowers the floor and resets the cursor; then they are sent', async () => {
+    const r = rig({ cursors: seeded() });
+    r.rows.push({ ws: SRC, id: 5, sessionId: S2, rawJsonl: msg('new'), started: 6_000 });
+    await r.p.sweep();
+    await r.p.sweep();
+    expect(r.texts()).toEqual(['new']);
+    await backfill(r, 0);
+    await r.p.sweep();
+    expect(r.texts()).toEqual(['new', 'before opt-in', 'uses [redacted:API_TOKEN] and [redacted]', 'second', 'new']);
+  });
+
+  it('a lowered floor without the cursor reset reads nothing older than the cursor', async () => {
+    const r = rig({ cursors: seeded() });
+    await r.p.sweep();
+    r.setManifests([widened(0), local(OFF, []), remote(R1)]);
+    await r.p.sweep();
+    expect(r.texts()).toEqual([]);
+  });
+
+  it('a chosen date sends only sessions that started on or after it', async () => {
+    const S3 = '33333333-2222-4333-8444-555555555555';
+    const r = rig({ cursors: seeded(), rows: [...BASE_ROWS, { ws: SRC, id: 6, sessionId: S3, rawJsonl: msg('older still'), started: 1_000 }] });
+    await backfill(r, 3_000);
+    await r.p.sweep();
+    expect(r.texts()).toEqual(['before opt-in', 'uses [redacted:API_TOKEN] and [redacted]', 'second']);
+  });
+
+  it('withheld sessions stay withheld', async () => {
+    const r = rig({ cursors: seeded(), withheld: [S1] });
+    await backfill(r, 0);
+    await r.p.sweep();
+    expect(r.sent.map((x) => x.batch.sessionId)).toEqual([S2]);
+  });
+
+  it('fails closed when a secret can’t be read', async () => {
+    const r = rig({ cursors: seeded(), secrets: async () => { throw new Error('secret API_TOKEN can’t be read from the vault'); } });
+    await backfill(r, 0);
+    await r.p.sweep();
+    expect(r.publish).not.toHaveBeenCalled();
+    expect(r.logs.map((l) => l.type)).toEqual(['publish-scrub-unavailable']);
+  });
+
+  it('exclusive waits out a running pass, so its cursor write can’t land after the reset; no pass starts meanwhile', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((ok) => (release = ok));
+    const r = rig({ cursors: seeded(), publish: async (_u, b) => { await gate; return { ok: true, accepted: b.events.length, inserted: 0 }; } });
+    r.rows.push({ ws: SRC, id: 5, sessionId: S2, rawJsonl: msg('new'), started: 6_000 });
+    const swept = r.p.sweep();
+    await vi.waitFor(() => expect(r.publish).toHaveBeenCalledTimes(1));
+    let ran = false;
+    const held = r.p.exclusive(SRC, async () => {
+      ran = true;
+      const reads = r.reads.length;
+      await r.p.sweep();
+      expect(r.reads.length).toBe(reads);
+      r.cursors.delete(`${SRC}>${R1}`);
+      r.setManifests([widened(0), local(OFF, []), remote(R1)]);
+    });
+    await new Promise((ok) => setTimeout(ok, 5));
+    expect(ran).toBe(false);
+    release();
+    await Promise.all([swept, held]);
+    expect(ran).toBe(true);
+    expect(r.cursors.has(`${SRC}>${R1}`)).toBe(false);
+    await r.p.sweep();
+    expect(r.texts()).toContain('before opt-in');
+  });
+});

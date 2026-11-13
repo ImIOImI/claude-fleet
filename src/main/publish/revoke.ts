@@ -11,8 +11,9 @@ export async function revokePublishTarget(target: string, d: RevokeDeps): Promis
   for (const m of await d.listManifests()) {
     if (m.kind === 'remote' || !m.publish || (!m.publish.to.includes(target) && !Object.hasOwn(m.publish.since, target))) continue;
     const to = m.publish.to.filter((id) => id !== target);
-    const since = Object.fromEntries(Object.entries(m.publish.since).filter(([id]) => id !== target));
-    await d.writeManifest({ ...m, publish: to.length ? { to, since } : undefined });
+    const keep = (r: Record<string, number>): Record<string, number> => Object.fromEntries(Object.entries(r).filter(([id]) => id !== target));
+    const from = keep(m.publish.from ?? {});
+    await d.writeManifest({ ...m, publish: to.length ? { to, since: keep(m.publish.since), ...(Object.keys(from).length ? { from } : {}) } : undefined });
   }
   await d.deleteCursorsTo(target);
 }

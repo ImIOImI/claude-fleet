@@ -158,7 +158,7 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     await t!.pool.query(`INSERT INTO ${t!.schema}.publish_partitions (partition_id, owner_provider, owner_id, owner_login, source_workspace_id, created_at)
       VALUES ('pub_a', 'github', '9', 'cat', $1, 1)`, [OTHER]);
     await t!.pool.query(`INSERT INTO ${t!.schema}.publish_sessions (session_id, partition_id, source_session_id, first_published_at, last_published_at)
-      VALUES ($1, 'pub_a', 'src', 1, 1)`, [PUB]);
+      VALUES ($1, 'pub_a', 'src', $2, $2)`, [PUB, Date.now()]);
     const ws = new WebSocket(`${a.url.replace('http', 'ws')}/attach`, { headers: { Authorization: `Bearer ${TOKEN}` } });
     await new Promise((r, j) => { ws.once('open', r); ws.once('error', j); });
     const replies: Array<Record<string, unknown>> = [];

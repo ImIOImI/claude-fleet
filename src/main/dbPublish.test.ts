@@ -133,4 +133,23 @@ describe('publish helpers', () => {
     expect(await db.getPublishCursor(O, W)).toBe(0);
     expect(await db.withheldSessions(O)).toEqual(new Set(['s2']));
   });
+
+  it('counts the backfill: sessions started in [from, below), not withheld, with a session UUID id', async () => {
+    await openTestState('pub-count-');
+    const k = db.stateKysely();
+    const at = (id: string, ws: string, started: number | null) =>
+      k.insertInto('sessions').values({ id, workspace_id: ws, cwd: null, started_at: started, last_active_at: started, ai_title: null, first_user_message: null, user_set_name: null }).execute();
+    const u = (n: number) => `${String(n).repeat(8)}-2222-4333-8444-555555555555`;
+    await at(u(1), W, 100);
+    await at(u(2), W, 499);
+    await at(u(3), W, 500);
+    await at(u(4), W, 50);
+    await at(u(5), W, 200);
+    await at(u(6), W, null);
+    await at('not-a-uuid', W, 200);
+    await at(u(7), '01JC0000000000000000000006', 200);
+    await db.withholdSession(W, u(5));
+    expect(await db.backfillSessionCount(W, 100, 500)).toBe(2);
+    expect(await db.backfillSessionCount(W, 0, 500)).toBe(3);
+  });
 });

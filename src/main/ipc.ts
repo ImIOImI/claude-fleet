@@ -167,6 +167,7 @@ import {
   withheldSessions,
   deletePublishCursor,
   deletePublishCursorsTo,
+  backfillSessionCount,
   workspaceMaxEventId,
   withholdSession,
 } from './db.js';
@@ -2239,7 +2240,15 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     readManifest: readWorkspaceManifest,
     unpublish: (url, sessionId) => remoteBackend.clientFor(url).unpublish(sessionId),
     withhold: withholdSession,
-    idle: (ws) => publisher?.idle(ws) ?? Promise.resolve()
+    idle: (ws) => publisher?.idle(ws) ?? Promise.resolve(),
+    writeManifest: async (spec) => {
+      await writeWorkspaceManifest(spec);
+      invalidateWorkspaceList();
+    },
+    resetCursor: deletePublishCursor,
+    exclusive: (ws, fn) => (publisher ? publisher.exclusive(ws, fn) : fn()),
+    countBackfill: backfillSessionCount,
+    bump: (ws) => publisher?.bump(ws)
   });
   relayTimer = setInterval(() => { summaryRelay.sync(); syncRemoteNotices(); }, 15_000);
   relayTimer.unref?.();

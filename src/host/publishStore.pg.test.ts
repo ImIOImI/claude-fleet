@@ -12,7 +12,7 @@ import { startHostIndexer } from './hostIndexer.js';
 import { hostUsageRecorder } from './hostMcp.js';
 import { createLogger } from './log.js';
 import { leaseFence, LeaseLostError } from './pgLease.js';
-import { PublishConflictError, publishStore } from './publishStore.js';
+import { PUBLISH_RETENTION_DAYS, PUBLISH_RETENTION_MS, PublishConflictError, publishStore } from './publishStore.js';
 
 const HOSTED = '01JC0000000000000000000000';
 const SRC = '01JC0000000000000000000005';
@@ -22,6 +22,11 @@ const BOB = { provider: 'github', id: 8, login: 'bob' };
 const scrub = makeScrubber([]);
 const turn = (uuid: string, type: string, content: string): ScrubbedLine =>
   scrub(JSON.stringify({ type, uuid, sessionId: SID, timestamp: '2026-11-05T00:00:00Z', message: { role: type, content } }));
+
+it('retention is 180 days (D138)', () => {
+  expect(PUBLISH_RETENTION_DAYS).toBe(180);
+  expect(PUBLISH_RETENTION_MS).toBe(180 * 86_400_000);
+});
 
 it('one publish request is one ingest transaction', () => {
   expect(PUBLISH_MAX_LINES).toBe(db.INGEST_TX_LINES);
@@ -260,5 +265,79 @@ describe.skipIf(!isPg)('publishStore', () => {
     await expect(s.unpublish(ANN, SID)).rejects.toThrow(LeaseLostError);
     expect(await db.eventsForSession(pub.sessionId)).toHaveLength(1);
     expect(await count('publish_sessions')).toBe(1);
+  });
+
+  describe('retention (D138)', () => {
+    const NOW = 1_800_000_000_000;
+    const age = (id: string, ms: number) => db.stateKysely().updateTable('sessions').set({ last_active_at: NOW - ms }).where('id', '=', id).execute();
+    const SID2 = '22222222-2222-4333-8444-555555555555';
+
+    it('removes a published session whose last activity is past 180 days, with everything unpublish removes; keeps the rest', async () => {
+      const s = await rig();
+      const old = await s.ingest(ANN, SRC, SID, [turn('u1', 'user', 'old words')]);
+      const edge = await s.ingest(ANN, SRC, SID2, [turn('u1', 'user', 'edge words')]);
+      const recent = await s.ingest(BOB, SRC, SID, [turn('u1', 'user', 'recent words')]);
+      await age(old.sessionId, PUBLISH_RETENTION_MS + 1);
+      await age(edge.sessionId, PUBLISH_RETENTION_MS);
+      await age(recent.sessionId, PUBLISH_RETENTION_MS - 86_400_000);
+      await db.stateKysely().insertInto('sessions').values({
+        id: 'own-old', workspace_id: HOSTED, cwd: null, started_at: 1, last_active_at: 1, ai_title: null, first_user_message: null, user_set_name: null
+      }).execute();
+      await db.insertEmbeddings([{ workspaceId: old.partitionId, sessionId: old.sessionId, kind: 'turn', refEventId: null, ts: 1, text: 'old words', modelId: 'm', dim: EMBED_DIM, vec: Buffer.from(new Float32Array(EMBED_DIM).fill(1 / Math.sqrt(EMBED_DIM)).buffer), dedupKey: 'd1' }]);
+      await hostUsageRecorder({ workspaceId: HOSTED, sessionId: old.sessionId, kind: 'marked-useful' });
+      expect(await s.prune(NOW)).toBe(1);
+      const k = db.stateKysely();
+      expect(await db.eventsForSession(old.sessionId)).toEqual([]);
+      expect(await db.getSession(old.sessionId)).toBeNull();
+      expect(await k.selectFrom('embeddings').select('id').where('session_id', '=', old.sessionId).execute()).toEqual([]);
+      expect(await k.selectFrom('usage_events').select('id').where('session_id', '=', old.sessionId).execute()).toEqual([]);
+      expect((await st!.pg!.pool.query(`SELECT session_id FROM ${st!.pg!.schema}.publish_sessions ORDER BY session_id`)).rows.map((r) => r.session_id))
+        .toEqual([edge.sessionId, recent.sessionId].sort());
+      expect(await db.eventsForSession(edge.sessionId)).toHaveLength(1);
+      expect(await db.eventsForSession(recent.sessionId)).toHaveLength(1);
+      expect((await db.getSession('own-old'))?.workspaceId).toBe(HOSTED);
+      expect(await s.prune(NOW)).toBe(0);
+    });
+
+    it('is bounded per call, oldest first', async () => {
+      const s = await rig();
+      const a = await s.ingest(ANN, SRC, SID, [turn('u1', 'user', 'a')]);
+      const b = await s.ingest(ANN, SRC, SID2, [turn('u1', 'user', 'b')]);
+      await age(a.sessionId, PUBLISH_RETENTION_MS + 5);
+      await age(b.sessionId, PUBLISH_RETENTION_MS + 10);
+      expect(await s.prune(NOW, 1)).toBe(1);
+      expect(await db.getSession(b.sessionId)).toBeNull();
+      expect(await db.getSession(a.sessionId)).not.toBeNull();
+      expect(await s.prune(NOW, 1)).toBe(1);
+      expect(await db.getSession(a.sessionId)).toBeNull();
+    });
+
+    it('a pruned session sent again is accepted as new: dedup does not block it', async () => {
+      const s = await rig();
+      const lines = [turn('u1', 'user', 'hello'), turn('a1', 'assistant', 'hi')];
+      const first = await s.ingest(ANN, SRC, SID, lines);
+      await age(first.sessionId, PUBLISH_RETENTION_MS + 1);
+      expect(await s.prune(NOW)).toBe(1);
+      const again = await s.ingest(ANN, SRC, SID, lines);
+      expect(again).toEqual({ ...first, inserted: 2 });
+      expect(await db.eventsForSession(first.sessionId)).toHaveLength(2);
+      expect(await count('publish_sessions')).toBe(1);
+    });
+
+    it('deletes nothing once the lease is lost', async () => {
+      const s = await rig();
+      const pub = await s.ingest(ANN, SRC, SID, [turn('u1', 'user', 'x')]);
+      await age(pub.sessionId, PUBLISH_RETENTION_MS + 1);
+      const schema = st!.pg!.schema;
+      await st!.pg!.pool.query(`INSERT INTO ${schema}.host_lease VALUES ($1, 'me', 2, clock_timestamp() + interval '1 minute')`, [HOSTED]);
+      await db.closeDb();
+      await db.openDbPostgres(st!.pg!.pool, {
+        migrate: false,
+        afterBeginWrite: leaseFence({ workspaceId: HOSTED, holder: 'me', epoch: () => 1, onLost: () => undefined })
+      });
+      await expect(s.prune(NOW)).rejects.toThrow(LeaseLostError);
+      expect(await db.eventsForSession(pub.sessionId)).toHaveLength(1);
+      expect(await count('publish_sessions')).toBe(1);
+    });
   });
 });

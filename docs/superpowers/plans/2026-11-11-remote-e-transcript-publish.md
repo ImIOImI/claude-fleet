@@ -127,6 +127,7 @@ Numbering continues from D96.
     - A session with no timestamped line has no `started_at` and isn't published.
   - The shape adds `since` to the spec's `{ to }`.
   - A request whose manifest lacks the `publish` key keeps the existing block. The Saved-tab resume and the committee writes omit it.
+  - Amended by D140 (SPEC §7 *Transcript publish*, *Backfill*): earlier sessions are sent only through the explicit, confirmed "Also publish existing sessions…" action, which lowers a main-owned `from[target]` floor and resets that target's cursor.
 - **D105: Desktop bookkeeping (state v19, both dialects).**
   - `publish_cursors(source_workspace_id, target_workspace_id, last_event_id, updated_at)` is a progress cache.
     - It is copied by the SQLite → Postgres import (`IMPORT_TABLES`), not by the user-state merge.
@@ -171,7 +172,7 @@ Numbering continues from D96.
   - **Reply:** 200 `{ ok: true, removed: n }`, or 404 `not published`.
   - **Desktop:** the desktop first records the session in `publish_withheld`, so its later events are never published again, then calls every current target.
   - **Scope:** nothing else ever deletes or updates published rows.
-- **D110: No host retention of published rows in (e).** The host runs no retention pass today, so published rows stay until unpublished. This is listed under §11 *Remote host: what remains*.
+- **D110: Superseded by D138** (SPEC §7 *Transcript publish*, *Decisions*): a host removes a published session 180 days after its last activity.
 - **D111: There is no new port, role or grant.** Publish rides `:8080` (D73, D96). Its tables are host-track tables owned by the app role and are invisible to the `query` roles (D71).
 
 ## File Structure

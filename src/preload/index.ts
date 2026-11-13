@@ -18,7 +18,7 @@ export type { OwnerCostRow, SessionOwner } from './sessionOwner';
 import type { RemoteAddOptions, RemoteLiveSession, RemoteProbe } from './remoteTypes';
 import type { StoreChoice, StoreSettings, StoreStatus } from './storeTypes';
 import type { FederatedSearchResult, RemoteSessionsResult, SessionCursor } from './federation';
-import type { UnpublishResult } from './publish';
+import type { BackfillCount, BackfillResult, UnpublishResult } from './publish';
 import type {
   Federated, RemoteActionResult, RemoteAutomation, RemoteAutomationDetail, RemoteChange, RemoteCounts, RemoteDraft, RemoteProposal, RemoteTodo
 } from './remoteAutomations';
@@ -26,7 +26,7 @@ export type {
   Federated, RemoteActionErrorKind, RemoteActionResult, RemoteAutomation, RemoteAutomationDetail, RemoteChange, RemoteChangeChannel,
   RemoteCounts, RemoteDraft, RemoteNotice, RemoteOriginInfo, RemoteProposal, RemoteTierName, RemoteTodo
 } from './remoteAutomations';
-export type { UnpublishResult, WorkspacePublish } from './publish';
+export type { BackfillCount, BackfillResult, UnpublishResult, WorkspacePublish } from './publish';
 export type { ImportProgress, StoreChoice, StorePhase, StoreSettings, StoreStatus } from './storeTypes';
 export type { RemoteAddOptions, RemoteLiveSession, RemoteProbe, RemoteProbeOk, RemoteProbeErr, RemoteProbeErrorKind, RemoteTier } from './remoteTypes';
 export type { ExtraMount } from './extraMounts';
@@ -817,7 +817,13 @@ const api = {
   publish: {
     /** Withdraw a session from every host its workspace publishes to; it is never published again. */
     unpublish: (workspaceId: string, sessionId: string): Promise<UnpublishResult> =>
-      ipcRenderer.invoke('publish:unpublish', workspaceId, sessionId)
+      ipcRenderer.invoke('publish:unpublish', workspaceId, sessionId),
+    /** How many existing sessions "Also publish existing sessions" would add; `from` is epoch ms or 'all'. */
+    backfillCount: (workspaceId: string, target: string, from: number | 'all'): Promise<BackfillCount> =>
+      ipcRenderer.invoke('publish:backfillCount', workspaceId, target, from),
+    /** Lowers the target's session-start floor (only ever earlier) and re-reads the history; never automatic. */
+    backfill: (workspaceId: string, target: string, from: number | 'all'): Promise<BackfillResult> =>
+      ipcRenderer.invoke('publish:backfill', workspaceId, target, from)
   },
   endpoints: {
     list: (): Promise<unknown[]> => ipcRenderer.invoke('endpoints:list'),
