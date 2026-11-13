@@ -37,8 +37,9 @@ parentPort.on('message', (m) => { if (m === 'close') { parentPort.close(); retur
 parentPort.postMessage({ ready: true });
 `;
 
-/** Holds its own connection to state.db, answers every checkpoint as busy (so none is in flight
- *  to terminate), closes 300 ms after a close request and then leaves a marker; ready after `delayMs`. */
+/** Holds its own connection to state.db, answers every checkpoint as busy, closes 300 ms after
+ *  a close request and then leaves a marker; ready after `delayMs`. A close with a checkpoint
+ *  request still in flight terminates it instead, so tests that assert the marker issue none. */
 const holder = (delayMs = 0) => `
 const { parentPort, workerData } = require('node:worker_threads');
 const d = new (require(workerData.bs3Path))(workerData.dbPath);
@@ -57,10 +58,35 @@ parentPort.on('message', (m) => {
 setTimeout(() => parentPort.postMessage({ ready: true }), ${delayMs});
 `;
 
-/** Waits until the holder worker has its connection open (worker startup can take a while). */
-async function connected(dir: string): Promise<void> {
-  for (let i = 0; i < 200 && !existsSync(join(dir, 'state.db.holder-open')); i++) await new Promise((r) => setTimeout(r, 25));
-  expect(existsSync(join(dir, 'state.db.holder-open'))).toBe(true);
+/** Holds its own connection to state.db and never answers a checkpoint or a close request, as
+ *  a worker stuck in a checkpoint: only terminate() ends it. Leaves a marker at the first request. */
+const stuckHolder = `
+const { parentPort, workerData } = require('node:worker_threads');
+const d = new (require(workerData.bs3Path))(workerData.dbPath);
+d.prepare('select count(*) from sessions').get();
+require('node:fs').writeFileSync(workerData.dbPath + '.holder-open', '');
+parentPort.on('message', (m) => { if (m !== 'close') require('node:fs').writeFileSync(workerData.dbPath + '.holder-asked', ''); });
+parentPort.postMessage({ ready: true });
+`;
+
+/** Polls (bounded) until `file` in `dir` exists; worker startup under load can take seconds. */
+async function appears(dir: string, file: string): Promise<void> {
+  const until = Date.now() + 30_000;
+  while (!existsSync(join(dir, file)) && Date.now() < until) await new Promise((r) => setTimeout(r, 25));
+  expect(existsSync(join(dir, file))).toBe(true);
+}
+
+/** Waits until the holder worker has its connection open. */
+const connected = (dir: string) => appears(dir, 'state.db.holder-open');
+
+/** A fresh state.db with a row written, so its WAL file exists. */
+async function freshWithWal(): Promise<string> {
+  const dir = mkdtempSync(join(tmpdir(), 'cf-leftover-wal-'));
+  dirs.push(dir);
+  openDb(dir);
+  await writeRows(1);
+  expect(existsSync(join(dir, 'state.db-wal'))).toBe(true);
+  return dir;
 }
 
 /** The open db's stats at its first write (the fallback is far off). */
@@ -171,28 +197,40 @@ describe.skipIf(isPg)('leftover WAL at open', () => {
     expect(await pragma('wal_autocheckpoint')).toBe(1000);
   }, 60_000);
 
-  it('closeDb mid-drain stops the worker first, so main closes last and removes the WAL', async () => {
+  // main's close removes the WAL only when no other connection has state.db open.
+  it('closeDb mid-drain terminates a worker stuck in a checkpoint, so main closes last and removes the WAL', async () => {
     const dir = await leaveWal(20_000);
-    _setWalCheckpointerOptionsForTests({ workerSource: holder(), checkpointTimeoutMs: 30_000 });
+    _setWalCheckpointerOptionsForTests({ workerSource: stuckHolder, checkpointTimeoutMs: 30_000, readyTimeoutMs: 30_000 });
     openDb(dir);
     lastDrain = stateLeftoverDrain()!;
-    await connected(dir);
+    await appears(dir, 'state.db.holder-asked');
     const t0 = Date.now();
     await closeDb();
     expect(Date.now() - t0).toBeLessThan(3_000);
-    expect(existsSync(join(dir, 'state.db.holder-closed'))).toBe(true);
     expect(walSize(dir)).toBe(0);
     expect(await within(stateDrainOf(), 3_000)).not.toBe('timeout');
   }, 60_000);
 
-  it('closeDb waits for a worker that has not answered ready yet', async () => {
-    const dir = await leaveWal(20_000);
-    _setWalCheckpointerOptionsForTests({ workerSource: holder(1_000) });
-    openDb(dir);
+  it('closeDb lets a worker with no checkpoint in flight close its connection first, then removes the WAL', async () => {
+    _setWalCheckpointerOptionsForTests({ workerSource: holder(), requestEveryMs: 0, readyTimeoutMs: 30_000 });
+    const dir = await freshWithWal();
+    const lease = await acquireWalCheckpointer();
+    expect(lease?.active()).toBe(true);
     await connected(dir);
     await closeDb();
     expect(existsSync(join(dir, 'state.db.holder-closed'))).toBe(true);
     expect(walSize(dir)).toBe(0);
+  }, 60_000);
+
+  it('closeDb waits for a worker that has not answered ready yet', async () => {
+    _setWalCheckpointerOptionsForTests({ workerSource: holder(1_000), requestEveryMs: 0, readyTimeoutMs: 30_000 });
+    const dir = await freshWithWal();
+    const lease = acquireWalCheckpointer();
+    await connected(dir);
+    await closeDb();
+    expect(existsSync(join(dir, 'state.db.holder-closed'))).toBe(true);
+    expect(walSize(dir)).toBe(0);
+    await lease;
   }, 60_000);
 });
 

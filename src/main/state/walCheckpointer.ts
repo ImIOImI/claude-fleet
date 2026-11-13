@@ -186,7 +186,7 @@ export class WalCheckpointer implements StoreCheckpointer {
     this.live.add(g.exited);
     void g.exited.then(() => this.live.delete(g.exited));
     g.ready = new Promise<boolean>((resolve) => {
-      const t = setTimeout(() => resolve(false), READY_TIMEOUT_MS);
+      const t = setTimeout(() => resolve(false), opts.readyTimeoutMs ?? READY_TIMEOUT_MS);
       worker.once('message', (m: { ready?: boolean }) => { clearTimeout(t); resolve(m.ready === true); });
       worker.once('error', () => { clearTimeout(t); resolve(false); });
       worker.once('exit', () => { clearTimeout(t); resolve(false); });

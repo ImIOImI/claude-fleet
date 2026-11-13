@@ -134,6 +134,8 @@ export interface CheckpointerOptions {
   requestEveryMs?: number;
   /** Default CHECKPOINT_TIMEOUT_MS (DRAIN_TIMEOUT_MS while a drain runs). */
   checkpointTimeoutMs?: number;
+  /** Default READY_TIMEOUT_MS. */
+  readyTimeoutMs?: number;
   /** The database the worker opens; db.ts passes state.db. */
   dbPath?: string;
 }
