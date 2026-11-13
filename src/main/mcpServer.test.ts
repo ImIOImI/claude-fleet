@@ -665,6 +665,17 @@ describe('callTool diagnostics', () => {
     await new Promise((r) => setTimeout(r, 20));
   });
 
+  it('a dropped reply for a hook fire-and-forget tool writes nothing; any other tool still warns', async () => {
+    harness = makeFileDb();
+    _setDbForTests(harness.db);
+    const closed = { write: () => true, destroyed: true };
+    dispatchLineForTests(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'signal_input_wait', arguments: { sessionId: 's', waiting: false } } }), closed, WS_A);
+    dispatchLineForTests(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_sessions', arguments: {} } }), closed, WS_A);
+    await new Promise((r) => setTimeout(r, 50));
+    const dropped = rows.filter((r) => r.type === 'mcp-reply-dropped');
+    expect(dropped.map((r) => r.extra?.tool)).toEqual(['list_sessions']);
+  });
+
   it('a normal short call writes no connection rows', async () => {
     harness = makeFileDb();
     _setDbForTests(harness.db);

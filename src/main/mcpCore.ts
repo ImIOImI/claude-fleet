@@ -461,6 +461,9 @@ export function trackConnection(
 const MAX_TOOL_ERROR_CHARS = 4_096;
 export const MAX_IN_FLIGHT_PER_CONNECTION = 16;
 const inFlight = new WeakMap<Out, number>();
+/** Tools the runner's hooks call fire-and-forget (one request piped through
+ *  socat, reply discarded): a reply they never read isn't request loss. */
+export const FIRE_AND_FORGET_TOOLS: ReadonlySet<string> = new Set(['signal_input_wait', 'report_session_mapping', 'report_summary_status']);
 
 /** Test-only: dispatch one request line as `callerId` on a fake connection. */
 export function dispatchLineForTests(line: string, sock: Out, callerId: string): void {
@@ -491,6 +494,7 @@ export function dispatchLine(line: string, sock: Out, callerId: string): void {
     // After the client's FIN the socket is ended (not yet destroyed): a write would be lost too.
     const s = sock as Partial<Socket>;
     if (s.destroyed || s.writableEnded || s.writable === false) {
+      if (tool && FIRE_AND_FORGET_TOOLS.has(tool)) return;
       logError({
         source: 'main',
         type: 'mcp-reply-dropped',
