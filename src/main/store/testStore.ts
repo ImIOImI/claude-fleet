@@ -20,12 +20,40 @@ export const pgMultiConnection = isPg && POOL_MAX > 1;
 
 export interface TestPg { pool: pg.Pool; schema: string; drop(): Promise<void> }
 
+/** pool.end() resolves before each client's socket closes; a DROP DATABASE ... WITH (FORCE) or
+ *  pg_terminate_backend in that gap sends the closing client a 57P01. Waits for every 'remove'. */
+export async function endPool(pool: pg.Pool, timeoutMs = 5_000): Promise<void> {
+  let open = pool.totalCount;
+  let timer: NodeJS.Timeout | undefined;
+  const closed = new Promise<void>((resolve) => {
+    if (open === 0) return resolve();
+    pool.on('remove', () => { if (--open === 0) resolve(); });
+    timer = setTimeout(() => {
+      console.warn(`endPool: ${open} client(s) still closing after ${timeoutMs} ms`);
+      resolve();
+    }, timeoutMs);
+  });
+  try {
+    await pool.end();
+    await closed;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 'error' (the server ended an idle client) logs instead of becoming an unhandled error. */
+function testPool(cfg: PgPoolConfig): pg.Pool {
+  const pool = createPgPool(cfg);
+  pool.on('error', (e) => console.warn(`test pool (${cfg.schema}) error: ${e.message}`));
+  return pool;
+}
+
 /** A fresh schema on PG_TEST_URL; drop() removes it and ends the pool. */
 export async function testPgSchema(): Promise<TestPg> {
   const url = process.env.PG_TEST_URL;
   if (!url) throw new Error('STORE_TEST_DIALECT=postgres needs PG_TEST_URL');
   const schema = `t_${Math.floor(Date.now() / 1000)}_${randomBytes(6).toString('hex')}`;
-  const pool = createPgPool({ connectionString: url, schema, max: POOL_MAX });
+  const pool = testPool({ connectionString: url, schema, max: POOL_MAX });
   await pool.query(`CREATE SCHEMA ${schema}`);
   return {
     pool, schema,
@@ -37,7 +65,7 @@ export async function testPgSchema(): Promise<TestPg> {
       } catch (e) {
         console.warn(`testPgSchema cleanup: DROP SCHEMA ${schema} failed: ${(e as Error).message}`);
       } finally {
-        await pool.end();
+        await endPool(pool);
       }
     },
   };
@@ -179,14 +207,14 @@ export async function testPgAppSchema(): Promise<TestPgApp> {
     { connectionString: process.env.PG_TEST_URL, schema: t.schema }, appRole, password,
   );
   const appConfig: PgPoolConfig = { ...conn, schema: t.schema, max: POOL_MAX };
-  const appPool = createPgPool(appConfig);
+  const appPool = testPool(appConfig);
   return {
     ...t, appRole, appConfig, appPool,
     async drop() {
       // Ordered and idempotent: close the app pool first, then the schema, then its roles
       // (longest/leaf names first); each step runs even if an earlier one failed, and t.pool
       // always ends, so one bad drop can't leak the pool or skip the rest.
-      await appPool.end().catch((e: Error) => console.warn(`testPgAppSchema cleanup: appPool.end failed: ${e.message}`));
+      await endPool(appPool).catch((e: Error) => console.warn(`testPgAppSchema cleanup: appPool.end failed: ${e.message}`));
       try {
         try {
           await t.pool.query(`DROP SCHEMA ${t.schema} CASCADE`);
@@ -203,7 +231,7 @@ export async function testPgAppSchema(): Promise<TestPgApp> {
           }
         }
       } finally {
-        await t.pool.end();
+        await endPool(t.pool);
       }
     },
   };
