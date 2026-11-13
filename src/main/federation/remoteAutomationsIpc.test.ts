@@ -134,6 +134,16 @@ describe('remote automations IPC', () => {
     expect(calls).toEqual([]);
   });
 
+  it('refuses more than 32 run args instead of silently dropping the rest (SPEC §6)', async () => {
+    const { invoke, calls } = setup(() => ({ replayed: false, result: null, error: null }));
+    const ok32 = Object.fromEntries(Array.from({ length: 32 }, (_, i) => [`k${i}`, i]));
+    await invoke('remoteAutomations:run', O, '01JC0000000000000000000001', ok32, RID);
+    expect(calls).toHaveLength(1);
+    const over33 = { ...ok32, k32: 32 };
+    await expect(invoke('remoteAutomations:run', O, '01JC0000000000000000000001', over33, RID)).rejects.toThrow(/args has more than 32 keys/);
+    expect(calls).toHaveLength(1);
+  });
+
   it('reads: rows get origin info; get answers null for an unknown or down host', async () => {
     const todo = {
       id: '01JC0000000000000000000002', title: 't', body: null, status: 'open', priority: 'high', source: { kind: 'user', id: 'ann' }, sourceRunId: null,

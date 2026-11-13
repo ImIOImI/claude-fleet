@@ -108,9 +108,9 @@ describe('requestRemoteDraft: a local drafting session with read-tier host conte
     expect(calls).toEqual(['automations:list', 'automations:get']);
     expect(requested).toEqual([O]);
     expect(posted[0]).toMatch(/propose_automation_change \(id = that automation's name/);
-    expect(posted[0]).toMatch(/=== BEGIN HOST DATA [0-9a-f]{32} ===\nAutomations already on review-bot: nightly, triage\.\nAutomation to change: nightly\n/);
+    expect(posted[0]).toMatch(/=== BEGIN HOST DATA [0-9a-f]{32} ===\nWorkspace: "review-bot"\nAutomations already on this workspace: nightly, triage\.\nAutomation to change: nightly\n/);
     expect(posted[0]).toMatch(/platform-ops PR/);
-    expect(posted[0]).toMatch(/Automations already on review-bot: nightly, triage\./);
+    expect(posted[0]).toMatch(/Automations already on this workspace: nightly, triage\./);
     expect(posted[0]).toContain('cron: 0 3 * * *');
     expect(posted[0]).toContain('run at 4 instead');
   });
@@ -120,7 +120,7 @@ describe('requestRemoteDraft: a local drafting session with read-tier host conte
     await requestRemoteDraft(d, O, 'triage new issues', null);
     expect(calls).toEqual(['automations:list']);
     expect(posted[0]).toMatch(/submit it with propose_automation \(/);
-    expect(posted[0]).toMatch(/\(unknown: review-bot could not be read\)/);
+    expect(posted[0]).toMatch(/\(unknown: could not be read\)/);
   });
 
   it('an unknown bookmark or an unreadable definition starts nothing', async () => {

@@ -86,14 +86,16 @@ export function createProposalService(deps: ProposalDeps) {
     await deps.automations.update(cur.id, it.after, by, now, it.baseVersion ?? undefined);
   }
 
-  /** Mark older pending proposals from the same workspace for the same automations as superseded. */
+  /** Mark older pending proposals from the same workspace for the same automations as superseded.
+   *  CAS against the items read here, so a concurrent reject/applied-mark on the same proposal wins instead of being overwritten. */
   async function supersede(proposer: string, names: Set<string>): Promise<void> {
     for (const p of await deps.proposals.pending()) {
       if (p.proposer.id !== proposer) continue;
       if (!p.items.some((i) => names.has(i.name) || (i.automationId && names.has(i.automationId)))) continue;
+      const readItems = structuredClone(p.items);
       p.status = 'superseded';
       p.decidedAt = deps.now();
-      await deps.proposals.save(p);
+      if (!(await deps.proposals.saveIfPending(p, readItems))) continue;
     }
   }
 

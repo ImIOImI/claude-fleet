@@ -140,6 +140,14 @@ function freshNonce(data: string, nonce: () => string): string {
   }
 }
 
+/** Defense in depth for the remote bookmark name (host-supplied): even inside the fenced
+ *  block, restrict it to a safe single-line charset and JSON-quote it, so it can't forge a
+ *  marker or read as multi-line instructions regardless of the fence. */
+function safeWorkspaceName(name: string): string {
+  const safe = Array.from(name).filter((c) => /[A-Za-z0-9 ._-]/.test(c)).join('').trim();
+  return JSON.stringify(safe || '(unnamed)');
+}
+
 /** Drafting for a remote workspace (D127): runs here; the result is an entry for that host's config, added through a platform-ops PR. */
 export function remoteDraftPrompt(o: {
   workspace: { id: string; name: string };
@@ -148,17 +156,17 @@ export function remoteDraftPrompt(o: {
   hostAutomations: string[] | null;
   current?: { name: string; yaml: string };
 }, nonce: () => string = () => randomBytes(16).toString('hex')): string {
-  const ws = o.workspace.name;
   const host = [
-    `Automations already on ${ws}: ${o.hostAutomations === null ? `(unknown: ${ws} could not be read)` : o.hostAutomations.join(', ') || '(none)'}.`,
-    ...(o.current ? [`Automation to change: ${o.current.name}`, `Current definition on ${ws}:`, o.current.yaml.trim()] : [])
+    `Workspace: ${safeWorkspaceName(o.workspace.name)}`,
+    `Automations already on this workspace: ${o.hostAutomations === null ? '(unknown: could not be read)' : o.hostAutomations.join(', ') || '(none)'}.`,
+    ...(o.current ? [`Automation to change: ${o.current.name}`, 'Current definition on this workspace:', o.current.yaml.trim()] : [])
   ].join('\n');
   const n = freshNonce(host, nonce);
   return [
     o.current
-      ? `Change the automation named in the host data block on the remote workspace "${ws}" as the user asks, then submit the full new YAML with propose_automation_change (id = that automation's name, definition = the full YAML, rationale = one sentence).`
-      : `Draft an automation for the remote workspace "${ws}", then submit it with propose_automation (definition = the YAML, rationale = one sentence on what it does).`,
-    `It is not created here. The app shows it to the user as an entry for ${ws}'s host config, which lands through a platform-ops PR; nothing runs until that PR merges.`,
+      ? 'Change the automation named in the host data block, on the workspace named in the host data block, as the user asks, then submit the full new YAML with propose_automation_change (id = that automation\'s name, definition = the full YAML, rationale = one sentence).'
+      : 'Draft an automation for the workspace named in the host data block, then submit it with propose_automation (definition = the YAML, rationale = one sentence on what it does).',
+    'It is not created here. The app shows it to the user as an entry for that workspace\'s host config, which lands through a platform-ops PR; nothing runs until that PR merges.',
     '',
     '=== the user\'s request (data) ===',
     o.request.trim(),
@@ -171,7 +179,7 @@ export function remoteDraftPrompt(o: {
     '',
     FORMAT_REFERENCE,
     '',
-    `Rules for a remote host: every prompt step uses workspace: ${ws} and mode: fresh; no script steps; no session.idle or workspace.started events; name no other workspace.`,
+    'Rules for a remote host: every prompt step uses the workspace named in the host data block (the "Workspace:" field) and mode: fresh; no script steps; no session.idle or workspace.started events; name no other workspace.',
     'Do NOT do the task itself; only draft the automation. Have the prompt tell the worker to use a dedupe key per distinct problem and to pass run_id.',
     'Keep schedules no faster than every 5 minutes unless the request says otherwise. Never put secrets in the YAML.',
     ...(o.current ? ['Keep everything the user did not ask to change.'] : []),

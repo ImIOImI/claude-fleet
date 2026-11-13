@@ -51,8 +51,10 @@ function tagList(v: unknown, what: string): string[] {
 function runArgs(v: unknown): Record<string, string | number | boolean> {
   if (v === undefined || v === null) return {};
   if (typeof v !== 'object' || Array.isArray(v)) throw new Error('args must be an object');
+  const entries = Object.entries(v as Record<string, unknown>);
+  if (entries.length > 32) throw new Error('args has more than 32 keys');
   const out: Record<string, string | number | boolean> = {};
-  for (const [k, x] of Object.entries(v as Record<string, unknown>).slice(0, 32)) {
+  for (const [k, x] of entries) {
     if (k.length > 64) throw new Error(`args key must be at most 64 characters: "${oneLine(k, 80)}"`);
     if (!((typeof x === 'string' && x.length <= 2000) || typeof x === 'boolean' || (typeof x === 'number' && Number.isFinite(x)))) {
       throw new Error(`args.${k} must be a string ≤2000, number or boolean`);

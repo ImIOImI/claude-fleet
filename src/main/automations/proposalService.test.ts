@@ -64,6 +64,28 @@ describe('proposing', () => {
     await svc.mcp.propose('W2', { definition: YAML('log-watch', '*/30 * * * *') });
     expect((await svc.list()).map((p) => p.status).sort()).toEqual(['pending', 'superseded']);
   });
+  it('supersede is a CAS: a proposal decided concurrently is left alone, not overwritten to superseded', async () => {
+    inbox = await openTestInbox();
+    const store = new ProposalStore(inbox.kysely);
+    let armed = false;
+    // simulates another decision (e.g. approve/reject) landing between supersede's read and its save
+    const racing = Object.assign(Object.create(store) as ProposalStore, {
+      pending: async () => {
+        const list = await store.pending();
+        if (armed) for (const p of list) await store.save({ ...p, status: 'approved', note: 'decided elsewhere', decidedAt: 999 });
+        return list;
+      }
+    });
+    const svc = createProposalService({
+      proposals: racing, automations: new AutomationStore(inbox.kysely), now: () => 2,
+      resolveWorkspace: (v) => WSS[v] ?? null, workspaceName: (id) => id, trusted: async () => false,
+      notify: () => null, changed: () => {}
+    });
+    const first = await svc.mcp.propose('W2', { definition: YAML() });
+    armed = true;
+    await svc.mcp.propose('W2', { definition: YAML('log-watch', '*/30 * * * *') });
+    expect(await store.get(first.id)).toMatchObject({ status: 'approved', note: 'decided elsewhere' });
+  });
 });
 
 describe('approving', () => {
